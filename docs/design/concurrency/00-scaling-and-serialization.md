@@ -64,7 +64,7 @@ hold and recurses under it. The doc comment at `:535` states the same contract f
 
 **The RFC-0024 bound-path slot API is on this list, and it is not control plane.** Minting an
 element takes the lock (`op_resolve_walk.hpp:637` → `vertex_slot`) and honouring one takes it
-again (`op_resolve_walk.hpp:1073` and `fwd_router.cpp:1297-1303` → `deref_vertex_slot`), so a bound-path hop pays
+again (`op_resolve_walk.hpp:1079` and `fwd_router.cpp:1334-1340` → `deref_vertex_slot`), so a bound-path hop pays
 `map_mutex_` on both ends of the round trip that bound paths exist to make cheap. The two are not
 the same cost: `vertex_slot` **scans `vertex_slots_` linearly** inside the hold, while
 `deref_vertex_slot` and `vertex_slot_at` are a bounds check and one compare — the asymmetry
@@ -73,7 +73,7 @@ acquisition is what stops the slot index and the retire generation straddling a 
 `retire`, which is how an element gets stamped with the successor tenant's number.
 
 The leaf/branch fork reads a per-vertex bit (`vertex_t::has_registered_child`,
-`core/include/libtracer/vertex.hpp:735`), called from `core/src/graph.cpp:1520`, and takes no
+`core/include/libtracer/vertex.hpp:735`), called from `core/src/graph.cpp:1635`, and takes no
 lock. The symbol exists on the vertex rather than on the graph, so a reader grepping for it finds
 a flag test rather than a lock acquisition.
 
@@ -174,7 +174,7 @@ Two limits, and the second hides the first:
    There the limit is the value's own reference count, and the `sp-load` calibration arm —
    1.4 M/s at T=24 — accounts for nearly all of the 1.74 M/s stock rate.
 
-The write path takes no map lock (`write_impl`, `graph.cpp:1799`), which is the entire "writes
+The write path takes no map lock (`write_impl`, `graph.cpp:1914`), which is the entire "writes
 scale 5×, reads do not" asymmetry.
 
 **A caution on the calibration arms.** `sp-load` measures 710 ns/op at T=24 against a whole real

@@ -188,8 +188,8 @@ class child_registry_t {                 // the one NAME -> link demux table (AD
 }  // namespace tr::net
 ```
 
-Signature source: `core/include/libtracer/fwd_router.hpp:194` (constructor), `:366`
-(`add_child`), `:423` (`subscribe_toward`), `:543-555` (the sink function-pointer types);
+Signature source: `core/include/libtracer/fwd_router.hpp:194` (constructor), `:372`
+(`add_child`), `:429` (`subscribe_toward`), `:549-561` (the sink function-pointer types);
 `core/include/libtracer/child_registry.hpp:280` (`add`), `:538` (`resolve_peer`), `:553`
 (`erase`), `:586` (`entry_by_name`), `:607` (`by_name`), `:648`/`:658` (`size`/`live_size`).
 
@@ -225,8 +225,8 @@ flowchart TB
   consumer that did not need contiguity. `m` must stay alive while its span is read.
 - **The default delivery leg copies nothing.** A full-route `FWD{WRITE}` fan-out scatter-gathers a
   fresh stack head, the stored return-route bytes, an empty `src`, and one span per link of the
-  stored value (`core/src/fwd_router.cpp:3031`). The `COMPACT` leg is the one that flattens,
-  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:2832`) — single-link, that
+  stored value (`core/src/fwd_router.cpp:3099`). The `COMPACT` leg is the one that flattens,
+  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:2900`) — single-link, that
   flatten is a zero-copy adopt, and multi-link it draws from the router's injected `flat` backend
   (#730), not the global heap.
 - **All rope flattens on the forward AND terminus paths draw from the injected seam.** `flat`
@@ -292,7 +292,7 @@ the role default. Extra transport kinds join the catalog through `register_trans
 file ever learning about it.
 
 **The write is ACL-gated.** The `:children[]` append is gated on the parent vertex's `CREATE`
-right and denied with `PERMISSION_DENIED` otherwise (`core/src/graph.cpp:2924-2957`). Under
+right and denied with `PERMISSION_DENIED` otherwise (`core/src/graph.cpp:3049-3082`). Under
 [RFC-0014 — creator endpoint, connection lifecycle and link liveness](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)
 that gate relocates onto the creator endpoint's own ACL and gains its removal counterpart: a `NAME`
 write is gated on `WRITE` — **not** `DELETE` — per
@@ -321,7 +321,7 @@ adopt; `/net` itself is likewise only the recommended root convention (a constru
 **Creation is all-or-nothing.** A connection is built in three steps — register the identity
 vertex, insert the `conns_` entry, wire the link into the router's `child_registry_t` — and only
 the last can be refused: `add_child` answers `false` when the registry cannot grow, and it is the
-only place that can say so (`core/include/libtracer/fwd_router.hpp:366`,
+only place that can say so (`core/include/libtracer/fwd_router.hpp:372`,
 `core/include/libtracer/child_registry.hpp:280`). A refusal unwinds the first two in reverse —
 retire the vertex, then erase the entry, which destroys the config-constructed socket — publishes
 no liveness, and answers `BACKPRESSURE` (`core/src/transport_vertex.cpp:620-623`). Discarding that

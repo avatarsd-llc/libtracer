@@ -1386,6 +1386,16 @@ if(LIBTRACER_NET_PLANE)
     target_link_libraries(edge_eviction_test PRIVATE libtracer)
     libtracer_test_warnings(edge_eviction_test)
     add_test(NAME edge_eviction COMMAND edge_eviction_test)
+
+    # #1266 / #1417 — the CARRIED link token. The parts of the carry whose failure mode is a
+    # leaked subscriber edge rather than a slow one: node-scoped identity, same-NAME redial,
+    # slot reuse, a wrong token refused, the seam's laziness, and the census-bus lazy mint.
+    # Deliberately its own file: edge_eviction_test.cpp stays UNMODIFIED by the carry, and
+    # that it does is half the evidence that the name doors did not move.
+    add_executable(link_token_carry_test link_token_carry_test.cpp)
+    target_link_libraries(link_token_carry_test PRIVATE libtracer)
+    libtracer_test_warnings(link_token_carry_test)
+    add_test(NAME link_token_carry COMMAND link_token_carry_test)
 endif()
 
 if(LIBTRACER_NET_PLANE)
@@ -1819,6 +1829,13 @@ endif()
 # bus-less build. Stating it here keeps it in ONE diffable place and makes it self-correcting:
 # a new bus-dependent test that forgets the label reds the bus-closed leg rather than passing
 # silently — which is the failure direction a deselection list is allowed to have.
+#
+# The converse is deliberate and belongs here so it is not "fixed" by a later reader:
+# `link_token_carry` is NOT on this list even though one of its eight cases drives a census bus.
+# There the bus dependence really is a property of a CASE — the other seven are tier-blind and one
+# of them IS the FLAT tier, the shape a bus-closed node actually runs — so that one case gates
+# itself on `tr::net::kBusLinks` in the test's `main` and PRINTS its skip. Labelling the target
+# instead would deselect the carry from the only configuration that ships without a bus.
 #
 # `if(TEST ...)` because the set is module-gated above: a build without CAN, without the net
 # plane, or without integrations/esp-idf/ present registers only a subset.

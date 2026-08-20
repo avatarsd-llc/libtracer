@@ -38,7 +38,7 @@ for a local `preview.html` of the same charts.
 | `bench_pin_ratio` (`run_pin_ratio.sh`) | **RFC-0022 §6, the LATENCY half**: the WRITE store leg over a (payload × segment) grid, every `K` arm rotating inside ONE process. Answered §8 Q3 → Amendment 2 (the on-by-default flip does not land). Collated by `collate_pin.py`. |
 | `bench_pin_net` (`run_pin_net.sh`) | **RFC-0022 §6, the RAM half**: two processes over real UDP, deliveries counted by the RECEIVER, receiver backed by a **bounded RX pool** whose free-slot floor and `dropped_rx()` are the occupancy instrument. Sweeps the live-vertex count across the slot count — the axis on which a pin's borrow starves receive. See [receive-pool occupancy](#bench_pin_net--rfc-0022-6-receive-pool-occupancy-760). |
 | `bench_store_sweep` + `bench_store_escape` (`run_store_sweep.sh`) | **ADR-0079's per-configuration allocation-store sweep (#941)**: H-baseline / WIDE / MID / NARROW over ONE whole-node workload that draws all four ADR-0079 channels, reporting latency by leg, fan-out throughput across T={1,2,4,8,16,24}, deterministic store high-water, and what still escapes to the process heap. Collated by `collate_store_sweep.py`. See [what it resolves, and what it cannot](#bench_store_sweep--the-adr-0079-per-configuration-store-sweep-941). |
-| `bench_subscribe_index` (`run_subscribe_index.sh`) | **#1266's subscriber-index interning A/B**: what keying `link_index_` by an interned token instead of a link NAME costs and saves, in latency and in bytes at rest, over 4/8/16/32/65 links. Four index arms in one binary plus the live `subscribe_wire` path, and the A/A null is collected in the same window. Collated by `collate_subscribe_index.py`. See [what it resolves](#bench_subscribe_index--link-identity-interning-1266). |
+| `bench_subscribe_index` (`run_subscribe_index.sh`) | **#1266's subscriber-index interning A/B**: what keying `link_index_` by an interned token instead of a link NAME costs and saves, in latency and in bytes at rest, over 4/8/16/32/65 links. Five index arms in one binary — including `idx-token-carry`, the shape #1417 shipped, which pays for obtaining the token — plus the live `subscribe_wire` path and the name-door cost, and the A/A null is collected in the same window. Collated by `collate_subscribe_index.py`. See [what it resolves](#bench_subscribe_index--link-identity-interning-1266). |
 
 ### `bench_forward_heap` — the 16KB-RAM zero-heap forward gate (ADR-0038)
 
@@ -87,7 +87,7 @@ window, so **"the forward hop is heap-free by construction" is false as stated**
   nothing about it (`core/src/transport_tcp.cpp:51-55`).
 - **The multi-link rope arm.** A rope source's sub-span count is the sender's choice and is
   known only at run time, so that arm gathers into a `mem::block_array_t` drawn from the
-  injected receive source (`core/src/fwd_router.cpp:2235`). Nothrow (ADR-0065 — exhaustion
+  injected receive source (`core/src/fwd_router.cpp:2303`). Nothrow (ADR-0065 — exhaustion
   drops the frame rather than aborting), but **not** allocation-free.
 
 Read `bench_forward_heap` and `bench_transport_iov` together; neither is sufficient alone.
@@ -787,29 +787,47 @@ bash bench/run_subscribe_index.sh bench/build 13 2 > /tmp/sidx.tsv
 python3 bench/collate_subscribe_index.py /tmp/sidx.tsv
 ```
 
-`graph_t::index_link_vertex` keys the per-link departure index by the link's NAME: a hash, a
-map find, and a `std::pmr::string` key copy on a miss, all under `link_index_mutex_`. #1266
-asks whether keying it by an interned token instead is worth doing. Two attempts stalled for
-want of an instrument — #1290 measured an interned probe table with a purpose-built variant
-that was then discarded, and #1366 recorded *"Measurement: not taken. No checked-in A/B
-harness for the subscribe path exists."*
+`graph_t::index_link_vertex` used to key the per-link departure index by the link's NAME: a
+hash, a map find, and a `std::pmr::string` key copy on a miss, all under `link_index_mutex_`.
+#1266 asked whether keying it by an interned token instead is worth doing. Two attempts
+stalled for want of an instrument — #1290 measured an interned probe table with a
+purpose-built variant that was then discarded, and #1366 recorded *"Measurement: not taken.
+No checked-in A/B harness for the subscribe path exists."*
 
-**Four index arms in ONE binary**, because this host's cross-build layout sensitivity runs to
+**Five index arms in ONE binary**, because this host's cross-build layout sensitivity runs to
 +9.8 % on an untouched leg (below) — larger than part of the effect being hunted, so a
 two-build A/B could not resolve it:
 
 | arm | what it is |
 | --- | --- |
 | `S-sentinel` | the driver loop with no index operation — the control every delta is taken against |
-| `idx-string` | today's shape, transcribed line-for-line from `core/src/graph.cpp` |
-| `idx-token` | interning with the token **already in hand**: no hash, no map, no key copy |
+| `idx-string` | the HISTORICAL baseline: the string-keyed map the index was before #1417, transcribed line-for-line from that revision. Every saving below is quoted against this column |
+| `idx-token` | interning with the token **already in hand**: no hash, no map, no key copy, and **no key stored at all** |
 | `idx-token-intern` | the **graph-only re-key**: the name still arrives as a `string_view`, so the hash is still paid and the token vector is paid on top |
+| `idx-token-carry` | **what ships** (#1417): one dense slot vector with the name stored INSIDE the slot, and the token obtained through an indirect call to a supplier modelling both router tiers |
 | `sub-wire` | the live `graph_t::subscribe_wire`, for proportion — never compared to the control |
 
-`idx-token` deliberately charges **nothing** for obtaining the token, so `idx-string −
-idx-token` is the **ceiling** on what interning could ever save, not an estimate of it. In the
-real system the token has to be minted upstream and carried across the `tr::net`/`tr::graph`
-seam, and that carry is not free.
+`idx-token` deliberately charges **nothing** for obtaining the token and stores **no name at
+all**, so `idx-string − idx-token` is the **ceiling** on what interning could ever save, not
+an estimate of it. The shipped index cannot be that shape: the NAME door is load-bearing
+(`link_down(name)` and `evict_link_edges(name)` enter by name, and
+`integrations/esp-idf/tests/host/httpd_ws_departure_cost_test.cpp` calls
+`link_edge_candidates("p0")` on a bare `graph_t` with no router and no token), and a dense
+vector PLUS a name→token map is byte-for-byte `idx-token-intern` — *worse* than the map it
+replaces. `idx-token-carry` is the forecast: it stores the name exactly once, in the slot, and
+it pays for the token.
+
+`idx-token-carry` charges the carry's real per-subscribe price inside the timed window — an
+**indirect call** to a supplier that models both tiers (FLAT: one relaxed atomic load off a
+`child_rx_ctx_t`-shaped struct; BUS: a direct-mapped lookup by `peer_handle_t::index` with a
+tag compare and a miss branch, because an announce-census bus never announces and its peers
+must be minted lazily) plus the token validation, which includes the **name compare** that
+makes a wrong token harmless rather than merely unlikely.
+
+A fourth table, `RESULT_SIDX_DOOR` (`--door`), reports what the **name door** costs in each
+shape. That is the half of the trade that got slower — a hash-and-find per SUBSCRIBE becomes a
+linear scan per PEER HANGUP — and it is reported rather than gated, because a curve showing
+only the half that improved would be advocacy.
 
 #### The faithfulness oracle — why the transcription can be trusted
 
@@ -818,10 +836,15 @@ construction or vertex registration (measured: 0 bytes, 0 allocations after a ct
 `register_vertex` calls — vertex storage comes from the `ctl` block source and the global
 heap). In this workload the counted arena therefore sees exactly one structure: `link_index_`
 itself. So the live arm's byte count **is** the shipped index's byte count, and `--calibrate`
-asserts on every invocation that `idx-string` reproduces it **byte-for-byte and
-allocation-for-allocation** at 4, 8 and 65 links (746 B / 23 allocs, 1388 B / 45, 11467 B /
-361). A transcription that drifts from the code it claims to transcribe fails the run rather
-than quietly mis-reporting it.
+asserts on every invocation that the arm claiming to be **today's** shape reproduces it
+**byte-for-byte and allocation-for-allocation** at 4, 8 and 65 links. A transcription that
+drifts from the code it claims to transcribe fails the run rather than quietly mis-reporting
+it.
+
+Which arm is under oath moved with the shipped index. Before #1417 it was `idx-string`, at
+746 B / 23 allocs, 1388 / 45 and 11467 / 361; it is now `idx-token-carry`, at **512 / 20,
+1024 / 40 and 8320 / 325**. `idx-string` is retained as the historical baseline so the two
+shapes can be compared under one binary's layout.
 
 #### What the harness can and cannot resolve
 

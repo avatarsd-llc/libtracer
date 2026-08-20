@@ -879,6 +879,14 @@ bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_sou
         // registration and not only the bus one, because ADR-0082 rules the subject a
         // separate claim from addressing: it has to be askable of a FLAT child too.
         bctx.link.store(&link, std::memory_order_relaxed);
+        // The BUS tier's per-peer LINK-TOKEN cache (#1417). Allocated on this name's first
+        // bus registration and REUSED — never replaced — on every later one, so a lock-free
+        // reader on the receive thread can hold its address across a re-add. `acquire_ctx`
+        // already cleared its contents; what is stored here is the facet flag that tells
+        // `link_id_of` which tier this ctx is.
+        if (bctx.peer_tokens_own == nullptr)
+            bctx.peer_tokens_own = std::make_unique<bus_token_cache_t>();
+        bctx.peer_tokens.store(bctx.peer_tokens_own.get(), std::memory_order_relaxed);
         publish_ctx(bctx);
         // The session-identity pair (#1223 step 2). Arrival is a NEW seam and only an
         // ACCEPTING listener fires it — `set_peer_up_notifier` is what turns ADR-0044's
@@ -897,9 +905,9 @@ bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_sou
             },
             &bctx);
         bus->set_peer_down_notifier(
-            [](void* c, peer_handle_t, std::string_view peer) {
+            [](void* c, peer_handle_t handle, std::string_view peer) {
                 auto* const cc = static_cast<child_rx_ctx_t*>(c);
-                cc->self->bus_peer_down(*cc, peer);
+                cc->self->bus_peer_down(*cc, handle, peer);
             },
             &bctx);
         if (bus->delivers_ropes()) {
@@ -926,6 +934,12 @@ bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_sou
     // this ctx (#884) and a name that used to be a bus mount must not keep answering with
     // the facet it no longer has (#1294).
     ctx.bus.store(nullptr, std::memory_order_relaxed);
+    // No per-peer token cache on this tenancy either, and CLEARED for the same reason the
+    // bus facet is: a name re-added as a point-to-point child must not keep answering
+    // `link_id_of` through the bus table it used to have (#884, #1417). The table itself is
+    // kept alive on the ctx — a later re-add as a bus mount reuses it rather than allocating
+    // a second one a reader might still be standing on.
+    ctx.peer_tokens.store(nullptr, std::memory_order_relaxed);
     ctx.link.store(&link, std::memory_order_relaxed);  // the subject seam's door (#375 Part 2)
     // The bound-path join (RFC-0024 §5.1), resolved ONCE per registration: the child's mount
     // run IS the canonical key of its connection vertex, so this is one map lookup of bytes
@@ -951,6 +965,11 @@ bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_sou
         [](void* c) {
             auto* const cc = static_cast<child_rx_ctx_t*>(c);
             cc->self->link_down(cc->name);
+            // The eviction released this child's index slot, so the cached token is spent
+            // (#1417). Dropped here rather than inside `link_down`, which is also a public
+            // by-NAME door with no ctx in hand; a reconnect over the same registration mints
+            // a fresh token on its first subscribe.
+            cc->link_token.store(0, std::memory_order_relaxed);
         },
         &ctx);
     if (link.delivers_ropes()) {
@@ -995,6 +1014,10 @@ bool fwd_router_t::remove_child(std::string_view name) {
         // and no TTL (§7.3): the peer's next frame answers `NOT_FOUND` and it falls back to the
         // full-string path it still holds, re-minting from the reply after that.
         release_child_label(*ctx);
+        // The interned link token goes with the tenancy too (#1417): `link_down` below
+        // releases the index slot it names, so a copy left here would outlive its stamp.
+        ctx->link_token.store(0, std::memory_order_relaxed);
+        if (ctx->peer_tokens_own != nullptr) ctx->peer_tokens_own->clear();
     }
     link_down(name);
     return true;
@@ -1062,7 +1085,8 @@ void fwd_router_t::bus_peer_up(const child_rx_ctx_t& ctx, std::string_view peer)
     (void)graph_.register_session_anchor(session_anchor_id(ctx.name, peer));
 }
 
-void fwd_router_t::bus_peer_down(const child_rx_ctx_t& ctx, std::string_view peer) {
+void fwd_router_t::bus_peer_down(const child_rx_ctx_t& ctx, peer_handle_t handle,
+                                 std::string_view peer) {
     // Retire BEFORE the eviction. Retirement is what bumps the saturating generation
     // (RFC-0024 §4.4 rule 3), and the slot this session sat in can be handed to the next
     // dialer the moment the poll thread returns from here — so the stamp has to have moved
@@ -1074,6 +1098,13 @@ void fwd_router_t::bus_peer_down(const child_rx_ctx_t& ctx, std::string_view pee
             graph_.find_session_anchor(session_anchor_id(ctx.name, peer)))
         (void)graph_.retire(*anchor);
     link_down(peer);
+    // The eviction inside `link_down` RELEASED this peer's index slot, so the token cached
+    // for it names a stamp that can never validate again (#1417). Dropping it is what lets
+    // the next session in this slot mint a fresh one on its first subscribe instead of
+    // asking with a dead stamp for the rest of its life. Ordered AFTER the eviction so no
+    // window can refill the entry from a frame still in flight for the departing session.
+    if (bus_token_cache_t* const cache = ctx.peer_tokens.load(std::memory_order_acquire))
+        cache->drop(handle);
 }
 
 std::uint16_t fwd_router_t::advertise(std::string_view link_name,
@@ -1142,6 +1173,12 @@ fwd_router_t::child_rx_ctx_t& fwd_router_t::acquire_ctx(const std::string& name,
         // and a BUS re-add of a formerly point-to-point name deliberately leaves it here.
         hit->conn_slot.store(kNoConnSlot, std::memory_order_relaxed);
         hit->rx.store(rx, std::memory_order_relaxed);
+        // The interned LINK TOKEN goes with the tenancy (#1417), both tiers. A token is an
+        // index-slot address, and the departing tenancy's `link_down` released the slot it
+        // named — so carrying one across a re-add would hand the new tenancy a stamp that
+        // can never validate. Rewound to "not minted yet"; the next subscribe mints afresh.
+        hit->link_token.store(0, std::memory_order_relaxed);
+        if (hit->peer_tokens_own != nullptr) hit->peer_tokens_own->clear();
         // RFC-0027 §7.1: the tenancy this ctx's path label stood for is the one just hidden, so
         // the label goes with it — released (its slot's generation bumps, saturating and
         // retiring per §4.3.1) and forgotten. Nothing is told: there is no withdraw frame and
@@ -1630,6 +1667,37 @@ std::string_view fwd_router_t::peer_subject_of(const child_rx_ctx_t* ctx, peer_h
     transport_t* const link = ctx->link.load(std::memory_order_relaxed);
     if (link == nullptr) return {};
     return link->peer_subject(peer, scratch);
+}
+
+graph::link_id_t fwd_router_t::link_id_of(const child_rx_ctx_t* ctx, peer_handle_t peer,
+                                          std::string_view link_name) {
+    if (ctx == nullptr) return {};
+    // The BUS tier. `peer_tokens` is non-null exactly when this ctx was registered as a bus
+    // mount, so the facet test IS the tier test — no kind check, no branch on the handle.
+    if (bus_token_cache_t* const cache = ctx->peer_tokens.load(std::memory_order_acquire)) {
+        if (const graph::link_id_t hit = cache->peek(peer); hit.valid()) return hit;
+        if (link_name.empty()) return {};
+        // The census-bus fallback, and it is load-bearing (see the header): a bus that never
+        // announces arrivals has no eagerly-filled entry to hit, so the mint happens HERE —
+        // once per peer, on the subscribe path, never on the frame path.
+        const graph::link_id_t fresh = graph_.intern_link(link_name);
+        if (fresh.valid()) cache->put(peer, fresh);
+        return fresh;
+    }
+    // The FLAT tier: one link, one name, one word.
+    if (const std::uint64_t bits = ctx->link_token.load(std::memory_order_relaxed); bits != 0)
+        return graph::link_id_t::from_bits(bits);
+    if (link_name.empty()) return {};
+    const graph::link_id_t fresh = graph_.intern_link(link_name);
+    if (fresh.valid()) ctx->link_token.store(fresh.bits(), std::memory_order_relaxed);
+    return fresh;
+}
+
+graph::link_id_t fwd_router_t::link_id_thunk(void* ctx, const graph::inbound_ref_t& inbound) {
+    // Unlike `peer_subject_thunk`, this supplier DOES need the router: the lazy mint calls
+    // `graph_t::intern_link`, and the graph is the router's, not the receive context's.
+    return static_cast<fwd_router_t*>(ctx)->link_id_of(
+        static_cast<const child_rx_ctx_t*>(inbound.origin), inbound.peer, inbound.link);
 }
 
 std::string_view fwd_router_t::peer_subject_thunk(void* ctx, const graph::inbound_ref_t& inbound,

@@ -4,7 +4,8 @@
 SPDX-License-Identifier: Apache-2.0
 SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
-Reads `RESULT_SIDX` / `RESULT_SIDX_RAM` lines from stdin or files and renders three tables:
+Reads `RESULT_SIDX` / `RESULT_SIDX_RAM` / `RESULT_SIDX_DOOR` lines from stdin or files and
+renders four tables:
 
   1. **The A/A null.**  `run_subscribe_index.sh` runs the SAME binary under two tags, `A` and
      `B`, ABBA-interleaved.  The widest per-cell excursion between them is the null band, and
@@ -15,6 +16,9 @@ Reads `RESULT_SIDX` / `RESULT_SIDX_RAM` lines from stdin or files and renders th
      rather than as a win.  That rule is enforced HERE rather than left to the reader.
   3. **Bytes at rest**, on the same axis, with the per-link footprint derived across the link
      sweep at a fixed vertex population.
+  4. **The name door**, reported and never gated.  The carry (#1417) trades a hash-and-find
+     per SUBSCRIBE for a linear scan per PEER HANGUP; a curve showing only the half that got
+     faster would be advocacy, so the half that got slower is printed beside it.
 
 ESTIMATOR: **best-of-rounds**, never median.  `docs/methodology.md` records why — contamination
 is one-sided, so the minimum is the estimate least disturbed by it, and the same sample set that
@@ -34,7 +38,8 @@ kControlArm = "S-sentinel"
 kLiveArm = "sub-wire"
 
 #: Arms in report order.
-kArmOrder = [kControlArm, "idx-string", "idx-token", "idx-token-intern", kLiveArm]
+kArmOrder = [kControlArm, "idx-string", "idx-token", "idx-token-intern", "idx-token-carry",
+             kLiveArm]
 
 
 def parse(lines):
@@ -42,6 +47,7 @@ def parse(lines):
     lat = defaultdict(dict)  # (arm, links, verts) -> {(tag, round): p50_ns}
     spread = defaultdict(list)  # (arm, links, verts) -> [p50_ns, ...]
     ram = {}  # (tag, arm, links, verts) -> (live, peak, allocs, entries)
+    door = {}  # (tag, arm, links, verts) -> ns per name-door lookup
     for line in lines:
         f = line.rstrip("\n").split("\t")
         if not f:
@@ -51,6 +57,8 @@ def parse(lines):
             p50_ns = int(f[6]) / 1000.0  # the bench emits PICOseconds per op
             lat[(arm, links, verts)][(tag, rnd)] = p50_ns
             spread[(arm, links, verts)].append(p50_ns)
+        elif f[0] == "RESULT_SIDX_DOOR" and len(f) == 6:
+            door[(f[1], f[2], int(f[3]), int(f[4]))] = int(f[5]) / 1000.0
         elif f[0] == "RESULT_SIDX_RAM" and len(f) == 9:
             ram[(f[1], f[2], int(f[3]), int(f[4]))] = (
                 int(f[5]),
@@ -58,7 +66,7 @@ def parse(lines):
                 int(f[7]),
                 int(f[8]),
             )
-    return lat, spread, ram
+    return lat, spread, ram, door
 
 
 def best(samples, tag=None):
@@ -103,7 +111,7 @@ def verdict(delta_ns, reference_ns, band_pct):
 
 def main():
     data = sys.stdin if len(sys.argv) < 2 else open(sys.argv[1])
-    lat, spread, ram = parse(data)
+    lat, spread, ram, door = parse(data)
     if not lat:
         print("no RESULT_SIDX rows on input", file=sys.stderr)
         return 2
@@ -122,8 +130,9 @@ def main():
 
     print("## 2. THE CURVE — all five link counts, both vertex populations\n")
     print("| verts | links | sentinel | idx-string | idx-token | idx-token-intern "
-          "| sub-wire | string-token (ceiling) | verdict | string-intern | verdict |")
-    print("|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---|")
+          "| idx-token-carry | sub-wire | string-token (ceiling) | verdict "
+          "| string-carry (SHIPPED) | verdict | string-intern | verdict |")
+    print("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---|---:|---|")
     verts_seen = sorted({v for (_a, _l, v) in lat})
     links_seen = sorted({l for (_a, l, _v) in lat})
     for verts in verts_seen:
@@ -135,18 +144,26 @@ def main():
             ctl = cell(kControlArm)
             s_str, s_tok = cell("idx-string"), cell("idx-token")
             s_int, live = cell("idx-token-intern"), cell(kLiveArm)
-            if None in (ctl, s_str, s_tok, s_int):
+            s_car = cell("idx-token-carry")
+            if None in (ctl, s_str, s_tok, s_int, s_car):
                 continue
             # Net of the control: the driver loop and the clock are the same in every arm.
             n_str, n_tok, n_int = s_str - ctl, s_tok - ctl, s_int - ctl
+            n_car = s_car - ctl
             d_ceiling = s_str - s_tok
+            d_carry = s_str - s_car
             d_intern = s_str - s_int
             live_s = f"{live:.0f}" if live else "-"
             print(f"| {verts} | {links} | {ctl:.2f} | {s_str:.2f} ({n_str:+.2f}) | "
-                  f"{s_tok:.2f} ({n_tok:+.2f}) | {s_int:.2f} ({n_int:+.2f}) | {live_s} | "
+                  f"{s_tok:.2f} ({n_tok:+.2f}) | {s_int:.2f} ({n_int:+.2f}) | "
+                  f"{s_car:.2f} ({n_car:+.2f}) | {live_s} | "
                   f"{d_ceiling:+.2f} | {verdict(d_ceiling, s_str, band)} | "
+                  f"{d_carry:+.2f} | {verdict(d_carry, s_str, band)} | "
                   f"{d_intern:+.2f} | {verdict(d_intern, s_str, band)} |")
-    print("\nFigures in parentheses are net of the `S-sentinel` control. `sub-wire` is the LIVE "
+    print("\n`idx-token-carry` is the SHIPPED shape and pays for the token; `idx-token` charges "
+          "nothing for it and is a CEILING, not a forecast. `idx-string` is what the index was "
+          "before the carry landed, and is the column every saving is quoted against.\n")
+    print("Figures in parentheses are net of the `S-sentinel` control. `sub-wire` is the LIVE "
           "`graph_t::subscribe_wire` cost of one whole remote subscribe, in ns; it is not "
           "comparable to the control and is printed for proportion only.\n")
 
@@ -157,6 +174,20 @@ def main():
         lo, hi = min(vals), max(vals)
         print(f"| {arm} | {links} | {verts} | {lo:.2f} | {statistics.median(vals):.2f} | "
               f"{hi:.2f} | {hi / lo:.2f}x |")
+
+    if door:
+        print("\n## 5. THE NAME DOOR — reported, never gated\n")
+        print("The carry trades a hash-and-find per SUBSCRIBE for a linear scan per PEER "
+              "HANGUP. This is the half that got slower, at the rate it actually runs.\n")
+        print("| links | verts | idx-string (ns) | idx-token-carry (ns) | ratio |")
+        print("|---:|---:|---:|---:|---:|")
+        for (tag, arm, links, verts), ns in sorted(door.items()):
+            if tag != "A" or arm != "idx-string":
+                continue
+            car = door.get(("A", "idx-token-carry", links, verts))
+            if car is None:
+                continue
+            print(f"| {links} | {verts} | {ns:.1f} | {car:.1f} | {car / ns:.2f}x |")
 
     if ram:
         print("\n## 4. BYTES AT REST\n")

@@ -231,6 +231,12 @@ class fwd_router_t {
         // unconditionally and costing nothing until a link actually mints a per-peer subject
         // — with none, the thunk answers empty and the resolver keeps the inbound link name.
         resolver_.on_peer_subject(&fwd_router_t::peer_subject_thunk, this);
+        // The terminus LINK-TOKEN seam (#1266 / #1417), installed beside the subject one and
+        // for the mirror-image reason: only the transport plane knows which link a frame's
+        // handle belongs to, and only it has somewhere to CACHE the graph's answer. Asked
+        // lazily, at a remote subscribe and nowhere else, so an ordinary read/write/await
+        // frame never touches it.
+        resolver_.on_link_id(&fwd_router_t::link_id_thunk, this);
         // The wire `:subscribers[]` door's target descent (RFC-0021, #491): a SUBSCRIBER's
         // PATH child is an address in THIS node's frame, so deciding whether it leaves the
         // node is a mount question — the transport plane's, which L4 cannot name. Installed
@@ -793,6 +799,75 @@ class fwd_router_t {
      * function of the child's name, so re-adding a tombstoned name yields identical bytes, and
      * this deque never invalidates a reference either.
      */
+    /**
+     * @brief The BUS tier's per-peer LINK-TOKEN cache — direct-mapped, fixed, lock-free.
+     *
+     * The carry (#1266 / #1417) needs the arriving peer's `graph_t::intern_link` token in
+     * hand at the subscribe branch, and a bus mount carries MANY peers through one receive
+     * context, so the token cannot live on the ctx the way the flat tier's does.
+     *
+     * Direct-mapped on `peer_handle_t::index` and FIXED rather than grown, deliberately. A
+     * growable table would have to be published to a lock-free reader on the transport's own
+     * receive thread, which is a retire list and a lifetime argument for a CACHE whose every
+     * miss is already correct — the index simply interns the name it was handed. Peer indices
+     * are slot numbers (`p<slot>`) or bus node ids (`n<node>`), so they are small and dense
+     * and the ways collide only past `kWays` live peers on one mount; a collision costs
+     * one name lookup and nothing else.
+     *
+     * WHY THE PEER'S GENERATION IS NOT PART OF THE KEY: a peer's NAME is a pure function of
+     * its index (`bus_link_t::peer_name` is documented as exactly that), so a recycled index
+     * asks about the same link name and therefore the same interned identity. The stamp that
+     * DOES matter is the token's own, and `graph_t` validates that itself — an entry left
+     * behind by a departed session fails there and degrades to a lookup.
+     */
+    struct bus_token_cache_t {
+        /** @brief Ways in the direct-mapped table. */
+        static constexpr std::size_t kWays = 16;
+        /** @brief Occupancy tag: the peer index PLUS ONE, so `0` reads as empty. */
+        std::atomic<std::uint32_t> key[kWays] = {};
+        /** @brief `link_id_t::bits()` for the peer `key` names. */
+        std::atomic<std::uint64_t> val[kWays] = {};
+
+        /**
+         * @brief @p peer's cached token, or an invalid one.
+         *
+         * The tag is read, the value taken, and the tag RE-READ: a writer hides its way
+         * before rewriting it, so a tag that reads the same peer index either side of the
+         * value pins the value to that peer. Two peers cannot both tag one way — the tag is
+         * `index + 1` and indices are distinct — so this cannot hand back another peer's
+         * token, and a torn read of one peer's own successive tokens is harmless because
+         * both name the same link NAME.
+         */
+        [[nodiscard]] graph::link_id_t peek(peer_handle_t peer) const noexcept {
+            const std::size_t w = peer.index % kWays;
+            const std::uint32_t want = peer.index + 1;
+            if (key[w].load(std::memory_order_acquire) != want) return {};
+            const std::uint64_t bits = val[w].load(std::memory_order_relaxed);
+            if (key[w].load(std::memory_order_acquire) != want) return {};
+            return graph::link_id_t::from_bits(bits);
+        }
+
+        /** @brief Record @p id for @p peer, hiding the way while the pair is inconsistent. */
+        void put(peer_handle_t peer, graph::link_id_t id) noexcept {
+            const std::size_t w = peer.index % kWays;
+            key[w].store(0, std::memory_order_release);
+            val[w].store(id.bits(), std::memory_order_relaxed);
+            key[w].store(peer.index + 1, std::memory_order_release);
+        }
+
+        /** @brief Forget @p peer, if this way is still its — the departure half. */
+        void drop(peer_handle_t peer) noexcept {
+            const std::size_t w = peer.index % kWays;
+            if (key[w].load(std::memory_order_relaxed) == peer.index + 1)
+                key[w].store(0, std::memory_order_release);
+        }
+
+        /** @brief Forget every peer — a re-add rebinds the whole mount (#884). */
+        void clear() noexcept {
+            for (std::atomic<std::uint32_t>& k : key) k.store(0, std::memory_order_release);
+        }
+    };
+
     struct child_rx_ctx_t {
         fwd_router_t* self;
         std::string name;
@@ -845,6 +920,39 @@ class fwd_router_t {
          * still read it, and `retired` carries the ordering edge for the rebind as a whole.
          */
         std::atomic<transport_t*> link{nullptr};
+        /**
+         * @brief The FLAT tier's resolved-once LINK TOKEN, as `link_id_t::bits()`; `0` ⇒ not
+         *        minted yet (#1266 / #1417).
+         *
+         * One relaxed load is the whole of the carry on a point-to-point child: the link has
+         * ONE name, so it has one interned identity for its whole tenancy.
+         *
+         * Minted LAZILY, at the first remote subscribe over this child rather than at
+         * registration. A registered child that never carries a subscription then charges the
+         * graph's arena nothing at all, which matters because the arena is the budget #1160 is
+         * making configurable on the C6 and a pre-minted slot per child would spend it on
+         * links that never use the index. Two threads racing the mint agree by construction:
+         * `graph_t::intern_link` is idempotent by NAME.
+         *
+         * `mutable` and atomic because it is a CACHE written from the frame path through the
+         * `const` context the subject seam already hands around, and cleared from the control
+         * thread on a re-add (#884) — the same relaxed discipline `rx`, `bus` and `link` use,
+         * with `retired` carrying the ordering edge for the rebind as a whole.
+         */
+        mutable std::atomic<std::uint64_t> link_token{0};
+        /**
+         * @brief The BUS tier's per-peer token cache — null on a point-to-point child.
+         *
+         * Allocated once, on the first registration of this name as a bus mount, and never
+         * freed before the ctx: a re-add CLEARS it rather than replacing it, so a lock-free
+         * reader on the receive thread can never hold a pointer to a freed table. Cleared to
+         * null (not destroyed) when the same name is re-added as a FLAT child, for the reason
+         * `bus` is — a name that used to be a bus mount must not keep answering with the
+         * facet it no longer has.
+         */
+        std::unique_ptr<bus_token_cache_t> peer_tokens_own;
+        /** @brief `peer_tokens_own` as the frame path reads it; null ⇒ the FLAT tier. */
+        std::atomic<bus_token_cache_t*> peer_tokens{nullptr};
         /**
          * @brief This child's CONNECTION vertex slot index, resolved once at registration
          *        (RFC-0024 §5.1) — `kNoConnSlot` when the child has none.
@@ -1122,6 +1230,33 @@ class fwd_router_t {
      *         back out of the opaque `inbound_ref_t::origin` the terminus put there. */
     static std::string_view peer_subject_thunk(void* ctx, const graph::inbound_ref_t& inbound,
                                                std::span<char> scratch);
+    /**
+     * @brief The arriving link's INTERNED TOKEN, from this router's own cache (#1266 /
+     *        #1417) — the carry the subscriber index is keyed by.
+     *
+     * Two tiers, one door, because the 2026-08-14 ruling's `add_child`-only mint point was
+     * retired for covering exactly one of them: on the ESP node EVERY WS session is a bus
+     * PEER, and its name reaches the graph out of `on_frame_*_bus` without ever passing
+     * through `add_child`.
+     *
+     * - **BUS** (`peer_tokens` non-null): the direct-mapped per-peer cache, then a LAZY MINT
+     *   on a miss. The lazy path is mandatory, not an optimisation: an announce-census bus
+     *   never calls `set_peer_up_notifier`, so nothing ever fills its entries eagerly and a
+     *   cache-only supplier would leave every CAN peer paying the name lookup forever.
+     * - **FLAT**: the ctx's own resolved-once word, minted lazily for the same reason.
+     *
+     * Both mints go through `graph_t::intern_link`, which is idempotent by NAME — so a race
+     * between two receive threads, or between this and a redial, agrees by construction.
+     *
+     * @retval {} No context, or an empty name — the index interns what it was handed, which
+     *            is exactly what it did before the carry existed.
+     */
+    [[nodiscard]] graph::link_id_t link_id_of(const child_rx_ctx_t* ctx, peer_handle_t peer,
+                                              std::string_view link_name);
+    /** @brief The `graph::link_id_fn_t` trampoline: `ctx` is the router (this supplier has
+     *         state, unlike the subject one), and the receive context comes back out of the
+     *         opaque `inbound_ref_t::origin` the terminus put there. */
+    static graph::link_id_t link_id_thunk(void* ctx, const graph::inbound_ref_t& inbound);
     static std::string_view resolve_peer_name(const child_rx_ctx_t& ctx, peer_handle_t peer,
                                               std::span<char> scratch);
     /** @brief The shared rope routing body; @p inbound_ctx is the link's receiver ctx when the
@@ -1466,8 +1601,15 @@ class fwd_router_t {
      * successor. Eviction (@ref link_down) is unchanged and still keyed by the peer NAME.
      * An anchor that was never created (an announce-census peer, or a session that departed
      * before its arrival was wired) simply resolves to nothing and the eviction runs alone.
+     *
+     * @p handle is the departing peer's, and it is what the per-peer LINK-TOKEN cache is
+     * keyed by (#1417): the eviction below releases the graph's index slot, so the cached
+     * token has to go with it or the next session in that slot would ask with a stamp that
+     * can never validate again and pay a name lookup for its whole life. Dropping it is
+     * self-healing rather than merely tidy — correctness is already covered by `graph_t`
+     * refusing the stale stamp.
      */
-    void bus_peer_down(const child_rx_ctx_t& ctx, std::string_view peer);
+    void bus_peer_down(const child_rx_ctx_t& ctx, peer_handle_t handle, std::string_view peer);
     /**
      * @brief The receiver ctx @p name is to be registered through — reuse-or-append (#884).
      *

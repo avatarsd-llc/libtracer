@@ -36,6 +36,7 @@
 
 #include "libtracer/error.hpp"
 #include "libtracer/key_view.hpp"
+#include "libtracer/link_id.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/path.hpp"
@@ -972,6 +973,69 @@ class graph_t {
     [[nodiscard]] std::size_t link_edge_candidates(std::string_view link_name) const;
 
     /**
+     * @brief Mint-or-find @p link_name's interned token — the LINK-UP door (#1266 / #1417).
+     *
+     * The transport plane calls this ONCE, when a link or a bus peer becomes audible, caches
+     * the answer in its own per-link receive context, and hands it to every subsequent
+     * subscribe through `op_resolver_t::on_link_id`. That is the whole of the carry, and it
+     * is what takes the index operation from 14.1–17.2 ns to 9.4 ns — FLAT in link count —
+     * and its footprint from 175.8 to 128.0 bytes per link (measured on #1416's harness,
+     * `bench/bench_subscribe_index`, 8 vertices, best-of-13-rounds against a carried A/A null).
+     *
+     * IDEMPOTENT BY NAME, which is the property #1263 pinned and this must not move: the
+     * same spelling always answers the same live token, so a redialing peer that comes back
+     * under its old name re-enters its old slot rather than stranding it. A name that has
+     * never been interned takes a fresh slot (or a released one), and the returned token is
+     * valid until @ref release_link or a whole-link eviction retires that slot.
+     *
+     * @param link_name This node's NAME for the link; empty ⇒ an invalid token (the #1056
+     *                  empty-key rule — the LOCAL spelling is not a link).
+     * @return The token, or a default-constructed one for an empty name.
+     */
+    [[nodiscard]] link_id_t intern_link(std::string_view link_name);
+
+    /**
+     * @brief Retire @p token's slot so it can be reused — the LINK-DOWN half of @ref
+     *        intern_link.
+     *
+     * Bumps the slot's stamp, so every copy of @p token still in flight stops validating and
+     * degrades to a name lookup rather than addressing whatever link takes the slot next.
+     * The candidate list is released with it: this is the teardown door, so anything still
+     * listed is by definition an edge that departed with the link.
+     *
+     * Optional in the safety sense and NOT in the footprint sense: a node that never calls it
+     * keeps one 64-byte slot per distinct link name it has ever seen, where one that does
+     * keeps one per link it currently holds. `evict_link_edges` already releases the slot it
+     * empties, so the transport plane's ordinary hangup path needs no extra call; this exists
+     * for an owner tearing a link down without evicting through the graph.
+     *
+     * A token that is invalid, out of range, or already released is a no-op.
+     */
+    void release_link(link_id_t token);
+
+    /**
+     * @brief How many index inserts had to fall back to a NAME LOOKUP — the carry's own
+     *        observability (#1417).
+     *
+     * A carried token that validates costs a subscript; anything else costs a scan of the
+     * live slots. This counts the second case, and it is the ONLY way to see from outside
+     * whether the carry is actually working: a valid token and a name lookup produce
+     * byte-identical index state by construction, which is what makes the carry safe and
+     * also what makes it invisible.
+     *
+     * Expected to be SMALL and bounded, not zero. It counts one per link that has never been
+     * interned (the transport plane's lazy mint goes through `intern_link`, so that is not
+     * counted), one per admission whose key is not the arrival link — a mount-routed target,
+     * a `field_write` `caller` fallback — and one per `subscribe_wire` reached with no
+     * transport plane behind it, which is every host-side caller and every test that binds an
+     * edge directly. The purely LOCAL `subscribe()` doors never reach here at all: they admit
+     * no `remote`, so there is no link to index them under. A count that GROWS with traffic on
+     * a steady link set means the carry is not reaching the index, which is a performance
+     * defect, never a correctness one.
+     */
+    [[nodiscard]] std::size_t link_index_name_lookups() const;
+
+    /**
      * @brief Evict the remote subscriber edge(s) whose delivery link AND stored return
      *        route both match — the refused-route reclaim (#1223 step 5).
      *
@@ -1792,10 +1856,25 @@ class graph_t {
      * and each delivery's WRITE re-gate all name the writer rather than the wire it used.
      * The delivery link is unaffected, which is the point of splitting them: the edge still
      * routes back over @p link (or, for a mount-routed target, over the mount).
+     *
+     * @p link_token is the CARRIED interned identity of @p link (#1266 / #1417) — what the
+     * transport plane got back from @ref intern_link at link-up and cached in its own
+     * per-link receive context. It saves the index the name hash and find — **42–56 % of the
+     * whole index operation net of its control**, measured at all ten cells of #1416's own
+     * harness. A token that cost NOTHING to obtain would be worth 72–82 %, so roughly two
+     * thirds of that ceiling survives paying for the carry. It is an OPTIMISATION and only
+     * that:
+     * the default is "no token", which is byte-identical to every pre-carry caller, and a
+     * token that does not name a slot holding the key the index is about to use is ignored
+     * rather than trusted. That is deliberate — the key is not always @p link (a mount-routed
+     * target rebinds it to the mount's, and a `field_write` admission has only its `caller`,
+     * #943), and a token silently indexing under the wrong link is exactly the leaked
+     * subscriber edge #1071 exists to prevent.
      */
     [[nodiscard]] result_t<void> subscribe_wire(vertex_handle_t v, view_t source_view,
                                                 view_t return_route, std::string link,
-                                                view_t reverse_route = {}, std::string caller = {});
+                                                view_t reverse_route = {}, std::string caller = {},
+                                                link_id_t link_token = {});
 
     /**
      * @brief Read by path — resolve the path key once (guarded map lookup), then the hot path.
@@ -2102,7 +2181,13 @@ class graph_t {
     // which is where this promise finally became true) — a vertex already listed for `link`
     // is not listed twice, which is what keeps a peer that re-subscribes to the same vertex
     // from growing its own departure cost, its arena footprint, or its sort bill.
-    void index_link_vertex(std::string_view link, vertex_t* v);
+    //
+    // `token` is the CARRIED interned identity (#1417). Valid ⇒ the entry is a subscript and
+    // no name is looked at; absent or stale ⇒ `link` is interned by name, which is exactly
+    // what every pre-carry caller gets and is byte-identical in outcome. It is only ever an
+    // optimisation: `link` remains the authority and a wrong token cannot mis-index, because
+    // a token whose slot does not hold `link` is rejected the same way a stale one is.
+    void index_link_vertex(std::string_view link, link_id_t token, vertex_t* v);
     // The candidate vertices an eviction for `link_name` must visit — see the definition.
     // `take` removes the index entry (whole-link teardown) instead of copying it
     // (route-scoped reclaim, which leaves the link holding other edges).
@@ -2113,9 +2198,13 @@ class graph_t {
     // the edge's kind) → RFC-0005 bookkeeping. Every door — the two subscribe() sugars,
     // the local `:subscribers[]` field-write, and the wire subscribe_wire — ends here,
     // so gate and latch semantics cannot diverge per entry point.
+    // `link_token` is the carried interned identity (#1417), forwarded verbatim to
+    // `index_link_vertex` — which ignores it unless it names a live slot spelling the key
+    // this admission actually indexes under. Defaulted, so the three local doors that carry
+    // none are unchanged.
     [[nodiscard]] result_t<subscription_t> admit_subscriber(
         vertex_t* v, subscriber_t s, std::string_view caller,
-        std::optional<std::size_t> slot = std::nullopt);
+        std::optional<std::size_t> slot = std::nullopt, link_id_t link_token = {});
     // Fire the external-subscription observer for ONE slot mutation
     // (configure_subscription_observer). Returns immediately when no observer is installed or
     // `caller` is EMPTY — the latter is the whole external/local discrimination, in one place.
@@ -2411,27 +2500,6 @@ class graph_t {
     // codegen change on the DELIVERY path, which the symbol ratchet caught and which
     // nothing here gains from.
     /**
-     * @brief Transparent hashing/equality for `link_index_`, so a lookup spends no
-     *        allocation turning a caller's `std::string_view` into a key (#1071).
-     *
-     * Hashed rather than ordered because this lookup sits on the SUBSCRIBE path: a tree's
-     * cost grows with the number of live links, so an ordered index made every subscribe a
-     * little dearer on a node with more peers — measurably, and in the one direction #1071's
-     * acceptance criteria refuse. A hash makes it independent of that count.
-     */
-    struct link_key_hash_t {
-        using is_transparent = void; /**< @brief Enables the heterogeneous `find`. */
-        std::size_t operator()(std::string_view s) const noexcept {
-            return std::hash<std::string_view>{}(s);
-        }
-    };
-    /** @brief The equality half of `link_key_hash_t`'s heterogeneous lookup. */
-    struct link_key_eq_t {
-        using is_transparent = void; /**< @brief Enables the heterogeneous `find`. */
-        bool operator()(std::string_view a, std::string_view b) const noexcept { return a == b; }
-    };
-
-    /**
      * @brief Which vertices hold a subscriber edge for a given LINK NAME — the index that
      *        makes a peer's departure cost its OWN edges instead of the graph's (#1071).
      *
@@ -2461,6 +2529,41 @@ class graph_t {
      * global-heap `std::vector` sized to the graph's whole subscribed set on every peer
      * hangup, which is the allocation #1071 called out. It now allocates nothing at all —
      * the candidate list IS this entry, moved out.
+     *
+     * @section carried Why this is a DENSE SLOT VECTOR and not a map (#1266 / #1417)
+     *
+     * It was a `std::pmr::unordered_map<std::pmr::string, link_entry_t>` with a transparent
+     * hash, so every remote subscribe hashed the arriving link name and found it. PR #1416
+     * measured what that costs and what removing it could buy, four arms in one binary
+     * against a fresh A/A null: **a token that costs nothing to obtain removes ~78 % of the
+     * index operation's cost net of the control, and a GRAPH-ONLY re-key buys nothing at
+     * all** — `within-null`
+     * at nine of ten cells, and its footprint goes UP. The reason is structural: the peer
+     * NAME is materialized per frame into a stack scratch buffer, so something must map that
+     * name to whatever the index keys on unless a token is minted upstream and carried.
+     *
+     * So the token is carried (`subscribe_wire`'s `link_token`), and this is what it
+     * addresses. One structure, not two: the name lives INSIDE the slot it belongs to, which
+     * is what makes the carry pay in bytes as well as in nanoseconds. A dense vector PLUS a
+     * name→token map is byte-for-byte the shape #1416 measured at 183.8 B/link against the
+     * map's 175.8 — i.e. worse — and this shape measures **128.0 B/link**.
+     *
+     * MEASURED on the same harness, with the shipped arm held to the calibration oracle: the
+     * index operation goes **14.1–17.2 ns → 9.4 ns, FLAT in link count** at 8 vertices
+     * (15.5–18.4 → 10.4 at 32), which is **42–56 % of its cost net of the control at every
+     * one of the ten cells**, and its footprint **175.8 → 128.0 B per link**. The gap to the
+     * free-token ceiling is the indirect supplier call, its tier branch, and the name compare
+     * below.
+     *
+     * The NAME door survives unchanged, which is #1366's first objection answered rather
+     * than waived: `link_edge_candidates`, `link_candidates` and therefore `evict_link_edges`
+     * all still take a `std::string_view` and all still work with no token in sight (the ESP
+     * departure-cost test calls one on a bare `graph_t` with no router at all). They pay a
+     * LINEAR SCAN over live slots instead of a hash — a path that runs once per peer hangup
+     * where the one it pays for runs once per subscribe. `run_subscribe_index.sh` reports
+     * that scan's cost every run (`RESULT_SIDX_DOOR`) rather than leaving the half of the
+     * trade that got slower unstated: it is CHEAPER than the hash up to about 32 live links
+     * and about 2x dearer at 65.
      */
     /** @brief One link's candidate list, plus where its sorted prefix ends. */
     struct link_entry_t {
@@ -2475,13 +2578,84 @@ class graph_t {
      *         the sort is paid per NEW vertex, never per subscribe. */
     static constexpr std::size_t kLinkIndexCompactFloor = 8;
 
+    /** @brief How many name characters live INSIDE a slot before it overflows to
+     *         `link_long_names_`.
+     *
+     * Chosen so the whole slot is 64 bytes — one cache line, and the difference between a
+     * measured 128.0 B/link and the 160.8 B a `std::pmr::string` here would cost (that type
+     * is 40 bytes of header before a single character is stored, because the polymorphic
+     * allocator is not empty). It covers every name the transport plane mints — `p<slot>`,
+     * `n<node>`, the `tr::net::kPeerNameChars` tokens — and every dotted-quad `host:port`.
+     * A longer registered child name still works; it simply costs one entry in the overflow
+     * list and one extra indirection on the doors that scan by name. */
+    static constexpr std::size_t kInlineLinkNameChars = 19;
+    /** @brief `link_slot_t::len` sentinel for a name held in `link_long_names_`. */
+    static constexpr std::uint8_t kOverflowLinkNameLen = 0xFF;
+
+    /**
+     * @brief One link's whole index record: its candidate list AND its name, stored ONCE.
+     *
+     * A dead slot has `len == 0`, which no live link can have — `index_link_vertex` and
+     * `intern_link` both refuse the empty spelling (the #1056 empty-key rule) — so a name
+     * scan skips dead slots without a second predicate.
+     */
+    struct link_slot_t {
+        link_entry_t e;               /**< @brief The candidate list. */
+        std::uint32_t generation = 0; /**< @brief Bumped on release; `0` ⇒ never minted. */
+        std::uint8_t len = 0;         /**< @brief Inline name length; `0` ⇒ DEAD,
+                                       *          `kOverflowLinkNameLen` ⇒ overflowed. */
+        char name[kInlineLinkNameChars] = {}; /**< @brief The ADMITTED-OVER spelling. */
+    };
+    // The property worth pinning is that the name rides INSIDE the slot for free — no padding
+    // beyond the stamp and the length byte — NOT the literal 64, which is a 64-bit host's
+    // arithmetic. On the 32-bit RISC-V C6 this same expression is 44 bytes, because
+    // `link_entry_t` is 20 there and not 40. Spelling the assert `== 64` broke the ESP build
+    // outright, which would have been an odd way to ship the change whose whole justification
+    // is the C6's user-pinned arena.
+    static_assert(sizeof(link_slot_t) ==
+                      sizeof(link_entry_t) + sizeof(std::uint32_t) + 1 + kInlineLinkNameChars,
+                  "the index slot carries its name inline and adds no padding for it — 64 bytes, "
+                  "one cache line, on a 64-bit host; see kInlineLinkNameChars");
+
+    /** @brief A link name too long for `link_slot_t` — rare, so a scanned list beats a
+     *         second hashed container, and it costs nothing at all while it is empty. */
+    struct link_long_name_t {
+        std::uint32_t slot;    /**< @brief Which slot it belongs to. */
+        std::pmr::string text; /**< @brief The spelling. */
+    };
+
+    /** @brief "No such slot" — what a name scan answers when nothing matches. */
+    static constexpr std::uint32_t kNoLinkSlot = 0xFFFFFFFFu;
+
+    // The four private doors below all run with `link_index_mutex_` HELD.
+    /** @brief Slot @p i's spelling — inline, overflowed, or empty for a dead slot. */
+    [[nodiscard]] std::string_view link_slot_name(std::uint32_t i) const;
+    /** @brief The live slot holding @p name, or `kNoLinkSlot`. */
+    [[nodiscard]] std::uint32_t find_link_slot(std::string_view name) const;
+    /** @brief Give slot @p i the spelling @p name, inline when it fits. */
+    void name_link_slot(std::uint32_t i, std::string_view name);
+    /** @brief @ref intern_link with the lock already held. */
+    [[nodiscard]] link_id_t intern_link_locked(std::string_view name);
+    /** @brief Retire slot @p i: drop its name, bump its stamp, free its list, list it for
+     *         reuse. The shared body of @ref release_link and the take-arm of
+     *         `link_candidates`. */
+    void release_link_slot(std::uint32_t i);
+
     // `mutable` because the entries are a CACHE of where a link's edges may be: the
     // diagnostic reader compacts one in place to report a distinct count, which changes no
     // observable graph state. Guarded by the mutable mutex below, as `map_mutex_` is.
-    mutable std::pmr::unordered_map<std::pmr::string, link_entry_t, link_key_hash_t, link_key_eq_t>
-        link_index_{mr_};
-    /** @brief Guards `link_index_` ONLY. A leaf: never held across a map, stripe, or
-     *         sweep acquisition, so it orders against nothing else in this class. */
+    mutable std::pmr::vector<link_slot_t> link_index_{mr_};
+    /** @brief Released slots awaiting reuse — what keeps a churning node's slot space
+     *         bounded by its CONCURRENT link count instead of by its lifetime's. */
+    std::pmr::vector<std::uint32_t> link_free_{mr_};
+    /** @brief Names past `kInlineLinkNameChars`. Empty on every shipped deployment. */
+    std::pmr::vector<link_long_name_t> link_long_names_{mr_};
+    /** @brief @ref link_index_name_lookups's counter. A plain word, not an atomic: every
+     *         read and write of it is already inside `link_index_mutex_`. */
+    std::size_t link_name_lookups_ = 0;
+    /** @brief Guards `link_index_`, `link_free_` and `link_long_names_` ONLY. A leaf: never
+     *         held across a map, stripe, or sweep acquisition, so it orders against nothing
+     *         else in this class. */
     mutable std::mutex link_index_mutex_;
 };
 

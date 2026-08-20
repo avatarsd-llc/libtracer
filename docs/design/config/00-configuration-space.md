@@ -43,7 +43,7 @@ using config_t = my_node_config_t;
 
 Inheriting means a knob added later does not break the preset — it inherits the new default
 rather than failing to compile. The rest of the library names the derived spellings re-exported
-below the traits type (`:524-547`), each of which is exactly its traits member, so introducing
+below the traits type (`:566-589`), each of which is exactly its traits member, so introducing
 `config_t` moved no call site.
 
 It is **bound once, not threaded as a template parameter**, and
@@ -300,7 +300,7 @@ serve the page that instruction points at. The contract, stated here, is three o
 | read | `value_ptr_t load() const` | Returns an **owning** handle. |
 
 Owning is not negotiable. The composed branch read `graph_t::read_subtree_folded`
-(`core/include/libtracer/graph.hpp:1367`) stashes one LKV per node into a vector that outlives
+(`core/include/libtracer/graph.hpp:1431`) stashes one LKV per node into a vector that outlives
 the map lock and spans three passes, so **N values are held simultaneously**. A reclamation
 scheme that can protect only one value per reader at a time — hazard pointers, as classically
 stated — therefore cannot hand back a pinned pointer; it must promote the pin to a counted

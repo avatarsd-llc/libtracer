@@ -1023,16 +1023,123 @@ static bool candidates_contain(const std::pmr::vector<vertex_t*>& vs, std::size_
     return false;
 }
 
-void graph_t::index_link_vertex(std::string_view link, vertex_t* v) {
+std::string_view graph_t::link_slot_name(std::uint32_t i) const {
+    const link_slot_t& s = link_index_[i];
+    if (s.len != kOverflowLinkNameLen) return std::string_view(s.name, s.len);
+    for (const link_long_name_t& l : link_long_names_)
+        if (l.slot == i) return l.text;
+    return {};
+}
+
+std::uint32_t graph_t::find_link_slot(std::string_view name) const {
+    // THE NAME DOOR, and it is a scan (see link_index_'s @ref carried). A dead slot's name
+    // is empty and `name` never is here, so the liveness test rides the comparison.
+    for (std::uint32_t i = 0; i < link_index_.size(); ++i)
+        if (link_slot_name(i) == name) return i;
+    return kNoLinkSlot;
+}
+
+void graph_t::name_link_slot(std::uint32_t i, std::string_view name) {
+    link_slot_t& s = link_index_[i];
+    if (name.size() <= kInlineLinkNameChars) {
+        std::memcpy(s.name, name.data(), name.size());
+        s.len = static_cast<std::uint8_t>(name.size());
+        return;
+    }
+    link_long_names_.push_back(link_long_name_t{i, std::pmr::string(name, mr_)});
+    s.len = kOverflowLinkNameLen;
+}
+
+link_id_t graph_t::intern_link_locked(std::string_view name) {
+    if (name.empty()) return {};  // the #1056 empty-key rule — the LOCAL spelling is not a link
+    // Mint-or-FIND: the same spelling always answers the same live token, which is the
+    // same-NAME redial ordering #1263 pinned. A redial that comes back as `p3` re-enters the
+    // slot `p3` already has rather than stranding it behind a second one.
+    if (const std::uint32_t i = find_link_slot(name); i != kNoLinkSlot)
+        return link_id_t{i, link_index_[i].generation};
+    std::uint32_t i = 0;
+    if (!link_free_.empty()) {
+        i = link_free_.back();
+        link_free_.pop_back();
+    } else {
+        // Grown to EXACTLY what is needed rather than doubled. This runs once per link-up
+        // and the figure #1266 is judged on is bytes at rest in the user-pinned arena
+        // (#1160's budget on the C6), where a doubling vector of 64-byte slots would hand
+        // back up to a fifth of the saving as capacity slack. The copy is a move of a
+        // handful of trivially-relocatable records on a control-plane-cold path.
+        if (link_index_.size() == link_index_.capacity())
+            link_index_.reserve(link_index_.size() + 1);
+        link_index_.push_back(
+            link_slot_t{.e = link_entry_t{.vs = std::pmr::vector<vertex_t*>(mr_)}});
+        i = static_cast<std::uint32_t>(link_index_.size() - 1);
+    }
+    link_slot_t& s = link_index_[i];
+    if (s.generation == 0) s.generation = 1;  // fresh; a released slot was bumped on release
+    name_link_slot(i, name);
+    return link_id_t{i, s.generation};
+}
+
+std::size_t graph_t::link_index_name_lookups() const {
+    const std::lock_guard lock(link_index_mutex_);
+    return link_name_lookups_;
+}
+
+link_id_t graph_t::intern_link(std::string_view link_name) {
+    const std::lock_guard lock(link_index_mutex_);
+    return intern_link_locked(link_name);
+}
+
+void graph_t::release_link(link_id_t token) {
+    const std::lock_guard lock(link_index_mutex_);
+    if (!token.valid() || token.slot >= link_index_.size()) return;
+    link_slot_t& s = link_index_[token.slot];
+    if (s.generation != token.generation || s.len == 0) return;  // already released, or stale
+    release_link_slot(token.slot);
+}
+
+void graph_t::release_link_slot(std::uint32_t i) {
+    link_slot_t& s = link_index_[i];
+    if (s.len == kOverflowLinkNameLen)
+        for (std::size_t k = 0; k < link_long_names_.size(); ++k)
+            if (link_long_names_[k].slot == i) {
+                link_long_names_.erase(link_long_names_.begin() + static_cast<std::ptrdiff_t>(k));
+                break;
+            }
+    s.len = 0;  // DEAD — a name scan skips it, and no live link can spell itself empty
+    // The stamp moves BEFORE the slot can be handed out again, so every token still in flight
+    // for the departed link stops validating. That is what makes slot reuse safe rather than
+    // merely unlikely: a stale token cannot inherit a successor's candidate list.
+    ++s.generation;
+    if (s.generation == 0) s.generation = 1;  // wrapped: 0 is reserved for "no token"
+    s.e.vs.clear();
+    s.e.compacted = 0;
+    link_free_.push_back(i);
+}
+
+void graph_t::index_link_vertex(std::string_view link, link_id_t token, vertex_t* v) {
     if (link.empty()) return;  // the LOCAL spelling — no link teardown can ever name it
     const std::lock_guard lock(link_index_mutex_);
-    auto it = link_index_.find(link);
-    if (it == link_index_.end())
-        it = link_index_
-                 .emplace(std::pmr::string(link, mr_),
-                          link_entry_t{.vs = std::pmr::vector<vertex_t*>(mr_)})
-                 .first;
-    link_entry_t& e = it->second;
+    // THE CARRY (#1417). A valid token whose slot is live AND spells `link` is the entry,
+    // reached by subscript: no hash, no find, no key copy. Everything else falls back to
+    // interning the name, which is byte-identical in outcome to what every pre-carry caller
+    // got — so an absent token, a token released under it, and a token for a DIFFERENT link
+    // than the one this admission is keyed by (a mount-routed target rebinds the key to the
+    // mount's name; a `field_write` admission keys on its `caller`, #943) all degrade to a
+    // lookup instead of mis-indexing. The name compare is what turns "the caller must never
+    // carry the wrong token" into "carrying the wrong token cannot lose an edge", and it is a
+    // handful of inline bytes against a `std::string_view` already in a register.
+    std::uint32_t i = kNoLinkSlot;
+    if (token.valid() && token.slot < link_index_.size() &&
+        link_index_[token.slot].generation == token.generation &&
+        link_slot_name(token.slot) == link) {
+        i = token.slot;
+    } else {
+        ++link_name_lookups_;  // the carry did not reach here — see link_index_name_lookups
+        const link_id_t fresh = intern_link_locked(link);
+        if (!fresh.valid()) return;
+        i = fresh.slot;
+    }
+    link_entry_t& e = link_index_[i].e;
     // IDEMPOTENT — a vertex already listed for this link is not listed again. That is what
     // the declaration has always promised, and what this file's own bound argument assumes;
     // the code did not do it, and that gap is where the subscribe path's cost actually was
@@ -1065,11 +1172,14 @@ void graph_t::index_link_vertex(std::string_view link, vertex_t* v) {
 std::size_t graph_t::link_edge_candidates(std::string_view link_name) const {
     if (link_name.empty()) return 0;
     const std::lock_guard lock(link_index_mutex_);
-    const auto it = link_index_.find(link_name);
-    if (it == link_index_.end()) return 0;
+    // The NAME door, unchanged in signature and in answer, and now a scan (#1417). It costs
+    // no token and no router: the ESP departure-cost guard calls it on a bare `graph_t`, and
+    // that is the property that forced the name into the slot rather than out of the index.
+    const std::uint32_t i = find_link_slot(link_name);
+    if (i == kNoLinkSlot) return 0;
     // Compact before reporting, so the number is the DISTINCT vertex count a caller can
     // reason about rather than an artefact of where the amortized compaction last landed.
-    link_entry_t& e = it->second;
+    link_entry_t& e = link_index_[i].e;
     if (e.vs.size() != e.compacted) {
         compact_candidates(e.vs);
         e.compacted = e.vs.size();
@@ -1088,17 +1198,22 @@ std::size_t graph_t::link_edge_candidates(std::string_view link_name) const {
  */
 std::pmr::vector<vertex_t*> graph_t::link_candidates(std::string_view link_name, bool take) {
     const std::lock_guard lock(link_index_mutex_);
-    const auto it = link_index_.find(link_name);
-    if (it == link_index_.end()) return std::pmr::vector<vertex_t*>(mr_);
+    const std::uint32_t i = find_link_slot(link_name);
+    if (i == kNoLinkSlot) return std::pmr::vector<vertex_t*>(mr_);
     // Compact first: a duplicate would cost a second eviction pass over the same vertex.
-    link_entry_t& e = it->second;
+    link_entry_t& e = link_index_[i].e;
     if (e.vs.size() != e.compacted) {
         compact_candidates(e.vs);
         e.compacted = e.vs.size();
     }
     if (!take) return e.vs;  // a copy: the entry outlives this eviction
     std::pmr::vector<vertex_t*> out = std::move(e.vs);
-    link_index_.erase(it);
+    // RELEASED, not merely emptied — the exact footprint behaviour the erased map entry had,
+    // so a node that churns links keeps one slot per link it CURRENTLY holds rather than one
+    // per name it has ever seen. The stamp bump inside is what stops a token cached for the
+    // departed link from addressing whichever link takes the slot next (#1417); a router that
+    // has not yet dropped its cached copy degrades to a name lookup, never to a wrong entry.
+    release_link_slot(i);
     return out;
 }
 
@@ -2365,7 +2480,8 @@ void parse_subscriber_tlv(const tlv_t& sub, subscriber_t& s) {
 
 result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
                                                    std::string_view caller,
-                                                   std::optional<std::size_t> slot) {
+                                                   std::optional<std::size_t> slot,
+                                                   link_id_t link_token) {
     // The single admission step (ADR-0049): every door lands here, so the SUBSCRIBE gate
     // and the transient-local durability latch apply UNIFORMLY — which invariants fire no
     // longer depends on which door an edge entered through.
@@ -2427,7 +2543,15 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
     // leaves a stale entry, which costs one no-op eviction, whereas indexing only on success
     // would open a window where the edge is live and unindexed — a departure could then miss
     // it, which is a leaked subscriber edge rather than a wasted comparison.
-    if (s.remote) index_link_vertex(s.remote->link.empty() ? s.remote->caller : s.remote->link, v);
+    //
+    // The carried token rides along (#1417) and is CHECKED against that spelling rather than
+    // trusted: the two cases where it is the wrong key — a mount-routed target, whose
+    // delivery link is the mount's and not the arrival's, and the `caller` fallback — are
+    // exactly the ones the name compare inside rejects, so neither can silently un-index the
+    // edges #943 and #1071 fixed.
+    if (s.remote)
+        index_link_vertex(s.remote->link.empty() ? s.remote->caller : s.remote->link, link_token,
+                          v);
     note_subscriber_added(v);  // RFC-0005: descendants' writes now bubble here
     if (slot) {
         // RFC-0009 §D.1 replace: the SAME door, so the SUBSCRIBE gate above and the latch
@@ -2641,7 +2765,8 @@ void graph_t::configure_wire_target_resolver(wire_target_fn_t fn, void* ctx) noe
 }
 
 result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view_t source_view, view_t return_route,
-                                       std::string link, view_t reverse_route, std::string caller) {
+                                       std::string link, view_t reverse_route, std::string caller,
+                                       link_id_t link_token) {
     vertex_t* v = vh.get();
     // The route is this door's precondition, not an optional extra (#1055). Every edge this
     // door admits carries a link, and `dispatch_edge` gates its remote leg on that link while
@@ -2727,7 +2852,7 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view_t source_view, v
                                             // (#81/ADR-0026), not the delivery one
     // A wire subscribe carries no host handle back — discard the slot (unsubscribe is the
     // wire :subscribers[N] clear, not this door's return).
-    if (const auto r2 = admit_subscriber(v, std::move(s), gate_ctx); !r2)
+    if (const auto r2 = admit_subscriber(v, std::move(s), gate_ctx, std::nullopt, link_token); !r2)
         return std::unexpected(r2.error());
     return {};
 }
