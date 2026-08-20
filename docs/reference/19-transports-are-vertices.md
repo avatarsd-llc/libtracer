@@ -231,9 +231,11 @@ creation.
 ### 7. The config vocabulary is not yet self-describing
 
 Uniform introspection covers the liveness value and the children, but not the *creation
-catalog*: `:schema`-as-catalog on the creator endpoint is RFC-0014 S3 and is not implemented,
-and `conn` is still enumerated alongside the member connections (S4). So a creator today
-must know a kind's config keys out of band, from the
+catalog*: `:schema`-as-catalog on the creator endpoint is RFC-0014 S3 and is not implemented.
+Worse than absent — the endpoint is hidden from the module's `:children[]` (S4), so §6's
+`read <module>/conn:schema` probe is the *only* sanctioned way to find it, and that probe
+currently answers the generic whole-vertex `:schema` (an EMPTY `SETTINGS`) rather than the
+module's catalog. So a creator today must know a kind's config keys out of band, from the
 [connection-config module page](../modules/connection-config.md), rather than by reading the
 endpoint. Stated plainly because it is the one place the "everything is in the graph" claim
 does not yet reach.
