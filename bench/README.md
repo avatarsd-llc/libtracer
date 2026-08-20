@@ -991,11 +991,120 @@ Bytes at rest, 8 vertices — and these are the SHIPPED index's bytes, per the o
    worth on a user-pinned arena.
 
    That ~6x is itself worth recording: it is not the index (whose whole contribution is
-   ~13 ns), so a subscribe on this path gets steadily dearer with peer count for reasons this
-   bench localises but does not explain. It is a larger effect than the one #1266 is about.
+   ~13 ns). It is a larger effect than the one #1266 is about, and it is
+   [explained below](#where-the-whole-subscribe-growth-goes-1436).
 
 Diagnostic, **not** a `perf.yml` gate: the arms are four spellings in one binary, not two
 builds, and nothing here is banked to the perf store.
+
+#### Where the whole-subscribe growth goes (#1436)
+
+The `sub-wire` column above grows ~6x across the sweep and the table alone does not say why —
+which is what #1436 asked. It is **not** the index, **not** the TLV decode, **not** the ACL
+gate and **not** the RFC-0005 listener bubble. It is `vertex_t::try_publish_edges`, and the
+axis it grows on is not the link count as such but **the number of subscriber edges already
+live on the vertex being subscribed to**.
+
+That distinction is the first thing the sweep itself proves. `sub-wire` is measured at 8 and
+at 32 vertices with the link count held against both, and the two columns agree to ~5 % at
+every point (2461 ns vs 2676 ns at 65 links). Four times the vertices, four times the edges in
+the graph, no change. What *does* change is that one pass installs one edge per (link, vertex)
+pair, so a vertex ends the pass holding `links` edges — and each admission is charged for the
+ones already there.
+
+**How it was measured.** Two instruments, because they answer different halves.
+`valgrind --tool=callgrind --collect-atstart=no --toggle-collect='*run_cell*'` gives exact,
+deterministic, host-noise-free instruction attribution, and the toggle collects the latency
+path only — `calibrate` and `--ram` never reach `run_cell`, so the calibration pass executes
+uncounted. `--links=` / `--verts=` restrict the run to one grid cell so the three profiles are
+of one cell each rather than of the whole sweep. `perf record -e cycles:u` then cross-checks
+that the instruction attribution is also the *cycle* attribution, which matters here because
+the term under suspicion is allocator traffic and instruction counts flatter it.
+
+```sh
+# the curve, one cell at a time (390 / 798 / 2461 ns p50 at 4 / 16 / 65 links, 8 vertices)
+taskset -c 2 ./bench/build/bench_subscribe_index --arms=sub-wire --links=65 --verts=8 --rounds=3
+
+# who it is, exactly
+valgrind --tool=callgrind --collect-atstart=no --toggle-collect='*run_cell*' \
+  --callgrind-out-file=cg.65 \
+  ./bench/build/bench_subscribe_index --arms=sub-wire --links=65 --verts=8 --rounds=1
+callgrind_annotate --inclusive=yes --tree=both cg.65
+
+# and that it is cycles, not just instructions
+taskset -c 2 perf record -F 4999 -e cycles:u -- \
+  ./bench/build/bench_subscribe_index --arms=sub-wire --links=65 --verts=8 --rounds=20
+```
+
+`--links=` / `--verts=` refuse a value that is not on the swept axis rather than inventing an
+off-curve cell, and they leave the default sweep — the one `run_subscribe_index.sh` drives —
+untouched. `run_cell` is `[[gnu::noinline]]` for the same reason the toggle names it: at `-O3`
+it was inlined into `main`, and the first profiling attempt collected zero events.
+
+Callgrind, instructions retired per subscribe, 8 vertices, inclusive of callees, g++ 13.3.0
+`-O3`, `e376ba78`:
+
+| depth | node | @4 links | @16 | @65 | Δ(65−4) | share of Δ |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 0 | `graph_t::subscribe_wire` | 5 493 | 10 960 | 37 933 | +32 440 | 100 % |
+| 1 | `graph_t::admit_subscriber` | 3 285 | 8 691 | 35 514 | +32 230 | 99.4 % |
+| 2 | `vertex_t::add_edge` | 2 356 | 7 622 | 33 041 | +30 685 | **94.6 %** |
+| 3 | `vertex_t::try_publish_edges` | 1 388 | 4 717 | 23 699 | +22 311 | **68.8 %** |
+| 4 | — of it: `link` + `caller` string copies | 611 | 2 528 | 10 663 | +10 052 | 31.0 % |
+| 4 | — of it: nothrow `operator new` (`pub_remote_t`) | 623 | 1 244 | 9 044 | +8 420 | 26.0 % |
+| 3 | `scan_retired_edges` (the matching frees) | 565 | 2 093 | 8 572 | +8 008 | **24.7 %** |
+| 2 | `graph_t::index_link_vertex` | 560 | 700 | 2 105 | +1 545 | 4.8 % |
+| 1 | `tr::wire::decode` | 850 | 851 | 852 | +2 | 0.0 % |
+| 1 | `parse_subscriber_tlv` | 351 | 376 | 474 | +123 | 0.4 % |
+| 2 | `graph_t::acl_allows` | 28 | 28 | 28 | 0 | 0.0 % |
+| 2 | `graph_t::notify_subscription` | 26 | 26 | 26 | 0 | 0.0 % |
+| 2 | `bump_subtree_listeners` (RFC-0005) | 4 | 4 | 4 | 0 | 0.0 % |
+
+`perf` agrees in cycles at 65 links: `try_publish_edges` 25.6 % self, `scan_retired_edges`
+15.2 %, `_int_malloc` 17.2 %, `malloc_consolidate` 10.1 %, `malloc` 4.1 %, `unlink_chunk`
+3.3 %, the two `std::string` legs 4.5 % — ~82 % of user cycles in the republish, its frees and
+the allocator serving them. `subscribe_wire`'s own body is 0.97 % and
+`admit_subscriber`'s 0.45 %. At 4 links the same profile is flat and broad (decode 5.8 %,
+`segment_ptr_t::reset` 7.8 %, `try_publish_edges` 13.8 %): the term does not dominate until
+the fan-out is wide.
+
+**The mechanism, in one paragraph.** #635 made the dispatch side of a vertex an immutable
+published array (`edge_pub_t`) that a publisher copies out under an edge pin with no lock, so
+every control-plane mutation must publish a WHOLE NEW array and retire the old one. Appending
+the k-th subscriber therefore rebuilds k+1 entries and destroys k. That much is arithmetic.
+What makes each of those entries expensive is that a REMOTE edge's cold half is deep-copied:
+`try_publish_edges` does `new (std::nothrow) pub_remote_t` plus `try_assign` of the `link` and
+`caller` strings **per pre-existing entry, per admission**, and `scan_retired_edges` frees all
+of them again. The call counts say it exactly — at 65 links, 14 264 admissions issue 928 528
+string assignments (2 per entry × 32.6 mean entries) and 478 528 nothrow `operator new`s (1 per
+entry). Measured per pre-existing edge per admission: **~940 instructions**, of which the
+rebuild loop's own body is ~119 and the retire scan's own body ~39.
+
+**Verdict: the O(n) walk is inherent; ~83 % of its constant is not.** The walk is a real
+obligation — an immutable published array cannot be appended to in place, and #635 bought
+lock-free fan-out with exactly this trade. The deep copy is not: on a republish every
+pre-existing entry's cold half is byte-identical to the one being retired, and the slot never
+mutates `remote->` after admission (every reference in `graph.cpp` and `vertex.hpp` is a
+read). A refcount-shared immutable cold half would make the per-entry cost a pointer copy and
+an increment — the same move `target_key_t` already made one field over, and for the same
+reason its doc-comment gives ("a malloc + free per edge per delivery"). Taking ~940 down to
+~158 instructions per entry would cut the 65-link cell to roughly a third and flatten the
+slope ~6x.
+
+It is deliberately **not** done here. `subscriber_t` and `subscriber_remote_t` carry pinned
+`sizeof` assertions (80 B / 120 B), `pub_edge_t`'s width was measured at **+23 % on the
+fan-out-1024 publish** when it last grew, and a `std::shared_ptr` would widen both — so the
+shape has to be an intrusive 8-byte refcount, on the dispatch hot path, under the #477 nothrow
+discipline. That is a core refactor with its own measurement, not a rider on a profiling run.
+It is filed as #1442; this section is the profile that justifies it.
+
+**Two things this finding is bounded by.** It applies to REMOTE (wire) subscriptions only —
+`try_publish_edges` skips the cold half outright for an in-process edge (a null `remote`), so a
+purely local graph pays the array rebuild and none of the allocator traffic.
+And the bench's link names are half short (`p0`, `p2`, …) and half over the SSO boundary
+(`192.168.4.N:9000`, 16 chars), which is why only ~half the string assignments reach the
+allocator — a deployment naming links `host:port` sits on the expensive side of that by
+default.
 
 ### `bench_forward_rope` — the rope forward hop, and what its A/A null is worth (#1358)
 
