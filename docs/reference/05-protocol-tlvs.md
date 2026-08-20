@@ -389,6 +389,145 @@ the body. Both are `input.bin` cases, not `reject.bin` ones: decode must succeed
 is not where the rule lives. They replace `path/path-value-children-illegal`, retired with
 RFC-0018 — a packed record has no type byte, so a mistyped child is unrepresentable.
 
+### Path label element (escape `kind = 0x16`) — routing semantics
+
+The layout above is what a **LABEL** element *is*; this is what a host does with one
+([RFC-0027](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0027-label-switched-path-compression.md)
+§§4–8, accepted 2026-08-15, implemented). It is a compression of **one hop's own local part** of
+an address, never a new address form: a `PATH` carrying a label element is still a `0x06`, and the
+canonical spelling of the same address is what minted it and what a failure falls back to.
+
+**There is no `PATH_LABEL` type code.** The element is the escape record of §Constraints above —
+`00 <u8 kind = 0x16> <u8 len = 4> <u32 LE>`, 7 bytes — and `0x16`–`0x1F` stay **unassigned** in the
+type-code registry (§reserved range). The escape `kind` space and the TLV type space are different
+namespaces that happen to share a number; RFC-0027's candidate 8-byte TLV-child spelling was ruled
+and then never built (its amendments 4 and 5).
+
+**The value.** `u32` little-endian, `(u16 slot index, u16 generation)` — bits 0–15 the index, bits
+16–31 the generation. The index is a **slot in the minting host's own label table**, handed out at
+mint time and bounds-checkable against the table's cardinality; it is **never a content hash**,
+because a hash collision is a mis-delivery and this doc set closes that class by construction
+rather than by digest width. A generation of `0` means *no label*: it is never carried by a minted
+element, and an element carrying it is a well-formed LABEL whose value is invalid — refused at
+deref, not at decode.
+
+**Node-scoped, and an address rather than a capability.** A label means something **only on the
+host that minted it**. A host MUST NOT interpret a label it did not mint, and MUST NOT relay a
+label of its own into a part of the path another host reads.
+
+**One label covers a whole local part.** A hop's local part is its entire mount run
+(`net/<module>/<name>`, however many segments), and one label stands for all of it — never one
+label per segment. Granularity is per hop, so mixed granularity across a route is legal.
+
+**Mixed paths are legal and expected.** A `PATH` MAY carry any mixture of NAME and LABEL elements,
+in any order; there is no "fully minted" state a path must reach. A hop that does not implement
+this mechanism, or that declines to mint, leaves its own part spelled in names and every other
+hop's part still compacts.
+
+#### Minting — passive, on the reply, and never load-bearing
+
+There is **no advertise, no request flag, no setup exchange and no control frame of any kind**. A
+minting host emits exactly the frames it emits today, with some path elements spelled differently:
+
+- Each forwarding hop resolves its local part canonically on the way out, exactly as today.
+- On the way **back**, a minting hop relaying a reply prepends its own local part to that reply's
+  `src`, spelled as one label element. The reply's `src` is the only region that survives to the
+  origin — the reply's `dst` is consumed hop by hop, and appending a trailing accumulation is
+  refused by the "replaces, never appends" rule. RFC-0004 §B's *"a reply accumulates no return
+  route"* is therefore narrowed to **non-minting** hops, which is every host that does not inject a
+  table (RFC-0027 §6.1 erratum 2).
+- A **terminus** does the same for the residual it resolved: at a terminus the reply's `src` region
+  *is* that residual, so the rewrite is a literal substitution and the frame gets **shorter**.
+- The rewrite **replaces** string bytes and never appends, measured against the string spelling of
+  the same part — 7 bytes against the 13 of the shipped `net/<module>/<name>` mount run.
+
+**The trigger is a fact already in hand, never a prediction.** A forwarding hop mints on the first
+reply it relays over a child; a terminus mints on the first terminated operation per child. **No
+use counters, no hit thresholds, no hotness estimate, no timers, no aging.** Minting is
+**post-auth only**: a host MUST NOT mint for a part of a path the requesting peer could not have
+reached canonically in the same operation, so probing the labelled spelling yields what probing the
+string spelling yields — *exists + denied*, never *exists + here is a handle to it*.
+
+**A mint is never load-bearing.** A host MUST behave correctly when no label is ever minted
+anywhere on a route. A refusal to mint, a retired slot, an exhausted table and a hop that does not
+implement the mechanism at all are **one case** — the string path — and none of them is an error, a
+NACK, or observable on the wire.
+
+#### Dereference and failure — `NOT_FOUND`, then the string the sender still holds
+
+On receipt of a labelled element a host bounds-checks the index against its own table, compares the
+generation, and authorizes at the dereferenced vertex — the same three steps, in the same order, a
+`PATH_REF` element takes (§`0x14` §routing semantics). Every labelled operation **MUST** evaluate
+the access check at the dereferenced vertex for that operation's own right, **exactly as the string
+form does**: a generation match says the vertex is the same one, never that the caller may still
+act on it, and a label holds no authorization state, so a revoked right takes effect on the very
+next operation over an already-minted label. Conformance carries the paired
+[`acl/label-vs-string-allow`](https://github.com/avatarsd-llc/libtracer/tree/main/tests/conformance/vectors/v1/acl/label-vs-string-allow)
+and [`acl/label-vs-string-deny`](https://github.com/avatarsd-llc/libtracer/tree/main/tests/conformance/vectors/v1/acl/label-vs-string-deny)
+asserting the two spellings agree byte for byte, allowed and denied alike.
+
+A host that receives a label it cannot validate — out of range, generation mismatch, unminted slot,
+a label it did not mint — **MUST NOT** forward it, **MUST NOT** apply the operation, and **MUST
+NOT** attempt any repair of its own: no re-resolution against a nearest match, no retry against a
+different slot, no guessing. It **MUST** answer a `NOT_FOUND`-class error (`tr::path::not_found`):
+an unresolvable address is exactly what that error already means, and a label is an address. No new
+frame is needed and none is defined.
+
+**There is no fall-through to the canonical walk**, and this is where a labelled element differs
+from a bound subscriber edge, which does fall through: the label **replaced** the string bytes, so
+there is nothing left to walk and a fall-through would amount to inventing an address. The sender's
+recovery is the full-string path it still holds, re-minted from the next reply — one failed
+operation is the entire cost.
+
+**Staleness is the generation, and nothing else.** When the vertex a label resolves to departs —
+retirement, connection-vertex removal, link teardown — the minting host bumps that slot's
+generation, and the label the peer holds compares unequal. Generations only move forward, so a
+stale label never becomes valid by waiting. A generation **MUST NOT** wrap: on saturation it stops
+advancing and the slot is **retired permanently**, removed from the mintable set for the lifetime
+of the table and never minted into again. The rule is invisible on the wire — it is a constraint on
+what a minting host may do with its own table — and it is what closes the mis-delivery class a
+wrapped generation would reopen, identically to §`0x14`'s rule for a vertex ref.
+
+**No withdraw protocol, no aging.** There is no withdraw frame, no unbind, no lease and no TTL. A
+label is not retired by its holder and not expired by its minter; it simply stops validating, and
+the next frame discovers that.
+
+#### The table — injected, ceilinged, refuse-new, and off by default
+
+The label table is the **per-hop state** this mechanism knowingly buys, and it is bounded by an
+injected resource rather than a library-chosen capacity: it draws from the embedder's net-plane
+store ([ADR-0079](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md)),
+carries a **per-peer ceiling** so one peer cannot consume it, and on exhaustion **refuses new
+mints** — it does not evict, does not grow, and does not fail the operation. **Live labels are
+never evicted by pressure**: an established label is not a cache entry, and reclaiming one would
+turn a bounded-resource problem into a stream of avoidable `NOT_FOUND` round trips on flows that
+were working.
+
+**Minting is opt-in and off by default.** A node with no injected table never enters the label
+branch: it mints nothing, its parts travel as the strings they travel as today, and a peer that
+presents it a label gets the `NOT_FOUND` above. That default is deliberate and measured — the
+per-hop saving is a **wide-node** property (it arrives with registry width and is not claimed at
+all on a narrow node), while the terminus-residual saving is what the mechanism banks; RFC-0027
+§3.4 carries both figures and the scope limit.
+
+**One compression per address.** A host SHOULD NOT mint a path label into an address already
+spelled as a `PATH_REF` (§`0x14`), and SHOULD NOT bind a `PATH_REF` over an already-labelled path.
+Two compressions of one address buy one address's worth of saving and two staleness surfaces.
+
+**Optionality.** Emitting and accepting labelled elements are both optional. A host that implements
+neither still relays a frame carrying one, by stepping over the escape record by its declared
+length (§Enforcement above) — which is why the element is self-delimiting and why the node least
+likely to mint pays only the skip.
+
+Conformance vectors:
+[`path-label/label-roundtrip`](https://github.com/avatarsd-llc/libtracer/tree/main/tests/conformance/vectors/v1/path-label/label-roundtrip),
+`label-mixed`, `label-multi-segment`, `label-foreign-kind` and the negative `label-wrong-length`
+(a declared length that is not 4 makes the address unspellable ⇒ `tr::path::invalid`, the resolver's
+answer, since the packed body is codec-opaque); `fwd/fwd-label-mint-reply`,
+`fwd/fwd-label-terminus-reply`, `fwd/fwd-label-terminus-deref` and the negatives `fwd/fwd-label-stale`,
+`fwd/fwd-label-terminus-stale`; and the ACL pair above. Every existing vector is byte-unchanged: a
+`PATH` with no label element is byte-identical to today's.
+
 ### Where it appears
 
 - Inside SUBSCRIBER as `target_path`.
@@ -997,7 +1136,11 @@ Allocated on a fast-track basis during v1. Assigned so far:
 - `0x14` **PATH_REF** — the **bound path**, the second normative address form ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §4, below).
 - `0x15` **PATH_REF_REVERSE** — the **reverse-direction bound-path list** a mint-flagged request accumulates ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §7.1 amendment 2, below). `0x14`'s body grammar exactly; a different role.
 
-Unassigned: `0x16`–`0x1F`. Candidate uses: `CAPABILITY` (opaque token, lighter than full ACL), `HEARTBEAT` (an explicit liveness ping; the intended alternative is writes to the `:liveness.last_seen_ns` field, [04-communication-flows.md](04-communication-flows.md) — ⚠️ which is itself unimplemented, so *neither* spelling exists today, [#586](https://github.com/avatarsd-llc/libtracer/issues/586)). Receivers MUST handle unknown codes in this range per the forward-compatibility rules of [01-data-format.md](01-data-format.md) §forward / backward compatibility.
+Unassigned: `0x16`–`0x1F`. **`0x16` is unassigned as a *type code* and taken as an *escape kind***
+— RFC-0027's path-label element is `kind = 0x16` inside a packed `PATH` body (§`0x06` §path label
+element), which is a different namespace that happens to share the number. Assigning TLV `0x16`
+would not collide, but a reader meeting `16` in a `PATH` body is meeting the escape kind, not this
+registry. Candidate uses: `CAPABILITY` (opaque token, lighter than full ACL), `HEARTBEAT` (an explicit liveness ping; the intended alternative is writes to the `:liveness.last_seen_ns` field, [04-communication-flows.md](04-communication-flows.md) — ⚠️ which is itself unimplemented, so *neither* spelling exists today, [#586](https://github.com/avatarsd-llc/libtracer/issues/586)). Receivers MUST handle unknown codes in this range per the forward-compatibility rules of [01-data-format.md](01-data-format.md) §forward / backward compatibility.
 
 A single-hop `FWD` request → reply round-trip (the consumer reaches a terminus node directly). The reply's `dst` is the request's `src`; a failure comes back as `kind=ERROR` carrying `STATUS{ ERROR }`:
 

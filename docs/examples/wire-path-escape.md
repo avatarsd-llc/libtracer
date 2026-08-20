@@ -24,11 +24,12 @@ prefix still implies an ancestor.
   it might pass the wrong way round.
 - **The frame is still well-formed.** The escape-bearing `PATH` decodes cleanly — it is a
   *valid frame* that is *not a key*. Those are different verdicts and the example asserts both.
-- **`kPackedEscapeKindLabel` (`0x16`) is reserved, not in use.** It is the kind
+- **`kPackedEscapeKindLabel` (`0x16`) is a kind this layer never mints.** It is the kind
   [RFC-0027](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0027-label-switched-path-compression.md)
-  assigns to its path-label element. RFC-0027 is accepted, but **nothing in the library mints a
-  label today**; `packed_path.hpp` stays kind-agnostic by design, and emitting an escape is not
-  minting one. An escape only reaches this node because a peer put it there.
+  uses for its path-label element, and RFC-0027 is implemented — but minting lives in the
+  forwarder and only on a node given a mint table (off by default), never here:
+  `packed_path.hpp` stays kind-agnostic by design, and emitting an escape is not minting a label.
+  In this example the escape is simply bytes that arrived.
 - **Nothing here is conditional** — the target builds and runs under every CI leg.
 
 ## Source
