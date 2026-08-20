@@ -39,30 +39,74 @@ SLOTS="${5:-64}"
 COUNT="${COUNT:-200000}"
 WINDOW_MS="${WINDOW_MS:-6000}"
 
+# THE A/A NULL IS AN ARM, NOT A POST-HOC ESTIMATE. `B2-null` is a byte-for-byte duplicate of
+# `B-sentinel` — same K = 0, same binary, same pool, same transport — rotated through the same
+# interleave. The B-sentinel-vs-B2-null spread at a given (vertices, payload, slot) cell IS the
+# instrument's null, and no pinning-arm delta narrower than it may be quoted. It has to be an
+# in-band arm here because collate_pin.py's paired sign test covers only the store-leg table:
+# RESULT_PINNET carries no round index, so the net table is unpaired min/med/max and per-round
+# pairing is unavailable on this leg.
+#
+# D16 exists because the predicate is `payload * K >= segment_bytes`. At slot = 1024 a 512 B
+# payload pins from K >= 2, but a 64 B payload needs K >= 16 — without D16 the 64 B sweep would
+# have NO arm that pins below C-pin-always and its D-rows would be vacuous.
+#
 # arm : K
 ARMS=(
     "B-sentinel:0"
+    "B2-null:0"
     "D2:2"
     "D4:4"
     "D8:8"
+    "D16:16"
     "C-pin-always:4294967295"
 )
 
 VERTEX_SET="${VERTEX_SET:-1 8 32 128}"
 
 port=47300
+
+# One (subscriber, publisher) pair, RETRIED on a failed bind.
+#
+# A full sweep is rounds x |VERTEX_SET| x |ARMS| pairs and burns two UDP ports each, so it wraps
+# the port window several times and eventually lands on one the kernel has not released. That
+# used to abort the whole sweep under `set -e` mid-round, silently truncating the transcript to
+# a partial rotation — the arms are interleaved, so a truncated run is also an UNBALANCED one.
+# Retrying on the next port keeps the rotation balanced; five consecutive failures is a host
+# problem and still stops the run loudly.
+#
+# Both ends are checked. A subscriber that failed to bind is dead within the settle sleep, and
+# a publisher that failed to bind would otherwise leave the subscriber to run its whole window
+# and emit a zero-delivery row that looks like starvation but is a bind error.
+run_cell() {
+    local label="$1" k="$2" V="$3" subpid
+    for _ in 1 2 3 4 5; do
+        port=$((port + 2)); [ "$port" -gt 48900 ] && port=47300
+        "$BIN/bench_pin_net" sub "$port" "$k" "$PAYLOAD" "$SLOT" "$SLOTS" \
+            "$WINDOW_MS" "$V" "$label" &
+        subpid=$!
+        sleep 0.25
+        if ! kill -0 "$subpid" 2>/dev/null; then
+            wait "$subpid" || true          # subscriber bind failed; next port
+            continue
+        fi
+        if ! "$BIN/bench_pin_net" pub "$port" "$PAYLOAD" "$COUNT" "$V" >/dev/null; then
+            kill "$subpid" 2>/dev/null || true
+            wait "$subpid" || true          # publisher bind failed; discard the pair
+            continue
+        fi
+        wait "$subpid" && return 0
+    done
+    echo "run_pin_net: $label V=$V could not bind after 5 attempts" >&2
+    return 1
+}
+
 for ((r = 0; r < ROUNDS; ++r)); do
     for V in $VERTEX_SET; do
         n=${#ARMS[@]}
         for ((j = 0; j < n; ++j)); do
             IFS=: read -r label k <<<"${ARMS[$(((r + j) % n))]}"
-            port=$((port + 2)); [ "$port" -gt 47900 ] && port=47300  # dodge TIME_WAIT reuse
-            "$BIN/bench_pin_net" sub "$port" "$k" "$PAYLOAD" "$SLOT" "$SLOTS" \
-                "$WINDOW_MS" "$V" "$label" &
-            subpid=$!
-            sleep 0.25
-            "$BIN/bench_pin_net" pub "$port" "$PAYLOAD" "$COUNT" "$V" >/dev/null
-            wait "$subpid"
+            run_cell "$label" "$k" "$V"
         done
     done
 done

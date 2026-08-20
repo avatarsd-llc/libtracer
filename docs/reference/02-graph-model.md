@@ -548,6 +548,42 @@ more vertices stay extension-less than before RFC-0022**. A vertex allocates the
 STREAM, carries a handler, holds app fields or an `:acl` — or when its owner declares one of the
 two magnitudes on it, which is the only case storage itself pays for.
 
+#### The pin is a BORROW, and the application owns the budget
+
+`K` is the surface on which an application declares *whether borrowing is permitted at all*, so
+what the borrow costs belongs here rather than in a footnote:
+
+**A pinned value borrows its inbound RX segment for its whole lifetime.** Not for the delivery
+window — for as long as it remains the vertex's last-known value. On a pooled RX backend that
+borrow is a **pool slot**, i.e. receive capacity, unavailable to the transport until the value is
+displaced or the vertex dies. The library makes the deferred release *safe* — segment refcounts
+are atomic, so a borrow outliving the receive frame is never a use-after-free — but the library
+does not, and cannot, bound the *budget*: only the application knows its pool geometry and its
+retention pattern. This is the same division as the embedder-driven `collect()` idiom and the
+same Stage-2 posture as user-pinned memory ([09](09-memory-substrate.md)): the library guarantees
+safety, the embedder decides when and whether.
+
+The quantity to size against is therefore **`live pinned values × segment_bytes`**. `K` bounds
+the waste *per value*; it never bounds the *number* of values, so **no value of `K` is a remedy
+for a retain-heavy workload** — a workload that retains twenty pinned values holds twenty
+segments at every `K` that pins it at all. That is measured, not argued: at the ESP32-C6 RX
+geometry (1 KiB slots, 24 slots) every pinning arm — `K` ∈ {2, 4, 8, 16, ∞} — drove a 29-slot
+pool to a free-slot floor of **0** with ~10⁶ dropped datagrams the moment the live vertex count
+crossed the slot count, while the sentinel arm held a floor of 28 and zero drops across the same
+sweep ([`bench/README.md` §"RFC-0022 §6 — receive-pool occupancy"](https://github.com/avatarsd-llc/libtracer/blob/main/bench/README.md)).
+
+Class guidance, which is also why the shipped default is the sentinel on **both** targets:
+
+| class | posture | why |
+| ---- | ---- | ---- |
+| **NARROW** | set the sentinel — never pin | a fixed, small RX pool cannot fund an indefinite borrow; same off-by-default-on-NARROW posture as the [RFC-0027](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0027-label-switched-path-compression.md) label table |
+| **MID / WIDE** | may borrow freely | the pool is large relative to the retained set, and the borrow *is* the zero-copy latency win |
+
+Note the asymmetry this exposes: latency is bought per *write*, but the RAM is paid per *retained
+value*. A vertex that is written constantly and read constantly borrows one slot; a config vertex
+written once at boot borrows one slot **forever**. Long-held vertices are the ones to leave on
+the sentinel, whatever the class.
+
 ### Owner-declared application fields (`settings.app`)
 
 The `app` key is **reserved inside the vertex `SETTINGS` namespace** ([05 §`0x0B`](05-protocol-tlvs.md)): the protocol MUST never mint a QoS or machinery knob named `app`, and everything below `settings.app.` is **owner-defined** — names, nesting, and value bytes are the application's, opaque to the runtime. This is the substrate for the device-private half of the field discipline ([ADR-0021](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0021-colon-field-plane-is-the-vertex-ioctl.md) rule 3: fields are standard *and* device-private, like ioctls — the protocol owns the addressing, the device owns the catalog of what each field accepts):

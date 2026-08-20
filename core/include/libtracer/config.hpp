@@ -236,6 +236,28 @@ struct default_config_t {
      * to 0 and its predicate required `> 0`). RFC-0022 §8 Q3 was answered by §6's measurement
      * (Amendment 2, PR #771): the sentinel is the landing default on BOTH targets — the
      * on-by-default flip does not land.
+     *
+     * @section pin_borrow The borrow is APP-OWNED policy, and this constant is the decision surface
+     *
+     * A pinned value **borrows** its inbound RX segment for its whole lifetime — not for the
+     * delivery window, for as long as the value is the vertex's last-known value. On a pooled RX
+     * backend that borrow is a **pool slot**, i.e. receive capacity, unavailable to the transport
+     * until the value is displaced or the vertex dies. The library makes the deferred release
+     * *safe* — atomic segment refcounts, so a borrow outliving the recv frame is never a
+     * use-after-free — but nothing in the library bounds the *budget*, and nothing can: only the
+     * application knows its pool geometry and its retention pattern.
+     *
+     * So the quantity to size against is `live pinned values x segment_bytes`. `K` bounds the
+     * waste per value; it does **not** bound the number of values, which is why no `K` is a
+     * remedy for a retain-heavy workload — measured, see `bench/README.md` §"RFC-0022 §6 —
+     * receive-pool occupancy": at the ESP32-C6 RX geometry every `K` that pins at all collapsed a
+     * 29-slot pool identically once the live vertex count crossed the slot count.
+     *
+     * Target-class guidance, and the reason the shipped value is the sentinel on both:
+     * - **NARROW** — set the sentinel. A fixed, small RX pool cannot fund an indefinite borrow;
+     *   the same off-by-default-on-NARROW posture as the RFC-0027 label table.
+     * - **WIDE / MID** — may borrow freely; the pool is large relative to the retained set, and
+     *   the borrow is the zero-copy latency win.
      */
     static constexpr std::uint32_t kPinPayloadRatio = 0;
 

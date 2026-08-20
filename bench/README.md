@@ -35,6 +35,8 @@ for a local `preview.html` of the same charts.
 | `bench_path_label` | **RFC-0027 §12.4's normative gate**: what a minted **path label** saves per hop, as a slope over hop count and over registry width, and what it saves on the TERMINUS RESIDUAL against address depth — clause 2's axis, the one §3.3 nominates as deciding. See [the RFC-0027 gate](#bench_path_label--the-rfc-0027-124-gate-1325-car-5). |
 | `bench_forward_rope` | **the forward hop over a MULTI-LINK ROPE** (`on_frame_rope`, ADR-0053 §5), swept over link count — the only bench that instantiates `rope_cursor`, the specialisation `symbol_ratchet.json` pins. Diagnostic, not gated; quote it only off a quiescent host — see [its A/A null](#bench_forward_rope--the-rope-forward-hop-and-what-its-aa-null-is-worth-1358). |
 | `bench_rx_source_topology` | **RX failable-source topology**: T receive threads forwarding rope frames through a shared heap, one shared pool, or one pool per child — the measurement behind [ADR-0067](../docs/adr/0067-bounded-recycling-source-and-per-owner-topology.md) §3. |
+| `bench_pin_ratio` (`run_pin_ratio.sh`) | **RFC-0022 §6, the LATENCY half**: the WRITE store leg over a (payload × segment) grid, every `K` arm rotating inside ONE process. Answered §8 Q3 → Amendment 2 (the on-by-default flip does not land). Collated by `collate_pin.py`. |
+| `bench_pin_net` (`run_pin_net.sh`) | **RFC-0022 §6, the RAM half**: two processes over real UDP, deliveries counted by the RECEIVER, receiver backed by a **bounded RX pool** whose free-slot floor and `dropped_rx()` are the occupancy instrument. Sweeps the live-vertex count across the slot count — the axis on which a pin's borrow starves receive. See [receive-pool occupancy](#bench_pin_net--rfc-0022-6-receive-pool-occupancy-760). |
 
 ### `bench_forward_heap` — the 16KB-RAM zero-heap forward gate (ADR-0038)
 
@@ -445,6 +447,107 @@ per-child tracks the heap within run-to-run spread. Peak slab is reported on std
 Diagnostic, **not** a `perf.yml` gate, for the same reason as the two storms above. Run it
 at least three times before drawing a conclusion — a single run of this workload showed a
 27 % single-thread pool win that three runs deleted.
+
+### `bench_pin_net` — RFC-0022 §6 receive-pool occupancy (#760)
+
+```sh
+cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
+cmake --build bench/build --target bench_pin_net -j
+python3 bench/host_guard.py wait
+VERTEX_SET="1 8 24 32 48" COUNT=200000 WINDOW_MS=6000 \
+  bash bench/run_pin_net.sh bench/build 12 512 1024 24 > /tmp/pinnet-512.tsv
+VERTEX_SET="1 8 24 32 48" COUNT=200000 WINDOW_MS=6000 \
+  bash bench/run_pin_net.sh bench/build 12 64  1024 24 > /tmp/pinnet-64.tsv
+python3 bench/collate_pin.py /tmp/pinnet-512.tsv /tmp/pinnet-64.tsv
+```
+
+RFC-0022 §6 recorded a hazard it declared out of scope: pinning refcounts the **inbound receive**
+segment, so a long-held value holds a receive buffer for as long as it lives, and on a small fixed
+pool that is receive capacity gone for the value's lifetime. #760 is that hazard, and the
+maintainer ruling gated its fix — copy-on-retain — on this measurement: build the relocate-on-
+retain mechanism **iff** realistic workloads starve the pool *even under* the sentinel posture the
+library ships.
+
+**Geometry is taken, not invented.** `slot = 1024`, `slots = 24` are the ESP32-C6 profile's own RX
+pool constants (`integrations/esp-idf/examples/pin_bench/main/app_main.cpp`, `kSlotBytes`/`kSlots`
+— "deliberately small: that is §6's premise"). `pool_t` carves 29 slots from the slab the bench
+sizes from them, which is the `pool slots` column. **The vertex count is the RAM axis**: one
+STORED_VALUE vertex holds one value, so pinning it holds one slot however large the segment; the
+held quantity is `live pinned values × segment_bytes`. `VERTEX_SET` therefore spans the slot count
+— below it the pool absorbs the borrow, above it the transport must refuse datagrams.
+
+#### The A/A null, quoted first
+
+`collate_pin.py`'s paired sign test covers only the **store-leg** table; `RESULT_PINNET` carries no
+round index, so the net table is unpaired min/med/max and per-round pairing is unavailable on this
+leg. The null is therefore an **in-band duplicate arm**: `B2-null` is byte-for-byte `B-sentinel`
+(same `K = 0`, same binary, same pool, same transport) rotated through the same interleave, and the
+`B-sentinel`-vs-`B2-null` spread per cell *is* the instrument's null.
+
+| verts | payload B | `B-sentinel` med d/s | `B2-null` med d/s | spread | free-slot floor S/N | rx drops S/N |
+| ---: | ---: | ---: | ---: | ---: | :---: | :---: |
+| 1 | 64 | 107 946 | 106 312 | −1.5 % | 28 / 28 | 0 / 0 |
+| 1 | 512 | 103 556 | 98 894 | −4.5 % | 28 / 28 | 0 / 0 |
+| 8 | 64 | 108 776 | 109 240 | +0.4 % | 28 / 28 | 0 / 0 |
+| 8 | 512 | 109 974 | 101 688 | −7.5 % | 28 / 28 | 0 / 0 |
+| 24 | 64 | 99 658 | 105 824 | +6.2 % | 28 / 28 | 0 / 0 |
+| 24 | 512 | 109 676 | 99 746 | **−9.1 %** | 28 / 28 | 0 / 0 |
+| 32 | 64 | 107 600 | 108 032 | +0.4 % | 28 / 28 | 0 / 0 |
+| 32 | 512 | 107 430 | 108 952 | +1.4 % | 28 / 28 | 0 / 0 |
+| 48 | 64 | 106 818 | 104 694 | −2.0 % | 28 / 28 | 0 / 0 |
+| 48 | 512 | 110 430 | 104 212 | −5.6 % | 28 / 28 | 0 / 0 |
+
+So: **±9.1 % on delivered throughput; exactly 0 on the free-slot floor and 0 on rx drops.** No
+throughput delta narrower than 9.1 % may be quoted off this instrument. The RAM axis, by contrast,
+has a null of *zero* — twenty identical cells, floor 28 and drops 0 in every one — which is what
+makes it the discriminating axis rather than the throughput column.
+
+#### What the run says
+
+12 interleaved rounds × 5 vertex counts × 7 arms × 2 payloads = 840 process pairs, 60 balanced
+cells per arm, on a quiescent host (`host_guard.py wait`: load 0.77–1.35 against a bar of 7.75 on
+31 CPUs; no orphaned busy-loops).
+
+| leg | arm(s) | result |
+| --- | --- | --- |
+| **1 — does the shipped posture starve?** | `B-sentinel`, `K = kPinNever` | **No.** Free-slot floor **28 / 29** and **zero** rx drops at *every* vertex count to 48, both payloads; ~100 k deliveries/s throughout. `pins = 0`, so no RX slot is ever retained by a stored value — the ADR-0041 one-copy trailer-sliced store branch, by construction. |
+| **2 — can the instrument redden?** | `C-pin-always`, `D16`, `D2`/`D4`/`D8` @ 512 B | **Yes, violently.** All report `pins > 0`. Floor decays 28 → 27 (1 vertex) → 20 (8) → **4** (24) → **0** (32 and 48), and at 32 vertices delivery collapses from ~107 k/s to **72/s** with **~10⁶** dropped datagrams. |
+| **3 — is the ratio bound the remedy?** | the `D` sweep at fixed payload | **No.** At 512 B *every* `K` that pins — 2, 4, 8, 16, ∞ — produces the identical collapse (floor 0, ~10⁶ drops, 348 delivered over 12 rounds) at 32 and 48 vertices. Exactly RFC-0022 Amendment 2: "every `K` that pins the deployed workload collapses the pool identically". |
+
+The 64 B rows make the predicate legible on their own: `payload × K ≥ segment` means a 64 B payload
+needs `K ≥ 16` at a 1 KiB slot, so `D2`/`D4`/`D8` **never pin** there and track the sentinel exactly
+(floor 28, zero drops) while `D16` collapses with the rest. `K` is doing precisely what RFC-0022
+§3.D says it does — bounding waste *per value* — and precisely nothing about the *number* of
+retained values, which is the quantity that empties the pool.
+
+The collapsed cells are worth reading exactly: **348 delivered over 12 rounds is 29 per round, the
+pool's whole capacity.** The pool fills once, every slot is borrowed by a live pinned value, and
+the transport never receives again — not degraded throughput, a **latched** dead node. That is the
+failure mode #760 named, reproduced at the C6 geometry, and it is why the borrow is documented as
+an occupancy budget rather than as a performance trade.
+
+**Verdict: the gate PASSES on the sentinel arm, so copy-on-retain is NOT built.** The shipped
+posture (`config_t::kPinPayloadRatio = kPinNever` on both targets) already bounds occupancy, and
+the deliverable is the borrow contract in the docs — see
+[02 §"The pin is a BORROW, and the application owns the budget"](../docs/reference/02-graph-model.md).
+The failing arms are the evidence for the class guidance, not a defect: they are what a deployment
+that sets a non-sentinel `K` on a retain-heavy NARROW node is buying.
+
+#### Two properties of the runner worth knowing
+
+**Reachability is measured as an OUTCOME.** The `pins`/`copies` columns come from segment-pointer
+identity between the stored value and the segments `recording_pool_t` handed out — available with
+or without `LIBTRACER_PIN_INSTRUMENT` (which is `ON` by default here and arms the decision-site
+counters separately). An arm that intends to pin and reports zero pins **invalidates its own row**;
+that check is not optional, and a Leg-1 pass proves nothing without it.
+
+**Bind failures are retried, not fatal.** A full sweep burns two UDP ports per pair and wraps the
+port window several times, so it will eventually land on a port the kernel has not released. That
+used to abort the sweep mid-round under `set -e` — and because the arms are interleaved, a
+truncated transcript is also an **unbalanced** one. `run_cell` now retries on the next port (five
+consecutive failures still stops the run loudly) and checks *both* ends, since a publisher that
+failed to bind would otherwise leave the subscriber to emit a zero-delivery row that reads as
+starvation but is a bind error.
 
 ### `bench_path_label` — the RFC-0027 §12.4 gate (#1325 car 5)
 
