@@ -31,7 +31,7 @@ A fourth copy is bounded rather than structural: reply-route synthesis (`tlv_sli
 `core/src/fwd_reply.hpp:109`) emits rewritten route wires — tens of bytes, never
 payload-scaled.
 
-The 4096-byte decode arena (`core/src/graph.cpp:1929`) is **structure storage, not a payload copy**:
+The 4096-byte decode arena (`core/src/graph.cpp:2044`) is **structure storage, not a payload copy**:
 it backs the `arena_tlv_t` node array and the grammar walk stacks, whose existence is independent
 of where the field bytes come from. The rope cursor is a byte source, so it does not remove the
 arena; only a streaming decode does, and that **relocates** the bytes from stack to pool rather
@@ -84,16 +84,16 @@ identifiers for the rest of this page.
 | # | Site | Single-link? | Multi-link? | Kind | Removed by the rope cursor? |
 |---|------|:--:|:--:|---------|---------|
 | ① | Ingress ownership — `flatten` (`core/src/rope.cpp:41`), pull-path `read_exact` into the accepted segment (`core/src/transport_tcp.cpp:304`) | yes (it *is* the recv) | yes | Structural | No — orthogonal; it is the ingress floor |
-| ② | Branch write — `value.try_materialize(*value_backend_)` (`core/src/graph.cpp:1911-1916`) | no — refcount bump | yes (one flatten to feed the span cursor) | Fallback | Multi-link leg: yes, via a rope-native branch decode |
-| ③ | Field write — the twin of ② (`core/src/graph.cpp:2248`) | no — refcount bump | yes | Fallback | Same as ② |
-| ④ | 4096-byte decode arena (`core/src/graph.cpp:1929-1930`) | yes — paid on every branch write | yes | Structure scratch, not a payload copy | **No** — see §3; the rope cursor is a byte source, not a structure store |
+| ② | Branch write — `value.try_materialize(*value_backend_)` (`core/src/graph.cpp:2026-2031`) | no — refcount bump | yes (one flatten to feed the span cursor) | Fallback | Multi-link leg: yes, via a rope-native branch decode |
+| ③ | Field write — the twin of ② (`core/src/graph.cpp:2363`) | no — refcount bump | yes | Fallback | Same as ② |
+| ④ | 4096-byte decode arena (`core/src/graph.cpp:2044-2045`) | yes — paid on every branch write | yes | Structure scratch, not a payload copy | **No** — see §3; the rope cursor is a byte source, not a structure store |
 | ⑤ | `own_wire` mutation ownership — `sub.flatten(backend())` (`core/src/op_resolve_view.cpp:141`) | no — a single link is still COPIED, through the same backend (`core/src/op_resolve_view.cpp:151`, #793) | yes — flattens the multi-link subrope | Structural for *mutated* values | No — this step *is* the ownership copy; it still owns |
 | ⑥ | Per-node parse contiguity — `ensure_cache` → `wire().materialize(backend())` (`core/src/op_resolve_view.cpp:253-259`) | no — a single-link node adopts | only per **straddling** node | Fallback, span-node-shaped | Yes — rope-native node accessors remove it |
 | ⑦ | `deliver_rope` span fallback (`core/include/libtracer/receiver_slot.hpp:143`) | no | yes — only when no rope sink is installed; a refused materialize now DROPS the frame rather than handing the sink an empty span (#917) | Fallback — the cost of a span-only sink | Yes — installing the rope sink removes it; see §4.1 |
 | ⑧ | WS RX reassembly — `asm_buf_t` regrow-and-memcpy (`integrations/esp-idf/libtracer/httpd_ws_link.cpp`) | no — unfragmented delivers borrowed (scratch-backed, no per-frame alloc for fitting frames) | yes — O(n²) across fragments | Fallback | Enables ⑦'s removal; the copy itself is a pool-recv question, not a cursor one |
 | ⑨ | WS TX gather — memcpy into a pooled tx work slot in `queue_send` (`integrations/esp-idf/libtracer/httpd_ws_link.cpp`; `new (nothrow)` only for an oversize payload — an exhausted pool drops and counts, #949) | copy per frame per peer; alloc only on the oversize arm | yes | Structural within the `esp_http_server` seam | **No** — TX-side; the cursor is irrelevant |
-| ⑩ | COMPACT remote delivery — `deliver_remote` (`core/src/fwd_router.cpp:2929`, materialize at `:2967`, from the router's injected backend) | no — adopt | yes — auto-promotion leg only | Fallback, narrow | Yes — a scatter-gather compact encoder |
-| ⑪ | Control-child strip — `on_control_rope` (`core/src/fwd_router.cpp:2381`, sub-rope materialize at `:2398` and `:2365`, from the router's injected backend) | no | only a multi-link ADVERTISE / COMPACT sub-rope | Fallback, and fused rather than eliminated — the next consumer re-encodes anyway | Yes, with a near-zero saving |
+| ⑩ | COMPACT remote delivery — `deliver_remote` (`core/src/fwd_router.cpp:2993`, materialize at `:3031`, from the router's injected backend) | no — adopt | yes — auto-promotion leg only | Fallback, narrow | Yes — a scatter-gather compact encoder |
+| ⑪ | Control-child strip — `on_control_rope` (`core/src/fwd_router.cpp:2445`, sub-rope materialize at `:2462` and `:2429`, from the router's injected backend) | no | only a multi-link ADVERTISE / COMPACT sub-rope | Fallback, and fused rather than eliminated — the next consumer re-encodes anyway | Yes, with a near-zero saving |
 | ⑫ | Reply-route synthesis — `tlv_sliced` (`core/src/fwd_reply.hpp:109`, called at `core/src/fwd_reply.cpp:139-140`) | yes | yes | Bounded frame synthesis: the route wires are rewritten | No — these are emitted bytes, not a copy of payload |
 
 On the single-link path the only copies that fire are ① (the recv floor), ④ (the structure arena),
@@ -109,25 +109,25 @@ migration is therefore insurance against fragmented-transport load, not a single
 ### 3.1 Two costs at one site
 
 ```
-core/src/graph.cpp:1911   const std::expected<view_t, tr::view::flatten_err_t> head =    // A: the flatten
-core/src/graph.cpp:1912       value.try_materialize(*value_backend_);
-core/src/graph.cpp:1914   head.error() == NO_MEMORY ? BACKPRESSURE : TYPE_MISMATCH       //    (paraphrased)
-core/src/graph.cpp:1929   std::array<std::byte, 4096> stack;                             // B: the arena
-core/src/graph.cpp:1930   mem::bump_source_t src(stack, *ctl_);
-core/src/graph.cpp:1932   wire::decode_into(head->bytes(), src);
+core/src/graph.cpp:2026   const std::expected<view_t, tr::view::flatten_err_t> head =    // A: the flatten
+core/src/graph.cpp:2027       value.try_materialize(*value_backend_);
+core/src/graph.cpp:2029   head.error() == NO_MEMORY ? BACKPRESSURE : TYPE_MISMATCH       //    (paraphrased)
+core/src/graph.cpp:2044   std::array<std::byte, 4096> stack;                             // B: the arena
+core/src/graph.cpp:2045   mem::bump_source_t src(stack, *ctl_);
+core/src/graph.cpp:2047   wire::decode_into(head->bytes(), src);
 ```
 
-**Cost A, the flatten (`:1911`)** is zero-copy for a single-link rope — `try_materialize` returns
+**Cost A, the flatten (`:2026`)** is zero-copy for a single-link rope — `try_materialize` returns
 `links()[0]`, a refcount bump (`core/include/libtracer/rope.hpp:219`) — and memcpys only a
 multi-link rope, drawing from the injected `value_backend_`. An exhausted pool is refused by name:
-`graph.cpp:1914` reads `flatten_err_t::NO_MEMORY` and surfaces `BACKPRESSURE` rather than letting
+`graph.cpp:2029` reads `flatten_err_t::NO_MEMORY` and surfaces `BACKPRESSURE` rather than letting
 the decoder read an empty head back as a malformed value, and a DEVICE-link value — which no retry
 makes CPU-decodable — takes the `TYPE_MISMATCH` arm instead. Before #917 both arrived as the same
 empty view and the site had to guess from `head.empty() && total_length() != 0`. Because ingress
 values are single-link until the rope-native branch decode lands, Cost A does not fire on
 single-link traffic. It is a fallback.
 
-**Cost B, the arena (`graph.cpp:1929`)** is the `std::array<std::byte, 4096>` backing `decode_into`'s node
+**Cost B, the arena (`graph.cpp:2044`)** is the `std::array<std::byte, 4096>` backing `decode_into`'s node
 array (`std::pmr::vector<arena_tlv_t>`) plus the grammar walk stack and the open-node stack. It is
 structure-only scratch, allocated on every branch write regardless of link count, on the deepest
 thread — the httpd/WS receive task.
@@ -179,8 +179,8 @@ deep receive task.
 A stack budget for that task counts four such buffers, not one. The decode arena is the only one
 this document covers; the other three are transport receive and chunk scratch, each a 4096-byte
 `std::array` — `core/src/transport_tcp.cpp:261` (the backpressure drain),
-`core/src/transport_ws.cpp:736` (the WS client's receive loop), and
-`core/src/posix_endpoint.cpp:654` — the ONE per-chunk scratch both multi-peer servers now
+`core/src/transport_ws.cpp:734` (the WS client's receive loop), and
+`core/src/posix_endpoint.cpp:652` — the ONE per-chunk scratch both multi-peer servers now
 share, since #871 folded their duplicated poll loops into `slot_server_t::service_peer` (it
 was two buffers, one apiece, before that). They are not decode arenas and carry no structure,
 but they occupy the same frames and none of the four has a measured per-task high-water.
@@ -192,7 +192,7 @@ therefore sizes the task at `kRequiredHttpdStack = 12288`
 (`integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:193` — a PUBLIC constant
 since #955, because only the port-binding ctor can apply it and an adopting embedder must size the
 task itself; the 8 KB the deep path was measured overflowing is the other half of the same
-measurement, at `integrations/esp-idf/libtracer/httpd_ws_link.cpp:89`, and the 4 KB platform
+measurement, at `integrations/esp-idf/libtracer/httpd_ws_link.cpp:78`, and the 4 KB platform
 default is named at
 `integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:52`). Against a 4096-byte
 default the arena is a full half of the frame, and it is the single largest consumer on the write
@@ -200,7 +200,7 @@ path. A 4 KB stack-high-water reclaim is the real saving even though total RAM i
 
 ### 3.4 Arena exhaustion
 
-The overflow leg does not draw from a throwing upstream. `core/src/graph.cpp:1929-1930` reads
+The overflow leg does not draw from a throwing upstream. `core/src/graph.cpp:2044-2045` reads
 
 ```
 std::array<std::byte, 4096> stack;
@@ -209,10 +209,10 @@ mem::bump_source_t src(stack, *ctl_);
 
 `bump_source_t` (`core/include/libtracer/mem_source.hpp:184`) carves from that stack buffer and,
 past it, falls back to the graph's injected control seam `ctl_`
-(`core/include/libtracer/graph.hpp:475`, `control_source()`), whose default is the NOTHROW heap
+(`core/include/libtracer/graph.hpp:476`, `control_source()`), whose default is the NOTHROW heap
 source. Capability is unchanged — a branch tree larger than the slab still decodes — and
 **exhaustion is a value, not an abort**: the write soft-fails as `TYPE_MISMATCH`
-(`core/src/graph.cpp:1933`), which is *not* `BACKPRESSURE` — this decode cannot distinguish "the
+(`core/src/graph.cpp:2048`), which is *not* `BACKPRESSURE` — this decode cannot distinguish "the
 value did not parse" from "the arena ran out" and does not try, so the block seam's reject belongs
 to the operation rather than to the seam. A bounded node that injects its own control source gets
 the arena overflow drawn from that store too. No node-counting pre-pass exists, and none is
@@ -233,24 +233,24 @@ exhaustion is representable. The general failable-allocation contract is
 - `check_frame` and `validate_rope` (`core/src/rope_decode.cpp:32`, `:46`) validate structure and
   CRC straight over a rope.
 - The lazy `tlv_view_t` tier walks children one header at a time off a refcounted subrope.
-- `on_control_rope` / `peek_control` (`core/src/fwd_router.cpp:2381`, `:2332`) read a control frame's
+- `on_control_rope` / `peek_control` (`core/src/fwd_router.cpp:2445`, `:2396`) read a control frame's
   label off the rope and materialize only the sub-rope a re-encoding consumer needs contiguous
-  (`:2387`, `:2365`) — out of the router's injected `flat` backend, and a refused flatten drops the
+  (`:2451`, `:2429`) — out of the router's injected `flat` backend, and a refused flatten drops the
   frame rather than delivering an empty value (#730).
 - The FWD request terminus: `resolve_terminus_rope`
-  (`core/include/libtracer/fwd_router.hpp:1160-1168`) adopts a fragmented request as
+  (`core/include/libtracer/fwd_router.hpp:1295-1303`) adopts a fragmented request as
   `tlv_view_t::over(rope)` and resolves it through `op_resolver_t::resolve(tlv_view_t)`.
 
 The forward hop scatter-gathers a multi-link frame over the rope cursor with no flatten; the egress
 gathers each region's per-link sub-spans into a `block_array_t` drawn from the injected `rx_`, and
-exhaustion drops the frame rather than throwing (`core/include/libtracer/fwd_router.hpp:1219-1227`,
+exhaustion drops the frame rather than throwing (`core/include/libtracer/fwd_router.hpp:1354-1362`,
 [#596]).
 
 Two limits on that tier are load-bearing. First, **a single-link rope never reaches
 `resolve_terminus_rope`** — `on_frame_rope_impl` short-circuits it deliberately into the
-single-link view path (`core/src/fwd_router.cpp:1794`, the check at `:1799-1804`). Second, the tier earns its place only on large, lightly
+single-link view path (`core/src/fwd_router.cpp:1858`, the check at `:1863-1868`). Second, the tier earns its place only on large, lightly
 fragmented frames: at 64 KB across 2 links it is ~12% ahead of flatten-then-arena, and behind it
-everywhere smaller (`core/include/libtracer/fwd_router.hpp:1133-1136`, recorded as an erratum to
+everywhere smaller (`core/include/libtracer/fwd_router.hpp:1268-1271`, recorded as an erratum to
 [ADR-0053, lazy rope-backed decode view](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0053-lazy-rope-backed-decode-view-partial-path-routing.md)).
 That figure carries no host, sample count or spread in the source that records it, so it is a
 direction, not a budget.
@@ -259,8 +259,8 @@ Row ⑦ has changed shape rather than disappearing. The span fallback in
 `receiver_slot_t::deliver_rope` (`core/include/libtracer/receiver_slot.hpp:143`) still exists for a
 slot with no rope sink installed, but the router does not flatten on the reply path: a REPLY that
 reaches its originator is handed to the sink rope-native
-(`core/src/fwd_router.cpp:1858-1862`). The contract at
-`core/include/libtracer/fwd_router.hpp:557-561` states it — the router performs no decode and no
+(`core/src/fwd_router.cpp:1922-1926`). The contract at
+`core/include/libtracer/fwd_router.hpp:563-567` states it — the router performs no decode and no
 flatten, a rope-delivered reply reaches the sink zero-copy, a sink that wants contiguous bytes
 holds `const view_t m = reply.materialize()`, and only a multi-link reply pays one flatten, on
 demand. The escape hatch is the consumer's, not the router's.
@@ -337,7 +337,7 @@ flatten questions:
   feeding the rope tier an owned segment, let the branch and field decode collapse to refcount
   bumps once the sink is rope-native.
 - **WS reassembly (⑧)** regrows exact-size per fragment
-  (`integrations/esp-idf/libtracer/httpd_ws_link.cpp:589-599`), which is O(n²) in total bytes
+  (`integrations/esp-idf/libtracer/httpd_ws_link.cpp:578-588`), which is O(n²) in total bytes
   copied. Chaining each fragment as an owning rope link makes it O(n) owning copies — the CAN model,
   which is what the host `transport_ws.cpp` does.
 

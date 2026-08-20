@@ -34,8 +34,11 @@
  *  - `S-sentinel` — the CONTROL. The identical driver loop with the index call replaced by a
  *    barrier that consumes both operands. Every other arm's verdict is a paired per-round
  *    delta against this arm, so the loop, the name rotation and the clock are subtracted.
- *  - `idx-string` — TODAY'S SHAPE, transcribed line-for-line from `graph_t::index_link_vertex`
- *    and its two file-local helpers. A transcription arm is worth exactly its faithfulness,
+ *  - `idx-string` — THE HISTORICAL BASELINE: the string-keyed map `graph_t` shipped before the
+ *    carry landed (#1417), transcribed line-for-line from the `index_link_vertex` of that
+ *    revision and its two file-local helpers. Every saving this bench reports is quoted
+ *    against this column, and keeping it in-binary is what lets the old and new shapes be
+ *    compared under ONE layout. A transcription arm is worth exactly its faithfulness,
  *    so it is not tidied: the sorted-prefix/unsorted-tail membership test is written out
  *    rather than composed from `<algorithm>`, `kLinkIndexCompactFloor` keeps its value, and
  *    the transparent hash/equality pair is the one `graph.hpp` declares.
@@ -51,6 +54,36 @@
  *    @ref why_graph_only), so the graph must intern it itself: hash + find in a name→token
  *    map, then the vector index, then the identical insert. This arm exists to price that
  *    described shape rather than to argue about it.
+ *  - `idx-token-carry` — WHAT #1417 ACTUALLY PROPOSES TO SHIP, and unlike `idx-token` it
+ *    PAYS FOR OBTAINING THE TOKEN. See @ref carry.
+ *
+ * @section carry The carry arm, and why it is not the ceiling
+ *
+ * `idx-token`'s 104.0 B/link is a dense token-indexed vector THAT STORES NO KEY AT ALL. The
+ * shipped index cannot be that: the NAME door is load-bearing — `link_down(name)` and
+ * `evict_link_edges(name)` enter by name, and `integrations/esp-idf/tests/host/`
+ * `httpd_ws_departure_cost_test.cpp` calls `link_edge_candidates("p0")` on a bare `graph_t`
+ * with no router and no token at all. So the name has to be stored somewhere, and the naive
+ * carry — a dense vector PLUS a name→token map — is byte-for-byte the shape `idx-token-intern`
+ * already measured at 183.8 B/link, i.e. WORSE than today's 175.8.
+ *
+ * `idx-token-carry` therefore stores the name EXACTLY ONCE, in the dense slot itself, and
+ * deletes the map: one `pmr::vector<carry_slot_t>` indexed by token, plus a free list. The
+ * name door becomes a LINEAR SCAN over live slots — a path that runs once per peer hangup, not
+ * once per subscribe — and its cost is REPORTED (`RESULT_SIDX_DOOR`) rather than hidden.
+ *
+ * And the token is not free here. It is obtained through an INDIRECT CALL to a supplier that
+ * models both router tiers, which is the carry's real per-subscribe price:
+ *
+ *  - FLAT (a point-to-point child): one relaxed atomic load off a `child_rx_ctx_t`-shaped
+ *    struct — the resolved-once discipline that ctx's other cached fields already use.
+ *  - BUS (every WS session on the ESP node, and every CAN peer): a dense lookup by
+ *    `peer_handle_t::index` with a `generation` compare and a MISS BRANCH, because an
+ *    announce-census bus never fires `peer_up` and its peers must be minted lazily.
+ *
+ * Both are inside the timed window, so `idx-string − idx-token-carry` is a FORECAST where
+ * `idx-string − idx-token` is only a ceiling. The gap between the two columns is exactly what
+ * the indirect call plus the tier branch plus the token validation costs.
  *
  * A fifth arm, `sub-wire`, drives the LIVE `graph_t::subscribe_wire` so the index delta can be
  * read as a fraction of a whole remote subscribe rather than in isolation. It is reported
@@ -106,6 +139,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -124,6 +158,7 @@
 #include "libtracer/graph.hpp"
 #include "libtracer/packed_path.hpp"
 #include "libtracer/path.hpp"
+#include "libtracer/peer_handle.hpp"
 #include "libtracer/tlv.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/vertex.hpp"
@@ -393,6 +428,250 @@ class intern_index_t {
 };
 
 /**
+ * @brief The token `idx-token-carry` carries — a dense slot plus a validate-on-use stamp.
+ *
+ * NOT `link_id_t`: that one is the ceiling arm's bare subscript and is deliberately left
+ * unchanged, so #1416's three established columns stay byte-identical. This one is
+ * node-scoped and answers #1366's second objection directly — two links each minting
+ * `tr::net::kSolePeerHandle` get different `carry_id_t`s, because the graph mints it, not the
+ * link. A zero @ref generation is never live, so a default-constructed token always falls
+ * back to the name door.
+ */
+struct carry_id_t {
+    std::uint32_t slot = 0;       /**< @brief Dense slot in the token-keyed index. */
+    std::uint32_t generation = 0; /**< @brief Validate-on-use stamp; `0` is never live. */
+};
+
+/** @brief How many name characters live INSIDE a slot before it overflows. */
+constexpr std::size_t kInlineLinkNameChars = 19;
+
+/** @brief `carry_slot_t::len` sentinel for a name held in the overflow list. */
+constexpr std::uint8_t kOverflowNameLen = 0xFF;
+
+/**
+ * @brief One link's whole index record — the candidate list AND its name, stored ONCE.
+ *
+ * Sized to 64 bytes on purpose: `link_entry_t` (40) + the stamp (4) + a length byte + 19
+ * inline characters. The inline name is what makes the carry pay in RAM rather than merely
+ * in latency — a `std::pmr::string` here is 40 bytes of header before a single character is
+ * stored (measured; the polymorphic allocator is not empty), which would put the slot at 88
+ * and hand back most of the saving. 19 characters covers every name the transport plane
+ * actually mints (`p<slot>`, `n<node>`, `kPeerNameChars` tokens) and every dotted-quad
+ * `host:port` spelling; anything longer goes to @ref long_name_t, which costs nothing at all
+ * when it is empty.
+ */
+struct carry_slot_t {
+    link_entry_t e;                         /**< @brief The candidate list — shared shape. */
+    std::uint32_t generation = 0;           /**< @brief Bumped on release; `0` ⇒ never minted. */
+    std::uint8_t len = 0;                   /**< @brief Inline name length; `0` ⇒ dead slot,
+                                             *          @ref kOverflowNameLen ⇒ overflowed. */
+    char name[kInlineLinkNameChars] = {{}}; /**< @brief The link's ADMITTED-OVER spelling. */
+};
+
+static_assert(sizeof(carry_slot_t) == 64,
+              "the carry slot is one cache line, and that is the "
+              "whole RAM argument for the inline name");
+
+/** @brief A name too long for @ref carry_slot_t — rare, so a scanned list beats a map. */
+struct long_name_t {
+    std::uint32_t slot;    /**< @brief Which slot it belongs to. */
+    std::pmr::string text; /**< @brief The spelling. */
+};
+
+/**
+ * @brief A `child_rx_ctx_t`-shaped per-link router state — the SUPPLIER side of the carry.
+ *
+ * Deliberately drawn from the GLOBAL heap and not from the counted arena: the router's
+ * per-link state is not the graph's index, and charging it to `link_index_`'s footprint would
+ * flatter neither arm honestly.
+ */
+struct rx_ctx_shape_t {
+    /** @brief FLAT tier: the resolved-once token, read with one relaxed load — the same
+     *         discipline `child_rx_ctx_t`'s other cached fields already document. */
+    std::atomic<std::uint64_t> flat_token{0};
+    std::vector<std::uint64_t> bus_token; /**< @brief BUS tier: token bits by peer index. */
+    std::vector<std::uint32_t> bus_gen;   /**< @brief BUS tier: the handle stamp each slot holds. */
+    bool bus = false;                     /**< @brief Which tier this ctx is. */
+};
+
+/** @brief The supplier seam: `(router ctx, the frame's peer handle) → the link's token`. */
+using link_id_fn_t = carry_id_t (*)(void*, tr::net::peer_handle_t);
+
+/** @brief Pack a token into the one word a lock-free ctx cache can publish atomically. */
+[[nodiscard]] constexpr std::uint64_t pack_token(carry_id_t id) noexcept {
+    return (static_cast<std::uint64_t>(id.generation) << 32) | id.slot;
+}
+
+/** @brief The inverse of @ref pack_token. */
+[[nodiscard]] constexpr carry_id_t unpack_token(std::uint64_t bits) noexcept {
+    return carry_id_t{static_cast<std::uint32_t>(bits), static_cast<std::uint32_t>(bits >> 32)};
+}
+
+/**
+ * @brief The supplier thunk, modelling BOTH router tiers — the carry's real per-subscribe cost.
+ *
+ * `[[gnu::noinline]]` and reached through @ref g_link_id_supplier, because the whole point of
+ * this arm is that the token costs an INDIRECT CALL through a seam the compiler cannot see
+ * across. Letting GCC inline a known target here would price a carry nobody can build.
+ */
+[[gnu::noinline]] carry_id_t supply_link_id(void* c, tr::net::peer_handle_t peer) {
+    const rx_ctx_shape_t* const ctx = static_cast<const rx_ctx_shape_t*>(c);
+    if (!ctx->bus) return unpack_token(ctx->flat_token.load(std::memory_order_relaxed));
+    // The BUS tier's miss branch is not decoration: an announce-census CAN bus never calls
+    // `set_peer_up_notifier`, so its peers have no minted token and the index must fall back
+    // to the name door and mint lazily. Charging that branch here is what keeps this arm a
+    // forecast rather than a second ceiling.
+    if (peer.index >= ctx->bus_token.size()) return {};
+    if (ctx->bus_gen[peer.index] != peer.generation) return {};
+    return unpack_token(ctx->bus_token[peer.index]);
+}
+
+/**
+ * @brief The supplier, read through a `volatile` so the call site stays INDIRECT.
+ *
+ * A plain function pointer initialised in this translation unit is constant-propagated by
+ * GCC at `-O3`, which would delete the very indirection being measured. A volatile load
+ * cannot be folded, and it is paid once per driver construction rather than per operation.
+ */
+link_id_fn_t volatile g_link_id_supplier = &supply_link_id;
+
+/**
+ * @brief Arm `idx-token-carry` — the shape #1417 proposes, paying for the token (@ref carry).
+ *
+ * ONE structure, not two: a dense `pmr::vector<carry_slot_t>` addressed by the carried token,
+ * with the link's name stored inside the slot it belongs to. There is no map, no hash and no
+ * key copy anywhere in this class — the only name comparison is the linear scan the name door
+ * and the lazy mint run, and neither is on the subscribe path.
+ */
+class carry_index_t {
+   public:
+    /** @brief Construct over @p mr, which every slot, name and candidate list is drawn from. */
+    explicit carry_index_t(std::pmr::memory_resource* mr)
+        : mr_(mr), slots_(mr), free_(mr), long_names_(mr) {}
+
+    /** @brief Mint-or-find @p name's token — the LINK-UP door, never the subscribe one. */
+    [[nodiscard]] carry_id_t intern(std::string_view name) {
+        const std::lock_guard lock(m_);
+        return intern_locked(name);
+    }
+
+    /**
+     * @brief The carried form of `index_link_vertex`: validate the token, then the shared
+     *        insert.
+     *
+     * Three tests, transcribed from the shipped door: in range, the stamp matches, and the
+     * slot SPELLS the key. The third is what turns *"the caller must never carry the wrong
+     * token"* into *"carrying the wrong token cannot lose an edge"* — the two admissions
+     * whose key is not the arrival link (a mount-routed target, and the `caller` fallback
+     * #943 needs) both land on it, and #1071 exists to keep exactly those edges reachable.
+     * It is a handful of inline bytes against a `std::string_view` already in a register,
+     * and it is CHARGED to this arm rather than argued away.
+     */
+    void insert(carry_id_t id, std::string_view name, const cand_t v) {
+        if (name.empty()) return;  // the LOCAL spelling — no link teardown can ever name it
+        const std::lock_guard lock(m_);
+        if (id.slot >= slots_.size() || slots_[id.slot].generation != id.generation ||
+            slot_name(id.slot) != name) {
+            id = intern_locked(name);
+            if (id.generation == 0) return;
+        }
+        insert_candidate(slots_[id.slot].e, v);
+    }
+
+    /** @brief Distinct candidates recorded under @p id — the calibration oracle. */
+    [[nodiscard]] std::size_t candidates(carry_id_t id) {
+        const std::lock_guard lock(m_);
+        if (id.slot >= slots_.size() || slots_[id.slot].generation != id.generation) return 0;
+        return compacted_size(slots_[id.slot].e);
+    }
+
+    /**
+     * @brief THE NAME DOOR — distinct candidates recorded for @p name, found by linear scan.
+     *
+     * This is what `link_edge_candidates` / `link_candidates` become, and the trade the carry
+     * makes: a hash and a find per SUBSCRIBE become a scan per PEER HANGUP. Its cost is
+     * measured and reported (`RESULT_SIDX_DOOR`), never assumed away.
+     */
+    [[nodiscard]] std::size_t candidates_by_name(std::string_view name) {
+        const std::lock_guard lock(m_);
+        const std::uint32_t i = find_locked(name);
+        if (i == kNoSlot) return 0;
+        return compacted_size(slots_[i].e);
+    }
+
+   private:
+    /** @brief "No such slot" — also what an unminted token's scan answers. */
+    static constexpr std::uint32_t kNoSlot = 0xFFFFFFFFu;
+
+    /** @brief Fold the tail in and report the distinct count, as every name door does. */
+    [[nodiscard]] static std::size_t compacted_size(link_entry_t& e) {
+        if (e.vs.size() != e.compacted) {
+            compact_candidates(e.vs);
+            e.compacted = e.vs.size();
+        }
+        return e.vs.size();
+    }
+
+    /** @brief @p i's spelling — inline, overflowed, or empty for a dead slot. */
+    [[nodiscard]] std::string_view slot_name(std::uint32_t i) const {
+        const carry_slot_t& s = slots_[i];
+        if (s.len != kOverflowNameLen) return std::string_view(s.name, s.len);
+        for (const long_name_t& l : long_names_)
+            if (l.slot == i) return l.text;
+        return {};
+    }
+
+    /** @brief The slot holding @p name, or @ref kNoSlot. A dead slot's name is empty. */
+    [[nodiscard]] std::uint32_t find_locked(std::string_view name) const {
+        for (std::uint32_t i = 0; i < slots_.size(); ++i)
+            if (slot_name(i) == name) return i;
+        return kNoSlot;
+    }
+
+    /** @brief Give @p i the spelling @p name, inline when it fits. */
+    void name_slot(std::uint32_t i, std::string_view name) {
+        carry_slot_t& s = slots_[i];
+        if (name.size() <= kInlineLinkNameChars) {
+            std::memcpy(s.name, name.data(), name.size());
+            s.len = static_cast<std::uint8_t>(name.size());
+            return;
+        }
+        long_names_.push_back(long_name_t{i, std::pmr::string(name, mr_)});
+        s.len = kOverflowNameLen;
+    }
+
+    /** @brief @ref intern with the lock already held. */
+    [[nodiscard]] carry_id_t intern_locked(std::string_view name) {
+        if (name.empty()) return {};
+        if (const std::uint32_t i = find_locked(name); i != kNoSlot)
+            return carry_id_t{i, slots_[i].generation};
+        std::uint32_t i;
+        if (!free_.empty()) {
+            i = free_.back();
+            free_.pop_back();
+        } else {
+            // Grown to EXACTLY what is needed rather than doubled: this runs once per
+            // link-up, and the figure #1266 is judged on is bytes at rest in a user-pinned
+            // arena, where a doubling vector of 64-byte slots would hand back a fifth of the
+            // saving as slack.
+            if (slots_.size() == slots_.capacity()) slots_.reserve(slots_.size() + 1);
+            slots_.push_back(carry_slot_t{.e = {.vs = std::pmr::vector<cand_t>(mr_)}});
+            i = static_cast<std::uint32_t>(slots_.size() - 1);
+        }
+        carry_slot_t& s = slots_[i];
+        if (s.generation == 0) s.generation = 1;  // a fresh slot; released ones were bumped
+        name_slot(i, name);
+        return carry_id_t{i, s.generation};
+    }
+
+    mutable std::mutex m_;          /**< @brief The leaf lock the shipped index also takes. */
+    std::pmr::memory_resource* mr_; /**< @brief Where slots, names and lists are drawn from. */
+    std::pmr::vector<carry_slot_t> slots_;     /**< @brief Dense, token-indexed. THE structure. */
+    std::pmr::vector<std::uint32_t> free_;     /**< @brief Released slots awaiting reuse. */
+    std::pmr::vector<long_name_t> long_names_; /**< @brief Names past the inline bound. */
+};
+
+/**
  * @brief A `std::pmr::memory_resource` that counts what its upstream hands out.
  *
  * Bytes AT REST is the figure #1266 asks for, so `live_` is the headline and `peak_` is
@@ -476,6 +755,7 @@ enum class arm_t : std::uint8_t {
     IDX_STRING, /**< @brief Today's string-keyed index, transcribed. */
     IDX_TOKEN,  /**< @brief Interning with the token already in hand — the ceiling. */
     IDX_INTERN, /**< @brief The graph-only re-key: hash, then token. */
+    IDX_CARRY,  /**< @brief The carry as it would ship, PAYING for the token (@ref carry). */
     SUB_WIRE,   /**< @brief The live `graph_t::subscribe_wire` path, for proportion. */
 };
 
@@ -487,9 +767,9 @@ struct arm_spec_t {
 
 /** @brief The arm table, control first. */
 constexpr arm_spec_t kAllArms[] = {
-    {"S-sentinel", arm_t::SENTINEL}, {"idx-string", arm_t::IDX_STRING},
-    {"idx-token", arm_t::IDX_TOKEN}, {"idx-token-intern", arm_t::IDX_INTERN},
-    {"sub-wire", arm_t::SUB_WIRE},
+    {"S-sentinel", arm_t::SENTINEL},       {"idx-string", arm_t::IDX_STRING},
+    {"idx-token", arm_t::IDX_TOKEN},       {"idx-token-intern", arm_t::IDX_INTERN},
+    {"idx-token-carry", arm_t::IDX_CARRY}, {"sub-wire", arm_t::SUB_WIRE},
 };
 
 /** @brief The label of the control arm, repeated here so the collator and the bench agree. */
@@ -555,6 +835,9 @@ class driver_t {
                 break;
             case arm_t::IDX_INTERN:
                 i_index_ = std::make_unique<intern_index_t>(&mr, links);
+                break;
+            case arm_t::IDX_CARRY:
+                build_carry();
                 break;
             case arm_t::SUB_WIRE:
                 build_live_bodies();
@@ -623,6 +906,14 @@ class driver_t {
             case arm_t::IDX_INTERN:
                 i_index_->insert(names_[li], cands_[vi]);
                 break;
+            case arm_t::IDX_CARRY:
+                // The whole carry, priced: an INDIRECT call into the router-shaped supplier
+                // (which branches on its tier and, on the bus, compares a handle stamp),
+                // then the token validation, then the identical shared insert. Nothing here
+                // is assumed to be already in hand except the two things a terminus genuinely
+                // does hold — the frame's `peer_handle_t` and its `child_rx_ctx_t`.
+                c_index_->insert(supplier_(ctxs_[li], peers_[li]), names_[li], cands_[vi]);
+                break;
             case arm_t::SUB_WIRE:
                 live_step(li, vi);
                 break;
@@ -638,6 +929,8 @@ class driver_t {
                 return t_index_->candidates(ids_[li]);
             case arm_t::IDX_INTERN:
                 return i_index_->candidates(names_[li]);
+            case arm_t::IDX_CARRY:
+                return c_index_->candidates(tokens_[li]);
             case arm_t::SUB_WIRE:
                 return graph_ ? graph_->link_edge_candidates(names_[li]) : 0;
             case arm_t::SENTINEL:
@@ -646,7 +939,63 @@ class driver_t {
         return 0;
     }
 
+    /**
+     * @brief The NAME DOOR's answer for link @p li — what an eviction entering by name sees.
+     *
+     * Only the two arms that have a name door answer; the calibration checks they agree with
+     * what the token door says, which is the machine-checked form of #1366's first objection
+     * (*"the key belongs to EVICTION, not to subscribe"*).
+     */
+    [[nodiscard]] std::size_t candidates_by_name(std::size_t li) {
+        switch (arm_) {
+            case arm_t::IDX_STRING:
+                return s_index_->candidates(names_[li]);
+            case arm_t::IDX_CARRY:
+                return c_index_->candidates_by_name(names_[li]);
+            default:
+                return 0;
+        }
+    }
+
    private:
+    /**
+     * @brief Stand up the carry arm: intern every link at LINK-UP, then publish each token
+     *        into a router-shaped ctx of the tier that link would really belong to.
+     *
+     * Even links are BUS peers sharing ONE ctx (every WS session on the ESP node is a bus
+     * peer, and an announce-census CAN bus is the same shape) and odd links are point-to-point
+     * FLAT children with a ctx each. That split is not cosmetic: the 2026-08-14 ruling's
+     * `add_child`-only mint point was retired precisely because it covered the flat tier only,
+     * and an arm that priced one tier would repeat the mistake.
+     */
+    void build_carry() {
+        c_index_ = std::make_unique<carry_index_t>(mr_);
+        supplier_ = g_link_id_supplier;  // volatile read — keeps the call site indirect
+        bus_ctx_ = std::make_unique<rx_ctx_shape_t>();
+        bus_ctx_->bus = true;
+        ctxs_.assign(links_, nullptr);
+        peers_.assign(links_, tr::net::peer_handle_t{});
+        tokens_.assign(links_, carry_id_t{});
+        for (std::size_t li = 0; li < links_; ++li) {
+            tokens_[li] = c_index_->intern(names_[li]);
+            const std::uint64_t bits = pack_token(tokens_[li]);
+            if (li % 2 == 0) {
+                const auto pi = static_cast<std::uint32_t>(li / 2);
+                bus_ctx_->bus_token.resize(pi + 1, 0);
+                bus_ctx_->bus_gen.resize(pi + 1, 0);
+                bus_ctx_->bus_token[pi] = bits;
+                bus_ctx_->bus_gen[pi] = 1;
+                peers_[li] = tr::net::peer_handle_t{pi, 1};
+                ctxs_[li] = bus_ctx_.get();
+            } else {
+                flat_ctxs_.push_back(std::make_unique<rx_ctx_shape_t>());
+                flat_ctxs_.back()->flat_token.store(bits, std::memory_order_relaxed);
+                peers_[li] = tr::net::kSolePeerHandle;
+                ctxs_[li] = flat_ctxs_.back().get();
+            }
+        }
+    }
+
     /** @brief Pre-build the per-(link, vertex) SUBSCRIBER and per-link return-route bytes. */
     void build_live_bodies() {
         subs_.reserve(links_ * verts_);
@@ -693,6 +1042,14 @@ class driver_t {
     std::unique_ptr<string_index_t> s_index_; /**< @brief Arm `idx-string`. */
     std::unique_ptr<token_index_t> t_index_;  /**< @brief Arm `idx-token`. */
     std::unique_ptr<intern_index_t> i_index_; /**< @brief Arm `idx-token-intern`. */
+
+    std::unique_ptr<carry_index_t> c_index_;  /**< @brief Arm `idx-token-carry`. */
+    link_id_fn_t supplier_ = nullptr;         /**< @brief The seam the token is obtained over. */
+    std::unique_ptr<rx_ctx_shape_t> bus_ctx_; /**< @brief The one bus ctx every bus peer shares. */
+    std::vector<std::unique_ptr<rx_ctx_shape_t>> flat_ctxs_; /**< @brief One ctx per flat child. */
+    std::vector<void*> ctxs_; /**< @brief Per link — what `inbound.origin` is. */
+    std::vector<tr::net::peer_handle_t> peers_; /**< @brief Per link — what the frame carries. */
+    std::vector<carry_id_t> tokens_;            /**< @brief Per link, for the oracle only. */
 
     std::unique_ptr<graph_t> graph_;             /**< @brief Arm `sub-wire`'s live graph. */
     std::vector<vertex_handle_t> vertices_;      /**< @brief Its registered vertices. */
@@ -770,6 +1127,39 @@ struct ram_result_t {
     return out;
 }
 
+/**
+ * @brief What ONE name-door lookup costs, in picoseconds — the carry's side of the trade.
+ *
+ * REPORTED, NOT GATED. `idx-string` answers the door with a hash and a map find; the carry
+ * answers it with a linear scan over live slots. The scan is unambiguously the slower of the
+ * two and grows with link count, and pretending otherwise would be dishonest — but it runs
+ * once per PEER HANGUP where the thing it pays for runs once per SUBSCRIBE, so the trade is
+ * shown rather than hidden inside an aggregate.
+ */
+[[nodiscard]] std::uint64_t run_door(arm_t arm, std::size_t links, std::size_t verts) {
+    counting_resource_t mr;
+    driver_t d(arm, links, verts, mr);
+    constexpr std::size_t kDoorReps = 200;
+    std::uint64_t best = ~std::uint64_t{0};
+    for (std::size_t s = 0; s < kDoorReps; ++s) {
+        const std::uint64_t a = bench::now_ns();
+        std::size_t sink = 0;
+        for (std::size_t li = 0; li < links; ++li) sink += d.candidates_by_name(li);
+        const std::uint64_t window = bench::now_ns() - a;
+        asm volatile("" : : "r"(sink) : "memory");
+        best = std::min(best, window * kPsPerNs / links);
+    }
+    return best;
+}
+
+/** @brief `RESULT_SIDX_DOOR` — one name-door lookup's cost, in picoseconds. */
+void emit_door(const char* tag, const char* arm, std::size_t links, std::size_t verts,
+               std::uint64_t ps) {
+    std::printf("RESULT_SIDX_DOOR\t%s\t%s\t%zu\t%zu\t%llu\n", tag, arm, links, verts,
+                static_cast<unsigned long long>(ps));
+    std::fflush(stdout);
+}
+
 /** @brief `RESULT_SIDX` — one arm at one grid cell in one round. Own tag; see @ref reading. */
 void emit_sidx(int round, const char* tag, const char* arm, std::size_t links, std::size_t verts,
                const cell_result_t& r) {
@@ -822,30 +1212,43 @@ int calibrate() {
     counting_resource_t mr_s;
     counting_resource_t mr_t;
     counting_resource_t mr_i;
+    counting_resource_t mr_c;
     counting_resource_t mr_n;
     counting_resource_t mr_w;
     driver_t ds(arm_t::IDX_STRING, kL, kV, mr_s);
     driver_t dt(arm_t::IDX_TOKEN, kL, kV, mr_t);
     driver_t di(arm_t::IDX_INTERN, kL, kV, mr_i);
+    driver_t dc(arm_t::IDX_CARRY, kL, kV, mr_c);
     driver_t dn(arm_t::SENTINEL, kL, kV, mr_n);
     driver_t dw(arm_t::SUB_WIRE, kL, kV, mr_w);
 
-    // 1 + 2 — the three index arms agree, and agree at the value the warm-up should have
+    // 1 + 2 — the four index arms agree, and agree at the value the warm-up should have
     // produced (every vertex once, no duplicates), which is idempotency observed.
     for (std::size_t li = 0; li < kL; ++li) {
         expect("idx-string records every vertex exactly once", ds.candidates(li), kV);
         expect("idx-token agrees with idx-string", dt.candidates(li), ds.candidates(li));
         expect("idx-token-intern agrees with idx-string", di.candidates(li), ds.candidates(li));
+        expect("idx-token-carry agrees with idx-string", dc.candidates(li), ds.candidates(li));
+        // THE NAME DOOR — #1366's first objection, machine-checked. The carry arm keeps the
+        // key eviction enters by, and a name lookup must land on the SAME slot the token
+        // does. If these ever diverge the carry has un-indexed exactly the edges #1071 and
+        // #943 exist to keep reachable, and no latency figure below would be worth having.
+        expect("the carry's NAME door answers what its TOKEN door answers", dc.candidates(li),
+               dc.candidates_by_name(li));
+        expect("the carry's NAME door agrees with idx-string's", dc.candidates_by_name(li),
+               ds.candidates_by_name(li));
     }
     // A further full pass must move nothing — the idempotent early return, exercised.
     for (std::size_t i = 0; i < kL * kV; ++i) {
         ds.step();
         dt.step();
         di.step();
+        dc.step();
     }
     expect("a second pass adds no candidate (idx-string)", ds.candidates(0), kV);
     expect("a second pass adds no candidate (idx-token)", dt.candidates(0), kV);
     expect("a second pass adds no candidate (idx-token-intern)", di.candidates(0), kV);
+    expect("a second pass adds no candidate (idx-token-carry)", dc.candidates(0), kV);
 
     // 3 — the control is a floor, not a fifth index.
     expect("S-sentinel records nothing", dn.candidates(0), 0);
@@ -870,6 +1273,26 @@ int calibrate() {
                 ram_live ? "PASS" : "FAIL", mr_s.live(), mr_t.live());
     if (!ram_live) ++bad;
 
+    // 7 — the SHIPPED doors, exercised through the live arm: `graph_t::intern_link` is
+    // idempotent by NAME (the same-NAME redial property #1263 pinned), and a released slot's
+    // token stops validating. Checked here because the transcription arms can only show that
+    // the SHAPE has these properties; this shows the shipped code does.
+    {
+        counting_resource_t mr_g;
+        graph_t g(&mr_g);
+        const tr::graph::link_id_t a = g.intern_link("p0");
+        const tr::graph::link_id_t b = g.intern_link("p0");
+        expect("intern_link is idempotent by NAME (same-NAME redial, #1263)",
+               a == b && a.valid() ? 1 : 0, 1);
+        const tr::graph::link_id_t c = g.intern_link("p1");
+        expect("two links get two tokens (#1366 objection 2)", c != a && c.valid() ? 1 : 0, 1);
+        g.release_link(a);
+        const tr::graph::link_id_t d = g.intern_link("p2");
+        expect("a released slot is REUSED", d.slot == a.slot ? 1 : 0, 1);
+        expect("but its stamp moved, so the old token cannot inherit it",
+               d.generation != a.generation ? 1 : 0, 1);
+    }
+
     // 6 — THE FAITHFULNESS ORACLE, and it is the strongest check in this file.
     //
     // A `graph_t` built over an injected `std::pmr::memory_resource` draws NOTHING from it
@@ -879,17 +1302,27 @@ int calibrate() {
     // `link_index_` itself.
     //
     // Which means the live arm's byte count is the SHIPPED index's byte count, and the
-    // transcription arm can be checked against it directly rather than taken on trust. If
-    // `idx-string` ever stops reproducing `link_index_` byte-for-byte AND
-    // allocation-for-allocation, the transcription has drifted from the code it claims to
-    // transcribe, and every `idx-string - idx-token` figure in this bench is measuring
-    // something other than what it says. That is a refusal to report, not a footnote.
+    // transcription arm can be checked against it directly rather than taken on trust. If the
+    // arm that claims to be today's shape ever stops reproducing `link_index_` byte-for-byte
+    // AND allocation-for-allocation, the transcription has drifted from the code it claims to
+    // transcribe, and every figure in this bench is measuring something other than what it
+    // says. That is a refusal to report, not a footnote.
+    //
+    // WHICH ARM IS CHECKED MOVED WITH THE SHIPPED INDEX (#1417). Until the carry landed, the
+    // shipped shape was `idx-string` and it reproduced 746 / 23 @ 4 links, 1388 / 45 @ 8 and
+    // 11467 / 361 @ 65. The carry replaced the map with the dense slot vector this file's
+    // `carry_index_t` transcribes, so `idx-token-carry` is now the arm under oath and the
+    // numbers moved with it — 512 / 20, 1024 / 40, 8320 / 325. `idx-string` is retained
+    // deliberately and is now the HISTORICAL BASELINE: it is what `origin/main` shipped
+    // before this change, it is the column every saving in #1416's curve is quoted against,
+    // and keeping it in-binary is what lets the two shapes be compared under one layout.
     for (const std::size_t l : {std::size_t{4}, std::size_t{8}, std::size_t{65}}) {
-        const ram_result_t r_str = run_ram(arm_t::IDX_STRING, l, kV);
+        const ram_result_t r_carry = run_ram(arm_t::IDX_CARRY, l, kV);
         const ram_result_t r_live = run_ram(arm_t::SUB_WIRE, l, kV);
-        expect("idx-string reproduces the shipped link_index_ BYTE for byte", r_str.live,
+        expect("idx-token-carry reproduces the shipped link_index_ BYTE for byte", r_carry.live,
                r_live.live);
-        expect("idx-string reproduces it ALLOCATION for allocation", r_str.allocs, r_live.allocs);
+        expect("idx-token-carry reproduces it ALLOCATION for allocation", r_carry.allocs,
+               r_live.allocs);
     }
     return bad;
 }
@@ -901,6 +1334,7 @@ int main(int argc, char** argv) {
     int round0 = 0;
     bool do_calibrate = false;
     bool do_ram = false;
+    bool do_door = false;
     const char* tag = "A";
     std::vector<arm_spec_t> arms(std::begin(kAllArms), std::end(kAllArms));
 
@@ -916,6 +1350,8 @@ int main(int argc, char** argv) {
             do_calibrate = true;
         else if (a == "--ram")
             do_ram = true;
+        else if (a == "--door")
+            do_door = true;
         else if (a.rfind("--arms=", 0) == 0) {
             arms.clear();
             const std::string list = a.substr(7);
@@ -943,6 +1379,15 @@ int main(int argc, char** argv) {
             for (std::size_t verts : kVertexCounts)
                 for (std::size_t links : kLinkCounts)
                     emit_ram(tag, arm.label, links, verts, run_ram(arm.arm, links, verts));
+        return 0;
+    }
+
+    if (do_door) {
+        std::printf("# RESULT_SIDX_DOOR tag arm links verts ps_per_lookup\n");
+        for (const arm_t arm : {arm_t::IDX_STRING, arm_t::IDX_CARRY})
+            for (std::size_t links : kLinkCounts)
+                emit_door(tag, arm == arm_t::IDX_STRING ? "idx-string" : "idx-token-carry", links,
+                          kVertexCounts[0], run_door(arm, links, kVertexCounts[0]));
         return 0;
     }
 

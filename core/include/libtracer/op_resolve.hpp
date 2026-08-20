@@ -151,6 +151,55 @@ struct inbound_ref_t {
 };
 
 /**
+ * @brief The terminus's LINK-TOKEN supplier: `(ctx, the inbound identity) → the link's
+ *        interned `%tr::graph::link_id_t`` (#1266 / #1417).
+ *
+ * Declared at namespace scope rather than inside `op_resolver_t` — unlike its three sibling
+ * seams — because @ref link_token_seam_t below has to name it, and that struct is what the
+ * walk carries. `op_resolver_t::on_link_id` installs it.
+ *
+ * The supplier is expected to ANSWER FROM A CACHE it filled at link-up, not to compute
+ * anything: it is asked on the subscribe path, where the whole point is to spend a subscript
+ * instead of a hash. A default-constructed answer means "no token", which the index handles
+ * by interning the name exactly as it does today.
+ *
+ * @param ctx     The caller-owned context handed to `op_resolver_t::on_link_id`.
+ * @param inbound The request's inbound identity — `peer` is the handle whose link is wanted
+ *                and `origin` is the opaque per-link token the installer put there.
+ */
+using link_id_fn_t = link_id_t (*)(void* ctx, const inbound_ref_t& inbound);
+
+/**
+ * @brief The link-token seam as the resolve walk carries it — the `{fn, ctx}` pair plus the
+ *        identity it resolves.
+ *
+ * Bundled deliberately. The walk already threads two bare `{fn, ctx}` pairs and a third would
+ * make `resolve_node` and `apply_op` grow THREE parameters (the pair, plus the
+ * @ref inbound_ref_t the supplier needs and the walk otherwise flattens away into a bare
+ * link name). One trivially-copyable three-word struct with a "not installed" default keeps
+ * every existing call site and every existing default argument exactly where it was.
+ *
+ * @ref inbound points into the resolve's own stack frame and never outlives it.
+ */
+struct link_token_seam_t {
+    link_id_fn_t fn = nullptr;              /**< @brief The supplier, or null. */
+    void* ctx = nullptr;                    /**< @brief Its caller-owned context. */
+    const inbound_ref_t* inbound = nullptr; /**< @brief What to resolve; null ⇒ no token. */
+
+    /**
+     * @brief Ask for the token — the ONE place the seam is consulted.
+     *
+     * Called from the subscribe branch alone, so an un-installed seam costs one predictable
+     * branch on a path that is already building an owned SUBSCRIBER copy, and an installed
+     * one costs an indirect call per remote subscribe and nothing per frame.
+     */
+    [[nodiscard]] link_id_t ask() const {
+        if (fn == nullptr || inbound == nullptr) return {};
+        return fn(ctx, *inbound);
+    }
+};
+
+/**
  * @brief Resolves an arena-decoded FWD against a local graph and builds the FWD{REPLY} rope.
  *
  * Local-only (RFC-0004 / ADR-0035): no transport, no multi-hop forwarding, no
@@ -446,6 +495,32 @@ class op_resolver_t {
         path_label_ctx_ = ctx;
     }
 
+    /**
+     * @brief Install the terminus LINK-TOKEN supplier (null @p fn uninstalls) — #1266 /
+     *        #1417's carry.
+     *
+     * The seam that lets a remote subscribe reach the subscriber index by SUBSCRIPT instead
+     * of by name hash. The supplier is the transport plane's: it minted the link's
+     * `graph_t::intern_link` token when the link (or the bus peer) became audible and cached
+     * it in its own per-link receive context, which is what @ref inbound_ref_t::origin points
+     * at. PR #1416 measured the prize at 78–83 % of the index operation and 27 % of its bytes.
+     *
+     * ASKED LAZILY, at the subscribe branch and nowhere else. That is the load-bearing part
+     * of the contract: a control-plane saving paid on every terminus frame is what killed
+     * #1290's prototype, so unlike @ref subject_fn_t this one is NOT resolved once per
+     * resolve. A read, a write, an await and a forwarding hop never call it.
+     *
+     * An invalid answer is the conformant default and costs nothing but the lookup the index
+     * does today — no installed supplier, a peer the supplier has no token for, a census bus
+     * that never announced. So is a WRONG answer: the index verifies that the token's slot
+     * spells the key it is about to index under, so a supplier that confuses two links loses
+     * a subscript, not an edge.
+     */
+    void on_link_id(link_id_fn_t fn, void* ctx) noexcept {
+        link_id_fn_ = fn;
+        link_id_ctx_ = ctx;
+    }
+
    private:
     graph_t& graph_;
     mem::mem_backend_t* flat_ = &mem::heap_backend();    // rope-tier terminus flattens (#766)
@@ -456,6 +531,14 @@ class op_resolver_t {
     void* path_label_ctx_ = nullptr;             /**< @brief Its caller-owned context. */
     subject_fn_t subject_fn_ = nullptr;          // #375 Part 2 terminus subject derivation
     void* subject_ctx_ = nullptr;                /**< @brief Its caller-owned context. */
+    link_id_fn_t link_id_fn_ = nullptr;          // #1417 terminus link-token carry
+    void* link_id_ctx_ = nullptr;                /**< @brief Its caller-owned context. */
+
+    /** @brief The token seam as the walk carries it — the pair plus the identity it
+     *         resolves, bundled so `resolve_node` grows ONE parameter and not three. */
+    [[nodiscard]] link_token_seam_t link_token_seam(const inbound_ref_t& inbound) const noexcept {
+        return link_token_seam_t{.fn = link_id_fn_, .ctx = link_id_ctx_, .inbound = &inbound};
+    }
 
     /**
      * @brief Derive the operation's ACL subject from @p inbound — the ONE place the split

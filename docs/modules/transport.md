@@ -50,7 +50,7 @@ A transport that can hand up *owning* frames implements the rope-receiver seam
 view delivery](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md),
 generalized to ropes by [ADR-0053 — lazy rope-backed decode, view partial-path
 routing](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0053-lazy-rope-backed-decode-view-partial-path-routing.md)):
-it overrides `delivers_ropes()` (`core/include/libtracer/transport.hpp:621`) and
+it overrides `delivers_ropes()` (`core/include/libtracer/transport.hpp:620`) and
 delivers each inbound frame as a `rope_t` of refcounted links over segments drawn
 from a host-injected `mem_backend_t`. A contiguous frame is the single-link case; a
 scattered one — a CAN reassembly group, a fragmented WebSocket message — crosses the
@@ -61,8 +61,8 @@ the callback needs this tier.
 There is deliberately no adapter that wraps a borrowed span into a rope; such a rope's
 refcounts would lie about lifetime. `fwd_router_t::add_child` (`core/src/fwd_router.cpp:802`)
 therefore branches on the link's declared capability and installs exactly one sink —
-the rope form for an owning link, the span form otherwise (`fwd_router.cpp:957,850`, and
-`fwd_router.cpp:906,913` for the peer-named bus equivalent).
+the rope form for an owning link, the span form otherwise (`fwd_router.cpp:972,846`, and
+`fwd_router.cpp:910,917` for the peer-named bus equivalent).
 
 Every socket transport in the tree declares the owning tier: UDP
 (`transport_udp.hpp:111`), TCP client and server (`transport_tcp.hpp:218,409`),
@@ -76,7 +76,7 @@ and the tier an out-of-tree transport gets for free.
 A point-to-point link carries one peer, so the child NAME the router registers it
 under fully addresses the far side. A **bus** link reaches many peers over one wire
 and exposes them through the optional `bus_link_t` facet
-(`core/include/libtracer/transport.hpp:76`, [ADR-0044 — stateless transport peer
+(`core/include/libtracer/transport.hpp:75`, [ADR-0044 — stateless transport peer
 enumeration](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0044-stateless-transport-peer-enumeration-separate-paths-client-side-identity.md)):
 `enumerate_peers` synthesizes the currently-audible names from the wire's own live
 traffic, `peer_link` resolves one name to a directed sending endpoint, and
@@ -93,11 +93,11 @@ for a peer and no peer state is stored.
 `transport_t::bus()` returns the facet or `nullptr`. CAN always returns it
 (`transport_can.hpp:564`); the TCP and WebSocket **servers** return it when
 configured peer-named — one implementation, on the slot-server base both of them
-inherit (`posix_endpoint.hpp:692`); every other kind keeps the `nullptr` default.
+inherit (`posix_endpoint.hpp:675`); every other kind keeps the `nullptr` default.
 
 Whether a link's peer-named tier exists is one query, `bus_link_t::peer_named()`
-(`transport.hpp:193`): the constructed flag for the two stream servers
-(`posix_endpoint.hpp:708`), `true` by construction for a kind that is a bus outright.
+(`transport.hpp:192`): the constructed flag for the two stream servers
+(`posix_endpoint.hpp:687`), `true` by construction for a kind that is a bus outright.
 `bus_link_t` **refuses** each of its peer-named wiring calls — `set_peer_receiver`,
 `set_peer_rope_receiver`, `set_peer_down_notifier` — while it is false. That refusal matters
 because `bus_link_t` is a public base: on a flat server the setters are reachable by an
@@ -116,50 +116,8 @@ Departure follows the same split. A **peer-named** server evicts exactly the dep
 (`notify_peer_down(name)`); a **flat** server has one routing identity for every peer it
 carries — the registered child NAME — so its only seam is the whole link
 (`transport_t::notify_down`), and it therefore waits until the **last** open session departs
-(`posix_endpoint.cpp:726`). Firing it on a mid-life close would evict the surviving peers'
+(`posix_endpoint.cpp:724`). Firing it on a mid-life close would evict the surviving peers'
 edges along with the departed one's.
-
-## Closing the bus module out at build time
-
-The peer-named tier is a **module**, and a node whose links are all point-to-point does not
-have to carry it. `tr::graph::default_config_t::kBusLinks` (`core/include/libtracer/config.hpp:488`)
-is the knob; bound `false` by an
-[ADR-0068](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0068-build-configuration-is-plain-cpp-config-header.md)
-override fragment, not a `-D`:
-
-```cpp
-// libtracer/config_override.hpp
-namespace tr::graph {
-struct flat_node_config_t : default_config_t {
-    static constexpr bool kBusLinks = false;
-};
-using config_t = flat_node_config_t;
-}  // namespace tr::graph
-```
-
-The routing plane reaches the facet through exactly one door, `tr::net::bus_of`
-(`core/include/libtracer/transport.hpp:783`), and every consumer asks there: the registry's
-mount-shape stamp and its two peer-resolution paths, `fwd_router_t::add_child`'s peer wiring,
-and the connection vertex's synthesized peer listing. `transport_t::bus()` itself is
-untouched — still a virtual, still `nullptr` by default — so a transport may still *be* a
-bus; what the knob changes is whether anything asks. Measured on rv32 (`-Os -fno-exceptions
--fno-rtti`, `rv32imac_zicsr_zifencei`/`ilp32`, GCC 15.2, per-TU `.text`): **−2,078 B of
-flash** (`fwd_router` −1,400, `transport_vertex` −678) and **±0 B of `.bss`**, because the tier is code and
-per-instance state rather than a static table. A `LIBTRACER_NET_PLANE=OFF` build gains
-nothing — it never compiled those translation units.
-
-Asking for a bus on such a build is **refused**, never quietly served as a flat link:
-
-| door | refusal |
-| --- | --- |
-| `LIBTRACER_TRANSPORT_CAN=ON` | a `static_assert` in `transport_can.cpp` — CAN is a bus by construction, so a bus-less CAN build is broken, not smaller |
-| `SPEC{listener, kind=tcp\|ws, peer_named=1}` | the factory answers `TYPE_MISMATCH` — permanent, because no retry grows this build a bus facet — and creates no connection |
-| a directly constructed peer-named `slot_server_t` | `ok()` is false, the came-up predicate every caller already checks |
-| `httpd_ws_link_t` (ESP-IDF) | `ok()` is false — it is peer-named by construction and has no flat mode |
-
-A quiet demotion would be the worse outcome, and specifically so: the listener's own
-per-frame tier select reads its constructed mode, so a demoted-at-the-router-only server
-would keep delivering peer-named into a sink the router never installed.
 
 ## QUIC and WebTransport
 
@@ -335,7 +293,7 @@ flowchart LR
   and a callable destroyed early dangles exactly like a stale `ctx`.
 - **Overriding `send(iov)` is not optional for a scatter-gather wire.** The base
   implementation gathers into a temporary buffer and, when that allocation fails,
-  **drops the frame** rather than aborting (`transport.hpp:457`). A transport with a
+  **drops the frame** rather than aborting (`transport.hpp:456`). A transport with a
   native `sendmsg`/`writev` that does not override it silently pays a copy per
   forward hop and inherits a drop path it did not intend.
 - **The egress gather draws from the link's own injected store.** That temporary — and

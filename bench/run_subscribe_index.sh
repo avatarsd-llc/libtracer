@@ -45,6 +45,13 @@ for tag in A B; do
     "${PIN[@]}" "$BIN/bench_subscribe_index" --ram --tag="$tag"
 done
 
+# The NAME DOOR, reported and never gated. The carry (#1417) trades a hash-and-find per
+# SUBSCRIBE for a linear scan per PEER HANGUP, and a curve that showed only the half that got
+# faster would be advocacy. Once per tag, on the same pin, for the same reason the footprint is.
+for tag in A B; do
+    "${PIN[@]}" "$BIN/bench_subscribe_index" --door --tag="$tag"
+done
+
 for ((r = 0; r < ROUNDS; ++r)); do
     if ((r % 2 == 0)); then
         order="A B"

@@ -1386,6 +1386,16 @@ if(LIBTRACER_NET_PLANE)
     target_link_libraries(edge_eviction_test PRIVATE libtracer)
     libtracer_test_warnings(edge_eviction_test)
     add_test(NAME edge_eviction COMMAND edge_eviction_test)
+
+    # #1266 / #1417 — the CARRIED link token. The parts of the carry whose failure mode is a
+    # leaked subscriber edge rather than a slow one: node-scoped identity, same-NAME redial,
+    # slot reuse, a wrong token refused, the seam's laziness, and the census-bus lazy mint.
+    # Deliberately its own file: edge_eviction_test.cpp stays UNMODIFIED by the carry, and
+    # that it does is half the evidence that the name doors did not move.
+    add_executable(link_token_carry_test link_token_carry_test.cpp)
+    target_link_libraries(link_token_carry_test PRIVATE libtracer)
+    libtracer_test_warnings(link_token_carry_test)
+    add_test(NAME link_token_carry COMMAND link_token_carry_test)
 endif()
 
 if(LIBTRACER_NET_PLANE)

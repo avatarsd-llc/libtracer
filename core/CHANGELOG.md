@@ -51,7 +51,81 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   Nothing changes for a build that leaves `kBusLinks` at its default `true` — including every
   existing consumer, since the knob is new and inherited from `default_config_t`.
 
+- **`tr::graph::link_id_t` (`core/include/libtracer/link_id.hpp`) — a node-scoped interned
+  LINK IDENTITY, and the doors that mint and retire it: `graph_t::intern_link(std::string_view)`
+  and `graph_t::release_link(link_id_t)`**
+  ([#1266](https://github.com/avatarsd-llc/libtracer/issues/1266),
+  [#1417](https://github.com/avatarsd-llc/libtracer/issues/1417)). An 8-byte
+  `(slot, generation)` POD in a leaf header, on the `peer_handle.hpp` precedent: `tr::graph` is
+  L4 and may not include `transport.hpp`, and the transport plane must be able to name the
+  token without including `graph.hpp`. It is **not** a `peer_handle_t` — a handle is meaningful
+  only to the link that minted it, so two links both minting `tr::net::kSolePeerHandle` are
+  indistinguishable by handle; a `link_id_t` is minted by `graph_t` from its own slot space
+  against the link's NAME, so two links always get two ids. `intern_link` is **idempotent by
+  name**, which is the same-NAME redial property
+  [#1263](https://github.com/avatarsd-llc/libtracer/issues/1263) pinned.
+
+- **`graph_t::link_index_name_lookups()`** — how many index inserts fell back to a name lookup
+  instead of using a carried token. The carry is observationally transparent by construction (a
+  valid token and a name lookup leave byte-identical index state, which is what makes a wrong
+  token harmless), so this counter is the only way to see from outside whether it is working. It
+  is expected to be small and BOUNDED rather than zero: one per never-yet-interned link, one per
+  admission whose key is not the arrival link, one per `subscribe_wire` reached with no transport
+  plane behind it. A count that grows with traffic on a steady link set is a performance defect,
+  never a correctness one.
+
+- **`tr::graph::link_id_fn_t` and `op_resolver_t::on_link_id(fn, ctx)`** — the terminus seam the
+  token is carried over, installed exactly as `on_peer_subject` is and for the mirror-image
+  reason: only the transport plane knows which link a frame's handle belongs to, and only it has
+  somewhere to cache the graph's answer. **Asked lazily, at the remote-subscribe branch and
+  nowhere else** — a read, a write, an await and a forwarding hop never call it, which is the
+  one contract clause that matters here: a control-plane saving charged to every terminus frame
+  is what killed [#1290](https://github.com/avatarsd-llc/libtracer/pull/1290)'s prototype.
+  `fwd_router_t` installs its own supplier unconditionally.
+
 ### Changed
+
+- **`graph_t::subscribe_wire` takes a trailing `link_id_t link_token = {}`, and the per-link
+  departure index is now a DENSE SLOT VECTOR rather than a name-keyed hash map**
+  ([#1266](https://github.com/avatarsd-llc/libtracer/issues/1266),
+  [#1417](https://github.com/avatarsd-llc/libtracer/issues/1417)). Source-compatible: the
+  parameter is defaulted, and the default is byte-identical in outcome to every pre-carry
+  caller. Measured on `bench/bench_subscribe_index` (the harness
+  [#1416](https://github.com/avatarsd-llc/libtracer/pull/1416) landed), against a fresh A/A
+  null on the pinned host: the index operation goes from **13.7–16.7 ns to 9.4 ns, flat in link
+  count**, and its footprint from **175.8 to 128.0 bytes per link** — 746 B → 512 B at the
+  narrow 4-link/8-vertex configuration the 2026-08-14 ruling costed, out of the user-pinned
+  arena that is [#1160](https://github.com/avatarsd-llc/libtracer/issues/1160)'s budget.
+
+  **No name-taking door moved.** `link_edge_candidates`, `link_candidates`, `evict_link_edges`
+  and `evict_route_edges` keep their signatures and their answers, and they still work with no
+  token and no router in sight — which is #1366's first objection (*"the key belongs to
+  EVICTION, not to subscribe"*) answered rather than waived, and is why the name lives INSIDE
+  the slot it belongs to instead of in a second container. A dense vector plus a name→token map
+  is byte-for-byte the shape #1416 measured at 183.8 B/link, i.e. worse than the map it would
+  replace. What those doors pay instead is a **linear scan over live slots** — a path that runs
+  once per peer hangup where the one it pays for runs once per subscribe.
+
+  **A wrong token cannot mis-index.** The index verifies that the token's slot spells the key
+  it is about to index under, so the two admissions whose key is NOT the arrival link — a
+  mount-routed target (RFC-0021 §4.B.1) and the `caller` fallback
+  [#943](https://github.com/avatarsd-llc/libtracer/issues/943) needs — index exactly where they
+  always did. Same for a token released under its holder: the stamp moves on release, so a
+  successor in the reused slot cannot inherit a predecessor's candidate list. Both are shown by
+  ablation in `core/tests/link_token_carry_test.cpp` rather than asserted.
+
+  One behaviour is worth stating plainly because it is a bound and not a bug: a link NAME longer
+  than 19 characters overflows to a scanned side list instead of living inline in its slot. Every
+  name the transport plane mints (`p<slot>`, `n<node>`, `tr::net::kPeerNameChars` tokens) and
+  every dotted-quad `host:port` fits; a longer registered child name costs one entry in that list
+  and one extra indirection on the doors that scan by name, and nothing else.
+
+- **`fwd_router_t`'s bus peer-DOWN notifier now receives the departing peer's `peer_handle_t`**
+  (`bus_peer_down(ctx, handle, peer)`). Internal to the router — no transport kind's interface
+  changed, and the handle was already being handed to the notifier and discarded. It is what
+  keys the per-peer token cache the bus tier carries, so the eviction that releases the graph's
+  index slot can drop the cached token with it instead of leaving a successor asking under a
+  stamp that can never validate again.
 
 - **A SECOND extended CONNECT on a live WebTransport session is now REFUSED, and
   `webtransport_transport_t::session_path()` is stable for the life of a session**

@@ -614,7 +614,7 @@ template <class N>
     mem::mem_backend_t& egress, const reply_route_t& route, const field_path_t& field,
     bool has_field, op_resolver_t::reverse_ref_fn_t reverse_ref_fn = nullptr,
     void* reverse_ref_ctx = nullptr, op_resolver_t::path_label_fn_t path_label_fn = nullptr,
-    void* path_label_ctx = nullptr, bool dst_labelled = false) {
+    void* path_label_ctx = nullptr, bool dst_labelled = false, link_token_seam_t link_token = {}) {
     // The mint answer (RFC-0024 §7.5): this node's own reference to the target vertex, as a
     // one-element `PATH_REF` the origin stacks under whatever it already holds for the hops
     // in front of it. 4 + 8 bytes, on the reply only, and only when asked — the request side
@@ -840,9 +840,15 @@ template <class N>
                 // peer handle, and differ exactly when the terminus derived a per-writer
                 // subject — which is what makes a FLAT listener's peers distinguishable
                 // without making any of them individually routable.
+                // The carried link token (#1417), asked for HERE and only here — lazily, at
+                // the one branch that can use it. `subject_for` is resolved once per resolve
+                // because every op needs a subject; a token is needed by remote SUBSCRIBE
+                // alone, and a control-plane saving charged to every terminus frame is the
+                // mistake #1290's prototype was killed for.
                 result_t<void> w = graph.subscribe_wire(
                     v, sub_value, return_route, std::string(inbound_link), std::move(reverse_route),
-                    subject == inbound_link ? std::string{} : std::string(subject));
+                    subject == inbound_link ? std::string{} : std::string(subject),
+                    link_token.ask());
                 if (!w) return assemble_error_reply(route, w.error(), egress);
                 const reply_route_t ok = labelled_route();
                 return or_backpressure(
@@ -929,7 +935,7 @@ template <class N>
     const view_t* frame_view, mem::mem_backend_t& flat, mem::mem_backend_t& egress,
     op_resolver_t::reverse_ref_fn_t reverse_ref_fn = nullptr, void* reverse_ref_ctx = nullptr,
     op_resolver_t::path_label_fn_t path_label_fn = nullptr, void* path_label_ctx = nullptr,
-    const wire::path_ref_element_t* dst_label_target = nullptr) {
+    const wire::path_ref_element_t* dst_label_target = nullptr, link_token_seam_t link_token = {}) {
     result_t<parsed_fwd_t<N>> parsed = parse_fwd(root);
     if (!parsed) return std::unexpected(parsed.error());
     const parsed_fwd_t<N>& req = *parsed;
@@ -1056,7 +1062,7 @@ template <class N>
         return apply_op(graph, req, *bound, inbound_link, subject, frame_view, flat, egress, route,
                         field, has_field, reverse_ref_fn, reverse_ref_ctx, path_label_fn,
                         path_label_ctx,
-                        /*dst_labelled=*/true);
+                        /*dst_labelled=*/true, link_token);
     }
 
     if (req.dst_bound) {
@@ -1077,7 +1083,7 @@ template <class N>
         // "it is not there any more" is exactly the stale case the deref just refused.
         return apply_op(graph, req, *bound, inbound_link, subject, frame_view, flat, egress, route,
                         field, has_field, reverse_ref_fn, reverse_ref_ctx, path_label_fn,
-                        path_label_ctx);
+                        path_label_ctx, /*dst_labelled=*/false, link_token);
     }
 
     // dst resolution is the router's PATH-keyed dispatch — span-aliased for a
@@ -1122,7 +1128,7 @@ template <class N>
     if (!found) return assemble_error_reply(route, status_t::NOT_FOUND, egress);
     return apply_op(graph, req, *found, inbound_link, subject, frame_view, flat, egress, route,
                     field, has_field, reverse_ref_fn, reverse_ref_ctx, path_label_fn,
-                    path_label_ctx);
+                    path_label_ctx, /*dst_labelled=*/false, link_token);
 }
 
 }  // namespace

@@ -36,7 +36,8 @@ result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, const inbound_re
     return resolve_node(graph_, arena_node{&fwd, 0}, inbound.link, subject, frame_view,
                         flat_ != nullptr ? *flat_ : mem::heap_backend(),
                         egress_ != nullptr ? *egress_ : mem::heap_backend(), reverse_ref_fn_,
-                        reverse_ref_ctx_, path_label_fn_, path_label_ctx_, dst_label_target);
+                        reverse_ref_ctx_, path_label_fn_, path_label_ctx_, dst_label_target,
+                        link_token_seam(inbound));
 }
 
 }  // namespace tr::graph
