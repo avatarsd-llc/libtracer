@@ -1,8 +1,9 @@
 /**
  * @file
- * @brief #1442 — a published-edge-array republish SHARES each pre-existing edge's cold half
- *        instead of deep-copying it, so an admission's allocation count is flat in the number
- *        of edges already on the vertex.
+ * @brief #1442 / #1448 — NOBODY deep-copies a subscription's cold half any more. A republish
+ *        shares it (so an admission's allocation count is flat in the edges already on the
+ *        vertex) and so does the dispatch snapshot (so a WRITE's allocation count is flat in
+ *        the remote fan-out).
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -245,11 +246,87 @@ void test_reclaim_leaves_the_survivors_intact() {
     check(!one, "the reclaimed edge delivered nothing");
 }
 
+/**
+ * @brief (c) A DELIVERY's allocation count does not grow with the REMOTE fan-out (#1448).
+ *
+ * The second arm, and the hotter one: #1442/#1447 took the deep copy off the SUBSCRIBE path,
+ * where it was paid once per admission, while `vertex_t::copy_published` kept paying it once
+ * per remote edge **per write**. The dispatch snapshot now takes a refcount share of the same
+ * immutable record, so a write's allocation count must be flat in the number of remote edges
+ * it fans out to.
+ *
+ * The same instrument and the same shape-not-budget assertion as section (a), read on the
+ * write instead of the subscribe. MEASURED ablation: put the two pre-#1448 `std::string`
+ * copies back into `copy_entry` and the two compared points read **7 and 47** allocations
+ * instead of 1 and 1, i.e. one per remote edge, and this section reddens with two failures
+ * and exit 1. One rather than two because @ref long_link is deliberately past the SSO buffer
+ * while `callerN` is not — which is also why the link is the field that must stay long: with
+ * SSO-sized links the removed cost would never reach the counter at all.
+ *
+ * Each armed write is preceded by an UNARMED one at the same width. That is not hygiene, it
+ * is what keeps the measurement about the per-edge term: the wide-fan-out overflow buffer is
+ * a thread-local `std::vector` that keeps its capacity across publishes (`graph_t::fan_out`),
+ * so the first write at a new width legitimately reallocates it exactly once, and counting
+ * that growth would report a per-WIDTH cost as if it were a per-EDGE one.
+ */
+void test_delivery_allocation_is_flat() {
+    std::printf("a delivery's allocation count is flat in the remote fan-out:\n");
+    constexpr std::size_t kEdges = 48;
+    constexpr std::size_t kEarly = 5;  // 5 remote edges — inside the inline snapshot
+    constexpr std::size_t kLate = 45;  // 45 remote edges — through the overflow buffer
+    graph_t g;
+    const path_t src = *path_t::parse("/t/share/deliver");
+    const auto v = g.register_vertex(src, role_t::STORED_VALUE);
+    std::size_t delivered = 0;
+    const tr::testing::remote_sink_guard_t sink(g, [&](const remote_delivery_t& d, const rope_t&) {
+        // Touch the borrowed spellings: a snapshot that handed back a dangling view
+        // rather than a held record is a read of freed bytes here, which is what the
+        // ASan/TSan legs of this binary are for.
+        delivered += d.link.size() + d.caller.size();
+    });
+
+    std::vector<std::size_t> per_write(kEdges, 0);
+    for (std::size_t i = 0; i < kEdges; ++i) {
+        check(g.subscribe_wire(v, subscriber_tlv(), route_tlv(), long_link(i), view_t{},
+                               "caller" + std::to_string(i))
+                  .has_value(),
+              "every remote subscribe is admitted");
+        const view_t warm = make_value({0x30, 0x00, 0x00, 0x00});
+        const view_t armed = make_value({0x31, 0x00, 0x00, 0x00});
+        check(g.write(src, warm).has_value(), "the un-armed settling write lands");
+        g_allocs = 0;
+        g_arm = true;
+        const auto w = g.write(src, armed);
+        g_arm = false;
+        per_write[i] = g_allocs;
+        check(w.has_value(), "the armed write lands");
+        if (!w) return;
+    }
+    check(delivered > 0, "the sink actually read each delivery's link and caller bytes");
+
+    const std::size_t early = per_write[kEarly];
+    const std::size_t late = per_write[kLate];
+    std::printf("    write at %zu remote edges: %zu allocations; at %zu edges: %zu allocations\n",
+                kEarly + 1, early, kLate + 1, late);
+    check(early > 0, "the counter is live (an armed write allocates SOMETHING — the LKV)");
+    // Slack of 2 for the same reason section (a) takes it: the write's own store leg is
+    // size-dependent and an allocator packaging difference could add a bucket. The defect
+    // guarded against is one allocation per remote edge — 40 between these two points.
+    check(late <= early + 2,
+          "a write fanning out to 46 remote edges allocates no more than one to 6 — the "
+          "dispatch snapshot SHARES the cold half instead of copying it");
+
+    std::size_t worst = 0;
+    for (std::size_t i = 0; i < kEdges; ++i) worst = worst > per_write[i] ? worst : per_write[i];
+    check(worst <= early + 2, "and no write in the sweep spikes at all");
+}
+
 }  // namespace
 
 int main() {
-    std::printf("#1442 shared subscription cold half\n\n");
+    std::printf("#1442 / #1448 shared subscription cold half\n\n");
     test_republish_allocation_is_flat();
     test_reclaim_leaves_the_survivors_intact();
+    test_delivery_allocation_is_flat();
     return tr::testing::summary("edge_cold_half_share");
 }

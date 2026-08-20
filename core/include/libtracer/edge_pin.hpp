@@ -16,7 +16,7 @@
  * the scan, which are the parts that were never in dispute.
  *
  * Why a pin is admissible here when ADR-0072's supersession said fan-out could not hold one:
- * `snapshot_edges` already COPIES OUT (`edge_view_t` owns refcount clones) and `graph_t::fan_out`
+ * `snapshot_edges` already COPIES OUT (`edge_view_t` holds refcount shares) and `graph_t::fan_out`
  * dispatches OUTSIDE the vertex lock. The window a pin has to cover is therefore the copy loop
  * alone — bounded, no I/O, and provably not re-entrant, because the pin is released before the
  * first `dispatch_edge` call. A subscriber callback that re-enters the graph (a nested wide

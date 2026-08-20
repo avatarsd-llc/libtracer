@@ -188,7 +188,7 @@ auto r = g.await(temp, std::chrono::seconds{2});
 The callback form is sugar over the primitive
 `subscribe(const path_t&, subscriber_fn_t fn, void* ctx)` with
 `subscriber_fn_t = void (*)(void*, const rope_t&)`
-(`core/include/libtracer/subscriber.hpp:108`). The sugar takes the callable as `F&`
+(`core/include/libtracer/subscriber.hpp:109`). The sugar takes the callable as `F&`
 (`core/include/libtracer/graph.hpp:1496-1499`), so a temporary lambda written inline at
 the call site does not compile — and would dangle if it did. **Lifetime obligation:**
 the bound callable is the `ctx`, and `ctx` must outlive every possible delivery;

@@ -106,6 +106,44 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **BREAKING (type only): `tr::graph::edge_view_t` HOLDS the shared cold half instead of
+  copying it — `link` / `caller` / `return_route` / `reverse_route` / `delivery_compact` are
+  gone as members, replaced by a `remote_ptr_t remote` plus `link()`, `caller()` and
+  `has_remote_leg()`; `vertex_t::snapshot_drops_t::out_of_memory` is REMOVED**
+  ([#1448](https://github.com/avatarsd-llc/libtracer/issues/1448), the second arm of
+  [#1442](https://github.com/avatarsd-llc/libtracer/issues/1442)). #1447 took the cold half's
+  deep copy off the SUBSCRIBE path; `vertex_t::copy_published` — the DELIVERY path — was still
+  paying it, and paying it once per remote edge **per write** rather than once per admission.
+  The dispatch snapshot now takes a refcount share of the same immutable record, so a remote
+  edge's per-delivery cost is one relaxed increment where it was two probe-guarded
+  `std::string` copies plus two `view_t` clones.
+
+  `sizeof(edge_view_t)` goes **160 B → 48 B** (newly pinned by `static_assert`), and with it
+  `edge_snapshot_t` — the publishing thread's stack buffer — **1288 B → 392 B**. That width is
+  the fan-out loop's bandwidth: `graph_t::fan_out` streams `F` of these through the overflow
+  vector, the term `bench/bench_common.hpp` names as the reason the #844 mid ladder exists. The
+  three widths #1442 pinned are untouched (`subscriber_t` 80 B, `subscriber_remote_t` 120 B,
+  `pub_edge_t` 56 B, `remote_ptr_t` 8 B) — nothing was widened to pay for this, which matters
+  because #1447 spent the cold record's last tail padding.
+
+  **The per-edge snapshot became infallible**, and that is the removed counter. Nothing on it
+  allocates now, on any edge shape, so `copy_published` has no per-edge OOM leg and
+  `snapshot_drops_t` carries only `truncated` (the wide-fan-out capacity degrade). The
+  OUT_OF_MEMORY *delivery* cause on `graph_t::delivery_drops()` is unchanged and still counted
+  from the legs that can still hit it — `dispatch_edge_target`'s rope clone and the store legs.
+  A delivery that used to be shed under memory pressure now lands: `graph_oom_softfail_test`'s
+  remote arm asserts exactly that inversion through the identical injection hook, with a canary
+  proving the hook is live.
+
+  Migration for an out-of-tree reader of a dispatch view: `e.link` → `e.link()`,
+  `e.caller` → `e.caller()` (both `std::string_view`, valid while the view is), and
+  `e.return_route` / `e.reverse_route` / `e.delivery_compact` → `e.remote->…` behind an
+  `e.remote != nullptr` test. `!e.link.empty()` as the remote-leg gate → `e.has_remote_leg()`.
+  [ADR-0041](../docs/adr/0041-terminus-arena-decode-span-contract.md) §2 needs no amendment —
+  its remote-subscriber row already prescribed one copy at subscribe with every later delivery
+  roping the stored route, and this reaches that end state with the constant at zero; a dated
+  note records it there.
+
 - **BREAKING (type only): the subscription COLD HALF is refcount-shared and immutable —
   `subscriber_t::remote` and `pub_edge_t::remote` are `tr::graph::remote_ptr_t`, and
   `tr::graph::pub_remote_t` is REMOVED**
