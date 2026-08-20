@@ -173,7 +173,9 @@ class quic_transport_t : public transport_t {
      *         Each one shuts the connection down — the stream has lost framing sync. */
     [[nodiscard]] std::uint64_t malformed_rx() const noexcept;
 
-    /** @brief Frames shed on the way OUT (#932): a record over @ref kMaxFrame, no live
+    /** @brief Frames shed on the way OUT (#932): a record over THIS CONNECTION's cap
+     *         (`:settings max_frame`, resolved tighten-only against @ref kMaxFrame — it is
+     *         the same number the peer measures the arriving prefix by, #1409), no live
      *         peer stream to write to (dialing / torn down), or a `StreamSend` msquic
      *         refused. H3 handshake material is not counted — it is not a frame. */
     [[nodiscard]] std::uint64_t dropped_tx() const noexcept;

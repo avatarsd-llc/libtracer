@@ -16,6 +16,21 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **`quic` and `webtransport` egress is bounded by THIS CONNECTION's `max_frame`, not by the
+  16 MiB protocol maximum** ([#1409](https://github.com/avatarsd-llc/libtracer/issues/1409)).
+  Both `msquic_endpoint_t::send_frame` overloads compared the outgoing record against
+  `kMaxFrame` (`length_prefix_framer::kDefaultMaxFrame`) while RX honoured the
+  `configured_cap`-clamped per-connection `max_frame`. A link whose `:settings max_frame`
+  tightened RX to, say, 64 KiB would still hand up to 16 MiB to msquic; a conformant peer
+  running this same code then read a prefix past *its* configured cap, counted `malformed_rx`
+  and **shut the connection down** — so an over-cap local send was a link teardown rather than
+  a shed frame, and `dropped_tx()` never moved. Now an over-cap send is shed with
+  `dropped_tx()` and the link stays up. `max_frame` is `configured_cap`-clamped at
+  construction and so is never *looser* than `kMaxFrame`: this can only tighten, and a link
+  that configured no cap is behaviour-identical. The disposition is unchanged — `dropped_tx`
+  and return, never a throw, never a partial record. The `dropped_tx()` documentation on both
+  transports named the wrong cap and is corrected with it.
+
 - **BREAKING — the GPU backend left core. `<libtracer/mem_cuda.hpp>` is now
   `backends/cuda/include/libtracer/mem_cuda.hpp`, built by its own CMake project, and
   `-DLIBTRACER_WITH_CUDA` no longer exists**
