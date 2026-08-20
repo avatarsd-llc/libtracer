@@ -75,6 +75,7 @@ add_library(libtracer STATIC
     src/frame.cpp
     src/tlv_arena.cpp
     src/backend_set.cpp
+    src/device_backend.cpp
     src/mem_heap.cpp
     src/mem_source.cpp
     src/mem_pool.cpp
@@ -189,10 +190,6 @@ else()
     target_compile_options(libtracer PRIVATE -Wall -Wextra -Werror=switch)
 endif()
 
-# mem_cuda — the GPU device backend (docs/adr/0024). OFF by default: it needs the
-# CUDA toolkit and is built/tested locally (e.g. tools/test-cuda.sh), never in
-# CI (no GPU). The .cpp uses only the CUDA runtime API (no kernels), so a host
-# compiler + libcudart suffices — no nvcc required.
 # security_acl — the ACL policy seam (docs/adr/0050). The policy is selected at
 # build time per target (ADR-0047 §1): OFF (default) = the ALLOW-only MCU
 # profile; ON = the full host policy (ordered first-match-per-bit with DENY).
@@ -249,13 +246,12 @@ using config_t = cmake_config_t;
         $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/generated/include>)
 endif()
 
-option(LIBTRACER_WITH_CUDA "Build the mem_cuda GPU backend (needs CUDA toolkit)" OFF)
-if(LIBTRACER_WITH_CUDA)
-    find_package(CUDAToolkit REQUIRED)
-    target_sources(libtracer PRIVATE src/mem_cuda.cpp)
-    target_link_libraries(libtracer PUBLIC CUDA::cudart)
-    target_compile_definitions(libtracer PUBLIC LIBTRACER_WITH_CUDA)
-endif()
+# The GPU device backend used to be an option HERE, compiled into libtracer itself with a
+# PUBLIC `-DLIBTRACER_WITH_CUDA` every consumer TU then carried. It is now a tier module —
+# `backends/cuda/`, its own CMake project that consumes this one (#1381, docs/adr/0024
+# Amendment 1) — and it plugs in through `tr::mem::register_device_backend` exactly as an
+# out-of-tree transport plugs in through `register_transport_type`. Nothing in core names it,
+# which is why there is no option to find here.
 
 # libtracer_quic — the QUIC transport MODULE (docs/adr/0043 Phase A), a SEPARATE
 # library target: a host that talks QUIC links libtracer_quic; a host that
@@ -345,13 +341,10 @@ if(LIBTRACER_INSTALL)
         NAMESPACE libtracer::
         DESTINATION ${LIBTRACER_CMAKE_CONFIG_DIR})
 
-    # Dependencies the exported config must re-find. Threads is unconditional;
-    # CUDAToolkit only when the GPU backend was compiled into this install (its
-    # CUDA::cudart link is a usage requirement that must be reconstructable).
+    # Dependencies the exported config must re-find. Threads is unconditional, and it is now
+    # the only one: with the GPU backend moved to the `backends/` tier (#1381) core's export
+    # carries no vendor usage requirement to reconstruct — the tier links its own toolkit.
     set(LIBTRACER_PACKAGE_DEPENDENCIES "find_dependency(Threads)")
-    if(LIBTRACER_WITH_CUDA)
-        string(APPEND LIBTRACER_PACKAGE_DEPENDENCIES "\nfind_dependency(CUDAToolkit)")
-    endif()
 
     configure_package_config_file(
         ${CMAKE_CURRENT_SOURCE_DIR}/cmake/libtracerConfig.cmake.in

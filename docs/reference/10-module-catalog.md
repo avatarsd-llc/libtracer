@@ -53,7 +53,7 @@ L0 has **two** seams. Most modules here are *backends* that own real bytes and v
 | `mem_uart_rx_dma` | mem-backend | A double-buffered DMA UART RX ring (half-complete and complete IRQs) | v1 |
 | `mem_iceoryx2` | mem-backend | An iceoryx2 publish-side block | future |
 | `mem_rdma` | mem-backend | An RDMA-registered memory region with ibv tags | future |
-| `mem_cuda` | mem-backend | CUDA device memory — a device address space the codec must not dereference; it backs a VALUE payload inside a heterogeneous host+device rope ([ADR-0024 — mem_cuda and the heterogeneous rope](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0024-mem-cuda-gpu-backend-heterogeneous-rope.md)) | v1, opt-in |
+| `mem_cuda` | mem-backend | CUDA device memory — a device address space the codec must not dereference; it backs a VALUE payload inside a heterogeneous host+device rope ([ADR-0024 — mem_cuda and the heterogeneous rope](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0024-mem-cuda-gpu-backend-heterogeneous-rope.md)). Lives in the `backends/cuda/` tier, **not** in core, and registers its byte-move through `tr::mem::register_device_backend` | v1, opt-in |
 | `mem_asio_streambuf` | mem-backend | A `boost::asio::streambuf` (consume-on-read semantics) | not in v1 — see [§hard integrations](#hard-integrations) |
 
 `can_reassembly` is **not** an L0 module. It is listed under transports below, for the reason given there.

@@ -32,7 +32,7 @@ rather than a silent behavioural fork between translation units.
 
 The sizes and policies are members of **one named type**, `default_config_t`
 (`core/include/libtracer/config.hpp:84`), bound once by `using config_t = default_config_t;`
-(`:432`). An application declares its own by inheriting and overriding what differs (`:68-78`):
+(`:457`). An application declares its own by inheriting and overriding what differs (`:68-78`):
 
 ```cpp
 struct my_node_config_t : tr::graph::default_config_t {
@@ -43,7 +43,7 @@ using config_t = my_node_config_t;
 
 Inheriting means a knob added later does not break the preset — it inherits the new default
 rather than failing to compile. The rest of the library names the derived spellings re-exported
-below the traits type (`:435-458`), each of which is exactly its traits member, so introducing
+below the traits type (`:460-483`), each of which is exactly its traits member, so introducing
 `config_t` moved no call site.
 
 It is **bound once, not threaded as a template parameter**, and
@@ -105,7 +105,12 @@ full node.
 | `LIBTRACER_TRANSPORT_WS` | `transport_ws_*` | `CONFIG_LIBTRACER_TRANSPORT_WS` — selects a *different implementation* on chips (see below) | — |
 | `LIBTRACER_TRANSPORT_CAN` | `transport_can` + its platform link | `CONFIG_LIBTRACER_TRANSPORT_CAN` | — |
 | `LIBTRACER_WITH_QUIC` | `libtracer_quic` (needs msquic) | none | off by default |
-| `LIBTRACER_WITH_CUDA` | `mem_cuda` GPU backend (needs the CUDA toolkit) | none | off by default |
+
+`LIBTRACER_WITH_CUDA` is **gone** (#1381): the GPU backend is a tier module with its own CMake
+project, `backends/cuda/`, so "do I want it" is answered by whether you configure that directory
+and link `libtracer_cuda` — not by a core option, and not by a compile definition that used to
+reach every consumer TU of a CUDA-enabled build. It plugs into core through
+`tr::mem::register_device_backend`, the memory layer's mirror of `register_transport_type`.
 
 The always-compiled core is the L2/L3 wire codec, the L0/L1 substrate, `path`, and the L4
 graph runtime. See [10-module-catalog.md](../../reference/10-module-catalog.md) for what each module is
@@ -165,16 +170,16 @@ is a knob the fragment does not state at all (#1244).
 
 | knob | kind | default | ESP-IDF |
 | --- | --- | --- | --- |
-| `kVertexLockStripes` (`config.hpp:98`) | count | 16 | menuconfig `CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES` (`integrations/esp-idf/libtracer/CMakeLists.txt:280`) |
-| `kCacheLineBytes` (`:122`) | padding width | 64 | derived from `CONFIG_FREERTOS_UNICORE`, not exposed (`integrations/esp-idf/libtracer/CMakeLists.txt:298`) |
+| `kVertexLockStripes` (`config.hpp:98`) | count | 16 | menuconfig `CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES` (`integrations/esp-idf/libtracer/CMakeLists.txt:284`) |
+| `kCacheLineBytes` (`:122`) | padding width | 64 | derived from `CONFIG_FREERTOS_UNICORE`, not exposed (`integrations/esp-idf/libtracer/CMakeLists.txt:302`) |
 | `kHazardReaderSlots` (`:149`) | count | 64 | inherited — the refcount slot never builds the domain |
-| `kEdgePinSlots` (`:162`) | count | 32 | set to 8 (`integrations/esp-idf/libtracer/CMakeLists.txt:293`) |
+| `kEdgePinSlots` (`:162`) | count | 32 | set to 8 (`integrations/esp-idf/libtracer/CMakeLists.txt:297`) |
 | `kMaxVertexBytes64` / `kMaxVertexBytes32` (`:198` / `:216`) | RAM ratchet | 96 / 72 | the preset — deliberately not overridable |
 | `kPinPayloadRatio` (`:240`) | ratio | 0 — the `kPinNever` sentinel | the preset |
 | `acl_policy_t` (`:249`) | policy type | `allow_only_policy_t` | inherited — the full policy is not selectable |
 | `lkv_slot_t` (`:265`) | policy type | `sp_atomic_slot_t` | inherited — the hazard slot is not selectable |
-| `kSpinWaitSafe` (`:484`) | target fact | `true` | derived from `IDF_TARGET` — `false` on every chip, `true` on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:314`) |
-| `kWeaklyOrdered` (`:399`) | target fact | `true` | inherited — every ESP chip is weakly ordered, which is the default |
+| `kSpinWaitSafe` (`:509`) | target fact | `true` | derived from `IDF_TARGET` — `false` on every chip, `true` on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:318`) |
+| `kWeaklyOrdered` (`:424`) | target fact | `true` | inherited — every ESP chip is weakly ordered, which is the default |
 
 Two CMake variables survive for one transition release, `-DLIBTRACER_ACL_FULL` and
 `-DLIBTRACER_LKV_SLOT`; `core/CMakeLists.txt` writes a fragment on their behalf. The five other

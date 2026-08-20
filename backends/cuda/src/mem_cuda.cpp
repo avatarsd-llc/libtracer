@@ -6,7 +6,8 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * Built only with LIBTRACER_WITH_CUDA.
+ * The backends/cuda tier module (#1381, docs/adr/0024 Amendment 1) — built by
+ * backends/cuda/CMakeLists.txt, never by core.
  */
 
 #include "libtracer/mem_cuda.hpp"
@@ -45,12 +46,11 @@ class cuda_backend_t final : public mem_backend_t {
     }
 
     [[nodiscard]] mem_space_t space() const noexcept override { return mem_space_t::DEVICE; }
-    /**
-     * @brief TU-local (LIBTRACER_WITH_CUDA only): tagged CUDA, but not in backend_set.cpp's fast
-     *        switch, so destroy_dispatch routes it through the virtual `destroy` above and
-     *        mem::transfer routes it through cuda_transfer (below).
-     */
-    [[nodiscard]] backend_tag tag() const noexcept override { return backend_tag::CUDA; }
+    // No `tag()` override, and none is possible: `backend_tag` is closed over the backends
+    // core itself compiles (#1381). This backend leaves the default UNKNOWN, so
+    // destroy_dispatch takes the virtual `destroy` above — the SAME arm the CUDA enumerator
+    // routed to, since it was never in the fast switch. `mem::transfer` finds cuda_transfer
+    // by the backend's IDENTITY instead, through the registration below.
 
     /**
      * @brief Module-set traits (ADR-0047 §2).
@@ -69,10 +69,29 @@ class cuda_backend_t final : public mem_backend_t {
         true; /**< @brief Owns the `cudaMalloc`'d device allocation. */
 };
 
+/** @brief The one backend object, constructed on first use. Its ADDRESS is the registry key. */
+cuda_backend_t& instance() noexcept {
+    static cuda_backend_t backend;
+    return backend;
+}
+
 }  // namespace
 
+bool register_cuda_backend() noexcept {
+    return register_device_backend(instance(), &cuda_transfer);
+}
+
 mem_backend_t& cuda_backend() noexcept {
-    static cuda_backend_t backend;
+    cuda_backend_t& backend = instance();
+    // Registering on first use is what keeps the backend and its transfer hook from ever
+    // disagreeing: every route to a device segment runs through cuda_alloc -> cuda_backend(),
+    // so by the time such a segment exists the hook is in core's table and mem::transfer can
+    // find it. A composition root that wants the registration EARLIER — or wants to SEE it
+    // refuse a full table — calls register_cuda_backend() itself; it is idempotent.
+    //
+    // `instance()` is fully initialized before this line, so the call below cannot re-enter
+    // this static's own guard.
+    [[maybe_unused]] static const bool registered = register_cuda_backend();
     return backend;
 }
 

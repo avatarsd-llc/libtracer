@@ -6,7 +6,7 @@
 ``integrations/esp-idf/libtracer/CMakeLists.txt`` carries a HAND-MAINTAINED
 ``LIBTRACER_SRCS`` list of the ``core/src/*.cpp`` the ESP full-node build compiles.
 It cannot simply reuse ``core/CMakeLists.txt``'s list — that one is assembled
-CONDITIONALLY (NET_PLANE / per-transport / CUDA / QUIC / POSIX / socketcan-vs-stub
+CONDITIONALLY (NET_PLANE / per-transport / QUIC / POSIX / socketcan-vs-stub
 gates plus a generated ``builtin_transports.cpp``), whereas the ESP list is a flat
 subset for one fixed config. So the two lists legitimately differ and can't share a
 fragment.
@@ -30,7 +30,6 @@ ESP_CMAKE = ROOT / "integrations" / "esp-idf" / "libtracer" / "CMakeLists.txt"
 # core/src sources the ESP full-node build intentionally does NOT compile. Adding a
 # new host-only / opt-in module? Add it here — a conscious opt-out, not silent drift.
 EXCLUDED = {
-    "mem_cuda.cpp",                # CUDA backend — host GPU only (LIBTRACER_WITH_CUDA)
     "transport_quic.cpp",          # QUIC — opt-in, separate libtracer_quic module (msquic)
     "transport_webtransport.cpp",  # WebTransport — QUIC-based, opt-in
 }

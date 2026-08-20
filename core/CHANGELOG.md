@@ -14,6 +14,37 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING — the GPU backend left core. `<libtracer/mem_cuda.hpp>` is now
+  `backends/cuda/include/libtracer/mem_cuda.hpp`, built by its own CMake project, and
+  `-DLIBTRACER_WITH_CUDA` no longer exists**
+  ([#1381](https://github.com/avatarsd-llc/libtracer/issues/1381),
+  [ADR-0024 Amendment 1](../docs/adr/0024-mem-cuda-gpu-backend-heterogeneous-rope.md)). The
+  `#include "libtracer/mem_cuda.hpp"` spelling is **unchanged** — what changes is which target
+  supplies it. Configure `backends/cuda` and link `libtracer_cuda` (it carries `libtracer` and
+  `CUDA::cudart` as PUBLIC usage requirements) instead of passing `-DLIBTRACER_WITH_CUDA=ON` to
+  core. Consequences worth reading before upgrading:
+
+  - `libtracer` no longer exports a `CUDA::cudart` link or a `find_dependency(CUDAToolkit)` in its
+    installed package config, and **no consumer TU carries `-DLIBTRACER_WITH_CUDA` any more** — it
+    was a PUBLIC compile definition, so every TU of a CUDA-enabled build used to see it.
+  - `core/src/mem_cuda.cpp` and `core/tests/cuda_test.cpp` moved with the header; the PlatformIO
+    package (which exports `core/include/**` + `core/src/**`) simply stops shipping a GPU backend
+    an MCU never wanted.
+  - **`tr::mem::backend_tag::CUDA` is removed.** It was the last enumerator, so every other value
+    (`UNKNOWN = 0` … `BORROWED_DEVICE = 4`) is unchanged and no segment layout or ABI value moves.
+    A device backend is now identified by its `mem_backend_t` object, not by a tag; it leaves
+    `tag()` at the default `UNKNOWN` and `destroy_dispatch` routes it through the virtual
+    `destroy` — *the same arm the `CUDA` enumerator already took*, since it was never in the fast
+    switch. Per [ADR-0047 §2](../docs/adr/0047-build-time-closed-module-sets-compile-time-seams.md)
+    the tag is a fast path, never a correctness dependency, so nothing observable changes. Code
+    that `switch`es on `backend_tag` must drop its `case backend_tag::CUDA:` — `-Werror=switch`
+    makes that a build error rather than a silent fall-through.
+  - `tr::mem::transfer`'s behaviour is unchanged for every backend in core: a `DEVICE`-space
+    segment whose backend registered nothing gets the same `false` it always got, and the host
+    arms (`HEAP` / `POOL` / `BORROWED` / `BORROWED_DEVICE`) are instruction-identical.
+
 ### Added
 
 - **`graph_t::drain_unflushed(vertex_handle_t, std::vector<std::shared_ptr<const rope_t>>&)` and
@@ -40,6 +71,25 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   handle-based snapshot leg (it is `vertex_t::history_snapshot()` plus the STREAM and READ
   gates), and a second ungated spelling of it would be a permanent duplicate on the public
   surface.
+- **`tr::mem::register_device_backend(const mem_backend_t&, device_transfer_fn_t)` and
+  `tr::mem::device_transfer_fn_t` (`<libtracer/backend.hpp>`) — the registration seam a
+  `DEVICE`-space backend plugs into** ([#1381](https://github.com/avatarsd-llc/libtracer/issues/1381)).
+  The L0 mirror of `tr::net::transport_vertex_t::register_transport_type`: a backend outside core
+  registers the pair `{itself, its device byte-move}` and `tr::mem::transfer` routes that backend's
+  segments to that hook. Keyed by the **backend object**, not by `mem_space_t`, so a second vendor
+  (ROCm, an NPU, dmabuf) plugs in without adding a name — or an enumerator — to core. Bounded and
+  allocation-free; re-registering the same backend replaces its hook (`insert_or_assign`
+  semantics); a full table refuses and registers nothing. Call it at setup, before frames flow,
+  from one thread — the same contract `register_transport_type` carries.
+- **`tr::graph::default_config_t::kDeviceBackendSlots` (and its L0 spelling
+  `tr::mem::kDeviceBackendSlots`), default `2`** — how many device backends may register at once
+  ([ADR-0068](../docs/adr/0068-build-configuration-is-plain-cpp-config-header.md) knob, set by an
+  override fragment like every other). Its `.bss` is 32 B on a 64-bit host, and **0 B** on a
+  single-backend (`LIBTRACER_BACKEND_SET_POOL_ONLY`) target, which has no device arm and never
+  links the registry TU.
+- **`tr::mem::register_cuda_backend()` (`backends/cuda`)** — the GPU module's
+  `quic_transport_factory` equivalent. `cuda_backend()` calls it on first use, so a program that
+  only ever calls `tr::view::cuda_alloc` cannot end up with an unregistered backend.
 
 - **A PRE-AUTH request-size budget on the WebSocket opening handshake —
   `transport_ws_server::kMaxHandshakeBytes`, `transport_ws_server::handshake_cap()`, a trailing

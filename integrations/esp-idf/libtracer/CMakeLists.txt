@@ -46,6 +46,10 @@ set(LIBTRACER_SRCS
     "${LIBTRACER_ROOT}/core/src/frame.cpp"
     "${LIBTRACER_ROOT}/core/src/tlv_arena.cpp"
     "${LIBTRACER_ROOT}/core/src/backend_set.cpp"
+    # The DEVICE-space backend registry backend_set.cpp's multi-member transfer dispatches
+    # through (#1381). An ESP node registers nothing, so the table stays empty — but the
+    # multi-member fold is what this component builds, so the TU has to be here.
+    "${LIBTRACER_ROOT}/core/src/device_backend.cpp"
     "${LIBTRACER_ROOT}/core/src/mem_heap.cpp"
     "${LIBTRACER_ROOT}/core/src/mem_source.cpp"
     "${LIBTRACER_ROOT}/core/src/mem_pool.cpp"

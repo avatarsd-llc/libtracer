@@ -11,6 +11,11 @@
 # the commits that ran no check at all (#803). This job closes that: its filter is the
 # UNION of every tree an anchor can name plus every tree a citation can live in.
 #
+# `backends/**` joined that union with the GPU backend's move out of core (#1381): the
+# tier's CMake project is an enrolled non-source path, so a commit that shifts a line in
+# it must be a commit this gate fires on — the same rule `EnrolledPathsArePinnedTest`
+# enforces for every other enrolled path.
+#
 # It is deliberately its own workflow rather than a step inside core-ci: the check needs
 # no build, no toolchain and ~0.3 s, and hanging it off a 3-way build matrix would make a
 # doc-only failure wait on compilation.
@@ -50,6 +55,7 @@ on:
       - "docs/**"
       - "**/*.md"
       - "core/**"
+      - "backends/**"
       - "bench/**"
       - "tests/**"
       - "integrations/**"
@@ -79,6 +85,7 @@ on:
       - "docs/**"
       - "**/*.md"
       - "core/**"
+      - "backends/**"
       - "bench/**"
       - "tests/**"
       - "integrations/**"

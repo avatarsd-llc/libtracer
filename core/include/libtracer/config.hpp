@@ -350,6 +350,31 @@ struct default_config_t {
     static constexpr std::size_t kQsbrParticipants = kEdgePinSlots;
 
     /**
+     * @brief How many `DEVICE`-space memory backends may register a transfer hook at once
+     *        (#1381) — the bound on `tr::mem::register_device_backend`'s table.
+     *
+     * An L0 (`tr::mem`) fact, here for the same reason @ref kSpinWaitSafe is: ADR-0070's rule
+     * is that the configuration is ONE named type. @ref tr::mem::kDeviceBackendSlots is its
+     * spelling for the memory layer.
+     *
+     * Read it as "vendor accelerator backends this process binds" — a GPU tier module, an NPU
+     * one, a dmabuf one. Two is the honest default: a host that talks to one accelerator family
+     * needs one slot, and nothing in-tree registers at all.
+     *
+     * Its `.bss` is `N * (sizeof(void*) + sizeof(void(*)()))` — 32 B on a 64-bit host at the
+     * default — and it is emitted **only** in a build that links `device_backend.cpp`. A
+     * single-backend (`LIBTRACER_BACKEND_SET_POOL_ONLY`) target has no device arm and never
+     * links that TU, so the cost there is 0 B rather than "small". Override fragment:
+     * `static constexpr std::size_t kDeviceBackendSlots = 4;`
+     *
+     * Overflow is a REFUSAL, not a failure: `register_device_backend` returns `false` and
+     * registers nothing, so a backend that could not claim a slot moves no bytes at all
+     * (`tr::mem::transfer` answers `false` for its segments) rather than silently sharing
+     * another vendor's hook.
+     */
+    static constexpr std::size_t kDeviceBackendSlots = 2;
+
+    /**
      * @brief Whether a task on this target may SPIN-WAIT for a lock another task holds (#1158).
      *
      * An L0 (`tr::mem`) fact, but a member HERE because ADR-0070's rule is that the
@@ -482,5 +507,15 @@ namespace tr::mem {
  * where spin-waiting is unsafe.
  */
 inline constexpr bool kSpinWaitSafe = tr::graph::config_t::kSpinWaitSafe;
+
+/**
+ * @brief How many `DEVICE`-space backends may register a transfer hook at once.
+ *
+ * The memory layer's spelling of @ref tr::graph::default_config_t::kDeviceBackendSlots, which
+ * carries the full rationale. Derived from @ref tr::graph::config_t exactly as @ref
+ * kSpinWaitSafe is, so an override fragment sets it in the one place every knob is set. Its one
+ * consumer is the bounded table behind @ref register_device_backend (`device_backend.cpp`).
+ */
+inline constexpr std::size_t kDeviceBackendSlots = tr::graph::config_t::kDeviceBackendSlots;
 
 }  // namespace tr::mem

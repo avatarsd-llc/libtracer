@@ -12,11 +12,16 @@
  * (segment.hpp / backend.hpp) free of any dependency on the concrete backends.
  *
  * Every fast case dispatches through the backend's `final`-class type with a
- * qualified call (a non-virtual, inlinable direct call). Any other tag (UNKNOWN,
- * CUDA, or a future backend not linked into the fast set) falls through to the
- * backend's virtual `destroy`, so the result is identical to the pre-ADR-0047
- * `seg->backend->destroy(seg)` for every backend — the tag is a fast path, never
- * a correctness dependency.
+ * qualified call (a non-virtual, inlinable direct call). Any other tag (UNKNOWN, or a
+ * backend not linked into the fast set — every out-of-core device backend is) falls
+ * through to the backend's virtual `destroy`, so the result is identical to the
+ * pre-ADR-0047 `seg->backend->destroy(seg)` for every backend — the tag is a fast
+ * path, never a correctness dependency.
+ *
+ * The one arm this TU does NOT own is the DEVICE-space byte-move: a vendor accelerator
+ * backend lives in the `backends/` tier and registers its hook through
+ * `register_device_backend` (`device_backend.cpp`, #1381), so no vendor name appears
+ * here and adding a second accelerator changes nothing in core.
  */
 #include <cstring>
 #include <span>
@@ -28,10 +33,6 @@
 #ifndef LIBTRACER_BACKEND_SET_POOL_ONLY
 #include "libtracer/mem_borrowed.hpp"
 #include "libtracer/mem_heap.hpp"
-#endif
-
-#ifdef LIBTRACER_WITH_CUDA
-#include "libtracer/mem_cuda.hpp"  // declares tr::mem::cuda_transfer (cudaMemcpy stays TU-local)
 #endif
 
 namespace tr::mem {
@@ -58,8 +59,7 @@ bool transfer_host(view::segment_t* seg, std::span<std::byte> host, io_dir_t dir
 // Fallback for a backend not in the fast set (a user backend tagged UNKNOWN): the
 // same memcpy, but bracketed by the virtual cache hooks unconditionally (its traits
 // are not statically known here). Its DEVICE-space refusal is now redundant with the
-// hoisted guard in `transfer` (#928) and kept as defence in depth: this is the arm a
-// CUDA-tagged segment falls through to when CUDA is not linked.
+// hoisted guard in `transfer` (#928) and kept as defence in depth.
 bool transfer_generic(view::segment_t* seg, std::span<std::byte> host, io_dir_t dir) noexcept {
     if (host.size() > seg->bytes.size() || seg->space == mem_space_t::DEVICE) return false;
     seg->backend->before_io(seg, dir);
@@ -100,7 +100,8 @@ void destroy_dispatch(view::segment_t* seg) noexcept {
 
 // Single-backend set: only mem_pool is linked, so the transfer dispatch folds too.
 // The DEVICE-space guard is hoisted here exactly as in the multi-member variant (#928),
-// with no CUDA exemption: no device copy is linked in a POOL_ONLY build.
+// and it is UNCONDITIONAL: a single-backend target has no device arm at all, so it never
+// consults the device-backend registry and never links `device_backend.cpp` (#1381).
 bool transfer(view::segment_t* seg, std::span<std::byte> host, io_dir_t dir) noexcept {
     if (seg == nullptr || seg->space == mem_space_t::DEVICE) return false;
     if (seg->btag == backend_tag::POOL) return transfer_host<pool_t>(seg, host, dir);
@@ -131,24 +132,27 @@ void destroy_dispatch(view::segment_t* seg) noexcept {
                 ->borrowed_device_backend_t::destroy(seg);
             return;
         case backend_tag::UNKNOWN:
-        case backend_tag::CUDA:
             break;  // dispatched through the virtual fallback below.
     }
-    seg->backend->destroy(seg);  // virtual fallback: CUDA, UNKNOWN, any unlisted backend.
+    seg->backend->destroy(seg);  // virtual fallback: UNKNOWN, any unlisted backend.
 }
 
 // The multi-member host set: a switch to the per-backend host memcpy (with the
-// backend's `needs_cache_ops` trait gating its cache hooks), a device backend
-// (CUDA) routed to its device copy, and the generic memcpy for anything else.
+// backend's `needs_cache_ops` trait gating its cache hooks), a DEVICE-space segment
+// routed through the registry to its own backend's hook, and the generic memcpy for
+// anything else.
 bool transfer(view::segment_t* seg, std::span<std::byte> host, io_dir_t dir) noexcept {
     if (seg == nullptr) return false;
     // Hoisted DEVICE-space guard (#928): a device pointer is not CPU-dereferenceable, so no
-    // host-memcpy arm may ever see one — only the CUDA backend owns a real device copy.
-    // Before this guard the backend TAG decided the outcome: a BORROWED_DEVICE segment
-    // reached `transfer_host`'s memcpy while a semantically identical UNKNOWN-tagged device
-    // segment got `transfer_generic`'s clean false — and the tag is documented as a fast path
-    // with identical results, never a correctness dependency.
-    if (seg->space == mem_space_t::DEVICE && seg->btag != backend_tag::CUDA) return false;
+    // host-memcpy arm may ever see one. Before this guard the backend TAG decided the outcome:
+    // a BORROWED_DEVICE segment reached `transfer_host`'s memcpy while a semantically identical
+    // UNKNOWN-tagged device segment got `transfer_generic`'s clean false — and the tag is
+    // documented as a fast path with identical results, never a correctness dependency.
+    //
+    // The one way past it is the backend's OWN registered device copy (#1381): the registry
+    // answers `false` for a backend nobody registered, which is exactly what the pre-registry
+    // guard did for every DEVICE segment that was not the one vendor tag core used to name.
+    if (seg->space == mem_space_t::DEVICE) return detail::device_transfer(seg, host, dir);
     switch (seg->btag) {
         case backend_tag::HEAP:
             return transfer_host<heap_backend_t>(seg, host, dir);
@@ -158,12 +162,6 @@ bool transfer(view::segment_t* seg, std::span<std::byte> host, io_dir_t dir) noe
             return transfer_host<borrowed_backend_t>(seg, host, dir);
         case backend_tag::BORROWED_DEVICE:
             return transfer_host<borrowed_device_backend_t>(seg, host, dir);
-        case backend_tag::CUDA:
-#ifdef LIBTRACER_WITH_CUDA
-            return cuda_transfer(seg, host, dir);  // device copy: cudaMemcpy + after_io barrier.
-#else
-            break;  // CUDA backend not linked; fall through to the generic path.
-#endif
         case backend_tag::UNKNOWN:
             break;
     }

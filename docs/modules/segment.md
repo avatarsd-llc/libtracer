@@ -27,7 +27,7 @@ handle drops, `segment_ptr_t::reset` calls `tr::mem::destroy_dispatch`, which
 switches on that tag to a direct call for a linked backend and falls back to the
 backend's virtual `destroy` for any other — the result is identical to
 `seg->backend->destroy(seg)` for every backend
-(`core/include/libtracer/backend.hpp:187-197`;
+(`core/include/libtracer/backend.hpp:251-260`;
 [ADR-0047 — build-time-closed module sets, compile-time seams](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0047-build-time-closed-module-sets-compile-time-seams.md) §2).
 There is no separate `release()` step.
 
@@ -45,7 +45,7 @@ single-threaded and Cortex-M0/M0+ targets that have no LDREX/STREX
 (`core/include/libtracer/segment.hpp:21,44`). It is a compile definition, not a
 CMake option: the constrained-target footprint build sets it
 (`tools/cortexm0_footprint.py:158`) and the substrate test is built a second time
-with it (`core/tests/CMakeLists.txt:1608,1621-1622`).
+with it (`core/tests/CMakeLists.txt:1608,1623-1624`).
 
 ## API reference
 
