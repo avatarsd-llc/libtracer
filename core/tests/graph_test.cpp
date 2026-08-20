@@ -111,6 +111,48 @@ void test_stored_value() {
           "duplicate registration reports PathInUse");
 }
 
+/**
+ * @brief The LKV publish and the seq bump that publishes nothing, through the handle (#1300).
+ *
+ * Restates what the bare-`vertex_t` storage suite asserted on `store()` / `note_write()`
+ * directly before `vertex_t::store()` became `graph_t`'s alone: `assign` is the verb that
+ * publishes a last-known-value, and a HANDLER write is the verb that moves the readiness
+ * cursor without publishing one.
+ */
+void test_assign_lkv_and_seq_bump() {
+    std::printf("assign — the LKV publish, and a seq bump that publishes nothing:\n");
+    graph_t g;
+    tr::graph::vertex_handle_t v = g.register_vertex(path_t("/lkv/cell"), role_t::STORED_VALUE);
+    check(!g.read(v).has_value() && g.read(v).error() == status_t::NOT_FOUND,
+          "a never-assigned vertex holds no LKV");
+    check(g.assign(v, make_value({0x42})).has_value(), "assign is admitted");
+    auto r = g.read(v);
+    check(r.has_value() && std::to_integer<int>((*r)->only().bytes()[0]) == 0x42,
+          "assign publishes the last-known-value");
+    (void)g.assign(v, make_value({0x43}));
+    r = g.read(v);
+    check(r.has_value() && std::to_integer<int>((*r)->only().bytes()[0]) == 0x43,
+          "a later assign wins (last-writer-wins)");
+
+    // The "bump without storing" half: a HANDLER whose on_write consumes and whose on_read is
+    // unset. The write bumps the await cursor — a blocked awaiter WAKES — and nothing lands,
+    // so the wake answers NOT_FOUND rather than TIMEOUT. That is `note_write` observed through
+    // the only public seam that can see it.
+    tr::graph::handlers_t h;
+    h.on_write = [](const tr::view::rope_t&,
+                    const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> { return {}; };
+    tr::graph::vertex_handle_t hv =
+        g.register_vertex(path_t("/lkv/sink"), role_t::HANDLER, std::move(h));
+    std::thread writer([&] {
+        std::this_thread::sleep_for(40ms);
+        (void)g.write(hv, make_value({0x99}));
+    });
+    const auto woke = g.await(hv, 2s);
+    writer.join();
+    check(!woke.has_value() && woke.error() == status_t::NOT_FOUND,
+          "a handler write bumps the await cursor without storing (a wake, not a timeout)");
+}
+
 void test_stream() {
     std::printf("Stream vertex (bounded history ring):\n");
     graph_t g;
@@ -129,6 +171,61 @@ void test_stream() {
     auto latest = g.read(v);
     check(latest && std::to_integer<int>((*latest)->only().bytes()[0]) == 5,
           "read returns the latest (5)");
+}
+
+/**
+ * @brief RFC-0008 §E through the handle: the STREAM drain cursor, mirrored on `graph_t` (#1300).
+ *
+ * The bare-`vertex_t` twin of this suite is gone — `vertex_t::store()` is `graph_t`'s alone now
+ * — so this is where §E's "a stream is a queue, not a coalesce" lives. Assertion for assertion
+ * the same ground, driven through `vertex_handle_t` instead of a raw vertex.
+ *
+ * Load-bearing: the appends here are `assign`, never `write`. `write` on a STREAM runs
+ * `deliver_current`, which DRAINS and advances the cursor even with zero subscribers, so a
+ * drain test written on `write` reads 0 everywhere and looks like a broken mirror. `assign` is
+ * the RFC-0008 §A state-only verb, and the only one that leaves the cursor for a test to see.
+ */
+void test_stream_drain_cursor() {
+    std::printf("STREAM drain cursor through the handle (RFC-0008 §E):\n");
+    graph_t g;
+    tr::graph::vertex_handle_t v = g.register_vertex(path_t("/log/drain"), role_t::STREAM);
+    g.set_history_depth(v, 3);
+    for (std::uint8_t b = 1; b <= 5; ++b) (void)g.assign(v, make_value({b}));
+
+    const auto hist = g.history(v);
+    check(hist.has_value() && hist->size() == 3, "the ring keeps exactly the owner-declared depth");
+    check(hist && hist->size() == 3 && std::to_integer<int>((*hist)[0].only().bytes()[0]) == 3 &&
+              std::to_integer<int>((*hist)[2].only().bytes()[0]) == 5,
+          "trim drops the oldest entries (ring holds 3,4,5)");
+
+    std::vector<std::shared_ptr<const tr::view::rope_t>> batch;
+    const auto d1 = g.drain_unflushed(v, batch);
+    check(d1.has_value() && *d1 == 3, "5 unflushed appends drain to the 3 ring survivors");
+    check(batch.size() == 3 && std::to_integer<int>(batch[0]->only().bytes()[0]) == 3 &&
+              std::to_integer<int>(batch[2]->only().bytes()[0]) == 5,
+          "drain is in append order");
+    const auto d2 = g.drain_unflushed(v, batch);
+    check(d2.has_value() && *d2 == 0, "a drained stream has nothing more to drain");
+
+    (void)g.assign(v, make_value({6}));
+    const auto d3 = g.drain_unflushed(v, batch);
+    check(d3.has_value() && *d3 == 1 && std::to_integer<int>(batch[0]->only().bytes()[0]) == 6,
+          "the next append drains alone (a queue, not a coalesce)");
+
+    (void)g.assign(v, make_value({7}));
+    check(g.mark_flushed(v).has_value(), "mark_flushed is accepted on a STREAM");
+    const auto d4 = g.drain_unflushed(v, batch);
+    check(d4.has_value() && *d4 == 0, "mark_flushed advances the cursor without draining");
+
+    // The role gate on both verbs: a non-stream role owns no ring, so it owns no cursor —
+    // the same disposition `history` already gives.
+    tr::graph::vertex_handle_t sv = g.register_vertex(path_t("/log/cell"), role_t::STORED_VALUE);
+    const auto nd = g.drain_unflushed(sv, batch);
+    check(!nd.has_value() && nd.error() == status_t::SCHEMA_NOT_FOUND,
+          "drain_unflushed on a non-stream role is SchemaNotFound");
+    const auto nf = g.mark_flushed(sv);
+    check(!nf.has_value() && nf.error() == status_t::SCHEMA_NOT_FOUND,
+          "mark_flushed on a non-stream role is SchemaNotFound");
 }
 
 void test_handler() {
@@ -1003,7 +1100,9 @@ void test_for_each_vertex_concurrent_register() {
 int main() {
     test_path_parse();
     test_stored_value();
+    test_assign_lkv_and_seq_bump();
     test_stream();
+    test_stream_drain_cursor();
     test_handler();
     test_await();
     test_subscribe_callback();

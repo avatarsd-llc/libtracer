@@ -469,7 +469,7 @@ struct vertex_ext_t {
      * `graph_t::set_history_depth`, exactly like the delivery mode; it has **no wire
      * surface at all** — neither readable nor writable remotely. Guarded by the vertex
      * mutex, which already guards the ring it bounds, and re-read on every append
-     * (@ref vertex_t::store) under that same hold. Costs a STREAM vertex zero extra bytes:
+     * (the `%store` verb) under that same hold. Costs a STREAM vertex zero extra bytes:
      * a STREAM identity always allocates this block anyway.
      */
     std::uint32_t history_keep_last = 1;
@@ -526,13 +526,19 @@ struct vertex_layout_gate_t;
  * read/write hot path takes no vertex lock (an atomic shared_ptr swap); the mutex guards only the
  * history ring, the subscriber list, and the await waiter accounting. Non-copyable.
  *
- * The public surface is a VERB interface — storage (@ref store / @ref read_stored),
+ * The public surface is a VERB interface — reading the stored value (@ref read_stored),
  * readiness (@ref note_write / @ref wait_for_change / the seq cursors), edges
  * (@ref add_edge / @ref clear_edge / @ref snapshot_edges), and ACL state (@ref set_acl /
  * @ref with_acl / @ref with_aces / @ref with_effective_aces) — each verb taking the vertex mutex
  * internally (the LKV slot stays
  * lock-free). `graph_t` keeps what SPANS vertices: routing, ancestor walks, fan-out
  * dispatch legs, the effective-ACL walk, admission, and the field surface.
+ *
+ * The PUBLISHING half of storage is not on that surface: `%store`, like the map-lock mutators,
+ * is private with `graph_t` as its sole friend (#867, #1300), because every publish must pass
+ * `graph_t::store_value` — the one seam that gates the write, injects the ADR-0039 resource and
+ * counts what the publish shed. Owners reach the stored value's queue semantics through
+ * `graph_t::history` / `graph_t::drain_unflushed` / `graph_t::mark_flushed` instead.
  */
 class vertex_t {
    public:
@@ -838,7 +844,7 @@ class vertex_t {
     // -- storage & readiness ----------------------------------------------------------
 
     /**
-     * @brief What a @ref store SHED under allocation pressure — reported BY REFERENCE,
+     * @brief What a `%store` SHED under allocation pressure — reported BY REFERENCE,
      *        never counted here (#1003).
      *
      * The same division of labour @ref snapshot_drops_t states for the fan-out plane, for the
@@ -863,6 +869,16 @@ class vertex_t {
         [[nodiscard]] bool any() const noexcept { return ring_append; }
     };
 
+   private:
+    // #1300: the storage funnel is graph_t's, for the same reason the map-lock mutators above
+    // are — `store()` is reachable ONLY through `graph_t::store_value`, the one seam that
+    // gates the write, injects the ADR-0039 resource, and folds `store_drops_t` into
+    // `delivery_drops()`. A caller that reached it directly would publish a value the graph
+    // never counted, never gated and never marked pending. The RFC-0008 §E coverage that used
+    // to need it on a bare vertex is now `graph_t::drain_unflushed` / `mark_flushed` /
+    // `history`, handle-based. The `friend class graph_t` above is the sole exemption; no new
+    // friend was added, deliberately — a friend named in an installed public header is
+    // claimable by any user who defines a class of that name.
     /**
      * @brief Store @p value as this vertex's state: publish the last-known-value
      *        (lock-free), append the STREAM ring (keep-last trim), bump the write
@@ -972,6 +988,7 @@ class vertex_t {
         return sp;
     }
 
+   public:
     /**
      * @brief Record a Handler-role write: bump the write sequence and wake awaiters
      *        (the vertex stores no value — the user handler consumed it).
@@ -1997,7 +2014,7 @@ class vertex_t {
      * read is required. Only the OWN half; the ancestor count keeps its relaxed load, see
      * @ref listeners_above.
      *
-     * The pairing is the one @ref store already documents for `waiters`. PUBLISHER: store
+     * The pairing is the one `%store` already documents for `waiters`. PUBLISHER: store
      * the LKV, THEN load this count. SUBSCRIBER: bump this count, THEN load the LKV into
      * the latch. Both sides `seq_cst`, so they share one total order: a publisher that
      * reads zero is ordered before the subscriber's bump, hence before the subscriber's
@@ -2065,7 +2082,7 @@ class vertex_t {
     }
 
     /**
-     * @brief The @ref store LKV allocation (control block + rope), NOTHROW: `nullptr` on
+     * @brief The `%store` LKV allocation (control block + rope), NOTHROW: `nullptr` on
      *        OOM instead of the bad_alloc that abort()s under the MCU profile's
      *        `-fno-exceptions` (#477, the engine-task storm crash class).
      *

@@ -61,9 +61,9 @@ per-vertex `:settings` container — `:settings.reliability`, `:settings.durabil
 [RFC-0022](../../docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md)
 (with its Amendment 1) deleted `settings_t` outright and removed the whole
 `:settings.<knob>` **write** surface: a write to any of the seven names now answers
-`SCHEMA_NOT_FOUND`, caller-independently (`core/src/graph.cpp:2804-2810`). The `:settings`
+`SCHEMA_NOT_FOUND`, caller-independently (`core/src/graph.cpp:2825-2831`). The `:settings`
 **read** container survives with its shape and none
-of its knobs — `SETTINGS{ [NAME "app" SETTINGS{…}] }`, `core/src/graph.cpp:3161` — so
+of its knobs — `SETTINGS{ [NAME "app" SETTINGS{…}] }`, `core/src/graph.cpp:3182` — so
 there is nothing left for QoS to round-trip through, and no wire surface a namespaced
 extension could ride. See [ADR-0023](../../docs/adr/0023-ros2-binding-via-rmw-tracer.md)'s
 two errata. Nothing shipped against the old mapping: this package has one real TU
