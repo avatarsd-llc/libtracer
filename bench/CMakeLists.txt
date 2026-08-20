@@ -312,3 +312,21 @@ target_compile_options(bench_path_label PRIVATE -Wall -Wextra)
 add_executable(bench_subscribe_index bench_subscribe_index.cpp)
 target_link_libraries(bench_subscribe_index PRIVATE libtracer)
 target_compile_options(bench_subscribe_index PRIVATE -Wall -Wextra)
+
+# #941 / ADR-0079 §Verification — the PER-CONFIGURATION allocation-store sweep. Four arms
+# (H-baseline / WIDE / MID / NARROW) over ONE workload that draws all four ADR-0079 channels,
+# reporting latency, fan-out throughput across T={1,2,4,8,16,24} and store high-water. The arms
+# rotate inside ONE process because this host's cross-build layout sensitivity is up to +9.8% on
+# an untouched leg (bench/README.md) — larger than part of the effect being measured.
+# Driven by run_store_sweep.sh, collated by collate_store_sweep.py.
+add_executable(bench_store_sweep bench_store_sweep.cpp)
+target_link_libraries(bench_store_sweep PRIVATE libtracer)
+target_compile_options(bench_store_sweep PRIVATE -Wall -Wextra)
+
+# The memory half of the same sweep, in its OWN binary: a global operator new/delete override
+# counting what ESCAPES each composition to the process heap. Separate because that override
+# costs a relaxed atomic load per allocation, on arms that allocate at different rates.
+# Driven by run_store_sweep.sh, collated by collate_store_sweep.py.
+add_executable(bench_store_escape bench_store_escape.cpp)
+target_link_libraries(bench_store_escape PRIVATE libtracer)
+target_compile_options(bench_store_escape PRIVATE -Wall -Wextra)
