@@ -209,7 +209,7 @@ transport_ws_server::transport_ws_server(std::uint16_t bind_port, mem::mem_backe
                                          bool peer_named, std::size_t recv_stack,
                                          std::uint32_t liveness_window_ms,
                                          std::size_t max_handshake)
-    : slot_server_t(max_peers, peer_named, liveness_window_ms), backend_(backend) {
+    : stream_server_base_t(max_peers, peer_named, liveness_window_ms), backend_(backend) {
     max_frame_ = length_prefix_framer::configured_cap(max_frame);  // tighten-only (#1035)
     max_handshake_ = handshake_cap(max_handshake);                 // tighten-only (#934)
     if (!bind_listen(bind_port)) return;
@@ -444,15 +444,18 @@ bool transport_ws_server::drain_frames(session_t& s) {
                 // — peer-named servers deliver tagged with the sending peer's name
                 // (the ADR-0044 bus precedence, what the router wires), flat servers
                 // deliver point-to-point under the link's own registered name.
-                // Reading the stored flag, not `peer_rx_.has_any()`: a mode is a
+                // Reading the stored flag, not the peer slot's `has_any()`: a mode is a
                 // wiring-time fact, not a per-frame consequence of which sink someone
                 // happened to install. `bus_mode()` is that flag conjoined with whether
                 // this BUILD carries a bus module at all (#375 deliverable 3); at the
-                // default binding it IS the flag. WITHIN the chosen tier a sink installed
+                // default binding it IS the flag. The three peer-tier calls below are the
+                // STATIC seam of #1438 — `bus_slot_server_t`'s live half or the flat arm's
+                // inert one, picked at compile time, so the per-frame path gained no
+                // dispatch. WITHIN the chosen tier a sink installed
                 // mid-stream still takes effect on the next data frame. Unfragmented
                 // fast path on the span tier: borrowed payload, no owning copy.
                 const bool to_peer = bus_mode();
-                const bool want_rope = to_peer ? peer_rx_.has_rope() : rx_.has_rope();
+                const bool want_rope = to_peer ? peer_tier_wants_rope() : rx_.has_rope();
                 // The FLAT tier carries no per-frame tag by construction, so the WHO the
                 // subject seam needs is stamped here instead (#375 Part 2, ADR-0082): the
                 // session's handle, on the poll thread, immediately before the delivery that
@@ -464,7 +467,7 @@ bool transport_ws_server::drain_frames(session_t& s) {
                     !want_rope) {
                     const std::span<const std::byte> payload(frame.payload);
                     if (to_peer)
-                        peer_rx_.deliver_borrowed(s.handle, payload);
+                        deliver_to_peer_borrowed(s.handle, payload);
                     else
                         rx_.deliver_borrowed(payload);
                     break;
@@ -486,7 +489,7 @@ bool transport_ws_server::drain_frames(session_t& s) {
                 // fragment (ADR-0053 §5): the rope sink takes it as-is; only
                 // a span-only sink pays the one materialize (in the slot).
                 if (to_peer)
-                    peer_rx_.deliver_rope(s.handle, std::move(msg.message));
+                    deliver_to_peer_rope(s.handle, std::move(msg.message));
                 else
                     rx_.deliver_rope(std::move(msg.message));
                 break;

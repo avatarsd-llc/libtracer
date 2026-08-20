@@ -318,7 +318,7 @@ class tcp_transport_t : public transport_t, private stream_endpoint_t {
  * leaner than WS packaging (no HTTP upgrade, no frame masking) with the same
  * per-peer return-route identity when @p peer_named.
  */
-class transport_tcp_server : public slot_server_t {
+class transport_tcp_server : public stream_server_base_t {
    public:
     /**
      * @brief Bind+listen on @p bind_port (0 = ephemeral; see local_port()).
@@ -351,7 +351,7 @@ class transport_tcp_server : public slot_server_t {
      *                   clamped to that ceiling, because the cap is the
      *                   denominator every send bound divides by. Read the
      *                   enforced value back from `slot_server_t::max_peers`.
-     * @param peer_named Expose the @ref bus_link_t facet (see @ref bus) — the
+     * @param peer_named Expose the @ref bus_link_t facet (see @ref transport_t::bus) — the
      *                   board↔board wiring choice, same contract as
      *                   transport_ws_server's.
      * @param recv_stack Poll-thread stack size in bytes, 0 = platform default
@@ -435,7 +435,7 @@ class transport_tcp_server : public slot_server_t {
     struct session_t;  // one peer slot's connection state (defined in the .cpp)
 
     /**
-     * @brief The directed per-peer sending endpoint @ref peer_link hands out:
+     * @brief The directed per-peer sending endpoint @ref slot_server_t::peer_link hands out:
      *        `send()` writes one length-prefixed record to that peer's socket
      *        only.  Ingress stays on the owning server's peer-named slot.
      */
@@ -479,8 +479,9 @@ class transport_tcp_server : public slot_server_t {
     void on_slot_publishing() override;
 
     // The slot vector, the listen socket, the accept/poll/teardown machinery and the
-    // bus_link_t query trio all live in slot_server_t (#871); what stays here is the
-    // length-prefix framing and its ingress bound.
+    // peer query trio all live in slot_server_t (#871), and the bus FACET one tier
+    // below it in stream_server_base_t (#1438); what stays here is the length-prefix
+    // framing and its ingress bound.
     mem::mem_backend_t* backend_;
     std::size_t max_frame_ = tcp_transport_t::kMaxFrame;
     std::atomic<std::uint64_t> dropped_rx_{0};

@@ -341,6 +341,15 @@ void run() {
 }  // namespace
 
 int main() {
+    // #1438 — see tcp_test's twin of this guard: `run()` binds a `bus_link_t&` to
+    // `*server.bus()`, which is null on a build with no bus module, so this suite crashed
+    // there instead of reporting. A session ANCHOR is a peer-named artefact by definition;
+    // where the tier is absent there is nothing here to assert. Skip, do not crash.
+    if constexpr (!tr::net::kBusLinks)
+        return tr::testing::skipped("session_anchor",
+                                    "this build closed the ADR-0044 bus module out "
+                                    "(kBusLinks = false); no listener exposes the facet these "
+                                    "anchors hang off");
     std::printf("#1223 step 2 — session identity anchors on an accepted slot_server_t peer:\n");
     run();
     return tr::testing::summary("session_anchor");

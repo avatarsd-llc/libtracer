@@ -38,6 +38,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -1001,6 +1002,21 @@ void test_flat_server_down_only_on_last_session() {
 }
 
 /**
+ * @brief Take the out-of-contract path #889 exists to refuse: reach `set_peer_receiver`
+ *        by an explicit upcast to the PUBLIC `bus_link_t` base, past the null `bus()`.
+ *
+ * A template so the upcast is a DEPENDENT expression and is therefore checked at
+ * INSTANTIATION rather than at definition. On a target that closed the bus module out a
+ * listener has no such base at all (#1438), and the caller's `if constexpr` then never
+ * instantiates this.
+ */
+template <typename server_t>
+void force_peer_sink(server_t& server, peer_sink_t& sink) {
+    sink.bus = &static_cast<tr::net::bus_link_t&>(server);
+    static_cast<tr::net::bus_link_t&>(server).set_peer_receiver(sink);
+}
+
+/**
  * @brief #889 — a FLAT server refuses peer-named wiring: `set_peer_receiver` is rejected
  *        and inbound keeps reaching the flat `transport_t` receiver.
  *
@@ -1010,7 +1026,12 @@ void test_flat_server_down_only_on_last_session() {
  * did not exist. The mode authority is the constructed `peer_named` flag alone: the wiring
  * is refused, and delivery keys off the flag rather than off "a peer sink happens to be
  * installed".
+ *
+ * A TEMPLATE only so the forced upcast sits in a discarded `if constexpr` branch: where the
+ * bus module is closed out the base does not exist, so the refusal is the TYPE SYSTEM's —
+ * strictly stronger than the runtime gate, and the `static_assert` below is what states it.
  */
+template <bool kBus = tr::net::kBusLinks>
 void test_flat_server_rejects_peer_receiver() {
     std::printf("TCP transport — flat server refuses peer-named wiring (#889):\n");
 
@@ -1021,11 +1042,12 @@ void test_flat_server_rejects_peer_receiver() {
     tr::net::transport_tcp_server server(0, &tr::mem::heap_backend(), 0, /*max_peers=*/0);
     check(server.ok(), "flat server bound");
     check(server.bus() == nullptr, "flat server exposes no bus facet");
+    static_assert(std::is_base_of_v<tr::net::bus_link_t, tr::net::transport_tcp_server> == kBus,
+                  "the facet is a base of a listener iff this build carries the bus module");
     server.set_receiver(flat_rx);
     // The out-of-contract path itself: the public base, named explicitly. A member-shadowing
     // guard would not catch this call, so the refusal has to live in bus_link_t.
-    peer_sink.bus = &static_cast<tr::net::bus_link_t&>(server);
-    static_cast<tr::net::bus_link_t&>(server).set_peer_receiver(peer_sink);
+    if constexpr (kBus) force_peer_sink(server, peer_sink);
 
     tcp_transport_t a("127.0.0.1", server.local_port());
     check(a.ok(), "dialer connected");
@@ -1402,6 +1424,17 @@ void test_recv_stack_sized() {
 }
 
 int main() {
+    // #1438: this suite is labelled `bus` because it drives the ADR-0044 peer-named tier —
+    // `bus()->set_peer_receiver(...)` and friends. On a build that closed the module out
+    // `bus()` is null by construction, so those lines dereference nullptr and the suite
+    // CRASHES instead of reporting anything. `ctest -LE bus` deselects it there; this is
+    // what it does when someone runs it anyway, and a stated skip is the right answer
+    // because the subject is absent, not broken.
+    if constexpr (!tr::net::kBusLinks)
+        return tr::testing::skipped("tcp",
+                                    "this build closed the ADR-0044 bus module out "
+                                    "(kBusLinks = false); the peer-named tier under test "
+                                    "does not exist here");
     test_raw_frame_duplex();
     test_recv_stack_sized();
     test_partial_and_coalesced();
