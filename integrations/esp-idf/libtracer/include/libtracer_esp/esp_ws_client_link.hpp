@@ -102,8 +102,26 @@
  *     4 s literal it used to be (#952: 3 x 4 s against a 5 s watchdog). The reads run
  *     otherwise lock-free on the one recv thread; the graph/router lock-stripes
  *     below are unchanged — this link adds no lock beyond that syscall serializer.
+ *   - A TEARDOWN THAT LANDS MID-DIAL COSTS NO DIAL (#1058). `esp_transport_connect` takes
+ *     no cancellation — that is IDF's documented signature, `(handle, host, port,
+ *     timeout_ms)`, and there is no second entry point — so the dial cannot be stopped.
+ *     What the destructor stops is CHARGING the destroying task for it: it CONDEMNS the
+ *     in-flight dial under the dial slot's own mutex and DETACHES the recv thread instead
+ *     of joining it, and the orphaned dial releases its own transport pair when the call
+ *     finally resolves (success ⇒ close then destroy; failure ⇒ destroy). The worst-case
+ *     teardown is therefore `kPollMs + kWriteBudgetMs` — one recv-loop poll turn plus one
+ *     write budget — where it used to be `kDialTimeoutMs + kWriteBudgetMs`; at the 5 s
+ *     watchdog fallback that is 1448 ms rather than 3748 ms, and the mid-dial case
+ *     specifically costs two uncontended mutex acquires instead of up to 2500 ms.
+ *     THE COST, stated because it is real: a condemned link's recv thread outlives the
+ *     destructor by up to `kDialTimeoutMs`, holding the stack it was already given (no new
+ *     thread is created, and the peak thread count per link is unchanged). N links
+ *     destroyed inside one dial bound therefore retain N recv-thread stacks for the
+ *     remainder of it. Admission is per-link and lives in the link's own slot, so no
+ *     global gate exists that a condemned dial could make a fresh link wait behind.
  *   - Teardown is a BARRIER, not an assumption. The destructor disarms the link
- *     (`stop_`), wakes the recv thread's backoff, joins it, then destroys the handles
+ *     (`stop_`), wakes the recv thread's backoff, joins it (or detaches it, per the note
+ *     above), then destroys the handles
  *     UNDER the same mutex a sender holds across its write, and finally waits out
  *     every sender that had already ANNOUNCED itself on the in-flight tally — raised at
  *     the top of `send()`, before it queues on that mutex. Before #952 it destroyed the
@@ -167,6 +185,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <span>
 #include <string>
@@ -256,9 +275,17 @@ class esp_ws_client_link_t : public transport_t {
      * entered `send()` finishes first": a caller between `send()`'s entry checks and
      * that raise is not waited out, exactly as a `send()` starting after this
      * destructor returns is not. Both are the embedder's lifetime problem; nothing
-     * inside the object can close them. A teardown that lands mid-dial still costs one
-     * dial timeout — `esp_transport_connect` takes no cancellation — which is why that
-     * timeout is derived from the task-watchdog period.
+     * inside the object can close them.
+     *
+     * WORST CASE, derived: `kPollMs + kWriteBudgetMs` — one recv-loop poll turn (how fast
+     * the recv thread can observe `stop_`) plus one write budget (a quarter of the
+     * task-watchdog period, which is what a sender inside `esp_transport_write` may still
+     * be spending). 1448 ms at the 5 s host fallback. The DIAL term is gone (#1058): a
+     * teardown landing mid-dial condemns the in-flight dial and detaches the recv thread
+     * rather than joining it, because `esp_transport_connect` takes no cancellation and
+     * the only thing left to fix was who pays for it. What that buys is paid for by the
+     * condemned link's recv thread outliving this destructor by up to `kDialTimeoutMs`,
+     * holding the stack it already had; see the threading note at the top of this file.
      */
     ~esp_ws_client_link_t() override;
 
@@ -423,12 +450,34 @@ class esp_ws_client_link_t : public transport_t {
     [[nodiscard]] static timing_t timing() noexcept;
 
    private:
+    /**
+     * @brief The state ONE dial owns, in a heap slot that outlives the link (#1058).
+     *
+     * Defined in the .cpp — nothing outside it may name the type. It exists because a
+     * teardown landing mid-dial no longer joins the dial: the recv thread is detached and
+     * `esp_transport_connect` keeps running with the arguments it was handed, so those
+     * arguments and the half-built transport pair cannot live in a member of an object
+     * that is about to be destroyed. Allocated ONCE in the constructor and reused by every
+     * dial (its string copies are `const` for the link's life), so this adds no per-dial
+     * heap and the file's "NO per-frame heap" posture is unchanged.
+     */
+    struct dial_t;
+
+    /** @brief What one dial attempt ended as (#1058). */
+    enum class dial_outcome_t {
+        UP,       /**< @brief A handshake completed; the link is connected. */
+        FAILED,   /**< @brief No handshake; the caller decides on a backoff. */
+        ORPHANED, /**< @brief The link was destroyed during this dial. The dial released
+                   *          its own transport pair and the caller must touch NOTHING on
+                   *          this object — it is gone. */
+    };
+
     /** @brief The recv thread body: (re)connect, then poll+read+deliver until stopped. */
     void recv_loop();
     /** @brief One dial attempt: (lazily) build the tcp+ws transports, connect, apply the
      *         per-socket policy (Nagle off, bounded write, keepalive probes), mark up.
-     *         @return true on a completed handshake. */
-    bool connect_once();
+     *         @return which of the three outcomes it reached (@ref dial_outcome_t). */
+    dial_outcome_t connect_once();
     /** @brief Close the connection and mark down; the next recv_loop turn reports the
      *         departure and re-dials. The report is NOT made here — this runs under the
      *         syscall serializer, and the notifier re-enters the routing plane. */
@@ -442,10 +491,19 @@ class esp_ws_client_link_t : public transport_t {
      *         reads it on every (re)dial exists, so there is no cross-thread write to order
      *         and the first dial carries it. */
     const std::string handshake_headers_;
+    /** @brief The dial slot (#1058) — allocated in the ctor, shared with the recv thread,
+     *         and the ONE piece of this object a condemned dial may still touch after the
+     *         destructor has returned. `const` because the slot is never replaced: it is
+     *         reused dial after dial, and its mutex is a LEAF (never taken with `write_m_`,
+     *         `st_m_` or `backoff_m_` held, and never held across the connect). */
+    const std::shared_ptr<dial_t> dial_;
 
-    // Both handles are written ONLY by the recv thread (connect_once rebuilds them on
-    // every dial, holding no lock) and PUBLISHED by the connected_ release store below;
-    // any other thread must observe that store before it may read either one.
+    // Both handles are written ONLY by the recv thread (connect_once tears them down
+    // before a dial and adopts the freshly built pair out of `dial_` after it, holding no
+    // lock either side of the connect) and PUBLISHED by the connected_ release store
+    // below; any other thread must observe that store before it may read either one.
+    // NULL for the whole of a dial, which is what makes a destructor that lands mid-dial
+    // find nothing to destroy: the pair being built belongs to `dial_` until it resolves.
     esp_transport_handle_t tcp_ = nullptr;  // parent TCP transport (owned)
     esp_transport_handle_t ws_ = nullptr;   // WS transport over tcp_ (owned)
 

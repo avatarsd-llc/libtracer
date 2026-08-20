@@ -1043,7 +1043,7 @@ ANCHORS = [
      '"listener", [this](graph::graph_t&, std::vector<std::byte> key, const tlv_t* config) {'),
     ('core/src/transport_vertex.cpp:407',
      'result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::byte> child_key,'),
-    ('integrations/esp-idf/libtracer/include/libtracer_esp/esp_ws_client_link.hpp:176',
+    ('integrations/esp-idf/libtracer/include/libtracer_esp/esp_ws_client_link.hpp:195',
      '#include "esp_transport.h"'),
     ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:152',
      '#include "esp_http_server.h"'),

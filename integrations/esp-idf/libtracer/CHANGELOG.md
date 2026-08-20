@@ -10,6 +10,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`esp_ws_client_link_t` teardown no longer pays for a dial it cannot cancel**
+  ([#1058](https://github.com/avatarsd-llc/libtracer/issues/1058)). A destructor that landed
+  while the recv thread was inside `esp_transport_connect` used to inherit the whole dial
+  bound — half a task-watchdog period, 2500 ms at the 5 s default. `esp_transport_connect`
+  still takes no cancellation (IDF offers none, and `esp_transport_get_socket` cannot even
+  name a descriptor while the dial is in flight), so the dial is not interrupted: it is
+  CONDEMNED. The destructor marks the in-flight dial and **detaches** the recv thread
+  instead of joining it, and the orphaned dial releases its own transport pair when the
+  call finally resolves — success closes then destroys, failure destroys. **The numbers**:
+  worst-case teardown falls from `kDialTimeoutMs + kWriteBudgetMs` to
+  `kPollMs + kWriteBudgetMs` — 3748 ms → 1448 ms at the 5 s watchdog fallback — and a
+  teardown landing mid-dial specifically goes from up to 2500 ms of blocking transport call
+  to none at all (two uncontended mutex acquires and a detach). **The cost, stated because
+  it is real**: a condemned link's recv thread outlives its destructor by up to
+  `kDialTimeoutMs`, holding the stack it already had — no new thread is created and the
+  peak thread count per link is unchanged, but N links destroyed inside one dial bound
+  retain N recv-thread stacks for the remainder of it. No public API change: the header
+  gains a private nested `dial_t` slot (one `std::shared_ptr` + one `std::mutex` + three
+  string copies of the dial's own inputs, per link) and its threading note now states the
+  new worst case and its derivation.
+
 ## [0.13.0] — 2026-08-16
 
 ### Changed
@@ -689,7 +712,7 @@ core 0.10.0 reaches it.
 - **Public headers now propagate their ESP-IDF dependencies (#963.4).** `esp_http_server`,
   `tcp_transport` and `esp_driver_twai` moved from `PRIV_REQUIRES` to **`REQUIRES`**. Those
   three are named by headers under `include/libtracer_esp/` (`httpd_ws_link.hpp:152`,
-  `esp_ws_client_link.hpp:176`, `twai_link.hpp:36-37`), and `PRIV_REQUIRES` does not
+  `esp_ws_client_link.hpp:195`, `twai_link.hpp:36-37`), and `PRIV_REQUIRES` does not
   propagate include dirs — so a dependent that included one of ours without independently
   requiring the base component died with `esp_http_server.h: No such file or directory` and
   no hint that libtracer was the cause. `lwip` and `esp_driver_gpio` stay private: they are
