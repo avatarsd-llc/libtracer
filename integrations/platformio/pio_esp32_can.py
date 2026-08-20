@@ -39,12 +39,13 @@ Import("env", "pio_lib_builder")  # noqa: F821  (injected by PlatformIO/SCons at
 # installs; bumping that pin is the act that re-validates this assumption.
 #
 # This is the portable baseline every platform gets — the former manifest filter,
-# verbatim: the whole core minus the TUs that need host-only stacks (CUDA, msquic,
-# libwebtransport) or Linux kernel headers (SocketCAN; its stub stays in).
+# verbatim: the whole core minus the TUs that need host-only stacks (msquic,
+# libwebtransport) or Linux kernel headers (SocketCAN; its stub stays in). The GPU
+# backend needs no entry since #1381 — it is a `backends/` tier module and this
+# package only exports `core/`, so there is nothing to filter out.
 env.Replace(  # noqa: F821
     SRC_FILTER=[
         "+<*>",
-        "-<mem_cuda.cpp>",
         "-<transport_quic.cpp>",
         "-<transport_webtransport.cpp>",
         "-<socketcan_link.cpp>",

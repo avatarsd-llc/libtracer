@@ -5,8 +5,10 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * Built only with LIBTRACER_WITH_CUDA; run on
- * a real GPU (locally, e.g. tools/test-cuda.sh — never in CI, which has no GPU).
+ * The backends/cuda tier module's own test (#1381): built by backends/cuda/CMakeLists.txt
+ * and run on a real GPU locally (tools/test-cuda.sh) — never in CI, which has no GPU. The
+ * GPU-free half of the same seam (does mem::transfer route a registered DEVICE backend's
+ * segments to its hook?) is core/tests/substrate_test.cpp, which runs on every PR.
  */
 #include <array>
 #include <cstddef>
@@ -35,6 +37,11 @@ int main() {
         return 1;
     }
     check(dev->space == tr::mem::mem_space_t::DEVICE, "cuda segment.space == DEVICE");
+
+    // 1b. the registration seam: cuda_alloc already registered the backend (cuda_backend()'s
+    // first use does it), and re-registering replaces the same slot rather than consuming a
+    // second one — so this must still succeed on a table sized for kDeviceBackendSlots.
+    check(tr::mem::register_cuda_backend(), "register_cuda_backend() is idempotent");
 
     // 2. round-trip host -> device -> host (proves real GPU memory works)
     std::array<std::byte, 64> src{};

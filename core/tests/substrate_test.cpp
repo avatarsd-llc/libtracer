@@ -22,6 +22,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <new>
 #include <span>
 #include <string>
 #include <string_view>
@@ -252,6 +253,138 @@ void test_mem_transfer() {
           "a null segment is refused");
 }
 
+/**
+ * @brief What a registered device hook was last asked to move — the test's observation point.
+ */
+struct device_hook_log_t {
+    const tr::mem::mem_backend_t* backend = nullptr; /**< @brief Whose segment reached the hook. */
+    std::size_t bytes = 0;                           /**< @brief How many bytes were asked for. */
+    int hook_id = 0;                                 /**< @brief WHICH hook ran (0 = none yet). */
+};
+
+/** @brief The one log both hooks below write; reset between properties. */
+device_hook_log_t g_hook_log;
+
+/**
+ * @brief A `DEVICE`-space backend over caller-owned HOST bytes — the GPU-free stand-in that
+ *        lets the `register_device_backend` seam be pinned on every PR (#1381).
+ *
+ * The real device backend is a `backends/` tier module needing a GPU, so CI can never build
+ * it. What CI *can* build is a second member of the same seam: anything whose `space()` is
+ * `DEVICE` takes `mem::transfer`'s registry arm, and the bytes behind it being ordinary RAM
+ * is exactly what makes the routing observable without hardware.
+ */
+class fake_device_backend_t final : public tr::mem::mem_backend_t {
+   public:
+    fake_device_backend_t() noexcept : mem_backend_t("fake_device") {}
+    void destroy(tr::view::segment_t* seg) noexcept override { delete seg; }
+    [[nodiscard]] tr::mem::mem_space_t space() const noexcept override {
+        return tr::mem::mem_space_t::DEVICE;
+    }
+};
+
+/** @brief The shared body of both hooks: log the call, then move the bytes for real. */
+bool log_and_move(tr::view::segment_t* seg, std::span<std::byte> host, tr::mem::io_dir_t dir,
+                  int hook_id) noexcept {
+    if (seg == nullptr || host.size() > seg->bytes.size()) return false;
+    g_hook_log = {seg->backend, host.size(), hook_id};
+    if (dir == tr::mem::io_dir_t::CPU_TO_DEVICE) {
+        std::memcpy(seg->bytes.data(), host.data(), host.size());
+    } else {
+        std::memcpy(host.data(), seg->bytes.data(), host.size());
+    }
+    return true;
+}
+
+/** @brief Device hook #1 — the first registration. */
+bool device_hook_a(tr::view::segment_t* seg, std::span<std::byte> host,
+                   tr::mem::io_dir_t dir) noexcept {
+    return log_and_move(seg, host, dir, 1);
+}
+
+/** @brief Device hook #2 — the replacement, to prove re-registration rebinds the same slot. */
+bool device_hook_b(tr::view::segment_t* seg, std::span<std::byte> host,
+                   tr::mem::io_dir_t dir) noexcept {
+    return log_and_move(seg, host, dir, 2);
+}
+
+/** @brief A segment of @p bytes owned by @p backend (the fake device's `alloc` stand-in). */
+tr::view::segment_ptr_t device_segment(tr::mem::mem_backend_t& backend,
+                                       std::span<std::byte> bytes) {
+    return tr::view::segment_ptr_t::adopt(new (std::nothrow) tr::view::segment_t(&backend, bytes));
+}
+
+/**
+ * @brief The device-backend registration seam (#1381) — `mem::transfer`'s out-of-core arm,
+ *        proved without a GPU.
+ *
+ * This is the property the `backends/` tier depends on and the one the vendor `#ifdef` used
+ * to provide: a `DEVICE` segment reaches its OWN backend's byte-move, and only that one.
+ * Registrations are process-global and this test fills the table, so it runs last.
+ */
+void test_device_backend_registry() {
+    std::printf("register_device_backend — the DEVICE-space transfer seam (#1381):\n");
+    std::array<fake_device_backend_t, tr::mem::kDeviceBackendSlots> slotted{};
+    fake_device_backend_t spare;  // one more backend than the table can hold
+
+    std::array<std::byte, 8> src{};
+    for (std::size_t i = 0; i < src.size(); ++i) src[i] = static_cast<std::byte>(0x50 + i);
+    std::array<std::byte, 8> store{};
+    tr::view::segment_ptr_t seg = device_segment(slotted[0], store);
+    check(static_cast<bool>(seg) && seg->space == tr::mem::mem_space_t::DEVICE,
+          "the fake device backend's segment reports DEVICE space");
+
+    // (b) UNREGISTERED — the pre-registry refusal, now proved against the registry rather
+    // than against a vendor tag. Nothing has registered yet, so there is nothing to route to.
+    check(!tr::mem::transfer(seg.get(), src, tr::mem::io_dir_t::CPU_TO_DEVICE),
+          "an UNREGISTERED device backend's segment is refused");
+    check(std::ranges::all_of(store, [](std::byte b) { return b == std::byte{0}; }),
+          "the refused bytes are untouched");
+    check(!tr::mem::register_device_backend(spare, nullptr), "a null hook registers nothing");
+
+    // (a) REGISTERED — transfer routes to that backend's hook, in both directions.
+    check(tr::mem::register_device_backend(slotted[0], &device_hook_a),
+          "register_device_backend accepts the first backend");
+    g_hook_log = {};
+    check(tr::mem::transfer(seg.get(), src, tr::mem::io_dir_t::CPU_TO_DEVICE),
+          "CPU_TO_DEVICE reaches the registered hook");
+    check(g_hook_log.hook_id == 1 && g_hook_log.backend == &slotted[0] && g_hook_log.bytes == 8,
+          "the hook saw its OWN backend's segment and the full span");
+    check(std::ranges::equal(store, src), "the hook moved the bytes host -> device");
+    std::array<std::byte, 8> out{};
+    check(tr::mem::transfer(seg.get(), out, tr::mem::io_dir_t::DEVICE_TO_CPU) &&
+              std::ranges::equal(out, src),
+          "DEVICE_TO_CPU reaches the same hook and round-trips");
+
+    // Keyed by BACKEND IDENTITY, not by space: a second, unregistered device backend is still
+    // refused while the first one routes. This is what lets a second vendor plug in.
+    std::array<std::byte, 8> other_store{};
+    tr::view::segment_ptr_t other = device_segment(spare, other_store);
+    check(!tr::mem::transfer(other.get(), src, tr::mem::io_dir_t::CPU_TO_DEVICE),
+          "a DIFFERENT unregistered device backend is still refused");
+
+    // (c) RE-REGISTERING REPLACES the hook (insert_or_assign) — and must not eat a second slot.
+    check(tr::mem::register_device_backend(slotted[0], &device_hook_b),
+          "re-registering the same backend succeeds");
+    g_hook_log = {};
+    check(tr::mem::transfer(seg.get(), src, tr::mem::io_dir_t::CPU_TO_DEVICE),
+          "transfer still routes after the replacement");
+    check(g_hook_log.hook_id == 2, "the REPLACEMENT hook ran, not the original");
+
+    // (d) OVERFLOW refuses and registers nothing. Filling the remaining slots must succeed,
+    // which is also the proof that (c) rebound slot 0 rather than consuming a new one.
+    for (std::size_t i = 1; i < tr::mem::kDeviceBackendSlots; ++i) {
+        check(tr::mem::register_device_backend(slotted[i], &device_hook_a),
+              "the remaining slots accept a registration");
+    }
+    check(!tr::mem::register_device_backend(spare, &device_hook_a),
+          "a full table REFUSES the next backend (kDeviceBackendSlots)");
+    g_hook_log = {};
+    check(!tr::mem::transfer(other.get(), src, tr::mem::io_dir_t::CPU_TO_DEVICE),
+          "the refused backend registered nothing — its segments still get false");
+    check(g_hook_log.hook_id == 0, "no hook ran for the refused backend");
+}
+
 }  // namespace
 
 void test_memory_space() {
@@ -296,6 +429,8 @@ int main() {
     test_bounded_pool();
     test_mem_transfer();
     test_memory_space();
+    // Last: it fills the process-global device-backend table (#1381).
+    test_device_backend_registry();
 
 #ifdef LIBTRACER_NO_ATOMIC
     std::printf("\n(built with LIBTRACER_NO_ATOMIC — single-threaded refcount)\n");

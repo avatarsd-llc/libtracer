@@ -30,8 +30,11 @@ because many substrates — MMIO, hardware FIFOs — cannot allocate at all.
 | `mem_borrowed` | nothing (your bytes) | frees only the control block | live/raw, MMIO header, ROM |
 | `mem_pool` | a caller slab | returns the slot to a free list | bounded / MCU / deterministic |
 
-A fourth, `mem_cuda`, is compiled only when `LIBTRACER_WITH_CUDA` is set
-(`core/CMakeLists.txt:252-257`); it needs the CUDA toolkit and is not built in CI.
+A fourth, `mem_cuda`, is **not part of core at all**: it is a tier module under
+[`backends/cuda/`](https://github.com/avatarsd-llc/libtracer/blob/main/backends/cuda/README.md),
+its own CMake project that consumes core (`backends/cuda/CMakeLists.txt:36`). It needs the CUDA
+toolkit and a GPU, so it is never built in CI. Core carries no vendor name and no `#ifdef` for
+it — a `DEVICE`-space backend plugs in by **registering a transfer hook** ([below](#the-device-backend-seam)).
 
 `mem_pool` is the bounded "custom allocator": it carves a **caller-owned** slab
 into fixed slots with the free list threaded *through the slab* (no auxiliary
@@ -212,9 +215,34 @@ for what a shared free list costs under contention.
 :members:
 ```
 
-### Device memory
+(the-device-backend-seam)=
+### Device memory — the registration seam
+
+Core keeps the *interface*; the vendor backend lives in the
+[`backends/`](https://github.com/avatarsd-llc/libtracer/blob/main/backends/cuda/README.md) tier.
+A `DEVICE`-space backend registers the pair `{backend, transfer hook}` and `tr::mem::transfer`
+routes that backend's segments to it — the L0 mirror of
+`tr::net::transport_vertex_t::register_transport_type`
+([ADR-0024 Amendment 1](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0024-mem-cuda-gpu-backend-heterogeneous-rope.md)).
+The key is the **backend object**, not the space tag, so a second vendor (ROCm, an NPU, dmabuf)
+plugs in without adding a name — or an enumerator — to core. A backend nobody registered gets a
+clean `false`, exactly as every unrecognized device segment did before the registry existed.
+
+```{doxygentypedef} tr::mem::device_transfer_fn_t
+:project: libtracer
+```
+
+```{doxygenfunction} tr::mem::register_device_backend
+:project: libtracer
+```
+
+The GPU module's own entry points (built only in the tier):
 
 ```{doxygenfunction} tr::mem::cuda_backend
+:project: libtracer
+```
+
+```{doxygenfunction} tr::mem::register_cuda_backend
 :project: libtracer
 ```
 

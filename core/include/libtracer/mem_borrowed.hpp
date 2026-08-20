@@ -57,7 +57,7 @@ class borrowed_backend_t final : public mem_backend_t {
 }
 
 /** @brief A borrowed backend that reports `DEVICE` space — for non-CPU memory
- *         (and as a CUDA-free stand-in to test the codec's device-link handling). */
+ *         (and as a vendor-free stand-in to test the codec's device-link handling). */
 class borrowed_device_backend_t final : public mem_backend_t {
    public:
     borrowed_device_backend_t() noexcept : mem_backend_t("mem_borrowed_device") {}
@@ -66,7 +66,7 @@ class borrowed_device_backend_t final : public mem_backend_t {
     [[nodiscard]] backend_tag tag() const noexcept override { return backend_tag::BORROWED_DEVICE; }
 
     // Module-set traits (ADR-0047 §2). Bytes are host memory tagged DEVICE (a
-    // CUDA-free stand-in). `mem::transfer` REFUSES it like any other DEVICE-space
+    // vendor-free stand-in). `mem::transfer` REFUSES it like any other DEVICE-space
     // segment (#928): the SPACE tag, not the backend tag, decides CPU-copyability,
     // so the stand-in exercises exactly the refusal a real device link gets.
     static constexpr bool needs_cache_ops =
@@ -119,8 +119,10 @@ namespace tr::view {
  * @brief Wrap caller-owned @p bytes as a `DEVICE`-space (non-CPU) segment.
  *
  * The resulting view reports @ref view_t::is_device; the codec must not
- * CPU-dereference it (docs/adr/0024). The real device backend is `mem_cuda`;
- * this borrow tags existing memory `DEVICE` (e.g. for tests or a custom binding).
+ * CPU-dereference it (docs/adr/0024). A real device backend lives in the
+ * `backends/` tier and registers its own byte-move (`register_device_backend`);
+ * this borrow tags existing memory `DEVICE` (e.g. for tests or a custom binding),
+ * registers nothing, and so `mem::transfer` refuses it.
  */
 [[nodiscard]] inline segment_ptr_t borrow_device(std::span<std::byte> bytes) {
     return segment_ptr_t::adopt(new (std::nothrow)

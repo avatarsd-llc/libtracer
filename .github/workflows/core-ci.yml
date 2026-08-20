@@ -572,7 +572,7 @@ jobs:
         run: |
           apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends clang-format
           mapfile -t files < <(find core/include core/src core/tests core/examples \
-            tests/packaging -name '*.hpp' -o -name '*.cpp')
+            backends tests/packaging -name '*.hpp' -o -name '*.cpp')
           clang-format --dry-run --Werror "${files[@]}"
       - name: Restore workspace ownership for the host runner
         # This job runs as root inside `container:` on a self-hosted runner whose

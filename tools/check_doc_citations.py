@@ -312,8 +312,8 @@ ANCHORS = [
     ('core/include/libtracer/transport.hpp:38', 'using peer_id_t = std::array<std::byte, 16>;'),
     ('core/include/libtracer/transport.hpp:75', 'class bus_link_t {'),
     ("core/include/libtracer/backend.hpp:40", "enum class io_dir_t"),
-    ("core/include/libtracer/backend.hpp:101", "class mem_backend_t"),
-    ("core/include/libtracer/backend.hpp:145",
+    ("core/include/libtracer/backend.hpp:106", "class mem_backend_t"),
+    ("core/include/libtracer/backend.hpp:150",
      "virtual void before_io(view::segment_t* /*seg*/, io_dir_t /*dir*/) noexcept {}"),
     ('core/include/libtracer/backend.hpp:58', "* @brief The address space a backend's bytes live in."),
     ("core/include/libtracer/grammar.hpp:363", "receiver-resource depth bound"),
@@ -417,9 +417,9 @@ ANCHORS = [
     ('core/examples/wire_codec.cpp:71', 'std::printf("encoded POINT{VALUE,VALUE}+CRC: %zu bytes\\n", wire.size());'),
     ('core/examples/wire_codec.cpp:94', 'constexpr int kIters = 50000;'),
     # core/include/libtracer/backend.hpp
-    ('core/include/libtracer/backend.hpp:153',
+    ('core/include/libtracer/backend.hpp:158',
      'virtual void after_io(view::segment_t* /*seg*/, io_dir_t /*dir*/) noexcept {}'),
-    ('core/include/libtracer/backend.hpp:188',
+    ('core/include/libtracer/backend.hpp:251',
      '* @brief Reclaim @p seg through its backend — the module-set destroy dispatch'),
     # core/include/libtracer/can_reassembly.hpp
     ('core/include/libtracer/can_reassembly.hpp:191',
@@ -437,20 +437,20 @@ ANCHORS = [
     ('core/include/libtracer/config.hpp:216', 'static constexpr std::size_t kMaxVertexBytes32 = 72;'),
     ('core/include/libtracer/config.hpp:265', 'using lkv_slot_t = sp_atomic_slot_t;',
      'A many-core host is the case for rebinding this'),
-    ('core/include/libtracer/config.hpp:432', 'using config_t = default_config_t;'),
+    ('core/include/libtracer/config.hpp:457', 'using config_t = default_config_t;'),
     ('core/include/libtracer/config.hpp:98',
      'static constexpr std::size_t kVertexLockStripes = 16;'),
     ('core/include/libtracer/config.hpp:122',
      'static constexpr std::size_t kCacheLineBytes = 64;'),
     ('core/include/libtracer/config.hpp:262',
      '* fragment: `using lkv_slot_t = hazard_slot_t;`. The named type must satisfy the contract in'),
-    ('core/include/libtracer/config.hpp:484',
+    ('core/include/libtracer/config.hpp:509',
      'inline constexpr bool kSpinWaitSafe = tr::graph::config_t::kSpinWaitSafe;'),
-    ('core/include/libtracer/config.hpp:399', 'static constexpr bool kWeaklyOrdered = true;'),
+    ('core/include/libtracer/config.hpp:424', 'static constexpr bool kWeaklyOrdered = true;'),
     # Was pinned to the :316 banner rule, one of three IDENTICAL comment rules in this header —
     # an anchor no scope could ever separate. Re-pinned inside the SAME cited span
     # (the derived-spelling block the table cites) to the first derived spelling, which is unique.
-    ('core/include/libtracer/config.hpp:441',
+    ('core/include/libtracer/config.hpp:466',
      'inline constexpr std::size_t kVertexLockStripes = config_t::kVertexLockStripes;'),
     # core/include/libtracer/crc.hpp
     ('core/include/libtracer/crc.hpp:38', 'constexpr std::array<std::uint32_t, 256> crc32c_table() noexcept {'),
@@ -835,8 +835,8 @@ ANCHORS = [
     ('tools/cortexm0_footprint.py:158', '"-DLIBTRACER_NO_ATOMIC",'),
     ('tools/cortexm0_footprint.py:172', '"--specs=nano.specs",'),
     ('core/tests/CMakeLists.txt:1608', 'add_executable(substrate_test_no_atomic'),
-    ('core/tests/CMakeLists.txt:1621', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
-    ('core/tests/CMakeLists.txt:1622', '    LIBTRACER_NO_ATOMIC'),
+    ('core/tests/CMakeLists.txt:1623', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
+    ('core/tests/CMakeLists.txt:1624', '    LIBTRACER_NO_ATOMIC'),
     # The leading indent is load-bearing: the bare token also appears in the comment
     # three lines above the executable, and an anchor that matches both is not an anchor.
 
@@ -866,11 +866,13 @@ ANCHORS = [
     ('bindings/typescript/packages/client/test/mesh-testbed.test.mjs:24',
      "ADDRESSING: a connection's routing key IS its vertex path"),
     ('core/CMakeLists.txt:63', 'option(LIBTRACER_NET_PLANE'),
-    ('core/CMakeLists.txt:252', 'option(LIBTRACER_WITH_CUDA "Build the mem_cuda GPU backend'),
-    ('core/CMakeLists.txt:275', 'option(LIBTRACER_WITH_QUIC "Configure the libtracer_quic transport module'),
-    ('core/CMakeLists.txt:363', 'write_basic_package_version_file('),
-    ('core/CMakeLists.txt:374', 'if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND EXISTS'),
-    ('core/CMakeLists.txt:381', 'option(LIBTRACER_BUILD_EXAMPLES "Build the core examples"'),
+    # The GPU backend's build moved out of core into its own tier project (#1381), so what
+    # docs/modules/backends.md cites is the tier's target, not a core option.
+    ('backends/cuda/CMakeLists.txt:36', 'add_library(libtracer_cuda STATIC src/mem_cuda.cpp)'),
+    ('core/CMakeLists.txt:271', 'option(LIBTRACER_WITH_QUIC "Configure the libtracer_quic transport module'),
+    ('core/CMakeLists.txt:356', 'write_basic_package_version_file('),
+    ('core/CMakeLists.txt:367', 'if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND EXISTS'),
+    ('core/CMakeLists.txt:374', 'option(LIBTRACER_BUILD_EXAMPLES "Build the core examples"'),
     # `docs/examples/index.md` cited the two `if(LIBTRACER_NET_PLANE)` lines (58, 73). That
     # text appears THREE times in this file and the scope filter cannot separate 58 from 73
     # — a scope must sit ABOVE its candidate, and everything above 58 is also above 73. The
@@ -881,14 +883,14 @@ ANCHORS = [
     ('core/examples/CMakeLists.txt:87', 'if(BUILD_TESTING)'),
     ('core/examples/CMakeLists.txt:92', 'add_test(NAME example_wire_codec COMMAND wire_codec)'),
     ('integrations/esp-idf/libtracer/CMakeLists.txt:44', 'set(LIBTRACER_SRCS'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:173', 'if(CONFIG_LIBTRACER_TRANSPORT_CAN)'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:314', 'if(IDF_TARGET STREQUAL "linux")',
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:177', 'if(CONFIG_LIBTRACER_TRANSPORT_CAN)'),
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:318', 'if(IDF_TARGET STREQUAL "linux")',
      'unlike CONFIG_* is defined in BOTH CMake passes'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:293', 'set(LIBTRACER_EDGE_PIN_SLOTS 8)'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:280',
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:297', 'set(LIBTRACER_EDGE_PIN_SLOTS 8)'),
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:284',
      'set(LIBTRACER_VERTEX_LOCK_STRIPES ${CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES})'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:298', 'if(CONFIG_FREERTOS_UNICORE)'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:174',
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:302', 'if(CONFIG_FREERTOS_UNICORE)'),
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:178',
      'list(APPEND LIBTRACER_SRCS "${LIBTRACER_ROOT}/core/src/transport_can.cpp")'),
 
     # --- #1243: the backfill that made the pin list a COVERAGE list.
@@ -1106,6 +1108,7 @@ def source_map(root: pathlib.Path = None) -> dict:
 CITABLE_NON_SOURCE_PATHS = (
     ".github/workflows/core-ci.yml",
     ".github/workflows/footprint-cortexm0.yml",
+    "backends/cuda/CMakeLists.txt",
     "bench/CMakeLists.txt",
     "bindings/typescript/packages/client/test/mesh-testbed.test.mjs",
     "core/CMakeLists.txt",

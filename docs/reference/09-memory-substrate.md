@@ -414,7 +414,7 @@ Whether a conforming receiver **must** narrow the second of those to a resource 
 
 ## Backend catalog
 
-Each entry: module-set membership, what it wraps, allocation supported, footprint, when to use, when to avoid. Membership in the v1 module set is a statement about the module *set* ([10-module-catalog.md](10-module-catalog.md)), not about what any one implementation has built. The reference implementation provides `mem_heap`, `mem_pool` (a fixed-slot pool plus a synchronized composition of it), `mem_borrowed` and `mem_cuda`; the remaining entries describe the substrate shape a backend for that category has to honor. Footprint figures are order-of-magnitude sizing budgets for a porter, not bench measurements.
+Each entry: module-set membership, what it wraps, allocation supported, footprint, when to use, when to avoid. Membership in the v1 module set is a statement about the module *set* ([10-module-catalog.md](10-module-catalog.md)), not about what any one implementation has built. The reference implementation provides `mem_heap`, `mem_pool` (a fixed-slot pool plus a synchronized composition of it) and `mem_borrowed` in `core/`, plus `mem_cuda` as a `backends/` tier module (core keeps the substrate *interfaces*; a vendor device backend registers itself through `tr::mem::register_device_backend`); the remaining entries describe the substrate shape a backend for that category has to honor. Footprint figures are order-of-magnitude sizing budgets for a porter, not bench measurements.
 
 ### `mem_heap`
 
@@ -491,8 +491,9 @@ Each entry: module-set membership, what it wraps, allocation supported, footprin
 
 ### `mem_cuda`
 
-- **Module set**: v1, opt-in.
+- **Module set**: v1, opt-in — and **out of core**: a tier module under `backends/cuda/` with its own CMake project ([ADR-0024 Amendment 1](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0024-mem-cuda-gpu-backend-heterogeneous-rope.md)). Core holds the substrate *interface* and a registration seam; the vendor specifics live in the tier.
 - **Wraps**: CUDA device memory (`cudaMalloc` / `cudaFree`). The segment reports `DEVICE` space, so the codec must never CPU-dereference it; a device segment backs a VALUE payload inside a heterogeneous host+device rope ([ADR-0024 — the `mem_cuda` GPU backend](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0024-mem-cuda-gpu-backend-heterogeneous-rope.md)).
+- **Byte-move**: registered, not built in. It calls `tr::mem::register_device_backend(cuda_backend(), &cuda_transfer)`, and `tr::mem::transfer` routes that backend's `DEVICE` segments to that hook. A device backend nobody registered gets a clean `false` — the same refusal every unrecognized device segment has always got.
 - **Allocation**: yes.
 - **When to use**: a host that publishes tensors already resident on the GPU.
 - **When to avoid**: any MCU target.
@@ -634,7 +635,7 @@ The method carries the *timing* (before vs. after the transfer); the `io_dir_t` 
 
 Cortex-M0 / -M3 / -M4 without cache: the hooks are no-ops.
 
-The one in-tree caller of the hooks is **`tr::mem::transfer(seg, host, io_dir_t)`** ([ADR-0047 §2 — build-time closed module sets, compile-time seams](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0047-build-time-closed-module-sets-compile-time-seams.md)) — the module-set's tag-dispatched host↔device byte-mover. `CPU_TO_DEVICE` copies host bytes into the segment; `DEVICE_TO_CPU` copies them back out. A host-addressable backend transfers with a `memcpy`, bracketed by `before_io`/`after_io` **only** when its `needs_cache_ops` trait is set (below), so a cacheless backend folds the bracket away at compile time. A `DEVICE`-space backend (`mem_cuda`) routes to its device copy (`cudaMemcpy` plus the `after_io` stream barrier). One seam covers both, rather than a CUDA-named pair of free functions.
+The one in-tree caller of the hooks is **`tr::mem::transfer(seg, host, io_dir_t)`** ([ADR-0047 §2 — build-time closed module sets, compile-time seams](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0047-build-time-closed-module-sets-compile-time-seams.md)) — the module-set's tag-dispatched host↔device byte-mover. `CPU_TO_DEVICE` copies host bytes into the segment; `DEVICE_TO_CPU` copies them back out. A host-addressable backend transfers with a `memcpy`, bracketed by `before_io`/`after_io` **only** when its `needs_cache_ops` trait is set (below), so a cacheless backend folds the bracket away at compile time. A `DEVICE`-space segment takes the **registry** arm instead: `tr::mem::transfer` looks its backend up in the `register_device_backend` table and calls that backend's own hook (for `mem_cuda`, `cudaMemcpy` plus the `after_io` stream barrier), or answers `false` when nothing is registered for it. One seam covers both, rather than a vendor-named pair of free functions or a vendor `#ifdef` in core.
 
 ### Module-set traits
 

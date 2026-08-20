@@ -9,9 +9,9 @@
  *
  * Including this header pulls in every layer. A translation unit that needs one layer includes
  * that layer's header directly. The opt-in pieces are deliberately absent and are included by
- * name: the WebSocket, CAN, QUIC and WebTransport transports, the CUDA backend, the lazy
- * decode tier, and the ACL policy seam — each carries dependencies a minimal node should not
- * pay for.
+ * name: the WebSocket, CAN, QUIC and WebTransport transports, the GPU device backend (now a
+ * `backends/` tier module, docs/adr/0024), the lazy decode tier, and the ACL policy seam —
+ * each carries dependencies a minimal node should not pay for.
  */
 #pragma once
 

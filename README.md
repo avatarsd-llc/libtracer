@@ -88,6 +88,7 @@ A deliberate separation lets vendors build proprietary products on top without f
 libtracer/
 ├── core/                Reference C/C++ implementation (Apache 2.0) — src, include, tests
 │   └── examples/        Runnable, CI-built example programs (CC0)
+├── backends/            Vendor L0 memory backends — cuda/ (GPU); each its own CMake project
 ├── bindings/            Native cores — rust/ (crates.io), typescript/ (npm @avatarsd-llc/*)
 ├── integrations/        Platform packaging — esp-idf/ (working) · platformio/ · esphome/ · arduino/
 ├── bench/               libtracer↔Zenoh benchmark harness (feeds the live perf page)

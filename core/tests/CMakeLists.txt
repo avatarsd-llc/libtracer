@@ -1609,6 +1609,8 @@ add_executable(substrate_test_no_atomic
     substrate_test.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/frame.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/backend_set.cpp
+    # backend_set.cpp's multi-member `transfer` dispatches its DEVICE arm here (#1381).
+    ${CMAKE_CURRENT_SOURCE_DIR}/../src/device_backend.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/mem_heap.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/../src/mem_pool.cpp
     # frame.cpp's decode spills its walk stack to mem::heap_source() (#588).
@@ -1715,14 +1717,10 @@ if(LIBTRACER_WITH_QUIC)
         "TSAN_OPTIONS=suppressions=${CMAKE_CURRENT_SOURCE_DIR}/tsan-msquic.supp")
 endif()
 
-# mem_cuda GPU test — only with LIBTRACER_WITH_CUDA; run on a real GPU locally
-# (tools/test-cuda.sh), never in CI.
-if(LIBTRACER_WITH_CUDA)
-    add_executable(cuda_test cuda_test.cpp)
-    target_link_libraries(cuda_test PRIVATE libtracer)
-    libtracer_test_warnings(cuda_test)
-    add_test(NAME cuda COMMAND cuda_test)
-endif()
+# The GPU backend's test moved out with the backend itself (#1381): it is
+# `backends/cuda/tests/cuda_test.cpp`, built and run by the tier's own CMake project
+# (tools/test-cuda.sh), never in CI. What core keeps under test is the SEAM the tier
+# plugs into — the device-backend registry properties in substrate_test, which need no GPU.
 
 # #874 — the shared runner (test_support.hpp), under test by itself. Every other harness
 # here reports its verdict THROUGH that header, so a runner that stopped counting would

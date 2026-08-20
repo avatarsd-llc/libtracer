@@ -57,8 +57,8 @@ enum class alloc_hint_t : std::uint32_t {
 /**
  * @brief The address space a backend's bytes live in.
  *
- * `HOST` bytes are CPU-addressable; `DEVICE` bytes are not (e.g. CUDA device
- * memory — docs/adr/0024). The codec must never CPU-dereference a `DEVICE` link:
+ * `HOST` bytes are CPU-addressable; `DEVICE` bytes are not (e.g. GPU/accelerator
+ * device memory — docs/adr/0024). The codec must never CPU-dereference a `DEVICE` link:
  * such a segment may back only an opaque VALUE payload, with the header/trailer
  * kept in a `HOST` segment (a heterogeneous host+device rope).
  */
@@ -75,8 +75,14 @@ enum class mem_space_t : std::uint8_t {
  * dispatch (`segment_ptr_t::reset` → @ref destroy_dispatch) is a `switch` →
  * devirtualized direct call rather than a vtable indirect — foldable to a single
  * direct call when a target links only one backend. An unrecognized tag
- * (`UNKNOWN`, or a backend not in the fast set — e.g. `CUDA`) routes to the
- * backend's virtual `destroy`, so dispatch is correct regardless.
+ * (`UNKNOWN`, or any backend outside the fast set — every out-of-core device
+ * backend is) routes to the backend's virtual `destroy`, so dispatch is correct
+ * regardless.
+ *
+ * The set is closed over the backends `core/` itself compiles. A vendor backend
+ * from the `backends/` tier does **not** get an enumerator: it is identified by
+ * its `mem_backend_t` object (@ref register_device_backend), which is what
+ * `destroy` already routes on, so core never has to name it.
  */
 enum class backend_tag : std::uint8_t {
     UNKNOWN = 0,     /**< @brief No fast-path tag → virtual `destroy` fallback. */
@@ -84,7 +90,6 @@ enum class backend_tag : std::uint8_t {
     POOL,            /**< @brief `mem_pool` (`%mem_pool.hpp`). */
     BORROWED,        /**< @brief `mem_borrowed` (`%mem_borrowed.hpp`). */
     BORROWED_DEVICE, /**< @brief `mem_borrowed` device-space variant. */
-    CUDA,            /**< @brief `mem_cuda` (device; dispatched via the virtual fallback). */
 };
 
 /**
@@ -162,8 +167,9 @@ class mem_backend_t {
     /**
      * @brief The address space this backend's segments live in (default `HOST`).
      *
-     * A `DEVICE` backend (e.g. `mem_cuda`) must override this; segments inherit
-     * it (`%segment.hpp`), and the codec uses it to skip CPU access to device links.
+     * A `DEVICE` backend (one from the `backends/` tier) must override this;
+     * segments inherit it (`%segment.hpp`), and the codec uses it to skip CPU
+     * access to device links.
      */
     [[nodiscard]] virtual mem_space_t space() const noexcept { return mem_space_t::HOST; }
 
@@ -185,6 +191,63 @@ class mem_backend_t {
 };
 
 /**
+ * @brief The device byte-move a `DEVICE`-space backend registers with
+ *        @ref register_device_backend — @ref transfer's out-of-core arm.
+ *
+ * Same contract as @ref transfer, narrowed to one backend's segments: move
+ * `host.size()` bytes between @p seg and @p host in direction @p dir, `false` on
+ * refusal. A plain function pointer, not a `std::function`: the seam must cost a
+ * pointer and never allocate (ADR-0047 §2).
+ */
+using device_transfer_fn_t = bool (*)(view::segment_t* seg, std::span<std::byte> host,
+                                      io_dir_t dir) noexcept;
+
+/**
+ * @brief Register @p fn as the byte-mover @ref transfer routes @p backend's
+ *        `DEVICE`-space segments through.
+ *
+ * The L0 mirror of `tr::net::transport_vertex_t::register_transport_type`: a
+ * module outside core supplies the value, the composition root wires it in, and
+ * core never names the module (docs/adr/0024 Amendment 1; the module seam is
+ * docs/adr/0043 §1). The `backends/` tier holds the first in-tree caller.
+ *
+ * Keyed by the **backend object**, not by @ref mem_space_t — `DEVICE` is one
+ * enumerator shared by every accelerator, and the segment's `backend` pointer is
+ * already the identity `destroy` routes on — so a second vendor plugs in without
+ * adding a name to core.
+ *
+ * Bounded and allocation-free: the table holds @ref tr::mem::kDeviceBackendSlots
+ * entries (`%config.hpp`), so registration cannot fail for lack of heap, only for
+ * lack of a slot. Registering the same @p backend twice **replaces** its hook
+ * (`insert_or_assign` semantics), so a backend and its hook can never disagree.
+ *
+ * @note Call at setup, before frames flow, from one thread — the same contract
+ *       `register_transport_type` carries. Concurrent *lookups* by @ref transfer
+ *       are safe against a completed registration.
+ * @retval false @p fn was null, or the table is full — nothing was registered.
+ */
+[[nodiscard]] bool register_device_backend(const mem_backend_t& backend,
+                                           device_transfer_fn_t fn) noexcept;
+
+namespace detail {
+
+/**
+ * @brief Look @p seg's backend up in the @ref register_device_backend table and
+ *        run its hook — @ref transfer's whole `DEVICE`-space arm.
+ *
+ * Defined in `device_backend.cpp`, a TU of its own so that a single-backend
+ * (`LIBTRACER_BACKEND_SET_POOL_ONLY`) target, which has no device arm at all,
+ * never links the table.
+ * @retval false Nothing is registered for that backend (the pre-registry
+ *               behaviour for every unrecognized `DEVICE` segment), or the
+ *               registered hook refused.
+ */
+[[nodiscard]] bool device_transfer(view::segment_t* seg, std::span<std::byte> host,
+                                   io_dir_t dir) noexcept;
+
+}  // namespace detail
+
+/**
  * @brief Reclaim @p seg through its backend — the module-set destroy dispatch
  *        (ADR-0047 §2), called by `segment_ptr_t::reset` at refcount zero.
  *
@@ -201,9 +264,8 @@ void destroy_dispatch(view::segment_t* seg) noexcept;
  *        @p host in direction @p dir — the module-set host↔device transfer
  *        (ADR-0047 §2), bracketed by the backend's cache hooks.
  *
- * The single tag-dispatched byte-mover the codec routes a copy through,
- * generalizing (and retiring) the CUDA-named `cuda_copy_from_host` /
- * `cuda_copy_to_host` free functions:
+ * The single tag-dispatched byte-mover the codec routes a copy through, which
+ * replaced the vendor-named per-device copy pair the module set retired:
  * - `io_dir_t::CPU_TO_DEVICE` copies @p host **into** @p seg (host is the source);
  * - `io_dir_t::DEVICE_TO_CPU` copies @p seg **out to** @p host (host is the sink).
  *
@@ -211,9 +273,11 @@ void destroy_dispatch(view::segment_t* seg) noexcept;
  * `before_io`/`after_io` only when its `static constexpr needs_cache_ops` trait
  * is set — so a cacheless backend (every one today) folds the hooks away at
  * compile time (they are the traits' first in-tree consumer, review finding #8).
- * A `DEVICE`-space backend (`mem_cuda`, built only with `LIBTRACER_WITH_CUDA`)
- * routes to its device copy — where `after_io` gets its first caller (the CUDA
- * stream barrier). Defined in `backend_set.cpp` (the module-set TU).
+ * A `DEVICE`-space segment takes the registry arm instead: its backend's
+ * @ref register_device_backend hook, or `false` when nothing is registered for it
+ * — no host arm ever sees a pointer the CPU may not dereference (#928). That is
+ * where `after_io` gets its first caller, in the `backends/` tier module that owns
+ * the device copy (docs/adr/0024). Defined in `backend_set.cpp` (the module-set TU).
  *
  * @param seg  The segment to read from or write to; `nullptr` yields `false`.
  * @param host CPU-addressable bytes; a `.size()` larger than @p seg's yields `false`.

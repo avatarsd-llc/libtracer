@@ -176,10 +176,14 @@ satisfy.
 :project: libtracer
 ```
 
-The one derived constant that is *not* in `tr::graph`: the memory layer reads its own
-spelling, so that L0 never has to name an L4 type.
+The two derived constants that are *not* in `tr::graph`: the memory layer reads its own
+spellings, so that L0 never has to name an L4 type.
 
 ```{doxygenvariable} tr::mem::kSpinWaitSafe
+:project: libtracer
+```
+
+```{doxygenvariable} tr::mem::kDeviceBackendSlots
 :project: libtracer
 ```
 

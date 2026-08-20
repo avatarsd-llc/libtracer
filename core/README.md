@@ -69,4 +69,4 @@ ctest --test-dir build --output-on-failure
 Separate modules (a host links a module only if it uses it; the default build has zero external dependencies and never compiles module sources):
 
 - **`libtracer_quic`** — the msquic QUIC transport (`-DLIBTRACER_WITH_QUIC=ON` configures the target; `quic_test` joins the suite). Needs [msquic](https://github.com/microsoft/msquic); point `CMAKE_PREFIX_PATH` at its install prefix if it isn't system-installed. Wire it in with `net.register_transport_type("quic", tr::net::quic_transport_factory())`.
-- **`mem_cuda`** — the GPU backend (`-DLIBTRACER_WITH_CUDA=ON`). Needs the CUDA toolkit; tested locally via `tools/test-cuda.sh` (no GPU in CI).
+- **`libtracer_cuda`** — the GPU device backend, and no longer part of core: it is a tier module under [`backends/cuda/`](../backends/cuda/README.md), its own CMake project that consumes core (`cmake -S backends/cuda -B build/cuda`). Needs the CUDA toolkit; tested locally via `tools/test-cuda.sh` (no GPU in CI). It plugs in through `tr::mem::register_device_backend`, the memory layer's mirror of `register_transport_type` — nothing under `core/` names CUDA.
