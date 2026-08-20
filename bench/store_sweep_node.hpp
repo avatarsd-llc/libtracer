@@ -657,11 +657,13 @@ class node_t {
 
         // The `mr` channel is a `std::pmr` seam, so it reaches its store through #1401's
         // adapter. The baseline keeps the process-default resource, which is what ships.
-        if (arm_ != arm_t::H_BASELINE) {
-            st_.mr_adapter = std::make_unique<tr::mem::source_resource_t>(*mr_src_);
-        } else if (count_channels) {
-            // Even the baseline routes `mr` through the decorator when counting, so the
-            // seam-reachability canary can prove the channel is drawn from at all.
+        // The baseline is the ONE arm whose `mr` normally stays on the process-default
+        // resource, which is exactly what makes it the control. It is routed through the
+        // adapter ONLY when counting, so the census can say how many blocks the channel draws
+        // at all — a reference the injected arms' counts are read against. The consequence is
+        // disclosed rather than hidden: the baseline's `hwm` / `chan` rows describe a very
+        // slightly different composition from its TIMED rows, which never see the adapter.
+        if (arm_ != arm_t::H_BASELINE || count_channels) {
             st_.mr_adapter = std::make_unique<tr::mem::source_resource_t>(*mr_src_);
         }
     }
