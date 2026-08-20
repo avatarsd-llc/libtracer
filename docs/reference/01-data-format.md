@@ -179,16 +179,24 @@ The TLV's wire-time is the **parent's wire-time + offset**. Use for children ins
 
 - Range: ±2.147 seconds. Plenty for intra-frame sample timing.
 - "Parent" means the wrapping structured TLV's `trailer_ts` (if present), or — if the wrapping structured TLV has no `trailer_ts` — the next outermost ancestor that does.
-- A TLV with `TF=1` whose ancestor chain has no `trailer_ts` MUST be rejected with `ERROR{tr::path::invalid}` (the relative timestamp is meaningless without an anchor).
+- A `TF=1` stamp whose ancestor chain has no `trailer_ts` is **anchorless** and names no time. It MUST be rejected with `ERROR{tr::path::invalid}` **by the party that CONSUMES the stamp as a time** — not by the decoder, and not by a relay. See the binding note directly below.
 
-> ⚠️ **Conformance gap — the reference codec does not perform this check.** `tr::frame` records the relative flag and the delta and returns success, so an anchorless `TF=1` frame decodes cleanly instead of being rejected; nothing walks the ancestor chain and no TS path raises `PATH_INVALID`. The requirement above is unchanged — this is a gap in the implementation, and §pitfalls below describes exactly what it produces (timestamps that parse, sort and plot, near the Unix epoch).
+**Where the anchorless-reject MUST binds: at the CONSUMER, never at the decoder and never at a relay** ([#1449](https://github.com/avatarsd-llc/libtracer/issues/1449)). Three obligations, one per role, and they do not overlap:
+
+- **Decode records and succeeds.** `tr::frame` records the relative flag and the delta and returns success. An anchorless `TF=1` frame is a well-formed frame — it decodes cleanly, no TS path raises `PATH_INVALID`, and nothing walks the ancestor chain at decode. That is the specified behaviour, not a shortfall in it.
+- **A relay carries it verbatim.** A forwarder re-emits the outer `TS`/`TF` bits and the trailer bytes untouched (§Writer-side status below), on the same relay-opacity precedent as an escape record: a hop that does not read a field does not get to reject on it. This is why the MUST cannot bind at decode — a decoder-side check would make forwarders reject frames they are required to carry opaquely, which is a routing-correctness failure rather than a validation nicety.
+- **The consumer rejects.** The party that reads the stamp *as a time* — a resolve walk, a value consumer, an application reading acquisition time off the wire — is the party holding the ancestor chain and the party harmed by a missing anchor, so it is the party that answers `ERROR{tr::path::invalid}`. The reply-echo path declines a `TF=1` root for the same reason: it has no anchor to echo against.
+
+The reference core already implements exactly this split (`fwd_frame_view.hpp`, `op_resolve_walk.hpp`), and a passing test covers it. Earlier revisions of this section read the MUST as a **decoder** obligation and called the codec's non-enforcement a "conformance gap"; that reading was wrong in normative text, and since this page is incorporated in full into [the spec](../spec/v1.md), it is corrected here as an **erratum**. Nothing about the wire surface changes: the same bytes are conforming before and after.
+
+> **`TF=1` is RESERVED grammar, not dead grammar.** No conforming writer mints it today (§Writer-side status below keeps the reference writer gated), but the form stays specified, decodable and relayable: `TF=1` is additive future surface this protocol does not yet use, never surface it removes. Ruled in the 2026-08-20 grilling session and transcribed in [RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.2.1 (Amendment 1, consequence 4).
 
 ### Writer-side status (#1109)
 
 The reference implementation now writes the wire-trailer TS as well as reading it — a plain enhancement, since the trailer above was already fully specified. What ships, and what deliberately does not:
 
 - **Stamping is per-frame opt-in from an INJECTED clock.** `tr::wire::stamp_ts` (`frame.hpp`) sets `opt.TS` and the trailer value together; the clock is the `wire_clock_t` seam the producer supplies — the library never reads ambient time on any frame path. The contract on the value is `CONTEXT.md`'s `origin_timestamp`: per-producer monotonic, wall-clock-advisory. A producer that does not stamp pays nothing — the same shape as the CRC opt-in above.
-- **TF=0 only, on purpose.** The relative form's anchorless-reject rule is the conformance gap flagged above; writing TF=1 before that check exists would mint exactly the near-epoch garbage §pitfalls describes. The byte layout for **both** forms has one home (`wire::store_trailer_ts` / `emit_trailer_ts`), and the frame builders (`stack_writer::header`, the reply emit cursor) accept both forms' TS/TF bits — so the TF=1 writer is a gated follow-up on the anchor check, not a redesign, and the stream shape proposed on #879 reuses this plumbing as-is.
+- **TF=0 only, on purpose.** Wire time is the outermost frame's trailer and is always absolute — [RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.2.1 makes that the *design*, not a waiting room. The writer additionally stays **gated** on the consumer-side anchor check landing: minting TF=1 while no consumer enforces the anchor rule would produce exactly the near-epoch garbage §pitfalls describes. The byte layout for **both** forms has one home (`wire::store_trailer_ts` / `emit_trailer_ts`), and the frame builders (`stack_writer::header`, the reply emit cursor) accept both forms' TS/TF bits — so the TF=1 writer is a gated follow-up on the anchor check, not a redesign, and the stream shape proposed on #879 reuses this plumbing as-is.
 - **A forwarder preserves the stamp verbatim.** The FWD hop rebuild keeps the outer `TS`/`TF` bits and re-emits the trailer bytes, so an origin's stamp survives to the terminus. An inbound **CRC does not cross a hop**: the rebuilt body invalidates it by construction, so `CR` is dropped rather than forwarded stale.
 - **The terminus ECHOES a TF=0 request stamp on its reply** — error replies included. This is the ICMP-echo RTT construction: `RTT = origin_now − echoed_stamp`, computed entirely on the origin's clock, no request id, no clock sync, no per-request state. The echo is a capability, not an obligation — a reply without a stamp means "this peer does not echo" and is fully conforming; stored values remain trailer-less at rest (the ADR-0041 trailer-slice is unchanged — only the reply's own outer frame answers a stamp with a stamp).
 - **The silent-zero is loud.** `encode` refuses (`empty vector`) a TLV claiming `opt.TS` with no trailer value, or a value whose form contradicts `opt.TF` — it no longer emits a stamp of 1970-01-01. Likewise `wire::emit_tlv`, which writes nothing after the body, clears trailer bits by construction instead of minting a frame that claims a trailer it does not carry.
@@ -196,19 +204,26 @@ The reference implementation now writes the wire-trailer TS as well as reading i
 
 ### Use case: 1 GS/s ADC with per-sample timing
 
-Without relative TS, a tight ADC stream would carry an 8-byte timestamp on every slice — bandwidth waste. With relative TS:
+A tight ADC stream must not spend 8 bytes of timestamp on every slice. It does not — and it does not use the trailer to avoid it either. Per [RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.2.1 (Amendment 1, 2026-08-21) there are **three clocks with three separate carriers**, and a sample's acquisition time is not one of the trailer's jobs:
 
 ```
-USER_SAMPLE_RECORD (PL=1) {            ; outer carries absolute TS in trailer
-  trailer_ts (u64): T_window_start
+BATCH (PL=1, user-range record type)   ; one written value, N samples
+  trailer_ts (u64): T_tx               ; WIRE time — when this frame left the
+                                       ;   interface. OUTERMOST frame only, TF=0.
+                                       ;   Not a sample time. One per frame, not per sample.
   ...children:
-    VALUE { sample_0, trailer_ts (i32): +0   }
-    VALUE { sample_1, trailer_ts (i32): +1ns }
+    TIME  <u64 LE ns>: T_0             ; SAMPLE time of frame 0 — the batch BASE.
+                                       ;   One per batch, inside the payload.
+    VALUE { sample_0 }                 ; homogeneous children, no trailer of their own
+    VALUE { sample_1 }
     ...
-}
 ```
 
-A 4-byte sample with i32 relative TS in trailer = 12 bytes total, three int32 chunks at 4-byte aligned offsets (`type,opt,length`, `payload`, `trailer_ts`) — see worked examples below.
+- **A uniform stream spends 0 bytes per sample on time.** `t(i) = T_0 + i × dt_ns`, where `dt_ns` is the nominal sample period the stream's **descriptor** declares (RFC-0025 §4.3 — a `SETTINGS` LKV beside the data vertex, negotiated once, never repeated per batch). A 1 GS/s capture declares `dt_ns = 1` once and transmits no per-sample timing at all: a 4-byte sample costs 4 bytes.
+- **A non-uniform stream (`dt_ns == 0`) carries one packed `i32` offset array**, one signed LE ns offset from `T_0` per sample, in frame order, in a single child — 4 bytes per sample in one contiguous run, decodable in one span, with no per-child TLV header and no anchor walk.
+- **The trailer stays wire time.** `T_tx` answers "when did this frame leave an interface", which is a transport-diagnostics and RTT question; conflating it with `T_0` reports every hop's queueing delay as sensor jitter (§pitfalls).
+
+Earlier revisions of this section worked this same use case with an absolute trailer on the parent and a `TF=1` trailer on every child — the shape §"Application-domain timestamps are NOT the wire-trailer TS" below calls a bug, on the very page that prescribes the rule. That contradiction is what this erratum retires ([#1450](https://github.com/avatarsd-llc/libtracer/issues/1450)); the retired shape also cost 4 trailer bytes per sample where the amended one costs 0.
 
 ### Application-domain timestamps are NOT the wire-trailer TS
 
@@ -218,11 +233,12 @@ Application-domain timestamps (sample acquisition time, sensor exposure window, 
 
 | Concern | Mechanism |
 | ---- | ---- |
-| When did the sender put this on the wire? | wire-trailer `TS` (this section) |
-| When was the sample acquired / produced? | `TIME` TLV inside a structured payload |
+| When did the sender put this on the wire? (**WIRE / TX**) | wire-trailer `TS` (this section), outermost frame only, always `TF=0` |
+| When was the sample acquired / produced? (**SAMPLE**) | `TIME` (`0x0C`) TLV inside a structured payload — or derived from a batch base plus the descriptor's `dt_ns` |
+| When should the consumer present it? (**PLAYOUT**) | *nowhere on the wire* — the receiver derives it from the RTT and clock offset it estimates off read/write carrier echoes |
 | When did this vertex last receive a write? | ⚠️ *no mechanism today* — `:liveness.last_seen_ns` is unimplemented ([#586](https://github.com/avatarsd-llc/libtracer/issues/586)) |
 
-Conflating them is a bug; the protocol keeps them separate by construction.
+Conflating them is a bug; the protocol keeps them separate by construction. This is the three-clock model of [RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.2.1, and cross-writer *ordering* is none of the three — that is [ADR-0019](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0019-per-producer-monotonic-origin-timestamp.md)'s per-producer monotonic HLC stamp.
 
 ---
 
@@ -435,7 +451,7 @@ Each entry pairs a rule stated above with the failure mode an implementation tha
 - **Trailer bytes are not payload bytes.** A forwarder that re-emits the received byte range verbatim carries the upstream's wire-time and a CRC computed over a different span. Strip at ingress, attach fresh at egress; the payload region is what stays byte-identical.
 - **Reserved bits are a reject, not a mask.** An implementation that clears bits 7 and 0 before decoding accepts frames a conforming receiver rejects, and absorbs exactly the silent semantic drift the reject exists to prevent. Both bits are frozen for the lifetime of v1, so the check can be hardened at compile time.
 - **Wire-trailer `TS` is not acquisition time.** An implementation that surfaces `trailer_ts` to the application as the sample timestamp reports every forwarding hop's queueing delay as sensor jitter. Acquisition time is a `TIME` TLV inside the payload.
-- **A relative timestamp without an anchor is an error, not a zero.** `TF=1` whose ancestor chain carries no `trailer_ts` MUST be rejected. An implementation that defaults the missing anchor to zero produces timestamps that parse, sort and plot — near the Unix epoch.
+- **A relative timestamp without an anchor is an error, not a zero — and the error belongs to the CONSUMER.** `TF=1` whose ancestor chain carries no `trailer_ts` MUST be rejected by whoever reads the stamp as a time. An implementation that defaults the missing anchor to zero produces timestamps that parse, sort and plot — near the Unix epoch. An implementation that instead moves the check into its *decoder* fails the other way: its forwarders reject frames they are required to relay opaquely, turning a timestamp question into a routing outage.
 - **`length` is validated before anything is allocated.** An implementation that sizes a buffer from `length` before checking it against the bytes actually available lets a `LL=1` frame claiming 4 GiB in a 60-byte datagram exhaust the receive pool, from an unauthenticated peer.
 
 ---
