@@ -353,7 +353,7 @@ transport_tcp_server::transport_tcp_server(std::uint16_t bind_port, mem::mem_bac
                                            std::size_t max_frame, std::size_t max_peers,
                                            bool peer_named, std::size_t recv_stack,
                                            std::uint32_t liveness_window_ms)
-    : slot_server_t(max_peers, peer_named, liveness_window_ms), backend_(backend) {
+    : stream_server_base_t(max_peers, peer_named, liveness_window_ms), backend_(backend) {
     max_frame_ = length_prefix_framer::configured_cap(max_frame);  // tighten-only (#1035)
     if (!bind_listen(bind_port)) return;
     start([this] { run(); }, recv_stack);
@@ -449,7 +449,11 @@ void transport_tcp_server::on_readable(session_base_t& base, const std::byte* da
     // per-frame consequence of which sink someone happened to install — and this
     // reads a member instead of taking the slot's mutex once per frame. `bus_mode()`
     // is that member conjoined with whether this BUILD carries a bus module at all
-    // (#375 deliverable 3); at the default binding it IS the member load.
+    // (#375 deliverable 3); at the default binding it IS the member load. The
+    // peer-named arm goes through `deliver_to_peer`, the STATIC seam whose live half
+    // is `bus_slot_server_t`'s and whose inert half is the flat arm's (#1438) — a
+    // direct call either way, because which arm this server derives from is a
+    // compile-time fact, so the per-frame path gained no dispatch.
     const auto res = s.framer.feed(
         *backend_, max_frame_, data, len,
         [this, &s](view::segment_ptr_t seg, std::size_t flen) {
@@ -460,7 +464,7 @@ void transport_tcp_server::on_readable(session_base_t& base, const std::byte* da
             // per-frame tag at all, and one unconditional 8-byte store serves both.
             delivering_ = s.handle;
             if (bus_mode())
-                peer_rx_.deliver(s.handle, std::move(frame));
+                deliver_to_peer(s.handle, std::move(frame));
             else
                 rx_.deliver(std::move(frame));
         },

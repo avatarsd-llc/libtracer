@@ -13,8 +13,11 @@
  * udp keeps its datagram shape (one connectionless fd, no peer teardown).
  * The MULTI-peer stream servers (tcp / ws) layer one more tier on top —
  * slot_server_t, the slot vector + accept/poll/teardown machinery and the
- * bus_link_t query trio (#871); only their framing and handshake differ, and
- * those are its two variance points.
+ * peer query trio (#871); only their framing and handshake differ, and
+ * those are its two variance points. The ADR-0044 BUS FACET is a tier below
+ * that again (bus_slot_server_t / flat_slot_server_t, selected by
+ * stream_server_base_t), so a build with no bus module carries a listener
+ * whose layout does not contain it (#1438).
  */
 #pragma once
 
@@ -29,6 +32,8 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "libtracer/transport.hpp"
@@ -596,11 +601,21 @@ class stream_endpoint_t : protected posix_endpoint_t {
  * line-for-line lives here exactly once — the slot struct and its threading
  * rule, the bind/listen/getsockname bring-up, the free-slot-or-grow accept
  * with its @p max_peers refusal and `p<slot>` naming, the poll loop, the
- * two-phase teardown, the @ref bus_link_t query trio, and the broadcast's
+ * two-phase teardown, the peer query trio, and the broadcast's
  * pristine-iovec-copy-per-peer fan-out. Only the FRAMING and the HANDSHAKE
  * differ between the two servers, and those are the variance points below
  * (the `msquic_endpoint_t` shape: runtime virtuals, appropriate per ADR-0047
  * §4 because peer arrival/departure is wiring-frequency, not hot path).
+ *
+ * **It is NOT a @ref bus_link_t** (#1438, the provider half of #375
+ * deliverable 3). The queries a bus facet needs are all here — they are
+ * questions about the slot table, which exists either way — but the FACET
+ * itself (the base subobject, its `peer_rx_` slot, its two peer-lifecycle
+ * notifier pairs and their vtable entries) lives one tier down in
+ * @ref bus_slot_server_t, so a build that closed the ADR-0044 bus module out
+ * carries a listener whose LAYOUT does not contain it. Concrete servers
+ * derive from `%tr::net::stream_server_base_t`, which is that arm or
+ * @ref flat_slot_server_t according to @ref tr::net::kBusLinks.
  *
  * **Slot threading rule, ONE rule for both halves of a slot's lifecycle:**
  * @ref session_base_t::fd / @ref session_base_t::open are atomics MUTATED
@@ -618,8 +633,12 @@ class stream_endpoint_t : protected posix_endpoint_t {
  *          the poll thread dispatches the variance points below into the
  *          derived object, which must still be alive when it does.
  */
-class slot_server_t : public transport_t, public bus_link_t, protected stream_endpoint_t {
+class slot_server_t : public transport_t, protected stream_endpoint_t {
    public:
+    /** @brief The peer-visitor shape the query trio speaks — @ref bus_link_t's, so the
+     *         facet arm's overrides are the same signature and no consumer sees two. */
+    using peer_visitor_t = bus_link_t::peer_visitor_t;
+
     /**
      * @brief True if the listen socket is bound and listening — and, on a target that closed
      *        the bus module out, only if this server did not ask to be peer-named (#375).
@@ -676,25 +695,9 @@ class slot_server_t : public transport_t, public bus_link_t, protected stream_en
     }
 
     /**
-     * @brief The @ref bus_link_t facet (ADR-0044) when constructed `peer_named`, else
-     *        `nullptr`. With the facet the router tags inbound frames per peer (each
-     *        peer gets its own return-route identity and a `dst` segment routes back to
-     *        that one session); without it the link keeps point-to-point hop naming —
-     *        inbound frames carry the registered child NAME and `send()` fans out to
-     *        every open peer.
-     * @note Departure eviction (RFC-0009 §D.5) follows the same split: peer-named mode
-     *       evicts just the departed peer's edges (`notify_peer_down(name)`), while FLAT
-     *       mode reports the whole link down (`notify_down()`) — but only when the LAST
-     *       open session departs (#889). A flat link has ONE routing identity for all its
-     *       peers (the registered child NAME), so firing that on a mid-life close would
-     *       evict the surviving peers' edges too.
-     */
-    [[nodiscard]] bus_link_t* bus() override { return bus_mode() ? this : nullptr; }
-
-    /**
      * @brief The mode authority (#889): the `peer_named` this server was constructed with.
      *
-     * The ONE answer to "which mode is this link in" — @ref bus, the two servers' per-frame
+     * The ONE answer to "which mode is this link in" — `bus()`, the two servers' per-frame
      * tier select, and the departure branch in @ref teardown_slot all key off this flag (not
      * off whether a peer sink happens to be installed), and `bus_link_t` refuses every
      * peer-named wiring call while it is false.
@@ -702,11 +705,15 @@ class slot_server_t : public transport_t, public bus_link_t, protected stream_en
      * It reads @ref bus_mode, not the constructor argument, so the one answer stays one
      * answer on a target that closed the bus module out: there the server is FLAT in every
      * respect, and @ref ok is what reports that the configuration was refused (#375).
+     *
+     * Not `override` here since #1438: this tier is not a @ref bus_link_t, so there is no
+     * virtual to override until @ref bus_slot_server_t re-declares it. The ANSWER is
+     * unchanged, and so is every caller's spelling.
      */
-    [[nodiscard]] bool peer_named() const noexcept override { return bus_mode(); }
+    [[nodiscard]] bool peer_named() const noexcept { return bus_mode(); }
 
     /** @brief Visit the currently-OPEN peers' names, `p<slot>` (#426). */
-    void enumerate_peers(const peer_visitor_t& visit) const override;
+    void enumerate_peers(const peer_visitor_t& visit) const;
 
     /**
      * @brief Resolve an inbound handle back to its peer name, `p<slot>` (#1294).
@@ -716,8 +723,7 @@ class slot_server_t : public transport_t, public bus_link_t, protected stream_en
      * router pays nothing for asking on the delivery callback that a name string used to
      * arrive on.
      */
-    [[nodiscard]] std::string_view peer_name(peer_handle_t peer,
-                                             std::span<char> scratch) const override;
+    [[nodiscard]] std::string_view peer_name(peer_handle_t peer, std::span<char> scratch) const;
 
     /**
      * @brief The in-flight frame's peer — the WHO seam, answered at either setting of
@@ -754,7 +760,7 @@ class slot_server_t : public transport_t, public bus_link_t, protected stream_en
      * is reused.
      * @retval nullptr @p peer names no currently-open connection.
      */
-    [[nodiscard]] transport_t* peer_link(std::string_view peer) override;
+    [[nodiscard]] transport_t* peer_link(std::string_view peer);
 
     /**
      * @brief Close the open peer named @p peer, freeing its slot for reuse.
@@ -766,7 +772,7 @@ class slot_server_t : public transport_t, public bus_link_t, protected stream_en
      * @retval true  @p peer named an open connection and its socket was shut down.
      * @retval false @p peer names no currently-open connection.
      */
-    [[nodiscard]] bool close_peer(std::string_view peer) override;
+    [[nodiscard]] bool close_peer(std::string_view peer);
 
    protected:
     /**
@@ -987,6 +993,33 @@ class slot_server_t : public transport_t, public bus_link_t, protected stream_en
     void publish_peer_up(const session_base_t& s);
 
     /**
+     * @name The peer-LIFECYCLE seam (#1438) — the only two places this tier needs the facet.
+     *
+     * `publish_peer_up` and `teardown_slot` run HERE, in the tier that owns the slot table,
+     * but the notifiers they end in are `bus_link_t`'s protected members and this tier is
+     * no longer a `bus_link_t`. These two hooks are the join: inert in the base, overridden
+     * by @ref bus_slot_server_t to fire `notify_peer_up` / `notify_peer_down`.
+     *
+     * Virtual rather than the static seam the per-frame tier select uses, because these are
+     * the base tier's own call sites and a base cannot resolve a derived name statically.
+     * The cost is two vtable slots per concrete server and one indirect call per peer
+     * ARRIVAL and DEPARTURE — wiring frequency, explicitly the tier ADR-0047 §4 admits a
+     * runtime virtual at — and zero bytes per listener, since the vptr is already there.
+     * @{
+     */
+    /** @brief Announce an arrival to the facet (no-op without one). */
+    virtual void announce_peer_up(peer_handle_t handle, std::string_view peer) {
+        (void)handle;
+        (void)peer;
+    }
+    /** @brief Announce a departure to the facet (no-op without one). */
+    virtual void announce_peer_down(peer_handle_t handle, std::string_view peer) {
+        (void)handle;
+        (void)peer;
+    }
+    /** @} */
+
+    /**
      * @brief Guards the slot vector and every slot's NAME — the cross-thread reads
      *        (@ref enumerate_peers / @ref peer_link) against the poll thread's
      *        accept/teardown. See the class-level threading rule; lock order where
@@ -1000,7 +1033,11 @@ class slot_server_t : public transport_t, public bus_link_t, protected stream_en
     /** @brief The ENFORCED admission cap (RFC-0006), resolved once by `derive_max_peers`
      *         at construction — never 0, never above the window's ceiling (#1295). */
     std::size_t max_peers_ = 1;
-    bool peer_named_ = false; /**< @brief Expose bus() — a wiring-time deployment choice. */
+    /** @brief Expose the bus facet — a wiring-time deployment choice. Stored HERE rather
+     *         than in the facet arm because @ref ok reads it to refuse a peer-named server
+     *         on a build that carries no facet at all (#375), and that refusal has to work
+     *         in the arm where the facet does not exist. */
+    bool peer_named_ = false;
 
     /**
      * @brief The constructed mode AS THIS BUILD CAN HONOUR IT — the one predicate every
@@ -1010,7 +1047,7 @@ class slot_server_t : public transport_t, public bus_link_t, protected stream_en
      * carries a bus module at all (`tr::graph::default_config_t::kBusLinks`). The two differ
      * in exactly one build, the one that closed the module out, and there this is constant
      * `false` — so the per-frame tier select, the departure seam, the arrival seam and
-     * @ref bus all collapse to their FLAT arms at compile time and the peer-named halves are
+     * `bus()` all collapse to their FLAT arms at compile time and the peer-named halves are
      * never emitted. That build cannot reach those arms at run time either, because @ref ok
      * refuses such a server outright; the folding is what makes the refusal FREE rather than
      * merely safe.
@@ -1039,5 +1076,160 @@ class slot_server_t : public transport_t, public bus_link_t, protected stream_en
      */
     [[nodiscard]] bool any_open_session() const;
 };
+
+/**
+ * @brief The stream-server arm WITHOUT the ADR-0044 bus facet — the layout a target that
+ *        closed the bus module out actually gets (#1438).
+ *
+ * Adds nothing to @ref slot_server_t but the INERT half of the per-frame peer-delivery
+ * seam. Those members exist so the two servers' tier select is ONE piece of source under
+ * both bindings; they are unreachable here, because the select is guarded by
+ * `slot_server_t::bus_mode()`, which this arm only ever compiles as the constant `false`.
+ *
+ * The seam is deliberately NOT virtual, unlike the two peer-lifecycle hooks: it is read
+ * once per inbound FRAME, and the concrete servers derive from `%tr::net::stream_server_base_t`,
+ * so which arm's members they see is a compile-time fact. Nothing is dispatched.
+ */
+class flat_slot_server_t : public slot_server_t {
+   protected:
+    using slot_server_t::slot_server_t;
+
+    /**
+     * @name The per-frame peer-delivery seam, inert (see @ref bus_slot_server_t for the live
+     *       half). Every one of these is dead code under this arm's own `bus_mode()`.
+     * @{
+     */
+    /** @brief No peer tier, so nothing wants ropes on it. */
+    [[nodiscard]] static bool peer_tier_wants_rope() noexcept { return false; }
+    /** @brief No peer tier to deliver an owning view to. */
+    static void deliver_to_peer(peer_handle_t peer, view::view_t frame) {
+        (void)peer;
+        (void)frame;
+    }
+    /** @brief No peer tier to deliver a borrowed span to. */
+    static void deliver_to_peer_borrowed(peer_handle_t peer, std::span<const std::byte> frame) {
+        (void)peer;
+        (void)frame;
+    }
+    /** @brief No peer tier to deliver an owning rope to. */
+    static void deliver_to_peer_rope(peer_handle_t peer, view::rope_t frame) {
+        (void)peer;
+        (void)frame;
+    }
+    /** @} */
+};
+
+/**
+ * @brief The stream-server arm WITH the ADR-0044 bus facet — @ref slot_server_t plus the
+ *        `bus_link_t` base subobject, its `peer_rx_` slot and its two peer-lifecycle
+ *        notifier pairs (#1438).
+ *
+ * Everything a bus facet needs to ANSWER already lives one tier up, because every one of
+ * those questions is a question about the slot table: `p<slot>` is a pure function of the
+ * slot index either way. What lives HERE is the facet itself — the identity
+ * `transport_t::bus()` hands out, the peer-named receiver slot, and the arrival/departure
+ * notifiers — so the four `bus_link_t` pure virtuals below are one-line forwards to the
+ * implementations they always had, not a second copy of them.
+ *
+ * Re-declaring them here is also what keeps the names UNAMBIGUOUS: with the same signature
+ * reachable through @ref slot_server_t and through `bus_link_t`, an unqualified
+ * `server.enumerate_peers(...)` would otherwise be an ambiguous lookup; the override in the
+ * most-derived tier hides both.
+ */
+class bus_slot_server_t : public slot_server_t, public bus_link_t {
+   public:
+    /** @brief The one visitor shape — declared here so the name reaching this tier through
+     *         two bases (identical types, ambiguous LOOKUP) resolves to one declaration. */
+    using peer_visitor_t = bus_link_t::peer_visitor_t;
+
+    /**
+     * @brief The @ref bus_link_t facet (ADR-0044) when constructed `peer_named`, else
+     *        `nullptr`. With the facet the router tags inbound frames per peer (each
+     *        peer gets its own return-route identity and a `dst` segment routes back to
+     *        that one session); without it the link keeps point-to-point hop naming —
+     *        inbound frames carry the registered child NAME and `send()` fans out to
+     *        every open peer.
+     * @note Departure eviction (RFC-0009 §D.5) follows the same split: peer-named mode
+     *       evicts just the departed peer's edges (`notify_peer_down(name)`), while FLAT
+     *       mode reports the whole link down (`notify_down()`) — but only when the LAST
+     *       open session departs (#889). A flat link has ONE routing identity for all its
+     *       peers (the registered child NAME), so firing that on a mid-life close would
+     *       evict the surviving peers' edges too.
+     */
+    [[nodiscard]] bus_link_t* bus() override { return bus_mode() ? this : nullptr; }
+
+    /** @brief The mode authority as the facet's own virtual — @ref slot_server_t::peer_named,
+     *         so "which mode is this link in" still has exactly one answer (#889). */
+    [[nodiscard]] bool peer_named() const noexcept override { return slot_server_t::peer_named(); }
+
+    /** @brief The facet's spelling of @ref slot_server_t::enumerate_peers. */
+    void enumerate_peers(const peer_visitor_t& visit) const override {
+        slot_server_t::enumerate_peers(visit);
+    }
+
+    /** @brief The facet's spelling of @ref slot_server_t::peer_name. */
+    [[nodiscard]] std::string_view peer_name(peer_handle_t peer,
+                                             std::span<char> scratch) const override {
+        return slot_server_t::peer_name(peer, scratch);
+    }
+
+    /** @brief The facet's spelling of @ref slot_server_t::peer_link. */
+    [[nodiscard]] transport_t* peer_link(std::string_view peer) override {
+        return slot_server_t::peer_link(peer);
+    }
+
+    /** @brief The facet's spelling of @ref slot_server_t::close_peer. */
+    [[nodiscard]] bool close_peer(std::string_view peer) override {
+        return slot_server_t::close_peer(peer);
+    }
+
+   protected:
+    using slot_server_t::slot_server_t;
+
+    /** @brief Arrival: fire the facet's peer-up notifier (#1223 step 2). */
+    void announce_peer_up(peer_handle_t handle, std::string_view peer) override {
+        notify_peer_up(handle, peer);
+    }
+
+    /** @brief Departure: fire the facet's peer-down notifier (RFC-0009 §D.5). */
+    void announce_peer_down(peer_handle_t handle, std::string_view peer) override {
+        notify_peer_down(handle, peer);
+    }
+
+    /**
+     * @name The per-frame peer-delivery seam, live — the tier select in both servers'
+     *       receive loops reaches `peer_rx_` through exactly these.
+     * @{
+     */
+    /** @brief True iff the peer-named tier wants OWNING ropes (ADR-0053 §5). */
+    [[nodiscard]] bool peer_tier_wants_rope() const noexcept { return peer_rx_.has_rope(); }
+    /** @brief Deliver an owning view up the peer-named tier. */
+    void deliver_to_peer(peer_handle_t peer, view::view_t frame) {
+        peer_rx_.deliver(peer, std::move(frame));
+    }
+    /** @brief Deliver a borrowed span up the peer-named tier. */
+    void deliver_to_peer_borrowed(peer_handle_t peer, std::span<const std::byte> frame) {
+        peer_rx_.deliver_borrowed(peer, frame);
+    }
+    /** @brief Deliver an owning rope up the peer-named tier. */
+    void deliver_to_peer_rope(peer_handle_t peer, view::rope_t frame) {
+        peer_rx_.deliver_rope(peer, std::move(frame));
+    }
+    /** @} */
+};
+
+/**
+ * @brief What a concrete stream server derives from: the arm this BUILD binds (#1438).
+ *
+ * The provider half of the #375 deliverable-3 fold. `tr::net::bus_of` stopped the routing
+ * plane from ASKING for a bus on a target that has none; this stops a listener on that
+ * target from CARRYING the facet it could never hand out. One `std::conditional_t`, chosen
+ * by @ref tr::net::kBusLinks, and the flat listener's layout simply does not contain
+ * `bus_link_t` — no base subobject, no second vptr, no `peer_rx_`, no notifier pairs, and
+ * none of the vtable entries that hang off them.
+ *
+ * At the default binding this IS @ref bus_slot_server_t and nothing about a listener moves.
+ */
+using stream_server_base_t = std::conditional_t<kBusLinks, bus_slot_server_t, flat_slot_server_t>;
 
 }  // namespace tr::net

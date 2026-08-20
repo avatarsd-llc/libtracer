@@ -648,7 +648,7 @@ ANCHORS = [
     ('core/include/libtracer/transport_ws.hpp:280',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'void send(std::span<const std::span<const std::byte>> iov) override;'),
-    ('core/include/libtracer/transport_ws.hpp:506',
+    ('core/include/libtracer/transport_ws.hpp:507',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }',
      'transport_ws_client& operator=(const transport_ws_client&) = delete;'),
     # core/include/libtracer/vertex.hpp
@@ -753,7 +753,7 @@ ANCHORS = [
     # The multi-peer servers' per-chunk receive scratch — ONE buffer since #871 folded the
     # tcp and ws poll loops into slot_server_t (it used to be one apiece, cited as
     # transport_tcp.cpp:508 and transport_ws.cpp:420).
-    ('core/src/posix_endpoint.cpp:654', 'std::array<std::byte, 4096> chunk;',
+    ('core/src/posix_endpoint.cpp:661', 'std::array<std::byte, 4096> chunk;',
      'void slot_server_t::service_peer(session_base_t& s) {'),
     # core/src/rope.cpp
     ('core/src/rope.cpp:21', 'if (!all_host()) {'),
@@ -803,7 +803,7 @@ ANCHORS = [
     # which #871 moved out of this TU into slot_server_t::bind_listen; the entry sheds the
     # scope entirely instead, because the array is now spelled `pristine_inline` here and
     # `inline_vec` only in the directed facade — one anchor, one hit, no positional filter.
-    ('core/src/transport_ws.cpp:736', 'std::array<std::byte, 4096> chunk;',
+    ('core/src/transport_ws.cpp:739', 'std::array<std::byte, 4096> chunk;',
      'void transport_ws_client::serve(int fd, std::vector<std::byte> pipelined) {'),
     # core/tests/registry_teardown_test.cpp
     ('core/tests/registry_teardown_test.cpp:275', 'void test_digest_paths_agree() {'),
@@ -825,8 +825,13 @@ ANCHORS = [
     ('core/include/libtracer/fwd_frame_view.hpp:1053', 'inline constexpr std::size_t kFwdMaxIov = 10;'),
     # ONE `bus()` since #871: both stream servers inherit slot_server_t's (they used to
     # restate it, cited as transport_tcp.hpp:343 and transport_ws.hpp:233).
-    ('core/include/libtracer/posix_endpoint.hpp:692',
+    ('core/include/libtracer/posix_endpoint.hpp:1159',
      '[[nodiscard]] bus_link_t* bus() override { return bus_mode() ? this : nullptr; }'),
+    # The #1438 PROVIDER half: which arm a concrete stream server derives from is the binding's
+    # choice, so the facet is absent from a bus-less listener's LAYOUT and not merely withheld.
+    ('core/include/libtracer/posix_endpoint.hpp:1233',
+     'using stream_server_base_t = std::conditional_t<kBusLinks, bus_slot_server_t, '
+     'flat_slot_server_t>;'),
     # The #375-deliverable-3 bus-module seam: the knob, and the ONE door the routing plane
     # asks the facet through.
     ('core/include/libtracer/config.hpp:488', 'static constexpr bool kBusLinks = true;'),
@@ -963,7 +968,7 @@ ANCHORS = [
     ('core/include/libtracer/path.hpp:51',
      "* separates field levels, `[` / `]` delimit the grammar's index suffix (which sits"),
     ('core/include/libtracer/path.hpp:335', 'inline path_t::path_t(std::string_view text) {'),
-    ('core/include/libtracer/posix_endpoint.hpp:708',
+    ('core/include/libtracer/posix_endpoint.hpp:715',
      "/** @brief Visit the currently-OPEN peers' names, `p<slot>` (#426). */"),
     ('core/include/libtracer/tlv.hpp:62', 'PATH_REF = 0x14,'),
     ('core/include/libtracer/transport.hpp:193',
@@ -1055,7 +1060,7 @@ ANCHORS = [
     ('core/src/path.cpp:124',
      'return std::unexpected(status_t::INVALID_PATH);',
      'if (p.field_.steps.size() > kMaxFieldDepth)'),
-    ('core/src/posix_endpoint.cpp:726',
+    ('core/src/posix_endpoint.cpp:733',
      'return false;',
      'if (s->open.load(std::memory_order_relaxed)) return true;'),
     ('core/src/transport_tcp.cpp:51',

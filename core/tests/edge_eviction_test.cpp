@@ -1240,17 +1240,27 @@ void test_reverse_mint_closes_the_disclosure() {
     // behaviour on this frame and is exactly what must not be relied on.
     {
         const auto& lg = a_to_b.log();
-        check(!lg.empty(), "A forwarded the mint-flagged subscribe to B");
-        const auto dec = tr::wire::decode(lg.back());
-        check(dec.has_value() && !dec->children.empty() &&
-                  dec->children.back().type == tr::wire::type_t::PATH_REF_REVERSE &&
-                  dec->children.back().payload.size() == 8,
-              "the forwarded request's LAST child is a one-element PATH_REF_REVERSE (0x15)");
-        // And the payload the WRITE actually carries is still a SUBSCRIBER — the reverse
-        // child is additive, never a replacement for the closed RFC-0004 §B child list.
+        const bool forwarded = !lg.empty();
+        check(forwarded, "A forwarded the mint-flagged subscribe to B");
+        // GUARDED, not assumed (#1438): every read below is off `lg.back()`, so on the one
+        // build where the forward does not happen this block used to run straight off an
+        // empty vector and SEGFAULT one line after the check that had already reported the
+        // real fault. A failed precondition must leave a failure, never a crash.
+        bool reverse_is_last = false;
+        // The payload the WRITE actually carries is still a SUBSCRIBER — the reverse child
+        // is additive, never a replacement for the closed RFC-0004 §B child list.
         bool has_subscriber = false;
-        for (const auto& c : dec->children)
-            if (c.type == tr::wire::type_t::SUBSCRIBER) has_subscriber = true;
+        if (forwarded) {
+            const auto dec = tr::wire::decode(lg.back());
+            reverse_is_last = dec.has_value() && !dec->children.empty() &&
+                              dec->children.back().type == tr::wire::type_t::PATH_REF_REVERSE &&
+                              dec->children.back().payload.size() == 8;
+            if (dec.has_value())
+                for (const auto& c : dec->children)
+                    if (c.type == tr::wire::type_t::SUBSCRIBER) has_subscriber = true;
+        }
+        check(reverse_is_last,
+              "the forwarded request's LAST child is a one-element PATH_REF_REVERSE (0x15)");
         check(has_subscriber, "the forwarded request still carries its SUBSCRIBER payload");
     }
     const auto subs0 = gb.read_subscribers(sensor);
@@ -1317,6 +1327,17 @@ void test_reverse_mint_closes_the_disclosure() {
 }
 
 int main() {
+    // #1438 — see tcp_test's twin of this guard. This suite's crash was NOT a null `bus()`:
+    // with no bus module the router never registers a peer anchor, so the forwarding hop
+    // emits nothing, and the reverse-mint case read `log().back()` on the empty log one line
+    // past the `check` that had already failed. Both halves are fixed — the read below is
+    // guarded, and the suite skips here, because peer-scoped eviction is a peer-named
+    // artefact and there is nothing left for it to assert on this build.
+    if constexpr (!tr::net::kBusLinks)
+        return tr::testing::skipped("edge_eviction",
+                                    "this build closed the ADR-0044 bus module out "
+                                    "(kBusLinks = false); the per-peer eviction seam under "
+                                    "test has no peer tier to fire from");
     std::printf("== edge_eviction_test ==\n");
     test_evict_scoped_to_link();
     test_departure_cost_is_scoped_to_the_peer();

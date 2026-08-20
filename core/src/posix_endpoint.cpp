@@ -475,9 +475,12 @@ std::string_view slot_server_t::peer_subject(peer_handle_t peer, std::span<char>
     // The SUBJECT and the peer NAME coincide for this kind, and deliberately so: the session
     // token `p<slot>` is the only per-writer discriminator a stream server has until an
     // authentication layer mints a real one (ADR-0045). What does NOT coincide is their
-    // AVAILABILITY — `peer_name` is reached through the `bus_link_t` facet, which a FLAT
-    // server does not expose, while this is on `transport_t` and answers at either setting of
-    // `peer_named`. That difference IS ADR-0082's decouple, expressed in one override.
+    // AVAILABILITY to the ROUTING PLANE — `peer_name` is an ADDRESSING answer the plane
+    // reaches through the `bus_link_t` facet, which a FLAT server does not expose (and which
+    // a `kBusLinks = false` build does not even carry, #1438), while this is on `transport_t`
+    // and answers at either setting of `peer_named`. That difference IS ADR-0082's decouple,
+    // expressed in one override. The formatting is shared rather than duplicated because the
+    // two coincide in VALUE.
     return peer_name(peer, scratch);
 }
 
@@ -645,7 +648,11 @@ void slot_server_t::publish_peer_up(const session_base_t& s) {
         name = s.name;
         handle = s.handle;
     }
-    if (!name.empty()) notify_peer_up(handle, name);
+    // Through the arrival HOOK, not `notify_peer_up` directly (#1438): the notifier is the
+    // bus facet's, and this tier is no longer a `bus_link_t`. `bus_slot_server_t` overrides
+    // the hook to fire it; the flat arm's inherited no-op is unreachable behind the
+    // `bus_mode()` guard above.
+    if (!name.empty()) announce_peer_up(handle, name);
 }
 
 void slot_server_t::service_peer(session_base_t& s) {
@@ -710,7 +717,7 @@ void slot_server_t::teardown_slot(session_base_t& s) {
     // or vanish between the answer and the notification.
     if (was_open && !departed.empty()) {
         if (bus_mode())
-            notify_peer_down(departed_handle, departed);
+            announce_peer_down(departed_handle, departed);
         else if (!any_open_session())
             notify_down();
     }

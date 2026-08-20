@@ -66,7 +66,7 @@ the rope form for an owning link, the span form otherwise (`fwd_router.cpp:976,8
 
 Every socket transport in the tree declares the owning tier: UDP
 (`transport_udp.hpp:111`), TCP client and server (`transport_tcp.hpp:218,409`),
-WebSocket server and client (`transport_ws.hpp:280,506`), CAN
+WebSocket server and client (`transport_ws.hpp:280,507`), CAN
 (`transport_can.hpp:606`), QUIC (`transport_quic.hpp:153`) and WebTransport
 (`transport_webtransport.hpp:235`). The borrowed-span path is the base-class default
 and the tier an out-of-tree transport gets for free.
@@ -93,11 +93,19 @@ for a peer and no peer state is stored.
 `transport_t::bus()` returns the facet or `nullptr`. CAN always returns it
 (`transport_can.hpp:564`); the TCP and WebSocket **servers** return it when
 configured peer-named — one implementation, on the slot-server base both of them
-inherit (`posix_endpoint.hpp:692`); every other kind keeps the `nullptr` default.
+inherit (`posix_endpoint.hpp:1159`); every other kind keeps the `nullptr` default.
+
+That base is picked by the BUILD. `slot_server_t` owns the slot table and answers every
+peer query off it, but it is not itself a `bus_link_t`; the facet — the base subobject, its
+peer-named receiver slot and its two peer-lifecycle notifier pairs — lives one tier below,
+in `bus_slot_server_t`, and the two servers derive from `stream_server_base_t`
+(`posix_endpoint.hpp:1233`), which is that tier or the facet-free `flat_slot_server_t`
+according to `tr::net::kBusLinks`. So on a target that closed the bus module out a listener
+does not merely refuse to hand the facet out: its LAYOUT does not contain one.
 
 Whether a link's peer-named tier exists is one query, `bus_link_t::peer_named()`
 (`transport.hpp:193`): the constructed flag for the two stream servers
-(`posix_endpoint.hpp:708`), `true` by construction for a kind that is a bus outright.
+(`posix_endpoint.hpp:715`), `true` by construction for a kind that is a bus outright.
 `bus_link_t` **refuses** each of its peer-named wiring calls — `set_peer_receiver`,
 `set_peer_rope_receiver`, `set_peer_down_notifier` — while it is false. That refusal matters
 because `bus_link_t` is a public base: on a flat server the setters are reachable by an
@@ -116,7 +124,7 @@ Departure follows the same split. A **peer-named** server evicts exactly the dep
 (`notify_peer_down(name)`); a **flat** server has one routing identity for every peer it
 carries — the registered child NAME — so its only seam is the whole link
 (`transport_t::notify_down`), and it therefore waits until the **last** open session departs
-(`posix_endpoint.cpp:726`). Firing it on a mid-life close would evict the surviving peers'
+(`posix_endpoint.cpp:733`). Firing it on a mid-life close would evict the surviving peers'
 edges along with the departed one's.
 
 ## Closing the bus module out at build time
@@ -147,6 +155,15 @@ bus; what the knob changes is whether anything asks. Measured on rv32 (`-Os -fno
 flash** (`fwd_router` −1,400, `transport_vertex` −678) and **±0 B of `.bss`**, because the tier is code and
 per-instance state rather than a static table. A `LIBTRACER_NET_PLANE=OFF` build gains
 nothing — it never compiled those translation units.
+
+The PROVIDER side of the same fold is the base-class selection described above
+(`stream_server_base_t`). It is what makes the saving reach a listener's own bytes rather
+than only the routing plane's code: measured on the esp32c6 full-node profile
+(`-Os -fno-exceptions -fno-rtti`, `riscv32-esp-elf` 14.2.0), a bus-closed build's
+`transport_tcp_server` shrinks **208 B → 168 B at rest, −40 B per listener**, with a further
+**−568 B** of image `.text` and **±0 B of `.bss`**. At the default binding the listener's
+size does not move and the seam costs **+80 B `.text` / +96 B `.rodata`** once, for the
+forwarding overrides and the two peer-lifecycle hooks.
 
 Asking for a bus on such a build is **refused**, never quietly served as a flat link:
 
@@ -371,9 +388,12 @@ they are the reason a new binding is small.
   that keeps a concurrent send from writing to a reused descriptor. UDP keeps its
   datagram shape and uses only the base. `slot_server_t` is one tier further up,
   for the MULTI-peer stream servers: it owns the slot vector, the accept/poll/
-  teardown machinery and the `bus_link_t` query trio, so `transport_tcp_server`
+  teardown machinery and the peer query trio, so `transport_tcp_server`
   and `transport_ws_server` differ only in their framing and handshake — the two
-  hooks it dispatches into them.
+  hooks it dispatches into them. The ADR-0044 bus FACET is a tier below that
+  again — `bus_slot_server_t` carries it, `flat_slot_server_t` does not, and
+  `stream_server_base_t` picks between them by `tr::net::kBusLinks` — so a
+  bus-less build's listener does not contain one.
 - **`register_builtin_transports`** is how a node's transport catalog gets
   populated. Each `register_*_transport` lives in its own translation unit,
   compiled only when that transport is enabled, so a build that drops a transport
@@ -440,6 +460,18 @@ counted and closed rather than blocked on forever (#838):
 ```
 
 ```{doxygenclass} tr::net::slot_server_t
+:project: libtracer
+:members:
+:protected-members:
+```
+
+```{doxygenclass} tr::net::bus_slot_server_t
+:project: libtracer
+:members:
+:protected-members:
+```
+
+```{doxygenclass} tr::net::flat_slot_server_t
 :project: libtracer
 :members:
 :protected-members:

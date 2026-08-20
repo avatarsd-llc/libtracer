@@ -155,6 +155,33 @@ inline void check_quiet(bool ok, std::string_view what,
 /** @brief How many checks have failed so far — for a suite that branches on it mid-run. */
 [[nodiscard]] inline int failures() { return g_failures.load(std::memory_order_relaxed); }
 
+/**
+ * @brief The exit code CTest reads as SKIPPED, per the target's `SKIP_RETURN_CODE` property.
+ *
+ * 77 is the GNU-autotools convention CTest documents; the value matters only in that the
+ * `add_test` site and the suite agree, so it is spelled once, here.
+ */
+inline constexpr int kSkipExitCode = 77;
+
+/**
+ * @brief Report the whole suite as SKIPPED and answer the process exit code (#1438).
+ *
+ * For a suite whose SUBJECT this build does not contain — a module closed out at compile
+ * time (ADR-0047 §1), not a case that happens to be inconvenient. CTest's label filters are
+ * the primary deselection (`ctest -LE bus`); this is what the suite does when someone runs
+ * it anyway, so the answer is a stated skip instead of a crash or a wall of failures about
+ * a feature the binary was never built with.
+ *
+ * @param suite The suite's name, as @ref summary prints it.
+ * @param why   Why the subject is absent — printed, so the log says which build this is.
+ * @return @ref kSkipExitCode, for `return` straight out of `main`.
+ */
+[[nodiscard]] inline int skipped(std::string_view suite, std::string_view why) {
+    std::printf("%.*s: SKIPPED — %.*s\n", static_cast<int>(suite.size()), suite.data(),
+                static_cast<int>(why.size()), why.data());
+    return kSkipExitCode;
+}
+
 /** @brief Publish everything written before this point to whoever later acquires @p p. */
 inline void tsan_release([[maybe_unused]] void* p) {
 #ifdef LIBTRACER_TEST_TSAN

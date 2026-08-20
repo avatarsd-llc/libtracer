@@ -286,6 +286,15 @@ jobs:
             -DCMAKE_CXX_FLAGS="-I$PWD/bus-closed"
           cmake --build core/build-bus-closed -j "$(nproc)"
           ctest --test-dir core/build-bus-closed -LE bus --output-on-failure
+      # The DESELECTED suites, run on purpose (#1438). Five of them used to SEGFAULT here
+      # rather than report — the label filter hid it, so nothing in CI ever noticed. They now
+      # state a skip from their own `main` and exit `SKIP_RETURN_CODE`, which ctest reads as
+      # Skipped and this step therefore passes. It fails the moment one of them crashes or
+      # fails again, which is the property the label filter cannot gate.
+      - name: The deselected suites SKIP cleanly rather than crash
+        run: |
+          ctest --test-dir core/build-bus-closed --output-on-failure \
+            -R '^(edge_eviction|send_stall|session_anchor|tcp|ws_transport)$'
       - name: Restore workspace ownership for the host runner
         if: always()
         run: chown -R "$(stat -c '%u:%g' ..)" .

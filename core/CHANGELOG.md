@@ -16,6 +16,27 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`tr::net::bus_slot_server_t`, `tr::net::flat_slot_server_t` and
+  `tr::net::stream_server_base_t` (`posix_endpoint.hpp`) — the PROVIDER half of the
+  `kBusLinks` fold** ([#1438](https://github.com/avatarsd-llc/libtracer/issues/1438),
+  [#375](https://github.com/avatarsd-llc/libtracer/issues/375) deliverable 3,
+  [ADR-0082](../docs/adr/0082-auth-subject-and-peer-named-are-decoupled-claims-default-stays-false.md)'s
+  named remainder). `tr::net::bus_of` stopped the routing plane from ASKING for a bus on a
+  target that carries none; a listener on that target still CARRIED the facet — the
+  `bus_link_t` base subobject, its peer-named receiver slot, its two peer-lifecycle notifier
+  pairs, and the vtable entries hanging off them — in a build where no bus can exist.
+
+  `slot_server_t` keeps the slot table and answers every peer query off it, but is no longer
+  a `bus_link_t`. The facet moved one tier down into `bus_slot_server_t`; `flat_slot_server_t`
+  is the arm without it; and `stream_server_base_t` is the `std::conditional_t` on
+  `tr::net::kBusLinks` that the two stream servers now derive from. Measured on the esp32c6
+  full-node profile (`-Os -fno-exceptions -fno-rtti`, `riscv32-esp-elf` 14.2.0), bus closed:
+  `sizeof(transport_tcp_server)` **208 B → 168 B — −40 B per listener at rest**, image `.text`
+  **−568 B**, `.bss` **±0 B**. At the default binding a listener's size does not move and the
+  seam costs **+80 B `.text` / +96 B `.rodata`** once, for four forwarding overrides and two
+  wiring-frequency peer-lifecycle hooks; the per-frame tier select gained no dispatch, because
+  which arm a server derives from is a compile-time fact.
+
 - **`tr::graph::default_config_t::kBusLinks` — the ADR-0044 BUS module as a build-time-closed
   seam** ([#375](https://github.com/avatarsd-llc/libtracer/issues/375) deliverable 3,
   [ADR-0047](../docs/adr/0047-build-time-closed-module-sets-compile-time-seams.md) §1). A node
@@ -84,6 +105,20 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `fwd_router_t` installs its own supplier unconditionally.
 
 ### Changed
+
+- **BREAKING (derivation only): `tr::net::slot_server_t` no longer derives from
+  `tr::net::bus_link_t`** ([#1438](https://github.com/avatarsd-llc/libtracer/issues/1438)).
+  Its peer QUERIES (`enumerate_peers`, `peer_name`, `peer_link`, `close_peer`, `peer_named`)
+  are unchanged in name, signature and answer, and are still reachable on a listener — they
+  are simply no longer `virtual` at that tier. `transport_tcp_server` and
+  `transport_ws_server` are unaffected at the default binding: they derive from
+  `stream_server_base_t`, which IS the facet-carrying arm there, so `bus()`, the facet, and
+  every upcast to `bus_link_t&` behave exactly as before. Two things move for an out-of-tree
+  consumer: a class deriving directly from `slot_server_t` and expecting the facet must
+  derive from `stream_server_base_t` (or `bus_slot_server_t`) instead, and a
+  `static_cast<bus_link_t&>(listener)` no longer compiles on a `kBusLinks = false` build —
+  by design, since that is the refusal the type system can state and the runtime gate could
+  only report.
 
 - **`graph_t::subscribe_wire` takes a trailing `link_id_t link_token = {}`, and the per-link
   departure index is now a DENSE SLOT VECTOR rather than a name-keyed hash map**

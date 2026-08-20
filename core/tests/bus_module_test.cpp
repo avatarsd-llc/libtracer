@@ -14,7 +14,7 @@
  * compile-time fold rather than a run-time branch.
  *
  * This file follows the binding by `if constexpr`, exactly as `reclaim_test.cpp` follows
- * ADR-0080's, so ONE executable serves both legs of the seam. Five properties:
+ * ADR-0080's, so ONE executable serves both legs of the seam. Six properties:
  *
  *   (a) the GATE itself — `bus_of` answers a point-to-point link nullptr under every binding,
  *       and answers a genuine bus link its facet iff this build carries the module. The link's
@@ -35,12 +35,22 @@
  *       delivering peer-named into a sink the router never installed;
  *   (e) the same refusal through the IN-BAND door — a `SPEC{listener, kind=ws|tcp,
  *       peer_named=1}` write is answered with an error instead of creating a connection,
- *       while the same SPEC without the key is created under both bindings.
+ *       while the same SPEC without the key is created under both bindings;
+ *   (f) the PROVIDER half (#1438) — a listener's LAYOUT follows the binding as well as its
+ *       behaviour: on a closed build it does not INHERIT the facet, so it does not carry the
+ *       base subobject, the second vptr, the peer-named receiver slot or the notifier pairs.
+ *       (a)–(e) cannot see this: every one of them would stay green with the facet present
+ *       and merely never handed out, which is exactly the state #375 deliverable 3 left.
  *
  * Ablation (2026-08-20, and re-run at every claim below): reverting `bus_of` to `link.bus()`
  * unconditionally reddens (a)'s gate assertion and every assertion in (b) at the closed
  * binding; reverting `slot_server_t::ok()`'s refusal limb reddens (d); dropping the two SPEC
- * factory refusals reddens (e). None of them touches (c) — the flat arm stays green
+ * factory refusals reddens (e); pointing `stream_server_base_t` at `bus_slot_server_t`
+ * unconditionally reddens (f)'s two `is_base_of` claims at the closed binding — and reds that
+ * leg's BUILD too, on `tcp_test` / `ws_transport_test`'s matching `static_assert` — while
+ * every behavioural suite there stays green (`ctest -LE bus`: 152/152). That last measurement
+ * is the point of (f): the provider half is invisible to behaviour by construction, so only a
+ * layout assertion can hold it. None of them touches (c) — the flat arm stays green
  * throughout, which is what says these guards are not vacuous.
  */
 
@@ -48,6 +58,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 #include "libtracer/child_registry.hpp"
@@ -227,6 +238,39 @@ void test_the_spec_factory_refuses_the_key_when_closed() {
           "with the same permanent status");
 }
 
+/**
+ * @brief (f) The PROVIDER half (#1438): a listener's LAYOUT follows the binding too.
+ *
+ * (a)–(e) are all about behaviour, and behaviour cannot see a base subobject. This is the
+ * claim the provider half actually makes: on a build with no bus module a listener does not
+ * merely refuse to hand the facet out, it does not CONTAIN one. Two independent statements
+ * of that, because either alone is weak — `is_base_of` says the facet is not inherited, and
+ * the `sizeof` comparison says nothing else silently grew back to pay for it.
+ *
+ * The `sizeof` is compared against the FLAT tier's rather than against a literal: a byte
+ * count would have to be re-pinned for every unrelated member the servers gain, whereas the
+ * relation "a listener is exactly its facet-free tier plus its own framing" is the invariant
+ * being asserted, and is what a revert of the hoist breaks.
+ */
+void test_the_layout_follows_the_binding() {
+    std::printf("(f) the listener's LAYOUT carries the facet iff this build has one:\n");
+    check(std::is_base_of_v<tr::net::bus_link_t, tr::net::transport_ws_server> == kBusLinks,
+          "a ws listener inherits bus_link_t iff the module is bound");
+    check(std::is_base_of_v<tr::net::bus_link_t, tr::net::transport_tcp_server> == kBusLinks,
+          "and so does a tcp listener — one seam, both stream servers");
+    check(!std::is_base_of_v<tr::net::bus_link_t, tr::net::slot_server_t>,
+          "the SHARED slot tier never inherits it, under either binding (#1438)");
+    check(std::is_base_of_v<tr::net::slot_server_t, tr::net::stream_server_base_t>,
+          "and whichever arm this build bound is still that same slot tier");
+    // The facet costs bytes at rest: its base subobject, its second vptr, its peer-named
+    // receiver slot and its two notifier pairs. Where it is absent, a listener is exactly the
+    // flat tier plus its own framing — measured on the C6 profile as 208 B -> 168 B.
+    check((sizeof(tr::net::bus_slot_server_t) > sizeof(tr::net::flat_slot_server_t)),
+          "carrying the facet is strictly larger at rest than not carrying it");
+    check(sizeof(tr::net::transport_tcp_server) >= sizeof(tr::net::stream_server_base_t),
+          "and a concrete listener is its bound arm plus its framing, nothing else");
+}
+
 }  // namespace
 
 int main() {
@@ -236,5 +280,6 @@ int main() {
     test_a_flat_listener_is_untouched();
     test_a_peer_named_listener_is_refused_when_closed();
     test_the_spec_factory_refuses_the_key_when_closed();
+    test_the_layout_follows_the_binding();
     return tr::testing::summary("bus_module");
 }

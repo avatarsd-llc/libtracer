@@ -43,6 +43,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -889,7 +890,20 @@ void test_close_peer() {
  *
  * The ws twin of the tcp case: the shared teardown/mode plumbing is guarded once in
  * `tcp_test`, but this file owns THIS server's framing-side tier select.
+ *
+ * A TEMPLATE for the reason its tcp twin is: the forced upcast lives in a discarded
+ * `if constexpr` branch, because on a target that closed the bus module out a listener is
+ * not a `bus_link_t` at all (#1438) and the out-of-contract path is refused by the type
+ * system instead of by the runtime gate.
  */
+template <typename server_t>
+void force_peer_sink(server_t& server, peer_sink_t& sink) {
+    sink.bus = &static_cast<tr::net::bus_link_t&>(server);
+    static_cast<tr::net::bus_link_t&>(server).set_peer_receiver(sink);
+}
+
+/** @brief The #889 refusal, under whichever `kBusLinks` this build bound (see above). */
+template <bool kBus = tr::net::kBusLinks>
 void test_flat_server_rejects_peer_receiver() {
     std::printf("transport_ws server — flat server refuses peer-named wiring (#889):\n");
 
@@ -899,11 +913,12 @@ void test_flat_server_rejects_peer_receiver() {
     tr::net::transport_ws_server server(0);
     check(server.ok(), "flat server bound");
     check(server.bus() == nullptr, "flat server exposes no bus facet (peer_named=false)");
+    static_assert(std::is_base_of_v<tr::net::bus_link_t, tr::net::transport_ws_server> == kBus,
+                  "the facet is a base of a listener iff this build carries the bus module");
     server.set_receiver(flat_sink);
     // The out-of-contract path itself: the public base, named explicitly. A member-shadowing
     // guard would not catch this call, so the refusal has to live in bus_link_t.
-    forced_peer_sink.bus = &static_cast<tr::net::bus_link_t&>(server);
-    static_cast<tr::net::bus_link_t&>(server).set_peer_receiver(forced_peer_sink);
+    if constexpr (kBus) force_peer_sink(server, forced_peer_sink);
 
     tr::net::transport_ws_client client("127.0.0.1", server.local_port());
     check(client.ok(), "client connected + 101 verified");
@@ -1768,6 +1783,14 @@ void test_client_fails_the_connection_on_a_reserved_control_opcode() {
 }  // namespace
 
 int main() {
+    // #1438 — see tcp_test's twin of this guard: the `bus`-labelled cases below reach the
+    // peer-named tier through `bus()`, which a build with no bus module answers null, so
+    // running this suite there crashed rather than reporting. Skip, do not crash.
+    if constexpr (!tr::net::kBusLinks)
+        return tr::testing::skipped("ws_transport",
+                                    "this build closed the ADR-0044 bus module out "
+                                    "(kBusLinks = false); the peer-named tier under test "
+                                    "does not exist here");
     test_handshake_and_frames();
     test_peer_open_before_response_is_readable();
     test_fragmented_message_rope();

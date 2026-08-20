@@ -129,7 +129,7 @@ inline constexpr std::string_view kWsServerSuggestedModule = "ws-server";
  * transport_tcp_server since #871; what this class adds is the RFC 6455
  * packaging — the opening handshake and the frame codec.
  */
-class transport_ws_server : public slot_server_t {
+class transport_ws_server : public stream_server_base_t {
    public:
     /** @brief The largest MESSAGE a peer may announce — the shared
      *         length_prefix_framer::kDefaultMaxFrame (16 MiB) unless `:settings max_frame`
@@ -203,7 +203,7 @@ class transport_ws_server : public slot_server_t {
      *                  clamped to that ceiling, because the cap is the
      *                  denominator every send bound divides by. Read the
      *                  enforced value back from `slot_server_t::max_peers`.
-     * @param peer_named Expose the @ref bus_link_t facet (see @ref bus). A
+     * @param peer_named Expose the @ref bus_link_t facet (see @ref transport_t::bus). A
      *                   wiring-time deployment choice: the browser-SPA/tabs
      *                   server sets it so each tab gets its own return route;
      *                   a point-to-point link keeps the default (its registered
@@ -322,7 +322,7 @@ class transport_ws_server : public slot_server_t {
     struct session_t;  // one peer slot's connection state (defined in the .cpp)
 
     /**
-     * @brief The directed per-peer sending endpoint @ref peer_link hands out:
+     * @brief The directed per-peer sending endpoint @ref slot_server_t::peer_link hands out:
      *        `send()` writes a server BINARY frame to that peer's socket only.
      *        Ingress stays on the owning server's peer-named slot — this
      *        facade's own inherited receiver is never delivered to.
@@ -375,8 +375,9 @@ class transport_ws_server : public slot_server_t {
     bool drain_frames(session_t& s);  // decode buffered frames; false ⇒ teardown
 
     // The slot vector, the listen socket, the accept/poll/teardown machinery and the
-    // bus_link_t query trio all live in slot_server_t (#871); what stays here is the
-    // RFC 6455 packaging and its ingress bound.
+    // peer query trio all live in slot_server_t (#871), and the bus FACET one tier
+    // below it in stream_server_base_t (#1438); what stays here is the RFC 6455
+    // packaging and its ingress bound.
     //
     // RX segment source for message reassembly (ADR-0042 §2) + the ingress bound and
     // its counters — the same four members tcp/quic/webtransport carry.

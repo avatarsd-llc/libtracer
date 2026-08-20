@@ -1876,6 +1876,22 @@ foreach(_libtracer_bus_test IN LISTS LIBTRACER_BUS_TESTS)
     endif()
 endforeach()
 
+# The suites above that SEGFAULTED rather than failed under `kBusLinks = false` (#1438). The
+# label already deselects them; this is about what happens to someone who runs the closed build
+# WITHOUT the label filter, which used to be five crashes. Each of these now states a skip from
+# its own `main` (tr::testing::skipped) and exits 77, which this property is what makes CTest
+# read as `Skipped` rather than as a failure. 77 is the autotools convention CTest documents and
+# `tr::testing::kSkipExitCode` is the single spelling of it on the C++ side — change both
+# together. Only these five: the remaining `bus` suites already fail CLEANLY on that build,
+# which is an acceptable answer for a test whose subject was compiled out, and converting all of
+# them would be a much larger diff for no additional safety.
+set(LIBTRACER_BUS_SKIPPABLE_TESTS edge_eviction send_stall session_anchor tcp ws_transport)
+foreach(_libtracer_bus_test IN LISTS LIBTRACER_BUS_SKIPPABLE_TESTS)
+    if(TEST ${_libtracer_bus_test})
+        set_property(TEST ${_libtracer_bus_test} PROPERTY SKIP_RETURN_CODE 77)
+    endif()
+endforeach()
+
 # The other half of the refusal (#375 deliverable 3): `transport_can.cpp`'s
 # `static_assert(kBusLinks, ...)`. A rejection is not observable from a compiled binary — by the
 # time a test runs, the TU that should have been rejected has already compiled — so the check
