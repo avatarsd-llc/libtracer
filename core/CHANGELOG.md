@@ -16,6 +16,27 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **A SECOND extended CONNECT on a live WebTransport session is now REFUSED, and
+  `webtransport_transport_t::session_path()` is stable for the life of a session**
+  ([#1410](https://github.com/avatarsd-llc/libtracer/issues/1410)). The HEADERS arm of the
+  LISTEN-side classifier had no "session already up" guard, so a peer that had already been
+  answered could open a second bidirectional stream, send a second extended CONNECT, and have
+  the endpoint answer `200` again, overwrite the recorded `:path`, and **re-arm
+  `connect_stream_id`** from the new stream's id. That id is guard 2 of the strict `0x41`
+  frame-channel check ("the session-id varint must name THAT CONNECT stream"), so a second
+  CONNECT let a peer move the goalposts on its own identity check before the frame channel was
+  claimed — and it made `session_path()`, an observation a host may act on, silently mutable.
+  The refusal is **stream-scoped with no HTTP status** (`refuse_stream`, reusing the existing
+  bad-request code): the session latch is one-way with no successor state, it is the same class
+  as the `0x41` check's "the FIRST valid one wins" guard, and answering would cost the one owned
+  send buffer msquic borrows until `SEND_COMPLETE` per hostile stream. `refused_sessions()` does
+  **not** move — that counter is #934's count-then-close for work the node could not afford,
+  and this is a peer-conformance refusal. One consequence is deliberate and observable: because
+  the guard sits *before* the field-section decode, a **malformed or non-CONNECT** request
+  HEADERS arriving while a session is live is now stream-scoped too, where it used to be
+  connection-fatal. That is strictly the #919 direction; the alternative placement would leave a
+  valid second CONNECT costing one stream while an invalid one cost the whole session.
+
 - **`quic` and `webtransport` egress is bounded by THIS CONNECTION's `max_frame`, not by the
   16 MiB protocol maximum** ([#1409](https://github.com/avatarsd-llc/libtracer/issues/1409)).
   Both `msquic_endpoint_t::send_frame` overloads compared the outgoing record against

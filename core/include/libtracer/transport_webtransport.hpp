@@ -263,6 +263,11 @@ class webtransport_transport_t : public transport_t {
      * the resource), so this is an observation, not an admission decision: it
      * is how a host sees which resource a session asked for. Returns a copy —
      * thread-safe, and not on any frame path.
+     *
+     * STABLE for the life of a session (#1410): a second extended CONNECT on a live
+     * session is refused at stream scope, so a peer that has already been answered cannot
+     * rewrite what a host observes here. It changes only when the session itself does —
+     * connection teardown, or the one-peer replacement path accepting a new peer.
      */
     [[nodiscard]] std::string session_path() const;
 

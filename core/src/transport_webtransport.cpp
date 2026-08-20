@@ -49,7 +49,10 @@
  *     their first varint(s): control/QPACK/push/WT-uni streams are drained;
  *     the bidirectional HEADERS (0x01) stream is the extended CONNECT — it is
  *     validated (`:method=CONNECT`, `:protocol=webtransport`), answered with
- *     200, and kept open as the session's lifetime handle; the FIRST valid
+ *     200, and kept open as the session's lifetime handle. Exactly ONE of them
+ *     is answered: a request HEADERS arriving while a session is live is
+ *     refused at stream scope (#1410), because the session latch has no
+ *     successor state and the CONNECT stream's lifetime IS the session's. The FIRST valid
  *     bidirectional WEBTRANSPORT_STREAM (0x41) is adopted as THE frame
  *     channel, everything after its session-id varint feeding the 4-byte
  *     length-prefix reassembler.
@@ -168,9 +171,15 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
 
     /** @brief Every stream context of the live session (guarded by conn_m). */
     std::vector<stream_ctx_t*> ctxs;
-    /** @brief Extended CONNECT accepted (200) — the session state. */
+    /** @brief Extended CONNECT accepted (200) — the session state.
+     *
+     * A ONE-WAY latch per connection: only teardown / `replace_peer` clears it, and while
+     * it is set a second request HEADERS is refused rather than answered (#1410). `path`
+     * and `connect_stream_id` are derived slots written once under it, so neither can be
+     * re-armed by a peer that has already been answered. */
     std::atomic<bool> session{false};
-    /** @brief The CONNECT stream's id (the 0x41 preamble references it). */
+    /** @brief The CONNECT stream's id (the 0x41 preamble references it) — written once,
+     *         with the session latch, and never re-armed (#1410). */
     std::uint64_t connect_stream_id = 0;
     /**
      * @brief Extended CONNECTs this node REFUSED because it could not afford to answer
@@ -493,6 +502,38 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
                 }
                 rest = rest.subspan(len->consumed);
                 if (rest.size() < len->value) break;  // need the full field section
+
+                // ONE session per connection (#1410). `session` is a one-way latch and
+                // `path` / `connect_stream_id` are derived slots written once under it, so
+                // there is no successor state a SECOND request HEADERS could move this
+                // endpoint into: the CONNECT stream's lifetime IS the session's
+                // (draft-ietf-webtrans-http3), and this endpoint carries ONE session
+                // (ADR-0043 Phase B). It is refused at STREAM scope with NO status —
+                // exactly guard 3 of the 0x41 check above ("the FIRST valid one wins"),
+                // which aborts the second frame channel rather than answering it, and
+                // #919's ruling that a nonconforming stream must not take down a session
+                // the peer already established. Answering instead would cost the one owned
+                // send buffer msquic borrows until SEND_COMPLETE, per hostile stream —
+                // the pre-auth amplification #934 removed from this path; `refuse_stream`
+                // allocates nothing.
+                //
+                // Placed BEFORE `decode_field_section` because with a session live the
+                // answer no longer depends on what the fields say, so ~4.6 KiB of
+                // `field_section_t` stack and a Huffman decode on a peer-driven path are
+                // avoided. The consequence, taken deliberately: a MALFORMED or non-CONNECT
+                // HEADERS arriving while a session is live becomes stream-scoped too,
+                // where the `method`/`protocol` arm below makes it connection-fatal. That
+                // is strictly the #919 direction, and the alternative placement would
+                // leave the indefensible asymmetry of a valid second CONNECT costing one
+                // stream while an invalid one costs the whole session.
+                //
+                // No lock: msquic serializes per-connection callbacks, so two CONNECTs on
+                // one connection cannot race. This is a PEER-CONFORMANCE refusal, not the
+                // node shedding its own work, so it must not touch `refused_sessions`.
+                if (session.load(std::memory_order_relaxed)) {
+                    refuse_stream(c);
+                    return true;  // the established session stays up
+                }
 
                 // The decode borrows: the headers are views into `fields` and
                 // into `c.acc` (through `rest`), so both outlive every read
