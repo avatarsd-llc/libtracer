@@ -1184,10 +1184,91 @@ within their A/A nulls, and every fan-out from 16 up is **FASTER** — `inproc` 
 +2.9 / +4.1 / +4.1 / +6.2 / +5.1 / +6.8 / +5.3 / +5.8 % at 16 / 32 / 64 / 128 / 256 / 512 / 1024 /
 8192 against nulls of 0.6–4.7 %, with p50 and p99 moving the same way.
 
-**Not taken here, deliberately.** #1442's second arm — letting `edge_view_t` hold the same
-shared pointer so `try_copy_published` stops copying two strings **per delivery** — is a change
-to the delivery path itself, and this PR's bar was that the delivery path not move. It stays
-open, and it is the larger prize on a wide remote fan-out.
+**Not taken there, deliberately.** #1442's second arm — letting `edge_view_t` hold the same
+shared pointer so the snapshot stops copying two strings **per delivery** — is a change to the
+delivery path itself, and #1447's bar was that the delivery path not move. It was filed as
+#1448, and the next section is what it measured.
+
+#### What #1448 did to the DELIVERY half — and the blind spot it had to close first
+
+`edge_view_t` now HOLDS the shared record (`remote_ptr_t`) instead of copying five fields out of
+it, so `vertex_t::copy_published` is four words and two refcounts per edge, with no branch on the
+edge shape. `sizeof(edge_view_t)` **160 B → 48 B**, `edge_snapshot_t` **1288 B → 392 B**, and
+`graph_t::fan_out`'s own stack reservation **1368 B → 472 B** (`sub $0x558,%rsp` →
+`sub $0x1d8,%rsp`) — which is the figure that matters on a 16 KB-class task stack.
+
+**The blind spot.** Every fan-out row in this suite subscribes local callbacks, whose cold half
+is null; `inproc-target-*` names a local PATH, whose cold half is null too. So no published
+fan-out row has ever exercised a remote subscriber, which is why both #1442 and #1448 had to be
+priced on other instruments. #1448 adds `inproc-remote` (`bench_libtracer fan-remote`, an
+isolated sweep only) so the leg has a curve at last.
+
+**What `fan` measures here is the WIDTH, not the removed copy** — its edges have no cold half to
+copy. That is worth reading as a result rather than a caveat: the entire delta below is
+`edge_view_t` getting smaller.
+
+`bench_libtracer fan`, best of 9 rounds per binary, three binaries interleaved `B N A A N B` in
+one window (`N` a byte-identical copy of `B` — the A/A null), `taskset -c 2`.
+
+| fan-out | 1 | 8 | 16 | 32 | 64 | 128 | 256 | 512 | 1024 | 8192 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `inproc` throughput | +20.0 % | +72.9 % | +55.5 % | +67.7 % | +73.2 % | +77.2 % | +83.0 % | +85.6 % | +83.1 % | +83.7 % |
+| — its A/A null | ±6.9 % | ±7.0 % | ±8.1 % | ±6.0 % | ±1.6 % | ±3.1 % | ±4.4 % | ±8.8 % | ±5.1 % | ±1.5 % |
+| `inproc` p50 | −15.4 % | −36.0 % | −34.4 % | −38.2 % | −39.2 % | −40.9 % | −44.0 % | −43.7 % | −43.5 % | −45.1 % |
+| — its A/A null | ±7.7 % | ±4.0 % | ±3.1 % | ±3.6 % | ±3.1 % | ±2.8 % | ±4.4 % | ±4.6 % | ±3.1 % | ±2.0 % |
+| `inproc` p99 | −20.0 % | −48.8 % | −33.3 % | −56.0 % | −57.7 % | −66.4 % | −67.2 % | −68.3 % | −39.5 % | −47.8 % |
+| — its A/A null | ±10.0 % | ±34.9 % | ±6.3 % | ±1.2 % | ±4.0 % | ±16.1 % | ±21.8 % | ±18.2 % | ±3.4 % | ±10.0 % |
+| `inproc-batch` p50 (clock-calibrated) | −30.3 % | −42.2 % | −35.2 % | −38.6 % | −40.0 % | −41.4 % | −43.0 % | −42.5 % | −42.7 % | −44.7 % |
+| — its A/A null | ±20.5 % | ±4.6 % | ±2.7 % | ±0.6 % | ±1.9 % | ±1.1 % | ±2.5 % | ±1.7 % | ±0.5 % | ±4.7 % |
+
+Read the throughput row against its null: from fan-8 up the effect is **an order of magnitude
+outside it**, and the clock-calibrated `inproc-batch` row agrees point for point with the
+quantized one. Fan-1 is the only arm where the two are within a small multiple of the null; it
+is also the arm with the least `edge_view_t` to shrink, which is the shape the mechanism
+predicts. The p99 nulls at fan-8/128/256/512 are wide enough that only the *sign* of those cells
+should be read.
+
+**Provenance, stated because it bounds what these numbers are worth.** This window was taken on
+a heavily loaded host (load average 45–110 on 31 CPUs — a CI runner and other build jobs), which
+`bench/host_guard.py` would have refused. Best-of-rounds is what makes it usable at all:
+contamination is one-sided, so the best round of each leg is a floor, and the A/A null in the
+same window is what bounds the residual. The effect is 10–25× that null, so the CONCLUSION is
+not in doubt; the third digit is, and the table should be retaken on a quiet host before any of
+it is banked.
+
+**A vacuity check, because a delivery that stopped happening would look exactly like this.**
+`run_inproc` counts deliveries but never asserts them. Both binaries were therefore run against
+a direct probe outside the bench: at F = 1 / 8 / 1024 a single write delivers exactly F times on
+each. `ctest` 202/202 covers the same ground properly.
+
+##### `fan-remote` — the arm that prices the removed copy
+
+Same protocol, same two binaries, taken in a **much quieter window** — every A/A null below is
+under 2.1 % on throughput and under 1.1 % on p50, which is what this arm's numbers should be
+read against rather than the `fan` table's.
+
+| fan-out | 1 | 8 | 16 | 32 | 64 | 128 | 256 | 512 | 1024 | 8192 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `inproc-remote` throughput | +26.2 % | +95.1 % | +87.2 % | +91.4 % | +97.4 % | +106.9 % | +106.8 % | +109.7 % | +111.8 % | **+121.6 %** |
+| — its A/A null | ±1.8 % | ±1.0 % | ±0.0 % | ±1.1 % | ±0.4 % | ±0.5 % | ±2.1 % | ±1.6 % | ±1.2 % | ±0.5 % |
+| `inproc-remote` p50 | −17.7 % | −46.9 % | −45.3 % | −46.5 % | −48.2 % | −50.6 % | −51.7 % | −52.4 % | −53.3 % | **−54.3 %** |
+| — its A/A null | ±0.0 % | ±0.0 % | ±0.0 % | ±1.0 % | ±0.5 % | ±0.4 % | ±0.9 % | ±0.8 % | ±0.1 % | ±0.6 % |
+| `inproc-remote` p99 | −17.4 % | −64.3 % | −64.0 % | −48.1 % | −67.3 % | −69.9 % | −44.0 % | −49.3 % | −58.9 % | −64.3 % |
+| — its A/A null | ±17.4 % | ±29.7 % | ±1.8 % | ±48.1 % | ±0.6 % | ±6.8 % | ±9.5 % | ±8.5 % | ±1.8 % | ±15.8 % |
+
+A remote fan-out **more than doubles** from fan-128 up, and its p50 halves, against a null two
+orders of magnitude smaller. Read the p99 row for sign only at fan-1 / 8 / 32 / 8192, where the
+null is wide.
+
+The curve's SHAPE is the mechanism: the delta grows with the fan-out and flattens at the top,
+because what was removed is a per-edge constant (two `std::string` copies and two `view_t`
+clones) and what remains — the sink call, the two route clones `remote_delivery_t` still takes,
+the array walk — is not. Against the `fan` row at the same width, the remote arm gains roughly
+1.4x what the local one does, which is the removed copy on top of the shared width change.
+
+The row asserts `deliveries == MSGS * F` before it is emitted, and the sink reads the borrowed
+link spelling on every delivery, so neither "it delivered nothing" nor "it never dereferenced
+the shared record" can produce a number here.
 
 ### `bench_forward_rope` — the rope forward hop, and what its A/A null is worth (#1358)
 

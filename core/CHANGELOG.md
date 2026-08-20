@@ -135,6 +135,18 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   remote arm asserts exactly that inversion through the identical injection hook, with a canary
   proving the hook is live.
 
+  Measured on `bench_libtracer`, best of 9 rounds per binary, three binaries interleaved
+  `B N A A N B` in one window (`N` a byte-identical copy of `B` — the A/A null), `taskset -c 2`.
+  The new **`fan-remote`** ladder — the arm that actually carries a cold half, added by this
+  change because no published fan-out row ever had one — reads **+95 % to +122 % throughput and
+  −47 % to −54 % p50 from fan-8 to fan-8192**, against A/A nulls under 2.1 % and 1.1 %
+  respectively. The pre-existing local-callback `fan` ladder, whose edges carry no cold half at
+  all and therefore price only the width change, reads **+55 % to +86 % throughput and −34 % to
+  −45 % p50** over the same span. `vertex_t::copy_published` — the pinned STOP symbol — did not
+  regress: **3554 → 1707 B, 761 → 399 instructions**. Full tables, the per-symbol attribution
+  (including the two symbols that grew, by +1 B and by +10 instructions) and the window's
+  provenance are in `bench/README.md` and `bench/symbol_ratchet.json`.
+
   Migration for an out-of-tree reader of a dispatch view: `e.link` → `e.link()`,
   `e.caller` → `e.caller()` (both `std::string_view`, valid while the view is), and
   `e.return_route` / `e.reverse_route` / `e.delivery_compact` → `e.remote->…` behind an
