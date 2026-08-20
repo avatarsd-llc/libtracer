@@ -22,6 +22,20 @@ Status: accepted. **Refined by [ADR-0059](0059-creator-endpoint-creation-and-rem
 > route is `dst`-monotonicity alone.** The arbitrary-folding / self-healing claim the clause was
 > attached to stands on its own and never depended on the cap.
 
+> **Erratum (2026-08-20), [#1392](https://github.com/avatarsd-llc/libtracer/issues/1392) — the `:settings` spelling of a connection's scalars is superseded.**
+> The §Decision worked example and the rule of thumb below it put a connection's `addr` / `port` /
+> `role` / `keepalive` in its `:settings`. **That namespace no longer exists**:
+> [RFC-0022](../spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.B
+> (as replaced by its Amendment 1) deleted `settings_t` outright, so a write to any flat name under
+> `:settings` answers `SCHEMA_NOT_FOUND` caller-independently and only the read container plus its
+> reserved `app` subkey survive. A connection's scalars are **creation-time config**, carried in the
+> creating `SPEC` and parsed into the transport-private `tr::net::conn_settings_t` — an ADR-0021
+> §Decision 3 *device-private* facet, reached through the transport kind's own config door, with no
+> post-creation edit of any kind. **This ADR's substance is untouched**: the dividing rule
+> *distinct lifecycle/identity ⇒ `/` vertex; scalar config of a thing ⇒ config on that thing* is
+> exactly what still holds — only the spelling of its second half moved. The current statement is
+> [reference/19](../reference/19-transports-are-vertices.md) §What is a vertex, and what is not.
+
 [ADR-0021](0021-colon-field-plane-is-the-vertex-ioctl.md) established the `:` field plane as a vertex's `ioctl` and **rejected** turning a vertex's *control facets* (`/v/acl`, `/v/subscribers`) into `/` sub-vertices, because that dissolves one-identity atomicity. [ADR-0017](0017-in-band-vertex-creation-controller-orchestration.md) made vertex creation an in-band, ACL-gated `:children[]` write. The open question for third-party network formation: **how does an orchestrator (typically a web UI) bring up a transport link — e.g. a QUIC connection from B to A?** A first sketch squeezed it into a `transport_quic:peers[]` field. This ADR rejects that and places the transport in the path tree.
 
 ## Decision

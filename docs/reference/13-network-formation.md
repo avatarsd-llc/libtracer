@@ -277,8 +277,9 @@ machine managed automatically (RFC-0014).
   the refcount to 0 and the link re-dormants with no background retry.
 - **A permanently-unreachable `DIAL` peer with a standing binding retries
   indefinitely.** There is no max-attempt constant, no give-up bound and no
-  terminal-failure state; `backoff` and `connect_timeout` are `:settings`, never
-  hardcoded. A consumer distinguishes "transiently retrying" from "unreachable" by
+  terminal-failure state; `backoff` and `connect_timeout` are creation-time config
+  (§Creation — the `SPEC`'s `config`, parsed into `conn_settings_t`), never hardcoded.
+  A consumer distinguishes "transiently retrying" from "unreachable" by
   applying its **own** display threshold to the propagated `reconnecting` state — the
   wire stays honestly `reconnecting`.
 - **Ops on a down or reconnecting link fail fast** with `link-down`; they never block
@@ -303,8 +304,10 @@ normative on the merge of RFC-0014's conformance vectors** — the RFC defers it
 values are the reference encoding until then (`link_state_t`,
 `core/include/libtracer/transport_vertex.hpp:99-106`). A `LISTEN` vertex's liveness
 reports **listen-socket reachability**, not per-accepted-peer connectivity; accepted-peer
-count and identity are exposed through `:children[]` / `:settings`. Once up, a link is
-bidirectional regardless of who dialed — `role` says only *who initiates*. The liveness
+count and identity are exposed through the connection vertex's **synthesized
+`:children[]`**, built per read from the transport's own live-peer table
+(`core/src/transport_vertex.cpp:574`) — never through `:settings`, whose core namespace
+is empty. Once up, a link is bidirectional regardless of who dialed — `role` says only *who initiates*. The liveness
 engine that drives these transitions automatically is not implemented; the value is set
 by the caller.
 
@@ -412,7 +415,18 @@ automatic**:
   with many.
 - **Re-`SPEC`ing to reconfigure.** A `SPEC` naming an existing connection is rejected
   `PATH_IN_USE`. An implementation that treats reconfiguration as "create again" never
-  changes the address; the address lives in `:settings`.
+  changes the address — and there is no `:settings` edit to reach for instead. `addr`
+  and `port` are **creation-time config** (§Creation): they travel in the `SPEC`'s
+  `config` and are parsed into the transport-private `tr::net::conn_settings_t`, whose
+  only accessor hands out a **const** view
+  (`transport_vertex_t::settings_of`, `core/include/libtracer/transport_vertex.hpp:505`).
+  The vertex `:settings` core namespace holds nothing to write — RFC-0022 §3.B deleted
+  `settings_t`, so every flat knob name under it answers `SCHEMA_NOT_FOUND`
+  caller-independently (`core/src/graph.cpp:3108`), leaving only the read container and
+  its reserved `app` subkey (`core/src/graph.cpp:3306`). Moving a peer therefore means
+  retiring the connection (`NAME`) and re-creating it (`SPEC`), which un-routes the link
+  and cascade-evicts the subscriptions routed through it (§Boundaries of the formation
+  model, *hard* teardown).
 - **Expecting a data write to revive a retired connection.** Connection vertices are an
   exception to write-creates; the write fails and the peer stays unreachable until a
   `SPEC` recreates it.
