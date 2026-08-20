@@ -1291,6 +1291,18 @@ result_t<vertex_handle_t> graph_t::ensure_vertex(std::span<const std::byte> key,
     return vertex_handle_t{*p};
 }
 
+result_t<void> graph_t::hide_from_enumeration(vertex_handle_t vh) {
+    vertex_t* v = vh.get();
+    // The UNIQUE map lock, the same one `fill` / `mark_unregistered` take: the bit is read by
+    // every `:children[]` walk under the SHARED lock, so writing it under the unique lock is
+    // what keeps a listing from being gathered half-hidden. It is set once, at mint, on a
+    // control-plane path — nothing here is hot.
+    const std::unique_lock lock(map_mutex_);
+    if (v == nullptr || !v->registered()) return std::unexpected(status_t::NOT_FOUND);
+    v->mark_enumeration_hidden();
+    return {};
+}
+
 result_t<vertex_t*> graph_t::ensure_vertex_ptr(std::span<const std::byte> key,
                                                std::string_view caller) {
     if (vertex_t* v = find_ptr(key)) return v;
@@ -3393,7 +3405,11 @@ result_t<view_t> graph_t::read_children(vertex_t* v) const {
         // A direct child contributes ONE `POINT{NAME <segment>}` member (ADR-0057 — one
         // child-list walk, no whole-map prefix scan). Placeholders (unregistered
         // intermediate levels) are not members, matching the flat map where they did
-        // not exist.
+        // not exist — and neither is an enumeration-hidden child
+        // (@ref vertex_t::enumerable_member): the RFC-0014 §3 creator endpoint is registered
+        // and addressable but is not one of its module's connections. One predicate, shared
+        // with the folded door below, so the two listings cannot disagree about membership
+        // (`folded_children_test` gates them byte-for-byte).
         //
         // The child's key RECORD used to be the POINT body verbatim, because a vertex-map
         // key record and a `NAME` TLV were the same four-byte-headed bytes. RFC-0018 packs
@@ -3402,7 +3418,7 @@ result_t<view_t> graph_t::read_children(vertex_t* v) const {
         // decoder standing everywhere else — so the member is RE-FRAMED here rather than
         // borrowed: same wire shape as before this RFC, one header write per child.
         v->for_each_child([&members](const vertex_t& c) {
-            if (!c.registered()) return;
+            if (!c.enumerable_member()) return;
             const std::span<const std::byte> seg = child_segment(c);
             const std::size_t body = kNameHeaderBytes + seg.size();
             wire::emit_header(members, type_t::POINT, opt_t{.pl = true, .ll = body > 0xFFFFu},
@@ -3542,7 +3558,10 @@ result_t<rope_t> graph_t::read_children_folded(vertex_handle_t vh) const {
     {
         const std::shared_lock lock(map_mutex_);
         v->for_each_child([&members, &members_len, &oom, &hdr_backend](const vertex_t& c) {
-            if (oom || !c.registered()) return;
+            // THE membership predicate, shared verbatim with `read_children` — placeholders
+            // and enumeration-hidden children (the RFC-0014 §3 creator endpoint) are not
+            // members on either door.
+            if (oom || !c.enumerable_member()) return;
             const std::span<const std::byte> seg = child_segment(c);
             const std::size_t body = kNameHeaderBytes + seg.size();
             view::segment_ptr_t mseg = folded_member_header(hdr_backend, body, seg.size());

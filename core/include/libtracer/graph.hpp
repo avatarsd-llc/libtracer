@@ -1932,6 +1932,38 @@ class graph_t {
                                                           std::string_view caller = {});
 
     /**
+     * @brief Drop @p vh out of its parent's `:children[]` listing, keeping it registered and
+     *        addressable — the enumeration-hide seam
+     *        [RFC-0014](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)
+     *        §3 requires (stage S4 of
+     * [#492](https://github.com/avatarsd-llc/libtracer/issues/492)).
+     *
+     * The one caller today is @ref tr::net::transport_vertex_t, on the creator endpoint
+     * `<net_root>/<module>/conn`: §3 reserves that name and says it is **hidden** from
+     * `<net_root>/<module>:children[]`, which "returns the member connection vertices". The
+     * endpoint is not one of them — it is the write-only control that CREATES them — so a
+     * peer walking the listing as a topology of links descends into a vertex with no peer
+     * behind it. Discovery of the endpoint is by §6's creatability probe (`read
+     * <module>/conn:schema`) instead, which is why hiding must not cost addressability.
+     *
+     * Scope, deliberately: this changes `:children[]` (both the materialized and the folded
+     * door) and nothing else. @ref find still resolves the vertex, reads and writes still
+     * reach it, the RFC-0016 composed branch read still descends into it, and the owner-side
+     * @ref for_each_vertex census still visits it. RFC-0014 §3's clause is about the member
+     * listing; widening it to the other surfaces is not this seam's call to make.
+     *
+     * One-way. The bit belongs to the current occupant of the key, so a @ref retire clears it
+     * along with the rest of that occupant's identity; a fresh registration is listed again
+     * unless it hides itself. There is no `unhide`.
+     *
+     * @param vh The vertex to hide. Must be registered.
+     * @retval status_t::NOT_FOUND @p vh is null or is an unregistered placeholder — hiding a
+     *         vertex that is not a member yet would silently apply to whatever registers
+     *         there later.
+     */
+    [[nodiscard]] result_t<void> hide_from_enumeration(vertex_handle_t vh);
+
+    /**
      * @brief How many writes performed the ancestor (bubbling) walk — instrumentation.
      *
      * The near-free-when-idle observable (RFC-0005): stays 0 while no subscriber

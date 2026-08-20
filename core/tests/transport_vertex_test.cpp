@@ -1563,12 +1563,11 @@ void test_ws_peer_named_config() {
     check(enumerate_peers(node, "/net:children[]") ==
               std::set<std::string>{"udp-client", "udp-server", "ws-client", "ws-server"},
           "/net:children[] lists every declared module");
-    // The `conn` endpoint is listed alongside the members here: hiding it from the module's
-    // `:children[]` is RFC-0014 S4 (the enumeration-hide seam), which does not exist yet.
+    // The `conn` endpoint is NOT listed (RFC-0014 §3, S4): the module's `:children[]` returns
+    // its member CONNECTIONS, and the endpoint is the control that creates them.
     check(
-        enumerate_peers(node, "/net/ws-server:children[]") ==
-            std::set<std::string>{"bus", "conn", "plain"},
-        "/net/ws-server:children[] lists the two connections + the endpoint — no vertex per peer");
+        enumerate_peers(node, "/net/ws-server:children[]") == std::set<std::string>{"bus", "plain"},
+        "/net/ws-server:children[] lists the two connections — no endpoint, no vertex per peer");
 }
 
 /**
@@ -1800,6 +1799,49 @@ void test_conn_endpoint_name_removes() {
     // Removing it again is the same no-op success, so a retried teardown is safe too.
     check(node.write(endpoint, tr::net::conn_remove("up")).has_value(),
           "a repeated remove is a no-op success");
+    channel.shutdown();
+}
+
+/**
+ * @brief RFC-0014 §3 (S4): `conn` is HIDDEN from `/net/<module>:children[]`, and hiding it
+ *        costs nothing else — the endpoint stays addressable, writable, and probe-able.
+ *
+ * The two halves are inseparable and that is the point of testing them together. §3 says the
+ * module's listing returns its member CONNECTIONS, so the endpoint must not appear; §6 makes
+ * `read <module>/conn:schema` the sanctioned creatability probe, so the endpoint must still
+ * resolve. "Hidden" that also meant "unreachable" would break the discovery contract that
+ * exists BECAUSE it is hidden.
+ */
+void test_conn_endpoint_is_hidden_from_enumeration() {
+    std::printf("RFC-0014 §3 (S4): the conn endpoint is unlisted but still addressable:\n");
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    (void)net.register_module("ws-client", "ws", conn_role_t::DIAL);
+
+    // A declared module with no connection yet lists NOTHING — not even its own endpoint.
+    check(enumerate_peers(node, "/net/ws-client:children[]").empty(),
+          "an empty module's :children[] is empty — the endpoint is not a member");
+    // Not vacuous: the module itself IS discoverable one level up, which is how a creator
+    // finds the endpoint it cannot see in the module's own listing.
+    check(enumerate_peers(node, "/net:children[]") == std::set<std::string>{"ws-client"},
+          "/net:children[] still lists the declared module");
+
+    // Unlisted is not unreachable — the endpoint resolves, and the SPEC write still executes.
+    const auto endpoint = path_t("/net/ws-client/conn");
+    check(node.find(path_t::parse("/net/ws-client/conn")->key()).has_value(),
+          "the hidden endpoint still RESOLVES (RFC-0014 §6's creatability probe needs it to)");
+    check(node.read(path_t("/net/ws-client/conn:schema")).has_value(),
+          "and its :schema facet still reads (the probe's own verb)");
+
+    tr::net::loopback_channel_t channel;
+    net.provide_link("ws-client", "up", channel.a());
+    check(node.write(endpoint, conn_spec_t("up").view()).has_value(),
+          "a SPEC written to the hidden endpoint still creates the connection");
+
+    // Now the listing holds exactly the member connection — the endpoint stays out of it.
+    check(enumerate_peers(node, "/net/ws-client:children[]") == std::set<std::string>{"up"},
+          "/net/ws-client:children[] lists the connection and only the connection");
     channel.shutdown();
 }
 
@@ -2209,6 +2251,7 @@ int main() {
     test_conn_endpoint_malformed_refuses();
     test_conn_endpoint_spec_in_use_is_idempotent_safe();
     test_conn_endpoint_name_removes();
+    test_conn_endpoint_is_hidden_from_enumeration();
     test_wire_name_reaches_add_child();
     test_app_chosen_root_and_module();
     test_structural_vertex_partition();
