@@ -53,6 +53,14 @@ verbatim from that file, so it cannot drift from what actually compiles.
 | [Classes do not share](mem-size-classes.md) | L0 substrate | exact `(bytes, align)` classes; `classes_used()` / `overflowed()` size the span |
 | [A container that fails by value](mem-block-array.md) | L0 substrate | `block_array_t`: growth returns `false`; `push_slot`; the two static asserts |
 | [The `std::pmr` adapter](mem-source-resource.md) | L0 substrate | ADR-0079 `source_resource_t` — placement and bounding, never failability |
+| [Open by default, and the first ACE is the lock](acl-open-by-default.md) | L4 auth / ACL | enforcement is opt-in twice; presence closes, not a DENY; the trusted local context |
+| [The caller context is not the subject](acl-subject-resolver.md) | L4 auth / ACL | ADR-0018 `subject_resolver_fn_t`; the ERROR arm is a deny; the `{fn, ctx}` shape |
+| [`access_mask` is a bitfield](acl-right-bits.md) | L4 auth / ACL | six gates, six single-bit grants; `WRITE_ACL` is precisely admin |
+| [`EVERYONE@` is reserved both ways](acl-everyone-reserved.md) | L4 auth / ACL | the wildcard ACE, and why a resolved subject may never spell it (#908) |
+| [Effective ACL = own + inherited](acl-inherit.md) | L4 auth / ACL | `kAceInherit`; a closed parent over an open child |
+| [`expires_ns` is checked against your clock](acl-expiry.md) | L4 auth / ACL | ADR-0050: one merge, many verdicts; an expired ACE still closes |
+| [Two evaluators, and DENY](acl-policy-profiles.md) | L4 auth / ACL | `allow_only_policy_t` vs `full_acl_policy_t`; why parse refuses a DENY |
+| [An ACL is a security document](acl-parse-strict.md) | L4 auth / ACL | `parse_acl` refuses what `encode_acl` never emits; leniency widens grants |
 
 The toctree below is the order of record; this table adds the layer and the summary.
 Each example's layer column names the module that owns the types it uses — the
@@ -105,18 +113,27 @@ options, so neither CMake nor ctest can label that case; each binary announces t
 its first line, and that line is the only place the distinction is visible.
 
 The eight `graph_*` targets are pure in-process L4 and are built unconditionally; run them
-together with `ctest --test-dir build -R example_graph_`. The eight `wire_*`, eight `view_*` and
-eight `mem_*` targets are likewise unconditional — pure L0/L1/L2/L3, no net plane, no sockets —
-and run with `ctest --test-dir build -R example_wire_`, `-R example_view_` and
-`-R example_mem_`. Those per-domain `ctest -R`
+together with `ctest --test-dir build -R example_graph_`. The eight `wire_*`, eight `view_*`,
+eight `mem_*` and eight `acl_*` targets are likewise unconditional — pure L0/L1/L2/L3/L4, no net
+plane, no sockets — and run with `ctest --test-dir build -R example_wire_`, `-R example_view_`,
+`-R example_mem_` and `-R example_acl_`. Those per-domain `ctest -R`
 spellings are the maintained way to run a group; the explicit `./build/examples/…` list above
 predates them and is deliberately left as the original seven rather than grown to every target.
 
-The `mem_*` group is the one domain with **no** conditional target of either kind: no
-`if(LIBTRACER_NET_PLANE)` guard and no `if constexpr` run-time skip, because L0 has no knob that
-can forbid one of them. A green `ctest -R example_mem_` is therefore a pass for eight examples
-that all demonstrated something — which is exactly the property the two paragraphs above say the
-other groups cannot claim for themselves.
+Two groups have **no** conditional target of either kind — no `if(LIBTRACER_NET_PLANE)` guard and
+no `if constexpr` run-time skip — so a green `ctest -R` over either is a pass for eight examples
+that all demonstrated something, which is exactly the property the two paragraphs above say the
+other groups cannot claim for themselves:
+
+- `mem_*`, because L0 has no knob that can forbid one of them at all; and
+- `acl_*`, which does have a knob in reach and handles it differently from a skip.
+  `acl_policy_profiles` covers a surface the target's `acl_policy_t` binding selects
+  ([ADR-0068](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0068-build-configuration-is-plain-cpp-config-header.md)),
+  and rather than following the binding and skipping the arm it does not have, it names **both**
+  policies explicitly as template arguments — both adapters are always compiled — so both arms
+  run in every build and the bound choice is only *printed*. Where an example's subject is a
+  build-configuration seam, naming the seam's arms beats following the binding; a skip should be
+  the last resort, not the first reflex.
 :::
 
 ```{toctree}
@@ -170,4 +187,12 @@ A long-lived seam has to recycle <mem-pool-source>
 Classes do not share <mem-size-classes>
 A container that fails by value <mem-block-array>
 The std::pmr adapter <mem-source-resource>
+Open by default, and the first ACE is the lock <acl-open-by-default>
+The caller context is not the subject <acl-subject-resolver>
+access_mask is a bitfield <acl-right-bits>
+EVERYONE@ is reserved both ways <acl-everyone-reserved>
+Effective ACL = own + inherited <acl-inherit>
+expires_ns is checked against your clock <acl-expiry>
+Two evaluators, and DENY <acl-policy-profiles>
+An ACL is a security document <acl-parse-strict>
 ```
