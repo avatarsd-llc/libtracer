@@ -90,9 +90,9 @@ Two targets are conditional at **run** time rather than build time, which is a d
 with the same ending. [`sub_unsubscribe_from_dispatch`](sub-unsubscribe-from-dispatch) demonstrates
 unsubscribing from inside a delivery — a shape `reclaim_strict_t` forbids — and
 [`view_sync_pool`](view-sync-pool) binds a spin-waiting critical section, which a target that sets
-`tr::mem::kSpinWaitSafe = false` may not instantiate at all. Both are always built, but under the
-binding they do not apply to each prints `skipped:` and exits `0`, so `ctest` records a **pass for
-an example that demonstrated nothing**. Both knobs are bound as plain C++ rather than as CMake
+`tr::mem::kSpinWaitSafe = false` may not instantiate at all. Both are always built; under a
+binding an example does not apply to, it prints `skipped:` and exits `0`, so `ctest` records a
+**pass for an example that demonstrated nothing**. Both knobs are bound as plain C++ rather than CMake
 options, so neither CMake nor ctest can label that case; each binary announces the bound value on
 its first line, and that line is the only place the distinction is visible.
 
