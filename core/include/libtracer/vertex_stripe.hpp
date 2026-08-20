@@ -69,7 +69,7 @@ struct alignas(kStripeAlign) vertex_stripe_t {  // one cache line per stripe whe
     /** @brief Live `await` waiters on this stripe. Mutated only under @ref m, but READ
      *         without it by a publish that never takes the lock at all (#555), so it is
      *         atomic: the waiterless publish skips the mutex, not just the condvar call
-     *         that #370 skipped. See @ref vertex_t::store for the ordering argument that
+     *         that #370 skipped. See `%vertex_t::store` for the ordering argument that
      *         makes the lock-free read safe against a lost wakeup. */
     std::atomic<int> waiters{0};
 };

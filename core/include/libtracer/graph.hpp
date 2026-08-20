@@ -1242,6 +1242,53 @@ class graph_t {
     [[nodiscard]] result_t<std::vector<rope_t>> history(vertex_handle_t v) const;
 
     /**
+     * @brief Drain @p v's STREAM entries appended since the last flush, in order — a queue,
+     *        not a coalesce (RFC-0008 §E) — and advance the drain cursor.
+     *
+     * The handle-based mirror of the drain half of §E: the same cursor the internal write and
+     * sweep paths advance, reachable by an owner that drives propagation itself. It is the
+     * observation seam for §E's "a stream's flush delivers each ring entry appended since the
+     * previous flush" — `history` shows what the ring RETAINS, this shows what is OWED.
+     *
+     * The out-param is deliberate, not a returned vector: `vertex_t::drain_unflushed`'s #477
+     * nothrow contract is "on OOM return 0 WITHOUT advancing the cursor, so the entries
+     * re-drain on the next covering flush", and that only holds with caller storage the
+     * snapshot can nothrow-reserve into. This form inherits that contract verbatim, including
+     * the note that entries trimmed out of the keep-last ring before the drain are lost.
+     *
+     * Draining ADVANCES the cursor, so a later @ref propagate sweep will not re-deliver what
+     * this took — the caller now owns delivering them.
+     *
+     * @param v   The STREAM vertex to drain.
+     * @param out Caller storage the drained entries are assigned into (overwritten).
+     * @return The number of entries drained (0 ⇒ nothing appended since the last flush, or
+     *         the snapshot could not be allocated — retry on the next flush).
+     * @retval status_t::SCHEMA_NOT_FOUND @p v is not a STREAM — no ring, no cursor, the same
+     *         disposition @ref history gives a non-stream role.
+     * @retval status_t::PERMISSION_DENIED The local caller lacks READ. A drain hands back the
+     *         SAME bytes @ref history serves, so leaving it ungated would be a READ-gate
+     *         bypass wearing a different verb's name.
+     */
+    [[nodiscard]] result_t<std::size_t> drain_unflushed(
+        vertex_handle_t v, std::vector<std::shared_ptr<const rope_t>>& out);
+    /**
+     * @brief Advance @p v's STREAM drain cursor to "now" WITHOUT draining (RFC-0008 §E) — an
+     *        eager delivery already flushed the ring, so a later sweep must not re-deliver.
+     *
+     * The handle-based mirror of the flush half of §E, and the exact verb `write_branch`
+     * already uses internally after it fans a decomposed slice out eagerly. Takes no cursor
+     * argument: the cursor is the per-vertex "appended since flush" count and the only thing
+     * a flush can say about it is "nothing is owed".
+     *
+     * Ungated beyond the role check, unlike @ref drain_unflushed — it discloses no bytes and
+     * has no wire surface — the same owner-side shape @ref propagate and @ref set_history_depth
+     * carry.
+     *
+     * @retval status_t::SCHEMA_NOT_FOUND @p v is not a STREAM.
+     */
+    [[nodiscard]] result_t<void> mark_flushed(vertex_handle_t v);
+
+    /**
      * @brief FOLDED projection of the `:children` listing (L4 fold, Slice 0) — the SAME
      *        `POINT{ POINT{NAME}… }` that the materialized `read_children` serializes, but
      *        produced as a scatter-gather **rope** (an outer POINT header link plus one

@@ -6,12 +6,17 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * Covers: the #867 visibility guard (the map-lock mutators are graph_t's, enforced by
- * `static_assert` because no runtime test can observe access control),
- * store/read_stored (LKV + seq bump), the STREAM ring keep-last trim and the
- * RFC-0008 §E drain cursor, wait_for_change wake/timeout, snapshot_edges under a
- * concurrent add_edge storm (inline→heap crossover included), clear_edge, the
- * transient-local add_edge latch, and set_acl/with_acl/with_aces.
+ * Covers: the #867 / #1300 visibility guard (the map-lock mutators AND the storage funnel are
+ * graph_t's, enforced by `static_assert` because no runtime test can observe access control),
+ * the note_write/read_stored readiness cursor, wait_for_change wake/timeout, snapshot_edges
+ * under a concurrent add_edge storm (inline→heap crossover included), clear_edge, the edge slot
+ * table, and set_acl/with_acl/with_aces.
+ *
+ * NOT here since #1300: the LKV publish, the STREAM ring keep-last trim, the RFC-0008 §E drain
+ * cursor and the transient-local latch all need a stored value, and `vertex_t::store()` is
+ * `graph_t`'s alone now. They live in `graph_test.cpp` — `test_assign_lkv_and_seq_bump`,
+ * `test_stream`, `test_stream_drain_cursor`, `test_admission_door_uniformity` — driven through
+ * `vertex_handle_t`, plus `qos_policy_test.cpp` §5.1/§5.2 for the per-subscriber latch ablation.
  */
 
 #include "libtracer/vertex.hpp"
@@ -49,12 +54,12 @@ using tr::view::rope_t;
 using tr::graph::handlers_t;
 using tr::testing::check;
 
-// -- #867 ruling 2: the map-lock mutators are graph_t's, and the COMPILER enforces it ------
+// -- #867 ruling 2 (+ #1300): the graph-owned mutators, and the COMPILER enforces it ------
 //
 // Access checking happens during substitution, so an inaccessible member makes a
 // requires-expression FALSE rather than ill-formed: these assertions observe the visibility
 // itself, which no runtime test can. Reverting the `private:` hunk in `vertex.hpp` re-satisfies
-// every concept below and turns this TU into three compile errors — that ablation IS the
+// every concept below and turns this TU into four compile errors — that ablation IS the
 // evidence, since a green suite says nothing about an encapsulation the compiler owns.
 
 /** @brief True iff a caller outside `graph_t` can stamp a registration's identity onto a vertex. */
@@ -69,15 +74,21 @@ concept unregisters = requires(V& v) { v.mark_unregistered(); };
 template <typename V>
 concept adopts_child = requires(V& v, std::unique_ptr<V> c) { v.add_child(std::move(c)); };
 
+/** @brief True iff a caller outside `graph_t` can publish a value into a vertex's LKV. */
+template <typename V>
+concept publishes_value = requires(V& v) { v.store(rope_t{}); };
+
 static_assert(!fills_identity<vertex_t>,
               "#867: fill() is unique-map-lock state — only graph_t may stamp an identity");
 static_assert(!unregisters<vertex_t>,
               "#867: mark_unregistered() is unique-map-lock state — only graph_t may retire");
 static_assert(!adopts_child<vertex_t>,
               "#867: add_child() mutates the Composite tree — only graph_t may splice it");
+static_assert(!publishes_value<vertex_t>,
+              "#1300: store() is graph_t's storage funnel — only graph_t may publish an LKV");
 
 /** @brief What deliberately STAYS public on a bare vertex: the read + verb surface the
- *         storage-layer tests below drive with no graph_t in sight. */
+ *         readiness/edge/ACL tests below drive with no graph_t in sight. */
 static_assert(requires(vertex_t& v) {
     v.role();
     v.registered();
@@ -92,58 +103,37 @@ rope_t make_value(std::uint8_t b) {
     return rope_t{tr::view::view_t::over(std::move(seg))};
 }
 
-std::uint8_t first_byte(const rope_t& r) {
-    return std::to_integer<std::uint8_t>(r.only().bytes()[0]);
-}
-
 path_key_t key_of(std::initializer_list<std::uint8_t> bytes) {
     std::vector<std::byte> k;
     for (std::uint8_t b : bytes) k.push_back(std::byte{b});
     return path_key_t{k};
 }
 
-void test_store_and_lkv() {
-    std::printf("store / read_stored — the LKV publish + seq bump:\n");
+/**
+ * @brief The write-sequence arithmetic on a BARE vertex — the one property no graph seam can
+ *        express, because `graph_t::await` snapshots the cursor internally.
+ *
+ * `store()` is `graph_t`'s alone since #1300, so what remains testable here is the readiness
+ * half: `note_write()` is exactly "+1 per verb, publish nothing". The LKV facts this suite used
+ * to assert on `store()` are restated through the handle in
+ * `graph_test.cpp::test_assign_lkv_and_seq_bump`.
+ */
+void test_seq_cursor_and_empty_lkv() {
+    std::printf("note_write / read_stored — the seq cursor moves, the LKV does not:\n");
     vertex_t v{role_t::STORED_VALUE, key_of({0x01}), {}};
     check(v.read_stored() == nullptr, "a never-assigned vertex holds no LKV");
     const std::uint64_t seq0 = v.current_seq();
-    v.store(make_value(0x42));
-    check(v.read_stored() != nullptr && first_byte(*v.read_stored()) == 0x42,
-          "store publishes the last-known-value");
-    check(v.current_seq() == seq0 + 1, "store bumps the write sequence once");
-    v.store(make_value(0x43));
-    check(first_byte(*v.read_stored()) == 0x43, "a later store wins (last-writer-wins)");
     v.note_write();
-    check(v.current_seq() == seq0 + 3, "note_write bumps the sequence without storing");
-    check(first_byte(*v.read_stored()) == 0x43, "note_write leaves the LKV untouched");
-}
-
-void test_stream_ring_trim_and_drain() {
-    std::printf("STREAM ring — keep-last trim + the RFC-0008 §E drain cursor:\n");
-    vertex_t v{role_t::STREAM, key_of({0x02}), {}};
-    v.set_history_depth(3);
-    for (std::uint8_t b = 1; b <= 5; ++b) v.store(make_value(b));
-    const std::vector<rope_t> hist = v.history_snapshot();
-    check(hist.size() == 3, "the ring keeps exactly the owner-declared depth");
-    check(hist.size() == 3 && first_byte(hist[0]) == 3 && first_byte(hist[2]) == 5,
-          "trim drops the oldest entries (ring holds 3,4,5)");
-
-    std::vector<std::shared_ptr<const rope_t>> batch;
-    check(v.drain_unflushed(batch) == 3, "5 unflushed appends drain to the 3 ring survivors");
-    check(first_byte(*batch[0]) == 3 && first_byte(*batch[2]) == 5, "drain is in append order");
-    check(v.drain_unflushed(batch) == 0, "a drained stream has nothing more to drain");
-
-    v.store(make_value(6));
-    check(v.drain_unflushed(batch) == 1 && first_byte(*batch[0]) == 6,
-          "the next append drains alone (a queue, not a coalesce)");
-
-    v.store(make_value(7));
-    v.mark_flushed();
-    check(v.drain_unflushed(batch) == 0, "mark_flushed advances the cursor without draining");
+    check(v.current_seq() == seq0 + 1, "note_write bumps the write sequence exactly once");
+    check(v.read_stored() == nullptr, "a seq bump publishes nothing");
+    v.note_write();
+    v.note_write();
+    check(v.current_seq() == seq0 + 3, "three bumps land three apart — one per verb, no coalesce");
+    check(v.read_stored() == nullptr, "still nothing published after three bumps");
 }
 
 void test_await_wake_and_timeout() {
-    std::printf("wait_for_change — wake on store, timeout when idle:\n");
+    std::printf("wait_for_change — wake on a write bump, timeout when idle:\n");
     vertex_t v{role_t::STORED_VALUE, key_of({0x03}), {}};
     check(!v.wait_for_change(v.current_seq(), 20ms), "no writer => timeout (returns false)");
 
@@ -153,14 +143,25 @@ void test_await_wake_and_timeout() {
         if (v.wait_for_change(seq0, 2s)) woke.store(true);
     });
     std::this_thread::sleep_for(20ms);
-    v.store(make_value(0x99));
+    v.note_write();
     waiter.join();
-    check(woke.load(), "a store wakes a blocked waiter (write_seq_ != seq0)");
+    check(woke.load(), "a write bump wakes a blocked waiter (write_seq_ != seq0)");
     check(v.wait_for_change(seq0, 0ns), "a stale seq0 observes the change without blocking");
 }
 
+/**
+ * @brief The edge slot table on a bare vertex: add / snapshot / clear, and the one latch fact a
+ *        vertex with NO last-known-value can still state.
+ *
+ * The LATCHED half of RFC-0022 §3.A — a `durability_request` subscriber replayed with the
+ * producer's current value, and the ablation next to it — needs an LKV, and since #1300 only
+ * `graph_t` can publish one. It is asserted at graph level instead: `graph_test.cpp` §admission
+ * door (callback door latches, default subscription does not, a durability_request on the SAME
+ * vertex does) and `qos_policy_test.cpp` §5.1/§5.2 (the per-subscriber ablation, both edges
+ * still live afterwards).
+ */
 void test_edges_snapshot_clear_latch() {
-    std::printf("edges — add/snapshot/clear + the per-subscription durability latch:\n");
+    std::printf("edges — add/snapshot/clear + the no-LKV latch floor:\n");
     // RFC-0022 §3.A: the latch predicate is the SUBSCRIBER's request, not a vertex flag.
     vertex_t v{role_t::STORED_VALUE, key_of({0x04}), {}};
 
@@ -178,19 +179,11 @@ void test_edges_snapshot_clear_latch() {
           "the first edge lands in slot 0");
     check(latch.value == nullptr, "no LKV yet => no latch");
 
-    v.store(make_value(0x11));
     edge_latch_t latch2;
     check(v.add_edge(mk_edge(delivery_policy_t::kDurabilityRequest), &latch2) == 1,
           "the second edge lands in slot 1");
-    check(latch2.value != nullptr && first_byte(*latch2.value) == 0x11,
-          "durability_request + LKV => the latch snapshots the value");
-    check(latch2.edge.callback != nullptr && latch2.edge.callback_ctx == &hits,
-          "the latch carries the admitted edge's {fn, ctx} dispatch view");
-
-    // The ablation: same vertex, same LKV, a subscriber that did NOT request durability.
     edge_latch_t latch3;
     check(v.add_edge(mk_edge(), &latch3) == 2, "the third edge lands in slot 2");
-    check(latch3.value == nullptr, "no durability_request => NO latch, on the same LKV");
 
     edge_snapshot_t buf;
     std::vector<edge_view_t> heap;
@@ -198,7 +191,10 @@ void test_edges_snapshot_clear_latch() {
     check(v.snapshot_edges(buf, heap, drops) == 3 && heap.empty(),
           "3 active edges snapshot into the inline buffer (no heap)");
     check(!drops.any(), "an unpressured snapshot sheds nothing (#896)");
-    buf[0].callback(buf[0].callback_ctx, *v.read_stored());
+    // The dispatch view stands on its own: the value handed to a snapshotted edge is the
+    // caller's rope, never something the vertex had to be holding.
+    const rope_t dispatched = make_value(0x11);
+    buf[0].callback(buf[0].callback_ctx, dispatched);
     check(hits == 1, "a snapshotted edge dispatches through its {fn, ctx} pair");
 
     check(v.clear_edge(0), "clearing an active slot reports true");
@@ -305,8 +301,7 @@ void test_bookkeeping_counters() {
 }  // namespace
 
 int main() {
-    test_store_and_lkv();
-    test_stream_ring_trim_and_drain();
+    test_seq_cursor_and_empty_lkv();
     test_await_wake_and_timeout();
     test_edges_snapshot_clear_latch();
     test_snapshot_under_concurrent_add();

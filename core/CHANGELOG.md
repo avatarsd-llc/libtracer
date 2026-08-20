@@ -16,6 +16,31 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`graph_t::drain_unflushed(vertex_handle_t, std::vector<std::shared_ptr<const rope_t>>&)` and
+  `graph_t::mark_flushed(vertex_handle_t)` — the RFC-0008 §E drain cursor, handle-based**
+  ([#1300](https://github.com/avatarsd-llc/libtracer/issues/1300), the
+  [#867](https://github.com/avatarsd-llc/libtracer/issues/867) residual). §E says a STREAM
+  vertex is a *queue, not a coalesce*: its flush delivers each ring entry appended since the
+  previous flush. Until now the only public window onto that was `graph_t::history`, which shows
+  what the ring **retains** — nothing showed what it **owes**, and nothing could advance the
+  cursor. Both new verbs sit next to `history`, take a `vertex_handle_t`, return `result_t`, and
+  answer `SCHEMA_NOT_FOUND` on a non-STREAM role exactly as `history` does. `drain_unflushed`
+  additionally takes the same READ gate `history` takes — it hands back the same bytes, so
+  leaving it ungated would be a READ-gate bypass wearing a different verb's name; `mark_flushed`
+  discloses nothing and only moves a cursor, so it carries the role check alone, the ungated
+  owner-side shape `propagate` and `set_history_depth` already have.
+
+  The drain takes **caller storage** rather than returning a vector, deliberately: the underlying
+  #477 nothrow contract is "on OOM return 0 **without** advancing the cursor, so the entries
+  re-drain on the next covering flush", and that only holds with an out-param the snapshot can
+  nothrow-reserve into. The graph form inherits it verbatim, along with "entries trimmed out of
+  the keep-last ring before the drain are lost". `mark_flushed` takes **no cursor argument** —
+  the cursor is a per-vertex "appended since flush" count and a flush has exactly one thing to
+  say about it. No `history_snapshot` alias was added: `graph_t::history` already **is** the
+  handle-based snapshot leg (it is `vertex_t::history_snapshot()` plus the STREAM and READ
+  gates), and a second ungated spelling of it would be a permanent duplicate on the public
+  surface.
+
 - **A PRE-AUTH request-size budget on the WebSocket opening handshake —
   `transport_ws_server::kMaxHandshakeBytes`, `transport_ws_server::handshake_cap()`, a trailing
   `max_handshake` constructor parameter and an `effective_max_handshake()` accessor on BOTH
@@ -215,6 +240,25 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   used before.
 
 ### Changed
+
+- **BREAKING: `graph::vertex_t::store()` is `private` — the storage funnel belongs to `graph_t`,
+  and the compiler now says so** ([#1300](https://github.com/avatarsd-llc/libtracer/issues/1300),
+  finishing [#867](https://github.com/avatarsd-llc/libtracer/issues/867) ruling 2). **This
+  supersedes the `[0.13.0]` note below** that recorded `store()` as deliberately staying public.
+  The reason it stayed is now gone: that note's justification was the bare-`vertex_t` storage
+  unit tests, and the RFC-0008 §E coverage they provided had no `graph_t` equivalent to move to.
+  The two verbs added above are that equivalent, so the coverage relocated instead of being
+  deleted, and the last non-`graph_t` caller went with it.
+
+  **What changes for a user.** `vertex_t` already declared `friend class graph_t`, so **no new
+  friend was added** — a friend named in an installed public header is claimable by anyone who
+  defines a class of that name, which would be the bypass under another name. `store_drops_t`
+  and `snapshot_drops_t` stay public (they are named on `graph_t`'s own surface). Post-#1133 no
+  public API hands out a graph-owned `vertex_t*`, so the only vertex a user could have called
+  this on is one they constructed and own outright; such a caller must now publish through
+  `graph_t::assign` / `graph_t::write`, which is the seam that gates the write, injects the
+  ADR-0039 resource and folds `store_drops_t` into `delivery_drops()`. **Pure visibility: no
+  signature, no body and no layout changed**, and the six hot-symbol ratchet pins come back `+0`.
 
 - **The four remaining body-internal `mem::heap_source()` calls are now defaulted parameters on
   an injectable seam** ([#873](https://github.com/avatarsd-llc/libtracer/issues/873), ADR-0079).

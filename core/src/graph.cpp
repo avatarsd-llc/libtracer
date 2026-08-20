@@ -2276,6 +2276,26 @@ result_t<std::vector<rope_t>> graph_t::history(vertex_handle_t vh) const {
     return v->history_snapshot();  // clones each entry (refcount bumps)
 }
 
+result_t<std::size_t> graph_t::drain_unflushed(vertex_handle_t vh,
+                                               std::vector<std::shared_ptr<const rope_t>>& out) {
+    vertex_t* v = vh.get();
+    if (v->role() != role_t::STREAM) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+    // Same gate as `history`, for the same reason: a drain hands back the same ring entries a
+    // history read serves, so an ungated drain would be a READ-gate bypass (local-only helper
+    // => local (empty) context).
+    if (!acl_allows(v, {}, acl_right_t::READ)) return std::unexpected(status_t::PERMISSION_DENIED);
+    return v->drain_unflushed(out);
+}
+
+result_t<void> graph_t::mark_flushed(vertex_handle_t vh) {
+    vertex_t* v = vh.get();
+    if (v->role() != role_t::STREAM) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+    // No ACL gate: nothing is disclosed and nothing is delivered — the cursor just moves. The
+    // owner-side shape `propagate` and `set_history_depth` already carry.
+    v->mark_flushed();
+    return {};
+}
+
 namespace {
 
 /**
