@@ -505,6 +505,61 @@ void test_tx_drop_counters() {
           "the snapshot's other two fields still agree with the concrete accessors");
 }
 
+/**
+ * @brief #1409 — a TIGHTENED link sheds an over-cap send instead of tearing itself down.
+ *
+ * Egress used to be measured against `kMaxFrame`, the 16 MiB PROTOCOL maximum, while ingress
+ * honoured the `configured_cap`-clamped per-connection `max_frame`. The two are supposed to be
+ * the same number. A peerless link cannot show the drift — with no frame stream EVERY send
+ * counts `dropped_tx` regardless — so this vector needs a LIVE peer, and both ends configured
+ * at the same tightened cap, which is what a real deployment looks like.
+ *
+ * Before the fix the 128 KiB record below went out; the listener's framer read a prefix past
+ * its own 64 KiB cap, ticked `malformed_rx` and shut the connection down. So all four
+ * assertions redden together: `dropped_tx()` reads 0, `malformed_rx()` reads 1, the link is
+ * down, and the in-cap frame behind it never arrives.
+ */
+void test_tx_honours_the_connection_cap() {
+    std::printf("QUIC transport — egress is bounded by the CONNECTION's max_frame (#1409):\n");
+    constexpr std::size_t kCap = 64 * 1024;
+    frame_sink_t sink;
+    auto rx = [&](std::span<const std::byte> f) { sink.push(f); };
+    quic_transport_t listener(std::uint16_t{0}, g_cert, g_key, &tr::mem::heap_backend(), kCap);
+    listener.set_receiver(rx);
+    quic_transport_t dialer("127.0.0.1", listener.local_port(), dev_tls(), &tr::mem::heap_backend(),
+                            kCap);
+    check(dialer.ok(), "both ends are up at a 64 KiB configured cap");
+
+    // A frame the link really carries, so the shed below cannot be confused with a link that
+    // was never usable.
+    const auto before = test_frame(64, 0x10);
+    dialer.send(before);
+    check(sink.wait_for_count(1, 3000ms), "an in-cap frame crosses the tightened link");
+    check(dialer.dropped_tx() == 0, "and counted no shed");
+
+    // BETWEEN the tightened cap and the 16 MiB protocol maximum.
+    const std::vector<std::byte> over(128 * 1024, std::byte{0xEE});
+    dialer.send(std::span<const std::byte>(over));
+    check(dialer.dropped_tx() == 1, "a 128 KiB record on a 64 KiB link is SHED, with a counter");
+
+    // The gather overload funnels through the same bound.
+    const std::array<std::span<const std::byte>, 1> iov{std::span<const std::byte>(over)};
+    dialer.send(std::span<const std::span<const std::byte>>(iov));
+    check(dialer.dropped_tx() == 2, "the gather overload honours the same cap");
+
+    const auto after = test_frame(128, 0x90);
+    dialer.send(after);
+    check(sink.wait_for_count(2, 3000ms), "a following in-cap frame still reaches the peer");
+    check(sink.count() == 2 && sink.at(1) == after, "byte-identically — the framer never desynced");
+    check(listener.malformed_rx() == 0,
+          "the peer never saw a malformed prefix: the over-cap record never left this node");
+    // Asserted LAST, after the round trip above: the peer's teardown is asynchronous, so a
+    // liveness read taken the instant after the over-cap send would still say "up" on the
+    // unfixed build and the assertion would be vacuous.
+    check(dialer.link_up() && listener.link_up(),
+          "both ends are still up — a shed frame is not a teardown");
+}
+
 // Build FWD{ op=WRITE, dst=<segs...>, src=<empty PATH>, payload=<VALUE> } — a remote
 // write routed by explicit source route (RFC-0004 §D, ADR-0040).
 std::vector<std::byte> fwd_write(std::initializer_list<std::string_view> dst,
@@ -797,6 +852,7 @@ int main() {
     test_backpressure_drain();
     test_scatter_gather();
     test_tx_drop_counters();
+    test_tx_honours_the_connection_cap();
     test_two_nodes_over_quic();
     test_config_constructed_quic();
     test_spec_dial_trust_keys();

@@ -77,6 +77,47 @@ class webtransport_transport_t : public transport_t {
     static constexpr std::size_t kMaxFrame = length_prefix_framer::kDefaultMaxFrame;
 
     /**
+     * @brief The largest H3 HANDSHAKE a PRE-AUTH peer may make this node buffer
+     *        (16 KiB) — the ceiling `max_handshake` tightens against (#1408).
+     *
+     * A different budget from @ref kMaxFrame and deliberately so: a frame arrives on an
+     * established session under whatever the deployment allowed, while H3 classification
+     * bytes arrive from a host that has done nothing but complete a QUIC handshake and
+     * open one stream — no session, no ACL, no subscription, no router, nothing
+     * authenticated. Pre-auth work is REFUSED EARLY, not carefully allocated: an
+     * accumulation that would pass this budget is refused BEFORE the byte that would
+     * exceed it is copied, and a HEADERS or unknown/GREASE frame DECLARING more than it is
+     * refused before one body byte is buffered.
+     *
+     * The two dispositions this module already distinguishes are unchanged and must not be
+     * merged: over-budget is a statement about the PEER, so it shuts the connection down
+     * with the bad-request code; running out of memory is a statement about US, so it is
+     * stream-scoped (#919) or count-then-close (@ref refused_sessions, #934).
+     */
+    static constexpr std::size_t kMaxHandshakeBytes = 16u * 1024u;
+
+    /**
+     * @brief Resolve a `max_handshake` request into the honored budget — TIGHTEN-ONLY
+     *        against @ref kMaxHandshakeBytes, exactly as
+     *        `length_prefix_framer::configured_cap` is against `kDefaultMaxFrame`.
+     *
+     * `0` (unset) keeps the default; a nonzero value yields
+     * `min(max_handshake, kMaxHandshakeBytes)`. The value arrives through a config-writable
+     * key (`webtransport`-private `max_handshake`), and a config-writable key must never
+     * RAISE a pre-auth bound — only narrow it.
+     *
+     * @note The same shape `transport_ws_server::handshake_cap` carries for the WS plane
+     *       (#1407), deliberately spelled rather than shared: `transport_ws.hpp` sits
+     *       behind `LIBTRACER_TRANSPORT_WS` and can be configured OFF, so consuming its
+     *       symbol here would make an optional core module a hard dependency of this
+     *       optional transport module.
+     */
+    [[nodiscard]] static constexpr std::size_t handshake_cap(std::size_t max_handshake) noexcept {
+        if (max_handshake == 0) return kMaxHandshakeBytes;
+        return max_handshake < kMaxHandshakeBytes ? max_handshake : kMaxHandshakeBytes;
+    }
+
+    /**
      * @brief DIAL mode: establish a WebTransport session to
      *        `https://peer_host:peer_port/path` and open the frame stream
      *        (synchronous — the constructor waits for the QUIC handshake, the
@@ -109,11 +150,16 @@ class webtransport_transport_t : public transport_t {
      *                  yet. Nothing is buffered library-side. Default false (the
      *                  historical one-phase shape); `transport_vertex_t` builds a
      *                  SPEC-created dialer with it set.
+     * @param max_handshake Pre-auth H3 handshake budget (`max_handshake`); 0 = the
+     *                  @ref kMaxHandshakeBytes default. TIGHTEN-ONLY — see
+     *                  @ref handshake_cap. On the DIAL side it bounds the CONNECT
+     *                  RESPONSE's field section, declared length included.
      */
     webtransport_transport_t(const std::string& peer_host, std::uint16_t peer_port,
                              const std::string& path = "/", webtransport_dial_tls_t tls = {},
                              mem::mem_backend_t* backend = &mem::heap_backend(),
-                             std::size_t max_frame = 0, bool defer_rx = false);
+                             std::size_t max_frame = 0, bool defer_rx = false,
+                             std::size_t max_handshake = 0);
 
     /**
      * @brief LISTEN mode: serve WebTransport (ALPN `h3`) on @p bind_port with
@@ -131,11 +177,18 @@ class webtransport_transport_t : public transport_t {
      * @param cert_file PEM server-certificate path.
      * @param key_file  PEM private-key path matching @p cert_file.
      * @param backend   The RX memory seam — see the DIAL constructor.
+     * @param max_frame Per-link RX cap (`:settings max_frame`); 0 = the default.
+     * @param max_handshake Pre-auth H3 handshake budget (`max_handshake`); 0 = the
+     *                  @ref kMaxHandshakeBytes default. TIGHTEN-ONLY — see
+     *                  @ref handshake_cap. On this LISTEN side it bounds per-stream
+     *                  classification/HEADERS accumulation, and the DECLARED length of a
+     *                  HEADERS or unknown/GREASE frame, so an over-declaration is refused
+     *                  before one body byte is buffered.
      */
     webtransport_transport_t(std::uint16_t bind_port, const std::string& cert_file,
                              const std::string& key_file,
                              mem::mem_backend_t* backend = &mem::heap_backend(),
-                             std::size_t max_frame = 0);
+                             std::size_t max_frame = 0, std::size_t max_handshake = 0);
 
     /** @brief Shut the session down, drain msquic callbacks, and release the
      *         msquic API (listener → streams → connection → registration order). */
@@ -210,6 +263,11 @@ class webtransport_transport_t : public transport_t {
      * the resource), so this is an observation, not an admission decision: it
      * is how a host sees which resource a session asked for. Returns a copy —
      * thread-safe, and not on any frame path.
+     *
+     * STABLE for the life of a session (#1410): a second extended CONNECT on a live
+     * session is refused at stream scope, so a peer that has already been answered cannot
+     * rewrite what a host observes here. It changes only when the session itself does —
+     * connection teardown, or the one-peer replacement path accepting a new peer.
      */
     [[nodiscard]] std::string session_path() const;
 
@@ -221,7 +279,9 @@ class webtransport_transport_t : public transport_t {
      *         Each one shuts the connection down (framing sync is lost). */
     [[nodiscard]] std::uint64_t malformed_rx() const noexcept;
 
-    /** @brief Frames shed on the way OUT (#932): a record over @ref kMaxFrame, no live
+    /** @brief Frames shed on the way OUT (#932): a record over THIS CONNECTION's cap
+     *         (`:settings max_frame`, resolved tighten-only against @ref kMaxFrame — it is
+     *         the same number the peer measures the arriving prefix by, #1409), no live
      *         peer stream to write to (dialing / torn down), or a `StreamSend` msquic
      *         refused. H3 handshake material is not counted — it is not a frame. */
     [[nodiscard]] std::uint64_t dropped_tx() const noexcept;
@@ -267,6 +327,13 @@ class webtransport_transport_t : public transport_t {
      */
     [[nodiscard]] std::size_t live_streams() const noexcept;
 
+    /** @brief The pre-auth handshake budget actually honored: `handshake_cap(max_handshake)`
+     *         as constructed (#1408). It names no backend — H3 handshake bytes accumulate in
+     *         the stream context's own buffer, not in an RX segment, so unlike the frame cap
+     *         there is no second injected resource to take the min against. Answered on
+     *         every link, including one whose dial never came up. */
+    [[nodiscard]] std::size_t effective_max_handshake() const noexcept;
+
    private:
     struct impl_t;  // all msquic + H3 state lives in the .cpp
     std::unique_ptr<impl_t> impl_;
@@ -282,7 +349,8 @@ class webtransport_transport_t : public transport_t {
  * A `:children[]` SPEC whose config carries `kind = webtransport` then
  * constructs a @ref webtransport_transport_t — DIAL: `addr` + `port` plus the
  * OPTIONAL `path` and trust keys below; LISTEN: `port` plus the REQUIRED
- * `cert`/`key` PEM-path config keys. All five are kind-PRIVATE config keys
+ * `cert`/`key` PEM-path config keys. Both roles additionally read the OPTIONAL
+ * `max_handshake` budget (#1408). All six are kind-PRIVATE config keys
  * parsed by this factory from the raw SPEC config TLV — they never appear on
  * the shared `conn_settings_t` (the ADR-0043 §5 leanness ruling). Missing
  * fields fail with `TYPE_MISMATCH`; a session that failed to come up fails with
@@ -297,6 +365,13 @@ class webtransport_transport_t : public transport_t {
  * resource surfaces as `TRANSPORT_DOWN` from creation — the same status a
  * rejected certificate gives. The key is kind-private, so it does not collide
  * with the `can` kind's unrelated `path` key (an advertised group path).
+ *
+ * **The `max_handshake` key (#1408)** carries the pre-auth H3 handshake budget in
+ * bytes — VALUE u32, default `0` = @ref webtransport_transport_t::kMaxHandshakeBytes
+ * (16 KiB), read on BOTH roles and TIGHTEN-ONLY
+ * (@ref webtransport_transport_t::handshake_cap clamps a larger request). It is the
+ * injected spelling of a bound that used to be a file-local literal, so the
+ * deployment sets the ceiling rather than the compiler.
  *
  * **A SPEC-created dialer verifies the server certificate (#918)** — the trust
  * mode is whatever @ref webtransport_dial_tls_t defaults to, so with neither

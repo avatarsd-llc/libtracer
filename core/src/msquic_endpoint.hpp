@@ -249,12 +249,29 @@ class msquic_endpoint_t {
      * @{
      */
     mem::mem_backend_t* backend = nullptr;      /**< @brief The injected RX memory seam. */
-    std::size_t max_frame = kMaxFrame;          /**< @brief Per-connection RX cap (:settings). */
+    std::size_t max_frame = kMaxFrame;          /**< @brief This connection's frame cap, `:settings
+                                                            max_frame` resolved through
+                                                            `length_prefix_framer::configured_cap`
+                                                            (tighten-only, #1035). It bounds BOTH
+                                                            directions: RX through
+                                                            `length_prefix_framer::feed`, and TX
+                                                            through both @ref send_frame overloads
+                                                            (#1409). */
     std::atomic<std::uint64_t> dropped_rx{0};   /**< @brief Backpressure-dropped frames. */
     std::atomic<std::uint64_t> malformed_rx{0}; /**< @brief Malformed length prefixes seen. */
     /**
-     * @brief Outbound frames shed before the wire (#932): over @ref kMaxFrame, no peer
-     *        stream to write to, or a `StreamSend` msquic refused.
+     * @brief Outbound frames shed before the wire (#932): over THIS CONNECTION's
+     *        @ref max_frame, no peer stream to write to, or a `StreamSend` msquic refused.
+     *
+     * The first class used to be measured against @ref kMaxFrame, the 16 MiB PROTOCOL
+     * maximum, rather than the per-connection cap (#1409). A link whose `:settings
+     * max_frame` had tightened RX to, say, 64 KiB would still gather up to 16 MiB into one
+     * owned send buffer and hand it to msquic; a conformant peer running this same code
+     * then read a prefix beyond its own configured cap, counted `malformed_rx` and shut the
+     * connection DOWN — so an over-cap local send was a link teardown rather than a shed
+     * frame, and this counter never moved. `max_frame` is `configured_cap`-clamped at
+     * construction, so it is never looser than `kMaxFrame` and the correction can only
+     * tighten: a link that configured no cap sees no behaviour change at all.
      *
      * Counts the PROTOCOL-frame path only (@ref send_frame). H3 handshake material goes
      * out through @ref send_raw, which is not a frame the router believed it sent, so a
@@ -567,7 +584,10 @@ class msquic_endpoint_t {
      * transfer).
      */
     void send_frame(std::span<const std::byte> frame) {
-        if (frame.size() > kMaxFrame) {  // the peer would reject it as malformed
+        // THIS connection's cap, not the 16 MiB protocol maximum (#1409): a conformant peer
+        // reads the prefix against the very same configured number, so anything past it is
+        // a record the peer would count `malformed_rx` on and tear the connection down for.
+        if (frame.size() > max_frame) {
             dropped_tx.fetch_add(1, std::memory_order_relaxed);
             return;
         }
@@ -595,7 +615,7 @@ class msquic_endpoint_t {
     void send_frame(std::span<const std::span<const std::byte>> iov) {
         std::size_t total = 0;
         for (const auto& s : iov) total += s.size();
-        if (total > kMaxFrame) {  // the peer would reject it as malformed
+        if (total > max_frame) {  // this connection's cap — see the span overload (#1409)
             dropped_tx.fetch_add(1, std::memory_order_relaxed);
             return;
         }

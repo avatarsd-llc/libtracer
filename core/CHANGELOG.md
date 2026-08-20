@@ -16,6 +16,42 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **A SECOND extended CONNECT on a live WebTransport session is now REFUSED, and
+  `webtransport_transport_t::session_path()` is stable for the life of a session**
+  ([#1410](https://github.com/avatarsd-llc/libtracer/issues/1410)). The HEADERS arm of the
+  LISTEN-side classifier had no "session already up" guard, so a peer that had already been
+  answered could open a second bidirectional stream, send a second extended CONNECT, and have
+  the endpoint answer `200` again, overwrite the recorded `:path`, and **re-arm
+  `connect_stream_id`** from the new stream's id. That id is guard 2 of the strict `0x41`
+  frame-channel check ("the session-id varint must name THAT CONNECT stream"), so a second
+  CONNECT let a peer move the goalposts on its own identity check before the frame channel was
+  claimed — and it made `session_path()`, an observation a host may act on, silently mutable.
+  The refusal is **stream-scoped with no HTTP status** (`refuse_stream`, reusing the existing
+  bad-request code): the session latch is one-way with no successor state, it is the same class
+  as the `0x41` check's "the FIRST valid one wins" guard, and answering would cost the one owned
+  send buffer msquic borrows until `SEND_COMPLETE` per hostile stream. `refused_sessions()` does
+  **not** move — that counter is #934's count-then-close for work the node could not afford,
+  and this is a peer-conformance refusal. One consequence is deliberate and observable: because
+  the guard sits *before* the field-section decode, a **malformed or non-CONNECT** request
+  HEADERS arriving while a session is live is now stream-scoped too, where it used to be
+  connection-fatal. That is strictly the #919 direction; the alternative placement would leave a
+  valid second CONNECT costing one stream while an invalid one cost the whole session.
+
+- **`quic` and `webtransport` egress is bounded by THIS CONNECTION's `max_frame`, not by the
+  16 MiB protocol maximum** ([#1409](https://github.com/avatarsd-llc/libtracer/issues/1409)).
+  Both `msquic_endpoint_t::send_frame` overloads compared the outgoing record against
+  `kMaxFrame` (`length_prefix_framer::kDefaultMaxFrame`) while RX honoured the
+  `configured_cap`-clamped per-connection `max_frame`. A link whose `:settings max_frame`
+  tightened RX to, say, 64 KiB would still hand up to 16 MiB to msquic; a conformant peer
+  running this same code then read a prefix past *its* configured cap, counted `malformed_rx`
+  and **shut the connection down** — so an over-cap local send was a link teardown rather than
+  a shed frame, and `dropped_tx()` never moved. Now an over-cap send is shed with
+  `dropped_tx()` and the link stays up. `max_frame` is `configured_cap`-clamped at
+  construction and so is never *looser* than `kMaxFrame`: this can only tighten, and a link
+  that configured no cap is behaviour-identical. The disposition is unchanged — `dropped_tx`
+  and return, never a throw, never a partial record. The `dropped_tx()` documentation on both
+  transports named the wrong cap and is corrected with it.
+
 - **BREAKING — the GPU backend left core. `<libtracer/mem_cuda.hpp>` is now
   `backends/cuda/include/libtracer/mem_cuda.hpp`, built by its own CMake project, and
   `-DLIBTRACER_WITH_CUDA` no longer exists**
@@ -46,6 +82,26 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     arms (`HEAP` / `POOL` / `BORROWED` / `BORROWED_DEVICE`) are instruction-identical.
 
 ### Added
+
+- **`webtransport_transport_t::kMaxHandshakeBytes`, `::handshake_cap(std::size_t)`,
+  `::effective_max_handshake()`, a defaulted `max_handshake` parameter on BOTH constructors, and
+  the `webtransport`-private `max_handshake` config key**
+  ([#1408](https://github.com/avatarsd-llc/libtracer/issues/1408)). The endpoint's pre-auth H3
+  handshake bound was a file-local `constexpr std::size_t kMaxHandshakeBytes = 16'384` in
+  `core/src/transport_webtransport.cpp` — a real bound, but the wrong spelling under the
+  no-synthetic-limits rule: a bound comes from an injected resource or per-target config, never
+  from a magic constant. It is now injected in the shape
+  [#1407](https://github.com/avatarsd-llc/libtracer/issues/1407) landed for the WS plane —
+  **tighten-only** (`0` = the 16 KiB default; a larger request is clamped; a smaller one is
+  honored), read back through `effective_max_handshake()`, and reachable from a SPEC through the
+  kind-private `max_handshake` key on both roles. `handshake_cap` is *spelled* like
+  `transport_ws_server::handshake_cap` rather than reusing it: `transport_ws.hpp` sits behind
+  `LIBTRACER_TRANSPORT_WS` and may be configured OFF, so consuming its symbol would make an
+  optional core module a hard dependency of the optional `libtracer_quic` module. The new
+  constructor parameters are defaulted and last, so every existing call compiles unchanged, and
+  the two dispositions the module distinguishes are untouched: over-budget stays connection-fatal
+  (a statement about the peer), while exhaustion stays stream-scoped (#919) or count-then-close
+  (`refused_sessions()`, #934).
 
 - **`graph_t::drain_unflushed(vertex_handle_t, std::vector<std::shared_ptr<const rope_t>>&)` and
   `graph_t::mark_flushed(vertex_handle_t)` — the RFC-0008 §E drain cursor, handle-based**

@@ -944,6 +944,112 @@ void test_frame_stream_adoption_gate() {
 }
 
 /**
+ * @brief A non-CONNECT request HEADERS frame: `:method` GET, no `:protocol`.
+ *
+ * `wt_h3` encodes only the extended-CONNECT shape (it is all this endpoint ever sends), so
+ * the one field line here is hand-built: an Indexed Field Line naming static entry 17
+ * (`:method: GET`) after the two-byte QPACK field-section prefix.
+ */
+[[nodiscard]] std::vector<std::uint8_t> get_headers_frame() {
+    const std::array<std::uint8_t, 3> section{0x00, 0x00, static_cast<std::uint8_t>(0xc0 | 17)};
+    std::vector<std::uint8_t> out;
+    tr::net::wt_h3::append_h3_frame(out, tr::net::wt_h3::kFrameHeaders,
+                                    std::span<const std::uint8_t>(section));
+    return out;
+}
+
+/**
+ * @brief #1410 — a SECOND extended CONNECT on a live session is REFUSED, and the first
+ *        session survives intact.
+ *
+ * The HEADERS arm had no "session already up" guard, so a peer that had already been
+ * answered could open a second bidirectional stream, send a second extended CONNECT, and
+ * have the endpoint answer 200 again, overwrite `path`, and RE-ARM `connect_stream_id`
+ * from the new stream's id. That last one is the sharp end: `connect_stream_id` is guard 2
+ * of the strict `0x41` check ("the session-id varint must name THAT CONNECT stream"), so a
+ * second CONNECT let the peer move the goalposts on its own identity check before the frame
+ * channel was claimed. It also made `session_path()` — an observation a host may act on —
+ * silently mutable by an already-answered peer.
+ *
+ * The refusal is STREAM-scoped with no HTTP status, reusing the existing bad-request code.
+ * `session` is a one-way latch and `path`/`connect_stream_id` are derived slots written
+ * once under it, so there is no successor state a second CONNECT could move the endpoint
+ * into; it is the same class as guard 3 of the `0x41` check ("the FIRST valid one wins"),
+ * which aborts rather than answers; and answering would cost the one owned send buffer
+ * msquic borrows until SEND_COMPLETE, per hostile stream — the pre-auth amplification #934
+ * removed from this path.
+ *
+ * `refused_sessions()` must NOT move: that counter is #934's count-then-close for "we could
+ * not afford to answer". This is a peer-conformance refusal, not the node shedding work.
+ */
+void test_second_connect_is_refused() {
+    std::printf("WebTransport — a second extended CONNECT on a live session is refused (#1410):\n");
+
+    {
+        frame_sink_t sink;
+        auto rx = [&](std::span<const std::byte> f) { sink.push(f); };
+        webtransport_transport_t listener(std::uint16_t{0}, g_cert, g_key);
+        listener.set_receiver(rx);
+        raw_wt_client_t cli(listener.local_port());
+        check(cli.ok, "raw msquic h3 client connected");
+
+        auto* first = cli.open_bidi();
+        cli.write(first, connect_frame("127.0.0.1:0", "/first"));
+        check(wait_session(listener, 3000ms), "the first extended CONNECT established a session");
+        check(listener.session_path() == "/first", "and it is the FIRST request's resource");
+
+        auto* second = cli.open_bidi();
+        cli.write(second, connect_frame("127.0.0.1:0", "/second"));
+        check(raw_wt_client_t::wait_aborted(second, 3000ms),
+              "the SECOND extended CONNECT is refused — the stream is aborted");
+        check(listener.session_up(), "the established session survives the refusal");
+        check(!cli.shut.load(std::memory_order_relaxed),
+              "refusal is STREAM-scoped — the connection stays up");
+        check(listener.session_path() == "/first",
+              "session_path() still reports the FIRST resource — an answered peer cannot "
+              "rewrite it");
+        check(listener.refused_sessions() == 0,
+              "a peer-conformance refusal is NOT #934's count-then-close");
+
+        // `connect_stream_id` is not directly observable, so it is read through the guard it
+        // feeds: a 0x41 channel naming the FIRST CONNECT stream must still be adopted. If the
+        // second CONNECT had re-armed the id, this preamble would name the wrong stream and
+        // guard 2 would refuse it.
+        auto* frames = cli.open_bidi();
+        cli.write(frames, wt_preamble(first->id));
+        const auto good = payload(9, 0x5C);
+        cli.write(frames, record(good));
+        check(sink.wait_for_count(1, 3000ms),
+              "a 0x41 channel naming the FIRST CONNECT stream is still adopted — the id was "
+              "not re-armed");
+        check(sink.count() == 1 && same(sink.at(0), good), "and its record arrives byte-identical");
+        check(listener.malformed_rx() == 0, "the length-prefix reassembler never desynced");
+    }
+
+    // The consequence of putting the guard BEFORE the field-section decode, pinned rather
+    // than left incidental: while a session is live, ANY request HEADERS on a fresh peer bidi
+    // stream is nonconforming for this endpoint, so a non-CONNECT one is stream-scoped too
+    // where it used to be connection-fatal. That is strictly the #919 direction — the
+    // alternative placement would leave a valid second CONNECT costing one stream while an
+    // invalid one cost the whole session.
+    {
+        webtransport_transport_t listener(std::uint16_t{0}, g_cert, g_key);
+        raw_wt_client_t cli(listener.local_port());
+        auto* first = cli.open_bidi();
+        cli.write(first, connect_frame("127.0.0.1:0", "/first"));
+        check(wait_session(listener, 3000ms), "companion: the session is up");
+
+        auto* getter = cli.open_bidi();
+        cli.write(getter, get_headers_frame());
+        check(raw_wt_client_t::wait_aborted(getter, 3000ms),
+              "companion: a non-CONNECT HEADERS on a second stream is aborted");
+        check(listener.session_up() && !cli.shut.load(std::memory_order_relaxed),
+              "companion: it is STREAM-scoped now — the session and the connection both live");
+        check(listener.session_path() == "/first", "companion: and the resource is untouched");
+    }
+}
+
+/**
  * @brief #920 — an unknown/GREASE H3 frame is skipped by its length, not fatal.
  *
  * The deliberate opposite pull from #919 above: identity is pinned, unknown
@@ -1031,6 +1137,120 @@ void test_unknown_h3_frames_skipped() {
         cli.write(connect, rest);
         check(wait_session(listener, 3000ms),
               "classification resumes once the skipped frame's bytes arrive");
+    }
+}
+
+/**
+ * @brief #1408 — the pre-auth H3 handshake ceiling MOVES with the configured budget.
+ *
+ * The bound used to be a file-local `constexpr std::size_t kMaxHandshakeBytes = 16'384`, which is
+ * a real bound but the wrong spelling: under the no-synthetic-limits rule a bound comes from an
+ * injected resource or per-target config, never from a magic constant. So the acceptance
+ * criterion is NOT "16 KiB is refused" — a test that re-asserts the literal passes on the
+ * unfixed build. Every leg is therefore a PAIR: the same bytes against a TIGHTENED listener and
+ * against a DEFAULT one, and only the pair distinguishes "the budget is honored" from "the
+ * endpoint refuses everything" (the #920 vectors' own shape).
+ *
+ * Each leg gets its own listener + client: the refusals here are CONNECTION-fatal (over-budget is
+ * a statement about the peer, unchanged by this issue), so a shared connection could not carry a
+ * second leg.
+ */
+void test_the_handshake_budget_is_the_configured_one() {
+    std::printf("WebTransport — the handshake budget is the CONFIGURED one (#1408):\n");
+    constexpr std::size_t kTight = 2048;
+
+    // Leg 1, tightened: an unknown/GREASE frame DECLARING 4096 bytes — under the 16 KiB
+    // default, over a 2048-byte budget. Only the two varints are written, so nothing but the
+    // declared length can decide this.
+    {
+        webtransport_transport_t tight(std::uint16_t{0}, g_cert, g_key, &tr::mem::heap_backend(),
+                                       /*max_frame=*/0, kTight);
+        check(tight.ok(), "leg 1: the 2048-byte-budget listener is up");
+        raw_wt_client_t cli(tight.local_port());
+        auto* s = cli.open_bidi();
+        std::vector<std::uint8_t> declared;
+        tr::net::wt_h3::append_varint(declared, grease_type(5));
+        tr::net::wt_h3::append_varint(declared, 4096);
+        cli.write(s, declared);
+        check(cli.wait_shutdown(3000ms),
+              "leg 1: a frame DECLARING 4096 bytes is refused under a 2048-byte budget");
+    }
+    // Leg 1, default budget: the SAME declaration, and the whole 4096-byte body behind it, is
+    // skipped and the session still establishes. Without this arm "refused" above would also be
+    // satisfied by an endpoint that refuses everything.
+    {
+        webtransport_transport_t wide(std::uint16_t{0}, g_cert, g_key);
+        raw_wt_client_t cli(wide.local_port());
+        auto* s = cli.open_bidi();
+        std::vector<std::uint8_t> bytes = grease_frame(5, 4096);
+        const auto hdr = connect_frame("127.0.0.1:0");
+        bytes.insert(bytes.end(), hdr.begin(), hdr.end());
+        cli.write(s, bytes);
+        check(wait_session(wide, 3000ms),
+              "leg 1: the same 4096-byte frame is skipped whole under the default budget");
+        check(!cli.shut.load(std::memory_order_relaxed),
+              "leg 1: and the default-budget connection was never torn down");
+    }
+
+    // Leg 2, tightened: the ACCUMULATOR, not the declaration. The frame declares exactly the
+    // budget (2048 — legal, the check is strictly greater), but type + length + body is 2052
+    // bytes on the wire, so `accumulate` passes the budget while the declared-length check
+    // does not. That is the byte-copy bound rather than the announcement bound.
+    {
+        webtransport_transport_t tight(std::uint16_t{0}, g_cert, g_key, &tr::mem::heap_backend(),
+                                       /*max_frame=*/0, kTight);
+        raw_wt_client_t cli(tight.local_port());
+        auto* s = cli.open_bidi();
+        cli.write(s, grease_frame(5, kTight));
+        check(cli.wait_shutdown(3000ms),
+              "leg 2: accumulating past the budget is refused even though the DECLARED length "
+              "is within it");
+    }
+    // Leg 2, default budget: the same 2052 bytes are accumulated, skipped whole, and the
+    // CONNECT behind them establishes the session.
+    {
+        webtransport_transport_t wide(std::uint16_t{0}, g_cert, g_key);
+        raw_wt_client_t cli(wide.local_port());
+        auto* s = cli.open_bidi();
+        std::vector<std::uint8_t> bytes = grease_frame(5, kTight);
+        const auto hdr = connect_frame("127.0.0.1:0");
+        bytes.insert(bytes.end(), hdr.begin(), hdr.end());
+        cli.write(s, bytes);
+        check(wait_session(wide, 3000ms),
+              "leg 2: the same 2052 accumulated bytes are fine under the default budget");
+    }
+
+    // Leg 3: the readback, and that the key is TIGHTEN-ONLY.
+    {
+        webtransport_transport_t tight(std::uint16_t{0}, g_cert, g_key, &tr::mem::heap_backend(),
+                                       /*max_frame=*/0, kTight);
+        check(tight.effective_max_handshake() == kTight,
+              "leg 3: a tightened budget is honored verbatim");
+        webtransport_transport_t wide(std::uint16_t{0}, g_cert, g_key, &tr::mem::heap_backend(),
+                                      /*max_frame=*/0, 1u << 20);
+        check(wide.effective_max_handshake() == webtransport_transport_t::kMaxHandshakeBytes,
+              "leg 3: a 1 MiB request is CLAMPED — a config key never raises a pre-auth bound");
+        webtransport_transport_t unset(std::uint16_t{0}, g_cert, g_key);
+        check(unset.effective_max_handshake() == webtransport_transport_t::kMaxHandshakeBytes,
+              "leg 3: 0 means the built-in default");
+        check(webtransport_transport_t::handshake_cap(0) ==
+                      webtransport_transport_t::kMaxHandshakeBytes &&
+                  webtransport_transport_t::handshake_cap(64) == 64 &&
+                  webtransport_transport_t::handshake_cap(1u << 20) ==
+                      webtransport_transport_t::kMaxHandshakeBytes,
+              "leg 3: handshake_cap() itself is 0-means-default, tighten-only");
+
+        // The DIAL half, without hand-rolling an H3 server: the wrong-CA dialer of #918 fails
+        // at TLS, so it never comes up — and must still report the budget it was built with,
+        // because the resolution happens before the dial.
+        webtransport_transport_t peer(std::uint16_t{0}, g_cert, g_key);
+        webtransport_transport_t dead("127.0.0.1", peer.local_port(), "/",
+                                      webtransport_dial_tls_t{.ca_file = g_other_cert},
+                                      &tr::mem::heap_backend(), /*max_frame=*/0,
+                                      /*defer_rx=*/false, /*max_handshake=*/4096);
+        check(!dead.ok(), "leg 3: the wrong-CA dial did not come up");
+        check(dead.effective_max_handshake() == 4096,
+              "leg 3: a DIAL that never came up still reports its own budget");
     }
 }
 
@@ -1271,7 +1491,9 @@ int main() {
     test_spec_dial_trust_keys();
     test_spec_dial_connect_path();
     test_frame_stream_adoption_gate();
+    test_second_connect_is_refused();
     test_unknown_h3_frames_skipped();
+    test_the_handshake_budget_is_the_configured_one();
     test_peer_stream_cycling_is_bounded();
     test_push_on_session_waits_for_start_receiving();
     test_start_receiving_is_inert_where_it_must_be();

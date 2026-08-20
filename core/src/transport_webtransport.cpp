@@ -49,7 +49,10 @@
  *     their first varint(s): control/QPACK/push/WT-uni streams are drained;
  *     the bidirectional HEADERS (0x01) stream is the extended CONNECT — it is
  *     validated (`:method=CONNECT`, `:protocol=webtransport`), answered with
- *     200, and kept open as the session's lifetime handle; the FIRST valid
+ *     200, and kept open as the session's lifetime handle. Exactly ONE of them
+ *     is answered: a request HEADERS arriving while a session is live is
+ *     refused at stream scope (#1410), because the session latch has no
+ *     successor state and the CONNECT stream's lifetime IS the session's. The FIRST valid
  *     bidirectional WEBTRANSPORT_STREAM (0x41) is adopted as THE frame
  *     channel, everything after its session-id varint feeding the 4-byte
  *     length-prefix reassembler.
@@ -104,8 +107,6 @@ namespace {
 /** @brief App-layer connection-shutdown code: not a WebTransport extended
  *         CONNECT. */
 constexpr std::uint64_t kAppErrBadRequest = 0x2;
-/** @brief Per-stream classification/HEADERS accumulation cap (DoS bound). */
-constexpr std::size_t kMaxHandshakeBytes = 16'384;
 
 /** @brief The HTTP/3 ALPN every WebTransport endpoint negotiates. */
 const QUIC_BUFFER kAlpnH3{sizeof("h3") - 1, reinterpret_cast<uint8_t*>(const_cast<char*>("h3"))};
@@ -141,8 +142,8 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
         impl_t* owner = nullptr;       /**< @brief The owning endpoint. */
         HQUIC h = nullptr;             /**< @brief The stream handle. */
         kind_t kind = kind_t::DRAIN;   /**< @brief The classification state. */
-        std::vector<std::uint8_t> acc; /**< @brief Handshake bytes, bounded by
-                                                   kMaxHandshakeBytes. */
+        std::vector<std::uint8_t> acc; /**< @brief Handshake bytes, bounded by the
+                                                   endpoint's `max_handshake` budget. */
         bool harvested = false;        /**< @brief Guarded by conn_m: the dtor/replacement path
                                                    took this handle for closing — never
                                                    re-adopt it. */
@@ -157,11 +158,28 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
      */
     std::string path;
 
+    /**
+     * @brief The pre-auth H3 handshake budget this endpoint honors (#1408) — resolved
+     *        once by `webtransport_transport_t::handshake_cap` in the constructor, before
+     *        any msquic handle exists, and const for the endpoint's life.
+     *
+     * It lives on the WebTransport impl and NOT on `msquic_endpoint_t`: the `quic` kind
+     * has no H3 handshake accumulator at all, and the base already draws its line at what
+     * both transports genuinely share.
+     */
+    std::size_t max_handshake = webtransport_transport_t::kMaxHandshakeBytes;
+
     /** @brief Every stream context of the live session (guarded by conn_m). */
     std::vector<stream_ctx_t*> ctxs;
-    /** @brief Extended CONNECT accepted (200) — the session state. */
+    /** @brief Extended CONNECT accepted (200) — the session state.
+     *
+     * A ONE-WAY latch per connection: only teardown / `replace_peer` clears it, and while
+     * it is set a second request HEADERS is refused rather than answered (#1410). `path`
+     * and `connect_stream_id` are derived slots written once under it, so neither can be
+     * re-armed by a peer that has already been answered. */
     std::atomic<bool> session{false};
-    /** @brief The CONNECT stream's id (the 0x41 preamble references it). */
+    /** @brief The CONNECT stream's id (the 0x41 preamble references it) — written once,
+     *         with the session latch, and never re-armed (#1410). */
     std::uint64_t connect_stream_id = 0;
     /**
      * @brief Extended CONNECTs this node REFUSED because it could not afford to answer
@@ -301,7 +319,7 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
     /** @brief Accumulate handshake bytes with the DoS cap. False => connection
      *         down. */
     bool accumulate(stream_ctx_t& c, const std::uint8_t* p, std::size_t n) {
-        if (c.acc.size() + n > kMaxHandshakeBytes) {
+        if (c.acc.size() + n > max_handshake) {
             shutdown_conn(kAppErrBadRequest);
             return false;
         }
@@ -478,12 +496,44 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
                 auto rest = in.subspan(t->consumed);
                 const auto len = wt_h3::read_varint(rest);
                 if (!len) break;
-                if (len->value > kMaxHandshakeBytes) {
+                if (len->value > max_handshake) {
                     shutdown_conn(kAppErrBadRequest);
                     return false;
                 }
                 rest = rest.subspan(len->consumed);
                 if (rest.size() < len->value) break;  // need the full field section
+
+                // ONE session per connection (#1410). `session` is a one-way latch and
+                // `path` / `connect_stream_id` are derived slots written once under it, so
+                // there is no successor state a SECOND request HEADERS could move this
+                // endpoint into: the CONNECT stream's lifetime IS the session's
+                // (draft-ietf-webtrans-http3), and this endpoint carries ONE session
+                // (ADR-0043 Phase B). It is refused at STREAM scope with NO status —
+                // exactly guard 3 of the 0x41 check above ("the FIRST valid one wins"),
+                // which aborts the second frame channel rather than answering it, and
+                // #919's ruling that a nonconforming stream must not take down a session
+                // the peer already established. Answering instead would cost the one owned
+                // send buffer msquic borrows until SEND_COMPLETE, per hostile stream —
+                // the pre-auth amplification #934 removed from this path; `refuse_stream`
+                // allocates nothing.
+                //
+                // Placed BEFORE `decode_field_section` because with a session live the
+                // answer no longer depends on what the fields say, so ~4.6 KiB of
+                // `field_section_t` stack and a Huffman decode on a peer-driven path are
+                // avoided. The consequence, taken deliberately: a MALFORMED or non-CONNECT
+                // HEADERS arriving while a session is live becomes stream-scoped too,
+                // where the `method`/`protocol` arm below makes it connection-fatal. That
+                // is strictly the #919 direction, and the alternative placement would
+                // leave the indefensible asymmetry of a valid second CONNECT costing one
+                // stream while an invalid one costs the whole session.
+                //
+                // No lock: msquic serializes per-connection callbacks, so two CONNECTs on
+                // one connection cannot race. This is a PEER-CONFORMANCE refusal, not the
+                // node shedding its own work, so it must not touch `refused_sessions`.
+                if (session.load(std::memory_order_relaxed)) {
+                    refuse_stream(c);
+                    return true;  // the established session stays up
+                }
 
                 // The decode borrows: the headers are views into `fields` and
                 // into `c.acc` (through `rest`), so both outlive every read
@@ -547,7 +597,7 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
             auto rest = in.subspan(t->consumed);
             const auto len = wt_h3::read_varint(rest);
             if (!len) break;  // need the length varint
-            if (len->value > kMaxHandshakeBytes) {
+            if (len->value > max_handshake) {
                 shutdown_conn(kAppErrBadRequest);
                 return false;
             }
@@ -575,7 +625,7 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
         auto rest = in.subspan(t->consumed);
         const auto len = wt_h3::read_varint(rest);
         if (!len) return;
-        if (len->value > kMaxHandshakeBytes) {
+        if (len->value > max_handshake) {
             signal_session(false);
             shutdown_conn(kAppErrBadRequest);
             return;
@@ -904,12 +954,16 @@ webtransport_transport_t::webtransport_transport_t(const std::string& peer_host,
                                                    std::uint16_t peer_port, const std::string& path,
                                                    webtransport_dial_tls_t tls,
                                                    mem::mem_backend_t* backend,
-                                                   std::size_t max_frame, bool defer_rx)
+                                                   std::size_t max_frame, bool defer_rx,
+                                                   std::size_t max_handshake)
     : impl_(std::make_unique<impl_t>()) {
     impl_t& i = *impl_;
     i.rx = &rx_;  // the delivery-tier slot lives in the transport_t base
     i.backend = backend;
     i.max_frame = length_prefix_framer::configured_cap(max_frame);  // tighten-only (#1035)
+    // Resolved BEFORE the dial below, so a link that never comes up still reads its own
+    // budget back through effective_max_handshake() (#1408).
+    i.max_handshake = handshake_cap(max_handshake);  // tighten-only
     // Two-phase bring-up (#1101, ADR-0081 §2). Latched BEFORE any msquic handle exists, so
     // there is no instant at which a frame channel — ours below, or one the server opens —
     // could deliver into the sink the owner has not installed yet. This transport owns no
@@ -972,12 +1026,15 @@ webtransport_transport_t::webtransport_transport_t(std::uint16_t bind_port,
                                                    const std::string& cert_file,
                                                    const std::string& key_file,
                                                    mem::mem_backend_t* backend,
-                                                   std::size_t max_frame)
+                                                   std::size_t max_frame, std::size_t max_handshake)
     : impl_(std::make_unique<impl_t>()) {
     impl_t& i = *impl_;
     i.rx = &rx_;  // the delivery-tier slot lives in the transport_t base
     i.backend = backend;
     i.max_frame = length_prefix_framer::configured_cap(max_frame);  // tighten-only (#1035)
+    // Resolved BEFORE listen_start, so the first peer's very first classification chunk is
+    // already measured against the configured budget (#1408).
+    i.max_handshake = handshake_cap(max_handshake);  // tighten-only
     // Departure seam (RFC-0009 §D extended to peer departure): wire the base's
     // connection-down / one-peer replacement harvest to this transport_t's flat
     // link-down notifier. A WebTransport endpoint carries ONE session (one peer
@@ -1040,39 +1097,49 @@ std::size_t webtransport_transport_t::live_streams() const noexcept {
     return impl_->ctxs.size();
 }
 
+std::size_t webtransport_transport_t::effective_max_handshake() const noexcept {
+    return impl_->max_handshake;  // constructor-resolved and immutable thereafter
+}
+
 namespace {
 
 /**
  * @brief The webtransport kind's PRIVATE config keys, parsed module-side from
  *        the raw SPEC config SETTINGS TLV (ADR-0043 §5 leanness — identical to
- *        the quic kind, plus one of its own): NAME "cert" NAME <file>, NAME
+ *        the quic kind, plus two of its own): NAME "cert" NAME <file>, NAME
  *        "key" NAME <file>, NAME "ca" NAME <file>, NAME "insecure" VALUE <u8>,
- *        NAME "path" NAME <resource>; unknown pairs ignored.
+ *        NAME "path" NAME <resource>, NAME "max_handshake" VALUE <u32>; unknown
+ *        pairs ignored.
  *
- * Two of the five are LISTEN-side (the served credential), two are DIAL-side
- * (how the server certificate is trusted, #918), and one is the DIAL-side
- * extended CONNECT `:path` (#1023) — the only key not shared with `quic`, which
- * has no HTTP layer to carry a resource.
+ * Two of the six are LISTEN-side (the served credential), two are DIAL-side (how
+ * the server certificate is trusted, #918), one is the DIAL-side extended CONNECT
+ * `:path` (#1023), and one — the pre-auth handshake budget (#1408) — applies to
+ * BOTH roles. The last two are the keys not shared with `quic`, which has no HTTP
+ * layer to carry a resource and no H3 handshake to bound.
  */
 struct wt_private_cfg_t {
-    std::string cert;      /**< @brief PEM server-certificate path (LISTEN). */
-    std::string key;       /**< @brief PEM private-key path matching cert (LISTEN). */
-    std::string ca;        /**< @brief PEM CA-bundle path the DIAL side verifies the
-                                       server certificate against; empty = the system
-                                       trust store (DIAL). */
-    bool insecure = false; /**< @brief DEV ONLY: skip server-certificate validation on
-                                       the DIAL side entirely. Must be asked for
-                                       explicitly — the default is to verify (DIAL). */
-    std::string path;      /**< @brief The extended CONNECT `:path` the dial requests;
-                                       empty = the "/" default (DIAL, #1023). */
+    std::string cert;              /**< @brief PEM server-certificate path (LISTEN). */
+    std::string key;               /**< @brief PEM private-key path matching cert (LISTEN). */
+    std::string ca;                /**< @brief PEM CA-bundle path the DIAL side verifies the
+                                               server certificate against; empty = the system
+                                               trust store (DIAL). */
+    bool insecure = false;         /**< @brief DEV ONLY: skip server-certificate validation on
+                                               the DIAL side entirely. Must be asked for
+                                               explicitly — the default is to verify (DIAL). */
+    std::string path;              /**< @brief The extended CONNECT `:path` the dial requests;
+                                               empty = the "/" default (DIAL, #1023). */
+    std::size_t max_handshake = 0; /**< @brief Pre-auth H3 handshake budget in bytes;
+                                               0 = webtransport_transport_t::
+                                               kMaxHandshakeBytes, and TIGHTEN-ONLY
+                                               against it (both roles, #1408). */
 };
 
 /** @brief The shared config_reader_t walk over the webtransport-private keys: NAME
  *         "cert" NAME <file>, NAME "key" NAME <file>, NAME "ca" NAME <file>, NAME
- *         "insecure" VALUE <u8>, NAME "path" NAME <resource>; unknown pairs ignored
- *         (forward-compat). Pair-consuming (#927), like every other config parse: a
- *         forward-compat pair whose string value reads `"key"` must not bind the
- *         FOLLOWING child as the private-key path. */
+ *         "insecure" VALUE <u8>, NAME "path" NAME <resource>, NAME "max_handshake"
+ *         VALUE <u32>; unknown pairs ignored (forward-compat). Pair-consuming (#927),
+ *         like every other config parse: a forward-compat pair whose string value reads
+ *         `"key"` must not bind the FOLLOWING child as the private-key path. */
 [[nodiscard]] wt_private_cfg_t parse_wt_config(const wire::tlv_t* raw_config) {
     wt_private_cfg_t out;
     const config_reader_t cfg(raw_config);
@@ -1081,6 +1148,7 @@ struct wt_private_cfg_t {
     if (const auto v = cfg.name("ca")) out.ca = std::string(*v);
     if (const auto v = cfg.flag("insecure")) out.insecure = *v;
     if (const auto v = cfg.name("path")) out.path = std::string(*v);
+    out.max_handshake = static_cast<std::size_t>(cfg.u32("max_handshake").value_or(0));
     return out;
 }
 
@@ -1122,7 +1190,7 @@ transport_vertex_t::transport_factory_t webtransport_transport_factory(
             t = std::make_unique<webtransport_transport_t>(
                 s.addr, s.port, priv.path,
                 webtransport_dial_tls_t{.ca_file = priv.ca, .insecure_no_verify = priv.insecure},
-                rx_backend, s.max_frame, /*defer_rx=*/true);
+                rx_backend, s.max_frame, /*defer_rx=*/true, priv.max_handshake);
             // A refused session is TRANSIENT, not a bad address (#929).
             if (!t->ok()) return std::unexpected(graph::status_t::TRANSPORT_DOWN);
             return t;
@@ -1132,7 +1200,7 @@ transport_vertex_t::transport_factory_t webtransport_transport_factory(
         if (!s.port_set || priv.cert.empty() || priv.key.empty())
             return std::unexpected(graph::status_t::TYPE_MISMATCH);
         t = std::make_unique<webtransport_transport_t>(s.port, priv.cert, priv.key, rx_backend,
-                                                       s.max_frame);
+                                                       s.max_frame, priv.max_handshake);
         // bind/cred failed — the listener did not come up (#929).
         if (!t->ok()) return std::unexpected(graph::status_t::TRANSPORT_DOWN);
         return t;
