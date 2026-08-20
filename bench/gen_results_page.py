@@ -337,6 +337,19 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "RFC-0022 §3.B deleted the pre-RFC knob, so no such build exists.",
         "ns per store · pins and copies per cell"),
     instrument_t(
+        "bench_subscribe_index.cpp", "counted", (),
+        "Prices the per-link departure index (`graph_t::index_link_vertex`) on the remote "
+        "SUBSCRIBE path, swept over 4/8/16/32/65 distinct link names at a held-constant vertex "
+        "population. Four arms rotate inside one binary — a no-index sentinel, the shipped "
+        "name-keyed index transcribed line for line, the same index keyed by a token the caller "
+        "already holds, and the graph-only re-key that must still hash the arriving name — "
+        "beside the live `subscribe_wire` for proportion. A counting `std::pmr::memory_resource` "
+        "reports bytes at rest on the same axis, and the run refuses to report unless the "
+        "transcription reproduces the shipped index byte for byte and allocation for allocation. "
+        "The A/A null is carried in the run as two ABBA-interleaved tags, so every delta is read "
+        "against a band from its own window.",
+        "ns per index operation · bytes at rest per link"),
+    instrument_t(
         "bench_reply_leg.cpp", "framed", (),
         "Drives the PRODUCER fan-out leg: one write to a vertex with N remote subscribers, which "
         "runs `deliver_remote` N times and opens each with a registry scan for the subscriber's "
