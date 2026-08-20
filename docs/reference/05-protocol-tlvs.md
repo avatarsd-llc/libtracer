@@ -528,6 +528,14 @@ answer, since the packed body is codec-opaque); `fwd/fwd-label-mint-reply`,
 `fwd/fwd-label-terminus-stale`; and the ACL pair above. Every existing vector is byte-unchanged: a
 `PATH` with no label element is byte-identical to today's.
 
+**On the wire, in a capture.** The [Wireshark dissector](https://github.com/avatarsd-llc/libtracer/tree/main/tools/wireshark)
+renders a label in place inside the address — `/<label:3@7>/sensor/temp`, index before generation —
+and exposes `libtracer.path.label.index` / `.generation` as display filters. The three
+distinguishable cases an operator meets are the three this section defines: a well-formed label, a
+generation-`0` label (flagged, and refused where it is dereferenced rather than where it is
+decoded), and a `0x16` record whose length is not 4, which is shown as a malformed address and
+never read as a label.
+
 ### Where it appears
 
 - Inside SUBSCRIBER as `target_path`.

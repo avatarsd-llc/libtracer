@@ -170,6 +170,17 @@ M.FWD_KIND = { [0] = "RESULT", [1] = "ERROR" }
 -- resolver (op_resolve_walk.hpp:372-377), so the dissector flags it too.
 M.INDEX_MODE = { [0] = "SCALAR", [1] = "ELEMENT", [2] = "WILDCARD" }
 
+-- RFC-0027's path label, as it actually travels: an RFC-0018 §8 escape record
+-- `00 <kind=0x16> <len=4> <u32 LE>` inside a packed PATH body. The 8-byte
+-- `PATH_LABEL` TLV child of the RFC's draft was never built (RFC-0027 amendment 5),
+-- so `0x16` here is an ESCAPE KIND and NOT a type code — the two are different
+-- namespaces that happen to share the number (RFC-0027 §12.1 erratum 3 clause 3).
+-- Kind and length are two INDEPENDENT clauses and are checked separately: a
+-- length-only check would read another kind's payload as a label, which is a
+-- mis-delivery rather than an error (RFC-0027 §12.5 erratum 1 clause 2).
+M.PATH_LABEL_KIND = 0x16
+M.PATH_LABEL_BYTES = 4
+
 -- tr::<concept>::<error> registry, keyed by the u16 registered code.
 M.ERROR_CODES = {
   [0x0001] = "tr::frame::truncated", [0x0002] = "tr::frame::invalid",
@@ -387,7 +398,14 @@ function M._semantics(b, node)
     -- `<esc:KK=hex>` in place of a segment, so an operator can see a label riding an
     -- address. Ragged framing stops the walk and is marked, so a truncated or hostile
     -- body renders as what it is instead of silently as a shorter address.
+    --
+    -- The one escape kind libtracer itself defines is `0x16`, RFC-0027's PATH LABEL, and
+    -- it is decoded rather than left as hex: raw `<esc:16=01000200>` hides the two fields
+    -- an operator actually needs — the slot index and the generation — and the generation
+    -- is the whole staleness mechanism (§7.1). See `M.path_label_str` for the spelling
+    -- and for what each of the three renderings means.
     local segs, at, ragged = {}, node.payload_off, false
+    local labels = {}
     local body_end = node.payload_off + node.length
     while at < body_end do
       local len = string.byte(b, at + 1)
@@ -397,7 +415,35 @@ function M._semantics(b, node)
         local kind = string.byte(b, at + 2)
         local elen = string.byte(b, at + 3)
         if at + 3 + elen > body_end then ragged = true break end
-        segs[#segs + 1] = string.format("<esc:%02X=%s>", kind, tohex(b, at + 3, elen))
+        if kind == M.PATH_LABEL_KIND then
+          -- `off` is the record's leading `00`, kept so the Wireshark tree can highlight
+          -- the label's own four payload bytes rather than the whole frame.
+          local lab = { off = at }
+          if elen == M.PATH_LABEL_BYTES then
+            -- RFC-0027 §4.1: one LE u32 split 16/16 — index in the low half, generation
+            -- in the high half. Arithmetic rather than shifts, because this file must run
+            -- on the 5.1 fallback backend too.
+            lab.value = u32le(b, at + 3)
+            lab.index = lab.value % 65536
+            lab.generation = math.floor(lab.value / 65536)
+            -- Generation 0 is the reserved "no label" and never legitimately reaches the
+            -- wire. It decodes as a LABEL and is refused at DEREF, not at decode, so it
+            -- is displayed as the label it claims to be, flagged.
+            lab.unminted = (lab.generation == 0) or nil
+          else
+            -- The declared length MUST be 4 (RFC-0027 §12.1 erratum 3 clause 2). This is
+            -- a malformed ADDRESS, refused by the resolver with `tr::path::invalid` —
+            -- NOT a codec reject, since a packed body is `opt.PL = 0` and opaque to the
+            -- codec. So the frame is not flagged invalid and the bytes are not read as a
+            -- label: a short field read as one is exactly the mis-delivery the two-clause
+            -- vector split exists to catch.
+            lab.bad_len = elen
+          end
+          labels[#labels + 1] = lab
+          segs[#segs + 1] = M.path_label_str(lab)
+        else
+          segs[#segs + 1] = string.format("<esc:%02X=%s>", kind, tohex(b, at + 3, elen))
+        end
         at = at + 3 + elen
       else
         if at + 1 + len > body_end then ragged = true break end
@@ -407,6 +453,7 @@ function M._semantics(b, node)
     end
     node.path_str = "/" .. table.concat(segs, "/")
     if ragged then node.path_str = node.path_str .. " <ragged>" end
+    if #labels > 0 then node.path_labels = labels end
 
   elseif t == 0x0F then -- FWD: VALUE op, PATH dst, PATH src, [VALUE kind (REPLY)]
     local fwd, paths, values = {}, {}, {}
@@ -496,6 +543,29 @@ function M._semantics(b, node)
       end
     end
   end
+end
+
+--[[ @brief Render one decoded RFC-0027 path-label element for the address string.
+
+  Three renderings, one per case an operator must be able to tell apart at a glance:
+
+  * `<label:3@7>` — a well-formed label: slot index 3 at generation 7. It is HOST-SCOPED
+    (RFC-0027 §4.1): these bytes name a vertex only on the host that minted them and mean
+    nothing anywhere else, so a label seen in two captures is two unrelated things.
+  * `<label:3@0 UNMINTED>` — generation 0, the reserved "no label", which never
+    legitimately reaches the wire. Refused where it is dereferenced, with
+    `tr::path::not_found`, not where it is decoded.
+  * `<label:bad-len=3>` — kind `0x16` with a declared length that is not 4. A malformed
+    address (`tr::path::invalid`), and deliberately NOT rendered as a label: reading a
+    short field as one is a mis-delivery.
+
+  A `@` rather than a `/` separates index from generation because `/` is the segment
+  separator, and a label sits where a segment would.
+]]--
+function M.path_label_str(lab)
+  if lab.bad_len then return string.format("<label:bad-len=%d>", lab.bad_len) end
+  return string.format("<label:%d@%d%s>", lab.index, lab.generation,
+                       lab.unminted and " UNMINTED" or "")
 end
 
 --[[ @brief Render a decoded FIELD selector in its source spelling.
@@ -591,6 +661,18 @@ local function node_to_json(n)
   end
 
   if n.path_str then parts[#parts + 1] = '"path_str":' .. jstr(n.path_str) end
+  if n.path_labels then
+    -- Emitted as NUMBERS beside the rendered string, so the test harness pins the 16/16
+    -- split itself and not merely the spelling of it: a swapped index/generation would
+    -- otherwise have to be caught by reading the string back apart.
+    local lp = {}
+    for _, l in ipairs(n.path_labels) do
+      lp[#lp + 1] = string.format('{"index":%s,"generation":%s,"bad_len":%s,"str":%s}',
+        tostring(l.index or "null"), tostring(l.generation or "null"),
+        tostring(l.bad_len or "null"), jstr(M.path_label_str(l)))
+    end
+    parts[#parts + 1] = '"path_labels":[' .. table.concat(lp, ",") .. "]"
+  end
   if n.fwd then
     parts[#parts + 1] = string.format(
       '"fwd":{"op":%s,"op_name":%s,"dst":%s,"src":%s,"kind":%s,"kind_name":%s}',
@@ -673,6 +755,12 @@ if rawget(_G, "Proto") then
     length   = ProtoField.uint32("libtracer.length", "Length", base.DEC),
     payload  = ProtoField.bytes("libtracer.payload", "Payload"),
     path     = ProtoField.string("libtracer.path", "Path"),
+    -- RFC-0027 path label. Filterable on its own, because "which frames carry a label at
+    -- all" and "which generation is this peer still holding" are the two questions a
+    -- staleness investigation asks, and neither is answerable from the address string.
+    plabel   = ProtoField.uint32("libtracer.path.label", "Path label", base.HEX),
+    plabel_ix = ProtoField.uint16("libtracer.path.label.index", "Path label slot index", base.DEC),
+    plabel_gn = ProtoField.uint16("libtracer.path.label.generation", "Path label generation", base.DEC),
     fwd_op   = ProtoField.uint8("libtracer.fwd.op", "FWD op", base.DEC, vs_op),
     fwd_kind = ProtoField.uint8("libtracer.fwd.kind", "FWD kind", base.DEC, vs_kind),
     fwd_dst  = ProtoField.string("libtracer.fwd.dst", "FWD dst"),
@@ -692,8 +780,14 @@ if rawget(_G, "Proto") then
     crc_bad = ProtoExpert.new("libtracer.crc.bad", "Trailer CRC mismatch", expert.group.CHECKSUM, expert.severity.ERROR),
     invalid = ProtoExpert.new("libtracer.invalid", "Invalid frame", expert.group.MALFORMED, expert.severity.WARN),
     trunc   = ProtoExpert.new("libtracer.truncated", "Truncated frame", expert.group.MALFORMED, expert.severity.WARN),
+    -- Distinct from `invalid`: a malformed path label is a bad ADDRESS the resolver
+    -- refuses (`tr::path::invalid`), while the FRAME is perfectly well-formed — a packed
+    -- PATH body is `opt.PL = 0` and opaque to the codec. Raising `invalid` here would
+    -- tell an operator the capture is corrupt when it is the address that is.
+    plabel  = ProtoExpert.new("libtracer.path.label.invalid", "Malformed path label",
+                              expert.group.MALFORMED, expert.severity.WARN),
   }
-  p.experts = { ef.crc_bad, ef.invalid, ef.trunc }
+  p.experts = { ef.crc_bad, ef.invalid, ef.trunc, ef.plabel }
 
   local pref_ws  = 80    -- WebSocket TCP port (a WS-serving node commonly uses :80)
   local pref_tcp = 0     -- raw-TCP length_prefix_framer port; 0 = disabled
@@ -733,6 +827,26 @@ if rawget(_G, "Proto") then
     local frange = tvb(node.off, nlen)
     local function gen(field, value) sub:add(field, frange, value):set_generated() end
     if node.path_str then gen(f.path, node.path_str) end
+    -- Path labels are added over their OWN bytes, not as generated items over the frame:
+    -- the value and both halves are verbatim little-endian slices, so selecting the field
+    -- highlights the four bytes it came from. `l.off` is the escape record's `00`, so the
+    -- payload starts three bytes later.
+    for _, l in ipairs(node.path_labels or {}) do
+      if l.bad_len then
+        sub:add_proto_expert_info(ef.plabel, string.format(
+          "path label declares len=%d; RFC-0027 §4.1 requires exactly 4 — the resolver "
+          .. "answers tr::path::invalid", l.bad_len))
+      elseif have(l.off + 3, 4) then
+        sub:add_le(f.plabel, tvb(l.off + 3, 4))
+        sub:add_le(f.plabel_ix, tvb(l.off + 3, 2))
+        sub:add_le(f.plabel_gn, tvb(l.off + 5, 2))
+        if l.unminted then
+          sub:add_proto_expert_info(ef.plabel,
+            "path label generation 0 is the reserved \"no label\" and never legitimately "
+            .. "reaches the wire; the dereferencing host answers tr::path::not_found")
+        end
+      end
+    end
     if node.fwd then
       if node.fwd.op then gen(f.fwd_op, node.fwd.op) end
       if node.fwd.kind then gen(f.fwd_kind, node.fwd.kind) end

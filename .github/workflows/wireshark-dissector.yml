@@ -42,3 +42,8 @@ jobs:
         run: luac5.4 -p tools/wireshark/libtracer.lua
       - name: Decode every conformance vector through the dissector
         run: python3 tools/wireshark/tests/run_tests.py -v
+      - name: Smoke the Wireshark-side tree rendering (stubbed Proto/ProtoField)
+        # The step above drives the pure decoder; the registration block only runs
+        # when a `Proto` global exists, so without this it was covered by `luac5.4
+        # -p` alone — blind to a uint16 field added from a four-byte slice.
+        run: lua5.4 tools/wireshark/tests/tree_smoke.lua
