@@ -1830,6 +1830,13 @@ endif()
 # a new bus-dependent test that forgets the label reds the bus-closed leg rather than passing
 # silently — which is the failure direction a deselection list is allowed to have.
 #
+# The converse is deliberate and belongs here so it is not "fixed" by a later reader:
+# `link_token_carry` is NOT on this list even though one of its eight cases drives a census bus.
+# There the bus dependence really is a property of a CASE — the other seven are tier-blind and one
+# of them IS the FLAT tier, the shape a bus-closed node actually runs — so that one case gates
+# itself on `tr::net::kBusLinks` in the test's `main` and PRINTS its skip. Labelling the target
+# instead would deselect the carry from the only configuration that ships without a bus.
+#
 # `if(TEST ...)` because the set is module-gated above: a build without CAN, without the net
 # plane, or without integrations/esp-idf/ present registers only a subset.
 set(LIBTRACER_BUS_TESTS

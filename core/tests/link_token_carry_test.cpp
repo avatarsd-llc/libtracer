@@ -41,7 +41,13 @@
  *     `set_peer_up_notifier`, so nothing ever fills its per-peer token cache eagerly; the
  *     supplier must mint lazily on the miss. Without that, every CAN peer would pay a name
  *     lookup forever — and if the lazy mint were wrong instead of merely absent, its edges
- *     would not be evictable at all.
+ *     would not be evictable at all. This one assertion — and ONLY this one — presupposes the
+ *     ADR-0044 bus module, so it is bound to `tr::net::kBusLinks` in `main`; see the note there.
+ *
+ * The binary itself carries no `bus` CTest label. Seven of the eight cases above are tier-blind,
+ * and the FLAT tier is precisely the shape a bus-closed node runs — labelling the whole target
+ * out of `ctest -LE bus` would delete the carry's coverage from the one configuration that
+ * ships without a bus.
  */
 
 #include <cstddef>
@@ -79,6 +85,7 @@ using tr::graph::role_t;
 using tr::graph::vertex_handle_t;
 using tr::net::bus_link_t;
 using tr::net::fwd_router_t;
+using tr::net::kBusLinks;
 using tr::net::peer_handle_t;
 using tr::net::transport_t;
 using tr::view::view_t;
@@ -412,6 +419,12 @@ void test_the_token_seam_is_asked_only_at_a_subscribe() {
  *
  * Driven end to end through `fwd_router_t`, so what is exercised is the shipped supplier and
  * the shipped notifier wiring, not a stand-in for them.
+ *
+ * @note The one case here that needs the bus module PRESENT. Driving it end to end through
+ *       `fwd_router_t` is the point, and under `kBusLinks = false` the router asks
+ *       `tr::net::bus_of`, is told nullptr, and mounts this census bus as a point-to-point
+ *       child — so no peer receiver is ever installed and every `inject_peer` lands nowhere.
+ *       Its caller in `main` gates it; see there for why the gate is not a CTest label.
  */
 void test_a_census_bus_peer_is_indexed_and_evicts() {
     std::printf("census bus (no arrival notifier) — lazy mint, indexed, evictable:\n");
@@ -549,7 +562,20 @@ int main() {
     test_a_released_slot_inherits_nothing();
     test_a_wrong_token_cannot_mis_index();
     test_the_token_seam_is_asked_only_at_a_subscribe();
-    test_a_census_bus_peer_is_indexed_and_evicts();
+    if constexpr (kBusLinks) {
+        test_a_census_bus_peer_is_indexed_and_evicts();
+    } else {
+        // Not a gap in the carry's coverage — the census bus is the ONE case here that needs a
+        // module this build compiled out (#375 deliverable 3), and its every assertion is about
+        // peers, which a point-to-point node does not have. Skipped rather than `bus`-labelled
+        // because the seven other cases are tier-blind and the FLAT tier below is exactly the
+        // shape a bus-closed node runs: deselecting the whole target would take the carry's
+        // coverage away from the configuration that most needs it. Printed rather than silent
+        // so this binary's pass is never mistaken for a census-bus result.
+        std::printf(
+            "census bus SKIPPED: this build closed the ADR-0044 bus module out "
+            "(kBusLinks = false); no link here can carry peers. Every other case still ran.\n");
+    }
     test_a_flat_child_carries_its_token();
     test_a_long_link_name_overflows_and_still_resolves();
     return tr::testing::summary("link_token_carry");
