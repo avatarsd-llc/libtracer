@@ -203,6 +203,14 @@ The three configurations have **different, measurable** cost profiles, so each m
 
 This bench work is tracked separately (blocked on the substrate itself existing) and is a landing gate for the composition, not optional tooling.
 
+### The instrument exists (2026-08-20, [#941](https://github.com/avatarsd-llc/libtracer/issues/941))
+
+`bench/bench_store_sweep.cpp` + `bench/bench_store_escape.cpp`, driven by `bench/run_store_sweep.sh` and collated by `bench/collate_store_sweep.py`. It sweeps **four** arms — an `H-baseline` control (the shipped all-heap default) plus WIDE / MID / NARROW — over one workload that draws all four channels above, and reports latency by leg, fan-out throughput across T = {1, 2, 4, 8, 16, 24}, deterministic store high-water, and what still escapes to the process heap. The banked run is in `bench/README.md`. Three things about it belong here rather than only there:
+
+- **Its graph arm is Stage-1 only.** `vertex_t` placement is still `std::make_unique<vertex_t>` on the global heap — that is Stage 2 ([#843](https://github.com/avatarsd-llc/libtracer/issues/843), gated on [#1285](https://github.com/avatarsd-llc/libtracer/issues/1285)) and it has not landed. What the sweep varies on the graph side is the descent stacks (`ctl`) and the `std::pmr` control-block channel (`mr`, through the [#1401](https://github.com/avatarsd-llc/libtracer/issues/1401) adapter). The consequence is measured: injecting the whole substrate moves ~104 B of node construction off the process heap, and the escape is non-zero in every arm.
+- **The non-vacuity clause is half-confirmed and half-contradicted.** WIDE does show the predicted collapse under a multi-thread fan-out (0.01x of its own single-thread rate by T = 24). So does **MID** — its net-plane store is one `pool_source_t<sync_mutex_t>` shared by every receive thread, which is the same shape at a different granularity. Only NARROW tracks the platform heap's scaling curve. On the whole-node leg every injected arm collapses, because the graph plane is one locked store in all three.
+- **Diagnostic, not gated.** Thread-contention numbers and process-heap high-waters are runner-dependent (`bench/ram_census_pins.json` records a 66 % across-run swing), so only the deterministic columns — store `used()` and the T = 1 latency cell — are candidates for the standing CI series this section asks for. Landing the harness diagnostic-only satisfies "a standing bench so a regression in any configuration is visible" **partially**; the gating series is tracked separately.
+
 ## Considered options
 
 - **WIDE as default.** Rejected: the ×16.6 host contention and the single shared blast radius. Kept as the MCU *fold* of MID, chosen by injection where it is free.

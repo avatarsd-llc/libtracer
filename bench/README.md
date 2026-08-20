@@ -37,6 +37,7 @@ for a local `preview.html` of the same charts.
 | `bench_rx_source_topology` | **RX failable-source topology**: T receive threads forwarding rope frames through a shared heap, one shared pool, or one pool per child — the measurement behind [ADR-0067](../docs/adr/0067-bounded-recycling-source-and-per-owner-topology.md) §3. |
 | `bench_pin_ratio` (`run_pin_ratio.sh`) | **RFC-0022 §6, the LATENCY half**: the WRITE store leg over a (payload × segment) grid, every `K` arm rotating inside ONE process. Answered §8 Q3 → Amendment 2 (the on-by-default flip does not land). Collated by `collate_pin.py`. |
 | `bench_pin_net` (`run_pin_net.sh`) | **RFC-0022 §6, the RAM half**: two processes over real UDP, deliveries counted by the RECEIVER, receiver backed by a **bounded RX pool** whose free-slot floor and `dropped_rx()` are the occupancy instrument. Sweeps the live-vertex count across the slot count — the axis on which a pin's borrow starves receive. See [receive-pool occupancy](#bench_pin_net--rfc-0022-6-receive-pool-occupancy-760). |
+| `bench_store_sweep` + `bench_store_escape` (`run_store_sweep.sh`) | **ADR-0079's per-configuration allocation-store sweep (#941)**: H-baseline / WIDE / MID / NARROW over ONE whole-node workload that draws all four ADR-0079 channels, reporting latency by leg, fan-out throughput across T={1,2,4,8,16,24}, deterministic store high-water, and what still escapes to the process heap. Collated by `collate_store_sweep.py`. See [what it resolves, and what it cannot](#bench_store_sweep--the-adr-0079-per-configuration-store-sweep-941). |
 | `bench_subscribe_index` (`run_subscribe_index.sh`) | **#1266's subscriber-index interning A/B**: what keying `link_index_` by an interned token instead of a link NAME costs and saves, in latency and in bytes at rest, over 4/8/16/32/65 links. Four index arms in one binary plus the live `subscribe_wire` path, and the A/A null is collected in the same window. Collated by `collate_subscribe_index.py`. See [what it resolves](#bench_subscribe_index--link-identity-interning-1266). |
 
 ### `bench_forward_heap` — the 16KB-RAM zero-heap forward gate (ADR-0038)
@@ -448,6 +449,156 @@ per-child tracks the heap within run-to-run spread. Peak slab is reported on std
 Diagnostic, **not** a `perf.yml` gate, for the same reason as the two storms above. Run it
 at least three times before drawing a conclusion — a single run of this workload showed a
 27 % single-thread pool win that three runs deleted.
+
+It measures **one** seam. The whole-node instrument — four allocation channels, four arms,
+rounds, a carried A/A null and a memory column — is
+[`bench_store_sweep`](#bench_store_sweep--the-adr-0079-per-configuration-store-sweep-941)
+below. The two are not rivals: this one isolates the router's `rx` seam, that one composes
+the node the seam sits in.
+
+### `bench_store_sweep` — the ADR-0079 per-configuration store sweep (#941)
+
+```sh
+cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
+cmake --build bench/build --target bench_store_sweep bench_store_escape -j
+python3 bench/host_guard.py wait --timeout 900
+bash bench/run_store_sweep.sh bench/build 13 2 > /tmp/store.tsv
+python3 bench/collate_store_sweep.py /tmp/store.tsv
+```
+
+ADR-0079 §Verification commissions "a three-configuration sweep (WIDE / MID / NARROW) over the
+same workload, reporting per config: alloc hot-path latency, fan-out throughput at increasing
+thread counts, and peak resident / store high-water-mark". This is that instrument, and #873's
+substrate train names it as the acceptance gate each family car should have been read against.
+
+**Four arms, not three** — the baseline is the point:
+
+| arm | graph `mr` | graph `ctl` | router `label_src`/`rx` | transport egress |
+| --- | --- | --- | --- | --- |
+| `H-baseline` | `std::pmr::get_default_resource()` | `heap_source()` | `heap_source()` | `heap_source()` |
+| `WIDE` | one slab (via #1401's pmr adapter) | the one slab | the one slab | the one slab |
+| `MID` | graph store | graph store | net store | net store |
+| `NARROW` | graph store | graph store | **per-child** store | **per-link** store |
+
+Total slab **bytes** are held equal across WIDE / MID / NARROW (`bench_rx_source_topology`'s
+rule), so what is compared is topology, not budget. `value_backend` stays `heap_backend()` in
+every arm: ADR-0079 keeps need C (payload segments) separate on purpose, and varying it would
+make the sweep measure two substrates at once.
+
+The workload has three legs, timed separately so no channel can hide behind another —
+`net-fwd` (a 4-link rope FWD forward hop: the router `rx` draw plus the base
+`transport_t::send(iov)` gather, which reaches the **egress** store only because the sink
+declines to override the gather form), `graph-write` (the `std::pmr` `mr` channel), and
+`graph-read` (a composed subtree read, the `ctl` channel) — plus `full`, which is all three and
+is what the throughput arm runs.
+
+#### The honest limitation, stated before any number
+
+`vertex_t` placement is **still** `std::make_unique<vertex_t>` on the global heap. That is
+ADR-0079 **Stage 2** (#843, gated on #1285) and it has not landed. So the graph half of what
+this sweep varies is **descent stacks and the `std::pmr` control-block channel only**, not
+vertex placement — and the process-heap escape is consequently **non-zero in every arm**. That
+number is the deliverable, not a defect in it: it is what "bounded node" currently delivers.
+
+#### Two windows, and the rule that keeps them apart
+
+`latency`, `hwm` and the escape census run under `taskset -c 2`. `throughput` runs
+**unpinned**, because a 24-thread arm on one logical CPU measures the scheduler. They emit
+under different RESULT tags and the collator renders them in separate tables with separate null
+bands. Latency verdicts use the same-window A/A band (`collate_subscribe_index.py`'s rule);
+throughput verdicts use the paired per-round sign test (`collate_pin.py`'s rule) — one sign
+flip anywhere prints `indistinguishable`.
+
+#### Non-vacuity — `calibrate`, in both binaries, exit non-zero
+
+`bench_store_sweep calibrate` asserts each of the four channels is drawn from (`blocks > 0`) in
+WIDE and each per-lane store in NARROW; a channel wired to a store nothing draws from is an arm
+that silently measures nothing. `bench_store_escape calibrate` carries the half that needs the
+`operator new` override: the escape canary (a `block_array_t` over `heap_source()` **must** be
+seen to escape, or the override is blind), the disjointness canary (the counting decorator
+serves from `std::aligned_alloc`, never `::operator new` — the #1402 defect), and a null arm
+reading exactly 0. `run_store_sweep.sh` runs both before **and** after the transcript.
+
+#### Measured, 2026-08-20, pinned host (31 CPUs), 13 rounds x 2 tags, g++ 13.3.0 `-O3`
+
+Load average 5.11 before / 10.15 after — the "after" reading is taken immediately behind the
+last **unpinned 24-thread** point and therefore includes the sweep's own load; the pinned
+window's own A/A null is the certificate that matters, and it reads **0.87 %**. No orphaned
+busy-loops; `host_guard.py wait` cleared at 5.47 against a 7.75 bar.
+
+**Latency, best-of-rounds ns/op, null band 0.87 %:**
+
+| leg | H-baseline | WIDE | MID | NARROW |
+| --- | ---: | ---: | ---: | ---: |
+| `net-fwd` | 242.73 | 240.47 (FASTER, marginal) | 233.44 (FASTER) | **220.39 (FASTER, −9.2 %)** |
+| `graph-write` | 59.20 | 58.75 (within-null) | 58.44 (FASTER) | 58.50 (FASTER) |
+| `graph-read` | 296.33 | 297.81 (within-null) | 295.15 (within-null) | 296.41 (within-null) |
+| `full` | 715.94 | 719.38 (within-null) | 718.44 (within-null) | **707.81 (FASTER)** |
+
+**Fan-out throughput, best-of-rounds ops/s per thread, unpinned:**
+
+| leg | arm | T=1 | T=4 | T=8 | T=16 | T=24 | T=1→24 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `net-fwd` | H-baseline | 3,865,331 | 3,655,568 | 3,293,369 | 2,384,886 | 1,750,859 | 0.45x |
+| `net-fwd` | WIDE | 3,550,139 | 606,367 | 214,020 | 60,962 | 43,697 | **0.01x** |
+| `net-fwd` | MID | 3,538,013 | 744,588 | 200,382 | 55,272 | 43,585 | **0.01x** |
+| `net-fwd` | NARROW | 4,353,219 | 3,951,587 | 3,443,077 | 2,750,488 | 2,002,368 | 0.46x |
+| `full` | H-baseline | 1,303,295 | 1,095,874 | 970,905 | 629,604 | 486,689 | 0.37x |
+| `full` | WIDE | 1,259,554 | 256,400 | 79,581 | 23,224 | 17,486 | 0.01x |
+| `full` | MID | 1,259,121 | 373,375 | 165,867 | 41,178 | 29,562 | 0.02x |
+| `full` | NARROW | 1,306,096 | 497,616 | 164,145 | 43,672 | 32,812 | 0.03x |
+
+**Store high-water (`used()`), deterministic**, at T=24: WIDE **2,808 B** in one store, MID
+**2,933 B** in two, NARROW **6,678 B** in 49 — so NARROW's measured per-store slack over WIDE
+on this workload is **3,870 B**, or ~161 B per lane, with the per-lane stores at 128 B (rx) and
+36 B (egress) each and one size class apiece. Zero overflow and zero refusals in every cell.
+ADR-0079's ~14 KB NARROW-slack figure is an MCU-target estimate over a different channel set;
+this is the first measured number of its kind and does not contradict it, it sits beside it.
+
+**Process-heap escape**, per node: `build` 5,200 B live on H-baseline against 5,096 B on all
+three injected arms — i.e. injecting the whole ADR-0079 substrate moves **104 bytes** of node
+construction off the global heap, because vertex placement is Stage 2. `steady`, per 256
+workload iterations: 5,376 allocations on H-baseline against 4,352 on each injected arm — the
+four channels capture exactly **4 allocations per iteration**, which independently corroborates
+the per-channel table (65 blocks over 64 iterations per channel). Peak transient 744 B in every
+arm.
+
+#### What this run says, including the parts that are not flattering
+
+1. **NARROW is the only injected composition that survives a fan-out.** On the net leg it
+   tracks the platform heap's scaling curve (0.46x vs 0.45x from T=1 to T=24) while being
+   ~9 % faster per hop at T=1. The collator still prints `indistinguishable` at T=24 against
+   the baseline, because the paired sign test flipped in at least one round — the rule is
+   enforced rather than argued around.
+2. **MID collapses just as hard as WIDE.** ADR-0079 §Considered-options rejects WIDE as the
+   default on "the ×16.6 host contention" and keeps MID as the default. On this workload MID's
+   net-plane store is a single `pool_source_t<sync_mutex_t>` shared by every receive thread, so
+   it reproduces the ADR-0060-erratum-1 signature to within noise of WIDE: **0.01x** of its own
+   single-thread rate by T=24, against a platform heap that scales. The ADR's own non-vacuity
+   clause asks for "a deliberately mis-wired WIDE build ... must show the contention the
+   MID/NARROW builds do not" — half of that is confirmed and half is contradicted, and the
+   contradiction is the finding.
+3. **No composition currently delivers a scalable whole node.** On the `full` leg every
+   injected arm, NARROW included, falls to 0.01–0.03x of its single-thread rate, because the
+   graph plane is one locked store in all three of them: ADR-0079's fan is a *net-plane* fan,
+   and the per-vertex placement that would fan the graph plane is Stage 2.
+4. **Nor a bounded one.** See the escape figures above.
+
+None of that is an argument against the substrate — at T=1, the MCU shape ADR-0079 is written
+for, every injected arm is at least as fast as the heap and NARROW is measurably faster. It is
+an argument about what the *composition default* buys on a many-core host, and it is now
+argued from CI-reproducible numbers rather than from memory, which is what §Verification asked
+for.
+
+#### Not wired into `perf-local.yml`, and why that is only a partial answer
+
+Standing in-tree practice is that thread-contention benches are DIAGNOSTIC-not-gated
+(`bench_rx_source_topology`, `bench_route_handle_contention`, `bench_fanout_clone_storm`), and
+`bench/ram_census_pins.json` records high-water columns moving 66 % across runs — so the T-sweep
+and the escape high-water must never be gated. Only the deterministic columns (store `used()`
+and the T=1 latency cell) are candidates. ADR-0079 §Verification asks for "a standing bench so a
+regression in any configuration is visible"; landing diagnostic-only satisfies that **partially**,
+and the gating series is tracked separately.
 
 ### `bench_pin_net` — RFC-0022 §6 receive-pool occupancy (#760)
 

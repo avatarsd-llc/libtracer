@@ -40,6 +40,15 @@
  * Output: the shared bench RESULT contract (bench_common.hpp) —
  *   mode=rx_source_<config>, fanout=T, pub_per_s=per-thread forwards/s,
  *   deliv_per_s=aggregate forwards/s, latency fields = per-thread ns/forward.
+ *
+ * @note ONE SEAM, DELIBERATELY. The whole-NODE instrument is `bench_store_sweep.cpp` (#941,
+ *       ADR-0079 §Verification): four arms over all four ADR-0079 allocation channels at once,
+ *       with rounds, a carried A/A null and a memory column, which this bench has none of. The
+ *       two are not rivals and neither supersedes the other — this one isolates the router's
+ *       `rx` seam so a finding there is attributable to it; that one composes the node the seam
+ *       sits in, so a finding there is a statement about a deployable composition. The lane,
+ *       rope and worker-barrier machinery below is reused there verbatim rather than
+ *       reinvented.
  */
 #include <atomic>
 #include <chrono>

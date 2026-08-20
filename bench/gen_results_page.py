@@ -423,8 +423,28 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
     instrument_t(
         "bench_rx_source_topology.cpp", "scaling", (),
         "T receive threads forward rope frames with the RX block source shared across all "
-        "children, one pool shared, or one pool per child.",
+        "children, one pool shared, or one pool per child. One seam; the whole-node instrument "
+        "is `bench_store_sweep.cpp`.",
         "frames/s · ns p50, per thread count"),
+    instrument_t(
+        "bench_store_sweep.cpp", "scaling", (),
+        "Composes a whole node under four allocation-store configurations — the shipped all-heap "
+        "baseline plus ADR-0079's WIDE, MID and NARROW, at equal total slab — and drives one "
+        "workload that draws all four of its allocation channels: a rope forward hop (router "
+        "`rx` plus the transport egress gather), a graph write (the `std::pmr` channel) and a "
+        "composed subtree read (the failable `ctl` channel). Reports each leg's latency, "
+        "fan-out throughput as receive threads scale 1 → 24, and each store's deterministic "
+        "high-water; its `calibrate` mode fails the run if any channel served nothing.",
+        "ns p50 · ops/s per thread · store bytes",
+        "diagnostic, not gated — see bench/README.md"),
+    instrument_t(
+        "bench_store_escape.cpp", "counted", (),
+        "The memory half of the store sweep, in its own binary so a global `operator new` "
+        "override cannot bias the timed arms: it composes the same four configurations and "
+        "counts what still ESCAPES to the process heap, standing the node up and then per "
+        "workload iteration. Non-zero in every arm while vertex placement remains on the global "
+        "heap, which is the point of the number.",
+        "heap bytes and allocations, per arm and window"),
     instrument_t(
         "bench_lkv_slot.cpp", "scaling", (),
         "Concurrent publishers and readers on one last-known-value slot across five reclamation "
