@@ -43,6 +43,29 @@
 # enough to bisect. Contaminated points do not count as coverage — a sample the A/A
 # pair flagged answers "what was the machine doing", not "what did the code cost".
 #
+# STORE SWEEP (#1428): the ADR-0079 per-configuration sweep banks its DETERMINISTIC
+# columns here — the `hwm` store `used()` occupancy per (arm, T), which additionally
+# carries a WARN-FIRST pinned ratchet (bench/store_sweep_pins.json), and the T=1 latency
+# cell of each (arm, leg), which is banked and watched by the rolling `store_guard.py
+# drift` leg below rather than pinned.
+#
+# TWO COLUMNS OF THAT INSTRUMENT ARE EXCLUDED, and they are named here rather than left
+# implied by omission:
+#
+#   * the fan-out T-sweep (T >= 2). Thread-contention numbers are runner-dependent, and
+#     the standing in-tree call for exactly this shape is DIAGNOSTIC-not-gated —
+#     bench_rx_source_topology, bench_route_handle_contention and bench_fanout_clone_storm
+#     all decline the gate on that ground. Its own A/A null in the banked #941 run read
+#     58.9%; a gate with a 58.9% null is a flaky red, and a flaky red teaches everyone to
+#     ignore the gate.
+#   * the process-heap ESCAPE high-water. bench/ram_census_pins.json records a high-water
+#     moving 66% across runs, which is why ram_census.py already excludes high-water
+#     columns from its pinned rows.
+#
+# The exclusion is a mechanism, not a promise: `STORE_SWEEP_SCOPE=deterministic` does not
+# run those two arms at all (so `bench_store_escape` is deliberately NOT built here), and
+# `store_sweep_gate.py` FAILS on a pin that names either column.
+#
 # RAM (#1228): this workflow also carries the two RAM-census instruments. Steady-state
 # RAM is what decides whether a node fits the 16 KB target, and it was the only cost
 # axis with neither a gate nor a recorded trend. Both censuses publish here (same
@@ -175,7 +198,7 @@ jobs:
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
           cmake --build bench/build --target bench_libtracer bench_forward_heap \
             bench_forward_demux bench_compact_delivery \
-            bench_conn_ram bench_ram_census_tcp -j "$(nproc)"
+            bench_conn_ram bench_ram_census_tcp bench_store_sweep -j "$(nproc)"
 
       # QUIESCENCE (#1236). The build above just ran `-j$(nproc)` and the 1-minute load
       # average is still carrying it, so this WAITS for the machine rather than checking
@@ -224,6 +247,26 @@ jobs:
           for f in bench/bench_forward_demux_raw.txt bench/bench_compact_delivery_raw.txt; do
             [ -s "$f" ] || echo "::warning::$f is empty — its series will not be recorded"
           done
+
+      # The ADR-0079 store sweep, DETERMINISTIC COLUMNS ONLY (#1428). Inside the A/A
+      # bracket on purpose: half of what it banks is a TIMED latency cell, so it belongs
+      # in the window the null pair certifies. `STORE_SWEEP_SCOPE=deterministic` skips the
+      # unpinned T-sweep and the escape census — the two columns that may never be gated
+      # (see the header) — which is also why the whole leg costs ~4 s rather than minutes
+      # and why it can be pinned to one CPU without measuring the scheduler.
+      #
+      # The script calibrates BEFORE and AFTER the transcript and exits non-zero on a
+      # failure, so a broken instrument reds this step rather than banking vacuous rows;
+      # `store_sweep_gate.py` re-reads both tallies off the transcript for the same reason.
+      - name: ADR-0079 store sweep — deterministic columns (bench_store_sweep)
+        env:
+          STORE_SWEEP_SCOPE: deterministic
+        run: |
+          set -o pipefail
+          bash bench/run_store_sweep.sh bench/build 13 "$BENCH_CPU" \
+            | tee bench/bench_store_sweep_raw.txt
+          [ -s bench/bench_store_sweep_raw.txt ] || \
+            echo "::warning::no store-sweep transcript — its series will not be recorded"
 
       # Zenoh control series, pinned to the same CPU: a pinned control that moves is
       # the HOST changing (thermal, neighbour), not the code — on a fixed machine the
@@ -336,6 +379,52 @@ jobs:
                exit 1 ;;
           esac
 
+      # --- ADR-0079 store occupancy (#1428) --------------------------------------
+      # WARN-FIRST, on the same terms as the RAM ratchet above and for the same reason:
+      # the pins are MEASURED, the flip to `--mode fail` is a deliberate PR edit governed
+      # by the activation criterion recorded in bench/store_sweep_pins.json, and never an
+      # auto-ratchet. The band here is ZERO rather than the census's 8 B — this column
+      # came back byte-identical across eight invocations spanning an 8x range of host
+      # load, because the `hwm` mode runs single-threaded precisely so the figure is a
+      # function of the workload and the topology and not of the scheduler.
+      #
+      # Not conditioned on the quiescence guard, exactly like the RAM census: the pinned
+      # figures do not move with load, so the gate still renders a verdict on a commit
+      # whose TIMING sample was skipped. An instrument failure (no transcript, a failed or
+      # half-run calibration, an overflowing store, a dead pin) reds this step in EITHER
+      # mode: a failure to measure is not a budget verdict.
+      - name: ADR-0079 store-occupancy ratchet (warn-first)
+        run: |
+          python3 bench/store_sweep_gate.py gate \
+            --sweep-raw bench/bench_store_sweep_raw.txt \
+            --pins bench/store_sweep_pins.json \
+            --mode warn
+
+      # The same live negative control the RAM ratchet carries, for the same reason: a
+      # warn-only comparator is invisible when it is right AND when it is broken. A
+      # doctored baseline must produce the annotation; if it does not, the step above is
+      # decorative and this one says so.
+      - name: The store ratchet must warn on an induced growth (dry run, doctored pins)
+        run: |
+          doctored="${RUNNER_TEMP:-.}/doctored_store_pins.json"
+          python3 - "$doctored" <<'PY'
+          import json, pathlib, sys
+          p = json.loads(pathlib.Path("bench/store_sweep_pins.json").read_text())
+          for pin in p["pins"]:
+              if pin["metric"] == "used_total":
+                  pin["value"] = pin["value"] - 64  # induce +64 B of "growth"
+          pathlib.Path(sys.argv[1]).write_text(json.dumps(p))
+          PY
+          out=$(python3 bench/store_sweep_gate.py gate \
+                  --sweep-raw bench/bench_store_sweep_raw.txt \
+                  --pins "$doctored" --mode warn)
+          echo "$out"
+          case "$out" in
+            *"::warning::ADR-0079 store occupancy drift"*) echo "warn path is live" ;;
+            *) echo "::error::the store ratchet did not warn on a 64 B induced growth — it is vacuous"
+               exit 1 ;;
+          esac
+
       - name: Emit history metrics + stamp the host onto every point
         if: steps.guard.outputs.bank == 'true'
         run: |
@@ -358,6 +447,15 @@ jobs:
           python3 bench/ram_census.py emit \
             --conn-raw bench/bench_conn_ram_raw.txt \
             --node-raw bench/bench_ram_census_tcp_raw.txt \
+            --merge bench/benchmark_output.json
+          # The ADR-0079 sweep's two DETERMINISTIC columns, into the same file for the
+          # same reasons: one commit axis, one host/compiler stamp (below), one publish
+          # step — and, because they land in the banked store, `store_guard.py drift`
+          # covers them without a second comparator. The T-sweep and the escape
+          # high-water are not here and never will be; the tool announces both as
+          # dropped so the exclusion is visible in the log rather than inferred.
+          python3 bench/store_sweep_gate.py emit \
+            --sweep-raw bench/bench_store_sweep_raw.txt \
             --merge bench/benchmark_output.json
           # benchmark-action renders each point's `extra` in the chart tooltip — this
           # is where "which host produced this number" lives, per bench, per point.
@@ -387,6 +485,7 @@ jobs:
             bench/bench_zenoh_raw.txt
             bench/bench_conn_ram_raw.txt
             bench/bench_ram_census_tcp_raw.txt
+            bench/bench_store_sweep_raw.txt
             bench/aa_pre.txt
             bench/aa_post.txt
           retention-days: 90

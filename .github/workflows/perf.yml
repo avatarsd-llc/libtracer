@@ -112,6 +112,14 @@ jobs:
       # ratchet warns on drift rather than on nothing, and they need no build.
       - name: RAM-census decision-rule tests
         run: python3 bench/test_ram_census.py
+      # The ADR-0079 store-sweep series + warn ratchet (#1428), here for the third time
+      # for the same reason, plus one of its own: this gate's whole value is that it banks
+      # ONLY the deterministic columns, and "the T-sweep and the escape high-water are
+      # never gated" is a rule a future edit could undo silently. These tests are what
+      # make that rule enforced rather than documented — a pin naming either column must
+      # fail the gate — and they need no build.
+      - name: Store-sweep gated-series decision-rule tests
+        run: python3 bench/test_store_sweep_gate.py
       # The bench's ARGV contract (#1040), also before anything is timed. An unrecognised
       # mode used to fall through into the full default sweep and exit 0, which in a
       # cross-commit A/B silently joins one axis against every axis on the same row keys.
