@@ -14,9 +14,9 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <map>
 #include <mutex>
 #include <optional>
-#include <thread>
 #include <utility>
 
 #include "esp_pthread.h"
@@ -52,20 +52,36 @@ struct state_t {
     /** @brief What esp_transport_get_socket answers — see fake_ws::set_socket_fd. */
     int socket_fd = -1;
 
-    /** @name Handle liveness and the blocking levers (#952). */
+    /** @name Handle liveness and the blocking levers (#952, #1058). */
     /** @{ */
-    bool tcp_live = false;      /**< @brief tcp handle created and not yet destroyed. */
-    bool ws_live = false;       /**< @brief ws handle created and not yet destroyed. */
-    int misuse = 0;             /**< @brief Ops on a null/destroyed handle — see handle_misuse. */
-    bool fail_connect = false;  /**< @brief Every dial fails at once. */
-    bool hang_connect = false;  /**< @brief Every dial blocks for its timeout, then fails. */
-    int connect_timeout_ms = 0; /**< @brief The last dial's requested bound. */
-    bool hold_write = false;    /**< @brief Park writers instead of completing them. */
-    std::condition_variable write_cv;  /**< @brief Wakes parked writers. */
-    int writers = 0;                   /**< @brief Writers parked right now. */
-    int writes = 0;                    /**< @brief Writes entered since the reset. */
-    int write_timeout_ms = 0;          /**< @brief The last write's requested bound. */
-    std::vector<std::byte> last_write; /**< @brief The last completed write's payload. */
+    /**
+     * @brief Every handle created and not yet destroyed, mapped to "is it the WS one".
+     *
+     * A REGISTRY rather than the two `tcp_live`/`ws_live` booleans it replaces, because
+     * #1058 puts two transport pairs on the fake at once: an orphaned dial still holding
+     * its pair while the link that started it is gone and a fresh link has dialed its
+     * own. A single-pair model would score the orphan's release as a misuse against the
+     * live link's handles, which is the one counter the whole suite rests on.
+     */
+    std::map<esp_transport_handle_t, bool> live;
+    /** @brief Next handle value to hand out — distinct per handle, monotonic. */
+    std::uintptr_t next_handle = 0x7c000001;
+    int misuse = 0;            /**< @brief Ops on a null/destroyed handle — see handle_misuse. */
+    int closes = 0;            /**< @brief Closes that reached a live handle. */
+    bool fail_connect = false; /**< @brief Every dial fails at once. */
+    bool hang_connect = false; /**< @brief Every dial blocks for its timeout, then fails. */
+    std::condition_variable connect_cv; /**< @brief Wakes dials parked by `hang_connect`. */
+    int dialers = 0;                    /**< @brief Dials parked right now. */
+    bool connect_released = false;      /**< @brief A release was issued — see
+                                         *          fake_ws::release_connects. */
+    bool connect_succeed = false;       /**< @brief What that release makes them report. */
+    int connect_timeout_ms = 0;         /**< @brief The last dial's requested bound. */
+    bool hold_write = false;            /**< @brief Park writers instead of completing them. */
+    std::condition_variable write_cv;   /**< @brief Wakes parked writers. */
+    int writers = 0;                    /**< @brief Writers parked right now. */
+    int writes = 0;                     /**< @brief Writes entered since the reset. */
+    int write_timeout_ms = 0;           /**< @brief The last write's requested bound. */
+    std::vector<std::byte> last_write;  /**< @brief The last completed write's payload. */
     /** @} */
 
     std::size_t armed_stack = 0; /**< @brief Last arming set_cfg's stack_size. */
@@ -81,14 +97,11 @@ state_t& st() {
     return s;
 }
 
-/** @brief The one handle value the fake hands out for the TCP transport. */
-esp_transport_handle_t tcp_handle() {
-    return reinterpret_cast<esp_transport_handle_t>(static_cast<std::uintptr_t>(0x7c000001));
-}
-
-/** @brief The one handle value the fake hands out for the WS transport. */
-esp_transport_handle_t ws_handle() {
-    return reinterpret_cast<esp_transport_handle_t>(static_cast<std::uintptr_t>(0x7c000002));
+/** @brief With `m` held: mint a fresh live handle, @p is_ws saying which kind it is. */
+esp_transport_handle_t mint_handle(bool is_ws) {
+    const auto h = reinterpret_cast<esp_transport_handle_t>(st().next_handle++);
+    st().live.emplace(h, is_ws);
+    return h;
 }
 
 /** @brief True with `m` held iff an unread scripted byte (or frame) remains. */
@@ -98,14 +111,13 @@ bool pending(const state_t& s) { return s.cur < s.frames.size(); }
  * @brief With `m` held: is @p t a handle that may legally be operated on right now?
  *
  * Counts a misuse and answers false otherwise. This is the whole use-after-free
- * observable — on silicon each of these dereferences freed transport state.
+ * observable — on silicon each of these dereferences freed transport state. Per HANDLE
+ * since #1058: two transport pairs coexist while an orphaned dial resolves under a link
+ * that is already gone, and identity is what keeps the orphan's release from being
+ * charged against the live link's pair.
  */
 bool handle_usable(esp_transport_handle_t t) {
-    if (t == ws_handle()) {
-        if (st().ws_live) return true;
-    } else if (t == tcp_handle()) {
-        if (st().tcp_live) return true;
-    }
+    if (st().live.find(t) != st().live.end()) return true;
     ++st().misuse;  // null, foreign, or already destroyed
     return false;
 }
@@ -124,11 +136,14 @@ frame_t make_frame(ws_transport_opcodes_t op, bool fin, std::size_t len, std::ui
 
 void reset() {
     const std::lock_guard<std::mutex> lk(st().m);
-    st().tcp_live = false;
-    st().ws_live = false;
+    st().live.clear();
     st().misuse = 0;
+    st().closes = 0;
     st().fail_connect = false;
     st().hang_connect = false;
+    st().connect_released = false;
+    st().connect_succeed = false;
+    st().dialers = 0;
     st().connect_timeout_ms = 0;
     st().hold_write = false;
     st().writers = 0;
@@ -211,6 +226,30 @@ void hang_connects(bool on) {
     st().hang_connect = on;
 }
 
+void release_connects(bool succeed) {
+    {
+        const std::lock_guard<std::mutex> lk(st().m);
+        st().connect_released = true;
+        st().connect_succeed = succeed;
+    }
+    st().connect_cv.notify_all();
+}
+
+int dialers_inside() {
+    const std::lock_guard<std::mutex> lk(st().m);
+    return st().dialers;
+}
+
+int live_handles() {
+    const std::lock_guard<std::mutex> lk(st().m);
+    return static_cast<int>(st().live.size());
+}
+
+int close_count() {
+    const std::lock_guard<std::mutex> lk(st().m);
+    return st().closes;
+}
+
 int last_connect_timeout_ms() {
     const std::lock_guard<std::mutex> lk(st().m);
     return st().connect_timeout_ms;
@@ -256,15 +295,17 @@ std::vector<std::byte> last_write_payload() {
 
 esp_transport_handle_t esp_transport_tcp_init(void) {
     const std::lock_guard<std::mutex> lk(st().m);
-    st().tcp_live = true;
-    return tcp_handle();
+    return mint_handle(/*is_ws=*/false);
 }
 
 esp_transport_handle_t esp_transport_ws_init(esp_transport_handle_t parent_handle) {
     const std::lock_guard<std::mutex> lk(st().m);
-    if (parent_handle != tcp_handle() || !st().tcp_live) return nullptr;
-    st().ws_live = true;
-    return ws_handle();
+    // A LIVE, non-ws parent — IDF's `esp_transport_ws_init` wraps a tcp transport that
+    // still exists. Not counted as a misuse: the link never calls this with a dead parent
+    // (it checks the init above), so an answer of nullptr is the failure the link handles.
+    const auto it = st().live.find(parent_handle);
+    if (it == st().live.end() || it->second) return nullptr;
+    return mint_handle(/*is_ws=*/true);
 }
 
 esp_err_t esp_transport_ws_set_config(esp_transport_handle_t t,
@@ -284,10 +325,7 @@ esp_err_t esp_transport_ws_set_config(esp_transport_handle_t t,
 esp_err_t esp_transport_destroy(esp_transport_handle_t t) {
     const std::lock_guard<std::mutex> lk(st().m);
     if (!handle_usable(t)) return ESP_FAIL;
-    if (t == ws_handle())
-        st().ws_live = false;
-    else
-        st().tcp_live = false;
+    st().live.erase(t);
     return ESP_OK;
 }
 
@@ -304,12 +342,25 @@ int esp_transport_connect(esp_transport_handle_t t, const char* host, int port, 
     st().dialed_headers.push_back(st().headers);
     st().connect_timeout_ms = timeout_ms;
     if (st().hang_connect) {
-        // What an unreachable peer does: spend the whole bound, then fail. Nothing
-        // wakes it early — `esp_transport_connect` takes no cancellation, which is the
-        // residual the link's derived dial bound is sized against.
-        lk.unlock();
-        std::this_thread::sleep_for(std::chrono::milliseconds(timeout_ms));
-        return -1;
+        // What an unreachable peer does: spend the whole bound, then fail. Nothing the
+        // LINK can do wakes it early — `esp_transport_connect` takes no cancellation,
+        // which is the residual #1058 is about; the only thing that resolves it is the
+        // peer answering, which `fake_ws::release_connects` stands in for. Bounded by the
+        // timeout the caller asked for, exactly as the parked write above is.
+        ++st().dialers;
+        st().connect_cv.wait_for(lk, std::chrono::milliseconds(timeout_ms),
+                                 [] { return st().connect_released; });
+        --st().dialers;
+        // Re-checked on the way out, exactly as the parked write is: the real
+        // `esp_transport_connect` dereferences the handle for the whole call, so a pair
+        // destroyed while a dial is parked in it is a use-after-free even though it was
+        // live on entry. That is the failure mode a "cancel the dial by destroying its
+        // transport" fix would have, and this is what would count it.
+        if (!handle_usable(t)) return -1;
+        if (!st().connect_released) return -1;  // the bound expired: an unreachable peer
+        if (!st().connect_succeed) return -1;
+        st().connected = true;
+        return 0;
     }
     if (st().fail_connect) return -1;
     st().connected = true;
@@ -319,6 +370,7 @@ int esp_transport_connect(esp_transport_handle_t t, const char* host, int port, 
 int esp_transport_close(esp_transport_handle_t t) {
     const std::lock_guard<std::mutex> lk(st().m);
     if (!handle_usable(t)) return -1;
+    ++st().closes;
     st().connected = false;
     return 0;
 }

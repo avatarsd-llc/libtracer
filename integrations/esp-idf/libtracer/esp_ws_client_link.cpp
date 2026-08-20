@@ -61,15 +61,24 @@ constexpr std::uint32_t kTaskWdtSeconds = 5;
 constexpr int kWatchdogMs = static_cast<int>((kTaskWdtSeconds != 0 ? kTaskWdtSeconds : 5) * 1000U);
 
 /**
- * @brief The teardown budget this link's two blocking legs are cut from.
+ * @brief What ONE dial may spend inside `esp_transport_connect` (ms) — half the watchdog
+ *        window.
  *
- * A destroying task's worst case is ONE dial (the recv thread is parked in
- * `esp_transport_connect`, and the destructor joins it) plus ONE full write bound (the
- * recv thread's read queues on `write_m_` behind a sender, or the destructor's own
- * handle teardown does). That sum must fit inside a single watchdog window, so the
- * window is split: half to the dial, a quarter to the write, a quarter left over for
- * whatever else the destroying task is holding. Nothing else in the loop is unbounded —
- * the backoff wakes on `stop_` and the poll turn is @ref kPollMs.
+ * It is no longer a teardown term (#1058). It used to be the dominant one: the recv
+ * thread parked in `esp_transport_connect` and the destructor joined it, so a teardown
+ * landing mid-dial paid the whole of this. The destructor now CONDEMNS an in-flight dial
+ * and detaches the recv thread, so a destroying task's worst case is @ref kPollMs (how
+ * fast the recv thread observes `stop_`) plus ONE full write bound (a sender inside
+ * `esp_transport_write`, or the destructor's own handle teardown queued behind one) —
+ * `kPollMs + kWriteBudgetMs`, well inside a single watchdog window.
+ *
+ * What this bound still sizes is the DIAL: how long a recv thread may sit on an
+ * unreachable peer before it backs off and re-dials, and hence how long a CONDEMNED
+ * dial's orphaned recv thread outlives the link that started it. Half the window keeps
+ * that orphan comfortably shorter than the reconnect cadence and leaves the other half
+ * for the write bound (a quarter) and whatever else the destroying task holds. Nothing
+ * else in the loop is unbounded — the backoff wakes on `stop_`, the poll turn is
+ * @ref kPollMs.
  */
 constexpr int kDialTimeoutMs = kWatchdogMs / 2;
 
@@ -84,8 +93,8 @@ constexpr int kDialTimeoutMs = kWatchdogMs / 2;
  */
 constexpr int kIdfWriteLegs = 3;
 
-/** @brief What ONE `send()` may spend in total, all legs (ms) — a quarter of the
- *  teardown budget above. */
+/** @brief What ONE `send()` may spend in total, all legs (ms) — a quarter of the watchdog
+ *  window, and (with @ref kPollMs) the whole of what a teardown can now cost. */
 constexpr int kWriteBudgetMs = kWatchdogMs / 4;
 
 /** @brief Write timeout handed to IDF (ms): the total budget divided by the legs IDF
@@ -120,7 +129,9 @@ constexpr int kReadTimeoutMs = 100;
  * (`CONFIG_LIBTRACER_WS_CLIENT_POLL_MS`, #1160), and it is the knob that trades teardown
  * latency against idle wakeups: the destructor's join cannot complete faster than one
  * turn of this, and a node that wakes its recv thread five times a second is paying for
- * that responsiveness in a power budget only the embedder can see.
+ * that responsiveness in a power budget only the embedder can see. Since #1058 it is the
+ * DOMINANT teardown term rather than one of two — the dial no longer contributes at all,
+ * so the worst case is this plus @ref kWriteBudgetMs.
  */
 #ifdef CONFIG_LIBTRACER_WS_CLIENT_POLL_MS
 constexpr int kPollMs = CONFIG_LIBTRACER_WS_CLIENT_POLL_MS;
@@ -209,6 +220,44 @@ class sender_exit_t {
 
 }  // namespace
 
+/**
+ * @brief The state one dial owns — everything an in-flight `esp_transport_connect` needs,
+ *        held where a destroyed link cannot take it away (#1058).
+ *
+ * The reason it is not simply the link's own members: the destructor no longer joins a
+ * dial. `esp_transport_connect(handle, host, port, timeout_ms)` is IDF's whole surface —
+ * no cancellation, no second entry point — and `esp_transport_get_socket` only names a
+ * descriptor AFTER the connect returns, so there is nothing to shut down from outside
+ * while the dial is parked. The dial therefore keeps running after the link is gone, and
+ * every byte it is still reading has to belong to this slot rather than to the corpse:
+ * the pre-#1058 call passed `host_.c_str()` and `cfg.headers = handshake_headers_.c_str()`
+ * — pointers INTO members — to a call that blocks for up to `kDialTimeoutMs`.
+ */
+struct esp_ws_client_link_t::dial_t {
+    /** @brief Guards the two flags below and the handle hand-off. A LEAF: never taken with
+     *         `write_m_`, `st_m_` or `backoff_m_` held, and never held across the connect. */
+    std::mutex m;
+    /** @brief True between the publish and the resolve — i.e. exactly while a thread is
+     *         inside `esp_transport_connect` on this link's behalf. */
+    bool in_flight = false;
+    /** @brief The link that started this dial is gone. Set by the destructor under `m`
+     *         when it finds `in_flight`; the dial reads it at the resolve and releases the
+     *         transport pair itself. */
+    bool condemned = false;
+    const std::string host;    /**< @brief COPY of the link's host — see the note above. */
+    const std::string ws_path; /**< @brief COPY of the requested WS URI. */
+    const std::string headers; /**< @brief COPY of the handshake header lines, "" = none. */
+    const std::uint16_t port;  /**< @brief COPY of the peer's TCP port. */
+    esp_transport_handle_t tcp = nullptr; /**< @brief The pair being built, until the
+                                           *         resolve hands it to the link or the
+                                           *         orphan releases it. */
+    esp_transport_handle_t ws = nullptr;  /**< @brief The WS half of that pair. */
+
+    /** @brief Copy the dial's inputs out of the link, once, at construction. */
+    dial_t(std::string h, std::uint16_t p, std::string path, std::string hdrs)
+        : host(std::move(h)), ws_path(std::move(path)), headers(std::move(hdrs)), port(p) {}
+};
+
 esp_ws_client_link_t::esp_ws_client_link_t(std::string host, std::uint16_t port,
                                            std::string ws_path, std::string handshake_headers,
                                            std::size_t rx_bytes, std::size_t tx_bytes,
@@ -217,6 +266,11 @@ esp_ws_client_link_t::esp_ws_client_link_t(std::string host, std::uint16_t port,
       port_(port),
       ws_path_(std::move(ws_path)),
       handshake_headers_(std::move(handshake_headers)),
+      // Allocated ONCE, here, and reused by every dial — not per dial: the three strings
+      // are `const` for the link's life, so one slot serves them all and the file's "NO
+      // per-frame heap" posture is untouched. Initialized from the MEMBERS above (already
+      // moved-to; member init order is declaration order), never from the parameters.
+      dial_(std::make_shared<dial_t>(host_, port_, ws_path_, handshake_headers_)),
       rx_buf_(rx_bytes),
       tx_buf_(tx_bytes),
       armed_(!defer_recv) {
@@ -268,9 +322,37 @@ esp_ws_client_link_t::~esp_ws_client_link_t() {
         const std::lock_guard<std::mutex> lk(backoff_m_);
     }
     backoff_cv_.notify_all();
-    if (recv_thread_.joinable()) recv_thread_.join();
+    // CONDEMN an in-flight dial rather than wait for it (#1058). `esp_transport_connect`
+    // takes no cancellation, so the dial cannot be stopped — but the destroying task does
+    // not have to pay for it. Taking `dial_->m` is the LINEARIZATION POINT of the whole
+    // scheme, and it has no window on either side: `stop_` was stored above, BEFORE this
+    // lock, and connect_once() publishes `in_flight` under this same lock only after
+    // re-reading `stop_` under it. So either the recv thread gets here first and this sees
+    // an in-flight dial to condemn, or this gets here first and that dial never starts.
+    //
+    // A condemned dial owns its transport pair (the members are null for the whole of a
+    // dial) and releases it when the call resolves, so detaching leaks nothing: what it
+    // costs is one recv-thread stack — the one already allocated, no new thread — held for
+    // the remainder of kDialTimeoutMs. That is the price of not charging this task for a
+    // blocking call it cannot interrupt, and it is stated in the header's threading note.
+    bool orphaned_dial = false;
     {
-        // The recv thread has stopped, but it was only ONE of the two handle users:
+        const std::lock_guard<std::mutex> lk(dial_->m);
+        if (dial_->in_flight) {
+            dial_->condemned = true;
+            orphaned_dial = true;
+        }
+    }
+    if (orphaned_dial && recv_thread_.joinable()) {
+        ESP_LOGI(kTag, "torn down mid-dial: the dial is orphaned, not waited out");
+        recv_thread_.detach();
+    } else if (recv_thread_.joinable()) {
+        recv_thread_.join();
+    }
+    {
+        // The recv thread has stopped (or been condemned and detached, in which case it
+        // touches nothing on this object ever again), but it was only ONE of the two
+        // handle users:
         // the header's contract is that send() may be called from any task, and the
         // pre-#952 destructor destroyed the handles with `write_m_` held nowhere. A
         // sender inside esp_transport_write holds this lock for the whole call, so
@@ -305,7 +387,7 @@ esp_ws_client_link_t::~esp_ws_client_link_t() {
         std::this_thread::sleep_for(std::chrono::milliseconds(kDrainSliceMs));
 }
 
-bool esp_ws_client_link_t::connect_once() {
+esp_ws_client_link_t::dial_outcome_t esp_ws_client_link_t::connect_once() {
     // Build a FRESH tcp+ws transport pair for every dial. Re-using a closed
     // esp_transport_ws handle would inherit its internal frame_state (bytes_remaining
     // etc.) — ws_connect() does not reset it, only ws_init() zero-allocates it — so a
@@ -327,41 +409,90 @@ bool esp_ws_client_link_t::connect_once() {
         esp_transport_destroy(tcp_);
         tcp_ = nullptr;
     }
-    tcp_ = esp_transport_tcp_init();
-    if (tcp_ == nullptr) return false;
-    ws_ = esp_transport_ws_init(tcp_);
-    if (ws_ == nullptr) return false;
-    esp_transport_ws_config_t cfg = {};
-    cfg.ws_path = ws_path_.c_str();
-    cfg.propagate_control_frames = false;  // esp_transport_ws answers PING/CLOSE itself
-    // Optional handshake auth: extra header lines a peer's admission hook can gate on (a
-    // b2b dial carries no browser cookie). esp_transport_ws appends them verbatim; empty
-    // leaves the field null so the handshake is byte-for-byte the historical one.
-    //
-    // Read with no lock and no copy, which is sound because the member is `const` and was
-    // set before this thread existed (#959). The pointer therefore cannot dangle, and the
-    // FIRST dial carries the header. It used to be an ordinary member a setter assigned
-    // after construction, unsynchronized with this read: which side won was undefined, so
-    // whether dial one carried a token was undefined too. Every re-dial re-reads the same
-    // bytes, so a reconnect re-authenticates.
-    if (!handshake_headers_.empty()) cfg.headers = handshake_headers_.c_str();
-    esp_transport_ws_set_config(ws_, &cfg);
 
-    // esp_transport_connect performs the full RFC 6455 client handshake for ws_path_.
-    // The bound is DERIVED (kDialTimeoutMs), not a literal: this call is the longest
-    // thing the recv thread does, and the destructor joins it, so its size is the size
-    // of a teardown that lands mid-dial. It is not interruptible — see the recv_loop
-    // note on what that still costs.
+    // PUBLISH the dial (#1058). From the lock below until the resolve at the bottom of
+    // this block, this thread touches NOT ONE member of the link — everything the dial
+    // needs is in the slot, whose lifetime is a shared_ptr and not this object's. That is
+    // what lets the destructor detach instead of joining: the corpse is never read.
     //
-    // Timed, too: TCP connect + the opening exchange is an UPPER BOUND on ~2x RTT, and
-    // it is the only latency fact this link can offer without an active probe (stats_t).
-    const std::int64_t dial_t0 = esp_timer_get_time();
-    const int rc = esp_transport_connect(ws_, host_.c_str(), port_, kDialTimeoutMs);
-    if (rc != 0) {
-        esp_transport_close(ws_);
-        return false;
+    // The lock is the linearization point against the destructor, which stores `stop_`
+    // BEFORE it takes this mutex. Either this side wins and publishes an in-flight dial
+    // for the destructor to condemn, or the destructor wins and this load sees the stop
+    // and never dials at all. There is no third interleaving and hence no window.
+    const std::shared_ptr<dial_t> slot = dial_;
+    {
+        const std::lock_guard<std::mutex> lk(slot->m);
+        if (stop_.load(std::memory_order_acquire)) return dial_outcome_t::FAILED;
+        slot->in_flight = true;
     }
-    const std::int64_t dial_us = esp_timer_get_time() - dial_t0;
+
+    int rc = -1;
+    std::int64_t dial_us = 0;
+    slot->tcp = esp_transport_tcp_init();
+    if (slot->tcp != nullptr) slot->ws = esp_transport_ws_init(slot->tcp);
+    if (slot->ws != nullptr) {
+        esp_transport_ws_config_t cfg = {};
+        cfg.ws_path = slot->ws_path.c_str();
+        cfg.propagate_control_frames = false;  // esp_transport_ws answers PING/CLOSE itself
+        // Optional handshake auth: extra header lines a peer's admission hook can gate on
+        // (a b2b dial carries no browser cookie). esp_transport_ws appends them verbatim;
+        // empty leaves the field null so the handshake is byte-for-byte the historical one.
+        //
+        // Read from the SLOT's copy, not from `handshake_headers_`, and that is the #1058
+        // half of #959: the member is `const` and set before this thread existed, so the
+        // read was already race-free — but it is a pointer handed to a call that blocks for
+        // up to kDialTimeoutMs, and the destructor no longer waits for that call. A pointer
+        // into a member would dangle the moment a teardown lands mid-dial. Every re-dial
+        // re-reads the same bytes, so a reconnect still re-authenticates.
+        if (!slot->headers.empty()) cfg.headers = slot->headers.c_str();
+        esp_transport_ws_set_config(slot->ws, &cfg);
+
+        // esp_transport_connect performs the full RFC 6455 client handshake for ws_path.
+        // The bound is DERIVED (kDialTimeoutMs), not a literal, and it is no longer a
+        // teardown term: this call is still the longest thing the recv thread does, but a
+        // destructor that lands inside it condemns it and detaches rather than joining.
+        //
+        // Timed, too: TCP connect + the opening exchange is an UPPER BOUND on ~2x RTT, and
+        // it is the only latency fact this link can offer without an active probe (stats_t).
+        const std::int64_t dial_t0 = esp_timer_get_time();
+        rc = esp_transport_connect(slot->ws, slot->host.c_str(), static_cast<int>(slot->port),
+                                   kDialTimeoutMs);
+        dial_us = esp_timer_get_time() - dial_t0;
+    }
+
+    // RESOLVE. Invariant 1 of the #1058 ruling, and it is structural rather than
+    // remembered: the pair this dial built is released here by EXACTLY ONE owner. Either
+    // the link is still alive and adopts it (and the ordinary destructor releases it
+    // later), or the link is gone and this orphan releases it right now — success closes
+    // first, because a completed handshake means there is a connection on the peer's side
+    // to take down. `condemned` is read under the same mutex the destructor set it under,
+    // so the two decisions cannot both fire and cannot both be skipped.
+    {
+        const std::lock_guard<std::mutex> lk(slot->m);
+        slot->in_flight = false;
+        if (slot->condemned) {
+            if (slot->ws != nullptr) {
+                esp_transport_close(slot->ws);
+                esp_transport_destroy(slot->ws);
+                slot->ws = nullptr;
+            }
+            if (slot->tcp != nullptr) {
+                esp_transport_destroy(slot->tcp);
+                slot->tcp = nullptr;
+            }
+            // No log through a member (`host_` is gone) and no counter bump: this thread
+            // has no object left to talk about. The caller must return at once.
+            return dial_outcome_t::ORPHANED;
+        }
+        ws_ = slot->ws;
+        tcp_ = slot->tcp;
+        slot->ws = nullptr;
+        slot->tcp = nullptr;
+    }
+    if (rc != 0) {
+        if (ws_ != nullptr) esp_transport_close(ws_);
+        return dial_outcome_t::FAILED;
+    }
     // Disable Nagle on the freshly connected socket, symmetric with the server side
     // (httpd_ws_link_t::bound_socket): a board-to-board dial carries the same small,
     // latency-sensitive TLV frames whose replies the peer awaits, so delayed-ACK +
@@ -437,7 +568,7 @@ bool esp_ws_client_link_t::connect_once() {
     connected_.store(true, std::memory_order_release);
     ESP_LOGI(kTag, "connected ws://%s:%u%s", host_.c_str(), static_cast<unsigned>(port_),
              ws_path_.c_str());
-    return true;
+    return dial_outcome_t::UP;
 }
 
 esp_ws_client_link_t::stats_t esp_ws_client_link_t::stats() const {
@@ -693,7 +824,15 @@ void esp_ws_client_link_t::recv_loop() {
             // after would leave the spin intact for exactly one more cycle, which on the
             // failing peer is the cycle that matters.
             if (!backoff_now) {
-                if (connect_once()) {
+                const dial_outcome_t out = connect_once();
+                // ORPHANED means this link was destroyed while that dial was in flight:
+                // the dial released its own transport pair and THIS OBJECT IS GONE. Return
+                // without touching one more member — not even `stop_` — which is the whole
+                // of what the destructor's detach relies on (#1058). The lambda that
+                // called us holds `this` as a pointer it never dereferences again, so
+                // unwinding out of here ends the thread cleanly.
+                if (out == dial_outcome_t::ORPHANED) return;
+                if (out == dial_outcome_t::UP) {
                     was_up = true;  // there is now a connection whose death is reportable
                 } else {
                     backoff_now = true;
@@ -702,11 +841,13 @@ void esp_ws_client_link_t::recv_loop() {
             if (backoff_now) {
                 // Interruptible backoff. `sleep_for` was not: the destructor's join
                 // inherited the whole 1.5 s on exactly the unreachable peer a re-dial
-                // exists for. What remains uninterruptible is the dial itself —
+                // exists for. The dial itself is STILL uninterruptible —
                 // esp_transport_connect takes no cancellation, and shutting its socket
-                // down from another task is not portable across IDF versions — so a
-                // teardown that lands mid-dial still costs up to kDialTimeoutMs, which
-                // is why that constant is derived from the watchdog window.
+                // down from another task is not portable across IDF versions — but since
+                // #1058 a teardown does not pay for it either: it condemns the in-flight
+                // dial and detaches this thread, so what the destroying task inherits is
+                // one poll turn plus one write bound, and the orphaned dial pays its own
+                // kDialTimeoutMs out on this thread.
                 std::unique_lock<std::mutex> lk(backoff_m_);
                 backoff_cv_.wait_for(lk, std::chrono::milliseconds(kReconnectBackoffMs),
                                      [this] { return stop_.load(std::memory_order_acquire); });

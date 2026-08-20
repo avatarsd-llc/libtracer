@@ -26,6 +26,13 @@
  *   - a zero-payload frame returns 0 from `esp_transport_read`, indistinguishable from a
  *     poll timeout (transport_ws.c:763).
  *
+ * Handles have IDENTITY (#1058): every `esp_transport_tcp_init` / `esp_transport_ws_init`
+ * mints a distinct value and liveness is tracked per handle, because a teardown that lands
+ * mid-dial puts two transport pairs on this fake at once — an orphaned dial still holding
+ * the pair it built while the link that started it is gone and a fresh link has dialed its
+ * own. A single-pair model would score the orphan's release as a misuse against the live
+ * link, and @ref handle_misuse is the counter the whole teardown suite rests on.
+ *
  * There is NO socket in this fake, at any layer: nothing is opened, and every byte the
  * link reads comes from the script above. The ESP-IDF WebSocket plane must never use
  * POSIX sockets (#947), and a fake that opened one would quietly make the suite prove the
@@ -131,9 +138,36 @@ void fail_connects(bool on);
  * @brief Make every dial BLOCK for the timeout it asked for, then fail.
  *
  * What a dial to an unreachable peer does on silicon, and the only way to put the recv
- * thread inside `esp_transport_connect` while a test tears the link down.
+ * thread inside `esp_transport_connect` while a test tears the link down. The park is
+ * RESOLVABLE — see @ref release_connects — so a suite can decide when the orphaned dial
+ * of a torn-down link comes back, instead of paying the whole bound to find out.
  */
 void hang_connects(bool on);
+
+/**
+ * @brief Resolve every dial parked by @ref hang_connects, and every later one, at once:
+ *        @p succeed picks whether they report a completed handshake or a failure.
+ *
+ * The lever the #1058 cases turn. A teardown that lands mid-dial cannot cancel the dial,
+ * so the ORPHANED `esp_transport_connect` comes back later on a thread whose link is
+ * already gone — and both of its outcomes have to release the transport pair exactly
+ * once. This says WHEN that resolution happens, so the interleaving is scripted rather
+ * than raced against a 2.5 s bound. STICKY until @ref reset, so a dial entered after the
+ * release resolves immediately instead of parking again.
+ */
+void release_connects(bool succeed);
+
+/** @brief How many callers are parked inside `esp_transport_connect` right now — the
+ *         orphan census a mid-dial teardown case reads. */
+[[nodiscard]] int dialers_inside();
+
+/** @brief Handles created and not yet destroyed — the RELEASE oracle: a link (or an
+ *         orphaned dial) that released its transport pair leaves this at 0. */
+[[nodiscard]] int live_handles();
+
+/** @brief `esp_transport_close` calls that reached a live handle since the reset — the
+ *         "a dial that resolved SUCCESS was closed, not merely destroyed" oracle. */
+[[nodiscard]] int close_count();
 
 /** @brief The `timeout_ms` the last dial asked for — the bound the link chose. */
 [[nodiscard]] int last_connect_timeout_ms();

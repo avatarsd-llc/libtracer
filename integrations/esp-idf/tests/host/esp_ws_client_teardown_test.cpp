@@ -1,7 +1,7 @@
 /**
  * @file
- * @brief #952 — the WS *client* link's BOUNDED-BLOCKING discipline: what a send may
- *        cost, what a teardown may cost, and who may still be inside the transport
+ * @brief #952 + #1058 — the WS *client* link's BOUNDED-BLOCKING discipline: what a send
+ *        may cost, what a teardown may cost, and who may still be inside the transport
  *        when the handles are destroyed.
  *
  * SPDX-License-Identifier: Apache-2.0
@@ -42,6 +42,19 @@
  * recv thread rebuilds them on every re-dial holding no lock. A sender that reads a
  * handle ahead of that acquire gate races the rebuild whatever lock it holds — so that
  * case drives sends straight through a failing-dial cycle, for the `tsan` leg to judge.
+ *
+ * #1058 adds the residual #952 deliberately left standing: a teardown that lands MID-DIAL.
+ * `esp_transport_connect` takes no cancellation — that is IDF's documented surface, not a
+ * guess — so the dial cannot be stopped, and the ruling is to stop CHARGING the destroying
+ * task for it. Four cases hold the resulting contract, all on the fake's now-resolvable
+ * hung dial (`fake_ws::release_connects`) and its per-handle liveness registry: the
+ * destroying task pays no dial bound and a fresh link is admitted at once while the orphan
+ * is still in flight; an orphan that resolves SUCCESS closes and releases; one that
+ * resolves FAILURE releases; and neither side of a teardown/resolution race releases twice.
+ * `fake_ws::live_handles()` is the release oracle and `fake_ws::handle_misuse()` the
+ * double-release one. Every case DRAINS before it returns, which is not tidiness: a
+ * condemned dial's recv thread is DETACHED, so one still running at process exit is a
+ * crash under ASan/TSan and a leak under LSan.
  *
  * What this suite does NOT claim: that a `send()` STARTING after the destructor has
  * returned is safe, nor that one which entered `send()` but has not yet raised the
@@ -134,12 +147,33 @@ std::vector<std::byte> payload() {
     return f;
 }
 
+/** @brief Build a link on the fake, WITHOUT asserting anything — the quiet half of
+ *         @ref dialing_link, for the 50-iteration race case whose per-turn verdicts
+ *         would otherwise bury the report. */
+std::unique_ptr<esp_ws_client_link_t> quiet_link() {
+    return std::make_unique<esp_ws_client_link_t>(
+        "127.0.0.1", 8080, "/ws", /*handshake_headers=*/std::string{}, kBufBytes, kBufBytes, 0);
+}
+
 /** @brief Build a link on the fake and wait for its first dial. */
 std::unique_ptr<esp_ws_client_link_t> dialing_link() {
-    auto link = std::make_unique<esp_ws_client_link_t>(
-        "127.0.0.1", 8080, "/ws", /*handshake_headers=*/std::string{}, kBufBytes, kBufBytes, 0);
+    auto link = quiet_link();
     check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s), "the link dialed");
     return link;
+}
+
+/**
+ * @brief Wait for the fake to hold NO transport handle and NO parked dialer.
+ *
+ * Every case that orphans a dial must end here, and not as tidiness: the orphaned recv
+ * thread is DETACHED, so a case that returns while it is still inside the transport
+ * leaves a running thread at process exit (a crash under ASan/TSan) and an unreleased
+ * transport pair (a leak under LSan). It is also the release oracle itself — "the bound
+ * was released exactly once" is `live_handles() == 0` with `handle_misuse() == 0`.
+ */
+bool drained_fake(std::chrono::milliseconds limit = 5s) {
+    return wait_until([] { return fake_ws::live_handles() == 0 && fake_ws::dialers_inside() == 0; },
+                      limit);
 }
 
 /**
@@ -248,28 +282,174 @@ void test_teardown_does_not_wait_out_the_reconnect_backoff() {
 }
 
 /**
- * @brief Defect 2, the residual: a teardown that lands mid-dial is BOUNDED.
+ * @brief #1058 (a): a teardown that lands mid-dial charges the destroying task NOTHING,
+ *        and the next link's dial is admitted while the orphan is still in flight.
  *
- * `esp_transport_connect` takes no cancellation, so this wait is the one the fix does
- * not remove — it makes it derivable instead. The dial bound is half a watchdog window,
- * so a destroying task that lands inside a dial still gets to feed the watchdog; pre-fix
- * the literal was a whole window, which is the panic itself.
+ * The residual #952 left, and the one this case now denies. `esp_transport_connect` takes
+ * no cancellation — that is the documented IDF contract, not a guess — so the dial itself
+ * cannot be stopped. What CAN be stopped is charging the destroying task for it: the
+ * destructor condemns the in-flight dial and DETACHES the recv thread instead of joining
+ * it, and the orphaned dial releases its own transport pair when it eventually resolves.
+ *
+ * The ceiling is DERIVED from the link's own published policy (`timing().poll_ms`, the
+ * knob that genuinely bounds a teardown now) plus slack for a loaded runner — never a
+ * literal, and never the dial bound. Against the pre-fix TU this case reads one whole
+ * `timing().dial_timeout_ms` (2500 ms at the host's 5 s watchdog fallback) and FAILS.
+ *
+ * The second half is invariant 2 of the ruling: dial admission is per-link and lives in
+ * the link's own slot, so nothing anywhere holds a bound on the orphan's account — a link
+ * constructed during the orphan's wait dials AT ONCE (`connect_count()` 1 -> 2 while
+ * `dialers_inside()` still counts the orphan).
  */
-void test_a_teardown_that_lands_mid_dial_is_bounded() {
-    std::printf("a teardown that lands mid-dial is bounded by the watchdog window:\n");
+void test_a_teardown_that_lands_mid_dial_costs_no_dial_bound() {
+    std::printf("a teardown that lands mid-dial costs no dial bound:\n");
     fake_ws::reset();
     fake_ws::hang_connects(true);
 
     auto link = dialing_link();
+    const esp_ws_client_link_t::timing_t t = esp_ws_client_link_t::timing();
     std::printf("       the dial asked for %d ms\n", fake_ws::last_connect_timeout_ms());
 
     const auto start = std::chrono::steady_clock::now();
     link.reset();
     const long long elapsed = ms_since(start);
 
-    check_under_ms(elapsed, kHostWdtMs * 3 / 4,
-                   "the destroying task got the window back inside its watchdog period");
-    check(fake_ws::handle_misuse() == 0, "and nothing touched a destroyed handle on the way out");
+    // Derived, both of them: the dominant teardown term is now one poll turn (the recv
+    // thread's stop-observation cadence), and 50 ms is runner slack, not policy.
+    check_under_ms(elapsed, t.poll_ms + 50,
+                   "the destroying task paid a poll turn, not a dial bound");
+    check_under_ms(elapsed, t.dial_timeout_ms / 4,
+                   "not a quarter of the dial bound it used to inherit either");
+    check(fake_ws::dialers_inside() >= 1,
+          "while the orphaned dial is still inside esp_transport_connect, as it must be");
+
+    // Invariant 2: a NEW link dials immediately — nothing is held on the orphan's account.
+    auto second = quiet_link();
+    check(wait_until([] { return fake_ws::connect_count() >= 2; }, 2s),
+          "a link constructed during the orphan's wait was admitted at once");
+    std::printf("       %d dial(s) entered, %d still parked inside the transport\n",
+                fake_ws::connect_count(), fake_ws::dialers_inside());
+    check(fake_ws::dialers_inside() >= 1, "with the orphan's dial still unresolved");
+
+    // The two numbers this case exists to produce, in the form #183's readiness checklist
+    // carries them. Derived from the link's own published policy, so they follow the
+    // watchdog rather than a literal written here.
+    const long long write_budget = static_cast<long long>(t.write_timeout_ms) * kIdfWriteLegs;
+    std::printf(
+        "       #183: worst-case teardown %lld ms -> %lld ms (dial+write -> poll+write);"
+        " mid-dial %d ms -> %lld ms\n",
+        t.dial_timeout_ms + write_budget, t.poll_ms + write_budget, t.dial_timeout_ms, elapsed);
+
+    fake_ws::release_connects(/*succeed=*/true);
+    second.reset();
+    check(drained_fake(), "and both the orphan and the live link released their pairs");
+    check(fake_ws::handle_misuse() == 0, "with no operation on a destroyed or foreign handle");
+}
+
+/**
+ * @brief #1058 (b): an orphaned dial that resolves SUCCESS closes and releases, once.
+ *
+ * Invariant 1's first arm. The blocking call still runs to completion — we only fix who
+ * pays — so when it comes back holding a connected transport pair belonging to a link
+ * that no longer exists, that pair must be CLOSED (there is a socket on the peer's side
+ * of it) and destroyed, exactly once. `close_count()` is the "closed, not merely
+ * destroyed" oracle; `live_handles()` is the release oracle; `handle_misuse()` is the
+ * double-release oracle.
+ */
+void test_an_orphaned_dial_that_succeeds_closes_and_releases_once() {
+    std::printf("an orphaned dial that resolves SUCCESS closes and releases once:\n");
+    fake_ws::reset();
+    fake_ws::hang_connects(true);
+
+    auto link = dialing_link();
+    const int closes_before = fake_ws::close_count();
+    link.reset();
+
+    check(fake_ws::dialers_inside() == 1, "the dial outlived its link, still in flight");
+    check(fake_ws::live_handles() == 2, "still holding the transport pair it built");
+
+    fake_ws::release_connects(/*succeed=*/true);
+    check(drained_fake(), "and released it the moment the handshake resolved");
+    std::printf("       %d close(s) on the way out, %d handle(s) still live\n",
+                fake_ws::close_count() - closes_before, fake_ws::live_handles());
+    check(fake_ws::close_count() > closes_before, "closing the connection it had just made");
+    check(fake_ws::handle_misuse() == 0, "exactly once — nothing was released twice");
+}
+
+/**
+ * @brief #1058 (c): an orphaned dial that resolves FAILURE releases, once.
+ *
+ * Invariant 1's second arm, and the common case on silicon: the peer was unreachable all
+ * along and the dial comes back with the bound spent. Same release, same oracle.
+ */
+void test_an_orphaned_dial_that_fails_releases_once() {
+    std::printf("an orphaned dial that resolves FAILURE releases once:\n");
+    fake_ws::reset();
+    fake_ws::hang_connects(true);
+
+    auto link = dialing_link();
+    link.reset();
+    check(fake_ws::live_handles() == 2, "the orphaned dial holds the transport pair");
+
+    fake_ws::release_connects(/*succeed=*/false);
+    check(drained_fake(), "and released it when the dial failed");
+    check(fake_ws::handle_misuse() == 0, "exactly once — nothing was released twice");
+}
+
+/**
+ * @brief #1058 (d): teardown RACING the dial's resolution releases exactly once, always.
+ *
+ * The two sides decide the same thing — who owns the transport pair — from two threads,
+ * so the case that matters is the one where they decide it at the same instant. Either
+ * the condemn wins (the orphan releases the pair) or the resolve wins (the link adopts it
+ * and the ordinary destructor releases it), and there is no interleaving in which both do
+ * or neither does. `handle_misuse()` counts the "both" (a second destroy on a dead
+ * handle); the drain catches the "neither".
+ *
+ * Fifty turns, and BOTH arms are covered on purpose rather than left to the scheduler:
+ * a free-running race is won by the condemn essentially every time (the destructor needs
+ * two uncontended mutex acquires; the resolve needs a parked thread to be woken first), so
+ * the odd turns settle the resolution FIRST — waited for on an observable, never slept
+ * for — and tear down a link that adopted its pair the ordinary way. The even turns are the
+ * genuine race. The outcome the dial resolves to alternates too, since success and failure
+ * release along different paths.
+ */
+void test_teardown_racing_the_dials_resolution_releases_once() {
+    std::printf("teardown racing the dial's resolution releases exactly once:\n");
+    int no_dial = 0, not_drained = 0, misused = 0, adopted = 0, raced = 0;
+    constexpr int kTurns = 50;
+    for (int i = 0; i < kTurns; ++i) {
+        fake_ws::reset();
+        fake_ws::hang_connects(true);
+        auto link = quiet_link();
+        if (!wait_until([] { return fake_ws::connect_count() >= 1; }, 2s)) ++no_dial;
+        if (i % 2 == 0) {
+            // The resolution is issued from a FOREIGN thread while the destructor runs, so
+            // the interleaving is the scheduler's, not the test's.
+            std::thread resolver([i] { fake_ws::release_connects(i % 4 == 0); });
+            link.reset();
+            resolver.join();
+            ++raced;
+        } else {
+            // The other arm: the dial resolves BEFORE the teardown, so the link adopts the
+            // pair and the ordinary destructor releases it. Waited for on the link's own
+            // came-up latch — the fact that says the resolve landed — because a sleep here
+            // would be a guess at the same thing.
+            fake_ws::release_connects(/*succeed=*/true);
+            if (wait_until([&] { return link->ok(); }, 2s)) ++adopted;
+            link.reset();
+        }
+        if (!drained_fake()) ++not_drained;
+        if (fake_ws::handle_misuse() != 0) ++misused;
+    }
+    std::printf(
+        "       %d turns (%d raced, %d resolved-then-torn-down): %d without a dial, %d that"
+        " did not drain, %d with misuse\n",
+        kTurns, raced, adopted, no_dial, not_drained, misused);
+    check(no_dial == 0, "every turn got its dial in flight before the teardown");
+    check(adopted == kTurns / 2, "every resolve-first turn was adopted by its link");
+    check(not_drained == 0, "every turn released the transport pair");
+    check(misused == 0, "and no turn released one twice, on either side of the race");
 }
 
 /**
@@ -375,12 +555,19 @@ void test_the_blocking_bounds_are_derived_from_the_watchdog() {
 }  // namespace
 
 int main() {
-    std::printf("esp_ws_client_link bounded-blocking host suite (#952):\n");
+    std::printf("esp_ws_client_link bounded-blocking host suite (#952, #1058):\n");
     test_teardown_does_not_destroy_handles_under_a_sender();
     test_teardown_does_not_wait_out_the_reconnect_backoff();
-    test_a_teardown_that_lands_mid_dial_is_bounded();
+    test_a_teardown_that_lands_mid_dial_costs_no_dial_bound();
+    test_an_orphaned_dial_that_succeeds_closes_and_releases_once();
+    test_an_orphaned_dial_that_fails_releases_once();
+    test_teardown_racing_the_dials_resolution_releases_once();
     test_send_during_a_redial_reads_no_handle();
     test_the_blocking_bounds_are_derived_from_the_watchdog();
+    // Nothing detached may still be running here: a condemned dial's recv thread outlives
+    // its link by design, and one still inside the transport at process exit is a crash
+    // under ASan/TSan and a leak under LSan. Every case drains, and this is the backstop.
+    check(drained_fake(), "no orphaned dial or transport handle outlived the suite");
     std::printf(g_failures == 0 ? "\nALL PASS\n" : "\n%d FAILURE(S)\n", g_failures);
     return g_failures == 0 ? 0 : 1;
 }
