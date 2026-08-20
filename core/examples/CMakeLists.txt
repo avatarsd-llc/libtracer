@@ -303,3 +303,53 @@ if(LIBTRACER_REGISTER_GRAPH_EXAMPLE_TESTS)
         add_test(NAME example_${example} COMMAND ${example})
     endforeach()
 endif()
+
+# The routing domain (#1383) — how a frame gets from one node to another: the source route in
+# the `dst`, the NAME→link table each hop resolves it against, and the label plane a repeating
+# flow uses to stop re-carrying it. Appended at EOF for the same reason every block above it
+# was: `docs/examples/index.md` pins line-numbered citations into the first block.
+#
+# These eight are the FIRST domain group that cannot be unconditional. `fwd_router_t`,
+# `route_handle_t` and `op_resolve` are the net plane, compiled only under
+# `if(LIBTRACER_NET_PLANE)` (`core/CMakeLists.txt:92`), so at `-DLIBTRACER_NET_PLANE=OFF` these
+# targets do not merely skip — the types they name do not exist. That is a BUILD-time absence,
+# and it is the honest one: the alternative, an unconditional target that returns early, would
+# make ctest record eight passes for eight examples that ran nothing (the hazard
+# `docs/examples/index.md` documents at length). The option defaults to ON, so every CI leg but
+# the deliberate minimal-set one builds and runs all eight; the index says what the minimal-set
+# leg is missing and how to see it.
+#
+# Within the group nothing is conditional at RUN time: no target has a `config_override.hpp`
+# knob in reach, no sockets are opened, no ports are bound and no threads are started — every
+# link is a recording stub driven synchronously, so a green `ctest -R example_route_` in a
+# net-plane build is a pass for eight examples that all demonstrated something.
+set(LIBTRACER_ROUTING_EXAMPLES
+    route_dst_is_source_route # the route rides in the frame: dst shrinks, src grows, per hop
+    route_terminus_or_forward # one test decides a hop: does the leading dst segment name a child?
+    route_child_table         # one NAME→link table, one slot per name; a refusal registers nothing
+    route_qualified_mount     # RFC-0014 strip-K: a mount name is any width, consumed in one step
+    route_multi_hop           # a chain is the one-hop rule again; the middle hop stores nothing
+    route_reply_home          # the accumulated src IS the return route — no correlation table
+    route_label_compact       # ADR-0035 — advertise binds label↔route per link; COMPACT elides it
+    route_label_stale         # an unknown label is dropped and NACK'd; the NACK re-advertises
+)
+
+if(LIBTRACER_NET_PLANE)
+    foreach(example IN LISTS LIBTRACER_ROUTING_EXAMPLES)
+        add_executable(${example} ${example}.cpp)
+        target_link_libraries(${example} PRIVATE libtracer)
+        if(MSVC)
+            target_compile_options(${example} PRIVATE /W4)
+        else()
+            target_compile_options(${example} PRIVATE -Wall -Wextra)
+        endif()
+    endforeach()
+
+    # The same alias as every block above, for the same anchor reason — and nested inside the
+    # net-plane guard so the registrations follow the targets exactly.
+    if(LIBTRACER_REGISTER_GRAPH_EXAMPLE_TESTS)
+        foreach(example IN LISTS LIBTRACER_ROUTING_EXAMPLES)
+            add_test(NAME example_${example} COMMAND ${example})
+        endforeach()
+    endif()
+endif()
