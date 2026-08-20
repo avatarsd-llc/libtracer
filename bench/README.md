@@ -55,6 +55,20 @@ forward hop, and reports `allocs` / `frees` / `bytes`. Single-threaded by constr
 ZEROHEAP_MAX=0 ./build/bench_forward_heap   # hard gate: exit 1 if allocs > 0 (LIVE in perf.yml)
 ```
 
+**Two canaries run first, and they can fail the binary on their own (exit 2).** Every row
+this bench prints rests on the global escape counter being able to see anything at all, and
+the `reg_escape` row additionally rests on its two columns being *disjoint*. Neither held by
+construction until [#1420](https://github.com/avatarsd-llc/libtracer/issues/1420): the probe's
+injected `std::pmr::memory_resource` forwarded to `get_default_resource()`, which is
+`::operator new` in the very form this TU overrides, so a seam-served block was charged to the
+escape column too. `canary_seam_only` fills a `std::pmr::vector` over the injected seam and
+requires `escaped=0`; `canary_heap_escape` fills the identical vector over the process heap and
+requires `escaped>0`. Both are shown failing on their own mutants in #1420's PR — with the
+override blinded and the canaries removed, this bench prints `allocs=0` on **every** row and
+exits 0, which is exactly the free pass they exist to deny. Their rows lead with `mr_served=`
+rather than `allocs=`, so `perf_emit_benchmark.py` and `perf_gate.py` do not pick them up as a
+series to chart or ratchet: a canary is a structural verdict, not a number with a history.
+
 **Current: 0 allocs / 0 B per forward hop — the gate PASSES and is enforced in CI**
 (`perf.yml`, `ZEROHEAP_MAX=0`). What that buys, precisely: on a **contiguous (single-link)**
 frame the hop's *own* work allocates nothing — offset dispatch (no `wire::decode`), fixed

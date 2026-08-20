@@ -28,6 +28,30 @@
  * operation cost, so it reads both counters at once: global blocks that escaped, and
  * blocks the resource served.
  *
+ * @par The disjointness invariant, and the two canaries that defend it (#1420)
+ * Window (4) rests on its two columns being DISJOINT — a block counted at the seam must not
+ * also be counted as an escape — and every OTHER window rests on the escape counter being
+ * able to see anything at all. Neither held by construction: `counting_resource_t` forwarded
+ * to `std::pmr::get_default_resource()`, which is `::operator new` in the very form this TU
+ * overrides, so a seam-served block was charged to the escape column too. It stayed LATENT
+ * only because the registration path draws nothing through the seam today (`mr_served=0`);
+ * the moment #551 / ADR-0039 moves that work onto the seam — which is the direction this
+ * probe exists to steer — the escape count would have failed to fall and the row would have
+ * reported that the work did not move when it did. `run_canaries` now asserts both directions
+ * BEFORE any claim-bearing row is emitted, and a miss ABORTS the run:
+ *   - `canary_seam_only`   — a `std::pmr::vector` over `counting_resource_t`. The seam MUST
+ *     serve (`mr_served` non-zero) and NOTHING may escape (`escaped` ZERO). Re-point
+ *     `counting_resource_t::do_allocate` at `std::pmr::get_default_resource()` — the exact
+ *     pre-#1420 body — and this row reddens.
+ *   - `canary_heap_escape` — the identical vector over the PROCESS HEAP, with a
+ *     `counting_resource_t` built and untouched. The seam must serve NOTHING and the escape
+ *     MUST be seen. This catches the other vacuity: an operator-new override gone blind
+ *     (elided, LTO'd away, a different allocator linked in) would make `forward allocs=0`
+ *     and every other zero on this page pass for free.
+ * Their rows are deliberately NOT shaped like the trend rows: they lead with `mr_served=`,
+ * so neither `perf_emit_benchmark.py` nor `perf_gate.py` picks them up as a series to chart
+ * or ratchet. A canary is a structural verdict, not a number with a history.
+ *
  * This TU owns the global operator-new/delete override (probe/heap_probe.hpp): all
  * allocation variants — plain, sized, aligned (what `heap_alloc`'s `operator new(size,
  * align_val_t, nothrow)` uses), and nothrow — funnel through a counting malloc wrapper,
@@ -223,8 +247,11 @@ struct capture_transport_t : transport_t {
  * the resource actually served. Reporting only the first would leave "0 escapes" and "the
  * graph allocated nothing at all" indistinguishable.
  *
- * Serves from the default resource rather than a slab, deliberately: a slab would also
- * change WHERE the bytes come from, and this probe is measuring routing, not locality.
+ * Serves from the C allocator rather than a slab, deliberately: a slab would also change
+ * WHERE the bytes come from, and this probe is measuring routing, not locality.
+ *
+ * @note The two counters are only disjoint because this class serves from `std::aligned_alloc`
+ *       rather than from `std::pmr::get_default_resource()` — see @ref do_allocate.
  */
 class counting_resource_t final : public std::pmr::memory_resource {
    public:
@@ -232,22 +259,154 @@ class counting_resource_t final : public std::pmr::memory_resource {
     std::size_t live = 0;   /**< @brief Allocations not yet released. */
 
    private:
-    /** @brief Serve from the default resource, counting. */
+    /** @brief Serve from the C allocator, counting. */
     void* do_allocate(std::size_t n, std::size_t align) override {
         ++allocs;
         ++live;
-        return std::pmr::get_default_resource()->allocate(n, align);
+        // `std::aligned_alloc`, NOT `std::pmr::get_default_resource()` (#1420). That is the whole
+        // reason the two columns of the escape probe mean different things: the default resource
+        // is `new_delete_resource()`, whose `do_allocate` is `::operator new(n, align_val_t{a})` —
+        // the form THIS TU overrides and counts. Forwarding to it charged every seam-served block
+        // to the GLOBAL escape counter as well, so `allocs=` and `mr_served=` overlapped by
+        // construction and the row could never report the zero-escape result it exists to show.
+        // Going straight to the C allocator keeps the columns DISJOINT. This is the identical
+        // defect #1402 fixed in `bench_failable_census.cpp`, in its `std::pmr` spelling; the two
+        // canary rows at the top of `main` are what stop it returning a third time.
+        // `aligned_alloc` requires a size that is a multiple of the alignment.
+        const std::size_t rounded = (n + align - 1) / align * align;
+        return std::aligned_alloc(align, rounded != 0 ? rounded : align);
     }
-    /** @brief Release to the default resource, counting. */
-    void do_deallocate(void* p, std::size_t n, std::size_t align) override {
+    /** @brief Release to the C allocator, counting. */
+    void do_deallocate(void* p, std::size_t, std::size_t) override {
         --live;
-        std::pmr::get_default_resource()->deallocate(p, n, align);
+        std::free(p);
     }
     /** @brief Identity equality — a stateful counter is only equal to itself. */
     [[nodiscard]] bool do_is_equal(const std::pmr::memory_resource& o) const noexcept override {
         return this == &o;
     }
 };
+
+/**
+ * @brief What ONE column of the escape probe is REQUIRED to read for a canary row to pass.
+ *
+ * Deliberately a THRESHOLD and not a pinned count: zero-versus-non-zero is a structural
+ * property of WHERE a consumer draws its memory, so it survives an allocator's growth ladder
+ * changing under it, whereas a pinned figure would rot into a maintenance chore and get
+ * relaxed the first time it was inconvenient. The exact counts are still printed.
+ */
+enum class col_expect_t : std::uint8_t {
+    ZERO,    /**< @brief Nothing may be drawn on this column: the count must be 0. */
+    NONZERO, /**< @brief Something MUST be drawn here — the non-vacuity arm. */
+};
+
+/** @brief True when a column reading @p blocks satisfies @p e. */
+bool meets(std::size_t blocks, col_expect_t e) noexcept {
+    return e == col_expect_t::ZERO ? blocks == 0 : blocks != 0;
+}
+
+/** @brief The spelling of @p e in the RESULT line. */
+const char* expect_name(col_expect_t e) noexcept {
+    return e == col_expect_t::ZERO ? "ZERO" : "NONZERO";
+}
+
+/** @brief Elements a canary vector holds — several growths of the doubling ladder. */
+constexpr std::size_t kCanaryElems = 64;
+
+/**
+ * @brief Fill a `std::pmr::vector<std::uint64_t>` of @ref kCanaryElems elements over @p mr.
+ *
+ * The canaries' subject: a real `std::pmr` consumer of exactly the kind the escape probe's
+ * seam is meant to serve, whose growth is a deterministic doubling ladder — which is why the
+ * rows below can be gated on a threshold rather than on a hand-chosen number. The vector is
+ * destroyed inside the armed window, so its frees land on the same counters as its allocs.
+ */
+void fill_canary_vector(std::pmr::memory_resource* mr) {
+    std::pmr::vector<std::uint64_t> v(mr);
+    for (std::size_t i = 0; i < kCanaryElems; ++i) v.push_back(i);
+    asm volatile("" : : "r"(v.data()) : "memory");
+}
+
+/**
+ * @brief Emit one canary row and judge both of its columns.
+ *
+ * The line deliberately does NOT open `allocs=<n> frees=<n> bytes=<n>` after the point name:
+ * that is the shape `perf_emit_benchmark.py::zeroheap_metrics` and `perf_gate.py`'s `_MEM_RE`
+ * key on, and a canary is a structural PASS/FAIL, not a trend anyone should chart or ratchet.
+ * Leading with `mr_served=` keeps it out of the gh-pages history store by construction. For the
+ * same reason the width field is `elems=` and not `n=`: nothing here is a per-op average, so a
+ * reader must not divide by it.
+ *
+ * @return true when both columns met their expectation.
+ */
+bool print_canary(const char* op, std::size_t mr_served, std::size_t escaped, const char* note,
+                  col_expect_t mr_expect, col_expect_t escape_expect) {
+    const bool ok = meets(mr_served, mr_expect) && meets(escaped, escape_expect);
+    std::printf(
+        "RESULT zeroheap %s mr_served=%zu escaped=%zu mr_expect=%s escape_expect=%s elems=%zu "
+        "note=%s verdict=%s\n",
+        op, mr_served, escaped, expect_name(mr_expect), expect_name(escape_expect), kCanaryElems,
+        note, ok ? "PASS" : "FAIL");
+    return ok;
+}
+
+/**
+ * @brief The two non-vacuity canaries that underwrite every row this bench prints (#1420).
+ *
+ * Emitted FIRST, before any claim they defend, and they are HARD — a miss aborts the run.
+ *
+ * @return 0 when both canaries passed, 2 otherwise (an instrument fault, not a heap result).
+ */
+int run_canaries() {
+    counting_resource_t seam;
+    int failures = 0;
+
+    // (A) The seam serves, and NOTHING escapes. The direct mutant for the #1420 defect:
+    //     re-point `counting_resource_t::do_allocate` at `std::pmr::get_default_resource()`
+    //     — the exact pre-fix body — and this row reddens, because every block the seam
+    //     served is then charged to the global escape counter too.
+    {
+        const std::size_t before = seam.allocs;
+        probe::reset();
+        probe::arm();
+        fill_canary_vector(&seam);
+        probe::disarm();
+        const probe::counts_t c = probe::snapshot();
+        if (!print_canary("canary_seam_only", seam.allocs - before, c.allocs,
+                          "64xu64_pmr_vector_over_the_SEAM:columns_must_be_DISJOINT",
+                          col_expect_t::NONZERO, col_expect_t::ZERO))
+            ++failures;
+    }
+
+    // (B) The identical vector over the PROCESS HEAP, with the `counting_resource_t` left
+    //     untouched. The escape MUST be seen. This catches the OPPOSITE vacuity, and it is
+    //     the one that underwrites the whole file rather than just the escape probe: an
+    //     operator-new override gone blind (elided, LTO'd away, a different allocator linked
+    //     in, the counter left disarmed) would make `forward allocs=0` — the ZEROHEAP_MAX=0
+    //     hard gate — and every other zero on this page pass for free.
+    {
+        const std::size_t before = seam.allocs;
+        probe::reset();
+        probe::arm();
+        fill_canary_vector(std::pmr::new_delete_resource());
+        probe::disarm();
+        const probe::counts_t c = probe::snapshot();
+        if (!print_canary("canary_heap_escape", seam.allocs - before, c.allocs,
+                          "64xu64_pmr_vector_over_the_HEAP:the_escape_MUST_be_seen",
+                          col_expect_t::ZERO, col_expect_t::NONZERO))
+            ++failures;
+    }
+
+    if (failures != 0) {
+        std::printf(
+            "CANARY: FAIL (%d of 2) — the two counters this bench prints are NOT disjoint, or "
+            "the operator-new override is blind. Every number below is worthless; fix the "
+            "instrument before reading any of them (#1420).\n",
+            failures);
+        return 2;
+    }
+    return 0;
+}
 
 /** @brief Append a NAME-only PATH TLV over `segs`. */
 void emit_path(std::vector<std::byte>& out, std::initializer_list<std::string_view> segs) {
@@ -277,6 +436,11 @@ std::vector<std::byte> make_fwd(std::initializer_list<std::string_view> dst,
 }  // namespace
 
 int main() {
+    // The instrument judges itself BEFORE it judges the library: two rows that assert the
+    // disjointness of the two columns in both directions (#1420). They precede every claim
+    // they underwrite, including the ZEROHEAP_MAX=0 hard gate below.
+    if (const int rc = run_canaries(); rc != 0) return rc;
+
     // One node with two transport children: a frame arriving on "in" whose dst names
     // "out" is a pure FORWARD hop (strip "out" from dst, prepend "in" to src, send on
     // "out") — the exact hot path the 16KB node runs, no terminus, no local vertex.
