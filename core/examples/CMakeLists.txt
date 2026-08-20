@@ -264,3 +264,42 @@ if(LIBTRACER_REGISTER_GRAPH_EXAMPLE_TESTS)
         add_test(NAME example_${example} COMMAND ${example})
     endforeach()
 endif()
+
+# The auth / ACL domain (#1383) — who may do what, and the two halves of that question: the
+# graph's gates (a resolved subject against a vertex's effective ACL) and the pure ADR-0050
+# policy seam beneath them. Appended at EOF for the same reason every block above it was:
+# `docs/examples/index.md` pins line-numbered citations into the first block.
+#
+# All eight are pure L4 over the always-compiled ACL headers: no net plane, no transports, no
+# sockets, no threads. The one build knob in reach is `acl_policy_t` (ADR-0068 — plain C++ in
+# config.hpp, which CMake cannot see), and `acl_policy_profiles` handles it by naming BOTH
+# policies explicitly as template arguments instead of skipping an arm: it exercises the
+# ALLOW-only and the full policy in every build and only PRINTS which one this target binds.
+# So, as with the mem_* group, nothing here is conditional at build OR at run time.
+set(LIBTRACER_ACL_EXAMPLES
+    acl_open_by_default   # enforcement is opt-in twice; the first ACE is what closes a vertex
+    acl_subject_resolver  # ADR-0018 caller context -> subject token; the error arm DENIES
+    acl_right_bits        # access_mask is a bitfield; every gate tests exactly one bit
+    acl_everyone_reserved # the one wildcard subject, reserved against the resolver's output
+    acl_inherit           # effective ACL = own ACEs + INHERIT-flagged ancestor ACEs
+    acl_expiry            # expires_ns is evaluated against the caller's `now`, nothing cached
+    acl_policy_profiles   # ADR-0050 — DENY exists only where the evaluator can see it
+    acl_parse_strict      # parse_acl refuses shapes encode_acl never emits; leniency widens
+)
+
+foreach(example IN LISTS LIBTRACER_ACL_EXAMPLES)
+    add_executable(${example} ${example}.cpp)
+    target_link_libraries(${example} PRIVATE libtracer)
+    if(MSVC)
+        target_compile_options(${example} PRIVATE /W4)
+    else()
+        target_compile_options(${example} PRIVATE -Wall -Wextra)
+    endif()
+endforeach()
+
+# The same alias again, for the same anchor reason.
+if(LIBTRACER_REGISTER_GRAPH_EXAMPLE_TESTS)
+    foreach(example IN LISTS LIBTRACER_ACL_EXAMPLES)
+        add_test(NAME example_${example} COMMAND ${example})
+    endforeach()
+endif()
