@@ -33,14 +33,16 @@ Two rules govern it:
 | Extend or embed the C++ core in a host application | [C++ API reference](modules/index.md) | [other doors](#other-doors) | MID → WIDE |
 | Understand the model before choosing any of the above | [Reference 00 — core overview](reference/00-overview.md) | the reference suite's own [reading paths](reference/README.md) | any |
 
-**Target scale** is the deployment the lane is written for. The three words are the
-project's own axis: `NARROW` / `MID` / `WIDE` name allocation-store composition in
-[ADR-0079](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md),
-and the ADRs use them in prose for the deployments those compositions belong to —
+**Target scale** is the deployment the lane is written for, and that is the *only* thing
+these three words mean: **NARROW** = a constrained node with tens of KB of RAM, **MID** =
+a gateway or SBC process, **WIDE** = a many-core host — the spectrum
 [ADR-0082](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0082-auth-subject-and-peer-named-are-decoupled-claims-default-stays-false.md)
-§reason 2 calls the single-upstream MCU "the common NARROW deployment". Used here in
-that second sense: **NARROW** = a constrained node with tens of KB of RAM, **MID** = a
-gateway or SBC process, **WIDE** = a many-core host. It is a reading hint, not a
+§reason 2 draws on when it calls the single-upstream MCU "the common NARROW deployment".
+They once doubled as the names of the three allocation-store compositions in
+[ADR-0079](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md)
+— with the mapping *inverted*, so that reading collided with this one; that spelling is
+retired (ADR-0079's 2026-08-20 amendment) and the compositions are now **folded /
+per-plane / per-thread**. Target scale is a reading hint, not a
 conformance statement — the protocol is one model at every scale
 ([Reference 12](reference/12-deployment-profiles.md), opening).
 

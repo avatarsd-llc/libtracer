@@ -4,7 +4,7 @@
 `do_allocate` forwards to `try_alloc`, `do_deallocate` forwards to the seam's **sized**
 `release` — `std::pmr` carries the original size and alignment into `deallocate`, which is
 exactly the pair a header-free pool needs — and `do_is_equal` is address identity
-([ADR-0079](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0079-allocation-store-composition.md)).
+([ADR-0079](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md)).
 
 :::{warning}
 **This delivers placement and bounding, not failability.** `std::pmr`'s only exhaustion signal is

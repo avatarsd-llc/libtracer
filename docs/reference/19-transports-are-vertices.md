@@ -295,19 +295,22 @@ and it only ever tightens. That is the test a candidate key must pass: **every k
 and every kind means the same thing by it.** A key that fails the test belongs in the kind's
 factory, however convenient the shared record looks.
 
-### The same discipline, one layer down (NARROW / MID / WIDE)
+### The same discipline, one layer down (store composition)
 
 Where a kind needs something the plane owns, the plane exposes a **seam**, not a field.
 `transport_vertex_t::egress_source` hands an out-of-tree factory the very egress store the
 built-in factories wire into their sockets, so a `quic` or `can` link is bounded by the same
-budget rather than silently falling back to the process heap. That composition has a
-deliberate spectrum
-([ADR-0079](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md)):
-the default is **MID** — one store per plane, which fences a net-plane flood off from the
-graph; a **WIDE** deployment folds everything onto one store; a **NARROW** one ignores this
-accessor and injects its own per-thread or per-connection source, buying zero contention at
-the cost of per-store slack (≈14 KB on an ESP32-C6-class target, an estimate ADR-0079 marks
-as owing a measured high-water-mark census). The point for this page: the knob is an injected
+budget rather than silently falling back to the process heap. How many such stores a node
+wires is its **composition**, and it has three named points
+([ADR-0079](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md),
+Amendment 2026-08-20): **folded** — everything on one store, the single-threaded-MCU recipe;
+**per-plane** — one store per plane, which fences a net-plane flood off from the graph and is
+worth choosing for exactly that (it is measured to collapse under fan-out just as folded does);
+**per-thread** — this accessor ignored in favour of a per-RX-thread or per-connection source,
+the only point that survives a fan-out and the multi-RX-host recipe, paid for in per-store
+slack (≈14 KB on an ESP32-C6-class target, an estimate ADR-0079 marks as owing a measured
+high-water-mark census). **None of the three is a default** — every seam defaults to the
+process heap, so a node that says nothing is all-heap. The point for this page: the knob is an injected
 store reached through an accessor, not a `store` field on `conn_settings_t` — the same rule,
 applied to a resource instead of a config key.
 
