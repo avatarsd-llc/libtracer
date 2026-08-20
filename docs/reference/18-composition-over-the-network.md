@@ -317,11 +317,12 @@ write made during the partition is silently discarded
 :class: note
 The link-departure eviction is implemented and wired onto every connection-oriented transport
 (ws server / ws client / tcp, the ESP-IDF adopted-mode link, QUIC and WebTransport), per
-RFC-0009 §D.5. What is **not** implemented is the **liveness engine** that would drive
-`link_state_t` transitions automatically — the value is set by the caller today, and RFC-0014's
-§4/§5 liveness work is tracked by [#492](https://github.com/avatarsd-llc/libtracer/issues/492).
-Of the connection-config keys, `keepalive` has no consumer anywhere in the tree, and `backoff`
-and `connect_timeout` are parsed but dormant pending that engine
+RFC-0009 §D.5. The **liveness engine** driving `link_state_t` transitions automatically
+(RFC-0014 §4 S5, `tr::net::self_heal_link_t`,
+[#492](https://github.com/avatarsd-llc/libtracer/issues/492)) runs for kinds registered
+`self_heal_dial`, consuming `backoff` and `connect_timeout`; the built-in kinds are not yet
+opted in, so their value is still set by the caller. Of the connection-config keys,
+`keepalive` has no consumer anywhere in the tree
 ([13](13-network-formation.md), [connection-config module page](../modules/connection-config.md)).
 So the recovery *semantics* above are specified and the *automation* of them is partly not yet
 true.

@@ -136,10 +136,12 @@ overridable per node), never a library rule — with names like `ws-client`, `ws
   retiring the connection (`NAME`) and re-creating it (`SPEC`), which does tear down the
   routes under it, because `remove_connection` un-routes and retires the identity vertex.
   Routing that makes `/net/<module>/<name>` addressable is [ADR-0061 — Per-module mount routing](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md).
-- **Of those five keys, only `addr` and `port` are consumed today.** `keepalive` has no
-  consumer anywhere in the tree — it is parsed and nothing reads it — and `backoff` /
-  `connect_timeout` are parsed-but-dormant pending the §4 liveness engine
-  ([#492](https://github.com/avatarsd-llc/libtracer/issues/492)). The per-key record,
+- **Of those five keys, `addr`, `port`, `backoff` and `connect_timeout` are consumed
+  today.** `keepalive` has no consumer anywhere in the tree — it is parsed and nothing
+  reads it. `backoff` / `connect_timeout` feed the §4 liveness engine
+  ([#492](https://github.com/avatarsd-llc/libtracer/issues/492) S5, `self_heal_link_t`)
+  on a kind registered `self_heal_dial`; on a kind not opted in (today: the built-ins)
+  they are parsed with no consumer. The per-key record,
   including which kinds honour `max_frame`, is the
   [connection-config module page](../modules/connection-config.md).
 - **`SPEC` naming an existing name is `PATH_IN_USE`** — a re-`SPEC` is never a
@@ -165,9 +167,12 @@ mints `/net/<module>/conn`, a `SPEC{name, config}` written there creates
 `/net/<module>/<name>` and a `NAME{<name>}` removes it, the `conn` name is reserved in
 both directions, and the endpoint is **hidden** from `/net/<module>:children[]` (S4) — that
 listing returns the module's member connections only, while the endpoint itself stays
-addressable for the §6 creatability probe. What is **not** implemented is the rest:
-per-module `:schema`-as-catalog (S3), the `CREATE`/`WRITE` gating split (S2c) and the
-liveness engine (S5). The addressing half was already there — a created connection mounts and routes at
+addressable for the §6 creatability probe. The liveness engine (S5) is implemented too
+(`tr::net::self_heal_link_t`) for kinds registered with
+`transport_kind_traits_t::self_heal_dial`; the built-in kinds are not yet opted in, so a
+built-in DIAL connection still constructs eagerly and reports `UP` at creation. What is
+**not** implemented is the rest: per-module `:schema`-as-catalog (S3) and the
+`CREATE`/`WRITE` gating split (S2c). The addressing half was already there — a created connection mounts and routes at
 `/net/<module>/<name>`, with the module name declared by the application (never
 library-derived — ADR-0073 §4) — and the `:children[]` creation spelling RFC-0014
 supersedes still works in parallel until S7 retires it. RFC-0014's byte-level clauses (the
@@ -303,11 +308,11 @@ write-only, non-propagating creator endpoint.
 `dormant` takes `0` so a resting link is the falsy default. **The byte encoding becomes
 normative on the merge of RFC-0014's conformance vectors** — the RFC defers it, so these
 values are the reference encoding until then (`link_state_t`,
-`core/include/libtracer/transport_vertex.hpp:99-106`). A `LISTEN` vertex's liveness
+`core/include/libtracer/transport_vertex.hpp:102-109`). A `LISTEN` vertex's liveness
 reports **listen-socket reachability**, not per-accepted-peer connectivity; accepted-peer
 count and identity are exposed through the connection vertex's **synthesized
 `:children[]`**, built per read from the transport's own live-peer table
-(`core/src/transport_vertex.cpp:583`) — never through `:settings`, whose core namespace
+(`core/src/transport_vertex.cpp:630`) — never through `:settings`, whose core namespace
 is empty. Once up, a link is bidirectional regardless of who dialed — `role` says only *who initiates*. The liveness
 engine that drives these transitions automatically is not implemented; the value is set
 by the caller.
@@ -420,7 +425,7 @@ automatic**:
   and `port` are **creation-time config** (§Creation): they travel in the `SPEC`'s
   `config` and are parsed into the transport-private `tr::net::conn_settings_t`, whose
   only accessor hands out a **const** view
-  (`transport_vertex_t::settings_of`, `core/include/libtracer/transport_vertex.hpp:512`).
+  (`transport_vertex_t::settings_of`, `core/include/libtracer/transport_vertex.hpp:594`).
   The vertex `:settings` core namespace holds nothing to write — RFC-0022 §3.B deleted
   `settings_t`, so every flat knob name under it answers `SCHEMA_NOT_FOUND`
   caller-independently (`core/src/graph.cpp:3140`), leaving only the read container and

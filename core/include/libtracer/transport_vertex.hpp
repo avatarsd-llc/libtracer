@@ -41,6 +41,7 @@
 namespace tr::net {
 
 class fwd_router_t;
+class self_heal_link_t;
 
 /**
  * @brief Tag selecting the SLIM @ref transport_vertex_t ctor — the one that does
@@ -92,8 +93,10 @@ enum class conn_role_t : std::uint8_t { DIAL = 0, LISTEN = 1 };
  *
  * DIAL links move through `DORMANT`/`DIALING`/`RECONNECTING`/`UP`; LISTEN links report
  * listen-socket reachability as `LISTENING`/`BIND_FAILED` (never per-accepted-peer). The
- * liveness *engine* that drives these automatically is RFC-0014 S5 — for now the value is
- * set manually (config-constructed sockets report `UP`/`LISTENING` at creation; provided
+ * DIAL transitions are driven by the RFC-0014 S5 liveness engine
+ * (@ref tr::net::self_heal_link_t, #492) for kinds registered with
+ * `transport_kind_traits_t::self_heal_dial`; everywhere else the value is still set
+ * manually (eagerly-constructed sockets report `UP`/`LISTENING` at creation; provided
  * links report via @ref transport_vertex_t::set_link_state).
  */
 enum class link_state_t : std::uint8_t {
@@ -149,12 +152,13 @@ struct conn_settings_t {
     std::string kind;                     /**< @brief Transport-factory selector ("udp",
                                                       "ws", ...); empty = provide_link only. */
     std::uint32_t backoff_ms = 0;         /**< @brief DIAL self-heal retry interval (RFC-0014 §4);
-                                                      consumed by the S5 liveness engine, 0 = the
-                                                      engine's default. Parsed but dormant until S5. */
+                                                      consumed by the S5 liveness engine
+                                                      (`self_heal_link.hpp`), 0 = the engine's
+                                                      default (`kDefaultBackoffMs`). */
     std::uint32_t connect_timeout_ms = 0; /**< @brief DIAL connect-attempt deadline (RFC-0014 §4):
                                                       how long one dial waits for `UP` before it
-                                                      counts as failed. 0 = the engine's default.
-                                                      Parsed but dormant until S5. */
+                                                      counts as failed; consumed by the S5 engine.
+                                                      0 = `kDefaultConnectTimeoutMs`. */
 };
 
 /**
@@ -178,6 +182,41 @@ struct conn_settings_t {
  * endpoint stays addressable precisely because it is unlisted.
  */
 inline constexpr std::string_view kConnEndpointName = "conn";
+
+/**
+ * @brief Per-kind CAPABILITY declarations a transport factory registers with (RFC-0014 §4,
+ *        S5) — properties of the KIND, not of one connection, so they live in the factory
+ *        catalog and never on the shared @ref conn_settings_t (the ADR-0043 §5 leanness
+ *        ruling protects that record; this struct is the catalog's row, not the SPEC's).
+ *
+ * The defaults preserve every existing registration: a kind registered through the
+ * traits-less overload keeps today's eager-construction behaviour exactly.
+ */
+struct transport_kind_traits_t {
+    /**
+     * @brief Opt this kind's DIAL connections into the RFC-0014 §4 S5 liveness engine
+     *        (@ref tr::net::self_heal_link_t).
+     *
+     * When set, a DIAL creation constructs NO socket: the vertex is minted `DORMANT` and
+     * the engine dials on demand (any op auto-wakes it, bounded by `connect_timeout`),
+     * self-heals with `backoff` while a standing binding holds it, and closes the socket
+     * back to dormant on the last release. The kind's factory is then run once per dial
+     * attempt — it must be re-runnable (every built-in socket factory is). LISTEN
+     * connections of the same kind are untouched (RFC-0014 §4: a LISTEN link ignores
+     * refcount; it binds eagerly at creation as before).
+     *
+     * Only for POINT-TO-POINT, connection-oriented kinds: a bus kind (CAN) must keep the
+     * default — the engine has no socket at creation, so the router's bus-facet wiring
+     * (`bus_of` at add_child) would never see the facet.
+     */
+    bool self_heal_dial = false;
+    /**
+     * @brief The kind's delivery capability (`transport_t::delivers_ropes`), declared
+     *        statically because the engine must answer it for `fwd_router_t::add_child`
+     *        BEFORE any socket exists. Ignored unless @ref self_heal_dial is set.
+     */
+    bool delivers_ropes = false;
+};
 
 /**
  * @brief Groups connection vertices under `/net` and makes each a `/` vertex (ADR-0027).
@@ -332,6 +371,47 @@ class transport_vertex_t {
     void register_transport_type(std::string kind, transport_factory_t factory);
 
     /**
+     * @brief Register a transport factory WITH its kind capabilities (RFC-0014 §4 S5).
+     *
+     * The traits overload: identical to the two-argument form, plus the
+     * @ref transport_kind_traits_t row that opts the kind's DIAL connections into the
+     * S5 liveness engine. The traits-less overload registers `{}` — every existing
+     * caller keeps eager construction unchanged.
+     * @param kind    The config `kind` selector (e.g. "udp", "quic").
+     * @param factory Builds an owning transport from the parsed universal settings plus
+     *                the raw config TLV; with `traits.self_heal_dial` set it is re-run
+     *                once per dial attempt, off the creation path.
+     * @param traits  The kind's capability row — see @ref transport_kind_traits_t.
+     */
+    void register_transport_type(std::string kind, transport_factory_t factory,
+                                 transport_kind_traits_t traits);
+
+    /**
+     * @brief A STANDING binding takes its hold on connection @p name's link (RFC-0014 §4).
+     *
+     * The S5 refcount seam: a standing subscription or `await` routed through the link
+     * holds it acquired for its lifetime (the routing-plane callers are S6's wiring; an
+     * embedder may drive it directly). While the count is above zero the engine keeps the
+     * link's steady-state target `UP` — self-healing on loss with `backoff`, forever —
+     * and the last @ref release_link closes the socket back to `DORMANT`. Non-blocking;
+     * "bring it up and wait" is `await` on the connection vertex.
+     *
+     * A connection that is not engine-managed (a provided link, an eagerly-constructed
+     * kind, any LISTEN) answers success as a no-op — RFC-0014 §4: a LISTEN link ignores
+     * refcount, and a manual link's liveness stays the caller's.
+     * @param name The connection's **qualified** key `net/<module>/<name>` (#605).
+     * @return NotFound if @p name names no created connection.
+     */
+    [[nodiscard]] graph::result_t<void> acquire_link(std::string_view name);
+
+    /**
+     * @brief The standing binding releases its hold — see @ref acquire_link.
+     * @param name The connection's **qualified** key `net/<module>/<name>` (#605).
+     * @return NotFound if @p name names no created connection.
+     */
+    [[nodiscard]] graph::result_t<void> release_link(std::string_view name);
+
+    /**
      * @brief This net plane's EGRESS store — the one the built-in factories wire into every
      *        socket they construct (see the ctor's `egress_src`, #873 / ADR-0079).
      *
@@ -467,10 +547,12 @@ class transport_vertex_t {
      *
      * Writing the 1-byte link_state_t makes `await(/net/<name>)` fire (ADR-0021:
      * `await` is the vertex's `poll`) and delivers to every subscriber (RFC-0008 §D
-     * assign-then-deliver). Config-constructed transports are set `UP`/`LISTENING` at
+     * assign-then-deliver). Eagerly-constructed transports are set `UP`/`LISTENING` at
      * creation; this remains the seam for later link events (and the only source for
-     * provided links). Until the RFC-0014 S5 liveness engine lands, callers drive this
-     * manually — the engine will become the sole writer of the DIAL transitions.
+     * provided links). On an ENGINE-MANAGED connection (a `self_heal_dial` kind's DIAL,
+     * RFC-0014 S5) the engine is the sole writer of the DIAL transitions — a manual
+     * write here still lands but is advisory-at-best and the next transition overwrites
+     * it; drive such a link through @ref acquire_link / @ref release_link instead.
      *
      * @note Thread-safe (#881): this takes the control mutex, so the transport thread
      *       reporting a provided link's liveness may run concurrently with the wire-driven
@@ -536,6 +618,10 @@ class transport_vertex_t {
         graph::vertex_handle_t vertex;  // the /net/<name> identity vertex (set on creation)
         conn_settings_t settings;
         std::unique_ptr<transport_t> owned;  // config-constructed socket (see class docs)
+        // The S5 liveness engine, iff this connection is engine-managed (RFC-0014 §4):
+        // a non-owning view of `owned` as its concrete type, so teardown can stop the
+        // worker BEFORE the vertex retires and acquire/release can reach the refcount.
+        self_heal_link_t* engine = nullptr;
     };
 
     // One declared module: the segment it mounts under, the config `kind` it constructs, and
@@ -668,11 +754,18 @@ class transport_vertex_t {
     std::string net_root_;
     mem::mem_backend_t* rx_backend_;   // RX segment source for owned view-delivering sockets
     mem::block_source_t* egress_src_;  // TX gather store for owned sockets (#873 / ADR-0079)
+    // One factory-catalog row: the constructor and the kind's capability declarations
+    // (RFC-0014 S5). Traits ride WITH the factory so one lookup answers both.
+    struct kind_entry_t {
+        transport_factory_t factory;
+        transport_kind_traits_t traits;
+    };
+
     // Pre-supplied links awaiting their SPEC, and created connections, both by NAME;
     // the transport-factory catalog by config `kind`.
     std::map<std::string, transport_t*, std::less<>> pending_links_;
     std::map<std::string, conn_t, std::less<>> conns_;
-    std::map<std::string, transport_factory_t, std::less<>> transport_types_;
+    std::map<std::string, kind_entry_t, std::less<>> transport_types_;
     // Declared modules — see register_module / module_for (declared-only, ADR-0073 §4).
     // A flat vector, not a map: this is written at setup and read once per
     // connection creation, so an rbtree buys nothing a linear scan over a handful of entries

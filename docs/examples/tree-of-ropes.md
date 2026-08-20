@@ -24,7 +24,7 @@ example asserts they never merge.
   an in-band `/net:children[]` write adds exactly one addressable vertex at
   `/net/<module>/<name>` — here `/net/can/link0`, the module taken from the
   `provide_link` staging key (`transport_vertex_t::provide_link`,
-  `core/src/transport_vertex.cpp:408`). The transport's real bytes live *outside*
+  `core/src/transport_vertex.cpp:431`). The transport's real bytes live *outside*
   the graph, in the FWD router's demux; no per-peer vertex or memory is added
   (ADR-0044). Attaching a bus does not "grow the rope."
 
@@ -42,7 +42,7 @@ example asserts they never merge.
   value at all: the read returns `NOT_FOUND`. Only once the link reports state does
   the vertex hold a value, and that value is a **single-link** rope carrying a
   one-byte link-state VALUE TLV (`link_state_value`,
-  `core/src/transport_vertex.cpp:73`) — categorically not a chained payload. The live
+  `core/src/transport_vertex.cpp:90`) — categorically not a chained payload. The live
   transport is found in `router.registry().by_name("net/can/link0")`, outside the
   graph.
 
