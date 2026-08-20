@@ -301,19 +301,19 @@ write is gated on `WRITE` — **not** `DELETE` — per
 **Mount and routing are the same path.** A created connection lives at `/net/<module>/<name>` and
 routes by exactly that path: the routing key *is* the mount path, so the registry's precomputed
 NAME run is exactly the prefix a hop prepends to `src` and the forward path assembles nothing per
-hop (`core/src/transport_vertex.cpp:500-507,517-523`;
+hop (`core/src/transport_vertex.cpp:523-530,540-546`;
 [ADR-0061 — per-transport mount routing, strip-K L5 demux](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md)).
 The `/net/<module>` structural vertex is created lazily on first use, with `graph_.find` itself as the
-dedupe rather than a second source of truth (`core/src/transport_vertex.cpp:525-533`). Because a
+dedupe rather than a second source of truth (`core/src/transport_vertex.cpp:548-556`). Because a
 connection is addressed under `/net/<module>/`, a first-level local vertex cannot shadow one.
 
 **Module naming is declared-only, by the application**
 ([ADR-0073](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0073-naming-authority-the-application-mints-one-predicate-gates.md)
 §4). There is no derived default and no library-side auto-registration: linking a built-in
 transport registers no module name, and an undeclared `(kind, role)` pair fails creation with
-`SCHEMA_NOT_FOUND` (`core/src/transport_vertex.cpp:183`). The application declares each module
-under a name it chooses through `register_module` (`core/src/transport_vertex.cpp:145`,
-`core/include/libtracer/transport_vertex.hpp:379`), a minting boundary gated by the shared
+`SCHEMA_NOT_FOUND` (`core/src/transport_vertex.cpp:206`). The application declares each module
+under a name it chooses through `register_module` (`core/src/transport_vertex.cpp:168`,
+`core/include/libtracer/transport_vertex.hpp:459`), a minting boundary gated by the shared
 segment-validity predicate — a reserved-character name answers `INVALID_PATH`. The built-in
 transports export *suggested*-name constants (`kWsClientSuggestedModule`, …) an application may
 adopt; `/net` itself is likewise only the recommended root convention (a constructor default).
@@ -324,11 +324,11 @@ the last can be refused: `add_child` answers `false` when the registry cannot gr
 only place that can say so (`core/include/libtracer/fwd_router.hpp:372`,
 `core/include/libtracer/child_registry.hpp:280`). A refusal unwinds the first two in reverse —
 retire the vertex, then erase the entry, which destroys the config-constructed socket — publishes
-no liveness, and answers `BACKPRESSURE` (`core/src/transport_vertex.cpp:629-632`). Discarding that
+no liveness, and answers `BACKPRESSURE` (`core/src/transport_vertex.cpp:689-692`). Discarding that
 `bool` left a connection reporting `UP` that no `dst` resolved, no inbound frame reached, and
 `remove_child` did not know about — a ghost a peer could mint by creating connections until the
 registry slab exhausted. A `provide_link` staging is consumed only once the wiring has succeeded
-(`core/src/transport_vertex.cpp:638`), so a retry after the pressure clears still finds its link.
+(`core/src/transport_vertex.cpp:698`), so a retry after the pressure clears still finds its link.
 
 **Liveness is the connection vertex's value.** `link_state_t` is six states —
 `DORMANT`, `DIALING`, `RECONNECTING`, `UP`, `LISTENING`, `BIND_FAILED`
@@ -337,7 +337,7 @@ links report listen-socket reachability with the last two, never a per-accepted-
 value is a 1-byte `VALUE` on the vertex, so it is `await`-able and subscribable: `subscribe
 /net/<module>/<name>` streams every transition. The liveness *engine* that would drive these
 automatically is not implemented — the value is set by the caller, and a config-constructed socket
-reports `UP` or `LISTENING` at creation (`core/src/transport_vertex.cpp:657-660`).
+reports `UP` or `LISTENING` at creation (`core/src/transport_vertex.cpp:717-720`).
 
 **The accepted direction, and what is not realised.** RFC-0014 replaces the single global
 `/net:children[]` catalog with a **per-module creator endpoint** at `/net/<module>/conn`, whose own

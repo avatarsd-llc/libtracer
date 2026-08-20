@@ -312,7 +312,7 @@ values are the reference encoding until then (`link_state_t`,
 reports **listen-socket reachability**, not per-accepted-peer connectivity; accepted-peer
 count and identity are exposed through the connection vertex's **synthesized
 `:children[]`**, built per read from the transport's own live-peer table
-(`core/src/transport_vertex.cpp:583`) — never through `:settings`, whose core namespace
+(`core/src/transport_vertex.cpp:630`) — never through `:settings`, whose core namespace
 is empty. Once up, a link is bidirectional regardless of who dialed — `role` says only *who initiates*. The liveness
 engine that drives these transitions automatically is not implemented; the value is set
 by the caller.
@@ -425,7 +425,7 @@ automatic**:
   and `port` are **creation-time config** (§Creation): they travel in the `SPEC`'s
   `config` and are parsed into the transport-private `tr::net::conn_settings_t`, whose
   only accessor hands out a **const** view
-  (`transport_vertex_t::settings_of`, `core/include/libtracer/transport_vertex.hpp:512`).
+  (`transport_vertex_t::settings_of`, `core/include/libtracer/transport_vertex.hpp:594`).
   The vertex `:settings` core namespace holds nothing to write — RFC-0022 §3.B deleted
   `settings_t`, so every flat knob name under it answers `SCHEMA_NOT_FOUND`
   caller-independently (`core/src/graph.cpp:3140`), leaving only the read container and
