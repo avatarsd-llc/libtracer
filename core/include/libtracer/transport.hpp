@@ -24,6 +24,7 @@
 #include <type_traits>
 #include <vector>
 
+#include "libtracer/config.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/peer_handle.hpp"
@@ -755,5 +756,35 @@ class transport_t {
      */
     [[nodiscard]] virtual bus_link_t* bus() { return nullptr; }
 };
+
+/**
+ * @brief @p link's BUS facet, or nullptr on a target that closed the bus module out —
+ *        the ONE door the routing plane asks through (#375 deliverable 3).
+ *
+ * At the default binding this is `link.bus()` and nothing else: the `if constexpr` selects the
+ * live branch, so every consumer's machine code is byte-identical to the direct call (verified
+ * by object-file `cmp` — 68 of 68 objects unchanged). Bound
+ * @ref tr::graph::default_config_t::kBusLinks `false`, the call is not merely predicted away —
+ * it is not compiled, so the peer-resolution, peer-enumeration and peer-lifecycle code that
+ * hangs off a non-null result is unreachable and the linker keeps none of it.
+ *
+ * Consumers ask through here rather than reading @ref tr::net::kBusLinks so that the
+ * point-to-point answer is spelled once. `transport_t::bus()` itself is untouched — still a
+ * virtual, still `return nullptr` by default (ADR-0047 §4: peer wiring is a wiring-frequency
+ * query, and this adds no template parameter and no dispatch mechanism to any control
+ * structure).
+ *
+ * @warning A DIRECT `link.bus()` call bypasses the gate and is correct only where the caller
+ *          IS the bus (a transport's own facet, a test pinning a link's shape). Anything on
+ *          the routing plane asks here.
+ * @param link The link to interrogate.
+ * @retval nullptr @p link is point-to-point, or this target carries no bus module at all.
+ */
+[[nodiscard]] inline bus_link_t* bus_of(transport_t& link) {
+    if constexpr (kBusLinks)
+        return link.bus();
+    else
+        return nullptr;
+}
 
 }  // namespace tr::net

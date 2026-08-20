@@ -447,7 +447,9 @@ void transport_tcp_server::on_readable(session_base_t& base, const std::byte* da
     // deliver point-to-point under the link's own registered name.  Reading the
     // stored flag, not `peer_rx_.has_any()`: a mode is a wiring-time fact, not a
     // per-frame consequence of which sink someone happened to install — and this
-    // reads a member instead of taking the slot's mutex once per frame.
+    // reads a member instead of taking the slot's mutex once per frame. `bus_mode()`
+    // is that member conjoined with whether this BUILD carries a bus module at all
+    // (#375 deliverable 3); at the default binding it IS the member load.
     const auto res = s.framer.feed(
         *backend_, max_frame_, data, len,
         [this, &s](view::segment_ptr_t seg, std::size_t flen) {
@@ -457,7 +459,7 @@ void transport_tcp_server::on_readable(session_base_t& base, const std::byte* da
             // the peer-named tier passes the handle as an argument, the flat tier has no
             // per-frame tag at all, and one unconditional 8-byte store serves both.
             delivering_ = s.handle;
-            if (peer_named_)
+            if (bus_mode())
                 peer_rx_.deliver(s.handle, std::move(frame));
             else
                 rx_.deliver(std::move(frame));

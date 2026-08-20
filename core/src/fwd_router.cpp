@@ -835,7 +835,11 @@ bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_sou
     // name into a directed send. An owning-delivery link funnels through the same
     // routing with the frame view alongside; a span link keeps the borrowed-span
     // path. No adapter wraps a span into a lying view.
-    if (bus_link_t* const bus = link.bus()) {
+    // Asked through `bus_of` (#375 deliverable 3): a target that closed the bus module out
+    // wires every child point-to-point, and the whole peer-named arm below — the two
+    // peer-lifecycle notifiers, the peer-named receivers, the `child_rx_ctx_t::bus` stamp
+    // `resolve_peer_name` keys off — is discarded at compile time rather than branched over.
+    if (bus_link_t* const bus = bus_of(link)) {
         // A reassembling bus that delivers ropes (ADR-0053 §5) hands its group up
         // as-is — zero-copy; a span-only bus keeps the borrowed peer-named path.
         // A bus frame arrives tagged with the sending peer's name — but a PEER has no

@@ -631,7 +631,9 @@ void slot_server_t::accept_peer() {
 }
 
 void slot_server_t::publish_peer_up(const session_base_t& s) {
-    if (!peer_named_) return;
+    // `bus_mode()`, not `peer_named_`: a build with no bus module has no per-session identity
+    // to anchor, so the arrival seam folds away entirely there (#375 deliverable 3).
+    if (!bus_mode()) return;
     std::string name;
     peer_handle_t handle;
     {
@@ -707,7 +709,7 @@ void slot_server_t::teardown_slot(session_base_t& s) {
     // mutated only here and in accept_peer, both on this thread, so no session can appear
     // or vanish between the answer and the notification.
     if (was_open && !departed.empty()) {
-        if (peer_named_)
+        if (bus_mode())
             notify_peer_down(departed_handle, departed);
         else if (!any_open_session())
             notify_down();

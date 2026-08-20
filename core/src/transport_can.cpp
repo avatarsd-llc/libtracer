@@ -22,6 +22,17 @@
 
 namespace tr::net {
 
+// CAN is a BUS by construction (ADR-0030): `can_transport_t::bus()` returns `this`
+// unconditionally, its peers are an announce census, and its whole addressing model is
+// peer-named. So a build that closed the bus module out and then compiles this module is a
+// contradiction, not a smaller node — the transport would come up and its peers would be
+// unaddressable. Refuse it here, where the module list and the configuration first meet,
+// rather than let it link (#375 deliverable 3).
+static_assert(kBusLinks,
+              "LIBTRACER_TRANSPORT_CAN needs the bus module: a CAN link is peer-named by "
+              "construction. Either configure -DLIBTRACER_TRANSPORT_CAN=OFF, or drop "
+              "`kBusLinks = false` from libtracer/config_override.hpp.");
+
 namespace {
 
 /**

@@ -444,6 +444,48 @@ struct default_config_t {
      * take deliberately rather than by omission.
      */
     static constexpr bool kWeaklyOrdered = true;
+
+    /**
+     * @brief Whether this target carries the ADR-0044 BUS facet at all — peer-named links,
+     *        per-peer addressing, in-band peer enumeration (#375 deliverable 3).
+     *
+     * A `tr::net` fact, and a member HERE for the reason @ref kSpinWaitSafe and
+     * @ref kDeviceBackendSlots are: ADR-0070's rule is that the configuration is ONE named
+     * type, so a knob that lives outside it cannot be reached by an override fragment.
+     * @ref tr::net::kBusLinks is its spelling for the transport plane.
+     *
+     * **What it closes.** A bus link reaches MANY peers and names each of them, so the
+     * routing plane carries a second addressing tier for it: the registry stamps a mount's
+     * bus SHAPE and resolves a residual segment as a peer (`child_registry_t::resolve_peer`,
+     * `by_name`'s peer fallback), `fwd_router_t::add_child` wires the peer-named receiver and
+     * both peer-lifecycle notifiers, and a connection vertex synthesizes its `:children[]`
+     * from the link's live peer table. Bound `false`, every one of those consumers folds to
+     * the point-to-point answer at COMPILE time through `%tr::net::bus_of` (`%transport.hpp`), and
+     * the peer-named machinery behind them is never reached — ADR-0047 §1 link-time module
+     * selection, expressed as a configuration member rather than as a TU list, because
+     * whether a tcp/ws listener is peer-named is a WIRING-time choice inside a TU that a
+     * bus-less target still compiles for its point-to-point half.
+     *
+     * **What it costs to keep (the default) and what closing it buys.** Measured on rv32
+     * (`-Os -fno-exceptions -fno-rtti`, `rv32imac_zicsr_zifencei`/`ilp32`, GCC 15.2, per-TU
+     * `.text`), closing it removes **1,400 B** of flash from `%fwd_router.cpp` and **678 B**
+     * from `%transport_vertex.cpp` — 2,078 B — and **0 B** of `.bss`, because the tier is code
+     * and per-instance state, not a static table. A `LIBTRACER_NET_PLANE=OFF` build gains
+     * nothing: it never compiled those TUs in the first place.
+     *
+     * **Who should set it.** A node whose links are point-to-point — one dial upstream, or a
+     * listener that serves its peers as one broadcast link (ADR-0001's originating firmware
+     * shape). Override fragment: `static constexpr bool kBusLinks = false;`
+     *
+     * **It is a REFUSAL, never a silent downgrade.** A build that binds it `false` and then
+     * asks for a bus is rejected, loudly and at the earliest door that can speak: compiling
+     * `LIBTRACER_TRANSPORT_CAN` (a bus by construction) is a `static_assert`, and a
+     * `peer_named=true` tcp/ws listener is refused by its SPEC factory and reports
+     * `transport_t::ok() == false` when constructed directly. Quietly serving such a
+     * configuration as FLAT would be worse than either: the listener's own per-frame tier
+     * select would keep delivering peer-named into a sink the router never installed.
+     */
+    static constexpr bool kBusLinks = true;
 };
 
 }  // namespace tr::graph
@@ -541,3 +583,23 @@ inline constexpr bool kSpinWaitSafe = tr::graph::config_t::kSpinWaitSafe;
 inline constexpr std::size_t kDeviceBackendSlots = tr::graph::config_t::kDeviceBackendSlots;
 
 }  // namespace tr::mem
+
+// ---------------------------------------------------------------------------------------------
+// Transport-plane (tr::net) build configuration. Delivered by the same header for the same
+// reason the L0 block above is (ADR-0068: one file per build, so every TU agrees); a separate
+// namespace because the fact it states belongs to the transport plane, not the graph.
+
+namespace tr::net {
+
+/**
+ * @brief Whether this target carries the ADR-0044 BUS facet at all (peer-named links).
+ *
+ * The transport plane's spelling of @ref tr::graph::default_config_t::kBusLinks, which carries
+ * the full rationale, the measured saving and the refusal rule. Derived from
+ * @ref tr::graph::config_t exactly as @ref tr::mem::kSpinWaitSafe is, so an override fragment
+ * sets it in the one place every knob is set. Its consumers reach it through
+ * `tr::net::bus_of` (`%transport.hpp`) rather than reading it directly.
+ */
+inline constexpr bool kBusLinks = tr::graph::config_t::kBusLinks;
+
+}  // namespace tr::net

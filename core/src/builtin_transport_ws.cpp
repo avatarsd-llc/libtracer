@@ -45,6 +45,10 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_ba
     //    SPEC-created listener has a null bus() and is a broadcast link — send() fans out
     //    to every open peer and no peer enumeration is reachable in-band at all, which
     //    left ADR-0044's peer-listing story creatable only by direct construction (#408).
+    //    On a target that closed the bus module out (`kBusLinks = false`, #375 deliverable
+    //    3) asking for it is REFUSED below, not quietly served as FLAT: the key would
+    //    otherwise be accepted and mean nothing, which is the silent mode flip the null
+    //    `bus()` contract exists to deny.
     //  - `max_peers` (VALUE u32) is the concurrent-peer admission cap (RFC-0006). Default
     //    0 no longer means UNBOUNDED (#1295): the transport resolves it through
     //    derive_max_peers, so an omitted key takes the liveness window's own ceiling and
@@ -72,6 +76,14 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_ba
                                                                   const wire::tlv_t* raw_config) {
         const config_reader_t cfg(raw_config);
         const bool peer_named = cfg.flag("peer_named").value_or(false);
+        // The bus-module refusal (#375 deliverable 3). TYPE_MISMATCH, the status this
+        // factory family already answers an unhonourable `:settings` with — a PERMANENT
+        // "this node cannot serve that configuration", not the TRANSIENT TRANSPORT_DOWN a
+        // failed bind gets, because no retry will make this build grow a bus facet.
+        if constexpr (!kBusLinks)
+            if (peer_named)
+                return graph::result_t<std::unique_ptr<transport_t>>(
+                    std::unexpected(graph::status_t::TYPE_MISMATCH));
         const auto max_peers = static_cast<std::size_t>(cfg.u32("max_peers").value_or(0));
         const std::uint32_t liveness_window = cfg.u32("liveness_window").value_or(0);
         const auto max_handshake = static_cast<std::size_t>(cfg.u32("max_handshake").value_or(0));

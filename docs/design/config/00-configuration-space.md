@@ -21,7 +21,7 @@ The configuration space therefore has exactly three kinds of axis, and no fourth
 
 | axis kind | what it selects | mechanism |
 | --- | --- | --- |
-| **module set** | which translation units compile at all | CMake `option()` / Kconfig — a dropped module leaves neither code nor a symbol |
+| **module set** | which translation units compile at all | CMake `option()` / Kconfig — a dropped module leaves neither code nor a symbol. One module, `kBusLinks`, has no TU of its own and is stated in the config header instead — see *The one module that is not a TU list*, below |
 | **buffer sizes** | how big the fixed tables are | `inline constexpr` in one hand-written header |
 | **policy types** | which implementation of a named seam is bound | `using` alias in the same header |
 
@@ -32,7 +32,7 @@ rather than a silent behavioural fork between translation units.
 
 The sizes and policies are members of **one named type**, `default_config_t`
 (`core/include/libtracer/config.hpp:84`), bound once by `using config_t = default_config_t;`
-(`:479`). An application declares its own by inheriting and overriding what differs (`:68-78`):
+(`:521`). An application declares its own by inheriting and overriding what differs (`:68-78`):
 
 ```cpp
 struct my_node_config_t : tr::graph::default_config_t {
@@ -43,7 +43,7 @@ using config_t = my_node_config_t;
 
 Inheriting means a knob added later does not break the preset — it inherits the new default
 rather than failing to compile. The rest of the library names the derived spellings re-exported
-below the traits type (`:482-505`), each of which is exactly its traits member, so introducing
+below the traits type (`:524-547`), each of which is exactly its traits member, so introducing
 `config_t` moved no call site.
 
 It is **bound once, not threaded as a template parameter**, and
@@ -131,6 +131,27 @@ one: the portable pair's gather egress asks `sendmsg` for `MSG_NOSIGNAL`, which 
 with `EOPNOTSUPP`, so on silicon it silently drops every data frame. See
 [the ESP-IDF integration README](https://github.com/avatarsd-llc/libtracer/blob/main/integrations/esp-idf/README.md).
 
+### The one module that is not a TU list — `kBusLinks`
+
+Every module above is selected by which sources compile. The **bus** module — ADR-0044's
+peer-named addressing tier: a mount's bus shape, per-peer resolution, in-band peer enumeration,
+the peer-named receiver and the two peer-lifecycle notifiers — cannot be, and is the deliberate
+exception ([#375](https://github.com/avatarsd-llc/libtracer/issues/375)). Whether a `tcp` or `ws`
+*listener* is peer-named is a **wiring-time** choice made inside a TU that a bus-less target still
+compiles for its point-to-point half, so there is no file to leave out. It is therefore stated as
+a configuration member, `kBusLinks`, and reached through one gate, `tr::net::bus_of`, so the
+closure is a compile-time fold at every consumer rather than a run-time branch. Measured on rv32
+(`-Os -fno-exceptions -fno-rtti`, GCC 15.2, per-TU `.text`), binding it `false` removes 1,400 B
+from `fwd_router.cpp` and 678 B from `transport_vertex.cpp` — 2,078 B of flash, 0 B of `.bss`, because
+the tier is code and per-instance state rather than a static table.
+
+Closing it is a **refusal, never a silent downgrade**. A `peer_named=true` listener SPEC is
+answered `TYPE_MISMATCH` (permanent — no retry grows a build a bus facet), a directly-constructed
+peer-named listener reports `ok() == false`, and compiling `LIBTRACER_TRANSPORT_CAN` — a bus by
+construction — is a `static_assert`. Serving such a configuration as flat would be worse than
+either: the listener's own per-frame tier select would keep delivering peer-named into a sink the
+router never installed.
+
 ### The required-modules footprint ceiling
 
 The minimum-feature module set — `frame`, `tlv_arena`, `backend_set`, `mem_pool`, `mem_source`,
@@ -178,18 +199,20 @@ is a knob the fragment does not state at all (#1244).
 | `kPinPayloadRatio` (`:262`) | ratio | 0 — the `kPinNever` sentinel | the preset |
 | `acl_policy_t` (`:271`) | policy type | `allow_only_policy_t` | inherited — the full policy is not selectable |
 | `lkv_slot_t` (`:287`) | policy type | `sp_atomic_slot_t` | inherited — the hazard slot is not selectable |
-| `kSpinWaitSafe` (`:531`) | target fact | `true` | derived from `IDF_TARGET` — `false` on every chip, `true` on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:318`) |
+| `kSpinWaitSafe` (`:573`) | target fact | `true` | derived from `IDF_TARGET` — `false` on every chip, `true` on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:318`) |
 | `kWeaklyOrdered` (`:446`) | target fact | `true` | inherited — every ESP chip is weakly ordered, which is the default |
+| `kBusLinks` (`:530`) | module presence | `true` | inherited — the component builds the full peer-named tier |
 
 Two CMake variables survive for one transition release, `-DLIBTRACER_ACL_FULL` and
 `-DLIBTRACER_LKV_SLOT`; `core/CMakeLists.txt` writes a fragment on their behalf. The five other
 cache variables this table used to list were deleted with the template (#1142).
 
 Each is documented at its declaration with what it costs and when to move it; that header is
-the reference, not this table. What matters here is the shape: **ten knobs, all named, all
+the reference, not this table. What matters here is the shape: **eleven knobs, all named, all
 finite.** Three are counts (`kVertexLockStripes`, `kHazardReaderSlots`, `kEdgePinSlots`), one is a
-padding width, one is a per-target RAM ceiling, one is a ratio, two are type bindings, and two are
-target facts rather than preferences. `kSpinWaitSafe` says whether a task on this target may spin
+padding width, one is a per-target RAM ceiling, one is a ratio, two are type bindings, two are
+target facts rather than preferences, and one — `kBusLinks`, below — states whether a *module* is
+present at all. `kSpinWaitSafe` says whether a task on this target may spin
 for a lock another task holds, and the guard in `mem_pool.hpp` reads it to refuse
 `synchronized_pool_t<spin_sync_t>` where the answer is no (#1158). `kWeaklyOrdered` says whether
 the target's memory model may reorder a later relaxed load ahead of an earlier `seq_cst` store,

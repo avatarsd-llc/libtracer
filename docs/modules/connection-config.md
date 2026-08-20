@@ -339,6 +339,16 @@ out of the raw config TLV it already receives, and in a block on this page. Not 
   (`length_prefix_framer::kDefaultMaxFrame`), not a knob.
 - **`peer_named` is off by default**, so a SPEC-created `tcp`/`ws` listener is a
   broadcast link and one request over it draws one reply *per peer*.
+- **`peer_named` may be REFUSED outright, not downgraded.** A target that closed the
+  ADR-0044 bus module out (`tr::graph::default_config_t::kBusLinks = false` — see
+  [transport.md](transport.md) §"Closing the bus module out at build time") carries no
+  peer-named tier at all, so both stream factories answer `peer_named = 1` with
+  `TYPE_MISMATCH` and create no connection. The status is deliberately the **permanent**
+  one rather than the transient `TRANSPORT_DOWN` a failed bind gets: no retry will make
+  that build grow a bus facet. Serving the key as if it had said `0` would be worse than
+  either, because the listener's own per-frame tier select reads its constructed mode —
+  a listener demoted only at the router would keep delivering peer-named into a sink
+  nothing installed.
 - **The builder types the universal keys, not the kind-private ones.**
   `conn_spec_t`'s named setters ([#902]) make `kind`, `addr`, `port`, `role` and the
   four u32s unmisspellable, and they replaced the sixteen hand-written emitters that

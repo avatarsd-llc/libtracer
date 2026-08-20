@@ -567,7 +567,10 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(const std::
     // vertex. The captured facet lives exactly as long as the link (the class's
     // documented lifetime contract — the graph must not outlive this object).
     graph::handlers_t handlers;
-    if (bus_link_t* const bus = link->bus()) {
+    // Asked through `bus_of` (#375 deliverable 3): on a target that closed the bus module out
+    // every connection vertex is the plain one, and the synthesis below — with the TLV
+    // emission and the `std::function` it captures into — is never compiled.
+    if (bus_link_t* const bus = bus_of(*link)) {
         handlers.on_children = [bus]() -> result_t<view_t> {
             std::vector<std::byte> members;
             bus->enumerate_peers([&members](std::string_view peer) {

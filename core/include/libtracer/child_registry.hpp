@@ -196,6 +196,18 @@ class child_registry_t {
          */
         [[nodiscard]] egress_t egress() const noexcept {
             const std::uintptr_t w = egress_.load(std::memory_order_acquire);
+            // On a target that closed the bus module out, the shape is a CONSTANT false —
+            // @ref add never stamps the bit, so reading it would be reading a bit nothing
+            // sets. Folding it here rather than trusting the optimizer is what lets every
+            // `multi_peer` test below become a compile-time false, so the bus arm of each
+            // one — the peer resolution, the peer fallback, the peer-named wiring — is
+            // discarded rather than branched over (#375 deliverable 3). It does NOT delete
+            // the descent's rejected-hit REPLY: `reject_bus_name_hop` answers six other
+            // refusals (`INVALID_PATH`, `NOT_FOUND`) and is emitted byte-identically under
+            // both bindings — measured, not assumed. At the default binding the
+            // `if constexpr` is discarded and this is the load and mask it always was.
+            if constexpr (!kBusLinks)
+                return egress_t{reinterpret_cast<transport_t*>(w & ~kBusShapeBit), false};
             return egress_t{reinterpret_cast<transport_t*>(w & ~kBusShapeBit),
                             (w & kBusShapeBit) != 0};
         }
@@ -268,8 +280,15 @@ class child_registry_t {
     [[nodiscard]] bool add(std::string name, transport_t& link) {
         // Shape and link become ONE word here, so no reader can ever see one without the
         // other (#882). `bus()` is probed exactly once, on this control-plane call.
+        //
+        // Through `bus_of` (#375 deliverable 3): on a target that closed the bus module out
+        // no mount can BE a bus, so the shape bit is never stamped — and that is correct, not
+        // a lost refusal. The bit exists so a residual segment below a bus mount is rejected
+        // rather than resolved locally (ADR-0073 §3, RFC-0020 §3); with no bus facet in the
+        // build there is no such mount for a residual to sit below, because the one door that
+        // could create one refuses at construction (config.hpp, `kBusLinks`).
         const std::uintptr_t egress =
-            reinterpret_cast<std::uintptr_t>(&link) | (link.bus() != nullptr ? kBusShapeBit : 0);
+            reinterpret_cast<std::uintptr_t>(&link) | (bus_of(link) != nullptr ? kBusShapeBit : 0);
         child_t* hit = nullptr;
         for_each([&](const child_t& c) {
             if (c.name == name) {
@@ -512,13 +531,14 @@ class child_registry_t {
      * The per-endpoint replacement for `by_name`'s global cross-bus scan: a peer segment
      * is resolved against the multi-peer child it was addressed *through*, so two servers'
      * same-named peers stay distinct and a peer is never reachable through the wrong
-     * module. A point-to-point child resolves no peer at all.
+     * module. A point-to-point child resolves no peer at all — and neither does anything, on
+     * a target that closed the bus module out (`tr::net::bus_of`, #375 deliverable 3).
      * @return The directed per-peer endpoint, or nullptr if this child has no such peer.
      */
     [[nodiscard]] static transport_t* resolve_peer(const child_t& child, std::string_view peer) {
         const egress_t eg = child.egress();
         if (!eg.multi_peer || eg.link == nullptr) return nullptr;
-        bus_link_t* const bus = eg.link->bus();
+        bus_link_t* const bus = bus_of(*eg.link);
         return bus == nullptr ? nullptr : bus->peer_link(peer);
     }
 
@@ -597,7 +617,7 @@ class child_registry_t {
         for_each([&](const child_t& c) {
             transport_t* const l = c.link();
             if (l == nullptr) return false;  // tombstone (#494) — no link to ask
-            if (bus_link_t* const bus = l->bus()) {
+            if (bus_link_t* const bus = bus_of(*l)) {
                 if (transport_t* const peer = bus->peer_link(name)) {
                     hit = peer;
                     return true;

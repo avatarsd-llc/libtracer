@@ -38,6 +38,17 @@
 
 namespace tr::net {
 
+// `httpd_ws_link_t` derives from `bus_link_t` unconditionally — it serves many inbound
+// browser sessions and names each one — so it is exactly the module a `kBusLinks = false`
+// target declared it does not carry, and it has no flat mode to be demoted to. The refusal
+// is `httpd_ws_link_t::ok()` (see its doc): a came-up predicate that answers false, which is
+// the same door `slot_server_t` refuses a peer-named listener through and the one every
+// caller already checks. It is deliberately NOT a `static_assert` the way `transport_can.cpp`
+// carries one: CAN's TU is selected by a CMake module option, so an assert there is
+// actionable (turn the module off), while this TU is compiled unconditionally by the
+// component and by core's host fakes, where a hard error would break builds that never
+// construct the link (#375 deliverable 3).
+
 namespace {
 
 constexpr const char* kTag = "httpd_ws";

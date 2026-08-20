@@ -539,8 +539,19 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * by the destructor, so this never answers live state (the defect #1203 fixed on the
      * client link). Which peers are currently attached is a different question entirely —
      * @ref enumerate_peers / @ref peer_stats_t — because this is a MULTI-PEER server.
+     *
+     * On a target that closed the ADR-0044 bus module out
+     * (`tr::graph::default_config_t::kBusLinks = false`, #375 deliverable 3) it is
+     * unconditionally false: this link is peer-named by construction — it has no flat mode to
+     * fall back to — so a build that declared it carries no bus facet cannot serve it, and
+     * saying so through the came-up predicate is what stops it being wired into a routing
+     * plane that would resolve none of its peers. At the default binding the `if constexpr`
+     * is discarded and this is `handle_ != nullptr`, the predicate it always was.
      */
-    [[nodiscard]] bool ok() const noexcept { return handle_ != nullptr; }
+    [[nodiscard]] bool ok() const noexcept {
+        if constexpr (!kBusLinks) return false;
+        return handle_ != nullptr;
+    }
 
     /**
      * @brief Liveness (the @ref transport_t::link_up contract): true while this server is

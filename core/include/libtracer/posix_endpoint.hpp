@@ -620,8 +620,25 @@ class stream_endpoint_t : protected posix_endpoint_t {
  */
 class slot_server_t : public transport_t, public bus_link_t, protected stream_endpoint_t {
    public:
-    /** @brief True if the listen socket is bound and listening. */
-    [[nodiscard]] bool ok() const noexcept { return listen_fd_ >= 0; }
+    /**
+     * @brief True if the listen socket is bound and listening — and, on a target that closed
+     *        the bus module out, only if this server did not ask to be peer-named (#375).
+     *
+     * The came-up predicate `make_checked` asks (#1059), so the second limb is what turns a
+     * `kBusLinks = false` build's refusal into an ordinary "this link did not come up" for
+     * every door — the SPEC factory and a direct constructor alike. It is a REFUSAL rather
+     * than a quiet demotion to FLAT because a demotion is not observable and this is: a
+     * deployment that configured peer-named addressing on a build that carries none has a
+     * configuration error, and a listener that answers `ok()` would hide it.
+     *
+     * At the default binding the `if constexpr` is discarded and this is `listen_fd_ >= 0`,
+     * the predicate it always was — same instructions, verified by object-file `cmp`.
+     */
+    [[nodiscard]] bool ok() const noexcept {
+        if constexpr (!kBusLinks)
+            if (peer_named_) return false;
+        return listen_fd_ >= 0;
+    }
 
     /** @brief The actual bound TCP port (resolves an ephemeral 0 request). */
     [[nodiscard]] std::uint16_t local_port() const noexcept { return bound_port_; }
@@ -672,7 +689,7 @@ class slot_server_t : public transport_t, public bus_link_t, protected stream_en
      *       peers (the registered child NAME), so firing that on a mid-life close would
      *       evict the surviving peers' edges too.
      */
-    [[nodiscard]] bus_link_t* bus() override { return peer_named_ ? this : nullptr; }
+    [[nodiscard]] bus_link_t* bus() override { return bus_mode() ? this : nullptr; }
 
     /**
      * @brief The mode authority (#889): the `peer_named` this server was constructed with.
@@ -681,8 +698,12 @@ class slot_server_t : public transport_t, public bus_link_t, protected stream_en
      * tier select, and the departure branch in @ref teardown_slot all key off this flag (not
      * off whether a peer sink happens to be installed), and `bus_link_t` refuses every
      * peer-named wiring call while it is false.
+     *
+     * It reads @ref bus_mode, not the constructor argument, so the one answer stays one
+     * answer on a target that closed the bus module out: there the server is FLAT in every
+     * respect, and @ref ok is what reports that the configuration was refused (#375).
      */
-    [[nodiscard]] bool peer_named() const noexcept override { return peer_named_; }
+    [[nodiscard]] bool peer_named() const noexcept override { return bus_mode(); }
 
     /** @brief Visit the currently-OPEN peers' names, `p<slot>` (#426). */
     void enumerate_peers(const peer_visitor_t& visit) const override;
@@ -980,6 +1001,25 @@ class slot_server_t : public transport_t, public bus_link_t, protected stream_en
      *         at construction — never 0, never above the window's ceiling (#1295). */
     std::size_t max_peers_ = 1;
     bool peer_named_ = false; /**< @brief Expose bus() — a wiring-time deployment choice. */
+
+    /**
+     * @brief The constructed mode AS THIS BUILD CAN HONOUR IT — the one predicate every
+     *        peer-named branch in this class and its two derived servers reads (#375).
+     *
+     * `peer_named_` is the REQUEST; this is the request conjoined with whether the target
+     * carries a bus module at all (`tr::graph::default_config_t::kBusLinks`). The two differ
+     * in exactly one build, the one that closed the module out, and there this is constant
+     * `false` — so the per-frame tier select, the departure seam, the arrival seam and
+     * @ref bus all collapse to their FLAT arms at compile time and the peer-named halves are
+     * never emitted. That build cannot reach those arms at run time either, because @ref ok
+     * refuses such a server outright; the folding is what makes the refusal FREE rather than
+     * merely safe.
+     *
+     * Non-virtual and inline on purpose: it is read once per inbound frame on the poll thread,
+     * where `peer_named()`'s virtual would be a per-frame dispatch. At the default binding it
+     * IS `peer_named_` — one member load, the instruction sequence that was there before.
+     */
+    [[nodiscard]] bool bus_mode() const noexcept { return kBusLinks && peer_named_; }
     /** @brief The peer whose frame is being delivered RIGHT NOW — @ref inbound_peer's
      *         storage. Stamped by the derived server's receive loop immediately before it
      *         hands a frame up the FLAT tier, on the poll thread, and never read off it. */

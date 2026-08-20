@@ -33,7 +33,10 @@ void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
     // The two LISTEN-side tcp-private keys mirror ws's verbatim (ADR-0043 §5
     // kind-private config keys):
     //  - `peer_named` (VALUE u8, nonzero = true; default false) exposes the bus_link_t
-    //    facet — each inbound peer gets its own return-route identity (board↔board).
+    //    facet — each inbound peer gets its own return-route identity (board↔board). On a
+    //    target that closed the bus module out (`kBusLinks = false`, #375 deliverable 3)
+    //    asking for it is REFUSED below rather than quietly served as FLAT, exactly as the
+    //    ws factory refuses it.
     //  - `max_peers` (VALUE u32) is the concurrent-peer admission cap (RFC-0006). Default
     //    0 no longer means UNBOUNDED (#1295): the transport resolves it through
     //    derive_max_peers, so an omitted key takes the liveness window's own ceiling and
@@ -53,6 +56,12 @@ void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
         "tcp", [rx_backend, egress_src](const conn_settings_t& s, const wire::tlv_t* raw_config) {
             const config_reader_t cfg(raw_config);
             const bool peer_named = cfg.flag("peer_named").value_or(false);
+            // The bus-module refusal — the ws factory's twin; see its comment for why
+            // TYPE_MISMATCH rather than TRANSPORT_DOWN (#375 deliverable 3).
+            if constexpr (!kBusLinks)
+                if (peer_named)
+                    return graph::result_t<std::unique_ptr<transport_t>>(
+                        std::unexpected(graph::status_t::TYPE_MISMATCH));
             const auto max_peers = static_cast<std::size_t>(cfg.u32("max_peers").value_or(0));
             const std::uint32_t liveness_window = cfg.u32("liveness_window").value_or(0);
             auto link = dial_or_listen(

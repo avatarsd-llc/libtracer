@@ -1795,3 +1795,100 @@ add_executable(reclaim_test reclaim_test.cpp)
 target_link_libraries(reclaim_test PRIVATE libtracer Threads::Threads)
 libtracer_test_warnings(reclaim_test)
 add_test(NAME reclaim COMMAND reclaim_test)
+
+# #375 deliverable 3 / ADR-0044 + ADR-0047 §1 — the BUS MODULE as a build-time-closed seam.
+# Runs under whatever `kBusLinks` this build bound: the present arm asserts the module works,
+# the closed arm asserts it is absent AND that asking for it is refused rather than quietly
+# demoted. ONE executable serves both bindings by `if constexpr`, exactly as reclaim_test does
+# for ADR-0080, so the CI matrix needs no second target. It is deliberately NOT labelled `bus`
+# below: it is the one test that must run in BOTH legs.
+if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_WS)
+    add_executable(bus_module_test bus_module_test.cpp)
+    target_link_libraries(bus_module_test PRIVATE libtracer Threads::Threads)
+    libtracer_test_warnings(bus_module_test)
+    add_test(NAME bus_module COMMAND bus_module_test)
+endif()
+
+# The `bus` CTest LABEL — the tests that need the ADR-0044 bus module PRESENT (#375
+# deliverable 3), so a `kBusLinks = false` build can deselect them with `ctest -LE bus`.
+#
+# It is a label rather than a set of in-test `if constexpr` skips because the fact it records
+# is a property of the TARGET, not of a case: each executable below either constructs a
+# peer-named listener, wires a multi-peer link into the routing plane, or (the httpd_ws_*
+# family) exercises a link that is a bus by construction and therefore never comes up on a
+# bus-less build. Stating it here keeps it in ONE diffable place and makes it self-correcting:
+# a new bus-dependent test that forgets the label reds the bus-closed leg rather than passing
+# silently — which is the failure direction a deselection list is allowed to have.
+#
+# `if(TEST ...)` because the set is module-gated above: a build without CAN, without the net
+# plane, or without integrations/esp-idf/ present registers only a subset.
+set(LIBTRACER_BUS_TESTS
+    child_rx_churn
+    collect
+    edge_eviction
+    fwd_flatten_backend
+    mount_routing
+    mount_shape_flip
+    orchestrate_depart
+    peer_handle_seam
+    send_stall
+    session_anchor
+    tcp
+    transport_can
+    transport_can_peers
+    transport_vertex
+    write_ctx
+    ws_transport
+    httpd_ws_admission
+    httpd_ws_adopted_host
+    httpd_ws_auth
+    httpd_ws_close_peer
+    httpd_ws_departure_cost
+    httpd_ws_eviction_lock
+    httpd_ws_fanout_alloc
+    httpd_ws_fanout_wait
+    httpd_ws_fanout_width
+    httpd_ws_keepalive
+    httpd_ws_send_stall
+    httpd_ws_session_identity
+    httpd_ws_teardown
+    httpd_ws_tx_pool)
+foreach(_libtracer_bus_test IN LISTS LIBTRACER_BUS_TESTS)
+    if(TEST ${_libtracer_bus_test})
+        set_property(TEST ${_libtracer_bus_test} APPEND PROPERTY LABELS bus)
+    endif()
+endforeach()
+
+# The other half of the refusal (#375 deliverable 3): `transport_can.cpp`'s
+# `static_assert(kBusLinks, ...)`. A rejection is not observable from a compiled binary — by the
+# time a test runs, the TU that should have been rejected has already compiled — so the check
+# drives the compiler over the REAL TU under both bindings, exactly as the #1158 spin-pool guard
+# does. Gated on the CAN module because that is the option whose combination with `kBusLinks =
+# false` is the contradiction; the bus-closed CI leg turns CAN off and so never reaches it, which
+# is precisely why this guard has to exist separately.
+if(LIBTRACER_TRANSPORT_CAN)
+    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/bus-closed/libtracer/config_override.hpp
+"/**
+ * @file
+ * @brief GENERATED test fixture — the ADR-0044 bus module closed out (#375 deliverable 3).
+ */
+#pragma once
+
+namespace tr::graph {
+
+/** @brief The defaults, with no peer-named links at all (a point-to-point node). */
+struct bus_closed_config_t : default_config_t {
+    static constexpr bool kBusLinks = false;
+};
+
+using config_t = bus_closed_config_t;
+
+}  // namespace tr::graph
+")
+    add_test(NAME bus_can_guard COMMAND ${CMAKE_COMMAND}
+             -DLT_CXX=${CMAKE_CXX_COMPILER}
+             -DLT_CORE_INCLUDE=${CMAKE_CURRENT_SOURCE_DIR}/../include
+             -DLT_BUS_CLOSED_INCLUDE=${CMAKE_CURRENT_BINARY_DIR}/bus-closed
+             -DLT_PROBE=${CMAKE_CURRENT_SOURCE_DIR}/../src/transport_can.cpp
+             -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/bus_can_guard.cmake)
+endif()
