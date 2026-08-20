@@ -621,6 +621,11 @@ a reply already being assembled.
 :members:
 ```
 
+```{doxygenstruct} tr::graph::pub_edge_t
+:project: libtracer
+:members:
+```
+
 ```{doxygentypedef} tr::graph::subscriber_fn_t
 :project: libtracer
 ```

@@ -16,17 +16,20 @@
 #pragma once
 
 #include <atomic>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <new>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 #include "libtracer/edge_pin.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/rope.hpp"
+#include "libtracer/segment.hpp"
 #include "libtracer/view.hpp"
 
 /**
@@ -105,12 +108,41 @@ struct delivery_policy_t {
 using subscriber_fn_t = void (*)(void* ctx, const rope_t& value);
 
 /**
- * @brief The COLD wire/gate half of a subscription edge (#380 §3), lazily allocated:
- *        the in-process edge — the common MCU wiring shape (callback or local target,
- *        empty caller) — keeps `subscriber_t::remote` null and pays one pointer
- *        instead of ~90 B of route/link/caller state per edge.
+ * @brief The COLD wire/gate half of a subscription edge (#380 §3), lazily allocated and
+ *        **refcount-shared, immutable after admission** (#1442): the in-process edge — the
+ *        common MCU wiring shape (callback or local target, empty caller) — keeps
+ *        `subscriber_t::remote` null and pays one pointer instead of ~90 B of route/link/
+ *        caller state per edge.
+ *
+ * **Build then freeze.** An admission door fills one of these through
+ * @ref subscriber_t::ensure_remote while the record is still private to its stack-local
+ * `subscriber_t`; the slot verb then moves it in, and from the first
+ * `%vertex_t::try_publish_edges` onward the record is READ-ONLY. Nothing in the tree
+ * writes it after admission — `index_link_vertex`'s key choice, `evict_link_edges`' link
+ * compare, `evict_route_edges`' route compare, `edge_view_of` and `try_copy_published` are
+ * all reads — which is what makes sharing it correct rather than merely cheap.
+ *
+ * That immutability is the whole fix for #1442. Before it, a republish DEEP-COPIED this
+ * record into a fresh `pub_remote_t` per pre-existing entry, per admission — one nothrow
+ * `operator new` plus up to two `std::string` heap copies each — and `%scan_retired_edges`
+ * freed them all again on the next pass. Measured at ~940 instructions per pre-existing edge
+ * against a ~158 inherent floor at 65 links (`bench/README.md`, *Where the whole-subscribe
+ * growth goes*), i.e. ~83 % of the constant spent reproducing bytes byte-identical to the
+ * ones being retired. A republish now copies a pointer and increments @ref refs.
  */
 struct subscriber_remote_t {
+    /**
+     * @brief This node's NAME for the link the subscribe arrived on.
+     *
+     * FIRST, and the member ORDER below is the retired `pub_remote_t`'s, not this record's
+     * historical one. That is deliberate and load-bearing: unifying the two halves means the
+     * DELIVERY path (`vertex_t::try_copy_published`) now reads this record instead of the
+     * published copy, and keeping the offsets it reads at exactly where they were is what
+     * makes that loop's instruction stream identical before and after #1442. The slot-side
+     * readers (`edge_view_of`, `evict_link_edges`, `evict_route_edges`) move their
+     * displacements instead — control-plane paths, none of them pinned.
+     */
+    std::string link;
     /**
      * @brief The consumer's accumulated return route (a complete PATH TLV's bytes — the FWD
      *        `src` the subscribe arrived with).
@@ -132,17 +164,6 @@ struct subscriber_remote_t {
      * alive across a concurrent unsubscribe. An opaque view, so L4 never depends on tr::net.
      */
     view_t return_route{};
-    std::string link; /**< @brief This node's NAME for the link the subscribe arrived on. */
-    /**
-     * @brief The caller context this edge was created under (#81, ADR-0026 fan-in gate).
-     *
-     * The inbound link NAME for a remote subscribe, empty for a locally-wired edge. A
-     * fan-out re-dispatch into a LOCAL target vertex is gated by the TARGET's `:acl` WRITE
-     * right under this context — the subscription's creator is the "writer" the target
-     * authorizes. A REMOTE subscriber's fan-in gate runs on the peer instead (its
-     * `FWD{WRITE}` terminus checks the same right).
-     */
-    std::string caller;
     /**
      * @brief The COMPLETED reverse-direction bound route (RFC-0024 §7.1 amendment 1) — a
      *        `PATH_REF` TLV whose element 0 is THIS node's own reference to the connection
@@ -160,6 +181,16 @@ struct subscriber_remote_t {
      */
     view_t reverse_route{};
     /**
+     * @brief The caller context this edge was created under (#81, ADR-0026 fan-in gate).
+     *
+     * The inbound link NAME for a remote subscribe, empty for a locally-wired edge. A
+     * fan-out re-dispatch into a LOCAL target vertex is gated by the TARGET's `:acl` WRITE
+     * right under this context — the subscription's creator is the "writer" the target
+     * authorizes. A REMOTE subscriber's fan-in gate runs on the peer instead (its
+     * `FWD{WRITE}` terminus checks the same right).
+     */
+    std::string caller;
+    /**
      * @brief Route-handle opt-in (`SUBSCRIBER.qos_settings.delivery_compact`, RFC-0004
      *        §E.1 / ADR-0035 slice 4).
      *
@@ -170,6 +201,108 @@ struct subscriber_remote_t {
      * state.
      */
     bool delivery_compact = false;
+    /**
+     * @brief Intrusive refcount (#1442): how many holders name this record — the slot, plus
+     *        one per PUBLISHED edge array whose entry points at it.
+     *
+     * **Rides the record's existing TAIL PADDING and therefore costs zero bytes.**
+     * @ref delivery_compact ends at offset 113 and the record is 8-aligned, so a 4-byte
+     * counter lands at 116 and `sizeof` stays the pinned 120 B. That is why the shape is an
+     * intrusive count and not a `std::shared_ptr`: a 16-byte handle would have widened
+     * @ref subscriber_t (pinned at 80 B) AND @ref pub_edge_t, whose width was measured at
+     * **+23 %** on the fan-out-1024 publish the last time it grew — the fix would have been
+     * paid for out of the delivery path.
+     *
+     * Not a synchronization primitive for the PAYLOAD. The payload is written once, before
+     * the record is ever named by a published array, and the seq_cst exchange that publishes
+     * that array is what makes those bytes visible to a pinned reader — exactly the ordering
+     * the deep copy relied on. The COUNT is atomic because two mutators can be inside
+     * `%scan_retired_edges` at the same time (each pops a disjoint retire list after
+     * releasing the stripe lock) and both may drop the last reference to the same record.
+     * A reader never touches it: `%vertex_t::try_copy_published` copies the strings out and
+     * leaves the handle alone.
+     *
+     * `%tr::view::detail::ref_count_t` is the in-tree primitive @ref tr::view::segment_ptr_t
+     * already uses, `LIBTRACER_NO_ATOMIC` fallback included.
+     */
+    view::detail::ref_count_t refs{1};
+};
+
+/**
+ * @brief Intrusive owning handle for a @ref subscriber_remote_t — ONE pointer, copy = clone.
+ *
+ * The `%tr::view::segment_ptr_t` shape, applied to the subscription cold half (#1442): copy is
+ * a relaxed increment, destruction is an acq_rel decrement, and the last holder out frees the
+ * record. Eight bytes, so it drops into @ref subscriber_t and @ref pub_edge_t exactly where
+ * the `std::unique_ptr` it replaces sat and neither pinned width moves.
+ *
+ * Const by default. `operator->` yields a `const` record because every holder except the
+ * admitting door is a reader; the one mutable escape (@ref mutable_get) is named so that a
+ * write to a published record cannot be typed by accident.
+ */
+class remote_ptr_t {
+   public:
+    /** @brief An empty handle — the plain in-process edge's cold half (none). */
+    remote_ptr_t() noexcept = default;
+
+    /** @brief Adopt a freshly built record's INITIAL reference without bumping (`refs == 1`).
+     *  @param p The record, or null (which yields an empty handle). */
+    [[nodiscard]] static remote_ptr_t adopt(subscriber_remote_t* p) noexcept {
+        remote_ptr_t h;
+        h.p_ = p;
+        return h;
+    }
+
+    /** @brief Clone — one more reference to the same immutable record (relaxed increment). */
+    remote_ptr_t(const remote_ptr_t& other) noexcept : p_(other.p_) {
+        if (p_ != nullptr) p_->refs.inc_relaxed();
+    }
+    /** @brief Transfer @p other's reference, leaving it empty. */
+    remote_ptr_t(remote_ptr_t&& other) noexcept : p_(other.p_) { other.p_ = nullptr; }
+    /** @brief Copy-and-swap assignment — one operator covers copy- and move-assign. */
+    remote_ptr_t& operator=(remote_ptr_t other) noexcept {
+        std::swap(p_, other.p_);
+        return *this;
+    }
+    /** @brief Release this reference; the last one out frees the record. */
+    ~remote_ptr_t() { reset(); }
+
+    /** @brief Drop this reference (acq_rel) and empty the handle; frees the record at zero. */
+    void reset() noexcept {
+        if (p_ != nullptr && p_->refs.dec_acq_rel() == 1) delete p_;
+        p_ = nullptr;
+    }
+
+    /** @brief The shared record, read-only; null when this edge carries no cold half. */
+    [[nodiscard]] const subscriber_remote_t* get() const noexcept { return p_; }
+    /** @brief Member access on the shared record (read-only). */
+    [[nodiscard]] const subscriber_remote_t* operator->() const noexcept { return p_; }
+    /** @brief True iff this handle names a record. */
+    [[nodiscard]] explicit operator bool() const noexcept { return p_ != nullptr; }
+    /** @brief Null test, so `remote == nullptr` reads exactly as it did under
+     *         `std::unique_ptr` at every call site that tests for the in-process edge. */
+    [[nodiscard]] friend bool operator==(const remote_ptr_t& h, std::nullptr_t) noexcept {
+        return h.p_ == nullptr;
+    }
+    /** @brief Holder count — the build-then-freeze assertion and diagnostics ONLY, never a
+     *         synchronization primitive (an acquire load of a value another thread may be
+     *         changing). */
+    [[nodiscard]] std::uint_least32_t use_count() const noexcept {
+        return p_ != nullptr ? p_->refs.load_acquire() : 0;
+    }
+
+    /**
+     * @brief The shared record, MUTABLE — the admission door's BUILD phase and nothing else.
+     *
+     * Legal only while the caller is the record's sole holder, which is what
+     * @ref subscriber_t::ensure_remote asserts. Once a publish has cloned the handle, the
+     * record is bytes a pinned reader may be copying with no lock and no pin on the record
+     * itself — a write here would be a data race the deep copy used to make impossible.
+     */
+    [[nodiscard]] subscriber_remote_t* mutable_get() const noexcept { return p_; }
+
+   private:
+    subscriber_remote_t* p_ = nullptr; /**< @brief The shared record, or null. */
 };
 
 /**
@@ -277,8 +410,9 @@ struct subscriber_t {
     view_t source_view{};
     /** @brief The cold wire/gate half (#380 §3) — null for the plain in-process edge;
      *         allocated by @ref ensure_remote when a route/link/caller/compact-flag is
-     *         stored (pay-for-what-you-use, ADR-0021). */
-    std::unique_ptr<subscriber_remote_t> remote;
+     *         stored (pay-for-what-you-use, ADR-0021). SHARED with every published entry
+     *         that names this slot (#1442), never copied into one. */
+    remote_ptr_t remote;
     /** @brief This subscription's DELIVERY policy (RFC-0022 §3.A) — the packed 16 bits its
      *         `SUBSCRIBER.SETTINGS{ NAME "delivery_policy" }` carried, or all-zero when it
      *         carried none. HOT, not in the cold `remote` half: `durability_request` is read
@@ -290,11 +424,37 @@ struct subscriber_t {
      *         `delivery_mode_t`, never a per-subscriber byte comparison). */
     bool active = true;
 
-    /** @brief The cold half, allocated on first use (admission-time only — never on a
-     *         dispatch path). */
+    /** @brief A blank edge (an inert slot shell, or a door's scratch record). */
+    subscriber_t() = default;
+    /** @brief NOT copyable, exactly as it was while the cold half was a `std::unique_ptr`
+     *         (#380 §3). The handle that replaced it IS copyable — that is the point — so
+     *         the ban is stated rather than inherited: a copied slot would share a cold half
+     *         that @ref ensure_remote is then entitled to write. */
+    subscriber_t(const subscriber_t&) = delete;
+    /** @brief NOT copy-assignable — see the copy constructor. */
+    subscriber_t& operator=(const subscriber_t&) = delete;
+    /** @brief Movable: what the slot verbs do (append, reuse, reclaim-in-place). */
+    subscriber_t(subscriber_t&&) = default;
+    /** @brief Move-assignable: `subs[idx] = std::move(...)` is the reclaim. */
+    subscriber_t& operator=(subscriber_t&&) = default;
+    /** @brief Releases this slot's reference to the shared cold half. */
+    ~subscriber_t() = default;
+
+    /**
+     * @brief The cold half, allocated on first use (admission-time only — never on a
+     *        dispatch path), and MUTABLE only because the caller is still its sole holder.
+     *
+     * The build phase of build-then-freeze (#1442). Every in-tree door fills a stack-local
+     * @ref subscriber_t and only then hands it to `vertex_t::add_edge` / `replace_edge`, so
+     * nothing has cloned the handle yet; the assertion states that rather than trusting it,
+     * because a write reached after a publish would mutate bytes a pinned reader may be
+     * copying under no lock.
+     */
     subscriber_remote_t& ensure_remote() {
-        if (!remote) remote = std::make_unique<subscriber_remote_t>();
-        return *remote;
+        if (remote == nullptr) remote = remote_ptr_t::adopt(new subscriber_remote_t{});
+        assert(remote.use_count() == 1 &&
+               "the subscription cold half is immutable once published (#1442)");
+        return *remote.mutable_get();
     }
 };
 
@@ -310,16 +470,28 @@ struct subscriber_t {
  *
  * 64-bit hosts only: the widths are pointer-sized-member sums, so an MCU build legitimately
  * differs and a `sizeof` pin there would be a false alarm rather than a guard.
+ *
+ * #1442 moved the cold half from owned-per-holder to refcount-shared and **both numbers are
+ * unchanged**: the handle is one pointer, as the `std::unique_ptr` was, and the intrusive
+ * count fits the cold record's pre-existing tail padding. A future member that pushes
+ * @ref subscriber_remote_t past 120 B evicts the counter into a word of its own and costs 8,
+ * not 4 — that is the growth this pin is here to price.
  */
 static_assert(sizeof(void*) != 8 || sizeof(subscriber_t) == 80,
               "the HOT edge record is 80 B — see #380 §3; move new members to the cold half");
 static_assert(sizeof(void*) != 8 || alignof(subscriber_t) == 8,
               "the HOT edge record is 8-aligned; it lives in a vector");
+static_assert(std::is_nothrow_move_constructible_v<subscriber_t>,
+              "the slot vector grows by MOVE; a throwing move would copy — and the copy is "
+              "deleted");
 static_assert(sizeof(void*) != 8 || sizeof(subscriber_remote_t) == 120,
               "the COLD edge half is 120 B — price any growth against the per-edge RAM");
 static_assert(sizeof(void*) != 8 || alignof(subscriber_remote_t) == 8,
-              "the COLD edge half is 8-aligned; it is unique_ptr-owned, so its address is "
-              "stable across a slot-vector reallocation");
+              "the COLD edge half is 8-aligned; it is refcount-owned off to the side, so its "
+              "address is stable across a slot-vector reallocation");
+static_assert(sizeof(void*) != 8 || sizeof(remote_ptr_t) == 8,
+              "the cold-half handle is ONE pointer — a wider one (a std::shared_ptr) is paid "
+              "for out of pub_edge_t, on the delivery path");
 
 /**
  * @brief The dispatch-relevant snapshot of one ACTIVE subscription edge.
@@ -416,25 +588,6 @@ class edge_snapshot_t {
 };
 
 /**
- * @brief The COLD wire/gate half of a published edge — null for the plain in-process edge.
- *
- * Split out for the reason #380 §3 split `subscriber_remote_t` out of @ref subscriber_t, and
- * it is not decoration: the fan-out copy loop STREAMS this array, so the entry's width is the
- * loop's bandwidth. Inlining these four members made the entry 136 B against `subscriber_t`'s
- * 72 and cost **+23 % on the fan-out-1024 publish** — the wide-fan-out arm, measured, not
- * predicted. Out of line, an entry is 48 B, and a local edge's copy is the pointer-and-refcount
- * work `vertex_t::try_copy_published` does.
- */
-struct pub_remote_t {
-    std::string link;              /**< @brief Remote-delivery link NAME. */
-    view_t return_route{};         /**< @brief Consumer return route (refcount clone). */
-    view_t reverse_route{};        /**< @brief Completed reverse bound route (refcount clone;
-                                        empty ⇒ canonical-only — RFC-0024 §7.1 amendment 1). */
-    std::string caller;            /**< @brief The edge's stored ACL fan-in context (#81). */
-    bool delivery_compact = false; /**< @brief RFC-0004 §E.1 label-compaction opt-in. */
-};
-
-/**
  * @brief One entry of a PUBLISHED edge array: the hot dispatch fields plus a liveness bit.
  *
  * Written once, before the array is published, and never touched again — that is what lets a
@@ -451,12 +604,23 @@ struct pub_remote_t {
  * successful publish, where a failure costs nothing but a delayed release.
  */
 struct pub_edge_t {
-    subscriber_fn_t callback = nullptr;   /**< @brief In-process sink fn (null ⇒ target-only). */
-    void* callback_ctx = nullptr;         /**< @brief The sink's caller-owned context. */
-    target_key_t target_key;              /**< @brief Local re-dispatch target (refcount share). */
-    target_binding_t binding{};           /**< @brief The minted slot for that target (#830). */
-    std::unique_ptr<pub_remote_t> remote; /**< @brief The cold wire half; null for a local edge. */
-    std::atomic<bool> active{true};       /**< @brief Monotone true -> false liveness bit. */
+    subscriber_fn_t callback = nullptr; /**< @brief In-process sink fn (null ⇒ target-only). */
+    void* callback_ctx = nullptr;       /**< @brief The sink's caller-owned context. */
+    target_key_t target_key;            /**< @brief Local re-dispatch target (refcount share). */
+    target_binding_t binding{};         /**< @brief The minted slot for that target (#830). */
+    /**
+     * @brief The cold wire half (null for a local edge) — a refcount SHARE of the admitting
+     *        slot's @ref subscriber_remote_t, never a copy of it (#1442).
+     *
+     * The entry's WIDTH is the fan-out copy loop's bandwidth, which is why this half is out of
+     * line at all: inlining its members made an entry 136 B against `subscriber_t`'s 72 and
+     * cost **+23 % on the fan-out-1024 publish** — measured, not predicted. Sharing keeps that
+     * width exactly where it was (one pointer, as the `std::unique_ptr` here was) while making
+     * a republish's per-entry cost a pointer copy and an increment instead of a heap
+     * allocation and two `std::string` copies.
+     */
+    remote_ptr_t remote;
+    std::atomic<bool> active{true}; /**< @brief Monotone true -> false liveness bit. */
 };
 
 /**
@@ -564,9 +728,14 @@ inline void retire_push(std::atomic<edge_pub_t*>& head, edge_pub_t* p) noexcept 
  * block's teardown flush, so parked memory is bounded by (arrays displaced while some reader
  * is mid-copy) — a control-plane rate times a sub-microsecond window. Run by the MUTATOR, on
  * its own thread, after the stripe lock is released: the destructors that run here belong to
- * library types only (an @ref edge_view_t owns strings, a refcount clone and a target key — a
+ * library types only (an entry owns a target-key share and a @ref remote_ptr_t share — a
  * `subscriber_t::callback_ctx` is caller-owned and never destroyed by us), so no embedder code
  * can execute inside this machinery.
+ *
+ * TWO mutators can be in here at once — each `exchange`s the whole retire list, so they hold
+ * disjoint arrays, but those arrays may share a cold half with each other and with the live
+ * slot. That is precisely what @ref subscriber_remote_t::refs is atomic for; the free happens
+ * once, on whichever thread drops the last reference.
  */
 inline void scan_retired_edges(edge_block_t& b) noexcept {
     edge_pub_t* p = b.retired.exchange(nullptr, std::memory_order_acq_rel);

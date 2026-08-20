@@ -73,7 +73,7 @@ What `qos.c` maps onto instead — **three carriers, not one**:
 
 | `rmw_qos_profile_t` field | libtracer carrier | where |
 | --- | --- | --- |
-| `reliability`, `durability` (libtracer packs a third bit-field, `priority`, that ROS has no profile member for) | the **subscription's** packed 16-bit `delivery_policy`, set at `rmw_create_subscription` time and carried in the `SUBSCRIBER`'s existing `SETTINGS` child as `NAME "delivery_policy" VALUE u16` | `core/include/libtracer/subscriber.hpp:70`, decoded at `core/src/graph.cpp:2302`, RFC-0022 §3.A |
+| `reliability`, `durability` (libtracer packs a third bit-field, `priority`, that ROS has no profile member for) | the **subscription's** packed 16-bit `delivery_policy`, set at `rmw_create_subscription` time and carried in the `SUBSCRIBER`'s existing `SETTINGS` child as `NAME "delivery_policy" VALUE u16` | `core/include/libtracer/subscriber.hpp:73`, decoded at `core/src/graph.cpp:2302`, RFC-0022 §3.A |
 | `history` + `depth` | **owner-side** ring depth, declared independently at each end — the subscription's own target vertex is a STREAM whose depth `rmw_tracer` sets locally (that ring is what `rmw_take` pops); what a subscriber cannot set is the *producer's* depth, which has no wire surface | `core/include/libtracer/graph.hpp:1208`, `core/include/libtracer/vertex.hpp:206` |
 | `deadline`, `liveliness`, `lifespan` | **no mapping at all** | — |
 

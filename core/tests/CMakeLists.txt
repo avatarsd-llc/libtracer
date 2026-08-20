@@ -960,6 +960,16 @@ libtracer_test_warnings(edge_publish_test)
 add_test(NAME edge_publish COMMAND edge_publish_test)
 set_tests_properties(edge_publish PROPERTIES RUN_SERIAL TRUE TIMEOUT 300)
 
+# #1442 — the republish SHARES each pre-existing edge's cold half instead of deep-copying it.
+# Its own binary because it REPLACES global operator new/delete to count allocations, which no
+# other test in this file may inherit. The assertion is a shape (an admission's allocation
+# count is flat in the edge count), so restoring the deep copy reddens it by ~3 allocations per
+# pre-existing edge.
+add_executable(edge_cold_half_share_test edge_cold_half_share_test.cpp)
+target_link_libraries(edge_cold_half_share_test PRIVATE libtracer)
+libtracer_test_warnings(edge_cold_half_share_test)
+add_test(NAME edge_cold_half_share COMMAND edge_cold_half_share_test)
+
 if(LIBTRACER_NET_PLANE)
     add_executable(registry_teardown_test registry_teardown_test.cpp)
     target_link_libraries(registry_teardown_test PRIVATE libtracer)

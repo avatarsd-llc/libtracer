@@ -1091,12 +1091,13 @@ reason its doc-comment gives ("a malloc + free per edge per delivery"). Taking ~
 ~158 instructions per entry would cut the 65-link cell to roughly a third and flatten the
 slope ~6x.
 
-It is deliberately **not** done here. `subscriber_t` and `subscriber_remote_t` carry pinned
+It was deliberately **not** done here. `subscriber_t` and `subscriber_remote_t` carry pinned
 `sizeof` assertions (80 B / 120 B), `pub_edge_t`'s width was measured at **+23 % on the
 fan-out-1024 publish** when it last grew, and a `std::shared_ptr` would widen both — so the
 shape has to be an intrusive 8-byte refcount, on the dispatch hot path, under the #477 nothrow
 discipline. That is a core refactor with its own measurement, not a rider on a profiling run.
-It is filed as #1442; this section is the profile that justifies it.
+It was filed as #1442; this section is the profile that justified it, and the next section is
+what happened.
 
 **Two things this finding is bounded by.** It applies to REMOTE (wire) subscriptions only —
 `try_publish_edges` skips the cold half outright for an in-process edge (a null `remote`), so a
@@ -1105,6 +1106,88 @@ And the bench's link names are half short (`p0`, `p2`, …) and half over the SS
 (`192.168.4.N:9000`, 16 chars), which is why only ~half the string assignments reach the
 allocator — a deployment naming links `host:port` sits on the expensive side of that by
 default.
+
+#### What #1442 did to it — the shared cold half, measured
+
+The cold half is now **one refcount-shared, immutable record** (`subscriber_remote_t` behind
+the intrusive `remote_ptr_t`), named by the slot and by every published array that mirrors it.
+A republish copies a pointer and takes an increment where it used to allocate a record and copy
+two strings; the retire scan decrements where it used to free them.
+
+Both pinned widths are **unchanged**: the handle is one pointer, as the `std::unique_ptr` was,
+and the 4-byte counter fits `subscriber_remote_t`'s pre-existing tail padding (`delivery_compact`
+ends at offset 113 in a 120-byte, 8-aligned record). Nothing was paid for out of `pub_edge_t`.
+
+**Latency.** `bench_subscribe_index`, `sub-wire`, best-of-rounds over 9 rounds × 2 tags, two
+runs per binary interleaved `B N N B` in one window, `taskset -c 2`. Each leg carries its own
+A/A null: **0.70 % / 1.66 % / 1.94 % / 1.35 %** — every delta below is an order of magnitude
+outside the widest of them.
+
+| verts | links | before (ns) | after (ns) | delta | |
+| ---: | ---: | ---: | ---: | ---: | --- |
+| 8 | 4 | 388 | 308 | −20.8 % | ×1.26 |
+| 8 | 8 | 478 | 335 | −29.9 % | ×1.43 |
+| 8 | 16 | 793 | 460 | −41.9 % | ×1.72 |
+| 8 | 32 | 1450 | 623 | −57.0 % | ×2.33 |
+| 8 | 65 | 2463 | 868 | **−64.8 %** | ×2.84 |
+| 32 | 4 | 421 | 338 | −19.6 % | ×1.24 |
+| 32 | 8 | 508 | 374 | −26.4 % | ×1.36 |
+| 32 | 16 | 802 | 520 | −35.1 % | ×1.54 |
+| 32 | 32 | 1445 | 634 | −56.1 % | ×2.28 |
+| 32 | 65 | 2589 | 871 | **−66.3 %** | ×2.97 |
+
+The growth SLOPE over the 4→65 span goes from **34.0 to 9.2 ns/link** at 8 vertices and 35.6 to
+8.7 at 32 — a **3.7–4.1x flattening**. The projection in the section above was "roughly a third
+at 65 links, slope ~6x": the cell figure landed (×2.84 / ×2.97), the slope did not — a 3.9x
+flattening, not 6x. The projection assumed the whole ~940 → ~158 per-entry saving showed up as
+slope; what is left in the slope is the O(n) walk itself plus the index, which is inherent.
+
+**Attribution.** Same callgrind invocation as above, both binaries, instructions retired per
+subscribe (inclusive), 8 vertices, g++ 13.3.0 `-O3`:
+
+| node | @4 before | after | @16 before | after | @65 before | after |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `graph_t::subscribe_wire` | 2 900 | 2 143 | 8 958 | 4 074 | 35 954 | **6 998** |
+| `graph_t::admit_subscriber` | 1 734 | 974 | 7 103 | 2 102 | 33 662 | 4 465 |
+| `vertex_t::add_edge` | 1 244 | 484 | 6 230 | 1 228 | 31 318 | **2 700** |
+| `operator new` (all sites) | 722 | 501 | 2 625 | 1 155 | 13 438 | 1 567 |
+
+Per pre-existing edge, taken as the 4→65 slope over the mean pre-existing edge count: whole
+subscribe **1 084 → 159 Ir/edge**. That is the ~940-against-a-~158-floor prediction landing
+almost exactly on the floor — the residual 159 is the array rebuild, the slot walk and the link
+index, and there is no allocator left in it.
+
+**RAM, first per the 2026-08-14 ruling.** `bench_subscribe_index --ram` measures the *index*
+arena (the injected `ctl` resource) and is unchanged at 16.0 B/link — correct, and the reason it
+cannot see this: the cold half is drawn from the global heap. Measured instead with a global
+`operator new`/`delete` byte accountant over `subscribe_wire` (links named `192.168.4.N:9000`,
+callers `peerN`), live bytes at rest with the published array installed:
+
+| edges | before | after | per edge before | after | delta |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 4 | 2 392 B | 1 788 B | 598.0 B | 447.0 B | **−151 B** |
+| 8 | 4 728 B | 3 520 B | 591.0 B | 440.0 B | −151 B |
+| 16 | 9 406 B | 6 990 B | 587.9 B | 436.9 B | −151 B |
+| 32 | 18 766 B | 13 934 B | 586.4 B | 435.4 B | −151 B |
+| 65 | 43 111 B | 33 296 B | 663.2 B | 512.2 B | −151 B |
+
+−151 B per remote edge at rest, **−25.3 %**, flat in the edge count: the 120-byte published
+copy plus its link string, gone. A second live array (a retired one not yet scanned) used to
+cost another 151 B/edge and now costs zero.
+
+**The delivery path did not regress.** `vertex_t::snapshot_edges` is byte-identical (923 B,
+`bench/symbol_ratchet.json`), and `try_copy_published`'s source is untouched — but the out-of-line
+`copy_published` that carries the actual copy loop moved **4 157 → 3 554 B (−603, 866 → 761
+instructions)** on an inlining-heuristic shuffle, and it was not pinned. It is now. Priced on
+`bench_libtracer fan`, best-of-3 rounds per binary, `B N N B` interleaved: fan-out 1 and 8 are
+within their A/A nulls, and every fan-out from 16 up is **FASTER** — `inproc` throughput
++2.9 / +4.1 / +4.1 / +6.2 / +5.1 / +6.8 / +5.3 / +5.8 % at 16 / 32 / 64 / 128 / 256 / 512 / 1024 /
+8192 against nulls of 0.6–4.7 %, with p50 and p99 moving the same way.
+
+**Not taken here, deliberately.** #1442's second arm — letting `edge_view_t` hold the same
+shared pointer so `try_copy_published` stops copying two strings **per delivery** — is a change
+to the delivery path itself, and this PR's bar was that the delivery path not move. It stays
+open, and it is the larger prize on a wide remote fan-out.
 
 ### `bench_forward_rope` — the rope forward hop, and what its A/A null is worth (#1358)
 

@@ -106,6 +106,55 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **BREAKING (type only): the subscription COLD HALF is refcount-shared and immutable —
+  `subscriber_t::remote` and `pub_edge_t::remote` are `tr::graph::remote_ptr_t`, and
+  `tr::graph::pub_remote_t` is REMOVED**
+  ([#1442](https://github.com/avatarsd-llc/libtracer/issues/1442),
+  [#1441](https://github.com/avatarsd-llc/libtracer/pull/1441)'s profile,
+  [#635](https://github.com/avatarsd-llc/libtracer/issues/635)). `vertex_t::try_publish_edges`
+  rebuilds the whole published edge array on every admission — inherent to #635, an immutable
+  array cannot be appended to in place — but it also **deep-copied** each pre-existing REMOTE
+  entry's cold half while doing so: one nothrow `operator new` for a `pub_remote_t` plus a
+  `std::string` copy each for the link and the caller, per pre-existing entry, per admission,
+  with `scan_retired_edges` freeing every one of them again. The record is written once at
+  admission and never after (every other reference in `graph.cpp` and `vertex.hpp` is a read),
+  so each copy reproduced bytes byte-identical to the ones it was retiring.
+
+  `subscriber_remote_t` is now the single record for both sides, held behind an intrusive
+  8-byte handle (`remote_ptr_t`, the `tr::view::segment_ptr_t` shape) that the slot and every
+  published array naming it share. A republish is a pointer copy and an increment; the retire
+  scan is a decrement. **Both pinned widths are unchanged** — `sizeof(subscriber_t) == 80`,
+  `sizeof(subscriber_remote_t) == 120` — because the handle is one pointer, as the
+  `std::unique_ptr` it replaces was, and the 4-byte counter fits the cold record's pre-existing
+  tail padding. A `std::shared_ptr` would have widened both and been paid for out of
+  `pub_edge_t`, whose width was measured at +23 % on the fan-out-1024 publish the last time it
+  grew.
+
+  Measured on `bench/bench_subscribe_index --arms=sub-wire`, best-of-rounds, two runs per binary
+  interleaved in one window, each leg carrying its own A/A null (0.70–1.94 %): the whole remote
+  subscribe goes **2463 → 868 ns at 65 links / 8 vertices (−64.8 %, ×2.84)** and 2589 → 871 at
+  32 vertices (−66.3 %), with the growth slope over the 4→65 span **34.0 → 9.2 ns/link**
+  (a 3.9x flattening; the projection had said ~6x). Callgrind agrees: whole-subscribe cost per
+  pre-existing edge **1 084 → 159 instructions**, which is the inherent floor #1441 predicted.
+  RAM at rest falls **151 B per remote edge (−25.3 %)**, flat in the edge count, and a
+  republish is now allocation-free except for the array itself — strictly better for the #477
+  exhaustion story, since the cold half's one allocation happens at admission behind the door's
+  own `BACKPRESSURE`. Full tables in [`bench/README.md`](../bench/README.md).
+
+  **The delivery path is unchanged by construction and faster in fact.** `edge_view_t` still
+  owns its copies, `try_copy_published` is untouched, and `vertex_t::snapshot_edges` is
+  byte-identical (923 B). The out-of-line `copy_published` shrank 4 157 → 3 554 B on an
+  inlining shuffle and is now pinned in `bench/symbol_ratchet.json` so the next such move is
+  visible at review time; `bench_libtracer fan` reads within-null at fan-out 1–8 and +2.9…+6.8 %
+  throughput at every fan-out from 16 to 8192.
+
+  What an out-of-tree consumer must change: `pub_remote_t` no longer exists (name
+  `subscriber_remote_t`); reading through `subscriber_t::remote` / `pub_edge_t::remote` yields a
+  `const subscriber_remote_t*`, and a WRITE must go through `subscriber_t::ensure_remote()` at
+  admission, before the edge is published — the build-then-freeze rule the record's own
+  documentation states and a debug assertion enforces. `subscriber_remote_t`'s members are
+  reordered (`link` first) so the delivery path reads them at the offsets it already did.
+
 - **BREAKING (derivation only): `tr::net::slot_server_t` no longer derives from
   `tr::net::bus_link_t`** ([#1438](https://github.com/avatarsd-llc/libtracer/issues/1438)).
   Its peer QUERIES (`enumerate_peers`, `peer_name`, `peer_link`, `close_peer`, `peer_named`)
