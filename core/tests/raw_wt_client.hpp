@@ -72,11 +72,15 @@ inline std::vector<std::uint8_t> payload(std::size_t len, std::uint8_t seed) {
     return p;
 }
 
-/** @brief The extended CONNECT request frame (HEADERS) a browser-shaped client sends. */
-inline std::vector<std::uint8_t> connect_frame(std::string_view authority) {
+/** @brief The extended CONNECT request frame (HEADERS) a browser-shaped client sends.
+ *  @param path The `:path` requested. Defaults to the root; a LONG one is what lets a
+ *              vector aim at the server's `:path` copy, whose size the PEER chooses
+ *              (#934). */
+inline std::vector<std::uint8_t> connect_frame(std::string_view authority,
+                                               std::string_view path = "/") {
     std::vector<std::uint8_t> out;
     tr::net::wt_h3::append_h3_frame(out, tr::net::wt_h3::kFrameHeaders,
-                                    tr::net::wt_h3::encode_connect_field_section(authority, "/"));
+                                    tr::net::wt_h3::encode_connect_field_section(authority, path));
     return out;
 }
 

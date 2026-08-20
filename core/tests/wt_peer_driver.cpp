@@ -29,14 +29,21 @@
  * every step it takes is ordered after an acknowledged one — which is what lets the test
  * synchronise on observable state instead of sleeping.
  *
- *     CONNECT <port>          -> CONNECT ok | CONNECT fail
- *     SESSION <authority>     -> SESSION <tag> ok | SESSION fail
- *     OPEN                    -> OPEN <tag> ok | OPEN <tag> fail
- *     WRITE <tag> <hex...>    -> WRITE ok | WRITE fail
- *     ISABORT <tag>           -> ISABORT 0 | ISABORT 1
- *     WAITABORT <tag> <ms>    -> WAITABORT 0 | WAITABORT 1
- *     CLOSE <tag>             -> CLOSE ok
- *     QUIT                    -> QUIT ok   (then exit 0)
+ *     CONNECT <port>            -> CONNECT ok | CONNECT fail
+ *     SESSION <authority> [path]-> SESSION <tag> ok | SESSION fail
+ *     OPEN                      -> OPEN <tag> ok | OPEN <tag> fail
+ *     WRITE <tag> <hex...>      -> WRITE ok | WRITE fail
+ *     ISABORT <tag>             -> ISABORT 0 | ISABORT 1
+ *     WAITABORT <tag> <ms>      -> WAITABORT 0 | WAITABORT 1
+ *     WAITSHUT <ms>             -> WAITSHUT 0 | WAITSHUT 1
+ *     CLOSE <tag>               -> CLOSE ok
+ *     QUIT                      -> QUIT ok   (then exit 0)
+ *
+ * `SESSION`'s optional second word is the extended CONNECT `:path`; it defaults to the root.
+ * A long one is what lets a vector aim at the server's PEER-SIZED `:path` copy (#934).
+ * `WAITSHUT` is the CONNECTION-scoped counterpart of `WAITABORT`: it answers whether the
+ * server tore the whole connection down, which is what the count-then-close refusal of an
+ * unaffordable extended CONNECT looks like from the peer (#934).
  *
  * A closed stdin (the parent died) ends the loop, so no driver can outlive its test.
  */
@@ -131,7 +138,9 @@ int main() {
             reply(g_cli->ok ? "CONNECT ok" : "CONNECT fail");
         } else if (verb == "SESSION") {
             std::string authority;
-            is >> authority;
+            std::string path;
+            is >> authority >> path;
+            if (path.empty()) path = "/";
             if (!g_cli || !g_cli->ok) {
                 reply("SESSION fail");
                 continue;
@@ -145,7 +154,7 @@ int main() {
                 reply("SESSION fail");
                 continue;
             }
-            g_cli->write(s, connect_frame(authority));
+            g_cli->write(s, connect_frame(authority, path));
             std::ostringstream os;
             os << "SESSION " << tag << " ok";
             reply(os.str());
@@ -184,6 +193,11 @@ int main() {
             const bool a =
                 s != nullptr && raw_wt_client_t::wait_aborted(s, std::chrono::milliseconds(ms));
             reply(a ? "WAITABORT 1" : "WAITABORT 0");
+        } else if (verb == "WAITSHUT") {
+            unsigned ms = 0;
+            is >> ms;
+            const bool s = g_cli && g_cli->wait_shutdown(std::chrono::milliseconds(ms));
+            reply(s ? "WAITSHUT 1" : "WAITSHUT 0");
         } else if (verb == "CLOSE") {
             std::size_t tag = 0;
             is >> tag;

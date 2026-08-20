@@ -62,6 +62,7 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <span>
 #include <string>
 #include <utility>
@@ -69,6 +70,7 @@
 
 #include "libtracer/byteorder.hpp"
 #include "libtracer/length_prefix_framer.hpp"
+#include "libtracer/mem_heap.hpp"
 #include "libtracer/receiver_slot.hpp"
 
 #if defined(__SANITIZE_THREAD__)
@@ -134,28 +136,67 @@ inline constexpr std::uint32_t kHandshakeWaitMs = 10'000;
  * are only borrowed for the send() call, so ONE copy into this heap buffer is
  * unavoidable — and the only library-held buffer, freed by SEND_COMPLETE.
  * Used both for length-prefixed frame records and for raw handshake bytes.
+ *
+ * @par Built only through the two nothrow factories (#934)
+ * Both allocations — the ctx and its byte buffer — are made by @ref make_frame /
+ * @ref make_raw through `new (std::nothrow)` and `%tr::detail::try_reserve`, and a
+ * refusal is a null return. That is not a stylistic preference: the H3 handshake writes
+ * this buffer from an msquic STREAM CALLBACK, i.e. from inside libmsquic's C frames,
+ * where a `std::bad_alloc` has nowhere to unwind to and the module holds no `catch`. A
+ * throwing constructor there is an unauthenticated peer's route to `std::terminate` on a
+ * tight heap, which is exactly what the #934 audit set out to answer.
  */
 struct send_ctx_t {
     QUIC_BUFFER buf{};            /**< @brief The buffer descriptor handed to StreamSend. */
     std::vector<std::byte> bytes; /**< @brief The owned copy of `prefix ++ frame` (or raw). */
 
-    /** @brief A length-prefixed frame record: prefix ++ frame (frame filled by caller). */
-    explicit send_ctx_t(std::size_t frame_len) : bytes(kPrefixBytes + frame_len) {
-        detail::store_le(std::span(bytes).first(kPrefixBytes),
+    /** @brief Empty — the factories fill it. */
+    send_ctx_t() = default;
+
+    /**
+     * @brief A length-prefixed frame record: prefix ++ @p frame_len zero bytes the caller
+     *        then fills. Nothrow.
+     * @retval nullptr The ctx or its buffer could not be allocated — the caller sheds the
+     *                 frame and counts it.
+     */
+    [[nodiscard]] static std::unique_ptr<send_ctx_t> make_frame(std::size_t frame_len) noexcept {
+        const std::size_t total = kPrefixBytes + frame_len;
+        std::unique_ptr<send_ctx_t> ctx = make_sized(total);
+        if (!ctx) return nullptr;
+        detail::store_le(std::span(ctx->bytes).first(kPrefixBytes),
                          static_cast<std::uint32_t>(frame_len));
-        arm();
+        return ctx;
     }
-    /** @brief Raw bytes (H3 handshake material) — no prefix. */
-    explicit send_ctx_t(std::vector<std::uint8_t> raw)
-        : bytes(reinterpret_cast<std::byte*>(raw.data()),
-                reinterpret_cast<std::byte*>(raw.data()) + raw.size()) {
-        arm();
+
+    /**
+     * @brief Raw bytes (H3 handshake material) — no prefix. Nothrow.
+     * @retval nullptr The ctx or its buffer could not be allocated — the caller refuses
+     *                 the handshake step rather than aborting the node.
+     */
+    [[nodiscard]] static std::unique_ptr<send_ctx_t> make_raw(
+        std::span<const std::uint8_t> raw) noexcept {
+        std::unique_ptr<send_ctx_t> ctx = make_sized(raw.size());
+        if (!ctx) return nullptr;
+        if (!raw.empty()) std::memcpy(ctx->bytes.data(), raw.data(), raw.size());
+        return ctx;
     }
 
     /** @brief Point the QUIC_BUFFER at the owned bytes. */
-    void arm() {
+    void arm() noexcept {
         buf.Length = static_cast<std::uint32_t>(bytes.size());
         buf.Buffer = reinterpret_cast<uint8_t*>(bytes.data());
+    }
+
+   private:
+    /** @brief The shared nothrow body of both factories: a ctx owning @p total zeroed,
+     *         armed bytes. */
+    [[nodiscard]] static std::unique_ptr<send_ctx_t> make_sized(std::size_t total) noexcept {
+        std::unique_ptr<send_ctx_t> ctx(new (std::nothrow) send_ctx_t());
+        if (!ctx) return nullptr;
+        if (!detail::try_reserve(ctx->bytes, total)) return nullptr;
+        ctx->bytes.resize(total);  // within capacity — cannot reallocate, cannot throw
+        ctx->arm();
+        return ctx;
     }
 };
 
@@ -498,11 +539,23 @@ class msquic_endpoint_t {
             dropped_tx.fetch_add(1, std::memory_order_relaxed);
     }
 
-    /** @brief Send raw @p bytes (H3 handshake material — no prefix) on
-     *         @p stream; msquic owns the buffer until SEND_COMPLETE. A refusal is
-     *         a setup failure the handshake surfaces on its own, not a shed frame. */
-    void send_raw(HQUIC stream, std::vector<std::uint8_t> bytes) {
-        (void)submit(stream, std::make_unique<send_ctx_t>(std::move(bytes)));
+    /**
+     * @brief Send raw @p bytes (H3 handshake material — no prefix) on @p stream; msquic
+     *        owns the buffer until SEND_COMPLETE.
+     *
+     * @p bytes is only BORROWED: the copy into the ctx completes before this returns, so
+     * a caller may pass a view of static storage (the constant handshake preambles) or of
+     * a local it owns.
+     *
+     * @return Whether the bytes reached msquic. A false is either a tight heap (the copy
+     *         was refused, nothrow — #934) or a `StreamSend` msquic declined; both are
+     *         connection-setup failures the caller dispositions, never a shed frame, so
+     *         nothing is counted here.
+     */
+    [[nodiscard]] bool send_raw(HQUIC stream, std::span<const std::uint8_t> bytes) {
+        std::unique_ptr<send_ctx_t> ctx = send_ctx_t::make_raw(bytes);
+        if (!ctx) return false;
+        return submit(stream, std::move(ctx));
     }
 
     /**
@@ -518,7 +571,13 @@ class msquic_endpoint_t {
             dropped_tx.fetch_add(1, std::memory_order_relaxed);
             return;
         }
-        auto ctx = std::make_unique<send_ctx_t>(frame.size());
+        // The one library-held buffer, and the one allocation on the TX path: failable
+        // (#934), so a tight heap sheds the frame with a counter instead of aborting.
+        std::unique_ptr<send_ctx_t> ctx = send_ctx_t::make_frame(frame.size());
+        if (!ctx) {
+            dropped_tx.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
         if (!frame.empty())
             std::memcpy(ctx->bytes.data() + kPrefixBytes, frame.data(), frame.size());
         submit_frame(std::move(ctx));
@@ -540,7 +599,11 @@ class msquic_endpoint_t {
             dropped_tx.fetch_add(1, std::memory_order_relaxed);
             return;
         }
-        auto ctx = std::make_unique<send_ctx_t>(total);
+        std::unique_ptr<send_ctx_t> ctx = send_ctx_t::make_frame(total);  // failable (#934)
+        if (!ctx) {
+            dropped_tx.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
         std::size_t off = kPrefixBytes;
         for (const auto& s : iov) {
             if (s.empty()) continue;

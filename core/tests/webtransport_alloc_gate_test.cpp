@@ -1,7 +1,13 @@
 /**
  * @file
- * @brief #1182 — the two PEER-DRIVEN allocation guards in `transport_webtransport.cpp`,
- *        gated at last: an out-of-process peer lets the injector be armed at the SERVER only.
+ * @brief The PEER-DRIVEN allocation guards in `transport_webtransport.cpp`, gated: an
+ *        out-of-process peer lets the injector be armed at the SERVER only.
+ *
+ * Two vectors from #1182 (stream adoption, handshake accumulation) and two from #934 (the
+ * extended CONNECT's `:path` copy and its 200 response) — the last two being the sites the
+ * #934 quic/webtransport ingress audit found still THROWING on a pre-auth path, where a
+ * `bad_alloc` unwinds into libmsquic's C frames and takes the node down rather than
+ * refusing the peer.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -62,8 +68,10 @@
  * handle, an abort flag, delivered bytes — and moving them behind a line protocol would trade
  * direct assertions for string parsing, add a process launch per case, and put the peer's
  * state out of reach of the debugger. The driver is worth its cost only where a
- * process-scoped seam has to be aimed, which today is these two sites. A third such site
- * should extend this file rather than migrate the suites.
+ * process-scoped seam has to be aimed. That assessment has now been taken up twice: #934's
+ * two sites extended this file rather than migrating the suites, exactly as it said they
+ * should, and the extension cost was one optional `SESSION` argument plus one `WAITSHUT`
+ * verb on the driver.
  */
 
 #include <poll.h>
@@ -109,16 +117,36 @@ std::atomic<bool> g_armed{false};
  *         reached a `try_reserve` at all, rather than passing because nothing allocated. */
 std::atomic<int> g_refusals{0};
 
-/** @brief The process-wide OOM injector: refuse everything while armed, admit otherwise. */
-bool refuse_while_armed(std::size_t /*bytes*/) noexcept {
+/**
+ * @brief Non-zero => refuse ONLY a growth of exactly this many bytes (#934).
+ *
+ * The two #1108 vectors below refuse everything, because the site they aim at is the first
+ * one their sequence reaches. The #934 vectors cannot: the extended CONNECT walks
+ * `on_peer_stream_started` → `accumulate` → `classify_bidi` in that order, so a
+ * refuse-everything arming would abort the stream in `accumulate` and the two sites at the
+ * END of that walk — the `:path` copy and the 200 response — would never run. Both have a
+ * byte count nothing else on the path shares (the peer chooses the `:path` length; the 200
+ * response is a 5-byte protocol constant), so an EXACT-SIZE arming aims at them precisely.
+ * The `refused_sessions()` counter is the cross-check that the byte count really did land
+ * on the intended site and not on a coincidence.
+ */
+std::atomic<std::size_t> g_armed_size{0};
+
+/** @brief The process-wide OOM injector: refuse while armed — everything, or only the one
+ *         byte count @ref g_armed_size names. */
+bool refuse_while_armed(std::size_t bytes) noexcept {
     if (!g_armed.load(std::memory_order_acquire)) return true;
+    const std::size_t only = g_armed_size.load(std::memory_order_relaxed);
+    if (only != 0 && bytes != only) return true;
     g_refusals.fetch_add(1, std::memory_order_relaxed);
     return false;
 }
 
-/** @brief Arm the injector and reset the refusal count. */
-void arm() {
+/** @brief Arm the injector and reset the refusal count.
+ *  @param only_bytes 0 = refuse every probed growth; otherwise refuse only that size. */
+void arm(std::size_t only_bytes = 0) {
     g_refusals.store(0, std::memory_order_relaxed);
+    g_armed_size.store(only_bytes, std::memory_order_relaxed);
     g_armed.store(true, std::memory_order_release);
 }
 
@@ -252,6 +280,27 @@ struct peer_driver_t {
         std::ostringstream os;
         os << "WAITABORT " << tag << ' ' << budget.count();
         return cmd(os.str()) == "WAITABORT 1";
+    }
+
+    /** @brief Whether the peer has seen the server tear the whole CONNECTION down — the
+     *         shape a count-then-close refusal takes on this side (#934). */
+    [[nodiscard]] bool wait_shutdown(std::chrono::milliseconds budget) {
+        std::ostringstream os;
+        os << "WAITSHUT " << budget.count();
+        return cmd(os.str()) == "WAITSHUT 1";
+    }
+
+    /** @brief Send the extended CONNECT requesting @p path. True when the peer got it out
+     *         (the SERVER decides whether a session follows). */
+    [[nodiscard]] bool session(std::string_view path) {
+        std::ostringstream os;
+        os << "SESSION 127.0.0.1:0 " << path;
+        std::istringstream is(cmd(os.str()));
+        std::string verb;
+        std::size_t tag = 0;
+        std::string status;
+        is >> verb >> tag >> status;
+        return verb == "SESSION" && status == "ok";
     }
 
     /** @brief Close the stream @p tag names (abort + close, so the server sees it finish). */
@@ -447,6 +496,147 @@ void test_handshake_accumulate_guard_is_gated() {
     peer.close(*tag);
 }
 
+// ---- #934: the extended-CONNECT answer path, which USED to abort the node ----
+
+/**
+ * @brief Bring a listener + out-of-process peer to the point just BEFORE the extended
+ *        CONNECT: QUIC is up, the server has presented its H3 face, nothing is armed yet.
+ * @return False when the fixture failed (the caller reports it, so a broken fixture never
+ *         reads as a passing guard).
+ */
+[[nodiscard]] bool connect_only(webtransport_transport_t& listener, peer_driver_t& peer) {
+    if (!peer.ok) return false;
+    std::ostringstream os;
+    os << "CONNECT " << listener.local_port();
+    return peer.cmd(os.str()) == "CONNECT ok";
+}
+
+/** @brief Block until the LISTEN side has counted @p want refused CONNECTs. */
+[[nodiscard]] bool wait_refused(const webtransport_transport_t& t, std::uint64_t want,
+                                std::chrono::milliseconds budget) {
+    const auto deadline = std::chrono::steady_clock::now() + budget;
+    while (t.refused_sessions() < want) {
+        if (std::chrono::steady_clock::now() > deadline) return false;
+        std::this_thread::sleep_for(5ms);
+    }
+    return true;
+}
+
+/**
+ * @brief GUARD 3 — the `:path` copy in the extended-CONNECT answer (#934).
+ *
+ * Before this car that line was `path = std::string(req_path)`: a THROWING, PEER-SIZED
+ * allocation on an msquic stream callback, i.e. inside libmsquic's C frames, in a module
+ * with no `catch` anywhere. On a tight heap an unauthenticated peer — one QUIC handshake,
+ * one bidi stream, one HEADERS frame, no ACL, no subscription — took the whole process
+ * down. This vector could not even be WRITTEN against that code: there is no assertion for
+ * "and then the test binary terminated".
+ *
+ * Armed at the ONE byte count the `:path` copy asks for (its length + the NUL), the copy is
+ * refused; the answer is count-then-close, so `refused_sessions()` moves, no session comes
+ * up, the peer sees the connection go down — and this process is still here to say so.
+ * Unarmed, the identical CONNECT establishes a session and `session_path()` returns the
+ * very path that was refused, which is what makes the armed arm's silence the guard rather
+ * than a peer that stopped driving. Each arm gets a FRESH listener, so the `path` member's
+ * capacity starts at SSO in both and the ordering carries no hidden state.
+ */
+void test_connect_path_copy_is_failable() {
+    std::printf("WebTransport — the extended CONNECT's :path copy refuses, never aborts (#934):\n");
+    // 512 bytes of `:path`, so the copy asks for 513 (the NUL) — a byte count nothing else
+    // on this walk shares: the accumulate reserve takes the whole ~559-byte CONNECT frame
+    // and the ctx-list reserve takes a multiple of a pointer.
+    const std::string long_path = "/" + std::string(511, 'a');
+    const std::size_t copy_bytes = long_path.size() + 1;
+
+    {
+        webtransport_transport_t listener(std::uint16_t{0}, g_cert, g_key);
+        check(listener.ok(), "armed: listener started (ALPN h3, ephemeral port, dev cert)");
+        peer_driver_t peer(LIBTRACER_WT_PEER_DRIVER);
+        check(peer.ok, "armed: the peer driver runs in a SEPARATE process");
+        check(connect_only(listener, peer), "armed: QUIC up, H3 face presented, nothing armed");
+
+        arm(copy_bytes);
+        const bool sent = peer.session(long_path);
+        const bool counted = sent && wait_refused(listener, 1, 5000ms);
+        const bool peer_saw_close = counted && peer.wait_shutdown(5000ms);
+        disarm();
+
+        check(sent, "armed: the peer sent its extended CONNECT (its process is unaffected)");
+        check(g_refusals.load(std::memory_order_relaxed) > 0,
+              "the injector fired in the server process (an unreached try_assign is vacuous)");
+        check(counted, "ARMED: the CONNECT was REFUSED and counted (refused_sessions())");
+        check(!listener.session_up(), "and no session was left half-established");
+        check(peer_saw_close, "the peer saw the count-then-CLOSE (#934's 2026-08-15 ruling)");
+        check(listener.session_path().empty(),
+              "the refused :path was never recorded (try_assign leaves dst unchanged)");
+    }
+
+    // Control arm: the SAME CONNECT, unarmed, MUST establish — so the armed arm's refusal
+    // is the guard and not a path this server rejects for some other reason.
+    {
+        webtransport_transport_t listener(std::uint16_t{0}, g_cert, g_key);
+        check(listener.ok(), "control: listener started");
+        peer_driver_t peer(LIBTRACER_WT_PEER_DRIVER);
+        check(peer.ok, "control: the peer driver runs in a SEPARATE process");
+        check(connect_only(listener, peer), "control: QUIC up");
+        check(peer.session(long_path), "control: the peer sent the same extended CONNECT");
+        check(wait_session(listener, 5000ms), "UNARMED: the session IS established");
+        check(listener.session_path() == long_path, "and the 512-byte :path was recorded");
+        check(listener.refused_sessions() == 0, "with nothing refused");
+    }
+}
+
+/**
+ * @brief GUARD 4 — the 200 response's one owned copy (#934).
+ *
+ * The response BYTES are now a `constexpr` view of static storage (`wt_h3::
+ * status_200_headers_frame`), so the vector and the field-section vector that used to be
+ * built per CONNECT are deleted rather than guarded. What survives is the single copy
+ * msquic owns until SEND_COMPLETE — unavoidable, because the seam's spans are borrowed only
+ * for the `StreamSend` call — and that copy is what this vector refuses.
+ *
+ * Armed at exactly 5 bytes (the frame's fixed length: HEADERS type, length, and the 3-byte
+ * `:status: 200` section), `send_ctx_t::make_raw` returns null, `send_raw` answers false,
+ * and the CONNECT is refused with the same count-then-close. Unarmed, the identical
+ * sequence establishes the session.
+ */
+void test_connect_response_send_is_failable() {
+    std::printf("WebTransport — the 200 response's owned copy refuses, never aborts (#934):\n");
+    {
+        webtransport_transport_t listener(std::uint16_t{0}, g_cert, g_key);
+        check(listener.ok(), "armed: listener started");
+        peer_driver_t peer(LIBTRACER_WT_PEER_DRIVER);
+        check(peer.ok, "armed: the peer driver runs in a SEPARATE process");
+        check(connect_only(listener, peer), "armed: QUIC up");
+
+        // The root path fits `path`'s SSO buffer, so guard 3 never probes and this vector is
+        // about the response copy alone.
+        arm(5);
+        const bool sent = peer.session("/");
+        const bool counted = sent && wait_refused(listener, 1, 5000ms);
+        const bool peer_saw_close = counted && peer.wait_shutdown(5000ms);
+        disarm();
+
+        check(sent, "armed: the peer sent its extended CONNECT");
+        check(g_refusals.load(std::memory_order_relaxed) > 0,
+              "the injector fired in the server process");
+        check(counted, "ARMED: the 200 could not be copied, so the CONNECT was counted-and-closed");
+        check(!listener.session_up(), "and the session never came up");
+        check(peer_saw_close, "the peer saw the connection close rather than the node die");
+    }
+
+    {
+        webtransport_transport_t listener(std::uint16_t{0}, g_cert, g_key);
+        check(listener.ok(), "control: listener started");
+        peer_driver_t peer(LIBTRACER_WT_PEER_DRIVER);
+        check(peer.ok, "control: the peer driver runs in a SEPARATE process");
+        check(connect_only(listener, peer), "control: QUIC up");
+        check(peer.session("/"), "control: the peer sent the same extended CONNECT");
+        check(wait_session(listener, 5000ms), "UNARMED: the session IS established");
+        check(listener.refused_sessions() == 0, "with nothing refused");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -470,6 +660,8 @@ int main() {
 
     test_peer_stream_adoption_guard_is_gated();
     test_handshake_accumulate_guard_is_gated();
+    test_connect_path_copy_is_failable();
+    test_connect_response_send_is_failable();
 
     tr::detail::probe_fail_hook = nullptr;
     return tr::testing::summary("webtransport_alloc_gate");

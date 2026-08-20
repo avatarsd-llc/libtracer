@@ -49,6 +49,27 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   (`tools/check_esp_ws_plane.py`), so there is no libtracer-owned handshake buffer there to cap.
   Explicitly **not** a nothrow rewrite of the handshake crypto helpers — pre-auth work is
   refused early, not carefully allocated.
+
+- **`tr::net::webtransport_transport_t::refused_sessions()`** — extended CONNECT handshakes
+  the node refused because it could not afford to answer them
+  ([#934](https://github.com/avatarsd-llc/libtracer/issues/934) car C, the quic/webtransport
+  ingress audit). The LISTEN side reaches two allocations on the strength of one
+  *unauthenticated* peer's HEADERS frame — recording the requested `:path`, and the one owned
+  copy of the 200 response msquic borrows until SEND_COMPLETE — and both used to be throwing
+  allocations on an msquic callback, i.e. inside libmsquic's C frames where a `std::bad_alloc`
+  has nowhere to unwind and this module holds no `catch`. Both are now nothrow, and a refusal
+  is **count-then-close** (#934's 2026-08-15 ruling, reusing #838's shape): this counter moves
+  and the connection is shut down with the bad-request code, so the peer's memory is freed at
+  once and no session is left half-established. It never moves on a healthy node.
+
+  Behaviour changes only in the exhaustion case — the wire remains byte-identical, and the
+  `:path` and 200-response bytes a peer sees are unchanged. Everything else on that answer
+  path was *deleted* rather than guarded: the H3 control/QPACK preambles and the 200 response
+  are protocol constants, so the module-private `wt_h3` now serves them as `constexpr` views
+  of static storage and the LISTEN-side handshake builds no container at all. `wt_h3.hpp`,
+  `msquic_endpoint.hpp` and `send_ctx_t` live under `core/src/` and are never installed, so no
+  other public surface moved.
+
 - **`tr::mem::source_resource_t` — the `std::pmr` adapter over the block seam**
   (new header `libtracer/mem_source_pmr.hpp`;
   [#873](https://github.com/avatarsd-llc/libtracer/issues/873) family 5,
