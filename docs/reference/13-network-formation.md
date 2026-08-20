@@ -225,7 +225,7 @@ remain in the devices — RAM, or NVS where the device persists them.
 target routes through a mount.** A `SUBSCRIBER` whose `PATH` names a path *through* a
 transport mount, spelled in the **producer's** frame
 (`/net/<module>/<link>/<consumer-path>`), binds the edge to that mount's link and the
-residual below it (`graph_t::subscribe_wire`, `core/src/graph.cpp:2703`), so
+residual below it (`graph_t::subscribe_wire`, `core/src/graph.cpp:2702`), so
 `fwd_router_t::link_down` → `graph_t::evict_link_edges` on the orchestrator's session no
 longer matches it and the producer keeps delivering. That is RFC-0021 §4.B.1/§4.C, and
 it is what makes the departure above real for a third-party wire.
