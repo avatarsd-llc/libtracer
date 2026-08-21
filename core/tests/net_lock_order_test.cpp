@@ -52,6 +52,7 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -149,7 +150,66 @@ struct dial_script_t {
     }
 };
 
-/** @brief Register the scripted engine-managed `fake` kind and its DIAL module. */
+/**
+ * @brief A section's quiescence barrier: unblock every parked factory, THEN destroy the
+ *        transport vertex — so its engine workers are JOINED while the subscriber they
+ *        publish into is still alive.
+ *
+ * Two hazards are closed here, and only the second one needs the vertex to be optional.
+ *
+ * 1. **The parked factory.** A section that fails a check early leaves a dial attempt
+ *    blocked on `dial_script_t::cv`, and the engine's teardown join then waits out the
+ *    watchdog. `arm_auto_fail` releases it first (this is what `link_liveness_test.cpp`'s
+ *    `script_guard_t` does), which is why it must run BEFORE the vertex is torn down.
+ *
+ * 2. **The outliving subscriber.** A liveness subscriber (`standing_binding_t`,
+ *    `worker_fanout_binding_t`) holds a `std::string`, and the engine WORKER publishes
+ *    into it from another thread. `graph_t::unsubscribe` is NOT a barrier against that:
+ *    per @ref tr::graph::subscription_t's reclamation section, the fan-out snapshots a
+ *    vertex's edges and dispatches outside every lock, so a snapshot taken before the
+ *    retirement still names the subscriber — the plain (hook-less) `unsubscribe` retires
+ *    the edge and returns, it does not wait. The only real barrier is the PUBLISHER
+ *    stopping, and that is `~transport_vertex_t` → `~conn_t` → `~self_heal_link_t` →
+ *    `stop()`, which joins the worker (and publishes nothing itself, so the fan-out this
+ *    releases cannot re-enter a half-dead section). Ordinary stack order runs it too LATE:
+ *    the subscriber is declared after the vertex it borrows, so the subscriber dies first
+ *    and a delivery already in flight writes into a freed string — the `~standing_binding_t`
+ *    / `operator delete` race TSan reported at #1484. Holding the vertex in a
+ *    `std::optional` and resetting it from a guard declared AFTER the subscriber inverts
+ *    that, on every exit path including the early `return`s.
+ */
+struct section_quiesce_t {
+    std::optional<transport_vertex_t>& net; /**< @brief The vertex destroyed by this guard. */
+    dial_script_t& script;                  /**< @brief The script that frees its workers. */
+
+    /**
+     * @brief Unblock, then join: the order the two hazards above require.
+     *
+     * IDEMPOTENT, and callable early — a section that wants to READ its subscriber's
+     * counters must quiesce before sampling them (see section 2), and the destructor is
+     * then a backstop rather than the only discharge. A second call re-arms an already
+     * armed script and resets an already empty optional; both are no-ops.
+     */
+    void discharge() {
+        script.arm_auto_fail();
+        net.reset();
+    }
+
+    /** @brief The backstop discharge — every exit path, including the early `return`s. */
+    ~section_quiesce_t() { discharge(); }
+};
+
+/**
+ * @brief Register the scripted engine-managed `fake` kind and its DIAL module.
+ *
+ * @param net    The transport vertex the `fake` kind is registered on.
+ * @param script The dial script the factory consults. It **MUST** be declared BEFORE the
+ *               @p net it is handed to: the engine's factory copy holds this address, and
+ *               a worker can still be inside the factory while `~transport_vertex_t` runs.
+ *               Declared the other way round, `~dial_script_t` destroys the mutex and
+ *               condition variable out from under a live worker — which is a data race
+ *               TSan reports rather than a hang, and it is what broke `main` at #1484.
+ */
 void declare_fake_engine_module(transport_vertex_t& net, dial_script_t& script) {
     dial_script_t* const s = &script;
     net.register_transport_type(
@@ -221,6 +281,10 @@ void test_publish_does_not_hold_ctl_over_its_fan_out() {
     std::printf("S6: a liveness publish does not hold ctl_m_ across its subscriber fan-out:\n");
     graph_t node;
     fwd_router_t router(node);
+    // Plain stack order, no `section_quiesce_t`: this section declares no engine-managed
+    // kind, so the vertex owns no worker and the ONLY thread that ever publishes into the
+    // binding below is the `completes()` thread this function already waits on. There is no
+    // second publisher to join, hence nothing for the barrier to do.
     transport_vertex_t net(node, router);
     fake_sock_t sock;
     net.provide_link("manual", "a", sock);
@@ -255,13 +319,18 @@ void test_creation_birth_publish_is_outside_ctl() {
     std::printf("S6: a creation's birth liveness publishes with ctl_m_ already released:\n");
     graph_t node;
     fwd_router_t router(node);
-    transport_vertex_t net(node, router);
-    dial_script_t script;
+    dial_script_t script;  // outlives `net`: the engine's factory copy holds its address
+    std::optional<transport_vertex_t> net_slot;
+    net_slot.emplace(node, router);
+    transport_vertex_t& net = *net_slot;
     declare_fake_engine_module(net, script);
 
     // Subscribe to the vertex BEFORE it exists: an ancestor subscription reaches the
     // creation's own publish, which is the only way to observe a birth transition.
     standing_binding_t binding{net, "net/fake-client/a"};
+    // AFTER the binding, so the engine workers are joined while the binding still owns its
+    // string — see `section_quiesce_t`. Bounded teardown even on a failing check.
+    section_quiesce_t quiesce{net_slot, script};
     const auto sub = node.subscribe(*path_t::parse("/net/fake-client"), binding);
     check(sub.has_value(), "a subscriber sits above the module (RFC-0005 bubbling)");
 
@@ -271,11 +340,22 @@ void test_creation_birth_publish_is_outside_ctl() {
     });
     check(done, "the creation returned — its birth publish did not re-enter ctl_m_");
     if (!done) return;
+
+    // QUIESCE FIRST, then read the counters. The engine's worker is a second publisher into
+    // this same binding, and `deliveries` / `reentries` are bumped at the two ENDS of one
+    // delivery — so a live sample that catches the worker between them reads `reentries <
+    // deliveries` and indicts a re-entry that was merely still running. That is the same
+    // window as the lifetime race above, seen through the assertion instead of through the
+    // allocator, and the same barrier closes it: the guard's `arm_auto_fail` + vertex
+    // destruction joins the worker, after which the two counters are stable and the
+    // equality is the property it claims to be — "no delivery wedged", not "no delivery is
+    // mid-flight". `reset()` is idempotent, so the guard still covers the paths above.
+    quiesce.discharge();
+
     check(binding.deliveries.load() >= 1, "the birth DORMANT reached the subscriber");
     check(binding.reentries.load() == binding.deliveries.load(),
           "every delivery's control-plane re-entry returned");
     (void)node.unsubscribe(*sub);
-    script.arm_auto_fail();
 }
 
 /**
@@ -346,8 +426,10 @@ void test_teardown_does_not_hold_ctl_over_the_engine_join() {
     std::printf("S6: teardown does not hold ctl_m_ across the engine worker's join:\n");
     graph_t node;
     fwd_router_t router(node);
-    transport_vertex_t net(node, router);
-    dial_script_t script;
+    dial_script_t script;  // outlives `net`: the engine's factory copy holds its address
+    std::optional<transport_vertex_t> net_slot;
+    net_slot.emplace(node, router);
+    transport_vertex_t& net = *net_slot;
     declare_fake_engine_module(net, script);
     (void)node.write(path_t("/net/fake-client/conn"), fake_spec("a", 1));
     // Armed up front so a dial that does reach the factory concludes on its own — the
@@ -357,6 +439,9 @@ void test_teardown_does_not_hold_ctl_over_the_engine_join() {
     // Subscribed AFTER creation, so the first delivery this binding sees is a WORKER
     // publish rather than the birth DORMANT (which section 2 already covers).
     worker_fanout_binding_t binding{net, "net/fake-client/a"};
+    // AFTER the binding — same barrier as section 2, and this section is the one whose
+    // subscriber is designed to be sitting on the WORKER thread when the section ends.
+    section_quiesce_t quiesce{net_slot, script};
     const auto sub = node.subscribe(*path_t::parse("/net/fake-client/a"), binding);
     check(sub.has_value(), "the routing-plane subscriber binds to the connection's liveness");
 
