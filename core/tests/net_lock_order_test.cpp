@@ -149,7 +149,29 @@ struct dial_script_t {
     }
 };
 
-/** @brief Register the scripted engine-managed `fake` kind and its DIAL module. */
+/**
+ * @brief Release every blocked factory, so a teardown's in-flight join is bounded.
+ *
+ * Declared AFTER the `transport_vertex_t` in each section, so it runs BEFORE the engines'
+ * teardown joins their workers. Without it a section that fails its checks early leaves an
+ * attempt parked on `cv` and the destructor waits out the watchdog.
+ */
+struct script_guard_t {
+    dial_script_t& s; /**< @brief The script this guard releases. */
+    ~script_guard_t() { s.arm_auto_fail(); }
+};
+
+/**
+ * @brief Register the scripted engine-managed `fake` kind and its DIAL module.
+ *
+ * @param net    The transport vertex the `fake` kind is registered on.
+ * @param script The dial script the factory consults. It **MUST** be declared BEFORE the
+ *               @p net it is handed to: the engine's factory copy holds this address, and
+ *               a worker can still be inside the factory while `~transport_vertex_t` runs.
+ *               Declared the other way round, `~dial_script_t` destroys the mutex and
+ *               condition variable out from under a live worker — which is a data race
+ *               TSan reports rather than a hang, and it is what broke `main` at #1484.
+ */
 void declare_fake_engine_module(transport_vertex_t& net, dial_script_t& script) {
     dial_script_t* const s = &script;
     net.register_transport_type(
@@ -255,9 +277,10 @@ void test_creation_birth_publish_is_outside_ctl() {
     std::printf("S6: a creation's birth liveness publishes with ctl_m_ already released:\n");
     graph_t node;
     fwd_router_t router(node);
+    dial_script_t script;  // outlives `net`: the engine's factory copy holds its address
     transport_vertex_t net(node, router);
-    dial_script_t script;
     declare_fake_engine_module(net, script);
+    const script_guard_t guard{script};  // bounded teardown even on a failing check
 
     // Subscribe to the vertex BEFORE it exists: an ancestor subscription reaches the
     // creation's own publish, which is the only way to observe a birth transition.
@@ -346,9 +369,10 @@ void test_teardown_does_not_hold_ctl_over_the_engine_join() {
     std::printf("S6: teardown does not hold ctl_m_ across the engine worker's join:\n");
     graph_t node;
     fwd_router_t router(node);
+    dial_script_t script;  // outlives `net`: the engine's factory copy holds its address
     transport_vertex_t net(node, router);
-    dial_script_t script;
     declare_fake_engine_module(net, script);
+    const script_guard_t guard{script};  // bounded teardown even on a failing check
     (void)node.write(path_t("/net/fake-client/conn"), fake_spec("a", 1));
     // Armed up front so a dial that does reach the factory concludes on its own — the
     // teardown's in-flight-attempt join stays bounded whatever this test does.
