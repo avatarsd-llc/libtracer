@@ -221,6 +221,13 @@ rejected, and are carried verbatim so they read back unchanged from `:subscriber
 above, `subscriber/policy-durability`); `reliability` and `priority` are stored and read back,
 awaiting the transport work that honours them.
 
+These three were per-**vertex** `:settings` knobs until RFC-0022: a single `reliability` or
+`priority` has no coherent meaning across a heterogeneous fan-out (one vertex to a CAN peer and a
+WebSocket peer at once), which is why nothing ever consumed them. **No magnitude may be packed
+here** — a deadline or queue bound is a magnitude, and a bit-width on a magnitude is a synthetic
+limit this project forbids; one would arrive as a full-width field in the subscription's cold
+half, never in these bits.
+
 **Bits 6–7 are assigned but not yet live.** [RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.1 assigns them
 `delivery_class`; the default `0` (conflate) is today's behaviour byte-identically, which is
 why the assignment costs no wire byte and breaks no sender. Until the implementation commit of
@@ -239,13 +246,6 @@ its three-language gates narrow to "bits 8–15 reserved" — in the **same comm
 | `1` immediate | every write delivered as its own event; order-preserving, never conflated. |
 | `2` batch | the **wire encoding of the [RFC-0008](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0008-vertex-operations-assign-propagate.md) `assign`/`propagate` flush**. Accumulation is the source vertex's own state — a plain value **coalesces** (LKV overwrite, §B.2), a STREAM vertex keeps its **bounded since-last-flush list** (§E) — never a per-subscriber buffer at the fan-out edge. A flush emits the **snapshot** on a plain vertex and the **full list** on a STREAM, as one BATCH record (§User range, `0x80`), after `batch_count` frames, after `batch_window_ns`, or **early when the list is full** (no loss, no gap signal, no counter). |
 | `3` stream | append-preserving: every write delivered in order, none conflated, with the RFC-0025 §4.4 pressure contract at the **receiving** vertex's ring. |
-
-These three were per-**vertex** `:settings` knobs until RFC-0022: a single `reliability` or
-`priority` has no coherent meaning across a heterogeneous fan-out (one vertex to a CAN peer and a
-WebSocket peer at once), which is why nothing ever consumed them. **No magnitude may be packed
-here** — a deadline or queue bound is a magnitude, and a bit-width on a magnitude is a synthetic
-limit this project forbids; one would arrive as a full-width field in the subscription's cold
-half, never in these bits.
 
 **Per-vertex `delivery_mode` ([RFC-0008](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0008-vertex-operations-assign-propagate.md)).** Whether a vertex rides an *ancestor's* `propagate` sweep is a value-agnostic property of the **vertex** (not the subscriber): `UNCONDITIONAL` (always swept), `IF_NEWER` (default — swept only if its write sequence advanced since the last covering sweep), `EXPLICIT` (never swept by an ancestor; deliverable only by a direct `propagate` on the vertex). `assign` and a direct `propagate` on the vertex are never gated by it. It is host state defaulting to `IF_NEWER`. Wire configuration reuses the vertex's own `:settings` (a `delivery_mode` NAME/VALUE under the vertex `SETTINGS`) and is **deferred**, so the host call is the only way to set it.
 
