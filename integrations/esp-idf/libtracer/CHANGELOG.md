@@ -10,6 +10,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-08-21
+
+### Changed
+
+- **`httpd_ws_link_t::ok()` answers `false` on a target that closed the ADR-0044 bus
+  module out** (`tr::graph::default_config_t::kBusLinks = false`,
+  [#375](https://github.com/avatarsd-llc/libtracer/issues/375) deliverable 3). This link is
+  peer-named by construction — it serves many browser sessions and names each one — so it
+  has no flat mode to be demoted to, and a build that declared it carries no bus facet
+  cannot serve it. The refusal rides the came-up predicate every caller already checks
+  rather than a `static_assert`, because the component compiles this TU unconditionally and
+  a hard error would break builds that never construct the link. **At the default binding
+  (`kBusLinks = true`) nothing moves**: the `if constexpr` is discarded and `ok()` is
+  `handle_ != nullptr`, the predicate it always was.
+
 ### Fixed
 
 - **`esp_ws_client_link_t` teardown no longer pays for a dial it cannot cancel**

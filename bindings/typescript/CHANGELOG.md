@@ -7,6 +7,30 @@ versioning/publish strategy.
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-08-21
+
+No API change to any of the four packages. One behaviour a client sees *from the
+node* changed, and it is worth knowing about.
+
+### Changed
+
+- **Against a 0.14.0+ node, a module's `:children[]` no longer lists `conn`** (core
+  RFC-0014 S4, [#492](https://github.com/avatarsd-llc/libtracer/issues/492)). The
+  creator endpoint is now hidden from the listing at the source, so
+  `/net/<module>:children[]` is exactly that module's member connections — and a
+  module that carries none legitimately lists **nothing**. Module discovery is
+  unaffected and always lived one level up, in `/net:children[]`; the endpoint stays
+  addressable, and RFC-0014 §6's creatability probe (`read /net/<module>/conn:schema`)
+  is unchanged.
+
+  **`CONN_ENDPOINT_NAME` and `walkTopology`'s skip of it stay, and are still
+  required** ([#1302](https://github.com/avatarsd-llc/libtracer/issues/1302)): a node
+  older than S4 keeps listing the endpoint, and this client talks to those too. Nothing
+  to change in caller code — a filter that was load-bearing against 0.13.x nodes is
+  simply a no-op against 0.14.0 ones. The `mesh-testbed` expectations were updated to
+  the post-S4 listings; `topology-completeness`'s stub is deliberately left as a
+  **pre-S4** node, because that is the case the skip exists for.
+
 ## [0.13.0] — 2026-08-16
 
 ### Added

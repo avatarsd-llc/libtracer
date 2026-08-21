@@ -8,6 +8,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-08-21
+
+No crate change. Nothing under `bindings/rust/` moved between `v0.13.0` and
+`v0.14.0`; the crate is republished only because one libtracer tag versions every
+artifact in lockstep (see [`RELEASING.md`](../../.github/RELEASING.md)).
+
+**The wire surface this codec implements is unchanged.** 0.14.0's behaviour work is
+graph- and transport-plane — RFC-0014 S4 hides a module's creator endpoint from
+`:children[]`, S5 adds a link-liveness engine — and its spec work (the ADR-0079
+composition rename, RFC-0025's amendments, the 01-data-format erratum) is normative
+text, not encoding. A 0.13.0 encoder and a 0.14.0 encoder emit identical bytes, and
+the conformance vectors are the same vectors.
+
 ## [0.13.0] — 2026-08-16
 
 ### Changed
