@@ -22,14 +22,17 @@
  */
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include "libtracer/graph.hpp"
@@ -633,6 +636,120 @@ class transport_vertex_t {
         conn_role_t role;
     };
 
+    /**
+     * @brief What a `%ctl_txn_t` is for — which of the two control-plane locks it needs.
+     *
+     * The distinction IS the S6 discipline (#492). See `ops_m_` and `ctl_m_`.
+     */
+    enum class ctl_scope_t : std::uint8_t {
+        LOOKUP,    /**< @brief The maps only: a reader, or the refcount seam. `ctl_m_`. */
+        OPERATION, /**< @brief A whole mutation, phase 1 + phase 2. `ops_m_` then `ctl_m_`. */
+    };
+
+    /**
+     * @brief The RFC-0014 S6 two-phase control-plane seam (#492): the ONE way either
+     *        control-plane lock is taken, and the thing that makes the discharge unskippable.
+     *
+     * **Phase 1** — construction takes the locks its `%ctl_scope_t` asks for; the decision
+     * runs under them and touches only this class's own maps. **Phase 2** — `%discharge`
+     * (or, as the backstop, the destructor) drops `ctl_m_` FIRST and only then performs the
+     * collected work against the graph, the router and the sockets. Nothing between the two
+     * phases can skip the release: there is no hand-written unlock path to forget, and an
+     * early `return` out of a decision still discharges.
+     *
+     * The work collected is exactly the work that can RE-ENTER this class:
+     * `%publish` is a `graph_t::write` that fans out to subscribers (a routing-plane
+     * subscriber of a connection's own liveness is what S6 wires, and it drives
+     * @ref transport_vertex_t::acquire_link — straight back into `ctl_m_`), and
+     * `%stop_engine` / `%destroy_link` JOIN a thread that may be inside such a
+     * fan-out. Held across `ctl_m_`, either one deadlocks a non-recursive mutex.
+     *
+     * An `OPERATION` keeps `ops_m_` for the WHOLE of both phases, which is what preserves
+     * ADR-0063 §3's serialization promise now that the discharge is outside `ctl_m_`: two
+     * mutations cannot interleave, so a deferred publish can no longer land on a vertex a
+     * concurrent teardown is retiring. `ops_m_` is safe to hold there precisely because the
+     * doors a fan-out reaches never take it.
+     *
+     * A `LOOKUP` that collects nothing is a plain scoped lock — which is the point: every
+     * acquisition of either mutex in this class goes through this type, so the re-entrancy
+     * checks in the constructor see them all.
+     */
+    class ctl_txn_t {
+       public:
+        /**
+         * @brief Phase 1 begins: take the locks @p scope asks for and claim them for this
+         *        thread.
+         *
+         * `const`, because the pure readers (`settings_of` / `link_of` / `module_for` /
+         * `is_structural`) take `ctl_m_` too — it is `mutable`, as are `ops_m_` and both
+         * ownership stamps. Phase 2 still reaches the graph and the router: those are
+         * REFERENCE members, so const on the owner does not propagate to them.
+         */
+        explicit ctl_txn_t(const transport_vertex_t& owner,
+                           ctl_scope_t scope = ctl_scope_t::LOOKUP);
+
+        /** @brief The backstop discharge — see `%discharge`; the status is dropped. */
+        ~ctl_txn_t();
+
+        ctl_txn_t(const ctl_txn_t&) = delete;
+        ctl_txn_t& operator=(const ctl_txn_t&) = delete;
+
+        /** @brief Collect the liveness publish for @p vertex (RFC-0014 §4's 1-byte VALUE). */
+        void publish(graph::vertex_handle_t vertex, link_state_t state);
+
+        /** @brief Collect `fwd_router_t::remove_child(name)` — the un-route, first in phase 2. */
+        void unroute(std::string name);
+
+        /** @brief Collect `self_heal_link_t::stop()` on @p engine — JOINS its worker. */
+        void stop_engine(self_heal_link_t* engine);
+
+        /** @brief Collect the destruction of @p link — JOINS its receive thread. */
+        void destroy_link(std::unique_ptr<transport_t> link);
+
+        /** @brief Collect `graph_t::retire(vertex)` — the connection's identity goes. */
+        void retire(graph::vertex_handle_t vertex);
+
+        /**
+         * @brief Phase 2: drop `ctl_m_`, then run the collected work in teardown order —
+         *        un-route, stop the engine, retire the vertex, destroy the socket, publish.
+         *
+         * `ops_m_`, if this is an `OPERATION`, is NOT dropped here: it is the destructor's,
+         * so the whole mutation stays one serialized step.
+         *
+         * Idempotent (a second call has nothing left to do), so the destructor may run it
+         * again harmlessly after an explicit call.
+         * @return The status of whichever of the two failable actions was collected — a
+         *         retire (teardown) or a publish (creation, liveness). They are mutually
+         *         exclusive by construction: a teardown publishes nothing and a publish
+         *         retires nothing. A transaction that collected neither answers success.
+         */
+        graph::result_t<void> discharge();
+
+       private:
+        /** @brief End phase 1: clear the `ctl_m_` stamp, then unlock it. Idempotent. */
+        void release_lock();
+
+        const transport_vertex_t& owner_;
+        std::unique_lock<std::mutex> ops_lock_; /**< @brief Engaged for an `OPERATION`. */
+        std::unique_lock<std::mutex> lock_;     /**< @brief `ctl_m_`; dropped by phase 2. */
+        std::string unroute_;                   /**< @brief Empty = no un-route. */
+        self_heal_link_t* stop_ = nullptr;      /**< @brief Null = no engine to stop. */
+        std::unique_ptr<transport_t> destroy_;  /**< @brief Null = nothing to destroy. */
+        // Engaged = collected. `vertex_handle_t` has no default state to spell (ADR-0056 —
+        // it is exactly a pointer, constructible only by the graph), so the optional IS the
+        // armed flag rather than riding beside a synthetic null handle.
+        std::optional<graph::vertex_handle_t> retire_;  /**< @brief The vertex to retire. */
+        std::optional<graph::vertex_handle_t> publish_; /**< @brief The vertex to write. */
+        link_state_t publish_state_{};                  /**< @brief The value to write. */
+    };
+
+    /** @brief True iff THIS thread is inside a `%ctl_txn_t`'s phase 1 — the S6 lock-order
+     *         self-check's predicate (see `ctl_owner_`). */
+    [[nodiscard]] bool ctl_held_by_this_thread() const noexcept;
+
+    /** @brief True iff THIS thread is inside an `OPERATION` transaction (see `ops_owner_`). */
+    [[nodiscard]] bool ops_held_by_this_thread() const noexcept;
+
     // The catalog factory shared by the `client`/`listener` types: parse the SPEC config,
     // resolve the link (provided > config-constructed), record the leaf, wire the link
     // into the router. `role` distinguishes the two types (a config `role` overrides).
@@ -654,14 +771,26 @@ class transport_vertex_t {
      * @param config   The SPEC's raw `config` SETTINGS, for the kind factory's private keys.
      * @param settings The universal keys parsed out of @p config, with `role` (and, on the
      *                 endpoint door, `kind`) already fixed by the module.
+     * @param txn      The open transaction — creation's birth liveness (RFC-0014 §4's
+     *                 `UP`/`LISTENING`/`DORMANT`) is COLLECTED on it, not published here,
+     *                 because publishing fans out to subscribers under `ctl_m_`.
      */
     [[nodiscard]] graph::result_t<graph::vertex_handle_t> make_connection_locked(
-        const std::string& module, const std::string& name, const wire::tlv_t* config,
-        conn_settings_t settings);
+        ctl_txn_t& txn, const std::string& module, const std::string& name,
+        const wire::tlv_t* config, conn_settings_t settings);
 
-    /** @brief `remove_connection`'s body, for a caller that ALREADY holds `ctl_m_` — same
-     *         non-recursive-mutex constraint as `%module_for_locked`. */
-    [[nodiscard]] graph::result_t<void> remove_connection_locked(std::string_view name);
+    /**
+     * @brief `remove_connection`'s body, for a caller that ALREADY holds `ctl_m_` — same
+     *        non-recursive-mutex constraint as `%module_for_locked`.
+     *
+     * Phase 1 only: the `conns_` entry goes here, and the un-route / engine stop / vertex
+     * retire / socket destruction are collected on @p txn for phase 2. Erasing the entry
+     * before the vertex retires cannot let a same-name creation slip in between: the
+     * identity vertex is still registered, so `register_vertex_key` refuses it
+     * `PATH_IN_USE` until phase 2's retire has run — and by then the un-route has too.
+     */
+    [[nodiscard]] graph::result_t<void> remove_connection_locked(ctl_txn_t& txn,
+                                                                 std::string_view name);
 
     /**
      * @brief Register `<net_root>/<module>` and its `conn` creator endpoint, idempotently.
@@ -687,12 +816,14 @@ class transport_vertex_t {
     [[nodiscard]] graph::result_t<void> endpoint_write(const std::string& module,
                                                        const view::rope_t& value);
 
-    /** @brief The `SPEC` ⇒ create leg of `%endpoint_write`; caller holds `ctl_m_`. */
-    [[nodiscard]] graph::result_t<void> endpoint_create_locked(const std::string& module,
+    /** @brief The `SPEC` ⇒ create leg of `%endpoint_write`; runs in @p txn's phase 1. */
+    [[nodiscard]] graph::result_t<void> endpoint_create_locked(ctl_txn_t& txn,
+                                                               const std::string& module,
                                                                const wire::tlv_t& spec);
 
-    /** @brief The `NAME` ⇒ remove leg of `%endpoint_write`; caller holds `ctl_m_`. */
-    [[nodiscard]] graph::result_t<void> endpoint_remove_locked(const std::string& module,
+    /** @brief The `NAME` ⇒ remove leg of `%endpoint_write`; runs in @p txn's phase 1. */
+    [[nodiscard]] graph::result_t<void> endpoint_remove_locked(ctl_txn_t& txn,
+                                                               const std::string& module,
                                                                std::string_view name);
 
     /**
@@ -723,11 +854,12 @@ class transport_vertex_t {
     /**
      * @brief `set_link_state`'s body, for a caller that ALREADY holds `ctl_m_`.
      *
-     * Creation publishes `UP`/`LISTENING` for a config-constructed socket from inside the
-     * locked section and calls this; every external liveness report goes through the
-     * locking public entry. Same non-recursive-mutex constraint as `module_for_locked`.
+     * Resolution only: it maps @p name to its connection vertex and COLLECTS the write on
+     * @p txn. The write itself is phase 2's, because it fans out to subscribers — see
+     * `%ctl_txn_t`. Creation reaches it the same way for its birth liveness, so the two
+     * doors publish through one body and one discharge.
      */
-    [[nodiscard]] graph::result_t<void> set_link_state_locked(std::string_view name,
+    [[nodiscard]] graph::result_t<void> set_link_state_locked(ctl_txn_t& txn, std::string_view name,
                                                               link_state_t state);
 
     /**
@@ -744,10 +876,70 @@ class transport_vertex_t {
      * milliseconds, which rules out an interrupt-disable critical section outright and makes a
      * spinlock a priority-inversion hazard on single-core FreeRTOS (ADR-0063 erratum 1).
      *
-     * Lock order: this → `fwd_router_t::ctl_m_` → `graph_t::map_mutex_` → the vertex stripe.
-     * Nothing on the forward or delivery path takes any of them.
+     * **Lock order (ADR-0063 §3, erratum 7).** `ops_m_ → this → fwd_router_t::ctl_m_ →
+     * graph_t::map_mutex_ → the vertex stripe`, and nothing on the forward or delivery
+     * path takes any of them. The order is only half the discipline, though, and the
+     * weaker half: an order says which lock may nest inside which, and says nothing about
+     * a call that comes back round the outside. The binding rule is the second one:
+     *
+     * > **`ctl_m_` is NEVER held across a call that can re-enter `transport_vertex_t`** —
+     * > a subscriber fan-out (`graph_t::write`) or a thread join (`self_heal_link_t::stop`,
+     * > a socket destructor) — and **`ops_m_`, which IS held across those, is never taken
+     * > by a door such a call can reach.**
+     *
+     * Both re-entries were reachable before RFC-0014 S6 (#492), and S6's own wiring is what
+     * made them live: a routing-plane subscriber of a connection's liveness drives
+     * @ref acquire_link, so a publish made under a single control mutex re-entered a
+     * non-recursive lock on its own thread, and a teardown that joined the engine's worker
+     * mid-publish did the same across two threads. Both now run in phase 2 of a
+     * `%ctl_txn_t`, with `ctl_m_` already released. What the class still holds `ctl_m_`
+     * across — `graph_t::find` / `register_vertex_key` / `hide_from_enumeration`,
+     * `fwd_router_t::add_child` — are structural mutations that dispatch nothing and join
+     * nothing, so they cannot come back round.
+     *
+     * Enforced, not merely documented: `%ctl_txn_t` is the only acquisition of either
+     * mutex in the class, the discharge is its destructor's, and the ownership stamps make
+     * a re-entry an assertion rather than a hang (`net_lock_order_test`).
      */
     mutable std::mutex ctl_m_;
+
+    /**
+     * @brief Serializes whole control-plane OPERATIONS — the outer half of the pair.
+     *
+     * ADR-0063 §3 promised that a create / remove / liveness publish is serialized "in
+     * full", and while one mutex covered the whole operation it was. S6 moves the discharge
+     * out of `ctl_m_`, which alone would let one operation's deferred work interleave with
+     * another's decision — concretely, `set_link_state`'s deferred `graph_t::write` landing
+     * on the vertex a concurrent `remove_connection` is retiring, which is a genuine race
+     * (`net_control_plane_race_test` reports it under TSan) and not merely an odd ordering.
+     * This mutex restores the promise: an `OPERATION` transaction holds it across BOTH
+     * phases.
+     *
+     * It is therefore held across the fan-out and the joins — and that is safe for exactly
+     * one reason, which is the reason it exists as a second mutex rather than as `ctl_m_`
+     * held longer: **no door a fan-out can reach takes it.** @ref acquire_link,
+     * @ref release_link, @ref link_of, @ref settings_of, @ref module_for and
+     * `is_structural` are `LOOKUP` scope. A callback that instead MUTATES the control plane
+     * re-entrantly — a liveness subscriber calling @ref remove_connection — is refused by
+     * assertion rather than deadlock; that is a restriction, and a deliberate one: a
+     * teardown re-entered from inside its own teardown's fan-out has no defined meaning.
+     */
+    mutable std::mutex ops_m_;
+
+    /**
+     * @brief The thread inside a `%ctl_txn_t`'s phase 1 — the S6 lock-order self-check.
+     *
+     * A default-constructed id means "nobody". Written under `ctl_m_` and read from
+     * anywhere, hence atomic: the read that matters is a re-entrant one, made by a thread
+     * that is about to block on the mutex this same thread holds. Without it that bug is a
+     * silent hang wherever the callback happened to be installed; with it, it is a
+     * diagnosable assertion at the acquisition site.
+     */
+    mutable std::atomic<std::thread::id> ctl_owner_{};
+
+    /** @brief The same stamp for `ops_m_` — the thread inside an `OPERATION` transaction,
+     *         across both its phases. This is the one a re-entrant mutation trips. */
+    mutable std::atomic<std::thread::id> ops_owner_{};
 
     graph::graph_t& graph_;
     fwd_router_t& router_;

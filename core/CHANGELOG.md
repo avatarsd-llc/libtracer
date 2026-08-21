@@ -14,6 +14,31 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Changed
+
+- **`tr::net::transport_vertex_t` no longer holds its control mutex across a call that can
+  re-enter it** — the RFC-0014 S6 two-phase seam
+  ([#492](https://github.com/avatarsd-llc/libtracer/issues/492),
+  [ADR-0063](../docs/adr/0063-connection-table-lock-free-reads-trait-serialized-writes.md)
+  erratum 7). The class's declared lock order (`transport_vertex_t` → `fwd_router_t` →
+  `graph_t` → the vertex stripe) was never the whole discipline: two of its own calls left
+  the class and came back round the outside. A liveness publish (`set_link_state`, and a
+  creation's birth `UP`/`LISTENING`/`DORMANT`) fans out to the connection's subscribers, and
+  §4's standing-binding seam — `acquire_link` / `release_link` — is driven by a routing plane
+  watching exactly that liveness, so the subscriber re-entered a **non-recursive** mutex on
+  the publishing thread. `remove_connection` joined the liveness engine's worker (and then
+  the socket's receive thread) from under the same mutex, while that worker could be inside
+  such a publish: a two-thread deadlock. Both now run in phase 2 of an RAII transaction that
+  releases the mutex first.
+
+  **No signature changes and no status changes** — `set_link_state` still answers the write's
+  status, `remove_connection` still answers the retire's, a creation still returns with its
+  birth liveness already published. What changed is what an *embedder's* callback may do:
+  a subscriber of a connection vertex, or any code the graph dispatches from a liveness
+  write, may now call back into `transport_vertex_t` freely. Previously that wedged. The
+  order itself is unchanged and still governs what remains inside the hold — the graph
+  lookups and registrations and the router's `add_child`, none of which dispatch or join.
+
 ## [0.14.0] — 2026-08-21
 
 ### Added
