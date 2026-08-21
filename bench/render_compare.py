@@ -171,7 +171,7 @@ def build(rows: list[dict]) -> dict:
     # instead of only in the prose above it.
     LINES = [("libtracer", "libtracer — write (store+notify+deliver)", 0),
              ("libtracer-deliver", "libtracer — deliver-only (propagate)", 1),
-             ("zenoh", "Zenoh — zenoh-c 1.9.0, peer mode (put)", 2)]
+             ("zenoh", "Zenoh — zenoh-c 1.10.0, peer mode (put)", 2)]
 
     def chart(cid, title, cond, series, x, fmt, ylabel, log, read):
         """One chart in the render_history payload shape (see perf_history.js)."""
@@ -419,9 +419,11 @@ def html_block(rows: list[dict], provenance: str) -> str:
     payload = json.dumps(data, separators=(",", ":"))
     return f""":::{{raw}} html
 <div class="ph-hist">
-  <p class="ph-note">Measured in the SAME pass on the same runner, so this is like-for-like on
-  identical hardware. libtracer is compiled from source at <code>-O3</code> here; Zenoh is the
-  upstream <b>zenoh-c 1.9.0 prebuilt release</b> binary (<code>bench/fetch_zenoh.sh</code>
+  <p class="ph-note">Measured on the same runner in the same rounds — the whole grid swept
+  3 times with each point keeping its best observation, both engines in the same loop — so
+  this is like-for-like on identical hardware. libtracer is compiled from source at
+  <code>-O3</code> here; Zenoh is the upstream <b>zenoh-c 1.10.0 prebuilt release</b> binary
+  (<code>bench/fetch_zenoh.sh</code>
   downloads it — we do not build it, so its optimization profile is upstream's, not a flag we
   set). Both are optimized builds. Absolute values on absolute
   axes — no ratios, and every "reading" under a chart is computed from that chart's own
