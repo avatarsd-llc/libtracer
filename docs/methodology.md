@@ -145,16 +145,25 @@ fails to run must not cost a commit its whole history point — but an empty one
 warning naming the file, because a silently-empty transcript is otherwise a green job that
 recorded nothing.
 
-### 4 · libtracer vs Zenoh (absolute, one pass, same runner)
+### 4 · libtracer vs Zenoh (absolute, best of 3 rounds, same runner)
 
 A side-by-side against [Eclipse Zenoh](https://zenoh.io) (zenoh-c, peer mode). Both are
-measured **in the same pass on the same runner** — libtracer compiled from source at `-O3`,
-Zenoh as the upstream prebuilt `zenoh-c 1.9.0` release binary that `bench/fetch_zenoh.sh`
-downloads (we do not build it, so its optimization profile is upstream's, not ours). And
-the charts plot **absolute** throughput / latency / bandwidth — both engines as
-series on shared axes. There are **no speed-up ratios**: every point is a measured
-number you can read off directly. Fairness is discussed in its own section below,
-because a naive put-vs-write comparison would be misleading.
+measured **on the same runner in the same rounds** — libtracer compiled from source at
+`-O3`, Zenoh as the upstream prebuilt `zenoh-c 1.10.0` release binary that
+`bench/fetch_zenoh.sh` downloads (we do not build it, so its optimization profile is
+upstream's, not ours). The whole grid is swept **3 times** and each point keeps its best
+observation across those rounds (`bench/best_of_rounds.py`): contamination on a shared
+runner is one-sided — a busy neighbour can only ever make a round slower — so the best
+round is the estimator closest to what the code does, while a median would be an estimate
+of how busy the machine was. Both engines are executed in the same loop the same number of
+times; giving one arm N tries and the other one shot would be a thumb on the scale rather
+than a measurement. The **tail** rows (p999 / max) are deliberately **not** reduced this
+way — a minimum p999 would advertise the calmest moment the host ever had as though it
+were a worst case — so those are left as measured. And the charts plot **absolute**
+throughput / latency / bandwidth — both engines as series on shared axes. There are **no
+speed-up ratios**: every point is a measured number you can read off directly. Fairness is
+discussed in its own section below, because a naive put-vs-write comparison would be
+misleading.
 
 ### 5 · Cross-core codec (like-for-like across implementations)
 
@@ -371,6 +380,21 @@ never encode one machine's speed as another machine's target.)
 
 An honest side-by-side has to account for the two engines doing *different amounts
 of work per operation*.
+
+- **Deliveries are counted at the subscriber on both arms.** Neither engine's delivery
+  figure is inferred from `publishes x fan-out`. Each side's timed window ends only once
+  every delivery it owes has landed, each reports what its subscribers actually received,
+  and each prints a warning naming any point that came up short. The two engines reach
+  that guarantee differently, and the difference is not a handicap: libtracer dispatches
+  inline, so `write()` returns only after the last subscriber callback and its publish
+  loop *is* its delivery loop, whereas Zenoh delivers off the publishing thread and the
+  harness spins on the receive counter inside the window until the backlog drains. This
+  matters because the arithmetic form would not merely be imprecise, it would be
+  unfalsifiable: libtracer's wide-fan-out snapshot truncates to its inline prefix when its
+  overflow reserve fails, and its HANDLER and STREAM legs shed an entire fan-out on a
+  clone or ring-append failure — in every one of those cases `write()` still returns
+  success, so a `publishes x fan-out` figure would report deliveries that never happened
+  and nothing in the harness would contradict it.
 
 - **Write does strictly more than put.** libtracer's `write` row also **persists**
   the value (it becomes the vertex's last-known-value) and bumps the `await` /
