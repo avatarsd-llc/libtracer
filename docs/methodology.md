@@ -226,12 +226,12 @@ build if one does not.
 
 Details that make these trustworthy:
 
-- The per-PR gate watches **fourteen canonical points** — a representative slice of the
+- The per-PR gate watches **fifteen canonical points** — a representative slice of the
   fan-out / payload / topic sweeps plus a fold-width point, one per *gated* family
   (`inproc` and `inproc-borrow` share one), so a pullback on any of those legs is caught and
   not just the 1:1 write. They are **not** the whole dispatch surface, and this page should
-  not be read as claiming they are: `inproc-deliver`, the `eptype-*` sweep and the `-batch`
-  twins are measured and charted but **ungated**. A pullback confined to
+  not be read as claiming they are: `inproc-deliver`, the `-batch` twins and the `eptype-*`
+  sweep's two **lean** arms are measured and charted but **ungated**. A pullback confined to
   those ships without the gate objecting. They are
   `perf_gate.py`'s `POINTS`, named here in full because this page is hand-written and a
   bare count says nothing about what is covered; each is keyed
@@ -278,7 +278,21 @@ Details that make these trustworthy:
   tick guard would demand an extra +25 ns absolute and blunt them the way it blunts
   `fold-b4`.
 
-  Four of the fourteen come from OTHER bench binaries, and they are here because of what
+  `eptype-stream/64/1/1` is the fifteenth, and the reason it is gated while its two
+  siblings are not is the whole point of adding it. `eptype-lean` and `eptype-lean-cached`
+  are the `inproc` and `inproc-borrow` code paths *re-emitted* under an endpoint-type
+  name — already gated, twice over, so gating them again would buy correlated evidence
+  rather than coverage. `eptype-stream` is not a re-emission: it is the only point on the
+  list that declares a bounded history depth, and therefore the only one downstream of the
+  **`STREAM` role's retention work** — the append to the bounded ring that every write to a
+  stream vertex pays *before* fan-out. Nothing else on the list touches that path, so a
+  pullback confined to retention was invisible to all fourteen predecessors, which is the
+  same guard-gap shape as `lkv-store-*` and the compact/demux arms below. It costs **no
+  wall-clock**: the default sweep already emits the row. And all three legs bite at the
+  nominal thresholds — it measures **~190 ns** p50 and mean, far above the sub-100 ns band
+  where the tick guard would demand an extra +25 ns absolute.
+
+  Four of the fifteen come from OTHER bench binaries, and they are here because of what
   happened without them (#1173): `compact-forward` moved **+41%** across the v0.8.0 →
   v0.9.0 window while every gated point stayed flat, so the gate had nothing to object to.
   They are `compact-forward/64/1/1` and `compact-terminus/64/1/1` — the compact-delivery
