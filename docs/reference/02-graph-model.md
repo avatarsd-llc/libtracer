@@ -502,13 +502,23 @@ new wire structure — as one packed 16-bit value under the key `delivery_policy
 | 0–1 | `reliability` | `0` = best-effort, `1` = reliable; `2`–`3` reserved |
 | 2–4 | `priority` | `0`–`7`, `0` = default |
 | 5 | `durability_request` | `1` = deliver the producer's latched last value on join |
-| 6–15 | reserved | MUST be written `0`, MUST be **ignored** on read — never rejected |
+| 6–7 | `delivery_class` | `0` = conflate (default), `1` = immediate, `2` = batch, `3` = stream ([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.1) — assigned, not yet honoured |
+| 8–15 | reserved | MUST be written `0`, MUST be **ignored** on read — never rejected |
 
 **Absent ⇒ all-zero ⇒ the default behaviour**, byte-identically: a sender that predates the
 policy is a conforming sender. Only `durability_request` is honoured today (§the transient-local
 latch, [05 §`0x04`](05-protocol-tlvs.md)); `reliability` and `priority` are carried and read back,
 awaiting the transport work that honours them — the honest shape RFC-0022 chose over moving dead
-per-vertex fields into a new home.
+per-vertex fields into a new home. Bits 6–7 are **assigned but not yet live**: their default `0`
+(conflate) is today's behaviour byte-identically, and until
+[#1204](https://github.com/avatarsd-llc/libtracer/issues/1204) phase 3 ships `delivery_class` they
+are carried verbatim and ignored exactly like bits 8–15 (the `subscriber/policy-reserved-bits`
+vector, which narrows its description in that same commit —
+[RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.1.2 clause 7). `delivery_class = 2` (batch) is the
+**wire encoding of the [RFC-0008](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0008-vertex-operations-assign-propagate.md) `assign`/`propagate` flush**: accumulation is
+the source vertex's own state — LKV coalesce for a plain value, the bounded since-last-flush list
+for a STREAM — and a flush emits the **snapshot** or the **full list** accordingly, never a
+per-subscriber buffer at the fan-out edge.
 
 **No magnitude is packed here.** A deadline or a queue bound added later is a *magnitude*, and a
 bit-width on a magnitude is a synthetic limit, which this project forbids

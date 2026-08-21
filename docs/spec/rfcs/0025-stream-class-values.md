@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0025 |
 | **Title** | Stream-class values: delivery classes over the rope primitive |
-| **Status** | **accepted** (opened 2026-08-12, accepted 2026-08-12 by the merge of [PR #1192](https://github.com/avatarsd-llc/libtracer/pull/1192); implementation tracked by [#1204](https://github.com/avatarsd-llc/libtracer/issues/1204)). The comment window is **waived by default** per [GOVERNANCE](../../../.github/GOVERNANCE.md) single-maintainer rule — invoked explicitly only if outside input is wanted, and it was not invoked here. This line previously read `in-comment`, which under the waived-by-default rule is a state the RFC never occupied. **Amendment 1 (2026-08-21, §4.2.1) replaces §4.2's single-clock timestamp spelling with the three-clock model — wire/TX on the trailer (outermost frame, always `TF=0`), SAMPLE in a payload `TIME` (`0x0C`) child, PLAYOUT receiver-derived — and re-shapes the batch accordingly: a `TIME{u64 base}` child, per-sample time derived at **0 bytes/sample** for a uniform stream, a packed `i32` offset array for a non-uniform one. **Amendment 2 (2026-08-21, §4.6.1) relocates the ring: a producer never queues — the queue belongs to whoever consumes it, materializes at the *receiving* vertex as a STREAM, and is bounded in BYTES by that vertex's own injected `mem::block_source_t`; §4.4's pressure contract binds at the receiver ring, cross-writer total order is delegated to ADR-0019 HLC stamps, and the per-edge credit window is PARKED as the v2 wire-level escalation. Both amendments transcribe the 2026-08-20 grilling rulings (Q8, Q9, Q10) and neither adds a wire byte. |
+| **Status** | **accepted** (opened 2026-08-12, accepted 2026-08-12 by the merge of [PR #1192](https://github.com/avatarsd-llc/libtracer/pull/1192); implementation tracked by [#1204](https://github.com/avatarsd-llc/libtracer/issues/1204)). The comment window is **waived by default** per [GOVERNANCE](../../../.github/GOVERNANCE.md) single-maintainer rule — invoked explicitly only if outside input is wanted, and it was not invoked here. This line previously read `in-comment`, which under the waived-by-default rule is a state the RFC never occupied. **Amendment 1 (2026-08-21, §4.2.1) replaces §4.2's single-clock timestamp spelling with the three-clock model — wire/TX on the trailer (outermost frame, always `TF=0`), SAMPLE in a payload `TIME` (`0x0C`) child, PLAYOUT receiver-derived — and re-shapes the batch accordingly: a `TIME{u64 base}` child, per-sample time derived at **0 bytes/sample** for a uniform stream, a packed `i32` offset array for a non-uniform one. **Amendment 2 (2026-08-21, §4.6.1) relocates the ring: a producer never queues — the queue belongs to whoever consumes it, materializes at the *receiving* vertex as a STREAM, and is bounded in BYTES by that vertex's own injected `mem::block_source_t`; §4.4's pressure contract binds at the receiver ring, cross-writer total order is delegated to ADR-0019 HLC stamps, and the per-edge credit window is PARKED as the v2 wire-level escalation. Both amendments transcribe the 2026-08-20 grilling rulings (Q8, Q9, Q10) and neither adds a wire byte. **Amendment 3 (2026-08-21, §4.1.2) rules that `delivery_class = batch` is the wire encoding of RFC-0008's already-shipped `assign`/`propagate` flush** — accumulation is vertex STATE (LKV coalesce for a plain value, the bounded since-flush list for a STREAM), never a per-subscriber fold buffer; a flush emits the SNAPSHOT for a plain value and the FULL LIST for a STREAM; list-full flushes EARLY; `propagate` gains a FOLD emission mode (one RFC-0016-grammar branch-write frame per sweep, un-deferring RFC-0005 §E's `delivery_scope = SNAPSHOT` by reframing it as a branch write); and BATCH is formally assigned the user-range record type `0x80`. It resolves §4.1's contradiction with Amendment 2 and adds no wire byte beyond that assignment. |
 | **Author(s)** | AvatarSD (maintainer), with AI drafting |
 | **Created** | 2026-08-12 |
 | **Tracking issue** | [#879](https://github.com/avatarsd-llc/libtracer/issues/879) (folds [#863](https://github.com/avatarsd-llc/libtracer/issues/863), per-subscription delivery QoS) |
@@ -44,7 +44,11 @@ protocol already has**, with **zero new wire grammar**:
 - The QoS folded in from #863 becomes a **delivery-class field in bits 6–7 of
   RFC-0022's packed `delivery_policy` u16** — `0` conflate (default, bit-compatible
   with today), `1` immediate, `2` batch, `3` stream — declared **per subscription**,
-  enforced at the producer's fan-out edge. No per-vertex "I am a stream" flag exists:
+  enforced at the producer's fan-out edge. **Amendment 3 (§4.1.2) pins what "batch"
+  means**: it is the wire encoding of RFC-0008's `assign`/`propagate` flush, so what
+  the fan-out edge holds for a batch subscriber is a counter and a window, never a
+  per-subscriber buffer — accumulation is the source vertex's own state, and BATCH
+  takes the user-range record type `0x80`. No per-vertex "I am a stream" flag exists:
   the plane is **demand-driven and init-free**, so load-bearing claim 5 (the graph
   imposes no shape on user data) stays intact.
 - Under pressure, behaviour is the **existing `reliability` bits × the class**
@@ -151,10 +155,16 @@ Class semantics, enforced at the producer's fan-out edge:
   is the LKV contract and the default.
 - **`1` immediate** — every write is delivered as its own event, lowest latency,
   no producer-side accumulation. Order-preserving; never conflated.
-- **`2` batch** — the producer's fan-out edge accumulates deliveries for this
-  subscriber and flushes a §4.2 batch after **N sample frames or a T-window**,
-  whichever the subscription configured (magnitudes in §4.1.1). Order-preserving;
-  never conflated.
+- **`2` batch** — the **wire encoding of RFC-0008's `assign`/`propagate` flush**
+  (§4.1.2, Amendment 3). **Accumulation is the source vertex's own state, never a
+  per-subscriber queue at the fan-out edge**: a plain value **coalesces** (LKV
+  overwrite — RFC-0008 §B.2, *"coalescing is free"*), and a STREAM vertex keeps its
+  **bounded since-last-flush list** (RFC-0008 §E). A flush emits a §4.2 batch — the
+  **snapshot** for a plain value, the **full list** for a STREAM (§4.1.2 clause 2) —
+  after **N sample frames or a T-window**, whichever the subscription configured
+  (magnitudes in §4.1.1), or **early when the list is full** (§4.1.2 clause 4). What
+  the fan-out edge holds is that counter and that window — mechanics, not a buffer.
+  Order-preserving; a STREAM's list is never conflated.
 - **`3` stream** — append-preserving: every write is delivered, in order, none
   conflated, with the §4.4 pressure contract governing overload. This is the
   signal-plane class; it is what makes the existing STREAM-role drain machinery
@@ -183,6 +193,246 @@ absent-⇒-default doctrine, applied in reverse). The `stream_qos` and
 `stream_window` keys of the superseded #893 draft **do not exist**: the pressure
 behaviour they selected rides `reliability` × class (§4.4), and the window
 magnitude is `stream_depth` above.
+
+> **Amended 2026-08-21 by Amendment 3 (§4.1.2).** `batch_count` and `batch_window_ns`
+> are ruled **admissible, narrowly**: they are **fan-out-edge mechanics** under this
+> section's declared magnitudes — a counter and a window on one subscription's edge —
+> and nothing more. The graph-plane timer ban of RFC-0005 (§Motivation-3 and §E,
+> *"rate caps, flush intervals, dirty tracking and timers are explicitly not libtracer
+> concerns"*, ruled 2026-07-03) **STANDS**: a window magnitude is not a licence for a
+> graph-plane timer, a rate cap, or a scheduler. Explicit flush stays the host-side
+> `graph_t::propagate` (`core/include/libtracer/graph.hpp`), which already exists.
+
+#### 4.1.2 Amendment 3 (2026-08-21, ruled) — `batch` is the wire encoding of RFC-0008's assign/propagate flush
+
+**Instrument.** Amendment, not erratum:
+[GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"
+reserves "a behaviour a conforming peer could observe" for an amendment, and this changes
+§4.1's `2` batch clause, names a new flush trigger, adds an emission mode to `propagate`, and
+assigns a record type. The comment window is **waived by default** under that document's
+solo-maintainer clause and is **not invoked here** — nothing in this amendment is deferred for
+a window that is waived. No wire byte already released moves: the only wire-surface act is the
+**assignment of a previously-unassigned user-range record type** (clause 6), and every existing
+conformance vector keeps its bytes (clause 7). Ruled by the maintainer in the Cluster A rulings
+of the 2026-08-21 Q8 / batch-semantics grill, now closed. Implementation is tracked separately
+by [#1463](https://github.com/avatarsd-llc/libtracer/issues/1463) (the batch carrier) and
+[#1468](https://github.com/avatarsd-llc/libtracer/issues/1468) (the `propagate` fold mode)
+under [#1204](https://github.com/avatarsd-llc/libtracer/issues/1204); this amendment pins only
+the normative surface.
+
+##### The judgement
+
+> **`delivery_class = batch` is not new machinery. It is the wire encoding of RFC-0008's
+> already-shipped `assign`/`propagate` flush model.**
+
+Everything below is that sentence unpacked.
+
+###### 1. What §4.1 said, why it was wrong, and what it says now
+
+Until this amendment §4.1's `2` batch clause read:
+
+> ~~the **producer's fan-out edge accumulates deliveries for this subscriber** and flushes a
+> §4.2 batch after N sample frames or a T-window~~
+
+That is a **per-subscriber fold buffer at the fan-out edge**, and it **contradicted
+Amendment 2** (§4.6.1), which had already ruled that **a producer never queues** and deleted
+the producer-side ring. The RFC contradicted itself; §4.1's clause is **rewritten in place**
+above and the old wording does not stand beside the new.
+
+The resolution is that **accumulation is graph STATE, not a fan-out queue** — and the state is
+the one RFC-0008 already specifies, per vertex role:
+
+- a **plain value coalesces** — the LKV is overwritten and the write sequence advances, which
+  is [RFC-0008](0008-vertex-operations-assign-propagate.md) §B.2 verbatim: *"Coalescing is
+  free. `assign` overwrites the last-known-value (last-writer-wins) and advances the sequence;
+  it does not enqueue. So k assigns to the same vertex between two sweeps flush **once**, with
+  the latest value."*
+- a **STREAM vertex** keeps its **bounded since-last-flush list** —
+  [RFC-0008](0008-vertex-operations-assign-propagate.md) §E: *"a stream's flush delivers each
+  ring entry appended since the previous flush"* — already implemented as the reference
+  library's `drain_unflushed` / `appended_since_flush` cursors.
+
+**Per-subscriber fold buffers at the fan-out edge are REJECTED**, on two independent grounds,
+either of which is sufficient:
+
+1. **RFC-0008 already refused per-`(vertex, subscriber)` selection state.** §B.1 keeps *one
+   small counter per vertex* and delivers to the full observer set precisely so that selection
+   never becomes per-observer bookkeeping — "Capping delivery at `root` was considered and
+   rejected; it would force per-`(vertex, root)` bookkeeping" — and §Alternatives rejects
+   `delivery_mode` per-subscriber for the same reason ("Per-subscriber would also re-introduce
+   the 'who receives' coupling §B.1 deliberately avoids"). A fold buffer per
+   `(vertex, subscriber)` is that refused shape wearing a different name.
+2. **It is the exact queue shape §4.6.1 deleted.** Amendment 2 clause 1 deletes the
+   producer-side ring rather than making it optional, on §4.6.2's measurement — a **fixed
+   +29 ns (+54 %) per write regardless of depth**, and **4.59 M/s → 1.73 M/s** under four
+   writers. A per-subscriber fold buffer reinstates that structure multiplied by the fan-out.
+
+This clause is what resolves the §4.1-versus-Amendment-2 contradiction. Where §4.1 and §3 still
+say the class is *enforced at the producer's fan-out edge*, that remains true and now means
+exactly one thing: the edge holds the subscription's **counter and window** (§4.1.1) and decides
+**when** to flush. It holds no bytes.
+
+###### 2. Batch semantics by role — snapshot for a plain value, the full list for a STREAM
+
+A flush of a batch-class subscription emits:
+
+| the source vertex is… | the batch carries |
+| --- | --- |
+| a **plain value** (LKV) | the **SNAPSHOT** — the newest value only, one sample frame |
+| a **STREAM** | the **FULL LIST** — every entry appended since the last flush, in order |
+
+Both readings follow from clause 1: the batch is the *encoding* of whatever the flush selected,
+and the flush selects what the vertex's role kept. The two consequences that make this the ruled
+answer rather than a convenience:
+
+- **The stream no-conflate contract stays unbroken.** A STREAM vertex's contract is "observe
+  every buffered entry" (RFC-0008 §E), and folding its since-flush list into one batch frame
+  preserves every entry and its order. Batching a STREAM is not conflation; it is one frame
+  instead of N.
+- **Nobody pays for history they did not ask for.** A plain value never accumulated a history,
+  so a batch over it cannot invent one — it carries the snapshot. A subscriber that wants
+  history makes the vertex that holds it a STREAM (§4.6.1 clause 2), which is where the bytes
+  and the byte-bound already live.
+
+###### 3. `batch_count` / `batch_window_ns` — admitted, narrowly; the timer ban stands
+
+The two magnitudes of §4.1.1 are **admitted as fan-out-edge MECHANICS** under §4.1's declared
+magnitudes, and nothing further. This is the **§8.9 crack** — §8.9 rejects rate caps, dirty
+tracking and scheduling in the library while allowing that "a batching timer is application or
+fan-out-edge mechanics under §4.1's declared magnitudes, never a graph-wide throttle" — and it
+is hereby ruled **open NARROWLY**: a per-subscription frame counter and a per-subscription
+elapsed-time window on that subscription's own edge. It is not an opening for a rate cap, a
+dirty-tracking scheme, a scheduler, or any graph-wide throttle.
+
+In the same breath, restated because a window magnitude reads like a licence and is not one:
+**the graph-plane timer ban STANDS.** [RFC-0005](0005-subtree-subscriptions.md) §Motivation-3
+and §E, ruled 2026-07-03, are unamended — *"Rate caps, flush intervals, dirty tracking and
+timers are **explicitly not libtracer concerns**: the producer decides when and at what
+granularity to push."* A `batch_window_ns` is a magnitude the producer's own cadence honours;
+it does not authorise the graph plane to own a timer.
+
+Flush therefore stays **explicit**, and its host-side surface already exists: **`graph_t::propagate`**
+(`core/include/libtracer/graph.hpp`). A **remote** flush request, if one is ever wanted, is a
+**`:`-field write** to the vertex's control surface — the same mechanism RFC-0008 §C defers the
+`delivery_mode` configuration to. **The wire op set is untouched**: `READ` / `WRITE` / `AWAIT` /
+`REPLY` (the `FWD` `op` byte, `docs/reference/05-protocol-tlvs.md` §the fast-track range) gains
+no verb from this amendment, and none is proposed.
+
+###### 4. List-full ⇒ FLUSH EARLY, and the §4.4 behaviour of that path, named
+
+When a STREAM vertex's bounded since-last-flush list reaches its bound before `batch_count` or
+`batch_window_ns` is met, the implementation **MUST FLUSH EARLY**: deliver now. **Nothing is
+lost.** Consequently **the cap and the batch size are one knob** — the vertex's byte bound
+(§4.6.1 clause 3, the vertex's own injected `mem::block_source_t`) *is* the largest batch it can
+emit, and there is no second magnitude to reconcile against it.
+
+This **replaces the silent keep-last trim** for batch-class subscribers: a batch-class flush
+never discards the oldest entries of the list to make room, because it flushes instead.
+
+**The §4.4 pressure behaviour of this path, stated explicitly** — silence is the one behaviour
+this RFC forbids (§4.4), so it is named rather than left to inference:
+
+- **At the accumulation site, flush-early is NEITHER §4.4 arm.** It is a **no-loss discharge**:
+  no shed, no `tr::flow::address_shift_gap`, no `tr::flow::backpressure`, and the
+  loss-accounting counters (§4.4, vector `stream/loss-accounting`) are **not incremented**,
+  because nothing was lost. The early flush *is* the receipt. An implementation that trims
+  instead of flushing, or that flushes without delivering, is non-conforming.
+- **§4.4 binds where Amendment 2 put it** — at the **receiving** vertex's ring, on the
+  flushed frame. If the receiver's ring cannot admit the early-flushed batch, §4.4's two arms
+  apply unchanged: best-effort **drops the oldest whole delivery, surfaces
+  `tr::flow::address_shift_gap` in-order, and accounts the loss**; reliable answers
+  **`tr::flow::backpressure`** back to the rate-aware producer, which slows.
+
+###### 5. `propagate` gains a FOLD emission mode — one branch-write frame per sweep
+
+`propagate` gains a **FOLD emission mode**. Instead of
+[RFC-0008](0008-vertex-operations-assign-propagate.md) §D's **one `FWD{WRITE}` per selected
+vertex** ("A producer's selective subtree flush therefore reaches a remote subtree subscriber as
+one `FWD{WRITE}` per selected vertex"), a folded sweep emits **ONE branch-write frame** for the
+subtree it swept:
+
+- the frame is the **[RFC-0016](0016-composed-branch-read.md) POINT-tree grammar** — the folded
+  `POINT` tree of the swept subtree, node shape byte-for-byte RFC-0005 §B's (leading `NAME`,
+  optional value, recursive `POINT` sub-branches). It is emitted **as a branch write**, so its
+  root carries the leading `NAME` echoing the target's leaf segment per
+  [RFC-0005](0005-subtree-subscriptions.md) §B — the one root asymmetry RFC-0016 §A already
+  names between a composed-*read* root and a branch-*write* root;
+- the payload carries **`TIME` (`0x0C`) children** holding the stream-list times, exactly the
+  carrier Amendment 1 (§4.2.1) established for sample time.
+
+**This un-defers the item parked under the name `delivery_scope = SNAPSHOT`** — listed as
+deferred in [RFC-0005](0005-subtree-subscriptions.md) §E ("`delivery_scope = SNAPSHOT`
+producer-side re-aggregation") — by **reframing it as a branch write**, which
+[RFC-0005](0005-subtree-subscriptions.md) §Motivation-2 **already blesses verbatim**: *"The
+branch write gives it one frame per subtree — decomposed at the terminus into per-leaf truth."*
+It was never a missing mechanism; it was the mechanism under a name that made it look like one.
+
+Three constraints ride with it, each load-bearing:
+
+- **Terminus side: ZERO change.** [RFC-0005](0005-subtree-subscriptions.md) §B's branch-write
+  slicing already gives each covered subscriber its zero-copy address-shift subview of the one
+  frame — "each covered subscription point is notified **once**, with the smallest subview of
+  the written frame covering every value landed at-or-below it". A folded emission needs no new
+  terminus behaviour, no new decode path, and no new vector on the receiving side.
+- **It is NOT a wire batch container.** The **retired-LIST prohibition stands** (ADR-0003;
+  [RFC-0005](0005-subtree-subscriptions.md) §E, *"batching is N self-contained frames in one
+  `send(iov)`, never a wire batch container"*). The fold produces **one frame per subtree**, not
+  a generic container spanning several subtrees; several subtrees remain N self-contained frames
+  in one `send(iov)`.
+- **Trailer-carrying nodes are rejected inside a branch write**, per
+  [RFC-0005](0005-subtree-subscriptions.md) §B's strictness rule ("any trailer-carrying node
+  (`opt.TS/CR/CW/TF` set anywhere in the tree) is rejected with `tr::schema::type_mismatch` and
+  nothing lands"). The fold is compatible with that rule **precisely because Amendment 1 moved
+  sample time out of the trailer and into payload `TIME` children** — under §4.2's retired
+  spelling, a folded stream would have been a tree of trailer-carrying nodes and therefore
+  unencodable as a branch write.
+
+The fold is an **emission mode**, not a new op and not a new default: `propagate` keeps RFC-0008
+§D's per-vertex emission as its behaviour, and a fold is selected by the producer.
+
+###### 6. BATCH is formally assigned the user-range record type `0x80`
+
+`0x80` today appears only as a **worked example** — `docs/reference/05-protocol-tlvs.md`
+§`0x0C` TIME, *"A user-range record TLV (`type=0x80`, application-defined, `opt.PL=1`)
+containing a TIME and a VALUE"* (line 1046 as it stood before this amendment). This amendment
+makes it a **formal assignment**: `0x80` is the **BATCH record type**, the type code of §4.2's
+batch convention as restated by Amendment 1 (§4.2.1).
+
+What the assignment does and does not do:
+
+- It **does not create a core-range type code.** `0x80`–`0xFF` is the user range, and §3's
+  zero-new-grammar tenet is intact: a BATCH is still an ordinary `opt.PL=1` structured TLV that
+  every conforming decoder already decodes, and the graph still never interprets it (claim 5).
+- It **does** give the batch convention one canonical code, so the reference helpers, the
+  descriptor (§4.3), and the conformance vectors name the same number instead of each picking
+  one.
+- The user range keeps its property that the **protocol does not opine** on it
+  (`docs/reference/05-protocol-tlvs.md` §User range): a deployment already using `0x80` for
+  its own record is not made non-conforming by this assignment, and the standing
+  register-a-project-prefix advice still applies. What changes is that libtracer's *own*
+  convention now has a number, and that number is `0x80`.
+
+###### 7. The reserved-bits narrowing rides the implementation commit
+
+The `subscriber/policy-reserved-bits` conformance vector is repaired **IN PLACE — same bytes**.
+Its `delivery_policy` word is `0xFFC1`, which under §4.1's layout already carries
+`delivery_class = 3`; only the vector's **description** and its **three-language gates**
+(`core/tests/qos_policy_test.cpp`, `bindings/rust/tests/conformance_vectors.rs`,
+`bindings/typescript/packages/client/test/vectors.test.mjs`) narrow from "bits 6–15 reserved"
+to **"bits 8–15 reserved"**. That repair lands in the **SAME COMMIT** that ships
+`delivery_class` ([#1204](https://github.com/avatarsd-llc/libtracer/issues/1204) phase 3), never
+before and never after: until that commit the bits are reserved-and-ignored and the vector's
+current description is true.
+
+**This amendment records that landing shape; it does not itself respin the vector.** No vector
+file changes in this amendment's PR.
+
+One further mechanical, stated while in the neighbourhood: **backpressure to a REMOTE producer
+stays local-only for v1.** The reliable arm of §4.4 propagates `tr::flow::backpressure` to a
+**local** rate-aware producer; there is **no wire carrier** for it, and there will be none in
+v1 — it waits on the **per-edge credit window PARKED by §4.6.1 clause 7** as the v2 wire-level
+escalation. A remote producer learns of receiver pressure only through the ordinary reply of the
+write it issued.
 
 ### 4.2 Wire shape — the batch convention (zero new grammar)
 
@@ -359,6 +609,15 @@ Ruled consequences:
 > enqueue" below as "**the receiving vertex's STREAM ring cannot admit**", and read
 > the reliable arm's `FLOW_BACKPRESSURE` as travelling **back to the rate-aware
 > producer**, which slows. The table's two contracts are unchanged.
+>
+> **Amended 2026-08-21 by Amendment 3 (§4.1.2 clause 4).** One path is added that this table
+> does **not** cover, and is named here so it is not read as silence: a batch-class
+> subscription whose STREAM since-flush list fills **FLUSHES EARLY** — a **no-loss discharge**,
+> neither arm of the table, no gap signal, no backpressure, and **no loss counter
+> incremented**. The table's two arms then bind as written on the flushed frame, at the
+> receiving vertex's ring. Amendment 3 also fixes the reliable arm's reach: the
+> `FLOW_BACKPRESSURE` above travels to a **local** producer only — there is **no wire carrier**
+> for it in v1, which waits on the credit window parked by §4.6.1 clause 7.
 
 When a producer's fan-out edge cannot enqueue a delivery for a subscriber (ring
 full, resource exhausted), behaviour is selected by the subscription's **existing
@@ -619,6 +878,11 @@ fan-out pressure.
 - `docs/reference/05-protocol-tlvs.md` — the `delivery_policy` bit table gains
   bits 6–7 `delivery_class` (reserved narrows to 8–15); `qos_settings` gains the
   three §4.1.1 magnitude keys; prose for class semantics and the pressure contract.
+  **Amendment 3 (§4.1.2) adds two more, edited in this PR**: the `delivery_scope`
+  reservation note under §`0x04` loses its "SNAPSHOT re-aggregation deferred" clause
+  (it is no longer deferred — it is a branch write, clause 5), and the §`0x0C` `0x80`
+  worked example becomes the **formal BATCH assignment** recorded in the §User range
+  section (clause 6).
 - `docs/reference/02-graph-model.md` — the delivery-class ladder and the
   attach-forward cold-start boundary.
 - `docs/reference/01-data-format.md` — a short worked example of the batch trailer
@@ -653,7 +917,10 @@ New vectors (the `stream/*` family, phase-3 unless noted):
 2. `stream/class-immediate-order` — class 1 delivers every write, in order, none
    conflated.
 3. `stream/class-batch-flush` — class 2 flushes on `batch_count` and on
-   `batch_window_ns`, whichever first.
+   `batch_window_ns`, whichever first — **and, per Amendment 3 (§4.1.2 clause 4), on a
+   full since-flush list, EARLY, with nothing shed and no loss counter incremented**. Its
+   emission is the **snapshot** on a plain source vertex and the **full list** on a STREAM
+   one (clause 2).
 4. `stream/class-stream-no-conflate` — class 3 never conflates under a lagging
    consumer.
 5. `stream/besteffort-shed-gap` — best-effort overflow sheds oldest whole and
@@ -679,6 +946,12 @@ New vectors (the `stream/*` family, phase-3 unless noted):
 12. `stream/receiver-ring-flood` (Amendment 2 §4.6.1) — exhausting the **net-plane** store
     under a flood leaves the **graph plane** still able to allocate; the receiver ring
     sheds under §4.4 rather than starving the node.
+
+**Vector repairs Amendment 3 (§4.1.2 clause 7) schedules but does not perform.**
+`subscriber/policy-reserved-bits` is repaired **in place, same bytes** — its `0xFFC1`
+`delivery_policy` word is unchanged; only its description and its three-language gates narrow
+from "bits 6–15 reserved" to **"bits 8–15 reserved"** — in the **same commit** that ships
+`delivery_class`. **No vector file changes in Amendment 3's own PR.**
 
 **Migration.** Existing app-level conventions keep working untouched — they are
 opaque `VALUE` writes and remain so. The downstream scope and PWM-timeline vertices
@@ -726,7 +999,12 @@ dual-publish transition is needed because nothing about the data vertex changes.
 9. **Rate caps / dirty tracking / scheduling in the library.** Out — the producer
    owns cadence (standing Branch-write rule); a batching timer is application or
    fan-out-edge mechanics under §4.1's declared magnitudes, never a graph-wide
-   throttle.
+   throttle. **Amendment 3 (§4.1.2 clause 3) rules this crack open NARROWLY**:
+   `batch_count` and `batch_window_ns` are admitted as exactly that — a counter and a
+   window on one subscription's own fan-out edge — and nothing else. The RFC-0005
+   graph-plane timer ban of 2026-07-03 (§Motivation-3, §E) **STANDS**; a window magnitude
+   is not a licence for a graph-plane timer, and explicit flush remains host-side
+   `graph_t::propagate`.
 
 ## 9. Relationship to the superseded draft (PR #893)
 
