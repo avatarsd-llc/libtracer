@@ -8,6 +8,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`DeliveryPolicy::delivery_class()`** — bits 6–7 of the packed `delivery_policy` word
+  (RFC-0025 §4.1): `0` conflate, `1` immediate, `2` batch, `3` stream. Total by construction;
+  every two-bit pattern is an assigned class.
+
+### Changed
+
+- **`DeliveryPolicy::reserved()` now returns bits 8–15, not 6–15.** The two bits it lost are
+  the delivery class above. No wire byte moves and no vector's bytes change — the
+  `subscriber/policy-reserved-bits` vector's `0xFFC1` word always carried
+  `delivery_class = 3` (RFC-0025 §4.1.2 clause 7, which repairs the vector in place). A
+  caller comparing `reserved()` against a literal must shift its expectation by two bits.
+
 ## [0.14.0] — 2026-08-21
 
 No crate change. Nothing under `bindings/rust/` moved between `v0.13.0` and

@@ -228,15 +228,19 @@ here** — a deadline or queue bound is a magnitude, and a bit-width on a magnit
 limit this project forbids; one would arrive as a full-width field in the subscription's cold
 half, never in these bits.
 
-**Bits 6–7 are assigned but not yet live.** [RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.1 assigns them
+**Bits 6–7 are DECODED, not yet honoured.** [RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.1 assigns them
 `delivery_class`; the default `0` (conflate) is today's behaviour byte-identically, which is
-why the assignment costs no wire byte and breaks no sender. Until the implementation commit of
-[#1204](https://github.com/avatarsd-llc/libtracer/issues/1204) phase 3 ships `delivery_class`,
-bits 6–7 are **carried verbatim and ignored** exactly like bits 8–15, and the
-`subscriber/policy-reserved-bits` vector still gates "bits 6–15 ignored". That vector is
-repaired **in place, same bytes** — its `0xFFC1` word is unchanged; only its description and
-its three-language gates narrow to "bits 8–15 reserved" — in the **same commit** that ships
-`delivery_class` ([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.1.2, Amendment 3, clause 7).
+why the assignment costs no wire byte and breaks no sender — a subscriber that predates the
+class wrote `0` there when the bits were reserved and is conflate-class **by construction**.
+Every core now reads the field (C++ `delivery_policy_t::delivery_class`, Rust
+`DeliveryPolicy::delivery_class`, TS `deliveryClassOf`), and the
+`subscriber/policy-reserved-bits` vector was repaired with it — **in place, same bytes**: its
+`0xFFC1` word is unchanged (it always carried `delivery_class = 3`), and only its description
+and its three-language gates narrowed to "bits 8–15 reserved"
+([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.1.2, Amendment 3, clause 7). **Reading the class is not honouring
+it**: every class beyond `conflate` needs the fan-out-edge mechanics and the receiving
+vertex's ring, which land with [#1204](https://github.com/avatarsd-llc/libtracer/issues/1204) phase 3's remaining work. Until then a producer
+delivers as it always did, whatever a subscriber's word says.
 
 **Class semantics** ([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.1, as amended):
 

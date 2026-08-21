@@ -31,6 +31,9 @@ import {
   encodeSubscriber,
   encodeConnSpec,
   DELIVERY_DURABILITY_REQUEST,
+  DELIVERY_CLASS,
+  deliveryClassBits,
+  deliveryClassOf,
   encodeFwd,
   encodeField,
   decodeFwd,
@@ -83,8 +86,9 @@ test('encodeSubscriber emits the RFC-0022 delivery-policy vectors byte-for-byte'
   );
   assert.equal(DELIVERY_DURABILITY_REQUEST, 0x0020, 'durability_request is bit 5');
 
-  // §5.3 — every reserved bit (6-15) set, reliability=1 under them. A sender MUST be
-  // able to emit them verbatim; masking them here would change the bytes.
+  // §5.3 — every reserved bit (8-15) set, plus delivery_class=3 and reliability=1 under
+  // them. A sender MUST be able to emit them verbatim; masking them here would change the
+  // bytes — and RFC-0025 §4.1.2 clause 7 repairs this vector IN PLACE, same bytes.
   const reserved = vector('subscriber/policy-reserved-bits');
   assert.ok(
     sameBytes(encodeSubscriber(['client'], { deliveryPolicy: 0xffc1 }), reserved),
@@ -132,6 +136,27 @@ test('the delivery-policy word decodes out of the policy vectors', () => {
   assert.equal(rsvd & 0x0003, 1, 'reliability = 1');
   assert.equal((rsvd >> 2) & 0x0007, 0, 'priority = 0');
   assert.equal((rsvd & 0x0020) !== 0, false, 'durability_request clear');
+  // The RFC-0025 §4.1 narrowing: bits 6-7 are the delivery class, 8-15 are what is reserved.
+  assert.equal(deliveryClassOf(rsvd), DELIVERY_CLASS.STREAM, 'delivery_class = 3 (stream)');
+  assert.equal(rsvd >> 8, 0xff, 'and the reserved range is 8-15');
+});
+
+/** @brief The delivery class packs into bits 6-7 and reads back out of them, and CONFLATE
+ * is `0` — which is why the assignment costs no wire byte (RFC-0025 §4.1). */
+test('the delivery class occupies bits 6-7 and defaults to conflate', () => {
+  assert.equal(DELIVERY_CLASS.CONFLATE, 0, 'conflate is 0 — an absent word IS conflate');
+  assert.equal(deliveryClassBits(DELIVERY_CLASS.STREAM), 0x00c0);
+  assert.equal(deliveryClassBits(DELIVERY_CLASS.BATCH), 0x0080);
+  assert.equal(deliveryClassOf(0xff3f), DELIVERY_CLASS.CONFLATE, 'nothing else reaches it');
+  for (const cls of Object.values(DELIVERY_CLASS))
+    assert.equal(deliveryClassOf(deliveryClassBits(cls)), cls, `class ${cls} round-trips`);
+  // An all-zero policy emits no SETTINGS child at all, so a conflate-class subscriber is
+  // byte-identical to a pre-RFC-0025 one.
+  assert.ok(
+    sameBytes(encodeSubscriber(['client'], { deliveryPolicy: deliveryClassBits(DELIVERY_CLASS.CONFLATE) }),
+              encodeSubscriber(['client'])),
+    'conflate adds no bytes',
+  );
 });
 
 test('encodePath matches the path-sensor-temp vector byte-for-byte', () => {

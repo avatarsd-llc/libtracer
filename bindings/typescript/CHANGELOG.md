@@ -7,6 +7,16 @@ versioning/publish strategy.
 
 ## [Unreleased]
 
+### Added
+
+- **`DELIVERY_CLASS`, `deliveryClassBits()` and `deliveryClassOf()`** (`@avatarsd-llc/libtracer`)
+  — bits 6–7 of the packed `delivery_policy` word (RFC-0025 §4.1): `0` conflate, `1`
+  immediate, `2` batch, `3` stream. `CONFLATE` is `0`, so a conflate-class subscriber emits
+  no `SETTINGS` child at all and is byte-identical to a pre-RFC-0025 one. The client is a
+  codec: it carries the class, it does not honour it. The reserved range in
+  `SubscriberOptions.deliveryPolicy`'s documentation narrows from 6–15 to 8–15 accordingly;
+  no bytes change (RFC-0025 §4.1.2 clause 7).
+
 ## [0.14.0] — 2026-08-21
 
 No API change to any of the four packages. One behaviour a client sees *from the

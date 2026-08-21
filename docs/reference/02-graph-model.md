@@ -509,12 +509,13 @@ new wire structure — as one packed 16-bit value under the key `delivery_policy
 policy is a conforming sender. Only `durability_request` is honoured today (§the transient-local
 latch, [05 §`0x04`](05-protocol-tlvs.md)); `reliability` and `priority` are carried and read back,
 awaiting the transport work that honours them — the honest shape RFC-0022 chose over moving dead
-per-vertex fields into a new home. Bits 6–7 are **assigned but not yet live**: their default `0`
-(conflate) is today's behaviour byte-identically, and until
-[#1204](https://github.com/avatarsd-llc/libtracer/issues/1204) phase 3 ships `delivery_class` they
-are carried verbatim and ignored exactly like bits 8–15 (the `subscriber/policy-reserved-bits`
-vector, which narrows its description in that same commit —
-[RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.1.2 clause 7). `delivery_class = 2` (batch) is the
+per-vertex fields into a new home. Bits 6–7 are **decoded but not yet honoured**: their default
+`0` (conflate) is today's behaviour byte-identically, every core now reads the field, and the
+`subscriber/policy-reserved-bits` vector narrowed its description to "bits 8–15 reserved" in the
+same commit — same bytes
+([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.1.2 clause 7). What still owes
+[#1204](https://github.com/avatarsd-llc/libtracer/issues/1204) phase 3 is the *honouring*: the
+fan-out-edge counter/window and the receiving vertex's ring. `delivery_class = 2` (batch) is the
 **wire encoding of the [RFC-0008](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0008-vertex-operations-assign-propagate.md) `assign`/`propagate` flush**: accumulation is
 the source vertex's own state — LKV coalesce for a plain value, the bounded since-last-flush list
 for a STREAM — and a flush emits the **snapshot** or the **full list** accordingly, never a

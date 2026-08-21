@@ -32,7 +32,7 @@ _Avoid_: "per-peer capability discovery", "feature negotiation handshake".
 Canonical per reference `01` and `05`.
 
 **`opt` byte**:
-The 1-byte options bitfield at offset 1 of every TLV; bits 7→0 are `R│PL│TS│CR│LL│CW│TF│R`. `PL`=payload-is-structured, `TS`=trailer-timestamp, `CR`=trailer-CRC, `LL`=length width, `CW`=CRC width, `TF`=timestamp form; bits 7 and 0 are reserved-must-be-zero (non-zero ⇒ reject as `INVALID`). The bitfield is `opt_t` (`core/include/libtracer/tlv.hpp:99`).
+The 1-byte options bitfield at offset 1 of every TLV; bits 7→0 are `R│PL│TS│CR│LL│CW│TF│R`. `PL`=payload-is-structured, `TS`=trailer-timestamp, `CR`=trailer-CRC, `LL`=length width, `CW`=CRC width, `TF`=timestamp form; bits 7 and 0 are reserved-must-be-zero (non-zero ⇒ reject as `INVALID`). The bitfield is `opt_t` (`core/include/libtracer/tlv.hpp:118`).
 _Avoid_: the legacy `VR│PL│TS│FP│CR│reserved` layout; any `VR` (version) or `FP` (finite-pool) bit — neither exists.
 
 **TLV header**:
@@ -52,7 +52,7 @@ _Avoid_: "XOR-16" (a checksum from the pre-spec code), "CRC in the header", "CRC
 
 **Structured TLV**:
 Any TLV with `opt.PL=1`, whose payload is **purely** concatenated child TLVs; its **type code** declares what the children mean (SUBSCRIBER, POINT, FWD, SETTINGS, …). There is no generic container type. **No address form is one**: `PATH` (`0x06`) carries packed §Segment records and `PATH_REF` / `PATH_REF_REVERSE` carry fixed-stride elements, all three with `opt.PL=0`.
-_Avoid_: "LIST", "type `0x05`", "graph-node-as-TLV LIST" — `0x05`/LIST is **retired** and the code assigns no type to it (`core/include/libtracer/tlv.hpp:32-75`).
+_Avoid_: "LIST", "type `0x05`", "graph-node-as-TLV LIST" — `0x05`/LIST is **retired** and the code assigns no type to it (`core/include/libtracer/tlv.hpp:37-94`).
 
 **Validation timing (lazy, per-level)**:
 Structural validity is checked **where a level is consumed**, never by an eager whole-tree walk at ingress: ingress verifies the trailer CRC (a linear scan — CRC never needs the tree) and the top-level header; a malformed child TLV surfaces its error (`INVALID`, `tr::tlv::*`) at the consumer that opens that level. The only whole-tree walks are termini that materialize or apply transactionally (arena decode, §branch-write admission), whose per-open-level work-stack node is drawn from the receiver's injected decode resources ([RFC-0006](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0006-resource-bounded-nesting-depth.md)) — no depth constant exists anywhere. The spec's MUST-reject rules bind on **observation** of a violation, wherever consumption occurs, and so do not imply an eager scan.

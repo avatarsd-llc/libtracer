@@ -16,7 +16,7 @@
  *   2. `subscriber/policy-durability`         — `durability_request` set => the latched value is
  *                                               delivered on join; unset => it is NOT, on the
  *                                               SAME producer holding the SAME value.
- *   3. `subscriber/policy-reserved-bits`      — bits 6-15 are ignored, not an error, and the
+ *   3. `subscriber/policy-reserved-bits`      — bits 8-15 are ignored, not an error, and the
  *                                               honoured bits below them still act.
  *   4. `settings/removed-knob`                — every one of the seven historical knob names
  *                                               answers SCHEMA_NOT_FOUND, the two survivors
@@ -200,10 +200,16 @@ void test_policy_durability_is_per_subscriber() {
 }
 
 /**
- * @brief Reserved bits 6–15 are ignored, never rejected — and the honoured bits still act.
+ * @brief Reserved bits **8–15** are ignored, never rejected — and the honoured bits still act.
  *
  * The second half is what makes this non-vacuous: a subscribe that failed outright would
  * also show "no error surfaced to the caller" if only the return value were checked.
+ *
+ * **The range narrowed, the bytes did not.** RFC-0025 §4.1 takes bits 6–7 for
+ * `delivery_class`, so this vector's `0xFFC1` word — unchanged, and not respun — now decodes
+ * `delivery_class = 3` (stream) beside `reliability = 1`, with 8–15 the reserved range. The
+ * repair lands in the SAME commit that ships the class (§4.1.2 clause 7): until then the
+ * bits were reserved-and-ignored and the old reading was true.
  */
 void test_policy_reserved_bits_are_ignored() {
     std::printf("§5.3 policy-reserved-bits — ignored, not an error:\n");
@@ -212,7 +218,7 @@ void test_policy_reserved_bits_are_ignored() {
     (void)g.write(src, byte_value(0x33));
 
     // Every reserved bit set, plus the durability request underneath them.
-    constexpr std::uint16_t kReserved = 0xFFC0;
+    constexpr std::uint16_t kReserved = 0xFF00;
     int seen = 0;
     auto sink = [&seen](const rope_t&) { ++seen; };
     const auto sub = g.subscribe(path_t("/p/rsvd"), sink,
@@ -224,11 +230,20 @@ void test_policy_reserved_bits_are_ignored() {
     // The accessors mask: reserved bits must not leak into a field's value.
     constexpr delivery_policy_t all_reserved{kReserved};
     check(all_reserved.reliability() == 0 && all_reserved.priority() == 0 &&
-              !all_reserved.durability_request(),
-          "reserved bits decode into NO honoured field");
-    constexpr delivery_policy_t mixed{static_cast<std::uint16_t>(0xFFC0 | 0x0001 | (5U << 2))};
+              !all_reserved.durability_request() &&
+              all_reserved.delivery_class() == tr::graph::delivery_class_t::CONFLATE,
+          "reserved bits 8-15 decode into NO honoured field — the class included");
+    constexpr delivery_policy_t mixed{static_cast<std::uint16_t>(0xFF00 | 0x0001 | (5U << 2))};
     check(mixed.reliability() == 1 && mixed.priority() == 5,
           "... while reliability and priority still decode from under them");
+
+    // The narrowing itself, on the vector's OWN word: bits 6-7 are the class now, and the
+    // reserved bits above them still reach no honoured field.
+    constexpr delivery_policy_t vec_word{0xFFC1};
+    check(vec_word.delivery_class() == tr::graph::delivery_class_t::STREAM,
+          "the vector's 0xFFC1 carries delivery_class = 3 (stream) — same bytes, narrower range");
+    check(vec_word.reliability() == 1 && vec_word.priority() == 0 && !vec_word.durability_request(),
+          "... and the class leaks into none of the three fields beneath it");
 }
 
 /** @brief The packed layout is exactly RFC-0022 §3.A's table — asserted at compile time so a
@@ -241,6 +256,11 @@ void test_policy_bit_layout() {
     static_assert(delivery_policy_t{0x001C}.priority() == 7, "bits 2-4 are priority");
     static_assert(delivery_policy_t{0x0020}.durability_request(), "bit 5 is durability_request");
     static_assert(!delivery_policy_t{0x001F}.durability_request(), "bit 5 only");
+    static_assert(delivery_policy_t{0x00C0}.delivery_class() == tr::graph::delivery_class_t::STREAM,
+                  "bits 6-7 are delivery_class (RFC-0025 §4.1)");
+    static_assert(
+        delivery_policy_t{0xFF3F}.delivery_class() == tr::graph::delivery_class_t::CONFLATE,
+        "... and nothing outside 6-7 reaches the class");
     check(true, "the §3.A packing is pinned by static_assert (see the source)");
 }
 
@@ -688,17 +708,19 @@ void test_conformance_vectors() {
               "subscriber/policy-reserved-bits: admitted (not rejected), bit 5 clear => no latch");
 
         // The vector's OTHER two claims, which "admitted, no latch" does not reach: the word
-        // under the reserved bits still decodes (an implementation that let 6-15 leak into
-        // reliability or priority fails here), and the record round-trips VERBATIM through
-        // `:subscribers[0]` — §3.A stores unknown bits, it does not normalise them away.
+        // under the reserved bits still decodes (an implementation that let 8-15 leak into
+        // reliability, priority or the class fails here), and the record round-trips VERBATIM
+        // through `:subscribers[0]` — §3.A stores unknown bits, it does not normalise them away.
         const std::vector<std::byte> want = vector_bytes("subscriber/policy-reserved-bits");
         const std::optional<std::uint16_t> word = policy_word_of(want);
         check(word.has_value() && *word == 0xFFC1,
               "... the vector's delivery_policy word is 0xFFC1 (every reserved bit, plus "
-              "reliability=1)");
+              "reliability=1 and delivery_class=3) — the SAME bytes as before the narrowing");
         const delivery_policy_t p{word.value_or(0)};
-        check(p.reliability() == 1 && p.priority() == 0 && !p.durability_request(),
-              "... which decodes to reliability=1 and NOTHING else — no leak from 6-15");
+        check(p.reliability() == 1 && p.priority() == 0 && !p.durability_request() &&
+                  p.delivery_class() == tr::graph::delivery_class_t::STREAM,
+              "... which decodes to reliability=1 + delivery_class=3 and NOTHING else — no "
+              "leak from the reserved 8-15");
         const std::optional<decoded_t> back =
             decode_read(g.read(path_t("/vec/src:subscribers[0]")));
         check(back.has_value() && back->bytes == want,

@@ -14,6 +14,28 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Added
+
+- **`tr::wire` gains the BATCH record (`batch.hpp`, `type_t::BATCH = 0x80`)** — the wire
+  encoding of a flush, and the one canonical spelling of RFC-0025's batch convention
+  ([#1463](https://github.com/avatarsd-llc/libtracer/issues/1463); RFC-0025 §4.2.1 / §4.1.2,
+  Amendments 1 and 3). `emit_batch` FOLDS N already-encoded sample frames into one written
+  value — a concatenation under one header, never a re-encode, so a sample's own bytes ride
+  it verbatim; `read_batch` / `batch_view_t` read one back and DERIVE per-sample time from
+  the descriptor's rate (`t(i) = base + i × dt_ns`) at **0 bytes per sample**, or from the
+  non-uniform stream's single packed `i32` run. Which of the two shapes a record is, is the
+  §4.3 descriptor's `dt_ns` and never the record's — hence the parameter on the read. `0x80`
+  is the ONE assigned code in the user range, and the assignment changes nothing else about
+  that range: a BATCH is an ordinary `opt.PL=1` TLV every conforming decoder already decodes,
+  and the graph still never interprets it. Vector `stream/batch-time-roundtrip`.
+- **`tr::graph::delivery_class_t` and `delivery_policy_t::delivery_class()`** — bits 6–7 of
+  the packed `delivery_policy` word (RFC-0025 §4.1): `0` conflate (the default an absent word
+  decodes to), `1` immediate, `2` batch, `3` stream. **Decoded, not yet honoured**: the
+  classes beyond conflate need the fan-out-edge mechanics and the receiving vertex's ring.
+  The reserved range narrows from 6–15 to **8–15** with it, and the
+  `subscriber/policy-reserved-bits` vector is repaired **in place — same bytes** (§4.1.2
+  clause 7): its `0xFFC1` word always carried `delivery_class = 3`.
+
 ### Changed
 
 - **A producer never queues: the STREAM ring is the RECEIVER's, and it is bounded in BYTES by

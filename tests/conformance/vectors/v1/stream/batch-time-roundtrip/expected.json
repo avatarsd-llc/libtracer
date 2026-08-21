@@ -1,0 +1,12 @@
+{
+  "name": "batch-time-roundtrip",
+  "category": "stream",
+  "hex": "80401E000C00080000002A36FE9C9717010002006400010002006500010002006600",
+  "total_bytes": 34,
+  "decoded": {
+    "type": "0x80 BATCH",
+    "structured": true,
+    "meaning": "BATCH{ TIME u64=1700000000000000000, VALUE u16=0x0064, VALUE u16=0x0065, VALUE u16=0x0066 } — a UNIFORM stream's fold: the base sample time is one payload TIME child, and the three sample frames carry NO time of their own. With the descriptor's dt_ns = 1000, t(i) = 1700000000000000000 + i*1000 (RFC-0025 §4.2.1, Amendment 1)",
+    "note": "the record carries NO trailer: wire/TX time is opt.TS on the OUTERMOST frame only and always TF=0, and a written value is an inner TLV. An implementation that spends a per-sample trailer (the retired §4.2 spelling) emits 4 more bytes per sample and does not produce these bytes; one that reads the second child as an offset array has ignored the descriptor's dt_ns"
+  }
+}

@@ -383,7 +383,8 @@ export interface SubscriberOptions {
    *
    * Bit 0–1 reliability (0 = best-effort, 1 = reliable), bits 2–4 priority (0–7, 0 =
    * default), bit 5 `durability_request` (deliver the producer's latched last value on
-   * join), bits 6–15 reserved — a sender MUST write them 0 and a receiver MUST ignore them.
+   * join), bits 6–7 `delivery_class` (RFC-0025 §4.1 — see {@link DELIVERY_CLASS}), bits
+   * 8–15 reserved — a sender MUST write them 0 and a receiver MUST ignore them.
    *
    * Omitted or `0` emits **no** SETTINGS child at all: absent ⇒ all-zero ⇒ today's
    * behaviour, byte-identically (the `subscriber/policy-absent` vector).
@@ -395,6 +396,37 @@ export interface SubscriberOptions {
  * latched last value once, on join. Before RFC-0022 this was the producer's
  * `:settings.durability`, which applied to every subscriber at once. */
 export const DELIVERY_DURABILITY_REQUEST = 0x0020;
+
+/**
+ * @brief `delivery_class` (RFC-0025 §4.1, bits 6–7 of the packed word): how the producer's
+ * fan-out edge treats THIS subscriber's deliveries.
+ *
+ * `CONFLATE` is `0`, which is what a sender that predates the class wrote into those bits
+ * when they were reserved — so the assignment costs no wire byte and old subscribers are
+ * conflate-class by construction. Shift into place with {@link deliveryClassBits}; read one
+ * back out with {@link deliveryClassOf}. This client is a codec: it carries the class, it
+ * does not honour it.
+ */
+export const DELIVERY_CLASS = {
+  /** @brief `0` — last-wins; delivery MAY coalesce to the newest value. The LKV default. */
+  CONFLATE: 0,
+  /** @brief `1` — every write its own event; order-preserving, never conflated. */
+  IMMEDIATE: 1,
+  /** @brief `2` — the wire encoding of a flush: one BATCH record (`0x80`) per flush. */
+  BATCH: 2,
+  /** @brief `3` — append-preserving; every write delivered in order, none conflated. */
+  STREAM: 3,
+} as const;
+
+/** @brief The packed-word bits for a {@link DELIVERY_CLASS} member — `class << 6`. */
+export function deliveryClassBits(cls: number): number {
+  return (cls & 0x03) << 6;
+}
+
+/** @brief The delivery class carried in a packed `delivery_policy` word (bits 6–7). */
+export function deliveryClassOf(policy: number): number {
+  return (policy >> 6) & 0x03;
+}
 
 /**
  * @brief Build a SUBSCRIBER TLV (`type=0x04`, PL=1) wrapping a target PATH —

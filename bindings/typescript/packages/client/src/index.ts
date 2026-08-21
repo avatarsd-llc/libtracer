@@ -36,6 +36,9 @@ export {
   pathSegments,
   PACKED_ESCAPE_LEN,
   DELIVERY_DURABILITY_REQUEST,
+  DELIVERY_CLASS,
+  deliveryClassBits,
+  deliveryClassOf,
 } from './tlv.js';
 export type { ValueOptions, SubscriberOptions, ConnSpecOptions, ConnRole } from './tlv.js';
 
