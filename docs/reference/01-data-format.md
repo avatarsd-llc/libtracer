@@ -207,7 +207,7 @@ The reference implementation now writes the wire-trailer TS as well as reading i
 A tight ADC stream must not spend 8 bytes of timestamp on every slice. It does not — and it does not use the trailer to avoid it either. Per [RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.2.1 (Amendment 1, 2026-08-21) there are **three clocks with three separate carriers**, and a sample's acquisition time is not one of the trailer's jobs:
 
 ```
-BATCH (PL=1, user-range record type)   ; one written value, N samples
+BATCH (PL=1, type=0x80)                ; one written value, N samples
   trailer_ts (u64): T_tx               ; WIRE time — when this frame left the
                                        ;   interface. OUTERMOST frame only, TF=0.
                                        ;   Not a sample time. One per frame, not per sample.
@@ -249,7 +249,7 @@ Conflating them is a bug; the protocol keeps them separate by construction. This
 | `0x00` | Reserved sentinel; never assigned | Forever |
 | `0x01` – `0x1F` | Core protocol types ([05-protocol-tlvs.md](05-protocol-tlvs.md)) | Stable; the wire format does not version. |
 | `0x20` – `0x7F` | Reserved for future core extensions | Pending registry |
-| `0x80` – `0xFF` | User-defined application payload types | No protocol opinion |
+| `0x80` – `0xFF` | User-defined application payload types (`0x80` = **BATCH**, assigned by [RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.1.2; [05-protocol-tlvs.md](05-protocol-tlvs.md) §User range) | No protocol opinion on the rest |
 
 Type code `0x00` indicates either a zeroed buffer or framing corruption. Receivers MUST treat `type=0x00` as INVALID.
 

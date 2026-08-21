@@ -20,6 +20,8 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 > **§C/§E amended by [RFC-0016](0016-composed-branch-read.md) (2026-07-20):** the composed subtree-read this RFC deferred is now specified and accepted — a plain `READ` of a vertex with ≥ 1 registered child serves the **composed branch read**, the folded `POINT` tree of its registered subtree (landed stored TLVs verbatim), the read-side dual of the §B decomposition. §C's one-store invariant and cross-leaf atomicity non-promise stand unchanged and carry into RFC-0016.
 
+> **§E `delivery_scope = SNAPSHOT` deferral struck (2026-08-21, [RFC-0025](0025-stream-class-values.md) §4.1.2 Amendment 3):** the last producer-side re-aggregation deferral is discharged — **by reframing it as a branch write**. `propagate` gains a FOLD emission mode emitting one branch-write frame per sweep in the RFC-0016 `POINT`-tree grammar, which is §Motivation-2's "one frame per subtree — decomposed at the terminus into per-leaf truth". §B's terminus slicing is unchanged, this RFC's retired-LIST ban stands (one frame per subtree, never a container across several), and §B's trailer-carrying-node rejection is not tripped because RFC-0025's Amendment 1 moved sample time into payload `TIME` children. See §E.
+
 > **§E child-removal deferral struck (2026-08-12, [#937](https://github.com/avatarsd-llc/libtracer/issues/937)):** the last deferred point — child-removal delivery semantics — is ruled, not specified: **no removal-push surface exists, normatively.** The vertex-delete surface this deferral waited on landed as retirement ([RFC-0009](0009-vertex-removal-and-subscriber-eviction.md)), whose §B.5 requires that retirement deliver nothing and wake nothing; the ruling agrees with it. See §E for the full statement.
 
 ## Summary
@@ -312,10 +314,19 @@ A subscriber learns that a child is gone only by re-reading: enumerating
 the SPA — demonstrates the need, and because §B.5 forbids the mechanism, any
 future push surface is a new amendment, not a reopening of this deferral);
 wire-level concrete-path tagging of remote deliveries (RFC-0003, draft);
-`delivery_scope = SNAPSHOT` producer-side re-aggregation (the aggregate remains
+~~`delivery_scope = SNAPSHOT` producer-side re-aggregation~~ (the aggregate remains
 available as a read — since 2026-07-20 the **composed branch read** of
-[RFC-0016](0016-composed-branch-read.md); the default — and currently only —
-delivery is the written TLV as-is); ~~a composed subtree-read op (§C)~~
+[RFC-0016](0016-composed-branch-read.md); the default delivery is still the written
+TLV as-is) — **no longer deferred as of 2026-08-21**:
+[RFC-0025](0025-stream-class-values.md) §4.1.2 (Amendment 3) un-defers it by
+**reframing it as a branch write** — `propagate` gains a FOLD emission mode emitting
+**one branch-write frame per sweep** in the RFC-0016 `POINT`-tree grammar, which is
+exactly the "one frame per subtree — decomposed at the terminus into per-leaf truth"
+of §Motivation-2 above. §B's terminus slicing is unchanged, the retired-LIST ban of
+this section stands (one frame per subtree, never a container across several), and the
+fold is encodable as a branch write precisely because RFC-0025's Amendment 1 moved
+sample time out of the trailer into payload `TIME` children, so §B's
+trailer-carrying-node rejection is not tripped; ~~a composed subtree-read op (§C)~~
 (specified and accepted 2026-07-20 as RFC-0016 — no longer deferred).
 
 ### Files this RFC edits

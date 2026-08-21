@@ -11,7 +11,7 @@
 | `0x00` | Reserved sentinel; never a valid TLV |
 | `0x01` – `0x1F` | Core protocol types (this document) |
 | `0x20` – `0x7F` | Reserved for future core extensions |
-| `0x80` – `0xFF` | User-defined application payload types |
+| `0x80` – `0xFF` | User-defined application payload types (`0x80` = **BATCH**, the one assigned code — §User range) |
 
 Assigned in the first block: `0x01`–`0x04`, `0x06`–`0x0C`, `0x0E` (12 types). `0x05` is a **reserved code with no assigned meaning** in v1 (see §`0x05`); `0x0D` ROUTER is a **reserved, decodable codepoint with no implemented mechanism** (see §`0x0D`). `0x0E` is **SPEC** (vertex-creation spec, [ADR-0017](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0017-in-band-vertex-creation-controller-orchestration.md)). The `0x0F`–`0x1F` fast-track range holds the remote-operation, route-handle and bound-path frames (`0x0F`–`0x15` assigned, §reserved range `0x0F` – `0x1F`); `0x20` – `0x7F` is the long-term registry.
 
@@ -176,11 +176,32 @@ The `qos_settings` SETTINGS carries **per-subscriber encoding hints and this sub
 
 ```
 qos_settings = SETTINGS {
-  NAME "delivery_scope"    VALUE <u8: DELTA=0, SNAPSHOT=1>   ; reserved (RFC-0005: as-written is the delivery; SNAPSHOT re-aggregation deferred)
+  NAME "delivery_scope"    VALUE <u8: DELTA=0, SNAPSHOT=1>   ; reserved (RFC-0005: as-written is the delivery; SNAPSHOT re-aggregation is a BRANCH WRITE)
   NAME "delivery_compact"  VALUE <u8: 0=off, 1=on>  ; opt into route-handle compaction (§route-handle)
   NAME "delivery_policy"   VALUE <u16>              ; this subscription's DELIVERY policy (RFC-0022 §3.A)
+  NAME "batch_count"       VALUE <u32>              ; delivery_class=2 only — flush after N sample frames (RFC-0025 §4.1.1)
+  NAME "batch_window_ns"   VALUE <u64>              ; delivery_class=2 only — flush after T elapsed (RFC-0025 §4.1.1)
 }
 ```
+
+**`delivery_scope = SNAPSHOT` is no longer deferred.** It was parked in
+[RFC-0005](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md) §E as "producer-side re-aggregation";
+[RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.1.2 (Amendment 3, 2026-08-21) un-defers it by
+**reframing it as a branch write**: `propagate` gains a FOLD emission mode that emits **one
+branch-write frame per sweep** — the [RFC-0016](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0016-composed-branch-read.md) `POINT`-tree grammar, rooted per
+§`0x07`'s branch-write shape, with payload `TIME` (§`0x0C`) children carrying stream-list
+times — instead of one `FWD{WRITE}` per selected vertex. The terminus is unchanged (§`0x07`
+decomposition slices the one frame per covered subscriber), and it is **not** a wire batch
+container: one frame per subtree, several subtrees stay N self-contained frames in one
+`send(iov)` (the retired-`LIST` rule, §`0x05`). The `delivery_scope` **key itself is still
+reserved** — no implementation reads it today.
+
+The `batch_count` / `batch_window_ns` magnitudes are **fan-out-edge mechanics** — a counter and
+an elapsed-time window on one subscription's own edge, meaningful only under
+`delivery_class = 2`, ignored otherwise (the absent-⇒-default doctrine applied in reverse).
+They are **not** a graph-plane timer, a rate cap or a scheduler: the producer owns cadence
+([RFC-0005](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md) §E), and explicit flush is the host-side `graph_t::propagate`. Neither key is
+honoured yet — they land with `delivery_class` ([#1204](https://github.com/avatarsd-llc/libtracer/issues/1204)).
 
 **`delivery_policy`** ([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.A) is one packed 16-bit value carried in this **same**
 `SETTINGS` child, so the per-subscription policy introduced no new wire structure:
@@ -190,7 +211,8 @@ qos_settings = SETTINGS {
 | 0–1 | `reliability` | `0` = best-effort, `1` = reliable; `2`–`3` reserved |
 | 2–4 | `priority` | `0`–`7`, `0` = default |
 | 5 | `durability_request` | `1` = deliver the producer's latched last value on join |
-| 6–15 | reserved | MUST be written `0`, MUST be **ignored** on read |
+| 6–7 | `delivery_class` | `0` = conflate (default), `1` = immediate, `2` = batch, `3` = stream ([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.1) — **assigned, not yet honoured**; see below |
+| 8–15 | reserved | MUST be written `0`, MUST be **ignored** on read |
 
 **Absent ⇒ all-zero ⇒ the default behaviour**, byte-identically — a sender that predates the key
 is a conforming sender (`subscriber/policy-absent`). Reserved bits MUST be ignored, never
@@ -205,6 +227,25 @@ WebSocket peer at once), which is why nothing ever consumed them. **No magnitude
 here** — a deadline or queue bound is a magnitude, and a bit-width on a magnitude is a synthetic
 limit this project forbids; one would arrive as a full-width field in the subscription's cold
 half, never in these bits.
+
+**Bits 6–7 are assigned but not yet live.** [RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.1 assigns them
+`delivery_class`; the default `0` (conflate) is today's behaviour byte-identically, which is
+why the assignment costs no wire byte and breaks no sender. Until the implementation commit of
+[#1204](https://github.com/avatarsd-llc/libtracer/issues/1204) phase 3 ships `delivery_class`,
+bits 6–7 are **carried verbatim and ignored** exactly like bits 8–15, and the
+`subscriber/policy-reserved-bits` vector still gates "bits 6–15 ignored". That vector is
+repaired **in place, same bytes** — its `0xFFC1` word is unchanged; only its description and
+its three-language gates narrow to "bits 8–15 reserved" — in the **same commit** that ships
+`delivery_class` ([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.1.2, Amendment 3, clause 7).
+
+**Class semantics** ([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.1, as amended):
+
+| class | delivery |
+| --- | --- |
+| `0` conflate | last-wins; delivery MAY coalesce to the newest value. The LKV contract, and the default. |
+| `1` immediate | every write delivered as its own event; order-preserving, never conflated. |
+| `2` batch | the **wire encoding of the [RFC-0008](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0008-vertex-operations-assign-propagate.md) `assign`/`propagate` flush**. Accumulation is the source vertex's own state — a plain value **coalesces** (LKV overwrite, §B.2), a STREAM vertex keeps its **bounded since-last-flush list** (§E) — never a per-subscriber buffer at the fan-out edge. A flush emits the **snapshot** on a plain vertex and the **full list** on a STREAM, as one BATCH record (§User range, `0x80`), after `batch_count` frames, after `batch_window_ns`, or **early when the list is full** (no loss, no gap signal, no counter). |
+| `3` stream | append-preserving: every write delivered in order, none conflated, with the RFC-0025 §4.4 pressure contract at the **receiving** vertex's ring. |
 
 **Per-vertex `delivery_mode` ([RFC-0008](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0008-vertex-operations-assign-propagate.md)).** Whether a vertex rides an *ancestor's* `propagate` sweep is a value-agnostic property of the **vertex** (not the subscriber): `UNCONDITIONAL` (always swept), `IF_NEWER` (default — swept only if its write sequence advanced since the last covering sweep), `EXPLICIT` (never swept by an ancestor; deliverable only by a direct `propagate` on the vertex). `assign` and a direct `propagate` on the vertex are never gated by it. It is host state defaulting to `IF_NEWER`. Wire configuration reuses the vertex's own `:settings` (a `delivery_mode` NAME/VALUE under the vertex `SETTINGS`) and is **deferred**, so the host call is the only way to set it.
 
@@ -1043,14 +1084,14 @@ Normative rules:
 
 ### Hex example
 
-A user-range record TLV (`type=0x80`, application-defined, `opt.PL=1`) containing a TIME and a VALUE, with outer CRC-32:
+A **BATCH** record TLV (`type=0x80`, `opt.PL=1`) containing a TIME and a VALUE, with outer CRC-32. `0x80` is the user-range code **formally assigned to BATCH** by [RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.1.2 (Amendment 3, clause 6) — see §User range; this example predates the assignment and reads the same either way, since the graph never interprets the record:
 
 ```
 80 50 14 00 [inner 20 bytes] [crc:4]
 ^  ^  ^^^^^
 |  |  length = 20
 |  opt = 0x50 (PL=1, CR=1)
-type = 0x80 (user-range record, sender and receiver agree on shape)
+type = 0x80 (BATCH — the assigned user-range record; §User range)
 
   Children (20 bytes):
   0C 00 08 00 00 00 00 00 00 00 00 00 00         ← TIME, 12 bytes
@@ -1354,6 +1395,12 @@ Long-term registry for future core extensions, post-v1. Allocation procedure: PR
 ## User range (`0x80` – `0xFF`)
 
 128 type codes the protocol does not opine on. Senders and receivers agree out-of-band. Recommended convention: register a project-specific "magic" prefix (e.g., 4-byte UUID-derived bytes at the start of the payload) so multiple unrelated user types can coexist on the same wire without collision.
+
+**One code is assigned: `0x80` = BATCH.** [RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.1.2 (Amendment 3, 2026-08-21, clause 6) promotes `0x80` from a worked example to the **formal record type of the batch convention** — a structured (`opt.PL=1`) written value whose children are the sample frames, carrying one payload `TIME` (§`0x0C`) child as the batch base and, for a non-uniform stream, a packed `i32` offset array ([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.2.1, Amendment 1). Three properties of the range survive the assignment intact:
+
+- **No new grammar.** A BATCH is an ordinary structured TLV every conforming decoder already decodes. No core-range type code is minted, no `opt` bit is added, and the graph still never interprets the record (claim 5) — the §4.3 stream descriptor tells consumers how to read it.
+- **The protocol still does not opine on the range.** A deployment already using `0x80` for its own record is not made non-conforming; the register-a-prefix advice above still applies, and this range remains per-deployment. What changed is that libtracer's *own* convention now has a number.
+- **Nothing on the wire changes.** No conformance vector's bytes move, and a receiver that has never heard of BATCH treats `0x80` exactly as it did before.
 
 ---
 
