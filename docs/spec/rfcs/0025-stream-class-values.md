@@ -388,7 +388,8 @@ Three constraints ride with it, each load-bearing:
   unencodable as a branch write.
 
 The fold is an **emission mode**, not a new op and not a new default: `propagate` keeps RFC-0008
-§D's per-vertex emission as its behaviour, and a fold is selected by the producer.
+§D's one-`FWD{WRITE}`-per-vertex emission as its **default**, and a fold is selected by the
+producer — which is the producer-owns-cadence rule (§3), not an exception to it.
 
 ###### 6. BATCH is formally assigned the user-range record type `0x80`
 
