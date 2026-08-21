@@ -64,8 +64,9 @@ The shape, in seven ruled sentences:
 - **Staleness is a generation bump.** Vertex departure bumps its slot's generation; a frame carrying
   a stale or unknown label answers a **`NOT_FOUND`-class error**; the sender falls back to the
   full-string path and re-mints from the next reply. **No withdraw protocol, no aging** (§7).
-- **Minting is POST-AUTH only.** The label table draws from the **injected net-plane store**
-  ([ADR-0079](../../adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md)'s axis),
+- **Minting is POST-AUTH only.** The label table draws from the **store the embedder injects at
+  this seam** ([ADR-0079](../../adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md)
+  — injected, sized per target; ~~"the per-plane axis"~~ erratum 6, §8.3),
   carries a **per-peer ceiling**, and on exhaustion **REFUSES new mints** — live labels are never
   evicted by pressure, and a refusal is invisible to correctness because the string path keeps
   working (§8). This mirrors the CAN control-map ruling: ceiling plus refuse-new.
@@ -910,11 +911,14 @@ operation over an already-minted label. There is no snapshot to go stale.
 
 **Normative, and each clause is a ruling:**
 
-- **The label table draws from the injected net-plane store.** Not a static array, not a
-  library-chosen capacity — the
-  [ADR-0079](../../adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md) per-plane
-  composition axis, sized by the embedder. This is the standing no-synthetic-limits rule and the same
-  shape RFC-0024 §6.4 requires of its binding budget.
+- **The label table draws from the store the embedder injects at this seam.** Not a static array,
+  not a library-chosen capacity — the
+  [ADR-0079](../../adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md) **injection**
+  decision (its §Decision 2, *composition is injected, build-time*, and §Decision 4, *"bounded node"
+  is a property the deployer injects*), sized by the embedder for its target. ~~The ADR-0079
+  per-plane composition axis.~~ **Erratum 6 (2026-08-21), below: ADR-0079's amendment of 2026-08-20
+  withdrew the universal default, so this RFC names no composition.** This is the standing
+  no-synthetic-limits rule and the same shape RFC-0024 §6.4 requires of its binding budget.
 - **There is a per-peer ceiling.** A single peer cannot consume the table. The ceiling is a
   per-target configuration, not a magic number.
 - **On exhaustion, a host REFUSES new mints.** It does not evict, does not grow, and does not fail
@@ -929,6 +933,50 @@ the same degrade RFC-0004 §E.1's label allocator already takes at exhaustion: r
 nothing, send the full route, *"the full-route form that always works"* (`core/src/route_handle.cpp:259-267`). A
 mechanism whose exhaustion policy is "do what we did before this mechanism existed" cannot make a
 node worse.
+
+#### Erratum 6 (2026-08-21) — the ADR-0079 citation names a default and a spelling ADR-0079 has withdrawn
+
+An **erratum**, not an amendment: §8.3's first bullet (and §1's summary of it) cited ADR-0079 as it
+read before its **amendment of 2026-08-20** ([PR #1457](https://github.com/avatarsd-llc/libtracer/pull/1457),
+closing [#1429](https://github.com/avatarsd-llc/libtracer/issues/1429)). The requirement is
+unchanged — injected, ceilinged, refuse-new — and no wire surface moves.
+
+**What the text said.** *"The label table draws from the injected net-plane store … the ADR-0079
+**per-plane** composition axis, sized by the embedder."*
+
+**What ADR-0079 says now.** Two things the citation depended on were withdrawn:
+
+1. **There is no default composition.** ADR-0079 §Amendment 1 withdraws §Decision 1 ("Default
+   composition is MID") and the title's "defaults to per-plane": *"No composition is the default,
+   because there is no one target to default for."* Composition is **multiple knobs, varied per
+   target**; what ships un-wired is every allocation seam taking an injected
+   `mem::block_source_t` **defaulting to `&mem::heap_source()`**. §Decision 2 (injected,
+   build-time) and §Decision 4 (a bounded node is what the deployer sizes) *"carry the whole weight
+   now"* — and those two are the ones §8.3 was ever standing on.
+2. **The triad is renamed, and per-plane is demoted.** `NARROW`/`MID`/`WIDE` are retired **as
+   composition names** in favour of **folded / per-plane / per-thread** (NARROW/WIDE now describe
+   *targets* only). Per-plane keeps exactly one claim and it is a **security** claim — *"the
+   blast-radius point"*, the composition that fences a peer-provoked flood in the net plane off from
+   the graph plane — measured *not* to discriminate on contention (per-plane collapses to 0.01× of
+   its own single-thread rate at T = 24, identical to folded; only per-thread scales).
+
+So "the per-plane composition axis" now names one recipe among three, chosen for a property this
+RFC never asked for, and "the net-plane store" is a store that exists only under that one recipe: a
+folded node has one slab for the whole stack, and a per-thread host has one store per receive
+thread.
+
+**The correction.** §8.3 requires the table's memory to be **injected and sized by the embedder**,
+and names no composition. Whichever composition a deployer chose — folded, per-plane, or
+per-thread — the table draws from the store wired into its seam, and an un-wired build draws from
+the heap source ADR-0079 records as what ships. The three other clauses of §8.3 (the per-peer
+ceiling, refuse-on-exhaustion, never evict a live label) are untouched, and so is §11.1
+collision 3's accounting of the per-hop table as a knowing surrender.
+
+**Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). The
+corrected clause is a *declaring* clause about where the table's bytes come from. No frame, type
+code, error identity or byte layout moves; §12.5's vectors are untouched; and applying it changes
+what no conforming implementation does, because no implementation was ever obliged to pick a
+composition — ADR-0079 §Decision 2 always made that the deployer's build-time wiring.
 
 ### 8.4 What an attacker gets
 
