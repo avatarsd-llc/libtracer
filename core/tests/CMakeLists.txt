@@ -1945,3 +1945,15 @@ using config_t = bus_closed_config_t;
              -DLT_PROBE=${CMAKE_CURRENT_SOURCE_DIR}/../src/transport_can.cpp
              -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/bus_can_guard.cmake)
 endif()
+
+# #1460 phase (b) / RFC-0025 §7 vector 12 `stream/receiver-ring-flood` — the PLANE-ISOLATION
+# arm: a flood that exhausts the net-plane store (the #603 / fe6adcd6 injected block_source_t
+# seam) must leave the graph plane still allocating. Carries its own ablation as a control arm
+# (both planes folded onto one source), so the suite proves its own instrument is reachable.
+# Net-plane guarded: it drives a real fwd_router_t.
+if(LIBTRACER_NET_PLANE)
+    add_executable(plane_isolation_test plane_isolation_test.cpp)
+    target_link_libraries(plane_isolation_test PRIVATE libtracer)
+    libtracer_test_warnings(plane_isolation_test)
+    add_test(NAME plane_isolation COMMAND plane_isolation_test)
+endif()
