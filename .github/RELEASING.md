@@ -165,8 +165,14 @@ CI-published registries, not unnecessary. CMake `FetchContent` is already covere
    with a warning (add tokens incrementally) rather than failing the release.
    - **GitHub Release** — an AI-written summary (from the CHANGELOGs + commits)
      above the extracted `## [X.Y.Z]` section of **every package changelog**, each
-     under its own heading (`tools/gen_release_notes.py`, one `--changelog` per
-     package). A package whose section is still called `[Unreleased]` at tag time
+     under its own heading (`tools/gen_release_notes.py` on its **default** package
+     list — the same `DEFAULT_CHANGELOGS` the tool's tests and
+     [`version-consistency.yml`](workflows/version-consistency.yml) gate. `release.yml`
+     deliberately passes **no** `--changelog`: an override there is the one spelling of
+     the list that nothing reads back, and it is exactly how `bindings/ros2` — added to
+     the defaults, the tests and the probe by the v0.13.0 cut — was still missing from
+     the v0.13.0 and v0.14.0 release bodies with every gate green). A package whose
+     section is still called `[Unreleased]` at tag time
      contributes that instead, so a binding that missed the consolidation PR is
      still published. Needs `ANTHROPIC_API_KEY`; without it, the CHANGELOG sections
      alone are the body.

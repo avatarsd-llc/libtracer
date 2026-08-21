@@ -37,6 +37,7 @@ on:
       - tools/tests/**
       - "**/CHANGELOG.md"
       - .github/workflows/version-consistency.yml
+      - .github/workflows/release.yml
   pull_request:
     paths:
       - VERSION
@@ -52,6 +53,7 @@ on:
       - tools/tests/**
       - "**/CHANGELOG.md"
       - .github/workflows/version-consistency.yml
+      - .github/workflows/release.yml
   workflow_dispatch:
 
 permissions:
