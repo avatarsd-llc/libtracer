@@ -726,11 +726,48 @@ Everything below is that sentence unpacked.
    fan-out is that same shape at a different granularity. Composition remains **multiple knobs,
    varied always per target** (folded / per-plane / per-thread — no universal default), each of
    the ~12 injection seams defaulting to `&mem::heap_source()`.
+
+   **The bound is reservation ADMISSION, not PLACEMENT** (ruled 2026-08-21 with the
+   implementation; stated here because the phrase "bounded in bytes" invites the other
+   reading, and the other reading is expensive). Concretely: on append the receiving vertex
+   calls `try_alloc(retained_bytes)` on its own source, **holds that reservation until the
+   entry retires**, and `release`s it on retirement (trim, shed, drain-past, teardown). What
+   the source therefore bounds is **how much this receiver may have outstanding**, in bytes,
+   against a budget it chose. The **payload bytes do not move.** They stay with the allocators
+   that already hold them, the ring entry is still a `shared_ptr` refcount share, and the
+   **zero-copy handoff is preserved**. Physical placement migration — actually relocating
+   value bytes into an injected source — is the later
+   [#873](https://github.com/avatarsd-llc/libtracer/issues/873) family and is explicitly
+   **out of scope for this amendment**. A reader who assumes the ring's bytes physically move
+   into the injected source will be wrong about lifetime, about copies, and about cost.
+
+   The seam is likewise pinned so it cannot drift: the source is a member of the vertex's
+   **extension block** (`vertex_ext_t`), injected through `graph_t::set_ring_source`, sited
+   beside `set_history_depth`. A STREAM identity already allocates that block, so the byte
+   bound costs `sizeof(vertex_t)` **nothing** and the 96-B ratchet is untouched. A vertex that
+   declares no source of its own draws from a **graph-level default ring source** injected at
+   graph construction and itself defaulting to `heap_source()` — a default so that every
+   receiver has somewhere to charge, never a shared pool by stealth: **per-vertex isolation is
+   a tested property**, and one receiver running its own source dry MUST NOT affect another.
 4. **§4.4's pressure contract binds at the RECEIVER ring.** Best-effort =
    **drop-oldest + `FLOW_ADDRESS_SHIFT_GAP` + loss accounting**, exactly as §4.4/§4.5 specify,
    applied when the receiving vertex's ring cannot admit. Reliable = **`FLOW_BACKPRESSURE`
    propagated back to the rate-aware producer, which slows**. Silence remains the one
    non-conforming behaviour.
+
+   Three points the implementation pins, so they are not left to a reader's inference:
+   **(a)** "the oldest" is **singular** — one shed per refused admission. Shedding in a loop
+   until the source relents empties the whole queue to fund an admission that may still fail,
+   destroying every pending delivery in one stroke; one per admission bounds the damage to
+   what the pressure actually cost, and a source that stays exhausted converges the ring to
+   empty one write at a time. **(b)** The **depth intent retires before the byte bound
+   charges**: a ring already at its declared depth would drop its oldest entry for this append
+   in any case, so releasing that reservation first funds the new one out of the receiver's own
+   steady-state budget. Charging first would make a source sized for exactly N entries refuse
+   the N+1th and take the §4.4 path on a ring that was never over its bound. This is what
+   "both bounds compose" (§4.6) means operationally. **(c)** Reliable's reach is **LOCAL**:
+   there is no wire carrier for backpressure in v1 (clause 7 parks the credit window), so the
+   status reaches a local producer and a remote one sees the receiver's loss tally instead.
 5. **`set_history_depth` stays a HOST-ONLY intent.** It is the owner's retention *declaration* on
    its own vertex, with **no wire surface** — unchanged by this amendment, and now doubly
    coherent: the vertex declaring depth is the vertex holding the ring. The conformance vector

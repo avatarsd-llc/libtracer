@@ -57,6 +57,7 @@
 #include "libtracer/config.hpp"
 #include "libtracer/edge_pin.hpp"
 #include "libtracer/lkv_slot.hpp"
+#include "libtracer/mem_source.hpp"
 #include "libtracer/path.hpp"
 #include "libtracer/path_ref.hpp"
 #include "libtracer/rope.hpp"
@@ -203,8 +204,11 @@ using view::view_t;
  *         into `vertex_t`'s flag byte group (#361 diet — 3 values need no int). */
 enum class role_t : std::uint8_t {
     STORED_VALUE, /**< @brief Role 1: last-writer-wins; holds the last-written value. */
-    STREAM,       /**< @brief Role 2: bounded history ring, depth declared owner-side by
-                       `graph_t::set_history_depth` (RFC-0022 §3.C). */
+    STREAM,       /**< @brief Role 2: the CONSUMER's bounded history ring — a queue the
+                       RECEIVING vertex owns (RFC-0025 §4.6.1 Amendment 2: "a producer
+                       never queues"), bounded in BYTES by that vertex's own injected
+                       `tr::mem::block_source_t` and retained to a depth declared
+                       owner-side by `graph_t::set_history_depth` (RFC-0022 §3.C). */
     HANDLER,      /**< @brief Roles 3-7: user `on_read` / `on_write` supplies the behavior. */
 };
 
@@ -395,6 +399,57 @@ enum class delivery_mode_t : std::uint8_t {
 };
 
 /**
+ * @brief One entry of a receiving vertex's STREAM ring: the value, plus the RESERVATION it
+ *        was admitted under (RFC-0025 §4.6.1 clause 3).
+ *
+ * The reservation is the whole point, and the thing most easily misread. Admission calls
+ * `tr::mem::block_source_t::try_alloc(retained_bytes)` on the RECEIVING vertex's own source
+ * and holds the block until the entry retires (trim, drain-past, revert, destruction), at
+ * which point it is released. That bounds **admission**, in bytes, against a budget the
+ * receiver injected.
+ *
+ * It does **NOT** bound PLACEMENT. The payload never moves: @ref value stays exactly the
+ * `shared_ptr` the publish handed out, in whatever allocator the value backend gave it, so
+ * the zero-copy handoff is preserved and a ring append is still a refcount bump. Physical
+ * placement migration is the later #873 family, explicitly out of scope here. A reader who
+ * assumes the ring's bytes physically move into the injected source will be wrong, and the
+ * wrongness is expensive.
+ */
+struct ring_entry_t {
+    /** @brief The published value — a refcount share of the LKV, never a byte copy. */
+    std::shared_ptr<const rope_t> value;
+    /** @brief The admission reservation, or `nullptr` for an entry admitted at zero cost.
+     *         Released with @ref bytes and @ref kAlign, the sized-reclaim contract. */
+    void* token = nullptr;
+    /** @brief The reserved width, as passed to `try_alloc` — required to release it. */
+    std::size_t bytes = 0;
+    /** @brief True iff a shed happened immediately BEFORE this entry: the in-order
+     *         `tr::flow::address_shift_gap` marker of RFC-0025 §4.4/§4.5, so a consumer
+     *         draining the ring learns where the discontinuity is, not merely that one
+     *         happened. */
+    bool gap_before = false;
+    /** @brief The alignment every reservation is taken and released at. */
+    static constexpr std::size_t kAlign = alignof(std::max_align_t);
+};
+
+/**
+ * @brief The per-entry ring overhead charged ON TOP of the payload bytes: the deque slot and
+ *        the control-block share the retention actually costs.
+ *
+ * Named, not a magic constant at the call site, and — unlike the `kRingAppendProbe = 1024`
+ * guess it replaces (RFC-0025 §4.6.2) — it prices the ENTRY rather than libstdc++'s deque
+ * internals, and it is charged against a source the embedder actually injected instead of
+ * against the global heap nobody was watching.
+ */
+inline constexpr std::size_t kRingEntryOverhead = sizeof(ring_entry_t) + 2 * sizeof(void*);
+
+/** @brief Release @p e's admission reservation back to @p src (sized reclaim); a no-op for a
+ *         zero-cost entry. The ONE spelling of the release half of the charge/release pair. */
+inline void release_reservation(tr::mem::block_source_t& src, const ring_entry_t& e) noexcept {
+    if (e.token != nullptr) src.release(e.token, e.bytes, ring_entry_t::kAlign);
+}
+
+/**
  * @brief The lazily-allocated COLD half of a vertex (issue #361 §1): every member a plain
  *        STORED_VALUE leaf with default storage policy, no handlers, and no `:acl` never touches.
  *
@@ -422,13 +477,37 @@ struct vertex_ext_t {
      *         the park OFF the per-vertex block costs an app-field / leaf vertex zero extra
      *         bytes. The live block here is freed by this ext's destructor. */
     std::atomic<value_handlers_t*> handlers{nullptr};
-    /** @brief STREAM ring (docs/reference/11 role 2), LAZILY allocated on the first
-     *         append (#388): an empty libstdc++ `std::deque` allocates its ~512 B map
+    /** @brief The RECEIVER's STREAM ring (docs/reference/11 role 2), LAZILY allocated on the
+     *         first append (#388): an empty libstdc++ `std::deque` allocates its ~512 B map
      *         node at CONSTRUCTION, which every ext-bearing vertex (handlers, app
      *         fields, `:acl`, an owner-declared storage magnitude) paid even though only the
      *         STREAM
-     *         role ever appends. Null ⇒ empty ring. Guarded by the vertex mutex. */
-    std::unique_ptr<std::deque<std::shared_ptr<const rope_t>>> history;
+     *         role ever appends. Null ⇒ empty ring. Guarded by the vertex mutex.
+     *
+     *         Each entry carries the RESERVATION it was admitted under (@ref ring_entry_t),
+     *         released when the entry retires — the byte bound of RFC-0025 §4.6.1 clause 3. */
+    std::unique_ptr<std::deque<ring_entry_t>> history;
+    /** @brief The receiving vertex's OWN injected ring source (RFC-0025 §4.6.1 clause 3) —
+     *         the seam the ring's admission reservations are charged against.
+     *
+     *         Null until the first admission or an explicit `graph_t::set_ring_source`, at
+     *         which point the graph-level default (itself defaulting to
+     *         `tr::mem::heap_source()`) is BOUND here and stays bound: the destructor and
+     *         every trim release against this exact source, and a sized reclaim cannot be
+     *         served by a source that did not hand the block out. Per-injection-point, never
+     *         a shared pool — ADR-0079's amendment measured a folded source collapsing to
+     *         0.01x of its own single-thread rate at T=24. Guarded by the vertex mutex. */
+    tr::mem::block_source_t* ring_source = nullptr;
+    /** @brief Shed points on this ring since registration — each one a
+     *         `tr::flow::address_shift_gap` (RFC-0025 §4.5: "a detected discontinuity in an
+     *         ordered flow"), surfaced to the consumer IN ORDER through
+     *         `vertex_t::drain_unflushed`'s gap out-param and counted here for the census.
+     *         Guarded by the vertex mutex. */
+    std::uint64_t ring_gaps = 0;
+    /** @brief How much of @ref ring_gaps a consumer has already been told about, so
+     *         `vertex_t::drain_unflushed` reports each shed point EXACTLY ONCE, in order,
+     *         at the drain that follows it. Guarded by the vertex mutex. */
+    std::uint64_t ring_gaps_drained = 0;
     /** @brief The `:acl` parsed into core-subset ACEs at write time (#81) — the ONLY stored
      *         ACL state (#907); guarded by the vertex mutex. `graph_t::acl_allows` evaluates
      *         this list and `graph_t::read_acl` RE-ENCODES it, so read-back is canonical by
@@ -502,12 +581,39 @@ struct vertex_ext_t {
      *         propagate drains only what was appended; guarded by the vertex mutex. NOT a
      *         `write_seq_` delta (#925) — that bumps on a SHED append, fabricating a tail. */
     std::uint64_t appended_since_flush = 0;
+    /** @brief The §4.4 pressure arm this receiver's ring binds under: `false` (the default)
+     *         is BEST-EFFORT — a refused admission sheds the oldest entry whole, accounts the
+     *         loss and raises a gap; `true` is RELIABLE — the admission is refused outright
+     *         and the local producer is answered `BACKPRESSURE`, with nothing shed and no
+     *         growth past the byte bound. Declared owner-side through
+     *         `graph_t::set_ring_source`; it is NOT a new knob on the wire (RFC-0025 §4.4
+     *         selects the arm from the subscription's existing `reliability` bits, and the
+     *         in-process delivery leg ORs that bit in per delivery). Lands in the padding
+     *         beside the two 32-bit knobs: zero extra bytes. */
+    bool ring_reliable = false;
 
-    /** @brief Free the live handler block. `handlers` is a raw atomic pointer (for
-     *         lock-free reads) so it no longer self-frees; this closes that. Blocks parked
-     *         by retirement live on the graph, not here. Runs from `~vertex_t`'s
-     *         `delete ext_`. */
-    ~vertex_ext_t() { delete handlers.load(std::memory_order_acquire); }
+    /** @brief Free the live handler block and RELEASE every reservation the ring still holds.
+     *
+     *         `handlers` is a raw atomic pointer (for lock-free reads) so it no longer
+     *         self-frees; this closes that. Blocks parked by retirement live on the graph,
+     *         not here. The ring's reservations are released against @ref ring_source, the
+     *         source they were taken from — the sized-reclaim contract of
+     *         `tr::mem::block_source_t::release`. Runs from `~vertex_t`'s `delete ext_`. */
+    ~vertex_ext_t() {
+        release_ring();
+        delete handlers.load(std::memory_order_acquire);
+    }
+
+    /** @brief Release every held reservation and empty the ring — the ONE place the
+     *         charge/release pairing is closed, shared by the destructor, the placeholder
+     *         revert and `graph_t::set_ring_source`'s rebind. Idempotent. */
+    void release_ring() noexcept {
+        if (!history) return;
+        if (ring_source != nullptr)
+            for (const ring_entry_t& e : *history) release_reservation(*ring_source, e);
+        history->clear();
+        appended_since_flush = 0;
+    }
     vertex_ext_t() = default;
     vertex_ext_t(const vertex_ext_t&) = delete;
     vertex_ext_t& operator=(const vertex_ext_t&) = delete;
@@ -894,13 +1000,19 @@ class vertex_t {
      * flushes the cursor). See `graph_t::count_store_drops`.
      */
     struct store_drops_t {
-        /** @brief The STREAM history append was shed: the ring-append probe declined, so the
-         *         entry never entered the ring. The LKV publish ABOVE it still landed — the
-         *         write succeeds (RFC-0008 §E, bounded-lossy history), and what is lost is
-         *         the delivery a later drain would have made. */
+        /** @brief The RECEIVER's STREAM ring could not admit: its injected source declined the
+         *         reservation and the ring had nothing left to shed, so the entry never
+         *         entered the ring. The LKV publish ABOVE it still landed — the write succeeds
+         *         (RFC-0008 §E, bounded-lossy history), and what is lost is the delivery a
+         *         later drain would have made. */
         bool ring_append = false;
+        /** @brief How many queued entries the best-effort arm SHED to make room (RFC-0025
+         *         §4.4: "shed the oldest, whole, never partial"). Each one is both a lost
+         *         delivery and a `tr::flow::address_shift_gap` point; silence here is the one
+         *         behaviour the RFC forbids. */
+        std::uint64_t ring_shed = 0;
         /** @brief Did this store shed anything? The ONE test a clean write pays. */
-        [[nodiscard]] bool any() const noexcept { return ring_append; }
+        [[nodiscard]] bool any() const noexcept { return ring_append || ring_shed != 0; }
     };
 
    private:
@@ -914,15 +1026,29 @@ class vertex_t {
     // friend was added, deliberately — a friend named in an installed public header is
     // claimable by any user who defines a class of that name.
     /**
-     * @brief Store @p value as this vertex's state: publish the last-known-value
-     *        (lock-free), append the STREAM ring (keep-last trim), bump the write
-     *        sequence, and wake awaiters.
+     * @brief Publish @p value as this vertex's state: swap the last-known-value (lock-free),
+     *        bump the write sequence, and wake awaiters. **A PRODUCER NEVER QUEUES.**
+     *
+     * ONE tail, for every role (RFC-0025 §4.6.1 Amendment 2, clause 1). The producer-side ring
+     * machinery this verb used to run — the `kRingAppendProbe = 1024` heuristic, the deque
+     * append under the stripe mutex, and the second stripe acquisition the drain then paid —
+     * is GONE, not made optional: §4.6.2 measured it at a **fixed +29 ns (+54 %) per write,
+     * independent of depth**, and four writers on one vertex at **1.73 M/s against 4.59 M/s**
+     * lock-free. A tax that every producer pays for a service only some consumers want belongs
+     * to the consumer, so the queue moved to the RECEIVING vertex (%ring_admit) and is
+     * bounded there in BYTES by that vertex's own injected source.
      *
      * One allocation (`make_shared`): the rope's inline small-buffer holds the
      * single-link trivial case, so a scalar write costs exactly what the `view_t`
-     * slot cost (ADR-0053 §6). The LKV publish happens BEFORE the lock; only the
-     * ring trim + seq bump + notify run under it. Not for Handler-role writes —
-     * the graph runs `handlers().on_write` and calls @ref note_write instead.
+     * slot cost (ADR-0053 §6). Not for Handler-role writes — the graph runs
+     * `handlers().on_write` and calls @ref note_write instead.
+     *
+     * @note **Cross-writer total order is no longer implied here.** The stripe mutex used to
+     *       serialize STREAM appends, so ring order doubled as a global order across writers.
+     *       It does not any more: order across producers is ADR-0019's per-producer HLC
+     *       stamp, read off the value, and a receiver ring fed by N producers
+     *       orders by stamp rather than minting a sequence of its own. An embedder that read a
+     *       global order off append order must read it off the stamp instead.
      * @param value The value to publish (moved into the LKV slot).
      * @param mr    The ADR-0039 injected resource the LKV control block + rope are
      *              allocated from (#361 §5) — the graph passes its own; `nullptr`
@@ -930,21 +1056,14 @@ class vertex_t {
      *              Lifetime: the resource must outlive every `shared_ptr` obtained
      *              from this vertex — the same "handles do not outlive the graph's
      *              memory" contract the injection seam already imposes.
-     * @param drops Out: what this store SHED (@ref store_drops_t) — set, never cleared, so
-     *              the caller owns the zeroing. A pointer rather than the reference
-     *              @ref snapshot_edges takes because the storage-layer unit tests call this
-     *              verb directly and hold no counters; the seam that must never forget is
-     *              `graph_t::store_value`, the ONE funnel every graph write reaches this
-     *              through, and the tally is required THERE.
      * @return The published LKV pointer — exactly what a concurrent @ref read_stored
      *         observes — so the write path can deliver the stored value (RFC-0008 §D
      *         "deliver exactly what was stored") without recloning the rope.
      * @retval nullptr The LKV control-block allocation failed (OOM): NOTHING was
-     *         published or appended (#477 nothrow soft-fail — the graph maps this to
+     *         published (#477 nothrow soft-fail — the graph maps this to
      *         `BACKPRESSURE`; the store verb never aborts the node).
      */
-    std::shared_ptr<const rope_t> store(rope_t value, std::pmr::memory_resource* mr = nullptr,
-                                        store_drops_t* drops = nullptr) {
+    std::shared_ptr<const rope_t> store(rope_t value, std::pmr::memory_resource* mr = nullptr) {
         std::shared_ptr<const rope_t> sp = try_make_lkv(std::move(value), mr);
         if (!sp) return nullptr;  // OOM: nothing published — the caller soft-fails (#477)
         // Publish the new last-known-value (lock-free by CONTRACT; see lkv_). A slot that
@@ -974,52 +1093,121 @@ class vertex_t {
         // collision `vertex_stripe_t` already documents (a spurious wake plus a re-check,
         // never a correctness change).
         vertex_stripe_t& st = vertex_stripe_of(this);  // one lookup per verb (#370)
-        if (role_ != role_t::STREAM) {
-            write_seq_.fetch_add(1, std::memory_order_seq_cst);
-            if (st.waiters.load(std::memory_order_seq_cst) == 0) return sp;
-            const std::lock_guard lock(st.m);
-            vertex_stripe_cv(vertex_stripe_index(this)).notify_all();
-            return sp;
+        write_seq_.fetch_add(1, std::memory_order_seq_cst);
+        if (st.waiters.load(std::memory_order_seq_cst) == 0) return sp;
+        const std::lock_guard lock(st.m);
+        vertex_stripe_cv(vertex_stripe_index(this)).notify_all();
+        return sp;
+    }
+
+    /**
+     * @brief Admit @p sp into this RECEIVING vertex's STREAM ring, charging the admission
+     *        against @p src — the byte bound of RFC-0025 §4.6.1 clause 3.
+     *
+     * Charging is **reservation ADMISSION, not placement**. `try_alloc(retained_bytes)` on
+     * @p src reserves a block that is never written to and is held until the entry retires;
+     * the payload stays exactly where the publish put it and the append is still a refcount
+     * bump (@ref ring_entry_t). What the injected source therefore bounds is how much this
+     * receiver may have OUTSTANDING, in bytes, on a budget it chose — which is the thing the
+     * retired `kRingAppendProbe = 1024` guess could not do: it priced libstdc++'s deque
+     * internals against the global heap, and no injected source ever saw it.
+     *
+     * The §4.4 pressure contract, binding HERE (clause 4), selected by the receiver's own
+     * declared arm (`vertex_ext_t::ring_reliable`, set through `graph_t::set_ring_source`):
+     *
+     * - **best-effort** — a refused reservation SHEDS THE OLDEST entry, whole and never
+     *   partial, releases its reservation and retries; each shed accounts a lost delivery
+     *   (@ref store_drops_t::ring_shed) and marks a `tr::flow::address_shift_gap` IN ORDER at
+     *   the shed point (@ref ring_entry_t::gap_before). A ring that cannot fund even an empty
+     *   admission declines it and says so (@ref store_drops_t::ring_append). Latency stays
+     *   bounded; completeness is sacrificed knowingly.
+     * - **reliable** — the admission is refused, NOTHING is shed and the ring does not grow
+     *   past its byte bound; the caller answers `BACKPRESSURE` to the rate-aware producer,
+     *   which slows. LOCAL producers only in v1: there is no wire carrier for backpressure,
+     *   which waits on the credit window §4.6.1 clause 7 parks as the v2 escalation.
+     *
+     * @param sp       The published value to queue (refcount share; the caller keeps its own).
+     * @param bytes    The retained width to reserve — payload plus %kRingEntryOverhead.
+     * @param src      The graph-resolved effective source; BOUND into `vertex_ext_t::ring_source`
+     *                 on first use so every later release reaches the source that served it.
+     * @param drops    Out: what this admission SHED — set, never cleared, so the caller owns
+     *                 the zeroing. `graph_t::count_store_drops` is the seam that must not forget.
+     * @return true iff the entry was queued. False is the RELIABLE refusal — and only that, so
+     *         a caller can map it straight to `BACKPRESSURE` without re-deriving the arm.
+     */
+    bool ring_admit(const std::shared_ptr<const rope_t>& sp, std::size_t bytes,
+                    tr::mem::block_source_t& src, store_drops_t* drops) {
+        const std::lock_guard lock(vertex_stripe_of(this).m);
+        vertex_ext_t* e = ext_.load(std::memory_order_acquire);
+        if (e == nullptr) return true;  // no ext, no ring — nothing to admit into, nothing shed
+        // Bind the source ONCE. A release must reach the source that served the block (sized
+        // reclaim), so a vertex that has already charged keeps charging the same seam even if
+        // the graph default is later re-injected; `graph_t::set_ring_source` is the only
+        // rebind, and it drains the ring first.
+        if (e->ring_source == nullptr) e->ring_source = &src;
+        tr::mem::block_source_t& source = *e->ring_source;
+        if (!e->history)  // first append allocates the ring (#388 lazy deque)
+            e->history = std::make_unique<std::deque<ring_entry_t>>();
+
+        // The DEPTH intent retires BEFORE the byte bound charges. Order matters: a ring already
+        // at its declared depth is going to drop its oldest entry for this append either way,
+        // so releasing that reservation FIRST is what funds the new one out of the receiver's
+        // own steady-state budget. Charging first and trimming after would make a source sized
+        // for exactly N entries refuse the N+1th and shed under §4.4 — pressure behaviour on a
+        // ring that was never actually over its bound. Both bounds compose (RFC-0025 §4.6);
+        // this is the composition.
+        //
+        // And the retiring entry's reservation is HANDED STRAIGHT ON when it is the same shape
+        // the new one needs. A reservation is fungible bytes at a fixed size and alignment, so
+        // releasing a block of exactly `bytes` only to ask the same source for a block of
+        // exactly `bytes` is a round trip that buys nothing. Carrying it over makes a
+        // steady-state uniform stream cost the source ZERO calls per write — where the
+        // `kRingAppendProbe` heuristic this replaces did an allocate-and-free on EVERY write,
+        // forever, and told nobody anything.
+        const std::size_t keep = e->history_keep_last != 0 ? e->history_keep_last : 1;
+        void* carried = nullptr;
+        while (e->history->size() >= keep) {
+            ring_entry_t& oldest = e->history->front();
+            if (carried == nullptr && oldest.token != nullptr && oldest.bytes == bytes) {
+                carried = oldest.token;
+            } else {
+                release_reservation(source, oldest);
+            }
+            e->history->pop_front();
         }
 
-        // STREAM keeps the original shape verbatim: the ring append is real state mutation
-        // and must stay under the stripe mutex.
-        {
-            const std::lock_guard lock(st.m);
-            vertex_ext_t* e = ext_.load(std::memory_order_acquire);
-            if (e != nullptr) {  // STREAM identity always has ext
-                // The ring's deque legs (shell + map + one node per chunk) throw on OOM
-                // (#477). Probe one conservative per-append bound first (libstdc++'s
-                // 512 B chunk + map/shell slack — every -fno-exceptions MCU target;
-                // wider-chunk hosts keep real exceptions) and on failure SKIP the
-                // append: the ring is bounded-lossy by contract (drain: "entries
-                // trimmed before the drain are lost"), so a pressure-dropped history
-                // entry is valid behavior — the LKV above already published.
-                //
-                // Valid, but not FREE, and not silent (#1003): for a STREAM the drain IS the
-                // fan-out, so a skipped append is a delivery every subscriber loses. The
-                // write still answers SUCCESS (the ruled disposition — the value publish
-                // landed and the ring is lossy by contract), which is exactly why the loss
-                // has to leave the tally behind instead.
-                static constexpr std::size_t kRingAppendProbe = 1024;
-                if (tr::detail::probe_bytes(kRingAppendProbe)) {
-                    if (!e->history)  // first append allocates the ring (#388 lazy deque)
-                        e->history = std::make_unique<std::deque<std::shared_ptr<const rope_t>>>();
-                    e->history->push_back(sp);  // refcount bump — the caller keeps `sp`
-                    ++e->appended_since_flush;  // the drain counts APPENDS, not seq (#925)
-                    const std::size_t keep = e->history_keep_last != 0 ? e->history_keep_last : 1;
-                    while (e->history->size() > keep) e->history->pop_front();
-                } else if (drops != nullptr) {
-                    drops->ring_append = true;
-                }
-            }
-            write_seq_.fetch_add(1, std::memory_order_seq_cst);
-            // Waiterless publish skips the condvar entirely (#370): we hold st.m, so a
-            // zero count here cannot race a registration.
-            if (st.waiters.load(std::memory_order_relaxed) != 0)
-                vertex_stripe_cv(vertex_stripe_index(this)).notify_all();
+        const bool arm_reliable = e->ring_reliable;
+        void* token = carried != nullptr ? carried : source.try_alloc(bytes, ring_entry_t::kAlign);
+        std::uint64_t shed = 0;
+        if (token == nullptr && !arm_reliable && !e->history->empty()) {
+            // Best-effort: shed **THE OLDEST** whole entry — §4.4's word is singular and it is
+            // load-bearing. Shedding in a loop until the source relents would empty the whole
+            // ring on a source that has gone to zero, destroying every queued delivery to fund
+            // an admission that still fails. One per admission bounds the damage to what the
+            // pressure actually cost, and a source that stays dead converges the ring to empty
+            // one write at a time instead of in one stroke.
+            release_reservation(source, e->history->front());
+            e->history->pop_front();
+            ++shed;
+            token = source.try_alloc(bytes, ring_entry_t::kAlign);
         }
-        return sp;
+        if (token == nullptr) {
+            // Nothing admitted. Under the reliable arm nothing was shed either, and the caller
+            // turns our `false` into BACKPRESSURE. Under best-effort the ring was already
+            // emptied above, so the loss is real and is accounted rather than silent.
+            if (drops != nullptr && !arm_reliable) drops->ring_append = true;
+            if (drops != nullptr) drops->ring_shed += shed;
+            e->ring_gaps += shed;
+            return !arm_reliable;
+        }
+        e->history->push_back(ring_entry_t{.value = sp,  // refcount bump — the caller keeps `sp`
+                                           .token = token,
+                                           .bytes = bytes,
+                                           .gap_before = shed != 0});
+        ++e->appended_since_flush;  // the drain counts APPENDS, not seq (#925)
+        if (drops != nullptr) drops->ring_shed += shed;
+        e->ring_gaps += shed;
+        return true;
     }
 
    public:
@@ -1103,13 +1291,28 @@ class vertex_t {
      * @note Counts ring APPENDS, never a `write_seq_` delta (#925): that sequence is the
      *       await/readiness cursor and bumps on a SHED append too, so the surplus would
      *       re-take an ALREADY-FLUSHED entry — a drain removes nothing from the ring.
+     * @param out       Caller storage the drained entries are assigned into (overwritten).
+     * @param gap_before Optional out: shed points observed on this ring since the previous
+     *                  drain — the in-order `tr::flow::address_shift_gap` signal of RFC-0025
+     *                  §4.4/§4.5. Non-zero means entries the consumer would have seen are
+     *                  MISSING immediately before this batch. Written unconditionally when
+     *                  non-null, including on the zero-drain returns, so a consumer that
+     *                  polls a quiet ring still learns about a shed.
      * @return The number of entries drained (0 ⇒ nothing appended since the last flush,
      *         or the snapshot could not be allocated — retry on the next flush).
      */
-    std::size_t drain_unflushed(std::vector<std::shared_ptr<const rope_t>>& out) {
+    std::size_t drain_unflushed(std::vector<std::shared_ptr<const rope_t>>& out,
+                                std::uint64_t* gap_before = nullptr) {
         const std::lock_guard lock(vertex_stripe_of(this).m);
         vertex_ext_t* e = ext_.load(std::memory_order_acquire);
-        if (e == nullptr) return 0;  // no ring — nothing was ever appended
+        if (e == nullptr) {
+            if (gap_before != nullptr) *gap_before = 0;
+            return 0;  // no ring — nothing was ever appended
+        }
+        if (gap_before != nullptr) {
+            *gap_before = e->ring_gaps - e->ring_gaps_drained;
+            e->ring_gaps_drained = e->ring_gaps;
+        }
         // A non-zero count implies a ring: the counter is bumped only where the append
         // lands (which creates it), and `retire` clears the two together.
         if (e->appended_since_flush == 0 || !e->history) return 0;
@@ -1119,7 +1322,9 @@ class vertex_t {
         // marked un-flushed (deferred delivery), instead of a throwing assign (#477).
         if (!tr::detail::try_reserve(out, static_cast<std::size_t>(take))) return 0;
         e->appended_since_flush = 0;
-        out.assign(e->history->end() - take, e->history->end());  // within capacity
+        out.clear();
+        for (auto it = e->history->end() - take; it != e->history->end(); ++it)
+            out.push_back(it->value);  // within capacity — refcount shares, no byte copy
         return out.size();
     }
 
@@ -1131,8 +1336,29 @@ class vertex_t {
         const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
         if (e == nullptr || !e->history) return out;
         out.reserve(e->history->size());
-        for (const auto& sp : *e->history) out.push_back(*sp);
+        for (const ring_entry_t& entry : *e->history) out.push_back(*entry.value);
         return out;
+    }
+
+    /** @brief Total bytes this receiver currently holds RESERVED against its injected ring
+     *         source — the byte bound's observable (RFC-0025 §4.6.1 clause 3). Zero on a
+     *         vertex that has never admitted an entry. */
+    [[nodiscard]] std::size_t ring_reserved_bytes() const {
+        const std::lock_guard lock(vertex_stripe_of(this).m);
+        const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
+        if (e == nullptr || !e->history) return 0;
+        std::size_t n = 0;
+        for (const ring_entry_t& entry : *e->history) n += entry.bytes;
+        return n;
+    }
+
+    /** @brief Shed points on this receiver's ring since registration — the cumulative
+     *         `tr::flow::address_shift_gap` census (RFC-0025 §4.4: a shed with no accounting
+     *         is non-conforming). */
+    [[nodiscard]] std::uint64_t ring_gap_count() const {
+        const std::lock_guard lock(vertex_stripe_of(this).m);
+        const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
+        return e != nullptr ? e->ring_gaps : 0;
     }
 
     // -- subscription edges -----------------------------------------------------------
@@ -1648,6 +1874,10 @@ class vertex_t {
             // reader). The remaining ext fields are mutated under the stripe lock.
             detached = e->handlers.exchange(nullptr, std::memory_order_acq_rel);
             const std::lock_guard lock(vertex_stripe_of(this).m);
+            // RELEASE before reset: every queued entry holds an admission reservation on the
+            // receiver's injected source, and dropping the deque without releasing them would
+            // leak the whole ring's byte budget on every retirement.
+            e->release_ring();
             e->history.reset();
             e->acl_present = false;
             e->aces.clear();
@@ -1656,6 +1886,10 @@ class vertex_t {
             e->history_keep_last = 1;
             e->pin_payload_ratio = 0;
             e->app.reset();
+            e->ring_source = nullptr;  // the next identity binds its own seam afresh
+            e->ring_reliable = false;
+            e->ring_gaps = 0;
+            e->ring_gaps_drained = 0;
             e->appended_since_flush = 0;  // cleared WITH `history` — the drain's invariant
         }
         // The edge block is stripe-guarded; clear it in its own critical section (both it and
@@ -1983,6 +2217,41 @@ class vertex_t {
     [[nodiscard]] std::uint32_t history_depth() const noexcept {
         const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
         return e != nullptr ? e->history_keep_last : 1;
+    }
+
+    /**
+     * @brief Bind this RECEIVING vertex's own ring source and §4.4 pressure arm — the seam of
+     *        RFC-0025 §4.6.1 clause 3, owner-side and with no wire surface.
+     *
+     * Sited on `vertex_ext_t`, never on `vertex_t`: a STREAM identity already allocates the
+     * extension block, so the byte bound costs `sizeof(vertex_t)` nothing and the #1285
+     * ratchet is untouched.
+     *
+     * REBINDING DRAINS. Reservations are released to the source that served them (sized
+     * reclaim), so a rebind first hands every queued entry's block back to the OLD source and
+     * empties the ring; the queue restarts on the new budget. Wiring-time by intent — the
+     * "configure before frames flow" contract `set_history_depth` and `set_delivery_mode`
+     * already carry.
+     *
+     * @param src      The source this receiver's admissions are charged against. `nullptr`
+     *                 unbinds, so the next admission re-resolves the graph-level default.
+     * @param reliable The §4.4 arm: false (default) best-effort — shed oldest, account the
+     *                 loss, raise a gap; true reliable — refuse the admission and answer the
+     *                 local producer `BACKPRESSURE`, shedding nothing.
+     */
+    void set_ring_source(tr::mem::block_source_t* src, bool reliable) {
+        vertex_ext_t& e = ensure_ext();
+        const std::lock_guard lock(vertex_stripe_of(this).m);
+        e.release_ring();
+        e.ring_source = src;
+        e.ring_reliable = reliable;
+    }
+
+    /** @brief This receiver's bound ring source, or `nullptr` while it still draws the
+     *         graph-level default (nothing admitted and nothing declared). */
+    [[nodiscard]] tr::mem::block_source_t* ring_source() const noexcept {
+        const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
+        return e != nullptr ? e->ring_source : nullptr;
     }
 
     /**

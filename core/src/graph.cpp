@@ -592,7 +592,7 @@ struct branch_node_t {
 }  // namespace
 
 graph_t::graph_t(std::pmr::memory_resource* mr, mem::mem_backend_t* value_backend,
-                 mem::block_source_t* ctl)
+                 mem::block_source_t* ctl, mem::block_source_t* ring)
     : mr_(mr),
       value_backend_(value_backend),
       root_(std::make_unique<vertex_t>(role_t::STORED_VALUE, path_key_t{}, handlers_t{})),
@@ -600,7 +600,8 @@ graph_t::graph_t(std::pmr::memory_resource* mr, mem::mem_backend_t* value_backen
       // an anchor itself and no element can name it, and giving it one would put a second
       // unaddressable hole in an index whose only documented hole is slot 0.
       anchor_root_(std::make_unique<vertex_t>(role_t::STORED_VALUE, path_key_t{}, handlers_t{})),
-      ctl_(ctl) {
+      ctl_(ctl),
+      ring_(ring != nullptr ? ring : &mem::heap_source()) {
     // Slot 0 is the structural root (RFC-0024 §6.4): the index is seeded here so it stays
     // allocation-ordered from the first vertex_t this graph owns. The root is not a
     // registrable address, so no bound path ever names slot 0 — it is in the vector because
@@ -1421,7 +1422,15 @@ void graph_t::count_snapshot_drops(const vertex_t::snapshot_drops_t& drops) noex
 }
 
 void graph_t::count_store_drops(vertex_t* v, const vertex_t::store_drops_t& drops) noexcept {
-    if (!drops.ring_append) return;  // the clean write pays exactly this test
+    if (!drops.any()) return;  // the clean write pays exactly this test
+    // Two sheds now, both at the RECEIVER's ring and both under RFC-0025 §4.4's best-effort
+    // arm. `ring_shed` is drop-oldest: the admission was funded by evicting queued entries,
+    // each one a delivery the consumer will never see and each one a
+    // `tr::flow::address_shift_gap` point (surfaced in order by the drain). `ring_append` is
+    // the floor case — the source could not fund the entry even with the ring emptied.
+    // Counting BOTH is what keeps the §4.4 promise that every loss is accounted; a shed with
+    // no accounting is non-conforming, and silence is the one forbidden behaviour.
+    //
     // A shed STREAM ring append under memory pressure. For a STREAM the drain IS the fan-out,
     // so the entry that never entered the ring is a delivery every subscriber loses — counted
     // at the width it sheds, one per subscriber, never one per event. Same width, same cause
@@ -1431,7 +1440,9 @@ void graph_t::count_store_drops(vertex_t* v, const vertex_t::store_drops_t& drop
     // served stay uncounted because #854's close ruling dropped ancestor-leg drop
     // instrumentation outright. A vertex with no subscribers of its own counts nothing, which
     // is why this is guarded rather than a bare add of zero.
-    if (const std::uint64_t n = v->own_subs(); n != 0) count_drop(drop_reason_t::OUT_OF_MEMORY, n);
+    const std::uint64_t lost = (drops.ring_append ? 1U : 0U) + drops.ring_shed;
+    if (const std::uint64_t n = v->own_subs(); n != 0)
+        count_drop(drop_reason_t::OUT_OF_MEMORY, n * lost);
 }
 
 void graph_t::bump_subtree_listeners(vertex_t* v, std::int32_t delta) {
@@ -1533,6 +1544,31 @@ std::uint32_t graph_t::pin_payload_ratio(vertex_handle_t v) const noexcept {
 
 void graph_t::set_history_depth(vertex_handle_t v, std::uint32_t keep) {
     v.get()->set_history_depth(keep);
+}
+
+/**
+ * @brief Bind a receiving vertex's own ring source and §4.4 arm (RFC-0025 §4.6.1 clause 3).
+ *
+ * Sited beside `set_history_depth` because the two compose — intent in entries, bound in bytes
+ * — and both are owner-side wiring with no wire surface. The vertex verb drains the ring on a
+ * rebind so every reservation returns to the source that served it.
+ */
+void graph_t::set_ring_source(vertex_handle_t v, mem::block_source_t* src, bool reliable) {
+    v.get()->set_ring_source(src, reliable);
+}
+
+/** @brief Bytes the receiver ring currently holds reserved — the byte bound's observable. */
+result_t<std::size_t> graph_t::ring_reserved_bytes(vertex_handle_t v) const {
+    vertex_t* const vx = v.get();
+    if (vx->role() != role_t::STREAM) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+    return vx->ring_reserved_bytes();
+}
+
+/** @brief The cumulative gap census: how many shed points this receiver's ring has taken. */
+result_t<std::uint64_t> graph_t::stream_gaps(vertex_handle_t v) const {
+    vertex_t* const vx = v.get();
+    if (vx->role() != role_t::STREAM) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+    return vx->ring_gap_count();
 }
 
 void graph_t::set_pin_payload_ratio(vertex_handle_t v, std::uint32_t k) {
@@ -1742,8 +1778,22 @@ namespace {
     // but a STREAM target's ring still feeds the next propagate over it, exactly as an assign's
     // does. A shed append therefore loses that deferred delivery, and is counted at the
     // TARGET's own-subs width (the shed is the target's, not the source's).
+    //
+    // This is the RECEIVER seam: `target` is the consumer's own vertex, so if it is a STREAM
+    // the ring materializes THERE and is charged against the source THAT vertex injected
+    // (RFC-0025 §4.6.1 clause 2). The §4.4 arm is the receiving vertex's own declaration
+    // (`graph_t::set_ring_source`) rather than a bit read off this edge: the arm is NOT read
+    // here on purpose — `edge_view_t` is the always-inlined per-edge body of the wide fan-out
+    // loop, and one added field there was enough to flip the inline estimate and cost 12%
+    // (#1223 / #1250). Under the reliable arm the admission is refused and this leg counts the
+    // declined delivery; a LOCAL producer writing the receiving vertex directly gets the
+    // BACKPRESSURE status itself, which is the whole reach v1 has (the wire carrier waits on
+    // the credit window §4.6.1 clause 7 parks).
     vertex_t::store_drops_t store_drops;
-    (void)store_value(target, std::move(clone), store_drops, e.caller());
+    if (!store_value(target, std::move(clone), store_drops, e.caller())) {
+        count_drop(drop_reason_t::OUT_OF_MEMORY, 1);
+        return;
+    }
     count_store_drops(target, store_drops);
 }
 
@@ -1897,16 +1947,50 @@ result_t<std::shared_ptr<const rope_t>> graph_t::store_value(vertex_t* v, rope_t
         v->note_write();
         return std::shared_ptr<const rope_t>{};  // handler consumed it — nothing stored
     }
-    // The storage verb owns the invariant order: LKV publish (lock-free) BEFORE the
-    // lock; ring append + keep-last trim + seq bump + await wake under it.
-    std::shared_ptr<const rope_t> sp = v->store(std::move(value), mr_, &drops);
+    // The storage verb has ONE tail for every role now (RFC-0025 §4.6.1 clause 1): publish the
+    // LKV lock-free, bump the sequence, wake awaiters. A PRODUCER NEVER QUEUES — the ring the
+    // STREAM arm used to append here moved to the RECEIVING vertex, below.
+    //
+    // The retained width is measured BEFORE the move and ONLY for a STREAM. `total_length()`
+    // walks the rope's links, and a producer must not pay a walk for a queue it does not have:
+    // measured, hoisting it out of this branch cost the 4-writer plain-write point ~30%.
+    const bool receives = v->role() == role_t::STREAM;
+    const std::size_t retained = receives ? value.total_length() + kRingEntryOverhead : 0;
+    std::shared_ptr<const rope_t> sp = v->store(std::move(value), mr_);
     // vertex_t::store soft-fails its LKV allocation nothrow (#477): null here (a
     // non-handler role always publishes a pointer) is exactly OOM — report it as the
     // injected-resource status (BACKPRESSURE, ADR-0060 §3), never abort. Distinct from
     // the handler leg above, whose null shared_ptr is the "consumed, nothing stored"
     // SUCCESS sentinel.
     if (!sp) return std::unexpected(status_t::BACKPRESSURE);
+    // THE RECEIVER'S QUEUE. A STREAM vertex is a consumer-owned ring: whoever wants depth
+    // makes its OWN vertex a STREAM, and the entries it retains are charged, in bytes, to the
+    // source that vertex injected (or, having declared none, to this graph's default). The
+    // charge is reservation ADMISSION — the payload never moves, and `sp` is the same refcount
+    // share the publish handed out.
+    //
+    // The admission runs AFTER the publish, so an awaiter woken by the sequence bump can reach
+    // a drain before the entry is queued. That window defers a delivery; it never loses one —
+    // the drain cursor only advances over entries that are IN the ring, so the late arrival is
+    // taken by the next covering flush. Charging BEFORE the publish would instead have to
+    // un-charge on an LKV soft-fail, which is a leak waiting for its first early return.
+    if (receives && !v->ring_admit(sp, retained, ring_source_for(v), &drops))
+        return std::unexpected(status_t::BACKPRESSURE);  // the RELIABLE arm of §4.4
     return sp;
+}
+
+/**
+ * @brief The source a receiving vertex charges its ring admissions against: its OWN if it
+ *        declared one, else this graph's default (RFC-0025 §4.6.1 clause 3).
+ *
+ * The whole resolution, in one place, so "per-injection-point, never a shared pool" has a
+ * single spelling. The default is a DEFAULT — it exists so a vertex that declared nothing
+ * still has somewhere to charge — and `vertex_t::ring_admit` binds whatever it is handed on
+ * first use, because a sized reclaim must reach the source that served the block.
+ */
+mem::block_source_t& graph_t::ring_source_for(vertex_t* v) const noexcept {
+    mem::block_source_t* const own = v->ring_source();
+    return own != nullptr ? *own : *ring_;
 }
 
 void graph_t::bubble_up(vertex_t* v, const rope_t& value) {
@@ -2002,13 +2086,15 @@ result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, std::string_view c
         store_value(v, std::move(value), store_drops, caller);
     if (!stored) return std::unexpected(stored.error());
     if (v->role() == role_t::STREAM) {
-        // Deliver the just-appended ring entry and advance the drain cursor, so a later
-        // propagate on this stream does not re-deliver it (RFC-0008 §E).
+        // Drain this RECEIVER's ring and advance its cursor, so a later propagate over the
+        // same stream does not re-deliver what went out here (RFC-0008 §E). The entries are
+        // the ones its own admission just queued — a queue, in order, not a coalesce.
         //
-        // If the append was SHED, this drain finds nothing and returns before a single edge
-        // is snapshotted — the whole fan-out abandoned without ever reaching the dispatch
-        // plane's counting sites (#1003). The write still succeeds; the tally is what makes
-        // the loss something an operator can see.
+        // If the admission was SHED, this drain finds less than was written — or nothing at
+        // all — and the whole fan-out is abandoned without ever reaching the dispatch plane's
+        // counting sites (#1003). The write still succeeds; the tally is what makes the loss
+        // something an operator can see, and the drain's gap out-param is what makes it
+        // something the CONSUMER can see, in order, at the shed point.
         count_store_drops(v, store_drops);
         deliver_current(v);
     } else {
@@ -2192,8 +2278,8 @@ void graph_t::deliver_vertex(vertex_t* v, const rope_t& value) {
 
 void graph_t::deliver_current(vertex_t* v) {
     if (v->role() == role_t::STREAM) {
-        // A stream is a queue (RFC-0008 §E): drain the ring entries appended since the
-        // last flush, in order — NOT a coalesce. Snapshot under the lock
+        // A stream is a queue (RFC-0008 §E): drain the RECEIVER's ring entries appended since
+        // the last flush, in order — NOT a coalesce. Snapshot under the lock
         // (vertex_t::drain_unflushed), deliver outside.
         std::vector<std::shared_ptr<const rope_t>> batch;
         if (v->drain_unflushed(batch) == 0) return;  // nothing appended since the last flush
@@ -2423,14 +2509,15 @@ result_t<std::vector<rope_t>> graph_t::history(vertex_handle_t vh) const {
 }
 
 result_t<std::size_t> graph_t::drain_unflushed(vertex_handle_t vh,
-                                               std::vector<std::shared_ptr<const rope_t>>& out) {
+                                               std::vector<std::shared_ptr<const rope_t>>& out,
+                                               std::uint64_t* gap_before) {
     vertex_t* v = vh.get();
     if (v->role() != role_t::STREAM) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
     // Same gate as `history`, for the same reason: a drain hands back the same ring entries a
     // history read serves, so an ungated drain would be a READ-gate bypass (local-only helper
     // => local (empty) context).
     if (!acl_allows(v, {}, acl_right_t::READ)) return std::unexpected(status_t::PERMISSION_DENIED);
-    return v->drain_unflushed(out);
+    return v->drain_unflushed(out, gap_before);
 }
 
 result_t<void> graph_t::mark_flushed(vertex_handle_t vh) {

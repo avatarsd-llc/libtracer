@@ -20,6 +20,14 @@
  *   - the two sheds that happen BEFORE the fan-out — a STREAM ring append and a
  *     `mark_pending` leg — are COUNTED at one per subscriber while the write still answers
  *     SUCCESS (#1003), which is what makes an abandoned fan-out visible at all.
+ *
+ * The STREAM cases are injected at a DIFFERENT seam since RFC-0025 §4.6.1 Amendment 2. The
+ * ring is the RECEIVER's and is bounded in bytes by that vertex's own injected
+ * `mem::block_source_t`, not by the global-heap probe, so exhaustion is injected there
+ * (@ref refusing_source_t / a small `pool_source_t`) rather than through `probe_fail_hook`.
+ * What they pin is the §4.4 pressure contract at that ring: best-effort sheds THE OLDEST and
+ * accounts it, reliable answers `BACKPRESSURE` and sheds nothing, the charge/release pairing
+ * is exact and symmetric, and one receiver running its source dry does not affect another.
  */
 
 #include <array>
@@ -67,6 +75,35 @@ bool fail_big(std::size_t n) noexcept { return n < 512; }
 /** @brief Reject exactly @ref g_reject_size-byte probes — pinpoint one growth site. */
 std::size_t g_reject_size = 0;
 bool fail_exact(std::size_t n) noexcept { return n != g_reject_size; }
+
+/**
+ * @brief A heap-backed `block_source_t` that can be switched to REFUSE, and that counts what
+ *        it served — the receiver-ring seam's OOM injector (RFC-0025 §4.6.1 clause 3).
+ *
+ * The ring's bound is no longer the global heap probe `hook_guard_t` drives: it is the
+ * RECEIVING vertex's own injected source, so exhaustion has to be injected THERE. Refusing by
+ * a switch rather than by a byte cap keeps these tests about the pressure CONTRACT (shed,
+ * account, gap / backpressure) rather than about arithmetic on the entry width.
+ */
+class refusing_source_t final : public tr::mem::block_source_t {
+   public:
+    /** @brief Named for the census, like every other source. */
+    refusing_source_t() noexcept : block_source_t("test-refusing") {}
+    /** @brief Serve from the heap unless refusing; count what was handed out. */
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        if (refuse) return nullptr;
+        void* const p = ::operator new(bytes, std::align_val_t{align}, std::nothrow);
+        if (p != nullptr) ++live;
+        return p;
+    }
+    /** @brief Sized reclaim matching @ref try_alloc — the pairing these tests assert on. */
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        --live;
+        ::operator delete(p, bytes, std::align_val_t{align});
+    }
+    bool refuse = false;   /**< @brief Flip to make every admission decline. */
+    std::int64_t live = 0; /**< @brief Outstanding reservations — zero means no leak. */
+};
 
 /** @brief RAII: install an OOM-injection hook for one scope, always uninstalled on exit. */
 struct hook_guard_t {
@@ -381,23 +418,149 @@ void test_target_clone_drop() {
           "and the successful redelivery counts no further drop");
 }
 
-/** @brief A stream's ring append is shed under OOM (bounded-lossy), the LKV still lands. */
+/** @brief A receiver ring's admission is refused by ITS OWN source (bounded-lossy), the LKV
+ *         still lands — the byte bound of RFC-0025 §4.6.1 clause 3, injected where it lives. */
 void test_stream_ring_shed() {
-    std::printf("stream ring — the deque append is shed under OOM, the LKV still lands:\n");
+    std::printf("receiver ring — the admission is refused by the vertex's own source:\n");
+    refusing_source_t src;  // MUST outlive the graph: the ring releases against it
     graph_t g;
     auto v = g.register_vertex(path_t("/s/log"), role_t::STREAM);
+    g.set_ring_source(v, &src);
     g.set_history_depth(v, 4);
     {
-        const hook_guard_t frag(fail_big);  // the ring-append probe exceeds 512 B
+        src.refuse = true;  // the receiver's own budget declines the reservation
         check(g.write(v, make_value({0x10})).has_value(), "the stream write succeeds");
         const auto r = g.read(v);
         check(r.has_value() && std::to_integer<int>((*r)->only().bytes()[0]) == 0x10,
-              "the LKV published even though the ring entry was shed");
+              "the LKV published even though the ring entry was refused admission");
         const auto hist = g.history(v);
-        check(hist.has_value() && hist->empty(), "the shed entry never entered the ring");
+        check(hist.has_value() && hist->empty(), "the refused entry never entered the ring");
     }
+    src.refuse = false;
     check(g.write(v, make_value({0x11})).has_value() && g.history(v)->size() == 1,
-          "the ring accepts entries again once memory returns");
+          "the ring admits again once the source can fund it");
+    check(src.live == 1, "exactly one reservation is held — charge on append, one entry kept");
+    check(g.ring_reserved_bytes(v).has_value() && *g.ring_reserved_bytes(v) > 0,
+          "and the byte bound's observable reports it");
+}
+
+/**
+ * @brief The charge/release pairing is EXACT and SYMMETRIC: a steady-state ring at depth N
+ *        holds a bounded reservation total, and a retired ring returns every byte.
+ *
+ * The failure this pins is the expensive one — a reservation held past the entry that earned
+ * it. It would not show as a crash or a wrong value; it would show as a receiver that
+ * gradually stops admitting, months later, on a source nobody was watching.
+ */
+void test_ring_reservations_are_symmetric() {
+    std::printf("receiver ring — charge on append, release on retire, no leak:\n");
+    refusing_source_t src;
+    {
+        graph_t g;
+        auto v = g.register_vertex(path_t("/s/sym"), role_t::STREAM);
+        g.set_ring_source(v, &src);
+        g.set_history_depth(v, 3);
+        for (int i = 0; i < 10; ++i) check(g.write(v, make_value({0x20})).has_value(), "write");
+        check(src.live == 3, "the trim released every entry the depth intent dropped");
+        const auto held = g.ring_reserved_bytes(v);
+        check(held.has_value() && *held > 0, "the ring reports the bytes it holds reserved");
+        check(g.history(v)->size() == 3, "and the depth intent is what bounds the entry count");
+    }
+    check(src.live == 0, "tearing the graph down returned every reservation — no leak");
+}
+
+/**
+ * @brief Per-vertex isolation (ruling R-A2): one receiver running its source dry MUST NOT
+ *        affect another. This is what "per-injection-point, never a shared pool" buys, and
+ *        ADR-0079's amendment measured what a folded source costs instead (0.01x at T=24).
+ */
+void test_ring_sources_are_isolated_per_vertex() {
+    std::printf("receiver ring — one vertex running dry does not affect another:\n");
+    refusing_source_t dry;  // both MUST outlive the graph — the rings release against them
+    refusing_source_t healthy;
+    graph_t g;
+    auto a = g.register_vertex(path_t("/iso/a"), role_t::STREAM);
+    auto b = g.register_vertex(path_t("/iso/b"), role_t::STREAM);
+    g.set_ring_source(a, &dry);
+    g.set_ring_source(b, &healthy);
+    g.set_history_depth(a, 4);
+    g.set_history_depth(b, 4);
+
+    dry.refuse = true;
+    check(g.write(a, make_value({0x30})).has_value(), "the exhausted receiver's write succeeds");
+    check(g.history(a)->empty(), "…and queues nothing — its own budget declined");
+    check(g.write(b, make_value({0x31})).has_value(), "the other receiver's write succeeds");
+    check(g.history(b)->size() == 1, "…and queues normally — the flood is a blast radius");
+    check(healthy.live == 1 && dry.live == 0, "each ring charged its OWN seam, never a pool");
+}
+
+/**
+ * @brief The best-effort arm of RFC-0025 §4.4, at the receiver ring: shed the OLDEST whole,
+ *        account the loss, and surface `tr::flow::address_shift_gap` IN ORDER at the shed
+ *        point. A shed with no accounting is non-conforming; silence is the one behaviour
+ *        the pressure contract forbids.
+ */
+void test_ring_best_effort_sheds_oldest_with_a_gap() {
+    std::printf("receiver ring — best-effort sheds the OLDEST, counts it, and raises a gap:\n");
+    // A pool sized so the ring funds a couple of entries and then must evict to admit.
+    // Declared BEFORE the graph: blocks are host-owned and the source must outlive them.
+    std::array<std::byte, 512> slab{};
+    std::array<tr::mem::size_class_t, 4> classes{};
+    tr::mem::pool_source_t pool(slab, classes);
+    graph_t g;
+    auto v = g.register_vertex(path_t("/s/gap"), role_t::STREAM);
+    g.set_ring_source(v, &pool, /*reliable=*/false);
+    g.set_history_depth(v, 64);  // depth intent far past what the byte bound can fund
+
+    int seen = 0;
+    (void)g.subscribe(path_t("/s/gap"), count_cb, &seen);
+    const auto before = g.delivery_drops();
+    for (int i = 0; i < 64; ++i)
+        check(g.write(v, make_value({static_cast<std::uint8_t>(i)})).has_value(),
+              "every best-effort write SUCCEEDs — completeness is what is sacrificed");
+    const auto gaps = g.stream_gaps(v);
+    check(gaps.has_value() && *gaps > 0, "the byte bound bit: shed points were recorded");
+    check(g.delivery_drops().out_of_memory > before.out_of_memory,
+          "and every shed is ACCOUNTED — a silent shed is non-conforming");
+    const auto hist = g.history(v);
+    check(hist.has_value() && hist->size() < 64,
+          "the ring holds what the SOURCE could fund, never the declared depth");
+    check(!hist->empty(), "…and the newest entries survived: oldest-first is the shed order");
+
+    std::vector<std::shared_ptr<const tr::view::rope_t>> batch;
+    std::uint64_t gap_before = 0;
+    (void)g.drain_unflushed(v, batch, &gap_before);
+    check(gap_before > 0, "the consumer is TOLD about the discontinuity, in order, at the drain");
+    std::uint64_t again = 1;
+    (void)g.drain_unflushed(v, batch, &again);
+    check(again == 0, "…exactly once — a gap already surfaced is not re-reported");
+}
+
+/**
+ * @brief The reliable arm of RFC-0025 §4.4, at the receiver ring: refuse the admission,
+ *        shed NOTHING, and answer the LOCAL producer `BACKPRESSURE`.
+ *
+ * v1 reach, stated so it is not read as an omission: there is no wire carrier for
+ * backpressure — the per-edge credit window is PARKED as the v2 escalation (§4.6.1 clause 7)
+ * — so this status reaches a local producer and a remote one sees the receiver's drop tally.
+ */
+void test_ring_reliable_answers_backpressure() {
+    std::printf("receiver ring — the reliable arm refuses and answers BACKPRESSURE:\n");
+    refusing_source_t src;  // MUST outlive the graph: the ring releases against it
+    graph_t g;
+    auto v = g.register_vertex(path_t("/s/rel"), role_t::STREAM);
+    g.set_ring_source(v, &src, /*reliable=*/true);
+    g.set_history_depth(v, 4);
+    check(g.write(v, make_value({0x40})).has_value(), "a funded write lands normally");
+    check(g.history(v)->size() == 1, "…and queues its entry");
+
+    src.refuse = true;
+    const auto r = g.write(v, make_value({0x41}));
+    check(!r && r.error() == status_t::BACKPRESSURE,
+          "the refused admission answers BACKPRESSURE to the rate-aware producer");
+    check(g.history(v)->size() == 1, "NOTHING was shed — the reliable arm never drops");
+    check(g.stream_gaps(v).has_value() && *g.stream_gaps(v) == 0,
+          "…and raises no gap: a gap means a loss, and there was none");
 }
 
 /**
@@ -417,8 +580,10 @@ void test_stream_ring_shed() {
  */
 void test_stream_shed_append_no_redelivery() {
     std::printf("stream drain — a shed ring append re-delivers NOTHING (#925):\n");
+    refusing_source_t src;  // MUST outlive the graph: the ring releases against it
     graph_t g;
     auto v = g.register_vertex(path_t("/s/shed"), role_t::STREAM);
+    g.set_ring_source(v, &src);
     g.set_history_depth(v, 4);
     std::vector<std::uint8_t> seen;
     (void)g.subscribe(path_t("/s/shed"), record_cb, &seen);
@@ -427,11 +592,16 @@ void test_stream_shed_append_no_redelivery() {
     check(seen.size() == 1 && seen[0] == 0x10, "the subscriber saw 0x10 exactly once");
 
     {
-        const hook_guard_t frag(fail_big);  // the ring-append probe exceeds 512 B
+        src.refuse = true;  // the RECEIVER's own source declines the reservation
         check(g.write(v, make_value({0x11})).has_value(), "the shed stream write still succeeds");
+        src.refuse = false;
     }
-    check(g.history(v).has_value() && g.history(v)->size() == 1,
-          "the shed entry never entered the ring");
+    // §4.4's best-effort arm at the receiver ring: the refused admission shed the OLDEST
+    // queued entry (whole, one per admission) to try to fund itself, and still could not.
+    // What is asserted here is what #925 is actually about — the DRAIN must not fabricate a
+    // tail out of the un-appended entry — so the ring being empty is fine; a re-delivery is not.
+    check(g.history(v).has_value() && g.history(v)->empty(),
+          "the refused entry never entered the ring, and the oldest was shed to try");
     check(seen.size() == 1, "the shed append delivered NOTHING — no phantom tail entry");
     check(seen.size() == 1 && seen.back() == 0x10, "0x10 was NOT re-delivered as 0x11's entry");
 
@@ -459,8 +629,10 @@ void test_stream_shed_append_no_redelivery() {
  */
 void test_stream_shed_is_counted() {
     std::printf("stream ring — a shed append is COUNTED per subscriber, write still SUCCEEDs:\n");
+    refusing_source_t src;  // MUST outlive the graph: the ring releases against it
     graph_t g;
     auto v = g.register_vertex(path_t("/s/counted"), role_t::STREAM);
+    g.set_ring_source(v, &src);
     g.set_history_depth(v, 4);
     constexpr int kSubs = 3;
     int seen = 0;
@@ -468,9 +640,10 @@ void test_stream_shed_is_counted() {
 
     const auto before = g.delivery_drops();
     {
-        const hook_guard_t frag(fail_big);  // the ring-append probe exceeds 512 B
+        src.refuse = true;  // the RECEIVER's own source declines the reservation
         check(g.write(v, make_value({0x10})).has_value(),
               "the write SUCCEEDs — the LKV published and the ring is lossy by contract");
+        src.refuse = false;
     }
     check(seen == 0, "not one of the three subscribers was delivered");
 
@@ -643,6 +816,10 @@ int main() {
     test_handler_notify_clone_sheds_fan_out();
     test_remote_edge_snapshot_is_allocation_free();
     test_stream_ring_shed();
+    test_ring_reservations_are_symmetric();
+    test_ring_sources_are_isolated_per_vertex();
+    test_ring_best_effort_sheds_oldest_with_a_gap();
+    test_ring_reliable_answers_backpressure();
     test_stream_shed_append_no_redelivery();
     test_stream_shed_is_counted();
     test_shed_pending_mark_is_counted();
