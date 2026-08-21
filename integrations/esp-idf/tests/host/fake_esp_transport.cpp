@@ -17,6 +17,7 @@
 #include <map>
 #include <mutex>
 #include <optional>
+#include <thread>
 #include <utility>
 
 #include "esp_pthread.h"
@@ -243,6 +244,19 @@ int dialers_inside() {
 int live_handles() {
     const std::lock_guard<std::mutex> lk(st().m);
     return static_cast<int>(st().live.size());
+}
+
+bool wait_drained(std::chrono::milliseconds limit) {
+    const auto drained_now = [] {
+        const std::lock_guard<std::mutex> lk(st().m);
+        return st().live.empty() && st().dialers == 0;
+    };
+    const auto deadline = std::chrono::steady_clock::now() + limit;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (drained_now()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return drained_now();
 }
 
 int close_count() {

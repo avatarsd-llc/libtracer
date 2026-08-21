@@ -170,11 +170,11 @@ std::unique_ptr<esp_ws_client_link_t> dialing_link() {
  * leaves a running thread at process exit (a crash under ASan/TSan) and an unreleased
  * transport pair (a leak under LSan). It is also the release oracle itself — "the bound
  * was released exactly once" is `live_handles() == 0` with `handle_misuse() == 0`.
+ *
+ * The wait itself now lives on the fake (`fake_ws::wait_drained`, #1456) so the other
+ * client suites — which had the same exposure and none of the drain — share it.
  */
-bool drained_fake(std::chrono::milliseconds limit = 5s) {
-    return wait_until([] { return fake_ws::live_handles() == 0 && fake_ws::dialers_inside() == 0; },
-                      limit);
-}
+bool drained_fake(std::chrono::milliseconds limit = 5s) { return fake_ws::wait_drained(limit); }
 
 /**
  * @brief The headline (defect 3): teardown must not destroy the handles under a sender.

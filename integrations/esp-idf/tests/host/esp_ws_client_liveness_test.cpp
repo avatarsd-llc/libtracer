@@ -90,6 +90,20 @@ bool wait_until(pred_t pred, std::chrono::milliseconds limit) {
     return pred();
 }
 
+/**
+ * @brief Assert that the fake holds nothing any more — every case that destroyed a link
+ *        ends here (#1456).
+ *
+ * A teardown that lands mid-dial detaches the link's recv thread, so the orphan releases
+ * its transport pair up to a dial bound after the link is gone. Returning from a case (and
+ * ultimately from `main`) before that leaves a live thread inside the fake while the fake's
+ * static state is being destroyed — the TSan race #1456 reported. A timeout is a real
+ * release defect, so it is scored as a failed check rather than skipped.
+ */
+void check_drained() {
+    check(fake_ws::wait_drained(), "the fake drained: no live handle, no parked dialer");
+}
+
 /** @brief The descriptor NUMBER the fake hands the link for its dialed connection. It is
  *         not a socket: nothing is opened, and `__wrap_setsockopt` below catches every
  *         option applied to it. Deliberately not a plausible live fd. */
@@ -193,6 +207,7 @@ void test_dial_arms_keepalive() {
         check(opt_value(IPPROTO_TCP, TCP_NODELAY) == 1, "and TCP_NODELAY is still applied");
         check(opt_value(SOL_SOCKET, SO_SNDTIMEO) != -1, "and the bounded write is still applied");
     }
+    check_drained();
 }
 
 // ---------------------------------------------------------------------------
@@ -213,6 +228,7 @@ void test_peer_close_reports_down() {
         check(wait_until([&] { return fake_ws::connect_count() > dials_before; }, 5s),
               "and the link still re-dialed afterwards");
     }
+    check_drained();
 }
 
 // ---------------------------------------------------------------------------
@@ -237,6 +253,7 @@ void test_second_death_reports_again() {
         check(wait_until([&] { return down.count() > after_first; }, 5s),
               "the SECOND connection's death reported too");
     }
+    check_drained();
 }
 
 // ---------------------------------------------------------------------------
@@ -254,6 +271,7 @@ void test_destructor_reports_nothing() {
     // Destroyed while CONNECTED: the destructor clears `connected_`, which is the same
     // state a dead peer leaves behind — the recv loop must tell them apart by `stop_`.
     check(down.count() == 0, "the destructor fired no departure (core's stop_ rule)");
+    check_drained();
 }
 
 // ---------------------------------------------------------------------------
@@ -275,6 +293,7 @@ void test_failed_dials_report_nothing() {
         check(down.count() == 0, "no departure was reported for a link that was never up");
     }
     fake_ws::fail_connects(false);
+    check_drained();
 }
 
 // ---------------------------------------------------------------------------
@@ -311,6 +330,7 @@ void test_refused_connection_backs_off() {
         std::printf("       re-dial gap: %lld ms\n", static_cast<long long>(gap));
         check(gap >= 1000, "and it waited the backoff first, instead of spinning");
     }
+    check_drained();
 }
 
 /**
@@ -341,6 +361,7 @@ void test_productive_connection_redials_at_once() {
         std::printf("       re-dial gap: %lld ms\n", static_cast<long long>(gap));
         check(gap < 1000, "and it did NOT pay the backoff — the retry is still immediate");
     }
+    check_drained();
 }
 
 // ---------------------------------------------------------------------------
@@ -381,6 +402,7 @@ void test_ok_latches_while_link_up_flips() {
         check(wait_until([&] { return link->link_up(); }, 5s), "the link re-dialed and came back");
         check(link->ok(), "and ok() is still true across the whole cycle");
     }
+    check_drained();
 }
 
 }  // namespace
@@ -416,6 +438,9 @@ int main() {
     test_refused_connection_backs_off();
     test_productive_connection_redials_at_once();
     test_ok_latches_while_link_up_flips();
+    // Defensive: `main` must never return under a detached orphan still inside the fake,
+    // whose static state is destroyed on the way out (#1456).
+    check_drained();
     if (g_failures != 0) {
         std::printf("FAILED: %d check(s)\n", g_failures);
         return 1;

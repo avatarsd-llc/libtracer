@@ -150,6 +150,20 @@ bool wait_until(pred_t pred, std::chrono::milliseconds limit) {
 }
 
 /**
+ * @brief Assert that the fake holds nothing any more — every case that destroyed a link
+ *        ends here (#1456).
+ *
+ * A teardown that lands mid-dial detaches the link's recv thread, so the orphan releases
+ * its transport pair up to a dial bound after the link is gone. Returning from a case (and
+ * ultimately from `main`) before that leaves a live thread inside the fake while the fake's
+ * static state is being destroyed — the TSan race #1456 reported. A timeout is a real
+ * release defect, so it is scored as a failed check rather than skipped.
+ */
+void check_drained() {
+    check(fake_ws::wait_drained(), "the fake drained: no live handle, no parked dialer");
+}
+
+/**
  * @brief Run @p body with file descriptor 2 redirected to a temp file. @return what was
  *        written there while it ran (empty if the capture could not be set up).
  *
@@ -220,6 +234,7 @@ void test_first_dial_carries_the_headers() {
         check(!dials.empty() && dials[0].value_or("") == kToken, "and it carried the token");
         check(fake_ws::last_ws_path() == "/ws", "the path went out on the same dial");
     }
+    check_drained();
 }
 
 /**
@@ -250,6 +265,7 @@ void test_every_dial_carries_the_headers() {
         for (const auto& h : dials) all_carried = all_carried && h.value_or("") == kToken;
         check(all_carried, "EVERY dial carried the token, not just the first");
     }
+    check_drained();
 }
 
 /**
@@ -270,6 +286,7 @@ void test_no_headers_leaves_the_field_null() {
         check(!dials.empty(), "a dial was recorded");
         check(!dials.empty() && !dials[0].has_value(), "and it left cfg.headers null");
     }
+    check_drained();
 }
 
 /**
@@ -314,6 +331,7 @@ void test_oversize_frame_is_refused_and_counted() {
         check(logged.find(wanted) != std::string::npos,
               "and the drop is LOGGED with both sizes, which the counter cannot say");
     }
+    check_drained();
 }
 
 /**
@@ -339,6 +357,7 @@ void test_the_effective_config_is_readable() {
         check(link.rx_bytes() == 1024, "rx_bytes() reports the RX buffer this link was given");
         check(link.tx_bytes() == 768, "tx_bytes() reports the TX scratch this link was given");
     }
+    check_drained();
     const auto t = tr::net::esp_ws_client_link_t::timing();
     check(t.read_timeout_ms > 0 && t.poll_ms > 0 && t.reconnect_backoff_ms > 0,
           "the three Kconfig bounds are positive");
@@ -361,6 +380,9 @@ int main() {
     test_no_headers_leaves_the_field_null();
     test_oversize_frame_is_refused_and_counted();
     test_the_effective_config_is_readable();
+    // Defensive: `main` must never return under a detached orphan still inside the fake,
+    // whose static state is destroyed on the way out (#1456).
+    check_drained();
     if (g_failures != 0) {
         std::printf("FAILED: %d check(s)\n", g_failures);
         return 1;

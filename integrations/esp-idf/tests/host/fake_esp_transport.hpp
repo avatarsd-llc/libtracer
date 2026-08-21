@@ -43,6 +43,7 @@
  */
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -164,6 +165,25 @@ void release_connects(bool succeed);
 /** @brief Handles created and not yet destroyed — the RELEASE oracle: a link (or an
  *         orphaned dial) that released its transport pair leaves this at 0. */
 [[nodiscard]] int live_handles();
+
+/**
+ * @brief Wait, up to @p limit, until the fake holds NO transport handle and NO parked
+ *        dialer. @return whether it got there.
+ *
+ * Every case that destroys a link must end here, and not as tidiness (#1456). A teardown
+ * that lands mid-dial cannot cancel the dial, so the link DETACHES its recv thread
+ * (`esp_ws_client_link.cpp`, the #1058 bound): the orphan comes back up to a dial bound
+ * later and only then releases its transport pair on this fake. A case that returns
+ * before that leaves a thread running at process exit, and `main` returning under it
+ * destroys this fake's function-local static state — `~std::mutex` and `~std::map` under
+ * a thread that is inside `esp_transport_destroy`, which is undefined behaviour and the
+ * TSan race #1456 reported.
+ *
+ * It is also the release oracle itself: "the bound was released exactly once" is
+ * `live_handles() == 0` with @ref handle_misuse at 0. A timeout here is therefore a
+ * genuine release defect, never a reason to skip the wait — report it as a failure.
+ */
+[[nodiscard]] bool wait_drained(std::chrono::milliseconds limit = std::chrono::seconds(5));
 
 /** @brief `esp_transport_close` calls that reached a live handle since the reset — the
  *         "a dial that resolved SUCCESS was closed, not merely destroyed" oracle. */
