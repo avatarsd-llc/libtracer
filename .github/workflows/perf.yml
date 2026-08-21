@@ -3,9 +3,25 @@
 # Design (all comparisons are SAME-RUNNER, because GitHub-hosted runners vary ~2x in
 # absolute speed — cross-runner nanoseconds cannot gate):
 #
-#  1. Path filter — perf only runs when performance can actually change: C++ core, the
-#     bench harness, CMake, or this workflow. A PR touching only bindings/typescript/**,
-#     docs/**, packaging, etc. does NOT run perf.
+#  1. Path filter — perf only runs when this job's VERDICT can actually change. Two
+#     things can change it, and both are enrolled:
+#       a) what is MEASURED — C++ core, the bench harness, CMake. Note what is NOT here:
+#          `integrations/**` and `bindings/**` compile into no binary this workflow
+#          builds (`bench/CMakeLists.txt` adds `core/` and nothing else), so enrolling
+#          them would interleave two byte-identical binaries for 8-30 min and call the
+#          tie a pass. That is a vacuous green, not coverage; an ESP or a bindings
+#          regression needs an instrument that builds them, which this job is not.
+#       b) what the job ASSERTS before it measures — the unit-test steps below read
+#          files outside bench/, and a stale one reds this job while the filter keeps
+#          the job from running at all. `test_perf_gate.py` reads `docs/methodology.md`
+#          (`PointsAreDocumented` / `MemPointsAreDocumented`: the gated-point count and
+#          every point's key are stated there, and that prose is spliced into the
+#          PUBLISHED performance page) and scans every `perf_gate.py` invocation in
+#          `.github/workflows/` for its `--tier` flag; `test_store_guard.py` asserts on
+#          `perf-local.yml`'s trigger and density wiring by name. So `docs/methodology.md`
+#          and `perf*.yml` are enrolled — editing either can break this job.
+#     A PR touching only bindings/**, integrations/**, the rest of docs/**, packaging,
+#     etc. still does NOT run perf.
 #  2. PR gate (`gate-pr`) — main's bench_libtracer and the PR's bench_libtracer are BOTH
 #     built on the SAME runner and then timed INTERLEAVED (A B / B A / …, 4 pairs) in one
 #     job, so a drift window in the machine is shared by the two arms instead of landing
@@ -39,14 +55,16 @@ on:
       - 'bench/**'
       - '**/CMakeLists.txt'
       - '**/*.cmake'
-      - '.github/workflows/perf.yml'
+      - 'docs/methodology.md'
+      - '.github/workflows/perf*.yml'
   pull_request:
     paths:
       - 'core/**'
       - 'bench/**'
       - '**/CMakeLists.txt'
       - '**/*.cmake'
-      - '.github/workflows/perf.yml'
+      - 'docs/methodology.md'
+      - '.github/workflows/perf*.yml'
 
 jobs:
   # --- PR gate: same-runner baseline against main --------------------------------

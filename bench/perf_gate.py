@@ -119,10 +119,10 @@ DEFAULT_TIER = "advisory"
 # Canonical points: (mode, size, fanout, endpoints). RESULT cols (collate.py):
 # RESULT sys mode size fan ep pub_s deliv_s mb_s p50ns p99ns meanns
 # One point per GATED family, so a regression on any of these legs is caught —
-# not just the 1:1 write. This is NOT the whole dispatch surface: inproc-deliver,
-# the eptype-* sweep and the -batch twins are charted and published but ungated. Do
-# not restate this list as "anywhere on the dispatch surface" — docs/methodology.md did,
-# and that sentence reaches the public performance page (#1041):
+# not just the 1:1 write. This is NOT the whole dispatch surface: inproc-deliver, the
+# -batch twins and the eptype-* sweep's two LEAN arms are charted and published but
+# ungated. Do not restate this list as "anywhere on the dispatch surface" —
+# docs/methodology.md did, and that sentence reaches the public performance page (#1041):
 #   inproc / inproc-borrow  — the canonical zero-copy / loaned 1:1 writes
 #   fan-out 1024            — the subscriber fan-out loop
 #   inproc-path @ 8192 ep   — the resolver canary (registry lookup per write)
@@ -130,6 +130,28 @@ DEFAULT_TIER = "advisory"
 #   fold-b4                 — the L0 inline-fold codec tier (batch-amortized)
 #   lkv-store-{heap,pool}   — the L1 rope->contiguous copy (`rope_t::materialize`)
 #   inproc-target-{handler,stored} @ fan 8 — the path-target dispatch legs
+#   eptype-stream           — the STREAM role's bounded-history retention leg
+#
+# `eptype-stream` is gated and its two siblings are NOT, and the asymmetry is the whole
+# reason it is here. `eptype-lean` and `eptype-lean-cached` are `run_inproc` re-emitted
+# under an endpoint-type name (`run_eptype`), so they are the SAME code as `inproc/64/1/1`
+# and `inproc-borrow/64/1/1` — already gated, twice over, and gating them again would buy
+# correlated evidence rather than coverage. `eptype-stream` is not a re-emission: it is
+# the only point on this list that runs `set_history_depth` and therefore the only one
+# downstream of the STREAM role's bounded-ring RETENTION work, which every write to a
+# STREAM vertex pays before fan-out. Nothing else here touches that path, so a pullback
+# confined to retention was invisible to all fourteen predecessors — the same guard-gap
+# shape as #1250 (`rope_t::materialize`) and #1173 (`compact-forward`), and a live one
+# while RFC-0025's stream work (#1204) is reshaping exactly that ring.
+#
+# It costs NO extra wall-clock: `bench_libtracer`'s default sweep already emits this row
+# (`run_eptype_stream`), so the gate reads one more key out of output it was already
+# collecting — the same deal as the `lkv-store-*` and `inproc-target-*` pairs.
+#
+# All three legs gate at the nominal +15% / +12% / -12%: measured on a (busy) host at
+# 190 ns p50 / 190 ns mean over 5 rounds, best-of-rounds, which is far above the 100 ns
+# band where `LAT_TICK_NS` would demand an extra +25 ns absolute and blunt the latency
+# legs the way it blunts `fold-b4`. The p50 read 190 ns in every one of the five rounds.
 #
 # The two `inproc-target-*` legs are here because of #1077, and fan 8 rather than any
 # other width for two measured reasons. That issue was opened on a ~+5.5% step at
@@ -190,6 +212,7 @@ POINTS = [
     ("main", "lkv-store-pool", 64, 1, 1),
     ("main", "inproc-target-handler", 64, 8, 1),
     ("main", "inproc-target-stored", 64, 8, 1),
+    ("main", "eptype-stream", 64, 1, 1),
     ("compact", "compact-forward", 64, 1, 1),
     ("compact", "compact-terminus", 64, 1, 1),
     ("demux", "fwd-demux-fixed", 79, 1, 1),
