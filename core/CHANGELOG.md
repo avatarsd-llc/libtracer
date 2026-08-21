@@ -14,6 +14,8 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-08-21
+
 ### Added
 
 - **`tr::graph::graph_t::hide_from_enumeration` — the RFC-0014 §3 enumeration-hide seam
@@ -150,230 +152,6 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   one contract clause that matters here: a control-plane saving charged to every terminus frame
   is what killed [#1290](https://github.com/avatarsd-llc/libtracer/pull/1290)'s prototype.
   `fwd_router_t` installs its own supplier unconditionally.
-
-### Changed
-
-- **BREAKING (type only): `tr::graph::edge_view_t` HOLDS the shared cold half instead of
-  copying it — `link` / `caller` / `return_route` / `reverse_route` / `delivery_compact` are
-  gone as members, replaced by a `remote_ptr_t remote` plus `link()`, `caller()` and
-  `has_remote_leg()`; `vertex_t::snapshot_drops_t::out_of_memory` is REMOVED**
-  ([#1448](https://github.com/avatarsd-llc/libtracer/issues/1448), the second arm of
-  [#1442](https://github.com/avatarsd-llc/libtracer/issues/1442)). #1447 took the cold half's
-  deep copy off the SUBSCRIBE path; `vertex_t::copy_published` — the DELIVERY path — was still
-  paying it, and paying it once per remote edge **per write** rather than once per admission.
-  The dispatch snapshot now takes a refcount share of the same immutable record, so a remote
-  edge's per-delivery cost is one relaxed increment where it was two probe-guarded
-  `std::string` copies plus two `view_t` clones.
-
-  `sizeof(edge_view_t)` goes **160 B → 48 B** (newly pinned by `static_assert`), and with it
-  `edge_snapshot_t` — the publishing thread's stack buffer — **1288 B → 392 B**. That width is
-  the fan-out loop's bandwidth: `graph_t::fan_out` streams `F` of these through the overflow
-  vector, the term `bench/bench_common.hpp` names as the reason the #844 mid ladder exists. The
-  three widths #1442 pinned are untouched (`subscriber_t` 80 B, `subscriber_remote_t` 120 B,
-  `pub_edge_t` 56 B, `remote_ptr_t` 8 B) — nothing was widened to pay for this, which matters
-  because #1447 spent the cold record's last tail padding.
-
-  **The per-edge snapshot became infallible**, and that is the removed counter. Nothing on it
-  allocates now, on any edge shape, so `copy_published` has no per-edge OOM leg and
-  `snapshot_drops_t` carries only `truncated` (the wide-fan-out capacity degrade). The
-  OUT_OF_MEMORY *delivery* cause on `graph_t::delivery_drops()` is unchanged and still counted
-  from the legs that can still hit it — `dispatch_edge_target`'s rope clone and the store legs.
-  A delivery that used to be shed under memory pressure now lands: `graph_oom_softfail_test`'s
-  remote arm asserts exactly that inversion through the identical injection hook, with a canary
-  proving the hook is live.
-
-  Migration for an out-of-tree reader of a dispatch view: `e.link` → `e.link()`,
-  `e.caller` → `e.caller()` (both `std::string_view`, valid while the view is), and
-  `e.return_route` / `e.reverse_route` / `e.delivery_compact` → `e.remote->…` behind an
-  `e.remote != nullptr` test. `!e.link.empty()` as the remote-leg gate → `e.has_remote_leg()`.
-  [ADR-0041](../docs/adr/0041-terminus-arena-decode-span-contract.md) §2 needs no amendment —
-  its remote-subscriber row already prescribed one copy at subscribe with every later delivery
-  roping the stored route, and this reaches that end state with the constant at zero; a dated
-  note records it there.
-
-- **BREAKING (type only): the subscription COLD HALF is refcount-shared and immutable —
-  `subscriber_t::remote` and `pub_edge_t::remote` are `tr::graph::remote_ptr_t`, and
-  `tr::graph::pub_remote_t` is REMOVED**
-  ([#1442](https://github.com/avatarsd-llc/libtracer/issues/1442),
-  [#1441](https://github.com/avatarsd-llc/libtracer/pull/1441)'s profile,
-  [#635](https://github.com/avatarsd-llc/libtracer/issues/635)). `vertex_t::try_publish_edges`
-  rebuilds the whole published edge array on every admission — inherent to #635, an immutable
-  array cannot be appended to in place — but it also **deep-copied** each pre-existing REMOTE
-  entry's cold half while doing so: one nothrow `operator new` for a `pub_remote_t` plus a
-  `std::string` copy each for the link and the caller, per pre-existing entry, per admission,
-  with `scan_retired_edges` freeing every one of them again. The record is written once at
-  admission and never after (every other reference in `graph.cpp` and `vertex.hpp` is a read),
-  so each copy reproduced bytes byte-identical to the ones it was retiring.
-
-  `subscriber_remote_t` is now the single record for both sides, held behind an intrusive
-  8-byte handle (`remote_ptr_t`, the `tr::view::segment_ptr_t` shape) that the slot and every
-  published array naming it share. A republish is a pointer copy and an increment; the retire
-  scan is a decrement. **Both pinned widths are unchanged** — `sizeof(subscriber_t) == 80`,
-  `sizeof(subscriber_remote_t) == 120` — because the handle is one pointer, as the
-  `std::unique_ptr` it replaces was, and the 4-byte counter fits the cold record's pre-existing
-  tail padding. A `std::shared_ptr` would have widened both and been paid for out of
-  `pub_edge_t`, whose width was measured at +23 % on the fan-out-1024 publish the last time it
-  grew.
-
-  Measured on `bench/bench_subscribe_index --arms=sub-wire`, best-of-rounds, two runs per binary
-  interleaved in one window, each leg carrying its own A/A null (0.70–1.94 %): the whole remote
-  subscribe goes **2463 → 868 ns at 65 links / 8 vertices (−64.8 %, ×2.84)** and 2589 → 871 at
-  32 vertices (−66.3 %), with the growth slope over the 4→65 span **34.0 → 9.2 ns/link**
-  (a 3.9x flattening; the projection had said ~6x). Callgrind agrees: whole-subscribe cost per
-  pre-existing edge **1 084 → 159 instructions**, which is the inherent floor #1441 predicted.
-  RAM at rest falls **151 B per remote edge (−25.3 %)**, flat in the edge count, and a
-  republish is now allocation-free except for the array itself — strictly better for the #477
-  exhaustion story, since the cold half's one allocation happens at admission behind the door's
-  own `BACKPRESSURE`. Full tables in [`bench/README.md`](../bench/README.md).
-
-  **The delivery path is unchanged by construction and faster in fact.** `edge_view_t` still
-  owns its copies, `try_copy_published` is untouched, and `vertex_t::snapshot_edges` is
-  byte-identical (923 B). The out-of-line `copy_published` shrank 4 157 → 3 554 B on an
-  inlining shuffle and is now pinned in `bench/symbol_ratchet.json` so the next such move is
-  visible at review time; `bench_libtracer fan` reads within-null at fan-out 1–8 and +2.9…+6.8 %
-  throughput at every fan-out from 16 to 8192.
-
-  What an out-of-tree consumer must change: `pub_remote_t` no longer exists (name
-  `subscriber_remote_t`); reading through `subscriber_t::remote` / `pub_edge_t::remote` yields a
-  `const subscriber_remote_t*`, and a WRITE must go through `subscriber_t::ensure_remote()` at
-  admission, before the edge is published — the build-then-freeze rule the record's own
-  documentation states and a debug assertion enforces. `subscriber_remote_t`'s members are
-  reordered (`link` first) so the delivery path reads them at the offsets it already did.
-
-- **BREAKING (derivation only): `tr::net::slot_server_t` no longer derives from
-  `tr::net::bus_link_t`** ([#1438](https://github.com/avatarsd-llc/libtracer/issues/1438)).
-  Its peer QUERIES (`enumerate_peers`, `peer_name`, `peer_link`, `close_peer`, `peer_named`)
-  are unchanged in name, signature and answer, and are still reachable on a listener — they
-  are simply no longer `virtual` at that tier. `transport_tcp_server` and
-  `transport_ws_server` are unaffected at the default binding: they derive from
-  `stream_server_base_t`, which IS the facet-carrying arm there, so `bus()`, the facet, and
-  every upcast to `bus_link_t&` behave exactly as before. Two things move for an out-of-tree
-  consumer: a class deriving directly from `slot_server_t` and expecting the facet must
-  derive from `stream_server_base_t` (or `bus_slot_server_t`) instead, and a
-  `static_cast<bus_link_t&>(listener)` no longer compiles on a `kBusLinks = false` build —
-  by design, since that is the refusal the type system can state and the runtime gate could
-  only report.
-
-- **`graph_t::subscribe_wire` takes a trailing `link_id_t link_token = {}`, and the per-link
-  departure index is now a DENSE SLOT VECTOR rather than a name-keyed hash map**
-  ([#1266](https://github.com/avatarsd-llc/libtracer/issues/1266),
-  [#1417](https://github.com/avatarsd-llc/libtracer/issues/1417)). Source-compatible: the
-  parameter is defaulted, and the default is byte-identical in outcome to every pre-carry
-  caller. Measured on `bench/bench_subscribe_index` (the harness
-  [#1416](https://github.com/avatarsd-llc/libtracer/pull/1416) landed), against a fresh A/A
-  null on the pinned host: the index operation goes from **14.1–17.2 ns to 9.4 ns, flat in link
-  count** (8 vertices; 15.5–18.4 → 10.4 at 32), which is **42–56 % of its cost net of the
-  control at every one of the ten cells**, and its footprint from **175.8 to 128.0 bytes per
-  link** — 746 B → 512 B at the narrow 4-link/8-vertex configuration the 2026-08-14 ruling
-  costed, out of the user-pinned arena that is
-  [#1160](https://github.com/avatarsd-llc/libtracer/issues/1160)'s budget. A token that cost
-  NOTHING to obtain would be worth 72–82 % and 41 % of the bytes, so roughly two thirds of that
-  ceiling survives paying for the carry, on both axes.
-
-  Both footprint figures are x86-64, where the slot is 64 bytes. The C6 is 32-bit and its
-  `link_entry_t` is narrower, so the direction holds but the absolute arithmetic does not
-  transfer — the C6 ratio is deliberately left unquoted rather than extrapolated.
-
-  **No name-taking door moved.** `link_edge_candidates`, `link_candidates`, `evict_link_edges`
-  and `evict_route_edges` keep their signatures and their answers, and they still work with no
-  token and no router in sight — which is #1366's first objection (*"the key belongs to
-  EVICTION, not to subscribe"*) answered rather than waived, and is why the name lives INSIDE
-  the slot it belongs to instead of in a second container. A dense vector plus a name→token map
-  is byte-for-byte the shape #1416 measured at 183.8 B/link, i.e. worse than the map it would
-  replace. What those doors pay instead is a **linear scan over live slots** — a path that runs
-  once per peer hangup where the one it pays for runs once per subscribe. `run_subscribe_index.sh`
-  now emits `RESULT_SIDX_DOOR` on every run, so the half of the trade that got slower is never
-  left unstated: the scan is **cheaper** than the hash up to about 32 live links and about
-  **2x dearer at 65** — ~35 ns once, when a peer disconnects, against 5–8 ns saved on every
-  subscribe it ever made.
-
-  **A wrong token cannot mis-index.** The index verifies that the token's slot spells the key
-  it is about to index under, so the two admissions whose key is NOT the arrival link — a
-  mount-routed target (RFC-0021 §4.B.1) and the `caller` fallback
-  [#943](https://github.com/avatarsd-llc/libtracer/issues/943) needs — index exactly where they
-  always did. Same for a token released under its holder: the stamp moves on release, so a
-  successor in the reused slot cannot inherit a predecessor's candidate list. Both are shown by
-  ablation in `core/tests/link_token_carry_test.cpp` rather than asserted.
-
-  One behaviour is worth stating plainly because it is a bound and not a bug: a link NAME longer
-  than 19 characters overflows to a scanned side list instead of living inline in its slot. Every
-  name the transport plane mints (`p<slot>`, `n<node>`, `tr::net::kPeerNameChars` tokens) and
-  every dotted-quad `host:port` fits; a longer registered child name costs one entry in that list
-  and one extra indirection on the doors that scan by name, and nothing else.
-
-- **`fwd_router_t`'s bus peer-DOWN notifier now receives the departing peer's `peer_handle_t`**
-  (`bus_peer_down(ctx, handle, peer)`). Internal to the router — no transport kind's interface
-  changed, and the handle was already being handed to the notifier and discarded. It is what
-  keys the per-peer token cache the bus tier carries, so the eviction that releases the graph's
-  index slot can drop the cached token with it instead of leaving a successor asking under a
-  stamp that can never validate again.
-
-- **A SECOND extended CONNECT on a live WebTransport session is now REFUSED, and
-  `webtransport_transport_t::session_path()` is stable for the life of a session**
-  ([#1410](https://github.com/avatarsd-llc/libtracer/issues/1410)). The HEADERS arm of the
-  LISTEN-side classifier had no "session already up" guard, so a peer that had already been
-  answered could open a second bidirectional stream, send a second extended CONNECT, and have
-  the endpoint answer `200` again, overwrite the recorded `:path`, and **re-arm
-  `connect_stream_id`** from the new stream's id. That id is guard 2 of the strict `0x41`
-  frame-channel check ("the session-id varint must name THAT CONNECT stream"), so a second
-  CONNECT let a peer move the goalposts on its own identity check before the frame channel was
-  claimed — and it made `session_path()`, an observation a host may act on, silently mutable.
-  The refusal is **stream-scoped with no HTTP status** (`refuse_stream`, reusing the existing
-  bad-request code): the session latch is one-way with no successor state, it is the same class
-  as the `0x41` check's "the FIRST valid one wins" guard, and answering would cost the one owned
-  send buffer msquic borrows until `SEND_COMPLETE` per hostile stream. `refused_sessions()` does
-  **not** move — that counter is #934's count-then-close for work the node could not afford,
-  and this is a peer-conformance refusal. One consequence is deliberate and observable: because
-  the guard sits *before* the field-section decode, a **malformed or non-CONNECT** request
-  HEADERS arriving while a session is live is now stream-scoped too, where it used to be
-  connection-fatal. That is strictly the #919 direction; the alternative placement would leave a
-  valid second CONNECT costing one stream while an invalid one cost the whole session.
-
-- **`quic` and `webtransport` egress is bounded by THIS CONNECTION's `max_frame`, not by the
-  16 MiB protocol maximum** ([#1409](https://github.com/avatarsd-llc/libtracer/issues/1409)).
-  Both `msquic_endpoint_t::send_frame` overloads compared the outgoing record against
-  `kMaxFrame` (`length_prefix_framer::kDefaultMaxFrame`) while RX honoured the
-  `configured_cap`-clamped per-connection `max_frame`. A link whose `:settings max_frame`
-  tightened RX to, say, 64 KiB would still hand up to 16 MiB to msquic; a conformant peer
-  running this same code then read a prefix past *its* configured cap, counted `malformed_rx`
-  and **shut the connection down** — so an over-cap local send was a link teardown rather than
-  a shed frame, and `dropped_tx()` never moved. Now an over-cap send is shed with
-  `dropped_tx()` and the link stays up. `max_frame` is `configured_cap`-clamped at
-  construction and so is never *looser* than `kMaxFrame`: this can only tighten, and a link
-  that configured no cap is behaviour-identical. The disposition is unchanged — `dropped_tx`
-  and return, never a throw, never a partial record. The `dropped_tx()` documentation on both
-  transports named the wrong cap and is corrected with it.
-
-- **BREAKING — the GPU backend left core. `<libtracer/mem_cuda.hpp>` is now
-  `backends/cuda/include/libtracer/mem_cuda.hpp`, built by its own CMake project, and
-  `-DLIBTRACER_WITH_CUDA` no longer exists**
-  ([#1381](https://github.com/avatarsd-llc/libtracer/issues/1381),
-  [ADR-0024 Amendment 1](../docs/adr/0024-mem-cuda-gpu-backend-heterogeneous-rope.md)). The
-  `#include "libtracer/mem_cuda.hpp"` spelling is **unchanged** — what changes is which target
-  supplies it. Configure `backends/cuda` and link `libtracer_cuda` (it carries `libtracer` and
-  `CUDA::cudart` as PUBLIC usage requirements) instead of passing `-DLIBTRACER_WITH_CUDA=ON` to
-  core. Consequences worth reading before upgrading:
-
-  - `libtracer` no longer exports a `CUDA::cudart` link or a `find_dependency(CUDAToolkit)` in its
-    installed package config, and **no consumer TU carries `-DLIBTRACER_WITH_CUDA` any more** — it
-    was a PUBLIC compile definition, so every TU of a CUDA-enabled build used to see it.
-  - `core/src/mem_cuda.cpp` and `core/tests/cuda_test.cpp` moved with the header; the PlatformIO
-    package (which exports `core/include/**` + `core/src/**`) simply stops shipping a GPU backend
-    an MCU never wanted.
-  - **`tr::mem::backend_tag::CUDA` is removed.** It was the last enumerator, so every other value
-    (`UNKNOWN = 0` … `BORROWED_DEVICE = 4`) is unchanged and no segment layout or ABI value moves.
-    A device backend is now identified by its `mem_backend_t` object, not by a tag; it leaves
-    `tag()` at the default `UNKNOWN` and `destroy_dispatch` routes it through the virtual
-    `destroy` — *the same arm the `CUDA` enumerator already took*, since it was never in the fast
-    switch. Per [ADR-0047 §2](../docs/adr/0047-build-time-closed-module-sets-compile-time-seams.md)
-    the tag is a fast path, never a correctness dependency, so nothing observable changes. Code
-    that `switch`es on `backend_tag` must drop its `case backend_tag::CUDA:` — `-Werror=switch`
-    makes that a build error rather than a silent fall-through.
-  - `tr::mem::transfer`'s behaviour is unchanged for every backend in core: a `DEVICE`-space
-    segment whose backend registered nothing gets the same `false` it always got, and the host
-    arms (`HEAP` / `POOL` / `BORROWED` / `BORROWED_DEVICE`) are instruction-identical.
-
-### Added
 
 - **`tr::graph::default_config_t::kBusLinks`, its transport-plane spelling `tr::net::kBusLinks`,
   and the gate `tr::net::bus_of(transport_t&)` — the ADR-0044 bus tier is now a module a target
@@ -637,8 +415,6 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   many-core answer; under the two policies here #897 is **absent** rather than fixed, because
   single-threaded there is no other thread's list to reach across.
 
-### Added
-
 - **`<libtracer/peer_handle.hpp>` — `net::peer_handle_t`, `net::kSolePeerHandle` and
   `net::kPeerNameChars` now live in a header of their own**
   ([#375](https://github.com/avatarsd-llc/libtracer/issues/375) Part 2). Pure relocation out of
@@ -670,173 +446,6 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   one that forwards to `transport_t::peer_subject`. With no supplier, no valid handle, or a
   supplier that declines, the subject IS `link` — byte for byte the caller context the resolver
   used before.
-
-### Changed
-
-- **BREAKING: `graph::vertex_t::store()` is `private` — the storage funnel belongs to `graph_t`,
-  and the compiler now says so** ([#1300](https://github.com/avatarsd-llc/libtracer/issues/1300),
-  finishing [#867](https://github.com/avatarsd-llc/libtracer/issues/867) ruling 2). **This
-  supersedes the `[0.13.0]` note below** that recorded `store()` as deliberately staying public.
-  The reason it stayed is now gone: that note's justification was the bare-`vertex_t` storage
-  unit tests, and the RFC-0008 §E coverage they provided had no `graph_t` equivalent to move to.
-  The two verbs added above are that equivalent, so the coverage relocated instead of being
-  deleted, and the last non-`graph_t` caller went with it.
-
-  **What changes for a user.** `vertex_t` already declared `friend class graph_t`, so **no new
-  friend was added** — a friend named in an installed public header is claimable by anyone who
-  defines a class of that name, which would be the bypass under another name. `store_drops_t`
-  and `snapshot_drops_t` stay public (they are named on `graph_t`'s own surface). Post-#1133 no
-  public API hands out a graph-owned `vertex_t*`, so the only vertex a user could have called
-  this on is one they constructed and own outright; such a caller must now publish through
-  `graph_t::assign` / `graph_t::write`, which is the seam that gates the write, injects the
-  ADR-0039 resource and folds `store_drops_t` into `delivery_drops()`. **Pure visibility: no
-  signature, no body and no layout changed**, and the six hot-symbol ratchet pins come back `+0`.
-
-- **The four remaining body-internal `mem::heap_source()` calls are now defaulted parameters on
-  an injectable seam** ([#873](https://github.com/avatarsd-llc/libtracer/issues/873), ADR-0079).
-  Every one of these was a store the library **named for you**, so a deployer who had injected a
-  bounded source still had these four allocations land on the process heap. All four defaults are
-  `mem::heap_source()` / `&mem::heap_source()`, so **no existing caller changes behaviour** — the
-  point is that a caller can now say otherwise. **Source-compatible in all four cases** (defaulted
-  parameters appended, or added after an existing tag argument).
-  - `wire::decode(std::span<const std::byte>, mem::block_source_t& spill = mem::heap_source())`
-    and the `view_t` overload — the walk stack's spill. `decode(bytes, mem::null_source())` is now
-    the spelling of a hard nesting bound: a frame deeper than the 8 inline slots answers
-    `TLV_NESTING_TOO_DEEP` instead of growing. **Only the walk stack moves onto the seam** — the
-    returned owning `tlv_t` tree holds `std::vector` children and still allocates on the global
-    heap by construction; a caller that wants the whole decode bounded wants `wire::decode_into`.
-  - `wire::validate_rope(const view::rope_t&, mem::block_source_t& spill = mem::heap_source())` —
-    the same spill on the rope validator. Its sink models nothing, so this one really is
-    allocation-free with respect to the process heap once a source is injected.
-  - `net::transport_ws_client`'s constructor takes a trailing
-    `mem::block_source_t* egress_src = &mem::heap_source()`. This is a **defect fix, not just a
-    seam**: `tx_buf_` (the masked-frame buffer, the one WS egress path that needs a buffer) is a
-    `mem::block_array_t` member, and a `block_array_t` binds its source at CONSTRUCTION — so
-    `transport_t::set_egress_source`, the documented injection point that the built-in `ws`
-    factory used, **could never reach it**. An injected egress store was silently ignored by this
-    one buffer and it kept growing on the process heap. The built-in `ws` factory now passes the
-    store through the constructor, and `transport_t::set_egress_source`'s documentation states
-    that a link's construction-bound buffers take their store from the constructor.
-  - `net::transport_vertex_t`'s SLIM constructor takes a trailing
-    `mem::block_source_t* egress_src = &mem::heap_source()`, **after** the `slim_net_t` tag (the
-    tag keeps its overload-disambiguating position). `transport_vertex_t::egress_source()`
-    previously answered the process heap on a slim node whatever the composition root had chosen,
-    so it misreported the store to any factory registered via `register_transport_type`. The
-    `nullptr` guard moved from the FULL constructor into the delegated SLIM one, so both doors
-    behave identically and an explicit `nullptr` still means the process heap.
-
-- **BREAKING — `net::route_handle_t` and `net::fwd_router_t` draw their label state from an
-  injected `mem::block_source_t`, not from a `std::pmr::memory_resource`**
-  ([#603](https://github.com/avatarsd-llc/libtracer/issues/603) defect 1, family 3 of
-  [#873](https://github.com/avatarsd-llc/libtracer/issues/873); ADR-0065 / ADR-0079). This is
-  a **security/availability fix, not hygiene**: an inbound `ADVERTISE` from a remote peer
-  reached four throwing `std::pmr` allocations in the label store — the tables node, the link
-  name, and both route copies — on a transport receive thread, pre-ACL. Against the reference
-  firmware's aborting `heap_resource_t` on the shipping `-fno-exceptions` profile, an
-  ADVERTISE storm rebooted the node at wire rate. Exhaustion is now an ANSWER at every door,
-  and every one of those answers already existed: `bind_ingress` returns `false`,
-  `ensure_egress` returns `{0, false}`, `record_egress` returns `false`, `alloc_label` returns
-  the reserved `0` — the same degrade to the full-route `FWD{WRITE}` form that a full table
-  (#703) and an exhausted label space (#701) already produced. The store now contains no
-  `std::pmr` type at all.
-
-  The signature changes, all of them compile errors rather than silent behaviour changes:
-
-  | before | after |
-  | --- | --- |
-  | `route_handle_t(std::pmr::memory_resource*, std::size_t)` | `route_handle_t(mem::block_source_t*, std::size_t)` |
-  | `fwd_router_t(graph, std::pmr::memory_resource* mr, …)` | `fwd_router_t(graph, mem::block_source_t* label_src, …)` |
-  | `handle_binding_t{std::string down_link; std::vector<std::byte> local_route; …}` | `handle_binding_t{std::string_view down_link; std::span<const std::byte> local_route; …}` |
-  | `lookup_ingress(link, label) -> std::optional<handle_binding_t>` | `copy_binding(link, label, std::span<char>, std::span<std::byte>) -> binding_copy_t` |
-  | `egress_route(link, label) -> std::optional<std::vector<std::byte>>` | `copy_egress_route(link, label, std::span<std::byte>) -> std::size_t` |
-  | `record_egress(link, label, std::vector<std::byte>)` | `record_egress(link, label, std::span<const std::byte>)` |
-
-  `fwd_router_t`'s first optional parameter kept its POSITION rather than being appended,
-  because feeding the label tables was its only job — a call site that passed
-  `std::pmr::get_default_resource()` now passes nothing (the default is
-  `&mem::heap_source()`, byte-identical behaviour) or its own source. `handle_binding_t` is
-  now a NON-OWNING descriptor: it is borrowed for the duration of a bind and the store copies
-  the bytes into its own blocks, which is what made the entry types trivially copyable and
-  therefore holdable by `mem::block_array_t` — the structural blocker the file's own comment
-  named. `lookup_ingress` and `egress_route` are removed rather than deprecated: both built an
-  owning `std::string`/`std::vector` on the throwing global heap on peer-provoked arms (the
-  cold `COMPACT` and the `HANDLE_NACK` re-advertise), which is the defect, so a compatibility
-  shim would have preserved it. The replacements copy into caller storage and report the true
-  size, so truncation stays distinguishable from absence. `refused_bindings()` now counts a
-  source refusal alongside a count refusal — one counter, because ADR-0079 makes the injected
-  store's size a bound in its own right and an operator is watching one symptom.
-
-  Not to be read together with the ADR-0080 reclamation seam above, which lands in the same
-  release: that one settles **when** a retired subscriber's callback pair may be freed, this
-  one settles **where bytes come from**. ADR-0079 draws the line in as many words — the
-  substrate work "is about *where bytes come from*, not *when a replaced block is freed*" —
-  and neither entry changes the other's answer.
-
-  The migration pattern the rest of #873 follows is written down in
-  [`docs/reference/09-memory-substrate.md`](../docs/reference/09-memory-substrate.md)
-  (§Migrating a STORE onto the substrate — the route-handle pattern).
-
-- **A LISTEN connection SPEC may now spell `port = 0` — the EPHEMERAL request — and
-  `conn_settings_t` gained `port_set`**
-  ([#1362](https://github.com/avatarsd-llc/libtracer/issues/1362)). The LISTEN arm of
-  `dial_or_listen` (and the `quic` / `webtransport` factories' own copies of the check) used
-  to refuse `port == 0` with `TYPE_MISMATCH`, which conflated two different configs: an
-  OMITTED `port` key, which really is a missing required field, and an explicit `0`, which is
-  what every listener constructor in this tree already documents as "the OS picks". The
-  consequence was that an in-band-created listener had no way to ask for an ephemeral port at
-  all, so callers had to name a literal and hope nobody else owned it — and nobody can
-  guarantee that, because no port number is reserved (Linux hands out 32768-60999 to ordinary
-  client sockets). The two cases are now distinguished by the new
-  `conn_settings_t::port_set`, set by `parse_config` when the key is PRESENT: an absent key is
-  still `TYPE_MISMATCH` on a LISTEN, `port = 0` binds an OS-granted port, and the grant is
-  read back off the constructed link with `local_port()`. A DIAL is unchanged and still
-  refuses `0`. Additive to `conn_settings_t`; no existing SPEC changes meaning, since `port =
-  0` on a LISTEN previously only ever produced an error.
-
-- **ERRATUM to `[0.13.0]`'s RFC-0018 entry — the "resolve leg 34 ns to ~20 ns" figure came from
-  an instrument that was measuring the wrong thing**
-  ([#1346](https://github.com/avatarsd-llc/libtracer/issues/1346)). No API or wire surface
-  changes; only the recorded measurement does. `bench_forward_demux`'s falsifier-1 control arm
-  (`fwd-demux-resolve-literal`) was a hand-rolled walk, not the retired one: it omitted the
-  `PATH_REF` arm of `peek_fwd_dst_any`, walked three `dst` segments where `prefill` walks four,
-  and replaced `dst_seg_walk_t` with `pos += h->total` in registers. Ablated on the quiet pinned
-  host, that made the control arm read **31 ns light** — enough to invert the falsifier's
-  verdict, which at face value had the packed arm LOSING 32 ns to 25 ns. The arm is now a
-  line-for-line transcription of the code at `5e7659e3` and is renamed
-  **`fwd-demux-resolve-legacy`**, because what the row measures changed. With it, falsifier 1
-  passes for the right reason: **56 → 32 ns (−42.9 %)**, one binary, same frame, best-of-12.
-  The bench also moves off the retired plateau batch calibrator onto
-  `bench::calibrate_batch_for_window`.
-
-- **`op_resolver_t::resolve`'s second parameter is a `graph::inbound_ref_t`, not a
-  `std::string_view`** ([#375](https://github.com/avatarsd-llc/libtracer/issues/375) Part 2).
-  Source-compatible for every existing call: `inbound_ref_t` is implicitly constructible from
-  anything a `std::string_view` is, so `resolve(fwd, "up")` and `resolve(fwd, name)` keep
-  compiling and keep meaning what they meant. A caller that took the function's ADDRESS, or
-  spelled the parameter type, must update.
-
-- **`graph_t::subscribe_wire` takes a sixth argument, `std::string caller`** (defaulted, so no
-  existing call changes). It is the SUBJECT the admission is gated under and the fan-in context
-  every later delivery re-gates under — *who subscribed*, as against `link`'s *where to
-  deliver*. EMPTY means "the same as `link`", which is what this door did before the two claims
-  were separated.
-
-- **BEHAVIOUR — a peer on a link that mints a per-peer subject is now authorized AS THAT PEER,
-  at either setting of `peer_named`** ([#375](https://github.com/avatarsd-llc/libtracer/issues/375)
-  Part 2). On the tcp/ws listeners this is a real change at `peer_named=false`: the ACL caller
-  context, the `write_ctx_t::subject` a HANDLER sees, and a wire subscription's stored fan-in
-  context go from the shared LINK name (e.g. `up`) to the writer's own session token (`p0`,
-  `p1`, …). **An ACE that named a FLAT listener's link in order to grant every peer on it stops
-  matching** — re-spell it as the wildcard subject, or as one ACE per peer. This is the
-  conflation #375 was opened about: at `peer_named=false` every writer previously authenticated
-  as the wire it arrived on. `peer_named`'s own default is UNCHANGED at `false` (ADR-0082 §2)
-  and no addressing behaviour moves — the subject is derived from the frame's `peer_handle_t`,
-  not from the name it arrived under. Every other kind (dialers, UDP, CAN, loopback, custom
-  transports) mints no per-peer subject and is byte-identical to before. The label-switched
-  `COMPACT` delivery derives the SAME subject as the full-route `FWD{WRITE}`, so the two
-  spellings of one write cannot be gated under two different principals.
-
-### Added
 
 - **The RFC-0027 TERMINUS deref — a fourth parameter on both `graph::op_resolver_t::resolve`
   overloads, `const wire::path_ref_element_t* dst_label_target`**
@@ -1060,6 +669,391 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   no conformance vector is added or altered. Measured cost of the cache slot on the Cortex-M0
   required-modules sentinel: **+28 B flash, +0 B RAM** — an unlabelled path holds one empty
   vector, allocates nothing, and nothing on the canonical hot path reads it.
+
+### Changed
+
+- **BREAKING (type only): `tr::graph::edge_view_t` HOLDS the shared cold half instead of
+  copying it — `link` / `caller` / `return_route` / `reverse_route` / `delivery_compact` are
+  gone as members, replaced by a `remote_ptr_t remote` plus `link()`, `caller()` and
+  `has_remote_leg()`; `vertex_t::snapshot_drops_t::out_of_memory` is REMOVED**
+  ([#1448](https://github.com/avatarsd-llc/libtracer/issues/1448), the second arm of
+  [#1442](https://github.com/avatarsd-llc/libtracer/issues/1442)). #1447 took the cold half's
+  deep copy off the SUBSCRIBE path; `vertex_t::copy_published` — the DELIVERY path — was still
+  paying it, and paying it once per remote edge **per write** rather than once per admission.
+  The dispatch snapshot now takes a refcount share of the same immutable record, so a remote
+  edge's per-delivery cost is one relaxed increment where it was two probe-guarded
+  `std::string` copies plus two `view_t` clones.
+
+  `sizeof(edge_view_t)` goes **160 B → 48 B** (newly pinned by `static_assert`), and with it
+  `edge_snapshot_t` — the publishing thread's stack buffer — **1288 B → 392 B**. That width is
+  the fan-out loop's bandwidth: `graph_t::fan_out` streams `F` of these through the overflow
+  vector, the term `bench/bench_common.hpp` names as the reason the #844 mid ladder exists. The
+  three widths #1442 pinned are untouched (`subscriber_t` 80 B, `subscriber_remote_t` 120 B,
+  `pub_edge_t` 56 B, `remote_ptr_t` 8 B) — nothing was widened to pay for this, which matters
+  because #1447 spent the cold record's last tail padding.
+
+  **The per-edge snapshot became infallible**, and that is the removed counter. Nothing on it
+  allocates now, on any edge shape, so `copy_published` has no per-edge OOM leg and
+  `snapshot_drops_t` carries only `truncated` (the wide-fan-out capacity degrade). The
+  OUT_OF_MEMORY *delivery* cause on `graph_t::delivery_drops()` is unchanged and still counted
+  from the legs that can still hit it — `dispatch_edge_target`'s rope clone and the store legs.
+  A delivery that used to be shed under memory pressure now lands: `graph_oom_softfail_test`'s
+  remote arm asserts exactly that inversion through the identical injection hook, with a canary
+  proving the hook is live.
+
+  Migration for an out-of-tree reader of a dispatch view: `e.link` → `e.link()`,
+  `e.caller` → `e.caller()` (both `std::string_view`, valid while the view is), and
+  `e.return_route` / `e.reverse_route` / `e.delivery_compact` → `e.remote->…` behind an
+  `e.remote != nullptr` test. `!e.link.empty()` as the remote-leg gate → `e.has_remote_leg()`.
+  [ADR-0041](../docs/adr/0041-terminus-arena-decode-span-contract.md) §2 needs no amendment —
+  its remote-subscriber row already prescribed one copy at subscribe with every later delivery
+  roping the stored route, and this reaches that end state with the constant at zero; a dated
+  note records it there.
+
+- **BREAKING (type only): the subscription COLD HALF is refcount-shared and immutable —
+  `subscriber_t::remote` and `pub_edge_t::remote` are `tr::graph::remote_ptr_t`, and
+  `tr::graph::pub_remote_t` is REMOVED**
+  ([#1442](https://github.com/avatarsd-llc/libtracer/issues/1442),
+  [#1441](https://github.com/avatarsd-llc/libtracer/pull/1441)'s profile,
+  [#635](https://github.com/avatarsd-llc/libtracer/issues/635)). `vertex_t::try_publish_edges`
+  rebuilds the whole published edge array on every admission — inherent to #635, an immutable
+  array cannot be appended to in place — but it also **deep-copied** each pre-existing REMOTE
+  entry's cold half while doing so: one nothrow `operator new` for a `pub_remote_t` plus a
+  `std::string` copy each for the link and the caller, per pre-existing entry, per admission,
+  with `scan_retired_edges` freeing every one of them again. The record is written once at
+  admission and never after (every other reference in `graph.cpp` and `vertex.hpp` is a read),
+  so each copy reproduced bytes byte-identical to the ones it was retiring.
+
+  `subscriber_remote_t` is now the single record for both sides, held behind an intrusive
+  8-byte handle (`remote_ptr_t`, the `tr::view::segment_ptr_t` shape) that the slot and every
+  published array naming it share. A republish is a pointer copy and an increment; the retire
+  scan is a decrement. **Both pinned widths are unchanged** — `sizeof(subscriber_t) == 80`,
+  `sizeof(subscriber_remote_t) == 120` — because the handle is one pointer, as the
+  `std::unique_ptr` it replaces was, and the 4-byte counter fits the cold record's pre-existing
+  tail padding. A `std::shared_ptr` would have widened both and been paid for out of
+  `pub_edge_t`, whose width was measured at +23 % on the fan-out-1024 publish the last time it
+  grew.
+
+  Measured on `bench/bench_subscribe_index --arms=sub-wire`, best-of-rounds, two runs per binary
+  interleaved in one window, each leg carrying its own A/A null (0.70–1.94 %): the whole remote
+  subscribe goes **2463 → 868 ns at 65 links / 8 vertices (−64.8 %, ×2.84)** and 2589 → 871 at
+  32 vertices (−66.3 %), with the growth slope over the 4→65 span **34.0 → 9.2 ns/link**
+  (a 3.9x flattening; the projection had said ~6x). Callgrind agrees: whole-subscribe cost per
+  pre-existing edge **1 084 → 159 instructions**, which is the inherent floor #1441 predicted.
+  RAM at rest falls **151 B per remote edge (−25.3 %)**, flat in the edge count, and a
+  republish is now allocation-free except for the array itself — strictly better for the #477
+  exhaustion story, since the cold half's one allocation happens at admission behind the door's
+  own `BACKPRESSURE`. Full tables in [`bench/README.md`](../bench/README.md).
+
+  **The delivery path is unchanged by construction and faster in fact.** `edge_view_t` still
+  owns its copies, `try_copy_published` is untouched, and `vertex_t::snapshot_edges` is
+  byte-identical (923 B). The out-of-line `copy_published` shrank 4 157 → 3 554 B on an
+  inlining shuffle and is now pinned in `bench/symbol_ratchet.json` so the next such move is
+  visible at review time; `bench_libtracer fan` reads within-null at fan-out 1–8 and +2.9…+6.8 %
+  throughput at every fan-out from 16 to 8192.
+
+  What an out-of-tree consumer must change: `pub_remote_t` no longer exists (name
+  `subscriber_remote_t`); reading through `subscriber_t::remote` / `pub_edge_t::remote` yields a
+  `const subscriber_remote_t*`, and a WRITE must go through `subscriber_t::ensure_remote()` at
+  admission, before the edge is published — the build-then-freeze rule the record's own
+  documentation states and a debug assertion enforces. `subscriber_remote_t`'s members are
+  reordered (`link` first) so the delivery path reads them at the offsets it already did.
+
+- **BREAKING (derivation only): `tr::net::slot_server_t` no longer derives from
+  `tr::net::bus_link_t`** ([#1438](https://github.com/avatarsd-llc/libtracer/issues/1438)).
+  Its peer QUERIES (`enumerate_peers`, `peer_name`, `peer_link`, `close_peer`, `peer_named`)
+  are unchanged in name, signature and answer, and are still reachable on a listener — they
+  are simply no longer `virtual` at that tier. `transport_tcp_server` and
+  `transport_ws_server` are unaffected at the default binding: they derive from
+  `stream_server_base_t`, which IS the facet-carrying arm there, so `bus()`, the facet, and
+  every upcast to `bus_link_t&` behave exactly as before. Two things move for an out-of-tree
+  consumer: a class deriving directly from `slot_server_t` and expecting the facet must
+  derive from `stream_server_base_t` (or `bus_slot_server_t`) instead, and a
+  `static_cast<bus_link_t&>(listener)` no longer compiles on a `kBusLinks = false` build —
+  by design, since that is the refusal the type system can state and the runtime gate could
+  only report.
+
+- **`graph_t::subscribe_wire` takes a trailing `link_id_t link_token = {}`, and the per-link
+  departure index is now a DENSE SLOT VECTOR rather than a name-keyed hash map**
+  ([#1266](https://github.com/avatarsd-llc/libtracer/issues/1266),
+  [#1417](https://github.com/avatarsd-llc/libtracer/issues/1417)). Source-compatible: the
+  parameter is defaulted, and the default is byte-identical in outcome to every pre-carry
+  caller. Measured on `bench/bench_subscribe_index` (the harness
+  [#1416](https://github.com/avatarsd-llc/libtracer/pull/1416) landed), against a fresh A/A
+  null on the pinned host: the index operation goes from **14.1–17.2 ns to 9.4 ns, flat in link
+  count** (8 vertices; 15.5–18.4 → 10.4 at 32), which is **42–56 % of its cost net of the
+  control at every one of the ten cells**, and its footprint from **175.8 to 128.0 bytes per
+  link** — 746 B → 512 B at the narrow 4-link/8-vertex configuration the 2026-08-14 ruling
+  costed, out of the user-pinned arena that is
+  [#1160](https://github.com/avatarsd-llc/libtracer/issues/1160)'s budget. A token that cost
+  NOTHING to obtain would be worth 72–82 % and 41 % of the bytes, so roughly two thirds of that
+  ceiling survives paying for the carry, on both axes.
+
+  Both footprint figures are x86-64, where the slot is 64 bytes. The C6 is 32-bit and its
+  `link_entry_t` is narrower, so the direction holds but the absolute arithmetic does not
+  transfer — the C6 ratio is deliberately left unquoted rather than extrapolated.
+
+  **No name-taking door moved.** `link_edge_candidates`, `link_candidates`, `evict_link_edges`
+  and `evict_route_edges` keep their signatures and their answers, and they still work with no
+  token and no router in sight — which is #1366's first objection (*"the key belongs to
+  EVICTION, not to subscribe"*) answered rather than waived, and is why the name lives INSIDE
+  the slot it belongs to instead of in a second container. A dense vector plus a name→token map
+  is byte-for-byte the shape #1416 measured at 183.8 B/link, i.e. worse than the map it would
+  replace. What those doors pay instead is a **linear scan over live slots** — a path that runs
+  once per peer hangup where the one it pays for runs once per subscribe. `run_subscribe_index.sh`
+  now emits `RESULT_SIDX_DOOR` on every run, so the half of the trade that got slower is never
+  left unstated: the scan is **cheaper** than the hash up to about 32 live links and about
+  **2x dearer at 65** — ~35 ns once, when a peer disconnects, against 5–8 ns saved on every
+  subscribe it ever made.
+
+  **A wrong token cannot mis-index.** The index verifies that the token's slot spells the key
+  it is about to index under, so the two admissions whose key is NOT the arrival link — a
+  mount-routed target (RFC-0021 §4.B.1) and the `caller` fallback
+  [#943](https://github.com/avatarsd-llc/libtracer/issues/943) needs — index exactly where they
+  always did. Same for a token released under its holder: the stamp moves on release, so a
+  successor in the reused slot cannot inherit a predecessor's candidate list. Both are shown by
+  ablation in `core/tests/link_token_carry_test.cpp` rather than asserted.
+
+  One behaviour is worth stating plainly because it is a bound and not a bug: a link NAME longer
+  than 19 characters overflows to a scanned side list instead of living inline in its slot. Every
+  name the transport plane mints (`p<slot>`, `n<node>`, `tr::net::kPeerNameChars` tokens) and
+  every dotted-quad `host:port` fits; a longer registered child name costs one entry in that list
+  and one extra indirection on the doors that scan by name, and nothing else.
+
+- **`fwd_router_t`'s bus peer-DOWN notifier now receives the departing peer's `peer_handle_t`**
+  (`bus_peer_down(ctx, handle, peer)`). Internal to the router — no transport kind's interface
+  changed, and the handle was already being handed to the notifier and discarded. It is what
+  keys the per-peer token cache the bus tier carries, so the eviction that releases the graph's
+  index slot can drop the cached token with it instead of leaving a successor asking under a
+  stamp that can never validate again.
+
+- **A SECOND extended CONNECT on a live WebTransport session is now REFUSED, and
+  `webtransport_transport_t::session_path()` is stable for the life of a session**
+  ([#1410](https://github.com/avatarsd-llc/libtracer/issues/1410)). The HEADERS arm of the
+  LISTEN-side classifier had no "session already up" guard, so a peer that had already been
+  answered could open a second bidirectional stream, send a second extended CONNECT, and have
+  the endpoint answer `200` again, overwrite the recorded `:path`, and **re-arm
+  `connect_stream_id`** from the new stream's id. That id is guard 2 of the strict `0x41`
+  frame-channel check ("the session-id varint must name THAT CONNECT stream"), so a second
+  CONNECT let a peer move the goalposts on its own identity check before the frame channel was
+  claimed — and it made `session_path()`, an observation a host may act on, silently mutable.
+  The refusal is **stream-scoped with no HTTP status** (`refuse_stream`, reusing the existing
+  bad-request code): the session latch is one-way with no successor state, it is the same class
+  as the `0x41` check's "the FIRST valid one wins" guard, and answering would cost the one owned
+  send buffer msquic borrows until `SEND_COMPLETE` per hostile stream. `refused_sessions()` does
+  **not** move — that counter is #934's count-then-close for work the node could not afford,
+  and this is a peer-conformance refusal. One consequence is deliberate and observable: because
+  the guard sits *before* the field-section decode, a **malformed or non-CONNECT** request
+  HEADERS arriving while a session is live is now stream-scoped too, where it used to be
+  connection-fatal. That is strictly the #919 direction; the alternative placement would leave a
+  valid second CONNECT costing one stream while an invalid one cost the whole session.
+
+- **`quic` and `webtransport` egress is bounded by THIS CONNECTION's `max_frame`, not by the
+  16 MiB protocol maximum** ([#1409](https://github.com/avatarsd-llc/libtracer/issues/1409)).
+  Both `msquic_endpoint_t::send_frame` overloads compared the outgoing record against
+  `kMaxFrame` (`length_prefix_framer::kDefaultMaxFrame`) while RX honoured the
+  `configured_cap`-clamped per-connection `max_frame`. A link whose `:settings max_frame`
+  tightened RX to, say, 64 KiB would still hand up to 16 MiB to msquic; a conformant peer
+  running this same code then read a prefix past *its* configured cap, counted `malformed_rx`
+  and **shut the connection down** — so an over-cap local send was a link teardown rather than
+  a shed frame, and `dropped_tx()` never moved. Now an over-cap send is shed with
+  `dropped_tx()` and the link stays up. `max_frame` is `configured_cap`-clamped at
+  construction and so is never *looser* than `kMaxFrame`: this can only tighten, and a link
+  that configured no cap is behaviour-identical. The disposition is unchanged — `dropped_tx`
+  and return, never a throw, never a partial record. The `dropped_tx()` documentation on both
+  transports named the wrong cap and is corrected with it.
+
+- **BREAKING — the GPU backend left core. `<libtracer/mem_cuda.hpp>` is now
+  `backends/cuda/include/libtracer/mem_cuda.hpp`, built by its own CMake project, and
+  `-DLIBTRACER_WITH_CUDA` no longer exists**
+  ([#1381](https://github.com/avatarsd-llc/libtracer/issues/1381),
+  [ADR-0024 Amendment 1](../docs/adr/0024-mem-cuda-gpu-backend-heterogeneous-rope.md)). The
+  `#include "libtracer/mem_cuda.hpp"` spelling is **unchanged** — what changes is which target
+  supplies it. Configure `backends/cuda` and link `libtracer_cuda` (it carries `libtracer` and
+  `CUDA::cudart` as PUBLIC usage requirements) instead of passing `-DLIBTRACER_WITH_CUDA=ON` to
+  core. Consequences worth reading before upgrading:
+
+  - `libtracer` no longer exports a `CUDA::cudart` link or a `find_dependency(CUDAToolkit)` in its
+    installed package config, and **no consumer TU carries `-DLIBTRACER_WITH_CUDA` any more** — it
+    was a PUBLIC compile definition, so every TU of a CUDA-enabled build used to see it.
+  - `core/src/mem_cuda.cpp` and `core/tests/cuda_test.cpp` moved with the header; the PlatformIO
+    package (which exports `core/include/**` + `core/src/**`) simply stops shipping a GPU backend
+    an MCU never wanted.
+  - **`tr::mem::backend_tag::CUDA` is removed.** It was the last enumerator, so every other value
+    (`UNKNOWN = 0` … `BORROWED_DEVICE = 4`) is unchanged and no segment layout or ABI value moves.
+    A device backend is now identified by its `mem_backend_t` object, not by a tag; it leaves
+    `tag()` at the default `UNKNOWN` and `destroy_dispatch` routes it through the virtual
+    `destroy` — *the same arm the `CUDA` enumerator already took*, since it was never in the fast
+    switch. Per [ADR-0047 §2](../docs/adr/0047-build-time-closed-module-sets-compile-time-seams.md)
+    the tag is a fast path, never a correctness dependency, so nothing observable changes. Code
+    that `switch`es on `backend_tag` must drop its `case backend_tag::CUDA:` — `-Werror=switch`
+    makes that a build error rather than a silent fall-through.
+  - `tr::mem::transfer`'s behaviour is unchanged for every backend in core: a `DEVICE`-space
+    segment whose backend registered nothing gets the same `false` it always got, and the host
+    arms (`HEAP` / `POOL` / `BORROWED` / `BORROWED_DEVICE`) are instruction-identical.
+
+- **BREAKING: `graph::vertex_t::store()` is `private` — the storage funnel belongs to `graph_t`,
+  and the compiler now says so** ([#1300](https://github.com/avatarsd-llc/libtracer/issues/1300),
+  finishing [#867](https://github.com/avatarsd-llc/libtracer/issues/867) ruling 2). **This
+  supersedes the `[0.13.0]` note below** that recorded `store()` as deliberately staying public.
+  The reason it stayed is now gone: that note's justification was the bare-`vertex_t` storage
+  unit tests, and the RFC-0008 §E coverage they provided had no `graph_t` equivalent to move to.
+  The two verbs added above are that equivalent, so the coverage relocated instead of being
+  deleted, and the last non-`graph_t` caller went with it.
+
+  **What changes for a user.** `vertex_t` already declared `friend class graph_t`, so **no new
+  friend was added** — a friend named in an installed public header is claimable by anyone who
+  defines a class of that name, which would be the bypass under another name. `store_drops_t`
+  and `snapshot_drops_t` stay public (they are named on `graph_t`'s own surface). Post-#1133 no
+  public API hands out a graph-owned `vertex_t*`, so the only vertex a user could have called
+  this on is one they constructed and own outright; such a caller must now publish through
+  `graph_t::assign` / `graph_t::write`, which is the seam that gates the write, injects the
+  ADR-0039 resource and folds `store_drops_t` into `delivery_drops()`. **Pure visibility: no
+  signature, no body and no layout changed**, and the six hot-symbol ratchet pins come back `+0`.
+
+- **The four remaining body-internal `mem::heap_source()` calls are now defaulted parameters on
+  an injectable seam** ([#873](https://github.com/avatarsd-llc/libtracer/issues/873), ADR-0079).
+  Every one of these was a store the library **named for you**, so a deployer who had injected a
+  bounded source still had these four allocations land on the process heap. All four defaults are
+  `mem::heap_source()` / `&mem::heap_source()`, so **no existing caller changes behaviour** — the
+  point is that a caller can now say otherwise. **Source-compatible in all four cases** (defaulted
+  parameters appended, or added after an existing tag argument).
+  - `wire::decode(std::span<const std::byte>, mem::block_source_t& spill = mem::heap_source())`
+    and the `view_t` overload — the walk stack's spill. `decode(bytes, mem::null_source())` is now
+    the spelling of a hard nesting bound: a frame deeper than the 8 inline slots answers
+    `TLV_NESTING_TOO_DEEP` instead of growing. **Only the walk stack moves onto the seam** — the
+    returned owning `tlv_t` tree holds `std::vector` children and still allocates on the global
+    heap by construction; a caller that wants the whole decode bounded wants `wire::decode_into`.
+  - `wire::validate_rope(const view::rope_t&, mem::block_source_t& spill = mem::heap_source())` —
+    the same spill on the rope validator. Its sink models nothing, so this one really is
+    allocation-free with respect to the process heap once a source is injected.
+  - `net::transport_ws_client`'s constructor takes a trailing
+    `mem::block_source_t* egress_src = &mem::heap_source()`. This is a **defect fix, not just a
+    seam**: `tx_buf_` (the masked-frame buffer, the one WS egress path that needs a buffer) is a
+    `mem::block_array_t` member, and a `block_array_t` binds its source at CONSTRUCTION — so
+    `transport_t::set_egress_source`, the documented injection point that the built-in `ws`
+    factory used, **could never reach it**. An injected egress store was silently ignored by this
+    one buffer and it kept growing on the process heap. The built-in `ws` factory now passes the
+    store through the constructor, and `transport_t::set_egress_source`'s documentation states
+    that a link's construction-bound buffers take their store from the constructor.
+  - `net::transport_vertex_t`'s SLIM constructor takes a trailing
+    `mem::block_source_t* egress_src = &mem::heap_source()`, **after** the `slim_net_t` tag (the
+    tag keeps its overload-disambiguating position). `transport_vertex_t::egress_source()`
+    previously answered the process heap on a slim node whatever the composition root had chosen,
+    so it misreported the store to any factory registered via `register_transport_type`. The
+    `nullptr` guard moved from the FULL constructor into the delegated SLIM one, so both doors
+    behave identically and an explicit `nullptr` still means the process heap.
+
+- **BREAKING — `net::route_handle_t` and `net::fwd_router_t` draw their label state from an
+  injected `mem::block_source_t`, not from a `std::pmr::memory_resource`**
+  ([#603](https://github.com/avatarsd-llc/libtracer/issues/603) defect 1, family 3 of
+  [#873](https://github.com/avatarsd-llc/libtracer/issues/873); ADR-0065 / ADR-0079). This is
+  a **security/availability fix, not hygiene**: an inbound `ADVERTISE` from a remote peer
+  reached four throwing `std::pmr` allocations in the label store — the tables node, the link
+  name, and both route copies — on a transport receive thread, pre-ACL. Against the reference
+  firmware's aborting `heap_resource_t` on the shipping `-fno-exceptions` profile, an
+  ADVERTISE storm rebooted the node at wire rate. Exhaustion is now an ANSWER at every door,
+  and every one of those answers already existed: `bind_ingress` returns `false`,
+  `ensure_egress` returns `{0, false}`, `record_egress` returns `false`, `alloc_label` returns
+  the reserved `0` — the same degrade to the full-route `FWD{WRITE}` form that a full table
+  (#703) and an exhausted label space (#701) already produced. The store now contains no
+  `std::pmr` type at all.
+
+  The signature changes, all of them compile errors rather than silent behaviour changes:
+
+  | before | after |
+  | --- | --- |
+  | `route_handle_t(std::pmr::memory_resource*, std::size_t)` | `route_handle_t(mem::block_source_t*, std::size_t)` |
+  | `fwd_router_t(graph, std::pmr::memory_resource* mr, …)` | `fwd_router_t(graph, mem::block_source_t* label_src, …)` |
+  | `handle_binding_t{std::string down_link; std::vector<std::byte> local_route; …}` | `handle_binding_t{std::string_view down_link; std::span<const std::byte> local_route; …}` |
+  | `lookup_ingress(link, label) -> std::optional<handle_binding_t>` | `copy_binding(link, label, std::span<char>, std::span<std::byte>) -> binding_copy_t` |
+  | `egress_route(link, label) -> std::optional<std::vector<std::byte>>` | `copy_egress_route(link, label, std::span<std::byte>) -> std::size_t` |
+  | `record_egress(link, label, std::vector<std::byte>)` | `record_egress(link, label, std::span<const std::byte>)` |
+
+  `fwd_router_t`'s first optional parameter kept its POSITION rather than being appended,
+  because feeding the label tables was its only job — a call site that passed
+  `std::pmr::get_default_resource()` now passes nothing (the default is
+  `&mem::heap_source()`, byte-identical behaviour) or its own source. `handle_binding_t` is
+  now a NON-OWNING descriptor: it is borrowed for the duration of a bind and the store copies
+  the bytes into its own blocks, which is what made the entry types trivially copyable and
+  therefore holdable by `mem::block_array_t` — the structural blocker the file's own comment
+  named. `lookup_ingress` and `egress_route` are removed rather than deprecated: both built an
+  owning `std::string`/`std::vector` on the throwing global heap on peer-provoked arms (the
+  cold `COMPACT` and the `HANDLE_NACK` re-advertise), which is the defect, so a compatibility
+  shim would have preserved it. The replacements copy into caller storage and report the true
+  size, so truncation stays distinguishable from absence. `refused_bindings()` now counts a
+  source refusal alongside a count refusal — one counter, because ADR-0079 makes the injected
+  store's size a bound in its own right and an operator is watching one symptom.
+
+  Not to be read together with the ADR-0080 reclamation seam above, which lands in the same
+  release: that one settles **when** a retired subscriber's callback pair may be freed, this
+  one settles **where bytes come from**. ADR-0079 draws the line in as many words — the
+  substrate work "is about *where bytes come from*, not *when a replaced block is freed*" —
+  and neither entry changes the other's answer.
+
+  The migration pattern the rest of #873 follows is written down in
+  [`docs/reference/09-memory-substrate.md`](../docs/reference/09-memory-substrate.md)
+  (§Migrating a STORE onto the substrate — the route-handle pattern).
+
+- **A LISTEN connection SPEC may now spell `port = 0` — the EPHEMERAL request — and
+  `conn_settings_t` gained `port_set`**
+  ([#1362](https://github.com/avatarsd-llc/libtracer/issues/1362)). The LISTEN arm of
+  `dial_or_listen` (and the `quic` / `webtransport` factories' own copies of the check) used
+  to refuse `port == 0` with `TYPE_MISMATCH`, which conflated two different configs: an
+  OMITTED `port` key, which really is a missing required field, and an explicit `0`, which is
+  what every listener constructor in this tree already documents as "the OS picks". The
+  consequence was that an in-band-created listener had no way to ask for an ephemeral port at
+  all, so callers had to name a literal and hope nobody else owned it — and nobody can
+  guarantee that, because no port number is reserved (Linux hands out 32768-60999 to ordinary
+  client sockets). The two cases are now distinguished by the new
+  `conn_settings_t::port_set`, set by `parse_config` when the key is PRESENT: an absent key is
+  still `TYPE_MISMATCH` on a LISTEN, `port = 0` binds an OS-granted port, and the grant is
+  read back off the constructed link with `local_port()`. A DIAL is unchanged and still
+  refuses `0`. Additive to `conn_settings_t`; no existing SPEC changes meaning, since `port =
+  0` on a LISTEN previously only ever produced an error.
+
+- **ERRATUM to `[0.13.0]`'s RFC-0018 entry — the "resolve leg 34 ns to ~20 ns" figure came from
+  an instrument that was measuring the wrong thing**
+  ([#1346](https://github.com/avatarsd-llc/libtracer/issues/1346)). No API or wire surface
+  changes; only the recorded measurement does. `bench_forward_demux`'s falsifier-1 control arm
+  (`fwd-demux-resolve-literal`) was a hand-rolled walk, not the retired one: it omitted the
+  `PATH_REF` arm of `peek_fwd_dst_any`, walked three `dst` segments where `prefill` walks four,
+  and replaced `dst_seg_walk_t` with `pos += h->total` in registers. Ablated on the quiet pinned
+  host, that made the control arm read **31 ns light** — enough to invert the falsifier's
+  verdict, which at face value had the packed arm LOSING 32 ns to 25 ns. The arm is now a
+  line-for-line transcription of the code at `5e7659e3` and is renamed
+  **`fwd-demux-resolve-legacy`**, because what the row measures changed. With it, falsifier 1
+  passes for the right reason: **56 → 32 ns (−42.9 %)**, one binary, same frame, best-of-12.
+  The bench also moves off the retired plateau batch calibrator onto
+  `bench::calibrate_batch_for_window`.
+
+- **`op_resolver_t::resolve`'s second parameter is a `graph::inbound_ref_t`, not a
+  `std::string_view`** ([#375](https://github.com/avatarsd-llc/libtracer/issues/375) Part 2).
+  Source-compatible for every existing call: `inbound_ref_t` is implicitly constructible from
+  anything a `std::string_view` is, so `resolve(fwd, "up")` and `resolve(fwd, name)` keep
+  compiling and keep meaning what they meant. A caller that took the function's ADDRESS, or
+  spelled the parameter type, must update.
+
+- **`graph_t::subscribe_wire` takes a sixth argument, `std::string caller`** (defaulted, so no
+  existing call changes). It is the SUBJECT the admission is gated under and the fan-in context
+  every later delivery re-gates under — *who subscribed*, as against `link`'s *where to
+  deliver*. EMPTY means "the same as `link`", which is what this door did before the two claims
+  were separated.
+
+- **BEHAVIOUR — a peer on a link that mints a per-peer subject is now authorized AS THAT PEER,
+  at either setting of `peer_named`** ([#375](https://github.com/avatarsd-llc/libtracer/issues/375)
+  Part 2). On the tcp/ws listeners this is a real change at `peer_named=false`: the ACL caller
+  context, the `write_ctx_t::subject` a HANDLER sees, and a wire subscription's stored fan-in
+  context go from the shared LINK name (e.g. `up`) to the writer's own session token (`p0`,
+  `p1`, …). **An ACE that named a FLAT listener's link in order to grant every peer on it stops
+  matching** — re-spell it as the wildcard subject, or as one ACE per peer. This is the
+  conflation #375 was opened about: at `peer_named=false` every writer previously authenticated
+  as the wire it arrived on. `peer_named`'s own default is UNCHANGED at `false` (ADR-0082 §2)
+  and no addressing behaviour moves — the subject is derived from the frame's `peer_handle_t`,
+  not from the name it arrived under. Every other kind (dialers, UDP, CAN, loopback, custom
+  transports) mints no per-peer subject and is byte-identical to before. The label-switched
+  `COMPACT` delivery derives the SAME subject as the full-route `FWD{WRITE}`, so the two
+  spellings of one write cannot be gated under two different principals.
 
 ### Fixed
 

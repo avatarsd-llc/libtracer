@@ -18,6 +18,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.14.0] — 2026-08-21
+
+No API change. `src/rmw_tracer/identity.c` is still the package's only real
+translation unit and is untouched; the remaining `rmw_*` entry points remain the
+staged work described in the [README](README.md) and
+[ADR-0023](../../docs/adr/0023-ros2-binding-via-rmw-tracer.md).
+
+### Documentation
+
+- **The QoS mapping's `depth` row was wrong, and is corrected** ([README](README.md),
+  "QoS: there is no `settings` to map onto"). It said ring depth "is not the
+  subscriber's to choose". A subscriber **does** get its own queue: a subscription's
+  target vertex lives on *this* node, is a STREAM, and `rmw_create_subscription` sizes
+  that ring locally with `graph_t::set_history_depth` — it is the ring `rmw_take` pops.
+  ROS's per-subscription `depth` therefore maps directly. What has no wire surface, and
+  so cannot be set or read remotely, is the **producer's** depth (RFC-0022 §3.C):
+  depth is *declared* at each end, never *negotiated* between them. The open question
+  is consequently narrower than stated — not "how does a subscriber get a depth" but
+  "what should `rmw_get_subscriptions_info_by_topic` report about a remote publisher's
+  depth", and there is no basis for a DDS-style QoS-compatibility check either way.
+- Citation pins re-anchored against `main` after the RFC-0014 S4 rebase and the
+  dispatch cold-half work; the `delivery_policy` / `delivery_mode_t` carrier rows are
+  otherwise unchanged.
+
 ## [0.13.0] — 2026-08-16
 
 No API change. `src/rmw_tracer/identity.c` — still the package's only real
