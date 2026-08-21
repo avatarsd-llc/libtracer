@@ -284,6 +284,57 @@ void test_lone_oneshot_failure_redormants() {
     }
 }
 
+void test_loss_at_refcount_zero_redormants() {
+    std::printf("S5: loss while UP at refcount 0 → DORMANT, NO background retry (§4.1 MUST 2):\n");
+    dial_script_t script;  // outlives `net`: the engine's factory copy holds its address
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    declare_fake_engine_module(net, script);
+    const script_guard_t guard{script};  // bounded teardown even on a failing test
+    (void)node.write(path_t("/net/fake-client/conn"), fake_spec("a", 1));
+    tr::net::transport_t* const link = net.link_of("net/fake-client/a");
+
+    // Wake by op only — NO acquire, so the socket comes up with refcount 0 the whole
+    // time. Keeping it up past the op is §4.1's MAY, which this engine exercises.
+    script.script(true);  // pre-queued: the attempt concludes without blocking
+    const std::byte frame[1] = {std::byte{0x00}};
+    link->send(frame);
+    check(await_state(node, "/net/fake-client/a", link_state_t::UP),
+          "the op-woken link is UP with no standing binding (§4.1's MAY: up until loss)");
+    check(script.built.size() == 1 && script.built[0]->sent.load() == 1, "the op was SERVED");
+
+    // The remote hangs up with nothing holding the link: dormant, and the retry loop must
+    // never start (§4.1 MUST 1/MUST 2 — the arm the S7 vectors pin).
+    script.built[0]->die();
+    check(await_state(node, "/net/fake-client/a", link_state_t::DORMANT),
+          "loss at refcount 0 re-publishes DORMANT — no self-heal (RFC-0014 §4.1)");
+    // The reap is the bounded POSITIVE rendezvous for "the engine has finished handling
+    // the loss"; with backoff at 1 ms a retry loop would have dialed many times over by
+    // the time the dead socket is destroyed. Same backstop shape as the release path.
+    const auto reap_deadline = std::chrono::steady_clock::now() + 10s;
+    while (g_socks_alive.load() != 0 && std::chrono::steady_clock::now() < reap_deadline) {
+        std::this_thread::yield();  // the worker reaps off-thread; bounded backstop
+    }
+    check(g_socks_alive.load() == 0, "the dead socket was destroyed (no socket at rest)");
+    {
+        const std::lock_guard l(script.m);
+        check(script.attempts == 1, "exactly ONE attempt ever ran — no background retry began");
+    }
+
+    // Dormant again means dormant in full: the NEXT op wakes it exactly as the first did.
+    script.script(true);
+    link->send(frame);
+    check(await_state(node, "/net/fake-client/a", link_state_t::UP),
+          "an op after the loss re-wakes the link");
+    {
+        const std::lock_guard l(script.m);
+        check(script.attempts == 2, "the fresh dial is the op's own — the second attempt overall");
+    }
+    check(script.built.size() == 2 && script.built[1]->sent.load() == 1,
+          "the post-loss op was served on a freshly constructed socket");
+}
+
 void test_standing_binding_selfheals() {
     std::printf("S5: loss while a standing binding holds → RECONNECTING, backoff retry, UP:\n");
     dial_script_t script;  // outlives `net`: the engine's factory copy holds its address
@@ -403,6 +454,7 @@ int main() {
     test_engine_creation_is_dormant();
     test_op_autowakes_and_dials();
     test_lone_oneshot_failure_redormants();
+    test_loss_at_refcount_zero_redormants();
     test_standing_binding_selfheals();
     test_release_during_heal_stops_retry();
     test_remove_while_healing_tears_down();

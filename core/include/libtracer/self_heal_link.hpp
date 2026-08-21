@@ -74,10 +74,13 @@ inline constexpr std::uint32_t kDefaultConnectTimeoutMs = 5000;
  * one-shot op's transient hold is implicit in @ref send itself: it wakes a dormant link
  * and rides the attempt, and its release is invisible at this seam (send is
  * fire-and-forget), so an op-woken socket with no standing binding stays up until loss
- * rather than being torn down per-op — the one documented divergence from a literal
- * reading of §4's steady-state rule, taken because a dial per one-shot op is exactly the
- * hidden-handshake-latency the RFC's own §Alternatives rejects. On loss it re-dormants
- * with no retry, which is the observable §4 contract.
+ * rather than being torn down per-op. That keep-up is the MAY of §4.1 (Amendment 1,
+ * 2026-08-21): the amendment leaves the close-on-transient-release question to the
+ * implementation, and this engine exercises the keep-up arm, because a dial per one-shot
+ * op is exactly the hidden-handshake latency the RFC's own §Alternatives rejects. The
+ * three §4.1 MUSTs are what this engine is held to, and all three hold here: no
+ * background retry at refcount 0, re-dormant with no retry on loss (or on a failed
+ * wake-dial) at refcount 0, and close-plus-re-dormant on the last STANDING release.
  *
  * **Threading.** One worker thread per engine, started lazily on the first transition
  * and joined by @ref stop / the destructor; it is the only thread that dials and the only
