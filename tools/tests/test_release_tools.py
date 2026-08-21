@@ -348,6 +348,26 @@ class ReleaseNotesTest(unittest.TestCase):
         }
         self.assertEqual(found, set(grn.DEFAULT_CHANGELOGS))
 
+    def test_release_yml_does_not_override_the_changelog_list(self):
+        """`release.yml` must take the gated defaults, not a hand-kept copy of them.
+
+        Every other guard in this file — the strict set equality above, the per-package
+        probe in `version-consistency.yml`, `test_the_release_being_cut_publishes_every
+        _package` — checks `DEFAULT_CHANGELOGS`. A `--changelog` override in the workflow
+        escapes all of them at once, because it is the one place the list is spelled that
+        nothing reads back. That is not hypothetical: the v0.13.0 cut added
+        `bindings/ros2/CHANGELOG.md` to the defaults, the tests and the probe, and the
+        `bindings/ros2` section was still absent from the v0.13.0 and v0.14.0 GitHub
+        release bodies, with every gate green.
+        """
+        workflow = read(os.path.join(REPO, ".github", "workflows", "release.yml"))
+        body_step = workflow.split("Build the release body")[1].split("- name:")[0]
+        # Comment lines are stripped: the step's own comment NAMES the flag to explain
+        # why it is absent, and a guard that forbade saying so would forbid the warning.
+        script = "\n".join(l for l in body_step.split("\n") if not l.lstrip().startswith("#"))
+        self.assertIn("gen_release_notes.py", script)
+        self.assertNotIn("--changelog", script)
+
     def test_main_emits_every_package_without_an_api_key(self):
         """End to end, key absent: the body is the concatenated sections."""
         env_key = os.environ.pop("ANTHROPIC_API_KEY", None)

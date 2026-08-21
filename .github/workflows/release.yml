@@ -133,14 +133,16 @@ jobs:
           git log --no-merges --pretty='- %s' ${range} 2>/dev/null | head -300 > "${RUNNER_TEMP}/commits.txt" || true
       - name: Build the release body (AI summary + CHANGELOG)
         run: |
-          # One tag publishes every package, so the body speaks for every package:
-          # core, the Rust crate, the npm packages and the ESP component (#607).
+          # One tag publishes every package, so the body speaks for every package (#607).
+          # The list is DELIBERATELY not spelled here: `gen_release_notes.py` defaults to
+          # its own `DEFAULT_CHANGELOGS`, which `tools/tests/test_release_tools.py` holds
+          # in strict set equality with every tracked `CHANGELOG.md` and which
+          # `version-consistency.yml` probes per package. A `--changelog` override here
+          # silently escapes both: it is how `bindings/ros2` — added to the defaults, the
+          # tests and the probe by the v0.13.0 cut — was still missing from the v0.13.0
+          # and v0.14.0 release bodies while every gate stayed green.
           python3 tools/gen_release_notes.py \
             --version "${{ needs.verify.outputs.version }}" \
-            --changelog core/CHANGELOG.md \
-                        bindings/rust/CHANGELOG.md \
-                        bindings/typescript/CHANGELOG.md \
-                        integrations/esp-idf/libtracer/CHANGELOG.md \
             --commits-file "${RUNNER_TEMP}/commits.txt" > "${RUNNER_TEMP}/body.md"
           echo "----- release body -----"; cat "${RUNNER_TEMP}/body.md"
       - name: Create the GitHub Release
