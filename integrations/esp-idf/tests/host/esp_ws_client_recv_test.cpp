@@ -95,6 +95,20 @@ bool wait_until(pred_t pred, std::chrono::milliseconds limit) {
     return pred();
 }
 
+/**
+ * @brief Assert that the fake holds nothing any more — every case that destroyed a link
+ *        ends here (#1456).
+ *
+ * A teardown that lands mid-dial detaches the link's recv thread, so the orphan releases
+ * its transport pair up to a dial bound after the link is gone. Returning from a case (and
+ * ultimately from `main`) before that leaves a live thread inside the fake while the fake's
+ * static state is being destroyed — the TSan race #1456 reported. A timeout is a real
+ * release defect, so it is scored as a failed check rather than skipped.
+ */
+void check_drained() {
+    check(fake_ws::wait_drained(), "the fake drained: no live handle, no parked dialer");
+}
+
 /** @brief Collects every message the link delivers, in order, as owned copies. */
 class sink_t {
    public:
@@ -152,6 +166,7 @@ void test_recv_stack_reaches_the_thread() {
         check(fake_ws::cfg_restored(), "the surrounding pthread config was restored");
         check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s), "the link dialed");
     }
+    check_drained();
 }
 
 /** @brief #900 — `recv_stack == 0` keeps the historical behaviour: nothing is armed. */
@@ -164,6 +179,7 @@ void test_zero_recv_stack_arms_nothing() {
         check(fake_ws::armed_stack() == 0, "no pthread config was armed");
         check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s), "the link dialed");
     }
+    check_drained();
 }
 
 /**
@@ -201,6 +217,10 @@ void test_oversized_single_frame_tail_is_not_delivered() {
     check(sink.count() == 1, "EXACTLY one message — the dropped frame's tail was not delivered");
     check(same_bytes(sink.at(0), good), "and it is the well-formed message that followed");
     check(link->dropped_rx() == 1, "the oversized message was counted on dropped_rx()");
+    // Release the link HERE, so the drain below is waited for inside the case rather
+    // than raced at process exit (#1456).
+    link.reset();
+    check_drained();
 }
 
 /** @brief #901 — a FRAGMENTED oversized message: same contract, the issue's own case. */
@@ -220,6 +240,10 @@ void test_oversized_fragmented_message_tail_is_not_delivered() {
     check(sink.count() == 1, "EXACTLY one message — the remaining fragments were discarded");
     check(same_bytes(sink.at(0), good), "and it is the well-formed message that followed");
     check(link->dropped_rx() == 1, "the oversized message was counted on dropped_rx()");
+    // Release the link HERE, so the drain below is waited for inside the case rather
+    // than raced at process exit (#1456).
+    link.reset();
+    check_drained();
 }
 
 /** @brief #901 — an EXACT-FIT message delivers; it used to take the overflow branch. */
@@ -235,6 +259,10 @@ void test_exact_fit_message_delivers() {
     check(sink.count() == 1, "exactly once");
     check(same_bytes(sink.at(0), exact), "with all of its bytes");
     check(link->dropped_rx() == 0, "and nothing was counted as dropped");
+    // Release the link HERE, so the drain below is waited for inside the case rather
+    // than raced at process exit (#1456).
+    link.reset();
+    check_drained();
 }
 
 /** @brief #901 — a stray CONTINUATION with no message open is dropped, not started. */
@@ -249,6 +277,10 @@ void test_stray_continuation_is_dropped() {
     check(sink.count() == 1, "EXACTLY one — the stray CONT was not delivered");
     check(same_bytes(sink.at(0), good), "and it is the well-formed message that followed");
     check(link->dropped_rx() == 1, "the stray CONT was counted on dropped_rx()");
+    // Release the link HERE, so the drain below is waited for inside the case rather
+    // than raced at process exit (#1456).
+    link.reset();
+    check_drained();
 }
 
 /** @brief A message that fits and is FRAGMENTED still reassembles — the case the discard
@@ -267,6 +299,10 @@ void test_fragmented_fitting_message_reassembles() {
     want.insert(want.end(), b.payload.begin(), b.payload.end());
     check(sink.at(0) == want, "with both fragments, in order");
     check(link->dropped_rx() == 0, "and nothing was counted as dropped");
+    // Release the link HERE, so the drain below is waited for inside the case rather
+    // than raced at process exit (#1456).
+    link.reset();
+    check_drained();
 }
 
 /**
@@ -287,38 +323,44 @@ void test_defer_recv_holds_the_dial_until_armed() {
     std::printf("#1102 defer_recv holds the dial until start_receiving():\n");
     fake_ws::reset();
     sink_t sink;
-    tr::net::esp_ws_client_link_t link("127.0.0.1", 8080, "/ws", /*handshake_headers=*/{}, kRxBytes,
-                                       kRxBytes, /*recv_stack=*/0, /*defer_recv=*/true);
-    // The peer's push-on-connect, queued while the link is UNARMED and the sink absent.
-    const fake_ws::frame_t good = good_message();
-    fake_ws::push_frames({good});
-    check(!wait_until([] { return fake_ws::connect_count() >= 1; }, 250ms),
-          "an unarmed link did NOT dial");
-    check(sink.count() == 0, "and nothing reached the sink before it was installed");
-    link.set_receiver(sink);
-    link.start_receiving();
-    link.start_receiving();  // idempotent — make_connection arms every link unconditionally
-    check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s),
-          "arming released the first dial");
-    check(wait_until([&] { return sink.count() >= 1; }, 5s),
-          "the pre-arm message ARRIVED after arming — held, never lost");
-    check(same_bytes(sink.at(0), good), "byte-for-byte");
-    check(link.dropped_rx() == 0, "and nothing was counted as dropped");
+    // The link lives in a scope of its own so it is DESTROYED before the drain below,
+    // rather than at process exit under the fake's dying static state (#1456).
+    {
+        tr::net::esp_ws_client_link_t link("127.0.0.1", 8080, "/ws", /*handshake_headers=*/{},
+                                           kRxBytes, kRxBytes, /*recv_stack=*/0,
+                                           /*defer_recv=*/true);
+        // The peer's push-on-connect, queued while the link is UNARMED and the sink absent.
+        const fake_ws::frame_t good = good_message();
+        fake_ws::push_frames({good});
+        check(!wait_until([] { return fake_ws::connect_count() >= 1; }, 250ms),
+              "an unarmed link did NOT dial");
+        check(sink.count() == 0, "and nothing reached the sink before it was installed");
+        link.set_receiver(sink);
+        link.start_receiving();
+        link.start_receiving();  // idempotent — make_connection arms every link unconditionally
+        check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s),
+              "arming released the first dial");
+        check(wait_until([&] { return sink.count() >= 1; }, 5s),
+              "the pre-arm message ARRIVED after arming — held, never lost");
+        check(same_bytes(sink.at(0), good), "byte-for-byte");
+        check(link.dropped_rx() == 0, "and nothing was counted as dropped");
 
-    // Reconnect leg: the latch is ONE-SHOT. A peer CLOSE tears the connection down; the
-    // re-dial happens with no re-arm, and a message on the NEW connection is delivered —
-    // a future latch that wrongly re-closed per connection reddens here.
-    fake_ws::push_frames(
-        {fake_ws::make_frame(WS_TRANSPORT_OPCODES_CLOSE, /*fin=*/true, /*len=*/2, /*seed=*/0x11)});
-    check(wait_until([] { return fake_ws::connect_count() >= 2; }, 5s),
-          "the link re-dialed after the peer CLOSE with no re-arm");
-    const fake_ws::frame_t after =
-        fake_ws::make_frame(WS_TRANSPORT_OPCODES_BINARY, /*fin=*/true, /*len=*/8, /*seed=*/0xB0);
-    fake_ws::push_frames({after});
-    check(wait_until([&] { return sink.count() >= 2; }, 5s),
-          "a message on the new connection was delivered — the latch did not re-close");
-    check(same_bytes(sink.at(1), after), "byte-for-byte");
-    check(link.dropped_rx() == 0, "and still nothing was counted as dropped");
+        // Reconnect leg: the latch is ONE-SHOT. A peer CLOSE tears the connection down; the
+        // re-dial happens with no re-arm, and a message on the NEW connection is delivered —
+        // a future latch that wrongly re-closed per connection reddens here.
+        fake_ws::push_frames({fake_ws::make_frame(WS_TRANSPORT_OPCODES_CLOSE, /*fin=*/true,
+                                                  /*len=*/2, /*seed=*/0x11)});
+        check(wait_until([] { return fake_ws::connect_count() >= 2; }, 5s),
+              "the link re-dialed after the peer CLOSE with no re-arm");
+        const fake_ws::frame_t after = fake_ws::make_frame(WS_TRANSPORT_OPCODES_BINARY,
+                                                           /*fin=*/true, /*len=*/8, /*seed=*/0xB0);
+        fake_ws::push_frames({after});
+        check(wait_until([&] { return sink.count() >= 2; }, 5s),
+              "a message on the new connection was delivered — the latch did not re-close");
+        check(same_bytes(sink.at(1), after), "byte-for-byte");
+        check(link.dropped_rx() == 0, "and still nothing was counted as dropped");
+    }
+    check_drained();
 }
 
 }  // namespace
@@ -333,6 +375,9 @@ int main() {
     test_stray_continuation_is_dropped();
     test_fragmented_fitting_message_reassembles();
     test_defer_recv_holds_the_dial_until_armed();
+    // Defensive: `main` must never return under a detached orphan still inside the fake,
+    // whose static state is destroyed on the way out (#1456).
+    check_drained();
     if (g_failures != 0) {
         std::printf("FAILED: %d check(s)\n", g_failures);
         return 1;
