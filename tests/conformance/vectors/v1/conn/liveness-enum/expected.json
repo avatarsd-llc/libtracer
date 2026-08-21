@@ -1,0 +1,26 @@
+{
+  "name": "liveness-enum",
+  "category": "conn",
+  "hex": "0100010000",
+  "total_bytes": 5,
+  "decoded": {
+    "type": "0x01 VALUE",
+    "structured": false,
+    "length": 1,
+    "payload": "00",
+    "meaning": "VALUE{ u8 0x00 } — RFC-0014 §3/§4: a connection vertex's value IS its link-liveness state, and DORMANT is 0x00. These are the bytes a freshly created engine-managed DIAL connection holds, and the bytes a read or a subscribe on /net/<module>/<name> carries.",
+    "fields": {
+      "link_state": "DORMANT"
+    },
+    "link_state_encoding": {
+      "note": "RFC-0014 §4's enum table, in table order, from zero. The RFC deferred these byte values under the clause-kind rule; this vector plus the shipped link_state_t make them normative. Six values and no seventh — in particular there is NO `healing` state (§4's prose names one, which no enumerator has ever had; the retry state is RECONNECTING 0x02, corrected by the RFC-0014 errata batch, PR #1475).",
+      "0x00": "DORMANT — DIAL: vertex exists; no socket (refcount 0). 0x00 is a migration constraint: it is the falsy default the superseded binary set_link_state(name, bool) used for `down`.",
+      "0x01": "DIALING — DIAL: a connect attempt is in flight (first-ever or resumed)",
+      "0x02": "RECONNECTING — DIAL: retrying toward UP between backoff waits",
+      "0x03": "UP — DIAL: socket connected, bidirectional",
+      "0x04": "LISTENING — LISTEN: listen socket bound and accepting (0 or more peers)",
+      "0x05": "BIND_FAILED — LISTEN: the listen socket could not bind"
+    },
+    "note": "The codec tier cannot falsify the mapping above: a 1-byte VALUE round-trips in any core whatever the byte means to it. The mapping is bound in core/tests/link_liveness_test.cpp — test_conformance_vectors drives a live connection vertex through all six states through the production doors and reads the published byte back off graph_t::read."
+  }
+}
