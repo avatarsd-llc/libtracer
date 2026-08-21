@@ -7,7 +7,7 @@
 # binaries. x86_64 Linux; adjust ZVER / the asset name for other platforms.
 set -euo pipefail
 cd "$(dirname "$0")"
-ZVER="1.9.0"
+ZVER="1.10.0"
 mkdir -p vendor && cd vendor
 
 echo "Fetching zenoh-c ${ZVER} (prebuilt, x86_64-unknown-linux-gnu)…"

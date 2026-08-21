@@ -144,8 +144,22 @@ target_link_libraries(bench_contention PRIVATE libtracer)
 target_compile_options(bench_contention PRIVATE -Wall -Wextra)
 
 # Zenoh side — built only when the prebuilt is vendored (run bench/fetch_zenoh.sh).
+#
+# The zenoh-cpp directory carries its version in its name, so it is DISCOVERED rather than
+# written down here. It used to be hardcoded, which silently coupled this file to
+# fetch_zenoh.sh's ZVER: bumping the fetcher left this path pointing at a directory that no
+# longer existed, the `EXISTS` guard below went false, and the build skipped the Zenoh
+# targets with a STATUS message — so the comparison would quietly publish libtracer's
+# numbers with no second engine beside them and nothing would have failed. An omitted
+# opponent must not be reachable by forgetting to edit a second file.
 set(ZC ${CMAKE_CURRENT_SOURCE_DIR}/vendor/zenoh-c)
-set(ZCPP ${CMAKE_CURRENT_SOURCE_DIR}/vendor/zenoh-cpp-1.9.0)
+file(GLOB ZCPP_CANDIDATES ${CMAKE_CURRENT_SOURCE_DIR}/vendor/zenoh-cpp-*)
+set(ZCPP "ZCPP-NOTFOUND")
+foreach(cand ${ZCPP_CANDIDATES})
+    if(EXISTS ${cand}/include/zenoh.hxx)
+        set(ZCPP ${cand})
+    endif()
+endforeach()
 if(EXISTS ${ZC}/lib/libzenohc.so AND EXISTS ${ZCPP}/include/zenoh.hxx)
     add_executable(bench_zenoh bench_zenoh.cpp)
     add_executable(bench_zenoh_net bench_zenoh_net.cpp)

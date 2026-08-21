@@ -146,7 +146,7 @@ SURFACES: tuple[surface_t, ...] = (
               "same topology for both engines; p50, the p99 tail and the p999 deep tail — "
               "published, never gated"),
     surface_t("compare", "Engine comparison", "libtracer and Zenoh side by side, absolute",
-              "same runner, same pass — no ratios"),
+              "same runner, best of 3 rounds — no ratios"),
     surface_t("codec", "Cross-core codec", "decode→encode roundtrip per implementation",
               "the same v1 vectors for every core",
               ("bindings/typescript/…/bench/perf.mjs", "bindings/rust/examples/perf.rs"),
@@ -830,13 +830,13 @@ def compare_intro() -> str:
     return f"""\
 {head("zenoh")}
 
-Both engines in **one pass on one runner**, so the numbers are directly comparable on
+Both engines on **one runner, best of 3 rounds**, so the numbers are directly comparable on
 identical hardware: three **in-process** axes — subscriber fan-out, payload size and topic
 count — and a **network latency** comparison over the real loopback kernel path, one socket
 and one paced value per transport in two processes. The charts plot **absolute** throughput,
 latency and bandwidth as series on shared axes; there are no speed-up ratios.
 
-libtracer is compiled from source at `-O3`; Zenoh is the upstream prebuilt `zenoh-c 1.9.0`
+libtracer is compiled from source at `-O3`; Zenoh is the upstream prebuilt `zenoh-c 1.10.0`
 release binary that `bench/fetch_zenoh.sh` downloads, so its optimization profile is
 upstream's rather than a flag this repo sets. Both are optimized builds. Which rows do equal
 work, why there is no network *throughput* comparison, and which transports are absent and
@@ -1263,7 +1263,7 @@ an MCU allocator in hundreds — so a host reading of churn is a *lower* bound.
 
 {compare_intro()}
 
-{mprose(M, "4 · libtracer vs Zenoh (absolute, one pass, same runner)")}
+{mprose(M, "4 · libtracer vs Zenoh (absolute, best of 3 rounds, same runner)")}
 
 ### Fairness in the comparison
 

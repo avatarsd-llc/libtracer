@@ -105,9 +105,10 @@ the heap is caught too ([ADR-0039](../docs/adr/0039-pmr-memory-model-host-aligne
 freely, out of the armed window.
 
 ```sh
-./fetch_zenoh.sh   # vendors prebuilt zenoh-c 1.9.0 + zenoh-cpp (x86_64 linux; not committed)
+./fetch_zenoh.sh   # vendors prebuilt zenoh-c 1.10.0 + zenoh-cpp (x86_64 linux; not committed)
 ./run.sh           # in-process matrix — side-by-side terminal table
 ./grid.sh          # sweep both engines → preview.html (absolute-value charts, no extra deps)
+ROUNDS=5 ./grid.sh # …over more rounds; best-of-rounds per point, both engines
 ```
 
 Without `fetch_zenoh.sh`, only the libtracer numbers appear.
@@ -1477,7 +1478,7 @@ craft libtracer":
 > `bridge_t` envelope, deleted with the bridge itself in
 > [ADR-0040](../docs/adr/0040-net-plane-is-explicit-source-routed-only.md) — the net plane is
 > explicit-source-routed `FWD` only. Neither mode is emitted today
-> (`bench_libtracer.cpp:16`, `:1378`); `bridge_t`, `router_wrap`, `router_unwrap`, `kMaxHops`,
+> (`bench_libtracer.cpp:16`, `:1407`); `bridge_t`, `router_wrap`, `router_unwrap`, `kMaxHops`,
 > `export_vertex` and `run_routers` survive in `core/` and `bench/` only inside comments
 > and `core/CHANGELOG.md`'s record of their removal — not one declaration, definition or
 > call of any of them is left (`grep -rn` over both trees, 2026-08-08), and the
@@ -1539,12 +1540,41 @@ cost it exists to show was invisible. The batch form resolves them (~1 / 2 / 4 /
 The old series were ended rather than continued, because the number means something
 different now.
 
-- **Throughput** — back-to-back publishes; `deliveries / elapsed`.
+- **Throughput** — back-to-back publishes; `deliveries / elapsed`, where the deliveries
+  are **counted at the subscriber on both sides**, never inferred from `publishes x
+  fan-out`. Each engine's timed window therefore ends only once every delivery it owes has
+  landed, and each prints a stderr warning naming any point that came up short. The two
+  engines reach that same guarantee differently and the difference is not a handicap:
+  libtracer dispatches inline (`write()` returns after the last subscriber callback), so
+  its publish loop *is* the delivery loop, whereas Zenoh delivers off the publishing
+  thread and the harness spins on the receive counter inside the window until the backlog
+  drains.
 - **Latency** — one publish at a time (publish, wait for receipt, repeat); p50/p99/mean.
+- **Best-of-rounds, both engines.** The published comparison runs the whole grid several
+  times and keeps each point's best observation (`best_of_rounds.py`). Contamination on a
+  shared runner is one-sided — a busy neighbour can only make a round slower — so the best
+  round is the estimator closest to what the code does, while a median is an estimate of
+  how busy the host was. Both engines are executed in the same loop the same number of
+  times: giving one arm N tries and the other one shot would be a thumb on the scale.
+  The **tail** rows (p999 / max) are deliberately *not* best-of-ed — see the tail note on
+  the results page.
 - libtracer builds at **`-O3`** (Release); Zenoh is the upstream **prebuilt** zenoh-c
   release binary, so "both at `-O3`" was never quite true — both are optimized builds
-  measured in one pass, which is what parity actually rests on. The app payload size (not the
+  measured in one pass, which is what parity actually rests on. Neither side gets
+  `-march=native` or LTO, and neither is pinned to a core. The app payload size (not the
   on-wire envelope) is used for MB/s.
+- **Where the remaining asymmetries point.** Two are worth naming because they run
+  *against* libtracer, not for it. The charted `inproc` row does strictly more work than
+  the Zenoh row beside it — it persists the value as the last-known-value and bumps the
+  await/readiness sequence, neither of which Zenoh's transient put does (`inproc-deliver`
+  is the closer semantic match and is charted separately). And Zenoh runs a multi-threaded
+  runtime against libtracer's single thread, so a loaded host taxes the Zenoh arm harder.
+  Against those: Zenoh is a *routing* engine being measured on its intra-session shortcut,
+  and it carries session and key-expression machinery in the window that an in-process
+  graph write has no analogue for. Discovery is the one thing the harness does equalize —
+  multicast scouting is switched off, because libtracer runs no discovery subsystem at all
+  and leaving it on would put a background thread and real multicast traffic inside the
+  timed window on one side only.
 
 ## Results
 

@@ -147,9 +147,11 @@ FAMILIES: list[dict] = [
     # medianed into one number.
     dict(id="vs-zenoh-fan", section="dispatch",
          title="libtracer vs Zenoh — by fan-out, over commits",
-         cond="inproc · 64 B · 1 topic · same runner, same pass — Zenoh (zenoh-c 1.9.0) is "
-              "version-pinned, so its line is the runner's own drift. The `ratio` toggle "
-              "divides the two arms per commit, which cancels that drift",
+         cond="inproc · 64 B · 1 topic · same runner, same pass — Zenoh is version-pinned, so "
+              "its line is mostly the runner's own drift. Note the pin CHANGED on 2026-08-21 "
+              "(zenoh-c 1.9.0 → 1.10.0): the step at that commit is an upstream version "
+              "change, not runner drift and not a libtracer effect. The `ratio` toggle "
+              "divides the two arms per commit, which cancels drift but NOT that step",
          # `\d+` already spans the deep fans (1024, 8192) the store records for BOTH arms,
          # so the fan sweep needs no widening — only the check that says so.
          pat=r"^(zenoh )?inproc 64B/fan(\d+)/1ep",
