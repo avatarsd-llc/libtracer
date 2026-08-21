@@ -56,9 +56,11 @@ The shape, in seven ruled sentences:
   expected**: a hop that does not implement minting, or refuses it, simply leaves its part as a
   string. Hosts that don't mint don't change their part (§5).
 - **Distribution is passive.** There are **no label-distribution frames**. Each forwarding hop, when
-  it relays the **reply**, rewrites its own local part of `src`/`dst` from string to its minted
-  label; the first reply therefore reaches the original sender with fully-minted `src` and `dst`,
-  which the sender's `path_t` caches (§6).
+  it relays the **reply**, rewrites its own local part of ~~`src`/`dst`~~ **`src`** from string to
+  its minted label; the first reply therefore reaches the original sender with ~~fully-minted `src`
+  and `dst`~~ **a fully-minted `src`**, which the sender's `path_t` caches and spells as the `dst`
+  of the frames after it (§6). *(Erratum 4, 2026-08-21: a reply's `dst` is the return route
+  accumulated canonically on the forward leg, and a forward leg mints nothing — see §6.1.)*
 - **Staleness is a generation bump.** Vertex departure bumps its slot's generation; a frame carrying
   a stale or unknown label answers a **`NOT_FOUND`-class error**; the sender falls back to the
   full-string path and re-mints from the next reply. **No withdraw protocol, no aging** (§7).
@@ -653,12 +655,12 @@ elements spelled differently.
 Minting rides the **reply**. Concretely, on an operation whose forward legs were spelled in strings:
 
 1. Each forwarding hop resolves its local part canonically, as today, and forwards the residual.
-2. On the way **back**, as it relays the reply, each hop **rewrites its own local part of `src` and
-   `dst` from string to the label it minted** for that part. It rewrites its own part and nothing
-   else.
+2. On the way **back**, as it relays the reply, each hop **rewrites its own local part of ~~`src`
+   and `dst`~~ `src` from string to the label it minted** for that part. It rewrites its own part
+   and nothing else. *(Erratum 4: the reply's `dst` is not a region a hop rewrites — see below.)*
 3. The terminus does the same for the residual it resolved.
-4. **The first reply therefore returns to the original sender with fully-minted `src` and `dst`**,
-   and the sender's `path_t` caches them.
+4. **The first reply therefore returns to the original sender with ~~fully-minted `src` and
+   `dst`~~ a fully-minted `src`**, and the sender's `path_t` caches ~~them~~ **it**. *(Erratum 4.)*
 
 Two properties fall out and are both required:
 
@@ -714,6 +716,52 @@ the analogue of RFC-0024's `adopt_binding`, which must prepend the origin's own 
 (the one hop no peer ever sees, §4.1) before handing the bytes to `path_t::cache_path_label`.
 Car 4 implements the forwarder and leaves the origin unwired; the vectors and the binding test
 pin the hop's emission, not the round trip.
+
+#### Erratum 4 (2026-08-21) — only the reply's `src` is ever labelled; the forward leg's `src` — and therefore the reply's `dst` — is not
+
+An **erratum**, not an amendment: the clauses corrected here are §1's summary bullet and §6.1
+points 2 and 4, all of which say a hop rewrites *"`src` and `dst`"* and that the first reply
+arrives *"with fully-minted `src` and `dst`"*. **Erratum 2 above already ruled the region** — the
+reply's `src` is the only one that survives to the origin, and the reply's `dst` is *"consumed, not
+rewritten"* — but it ruled it in its own subsection and left the three clauses above still saying
+`dst`. This finishes that correction. No wire surface moves; nothing a conforming host does
+changes.
+
+**What the text said.** That a minting hop rewrites its own local part of the reply's `src` **and**
+`dst`, and that the first reply therefore carries a fully-minted `dst` as well as a fully-minted
+`src`.
+
+**What the behaviour is.** A reply's `dst` **is** the return route the *forward* leg accumulated
+into its `src` — and a forward leg mints nothing:
+
+- **Minting rides the reply and only the reply**, because a request leg has not yet passed the
+  terminus's gates and minting there would break §8.1's post-auth rule. The shipped forwarder reads
+  the op byte for exactly this and refuses on anything that is not a `REPLY`
+  (`fwd_router_t::label_src_prefix`, `core/src/fwd_router.cpp`); its contract says the span it
+  returns is empty on *"every request leg, every bus child, every node with no injected table, and
+  every refusal"* (`core/include/libtracer/fwd_router.hpp`).
+- **A forward hop grows `src` canonically**, by the inbound link's full mount run, exactly as it did
+  before labels existed (`fwd_router_t::route_fwd_forward`; the same statement in
+  `docs/reference/05-protocol-tlvs.md` §`0x14`: *"`src` itself is never touched by this and stays
+  canonical and complete"*).
+- So by the time the reply exists, its `dst` is already a string route, and rewriting it would be
+  rewriting a region the relaying hop **consumes** (erratum 2 disposition 1).
+
+**The correction.** A minting hop rewrites its own local part of the reply's **`src`**, and that is
+the only region any hop ever labels. The first reply returns to the origin with a fully-minted
+`src` and a canonical, string-spelled `dst`. What becomes labelled *addressing* is the frames
+**after** it: the origin caches that minted `src` and spells it as the `dst` of subsequent
+requests, which is where §7.2's deref and its `NOT_FOUND` fallback are exercised. §6.1's four steps
+and every clause of §§4–12 are otherwise unchanged.
+
+**Why this is an erratum and not an amendment.** It withdraws no MUST and adds none, alters no byte
+layout, adds no type code, flag or frame, and changes nothing a conformant host does today: no
+shipped host has ever labelled a forward leg, and erratum 2 already ruled `src` to be the region.
+It removes a claim the accepted text could not satisfy — §6.1's own point 4 is unimplementable
+under the `dst` reading, which is what erratum 2 established — rather than changing what is
+required.
+
+**Still not ruled here**, unchanged from erratum 2: the origin-side adoption of the minted `src`.
 
 ### 6.2 Each subscription's first fire triggers path creation and minting
 
