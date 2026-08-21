@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0014 |
 | **Title** | Creator endpoint: connection lifecycle and link liveness |
-| **Status** | **accepted** (2026-07-24 — maintainer ruling; comment window waived on this solo-maintained spec, per the RFC-0009 precedent) |
+| **Status** | **accepted** (2026-07-24 — maintainer ruling; comment window waived on this solo-maintained spec, per the RFC-0009 precedent). **Amendment 1 (2026-08-21, §4.1)** replaces §4's literal "refcount → 0 → close socket" steady-state reading with MAY-shape wording: an op-woken socket with no standing binding **MAY** remain up until loss (the reference implementation does) or be closed eagerly, and only three MUSTs bind — no background retry at refcount 0, re-dormant with no retry on loss or a failed wake-dial at refcount 0, and close-plus-re-dormant on the last **standing** release. Ruled on the divergence flagged in [PR #1455](https://github.com/avatarsd-llc/libtracer/pull/1455). |
 | **Author(s)** | AvatarSD (maintainer) |
 | **Created** | 2026-07-24 |
 | **Comment window closes** | waived |
@@ -218,7 +218,12 @@ link **ignores refcount** — its listen socket stays bound and accepting until 
   whose dial fails drops refcount to 0 and the link re-dormants with **no** background retry; only a
   standing binding (refcount > 0 after the op returns) triggers self-heal.
 - **Self-heal is the retry loop toward the target, and runs iff refcount > 0.** Loss while in use →
-  background retry with `backoff`. refcount → 0 → close socket, go **dormant**, stop retrying.
+  background retry with `backoff`. A link **MUST NOT** background-retry at refcount 0; loss — or a
+  failed wake-dial — at refcount 0 re-dormants with **no** retry; and the **last standing release
+  MUST close the socket and re-dormant**. Whether an *op-woken* socket that never acquired a
+  standing binding is closed eagerly when its transient hold releases, or left **up until loss**, is
+  an implementation choice — see **Amendment 1 (§4.1)**, which replaces this bullet's original
+  "refcount → 0 → close socket" reading.
 - **Ops on a down/`reconnecting` link fail fast** with `link-down` — never block forever on a dead
   peer.
 - **A permanently-unreachable `DIAL` peer with a standing binding retries indefinitely** while
@@ -250,6 +255,51 @@ link **ignores refcount** — its listen socket stays bound and accepting until 
   connectivity; accepted-peer count/identity is exposed via `:children[]`/`:settings`, not the
   liveness enum. Once up, a link is **bidirectional** regardless of who dialed; `role` is only *who
   initiates*.
+
+#### 4.1 Amendment 1 (2026-08-21, ruled) — keep-up after an op-woken dial is a MAY, and only three MUSTs bind
+
+**Instrument.** Amendment, not erratum: §4's steady-state bullet as written was read literally to
+require a socket close the instant refcount hits 0 — *including* the moment a one-shot's transient
+hold releases — and this replaces that requirement with a MAY. It withdraws a normative
+obligation rather than clarifying one, so it is an amendment even though no wire byte, frame shape,
+type code or error identity moves: what changes is only *when a local socket is closed*, observable
+to a peer as nothing and to a caller as op latency. Ruled by the maintainer on the divergence
+flagged in [PR #1455](https://github.com/avatarsd-llc/libtracer/pull/1455) (the S5 link-liveness
+engine, [#492](https://github.com/avatarsd-llc/libtracer/issues/492)). The comment window is
+**waived by default** under [GOVERNANCE.md](../../../.github/GOVERNANCE.md)'s solo-maintainer clause
+and is not invoked.
+
+**The steady-state target stands, for standing bindings.** "Socket up while refcount > 0" is still
+what a `DIAL` link aims at, and the transient states `dialing`/`healing` are still refcount > 0 with
+the socket not yet or no longer up. What the amendment touches is the *other* direction — what an
+implementation owes the moment refcount reaches 0.
+
+**The MAY.** An **op-woken socket with no standing binding MAY remain `up` until loss.** The
+reference implementation does exactly this: a one-shot's transient hold is invisible at the
+fire-and-forget send seam, and tearing the socket down per-op would put a dial — a hidden handshake
+— inside the next `write`, which is precisely the latency §Alternatives rejects in refusing lazy
+create-from-address. An implementation **MAY** instead close eagerly as soon as the transient hold
+releases; a constrained node with no socket budget to spare is entitled to that trade. Both are
+conforming. The choice is **locally observable only as op latency** — a peer cannot tell the two
+apart except by when the next connection arrives.
+
+**The MUSTs.** Three clauses bind, and they are the peer-observable surface:
+
+1. A link **MUST NOT** background-retry at refcount 0. No timer, no backoff loop, no attempt a
+   binding did not ask for.
+2. Loss — **or a failed wake-dial** — at refcount 0 **MUST** re-dormant with **no** retry. This is
+   §4's transient-hold rule stated for both of its arms: the lone one-shot whose dial fails, and the
+   kept-up socket that later dies with nothing holding it.
+3. The **last standing release MUST close the socket and re-dormant.** Releasing the final standing
+   binding is an explicit "I no longer need this peer reachable"; it is not the same event as a
+   transient hold evaporating, and the MAY above does not reach it.
+
+> **Conformance-vector note.** The S7 vectors pin **only these three MUSTs**. A vector that a
+> conformant eagerly-closing implementation would fail is, by construction, not a conformance
+> vector — keep-up is a reference-implementation property and is pinned in the reference
+> implementation's own test suite (`core/tests/link_liveness_test.cpp`), not on the conformance
+> surface. §Discussion's `refcount-0→dormant` vector is to be read as the MUST-2/MUST-3
+> re-dormant, never as an assertion about *when* an op-woken socket closes.
 
 ### 5. Gating
 
@@ -322,7 +372,8 @@ fails-fast `link-down` and is reaped.
   `remove-via-NAME`, `remove-nonexistent-noop`, `remove-reserved-rejected`, `spec-name-in-use`,
   `bad-payload-type`, `catalog-read`, `absent-endpoint-PATH_NOT_FOUND`, `gate-CREATE`, `gate-WRITE`,
   and the liveness transitions (`dormant→dialing→up`, `up→reconnecting→up`, `refcount-0→dormant`,
-  `listen→listening`).
+  `listen→listening`). *(Amendment 1, §4.1: `refcount-0→dormant` pins the three MUSTs only — it
+  must not assert **when** an op-woken socket with no standing binding closes, which is a MAY.)*
 - **Migration.** Additive; deployed devices keep working. That consumer's web UI's deferred stub
   (`#82`) gains its *link* half; the browser-relay wires need the origination dependency above before
   they become owner-mediated.
