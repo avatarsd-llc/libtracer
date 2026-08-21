@@ -1,0 +1,12 @@
+{
+  "name": "absent-endpoint-not-found",
+  "category": "conn",
+  "hex": "0f403100010001000006000d00036e65740363616e04636f6e6e10400a0002000600736368656d6106000900087265706c792d6570",
+  "total_bytes": 53,
+  "decoded": {
+    "type": "0x0F FWD",
+    "structured": true,
+    "meaning": "FWD{ op=READ, dst=/net/can/conn, FIELD :schema, src=/reply-ep } — RFC-0014 §6's creatability probe. Against a node that declares no `can` module the reply is ERROR{tr::path::not_found} (0x0020), which the orchestrator reads as \"not creatable\"",
+    "note": "The probe exists BECAUSE §3 hides `conn` from `/net/<module>:children[]` — enumeration can never reveal the endpoint, so §6 makes reading its `:schema` the sanctioned way to learn it is there. The absent answer is `tr::path::not_found` (0x0020), the missing-`/`-vertex identity, matching RFC-0009 §A.1.1; `tr::schema::not_found` (0x0031) is reserved for the different case of a PRESENT endpoint given an unknown config type (RFC-0014 §Compatibility). The same bytes against a node that DOES declare the module answer a RESULT — nothing in this frame is inherently an error."
+  }
+}

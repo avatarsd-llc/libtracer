@@ -1487,6 +1487,10 @@ if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_UDP AND LIBTRACER_TRANSPORT_WS)
     add_executable(transport_vertex_test transport_vertex_test.cpp)
     target_link_libraries(transport_vertex_test PRIVATE libtracer)
     libtracer_test_warnings(transport_vertex_test)
+    # RFC-0014 S7-A: it binds the seven `conn/` control-plane vectors to the running
+    # creator endpoint, so it needs LIBTRACER_VECTORS_DIR.
+    target_compile_definitions(transport_vertex_test PRIVATE
+        LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
     add_test(NAME transport_vertex COMMAND transport_vertex_test)
 endif()
 

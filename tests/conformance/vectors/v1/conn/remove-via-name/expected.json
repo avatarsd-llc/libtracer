@@ -1,0 +1,15 @@
+{
+  "name": "remove-via-name",
+  "category": "conn",
+  "hex": "020002007570",
+  "total_bytes": 6,
+  "decoded": {
+    "type": "0x02 NAME",
+    "structured": false,
+    "meaning": "NAME{\"up\"} — RFC-0014 §2 `remove-via-NAME`: written to /net/<module>/conn it retires /net/<module>/up",
+    "fields": {
+      "name": "up"
+    },
+    "note": "Create and remove collapse onto ONE control vertex and are told apart by the written TLV's TYPE — SPEC creates, NAME removes. There is no verb, no field and no DELETE opcode: removal is an ordinary WRITE (0x02) of these six bytes. The same bytes written to any vertex that is NOT a creator endpoint are an ordinary value write, not control (RFC-0014 §2, last bullet)."
+  }
+}

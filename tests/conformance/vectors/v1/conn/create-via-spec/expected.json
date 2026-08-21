@@ -1,0 +1,19 @@
+{
+  "name": "create-via-spec",
+  "category": "conn",
+  "hex": "0e403f00020004006e616d6502000200757002000600636f6e6669670b4023000200040061646472020009003132372e302e302e3102000400706f727401000200901f",
+  "total_bytes": 67,
+  "decoded": {
+    "type": "0x0E SPEC",
+    "structured": true,
+    "meaning": "SPEC{NAME \"name\" NAME \"up\", NAME \"config\" SETTINGS{NAME \"addr\" NAME \"127.0.0.1\", NAME \"port\" VALUE u16=8080}} — RFC-0014 §2 `create-via-SPEC`, the payload written to /net/<module>/conn",
+    "fields": {
+      "name": "up",
+      "config": {
+        "addr": "127.0.0.1",
+        "port": 8080
+      }
+    },
+    "note": "The creator-endpoint spelling carries `{ name, config }` and NOTHING else. No `type`: the module segment in the path already selects the transport, so there is no catalog type to name. No `role`: RFC-0014 §1/§3 make the role POSITIONAL — the module the endpoint belongs to is `DIAL` or `LISTEN`, and a `role` pair in this config would be ignored rather than obeyed. Compare `spec/conn-client-ws`, the SUPERSEDED global `:children[]` spelling, which must carry both. Bytes emitted by tr::net::conn_spec_t's one-argument (endpoint) constructor."
+  }
+}
