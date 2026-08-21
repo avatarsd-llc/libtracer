@@ -132,7 +132,18 @@ jobs:
       - name: Run the libtracer-vs-Zenoh comparison sweep
         run: |
           out="${RUNNER_TEMP}/compare.tsv"
-          { ./bench/build/bench_libtracer grid; ./bench/build/bench_zenoh grid; } >"$out" 2>/dev/null || true
+          raw="${RUNNER_TEMP}/compare-rounds.tsv"
+          # BEST-OF-ROUNDS, both engines. A single round on a shared GitHub runner
+          # publishes whatever that runner happened to be doing; contamination is
+          # one-sided (a noisy neighbour can only make a round slower), so the best of a
+          # few rounds is the estimator closest to the code. Both engines are executed in
+          # the SAME loop the same number of times — reducing one arm over rounds while
+          # the other gets one shot would be a thumb on the scale, not a measurement.
+          : >"$raw"
+          for r in 1 2 3; do
+            { ./bench/build/bench_libtracer grid; ./bench/build/bench_zenoh grid; } >>"$raw" 2>/dev/null || true
+          done
+          python3 bench/best_of_rounds.py <"$raw" >"$out" || cp "$raw" "$out"
           # The composition-throughput rows are still NOT collected here. The harness that
           # earns them now exists (bench/run_compose.sh — two processes on both sides, the
           # receiver counts the values, and the publisher is audited for wire use), but

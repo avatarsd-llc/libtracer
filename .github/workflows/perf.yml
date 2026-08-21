@@ -153,6 +153,12 @@ jobs:
       # comparison from ever again reporting a rate for an engine that never reached the wire.
       - name: Composition-bench wire-use guard tests
         run: python3 bench/test_compose_guard.py
+      # The best-of-rounds reduction behind the published libtracer-vs-Zenoh charts. The
+      # property under test is even-handedness — the same reduction applied to both
+      # engines' rows — which the charts themselves cannot show, since they display only
+      # the reduced output.
+      - name: Comparison best-of-rounds reduction tests
+        run: python3 bench/test_best_of_rounds.py
       # The receiver-side half of the same harness: the per-point nonce that rejects a
       # concurrent run of this bench at the same K, and the sample floor under which a point
       # publishes nothing. Bytes built in-process — no network, no subprocess, no timing.

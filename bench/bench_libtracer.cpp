@@ -189,8 +189,28 @@ void run_inproc(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc, bool
     const auto t0 = now_ns();
     for (std::size_t i = 0; i < MSGS; ++i) put(i);
     const double secs = (now_ns() - t0) / 1e9;
+
+    // COUNT the deliveries; do not ASSERT them. This row is charted against a Zenoh row
+    // whose delivery figure is `received / elapsed`, with a stderr warning when the count
+    // comes up short. Publishing `pub_s * F` here would put a measured number on one side
+    // of that chart and an arithmetic one on the other — and the arithmetic side is ours.
+    //
+    // The two agree EXACTLY whenever the graph delivers in full, so no charted number
+    // moves: dispatch is inline (graph.cpp `fan_out` -> `dispatch_edge` runs every
+    // callback on this thread before `write()` returns), which is also why no wait is
+    // needed here the way the Zenoh side needs one. They diverge only where the
+    // arithmetic would be a false claim — `vertex.hpp`'s wide-fan-out snapshot truncates
+    // to its inline prefix when the overflow `try_reserve` fails, and the HANDLER and
+    // STREAM legs shed an entire fan-out on a clone or ring-append failure. In every one
+    // of those cases `write()` still returns success, so the publish loop finishes at full
+    // speed and `pub_s * F` would report deliveries that never happened.
+    const std::uint64_t want = static_cast<std::uint64_t>(MSGS) * F;
+    const std::uint64_t got = recv.load(std::memory_order_relaxed);
+    if (got < want)
+        std::fprintf(stderr, "[libtracer] S=%zu F=%zu E=%zu delivered %llu/%llu (shed)\n", S, F, E,
+                     static_cast<unsigned long long>(got), static_cast<unsigned long long>(want));
     const double pub_s = MSGS / secs;
-    const double deliv_s = pub_s * static_cast<double>(F);
+    const double deliv_s = static_cast<double>(got) / secs;
     const double mb_s = deliv_s * static_cast<double>(S) / 1e6;
 
     // THE p50/p99 COLUMNS OF THIS ROW ARE CLOCK-QUANTIZED. Read `<mode>-batch` for small deltas.
@@ -517,8 +537,17 @@ void run_inproc_deliver(std::size_t S, std::size_t F, std::uint64_t budget = kDe
     const auto t0 = now_ns();
     for (std::size_t i = 0; i < MSGS; ++i) put();
     const double secs = (now_ns() - t0) / 1e9;
+
+    // Counted, not asserted — see the same block in `run_inproc`. `propagate` fans out
+    // through the identical inline `dispatch_edge` path, so the count and `pub_s * F`
+    // agree whenever nothing is shed, and this row is charted against Zenoh's counted one.
+    const std::uint64_t want = static_cast<std::uint64_t>(MSGS) * F;
+    const std::uint64_t got = recv.load(std::memory_order_relaxed);
+    if (got < want)
+        std::fprintf(stderr, "[libtracer] deliver S=%zu F=%zu delivered %llu/%llu (shed)\n", S, F,
+                     static_cast<unsigned long long>(got), static_cast<unsigned long long>(want));
     const double pub_s = MSGS / secs;
-    const double deliv_s = pub_s * static_cast<double>(F);
+    const double deliv_s = static_cast<double>(got) / secs;
     const double mb_s = deliv_s * static_cast<double>(S) / 1e6;
 
     Latency lat;
