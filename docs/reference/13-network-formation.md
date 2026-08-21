@@ -266,8 +266,13 @@ machine managed automatically (RFC-0014).
   transient hold for the duration of a one-shot `read`/`write`/`FWD`. It is **per-hop
   and local**: a multi-hop route holds a ref on *this* node's link only; the next node
   independently refs its own. The steady-state target is **socket up while refcount >
-  0**; when refcount reaches 0 the socket closes and the link goes dormant **while the
-  vertex persists**.
+  0**. The **last standing** release closes the socket and the link goes dormant **while
+  the vertex persists**. A *transient* hold evaporating is a different event: an op-woken
+  socket that never acquired a standing binding **may** stay `up` until loss, and the
+  reference implementation does exactly that (RFC-0014 §4.1 amendment 1 — closing eagerly
+  is equally conforming, and the choice is locally observable only as op latency). What
+  binds at refcount 0 is that the link **never retries in the background**, and that loss
+  or a failed wake-dial there re-dormants with no retry.
 - **A `LISTEN` link ignores refcount.** Its listen socket stays bound and accepting
   until the vertex is retired — reachability is its purpose. Bindings routed through its
   accepted peers do not gate it.
@@ -298,7 +303,7 @@ write-only, non-propagating creator endpoint.
 
 | State | Value | Role | Meaning |
 | --- | --- | --- | --- |
-| `dormant` | `0` | DIAL | The vertex exists; no socket (refcount 0). |
+| `dormant` | `0` | DIAL | The vertex exists; no socket. Refcount is 0 here, but refcount 0 does not imply this state (RFC-0014 §4.1). |
 | `dialing` | `1` | DIAL | A connect attempt is in flight (first-ever or resumed). |
 | `reconnecting` | `2` | DIAL | Retrying toward `up` between backoff waits, whether or not previously up. |
 | `up` | `3` | DIAL | Socket connected, bidirectional. |
@@ -445,6 +450,10 @@ automatic**:
   gate answers on the producer; the fan-in gate answers on the consumer at delivery
   time. A bind that the producer accepts can still be denied on every delivery, and the
   orchestrator that issued it is gone by then.
-- **Assuming a one-shot op leaves a link up.** The transient hold is released before
-  self-heal is evaluated, so a one-shot against an unreachable peer leaves the link
-  dormant with no retry in progress. Only a standing binding keeps it healing.
+- **Assuming a one-shot op leaves a link retrying.** The transient hold is released
+  before self-heal is evaluated, so a one-shot against an unreachable peer leaves the
+  link dormant with no retry in progress. Only a standing binding makes the link
+  self-heal. (A one-shot that *succeeds* is the other case and the opposite mistake:
+  its socket may well still be up, because keep-up-until-loss at refcount 0 is a MAY the
+  reference implementation takes — RFC-0014 §4.1. Neither is a state to rely on; take a
+  standing binding if you need the peer reachable.)

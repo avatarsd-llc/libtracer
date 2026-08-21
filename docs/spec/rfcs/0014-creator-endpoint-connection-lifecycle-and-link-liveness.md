@@ -204,7 +204,8 @@ standing subscription or `await` routed through the link, plus a **transient** h
 of a one-shot `read`/`write`/`FWD`. It is **per-hop and local**: a multi-hop route
 `/net/ws-client/b/net/ws-client/c/sensor` holds a ref on *this* node's link `b`; c's node independently refs its own link
 `c`. For a `DIAL` link the **steady-state target is: socket up while refcount > 0** (the transient
-states `dialing`/`healing` have refcount > 0 with the socket not yet or no longer up). A `LISTEN`
+states `dialing`/`reconnecting` have refcount > 0 with the socket not yet or no longer up — erratum
+2026-08-21: this pair read `dialing`/`healing`, and there is no `healing` state). A `LISTEN`
 link **ignores refcount** — its listen socket stays bound and accepting until the vertex is retired
 (reachability is its purpose); bindings routed through its accepted peers do not gate it.
 
@@ -242,9 +243,15 @@ link **ignores refcount** — its listen socket stays bound and accepting until 
   > tighten within it, never raise how long a task may block.
 - **Liveness enum** (the vertex value; supersedes the binary `set_link_state`):
 
+  > **Erratum (2026-08-21), Amendment 1 (§4.1) — see §Erratum: the `dormant` row is not a
+  > biconditional.** The row below originally read *"vertex exists; no socket (refcount 0)"*,
+  > which reads as *refcount 0 ⇒ `dormant`*. Under §4.1 an op-woken socket with no standing
+  > binding **MAY** remain `up` at refcount 0, so refcount 0 is necessary for `dormant` and not
+  > sufficient. The state set, its meanings and its encoding are unchanged.
+
   | state | role | meaning |
   | --- | --- | --- |
-  | `dormant` | DIAL | vertex exists; no socket (refcount 0) |
+  | `dormant` | DIAL | vertex exists; no socket. Refcount is 0 here, but refcount 0 does **not** imply this state — see §4.1 |
   | `dialing` | DIAL | a connect attempt is in flight (first-ever or resumed) |
   | `reconnecting` | DIAL | retrying toward `up` between backoff waits (whether or not previously up) |
   | `up` | DIAL | socket connected, bidirectional |
@@ -270,7 +277,7 @@ engine, [#492](https://github.com/avatarsd-llc/libtracer/issues/492)). The comme
 and is not invoked.
 
 **The steady-state target stands, for standing bindings.** "Socket up while refcount > 0" is still
-what a `DIAL` link aims at, and the transient states `dialing`/`healing` are still refcount > 0 with
+what a `DIAL` link aims at, and the transient states `dialing`/`reconnecting` are still refcount > 0 with
 the socket not yet or no longer up. What the amendment touches is the *other* direction — what an
 implementation owes the moment refcount reaches 0.
 
@@ -495,3 +502,70 @@ offered the withdrawn door. It aligns the text with RFC-0022 §3.B and with the 
 
 **Text corrected alongside:** [reference/13](../../reference/13-network-formation.md) §Creator
 endpoint — the copied sentence, plus an explicit statement of which keys are consumed today.
+
+## Erratum (2026-08-21) — the `dormant` row states a biconditional §4.1 withdrew
+
+**What the text said.** §4's liveness-enum table, `dormant` row: *"vertex exists; no socket
+(refcount 0)"*. The parenthetical was written when §4's steady-state bullet was read literally as
+"refcount → 0 → close socket", so the row's reading — **refcount 0 ⇒ `dormant`** — was the whole
+truth at the time. `reference/13`'s §Link liveness carried the same reading in prose (*"when
+refcount reaches 0 the socket closes and the link goes dormant"*) and in the same table row.
+
+**What the behaviour is.** **Amendment 1 (§4.1, ruled 2026-08-21, on the divergence flagged in
+[PR #1455](https://github.com/avatarsd-llc/libtracer/pull/1455))** replaced that literal reading
+with a **MAY**: an op-woken socket with no standing binding **MAY** remain `up` until loss, and
+the reference implementation takes exactly that arm — `self_heal_link_t` states it in its own
+contract (*"an op-woken socket with no standing binding stays up until loss rather than being torn
+down per-op"*), and its machine leaves `UP` for `DORMANT` only on **socket loss at refcount 0** or
+on the **last standing release**
+(`core/include/libtracer/self_heal_link.hpp`, landed in
+[PR #1455](https://github.com/avatarsd-llc/libtracer/pull/1455)). So a link at refcount 0 may be
+`up`, and the row as written contradicts the amendment that sits four paragraphs below it.
+
+**The correction.** `dormant` means *the vertex exists and there is no socket*. Refcount is 0 in
+that state — the condition is **necessary and not sufficient**, and the row now says so and points
+at §4.1. The three MUSTs of §4.1 are what bind at refcount 0; the row describes a state, not a
+transition rule, and it never did.
+
+**Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). No wire
+surface moves: the state set is unchanged, the reference encoding of `link_state_t` is unchanged
+(`DORMANT = 0` …), no error identity, frame shape or type code moves, and no conforming
+implementation does anything different — the clause corrected is a *describing* clause about when a
+state holds, and the normative rule it appeared to state was already withdrawn by §4.1. This
+erratum only stops the table from re-asserting the withdrawn reading.
+
+**Text corrected alongside:** [reference/13](../../reference/13-network-formation.md) §Link
+liveness — the "when refcount reaches 0 the socket closes" bullet, the same table row, and the
+one-shot pitfall whose title generalized a failed-dial case into "a one-shot op never leaves a link
+up".
+
+## Erratum (2026-08-21) — there is no `healing` state; the transient state is `reconnecting`
+
+**What the text said.** §4's steady-state sentence and §4.1's restatement of it both name *"the
+transient states `dialing`/`healing`"*.
+
+**What the behaviour is.** There is no `healing` state and there never was one in this RFC. §4's own
+liveness enum — the normative state list, four lines below the first occurrence — enumerates
+`dormant`, `dialing`, `reconnecting`, `up`, `listening`, `bind-failed`, and the shipped engine's
+machine is exactly that set (`link_state_t`, `core/include/libtracer/transport_vertex.hpp`;
+`self_heal_link_t`'s `DORMANT → DIALING → UP / RECONNECTING` transitions, landed in
+[PR #1455](https://github.com/avatarsd-llc/libtracer/pull/1455)). The state the sentence means is
+**`reconnecting`** — *retrying toward `up` between backoff waits* — which is precisely "refcount > 0
+with the socket no longer up". `self_heal_link_t`'s contract deliberately no longer describes its
+own behaviour in words the state model does not carry, and the RFC should not either: an
+implementer reading "`healing`" looks for a seventh state, finds none, and has to guess which of the
+six was meant.
+
+**The correction.** Both occurrences read `dialing`/`reconnecting`. Nothing else in either sentence
+changes: the pair still means "refcount > 0 with the socket not yet (`dialing`) or no longer
+(`reconnecting`) up", which is what §4 and §4.1 both assert about it.
+
+**On correcting a dated instrument.** The second occurrence sits inside **Amendment 1 (§4.1)**, and
+this document does not rewrite dated instruments to match later rulings. This is not that: no
+ruling of §4.1 is touched, no clause changes meaning, and the amendment's three MUSTs and its MAY
+are untouched. What is corrected is a **state name that names nothing** — the same class as a
+mis-spelled enumerator, in text that landed the same day as this erratum.
+
+**Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). No wire
+surface moves: no state is added or removed, the reference encoding is untouched, and a conforming
+implementation cannot have implemented `healing` because no clause ever defined one.
