@@ -16,6 +16,69 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **A producer never queues: the STREAM ring is the RECEIVER's, and it is bounded in BYTES by
+  that vertex's own injected source**
+  ([#1461](https://github.com/avatarsd-llc/libtracer/issues/1461),
+  [#1462](https://github.com/avatarsd-llc/libtracer/issues/1462); RFC-0025 §4.6.1 Amendment 2).
+  `vertex_t::store` — the publish every write funnels through — now has **one tail for every
+  role**: swap the LKV lock-free, bump the sequence, wake awaiters. The producer-side ring
+  machinery it used to run is gone: the `kRingAppendProbe = 1024` heuristic, the deque append
+  under the stripe mutex, and the role fork that decided between them. RFC-0025 §4.6.2 measured
+  that machinery at a **fixed +29 ns (+54 %) per write regardless of depth**, with four writers
+  on one vertex at **1.73 M/s against 4.59 M/s** lock-free.
+
+  The queue did not disappear — it **moved to the party that wants it**. A consumer that wants
+  depth makes **its own** vertex a `role_t::STREAM`; the ring materializes there, and every
+  admitted entry reserves its retained width from **that vertex's own** `mem::block_source_t`.
+
+  **API additions:**
+
+  - `graph_t::set_ring_source(vertex_handle_t, mem::block_source_t*, bool reliable = false)` —
+    the injection seam, sited beside `set_history_depth`. Owner-side, no wire surface.
+    Rebinding drains the ring (reservations are released to the source that served them).
+
+    **It costs no bytes anywhere.** The source, the pressure arm and the gap census hang off
+    the *same lazily-allocated pointer* `vertex_ext_t` already held for the ring's entries
+    (`tr::graph::ring_state_t`), so `sizeof(vertex_t)` is unchanged (#1285 ratchet untouched),
+    `sizeof(vertex_ext_t)` is unchanged, and a vertex that allocates the cold block for its own
+    reasons — app fields, an `:acl`, a handler — and never receives a stream entry pays nothing.
+    The RAM census (`vertex_app5`, `vertex_app5_static`, `reg_escape`) is byte-identical.
+  - A **fourth `graph_t` constructor parameter**, `mem::block_source_t* ring = &mem::heap_source()`
+    — the graph-level DEFAULT ring source, for a receiver that declared none. Appended, so every
+    existing `graph_t{…}` call site compiles unchanged. Exposed as `default_ring_source()`.
+  - `graph_t::ring_reserved_bytes(vertex_handle_t)` and `graph_t::stream_gaps(vertex_handle_t)` —
+    the byte bound's observable and the cumulative `tr::flow::address_shift_gap` census.
+  - `graph_t::drain_unflushed` and `vertex_t::drain_unflushed` gain a trailing
+    `std::uint64_t* gap_before = nullptr` out-param: shed points since the previous drain,
+    surfaced **in order at the shed point**. Existing call sites compile unchanged.
+  - `vertex_t::store_drops_t` gains `ring_shed` (entries the best-effort arm evicted); `any()`
+    now covers both fields.
+
+  **Charging is reservation ADMISSION, not placement.** `try_alloc(retained_bytes)` on append,
+  held until the entry retires, released on retirement. The **payload bytes do not move** —
+  the ring entry is still a `shared_ptr` refcount share and the zero-copy handoff is preserved.
+  Physical placement migration remains the later
+  [#873](https://github.com/avatarsd-llc/libtracer/issues/873) family.
+
+  **Pressure (RFC-0025 §4.4, binding at the receiver ring):** best-effort sheds **the oldest**
+  entry — singular, one per refused admission — accounts the loss through the existing
+  `delivery_drops()` door, and raises a gap; reliable refuses the admission, sheds nothing, and
+  answers `status_t::BACKPRESSURE` to a **local** producer (there is no wire carrier in v1 — the
+  per-edge credit window is parked as the v2 escalation).
+
+  **Behavioural change embedders must know:** cross-writer **total order is no longer implied**
+  by the store path. The stripe mutex used to serialize STREAM appends, so ring order doubled as
+  a global order across writers. Order across producers is now
+  [ADR-0019](../docs/adr/0019-per-producer-monotonic-origin-timestamp.md)'s per-producer HLC
+  stamp, read off the value. Code that inferred a global order from append order must read the
+  stamp instead.
+
+  `set_history_depth` / `history_keep_last` are **unchanged** and still have no wire surface —
+  the depth is the retention *intent* (entries) and the injected source is the *bound* (bytes);
+  both compose, and the intent retires an entry **before** the bound charges the next one. A
+  `stream_depth` key appearing on the wire is **carried verbatim and ignored** (retired as a
+  subscription *request*, not as bytes).
+
 - **`tr::net::transport_vertex_t` no longer holds its control mutex across a call that can
   re-enter it** — the RFC-0014 S6 two-phase seam
   ([#492](https://github.com/avatarsd-llc/libtracer/issues/492),

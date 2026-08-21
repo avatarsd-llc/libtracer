@@ -459,10 +459,20 @@ class graph_t {
      *        retiring @p mr later is a compile error rather than a silent rebind.
      *        Appended, not prepended, so every existing `graph_t{&mr}` call site
      *        compiles unchanged. Must outlive the graph, like the other two.
+     *
+     * @param ring The GRAPH-LEVEL DEFAULT receiver-ring source (RFC-0025 §4.6.1 clause 3):
+     *        where a STREAM vertex's ring admissions are charged when that vertex has
+     *        declared no source of its own (@ref set_ring_source). It is a DEFAULT so that
+     *        every receiver has somewhere to charge — not a shared pool: composition stays
+     *        per-injection-point, and per-vertex isolation is a tested property. A different
+     *        seam from @p ctl on purpose — exhausting a node's control budget and exhausting
+     *        one plane's queue budget are different failures with different blast radii, and
+     *        the flood test asserts exactly that separation. Must outlive the graph.
      */
     explicit graph_t(std::pmr::memory_resource* mr = std::pmr::get_default_resource(),
                      mem::mem_backend_t* value_backend = &mem::heap_backend(),
-                     mem::block_source_t* ctl = &mem::heap_source());
+                     mem::block_source_t* ctl = &mem::heap_source(),
+                     mem::block_source_t* ring = &mem::heap_source());
     graph_t(const graph_t&) = delete;
     graph_t& operator=(const graph_t&) = delete;
 
@@ -474,6 +484,15 @@ class graph_t {
      * library draw from `ctl_` directly.
      */
     [[nodiscard]] mem::block_source_t& control_source() const noexcept { return *ctl_; }
+
+    /**
+     * @brief The graph-level DEFAULT receiver-ring source (RFC-0025 §4.6.1 clause 3).
+     *
+     * What a STREAM vertex charges its ring admissions against until it declares its own
+     * through @ref set_ring_source. Exposed for the same reason @ref control_source is: so a
+     * host can name it in a memory census and so the wiring is observable.
+     */
+    [[nodiscard]] mem::block_source_t& default_ring_source() const noexcept { return *ring_; }
 
     /**
      * @brief Register a vertex at a known-good @p path LITERAL, parsing nothing further (any
@@ -1259,6 +1278,53 @@ class graph_t {
      */
     void set_history_depth(vertex_handle_t v, std::uint32_t keep);
     /**
+     * @brief Bind the RECEIVING vertex @p v's own ring source and §4.4 pressure arm
+     *        (RFC-0025 §4.6.1 clause 3) — owner-side wiring, no wire surface.
+     *
+     * A producer never queues; the queue belongs to whoever consumes it, and it is bounded in
+     * BYTES by that party's own injected `tr::mem::block_source_t`. This is the seam that
+     * injects it, sited beside @ref set_history_depth because the two compose: the depth is
+     * the owner's retention INTENT (entries), the source is the BOUND (bytes), and a shortfall
+     * surfaces through §4.4's pressure contract rather than as a silent shrink of the depth.
+     *
+     * **Charging is reservation ADMISSION, not placement.** Each admitted entry reserves its
+     * retained width from @p src and holds it until the entry retires. The payload bytes
+     * physically stay with the allocators that already hold them — the `shared_ptr` zero-copy
+     * handoff is preserved and an append is still a refcount bump. Physical placement
+     * migration is the later #873 family, not this seam. A reader who assumes the ring's bytes
+     * move into @p src will be wrong.
+     *
+     * **Per-injection-point, never a shared pool.** ADR-0079's amendment measured a folded
+     * source collapsing to 0.01x of its own single-thread rate at T=24; composition is a knob
+     * varied per target, and one receiver running its source dry must not affect another.
+     *
+     * REBINDING DRAINS: every queued entry's reservation is released to the source that served
+     * it and the ring is emptied, so this is a wiring-time call like its neighbours.
+     *
+     * @param v        The receiving STREAM vertex. Meaningful only on that role; on another it
+     *                 stores the wiring and changes nothing, exactly as @ref set_history_depth
+     *                 does.
+     * @param src      The source to charge against; `nullptr` restores @ref default_ring_source.
+     * @param reliable The §4.4 arm. `false` (default) is BEST-EFFORT: a refused admission sheds
+     *                 the oldest entry whole, accounts the loss, and raises
+     *                 `tr::flow::address_shift_gap` in order at the shed point. `true` is
+     *                 RELIABLE: the admission is refused, nothing is shed, the ring never grows
+     *                 past its byte bound, and the LOCAL producer's write answers
+     *                 `status_t::BACKPRESSURE`. There is no wire carrier for backpressure in v1
+     *                 — the per-edge credit window is parked as the v2 escalation (§4.6.1
+     *                 clause 7) — so a remote producer sees the local receiver's drop tally,
+     *                 not a stall.
+     */
+    void set_ring_source(vertex_handle_t v, mem::block_source_t* src, bool reliable = false);
+    /** @brief Bytes @p v's receiver ring currently holds RESERVED against its source — the
+     *         byte bound's observable. `SCHEMA_NOT_FOUND` on a non-STREAM role, matching
+     *         @ref history. */
+    [[nodiscard]] result_t<std::size_t> ring_reserved_bytes(vertex_handle_t v) const;
+    /** @brief Shed points on @p v's receiver ring since registration — the cumulative
+     *         `tr::flow::address_shift_gap` census (RFC-0025 §4.4: a shed with no accounting is
+     *         non-conforming). `SCHEMA_NOT_FOUND` on a non-STREAM role. */
+    [[nodiscard]] result_t<std::uint64_t> stream_gaps(vertex_handle_t v) const;
+    /**
      * @brief Declare @p v's RFC-0022 §3.D pin amplification ratio `K` (ADR-0042 §3);
      *        @ref tr::graph::kPinNever (0, the default) disables pinning on this vertex.
      *
@@ -1335,6 +1401,12 @@ class graph_t {
      *
      * @param v   The STREAM vertex to drain.
      * @param out Caller storage the drained entries are assigned into (overwritten).
+     * @param gap_before Optional out: shed points on this ring since the previous drain — the
+     *            in-order `tr::flow::address_shift_gap` signal of RFC-0025 §4.4/§4.5. Non-zero
+     *            means entries this consumer would have seen are MISSING immediately before
+     *            the returned batch. Written whenever non-null, including on a zero drain, so
+     *            polling a quiet ring still surfaces a shed. Silence is the one behaviour the
+     *            pressure contract forbids, and this is where it is broken.
      * @return The number of entries drained (0 ⇒ nothing appended since the last flush, or
      *         the snapshot could not be allocated — retry on the next flush).
      * @retval status_t::SCHEMA_NOT_FOUND @p v is not a STREAM — no ring, no cursor, the same
@@ -1344,7 +1416,8 @@ class graph_t {
      *         bypass wearing a different verb's name.
      */
     [[nodiscard]] result_t<std::size_t> drain_unflushed(
-        vertex_handle_t v, std::vector<std::shared_ptr<const rope_t>>& out);
+        vertex_handle_t v, std::vector<std::shared_ptr<const rope_t>>& out,
+        std::uint64_t* gap_before = nullptr);
     /**
      * @brief Advance @p v's STREAM drain cursor to "now" WITHOUT draining (RFC-0008 §E) — an
      *        eager delivery already flushed the ring, so a later sweep must not re-deliver.
@@ -2123,6 +2196,10 @@ class graph_t {
     // the owner's own.
     [[nodiscard]] result_t<std::shared_ptr<const rope_t>> store_value(
         vertex_t* v, rope_t&& value, vertex_t::store_drops_t& drops, std::string_view caller);
+    // The source a receiving vertex charges its ring admissions against — its own injected
+    // one, else the graph-level default. One spelling, so "per-injection-point, never a
+    // shared pool" cannot drift between call sites.
+    [[nodiscard]] mem::block_source_t& ring_source_for(vertex_t* v) const noexcept;
     // Branch-write decomposition (RFC-0005): a POINT payload written to `v` lands
     // each value-carrying node at the corresponding descendant vertex as a
     // refcount SUBVIEW of the written frame (creating missing vertices, CREATE-
@@ -2512,6 +2589,21 @@ class graph_t {
      *         can see and nothing gains from.
      */
     mem::block_source_t* ctl_ = &mem::heap_source();
+
+    /** @brief The GRAPH-LEVEL DEFAULT receiver-ring source (RFC-0025 §4.6.1 clause 3): the seam
+     *         a STREAM vertex charges its ring admissions against when it has declared none of
+     *         its own through @ref set_ring_source.
+     *
+     *         A default, not a shared pool by stealth. ADR-0079's amendment measured a FOLDED
+     *         source collapsing to 0.01x of its own single-thread rate at T=24, which is why
+     *         composition stays multiple knobs varied per target and why per-vertex isolation
+     *         is a tested property: a receiver that runs its own source dry must not affect a
+     *         receiver on another. This member exists so a vertex that declared nothing still
+     *         has somewhere to charge, and it defaults to the platform heap.
+     *
+     *         Declared beside `ctl_` for the reason that member documents — a cold pointer
+     *         inserted mid-object shifts `root_` and every hot member after it. */
+    mem::block_source_t* ring_ = &mem::heap_source();
 
     /** @brief The @ref set_vertex_ceiling bound, charged against `vertex_slots_.size()` (#1314).
      *

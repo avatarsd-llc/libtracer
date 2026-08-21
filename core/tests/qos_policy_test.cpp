@@ -341,23 +341,41 @@ void test_schema_enumerates_nothing() {
 // ---------------------------------------------------------------------------
 // §5.7 — the ring depth is owner-side, and nothing is inherited (§3.F).
 
-/** @brief `set_history_depth` drives the ring; no wire operation reaches it. */
+/**
+ * @brief `set_history_depth` drives the RECEIVER's ring; no wire operation reaches it.
+ *
+ * RETARGETED to the receiver side for RFC-0025 §4.6.1 Amendment 2. A producer never queues:
+ * the ring belongs to whoever consumes it, so the depth declaration is exercised on the vertex
+ * that RECEIVES — a consumer's own STREAM vertex, fed by a subscription from the producer —
+ * rather than on the producing vertex. The property under test is unchanged and is exactly
+ * what conformance vector `stream/history-depth-host-only` asserts: the knob is owner-side,
+ * it has NO wire surface, and both wire halves answer the same bytes. Amendment 2 makes it
+ * doubly coherent — the vertex declaring depth is now the vertex holding the ring.
+ */
 void test_history_depth_is_host_only() {
-    std::printf("§5.7 history-depth-host-only — owner-side, no wire surface:\n");
+    std::printf("§5.7 history-depth-host-only — owner-side at the RECEIVER, no wire surface:\n");
     graph_t g;
+    // The PRODUCER is a plain vertex — it never queues (Amendment 2 clause 1). The CONSUMER
+    // makes its OWN vertex a STREAM and subscribes it, which is where the ring materializes.
+    const vertex_handle_t producer = g.register_vertex(path_t("/h/p"), role_t::STORED_VALUE);
     const vertex_handle_t stream = g.register_vertex(path_t("/h/s"), role_t::STREAM);
+    check(g.subscribe(path_t("/h/p"), path_t("/h/s")).has_value(),
+          "the consumer targets its OWN STREAM vertex at the producer");
 
-    // Default depth is 1: the ring keeps the last value only.
-    for (std::uint8_t i = 1; i <= 4; ++i) (void)g.write(stream, byte_value(i));
+    // Default depth is 1: the receiver's ring keeps the last value only.
+    for (std::uint8_t i = 1; i <= 4; ++i) (void)g.write(producer, byte_value(i));
     const auto shallow = g.history(stream);
     check(shallow.has_value() && shallow->size() == 1, "an undeclared ring keeps ONE entry");
+    check(g.history(producer).error() == status_t::SCHEMA_NOT_FOUND,
+          "and the PRODUCER holds no ring at all — a producer never queues");
 
-    // The owner declares a depth; the STORE PATH must read the new value, not merely report it.
+    // The owner declares a depth; the ADMISSION path must read the new value, not merely
+    // report it.
     g.set_history_depth(stream, 3);
-    for (std::uint8_t i = 1; i <= 5; ++i) (void)g.write(stream, byte_value(i));
+    for (std::uint8_t i = 1; i <= 5; ++i) (void)g.write(producer, byte_value(i));
     const auto deep = g.history(stream);
     check(deep.has_value() && deep->size() == 3,
-          "set_history_depth(3) => the ring TRIMS to three (the store path read it)");
+          "set_history_depth(3) => the receiver ring TRIMS to three (the admission read it)");
 
     // And no wire operation reaches it — write or read, whatever the caller.
     check(fails_with(g.write(path_t("/h/s:settings.history_keep_last"), value_le(9, 4)),
@@ -907,6 +925,49 @@ void test_qos_settings_repeat_semantics_are_the_shared_walk() {
 }
 
 /**
+ * @brief A `stream_depth` key on the wire is CARRIED VERBATIM and IGNORED (RFC-0025 §4.6.1,
+ *        "what §4.6 and §4.1.1 lose").
+ *
+ * Amendment 2 retires `stream_depth` as a **subscription request key** — a subscriber does not
+ * ask a producer for a window, it sizes its own receiving vertex's ring in bytes — but it does
+ * NOT retire it as bytes. Under the standing absent-⇒-default doctrine an unconsumed key is
+ * ignored, and the SUBSCRIBER record is stored as written, so the key survives a
+ * `:subscribers[]` round-trip untouched.
+ *
+ * Both halves are asserted because either one alone is satisfiable by the wrong behaviour: a
+ * REFUSAL would also "not change the depth", and a SILENT DROP of the pair would also "not be
+ * honoured". Admitted + unchanged + byte-identical read-back is the only shape that is
+ * carry-and-ignore.
+ */
+void test_stream_depth_is_carried_and_ignored() {
+    std::printf("§4.6.1 — a wire `stream_depth` is carried verbatim and IGNORED:\n");
+    std::vector<std::byte> q;
+    tr::wire::emit_name(q, "stream_depth");
+    std::vector<std::byte> w(4);
+    tr::detail::store_le(w, std::uint32_t{64}, 4);
+    tr::wire::emit_tlv(q, type_t::VALUE, opt_t{}, w);
+    const std::vector<std::byte> sub = b_subscriber_with_qos(q);
+
+    graph_t g;
+    const vertex_handle_t producer = g.register_vertex(path_t("/sd/src"), role_t::STORED_VALUE);
+    (void)g.write(producer, byte_value(0x5A));
+    register_client(g);
+    tr::graph::field_path_t field;
+    field.steps.push_back(
+        tr::graph::field_step_t{.name = "subscribers", .indexed = true, .append = true});
+    check(g.write(producer, field, make_value(sub)).has_value(),
+          "a SUBSCRIBER carrying `stream_depth` is ADMITTED — retired as a request, not refused");
+    check(g_client_writes == 0, "…and buys nothing: no window was requested of the producer");
+
+    // Verbatim: the `:subscribers[]` read-back is the stored source view, byte for byte.
+    const auto stored = g.read_subscribers(producer);
+    check(stored.has_value() && stored->size() == 1, "the subscription is on the vertex");
+    const std::span<const std::byte> back = stored->front().bytes();
+    check(std::ranges::equal(back, std::span<const std::byte>(sub)),
+          "…and reads back BYTE-IDENTICAL — the key is carried, not stripped");
+}
+
+/**
  * @brief The `settings/removed-knob` and `stream/history-depth-host-only` vectors are the
  *        bytes the RESOLVER builds — not a shape a document declared.
  *
@@ -977,6 +1038,7 @@ int main() {
     test_replace_door_latches();
     test_qos_settings_pair_scan_cannot_be_hijacked();
     test_qos_settings_repeat_semantics_are_the_shared_walk();
+    test_stream_depth_is_carried_and_ignored();
     test_removed_knob_reply_bytes();
     return tr::testing::summary("qos_policy");
 }

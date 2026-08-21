@@ -14,7 +14,10 @@ bump, no copy). The last-known-value path takes **no per-vertex mutex**.
 ## What it does
 
 `graph_t` owns the vertex map (keyed on canonical [path](path.md) bytes). Each vertex
-has a **role**: *stored-value* (last-writer-wins), *stream* (a bounded ring whose depth the
+has a **role**: *stored-value* (last-writer-wins), *stream* (the CONSUMER's bounded ring —
+a producer never queues, so the ring lives on the *receiving* vertex and is bounded in BYTES
+by that vertex's own injected `mem::block_source_t` via `set_ring_source`
+([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.6.1) — whose depth the
 owner declares host-side with `set_history_depth`, and which no peer can read or write —
 [RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.C), or *handler* (`on_read` / `on_write` — covering
 computed, proxy, sink, live-MMIO patterns). The last-known-value slot is an
@@ -106,11 +109,17 @@ class graph_t {
     result_t<std::vector<rope_t>> history(vertex_handle_t) const;   // stream window (RETAINED)
     // RFC-0008 §E drain cursor — what the stream OWES, and how to say it is paid
     result_t<std::size_t> drain_unflushed(vertex_handle_t,
-                                          std::vector<std::shared_ptr<const rope_t>>& out);
+                                          std::vector<std::shared_ptr<const rope_t>>& out,
+                                          std::uint64_t* gap_before = nullptr);
     result_t<void>        mark_flushed(vertex_handle_t);
 
     // owner-side storage declarations (RFC-0022 §3.C) — host API only, NO wire surface
     void          set_history_depth     (vertex_handle_t, std::uint32_t keep);
+    // the RECEIVER's byte bound (RFC-0025 §4.6.1) — admission reservations, not placement
+    void          set_ring_source       (vertex_handle_t, mem::block_source_t*,
+                                         bool reliable = false);
+    result_t<std::size_t>   ring_reserved_bytes(vertex_handle_t) const;
+    result_t<std::uint64_t> stream_gaps        (vertex_handle_t) const;
     void          set_pin_payload_ratio (vertex_handle_t, std::uint32_t k);
     std::uint32_t pin_payload_ratio     (vertex_handle_t) const noexcept;
 
@@ -150,7 +159,7 @@ temporary lambda does not compile.
 
 ```{admonition} `ctx` lives until the reclamation policy's grace point — and the library tells you when
 :class: important
-`unsubscribe` **deactivates** the slot (`core/include/libtracer/graph.hpp:1509`); a
+`unsubscribe` **deactivates** the slot (`core/include/libtracer/graph.hpp:1582`); a
 delivery already in flight snapshotted the edge and completes, and the `{fn, ctx}` pair is
 the one leg of that snapshot the library owns no copy of. So "when may I free `ctx`?" is answered by this build's **reclamation policy**
 ([ADR-0080](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0080-reclamation-policy-is-a-build-time-closed-per-target-seam.md),
@@ -167,7 +176,7 @@ The hook runs exactly once, on your thread, outside every graph lock: **inline, 
 **before the enclosing `write()` returns** when you called it from inside one. The
 one-argument overload retires the edge identically and simply carries no signal — which is
 sufficient whenever you unsubscribe from outside a callback, since that call is already
-quiescent on return (`core/include/libtracer/graph.hpp:1467` states the bound on `ctx`).
+quiescent on return (`core/include/libtracer/graph.hpp:1540` states the bound on `ctx`).
 ```
 
 ```{admonition} No strings on the hot path
@@ -217,8 +226,8 @@ for (...) g.write(v, p.field(), setpoint_tlv);           // hot loop — zero st
 ## What a read hands back
 
 `read` and `await` return `result_t<value_ref_t>`, not `result_t<rope_t>`
-(`core/include/libtracer/graph.hpp:1198,1295` by handle, `:1885,1891` by path;
-`value_ref_t` at `core/include/libtracer/vertex.hpp:237`). A `value_ref_t` is an **owning
+(`core/include/libtracer/graph.hpp:1217,1361` by handle, `:1958,1964` by path;
+`value_ref_t` at `core/include/libtracer/vertex.hpp:241`). A `value_ref_t` is an **owning
 reference** to the value the vertex published: the LKV slot holds it as a
 `std::shared_ptr<const rope_t>`, so handing that reference back costs a refcount clone of
 one control block instead of one `segment_ptr_t` clone per link.
@@ -538,6 +547,21 @@ followed by the owner's own announce write.
 ```
 
 ```{doxygenstruct} tr::graph::edge_block_t
+:project: libtracer
+:members:
+```
+
+The receiver-side STREAM ring (RFC-0025 §4.6.1): one lazily-allocated block per receiving
+vertex, holding the queued entries, the `block_source_t` their admissions are charged against,
+the §4.4 pressure arm and the gap census. Each entry carries the reservation it was admitted
+under — admission, not placement: the payload stays where the publish put it.
+
+```{doxygenstruct} tr::graph::ring_state_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::graph::ring_entry_t
 :project: libtracer
 :members:
 ```
