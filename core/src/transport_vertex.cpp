@@ -5,9 +5,11 @@
 
 #include "libtracer/transport_vertex.hpp"
 
+#include <cassert>
 #include <cstring>
 #include <memory>
 #include <span>
+#include <thread>
 #include <utility>
 
 #include "libtracer/builtin_transports.hpp"
@@ -97,6 +99,110 @@ void reemit_tlv(std::vector<std::byte>& out, const tlv_t& tlv) {
 
 }  // namespace
 
+// ---------------------------------------------------------------------------------------
+// The RFC-0014 S6 two-phase control-plane seam (#492). See transport_vertex.hpp's ctl_m_
+// doc for the invariant this type exists to make unskippable.
+// ---------------------------------------------------------------------------------------
+
+transport_vertex_t::ctl_txn_t::ctl_txn_t(const transport_vertex_t& owner, ctl_scope_t scope)
+    : owner_(owner),
+      ops_lock_(owner.ops_m_, std::defer_lock),
+      lock_(owner.ctl_m_, std::defer_lock) {
+    // Both checks run BEFORE their locks, or the diagnosis would be the hang it exists to
+    // replace: a thread that reaches here already holding one has come back round through a
+    // graph or router callback, and both are plain non-recursive std::mutexes.
+    assert(!owner_.ctl_held_by_this_thread() &&
+           "transport_vertex_t::ctl_m_ re-entered: a graph/router callback reached back into "
+           "the control plane. The work that fans out or joins belongs in ctl_txn_t phase 2.");
+    if (scope == ctl_scope_t::OPERATION) {
+        assert(!owner_.ops_held_by_this_thread() &&
+               "transport_vertex_t control-plane operation re-entered from inside its own "
+               "discharge: a liveness subscriber (or another graph/router callback) is "
+               "mutating the control plane. Only the LOOKUP doors are re-entrant.");
+        ops_lock_.lock();
+        owner_.ops_owner_.store(std::this_thread::get_id(), std::memory_order_relaxed);
+    }
+    lock_.lock();
+    owner_.ctl_owner_.store(std::this_thread::get_id(), std::memory_order_relaxed);
+}
+
+transport_vertex_t::ctl_txn_t::~ctl_txn_t() {
+    // The backstop: an early return out of any phase-1 decision still releases the lock and
+    // still discharges. Nothing collected here is failable in a way a destructor could act
+    // on, so the status goes; every explicit caller that wants it calls discharge() itself.
+    (void)discharge();
+    // `ops_m_` outlives phase 2 by exactly this much: the whole operation, decision and
+    // discharge, is one serialized step (see the member's doc). Stamp cleared first, for
+    // the reason release_lock() gives.
+    if (ops_lock_.owns_lock()) {
+        owner_.ops_owner_.store(std::thread::id{}, std::memory_order_relaxed);
+        ops_lock_.unlock();
+    }
+}
+
+void transport_vertex_t::ctl_txn_t::release_lock() {
+    if (!lock_.owns_lock()) return;
+    // Clear the stamp BEFORE unlocking: between the two, another thread could take the
+    // mutex and stamp itself, and a store made after that would overwrite the new owner.
+    owner_.ctl_owner_.store(std::thread::id{}, std::memory_order_relaxed);
+    lock_.unlock();
+}
+
+void transport_vertex_t::ctl_txn_t::publish(vertex_handle_t vertex, link_state_t state) {
+    publish_ = vertex;
+    publish_state_ = state;
+}
+
+void transport_vertex_t::ctl_txn_t::unroute(std::string name) { unroute_ = std::move(name); }
+
+void transport_vertex_t::ctl_txn_t::stop_engine(self_heal_link_t* engine) { stop_ = engine; }
+
+void transport_vertex_t::ctl_txn_t::destroy_link(std::unique_ptr<transport_t> link) {
+    destroy_ = std::move(link);
+}
+
+void transport_vertex_t::ctl_txn_t::retire(vertex_handle_t vertex) { retire_ = vertex; }
+
+result_t<void> transport_vertex_t::ctl_txn_t::discharge() {
+    release_lock();
+    result_t<void> out{};
+    // Teardown order, unchanged from when these lines ran under the lock (#494): un-route
+    // FIRST so the NAME stops resolving before anything is destroyed, then stop the engine
+    // so no liveness write can land on a vertex that is about to retire, then retire, then
+    // destroy the socket.
+    if (!unroute_.empty()) {
+        (void)owner_.router_.remove_child(unroute_);
+        unroute_.clear();
+    }
+    if (stop_ != nullptr) {
+        self_heal_link_t* const engine = stop_;
+        stop_ = nullptr;
+        engine->stop();  // JOINS the worker — the reason this is not under `ctl_m_`
+    }
+    if (retire_) {
+        const vertex_handle_t vertex = *retire_;
+        retire_.reset();
+        out = owner_.graph_.retire(vertex);
+    }
+    destroy_.reset();  // JOINS the receive thread — same reason
+    if (publish_) {
+        const vertex_handle_t vertex = *publish_;
+        publish_.reset();
+        // The fan-out: `write` delivers to this connection's subscribers, and a
+        // routing-plane subscriber drives acquire_link/release_link straight back here.
+        out = owner_.graph_.write(vertex, link_state_value(publish_state_));
+    }
+    return out;
+}
+
+bool transport_vertex_t::ctl_held_by_this_thread() const noexcept {
+    return ctl_owner_.load(std::memory_order_relaxed) == std::this_thread::get_id();
+}
+
+bool transport_vertex_t::ops_held_by_this_thread() const noexcept {
+    return ops_owner_.load(std::memory_order_relaxed) == std::this_thread::get_id();
+}
+
 // SLIM target ctor (@ref slim_net_t): member init + the graph-side catalog wiring,
 // but NO built-in factory registration. This TU-locus deliberately does NOT name
 // register_builtin_transports, so a consumer that only ever calls THIS ctor lets the
@@ -161,7 +267,7 @@ void transport_vertex_t::register_transport_type(std::string kind, transport_fac
 
 void transport_vertex_t::register_transport_type(std::string kind, transport_factory_t factory,
                                                  transport_kind_traits_t traits) {
-    const std::lock_guard ctl(ctl_m_);  // ADR-0063 §3 control-plane serialization
+    const ctl_txn_t txn(*this, ctl_scope_t::OPERATION);  // ADR-0063 §3 serialization
     transport_types_.insert_or_assign(std::move(kind), kind_entry_t{std::move(factory), traits});
 }
 
@@ -170,7 +276,7 @@ result_t<void> transport_vertex_t::register_module(std::string module, std::stri
     // Registration is a minting boundary (ADR-0073 §1): the ONE shared segment-validity
     // predicate gates the name here, exactly as path_t::parse gates the local string tier.
     if (!graph::valid_segment(module)) return std::unexpected(status_t::INVALID_PATH);
-    const std::lock_guard ctl(ctl_m_);  // ADR-0063 §3 control-plane serialization
+    const ctl_txn_t txn(*this, ctl_scope_t::OPERATION);  // ADR-0063 §3 serialization
     // "Adding a module adds its creator endpoint and catalog" (RFC-0014 §1). Minted BEFORE
     // the declaration is recorded, so a refusal leaves nothing half-declared: a module whose
     // endpoint could not be registered would advertise a (kind, role) the wire has no door to.
@@ -190,7 +296,7 @@ result_t<std::string> transport_vertex_t::module_for(std::string_view kind,
     // The PUBLIC entry locks (#881); `make_connection` already holds `ctl_m_` — a plain,
     // NON-RECURSIVE std::mutex (ADR-0063 erratum 1) — so it calls the body directly. The
     // fix is a split precisely because a lock added in place would self-deadlock there.
-    const std::lock_guard ctl(ctl_m_);  // ADR-0063 §3 control-plane serialization
+    const ctl_txn_t txn(*this);  // ADR-0063 §3 control-plane serialization
     return module_for_locked(kind, role);
 }
 
@@ -290,17 +396,29 @@ result_t<void> transport_vertex_t::endpoint_write(const std::string& module,
     const auto payload = wire::decode(*flat);
     if (!payload) return std::unexpected(status_t::TYPE_MISMATCH);
 
-    // ONE critical section for the whole dispatch: parse, declaration lookup, socket
+    // ONE critical section for the whole DECISION: parse, declaration lookup, socket
     // construction and routing all happen under `ctl_m_`, so two peers writing the same
     // endpoint cannot interleave into a half-built connection. Head of the declared lock
     // order (this -> fwd_router_t -> graph_t -> the vertex stripe), and the graph holds none
     // of its own locks across `on_write`, so nothing here descends against that order.
-    const std::lock_guard ctl(ctl_m_);  // ADR-0063 §3 control-plane serialization
+    // What the decision does NOT do is fan out or join: those are phase 2's (S6, #492).
+    ctl_txn_t txn(*this, ctl_scope_t::OPERATION);  // ADR-0063 §3 serialization
     switch (payload->type) {
-        case type_t::SPEC:
-            return endpoint_create_locked(module, *payload);
-        case type_t::NAME:
-            return endpoint_remove_locked(module, detail::as_string_view(payload->payload));
+        case type_t::SPEC: {
+            const result_t<void> made = endpoint_create_locked(txn, module, *payload);
+            // A creation's BIRTH-liveness publish is not the creation's verdict — the
+            // connection exists either way — so its status is dropped here exactly as it
+            // was dropped at the `(void) set_link_state_locked` site it moved from.
+            (void)txn.discharge();
+            return made;
+        }
+        case type_t::NAME: {
+            const result_t<void> removed =
+                endpoint_remove_locked(txn, module, detail::as_string_view(payload->payload));
+            if (!removed) return removed;
+            // A removal's verdict IS the retire's, which phase 2 performs.
+            return txn.discharge();
+        }
         default:
             // Any other payload — a VALUE, an empty write, a structured TLV that is neither
             // control type. The endpoint NEVER falls through to an ordinary assign
@@ -309,7 +427,7 @@ result_t<void> transport_vertex_t::endpoint_write(const std::string& module,
     }
 }
 
-result_t<void> transport_vertex_t::endpoint_create_locked(const std::string& module,
+result_t<void> transport_vertex_t::endpoint_create_locked(ctl_txn_t& txn, const std::string& module,
                                                           const tlv_t& spec) {
     // SPEC{ NAME "name" NAME <seg>, NAME "config" SETTINGS{ pairs }? } — no `type` and no
     // `role`: the module in the path already says both (RFC-0014 §1). Read through the ONE
@@ -359,14 +477,14 @@ result_t<void> transport_vertex_t::endpoint_create_locked(const std::string& mod
     if (settings.kind.empty()) settings.kind = declared->kind;
 
     const auto made =
-        make_connection_locked(module, std::string(name), config, std::move(settings));
+        make_connection_locked(txn, module, std::string(name), config, std::move(settings));
     if (!made) return std::unexpected(made.error());
     // The endpoint is valueless: the handle the creation produced is the connection's, not
     // this vertex's, and it is deliberately not published anywhere the write can return it.
     return {};
 }
 
-result_t<void> transport_vertex_t::endpoint_remove_locked(const std::string& module,
+result_t<void> transport_vertex_t::endpoint_remove_locked(ctl_txn_t& txn, const std::string& module,
                                                           std::string_view name) {
     // An empty NAME names nothing and is not an "absent" connection — it is a malformed
     // control payload, so it is refused rather than swallowed as a no-op success.
@@ -385,7 +503,7 @@ result_t<void> transport_vertex_t::endpoint_remove_locked(const std::string& mod
     // handle, so the endpoint owns this leg: a retried remove after a dropped reply must
     // answer the same as the first one, or teardown is not retry-safe either.
     if (!conns_.contains(qualified)) return {};
-    return remove_connection_locked(qualified);
+    return remove_connection_locked(txn, qualified);
 }
 
 bool transport_vertex_t::is_structural(wire::key_view_t key) const {
@@ -402,7 +520,7 @@ bool transport_vertex_t::is_structural(wire::key_view_t key) const {
     // connection (`<net_root>/<module>/<name>`) or below one — the peer's mounted graph.
     if (!parent.parent().empty()) return false;
     if (detail::as_string_view(parent.last_segment()) != root) return false;
-    const std::lock_guard ctl(ctl_m_);  // ADR-0063 §3 control-plane serialization
+    const ctl_txn_t txn(*this);  // ADR-0063 §3 control-plane serialization
     for (const module_decl_t& d : modules_) {
         if (d.module == leaf) return true;
     }
@@ -429,7 +547,7 @@ bool transport_vertex_t::is_structural(wire::key_view_t key) const {
 }
 
 void transport_vertex_t::provide_link(std::string module, std::string name, transport_t& link) {
-    const std::lock_guard ctl(ctl_m_);  // ADR-0063 §3 control-plane serialization
+    const ctl_txn_t txn(*this, ctl_scope_t::OPERATION);  // ADR-0063 §3 serialization
     std::string key = std::move(module);
     key.push_back('/');
     key += name;
@@ -439,7 +557,7 @@ void transport_vertex_t::provide_link(std::string module, std::string name, tran
 result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::byte> child_key,
                                                               const tlv_t* config,
                                                               conn_role_t role) {
-    const std::lock_guard ctl(ctl_m_);  // ADR-0063 §3 control-plane serialization
+    ctl_txn_t txn(*this, ctl_scope_t::OPERATION);  // ADR-0063 §3 serialization
     // ORDERING INVARIANT (#688 trace): this function is reached ONLY through the graph's
     // child-type catalog, i.e. from `graph_t::create_child`, which runs THE segment
     // predicate (`graph::valid_segment`, ADR-0073 §1) on the peer-supplied name BEFORE it
@@ -506,10 +624,17 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::b
 
     // The module is resolved; everything below is the door-independent half (RFC-0014 S2b
     // split the creator endpoint out as a SECOND door onto exactly this body).
-    return make_connection_locked(module, name, config, std::move(settings));
+    const auto made = make_connection_locked(txn, module, name, config, std::move(settings));
+    // Phase 2 before the handle goes back to the graph's `create_child`, so a `:children[]`
+    // creation still returns with its birth liveness already published — the observable
+    // shape is unchanged; only the lock state under the publish is. Status dropped for the
+    // reason `endpoint_write`'s create leg gives.
+    (void)txn.discharge();
+    return made;
 }
 
-result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(const std::string& module,
+result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(ctl_txn_t& txn,
+                                                                     const std::string& module,
                                                                      const std::string& name,
                                                                      const tlv_t* config,
                                                                      conn_settings_t settings) {
@@ -662,10 +787,10 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(const std::
 
     const bool constructed = owned != nullptr && engine == nullptr;
     const conn_role_t effective_role = settings.role;
-    conns_.insert_or_assign(qualified, conn_t{.vertex = *v,
-                                              .settings = std::move(settings),
-                                              .owned = std::move(owned),
-                                              .engine = engine});
+    const auto inserted = conns_.insert_or_assign(qualified, conn_t{.vertex = *v,
+                                                                    .settings = std::move(settings),
+                                                                    .owned = std::move(owned),
+                                                                    .engine = engine});
 
     // Wire the link into the router's child_registry_t — the single owner of the
     // NAME→link demux table (Brick 3a). The `/net/<name>` NAME is exactly the router
@@ -688,7 +813,12 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(const std::
     // dead connection.
     if (!router_.add_child(qualified, *link)) {
         (void)graph_.retire(*v);
-        conns_.erase(qualified);
+        // The config-constructed socket's destructor JOINS its receive thread, so it is
+        // handed to phase 2 like every other join (S6, #492) instead of running here under
+        // `ctl_m_`; the map entry itself goes now, so nothing observes a half-built
+        // connection once the lock drops.
+        txn.destroy_link(std::move(inserted.first->second.owned));
+        conns_.erase(inserted.first);
         return std::unexpected(status_t::BACKPRESSURE);
     }
     // The staged link is CONSUMED only once the connection is fully wired. Erasing it before
@@ -715,86 +845,107 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(const std::
     // `role` in its config, and in that case the old read published a `client` type's `UP`
     // over a socket the factory had just BOUND as a listener.
     if (constructed)
-        (void)set_link_state_locked(qualified, effective_role == conn_role_t::LISTEN
-                                                   ? link_state_t::LISTENING
-                                                   : link_state_t::UP);
+        (void)set_link_state_locked(
+            txn, qualified,
+            effective_role == conn_role_t::LISTEN ? link_state_t::LISTENING : link_state_t::UP);
     // An engine-managed connection is born RESTING (RFC-0014 §4: vertex exists, no
-    // socket, refcount 0) — the one initial publish the engine's worker does not own,
-    // made here under ctl_m_ before any op can reach the link.
-    if (engine != nullptr) (void)set_link_state_locked(qualified, link_state_t::DORMANT);
+    // socket, refcount 0) — the one initial publish the engine's worker does not own.
+    // COLLECTED here, before any op can reach the link, and written by phase 2 once
+    // `ctl_m_` is down: a birth publish fans out like any other (S6, #492).
+    if (engine != nullptr) (void)set_link_state_locked(txn, qualified, link_state_t::DORMANT);
     return v;
 }
 
 result_t<void> transport_vertex_t::remove_connection(std::string_view name) {
-    // The PUBLIC entry locks (#881); the RFC-0014 `NAME`-write dispatch already holds
-    // `ctl_m_` — a plain, NON-RECURSIVE std::mutex — so it calls the body directly.
-    const std::lock_guard ctl(ctl_m_);  // ADR-0063 §3 control-plane serialization
-    return remove_connection_locked(name);
+    // The PUBLIC entry opens the transaction (#881); the RFC-0014 `NAME`-write dispatch
+    // already has one open — `ctl_m_` is a plain, NON-RECURSIVE std::mutex — so it calls
+    // the body directly with its own.
+    ctl_txn_t txn(*this, ctl_scope_t::OPERATION);  // ADR-0063 §3 serialization
+    const result_t<void> removed = remove_connection_locked(txn, name);
+    if (!removed) return removed;
+    return txn.discharge();
 }
 
 /** @brief `remove_connection`'s body, for a caller that already holds `ctl_m_`. */
-result_t<void> transport_vertex_t::remove_connection_locked(std::string_view name) {
+result_t<void> transport_vertex_t::remove_connection_locked(ctl_txn_t& txn, std::string_view name) {
     const auto it = conns_.find(name);
     if (it == conns_.end()) return std::unexpected(status_t::NOT_FOUND);
-    // Un-route BEFORE anything is destroyed: after this the NAME resolves to nothing,
-    // so the socket below can go without a forward ever reaching freed memory (#494).
-    (void)router_.remove_child(name);
-    // Stop the S5 engine BEFORE the vertex retires: its worker publishes liveness by
-    // writing that vertex, and stop() joins the worker — after this line nothing can
-    // write a retired vertex. Safe under ctl_m_: the engine's worker never takes it
-    // (its publisher writes the graph directly, see make_connection_locked).
-    if (it->second.engine != nullptr) it->second.engine->stop();
-    // Retire the identity vertex (RFC-0009 §B.6): /net/<name> re-virginizes, so a later
-    // connection may take the same name — which is exactly the tombstone the registry
-    // reuses. Retiring an already-retired or unregistered vertex is a no-op, so a
-    // half-built connection tears down cleanly too.
+    // Everything below is COLLECTED, in the order #494 fixed and phase 2 replays:
     //
-    // #576: this is the peer-driven append site of the value-seam park — but only for a BUS
-    // link. The identity vertex bears a value seam iff it was given one above, and that
-    // happens only when `link->bus() != nullptr` (CAN; a tcp/ws server wired
+    //  1. Un-route BEFORE anything is destroyed: after this the NAME resolves to nothing,
+    //     so the socket can go without a forward ever reaching freed memory.
+    //  2. Stop the S5 engine BEFORE the vertex retires: its worker publishes liveness by
+    //     writing that vertex. `stop()` JOINS the worker, and the worker may be inside a
+    //     publish whose fan-out reaches a subscriber that calls back in here (S6's own
+    //     wiring does exactly that) — which is why it must not run under `ctl_m_`.
+    //  3. Retire the identity vertex (RFC-0009 §B.6): /net/<name> re-virginizes, so a later
+    //     connection may take the same name — which is exactly the tombstone the registry
+    //     reuses. Retiring an already-retired or unregistered vertex is a no-op, so a
+    //     half-built connection tears down cleanly too.
+    //  4. Destroy the owned socket, which joins its recv thread — the second join, and the
+    //     second reason phase 2 exists. A provided link is borrowed and left untouched.
+    //
+    // #576: step 3 is the peer-driven append site of the value-seam park — but only for a
+    // BUS link. The identity vertex bears a value seam iff it was given one at creation, and
+    // that happens only when `link->bus() != nullptr` (CAN; a tcp/ws server wired
     // `peer_named = true`). Tearing down a point-to-point connection — every dial link, UDP,
     // loopback, a default-wired server — parks NOTHING, so a default deployment never needs
     // a collect() point. A bus node parks one ~96 B value_handlers_t per teardown, which is
-    // the case #576 exists for. We do NOT collect here even then: we
-    // are under ctl_m_ and on whatever thread the teardown arrived on, which is precisely
-    // the free location graph_t::collect() exists to take out of the library's hands. The
-    // embedder calls collect() where it knows no reader holds a seam.
-    const auto retired = graph_.retire(it->second.vertex);
-    // Erasing the entry destroys `owned` — the config-constructed socket — which joins
-    // its recv thread. A provided link is borrowed and is left untouched.
+    // the case #576 exists for. We do NOT collect here even then: this runs on whatever
+    // thread the teardown arrived on, which is precisely the free location graph_t::collect()
+    // exists to take out of the library's hands. The embedder calls collect() where it knows
+    // no reader holds a seam.
+    txn.unroute(std::string(name));
+    txn.stop_engine(it->second.engine);
+    txn.retire(it->second.vertex);
+    txn.destroy_link(std::move(it->second.owned));
+    // The map entry goes NOW, under the lock, while the identity vertex is still registered
+    // — so a same-name creation racing this teardown is refused `PATH_IN_USE` by
+    // `register_vertex_key` until phase 2's retire lands, and by then phase 2's un-route has
+    // landed too. There is no window in which two connections own one routing NAME.
     conns_.erase(it);
-    return retired;
+    return {};
 }
 
 result_t<void> transport_vertex_t::set_link_state(std::string_view name, link_state_t state) {
-    // The PUBLIC entry locks (#881). This is the liveness door a TRANSPORT thread knocks
-    // on for a provided link, while create/remove is wire-driven on a receive thread — so
-    // the unguarded find here walked `conns_` mid-rebalance and could return a node
-    // `remove_connection` was erasing. `make_connection` publishes creation liveness from
-    // inside its own locked section via `set_link_state_locked`, which is why the fix is a
-    // split: `ctl_m_` is non-recursive, so it cannot re-enter through this wrapper.
-    const std::lock_guard ctl(ctl_m_);  // ADR-0063 §3 control-plane serialization
-    return set_link_state_locked(name, state);
+    // The PUBLIC entry opens the transaction (#881). This is the liveness door a TRANSPORT
+    // thread knocks on for a provided link, while create/remove is wire-driven on a receive
+    // thread — so the unguarded find here walked `conns_` mid-rebalance and could return a
+    // node `remove_connection` was erasing. `make_connection` collects creation liveness on
+    // its own transaction via `set_link_state_locked`, which is why the fix is a split:
+    // `ctl_m_` is non-recursive, so it cannot re-enter through this wrapper. `OPERATION`
+    // scope: the resolution and the write it defers are ONE step against a concurrent
+    // teardown of the same connection, which is what stops the write landing on a vertex
+    // mid-retire (see `ops_m_`).
+    ctl_txn_t txn(*this, ctl_scope_t::OPERATION);  // ADR-0063 §3 serialization
+    const result_t<void> resolved = set_link_state_locked(txn, name, state);
+    if (!resolved) return resolved;
+    // The verdict IS the write's, and the write is phase 2's.
+    return txn.discharge();
 }
 
 /** @brief `set_link_state`'s body, for a caller that already holds `ctl_m_`. */
-result_t<void> transport_vertex_t::set_link_state_locked(std::string_view name,
+result_t<void> transport_vertex_t::set_link_state_locked(ctl_txn_t& txn, std::string_view name,
                                                          link_state_t state) {
     const auto it = conns_.find(name);
     if (it == conns_.end()) return std::unexpected(status_t::NOT_FOUND);
-    // A write to the vertex value bumps write_seq_ + delivers to subscribers (RFC-0008
-    // §D) — so await(/net/<name>) fires and a subscribe streams the transition. Reached
-    // under `ctl_m_`, which is the head of the declared lock order (this → fwd_router_t
-    // ctl_m_ → graph_t map_mutex_ → the vertex stripe), so descending into the graph from
-    // here takes the locks in that order and never against it.
-    return graph_.write(it->second.vertex, link_state_value(state));
+    // Resolution is all that happens under the lock. The write itself bumps write_seq_ and
+    // DELIVERS to subscribers (RFC-0008 §D) — so await(/net/<name>) fires and a subscribe
+    // streams the transition — and a routing-plane subscriber of this very connection's
+    // liveness drives `acquire_link`/`release_link` (RFC-0014 §4's standing-binding seam),
+    // straight back into `ctl_m_`. Publishing from here re-entered a non-recursive mutex on
+    // its own thread; the collected write runs in phase 2 with the lock down (S6, #492).
+    txn.publish(it->second.vertex, state);
+    return {};
 }
 
 result_t<void> transport_vertex_t::acquire_link(std::string_view name) {
-    const std::lock_guard ctl(ctl_m_);  // ADR-0063 §3 control-plane serialization
+    const ctl_txn_t txn(*this);  // ADR-0063 §3 control-plane serialization
     const auto it = conns_.find(name);
     if (it == conns_.end()) return std::unexpected(status_t::NOT_FOUND);
-    // Lock order: ctl_m_ → the engine's own mutex; the engine never takes ctl_m_ back.
+    // Lock order: ctl_m_ → the engine's own mutex; the engine never takes ctl_m_ back, and
+    // neither `acquire` nor `release` joins a thread or dispatches — they flip the refcount
+    // and kick the worker — so they stay in phase 1 where the `conns_` lookup already is.
     // A connection without an engine answers success as a no-op (see the header: a
     // LISTEN ignores refcount per RFC-0014 §4, and a manual link's liveness is manual).
     if (it->second.engine != nullptr) it->second.engine->acquire();
@@ -802,7 +953,7 @@ result_t<void> transport_vertex_t::acquire_link(std::string_view name) {
 }
 
 result_t<void> transport_vertex_t::release_link(std::string_view name) {
-    const std::lock_guard ctl(ctl_m_);  // ADR-0063 §3 control-plane serialization
+    const ctl_txn_t txn(*this);  // ADR-0063 §3 control-plane serialization
     const auto it = conns_.find(name);
     if (it == conns_.end()) return std::unexpected(status_t::NOT_FOUND);
     if (it->second.engine != nullptr) it->second.engine->release();
@@ -810,15 +961,15 @@ result_t<void> transport_vertex_t::release_link(std::string_view name) {
 }
 
 const conn_settings_t* transport_vertex_t::settings_of(std::string_view name) const {
-    const std::lock_guard ctl(
-        ctl_m_);  // ADR-0063 §3 — readers of conns_ race the insert's rebalance
+    // ADR-0063 §3 — readers of conns_ race the insert's rebalance
+    const ctl_txn_t txn(*this);
     const auto it = conns_.find(name);
     return it == conns_.end() ? nullptr : &it->second.settings;
 }
 
 transport_t* transport_vertex_t::link_of(std::string_view name) const {
-    const std::lock_guard ctl(
-        ctl_m_);  // ADR-0063 §3 — readers of conns_ race the insert's rebalance
+    // ADR-0063 §3 — readers of conns_ race the insert's rebalance
+    const ctl_txn_t txn(*this);
     const auto it = conns_.find(name);
     return it == conns_.end() ? nullptr : it->second.owned.get();
 }

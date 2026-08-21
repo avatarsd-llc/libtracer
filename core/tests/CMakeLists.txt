@@ -1469,6 +1469,17 @@ if(LIBTRACER_NET_PLANE)
     target_link_libraries(link_liveness_test PRIVATE libtracer)
     libtracer_test_warnings(link_liveness_test)
     add_test(NAME link_liveness COMMAND link_liveness_test)
+
+    # RFC-0014 S6 (#492) — the control-plane lock-order invariant: `ctl_m_` is never held
+    # across a call that can re-enter transport_vertex_t (a subscriber fan-out, an engine
+    # or socket thread join). The regressions are DEADLOCKS, so each exercise runs on its
+    # own thread behind a watchdog and reports [FAIL] rather than hanging out to the ctest
+    # timeout; the TIMEOUT below is only the backstop for the backstop.
+    add_executable(net_lock_order_test net_lock_order_test.cpp)
+    target_link_libraries(net_lock_order_test PRIVATE libtracer)
+    libtracer_test_warnings(net_lock_order_test)
+    add_test(NAME net_lock_order COMMAND net_lock_order_test)
+    set_tests_properties(net_lock_order PROPERTIES TIMEOUT 180)
 endif()
 
 if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_UDP AND LIBTRACER_TRANSPORT_WS)

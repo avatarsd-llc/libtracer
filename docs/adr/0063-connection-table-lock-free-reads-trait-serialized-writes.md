@@ -25,7 +25,7 @@ Exploring the write side found the problem is wider than the registry. `transpor
 
 2. **Slot addresses become permanently stable**, which is a deliberate second effect, not a side effect — see Consequences.
 
-3. **The control plane serializes writers with a plain `std::mutex`** — one on `transport_vertex_t`, one on `fwd_router_t` — covering `make_connection` / `remove_connection` / `provide_link` and `add_child` / `remove_child` in full, and **never taken by the forward path**. *(Revised — see Erratum 1. This decision originally specified the ADR-0060 §2 arch-selected sync trait; that was wrong, and the reasons are recorded below rather than quietly dropped.)*
+3. **The control plane serializes writers with a plain `std::mutex`** — one on `transport_vertex_t`, one on `fwd_router_t` — covering `make_connection` / `remove_connection` / `provide_link` and `add_child` / `remove_child` in full, and **never taken by the forward path**. *(Revised — see Erratum 1. This decision originally specified the ADR-0060 §2 arch-selected sync trait; that was wrong, and the reasons are recorded below rather than quietly dropped. Revised again — see Erratum 7: "in full" no longer means "including the fan-out and the joins".)*
 
 4. **`child_t::multi_peer` becomes atomic.** Increment 1 made the *append* publish safely, but `add()` also **rebinds** an existing slot (the tombstone-reuse path that RFC-0014 create/remove churn takes constantly), and that rebind plainly writes `multi_peer` while the forward path plainly reads it (`fwd_router.cpp:212`, and the ADR-0062 cache probe at `:790`). Only `link` was atomic, so this was a genuine reader-vs-writer data race that increment 1 did not close — see Erratum 3. *(Superseded — see Erratum 6: the shape is no longer its own field. The requirement stands; the mechanism changed.)*
 
@@ -127,6 +127,43 @@ longer exists; decision 4's *requirement* — the shape must not be a plain fiel
 lock-free read — is upheld more strongly, its *mechanism* is superseded. `sizeof(child_t)` is
 unchanged at 80 bytes and the forward path now takes one load where it took two.
 
+**Erratum 7 (2026-08-21) — a lock ORDER was never the whole discipline, and the half this ADR
+omitted is the half that deadlocks.** Decision 3 says the control-plane mutexes cover their
+operations "in full", and the class documents an order — `transport_vertex_t::ctl_m_ →
+fwd_router_t::ctl_m_ → graph_t::map_mutex_ → the vertex stripe`. An order constrains which lock may
+nest inside which. It says nothing about a call that leaves the class entirely and comes back round
+the outside, and two of `transport_vertex_t`'s own calls do exactly that:
+
+- **the liveness publish.** `set_link_state` (and creation's birth `UP`/`LISTENING`/`DORMANT`) wrote
+  the connection vertex from inside the hold. `graph_t::write` FANS OUT to that vertex's
+  subscribers, and this ADR's own Consequences already said the rule — *"anything called under the
+  control-plane trait must not re-enter the graph's mutation APIs"* — it just did not name a caller
+  that would. RFC-0014 §4 names one: the standing-binding seam (`acquire_link` / `release_link`) is
+  driven by the routing plane off the liveness it is watching. That subscriber re-enters `ctl_m_`,
+  which is a plain **non-recursive** `std::mutex`, on the publishing thread. Self-deadlock.
+- **the teardown joins.** `remove_connection` called `self_heal_link_t::stop()` — which joins the
+  engine's worker, the sole publisher of liveness — and then destroyed the socket, joining its
+  receive thread, both under the hold. With the same subscriber on the other end of a publish in
+  flight, teardown waits for the worker while the worker waits for teardown's lock. Two-thread
+  deadlock, and not a rare interleaving: the worker publishes with its own `m_` released precisely
+  so the fan-out may take graph locks.
+
+**The rule this ADR should have carried, and now does:** `ctl_m_` is never held across a call that
+can re-enter `transport_vertex_t` — a subscriber fan-out or a thread join. Decision 3's "in full"
+means the DECISION, not the discharge. `transport_vertex_t::ctl_txn_t` (RFC-0014 S6,
+[#492](https://github.com/avatarsd-llc/libtracer/issues/492)) is the mechanism: phase 1 decides
+under the mutex and touches only this class's own maps, phase 2 releases it and *then* un-routes,
+stops, retires, destroys and publishes. It is the class's only acquisition of `ctl_m_`, the
+discharge is its destructor's rather than a hand-written unlock path, and it stamps the holding
+thread so a re-entry asserts instead of hanging. The declared ORDER is unchanged and still holds for
+what remains inside the hold — `graph_t::find` / `register_vertex_key` / `hide_from_enumeration` and
+`fwd_router_t::add_child`, all structural mutations that dispatch nothing and join nothing.
+`core/tests/net_lock_order_test.cpp` gates both arms; each reds under the corresponding ablation.
+
+Erratum 4's warning generalises here: a naive test passes. Both regressions are DEADLOCKS rather
+than data races, so a sanitizer is the second net, not the first — the test that fails is one that
+runs each exercise behind a watchdog and holds the worker's fan-out open while the teardown lands.
+
 ## Considered options
 
 - **A `std::mutex` control-plane lock.** Originally rejected on embedded cost — an uncontended host lock/unlock is **3 ns**, but ADR-0060 §2 measures a **FreeRTOS semaphore round-trip at ~2 µs**, and a second mechanism beside an established trait looked incoherent. **This rejection is withdrawn (Erratum 1):** the trait was never built, cannot wrap a section that blocks on sockets and `map_mutex_`, and a spinlock there risks unbounded priority inversion. The 2 µs figure is also a data-path number applied to a control plane this ADR calls non-hot — ~0.1% of a multi-millisecond connection setup. **This is now the decision.**
@@ -143,8 +180,8 @@ unchanged at 80 bytes and the forward path now takes one load where it took two.
 
 - **The forward path is unchanged and must stay so.** It already avoids the registry for the inbound mount run (#525, the run is carried on the link's receiver ctx), and its remaining `by_segments` scan is a plain traversal — a chunked list traverses as a linked walk instead of a contiguous one, which may cost a little locality. That must be measured against `bench_forward_demux`, not assumed: current baseline is ~112 ns fixed plus ~3.9 ns per registered link.
 
-- **This class is currently unpoliced.** The `tsan` CI job exists but does not exercise concurrent creates. A TSan test that hammers create/remove against a live forward stream lands with this change, or the invariant is only asserted in prose.
+- **This class is currently unpoliced.** The `tsan` CI job exists but does not exercise concurrent creates. A TSan test that hammers create/remove against a live forward stream lands with this change, or the invariant is only asserted in prose. *(Discharged twice: `net_control_plane_race_test` for the writer-vs-reader races, and `net_lock_order_test` for the re-entrancy discipline of Erratum 7.)*
 
-- **`transport_vertex_t` gains its first synchronization.** Anything called under the control-plane trait must not re-enter the graph's mutation APIs or block — the same discipline `graph.hpp:942` already documents for resolvers, and sharper here if the trait resolves to an interrupt-disable critical section.
+- **`transport_vertex_t` gains its first synchronization.** Anything called under the control-plane trait must not re-enter the graph's mutation APIs or block — the same discipline `graph.hpp:942` already documents for resolvers, and sharper here if the trait resolves to an interrupt-disable critical section. *(This was the right rule and it was not upheld: the liveness publish and the teardown joins both violated it from the start. Erratum 7 gives it a mechanism — `ctl_txn_t` — instead of a hope.)*
 
 - **ADR-0061's "immutable after setup" premise is formally retired.** Its erratum already records that the registry mutates at runtime; this ADR is where that fact acquires a mechanism instead of a caveat.
