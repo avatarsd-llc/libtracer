@@ -140,7 +140,8 @@ One control vertex serves both; the **TLV type of the written value** selects wh
   already retired) is a **no-op success** at the endpoint layer (`retire()`'s own idempotence only
   covers an already-resolved-but-unregistered handle). A resolvable member is passed to
   `graph_t::retire()`. `NAME{conn}` (or any reserved/protocol-owned name) is **rejected**
-  (`ERROR{tr::acl::permission_denied}`) and never routes to `retire()` — the endpoint cannot
+  (`ERROR{tr::access::denied}` — erratum 2026-08-21; this read `tr::acl::permission_denied`, which
+  is not a registered identity) and never routes to `retire()` — the endpoint cannot
   self-destruct.
 - **Any other payload** (empty, or a TLV type that is neither `SPEC` nor `NAME`) →
   `ERROR{tr::schema::type_mismatch}`. The endpoint never falls through to an ordinary assign.
@@ -538,6 +539,40 @@ erratum only stops the table from re-asserting the withdrawn reading.
 liveness — the "when refcount reaches 0 the socket closes" bullet, the same table row, and the
 one-shot pitfall whose title generalized a failed-dial case into "a one-shot op never leaves a link
 up".
+
+## Erratum (2026-08-21) — §2 spells the reserved-name refusal with an unregistered identity
+
+**What the text said.** §2, the `NAME` ⇒ remove bullet: `NAME{conn}` (or any reserved name) is
+rejected *"(`ERROR{tr::acl::permission_denied}`)"*.
+
+**What was wrong.** `tr::acl::permission_denied` is **not a registered error identity**, and could
+not be: [RFC-0002](0002-protocol-error-model.md) §A draws `<concept>` from a **frozen** set —
+*frame · tlv · path · schema · flow · access · transport · version* — in which `acl` does not
+appear, and §D's registry has no such row. The registered identity for this refusal is
+**`tr::access::denied` (`0x0050`)**, whose reserved status byte is `0x02 PERMISSION_DENIED` — which
+is exactly what the reference implementation answers: `status_t::PERMISSION_DENIED` maps to
+`wire::err_t::ACCESS_DENIED` in `core/src/fwd_reply.cpp`, and `ACCESS_DENIED = 0x0050` is spelled
+`tr::access::denied` at its declaration (`core/include/libtracer/error.hpp`). The RFC named the
+*status byte's* spelling under a concept word the registry does not have; the bytes on the wire
+were never in doubt.
+
+It is also a house naming-rule violation in its own right (`CLAUDE.md`: a namespace *"never reuses
+an error-concept word"*) — `acl` sitting beside the registered `access` is precisely that
+collision, and the access-mask bits §5 gates on are what invited it.
+
+**The correction.** §2 reads `ERROR{tr::access::denied}`. Nothing else in §2 or §5 changes; the
+`WRITE`-gating of `NAME` and the reserved-name rule are untouched.
+
+**Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). **No wire
+surface moves** — this is the strongest case of that in the batch: the corrected token was never a
+wire value, the error code (`0x0050`) and the status byte (`0x02`) are unchanged and unchangeable
+here, and a conforming implementation could not have implemented the spelling that was written
+because no such identity exists to emit.
+
+**Provenance.** Surfaced by the **#492 S7-A** car while building the control-plane conformance
+vectors; its `conn/remove-reserved-rejected` vector pins `0x0050` off a real reply, so the shipped
+side is nailed down by a vector rather than by inspection. Recorded on
+[#492](https://github.com/avatarsd-llc/libtracer/issues/492).
 
 ## Erratum (2026-08-21) — there is no `healing` state; the transient state is `reconnecting`
 
