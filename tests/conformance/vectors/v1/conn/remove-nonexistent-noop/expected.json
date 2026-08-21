@@ -1,0 +1,15 @@
+{
+  "name": "remove-nonexistent-noop",
+  "category": "conn",
+  "hex": "020005006e65766572",
+  "total_bytes": 9,
+  "decoded": {
+    "type": "0x02 NAME",
+    "structured": false,
+    "meaning": "NAME{\"never\"} — RFC-0014 §2 `remove-nonexistent-noop`: a removal naming a connection that does not resolve is a NO-OP SUCCESS, not an error",
+    "fields": {
+      "name": "never"
+    },
+    "note": "Structurally identical to `conn/remove-via-name`; only the payload string differs, and the outcome is decided by what the name resolves to at the endpoint — not by anything in these bytes. An unresolvable name (never created, or already retired) succeeds so that a retried teardown after a dropped reply is safe. `graph_t::retire()`'s own idempotence covers only an already-resolved-but-unregistered handle, so this leg belongs to the endpoint."
+  }
+}

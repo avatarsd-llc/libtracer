@@ -1,0 +1,15 @@
+{
+  "name": "remove-reserved-rejected",
+  "category": "conn",
+  "hex": "02000400636f6e6e",
+  "total_bytes": 8,
+  "decoded": {
+    "type": "0x02 NAME",
+    "structured": false,
+    "meaning": "NAME{\"conn\"} — RFC-0014 §2/§3 `remove-reserved-rejected`: the endpoint cannot be made to remove itself; the write is REFUSED and never routes to retire()",
+    "fields": {
+      "name": "conn"
+    },
+    "note": "`conn` is a reserved, protocol-owned name per module. The refusal is the registered identity `tr::access::denied` (0x0050) — the wire code the reference implementation's status_t::PERMISSION_DENIED maps to (core/src/fwd_reply.cpp). RFC-0014 §2 spells this `tr::acl::permission_denied`, which is NOT a registered identity in RFC-0002 §D's table; the registered spelling is `tr::access::denied`. Under RFC-0014 §Discussion's clause-kind rule the error identity is pinned by code PLUS this vector, so 0x0050 is what a conformant peer reads and the RFC's spelling is an erratum, not a second code."
+  }
+}

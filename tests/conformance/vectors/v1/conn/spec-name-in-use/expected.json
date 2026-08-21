@@ -1,0 +1,19 @@
+{
+  "name": "spec-name-in-use",
+  "category": "conn",
+  "hex": "0e403e00020004006e616d6502000200757002000600636f6e6669670b40220002000400616464720200080031302e302e302e3902000400706f7274010002002823",
+  "total_bytes": 66,
+  "decoded": {
+    "type": "0x0E SPEC",
+    "structured": true,
+    "meaning": "SPEC{NAME \"name\" NAME \"up\", NAME \"config\" SETTINGS{NAME \"addr\" NAME \"10.0.0.9\", NAME \"port\" VALUE u16=9000}} — RFC-0014 §2 `spec-name-in-use`: the same name as a live connection, a DIFFERENT config; refused `tr::path::in_use` (0x0022), and the live connection is NOT reconfigured",
+    "fields": {
+      "name": "up",
+      "config": {
+        "addr": "10.0.0.9",
+        "port": 9000
+      }
+    },
+    "note": "Deliberately not a byte-for-byte replay of `conn/create-via-spec`: the config differs, so the vector pins BOTH halves of RFC-0014's ruling (i) — the create is refused AND re-SPEC is not a reconfiguration door. `PATH_IN_USE` is idempotent-safe: a retrying orchestrator reads it as \"already exists\". Changing a key is retire-and-re-create (§Erratum 2026-08-13, #1070), never a second SPEC."
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "bad-payload-type",
+  "category": "conn",
+  "hex": "0b4023000200040061646472020009003132372e302e302e3102000400706f727401000200901f",
+  "total_bytes": 39,
+  "decoded": {
+    "type": "0x0B SETTINGS",
+    "structured": true,
+    "meaning": "SETTINGS{NAME \"addr\" NAME \"127.0.0.1\", NAME \"port\" VALUE u16=8080} — RFC-0014 §2 `bad-payload-type`: a TLV that is neither SPEC nor NAME, written to /net/<module>/conn; refused `tr::schema::type_mismatch` (0x0030), and NOT assigned",
+    "fields": {
+      "addr": "127.0.0.1",
+      "port": 8080
+    },
+    "note": "These bytes are BYTE-IDENTICAL to the `config` child of `conn/create-via-spec` — the same connection config with its SPEC envelope stripped off. That is the point: the endpoint selects the operation by the written TLV's TYPE, not by what the payload contains, so a well-formed config that names no operation is refused rather than guessed at. The endpoint is write-only and valueless (RFC-0014 §2): it never falls through to an ordinary assign, so nothing is stored and nothing propagates to subscribers."
+  }
+}

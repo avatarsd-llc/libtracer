@@ -32,7 +32,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <future>
+#include <iterator>
 #include <memory>
 #include <memory_resource>
 #include <mutex>
@@ -2216,9 +2219,293 @@ void test_conn_spec_round_trips_through_the_reader() {
     }
 }
 
+/** @brief The raw bytes of a conformance vector's `input.bin`. */
+std::vector<std::byte> vector_bytes(std::string_view case_dir) {
+    const std::filesystem::path p =
+        std::filesystem::path{LIBTRACER_VECTORS_DIR} / case_dir / "input.bin";
+    std::ifstream f(p, std::ios::binary);
+    const std::vector<char> raw((std::istreambuf_iterator<char>(f)),
+                                std::istreambuf_iterator<char>());
+    std::vector<std::byte> out(raw.size());
+    for (std::size_t i = 0; i < raw.size(); ++i)
+        out[i] = static_cast<std::byte>(static_cast<unsigned char>(raw[i]));
+    return out;
+}
+
+/**
+ * @brief Arena-decode a FWD and resolve it against @p resolver — `fwd_router_t`'s own terminus
+ *        wiring (ADR-0041), which is the door a probe arriving over the network comes through.
+ */
+tr::graph::result_t<tr::view::rope_t> resolve_bytes(tr::graph::op_resolver_t& resolver,
+                                                    std::span<const std::byte> fwd) {
+    const auto arena = tr::wire::decode_into(fwd, tr::mem::heap_source());
+    if (!arena) return std::unexpected(status_t::INVALID_PATH);
+    return resolver.resolve(*arena, {});
+}
+
+/**
+ * @brief The registered u16 error identity of a `STATUS{ ERROR{ VALUE u16 LE } }` reply payload
+ *        (RFC-0002 §C) — `0` when the shape does not match, which no registered code is.
+ */
+std::uint16_t status_error_code(const tr::wire::tlv_t& status) {
+    if (status.type != type_t::STATUS || status.children.size() != 1) return 0;
+    const tr::wire::tlv_t& err = status.children[0];
+    if (err.type != type_t::ERROR || !err.opt.pl || err.children.empty()) return 0;
+    const tr::wire::tlv_t& id = err.children[0];
+    if (id.type != type_t::VALUE || id.payload.size() != 2) return 0;
+    return tr::detail::load_le<std::uint16_t>(id.payload);
+}
+
+/** @brief The `kind` byte and the `STATUS`/payload child of a decoded FWD{REPLY}. */
+struct reply_parts_t {
+    tr::view::view_t flat;       /**< @brief The flattened reply the tlv below borrows. */
+    tr::wire::tlv_t tlv;         /**< @brief The decoded FWD{REPLY}. */
+    std::uint8_t kind = 0xFF;    /**< @brief `reply_kind_t` — RESULT or ERROR. */
+    std::uint16_t code = 0xFFFF; /**< @brief The registered error identity, when kind is ERROR. */
+};
+
+/** @brief Flatten, decode and split a reply rope into @ref reply_parts_t. */
+reply_parts_t reply_parts(const tr::view::rope_t& reply) {
+    reply_parts_t out;
+    out.flat = reply.flatten();
+    const auto dec = tr::wire::decode(out.flat.bytes());
+    if (!dec) return out;
+    out.tlv = *dec;
+    // `op, dst, src, kind [, payload]` — a RESULT that carries nothing (an executed WRITE) has
+    // four children, an ERROR always has the STATUS as its fifth.
+    if (out.tlv.children.size() < 4) return out;
+    if (out.tlv.children[3].type == type_t::VALUE && !out.tlv.children[3].payload.empty())
+        out.kind = tr::detail::load_le<std::uint8_t>(out.tlv.children[3].payload);
+    out.code = out.tlv.children.size() >= 5 ? status_error_code(out.tlv.children[4]) : 0;
+    return out;
+}
+
+/**
+ * @brief RFC-0014 S7-A — the seven `conn/` control-plane vectors, bound to the live endpoint.
+ *
+ * The harness that scores those vectors decodes and re-encodes `input.bin` and stops there
+ * (HARNESS.md §"What a vector gates"), so every behavioural claim their `description.md` files
+ * make is, on the conformance surface alone, unfalsifiable: delete the creator endpoint
+ * outright and all seven still score `ok`. This is where they can be false.
+ *
+ * Two doors are exercised on purpose, because RFC-0014 pins two different things:
+ *
+ * - **The local API door** (`graph_t::write` on the endpoint path) carries the EFFECT clauses —
+ *   what exists afterwards, what is routed, what the config parsed to, what did NOT move.
+ * - **The wire door** (`op_resolver_t` over a real `FWD`) carries the ERROR-IDENTITY clauses.
+ *   §Compatibility's error identities are wire codes, and a `status_t` enumerator is not one;
+ *   the mapping from status to registered code lives in `core/src/fwd_reply.cpp` and is only
+ *   observable in a reply. Asserting `status_t::PERMISSION_DENIED` would leave `0x0050` free to
+ *   drift, which is exactly the class of gap the vectors exist to close.
+ *
+ * Every refusal is checked twice — the answer, and that nothing moved — and every vector that
+ * asserts an absence is paired with the presence that makes the absence meaningful.
+ */
+void test_conformance_vectors() {
+    std::printf("RFC-0014 S7-A: the conn/ vectors are the bytes the creator endpoint obeys:\n");
+
+    const auto endpoint = path_t("/net/ws-client/conn");
+    const std::vector<std::byte> v_create = vector_bytes("conn/create-via-spec");
+    const std::vector<std::byte> v_in_use = vector_bytes("conn/spec-name-in-use");
+    const std::vector<std::byte> v_remove = vector_bytes("conn/remove-via-name");
+    const std::vector<std::byte> v_noop = vector_bytes("conn/remove-nonexistent-noop");
+    const std::vector<std::byte> v_reserved = vector_bytes("conn/remove-reserved-rejected");
+    const std::vector<std::byte> v_bad_type = vector_bytes("conn/bad-payload-type");
+    const std::vector<std::byte> v_probe = vector_bytes("conn/absent-endpoint-not-found");
+
+    // --- the bytes ARE the production builders' output ----------------------------------
+    // Pinned first, so a builder edit that changes a byte fails here rather than leaving the
+    // committed vector and the shipped encoder quietly disagreeing.
+    check(to_hex(v_create) == to_hex(conn_spec_t("up").addr("127.0.0.1").port(8080).bytes()),
+          "conn/create-via-spec == conn_spec_t's endpoint spelling (byte-exact)");
+    check(to_hex(v_in_use) == to_hex(conn_spec_t("up").addr("10.0.0.9").port(9000).bytes()),
+          "conn/spec-name-in-use == the same builder, same name, different config");
+    check(to_hex(v_remove) == to_hex(tr::net::conn_remove("up").bytes()),
+          "conn/remove-via-name == tr::net::conn_remove(\"up\")");
+    check(to_hex(v_noop) == to_hex(tr::net::conn_remove("never").bytes()),
+          "conn/remove-nonexistent-noop == conn_remove of a name that resolves to nothing");
+    check(to_hex(v_reserved) == to_hex(tr::net::conn_remove("conn").bytes()),
+          "conn/remove-reserved-rejected == conn_remove of the reserved endpoint name");
+    // bad-payload-type IS the create vector's own `config` child, envelope stripped — the
+    // claim its description makes about why it is refused, checked on the bytes themselves.
+    const std::string create_hex = to_hex(v_create);
+    check(create_hex.find(to_hex(v_bad_type)) != std::string::npos,
+          "conn/bad-payload-type IS conn/create-via-spec's config child, SPEC envelope removed");
+    // The positional-role claim, read off the wire: the endpoint SPEC carries neither a
+    // `role` pair nor a `type` pair for the endpoint to obey (RFC-0014 §1).
+    std::vector<std::byte> role_key;
+    tr::wire::emit_name(role_key, "role");
+    std::vector<std::byte> type_key;
+    tr::wire::emit_name(type_key, "type");
+    check(create_hex.find(to_hex(role_key)) == std::string::npos,
+          "the endpoint SPEC carries no `role` key — the role is the module's (RFC-0014 §1)");
+    check(create_hex.find(to_hex(type_key)) == std::string::npos,
+          "... and no `type` key — the module in the path is the transport");
+
+    // --- the effects, through the live endpoint ------------------------------------------
+    {
+        graph_t node;
+        fwd_router_t router(node);
+        transport_vertex_t net(node, router);
+        check(net.register_module("ws-client", "ws", conn_role_t::DIAL).has_value(),
+              "the application declares the module that mints the endpoint");
+
+        // conn/bad-payload-type runs FIRST, on an empty module, so "nothing was created" is a
+        // statement about an emptiness this write could have broken.
+        const auto bad = node.write(endpoint, owned(v_bad_type));
+        check(!bad.has_value() && bad.error() == status_t::TYPE_MISMATCH,
+              "conn/bad-payload-type => TYPE_MISMATCH (a SETTINGS names no operation)");
+        // The RFC names the EMPTY payload in the same clause; same door, no bytes to pin.
+        const auto empty = node.write(endpoint, view_t{});
+        check(!empty.has_value() && empty.error() == status_t::TYPE_MISMATCH,
+              "... and so is an empty payload (the clause's other arm)");
+        check(enumerate_peers(node, "/net/ws-client:children[]").empty() &&
+                  router.registry().size() == 0,
+              "neither refusal created a connection or wired a link");
+
+        tr::net::loopback_channel_t channel;
+        net.provide_link("ws-client", "up", channel.a());
+
+        const auto created = node.write(endpoint, owned(v_create));
+        check(created.has_value(), "conn/create-via-spec is ACCEPTED by the creator endpoint");
+        check(node.find(path_t::parse("/net/ws-client/up")->key()).has_value(),
+              "... and the connection vertex /net/ws-client/up exists");
+        check(router.registry().by_name("net/ws-client/up") == &channel.a(),
+              "... with its link in the router's single demux table");
+        const auto* s = net.settings_of("net/ws-client/up");
+        check(s != nullptr && s->addr == "127.0.0.1" && s->port == 8080,
+              "... and the vector's config reached conn_settings_t (addr/port)");
+        check(s != nullptr && s->role == conn_role_t::DIAL,
+              "... and the role came from the MODULE — nothing on the wire said DIAL");
+
+        // conn/spec-name-in-use: refused, and it changed nothing it named.
+        const auto again = node.write(endpoint, owned(v_in_use));
+        check(!again.has_value() && again.error() == status_t::PATH_IN_USE,
+              "conn/spec-name-in-use => PATH_IN_USE (retry-idempotent, never a second link)");
+        check(router.registry().size() == 1, "... still exactly one link in the demux table");
+        const auto* s2 = net.settings_of("net/ws-client/up");
+        check(s2 != nullptr && s2->addr == "127.0.0.1" && s2->port == 8080,
+              "... and the LIVE config is untouched: re-SPEC is not a reconfiguration door");
+
+        // conn/remove-nonexistent-noop: success, and the live connection survives it.
+        check(node.write(endpoint, owned(v_noop)).has_value(),
+              "conn/remove-nonexistent-noop => success (a retried teardown is safe)");
+        check(node.find(path_t::parse("/net/ws-client/up")->key()).has_value() &&
+                  router.registry().size() == 1,
+              "... and it removed NOTHING — the live connection is still there and routed");
+
+        // conn/remove-reserved-rejected: the endpoint cannot self-destruct.
+        const auto reserved = node.write(endpoint, owned(v_reserved));
+        check(!reserved.has_value() && reserved.error() == status_t::PERMISSION_DENIED,
+              "conn/remove-reserved-rejected => PERMISSION_DENIED (never routes to retire)");
+        check(node.find(path_t::parse("/net/ws-client/conn")->key()).has_value(),
+              "... the endpoint still resolves");
+
+        // conn/remove-via-name: the retire, and the un-route with it.
+        check(node.write(endpoint, owned(v_remove)).has_value(), "conn/remove-via-name => success");
+        check(!node.find(path_t::parse("/net/ws-client/up")->key()).has_value(),
+              "... the connection vertex is retired");
+        check(router.registry().by_name("net/ws-client/up") == nullptr,
+              "... and un-routed: the NAME no longer resolves to a link");
+        // The door the reserved-name refusal had to leave working: it still creates.
+        net.provide_link("ws-client", "up", channel.a());
+        check(node.write(endpoint, owned(v_create)).has_value(),
+              "... and the endpoint still creates afterwards (the refusals wrecked nothing)");
+        channel.shutdown();
+    }
+
+    // --- the error IDENTITIES, off a real reply ------------------------------------------
+    // The four refusals again, as FWD writes through the production terminus, so the u16 a
+    // peer actually reads is the thing asserted. RFC-0014 §2 spells the reserved-name refusal
+    // `tr::acl::permission_denied`, which is not a registered identity in RFC-0002 §D's table;
+    // the shipped mapping answers `tr::access::denied` (0x0050), and per §Discussion's
+    // clause-kind rule the identity is what code plus this vector pin. Raised on #492.
+    {
+        graph_t node;
+        fwd_router_t router(node);
+        transport_vertex_t net(node, router);
+        tr::graph::op_resolver_t resolver(node);
+        (void)net.register_module("ws-client", "ws", conn_role_t::DIAL);
+        tr::net::loopback_channel_t channel;
+        net.provide_link("ws-client", "up", channel.a());
+
+        const auto to_endpoint = [&](std::span<const std::byte> payload) {
+            return tr::testing::b_fwd(tr::graph::fwd_op_t::WRITE,
+                                      tr::testing::b_path({"net", "ws-client", "conn"}),
+                                      tr::testing::b_path({"reply-ep"}), {}, payload);
+        };
+        const auto answer = [&](std::span<const std::byte> payload) {
+            auto reply = resolve_bytes(resolver, to_endpoint(payload));
+            check(reply.has_value(), "the endpoint write produced a reply");
+            return reply.has_value() ? reply_parts(*reply) : reply_parts_t{};
+        };
+
+        const auto created = answer(v_create);
+        check(created.kind == static_cast<std::uint8_t>(tr::graph::reply_kind_t::RESULT),
+              "a SPEC over the wire answers RESULT — the control arm for the four below");
+
+        const auto in_use = answer(v_in_use);
+        check(in_use.kind == static_cast<std::uint8_t>(tr::graph::reply_kind_t::ERROR) &&
+                  in_use.code == 0x0022,
+              "conn/spec-name-in-use answers ERROR{ tr::path::in_use 0x0022 }");
+        const auto bad = answer(v_bad_type);
+        check(bad.kind == static_cast<std::uint8_t>(tr::graph::reply_kind_t::ERROR) &&
+                  bad.code == 0x0030,
+              "conn/bad-payload-type answers ERROR{ tr::schema::type_mismatch 0x0030 }");
+        const auto reserved = answer(v_reserved);
+        check(reserved.kind == static_cast<std::uint8_t>(tr::graph::reply_kind_t::ERROR) &&
+                  reserved.code == 0x0050,
+              "conn/remove-reserved-rejected answers ERROR{ tr::access::denied 0x0050 } — the "
+              "REGISTERED identity, not RFC-0014 §2's unregistered `tr::acl::permission_denied`");
+        const auto noop = answer(v_noop);
+        check(noop.kind == static_cast<std::uint8_t>(tr::graph::reply_kind_t::RESULT),
+              "conn/remove-nonexistent-noop answers RESULT — a no-op SUCCESS, not an error");
+        const auto removed = answer(v_remove);
+        check(removed.kind == static_cast<std::uint8_t>(tr::graph::reply_kind_t::RESULT),
+              "conn/remove-via-name answers RESULT");
+        channel.shutdown();
+    }
+
+    // --- conn/absent-endpoint-not-found: RFC-0014 §6's creatability probe ------------------
+    // The same 53 bytes at two nodes. Nothing in the frame is inherently an error; the answer
+    // is a property of the receiving node's module declarations, which is what the probe is
+    // for — so the declared node is the ablation, not a courtesy.
+    {
+        graph_t node;
+        fwd_router_t router(node);
+        transport_vertex_t net(node, router);
+        tr::graph::op_resolver_t resolver(node);
+        (void)net.register_module("ws-client", "ws", conn_role_t::DIAL);  // some OTHER module
+
+        const auto absent = resolve_bytes(resolver, v_probe);
+        check(absent.has_value(), "the probe resolved to a reply");
+        const auto a = absent.has_value() ? reply_parts(*absent) : reply_parts_t{};
+        check(
+            a.kind == static_cast<std::uint8_t>(tr::graph::reply_kind_t::ERROR) && a.code == 0x0020,
+            "no `can` module => ERROR{ tr::path::not_found 0x0020 } — \"not creatable\"");
+        check(a.code != 0x0031,
+              "... and NOT tr::schema::not_found, which §Compatibility reserves for a PRESENT "
+              "endpoint refusing an unknown config type");
+    }
+    {
+        graph_t node;
+        fwd_router_t router(node);
+        transport_vertex_t net(node, router);
+        tr::graph::op_resolver_t resolver(node);
+        check(net.register_module("can", "can", conn_role_t::DIAL).has_value(),
+              "the ablation: the same node, with the `can` module declared");
+        const auto present = resolve_bytes(resolver, v_probe);
+        check(present.has_value(), "the probe resolved to a reply");
+        const auto p = present.has_value() ? reply_parts(*present) : reply_parts_t{};
+        check(p.kind == static_cast<std::uint8_t>(tr::graph::reply_kind_t::RESULT),
+              "the IDENTICAL bytes now answer RESULT — the frame carries no error of its own");
+    }
+}
+
 }  // namespace
 
 int main() {
+    test_conformance_vectors();
     test_conn_spec_bytes_pinned();
     test_conn_spec_round_trips_through_the_reader();
     test_create_connection_vertex();

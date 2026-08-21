@@ -1,0 +1,51 @@
+# conn/create-via-spec
+
+RFC-0014 §2's `create-via-SPEC`: the payload of a `write /net/<module>/conn` that
+materializes the connection vertex `/net/<module>/up`, dialing `127.0.0.1:8080`.
+
+```
+SPEC{ NAME "name"   NAME "up",
+      NAME "config" SETTINGS{ NAME "addr" NAME "127.0.0.1",
+                              NAME "port" VALUE u16=8080 (LE) } }
+```
+
+```
+0e403f00020004006e616d6502000200757002000600636f6e6669670b402300
+0200040061646472020009003132372e302e302e3102000400706f7274010002
+00901f
+```
+(one byte string, wrapped here for width; the canonical bytes are `input.bin`.)
+
+| Bytes | Meaning |
+| --- | --- |
+| `0e 40 3f 00` | SPEC, `opt.PL=1`, body length 63 |
+| `02 00 04 00 6e616d65` / `02 00 02 00 7570` | NAME `"name"` → NAME `"up"` |
+| `02 00 06 00 636f6e666967` | NAME `"config"` — the key preceding the SETTINGS |
+| `0b 40 23 00` | SETTINGS, `opt.PL=1`, body length 35 |
+| `02 00 04 00 61646472` / `02 00 09 00 3132372e302e302e31` | NAME `"addr"` → NAME `"127.0.0.1"` |
+| `02 00 04 00 706f7274` / `01 00 02 00 901f` | NAME `"port"` → VALUE u16 `8080` (LE) |
+
+## What is NOT in these bytes is the point
+
+The creator endpoint's `SPEC` carries `{ name, config }` and nothing else:
+
+- **No `type`.** The module segment in the path (`/net/<module>/conn`) already selects the
+  transport, so there is no catalog child type left to name. The superseded global
+  `:children[]` door does need one — see `spec/conn-client-ws`, which is the same connection
+  spelled for that door and carries `type` and `role` on top of these fields.
+- **No `role`.** RFC-0014 §1/§3 make the role **positional**: it is fixed by *which module*
+  the endpoint belongs to (`ws-client` = `DIAL`, `ws-server` = `LISTEN`), never by a payload
+  field. An implementation that read a `role` pair here would let a peer create a listener
+  through a dialer's endpoint.
+
+`name` is required and stays required (ADR-0073 §5): a creator-chosen name is what makes a
+retried create idempotent — the retry answers `tr::path::in_use` (see `conn/spec-name-in-use`)
+instead of minting a second connection.
+
+## What this vector gates, and where the behaviour is bound
+
+Per [HARNESS.md](../../../../HARNESS.md), a vector gates the codec only — these bytes decode and
+re-encode to themselves in every core, and that says nothing about what a node does with them.
+The behaviour (the write executes rather than assigns; `/net/ws-client/up` appears; the link
+is wired into the router's demux table; the `config` reaches `conn_settings_t`) is bound in
+`core/tests/transport_vertex_test.cpp` — `test_conformance_vectors`.
