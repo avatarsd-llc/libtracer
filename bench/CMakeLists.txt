@@ -333,6 +333,19 @@ target_compile_options(bench_subscribe_index PRIVATE -Wall -Wextra)
 # rotate inside ONE process because this host's cross-build layout sensitivity is up to +9.8% on
 # an untouched leg (bench/README.md) — larger than part of the effect being measured.
 # Driven by run_store_sweep.sh, collated by collate_store_sweep.py.
+# #1485 — the vertex-count scaling sweep. Sweeps registered-vertex population over
+# 1e3/1e4/1e5/1e6 and DECOMPOSES the topic-count growth #1480 measured into legs that can each
+# be attributed: bound-handle delivery (residency), find() alone (resolution), a fixed-shape
+# probe address (ADR-0057 descent flatness), and a working-set control that keeps N resident
+# while touching one. Plus register_vertex_key descent, the O(N) vertex_slot reverse scan,
+# for_each_vertex enumeration and a MEASURED bytes-per-vertex census (mallinfo2 + RSS).
+# All arms rotate inside ONE process because this host's cross-build layout sensitivity is up to
+# +9.8% on an untouched leg (bench/README.md) — larger than the effect being decomposed.
+# Diagnostic, never a perf gate. Driven by run_scale_sweep.sh.
+add_executable(bench_scale_sweep bench_scale_sweep.cpp)
+target_link_libraries(bench_scale_sweep PRIVATE libtracer)
+target_compile_options(bench_scale_sweep PRIVATE -Wall -Wextra)
+
 add_executable(bench_store_sweep bench_store_sweep.cpp)
 target_link_libraries(bench_store_sweep PRIVATE libtracer)
 target_compile_options(bench_store_sweep PRIVATE -Wall -Wextra)
