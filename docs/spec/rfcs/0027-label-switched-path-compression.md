@@ -56,14 +56,17 @@ The shape, in seven ruled sentences:
   expected**: a hop that does not implement minting, or refuses it, simply leaves its part as a
   string. Hosts that don't mint don't change their part (§5).
 - **Distribution is passive.** There are **no label-distribution frames**. Each forwarding hop, when
-  it relays the **reply**, rewrites its own local part of `src`/`dst` from string to its minted
-  label; the first reply therefore reaches the original sender with fully-minted `src` and `dst`,
-  which the sender's `path_t` caches (§6).
+  it relays the **reply**, rewrites its own local part of ~~`src`/`dst`~~ **`src`** from string to
+  its minted label; the first reply therefore reaches the original sender with ~~fully-minted `src`
+  and `dst`~~ **a fully-minted `src`**, which the sender's `path_t` caches and spells as the `dst`
+  of the frames after it (§6). *(Erratum 4, 2026-08-21: a reply's `dst` is the return route
+  accumulated canonically on the forward leg, and a forward leg mints nothing — see §6.1.)*
 - **Staleness is a generation bump.** Vertex departure bumps its slot's generation; a frame carrying
   a stale or unknown label answers a **`NOT_FOUND`-class error**; the sender falls back to the
   full-string path and re-mints from the next reply. **No withdraw protocol, no aging** (§7).
-- **Minting is POST-AUTH only.** The label table draws from the **injected net-plane store**
-  ([ADR-0079](../../adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md)'s axis),
+- **Minting is POST-AUTH only.** The label table draws from the **store the embedder injects at
+  this seam** ([ADR-0079](../../adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md)
+  — injected, sized per target; ~~"the per-plane axis"~~ erratum 6, §8.3),
   carries a **per-peer ceiling**, and on exhaustion **REFUSES new mints** — live labels are never
   evicted by pressure, and a refusal is invisible to correctness because the string path keeps
   working (§8). This mirrors the CAN control-map ruling: ceiling plus refuse-new.
@@ -653,12 +656,12 @@ elements spelled differently.
 Minting rides the **reply**. Concretely, on an operation whose forward legs were spelled in strings:
 
 1. Each forwarding hop resolves its local part canonically, as today, and forwards the residual.
-2. On the way **back**, as it relays the reply, each hop **rewrites its own local part of `src` and
-   `dst` from string to the label it minted** for that part. It rewrites its own part and nothing
-   else.
+2. On the way **back**, as it relays the reply, each hop **rewrites its own local part of ~~`src`
+   and `dst`~~ `src` from string to the label it minted** for that part. It rewrites its own part
+   and nothing else. *(Erratum 4: the reply's `dst` is not a region a hop rewrites — see below.)*
 3. The terminus does the same for the residual it resolved.
-4. **The first reply therefore returns to the original sender with fully-minted `src` and `dst`**,
-   and the sender's `path_t` caches them.
+4. **The first reply therefore returns to the original sender with ~~fully-minted `src` and
+   `dst`~~ a fully-minted `src`**, and the sender's `path_t` caches ~~them~~ **it**. *(Erratum 4.)*
 
 Two properties fall out and are both required:
 
@@ -715,6 +718,52 @@ the analogue of RFC-0024's `adopt_binding`, which must prepend the origin's own 
 Car 4 implements the forwarder and leaves the origin unwired; the vectors and the binding test
 pin the hop's emission, not the round trip.
 
+#### Erratum 4 (2026-08-21) — only the reply's `src` is ever labelled; the forward leg's `src` — and therefore the reply's `dst` — is not
+
+An **erratum**, not an amendment: the clauses corrected here are §1's summary bullet and §6.1
+points 2 and 4, all of which say a hop rewrites *"`src` and `dst`"* and that the first reply
+arrives *"with fully-minted `src` and `dst`"*. **Erratum 2 above already ruled the region** — the
+reply's `src` is the only one that survives to the origin, and the reply's `dst` is *"consumed, not
+rewritten"* — but it ruled it in its own subsection and left the three clauses above still saying
+`dst`. This finishes that correction. No wire surface moves; nothing a conforming host does
+changes.
+
+**What the text said.** That a minting hop rewrites its own local part of the reply's `src` **and**
+`dst`, and that the first reply therefore carries a fully-minted `dst` as well as a fully-minted
+`src`.
+
+**What the behaviour is.** A reply's `dst` **is** the return route the *forward* leg accumulated
+into its `src` — and a forward leg mints nothing:
+
+- **Minting rides the reply and only the reply**, because a request leg has not yet passed the
+  terminus's gates and minting there would break §8.1's post-auth rule. The shipped forwarder reads
+  the op byte for exactly this and refuses on anything that is not a `REPLY`
+  (`fwd_router_t::label_src_prefix`, `core/src/fwd_router.cpp`); its contract says the span it
+  returns is empty on *"every request leg, every bus child, every node with no injected table, and
+  every refusal"* (`core/include/libtracer/fwd_router.hpp`).
+- **A forward hop grows `src` canonically**, by the inbound link's full mount run, exactly as it did
+  before labels existed (`fwd_router_t::route_fwd_forward`; the same statement in
+  `docs/reference/05-protocol-tlvs.md` §`0x14`: *"`src` itself is never touched by this and stays
+  canonical and complete"*).
+- So by the time the reply exists, its `dst` is already a string route, and rewriting it would be
+  rewriting a region the relaying hop **consumes** (erratum 2 disposition 1).
+
+**The correction.** A minting hop rewrites its own local part of the reply's **`src`**, and that is
+the only region any hop ever labels. The first reply returns to the origin with a fully-minted
+`src` and a canonical, string-spelled `dst`. What becomes labelled *addressing* is the frames
+**after** it: the origin caches that minted `src` and spells it as the `dst` of subsequent
+requests, which is where §7.2's deref and its `NOT_FOUND` fallback are exercised. §6.1's four steps
+and every clause of §§4–12 are otherwise unchanged.
+
+**Why this is an erratum and not an amendment.** It withdraws no MUST and adds none, alters no byte
+layout, adds no type code, flag or frame, and changes nothing a conformant host does today: no
+shipped host has ever labelled a forward leg, and erratum 2 already ruled `src` to be the region.
+It removes a claim the accepted text could not satisfy — §6.1's own point 4 is unimplementable
+under the `dst` reading, which is what erratum 2 established — rather than changing what is
+required.
+
+**Still not ruled here**, unchanged from erratum 2: the origin-side adoption of the minted `src`.
+
 ### 6.2 Each subscription's first fire triggers path creation and minting
 
 **Normative.** The mint trigger is the **first fire of a subscription** — the event that creates the
@@ -743,7 +792,8 @@ them is an error, a NACK, or an observable event on the wire.
 ### 7.1 Departure bumps the generation
 
 **Normative.** When the vertex a label resolves to departs — retirement, connection-vertex removal,
-link teardown — the minting host **bumps that slot's generation**. The label the peer holds then
+~~link teardown~~ **the hard teardown of the child registration whose tenancy the label stood for
+(erratum 5, below)** — the minting host **bumps that slot's generation**. The label the peer holds then
 compares unequal and is refused. Generations only move forward, so a stale label never becomes valid
 by waiting (RFC-0024 §5.1's property, and the reason it is stated there as well).
 
@@ -752,6 +802,54 @@ permanently** (§4.3.1) and the host leaves the part a string (§6.3). ~~See §1
 flagged tension between "saturate" here and §4.3's 16-bit wrap.~~ **Resolved 2026-08-15 at
 acceptance: there is no tension — §4.3.1 makes saturate-and-retire the normative rule and withdraws
 the draft's wrap reading. This clause is that rule's enforcement point.**
+
+#### Erratum 5 (2026-08-21) — "link teardown" is not a departure; RFC-0014 §4.1's dormancy is not one either
+
+An **erratum**, not an amendment: §7.1's departure list named *"link teardown"* alongside the two
+real departures, and under RFC-0014 that phrase covers an event at which **nothing departs**. No
+wire surface moves and no conforming implementation does anything different — see the instrument
+note at the end.
+
+**What the text said.** *"When the vertex a label resolves to departs — retirement,
+connection-vertex removal, link teardown — the minting host bumps that slot's generation."*
+
+**What was wrong.** [RFC-0014](0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)
+§Teardown distinguishes two events that "link teardown" runs together:
+
+- **Soft** — the last binding drops, the `DIAL` link goes dormant, **the vertex persists** and
+  self-heals on next use. Since **RFC-0014 §4.1 amendment 1 (2026-08-21)** the *timing* of that
+  socket close is not even fixed: an op-woken socket with no standing binding **MAY** stay `up`
+  until loss, and the amendment states the choice is *"locally observable only as op latency — a
+  peer cannot tell the two apart"*. A generation bump on socket close would make it **peer**-
+  observable, as a `NOT_FOUND` on the next labelled frame, which is exactly what that clause says
+  cannot happen. Two conforming implementations of RFC-0014 would then expose different label
+  lifetimes for the same traffic.
+- **Hard** — a `NAME` write retires the connection vertex and its routed subscriptions are
+  cascade-evicted. *That* is a departure, and it is one of the two the clause already named.
+
+The shipped forwarder bumps on the hard events only: `release_child_label` is reached from
+`fwd_router_t::remove_child` (the child registration is erased and its ctx tombstoned) and from the
+tenancy-replacement path when a name is re-added over a departed tenancy — while a transport's
+own down-notifier runs `link_down`, which evicts the link's graph edges and drops §E.1's per-link
+label state and **does not touch the path-label table** (`core/src/fwd_router.cpp`). A link that
+loses its socket and self-heals keeps its path labels, which is the same property that lets
+`self_heal_link_t` be a stable routing identity whose *"subscriber edges survive a transient loss"*
+(`core/include/libtracer/self_heal_link.hpp`).
+
+**The correction.** The departure that bumps a slot is the departure of **the vertex or tenancy the
+label stands for**: vertex retirement, connection-vertex removal, and the hard removal or
+replacement of the child registration whose local part the label aliases. A link going **dormant**
+— or its socket closing at refcount 0, or being lost and re-dialed — is **not** a departure: the
+connection vertex persists, the routes under it are untouched, and the labels minted against it
+stay valid.
+
+**Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). No
+grammar, frame shape, type code or error identity moves; §4.3.1's saturate-and-retire rule and
+§7.2's refusal path are untouched. And it changes what no conforming implementation does, in both
+directions: a host that bumps *more* eagerly than this clause requires is still conforming, because
+§6.3 makes a mint never load-bearing — an over-eager bump costs one refused operation and a
+re-mint, never a mis-delivery. What the erratum removes is the reading under which a host would be
+**obliged** to bump on an event RFC-0014 §4.1 declares unobservable.
 
 ### 7.2 A stale or unknown label answers `NOT_FOUND`, and the sender falls back
 
@@ -813,11 +911,14 @@ operation over an already-minted label. There is no snapshot to go stale.
 
 **Normative, and each clause is a ruling:**
 
-- **The label table draws from the injected net-plane store.** Not a static array, not a
-  library-chosen capacity — the
-  [ADR-0079](../../adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md) per-plane
-  composition axis, sized by the embedder. This is the standing no-synthetic-limits rule and the same
-  shape RFC-0024 §6.4 requires of its binding budget.
+- **The label table draws from the store the embedder injects at this seam.** Not a static array,
+  not a library-chosen capacity — the
+  [ADR-0079](../../adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md) **injection**
+  decision (its §Decision 2, *composition is injected, build-time*, and §Decision 4, *"bounded node"
+  is a property the deployer injects*), sized by the embedder for its target. ~~The ADR-0079
+  per-plane composition axis.~~ **Erratum 6 (2026-08-21), below: ADR-0079's amendment of 2026-08-20
+  withdrew the universal default, so this RFC names no composition.** This is the standing
+  no-synthetic-limits rule and the same shape RFC-0024 §6.4 requires of its binding budget.
 - **There is a per-peer ceiling.** A single peer cannot consume the table. The ceiling is a
   per-target configuration, not a magic number.
 - **On exhaustion, a host REFUSES new mints.** It does not evict, does not grow, and does not fail
@@ -832,6 +933,50 @@ the same degrade RFC-0004 §E.1's label allocator already takes at exhaustion: r
 nothing, send the full route, *"the full-route form that always works"* (`core/src/route_handle.cpp:259-267`). A
 mechanism whose exhaustion policy is "do what we did before this mechanism existed" cannot make a
 node worse.
+
+#### Erratum 6 (2026-08-21) — the ADR-0079 citation names a default and a spelling ADR-0079 has withdrawn
+
+An **erratum**, not an amendment: §8.3's first bullet (and §1's summary of it) cited ADR-0079 as it
+read before its **amendment of 2026-08-20** ([PR #1457](https://github.com/avatarsd-llc/libtracer/pull/1457),
+closing [#1429](https://github.com/avatarsd-llc/libtracer/issues/1429)). The requirement is
+unchanged — injected, ceilinged, refuse-new — and no wire surface moves.
+
+**What the text said.** *"The label table draws from the injected net-plane store … the ADR-0079
+**per-plane** composition axis, sized by the embedder."*
+
+**What ADR-0079 says now.** Two things the citation depended on were withdrawn:
+
+1. **There is no default composition.** ADR-0079 §Amendment 1 withdraws §Decision 1 ("Default
+   composition is MID") and the title's "defaults to per-plane": *"No composition is the default,
+   because there is no one target to default for."* Composition is **multiple knobs, varied per
+   target**; what ships un-wired is every allocation seam taking an injected
+   `mem::block_source_t` **defaulting to `&mem::heap_source()`**. §Decision 2 (injected,
+   build-time) and §Decision 4 (a bounded node is what the deployer sizes) *"carry the whole weight
+   now"* — and those two are the ones §8.3 was ever standing on.
+2. **The triad is renamed, and per-plane is demoted.** `NARROW`/`MID`/`WIDE` are retired **as
+   composition names** in favour of **folded / per-plane / per-thread** (NARROW/WIDE now describe
+   *targets* only). Per-plane keeps exactly one claim and it is a **security** claim — *"the
+   blast-radius point"*, the composition that fences a peer-provoked flood in the net plane off from
+   the graph plane — measured *not* to discriminate on contention (per-plane collapses to 0.01× of
+   its own single-thread rate at T = 24, identical to folded; only per-thread scales).
+
+So "the per-plane composition axis" now names one recipe among three, chosen for a property this
+RFC never asked for, and "the net-plane store" is a store that exists only under that one recipe: a
+folded node has one slab for the whole stack, and a per-thread host has one store per receive
+thread.
+
+**The correction.** §8.3 requires the table's memory to be **injected and sized by the embedder**,
+and names no composition. Whichever composition a deployer chose — folded, per-plane, or
+per-thread — the table draws from the store wired into its seam, and an un-wired build draws from
+the heap source ADR-0079 records as what ships. The three other clauses of §8.3 (the per-peer
+ceiling, refuse-on-exhaustion, never evict a live label) are untouched, and so is §11.1
+collision 3's accounting of the per-hop table as a knowing surrender.
+
+**Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). The
+corrected clause is a *declaring* clause about where the table's bytes come from. No frame, type
+code, error identity or byte layout moves; §12.5's vectors are untouched; and applying it changes
+what no conforming implementation does, because no implementation was ever obliged to pick a
+composition — ADR-0079 §Decision 2 always made that the deployer's build-time wiring.
 
 ### 8.4 What an attacker gets
 
