@@ -34,10 +34,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   **API additions:**
 
   - `graph_t::set_ring_source(vertex_handle_t, mem::block_source_t*, bool reliable = false)` —
-    the injection seam, sited beside `set_history_depth`. Owner-side, no wire surface. The
-    source is a member of `vertex_ext_t`, which a STREAM identity already allocates, so
-    `sizeof(vertex_t)` is **unchanged** and the #1285 ratchet is untouched. Rebinding drains the
-    ring (reservations are released to the source that served them).
+    the injection seam, sited beside `set_history_depth`. Owner-side, no wire surface.
+    Rebinding drains the ring (reservations are released to the source that served them).
+
+    **It costs no bytes anywhere.** The source, the pressure arm and the gap census hang off
+    the *same lazily-allocated pointer* `vertex_ext_t` already held for the ring's entries
+    (`tr::graph::ring_state_t`), so `sizeof(vertex_t)` is unchanged (#1285 ratchet untouched),
+    `sizeof(vertex_ext_t)` is unchanged, and a vertex that allocates the cold block for its own
+    reasons — app fields, an `:acl`, a handler — and never receives a stream entry pays nothing.
+    The RAM census (`vertex_app5`, `vertex_app5_static`, `reg_escape`) is byte-identical.
   - A **fourth `graph_t` constructor parameter**, `mem::block_source_t* ring = &mem::heap_source()`
     — the graph-level DEFAULT ring source, for a receiver that declared none. Appended, so every
     existing `graph_t{…}` call site compiles unchanged. Exposed as `default_ring_source()`.

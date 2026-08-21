@@ -551,6 +551,21 @@ followed by the owner's own announce write.
 :members:
 ```
 
+The receiver-side STREAM ring (RFC-0025 §4.6.1): one lazily-allocated block per receiving
+vertex, holding the queued entries, the `block_source_t` their admissions are charged against,
+the §4.4 pressure arm and the gap census. Each entry carries the reservation it was admitted
+under — admission, not placement: the payload stays where the publish put it.
+
+```{doxygenstruct} tr::graph::ring_state_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::graph::ring_entry_t
+:project: libtracer
+:members:
+```
+
 ```{doxygenenum} tr::graph::role_t
 :project: libtracer
 ```
