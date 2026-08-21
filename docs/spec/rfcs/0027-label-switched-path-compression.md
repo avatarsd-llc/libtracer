@@ -791,7 +791,8 @@ them is an error, a NACK, or an observable event on the wire.
 ### 7.1 Departure bumps the generation
 
 **Normative.** When the vertex a label resolves to departs — retirement, connection-vertex removal,
-link teardown — the minting host **bumps that slot's generation**. The label the peer holds then
+~~link teardown~~ **the hard teardown of the child registration whose tenancy the label stood for
+(erratum 5, below)** — the minting host **bumps that slot's generation**. The label the peer holds then
 compares unequal and is refused. Generations only move forward, so a stale label never becomes valid
 by waiting (RFC-0024 §5.1's property, and the reason it is stated there as well).
 
@@ -800,6 +801,54 @@ permanently** (§4.3.1) and the host leaves the part a string (§6.3). ~~See §1
 flagged tension between "saturate" here and §4.3's 16-bit wrap.~~ **Resolved 2026-08-15 at
 acceptance: there is no tension — §4.3.1 makes saturate-and-retire the normative rule and withdraws
 the draft's wrap reading. This clause is that rule's enforcement point.**
+
+#### Erratum 5 (2026-08-21) — "link teardown" is not a departure; RFC-0014 §4.1's dormancy is not one either
+
+An **erratum**, not an amendment: §7.1's departure list named *"link teardown"* alongside the two
+real departures, and under RFC-0014 that phrase covers an event at which **nothing departs**. No
+wire surface moves and no conforming implementation does anything different — see the instrument
+note at the end.
+
+**What the text said.** *"When the vertex a label resolves to departs — retirement,
+connection-vertex removal, link teardown — the minting host bumps that slot's generation."*
+
+**What was wrong.** [RFC-0014](0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)
+§Teardown distinguishes two events that "link teardown" runs together:
+
+- **Soft** — the last binding drops, the `DIAL` link goes dormant, **the vertex persists** and
+  self-heals on next use. Since **RFC-0014 §4.1 amendment 1 (2026-08-21)** the *timing* of that
+  socket close is not even fixed: an op-woken socket with no standing binding **MAY** stay `up`
+  until loss, and the amendment states the choice is *"locally observable only as op latency — a
+  peer cannot tell the two apart"*. A generation bump on socket close would make it **peer**-
+  observable, as a `NOT_FOUND` on the next labelled frame, which is exactly what that clause says
+  cannot happen. Two conforming implementations of RFC-0014 would then expose different label
+  lifetimes for the same traffic.
+- **Hard** — a `NAME` write retires the connection vertex and its routed subscriptions are
+  cascade-evicted. *That* is a departure, and it is one of the two the clause already named.
+
+The shipped forwarder bumps on the hard events only: `release_child_label` is reached from
+`fwd_router_t::remove_child` (the child registration is erased and its ctx tombstoned) and from the
+tenancy-replacement path when a name is re-added over a departed tenancy — while a transport's
+own down-notifier runs `link_down`, which evicts the link's graph edges and drops §E.1's per-link
+label state and **does not touch the path-label table** (`core/src/fwd_router.cpp`). A link that
+loses its socket and self-heals keeps its path labels, which is the same property that lets
+`self_heal_link_t` be a stable routing identity whose *"subscriber edges survive a transient loss"*
+(`core/include/libtracer/self_heal_link.hpp`).
+
+**The correction.** The departure that bumps a slot is the departure of **the vertex or tenancy the
+label stands for**: vertex retirement, connection-vertex removal, and the hard removal or
+replacement of the child registration whose local part the label aliases. A link going **dormant**
+— or its socket closing at refcount 0, or being lost and re-dialed — is **not** a departure: the
+connection vertex persists, the routes under it are untouched, and the labels minted against it
+stay valid.
+
+**Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). No
+grammar, frame shape, type code or error identity moves; §4.3.1's saturate-and-retire rule and
+§7.2's refusal path are untouched. And it changes what no conforming implementation does, in both
+directions: a host that bumps *more* eagerly than this clause requires is still conforming, because
+§6.3 makes a mint never load-bearing — an over-eager bump costs one refused operation and a
+re-mint, never a mis-delivery. What the erratum removes is the reading under which a host would be
+**obliged** to bump on an event RFC-0014 §4.1 declares unobservable.
 
 ### 7.2 A stale or unknown label answers `NOT_FOUND`, and the sender falls back
 
