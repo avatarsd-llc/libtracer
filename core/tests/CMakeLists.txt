@@ -1290,6 +1290,10 @@ if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_WS)
     add_executable(fwd_multihop_test fwd_multihop_test.cpp)
     target_link_libraries(fwd_multihop_test PRIVATE libtracer)
     libtracer_test_warnings(fwd_multihop_test)
+    # RFC-0025 §4.2.1 clause 4: it binds `stream/tf1-reserved`'s relay arm — a TF=1 root
+    # crossing live hops verbatim — so it needs LIBTRACER_VECTORS_DIR.
+    target_compile_definitions(fwd_multihop_test PRIVATE
+        LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
     add_test(NAME fwd_multihop COMMAND fwd_multihop_test)
 endif()
 

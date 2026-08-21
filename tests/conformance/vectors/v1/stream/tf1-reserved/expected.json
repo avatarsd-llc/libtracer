@@ -1,0 +1,38 @@
+{
+  "name": "tf1-reserved",
+  "category": "stream",
+  "hex": "0F622200010001000006000C000673656E736F720474656D7006000900087265706C792D6570702FFCFF",
+  "total_bytes": 42,
+  "decoded": {
+    "type": "0x0F FWD",
+    "structured": true,
+    "opt": {
+      "raw": "0x62",
+      "PL": 1,
+      "TS": 1,
+      "CR": 0,
+      "LL": 0,
+      "CW": 0,
+      "TF": 1,
+      "reserved_bit7": 0,
+      "reserved_bit0": 0
+    },
+    "length": 34,
+    "trailer": {
+      "ts": {
+        "form": "relative i32 ns",
+        "value": -250000,
+        "bytes_le": "702FFCFF"
+      },
+      "crc": null
+    },
+    "meaning": "FWD{ op=READ, dst=/sensor/temp, src=/reply-ep } with an ANCHORLESS relative root stamp — RFC-0025 §4.2.1 (Amendment 1) clause 4, Q10: TF=1 is RESERVED grammar, not removed. The body is byte-identical to fwd/fwd-read; the whole diff is the opt byte (0x40 -> 0x62) and the four trailer bytes, so anything a core does differently with this file is about TF=1 and nothing else.",
+    "note": "RFC-0004 §B/§C canonical FWD body; the length field excludes the trailer, as always. TF narrows the trailer timestamp field from 8 bytes to 4 — a signed i32 LE. The value is deliberately NEGATIVE: a core that read the four bytes as u32 would re-emit this file verbatim and still record 4294717296 instead of -250000, so the bound tests assert the DECODED value rather than the round-trip.",
+    "tf1_rules": {
+      "1_decode": "A decoder MUST record the relative flag and its delta and SUCCEED. A TF=1 root is well-formed grammar, never a reject. Bound: core/tests/op_resolve_test.cpp — test_tf1_reserved_root.",
+      "2_relay": "A relay MUST carry a TF=1 frame verbatim: the forwarding rebuild re-heads the frame (dst shrinks, src grows) but the trailer window — opt bits AND bytes, in the width TF names — crosses the hop untouched. Bound: core/tests/fwd_multihop_test.cpp, over live links.",
+      "3_echo_declines": "The #1109 reply-echo path MUST decline a TF=1 root: it is anchorless, so echoing it would propagate a meaningless value. The reply carries NO trailer at all — indistinguishable from what an unstamped request gets. Declining is not an error; the frame still resolves and still answers. Bound: core/tests/op_resolve_test.cpp — test_tf1_reserved_root.",
+      "4_writer_gated": "The reference writer does not MINT TF=1. Under the three-clock model (Amendment 1 §4.2.1) the trailer carries WIRE/TX time only, on the outermost frame only, always TF=0; SAMPLE time is a payload TIME (0x0C) child inside the value; PLAYOUT is never transmitted. TF=1 is additive future surface this RFC does not use, not surface it deletes."
+    }
+  }
+}
