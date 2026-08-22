@@ -424,6 +424,45 @@ class esp_ws_client_link_t : public transport_t {
     [[nodiscard]] std::size_t tx_bytes() const noexcept { return tx_buf_.size(); }
 
     /**
+     * @brief The interface-level shed-frame snapshot (#932) — the subset of @ref stats_t a
+     *        generic `transport_t*` holder can read, in the shape every kind answers.
+     *
+     * This link shipped the #932 contract's RICH half (@ref stats) without its GENERIC
+     * half, so a consumer holding only a `transport_t&` lost every drop this link counts
+     * the moment it swapped `httpd_ws_link_t` for this one — the exact asymmetry #932
+     * exists to remove, recorded as finding 5 of #1503.
+     *
+     * A PROJECTION, never a second tally, on the rule this link already states for
+     * `c.rx_drops`: every field here is READ from the counter that already owns the truth,
+     * so the two spellings can never drift. `malformed_rx` is honestly ZERO — a WebSocket
+     * client's framing is the IDF transport's, so this link never classifies a message as
+     * protocol-malformed and must not fabricate a number for one, which is what the #932
+     * all-zero default exists to make sayable.
+     */
+    [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
+        return {.dropped_rx = dropped_rx(), .malformed_rx = 0, .dropped_tx = stats().c.tx_drops};
+    }
+
+    /**
+     * @name The `core/STYLE.md` §Introspection spellings of this link's two ceilings
+     *
+     * `rx_bytes()` and `tx_bytes()` report a CAPACITY while `link_counters_t::rx_bytes`
+     * reports TRAFFIC — one word, two meanings, one of the naming collisions #1503's census
+     * enumerated. `capacity` is the vocabulary's word for "the effective ceiling that
+     * produced the refusal", which is exactly what these are, so these are the spellings
+     * new code uses. The originals stay: they are shipped API, and #1160's pairing rule (a
+     * readable ceiling beside every drop counter) is satisfied by either name.
+     * @{
+     */
+    /** @brief Effective inbound message ceiling, bytes — the ceiling behind
+     *         `drop_stats().dropped_rx`. */
+    [[nodiscard]] std::size_t rx_capacity() const noexcept { return rx_bytes(); }
+    /** @brief Effective outbound frame ceiling, bytes — the ceiling behind
+     *         `drop_stats().dropped_tx`'s oversize arm. */
+    [[nodiscard]] std::size_t tx_capacity() const noexcept { return tx_bytes(); }
+    /** @} */
+
+    /**
      * @brief The client's effective timing policy, milliseconds — every blocking bound
      *        this link rides, readable rather than buried in the .cpp (#1160).
      *

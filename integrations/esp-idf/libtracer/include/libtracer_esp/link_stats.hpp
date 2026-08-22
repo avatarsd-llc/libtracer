@@ -17,12 +17,20 @@
  *       DOES carry a `virtual drop_stats()` (`core/include/libtracer/transport.hpp`),
  *       because a consumer holding only the interface otherwise lost all drop
  *       observability when it swapped ws for tcp or CAN. That virtual is the
- *       shed-frame SUBSET every kind can answer; this block is the superset one kind
- *       publishes, and the two coexist by design — the naming of both follows the one
- *       introspection vocabulary in `core/STYLE.md` §Introspection (#1503). What is
- *       still true, and is the part worth keeping: no counter bump was added to core's
- *       hot `deliver_remote` path, and `fwd_router_t` grows no per-child accounting.
- *       Per-link attribution of core's delivery drops remains a future change.
+ *       shed-frame SUBSET every kind can answer; this block is the superset, and the two
+ *       coexist by design — the naming of both follows the one introspection vocabulary in
+ *       `core/STYLE.md` §Introspection (#1503).
+ *
+ *       Since #1503 step 4 BOTH links that hold one of these blocks also override
+ *       `drop_stats()`, each as a PROJECTION of the counters below rather than a second
+ *       tally, so the generic seam and the rich block can no longer disagree. It used to
+ *       be only @ref tr::net::httpd_ws_link_t, which meant a kind-agnostic consumer saw a
+ *       client link's drops as zero.
+ *
+ *       What is still true, and is the part worth keeping: no counter bump was added to
+ *       core's hot `deliver_remote` path, and `fwd_router_t` grows no PER-CHILD
+ *       accounting — #1503 step 3 gave it per-SEAM counters, which is the ADR-0079 shape;
+ *       per-link attribution of core's delivery drops remains a future change.
  *
  * Threading: PLAIN fields, no atomics. Every one of them is read and written under
  * the owning link's EXISTING mutex (`esp_ws_client_link_t::write_m_`,

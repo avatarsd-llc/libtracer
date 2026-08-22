@@ -365,6 +365,58 @@ void test_defer_recv_holds_the_dial_until_armed() {
 
 }  // namespace
 
+/**
+ * @brief #1503 step 4 / #932 — the #932 drop seam answers through a generic `transport_t&`.
+ *
+ * The asymmetry this closes (finding 5 of #1503): this link shipped the RICH half of the
+ * #932 contract (`stats()`) without the GENERIC half, so a consumer holding only a
+ * `transport_t&` — which is all `fwd_router_t` and any kind-agnostic host hold — saw ZERO
+ * drops from a link that was counting them, and saw them again the moment it swapped in
+ * `httpd_ws_link_t`. Read through the BASE reference on purpose: an override reachable only
+ * from the concrete type would pass a `link->drop_stats()` assertion and still leave the
+ * seam broken for its only real caller.
+ *
+ * A PROJECTION, never a second tally, so the case asserts agreement with the counter that
+ * owns the truth rather than a number of its own.
+ */
+void test_drop_stats_projects_through_the_base_interface() {
+    std::printf("#932/#1503 drop_stats() answers through a generic transport_t&:\n");
+    fake_ws::reset();
+    sink_t sink;
+    auto link = dialed_link(sink);
+    const tr::net::transport_t& generic = *link;
+
+    // The positive control comes FIRST: a link that has dropped nothing must report
+    // nothing. A projection wired to the wrong field would fail here before it ever
+    // reached the armed arm below.
+    const tr::net::transport_drop_stats_t clean = generic.drop_stats();
+    check(clean.dropped_rx == 0 && clean.malformed_rx == 0 && clean.dropped_tx == 0,
+          "a link that dropped nothing reports nothing through the base seam");
+
+    const fake_ws::frame_t good = good_message();
+    fake_ws::push_frames(
+        {fake_ws::make_frame(WS_TRANSPORT_OPCODES_BINARY, true, kRxBytes + 36, 1), good});
+    check(wait_until([&] { return sink.count() >= 1; }, 5s), "a message was delivered");
+
+    const tr::net::transport_drop_stats_t d = generic.drop_stats();
+    check(d.dropped_rx == 1, "the oversize drop is visible through the BASE interface");
+    check(d.dropped_rx == link->dropped_rx(),
+          "and it is the SAME number dropped_rx() reports — a projection, not a second tally");
+    check(d.malformed_rx == 0,
+          "malformed_rx stays 0 — this link never classifies a message as protocol-malformed, "
+          "and the #932 default exists so it need not fabricate one");
+    check(d.dropped_tx == link->stats().c.tx_drops,
+          "dropped_tx reads straight off the counter that owns it");
+
+    // The ceiling beside the drop (#1160), in the vocabulary's own spelling.
+    check(link->rx_capacity() == link->rx_bytes() && link->rx_capacity() == kRxBytes,
+          "rx_capacity() names the ceiling that produced the drop");
+    check(link->tx_capacity() == link->tx_bytes(), "and tx_capacity() its outbound twin");
+
+    link.reset();
+    check_drained();
+}
+
 int main() {
     std::printf("esp_ws_client_link receive-path host suite (#900, #901, #1102):\n");
     test_recv_stack_reaches_the_thread();
@@ -375,6 +427,7 @@ int main() {
     test_stray_continuation_is_dropped();
     test_fragmented_fitting_message_reassembles();
     test_defer_recv_holds_the_dial_until_armed();
+    test_drop_stats_projects_through_the_base_interface();
     // Defensive: `main` must never return under a detached orphan still inside the fake,
     // whose static state is destroyed on the way out (#1456).
     check_drained();
