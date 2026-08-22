@@ -102,12 +102,25 @@ This page documents only the API.
 :undoc-members:
 ```
 
+The seam's census block — the one introspection vocabulary every bounded resource
+in the tree answers with (`core/STYLE.md` §Introspection).
+
+```{doxygenstruct} tr::mem::source_stats_t
+:members:
+```
+
 ```{doxygenclass} tr::mem::heap_source_t
 :members:
 ```
 
+```{doxygenfunction} tr::mem::heap_source
+```
+
 ```{doxygenclass} tr::mem::null_source_t
 :members:
+```
+
+```{doxygenfunction} tr::mem::null_source
 ```
 
 ```{doxygenclass} tr::mem::bump_source_t
