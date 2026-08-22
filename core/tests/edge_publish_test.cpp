@@ -44,6 +44,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <future>
 #include <string>
 #include <thread>
 #include <vector>
@@ -330,6 +331,29 @@ void test_wide_fanout_under_churn() {
  * that record's `link` and `caller` strings out of whichever array they pinned. The delivered
  * bytes are CHECKED, not counted: a record freed one holder too early most likely delivers the
  * right number of times with the wrong bytes, and a counter cannot see that.
+ *
+ * ### The overlap latch (#1501)
+ *
+ * "A remote delivery landed while the wire edge was live" is a claim about an OVERLAP, and
+ * the `started` latch #1378 added proves only a STARTUP: that each publisher finished one
+ * batch *before* the churn began — i.e. before any wire edge existed. Nothing then made the
+ * two windows meet. The churn thread has no blocking point, so the live window per round is
+ * just the gap between `subscribe_wire` returning and the clearing field-write running ON THE
+ * SAME THREAD — sub-microsecond, with nothing inviting a publisher in. On a loaded box the
+ * publishers announce, get descheduled, the churn runs all 2000 rounds and sets `stop`, and
+ * `remote_hits` is still zero: a scheduler-dependent assertion, which this repo rules a defect
+ * rather than a test style (the calibrated-spin line, #1419).
+ *
+ * So the overlap is now ENFORCED rather than hoped for. For its first round only, the churn
+ * holds the wire edge OPEN — it does not issue the clearing write — until a remote delivery
+ * has actually landed on it, waiting on a `std::promise` the sink fulfils exactly once. The
+ * wait is edge-triggered on that delivery, not a calibrated duration; its deadline exists so a
+ * genuinely broken delivery path FAILS the check instead of hanging the suite. Every later
+ * round runs the original tight admit/clear churn untouched, so the refcount race this arm
+ * exists to exercise is not blunted — only the first round is widened, and only once.
+ *
+ * Raising the round count or widening every window would merely re-tune the bar; it would not
+ * remove the scheduler dependency, which is why neither is done.
  */
 void test_remote_cold_half_under_churn(std::size_t publishers) {
     std::printf("concurrent publish + REMOTE subscribe/unsubscribe churn (shared cold half):\n");
@@ -343,12 +367,22 @@ void test_remote_cold_half_under_churn(std::size_t publishers) {
     const std::string caller(64, 'C');
     std::atomic<std::size_t> remote_hits{0};
     std::atomic<std::size_t> remote_torn{0};
+    // The overlap latch: fulfilled by the FIRST remote delivery of either kind. Torn counts
+    // too — a torn first delivery must fail its own check below, not stall the churn to the
+    // deadline and then fail two. `signalled` is read RELAXED on the steady-state path, so
+    // after the one transition every later delivery pays a plain load and no RMW.
+    std::promise<void> first_remote;
+    std::future<void> first_remote_f = first_remote.get_future();
+    std::atomic<bool> signalled{false};
     const tr::testing::remote_sink_guard_t sink(g, [&](const remote_delivery_t& d, const rope_t&) {
         const bool ok = d.link.size() == 64 && d.caller.size() == 64 &&
                         d.link.find_first_not_of('L') == std::string_view::npos &&
                         d.caller.find_first_not_of('C') == std::string_view::npos &&
                         !d.return_route.bytes().empty();
         (ok ? remote_hits : remote_torn).fetch_add(1, std::memory_order_relaxed);
+        if (!signalled.load(std::memory_order_relaxed) &&
+            !signalled.exchange(true, std::memory_order_acq_rel))
+            first_remote.set_value();
     });
 
     sink_t standing;  // slot 0, so the churn's wire edge always reoccupies slot 1
@@ -361,6 +395,7 @@ void test_remote_cold_half_under_churn(std::size_t publishers) {
     std::atomic<bool> stop{false};
     std::atomic<std::size_t> started{0};
     std::atomic<std::size_t> rounds{0};
+    std::atomic<bool> overlapped{false};  // the churn saw a delivery land on a LIVE wire edge
 
     std::vector<std::thread> ts;
     ts.reserve(publishers + 1);
@@ -379,12 +414,23 @@ void test_remote_cold_half_under_churn(std::size_t publishers) {
         while (started.load(std::memory_order_acquire) < publishers &&
                std::chrono::steady_clock::now() < deadline)
             std::this_thread::yield();
+        // The overlap deadline is armed once the publishers are up, so a slow start eats the
+        // startup budget above rather than this one.
+        const auto overlap_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
         for (std::size_t round = 0; round < 2000 && !stop.load(std::memory_order_relaxed);
              ++round) {
             if (!g.subscribe_wire(v, make_value({0x04, 0x40, 0x00, 0x00}),
                                   make_value({0x06, 0x00, 0x00, 0x00}), link, view_t{}, caller))
                 break;
             rounds.fetch_add(1, std::memory_order_relaxed);
+            // The wire edge is LIVE from here until the clearing write below. Until one
+            // delivery has actually landed on it, do not close that window — block on the
+            // delivery itself instead of racing a publisher for a sub-microsecond gap. Once
+            // latched this is a plain relaxed load and the churn is the original tight loop.
+            if (!overlapped.load(std::memory_order_relaxed))
+                overlapped.store(
+                    first_remote_f.wait_until(overlap_deadline) == std::future_status::ready,
+                    std::memory_order_relaxed);
             (void)g.write(v, clear_fp->field(), make_value({0x09, 0x00, 0x00, 0x00}));
         }
         stop.store(true, std::memory_order_relaxed);
@@ -392,6 +438,10 @@ void test_remote_cold_half_under_churn(std::size_t publishers) {
     for (auto& th : ts) th.join();
 
     check(rounds.load() > 0, "the remote churn ran (admissions happened)");
+    // The overlap is enforced, not sampled: the churn held its first wire edge open until a
+    // delivery landed on it. A false here means the delivery path never reached the sink
+    // within the deadline while the edge was live — a real defect, not a lost scheduler race.
+    check(overlapped.load(), "the churn held its wire edge live until a delivery landed on it");
     check(remote_hits.load() > 0, "the churned remote edge was delivered to while it was live");
     check(remote_torn.load() == 0,
           "every remote delivery carried its record's OWN link, caller and route bytes");
