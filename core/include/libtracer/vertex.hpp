@@ -399,6 +399,25 @@ enum class delivery_mode_t : std::uint8_t {
 };
 
 /**
+ * @brief How a `graph_t::propagate` sweep EMITS what it selected (RFC-0025 §4.1.2, Amendment 3
+ *        clause 5) — a producer-side choice about framing, never a subscription negotiation.
+ *
+ * Orthogonal to `%delivery_mode_t` — that mode decides WHICH vertices a sweep selects,
+ * this one decides how the selection reaches the wire. Neither is a per-subscriber knob, and
+ * neither is readable or writable by a peer — the producer owns cadence and framing (RFC-0005
+ * §Motivation-3, RFC-0025 §3).
+ */
+enum class emission_mode_t : std::uint8_t {
+    /** @brief The DEFAULT, unchanged: one `FWD{WRITE}` per selected vertex (RFC-0008 §D). */
+    PER_VERTEX = 0,
+    /** @brief ONE branch-write frame for the swept subtree — the RFC-0016 `POINT` tree, node
+     *         shape byte-for-byte RFC-0005 §B's, root carrying its leading `NAME`. One frame
+     *         per SUBTREE and never a container across several (the retired-LIST ban,
+     *         RFC-0005 §E). */
+    FOLD = 1,
+};
+
+/**
  * @brief One entry of a receiving vertex's STREAM ring: the value, plus the RESERVATION it
  *        was admitted under (RFC-0025 §4.6.1 clause 3).
  *

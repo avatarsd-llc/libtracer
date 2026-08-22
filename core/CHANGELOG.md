@@ -35,6 +35,48 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   The reserved range narrows from 6–15 to **8–15** with it, and the
   `subscriber/policy-reserved-bits` vector is repaired **in place — same bytes** (§4.1.2
   clause 7): its `0xFFC1` word always carried `delivery_class = 3`.
+- **`propagate` gains a FOLD emission mode — one branch-write frame per sweep**
+  ([#1468](https://github.com/avatarsd-llc/libtracer/issues/1468); RFC-0025 §4.1.2 Amendment 3
+  clause 5). New `tr::graph::emission_mode_t { PER_VERTEX, FOLD }` and a second `propagate`
+  overload:
+
+  ```cpp
+  [[nodiscard]] result_t<void> graph_t::propagate(vertex_handle_t v, emission_mode_t mode);
+  ```
+
+  **The default does not move.** `propagate(v)` is untouched, and `propagate(v, PER_VERTEX)` is
+  that same door — RFC-0008 §D's one `FWD{WRITE}` per selected vertex stays the floor.
+
+  Under `FOLD` the sweep selects exactly what it always selected and emits it as **one
+  RFC-0005 §B branch-write frame**: the folded `POINT` tree of the selection, node shape
+  byte-for-byte §B's, the root carrying its own leading `NAME` (the one root asymmetry
+  RFC-0016 §A names against a composed-*read* root). Interior vertices the sweep did not
+  select ride along as value-free skeleton nodes, which §B admits verbatim.
+
+  **The terminus is untouched** — no receive-path branch was added, and none is wanted: §B's
+  existing slicing already hands each covered subscription point the smallest subview covering
+  every value at-or-below it, so a covered leaf sees **byte-identical** bytes under both modes
+  (asserted as a differential in `core/tests/propagate_fold_test.cpp`). It is **one frame per
+  subtree, never a container across several** — the retired-`LIST` ban of RFC-0005 §E stands.
+
+  **Refusals** happen before anything is delivered and before a single sweep mark is drained,
+  so a refused fold is a no-op the caller retries as `PER_VERTEX`:
+
+  - `TYPE_MISMATCH` — a selected vertex's stored value is not a single trailer-less `VALUE`
+    TLV. Trailer-carrying nodes are **rejected, not silently stripped** (§B strictness),
+    which is admissible only because RFC-0025 Amendment 1 moved sample time out of the trailer
+    into payload `TIME` (`0x0C`) children *inside* the value. A selected `role_t::STREAM`
+    refuses on the same rule: its since-flush **list** has no seat on a node that admits at
+    most one `VALUE`, and the `BATCH` (`0x80`) record that would seat it is not a `VALUE`
+    either, so §B strictness rejects it as "any other child type". The clause 5 / clause 6
+    tension that follows from this is recorded on
+    [#1468](https://github.com/avatarsd-llc/libtracer/issues/1468) for a ruling; the fold
+    refuses rather than emitting a frame a conforming terminus must reject.
+  - `BACKPRESSURE` — the frame could not be built within the injected memory seams.
+
+  No wire byte is minted: the frame is the `POINT` (`0x07`) / `NAME` (`0x02`) / `VALUE`
+  (`0x01`) grammar already in the spec, and the header framing is `read_subtree_folded`'s,
+  drawn from the same ADR-0060 `value_backend_`.
 
 ### Changed
 

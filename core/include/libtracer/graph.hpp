@@ -1256,6 +1256,41 @@ class graph_t {
      */
     void propagate(vertex_handle_t v);
     /**
+     * @brief Propagate with an explicit EMISSION MODE (RFC-0025 §4.1.2, Amendment 3 clause 5).
+     *
+     * Selection is identical to @ref propagate(vertex_handle_t) in both modes — same
+     * `delivery_mode` gating, same subtree, same drained pending marks. Only the FRAMING
+     * differs, and `emission_mode_t::PER_VERTEX` is exactly the one-arg overload, so the
+     * shipped default moves under nobody.
+     *
+     * Under `emission_mode_t::FOLD` the sweep emits **one branch-write frame** for the swept
+     * subtree instead of RFC-0008 §D's one `FWD{WRITE}` per selected vertex: the RFC-0016
+     * `POINT` tree of the selection, node shape byte-for-byte RFC-0005 §B's (leading `NAME`,
+     * optional `VALUE`, recursive `POINT` sub-branches), the root carrying its own leading
+     * `NAME` per §B — the one root asymmetry RFC-0016 §A names between a composed-*read* root
+     * and a branch-*write* root. Interior vertices that were not themselves selected appear as
+     * value-free skeleton nodes so the tree stays connected; §B calls that a valid no-op node.
+     *
+     * The TERMINUS is untouched. RFC-0005 §B's branch-write slicing already hands each covered
+     * subscription point the smallest subview covering every value at-or-below it, so a folded
+     * frame needs no new decode path — and this door emits nothing a §B decomposer would
+     * refuse. It is ONE FRAME PER SUBTREE, never a container across several: two disjoint
+     * subtrees are two calls and two frames (the retired-LIST ban, RFC-0005 §E / ADR-0003).
+     *
+     * REFUSALS, all before anything is delivered or any pending mark is drained, so a refused
+     * fold leaves the sweep exactly as it found it and the caller may retry `PER_VERTEX`:
+     * - `TYPE_MISMATCH` — a selected vertex's stored value is not a single trailer-less `VALUE`
+     *   TLV. Trailer-carrying nodes are REJECTED rather than silently stripped (§B strictness);
+     *   this is admissible only because RFC-0025 Amendment 1 moved sample time out of the
+     *   trailer into payload `TIME` children. A selected STREAM vertex refuses here too: its
+     *   since-flush LIST cannot ride a §B node, which admits at most one `VALUE`.
+     * - `BACKPRESSURE` — the fold could not be framed within the injected memory seams.
+     *
+     * @param v    The sweep root; always delivered, never gated by its own `delivery_mode`.
+     * @param mode The emission mode.
+     */
+    [[nodiscard]] result_t<void> propagate(vertex_handle_t v, emission_mode_t mode);
+    /**
      * @brief Set v's per-vertex propagation policy (RFC-0008 §C).
      *
      * A wiring-time call (the "configure before frames flow" contract), like settings;
@@ -2263,6 +2298,20 @@ class graph_t {
     // (RFC-0008 §B/§C). Loop-free by construction (each delivery terminates at its
     // target — ADR-0051), so no recursion depth to thread.
     void propagate_impl(vertex_t* v);
+    // The FOLD emission of the same sweep (RFC-0025 §4.1.2 clause 5): frame the selection as
+    // ONE RFC-0005 §B branch-write POINT tree and deliver it, instead of one per-vertex
+    // delivery each. Validates the whole selection BEFORE draining a single pending mark, so a
+    // refusal is a no-op the caller can retry as PER_VERTEX. Never touches the receive path.
+    result_t<void> propagate_folded_impl(vertex_t* v);
+    // The selection half of a FOLD sweep: render v's key into `lo` and collect every
+    // qualifying strict descendant's key into `out` — the same two sets, the same subtree
+    // predicate and the same delivery_mode gating propagate_impl uses, so the two emissions
+    // cannot select differently. PEEKS ONLY: nothing is drained, because the fold must be
+    // able to refuse an unencodable selection without having consumed it. The marks are
+    // retired afterwards by `clear_pending`, exactly as the eager branch write retires its
+    // landing sites. False on an OOM key render — the sweep defers, as it does today.
+    [[nodiscard]] bool select_sweep(vertex_t* v, std::vector<std::byte>& lo,
+                                    std::vector<std::vector<std::byte>>& out);
     // Record v as assigned-since-last-sweep so a covering propagate flushes it (RFC-0008
     // §B). No-op for EXPLICIT (never ancestor-swept), for UNCONDITIONAL (already a
     // permanent sweep member), and — the idle-write fast path — when nothing observes at

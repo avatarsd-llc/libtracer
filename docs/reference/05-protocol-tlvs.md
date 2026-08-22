@@ -196,6 +196,11 @@ container: one frame per subtree, several subtrees stay N self-contained frames 
 `send(iov)` (the retired-`LIST` rule, §`0x05`). The `delivery_scope` **key itself is still
 reserved** — no implementation reads it today.
 
+The mode is **live host-side** as `graph_t::propagate(v, emission_mode_t::FOLD)` — see
+[02-graph-model.md](02-graph-model.md) §"Assign, propagate, and the coalescing sweep" for the
+refusal rules — and it stays a **producer-side choice per call**: nothing about it is
+negotiated, readable or writable by a peer, and the default emission is unchanged.
+
 The `batch_count` / `batch_window_ns` magnitudes are **fan-out-edge mechanics** — a counter and
 an elapsed-time window on one subscription's own edge, meaningful only under
 `delivery_class = 2`, ignored otherwise (the absent-⇒-default doctrine applied in reverse).
