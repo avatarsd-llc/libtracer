@@ -695,3 +695,202 @@ namespaces, plus the existent-surface controls). Text corrected alongside:
 [reference/05](../../reference/05-protocol-tlvs.md) §`0x0B` (the caller qualifier) and
 [reference/02](../../reference/02-graph-model.md) §Owner-declared application fields
 (the gate order).
+
+## Amendment 1 (2026-08-22) — the node-scoped seam census: a reserved `:stats` field namespace ([#1503](https://github.com/avatarsd-llc/libtracer/issues/1503) step 5)
+
+**Status:** accepted (maintainer ruling 2026-08-22; the 14-day window is waived per
+[GOVERNANCE.md](../../../.github/GOVERNANCE.md), as on RFC-0002/0005/0008/0011).
+
+**Why here.** This RFC owns the reserved field namespaces — `:settings.app.*` and the `app`
+subkey (§A.1), and the disclosure rule for the protocol-owned name set (§Erratum). A new
+reserved field name is its business. [RFC-0011](0011-node-identity-facet.md) §C.1 is cited
+as **shape precedent only** — the node-scoped field that "takes no vertex, and every vertex
+answers identically" — and is not otherwise amended.
+
+**Motivation.** After [RFC-0004](0004-remote-operation-addressing.md) Amendment 2 a
+bulk-ingest producer may write with an empty `src` and thereby give up refusal-by-value
+feedback. The sanctioned way such a producer observes downstream pressure is to **poll
+ordinary READs of introspection counters** — which requires the
+[#1503](https://github.com/avatarsd-llc/libtracer/issues/1503) seam census to be
+wire-readable rather than a C++ accessor. Steps 1–4 of that issue built the counters; this
+amendment gives them their read surface.
+
+### D.1 The spelling — a node-scoped `:stats` field, in the `:identity` mould
+
+A reserved field name **`stats`** joins the protocol-owned field namespace, which becomes
+`{subscribers, acl, children, settings, schema, identity, stats}`. One seam is addressed as
+
+```
+<any-vertex>:stats.<seam-class>.<seam-name>
+```
+
+The field is **node-scoped**: it takes no vertex, every vertex of a node MUST answer it
+identically, and the content describes the **node**, never the addressed vertex. That is
+RFC-0011 §C.1's property, applied to a second field.
+
+Nothing else moves. There are **no new vertices**, **no new type codes**, **no new error
+identities**, and **no grammar change**: `:stats` is a NAME in the existing `:field.sub`
+tail, so [reference/03](../../reference/03-addressing.md) §Reserved characters is
+**untouched** — a leading `:` remains illegal inside a NAME segment, and the
+`path/path-reserved-brackets` conformance vector stands.
+
+**This clause SUBSTITUTES clause 2 of the 2026-08-22 scope-addition ruling** ("introspection
+fields are ordinary vertices with their own (tiny) bounded lists"), which is withdrawn: it is
+not expressible in the shipped path grammar without changing §Reserved characters, and the
+property it was written to secure is delivered here by construction instead. The normative
+isolation sentence is:
+
+> **The read targets whatever vertex the peer already addressed, and is bounded by that
+> vertex's existing list.**
+
+A monitoring READ therefore contends for exactly the resources of the vertex the monitor
+chose, and a flooded STREAM vertex cannot make a read of some quiet vertex queue behind it —
+per-vertex designated pressure, unchanged, with no new namespace to explode and no
+control-plane reserve clause.
+
+**The honest caveat, unchanged from the ruling:** a physically saturated shared *link*
+([#1494](https://github.com/avatarsd-llc/libtracer/issues/1494) TX-pool territory) delays
+every frame including a monitoring read. That is precisely when read-timeout-as-hard-
+congestion-signal semantics apply, and the link-seam counters are how the two cases are
+distinguished afterwards.
+
+### D.2 NAME validity resolves ABOVE the READ gate
+
+The `stats` namespace is **published spec text, identical on every node** — the
+protocol-owned row of this RFC's §Erratum. Accordingly, and on both doors:
+
+- An **unrecognised** `:stats` spelling — bare `:stats`, a bare `:stats.<class>`, an unknown
+  class or seam name, any `[N]` / `[]` / `[*]` selector at any level, or any tail deeper
+  than `<class>.<name>` — MUST answer `ERROR{tr::schema::not_found}` (`0x0031`)
+  **caller-independently**. No `:stats` spelling may have two answers split by who asked.
+- A **recognised** seam's VALUE keeps its gate (§D.5).
+
+Bare `:stats` and `:stats.<class>` name nothing **by design**: a census block is served
+whole, and aggregating seams into a container is exactly what
+[ADR-0079](../../adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md) forbids.
+
+### D.3 One READ = one seam = the whole counter block in ONE TLV
+
+A recognised seam read serves a single structured `SETTINGS` TLV whose members are the
+seam's counters as `NAME` / `VALUE` pairs, **sampled in one call**:
+
+```
+SETTINGS (PL=1) {
+  NAME "<noun>"  VALUE <u64>       ; one pair per counter, fixed-width u64 little-endian
+  ...                              ; readers MUST ignore unknown NAMEs
+}
+```
+
+Normative rules:
+
+- **One call, one block.** The counters MUST be sampled in the single call that answers the
+  read. Snapshot coherence (`core/STYLE.md` §Introspection — monotonic since construction,
+  sampled unsynchronized, read as the DIFFERENCE between two snapshots) is unachievable
+  across six separate field reads, which is why per-counter fields are **a named door and
+  not this surface**.
+- **The vocabulary is `core/STYLE.md` §Introspection's** — `capacity` / `in_use` / `peak` /
+  `refused` / `dropped` / `largest_refused`, used-polarity always. A seam names only the
+  nouns it has.
+- **Fixed-width `u64` little-endian** values, per the [reference/05](../../reference/05-protocol-tlvs.md)
+  integer conventions. A reader MUST ignore unknown `NAME`s and MUST NOT depend on the
+  member count or on a seam's member set staying fixed: a seam may grow a noun.
+- **Members appear in the seam's declared order**, so a block is a stable byte shape for one
+  seam at one version; that order is not a wire guarantee across versions, and a reader keys
+  on the `NAME`.
+
+### D.4 The seams this field answers — and the boundary, stated honestly
+
+The field is node-scoped, and the entity that answers it is the **graph** (`tr::graph`, L4).
+It therefore serves exactly the seams reachable from the node's own graph:
+
+| spelling | the seam | nouns |
+| --- | --- | --- |
+| `:stats.mem.control` | the injected failable block source (`graph_t::control_source`) — the #551 seam every peer-provokable allocation draws from | `capacity`, `in_use`, `peak`, `refused`, `largest_refused` |
+| `:stats.mem.ring` | the graph-level default receiver-ring source (`graph_t::default_ring_source`) — where a STREAM vertex's admissions are charged absent a per-vertex source | the same five |
+| `:stats.graph.delivery` | the graph's own delivery-drop door (`graph_t::delivery_drops`), which the net plane also counts through (`count_external_drop`) | `no_target`, `denied`, `out_of_memory`, `fan_out_truncated` |
+
+**The boundary, and why it is where it is.** The router seams (`fwd_router_t::drop_stats`
+and its four injected sources) and the label-table and per-link seams
+(`route_handle_t::labels_used` / `labels_exhausted`, `transport_t::drop_stats`) — all shipped
+by #1503 steps 3 and 4 — are **NOT** served by `:stats` in this amendment. Those counters are
+**per-`fwd_router_t`, per-`route_handle_t` and per-link**, not per-graph: a node may run more
+than one router, a router may be shared, and the graph is L4 while the router is the net
+plane. Dependencies point **up** the layers only, so the graph cannot reach down to sample
+them, and inventing a registration channel so it could is a larger surface than this
+amendment was scoped to carry.
+
+Concretely: **the entity that answers `:stats` is the graph, and it answers for the graph.**
+Router and link seams stay C++ accessors on the entities that own them, exactly as
+[reference/22](../../reference/22-backpressure-and-sizing.md) §6 Recipe A's in-process arm
+uses them. Extending the census to the net plane — the router registering its own seam
+samplers with the graph at configure time, the way it already installs its sinks — is a
+**named door, not built here**, and is recorded as a residual on
+[#1503](https://github.com/avatarsd-llc/libtracer/issues/1503). A future amendment that opens
+it adds `<seam-class>` values (`router`, `labels`, `link`) and changes nothing above.
+
+### D.5 The VALUE resolves BELOW the READ gate — the gating is INVERTED against `:identity`
+
+A recognised seam's value MUST be gated on `READ` against the addressed vertex's effective
+ACL. A denied caller receives `ERROR{tr::access::denied}` (`0x0050`).
+
+This is the **opposite** of RFC-0011 §C.2's exemption, deliberately. `:identity` is pre-auth
+because a public key is precisely what an unauthenticated peer must obtain in order to
+authenticate at all; a node's **memory census is not first-contact material**, and nothing
+deadlocks by gating it. The narrow, named pre-auth exemption therefore continues to apply to
+`:identity` **alone**, and `:stats` MUST NOT be added to it.
+
+**A denied caller's `PERMISSION_DENIED` discloses that the seam exists. That is intended.**
+The seam namespace is published spec (this section's table), identical on every node — the
+same disclosure `settings`, `children` and `schema` already make — so the answer reveals
+nothing a reader of this document does not have. What it must not do is reveal *authorization
+state through a code split on one spelling*, and §D.2 is what prevents that: unrecognised
+spellings are caller-independent, so the only caller-dependent answer is on a name whose
+existence was never secret.
+
+### D.6 Readable; never writable; never awaitable
+
+- **Never writable.** `:stats` has no write door. A write of any `:stats` spelling answers
+  `ERROR{tr::schema::not_found}` (`0x0031`), caller-independently — the ENOTTY of a facet
+  with no write surface, exactly as `:identity`'s write already answers.
+- **Never awaitable, and this mints nothing.** Counters are updated off the failure path and
+  **do not bump the vertex's write sequence**; making them real writes would put a publish on
+  the hot path, which the `core/STYLE.md` §Introspection counting doctrine forbids. Nothing
+  could ever fire a wait on this surface. No new status and no new guard are needed: **every
+  field-tailed AWAIT already answers `ERROR{tr::schema::not_found}` unconditionally** — the
+  [#585](https://github.com/avatarsd-llc/libtracer/issues/585) rule this RFC states in §C
+  ("`await` on a single field is deliberately unsupported"), which holds for every selector
+  including ones that read and write fine. This amendment **cites** that rule; it does not
+  restate or narrow it.
+- **Threshold-crossing notification stays a named door**, not built, exactly as ruled.
+- **Per-counter fields stay a named door**, for MCU clients that cannot parse a block.
+
+### Compatibility
+
+Additive, and it occupies previously-erroring space only: before this amendment every
+`:stats` spelling answered `SCHEMA_NOT_FOUND` on both doors, and after it every spelling
+except the three recognised seams still does. No frame shape, type code, grammar rule or
+error identity changes; both status codes it uses are long in the
+[RFC-0002](0002-protocol-error-model.md) registry. An implementation that does not serve the
+census keeps answering `SCHEMA_NOT_FOUND` and remains conformant for every other surface; a
+monitor MUST therefore treat `SCHEMA_NOT_FOUND` on a seam as "this node does not publish that
+seam", never as an error.
+
+### Files this amendment edits (on acceptance)
+
+- [reference/05](../../reference/05-protocol-tlvs.md) — the field-namespace set (twice), the
+  new §`0x0B` census-record subsection, and a failure-mode entry beside the `:identity` one.
+- [reference/22](../../reference/22-backpressure-and-sizing.md) §6 Recipe A — the deferred
+  wire arm, completed with the ruled spelling (its gate note is removed).
+- Reference core: the `:stats` read arm in `graph_t`'s field-read door.
+
+### Conformance
+
+`tests/conformance/vectors/v1/field/field-stats-block` — the graph-door block, byte-exact,
+with the other three answers named against the byte-identical vectors already held
+(`acl/denied-caller-undeclared-app-field` for the denied caller;
+`settings/removed-knob` for an unrecognised spelling and for the AWAIT refusal). Bound
+behaviourally by `core/tests/stats_field_test.cpp` (shape, node scoping, the gate inversion
+with `:identity` as its control, every unrecognised spelling at both an admitted and a denied
+caller, the read-only half) and by `core/tests/op_resolve_test.cpp` —
+`test_await_field_selector_is_enotty`, which now drives a `:stats` selector beside its
+field-less control.

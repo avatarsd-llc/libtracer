@@ -1258,6 +1258,15 @@ target_link_libraries(identity_test PRIVATE libtracer)
 libtracer_test_warnings(identity_test)
 add_test(NAME identity COMMAND identity_test)
 
+# #1503 step 5 / RFC-0010 Amendment 1 — the node-scoped `:stats` seam census: one READ is
+# one seam is the whole counter block in ONE SETTINGS TLV, node-scoped like `:identity` but
+# with the gating INVERTED (the VALUE sits BELOW the READ gate; only NAME validity resolves
+# above it), read-only, and never awaitable.
+add_executable(stats_field_test stats_field_test.cpp)
+target_link_libraries(stats_field_test PRIVATE libtracer)
+libtracer_test_warnings(stats_field_test)
+add_test(NAME stats_field COMMAND stats_field_test)
+
 add_executable(app_fields_test app_fields_test.cpp)
 target_link_libraries(app_fields_test PRIVATE libtracer)
 libtracer_test_warnings(app_fields_test)

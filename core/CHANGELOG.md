@@ -16,6 +16,32 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`read <any-vertex>:stats.<seam-class>.<seam-name>` — the seam census, on the wire**
+  ([#1503](https://github.com/avatarsd-llc/libtracer/issues/1503) step 5,
+  [RFC-0010](../docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §Amendment 1). The
+  counters steps 1–4 built were C++ accessors only; a remote supervisor — in particular the
+  RFC-0004 Amendment 2 empty-`src` producer, which has given up refusal-by-value feedback —
+  could not reach them. A reserved field name `stats` joins the protocol-owned field
+  namespace, **node-scoped in the `:identity` mould**: it takes no vertex, every vertex
+  answers identically, and the content describes the node. One READ is one SEAM is the whole
+  counter block in **one** `SETTINGS` TLV of `NAME`/`VALUE` pairs (fixed-width `u64` LE),
+  sampled in a single call — the only shape under which the `core/STYLE.md` §Introspection
+  snapshot-coherence clause holds. Seams: `:stats.mem.control` and `:stats.mem.ring` (the two
+  injected `block_source_t` seams, `capacity`/`in_use`/`peak`/`refused`/`largest_refused`)
+  and `:stats.graph.delivery` (`graph_t::delivery_drops`). The gating is **inverted against
+  `:identity`**: only NAME validity resolves above the READ gate — every unrecognised
+  `:stats` spelling answers `SCHEMA_NOT_FOUND` caller-independently — while the counter block
+  itself is `READ`-gated, so a denied caller gets `PERMISSION_DENIED`; a memory census is not
+  first-contact material, and the pre-auth exemption still names `:identity` alone. Read-only
+  (a write is `SCHEMA_NOT_FOUND`, whoever asks) and never awaitable — counters do not advance
+  `write_seq_`, and every field-tailed `await` already refuses unconditionally (#585), so no
+  new status and no new guard were minted. The router, label-table and per-link seams are NOT
+  served here: they are per `fwd_router_t` / `route_handle_t` / link rather than per graph,
+  and L4 does not reach into the net plane — that extension is a named door on #1503. **No
+  new public C++ symbol**, no new type code, no new error identity, no grammar change; the
+  arm is one string compare on the cold field-read path and `bench_forward_heap`'s
+  steady-state hop is unchanged at `allocs=0 frees=0 bytes=0`.
+
 - **`tr::net::fwd_router_t::drop_stats()` and its four seam accessors — the router's
   introspection surface** ([#1503](https://github.com/avatarsd-llc/libtracer/issues/1503)
   step 3, closing the rest of [#1492](https://github.com/avatarsd-llc/libtracer/issues/1492)).

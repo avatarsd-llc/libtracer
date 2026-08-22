@@ -221,15 +221,15 @@ role and schema).
 
 | Plane | Needs the LKV because |
 | --- | --- |
-| Local + remote `READ` | a leaf read serves the stored pointer (`core/src/graph.cpp:1732`; the `FWD{READ}` terminus is the same call) — null ⇒ `NOT_FOUND`, unless the vertex composes an answer from its `on_read` seam (`core/src/graph.cpp:1698`) |
-| `await`'s return value | the wake rides the write sequence and the stripe condvar (retention-free), but the value handed back is served through the **same role dispatch** `read` runs (`core/src/graph.cpp:2595`) |
-| `assign` / `propagate` sweep | **the hard dependency** — RFC-0008 §C: `propagate` takes no value argument, "the last-known-value is the single source of truth" (`core/src/graph.cpp:2339`) |
-| Composed subtree reads | RFC-0016 serves **landed** LKVs only, one atomic load per node (`core/src/graph.cpp:3855`); a non-retaining child contributes nothing |
+| Local + remote `READ` | a leaf read serves the stored pointer (`core/src/graph.cpp:1828`; the `FWD{READ}` terminus is the same call) — null ⇒ `NOT_FOUND`, unless the vertex composes an answer from its `on_read` seam (`core/src/graph.cpp:1794`) |
+| `await`'s return value | the wake rides the write sequence and the stripe condvar (retention-free), but the value handed back is served through the **same role dispatch** `read` runs (`core/src/graph.cpp:2691`) |
+| `assign` / `propagate` sweep | **the hard dependency** — RFC-0008 §C: `propagate` takes no value argument, "the last-known-value is the single source of truth" (`core/src/graph.cpp:2435`) |
+| Composed subtree reads | RFC-0016 serves **landed** LKVs only, one atomic load per node (`core/src/graph.cpp:3951`); a non-retaining child contributes nothing |
 | Late-joiner replay | the durability latch snapshots the LKV at edge-add (RFC-0022 §3.A bit 5, `core/include/libtracer/vertex.hpp:1413`) |
 
 **Not on the list: the whole callback / delivery plane.** Fan-out never reads the slot. A
-storing role delivers the just-published pointer (`core/src/graph.cpp:2139`); a HANDLER delivers
-from the incoming value (`core/src/graph.cpp:2086`). If subscribers are all a vertex has, it does
+storing role delivers the just-published pointer (`core/src/graph.cpp:2235`); a HANDLER delivers
+from the incoming value (`core/src/graph.cpp:2182`). If subscribers are all a vertex has, it does
 not need to retain.
 
 ### What shipped in RFC-0008 Amendment 2
@@ -242,7 +242,7 @@ preceded it:
   plus the `VALUE`. The degradation that remains is the *read contract's* — a handler with no
   `on_read` still answers `NOT_FOUND`, exactly as `read` does.
 - **`assign` and `propagate` refuse a non-retaining vertex with `SCHEMA_NOT_FOUND`**
-  (`core/src/graph.cpp:2174`, `core/src/graph.cpp:2356-2362`) — the taxonomy's contract-mismatch
+  (`core/src/graph.cpp:2270`, `core/src/graph.cpp:2452-2458`) — the taxonomy's contract-mismatch
   status, deliberately **not** `BACKPRESSURE`: nothing is under pressure and a retry will never
   succeed. At a handler vertex the call is **`write`**, which dispatches the seam and delivers
   eagerly; the accumulate-then-flush pair needs retention. `propagate(v)` is
@@ -270,7 +270,7 @@ preceded it:
    (#1487 marks the slot do-not-touch).
 2. **Today the HANDLER fan-out pays a rope clone the storing path avoids.** The storing roles
    hand the published pointer straight to delivery; the handler leg takes a nothrow clone first
-   (`core/src/graph.cpp:2089`). It is the cold path and the clone is refcount-only, but on a
+   (`core/src/graph.cpp:2185`). It is the cold path and the clone is refcount-only, but on a
    wide-fan-out handler vertex it is real. Tracked and being quantified as
    [#1505](https://github.com/avatarsd-llc/libtracer/issues/1505); until that rules, do not choose
    HANDLER *for throughput* on a heavily-subscribed vertex — choose it for the retention
@@ -358,33 +358,52 @@ as one snapshot: `in_use` and `peak` against `capacity`, plus `refused` and `dro
 holding the `graph_t`, the `fwd_router_t` and the links calls `stats()`, `drop_stats()` and
 `labels_used()` on its own cadence and applies §5's readings. This is the arm to build now.
 
-**The remote arm, at the semantic level.** The same monitoring is meant to be reachable over the
-protocol: a supervisor elsewhere on the graph READs a node's reserved-`:` introspection fields and
-gets the seam's whole counter block back as a **single snapshot-coherent TLV** — one read, one
-consistent block, rather than a field at a time. Three properties are already ruled and are worth
-designing to now:
+**The remote arm — shipped.** The same monitoring is reachable over the protocol: a supervisor
+elsewhere on the graph issues an ordinary READ of a node's reserved `:stats` field and gets the
+seam's whole counter block back as a **single snapshot-coherent TLV** — one read, one consistent
+block, rather than a field at a time. The spelling is
+[RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md)
+§Amendment 1's:
 
-- **Isolation is by construction, not by privilege.** Pressure in this model is designated per
-  vertex, so an introspection vertex — with its own tiny bounded lists, never sharing a bound with
-  a data vertex — stays answerable at any stream pressure. There is no privileged control arm and
-  none is needed; the reply reserve of §3.4 already protects the reply leg.
+```
+read <any-vertex>:stats.mem.control        ; capacity / in_use / peak / refused / largest_refused
+read <any-vertex>:stats.mem.ring           ; the same five, for the default receiver-ring source
+read <any-vertex>:stats.graph.delivery     ; no_target / denied / out_of_memory / fan_out_truncated
+```
+
+The field is **node-scoped** — it takes no vertex, and every vertex of the node answers
+identically — so a monitor addresses whichever vertex suits it. It is **`READ`-gated** (unlike
+`:identity`, which is pre-auth): a supervisor needs `READ` on the vertex it addresses. It is
+**read-only and never awaitable**, and the whole block is sampled in the single call that answers
+the read, which is what makes §5's difference-between-snapshots reading valid.
+
+**What the wire arm does NOT reach, and what to use instead.** `:stats` is answered by the
+**graph**, and it answers for the graph: the router, label-table and per-link seams are per
+`fwd_router_t` / `route_handle_t` / link rather than per graph, and L4 does not reach into the net
+plane to sample them. Those stay the in-process accessors above — `fwd_router_t::drop_stats()`,
+`route_handle_t::labels_used()` / `labels_exhausted()`, `transport_t::drop_stats()`. Extending the
+census to the net plane is a named door, tracked on
+[#1503](https://github.com/avatarsd-llc/libtracer/issues/1503).
+
+Three properties hold by construction:
+
+- **Isolation is by construction, not by privilege.** The read targets whatever vertex the peer
+  already addressed and is bounded by that vertex's existing list, and pressure in this model is
+  designated per vertex — so a flooded STREAM vertex cannot make a monitoring read of a quiet
+  vertex queue behind it. There is no privileged control arm and none is needed; the reply reserve
+  of §3.4 already protects the reply leg.
 - **A timeout is the signal, not a blind spot.** The monitoring READ travels the same fabric it
   measures. If a saturated shared link delays it past its deadline, *that is the hard congestion
   signal* — a fail-deadly health check. The link-seam counters distinguish link saturation from
   vertex pressure after the fact.
 - **Poll-only.** Introspection fields are readable and never awaitable: counters do not bump the
-  write sequence, so nothing wakes on them. A monitor polls; it does not subscribe.
-
-> **Gate.** The concrete **wire spelling** of that reserved `:` introspection subtree is *not
-> shipped* and is not invented here. It is specified by the pending
-> [#1503](https://github.com/avatarsd-llc/libtracer/issues/1503) step-5 amendment, which is held on
-> one addressing decision (a colon-prefixed *vertex* subtree is not expressible in the shipped path
-> grammar). Until that lands, everything in §5 and in this recipe's first arm is a **C++ accessor,
-> not a READ** — which is the right shape for the bench/staging run §5 describes anyway.
+  write sequence, so nothing wakes on them. A monitor polls; it does not subscribe. An `await`
+  carrying a `:stats` selector answers `ERROR{tr::schema::not_found}`, as every field-tailed
+  `await` does.
 
 ### Recipe B — probe-vertex timing
 
-Fully available today, and it needs nothing from the gate above.
+An application convention, and it needs nothing from the library at all.
 
 libtracer stays **clock-free** — timing is an application convention, never a library service.
 So measure it as one:
