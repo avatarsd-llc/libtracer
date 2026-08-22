@@ -162,6 +162,31 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **A `role_t::HANDLER` write no longer clones the value to deliver it — the non-retaining role
+  is now the CHEAPER one at every fan-out and every value shape**
+  ([#1505](https://github.com/avatarsd-llc/libtracer/issues/1505), measured with
+  [#1516](https://github.com/avatarsd-llc/libtracer/pull/1516)'s `bench_source_role` /
+  `bench_source_role_alloc`). A HANDLER publishes no last-known-value, so `write_impl` had no
+  stored pointer to hand to delivery and built a nothrow `try_clone_rope` before `store_value`.
+  It never needed to: `store_value`'s HANDLER leg only **reads** `value` and returns the null
+  "consumed" success sentinel, so the caller's rope is still live after the call. It is now
+  delivered directly. Measured x86-64 `-O3`, p50 ns per write, HANDLER before → after:
+  **70 → 60** at 1 link / fan 0, **170 → 110** at 4 links / fan 0 (+68 % throughput on that
+  point), and **one heap block per write fewer than `STORED_VALUE` at every link count** rather
+  than only below the rope's inline capacity. The storing arm is unchanged — byte-for-byte
+  identical object code on x86-64, and the two gated points `inproc-target-stored` /
+  `inproc-target-handler` hold.
+
+  **Behavioural surface:** `drop_reason_t::OUT_OF_MEMORY` can no longer be raised by a handler
+  write. That leg was the widest drop in the graph — a failed notify clone shed the vertex's
+  entire fan-out, counted one per subscriber, while the write still returned success — and it is
+  now *impossible* rather than narrower, because there is no allocation on the path left to
+  fail. The reason code stays live and the counting rule is unchanged:
+  [#854](https://github.com/avatarsd-llc/libtracer/issues/854)'s own-subs-wide ruling still
+  governs `mark_pending`'s shed pending mark, and `dispatch_edge_target`'s per-edge clone still
+  raises it at width 1. A deployment alarming on `delivery_drops().out_of_memory` will see one
+  fewer *cause*, never a narrower count for a cause that remains.
+
 - **`core/STYLE.md` gains an §Introspection section** — the one vocabulary every bounded
   resource in the tree answers with (`capacity` / `in_use` / `peak` / `refused` / `dropped` /
   `largest_refused`, used-polarity always), the **snapshot-coherence clause stated once** for

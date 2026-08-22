@@ -7,12 +7,18 @@
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
  * `bench_source_role` times the two roles; this binary counts what each write ALLOCATES,
- * which is what turns the shed-on-OOM exposure from an argument into a number. A `HANDLER`
- * write builds a notify clone of the value before storing, and `rope_t::kInline` is 2 — so
- * once the written value carries more than two links, that clone grows a `std::vector<view_t>`
- * on **every write**. It is that allocation whose failure sheds the ENTIRE fan-out (counted at
- * own-subs width) while the write still returns success, so the number of allocations per
- * write at each link count IS the exposure: an arm that allocates nothing cannot shed.
+ * which is what turned the shed-on-OOM exposure from an argument into a number. A `HANDLER`
+ * write used to build a notify clone of the value before storing, and `rope_t::kInline` is 2 —
+ * so once the written value carried more than two links, that clone grew a `std::vector<view_t>`
+ * on **every write**. It was that allocation whose failure shed the ENTIRE fan-out (counted at
+ * own-subs width) while the write still returned success, so the number of allocations per
+ * write at each link count WAS the exposure: an arm that allocates nothing cannot shed.
+ *
+ * #1505 acted on exactly that reading and deleted the clone. The `HANDLER` column now sits one
+ * block per write below the retaining column at EVERY link count — the LKV publish it skips,
+ * with nothing paid back — and `core/tests/handler_write_alloc_test.cpp` pins that difference so
+ * the inversion cannot come back unnoticed. This binary stays the measuring instrument; the test
+ * is the gate.
  *
  * A SEPARATE binary from the timing half, on the `bench_store_escape` precedent and for the
  * same reason stated there: the override costs a relaxed atomic load per allocation, charged

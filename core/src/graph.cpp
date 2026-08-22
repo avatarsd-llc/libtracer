@@ -2196,36 +2196,39 @@ result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, std::string_view c
     // a subtree sweep. propagate(v) is the separate accumulate-then-flush primitive.
     if (is_branch_point(value, v->role())) return write_branch(v, value, caller, /*notify=*/true);
     if (v->role() == role_t::HANDLER) {
-        // A handler stores no LKV (the user handler consumes the value), so the
-        // delivery clone survives here — the cold path only. The hot roles below
-        // deliver the exact published pointer store_value hands back instead. The
-        // clone is NOTHROW (try_clone_rope, #477): on failure the handler still runs
-        // (the write succeeds) and only the subscriber delivery drops.
-        // Refcount clone taken BEFORE the call: store_value moves from `value` on the
-        // storing legs. It does not on the Handler leg — that one only reads `value` and
-        // returns — so since #1116 (`rope_t&&`) the caller's rope survives that path.
-        rope_t notify;
-        const bool can_notify = try_clone_rope(notify, value);
+        // A handler stores no LKV (the user handler consumes the value), so there is no
+        // published pointer to deliver from — the hot roles below deliver the exact
+        // pointer store_value hands back. There is no CLONE either, and that is #1505:
+        // store_value's HANDLER leg only READS `value` and returns the null "consumed"
+        // sentinel — it does not move from it, and since #1116 (`rope_t&&`) that is a
+        // property of the leg rather than an accident of the signature — so the caller's
+        // rope is still live after the call and is delivered directly.
+        //
+        // What the clone this replaces cost, measured (#1505, #1516's bench_source_role):
+        // past the rope's inline link capacity (knee between 2 and 3 links) it was one heap
+        // block on EVERY handler write, ~40 ns flat in fan-out — a per-write term, paid in
+        // full even at fan-out zero — and it made the non-retaining role the more expensive
+        // one at multi-link values, inverting the ordering the role system advertises.
+        // Delivering `value` makes HANDLER the cheaper role at every point measured, and
+        // leaves the storing arm below byte-for-byte identical.
+        //
         // A HANDLER stores no LKV and owns no ring, so this tally is structurally clean —
         // required by the signature, and that is the point: the seam cannot be skipped.
         vertex_t::store_drops_t store_drops;
         const result_t<std::shared_ptr<const rope_t>> stored =
             store_value(v, std::move(value), store_drops, caller);
         if (!stored) return std::unexpected(stored.error());
-        if (can_notify) {
-            deliver_vertex(v, notify);
-        } else {
-            // A failed clone sheds the ENTIRE fan-out, not one leg: no edge of this
-            // vertex is dispatched, and the write still returns success. Keeping the
-            // write successful is right (the handler ran; un-running it is impossible),
-            // but the drop is the widest one in the graph, so it is counted at the width
-            // it sheds — one per subscriber, never one per event. Counted here, at the
-            // frame that abandons the delivery, because no inner frame is entered at all.
-            // The ancestor legs a bubble would also have served are deliberately not
-            // counted, and stay that way: #854's close ruling dropped the ancestor-leg
-            // drop instrumentation outright, so this tally is own-subs-wide by decision.
-            count_drop(drop_reason_t::OUT_OF_MEMORY, v->own_subs());
-        }
+        // No OUT_OF_MEMORY tally here any more, and the leg it counted is not merely
+        // narrower — it is IMPOSSIBLE. This frame used to shed the vertex's ENTIRE fan-out
+        // when the notify clone could not be allocated, counted one per subscriber (the
+        // widest drop in the graph). With the value delivered without a clone there is
+        // nothing left on this path to fail to allocate, so the event cannot occur and a
+        // counting site for it would be dead code. #854's own-subs-wide ruling is
+        // ANNOTATED, not overturned: OUT_OF_MEMORY still counts on the assign path's shed
+        // pending mark (mark_pending, at own-subs width) and on dispatch_edge_target's own
+        // per-edge clone (at width 1), so the reason code stays live and `1 never stands in
+        // for N` still holds everywhere it can still be raised.
+        deliver_vertex(v, value);
         // Eager delivery flushes any pending mark a prior assign left — but only while
         // what this write published is still current (#1185); on the handler leg that is
         // the null "consumed" sentinel, matching the handler's permanently null LKV.

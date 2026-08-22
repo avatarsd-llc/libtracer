@@ -361,7 +361,8 @@ target_compile_options(bench_store_escape PRIVATE -Wall -Wextra)
 # The RETENTION-ROLE write asymmetry (#1505): the same write at a vertex that retains an LKV
 # versus one that retains nothing. Nothing else in the suite sweeps the role of the WRITTEN
 # vertex — inproc-target-* sweeps the role of the delivery TARGET — so the notify clone a
-# HANDLER pays before every store was priced nowhere. Diagnostic, never a perf gate.
+# HANDLER paid before every store was priced nowhere. #1505 removed that clone on the strength
+# of these rows; they stay as the standing role-axis instrument. Diagnostic, never a perf gate.
 add_executable(bench_source_role bench_source_role.cpp)
 target_link_libraries(bench_source_role PRIVATE libtracer)
 target_compile_options(bench_source_role PRIVATE -Wall -Wextra)

@@ -87,9 +87,10 @@ constexpr std::size_t kFans[] = {0, 1, 4};
  *
  * @param handler `true` registers the written vertex as `HANDLER`, `false` as `STORED_VALUE`.
  * @param fan     Callback subscribers on the written vertex. **Fan 0 is the sharpest arm**:
- *                the retaining role dispatches nothing, while the HANDLER still pays the
- *                notify clone in full before discovering there is nobody to notify — so at
- *                fan 0 the gap between the two arms is the clone term and little else.
+ *                the retaining role dispatches nothing, while the HANDLER used to pay the
+ *                notify clone in full before discovering there was nobody to notify — so at
+ *                fan 0 the gap between the two arms was the clone term and little else. That
+ *                is what made it a per-WRITE cost, and #1505 removed it on this evidence.
  *                Callback edges deliberately, not path-target ones: the target leg has a
  *                per-edge clone of its own (`dispatch_edge_target`) that would swamp the
  *                source-role term this row exists to isolate.
