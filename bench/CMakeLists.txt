@@ -357,3 +357,18 @@ target_compile_options(bench_store_sweep PRIVATE -Wall -Wextra)
 add_executable(bench_store_escape bench_store_escape.cpp)
 target_link_libraries(bench_store_escape PRIVATE libtracer)
 target_compile_options(bench_store_escape PRIVATE -Wall -Wextra)
+
+# The RETENTION-ROLE write asymmetry (#1505): the same write at a vertex that retains an LKV
+# versus one that retains nothing. Nothing else in the suite sweeps the role of the WRITTEN
+# vertex — inproc-target-* sweeps the role of the delivery TARGET — so the notify clone a
+# HANDLER pays before every store was priced nowhere. Diagnostic, never a perf gate.
+add_executable(bench_source_role bench_source_role.cpp)
+target_link_libraries(bench_source_role PRIVATE libtracer)
+target_compile_options(bench_source_role PRIVATE -Wall -Wextra)
+
+# The heap half of that question, in its OWN binary for the reason bench_store_escape gives:
+# the counting operator-new override costs a relaxed atomic load per allocation, charged to
+# whichever arm allocates more — which is the retaining arm under comparison.
+add_executable(bench_source_role_alloc bench_source_role_alloc.cpp)
+target_link_libraries(bench_source_role_alloc PRIVATE libtracer)
+target_compile_options(bench_source_role_alloc PRIVATE -Wall -Wextra)

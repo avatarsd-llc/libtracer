@@ -461,6 +461,25 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "heap bytes and allocations, per arm and window",
         "never gated — a process-heap high-water moves 66% across runs"),
     instrument_t(
+        "bench_source_role.cpp", "inproc", (),
+        "The same write at a vertex that RETAINS a last-known-value and at one that retains "
+        "nothing, swept over subscriber width 0/1/4 and value link count 1/4 — the axis "
+        "`inproc-target-*` does not cover, because that pair sweeps the role of the delivery "
+        "TARGET and this one sweeps the role of the vertex being WRITTEN. A `HANDLER` builds a "
+        "notify clone of the value before storing; fan-out ZERO is the arm that isolates it. "
+        "Also times the clone term alone across the rope's inline/spill boundary.",
+        "ns p50 · writes/s, per role, fan-out and link count",
+        "diagnostic, never gated — its rows are absent from the default sweep the gate joins on"),
+    instrument_t(
+        "bench_source_role_alloc.cpp", "counted", (),
+        "The heap half of that question, in its own binary for the reason bench_store_escape "
+        "gives: how many process-heap blocks one write costs at each role and link count. The "
+        "count is the shed-on-OOM exposure — a HANDLER notify clone past the rope's inline "
+        "capacity draws a block on every write, and it is that block's failure that sheds an "
+        "entire fan-out while the write still returns success.",
+        "allocations and frees per write, per role and link count",
+        "never gated — a decision input, reported as a count"),
+    instrument_t(
         "bench_lkv_slot.cpp", "scaling", (),
         "Concurrent publishers and readers on one last-known-value slot across five reclamation "
         "arms, plus `graph_t::write` driven from T threads against distinct vertices that share "
