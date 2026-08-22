@@ -380,6 +380,119 @@ enum class app_sel_t : std::uint8_t {
     return app_sel_t::NAMED;
 }
 
+/**
+ * @brief One seam of the node-scoped `:stats` census (RFC-0010 Amendment 1, #1503 step 5).
+ *
+ * The spelling is `<any-vertex>:stats.<seam-class>.<name>` — node-scoped in the `:identity`
+ * mould (RFC-0011 §C.1): the field takes no vertex, every vertex answers identically, and
+ * the content describes the NODE. The enumerated set is the census this node can reach from
+ * its own `graph_t` (Amendment 1 §D.4): the two injected `block_source_t` seams and the
+ * graph's own delivery-drop door. The router and per-link seams answer at the entities that
+ * own them (`fwd_router_t`, `transport_t`) and are deliberately NOT reachable from here —
+ * L4 does not learn about the net plane to serve a diagnostic.
+ */
+enum class stats_seam_t : std::uint8_t {
+    NONE,           /**< @brief Not a `:stats` seam spelling — SCHEMA_NOT_FOUND. */
+    MEM_CONTROL,    /**< @brief `:stats.mem.control` — @ref graph_t::control_source. */
+    MEM_RING,       /**< @brief `:stats.mem.ring` — @ref graph_t::default_ring_source. */
+    GRAPH_DELIVERY, /**< @brief `:stats.graph.delivery` — @ref graph_t::delivery_drops. */
+};
+
+/**
+ * @brief Classify a `:stats…` field path per @ref stats_seam_t.
+ *
+ * Exactly three plain NAME steps: the head, the seam CLASS and the seam NAME. A census
+ * block is served WHOLE — one READ is one seam is one TLV, which is the only way the
+ * `core/STYLE.md` §Introspection snapshot-coherence clause can hold — so no member and no
+ * indexed spelling names anything, and neither does a bare `:stats` or a bare
+ * `:stats.<class>`: aggregating seams is exactly what ADR-0079 forbids.
+ *
+ * Out of line and `cold` for the same measured reason as @ref read_stats below, and reached
+ * only when the head already spelled `stats` — a field read of any other name pays one
+ * string compare and never this call.
+ */
+[[nodiscard, gnu::noinline, gnu::cold]] stats_seam_t stats_seam(
+    const field_path_t& field) noexcept {
+    if (field.steps.size() != 3) return stats_seam_t::NONE;
+    for (const field_step_t& s : field.steps)
+        if (!plain_step(s)) return stats_seam_t::NONE;
+    const std::string_view cls = field.steps[1].name;
+    const std::string_view name = field.steps[2].name;
+    if (cls == "mem") {
+        if (name == "control") return stats_seam_t::MEM_CONTROL;
+        if (name == "ring") return stats_seam_t::MEM_RING;
+    } else if (cls == "graph") {
+        if (name == "delivery") return stats_seam_t::GRAPH_DELIVERY;
+    }
+    return stats_seam_t::NONE;
+}
+
+/** @brief Emit one census member — `NAME <noun> VALUE u64` (fixed 8-byte little-endian,
+ *         the reference/05 integer convention), the shape every `:stats` block repeats. */
+void emit_counter(std::vector<std::byte>& out, std::string_view noun, std::uint64_t value) {
+    wire::emit_name(out, noun);
+    emit_value(out, value, 8);
+}
+
+/**
+ * @brief Serve one `:stats` seam as ONE `SETTINGS` TLV (RFC-0010 Amendment 1 §D.3).
+ *
+ * Sampled in a single call, in the vocabulary `core/STYLE.md` §Introspection fixes, in the
+ * declaration order of the underlying POD. The member set is a function of the SEAM CLASS,
+ * so `mem.control` and `mem.ring` are byte-shaped alike and a reader parses one block per
+ * class. Nothing here bumps `write_seq_` — counters are not writes, which is precisely why
+ * the field is readable and never awaitable.
+ *
+ * A free function rather than a `graph_t` member on purpose: every accessor it reads is
+ * already public, so the census needs no new public symbol and no friendship.
+ *
+ * `noinline` + `cold`, and the honest note is that this is PROPHYLACTIC, not a diagnosed
+ * fix. The first CI run of this change read a reproduced -16% on `compact-forward` — a
+ * point this code is not on — and the local interleaved A/B could not reproduce it in
+ * EITHER direction (x1.01 with these attributes, x1.02 without, against the same baseline
+ * on the same host). The attributes stay because they are right on their own terms: a
+ * census is polled at a supervisor's cadence, so its block-building code belongs in
+ * `.text.unlikely` behind one call rather than partitioned through this TU's hot text —
+ * exactly the shape #1503 step 3 had to adopt when seven `fetch_add`s inlined at their drop
+ * sites cost `bench_forward_demux` +7.3% until one `[[gnu::noinline, gnu::cold]]
+ * count_drop` took them out of line.
+ */
+[[nodiscard, gnu::noinline, gnu::cold]] result_t<view_t> read_stats(const graph_t& g,
+                                                                    stats_seam_t seam) {
+    std::vector<std::byte> members;
+    switch (seam) {
+        case stats_seam_t::MEM_CONTROL:
+        case stats_seam_t::MEM_RING: {
+            const mem::source_stats_t s = seam == stats_seam_t::MEM_CONTROL
+                                              ? g.control_source().stats()
+                                              : g.default_ring_source().stats();
+            emit_counter(members, "capacity", s.capacity);
+            emit_counter(members, "in_use", s.in_use);
+            emit_counter(members, "peak", s.peak);
+            emit_counter(members, "refused", s.refused);
+            emit_counter(members, "largest_refused", s.largest_refused);
+            break;
+        }
+        case stats_seam_t::GRAPH_DELIVERY: {
+            const graph_t::delivery_drops_t d = g.delivery_drops();
+            emit_counter(members, "no_target", d.no_target);
+            emit_counter(members, "denied", d.denied);
+            emit_counter(members, "out_of_memory", d.out_of_memory);
+            emit_counter(members, "fan_out_truncated", d.fan_out_truncated);
+            break;
+        }
+        case stats_seam_t::NONE:
+            return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+    }
+    std::vector<std::byte> block;
+    wire::emit_tlv(block, type_t::SETTINGS, opt_t{.pl = true}, members);
+    // `block` is non-empty by construction; `nullopt` is exactly an alloc failure
+    // → BACKPRESSURE (the audited alloc/copy/over locus).
+    const auto out = view::over_bytes(block);
+    if (!out) return std::unexpected(status_t::BACKPRESSURE);
+    return *out;
+}
+
 // The flat protocol-knob name table is GONE (RFC-0022 §3.B): `settings_t` is deleted, so
 // the vertex `:settings` core namespace has no writable member left. All seven historical
 // names — `reliability`, `priority`, `durability`, `deadline_ns`, `queue_max_bytes`,
@@ -4176,7 +4289,7 @@ result_t<rope_t> graph_t::read(vertex_handle_t vh, const field_path_t& field,
     const result_t<view_t> fv = [&]() -> result_t<view_t> {
         // PROTOCOL-OWNED NAME VALIDITY RESOLVES ABOVE THE READ GATE (#435, RFC-0010 §A
         // erratum 2026-08-12). The recognised field namespace — {subscribers, acl,
-        // children, settings, schema, identity} — is published spec text
+        // children, settings, schema, identity, stats} — is published spec text
         // (docs/reference/05 §0x09 STATUS / §Field namespace), identical on every node,
         // so answering an unknown NAME before the gate discloses nothing; answering it
         // BELOW the gate split one spelling's answer by who asked (SCHEMA_NOT_FOUND for
@@ -4190,7 +4303,7 @@ result_t<rope_t> graph_t::read(vertex_handle_t vh, const field_path_t& field,
         // — the owner's name set is a secret (see the settings arm past the gate).
         const std::string_view head = field.steps[0].name;
         if (head != "subscribers" && head != "acl" && head != "children" && head != "settings" &&
-            head != "schema" && head != "identity")
+            head != "schema" && head != "identity" && head != "stats")
             return std::unexpected(status_t::SCHEMA_NOT_FOUND);
         // Bare `:subscribers` and any `:subscribers.<tail>` spelling name nothing on
         // either door — the record is addressed whole, per slot — and the write door
@@ -4233,6 +4346,21 @@ result_t<rope_t> graph_t::read(vertex_handle_t vh, const field_path_t& field,
             if (!whole_field(field)) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
             return read_identity();
         }
+        // `:stats` (#1503 step 5, RFC-0010 Amendment 1) is node-scoped in the `:identity`
+        // mould — it takes no vertex, every vertex answers identically — with the GATING
+        // INVERTED: a memory census is not first-contact material, so the VALUE resolves
+        // BELOW the READ gate and there is no pre-auth exemption here. Only NAME VALIDITY
+        // resolves above it, exactly as the erratum's protocol-owned row requires: the seam
+        // namespace is published spec text, identical on every node, so an unrecognised
+        // seam spelling answers SCHEMA_NOT_FOUND caller-INDEPENDENTLY and a denied caller
+        // reading a RECOGNISED seam gets PERMISSION_DENIED. That does disclose that the
+        // seam exists — intended, and no more than `settings` or `children` already
+        // disclose. Resolving validity here (rather than below with the value) is what
+        // stops one spelling having two answers split by who asked.
+        const stats_seam_t seam =
+            field.steps[0].name == "stats" ? stats_seam(field) : stats_seam_t::NONE;
+        if (field.steps[0].name == "stats" && seam == stats_seam_t::NONE)
+            return std::unexpected(status_t::SCHEMA_NOT_FOUND);
         // An UNKNOWN core-namespace `:settings` NAME resolves HERE, above the READ gate —
         // the exact mirror of the write door (see `field_write`'s settings arm: only
         // `settings.app.…` reaches a gate; every other spelling under `settings` falls
@@ -4262,6 +4390,9 @@ result_t<rope_t> graph_t::read(vertex_handle_t vh, const field_path_t& field,
         if (app == app_sel_t::CORE_KNOB) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
         if (!acl_allows(v, caller, acl_right_t::READ))
             return std::unexpected(status_t::PERMISSION_DENIED);
+        // The `:stats` VALUE, below the gate (see the name-validity arm above): one seam,
+        // one census block, one TLV, sampled in one call.
+        if (seam != stats_seam_t::NONE) return read_stats(*this, seam);
         // One synthesized POINT, served whole — not an array field, so no `[N]` surface.
         // The shared `whole_field` shape rule (#869).
         if (field.steps[0].name == "schema" && whole_field(field)) return read_schema(v);

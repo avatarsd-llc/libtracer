@@ -872,7 +872,7 @@ STATUS is a **reply and a sentinel, not a field**. There is no asynchronous stat
 `<vertex>:status` is not a selector, and a field read or write to it answers
 `ERROR{tr::schema::not_found}` (`0x0031`), the declared reply for a field a vertex does not
 expose. The field **namespace** a dispatcher recognises is
-`{subscribers, acl, children, settings, schema, identity}`, and `status` is not in it.
+`{subscribers, acl, children, settings, schema, identity, stats}`, and `status` is not in it.
 A recognised name can still answer `NOT_FOUND` when the facet is empty, or
 `SCHEMA_NOT_FOUND` for a spelling it does not accept (bare `:subscribers` requires `[N]`) or
 for a facet deliberately absent (`:identity` with no keypair, §`0x0B`) — the set is a
@@ -1068,6 +1068,60 @@ Normative rules:
   an implementation that gates `:identity` behind `READ` deadlocks first contact. The exemption
   is narrow and named: it applies to this field alone, and it discloses nothing an
   authenticating handshake would not present as its static key anyway.
+
+### The seam census record — `:stats`
+
+`read <any-vertex>:stats.<seam-class>.<seam-name>` ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §Amendment 1) serves one SETTINGS TLV carrying **one seam's whole counter block**. Like `:identity` it is **node-scoped** — it takes no vertex, and every vertex answers identically — and unlike `:identity` it is **READ-gated**.
+
+```
+SETTINGS (PL=1) {
+  NAME "<noun>"  VALUE <u64>       ; one pair per counter, fixed-width u64 little-endian
+  ...                              ; readers MUST ignore unknown NAMEs
+}
+```
+
+The seams a node's graph answers for:
+
+| spelling | the seam | nouns |
+| ---- | ---- | ---- |
+| `:stats.mem.control` | the injected failable block source every peer-provokable allocation draws from | `capacity`, `in_use`, `peak`, `refused`, `largest_refused` |
+| `:stats.mem.ring` | the graph-level default receiver-ring source | the same five |
+| `:stats.graph.delivery` | the graph's delivery-drop door (the net plane counts through it too) | `no_target`, `denied`, `out_of_memory`, `fan_out_truncated` |
+
+Worked bytes — the graph-door block on a fresh node, **113 bytes** (the `settings/stats-seam-block` vector):
+
+```
+0B 40 6D 00                                SETTINGS: type=0x0B opt=0x40(PL=1) len=109
+  02 00 09 00 6E 6F 5F 74 61 72 67 65 74   NAME "no_target"
+  01 00 08 00 00 00 00 00 00 00 00 00      VALUE u64 = 0
+  02 00 06 00 64 65 6E 69 65 64            NAME "denied"
+  01 00 08 00 00 00 00 00 00 00 00 00      VALUE u64 = 0
+  02 00 0D 00 6F 75 74 5F 6F 66 5F 6D 65 6D 6F 72 79    NAME "out_of_memory"
+  01 00 08 00 00 00 00 00 00 00 00 00      VALUE u64 = 0
+  02 00 11 00 66 61 6E 5F 6F 75 74 5F 74 72 75 6E 63 61 74 65 64    NAME "fan_out_truncated"
+  01 00 08 00 00 00 00 00 00 00 00 00      VALUE u64 = 0
+```
+
+Normative rules:
+
+- **One READ is one SEAM is one BLOCK, sampled in ONE call.** The snapshot-coherence clause
+  (`core/STYLE.md` §Introspection: monotonic since construction, sampled unsynchronized, read as
+  the *difference* between two snapshots) is unachievable across separate field reads, so
+  per-counter fields are not this surface.
+- **NAME validity resolves ABOVE the READ gate.** Bare `:stats`, a bare `:stats.<class>`, an
+  unknown class or seam, any `[N]` / `[]` / `[*]` selector, and any deeper tail all answer
+  `ERROR{tr::schema::not_found}` (`0x0031`) **caller-independently**. Aggregating seams into a
+  container is deliberately unspellable.
+- **The VALUE resolves BELOW it — gated on `READ`.** A denied caller receives
+  `ERROR{tr::access::denied}` (`0x0050`), which discloses that the seam exists; that is intended,
+  because the seam namespace is published spec, identical on every node.
+- **Read-only, and never awaitable.** A write of any `:stats` spelling answers
+  `ERROR{tr::schema::not_found}` caller-independently. Counters do not advance the vertex's write
+  sequence, so no `await` could ever fire on them — and every field-tailed `await` already answers
+  `ERROR{tr::schema::not_found}` regardless (§`0x0F` FWD).
+- **A reader MUST ignore unknown `NAME`s** and MUST NOT depend on the member count: a seam may
+  grow a noun. A node that does not publish a seam answers `SCHEMA_NOT_FOUND`, which a monitor
+  MUST read as "not published here", never as an error.
 
 ---
 
@@ -1450,7 +1504,7 @@ cannot be spelled.
 
 ### Treating the field namespace as a list of readable facets
 
-The rule: `{subscribers, acl, children, settings, schema, identity}` is the namespace a
+The rule: `{subscribers, acl, children, settings, schema, identity, stats}` is the namespace a
 dispatcher recognises. A recognised name can still answer `NOT_FOUND` (the facet is empty),
 or `SCHEMA_NOT_FOUND` (a spelling it does not accept, such as bare `:subscribers` where `[N]`
 is required, or a facet deliberately absent, such as `:identity` with no keypair).
@@ -1472,6 +1526,20 @@ and authenticate. A second, subtler failure: resolving the bare spelling above t
 letting `:identity.key` fall through to it makes the answer *caller-dependent* — a denied
 caller gets `PERMISSION_DENIED` where an allowed caller gets `SCHEMA_NOT_FOUND` — which leaks
 the caller's authorization state through an error code.
+
+### Gating `:stats` like `:identity`
+
+The rule: `:stats` is node-scoped in the `:identity` mould but its **gating is inverted** — only
+NAME validity resolves above the READ gate; the counter block itself is `READ`-gated, and a denied
+caller gets `ERROR{tr::access::denied}`.
+
+The failure mode: an implementation that extends the pre-auth exemption to `:stats` because the two
+fields look alike publishes its memory census — slab sizes, occupancy, refusal counts, drop
+counts — to any unauthenticated peer that can open a link. Nothing deadlocks by gating it: a
+memory census is not first-contact material. The exemption is narrow and names `:identity` alone.
+The mirror-image error is gating the *name* too: resolving an unrecognised `:stats` spelling below
+the gate makes one spelling answer `SCHEMA_NOT_FOUND` to an allowed caller and `PERMISSION_DENIED`
+to a denied one, which is the caller-dependent disclosure §Gating `:identity` names.
 
 ### Serving a per-vertex identity record
 

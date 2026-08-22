@@ -329,6 +329,27 @@ void test_await_field_selector_is_enotty() {
               "... SCHEMA_NOT_FOUND, though READ/WRITE serve :subscribers fine");
     }
 
+    // The node-scoped census (#1503 step 5, RFC-0010 Amendment 1 §D.6). "Readable, never
+    // awaitable" needs NO new guard and mints no new status: counters do not bump
+    // `write_seq_`, so nothing could ever fire such a wait, and the unconditional refusal
+    // above already answers it — the amendment CITES this rule rather than adding one.
+    // Named here so a future narrowing of that guard fails a test that says `:stats`.
+    {
+        std::vector<std::byte> sel;
+        std::vector<std::byte> levels = b_name("stats");
+        const auto mem = b_name("mem");
+        const auto control = b_name("control");
+        levels.insert(levels.end(), mem.begin(), mem.end());
+        levels.insert(levels.end(), control.begin(), control.end());
+        tr::wire::emit_tlv(sel, type_t::FIELD, opt_t{.pl = true}, levels);
+        const auto d = await_with(sel);
+        const tlv_t& r = d.tlv;
+        check(value_u8(r.children[3]) == static_cast<std::uint8_t>(reply_kind_t::ERROR),
+              "AWAIT :stats.mem.control -> ERROR (the census READS fine; the await does not)");
+        check(status_error_code(r.children[4]) == 0x0031 /*tr::schema::not_found*/,
+              "... SCHEMA_NOT_FOUND, never flow::timeout — a counter can never wake a wait");
+    }
+
     // CONTROL — passes with or without the fix. Ordinary await must still time out.
     {
         const auto d = await_with({});

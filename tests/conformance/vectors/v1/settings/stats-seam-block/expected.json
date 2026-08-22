@@ -1,0 +1,12 @@
+{
+  "name": "stats-seam-block",
+  "category": "settings",
+  "hex": "0B406D00020009006E6F5F7461726765740100080000000000000000000200060064656E69656401000800000000000000000002000D006F75745F6F665F6D656D6F72790100080000000000000000000200110066616E5F6F75745F7472756E6361746564010008000000000000000000",
+  "total_bytes": 113,
+  "decoded": {
+    "type": "0x0B SETTINGS",
+    "structured": true,
+    "meaning": "SETTINGS{ NAME \"no_target\" VALUE u64=0, NAME \"denied\" VALUE u64=0, NAME \"out_of_memory\" VALUE u64=0, NAME \"fan_out_truncated\" VALUE u64=0 } — the whole graph-door census block, in ONE TLV, as `read <any-vertex>:stats.graph.delivery` answers it on a fresh node (RFC-0010 Amendment 1 §D.3, #1503 step 5)",
+    "note": "bytes emitted by the libtracer reference encoder. One READ is one SEAM is one BLOCK: the counters are sampled in a single call, which is the only shape under which core/STYLE.md §Introspection's snapshot-coherence clause holds — six per-counter fields could never be mutually coherent. Members are NAME/VALUE pairs in the declaration order of the underlying POD, each a FIXED-WIDTH u64 little-endian; readers MUST ignore unknown NAMEs and MUST NOT depend on the count. A mem-class seam (`:stats.mem.control`, `:stats.mem.ring`) carries the five-noun block instead (capacity/in_use/peak/refused/largest_refused). The OTHER three answers this surface can give are byte-identical to vectors already held and are deliberately not duplicated: a denied caller reading a recognised seam gets ERROR{0x0050 tr::access::denied} (acl/denied-caller-undeclared-app-field), an unrecognised `:stats` spelling and any AWAIT carrying a `:stats` selector both get ERROR{0x0031 tr::schema::not_found} (settings/removed-knob)."
+  }
+}
