@@ -293,13 +293,41 @@ Details that make these trustworthy:
   name — already gated, twice over, so gating them again would buy correlated evidence
   rather than coverage. `eptype-stream` is not a re-emission: it is the only point on the
   list that declares a bounded history depth, and therefore the only one downstream of the
-  **`STREAM` role's retention work** — the append to the bounded ring that every write to a
-  stream vertex pays *before* fan-out. Nothing else on the list touches that path, so a
+  **`STREAM` role's retention work**. Nothing else on the list touches that path, so a
   pullback confined to retention was invisible to all fourteen predecessors, which is the
   same guard-gap shape as `lkv-store-*` and the compact/demux arms below. It costs **no
   wall-clock**: the default sweep already emits the row. And all three legs bite at the
-  nominal thresholds — it measures **~190 ns** p50 and mean, far above the sub-100 ns band
-  where the tick guard would demand an extra +25 ns absolute.
+  nominal thresholds — it measures **~190 ns** p50 and mean over five best-of-rounds on a
+  busy 31-core host, far above the sub-100 ns band where the tick guard would demand an
+  extra +25 ns absolute.
+
+  **What that row prices changed underneath it**, and the change is worth naming because
+  the series name did not. Until `bdd1066b` the ring was the *producer's*: a write to a
+  stream vertex appended to its own history under the stripe mutex, before fan-out. Under
+  RFC-0025 §4.6.1 Amendment 2 **a producer never queues** — the queue belongs to the party
+  that wants depth, so the ring lives on the **receiving** vertex and the admission runs
+  *after* the last-known-value publish rather than before fan-out. What the gated row times
+  today is therefore the receiver leg: retire the entry the depth intent pushes out, admit
+  the new one by reserving its retained width against that vertex's own injected block
+  source, and append. The row keeps its name on purpose. The rule above — *renaming beats
+  reinterpreting* — governs a change in what the **instrument** measures; the bench source
+  is untouched and the operation it drives is still "one 64 B write into a depth-16 stream
+  vertex". The mechanism beneath it moved, and a core change moving the line is exactly the
+  signal the series exists to show.
+
+  **The append-and-admission leg is read as a gap, not as a series of its own.**
+  `eptype-stream` and `eptype-lean` are the same write at the same payload, fan-out and
+  topic count, emitted from the same pass of the same binary and banked as separate series
+  on the *Endpoint-type family* card — so the distance between the two lines is the
+  receiver-ring cost, over the whole recorded history, with the runner shared by both arms.
+  Two things that leg does **not** price, stated because a reader would otherwise assume
+  them covered: a reservation is **handed straight on** when a retiring entry has the shape
+  the new one needs, so a steady uniform stream costs its source zero `try_alloc` calls per
+  write and this row measures the admission *bookkeeping*, not an allocator round-trip; and
+  the resident footprint of the receiver's ring state has no memory probe. A bench for the
+  shape-changing admission path — where the carried reservation cannot be reused and
+  `try_alloc` fires on every write — **does not exist**, and neither does one for the ring's
+  resident bytes. Both are gaps in this page, not numbers it is withholding.
 
   Four of the fifteen come from OTHER bench binaries, and they are here because of what
   happened without them (#1173): `compact-forward` moved **+41%** across the v0.8.0 →
@@ -463,6 +491,136 @@ optional TLS module. An absent transport must never be readable as a tie.
 
 ---
 
+## Designated model boundaries
+
+Three properties of libtracer's model are **designed**, not accidental, and each of them
+carries a cost this page measures. They are listed here so that cost can be read for what
+it is: the price of a capability that was chosen, not a defect awaiting a fix. Every
+comparison on this page — the Zenoh chapter above most of all — has to be read against
+them, because a comparison between two engines that solved *different problems* is only
+informative once the problems are named. Nothing below proposes a redesign; where a
+boundary has a **mitigable constant**, the mitigation is a measurement, and it is linked.
+
+A boundary earns that name only from a measurement that **isolates** it, and the section is
+held to that standard in both directions. A number that moves for some other reason is not
+evidence for a wall, however convenient the shape of the curve — the first draft of
+boundary 1 argued from exactly such a curve and the isolating control arm refuted it. Where
+that has happened it is said outright below rather than quietly rewritten, because a
+boundaries section that only ever accumulates walls is an argument, not an instrument.
+
+**1 · Every distinct address is resident state.** A vertex is not a name that a message
+happens to carry — it is an object that exists between writes. That is what pays for the
+last-known-value (a reader gets the current value without waiting for the next publish),
+for `await` (a readiness sequence has to live somewhere), for composed reads across a
+subtree, and for the per-vertex ACL. An engine that only *routes* keeps no such object and
+so has nothing to scale in the number of addresses.
+
+**What residency costs is bytes.** That is the axis the trade is paid on, and it is
+measured rather than derived: the decomposition sweep
+([#1485](https://github.com/avatarsd-llc/libtracer/issues/1485) /
+[#1496](https://github.com/avatarsd-llc/libtracer/pull/1496)) reads **132 B of heap and
+140 B of RSS per vertex** at 10⁶ vertices, converging from above as the upper tree's fixed
+cost amortizes, against a computed ~120 B floor — **+10 %** over the arithmetic. A million
+addresses is **132 MB of heap and 140 MB of RSS**. The **O(#addresses) residency is the
+model** and no footprint work turns it into O(1); the **constant** in front of it is fair
+game and is actively ratcheted on this page, bytes at +2 % and block counts exactly.
+
+This is also where the boundary actually bites the target the project cares most about. On
+a **wide** host 132 MB for a million addresses is unremarkable; on the **narrow** end — the
+constrained MCU profile living inside a ~16 KB RAM budget — the per-vertex byte figure is
+the number that decides how many addresses a node may have at all. Memory, not latency, is
+the axis on which "every distinct address is resident state" is a real constraint.
+
+**Residency is NOT a per-operation LATENCY cost, and the control arm that decides this is
+unambiguous.** Hold **one million vertices resident and touch exactly one**: a write costs
+**90 ns** — the same 90 ns it costs with a thousand resident. Resolving a single hot address
+moves 70 → 90 ns across three decades. Descent is population-independent outright
+(ADR-0057, now verified rather than assumed): a fixed-shape probe address resolves in
+**60 ns at 10³ and 60 ns at 10⁶** warm, and **90 ns flat** with its lines evicted between
+samples. Everything that grows, grows with the **touched** set, not the resident set.
+
+Read that refutation at exactly its own width. It kills the claim that residency is a
+**latency** wall — which is what the earlier draft of this section asserted, and it was
+wrong on its own evidence. It does **not** say the residency model is free: the bytes above
+are the cost, and they are real. A boundary can be genuine on one axis and absent on
+another, and saying which is which is the whole job of this section.
+
+**The topic-count curve in the Zenoh chapter is not this boundary's evidence.** It stands
+as measured — the fairness audit
+([#1480](https://github.com/avatarsd-llc/libtracer/pull/1480)) went looking in both
+directions and found exactly one axis where Zenoh is the better engine outright:
+**topic-count scaling**, Zenoh's p50 moving **220 → 230 ns (+5 %)** across 1 → 8192 topics
+against libtracer's **140 → 190 ns (+36 %)**, narrowing our margin from **1.57× to 1.21×**.
+That number does not change and is not softened. Its *explanation* does. The decomposition
+puts the growth in **per-iteration by-address resolution**: over the span that ladder
+occupies (10³ → 10⁴) the resolve-then-write arm moves 210 → 270 ns and splits **+60 ns in
+resolution against +10 ns in the bound write**, so **~85 % of it sits in a leg the opponent's
+arm never had** — `bench_zenoh` publishes through a declared `Publisher` and resolves
+nothing per put, while the libtracer row re-resolved the address inside every timed
+iteration. Bind the handle once, which the API already offers, and the same operation reads
+**90 → 100 ns** over that span. A large part of our side of that gap is therefore a
+**bench-shape difference, not a model wall** — and of the wide arm's growth further out,
+only about **20 ns** is the extra `lower_bound` comparisons a wider tree costs; the rest is
+cold-line traffic, a cost of the working set rather than of the registry. This is the same
+asymmetry the Fairness section above records against the `inproc-path` pair, read from the
+other end: there it is a defect in how the two arms spelled their destination, here it is
+the reason the curve it produced cannot be charged to residency. One finding, stated twice
+because a reader arrives at it from either direction. The `topics-bound` / `topics-addr`
+pair is the fix — an instrument built to measure **both** spellings on **both** engines —
+but it is an instrument, not yet a result; see the caveat below before reading anything
+into it.
+
+Two caveats on that decomposition, because it is fresh. Its arms are **not gated** — they
+are new and their run-to-run stability is unproven, and `POINTS` is a promise about
+stability.
+
+And **the replacement topic-count arm has not produced a comparison yet.** Its preliminary
+run is single-round with no arm-order flip, it captured the **Zenoh side only** — the
+libtracer half was never taken at all, so no two-sided result exists to read — and CI
+compiles invalidated two attempts, after which the runs were discarded rather than
+published. One preliminary Zenoh figure is additionally suspected of having entered a
+*different upstream code path* rather than sitting on a scaling curve, which is on #1485 as
+a hypothesis the completed run must confirm or kill; it is deliberately not reproduced on
+this page and nothing here is derived from it. **No counter-number to the audit's result is
+being offered**, and the only cross-engine topic-count numbers on this page remain the
+audit's own. What survives without any of it is the structural point, which needs no new
+measurement: the two rows the old comparison charted against each other were **different
+operations**. The decomposition itself was taken on a quiet box
+(1-minute load 0.64–1.15, no `cc1plus` alive, 31 CPUs, best of 3 rounds with the arm order
+flipped on alternate rounds, two full ladders agreeing to ~2 % at 10⁶).
+
+One follow-up remains open and it is a ruling, not a redesign:
+[#1486](https://github.com/avatarsd-llc/libtracer/issues/1486), on memoizing
+`vertex_slot()`, whose reverse scan is exactly O(total vertices) — measured at 450 ns at
+10³ rising to **410 µs at 10⁶**, taken under a shared mutex on every binding mint. That is
+the number the ruling was blocked on; the ruling itself is #1486's to make.
+
+**2 · Paths are routes, not location-independent names.** A path is resolved from the
+vantage point of the graph doing the resolving; the same value can be reachable by
+different paths from different places, and a path handed to a peer does not carry a
+promise that it means the same thing there. This is the boundary that buys **composition
+with no infrastructure**: two graphs are joined by mounting one into the other, and the
+join needs no broker, no registry service, no name authority and no agreement between the
+parties beyond the mount itself. A location-independent naming scheme would make a path
+portable across vantage points, and would need exactly the infrastructure that absence is
+the point of not having. Comparisons that assume a global namespace are comparing against
+a system that has one.
+
+**3 · The producer's write budget is fixed, fan-out is value-agnostic, and a producer
+never queues.** A write costs what it costs regardless of who is listening: fan-out
+carries the value without inspecting it, and the depth a consumer wants is the consumer's
+own ring on the consumer's own vertex, charged in bytes to a source that vertex injected
+(RFC-0025 §4.6.1 Amendment 2). What this buys is the hot write path — the reason a write
+is a sub-100 ns operation at all, and the reason its cost does not move when a subscriber
+decides it wants history. What it forecloses is symmetric and worth stating: there is no
+producer-side buffering to smooth a slow consumer with, no content-dependent routing
+decision inside the fan-out loop, and no way for a subscriber to make a producer pay for
+its own depth. The budget is instrumented rather than asserted — the write path's compiled
+size is ratcheted symbol by symbol (`bench/symbol_ratchet.json`), and a change that moves
+it has to price the move on the bench before the pin is allowed to move with it.
+
+---
+
 ## Reading the numbers (noise & variance)
 
 - **Runner lottery.** Shared CI runners vary ~2× in absolute speed. **The tell:** a
@@ -575,6 +733,30 @@ optional TLS module. An absent transport must never be readable as a tie.
   catch-up measures HEAD whenever the last trusted point is more than 8 bench-relevant
   merges behind `main`, so the guarantee is a **bound on the gap** — narrow enough to
   bisect — rather than a point per commit.
+- **A banked series is a TREND instrument; the paired same-runner A/B is the gate.** The
+  two stores answer "where has this point been going" across machines and months. They do
+  not answer "did this commit cost anything", and reading them as if they did produces
+  verdicts the code never earned. A textbook case, both halves measured on the same day:
+  the rolling drift check on the banked series warned that `inproc 64B/fan1/1ep` p50 had
+  gone to **400 ns against a 100 ns baseline (+300%)**, while the interleaved same-runner
+  A/B on the **identical commit** read **1.02×**. Nothing regressed — the banked baseline
+  and the banked point were taken on different machines under different load, and the
+  quotient of two absolutes across that gap is instrument drift wearing a percentage sign.
+  So: a drift warning is a **prompt to measure**, never a verdict; a verdict comes only
+  from two arms interleaved on one runner in one session, which is what the per-PR gate
+  is and what every ratchet in the table above compares. This holds for every banked
+  series on this page, the memory ones included.
+- **An absolute without its host is not a measurement, and this page never publishes
+  one.** Load alone is worth more than most of the effects anyone argues about: the same
+  gated point read **3.6 M deliveries/s while CI was building on the box and 6.0 M/s
+  quiet — 1.6×**, no code between the two. Every absolute here therefore names the machine
+  and the conditions it was taken under, and a figure that arrives without them is
+  unusable rather than merely imprecise —
+  [#1495](https://github.com/avatarsd-llc/libtracer/issues/1495) is open on exactly that
+  defect in a **normative** document: RFC-0025 §4.6.2 states throughput caps as bare
+  cross-machine numbers, and unmodified `main` misses two of them by **1.40× and 1.71×**
+  purely because nobody recorded which host they were cut on. Where this page mentions
+  those caps it links that issue; it does not report them as met.
 - **Record the load context on both sides of every measurement, and wait for
   quiescence first.** `python3 bench/host_guard.py wait` before the run and
   `/proc/loadavg` either side of it: an absolute figure without its load context cannot

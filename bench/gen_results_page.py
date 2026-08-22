@@ -853,7 +853,9 @@ libtracer is compiled from source at `-O3`; Zenoh is the upstream prebuilt `zeno
 release binary that `bench/fetch_zenoh.sh` downloads, so its optimization profile is
 upstream's rather than a flag this repo sets. Both are optimized builds. Which rows do equal
 work, why there is no network *throughput* comparison, and which transports are absent and
-why, are all below."""
+why, are all below — as are the three **designated model boundaries**, which say what the
+two engines are respectively buying with the costs these charts show, and which include the
+one axis where Zenoh is the better engine."""
 
 
 def raw_data() -> str:
@@ -1277,6 +1279,10 @@ an MCU allocator in hundreds — so a host reading of churn is a *lower* bound.
 {compare_intro()}
 
 {mprose(M, "4 · libtracer vs Zenoh (absolute, best of 3 rounds, same runner)")}
+
+### Designated model boundaries
+
+{mprose(M, "Designated model boundaries")}
 
 ### Fairness in the comparison
 

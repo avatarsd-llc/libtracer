@@ -225,8 +225,21 @@ FAMILIES: list[dict] = [
          pat=r"^inproc-mt(\d+) 64B/fan1/\d+ep",
          label=lambda m: f"mt{m.group(1)}", key=_num, log=False,
          px=dict(label="worker threads", log=True, fmt="count")),
+    # The `stream` arm is the only GATED point downstream of the STREAM receiver's ring, and
+    # the only place the ring's per-write cost is banked at all — read as its DISTANCE from
+    # `lean`, which is the identical write with no retention, emitted from the same pass of
+    # the same binary. The two arms therefore share a runner point-for-point, which the
+    # cross-run series do not: the caption says so because a reader looking at the gap is
+    # entitled to know it is the one comparison on this card that drift does not move.
     dict(id="eptype", section="dispatch", title="Endpoint-type family",
-         cond="eptype-* · 64 B · fan-out 1 · 1 topic",
+         cond="eptype-* · 64 B · fan-out 1 · 1 topic — `lean` and `lean-cached` re-emit the "
+              "plain and loaned writes; `stream` is the same write into a depth-16 STREAM "
+              "vertex, so `stream` − `lean` is the RECEIVER-side ring cost (retire, admit by "
+              "byte reservation, append). The ring moved from the producer to the receiver "
+              "at bdd1066b (RFC-0025 §4.6.1 Amendment 2) — the bench and the row are "
+              "unchanged, the mechanism under them is not, which is the signal this line is "
+              "here to show. Both arms come from one pass on one runner; the COMMIT axis "
+              "does not, and is a trend",
          # The `(?<!-batch)` is load-bearing, not defensive clutter: without it a future
          # `eptype-lean-batch` row would land here labelled as a THIRD endpoint type
          # rather than as the same type measured with a different instrument (#553).
@@ -863,6 +876,14 @@ def _source_selector(local_ok: bool, why: str) -> str:
     generate time (a fork with no `gh-pages`, an offline build) the second button renders
     DISABLED and carries `why` as its title, rather than vanishing: a control that
     silently disappears reads as "this page has one store", which is false.
+
+    The selector carries the TREND caveat beside it because this is the one element that
+    heads every chart block on the page, so it is the only place a caveat about banked
+    series is guaranteed to sit next to one. A banked point and its banked baseline can
+    come from different machines under different load, and the quotient of two such
+    absolutes is drift, not a verdict: a rolling drift check once warned +300 % on a point
+    whose interleaved same-runner A/B, on the identical commit, read 1.02x. Cross-run
+    series are read as trends; the paired same-runner A/B is what gates.
     """
     dis = "" if local_ok else f' disabled title="{why}"'
     return (
@@ -874,6 +895,11 @@ def _source_selector(local_ok: bool, why: str) -> str:
         f'<button type="button" class="ph-srcbtn" data-src="local"{dis}'
         ' title="one pinned self-hosted CPU, same silicon every point — the absolute-trend instrument">'
         'bench-local</button>'
+        '<span class="ph-srcnote" title="A banked point and its baseline can come from '
+        'different machines under different load; a rolling drift check once read +300% on '
+        'a point whose same-runner interleaved A/B, at the identical commit, read 1.02x.">'
+        'cross-run series are a TREND instrument — the paired same-runner A/B is the gate'
+        '</span>'
         '</div>')
 
 
