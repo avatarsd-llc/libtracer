@@ -80,6 +80,36 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **WIRE-VISIBLE: a `FWD` whose `src` is a zero-length `PATH` is now UNACKNOWLEDGED — the
+  terminus applies the write and emits nothing**
+  ([#1502](https://github.com/avatarsd-llc/libtracer/issues/1502), ruling on
+  [#1491](https://github.com/avatarsd-llc/libtracer/issues/1491); RFC-0004 Amendment 2). A
+  reply is something the origin *requests* by wiring a return route, and the empty route is
+  the request not made. Two behaviour changes follow, both visible to peers:
+
+  - **A remote subscription delivery no longer draws a reply.** A full-route fan-out delivery
+    has always been emitted as `FWD{WRITE, dst=<return route>, src=<empty PATH>}`; its
+    receiver used to answer with a `FWD{REPLY}` addressed to an **empty path** — an unroutable
+    frame, sent once per delivered sample. It is now silent. **The emitter is unchanged**; the
+    fix is entirely receiver-side.
+  - **A client MAY now stream unacknowledged writes** by sending an empty `src`. #1491
+    measured a bulk WebSocket ingest on an ESP32-C6 spending **~60 %** of its per-batch cost
+    on replies it discards, with the throughput knee pinned to the reply queue's depth. The
+    origin gives up per-write backpressure feedback in exchange — inherent to an
+    unacknowledged channel, and opt-in.
+
+  An empty-`src` `READ`, `AWAIT`, mint-flagged frame, or `:subscribers[]` subscribe is
+  **malformed** and dropped at the terminus (there is no route to carry a NACK). A denied or
+  failed empty-`src` write drops silently, the same policy a denied `COMPACT` delivery already
+  took ([#974](https://github.com/avatarsd-llc/libtracer/issues/974)). The encoding is the
+  **empty** child and never an omitted one — the `FWD` child run is positional and a `WRITE`
+  payload may itself be `PATH`-typed — so **the grammar and every shipped parser are
+  unchanged**. Forwarders are untouched and still accumulate into `src` unconditionally, so
+  the marker reaches a terminus only from a directly attached origin or on the delivery leg;
+  extending it across hops is left to a separate proposal (RFC-0004 Amendment 2 §Scope
+  boundary). C++ API: none — `op_resolver_t::resolve` already documented the empty rope as
+  "no frame to send", and this is a new reason for it. Six conformance vectors in
+  `core/tests/empty_src_unacked_test.cpp`.
 - **A producer never queues: the STREAM ring is the RECEIVER's, and it is bounded in BYTES by
   that vertex's own injected source**
   ([#1461](https://github.com/avatarsd-llc/libtracer/issues/1461),

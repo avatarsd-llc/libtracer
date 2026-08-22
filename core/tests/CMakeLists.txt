@@ -2003,3 +2003,13 @@ target_compile_definitions(batch_test PRIVATE
     LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
 libtracer_test_warnings(batch_test)
 add_test(NAME batch COMMAND batch_test)
+
+if(LIBTRACER_NET_PLANE)
+    # RFC-0004 Amendment 2 (#1502) — the six empty-src conformance vectors: a zero-length
+    # `src` is "no reply requested", so the terminus applies the WRITE and emits nothing,
+    # and an empty-src READ/AWAIT/mint-flagged frame is malformed and dropped.
+    add_executable(empty_src_unacked_test empty_src_unacked_test.cpp)
+    target_link_libraries(empty_src_unacked_test PRIVATE libtracer)
+    libtracer_test_warnings(empty_src_unacked_test)
+    add_test(NAME empty_src_unacked COMMAND empty_src_unacked_test)
+endif()

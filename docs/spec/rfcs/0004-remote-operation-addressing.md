@@ -328,3 +328,141 @@ MUST be **rejected** (`kind=ERROR`, `STATUS{ ERROR{ tr::path::invalid (0x0021) }
 accumulated `src`), never emitted over the bus's shared fan-out endpoint. Only the link's peer
 names route below its mount; a `dst` naming the mount exactly still addresses the connection
 vertex locally. Normative text, rationale, and the two rejected alternatives live in RFC-0020.
+
+---
+
+## Amendment 2 (2026-08-22): §B/§D — a zero-length `src` is "no reply requested"
+
+Records the maintainer ruling on
+[#1491](https://github.com/avatarsd-llc/libtracer/issues/1491), tracked and specified in
+[#1502](https://github.com/avatarsd-llc/libtracer/issues/1502). The 14-day comment window is
+**waived by default** while the project is solo-maintained
+([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §Roles); it was not invoked, because the
+change removes frames rather than adding a surface for a second implementer to build against.
+(The 2026-08-01 amendment above is Amendment 1 — it predates the numbering.)
+
+**Status: accepted.** This is an **amendment and not an erratum**: it changes what a
+conforming implementation puts on the wire.
+
+### The measurement that forced the question
+
+A bulk producer streaming into a node over WebSocket ([#1491](https://github.com/avatarsd-llc/libtracer/issues/1491), on an
+ESP32-C6) solved to **~4.86 ms fixed per batch + ~1.57 µs/byte**. At a 2 KB payload the fixed
+term is **60 %** of the total, and throughput peaked at pipeline depth 4 and *degraded* beyond
+it — depth 4 being the async TX pool depth of the host's WebSocket transport, i.e. the queue
+the **replies** travel through. The writes were not what saturated. The reporter had already
+ruled out buffer copies (1.57 µs/byte is 252 cycles/byte, against 1–2 for a word-wise rv32
+copy), TCP window (a 4× lwIP window lifted raw HTTP 51 % and moved this path within noise),
+and batch size (already at the ring's capacity, worth 2.8× and spent).
+
+### The rule
+
+**A reply is something the origin requests by wiring a return route, never something the
+library imposes.** The `src` PATH of a `FWD` is simultaneously the return route and the
+acknowledgement request, so the empty route is the request not made:
+
+> §B gains: a request `FWD` whose `src` is a **zero-length `PATH`** carries **no return
+> route**, and the terminus MUST NOT emit any frame in response to it.
+
+1. **Empty, never omitted.** The encoding is the present-but-zero-length child. §B's child run
+   is read **positionally**, and a `WRITE` payload may itself be `PATH`-typed
+   ([RFC-0024](0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §7.1 amendment 2 gave
+   that shape back deliberately), so an omitted `src` and a `PATH` payload are the same bytes.
+   Omission is ambiguous; emptiness is not. **The grammar is unchanged** — `src` remains a
+   required `PATH` child — so every shipped parser reads the frame it always read.
+2. **Empty-`src` `WRITE`: applied, and silent.** The terminus applies the write and emits
+   **no** frame. A **denied or failed** empty-`src` write is **dropped silently** — no
+   addressed `ERROR`, because there is no address. This invents no drop policy: it is the one a
+   denied `COMPACT` delivery already runs under
+   ([reference/05](../../reference/05-protocol-tlvs.md) §route-handle, recording the
+   [#974](https://github.com/avatarsd-llc/libtracer/issues/974) ruling — *"a denied delivery is
+   dropped like any other unwritable one"*). The anti-enumeration property survives for free:
+   a peer that asked for no answer learns nothing about what it may not write.
+3. **Empty-`src` `READ` / `AWAIT`: malformed.** The result has nowhere to go, so the frame asks
+   for an answer and refuses to receive one. **Dropped at the terminus**, and deliberately
+   *not* NACKed — for the reason the whole clause exists: there is no route to carry a NACK.
+   Forwarders stay **opcode-agnostic**; the check sits where `op` is already switched, which is
+   the terminus.
+4. **Empty-`src` + the mint flag (`op` bit 7): malformed.** A bound-path mint answer rides the
+   reply alone (RFC-0024 §7.5), so the pairing is a contradiction on one frame. Dropped at the
+   terminus rather than downgraded to a plain silent write: silently ignoring the flag would
+   leave the origin waiting for a handle it will never be told it cannot have.
+5. **Empty-`src` remote `SUBSCRIBE` (a `:subscribers[]` `WRITE`): malformed** — derived from
+   the clauses above rather than ruled separately, and stated because they would otherwise
+   leave it open. A subscribe is a **standing** request for future frames: the edge it binds
+   would carry the empty route as its `target`, and every delivery down it would be the
+   unroutable `FWD{WRITE, dst=<empty>}` this amendment exists to stop, emitted forever instead
+   of once. Same terminus drop as clause 3.
+6. **Deliveries stop drawing garbage replies — with no emitter change anywhere.** A full-route
+   fan-out delivery is already `FWD{WRITE, dst=<return route>, src=<empty PATH>}` (§E; the
+   reference core has emitted exactly that since #136). Before this amendment its receiver
+   assembled a `FWD{REPLY}` addressed to an **empty path** — a frame no hop can route, sent for
+   every sample of every stream. Clause 2 fixes that **receiver-side**, and the emitter is
+   normatively unchanged.
+
+### What the origin gives up, stated
+
+An empty-`src` flow has **no per-write backpressure feedback**: the `BACKPRESSURE` reply that
+tells an origin to slow down is a reply, and there is none. That is inherent to an
+unacknowledged channel and it is **opt-in** — the origin chose it by sending the empty route.
+The application's own sequence counter is its loss detector, which is the mechanism #1491's
+reporter already carries.
+
+### Scope boundary: forwarders are untouched, so the marker is not multi-hop
+
+§B's **return-route accumulation is unchanged**: every forwarding hop still prepends its
+inbound-link `NAME` to `src`, including when `src` arrives empty. An empty `src` therefore
+means "no reply requested" **only where it is still empty when it reaches the terminus** —
+which is the two topologies the ruling is about:
+
+- a **directly attached** origin (a WebSocket/TCP client whose frame terminates at the node it
+  is attached to, with zero forwarding hops) — #1491's own case; and
+- the **delivery leg**, where the producer's terminus emits the empty `src` itself.
+
+An origin **behind one or more forwarders** cannot express the marker today: the first hop
+grows `src` and the terminus sees a route. Making the hop preserve an empty `src` was
+evaluated and **deliberately not taken here** — an empty seed `src` is currently the ordinary
+spelling for "name me by the link I arrive on", relied on by the shipped routing examples, so
+preserving it would silently unaddress every one of them. Extending the marker across hops is
+therefore a separate proposal that must re-specify the empty seed first, and is not decided by
+this amendment.
+
+### §D's tension, stated rather than papered over
+
+§D says **streaming never per-sample-remote-writes**, and that governs the **fan-out / consume**
+direction: delivery stays subscription-driven and flush-driven, and this amendment does not
+touch it. The empty-`src` `WRITE` sanctions the **push-ingest** topology — where the *producer*
+is the client and consumer-initiated subscription would invert who initiates. The standing
+plane (a `SUBSCRIBER` plus `delivery_compact`, §D/§E.1 and
+[ADR-0030](../../adr/0030-can-transport-dynamic-in-transport-map-advertise-reassembly.md))
+remains the documented **first** answer wherever the topology allows it; the unacknowledged
+write is the answer where it does not.
+
+### Conformance vectors
+
+Six, added to the S-set (`core/tests/empty_src_unacked_test.cpp`), each asserted as **zero
+frames emitted** rather than as "no reply parsed" — a frame sent to a zero-length route decodes
+as a well-formed `FWD{REPLY}`, so counting sends is the only assertion that catches it. Each is
+paired with a positive control carrying a one-segment `src`, which must still draw exactly one
+reply.
+
+| | vector | expected |
+| - | ------ | -------- |
+| a | empty-`src` `WRITE`, writable target | applied; **zero frames** |
+| b | empty-`src` `WRITE`, ACL-denied target | not applied; **zero frames** (`COMPACT` parity) |
+| c | empty-`src` `READ` | dropped; **zero frames** |
+| d | empty-`src` `AWAIT` | dropped; **zero frames** |
+| e | empty-`src` mint-flagged `WRITE` | dropped; **zero frames** |
+| f | subscription full-route delivery at the consumer | applied; **no reply frame** |
+
+Plus the derived clause-5 case (empty-`src` subscribe: dropped, and no edge bound) and the two
+remaining terminus reply sites — an unresolvable `dst` and a payload-less `WRITE` — which are
+different arms from the ones a–f reach and would otherwise stay free to answer an empty route.
+
+### Acceptance still open
+
+The on-silicon half of #1491 — a re-run of the reporter's depth/payload sweep on an ESP32-C6
+with the client sending empty-`src` writes, expecting a large drop in the ~4.86 ms fixed
+per-batch term and a shift of the depth-4 knee — is **not a merge gate** and is **not done**:
+no C6 was attached when this landed. It is recorded as a pending HIL item on #1502 alongside
+[#1479](https://github.com/avatarsd-llc/libtracer/issues/1479).
