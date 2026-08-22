@@ -1038,6 +1038,17 @@ target_link_libraries(subtree_read_test PRIVATE libtracer)
 libtracer_test_warnings(subtree_read_test)
 add_test(NAME subtree_snapshot COMMAND subtree_read_test)
 
+# RFC-0025 §4.1.2 (Amendment 3, clause 5) — propagate's FOLD emission mode: ONE
+# RFC-0005 §B branch-write frame per swept subtree instead of RFC-0008 §D's one
+# FWD{WRITE} per selected vertex. Asserts the default does not move, the fold-vs-
+# default per-leaf differential is byte-identical, the root carries its leading
+# NAME, trailer-carrying nodes are rejected (not stripped), a selected STREAM is
+# refused, and disjoint subtrees are SEVERAL frames (the retired-LIST ban).
+add_executable(propagate_fold_test propagate_fold_test.cpp)
+target_link_libraries(propagate_fold_test PRIVATE libtracer)
+libtracer_test_warnings(propagate_fold_test)
+add_test(NAME propagate_fold COMMAND propagate_fold_test)
+
 # ADR-0041 — terminus arena decoder: decode<->decode_into equivalence over every
 # conformance vector + the span/canonical/zero-spill contract.
 add_executable(tlv_arena_test tlv_arena_test.cpp)
