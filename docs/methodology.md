@@ -293,13 +293,41 @@ Details that make these trustworthy:
   name — already gated, twice over, so gating them again would buy correlated evidence
   rather than coverage. `eptype-stream` is not a re-emission: it is the only point on the
   list that declares a bounded history depth, and therefore the only one downstream of the
-  **`STREAM` role's retention work** — the append to the bounded ring that every write to a
-  stream vertex pays *before* fan-out. Nothing else on the list touches that path, so a
+  **`STREAM` role's retention work**. Nothing else on the list touches that path, so a
   pullback confined to retention was invisible to all fourteen predecessors, which is the
   same guard-gap shape as `lkv-store-*` and the compact/demux arms below. It costs **no
   wall-clock**: the default sweep already emits the row. And all three legs bite at the
-  nominal thresholds — it measures **~190 ns** p50 and mean, far above the sub-100 ns band
-  where the tick guard would demand an extra +25 ns absolute.
+  nominal thresholds — it measures **~190 ns** p50 and mean over five best-of-rounds on a
+  busy 31-core host, far above the sub-100 ns band where the tick guard would demand an
+  extra +25 ns absolute.
+
+  **What that row prices changed underneath it**, and the change is worth naming because
+  the series name did not. Until `bdd1066b` the ring was the *producer's*: a write to a
+  stream vertex appended to its own history under the stripe mutex, before fan-out. Under
+  RFC-0025 §4.6.1 Amendment 2 **a producer never queues** — the queue belongs to the party
+  that wants depth, so the ring lives on the **receiving** vertex and the admission runs
+  *after* the last-known-value publish rather than before fan-out. What the gated row times
+  today is therefore the receiver leg: retire the entry the depth intent pushes out, admit
+  the new one by reserving its retained width against that vertex's own injected block
+  source, and append. The row keeps its name on purpose. The rule above — *renaming beats
+  reinterpreting* — governs a change in what the **instrument** measures; the bench source
+  is untouched and the operation it drives is still "one 64 B write into a depth-16 stream
+  vertex". The mechanism beneath it moved, and a core change moving the line is exactly the
+  signal the series exists to show.
+
+  **The append-and-admission leg is read as a gap, not as a series of its own.**
+  `eptype-stream` and `eptype-lean` are the same write at the same payload, fan-out and
+  topic count, emitted from the same pass of the same binary and banked as separate series
+  on the *Endpoint-type family* card — so the distance between the two lines is the
+  receiver-ring cost, over the whole recorded history, with the runner shared by both arms.
+  Two things that leg does **not** price, stated because a reader would otherwise assume
+  them covered: a reservation is **handed straight on** when a retiring entry has the shape
+  the new one needs, so a steady uniform stream costs its source zero `try_alloc` calls per
+  write and this row measures the admission *bookkeeping*, not an allocator round-trip; and
+  the resident footprint of the receiver's ring state has no memory probe. A bench for the
+  shape-changing admission path — where the carried reservation cannot be reused and
+  `try_alloc` fires on every write — **does not exist**, and neither does one for the ring's
+  resident bytes. Both are gaps in this page, not numbers it is withholding.
 
   Four of the fifteen come from OTHER bench binaries, and they are here because of what
   happened without them (#1173): `compact-forward` moved **+41%** across the v0.8.0 →
@@ -463,6 +491,68 @@ optional TLS module. An absent transport must never be readable as a tie.
 
 ---
 
+## Designated model boundaries
+
+Three properties of libtracer's model are **designed**, not accidental, and each of them
+shows up somewhere on this page as a cost. They are listed here so that cost can be read
+for what it is: the price of a capability that was chosen, not a defect awaiting a fix.
+Every comparison on this page — the Zenoh chapter above most of all — has to be read
+against them, because a comparison between two engines that solved *different problems* is
+only informative once the problems are named. Nothing below proposes a redesign; where a
+boundary has a **mitigable constant**, the mitigation is a measurement, and it is linked.
+
+**1 · Every distinct address is resident state.** A vertex is not a name that a message
+happens to carry — it is an object that exists between writes. That is what pays for the
+last-known-value (a reader gets the current value without waiting for the next publish),
+for `await` (a readiness sequence has to live somewhere), for composed reads across a
+subtree, and for the per-vertex ACL. An engine that only *routes* keeps no such object and
+so has nothing to scale in the number of addresses. The **constant** in front of the
+residency is fair game and is actively worked — bytes per vertex are ratcheted exactly on
+this page, block counts to the byte — but the **O(#addresses) residency is the model**, and
+no amount of footprint work turns it into O(1).
+
+The honest consequence is measured and it is in the Zenoh chapter. The fairness audit
+([#1480](https://github.com/avatarsd-llc/libtracer/pull/1480)) went looking in both
+directions and found exactly one axis where Zenoh is the better engine outright:
+**topic-count scaling**. Across 1 → 8192 topics Zenoh's p50 moves **220 → 230 ns (+5%)**
+while libtracer's moves **140 → 190 ns (+36%)**, so libtracer's margin on that axis narrows
+from **1.57× to 1.21×** — and the trend line says it would keep closing past the end of the
+ladder. Zenoh's key-expression routing scales in topic count better than a path registry
+holding one resident object per address does. That is boundary 1 with a number on it, and
+the number stays on this page exactly as measured. Two follow-ups are open, both of them
+measurements of the constant rather than proposals about the model:
+[#1485](https://github.com/avatarsd-llc/libtracer/issues/1485) (a vertex-count scaling
+sweep — lookup, registration, mint, enumeration and RAM — with a Zenoh topic-count arm
+beside it, so the axis is charted rather than argued) and
+[#1486](https://github.com/avatarsd-llc/libtracer/issues/1486) (a ruling on memoizing
+`vertex_slot()`, whose reverse lookup is O(total vertices) today).
+
+**2 · Paths are routes, not location-independent names.** A path is resolved from the
+vantage point of the graph doing the resolving; the same value can be reachable by
+different paths from different places, and a path handed to a peer does not carry a
+promise that it means the same thing there. This is the boundary that buys **composition
+with no infrastructure**: two graphs are joined by mounting one into the other, and the
+join needs no broker, no registry service, no name authority and no agreement between the
+parties beyond the mount itself. A location-independent naming scheme would make a path
+portable across vantage points, and would need exactly the infrastructure that absence is
+the point of not having. Comparisons that assume a global namespace are comparing against
+a system that has one.
+
+**3 · The producer's write budget is fixed, fan-out is value-agnostic, and a producer
+never queues.** A write costs what it costs regardless of who is listening: fan-out
+carries the value without inspecting it, and the depth a consumer wants is the consumer's
+own ring on the consumer's own vertex, charged in bytes to a source that vertex injected
+(RFC-0025 §4.6.1 Amendment 2). What this buys is the hot write path — the reason a write
+is a sub-100 ns operation at all, and the reason its cost does not move when a subscriber
+decides it wants history. What it forecloses is symmetric and worth stating: there is no
+producer-side buffering to smooth a slow consumer with, no content-dependent routing
+decision inside the fan-out loop, and no way for a subscriber to make a producer pay for
+its own depth. The budget is instrumented rather than asserted — the write path's compiled
+size is ratcheted symbol by symbol (`bench/symbol_ratchet.json`), and a change that moves
+it has to price the move on the bench before the pin is allowed to move with it.
+
+---
+
 ## Reading the numbers (noise & variance)
 
 - **Runner lottery.** Shared CI runners vary ~2× in absolute speed. **The tell:** a
@@ -575,6 +665,30 @@ optional TLS module. An absent transport must never be readable as a tie.
   catch-up measures HEAD whenever the last trusted point is more than 8 bench-relevant
   merges behind `main`, so the guarantee is a **bound on the gap** — narrow enough to
   bisect — rather than a point per commit.
+- **A banked series is a TREND instrument; the paired same-runner A/B is the gate.** The
+  two stores answer "where has this point been going" across machines and months. They do
+  not answer "did this commit cost anything", and reading them as if they did produces
+  verdicts the code never earned. A textbook case, both halves measured on the same day:
+  the rolling drift check on the banked series warned that `inproc 64B/fan1/1ep` p50 had
+  gone to **400 ns against a 100 ns baseline (+300%)**, while the interleaved same-runner
+  A/B on the **identical commit** read **1.02×**. Nothing regressed — the banked baseline
+  and the banked point were taken on different machines under different load, and the
+  quotient of two absolutes across that gap is instrument drift wearing a percentage sign.
+  So: a drift warning is a **prompt to measure**, never a verdict; a verdict comes only
+  from two arms interleaved on one runner in one session, which is what the per-PR gate
+  is and what every ratchet in the table above compares. This holds for every banked
+  series on this page, the memory ones included.
+- **An absolute without its host is not a measurement, and this page never publishes
+  one.** Load alone is worth more than most of the effects anyone argues about: the same
+  gated point read **3.6 M deliveries/s while CI was building on the box and 6.0 M/s
+  quiet — 1.6×**, no code between the two. Every absolute here therefore names the machine
+  and the conditions it was taken under, and a figure that arrives without them is
+  unusable rather than merely imprecise —
+  [#1495](https://github.com/avatarsd-llc/libtracer/issues/1495) is open on exactly that
+  defect in a **normative** document: RFC-0025 §4.6.2 states throughput caps as bare
+  cross-machine numbers, and unmodified `main` misses two of them by **1.40× and 1.71×**
+  purely because nobody recorded which host they were cut on. Where this page mentions
+  those caps it links that issue; it does not report them as met.
 - **Record the load context on both sides of every measurement, and wait for
   quiescence first.** `python3 bench/host_guard.py wait` before the run and
   `/proc/loadavg` either side of it: an absolute figure without its load context cannot
