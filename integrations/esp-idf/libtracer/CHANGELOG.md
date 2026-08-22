@@ -10,6 +10,34 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`esp_ws_client_link_t::drop_stats()`** — the client link now answers the #932
+  interface-level drop seam, closing the last half of
+  [#1503](https://github.com/avatarsd-llc/libtracer/issues/1503)'s finding 5. It shipped
+  the RICH half of that contract (`stats()`) without the GENERIC one, so a consumer holding
+  only a `transport_t&` — which is what `fwd_router_t` and every kind-agnostic host hold —
+  read ZERO drops from a link that was counting them, and read them again the instant it
+  swapped in `httpd_ws_link_t`. A **projection**, never a second tally: `dropped_rx` is
+  `dropped_rx()`, `dropped_tx` is `stats().c.tx_drops`, and `malformed_rx` is honestly `0`
+  because this link's framing is the IDF transport's and it never classifies a message as
+  protocol-malformed — the all-zero #932 default exists so a link need not fabricate one.
+- **`esp_ws_client_link_t::rx_capacity()` / `tx_capacity()`** — the `core/STYLE.md`
+  §Introspection spellings of the two ceilings `rx_bytes()` / `tx_bytes()` already
+  reported. `rx_bytes` meant a CAPACITY here and TRAFFIC in `link_counters_t`, which is one
+  of the naming collisions #1503's census enumerated; `capacity` is the vocabulary's word
+  for "the effective ceiling that produced the refusal". `rx_bytes()` / `tx_bytes()` are
+  unchanged and stay — #1160's pairing rule is satisfied by either name.
+
+### Changed
+
+- **`link_stats.hpp`'s scope note is finished** rather than left half-corrected: both links
+  that publish a `link_counters_t` now also override `drop_stats()`, so the generic seam
+  and the rich block can no longer disagree, and the note says so. The part that is still
+  true is kept and sharpened — core's hot `deliver_remote` path grew no counter, and
+  `fwd_router_t` grew per-SEAM counters (the ADR-0079 shape), not per-child accounting.
+
+
 ## [0.14.0] — 2026-08-21
 
 ### Changed
