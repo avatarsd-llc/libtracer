@@ -445,7 +445,10 @@ of work per operation*.
   term is visible as its own difference instead of hidden inside one arm. What is compared is
   per-operation *resolution*: the `path_t` on one side and the `KeyExpr` on the other are both
   pre-built, because charging one engine for a string parse the other hoisted is the same
-  mistake in the other direction.
+  mistake in the other direction. The completed two-sided run and what it does to the audit's
+  conclusion are in *Designated model boundaries* below; the short form is that bound against
+  bound both engines are near-flat, and the axis the audit reported as Zenoh's was the
+  unmatched pair.
 - **ACL is disabled in the comparison rows.** No subject resolver is installed, so
   the access gate is a single null check. The *cost of enforcement* is measured
   separately (the `acl-inherit` rows), never hidden inside the comparison.
@@ -545,49 +548,76 @@ wrong on its own evidence. It does **not** say the residency model is free: the 
 are the cost, and they are real. A boundary can be genuine on one axis and absent on
 another, and saying which is which is the whole job of this section.
 
-**The topic-count curve in the Zenoh chapter is not this boundary's evidence.** It stands
-as measured — the fairness audit
+**The topic-count curve in the Zenoh chapter is not this boundary's evidence — and the
+completed comparison retires it.** The fairness audit
 ([#1480](https://github.com/avatarsd-llc/libtracer/pull/1480)) went looking in both
-directions and found exactly one axis where Zenoh is the better engine outright:
+directions and reported exactly one axis where Zenoh was the better engine outright:
 **topic-count scaling**, Zenoh's p50 moving **220 → 230 ns (+5 %)** across 1 → 8192 topics
 against libtracer's **140 → 190 ns (+36 %)**, narrowing our margin from **1.57× to 1.21×**.
-That number does not change and is not softened. Its *explanation* does. The decomposition
-puts the growth in **per-iteration by-address resolution**: over the span that ladder
-occupies (10³ → 10⁴) the resolve-then-write arm moves 210 → 270 ns and splits **+60 ns in
-resolution against +10 ns in the bound write**, so **~85 % of it sits in a leg the opponent's
-arm never had** — `bench_zenoh` publishes through a declared `Publisher` and resolves
-nothing per put, while the libtracer row re-resolved the address inside every timed
-iteration. Bind the handle once, which the API already offers, and the same operation reads
-**90 → 100 ns** over that span. A large part of our side of that gap is therefore a
-**bench-shape difference, not a model wall** — and of the wide arm's growth further out,
-only about **20 ns** is the extra `lower_bound` comparisons a wider tree costs; the rest is
-cold-line traffic, a cost of the working set rather than of the registry. This is the same
-asymmetry the Fairness section above records against the `inproc-path` pair, read from the
-other end: there it is a defect in how the two arms spelled their destination, here it is
-the reason the curve it produced cannot be charged to residency. One finding, stated twice
-because a reader arrives at it from either direction. The `topics-bound` / `topics-addr`
-pair is the fix — an instrument built to measure **both** spellings on **both** engines —
-but it is an instrument, not yet a result; see the caveat below before reading anything
-into it.
+Both rows were measured correctly and neither is withdrawn. They were **not the same
+operation**: the libtracer row (`inproc-path`) re-resolved the destination address inside
+every timed iteration, while `bench_zenoh` published through a declared `Publisher` and
+resolved nothing per put. A resolution term sat inside one arm and nowhere in the other, so
+the narrowing could not be attributed to either engine's topic scaling.
+
+The `topics-bound` / `topics-addr` pair
+([#1485](https://github.com/avatarsd-llc/libtracer/issues/1485), `bench/run_topics.sh`)
+measures **both** spellings on **both** engines over one ladder, and it is now a result
+rather than an instrument. 64 B payload, fan-1, deliveries counted at the subscriber,
+best-of-5-rounds with both arm orders and both engine orders, **two independent ladders**
+agreeing to ≤ 2 % on every arm:
+
+| p50 / mean ns per operation | 1 topic | 100 topics | 10 000 topics |
+| --- | ---: | ---: | ---: |
+| libtracer `topics-bound` | 110 / 116 | 110 / 116 | 110 / 118 |
+| Zenoh `topics-bound` | 210 / 214 | 210 / 215 | 220 / 232 |
+| libtracer `topics-addr` | 140 / 140 | 170 / 174 | 190 / 196 |
+| Zenoh `topics-addr` | 320 / 332 | 1 450 / 1 532 | 221 000 / 226 351 |
+
+Read **bound against bound** — the like-for-like pair, and each engine's own recommended
+spelling — libtracer moves **116 → 118 ns (+2 %)** and Zenoh **214 → 232 ns (+8 %)** across
+four decades of topic count, so the margin *widens* slightly, 1.84× → 1.97×. The audit's
+"+36 % against +5 %" was our resolve-per-operation arm charted against their bound one.
+Matched, **neither engine has a topic-count problem in the bound form**.
+
+Read **resolve against resolve**, the growth is on the other side and it is large.
+libtracer's per-operation `find()` descent moves **140 → 196 ns (+41 %)** over the same
+span — the audit's +36 %, reproduced at the shape that actually produces it. Zenoh's
+undeclared `Session::put` moves **332 ns → 226 µs**, and the completed run settles the
+"is that a different code path or a scaling curve" question #1485 left open, in the only
+sense that mattered: it is **a curve, and a linear one**. From 100 to 10 000 declared keys
+the log-log slope is **1.08** — O(N) within the instrument — with a marginal cost of about
+**12 ns** per additional declared key over the first decade and **23 ns** over the last two.
+It is of course reached by a different code path from `Publisher::put`; that is the arm's
+whole purpose. What it is not is an outlier, a congestion effect or a measurement artefact:
+inside that path the cost is exactly the linear match a declared publisher exists to hoist.
+
+So the honest statement of this axis, replacing the one above: **both engines are near-flat
+in the bound spelling and both degrade in the resolve-per-operation spelling — libtracer by
+41 % across four decades, Zenoh by a factor of about 680.** The mitigation is the same on
+both sides and both APIs already offer it: bind, or declare, once. There is no axis here on
+which Zenoh scales better in topic count. There was an axis on which our own bench spelled
+its destination worse than theirs did.
+
+Host, recorded with the numbers: 31 CPUs, no `cc1plus` alive at any 20-second sample of
+either ladder, 1-minute load 1.4–3.3 throughout except one ~60–90 s excursion per ladder
+(peaks 10.4 and 9.4, unattributed, on a shared desktop). Best-of-rounds is the specific
+mitigation for one-sided contamination, and the two ladders' ≤ 2 % agreement on every arm is
+the evidence that it worked here.
 
 Two caveats on that decomposition, because it is fresh. Its arms are **not gated** — they
 are new and their run-to-run stability is unproven, and `POINTS` is a promise about
 stability.
 
-And **the replacement topic-count arm has not produced a comparison yet.** Its preliminary
-run is single-round with no arm-order flip, it captured the **Zenoh side only** — the
-libtracer half was never taken at all, so no two-sided result exists to read — and CI
-compiles invalidated two attempts, after which the runs were discarded rather than
-published. One preliminary Zenoh figure is additionally suspected of having entered a
-*different upstream code path* rather than sitting on a scaling curve, which is on #1485 as
-a hypothesis the completed run must confirm or kill; it is deliberately not reproduced on
-this page and nothing here is derived from it. **No counter-number to the audit's result is
-being offered**, and the only cross-engine topic-count numbers on this page remain the
-audit's own. What survives without any of it is the structural point, which needs no new
-measurement: the two rows the old comparison charted against each other were **different
-operations**. The decomposition itself was taken on a quiet box
-(1-minute load 0.64–1.15, no `cc1plus` alive, 31 CPUs, best of 3 rounds with the arm order
-flipped on alternate rounds, two full ladders agreeing to ~2 % at 10⁶).
+And **the `topics-*` arms are not on the generated results page.** One ladder costs about
+nine minutes, almost all of it the Zenoh `topics-addr` rung at 10 000 keys, so wiring it
+into the documentation job would add roughly twenty minutes to every docs build to
+re-derive a result whose interesting content is structural. It is run by hand; the table
+above is its output. Those numbers supersede the preliminary single-round, single-engine
+Zenoh figures recorded on #1485, which were never quotable and are deliberately not
+reproduced here. The decomposition beside them was taken on a quiet box (1-minute load
+0.64–1.15, no `cc1plus` alive, 31 CPUs, best of 3 rounds with the arm order flipped on
+alternate rounds, two full ladders agreeing to ~2 % at 10⁶).
 
 One follow-up remains open and it is a ruling, not a redesign:
 [#1486](https://github.com/avatarsd-llc/libtracer/issues/1486), on memoizing
