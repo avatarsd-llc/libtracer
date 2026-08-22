@@ -600,6 +600,16 @@ void test_config_constructed_tcp() {
     graph_t node_b;
     tr::net::fwd_router_t router_a(node_a);
     tr::net::fwd_router_t router_b(node_b);
+
+    // A's reply sink, declared BEFORE the sockets exist and therefore destroyed AFTER
+    // them (#1489). A's recv thread lives inside `net_a`; it is the thread that fulfils
+    // this promise, and only `~transport_vertex_t` joins it. Declared the other way
+    // round — the ordinary "just above first use" spelling — the promise's shared state
+    // would be freed while a recv thread could still be mid-`set_value`, which is the
+    // stack-lifetime shape #1484 hit under TSan.
+    std::promise<std::vector<std::byte>> got;
+    auto fut = got.get_future();
+
     tr::net::transport_vertex_t net_a(node_a, router_a);
     tr::net::transport_vertex_t net_b(node_b, router_b);
     // ADR-0073 §4 (declared-only): the application mints the module names — the library
@@ -609,9 +619,7 @@ void test_config_constructed_tcp() {
     (void)net_b.register_module(std::string(tr::net::kTcpServerSuggestedModule), "tcp",
                                 tr::net::conn_role_t::LISTEN);
 
-    // A's reply sink is set BEFORE the sockets exist (configure before frames flow).
-    std::promise<std::vector<std::byte>> got;
-    auto fut = got.get_future();
+    // The sink is bound BEFORE the sockets carry frames (configure before frames flow).
     router_a.on_reply(
         [](void* ctx, const tr::view::rope_t& reply) {
             try {
