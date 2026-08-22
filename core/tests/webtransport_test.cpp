@@ -489,6 +489,15 @@ void test_fwd_read_round_trip() {
     graph_t node_a, node_b;
     tr::net::fwd_router_t router_a(node_a);
     tr::net::fwd_router_t router_b(node_b);
+    // A's reply sink, declared BEFORE the transports and therefore destroyed AFTER them
+    // (#1489). The router-vs-transport half of the contract was already documented here;
+    // the SINK half was not. msquic's callback thread lives inside `ta`, and only
+    // `~webtransport_transport_t` drains it — so a promise declared "just above first
+    // use" would have its shared state freed while a late or duplicate reply could still
+    // be mid-`set_value`. `test_view_delivery_and_backpressure` already gets this right.
+    std::promise<std::vector<std::byte>> got;
+    auto fut = got.get_future();
+
     // Transports AFTER the routers (destruct first — drain msquic callbacks
     // before the routers die), the quic_test declaration-order contract.
     webtransport_transport_t tb(std::uint16_t{0}, g_cert, g_key);  // B serves WebTransport
@@ -504,8 +513,6 @@ void test_fwd_read_round_trip() {
     router_a.add_child("b", ta);
     router_b.add_child("a", tb);
 
-    std::promise<std::vector<std::byte>> got;
-    auto fut = got.get_future();
     router_a.on_reply(
         [](void* ctx, const tr::view::rope_t& reply) {
             try {

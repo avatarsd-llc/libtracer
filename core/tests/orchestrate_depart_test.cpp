@@ -285,6 +285,14 @@ int main() {
     // `:children[]` SPEC write — the identical code path an inbound creator write takes.
     graph_t graph_a;
     fwd_router_t router_a(graph_a);
+    // A's delivery mailbox, declared BEFORE `net_a` and therefore destroyed AFTER it
+    // (#1489). The subscription below hands `&a_rx` to A's graph, and the thread that
+    // pushes into it is `net_a`'s accept/recv thread — `graph_t::unsubscribe` is not a
+    // barrier against an in-flight delivery (see `subscription_t`'s reclamation
+    // section); the only barrier is the PUBLISHER stopping, i.e. `~transport_vertex_t`
+    // joining its worker. Declared after `net_a`, the mailbox's vector/mutex/condvar
+    // would be freed under a live deliverer — the #1484 stack-lifetime shape.
+    mailbox_t a_rx;
     transport_vertex_t net_a(graph_a, router_a);
     (void)net_a.register_module(std::string(tr::net::kWsServerSuggestedModule), "ws",
                                 conn_role_t::LISTEN);
@@ -297,7 +305,6 @@ int main() {
     // The consumer endpoint: a delivery is an ordinary write here (RFC-0004 §D). The
     // local callback subscription is observation only — nothing on the recipe path.
     const auto sink_v = graph_a.register_vertex(*path_t::parse("/sink/val"), role_t::STORED_VALUE);
-    mailbox_t a_rx;
     (void)graph_a.subscribe(
         path_t("/sink/val"),
         [](void* ctx, const tr::view::rope_t& value) {
@@ -347,10 +354,14 @@ int main() {
     {
         graph_t graph_c;
         fwd_router_t router_c(graph_c);
+        // C's two router sinks, declared BEFORE `net_c` and therefore destroyed AFTER
+        // it (#1489). Both are fed from C's recv thread, which lives inside `net_c`;
+        // `~transport_vertex_t` joining that worker is the only barrier there is.
+        mailbox_t c_replies;
+        misroute_counter_t c_misroutes;
         transport_vertex_t net_c(graph_c, router_c);
         (void)net_c.register_module(std::string(tr::net::kWsClientSuggestedModule), "ws",
                                     conn_role_t::DIAL);
-        mailbox_t c_replies;
         router_c.on_reply(
             [](void* ctx, const tr::view::rope_t& reply) {
                 const view_t mat = reply.materialize();
@@ -358,7 +369,6 @@ int main() {
                 static_cast<mailbox_t*>(ctx)->push(std::vector<std::byte>(b.begin(), b.end()));
             },
             &c_replies);
-        misroute_counter_t c_misroutes;
         router_c.on_inbound(
             [](void* ctx, std::string_view, const tlv_t& fwd) {
                 static_cast<misroute_counter_t*>(ctx)->note(fwd);
@@ -432,7 +442,8 @@ int main() {
             },
             kBudget);
         check(b_saw_departure, "B observed the orchestrator's session depart");
-    }  // C's graph/router/transport_vertex destruct here — the node is GONE.
+    }  // C's transport_vertex, then its sinks, then its router/graph destruct here —
+       // the node is GONE, and its recv thread was joined while the sinks still lived.
 
     // ----- the proof: delivery continues WITHOUT the orchestrator -------------------
     std::printf("\nAfter departure — B produces, A must receive:\n");
@@ -457,6 +468,9 @@ int main() {
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "ALL PASS" : "FAILURES", g_failures,
                 g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;
-    // RAII teardown: net_b/router_b/graph_b, then net_a/router_a/graph_a — each owned
-    // socket stops delivering before the router it feeds is gone (the documented order).
+    // RAII teardown, in reverse declaration order: net_b/router_b/graph_b, then net_a,
+    // then `a_rx`, then router_a/graph_a. Each owned socket stops delivering before the
+    // router it feeds is gone AND before the SINK that delivery lands in is gone — the
+    // subscriber is the half the ordinary "declare it above first use" spelling misses
+    // (#1489), so `a_rx` sits above `net_a` on purpose.
 }
