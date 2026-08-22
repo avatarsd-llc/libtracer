@@ -284,6 +284,16 @@ class op_resolver_t {
      * missing the required `op`/`dst`/`src` children) that no reply can describe,
      * and for a REPLY frame (which is routed, not resolved, here).
      *
+     * **A request whose `src` is a ZERO-LENGTH `PATH` is UNACKNOWLEDGED** (RFC-0004
+     * Amendment 2, #1502): the return route is also the acknowledgement request, and
+     * the empty route is the request not made. A `WRITE` is applied and answers with
+     * an **empty rope** — success, refusal and ACL denial alike, since none of them
+     * has anywhere to go. A `READ`, an `AWAIT`, a mint-flagged frame or a
+     * `:subscribers[]` subscribe is MALFORMED on that route and refuses on the error
+     * side. The empty rope is therefore no longer only the egress-exhaustion signal
+     * it was; callers already treat it as "nothing to send" (`fwd_router_t`'s two
+     * terminus arms), and this is a second, deliberate reason for it.
+     *
      * A non-empty `inbound.link` makes an inbound `:subscribers[]` WRITE bind a
      * REMOTE subscriber (#136): the slot retains this request's accumulated return
      * route (`src`, copied once — trailer-sliced) and `inbound.link`, so the

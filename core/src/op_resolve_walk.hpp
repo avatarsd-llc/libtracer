@@ -265,6 +265,21 @@ struct parsed_fwd_t {
     std::optional<N> reverse{};
     std::uint64_t await_timeout = 0; /**< AWAIT only */
     bool has_await_timeout = false;
+    /**
+     * @brief The `src` PATH is present but ZERO-LENGTH — *no reply requested*
+     *        (RFC-0004 Amendment 2, #1502/#1491).
+     *
+     * A reply is something the origin REQUESTS by wiring a return route; an empty route is
+     * the request not made. The terminus applies the WRITE and emits nothing — success,
+     * refusal and denial alike, because none of them has anywhere to go.
+     *
+     * NOT set by @ref parse_fwd: the grammar is unchanged (the child is required and is
+     * still a `PATH`), and reading its LENGTH is a body read, which on the rope tier can be
+     * refused. `resolve_node` sets it once, after the guard that makes a refused flatten
+     * distinguishable from a genuinely empty route — an empty span read as "unacknowledged"
+     * would turn this node's memory pressure into a silently swallowed operation.
+     */
+    bool no_reply = false;
 };
 
 /**
@@ -755,8 +770,20 @@ template <class N>
             return or_backpressure(assemble_result_rope(ok, **r, egress, mint), ok, egress);
         }
         case fwd_op_t::WRITE: {
-            if (!req.payload.has_value())
-                return assemble_error_reply(route, status_t::TYPE_MISMATCH, egress);
+            /**
+             * @brief The WRITE arm's refusal channel — silent when no reply was requested.
+             *
+             * RFC-0004 Amendment 2 (#1502): an unacknowledged write's failures are DROPPED,
+             * not answered, and that is not a new drop policy — it is the one a denied
+             * `COMPACT` delivery has always run under (reference/05 §route-handle, the #974
+             * ruling: *"a denied delivery is dropped like any other unwritable one"*). Stated
+             * once here so no arm below can be added that answers a route that is not there.
+             */
+            const auto write_error = [&](status_t s) -> rope_t {
+                if (req.no_reply) return rope_t{};
+                return assemble_error_reply(route, s, egress);
+            };
+            if (!req.payload.has_value()) return write_error(status_t::TYPE_MISMATCH);
             const N& payload_node = *req.payload;
 
             // A remote subscribe — a `:subscribers[]` APPEND that arrived over a
@@ -777,6 +804,14 @@ template <class N>
             // wire TLV is never empty, so an empty copy is exactly an allocation failure
             // ⇒ BACKPRESSURE.
             if (remote_sub) {
+                // A SUBSCRIBE is a standing request for future frames, so "no reply
+                // requested" and "subscribe" are contradictory asks on one frame: the edge
+                // this would bind has the empty route as its `target`, and every delivery
+                // down it would be a `FWD{WRITE, dst=<empty>}` — the unroutable frame this
+                // very amendment exists to stop, emitted forever instead of once. It is
+                // MALFORMED for the same reason an empty-src READ is (RFC-0004 Amendment 2),
+                // and takes the same terminus drop.
+                if (req.no_reply) return std::unexpected(status_t::INVALID_PATH);
                 const view_t sub_value = own_tlv(payload_node, flat);
                 if (sub_value.empty())
                     return assemble_error_reply(route, status_t::BACKPRESSURE, egress);
@@ -875,10 +910,15 @@ template <class N>
                                             ? graph.pin_payload_ratio(v)
                                             : tr::graph::kPinPayloadRatio;
             const rope_t value = own_or_ref_tlv(payload_node, frame_view, pin_k, flat);
-            if (value.total_length() == 0)
-                return assemble_error_reply(route, status_t::BACKPRESSURE, egress);
+            if (value.total_length() == 0) return write_error(status_t::BACKPRESSURE);
 
             result_t<void> w = graph.write(v, has_field ? field : field_path_t{}, value, subject);
+            // RFC-0004 Amendment 2's whole effect, in one line: the write ran (or was
+            // refused by the ACL, or failed) and the terminus stays silent either way. The
+            // origin loses per-write backpressure feedback — `or_backpressure` never runs on
+            // this path — which is inherent to an unacknowledged flow and opt-in by wiring an
+            // empty `src`; the application's own sequence counter is its loss detector.
+            if (req.no_reply) return rope_t{};
             if (!w) return assemble_error_reply(route, w.error(), egress);
             const reply_route_t ok = labelled_route();
             return or_backpressure(
@@ -938,7 +978,7 @@ template <class N>
     const wire::path_ref_element_t* dst_label_target = nullptr, link_token_seam_t link_token = {}) {
     result_t<parsed_fwd_t<N>> parsed = parse_fwd(root);
     if (!parsed) return std::unexpected(parsed.error());
-    const parsed_fwd_t<N>& req = *parsed;
+    parsed_fwd_t<N>& req = *parsed;
     if (req.op == fwd_op_t::REPLY) return std::unexpected(status_t::INVALID_PATH);
 
     // The reply's route is the request's routes swapped: reply dst = request src (the
@@ -966,13 +1006,41 @@ template <class N>
     // before `parse_fwd`'s op byte is acted on, so it comes first.
     if (!req.src.spans_intact()) return std::unexpected(status_t::BACKPRESSURE);
 
+    // RFC-0004 Amendment 2 (#1502, ruling on #1491) — THE EMPTY RETURN ROUTE. A `src` whose
+    // body is zero bytes is not a route: it is the origin declining to ask for a reply. The
+    // encoding is the EMPTY child and never an omitted one, because this grammar is
+    // positional and a WRITE payload may itself be `PATH`-typed (`parse_fwd` above) — the
+    // frame shape is therefore untouched and every existing parser still reads it.
+    //
+    // The read is a body LENGTH, so it is a span read like every other, and the sticky
+    // refusal flag is re-checked AFTER it: on the rope tier a refused flatten answers empty,
+    // and reading that as "no reply requested" would convert this node's memory pressure
+    // into an operation applied in silence — the one outcome an origin cannot detect. A
+    // refusal answers BACKPRESSURE by value, which the router drops, exactly as guard 1.
+    req.no_reply = req.src.body().empty();
+    if (req.no_reply && !req.src.spans_intact()) return std::unexpected(status_t::BACKPRESSURE);
+    // Only an unflagged WRITE may go unacknowledged. A READ or an AWAIT produces a RESULT
+    // that has nowhere to go, and a mint-flagged request is asking for a bound path that
+    // rides the reply alone (RFC-0024 §7.5) — each is a request for an answer paired with a
+    // refusal to receive one, so each is MALFORMED. It is dropped at the TERMINUS and not
+    // NACKed, for the reason the whole clause exists: there is no route to carry a NACK.
+    // An undefined opcode joins them — #904's addressed `TYPE_MISMATCH` needs an address.
+    if (req.no_reply && (!req.op_defined || req.op != fwd_op_t::WRITE || req.mint_request))
+        return std::unexpected(status_t::INVALID_PATH);
+
     // The pre-dispatch error reply (#766): every "the frame says something illegal" verdict
     // below is derived from a SPAN read, and on the rope tier a refused flatten hands the
     // reader an empty span — which reads as a malformed selector or an unaddressable key.
     // Reporting that as INVALID_PATH would blame the peer's frame for this node's memory
     // state, so a refusal re-labels the verdict BACKPRESSURE (the reply route bytes are known
     // good — guard 1 — so it is addressable either way).
-    const auto reply_error = [&](status_t s) {
+    //
+    // An unacknowledged request (@ref parsed_fwd_t::no_reply) short-circuits it to the empty
+    // rope the router drops: RFC-0004 Amendment 2's drop policy is the same one a denied
+    // `COMPACT` delivery already runs under, and the alternative — an addressed error on a
+    // zero-length route — is precisely the garbage frame the amendment exists to stop.
+    const auto reply_error = [&](status_t s) -> rope_t {
+        if (req.no_reply) return rope_t{};
         return assemble_error_reply(route, req.dst.spans_intact() ? s : status_t::BACKPRESSURE,
                                     egress);
     };
@@ -1125,7 +1193,7 @@ template <class N>
     // The LOCAL `graph_t::write` overload keeps write-creating, deliberately: the in-process
     // caller is the node's own trusted code and owns its graph's structure. The asymmetry is
     // the point of the amendment, not an oversight left in it.
-    if (!found) return assemble_error_reply(route, status_t::NOT_FOUND, egress);
+    if (!found) return reply_error(status_t::NOT_FOUND);
     return apply_op(graph, req, *found, inbound_link, subject, frame_view, flat, egress, route,
                     field, has_field, reverse_ref_fn, reverse_ref_ctx, path_label_fn,
                     path_label_ctx, /*dst_labelled=*/false, link_token);
