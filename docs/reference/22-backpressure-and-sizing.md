@@ -1,0 +1,453 @@
+# Backpressure and sizing — wiring every bound so the bottleneck is chosen
+
+> **Genre**: descriptive reference. It assembles behaviour specified elsewhere into one
+> narrative a deployer can follow; where it paraphrases, it **cites**. The normative surface is
+> [`../spec/v1.md`](../spec/v1.md) and the RFCs it names. The reference implementation's own
+> allocation seams and their failure semantics are described in
+> [`../design/allocation-and-backpressure.md`](../design/allocation-and-backpressure.md), which
+> is the "how this C++ tree does it" companion to the "how a deployment reasons about it" below.
+
+## The thesis
+
+**"No bottlenecks" does not mean unbounded.** An unbounded stage is not a fast stage — it is a
+stage whose failure has been deferred until it can only be answered by an allocator, and on a
+node with tens of kilobytes of RAM that answer is a reboot. A pipeline with no accidental
+bottleneck is one where:
+
+1. **Every stage is bounded**, and every bound is a **real injected resource** — a slab, a pool,
+   a byte budget, a slot count — never a synthetic constant
+   ([CONTEXT.md](../../CONTEXT.md) §Resource bound).
+2. **Exactly one stage per flow is the designated pressure point** — the place the deployer has
+   decided the flow will queue or shed, chosen because it is where the loss or the stall is
+   cheapest.
+3. **Everything upstream of it refuses by value** rather than buffering. A refusal the caller was
+   told about is a sizing datum; a byte silently absorbed into a growing queue is a latency
+   regression that surfaces a week later as an OOM.
+
+Point 3 is the one that makes points 1 and 2 legible. A stage that answers `BACKPRESSURE`
+publishes where the pressure is; a stage that quietly grows hides it. That is why every seam a
+peer can provoke draws from `tr::mem::block_source_t`, whose exhaustion is a `nullptr` return
+rather than a throw
+([CONTEXT.md](../../CONTEXT.md) §Block source / failable allocation,
+[ADR-0065](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0065-failable-allocation-gets-its-own-seam-block-source.md)).
+
+The corollary a deployer must internalise: **libtracer will not choose the pressure point for
+you.** Every seam defaults to the process heap, so an unwired build is all-heap and has no
+designated point at all — the bottleneck is then wherever the platform's allocator happens to
+give out. Choosing is the deployment's job
+([ADR-0079](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md):
+no composition is the default, policy stays with the deployer).
+
+---
+
+## 1. The pipeline map
+
+One frame's life through a receiving node, with every bounded stage, what its bound is made of,
+what refusal looks like, and the member that observes it.
+
+```mermaid
+flowchart LR
+  RX["transport RX<br/>scratch + frame cap"] --> ARENA["rx arena<br/>TLV decode"]
+  ARENA --> GW["graph write<br/>ACL + value backend"]
+  GW --> RING["ring admission<br/>byte-accounted"]
+  RING --> FAN["fan-out<br/>subscriber snapshot"]
+  FAN --> FLAT["flat / egress seams<br/>reply + delivery assembly"]
+  FLAT --> TX["TX pool<br/>slots + reply reserve"]
+
+  classDef stage fill:#dff,stroke:#333
+  class RX,ARENA,GW,RING,FAN,FLAT,TX stage
+```
+
+| Stage | The bound | Where the capacity comes from | Refusal | Observed by |
+| --- | --- | --- | --- | --- |
+| **transport RX** | the link's own scratch and its peer-agreed max frame | per-connection `:settings`, the link's ctor | counted drop (`dropped_rx`) or a malformed reject (`malformed_rx`) — the peer is not told | `transport_t::drop_stats()` (`core/include/libtracer/transport.hpp:447`), one shape for every link kind (#932) |
+| **rx arena** | the injected failable source the terminus decode carves its node table from | `fwd_router_t`'s `rx` seam — reachable as `rx_source()` (`core/include/libtracer/fwd_router.hpp:404`) | refused **by value**: `TLV_NESTING_TOO_DEEP`, spelled by RFC-0006 as "exceeds this receiver's decode resources" | `router_stats_t::arena_dropped` (`core/include/libtracer/fwd_router.hpp:83`) |
+| **graph write** | the ACL gate, plus the value backend the store draws its durable bytes from | `graph_t`'s four injected seams (see the design companion) | `PERMISSION_DENIED` by value; an exhausted value store answers `BACKPRESSURE` | `graph_t::delivery_drops()` — `denied`, `out_of_memory` (`core/include/libtracer/graph.hpp:2205`) |
+| **ring admission** | a **byte** budget: `try_alloc(retained_bytes)` against the receiving vertex's own source | `graph_t::set_ring_source` (`core/include/libtracer/graph.hpp:1419`), per vertex, never a shared pool | **arm-dependent** — see §2 | `ring_reserved_bytes()` / `stream_gaps()` (`core/include/libtracer/graph.hpp:1423`) |
+| **fan-out** | the subscriber snapshot's inline prefix, then a heap widen | `kInlineFanout`, then the allocator | counted shed of the whole delivery (`fan_out_truncated`, `out_of_memory`) | `graph_t::delivery_drops()` |
+| **flat / egress seams** | the reply-flatten and egress span tables | `fwd_router_t`'s `flat` / `egress` seams — `flatten_backend()`, `egress_backend()` (`core/include/libtracer/fwd_router.hpp:406`) | counted drop of the reply or the forward hop — **drop, never truncate** | `router_stats_t::flatten_dropped`, `reply_iov_dropped`, `forward_iov_dropped`, `delivery_iov_dropped` |
+| **TX pool** | outstanding sends in flight, plus a reserve slots deep held back for replies | the link's ctor (`tx_slot_capacity()` + `tx_reply_reserve()` on the ESP httpd link, `integrations/esp-idf/libtracer/httpd_ws_link.cpp:2780`) | counted `dropped_tx`; a refused enqueue names the queue it could not enter | `transport_t::drop_stats()`; the link's own richer `stats()` where it has one |
+| **label space** (forwarders) | 65535 wire labels per link, and the per-link binding table | `route_handle_t`'s ctor `max_bindings_per_link` (`core/include/libtracer/route_handle.hpp:243`) | a **silent degrade**, not a loss: the flow falls back to full-route `FWD{WRITE}` | `labels_used(link)` / `labels_exhausted()` (`core/include/libtracer/route_handle.hpp:622`) |
+
+Two reading rules for this table:
+
+- **`refused` and `dropped` are different columns and must never be summed.** A refusal was
+  answered by value — somebody was told, and it is a sizing problem. A drop was lost — nobody was
+  told, which is exactly why it is counted, and it may be a correctness problem
+  (`core/STYLE.md` §Introspection).
+- **A ceiling is quoted beside every drop** (#1160). A report that says "refused" without saying
+  *what ceiling produced the refusal* is unactionable, because the effective ceiling is the
+  injected one, never the compile-time default.
+
+---
+
+## 2. The two pressure arms, stated once
+
+Every bounded stage answers pressure in one of exactly two ways. The choice is **per flow, not
+per node** — a node routinely runs both, and the archetypes in §3 all mix them.
+
+**The reliable arm — refuse admission, answer `BACKPRESSURE`, the producer retries.** Nothing is
+lost, nothing is shed, the bound is never exceeded, and the producer is expected to slow down.
+This is the arm for control planes and lossless flows: a setpoint that arrives late is still
+correct, a setpoint that vanishes is not.
+
+**The best-effort arm — shed the oldest, count the loss, raise the gap marker.** Latency stays
+bounded and completeness is sacrificed *knowingly*. This is the arm for streams where freshness
+beats completeness: the newest frame of a camera or an IMU is worth more than the one it
+displaced.
+
+The canonical instance of the pair is the receiving STREAM vertex's ring, whose arm is declared
+at wiring time and read at admission (`core/include/libtracer/vertex.hpp:1165`,
+`core/include/libtracer/vertex.hpp:1179`):
+
+| | reliable | best-effort (the default) |
+| --- | --- | --- |
+| refused reservation | admission refused, ring unchanged | **oldest entry** shed whole, reservation released, retried once |
+| what the producer sees | the local write answers `status_t::BACKPRESSURE` | the write succeeds |
+| what the consumer sees | nothing — there was no gap | `tr::flow::address_shift_gap` raised **in order** at the shed point |
+| accounting | nothing lost, nothing to count | every shed counted (`stream_gaps()`) |
+
+Three properties of this pair that a deployment must design around:
+
+1. **The shed is singular.** One entry per refused admission, never a loop until the source
+   relents — a source that has gone to zero converges the ring to empty one write at a time
+   instead of destroying every queued delivery in one stroke.
+2. **The reliable arm is LOCAL-producer only in v1.** There is no wire carrier for backpressure;
+   the per-edge credit window is parked as the v2 escalation (RFC-0025 §4.6.1 clause 7). A
+   **remote** producer against a reliable ring does not stall — it sees the receiver's drop tally
+   after the fact. Plan the remote case as §3 archetype 3 does, or accept that the feedback is
+   asynchronous.
+3. **Depth and bytes compose.** The declared depth intent retires *before* the byte bound charges,
+   so a ring at its declared depth funds the new admission out of the entry it was going to drop
+   anyway — and a source sized for exactly N entries does not spuriously shed on the N+1th
+   (`core/include/libtracer/vertex.hpp:1193`).
+
+---
+
+## 3. Deployment archetypes
+
+Four wirings. Each names its **designated pressure point** — the single stage that is allowed to
+queue or shed — and what every other stage does instead.
+
+### 3.1 Bounded MCU node (ESP32-class, tens of KB heap)
+
+- **Composition**: folded, or close to it — every seam on `pool_source_t` slabs carved from
+  static regions. One slab, whole stack, one cap, tightest RAM; contention-free because the
+  target has one thread ([ADR-0079](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md)
+  §folded).
+- **TX**: depth from the link's `tx_slot_capacity()`, with `tx_reply_reserve()` slots held back
+  past it. The sum is the link's true outstanding-send bound.
+- **Designated pressure point**: **two**, one per flow — the receiving vertex's ring on the
+  best-effort arm for sensor streams, the TX pool on the reliable arm for control.
+- **Everything else refuses**: the rx arena answers `TLV_NESTING_TOO_DEEP`, the value store
+  answers `BACKPRESSURE`, and neither grows.
+- Note the one cost a pooled RX backend adds: a **pinned** value borrows its whole inbound
+  segment — receive capacity — until it is displaced, not merely for the delivery window. Size
+  against `live pinned values × segment_bytes`; the pin ratio bounds the waste per value and never
+  the number of values (`core/include/libtracer/graph.hpp:1441`). Declaring a non-sentinel ratio
+  on a long-held vertex (a config vertex, a rarely-updated setpoint) is exactly the shape that
+  starves a small pool.
+
+### 3.2 Hosted gateway / forwarder
+
+- **Composition**: per-thread on a multi-RX host — the only point that survives a fan-out. Size
+  `rx`, `flat` and `egress` for **peer fan-in**, not for the local application.
+- **The forward hop is allocation-free in steady state**
+  ([ADR-0039](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0039-pmr-memory-model-host-aligned-allocation.md)'s
+  `bench_forward_heap == 0`), so pressure genuinely lives at the **edges** — RX admission and TX
+  egress. A forwarder that appears to be under memory pressure in the middle is a forwarder with
+  a mis-sized edge, not a slow router.
+- **Naming the seams**: `label_source()`, `rx_source()`, `flatten_backend()` and
+  `egress_backend()` (`core/include/libtracer/fwd_router.hpp:401`) reach the four injected
+  objects even when the host took the defaults — which is what makes the §5 loop runnable on a
+  gateway at all.
+- **Watch the silent degrade**: label exhaustion. `labels_used(link)` against the wire constant
+  65535, plus `labels_exhausted()`; and `label_not_found()` on the receiving side. Nothing is
+  lost when a label table fills — the flow reverts to full-route `FWD{WRITE}` frames, which is
+  *correct* and *larger*. It shows up as bandwidth, not as errors, and it is the degrade behind
+  the #1491/#1502 reply-cost story.
+- **Designated pressure point**: the egress TX pool of the busiest link. `rx` is sized so
+  `arena_dropped` stays zero — and `arena_dropped` is deliberately split from `malformed_rx` so a
+  peer sending garbage never reads as a slab that is too small.
+
+### 3.3 Bulk-ingest producer → node
+
+The #1491/#1494 topology: one producer streaming into one node as fast as the node will take it.
+
+- **Write with an empty `src`.** RFC-0004 Amendment 2 makes a zero-length `src` mean *no reply
+  requested*: the receiver executes the write and emits nothing back
+  ([RFC-0004](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0004-remote-operation-addressing.md)
+  §Amendment 2). This is the whole point of the archetype — the measurement that forced the
+  amendment found throughput peaking at pipeline depth 4 and *degrading* beyond it, depth 4 being
+  the async TX pool depth the **replies** travelled through. The writes were not what saturated.
+- **Pipeline depth** therefore derives from the receiver's `tx_slot_capacity()` only for the
+  flows that still request replies; the unacknowledged stream is off the reply queue entirely.
+- **Loss detection is the application's**, because refusal-by-value has been given up
+  deliberately: a sequence counter in the payload, plus §6's recipes for the pressure numbers the
+  replies would have carried.
+- **Designated pressure point**: the receiver's ring, arm chosen per flow. Note §2 property 2 —
+  a remote producer against a **reliable** ring gets no stall, so the honest pairing here is
+  best-effort plus sequence-gap accounting, or a reply-requesting control flow alongside.
+
+### 3.4 Mixed control + stream on one link
+
+- **The reply reserve is the control plane's lifeline** (#1218). A streamer that can consume
+  every TX slot can starve the replies that carry every control answer — the #1494 severity case.
+- The guarantee is structural, not advisory: the reserve is `tx_reply_reserve()` slots held back
+  **past** `tx_slot_capacity()`, so a fan-out sweep cannot reach into it however wide it is, and
+  a publish sweep that exceeds the send bound refuses by value rather than borrowing.
+- **Designated pressure point**: the stream's own ring (best-effort), *upstream* of the shared
+  link. Pushing the stream's pressure point onto the link is exactly the mistake the reserve
+  exists to survive; a deployment that relies on the reserve rather than on its own ring bound has
+  chosen its bottleneck by accident.
+- Run the two flows on **different vertices with different sources**. Per-injection-point, never
+  a shared pool: one flow running its source dry must not affect another
+  (`core/include/libtracer/graph.hpp:1398`).
+
+---
+
+## 4. Do you need the last-known-value?
+
+Retention is chosen per vertex the same way the pressure arm is chosen per flow, and it is a
+sizing decision: a retaining vertex pays a `make_shared` plus a publish plus the heap value on
+**every write**. The per-vertex retention switch **is the role system** — a vertex whose flows
+need none of the five planes below should be a `HANDLER`-role vertex (callbacks, nothing stored).
+The model already sanctions this: the role is invisible and the schema is the contract, so
+"read returns the last write" is role 1's contract only
+([11-vertex-roles-and-aggregation.md](11-vertex-roles-and-aggregation.md) §The contract between
+role and schema).
+
+**Exactly five planes consume the last-known-value:**
+
+| Plane | Needs the LKV because |
+| --- | --- |
+| Local + remote `READ` | a leaf read serves the stored pointer (`core/src/graph.cpp:1732`; the `FWD{READ}` terminus is the same call) — null ⇒ `NOT_FOUND`, unless the vertex composes an answer from its `on_read` seam (`core/src/graph.cpp:1698`) |
+| `await`'s return value | the wake rides the write sequence and the stripe condvar (retention-free), but the value handed back is served through the **same role dispatch** `read` runs (`core/src/graph.cpp:2595`) |
+| `assign` / `propagate` sweep | **the hard dependency** — RFC-0008 §C: `propagate` takes no value argument, "the last-known-value is the single source of truth" (`core/src/graph.cpp:2339`) |
+| Composed subtree reads | RFC-0016 serves **landed** LKVs only, one atomic load per node (`core/src/graph.cpp:3855`); a non-retaining child contributes nothing |
+| Late-joiner replay | the durability latch snapshots the LKV at edge-add (RFC-0022 §3.A bit 5, `core/include/libtracer/vertex.hpp:1413`) |
+
+**Not on the list: the whole callback / delivery plane.** Fan-out never reads the slot. A
+storing role delivers the just-published pointer (`core/src/graph.cpp:2139`); a HANDLER delivers
+from the incoming value (`core/src/graph.cpp:2086`). If subscribers are all a vertex has, it does
+not need to retain.
+
+### What shipped in RFC-0008 Amendment 2
+
+The table above reflects **shipped** behaviour as of RFC-0008 Amendment 2, not the state that
+preceded it:
+
+- **`await` at a HANDLER vertex answers the `on_read`-composed value**, not `NOT_FOUND`. Wire
+  visible: `FWD{AWAIT}` at a handler terminus went from `ERROR{tr::path::not_found}` to `RESULT`
+  plus the `VALUE`. The degradation that remains is the *read contract's* — a handler with no
+  `on_read` still answers `NOT_FOUND`, exactly as `read` does.
+- **`assign` and `propagate` refuse a non-retaining vertex with `SCHEMA_NOT_FOUND`**
+  (`core/src/graph.cpp:2174`, `core/src/graph.cpp:2356-2362`) — the taxonomy's contract-mismatch
+  status, deliberately **not** `BACKPRESSURE`: nothing is under pressure and a retry will never
+  succeed. At a handler vertex the call is **`write`**, which dispatches the seam and delivers
+  eagerly; the accumulate-then-flush pair needs retention. `propagate(v)` is
+  `[[nodiscard]] result_t<void>`, so that refusal cannot be dropped on the floor.
+
+### The three stances this table takes
+
+- **Composed branch reads stay landed-only.** A subtree read folds the descendants' landed LKVs
+  and never invokes a descendant handler mid-walk (RFC-0016 stands). A non-retaining child
+  therefore contributes nothing to its parent's composed read — that is specified, not a defect.
+- **The durability latch stays LKV-only.** No `on_read` synthesis at subscribe time; "null ⇒ no
+  latch" is the specified degradation
+  ([ADR-0049](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0049-field-write-single-subscriber-admission-door.md)
+  §the one admission door, as amended by RFC-0022 §3.A).
+- **The read contract is advertised as a `:schema` prose convention**, not a wire surface. A
+  peer that needs to know whether a vertex retains reads the schema; there is no protocol field
+  to interrogate, and none is planned.
+
+### Two honest caveats
+
+1. **The inline slot bytes are not reclaimed by opting out.** Every `vertex_t` pays the inline
+   value slot (16 B on x86-64, 8 B on rv32, at offset 0) regardless of role — pinned by the #1285
+   cache-line gate. Choosing HANDLER saves the per-write `make_shared` plus publish and the heap
+   value; it does not shrink the vertex. Per-vertex layout reclaim is deliberately not offered
+   (#1487 marks the slot do-not-touch).
+2. **Today the HANDLER fan-out pays a rope clone the storing path avoids.** The storing roles
+   hand the published pointer straight to delivery; the handler leg takes a nothrow clone first
+   (`core/src/graph.cpp:2089`). It is the cold path and the clone is refcount-only, but on a
+   wide-fan-out handler vertex it is real. Tracked and being quantified as
+   [#1505](https://github.com/avatarsd-llc/libtracer/issues/1505); until that rules, do not choose
+   HANDLER *for throughput* on a heavily-subscribed vertex — choose it for the retention
+   semantics and the write-path allocation it removes.
+
+Also worth knowing before switching a vertex to HANDLER: the announce-write convention used to
+instruct "assign and propagate". For the handler case it now names **`write`**
+([02-graph-model.md](02-graph-model.md)).
+
+---
+
+## 5. The measure-then-size loop
+
+This replaces guess-and-rerun bisection. It is a **host-side procedure** today — a bench or
+staging run with the C++ accessors in reach (see §6 for the remote arm and its gate).
+
+1. **Wire generous bounds.** Heap defaults are fine for the first pass; the point is to observe
+   the traffic, not to survive it.
+2. **Run representative traffic.** Representative means the real payload-size *distribution*,
+   not the mean — see step 4.
+3. **Read `peak` per seam.** `block_source_t::stats()` (`core/include/libtracer/mem_source.hpp:196`)
+   returns `source_stats_t{capacity, in_use, peak, refused, largest_refused}`
+   (`core/include/libtracer/mem_source.hpp:46`), all used-polarity. Free is derived, never
+   reported as the primary.
+4. **Set `capacity = peak + margin`, and take the margin from `largest_refused`, not from the
+   mean.** The tail is what refuses. A seam that refused once, for a 9 KB request, against a
+   steady-state `peak` of 3 KB needs headroom for the 9 KB — quoting a median request size is
+   measuring the wrong distribution (#1492). On peer-driven seams (`rx`, `flat`, `egress`) the
+   tail is chosen by the peer, so this is the only figure that generalises.
+5. **Re-run with the bounds armed and assert `refused == 0` on every stage except the designated
+   pressure point.** For a forwarder, `router_stats_t::arena_dropped`
+   (`core/include/libtracer/fwd_router.hpp:378`) is the one to assert zero against when sizing
+   `rx`. A non-zero `refused` anywhere else means the bottleneck is still being discovered rather
+   than chosen.
+
+**Read the counters through the snapshot-coherence clause** — `core/STYLE.md` §Introspection.
+Cite it; do not re-derive it. Its consequence for this loop is the operative one: the intended
+reading is the **difference between two snapshots**, never an instant, so step 3 samples at the
+start and the end of the run and step 5 asserts on a delta.
+
+Five traps this loop has to name, because each one has produced a wrong size:
+
+- **Zero means "this seam counts nothing", not "nothing happened."** `stats()` is an optional
+  virtual whose default is all-zero — the honest answer for a source that counts nothing, and the
+  deliberate #932 contract. `heap_source_t` and `null_source_t` report all-zero **by design**.
+  Before reading a zero as a result, confirm the seam is one that answers.
+- **`pool_source_t`'s `in_use` is bytes *carved*, and carving is monotonic** — so `peak == in_use`
+  for it, always. That is not a bug and not a leak; it is what "carve" means.
+- **`bump_source_t`'s buffer is its ceiling**, upstream spill is deliberately outside all three
+  occupancy fields, and its `peak` survives a `reset()` — which is exactly what makes a
+  per-iteration bump arena sizeable across a whole run.
+- **Never conflate `overflowed()` with `refused`.** `pool_source_t::overflowed()` counts a
+  *recycling degrade* — a freed block whose size class did not fit the injected class table, so
+  the block stays carved and **nobody was refused**. They are independent in both directions and
+  they point at two different knobs: the size-class span versus the slab
+  (`core/STYLE.md` §Introspection, "names this vocabulary deliberately does not unify").
+- **Quote the ceiling beside every drop** (#1160). `capacity` in the snapshot is the *effective*
+  ceiling — the injected slab, not a compile-time constant — which is the only number a sizing
+  decision can be made against.
+
+Beyond the block sources, the same loop reads: `synchronized_pool_t`'s `in_use()` / `available()`
+beside `capacity()` for the shared-pool archetype; `route_handle_t::labels_used(link)` against the
+wire constant 65535 for a forwarder's label space; `transport_t::drop_stats()` for every link kind
+(both ESP WebSocket links answer it, so a kind-agnostic supervisor no longer reads zero from a
+link that was counting); and `graph_t::delivery_drops()` for the fan-out plane.
+
+**When the designated pressure point is remote and unacknowledged** — the §3.3 empty-src ingest —
+there is no refusal reply to feed step 5. Recipe A's polled `peak` / `refused` replaces that
+feedback, and the reply/monitoring cadence must itself be part of the sized load.
+
+---
+
+## 6. Monitoring when refusal-by-value is out of reach
+
+Two recipes for the case §3.3 creates deliberately: a producer that has given up its replies, and
+therefore its share of the §5 feedback.
+
+### Recipe A — poll-based pressure monitoring
+
+**The shape.** A supervisor issues periodic ordinary READs of a seam's counter block and reads it
+as one snapshot: `in_use` and `peak` against `capacity`, plus `refused` and `dropped` watched for
+*movement* (§5's difference-between-snapshots discipline, not the instant).
+
+**In-process supervisors can do this today**, against the shipped C++ accessors: a supervisor task
+holding the `graph_t`, the `fwd_router_t` and the links calls `stats()`, `drop_stats()` and
+`labels_used()` on its own cadence and applies §5's readings. This is the arm to build now.
+
+**The remote arm, at the semantic level.** The same monitoring is meant to be reachable over the
+protocol: a supervisor elsewhere on the graph READs a node's reserved-`:` introspection fields and
+gets the seam's whole counter block back as a **single snapshot-coherent TLV** — one read, one
+consistent block, rather than a field at a time. Three properties are already ruled and are worth
+designing to now:
+
+- **Isolation is by construction, not by privilege.** Pressure in this model is designated per
+  vertex, so an introspection vertex — with its own tiny bounded lists, never sharing a bound with
+  a data vertex — stays answerable at any stream pressure. There is no privileged control arm and
+  none is needed; the reply reserve of §3.4 already protects the reply leg.
+- **A timeout is the signal, not a blind spot.** The monitoring READ travels the same fabric it
+  measures. If a saturated shared link delays it past its deadline, *that is the hard congestion
+  signal* — a fail-deadly health check. The link-seam counters distinguish link saturation from
+  vertex pressure after the fact.
+- **Poll-only.** Introspection fields are readable and never awaitable: counters do not bump the
+  write sequence, so nothing wakes on them. A monitor polls; it does not subscribe.
+
+> **Gate.** The concrete **wire spelling** of that reserved `:` introspection subtree is *not
+> shipped* and is not invented here. It is specified by the pending
+> [#1503](https://github.com/avatarsd-llc/libtracer/issues/1503) step-5 amendment, which is held on
+> one addressing decision (a colon-prefixed *vertex* subtree is not expressible in the shipped path
+> grammar). Until that lands, everything in §5 and in this recipe's first arm is a **C++ accessor,
+> not a READ** — which is the right shape for the bench/staging run §5 describes anyway.
+
+### Recipe B — probe-vertex timing
+
+Fully available today, and it needs nothing from the gate above.
+
+libtracer stays **clock-free** — timing is an application convention, never a library service.
+So measure it as one:
+
+1. Wire a dedicated **probe vertex** into the flow being characterised.
+2. The producer writes a `{sequence, local timestamp}` payload at a known cadence.
+3. The consumer reads or receives it; **the timestamp delta is the end-to-end propagation
+   figure**, and **sequence gaps or duplicates exercise the dedup window**. One probe, both
+   measurements.
+
+The probe must ride **the same arm, the same link and the same source** as the data it
+characterises — then its numbers are representative by construction. A probe on a reliable arm
+tells you nothing about a best-effort stream's shed behaviour, and a probe on its own private
+slab tells you nothing about the slab the data contends for.
+
+Pair the two: Recipe B tells you *what the flow experienced*; Recipe A tells you *which seam
+produced it*.
+
+---
+
+## 7. What must never be the fix
+
+The standing rulings this guide must not be read as licence to violate.
+
+- **No synthetic limits.** Every limit is a real injected resource or per-target / per-connection
+  configuration — never a hardcoded magic constant ([CONTEXT.md](../../CONTEXT.md) §Resource
+  bound). "Cap it at 32" is not a fix; "size the slab it draws from" is.
+- **No library-chosen capacities.** Policy stays with the deployer, and *no composition is the
+  default* — every injection seam defaults to the platform heap so an unwired build is all-heap
+  and behaves identically
+  ([ADR-0079](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md)).
+  A "sensible default bound" added inside the library is a bottleneck nobody chose.
+- **The producer never queues for a slow consumer; the receiver pays.** Depth belongs to the
+  vertex that wants it — whoever wants a queue makes their **own** vertex a STREAM and charges
+  its entries, in bytes, to the source they injected. A producer-side queue is a fix that relocates
+  the problem onto the one party that cannot size it.
+- **Counted, never enforced.** Nothing in the library reads its own counters. Alarming,
+  throttling and shedding policy on top of these numbers is the deployment's choice, and adding an
+  enforcement branch inside the library would put policy back where ADR-0079 removed it.
+- **Per-seam, never aggregated.** There is no node-wide census object to fold into; a shared one
+  was measured and it causes a cacheline storm
+  ([ADR-0067](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0067-bounded-recycling-source-and-per-owner-topology.md)).
+- **Wire-grammar constants are not tunables.** NAME ≤ 64 B, PATH body ≤ 1024 B, segment count
+  ≤ 255, field depth ≤ 8, the 65535 label space: these are identical on every peer and making them
+  per-target is "an interoperability failure dressed as a RAM saving". They are not part of any
+  sizing loop.
+- **Counters are free on the success path.** A counter is bumped on the refusal / exhaustion /
+  drop arm and nowhere else. If observing a stage would cost the hot path an instruction, the
+  observation is designed differently — `bench_forward_heap == 0` and the rv32 text figure are the
+  standing referees, measured per PR (`core/STYLE.md` §Introspection, the counting doctrine).
+
+---
+
+## Where to go next
+
+- [`../design/allocation-and-backpressure.md`](../design/allocation-and-backpressure.md) — the
+  reference implementation's four injected seams, their exact failure semantics, and the one site
+  that still reports exhaustion by throwing.
+- [09-memory-substrate.md](09-memory-substrate.md) — the implementation-independent statement that
+  a receiver's bounds are injected resources and exhaustion is answered by value.
+- [11-vertex-roles-and-aggregation.md](11-vertex-roles-and-aggregation.md) — the role/schema
+  contract §4's decision table rests on.
+- [15-concurrency-and-scaling.md](15-concurrency-and-scaling.md) — when adding threads helps, and
+  why an owning read is a write.
+- [12-deployment-profiles.md](12-deployment-profiles.md) — the deployment-rung spectrum the §3
+  archetypes are drawn from.

@@ -4,7 +4,9 @@
 > failure semantics. It is **not** the standard. The protocol-level obligation — that a receiver's
 > bounds are injected resources and that exhaustion is answered by value — is described
 > implementation-independently in [`../reference/09-memory-substrate.md`](../reference/09-memory-substrate.md);
-> the normative surface is [`../spec/v1.md`](../spec/v1.md).
+> the normative surface is [`../spec/v1.md`](../spec/v1.md). For the *deployment* question these
+> seams serve — which stage is allowed to queue or shed, and how to size the rest so it does not —
+> see [`../reference/22-backpressure-and-sizing.md`](../reference/22-backpressure-and-sizing.md).
 
 ## The rule
 

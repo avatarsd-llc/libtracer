@@ -1089,6 +1089,72 @@ ANCHORS = [
      '#include "esp_http_server.h"'),
     ('integrations/esp-idf/libtracer/include/libtracer_esp/twai_link.hpp:36',
      '#include "esp_twai.h"'),
+    # --- #1504: the backpressure & sizing guide's stage / seam / retention pins ---
+    # docs/reference/22-backpressure-and-sizing.md cites each bounded stage, the member
+    # that observes it, and the five LKV-consuming planes of its retention table.
+    # core/src/graph.cpp
+    ('core/src/graph.cpp:1698',
+     '[[gnu::noinline]] result_t<value_ref_t> graph_t::read_handler_gated(vertex_t* v) const {'),
+    ('core/src/graph.cpp:1732',
+     'std::shared_ptr<const rope_t> sp = v->read_stored();  // lock-free'),
+    ('core/src/graph.cpp:2086',
+     '// A handler stores no LKV (the user handler consumes the value), so the'),
+    ('core/src/graph.cpp:2089',
+     '// clone is NOTHROW (try_clone_rope, #477): on failure the handler still runs'),
+    ('core/src/graph.cpp:2139',
+     '// Deliver exactly what was stored (RFC-0008 §D): the published LKV pointer —'),
+    ('core/src/graph.cpp:2174',
+     'if (!role_retains(v->role())) return std::unexpected(status_t::SCHEMA_NOT_FOUND);'),
+    ('core/src/graph.cpp:2339', 'void graph_t::deliver_current(vertex_t* v) {'),
+    ('core/src/graph.cpp:2356',
+     "// The sweep root's OWN delivery is unconditional (below), and it reads the LKV"),
+    ('core/src/graph.cpp:2595',
+     'if (!sp) return std::unexpected(status_t::NOT_FOUND);  // never assigned'),
+    ('core/src/graph.cpp:3855',
+     'n.lkv = w.v->read_stored();  // ONE atomic load per node'),
+    # core/include/libtracer/graph.hpp
+    ('core/include/libtracer/graph.hpp:1398',
+     "* **Per-injection-point, never a shared pool.** ADR-0079's amendment measured a folded"),
+    ('core/include/libtracer/graph.hpp:1419',
+     'void set_ring_source(vertex_handle_t v, mem::block_source_t* src, bool reliable = false);'),
+    ('core/include/libtracer/graph.hpp:1423',
+     '[[nodiscard]] result_t<std::size_t> ring_reserved_bytes(vertex_handle_t v) const;'),
+    ('core/include/libtracer/graph.hpp:1441',
+     '* What "for the value\'s lifetime" costs on a POOLED RX backend: the pin is a **borrow** of'),
+    # core/include/libtracer/vertex.hpp
+    ('core/include/libtracer/vertex.hpp:1165',
+     '* - **reliable** — the admission is refused, NOTHING is shed and the ring does not grow'),
+    ('core/include/libtracer/vertex.hpp:1179',
+     'bool ring_admit(const std::shared_ptr<const rope_t>& sp, std::size_t bytes,'),
+    ('core/include/libtracer/vertex.hpp:1193',
+     '// The DEPTH intent retires BEFORE the byte bound charges. Order matters: a ring already'),
+    ('core/include/libtracer/vertex.hpp:1413',
+     '* durability (`policy.durability_request()`, RFC-0022 §3.A) and the vertex already'),
+    # core/include/libtracer/mem_source.hpp
+    ('core/include/libtracer/mem_source.hpp:46', 'struct source_stats_t {'),
+    ('core/include/libtracer/mem_source.hpp:196',
+     '[[nodiscard]] virtual source_stats_t stats() const noexcept { return {}; }'),
+    # core/include/libtracer/fwd_router.hpp
+    ('core/include/libtracer/fwd_router.hpp:83', 'struct router_stats_t {'),
+    ('core/include/libtracer/fwd_router.hpp:378',
+     '[[nodiscard]] router_stats_t drop_stats() const noexcept {'),
+    ('core/include/libtracer/fwd_router.hpp:401',
+     '[[nodiscard]] mem::block_source_t& label_source() const noexcept { return *label_src_; }'),
+    ('core/include/libtracer/fwd_router.hpp:404',
+     '[[nodiscard]] mem::block_source_t& rx_source() const noexcept { return *rx_; }'),
+    ('core/include/libtracer/fwd_router.hpp:406',
+     '[[nodiscard]] mem::mem_backend_t& flatten_backend() const noexcept { return *flat_; }'),
+    # core/include/libtracer/route_handle.hpp
+    ('core/include/libtracer/route_handle.hpp:243',
+     'std::size_t max_bindings_per_link = 0)'),
+    ('core/include/libtracer/route_handle.hpp:622',
+     '[[nodiscard]] std::size_t labels_used(std::string_view link) const;'),
+    # core/include/libtracer/transport.hpp
+    ('core/include/libtracer/transport.hpp:447',
+     '[[nodiscard]] virtual transport_drop_stats_t drop_stats() const noexcept { return {}; }'),
+    # integrations/esp-idf/libtracer/httpd_ws_link.cpp
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:2780',
+     'std::size_t httpd_ws_link_t::tx_slot_capacity() const noexcept { return tx_pool_slots_; }'),
 ]
 
 
