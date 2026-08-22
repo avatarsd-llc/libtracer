@@ -87,7 +87,7 @@ the value backend, the failable control source and the default receiver-ring sou
 `fwd_router_t`: the failable `label_src` source its label tables draw from, the
 failable `rx` source, the `flat` byte backend its rope flattens draw from, and the
 `egress` byte backend the terminus reply head draws from
-(`core/include/libtracer/fwd_router.hpp:194-199`; `egress` is #795 /
+(`core/include/libtracer/fwd_router.hpp:202-207`; `egress` is #795 /
 ADR-0074, and the `max_label_bindings_per_link` bound sits between the last two).
 `label_src` was a `std::pmr::memory_resource` until #603 defect 1 — it could not
 stay one, because a peer's `ADVERTISE` reaches it and pmr reports exhaustion by
@@ -158,7 +158,7 @@ then refuses every frame. An 8 KiB bump source wired as a router's `rx`, decodin
 53-byte FWD, served **six frames and rejected the next 194**
 ([ADR-0067 — bounded recycling source](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0067-bounded-recycling-source-and-per-owner-topology.md)
 §1; the same figure is carried on the type at
-`core/include/libtracer/mem_source.hpp:178-179`). A frames-served count without the
+`core/include/libtracer/mem_source.hpp:211-212`). A frames-served count without the
 payload size is not a measurement — 194 rejected 53-byte frames is a different fact
 from 194 rejected 1 KiB frames.
 
@@ -166,7 +166,7 @@ Use `tr::mem::pool_source_t`, which recycles.
 :::
 
 `pool_source_t` takes the slab **and** a caller-owned span of `size_class_t` slots
-(`core/include/libtracer/mem_source.hpp:325`), so both bounds belong to the caller
+(`core/include/libtracer/mem_source.hpp:366`), so both bounds belong to the caller
 rather than to the library
 ([RFC-0006 — resource-bounded nesting depth](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0006-resource-bounded-nesting-depth.md)):
 
@@ -205,7 +205,7 @@ to `sync_none_t`, which compiles to nothing.
 :::
 
 After a soak run, `classes_used()` says how many slots the node really needed and
-`overflowed()` must read zero (`core/include/libtracer/mem_source.hpp:376,380`) — a
+`overflowed()` must read zero (`core/include/libtracer/mem_source.hpp:417,421`) — a
 non-zero count means the class span is too small and blocks are being lost to the
 slab.
 

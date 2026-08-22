@@ -354,6 +354,48 @@ tr::net::can_reassembly_t reasm{&pmr, /*max_groups=*/16};
 
 **It runs one direction, and the reverse is forbidden.** `block_source_t` → `memory_resource` is offered; `memory_resource` → `block_source_t` is not, and must not be added. A wrapper in that direction would have to answer `nullptr` from a `try_alloc` built on an `allocate` that is annotated `returns_nonnull` and signals only by throwing — so the caller's null check is deleted at exactly the `-Os`/`-Oz` levels the reference node ships at (the table earlier in this section), and the throw reaches the `__cxa_throw` → `abort()` stub. That is the defect [ADR-0065](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0065-failable-allocation-gets-its-own-seam-block-source.md) created the block seam to escape, and `core/tests/mem_source_pmr_test.cpp` asserts the two types stay non-interconvertible.
 
+#### Migrating a host that already has a pmr arena
+
+Saying the reverse wrapper is forbidden is only half an answer, and the missing half is what a
+migrating host actually needed
+([#1493](https://github.com/avatarsd-llc/libtracer/issues/1493)). A node whose graph and router
+historically shared one pmr arena hits this the moment a seam's parameter changes from
+`std::pmr::memory_resource*` to `block_source_t*` — `fwd_router_t`'s `label_src` is the shipped
+example. Passing `get_default_resource()` is a compile error, which is the point; passing *its
+own* resource reaches for the adapter above, and **that one compiles**:
+
+```cpp
+// DO NOT DO THIS. It compiles, looks correct, and passes review.
+void* try_alloc(std::size_t n, std::size_t a) noexcept override {
+    return mr_->allocate(n, a);   // never returns nullptr; throws instead
+}
+```
+
+**Point a `pool_source_t` at the storage, not at the resource.** `pool_source_t`'s span
+constructor carves from a caller-provided slab with caller-provided size classes, so "reuse my
+existing arena" has an answer that involves no pmr at all: give the pool the same bytes the
+`monotonic_buffer_resource` was partitioning, and exhaustion stays a `nullptr` end to end.
+
+```cpp
+alignas(std::max_align_t) static std::byte g_slab[16 * 1024];   // the arena you already had
+static tr::mem::size_class_t g_classes[12];
+
+tr::mem::pool_source_t<> pool{g_slab, g_classes};
+tr::net::fwd_router_t router{graph, &pool};                     // label state, bounded, nothrow
+```
+
+Size the class span against `classes_used()` and `overflowed()`; the slab against `used()`,
+which is a high-water mark rather than a running total.
+
+**A budget-tracking adapter is declined, not merely absent.** The tempting third option — an
+upstream wrapper that counts its own bytes and returns `nullptr` at the ceiling *before*
+delegating — does not become honest by tracking a budget. A **fragmented** pmr resource can
+throw well below that ceiling, so the adapter is correct except precisely when the underlying
+resource is in the state the bound existed to protect against, and on `-fno-exceptions` that
+throw is the same link-wrapped `abort()` — now shipping with the library's name on it. An
+adapter that is correct except when the resource is fragmented is a landmine with a label on
+it, so the library does not provide one.
+
 :::{warning}
 **This delivers PLACEMENT and BOUNDING, not FAILABILITY.** The adapter's boundary is a
 `std::bad_alloc` on a hosted build and an `abort()` under `-fno-exceptions`. So it is not

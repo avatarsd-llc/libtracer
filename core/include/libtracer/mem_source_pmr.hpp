@@ -33,7 +33,10 @@
  *       not answer `nullptr` honestly: on the shipping `-Os` profile the caller's null
  *       check is deleted outright (measured, ADR-0065 §1) and the throw reaches
  *       ESP-IDF's `__cxa_throw` → `abort()` stub. That is the exact defect
- *       @ref tr::mem::block_source_t exists to escape.
+ *       @ref tr::mem::block_source_t exists to escape. A host with an existing pmr arena
+ *       migrates by pointing @ref tr::mem::pool_source_t's span constructor at the same
+ *       STORAGE instead (#1493); @ref tr::mem::block_source_t's warning carries the full
+ *       reasoning, including why a budget-tracking variant is declined too.
  */
 
 namespace tr::mem {

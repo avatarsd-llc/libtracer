@@ -99,7 +99,15 @@ class fwd_router_t {
      *              rather than appended, because feeding the label tables was its only job —
      *              a call site that passed `%std::pmr::get_default_resource()` now passes
      *              nothing (or its own source) and gets a compile error rather than a silent
-     *              re-route. Split from @p rx deliberately (ADR-0079's per-plane default):
+     *              re-route. A call site that passed its OWN resource — a node whose graph
+     *              and router historically shared one pmr arena — migrates by pointing
+     *              @ref mem::pool_source_t's SPAN CONSTRUCTOR at the same storage that
+     *              resource was partitioning (#1493). It must NOT reach for the adapter
+     *              that shape invites, a `block_source_t` wrapping the pmr resource: that
+     *              wrapper's `try_alloc` cannot answer `nullptr`, so it reinstates the very
+     *              abort this parameter change removed. @ref mem::block_source_t's warning
+     *              carries the full reasoning, including why a budget-tracking variant is
+     *              declined too. Split from @p rx deliberately (ADR-0079's per-plane default):
      *              @p rx is per-frame decode scratch and may legitimately be a
      *              `bump_source_t`, while label state is LONG-LIVED and would monotonically
      *              fill one.
