@@ -155,6 +155,17 @@ struct mount_hit_t {
      *         RFC-0005 amendment 1 the terminus leg was worse still: a WRITE there
      *         mkdir-p'd a shadow vertex under the connection.) */
     bool rejected = false;
+    /**
+     * @brief The registry slot @ref link_name is that slot's OWN `name` — null otherwise.
+     *
+     * Non-null exactly on the point-to-point arm, which is the one arm where the two spellings
+     * are the same object. The bus-peer arm deliberately leaves it null: there `link_name` is
+     * the PEER segment and the slot's name is the mount above it, so a caller keying a
+     * per-slot cache on `link_name` would write a peer's answer into the mount's word. Nothing
+     * here is worth that footgun — the one consumer (#1437's mount-token hint) has no bus arm
+     * to serve anyway, because a bus peer is `unroutable` at the subscriber door.
+     */
+    const child_registry_t::child_t* entry = nullptr;
 };
 
 /**
@@ -232,7 +243,39 @@ template <class SegAt, class Retain>
         rej.rejected = true;
         return rej;
     }
-    return mount_hit_t{eg.link, {}, k, c->name};
+    return mount_hit_t{.link = eg.link, .peer = {}, .strip_k = k, .link_name = c->name, .entry = c};
+}
+
+/**
+ * @brief @p hit's mount as an INTERNED link token — the carry for a mount-routed subscribe
+ *        (#1437), or a default token when @p hit resolved no registry slot of its own.
+ *
+ * A mount-routed target REBINDS the key the subscriber index is written under, from the link
+ * the subscribe arrived over to the mount's own name. The arrival's carried token therefore
+ * names the wrong link and is rejected at the index door, and the admission falls through to
+ * the graph's NAME door — which is a linear scan of the live link slots, cheaper than the hash
+ * it replaced under ~32 links and about 2x dearer at 65. Unlike the departure doors that scan
+ * is argued for, this one runs per SUBSCRIBE.
+ *
+ * Resolved through the registry slot the descent ALREADY matched, so it costs no second
+ * lookup: @ref child_registry_t::child_t::owner_hint is four bytes of padding the slot was
+ * carrying anyway, and @ref graph::graph_t::intern_link_hinted turns it into the whole find.
+ * The reaches that were available instead — `ctx_by_name` over the receive-context chain,
+ * `entry_by_name` over the registry — are themselves linear NAME scans, over nodes far larger
+ * than a 64-byte index slot, so they would have swapped the graph's scan for a worse one
+ * rather than removed it.
+ *
+ * No invalidation, and none is owed: the hint is validated by NAME on every use, so a rebound
+ * tenancy, a released slot and a never-written zero each cost one comparison and then
+ * re-derive. That is what lets this word live on a registry slot the graph knows nothing about
+ * and the router never has to keep in step with.
+ */
+[[nodiscard]] graph::link_id_t mount_token(graph::graph_t& graph, const mount_hit_t& hit) {
+    if (hit.entry == nullptr) return {};
+    std::uint32_t hint = hit.entry->owner_hint.load(std::memory_order_relaxed);
+    const graph::link_id_t token = graph.intern_link_hinted(hit.link_name, hint);
+    hit.entry->owner_hint.store(hint, std::memory_order_relaxed);
+    return token;
 }
 
 /**
@@ -2960,7 +3003,8 @@ graph::wire_target_split_t fwd_router_t::split_subscriber_target(
         return graph::wire_target_split_t{.unroutable = true};
     // The residual packed records are reused verbatim: the key suffix IS the route payload.
     return graph::wire_target_split_t{.link = hit.link_name,
-                                      .residual = key.subspan(walk.end_of(hit.strip_k))};
+                                      .residual = key.subspan(walk.end_of(hit.strip_k)),
+                                      .token = mount_token(graph_, hit)};
 }
 
 graph::result_t<void> fwd_router_t::subscribe_toward(const graph::path_t& producer,
@@ -2991,7 +3035,13 @@ graph::result_t<void> fwd_router_t::subscribe_toward(const graph::path_t& produc
     const auto sub_view = view::over_bytes(sub_tlv);
     if (!sub_view) return std::unexpected(graph::status_t::BACKPRESSURE);
 
-    return graph_.subscribe_wire(*v, *sub_view, *route_view, std::string(split.link));
+    // The mount's own interned token rides along (#1437). This door builds no SUBSCRIBER PATH
+    // child, so the graph's mount arm never runs and never gets the chance to swap the token
+    // itself: the link handed over IS the mount, and the token beside it is the mount's, so
+    // the index insert is a subscript rather than the name door's scan of the live slots.
+    // Un-carried, this was the ONE caller paying that scan per subscribe in steady state.
+    return graph_.subscribe_wire(*v, *sub_view, *route_view, std::string(split.link), {}, {},
+                                 split.token);
 }
 
 void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const view::rope_t& value) {

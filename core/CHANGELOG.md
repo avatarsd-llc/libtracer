@@ -166,6 +166,51 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   order itself is unchanged and still governs what remains inside the hold — the graph
   lookups and registrations and the router's `add_child`, none of which dispatch or join.
 
+- **The two un-carried subscribe doors now carry the MOUNT's interned link token, so neither
+  pays the graph's name-door scan per subscribe**
+  ([#1437](https://github.com/avatarsd-llc/libtracer/issues/1437), a consequence of
+  [#1266](https://github.com/avatarsd-llc/libtracer/issues/1266) /
+  [#1417](https://github.com/avatarsd-llc/libtracer/issues/1417)).
+
+  #1431 replaced the subscriber index's `unordered_map` with a dense slot vector holding each
+  link's name inline. A **carried** token subscripts that vector and never hashes — the win,
+  and it is flat in link count. An **un-carried** caller falls back to a NAME door that is now
+  a linear scan: cheaper than the hash it replaced up to about 32 live links, and about **2x
+  dearer at 65**. That trade was argued for paths that run once per peer hangup, and two doors
+  that run once per **subscribe** were quietly landing on it — `fwd_router_t::subscribe_toward`,
+  which has no token at all, and the RFC-0021 §4.B.1 mount rebind, whose carried token names
+  the arrival link while the index is keyed on the mount.
+
+  Both now resolve the mount's own token through the registry slot the mount descent already
+  matched, so the index insert is a subscript at any link count. **NARROW is untouched**: no
+  structure grew a byte (see below), the 128.0 B/link index footprint stands, and at four links
+  the scan this removes was the cheap side of the trade anyway. **WIDE** is where it pays.
+
+  **API additions:**
+
+  - `graph_t::intern_link_hinted(std::string_view link_name, std::uint32_t& hint)` — `intern_link`
+    with a caller-held slot hint. A hit is a bounds check and a name compare; a miss is the scan
+    `intern_link` would have run, with the hint rewritten. The hint is a **pure cache with no
+    invalidation contract** — it is validated by NAME on every use, so a stale, foreign or
+    never-written word costs one comparison and can never produce a wrong token. The slot's
+    generation is deliberately *not* part of it and must not become part of it.
+  - `graph::wire_target_split_t::token` — the mount's interned identity, filled by a resolver
+    that can answer it cheaply. Default (no token) is byte-identical to the previous behaviour,
+    and the token is still checked against the split's `link` at the index door, so a resolver
+    that answers for the wrong link degrades to the lookup rather than mis-indexing.
+  - `net::child_registry_t::child_t::owner_hint` — an **opaque** per-slot cache word for the
+    registry's owner; the registry never reads it and attaches no meaning to it. It rides in
+    padding `seg_count` was already leaving before `name_digest`'s alignment, so `child_t` is
+    the same size with it as without — pinned by the new `child_slot_layout_oracle_t`
+    `static_assert`, because a field appended at the end instead would have grown the slot from
+    80 to 88 bytes and made the forward path's mount descent walk eight more cache lines per
+    frame at `N = 64`. Anything stored here must tolerate never being invalidated.
+
+  **Documentation correction** (descriptive, no spec surface): `graph_t`'s `@section carried`
+  claimed the name-door scan "runs once per peer hangup where the one it pays for runs once per
+  subscribe". That was true of `link_edge_candidates` / `link_candidates` / `evict_link_edges`
+  and *not* of the index insert's own fallback. The block now states which doors pay it.
+
 ## [0.14.0] — 2026-08-21
 
 ### Added

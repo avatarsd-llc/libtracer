@@ -375,6 +375,23 @@ struct wire_target_split_t {
      */
     std::span<const std::byte> residual{};
     /**
+     * @brief @ref link's INTERNED identity, when the resolver had one to give (#1437).
+     *
+     * A mount-routed target REBINDS the key the subscriber index is written under, from the
+     * link the subscribe arrived over to @ref link — so the token the arrival carried
+     * (`subscribe_wire`'s `link_token`) names the wrong link and is correctly ignored, and
+     * the admission falls through to the name door's scan. That is the one un-carried door
+     * that runs per SUBSCRIBE rather than per hangup. A resolver that can answer this cheaply
+     * — the transport plane can: a mount is a registered child with a durable word to keep
+     * @ref graph_t::intern_link_hinted's slot hint in — closes it, and one that cannot leaves
+     * this default and gets exactly today's behaviour.
+     *
+     * An OPTIMISATION and only that. It is checked against @ref link at the index door like
+     * every other carried token, so a resolver that answers a token for some other link
+     * degrades to the lookup instead of mis-indexing.
+     */
+    link_id_t token{};
+    /**
      * @brief A mount WAS named, but it cannot carry a directed delivery — the target named
      *        the mount exactly (nothing below it), or its first hop landed on a bus link's
      *        own NAME (ADR-0073 §3 / RFC-0020). RFC-0021 §B.3: the subscribe-write is
@@ -1012,6 +1029,42 @@ class graph_t {
      * @return The token, or a default-constructed one for an empty name.
      */
     [[nodiscard]] link_id_t intern_link(std::string_view link_name);
+
+    /**
+     * @brief @ref intern_link with a caller-held SLOT HINT — the O(1) door for a caller that
+     *        has somewhere stable to keep one word (#1437).
+     *
+     * @ref intern_link's mint-or-find goes through the name door, and that door is a LINEAR
+     * SCAN of the live slots (the private `link_index_`'s "DENSE SLOT VECTOR" block spells out
+     * why — deliberately NOT an `@ref`, because that anchor lives on a private nested type the
+     * rendered API reference does not emit, and a link to it is a `-n -W` sphinx failure).
+     * Cheaper than the hash it
+     * replaced up to about 32 live links and about 2x dearer at 65 — which is fine on the
+     * paths the trade was argued on (once per peer hangup) and NOT fine on the un-carried
+     * subscribe doors, which pay it per subscribe. This is those doors' way out: a caller
+     * that owns a durable word per link (a registered mount, say) keeps the slot number in
+     * it and gets the whole find for one bounds check and one name compare.
+     *
+     * The hint is a PURE CACHE with NO invalidation contract, which is the property that
+     * makes it safe to park in a structure nobody synchronizes: a stale hint — a slot
+     * released and re-minted under another name, a hint from a different graph, an
+     * uninitialized zero — fails the name compare and costs one wasted comparison before the
+     * scan it would have paid anyway. Nothing a wrong hint can spell produces a wrong token,
+     * so the caller owes this word no upkeep on link-down, on re-add, or on teardown.
+     *
+     * The generation is NOT part of the hint and must not become part of it. The slot's name
+     * IS the validation: a live slot's spelling is unique across the index (@ref intern_link
+     * is mint-or-find by name) and a dead slot spells itself empty, so a name match already
+     * proves the slot is live, is this link's, and carries the stamp that is current right
+     * now — read from the slot under the same lock rather than remembered by the caller.
+     *
+     * @param link_name This node's NAME for the link; empty ⇒ an invalid token, hint
+     *                  untouched (the #1056 empty-key rule).
+     * @param hint      In: where this name was last seen. Out: where it is now, on any
+     *                  non-empty name that interned — so the next call is the fast path.
+     * @return Exactly what @ref intern_link would answer for @p link_name.
+     */
+    [[nodiscard]] link_id_t intern_link_hinted(std::string_view link_name, std::uint32_t& hint);
 
     /**
      * @brief Retire @p token's slot so it can be reused — the LINK-DOWN half of @ref
@@ -2732,11 +2785,27 @@ class graph_t {
      * than waived: `link_edge_candidates`, `link_candidates` and therefore `evict_link_edges`
      * all still take a `std::string_view` and all still work with no token in sight (the ESP
      * departure-cost test calls one on a bare `graph_t` with no router at all). They pay a
-     * LINEAR SCAN over live slots instead of a hash — a path that runs once per peer hangup
-     * where the one it pays for runs once per subscribe. `run_subscribe_index.sh` reports
-     * that scan's cost every run (`RESULT_SIDX_DOOR`) rather than leaving the half of the
-     * trade that got slower unstated: it is CHEAPER than the hash up to about 32 live links
-     * and about 2x dearer at 65.
+     * LINEAR SCAN over live slots instead of a hash. `run_subscribe_index.sh` reports that
+     * scan's cost every run (`RESULT_SIDX_DOOR`) rather than leaving the half of the trade
+     * that got slower unstated: it is CHEAPER than the hash up to about 32 live links and
+     * about 2x dearer at 65.
+     *
+     * **Which paths pay it, stated correctly (#1437).** The argument this block used to make
+     * — "a path that runs once per peer hangup where the one it pays for runs once per
+     * subscribe" — is true of the three doors above and was NOT true of the index insert
+     * itself. `index_link_vertex` falls back to the same scan whenever the carry misses, and
+     * the carry misses on doors that run per SUBSCRIBE: a host-side `subscribe_toward`, a
+     * mount-routed target whose key is the mount's name and not the arrival's (RFC-0021
+     * §4.B.1), and the `field_write` `caller` fallback (#943). The trade as documented was
+     * narrower than the trade as shipped, which is the whole of #1437.
+     *
+     * The answer is to CLOSE those doors, not to speed the scan up: a name→token map is the
+     * shape #1416 already measured at 183.8 B/link against the 128.0 this one costs, and a
+     * per-slot digest would spend the C6's arena on a WIDE-side latency point. So the two
+     * doors with somewhere to keep a word now keep one — @ref intern_link_hinted, whose slot
+     * hint the transport plane parks on the registered mount it already resolved — and the
+     * genuinely token-less doors keep the scan, which is the trade the paragraph above
+     * argues and can now be read as arguing.
      */
     /** @brief One link's candidate list, plus where its sorted prefix ends. */
     struct link_entry_t {
