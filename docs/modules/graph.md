@@ -287,7 +287,7 @@ value — it reads the last-known-value — and always delivers the vertex named
 vertex is the explicit target; the mode gates only what an **ancestor's** sweep sweeps up.
 Its cost is O((pending + unconditional) in subtree).
 
-**Both verbs require RETENTION** ([RFC-0008](../spec/rfcs/0008-vertex-operations-assign-propagate.md)
+**Both verbs require RETENTION** ([RFC-0008](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0008-vertex-operations-assign-propagate.md)
 Amendment 2). A `HANDLER` vertex retains nothing — it hands the value to `on_write` and stores
 no LKV — so the pair had nothing to carry between the two calls and the sweep delivered silence.
 `assign(v, …)` and `propagate(v)` therefore answer `SCHEMA_NOT_FOUND` when `v`'s role retains
