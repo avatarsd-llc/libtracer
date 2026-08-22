@@ -337,6 +337,19 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "RFC-0022 §3.B deleted the pre-RFC knob, so no such build exists.",
         "ns per store · pins and copies per cell"),
     instrument_t(
+        "bench_scale_sweep.cpp", "inproc", (),
+        "Sweeps the REGISTERED-VERTEX POPULATION over 10^3/10^4/10^5/10^6 and decomposes what "
+        "grows with it. Each candidate leg is measured in isolation against the same population, "
+        "in one process: a write through a pre-bound handle touching all N vertices, `find()` "
+        "alone over the same N addresses, a probe address of fixed depth and fixed per-level "
+        "fan-out (the ADR-0057 population-independence claim, verified rather than assumed), and "
+        "a working-set control that keeps N vertices resident while touching exactly one — the "
+        "arm that separates resident-set size from touched-set size. Beside them it prices "
+        "`register_vertex_key` descent, the O(N) `vertex_slot` reverse scan, `for_each_vertex` "
+        "enumeration, and the MEASURED heap and RSS bytes per vertex. Diagnostic: nothing here "
+        "is gated, because a population axis this new has no stability record to gate against.",
+        "ns per operation, by leg · bytes per vertex"),
+    instrument_t(
         "bench_subscribe_index.cpp", "counted", (),
         "Prices the per-link departure index (`graph_t::index_link_vertex`) on the remote "
         "SUBSCRIBE path, swept over 4/8/16/32/65 distinct link names at a held-constant vertex "

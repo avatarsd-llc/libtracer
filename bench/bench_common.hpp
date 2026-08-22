@@ -75,6 +75,28 @@ inline constexpr std::size_t kEndpoints[] = {1, 8, 128, 1024, 8192};  // distinc
  */
 inline constexpr std::size_t kFanoutsMid[] = {16, 32, 64, 256, 512};
 
+/**
+ * @brief The TOPIC-COUNT ladder for the #1485 addendum-C scaling arm — decades, on BOTH engines.
+ *
+ * The pre-existing @ref kEndpoints ladder is octave-spaced and already reaches 8192, and the
+ * #1480 fairness audit read its topic-count curve off exactly that. This ladder is not a denser
+ * re-run of it: it exists because that audit compared two DIFFERENT operations, and the modes it
+ * fed are not separable after the fact. libtracer's `inproc-path` row writes **by address** — a
+ * registry resolution inside every timed iteration — while `bench_zenoh`'s row of the same name
+ * publishes through a **declared `Publisher`**, which is the bound form and resolves nothing per
+ * put. Whatever the audit's 1.57x -> 1.21x narrowing was, part of it is that asymmetry rather
+ * than either engine's topic scaling.
+ *
+ * So the `topics-*` arms sweep this ladder in BOTH spellings on BOTH engines — `topics-bound`
+ * (pre-bound handle / declared publisher) and `topics-addr` (resolve the address inside every
+ * operation). That makes the comparison a 2x2 which can be read either way round, and makes the
+ * resolution term visible as its own difference instead of hidden inside one arm.
+ *
+ * Three decades, not five: every point pays a full population build on both engines, and this
+ * ladder's job is to show a SLOPE across decades, which three points spanning four of them do.
+ */
+inline constexpr std::size_t kTopicLadder[] = {1, 100, 10000};
+
 /** @brief Fixed points used while sweeping a different axis. */
 inline constexpr std::size_t kRefSize = 64;
 inline constexpr std::size_t kRefFanout = 1;

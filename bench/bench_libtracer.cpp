@@ -1316,6 +1316,44 @@ void run_mode_fan_remote() {
     for (std::size_t F : kLadder) run_inproc_remote(kRefSize, F, "inproc-remote");
 }
 
+/**
+ * @brief #1485 addendum C — the TOPIC-COUNT arm, in both address spellings (`topics`).
+ *
+ * `topics-bound` writes through a pre-bound @ref tr::graph::vertex_handle_t; `topics-addr` writes
+ * through a pre-parsed @ref tr::graph::path_t, so the registry resolution lands inside every
+ * timed iteration. Both reach the same one subscriber per topic, at the same payload.
+ *
+ * This pair exists because the published topic-count comparison did not have it. The libtracer
+ * row was `inproc-path` — resolve per write — and the Zenoh row of the same name published
+ * through a declared `Publisher`, which resolves nothing per put. So a resolution term sat
+ * inside one arm and nowhere in the other, and the reported narrowing of the margin across the
+ * topic ladder could not be attributed to either engine's topic scaling. `bench_zenoh topics`
+ * emits the matching pair; run them from `run_topics.sh`, which alternates the engines and runs
+ * both arm orders.
+ *
+ * The batch twin is suppressed on these rows (`batch_row = false`): the whole point is a
+ * cross-engine comparison, the Zenoh side has no batch twin to compare against, and ten more
+ * unread series is not what a new arm should cost.
+ */
+void run_mode_topics() {
+    for (std::size_t E : kTopicLadder) {
+        run_inproc(kRefSize, kRefFanout, E, alloc_t::HEAP, false, "topics-bound", kDeliveryBudget,
+                   kLatencyDeliveryBudget, nullptr, false);
+        run_inproc(kRefSize, kRefFanout, E, alloc_t::HEAP, true, "topics-addr", kDeliveryBudget,
+                   kLatencyDeliveryBudget, nullptr, false);
+    }
+}
+
+/** @brief @ref run_mode_topics with the two arms swapped — the order flip (`topics-rev`). */
+void run_mode_topics_rev() {
+    for (std::size_t E : kTopicLadder) {
+        run_inproc(kRefSize, kRefFanout, E, alloc_t::HEAP, true, "topics-addr", kDeliveryBudget,
+                   kLatencyDeliveryBudget, nullptr, false);
+        run_inproc(kRefSize, kRefFanout, E, alloc_t::HEAP, false, "topics-bound", kDeliveryBudget,
+                   kLatencyDeliveryBudget, nullptr, false);
+    }
+}
+
 /** @brief One selectable isolated sweep: its `argv[1]` spelling and the runner behind it. */
 struct bench_mode_t {
     std::string_view name; /**< What `argv[1]` must equal to select this sweep. */
@@ -1345,6 +1383,8 @@ constexpr bench_mode_t kModes[] = {
     {"fan", run_mode_fan},
     {"lkv", run_lkv_store_gate},
     {"fan-remote", run_mode_fan_remote},
+    {"topics", run_mode_topics},
+    {"topics-rev", run_mode_topics_rev},
 };
 
 /** @brief The usage text, on stderr, listing every entry of @ref kModes. */

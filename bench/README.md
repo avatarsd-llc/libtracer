@@ -39,6 +39,8 @@ for a local `preview.html` of the same charts.
 | `bench_pin_net` (`run_pin_net.sh`) | **RFC-0022 §6, the RAM half**: two processes over real UDP, deliveries counted by the RECEIVER, receiver backed by a **bounded RX pool** whose free-slot floor and `dropped_rx()` are the occupancy instrument. Sweeps the live-vertex count across the slot count — the axis on which a pin's borrow starves receive. See [receive-pool occupancy](#bench_pin_net--rfc-0022-6-receive-pool-occupancy-760). |
 | `bench_store_sweep` + `bench_store_escape` (`run_store_sweep.sh`) | **ADR-0079's per-configuration allocation-store sweep (#941)**: H-baseline / WIDE / MID / NARROW over ONE whole-node workload that draws all four ADR-0079 channels, reporting latency by leg, fan-out throughput across T={1,2,4,8,16,24}, deterministic store high-water, and what still escapes to the process heap. Collated by `collate_store_sweep.py`. Its two **deterministic** columns are **banked per `main` push and warn-ratcheted** on the pinned host; the T-sweep and the escape high-water are **never** gated — see [what it resolves, and what it cannot](#bench_store_sweep--the-adr-0079-per-configuration-store-sweep-941) and [which columns are gated](#which-columns-are-gated-and-which-can-never-be-1428). |
 | `bench_subscribe_index` (`run_subscribe_index.sh`) | **#1266's subscriber-index interning A/B**: what keying `link_index_` by an interned token instead of a link NAME costs and saves, in latency and in bytes at rest, over 4/8/16/32/65 links. Five index arms in one binary — including `idx-token-carry`, the shape #1417 shipped, which pays for obtaining the token — plus the live `subscribe_wire` path and the name-door cost, and the A/A null is collected in the same window. Collated by `collate_subscribe_index.py`. See [what it resolves](#bench_subscribe_index--link-identity-interning-1266). |
+| `bench_scale_sweep` (`run_scale_sweep.sh`) | **#1485's vertex-count scaling sweep**: registered-vertex population over 10³/10⁴/10⁵/10⁶, built to **decompose** the topic-count growth #1480 measured rather than reproduce it — bound-handle delivery, resolution alone, a fixed-shape probe address (the ADR-0057 flatness claim), and a working-set control that keeps N resident while touching one. Plus `register_vertex_key` descent, the O(N) `vertex_slot` scan, `for_each_vertex`, and a **measured** bytes-per-vertex census. Diagnostic, never gated — see [what it decomposed](#bench_scale_sweep--the-vertex-count-scaling-sweep-1485). |
+| `run_topics.sh` | **the topic-count comparison, in both address spellings on both engines** (#1485 addendum C): `topics-bound` (pre-bound handle / declared `Publisher`) and `topics-addr` (destination resolved inside every operation), over `kTopicLadder` = 1/100/10 000. Exists because the previous comparison put libtracer's resolve-per-write row against Zenoh's declared-publisher row — see [the asymmetry it removes](#run_topicssh--the-topic-count-comparison-both-spellings-both-engines-1485). |
 
 ### `bench_forward_heap` — the 16KB-RAM zero-heap forward gate (ADR-0038)
 
@@ -1435,6 +1437,127 @@ disjoint [min..max] ranges, so a gated arm here would add a false-fail surface w
 adding detection. `bench_libtracer fan` runs the whole ladder (coarse + mid, ascending) in
 about 1.7 s, which is the mode to A/B anything that touches dispatch width.
 
+### `bench_scale_sweep` — the vertex-count scaling sweep (#1485)
+
+The #1480 fairness audit measured libtracer's `inproc-path` p50 moving **140 → 190 ns (+36 %)
+across 1 → 8192 topics** against Zenoh's 220 → 230 ns (+5 %), narrowing the margin 1.57× → 1.21×
+with the trend still closing at the end of the ladder. That was a **curve with no explanation**,
+and a sweep that reproduced it would have added nothing. So this bench does not publish "cost at
+N topics". It measures each candidate leg **in isolation** against the same population, in one
+process, and lets the growth be attributed.
+
+`./run_scale_sweep.sh` executes one population per process (the RSS column is only valid for the
+first population a process builds — pages go back to the allocator, not to the kernel), refuses
+to run with any `cc1plus` alive or a 1-minute load above 4, and echoes the load it measured
+under into the output. **The five self-hosted CI runners live on this box**, so a quiet-looking
+moment can be a compile fleet, and the same gated point has read 3.6 M/s loaded and 6.0 M/s
+quiet — a factor of 1.6.
+
+#### What it measured
+
+Taken at `loadavg 0.64–1.15`, `cc1plus = 0`, `nproc = 31`, best-of-3 rounds with the arm order
+flipped on alternate rounds, 64 B payload, bulk shape `/scale/g<a>/h<b>/v<c>` (depth 4, per-level
+fan-out = ⌈N^⅓⌉). **p50 ns**, each figure carrying the instrument's ~22 ns per-sample clock cost:
+
+| arm | what it isolates | 10³ | 10⁴ | 10⁵ | 10⁶ |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `scale-find-fixed` | descent over a **fixed-shape** address (ADR-0057) | **60** | **60** | **60** | **60** |
+| `scale-find-fixed-cold` | the same, cache polluted between samples | **90** | **90** | **90** | **90** |
+| `scale-store-one` | N resident, **1 touched** — the working-set control | 90 | 90 | 90 | 90 |
+| `scale-resolve-one` | resolution, N resident, **1 touched** | 70 | 80 | 80 | 90 |
+| `scale-store` | bound-handle write, **N touched** | 90 | 100 | 210 | 340 |
+| `scale-resolve` | `find()` alone, **N touched** | 130 | 190 | 290 | 1010 |
+| `scale-write-key` | resolve **+** bound write, N touched | 210 | 270 | 430 | 1160 |
+| `scale-register` | `register_vertex_key` descent at population N | 130 | 140 | 140 | 150 |
+| `scale-vertex-slot` | the known O(N) reverse scan | 450 | 3 510 | 35 350 | 410 649 |
+| `scale-enumerate` | `for_each_vertex`, **per vertex** | 69 | 83 | 109 | 137 |
+
+Two runs of the whole ladder agreed to within ~2 % at 10⁶ on every arm.
+
+#### What that says
+
+- **`find_ptr` is flat, and the ADR-0057 claim survives contact with an instrument.** A
+  fixed-depth, fixed-fan-out address resolves in **60 ns at 10³ and 60 ns at 10⁶** — a 1000×
+  population change moves it by *zero*. The cold twin is flat too, at 90 ns. Descent cost is
+  population-independent, measured, not assumed.
+- **Residency is not what costs.** This is the decisive arm and it is unambiguous: hold **one
+  million** vertices resident and touch **one** of them, and a write costs 90 ns — the same 90 ns
+  it costs with a thousand resident. The "every distinct address is resident state" trade buys
+  LKV / `await` / composed reads / vertex-ACL and, on this evidence, it is **not** paid for in
+  per-operation latency. **No `Designated model boundaries` claim about a residency wall may cite
+  this curve** — the measurement refutes it.
+- **Everything that grows, grows with the TOUCHED set.** Every `-one` arm is flat and every
+  wide arm climbs. At 10⁶ the wide/one gap is 340 vs 90 ns on the bound write and 1010 vs 90 ns
+  on resolution. That is the memory hierarchy meeting a working set that outgrew it, which is a
+  cost of the *traffic*, not of the model.
+- **Descent shape contributes ~20 ns of that; the rest is cache.** `scale-resolve-one` walks the
+  *same* depth and the *same* per-level fan-out as `scale-resolve` at each N — the only
+  difference is that its target stays hot. It moves 70 → 90 ns across three decades while the
+  wide arm moves 130 → 1010. So the extra `lower_bound` comparisons a wider tree costs are worth
+  about **20 ns**, and the other **~920 ns** is cold-line traffic.
+- **A subscriber roughly doubles the per-vertex working set.** With one edge per vertex,
+  `scale-store` at 10⁵ reads **380 ns**; with no subscribers anywhere it reads **210 ns** on the
+  same population. Anything that adds bytes to the touched set shows up here directly.
+- **`vertex_slot` is exactly O(N), and now has a number.** 450 ns → 410 µs across the ladder,
+  ~×10 per decade, i.e. **~0.4 ns per vertex scanned**. At 10⁶ a single binding mint pays
+  **410 µs under a shared `map_mutex_` hold**. This is the figure [#1486](https://github.com/avatarsd-llc/libtracer/issues/1486)
+  was waiting on; the ruling on whether to memoize it is that issue's, and nothing is proposed
+  here.
+- **Registration is population-independent.** 130 → 150 ns p50 across three decades.
+- **`for_each_vertex` doubles per vertex** (69 → 137 ns) and at 10⁶ a full enumeration is
+  **137 ms**. The "control-plane only" label on `graph.hpp` is correct and cheap to breach.
+
+#### Measured RAM per vertex
+
+`mallinfo2` live-balance delta across the registration bracket **only** — every key the harness
+holds is built before the baseline is read, so this is graph-side bytes:
+
+| N | heap bytes / vertex | RSS bytes / vertex |
+| ---: | ---: | ---: |
+| 10³ | 155 | 290 |
+| 10⁴ | 140 | 165 |
+| 10⁵ | 135 | 146 |
+| 10⁶ | **132** | **140** |
+
+Measured, not computed. Against the ~96 B `vertex_t` plus a ~24 B slot/parent/header floor
+(120 B), the real steady-state figure is **132 B**, converging from above as the fixed cost of
+the upper tree amortizes — **+10 % over the floor**, which is the child vectors, the slot deque
+and the allocator's size-class rounding. At 10⁶ vertices the graph holds **132 MB** of heap and
+**140 MB** of RSS.
+
+#### What could not be measured
+
+- **The fan-1 `scale-deliver` arm does not run at 10⁶.** It needs an edge block per vertex, and
+  the largest population in any other bench in this tree is **100**. `SCALE_SUB_MAX_N` gates it
+  and the binary says so on stderr rather than emitting a row that describes a different
+  topology. Where both ran, `scale-deliver` tracked `scale-store` within ~10 %, so the fan-0 arm
+  carries the axis.
+- **`find_ptr` and `register_vertex_key_span` are private**, so the timed calls are the public
+  `find(span)` / `register_vertex_key(vector)` wrappers, which `graph.hpp` documents as wrapping
+  those bodies once at the boundary. The wrapper is a constant, and a constant cannot produce a
+  slope — but the absolutes carry it.
+- **`scale-register` gets no round flip.** It is the one measurement that mutates the population
+  it measures, so it is sampled over the tail of the build instead of as a round-robin arm; it
+  is one observation window per N (up to 20 000 samples) rather than a best-of-3.
+
+### `run_topics.sh` — the topic-count comparison, both spellings, both engines (#1485)
+
+The published topic-count comparison compared **two different operations**. libtracer's
+`inproc-path` row writes *by address* — a registry resolution inside every timed iteration —
+while `bench_zenoh`'s row of the same name publishes through a **declared `Publisher`**, which
+is the bound form and resolves nothing per put. A resolution term therefore sat inside one arm
+and nowhere in the other, and the narrowing of the margin across the ladder could not be
+attributed to either engine's topic scaling.
+
+Both engines now emit both spellings over the same `kTopicLadder` (1 / 100 / 10 000):
+`topics-bound` (pre-bound `vertex_handle_t` / declared `Publisher`) and `topics-addr`
+(destination resolved inside the operation — pre-parsed `path_t` on one side, pre-built
+`KeyExpr` on the other, so what is compared is per-operation *resolution* and not per-operation
+*string parsing*). `run_topics.sh` alternates the engines, runs **both arm orders**
+(`topics` / `topics-rev`), gives both engines the same number of rounds in the same loop,
+reduces with `best_of_rounds.py`, and **fails loudly if `bench_zenoh` was not built** — a
+missing opponent must never be reachable by a silent CMake `STATUS` line.
+
 ### Selecting a sweep (`bench_libtracer [mode]`)
 
 Run with **no argument** for the full default sweep — that is what CI, `perf_gate.py` and
@@ -1478,7 +1601,7 @@ craft libtracer":
 > `bridge_t` envelope, deleted with the bridge itself in
 > [ADR-0040](../docs/adr/0040-net-plane-is-explicit-source-routed-only.md) — the net plane is
 > explicit-source-routed `FWD` only. Neither mode is emitted today
-> (`bench_libtracer.cpp:16`, `:1407`); `bridge_t`, `router_wrap`, `router_unwrap`, `kMaxHops`,
+> (`bench_libtracer.cpp:16`, `:1447`); `bridge_t`, `router_wrap`, `router_unwrap`, `kMaxHops`,
 > `export_vertex` and `run_routers` survive in `core/` and `bench/` only inside comments
 > and `core/CHANGELOG.md`'s record of their removal — not one declaration, definition or
 > call of any of them is left (`grep -rn` over both trees, 2026-08-08), and the

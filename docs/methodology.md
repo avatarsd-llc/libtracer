@@ -404,6 +404,20 @@ of work per operation*.
   counterpart: value stored once, each op only delivers, matching put semantics. Both
   libtracer series are shown so the reader sees the full-work and the like-for-like
   number side by side.
+- **The topic-count rows must agree on how the destination is spelled** — and the
+  pre-existing `inproc-path` pair did **not**. libtracer's `inproc-path` row writes *by
+  address*, so a registry resolution sits inside every timed iteration; the Zenoh row of the
+  same name publishes through a **declared `Publisher`**, which is the bound form and resolves
+  nothing per put. A resolution term therefore sat inside one arm and nowhere in the other, and
+  any narrowing of the margin along that ladder could not be attributed to either engine's topic
+  scaling. The `topics-bound` / `topics-addr` pair (`bench/run_topics.sh`,
+  [#1485](https://github.com/avatarsd-llc/libtracer/issues/1485)) fixes
+  it by measuring **both** spellings on **both** engines over the same ladder — pre-bound
+  handle / declared publisher, and destination resolved inside the operation — so the resolution
+  term is visible as its own difference instead of hidden inside one arm. What is compared is
+  per-operation *resolution*: the `path_t` on one side and the `KeyExpr` on the other are both
+  pre-built, because charging one engine for a string parse the other hoisted is the same
+  mistake in the other direction.
 - **ACL is disabled in the comparison rows.** No subject resolver is installed, so
   the access gate is a single null check. The *cost of enforcement* is measured
   separately (the `acl-inherit` rows), never hidden inside the comparison.
