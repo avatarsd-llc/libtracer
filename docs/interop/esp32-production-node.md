@@ -110,7 +110,7 @@ and count with no lock and no atomic, so two threads can be handed the same slot
 stored value aliases onto an outbound frame.
 
 The synchronised pool this target needs **is built**:
-`synchronized_pool_t<Sync>` (`core/include/libtracer/mem_pool.hpp:184`) keeps `pool_t`'s
+`synchronized_pool_t<Sync>` (`core/include/libtracer/mem_pool.hpp:194`) keeps `pool_t`'s
 bounded slab and makes the critical section a compile-time policy, chosen as an
 [ADR-0047 — build-time closed module sets](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0047-build-time-closed-module-sets-compile-time-seams.md)
 §2 module-set trait, because the target knows its concurrency model at build time
@@ -158,7 +158,7 @@ then refuses every frame. An 8 KiB bump source wired as a router's `rx`, decodin
 53-byte FWD, served **six frames and rejected the next 194**
 ([ADR-0067 — bounded recycling source](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0067-bounded-recycling-source-and-per-owner-topology.md)
 §1; the same figure is carried on the type at
-`core/include/libtracer/mem_source.hpp:211-212`). A frames-served count without the
+`core/include/libtracer/mem_source.hpp:271-272`). A frames-served count without the
 payload size is not a measurement — 194 rejected 53-byte frames is a different fact
 from 194 rejected 1 KiB frames.
 
@@ -166,7 +166,7 @@ Use `tr::mem::pool_source_t`, which recycles.
 :::
 
 `pool_source_t` takes the slab **and** a caller-owned span of `size_class_t` slots
-(`core/include/libtracer/mem_source.hpp:366`), so both bounds belong to the caller
+(`core/include/libtracer/mem_source.hpp:476`), so both bounds belong to the caller
 rather than to the library
 ([RFC-0006 — resource-bounded nesting depth](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0006-resource-bounded-nesting-depth.md)):
 
@@ -205,7 +205,7 @@ to `sync_none_t`, which compiles to nothing.
 :::
 
 After a soak run, `classes_used()` says how many slots the node really needed and
-`overflowed()` must read zero (`core/include/libtracer/mem_source.hpp:417,421`) — a
+`overflowed()` must read zero (`core/include/libtracer/mem_source.hpp:538,549`) — a
 non-zero count means the class span is too small and blocks are being lost to the
 slab.
 

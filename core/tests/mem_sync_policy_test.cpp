@@ -153,10 +153,48 @@ void contended_policy_seam() {
                         "free-list integrity: one slot appeared twice in the list");
 }
 
+/**
+ * @brief The WRAPPER FORWARDS THE WHOLE CENSUS, not half of it (#1503 finding 4).
+ *
+ * `synchronized_pool_t` forwarded `capacity()` and stopped there, so wrapping a bounded
+ * resource in its thread-safe form lost its occupancy — on precisely the pool that is
+ * shared, i.e. the one whose occupancy is hardest to reason about. `in_use()` is the
+ * used-polarity primary (core/STYLE.md §Introspection); `available()` is the legacy
+ * free-polarity spelling and the two must stay each other's complement.
+ */
+void wrapper_forwards_the_whole_census() {
+    std::printf("\nwrapper census forwarding (#1503):\n");
+    constexpr std::size_t kSlotPayload = 32;
+    std::vector<std::byte> slab(8 * (kSlotPayload + sizeof(segment_t) + 64));
+    synchronized_pool_t<spin_sync_t> pool(slab, kSlotPayload);
+
+    const std::size_t cap = pool.capacity();
+    check_quiet(cap > 0, "census: the wrapped pool carved some slots");
+    check_quiet(pool.in_use() == 0, "census: a fresh pool has nothing in use");
+    check_quiet(pool.available() == cap, "census: ...and every slot free");
+
+    std::vector<segment_ptr_t> held;
+    for (std::size_t i = 0; i < 3 && i < cap; ++i) {
+        segment_t* raw = pool.alloc(kSlotPayload);
+        check_quiet(raw != nullptr, "census: the pool served a slot");
+        if (raw == nullptr) break;
+        held.push_back(segment_ptr_t::adopt(raw));
+    }
+    check_quiet(pool.in_use() == held.size(), "census: in_use counts USED slots, not free ones");
+    check_quiet(pool.available() == cap - held.size(),
+                "census: available() stays its exact complement");
+    check_quiet(pool.capacity() == cap, "census: the ceiling does not move under load");
+
+    held.clear();
+    check_quiet(pool.in_use() == 0, "census: reclaim returns every slot");
+    check_quiet(pool.available() == cap, "census: ...and the free count with it");
+}
+
 }  // namespace
 
 int main() {
     contended_policy_seam();
+    wrapper_forwards_the_whole_census();
 #ifdef LIBTRACER_ABLATE_POOL_SYNC
     std::printf("mem_sync_policy_test: ABLATION build (critical section removed)\n");
 #endif

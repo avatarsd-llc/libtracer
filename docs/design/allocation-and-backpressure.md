@@ -81,7 +81,7 @@ hooks and a refcount, which the block source is not. The split is `graph_t`'s `c
 thread-safe** (ADR-0060 §2): all of those sites but one run on a transport child's receive thread
 and the remaining one on the writer thread, and the `segment` it hands out self-routes its reclaim
 on whichever thread drops the last reference. A bare `pool_t` is not thread-safe and must not be injected here;
-`synchronized_pool_t<Sync>` (`core/include/libtracer/mem_pool.hpp:184`) is the in-tree
+`synchronized_pool_t<Sync>` (`core/include/libtracer/mem_pool.hpp:194`) is the in-tree
 composition, and its critical section is a compile-time policy: `sync_pool_t` for the multi-core
 spinlock, `tr::esp::critical_pool_t` for the single-core interrupt-disable variant.
 
@@ -171,23 +171,23 @@ too, leaving no terminus byte source on the global heap.**
 
 `block_source_t` is a bytes-in / `void*`-out interface whose allocating method is
 `[[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept`
-(`core/include/libtracer/mem_source.hpp:225`). The `noexcept` is the whole point: the override
+(`core/include/libtracer/mem_source.hpp:285`). The `noexcept` is the whole point: the override
 cannot throw, so the caller has exactly one branch to write.
 
 Four implementations ship:
 
 | Source | Construction | Behaviour |
 | --- | --- | --- |
-| `heap_source()` (`mem_source.hpp:171`) | free function, process-wide | wraps the platform allocator; the default for all three seams |
-| `null_source()` (`mem_source.hpp:192`) | free function, process-wide | serves nothing; makes a `bump_source_t`'s buffer a hard bound |
-| `bump_source_t` (`mem_source.hpp:217`) | `bump_source_t(std::span<std::byte> buffer, block_source_t& upstream = heap_source())` | carves from `buffer`, falls back to `upstream` once it cannot fit |
-| `pool_source_t` (`mem_source.hpp:349`) | caller-supplied slab plus a caller-supplied span of size classes | segregated exact-size free lists; recycles, so it suits a long-lived seam |
+| `heap_source()` (`mem_source.hpp:231`) | free function, process-wide | wraps the platform allocator; the default for all three seams |
+| `null_source()` (`mem_source.hpp:252`) | free function, process-wide | serves nothing; makes a `bump_source_t`'s buffer a hard bound |
+| `bump_source_t` (`mem_source.hpp:277`) | `bump_source_t(std::span<std::byte> buffer, block_source_t& upstream = heap_source())` | carves from `buffer`, falls back to `upstream` once it cannot fit |
+| `pool_source_t` (`mem_source.hpp:459`) | caller-supplied slab plus a caller-supplied span of size classes | segregated exact-size free lists; recycles, so it suits a long-lived seam |
 
 `bump_source_t` is the nothrow twin of `std::pmr::monotonic_buffer_resource`, and the **upstream
 parameter is what makes it a capability-preserving substitution**. A monotonic resource also spills
 past its buffer, but it spills to a throwing resource — the abort again. A `bump_source_t` spills
 to whatever `block_source_t` the caller named, so the same large input still succeeds where memory
-exists and fails as a value where it does not (`mem_source.hpp:203-206`).
+exists and fails as a value where it does not (`mem_source.hpp:263-266`).
 
 ## The decode arena
 
@@ -383,12 +383,12 @@ the exact-size nothrow allocation.
 **A bump block is never reclaimed.** `bump_source_t` has a cursor and no free list, so a source that
 outlives one burst of work fills monotonically and then refuses everything — the node does not
 abort, the seam behaves exactly as specified, it simply stops working. Construct one per operation
-(as the branch-write decode does) or `reset()` it between operations (`mem_source.hpp:257`).
+(as the branch-write decode does) or `reset()` it between operations (`mem_source.hpp:319`).
 A **long-lived** bounded seam — a router's `rx`, a graph's `ctl` — wants `pool_source_t`, which
-recycles (`mem_source.hpp:208-213`).
+recycles (`mem_source.hpp:268-273`).
 
 `bump_source_t` is also single-threaded by contract: a bump cursor is not synchronized, and its
-intended use is a function-scoped buffer on the calling thread's stack (`mem_source.hpp:214-215`).
+intended use is a function-scoped buffer on the calling thread's stack (`mem_source.hpp:274-275`).
 
 **Exhaustion of the block seam does not have one answer.** The reject belongs to the operation, not
 to the seam, and the three in-tree consumers answer differently:
@@ -419,7 +419,7 @@ report what to size the class span against.
 An 8 KiB `bump_source_t` wired as a router's `rx`, **decoding a 53-byte FWD**, decoded **6 frames
 and rejected the next 194**
 ([ADR-0067 §1](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0067-bounded-recycling-source-and-per-owner-topology.md);
-corroborated at `core/include/libtracer/mem_source.hpp:212` and
+corroborated at `core/include/libtracer/mem_source.hpp:272` and
 [`../reference/09-memory-substrate.md:280`](../reference/09-memory-substrate.md)).
 
 The frame size is load-bearing and a frames-served count without it is not a measurement: what the

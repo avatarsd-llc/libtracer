@@ -7,13 +7,22 @@
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
  * Scope, deliberately narrow: this is an `integrations/esp-idf` type, not a core
- * one. `transport_t` grows no `counters()` virtual and `fwd_router_t` grows no
- * per-child accounting, because the only consumers are hosts that enumerate the
- * two CONCRETE link types they themselves constructed (@ref
- * tr::net::esp_ws_client_link_t and @ref tr::net::httpd_ws_link_t). A polymorphic
- * hook would buy nothing there and would put a counter bump on core's hot
- * `deliver_remote` path. Per-link attribution of core's delivery drops stays a
- * future change, if anything ever needs it.
+ * one. It stays a RICH, kind-specific block that only a host holding one of the two
+ * CONCRETE link types it belongs to reads (@ref tr::net::esp_ws_client_link_t and
+ * @ref tr::net::httpd_ws_link_t) — bytes, frames and connection timestamps that no
+ * other transport kind can answer.
+ *
+ * @note The original wording here — "`transport_t` grows no `counters()` virtual" —
+ *       was overtaken by #932 and is corrected rather than preserved: `transport_t`
+ *       DOES carry a `virtual drop_stats()` (`core/include/libtracer/transport.hpp`),
+ *       because a consumer holding only the interface otherwise lost all drop
+ *       observability when it swapped ws for tcp or CAN. That virtual is the
+ *       shed-frame SUBSET every kind can answer; this block is the superset one kind
+ *       publishes, and the two coexist by design — the naming of both follows the one
+ *       introspection vocabulary in `core/STYLE.md` §Introspection (#1503). What is
+ *       still true, and is the part worth keeping: no counter bump was added to core's
+ *       hot `deliver_remote` path, and `fwd_router_t` grows no per-child accounting.
+ *       Per-link attribution of core's delivery drops remains a future change.
  *
  * Threading: PLAIN fields, no atomics. Every one of them is read and written under
  * the owning link's EXISTING mutex (`esp_ws_client_link_t::write_m_`,

@@ -16,6 +16,32 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`tr::mem::block_source_t::stats()` — the block seam's introspection surface**
+  ([#1503](https://github.com/avatarsd-llc/libtracer/issues/1503) steps 1–2, closing the core
+  of [#1492](https://github.com/avatarsd-llc/libtracer/issues/1492)). A new optional virtual
+  returning the POD `tr::mem::source_stats_t` `{capacity, in_use, peak, refused,
+  largest_refused}`, in the `transport_t::drop_stats` mould (#932): the **default is
+  all-zero**, the honest answer for a source that counts nothing, so every out-of-tree
+  `block_source_t` keeps compiling untouched. The whole vocabulary of this seam used to be
+  `name()`, so a host holding a `block_source_t&` could introspect nothing — least of all
+  whether anything had been refused. **`try_alloc → nullptr` is now counted**:
+  `pool_source_t` counts PRIMARY SLAB EXHAUSTION (which no implementation counted anywhere),
+  and `bump_source_t` counts a request its buffer could not fit that its upstream also
+  refused, both reporting `largest_refused` because the tail is what refuses.
+  `heap_source_t` and `null_source_t` stay at the all-zero default by design.
+  `pool_source_t::overflowed()` **keeps its existing meaning** — a recycling degrade, not a
+  refusal — and gains `refused()` / `largest_refused()` beside it; the two counters are
+  independent in both directions. The counters are bumped on the refusal arm ONLY: measured
+  on riscv32-esp-elf-g++ at the deployment flags, `try_alloc`'s success arm is
+  instruction-identical and `release` / `find` / teardown are byte-identical, at +18 B of
+  text on the `nullptr` arm and +4 B of vtable.
+- **`tr::mem::pool_t::in_use()` and `synchronized_pool_t::in_use()` / `available()`** — the
+  used-polarity occupancy accessor, and the census the thread-safe wrapper was dropping.
+  `synchronized_pool_t` forwarded `capacity()` and stopped there, so wrapping a bounded
+  resource lost half its census on precisely the pool that is shared (#1503 finding 4).
+  `pool_t::available()` (free slots) is unchanged and stays for compatibility; it is the
+  derived legacy spelling.
+
 - **`tr::wire` gains the BATCH record (`batch.hpp`, `type_t::BATCH = 0x80`)** — the wire
   encoding of a flush, and the one canonical spelling of RFC-0025's batch convention
   ([#1463](https://github.com/avatarsd-llc/libtracer/issues/1463); RFC-0025 §4.2.1 / §4.1.2,
@@ -79,6 +105,19 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   drawn from the same ADR-0060 `value_backend_`.
 
 ### Changed
+
+- **`core/STYLE.md` gains an §Introspection section** — the one vocabulary every bounded
+  resource in the tree answers with (`capacity` / `in_use` / `peak` / `refused` / `dropped` /
+  `largest_refused`, used-polarity always), the **snapshot-coherence clause stated once** for
+  other docs to cite instead of paraphrasing a fourth time, and the counting doctrine
+  (failure path only, counted-never-enforced, per-seam-never-aggregated,
+  one-event-one-counter, plain counters over atomics, tuning knobs are not limits)
+  ([#1503](https://github.com/avatarsd-llc/libtracer/issues/1503) step 1). Documentation
+  only; no behaviour change.
+- **`libtracer_esp/link_stats.hpp`'s scope note is corrected** — it claimed "`transport_t`
+  grows no `counters()` virtual", which #932 overtook: `transport_t` does carry
+  `virtual drop_stats()`. The part that is still true (no counter bump on core's hot
+  `deliver_remote` path, no per-child accounting in `fwd_router_t`) is kept.
 
 - **WIRE-VISIBLE: `await` at a HANDLER vertex now answers the value, not `NOT_FOUND`; and
   `assign` / `propagate` refuse a vertex that retains nothing**

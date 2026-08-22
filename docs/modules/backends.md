@@ -39,7 +39,7 @@ it — a `DEVICE`-space backend plugs in by **registering a transfer hook** ([be
 `mem_pool` is the bounded "custom allocator": it carves a **caller-owned** slab
 into fixed slots with the free list threaded *through the slab* (no auxiliary
 heap), and returns `nullptr` when full — the BACKPRESSURE signal. `pool_t` is not
-synchronized; `synchronized_pool_t<Sync>` (`core/include/libtracer/mem_pool.hpp:184`)
+synchronized; `synchronized_pool_t<Sync>` (`core/include/libtracer/mem_pool.hpp:194`)
 composes over it and guards the free list with a **compile-time synchronisation policy**,
 which is what any shared seam needs — a segment self-routes its reclaim on whatever thread
 drops the last reference, concurrent with a writer's `alloc`. Two policies ship: the
@@ -102,12 +102,25 @@ This page documents only the API.
 :undoc-members:
 ```
 
+The seam's census block — the one introspection vocabulary every bounded resource
+in the tree answers with (`core/STYLE.md` §Introspection).
+
+```{doxygenstruct} tr::mem::source_stats_t
+:members:
+```
+
 ```{doxygenclass} tr::mem::heap_source_t
 :members:
 ```
 
+```{doxygenfunction} tr::mem::heap_source
+```
+
 ```{doxygenclass} tr::mem::null_source_t
 :members:
+```
+
+```{doxygenfunction} tr::mem::null_source
 ```
 
 ```{doxygenclass} tr::mem::bump_source_t
