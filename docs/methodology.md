@@ -494,38 +494,84 @@ optional TLS module. An absent transport must never be readable as a tie.
 ## Designated model boundaries
 
 Three properties of libtracer's model are **designed**, not accidental, and each of them
-shows up somewhere on this page as a cost. They are listed here so that cost can be read
-for what it is: the price of a capability that was chosen, not a defect awaiting a fix.
-Every comparison on this page — the Zenoh chapter above most of all — has to be read
-against them, because a comparison between two engines that solved *different problems* is
-only informative once the problems are named. Nothing below proposes a redesign; where a
+carries a cost this page measures. They are listed here so that cost can be read for what
+it is: the price of a capability that was chosen, not a defect awaiting a fix. Every
+comparison on this page — the Zenoh chapter above most of all — has to be read against
+them, because a comparison between two engines that solved *different problems* is only
+informative once the problems are named. Nothing below proposes a redesign; where a
 boundary has a **mitigable constant**, the mitigation is a measurement, and it is linked.
+
+A boundary earns that name only from a measurement that **isolates** it, and the section is
+held to that standard in both directions. A number that moves for some other reason is not
+evidence for a wall, however convenient the shape of the curve — the first draft of
+boundary 1 argued from exactly such a curve and the isolating control arm refuted it. Where
+that has happened it is said outright below rather than quietly rewritten, because a
+boundaries section that only ever accumulates walls is an argument, not an instrument.
 
 **1 · Every distinct address is resident state.** A vertex is not a name that a message
 happens to carry — it is an object that exists between writes. That is what pays for the
 last-known-value (a reader gets the current value without waiting for the next publish),
 for `await` (a readiness sequence has to live somewhere), for composed reads across a
 subtree, and for the per-vertex ACL. An engine that only *routes* keeps no such object and
-so has nothing to scale in the number of addresses. The **constant** in front of the
-residency is fair game and is actively worked — bytes per vertex are ratcheted exactly on
-this page, block counts to the byte — but the **O(#addresses) residency is the model**, and
-no amount of footprint work turns it into O(1).
+so has nothing to scale in the number of addresses.
 
-The honest consequence is measured and it is in the Zenoh chapter. The fairness audit
+**What residency costs is bytes, and only bytes.** That is the whole of the trade, and it
+is measured: the decomposition sweep
+([#1485](https://github.com/avatarsd-llc/libtracer/issues/1485) /
+[#1496](https://github.com/avatarsd-llc/libtracer/pull/1496)) reads **132 B of heap and
+140 B of RSS per vertex** at 10⁶ vertices, converging from above as the upper tree's fixed
+cost amortizes, against a computed ~120 B floor — **+10 %**, measured rather than derived.
+A million addresses is 132 MB. The **O(#addresses) residency is the model** and no
+footprint work turns it into O(1); the **constant** in front of it is fair game and is
+actively ratcheted on this page, bytes at +2 % and block counts exactly.
+
+**Residency is NOT a per-operation cost, and the control arm that decides this is
+unambiguous.** Hold **one million vertices resident and touch exactly one**: a write costs
+**90 ns** — the same 90 ns it costs with a thousand resident. Resolving a single hot address
+moves 70 → 90 ns across three decades. Descent is population-independent outright
+(ADR-0057, now verified rather than assumed): a fixed-shape probe address resolves in
+**60 ns at 10³ and 60 ns at 10⁶** warm, and **90 ns flat** with its lines evicted between
+samples. Everything that grows, grows with the **touched** set, not the resident set. So
+this boundary must not be argued from a latency curve, and the earlier draft of this
+section that did so was wrong on its own evidence.
+
+**The topic-count curve in the Zenoh chapter is not this boundary's evidence.** It stands
+as measured — the fairness audit
 ([#1480](https://github.com/avatarsd-llc/libtracer/pull/1480)) went looking in both
 directions and found exactly one axis where Zenoh is the better engine outright:
-**topic-count scaling**. Across 1 → 8192 topics Zenoh's p50 moves **220 → 230 ns (+5%)**
-while libtracer's moves **140 → 190 ns (+36%)**, so libtracer's margin on that axis narrows
-from **1.57× to 1.21×** — and the trend line says it would keep closing past the end of the
-ladder. Zenoh's key-expression routing scales in topic count better than a path registry
-holding one resident object per address does. That is boundary 1 with a number on it, and
-the number stays on this page exactly as measured. Two follow-ups are open, both of them
-measurements of the constant rather than proposals about the model:
-[#1485](https://github.com/avatarsd-llc/libtracer/issues/1485) (a vertex-count scaling
-sweep — lookup, registration, mint, enumeration and RAM — with a Zenoh topic-count arm
-beside it, so the axis is charted rather than argued) and
-[#1486](https://github.com/avatarsd-llc/libtracer/issues/1486) (a ruling on memoizing
-`vertex_slot()`, whose reverse lookup is O(total vertices) today).
+**topic-count scaling**, Zenoh's p50 moving **220 → 230 ns (+5 %)** across 1 → 8192 topics
+against libtracer's **140 → 190 ns (+36 %)**, narrowing our margin from **1.57× to 1.21×**.
+That number does not change and is not softened. Its *explanation* does. The decomposition
+puts the growth in **per-iteration by-address resolution**: over the span that ladder
+occupies (10³ → 10⁴) the resolve-then-write arm moves 210 → 270 ns and splits **+60 ns in
+resolution against +10 ns in the bound write**, so **~85 % of it sits in a leg the opponent's
+arm never had** — `bench_zenoh` publishes through a declared `Publisher` and resolves
+nothing per put, while the libtracer row re-resolved the address inside every timed
+iteration. Bind the handle once, which the API already offers, and the same operation reads
+**90 → 100 ns** over that span. A large part of our side of that gap is therefore a
+**bench-shape difference, not a model wall** — and of the wide arm's growth further out,
+only about **20 ns** is the extra `lower_bound` comparisons a wider tree costs; the rest is
+cold-line traffic, a cost of the working set rather than of the registry. This is the same
+asymmetry the Fairness section above records against the `inproc-path` pair, read from the
+other end: there it is a defect in how the two arms spelled their destination, here it is
+the reason the curve it produced cannot be charged to residency. One finding, stated twice
+because a reader arrives at it from either direction; the `topics-bound` / `topics-addr`
+pair is the fix, and it measures **both** spellings on **both** engines.
+
+Two caveats on that decomposition, because it is fresh. Its arms are **not gated** — they
+are new and their run-to-run stability is unproven, and `POINTS` is a promise about
+stability. And the **cross-engine topic-count arm is preliminary**: single-round,
+zenoh-side only, with no arm-order flip, because CI compiles invalidated two attempts and
+the runs were discarded rather than published. The only cross-engine topic-count numbers on
+this page remain the audit's own. The decomposition itself was taken on a quiet box
+(1-minute load 0.64–1.15, no `cc1plus` alive, 31 CPUs, best of 3 rounds with the arm order
+flipped on alternate rounds, two full ladders agreeing to ~2 % at 10⁶).
+
+One follow-up remains open and it is a ruling, not a redesign:
+[#1486](https://github.com/avatarsd-llc/libtracer/issues/1486), on memoizing
+`vertex_slot()`, whose reverse scan is exactly O(total vertices) — measured at 450 ns at
+10³ rising to **410 µs at 10⁶**, taken under a shared mutex on every binding mint. That is
+the number the ruling was blocked on; the ruling itself is #1486's to make.
 
 **2 · Paths are routes, not location-independent names.** A path is resolved from the
 vantage point of the graph doing the resolving; the same value can be reachable by
