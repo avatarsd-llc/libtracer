@@ -51,6 +51,39 @@ namespace tr::mem {
  *       one token away from every correct `try_alloc` call site, with no diagnostic
  *       at any warning level. A separate type makes the slip a compile error.
  *
+ * @warning DO NOT WRAP A `std::pmr::memory_resource` BEHIND THIS SEAM. The note above
+ *          says why this type is not a pmr resource; this one is about the REVERSE
+ *          adaptation, which is the mistake a host migrating an existing pmr arena
+ *          actually makes (#1493). The obvious adapter compiles, looks correct and
+ *          passes review:
+ *          @code
+ *          void* try_alloc(std::size_t n, std::size_t a) noexcept override {
+ *              return mr_->allocate(n, a);   // <-- CANNOT report exhaustion
+ *          }
+ *          @endcode
+ *          `%std::pmr::memory_resource::allocate` signals exhaustion only by THROWING and
+ *          has no nothrow form, so this `try_alloc` either succeeds or never returns —
+ *          it never answers `nullptr`. Under `-fno-exceptions` the throw reaches ESP-IDF's
+ *          link-wrapped `__cxa_throw` → `abort()` stub, which is exactly the
+ *          reboot-a-node-by-exhausting-the-heap failure this seam exists to remove,
+ *          reintroduced by a class whose declaration promises the opposite. A comment
+ *          on the caveat does not fix it; it labels the landmine.
+ *
+ *          **Nor does a budget-tracking variant fix it** — one that counts its own bytes
+ *          and answers `nullptr` at the ceiling *before* delegating. Tracking a budget
+ *          does not make the adapter honest: a FRAGMENTED pmr resource can throw well
+ *          BELOW the budget, so the adapter is correct except exactly when the underlying
+ *          resource is in the state the bound was supposed to protect against. Such an
+ *          adapter is deliberately not offered and must not be added.
+ *
+ *          **The supported answer for "reuse my existing arena" is
+ *          @ref pool_source_t's span constructor**, which carves from a caller-provided
+ *          slab with caller-provided size classes and is not pmr at all — point it at the
+ *          same storage the pmr resource was partitioning, rather than at the resource.
+ *          The one direction that IS offered is the opposite one:
+ *          `tr::mem::source_resource_t` (`%mem_source_pmr.hpp`) serves a `std::pmr`
+ *          container FROM a `block_source_t`.
+ *
  * @note Also distinct from @ref mem_backend_t, which vends a refcounted
  *       @ref view::segment_t. Control-plane blocks have a single owner and no
  *       header; a refcount on them is pure overhead (a `segment_t` measures 20 B on
@@ -317,6 +350,14 @@ class pool_source_t final : public block_source_t {
    public:
     /**
      * @brief Serve allocations from @p slab, recycling through @p classes.
+     *
+     * This is also **the supported "reuse my existing arena" path** (#1493). A host that
+     * already partitions a static slab with `std::pmr` — the
+     * `%monotonic_buffer_resource` under a `%synchronized_pool_resource` shape ADR-0039
+     * describes — points this constructor at the SAME STORAGE rather than at the
+     * resource. There is no pmr in the result and nothing to adapt, so exhaustion stays
+     * a `nullptr` all the way down; see @ref block_source_t's warning for why wrapping
+     * the resource instead cannot work.
      *
      * @param slab    Caller-owned storage; must outlive every block carved from it.
      * @param classes Caller-owned free-list slots. Running out is safe but lossy — see
