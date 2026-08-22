@@ -207,7 +207,7 @@ std::array<std::byte, 4096> stack;
 mem::bump_source_t src(stack, *ctl_);
 ```
 
-`bump_source_t` (`core/include/libtracer/mem_source.hpp:184`) carves from that stack buffer and,
+`bump_source_t` (`core/include/libtracer/mem_source.hpp:217`) carves from that stack buffer and,
 past it, falls back to the graph's injected control seam `ctl_`
 (`core/include/libtracer/graph.hpp:503`, `control_source()`), whose default is the NOTHROW heap
 source. Capability is unchanged — a branch tree larger than the slab still decodes — and
@@ -238,19 +238,19 @@ exhaustion is representable. The general failable-allocation contract is
   (`:2498`, `:2476`) — out of the router's injected `flat` backend, and a refused flatten drops the
   frame rather than delivering an empty value (#730).
 - The FWD request terminus: `resolve_terminus_rope`
-  (`core/include/libtracer/fwd_router.hpp:1295-1303`) adopts a fragmented request as
+  (`core/include/libtracer/fwd_router.hpp:1303-1311`) adopts a fragmented request as
   `tlv_view_t::over(rope)` and resolves it through `op_resolver_t::resolve(tlv_view_t)`.
 
 The forward hop scatter-gathers a multi-link frame over the rope cursor with no flatten; the egress
 gathers each region's per-link sub-spans into a `block_array_t` drawn from the injected `rx_`, and
-exhaustion drops the frame rather than throwing (`core/include/libtracer/fwd_router.hpp:1354-1362`,
+exhaustion drops the frame rather than throwing (`core/include/libtracer/fwd_router.hpp:1362-1370`,
 [#596]).
 
 Two limits on that tier are load-bearing. First, **a single-link rope never reaches
 `resolve_terminus_rope`** — `on_frame_rope_impl` short-circuits it deliberately into the
 single-link view path (`core/src/fwd_router.cpp:1905`, the check at `:1910-1915`). Second, the tier earns its place only on large, lightly
 fragmented frames: at 64 KB across 2 links it is ~12% ahead of flatten-then-arena, and behind it
-everywhere smaller (`core/include/libtracer/fwd_router.hpp:1268-1271`, recorded as an erratum to
+everywhere smaller (`core/include/libtracer/fwd_router.hpp:1276-1279`, recorded as an erratum to
 [ADR-0053, lazy rope-backed decode view](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0053-lazy-rope-backed-decode-view-partial-path-routing.md)).
 That figure carries no host, sample count or spread in the source that records it, so it is a
 direction, not a budget.
@@ -260,7 +260,7 @@ Row ⑦ has changed shape rather than disappearing. The span fallback in
 slot with no rope sink installed, but the router does not flatten on the reply path: a REPLY that
 reaches its originator is handed to the sink rope-native
 (`core/src/fwd_router.cpp:1969-1973`). The contract at
-`core/include/libtracer/fwd_router.hpp:563-567` states it — the router performs no decode and no
+`core/include/libtracer/fwd_router.hpp:571-575` states it — the router performs no decode and no
 flatten, a rope-delivered reply reaches the sink zero-copy, a sink that wants contiguous bytes
 holds `const view_t m = reply.materialize()`, and only a multi-link reply pays one flatten, on
 demand. The escape hatch is the consumer's, not the router's.
