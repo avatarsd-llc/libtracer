@@ -166,6 +166,31 @@ class child_registry_t {
          */
         std::uint32_t seg_count = 0;
         /**
+         * @brief An OPAQUE cache word the registry's owner may keep per slot — free of charge.
+         *
+         * The registry never reads it, never writes it and attaches no meaning to it. It
+         * exists because `seg_count` above already leaves four bytes of padding before
+         * @ref name_digest's eight-byte alignment, so a word parked here costs the slot
+         * nothing: `child_t` is 80 bytes with it and 80 bytes without, and the descent's hot
+         * read is still the one line at offsets 0/8. A field appended at the end instead would
+         * have grown the slot to 88 and made the scan walk eight more cache lines per frame at
+         * `N = 64` — a frame-path cost for a control-plane convenience, which is the wrong way
+         * round.
+         *
+         * `fwd_router_t` keeps this mount's `graph_t::intern_link_hinted` SLOT HINT here
+         * (#1437), so a mount-routed subscribe resolves the link's interned token by subscript
+         * instead of by the graph's linear name scan. That use imposes no invalidation
+         * contract on this struct and must not be given one: the hint is validated by NAME on
+         * every use, so a stale word, a rebound tenancy, a tombstone coming back to life and a
+         * fresh zero are all merely a wasted comparison. Anything stored here MUST have that
+         * property — the registry will not clear it for you, on @ref add, on @ref erase, or
+         * ever.
+         *
+         * Atomic and relaxed on both sides: a lock-free forward reader owns no part of this
+         * word, and the control plane is not publishing anything through it.
+         */
+        mutable std::atomic<std::uint32_t> owner_hint{0};
+        /**
          * @brief A cheap digest of @ref name, computed once at @ref add time.
          *
          * A pure function of the slot's own name, so it has NO invalidation contract: a name
@@ -247,6 +272,28 @@ class child_registry_t {
          */
         std::atomic<std::uintptr_t> egress_{0};
     };
+
+    /**
+     * @brief @ref child_t's fields with @ref child_t::owner_hint taken back out — the layout
+     *        oracle for that word's "costs the slot nothing" claim.
+     *
+     * Spelled as a mirror rather than as an `offsetof`, which is only conditionally supported
+     * on a type with mixed access control, and rather than as a literal `== 80`, which is a
+     * 64-bit host's arithmetic and would break the 32-bit C6 build the whole per-slot byte
+     * argument is made for. What is pinned is the PROPERTY: the hint rides in padding
+     * `seg_count` was already leaving, so a future reordering that pushes it out of that hole
+     * — or a wider field that stops fitting — fails here instead of quietly costing the mount
+     * descent eight more cache lines per frame at `N = 64`.
+     */
+    struct child_slot_layout_oracle_t {
+        std::uint32_t seg_count = 0;           /**< @brief Mirrors @ref child_t::seg_count. */
+        std::uint64_t name_digest = 0;         /**< @brief Mirrors @ref child_t::name_digest. */
+        std::string name;                      /**< @brief Mirrors @ref child_t::name. */
+        std::vector<std::byte> mount_tlv;      /**< @brief Mirrors @ref child_t::mount_tlv. */
+        std::atomic<std::uintptr_t> egress{0}; /**< @brief Mirrors `child_t`'s egress word. */
+    };
+    static_assert(sizeof(child_t) == sizeof(child_slot_layout_oracle_t),
+                  "child_t::owner_hint must ride in seg_count's existing padding — see its doc");
 
     /**
      * @brief Register the link addressed by qualified name @p name (`"<module>/<name>"`).

@@ -1091,6 +1091,23 @@ link_id_t graph_t::intern_link(std::string_view link_name) {
     return intern_link_locked(link_name);
 }
 
+link_id_t graph_t::intern_link_hinted(std::string_view link_name, std::uint32_t& hint) {
+    if (link_name.empty()) return {};  // the #1056 empty-key rule, and the hint stays put
+    const std::lock_guard lock(link_index_mutex_);
+    // The whole of the fast path: a bounds check and a name compare, against the SCAN the
+    // else-arm would run. The name compare is not an optimisation here, it is the validation
+    // — see the declaration for why the stamp is deliberately not remembered by the caller.
+    if (hint < link_index_.size() && link_slot_name(hint) == link_name)
+        return link_id_t{hint, link_index_[hint].generation};
+    const link_id_t fresh = intern_link_locked(link_name);
+    // Written back only on a token, so a name that could not be interned (an exhausted arena)
+    // leaves whatever the caller had rather than poisoning the word with a slot that is not
+    // this link's. A hint that was already right and simply lost its race is re-derived here
+    // at the cost of the scan, which is the cost of not having a hint at all.
+    if (fresh.valid()) hint = fresh.slot;
+    return fresh;
+}
+
 void graph_t::release_link(link_id_t token) {
     const std::lock_guard lock(link_index_mutex_);
     if (!token.valid() || token.slot >= link_index_.size()) return;
@@ -2957,6 +2974,15 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view_t source_view, v
                 if (!route_view) return std::unexpected(status_t::BACKPRESSURE);
                 return_route = *std::move(route_view);
                 delivery_link.assign(split.link);
+                // The carried token moves with the key it names (#1437). The arrival's token
+                // spells the arrival link, and the index is about to be keyed on the MOUNT —
+                // so from here it is the wrong token, correctly rejected by the name compare
+                // at the index door and correctly replaced by the resolver's own, which the
+                // transport plane holds for the mount it just resolved. A resolver that gave
+                // none hands back a default, which is this door before this line existed: the
+                // scan. Assigned unconditionally for that reason — keeping the arrival's
+                // token here could only ever buy a comparison that must fail.
+                link_token = split.token;
                 // The reverse bound route is the ARRIVAL link's (RFC-0024 §7.1): it spells the
                 // way back to the writer, which is not where this edge delivers. Drop it —
                 // the mount route is canonical-only.
