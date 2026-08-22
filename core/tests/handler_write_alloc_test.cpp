@@ -1,7 +1,7 @@
 /**
  * @file
- * @brief #1505 — a HANDLER write allocates exactly ONE block fewer per write than a retaining
- *        write, at EVERY link count. The non-retaining role is never the more expensive one.
+ * @brief #1505 — a HANDLER write allocates ONE block fewer per write than a retaining write,
+ *        at EVERY link count. The non-retaining role is never the more expensive one.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -24,8 +24,11 @@
  * allocation under test invisible, and a missing delete form is an ASan alloc-dealloc-mismatch).
  * The assertion is a **difference**, not a budget: both arms build the same borrowed-view rope
  * inside the armed window and both dispatch the same fan-out, so every term except the LKV
- * publish and the vanished clone cancels. What is left is exactly 1 per write, and the old code
- * reddens the ladder's top three rungs by producing 0.
+ * publish and the vanished clone cancels. What is left is one block per write — asserted as a
+ * one-wide band rather than an exact 1.000, because only the retaining arm publishes a pointer
+ * and so only it feeds the reclamation slot, whose deferred variants amortize a retire batch
+ * over the writes. That excess is charged to the arm that retains, so it can only widen the
+ * gap. The old code reddens the ladder's top three rungs under every slot by producing 0.
  *
  * Three positive controls, because each failure mode has a way of passing quietly:
  *
@@ -190,10 +193,10 @@ struct fixture_t {
 }
 
 /**
- * @brief The ladder: HANDLER must be exactly one allocation per write cheaper, at every rung.
+ * @brief The ladder: HANDLER must be one allocation per write cheaper, at every rung.
  */
 void test_handler_write_is_one_allocation_cheaper() {
-    std::printf("a HANDLER write allocates exactly one block fewer than a retaining write:\n");
+    std::printf("a HANDLER write allocates one block fewer than a retaining write:\n");
     constexpr std::size_t kLadder[] = {1, 2, 3, 4, 8};
     double stored_at_one = 0.0;
     double stored_at_top = 0.0;
@@ -206,11 +209,20 @@ void test_handler_write_is_one_allocation_cheaper() {
         if (links == kLadder[0]) stored_at_one = stored;
         stored_at_top = stored;
         check(stored > 0.0, "the counter is live (an armed retaining write allocates its LKV)");
-        // Exact, not a bound: every other term of the two arms is identical by construction,
-        // so the difference IS the LKV publish the handler skips. Before #1505 the notify
-        // clone gave that one back at 3 links and beyond, making this difference 0.
-        check(stored - handler == 1.0,
-              "the handler skips the LKV publish and pays nothing back for it");
+        // A BAND of one block, not an exact 1.000, and the width is the reclaimer's. Every
+        // other term of the two arms is identical by construction, so the difference is the
+        // LKV publish the handler skips — but only the RETAINING arm publishes a pointer, so
+        // only it feeds the reclamation slot, and the deferred slots (hazard_slot_t,
+        // reclaim_qsbr) amortize an occasional retire batch over the writes: measured, the
+        // retaining arm reads 2.075 / 3.005 / 5.005 / 6.005 / 10.005 there against exact
+        // integers under immediate reclamation. That excess is charged to the arm that
+        // retains and can only ever WIDEN the gap, so the load-bearing half is the LOWER
+        // bound; the upper bound keeps the claim a shape ("the ONE publish", not two) rather
+        // than an open inequality anything would satisfy. Before #1505 the notify clone gave
+        // the block back at 3 links and beyond, making this difference 0.0 — under every
+        // slot, which is what the lower bound catches.
+        check(stored - handler >= 1.0 && stored - handler < 2.0,
+              "the handler skips the LKV publish — one block, and pays nothing back for it");
     }
 
     // The knee, measured. Without a rung past the rope's inline capacity the old clone would
