@@ -40,7 +40,7 @@ for a local `preview.html` of the same charts.
 | `bench_store_sweep` + `bench_store_escape` (`run_store_sweep.sh`) | **ADR-0079's per-configuration allocation-store sweep (#941)**: H-baseline / WIDE / MID / NARROW over ONE whole-node workload that draws all four ADR-0079 channels, reporting latency by leg, fan-out throughput across T={1,2,4,8,16,24}, deterministic store high-water, and what still escapes to the process heap. Collated by `collate_store_sweep.py`. Its two **deterministic** columns are **banked per `main` push and warn-ratcheted** on the pinned host; the T-sweep and the escape high-water are **never** gated — see [what it resolves, and what it cannot](#bench_store_sweep--the-adr-0079-per-configuration-store-sweep-941) and [which columns are gated](#which-columns-are-gated-and-which-can-never-be-1428). |
 | `bench_subscribe_index` (`run_subscribe_index.sh`) | **#1266's subscriber-index interning A/B**: what keying `link_index_` by an interned token instead of a link NAME costs and saves, in latency and in bytes at rest, over 4/8/16/32/65 links. Five index arms in one binary — including `idx-token-carry`, the shape #1417 shipped, which pays for obtaining the token — plus the live `subscribe_wire` path and the name-door cost, and the A/A null is collected in the same window. Collated by `collate_subscribe_index.py`. See [what it resolves](#bench_subscribe_index--link-identity-interning-1266). |
 | `bench_scale_sweep` (`run_scale_sweep.sh`) | **#1485's vertex-count scaling sweep**: registered-vertex population over 10³/10⁴/10⁵/10⁶, built to **decompose** the topic-count growth #1480 measured rather than reproduce it — bound-handle delivery, resolution alone, a fixed-shape probe address (the ADR-0057 flatness claim), and a working-set control that keeps N resident while touching one. Plus `register_vertex_key` descent, the O(N) `vertex_slot` scan, `for_each_vertex`, and a **measured** bytes-per-vertex census. Diagnostic, never gated — see [what it decomposed](#bench_scale_sweep--the-vertex-count-scaling-sweep-1485). |
-| `bench_source_role` + `bench_source_role_alloc` | **#1505's retention-role write asymmetry**: the same write at a vertex that RETAINS a last-known-value (`STORED_VALUE`) and at one that retains nothing (`HANDLER`), swept over subscriber width 0/1/4 and value link count 1/4. The axis `inproc-target-*` does not cover — that pair sweeps the role of the delivery TARGET, this one the role of the vertex being WRITTEN, which is where the notify clone a `HANDLER` builds before storing is paid. Fan-out **zero** is the isolating arm. The `_alloc` twin counts what each write allocates, which is what makes the shed-on-OOM exposure a number; it is a separate binary for the reason `bench_store_escape` gives. Diagnostic, never gated — see [what it prices](#bench_source_role--the-retention-role-write-asymmetry-1505). |
+| `bench_source_role` + `bench_source_role_alloc` | **#1505's retention-role write asymmetry**: the same write at a vertex that RETAINS a last-known-value (`STORED_VALUE`) and at one that retains nothing (`HANDLER`), swept over subscriber width 0/1/4 and value link count 1/4. The axis `inproc-target-*` does not cover — that pair sweeps the role of the delivery TARGET, this one the role of the vertex being WRITTEN, which is where the notify clone a `HANDLER` built before storing was paid — #1505 removed that clone, and these rows are the before/after. Fan-out **zero** is the isolating arm. The `_alloc` twin counts what each write allocates, which is what turned the shed-on-OOM exposure into a number; it is a separate binary for the reason `bench_store_escape` gives. Diagnostic, never gated — see [what it prices](#bench_source_role--the-retention-role-write-asymmetry-1505). |
 | `run_topics.sh` | **the topic-count comparison, in both address spellings on both engines** (#1485 addendum C): `topics-bound` (pre-bound handle / declared `Publisher`) and `topics-addr` (destination resolved inside every operation), over `kTopicLadder` = 1/100/10 000. Exists because the previous comparison put libtracer's resolve-per-write row against Zenoh's declared-publisher row — see [the asymmetry it removes](#run_topicssh--the-topic-count-comparison-both-spellings-both-engines-1485). |
 
 ### `bench_forward_heap` — the 16KB-RAM zero-heap forward gate (ADR-0038)
@@ -1403,13 +1403,18 @@ cmake --build bench/build --target bench_source_role bench_source_role_alloc -j
 ./bench/build/bench_source_role_alloc  # heap:    ROLE_ALLOC rows
 ```
 
-**The question.** A `HANDLER` vertex is the sanctioned "callbacks only, nothing stored" mode.
-`graph.cpp`'s write path gives it a shape the retaining roles do not have: because it publishes
-no last-known-value, it has no stored pointer to deliver, so it builds a nothrow
-`try_clone_rope(notify, value)` **before** `store_value` and delivers from that. The retaining
-roles deliver `**stored` — the pointer the store just published — and reclone nothing. So the
-non-retaining choice pays an extra copy on the hot write path, and on clone OOM sheds its
-**entire** fan-out (counted at own-subs width) while the write still returns success.
+**The question, as it stood when this bench was built.** A `HANDLER` vertex is the sanctioned
+"callbacks only, nothing stored" mode. `graph.cpp`'s write path gave it a shape the retaining
+roles do not have: because it publishes no last-known-value, it had no stored pointer to deliver,
+so it built a nothrow `try_clone_rope(notify, value)` **before** `store_value` and delivered from
+that. The retaining roles deliver `**stored` — the pointer the store just published — and reclone
+nothing. So the non-retaining choice paid an extra copy on the hot write path, and on clone OOM
+shed its **entire** fan-out (counted at own-subs width) while the write still returned success.
+
+**#1505 answered it and the clone is gone.** `store_value`'s HANDLER leg only READS `value` and
+returns the null "consumed" sentinel, so the caller's rope is still live and is delivered
+directly. These two binaries stay as the standing instrument for the role axis — the numbers
+below are recorded on both sides of that change, base first and candidate second.
 
 **Why an existing row could not answer it.** `inproc-target-stored` / `inproc-target-handler`
 sweep the role of the delivery TARGET — the far end of a path-target edge, whose leg has a
@@ -1418,9 +1423,10 @@ swept the role of the vertex being WRITTEN. This bench does, and subscribes by C
 target leg's clone stays out of the measurement.
 
 **Fan-out ZERO is the isolating arm** and the reason the sweep starts there rather than at 1:
-a retaining vertex with no subscribers dispatches nothing at all, while a `HANDLER` still pays
-the notify clone in full before discovering there is nobody to notify. Whatever separates the
-two arms at fan 0 is the clone and little else.
+a retaining vertex with no subscribers dispatches nothing at all, while a `HANDLER` used to pay
+the notify clone in full before discovering there was nobody to notify. Whatever separated the
+two arms at fan 0 was the clone and little else — which is what made the term a per-WRITE cost
+rather than a per-delivery one, and is the finding that corrected the sizing guide.
 
 **The `ep` column carries the LINK COUNT**, not an endpoint count. That is the axis that
 decides the answer: the rope's inline capacity is small, and a clone that fits inside it
@@ -1428,20 +1434,26 @@ touches no allocator and cannot fail, while one past it grows a `std::vector<vie
 write. The `_alloc` twin walks the link ladder until the per-write allocation count moves, so
 the knee is measured rather than asserted against a private constant.
 
-**What the answer turned out to be** (this host, best-of-5, idle CI, p50 ns per write):
+**What the answer turned out to be** (this host, best-of-5, idle CI, p50 ns per write —
+`base` is the clone shape, `now` is the shipped one):
 
-| links | fan | `STORED_VALUE` | `HANDLER` |
-| ---: | ---: | ---: | ---: |
-| 1 | 0 | 80 | **70** |
-| 1 | 4 | 120 | **110** |
-| 4 | 0 | **130** | 170 |
-| 4 | 4 | **170** | 210 |
+| links | fan | `STORED_VALUE` | `HANDLER` (base) | `HANDLER` (now) |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 0 | 80 | 70 | **60** |
+| 1 | 4 | 120 | 110 | **100** |
+| 4 | 0 | **130** | 170 | **110** |
+| 4 | 4 | **170** | 210 | **150** |
 
-The asymmetry is real but **link-count-gated, not universal**: while the value fits the rope
-inline the clone is free and the `HANDLER` is the CHEAPER role, because it skips the LKV
-publish the retaining roles pay for (one allocation per write, per the `_alloc` twin). The
-penalty appears only once the value spills, where the clone costs a heap block and ~40 ns.
-Read a single-link row as the common case and a multi-link row as the composed one.
+The asymmetry was real but **link-count-gated, not universal**: while the value fit the rope
+inline the clone was free and the `HANDLER` was already the CHEAPER role, because it skips the
+LKV publish the retaining roles pay for (one allocation per write, per the `_alloc` twin). The
+penalty appeared only once the value spilled, where the clone cost a heap block and ~40 ns —
+flat in fan-out, so a fan-0 handler paid it in full.
+
+**#1505 removed it.** With the value delivered directly the `HANDLER` is cheaper than
+`STORED_VALUE` at every point above, and the `_alloc` twin reads exactly one block per write
+fewer at every link count (1/2/4/5/9 against 2/3/5/6/10 for 1/2/3/4/8 links). The mode ordering
+now matches what the role system advertises: the non-retaining choice is the cheap one.
 
 ## What is measured
 

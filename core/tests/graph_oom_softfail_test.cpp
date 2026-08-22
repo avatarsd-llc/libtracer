@@ -13,9 +13,11 @@
  *   - the HANDLER null-shared_ptr "consumed" sentinel is NOT misread as that OOM;
  *   - DELIVERY legs drop (never abort, never corrupt): a wide fan-out degrades to the
  *     inline prefix, a spilled-rope target clone drops one leg, a stream ring append
- *     is shed (bounded-lossy history) — while the per-edge dispatch SNAPSHOT, which used
- *     to have a drop of its own, no longer allocates at all (#1448) and is pinned here as
- *     an inverted assertion: a remote fan-out survives a total heap refusal intact;
+ *     is shed (bounded-lossy history) — while TWO sites that used to have a drop of their
+ *     own no longer allocate at all and are pinned here as INVERTED assertions: the
+ *     per-edge dispatch snapshot (#1448 — a remote fan-out survives a total heap refusal
+ *     intact) and the HANDLER write's delivery (#1505 — the notify clone is gone, so the
+ *     widest OOM shed in the graph is not narrower but impossible);
  *   - a stream drain under OOM DEFERS (cursor kept) and catches up once memory returns;
  *   - the two sheds that happen BEFORE the fan-out — a STREAM ring append and a
  *     `mark_pending` leg — are COUNTED at one per subscriber while the write still answers
@@ -263,19 +265,34 @@ void test_wide_fanout_degrade() {
 }
 
 /**
- * @brief A HANDLER write whose notify clone OOMs sheds the vertex's WHOLE fan-out — and
- *        counts every shed delivery, not one event (#896).
+ * @brief A HANDLER write's delivery reaches NO allocator, so a refusal aimed exactly at the
+ *        clone it used to take cannot shed a single delivery (#1505 — inverted from #896's
+ *        drop).
  *
- * The sharpest of the three uncounted sites: `write_impl`'s handler branch clones the value
- * for delivery because the handler consumes the original, and on a failed clone it skips
- * `deliver_vertex` entirely — no edge is dispatched at all — while still returning success.
- * The behaviour is specified (the handler ran; un-running it is not on the table), so the
- * only thing that can tell an operator it happened is the counter. It moved by nothing, and
- * a counter that moved by ONE would have been almost as misleading: the unit of this drop is
- * a delivery, and this one drops all of them.
+ * **This assertion used to be its own opposite, and the inversion is the finding** — the same
+ * shape the remote-edge case below took at #1448. Until #1505 `write_impl`'s handler branch
+ * built a nothrow `try_clone_rope` of the value before `store_value`, because the handler
+ * "consumes" the original; on a failed clone it skipped `deliver_vertex` entirely — no edge
+ * dispatched at all — while still returning success. That was the WIDEST drop in the graph, so
+ * this test pinned its width: reject exactly the clone's chain reserve and every subscriber's
+ * delivery is abandoned and counted, one per subscriber, `1` never standing in for `N`.
+ *
+ * `store_value`'s HANDLER leg only READS `value` and returns the null "consumed" sentinel, so
+ * the caller's rope is still live and is delivered directly. There is no clone, so there is
+ * nothing on this path left to fail: the deliveries LAND instead of dropping, and the count
+ * stays flat under the same injection that used to move it by the fan-out width.
+ *
+ * The assertion is therefore the exact inverse of the one it replaces, taken through the same
+ * injection so the change is visible rather than merely absent. The injection is still armed
+ * and still lands — the CANARY below proves it — which is what stops this reading as a test
+ * that quietly stopped exercising anything.
+ *
+ * @note This is the leg #854's own-subs-wide ruling governed. The ruling is annotated, not
+ *       overturned: `out_of_memory` is still counted at own-subs width by `mark_pending`'s
+ *       shed pending mark, and at width 1 by `dispatch_edge_target`'s per-edge clone.
  */
-void test_handler_notify_clone_sheds_fan_out() {
-    std::printf("handler notify — a failed delivery clone sheds the WHOLE fan-out:\n");
+void test_handler_delivery_allocates_nothing() {
+    std::printf("handler notify — the delivery takes no clone, so nothing can shed it:\n");
     constexpr int kSubs = 3;  // < kInlineFanout: the snapshot itself never allocates
     graph_t g;
     int handled = 0;
@@ -290,27 +307,36 @@ void test_handler_notify_clone_sheds_fan_out() {
     for (int& c : counts) (void)g.subscribe(path_t("/h/fan"), count_cb, &c);
     const auto before = g.delivery_drops();
     {
-        g_reject_size = 3 * sizeof(view_t);  // exactly the notify clone's chain reserve
+        // The SAME rejection the shed used to need: exactly the chain reserve a 3-link rope
+        // clone takes. A blanket refusal would prove nothing here — it would shed something
+        // else and this arm would read as green for the wrong reason.
+        g_reject_size = 3 * sizeof(view_t);
         const hook_guard_t oom(fail_exact);
-        check(g.write(v, three_link()).has_value(), "the handler write still reports success");
+        // Canary: the hook is installed AND refuses a reserve of exactly the size the clone
+        // this path used to make asked for (`try_clone_rope` is `dst.try_reserve(3)` then a
+        // concat). Without it "nothing was shed" and "nothing was armed" look identical.
+        rope_t probe;
+        check(!probe.try_reserve(3),
+              "canary: the injection is live and refuses the 3-link chain reserve");
+        check(g.write(v, three_link()).has_value(), "the handler write reports success");
     }
     check(handled == 1, "the handler ran — the value was consumed, not lost");
     int delivered = 0;
     for (const int c : counts) delivered += c;
-    check(delivered == 0, "NOT ONE subscriber was delivered — the clone sheds the fan-out");
+    check(delivered == kSubs,
+          "EVERY subscriber was delivered under the refusal — the delivery takes no clone");
     const auto d = g.delivery_drops();
-    check(d.out_of_memory == before.out_of_memory + kSubs,
-          "all 3 shed deliveries are counted (a single +1 for a fan-out of N is the defect)");
+    check(d.out_of_memory == before.out_of_memory,
+          "and NOT ONE drop is counted: the widest OOM shed in the graph is now impossible");
     check(d.no_target == before.no_target && d.denied == before.denied &&
               d.fan_out_truncated == before.fan_out_truncated,
-          "and by its own cause — not a missing target, a denial, or a capacity degrade");
+          "nor is anything counted under another cause instead");
 
-    check(g.write(v, three_link()).has_value(), "the handler write succeeds once memory returns");
+    check(g.write(v, three_link()).has_value(), "the next unrefused handler write succeeds");
     delivered = 0;
     for (const int c : counts) delivered += c;
-    check(delivered == kSubs, "and the full fan-out delivers again");
-    check(g.delivery_drops().out_of_memory == before.out_of_memory + kSubs,
-          "with no further drop counted");
+    check(delivered == 2 * kSubs, "and delivers the full fan-out again");
+    check(g.delivery_drops().out_of_memory == before.out_of_memory, "with the counter still flat");
 }
 
 /**
@@ -624,8 +650,9 @@ void test_stream_shed_append_no_redelivery() {
  *
  * Both halves of the ruling are asserted: SUCCESS is the specified answer (the LKV publish
  * landed and the ring is bounded-lossy by contract, RFC-0008 §E), so the counter is the ONLY
- * thing that can carry the loss; and the width is per SUBSCRIBER, matching the eager
- * handler-clone leg that sheds a whole fan-out.
+ * thing that can carry the loss; and the width is per SUBSCRIBER, matching `mark_pending`'s
+ * shed deferred mark. (It used to be stated against the eager handler-clone leg instead —
+ * that leg went away with #1505's clone, and own-subs width is unchanged by its removal.)
  */
 void test_stream_shed_is_counted() {
     std::printf("stream ring — a shed append is COUNTED per subscriber, write still SUCCEEDs:\n");
@@ -813,7 +840,7 @@ int main() {
     test_small_fanout_allocation_free();
     test_wide_fanout_degrade();
     test_target_clone_drop();
-    test_handler_notify_clone_sheds_fan_out();
+    test_handler_delivery_allocates_nothing();
     test_remote_edge_snapshot_is_allocation_free();
     test_stream_ring_shed();
     test_ring_reservations_are_symmetric();

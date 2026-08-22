@@ -62,7 +62,7 @@ flowchart LR
 | --- | --- | --- | --- | --- |
 | **transport RX** | the link's own scratch and its peer-agreed max frame | per-connection `:settings`, the link's ctor | counted drop (`dropped_rx`) or a malformed reject (`malformed_rx`) — the peer is not told | `transport_t::drop_stats()` (`core/include/libtracer/transport.hpp:447`), one shape for every link kind (#932) |
 | **rx arena** | the injected failable source the terminus decode carves its node table from | `fwd_router_t`'s `rx` seam — reachable as `rx_source()` (`core/include/libtracer/fwd_router.hpp:404`) | refused **by value**: `TLV_NESTING_TOO_DEEP`, spelled by RFC-0006 as "exceeds this receiver's decode resources" | `router_stats_t::arena_dropped` (`core/include/libtracer/fwd_router.hpp:83`) |
-| **graph write** | the ACL gate, plus the value backend the store draws its durable bytes from | `graph_t`'s four injected seams (see the design companion) | `PERMISSION_DENIED` by value; an exhausted value store answers `BACKPRESSURE` | `graph_t::delivery_drops()` — `denied`, `out_of_memory` (`core/include/libtracer/graph.hpp:2205`) |
+| **graph write** | the ACL gate, plus the value backend the store draws its durable bytes from | `graph_t`'s four injected seams (see the design companion) | `PERMISSION_DENIED` by value; an exhausted value store answers `BACKPRESSURE` | `graph_t::delivery_drops()` — `denied`, `out_of_memory` (`core/include/libtracer/graph.hpp:2207`) |
 | **ring admission** | a **byte** budget: `try_alloc(retained_bytes)` against the receiving vertex's own source | `graph_t::set_ring_source` (`core/include/libtracer/graph.hpp:1419`), per vertex, never a shared pool | **arm-dependent** — see §2 | `ring_reserved_bytes()` / `stream_gaps()` (`core/include/libtracer/graph.hpp:1423`) |
 | **fan-out** | the subscriber snapshot's inline prefix, then a heap widen | `kInlineFanout`, then the allocator | counted shed of the whole delivery (`fan_out_truncated`, `out_of_memory`) | `graph_t::delivery_drops()` |
 | **flat / egress seams** | the reply-flatten and egress span tables | `fwd_router_t`'s `flat` / `egress` seams — `flatten_backend()`, `egress_backend()` (`core/include/libtracer/fwd_router.hpp:406`) | counted drop of the reply or the forward hop — **drop, never truncate** | `router_stats_t::flatten_dropped`, `reply_iov_dropped`, `forward_iov_dropped`, `delivery_iov_dropped` |
@@ -222,13 +222,13 @@ role and schema).
 | Plane | Needs the LKV because |
 | --- | --- |
 | Local + remote `READ` | a leaf read serves the stored pointer (`core/src/graph.cpp:1845`; the `FWD{READ}` terminus is the same call) — null ⇒ `NOT_FOUND`, unless the vertex composes an answer from its `on_read` seam (`core/src/graph.cpp:1811`) |
-| `await`'s return value | the wake rides the write sequence and the stripe condvar (retention-free), but the value handed back is served through the **same role dispatch** `read` runs (`core/src/graph.cpp:2708`) |
-| `assign` / `propagate` sweep | **the hard dependency** — RFC-0008 §C: `propagate` takes no value argument, "the last-known-value is the single source of truth" (`core/src/graph.cpp:2452`) |
-| Composed subtree reads | RFC-0016 serves **landed** LKVs only, one atomic load per node (`core/src/graph.cpp:3968`); a non-retaining child contributes nothing |
+| `await`'s return value | the wake rides the write sequence and the stripe condvar (retention-free), but the value handed back is served through the **same role dispatch** `read` runs (`core/src/graph.cpp:2711`) |
+| `assign` / `propagate` sweep | **the hard dependency** — RFC-0008 §C: `propagate` takes no value argument, "the last-known-value is the single source of truth" (`core/src/graph.cpp:2455`) |
+| Composed subtree reads | RFC-0016 serves **landed** LKVs only, one atomic load per node (`core/src/graph.cpp:3971`); a non-retaining child contributes nothing |
 | Late-joiner replay | the durability latch snapshots the LKV at edge-add (RFC-0022 §3.A bit 5, `core/include/libtracer/vertex.hpp:1413`) |
 
 **Not on the list: the whole callback / delivery plane.** Fan-out never reads the slot. A
-storing role delivers the just-published pointer (`core/src/graph.cpp:2252`); a HANDLER delivers
+storing role delivers the just-published pointer (`core/src/graph.cpp:2255`); a HANDLER delivers
 from the incoming value (`core/src/graph.cpp:2199`). If subscribers are all a vertex has, it does
 not need to retain.
 
@@ -242,7 +242,7 @@ preceded it:
   plus the `VALUE`. The degradation that remains is the *read contract's* — a handler with no
   `on_read` still answers `NOT_FOUND`, exactly as `read` does.
 - **`assign` and `propagate` refuse a non-retaining vertex with `SCHEMA_NOT_FOUND`**
-  (`core/src/graph.cpp:2287`, `core/src/graph.cpp:2469-2475`) — the taxonomy's contract-mismatch
+  (`core/src/graph.cpp:2290`, `core/src/graph.cpp:2472-2478`) — the taxonomy's contract-mismatch
   status, deliberately **not** `BACKPRESSURE`: nothing is under pressure and a retry will never
   succeed. At a handler vertex the call is **`write`**, which dispatches the seam and delivers
   eagerly; the accumulate-then-flush pair needs retention. `propagate(v)` is
@@ -268,38 +268,35 @@ preceded it:
    cache-line gate. Choosing HANDLER saves the per-write `make_shared` plus publish and the heap
    value; it does not shrink the vertex. Per-vertex layout reclaim is deliberately not offered
    (#1487 marks the slot do-not-touch).
-2. **The HANDLER write pays a rope clone the storing path avoids — and what it costs is gated by
-   the value's LINK COUNT, not by fan-out.** The storing roles hand the published pointer straight
-   to delivery; the handler leg takes a nothrow clone first (`core/src/graph.cpp:2202`).
-   [#1505](https://github.com/avatarsd-llc/libtracer/issues/1505) measured it
-   ([#1516](https://github.com/avatarsd-llc/libtracer/pull/1516)'s `bench_source_role` /
-   `bench_source_role_alloc`), and the guidance this caveat used to give was **backwards below the
-   knee**:
+2. **HANDLER is the CHEAPER role, at every fan-out and every value shape.** This caveat used to
+   say the opposite — *avoid HANDLER for throughput on a heavily-subscribed vertex* — and both
+   halves of that were wrong: wrong axis (the cost it named was a per-**write** term, flat in
+   fan-out) and, below the rope's inline link capacity, wrong direction.
+   [#1505](https://github.com/avatarsd-llc/libtracer/issues/1505) measured it with
+   [#1516](https://github.com/avatarsd-llc/libtracer/pull/1516)'s `bench_source_role` /
+   `bench_source_role_alloc` and then removed the cause.
 
-   - While the rope fits its **inline link capacity** the clone touches no allocator and is nearly
-     free, and HANDLER is the **cheaper** role — it skips the LKV publish the retaining roles pay
-     for. Measured x86-64 `-O3`, p50 per write, 1-link value: **70 ns HANDLER vs 80 ns
-     STORED_VALUE at fan-out 0** (90 vs 100 at fan 1, 110 vs 120 at fan 4), and **1 allocation per
-     write vs 2**.
-   - Past the inline capacity — the measured knee is **between 2 and 3 links** — the clone becomes
-     a heap block and HANDLER turns into the more expensive role by **~40 ns flat**: 4-link value,
-     **170 ns HANDLER vs 130 ns STORED_VALUE at fan-out 0**, 190 vs 150 at fan 1, 210 vs 170 at
-     fan 4.
+   The handler leg used to take a nothrow rope clone before storing, because it publishes no LKV
+   and so has no stored pointer to deliver. It does now: `store_value`'s HANDLER leg only *reads*
+   the value and returns the null "consumed" sentinel, so the caller's rope is still live and is
+   delivered directly (`core/src/graph.cpp:2199`). Measured x86-64 `-O3`, p50 ns per write:
 
-   The penalty is **flat in fan-out**, which is the whole correction: it is a per-**write** term,
-   not a per-delivery one. A fan-out-0 handler vertex pays the clone in full before discovering
-   there is nobody to notify, and widening the fan-out does not widen the penalty. So **do not
-   size this against subscriber count** — size it against the link count of the values you write.
-   A handler vertex fed single-link values is the *cheaper* choice at any fan-out; only a
-   multi-link value makes HANDLER the more expensive write, and even then by a fixed ~40 ns
-   irrespective of how many subscribers hang off it.
+   | links | fan-out | `STORED_VALUE` | `HANDLER` |
+   | ---: | ---: | ---: | ---: |
+   | 1 | 0 | 80 | **60** |
+   | 1 | 4 | 120 | **100** |
+   | 4 | 0 | 130 | **110** |
+   | 4 | 4 | 170 | **150** |
 
-   The clone is on the way out: #1505 ruled the handler leg should deliver the caller's rope
-   directly, which removes the term at every link count and makes HANDLER the cheaper role
-   everywhere. Until that lands, the sizing rule above is the accurate one; after it lands, the
-   multi-link penalty is gone and only the "HANDLER is cheaper" half survives. Either way, the
-   old advice — *avoid HANDLER for throughput on a heavily-subscribed vertex* — was never the
-   right axis and should not be applied.
+   and **one allocation per write fewer than the retaining roles at every link count** — the LKV
+   publish it skips, with nothing paid back for it. Before the fix, the clone gave that allocation
+   back once the value spilled past the inline capacity (measured knee: between 2 and 3 links) and
+   made HANDLER ~40 ns/write *more* expensive there. `handler_write_alloc_test` pins the
+   one-block difference at every rung so the inversion cannot return unnoticed.
+
+   **So the sizing rule is simply: choosing HANDLER never costs throughput.** Choose it for the
+   retention semantics and take the write-path allocation it removes as a bonus. Neither
+   subscriber count nor value link count is an argument against it.
 
 Also worth knowing before switching a vertex to HANDLER: the announce-write convention used to
 instruct "assign and propagate". For the handler case it now names **`write`**

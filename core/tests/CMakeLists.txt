@@ -965,6 +965,13 @@ set_tests_properties(edge_publish PROPERTIES RUN_SERIAL TRUE TIMEOUT 300)
 # other test in this file may inherit. The assertion is a shape (an admission's allocation
 # count is flat in the edge count), so restoring the deep copy reddens it by ~3 allocations per
 # pre-existing edge.
+# #1505 — a HANDLER write allocates exactly one block fewer per write than a retaining one,
+# at every link count. Its own binary because it owns a global `operator new` counter.
+add_executable(handler_write_alloc_test handler_write_alloc_test.cpp)
+target_link_libraries(handler_write_alloc_test PRIVATE libtracer)
+libtracer_test_warnings(handler_write_alloc_test)
+add_test(NAME handler_write_alloc COMMAND handler_write_alloc_test)
+
 add_executable(edge_cold_half_share_test edge_cold_half_share_test.cpp)
 target_link_libraries(edge_cold_half_share_test PRIVATE libtracer)
 libtracer_test_warnings(edge_cold_half_share_test)

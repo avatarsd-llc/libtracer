@@ -55,7 +55,8 @@ struct value_fixture_t {
  * @brief Register `/bench/src` with the role under test, wiring a HANDLER's `on_write` to
  *        @p hits so the arm can be proven live before it is timed.
  *
- * @param handler `true` for `HANDLER` (retains nothing — clones to notify), `false` for
+ * @param handler `true` for `HANDLER` (retains nothing — since #1505 it delivers the caller's
+ *                rope directly, having taken a notify clone before that), `false` for
  *                `STORED_VALUE` (retains — delivers the pointer `store_value` published).
  */
 [[nodiscard]] inline tr::graph::vertex_handle_t register_src(tr::graph::graph_t& g,

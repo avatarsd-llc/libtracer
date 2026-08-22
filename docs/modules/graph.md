@@ -440,9 +440,11 @@ struct delivery_drops_t {
 };
 ```
 
-The unit is a **delivery, not an event**: a write whose notify clone fails sheds every
-subscriber of the vertex, and a truncated snapshot sheds every edge past the inline prefix, so
-each counts once per shed delivery (`1` never stands in for `N`).
+The unit is a **delivery, not an event**: an `assign` whose pending mark cannot be allocated
+sheds every subscriber of the vertex, and a truncated snapshot sheds every edge past the inline
+prefix, so each counts once per shed delivery (`1` never stands in for `N`). A HANDLER write
+whose notify clone failed used to be the widest case of this; [#1505](https://github.com/avatarsd-llc/libtracer/issues/1505)
+removed the *clone*, so that shed is now impossible rather than merely counted.
 
 `denied` counts a refusal on **every plane the value-write path is entered from** — an API
 `write`, a `FWD{WRITE}` terminus, a `COMPACT` terminus, and a subscription edge's fan-in gate

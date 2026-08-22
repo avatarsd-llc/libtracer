@@ -2194,9 +2194,11 @@ class graph_t {
      *
      * The drop is not always ONE delivery, and the counters say so by counting deliveries
      * rather than events (#896): a fan-out truncated by an unreservable overflow buffer
-     * sheds every edge past the inline prefix, and a handler write whose notify clone
-     * cannot be allocated sheds the vertex's WHOLE subscriber set — each shed delivery is
-     * one increment, so `1` never stands in for `N`.
+     * sheds every edge past the inline prefix, and an `assign` whose pending mark cannot be
+     * allocated sheds the vertex's WHOLE subscriber set — each shed delivery is one
+     * increment, so `1` never stands in for `N`. A handler write's notify clone used to be
+     * the widest of these; #1505 deleted the clone rather than the tally, so that shed is
+     * now impossible rather than counted, and the width rule is unchanged by its removal.
      *
      * Counted, never enforced: nothing in the library reads them, so a deployment chooses
      * whether to alarm. Relaxed monotonic, incremented only ON a drop — the delivering path
