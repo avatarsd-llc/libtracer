@@ -148,6 +148,10 @@ M.TYPE_NAMES = {
   [0x0C] = "TIME", [0x0D] = "ROUTER", [0x0E] = "SPEC", [0x0F] = "FWD",
   [0x10] = "FIELD", [0x11] = "ADVERTISE", [0x12] = "COMPACT", [0x13] = "HANDLE_NACK",
   [0x14] = "PATH_REF", [0x15] = "PATH_REF_REVERSE",
+  -- The ONE assigned code in the user range (RFC-0025 §4.1.2 clause 6): the BATCH
+  -- record. Named for the human reading a capture; the range itself stays one the
+  -- protocol does not opine on, so any OTHER 0x80-0xFF code renders "user-defined".
+  [0x80] = "BATCH",
 }
 
 -- Structured types (opt.PL SHOULD be 1). Used only for display hints.

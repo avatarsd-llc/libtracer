@@ -199,6 +199,39 @@ the layer-free little-endian byte helper they build on stays in `tr::detail`
 payload, children and trailers, `frame.hpp`'s `decode`/`encode` are the entry
 points.
 
+## The BATCH record — folding a flush into one written value
+
+`batch.hpp` is the one canonical spelling of
+[RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md)'s
+batch convention: `BATCH` is `type_t::BATCH` (`0x80`), the single code assigned inside the
+user range, and a batch is otherwise an ordinary structured TLV — **zero new grammar**, so
+every conforming decoder above already decodes one and the graph never interprets it.
+
+| function | what it does |
+| --- | --- |
+| `emit_batch(out, base_ns, samples[, offsets_ns])` | FOLDS N already-encoded sample frames into one record: a `TIME{u64 LE ns}` base child, optionally the non-uniform stream's packed `i32` offset run, then the sample frames' own bytes **verbatim**. A fold is a concatenation under one header, never a re-encode |
+| `batch_wire_bytes(samples_bytes[, offsets])` | the whole size function, so a caller sizes the buffer before filling it |
+| `read_batch(tlv, dt_ns)` | the reader half: a `batch_view_t` over the base, the offsets and the sample frames |
+| `batch_view_t::sample_time_ns(i)` | the SAMPLE clock of frame `i`, **derived**: `base + i × dt_ns` on a uniform stream, `base + offsets[i]` on a non-uniform one |
+
+Two properties are worth stating where a reader will look for them.
+
+**A uniform stream spends 0 bytes per sample on time.** `dt_ns` is the nominal sample period
+the stream's *descriptor* declares — a `SETTINGS` LKV beside the data vertex, negotiated once
+and never repeated per batch — so nothing per-sample is transmitted and a 4-byte sample costs
+4 bytes. That is also why `dt_ns` is a parameter of `read_batch` and not something the record
+is asked for: whether the child after the `TIME` is an offset array or the first sample frame
+is a fact about the descriptor. A non-uniform stream (`dt_ns == 0`) carries one packed `i32`
+run in a single child — 4 bytes per sample, contiguous, no per-child TLV header, no anchor
+walk.
+
+**A batch carries no trailer.** Wire/TX time is `opt.TS` on the **outermost** frame only and
+is always `TF=0`; a written value is an inner TLV. Sample time is the payload `TIME` child;
+playout time is never transmitted at all (the three-clock model of
+[01-data-format.md](../reference/01-data-format.md)). `read_batch` declines bytes that do not
+spell the convention — a reader's refusal, never the codec's: the same bytes still decode,
+still forward and still round-trip.
+
 ## The terminus arena decoder
 
 Alongside the owning `tlv_t` model, the codec ships a second decoder for the FWD
@@ -274,8 +307,8 @@ Exhaustion answers `TLV_NESTING_TOO_DEEP`, never `std::bad_alloc` — which on a
 
 ## API reference
 
-Headers: `frame.hpp`, `tlv.hpp`, `tlv_emit.hpp`, `tlv_arena.hpp`, `path_ref.hpp`,
-`crc.hpp` — all under `core/include/libtracer/`.
+Headers: `frame.hpp`, `tlv.hpp`, `tlv_emit.hpp`, `tlv_arena.hpp`, `batch.hpp`,
+`path_ref.hpp`, `crc.hpp` — all under `core/include/libtracer/`.
 
 `tr::wire::opt_t` — the option bits carried in every header — is documented once, on
 [wire format bits](wire-format-bits.md), alongside the bit layout it names.

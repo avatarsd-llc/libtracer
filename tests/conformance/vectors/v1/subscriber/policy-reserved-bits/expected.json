@@ -6,7 +6,7 @@
   "decoded": {
     "type": "0x04 SUBSCRIBER",
     "structured": true,
-    "meaning": "SUBSCRIBER{ PATH{ NAME \"client\" }, SETTINGS{ NAME \"delivery_policy\" VALUE u16=0xFFC1 } } — every reserved bit (6–15) set: MUST be ignored, never rejected; reliability=1 below them still applies (RFC-0022 §5.3)",
-    "note": "an implementation that rejects unknown bits fails this vector; so does one that lets them leak into reliability or priority"
+    "meaning": "SUBSCRIBER{ PATH{ NAME \"client\" }, SETTINGS{ NAME \"delivery_policy\" VALUE u16=0xFFC1 } } — every reserved bit (8–15) set: MUST be ignored, never rejected; reliability=1 and delivery_class=3 below them still apply (RFC-0022 §5.3, RFC-0025 §4.1 as amended). Same bytes as before the narrowing — RFC-0025 §4.1.2 clause 7 repairs this vector in place",
+    "note": "an implementation that rejects unknown bits fails this vector; so does one that lets them leak into reliability, priority or the delivery class"
   }
 }

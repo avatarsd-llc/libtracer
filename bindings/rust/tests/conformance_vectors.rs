@@ -1552,11 +1552,14 @@ fn subscriber_policy_reserved_bits() {
     // Not rejected — decoding a word with unknown bits is an ignore, not an error.
     let got = structured::subscriber_policy(&t).unwrap();
     assert_eq!(got.bits, 0xFFC1);
-    // No leak: only bits 0-1 are reliability, only 2-4 priority, only 5 durability.
+    // No leak: only bits 0-1 are reliability, only 2-4 priority, only 5 durability, only
+    // 6-7 the delivery class. The reserved range is 8-15 since RFC-0025 §4.1 — the same
+    // bytes, read one field wider (§4.1.2 clause 7 repairs this vector in place).
     assert_eq!(got.reliability(), 1);
     assert_eq!(got.priority(), 0);
     assert!(!got.durability_request());
-    assert_eq!(got.reserved(), 0x03FF);
+    assert_eq!(got.delivery_class(), 3, "0xFFC1 carries delivery_class = 3 (stream)");
+    assert_eq!(got.reserved(), 0x00FF);
     // Verbatim: re-emitting keeps 6-15, so a future sender's bits survive the hop.
     let built = structured::subscriber_with_policy(&["client"], got).unwrap();
     assert_eq!(encode(&built), bin);
@@ -1570,11 +1573,18 @@ fn delivery_policy_bit_layout() {
     assert_eq!(DeliveryPolicy::from_bits(0x001C).priority(), 7);
     assert!(DeliveryPolicy::from_bits(0x0020).durability_request());
     assert!(!DeliveryPolicy::from_bits(0x001F).durability_request());
-    // Reserved bits decode into NO honoured field.
-    let all_reserved = DeliveryPolicy::from_bits(0xFFC0);
+    // Bits 6-7 are the RFC-0025 §4.1 delivery class; every pattern is assigned.
+    assert_eq!(DeliveryPolicy::from_bits(0x0000).delivery_class(), 0);
+    assert_eq!(DeliveryPolicy::from_bits(0x0040).delivery_class(), 1);
+    assert_eq!(DeliveryPolicy::from_bits(0x0080).delivery_class(), 2);
+    assert_eq!(DeliveryPolicy::from_bits(0x00C0).delivery_class(), 3);
+    assert_eq!(DeliveryPolicy::from_bits(0xFF3F).delivery_class(), 0);
+    // Reserved bits (8-15) decode into NO honoured field, the class included.
+    let all_reserved = DeliveryPolicy::from_bits(0xFF00);
     assert_eq!(all_reserved.reliability(), 0);
     assert_eq!(all_reserved.priority(), 0);
     assert!(!all_reserved.durability_request());
+    assert_eq!(all_reserved.delivery_class(), 0);
 }
 
 /* ------------------------------------------- #995 — NAME-field walk parity --- */

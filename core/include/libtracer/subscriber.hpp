@@ -46,6 +46,31 @@ using view::rope_t;
 using view::view_t;
 
 /**
+ * @brief The per-subscription DELIVERY CLASS — bits 6–7 of the packed `delivery_policy` word
+ *        (RFC-0025 §4.1, as amended).
+ *
+ * The class says how a producer's fan-out edge treats this ONE subscriber's deliveries. It is
+ * a subscription property, never a vertex flag: the signal plane is demand-driven and
+ * init-free, so no vertex ever declares "I am a stream" (RFC-0025 §3, claim 5).
+ */
+enum class delivery_class_t : std::uint8_t {
+    /** @brief `0` — last-wins. Delivery MAY coalesce to the newest value. The LKV contract,
+     *         today's behaviour, and the default an absent word decodes to. */
+    CONFLATE = 0,
+    /** @brief `1` — every write delivered as its own event; order-preserving, never
+     *         conflated, no producer-side accumulation. */
+    IMMEDIATE = 1,
+    /** @brief `2` — the wire encoding of RFC-0008's `assign`/`propagate` flush (RFC-0025
+     *         §4.1.2): a flush emits the SNAPSHOT on a plain value and the FULL since-flush
+     *         LIST on a STREAM, as one BATCH record (`batch.hpp`). Accumulation is the source
+     *         vertex's own state — never a per-subscriber buffer at the fan-out edge. */
+    BATCH = 2,
+    /** @brief `3` — append-preserving: every write delivered in order, none conflated, with
+     *         the §4.4 pressure contract binding at the RECEIVING vertex's ring. */
+    STREAM = 3,
+};
+
+/**
  * @brief One subscription's DELIVERY policy — a packed 16-bit field carried in the
  *        `SUBSCRIBER` TLV's `SETTINGS` child (RFC-0022 §3.A).
  *
@@ -60,13 +85,18 @@ using view::view_t;
  * | 0–1 | reliability | 0 = best-effort, 1 = reliable; 2–3 reserved |
  * | 2–4 | priority | 0–7, 0 = default |
  * | 5 | durability_request | 1 = deliver the latched last value on join |
- * | 6–15 | reserved | MUST be written 0, MUST be ignored on read |
+ * | 6–7 | delivery_class | 0 = conflate (default), 1 = immediate, 2 = batch, 3 = stream |
+ * | 8–15 | reserved | MUST be written 0, MUST be ignored on read |
  *
- * Absent from the wire ⇒ all-zero ⇒ today's default behaviour, byte-identically. Only
- * @ref durability_request is consumed today (the transient-local latch at
- * `graph_t::admit_subscriber`); @ref reliability and @ref priority are stored and read back,
- * awaiting the transport work that honours them — the honest shape RFC-0022 §3.E chose over
- * moving dead per-vertex fields.
+ * Absent from the wire ⇒ all-zero ⇒ today's default behaviour, byte-identically — and the
+ * class field costs no wire byte for the same reason: `0` is conflate, which is what every
+ * pre-RFC-0025 subscriber wrote into those bits when they were reserved. Old subscribers are
+ * conflate-class BY CONSTRUCTION.
+ *
+ * Only @ref durability_request is consumed today (the transient-local latch at
+ * `graph_t::admit_subscriber`); @ref reliability, @ref priority and @ref delivery_class are
+ * stored and read back, awaiting the fan-out-edge and receiver-ring work that honours them —
+ * the honest shape RFC-0022 §3.E chose over moving dead per-vertex fields.
  *
  * **Flags only, never a magnitude.** A deadline or a queue bound added later is a magnitude
  * and belongs in the subscription's cold half as a full-width field, never in these bits.
@@ -78,6 +108,8 @@ struct delivery_policy_t {
     static constexpr std::uint16_t kPriorityMask = 0x001C;      /**< @brief Bits 2–4. */
     static constexpr int kPriorityShift = 2;                    /**< @brief Bits 2–4 offset. */
     static constexpr std::uint16_t kDurabilityRequest = 0x0020; /**< @brief Bit 5. */
+    static constexpr std::uint16_t kDeliveryClassMask = 0x00C0; /**< @brief Bits 6–7. */
+    static constexpr int kDeliveryClassShift = 6;               /**< @brief Bits 6–7 offset. */
 
     /** @brief 0 = best-effort, 1 = reliable (2–3 reserved; stored, never interpreted). */
     [[nodiscard]] constexpr std::uint8_t reliability() const noexcept {
@@ -90,6 +122,18 @@ struct delivery_policy_t {
     /** @brief True iff THIS subscriber asked for the latched last value on join. */
     [[nodiscard]] constexpr bool durability_request() const noexcept {
         return (bits & kDurabilityRequest) != 0;
+    }
+    /**
+     * @brief Bits 6–7 — how the fan-out edge treats this subscriber's deliveries
+     *        (RFC-0025 §4.1).
+     *
+     * Every two-bit pattern is an assigned class, so this accessor is total: there is no
+     * "unknown class" to reject, and a word from a future sender still decodes to one of the
+     * four. Reading the field is not honouring it — the classes beyond `CONFLATE` land with
+     * the fan-out-edge mechanics and the receiving vertex's ring.
+     */
+    [[nodiscard]] constexpr delivery_class_t delivery_class() const noexcept {
+        return static_cast<delivery_class_t>((bits & kDeliveryClassMask) >> kDeliveryClassShift);
     }
 
     /** @brief Memberwise equality on the raw bits (reserved bits included — they are

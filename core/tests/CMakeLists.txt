@@ -1980,3 +1980,15 @@ if(LIBTRACER_NET_PLANE)
     libtracer_test_warnings(plane_isolation_test)
     add_test(NAME plane_isolation COMMAND plane_isolation_test)
 endif()
+
+# RFC-0025 §4.2.1 / §4.1.2 — the BATCH record (batch.hpp): the fold, the sample clock DERIVED
+# from the descriptor's rate at 0 bytes/sample, the non-uniform packed i32 offset array, and
+# the reader refusals the codec does NOT make. Pins the `stream/batch-time-roundtrip` vector
+# byte-exactly against the emitter, so it needs LIBTRACER_VECTORS_DIR. Not module-gated: the
+# record is an L2/L3 codec concern and links no net-plane TU.
+add_executable(batch_test batch_test.cpp)
+target_link_libraries(batch_test PRIVATE libtracer)
+target_compile_definitions(batch_test PRIVATE
+    LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
+libtracer_test_warnings(batch_test)
+add_test(NAME batch COMMAND batch_test)

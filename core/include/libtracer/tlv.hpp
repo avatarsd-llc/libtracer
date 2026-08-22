@@ -28,6 +28,11 @@ namespace tr::wire {
  * amendment 2): the two types whose body is NOT self-describing — a fixed-stride 8-byte
  * record array (opt.PL=0), whose shape the grammar therefore checks by type (path_ref.hpp,
  * gated by `is_path_ref_type`).
+ *
+ * One code beyond the core range is named here: 0x80 BATCH, the single assignment inside the
+ * user range (0x80-0xFF, RFC-0025 §4.1.2 clause 6). It is an ordinary structured TLV to the
+ * codec — the enumerator exists so the one convention libtracer itself emits has a spelling,
+ * not because the codec treats it specially.
  */
 enum class type_t : std::uint8_t {
     VALUE = 0x01,       /**< @brief Opaque scalar value. */
@@ -72,6 +77,20 @@ enum class type_t : std::uint8_t {
      * (`peek_trailing_mint`).
      */
     PATH_REF_REVERSE = 0x15,
+    /**
+     * @brief The ONE assigned user-range code: the BATCH record (RFC-0025 §4.1.2, Amendment 3
+     *        clause 6) — a structured (`opt.PL=1`) written value whose children are the sample
+     *        frames of one flush (`batch.hpp`).
+     *
+     * `0x80`–`0xFF` is the range the protocol does not opine on, and the assignment does not
+     * change that: a deployment already using `0x80` for its own record is not made
+     * non-conforming, no core-range code is minted, no `opt` bit is added, and the graph still
+     * never interprets the body (claim 5). What the assignment buys is ONE number — so the
+     * reference helpers, the §4.3 descriptor and the conformance vectors stop each picking
+     * their own. Until Amendment 3 this code appeared only as the worked example of
+     * docs/reference/05-protocol-tlvs.md §`0x0C`, which reads the same either way.
+     */
+    BATCH = 0x80,
 };
 
 /**

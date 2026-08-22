@@ -258,7 +258,13 @@ pub const DELIVERY_POLICY_KEY: &str = "delivery_policy";
  * | 0–1 | `reliability` (0 = best-effort, 1 = reliable) |
  * | 2–4 | `priority` (0–7, 0 = default) |
  * | 5 | `durability_request` — deliver the producer's latched last value on join |
- * | 6–15 | reserved |
+ * | 6–7 | `delivery_class` — 0 conflate (default), 1 immediate, 2 batch, 3 stream |
+ * | 8–15 | reserved |
+ *
+ * Bits 6–7 were reserved until RFC-0025 §4.1 assigned them the delivery class, and the
+ * assignment costs no wire byte: `0` is conflate, which is what a sender that predates the
+ * class wrote there: old subscribers are conflate-class **by construction**. Reading the
+ * class is not honouring it — this binding is a codec.
  *
  * The reserved bits are **round-tripped verbatim and never interpreted**: §3.A says a
  * sender MUST write 0 and a receiver MUST *ignore* them, which is an ignore, not a
@@ -300,11 +306,26 @@ impl DeliveryPolicy {
         (self.bits & Self::DURABILITY_REQUEST) != 0
     }
 
-    /** @brief Bits 6–15 — the reserved field, as it arrived. Never interpreted; exposed
-     * so a caller can assert it survived a round trip. */
+    /**
+     * @brief Bits 6–7 — the delivery class (RFC-0025 §4.1): `0` conflate (the default an
+     * absent word decodes to), `1` immediate, `2` batch, `3` stream.
+     *
+     * Total by construction — every two-bit pattern is an assigned class, so there is no
+     * "unknown class" to reject and a word from a future sender still decodes to one of the
+     * four.
+     */
+    #[must_use]
+    pub const fn delivery_class(self) -> u8 {
+        ((self.bits >> 6) & 0x0003) as u8
+    }
+
+    /** @brief Bits 8–15 — the reserved field, as it arrived. Never interpreted; exposed
+     * so a caller can assert it survived a round trip. Narrowed from 6–15 by RFC-0025
+     * §4.1.2 clause 7, which moved bits 6–7 to [`delivery_class`](Self::delivery_class)
+     * without moving a byte. */
     #[must_use]
     pub const fn reserved(self) -> u16 {
-        self.bits >> 6
+        self.bits >> 8
     }
 
     /** @brief True when no honoured bit is set AND nothing is reserved — the "absent"
