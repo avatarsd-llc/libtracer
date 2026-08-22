@@ -268,13 +268,38 @@ preceded it:
    cache-line gate. Choosing HANDLER saves the per-write `make_shared` plus publish and the heap
    value; it does not shrink the vertex. Per-vertex layout reclaim is deliberately not offered
    (#1487 marks the slot do-not-touch).
-2. **Today the HANDLER fan-out pays a rope clone the storing path avoids.** The storing roles
-   hand the published pointer straight to delivery; the handler leg takes a nothrow clone first
-   (`core/src/graph.cpp:2202`). It is the cold path and the clone is refcount-only, but on a
-   wide-fan-out handler vertex it is real. Tracked and being quantified as
-   [#1505](https://github.com/avatarsd-llc/libtracer/issues/1505); until that rules, do not choose
-   HANDLER *for throughput* on a heavily-subscribed vertex — choose it for the retention
-   semantics and the write-path allocation it removes.
+2. **The HANDLER write pays a rope clone the storing path avoids — and what it costs is gated by
+   the value's LINK COUNT, not by fan-out.** The storing roles hand the published pointer straight
+   to delivery; the handler leg takes a nothrow clone first (`core/src/graph.cpp:2202`).
+   [#1505](https://github.com/avatarsd-llc/libtracer/issues/1505) measured it
+   ([#1516](https://github.com/avatarsd-llc/libtracer/pull/1516)'s `bench_source_role` /
+   `bench_source_role_alloc`), and the guidance this caveat used to give was **backwards below the
+   knee**:
+
+   - While the rope fits its **inline link capacity** the clone touches no allocator and is nearly
+     free, and HANDLER is the **cheaper** role — it skips the LKV publish the retaining roles pay
+     for. Measured x86-64 `-O3`, p50 per write, 1-link value: **70 ns HANDLER vs 80 ns
+     STORED_VALUE at fan-out 0** (90 vs 100 at fan 1, 110 vs 120 at fan 4), and **1 allocation per
+     write vs 2**.
+   - Past the inline capacity — the measured knee is **between 2 and 3 links** — the clone becomes
+     a heap block and HANDLER turns into the more expensive role by **~40 ns flat**: 4-link value,
+     **170 ns HANDLER vs 130 ns STORED_VALUE at fan-out 0**, 190 vs 150 at fan 1, 210 vs 170 at
+     fan 4.
+
+   The penalty is **flat in fan-out**, which is the whole correction: it is a per-**write** term,
+   not a per-delivery one. A fan-out-0 handler vertex pays the clone in full before discovering
+   there is nobody to notify, and widening the fan-out does not widen the penalty. So **do not
+   size this against subscriber count** — size it against the link count of the values you write.
+   A handler vertex fed single-link values is the *cheaper* choice at any fan-out; only a
+   multi-link value makes HANDLER the more expensive write, and even then by a fixed ~40 ns
+   irrespective of how many subscribers hang off it.
+
+   The clone is on the way out: #1505 ruled the handler leg should deliver the caller's rope
+   directly, which removes the term at every link count and makes HANDLER the cheaper role
+   everywhere. Until that lands, the sizing rule above is the accurate one; after it lands, the
+   multi-link penalty is gone and only the "HANDLER is cheaper" half survives. Either way, the
+   old advice — *avoid HANDLER for throughput on a heavily-subscribed vertex* — was never the
+   right axis and should not be applied.
 
 Also worth knowing before switching a vertex to HANDLER: the announce-write convention used to
 instruct "assign and propagate". For the handler case it now names **`write`**
