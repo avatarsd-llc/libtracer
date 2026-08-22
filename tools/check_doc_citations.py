@@ -821,12 +821,12 @@ ANCHORS = [
     # core/tests/tlv_arena_test.cpp
     ('core/tests/tlv_arena_test.cpp:324', 'const std::vector<std::byte> deep_bytes = encode(nested(100));'),
     # integrations/esp-idf/libtracer/httpd_ws_link.cpp
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:89',
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:131',
      '* (F2b, 2026-07-09): the /unit batch apply overflowed 8 KB and needed ~12 KB. It is named'),
     ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:193',
      'static constexpr std::size_t kRequiredHttpdStack = 12288;'),
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:589', 'if (chunk.empty()) return true;'),
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:595',
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:631', 'if (chunk.empty()) return true;'),
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:637',
      'if (len_ != 0) std::memcpy(grown.get(), bytes_.get(), len_);'),
     # integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp
     ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:52',
@@ -873,9 +873,9 @@ ANCHORS = [
     ('tools/cortexm0_footprint.py:151', 'cxx_flags = ['),
     ('tools/cortexm0_footprint.py:158', '"-DLIBTRACER_NO_ATOMIC",'),
     ('tools/cortexm0_footprint.py:172', '"--specs=nano.specs",'),
-    ('core/tests/CMakeLists.txt:1705', 'add_executable(substrate_test_no_atomic'),
-    ('core/tests/CMakeLists.txt:1720', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
-    ('core/tests/CMakeLists.txt:1721', '    LIBTRACER_NO_ATOMIC'),
+    ('core/tests/CMakeLists.txt:1727', 'add_executable(substrate_test_no_atomic'),
+    ('core/tests/CMakeLists.txt:1742', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
+    ('core/tests/CMakeLists.txt:1743', '    LIBTRACER_NO_ATOMIC'),
     # The leading indent is load-bearing: the bare token also appears in the comment
     # three lines above the executable, and an anchor that matches both is not an anchor.
 
@@ -1151,8 +1151,10 @@ ANCHORS = [
     ('core/include/libtracer/transport.hpp:447',
      '[[nodiscard]] virtual transport_drop_stats_t drop_stats() const noexcept { return {}; }'),
     # integrations/esp-idf/libtracer/httpd_ws_link.cpp
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:2780',
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:2949',
      'std::size_t httpd_ws_link_t::tx_slot_capacity() const noexcept { return tx_pool_slots_; }'),
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:2805',
+     'void httpd_ws_link_t::send_in_call(const session_ref_t& to,'),
 ]
 
 

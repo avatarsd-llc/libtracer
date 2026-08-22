@@ -473,6 +473,28 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     set_tests_properties(httpd_ws_tx_pool
         PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
 
+    # #1494 — the IN-CALL REPLY leaves by the socket, not by the control queue. The pool
+    # suite above pins what a QUEUED send costs; this one pins that a reply serviced inside
+    # the handler frame pays none of it, and survives the full pool + refusing queue that
+    # used to silence the session permanently.
+    add_executable(httpd_ws_in_call_reply_test
+        "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_in_call_reply_test.cpp"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
+        "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
+    target_include_directories(httpd_ws_in_call_reply_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        "${LIBTRACER_ESP_DIR}/libtracer/include")
+    target_link_libraries(httpd_ws_in_call_reply_test PRIVATE libtracer)
+    target_link_options(httpd_ws_in_call_reply_test PRIVATE
+        "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+    libtracer_test_warnings(httpd_ws_in_call_reply_test)
+    add_test(NAME httpd_ws_in_call_reply COMMAND httpd_ws_in_call_reply_test)
+    # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and
+    # every case here constructs an adopting link — same exemption as the suites above.
+    set_tests_properties(httpd_ws_in_call_reply
+        PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+
     # #961 — the FAN-OUT path's allocation, on the same fake. The instrument is what is
     # new: the suite replaces the WHOLE global operator new/delete family (whole because a
     # subset makes ASan abort on a mismatched pair), so "a broadcast allocates" is a number
@@ -1952,6 +1974,7 @@ set(LIBTRACER_BUS_TESTS
     httpd_ws_fanout_alloc
     httpd_ws_fanout_wait
     httpd_ws_fanout_width
+    httpd_ws_in_call_reply
     httpd_ws_keepalive
     httpd_ws_send_stall
     httpd_ws_session_identity

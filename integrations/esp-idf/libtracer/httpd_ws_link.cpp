@@ -83,6 +83,48 @@ constexpr int kDrainSliceMs = 5;
 }
 
 /**
+ * @brief The link whose WebSocket handler frame THIS task is currently inside, or nullptr
+ *        — the "this send is a reply being serviced in-call" predicate (#1494).
+ *
+ * Deliberately NOT `server_task_ == current_task()`, which is the weaker question
+ * @ref httpd_ws_link_t::claim_tx_slot_waiting asks (there it only has to know whether
+ * waiting for the drain would wait on this very stack frame). Two things a bare task
+ * identity cannot tell apart, and the reply fork needs both:
+ *   - a work item the httpd task is draining (the auth sweep, a close) is ON the task but
+ *     inside no handler frame, so nothing holds the gate's `depth` and nothing pins the
+ *     session the frame names — the guarantees the in-call fork leans on;
+ *   - on the host, a suite that delivers a frame and then sends from the SAME thread is on
+ *     the "httpd task" forever after, which would make the pool suites' subject depend on
+ *     which thread they happen to run on rather than on the link.
+ *
+ * A pointer in `.tbss` (trivial type, no `__cxa_thread_atexit` registration): a handful of
+ * bytes in each task's TLS block and a single load to read.
+ */
+thread_local const httpd_ws_link_t* t_serving_link = nullptr;
+
+/** @brief RAII: mark the calling task as being inside @p link's handler frame for the
+ *         duration of the scope, and restore what it was before.
+ *
+ * Restoring the PREVIOUS value rather than clearing, and never touching @p link in the
+ * destructor, is what makes this safe on the one path that matters: the delivery inside
+ * the handler runs the app in-call and the app may destroy the link (#814), so by the time
+ * this scope unwinds `link` may be gone. Only the saved pointer is written back. */
+class serving_scope_t {
+   public:
+    /** @brief Enter @p link's handler frame on this task. */
+    explicit serving_scope_t(const httpd_ws_link_t* link) noexcept : prev_(t_serving_link) {
+        t_serving_link = link;
+    }
+    /** @brief Leave it, restoring whatever the task was serving before. */
+    ~serving_scope_t() { t_serving_link = prev_; }
+    serving_scope_t(const serving_scope_t&) = delete;
+    serving_scope_t& operator=(const serving_scope_t&) = delete;
+
+   private:
+    const httpd_ws_link_t* prev_; /**< @brief What this task was serving on entry. */
+};
+
+/**
  * @brief The stack size the deep in-call path was measured OVERFLOWING, bytes.
  *
  * The other half of the measurement @ref httpd_ws_link_t::kRequiredHttpdStack carries
@@ -1678,7 +1720,15 @@ esp_err_t httpd_ws_link_t::ws_handler(httpd_req_t* req) {
     // not a peer — httpd_ws_recv_frame answers ESP_ERR_INVALID_STATE on a socket with no
     // handshake done, which fails the handler and closes it. That is the right answer and
     // it costs no branch of ours.
-    const esp_err_t err = self->on_data_frame(req);
+    // Mark the frame: every send issued BENEATH this call is a reply serviced in-call, and
+    // takes the fork that keeps it off the control queue (#1494 — see t_serving_link and
+    // @ref httpd_ws_link_t::send_in_call). The scope restores the previous value on the way
+    // out and never touches `self`, which the next comment explains may be gone by then.
+    esp_err_t err = ESP_OK;
+    {
+        const serving_scope_t serving(self);
+        err = self->on_data_frame(req);
+    }
     // `self` may be DESTROYED by now: the delivery above runs the app in-call and the app
     // may tear this link down (#814). Only `gate`, which deliberately outlives it, may be
     // touched from here on.
@@ -2293,7 +2343,8 @@ void httpd_ws_link_t::sweep_pending_handshakes(std::int64_t now) {
 }
 
 esp_err_t httpd_ws_link_t::send_now(session_t* slot, int fd, int ws_type,
-                                    std::span<const std::byte> payload) {
+                                    std::span<const std::byte> payload, std::size_t* on_wire) {
+    if (on_wire != nullptr) *on_wire = 0;
     const httpd_handle_t h = handle_.load(std::memory_order_relaxed);
     if (h == nullptr || fd < 0) return ESP_FAIL;
     // Straight to the socket, with neither a pool slot nor `httpd_queue_work` in the way.
@@ -2316,7 +2367,13 @@ esp_err_t httpd_ws_link_t::send_now(session_t* slot, int fd, int ws_type,
     // desynchronises the stream just as thoroughly as a truncated reply.
     if (slot != nullptr) slot->open_tx_frame();
     const esp_err_t err = httpd_ws_send_frame_async(h, fd, &f);
-    if (slot != nullptr) (void)slot->close_tx_frame();
+    const std::size_t wrote = slot != nullptr ? slot->close_tx_frame() : 0;
+    // The bracket's verdict, reported only to a caller that asked for it. A non-zero count
+    // on a failed send is the OTHER failure (#951): the frame was announced and then cut
+    // off, the session has already been condemned inside the write, and a caller that logs
+    // an ordinary drop on top of it makes a desynchronised session look benign. The auth
+    // and close callers pass nullptr — they are tearing the session down either way.
+    if (on_wire != nullptr) *on_wire = wrote;
     return err;
 }
 
@@ -2745,6 +2802,118 @@ void httpd_ws_link_t::queue_send(const session_ref_t& to,
     if (!queued) note_enqueue_drop(fd, total);
 }
 
+void httpd_ws_link_t::send_in_call(const session_ref_t& to,
+                                   std::span<const std::span<const std::byte>> iov) {
+    // The #1494 fork: a reply serviced ON the httpd task writes to the socket HERE, and the
+    // control queue never hears about it.
+    //
+    // What the queue is for is marshalling a send from ANOTHER task onto the one task that
+    // owns the descriptor. A reply is already on it, so every step of the queued path is
+    // pure cost paid twice over: a gather-copy into a pool slot, a control message through
+    // a six-deep UDP mbox that the httpd task drains ONE message per server pass, and a
+    // second trip through the scheduler to arrive at the same `httpd_ws_send_frame_async`
+    // this function calls directly. That mbox is the scarcest thing on the link — it is
+    // shared with the closes @ref condemn wants landed — and the drain lag is what put
+    // issue #1494's cliff exactly at the pool depth: the in-call reserve (@ref
+    // tx_reply_reserve) is claimable once per DRAIN, not once per request, so a pipelining
+    // client is serviced again before the previous reply's slot comes back and the reply
+    // falls into the general pool, where an in-call send never waits (the #814 deadlock
+    // reason) and therefore drops at once. Off the queue, none of that arithmetic applies:
+    // a reply cannot be lost to a full pool, to a full mbox, or to a fan-out's occupancy.
+    //
+    // It is also the shape that cannot strand a slot in ANY ESP-IDF, which is the other
+    // half of #1494's report. Above this component's floor (`idf: ">=5.5.5"`) the enqueue
+    // verdict is trustworthy — `httpd_queue_work` reserves its mbox slot through a counting
+    // semaphore before the `sendto`, so ESP_OK means the item will run and release its slot
+    // (#949; the paragraph in @ref condemn describing an ESP_OK that lies predates that
+    // floor and describes the pre-floor `sendto`). Below it, the silent bin was real, and a
+    // dropped `tx_work` item left `tx_slot_t::busy` set forever. A reply that claims no slot
+    // is immune to that whether the verdict lies or not — and it needs no reclamation sweep,
+    // which is the remedy this one displaces: reclaiming a slot from a merely LATE item
+    // hands its buffer to another sender while the httpd task is still reading it.
+    //
+    // The fan-out/push path is NOT rerouted here. It is issued from producer tasks, which
+    // is precisely the case the queue exists for.
+    const httpd_handle_t h = handle_.load(std::memory_order_relaxed);
+    if (h == nullptr) return;
+    // The same re-resolve @ref queue_send opens with, for the same reason: a departed or
+    // condemned peer takes no more frames, and the reply's own resolution was made before
+    // the app was ever called.
+    const int fd = live_fd(to);
+    if (fd < 0) {
+        tx_to_dead_peer_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    // The server's own verdict on the socket the link just vouched for — @ref tx_work's
+    // second opinion, kept here so an in-call reply is judged by the same two tests a
+    // queued frame is. A skip is not a send result: it feeds the cumulative tally, never
+    // the streak (@ref note_tx_skip).
+    if (httpd_ws_get_fd_info(h, fd) != HTTPD_WS_CLIENT_WEBSOCKET) {
+        note_tx_skip(to);
+        return;
+    }
+    std::size_t total = 0;
+    for (const auto& part : iov) total += part.size();
+    // Teardown gate, the one @ref claim_tx_slot applies to every other send: once the dtor
+    // is draining, nothing new goes out. Applied explicitly because the single-span arm
+    // below claims no slot and would otherwise walk past it.
+    if (stopping_.load(std::memory_order_relaxed)) {
+        note_enqueue_drop(fd, total);
+        return;
+    }
+    // One span is the reply's ordinary shape, and it needs NO buffer of ours at all: the
+    // caller's memory is alive for this whole call (it is the caller's stack frame, one
+    // level up), which is exactly what the asynchronous path could not assume and had to
+    // gather-copy to escape. So the common reply now costs zero copies and zero slots.
+    std::span<const std::byte> payload = iov.empty() ? std::span<const std::byte>() : iov[0];
+    tx_work_t* scratch = nullptr;
+    if (iov.size() > 1) {
+        // A rope reply still has to reach the wire as ONE WebSocket frame, so it is
+        // gathered — into a pool slot used as scratch, never into a temporary of its own
+        // (a flatten temp alongside the tx copy is the heap spike behind the on-device OOM
+        // abort). The slot is claimed and released inside this call, on this task, and is
+        // never posted anywhere: no other task can be reading it, so it cannot strand.
+        tx_slot_t* const slot = claim_tx_slot(true);
+        if (slot == nullptr) {
+            tx_pool_misses_.fetch_add(1, std::memory_order_relaxed);
+            note_enqueue_drop(fd, total);
+            return;
+        }
+        scratch = &slot->work;
+        std::byte* dst = slot->inline_buf;
+        if (total > tx_inline_bytes_) {
+            // Nothrow END TO END on the one arm that can still allocate — never a
+            // std::vector, whose throwing allocator once aborted the node under
+            // -fno-exceptions on a reply-sized copy.
+            scratch->owned.reset(new (std::nothrow) std::byte[total]);
+            dst = scratch->owned.get();
+            if (dst == nullptr) {  // oversize-payload OOM: recycle the scratch, drop
+                release_tx_work(scratch);
+                note_enqueue_drop(fd, total);
+                return;
+            }
+        }
+        std::byte* p = dst;
+        for (const auto& part : iov) {
+            if (!part.empty()) std::memcpy(p, part.data(), part.size());
+            p += part.size();
+        }
+        payload = {dst, total};
+    }
+    std::size_t on_wire = 0;
+    const esp_err_t err = send_now(to.slot, fd, HTTPD_WS_TYPE_BINARY, payload, &on_wire);
+    // Back to the pool BEFORE the accounting, which takes peers_m_ and may close the
+    // session: the scratch has done its job the instant the send returns.
+    if (scratch != nullptr) release_tx_work(scratch);
+    // No `httpd_sess_update_lru_counter` here, unlike @ref tx_work: that call exists for a
+    // push the adopted server's LRU cannot see, and this send is INSIDE `httpd_sess_process`
+    // — the one place IDF advances the counter by itself.
+    if (err != ESP_OK && on_wire == 0)
+        ESP_LOGW(kTag, "ws reply failed (%s) fd=%d len=%u - frame dropped", esp_err_to_name(err),
+                 fd, (unsigned)total);
+    note_tx_result(to, err == ESP_OK, total);
+}
+
 void httpd_ws_link_t::queue_send(const session_ref_t& to, std::span<const std::byte> frame) {
     // One-span sugar over the gather form — the single copy/backpressure locus.
     const std::span<const std::byte> one[] = {frame};
@@ -2824,12 +2993,20 @@ void httpd_ws_link_t::condemn(int fd) {
     // (httpd_sess.c:476-481, release/v5.5): the SAME loopback control socket, drained by
     // the SAME single httpd task that is currently working through this fd's queued
     // sends. So it is strictly FIFO behind the very backlog it exists to clear, and every
-    // entry ahead of it costs a full send bound on a stalled socket. Worse, on the
-    // default non-blocking path `httpd_queue_work` is a bare `sendto` to that socket
-    // (httpd_main.c) — an enqueue past the receiver's UDP mbox is dropped inside lwIP
-    // while `sendto`, and therefore `httpd_queue_work`, still returns success. An ESP_OK
-    // from trigger_close is not evidence that anything was queued. On silicon the close
+    // entry ahead of it costs a full send bound on a stalled socket. On silicon the close
     // was asked for repeatedly and never took effect; the fd kept failing for two minutes.
+    //
+    // The FIFO argument is the whole of it above this component's ESP-IDF floor. The rest
+    // of what this paragraph used to say — that on the default non-blocking path
+    // `httpd_queue_work` is a bare `sendto` (httpd_main.c) whose overflow lwIP bins in
+    // silence while still returning success, so an ESP_OK from `trigger_close` is not
+    // evidence that anything was queued — described the pre-floor server and was written
+    // before #949 raised that floor to `>=5.5.5`, where the mbox slot is reserved through a
+    // counting semaphore BEFORE the `sendto` and a full queue is an ESP_FAIL the caller
+    // sees. It is recorded here rather than deleted because an audit of #1494 read it as
+    // current and derived a permanently-stranded TX slot from it: that mechanism is real
+    // below the floor and unreachable above it. `shutdown` is still the right answer, for
+    // the three reasons below and not for that one.
     //
     // `shutdown` answers instead, because it is not a request of the server at all:
     //   - it costs one syscall, taking effect before this function returns;
@@ -3349,7 +3526,15 @@ void httpd_ws_link_t::peer_resolution_t::send(std::span<const std::span<const st
         }
         to = session_ref_t{slot, gen_};
     }
-    owner->queue_send(to, iov);
+    // A reply issued from inside this link's own handler frame is already on the httpd
+    // task: it writes straight to the socket and never touches the pool or the control
+    // queue (#1494 — @ref send_in_call carries the whole argument). Every other caller —
+    // a producer task pushing a subscription value, a timer, the app on a thread of its
+    // own — takes the queue, which is what the queue is for.
+    if (t_serving_link == owner)
+        owner->send_in_call(to, iov);
+    else
+        owner->queue_send(to, iov);
 }
 
 // ---------------------------------------------------------------------------
