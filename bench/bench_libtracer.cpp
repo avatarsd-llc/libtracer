@@ -527,7 +527,7 @@ void run_inproc_deliver(std::size_t S, std::size_t F, std::uint64_t budget = kDe
     for (std::size_t f = 0; f < F; ++f) (void)g.subscribe(path, cb);
     const std::vector<std::byte> tlv = value_tlv(S);
     (void)g.write(v, owned_view(tlv));  // store ONCE — the timed ops below move no bytes
-    const auto put = [&]() { g.propagate(v); };
+    const auto put = [&]() { (void)g.propagate(v); };
 
     const std::size_t MSGS = publishes_for(F, budget);
     const std::size_t LATN = publishes_for(F, latbudget);

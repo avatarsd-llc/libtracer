@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0008 |
 | **Title** | Vertex operations: `assign` and `propagate`; structural selective propagation; value-agnostic per-vertex `delivery_mode` |
-| **Status** | **accepted** (2026-07-06, maintainer-ratified design discussion; amended 2026-07-06b) |
+| **Status** | **accepted** (2026-07-06, maintainer-ratified design discussion; amended 2026-07-06b, and 2026-08-22 — Amendment 2, below) |
 | **Author(s)** | AvatarSD (maintainer) |
 | **Created** | 2026-07-06 |
 | **Comment window** | waived by the maintainer (solo-maintainer project, GOVERNANCE.md window dead ceremony) |
@@ -111,6 +111,13 @@ on a vertex, and they touch disjoint planes:
 observes `assign`s at its own vertex (the readiness plane of a single identity,
 [RFC-0005](0005-subtree-subscriptions.md) §A), independent of propagation.
 
+> **Amended 2026-08-22 (Amendment 2, below).** Two clauses attach here. `await` serves its
+> woken value through the **same role dispatch** a `read` of that vertex serves — the sentence
+> above always said so, and the reference implementation did not. And the `assign` /
+> `propagate` pair **requires retention**: a vertex whose role retains no last-known-value
+> refuses both verbs by value (`SCHEMA_NOT_FOUND`) rather than storing nothing and sweeping
+> silence.
+
 **`write` is removed.** The one call that did both is gone; a caller performs the two
 operations explicitly. The wire mapping is unchanged (§D): a `FWD{WRITE}` arriving at
 a terminus *is* an `assign` followed by a `propagate` of that vertex.
@@ -190,7 +197,9 @@ governs **whether an ancestor's `propagate` sweep includes this vertex**. Three 
 Two invariants make the modes coherent with §A:
 
 - **`assign` is never gated.** Whatever the mode, `assign` swaps the value and advances
-  the write sequence. The mode governs *propagation*, not *storage*.
+  the write sequence. The mode governs *propagation*, not *storage*. (Amendment 2 adds the
+  one thing that is not a *mode* question: a vertex whose ROLE retains nothing has no storage
+  for `assign` to swap, and refuses the verb outright.)
 - **A direct `propagate(v)` always delivers `v`.** The **argument** of a `propagate`
   call is its explicit target and is delivered regardless of its mode — the mode governs
   only the *descendants* a sweep pulls in. This is what makes `EXPLICIT` reachable
@@ -326,3 +335,131 @@ operations and the vertex's declared policy**. The first is value-coupled and
 nondeterministic at the layer boundary; the second is structural, value-agnostic, and
 exactly the coalescing — with keepalive and hand-delivery as the two deliberate
 exceptions — that a timer-driven producer wants.
+
+---
+
+## Amendment 2 (2026-08-22): §A/§C — a vertex that RETAINS NOTHING
+
+Records the maintainer ruling made in the 2026-08-22 LKV-retention review and tracked in
+[#1506](https://github.com/avatarsd-llc/libtracer/issues/1506) (decision table on
+[#1504](https://github.com/avatarsd-llc/libtracer/issues/1504); the retention benchmark that
+sits beside it is [#1505](https://github.com/avatarsd-llc/libtracer/issues/1505)). The 14-day
+comment window is **waived by default** while the project is solo-maintained
+([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §Roles) and was not invoked. (The
+2026-07-06b amendment in the front matter above is **Amendment 1** — it predates the
+numbering.)
+
+**Status: accepted.** This is an **amendment and not an erratum**, on the strength of Clause 1
+alone: it changes what a conforming implementation puts on the wire. Clause 2 is presented
+*inside* it as a correction to the §A/§C pair, and is deliberately **not** split into a second
+instrument — the two clauses are the two halves of one fact.
+
+### The fact both clauses follow from
+
+`role_t` has exactly one **non-retaining** role. A `STORED_VALUE` and a `STREAM` vertex publish
+a last-known-value on every store; a `HANDLER` vertex hands the value to its `on_write` seam and
+**keeps nothing**, and serves a read by **composing** a value from its `on_read` seam
+(`core/src/graph.cpp`, `graph_t::store_value`'s "handler consumed it — nothing stored"
+sentinel). §A's two primitives were written against the retaining case and left the
+non-retaining one to fall out. It fell out twice, in opposite directions: `await` **read the
+storage that is never there**, and `assign`/`propagate` **wrote to it and swept the silence**.
+
+### Clause 1 — `await` dispatches the same read contract `read` serves
+
+§A already says what the answer must be: *"`read` and `await` … both live in the **state**
+plane"*, `await` being the readiness form of the same data READ (the reference states it as
+"`read` and `await` live wholly in the state plane",
+[reference/02](../../reference/02-graph-model.md) §Assign, propagate, and the coalescing
+sweep). The reference implementation did not. After a successful wake it read the
+last-known-value slot **directly**, so at a `HANDLER` vertex `read` served the `on_read` seam
+while `await` answered `NOT_FOUND` — *after the awaited write had already reached `on_write`
+and woken the waiter*. Two doors, one contract, two answers.
+
+§A gains:
+
+> After a wake, `await` MUST serve its value through the **same role dispatch** a `read` of the
+> same vertex serves at that instant. A vertex whose role composes its read value (a `HANDLER`,
+> via `on_read`) therefore answers an `await` with that composed value.
+
+Three consequences, all of them boundaries:
+
+1. **The degradation is the READ contract's, not `await`'s.** A `HANDLER` exposing no `on_read`
+   still answers `NOT_FOUND` — the same answer `read` gives it. This clause makes the two doors
+   agree; it does not make `await` succeed where `read` would not.
+2. **The BRANCH fork is deliberately not mirrored.** A `read` of a vertex with ≥ 1 registered
+   child serves the composed subtree fold ([RFC-0016](0016-composed-branch-read.md)). `await`
+   observes `assign`s **at its own vertex** (§A, the readiness plane of a single identity), so a
+   branch vertex's `await` hands back that vertex's **own** last-known-value, exactly as it
+   always has. Only the ROLE dispatch is shared, not the branch/leaf fork.
+3. **The retaining path is untouched.** A `STORED_VALUE` / `STREAM` `await` keeps the
+   lock-free published-value fast path and pays no handler-dispatch cost. This is a correctness
+   fix on a cold arm, not a re-plumbing of the hot one.
+
+**Wire visibility.** The `FWD{AWAIT}` terminus resolves through this same host `await`, so it
+inherits the correction with **no resolver change at all**: a `FWD{AWAIT}` addressed to a
+`HANDLER` vertex that used to answer `kind=ERROR` + `STATUS=ERROR(tr::path::not_found)` now
+answers `kind=RESULT` + the composed `VALUE`.
+[RFC-0004](0004-remote-operation-addressing.md) §D's op table already describes the `AWAIT` row
+as *"`kind=RESULT` + the next write's TLV"*; that row is **unchanged in wording and now true of
+one more role** — read it as "the value a `read` would serve at the instant of the wake", which
+at a retaining vertex *is* the next write's TLV. No grammar changes, no new status, no new
+frame.
+
+### Clause 2 — `assign` / `propagate` at a non-retaining vertex refuse BY VALUE
+
+§C's design turns on one dependency: **`propagate` takes no value argument — "the
+last-known-value is the single source of truth"** (§A). The accumulate-then-flush pair therefore
+requires the state plane to *hold* something between the two calls. At a vertex that retains
+nothing there is nothing to hold: `assign` handed the value to `on_write`, stored nothing and
+marked the vertex, and the next covering sweep — reading a slot that is permanently empty —
+delivered **nothing, silently**. That is the shape the counting doctrine already forbids: *a
+bound that silently discards work is indistinguishable from one that is never reached.* And it
+is not even pressure; it is a **contract mismatch** between the verb and the vertex.
+
+§A and §C gain:
+
+> The `assign` / `propagate` pair **requires retention**. A vertex whose role retains no
+> last-known-value MUST refuse both verbs **at the call site**, by value, before any effect:
+> `assign` MUST NOT enter the vertex's write seam, and `propagate` MUST NOT sweep.
+
+- **The status is `SCHEMA_NOT_FOUND`**, matching the taxonomy's existing contract-mismatch
+  answer — the same status a `history` or `drain_unflushed` of a non-`STREAM` vertex gives, and
+  the same one an `AWAIT` carrying a `:field` selector gives ([RFC-0010](0010-owner-app-fields-and-schema.md) §C). It is
+  emphatically **not `BACKPRESSURE`**: nothing is under pressure, no queue is full, and a retry
+  will never succeed. The refusal is permanent and structural.
+- **`assign` refuses AFTER the WRITE gate**, so the vertex's role is disclosed only to a caller
+  the ACL already admitted to write it.
+- **Only the sweep ROOT is judged.** `propagate(root)` refuses when `root` itself retains
+  nothing; a sweep rooted at a **retaining** ancestor still walks a subtree containing
+  non-retaining vertices exactly as before — they simply carry no mark, because `assign` no
+  longer admits one. Both emission modes ([RFC-0025](0025-stream-class-values.md) §4.1.2 clause 5)
+  answer alike, because the refusal belongs to the verb and not to the framing.
+- **`write` is unaffected and remains the right call.** §D's eager composition dispatches the
+  `on_write` seam and delivers in one step, which is exactly what a non-retaining vertex *can*
+  do. Clause 2 removes a silent failure; it removes no capability.
+- **No new counter.** The refusal is at the verb, so nothing downstream is discarded and there
+  is nothing to attribute — the caller holds the error.
+
+### Conformance / behavioural vectors
+
+| # | Vector | Expected |
+| --- | --- | --- |
+| 1 | `HANDLER` with `on_read`: WRITE then AWAIT | the `on_read`-composed `VALUE`, **not** an error |
+| 2 | `HANDLER` with no `on_read`: AWAIT | `NOT_FOUND` (the read contract's degradation) |
+| 3 | retaining vertex (leaf and branch): AWAIT | unchanged — the vertex's own published value |
+| 4 | `assign` at a `HANDLER` | `SCHEMA_NOT_FOUND`; `on_write` not entered, nothing marked, the covering sweep delivers nothing |
+| 5 | `propagate` at a `HANDLER` (both emission modes) | `SCHEMA_NOT_FOUND`; nothing delivered |
+
+Vectors 1–5 live in `core/tests/nonretaining_contract_test.cpp`, each paired with a positive
+control; the wire face of clause 1 is `core/tests/op_resolve_test.cpp`
+(`test_await_at_a_handler_replies_with_the_composed_value`), controlled against the `FWD{READ}`
+of the same vertex.
+
+### Not in scope
+
+Three stances ruled alongside this one are **documentation, not normative change**, and land in
+the backpressure/sizing guide rather than here: a composed **branch** read stays landed-LKVs-only
+and never invokes descendant handlers mid-walk ([RFC-0016](0016-composed-branch-read.md) stands
+— unbounded user code under a subtree walk is the anti-feature); and the ADR-0049 durability
+latch stays **LKV-only**, with no `on_read` synthesis at subscribe time, "null ⇒ no latch"
+being the specified degradation.

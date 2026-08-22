@@ -1677,26 +1677,46 @@ void graph_t::mark_subtree_acl_dirty(vertex_t* v) {
     v->for_each_descendant([](vertex_t& c) { c.mark_acl_cache_dirty(); });
 }
 
+/**
+ * @brief The HANDLER-role arm of the read contract: compose the value from the `on_read`
+ *        seam, or `NOT_FOUND` when the vertex exposes none.
+ *
+ * ONE spelling, called from BOTH read doors — @ref graph_t::read and, since RFC-0008
+ * Amendment 2, @ref graph_t::await. `await` is the readiness form of a data READ, so the
+ * value it hands back after a wake must be the value `read` would have handed back at that
+ * instant; it used to call `read_stored()` directly and so answered `NOT_FOUND` at a HANDLER
+ * vertex *after the awaited write arrived*. Sharing the arm is what keeps the two doors from
+ * drifting again.
+ *
+ * @warning The READ gate is the CALLER's: both doors check `acl_right_t::READ` up front (await
+ *          must, so a denied caller cannot camp on the condvar), and this arm does NOT
+ *          re-check. Do not call it from an ungated site.
+ *
+ * Out of line, and reached only through a taken branch: the retaining arm of either door keeps
+ * its `read_stored()` fast path, which pays no handler-dispatch cost at all.
+ */
+[[gnu::noinline]] result_t<value_ref_t> graph_t::read_handler_gated(vertex_t* v) const {
+    // Load the seam ONCE: it is an atomic pointer a concurrent retire may swap to
+    // null (RFC-0009 §B.6), so a check-then-call across two loads would race — the
+    // second load could see the cleared seam and throw bad_function_call. The parked
+    // block keeps this reference valid even if the swap fires right after the load.
+    const value_handlers_t& h = v->handlers();
+    // The handler seam is rope-valued (ADR-0053 section 6), so a handler read COMPOSES:
+    // it costs one control block that the published path does not pay. Converting the
+    // seam itself is a separate, lateral change.
+    if (h.on_read) {
+        auto produced = h.on_read();
+        if (!produced) return std::unexpected(produced.error());
+        return value_ref_t::composed(std::move(*produced));
+    }
+    return std::unexpected(status_t::NOT_FOUND);
+}
+
 result_t<value_ref_t> graph_t::read(vertex_handle_t vh, std::string_view caller) const {
     vertex_t* v = vh.get();
     if (!acl_allows(v, caller, acl_right_t::READ))
         return std::unexpected(status_t::PERMISSION_DENIED);
-    if (v->role() == role_t::HANDLER) {
-        // Load the seam ONCE: it is an atomic pointer a concurrent retire may swap to
-        // null (RFC-0009 §B.6), so a check-then-call across two loads would race — the
-        // second load could see the cleared seam and throw bad_function_call. The parked
-        // block keeps this reference valid even if the swap fires right after the load.
-        const value_handlers_t& h = v->handlers();
-        // The handler seam is rope-valued (ADR-0053 section 6), so a handler read COMPOSES:
-        // it costs one control block that the published path does not pay. Converting the
-        // seam itself is a separate, lateral change.
-        if (h.on_read) {
-            auto produced = h.on_read();
-            if (!produced) return std::unexpected(produced.error());
-            return value_ref_t::composed(std::move(*produced));
-        }
-        return std::unexpected(status_t::NOT_FOUND);
-    }
+    if (v->role() == role_t::HANDLER) return read_handler_gated(v);
     // The branch/leaf fork (RFC-0005 §C follow-on): a vertex with ≥ 1 registered child
     // serves the composed branch read — the folded POINT tree of its registered
     // descendants' landed LKVs. AFTER the handler seam (a HANDLER target's on_read keeps
@@ -2126,10 +2146,32 @@ result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, std::string_view c
     return {};
 }
 
+namespace {
+/**
+ * @brief Does @p r RETAIN a last-known-value — the one hard dependency RFC-0008's
+ *        sweep plane has on the state plane?
+ *
+ * `STORED_VALUE` and `STREAM` publish an LKV every store; a `HANDLER` hands the value to
+ * `on_write` and keeps nothing (`graph_t::store_value`'s null-shared_ptr success sentinel).
+ * Since `propagate` takes no value argument — "the last-known-value is the single source of
+ * truth", RFC-0008 §C — the accumulate-then-flush pair has nothing to flush at a vertex that
+ * retains nothing, and RFC-0008 Amendment 2 refuses it at the verb rather than sweeping
+ * silence. One load on two cold verbs.
+ */
+[[nodiscard]] constexpr bool role_retains(role_t r) noexcept { return r != role_t::HANDLER; }
+}  // namespace
+
 result_t<void> graph_t::assign(vertex_handle_t vh, rope_t value, std::string_view caller) {
     vertex_t* v = vh.get();
     if (!acl_allows(v, caller, acl_right_t::WRITE))
         return std::unexpected(status_t::PERMISSION_DENIED);
+    // A non-retaining vertex has no state plane for the STATE half to land in (RFC-0008
+    // Amendment 2). AFTER the ACL gate, so the refusal discloses the role only to a caller
+    // already admitted to write. `SCHEMA_NOT_FOUND` is the taxonomy's contract-mismatch
+    // status — the same answer `history` / `drain_unflushed` give a non-STREAM vertex —
+    // and deliberately NOT `BACKPRESSURE`: nothing is under pressure and a retry will
+    // never succeed. Use `write`, which dispatches the handler seam and delivers eagerly.
+    if (!role_retains(v->role())) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
     // The STATE half only (RFC-0008 §A): swap the last-known-value / append the stream
     // ring / bump the write sequence (waking await), then mark v for the next covering
     // sweep. A branch POINT assigns each descendant the same way. Sends nothing.
@@ -2310,7 +2352,17 @@ void graph_t::deliver_current(vertex_t* v) {
     deliver_vertex(v, *sp);
 }
 
-void graph_t::propagate(vertex_handle_t v) { propagate_impl(v.get()); }
+result_t<void> graph_t::propagate(vertex_handle_t v) {
+    // The sweep root's OWN delivery is unconditional (below), and it reads the LKV — so a root
+    // that retains nothing is a sweep that was always going to deliver its own value nowhere.
+    // Refused at the verb, with `assign`'s status and for `assign`'s reason (RFC-0008
+    // Amendment 2). Descendants are untouched by this: a sweep rooted at a RETAINING ancestor
+    // still walks past non-retaining vertices exactly as before — they simply carry no mark,
+    // because `assign` no longer admits one.
+    if (!role_retains(v.get()->role())) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+    propagate_impl(v.get());
+    return {};
+}
 
 result_t<void> graph_t::propagate(vertex_handle_t v, emission_mode_t mode) {
     // PER_VERTEX is the one-arg door verbatim — not a re-implementation of it, so the shipped
@@ -2318,10 +2370,11 @@ result_t<void> graph_t::propagate(vertex_handle_t v, emission_mode_t mode) {
     // RFC-0025 §4.1.2 clause 5 adds the alternative, it does not move the floor). The FOLD
     // body lives beside the other folds, below `read_subtree_folded`, because it shares their
     // header framing.
-    if (mode != emission_mode_t::FOLD) {
-        propagate_impl(v.get());
-        return {};
-    }
+    if (mode != emission_mode_t::FOLD) return propagate(v);
+    // The non-retaining refusal is the VERB's, not the emission mode's: a fold rooted at a
+    // vertex that retains nothing has the same nothing to fold (RFC-0008 Amendment 2), and
+    // refusing it here keeps the two modes answering alike for the same root.
+    if (!role_retains(v.get()->role())) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
     return propagate_folded_impl(v.get());
 }
 
@@ -2526,8 +2579,20 @@ result_t<value_ref_t> graph_t::await(vertex_handle_t vh, std::chrono::nanosecond
         return std::unexpected(status_t::PERMISSION_DENIED);
     const std::uint64_t seq0 = v->current_seq();
     if (!v->wait_for_change(seq0, timeout)) return std::unexpected(status_t::TIMEOUT);
+    // Serve the woken value through the SAME ROLE DISPATCH `read` runs (RFC-0008 Amendment 2).
+    // A HANDLER vertex answers `read` from its `on_read` seam and stores nothing, so the old
+    // `read_stored()` here answered NOT_FOUND *after* the awaited write landed — await
+    // contradicting the read contract it names as its own. The degradation that remains is the
+    // read contract's: a handler with no `on_read` still answers NOT_FOUND, exactly as `read`
+    // does. ACL was checked up front, so the arm is entered already gated.
+    //
+    // A RETAINING vertex (STORED_VALUE / STREAM) keeps the published fast path below,
+    // untouched — the branch/leaf fork `read` takes is deliberately NOT mirrored here: await
+    // observes assigns at ITS OWN vertex (RFC-0008 §A), so a branch vertex's await hands back
+    // that vertex's own last-known-value, as it always has, not the composed subtree fold.
+    if (v->role() == role_t::HANDLER) return read_handler_gated(v);
     std::shared_ptr<const rope_t> sp = v->read_stored();
-    if (!sp) return std::unexpected(status_t::NOT_FOUND);  // e.g. a Handler-role write
+    if (!sp) return std::unexpected(status_t::NOT_FOUND);  // never assigned
     return value_ref_t{std::move(sp)};
 }
 

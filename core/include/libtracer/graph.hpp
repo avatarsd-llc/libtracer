@@ -1295,6 +1295,12 @@ class graph_t {
      * observes at/above it). WRITE-gated like @ref write; never gated by delivery_mode. A
      * branch POINT decomposes and assigns each descendant (no notify). Pair with
      * @ref propagate for the "update many, propagate once" workflow.
+     *
+     * @retval SCHEMA_NOT_FOUND @p v's role RETAINS NOTHING (a `HANDLER`), so the state half has
+     *         nowhere to land and the covering sweep — which takes no value argument and reads
+     *         the last-known-value — would deliver silence (RFC-0008 Amendment 2). Checked
+     *         after the WRITE gate. Use @ref write instead: it dispatches the `on_write` seam
+     *         and delivers eagerly, which is what a non-retaining vertex can actually do.
      */
     [[nodiscard]] result_t<void> assign(vertex_handle_t v, rope_t value,
                                         std::string_view caller = {});
@@ -1306,8 +1312,13 @@ class graph_t {
      * subtree per each descendant's delivery_mode: IF_NEWER descendants assigned since the
      * last covering sweep, and every UNCONDITIONAL descendant. Reads the last-known-value
      * — no value argument. Costs O((pending + unconditional)-in-subtree).
+     *
+     * @retval SCHEMA_NOT_FOUND The sweep ROOT retains nothing (a `HANDLER`) — @ref assign's
+     *         refusal, at the other half of the pair (RFC-0008 Amendment 2). Only the root is
+     *         judged: a sweep rooted at a retaining ancestor still walks a subtree containing
+     *         non-retaining vertices exactly as before.
      */
-    void propagate(vertex_handle_t v);
+    [[nodiscard]] result_t<void> propagate(vertex_handle_t v);
     /**
      * @brief Propagate with an explicit EMISSION MODE (RFC-0025 §4.1.2, Amendment 3 clause 5).
      *
@@ -1338,6 +1349,8 @@ class graph_t {
      *   trailer into payload `TIME` children. A selected STREAM vertex refuses here too: its
      *   since-flush LIST cannot ride a §B node, which admits at most one `VALUE`.
      * - `BACKPRESSURE` — the fold could not be framed within the injected memory seams.
+     * - `SCHEMA_NOT_FOUND` — the root retains nothing; the VERB's refusal, shared with the
+     *   one-arg overload, so both modes answer alike for the same root.
      *
      * @param v    The sweep root; always delivered, never gated by its own `delivery_mode`.
      * @param mode The emission mode.
@@ -1444,7 +1457,21 @@ class graph_t {
     void set_pin_payload_ratio(vertex_handle_t v, std::uint32_t k);
     /**
      * @brief Block until the vertex's value changes or @p timeout elapses; return the value.
-     * @return The stored value as a rope, or a `status_t` (e.g. `TIMEOUT`).
+     *
+     * The READINESS FORM OF A DATA READ (RFC-0008 §A: `await` observes `assign`s at its own
+     * vertex, in the state plane, independent of propagation) — so after a wake the value is
+     * served through the SAME ROLE DISPATCH @ref read runs, and the two doors answer alike at
+     * the same instant. A `HANDLER` vertex therefore answers from its `on_read` seam
+     * (RFC-0008 Amendment 2, correcting a wake that used to answer `NOT_FOUND` *after* the
+     * awaited write landed); a handler exposing no `on_read` still answers `NOT_FOUND`, which
+     * is the read contract's own degradation, not await's.
+     *
+     * The BRANCH fork @ref read takes is deliberately not mirrored: await watches this
+     * vertex's own write sequence, so a branch vertex hands back its own last-known-value, not
+     * the composed subtree fold. The READ gate is checked BEFORE the wait, so a denied caller
+     * cannot camp on the condition variable.
+     *
+     * @return The value, or a `status_t` (`TIMEOUT`, `PERMISSION_DENIED`, `NOT_FOUND`).
      */
     [[nodiscard]] result_t<value_ref_t> await(vertex_handle_t v, std::chrono::nanoseconds timeout,
                                               std::string_view caller = {});
@@ -2459,6 +2486,12 @@ class graph_t {
     // ADR-0017). Composes the child key (parent key + the SPEC `name` NAME), dispatches
     // on the SPEC `type`. Unknown type => SCHEMA_NOT_FOUND; duplicate name => PATH_IN_USE.
     [[nodiscard]] result_t<void> create_child(vertex_t* parent, const view_t& spec_value);
+    // The HANDLER-role arm of the read contract (compose from `on_read`, else NOT_FOUND),
+    // shared by BOTH read doors — `read` and, per RFC-0008 Amendment 2, `await` — so the
+    // readiness form cannot drift from the form it names. ALREADY-GATED: each door checks
+    // acl_right_t::READ up front and this arm does not re-check. Out of line so the
+    // retaining arm of either door keeps its `read_stored()` fast path unencumbered.
+    [[nodiscard]] result_t<value_ref_t> read_handler_gated(vertex_t* v) const;
     // ":schema" read => a POINT descriptor (name + settings).
     [[nodiscard]] result_t<view_t> read_schema(vertex_t* v) const;
     // ":identity" read => the node-scoped SETTINGS{kind,key} record (RFC-0011 §B), or

@@ -104,7 +104,7 @@ class graph_t {
     result_t<value_ref_t> await(vertex_handle_t, std::chrono::nanoseconds,
                                 std::string_view caller = {});
     result_t<void>        assign(vertex_handle_t, rope_t, std::string_view caller = {});
-    void                  propagate(vertex_handle_t);
+    result_t<void>        propagate(vertex_handle_t);
     void                  set_delivery_mode(vertex_handle_t, delivery_mode_t);
     result_t<std::vector<rope_t>> history(vertex_handle_t) const;   // stream window (RETAINED)
     // RFC-0008 §E drain cursor — what the stream OWES, and how to say it is paid
@@ -159,7 +159,7 @@ temporary lambda does not compile.
 
 ```{admonition} `ctx` lives until the reclamation policy's grace point — and the library tells you when
 :class: important
-`unsubscribe` **deactivates** the slot (`core/include/libtracer/graph.hpp:1670`); a
+`unsubscribe` **deactivates** the slot (`core/include/libtracer/graph.hpp:1697`); a
 delivery already in flight snapshotted the edge and completes, and the `{fn, ctx}` pair is
 the one leg of that snapshot the library owns no copy of. So "when may I free `ctx`?" is answered by this build's **reclamation policy**
 ([ADR-0080](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0080-reclamation-policy-is-a-build-time-closed-per-target-seam.md),
@@ -176,7 +176,7 @@ The hook runs exactly once, on your thread, outside every graph lock: **inline, 
 **before the enclosing `write()` returns** when you called it from inside one. The
 one-argument overload retires the edge identically and simply carries no signal — which is
 sufficient whenever you unsubscribe from outside a callback, since that call is already
-quiescent on return (`core/include/libtracer/graph.hpp:1628` states the bound on `ctx`).
+quiescent on return (`core/include/libtracer/graph.hpp:1655` states the bound on `ctx`).
 ```
 
 ```{admonition} No strings on the hot path
@@ -226,7 +226,7 @@ for (...) g.write(v, p.field(), setpoint_tlv);           // hot loop — zero st
 ## What a read hands back
 
 `read` and `await` return `result_t<value_ref_t>`, not `result_t<rope_t>`
-(`core/include/libtracer/graph.hpp:1270,1449` by handle, `:2046,2052` by path;
+(`core/include/libtracer/graph.hpp:1270,1476` by handle, `:2073,2079` by path;
 `value_ref_t` at `core/include/libtracer/vertex.hpp:241`). A `value_ref_t` is an **owning
 reference** to the value the vertex published: the LKV slot holds it as a
 `std::shared_ptr<const rope_t>`, so handing that reference back costs a refcount clone of
@@ -286,6 +286,15 @@ notion of a batch:
 value — it reads the last-known-value — and always delivers the vertex named, because that
 vertex is the explicit target; the mode gates only what an **ancestor's** sweep sweeps up.
 Its cost is O((pending + unconditional) in subtree).
+
+**Both verbs require RETENTION** ([RFC-0008](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0008-vertex-operations-assign-propagate.md)
+Amendment 2). A `HANDLER` vertex retains nothing — it hands the value to `on_write` and stores
+no LKV — so the pair had nothing to carry between the two calls and the sweep delivered silence.
+`assign(v, …)` and `propagate(v)` therefore answer `SCHEMA_NOT_FOUND` when `v`'s role retains
+nothing (the contract-mismatch status, not `BACKPRESSURE`); use `write`, which dispatches the
+seam and delivers in one step. Only the sweep **root** is judged. The same amendment makes
+`await` serve its woken value through the **same role dispatch** `read` uses, so a handler
+vertex answers an `await` with its `on_read`-composed value instead of `NOT_FOUND`.
 
 `set_delivery_mode(v, mode)` sets that per-vertex policy. It is a wiring-time host API call,
 in the same family as `set_history_depth`, `set_pin_payload_ratio` and `set_app_fields` — an

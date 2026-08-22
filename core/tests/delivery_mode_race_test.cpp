@@ -145,7 +145,7 @@ void test_no_double_delivery_across_a_mode_flip() {
     // which are right to refuse to call such a run a pass.
     for (;;) {
         g_hits.store(0, std::memory_order_relaxed);
-        g.propagate(root);  // the only deliverer in this test
+        (void)g.propagate(root);  // the only deliverer in this test
         const int hits = g_hits.load(std::memory_order_relaxed);
         if (hits > worst) worst = hits;
         ++sweeps;
