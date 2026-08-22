@@ -398,6 +398,8 @@ A schema's relationship to vertex roles:
 
 The schema cannot enumerate the role exhaustively; an implementer is free to invent new roles as long as the read/write/subscribe contract is satisfied.
 
+> **Which role, though?** The table above says what each role's `read` *returns*; it deliberately states no decision procedure for picking one. That procedure is retention-shaped — the per-vertex retention switch **is** the role system — and it lives in [22-backpressure-and-sizing.md](22-backpressure-and-sizing.md) §4 "Do you need the last-known-value?": the five planes that consume the last-known-value, when a vertex that needs none of them should be a `HANDLER` instead, and the two costs that choice does and does not remove.
+
 ---
 
 ## In-band creation and the type catalog

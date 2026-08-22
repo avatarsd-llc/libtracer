@@ -231,6 +231,8 @@ For a parser/sender writer in another language: read 01, 03, 05, 06 in that orde
 
 For a forwarder implementer: 02, 03, 04, 07 are mandatory; 06 is illustrative of what you'll be routing.
 
+For a **deployer sizing a node** — someone who has the protocol and now has to decide how much RAM each stage gets and where the pipeline is allowed to queue or shed: [22-backpressure-and-sizing.md](22-backpressure-and-sizing.md), with [09-memory-substrate.md](09-memory-substrate.md) and [12-deployment-profiles.md](12-deployment-profiles.md) beside it.
+
 ---
 
 ## Out-of-scope for this reference suite
