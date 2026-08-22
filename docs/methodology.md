@@ -515,25 +515,35 @@ for `await` (a readiness sequence has to live somewhere), for composed reads acr
 subtree, and for the per-vertex ACL. An engine that only *routes* keeps no such object and
 so has nothing to scale in the number of addresses.
 
-**What residency costs is bytes, and only bytes.** That is the whole of the trade, and it
-is measured: the decomposition sweep
+**What residency costs is bytes.** That is the axis the trade is paid on, and it is
+measured rather than derived: the decomposition sweep
 ([#1485](https://github.com/avatarsd-llc/libtracer/issues/1485) /
 [#1496](https://github.com/avatarsd-llc/libtracer/pull/1496)) reads **132 B of heap and
 140 B of RSS per vertex** at 10⁶ vertices, converging from above as the upper tree's fixed
-cost amortizes, against a computed ~120 B floor — **+10 %**, measured rather than derived.
-A million addresses is 132 MB. The **O(#addresses) residency is the model** and no
-footprint work turns it into O(1); the **constant** in front of it is fair game and is
-actively ratcheted on this page, bytes at +2 % and block counts exactly.
+cost amortizes, against a computed ~120 B floor — **+10 %** over the arithmetic. A million
+addresses is **132 MB of heap and 140 MB of RSS**. The **O(#addresses) residency is the
+model** and no footprint work turns it into O(1); the **constant** in front of it is fair
+game and is actively ratcheted on this page, bytes at +2 % and block counts exactly.
 
-**Residency is NOT a per-operation cost, and the control arm that decides this is
+This is also where the boundary actually bites the target the project cares most about. On
+a **wide** host 132 MB for a million addresses is unremarkable; on the **narrow** end — the
+constrained MCU profile living inside a ~16 KB RAM budget — the per-vertex byte figure is
+the number that decides how many addresses a node may have at all. Memory, not latency, is
+the axis on which "every distinct address is resident state" is a real constraint.
+
+**Residency is NOT a per-operation LATENCY cost, and the control arm that decides this is
 unambiguous.** Hold **one million vertices resident and touch exactly one**: a write costs
 **90 ns** — the same 90 ns it costs with a thousand resident. Resolving a single hot address
 moves 70 → 90 ns across three decades. Descent is population-independent outright
 (ADR-0057, now verified rather than assumed): a fixed-shape probe address resolves in
 **60 ns at 10³ and 60 ns at 10⁶** warm, and **90 ns flat** with its lines evicted between
-samples. Everything that grows, grows with the **touched** set, not the resident set. So
-this boundary must not be argued from a latency curve, and the earlier draft of this
-section that did so was wrong on its own evidence.
+samples. Everything that grows, grows with the **touched** set, not the resident set.
+
+Read that refutation at exactly its own width. It kills the claim that residency is a
+**latency** wall — which is what the earlier draft of this section asserted, and it was
+wrong on its own evidence. It does **not** say the residency model is free: the bytes above
+are the cost, and they are real. A boundary can be genuine on one axis and absent on
+another, and saying which is which is the whole job of this section.
 
 **The topic-count curve in the Zenoh chapter is not this boundary's evidence.** It stands
 as measured — the fairness audit
@@ -555,15 +565,27 @@ cold-line traffic, a cost of the working set rather than of the registry. This i
 asymmetry the Fairness section above records against the `inproc-path` pair, read from the
 other end: there it is a defect in how the two arms spelled their destination, here it is
 the reason the curve it produced cannot be charged to residency. One finding, stated twice
-because a reader arrives at it from either direction; the `topics-bound` / `topics-addr`
-pair is the fix, and it measures **both** spellings on **both** engines.
+because a reader arrives at it from either direction. The `topics-bound` / `topics-addr`
+pair is the fix — an instrument built to measure **both** spellings on **both** engines —
+but it is an instrument, not yet a result; see the caveat below before reading anything
+into it.
 
 Two caveats on that decomposition, because it is fresh. Its arms are **not gated** — they
 are new and their run-to-run stability is unproven, and `POINTS` is a promise about
-stability. And the **cross-engine topic-count arm is preliminary**: single-round,
-zenoh-side only, with no arm-order flip, because CI compiles invalidated two attempts and
-the runs were discarded rather than published. The only cross-engine topic-count numbers on
-this page remain the audit's own. The decomposition itself was taken on a quiet box
+stability.
+
+And **the replacement topic-count arm has not produced a comparison yet.** Its preliminary
+run is single-round with no arm-order flip, it captured the **Zenoh side only** — the
+libtracer half was never taken at all, so no two-sided result exists to read — and CI
+compiles invalidated two attempts, after which the runs were discarded rather than
+published. One preliminary Zenoh figure is additionally suspected of having entered a
+*different upstream code path* rather than sitting on a scaling curve, which is on #1485 as
+a hypothesis the completed run must confirm or kill; it is deliberately not reproduced on
+this page and nothing here is derived from it. **No counter-number to the audit's result is
+being offered**, and the only cross-engine topic-count numbers on this page remain the
+audit's own. What survives without any of it is the structural point, which needs no new
+measurement: the two rows the old comparison charted against each other were **different
+operations**. The decomposition itself was taken on a quiet box
 (1-minute load 0.64–1.15, no `cc1plus` alive, 31 CPUs, best of 3 rounds with the arm order
 flipped on alternate rounds, two full ladders agreeing to ~2 % at 10⁶).
 
