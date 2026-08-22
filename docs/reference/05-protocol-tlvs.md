@@ -1088,7 +1088,7 @@ The seams a node's graph answers for:
 | `:stats.mem.ring` | the graph-level default receiver-ring source | the same five |
 | `:stats.graph.delivery` | the graph's delivery-drop door (the net plane counts through it too) | `no_target`, `denied`, `out_of_memory`, `fan_out_truncated` |
 
-Worked bytes — the graph-door block on a fresh node, **113 bytes** (the `field/field-stats-block` vector):
+Worked bytes — the graph-door block on a fresh node, **113 bytes** (the `settings/stats-seam-block` vector):
 
 ```
 0B 40 6D 00                                SETTINGS: type=0x0B opt=0x40(PL=1) len=109

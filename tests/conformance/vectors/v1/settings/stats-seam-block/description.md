@@ -1,4 +1,4 @@
-# field/field-stats-block
+# settings/stats-seam-block
 
 [RFC-0010](../../../../../../docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §Amendment 1
 (2026-08-22, [#1503](https://github.com/avatarsd-llc/libtracer/issues/1503) step 5) — the

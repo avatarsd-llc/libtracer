@@ -406,8 +406,13 @@ enum class stats_seam_t : std::uint8_t {
  * `core/STYLE.md` §Introspection snapshot-coherence clause can hold — so no member and no
  * indexed spelling names anything, and neither does a bare `:stats` or a bare
  * `:stats.<class>`: aggregating seams is exactly what ADR-0079 forbids.
+ *
+ * Out of line and `cold` for the same measured reason as @ref read_stats below, and reached
+ * only when the head already spelled `stats` — a field read of any other name pays one
+ * string compare and never this call.
  */
-[[nodiscard]] stats_seam_t stats_seam(const field_path_t& field) noexcept {
+[[nodiscard, gnu::noinline, gnu::cold]] stats_seam_t stats_seam(
+    const field_path_t& field) noexcept {
     if (field.steps.size() != 3) return stats_seam_t::NONE;
     for (const field_step_t& s : field.steps)
         if (!plain_step(s)) return stats_seam_t::NONE;
@@ -440,8 +445,20 @@ void emit_counter(std::vector<std::byte>& out, std::string_view noun, std::uint6
  *
  * A free function rather than a `graph_t` member on purpose: every accessor it reads is
  * already public, so the census needs no new public symbol and no friendship.
+ *
+ * `noinline` + `cold`, and the honest note is that this is PROPHYLACTIC, not a diagnosed
+ * fix. The first CI run of this change read a reproduced -16% on `compact-forward` — a
+ * point this code is not on — and the local interleaved A/B could not reproduce it in
+ * EITHER direction (x1.01 with these attributes, x1.02 without, against the same baseline
+ * on the same host). The attributes stay because they are right on their own terms: a
+ * census is polled at a supervisor's cadence, so its block-building code belongs in
+ * `.text.unlikely` behind one call rather than partitioned through this TU's hot text —
+ * exactly the shape #1503 step 3 had to adopt when seven `fetch_add`s inlined at their drop
+ * sites cost `bench_forward_demux` +7.3% until one `[[gnu::noinline, gnu::cold]]
+ * count_drop` took them out of line.
  */
-[[nodiscard]] result_t<view_t> read_stats(const graph_t& g, stats_seam_t seam) {
+[[nodiscard, gnu::noinline, gnu::cold]] result_t<view_t> read_stats(const graph_t& g,
+                                                                    stats_seam_t seam) {
     std::vector<std::byte> members;
     switch (seam) {
         case stats_seam_t::MEM_CONTROL:

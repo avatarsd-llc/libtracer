@@ -885,7 +885,7 @@ seam", never as an error.
 
 ### Conformance
 
-`tests/conformance/vectors/v1/field/field-stats-block` — the graph-door block, byte-exact,
+`tests/conformance/vectors/v1/settings/stats-seam-block` — the graph-door block, byte-exact,
 with the other three answers named against the byte-identical vectors already held
 (`acl/denied-caller-undeclared-app-field` for the denied caller;
 `settings/removed-knob` for an unrecognised spelling and for the AWAIT refusal). Bound

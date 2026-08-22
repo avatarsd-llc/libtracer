@@ -119,7 +119,7 @@ std::uint64_t counter(const tr::wire::tlv_t& block, std::string_view noun) {
  * @brief §D.3 — one seam, one block, one TLV: the shape, the vocabulary, and the values.
  *
  * The block is pinned BYTE-EXACT for the all-zero graph-door seam, because those are the
- * bytes the `field/field-stats-block` conformance vector holds; the mem seam is asserted
+ * bytes the `settings/stats-seam-block` conformance vector holds; the mem seam is asserted
  * against a source whose numbers the test itself provokes, so a block that merely LOOKED
  * right (all zeros, wrong seam, stale sample) cannot pass.
  */
@@ -148,7 +148,7 @@ void test_one_seam_is_one_block() {
             "010008000000000000000000"                    // VALUE u64 = 0
             "0200110066616e5f6f75745f7472756e6361746564"  // NAME "fan_out_truncated"
             "010008000000000000000000";                   // VALUE u64 = 0
-        check(hex(bytes) == expect, "the block is byte-exact (the field-stats-block vector)");
+        check(hex(bytes) == expect, "the block is byte-exact (the stats-seam-block vector)");
         if (hex(bytes) != expect) std::printf("  actual: %s\n", hex(bytes).c_str());
     }
 

@@ -221,15 +221,15 @@ role and schema).
 
 | Plane | Needs the LKV because |
 | --- | --- |
-| Local + remote `READ` | a leaf read serves the stored pointer (`core/src/graph.cpp:1828`; the `FWD{READ}` terminus is the same call) — null ⇒ `NOT_FOUND`, unless the vertex composes an answer from its `on_read` seam (`core/src/graph.cpp:1794`) |
-| `await`'s return value | the wake rides the write sequence and the stripe condvar (retention-free), but the value handed back is served through the **same role dispatch** `read` runs (`core/src/graph.cpp:2691`) |
-| `assign` / `propagate` sweep | **the hard dependency** — RFC-0008 §C: `propagate` takes no value argument, "the last-known-value is the single source of truth" (`core/src/graph.cpp:2435`) |
-| Composed subtree reads | RFC-0016 serves **landed** LKVs only, one atomic load per node (`core/src/graph.cpp:3951`); a non-retaining child contributes nothing |
+| Local + remote `READ` | a leaf read serves the stored pointer (`core/src/graph.cpp:1845`; the `FWD{READ}` terminus is the same call) — null ⇒ `NOT_FOUND`, unless the vertex composes an answer from its `on_read` seam (`core/src/graph.cpp:1811`) |
+| `await`'s return value | the wake rides the write sequence and the stripe condvar (retention-free), but the value handed back is served through the **same role dispatch** `read` runs (`core/src/graph.cpp:2708`) |
+| `assign` / `propagate` sweep | **the hard dependency** — RFC-0008 §C: `propagate` takes no value argument, "the last-known-value is the single source of truth" (`core/src/graph.cpp:2452`) |
+| Composed subtree reads | RFC-0016 serves **landed** LKVs only, one atomic load per node (`core/src/graph.cpp:3968`); a non-retaining child contributes nothing |
 | Late-joiner replay | the durability latch snapshots the LKV at edge-add (RFC-0022 §3.A bit 5, `core/include/libtracer/vertex.hpp:1413`) |
 
 **Not on the list: the whole callback / delivery plane.** Fan-out never reads the slot. A
-storing role delivers the just-published pointer (`core/src/graph.cpp:2235`); a HANDLER delivers
-from the incoming value (`core/src/graph.cpp:2182`). If subscribers are all a vertex has, it does
+storing role delivers the just-published pointer (`core/src/graph.cpp:2252`); a HANDLER delivers
+from the incoming value (`core/src/graph.cpp:2199`). If subscribers are all a vertex has, it does
 not need to retain.
 
 ### What shipped in RFC-0008 Amendment 2
@@ -242,7 +242,7 @@ preceded it:
   plus the `VALUE`. The degradation that remains is the *read contract's* — a handler with no
   `on_read` still answers `NOT_FOUND`, exactly as `read` does.
 - **`assign` and `propagate` refuse a non-retaining vertex with `SCHEMA_NOT_FOUND`**
-  (`core/src/graph.cpp:2270`, `core/src/graph.cpp:2452-2458`) — the taxonomy's contract-mismatch
+  (`core/src/graph.cpp:2287`, `core/src/graph.cpp:2469-2475`) — the taxonomy's contract-mismatch
   status, deliberately **not** `BACKPRESSURE`: nothing is under pressure and a retry will never
   succeed. At a handler vertex the call is **`write`**, which dispatches the seam and delivers
   eagerly; the accumulate-then-flush pair needs retention. `propagate(v)` is
@@ -270,7 +270,7 @@ preceded it:
    (#1487 marks the slot do-not-touch).
 2. **Today the HANDLER fan-out pays a rope clone the storing path avoids.** The storing roles
    hand the published pointer straight to delivery; the handler leg takes a nothrow clone first
-   (`core/src/graph.cpp:2185`). It is the cold path and the clone is refcount-only, but on a
+   (`core/src/graph.cpp:2202`). It is the cold path and the clone is refcount-only, but on a
    wide-fan-out handler vertex it is real. Tracked and being quantified as
    [#1505](https://github.com/avatarsd-llc/libtracer/issues/1505); until that rules, do not choose
    HANDLER *for throughput* on a heavily-subscribed vertex — choose it for the retention
