@@ -182,6 +182,79 @@ void reports_what_to_size_against() {
     check(f.src.overflowed() == 0, "an adequately sized table loses nothing");
 }
 
+/**
+ * @brief PRIMARY EXHAUSTION IS COUNTED — the number that did not exist before #1503.
+ *
+ * `try_alloc → nullptr` was uncounted at every source in the tree, so a host holding a
+ * `block_source_t&` could not tell a slab that was merely full from one that was refusing
+ * work. The counter must move on refusal, `largest_refused` must be the TAIL rather than
+ * the last or the mean, and `overflowed()` must NOT move — it counts a recycling degrade
+ * and keeps that meaning (core/STYLE.md §Introspection).
+ */
+void primary_exhaustion_is_counted() {
+    std::printf("\nprimary exhaustion (#1492/#1503):\n");
+    fixture_t<256, 4> f;
+
+    const auto fresh = f.src.stats();
+    check(fresh.capacity == 256, "capacity is the INJECTED slab, not a constant");
+    check(fresh.in_use == 0 && fresh.peak == 0, "a fresh pool holds nothing");
+    check(fresh.refused == 0 && fresh.largest_refused == 0, "and has refused nothing");
+
+    void* const a = f.src.try_alloc(128, 8);
+    void* const b = f.src.try_alloc(128, 8);
+    check(a != nullptr && b != nullptr, "the slab serves exactly its two blocks");
+    check(f.src.stats().in_use == 256, "in_use is USED-polarity — 256 of 256 carved");
+    check(f.src.stats().peak == 256, "and peak tracks it (carving is monotonic)");
+    check(f.src.stats().refused == 0, "nothing refused while the slab still fitted");
+
+    check(f.src.try_alloc(64, 8) == nullptr, "the third request cannot be carved");
+    check(f.src.stats().refused == 1, "and IS counted — the arm that was silent before");
+    check(f.src.stats().largest_refused == 64, "largest_refused records its size");
+    check(f.src.overflowed() == 0, "overflowed() did NOT move: a refusal is not a degrade");
+
+    check(f.src.try_alloc(512, 8) == nullptr, "a bigger request is refused too");
+    check(f.src.stats().refused == 2, "counted");
+    check(f.src.stats().largest_refused == 512, "and the TAIL is what largest_refused holds");
+    check(f.src.try_alloc(16, 8) == nullptr, "a smaller refusal follows");
+    check(f.src.stats().refused == 3, "counted");
+    check(f.src.stats().largest_refused == 512, "without pulling largest_refused back down");
+    check(f.src.overflowed() == 0, "and still no recycling degrade anywhere in this run");
+
+    // The two counters are independent in BOTH directions: drive the class table over
+    // while the slab is nowhere near full, and only `overflowed()` may move.
+    fixture_t<1024, 1> g;
+    void* const p = g.src.try_alloc(16, 8);
+    void* const q = g.src.try_alloc(32, 8);
+    g.src.release(p, 16, 8);
+    g.src.release(q, 32, 8);
+    check(g.src.overflowed() == 1, "the second shape had no class slot — a recycling degrade");
+    check(g.src.stats().refused == 0, "which refused NOBODY, so refused stays 0");
+
+    // The blocks stay carved and the source keeps working (the release-side contract).
+    check(f.src.name() != nullptr, "the source is still usable after refusing");
+    f.src.release(a, 128, 8);
+    check(f.src.try_alloc(128, 8) == a, "a recycled block is served without a fresh carve");
+    check(f.src.stats().refused == 3, "and serving from the free list refuses nothing");
+    f.src.release(b, 128, 8);
+}
+
+/** @brief The base seam answers for a source that counts nothing — all-zero, not a lie. */
+void base_seam_default_is_all_zero() {
+    std::printf("\nthe optional-virtual default:\n");
+    tr::mem::block_source_t& heap = tr::mem::heap_source();
+    const auto s = heap.stats();
+    check(s.capacity == 0 && s.in_use == 0 && s.peak == 0,
+          "heap_source_t reports nothing rather than fabricating a ceiling");
+    check(s.refused == 0 && s.largest_refused == 0, "including its refusal counters");
+
+    // ...and the seam is polymorphic: a pool read THROUGH the base reference answers.
+    fixture_t<128, 2> f;
+    tr::mem::block_source_t& erased = f.src;
+    check(erased.try_alloc(256, 8) == nullptr, "an oversize request is refused");
+    check(erased.stats().refused == 1 && erased.stats().capacity == 128,
+          "and a host holding only the SEAM can now see it (#1492)");
+}
+
 /** @brief The hosted policy compiles, guards, and leaves behaviour identical. */
 void hosted_sync_policy_works() {
     std::printf("\nsynchronization policy:\n");
@@ -217,6 +290,8 @@ int main() {
     class_table_overflow_is_safe();
     foreign_pointer_is_ignored();
     reports_what_to_size_against();
+    primary_exhaustion_is_counted();
+    base_seam_default_is_all_zero();
     hosted_sync_policy_works();
 
     return tr::testing::summary("mem_pool_source");

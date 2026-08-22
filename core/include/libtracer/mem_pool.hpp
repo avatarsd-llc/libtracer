@@ -81,10 +81,20 @@ class pool_t final : public mem_backend_t {
 
     [[nodiscard]] std::size_t capacity() const noexcept {
         return slot_count_;
-    } /**< @brief Total slots. */
-    [[nodiscard]] std::size_t available() const noexcept {
-        return free_count_;
-    } /**< @brief Free slots. */
+    } /**< @brief Total slots — the effective ceiling, i.e. whatever fitted in the caller's
+         slab, never a constant. */
+    /**
+     * @brief FREE slots.
+     *
+     * @note The one shipped free-polarity accessor, kept for compatibility. New code reads
+     *       @ref in_use — the unified vocabulary is used-polarity throughout
+     *       (`core/STYLE.md` §Introspection), and `available` is the derived legacy name
+     *       (`capacity() - in_use()`).
+     */
+    [[nodiscard]] std::size_t available() const noexcept { return free_count_; }
+    /** @brief Slots handed out and not yet returned — occupancy in the used-polarity
+     *         vocabulary (`core/STYLE.md` §Introspection). */
+    [[nodiscard]] std::size_t in_use() const noexcept { return slot_count_ - free_count_; }
 
    private:
     static constexpr std::size_t kNil = ~std::size_t{0};
@@ -237,6 +247,25 @@ class synchronized_pool_t final : public mem_backend_t {
 
     /** @brief Total slots (delegated to the inner @ref pool_t). */
     [[nodiscard]] std::size_t capacity() const noexcept { return inner_.capacity(); }
+
+    /**
+     * @brief Slots handed out and not yet returned (delegated to the inner @ref pool_t).
+     *
+     * The wrapper used to forward @ref capacity and STOP there, so wrapping a bounded
+     * resource in its thread-safe form lost half its census: a host could read the ceiling
+     * it had injected but not how much of it was gone — on precisely the pool that is
+     * shared, i.e. the one whose occupancy is hardest to reason about (#1503 finding 4).
+     *
+     * Read without taking @p Sync, per the snapshot-coherence clause (`core/STYLE.md`
+     * §Introspection): locking here would put a critical section on a ~120 ns free-list op
+     * in order to serve a diagnostic, and the intended reading is the difference between
+     * two samples, not an instant.
+     */
+    [[nodiscard]] std::size_t in_use() const noexcept { return inner_.in_use(); }
+
+    /** @brief FREE slots (delegated). Free-polarity legacy spelling — new code reads
+     *         @ref in_use; see @ref pool_t::available. */
+    [[nodiscard]] std::size_t available() const noexcept { return inner_.available(); }
 
    private:
     pool_t inner_;

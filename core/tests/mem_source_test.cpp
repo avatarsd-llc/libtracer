@@ -22,6 +22,7 @@
 #include <cstring>
 #include <memory_resource>
 #include <new>
+#include <span>
 #include <type_traits>
 
 #include "libtracer/graph.hpp"
@@ -136,6 +137,46 @@ int main() {
     budget.release(a, 32, alignof(std::max_align_t));
     budget.release(b, 32, alignof(std::max_align_t));
     check(budget.released_ == 2, "sized reclaim reaches the source");
+
+    // A source that counts nothing answers all-zero rather than a fabricated number —
+    // the optional-virtual default (#932's mould, #1503).
+    check(budget.stats().capacity == 0 && budget.stats().refused == 0,
+          "a source that does not override stats() reports nothing, not a guess");
+
+    // bump_source_t's census (#1503): the caller's buffer is the ceiling, occupancy is
+    // used-polarity, peak survives a reset, and a refusal is counted only when the
+    // request dies at BOTH this source and its upstream.
+    {
+        alignas(std::max_align_t) std::byte buf[128]{};
+        tr::mem::bump_source_t bump{std::span<std::byte>(buf), tr::mem::null_source()};
+        check(bump.stats().capacity == 128, "capacity is the span the caller handed over");
+        check(bump.stats().in_use == 0 && bump.stats().peak == 0, "and nothing is carved yet");
+
+        void* const p = bump.try_alloc(96, 8);
+        check(p != nullptr, "the buffer serves the request");
+        check(bump.stats().in_use == 96, "in_use follows the cursor (used-polarity)");
+        check(bump.stats().peak == 96, "peak reads through to the live cursor");
+
+        check(bump.try_alloc(64, 8) == nullptr,
+              "a request the buffer cannot fit reaches the null upstream and is refused");
+        check(bump.stats().refused == 1, "which IS counted");
+        check(bump.stats().largest_refused == 64, "with the refused size recorded");
+
+        bump.reset();
+        check(bump.stats().in_use == 0, "reset rewinds the cursor");
+        check(bump.stats().peak == 96, "but peak REMEMBERS the cycle that ended");
+        check(bump.stats().refused == 1, "and the refusal counter is monotonic across cycles");
+
+        // Against an unbounded upstream the same request is served, so nothing is
+        // refused — the spill is the upstream's census, not this one's.
+        alignas(std::max_align_t) std::byte small[16]{};
+        tr::mem::bump_source_t spilling{std::span<std::byte>(small), tr::mem::heap_source()};
+        void* const q = spilling.try_alloc(64, 8);
+        check(q != nullptr, "the upstream serves what the buffer cannot");
+        check(spilling.stats().refused == 0, "so nobody was refused");
+        check(spilling.stats().in_use == 0, "and the spilled bytes are NOT this source's in_use");
+        spilling.release(q, 64, 8);
+    }
 
     // Wiring: the graph defaults to the heap source, and an injected source is the
     // one the graph reports. The parameter is APPENDED, so the two shorter forms

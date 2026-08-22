@@ -25,6 +25,43 @@
 namespace tr::mem {
 
 /**
+ * @brief One block source's census, in the unified introspection vocabulary
+ *        (`core/STYLE.md` §Introspection; #1503).
+ *
+ * The five nouns every bounded resource answers with, spelled the same way here as at
+ * every other seam: an effective ceiling, used-polarity occupancy, a high-water mark,
+ * and the two numbers a sizing operator actually needs — how often a request was
+ * refused, and how big the biggest refused one was (#1492: the TAIL is what refuses, so
+ * a median request size tells the operator nothing).
+ *
+ * All-zero is the honest default for a source that counts nothing, exactly as
+ * `%tr::net::transport_drop_stats_t` is for a link that counts nothing (#932) — never a
+ * fabricated number. A field a particular source cannot answer stays 0; `capacity == 0`
+ * means "unbounded, or not reported", never "a zero-byte ceiling".
+ *
+ * Snapshot coherence is the `core/STYLE.md` §Introspection clause: monotonic since
+ * construction, sampled unsynchronized, and the intended reading is the DIFFERENCE
+ * between two snapshots rather than an instant.
+ */
+struct source_stats_t {
+    /** @brief The effective byte ceiling this source serves from — the caller's injected
+     *         slab, not a compile-time constant. 0 = unbounded / not reported. */
+    std::size_t capacity = 0;
+    /** @brief Bytes handed out and not returned to this source, USED-polarity (free is
+     *         `capacity - in_use`, and is deliberately not the primary). */
+    std::size_t in_use = 0;
+    /** @brief High-water mark of @ref in_use since construction. */
+    std::size_t peak = 0;
+    /** @brief @ref block_source_t::try_alloc calls this source answered `nullptr` —
+     *         requests refused BY VALUE, so the caller was told (it answered
+     *         BACKPRESSURE). Distinct from a `dropped`, where nobody was told. */
+    std::size_t refused = 0;
+    /** @brief Bytes of the LARGEST request in @ref refused — the number a deployment
+     *         grows its slab to. 0 iff @ref refused is 0. */
+    std::size_t largest_refused = 0;
+};
+
+/**
  * @brief The nothrow block seam every FAILABLE allocation draws from — the ones a
  *        PEER can provoke (#551, ADR-0065; ADR-0039 erratum 5/6).
  *
@@ -135,6 +172,29 @@ class block_source_t {
     /** @brief The source's stable name, for census and diagnostics. */
     [[nodiscard]] const char* name() const noexcept { return name_; }
 
+    /**
+     * @brief This source's census — the interface-level introspection seam (#1492, #1503).
+     *
+     * The whole vocabulary of this seam used to be @ref name, so a host holding a
+     * `block_source_t&` could introspect NOTHING: not the ceiling it injected, not how
+     * much of it was gone, and above all not whether anything had been refused —
+     * `try_alloc → nullptr` was uncounted at every implementation in the tree.
+     *
+     * Optional, in the `%tr::net::transport_t::drop_stats` mould (#932): the DEFAULT is
+     * all-zero, which is the honest answer for a source that counts nothing, never a
+     * fabricated number. Concrete sources override it — @ref bump_source_t and
+     * @ref pool_source_t do; @ref heap_source_t does not (the platform heap's ceiling is
+     * not this seam's to report), and neither does @ref null_source_t, whose refusals are
+     * its whole contract and are the CALLER's to count.
+     *
+     * Counted, never enforced, and never on the hot arm: the refusal counters are bumped
+     * only where @ref try_alloc is already returning `nullptr`, so a successful allocation
+     * pays nothing at all (`core/STYLE.md` §Introspection, counting doctrine 1 —
+     * ADR-0039's `bench_forward_heap == 0` hop and ADR-0067's rv32 text figure are the
+     * standing referees).
+     */
+    [[nodiscard]] virtual source_stats_t stats() const noexcept { return {}; }
+
    private:
     const char* name_; /**< @brief Borrowed literal; never owned. */
 };
@@ -232,7 +292,9 @@ class bump_source_t final : public block_source_t {
             used_ += pad + bytes;
             return buf_.data() + (used_ - bytes);
         }
-        return upstream_->try_alloc(bytes, align);
+        void* const spill = upstream_->try_alloc(bytes, align);
+        if (spill == nullptr) count_refusal(bytes);
+        return spill;
     }
 
     /** @brief No-op for a bump block; a sized return to the upstream otherwise. */
@@ -254,15 +316,57 @@ class bump_source_t final : public block_source_t {
      * @warning Every block previously carved from the buffer dangles afterwards. Blocks
      *          that came from the upstream are NOT reclaimed by this — return those first.
      */
-    void reset() noexcept { used_ = 0; }
+    void reset() noexcept {
+        // Fold the cycle that is ending into the high-water mark BEFORE the cursor is
+        // rewound. This is the whole cost of `peak` for a bump source: the cursor is
+        // monotonic within a cycle, so `peak` is just the largest cursor any cycle
+        // reached, and nothing at all is added to `try_alloc`'s success arm.
+        if (used_ > peak_) peak_ = used_;
+        used_ = 0;
+    }
 
     /** @brief Bytes carved from the buffer so far (diagnostics; excludes upstream blocks). */
     [[nodiscard]] std::size_t used() const noexcept { return used_; }
 
+    /**
+     * @brief This bump source's census (@ref source_stats_t; `core/STYLE.md` §Introspection).
+     *
+     * `capacity`/`in_use`/`peak` describe the CALLER'S BUFFER — the span size this source
+     * was handed, how much of it the cursor has carved, and the deepest any @ref reset
+     * cycle got. Upstream spill is deliberately outside all three: those bytes are the
+     * upstream's census to report, and folding them in here would make `in_use` exceed
+     * `capacity` on the very source whose ceiling the number exists to describe.
+     *
+     * `refused` counts what a caller experienced: a @ref try_alloc that answered `nullptr`,
+     * which for this source means the buffer could not fit the request AND the upstream
+     * refused it too. Against a bounded upstream (@ref null_source() — the composition that
+     * makes the buffer a hard limit) that is exactly "the buffer overflowed"; against
+     * @ref heap_source() it stays 0 until the platform heap is gone, which is the honest
+     * reading in both cases.
+     *
+     * Plain counters, no atomics: this source is single-threaded BY CONTRACT (see the class
+     * note), so the ownership discipline that already protects `used_` protects these
+     * (`core/STYLE.md` §Introspection, counting doctrine 5).
+     */
+    [[nodiscard]] source_stats_t stats() const noexcept override {
+        return source_stats_t{buf_.size(), used_, used_ > peak_ ? used_ : peak_, refused_,
+                              largest_refused_};
+    }
+
    private:
+    /** @brief Record one refused request. Cold arm only — @ref try_alloc is already
+     *         returning `nullptr` by the time this runs. */
+    [[gnu::noinline]] void count_refusal(std::size_t bytes) noexcept {
+        ++refused_;
+        if (bytes > largest_refused_) largest_refused_ = bytes;
+    }
+
     std::span<std::byte> buf_;
     block_source_t* upstream_;
     std::size_t used_ = 0;
+    std::size_t peak_ = 0;            /**< @brief Deepest cursor of any completed cycle. */
+    std::size_t refused_ = 0;         /**< @brief `try_alloc` calls answered `nullptr`. */
+    std::size_t largest_refused_ = 0; /**< @brief Bytes of the largest of those. */
 };
 
 /**
@@ -324,7 +428,13 @@ struct size_class_t {
  *
  * Code size of what actually ships, `riscv32-esp-elf-g++ -Os -fno-exceptions -fno-rtti`:
  * **322 B** of text (`try_alloc` 120, `release` 142, `find` 46, teardown 14) plus a 24 B
- * vtable. The two 256 B / 380 B figures quoted while choosing between the policies were
+ * vtable (ADR-0067). #1503's refusal counting adds **+18 B** to `try_alloc`'s
+ * already-returning-`nullptr` arm and **+4 B** of vtable for the @ref stats slot — measured
+ * as a delta on riscv32-esp-elf-g++ 14.2.0 at the same flags, with `release`, `find` and
+ * teardown byte-identical, so the shipped figure is **340 B** of text plus a 28 B vtable.
+ * The success arm did not move, which is the gate that mattered (`core/STYLE.md`
+ * §Introspection, counting doctrine 1).
+ * The two 256 B / 380 B figures quoted while choosing between the policies were
  * feature-matched *prototypes* — neither carried the alignment key, the overflow counter
  * or the foreign-pointer check this one does — so they compare the shapes to each other
  * and are not the shipped cost of either.
@@ -380,7 +490,18 @@ class pool_source_t final : public block_source_t {
         // by contract, and the division showed up as ~20 % of a terminus decode.
         const std::uintptr_t cur = reinterpret_cast<std::uintptr_t>(buf_.data()) + used_;
         const auto pad = static_cast<std::size_t>((~cur + 1U) & (align - 1U));
-        if (pad > buf_.size() - used_ || bytes > buf_.size() - used_ - pad) return nullptr;
+        if (pad > buf_.size() - used_ || bytes > buf_.size() - used_ - pad) {
+            // PRIMARY EXHAUSTION — the slab cannot carve this shape and no recycled block
+            // of it exists. Counted here and nowhere else: this is the arm that was
+            // returning `nullptr` uncounted at every source in the tree (#1492), and the
+            // success arm below is untouched by design (`core/STYLE.md` §Introspection,
+            // counting doctrine 1). NOT `overflow_`, which counts a recycling degrade and
+            // keeps that meaning — a pool can refuse with zero overflows and overflow with
+            // zero refusals.
+            ++refused_;
+            if (bytes > largest_refused_) largest_refused_ = bytes;
+            return nullptr;
+        }
         used_ += pad + bytes;
         return buf_.data() + (used_ - bytes);
     }
@@ -416,9 +537,47 @@ class pool_source_t final : public block_source_t {
     /** @brief Class slots in use — the number to size the injected span against. */
     [[nodiscard]] std::size_t classes_used() const noexcept { return n_; }
 
-    /** @brief Blocks lost because the class table was full; non-zero means the span is too small.
+    /**
+     * @brief Blocks lost because the class table was full; non-zero means the span is too
+     *        small.
+     *
+     * @note A RECYCLING DEGRADE, not an allocation refusal, and the two are deliberately
+     *       separate counters (`core/STYLE.md` §Introspection): the block stays carved —
+     *       bounded and safe — and the caller that freed it was never refused anything.
+     *       The refusal number is @ref refused.
      */
     [[nodiscard]] std::size_t overflowed() const noexcept { return overflow_; }
+
+    /** @brief @ref try_alloc calls this pool answered `nullptr` — primary slab exhaustion
+     *         (#1492). Also reachable via @ref stats. */
+    [[nodiscard]] std::size_t refused() const noexcept { return refused_; }
+
+    /** @brief Bytes of the largest request in @ref refused — the number to grow the slab to
+     *         (#1492: the tail is what refuses). */
+    [[nodiscard]] std::size_t largest_refused() const noexcept { return largest_refused_; }
+
+    /**
+     * @brief This pool's census (@ref source_stats_t; `core/STYLE.md` §Introspection).
+     *
+     * `capacity` is the injected slab, and `in_use` is @ref used — bytes CARVED, recycled
+     * blocks sitting on a free list included, because a carved block is never returned to
+     * the slab and so is not available to a different size class. That makes carving
+     * monotonic, and `peak` therefore equals `in_use` by construction: the high-water mark
+     * costs this source not one instruction.
+     *
+     * Plain counters under the existing @p Sync section, not atomics: the refusal bump sits
+     * inside the same `guard_t` `try_alloc` already holds, so a shared pool's counters are
+     * as synchronized as its free lists are and nothing new is locked. On rv32 an atomic
+     * wide enough to matter is not lock-free anyway — it takes a hidden libatomic lock per
+     * access (`core/STYLE.md` §Introspection, counting doctrine 5).
+     *
+     * @note @ref overflowed is NOT in this block. It counts a recycling degrade rather than
+     *       a refusal, so it is neither `refused` nor `dropped` in the shared vocabulary,
+     *       and it stays this type's own named accessor.
+     */
+    [[nodiscard]] source_stats_t stats() const noexcept override {
+        return source_stats_t{buf_.size(), used_, used_, refused_, largest_refused_};
+    }
 
    private:
     /** @brief RAII lock over the policy; empty and free when @p Sync is @ref sync_none_t. */
@@ -463,6 +622,8 @@ class pool_source_t final : public block_source_t {
     std::size_t used_ = 0;
     std::size_t n_ = 0;
     std::size_t overflow_ = 0;
+    std::size_t refused_ = 0;         /**< @brief `try_alloc` answers of `nullptr`. */
+    std::size_t largest_refused_ = 0; /**< @brief Bytes of the largest of those. */
     [[no_unique_address]] Sync sync_{};
 };
 
