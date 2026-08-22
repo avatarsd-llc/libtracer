@@ -442,7 +442,10 @@ std::pair<std::uint16_t, bool> route_handle_t::ensure_egress(std::string_view ou
     // on the reused label resolves the wrong route, which is a misroute, not a drop.
     // Exhaustion returns `{0, false}`, records nothing, and leaves the caller to send the
     // full-route FWD (which carries its own route and needs no label).
-    if (t->next_label == 0) return {0, false};
+    if (t->next_label == 0) {
+        label_space_exhausted_.fetch_add(1, std::memory_order_relaxed);
+        return {0, false};
+    }
     // Table full (#603): refuse, same answer and same caller degrade as an exhausted label
     // space. Checked AFTER the reuse scan above, so an established flow is never refused —
     // only a new one, and only into the full-route form that always works.
@@ -524,8 +527,21 @@ std::uint16_t route_handle_t::alloc_label(std::string_view link) {
     // Saturating, monotonic, never 0 (see ensure_egress): 1..65535 then permanently
     // exhausted. Sticky by construction -- handing out 65535 leaves `next_label` at 0, and
     // this returns before incrementing, so the state cannot walk back into live labels.
-    if (t->next_label == 0) return 0;
+    if (t->next_label == 0) {
+        label_space_exhausted_.fetch_add(1, std::memory_order_relaxed);
+        return 0;
+    }
     return t->next_label++;
+}
+
+std::size_t route_handle_t::labels_used(std::string_view link) const {
+    const tables_ref_t t = find_tables(link);
+    if (!t) return 0;  // no shell ⇒ nothing spent on this link
+    const std::lock_guard lock(t->m);
+    // `next_label` is the NEXT label to issue, starting at 1, and saturates by landing on 0
+    // after 65535 has been handed out — so the spent count is one less than it, and the
+    // saturated state is the full space.
+    return t->next_label == 0 ? std::size_t{0xFFFFu} : std::size_t{t->next_label} - 1u;
 }
 
 void route_handle_t::clear_link(std::string_view link) {

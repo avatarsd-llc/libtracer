@@ -188,8 +188,8 @@ class child_registry_t {                 // the one NAME -> link demux table (AD
 }  // namespace tr::net
 ```
 
-Signature source: `core/include/libtracer/fwd_router.hpp:202` (constructor), `:380`
-(`add_child`), `:437` (`subscribe_toward`), `:557-569` (the sink function-pointer types);
+Signature source: `core/include/libtracer/fwd_router.hpp:249` (constructor), `:469`
+(`add_child`), `:526` (`subscribe_toward`), `:646-658` (the sink function-pointer types);
 `core/include/libtracer/child_registry.hpp:327` (`add`), `:585` (`resolve_peer`), `:600`
 (`erase`), `:633` (`entry_by_name`), `:654` (`by_name`), `:695`/`:705` (`size`/`live_size`).
 
@@ -218,15 +218,15 @@ flowchart TB
   address size grows with hop count, which is what `ADVERTISE`/`COMPACT` route handles exist to
   amortise on a steady flow.
 - **A reply is delivered as a rope, never flattened by the router**
-  (`core/include/libtracer/fwd_router.hpp:565-574`). A sink that wants contiguous bytes holds
+  (`core/include/libtracer/fwd_router.hpp:654-663`). A sink that wants contiguous bytes holds
   `const view_t m = reply.materialize()` and reads `m.bytes()`; a **single-link reply — the common
   case — is returned zero-copy, no allocation and no copy**, and only a multi-link reply pays one
   flatten, on demand. The escape hatch sits at the consumer, so the router never pays for a
   consumer that did not need contiguity. `m` must stay alive while its span is read.
 - **The default delivery leg copies nothing.** A full-route `FWD{WRITE}` fan-out scatter-gathers a
   fresh stack head, the stored return-route bytes, an empty `src`, and one span per link of the
-  stored value (`core/src/fwd_router.cpp:3149`). The `COMPACT` leg is the one that flattens,
-  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:2943`) — single-link, that
+  stored value (`core/src/fwd_router.cpp:3227`). The `COMPACT` leg is the one that flattens,
+  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:3012`) — single-link, that
   flatten is a zero-copy adopt, and multi-link it draws from the router's injected `flat` backend
   (#730), not the global heap.
 - **All rope flattens on the forward AND terminus paths draw from the injected seam.** `flat`
@@ -321,7 +321,7 @@ adopt; `/net` itself is likewise only the recommended root convention (a constru
 **Creation is all-or-nothing.** A connection is built in three steps — register the identity
 vertex, insert the `conns_` entry, wire the link into the router's `child_registry_t` — and only
 the last can be refused: `add_child` answers `false` when the registry cannot grow, and it is the
-only place that can say so (`core/include/libtracer/fwd_router.hpp:380`,
+only place that can say so (`core/include/libtracer/fwd_router.hpp:469`,
 `core/include/libtracer/child_registry.hpp:327`). A refusal unwinds the first two in reverse —
 retire the vertex, then erase the entry, which destroys the config-constructed socket — publishes
 no liveness, and answers `BACKPRESSURE` (`core/src/transport_vertex.cpp:814-822`). Discarding that
@@ -469,6 +469,11 @@ tested against hand-built frames with no live transport.
 ## API reference
 
 ```{doxygenclass} tr::net::fwd_router_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::net::router_stats_t
 :project: libtracer
 :members:
 ```

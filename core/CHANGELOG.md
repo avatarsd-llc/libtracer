@@ -16,6 +16,36 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`tr::net::fwd_router_t::drop_stats()` and its four seam accessors — the router's
+  introspection surface** ([#1503](https://github.com/avatarsd-llc/libtracer/issues/1503)
+  step 3, closing the rest of [#1492](https://github.com/avatarsd-llc/libtracer/issues/1492)).
+  The router exposed NONE of its four injected seams and lost frames at ~15 sites without
+  counting one of them — against the doctrine it states itself (*"the event is COUNTED
+  rather than merely handled"*). `label_source()` / `rx_source()` / `flatten_backend()` /
+  `egress_backend()` return the injected object (the `graph_t::control_source()` mould), so a
+  host that took a DEFAULT seam can now reach it and call the `stats()` steps 1–2 added.
+  `drop_stats()` returns the new POD `tr::net::router_stats_t`: `flatten_dropped`,
+  `forward_iov_dropped`, `arena_dropped`, `assemble_dropped`, `reply_iov_dropped`,
+  `delivery_iov_dropped` and `malformed_rx`. Resource causes are split **per cause** because
+  a deployment grows a different seam for each; malformed frames, unknown opcodes and
+  unroutable bound frames are **one bucket**, because they are one operator symptom and
+  nothing is sized against them (#1503 Q3). The counters are ROUTER-LOCAL and are
+  deliberately NOT folded through `graph_t::count_external_drop` (#1503 Q2): these frames die
+  before the graph is involved, and that door's exclusion rules exist to stop one refusal
+  being tallied on both sides of the net/graph seam. Every bump is on an arm that has already
+  decided to lose the frame — the forward hop's success path gains nothing, and
+  `bench_forward_heap`'s steady-state hop is unchanged at `allocs=0 frees=0 bytes=0`.
+- **`tr::net::route_handle_t::labels_used(link)` and `labels_exhausted()`** — the 16-bit
+  label space, made visible (#1503 finding 3). `alloc_label` saturates at 65535 per link and
+  then degrades to the full-route form, which REPLIES per frame — the silent throughput
+  cliff [#1491](https://github.com/avatarsd-llc/libtracer/issues/1491) showed matters, and
+  until now it had no counter and no occupancy reading at all. `labels_used` is
+  used-polarity (free is `65535 - labels_used`); `clear_link` restores a link's whole space,
+  as it always did, while the historical exhaustion count stays monotonic.
+  `labels_exhausted()` is deliberately NOT fused into `refused_bindings()`: that one means "a
+  link's table was at its injected bound", which a deployment answers by sizing the table up,
+  and this one means the wire's own space is spent, which no amount of memory fixes.
+
 - **`tr::mem::block_source_t::stats()` — the block seam's introspection surface**
   ([#1503](https://github.com/avatarsd-llc/libtracer/issues/1503) steps 1–2, closing the core
   of [#1492](https://github.com/avatarsd-llc/libtracer/issues/1492)). A new optional virtual

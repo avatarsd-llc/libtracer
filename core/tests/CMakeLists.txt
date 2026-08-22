@@ -1458,6 +1458,15 @@ if(LIBTRACER_NET_PLANE)
 endif()
 
 if(LIBTRACER_NET_PLANE)
+    # #1503 step 3 — the router's four seam accessors and its COUNTED cold drops: every
+    # per-cause counter moves only on its own failure arm, and never on a success.
+    add_executable(router_drop_stats_test router_drop_stats_test.cpp)
+    target_link_libraries(router_drop_stats_test PRIVATE libtracer)
+    libtracer_test_warnings(router_drop_stats_test)
+    add_test(NAME router_drop_stats COMMAND router_drop_stats_test)
+endif()
+
+if(LIBTRACER_NET_PLANE)
     # #766 — the TERMINUS half of that seam: the rope-tier flattens one call below
     # resolve_terminus_rope draw from the same injection, and a refusal is answered by
     # value (drop, or an addressed BACKPRESSURE) instead of read as a short span.

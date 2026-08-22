@@ -63,6 +63,53 @@ namespace tr::net {
 struct fwd_pre_t;
 
 /**
+ * @brief The router's counted cold-path drops — one snapshot of every frame this router
+ *        lost rather than forwarded (#1503 step 3).
+ *
+ * Vocabulary and polarity per `core/STYLE.md` §Introspection; the snapshot-coherence clause
+ * stated there applies verbatim (each field is one relaxed load, so a multi-field snapshot
+ * may tear — the intended use is the difference between two snapshots).
+ *
+ * Every field counts a **`dropped`**, not a `refused`: these sites lose a frame and tell
+ * nobody, which is exactly why the doctrine requires them counted. They are ROUTER-LOCAL and
+ * deliberately NOT folded through `graph_t::count_external_drop` — these frames die
+ * before the graph is involved, and that door's exclusion rules exist to stop one refusal
+ * being tallied on both sides of the net/graph seam (#1503 Q2).
+ *
+ * The resource causes are split per-cause because a sizing operator grows a *different* seam
+ * for each; the malformed/opcode drops are fused into @ref malformed_rx because they are one
+ * operator symptom (#1503 Q3).
+ */
+struct router_stats_t {
+    /** @brief Frames dropped because the reject-reply flatten could not be served by the
+     *         injected byte backend (`fwd_router.cpp`, the `reject` arm). */
+    std::size_t flatten_dropped = 0;
+    /** @brief Forward hops dropped because the scatter-gather iov table could not be built —
+     *         the rope arm's source refusing growth, or the contiguous arm overrunning
+     *         `kFwdMaxIov`. Both arms state one policy: drop, never truncate. */
+    std::size_t forward_iov_dropped = 0;
+    /** @brief Terminus requests dropped because the injected rx source could not serve the
+     *         decode arena — `TLV_NESTING_TOO_DEEP`, which RFC-0006 spells as "exceeds this
+     *         receiver's decode resources". The number a deployment grows `rx` against. */
+    std::size_t arena_dropped = 0;
+    /** @brief Terminus REPLIES dropped because the resolver assembled an EMPTY rope — an
+     *         allocation refusal inside reply assembly, surfaced as `link_count() == 0`. */
+    std::size_t assemble_dropped = 0;
+    /** @brief Terminus REPLIES dropped because the egress span table could not grow
+     *         (`try_to_iovec` refused). The request is lost; the client retries. */
+    std::size_t reply_iov_dropped = 0;
+    /** @brief Remote DELIVERIES dropped because the delivery iov table could not be built
+     *         from the control source (`deliver_remote`, both the COMPACT and full-route
+     *         arms). */
+    std::size_t delivery_iov_dropped = 0;
+    /** @brief Frames dropped as MALFORMED — a failed decode, a failed root CRC, an oversized
+     *         or non-forwardable op, an unknown/unauthorized opcode. ONE bucket by ruling:
+     *         an operator reads every one of these as the same symptom ("a peer is speaking
+     *         something this node cannot parse"), and nothing is sized against them. */
+    std::size_t malformed_rx = 0;
+};
+
+/**
  * @brief A stateless hop-by-hop FWD forwarder (RFC-0004 §A/§B, ADR-0035 slice 3).
  *
  * Wires a local @ref graph::graph_t (terminus op resolution, via an internal
@@ -319,6 +366,48 @@ class fwd_router_t {
     [[nodiscard]] std::size_t label_resolves() const noexcept {
         return label_resolves_.load(std::memory_order_relaxed);
     }
+
+    /**
+     * @brief One snapshot of this router's counted cold-path drops (#1503 step 3).
+     *
+     * See @ref router_stats_t for what each field means and why the drops are counted HERE
+     * rather than through `graph_t::count_external_drop`. Snapshot coherence is the
+     * `core/STYLE.md` §Introspection clause: six relaxed loads, so use the difference
+     * between two snapshots, never the instant.
+     */
+    [[nodiscard]] router_stats_t drop_stats() const noexcept {
+        return {.flatten_dropped = flatten_dropped_.load(std::memory_order_relaxed),
+                .forward_iov_dropped = forward_iov_dropped_.load(std::memory_order_relaxed),
+                .arena_dropped = arena_dropped_.load(std::memory_order_relaxed),
+                .assemble_dropped = assemble_dropped_.load(std::memory_order_relaxed),
+                .reply_iov_dropped = reply_iov_dropped_.load(std::memory_order_relaxed),
+                .delivery_iov_dropped = delivery_iov_dropped_.load(std::memory_order_relaxed),
+                .malformed_rx = malformed_rx_.load(std::memory_order_relaxed)};
+    }
+
+    /**
+     * @name The four injected seams, exposed
+     *
+     * A host that injected a seam already holds it; a host that took a DEFAULT (the
+     * process-wide heap source / backend) could not reach it at all, so it could not read
+     * the `stats()` #1503 step 2 put on `mem::block_source_t`. These mirror
+     * `graph_t::control_source` — a reference, never null, never owned, and
+     * observation only — nothing in the library reads its own seams back through them.
+     *
+     * Per-seam, never aggregated (ADR-0079): there is deliberately no combined census here.
+     * @{
+     */
+    /** @brief The source the `route_handle` label tables draw from. */
+    [[nodiscard]] mem::block_source_t& label_source() const noexcept { return *label_src_; }
+    /** @brief The DEFAULT terminus-arena / rx-scratch source. A child that carries its own
+     *         (ADR-0067 §3) is not reported here — that one is the child's. */
+    [[nodiscard]] mem::block_source_t& rx_source() const noexcept { return *rx_; }
+    /** @brief The byte backend every rope flatten this router performs draws from (#730). */
+    [[nodiscard]] mem::mem_backend_t& flatten_backend() const noexcept { return *flat_; }
+    /** @brief The byte backend the terminus REPLY head and the mint egress bytes draw from
+     *         (#795). */
+    [[nodiscard]] mem::mem_backend_t& egress_backend() const noexcept { return *egress_; }
+    /** @} */
 
     /**
      * @brief Register a named transport-child vertex (ADR-0027).
@@ -1722,6 +1811,24 @@ class fwd_router_t {
     // insert-only, like registry_ (the transport holds the address for its life).
 
     /**
+     * @brief Bump one cold-drop counter — OUT OF LINE, and that is measured, not stylistic.
+     *
+     * Inlined, the seven `fetch_add`s sit inside `route_fwd_forward` and the templated
+     * ingress walk, which is the hot forward hop. Each is two or three words on a branch
+     * that never runs in steady state, but they still occupy the hop's INSTRUCTION
+     * footprint: `bench_forward_demux` charged **+7% at 64 registered links** for them,
+     * measured best-of-3 against a same-runner `origin/main` build whose A/A null on that
+     * instrument is exactly 0.0%. A control run that added 56 bytes of dead PADDING to this
+     * class instead cost nothing at all, which rules out object size and leaves code size.
+     *
+     * `noinline` + `cold` puts the bump in `.text.unlikely` and leaves ONE call at each drop
+     * site, so the hop's hot body is the shipped one plus a branch it already had.
+     */
+    [[gnu::noinline, gnu::cold]] static void count_drop(std::atomic<std::size_t>& c) noexcept {
+        c.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    /**
      * @brief The failable source a frame from @p ctx decodes through.
      *
      * A branch on a pointer already in a register, on the per-frame path — the whole cost
@@ -1814,6 +1921,33 @@ class fwd_router_t {
     sink_slot_t<raw_fn_t> raw_;                   /**< @brief Raw-frame observer. */
     sink_slot_t<compact_delivery_fn_t> delivery_; /**< @brief Local COMPACT delivery sink. */
     sink_slot_t<stale_label_fn_t> stale_;         /**< @brief Stale-label observer. */
+
+    /**
+     * @name The counted cold-path drops behind @ref drop_stats (#1503 step 3)
+     *
+     * `std::atomic<std::size_t>` and not plain counters because `on_frame` runs on SEVERAL
+     * transport receive threads at once and the router takes no lock on the frame path — a
+     * plain `++` here would be a data race by the memory model. Word-sized and RELAXED per
+     * `core/STYLE.md` §Introspection clause 5, so rv32 keeps a lock-free `amoadd.w` and pulls
+     * no libatomic. Every bump sits on a COLD arm that has already decided to lose the frame;
+     * no success arm gains an instruction (ADR-0039's steady-state hop is the referee).
+     *
+     * **LAST in the class, and that is a measured placement, not tidiness.** Declared beside
+     * `label_not_found_` — their natural home — these seven words push `registry_`, the
+     * `rx_head_` chain and the two sink slots the FWD span path reads on every frame apart by
+     * a cache line, and `bench_forward_demux` charged ~6% for it at 64 registered links. The
+     * sink slots' own doc block records the same hazard from the other direction. Cold state
+     * goes behind the hot state it would otherwise displace.
+     * @{
+     */
+    std::atomic<std::size_t> flatten_dropped_{0};
+    std::atomic<std::size_t> forward_iov_dropped_{0};
+    std::atomic<std::size_t> arena_dropped_{0};
+    std::atomic<std::size_t> assemble_dropped_{0};
+    std::atomic<std::size_t> reply_iov_dropped_{0};
+    std::atomic<std::size_t> delivery_iov_dropped_{0};
+    std::atomic<std::size_t> malformed_rx_{0};
+    /** @} */
 };
 
 }  // namespace tr::net
