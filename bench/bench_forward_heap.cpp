@@ -543,10 +543,10 @@ int main() {
                                std::span<const std::byte>(payload, 4));
             const tr::view::view_t wsv = tr::view::over_bytes(wstored).value_or(tr::view::view_t{});
             (void)fg.write(*fv, wsv);  // store the LKV once (outside the window)
-            fg.propagate(*fv);         // WARM propagate: prime the free-list + buffer capacity
+            (void)fg.propagate(*fv);   // WARM propagate: prime the free-list + buffer capacity
             const std::uint64_t warm_got = got.load();
             probe::window_t fwin;
-            fg.propagate(*fv);  // MEASURED: warm wide fan-out -> zero-alloc with the lease
+            (void)fg.propagate(*fv);  // MEASURED: warm wide fan-out -> zero-alloc with the lease
             const probe::counts_t fc = fwin.result();
             fanout_allocs = fc.allocs;
             fanout_bytes = fc.bytes;

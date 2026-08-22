@@ -939,8 +939,8 @@ void test_assign_never_misses_a_racing_subscribe() {
         seen.store(0, std::memory_order_relaxed);
         post_handoff(gate, i);
         (void)g.subscribe(paths[i], on_value, kDurableSub);
-        done_wait.wait(done, i);  // both legs have run
-        g.propagate(parent);      // the covering sweep: it drains the mark, or there is none
+        done_wait.wait(done, i);    // both legs have run
+        (void)g.propagate(parent);  // the covering sweep: it drains the mark, or there is none
         if ((seen.load(std::memory_order_relaxed) & (1U << 2)) == 0) ++missed;
     }
     w.join();
@@ -1031,24 +1031,24 @@ void test_assign_propagate() {
     check(*ca == 0, "assign delivers nothing (state plane only)");
 
     // propagate(root) flushes ONLY the descendant assigned since the last sweep, once.
-    g.propagate(r);
+    (void)g.propagate(r);
     check(*ca == 1, "propagate(root) flushes the assigned descendant once (coalesced)");
     check(*cb == 0 && *cc == 0, "IF_NEWER: descendants not assigned since the sweep are skipped");
 
     // Self-clearing: a second sweep with nothing newly assigned delivers nothing.
-    g.propagate(r);
+    (void)g.propagate(r);
     check(*ca == 1, "a clean subtree flushes nothing (write_seq did not advance)");
 
     // Selective subtree propagation: assign b and c, one propagate delivers exactly them.
     (void)g.assign(b, make_value({0x10}));
     (void)g.assign(c, make_value({0x20}));
-    g.propagate(r);
+    (void)g.propagate(r);
     check(*cb == 1 && *cc == 1, "propagate flushes exactly the newly-assigned descendants");
     check(*ca == 1, "an unassigned descendant is not re-sent");
 
     // UNCONDITIONAL rides every sweep, even with no assignment since the last one.
     g.set_delivery_mode(a, delivery_mode_t::UNCONDITIONAL);
-    g.propagate(r);
+    (void)g.propagate(r);
     check(*ca == 2, "UNCONDITIONAL is swept every time (even unassigned)");
     check(*cb == 1 && *cc == 1, "IF_NEWER siblings stay clean across an UNCONDITIONAL sweep");
 
@@ -1056,9 +1056,9 @@ void test_assign_propagate() {
     // (the argument of propagate is always delivered — RFC-0008 §C).
     g.set_delivery_mode(b, delivery_mode_t::EXPLICIT);
     (void)g.assign(b, make_value({0x11}));
-    g.propagate(r);
+    (void)g.propagate(r);
     check(*cb == 1, "EXPLICIT is never included by an ancestor sweep");
-    g.propagate(b);
+    (void)g.propagate(b);
     check(*cb == 2, "a direct propagate on an EXPLICIT vertex delivers it");
 
     // write() remains the eager §D composition (assign then deliver the vertex).
@@ -1087,10 +1087,10 @@ void test_assign_propagate() {
     (void)g.subscribe(path_t("/s/x"), on_x);
     (void)g.write(x, make_value({0x91}));
     check(seen->size() == 1 && seen->front() == 0x91, "the eager write delivers its own value");
-    g.propagate(s);  // a covering sweep: /s/x rides it only if its mark survived
+    (void)g.propagate(s);  // a covering sweep: /s/x rides it only if its mark survived
     check(seen->size() == 2 && seen->back() == 0x92,
           "a write's clear_pending keeps the mark of an assign it did not deliver (#1185)");
-    g.propagate(s);
+    (void)g.propagate(s);
     check(seen->size() == 2, "the surviving mark is drained once, not re-delivered");
 }
 

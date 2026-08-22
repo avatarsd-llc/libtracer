@@ -394,6 +394,11 @@ A `write` is not a primitive. It is the composition of the **two irreducible ope
 
 `write(v, value)` is exactly `assign(v, value)` followed by `propagate(v)`. `read` and `await` live wholly in the state plane; `await` observes assigns at its own vertex and is independent of propagation.
 
+**The pair requires retention, and `await` serves the read contract** ([RFC-0008](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0008-vertex-operations-assign-propagate.md) Amendment 2). Both statements follow from one fact: a **handler** vertex retains nothing — it hands a write to its `on_write` seam and composes a read from `on_read`.
+
+- `await` is the **readiness form of a data read**, so after a wake it serves its value through the **same role dispatch** a `read` of that vertex serves at that instant. A handler vertex therefore answers an `await` with its `on_read`-composed value; it used to answer `NOT_FOUND` *after* the awaited write had already reached `on_write`. A handler with no `on_read` still answers `NOT_FOUND` — that degradation belongs to the read contract, not to `await` — and a **branch** vertex's `await` still hands back its own last-known-value, never the composed subtree fold, because `await` watches its own vertex's write sequence. This is wire-visible: a `FWD{AWAIT}` at a handler terminus went from `ERROR` to a `RESULT` carrying the value.
+- `assign` and `propagate` **refuse by value at a vertex that retains nothing**, answering `SCHEMA_NOT_FOUND` — the contract-mismatch status, deliberately not `BACKPRESSURE`. `propagate` takes no value argument, so the accumulate-then-flush pair needs the state plane to hold something between the two calls; at a handler it held nothing and the sweep delivered silence. Use `write`, which dispatches the seam and delivers eagerly. Only the sweep **root** is judged: a sweep rooted at a retaining ancestor still walks past non-retaining descendants exactly as before.
+
 ### The write sequence and pending vertices
 
 Every vertex carries a monotonic **write sequence**, incremented by every assign — never a hash or a comparison of the value's bytes. A sweep records, per vertex it includes, the sequence value at that inclusion. A vertex is **pending** exactly when its write sequence has advanced past the value the last covering sweep recorded.

@@ -151,7 +151,7 @@ void test_default_emission_unchanged() {
     check(two.g.assign(two.leaf, make_value(a)).has_value(), "assign the leaf (PER_VERTEX arm)");
     check(two.g.assign(two.other, make_value(b)).has_value(), "assign the sibling (PER_VERTEX)");
 
-    one.g.propagate(one.s);
+    (void)one.g.propagate(one.s);
     check(two.g.propagate(two.s, emission_mode_t::PER_VERTEX).has_value(),
           "PER_VERTEX propagate succeeds");
     check(at_one == at_two,
@@ -184,7 +184,7 @@ void test_fold_is_one_frame_with_the_same_leaf_truth() {
         check(fx->g.assign(fx->other, make_value(b)).has_value(), "assign /s/other");
     }
 
-    d.g.propagate(d.s);
+    (void)d.g.propagate(d.s);
     check(f.g.propagate(f.s, emission_mode_t::FOLD).has_value(), "the folded sweep succeeds");
 
     // THE framing claim. The default fans the root subscriber one delivery per selected
@@ -224,7 +224,7 @@ void test_trailer_carrying_node_is_rejected() {
 
     // The refusal consumed nothing: the mark is still there, so the default emission still
     // discharges it. A refusal that ate the sweep would be a lost delivery.
-    fx.g.propagate(fx.s);
+    (void)fx.g.propagate(fx.s);
     check(at_root.size() == 1, "the retained mark still flushes under the per-vertex default");
 }
 
@@ -244,7 +244,7 @@ void test_selected_stream_is_refused() {
     check(!folded && folded.error() == status_t::TYPE_MISMATCH,
           "FOLD refuses: a since-flush LIST cannot ride a node that admits one VALUE");
     check(at_root.empty(), "nothing delivered on the refusal");
-    g.propagate(s);
+    (void)g.propagate(s);
     check(at_root.size() == 2, "PER_VERTEX still delivers both buffered stream entries");
 }
 

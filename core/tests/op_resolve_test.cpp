@@ -26,6 +26,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <memory>
 #include <memory_resource>
 #include <span>
 #include <string_view>
@@ -335,6 +336,73 @@ void test_await_field_selector_is_enotty() {
         check(status_error_code(r.children[4]) == 0x0041 /*tr::flow::timeout*/,
               "control: a field-less AWAIT still answers flow::timeout");
     }
+}
+
+/**
+ * @brief RFC-0008 Amendment 2 (#1506) — the WIRE face of the await fix: `FWD{AWAIT}` at a
+ *        HANDLER vertex answers a RESULT carrying the `on_read`-composed value, not an ERROR.
+ *
+ * The terminus calls `graph_t::await`, so it inherits the correction with no resolver change at
+ * all — which is precisely why the behaviour is wire-visible and the instrument is an
+ * amendment. Pre-fix this frame answered `ERROR{ tr::path::not_found }` *after* the awaited
+ * write had already reached the handler's `on_write`. The `FWD{READ}` of the same vertex is the
+ * positive control: the two ops must answer alike.
+ */
+void test_await_at_a_handler_replies_with_the_composed_value() {
+    std::printf("AWAIT at a HANDLER terminus -> RESULT(on_read value), not ERROR:\n");
+    graph_t g;
+    op_resolver_t resolver(g);
+    auto last = std::make_shared<std::uint8_t>(0);
+    tr::graph::handlers_t h;
+    h.on_write = [last](const tr::view::rope_t& value,
+                        const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
+        const auto dec = tr::wire::decode(value.only());
+        if (dec) *last = value_u8(*dec);
+        return {};
+    };
+    h.on_read = [last]() -> tr::graph::result_t<tr::view::rope_t> {
+        return tr::view::rope_t{make_value(b_value({*last}))};
+    };
+    const auto path = path_t::parse("/dev/seam");
+    tr::graph::vertex_handle_t v = g.register_vertex(*path, role_t::HANDLER, std::move(h));
+
+    // POSITIVE CONTROL: FWD{READ} of the same vertex composes from the seam.
+    check(g.write(v, make_value(b_value({0x2A}))).has_value(), "the handler accepts a write");
+    {
+        const auto f = b_fwd(fwd_op_t::READ, b_path({"dev", "seam"}), b_path({"reply-ep"}), {}, {});
+        const auto reply = resolve_bytes(resolver, f);
+        check(reply.has_value(), "control — resolve READ returned");
+        const auto d = decode_reply(*reply);
+        check(value_u8(d.tlv.children[3]) == static_cast<std::uint8_t>(reply_kind_t::RESULT),
+              "control — READ at a handler replies RESULT");
+        check(d.tlv.children.size() == 5 && value_u8(d.tlv.children[4]) == 0x2A,
+              "control — and the payload is the composed VALUE u8=42");
+    }
+
+    std::vector<std::byte> tobuf(8);
+    tr::detail::store_le<std::uint64_t>(tobuf, 5'000'000'000ull);  // 5s
+    const auto fwd =
+        b_fwd(fwd_op_t::AWAIT, b_path({"dev", "seam"}), b_path({"reply-ep"}), {}, b_value(tobuf));
+    // Edge-triggered, so re-arm the write until the resolve is out (see test_await).
+    std::atomic<bool> resolved{false};
+    std::thread writer([&] {
+        const auto deadline = std::chrono::steady_clock::now() + 30s;
+        while (!resolved.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() < deadline) {
+            (void)g.write(v, make_value(b_value({0x5B})));
+            std::this_thread::sleep_for(2ms);
+        }
+    });
+    auto reply = resolve_bytes(resolver, fwd);
+    resolved.store(true, std::memory_order_release);
+    writer.join();
+    check(reply.has_value(), "resolve AWAIT returned");
+    const auto d = decode_reply(*reply);
+    check(value_u8(d.tlv.children[3]) == static_cast<std::uint8_t>(reply_kind_t::RESULT),
+          "AWAIT at a handler replies RESULT — pre-fix this was ERROR{path::not_found}");
+    check(d.tlv.children.size() == 5 && d.tlv.children[4].type == type_t::VALUE &&
+              value_u8(d.tlv.children[4]) == 0x5B,
+          "and the payload is the on_read-composed VALUE u8=91");
 }
 
 void test_subscribers_field() {
@@ -1234,6 +1302,7 @@ int main() {
     test_write();
     test_await();
     test_await_field_selector_is_enotty();
+    test_await_at_a_handler_replies_with_the_composed_value();
     test_subscribers_field();
     test_write_trailer_sliced();
     test_pin_payload_ratio_store();

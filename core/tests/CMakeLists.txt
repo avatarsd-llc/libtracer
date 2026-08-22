@@ -1232,6 +1232,14 @@ target_link_libraries(mem_sync_policy_test PRIVATE libtracer)
 libtracer_test_warnings(mem_sync_policy_test)
 add_test(NAME mem_sync_policy COMMAND mem_sync_policy_test)
 
+# RFC-0008 Amendment 2 (#1506) — the non-retaining-vertex contract: `await` serves the
+# role-dispatched read, and `assign` / `propagate` refuse by value at a vertex that retains
+# no last-known-value. Five vectors, each with a positive control.
+add_executable(nonretaining_contract_test nonretaining_contract_test.cpp)
+target_link_libraries(nonretaining_contract_test PRIVATE libtracer)
+libtracer_test_warnings(nonretaining_contract_test)
+add_test(NAME nonretaining_contract COMMAND nonretaining_contract_test)
+
 add_executable(graph_test graph_test.cpp)
 target_link_libraries(graph_test PRIVATE libtracer)
 libtracer_test_warnings(graph_test)

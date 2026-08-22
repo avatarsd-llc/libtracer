@@ -608,7 +608,7 @@ void test_stream_shed_append_no_redelivery() {
     // A queue, not a coalesce: the next real append still delivers, exactly once.
     check(g.write(v, make_value({0x12})).has_value(), "the ring accepts entries again");
     check(seen.size() == 2 && seen.back() == 0x12, "the next real append delivers once");
-    g.propagate(v);
+    (void)g.propagate(v);
     check(seen.size() == 2, "a covering sweep after the shed re-delivers nothing");
 }
 
@@ -684,7 +684,7 @@ void test_shed_pending_mark_is_counted() {
 
     // Control: the same assign+propagate with no injection delivers exactly once.
     check(g.assign(child, make_value({0x01})).has_value(), "the control assign succeeds");
-    g.propagate(parent);
+    (void)g.propagate(parent);
     check(seen == 1, "control — the covering sweep delivers the assigned value once");
 
     const auto before = g.delivery_drops();
@@ -701,7 +701,7 @@ void test_shed_pending_mark_is_counted() {
     }
     // A fully healthy sweep now: nothing is injected, so anything undelivered is lost, not
     // deferred.
-    g.propagate(parent);
+    (void)g.propagate(parent);
     check(seen == 1, "the shed mark means the covering sweep delivers NOTHING — a lost delivery");
 
     // Exactly one: the vertex has one own-sub, and the ruled width is one per subscriber.
@@ -728,10 +728,10 @@ void test_stream_drain_defer() {
     (void)g.assign(v, make_value({0x03}));
     {
         const hook_guard_t oom(fail_all);
-        g.propagate(v);
+        (void)g.propagate(v);
         check(count == 0, "the OOM propagate delivered nothing (dropped, not aborted)");
     }
-    g.propagate(v);
+    (void)g.propagate(v);
     check(count == 3, "the deferred ring entries all deliver on the next sweep");
 }
 

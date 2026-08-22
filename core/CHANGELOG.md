@@ -80,6 +80,56 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **WIRE-VISIBLE: `await` at a HANDLER vertex now answers the value, not `NOT_FOUND`; and
+  `assign` / `propagate` refuse a vertex that retains nothing**
+  ([#1506](https://github.com/avatarsd-llc/libtracer/issues/1506); RFC-0008 Amendment 2). One
+  fact, two halves. A `HANDLER` vertex **retains nothing**: it hands a write to `on_write` and
+  composes a read from `on_read`, publishing no last-known-value.
+
+  1. **`await` serves the role-dispatched read.** `graph_t::await` states its own contract —
+     it is the readiness form of a data `READ` (RFC-0008 §A: `read` and `await` both live in
+     the state plane) — and then read the last-known-value slot directly after a wake. At a
+     handler vertex that meant `read` served `on_read` while `await` answered `NOT_FOUND`
+     *after the awaited write had already reached `on_write` and woken the waiter*. `await`
+     now dispatches on the role exactly as `read` does.
+
+     **This is wire-visible.** The `FWD{AWAIT}` terminus resolves through this same host
+     `await`, so with **no resolver change at all** a `FWD{AWAIT}` addressed to a handler
+     vertex went from `kind=ERROR` + `STATUS=ERROR(tr::path::not_found)` to `kind=RESULT` +
+     the composed `VALUE`. RFC-0004 §D's `AWAIT` op-table row is unchanged in wording and now
+     true of one more role.
+
+     Two boundaries: a handler exposing **no** `on_read` still answers `NOT_FOUND` (that
+     degradation is the read contract's, not await's), and a **branch** vertex's `await` still
+     hands back its own last-known-value rather than the RFC-0016 composed subtree fold —
+     `await` watches its own vertex's write sequence, so only the ROLE dispatch is shared, not
+     the branch/leaf fork. Retaining vertices keep the lock-free published-value fast path and
+     pay no handler-dispatch cost.
+
+  2. **`assign` / `propagate` refuse by value at a non-retaining vertex**, answering
+     `status_t::SCHEMA_NOT_FOUND` — the taxonomy's contract-mismatch status (the same answer a
+     `history` of a non-`STREAM` vertex gives), and deliberately **not** `BACKPRESSURE`:
+     nothing is under pressure and a retry never succeeds. `propagate` takes no value argument
+     ("the last-known-value is the single source of truth", RFC-0008 §C), so the
+     accumulate-then-flush pair needs the state plane to hold something between the two calls;
+     at a handler it held nothing and the covering sweep delivered **silence**. `assign`
+     refuses **after** the WRITE gate and before the seam, so `on_write` is never entered and
+     nothing is marked. Only the sweep **root** is judged — a sweep rooted at a retaining
+     ancestor still walks past non-retaining descendants exactly as before — and both emission
+     modes answer alike, because the refusal is the verb's and not the framing's. `write` is
+     unaffected and remains the right call for a handler: it dispatches the seam and delivers
+     eagerly.
+
+  **Source-visible signature change**, required so the refusal can be answered:
+
+  ```diff
+  -void                  graph_t::propagate(vertex_handle_t v);
+  +[[nodiscard]] result_t<void> graph_t::propagate(vertex_handle_t v);
+  ```
+
+  Existing call sites that ignore the result now warn under `-Wunused-result`; the fix is to
+  check it, or `(void)`-cast where the root is known to retain. No other signature moved.
+
 - **WIRE-VISIBLE: a `FWD` whose `src` is a zero-length `PATH` is now UNACKNOWLEDGED — the
   terminus applies the write and emits nothing**
   ([#1502](https://github.com/avatarsd-llc/libtracer/issues/1502), ruling on
