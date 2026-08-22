@@ -601,6 +601,47 @@ class route_handle_t {
         return refused_.load(std::memory_order_relaxed);
     }
 
+    /**
+     * @brief Labels SPENT out of @p link's 16-bit space — used-polarity occupancy of the one
+     *        resource this class cannot grow (#1503 finding 3).
+     *
+     * `capacity` for this seam is the constant 65535 (see @ref alloc_label): the space is
+     * per-link and fixed by the wire, so unlike every other bounded resource in the tree
+     * there is no injected ceiling to report beside it. Free is `65535 - labels_used(link)`.
+     *
+     * The allocator is monotonic and saturating — labels are not reclaimed individually, so
+     * this only ever rises until @ref clear_link forgets the link and restores its whole
+     * space. A value climbing toward 65535 on a long-lived link is the advance warning for
+     * @ref labels_exhausted; reading it after the fact only tells you the degrade already
+     * happened.
+     *
+     * @param link This node's NAME for the link.
+     * @return Labels issued on @p link, `0` for a link that holds no compaction state, and
+     *         65535 once the space is spent.
+     */
+    [[nodiscard]] std::size_t labels_used(std::string_view link) const;
+
+    /**
+     * @brief Times a mint was refused because a link's 16-bit label space was SPENT
+     *        (#1503 finding 3) — the previously silent degrade.
+     *
+     * Distinct from @ref refused_bindings, and deliberately not fused into it: that counter
+     * means "a link's table was at its INJECTED bound", which a deployment answers by sizing
+     * the table up. This one means the wire's own 65535/link space ran out, which no amount
+     * of memory fixes — the answer is a reconnect (@ref clear_link) or fewer distinct flows.
+     * One event, one counter, but only where an operator would act differently.
+     *
+     * The degrade it makes visible is the one #1491 showed matters: a caller handed `0`
+     * falls back to the full-route form, which REPLIES per frame — so throughput drops and
+     * the reply traffic returns, with nothing on the wire saying why.
+     *
+     * Counted, never enforced (`core/STYLE.md` §Introspection): the library does not refuse
+     * or reconnect on its own account.
+     */
+    [[nodiscard]] std::size_t labels_exhausted() const noexcept {
+        return label_space_exhausted_.load(std::memory_order_relaxed);
+    }
+
    private:
     // An exact-size byte block drawn from `src_`. Trivially copyable BY DESIGN: that is the
     // whole substrate move (#603 defect 1). A `std::pmr::vector` here made the entry types
@@ -799,6 +840,20 @@ class route_handle_t {
     // it, every newly created link_tables_t stamps it. Saturating, per RFC-0024 §4.4's rule:
     // see clear_link's body for what the ceiling costs and why it is the safe direction.
     std::uint32_t clear_gen_ = 0;
+    /**
+     * @brief 16-bit label-space exhaustions — see @ref labels_exhausted.
+     *
+     * Relaxed and bumped only on the COLD mint path (`core/STYLE.md` §Introspection 5).
+     *
+     * `std::uint32_t` and declared HERE, in `clear_gen_`'s existing tail padding, so
+     * `sizeof(route_handle_t)` does not move. This object is a member of `fwd_router_t`,
+     * and growing it shifts every router member after `handles_` — including the two sink
+     * slots the FWD span path reads on every frame, whose adjacency `bench_forward_demux`
+     * already charges ~2% for at 64 registered links. Costing nothing was cheaper than
+     * arguing about it. A 32-bit count is enough for a diagnostic; a link that mints four
+     * billion times has other news.
+     */
+    std::atomic<std::uint32_t> label_space_exhausted_{0};
 };
 
 /**

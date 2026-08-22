@@ -87,7 +87,7 @@ the value backend, the failable control source and the default receiver-ring sou
 `fwd_router_t`: the failable `label_src` source its label tables draw from, the
 failable `rx` source, the `flat` byte backend its rope flattens draw from, and the
 `egress` byte backend the terminus reply head draws from
-(`core/include/libtracer/fwd_router.hpp:202-207`; `egress` is #795 /
+(`core/include/libtracer/fwd_router.hpp:249-254`; `egress` is #795 /
 ADR-0074, and the `max_label_bindings_per_link` bound sits between the last two).
 `label_src` was a `std::pmr::memory_resource` until #603 defect 1 — it could not
 stay one, because a peer's `ADVERTISE` reaches it and pmr reports exhaustion by

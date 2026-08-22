@@ -1647,7 +1647,13 @@ bool fwd_router_t::route_bound_forward(std::string_view inbound_name,
     // Read off the offset the peek already carried, never through `peek_fwd_op`: that would
     // re-parse the FWD and op headers a third time on a frame whose whole cost story is how
     // few times its headers are read. Masked, because bits 7-6 are flags (§9.3).
-    if (pre.op_body_len == 0) return true;  // no op byte at all ⇒ malformed ⇒ drop
+    //
+    // All three refusals below share ONE counter (#1503 Q3): "a peer is speaking something
+    // this hop cannot route" is one operator symptom, and nothing here is sized against.
+    if (pre.op_body_len == 0) {  // no op byte at all ⇒ malformed ⇒ drop
+        count_drop(malformed_rx_);
+        return true;
+    }
     const auto op = static_cast<fwd_op_t>(cur.byte_at(pre.op_body_off) & graph::kFwdOpcodeMask);
     graph::acl_right_t right = graph::acl_right_t::READ;
     switch (op) {
@@ -1659,8 +1665,10 @@ bool fwd_router_t::route_bound_forward(std::string_view inbound_name,
             right = graph::acl_right_t::WRITE;
             break;
         case fwd_op_t::REPLY:
+            count_drop(malformed_rx_);
             return true;  // drop
         default:
+            count_drop(malformed_rx_);
             return true;  // an opcode with no known right ⇒ drop
     }
     const wire::path_ref_element_t e = read_path_ref_element(cur, pre.dst_body_off);
@@ -1676,7 +1684,13 @@ bool fwd_router_t::route_bound_forward(std::string_view inbound_name,
     // is made rather than being inherited from a downstream refusal that is free to change,
     // and nothing may cite it as a measured guard. The refusals it reports — the deref, the
     // ACL, the egress lookup — are each pinned by ablation in `bound_forward_test`.
-    if (child == nullptr) return true;
+    // Counted into the same bucket, and for the reason the paragraph above gives: ablated,
+    // the frame reaches the terminus tier, is refused there as a non-request, and is counted
+    // as `malformed_rx` anyway — so one bump here keeps the two roads reporting one number.
+    if (child == nullptr) {
+        count_drop(malformed_rx_);
+        return true;
+    }
     route_fwd_forward(inbound_name, inbound_ctx, from_peer, 0, cur, *child, &pre);
     return true;
 }
@@ -1939,13 +1953,17 @@ void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_
                     // Flatten REFUSED ⇒ drop the frame. This arm is all-host-guarded above,
                     // so the refusal is the OOM — named by the error channel now rather than
                     // inferred from an empty view a zero-byte success could fake (#917). Still
-                    // a REDUNDANT EARLY-OUT, like the ADVERTISE arm's: `reject_bus_name_hop`
-                    // opens with a `wire::decode`, an empty span does not decode, and it
-                    // returns without replying — so deleting this line changes no observable
-                    // behaviour. Kept so the reason is the OOM and not the codec's leniency.
-                    // The SEAM on the line above is the testable part, and
-                    // `fwd_flatten_backend_test` pins it.
-                    if (!flat) return;
+                    // the early-out the ADVERTISE arm also takes: `reject_bus_name_hop` opens
+                    // with a `wire::decode`, an empty span does not decode, and it returns
+                    // without replying — so the FRAME's fate does not depend on this line.
+                    // What does depend on it is the COUNT (#1503 step 3): the OOM is named
+                    // here rather than left to the codec's leniency, so an operator sees a
+                    // flatten-backend exhaustion instead of silence. The SEAM on the line
+                    // above is the testable part, and `fwd_flatten_backend_test` pins it.
+                    if (!flat) {
+                        count_drop(flatten_dropped_);
+                        return;
+                    }
                     reject_bus_name_hop(registry_, inbound_name, flat->bytes(), *egress_, status);
                 },
                 /* terminus */
@@ -2289,8 +2307,16 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
                                   reply_label)
             : rebuild_fwd_forward(cur_src, std::span<const std::byte>{}, inbound_name, strip_k, pre,
                                   mint_fn, reverse_fn, reply_label);
-    if (!rebuilt) return;        // not a forwardable FWD ⇒ drop (callers pre-peeked)
-    if (!rebuilt->ok()) return;  // malformed oversized op ⇒ drop, no overrun
+    // Both arms are the one `malformed_rx` bucket (#1503 Q3): a frame this node cannot
+    // parse into a forwardable hop is one operator symptom, and nothing is SIZED against it.
+    if (!rebuilt) {  // not a forwardable FWD ⇒ drop (callers pre-peeked)
+        count_drop(malformed_rx_);
+        return;
+    }
+    if (!rebuilt->ok()) {  // malformed oversized op ⇒ drop, no overrun
+        count_drop(malformed_rx_);
+        return;
+    }
 
     // Scatter-gather egress: the small stack heads interleaved with the untouched inbound
     // regions (remaining dst, selector, original src bytes, payload) — no payload copy. The
@@ -2329,7 +2355,14 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
         // ... and the same drop for a region that overshot the source window (#986): a
         // clamped feed emits FEWER bytes than the rebuilt head declares, which is the
         // truncated-frame-on-the-wire outcome this arm already refuses one line up.
-        if (!ok || cur_src.poisoned()) return;
+        //
+        // Two causes, two counters (#1503 step 3): the iov overrun is a RESOURCE drop an
+        // operator sizes `kFwdMaxIov` against, while a poisoned cursor is a frame whose
+        // regions left the source window — malformed, and fused into that bucket.
+        if (!ok || cur_src.poisoned()) {
+            count_drop(ok ? malformed_rx_ : forward_iov_dropped_);
+            return;
+        }
         child.send(std::span<const std::span<const std::byte>>(iov.data(), n));
     } else {
         // Rope source: a region may cross several links, so the sub-span count is only known
@@ -2348,8 +2381,12 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
         rebuilt->gather(cur_src, [&](std::span<const std::byte> s) {
             if (ok && !iov.push_back(s)) ok = false;
         });
-        // Same #986 window-overshoot drop as the span arm: both arms state one policy.
-        if (!ok || cur_src.poisoned()) return;
+        // Same #986 window-overshoot drop as the span arm: both arms state one policy, and
+        // the same two counters split it the same way.
+        if (!ok || cur_src.poisoned()) {
+            count_drop(ok ? malformed_rx_ : forward_iov_dropped_);
+            return;
+        }
         child.send(std::span<const std::span<const std::byte>>(iov.data(), iov.size()));
     }
 }
@@ -2368,7 +2405,15 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<con
     // subscriber whose deliveries route back over it (#136); the latch
     // (transient-local) fires inside resolve.
     const auto arena = wire::decode_into(frame, rx_for(inbound_ctx));
-    if (!arena) return;  // malformed frame ⇒ drop
+    if (!arena) {
+        // Two causes behind one `expected` (#1503 Q3): `TLV_NESTING_TOO_DEEP` is
+        // documented as "exceeds this RECEIVER's decode resources" — the rx source refused
+        // a draw, which is a RESOURCE drop an operator sizes the terminus arena against.
+        // Everything else is the frame's own fault and joins the malformed bucket.
+        count_drop(arena.error() == wire::err_t::TLV_NESTING_TOO_DEEP ? arena_dropped_
+                                                                      : malformed_rx_);
+        return;
+    }
     // §7.2's terminus deref rides as the fourth argument and nothing else changes: a labelled
     // `dst` is resolved against the element the label branch already produced, and a `nullptr`
     // — every frame a non-labelling node terminates — is the shipped call byte for byte.
@@ -2378,13 +2423,22 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<con
     // ctx rides along as the opaque token the router's own subject supplier reads back.
     const graph::inbound_ref_t inbound{inbound_name, terminus_peer(inbound_ctx, peer), inbound_ctx};
     auto reply = resolver_.resolve(*arena, inbound, frame_view, dst_label_target);
-    if (!reply) return;                    // structurally non-request ⇒ drop
-    if (reply->link_count() == 0) return;  // assemble OOM ⇒ empty rope ⇒ drop (no garbage frame)
+    if (!reply) {  // structurally non-request / malformed ⇒ drop
+        count_drop(malformed_rx_);
+        return;
+    }
+    if (reply->link_count() == 0) {  // assemble OOM ⇒ empty rope ⇒ drop (no garbage frame)
+        count_drop(assemble_dropped_);
+        return;
+    }
     if (transport_t* in = registry_.by_name(inbound_name)) {
         // Nothrow scatter-gather egress: the span table growth would abort() under
         // -fno-exceptions on a fragmented heap — drop the reply instead (the client retries).
         std::vector<std::span<const std::byte>> iov;
-        if (!reply->try_to_iovec(iov)) return;
+        if (!reply->try_to_iovec(iov)) {
+            count_drop(reply_iov_dropped_);
+            return;
+        }
         in->send(std::span<const std::span<const std::byte>>(iov));
     }
 }
@@ -2400,8 +2454,14 @@ void fwd_router_t::resolve_terminus_rope(std::string_view inbound_name, view::ro
     // surfaces its error where the resolver CONSUMES that level (per-TLV
     // verify-at-access, ADR-0053 §4).
     const auto view = wire::tlv_view_t::over(std::move(frame));
-    if (!view) return;                        // malformed root ⇒ drop (as a decode error)
-    if (!view->verify().has_value()) return;  // root CRC failure ⇒ drop
+    if (!view) {  // malformed root ⇒ drop (as a decode error)
+        count_drop(malformed_rx_);
+        return;
+    }
+    if (!view->verify().has_value()) {  // root CRC failure ⇒ drop
+        count_drop(malformed_rx_);
+        return;
+    }
     // No frame_view is threaded, and the rope tier does not need one: unlike the arena's
     // pin_wire — which requires a contiguous frame view and is gated on it —
     // view_node::pin_wire IGNORES the argument and subropes the payload directly
@@ -2413,13 +2473,22 @@ void fwd_router_t::resolve_terminus_rope(std::string_view inbound_name, view::ro
     // terminus.
     const graph::inbound_ref_t inbound{inbound_name, terminus_peer(inbound_ctx, peer), inbound_ctx};
     auto reply = resolver_.resolve(*view, inbound, nullptr, dst_label_target);
-    if (!reply) return;                    // structurally non-request ⇒ drop
-    if (reply->link_count() == 0) return;  // assemble OOM ⇒ empty rope ⇒ drop (no garbage frame)
+    if (!reply) {  // structurally non-request / malformed ⇒ drop
+        count_drop(malformed_rx_);
+        return;
+    }
+    if (reply->link_count() == 0) {  // assemble OOM ⇒ empty rope ⇒ drop (no garbage frame)
+        count_drop(assemble_dropped_);
+        return;
+    }
     if (transport_t* in = registry_.by_name(inbound_name)) {
         // Nothrow scatter-gather egress (see resolve_terminus): drop rather than abort on
         // a span-table growth failure.
         std::vector<std::span<const std::byte>> iov;
-        if (!reply->try_to_iovec(iov)) return;
+        if (!reply->try_to_iovec(iov)) {
+            count_drop(reply_iov_dropped_);
+            return;
+        }
         in->send(std::span<const std::span<const std::byte>>(iov));
     }
 }
@@ -3123,12 +3192,21 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const vie
                 // The iov table on the ADR-0065 failable seam (#981) — see the default arm
                 // below for the argument; this arm is the same table, same element type.
                 mem::block_array_t<std::span<const std::byte>> iov(graph_.control_source());
-                if (!iov.reserve(3 + value.link_count())) return;  // OOM — drop
+                if (!iov.reserve(3 + value.link_count())) {  // OOM — drop
+                    count_drop(delivery_iov_dropped_);
+                    return;
+                }
                 const bool built = iov.push_back(head.span()) && iov.push_back(dst_body) &&
                                    iov.push_back(std::span<const std::byte>(empty_src));
-                if (!built) return;
+                if (!built) {
+                    count_drop(delivery_iov_dropped_);
+                    return;
+                }
                 for (const view_t& l : value.links())
-                    if (!iov.push_back(l.bytes())) return;
+                    if (!iov.push_back(l.bytes())) {
+                        count_drop(delivery_iov_dropped_);
+                        return;
+                    }
                 out->send(std::span<const std::span<const std::byte>>(iov.data(), iov.size()));
                 return;
             }
@@ -3167,15 +3245,24 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const vie
     // node's injected source rather than the global heap. `std::span` is trivially copyable,
     // so the memcpy relocation is exact. Exhaustion still just drops this delivery.
     mem::block_array_t<std::span<const std::byte>> iov(graph_.control_source());
-    if (!iov.reserve(3 + value.link_count())) return;  // OOM — drop
+    if (!iov.reserve(3 + value.link_count())) {  // OOM — drop
+        count_drop(delivery_iov_dropped_);
+        return;
+    }
     // Reserved to the exact final count above, so none of these can grow again; they are
     // still checked because `push_back` is `[[nodiscard]]` and a silent short table would
     // put a truncated frame on the wire.
     const bool built = iov.push_back(head.span()) && iov.push_back(route) &&
                        iov.push_back(std::span<const std::byte>(empty_src));
-    if (!built) return;
+    if (!built) {
+        count_drop(delivery_iov_dropped_);
+        return;
+    }
     for (const view_t& l : value.links())
-        if (!iov.push_back(l.bytes())) return;
+        if (!iov.push_back(l.bytes())) {
+            count_drop(delivery_iov_dropped_);
+            return;
+        }
     link->send(std::span<const std::span<const std::byte>>(iov.data(), iov.size()));
 }
 
