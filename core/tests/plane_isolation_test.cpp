@@ -54,15 +54,15 @@
  * corrupt or deadlock them either, and because they become ablation-sensitive for free once
  * stage 2 lands; they are labelled in their prose so nobody quotes them as the lever.
  *
- * ### Vector coverage — partial, deliberately
+ * ### Vector coverage — one arm of three, by division of labour
  *
  * RFC-0025 §7 vector 12 has three arms. This suite populates the **plane-isolation** arm only.
  * The receiving STREAM ring's own §4.4 pressure contract (best-effort shed + `FLOW_ADDRESS_
- * SHIFT_GAP` + loss accounting; reliable ⇒ `FLOW_BACKPRESSURE`) and its recovery half land
- * with the fused #1461 + #1462 ring PR, which rewrites `vertex_t::store()`'s STREAM arm; there
- * is nothing in the tree to assert them against yet, and asserting them against what is here
- * would be asserting against a ring that does not exist. See the `HARNESS.md` row, which says
- * the same thing where a reader of the vector table will find it.
+ * SHIFT_GAP` + loss accounting; reliable ⇒ `FLOW_BACKPRESSURE`) and its recovery half needed the
+ * ring the fused #1461 + #1462 PR moved onto the receiving vertex, so they could not be asserted
+ * when this file landed. They are now, in the sibling `core/tests/ring_pressure_test.cpp`, which
+ * drives the same vector's other two arms through the graph's own store verb. See the
+ * `HARNESS.md` row, which says the same thing where a reader of the vector table will find it.
  *
  * Runs single-threaded, so it is meaningful under ASan+UBSan (`-fno-sanitize-recover=all`) and
  * costs nothing under TSan beyond the store's own internal locking.

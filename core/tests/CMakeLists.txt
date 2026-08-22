@@ -2009,6 +2009,16 @@ if(LIBTRACER_NET_PLANE)
     add_test(NAME plane_isolation COMMAND plane_isolation_test)
 endif()
 
+# #1460 phases (a)+(c) / RFC-0025 §7 vector 12 `stream/receiver-ring-flood` — the RING-PRESSURE
+# and RECOVERY arms: at exhaustion the RECEIVER's ring declines under §4.4 (best-effort sheds the
+# oldest and accounts it on both faces; reliable refuses and answers BACKPRESSURE), and once the
+# pressure clears it resumes, stops counting, and leaks no reservation. Not net-plane guarded —
+# unlike its phase (b) sibling it drives no router, only the graph's own store verb.
+add_executable(ring_pressure_test ring_pressure_test.cpp)
+target_link_libraries(ring_pressure_test PRIVATE libtracer)
+libtracer_test_warnings(ring_pressure_test)
+add_test(NAME ring_pressure COMMAND ring_pressure_test)
+
 # RFC-0025 §4.2.1 / §4.1.2 — the BATCH record (batch.hpp): the fold, the sample clock DERIVED
 # from the descriptor's rate at 0 bytes/sample, the non-uniform packed i32 offset array, and
 # the reader refusals the codec does NOT make. Pins the `stream/batch-time-roundtrip` vector
