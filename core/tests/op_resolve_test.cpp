@@ -1144,6 +1144,91 @@ void test_ts_echo() {
     }
 }
 
+/**
+ * @brief RFC-0025 §4.2.1 (Amendment 1) clause 4 / Q10 — `stream/tf1-reserved` bound to the
+ *        terminus: a `TF=1` ROOT is carried, recorded and answered, and never echoed.
+ *
+ * The harness scores this vector by decoding and re-encoding it, which is the WEAKEST of the
+ * four rules clause 4 states: re-emitting the bytes verbatim is precisely what a core that
+ * never looked at the `TF` bit would also do, and all three cores score `ok` today whether or
+ * not they interpret the flag at all. Two of the four rules can be false here:
+ *
+ * - **Rule 1 — a decoder MUST record the flag and its delta and SUCCEED.** Asserted on the
+ *   DECODED trailer rather than on the round-trip, and the vector's delta is deliberately
+ *   NEGATIVE: a core reading the four bytes as `u32` would re-emit the file byte-for-byte and
+ *   still record 4294717296. Only the signed read distinguishes them.
+ * - **Rule 3 — the reply-echo path MUST DECLINE a `TF=1` root.** The #1109 echo answers a
+ *   stamped request by copying its stamp onto the reply so the origin can compute
+ *   `RTT = origin_now - echoed_stamp` on its own clock. A relative offset at the root has no
+ *   anchor, so echoing it would propagate a meaningless number. Declining is not an error —
+ *   the frame still resolves and still answers `RESULT`.
+ *
+ * The **control** is what stops "no trailer on the reply" from being vacuous: the identical
+ * frame with `TF` cleared and an absolute stamp DOES come back echoed, so the silence above is
+ * a decision about the `TF` bit and not about this frame, this path, or a resolver that simply
+ * never echoes. Rule 2 (a relay carries it verbatim) is bound over live hops in
+ * `core/tests/fwd_multihop_test.cpp`; rule 4 (the writer stays gated) is an absence.
+ */
+void test_tf1_reserved_root() {
+    std::printf("RFC-0025 §4.2.1 Q10: a TF=1 ROOT is reserved grammar — carried, never echoed:\n");
+    graph_t g;
+    op_resolver_t resolver(g);
+    const auto path = path_t::parse("/sensor/temp");
+    const tr::graph::vertex_handle_t v = g.register_vertex(*path, role_t::STORED_VALUE);
+    (void)g.write(v, make_value(b_value({0x2A})));
+
+    const std::filesystem::path vroot{LIBTRACER_VECTORS_DIR};
+    const auto tf1 = read_file(vroot / "stream" / "tf1-reserved" / "input.bin");
+    check(tf1.size() == 42, "the stream/tf1-reserved vector loaded (42 bytes)");
+
+    // Rule 1: decode records the flag AND the signed delta, and succeeds.
+    const auto dec = tr::wire::decode(tf1);
+    check(dec.has_value(), "a TF=1 root DECODES — reserved grammar is not a reject");
+    check(tr::wire::encode(*dec) == tf1, "and re-encodes byte-exactly (3-core machine green)");
+    check(dec->opt.ts && dec->opt.tf, "the root's opt records TS=1 and TF=1");
+    check(dec->trailer && dec->trailer->ts && dec->trailer->ts->relative,
+          "the trailer records the RELATIVE form (a 4-byte field, not an 8-byte one)");
+    check(dec->trailer && dec->trailer->ts && dec->trailer->ts->value == -250000,
+          "and the delta reads back SIGNED: -250000 ns, not 4294717296");
+
+    // The vector is fwd/fwd-read plus the flag: a one-variable experiment, asserted rather
+    // than asserted-in-prose. Everything below is therefore about TF=1 and nothing else.
+    const auto plain = read_file(vroot / "fwd" / "fwd-read" / "input.bin");
+    check(plain.size() == 38 && tf1.size() == plain.size() + 4,
+          "the vector is fwd/fwd-read + a 4-byte relative trailer");
+    check(std::equal(plain.begin() + 4, plain.end(), tf1.begin() + 4),
+          "... with a byte-identical body — the whole diff is the opt byte and the trailer");
+
+    // Rule 3: it RESOLVES (not an error), and the reply carries no trailer at all.
+    {
+        auto reply = resolve_bytes(resolver, tf1);
+        check(reply.has_value(), "the TF=1-stamped READ resolves to a reply");
+        const auto d = decode_reply(*reply);
+        check(value_u8(d.tlv.children[3]) == static_cast<std::uint8_t>(reply_kind_t::RESULT),
+              "... and answers kind=RESULT — declining the echo is not refusing the frame");
+        check(!d.tlv.opt.ts && !d.tlv.trailer.has_value(),
+              "the reply carries NO trailer: an anchorless root stamp is never echoed");
+    }
+
+    // The control: TF cleared, absolute stamp, everything else identical => the echo happens.
+    // Without this, "no trailer" would also pass on a resolver that never echoed anything.
+    {
+        std::vector<std::byte> abs(plain);
+        opt_t o = opt_t::decode(std::to_integer<std::uint8_t>(abs[1]));
+        o.ts = true;
+        o.tf = false;
+        abs[1] = static_cast<std::byte>(o.encode());
+        constexpr std::int64_t kNs = 250'000LL;
+        tr::wire::emit_trailer_ts(abs, /*relative=*/false, kNs);
+        auto reply = resolve_bytes(resolver, abs);
+        check(reply.has_value(), "the CONTROL (same frame, TF=0, absolute) resolves");
+        const auto d = decode_reply(*reply);
+        check(d.tlv.opt.ts && !d.tlv.opt.tf && d.tlv.trailer && d.tlv.trailer->ts &&
+                  !d.tlv.trailer->ts->relative && d.tlv.trailer->ts->value == kNs,
+              "... and IS echoed — so the silence above is about TF, not about this path");
+    }
+}
+
 int main() {
     test_read_zero_copy();
     test_write();
@@ -1161,5 +1246,6 @@ int main() {
     test_remote_write_does_not_create();
     test_subscription_observer();
     test_ts_echo();
+    test_tf1_reserved_root();
     return tr::testing::summary("op_resolve");
 }

@@ -34,12 +34,16 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <initializer_list>
+#include <iterator>
 #include <mutex>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "fwd_frame_builder.hpp"
@@ -98,8 +102,13 @@ struct observed_t {
     std::mutex m;
     std::vector<std::byte> dst;
     std::vector<std::byte> src;
+    opt_t opt{}; /**< @brief The inbound ROOT's opt — the #1109 / RFC-0025 stamp-carriage arm. */
+    /** @brief The inbound ROOT's trailer timestamp, in whichever form `opt.tf` names. */
+    std::optional<tr::wire::timestamp_t> ts{};
     void set(const tlv_t& fwd) {
         const std::lock_guard lock(m);
+        opt = fwd.opt;
+        ts = fwd.trailer ? fwd.trailer->ts : std::nullopt;
         if (fwd.children.size() < 3) return;
         dst = tr::wire::encode(fwd.children[1]);
         src = tr::wire::encode(fwd.children[2]);
@@ -112,7 +121,25 @@ struct observed_t {
         const std::lock_guard lock(m);
         return src;
     }
+    /** @brief The root opt and trailer timestamp B last saw, snapshotted together. */
+    std::pair<opt_t, std::optional<tr::wire::timestamp_t>> snap_stamp() {
+        const std::lock_guard lock(m);
+        return {opt, ts};
+    }
 };
+
+/** @brief The raw bytes of a conformance vector's `input.bin`. */
+std::vector<std::byte> vector_bytes(std::string_view case_dir) {
+    const std::filesystem::path p =
+        std::filesystem::path{LIBTRACER_VECTORS_DIR} / case_dir / "input.bin";
+    std::ifstream f(p, std::ios::binary);
+    const std::vector<char> raw((std::istreambuf_iterator<char>(f)),
+                                std::istreambuf_iterator<char>());
+    std::vector<std::byte> out(raw.size());
+    for (std::size_t i = 0; i < raw.size(); ++i)
+        out[i] = static_cast<std::byte>(static_cast<unsigned char>(raw[i]));
+    return out;
+}
 
 constexpr auto kBudget = 5000ms;
 
@@ -260,6 +287,54 @@ int main() {
                   "REPLY echoes the origin's stamp VERBATIM after two forwarded hops");
             check(value_u8(dec->children[3]) == static_cast<std::uint8_t>(reply_kind_t::RESULT),
                   "stamped READ still answers kind=RESULT with the value");
+        }
+    }
+
+    // ===== 2c) RFC-0025 §4.2.1 clause 4 rule 2 — a relay carries TF=1 VERBATIM ===
+    // `stream/tf1-reserved`'s relay arm. The vector's own frame is addressed to a TERMINUS
+    // (dst=/sensor/temp) because that is where rules 1 and 3 live (op_resolve_test.cpp); a
+    // RELAYED frame by definition carries a routed dst, so this arm reuses the chain's
+    // /up/sensor address and the vector's TRAILER — asserted byte-identical to its last four
+    // bytes, so the two arms cannot drift onto different stamps.
+    //
+    // What can be false here: the forward rebuild re-heads the frame (dst shrinks by "up",
+    // src grows by "cli") and re-emits the trailer window from `opt.TS`/`opt.TF`. A hop that
+    // normalized the stamp it does not understand — widening TF=1's 4 bytes to 8, or dropping
+    // the bit — would still deliver a well-formed frame and still answer RESULT. Only reading
+    // what B ACTUALLY SAW catches it. Section 2b above is the TF=0 twin, so the pair together
+    // says the hop preserves the trailer in whichever width TF names.
+    std::printf("RFC-0025 Q10: a TF=1 root crosses the forwarding hop VERBATIM:\n");
+    const auto tf1_vec = vector_bytes("stream/tf1-reserved");
+    check(tf1_vec.size() == 42, "the stream/tf1-reserved vector loaded (42 bytes)");
+    {
+        std::vector<std::byte> rel =
+            b_fwd(fwd_op_t::READ, b_path({"up", "sensor"}), b_path({"reply-ep"}));
+        opt_t o = opt_t::decode(std::to_integer<std::uint8_t>(rel[1]));
+        o.ts = true;
+        o.tf = true;  // the anchorless root form — reserved grammar, never minted
+        rel[1] = static_cast<std::byte>(o.encode());
+        tr::wire::emit_trailer_ts(rel, /*relative=*/true, -250000);
+        check(std::equal(tf1_vec.end() - 4, tf1_vec.end(), rel.end() - 4),
+              "the probe's trailer is the VECTOR's four bytes, not a second stamp");
+        c_to_a.send(rel);
+    }
+    auto r2c = inbox.wait(kBudget);
+    check(r2c.has_value(), "client received a REPLY for the TF=1-stamped READ");
+    {
+        const auto [b_opt, b_ts] = b_seen.snap_stamp();
+        check(b_opt.ts && b_opt.tf,
+              "B saw the root's TS=1/TF=1 bits SURVIVE the hop — not normalized away");
+        check(b_ts.has_value() && b_ts->relative && b_ts->value == -250000,
+              "... carrying the same signed 4-byte delta the origin sent (verbatim)");
+    }
+    if (r2c) {
+        const auto dec = tr::wire::decode(*r2c);
+        check(dec.has_value(), "the TF=1 REPLY decodes");
+        if (dec) {
+            check(value_u8(dec->children[3]) == static_cast<std::uint8_t>(reply_kind_t::RESULT),
+                  "a TF=1 root still answers kind=RESULT — reserved is carried, not refused");
+            check(!dec->opt.ts && !dec->trailer.has_value(),
+                  "and comes home UNSTAMPED: the anchorless root is never echoed (rule 3)");
         }
     }
 

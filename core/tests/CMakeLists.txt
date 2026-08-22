@@ -1290,6 +1290,10 @@ if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_WS)
     add_executable(fwd_multihop_test fwd_multihop_test.cpp)
     target_link_libraries(fwd_multihop_test PRIVATE libtracer)
     libtracer_test_warnings(fwd_multihop_test)
+    # RFC-0025 §4.2.1 clause 4: it binds `stream/tf1-reserved`'s relay arm — a TF=1 root
+    # crossing live hops verbatim — so it needs LIBTRACER_VECTORS_DIR.
+    target_compile_definitions(fwd_multihop_test PRIVATE
+        LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
     add_test(NAME fwd_multihop COMMAND fwd_multihop_test)
 endif()
 
@@ -1468,6 +1472,10 @@ if(LIBTRACER_NET_PLANE)
     add_executable(link_liveness_test link_liveness_test.cpp)
     target_link_libraries(link_liveness_test PRIVATE libtracer)
     libtracer_test_warnings(link_liveness_test)
+    # RFC-0014 S7-B: it binds the `conn/liveness-enum` vector to the live connection
+    # vertex, so it needs LIBTRACER_VECTORS_DIR.
+    target_compile_definitions(link_liveness_test PRIVATE
+        LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
     add_test(NAME link_liveness COMMAND link_liveness_test)
 
     # RFC-0014 S6 (#492) — the control-plane lock-order invariant: `ctl_m_` is never held

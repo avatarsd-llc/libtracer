@@ -23,7 +23,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <deque>
+#include <filesystem>
+#include <fstream>
 #include <future>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <span>
@@ -447,6 +450,112 @@ void test_remove_while_healing_tears_down() {
     check(g_socks_alive.load() == 0, "no socket survives the removal");
 }
 
+/** @brief The raw bytes of a conformance vector's `input.bin`. */
+std::vector<std::byte> vector_bytes(std::string_view case_dir) {
+    const std::filesystem::path p =
+        std::filesystem::path{LIBTRACER_VECTORS_DIR} / case_dir / "input.bin";
+    std::ifstream f(p, std::ios::binary);
+    const std::vector<char> raw((std::istreambuf_iterator<char>(f)),
+                                std::istreambuf_iterator<char>());
+    std::vector<std::byte> out(raw.size());
+    for (std::size_t i = 0; i < raw.size(); ++i)
+        out[i] = static_cast<std::byte>(static_cast<unsigned char>(raw[i]));
+    return out;
+}
+
+/** @brief The whole published VALUE TLV at @p path — the bytes a peer's read serves. */
+std::vector<std::byte> published_bytes(graph_t& g, std::string_view path) {
+    const auto h = g.find(path_t::parse(path)->key());
+    if (!h) return {};
+    const auto v = g.read(*h);
+    if (!v) return {};
+    const auto bytes = (*v)->materialize().bytes();
+    return {bytes.begin(), bytes.end()};
+}
+
+/**
+ * @brief RFC-0014 S7-B — the `conn/liveness-enum` vector bound to the live connection vertex.
+ *
+ * The harness that scores the vector decodes and re-encodes its five bytes and stops there
+ * (HARNESS.md §"What a vector gates"). For this vector that boundary is unusually sharp: a
+ * one-byte `VALUE` round-trips in ANY conforming core no matter what the byte means to it, so
+ * `input.bin` alone cannot tell `DORMANT = 0x00` from any other assignment of the six states.
+ * Reverse the enum outright and the vector still scores `ok` in all three cores. This is where
+ * that claim can be false.
+ *
+ * Two things are asserted, and they are different claims:
+ *
+ * - **The vector's own bytes** are what the production door emits — not a hand-written TLV that
+ *   merely happens to decode the same. A fresh engine-managed `DIAL` creation is read back
+ *   through `graph_t::read` and compared to `input.bin` in full, header included, so the
+ *   envelope (`VALUE`, `opt = 0`, length 1) is pinned as well as the payload byte.
+ * - **All six enumerators**, driven through `set_link_state` — the public liveness door a
+ *   provided link reports on — and read back off the vertex. This is the arm that fails when
+ *   the mapping moves: the vector file is silent about `UP`, and `UP = 0x03` (not `0x01`) is
+ *   exactly the kind of "obvious" reassignment a second core would make unprompted.
+ *
+ * `BIND_FAILED` (0x05) is driven here through the same public door even though no reference
+ * code path assigns it yet — a peer must be able to read it, so the byte is pinned rather than
+ * left for the first implementation that needs it to choose.
+ *
+ * The **transitions** (`dormant→dialing→up`, `up→reconnecting→up`, `listen→listening`) are the
+ * engine tests above; the `refcount-0→dormant` clauses are `test_lone_oneshot_failure_redormants`,
+ * `test_loss_at_refcount_zero_redormants` and `test_standing_binding_selfheals` — and they pin
+ * RFC-0014 §4.1's three MUSTs ONLY, never its MAY. See the HARNESS.md row.
+ */
+void test_conformance_vectors() {
+    std::printf("S7-B: the conn/liveness-enum vector is the live vertex's own value bytes:\n");
+    dial_script_t script;  // outlives `net`: the engine's factory copy holds its address
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    declare_fake_engine_module(net, script);
+    const script_guard_t guard{script};  // bounded teardown even on a failing test
+
+    const auto vec = vector_bytes("conn/liveness-enum");
+    check(vec.size() == 5, "the conn/liveness-enum vector loaded (5 bytes)");
+
+    (void)node.write(path_t("/net/fake-client/conn"), fake_spec("a", 1));
+    check(published_bytes(node, "/net/fake-client/a") == vec,
+          "a fresh DIAL creation publishes the vector's bytes EXACTLY — envelope included");
+
+    // The six-value sweep. `set_link_state` is the public liveness door (the one a provided
+    // link reports through), so this is the production emitter, not a test builder.
+    struct case_t {
+        link_state_t state;
+        std::uint8_t byte;
+        const char* name;
+    };
+    static constexpr case_t kTable[] = {
+        {link_state_t::DORMANT, 0x00, "DORMANT"},
+        {link_state_t::DIALING, 0x01, "DIALING"},
+        {link_state_t::RECONNECTING, 0x02, "RECONNECTING"},
+        {link_state_t::UP, 0x03, "UP"},
+        {link_state_t::LISTENING, 0x04, "LISTENING"},
+        {link_state_t::BIND_FAILED, 0x05, "BIND_FAILED"},
+    };
+    for (const case_t& c : kTable) {
+        std::printf("  link_state_t::%s\n", c.name);
+        check(net.set_link_state("net/fake-client/a", c.state).has_value(),
+              "... set_link_state publishes the state");
+        const auto pub = published_bytes(node, "/net/fake-client/a");
+        const bool ok = pub.size() == 5 && pub[0] == std::byte{0x01} && pub[1] == std::byte{0x00} &&
+                        pub[2] == std::byte{0x01} && pub[3] == std::byte{0x00} &&
+                        pub[4] == std::byte{c.byte};
+        check(ok, "... reads back as a 1-byte VALUE carrying RFC-0014 §4's table byte");
+    }
+
+    // The enum is SIX values and no seventh: every table byte is distinct, they are exactly
+    // 0..5, and nothing sits between them. A phantom seventh state (RFC-0014 §4's prose names
+    // a `healing` that no enumerator has ever had — PR #1475's erratum) could not be placed
+    // anywhere in this range without moving a byte the vector and the sweep above already pin.
+    std::uint32_t seen = 0;
+    for (const case_t& c : kTable) seen |= 1u << (static_cast<std::uint8_t>(c.state) & 0x1Fu);
+    check(seen == 0x3F, "the six ENUMERATORS are exactly 0x00..0x05 — dense, distinct, no seventh");
+    check(static_cast<std::uint8_t>(link_state_t::DORMANT) == 0,
+          "DORMANT is the FALSY default the superseded binary set_link_state(name,bool) used");
+}
+
 }  // namespace
 
 int main() {
@@ -458,5 +567,6 @@ int main() {
     test_standing_binding_selfheals();
     test_release_during_heal_stops_retry();
     test_remove_while_healing_tears_down();
+    test_conformance_vectors();
     return tr::testing::summary("link_liveness");
 }
