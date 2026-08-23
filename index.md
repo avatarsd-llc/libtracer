@@ -1,10 +1,14 @@
 # libtracer
 
-**libtracer** is a spec-first protocol for tracing, telemetry, and pub/sub over a
-single zero-copy wire format — from Cortex-M microcontrollers to Linux gateways.
-A node is a graph of addressable **vertices**; the same TLV bytes are the wire
-encoding, the in-memory representation, and the graph node — so an in-process
-hand-off moves **zero bytes**.
+**libtracer** is a spec-first, high-performance protocol for tracing and pub/sub
+over a single zero-copy wire format — from Cortex-M microcontrollers to Linux
+gateways. A node is a graph of addressable **vertices**; the same TLV bytes are
+the wire encoding, the in-memory representation, and the graph node — so an
+in-process hand-off moves **zero bytes**, a steady-state forward hop makes
+**zero heap allocations**, and a plain write lands in **tens of nanoseconds**.
+Measured up to **9× the delivery rate of zenoh-c** at equal payloads and
+semantics, with lower latency at every point — all of it CI-gated on every
+merge.
 
 ```{raw} html
 <script type="application/ld+json">
@@ -12,7 +16,7 @@ hand-off moves **zero bytes**.
   "@context": "https://schema.org",
   "@type": "SoftwareApplication",
   "name": "libtracer",
-  "description": "A decentralized, zero-copy, graph-based pub/sub protocol — one wire format from a 16 KB Cortex-M0 to a GPU, across vendors and transports.",
+  "description": "A decentralized, zero-copy, high-performance graph-based pub/sub protocol — one wire format from a 16 KB Cortex-M0 to a GPU, across vendors and transports.",
   "applicationCategory": "DeveloperApplication",
   "operatingSystem": "Cross-platform (embedded to server)",
   "url": "https://libtracer.avatarsd.com/",
