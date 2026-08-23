@@ -41,8 +41,8 @@
 # by necessity. A fork PR falls back to `ubuntu-24.04`, so this required check never
 # waits on hardware a fork cannot use.
 #
-# CONTAINER: the self-hosted runners are bare machines with no preinstalled tool set and
-# no passwordless sudo, so the job runs in `container: ubuntu:24.04` on BOTH routes.
+# CONTAINER: the self-hosted runners are bare machines with no preinstalled tool set,
+# so the job runs in `container: ubuntu:24.04` on BOTH routes.
 # That image ships python 3.12 — the very version `setup-python` was pinning — so the
 # interpreter pin now comes from the image and the action is gone with it, one less
 # moving part in a job whose whole point is that it needs no toolchain.
@@ -70,6 +70,10 @@ on:
       - "tools/cortexm0_footprint.py"
       - "tools/check_config_keys.py"
       - "tools/tests/test_check_config_keys.py"
+      # The #1538 workspace-ownership gate and its tests ride in this job, so a change
+      # to either must fire it — same rule as the two checks above.
+      - "tools/check_ci_workspace_cleanup.py"
+      - "tools/tests/test_check_ci_workspace_cleanup.py"
       - ".github/workflows/doc-citations.yml"
       # #1095 enrolled seven more non-source paths. Four sit under `core/**`, `bench/**`
       # or `integrations/**` and are already covered above; these three are not, and an
@@ -95,6 +99,8 @@ on:
       - "tools/cortexm0_footprint.py"
       - "tools/check_config_keys.py"
       - "tools/tests/test_check_config_keys.py"
+      - "tools/check_ci_workspace_cleanup.py"
+      - "tools/tests/test_check_ci_workspace_cleanup.py"
       - ".github/workflows/doc-citations.yml"
       - ".github/workflows/core-ci.yml"
       - ".github/workflows/footprint-cortexm0.yml"
@@ -127,6 +133,10 @@ jobs:
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3 git ca-certificates
       - uses: actions/checkout@v4
+        with:
+          # See the WORKSPACE OWNERSHIP header: without this, checkout's post step
+          # re-roots `.git/config` after the cleanup step has already run.
+          persist-credentials: false
       # The resolver reads three citation spellings (full path, basename shorthand,
       # bare `:N` continuation) and must not guess; its unit tests run FIRST so a
       # resolver bug reports as a resolver bug rather than as 300 phantom drifts.
@@ -140,9 +150,20 @@ jobs:
         run: python3 -m unittest discover -s tools/tests -p "test_check_config_keys.py" -v
       - name: Config-key gate (the connection-config page matches the source that reads the keys)
         run: python3 tools/check_config_keys.py
+      # The #1538 workspace-ownership gate, run HERE as well as in core-ci's `ci-paths`
+      # job. This job is itself a self-hosted `container:` job, and this workflow's
+      # `paths:` include this file while core-ci's do not — so an edit that adds or
+      # breaks a cleanup step in this file is gated by the commit that makes it. Its own
+      # unit tests run first, same rule as the two checks above.
+      - name: Workspace-ownership gate unit tests
+        run: python3 -m unittest discover -s tools/tests -p "test_check_ci_workspace_cleanup.py" -v
+      - name: Every self-hosted container job restores workspace ownership
+        run: python3 tools/check_ci_workspace_cleanup.py
       - name: Restore workspace ownership for the host runner
-        # This job runs as root inside `container:` on a self-hosted runner whose
-        # _work tree is shared with non-container jobs (perf-local's bench-local runs
-        # directly on the host); root-owned leftovers break their checkout cleanup.
+        # Hands the container's root-owned tree back to the host runner user. WHY, and
+        # why it is duplicated inline rather than factored into a composite action: the
+        # WORKSPACE OWNERSHIP section of core-ci.yml's header. Gated by
+        # tools/check_ci_workspace_cleanup.py — every self-hosted `container:` job must
+        # END with this exact step.
         if: always()
-        run: chown -R "$(stat -c '%u:%g' ..)" .
+        run: chown -R "$(stat -c '%u:%g' ..)" . "$RUNNER_TEMP"
