@@ -7,6 +7,8 @@ versioning/publish strategy.
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-08-23
+
 ### Added
 
 - **`DELIVERY_CLASS`, `deliveryClassBits()` and `deliveryClassOf()`** (`@avatarsd-llc/libtracer`)

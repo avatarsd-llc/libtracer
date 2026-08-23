@@ -8,6 +8,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-08-23
+
 ### Added
 
 - **`DeliveryPolicy::delivery_class()`** — bits 6–7 of the packed `delivery_policy` word

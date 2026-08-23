@@ -18,6 +18,40 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-08-23
+
+### Changed
+
+- **The QoS `depth` mapping now has a second axis, and it is the one `rmw_tracer` will have
+  to size: BYTES** (core [#1461](https://github.com/avatarsd-llc/libtracer/issues/1461) /
+  [#1462](https://github.com/avatarsd-llc/libtracer/issues/1462), RFC-0025 §4.6.1
+  Amendment 2). The README's corrected `history` + `depth` row still holds — a
+  subscription's target vertex is a STREAM on *this* node and `rmw_create_subscription`
+  sizes the ring `rmw_take` pops — but the producer no longer runs any ring machinery at
+  all, and the receiver's ring is additionally bounded in bytes by that vertex's own
+  injected `mem::block_source_t` (`graph_t::set_ring_source`, or the graph-level default).
+  So the entry count is the retention *intent* and the source is the *bound*; a
+  `rmw_tracer` subscription that declares `depth = N` and injects nothing gets the
+  graph's default heap source. `rmw_get_subscriptions_info_by_topic` reporting a remote
+  publisher's depth stays open and is now narrower still: there is no producer ring to
+  report.
+
+  **Consequence for a future `rmw_take` implementation:** cross-writer total order is no
+  longer implied by ring append order. Order across producers is
+  [ADR-0019](../../docs/adr/0019-per-producer-monotonic-origin-timestamp.md)'s
+  per-producer HLC stamp, read off the value.
+
+- **`graph_t::propagate` is `[[nodiscard]] result_t<void>`** (core RFC-0008 Amendment 2,
+  [#1506](https://github.com/avatarsd-llc/libtracer/issues/1506)). No `rmw_tracer` TU calls
+  it today — `src/rmw_tracer/identity.c` remains the package's only real translation unit —
+  but the staged `rmw_publish` path in the README's checklist must check the result.
+
+### Documentation
+
+- **The README's nine `file:line` citations into `core/` are re-pinned** to where those
+  lines moved across the 0.15.0 core work. Text unchanged; the claims they support are
+  the same claims.
+
 ## [0.14.0] — 2026-08-21
 
 No API change. `src/rmw_tracer/identity.c` is still the package's only real

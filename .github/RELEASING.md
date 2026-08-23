@@ -200,7 +200,7 @@ CI-published registries, not unnecessary. CMake `FetchContent` is already covere
 - **This repo's standing rule:** a release is cut only when the maintainer
   explicitly says so. Reconciling the version markers (`tools/sync-version.py`) is
   **not** a release — only the signed `vX.Y.Z` tag is.
-- **Released so far:** `v0.3.0` (2026-07-08) through `v0.14.0` (2026-08-21).
+- **Released so far:** `v0.3.0` (2026-07-08) through `v0.15.0` (2026-08-23).
   `VERSION` reads the most recently shipped release, so the next cut bumps it.
   Do not take this list as authoritative —
   `git tag -l 'v*'` and `gh release list` are; it is here so a reader knows the

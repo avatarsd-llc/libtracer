@@ -10,6 +10,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-08-23
+
 ### Added
 
 - **`esp_ws_client_link_t::drop_stats()`** — the client link now answers the #932
@@ -36,7 +38,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and the rich block can no longer disagree, and the note says so. The part that is still
   true is kept and sharpened — core's hot `deliver_remote` path grew no counter, and
   `fwd_router_t` grew per-SEAM counters (the ADR-0079 shape), not per-child accounting.
-
 
 ## [0.14.0] — 2026-08-21
 
