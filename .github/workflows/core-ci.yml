@@ -23,12 +23,37 @@
 # below, or perf.yml (its interleaved gates are designed for hosted runners).
 #
 # CONTAINER: the self-hosted runners are bare machines, NOT the ubuntu-24.04 image —
-# there is no preinstalled tool set and the runner user has no passwordless sudo. Every
-# migrated job therefore runs inside `container: ubuntu:24.04` and apt-installs what it
-# needs as root (no `sudo` anywhere). The container applies on BOTH routes, so the
-# hosted fallback compiles in exactly the same environment — hermetic parity, not a
-# second configuration. Each migrated leg was run end-to-end in that container before
-# migrating (full ctest: 134/134).
+# there is no preinstalled tool set. Every migrated job therefore runs inside
+# `container: ubuntu:24.04` and apt-installs what it needs as root (no `sudo` anywhere —
+# the steps already ARE root, and the image ships none). The container applies on BOTH
+# routes, so the hosted fallback compiles in exactly the same environment — hermetic
+# parity, not a second configuration. Each migrated leg was run end-to-end in that
+# container before migrating (full ctest: 134/134).
+#
+# ── WORKSPACE OWNERSHIP (#1538) ─────────────────────────────────────────────────────
+# The container runs as ROOT, and on the self-hosted runners its `/__w` is a bind mount
+# of the host runner's `_work` tree — NOT a throwaway VM disk. Every file a job here
+# creates (the checkout, each CMake build tree, `$RUNNER_TEMP`) is left owned by root
+# after the job ends, the runner user cannot clean it, and the NEXT job on that machine
+# dies inside `actions/checkout`'s clean step. It reads as code breakage and is not: on
+# 2026-08-23 it took `perf-local / bench-local` red with 129 root-owned paths under
+# `core/build-minimal`, left by `build-test-minimal-set` — one of the two jobs that had
+# been missed when the cleanup step was added to the others.
+#
+# So EVERY job below that pairs `container:` with the self-hosted routing ends with the
+# same `if: always()` step, and `tools/check_ci_workspace_cleanup.py` (run by the
+# `ci-paths` job) fails the build if any such job omits it or spells it differently. The
+# step is inline in each job rather than a composite action ON PURPOSE: a local
+# `uses: ./...` action is only resolvable after `actions/checkout` has run, and the
+# cleanup has to survive a job that died in the apt step BEFORE checkout — the exact
+# wedge surface documented above. `if: always()` for the same reason: the run that
+# leaves the most wreckage is the one that failed or was cancelled mid-build.
+#
+# What it chowns, and to whom: `..` is the workspace's parent, created by the runner
+# process on the host, so its owner IS the runner user — no uid is hard-coded and the
+# step is a harmless no-op on the hosted fallback route. `$RUNNER_TEMP` is included
+# because `install-consume` builds into it as root and the runner cannot clear a
+# root-owned subtree between jobs either.
 #
 # NOT MIGRATED, and why (phase 2): the sanitizer and TSan legs run `setarch -R`, and
 # Docker's default seccomp profile denies `personality(ADDR_NO_RANDOMIZE)` — verified
@@ -141,11 +166,13 @@ jobs:
           cmake --build core/build -j "$(nproc)"
           ctest --test-dir core/build --output-on-failure
       - name: Restore workspace ownership for the host runner
-        # This job runs as root inside `container:` on a self-hosted runner whose
-        # _work tree is shared with non-container jobs (perf-local's bench-local runs
-        # directly on the host); root-owned leftovers break their checkout cleanup.
+        # Hands the container's root-owned tree back to the host runner user. WHY, and
+        # why it is duplicated inline rather than factored into a composite action: the
+        # WORKSPACE OWNERSHIP section of this file's header. Gated by
+        # tools/check_ci_workspace_cleanup.py — every self-hosted `container:` job must
+        # END with this exact step.
         if: always()
-        run: chown -R "$(stat -c '%u:%g' ..)" .
+        run: chown -R "$(stat -c '%u:%g' ..)" . "$RUNNER_TEMP"
 
   # MINIMAL MODULE SET (#1293). Every other leg here configures with the module options at
   # their defaults (all ON), so nothing in CI ever linked the closed module set ADR-0047
@@ -178,6 +205,14 @@ jobs:
             -DLIBTRACER_TRANSPORT_WS=OFF -DLIBTRACER_TRANSPORT_CAN=OFF
           cmake --build core/build-minimal -j "$(nproc)"
           ctest --test-dir core/build-minimal --output-on-failure
+      - name: Restore workspace ownership for the host runner
+        # Hands the container's root-owned tree back to the host runner user. WHY, and
+        # why it is duplicated inline rather than factored into a composite action: the
+        # WORKSPACE OWNERSHIP section of this file's header. Gated by
+        # tools/check_ci_workspace_cleanup.py — every self-hosted `container:` job must
+        # END with this exact step.
+        if: always()
+        run: chown -R "$(stat -c '%u:%g' ..)" . "$RUNNER_TEMP"
 
   # THE SECOND RECLAMATION POLICY (#894, ADR-0080). `reclaim_local_t` is the default and every
   # other leg here compiles it; `reclaim_strict_t` is the opt-in zero-cost MCU mode, and a seam
@@ -228,6 +263,14 @@ jobs:
             -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS="-I$PWD/reclaim-strict"
           cmake --build core/build-strict -j "$(nproc)"
           ctest --test-dir core/build-strict --output-on-failure
+      - name: Restore workspace ownership for the host runner
+        # Hands the container's root-owned tree back to the host runner user. WHY, and
+        # why it is duplicated inline rather than factored into a composite action: the
+        # WORKSPACE OWNERSHIP section of this file's header. Gated by
+        # tools/check_ci_workspace_cleanup.py — every self-hosted `container:` job must
+        # END with this exact step.
+        if: always()
+        run: chown -R "$(stat -c '%u:%g' ..)" . "$RUNNER_TEMP"
 
   # THE BUS MODULE CLOSED OUT (#375 deliverable 3, ADR-0044 + ADR-0047 §1). Every other leg
   # here compiles `kBusLinks = true`; a seam whose other member nothing ever builds is a seam
@@ -296,8 +339,13 @@ jobs:
           ctest --test-dir core/build-bus-closed --output-on-failure \
             -R '^(edge_eviction|send_stall|session_anchor|tcp|ws_transport)$'
       - name: Restore workspace ownership for the host runner
+        # Hands the container's root-owned tree back to the host runner user. WHY, and
+        # why it is duplicated inline rather than factored into a composite action: the
+        # WORKSPACE OWNERSHIP section of this file's header. Gated by
+        # tools/check_ci_workspace_cleanup.py — every self-hosted `container:` job must
+        # END with this exact step.
         if: always()
-        run: chown -R "$(stat -c '%u:%g' ..)" .
+        run: chown -R "$(stat -c '%u:%g' ..)" . "$RUNNER_TEMP"
 
   build-test-reclaim-qsbr:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
@@ -334,6 +382,14 @@ jobs:
             -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS="-I$PWD/reclaim-strict"
           cmake --build core/build-qsbr -j "$(nproc)"
           ctest --test-dir core/build-qsbr --output-on-failure
+      - name: Restore workspace ownership for the host runner
+        # Hands the container's root-owned tree back to the host runner user. WHY, and
+        # why it is duplicated inline rather than factored into a composite action: the
+        # WORKSPACE OWNERSHIP section of this file's header. Gated by
+        # tools/check_ci_workspace_cleanup.py — every self-hosted `container:` job must
+        # END with this exact step.
+        if: always()
+        run: chown -R "$(stat -c '%u:%g' ..)" . "$RUNNER_TEMP"
 
   # WEAKLY-ORDERED host gate (#1140). Every other leg here runs x86-64, whose TSO model
   # hides an entire class of defect: a seq_cst store lowers to a locked `xchg`, so a LATER
@@ -342,12 +398,6 @@ jobs:
   # `mark_pending`'s deferred skip (#1140) — is therefore untestable where CI runs, and both
   # were argued from the code rather than covered. aarch64 does NOT order a relaxed load
   # after a seq_cst store, which is the same property the shipped rv32 targets have and the
-      - name: Restore workspace ownership for the host runner
-        # This job runs as root inside `container:` on a self-hosted runner whose
-        # _work tree is shared with non-container jobs (perf-local's bench-local runs
-        # directly on the host); root-owned leftovers break their checkout cleanup.
-        if: always()
-        run: chown -R "$(stat -c '%u:%g' ..)" .
   # reason those arguments matter at all. This leg is the real evidence: same sources, same
   # ctest, a memory model that can actually exhibit the anomaly. Ablate it by relaxing any of
   # those ordered loads — the graph race guards can then fail HERE and nowhere else.
@@ -404,11 +454,13 @@ jobs:
           cmake --build core/build-gcc15 -j "$(nproc)"
           ctest --test-dir core/build-gcc15 --output-on-failure
       - name: Restore workspace ownership for the host runner
-        # This job runs as root inside `container:` on a self-hosted runner whose
-        # _work tree is shared with non-container jobs (perf-local's bench-local runs
-        # directly on the host); root-owned leftovers break their checkout cleanup.
+        # Hands the container's root-owned tree back to the host runner user. WHY, and
+        # why it is duplicated inline rather than factored into a composite action: the
+        # WORKSPACE OWNERSHIP section of this file's header. Gated by
+        # tools/check_ci_workspace_cleanup.py — every self-hosted `container:` job must
+        # END with this exact step.
         if: always()
-        run: chown -R "$(stat -c '%u:%g' ..)" .
+        run: chown -R "$(stat -c '%u:%g' ..)" . "$RUNNER_TEMP"
 
   # Both sanitizer legs run against both LKV slot bindings (ADR-0069 §1) as parallel
   # matrix jobs rather than extra steps, so the second binding costs no wall clock.
@@ -537,11 +589,13 @@ jobs:
           cmake --build "${RUNNER_TEMP}/consumer" -j "$(nproc)"
           "${RUNNER_TEMP}/consumer/app"
       - name: Restore workspace ownership for the host runner
-        # This job runs as root inside `container:` on a self-hosted runner whose
-        # _work tree is shared with non-container jobs (perf-local's bench-local runs
-        # directly on the host); root-owned leftovers break their checkout cleanup.
+        # Hands the container's root-owned tree back to the host runner user. WHY, and
+        # why it is duplicated inline rather than factored into a composite action: the
+        # WORKSPACE OWNERSHIP section of this file's header. Gated by
+        # tools/check_ci_workspace_cleanup.py — every self-hosted `container:` job must
+        # END with this exact step.
         if: always()
-        run: chown -R "$(stat -c '%u:%g' ..)" .
+        run: chown -R "$(stat -c '%u:%g' ..)" . "$RUNNER_TEMP"
 
   # Compile EVERY bench target, run none of them (#781). The measuring workflows
   # (perf.yml, docs.yml) each name the handful of targets they execute, so a bench
@@ -572,11 +626,13 @@ jobs:
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
           cmake --build bench/build -j "$(nproc)"
       - name: Restore workspace ownership for the host runner
-        # This job runs as root inside `container:` on a self-hosted runner whose
-        # _work tree is shared with non-container jobs (perf-local's bench-local runs
-        # directly on the host); root-owned leftovers break their checkout cleanup.
+        # Hands the container's root-owned tree back to the host runner user. WHY, and
+        # why it is duplicated inline rather than factored into a composite action: the
+        # WORKSPACE OWNERSHIP section of this file's header. Gated by
+        # tools/check_ci_workspace_cleanup.py — every self-hosted `container:` job must
+        # END with this exact step.
         if: always()
-        run: chown -R "$(stat -c '%u:%g' ..)" .
+        run: chown -R "$(stat -c '%u:%g' ..)" . "$RUNNER_TEMP"
 
   # The failable census, RUN rather than compiled (#1414). Both of its modes are
   # deterministic gates over counts, not timings, so neither needs a quiesced host and
@@ -625,10 +681,13 @@ jobs:
       - name: "Allocation escape gate (guard) — #848"
         run: ./bench/build-census/bench_failable_census guard
       - name: Restore workspace ownership for the host runner
-        # Same reason as bench-compile's: root-owned leftovers in the shared _work tree
-        # break the non-container jobs' checkout cleanup.
+        # Hands the container's root-owned tree back to the host runner user. WHY, and
+        # why it is duplicated inline rather than factored into a composite action: the
+        # WORKSPACE OWNERSHIP section of this file's header. Gated by
+        # tools/check_ci_workspace_cleanup.py — every self-hosted `container:` job must
+        # END with this exact step.
         if: always()
-        run: chown -R "$(stat -c '%u:%g' ..)" .
+        run: chown -R "$(stat -c '%u:%g' ..)" . "$RUNNER_TEMP"
 
   # This workflow's own `paths:` trigger, gated against what its jobs actually build
   # (#1082). The list used to be hand-written — `core/**`, `bench/**`,
@@ -657,16 +716,32 @@ jobs:
         run: |
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-            build-essential cmake git python3 ca-certificates
+            build-essential cmake git python3 python3-yaml ca-certificates
       - uses: actions/checkout@v4
       - name: core-ci's paths trigger covers everything core-ci builds
         run: python3 tools/gen_ci_paths.py --check
+      # An unverified gate is not a gate: the parser runs over synthetic workflows in
+      # both arms first, so a parser bug reports as a parser bug rather than as a
+      # phantom-clean sweep of the real files.
+      - name: Workspace-ownership gate unit tests
+        run: python3 -m unittest discover -s tools/tests -p "test_check_ci_workspace_cleanup.py" -v
+      # The #1538 gate. It rides in `ci-paths` because this job's subject already is
+      # "core-ci's own wiring is coherent". It sweeps EVERY workflow file, not just this
+      # one, so a self-hosted container job added anywhere in the tree is caught the next
+      # time core-ci runs — which is nearly every PR. doc-citations.yml runs the same
+      # check as its own step, because its `paths:` include itself and core-ci's do not:
+      # between the two, an edit to either of the workflows that carry such jobs today
+      # fires the gate on the commit that made the edit.
+      - name: Every self-hosted container job restores workspace ownership
+        run: python3 tools/check_ci_workspace_cleanup.py
       - name: Restore workspace ownership for the host runner
-        # This job runs as root inside `container:` on a self-hosted runner whose
-        # _work tree is shared with non-container jobs (perf-local's bench-local runs
-        # directly on the host); root-owned leftovers break their checkout cleanup.
+        # Hands the container's root-owned tree back to the host runner user. WHY, and
+        # why it is duplicated inline rather than factored into a composite action: the
+        # WORKSPACE OWNERSHIP section of this file's header. Gated by
+        # tools/check_ci_workspace_cleanup.py — every self-hosted `container:` job must
+        # END with this exact step.
         if: always()
-        run: chown -R "$(stat -c '%u:%g' ..)" .
+        run: chown -R "$(stat -c '%u:%g' ..)" . "$RUNNER_TEMP"
 
   format:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
@@ -697,11 +772,13 @@ jobs:
             backends tests/packaging -name '*.hpp' -o -name '*.cpp')
           clang-format --dry-run --Werror "${files[@]}"
       - name: Restore workspace ownership for the host runner
-        # This job runs as root inside `container:` on a self-hosted runner whose
-        # _work tree is shared with non-container jobs (perf-local's bench-local runs
-        # directly on the host); root-owned leftovers break their checkout cleanup.
+        # Hands the container's root-owned tree back to the host runner user. WHY, and
+        # why it is duplicated inline rather than factored into a composite action: the
+        # WORKSPACE OWNERSHIP section of this file's header. Gated by
+        # tools/check_ci_workspace_cleanup.py — every self-hosted `container:` job must
+        # END with this exact step.
         if: always()
-        run: chown -R "$(stat -c '%u:%g' ..)" .
+        run: chown -R "$(stat -c '%u:%g' ..)" . "$RUNNER_TEMP"
 
   doxygen-gate:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
@@ -724,8 +801,10 @@ jobs:
           apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends doxygen
           doxygen core/Doxyfile
       - name: Restore workspace ownership for the host runner
-        # This job runs as root inside `container:` on a self-hosted runner whose
-        # _work tree is shared with non-container jobs (perf-local's bench-local runs
-        # directly on the host); root-owned leftovers break their checkout cleanup.
+        # Hands the container's root-owned tree back to the host runner user. WHY, and
+        # why it is duplicated inline rather than factored into a composite action: the
+        # WORKSPACE OWNERSHIP section of this file's header. Gated by
+        # tools/check_ci_workspace_cleanup.py — every self-hosted `container:` job must
+        # END with this exact step.
         if: always()
-        run: chown -R "$(stat -c '%u:%g' ..)" .
+        run: chown -R "$(stat -c '%u:%g' ..)" . "$RUNNER_TEMP"

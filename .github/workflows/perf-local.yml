@@ -181,6 +181,24 @@ jobs:
     env:
       BENCH_CPU: "2" # the one pinned logical CPU — every measured process runs here
     steps:
+      # SELF-HEAL (#1538), and it runs BEFORE checkout because checkout is what it saves.
+      # This leg is the only self-hosted job in the tree that runs directly on the host as
+      # `github-runner`; it shares its `_work` tree with core-ci's and doc-citations'
+      # `container:` jobs, which run as ROOT. Those jobs now hand the tree back on their
+      # way out (see core-ci.yml's WORKSPACE OWNERSHIP section), but a job killed outside
+      # its own step sequence — runner service restart, `docker kill`, an OOM — never gets
+      # to. The symptom is `actions/checkout` below dying in its clean step, which reads as
+      # a bench breakage and is not: it took this leg red on 2026-08-23 over 129 root-owned
+      # paths under `core/build-minimal`, and cost a manual repair. `github-runner` has
+      # passwordless sudo on the studio host (verified 2026-08-23), so the leg repairs its
+      # own workspace instead of waiting for a human.
+      #
+      # `|| true` deliberately: a workspace this cannot repair must not be reported HERE as
+      # a measurement failure. Checkout is the step that should name it, with its own
+      # diagnostics, exactly as it did before.
+      - name: Reclaim any root-owned leftovers from a container job
+        run: sudo -n chown -R "$(id -un):$(id -gn)" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" || true
+
       - uses: actions/checkout@v4
 
       - name: Capture host characteristics (stamped onto every recorded point)

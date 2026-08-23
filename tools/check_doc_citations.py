@@ -895,11 +895,11 @@ ANCHORS = [
     # TSan job (`tsan-reclaim-qsbr`) with an identical `matrix:` block, which made the old
     # anchor ambiguous inside its own `  tsan:` scope — the scope runs to EOF, not to the
     # next job. A rendered job name is unique by construction and needs no scope at all.
-    ('.github/workflows/core-ci.yml:454', 'name: tsan (slot=${{ matrix.lkv_slot }})'),
+    ('.github/workflows/core-ci.yml:506', 'name: tsan (slot=${{ matrix.lkv_slot }})'),
     # The flag the prose QUOTES verbatim ("-fsanitize=thread -g -O1"). #1376's qsbr leg
     # quotes the same flags with a trailing `-I`, so this anchor is the EXACT full line,
     # which the qsbr leg's is not — no scope needed.
-    ('.github/workflows/core-ci.yml:461', '-DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1"'),
+    ('.github/workflows/core-ci.yml:513', '-DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1"'),
     ('.github/workflows/footprint-cortexm0.yml:13', '`--mode warn` governs the BUDGET VERDICT only'),
     ('bench/CMakeLists.txt:30', 'bench_libtracer_net (two-process ROUTER-flood bench) was retired'),
     ('bindings/typescript/packages/client/test/mesh-testbed.test.mjs:24',
