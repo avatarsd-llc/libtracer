@@ -57,11 +57,16 @@ Three things are deliberately **not** vertices:
   namespace was emptied outright by
   [RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md)
   §3.B — and they are not `/` children either.
-- **`:stats`.** ADR-0027's worked example showed a per-connection `:stats` facet. It was
-  never implemented and is not in the field namespace; a read or write of it answers
-  `ERROR{tr::schema::not_found}` (ADR-0027 erratum 2026-07-30,
-  [#583](https://github.com/avatarsd-llc/libtracer/issues/583); whether it should exist is
-  [#584](https://github.com/avatarsd-llc/libtracer/issues/584)).
+- **A per-connection `:stats` facet.** ADR-0027's worked example showed `:stats` *on the
+  connection vertex* — a facet whose content is the addressed vertex's. That was never
+  implemented and is not what shipped. What DID ship
+  ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md)
+  Amendments 1 and 2) is the opposite shape: a **node-scoped** `:stats.<class>.<name>` census
+  that takes no vertex and answers identically on every one, in the `:identity` mould — so a
+  link's counters are read as `<any-vertex>:stats.link.<child>`, keyed by the child NAME, and
+  never as a facet of the connection vertex itself (ADR-0027 erratum 2026-07-30,
+  [#583](https://github.com/avatarsd-llc/libtracer/issues/583); the census is
+  [#1503](https://github.com/avatarsd-llc/libtracer/issues/1503)).
 
 The dividing rule is ADR-0027's, unchanged: **distinct lifecycle and identity ⇒ a `/`
 vertex; scalar config of a thing ⇒ config on that thing.** A connection is created and
@@ -137,7 +142,7 @@ callback, all three primitives already work on it: `read` it, `await` it, or **s
 `/net/<module>/<name>` and receive every transition without polling (assign-then-deliver,
 [RFC-0008](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0008-vertex-operations-assign-propagate.md) §D).
 A monitoring peer needs no transport-specific verb and no per-transport statistics facet —
-which is why the absence of `:stats` costs less than it looks.
+which is why the absence of a per-connection `:stats` facet costs less than it looks.
 
 The same holds for enumeration: `/net:children[]` lists the modules, `/net/<module>:children[]`
 lists that module's connections, and a bus connection's `:children[]` lists the peers audible
@@ -370,8 +375,10 @@ its conformance-vector merge; until then the values in
   kind and by every node that links the core; a key only one factory reads is a key the other
   kinds carry and no one can be told about (the `:schema` catalog that would advertise it is
   S3, unimplemented).
-- **Expecting a per-transport statistics facet.** `:stats` was never implemented; a read of
-  it is `tr::schema::not_found`.
+- **Expecting a per-transport statistics FACET.** A connection vertex has no `:stats` of its
+  own. The counters are reached through the node-scoped census instead —
+  `<any-vertex>:stats.link.<child>` — and only on a node that has a router to sample them;
+  anything else is `tr::schema::not_found`.
 
 ## Boundaries
 

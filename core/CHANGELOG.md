@@ -16,6 +16,27 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`graph_t::configure_stats_sampler` / `graph_t::sample_stats`, `tr::graph::stats_block_t`,
+  and `fwd_router_t::sample_stats` — the NET-PLANE `:stats` seams**
+  ([#1503](https://github.com/avatarsd-llc/libtracer/issues/1503) residual,
+  [RFC-0010](../docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §Amendment 2). Amendment
+  1 stopped the census at the graph, because the router / label-table / per-link counters are
+  per `fwd_router_t` / `route_handle_t` / link and L4 cannot reach DOWN into the net plane to
+  sample them. This inverts the WIRING, not the dependency: `fwd_router_t`'s constructor now
+  registers a sampler **UP** into the graph — the sixth `{fn, ctx}` pair it installs there
+  (ADR-0047, `tr::sink_slot_t`) — so `read <any-vertex>:stats.router.drops`,
+  `:stats.labels.table` and `:stats.link.<child>` answer, and L4's new members name no
+  transport concept. The block shape is Amendment 1 §D.3's, unchanged: one seam, one
+  `SETTINGS` TLV, `NAME`/`VALUE` pairs, one encoder. A node with **no router** publishes none
+  of the three, and a `link` sub-key naming an unregistered or removed child is not a seam —
+  all answer `SCHEMA_NOT_FOUND`, caller-independently (validity is settled above the READ gate
+  by a sampler probe that samples nothing, so §D.2's "no spelling has two answers split by who
+  asked" survives the new classes). A link's `rx_capacity`/`tx_capacity` stay per-kind
+  accessors: the ceilings are in per-kind units (buffer bytes on WS, TX-pool slots on CAN), so
+  there is no unit-safe interface noun to publish. **Cost:** sampling happens only inside the
+  already `[[gnu::noinline, gnu::cold]]` `:stats` read path — zero hot-path delta — against a
+  static RAM-census delta of **one `sink_slot_t` (three words) on every `graph_t`**.
+
 - **`read <any-vertex>:stats.<seam-class>.<seam-name>` — the seam census, on the wire**
   ([#1503](https://github.com/avatarsd-llc/libtracer/issues/1503) step 5,
   [RFC-0010](../docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §Amendment 1). The

@@ -3,13 +3,18 @@
 Status: accepted. **Refined by [ADR-0059](0059-creator-endpoint-creation-and-removal-are-writes-to-a-vertex.md)** on one narrow point: the **`:children[]` spelling** of the §Decision worked example (`write /B/net/quic:children[] += SPEC{type=client, …}`, and "*its catalog is `{client, listener}`*") is superseded — creation is a write to a **creator endpoint vertex** (`write /net/export SPEC{type,name,config}`), and the catalog is that endpoint's own `:schema`. **This ADR's substance is untouched and is what ADR-0059 leans on**: transports and connections are `/` vertices, and distinct identity ⇒ `/`. Only the *spelling* of the creation write changes; what gets created, and that it is a vertex, does not.
 
 > **Erratum (2026-07-30), [#583](https://github.com/avatarsd-llc/libtracer/issues/583):** the §Decision worked example shows
-> `(read):stats   await (link up / down)` on a connection vertex. **`:stats` is not implemented
-> and never was** — it is not in the field namespace `{subscribers, acl, children, settings,
-> schema, identity}`; a field read or write to it answers `ERROR{tr::schema::not_found}`, and
-> `await` additionally ignores a `:field` selector entirely ([#585](https://github.com/avatarsd-llc/libtracer/issues/585)). The
-> example is annotated rather than rewritten: whether per-transport `:stats` should exist is
-> [#584](https://github.com/avatarsd-llc/libtracer/issues/584), and this ADR's substance — distinct identity ⇒ `/` vertex — does
-> not depend on the spelling. Prose elsewhere in this ADR that uses the *word* "stats" to mean
+> `(read):stats   await (link up / down)` on a connection vertex. **A per-connection `:stats`
+> FACET is not implemented and never was**: `:stats` is not a facet *of the addressed vertex*,
+> and a write to any `:stats` spelling answers `ERROR{tr::schema::not_found}`, as does an
+> `await`, which ignores a `:field` selector entirely ([#585](https://github.com/avatarsd-llc/libtracer/issues/585)).
+> **Amended 2026-08-23 ([#1503](https://github.com/avatarsd-llc/libtracer/issues/1503)):** the
+> name `stats` IS now in the field namespace, which reads
+> `{subscribers, acl, children, settings, schema, identity, stats}` — but in the opposite
+> shape to this example. RFC-0010 Amendments 1 and 2 make `:stats.<class>.<name>` a
+> **node-scoped** census in the `:identity` mould: it takes no vertex, every vertex answers
+> identically, and a link's counters are read as `<any-vertex>:stats.link.<child>` rather than
+> as a facet of that link's connection vertex. The example is annotated rather than rewritten,
+> and this ADR's substance — distinct identity ⇒ `/` vertex — does not depend on the spelling. Prose elsewhere in this ADR that uses the *word* "stats" to mean
 > "a subsystem with its own lifecycle and counters" is the correct statement of that rule and is
 > untouched.
 

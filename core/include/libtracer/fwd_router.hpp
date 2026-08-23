@@ -302,6 +302,16 @@ class fwd_router_t {
                 return static_cast<fwd_router_t*>(ctx)->split_subscriber_target(key);
             },
             this);
+        // The `:stats` NET-PLANE seam sampler (RFC-0010 Amendment 2, #1503 residual) — the
+        // SIXTH {fn, ctx} pair installed here, and the one that points the other way: the
+        // graph answers the node-scoped census, but the router / label-table / per-link
+        // counters live on THIS side of the L4↔net-plane seam, so the router registers a
+        // sampler UP rather than L4 reaching DOWN. Same lifetime contract as the five above
+        // (`this` must outlive every read the graph can still serve), and same
+        // configure-before-frames-flow doctrine; a node with no router publishes no
+        // net-plane seam and answers `SCHEMA_NOT_FOUND`, which is what those spellings
+        // already answered before the amendment.
+        graph_.configure_stats_sampler(&fwd_router_t::stats_sampler_thunk, this);
     }
 
     fwd_router_t(const fwd_router_t&) = delete;
@@ -812,6 +822,34 @@ class fwd_router_t {
 
     /** @brief The route-handle label store (test introspection — assert statelessness). */
     [[nodiscard]] const route_handle_t& handles() const noexcept { return handles_; }
+
+    /**
+     * @brief Sample one NET-PLANE `:stats` seam (RFC-0010 Amendment 2, #1503 residual).
+     *
+     * The body behind the sampler this router installs on the graph in its constructor;
+     * public so an in-process supervisor can ask for the same block the wire door serves,
+     * without re-deriving the seam vocabulary from the raw accessors.
+     *
+     * The classes, and the nouns each publishes:
+     *
+     * - `router.drops` — @ref drop_stats, all seven per-cause counters.
+     * - `labels.table` — the RFC-0027 label plane: `labels_exhausted`, `refused_bindings`,
+     *   `label_not_found`, `label_resolves`.
+     * - `link.<child>` — one registered child, by its `child_registry_t` NAME (the same key
+     *   as its `/net/<module>/<name>` connection vertex): `dropped_rx`, `malformed_rx`,
+     *   `dropped_tx` from @ref transport_t::drop_stats, plus `labels_used` when label
+     *   switching is on for this node. A name that is not registered, or whose slot is a
+     *   tombstone (a removed link), is NOT a seam — the caller gets `false`.
+     *
+     * @param seam_class The seam CLASS.
+     * @param seam_name  The seam NAME within it.
+     * @param out        Where to write the block, or `nullptr` to PROBE recognition only —
+     *                   which is how the graph settles NAME validity above its READ gate
+     *                   without sampling anything for a caller it will refuse.
+     * @return `true` iff the spelling names a seam this router serves.
+     */
+    [[nodiscard]] bool sample_stats(std::string_view seam_class, std::string_view seam_name,
+                                    graph::stats_block_t* out) const noexcept;
 
     /**
      * @brief Route one inbound FWD frame that arrived on child @p inbound_name.
@@ -1354,6 +1392,10 @@ class fwd_router_t {
      *         state, unlike the subject one), and the receive context comes back out of the
      *         opaque `inbound_ref_t::origin` the terminus put there. */
     static graph::link_id_t link_id_thunk(void* ctx, const graph::inbound_ref_t& inbound);
+    /** @brief The `graph::stats_sampler_fn_t` trampoline: `ctx` is the router
+     *         (RFC-0010 Amendment 2). */
+    static bool stats_sampler_thunk(void* ctx, std::string_view seam_class,
+                                    std::string_view seam_name, graph::stats_block_t* out);
     static std::string_view resolve_peer_name(const child_rx_ctx_t& ctx, peer_handle_t peer,
                                               std::span<char> scratch);
     /** @brief The shared rope routing body; @p inbound_ctx is the link's receiver ctx when the

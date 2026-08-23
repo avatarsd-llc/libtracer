@@ -13,6 +13,7 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <concepts>
@@ -417,6 +418,74 @@ struct wire_target_split_t {
  *       never on the delivery path.
  */
 using wire_target_fn_t = wire_target_split_t (*)(void* ctx, std::span<const std::byte> key);
+
+/**
+ * @brief One member of a `:stats` census block — a noun and its value (RFC-0010 Am. 2).
+ *
+ * The noun is BORROWED and must be a literal (or otherwise outlive the sampling call): the
+ * block is encoded before the sampler's frame is left, and nothing copies the string.
+ */
+struct stats_counter_t {
+    std::string_view noun{}; /**< @brief The `core/STYLE.md` §Introspection vocabulary name. */
+    std::uint64_t value = 0; /**< @brief Its value, emitted as a fixed-width u64. */
+};
+
+/**
+ * @brief One sampled seam block, filled by a `%stats_sampler_fn_t` (RFC-0010 Am. 2).
+ *
+ * A fixed-capacity, allocation-free carrier: the net plane samples INTO it and L4 encodes it,
+ * so the whole census keeps ONE encoder and one wire shape (RFC-0010 Am. 1 §D.3), and the
+ * sampling half never touches an allocator on a path a peer can drive.
+ *
+ * @ref kMaxMembers is a compile-time ceiling on how many nouns one seam may publish, not a
+ * protocol limit: it is sized to the widest block the reference net plane serves
+ * (`router_stats_t`'s seven) with headroom, and a seam that outgrew it would be split rather
+ * than truncated — @ref add refuses silently past the ceiling exactly so a caller cannot
+ * emit a half-member.
+ */
+struct stats_block_t {
+    /** @brief The per-seam member ceiling — see the class brief. */
+    static constexpr std::size_t kMaxMembers = 12;
+    std::array<stats_counter_t, kMaxMembers> members{}; /**< @brief The filled prefix. */
+    std::size_t count = 0;                              /**< @brief How much of it is filled. */
+
+    /**
+     * @brief Append one member; a no-op once @ref kMaxMembers is reached.
+     * @param noun  Borrowed, and must outlive the sampling call.
+     * @param value The counter's value.
+     */
+    void add(std::string_view noun, std::uint64_t value) noexcept {
+        if (count >= kMaxMembers) return;
+        members[count++] = stats_counter_t{noun, value};
+    }
+};
+
+/**
+ * @brief Sample one NET-PLANE `:stats` seam — the sixth `{fn, ctx}` seam the router installs
+ *        UP into the graph (RFC-0010 Amendment 2, #1503 residual).
+ *
+ * Amendment 1 §D.4 drew the census boundary at the graph, because L4 cannot reach DOWN into
+ * the net plane to sample a router or a link. This seam inverts the direction instead of the
+ * dependency: the router, which already knows the graph, registers a sampler UP — the same
+ * shape as `configure_remote_delivery_sink` and the four resolver seams its constructor
+ * installs — so L4 still names nothing below it.
+ *
+ * @param ctx        The caller-owned context installed beside the function.
+ * @param seam_class The seam CLASS — `router`, `labels` or `link` (Amendment 2 §D.4).
+ * @param seam_name  The seam NAME within that class; for `link` it is the router's
+ *                   `child_registry_t` name.
+ * @param out        Where to write the block, or `nullptr` for a RECOGNITION PROBE: answer
+ *                   whether the spelling names a seam and sample nothing.
+ * @return `true` when the spelling names a seam this sampler serves. `false` is the
+ *         node's "this seam is not published here" — `SCHEMA_NOT_FOUND`, and per Amendment 1
+ *         §Compatibility a monitor MUST read it that way, never as an error.
+ *
+ * @note Called ONLY from the cold `:stats` read path, never on a hot path. It MUST NOT
+ *       re-enter `graph_t`, and @p ctx must outlive every read the graph can still serve —
+ *       the lifetime the router's other five seams already require.
+ */
+using stats_sampler_fn_t = bool (*)(void* ctx, std::string_view seam_class,
+                                    std::string_view seam_name, stats_block_t* out);
 
 /**
  * @brief The L4 in-process graph runtime: the Composite vertex tree plus the whole data
@@ -2000,6 +2069,41 @@ class graph_t {
     void configure_wire_target_resolver(wire_target_fn_t fn, void* ctx) noexcept;
 
     /**
+     * @brief Install the NET-PLANE `:stats` seam sampler (RFC-0010 Amendment 2, #1503).
+     *
+     * With no sampler (the default) the census answers for the GRAPH alone — the three
+     * Amendment 1 §D.4 seams — and every `router` / `labels` / `link` spelling answers
+     * `SCHEMA_NOT_FOUND`, which Amendment 1 §Compatibility already spells as "this node does
+     * not publish that seam". With one installed those classes answer too, sampled at the
+     * entities that own the counters.
+     *
+     * CONFIGURATION, not a runtime knob (#1049), and the SIXTH `{fn, ctx}` seam
+     * `fwd_router_t`'s constructor installs — so a node with a transport plane publishes the
+     * net-plane census and one without cannot. Re-binding a graph to a second router is
+     * UNSUPPORTED, exactly as the other five seams document.
+     *
+     * @param fn  The sampler; @p ctx is handed back as its first argument. Null clears.
+     * @param ctx Caller-owned context; must outlive every read the graph can still serve.
+     */
+    void configure_stats_sampler(stats_sampler_fn_t fn, void* ctx) noexcept;
+
+    /**
+     * @brief Ask the installed sampler for one net-plane seam — the read side of
+     *        @ref configure_stats_sampler.
+     *
+     * Public because the census encoder is a free function over `graph_t`'s public accessors
+     * (it needs no friendship and mints no other symbol), and useful on its own to an
+     * in-process supervisor that wants one seam's block without going through the wire door.
+     *
+     * @param seam_class The seam CLASS (`router`, `labels`, `link`).
+     * @param seam_name  The seam NAME within it.
+     * @param out        Where to write the block, or `nullptr` to probe recognition only.
+     * @return `false` when no sampler is installed or the spelling names no seam.
+     */
+    [[nodiscard]] bool sample_stats(std::string_view seam_class, std::string_view seam_name,
+                                    stats_block_t* out) const noexcept;
+
+    /**
      * @brief The wire `:subscribers[]` APPEND — the same admission door as the local
      *        sugars and field-writes (ADR-0049), plus the remote delivery binding.
      *
@@ -2647,7 +2751,7 @@ class graph_t {
     // caller that violates the setup-only contract instead of a corrupted tree walk.
     mutable std::shared_mutex child_types_mutex_;
     std::map<std::string, child_factory_t, std::less<>> child_types_;
-    // The four CONFIGURATION sinks (#1049). Each is the ADR-0047 {fn, ctx} pair published
+    // The five CONFIGURATION sinks (#1049). Each is the ADR-0047 {fn, ctx} pair published
     // through a sink_slot_t — the mechanism #914 established for fwd_router_t's five, hoisted
     // to the layer-neutral `tr` namespace so L4 can hold one without naming the net plane.
     // The doctrine is setup-only and the verbs are named `configure_*` to say it; the slot is
@@ -2659,6 +2763,11 @@ class graph_t {
     tr::sink_slot_t<subject_resolver_fn_t> subject_resolver_;   // read by the ACL gate
     tr::sink_slot_t<sub_observer_fn_t> subscription_observer_;  // read on subscribe/clear
     tr::sink_slot_t<wire_target_fn_t> wire_target_;             // read on a wire subscribe only
+    // The FIFTH (RFC-0010 Amendment 2): the net plane's `:stats` seam sampler, installed by
+    // the router's constructor beside the other five it runs there. Read ONLY inside the
+    // already-cold `:stats` field-read path, so it is off every hot path by construction —
+    // its cost to a node that never reads the census is the three words it occupies.
+    tr::sink_slot_t<stats_sampler_fn_t> stats_sampler_;  // read on a `:stats` read only
     // The NODE's identity record, pre-serialized (#406, RFC-0011 §B): the complete
     // SETTINGS{kind,key} TLV, built once at install so every `:identity` read is a copy
     // of settled bytes rather than a re-emit — the "all vertices return byte-identical

@@ -106,10 +106,17 @@ model ([RFC-0004 — remote operation addressing](https://github.com/avatarsd-ll
   exactly the "distinct lifecycle ⇒ `/` vertex" rule of ADR-0027.
 
 :::{warning}
-`:stats` is **intended, not implemented** — including in the tree diagram above. A field read or
-write to `:stats` answers `ERROR{tr::schema::not_found}`; the field **namespace** the dispatcher recognises is `{subscribers, acl, children, settings, schema, identity}`. A recognised name can still answer `NOT_FOUND` when the facet is empty, or `SCHEMA_NOT_FOUND` for a spelling it does not accept (bare `:subscribers` requires `[N]`) or for a facet deliberately absent (`:identity` with no keypair, RFC-0011 §C.3) — so the set is a namespace, not a list of things that read. Whether per-transport `:stats` should
-exist at all is open ([#584](https://github.com/avatarsd-llc/libtracer/issues/584)); the diagram is kept because the design
-intent — per-bus counters on a per-bus vertex — is what that decision is about. `:settings` and
+A per-bus `:stats` **facet** — `:stats` *on the bus vertex*, as the tree diagram above draws it —
+is **intended, not implemented**. The field **namespace** the dispatcher recognises is
+`{subscribers, acl, children, settings, schema, identity, stats}`, but the `stats` in it is the
+**node-scoped census** RFC-0010 Amendments 1 and 2 specify: `<any-vertex>:stats.<class>.<name>`
+takes no vertex and answers identically on every one, so per-bus counters are read as
+`:stats.link.<bus>` keyed by the child NAME, never as a facet whose content follows the address.
+A recognised name can still answer `NOT_FOUND` when the facet is empty, or `SCHEMA_NOT_FOUND` for
+a spelling it does not accept (bare `:subscribers` requires `[N]`, bare `:stats` names nothing) or
+for a facet deliberately absent (`:identity` with no keypair, RFC-0011 §C.3) — so the set is a
+namespace, not a list of things that read. The diagram is kept because the design intent —
+per-bus counters, reachable per bus — is what the census now delivers, in a different shape. `:settings` and
 `:acl` in the same diagram are real facets, but the per-knob spelling is not: bare `:settings`
 serves the settings container, while a selector naming a bus knob (`:settings.bitrate`) is outside
 the flat QoS-knob namespace and answers `SCHEMA_NOT_FOUND` on both read and write. Link parameters
@@ -644,4 +651,4 @@ reply completion at the `op_resolver_t` terminus, which resolves synchronously.
 | A frame whose version prefix is not the receiver's is ignored, as is one bearing the receiver's own node id. | Interpreting another protocol generation's frames yields garbage bindings; consuming self-echo (`CAN_RAW_RECV_OWN_MSGS`, or a second local socket) makes a node its own peer and pollutes the last-heard table. |
 | A peer name is `n<node-id>`, decimal, no leading zeros. | An implementation that accepts `n05` or `N5` resolves two names to one peer, and a route grown into `src` fails to round-trip as the inbound NAME the reply is matched against. |
 | Peer listings are synthesized, never stored. | An implementation that materializes a vertex per peer mutates every listener's tree on a peer reboot, and leaks one vertex per node ever heard. |
-| `:stats` is not in the field namespace. | An implementation that publishes bus-off or error counters by writing `/net/can/<bus>:stats` gets `tr::schema::not_found` on every emission and its subscribers never see the event. |
+| `:stats` is READ-only and node-scoped; there is no per-vertex `:stats` facet to publish into. | An implementation that publishes bus-off or error counters by *writing* `/net/can/<bus>:stats` gets `tr::schema::not_found` on every emission and its subscribers never see the event. Counters are sampled on read (`:stats.link.<bus>`), never written and never awaitable. |

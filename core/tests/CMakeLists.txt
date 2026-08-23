@@ -1505,6 +1505,16 @@ if(LIBTRACER_NET_PLANE)
 endif()
 
 if(LIBTRACER_NET_PLANE)
+    # RFC-0010 Amendment 2 (#1503 residual) — the NET-PLANE `:stats` seams: the router
+    # registers a sampler UP into the graph, so `router` / `labels` / `link.<child>` are
+    # wire-readable; with no router every one of them stays SCHEMA_NOT_FOUND.
+    add_executable(stats_net_seam_test stats_net_seam_test.cpp)
+    target_link_libraries(stats_net_seam_test PRIVATE libtracer)
+    libtracer_test_warnings(stats_net_seam_test)
+    add_test(NAME stats_net_seam COMMAND stats_net_seam_test)
+endif()
+
+if(LIBTRACER_NET_PLANE)
     # #766 — the TERMINUS half of that seam: the rope-tier flattens one call below
     # resolve_terminus_rope draw from the same injection, and a refusal is answered by
     # value (drop, or an addressed BACKPRESSURE) instead of read as a short span.
