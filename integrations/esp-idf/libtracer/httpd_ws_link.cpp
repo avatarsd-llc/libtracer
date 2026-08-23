@@ -1004,6 +1004,28 @@ class httpd_ws_link_t::peer_resolution_t final : public transport_t {
      *         (no intermediate flatten temporary — see the owning link's iovec
      *         @ref httpd_ws_link_t::send). */
     void send(std::span<const std::span<const std::byte>> iov) override;
+    /**
+     * @brief The owning LINK's shed-frame counters, projected through this handle (#1494).
+     *
+     * The base default is all-zero, and inheriting it here was a genuine hole rather than an
+     * honest answer: a caller that holds only this `transport_t*` — which is precisely what
+     * the routing plane holds for a directed peer — read three zeros while every frame this
+     * handle dropped was being counted correctly one level up, on the link. `transport_t::send`
+     * is best-effort by contract and `drop_stats()` is the ONLY feedback it offers, so a
+     * handle that answers zero converts "counted shed" back into silent loss for the one
+     * caller shape that cannot reach past it.
+     *
+     * The numbers are the LINK's, not this session's, and that is stated rather than papered
+     * over: this component keeps no per-session tallies (a dead-peer send bumps the link's
+     * `tx_to_dead_peer` whichever session it was aimed at), so a per-handle block would have to
+     * be invented — a fabricated number, which the base's own doc forbids more strongly than it
+     * forbids an unattributed one. A monitor reads this as "the link this peer resolves
+     * against is shedding", then attributes with the link's richer @ref httpd_ws_link_t::stats.
+     *
+     * A retired handle (`owner_ == nullptr`, teardown) answers all-zero, which is the base's
+     * honest default and correct here: there is no longer a link whose counters these are.
+     */
+    [[nodiscard]] tr::net::transport_drop_stats_t drop_stats() const noexcept override;
 
    private:
     friend class httpd_ws_link_t;
@@ -3488,6 +3510,15 @@ void httpd_ws_link_t::send(std::span<const std::span<const std::byte>> iov) {
         }
         for (std::size_t i = 0; i < n; ++i) queue_send(targets[i], iov);
     }
+}
+
+tr::net::transport_drop_stats_t httpd_ws_link_t::peer_resolution_t::drop_stats() const noexcept {
+    // ONE load into a local, for the reason `send` records (#963): a teardown may be writing
+    // this member while a reader is here. A null owner is a retired handle — no link, no
+    // counters, and all-zero is then the base's honest default rather than a fabrication.
+    const httpd_ws_link_t* const owner = owner_;
+    if (owner == nullptr) return {};
+    return owner->drop_stats();
 }
 
 void httpd_ws_link_t::peer_resolution_t::send(std::span<const std::byte> frame) {

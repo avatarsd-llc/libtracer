@@ -612,9 +612,9 @@ ANCHORS = [
     ('core/include/libtracer/tlv_arena.hpp:130',
      '* NOTHROW end to end (#588). This function is on the wire RX path and reachable'),
     # core/include/libtracer/transport.hpp
-    ('core/include/libtracer/transport.hpp:457',
+    ('core/include/libtracer/transport.hpp:492',
      'virtual void send(std::span<const std::span<const std::byte>> iov) {'),
-    ('core/include/libtracer/transport.hpp:621',
+    ('core/include/libtracer/transport.hpp:656',
      '[[nodiscard]] virtual bool delivers_ropes() const { return false; }',
      'rx_.set_rope([](void* c, view::rope_t f) { (*static_cast<F*>(c))(std::move(f)); }, &sink);'),
     # core/include/libtracer/transport_can.hpp
@@ -846,7 +846,7 @@ ANCHORS = [
     # The #375-deliverable-3 bus-module seam: the knob, and the ONE door the routing plane
     # asks the facet through.
     ('core/include/libtracer/config.hpp:488', 'static constexpr bool kBusLinks = true;'),
-    ('core/include/libtracer/transport.hpp:783',
+    ('core/include/libtracer/transport.hpp:818',
      '[[nodiscard]] inline bus_link_t* bus_of(transport_t& link) {'),
     ('core/include/libtracer/edge_pin.hpp:153', 'class pin_t {'),
     ('core/src/fwd_router.cpp:1019', 'link.set_rope_receiver('),
@@ -1148,12 +1148,12 @@ ANCHORS = [
     ('core/include/libtracer/route_handle.hpp:622',
      '[[nodiscard]] std::size_t labels_used(std::string_view link) const;'),
     # core/include/libtracer/transport.hpp
-    ('core/include/libtracer/transport.hpp:447',
+    ('core/include/libtracer/transport.hpp:475',
      '[[nodiscard]] virtual transport_drop_stats_t drop_stats() const noexcept { return {}; }'),
     # integrations/esp-idf/libtracer/httpd_ws_link.cpp
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:2949',
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:2971',
      'std::size_t httpd_ws_link_t::tx_slot_capacity() const noexcept { return tx_pool_slots_; }'),
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:2805',
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:2827',
      'void httpd_ws_link_t::send_in_call(const session_ref_t& to,'),
 ]
 

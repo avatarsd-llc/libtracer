@@ -60,13 +60,13 @@ flowchart LR
 
 | Stage | The bound | Where the capacity comes from | Refusal | Observed by |
 | --- | --- | --- | --- | --- |
-| **transport RX** | the link's own scratch and its peer-agreed max frame | per-connection `:settings`, the link's ctor | counted drop (`dropped_rx`) or a malformed reject (`malformed_rx`) — the peer is not told | `transport_t::drop_stats()` (`core/include/libtracer/transport.hpp:447`), one shape for every link kind (#932) |
+| **transport RX** | the link's own scratch and its peer-agreed max frame | per-connection `:settings`, the link's ctor | counted drop (`dropped_rx`) or a malformed reject (`malformed_rx`) — the peer is not told | `transport_t::drop_stats()` (`core/include/libtracer/transport.hpp:475`), one shape for every link kind (#932) |
 | **rx arena** | the injected failable source the terminus decode carves its node table from | `fwd_router_t`'s `rx` seam — reachable as `rx_source()` (`core/include/libtracer/fwd_router.hpp:414`) | refused **by value**: `TLV_NESTING_TOO_DEEP`, spelled by RFC-0006 as "exceeds this receiver's decode resources" | `router_stats_t::arena_dropped` (`core/include/libtracer/fwd_router.hpp:83`) |
 | **graph write** | the ACL gate, plus the value backend the store draws its durable bytes from | `graph_t`'s four injected seams (see the design companion) | `PERMISSION_DENIED` by value; an exhausted value store answers `BACKPRESSURE` | `graph_t::delivery_drops()` — `denied`, `out_of_memory` (`core/include/libtracer/graph.hpp:2311`) |
 | **ring admission** | a **byte** budget: `try_alloc(retained_bytes)` against the receiving vertex's own source | `graph_t::set_ring_source` (`core/include/libtracer/graph.hpp:1488`), per vertex, never a shared pool | **arm-dependent** — see §2 | `ring_reserved_bytes()` / `stream_gaps()` (`core/include/libtracer/graph.hpp:1492`) |
 | **fan-out** | the subscriber snapshot's inline prefix, then a heap widen | `kInlineFanout`, then the allocator | counted shed of the whole delivery (`fan_out_truncated`, `out_of_memory`) | `graph_t::delivery_drops()` |
 | **flat / egress seams** | the reply-flatten and egress span tables | `fwd_router_t`'s `flat` / `egress` seams — `flatten_backend()`, `egress_backend()` (`core/include/libtracer/fwd_router.hpp:416`) | counted drop of the reply or the forward hop — **drop, never truncate** | `router_stats_t::flatten_dropped`, `reply_iov_dropped`, `forward_iov_dropped`, `delivery_iov_dropped` |
-| **TX pool** | outstanding sends in flight, plus a reserve slots deep held back for replies | the link's ctor (`tx_slot_capacity()` + `tx_reply_reserve()` on the ESP httpd link, `integrations/esp-idf/libtracer/httpd_ws_link.cpp:2949`) | counted `dropped_tx`; a refused enqueue names the queue it could not enter | `transport_t::drop_stats()`; the link's own richer `stats()` where it has one |
+| **TX pool** | outstanding sends in flight, plus a reserve slots deep held back for replies | the link's ctor (`tx_slot_capacity()` + `tx_reply_reserve()` on the ESP httpd link, `integrations/esp-idf/libtracer/httpd_ws_link.cpp:2971`) | counted `dropped_tx`; a refused enqueue names the queue it could not enter | `transport_t::drop_stats()`; the link's own richer `stats()` where it has one |
 | **label space** (forwarders) | 65535 wire labels per link, and the per-link binding table | `route_handle_t`'s ctor `max_bindings_per_link` (`core/include/libtracer/route_handle.hpp:243`) | a **silent degrade**, not a loss: the flow falls back to full-route `FWD{WRITE}` | `labels_used(link)` / `labels_exhausted()` (`core/include/libtracer/route_handle.hpp:622`) |
 
 Two reading rules for this table:
@@ -78,6 +78,16 @@ Two reading rules for this table:
 - **A ceiling is quoted beside every drop** (#1160). A report that says "refused" without saying
   *what ceiling produced the refusal* is unactionable, because the effective ceiling is the
   injected one, never the compile-time default.
+- **The transport plane is outside the refuse-by-value law of §Thesis point 3, by contract.**
+  `transport_t::send` returns `void` and always will in v1: there is **no wire carrier for
+  backpressure** (§2 property 2 — the per-edge credit window is the v2 escalation), so a link
+  that dropped a frame has nobody to refuse to. What it owes instead is a **count**: every drop
+  MUST land in `drop_stats()`, and that tally — readable in-process, and on the wire as
+  `read <any-vertex>:stats.link.<child>` — is the whole of the feedback this plane offers.
+  **Counted shed IS the transport contract.** Re-opening it is scoped to M5 (a real socket
+  transport), where a link owning its own socket buffer would have something to push back with.
+  The two rows this governs are **transport RX** and **TX pool** above; every other row in the
+  table refuses by value and the distinction is deliberate.
 
 ---
 
@@ -197,7 +207,7 @@ The #1491/#1494 topology: one producer streaming into one node as fast as the no
 - On the ESP httpd link the reply leg does not compete for the pool at all (#1494): a reply
   serviced **in-call**, on the httpd task, is written straight to the socket and claims neither a
   TX slot nor a control-queue message
-  (`integrations/esp-idf/libtracer/httpd_ws_link.cpp:2805`). So a fan-out sweep of any width, a
+  (`integrations/esp-idf/libtracer/httpd_ws_link.cpp:2827`). So a fan-out sweep of any width, a
   full pool and a full control mbox all cost throughput and never the answer.
 - Behind that, `tx_reply_reserve()` slots are still held back **past** `tx_slot_capacity()`
   (#1218), so a fan-out sweep cannot reach into them however wide it is, and a publish sweep that
