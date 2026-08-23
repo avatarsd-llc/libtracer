@@ -120,10 +120,10 @@ transport_vertex_t::ctl_txn_t::ctl_txn_t(const transport_vertex_t& owner, ctl_sc
                "discharge: a liveness subscriber (or another graph/router callback) is "
                "mutating the control plane. Only the LOOKUP doors are re-entrant.");
         ops_lock_.lock();
-        owner_.ops_owner_.store(std::this_thread::get_id(), std::memory_order_relaxed);
+        owner_.ops_owner_.store(detail::this_thread_id(), std::memory_order_relaxed);
     }
     lock_.lock();
-    owner_.ctl_owner_.store(std::this_thread::get_id(), std::memory_order_relaxed);
+    owner_.ctl_owner_.store(detail::this_thread_id(), std::memory_order_relaxed);
 }
 
 transport_vertex_t::ctl_txn_t::~ctl_txn_t() {
@@ -135,7 +135,7 @@ transport_vertex_t::ctl_txn_t::~ctl_txn_t() {
     // discharge, is one serialized step (see the member's doc). Stamp cleared first, for
     // the reason release_lock() gives.
     if (ops_lock_.owns_lock()) {
-        owner_.ops_owner_.store(std::thread::id{}, std::memory_order_relaxed);
+        owner_.ops_owner_.store(detail::unowned_thread_id(), std::memory_order_relaxed);
         ops_lock_.unlock();
     }
 }
@@ -144,7 +144,7 @@ void transport_vertex_t::ctl_txn_t::release_lock() {
     if (!lock_.owns_lock()) return;
     // Clear the stamp BEFORE unlocking: between the two, another thread could take the
     // mutex and stamp itself, and a store made after that would overwrite the new owner.
-    owner_.ctl_owner_.store(std::thread::id{}, std::memory_order_relaxed);
+    owner_.ctl_owner_.store(detail::unowned_thread_id(), std::memory_order_relaxed);
     lock_.unlock();
 }
 
@@ -196,11 +196,11 @@ result_t<void> transport_vertex_t::ctl_txn_t::discharge() {
 }
 
 bool transport_vertex_t::ctl_held_by_this_thread() const noexcept {
-    return ctl_owner_.load(std::memory_order_relaxed) == std::this_thread::get_id();
+    return ctl_owner_.load(std::memory_order_relaxed) == detail::this_thread_id();
 }
 
 bool transport_vertex_t::ops_held_by_this_thread() const noexcept {
-    return ops_owner_.load(std::memory_order_relaxed) == std::this_thread::get_id();
+    return ops_owner_.load(std::memory_order_relaxed) == detail::this_thread_id();
 }
 
 // SLIM target ctor (@ref slim_net_t): member init + the graph-side catalog wiring,

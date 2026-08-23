@@ -25,6 +25,7 @@
 #include <thread>
 #include <vector>
 
+#include "libtracer/thread_id.hpp"
 #include "libtracer/transport.hpp"
 #include "libtracer/transport_vertex.hpp"
 
@@ -261,7 +262,7 @@ class self_heal_link_t final : public transport_t {
     std::vector<std::shared_ptr<sock_t>> corpses_; /**< @brief Dead sockets awaiting reap. */
 
     std::thread worker_;                    /**< @brief Lazy; joined by @ref stop. */
-    std::thread::id worker_id_;             /**< @brief Re-entrancy guard: the worker's own
+    detail::thread_id_t worker_id_{};       /**< @brief Re-entrancy guard: the worker's own
                                                         publish fan-out must not block on the
                                                         worker (see `ready_socket`). */
     std::atomic<std::uint64_t> gen_ctr_{0}; /**< @brief Dial-generation mint. */

@@ -989,6 +989,13 @@ set_tests_properties(edge_publish PROPERTIES RUN_SERIAL TRUE TIMEOUT 300)
 # pre-existing edge.
 # #1505 — a HANDLER write allocates exactly one block fewer per write than a retaining one,
 # at every link count. Its own binary because it owns a global `operator new` counter.
+# #1532: the ownership-stamp identity primitive. Header-only and platform-branching, so the
+# host arm is unit-tested here and the FreeRTOS arm is compiled by the esp-idf full_node gate.
+add_executable(thread_id_test thread_id_test.cpp)
+target_link_libraries(thread_id_test PRIVATE libtracer)
+libtracer_test_warnings(thread_id_test)
+add_test(NAME thread_id COMMAND thread_id_test)
+
 add_executable(batch_compose_alloc_test batch_compose_alloc_test.cpp)
 target_link_libraries(batch_compose_alloc_test PRIVATE libtracer)
 libtracer_test_warnings(batch_compose_alloc_test)

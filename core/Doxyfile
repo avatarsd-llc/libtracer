@@ -44,6 +44,7 @@ INPUT                  = core/include/libtracer/config.hpp \
                          core/include/libtracer/path.hpp \
                          core/include/libtracer/peer_handle.hpp \
                          core/include/libtracer/link_id.hpp \
+                         core/include/libtracer/thread_id.hpp \
                          core/include/libtracer/transport.hpp \
                          core/include/libtracer/frame.hpp \
                          core/include/libtracer/graph.hpp \
