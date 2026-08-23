@@ -8,6 +8,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.15.1] — 2026-08-23
+
+No changes. This package is an independent native implementation of the protocol — it does
+not compile the C++ core — so neither 0.15.1's ESP-IDF boot fix (a C++-core thread-identity
+primitive) nor its `compose_batch` addition reaches it. Released at 0.15.1 only because one
+tag publishes every package in lockstep.
+
 ## [0.15.0] — 2026-08-23
 
 ### Added

@@ -10,6 +10,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.15.1] — 2026-08-23
+
+### Fixed
+
+- **v0.15.0 does not boot on this component — fixed** ([#1532](https://github.com/avatarsd-llc/libtracer/issues/1532)).
+  The component itself is unchanged; the defect and its fix are in the core it packages
+  (see [core/CHANGELOG.md](../../../core/CHANGELOG.md)), but ESP-IDF is the **only** platform
+  where it bites, so it is recorded here too. v0.15.0's control-plane ownership stamp called
+  `std::this_thread::get_id()` — `pthread_self()` on IDF — which **asserts** for any task that
+  is not in the `esp_pthread_t` registry. Every `xTaskCreate` task qualifies, **the IDF main
+  task running `app_main` included**, so an application that touches the control plane from a
+  native task aborts silently at boot under the default
+  `CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_SILENT=y` and is rolled back by the OTA watchdog —
+  which pins a deployed fleet on v0.14.0. With IDF's assert compiled out the failure is worse
+  than a reset loop: `pthread_self()` answers `NULL`, matching the unowned sentinel, and every
+  native task reports itself the owner of an unowned mutex. `tr::detail::this_thread_id()` now
+  answers `xTaskGetCurrentTaskHandle()` on ESP-IDF. **Upgrade from v0.15.0 to v0.15.1; do not
+  deploy v0.15.0.** A new object-level gate (`tools/check_esp_thread_id.py`, run in the
+  esp-idf `full_node` job) fails the build if `pthread_self` reappears in the affected
+  translation units — a successful compile never proved anything here.
+
 ## [0.15.0] — 2026-08-23
 
 ### Added

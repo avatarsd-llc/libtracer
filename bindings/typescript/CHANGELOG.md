@@ -7,6 +7,14 @@ versioning/publish strategy.
 
 ## [Unreleased]
 
+## [0.15.1] — 2026-08-23
+
+No changes. These packages are an independent TypeScript implementation of the protocol —
+they do not compile the C++ core — so neither 0.15.1's ESP-IDF boot fix (a C++-core
+thread-identity primitive) nor its `compose_batch` addition reaches them. The wire format is
+untouched, so a 0.15.0 client and a 0.15.1 node interoperate byte-for-byte. Released at 0.15.1
+only because one tag publishes every package in lockstep.
+
 ## [0.15.0] — 2026-08-23
 
 ### Added
