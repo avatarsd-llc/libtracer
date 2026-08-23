@@ -738,10 +738,13 @@ def mem_gate(cur: dict, base: dict | None) -> list[str]:
             # count of operator-new calls, identical on every host, so any increase
             # is the code allocating more per vertex. Guarded on presence so a
             # baseline recorded before this key existed degrades to bytes-only
-            # gating rather than crashing (the checked-in perf_baseline.json
-            # fallback deliberately carries no `allocs`: it was captured on a
-            # different toolchain, and an exact ratchet is only honest against a
-            # same-runner baseline binary, which is what CI supplies).
+            # gating rather than crashing (a LOCAL perf_baseline.json fallback
+            # carries no `allocs` if it predates the key, and an exact ratchet is
+            # only honest against a same-runner baseline binary, which is what CI
+            # supplies). "Checked-in" it is not, and never was: the file is
+            # gitignored (bench/.gitignore), tracked by nothing, and no workflow
+            # reads it — CI always passes `--baseline-bench`. See the LEGACY
+            # paragraph in this module's docstring (#1495).
             if "allocs" in b:
                 if v["allocs"] > b["allocs"]:
                     fails.append(f"{k} allocation pullback: {v['allocs']} heap blocks per "
