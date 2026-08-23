@@ -236,7 +236,9 @@ void test_link_and_label_seams() {
     check(lab && counter(*lab, "labels_exhausted") == 0 && counter(*lab, "refused_bindings") == 0 &&
               counter(*lab, "label_not_found") == 0 && counter(*lab, "label_resolves") == 0,
           "the four label-plane nouns are present");
-    const auto with_labels = tr::wire::decode(read_bytes(g, "/sink:stats.link.up"));
+    // The bytes must OUTLIVE the decode: a `tlv_t`'s children are spans INTO them.
+    const auto relinked = read_bytes(g, "/sink:stats.link.up");
+    const auto with_labels = tr::wire::decode(relinked);
     check(with_labels && counter(with_labels.value(), "labels_used") == 0,
           "…and the link block GREW its labels_used noun once switching is on");
 
