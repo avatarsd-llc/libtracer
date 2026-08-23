@@ -797,7 +797,8 @@ it has to price the move on the bench before the pin is allowed to move with it.
   [#1495](https://github.com/avatarsd-llc/libtracer/issues/1495), **now corrected**: RFC-0025
   §4.6.2's evidence appendix stated its figures as bare cross-machine absolutes, and unmodified
   `main` missed two of them by **1.40× and 1.71×** purely because nobody recorded which host they
-  were cut on. The [2026-08-24 erratum](spec/rfcs/0025-stream-class-values.md#erratum-2026-08-24)
+  were cut on. The **2026-08-24 erratum** to
+  [RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md)
   restates that section as portable premiums and ratios and demotes the absolutes to a
   host-stamped basis — the same move this bullet asks for, applied to the document that most
   needed it. Note what the defect was *not*: §4.6.2 is informative, so those numbers were never
