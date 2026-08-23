@@ -166,6 +166,14 @@ jobs:
         run: |
           cmake --build bench/build --target test_compose_record -j
           ./bench/build/test_compose_record
+      # The in-process rows' delivery figure (#1481): `delivery_count.hpp` against a
+      # path-target topology that sheds on purpose, where a counted figure and
+      # `pub_s * fanout` part company. The happy path cannot show this — the two agree
+      # exactly whenever the graph delivers in full, which on an idle runner it does.
+      - name: In-process delivery-count guard test
+        run: |
+          cmake --build bench/build --target test_delivery_count -j
+          ./bench/build/test_delivery_count
       # TIER: blocking. This is the repo's only PRE-MERGE perf verdict, and it is the one
       # shape hardened against runner noise from the inside — same runner, interleaved
       # A/B, and a fail that needs effect + disjoint ranges + a majority of pairs (#763).
