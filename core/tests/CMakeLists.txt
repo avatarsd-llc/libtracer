@@ -989,6 +989,11 @@ set_tests_properties(edge_publish PROPERTIES RUN_SERIAL TRUE TIMEOUT 300)
 # pre-existing edge.
 # #1505 — a HANDLER write allocates exactly one block fewer per write than a retaining one,
 # at every link count. Its own binary because it owns a global `operator new` counter.
+add_executable(batch_compose_alloc_test batch_compose_alloc_test.cpp)
+target_link_libraries(batch_compose_alloc_test PRIVATE libtracer)
+libtracer_test_warnings(batch_compose_alloc_test)
+add_test(NAME batch_compose_alloc COMMAND batch_compose_alloc_test)
+
 add_executable(handler_write_alloc_test handler_write_alloc_test.cpp)
 target_link_libraries(handler_write_alloc_test PRIVATE libtracer)
 libtracer_test_warnings(handler_write_alloc_test)
@@ -1075,6 +1080,10 @@ add_test(NAME subtree_snapshot COMMAND subtree_read_test)
 # refused, and disjoint subtrees are SEVERAL frames (the retired-LIST ban).
 add_executable(propagate_fold_test propagate_fold_test.cpp)
 target_link_libraries(propagate_fold_test PRIVATE libtracer)
+# Pins stream/fold-carries-composed-batch byte-exactly against the emitted frame (#1468), so it
+# needs LIBTRACER_VECTORS_DIR.
+target_compile_definitions(propagate_fold_test PRIVATE
+    LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
 libtracer_test_warnings(propagate_fold_test)
 add_test(NAME propagate_fold COMMAND propagate_fold_test)
 

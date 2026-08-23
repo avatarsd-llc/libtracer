@@ -4190,7 +4190,16 @@ result_t<void> graph_t::propagate_folded_impl(vertex_t* v) {
         // is not a `VALUE` either, so §B strictness would reject it as "any other child type".
         // The fold refuses rather than conflating the list down to a snapshot — silently
         // dropping buffered entries would break the stream no-conflate contract §4.1.2
-        // clause 2 exists to protect. Selecting PER_VERTEX is the working answer today.
+        // clause 2 exists to protect. Selecting PER_VERTEX is the working answer.
+        //
+        // This refusal is PERMANENT, and it is not what stands between a fold and a batch
+        // (RFC-0025 §4.1.3, Amendment 4, clause 2). What it refuses is a PER-SAMPLE ring: N
+        // separately stored entries, no single foldable value. Batching FOR a fold means
+        // composing onto the vertex the sweep visits — the app ropes its samples into ONE
+        // value (`wire::compose_batch`, batch.hpp) and swaps that in, after which the sweep
+        // below sees an ordinary single `VALUE` and carries it with no change here at all.
+        // A vertex that must keep a HISTORY of batches stays a STREAM, one ring entry per
+        // batch, and delivers per-vertex; that is the app's role choice, not a workaround.
         if (n.vx->role() == role_t::STREAM) return std::unexpected(status_t::TYPE_MISMATCH);
         n.lkv = n.vx->read_stored();
         if (!n.lkv) return &n;  // never assigned: deliver_current sends nothing, so does this

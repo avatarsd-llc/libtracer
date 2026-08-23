@@ -221,6 +221,68 @@ The #1491/#1494 topology: one producer streaming into one node as fast as the no
   a shared pool: one flow running its source dry must not affect another
   (`core/include/libtracer/graph.hpp:1467`).
 
+### 3.5 High-rate acquisition — Recipe C: compose → swap → push
+
+The archetype where **per-sample framing is the bottleneck**: an ADC sweep, a PWM timeline, a
+fixed-rate capture. A TLV header plus a routing walk per sample is an order of magnitude of
+overhead at 1 Msps, so the samples are **batched** — and batching in libtracer is
+**user-orchestrated** ([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.1.3, Amendment 4). There is no batch
+role, no flush counter, no window and no injected clock. A batch is a **value the application
+composed**, and the graph never learns that it is one.
+
+Three steps, and only the first is batch-specific:
+
+1. **COMPOSE.** Rope your sample values into one batch value:
+
+   ```cpp
+   // The app already holds its samples as views over its own acquisition buffers.
+   tr::view::rope_t batch = tr::wire::compose_batch(
+       my_source,                                  // where the ONE head segment comes from
+       tr::wire::batch_carriage_t::STANDALONE,     // or ::FOLDED — see below
+       base_ns,                                    // YOUR clock: sample time of frame 0
+       samples,                                    // std::span<const view_t> — referenced, not copied
+       offsets_ns);                                // empty on a uniform stream (0 B/sample)
+   ```
+
+   One small owned segment is allocated — the record header, the `TIME{u64}` base child and, on a
+   non-uniform stream, the packed `i32` offset run — and the sample bytes are roped on behind it
+   as refcounted links. Measured: **constant ~196 B per composition** from 64 B/sample to
+   64 KiB/sample, against 459 KB for the copying spelling at the top of that ladder
+   (`core/tests/batch_compose_alloc_test.cpp`). The payload never reaches an allocator.
+
+2. **SWAP.** `graph_t::assign` / `write` the composed value to the vertex. This is the ordinary
+   atomic LKV publish — there is no batch-specific write path and no new op.
+
+3. **PUSH.** `graph_t::propagate(v)`, or `propagate(v, emission_mode_t::FOLD)` to emit one
+   branch-write frame for a swept subtree instead of one `FWD{WRITE}` per vertex.
+
+**Where the count and the window live: on your side.** `batch_count` and `batch_window_ns` are
+**retired** as graph and wire duties. You already hold the sample count you composed and you own
+the clock you stamped with, so "flush every N samples" and "flush every T" are `if` statements in
+your acquisition loop — the only place they can be honoured without a graph-plane timer, which
+this project does not have and will not add.
+
+**Which role, and which carriage.** Both are the application's choice, and they pair:
+
+| you want the vertex to hold… | role | carriage |
+| --- | --- | --- |
+| **the newest window of signal** | `STORED_VALUE` — the LKV *is* the latest batch | either; `FOLDED` if you sweep it with `propagate(v, FOLD)` |
+| **the last k windows** | `STREAM` — the ring holds a history of batches, **one entry = one batch** | `STANDALONE` |
+
+The two carriages are the same bytes with a different header type (`0x80` for a standalone
+delivery, `VALUE` for a branch-write node's single value), and `compose_batch` produces either
+from one layout. A `STREAM` vertex is **refused** by `propagate(v, FOLD)`, permanently: what it
+refuses is a *per-sample* ring, which has no single foldable value. Batching for a fold means
+composing onto the vertex the sweep visits — which is step 1 above.
+
+- **Designated pressure point**: unchanged, and still the **receiving** vertex's ring, arm chosen
+  per flow. Batching does not move it; it changes how many entries a given rate costs — one ring
+  entry per batch rather than per sample, which is the whole point. Size that ring against the
+  **batch** size, not the sample size, and remember §7's rule that the producer never queues for
+  a slow consumer.
+- **Sizing the batch** is your byte budget against the receiver's ring bound: one batch must fit,
+  because a batch is one value.
+
 ---
 
 ## 4. Do you need the last-known-value?

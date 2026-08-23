@@ -59,6 +59,7 @@ INPUT                  = core/include/libtracer/config.hpp \
                          core/include/libtracer/tlv_view.hpp \
                          core/include/libtracer/tlv_arena.hpp \
                          core/include/libtracer/tlv_emit.hpp \
+                         core/include/libtracer/batch.hpp \
                          core/include/libtracer/path_ref.hpp \
                          core/include/libtracer/path_label.hpp \
                          core/include/libtracer/path_element.hpp \

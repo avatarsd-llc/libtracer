@@ -14,6 +14,39 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Added
+
+- **`tr::wire::compose_batch` and `tr::wire::batch_carriage_t` — the rope-native, ZERO-COPY
+  batch composer** ([#1468](https://github.com/avatarsd-llc/libtracer/issues/1468) /
+  [#1463](https://github.com/avatarsd-llc/libtracer/issues/1463),
+  [RFC-0025](../docs/spec/rfcs/0025-stream-class-values.md) §4.1.3 Amendment 4). Batching is
+  **user-orchestrated**: a batch is a value the application composes, swaps in through the
+  ordinary atomic LKV publish, and pushes with `propagate`. There is no batch role, no
+  graph-side flush counter or window, and no injected clock — the graph never learns that a
+  value is a batch (claim 5, trivially). `compose_batch` allocates exactly **one** small owned
+  segment for the record head (header + `TIME{u64}` base + any packed `i32` offset child) and
+  ropes the caller's existing sample segments on behind it as refcounted links — the same trick
+  as the composed branch read and the FWD plane's `src` accumulation. Measured over a 64 B →
+  64 KiB per-sample ladder: **constant 3 allocations / ~196 B per composition** (198 B past the
+  header's u32-length widening) against 459 KB for the contiguous `emit_batch` spelling at the
+  top rung (`core/tests/batch_compose_alloc_test.cpp`). `batch_carriage_t` selects the header
+  type byte — `STANDALONE` ⇒ the assigned BATCH record `0x80`, `FOLDED` ⇒ the single structured
+  `VALUE` of a `propagate(v, FOLD)` branch-write node — and that byte is the **whole** of what
+  differs between the two spellings; both come out of one layout implementation. New
+  conformance vectors `stream/batch-composed-standalone`, `stream/batch-composed-folded` and
+  `stream/fold-carries-composed-batch`, byte-exact in all three cores.
+- **`tr::wire::store_batch_head` / `store_batch_time` / `store_batch_offsets` /
+  `batch_body_bytes` / `batch_head_bytes`, and `tr::wire::store_header`** — the span-form
+  layout primitives the composer needs. `store_batch_head` is now the ONE batch-layout
+  implementation, and `emit_batch` / `emit_batch_time` / `emit_batch_offsets` / `emit_header`
+  are the container forms over their span siblings, so a rope-native composer and a
+  `std::vector` byte builder cannot drift into two spellings of the same bytes.
+
+### Changed
+
+- **`tr::wire::emit_batch` gains a trailing `carriage` parameter**, defaulted to
+  `batch_carriage_t::STANDALONE`. Existing calls are unaffected and emit byte-identical output.
+
 ## [0.15.0] — 2026-08-23
 
 ### Added

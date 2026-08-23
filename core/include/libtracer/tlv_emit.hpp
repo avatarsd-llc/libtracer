@@ -29,9 +29,34 @@
 
 namespace tr::wire {
 
+/** @brief Wire bytes a TLV header occupies under @p opt: 4, or 6 when the `ll` bit widens the
+ *         length to u32. */
+[[nodiscard]] constexpr std::size_t header_bytes(opt_t opt) noexcept { return opt.ll ? 6u : 4u; }
+
 /**
- * @brief Append just a TLV header: `<type> <opt> <length>` — the ONE representation of the
- *        header byte layout (ADR-0048 §3).
+ * @brief Store a TLV header into an exactly-sized @p out span — the ONE representation of the
+ *        header byte layout (ADR-0048 §3), in the form a caller composing into an OWNED SEGMENT
+ *        needs.
+ *
+ * The span form is the primitive and `emit_header` is the container form over it, so a
+ * rope-native composer (`%batch.hpp`'s `compose_batch`) and a `std::vector` byte
+ * builder cannot drift into two spellings of the same four bytes. Length is u16 LE, or u32 LE
+ * when `opt.ll` is set; the width follows `opt.ll` verbatim — this writes a header, it does not
+ * decide one.
+ *
+ * Precondition: `out.size() >= header_bytes(opt)`.
+ */
+inline void store_header(std::span<std::byte> out, type_t type, opt_t opt,
+                         std::size_t body_len) noexcept {
+    out[0] = static_cast<std::byte>(std::to_underlying(type));
+    out[1] = static_cast<std::byte>(opt.encode());
+    detail::store_le(out.subspan(2), static_cast<std::uint32_t>(body_len), opt.ll ? 4u : 2u);
+}
+
+/**
+ * @brief Append just a TLV header: `<type> <opt> <length>` — the container form of
+ *        `store_header`, which is the ONE representation of the header byte layout
+ *        (ADR-0048 §3).
  *
  * Length is u16 LE, or u32 LE when the `opt.ll` bit is set. The width follows `opt.ll`
  * verbatim — this writes a header, it does not decide one. The LL decision belongs one level
@@ -46,9 +71,9 @@ namespace tr::wire {
  * caller reaching for `emit_header` owns the width decision itself.
  */
 inline void emit_header(std::vector<std::byte>& out, type_t type, opt_t opt, std::size_t body_len) {
-    out.push_back(static_cast<std::byte>(std::to_underlying(type)));
-    out.push_back(static_cast<std::byte>(opt.encode()));
-    detail::append_le(out, static_cast<std::uint32_t>(body_len), opt.ll ? 4u : 2u);
+    const std::size_t at = out.size();
+    out.resize(at + header_bytes(opt));
+    store_header(std::span<std::byte>(out).subspan(at), type, opt, body_len);
 }
 
 /**
