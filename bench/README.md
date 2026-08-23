@@ -1455,6 +1455,43 @@ flat in fan-out, so a fan-0 handler paid it in full.
 fewer at every link count (1/2/4/5/9 against 2/3/5/6/10 for 1/2/3/4/8 links). The mode ordering
 now matches what the role system advertises: the non-retaining choice is the cheap one.
 
+### `bench_publish_leg` + `bench_writer_fanin` — re-banking RFC-0025 §4.6.2 (#1485, #1495)
+
+§4.6.2 quoted a **53 ns / 71 ns** baseline write at 0 / 1 subscribers and **4.59 vs 1.73 M/s**
+for four writers on one vertex, from a harness that was never committed. Its 2026-08-24 erratum
+demoted both to a host-stamped basis and filed the follow-up these two benches discharge: the
+same legs, from instruments a reader can re-run.
+
+```sh
+cmake --build bench/build --target bench_publish_leg bench_writer_fanin -j
+./bench/run_publish_leg.sh bench/build 5 4    # 5 rounds, publish leg pinned to cpu 4
+```
+
+- **`bench_publish_leg`** separates the two halves of a write. `publish-assign` is
+  `graph_t::assign` — RFC-0008's state transition, which sends nothing and is the public verb
+  that reaches the private `vertex_t::store`; `publish-write` is `assign` then deliver. Each at
+  fan 0 and fan 1. `deliv/s` is **0** on every row that delivers nothing (the #553 latency-only
+  convention): publishing a store rate in a column named "deliveries" is precisely the
+  definitional confusion the erratum corrects.
+- **`bench_writer_fanin`** runs 1/2/4/8 writers at one vertex, plain against a STREAM with a
+  bounded history, the two arms back to back at each width so the ratio is same-run. It prices
+  **today's** receiving-vertex retention, not the producer-side ring §4.6.2 priced and PR #1490
+  deleted.
+- **`run_publish_leg.sh`** waits for a quiet host, runs both best-of-rounds (never median),
+  reduces through `best_of_rounds.py`, and stamps every emitted point with `host_guard.py`
+  provenance — the host descriptor, the compiler identity and the contamination note.
+
+Studio host, best of 5, GCC 13.3.0: `assign` fan 0 **69 ns p50** (14.2 M ops/s), `write` fan 1
+**91 ns p50** (10.9 M ops/s) — a **1.32x** 1-subscriber premium against the original pair's
+1.34x, so the ratio reproduces while both absolutes read ~1.3x higher than the 2026-08-20 host's.
+The four-writer ratio ran **0.08x–0.42x across five rounds** (aggregate 7.1–14.1 M/s lock-free
+against 1.1–3.2 M/s STREAM); T = 1 is the tight arm at **0.54x–0.56x**.
+
+**Neither is a perf gate.** Every `bench_publish_leg` arm is a subset of the already-gated
+`inproc/64/1/1`, so it would buy correlated evidence rather than coverage; and a many-thread
+aggregate rate is a property of the host — the same reason every other `scaling`-surface harness
+here is diagnostic. Quote the ratio, with the stamp, and never a bare absolute.
+
 ## What is measured
 
 The swept axes (`bench_common.hpp`): payload **1..8192 B**, fan-out

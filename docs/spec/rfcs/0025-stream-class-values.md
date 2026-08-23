@@ -1014,15 +1014,34 @@ what survived re-measurement on a second machine:
 
 *(Basis for the percentages, one host, not a bar: the +54 % premium is **+29 ns** against a
 baseline lock-free write of **53 ns / 71 ns** at 0 / 1 subscribers, banked 2026-08-20 on an idle
-EPYC-class host at a single pinned logical CPU. The exact host, governor and compiler were not
-recorded at banking time and are **not recoverable** from the record — which is itself the reason
-these absolutes are demoted here rather than re-stated. They are that machine's numbers and
-**nothing conforms to them**: the project's own studio EPYC 9115 reads the same two legs at
-**77.0 ns** and **143.6 ns** on unmodified `main` — 1.40x and 1.71x — with no code between the two
-readings. Compare [RFC-0027](0027-label-switched-path-compression.md) §12.4's generality caveat and
+EPYC-class host at a single pinned logical CPU. The exact host, governor and compiler of that
+2026-08-20 banking were not recorded at the time and remain **not recoverable** from the record;
+that is why the figures are demoted here rather than re-stated, and the historical note stands.
+What has changed is that the two legs are no longer unhosted. They are now measured by
+**registered in-tree instruments** — `bench/bench_publish_leg.cpp` and
+`bench/bench_writer_fanin.cpp`, run through `bench/run_publish_leg.sh` — and the **current
+basis** for the percentages is that reading, stamped by `bench/host_guard.py`:*
+
+| leg (as §4.6.2 defines it) | current basis | instrument |
+| --- | ---: | --- |
+| store alone (`assign`), 0 subscribers — the 53 ns figure | **69 ns p50 / 70 ns mean**, 14.2 M ops/s | `bench_publish_leg` |
+| publish (`write`), 1 subscriber — the 71 ns figure | **91 ns p50 / 92 ns mean**, 10.9 M ops/s | `bench_publish_leg` |
+| four writers on one vertex, lock-free vs STREAM | **0.08x–0.42x per round** (7.1–14.1 M/s vs 1.1–3.2 M/s aggregate) | `bench_writer_fanin` |
+
+*Stamp: studio EPYC 9115, GCC 13.3.0, `-O2` Release, best of 5 rounds; the publish legs pinned to
+one logical CPU, the writer sweep deliberately unpinned. The **ratios are unchanged and are still
+the primary quantities** — the 1-subscriber leg costs **1.32x** the 0-subscriber one here against
+the original pair's 1.34x, so the shape reproduces while both absolutes read ~1.3x higher than the
+2026-08-20 host's. The four-writer band **brackets** the 0.14x this section states, but it is
+measured against a **different structure** — today's receiving-vertex retention, not the
+producer-side ring PR #1490 deleted — and its per-round spread is too wide to restate as a point
+estimate; the arm that is tight is T = 1, where a STREAM write costs **0.54x–0.56x** the plain one.
+Nothing above is a bar: these are one host's numbers, published with that host attached, per
+[RFC-0027](0027-label-switched-path-compression.md) §12.4's generality caveat and
 [methodology](../../methodology.md)'s rule that an absolute without its host is unusable rather
-than merely imprecise. Re-banking these two legs from registered instruments with `host_guard.py`
-provenance is tracked on [#1485](https://github.com/avatarsd-llc/libtracer/issues/1485).)*
+than merely imprecise. Neither instrument joins the per-PR gate, whose points are same-runner
+ratios by construction ([#1485](https://github.com/avatarsd-llc/libtracer/issues/1485),
+[#1495](https://github.com/avatarsd-llc/libtracer/issues/1495)).)*
 
 **What each figure times, stated because two of them were read as the same quantity.** The
 53 ns / 71 ns baseline is `vertex_t::store` **alone** — the producer-side publish, at 0 and 1
@@ -1443,6 +1462,15 @@ on any implementation. **No wire surface moves:** no grammar, frame shape, type 
 error identity changes, and no published conformance vector's bytes move. Not one measured value is
 altered, withdrawn or re-derived; the change is which of them lead, and what is said about the rest.
 Maintainer ruling in [#1495](https://github.com/avatarsd-llc/libtracer/issues/1495) (option (c),
-2026-08-23). Re-banking the two demoted legs from **registered** instruments — the 0-subscriber
-write and the four-writers-on-one-vertex leg, both of which came from a throwaway harness and have
-no in-tree bench — is tracked on [#1485](https://github.com/avatarsd-llc/libtracer/issues/1485).
+2026-08-23).
+
+**Re-banked, same day.** The follow-up this erratum filed — measuring the two demoted legs from
+**registered** instruments rather than a throwaway harness — is done. `bench_publish_leg.cpp`
+(the 0/1-subscriber publish leg, `assign` against `write`) and `bench_writer_fanin.cpp` (N writers
+on one vertex, plain against STREAM) are in the tree and in the instrument registry, and §4.6.2's
+parenthetical now carries their host-stamped reading as the **current basis** for its percentages.
+The 2026-08-20 absolutes and the unrecoverability of their host are kept as the historical record;
+no ratio in the table above moves, and neither instrument is added to the per-PR gate — every
+publish-leg arm is a subset of the already-gated `inproc` point, and a many-thread aggregate rate
+is a property of the host rather than of the code
+([#1485](https://github.com/avatarsd-llc/libtracer/issues/1485)).

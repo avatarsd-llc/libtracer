@@ -151,6 +151,21 @@ add_executable(bench_contention bench_contention.cpp)
 target_link_libraries(bench_contention PRIVATE libtracer)
 target_compile_options(bench_contention PRIVATE -Wall -Wextra)
 
+# The producer-side publish leg, isolated (#1485/#1495): `assign` (state only) against
+# `write` (state then deliver), at 0 and 1 subscribers. The in-tree instrument for the two
+# absolutes RFC-0025 §4.6.2's 2026-08-24 erratum demoted to a host-stamped basis. Registered
+# and run on demand; not a perf gate — every arm is a subset of the already-gated `inproc`.
+add_executable(bench_publish_leg bench_publish_leg.cpp)
+target_link_libraries(bench_publish_leg PRIVATE libtracer)
+target_compile_options(bench_publish_leg PRIVATE -Wall -Wextra)
+
+# N writers on ONE vertex, plain against STREAM (#1485/#1495): the in-tree instrument for
+# §4.6.2's four-writer leg. Reports the same-run stream/lock-free ratio per writer count.
+# Diagnostic, never a perf gate — a many-thread aggregate rate is a property of the host.
+add_executable(bench_writer_fanin bench_writer_fanin.cpp)
+target_link_libraries(bench_writer_fanin PRIVATE libtracer)
+target_compile_options(bench_writer_fanin PRIVATE -Wall -Wextra)
+
 # Zenoh side — built only when the prebuilt is vendored (run bench/fetch_zenoh.sh).
 #
 # The zenoh-cpp directory carries its version in its name, so it is DISCOVERED rather than

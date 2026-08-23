@@ -483,6 +483,24 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "allocations and frees per write, per role and link count",
         "never gated — a decision input, reported as a count"),
     instrument_t(
+        "bench_publish_leg.cpp", "inproc", (),
+        "Separates the two halves of a write at 0 and 1 subscribers: `assign`, which performs "
+        "RFC-0008's state transition and sends nothing, against `write`, which then delivers. "
+        "The in-tree instrument for the producer-side publish leg RFC-0025 §4.6.2 quoted from a "
+        "harness that was never committed; its `assign` row is the `vertex_t::store`-alone "
+        "figure that section's erratum demotes to a host-stamped basis.",
+        "ns p50 / p99 / mean · operations/s, per verb and subscriber count",
+        "never gated — every arm is a subset of the already-gated `inproc` point"),
+    instrument_t(
+        "bench_writer_fanin.cpp", "scaling", (),
+        "N writers on ONE vertex, plain last-writer-wins against a STREAM retaining a bounded "
+        "history, swept 1 → 8 writers with the two arms run back to back at each width so the "
+        "stream/lock-free ratio is same-run. The committed instrument for §4.6.2's four-writer "
+        "leg; it prices today's receiving-vertex retention, not the producer-side ring that "
+        "figure priced and PR #1490 deleted.",
+        "aggregate and per-thread ops/s · ps per system-wide op · the same-run ratio",
+        "never gated — a many-thread aggregate rate is a property of the host"),
+    instrument_t(
         "bench_lkv_slot.cpp", "scaling", (),
         "Concurrent publishers and readers on one last-known-value slot across five reclamation "
         "arms, plus `graph_t::write` driven from T threads against distinct vertices that share "
