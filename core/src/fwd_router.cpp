@@ -1768,6 +1768,58 @@ std::string_view fwd_router_t::peer_subject_thunk(void* ctx, const graph::inboun
                            scratch);
 }
 
+bool fwd_router_t::sample_stats(std::string_view seam_class, std::string_view seam_name,
+                                graph::stats_block_t* out) const noexcept {
+    if (seam_class == "router") {
+        if (seam_name != "drops") return false;
+        if (out == nullptr) return true;  // the recognition probe: sample nothing
+        const router_stats_t s = drop_stats();
+        out->add("flatten_dropped", s.flatten_dropped);
+        out->add("forward_iov_dropped", s.forward_iov_dropped);
+        out->add("arena_dropped", s.arena_dropped);
+        out->add("assemble_dropped", s.assemble_dropped);
+        out->add("reply_iov_dropped", s.reply_iov_dropped);
+        out->add("delivery_iov_dropped", s.delivery_iov_dropped);
+        out->add("malformed_rx", s.malformed_rx);
+        return true;
+    }
+    if (seam_class == "labels") {
+        if (seam_name != "table") return false;
+        if (out == nullptr) return true;
+        // The label PLANE, whose counters are split across two owners by design: the mint
+        // table's own refusals live on `route_handle_t`, and the dereference tallies on the
+        // router. One class, because an operator reads them as one story (RFC-0027 §7.2).
+        out->add("labels_exhausted", handles_.labels_exhausted());
+        out->add("refused_bindings", handles_.refused_bindings());
+        out->add("label_not_found", label_not_found());
+        out->add("label_resolves", label_resolves());
+        return true;
+    }
+    if (seam_class != "link") return false;
+    // A LIVE registered child, by the same NAME its `/net/<module>/<name>` connection vertex
+    // carries. A tombstone (`erase`d link) is deliberately NOT a seam: a removed link's
+    // sub-key must answer SCHEMA_NOT_FOUND, not a frozen block that looks live.
+    const child_registry_t::child_t* const entry = registry_.entry_by_name(seam_name);
+    if (entry == nullptr || !entry->live()) return false;
+    if (out == nullptr) return true;
+    const transport_t* const link = entry->link();
+    const transport_drop_stats_t d = link->drop_stats();
+    out->add("dropped_rx", d.dropped_rx);
+    out->add("malformed_rx", d.malformed_rx);
+    out->add("dropped_tx", d.dropped_tx);
+    // Per-link and in LABELS, a unit an operator can act on; published only when label
+    // switching is on for this node, because with no mint table there is no occupancy to
+    // report and a constant zero would read as "plenty of space left" (RFC-0010 Am. 1 §D.3:
+    // a seam names only the nouns it HAS).
+    if (labels_ != nullptr) out->add("labels_used", handles_.labels_used(seam_name));
+    return true;
+}
+
+bool fwd_router_t::stats_sampler_thunk(void* ctx, std::string_view seam_class,
+                                       std::string_view seam_name, graph::stats_block_t* out) {
+    return static_cast<const fwd_router_t*>(ctx)->sample_stats(seam_class, seam_name, out);
+}
+
 void fwd_router_t::on_frame_bus(const child_rx_ctx_t& ctx, peer_handle_t peer,
                                 std::span<const std::byte> frame) {
     // The handle is the seam's identity; the routing plane's is the NAME, so it is resolved

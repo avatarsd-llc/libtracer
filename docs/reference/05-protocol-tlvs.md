@@ -1088,6 +1088,16 @@ The seams a node's graph answers for:
 | `:stats.mem.ring` | the graph-level default receiver-ring source | the same five |
 | `:stats.graph.delivery` | the graph's delivery-drop door (the net plane counts through it too) | `no_target`, `denied`, `out_of_memory`, `fan_out_truncated` |
 
+And the NET-PLANE seams ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) §Amendment 2), which a node publishes when it has a router — the router registers a sampler UP into the graph, so L4 still reaches nothing below itself:
+
+| spelling | the seam | nouns |
+| ---- | ---- | ---- |
+| `:stats.router.drops` | the node's forwarder's counted cold-path drops | `flatten_dropped`, `forward_iov_dropped`, `arena_dropped`, `assemble_dropped`, `reply_iov_dropped`, `delivery_iov_dropped`, `malformed_rx` |
+| `:stats.labels.table` | the RFC-0027 label plane — mint refusals beside dereference tallies | `labels_exhausted`, `refused_bindings`, `label_not_found`, `label_resolves` |
+| `:stats.link.<child>` | ONE registered transport child, by the NAME its `/net/<module>/<name>` connection vertex carries | `dropped_rx`, `malformed_rx`, `dropped_tx`, and `labels_used` where the node mints labels |
+
+A node that constructed no router publishes none of the three, and a `link` sub-key naming no registered child — or a removed one — is not a seam: all of these answer `ERROR{tr::schema::not_found}` (`0x0031`), which a monitor reads as "not published here". A link's `rx_capacity` / `tx_capacity` ceilings are deliberately absent: they are per-kind and in per-kind units (buffer bytes on a WebSocket link, TX-pool slots on CAN), so there is no unit-safe ceiling to publish at the interface.
+
 Worked bytes — the graph-door block on a fresh node, **113 bytes** (the `settings/stats-seam-block` vector):
 
 ```

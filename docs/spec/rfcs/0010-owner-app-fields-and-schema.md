@@ -894,3 +894,149 @@ with `:identity` as its control, every unrecognised spelling at both an admitted
 caller, the read-only half) and by `core/tests/op_resolve_test.cpp` —
 `test_await_field_selector_is_enotty`, which now drives a `:stats` selector beside its
 field-less control.
+
+## Amendment 2 (2026-08-23) — the net-plane seam sampler: `router`, `labels` and `link` join the census ([#1503](https://github.com/avatarsd-llc/libtracer/issues/1503) residual)
+
+**Status:** accepted (maintainer ruling 2026-08-22; the 14-day window is waived per
+[GOVERNANCE.md](../../../.github/GOVERNANCE.md), as on Amendment 1).
+
+**Scope.** This amendment extends **§D.4 only**. §D.1, §D.2, §D.3, §D.5 and §D.6 are
+untouched and govern the new classes verbatim: the field stays node-scoped (every vertex of
+a node answers identically), NAME validity still resolves ABOVE the READ gate and the VALUE
+below it, one READ is still one seam is one whole counter block in ONE `SETTINGS` TLV, and
+the surface is still readable, never writable, never awaitable. No frame shape, type code,
+grammar rule or error identity changes.
+
+**What it opens.** Amendment 1 §D.4 named the door and declined to build it:
+
+> Extending the census to the net plane — the router registering its own seam samplers with
+> the graph at configure time, the way it already installs its sinks — is a **named door,
+> not built here** … A future amendment that opens it adds `<seam-class>` values (`router`,
+> `labels`, `link`) and changes nothing above.
+
+This is that amendment, and it opens exactly that door in exactly that way.
+
+### D.4 (extended) — the net-plane seams
+
+The boundary Amendment 1 drew was a **dependency** boundary: the graph is L4, the router is
+the transport plane above it, dependencies point up the layers only, and so L4 cannot reach
+DOWN to sample a router or a link. That argument is unchanged and is why the seams could not
+simply be added to the graph's `switch`.
+
+What changes is the **direction of the wiring, not the direction of the dependency**. The
+router already knows the graph — its constructor installs five `{fn, ctx}` pairs on it and on
+its resolver (`configure_remote_delivery_sink`, `on_reverse_ref`, `on_peer_subject`,
+`on_link_id`, `configure_wire_target_resolver`; ADR-0047's captureless-thunk shape, published
+through `tr::sink_slot_t`). The census sampler is the **sixth instance of that same pattern**:
+the router registers a sampler **UP** into the graph at construction, the graph calls back
+into it when a `:stats` read names a net-plane class, and L4 still names nothing below itself
+— it holds one more `{fn, ctx}` word pair whose type mentions no transport concept at all.
+
+The reserved seam classes and the nouns each publishes:
+
+| spelling | the seam | nouns |
+| --- | --- | --- |
+| `:stats.router.drops` | this node's `fwd_router_t` counted cold-path drops (`router_stats_t`, #1503 step 3) | `flatten_dropped`, `forward_iov_dropped`, `arena_dropped`, `assemble_dropped`, `reply_iov_dropped`, `delivery_iov_dropped`, `malformed_rx` |
+| `:stats.labels.table` | the RFC-0027 label plane — the mint table's refusals (`route_handle_t`) beside the router's dereference tallies | `labels_exhausted`, `refused_bindings`, `label_not_found`, `label_resolves` |
+| `:stats.link.<child>` | ONE registered transport child, by its `child_registry_t` NAME — the same key its `/net/<module>/<name>` connection vertex carries | `dropped_rx`, `malformed_rx`, `dropped_tx` (`transport_drop_stats_t`), plus `labels_used` when this node mints labels |
+
+`<child>` is an ordinary NAME step, so the whole spelling stays inside §D.1's `:field.sub`
+tail and nothing about the path grammar moves. A bare `:stats.router`, `:stats.labels` or
+`:stats.link` names nothing, exactly as §D.2 already requires of every bare class.
+
+**Two nouns that are NOT here, and why.** A link's `rx_capacity` / `tx_capacity` ceilings are
+**per-kind and in per-kind units** — bytes of buffer on the ESP WebSocket client link, TX-pool
+slots on a CAN link — so `transport_t` has no unit-safe ceiling to publish at the interface,
+and a single `capacity` noun carrying two units would be worse than none (`core/STYLE.md`
+§Introspection reads `capacity` against `in_use` in the resource's own unit). They stay
+per-kind accessors (`esp_ws_client_link_t::rx_capacity()` / `tx_capacity()`), and §D.3's "a
+seam may grow a noun" is what admits them later without another amendment, once there is a
+unit-safe interface seam to publish them through. `labels_used` IS published, because its unit
+is labels on every kind alike.
+
+### D.4.1 — an unpublished seam answers `SCHEMA_NOT_FOUND`
+
+> **A seam whose sampler is not registered — a node that constructed no router — and a
+> `link` sub-key that names no registered child, or one whose child has been removed, MUST
+> answer `ERROR{tr::schema::not_found}` (`0x0031`), caller-independently.**
+
+This mints nothing: §Compatibility of Amendment 1 already anticipated exactly this answer
+(":867–876" — *"An implementation that does not serve the census keeps answering
+`SCHEMA_NOT_FOUND` … a monitor MUST therefore treat `SCHEMA_NOT_FOUND` on a seam as 'this
+node does not publish that seam', never as an error."*). The sentence above states which
+node conditions produce it, so a monitor is not left to infer them.
+
+Because the SAMPLER, not the spec text, decides whether a NAME within a net class is served,
+that decision MUST be taken above the READ gate — §D.2's caller-independence rule is
+otherwise breakable in the new classes alone: an unserved `:stats.router.nope` would answer
+`SCHEMA_NOT_FOUND` to an admitted caller and `PERMISSION_DENIED` to a denied one, one
+spelling with two answers split by who asked. The reference implementation settles it with a
+**recognition probe** — the same sampler call with no output buffer, which samples nothing
+and is never handed the caller — and a conformant implementation MUST resolve net-plane NAME
+validity caller-independently by whatever means.
+
+### D.4.2 — ownership and lifetime (restated, not minted)
+
+Nothing new is required of an embedder. The two rules that govern this seam are the two that
+already govern the other five:
+
+- **The router MUST outlive every dispatch the graph can still make** (`graph.hpp:130`) — the
+  lifetime the held `graph_t&` reference and the remote-delivery sink already demand. The
+  sampler is read only inside a `:stats` field read, so the window is no wider than the
+  existing sinks', but it is not narrower either.
+- **Re-binding a graph to a second router is UNSUPPORTED** (`fwd_router.hpp:266-267`):
+  "constructing a router against a graph that is ALREADY serving frames is unsupported,
+  which is what `configure_` in the verb's name says." The sampler slot is a `sink_slot_t`
+  like the others, so a violation is DEFINED (a skipped dispatch, i.e. `SCHEMA_NOT_FOUND`)
+  rather than undefined — but it is still a violation.
+
+### D.4.3 — the cost, stated
+
+Sampling happens **only** inside the reference implementation's already
+`[[gnu::noinline, gnu::cold]]` `stats_seam` / `read_stats` path, which is reached only after
+a field read has spelled `stats`. No hot path gains an instruction. The static cost is one
+more `tr::sink_slot_t` on `graph_t` — **three words** (a `u32` generation counter, the
+function pointer, the context pointer) — carried by every node whether or not it has a
+transport plane, which is the RAM-census delta this amendment spends.
+
+### Compatibility
+
+Additive, and it occupies previously-erroring space only: before this amendment every
+`router` / `labels` / `link` spelling answered `SCHEMA_NOT_FOUND`, and after it every one of
+them still does on a node with no router. A node that publishes the seams is a superset; a
+monitor written against Amendment 1 is unaffected, and one written against this amendment
+degrades by construction, because §Compatibility already told it to read `SCHEMA_NOT_FOUND`
+as "not published here".
+
+### Files this amendment edits (on acceptance)
+
+- [reference/05](../../reference/05-protocol-tlvs.md) §*The seam census record* — the seam
+  table gains the three net-plane classes and the unpublished-seam rule.
+- [reference/22](../../reference/22-backpressure-and-sizing.md) §6 Recipe A — the "what the
+  wire arm does NOT reach" paragraph, which this amendment retires.
+- Reference core: `graph_t::configure_stats_sampler` / `graph_t::sample_stats` and the
+  `stats_block_t` carrier; `fwd_router_t::sample_stats` and its constructor's sixth install.
+
+### Conformance
+
+`tests/conformance/vectors/v1/settings/stats-seam-net-router` — the router seam's block,
+byte-exact, with the unpublished-seam and denied-caller answers named against the
+byte-identical vectors already held. Bound behaviourally by
+`core/tests/stats_net_seam_test.cpp`: live sampling, the per-link identity of
+`:stats.link.<child>`, the unregistered and removed sub-keys, the **no-router positive
+control**, node scoping across the new classes, caller-independence of an unserved net NAME
+with a served one as its control, and the read-only half.
+
+## Erratum (2026-08-23) — `:stats` IS in the field namespace; three reference pages still said it never would be ([#1503](https://github.com/avatarsd-llc/libtracer/issues/1503))
+
+Amendment 1 added `stats` to the protocol-owned field namespace, but three pages predating it
+still carry the pre-amendment sentence — [reference/19](../../reference/19-transports-are-vertices.md)
+(twice), [reference/14](../../reference/14-can-transport.md) (the namespace set, the
+"intended, not implemented" note and its failure-mode row) and
+[ADR-0027](../../adr/0027-transport-and-connections-are-vertices.md)'s 2026-07-30 erratum
+banner. Each is corrected to state what is true after Amendments 1 and 2: the **node-scoped
+census** `:stats.<class>.<name>` is implemented and readable, while the **per-connection
+`:stats` facet** ADR-0027's worked example drew — a facet *of the addressed vertex*, whose
+content differs per connection — remains not implemented and is what those pages were right
+to warn against. Text-only, no wire surface moves, so this is an erratum and not a third
+amendment.

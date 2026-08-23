@@ -385,17 +385,19 @@ enum class app_sel_t : std::uint8_t {
  *
  * The spelling is `<any-vertex>:stats.<seam-class>.<name>` — node-scoped in the `:identity`
  * mould (RFC-0011 §C.1): the field takes no vertex, every vertex answers identically, and
- * the content describes the NODE. The enumerated set is the census this node can reach from
+ * the content describes the NODE. The GRAPH classes are the census this node reaches from
  * its own `graph_t` (Amendment 1 §D.4): the two injected `block_source_t` seams and the
- * graph's own delivery-drop door. The router and per-link seams answer at the entities that
- * own them (`fwd_router_t`, `transport_t`) and are deliberately NOT reachable from here —
- * L4 does not learn about the net plane to serve a diagnostic.
+ * graph's own delivery-drop door. The `router` / `labels` / `link` classes are the net
+ * plane's (Amendment 2), and L4 still learns nothing about that plane to serve them: the
+ * router registers a sampler UP through `graph_t::configure_stats_sampler`, and @ref NET is
+ * "a spelling only that sampler can recognise or refuse".
  */
 enum class stats_seam_t : std::uint8_t {
     NONE,           /**< @brief Not a `:stats` seam spelling — SCHEMA_NOT_FOUND. */
     MEM_CONTROL,    /**< @brief `:stats.mem.control` — @ref graph_t::control_source. */
     MEM_RING,       /**< @brief `:stats.mem.ring` — @ref graph_t::default_ring_source. */
     GRAPH_DELIVERY, /**< @brief `:stats.graph.delivery` — @ref graph_t::delivery_drops. */
+    NET,            /**< @brief A net-plane class — the installed sampler decides (Am. 2). */
 };
 
 /**
@@ -423,6 +425,12 @@ enum class stats_seam_t : std::uint8_t {
         if (name == "ring") return stats_seam_t::MEM_RING;
     } else if (cls == "graph") {
         if (name == "delivery") return stats_seam_t::GRAPH_DELIVERY;
+    } else if (cls == "router" || cls == "labels" || cls == "link") {
+        // RESERVED to the net plane (Amendment 2 §D.4). The CLASS is spec text and is
+        // recognised here unconditionally; whether the NAME within it is served is the
+        // sampler's answer, and with no sampler installed every one of them is
+        // SCHEMA_NOT_FOUND — the same answer these spellings gave before the amendment.
+        return stats_seam_t::NET;
     }
     return stats_seam_t::NONE;
 }
@@ -458,6 +466,7 @@ void emit_counter(std::vector<std::byte>& out, std::string_view noun, std::uint6
  * count_drop` took them out of line.
  */
 [[nodiscard, gnu::noinline, gnu::cold]] result_t<view_t> read_stats(const graph_t& g,
+                                                                    const field_path_t& field,
                                                                     stats_seam_t seam) {
     std::vector<std::byte> members;
     switch (seam) {
@@ -479,6 +488,17 @@ void emit_counter(std::vector<std::byte>& out, std::string_view noun, std::uint6
             emit_counter(members, "denied", d.denied);
             emit_counter(members, "out_of_memory", d.out_of_memory);
             emit_counter(members, "fan_out_truncated", d.fan_out_truncated);
+            break;
+        }
+        case stats_seam_t::NET: {
+            // Amendment 2: the block comes from the net plane's registered sampler, which
+            // fills a fixed-capacity carrier — so the ONE encoder below still shapes every
+            // seam's bytes and the sampling half never touches an allocator.
+            stats_block_t sampled;
+            if (!g.sample_stats(field.steps[1].name, field.steps[2].name, &sampled))
+                return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+            for (std::size_t i = 0; i < sampled.count; ++i)
+                emit_counter(members, sampled.members[i].noun, sampled.members[i].value);
             break;
         }
         case stats_seam_t::NONE:
@@ -3094,6 +3114,20 @@ void graph_t::configure_wire_target_resolver(wire_target_fn_t fn, void* ctx) noe
     wire_target_.set(fn, ctx);
 }
 
+void graph_t::configure_stats_sampler(stats_sampler_fn_t fn, void* ctx) noexcept {
+    stats_sampler_.set(fn, ctx);
+}
+
+bool graph_t::sample_stats(std::string_view seam_class, std::string_view seam_name,
+                           stats_block_t* out) const noexcept {
+    // One coherent {fn, ctx} read, then dispatch from the SNAPSHOT — never from the members
+    // (`sink_slot.hpp`'s contract). An unset slot is the no-transport-plane node, and its
+    // answer is the same "not published here" a router that does not know the seam gives.
+    const auto sink = stats_sampler_.get();
+    if (sink.fn == nullptr) return false;
+    return sink.fn(sink.ctx, seam_class, seam_name, out);
+}
+
 result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view_t source_view, view_t return_route,
                                        std::string link, view_t reverse_route, std::string caller,
                                        link_id_t link_token) {
@@ -4364,6 +4398,16 @@ result_t<rope_t> graph_t::read(vertex_handle_t vh, const field_path_t& field,
             field.steps[0].name == "stats" ? stats_seam(field) : stats_seam_t::NONE;
         if (field.steps[0].name == "stats" && seam == stats_seam_t::NONE)
             return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+        // A NET-plane class (Amendment 2) is recognised by SPELLING here but SERVED by the
+        // registered sampler, so validity must be settled here too — with a probe that
+        // samples nothing. Otherwise an unserved `router` / `labels` / `link` NAME would
+        // answer SCHEMA_NOT_FOUND to an admitted caller and PERMISSION_DENIED to a denied
+        // one: one spelling, two answers split by who asked, which is exactly what §D.2
+        // forbids. The probe is caller-independent by construction — it is not handed the
+        // caller — and it discloses no value.
+        if (seam == stats_seam_t::NET &&
+            !sample_stats(field.steps[1].name, field.steps[2].name, nullptr))
+            return std::unexpected(status_t::SCHEMA_NOT_FOUND);
         // An UNKNOWN core-namespace `:settings` NAME resolves HERE, above the READ gate —
         // the exact mirror of the write door (see `field_write`'s settings arm: only
         // `settings.app.…` reaches a gate; every other spelling under `settings` falls
@@ -4395,7 +4439,7 @@ result_t<rope_t> graph_t::read(vertex_handle_t vh, const field_path_t& field,
             return std::unexpected(status_t::PERMISSION_DENIED);
         // The `:stats` VALUE, below the gate (see the name-validity arm above): one seam,
         // one census block, one TLV, sampled in one call.
-        if (seam != stats_seam_t::NONE) return read_stats(*this, seam);
+        if (seam != stats_seam_t::NONE) return read_stats(*this, field, seam);
         // One synthesized POINT, served whole — not an array field, so no `[N]` surface.
         // The shared `whole_field` shape rule (#869).
         if (field.steps[0].name == "schema" && whole_field(field)) return read_schema(v);

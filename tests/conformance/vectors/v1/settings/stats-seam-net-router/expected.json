@@ -1,0 +1,12 @@
+{
+  "name": "stats-seam-net-router",
+  "category": "settings",
+  "hex": "0B40E00002000F00666C617474656E5F64726F7070656401000800000000000000000002001300666F72776172645F696F765F64726F7070656401000800000000000000000002000D006172656E615F64726F7070656401000800000000000000000002001000617373656D626C655F64726F70706564010008000000000000000000020011007265706C795F696F765F64726F707065640100080000000000000000000200140064656C69766572795F696F765F64726F7070656401000800000000000000000002000C006D616C666F726D65645F7278010008000000000000000000",
+  "total_bytes": 228,
+  "decoded": {
+    "type": "0x0B SETTINGS",
+    "structured": true,
+    "meaning": "SETTINGS{ NAME \"flatten_dropped\" VALUE u64=0, NAME \"forward_iov_dropped\" VALUE u64=0, NAME \"arena_dropped\" VALUE u64=0, NAME \"assemble_dropped\" VALUE u64=0, NAME \"reply_iov_dropped\" VALUE u64=0, NAME \"delivery_iov_dropped\" VALUE u64=0, NAME \"malformed_rx\" VALUE u64=0 } — the NET-PLANE router seam, as `read <any-vertex>:stats.router.drops` answers it on a node whose router has forwarded nothing (RFC-0010 Amendment 2 §D.4, #1503 residual)",
+    "note": "bytes emitted by the libtracer reference encoder. The block shape is Amendment 1 §D.3's, unchanged — one READ is one SEAM is one BLOCK, NAME/VALUE pairs in the declaration order of the underlying POD, each a FIXED-WIDTH u64 little-endian, readers MUST ignore unknown NAMEs. What Amendment 2 adds is WHERE the block comes from: the counters are per-`fwd_router_t`, so L4 cannot reach them, and the router instead registers a sampler UP into the graph (`graph_t::configure_stats_sampler`) alongside the five {fn, ctx} seams its constructor already installs. A node with NO router constructed publishes no net-plane seam at all: `:stats.router.drops`, `:stats.labels.table` and every `:stats.link.<child>` answer ERROR{0x0031 tr::schema::not_found}, which per Amendment 1 §Compatibility a monitor MUST read as 'this node does not publish that seam'. The same answer covers a link sub-key that names no registered child, and one whose child has been removed."
+  }
+}

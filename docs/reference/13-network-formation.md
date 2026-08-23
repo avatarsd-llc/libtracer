@@ -231,7 +231,7 @@ remain in the devices — RAM, or NVS where the device persists them.
 target routes through a mount.** A `SUBSCRIBER` whose `PATH` names a path *through* a
 transport mount, spelled in the **producer's** frame
 (`/net/<module>/<link>/<consumer-path>`), binds the edge to that mount's link and the
-residual below it (`graph_t::subscribe_wire`, `core/src/graph.cpp:3157`), so
+residual below it (`graph_t::subscribe_wire`, `core/src/graph.cpp:3191`), so
 `fwd_router_t::link_down` → `graph_t::evict_link_edges` on the orchestrator's session no
 longer matches it and the producer keeps delivering. That is RFC-0021 §4.B.1/§4.C, and
 it is what makes the departure above real for a third-party wire.
@@ -433,8 +433,8 @@ automatic**:
   (`transport_vertex_t::settings_of`, `core/include/libtracer/transport_vertex.hpp:597`).
   The vertex `:settings` core namespace holds nothing to write — RFC-0022 §3.B deleted
   `settings_t`, so every flat knob name under it answers `SCHEMA_NOT_FOUND`
-  caller-independently (`core/src/graph.cpp:3448`), leaving only the read container and
-  its reserved `app` subkey (`core/src/graph.cpp:3646`). Moving a peer therefore means
+  caller-independently (`core/src/graph.cpp:3482`), leaving only the read container and
+  its reserved `app` subkey (`core/src/graph.cpp:3680`). Moving a peer therefore means
   retiring the connection (`NAME`) and re-creating it (`SPEC`), which un-routes the link
   and cascade-evicts the subscriptions routed through it (§Boundaries of the formation
   model, *hard* teardown).
