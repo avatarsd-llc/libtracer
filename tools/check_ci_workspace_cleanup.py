@@ -37,6 +37,12 @@ character. Last, because a step after it can re-dirty the tree it just handed
 back. Identical, because a variant that chowns a smaller set is the same defect
 wearing the same name.
 
+STDLIB ONLY. `version-consistency.yml` runs `unittest discover -s tools/tests` with
+no pattern and no pip install, so an `import yaml` here fails a suite that has
+nothing to do with this gate — it did, on the first cut. `parse_workflow` below
+reads the small YAML subset the gate needs instead, and its unit tests pin it
+against the real parser over the real workflow tree wherever PyYAML is installed.
+
 Usage:
     python3 tools/check_ci_workspace_cleanup.py            # gate (exit 1 on drift)
     python3 tools/check_ci_workspace_cleanup.py --list     # report every job it inspects
@@ -47,8 +53,6 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
-
-import yaml
 
 WORKFLOW_DIR = Path(__file__).resolve().parent.parent / ".github" / "workflows"
 
@@ -74,6 +78,119 @@ CANONICAL_YAML = f"""      - name: {STEP_NAME}
         run: {STEP_RUN}"""
 
 
+def _strip_inline_comment(text: str) -> str:
+    """@brief Drop a trailing `# …` comment, respecting quotes.
+
+    `name: "Allocation escape gate (guard) — #848"` is a real step in core-ci.yml,
+    and a naive `split('#')` truncates it into a different step name.
+    """
+    quote = ""
+    for i, ch in enumerate(text):
+        if quote:
+            if ch == quote:
+                quote = ""
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "#" and (i == 0 or text[i - 1] in " \t"):
+            return text[:i]
+    return text
+
+
+def _scalar(raw: str) -> str:
+    """@brief Unquote a plain/single/double-quoted YAML scalar. No escapes are needed here."""
+    value = _strip_inline_comment(raw).strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        return value[1:-1]
+    return value
+
+
+def parse_workflow(text: str) -> dict:
+    """@brief Read the `jobs:` block of a workflow into the shape this gate needs.
+
+    A HAND-ROLLED reader rather than PyYAML, on purpose: `version-consistency.yml`
+    runs `unittest discover -s tools/tests` with no pattern and no pip install, so
+    every tool under `tools/` has to import on a bare python. The subset parsed here
+    is exactly what the gate asks: per job, the raw `runs-on:` text, whether a
+    `container:` key exists, and each step's top-level scalar keys.
+
+    Anything it cannot read as a plain scalar (a block scalar `|`, a nested mapping
+    like `with:`) is recorded as the sentinel `None` rather than guessed at. For the
+    canonical cleanup step — three plain scalars — that loses nothing, and a job that
+    writes it some other way is drift the gate SHOULD name.
+    """
+    jobs: dict[str, dict] = {}
+    lines = text.split("\n")
+    i, in_jobs = 0, False
+    job: dict | None = None
+    step: dict | None = None
+    step_key_indent = -1
+    steps_seq_indent = -1
+    in_steps = False
+
+    while i < len(lines):
+        line = lines[i]
+        i += 1
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        indent = len(line) - len(line.lstrip())
+        body = line.strip()
+
+        if indent == 0:
+            in_jobs = body == "jobs:"
+            job = step = None
+            continue
+        if not in_jobs:
+            continue
+
+        if indent == 2 and body.endswith(":"):
+            job = {"runs-on": "", "container": False, "steps": []}
+            jobs[body[:-1].strip()] = job
+            step, in_steps, steps_seq_indent = None, False, -1
+            continue
+        if job is None:
+            continue
+
+        if indent == 4:
+            step = None
+            key, _, rest = body.partition(":")
+            # `in_steps` is what keeps a `strategy: matrix: include:` sequence — whose
+            # `- acl_full: OFF` entries look exactly like steps — out of the step list.
+            in_steps = key == "steps"
+            if key == "runs-on":
+                job["runs-on"] = _strip_inline_comment(rest).strip()
+            elif key == "container":
+                job["container"] = True
+            continue
+        if not in_steps:
+            continue
+
+        # A step opens with `- ` at the steps-sequence indent; its remaining keys sit
+        # one level in. Both are recorded, so `- name: x` followed by `if:`/`run:` reads
+        # as one mapping.
+        if body.startswith("- ") and steps_seq_indent in (-1, indent):
+            steps_seq_indent = indent
+            step = {}
+            job["steps"].append(step)
+            step_key_indent = indent + 2
+            body = body[2:]
+        elif step is None or indent != step_key_indent:
+            continue
+
+        key, sep, rest = body.partition(":")
+        if not sep or " " in key:
+            continue
+        rest = rest.strip()
+        if rest.startswith(("|", ">")) or rest == "":
+            # A block scalar or a nested mapping: consume its body, record the sentinel.
+            step[key] = None
+            while i < len(lines) and (not lines[i].strip() or len(lines[i]) - len(lines[i].lstrip()) > indent):
+                i += 1
+            continue
+        step[key] = _scalar(rest)
+
+    return jobs
+
+
 def _is_self_hosted(runs_on: object) -> bool:
     """@brief True when `runs-on:` can resolve to the self-hosted pool.
 
@@ -88,15 +205,10 @@ def _is_self_hosted(runs_on: object) -> bool:
 def qualifying_jobs(workflow_dir: Path = WORKFLOW_DIR):
     """@brief Yield `(path, job_name, job)` for every self-hosted containerized job."""
     for path in sorted(workflow_dir.glob("*.yml")):
-        doc = yaml.safe_load(path.read_text(encoding="utf-8"))
-        if not isinstance(doc, dict):
-            continue
-        for name, job in (doc.get("jobs") or {}).items():
-            if not isinstance(job, dict):
+        for name, job in parse_workflow(path.read_text(encoding="utf-8")).items():
+            if not job["container"]:
                 continue
-            if job.get("container") is None:
-                continue
-            if not _is_self_hosted(job.get("runs-on")):
+            if not _is_self_hosted(job["runs-on"]):
                 continue
             yield path, name, job
 
@@ -124,13 +236,13 @@ def check(workflow_dir: Path = WORKFLOW_DIR) -> list[tuple[str, str]]:
                 f"(last step is {shown!r})"
             )
             continue
-        if str(last.get("if", "")).strip() != STEP_IF:
+        if (last.get("if") or "").strip() != STEP_IF:
             note(f"{rel}: job `{name}` cleanup step is not `if: {STEP_IF}` (a green-only cleanup is not one)")
-        if str(last.get("run", "")).strip() != STEP_RUN:
+        if (last.get("run") or "").strip() != STEP_RUN:
             note(
                 f"{rel}: job `{name}` cleanup step command drifted\n"
                 f"       expected: {STEP_RUN}\n"
-                f"       found:    {str(last.get('run', '')).strip()}"
+                f"       found:    {(last.get('run') or '<not a plain scalar>').strip()}"
             )
     return findings
 

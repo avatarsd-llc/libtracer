@@ -122,6 +122,58 @@ class RealWorkflows(unittest.TestCase):
         jobs = list(gate.qualifying_jobs())
         self.assertGreater(len(jobs), 0, "no self-hosted container job found — has the routing changed?")
 
+    def test_the_hand_rolled_reader_agrees_with_pyyaml(self):
+        """The reader is hand-rolled because CI has no PyYAML; here, where PyYAML exists, it is the oracle.
+
+        `version-consistency.yml` runs `unittest discover -s tools/tests` with no
+        pattern and no pip install, so a `import yaml` in any tool under `tools/`
+        fails the whole suite — which is how this gate first went red. The parser
+        that replaced it reads a subset of YAML, and a subset parser is exactly the
+        thing that can be quietly wrong. On a developer machine (and nowhere else)
+        this arm pins it against the real parser over the REAL workflow tree: same
+        job set, same step count per job, same value for every plain scalar the gate
+        reads. Skipped rather than failed where PyYAML is absent — the skip is the
+        environment the gate was rewritten for.
+        """
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML not installed (the environment this parser exists for)")
+
+        workflows = Path(REPO) / ".github" / "workflows"
+        mine = {}
+        for path in sorted(workflows.glob("*.yml")):
+            mine[path.name] = gate.parse_workflow(path.read_text(encoding="utf-8"))
+
+        checked_jobs = 0
+        for path in sorted(workflows.glob("*.yml")):
+            doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+            for name, job in (doc.get("jobs") or {}).items():
+                if not isinstance(job, dict):
+                    continue
+                self.assertIn(name, mine[path.name], f"{path.name}: job `{name}` missed by the reader")
+                got = mine[path.name][name]
+                self.assertEqual(
+                    job.get("container") is not None, got["container"], f"{path.name}:{name} container"
+                )
+                # `runs-on:` is kept as RAW text by the reader (a flow sequence stays
+                # `[self-hosted, bench-local]` rather than becoming a list), so the
+                # comparison is the only thing the gate asks of it: the routing verdict.
+                self.assertEqual(
+                    "self-hosted" in str(job.get("runs-on", "")),
+                    gate._is_self_hosted(got["runs-on"]),
+                    f"{path.name}:{name} runs-on",
+                )
+                reference = job.get("steps") or []
+                self.assertEqual(len(reference), len(got["steps"]), f"{path.name}:{name} step count")
+                for ref, mine_step in zip(reference, got["steps"]):
+                    for key in ("name", "if", "run", "uses"):
+                        value = ref.get(key)
+                        if isinstance(value, str) and "\n" not in value:
+                            self.assertEqual(value.strip(), (mine_step.get(key) or "").strip(), f"{name}.{key}")
+                checked_jobs += 1
+        self.assertGreater(checked_jobs, 40, "the sweep should cover the whole workflow tree")
+
 
 if __name__ == "__main__":
     unittest.main()
