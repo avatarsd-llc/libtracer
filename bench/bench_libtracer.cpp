@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "bench_common.hpp"
+#include "delivery_count.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_pool.hpp"
 #include "libtracer/rope.hpp"
@@ -203,14 +204,13 @@ void run_inproc(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc, bool
     // to its inline prefix when the overflow `try_reserve` fails, and the HANDLER and
     // STREAM legs shed an entire fan-out on a clone or ring-append failure. In every one
     // of those cases `write()` still returns success, so the publish loop finishes at full
-    // speed and `pub_s * F` would report deliveries that never happened.
+    // speed and `pub_s * F` would report deliveries that never happened. The count-and-warn
+    // itself now lives in `delivery_count.hpp`, shared with the `inproc-target-*` and
+    // `inproc-remote` rows #1480 left on the arithmetic and #1481 finished.
     const std::uint64_t want = static_cast<std::uint64_t>(MSGS) * F;
-    const std::uint64_t got = recv.load(std::memory_order_relaxed);
-    if (got < want)
-        std::fprintf(stderr, "[libtracer] S=%zu F=%zu E=%zu delivered %llu/%llu (shed)\n", S, F, E,
-                     static_cast<unsigned long long>(got), static_cast<unsigned long long>(want));
     const double pub_s = MSGS / secs;
-    const double deliv_s = static_cast<double>(got) / secs;
+    const double deliv_s =
+        delivered_rate(mode, S, F, E, want, recv.load(std::memory_order_relaxed), secs);
     const double mb_s = deliv_s * static_cast<double>(S) / 1e6;
 
     // THE p50/p99 COLUMNS OF THIS ROW ARE CLOCK-QUANTIZED. Read `<mode>-batch` for small deltas.
@@ -373,17 +373,37 @@ void run_inproc_target(std::size_t S, std::size_t F, target_kind_t kind, const c
     // The delivery counter only moves for HANDLER targets (a STORED target's delivery
     // terminates in its LKV), so this is a wiring check for the handler row alone.
     recv.store(0);
+    const tr::graph::graph_t::delivery_drops_t drops0 = g.delivery_drops();
     const auto t0 = now_ns();
     for (std::size_t i = 0; i < MSGS; ++i) put(i);
     const double secs = (now_ns() - t0) / 1e9;
-    const double pub_s = MSGS / secs;
-    const double deliv_s = pub_s * static_cast<double>(F);
-    const double mb_s = deliv_s * static_cast<double>(S) / 1e6;
     if (kind == target_kind_t::HANDLER && recv.load() == 0) {
         std::fprintf(stderr, "SKIP mode=%s fanout=%zu: no delivery reached a handler target\n",
                      mode, F);
         return;
     }
+
+    // COUNT the deliveries, by whichever route this KIND has (delivery_count.hpp). #1480 took
+    // `pub_s * F` off the charted `inproc` rows and deliberately left this pair on it; the
+    // reason it had to go is the same here and worse. `dispatch_edge_target` drops a delivery
+    // on an unresolvable target, a denied fan-in gate and a failed nothrow clone — three legs
+    // the callback rows do not even have — and `write()` returns SUCCESS through all three, so
+    // the arithmetic would keep reporting a full fan-out while the graph delivered less.
+    //
+    // HANDLER reads its own counter: direct observation, the same evidence `inproc` uses.
+    // STORED has none to read — its delivery terminates in the target's LKV, and hanging a
+    // counting subscriber off each target to see it would add an edge per target to the very
+    // topology being timed, which is to say it would answer a different question. So that arm
+    // subtracts the graph's own drop accounting from the ceiling instead. That is sound rather
+    // than circular precisely because RFC-0025 §4.4 forbids a silent shed: every leg above
+    // counts what it dropped, so `want - dropped` is observed, not assumed.
+    const std::uint64_t want = static_cast<std::uint64_t>(MSGS) * F;
+    const std::uint64_t got = kind == target_kind_t::HANDLER
+                                  ? recv.load(std::memory_order_relaxed)
+                                  : deliveries_from_drops(want, drops0, g.delivery_drops());
+    const double pub_s = MSGS / secs;
+    const double deliv_s = delivered_rate(mode, S, F, 1, want, got, secs);
+    const double mb_s = deliv_s * static_cast<double>(S) / 1e6;
 
     Latency lat;
     for (std::size_t i = 0; i < LATN; ++i) {
@@ -484,14 +504,20 @@ void run_inproc_remote(std::size_t S, std::size_t F, const char* mode,
     const auto t0 = now_ns();
     for (std::size_t i = 0; i < MSGS; ++i) put(i);
     const double secs = (now_ns() - t0) / 1e9;
+
+    // COUNT the deliveries the sink saw (delivery_count.hpp), where this row used to publish
+    // `pub_s * F` and then REFUSE to emit unless the sink's tally matched it exactly. Both
+    // halves of that were wrong in the same way. The number was arithmetic, so the tally was
+    // the only thing standing between a shed and a false figure; and dropping the whole row on
+    // a short count deletes the point from the series over exactly the event a reader wants to
+    // find in it. Publishing what the sink counted needs no such backstop: a shed lowers the
+    // figure it should lower, and says so on stderr. The pre-timing zero check above stays —
+    // that one is a WIRING check ("did this leg run at all"), not a delivery figure.
+    const std::uint64_t want = static_cast<std::uint64_t>(MSGS) * F;
     const double pub_s = MSGS / secs;
-    const double deliv_s = pub_s * static_cast<double>(F);
+    const double deliv_s =
+        delivered_rate(mode, S, F, 1, want, recv.load(std::memory_order_relaxed), secs);
     const double mb_s = deliv_s * static_cast<double>(S) / 1e6;
-    if (recv.load() != static_cast<std::uint64_t>(MSGS) * F) {
-        std::fprintf(stderr, "SKIP mode=%s fanout=%zu: %llu deliveries, expected %zu\n", mode, F,
-                     static_cast<unsigned long long>(recv.load()), MSGS * F);
-        return;
-    }
 
     Latency lat;
     for (std::size_t i = 0; i < LATN; ++i) {
@@ -542,12 +568,9 @@ void run_inproc_deliver(std::size_t S, std::size_t F, std::uint64_t budget = kDe
     // through the identical inline `dispatch_edge` path, so the count and `pub_s * F`
     // agree whenever nothing is shed, and this row is charted against Zenoh's counted one.
     const std::uint64_t want = static_cast<std::uint64_t>(MSGS) * F;
-    const std::uint64_t got = recv.load(std::memory_order_relaxed);
-    if (got < want)
-        std::fprintf(stderr, "[libtracer] deliver S=%zu F=%zu delivered %llu/%llu (shed)\n", S, F,
-                     static_cast<unsigned long long>(got), static_cast<unsigned long long>(want));
     const double pub_s = MSGS / secs;
-    const double deliv_s = static_cast<double>(got) / secs;
+    const double deliv_s =
+        delivered_rate("inproc-deliver", S, F, 1, want, recv.load(std::memory_order_relaxed), secs);
     const double mb_s = deliv_s * static_cast<double>(S) / 1e6;
 
     Latency lat;

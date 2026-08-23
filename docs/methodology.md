@@ -424,6 +424,18 @@ of work per operation*.
   success, so a `publishes x fan-out` figure would report deliveries that never happened
   and nothing in the harness would contradict it.
 
+  The libtracer-only rows that audit deliberately left on the arithmetic — the
+  `inproc-target-*` pair and `inproc-remote`, which have no Zenoh row beside them — were
+  finished on the same terms
+  ([#1481](https://github.com/avatarsd-llc/libtracer/issues/1481)). `inproc-target-handler`
+  and `inproc-remote` count at their consumer like every other row. `inproc-target-stored`
+  has no consumer to count at — its delivery terminates in the target's last-known-value,
+  and hanging a counting subscriber off each target to see it would add an edge per target
+  to the topology being timed — so that one subtracts `graph_t::delivery_drops()` from the
+  ceiling instead. That is a measurement rather than a restatement of the arithmetic
+  because RFC-0025 §4.4 forbids an unaccounted shed: every leg that drops one of those
+  deliveries counts it.
+
 - **Write does strictly more than put.** libtracer's `write` row also **persists**
   the value (it becomes the vertex's last-known-value) and bumps the `await` /
   readiness sequence on every op. Zenoh's `put` is transient delivery only. So the

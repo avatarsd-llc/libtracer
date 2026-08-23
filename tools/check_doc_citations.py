@@ -428,7 +428,7 @@ ANCHORS = [
     # the same silence #725/#726 found in the module pages, in a file the gate could read
     # all along but had no pin for.
     ('bench/bench_libtracer.cpp:16', '(The `loopback` /'),
-    ('bench/bench_libtracer.cpp:1447',
+    ('bench/bench_libtracer.cpp:1470',
      '// (The `loopback` and n-routers `routers-hN` modes benchmarked the ROUTER-flood'),
     # bench/bench_lkv_slot.cpp
     ('bench/bench_lkv_slot.cpp:193', 'class model_sp_atomic_t {'),

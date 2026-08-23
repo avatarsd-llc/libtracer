@@ -49,6 +49,14 @@ target_compile_options(bench_compose_net PRIVATE -Wall -Wextra)
 add_executable(test_compose_record test_compose_record.cpp)
 target_compile_options(test_compose_record PRIVATE -Wall -Wextra)
 
+# The DELIVERY-FIGURE guard of the in-process rows (#1481): `delivery_count.hpp` driven
+# against a path-target topology built to shed, where a counted figure and `pub_s * fanout`
+# part company. Needs libtracer (the drop accounting is the graph's), no network and no
+# timing. Not named bench_* for the reason test_compose_record gives.
+add_executable(test_delivery_count test_delivery_count.cpp)
+target_link_libraries(test_delivery_count PRIVATE libtracer)
+target_compile_options(test_delivery_count PRIVATE -Wall -Wextra)
+
 # NETWORK transport comparison (UDP/TCP/WS over the loopback kernel path) — the
 # libtracer side of the transport matrix vs Zenoh (bench_zenoh_net). Two PROCESSES
 # (pub|sub role arg), same topology as the Zenoh bench; emits mode `net-<proto>`.
