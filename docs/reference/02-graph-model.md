@@ -439,6 +439,16 @@ A producer's selective subtree flush reaches a **remote** subtree subscriber as 
 
 The fold **refuses**, before delivering anything and before draining a single sweep mark, when a selected vertex cannot contribute a §B-legal node: a stored value that is not a single trailer-less `VALUE` TLV answers `tr::schema::type_mismatch`. Trailer-carrying nodes are therefore *rejected*, not silently stripped — admissible only because Amendment 1 moved sample time out of the trailer into payload `TIME` children. A selected **STREAM** vertex refuses on the same rule: its since-flush *list* has no seat on a node that admits at most one `VALUE`, and the `BATCH` (`0x80`) record that would seat it is not a `VALUE` either, so §B's strictness rejects it as "any other child type". A refusal consumes nothing, so the caller falls back to the default emission with no delivery lost.
 
+**That STREAM refusal is permanent, and it is not the thing that blocks batched folding**
+([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.1.3, Amendment 4, clause 2). What it refuses is a
+**per-sample ring** — N separately stored entries, no single foldable value. Batching for a fold
+means **composing onto the vertex the sweep visits**: the application ropes its samples into ONE
+value and swaps that in, and the sweep then sees an ordinary single `VALUE`, which §B admits and
+the fold carries with **zero graph change** (the folded carriage of the 2026-08-23 erratum). So the
+two are not in tension — the refusal is precisely what makes the app's composed value the only
+thing a folded node carries. A vertex that must keep a *history of batches* stays a STREAM (one
+ring entry per batch) and delivers per-vertex; that is a role choice, not a workaround.
+
 ### Stream drain semantics
 
 The write-sequence coalescing above is the **stored-value** semantic (last-writer-wins: flush the latest once). A **stream** vertex — one with a bounded history ring — is a queue: its contract is "observe every buffered entry," not "the latest." Its propagation is a **drain**, in order, of the entries appended since the previous flush. Propagate dispatches on the vertex role.
@@ -524,11 +534,21 @@ per-vertex fields into a new home. Bits 6–7 are **decoded but not yet honoured
 same commit — same bytes
 ([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.1.2 clause 7). What still owes
 [#1204](https://github.com/avatarsd-llc/libtracer/issues/1204) phase 3 is the *honouring*: the
-fan-out-edge counter/window and the receiving vertex's ring. `delivery_class = 2` (batch) is the
+receiving vertex's ring. `delivery_class = 2` (batch) is the
 **wire encoding of the [RFC-0008](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0008-vertex-operations-assign-propagate.md) `assign`/`propagate` flush**: accumulation is
 the source vertex's own state — LKV coalesce for a plain value, the bounded since-last-flush list
 for a STREAM — and a flush emits the **snapshot** or the **full list** accordingly, never a
 per-subscriber buffer at the fan-out edge.
+
+**Batching itself is user-orchestrated**
+([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.1.3, Amendment 4, 2026-08-23): a batch is a
+**value the application composed** — it ropes its sample values into one value, swaps it in
+through the ordinary atomic LKV publish, and calls `propagate`. There is no batch role, no
+graph-side flush counter or window (`batch_count` / `batch_window_ns` are **retired**), and no
+injected clock: the `TIME` base and any rate facts are payload bytes the app wrote, so the graph
+does not know the value is a batch. Whether the vertex is **STORED** (its LKV is the latest batch)
+or **STREAM** (its ring holds a history of batches, one entry per batch) is the application's
+choice, not the library's.
 
 **No magnitude is packed here.** A deadline or a queue bound added later is a *magnitude*, and a
 bit-width on a magnitude is a synthetic limit, which this project forbids

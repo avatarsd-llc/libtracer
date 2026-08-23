@@ -179,8 +179,8 @@ qos_settings = SETTINGS {
   NAME "delivery_scope"    VALUE <u8: DELTA=0, SNAPSHOT=1>   ; reserved (RFC-0005: as-written is the delivery; SNAPSHOT re-aggregation is a BRANCH WRITE)
   NAME "delivery_compact"  VALUE <u8: 0=off, 1=on>  ; opt into route-handle compaction (§route-handle)
   NAME "delivery_policy"   VALUE <u16>              ; this subscription's DELIVERY policy (RFC-0022 §3.A)
-  NAME "batch_count"       VALUE <u32>              ; delivery_class=2 only — flush after N sample frames (RFC-0025 §4.1.1)
-  NAME "batch_window_ns"   VALUE <u64>              ; delivery_class=2 only — flush after T elapsed (RFC-0025 §4.1.1)
+  NAME "batch_count"       VALUE <u32>              ; RETIRED (RFC-0025 §4.1.3) — carried verbatim, read by nothing
+  NAME "batch_window_ns"   VALUE <u64>              ; RETIRED (RFC-0025 §4.1.3) — carried verbatim, read by nothing
 }
 ```
 
@@ -201,12 +201,14 @@ The mode is **live host-side** as `graph_t::propagate(v, emission_mode_t::FOLD)`
 refusal rules — and it stays a **producer-side choice per call**: nothing about it is
 negotiated, readable or writable by a peer, and the default emission is unchanged.
 
-The `batch_count` / `batch_window_ns` magnitudes are **fan-out-edge mechanics** — a counter and
-an elapsed-time window on one subscription's own edge, meaningful only under
-`delivery_class = 2`, ignored otherwise (the absent-⇒-default doctrine applied in reverse).
-They are **not** a graph-plane timer, a rate cap or a scheduler: the producer owns cadence
-([RFC-0005](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md) §E), and explicit flush is the host-side `graph_t::propagate`. Neither key is
-honoured yet — they land with `delivery_class` ([#1204](https://github.com/avatarsd-llc/libtracer/issues/1204)).
+The `batch_count` / `batch_window_ns` magnitudes are **RETIRED**
+([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.1.3, Amendment 4, 2026-08-23): **batching is
+user-orchestrated**, so *when to swap and push* is an application decision that never crosses
+into the graph — the app already holds the sample count it composed and owns the clock it
+stamped with. Neither key is honoured, and none will be. They keep the `qos_settings`
+verbatim-carry rule, so a subscription that spells one is not made non-conforming; nothing
+reads it. The producer owns cadence ([RFC-0005](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md) §E), there is **no** graph-plane
+timer, rate cap or scheduler, and explicit flush is the host-side `graph_t::propagate`.
 
 **`delivery_policy`** ([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.A) is one packed 16-bit value carried in this **same**
 `SETTINGS` child, so the per-subscription policy introduced no new wire structure:
@@ -253,7 +255,7 @@ delivers as it always did, whatever a subscriber's word says.
 | --- | --- |
 | `0` conflate | last-wins; delivery MAY coalesce to the newest value. The LKV contract, and the default. |
 | `1` immediate | every write delivered as its own event; order-preserving, never conflated. |
-| `2` batch | the **wire encoding of the [RFC-0008](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0008-vertex-operations-assign-propagate.md) `assign`/`propagate` flush**. Accumulation is the source vertex's own state — a plain value **coalesces** (LKV overwrite, §B.2), a STREAM vertex keeps its **bounded since-last-flush list** (§E) — never a per-subscriber buffer at the fan-out edge. A flush emits the **snapshot** on a plain vertex and the **full list** on a STREAM, after `batch_count` frames, after `batch_window_ns`, or **early when the list is full** (no loss, no gap signal, no counter). **The batch has one layout and two spellings, chosen by carriage**: a **standalone** flush is one BATCH record (§User range, `0x80`); a flush **folded** into a `propagate(v, FOLD)` branch write is seated in the swept node's single structured `VALUE` (`opt.PL=1`) — the one value [RFC-0005](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md) §B admits — byte-identical apart from the header type byte ([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.1.2 clause 6, erratum 2026-08-23). |
+| `2` batch | the **wire encoding of the [RFC-0008](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0008-vertex-operations-assign-propagate.md) `assign`/`propagate` flush**. Accumulation is the source vertex's own state — a plain value **coalesces** (LKV overwrite, §B.2), a STREAM vertex keeps its **bounded since-last-flush list** (§E) — never a per-subscriber buffer at the fan-out edge. A flush emits the **snapshot** on a plain vertex and the **full list** on a STREAM. **Batching is user-orchestrated** ([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.1.3, Amendment 4): the application ropes its sample values into ONE batch value, swaps it in through the ordinary atomic LKV publish, and calls `propagate`/push. The graph holds no counter, no window and no buffer, derives no time, and never interprets the record — `batch_count` / `batch_window_ns` are retired, and a full bounded list is still discharged rather than trimmed (no loss, no gap signal, no counter). **The batch has one layout and two spellings, chosen by carriage**: a **standalone** flush is one BATCH record (§User range, `0x80`); a flush **folded** into a `propagate(v, FOLD)` branch write is seated in the swept node's single structured `VALUE` (`opt.PL=1`) — the one value [RFC-0005](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md) §B admits — byte-identical apart from the header type byte ([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.1.2 clause 6, erratum 2026-08-23). |
 | `3` stream | append-preserving: every write delivered in order, none conflated, with the RFC-0025 §4.4 pressure contract at the **receiving** vertex's ring. |
 
 **Per-vertex `delivery_mode` ([RFC-0008](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0008-vertex-operations-assign-propagate.md)).** Whether a vertex rides an *ancestor's* `propagate` sweep is a value-agnostic property of the **vertex** (not the subscriber): `UNCONDITIONAL` (always swept), `IF_NEWER` (default — swept only if its write sequence advanced since the last covering sweep), `EXPLICIT` (never swept by an ancestor; deliverable only by a direct `propagate` on the vertex). `assign` and a direct `propagate` on the vertex are never gated by it. It is host state defaulting to `IF_NEWER`. Wire configuration reuses the vertex's own `:settings` (a `delivery_mode` NAME/VALUE under the vertex `SETTINGS`) and is **deferred**, so the host call is the only way to set it.
@@ -1477,6 +1479,16 @@ Long-term registry for future core extensions, post-v1. Allocation procedure: PR
 - **Nothing on the wire changes.** No conformance vector's bytes move, and a receiver that has never heard of BATCH treats `0x80` exactly as it did before.
 
 **The assignment is scoped to a STANDALONE flush** ([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.1.2 clause 6, erratum 2026-08-23). When the flush is **folded** into a `propagate(v, FOLD)` branch write, the batch is seated in the swept node's **single structured `VALUE`** (`opt.PL=1`) instead — because a branch-write node's grammar ([RFC-0005](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md) §B: leading `NAME`, at most one `VALUE`, recursive `POINT` children) admits no `0x80` child, and the folded frame's node shape is held byte-for-byte at that grammar. **One layout, two spellings by carriage**: the `TIME` base, the sample-frame children and the non-uniform offset array are identical in both; only the header type byte differs (`0x80` → `VALUE`). A folded batch therefore never presents a user-range byte to the graph at all, which is why the graph-never-interprets rule survives the fold untouched.
+
+**Who composes a batch: the application, always** ([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.1.3, Amendment 4,
+2026-08-23). The app ropes its sample values into one batch value — a small owned header segment
+carrying the record header and the `TIME{u64 base}` child, with the app's existing sample bytes
+appended as refcounted **links**, never copies — swaps it in through the ordinary atomic LKV
+publish, and calls `propagate`/push. The graph composes nothing, derives no time, and holds no
+flush counter or window. The `TIME` base and any uniform-rate fact are payload bytes the app chose,
+which is why claim 5 holds trivially here: the graph does not know the value is a batch. Both
+carriages come out of one layout — the reference helper is
+`tr::wire::compose_batch` (`core/include/libtracer/batch.hpp`).
 
 ---
 
