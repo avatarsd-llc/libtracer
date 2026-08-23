@@ -55,6 +55,18 @@
 # because `install-consume` builds into it as root and the runner cannot clear a
 # root-owned subtree between jobs either.
 #
+# AND `persist-credentials: false` on every checkout in those jobs, which is the other
+# half and was found by measuring rather than by reading: with the cleanup step alone,
+# the first green run still left exactly ONE root-owned file per runner — `.git/config`,
+# the one file the next checkout must write to clean. `actions/checkout`'s POST step
+# runs after the last real step and calls `removeAuth()` unconditionally, and
+# `git config --local --unset-all http.<url>.extraheader` REWRITES the file when it
+# matches, as root. Measured here: with a match it re-owns the file to the caller; with
+# no match it exits 5 and does not touch it. Turning credential persistence off moves
+# the removal into the MAIN step (still root, but BEFORE the cleanup) and leaves the
+# post step nothing to match. These jobs build, test and lint — none uses a git
+# credential after checkout — so nothing else changes. The gate enforces both halves.
+#
 # NOT MIGRATED, and why (phase 2): the sanitizer and TSan legs run `setarch -R`, and
 # Docker's default seccomp profile denies `personality(ADDR_NO_RANDOMIZE)` — verified
 # EPERM — so the container route cannot run them, while the direct-on-host route would
@@ -160,6 +172,16 @@ jobs:
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
             build-essential cmake git ca-certificates
       - uses: actions/checkout@v4
+        with:
+          # NOT tidiness. checkout's POST step calls `removeAuth()` unconditionally,
+          # and `git config --unset-all http.<url>.extraheader` REWRITES `.git/config`
+          # when it matches — as ROOT, after the cleanup step below has already run.
+          # Measured on this host: with a match it re-owns the file to the caller; with
+          # no match it exits 5 and does not touch it. Without this the first green run
+          # of the fixed workflows still left exactly one root-owned file per runner,
+          # and it was `.git/config` — the one the next checkout must write to clean.
+          # These jobs build, test and lint; none uses git credentials after checkout.
+          persist-credentials: false
       - name: Configure + build (C++23) + ctest
         run: |
           cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo -DLIBTRACER_ACL_FULL=${{ matrix.acl_full }} -DLIBTRACER_LKV_SLOT=${{ matrix.lkv_slot }}
@@ -197,6 +219,10 @@ jobs:
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
             build-essential cmake git ca-certificates
       - uses: actions/checkout@v4
+        with:
+          # See the WORKSPACE OWNERSHIP header: without this, checkout's post step
+          # re-roots `.git/config` after the cleanup step has already run.
+          persist-credentials: false
       - name: Configure + build (minimal module set) + ctest
         run: |
           cmake -S core -B core/build-minimal -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo \
@@ -238,6 +264,10 @@ jobs:
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
             build-essential cmake git ca-certificates
       - uses: actions/checkout@v4
+        with:
+          # See the WORKSPACE OWNERSHIP header: without this, checkout's post step
+          # re-roots `.git/config` after the cleanup step has already run.
+          persist-credentials: false
       - name: Bind reclaim_strict_t, build + ctest
         run: |
           mkdir -p "$PWD/reclaim-strict/libtracer"
@@ -303,6 +333,10 @@ jobs:
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
             build-essential cmake git ca-certificates
       - uses: actions/checkout@v4
+        with:
+          # See the WORKSPACE OWNERSHIP header: without this, checkout's post step
+          # re-roots `.git/config` after the cleanup step has already run.
+          persist-credentials: false
       - name: Bind kBusLinks = false, build + ctest
         run: |
           mkdir -p "$PWD/bus-closed/libtracer"
@@ -357,6 +391,10 @@ jobs:
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
             build-essential cmake git ca-certificates
       - uses: actions/checkout@v4
+        with:
+          # See the WORKSPACE OWNERSHIP header: without this, checkout's post step
+          # re-roots `.git/config` after the cleanup step has already run.
+          persist-credentials: false
       - name: Bind reclaim_qsbr_t, build + ctest
         run: |
           mkdir -p "$PWD/reclaim-qsbr/libtracer"
@@ -444,6 +482,10 @@ jobs:
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends g++-15 gcc-15
       - uses: actions/checkout@v4
+        with:
+          # See the WORKSPACE OWNERSHIP header: without this, checkout's post step
+          # re-roots `.git/config` after the cleanup step has already run.
+          persist-credentials: false
       - name: Configure + build (C++23, GCC 15) + ctest
         env:
           CC: gcc-15
@@ -577,6 +619,10 @@ jobs:
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
             build-essential cmake git ca-certificates
       - uses: actions/checkout@v4
+        with:
+          # See the WORKSPACE OWNERSHIP header: without this, checkout's post step
+          # re-roots `.git/config` after the cleanup step has already run.
+          persist-credentials: false
       - name: Build + install core to a staging prefix
         run: |
           cmake -S core -B core/build-install -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release
@@ -621,6 +667,10 @@ jobs:
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
             build-essential cmake git ca-certificates
       - uses: actions/checkout@v4
+        with:
+          # See the WORKSPACE OWNERSHIP header: without this, checkout's post step
+          # re-roots `.git/config` after the cleanup step has already run.
+          persist-credentials: false
       - name: Configure + build every bench target (compile only, nothing is run)
         run: |
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
@@ -663,6 +713,10 @@ jobs:
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
             build-essential cmake git ca-certificates
       - uses: actions/checkout@v4
+        with:
+          # See the WORKSPACE OWNERSHIP header: without this, checkout's post step
+          # re-roots `.git/config` after the cleanup step has already run.
+          persist-credentials: false
       - name: Build bench_failable_census only
         # Its own build tree: bench-compile writes bench/build, and on the self-hosted
         # runner the two jobs can share a workspace.
@@ -718,6 +772,10 @@ jobs:
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
             build-essential cmake git python3 ca-certificates
       - uses: actions/checkout@v4
+        with:
+          # See the WORKSPACE OWNERSHIP header: without this, checkout's post step
+          # re-roots `.git/config` after the cleanup step has already run.
+          persist-credentials: false
       - name: core-ci's paths trigger covers everything core-ci builds
         run: python3 tools/gen_ci_paths.py --check
       # An unverified gate is not a gate: the parser runs over synthetic workflows in
@@ -757,6 +815,10 @@ jobs:
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends git ca-certificates
       - uses: actions/checkout@v4
+        with:
+          # See the WORKSPACE OWNERSHIP header: without this, checkout's post step
+          # re-roots `.git/config` after the cleanup step has already run.
+          persist-credentials: false
       # `clang-format` comes from the same noble archive the hosted image installed it
       # from, so the enforced style is the same version's, not a second dialect.
       - name: clang-format (dry-run, error on diff)
@@ -794,6 +856,10 @@ jobs:
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends git ca-certificates
       - uses: actions/checkout@v4
+        with:
+          # See the WORKSPACE OWNERSHIP header: without this, checkout's post step
+          # re-roots `.git/config` after the cleanup step has already run.
+          persist-credentials: false
       - name: Doxygen strict gate (undocumented public symbol = failure)
         # Also apt-installs inline before its real work; same cap as `clang-format`.
         timeout-minutes: 8

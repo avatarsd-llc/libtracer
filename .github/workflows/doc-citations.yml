@@ -133,6 +133,10 @@ jobs:
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3 git ca-certificates
       - uses: actions/checkout@v4
+        with:
+          # See the WORKSPACE OWNERSHIP header: without this, checkout's post step
+          # re-roots `.git/config` after the cleanup step has already run.
+          persist-credentials: false
       # The resolver reads three citation spellings (full path, basename shorthand,
       # bare `:N` continuation) and must not guess; its unit tests run FIRST so a
       # resolver bug reports as a resolver bug rather than as 300 phantom drifts.

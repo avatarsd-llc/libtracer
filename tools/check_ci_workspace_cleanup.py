@@ -31,11 +31,18 @@ literally or inside the trusted-run routing expression) AND which declares a
 `container:`. Hosted-only jobs need nothing — the whole VM is discarded — and
 non-container self-hosted jobs already run as `github-runner`.
 
-WHAT IS ENFORCED. The job's LAST step must be exactly the canonical step: the
-canonical name, `if: always()`, and the canonical `run:` command, character for
-character. Last, because a step after it can re-dirty the tree it just handed
-back. Identical, because a variant that chowns a smaller set is the same defect
-wearing the same name.
+WHAT IS ENFORCED. Two things.
+
+1. The job's LAST step must be exactly the canonical step: the canonical name,
+   `if: always()`, and the canonical `run:` command, character for character.
+   Last, because a step after it can re-dirty the tree it just handed back.
+   Identical, because a variant that chowns a smaller set is the same defect
+   wearing the same name.
+2. Its `actions/checkout` must set `persist-credentials: false`. Checkout's POST
+   step runs after every real step, including the cleanup, and rewrites
+   `.git/config` as root when it has a credential to unset — see CHECKOUT_WITH.
+   The first green run of the fixed workflows still left one root-owned file per
+   runner because of it, and that file is the one the next checkout must write.
 
 STDLIB ONLY. `version-consistency.yml` runs `unittest discover -s tools/tests` with
 no pattern and no pip install, so an `import yaml` here fails a suite that has
@@ -76,6 +83,24 @@ leaves the most root-owned wreckage, and that is the run whose next checkout bre
 CANONICAL_YAML = f"""      - name: {STEP_NAME}
         if: {STEP_IF}
         run: {STEP_RUN}"""
+
+CHECKOUT_WITH = ("persist-credentials", "false")
+"""The one setting that keeps the cleanup step from being undone a second later.
+
+`actions/checkout`'s POST step calls `removeAuth()` UNCONDITIONALLY, and
+`git config --local --unset-all http.<url>.extraheader` REWRITES `.git/config`
+when it matches — as root, after the last real step has run. Measured on this
+host: `--unset-all` with a match re-owns the file to the caller; with no match it
+exits 5 and does not touch it. So a container job that persists credentials leaves
+exactly one root-owned file behind no matter where the cleanup step sits, and that
+one file is `.git/config` — precisely what the next checkout must write to clean.
+It was observed after the FIRST green run of the fixed workflows: 129 root-owned
+paths down to 1, and the 1 was this.
+
+`persist-credentials: false` moves the removal into the MAIN step (root, before the
+cleanup) and leaves the post step nothing to match. None of these jobs use git
+credentials after checkout — they build, test and lint — so nothing else changes.
+"""
 
 
 def _strip_inline_comment(text: str) -> str:
@@ -181,10 +206,23 @@ def parse_workflow(text: str) -> dict:
             continue
         rest = rest.strip()
         if rest.startswith(("|", ">")) or rest == "":
-            # A block scalar or a nested mapping: consume its body, record the sentinel.
-            step[key] = None
+            # A block scalar or a nested mapping. Its body is consumed either way; a
+            # nested mapping of plain scalars (`with:`) is KEPT, because the gate reads
+            # `persist-credentials` out of the checkout step's. Anything else records
+            # the sentinel `None` rather than a guess.
+            nested: dict[str, str] | None = {} if key == "with" else None
             while i < len(lines) and (not lines[i].strip() or len(lines[i]) - len(lines[i].lstrip()) > indent):
+                child = lines[i]
                 i += 1
+                inner = child.strip()
+                if not inner or inner.startswith("#") or nested is None:
+                    continue
+                child_key, child_sep, child_rest = inner.partition(":")
+                if not child_sep or " " in child_key or child_rest.strip() == "":
+                    nested = None
+                    continue
+                nested[child_key] = _scalar(child_rest)
+            step[key] = nested if nested else None
             continue
         step[key] = _scalar(rest)
 
@@ -228,6 +266,25 @@ def check(workflow_dir: Path = WORKFLOW_DIR) -> list[tuple[str, str]]:
         if not steps:
             note(f"{rel}: job `{name}` runs a container on a self-hosted runner but has no steps")
             continue
+
+        # The checkout POST step runs AFTER the cleanup and re-roots `.git/config`
+        # unless there is no persisted credential left for it to unset. See
+        # CHECKOUT_WITH — this is not tidiness, it is the difference between "no
+        # root-owned files" and "one, and it is the one that breaks the next job".
+        setting, expected = CHECKOUT_WITH
+        for step in steps:
+            uses = step.get("uses") or ""
+            if not uses.startswith("actions/checkout"):
+                continue
+            with_block = step.get("with")
+            got = with_block.get(setting) if isinstance(with_block, dict) else None
+            if (got or "").strip().lower() != expected:
+                note(
+                    f"{rel}: job `{name}` checks out with `{setting}` = {got or '<unset>'}; "
+                    f"it must be `{expected}`, or checkout's post step re-roots `.git/config` "
+                    f"after the cleanup has run"
+                )
+
         last = steps[-1]
         if not isinstance(last, dict) or last.get("name") != STEP_NAME:
             shown = last.get("name") or last.get("uses") or "<unnamed>" if isinstance(last, dict) else str(last)

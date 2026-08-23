@@ -43,6 +43,11 @@ CLEANUP = f"""      - name: {gate.STEP_NAME}
         run: {gate.STEP_RUN}
 """
 
+CHECKOUT = f"""      - uses: actions/checkout@v4
+        with:
+          {gate.CHECKOUT_WITH[0]}: {gate.CHECKOUT_WITH[1]}
+"""
+
 
 def workflow(runs_on: str, container: str | None, steps: str) -> str:
     """@brief Render a one-job workflow file with the given routing and steps."""
@@ -103,6 +108,24 @@ class GateArms(unittest.TestCase):
         findings = self._findings(workflow(SELF_HOSTED, "ubuntu:24.04", step))
         self.assertEqual(len(findings), 1)
         self.assertIn("drifted", findings[0])
+
+    def test_checkout_that_persists_credentials_is_red(self):
+        """The residue the cleanup step cannot reach: checkout's post step re-roots `.git/config`."""
+        text = workflow(SELF_HOSTED, "ubuntu:24.04", "      - uses: actions/checkout@v4\n" + CLEANUP)
+        findings = self._findings(text)
+        self.assertEqual(len(findings), 1)
+        self.assertIn("persist-credentials", findings[0])
+
+    def test_checkout_with_credentials_off_passes(self):
+        """The positive control for the arm above — otherwise it would pass on any `with:` at all."""
+        self.assertEqual(self._findings(workflow(SELF_HOSTED, "ubuntu:24.04", CHECKOUT + CLEANUP)), [])
+
+    def test_checkout_with_other_settings_but_not_this_one_is_red(self):
+        """`with: fetch-depth: 0` is not the setting that matters; only this one is."""
+        step = "      - uses: actions/checkout@v4\n        with:\n          fetch-depth: 0\n"
+        findings = self._findings(workflow(SELF_HOSTED, "ubuntu:24.04", step + CLEANUP))
+        self.assertEqual(len(findings), 1)
+        self.assertIn("persist-credentials", findings[0])
 
     def test_hosted_container_job_is_not_policed(self):
         """A hosted VM's disk is discarded with the VM; nothing survives to break."""
@@ -171,6 +194,18 @@ class RealWorkflows(unittest.TestCase):
                         value = ref.get(key)
                         if isinstance(value, str) and "\n" not in value:
                             self.assertEqual(value.strip(), (mine_step.get(key) or "").strip(), f"{name}.{key}")
+                    # `with:` is the one nested mapping the reader keeps — and only when
+                    # every value in it is a plain one-line scalar; a `path: |` block
+                    # records the documented `None` sentinel instead, so those are not
+                    # compared. PyYAML types `false` as a bool and the reader as text,
+                    # so the comparison is over spellings.
+                    plain = isinstance(ref.get("with"), dict) and all(
+                        "\n" not in str(v) for v in ref["with"].values()
+                    )
+                    if plain:
+                        expected = {k: str(v).lower() for k, v in ref["with"].items()}
+                        actual = {k: str(v).lower() for k, v in (mine_step.get("with") or {}).items()}
+                        self.assertEqual(expected, actual, f"{name}.with")
                 checked_jobs += 1
         self.assertGreater(checked_jobs, 40, "the sweep should cover the whole workflow tree")
 
