@@ -34,6 +34,7 @@ on:
       - "core/include/**"
       - "tools/check_esp_srcs.py"
       - "tools/check_esp_ws_plane.py"
+      - "tools/check_esp_thread_id.py"
       - ".github/workflows/esp-idf.yml"
   pull_request:
     paths:
@@ -42,6 +43,7 @@ on:
       - "core/include/**"
       - "tools/check_esp_srcs.py"
       - "tools/check_esp_ws_plane.py"
+      - "tools/check_esp_thread_id.py"
       - ".github/workflows/esp-idf.yml"
   workflow_dispatch:
 
@@ -175,6 +177,23 @@ jobs:
         run: |
           . "${IDF_PATH}/export.sh"
           python3 "${GITHUB_WORKSPACE}/tools/check_esp_ws_plane.py" --build-dir build
+
+      # The v0.15.0 boot regression, gated at the object level (#1532). An ownership
+      # stamp taken with std::this_thread::get_id() lowers to pthread_self(), which
+      # ESP-IDF ASSERTS out of for any task it did not register — the IDF main task
+      # running app_main included — and under the default SILENT assert level that is
+      # a bare reset loop. A successful build proves nothing: the call links fine for
+      # every target and only fails on silicon, from an unregistered task. So this
+      # reads the objects. Measured as a real differential on this very example: before
+      # the fix transport_vertex.cpp.obj and self_heal_link.cpp.obj both list
+      # `U pthread_self`; after it, neither does and both list
+      # `U xTaskGetCurrentTaskHandle`.
+      - name: Assert no ownership stamp calls pthread_self (#1532)
+        shell: bash
+        working-directory: integrations/esp-idf/examples/full_node
+        run: |
+          . "${IDF_PATH}/export.sh"
+          python3 "${GITHUB_WORKSPACE}/tools/check_esp_thread_id.py" --build-dir build
 
       # Footprint report (docs/reference/00-overview.md §"build-size profiles";
       # numbers described by integrations/esp-idf/README.md §Memory budget).

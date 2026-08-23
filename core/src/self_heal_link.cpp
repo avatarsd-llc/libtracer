@@ -147,7 +147,7 @@ std::shared_ptr<self_heal_link_t::sock_t> self_heal_link_t::ready_socket() {
     // bounded by connect_timeout (§4's sanctioned stall-on-dial) — except the worker's
     // own publish fan-out, which must not block on the worker (a subscriber of this
     // link's own liveness routed through this link would otherwise self-deadlock).
-    if (std::this_thread::get_id() == worker_id_) return nullptr;
+    if (detail::this_thread_id() == worker_id_) return nullptr;
     if (state_ == link_state_t::DORMANT) {
         wake_requested_ = true;
         ensure_worker_locked();
@@ -275,7 +275,7 @@ bool self_heal_link_t::attempt_locked(std::unique_lock<std::mutex>& l) {
 
 void self_heal_link_t::worker_main() {
     std::unique_lock l(m_);
-    worker_id_ = std::this_thread::get_id();
+    worker_id_ = detail::this_thread_id();
     for (;;) {
         cv_.wait(l, [&] {
             return stop_ || !corpses_.empty() || publish_pending_ || wake_requested_ ||

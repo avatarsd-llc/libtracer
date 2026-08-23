@@ -32,13 +32,13 @@
 #include <set>
 #include <string>
 #include <string_view>
-#include <thread>
 #include <vector>
 
 #include "libtracer/graph.hpp"
 #include "libtracer/key_view.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source.hpp"
+#include "libtracer/thread_id.hpp"
 #include "libtracer/transport.hpp"
 
 namespace tr::net {
@@ -929,17 +929,23 @@ class transport_vertex_t {
     /**
      * @brief The thread inside a `%ctl_txn_t`'s phase 1 — the S6 lock-order self-check.
      *
-     * A default-constructed id means "nobody". Written under `ctl_m_` and read from
+     * `%tr::detail::unowned_thread_id()` means "nobody". Written under `ctl_m_` and read from
      * anywhere, hence atomic: the read that matters is a re-entrant one, made by a thread
      * that is about to block on the mutex this same thread holds. Without it that bug is a
      * silent hang wherever the callback happened to be installed; with it, it is a
      * diagnosable assertion at the acquisition site.
+     *
+     * The identity is `%tr::detail::thread_id_t` and **not** `std::thread::id` (#1532): the
+     * latter lowers to `pthread_self()`, which ESP-IDF ASSERTS out of for any task it did not
+     * register — the IDF main task included — so v0.15.0 abort-looped at boot on a stamp it
+     * could not take. See `%thread_id.hpp` for the mechanism and for why the sentinel and
+     * every live value must stay distinguishable.
      */
-    mutable std::atomic<std::thread::id> ctl_owner_{};
+    mutable std::atomic<detail::thread_id_t> ctl_owner_{};
 
     /** @brief The same stamp for `ops_m_` — the thread inside an `OPERATION` transaction,
      *         across both its phases. This is the one a re-entrant mutation trips. */
-    mutable std::atomic<std::thread::id> ops_owner_{};
+    mutable std::atomic<detail::thread_id_t> ops_owner_{};
 
     graph::graph_t& graph_;
     fwd_router_t& router_;
