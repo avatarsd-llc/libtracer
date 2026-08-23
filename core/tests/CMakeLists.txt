@@ -2084,6 +2084,14 @@ target_link_libraries(ring_pressure_test PRIVATE libtracer)
 libtracer_test_warnings(ring_pressure_test)
 add_test(NAME ring_pressure COMMAND ring_pressure_test)
 
+# RFC-0025 §4.1 delivery classes, HONOURED (#1204 phase 3): what each class selects once
+# Amendments 2/3/4 moved the machinery — the receiving vertex's ROLE and the source's role at
+# flush, never a bit consulted in the fan-out loop. Every case carries its own ablation.
+add_executable(delivery_class_honour_test delivery_class_honour_test.cpp)
+target_link_libraries(delivery_class_honour_test PRIVATE libtracer)
+libtracer_test_warnings(delivery_class_honour_test)
+add_test(NAME delivery_class_honour COMMAND delivery_class_honour_test)
+
 # RFC-0025 §4.2.1 / §4.1.2 — the BATCH record (batch.hpp): the fold, the sample clock DERIVED
 # from the descriptor's rate at 0 bytes/sample, the non-uniform packed i32 offset array, and
 # the reader refusals the codec does NOT make. Pins the `stream/batch-time-roundtrip` vector
