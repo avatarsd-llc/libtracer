@@ -14,6 +14,8 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+## [0.15.0] — 2026-08-23
+
 ### Added
 
 - **`graph_t::configure_stats_sampler` / `graph_t::sample_stats`, `tr::graph::stats_block_t`,
@@ -221,8 +223,9 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `virtual drop_stats()`. The part that is still true (no counter bump on core's hot
   `deliver_remote` path, no per-child accounting in `fwd_router_t`) is kept.
 
-- **WIRE-VISIBLE: `await` at a HANDLER vertex now answers the value, not `NOT_FOUND`; and
-  `assign` / `propagate` refuse a vertex that retains nothing**
+- **BREAKING (source + wire-visible): `await` at a HANDLER vertex now answers the value, not
+  `NOT_FOUND`; `assign` / `propagate` refuse a vertex that retains nothing; and
+  `graph_t::propagate` returns `[[nodiscard]] result_t<void>` instead of `void`**
   ([#1506](https://github.com/avatarsd-llc/libtracer/issues/1506); RFC-0008 Amendment 2). One
   fact, two halves. A `HANDLER` vertex **retains nothing**: it hands a write to `on_write` and
   composes a read from `on_read`, publishing no last-known-value.
