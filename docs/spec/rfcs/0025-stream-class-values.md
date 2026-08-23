@@ -393,6 +393,14 @@ producer — which is the producer-owns-cadence rule (§3), not an exception to 
 
 ###### 6. BATCH is formally assigned the user-range record type `0x80`
 
+> **Erratum (2026-08-23), [#1500](https://github.com/avatarsd-llc/libtracer/issues/1500) — see
+> §Erratum at the end of this document.** This clause's `0x80` carriage is scoped to a
+> **standalone** flush. A flush **folded** into a `propagate(v, FOLD)` branch write (clause 5)
+> seats the same batch in the swept node's single structured `VALUE` instead, because clause 5
+> holds the node shape byte-for-byte at RFC-0005 §B, which admits no `0x80` child. Both
+> spellings carry the identical `TIME`-base-plus-sample-frames layout; only the header type
+> byte differs.
+
 `0x80` today appears only as a **worked example** — `docs/reference/05-protocol-tlvs.md`
 §`0x0C` TIME, *"A user-range record TLV (`type=0x80`, application-defined, `opt.PL=1`)
 containing a TIME and a VALUE"* (line 1046 as it stood before this amendment). This amendment
@@ -1067,3 +1075,74 @@ handshake details beyond the descriptor-write mechanism (§4.7), and the scope o
 the reference playout helper. Sustained objections and their resolution will be
 recorded here; the comment window is waived by default per GOVERNANCE while
 solo-maintained.
+
+## Erratum (2026-08-23) — §4.1.2 clause 6's `0x80` carriage is scoped to a STANDALONE flush; a FOLDED flush seats the same batch in the branch-write node's single structured `VALUE` ([#1500](https://github.com/avatarsd-llc/libtracer/issues/1500))
+
+**What the text said.** Amendment 3 (§4.1.2) states two things that read as unconditional and,
+taken together, cannot both be:
+
+- **clause 5** — a folded sweep emits ONE branch-write frame whose node shape is *"byte-for-byte
+  [RFC-0005](0005-subtree-subscriptions.md) §B's (leading `NAME`, optional value, recursive
+  `POINT` sub-branches)"*, with terminus behaviour at **zero change**;
+- **clause 6** — `0x80` is *"the **BATCH record type**, the type code of §4.2's batch
+  convention"*, restated in [reference/05](../../reference/05-protocol-tlvs.md) §`delivery_policy`
+  as a STREAM flush emitting its full list *"as one BATCH record (§User range, `0x80`)"*.
+
+**What was wrong.** Only the **scope** of clause 6, and only for one carriage. RFC-0005 §B's node
+grammar admits a leading `NAME`, **at most one** `VALUE`, and recursive `POINT` children — and
+nothing else. A `0x80` child inside a branch-write node is therefore rejected by every conforming
+decomposer, wherever the constant is defined. So a STREAM vertex swept inside a
+`propagate(v, FOLD)` branch write had no legal spelling: clause 6 demanded a record type clause 5's
+grammar forbids. The contradiction is confined to the folded carriage; a standalone flush was
+always, and remains, correct exactly as clause 6 states it.
+
+**The correction — the carriage rule, stated as a rule.** A batch has **one layout and two
+spellings, selected by carriage**:
+
+| carriage | the batch is spelled as |
+| --- | --- |
+| **standalone flush** — the flush is its own `FWD{WRITE}` delivery | a **BATCH record**, `type = 0x80`, `opt.PL=1`, exactly as clause 6 assigns |
+| **folded flush** — the STREAM node rides a `propagate(v, FOLD)` branch write (clause 5) | the node's **single structured `VALUE`** (`opt.PL=1`), the one value RFC-0005 §B already admits |
+
+The two spellings are **byte-identical except for the header type byte** (`0x80` → `VALUE`): the
+same payload `TIME` (`0x0C`) child as the batch base, the same sample frames as children, the same
+`i32` offset array for a non-uniform stream ([RFC-0025](0025-stream-class-values.md) §4.2.1,
+Amendment 1). Nothing about *what a batch is* changes with carriage; only where it is seated, and
+therefore which byte introduces it.
+
+Three properties this preserves, each the reason the ruling went this way rather than widening §B:
+
+- **Clause 5 is untouched, and so is the terminus.** The node shape stays byte-for-byte RFC-0005
+  §B. The decomposer needs no new admitted child, no new branch, and no new vector on the
+  receiving side. The alternative — amending §B to admit a `0x80` child — would have widened
+  every terminus's obligation and made every shipped decomposer non-conforming until updated;
+  that is an amendment, and it reopens precisely the contract clause 5 was written to leave
+  alone.
+- **Claim 5 is preserved.** The graph and the terminus still never interpret a user-range code.
+  A folded batch is seated in a **core-range** `VALUE`, so the folded carriage does not even
+  present a user-range byte to the graph; the standalone carriage presents `0x80` and the graph
+  passes it through uninterpreted, as it always did.
+- **No new grammar, either way.** Both spellings are ordinary `opt.PL=1` structured TLVs that
+  every conforming decoder already decodes. §3's zero-new-grammar tenet is intact.
+
+**How a consumer tells them apart** — it does not need to. A folded frame's reader is already
+walking the RFC-0016 POINT tree and knows, from the §4.3 stream descriptor at the vertex, that a
+given node's value is a batch. A standalone frame's reader sees `0x80` and knows the same thing.
+The descriptor is the discriminator in both carriages; the type byte is not load-bearing for
+interpretation, which is why it is free to differ.
+
+**Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). **No
+wire surface moves.** No grammar, frame shape, type code or error identity changes; `0x80` keeps
+its assignment and its meaning; no published conformance vector's bytes move. Nothing shipped
+emits a folded stream today — [#1499](https://github.com/avatarsd-llc/libtracer/issues/1499)
+refuses a STREAM vertex selected under `FOLD` with `tr::schema::type_mismatch`, before any
+delivery and before any mark is drained — so applying the correction changes what no conforming
+implementation does. It resolves a contradiction between two clauses of the same amendment by
+scoping the one that over-reached, and it leaves the other exactly as written. Maintainer ruling
+in [#1500](https://github.com/avatarsd-llc/libtracer/issues/1500) (option (c), 2026-08-22);
+implementation of the folded seat is
+[#1468](https://github.com/avatarsd-llc/libtracer/issues/1468).
+
+**Text corrected alongside:** [reference/05](../../reference/05-protocol-tlvs.md) — the
+`delivery_policy` class table's `2 batch` row and the §User range BATCH assignment, both of which
+restate clause 6 and inherited its unscoped reading.
