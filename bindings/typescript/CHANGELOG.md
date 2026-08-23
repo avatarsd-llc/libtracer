@@ -7,6 +7,31 @@ versioning/publish strategy.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`@avatarsd-llc/libtracer-client`: FWD replies are correlated by the reply's own `src`, not
+  by FIFO order** ([#1530](https://github.com/avatarsd-llc/libtracer/issues/1530)).
+  `LibtracerClient` paired each inbound `FWD{REPLY}` with `pending.shift()`, which is only
+  correct while at most one request is outstanding. Nothing on the wire promises reply order —
+  a request FORWARDED across a mounted link answers in tens of milliseconds while a local one
+  answers in about one — so a later request routinely overtakes an earlier one, and from the
+  first overtake on **every caller received the previous request's answer**. Silently: the
+  reply is a well-formed `RESULT`, just for somebody else's path, so a decoder returned `null`
+  ("the device does not have that") or surfaced an `ERROR NOT_FOUND` meant for another read.
+
+  The client now correlates on the reply's `src` — the responder's own endpoint, which RFC-0004
+  §B requires a REPLY to carry — matching the oldest outstanding request whose `dst` ENDS WITH
+  it (`dst` shrinks per hop, so the terminus echoes a suffix: `/net/ws-client/peer0/hw/variant`
+  answers `src=hw/variant`). Requests the wire genuinely cannot tell apart — the same endpoint
+  reached locally and through a mount — keep the FIFO tiebreak among themselves. An empty
+  `src`, a `PATH_REF` src on a reply to a bound operation, or a `src` matching nothing
+  outstanding falls back to the oldest entry, i.e. to the previous behaviour, so no correlation
+  that used to work can break.
+
+  **Behavioural change for callers:** keeping several one-shot ops in flight on one client is
+  now correct. The documented workaround — serialising every op on one promise chain — is no
+  longer needed and costs pipelining.
+
 ## [0.15.1] — 2026-08-23
 
 No changes. These packages are an independent TypeScript implementation of the protocol —
