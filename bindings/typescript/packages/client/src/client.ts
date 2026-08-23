@@ -21,15 +21,17 @@
  * Each one-shot op sends a FWD and resolves the FWD{REPLY} the responder
  * source-routes back (RESULT → the value, ERROR → a typed {@link FwdError}).
  *
- * Reply correlation is the transport's concern (RFC-0004 §D): over a single ws
- * link the responder replies in request order, so a simple per-link FIFO of
- * pending requests matches each REPLY to its request. `FWD` stays pure — no
- * end-to-end correlation id.
+ * Reply correlation is the transport's concern (RFC-0004 §D): `FWD` stays pure —
+ * there is no end-to-end correlation id. What the wire DOES carry is the
+ * responder's own endpoint in the reply's `src` (RFC-0004 §B: "the `src` child of
+ * a REPLY … is set to the responder's own endpoint — the vertex that produced the
+ * result"), and this client correlates on that, FIFO only among requests it cannot
+ * tell apart. See {@link LibtracerClient} §correlation.
  */
 
 import { TYPE, decode, CodecError } from '@avatarsd-llc/libtracer';
 import type { Tlv } from '@avatarsd-llc/libtracer';
-import { encodeValue, encodePath, encodeSubscriber } from './tlv.js';
+import { encodeValue, encodePath, encodeSubscriber, pathSegments } from './tlv.js';
 import type { ValueOptions, SubscriberOptions } from './tlv.js';
 import {
   FWD_OP,
@@ -156,19 +158,27 @@ export class CompactFlowError extends Error {
   }
 }
 
-/** @brief A pending one-shot request awaiting its FWD{REPLY} (FIFO per link). */
+/** @brief A pending one-shot request awaiting its FWD{REPLY}. */
 interface Pending {
   resolve(reply: ParsedFwd): void;
   reject(err: Error): void;
   /**
    * @brief True once the promise has settled (timed out / transport closed).
    *
-   * A settled entry stays in the FIFO so a late REPLY still consumes its slot —
-   * keeping every later request correlated to the right reply.
+   * A settled entry stays in the queue so its own late REPLY still consumes its
+   * slot rather than being handed to a live caller.
    */
   settled: boolean;
   /** @brief The per-request deadline timer (cleared on settle), when one is armed. */
   timer: ReturnType<typeof setTimeout> | null;
+  /**
+   * @brief The request's `dst` segments — the correlation key a REPLY's `src` echoes.
+   *
+   * `null` when the client cannot state them (it never is today: every one-shot op
+   * here builds `dst` from a `PATH`), in which case this entry is only reachable by
+   * the FIFO fallback.
+   */
+  dst: string[] | null;
 }
 
 /** @brief Settle a pending entry: clear its deadline and mark it consumed. */
@@ -260,10 +270,12 @@ export class LibtracerClient {
         return;
       }
       if (parsed.op === FWD_OP.REPLY) {
-        const waiter = this.pending.shift();
-        // A settled waiter (timed out) still consumes its FIFO slot; its late
-        // reply is dropped so later requests stay correlated.
-        if (waiter && !waiter.settled) {
+        const at = this.correlate(parsed);
+        if (at < 0) return; // a reply with nothing outstanding to answer
+        const [waiter] = this.pending.splice(at, 1);
+        // A settled waiter (timed out) still consumes its slot; its late reply is
+        // dropped rather than handed to a live caller.
+        if (!waiter.settled) {
           settle(waiter);
           waiter.resolve(parsed);
         }
@@ -290,6 +302,57 @@ export class LibtracerClient {
     if (data.type === TYPE.VALUE) this.deliver(data);
   }
 
+  /**
+   * @brief Which outstanding request this REPLY answers — its index, or `-1` for none.
+   *
+   * @section correlation Why not FIFO
+   *
+   * FIFO correlation is only correct while at most one request is outstanding.
+   * `FWD` carries no correlation id, and nothing in RFC-0004 promises reply order:
+   * a request that is FORWARDED across a mounted link answers in tens of
+   * milliseconds while a local one answers in about one, so a later request
+   * routinely OVERTAKES an earlier one on the same link. Under `shift()` the first
+   * overtake transposes two answers and the queue never realigns — every later
+   * caller gets the previous request's reply. Nothing errors: the caller receives a
+   * well-formed `RESULT` for somebody else's path (#1530).
+   *
+   * @section key What the wire does carry
+   *
+   * RFC-0004 §B: a REPLY "does not accumulate `src`; the `src` child of a REPLY is
+   * still required and is set to the **responder's own endpoint** (the vertex that
+   * produced the result)". `dst` SHRINKS per hop, so what the terminus resolved —
+   * and echoes — is the TAIL of the request's `dst` after every mount prefix was
+   * stripped: a request to `/net/ws-client/peer0/hw/variant` answers `src=hw/variant`,
+   * and so does a local request to `/hw/variant`. The key is therefore a SUFFIX
+   * match, not an equality, and it is genuinely ambiguous between those two.
+   *
+   * So: the oldest outstanding request whose `dst` ends with the reply's `src`, which
+   * is FIFO among the ones the wire cannot tell apart — exactly the tiebreak #1530
+   * prescribes, and it resolves that issue's measured four-request trace correctly.
+   *
+   * @section fallback When the key is unusable
+   *
+   * An empty `src` (RFC-0004 Amendment 2's "no reply requested"), a `PATH_REF` src on
+   * a reply to a bound operation, a label escape, or a `src` matching nothing
+   * outstanding all fall back to the oldest entry — today's behaviour exactly, so
+   * this change can only ever improve a correlation, never break one that worked.
+   */
+  private correlate(parsed: ParsedFwd): number {
+    const fifo = this.pending.length > 0 ? 0 : -1;
+    let src: string[];
+    try {
+      src = pathSegments(parsed.src);
+    } catch {
+      return fifo; // a PATH_REF / escaped src is not an address this client can match
+    }
+    if (src.length === 0) return fifo;
+    for (let i = 0; i < this.pending.length; i++) {
+      const dst = this.pending[i].dst;
+      if (dst !== null && endsWith(dst, src)) return i;
+    }
+    return fifo;
+  }
+
   private deliver(value: Tlv): void {
     for (const handler of this.valueHandlers) handler(value.payload, value);
   }
@@ -298,14 +361,20 @@ export class LibtracerClient {
     if (this.errorHandler) this.errorHandler(err);
   }
 
-  /** @brief Send a one-shot FWD and resolve its FWD{REPLY} (FIFO correlation). */
-  private request(frame: Uint8Array): Promise<ParsedFwd> {
+  /**
+   * @brief Send a one-shot FWD and resolve its FWD{REPLY}.
+   *
+   * @param frame the encoded request frame
+   * @param dst   the request's destination segments — the key its reply's `src`
+   *              echoes (see {@link correlate})
+   */
+  private request(frame: Uint8Array, dst: string[]): Promise<ParsedFwd> {
     return new Promise<ParsedFwd>((resolve, reject) => {
       if (this.closed) {
         reject(this.closed);
         return;
       }
-      const entry: Pending = { resolve, reject, settled: false, timer: null };
+      const entry: Pending = { resolve, reject, settled: false, timer: null, dst };
       if (this.requestTimeoutMs > 0 && Number.isFinite(this.requestTimeoutMs)) {
         entry.timer = setTimeout(() => {
           // Leave the settled entry in the FIFO (see Pending) — its slot is
@@ -347,8 +416,10 @@ export class LibtracerClient {
    * @throws {FwdError} when the responder replies `kind=ERROR` (e.g. NOT_FOUND)
    */
   async read(path: string | string[]): Promise<Tlv> {
+    const dst = splitPath(path);
     const reply = await this.request(
-      encodeFwd({ op: FWD_OP.READ, dst: splitPath(path), src: this.replyEndpoint }),
+      encodeFwd({ op: FWD_OP.READ, dst, src: this.replyEndpoint }),
+      dst,
     );
     const value = this.result(reply);
     if (!value) throw new FwdError(0); // RESULT with no payload — malformed read reply
@@ -367,8 +438,10 @@ export class LibtracerClient {
    * @throws {FwdError} when the responder replies `kind=ERROR`
    */
   async readField(path: string | string[], selector: string | FieldLevel[]): Promise<Tlv> {
+    const dst = splitPath(path);
     const reply = await this.request(
-      encodeFwd({ op: FWD_OP.READ, dst: splitPath(path), field: selector, src: this.replyEndpoint }),
+      encodeFwd({ op: FWD_OP.READ, dst, field: selector, src: this.replyEndpoint }),
+      dst,
     );
     const value = this.result(reply);
     if (!value) throw new FwdError(0);
@@ -384,8 +457,10 @@ export class LibtracerClient {
    * @throws {FwdError} when the responder replies `kind=ERROR`
    */
   async write(path: string | string[], valueTLV: Uint8Array): Promise<void> {
+    const dst = splitPath(path);
     const reply = await this.request(
-      encodeFwd({ op: FWD_OP.WRITE, dst: splitPath(path), src: this.replyEndpoint, payload: valueTLV }),
+      encodeFwd({ op: FWD_OP.WRITE, dst, src: this.replyEndpoint, payload: valueTLV }),
+      dst,
     );
     this.result(reply); // throws on ERROR; RESULT carries no payload
   }
@@ -415,14 +490,16 @@ export class LibtracerClient {
     selector: string | FieldLevel[],
     valueTLV: Uint8Array,
   ): Promise<void> {
+    const dst = splitPath(path);
     const reply = await this.request(
       encodeFwd({
         op: FWD_OP.WRITE,
-        dst: splitPath(path),
+        dst,
         field: selector,
         src: this.replyEndpoint,
         payload: valueTLV,
       }),
+      dst,
     );
     this.result(reply); // throws on ERROR; RESULT carries no payload
   }
@@ -440,13 +517,15 @@ export class LibtracerClient {
    * @throws {FwdError} with code TIMEOUT when the responder's deadline elapses
    */
   async await_(path: string | string[], timeoutNs?: bigint): Promise<Tlv> {
+    const dst = splitPath(path);
     const reply = await this.request(
       encodeFwd({
         op: FWD_OP.AWAIT,
-        dst: splitPath(path),
+        dst,
         src: this.replyEndpoint,
         awaitTimeoutNs: timeoutNs,
       }),
+      dst,
     );
     const value = this.result(reply);
     if (!value) throw new FwdError(0);
@@ -481,6 +560,7 @@ export class LibtracerClient {
     handler: ValueHandler,
     opts: SubscriberOptions = {},
   ): Promise<Unsubscribe> {
+    const dst = splitPath(producerPath);
     const subscriber = encodeSubscriber(this.replyEndpoint, opts);
     // Register the handler BEFORE awaiting the ack: a producer may stream its
     // first delivery before its subscribe REPLY is seen on the wire, and we must
@@ -490,11 +570,12 @@ export class LibtracerClient {
       const reply = await this.request(
         encodeFwd({
           op: FWD_OP.WRITE,
-          dst: splitPath(producerPath),
+          dst,
           field: ':subscribers[]',
           src: this.replyEndpoint,
           payload: subscriber,
         }),
+        dst,
       );
       this.result(reply); // throws on ERROR
     } catch (err) {
@@ -535,6 +616,20 @@ Object.defineProperty(LibtracerClient.prototype, 'await', {
   configurable: true,
   enumerable: false,
 });
+
+/**
+ * @brief Does @p path end with the segments @p tail — the reply-`src` suffix test.
+ *
+ * A suffix rather than an equality because `dst` shrinks per hop (RFC-0004 §B): the
+ * responder's own endpoint is what is left of the request's `dst` once every mount
+ * prefix has been stripped.
+ */
+function endsWith(path: string[], tail: string[]): boolean {
+  if (tail.length > path.length) return false;
+  const at = path.length - tail.length;
+  for (let i = 0; i < tail.length; i++) if (path[at + i] !== tail[i]) return false;
+  return true;
+}
 
 /** @brief Normalize a `/`-path string (or segment array) into validated segments. */
 function splitPath(path: string | string[]): string[] {
