@@ -45,7 +45,9 @@
 #include <vector>
 
 #include "libtracer/frame.hpp"
+#include "libtracer/mem_borrowed.hpp"
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/rope.hpp"
 #include "libtracer/subscriber.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "test_support.hpp"
@@ -265,6 +267,80 @@ void delivery_class_bits() {
     check(true, "the §4.1 packing is pinned by static_assert (see the source)");
 }
 
+/** @brief The three samples as VIEWS over stable buffers — what an app already holds. */
+struct sample_views_t {
+    samples_t frames = three_samples();
+    std::vector<tr::view::view_t> views;
+
+    sample_views_t() {
+        for (const std::vector<std::byte>& f : frames.frames)
+            views.push_back(
+                tr::view::view_t::over(tr::view::borrow_const(std::span<const std::byte>(f))));
+    }
+};
+
+/** @brief The non-uniform offsets both composition vectors carry. */
+constexpr std::array<std::int32_t, 3> kComposedOffsets{0, 1500, -250};
+
+/**
+ * @brief Amendment 4 §4.1.3 clause 4 — a composition REFERENCES the app's sample bytes, and one
+ *        layout serves both carriages.
+ */
+void composition_references_rather_than_copies() {
+    std::printf("§4.1.3 compose — one owned head link, the samples referenced:\n");
+    const sample_views_t s;
+
+    const tr::view::rope_t standalone =
+        tr::wire::compose_batch(tr::mem::heap_backend(), tr::wire::batch_carriage_t::STANDALONE,
+                                kBase, s.views, kComposedOffsets);
+    check(standalone.link_count() == 1 + s.views.size(),
+          "ONE owned head link plus one link per sample — nothing else is allocated");
+    check(standalone.links()[0].bytes().size() == tr::wire::batch_head_bytes(6 * 3, 3),
+          "the head link is exactly the record header + TIME base + offset child");
+
+    // THE zero-copy claim, made structurally rather than by size: every sample link points at
+    // the app's own buffer. A composer that copied would produce identical BYTES and fail here.
+    for (std::size_t i = 0; i < s.views.size(); ++i) {
+        check(standalone.links()[i + 1].bytes().data() == s.frames.frames[i].data(),
+              "the sample link IS the app's buffer — a refcounted reference, not a copy");
+    }
+
+    std::vector<std::byte> flat;
+    standalone.walk(
+        [&flat](std::span<const std::byte> b) { flat.insert(flat.end(), b.begin(), b.end()); });
+    check(same(flat, vector_bytes("stream/batch-composed-standalone")),
+          "stream/batch-composed-standalone is byte-exact against the composer");
+
+    const tr::view::rope_t folded =
+        tr::wire::compose_batch(tr::mem::heap_backend(), tr::wire::batch_carriage_t::FOLDED, kBase,
+                                s.views, kComposedOffsets);
+    std::vector<std::byte> flat_folded;
+    folded.walk([&flat_folded](std::span<const std::byte> b) {
+        flat_folded.insert(flat_folded.end(), b.begin(), b.end());
+    });
+    check(same(flat_folded, vector_bytes("stream/batch-composed-folded")),
+          "stream/batch-composed-folded is byte-exact against the composer");
+
+    // The carriage rule, as a difference: ONE byte, and it is the header type.
+    check(flat.size() == flat_folded.size(), "the two carriages are the same length");
+    std::size_t differing = 0;
+    for (std::size_t i = 0; i < flat.size(); ++i)
+        if (flat[i] != flat_folded[i]) ++differing;
+    check(differing == 1 && std::to_integer<std::uint8_t>(flat[0]) == 0x80 &&
+              std::to_integer<std::uint8_t>(flat_folded[0]) == 0x01,
+          "exactly ONE byte differs — the header type (0x80 BATCH vs 0x01 VALUE)");
+
+    // One layout, not two: the contiguous emitter must reach the same bytes in both carriages.
+    for (const auto carriage :
+         {tr::wire::batch_carriage_t::STANDALONE, tr::wire::batch_carriage_t::FOLDED}) {
+        std::vector<std::byte> emitted;
+        tr::wire::emit_batch(emitted, kBase, s.frames.spans, kComposedOffsets, carriage);
+        check(
+            same(emitted, carriage == tr::wire::batch_carriage_t::STANDALONE ? flat : flat_folded),
+            "emit_batch and compose_batch share ONE layout implementation, per carriage");
+    }
+}
+
 }  // namespace
 
 /** @brief Runs every BATCH-record check; non-zero exit ⇒ some check failed. */
@@ -273,6 +349,7 @@ int main() {
     uniform_time_is_derived();
     the_descriptor_decides_the_shape();
     a_readers_refusal_is_not_the_codecs();
+    composition_references_rather_than_copies();
     delivery_class_bits();
     return tr::testing::summary("batch");
 }

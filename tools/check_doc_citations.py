@@ -192,7 +192,7 @@ ANCHORS = [
     ("core/src/graph.cpp:3608",
      "result_t<void> graph_t::set_identity(std::uint8_t kind, std::span<const std::byte> key) {"),
     ("core/src/graph.cpp:3648", "result_t<view_t> graph_t::read_identity() const {"),
-    ("core/src/graph.cpp:4382", 'field.steps[0].name == "identity"'),
+    ("core/src/graph.cpp:4391", 'field.steps[0].name == "identity"'),
     # The RFC-0022 §3.B pair, cited by the #1392 erratum: the WRITE arm's terminal fall-through
     # (every flat `:settings.<knob>` name ⇒ SCHEMA_NOT_FOUND, caller-independently) and the READ
     # container that survives it. The write arm is pinned on its EXPLANATORY COMMENT, not on the
@@ -289,9 +289,9 @@ ANCHORS = [
     ("core/src/graph.cpp:3909", "folded_member_header(hdr_backend, body, seg.size())"),
     ("core/src/graph.cpp:3921", "folded_point_header(hdr_backend, members_len)"),
     ("core/src/graph.cpp:4067", "folded_point_header(hdr_backend, n.body_len)"),
-    ("core/src/graph.cpp:4319", "return read_children_folded(vh);"),
-    ("core/src/graph.cpp:4316", "sel == field_sel_t::WHOLE || sel == field_sel_t::APPEND"),
-    ("core/src/graph.cpp:4490", "field_selector(field) == field_sel_t::SLOT"),
+    ("core/src/graph.cpp:4328", "return read_children_folded(vh);"),
+    ("core/src/graph.cpp:4325", "sel == field_sel_t::WHOLE || sel == field_sel_t::APPEND"),
+    ("core/src/graph.cpp:4499", "field_selector(field) == field_sel_t::SLOT"),
     ("core/src/op_resolve_walk.hpp:366", "enum class index_mode_t"),
     ("core/src/op_resolve_walk.hpp:1081", 'field.steps[0].name != "subscribers"'),
     ("core/src/op_resolve_walk.hpp:164", "view_t own_wire(mem::mem_backend_t& flat)"),
@@ -751,7 +751,7 @@ ANCHORS = [
     ('core/src/graph.cpp:2684',
      'result_t<void> graph_t::write(vertex_handle_t v, rope_t value, std::string_view caller) {'),
     ('core/src/graph.cpp:3491', 'result_t<void> graph_t::create_child(vertex_t* parent, const view_t& spec_value) {'),
-    ('core/src/graph.cpp:4521', 'result_t<void> graph_t::write(const path_t& path, rope_t value) {'),
+    ('core/src/graph.cpp:4530', 'result_t<void> graph_t::write(const path_t& path, rope_t value) {'),
     # core/src/op_resolve_walk.hpp
     ('core/src/fwd_reply.hpp:109', 'void tlv_sliced(std::span<const std::byte> wire) {'),
     ('core/src/op_resolve_walk.hpp:1007',
@@ -873,9 +873,9 @@ ANCHORS = [
     ('tools/cortexm0_footprint.py:151', 'cxx_flags = ['),
     ('tools/cortexm0_footprint.py:158', '"-DLIBTRACER_NO_ATOMIC",'),
     ('tools/cortexm0_footprint.py:172', '"--specs=nano.specs",'),
-    ('core/tests/CMakeLists.txt:1737', 'add_executable(substrate_test_no_atomic'),
-    ('core/tests/CMakeLists.txt:1752', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
-    ('core/tests/CMakeLists.txt:1753', '    LIBTRACER_NO_ATOMIC'),
+    ('core/tests/CMakeLists.txt:1746', 'add_executable(substrate_test_no_atomic'),
+    ('core/tests/CMakeLists.txt:1761', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
+    ('core/tests/CMakeLists.txt:1762', '    LIBTRACER_NO_ATOMIC'),
     # The leading indent is load-bearing: the bare token also appears in the comment
     # three lines above the executable, and an anchor that matches both is not an anchor.
 

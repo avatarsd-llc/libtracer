@@ -1,0 +1,12 @@
+{
+  "name": "batch-composed-folded",
+  "category": "stream",
+  "hex": "01402E000C00080000002A36FE9C971701000C0000000000DC05000006FFFFFF010002006400010002006500010002006600",
+  "total_bytes": 50,
+  "decoded": {
+    "type": "0x01 VALUE",
+    "structured": true,
+    "meaning": "VALUE{ TIME u64=1700000000000000000, VALUE i32[3]={0,1500,-250}, VALUE u16=0x0064, VALUE u16=0x0065, VALUE u16=0x0066 } — the SAME composed batch as stream/batch-composed-standalone in the FOLDED carriage: the single structured VALUE of a propagate(v, FOLD) branch-write node, the one value RFC-0005 §B admits (RFC-0025 §4.1.2 clause 6, erratum 2026-08-23)",
+    "note": "byte-identical to stream/batch-composed-standalone EXCEPT the header type byte (0x80 -> 0x01). That is the whole of the carriage rule, and this pair is what makes it checkable rather than merely stated. A folded batch presents no user-range byte to the graph at all, which is why claim 5 survives the fold untouched. An implementation that seats a 0x80 child in a branch-write node emits a frame every conforming decomposer rejects"
+  }
+}

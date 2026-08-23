@@ -1116,8 +1116,8 @@ fan-out pressure.
   `qos_settings` block and the `2 batch` class row lose their graph-side flush triggers —
   `batch_count` / `batch_window_ns` are marked retired, and the class row says a batch is a
   value the owner composes.
-- `docs/reference/22-backpressure-and-sizing.md` — the compose → swap → propagate recipe
-  (Amendment 4 §4.1.3 clause 4), beside the existing monitoring recipes.
+- `docs/reference/22-backpressure-and-sizing.md` §3.5 — the high-rate-acquisition archetype and
+  its Recipe C, **compose → swap → push** (Amendment 4 §4.1.3 clause 4).
 - `core/include/libtracer/batch.hpp` — the reference composition helper (Amendment 4
   §4.1.3 clause 4): one layout, both carriages, sample bytes referenced rather than copied.
 - `docs/reference/02-graph-model.md` — the delivery-class ladder and the

@@ -29,9 +29,44 @@
 
 namespace tr::wire {
 
+/** @brief Wire bytes a TLV header occupies under @p opt: 4, or 6 when the `ll` bit widens the
+ *         length to u32. */
+[[nodiscard]] constexpr std::size_t header_bytes(opt_t opt) noexcept { return opt.ll ? 6u : 4u; }
+
+/**
+ * @brief Store a TLV header into an exactly-sized @p out span — the header byte layout
+ *        (ADR-0048 §3) in the form a caller composing into an OWNED SEGMENT needs.
+ *
+ * The rope-native composer (`%batch.hpp`'s `compose_batch`) writes into a segment it allocated,
+ * not into a growing container, so it cannot reach `emit_header`. Length is u16 LE, or u32 LE
+ * when `opt.ll` is set; the width follows `opt.ll` verbatim — this writes a header, it does not
+ * decide one.
+ *
+ * @note This is a **deliberate second spelling** of the same four bytes, not an oversight, and
+ *       it joins the ones `emit_header` already names below (`emit_path_ref_into`, the
+ *       `fwd_frame_view` / `stack_writer` tiers). Making `emit_header` delegate here was tried
+ *       and **reverted on measurement**: the `resize`-then-store body re-partitioned the
+ *       inliner's budget on the forward hop, growing
+ *       `fwd_router_t::route_fwd_forward<rope_cursor>` by 319 B and
+ *       `graph_t::dispatch_edge_remote` by 32 B on the symbol-size ratchet
+ *       (`bench/symbol_ratchet.json`) — a code-shape change on the hottest leg the router has,
+ *       for a header nobody was misspelling. The equivalence is held the way this tree already
+ *       holds it for the other tiers: argued here and pinned by the conformance vectors both
+ *       forms produce.
+ *
+ * Precondition: `out.size() >= header_bytes(opt)`.
+ */
+inline void store_header(std::span<std::byte> out, type_t type, opt_t opt,
+                         std::size_t body_len) noexcept {
+    out[0] = static_cast<std::byte>(std::to_underlying(type));
+    out[1] = static_cast<std::byte>(opt.encode());
+    detail::store_le(out.subspan(2), static_cast<std::uint32_t>(body_len), opt.ll ? 4u : 2u);
+}
+
 /**
  * @brief Append just a TLV header: `<type> <opt> <length>` — the ONE representation of the
- *        header byte layout (ADR-0048 §3).
+ *        header byte layout (ADR-0048 §3) for a growing container; `store_header` is its
+ *        span-form twin for a caller writing into an owned segment.
  *
  * Length is u16 LE, or u32 LE when the `opt.ll` bit is set. The width follows `opt.ll`
  * verbatim — this writes a header, it does not decide one. The LL decision belongs one level

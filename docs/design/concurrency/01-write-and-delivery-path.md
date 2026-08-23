@@ -30,7 +30,7 @@ lock each stage takes, where the buffers come from, and what the delivery legs c
 The handle overload is the whole of `write(vertex_handle_t, rope_t, caller)`
 (`graph.cpp:2684-2686`) — a call straight into `write_impl`. A **path**-addressed write resolves
 first, and `find_ptr` takes `map_mutex_` in shared mode (`graph.cpp:1622-1623`), so the path overload
-(`graph.cpp:4521`) pays one shared map hold that the handle overload does not.
+(`graph.cpp:4530`) pays one shared map hold that the handle overload does not.
 
 One allocation-shaped detail on the store leg, and it used to be two. Every role delivers
 without recloning. The retaining roles deliver **the exact pointer `store_value` handed back**

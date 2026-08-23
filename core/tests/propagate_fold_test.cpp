@@ -26,14 +26,22 @@
  */
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
+#include <fstream>
 #include <initializer_list>
+#include <iterator>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
+#include "libtracer/batch.hpp"
+#include "libtracer/mem_borrowed.hpp"
+#include "libtracer/mem_heap.hpp"
 #include "libtracer/tlv.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
@@ -113,6 +121,24 @@ std::string root_name_of(std::span<const std::byte> frame) {
 /** @brief True iff @p needle appears contiguously inside @p hay. */
 bool contains(std::span<const std::byte> hay, std::span<const std::byte> needle) {
     return std::ranges::search(hay, needle).begin() != hay.end();
+}
+
+/** @brief Byte equality over two spans. */
+bool same_bytes(std::span<const std::byte> a, std::span<const std::byte> b) {
+    return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin());
+}
+
+/** @brief The raw bytes of a conformance vector's `input.bin`. */
+std::vector<std::byte> vector_bytes(std::string_view case_dir) {
+    const std::filesystem::path p =
+        std::filesystem::path{LIBTRACER_VECTORS_DIR} / case_dir / "input.bin";
+    std::ifstream f(p, std::ios::binary);
+    const std::vector<char> raw((std::istreambuf_iterator<char>(f)),
+                                std::istreambuf_iterator<char>());
+    std::vector<std::byte> out(raw.size());
+    for (std::size_t i = 0; i < raw.size(); ++i)
+        out[i] = static_cast<std::byte>(static_cast<unsigned char>(raw[i]));
+    return out;
 }
 
 /**
@@ -274,6 +300,59 @@ void test_disjoint_subtrees_are_several_frames() {
           "neither frame contains the other — there is no container across subtrees");
 }
 
+/**
+ * @brief RFC-0025 §4.1.3 (Amendment 4) clause 2 — a sweep carries a COMPOSED batch on a STORED
+ *        vertex with **zero graph change**, and the emitted frame is the vector.
+ *
+ * The refusal above and this are the two halves of one ruling. The fold refuses a **per-sample
+ * ring** — N stored entries, no single foldable value. Batching FOR a fold means composing onto
+ * the vertex the sweep visits: the app ropes its samples into ONE value, and the sweep then sees
+ * an ordinary single `VALUE`, which §B admits. Nothing in the graph was added to make this work,
+ * which is precisely what the vector records.
+ */
+void test_fold_carries_a_composed_batch() {
+    std::printf("§4.1.3 — the fold carries a COMPOSED batch with zero graph change:\n");
+    log_t at_root;
+    auto on_root = [&at_root](const rope_t& v) { at_root.push_back(bytes_of(v)); };
+    graph_t g;
+    vertex_handle_t s = g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
+    vertex_handle_t adc = g.register_vertex(path_t("/s/adc0"), role_t::STORED_VALUE);
+    check(g.subscribe(path_t("/s"), on_root).has_value(), "subtree subscriber at /s");
+
+    // The app's own sample buffers, held as views — exactly what a composition references.
+    std::vector<std::vector<std::byte>> frames;
+    for (const std::uint16_t r : {0x0064, 0x0065, 0x0066}) {
+        std::vector<std::byte> f;
+        tr::wire::emit_value_le<std::uint16_t>(f, r);
+        frames.push_back(std::move(f));
+    }
+    std::vector<tr::view::view_t> views;
+    for (const std::vector<std::byte>& f : frames)
+        views.push_back(
+            tr::view::view_t::over(tr::view::borrow_const(std::span<const std::byte>(f))));
+    constexpr std::array<std::int32_t, 3> kOffsets{0, 1500, -250};
+    constexpr std::int64_t kBase = 1'700'000'000'000'000'000;
+
+    rope_t batch = tr::wire::compose_batch(
+        tr::mem::heap_backend(), tr::wire::batch_carriage_t::FOLDED, kBase, views, kOffsets);
+    check(batch.link_count() == 1 + views.size(), "the composition is head + one link per sample");
+    const std::vector<std::byte> batch_bytes = bytes_of(batch);
+    check(g.assign(adc, std::move(batch)).has_value(), "swap the composed batch in as the value");
+
+    check(g.propagate(s, emission_mode_t::FOLD).has_value(),
+          "the folded sweep SUCCEEDS — a composed batch is an ordinary single VALUE");
+    check(at_root.size() == 1, "one branch-write frame for the swept subtree");
+    if (at_root.size() != 1) return;
+
+    check(root_name_of(at_root[0]) == "s", "rooted at /s, carrying its leading NAME per §B");
+    check(contains(at_root[0], std::span<const std::byte>(batch_bytes)),
+          "the composed batch rides the frame VERBATIM — the graph moved bytes it never read");
+    check(same_bytes(at_root[0], vector_bytes("stream/fold-carries-composed-batch")),
+          "stream/fold-carries-composed-batch is byte-exact against the emitted frame");
+    check(same_bytes(batch_bytes, vector_bytes("stream/batch-composed-folded")),
+          "... and the seat is stream/batch-composed-folded, byte for byte");
+}
+
 }  // namespace
 
 int main() {
@@ -283,5 +362,6 @@ int main() {
     test_trailer_carrying_node_is_rejected();
     test_selected_stream_is_refused();
     test_disjoint_subtrees_are_several_frames();
+    test_fold_carries_a_composed_batch();
     return tr::testing::summary("propagate_fold");
 }
