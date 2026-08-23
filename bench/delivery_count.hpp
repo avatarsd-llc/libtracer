@@ -53,7 +53,8 @@ namespace bench {
  * monotonic and read one at a time, so a snapshot taken while another thread delivers can
  * tear — harmless here, where both snapshots bracket a single-threaded timed loop.
  *
- * @param a The earlier snapshot, @param b the later one.
+ * @param a The earlier snapshot.
+ * @param b The later one.
  */
 [[nodiscard]] inline std::uint64_t drops_between(
     const tr::graph::graph_t::delivery_drops_t& a,
@@ -91,6 +92,12 @@ namespace bench {
  * moves no historical number, and why the day it does is the day it earned its keep.
  *
  * @param mode  The row's mode, so a warning names the series it belongs to.
+ * @param S     Payload bytes — part of the row's key, printed with the warning so a short
+ *              count identifies its own point.
+ * @param F     Fan-out (subscribers per endpoint).
+ * @param E     Endpoint count.
+ * @param want  The arithmetic ceiling the count is compared against, never published.
+ * @param got   Deliveries this run observed.
  * @param secs  The timed window; @p got over it is the figure returned.
  */
 [[nodiscard]] inline double delivered_rate(const char* mode, std::size_t S, std::size_t F,
