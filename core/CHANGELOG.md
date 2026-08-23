@@ -14,33 +14,7 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
-### Fixed
-
-- **`tr::detail::thread_id_t` — the ownership stamp no longer calls `pthread_self()`, which
-  ABORTED at boot on ESP-IDF** ([#1532](https://github.com/avatarsd-llc/libtracer/issues/1532)).
-  **A released-version regression: v0.15.0 does not boot on an ESP-IDF node**, and this is the
-  fix a v0.15.1 patch would carry. `transport_vertex_t`'s RFC-0014 S6 control-plane seam
-  (`e65e5fee`, shipped in v0.15.0) stamped and checked mutex ownership with
-  `std::this_thread::get_id()`, which lowers to `pthread_self()`. ESP-IDF's implementation looks
-  the calling task up in its `esp_pthread_t` registry and **asserts** when it is absent — and a
-  task created with `xTaskCreate`, the IDF **main task** running `app_main` included, has no such
-  registration. Under the IDF default `CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_SILENT=y` that is
-  a **silent `abort()`**: a bare reset loop, reverted by the OTA rollback watchdog. With IDF's
-  assert compiled out it is worse than unavailable — `pthread_self()` answers `NULL`, the stamp
-  equals the unowned sentinel, and **every** native task reports itself as the owner of an
-  **unowned** mutex. The identity was not merely missing there; it was inverted.
-  `tr::detail::this_thread_id()` (`core/include/libtracer/thread_id.hpp`) answers
-  `xTaskGetCurrentTaskHandle()` on ESP-IDF — always valid, never allocating, correct for
-  pthread-created and native tasks alike — and `std::this_thread::get_id()` everywhere else, with
-  the sentinel held distinguishable from every live value **by construction** (a pre-scheduler
-  null handle maps to a private marker rather than to the unowned value). **S6's semantics are
-  unchanged**: same stamp / check / clear points, same relaxed memory orders, same assert
-  message. `self_heal_link_t`'s worker re-entrancy guard is ported with the same primitive — its
-  comparison also ran on any caller's thread, native tasks included. Gated at the object level by
-  `tools/check_esp_thread_id.py` in the esp-idf `full_node` job, because a successful build
-  proves nothing here: measured on `full_node`/esp32c6, before the fix `transport_vertex.cpp.obj`
-  and `self_heal_link.cpp.obj` both list `U pthread_self`, and after it neither does and both
-  list `U xTaskGetCurrentTaskHandle`.
+## [0.15.1] — 2026-08-23
 
 ### Added
 
@@ -74,6 +48,34 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 - **`tr::wire::emit_batch` gains a trailing `carriage` parameter**, defaulted to
   `batch_carriage_t::STANDALONE`. Existing calls are unaffected and emit byte-identical output.
+
+### Fixed
+
+- **`tr::detail::thread_id_t` — the ownership stamp no longer calls `pthread_self()`, which
+  ABORTED at boot on ESP-IDF** ([#1532](https://github.com/avatarsd-llc/libtracer/issues/1532)).
+  **A released-version regression: v0.15.0 does not boot on an ESP-IDF node**, and this patch
+  release exists to carry the fix. `transport_vertex_t`'s RFC-0014 S6 control-plane seam
+  (`e65e5fee`, shipped in v0.15.0) stamped and checked mutex ownership with
+  `std::this_thread::get_id()`, which lowers to `pthread_self()`. ESP-IDF's implementation looks
+  the calling task up in its `esp_pthread_t` registry and **asserts** when it is absent — and a
+  task created with `xTaskCreate`, the IDF **main task** running `app_main` included, has no such
+  registration. Under the IDF default `CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_SILENT=y` that is
+  a **silent `abort()`**: a bare reset loop, reverted by the OTA rollback watchdog. With IDF's
+  assert compiled out it is worse than unavailable — `pthread_self()` answers `NULL`, the stamp
+  equals the unowned sentinel, and **every** native task reports itself as the owner of an
+  **unowned** mutex. The identity was not merely missing there; it was inverted.
+  `tr::detail::this_thread_id()` (`core/include/libtracer/thread_id.hpp`) answers
+  `xTaskGetCurrentTaskHandle()` on ESP-IDF — always valid, never allocating, correct for
+  pthread-created and native tasks alike — and `std::this_thread::get_id()` everywhere else, with
+  the sentinel held distinguishable from every live value **by construction** (a pre-scheduler
+  null handle maps to a private marker rather than to the unowned value). **S6's semantics are
+  unchanged**: same stamp / check / clear points, same relaxed memory orders, same assert
+  message. `self_heal_link_t`'s worker re-entrancy guard is ported with the same primitive — its
+  comparison also ran on any caller's thread, native tasks included. Gated at the object level by
+  `tools/check_esp_thread_id.py` in the esp-idf `full_node` job, because a successful build
+  proves nothing here: measured on `full_node`/esp32c6, before the fix `transport_vertex.cpp.obj`
+  and `self_heal_link.cpp.obj` both list `U pthread_self`, and after it neither does and both
+  list `U xTaskGetCurrentTaskHandle`.
 
 ## [0.15.0] — 2026-08-23
 

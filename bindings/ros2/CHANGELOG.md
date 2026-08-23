@@ -18,6 +18,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.15.1] — 2026-08-23
+
+No `rmw_tracer`-specific changes. 0.15.1 is a patch release for an ESP-IDF boot regression
+in the C++ core (core [#1532](https://github.com/avatarsd-llc/libtracer/issues/1532)); the
+package builds against that core but targets no FreeRTOS platform, so nothing in its own
+surface moves. Core's `tr::wire::compose_batch` (RFC-0025 §4.1.3 Amendment 4) is additive and
+does not change the QoS-mapping picture recorded under [0.15.0] — a future `rmw_publish` may
+use it to compose a multi-sample value, but no `rmw_tracer` translation unit calls it today.
+The heading tracks the libtracer release train, not a released ament package version.
+
 ## [0.15.0] — 2026-08-23
 
 ### Changed
