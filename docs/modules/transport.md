@@ -50,7 +50,7 @@ A transport that can hand up *owning* frames implements the rope-receiver seam
 view delivery](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md),
 generalized to ropes by [ADR-0053 — lazy rope-backed decode, view partial-path
 routing](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0053-lazy-rope-backed-decode-view-partial-path-routing.md)):
-it overrides `delivers_ropes()` (`core/include/libtracer/transport.hpp:621`) and
+it overrides `delivers_ropes()` (`core/include/libtracer/transport.hpp:656`) and
 delivers each inbound frame as a `rope_t` of refcounted links over segments drawn
 from a host-injected `mem_backend_t`. A contiguous frame is the single-link case; a
 scattered one — a CAN reassembly group, a fragmented WebSocket message — crosses the
@@ -146,7 +146,7 @@ using config_t = flat_node_config_t;
 ```
 
 The routing plane reaches the facet through exactly one door, `tr::net::bus_of`
-(`core/include/libtracer/transport.hpp:783`), and every consumer asks there: the registry's
+(`core/include/libtracer/transport.hpp:818`), and every consumer asks there: the registry's
 mount-shape stamp and its two peer-resolution paths, `fwd_router_t::add_child`'s peer wiring,
 and the connection vertex's synthesized peer listing. `transport_t::bus()` itself is
 untouched — still a virtual, still `nullptr` by default — so a transport may still *be* a
@@ -352,7 +352,7 @@ flowchart LR
   and a callable destroyed early dangles exactly like a stale `ctx`.
 - **Overriding `send(iov)` is not optional for a scatter-gather wire.** The base
   implementation gathers into a temporary buffer and, when that allocation fails,
-  **drops the frame** rather than aborting (`transport.hpp:457`). A transport with a
+  **drops the frame** rather than aborting (`transport.hpp:492`). A transport with a
   native `sendmsg`/`writev` that does not override it silently pays a copy per
   forward hop and inherits a drop path it did not intend.
 - **The egress gather draws from the link's own injected store.** That temporary — and

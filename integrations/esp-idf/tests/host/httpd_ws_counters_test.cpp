@@ -349,6 +349,55 @@ void test_stats_snapshot_tracks() {
     fake_httpd::instance().close_all();
 }
 
+// ---------------------------------------------------------------------------
+// 9 — #1494: the DIRECTED handle answers the link's drop counters, not zeros.
+// ---------------------------------------------------------------------------
+/**
+ * @brief `peer_link()`'s handle projects `drop_stats()` instead of inheriting the all-zero
+ *        base (#1494).
+ *
+ * The transport plane is best-effort by contract and `drop_stats()` is the ONLY feedback it
+ * offers, so a handle that answers zero turns a counted shed back into a silent loss for the
+ * exact caller shape that cannot reach past it — the routing plane, which holds a directed
+ * peer as a bare `transport_t*` and nothing else.
+ *
+ * The case drives a REAL drop through the handle, then asserts three things: the link counted
+ * it, the handle reports the same block (so the projection is live, not a snapshot), and the
+ * pre-drop reading was not already non-zero (so a passing block cannot be an accident).
+ */
+void test_directed_handle_projects_link_drop_stats() {
+    std::printf("#1494 the directed peer handle answers the LINK's drop counters:\n");
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    claim(770);
+    drain();
+
+    tr::net::transport_t* const to = link->peer_link("p0");
+    check(to != nullptr, "the directed endpoint resolved while the peer was open");
+    if (to == nullptr) return;
+    const auto before = to->drop_stats();
+    check(before.dropped_tx == link->drop_stats().dropped_tx,
+          "the handle agrees with its link before anything is dropped");
+
+    // The same provocation case 3 uses: resolve, let the session go, then send.
+    fake_httpd::instance().close_session(770);
+    drain();
+    to->send(std::span<const std::byte>(kBody));
+    drain();
+
+    const auto after = to->drop_stats();
+    const auto link_after = link->drop_stats();
+    check(after.dropped_tx == before.dropped_tx + 1,
+          "the drop this handle caused is VISIBLE through this handle");
+    check(after.dropped_tx == link_after.dropped_tx && after.dropped_rx == link_after.dropped_rx &&
+              after.malformed_rx == link_after.malformed_rx,
+          "and the whole block is the link's, sampled live");
+    check(before.dropped_tx == 0,
+          "control: the reading was zero BEFORE the drop, so the match is not vacuous");
+
+    link.reset();
+    fake_httpd::instance().close_all();
+}
+
 }  // namespace
 
 int main() {
@@ -361,6 +410,7 @@ int main() {
     test_condemn_is_counted();
     test_condemned_peer_leaves_the_facet();
     test_stats_snapshot_tracks();
+    test_directed_handle_projects_link_drop_stats();
     if (g_failures != 0) {
         std::printf("FAILED: %d check(s)\n", g_failures);
         return 1;

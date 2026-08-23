@@ -433,7 +433,35 @@ class transport_t {
 
     virtual ~transport_t() = default;
 
-    /** @brief Emit one frame (a complete TLV's bytes) onto the wire. */
+    /**
+     * @brief Emit one frame (a complete TLV's bytes) onto the wire.
+     *
+     * @par The transport plane is BEST-EFFORT by contract, and a drop MUST be counted.
+     * This is the one place in libtracer where the refuse-by-value law
+     * (`docs/reference/22-backpressure-and-sizing.md` §1, the third reading rule)
+     * does not apply, and the reason is not an oversight: **there is no wire carrier for
+     * backpressure in v1** (the per-edge credit window is parked as the v2 escalation,
+     * RFC-0025 §4.6.1 clause 7). A link that could refuse by value would have nobody to
+     * refuse *to* — the caller is a forwarding hop with a frame it cannot un-receive, and the
+     * peer cannot be told to slow down. So the contract is:
+     *
+     * - **`void` is deliberate, and stays.** A returned status here would be a promise the
+     *   plane cannot keep: on every real link the frame is queued and written later, on
+     *   another task, so "sent" at this call site can only ever mean "accepted", which is
+     *   what a `void` already says. Callers MUST NOT read a successful return as delivery.
+     * - **A link that drops a frame MUST count it** in @ref drop_stats — `dropped_tx` for a
+     *   frame the caller believed sent, `dropped_rx` / `malformed_rx` on the ingress side.
+     *   That counter is the ONLY feedback this plane offers, which is exactly why it is
+     *   mandatory rather than a courtesy: an uncounted drop is invisible to a deployment,
+     *   and `core/STYLE.md` §Introspection forbids the silent loss it hides.
+     * - **The counter is how a monitor closes the loop.** The tally is wire-readable as
+     *   `read <any-vertex>:stats.link.<child>` (RFC-0010 Amendment 2), so a supervisor polls
+     *   it and reacts, in place of the per-frame refusal v1 has no room for.
+     *
+     * @note Re-opening this is scoped to **M5** (a real socket transport), where a link that
+     *       owns its own socket buffer has something to push back WITH. Until then, "counted
+     *       shed" IS the transport contract.
+     */
     virtual void send(std::span<const std::byte> frame) = 0;
 
     /**
@@ -452,6 +480,13 @@ class transport_t {
      * Hand a rope's `to_iovec()` straight to the wire. The default gathers into a
      * temporary and calls @ref send(std::span<const std::byte>); transports with native
      * scatter-gather (sendmsg/writev/RDMA SGE) override this to avoid the copy.
+     *
+     * **The same best-effort contract as @ref send(std::span<const std::byte>)**: `void` is
+     * deliberate, and a gather this overload cannot complete is DROPPED and COUNTED in
+     * @ref drop_stats (`dropped_tx`) — never truncated, and never silently lost. The default
+     * body below is where that rule is enforced for every transport that does not override
+     * it.
+     *
      * @param iov The spans to emit, in order, as a single frame.
      */
     virtual void send(std::span<const std::span<const std::byte>> iov) {
