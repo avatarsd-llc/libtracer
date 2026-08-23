@@ -1215,6 +1215,30 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     void queue_send(const session_ref_t& to,
                     std::span<const std::byte> frame);  // one-span sugar over the gather
 
+    /**
+     * @brief Send a directed reply to @p to RIGHT NOW — the fork @ref queue_send is not
+     *        (httpd task, inside this link's handler frame; @ref peers_m_ must NOT be held).
+     *
+     * The #1494 fix. A reply serviced in-call is already on the task that owns the
+     * descriptor, so marshalling it costs a gather-copy, a pool slot and a round through
+     * the control mbox to arrive at the same socket write — and the mbox's one-message-per
+     * -pass drain is what put that issue's throughput cliff at the pool depth (the in-call
+     * reserve is claimable once per drain, not once per request, so a pipelining client's
+     * reply falls into the general pool and an in-call send never waits). Off the queue,
+     * a reply cannot be lost to a full pool, a full mbox or a fan-out's occupancy, and it
+     * can strand no slot on any ESP-IDF. The definition carries the full argument.
+     *
+     * Accounted exactly as @ref tx_work accounts a queued send: the same two liveness
+     * tests, @ref note_tx_skip for a peer that is gone and @ref note_tx_result for a
+     * result that names one. A single-span reply is written from the CALLER's memory with
+     * no copy at all; a rope is gathered through one pool slot used as scratch, claimed
+     * and released inside this call and posted nowhere.
+     *
+     * @param to  The destination session, resolved and identity-checked by the caller.
+     * @param iov The reply, as the rope's segments — sent as ONE WebSocket frame.
+     */
+    void send_in_call(const session_ref_t& to, std::span<const std::span<const std::byte>> iov);
+
     /** @brief Allocate the once-per-link RX scratch + TX slot pool and its inline payload
      *         block (nothrow), at the sizes the constructor resolved. RX failure is
      *         survivable (per-frame nothrow buffer); a link with no TX pool drops every
@@ -1666,12 +1690,20 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * @brief Send @p payload to @p slot's socket RIGHT NOW rather than through the work
      *        queue (httpd task only; @ref peers_m_ must NOT be held).
      *
-     * The auth exchange is the one send path that is already ON the httpd task and already
-     * holds its session, so it needs neither the pool nor `httpd_queue_work` — the queue
-     * exists to marshal sends from OTHER tasks onto this one. Bracketed like @ref tx_work's
+     * The auth exchange was the first send path that is already ON the httpd task and
+     * already holds its session, so it needs neither the pool nor `httpd_queue_work` — the
+     * queue exists to marshal sends from OTHER tasks onto this one. Since #1494 the
+     * directed reply travels the same way (@ref send_in_call). Bracketed like @ref tx_work's
      * send so a short write is judged by the same rule (@ref send_guarded).
+     *
+     * @param on_wire Optional: receives the bracket's byte count for this frame. Non-zero
+     *                after a failure is the DESYNC (#951) — the frame was announced and cut
+     *                off, and the session has already been condemned inside the write — so
+     *                a caller that logs an ordinary drop must not also log that one. The
+     *                teardown callers pass nullptr: they are closing the session anyway.
      */
-    esp_err_t send_now(session_t* slot, int fd, int ws_type, std::span<const std::byte> payload);
+    esp_err_t send_now(session_t* slot, int fd, int ws_type, std::span<const std::byte> payload,
+                       std::size_t* on_wire = nullptr);
     /**
      * @brief Send a WebSocket CLOSE with @p code and tear the session down (httpd task only;
      *        @ref peers_m_ must NOT be held).
