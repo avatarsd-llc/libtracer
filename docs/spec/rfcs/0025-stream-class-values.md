@@ -991,31 +991,65 @@ Everything below is that sentence unpacked.
 
 #### 4.6.2 Evidence for Amendment 2 (measured)
 
-The basis for the judgement above, banked 2026-08-20:
+> **Erratum (2026-08-24), [#1495](https://github.com/avatarsd-llc/libtracer/issues/1495) — see
+> §Erratum (§4.6.2) at the end of this document.** This section's figures are **evidence**, not a
+> conformance bar, and the table below is restated accordingly: the PORTABLE quantities — the
+> premium, the ratios, the per-sample amortization and the byte figures — are primary; the bare
+> nanosecond absolutes are demoted to a **host-stamped basis** for the percentages. Nothing here
+> was ever normative, and no wire surface moves.
+
+The basis for the judgement above, banked 2026-08-20. These are **premiums and ratios**, which is
+what survived re-measurement on a second machine:
 
 | measurement | figure |
 | --- | ---: |
-| STREAM ring premium per write | **+29 ns (+54 %)**, **fixed — independent of depth** |
+| STREAM ring premium per write | **+54 %**, **fixed — independent of depth** |
 | …decomposed: probe-alloc | 7.4 ns |
 | …decomposed: deque op | 4.4 ns |
 | …decomposed: double stripe-mutex / drain | ~17 ns |
-| Baseline lock-free write (0 subscribers / 1 subscriber) | **53 ns / 71 ns** |
-| 4 writers on one vertex — lock-free | **4.59 M/s** |
-| 4 writers on one vertex — STREAM | **1.73 M/s** (**0.14x** of the single-threaded rate) |
+| 4 writers on one vertex — STREAM vs lock-free | **0.14x** (1.73 M/s vs 4.59 M/s) |
 | Batch folding — per-sample amortization | **32.0x** (**2.54 ns/sample**) |
 | Batch folding — bytes retained per sample | **~9.3 B** vs **172 B** unfolded |
 | Batch folding — per-sample timestamp cost (uniform, Amendment 1) | **0 B** |
 
+*(Basis for the percentages, one host, not a bar: the +54 % premium is **+29 ns** against a
+baseline lock-free write of **53 ns / 71 ns** at 0 / 1 subscribers, banked 2026-08-20 on an idle
+EPYC-class host at a single pinned logical CPU. The exact host, governor and compiler were not
+recorded at banking time and are **not recoverable** from the record — which is itself the reason
+these absolutes are demoted here rather than re-stated. They are that machine's numbers and
+**nothing conforms to them**: the project's own studio EPYC 9115 reads the same two legs at
+**77.0 ns** and **143.6 ns** on unmodified `main` — 1.40x and 1.71x — with no code between the two
+readings. Compare [RFC-0027](0027-label-switched-path-compression.md) §12.4's generality caveat and
+[methodology](../../methodology.md)'s rule that an absolute without its host is unusable rather
+than merely imprecise. Re-banking these two legs from registered instruments with `host_guard.py`
+provenance is tracked on [#1485](https://github.com/avatarsd-llc/libtracer/issues/1485).)*
+
+**What each figure times, stated because two of them were read as the same quantity.** The
+53 ns / 71 ns baseline is `vertex_t::store` **alone** — the producer-side publish, at 0 and 1
+subscribers, and nothing else. The receiver-side **admission** leg is a *different operation*
+against a *different structure*, and §4.6.2 states **no figure for it**; a whole-`graph_t::write`
+measurement on a STREAM vertex (publish + admission + `deliver_current`'s drain) is a superset of
+the baseline and not comparable with it on any host. Any bench that means to gate one of these
+must name which one it times.
+
+**The premium is RETROSPECTIVE.** It prices machinery this amendment judged and
+[PR #1490](https://github.com/avatarsd-llc/libtracer/pull/1490) then **deleted outright** — the
+`kRingAppendProbe` heuristic, the deque append under the stripe mutex and the role fork between
+them are gone, not made optional. So the +54 % is evidence for **why the removal was right**, and
+it is not a bar anything on `main` can be measured against: the code it priced no longer exists.
+The point downstream of that deletion got **faster**, not dearer — `eptype-stream` moved
+3.609 → 3.888 M/s (+7.7 %) and p50 290 → 270 ns in the same PR.
+
 Two readings decide the amendment:
 
-1. **The premium is fixed, not proportional.** +29 ns is paid on *every* write at *every* depth,
+1. **The premium is fixed, not proportional.** +54 % is paid on *every* write at *every* depth,
    including depth 1 — so a producer-side ring taxes the whole write path for a service only some
    consumers want. Moving it to the receiver makes the party that wants depth the party that pays
    for it.
-2. **The producer-side ring does not survive fan-out.** Four writers on one vertex go from
-   4.59 M/s lock-free to 1.73 M/s with the ring — 0.14x of the single-threaded rate — which is the
-   same collapse shape ADR-0079's amendment measured for a shared allocation store. Both have one
-   cause: one shared, locked structure behind a many-writer path.
+2. **The producer-side ring does not survive fan-out.** Four writers on one vertex fall to 0.14x
+   of the single-threaded rate with the ring — the same collapse shape ADR-0079's amendment
+   measured for a shared allocation store. Both have one cause: one shared, locked structure
+   behind a many-writer path.
 
 Contextual composition figures are ADR-0079's, quoted in clause 3 above; they are that ADR's
 banked #941 sweep, not a measurement of this RFC.
@@ -1352,3 +1386,63 @@ implementation of the folded seat is
 **Text corrected alongside:** [reference/05](../../reference/05-protocol-tlvs.md) — the
 `delivery_policy` class table's `2 batch` row and the §User range BATCH assignment, both of which
 restate clause 6 and inherited its unscoped reading.
+
+## Erratum (2026-08-24) — §4.6.2's evidence is stated as portable premiums and ratios; its bare nanosecond absolutes are demoted to a host-stamped basis ([#1495](https://github.com/avatarsd-llc/libtracer/issues/1495))
+
+**What the text said.** §4.6.2 banked the evidence for Amendment 2 as a table mixing two kinds of
+quantity without distinguishing them: portable ones (a **+54 %** premium, a **0.14x** fan-out
+collapse, **32.0x** per-sample amortization, **~9.3 B vs 172 B** retained, **0 B** timestamp cost)
+and bare cross-machine absolutes (**53 ns / 71 ns** baseline, **+29 ns** premium, **4.59** and
+**1.73 M/s**) stated with **no host, no governor, no compiler and no optimisation level recorded**.
+
+**What was wrong — and it is a defect of PRESENTATION, not of measurement.** Every figure was
+honestly measured. But an absolute without its host is unusable rather than merely imprecise, and
+these were read as a bar. On the project's own studio EPYC 9115, quiet, the **unmodified**
+pre-existing code misses two of them:
+
+| §4.6.2 figure | unmodified `main` (`bbe03054`), quiet studio host | ratio |
+| --- | ---: | ---: |
+| baseline lock-free write, 53 ns | **77.0 ns** | **1.40x** |
+| the derived ring-append figure, 82–84 ns | **143.6 ns** | **1.71x** |
+
+A criterion that the code already on `main` fails, and that reverting the change under test would
+not fix, is not measuring the change — it is measuring the distance between two machines. Two
+further confusions rode on the same table:
+
+- **A definitional mismatch.** 53 ns / 71 ns times `vertex_t::store` **alone**, producer-side, at
+  0 and 1 subscribers. The receiver-side **admission** leg is a different operation and §4.6.2
+  gives **no figure for it**; a whole-`graph_t::write` measurement on a STREAM vertex is publish
+  *plus* admission *plus* the drain — a superset that cannot agree with the baseline on any host.
+- **A retrospective premium read as a live bar.** The +54 % / +29 ns prices machinery this very
+  amendment judged and [PR #1490](https://github.com/avatarsd-llc/libtracer/pull/1490)
+  (`bdd1066b`) then deleted outright — `vertex.hpp` records it as **"GONE, not made optional"**.
+  It is evidence for why the removal was right. Nothing on `main` can be measured against it,
+  because the code it priced is not there; and the gated point downstream of the deletion got
+  **faster** (`eptype-stream` 3.609 → 3.888 M/s, +7.7 %; p50 290 → 270 ns).
+
+**The correction.** §4.6.2 now leads with the portable quantities and demotes the absolutes to a
+parenthetical **basis for the percentages**, stamped with what is honestly known: *banked
+2026-08-20 on an idle EPYC-class host at a single pinned logical CPU*. The exact host, governor and
+compiler were **not recorded at banking time and are not recoverable from the record** — stated
+plainly rather than guessed, since guessing is the failure being corrected. The section also now
+says what each figure times, and that the premium is retrospective. This follows
+[RFC-0027](0027-label-switched-path-compression.md) §12.4's precedent — figures kept, their
+**generality** explicitly marked unmeasured — and [methodology](../../methodology.md)'s standing
+rule that this page never publishes an absolute without its host.
+
+**Caps that never existed here.** The "**53–55 ns**" plain-write and "**82–84 ns**" ring-append
+caps that circulated as acceptance criteria appear **nowhere in this RFC**. They were synthesized
+downstream by adding the +29 ns premium to the 53/71 ns basis and widening it into a range; they
+entered [#1461](https://github.com/avatarsd-llc/libtracer/issues/1461)'s acceptance list and
+PR #1490's acceptance table from there. This erratum does not retire them, because this document
+never stated them. It records their derivation so nothing quotes them back to §4.6.2 as normative.
+
+**Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). §4.6.2
+is **informative** — an evidence appendix, carrying no RFC-2119 keyword and imposing no obligation
+on any implementation. **No wire surface moves:** no grammar, frame shape, type code, `opt` bit or
+error identity changes, and no published conformance vector's bytes move. Not one measured value is
+altered, withdrawn or re-derived; the change is which of them lead, and what is said about the rest.
+Maintainer ruling in [#1495](https://github.com/avatarsd-llc/libtracer/issues/1495) (option (c),
+2026-08-23). Re-banking the two demoted legs from **registered** instruments — the 0-subscriber
+write and the four-writers-on-one-vertex leg, both of which came from a throwaway harness and have
+no in-tree bench — is tracked on [#1485](https://github.com/avatarsd-llc/libtracer/issues/1485).

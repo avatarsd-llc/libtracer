@@ -793,12 +793,17 @@ it has to price the move on the bench before the pin is allowed to move with it.
   gated point read **3.6 M deliveries/s while CI was building on the box and 6.0 M/s
   quiet — 1.6×**, no code between the two. Every absolute here therefore names the machine
   and the conditions it was taken under, and a figure that arrives without them is
-  unusable rather than merely imprecise —
-  [#1495](https://github.com/avatarsd-llc/libtracer/issues/1495) is open on exactly that
-  defect in a **normative** document: RFC-0025 §4.6.2 states throughput caps as bare
-  cross-machine numbers, and unmodified `main` misses two of them by **1.40× and 1.71×**
-  purely because nobody recorded which host they were cut on. Where this page mentions
-  those caps it links that issue; it does not report them as met.
+  unusable rather than merely imprecise. The worked example is
+  [#1495](https://github.com/avatarsd-llc/libtracer/issues/1495), **now corrected**: RFC-0025
+  §4.6.2's evidence appendix stated its figures as bare cross-machine absolutes, and unmodified
+  `main` missed two of them by **1.40× and 1.71×** purely because nobody recorded which host they
+  were cut on. The [2026-08-24 erratum](spec/rfcs/0025-stream-class-values.md#erratum-2026-08-24)
+  restates that section as portable premiums and ratios and demotes the absolutes to a
+  host-stamped basis — the same move this bullet asks for, applied to the document that most
+  needed it. Note what the defect was *not*: §4.6.2 is informative, so those numbers were never
+  normative caps, and the "53–55 ns" / "82–84 ns" figures quoted against them were **derived
+  downstream**, never stated by the RFC. Where this page mentions them it links the erratum; it
+  does not report them as met.
 - **Record the load context on both sides of every measurement, and wait for
   quiescence first.** `python3 bench/host_guard.py wait` before the run and
   `/proc/loadavg` either side of it: an absolute figure without its load context cannot
