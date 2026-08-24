@@ -41,6 +41,18 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **The composed branch read skips ENUMERATION-HIDDEN children** ([#492](https://github.com/avatarsd-llc/libtracer/issues/492),
+  [RFC-0016](../docs/spec/rfcs/0016-composed-branch-read.md) Amendment 1). `graph_t::read` of a
+  branch walked `registered()` children while both `:children[]` doors walk
+  `registered() && !enumeration-hidden`, so a composed read of `/net/<module>` served the hidden
+  RFC-0014 §3 creator endpoint that the listing hid — one question answered two ways. The walk now
+  takes the same `vertex_t::enumerable_member()` predicate as the other two listings, so a hidden
+  child contributes no node and no subtree. **Enumeration-shaped surfaces hide it; direct addressing
+  always sees it** — `hide_from_enumeration` governs enumeration, never reach, which is what keeps
+  RFC-0014 §6's `read <module>/conn:schema` creatability probe the discovery route for a
+  deliberately unlisted endpoint. Only a branch with a hidden child sees different reply bytes; the
+  shape is an ordinary composed `POINT`. Gated by `core/tests/subtree_read_test.cpp`.
+
 - **`delivery_policy_t::reliability` (bits 0–1) is documented as CARRIED VERBATIM, READ BY
   NOTHING** — a documentation-contract change, no code and no bytes
   ([#1204](https://github.com/avatarsd-llc/libtracer/issues/1204),

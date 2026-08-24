@@ -4087,8 +4087,16 @@ result_t<rope_t> graph_t::read_subtree_folded(vertex_handle_t vh, std::string_vi
             // pre-order equal to the emitted wire order.
             const auto first = static_cast<std::ptrdiff_t>(stack.size());
             w.v->for_each_child([this, caller, idx, &stack, &oom](vertex_t& c) {
-                if (oom) return;              // a prior sibling push failed — stop growing
-                if (!c.registered()) return;  // placeholders are not members
+                if (oom) return;  // a prior sibling push failed — stop growing
+                // THE membership predicate, the same one both `:children[]` doors take
+                // (@ref vertex_t::enumerable_member): placeholders are not members, and
+                // neither is an enumeration-hidden child. The composed read is an
+                // ENUMERATION-SHAPED surface — it answers "what is under here?" — so hiding
+                // that held on one such surface and not the other was a disagreement about
+                // membership, not a difference in kind (RFC-0016 Amendment 1 / RFC-0014 §3).
+                // Direct addressing is untouched: the hidden vertex still resolves, which is
+                // exactly what makes the §6 `conn:schema` probe the discovery route.
+                if (!c.enumerable_member()) return;
                 if (!acl_allows(&c, caller, acl_right_t::READ)) return;  // PRUNE the subtree
                 if (!stack.push_back(work_t{.v = &c, .parent = idx})) oom = true;
             });

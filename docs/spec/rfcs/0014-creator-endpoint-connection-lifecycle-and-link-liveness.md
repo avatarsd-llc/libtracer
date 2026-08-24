@@ -228,6 +228,14 @@ bytes: the reply is what the reference implementation has always emitted.
   this is a new seam the implementation must add (or the endpoint must be a placeholder-like node
   ADR-0057 already excludes).
 
+  > **Clarified 2026-08-24 (ruled;
+  > [RFC-0016](0016-composed-branch-read.md) Amendment 1).** The hide is a property of **every
+  > enumeration-shaped surface**, not of the `:children[]` spelling: the composed branch read of
+  > `/net/<module>` — which answers the same question, "what is under here?" — omits `conn` and its
+  > subtree as well. **Direct addressing always sees it**, which is precisely why §6's
+  > `read <module>/conn:schema` probe is the sanctioned way to discover a deliberately unlisted
+  > endpoint.
+
 ### 4. Link liveness (the socket, managed automatically)
 
 The connection *vertex* and the *link* it names are two lifecycles. The vertex is explicit (§3); the

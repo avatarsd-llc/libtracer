@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0016 |
 | **Title** | Composed branch read: a plain READ of a branch serves the folded POINT tree of its registered subtree |
-| **Status** | **accepted** (2026-07-20 — maintainer approval, window waived) |
+| **Status** | **accepted** (2026-07-20 — maintainer approval, window waived). **Amendment 1 (2026-08-24)**: the composed walk skips **enumeration-hidden** vertices — the hide is a property of every enumeration-shaped surface, not of `:children[]` alone; direct addressing still sees them. |
 | **Author(s)** | AvatarSD (maintainer) |
 | **Created** | 2026-07-20 |
 | **Comment window** | waived by the maintainer (standing solo-maintainer ruling, per RFC-0002/RFC-0005) |
@@ -118,6 +118,12 @@ All of the following are shipped behavior, pinned by `graph_t::read` /
 - **Placeholders and synthesized listings are absent.** Unregistered placeholder
   vertices are skipped exactly as `:children[]` enumeration skips them; synthesized
   `on_children` transport listings are not graph children and do not appear.
+
+  > **Amendment 1 (2026-08-24) — see §Amendment at the end of this document.** "Exactly as
+  > `:children[]` enumeration skips them" is the whole predicate, not just its placeholder
+  > arm: an **enumeration-hidden** vertex (RFC-0014 §3's creator endpoint) is likewise not a
+  > member of the composed tree, and neither is its subtree. Direct addressing still resolves
+  > it — hiding governs enumeration, never reach.
 - **Per-node READ ACL prune.** The root is gated as any read
   (`PERMISSION_DENIED` when the caller may not READ the target). Below the root, a
   vertex the caller may not READ **prunes its whole subtree** — silently, siblings
@@ -331,3 +337,42 @@ already-specified behavior (the §B prune), and this correction only writes down
 composed grammar's `child_node*` repetition genuinely includes zero. No frame shape, type
 code, or error identity changes. Maintainer ruling recorded on
 [#1030](https://github.com/avatarsd-llc/libtracer/issues/1030) (grilled 2026-08-12).
+
+## Amendment 1 (2026-08-24, ruled) — the composed walk skips ENUMERATION-HIDDEN vertices; the hide belongs to every enumeration-shaped surface
+
+**What §B said.** *"Placeholders and synthesized listings are absent. Unregistered placeholder
+vertices are skipped exactly as `:children[]` enumeration skips them."* The bullet names the
+membership predicate by analogy to `:children[]` and then lists only one of its two arms. The
+implementation followed the text literally: the composed walk tested `registered()`, while both
+`:children[]` doors test `registered() && !enumeration-hidden`.
+
+**What that produced.** [RFC-0014](0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)
+§3 hides the creator endpoint `/net/<module>/conn` from its module's `:children[]`: the endpoint is
+the control that *creates* connections, not one of them, so a peer walking the listing as a topology
+of links would descend into a vertex with no peer behind it. A composed READ of `/net/<module>` served
+it anyway — the same question ("what is under here?") answered two different ways by the same node.
+
+**The amendment.** A vertex marked hidden from enumeration is **not a member of any
+enumeration-shaped surface**. Concretely:
+
+- **`:children[]`** (both the materialized and the folded door) — unchanged, it always hid it.
+- **The composed branch read** — now shares that one predicate. A hidden child contributes no node,
+  and therefore no subtree: its descendants are unreachable through the composed door for the same
+  reason its own record is absent.
+- **Direct addressing always sees it.** Hiding is about ENUMERATION, never reach: the hidden vertex
+  resolves, reads, and is written exactly as before. That is what keeps RFC-0014 §6's
+  `read <module>/conn:schema` **creatability probe** — the sanctioned discovery route for a surface
+  that is deliberately unlisted — working at all.
+- The ACL prune of §B is **unaffected and independent**: prune is per-caller, hiding is per-vertex,
+  and a reply may be shaped by either or both.
+
+**Why an amendment and not an erratum.** The composed reply of a branch with a hidden child loses a
+child record, so bytes on the wire change for that one shape. No grammar, type code or error identity
+changes — the resulting reply is an ordinary composed `POINT`, indistinguishable in shape from the
+same branch without that child, and the zero-child-record boundary of the 2026-08-13 erratum already
+covers the degenerate end. Window waived (solo-maintained).
+
+**Pinned by** `core/tests/subtree_read_test.cpp` —
+`test_hidden_child_absent_from_composed_read`: the composed tree before the hide (both children),
+after it (only the enumerable child), `:children[]` agreeing, and the hidden vertex still resolving
+and still answering `:schema`.
