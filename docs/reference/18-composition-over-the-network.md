@@ -347,8 +347,11 @@ four instruments, and withholds history.
   latched last value at admission
   ([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.A;
   `core/include/libtracer/subscriber.hpp`). It is the **only** one of the three policy fields
-  consumed today — `reliability` and `priority` are stored and read back verbatim, awaiting the
-  transport work that would honour them.
+  consumed today — `priority` is stored and read back verbatim, awaiting the transport work that
+  would honour it, and `reliability` is stored and read back verbatim awaiting **nothing**: the
+  pressure arm is the receiving vertex's own declaration
+  ([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md)
+  §Erratum 2026-08-24).
 - **New vertices announce themselves by existing.** A child's *appearance* is just its first
   write bubbling to the parent's subscribers, so a subtree subscriber learns about vertices
   created after it joined without polling `:children[]` (RFC-0005 §A; CONTEXT.md §Write-creates).

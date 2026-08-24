@@ -14,6 +14,24 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Changed
+
+- **`delivery_policy_t::reliability` (bits 0–1) is documented as CARRIED VERBATIM, READ BY
+  NOTHING** — a documentation-contract change, no code and no bytes
+  ([#1204](https://github.com/avatarsd-llc/libtracer/issues/1204),
+  [RFC-0025](../docs/spec/rfcs/0025-stream-class-values.md) §Erratum 2026-08-24). §4.4's
+  pressure arm is selected by the **receiving vertex's own declaration**
+  (`ring_state_t::reliable`, set owner-side through `graph_t::set_ring_source`), never by a
+  bit consulted per-edge in the fan-out loop: reading one there means growing `edge_view_t`,
+  the always-inlined per-edge body of the wide fan-out loop, whose size is a cliff — one added
+  field cost **12 %** ([#1223](https://github.com/avatarsd-llc/libtracer/issues/1223) /
+  [#1250](https://github.com/avatarsd-llc/libtracer/issues/1250)) — and receiver-pays
+  (Amendment 2) puts the declaration with the party that funds the ring. `subscriber.hpp` no
+  longer promises that `reliability` awaits work that will honour it; `priority` and
+  `delivery_class` keep their wording. Decode, storage, read-back from `:subscribers[]` and
+  re-emission are unchanged, and no conformance vector's bytes move. The §4.7 attach-forward
+  contract (§7 vector 7) is newly pinned by `core/tests/delivery_class_honour_test.cpp`.
+
 ## [0.15.1] — 2026-08-23
 
 ### Added
