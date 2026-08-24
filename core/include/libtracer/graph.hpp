@@ -3043,6 +3043,60 @@ class graph_t {
      *         held across a map, stripe, or sweep acquisition, so it orders against nothing
      *         else in this class. */
     mutable std::mutex link_index_mutex_;
+
+    /**
+     * @brief One vertex's declared payload-type → required-ACL-right rows (RFC-0014 Am. 2),
+     *        as a node of the graph's insert-only, immortal declaration list.
+     */
+    struct payload_right_node_t {
+        const vertex_t* v = nullptr;          /**< @brief The declaring vertex. */
+        std::vector<payload_right_t> rows;    /**< @brief Its table, in declaration order. */
+        payload_right_node_t* next = nullptr; /**< @brief The previously declared node. */
+    };
+
+    /**
+     * @brief Head of the payload-right declaration list — the RFC-0014 Amendment 2 rows for
+     *        every vertex that declared any, NEWEST FIRST.
+     *
+     * **Why the rows are here and not on the vertex.** The declaration is control-plane data
+     * on a handful of control vertices, and every candidate per-vertex home charges the
+     * vertices that declare nothing: the value-seam block is allocated for any vertex with a
+     * seam (a bus link's `on_children` identity vertex, every handler), the app-field group
+     * for every owner-declared field table, and `vertex_ext_t` for all of them. Measured, a
+     * `std::vector` on the seam block is **+16 B on every handler-bearing vertex** — the
+     * `reg_escape` memory probe catches it — for a feature those vertices do not use. That is
+     * exactly the trade ADR-0058 made when it split the seam block out of `vertex_t`, applied
+     * one level further, so it is made the same way.
+     *
+     * **Insert-only and immortal, so the read is lock-free.** Nodes are PREPENDED under the
+     * unique map lock at registration and are never removed or freed until the graph itself is
+     * destroyed: the
+     * write gate walks the list with no lock, and a node it is reading can never be recycled
+     * under it. Retirement does not unlink — it clears the vertex's `PAYLOAD_RIGHTS` flag,
+     * which is what stops the gate looking at all, and a re-registration that declares again
+     * prepends NEWER rows that the walk therefore finds first (ADR-0057's insert-only
+     * discipline, the same one the seam park keeps).
+     *
+     * **What it costs the rest of the graph:** two members here, and one relaxed flag-bit test
+     * on the write path. A node that declares nothing allocates nothing and never walks.
+     */
+    std::atomic<payload_right_node_t*> payload_rights_{nullptr};
+
+    /** @brief OWNERSHIP of the `%payload_rights_` chain — deliberately separate from the
+     *         atomic head that readers walk, so the nodes are freed by an ordinary member
+     *         destructor and `graph_t` needs no user-provided one. (It measured: an
+     *         out-of-line `~graph_t` re-partitioned GCC's inline budget in this TU and grew
+     *         `dispatch_edge_remote` by 32 B — the #1223/#1250 hazard, caught by the symbol
+     *         ratchet.) Appended under the unique map lock, never erased. */
+    std::vector<std::unique_ptr<payload_right_node_t>> payload_right_store_;
+
+    /** @brief Publish @p rows as @p v's declaration and set its flag. Call with `map_mutex_`
+     *         held UNIQUE (the registration hold). Silently ignores an empty table. */
+    void declare_payload_rights(vertex_t* v, std::vector<payload_right_t> rows);
+
+    /** @brief The right @p v demands for a written TLV of @p type — `WRITE` unless @p v
+     *         declared a row for it. Lock-free; the caller has already tested the flag. */
+    [[nodiscard]] acl_right_t declared_write_right(const vertex_t* v, wire::type_t type) const;
 };
 
 }  // namespace tr::graph

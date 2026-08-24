@@ -63,6 +63,7 @@
 #include "libtracer/rope.hpp"
 #include "libtracer/status.hpp"
 #include "libtracer/subscriber.hpp"
+#include "libtracer/tlv.hpp"
 #include "libtracer/vertex_stripe.hpp"
 #include "libtracer/view.hpp"
 
@@ -323,6 +324,19 @@ struct write_ctx_t {
 };
 
 /**
+ * @brief One row of a handler vertex's payload-type → required-ACL-right table
+ *        (RFC-0014 Amendment 2).
+ *
+ * The selector is the written TLV's **type only** — never its content. That is what keeps the
+ * declaration ahead of the gate: `graph_t::write_impl` reads one byte of the value's leading
+ * link to pick the right, and no user code runs before the ACL check.
+ */
+struct payload_right_t {
+    wire::type_t type; /**< @brief The written value's LEADING TLV type. */
+    acl_right_t right; /**< @brief The right the write gate demands for that type. */
+};
+
+/**
  * @brief User behavior for a Handler-role vertex.
  *
  * `on_children` additionally applies to ANY role: when set, a read of the vertex's
@@ -349,6 +363,28 @@ struct handlers_t {
      *        metadata field).
      */
     std::function<void(std::string_view name, const view_t& value)> on_app_field_write;
+    /**
+     * @brief OPTIONAL payload-type → required-ACL-right table (RFC-0014 Amendment 2) — the
+     *        general contract by which a control vertex demands something other than plain
+     *        `WRITE` for a given written TLV type.
+     *
+     * Empty (the default) ⇒ every write to the vertex gates on `acl_right_t::WRITE`, which is
+     * both today's behaviour and today's cost: a vertex that declares nothing carries not one
+     * byte for this (the rows are moved out at registration and live on the graph — see
+     * `graph_t::declare_payload_rights`), and `graph_t::write_impl` stops at one relaxed
+     * flag-bit test on a word the write path already holds. A row whose
+     * `%payload_right_t::type` equals the written value's leading TLV type supplies the
+     * right demanded instead; an unmatched type (and a value whose leading link cannot be read,
+     * e.g. a device-memory link) falls back to `WRITE`. Rows are scanned in order, first match
+     * wins — the table is a handful of entries on a control vertex, never a hot-path structure.
+     *
+     * The refusal is still the ONE write gate's, counted into the single-sited
+     * `delivery_drops_t::denied`: this declaration changes WHICH right is demanded, never
+     * where the demand is made. The transport creator endpoint is the first user
+     * (`SPEC`→`CREATE`, `NAME`→`WRITE`, RFC-0014 §5); an application subtree-owner that
+     * implements create-on-write is the next (RFC-0003).
+     */
+    std::vector<payload_right_t> payload_rights;
 };
 
 /**
@@ -881,6 +917,24 @@ class vertex_t {
      * back and forth would be a second, mutable source of truth about what a module contains.
      */
     void mark_enumeration_hidden() noexcept { set_flag(flag_t::ENUM_HIDDEN, true); }
+
+    /**
+     * @brief Record that this vertex DECLARED a payload-right table (RFC-0014 Amendment 2).
+     *
+     * The rows themselves are the graph's — see `graph_t::declare_payload_rights` for why
+     * they are not here. This bit is the whole of the per-vertex cost, and it is why a vertex
+     * that declares nothing pays not one byte and not one dereference for the feature: the
+     * write gate reads this already-hot flags word and stops.
+     * Set by the graph under the map lock at registration; cleared by
+     * @ref revert_to_placeholder, so a retired vertex's rows can never gate its successor.
+     */
+    void mark_payload_rights() noexcept { set_flag(flag_t::PAYLOAD_RIGHTS, true); }
+
+    /** @brief True iff this vertex declared a payload-right table (RFC-0014 Amendment 2) —
+     *         the write gate's one-load precondition for consulting the graph's rows. */
+    [[nodiscard]] bool has_payload_rights() const noexcept {
+        return test_flag(flag_t::PAYLOAD_RIGHTS, std::memory_order_relaxed);
+    }
 
    public:
     /** @brief Recompute `flag_t::REGISTERED_CHILD`. Unique-map-lock callers only. */
@@ -1906,6 +1960,11 @@ class vertex_t {
         // next registration at this key is a different vertex kind and must be listed unless
         // it asks not to be (RFC-0014 §3 / S4).
         set_flag(flag_t::ENUM_HIDDEN, false);
+        // Same argument for the payload-right declaration (RFC-0014 Amendment 2): it belongs
+        // to the retiring occupant, not to the address. The graph's rows for this vertex stay
+        // parked and unreachable — nothing consults them while this bit is clear — and a
+        // re-registration that declares again publishes its own, newer rows.
+        set_flag(flag_t::PAYLOAD_RIGHTS, false);
         lkv_.clear(std::memory_order_release);  // a mid-read reader holds its own
                                                 // reference — safe under either policy.
         own_subs_.store(0, std::memory_order_relaxed);
@@ -2423,6 +2482,11 @@ class vertex_t {
         REGISTERED_CHILD = 1U << 1, /**< @brief At least one DIRECT child is registered (#652). */
         ENUM_HIDDEN = 1U << 2,      /**< @brief Registered, addressable, but NOT a `:children[]`
                                      *          member (RFC-0014 §3, S4). */
+        PAYLOAD_RIGHTS = 1U << 3,   /**< @brief This vertex DECLARED a payload-type →
+                                     *          required-ACL-right table (RFC-0014 Am. 2). The
+                                     *          rows live on the graph, not here; this bit is
+                                     *          what keeps the write gate from looking for them
+                                     *          on the vertices that declared none. */
     };
 
     /** @brief Set or clear @p f. An RMW, because the bits have different writers. */

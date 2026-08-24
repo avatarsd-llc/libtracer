@@ -231,7 +231,7 @@ remain in the devices — RAM, or NVS where the device persists them.
 target routes through a mount.** A `SUBSCRIBER` whose `PATH` names a path *through* a
 transport mount, spelled in the **producer's** frame
 (`/net/<module>/<link>/<consumer-path>`), binds the edge to that mount's link and the
-residual below it (`graph_t::subscribe_wire`, `core/src/graph.cpp:3194`), so
+residual below it (`graph_t::subscribe_wire`, `core/src/graph.cpp:3258`), so
 `fwd_router_t::link_down` → `graph_t::evict_link_edges` on the orchestrator's session no
 longer matches it and the producer keeps delivering. That is RFC-0021 §4.B.1/§4.C, and
 it is what makes the departure above real for a third-party wire.
@@ -317,7 +317,7 @@ values are the reference encoding until then (`link_state_t`,
 reports **listen-socket reachability**, not per-accepted-peer connectivity; accepted-peer
 count and identity are exposed through the connection vertex's **synthesized
 `:children[]`**, built per read from the transport's own live-peer table
-(`core/src/transport_vertex.cpp:755`) — never through `:settings`, whose core namespace
+(`core/src/transport_vertex.cpp:773`) — never through `:settings`, whose core namespace
 is empty. Once up, a link is bidirectional regardless of who dialed — `role` says only *who initiates*. The liveness
 engine that drives these transitions automatically is not implemented; the value is set
 by the caller.
@@ -433,8 +433,8 @@ automatic**:
   (`transport_vertex_t::settings_of`, `core/include/libtracer/transport_vertex.hpp:597`).
   The vertex `:settings` core namespace holds nothing to write — RFC-0022 §3.B deleted
   `settings_t`, so every flat knob name under it answers `SCHEMA_NOT_FOUND`
-  caller-independently (`core/src/graph.cpp:3485`), leaving only the read container and
-  its reserved `app` subkey (`core/src/graph.cpp:3683`). Moving a peer therefore means
+  caller-independently (`core/src/graph.cpp:3549`), leaving only the read container and
+  its reserved `app` subkey (`core/src/graph.cpp:3747`). Moving a peer therefore means
   retiring the connection (`NAME`) and re-creating it (`SPEC`), which un-routes the link
   and cascade-evicts the subscriptions routed through it (§Boundaries of the formation
   model, *hard* teardown).

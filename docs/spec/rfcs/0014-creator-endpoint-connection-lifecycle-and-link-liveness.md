@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0014 |
 | **Title** | Creator endpoint: connection lifecycle and link liveness |
-| **Status** | **accepted** (2026-07-24 — maintainer ruling; comment window waived on this solo-maintained spec, per the RFC-0009 precedent). **Amendment 1 (2026-08-21, §4.1)** replaces §4's literal "refcount → 0 → close socket" steady-state reading with MAY-shape wording: an op-woken socket with no standing binding **MAY** remain up until loss (the reference implementation does) or be closed eagerly, and only three MUSTs bind — no background retry at refcount 0, re-dormant with no retry on loss or a failed wake-dial at refcount 0, and close-plus-re-dormant on the last **standing** release. Ruled on the divergence flagged in [PR #1455](https://github.com/avatarsd-llc/libtracer/pull/1455). |
+| **Status** | **accepted** (2026-07-24 — maintainer ruling; comment window waived on this solo-maintained spec, per the RFC-0009 precedent). **Amendment 1 (2026-08-21, §4.1)** replaces §4's literal "refcount → 0 → close socket" steady-state reading with MAY-shape wording: an op-woken socket with no standing binding **MAY** remain up until loss (the reference implementation does) or be closed eagerly, and only three MUSTs bind — no background retry at refcount 0, re-dormant with no retry on loss or a failed wake-dial at refcount 0, and close-plus-re-dormant on the last **standing** release. Ruled on the divergence flagged in [PR #1455](https://github.com/avatarsd-llc/libtracer/pull/1455). **Amendment 2 (2026-08-24, §5.1)** generalizes §5: the demanded right is a **payload-type → required-ACL-right table the vertex declares**, keyed on the written TLV's type only, consulted by the one write gate, which does not move — absent declaration is plain `WRITE`. The creator endpoint declares §5's own mapping and §5 is discharged. **Amendment 3 (2026-08-24, §2.1)** pins the `conn:schema` catalog envelope as the ordinary `POINT{NAME, SETTINGS{…}}` record, with an **empty `SETTINGS`** — never `SCHEMA_NOT_FOUND` — for a module that declares no catalog. |
 | **Author(s)** | AvatarSD (maintainer) |
 | **Created** | 2026-07-24 |
 | **Comment window closes** | waived |
@@ -154,6 +154,39 @@ neither stores a value nor propagates to subscribers under
 [RFC-0008](0008-vertex-operations-assign-propagate.md) (RFC-0008 §D maps assign+propagate for a
 `FWD{WRITE}` carrying a `VALUE`; `SPEC`/`NAME` are outside that scope — the verbatim semantics
 ADR-0059 §Consequences pre-declared). Its only readable facet is `:schema` (the catalog).
+
+#### 2.1 Amendment 3 (2026-08-24, ruled) — the catalog envelope is the ordinary `:schema` record, and an empty catalog is an empty `SETTINGS`
+
+**What was open.** §1 and §2 name `conn:schema` as *"the module's config catalog"* and §Compatibility
+lists `catalog-read` among the vectors, but no clause says what the reply *is* — so the S3 seam
+(`transport_vertex.cpp`, the kind-private-config refusal) had no envelope to validate against, and an
+endpoint with nothing to advertise had no defined answer.
+
+**The envelope.** The catalog rides the **existing** `:schema` record and adds no shape of its own:
+
+```
+POINT { NAME <endpoint vertex name>, SETTINGS { …module-defined catalog… } }
+```
+
+That is exactly what `graph_t::read_schema` already emits for any vertex
+([RFC-0010](0010-owner-app-fields-and-schema.md) §B.2's synthesized protocol part, plus the
+owner part when a descriptor table is installed). The module-defined catalog is the **content of that
+`SETTINGS`** — the module owns what goes inside it, the graph owns the frame around it.
+
+**A module with no catalog answers an EMPTY `SETTINGS`, never `SCHEMA_NOT_FOUND`.** The empty answer
+is the *conforming degenerate case*, not a stub: today's shipped `read_schema` behaviour already
+satisfies this clause. `SCHEMA_NOT_FOUND` keeps the meaning §Compatibility gives it — *"endpoint
+present, config type unknown"* — which is an answer to a `SPEC` **write**, never to the catalog read.
+An implementation that answered `SCHEMA_NOT_FOUND` to a catalog read of a catalog-less module would
+make the §6 creatability probe ambiguous: the probe asks whether the endpoint EXISTS, and the two
+answers to that question are the `POINT` and `PATH_NOT_FOUND`.
+
+**§6 probe, fully specified.** `read /net/<module>/conn:schema` ⇒ `PATH_NOT_FOUND` means *not
+creatable*; **any** `POINT` means *creatable*, and its `SETTINGS` — possibly empty — is the catalog.
+
+**Instrument: amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)), window waived. It pins a
+byte clause that was `proposed pending` (see §Discussion) rather than correcting one, and it moves no
+bytes: the reply is what the reference implementation has always emitted.
 
 ### 3. The connection vertex (explicit identity) and the reserved name
 
@@ -326,6 +359,62 @@ The control reuses **already-enforced** access-mask bits ([05 §ACL](../../refer
 
 A peer can thus hold create-but-not-remove (`CREATE` without `WRITE` on the endpoint) or the reverse.
 
+#### 5.1 Amendment 2 (2026-08-24, ruled) — the demanded right is a payload-type table the VERTEX declares; the gate does not learn a transport
+
+**What §5 left unsaid.** §5 says which right each control payload gates on. It does not say **where
+that mapping lives** — and the reference implementation has exactly ONE value-write gate
+(`graph_t::write_impl`), which every plane enters through and which hardcoded `WRITE` for every
+vertex. Spelling §5 into that gate directly would put a transport concept ("this vertex is a creator
+endpoint, so a `SPEC` means create") inside the graph's narrowest, most-travelled frame.
+
+**The general contract.** A **handler vertex MAY declare a payload-type → required-ACL-right table**
+alongside its handlers. Normatively:
+
+1. **Absent declaration ⇒ plain `WRITE`.** Today's behaviour, and today's cost: a vertex that
+   declares nothing is gated exactly as before, and pays nothing — not a byte of storage and not a
+   taken branch — for a contract it does not use. (In the reference implementation the rows live on
+   the graph, and the vertex carries one bit saying they exist; that is an implementation choice the
+   clause does not mandate, but the *cost* it protects is the clause's point.)
+2. **The selector is the written TLV's TYPE, and only its type.** Never payload content. This is the
+   load-bearing half: content-keyed selection would mean running the vertex's own parsing ahead of
+   the ACL check, i.e. letting an unauthorized caller reach user code. A value with no readable
+   leading type byte (empty, or a device-memory head) is not a declared payload and takes `WRITE`.
+3. **One gate, one counter.** The declaration changes **which** right is demanded, never **where**
+   the demand is made: the single gate consults it, and a refusal counts into the same single-sited
+   `denied` drop counter as any other write refusal — a counter whose value depended on which door a
+   refusal came through could not be summed.
+4. **The right is demanded on the written vertex's OWN effective ACL.** A declaration re-labels the
+   demand; it never relocates it. This is what keeps §5's delegability claim true: `CREATE` on the
+   endpoint's own ACL, with no right on the parent transport.
+5. **The table is the vertex's, not the graph's.** The graph learns no transport concept — it learns
+   that a vertex may say which right a written type costs.
+
+**§5 discharged.** The creator endpoint is the first user of the contract and declares exactly §5's
+mapping: `SPEC` ⇒ `CREATE`, `NAME` ⇒ `WRITE`. Anything else written to the endpoint takes the default
+`WRITE` and is then refused on its **shape** by §2 (`TYPE_MISMATCH`) — a right-less payload cannot
+slip past the gate by being undeclared, because undeclared means `WRITE`, not "ungated".
+
+**Deliberately general.** The contract is written for the creator endpoint but is not about
+transports: an application subtree-owner that implements create-on-write (the
+[RFC-0003](0003-bridged-wildcard-delivery-path.md)/RFC-0005 §D direction) can demand `CREATE` for the
+payload type that creates and `WRITE` for the one that mutates, on its own vertex, with no core
+change. That generality is the reason the mapping is a declaration rather than two branches in the
+gate.
+
+**Instrument: amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)), window waived. The
+normative surface grows — a new declaration and a new right-selection rule — while the **wire surface
+does not move at all**: no new TLV type, no new error identity, no change to any reply's bytes. A
+peer that never had `CREATE` on an endpoint now sees `tr::access::denied` where the reference
+implementation previously accepted a `SPEC` under `WRITE` alone; that is §5 arriving, not a new
+codepoint.
+
+**How it is pinned.** Under the clause-kind rule (§Discussion) the gate-order clause is pinned by
+code plus tests: `core/tests/payload_right_table_test.cpp` covers a `CREATE`-only peer creating via
+`SPEC` and being refused `NAME`, a `WRITE`-only peer removing via `NAME` and being refused `SPEC`,
+the fallback for an undeclared type, and the single `denied` counter. There is no codec vector
+because there are no new bytes to bank — the conformance instrument for a clause with no
+wire-observable bytes is the bound host test (`tests/conformance/HARNESS.md`).
+
 ### 6. Discovery and multi-hop reach (the orchestrator contract)
 
 An orchestrator that manages a **remote** board — including one reachable only *through* a peer (the
@@ -414,7 +503,13 @@ fails-fast `link-down` and is reaped.
   creation is explicit and named; `conn` reserved and hidden; removal routes through `retire()`;
   refcount governs DIAL only; liveness target rule) stand on acceptance. The byte clauses (the
   `SPEC`/`NAME`/`config` layout, the `conn:schema` reply bytes, the liveness-enum encoding, the
-  `CREATE`/`WRITE` gate order, the error identities in §2/§Compatibility) are **proposed pending**.
+  `CREATE`/`WRITE` gate order, the error identities in §2/§Compatibility) were **proposed pending**.
+  Two of them are now **pinned**: the `conn:schema` reply bytes by Amendment 3 (§2.1) plus
+  `graph_t::read_schema` and its host test, and the `CREATE`/`WRITE` gate order by Amendment 2 (§5.1)
+  plus `core/tests/payload_right_table_test.cpp`. Neither pin has a codec vector, and neither needs
+  one: the schema reply is an existing banked shape and the gate order has no wire-observable bytes
+  of its own — for such a clause the conformance instrument is the bound host test
+  (`tests/conformance/HARNESS.md`). The remaining byte clauses stay proposed pending.
 - **Amends ADR-0059** on three points (per-transport rather than one global endpoint; `SPEC`/`NAME`
   collapsed onto one control; the gating **resolved** as `CREATE`-for-SPEC / `WRITE`-for-NAME) and
   **extends** it with the link-liveness layer. ADR-0059's load-bearing decisions are unchanged.
