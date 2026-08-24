@@ -2922,7 +2922,8 @@ class vertex_t {
     // not a benign torn read. Byte-wide as an atomic too, so the group stays four bytes.
     std::atomic<delivery_mode_t> delivery_mode_{delivery_mode_t::IF_NEWER};
     // Three lock-free predicates, packed into ONE byte so the flag group stays exactly four
-    // bytes wide and `sizeof(vertex_t)` stays at the 112 the #361 diet measured — the size
+    // bytes wide and `sizeof(vertex_t)` stays at the size the ratchets pin (96 B on x86-64,
+    // 72 B on rv32 — the #361 diet's measurement as re-taken by the #1487 census) — the size
     // gate's own failure message says to put a new member behind vertex_ext_t rather than
     // inline it, and a bit costs less than either. (`ENUM_HIDDEN`, the RFC-0014 §3 hide seam,
     // is the third: it went here rather than beside `registered_` for exactly that reason.)
