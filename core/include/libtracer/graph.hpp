@@ -862,14 +862,32 @@ class graph_t {
      *         form (RFC-0024 §4.4 rule 3) — or, defensively, @p vh is not in this graph's
      *         index at all.
      *
-     * @warning This is a **control-plane** call and is priced as one: it finds @p vh by
-     *          scanning the slot index, because the reverse direction is deliberately not
-     *          memoized. A per-vertex index field costs 4 bytes on rv32, where
-     *          `sizeof(vertex_t)` sits at its ceiling with zero headroom
-     *          (`config_t::kMaxVertexBytes32`), and a pointer→index side map costs strictly
-     *          more than the 4 B/vertex RFC-0024 §6.4 priced. A mint happens once per
-     *          binding, on a reply already being assembled; the hot path — @ref
-     *          deref_vertex_slot — pays a bounds check and one compare and never comes here.
+     * @note This is a **control-plane** call, but it is no longer priced as a scan (#1486).
+     *       The reverse direction IS memoized: every vertex carries the index of its own
+     *       slot, stamped once at slot assignment under the same unique hold that appended
+     *       it, and this call validates that memo against the index and returns. The scan
+     *       survives only as the fallback for a `vertex_t` no graph slotted.
+     *
+     *       The memo was previously declined on a footprint argument — "4 bytes on rv32,
+     *       where `sizeof(vertex_t)` sits at its ratchet with zero headroom" — and the #1487
+     *       census falsified its premise. There are 4 dead bytes at object offset 36–39 on
+     *       BOTH ABIs, and spending them costs zero: `sizeof(vertex_t)` stays 96 / 72 and
+     *       both `config_t` ratchets still pass, pinned to their measurements. The price is
+     *       a layering compromise, not RAM — the bytes are only reachable from inside
+     *       `path_key_t` (they are `name_`'s tail padding on x86-64), so the memo lives
+     *       there, documented as borrowed. A pointer→index side map, the other candidate,
+     *       would still cost strictly more than the 4 B/vertex RFC-0024 §6.4 priced.
+     *
+     *       What made it worth spending is that the scan was O(N) **under the shared
+     *       `map_mutex_`** — 450 ns at 10³ resident vertices and 410 µs at 10⁶
+     *       (#1485/#1496) — so route formation over M bindings paid O(M×N) and every
+     *       concurrent reader queued behind the hold. The mint is once per binding, but
+     *       "once per binding" is M times, not once.
+     *
+     * @warning The memo is INTERNAL. It is not exposed on `path_key_t`, is not exposed here,
+     *          and is not a second staleness signal: the generation remains the whole of
+     *          that (RFC-0024 §5.1). The hot path — @ref deref_vertex_slot — pays a bounds
+     *          check and one compare and never comes here.
      */
     [[nodiscard]] std::optional<vertex_slot_t> vertex_slot(vertex_handle_t vh) const noexcept;
 
@@ -2690,6 +2708,25 @@ class graph_t {
     // pointer §6.4 prices and not a byte of unpriced headroom. Indexing stays O(1) and
     // elements never move, which is all the deref needs.
     std::deque<vertex_t*> vertex_slots_;
+
+    /**
+     * @brief Stamp @p v with the index of the `vertex_slots_` entry that was just appended
+     *        for it — the write half of the #1486 reverse memo.
+     *
+     * Called immediately after every `vertex_slots_.push_back`, under the SAME unique
+     * `map_mutex_` hold that appended, and exactly once per `vertex_t` for the life of the
+     * graph. The memo lives in bytes borrowed from `path_key_t` (`owner_slot_`, whose block
+     * comment states whose bytes those are and why they had to live there); nothing
+     * invalidates it, because a slot index is immortal — the index is insert-only and
+     * pointer-stable (ADR-0057), and retirement re-virginizes a `vertex_t` IN PLACE rather
+     * than renumbering it, which is why the generation, not the index, is the staleness
+     * signal (RFC-0024 §6.4).
+     *
+     * There is no `graph_t` state here beyond the index itself and no public reader: the
+     * memo is an implementation detail of @ref vertex_slot, which re-validates it against
+     * the deque before trusting it.
+     */
+    void note_owner_slot(vertex_t& v) noexcept;
 
     mutable std::shared_mutex map_mutex_;
     // The Composite vertex tree's root (ADR-0057): an unregistered structural node whose

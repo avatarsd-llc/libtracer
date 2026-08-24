@@ -27,6 +27,8 @@
 
 namespace tr::graph {
 
+class graph_t;
+
 /** @brief Max bytes in one path segment (docs/reference/03 §limits; the packed record's
  *         `u8` length field caps it at 255 forever, RFC-0018 §5). */
 inline constexpr std::size_t kMaxSegmentBytes = 64;
@@ -399,8 +401,21 @@ class path_key_t {
     }
 
    private:
+    friend class graph_t;  // sole writer/reader of the borrowed slot memo below (#1486).
+
+    /**
+     * @brief `%owner_slot_`'s "no memo recorded" sentinel — never a real slot index.
+     *
+     * `0` cannot serve: slot 0 is the structural root (RFC-0024 §6.4), a real occupant of
+     * `graph_t::vertex_slots_`. `0xFFFFFFFF` is unreachable as an index because a slot
+     * index is bounded by the number of `vertex_t` allocations a graph made, and the
+     * element field is a `u32` whose top value the mint would have to issue.
+     */
+    static constexpr std::uint32_t kNoOwnerSlot = 0xFFFFFFFFU;
+
     /** @brief Store @p b (callers guarantee the key currently owns nothing). */
     void assign(std::span<const std::byte> b) {
+        owner_slot_ = kNoOwnerSlot;  // a fresh set of bytes has no owner (#1486)
         len_ = static_cast<std::uint32_t>(b.size());
         std::byte* dst = inline_;
         if (b.size() > kInlineBytes) dst = heap_ = new std::byte[b.size()];
@@ -413,6 +428,7 @@ class path_key_t {
     /** @brief Move @p o's storage into this key (which must own nothing); member-wise —
      *         a whole-object memcpy trips -Werror=class-memaccess on the ESP-IDF gcc. */
     void take(path_key_t& o) noexcept {
+        owner_slot_ = kNoOwnerSlot;  // the memo names an OWNER, and bytes moving have none
         len_ = o.len_;
         if (len_ > kInlineBytes)
             heap_ = o.heap_;
@@ -426,8 +442,66 @@ class path_key_t {
         std::byte* heap_;                /**< @brief The spill block when `len_ > kInlineBytes`. */
     };
     std::uint32_t len_ = 0; /**< @brief Record length; doubles as the inline/heap tag. */
+    /**
+     * @brief **These bytes are `vertex_t`'s, not `path_key_t`'s**: the memoized index of the
+     *        `graph_t::vertex_slots_` entry that names the vertex this key is the name of
+     *        (#1486). `%kNoOwnerSlot` until a graph assigns one.
+     *
+     * A deliberate, documented layering compromise, and the reason it is HERE rather than a
+     * sibling member of `vertex_t` is a C++ layout rule, not a design preference. The #1487
+     * footprint census measured 4 B of dead space at bytes 36–39 of `vertex_t` on BOTH
+     * ABIs — but only on rv32 is it `vertex_t`'s own alignment hole. On x86-64 it is the
+     * TAIL PADDING of the `name_` subobject (this class: a 16-byte union at 0 plus a `u32`
+     * `len_`, 8-aligned ⇒ 24 B with 20–23 dead), and C++ does not let a sibling member of
+     * `vertex_t` occupy a member subobject's tail padding. The bytes are reachable from
+     * inside `path_key_t` and from nowhere else. Measured consequence: this field costs
+     * **zero bytes on both targets** — `sizeof(vertex_t)` stays 96 / 72, `offsetof(lkv_)`
+     * stays 0 (the #1285 straddle gate), and both `config_t` ratchets still pass pinned to
+     * their measurements.
+     *
+     * What it buys: `graph_t::vertex_slot` was an O(N) reverse scan of a `std::deque` held
+     * under the shared `map_mutex_` — measured at 450 ns for 10³ vertices and **410 µs for
+     * 10⁶** (#1485/#1496 ladder), paid per binding mint, so route formation over M bindings
+     * against N vertices cost O(M×N) (~200 s at M = N = 10⁶) with the lock held throughout.
+     * The memo makes it a load.
+     *
+     * INTERNAL ONLY. No accessor is exposed on `path_key_t` or on `graph_t`: this is not a
+     * property of a name, and a public reader would make a `graph_t` implementation detail
+     * part of an L4 value type's contract. It is written ONCE, at slot assignment, under a
+     * unique `map_mutex_` hold, and never invalidated — the slot index of a `vertex_t` is
+     * immortal (ADR-0057: the vertex map is insert-only and pointer-stable, so slots never
+     * move and a retire re-virginizes in place rather than renumbering). There is therefore
+     * no invalidation logic to get wrong, which is the property that makes a plain
+     * non-atomic word correct here.
+     *
+     * NOT propagated by copy or move: it names the owner, and a copied name has no owner.
+     * `graph_t::vertex_slot` re-validates the memo against the deque before trusting it and
+     * falls back to the scan when there is none, so a `vertex_t` built outside a graph (the
+     * tests do this) still resolves exactly as it did before.
+     *
+     * @warning DECLARATION ORDER IS LOAD-BEARING: it must stay LAST, after `len_`. Declared
+     *          ahead of the union it is not free at all — the 8-aligned union would start at
+     *          offset 8 and `sizeof(path_key_t)` would go 24 → 32 on x86-64, spending the
+     *          `vertex_t` ratchet this field was chosen to avoid spending.
+     */
+    std::uint32_t owner_slot_ = kNoOwnerSlot;
     static_assert(kInlineBytes >= sizeof(std::byte*), "the union must fit the spill pointer");
 };
+
+/**
+ * @brief `path_key_t` is 24 bytes on EVERY target, and that is a ratchet (#1486, #1487).
+ *
+ * The number is identical on x86-64 and on rv32 for different reasons, which is exactly why
+ * it is worth pinning: on x86-64 the 16-byte union is 8-aligned so `len_` + `owner_slot_`
+ * fill what was already tail padding; on rv32 the union is 4-aligned and the two words pack
+ * behind it, consuming what was `vertex_t`'s own alignment hole. Either way this key adds
+ * NOTHING to `sizeof(vertex_t)` (96 / 72, both ratchets unmoved) — a property that survives
+ * only while the members stay in this order and no third word is added. Grow this and the
+ * next reader finds out from a `vertex_t` ratchet failure in an unrelated file.
+ */
+static_assert(sizeof(path_key_t) == 24,
+              "path_key_t's shape is a ratchet — it rides inside vertex_t, where the RAM diet "
+              "(#361) has zero headroom by construction on both ABIs");
 
 /**
  * @brief Hash functor for @ref path_key_t (FNV-1a over the key bytes) — the map hasher.

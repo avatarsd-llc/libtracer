@@ -236,6 +236,57 @@ void test_slot_index_is_a_bijection() {
     check(g.vertex_slot(a) == slot_a, "a slot does not move when the graph grows");
 }
 
+/**
+ * @brief The #1486 memo answers what the scan answered — for EVERY slot, not a sampled one.
+ *
+ * `vertex_slot` no longer scans: each vertex carries the index of its own slot, stamped once
+ * when the slot was appended. A memo is only ever as good as its agreement with the thing it
+ * replaced, so this walks the index in BOTH directions over a population big enough to have
+ * caught an off-by-one, a stale stamp, or a placeholder/leaf mix-up, and requires the round
+ * trip to be the identity at every single slot:
+ *
+ *   slot i --deref--> handle --vertex_slot--> i
+ *
+ * Placeholders are included by construction (the deep paths below allocate them), as are the
+ * two vertices a `graph_t` seeds itself with. The forward leg (`vertex_slot_at`) reads the
+ * deque by index and never consults the memo, so it is the independent side of the check.
+ */
+void test_slot_memo_agrees_with_the_scan() {
+    std::printf("the reverse index is memoized, and the memo is the scan's answer (#1486):\n");
+    graph_t g;
+    // Deep and wide: every level allocates a placeholder, so the slot order interleaves
+    // placeholders with registered leaves rather than being a run of one kind.
+    for (int i = 0; i < 40; ++i) {
+        char buf[64];
+        std::snprintf(buf, sizeof buf, "/bank%d/rack%d/cell%d", i % 5, i % 7, i);
+        (void)g.register_vertex(path_t(buf), role_t::STORED_VALUE);
+    }
+    const std::size_t slots = g.vertex_slot_count();
+    check(slots > 40, "the population includes placeholders as well as the registered leaves");
+
+    std::size_t round_tripped = 0;
+    for (std::uint32_t i = 0; i < slots; ++i) {
+        const std::optional<vertex_slot_t> at = g.vertex_slot_at(i);
+        if (!at.has_value()) continue;  // an unregistered placeholder — not mintable, §7.1
+        const std::optional<vertex_handle_t> vh = g.deref_vertex_slot(at->index, at->generation);
+        check(vh.has_value(), "a slot the forwarder could mint for dereferences");
+        const std::optional<vertex_slot_t> back = g.vertex_slot(*vh);
+        check(back.has_value() && back->index == i,
+              "the memo answers the slot the vertex is actually AT — every slot, both ways");
+        ++round_tripped;
+    }
+    check(round_tripped >= 40, "the round trip covered the whole registered population");
+
+    // A vertex no graph ever slotted keeps working: it has no memo, and the fallback scan
+    // reports what it always did — nothing. This is the case the re-validation exists for.
+    graph_t other;
+    const vertex_handle_t foreign =
+        other.register_vertex(path_t("/elsewhere"), role_t::STORED_VALUE);
+    check(!g.vertex_slot(foreign).has_value(),
+          "a foreign vertex resolves to no slot in this graph (the memo is re-validated, "
+          "never trusted)");
+}
+
 void test_generation_saturates() {
     std::printf("the generation SATURATES, never wraps (§4.4 rule 3):\n");
     // Reaching the ceiling through the retire path needs 2^32 retirements of one vertex, so
@@ -706,6 +757,7 @@ void test_conformance_vectors() {
 
 int main() {
     test_slot_index_is_a_bijection();
+    test_slot_memo_agrees_with_the_scan();
     test_generation_saturates();
     test_bound_read_matches_canonical();
     test_mint_round_trip();
