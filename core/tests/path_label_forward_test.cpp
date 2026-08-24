@@ -60,6 +60,7 @@ using tr::graph::role_t;
 using tr::net::fwd_router_t;
 using tr::net::path_label_table_t;
 using tr::testing::b_fwd_raw_op;
+using tr::testing::b_fwd_reply;
 using tr::testing::bytes_t;
 using tr::testing::check;
 using tr::wire::path_element_at;
@@ -75,10 +76,12 @@ using tr::wire::path_label_t;
 constexpr std::string_view kInLink = "net/downlink/cli";
 constexpr std::string_view kOutLink = "net/uplink/b";
 
-/** @brief The op bytes this file drives, unflagged (RFC-0004 §D). */
+/** @brief The request op bytes this file drives, unflagged (RFC-0004 §D).
+ *
+ *  There is no `kReply` here: a REPLY is built with @ref tr::testing::b_fwd_reply, because a
+ *  REPLY that is only an op byte is missing its REQUIRED `kind` child (RFC-0004 §B). */
 constexpr std::uint8_t kRead = 0x00;
 constexpr std::uint8_t kWrite = 0x01;
-constexpr std::uint8_t kReply = 0x03;
 
 /** @brief A `PATH` TLV over @p segs, packed-record body (RFC-0018). */
 bytes_t b_path(std::initializer_list<std::string_view> segs) {
@@ -262,8 +265,9 @@ std::optional<path_label_t> round_trip(hop_t& h) {
     if (h.up.sent.empty()) return std::nullopt;
 
     // Leg 2, the reply: it comes back on `up`, addressed to the accumulated return route.
-    const bytes_t reply = b_fwd_raw_op(kReply, b_path({"net", "downlink", "cli", "reply-ep"}),
-                                       b_path({"sensor", "temp"}), {}, b_value_u32(1234));
+    const bytes_t reply =
+        b_fwd_reply(tr::graph::reply_kind_t::RESULT, b_path({"net", "downlink", "cli", "reply-ep"}),
+                    b_path({"sensor", "temp"}), b_value_u32(1234));
     h.r.on_frame(kOutLink, reply);
     if (h.cli.sent.empty()) return std::nullopt;
 
@@ -290,9 +294,9 @@ int main() {
               "…the relayed reply's src still opens with a literal segment");
         // Byte-for-byte the reply's src as it arrived: a non-minting hop accumulates NOTHING
         // into a reply's src (RFC-0004 §B), which is the shipped behaviour this must not move.
-        check(src.has_value() && *src == *src_body_of(b_fwd_raw_op(kReply, b_path({"x"}),
-                                                                   b_path({"sensor", "temp"}), {},
-                                                                   b_value_u32(0))),
+        check(src.has_value() &&
+                  *src == *src_body_of(b_fwd_reply(tr::graph::reply_kind_t::RESULT, b_path({"x"}),
+                                                   b_path({"sensor", "temp"}), b_value_u32(0))),
               "…and the reply's src is relayed byte-identically — no accumulation (RFC-0004 §B)");
         check(h.labels.live_count() == 0 && h.labels.refused_mints() == 0,
               "an un-injected table is never even consulted");
@@ -459,8 +463,9 @@ int main() {
         hop_t h(/*mint=*/true);
         // A reply whose dst is a `PATH_REF` residual is not a canonical-PATH leg, so no mount
         // descent runs and no mint is offered. Drive one and confirm the table is untouched.
-        const bytes_t reply = b_fwd_raw_op(kReply, b_path({"net", "downlink", "cli", "reply-ep"}),
-                                           b_path({"sensor", "temp"}), {}, b_value_u32(1));
+        const bytes_t reply = b_fwd_reply(tr::graph::reply_kind_t::RESULT,
+                                          b_path({"net", "downlink", "cli", "reply-ep"}),
+                                          b_path({"sensor", "temp"}), b_value_u32(1));
         h.r.on_frame(kOutLink, reply);
         const std::size_t after_canonical = h.labels.live_count();
         check(after_canonical == 1, "the canonical leg mints, as the control for this case");
