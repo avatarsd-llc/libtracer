@@ -192,7 +192,7 @@ ANCHORS = [
     ("core/src/graph.cpp:3675",
      "result_t<void> graph_t::set_identity(std::uint8_t kind, std::span<const std::byte> key) {"),
     ("core/src/graph.cpp:3715", "result_t<view_t> graph_t::read_identity() const {"),
-    ("core/src/graph.cpp:4458", 'field.steps[0].name == "identity"'),
+    ("core/src/graph.cpp:4466", 'field.steps[0].name == "identity"'),
     # The RFC-0022 §3.B pair, cited by the #1392 erratum: the WRITE arm's terminal fall-through
     # (every flat `:settings.<knob>` name ⇒ SCHEMA_NOT_FOUND, caller-independently) and the READ
     # container that survives it. The write arm is pinned on its EXPLANATORY COMMENT, not on the
@@ -288,10 +288,10 @@ ANCHORS = [
     ("core/src/graph.cpp:3924", "view::segment_alloc(backend, folded_hdr_len(body_len))"),
     ("core/src/graph.cpp:3976", "folded_member_header(hdr_backend, body, seg.size())"),
     ("core/src/graph.cpp:3988", "folded_point_header(hdr_backend, members_len)"),
-    ("core/src/graph.cpp:4134", "folded_point_header(hdr_backend, n.body_len)"),
-    ("core/src/graph.cpp:4395", "return read_children_folded(vh);"),
-    ("core/src/graph.cpp:4392", "sel == field_sel_t::WHOLE || sel == field_sel_t::APPEND"),
-    ("core/src/graph.cpp:4566", "field_selector(field) == field_sel_t::SLOT"),
+    ("core/src/graph.cpp:4142", "folded_point_header(hdr_backend, n.body_len)"),
+    ("core/src/graph.cpp:4403", "return read_children_folded(vh);"),
+    ("core/src/graph.cpp:4400", "sel == field_sel_t::WHOLE || sel == field_sel_t::APPEND"),
+    ("core/src/graph.cpp:4574", "field_selector(field) == field_sel_t::SLOT"),
     ("core/src/op_resolve_walk.hpp:366", "enum class index_mode_t"),
     ("core/src/op_resolve_walk.hpp:1081", 'field.steps[0].name != "subscribers"'),
     ("core/src/op_resolve_walk.hpp:164", "view_t own_wire(mem::mem_backend_t& flat)"),
@@ -751,7 +751,7 @@ ANCHORS = [
     ('core/src/graph.cpp:2751',
      'result_t<void> graph_t::write(vertex_handle_t v, rope_t value, std::string_view caller) {'),
     ('core/src/graph.cpp:3558', 'result_t<void> graph_t::create_child(vertex_t* parent, const view_t& spec_value) {'),
-    ('core/src/graph.cpp:4597', 'result_t<void> graph_t::write(const path_t& path, rope_t value) {'),
+    ('core/src/graph.cpp:4605', 'result_t<void> graph_t::write(const path_t& path, rope_t value) {'),
     # core/src/op_resolve_walk.hpp
     ('core/src/fwd_reply.hpp:109', 'void tlv_sliced(std::span<const std::byte> wire) {'),
     ('core/src/op_resolve_walk.hpp:1007',

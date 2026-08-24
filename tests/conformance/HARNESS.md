@@ -49,6 +49,18 @@ consequences follow, and both are load-bearing:
    the feature". `run-all.py` reports codec agreement; the table below is where the
    behavioural gate lives.
 
+3. **A clause with no wire-observable bytes gets NO vector, and that is not a gap either.**
+   The two consequences above are about vectors that under-claim; this one is about the clause
+   that has nothing to bank. A gate ORDER, an absence of a dial, a right demanded before user
+   code runs — none of these put a byte on the wire that a peer could decode, so an `input.bin`
+   for them would claim carriage of bytes the row is not about, and a passing round-trip would
+   say nothing at all. **The conformance instrument for such a clause is the bound host test,
+   alone.** Read the pair the same way everywhere: a conformance vector is *a codec vector plus
+   a bound host test*, and where there are no bytes, the second half is the whole of it.
+   `conn/refcount-0-dormant` below is the worked precedent (host-only, no directory, and its
+   row says why); RFC-0014 §5.1 Amendment 2's `CREATE`/`WRITE` gate order is the second case,
+   bound by `core/tests/payload_right_table_test.cpp`.
+
 Behavioural conformance is gated by **each implementation's own host suite**, not here.
 
 ### The execution model has ONE forwarder — a named limitation

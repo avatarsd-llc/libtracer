@@ -530,6 +530,58 @@ void test_names_only_topology() {
     check(same_bytes((*r)->flatten(), expect), "topology-only snapshot bytes are exact");
 }
 
+// --- 6b. ENUMERATION-HIDDEN children (RFC-0016 Amendment 1 / RFC-0014 §3) ------
+
+/**
+ * @brief A hidden child is absent from the composed tree, and still directly addressable.
+ *
+ * The topology-walker shape: a peer READs the branch to learn what is under it. The
+ * RFC-0014 §3 creator endpoint is registered and addressable but is NOT one of its module's
+ * connections, so a walker that descended into it would be walking a link that has no peer
+ * behind it. `:children[]` hid it on both doors; the composed read did not — the same
+ * question answered two ways.
+ */
+void test_hidden_child_absent_from_composed_read() {
+    std::printf("enumeration-hidden child — absent from the composed tree, still addressable:\n");
+    graph_t g;
+    (void)g.register_vertex(path_t("/m"), role_t::STORED_VALUE);
+    const vertex_handle_t hidden = g.register_vertex(path_t("/m/conn"), role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/m/a"), role_t::STORED_VALUE);
+    const auto h = g.find(path_t::parse("/m")->key());
+    check(h.has_value(), "the branch resolves");
+    if (!h) return;
+
+    // Before hiding: BOTH children compose (the ablation, taken live rather than described —
+    // `/m/a` sorts before `/m/conn`, so the expected bytes below are a suffix of these).
+    const auto before = g.read(*h);
+    const std::vector<std::byte> both = cat({point_tlv("a", {}), point_tlv("conn", {})});
+    std::vector<std::byte> expect_before;
+    tr::wire::emit_tlv(expect_before, type_t::POINT, opt_t{.pl = true}, both);
+    check(before.has_value() && same_bytes((*before)->flatten(), expect_before),
+          "unhidden: the composed tree carries both children");
+
+    check(g.hide_from_enumeration(hidden).has_value(), "hide /m/conn from enumeration");
+
+    std::vector<std::byte> expect_after;
+    tr::wire::emit_tlv(expect_after, type_t::POINT, opt_t{.pl = true}, point_tlv("a", {}));
+    const auto after = g.read(*h);
+    check(after.has_value() && same_bytes((*after)->flatten(), expect_after),
+          "hidden: the composed tree carries ONLY the enumerable child");
+
+    // The two doors agree — one predicate, three listings.
+    const auto listing = g.read(path_t("/m:children[]"));
+    std::vector<std::byte> expect_listing;
+    tr::wire::emit_tlv(expect_listing, type_t::POINT, opt_t{.pl = true}, point_tlv("a", {}));
+    check(listing.has_value() && same_bytes((*listing)->flatten(), expect_listing),
+          "and `:children[]` says the same thing it always did");
+
+    // Hiding is about ENUMERATION, never reach: the §6 probe route stays open.
+    check(g.find(path_t::parse("/m/conn")->key()).has_value(),
+          "the hidden vertex still RESOLVES — direct addressing always sees it");
+    check(g.read(path_t("/m/conn:schema")).has_value(),
+          "and its :schema — the sanctioned discovery probe — still answers");
+}
+
 // --- 7. ZERO-COPY accounting --------------------------------------------------
 
 void test_zero_copy_link_structure() {
@@ -578,6 +630,7 @@ int main() {
     test_leaf_and_handler_regression();
     test_non_value_tlv_verbatim();
     test_names_only_topology();
+    test_hidden_child_absent_from_composed_read();
     test_zero_copy_link_structure();
     return tr::testing::summary("subtree_read");
 }
