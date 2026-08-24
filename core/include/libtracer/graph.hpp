@@ -3082,7 +3082,7 @@ class graph_t {
      */
     std::atomic<payload_right_node_t*> payload_rights_{nullptr};
 
-    /** @brief OWNERSHIP of the @ref payload_rights_ chain — deliberately separate from the
+    /** @brief OWNERSHIP of the `%payload_rights_` chain — deliberately separate from the
      *         atomic head that readers walk, so the nodes are freed by an ordinary member
      *         destructor and `graph_t` needs no user-provided one. (It measured: an
      *         out-of-line `~graph_t` re-partitioned GCC's inline budget in this TU and grew
