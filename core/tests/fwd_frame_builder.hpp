@@ -18,12 +18,18 @@
  * This header states the layout once:
  *
  * ```
- *   FWD[.pl] { VALUE op, PATH dst, [FIELD selector], PATH src, [payload] }
+ *   FWD[.pl] { VALUE op, PATH dst, [FIELD selector], PATH src, [VALUE kind], [payload] }
  * ```
  *
  * (RFC-0004 §B child order; the selector sits between `dst` and `src` so a forwarder can
  * peek `dst` at a fixed offset and skip the rest.) Every builder below funnels through
  * @ref tr::testing::fwd_envelope, so a future layout change edits ONE function body.
+ *
+ * `kind` is REQUIRED on a REPLY and absent on every other op (RFC-0004 §B: "`kind ∈ {RESULT,
+ * ERROR}`"). It was missing from this header until 2026-08-24, so every reply a test built
+ * here was an illegal frame — and one of them had been banked as a conformance vector
+ * (`fwd/fwd-label-mint-reply`). @ref tr::testing::b_fwd_reply is the only builder that emits
+ * a REPLY, so the discriminant cannot be forgotten again by reaching for the general form.
  *
  * The deliberately-malformed shapes are parameters here rather than separate hand-rolls:
  * a non-structured envelope (`structured = false`, the missing `.pl` bit) and a zero-length
@@ -149,17 +155,24 @@ inline void append(bytes_t& dst, std::span<const std::byte> src) {
 /**
  * @brief Assemble the FWD body from an already-built @p op_child and emit the envelope.
  *
- * THE layout: `op, dst, [selector], src, [payload]`. Empty optional children are omitted
- * rather than emitted zero-length, which is what a real origin puts on the wire.
+ * THE layout: `op, dst, [selector], src, [kind], [payload]`. Empty optional children are
+ * omitted rather than emitted zero-length, which is what a real origin puts on the wire.
+ *
+ * @p kind is the REPLY discriminant and belongs to REPLY frames ONLY — it sits between `src`
+ * and the payload (RFC-0004 §B), which is why it is a parameter here rather than something a
+ * caller prepends to its payload span: a payload-side splice would put it on the wrong side
+ * of a frame that also carries a `STATUS`.
  */
 inline bytes_t fwd_frame(std::span<const std::byte> op_child, std::span<const std::byte> dst,
                          std::span<const std::byte> selector, std::span<const std::byte> src,
-                         std::span<const std::byte> payload, bool structured) {
+                         std::span<const std::byte> kind, std::span<const std::byte> payload,
+                         bool structured) {
     bytes_t body;
     append(body, op_child);
     append(body, dst);
     if (!selector.empty()) append(body, selector);
     append(body, src);
+    if (!kind.empty()) append(body, kind);
     if (!payload.empty()) append(body, payload);
     return fwd_envelope(body, structured);
 }
@@ -179,7 +192,7 @@ inline bytes_t b_fwd_raw_op(std::uint8_t op_byte, std::span<const std::byte> dst
                             std::span<const std::byte> src,
                             std::span<const std::byte> selector = {},
                             std::span<const std::byte> payload = {}) {
-    return detail::fwd_frame(fwd_op_child(op_byte), dst, selector, src, payload, true);
+    return detail::fwd_frame(fwd_op_child(op_byte), dst, selector, src, {}, payload, true);
 }
 
 /**
@@ -211,6 +224,30 @@ inline bytes_t b_fwd_mint(tr::graph::fwd_op_t op, std::span<const std::byte> dst
 }
 
 /**
+ * @brief A `FWD{ op=REPLY }` frame — the ONLY builder here that emits the `kind` child.
+ *
+ * @param kind      the reply discriminant; `RESULT` or `ERROR` (RFC-0004 §B, REQUIRED).
+ * @param dst       the reply's route home — the request's accumulated `src`.
+ * @param src       the responder's own endpoint; present on a REPLY, never accumulated.
+ * @param payload   the result: a `VALUE` for a READ result, a `STATUS` for an ack or error.
+ * @param selector  optional `FIELD` selector, emitted BETWEEN `dst` and `src`.
+ *
+ * The parameter order puts @p payload ahead of @p selector on purpose: a reply carries a
+ * payload almost always and a selector almost never, and this header exists because a
+ * positional `X` that meant two different things in two files went unnoticed for 23 files.
+ */
+inline bytes_t b_fwd_reply(tr::graph::reply_kind_t kind, std::span<const std::byte> dst,
+                           std::span<const std::byte> src, std::span<const std::byte> payload = {},
+                           std::span<const std::byte> selector = {}) {
+    bytes_t kind_child;
+    const std::byte k{static_cast<std::uint8_t>(kind)};
+    tr::wire::emit_tlv(kind_child, tr::wire::type_t::VALUE, tr::wire::opt_t{},
+                       std::span<const std::byte>(&k, 1));
+    return detail::fwd_frame(fwd_op_child(static_cast<std::uint8_t>(tr::graph::fwd_op_t::REPLY)),
+                             dst, selector, src, kind_child, payload, true);
+}
+
+/**
  * @brief A FWD frame whose op child is a ZERO-LENGTH `VALUE` — a malformed-frame probe.
  *
  * Well-formed in envelope and child count, unreadable in opcode: the shape that proves a
@@ -219,7 +256,7 @@ inline bytes_t b_fwd_mint(tr::graph::fwd_op_t op, std::span<const std::byte> dst
 inline bytes_t b_fwd_no_op(std::span<const std::byte> dst, std::span<const std::byte> src,
                            std::span<const std::byte> selector = {},
                            std::span<const std::byte> payload = {}) {
-    return detail::fwd_frame(fwd_op_child_empty(), dst, selector, src, payload, true);
+    return detail::fwd_frame(fwd_op_child_empty(), dst, selector, src, {}, payload, true);
 }
 
 }  // namespace tr::testing
