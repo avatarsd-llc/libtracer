@@ -67,6 +67,20 @@ option(LIBTRACER_TRANSPORT_TCP "Build the TCP stream transport (tcp_transport_t)
 option(LIBTRACER_TRANSPORT_UDP "Build the UDP datagram transport (udp_transport_t)" ON)
 option(LIBTRACER_TRANSPORT_WS "Build the WebSocket transport (transport_ws_*)" ON)
 option(LIBTRACER_TRANSPORT_CAN "Build the CAN transport (transport_can + socketcan_link)" ON)
+# The RFC-0014 §4 S5 link-liveness engine (self_heal_link_t) — #1470. Its own TU, so its
+# own switch, and OFF gives a flash-constrained target back the 4,336 B of reachable
+# `self_heal_link_t` symbols the reporter measured on an ESP32-C6 image (`nm` on the linked
+# ELF; ±0 B of .bss — the engine is code, not a static table).
+#
+# PAIR IT WITH THE CONFIG MEMBER. This switch decides which TUs compile; whether the engine
+# is REACHABLE is `tr::graph::default_config_t::kSelfHealLinks`, bound by an override
+# fragment (ADR-0068), exactly as `kBusLinks` governs the ADR-0044 bus tier. Turning this
+# OFF without also binding `kSelfHealLinks = false` is a LINK error naming `self_heal_link_t`
+# — deliberately, because the mint site would still be compiled in with no implementation
+# behind it. The converse mistake is caught earlier and more clearly: `self_heal_link.cpp`
+# opens with a `static_assert(kSelfHealLinks, …)`.
+option(LIBTRACER_SELF_HEAL_LINKS
+       "Build the RFC-0014 S5 link-liveness engine (self_heal_link_t)" ON)
 
 # The required core (always compiled): L2/L3 wire codec + L0/L1 substrate + path + L4
 # graph runtime, plus the in-process loopback transport (dev/test, no dependencies; a
@@ -98,8 +112,11 @@ if(LIBTRACER_NET_PLANE)
         src/path_label_table.cpp
         src/fwd_router.cpp
         src/transport_vertex.cpp
-        src/self_heal_link.cpp
     )
+    # The S5 liveness engine (#1470) — see the option's own comment above.
+    if(LIBTRACER_SELF_HEAL_LINKS)
+        target_sources(libtracer PRIVATE src/self_heal_link.cpp)
+    endif()
     # The built-in transport-factory registrations transport_vertex_t wires up. One glue
     # TU per enabled builtin (udp/tcp/ws), plus a dispatcher (register_builtin_transports)
     # that calls exactly the enabled ones: the hand-written src/builtin_transports.cpp for

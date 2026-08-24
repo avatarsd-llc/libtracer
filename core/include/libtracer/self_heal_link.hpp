@@ -14,6 +14,8 @@
  */
 #pragma once
 
+#include <pthread.h>
+
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
@@ -22,9 +24,9 @@
 #include <memory>
 #include <mutex>
 #include <span>
-#include <thread>
 #include <vector>
 
+#include "libtracer/config.hpp"
 #include "libtracer/thread_id.hpp"
 #include "libtracer/transport.hpp"
 #include "libtracer/transport_vertex.hpp"
@@ -232,6 +234,9 @@ class self_heal_link_t final : public transport_t {
      *         caller holds `m_`. */
     void ensure_worker_locked();
 
+    /** @brief `pthread_create` trampoline into `%worker_main` (the `void*` is `this`). */
+    static void* worker_entry(void* self);
+
     /** @brief The op-side gate: the §4 transient hold. Returns the socket to send on, or
      *         nullptr = drop (fail-fast, or the one bounded auto-wake attempt failed). */
     [[nodiscard]] std::shared_ptr<sock_t> ready_socket();
@@ -261,11 +266,19 @@ class self_heal_link_t final : public transport_t {
     std::shared_ptr<sock_t> inner_;                /**< @brief The live socket (UP only). */
     std::vector<std::shared_ptr<sock_t>> corpses_; /**< @brief Dead sockets awaiting reap. */
 
-    std::thread worker_;                    /**< @brief Lazy; joined by @ref stop. */
-    detail::thread_id_t worker_id_{};       /**< @brief Re-entrancy guard: the worker's own
-                                                        publish fan-out must not block on the
-                                                        worker (see `ready_socket`). */
-    std::atomic<std::uint64_t> gen_ctr_{0}; /**< @brief Dial-generation mint. */
+    // A raw pthread rather than a `std::thread`, for the two reasons `posix_endpoint_t` and
+    // `socketcan_link_t` already are (#1470): `std::thread`'s constructor THROWS on spawn
+    // failure, which is a `std::abort()` under `-fno-exceptions`, while `pthread_create`
+    // returns an error code the engine can absorb; and `pthread_attr_setstacksize` is the
+    // only portable way to size the stack, which an RTOS target must do — IDF's pthread
+    // otherwise takes `CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT` (12,288 B stock) from the
+    // heap per link. See `tr::net::kSelfHealWorkerStackBytes`.
+    pthread_t worker_{};              /**< @brief Valid only while `%worker_started_` is set. */
+    bool worker_started_ = false;     /**< @brief Lazy; joined by @ref stop. */
+    detail::thread_id_t worker_id_{}; /**< @brief Re-entrancy guard: the worker's own
+                                                  publish fan-out must not block on the
+                                                  worker (see `ready_socket`). */
+    std::atomic<std::uint64_t> gen_ctr_{0};           /**< @brief Dial-generation mint. */
     std::atomic<std::uint64_t> engine_dropped_tx_{0}; /**< @brief Fail-fast drops. */
 };
 

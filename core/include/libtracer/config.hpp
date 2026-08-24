@@ -486,6 +486,75 @@ struct default_config_t {
      * select would keep delivering peer-named into a sink the router never installed.
      */
     static constexpr bool kBusLinks = true;
+
+    /**
+     * @brief Whether this target carries the RFC-0014 §4 S5 LINK-LIVENESS ENGINE at all —
+     *        `self_heal_link_t`, its worker thread and its backoff/redial state machine
+     *        (#1470).
+     *
+     * A `tr::net` fact, and a member HERE for the reason @ref kBusLinks is: ADR-0070's rule
+     * is that the configuration is ONE named type, so a knob that lives outside it cannot be
+     * reached by an override fragment. @ref tr::net::kSelfHealLinks is its spelling for the
+     * transport plane.
+     *
+     * **What it closes.** The engine is minted on exactly one path — a `config`-`kind` DIAL
+     * whose kind was registered with `transport_kind_traits_t::self_heal_dial`
+     * (`transport_vertex.cpp`, `create_connection_locked`). Bound `false`, that mint is
+     * discarded at COMPILE time, nothing references `self_heal_link_t`, and the TU is
+     * dropped from the archive by the build lists that also gate it
+     * (`LIBTRACER_SELF_HEAL_LINKS` in `core/CMakeLists.txt`,
+     * `CONFIG_LIBTRACER_SELF_HEAL_LINKS` in the ESP-IDF component).
+     *
+     * **What it costs to keep and what closing it buys.** Measured by the reporter on an
+     * ESP32-C6 image (riscv32, `-Os -fno-exceptions -fno-rtti`, same sdkconfig) across the
+     * release that made the TU unconditional: `nm` on the linked ELF finds **4,336 B** of
+     * reachable `self_heal_link_t` symbols (`worker_main`, `attempt_locked`, `reap_locked`,
+     * …) out of a +6,224 B image bump, and **0 B** of `.dram0.bss` — the engine is code and
+     * per-instance state, not a static table.
+     *
+     * **Who should set it.** Any node that does not use an engine-managed DIAL — which
+     * today is EVERY stock target, because **no in-tree transport kind sets
+     * `self_heal_dial`**: the built-in `udp`/`tcp`/`ws` factories construct eagerly, and an
+     * ESP-IDF node stages its links with `provide_link`, which bypasses the factory catalog
+     * entirely. Flipping the built-in point-to-point kinds onto the engine is #1548.
+     * Override fragment: `static constexpr bool kSelfHealLinks = false;`
+     *
+     * **It is a REFUSAL, never a silent downgrade.** A build that binds it `false` and then
+     * registers a `self_heal_dial` kind is rejected at `register_transport_type`: the kind
+     * is NOT catalogued, so a `SPEC` naming it answers `SCHEMA_NOT_FOUND` — the same answer
+     * any unregistered kind gets — and a debug build asserts at the registration itself.
+     * Quietly registering it with the trait CLEARED would be worse than either: the
+     * connection would come up eagerly, with no redial and no liveness publishing, and
+     * nothing would say so.
+     */
+    static constexpr bool kSelfHealLinks = true;
+
+    /**
+     * @brief Stack bytes for the link-liveness engine's worker thread; `0` = the platform
+     *        default (#1470).
+     *
+     * The worker is the sole dialer and the sole liveness publisher, so its stack has to
+     * carry a `connect()` and the publish fan-out beneath it. On a POSIX host the platform
+     * default is megabytes of lazily-committed address space and nobody has to think about
+     * it. On an RTOS target it is a REAL allocation from the heap, per link: ESP-IDF's
+     * `std::thread` is a pthread, and a pthread takes
+     * `CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT` from a board that may have ~76 KB free —
+     * 12,288 B per link on the sdkconfig #1470's reporter measured. There was no way to
+     * size it, which made the engine unusable on such a target INDEPENDENTLY of whether the
+     * flash was affordable — the second half of #1470.
+     *
+     * Applied through `pthread_attr_setstacksize` at the spawn, which is the same mechanism
+     * `posix_endpoint_t::start` and `socketcan_link_t::start` already use for their receive
+     * threads, and which IDF's pthread honours. So it is **not** an ESP-only knob with an
+     * inert body elsewhere: glibc honours it too. A value below the platform floor makes
+     * `pthread_attr_setstacksize` return `EINVAL` and leaves the default in place — the
+     * spawn still happens, with the default stack, exactly as the two precedents behave.
+     *
+     * Left at `0` — every host build, and the default everywhere — nothing is set and the
+     * spawn is byte-for-byte the one that shipped. Override fragment:
+     * `static constexpr std::size_t kSelfHealWorkerStackBytes = 4096;`
+     */
+    static constexpr std::size_t kSelfHealWorkerStackBytes = 0;
 };
 
 }  // namespace tr::graph
@@ -601,5 +670,25 @@ namespace tr::net {
  * `tr::net::bus_of` (`%transport.hpp`) rather than reading it directly.
  */
 inline constexpr bool kBusLinks = tr::graph::config_t::kBusLinks;
+
+/**
+ * @brief Whether this target carries the RFC-0014 §4 S5 link-liveness engine at all.
+ *
+ * The transport plane's spelling of @ref tr::graph::default_config_t::kSelfHealLinks, which
+ * carries the full rationale, the measured saving and the refusal rule. Derived from
+ * @ref tr::graph::config_t exactly as @ref kBusLinks is, so an override fragment sets it in
+ * the one place every knob is set.
+ */
+inline constexpr bool kSelfHealLinks = tr::graph::config_t::kSelfHealLinks;
+
+/**
+ * @brief Stack bytes for the link-liveness engine's worker thread; `0` = platform default.
+ *
+ * The transport plane's spelling of @ref tr::graph::default_config_t::kSelfHealWorkerStackBytes,
+ * which carries the rationale. Its one consumer is the `pthread_attr_setstacksize` at the
+ * worker spawn (`self_heal_link.cpp`).
+ */
+inline constexpr std::size_t kSelfHealWorkerStackBytes =
+    tr::graph::config_t::kSelfHealWorkerStackBytes;
 
 }  // namespace tr::net

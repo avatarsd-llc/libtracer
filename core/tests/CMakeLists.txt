@@ -2038,6 +2038,22 @@ foreach(_libtracer_bus_test IN LISTS LIBTRACER_BUS_SKIPPABLE_TESTS)
     endif()
 endforeach()
 
+# The suites whose SUBJECT is the RFC-0014 S5 link-liveness engine (#1470). On a
+# `kSelfHealLinks = false` build the engine is not in the image and
+# `register_transport_type` refuses their `self_heal_dial` kind, so neither can do anything
+# but crash or fail about a module the binary was never built with. Both state a skip from
+# their own `main` (tr::testing::skipped) and exit 77; the label is the primary deselection
+# (`ctest -LE selfheal`) and the property is what makes CTest read the exit as `Skipped` for
+# anyone who runs them anyway. Same two-part shape as the `bus` block above, and 77 must stay
+# in step with `tr::testing::kSkipExitCode`.
+set(LIBTRACER_SELF_HEAL_TESTS link_liveness net_lock_order)
+foreach(_libtracer_sh_test IN LISTS LIBTRACER_SELF_HEAL_TESTS)
+    if(TEST ${_libtracer_sh_test})
+        set_property(TEST ${_libtracer_sh_test} APPEND PROPERTY LABELS selfheal)
+        set_property(TEST ${_libtracer_sh_test} PROPERTY SKIP_RETURN_CODE 77)
+    endif()
+endforeach()
+
 # The other half of the refusal (#375 deliverable 3): `transport_can.cpp`'s
 # `static_assert(kBusLinks, ...)`. A rejection is not observable from a compiled binary — by the
 # time a test runs, the TU that should have been rejected has already compiled — so the check

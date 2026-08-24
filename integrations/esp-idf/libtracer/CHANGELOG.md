@@ -10,6 +10,35 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`CONFIG_LIBTRACER_SELF_HEAL_LINKS` and `CONFIG_LIBTRACER_SELF_HEAL_WORKER_STACK` — the
+  link-liveness engine is now excludable, and its worker's stack sizable**
+  ([#1470](https://github.com/avatarsd-llc/libtracer/issues/1470)). `self_heal_link.cpp` became
+  an unconditional component source at v0.14.0, so the RFC-0014 S5 engine linked into every
+  image whether or not the node could reach one — measured by the reporter on an ESP32-C6:
+  **4,336 B** of reachable `self_heal_link_t` symbols out of a +6,224 B image bump, and **0 B**
+  of `.dram0.bss`. Turning the first bool off drops the TU **and** writes
+  `kSelfHealLinks = false` into the generated `libtracer/config_override.hpp`, so the two
+  selectors are driven by one symbol and cannot disagree on this component. Defaults `y`: a
+  stock image is byte-identical to before.
+
+  **No built-in kind asks for the engine today.** The `udp`/`tcp`/`ws` factories construct
+  eagerly, and an ESP node stages its links with `provide_link`, which bypasses the factory
+  catalog entirely — so on a stock chip image the engine is unreachable and this is a pure
+  saving until [#1548](https://github.com/avatarsd-llc/libtracer/issues/1548) flips the
+  built-in point-to-point kinds onto it. With it off, registering a `self_heal_dial` kind is
+  **refused** (the kind is not catalogued; a `SPEC` naming it answers `SCHEMA_NOT_FOUND`)
+  rather than quietly downgraded to eager construction.
+
+  The second is the reporter's other ask and the one that made the engine unusable here
+  independently of flash: the worker was a bare `std::thread`, which on IDF takes
+  `CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT` from the heap **per link** — 12,288 B on the
+  reporter's sdkconfig, on a board with ~76 KB free. It is now spawned through
+  `pthread_create` with `pthread_attr_setstacksize`, the mechanism `posix_endpoint_t` and
+  `socketcan_link_t` already use, so the size is a plain integer knob. `0` (the default) means
+  the platform default and touches no attribute at all.
+
 ## [0.15.1] — 2026-08-23
 
 ### Fixed

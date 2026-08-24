@@ -60,6 +60,14 @@ BANNED_SYMBOL = "pthread_self"
 REQUIRED_SYMBOL = "xTaskGetCurrentTaskHandle"
 
 # The TUs that carry an ownership stamp, and therefore must show the replacement.
+#
+# A TU here may legitimately be ABSENT from a build: ``self_heal_link.cpp`` rides
+# ``CONFIG_LIBTRACER_SELF_HEAL_LINKS`` since #1470, and a node that closed the link-liveness
+# engine out compiles no such object. So the requirement is conditional on the object being
+# PRESENT — a missing object is reported as configured-out, not as a stamp that was deleted.
+# What is never optional is that at least one stamping TU was scanned: an image with none of
+# them would make the whole "the stamp is ported, not gone" half vacuous, and
+# ``transport_vertex.cpp`` is unconditional in every net-plane build, so that floor is real.
 STAMPING_TUS = ("transport_vertex.cpp", "self_heal_link.cpp")
 
 # Floor on the object count a scan must cover before its "no match" counts as evidence. Not a
@@ -127,6 +135,7 @@ def main() -> int:
     ok = True
     offenders: list[pathlib.Path] = []
     stamping_seen: dict[str, bool] = {tu: False for tu in STAMPING_TUS}
+    stamping_present: dict[str, bool] = {tu: False for tu in STAMPING_TUS}
 
     for obj in objects:
         undef = undefined_symbols(nm, obj)
@@ -138,7 +147,10 @@ def main() -> int:
         if BANNED_SYMBOL in undef:
             offenders.append(obj)
         for tu in STAMPING_TUS:
-            if obj.name.startswith(tu) and REQUIRED_SYMBOL in undef:
+            if not obj.name.startswith(tu):
+                continue
+            stamping_present[tu] = True
+            if REQUIRED_SYMBOL in undef:
                 stamping_seen[tu] = True
 
     if offenders:
@@ -150,6 +162,13 @@ def main() -> int:
             print(f"    - {o}", file=sys.stderr)
 
     for tu, seen in stamping_seen.items():
+        if not stamping_present[tu]:
+            # Configured out (#1470) — there is no object to carry a stamp. Say so in the log
+            # rather than silently dropping the claim, so a build that lost the TU by accident
+            # still leaves a trace someone can read.
+            print(f"note: {tu} compiled no object in this build — configured out; its stamp "
+                  "claim does not apply here.")
+            continue
         if not seen:
             ok = False
             print(f"ERROR: {tu}'s object does not reference {REQUIRED_SYMBOL} — the ownership "
@@ -157,9 +176,19 @@ def main() -> int:
                   "fix; the two-phase seam is platform-neutral and stays (#1532, #492).",
                   file=sys.stderr)
 
+    if not any(stamping_present.values()):
+        ok = False
+        print("ERROR: none of the ownership-stamp TUs "
+              f"({', '.join(STAMPING_TUS)}) compiled an object in this build. With none of "
+              "them scanned the ported-stamp claim is vacuous, and transport_vertex.cpp is "
+              "unconditional in every net-plane build — so this is a broken scan, not a "
+              "trimmed one.", file=sys.stderr)
+
     if ok:
+        scanned = [tu for tu, present in stamping_present.items() if present]
         print(f"ok: {len(objects)} libtracer objects scanned, zero reference {BANNED_SYMBOL}; "
-              f"both ownership-stamp TUs use {REQUIRED_SYMBOL}.")
+              f"{len(scanned)} ownership-stamp TU(s) present ({', '.join(scanned)}) and each "
+              f"uses {REQUIRED_SYMBOL}.")
     return 0 if ok else 1
 
 

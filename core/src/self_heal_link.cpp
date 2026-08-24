@@ -19,6 +19,16 @@
 
 namespace tr::net {
 
+// The module gate (#1470), the same shape `transport_can.cpp` states for `kBusLinks`: this
+// TU IS the link-liveness engine, so a build that bound the module out and then compiled it
+// anyway has its two selectors disagreeing. Say so here rather than shipping 4.3 KB of
+// unreachable flash — drop `LIBTRACER_SELF_HEAL_LINKS` / `CONFIG_LIBTRACER_SELF_HEAL_LINKS`
+// from the build list to match the fragment.
+static_assert(kSelfHealLinks,
+              "self_heal_link.cpp is compiled on a build whose config fragment binds "
+              "kSelfHealLinks = false. Turn LIBTRACER_SELF_HEAL_LINKS (CMake) or "
+              "CONFIG_LIBTRACER_SELF_HEAL_LINKS (ESP-IDF) OFF so the TU is dropped too.");
+
 using wire::tlv_t;
 
 self_heal_link_t::self_heal_link_t(transport_vertex_t::transport_factory_t factory,
@@ -96,14 +106,20 @@ void self_heal_link_t::release() {
 }
 
 void self_heal_link_t::stop() {
-    std::thread w;
+    pthread_t w{};
+    bool started = false;
     {
         const std::lock_guard l(m_);
         stop_ = true;
-        w = std::move(worker_);
+        // Take the handle out under the lock and clear the flag, so a second `stop()` (the
+        // destructor after an explicit one) joins nothing rather than joining twice — the
+        // `std::move(worker_)` this replaces bought the same idempotence.
+        started = worker_started_;
+        w = worker_;
+        worker_started_ = false;
         cv_.notify_all();
     }
-    if (w.joinable()) w.join();
+    if (started) (void)::pthread_join(w, nullptr);
     // Tear the sockets down with `m_` RELEASED: each destruction joins a receive thread
     // that may itself be blocked in on_socket_down waiting for `m_`.
     std::vector<std::shared_ptr<sock_t>> dead;
@@ -164,9 +180,29 @@ std::shared_ptr<self_heal_link_t::sock_t> self_heal_link_t::ready_socket() {
     return nullptr;  // the one attempt concluded not-up: link-down
 }
 
+void* self_heal_link_t::worker_entry(void* self) {
+    static_cast<self_heal_link_t*>(self)->worker_main();
+    return nullptr;
+}
+
 void self_heal_link_t::ensure_worker_locked() {
-    if (stop_ || worker_.joinable()) return;
-    worker_ = std::thread([this] { worker_main(); });
+    if (stop_ || worker_started_) return;
+    pthread_attr_t attr;
+    ::pthread_attr_init(&attr);
+    // The #1470 stack knob. `if constexpr` so the default binding (0 — every host build)
+    // emits no call at all and the spawn stays the one that shipped. A hint below the
+    // platform floor makes setstacksize answer EINVAL and leaves the attr's default in
+    // place, so the spawn still happens with the default stack — the same soft behaviour
+    // `posix_endpoint_t::start` and `socketcan_link_t::start` take.
+    if constexpr (kSelfHealWorkerStackBytes != 0)
+        (void)::pthread_attr_setstacksize(&attr, kSelfHealWorkerStackBytes);
+    // Error-code return, not a throw: a `std::thread` spawn failure is a `std::abort()`
+    // under -fno-exceptions, which is not an answer a link-liveness engine may give on an
+    // out-of-heap MCU. A failed spawn simply leaves the engine unworkered — the next
+    // transition tries again.
+    worker_started_ =
+        (::pthread_create(&worker_, &attr, &self_heal_link_t::worker_entry, this) == 0);
+    ::pthread_attr_destroy(&attr);
 }
 
 void self_heal_link_t::publish_unlocked(std::unique_lock<std::mutex>& l, link_state_t s) {

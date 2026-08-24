@@ -66,9 +66,19 @@ set(LIBTRACER_SRCS
     "${LIBTRACER_ROOT}/core/src/path_label_table.cpp"
     "${LIBTRACER_ROOT}/core/src/fwd_router.cpp"
     "${LIBTRACER_ROOT}/core/src/transport_vertex.cpp"
-    "${LIBTRACER_ROOT}/core/src/self_heal_link.cpp"
     "${LIBTRACER_ROOT}/core/src/loopback.cpp"
 )
+
+# The RFC-0014 S5 link-liveness engine (#1470) — its own TU, so its own Kconfig bool, and the
+# TU list and the config member below are driven by the SAME symbol, so the two can never
+# disagree on this component the way a hand-paired core build can. OFF gives a
+# flash-constrained node back 4,336 B of reachable self_heal_link_t symbols (measured on a
+# C6 image; 0 B of .dram0.bss). NO built-in kind asks for the engine today: the udp/tcp/ws
+# factories construct eagerly and an ESP node stages its links with provide_link, which
+# bypasses the factory catalog entirely — so on a stock image it is unreachable code.
+if(CONFIG_LIBTRACER_SELF_HEAL_LINKS)
+    list(APPEND LIBTRACER_SRCS "${LIBTRACER_ROOT}/core/src/self_heal_link.cpp")
+endif()
 
 # --- Built-in transport modules (#393) — per-module gating, mirroring the core CMake
 # options LIBTRACER_TRANSPORT_{UDP,TCP,WS}. Each transport's glue factory + socket TU
@@ -267,7 +277,7 @@ endif()
 # as plain C++ (ADR-0068 §Erratum 1). The DEFAULTS are not spelled here at all: they are C++
 # literals in the checked-in core/include/libtracer/config.hpp, which discovers this fragment
 # with __has_include and uses the `tr::graph::config_t` it binds. The fragment INHERITS
-# `tr::graph::default_config_t` and states only the four knobs an ESP target changes, so a knob
+# `tr::graph::default_config_t` and states only the six knobs an ESP target changes, so a knob
 # added to config.hpp later reaches this build at its new default — which is why no drift gate
 # has to hold the two files in step.
 # The generated directory is listed BEFORE core/include in INCLUDE_DIRS below, so the fragment
@@ -321,6 +331,23 @@ if(IDF_TARGET STREQUAL "linux")
 else()
     set(LIBTRACER_SPIN_WAIT_SAFE false)
 endif()
+# The S5 liveness engine (#1470). CONFIG_* is undefined in the early requirement-expansion
+# pass, so the fallback is the Kconfig DEFAULT (y) rather than off — the second pass then
+# writes the real value before anything compiles. Getting this backwards would render a
+# fragment that closes the engine out while the TU list (also CONFIG_-gated, and also read
+# only in the second pass) compiles it, which `self_heal_link.cpp`'s own static_assert would
+# then reject.
+if(DEFINED CONFIG_LIBTRACER_SELF_HEAL_LINKS AND NOT CONFIG_LIBTRACER_SELF_HEAL_LINKS)
+    set(LIBTRACER_SELF_HEAL_LINKS false)
+else()
+    set(LIBTRACER_SELF_HEAL_LINKS true)
+endif()
+# Worker stack bytes; 0 = the IDF pthread default. Same early-pass fallback reasoning.
+if(CONFIG_LIBTRACER_SELF_HEAL_WORKER_STACK)
+    set(LIBTRACER_SELF_HEAL_WORKER_STACK ${CONFIG_LIBTRACER_SELF_HEAL_WORKER_STACK})
+else()
+    set(LIBTRACER_SELF_HEAL_WORKER_STACK 0)
+endif()
 set(LIBTRACER_CONFIG_OVERRIDE_PATH
     "${CMAKE_CURRENT_BINARY_DIR}/generated/include/libtracer/config_override.hpp")
 set(LIBTRACER_CONFIG_OVERRIDE_TEXT
@@ -344,6 +371,8 @@ struct esp_config_t : default_config_t {
     static constexpr std::size_t kCacheLineBytes = ${LIBTRACER_CACHE_LINE_BYTES};
     static constexpr std::size_t kEdgePinSlots = ${LIBTRACER_EDGE_PIN_SLOTS};
     static constexpr bool kSpinWaitSafe = ${LIBTRACER_SPIN_WAIT_SAFE};
+    static constexpr bool kSelfHealLinks = ${LIBTRACER_SELF_HEAL_LINKS};
+    static constexpr std::size_t kSelfHealWorkerStackBytes = ${LIBTRACER_SELF_HEAL_WORKER_STACK};
 };
 
 using config_t = esp_config_t;

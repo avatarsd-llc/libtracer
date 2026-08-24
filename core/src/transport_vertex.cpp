@@ -174,10 +174,17 @@ result_t<void> transport_vertex_t::ctl_txn_t::discharge() {
         (void)owner_.router_.remove_child(unroute_);
         unroute_.clear();
     }
-    if (stop_ != nullptr) {
-        self_heal_link_t* const engine = stop_;
-        stop_ = nullptr;
-        engine->stop();  // JOINS the worker — the reason this is not under `ctl_m_`
+    // `if constexpr` on the module gate (#1470), here and at every other call INTO the
+    // engine: with `kSelfHealLinks = false` nothing mints one, so `stop_` is provably null —
+    // and discarding the call is what stops the linker pulling `self_heal_link.cpp`'s 4.3 KB
+    // back into an image that can never reach it. A null CHECK would not: the reference is
+    // what costs, not the branch.
+    if constexpr (kSelfHealLinks) {
+        if (stop_ != nullptr) {
+            self_heal_link_t* const engine = stop_;
+            stop_ = nullptr;
+            engine->stop();  // JOINS the worker — the reason this is not under `ctl_m_`
+        }
     }
     if (retire_) {
         const vertex_handle_t vertex = *retire_;
@@ -267,6 +274,22 @@ void transport_vertex_t::register_transport_type(std::string kind, transport_fac
 
 void transport_vertex_t::register_transport_type(std::string kind, transport_factory_t factory,
                                                  transport_kind_traits_t traits) {
+    // The #1470 module gate: on a build that closed the RFC-0014 §4 S5 engine out, a kind
+    // that asks for an engine-managed DIAL is REFUSED, never quietly downgraded. Registering
+    // it with the trait cleared would be the worst answer available — the connection would
+    // come up eagerly, with no redial and no liveness publishing, and nothing would say so.
+    // Refusing means the kind is not catalogued at all, so a `SPEC` naming it answers
+    // SCHEMA_NOT_FOUND, exactly as any unregistered kind does; the assert names the cause on
+    // a debug build, where a setup-time programming error should stop the program.
+    // Discarded entirely at the default binding — this costs a stock build nothing.
+    if constexpr (!kSelfHealLinks) {
+        if (traits.self_heal_dial) {
+            assert(!traits.self_heal_dial &&
+                   "register_transport_type: a self_heal_dial kind on a kSelfHealLinks=false "
+                   "build — the liveness engine is not in this image (#1470)");
+            return;
+        }
+    }
     const ctl_txn_t txn(*this, ctl_scope_t::OPERATION);  // ADR-0063 §3 serialization
     transport_types_.insert_or_assign(std::move(kind), kind_entry_t{std::move(factory), traits});
 }
@@ -711,32 +734,44 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(ctl_txn_t& 
         // An unregistered kind is an unsupported catalog entry — same convention as an
         // unknown SPEC `type` (SCHEMA_NOT_FOUND, the ENOTTY of creation).
         if (factory == transport_types_.end()) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
-        if (factory->second.traits.self_heal_dial && settings.role == conn_role_t::DIAL) {
-            // The RFC-0014 §4 S5 engine (#492): creation constructs NO socket — the vertex
-            // is minted DORMANT and the engine dials on demand / self-heals under its own
-            // worker. The factory therefore does not run here, so the universal DIAL keys
-            // it would have validated are gated NOW (the same predicate `dial_or_listen`
-            // applies): creation must refuse a misconfigured SPEC at the write, never
-            // defer it to a first dial that answers success today and failure later.
-            // Kind-PRIVATE config stays the factory's to refuse, at dial time — the §2
-            // catalog validation proper is S3's. Its ENVELOPE is ruled (RFC-0014
-            // Amendment 3): the catalog is the `SETTINGS` of the endpoint's ordinary
-            // `:schema` record, empty until a module declares one, so what is still open
-            // here is the module-side declaration and the validation it would license,
-            // never the reply shape.
-            if (settings.addr.empty() || settings.port == 0)
-                return std::unexpected(status_t::TYPE_MISMATCH);
-            // The engine owns a byte COPY of the raw config: the decoded TLV borrows the
-            // write's rope, which is gone by the first re-dial.
-            std::vector<std::byte> raw;
-            if (config != nullptr) reemit_tlv(raw, *config);
-            auto heal = std::make_unique<self_heal_link_t>(factory->second.factory, settings,
-                                                           std::move(raw),
-                                                           factory->second.traits.delivers_ropes);
-            engine = heal.get();
-            owned = std::move(heal);
-            link = owned.get();
-        } else {
+        // The one mint site of the S5 engine, behind the #1470 module gate. On a
+        // `kSelfHealLinks = false` build the whole arm is DISCARDED — `self_heal_link_t` is
+        // never named, so the linker never pulls its TU in — and no kind can reach it
+        // anyway, because `register_transport_type` refuses to catalogue a `self_heal_dial`
+        // kind on such a build. The eager arm below then serves every registered kind.
+        if constexpr (kSelfHealLinks) {
+            if (factory->second.traits.self_heal_dial && settings.role == conn_role_t::DIAL) {
+                // The RFC-0014 §4 S5 engine (#492): creation constructs NO socket — the vertex
+                // is minted DORMANT and the engine dials on demand / self-heals under its own
+                // worker. The factory therefore does not run here, so the universal DIAL keys
+                // it would have validated are gated NOW (the same predicate `dial_or_listen`
+                // applies): creation must refuse a misconfigured SPEC at the write, never
+                // defer it to a first dial that answers success today and failure later.
+                // Kind-PRIVATE config stays the factory's to refuse, at dial time — the §2
+                // catalog validation proper is S3's. Its ENVELOPE is ruled (RFC-0014
+                // Amendment 3): the catalog is the `SETTINGS` of the endpoint's ordinary
+                // `:schema` record, empty until a module declares one, so what is still open
+                // here is the module-side declaration and the validation it would license,
+                // never the reply shape.
+                if (settings.addr.empty() || settings.port == 0)
+                    return std::unexpected(status_t::TYPE_MISMATCH);
+                // The engine owns a byte COPY of the raw config: the decoded TLV borrows the
+                // write's rope, which is gone by the first re-dial.
+                std::vector<std::byte> raw;
+                if (config != nullptr) reemit_tlv(raw, *config);
+                auto heal = std::make_unique<self_heal_link_t>(
+                    factory->second.factory, settings, std::move(raw),
+                    factory->second.traits.delivers_ropes);
+                engine = heal.get();
+                owned = std::move(heal);
+                link = owned.get();
+            }
+        }
+        // The eager arm — every kind on a stock build, and EVERY kind on a build that closed
+        // the engine out. Keyed on `link` rather than written as the `else` of the arm above,
+        // because an `else` attached to a discarded `if constexpr` body would be discarded
+        // with it and a closed-out build would construct nothing at all.
+        if (link == nullptr) {
             // The raw config TLV rides along so the kind's factory can parse its own
             // kind-private keys (ADR-0043 §5 leanness: they never land in settings).
             auto built = factory->second.factory(settings, config);
@@ -796,11 +831,13 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(ctl_txn_t& 
     // set_link_state, whose ctl_m_ the engine's worker must never take (the teardown
     // path joins that worker while HOLDING ctl_m_). remove_connection stops the engine
     // before the vertex retires, so no publish lands on a retired vertex.
-    if (engine != nullptr) {
-        graph::graph_t* const g = &graph_;
-        const vertex_handle_t vh = *v;
-        engine->set_liveness_publisher(
-            [g, vh](link_state_t s) { (void)g->write(vh, link_state_value(s)); });
+    if constexpr (kSelfHealLinks) {  // #1470 module gate — see `ctl_txn_t::discharge`
+        if (engine != nullptr) {
+            graph::graph_t* const g = &graph_;
+            const vertex_handle_t vh = *v;
+            engine->set_liveness_publisher(
+                [g, vh](link_state_t s) { (void)g->write(vh, link_state_value(s)); });
+        }
     }
 
     const bool constructed = owned != nullptr && engine == nullptr;
@@ -966,7 +1003,8 @@ result_t<void> transport_vertex_t::acquire_link(std::string_view name) {
     // and kick the worker — so they stay in phase 1 where the `conns_` lookup already is.
     // A connection without an engine answers success as a no-op (see the header: a
     // LISTEN ignores refcount per RFC-0014 §4, and a manual link's liveness is manual).
-    if (it->second.engine != nullptr) it->second.engine->acquire();
+    if constexpr (kSelfHealLinks)  // #1470 module gate
+        if (it->second.engine != nullptr) it->second.engine->acquire();
     return {};
 }
 
@@ -974,7 +1012,8 @@ result_t<void> transport_vertex_t::release_link(std::string_view name) {
     const ctl_txn_t txn(*this);  // ADR-0063 §3 control-plane serialization
     const auto it = conns_.find(name);
     if (it == conns_.end()) return std::unexpected(status_t::NOT_FOUND);
-    if (it->second.engine != nullptr) it->second.engine->release();
+    if constexpr (kSelfHealLinks)  // #1470 module gate
+        if (it->second.engine != nullptr) it->second.engine->release();
     return {};
 }
 
