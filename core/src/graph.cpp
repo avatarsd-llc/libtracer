@@ -1953,13 +1953,16 @@ namespace {
     // This is the RECEIVER seam: `target` is the consumer's own vertex, so if it is a STREAM
     // the ring materializes THERE and is charged against the source THAT vertex injected
     // (RFC-0025 §4.6.1 clause 2). The §4.4 arm is the receiving vertex's own declaration
-    // (`graph_t::set_ring_source`) rather than a bit read off this edge: the arm is NOT read
-    // here on purpose — `edge_view_t` is the always-inlined per-edge body of the wide fan-out
-    // loop, and one added field there was enough to flip the inline estimate and cost 12%
-    // (#1223 / #1250). Under the reliable arm the admission is refused and this leg counts the
-    // declined delivery; a LOCAL producer writing the receiving vertex directly gets the
-    // BACKPRESSURE status itself, which is the whole reach v1 has (the wire carrier waits on
-    // the credit window §4.6.1 clause 7 parks).
+    // (`graph_t::set_ring_source`) rather than a bit read off this edge — the RULED reading
+    // since RFC-0025's 2026-08-24 §4.4 selector erratum (#1204), which demoted the
+    // subscription's `reliability` bits to carried-verbatim-read-by-nothing rather than
+    // commissioning a per-edge selector. The arm is NOT read here on purpose, and the erratum
+    // banks why: `edge_view_t` is the always-inlined per-edge body of the wide fan-out loop,
+    // whose size is a cliff rather than a slope — one added field there was enough to flip the
+    // inline estimate and cost 12% (#1223 / #1250). Under the reliable arm the admission is refused
+    // and this leg counts the declined delivery; a LOCAL producer writing the receiving vertex
+    // directly gets the BACKPRESSURE status itself, which is the whole reach v1 has (the wire
+    // carrier waits on the credit window §4.6.1 clause 7 parks).
     vertex_t::store_drops_t store_drops;
     if (!store_value(target, std::move(clone), store_drops, e.caller())) {
         count_drop(drop_reason_t::OUT_OF_MEMORY, 1);

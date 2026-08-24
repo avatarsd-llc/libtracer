@@ -509,9 +509,12 @@ struct ring_state_t {
      *         loss and raises a gap; `true` is RELIABLE — the admission is refused outright
      *         and the local producer is answered `BACKPRESSURE`, with nothing shed and no
      *         growth past the byte bound. Declared owner-side through
-     *         `graph_t::set_ring_source`; it is NOT a new knob on the wire — RFC-0025 §4.4
-     *         selects the arm from the subscription's existing `reliability` bits, and this
-     *         is where a receiver states its own. */
+     *         `graph_t::set_ring_source`; it is NOT a new knob on the wire. This declaration
+     *         IS the ruled selector: RFC-0025's 2026-08-24 §4.4 selector erratum (#1204) makes
+     *         the receiving vertex's own arm the one §4.4 binds, and demotes the subscription's
+     *         `reliability` bits to carried-verbatim-read-by-nothing. Receiver-pays (Amendment
+     *         2, §4.6.1): the party that funds the ring's bytes declares what its overflow
+     *         means. */
     bool reliable = false;
 
     /** @brief Release every held reservation and empty the ring — the ONE place the

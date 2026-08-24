@@ -526,9 +526,13 @@ new wire structure — as one packed 16-bit value under the key `delivery_policy
 
 **Absent ⇒ all-zero ⇒ the default behaviour**, byte-identically: a sender that predates the
 policy is a conforming sender. Only `durability_request` is honoured today (§the transient-local
-latch, [05 §`0x04`](05-protocol-tlvs.md)); `reliability` and `priority` are carried and read back,
-awaiting the transport work that honours them — the honest shape RFC-0022 chose over moving dead
-per-vertex fields into a new home. Bits 6–7 are **decoded but not yet honoured**: their default
+latch, [05 §`0x04`](05-protocol-tlvs.md)); `priority` is carried and read back, awaiting the
+transport work that honours it — the honest shape RFC-0022 chose over moving dead per-vertex
+fields into a new home. `reliability` is carried and read back **awaiting nothing**: the §4.4
+pressure arm is declared owner-side at the *receiving* vertex (`set_ring_source`), so bits 0–1 are
+carried verbatim and read by nothing
+([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md)
+§Erratum 2026-08-24). Bits 6–7 are **decoded but not yet honoured**: their default
 `0` (conflate) is today's behaviour byte-identically, every core now reads the field, and the
 `subscriber/policy-reserved-bits` vector narrowed its description to "bits 8–15 reserved" in the
 same commit — same bytes

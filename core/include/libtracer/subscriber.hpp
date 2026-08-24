@@ -94,9 +94,13 @@ enum class delivery_class_t : std::uint8_t {
  * conflate-class BY CONSTRUCTION.
  *
  * Only @ref durability_request is consumed today (the transient-local latch at
- * `graph_t::admit_subscriber`); @ref reliability, @ref priority and @ref delivery_class are
- * stored and read back, awaiting the fan-out-edge and receiver-ring work that honours them —
- * the honest shape RFC-0022 §3.E chose over moving dead per-vertex fields.
+ * `graph_t::admit_subscriber`). @ref priority and @ref delivery_class are stored and read
+ * back, awaiting the work that honours them — the honest shape RFC-0022 §3.E chose over
+ * moving dead per-vertex fields. @ref reliability is **not** awaiting anything: RFC-0025's
+ * 2026-08-24 §4.4 selector erratum (#1204) rules the pressure arm to be the RECEIVING
+ * vertex's own declaration (`graph_t::set_ring_source`), so these two bits are **carried
+ * verbatim and read by nothing** — decoded, stored, read back from `:subscribers[]` and
+ * re-emitted unchanged, with no behaviour behind them and none promised.
  *
  * **Flags only, never a magnitude.** A deadline or a queue bound added later is a magnitude
  * and belongs in the subscription's cold half as a full-width field, never in these bits.

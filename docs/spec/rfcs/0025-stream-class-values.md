@@ -136,7 +136,7 @@ becomes:
 
 | bits | field | values |
 | ---: | --- | --- |
-| 0–1 | `reliability` | `0` = best-effort, `1` = reliable; `2`–`3` reserved |
+| 0–1 | `reliability` | `0` = best-effort, `1` = reliable; `2`–`3` reserved. **Carried verbatim, read by nothing** since the 2026-08-24 selector erratum: the §4.4 arm is the receiving vertex's own declaration. |
 | 2–4 | `priority` | `0`–`7`, `0` = default |
 | 5 | `durability_request` | `1` = deliver the producer's latched last value on join |
 | 6–7 | `delivery_class` | `0` = **conflate** (default), `1` = **immediate**, `2` = **batch**, `3` = **stream** |
@@ -148,7 +148,11 @@ verbatim), so old subscribers are bit-compatible **by construction**, and the
 existing `subscriber/policy-absent` and `subscriber/policy-reserved-bits` vectors
 keep their meaning with the reserved range narrowed to 8–15.
 
-Class semantics, enforced at the producer's fan-out edge:
+Class semantics — **honoured by the ROLE of the vertex on each side of the edge**, plus the
+receiving vertex's own declared pressure arm (§4.4, as the 2026-08-24 selector erratum leaves
+it), never by a bit consulted in the fan-out loop. (This line read *"enforced at the producer's
+fan-out edge"* until that erratum; Amendments 2–4 had already deleted the producer-side edge
+state it named.)
 
 - **`0` conflate** — last-wins. Delivery MAY coalesce to the newest value; a
   subscriber lagging its producer observes the latest state, not the history. This
@@ -200,8 +204,10 @@ any of them is not made non-conforming — nothing reads them.
 A key carried under a class that does not consume it is ignored (the standing
 absent-⇒-default doctrine, applied in reverse). The `stream_qos` and
 `stream_window` keys of the superseded #893 draft **do not exist**: the pressure
-behaviour they selected rides `reliability` × class (§4.4), and the window
-magnitude is `stream_depth` above.
+behaviour they selected is the receiving vertex's declared arm × class (§4.4 — it rode
+`reliability` until the 2026-08-24 selector erratum, which found no per-edge selector was ever
+implementable at the fan-out loop's price), and the window magnitude was `stream_depth` above,
+retired by Amendment 2.
 
 > **Amended 2026-08-21 by Amendment 3 (§4.1.2), then SUPERSEDED 2026-08-23 by Amendment 4
 > (§4.1.3).** Amendment 3 ruled `batch_count` and `batch_window_ns` admissible **narrowly**,
@@ -788,8 +794,15 @@ Ruled consequences:
   the graph never validates it (claim 5). The reference library ships helpers that
   read and write this shape.
 
-### 4.4 The pressure contract — `reliability` × class, no new knob
+### 4.4 The pressure contract — the receiver's declared arm × class, no new knob
 
+> **Corrected 2026-08-24 by the §4.4/§4.1 selector erratum ([#1204](https://github.com/avatarsd-llc/libtracer/issues/1204)) — see §Erratum at the end of this document.** This
+> section's two arms stand verbatim. Its **selector** does not: the arm is selected by the
+> **receiving vertex's own declaration** (`ring_state_t::reliable`, set owner-side through
+> `graph_t::set_ring_source`), never by a bit consulted per-edge in the fan-out loop. The
+> subscription's `reliability` bits (bits 0–1 of `delivery_policy`) are **carried verbatim, read
+> by nothing** — the Amendment-4 vocabulary, applied to a second field. No wire byte moves.
+>
 > **Amended 2026-08-21 by Amendment 2 (§4.6.1).** Everything this section says about
 > *what* happens under pressure stands verbatim. *Where* it binds moves: the ring is
 > the **receiver's**, not the producer's, so read "a producer's fan-out edge cannot
@@ -806,16 +819,17 @@ Ruled consequences:
 > `FLOW_BACKPRESSURE` above travels to a **local** producer only — there is **no wire carrier**
 > for it in v1, which waits on the credit window parked by §4.6.1 clause 7.
 
-When a producer's fan-out edge cannot enqueue a delivery for a subscriber (ring
-full, resource exhausted), behaviour is selected by the subscription's **existing
-`reliability` bits**, uniformly for the immediate, batch and stream classes:
+When the receiving vertex's STREAM ring cannot admit a delivery (ring full, resource
+exhausted), behaviour is selected by **that vertex's own declared arm**
+(`ring_state_t::reliable`, declared owner-side through `graph_t::set_ring_source`),
+uniformly for the immediate, batch and stream classes:
 
-| `reliability` | contract |
+| declared arm | contract |
 | --- | --- |
-| `0` best-effort | **drop-oldest with a gap signal**: the implementation MUST shed the *oldest* queued delivery (whole, never partial), MUST account the loss, and MUST surface `tr::flow::address_shift_gap` (§4.5) to the subscriber in-order at the shed point. Latency stays bounded by the ring; completeness is sacrificed knowingly. *(prose name: the realtime-lossy behaviour)* |
-| `1` reliable | **producer backpressure**: the write answers `tr::flow::backpressure` (`FLOW_BACKPRESSURE`, the standing nothrow drop-with-receipt contract) and the delivery is enqueued for no one late. The *producer* decides whether to stall, skip, or degrade. *(prose name: the lossless-window behaviour)* |
+| `false` best-effort | **drop-oldest with a gap signal**: the implementation MUST shed the *oldest* queued delivery (whole, never partial), MUST account the loss, and MUST surface `tr::flow::address_shift_gap` (§4.5) to the subscriber in-order at the shed point. Latency stays bounded by the ring; completeness is sacrificed knowingly. *(prose name: the realtime-lossy behaviour)* |
+| `true` reliable | **producer backpressure**: the write answers `tr::flow::backpressure` (`FLOW_BACKPRESSURE`, the standing nothrow drop-with-receipt contract) and the delivery is enqueued for no one late. The *producer* decides whether to stall, skip, or degrade. *(prose name: the lossless-window behaviour)* |
 
-- **Conflate ignores the bit** — conflation *is* its pressure contract (the newest
+- **Conflate ignores the arm** — conflation *is* its pressure contract (the newest
   value replaces the queued one; nothing is "lost" that the class promised to keep).
 - **There is no retransmit and no NACK in v1.** Retransmit needs a producer
   retention contract an MCU cannot promise; a recovery scheme can be layered later
@@ -864,8 +878,9 @@ neither derives from the other.** The owner **declares** depth
 exactly as §8 answered); the subscription **requests** its window
 (`stream_depth`, §4.1.1); the **injected resource bounds what is satisfiable**. A
 shortfall — a declared or requested depth the resource cannot fund at the moment it
-is needed — **surfaces through §4.4's pressure contract** (gap or backpressure per
-the subscription's `reliability`), never as a silent shrink of the declared depth.
+is needed — **surfaces through §4.4's pressure contract** (gap or backpressure per the
+**receiving vertex's declared arm**, corrected by the 2026-08-24 selector erratum), never as
+a silent shrink of the declared depth.
 
 The implementation builds on the **existing STREAM-role ring/drain machinery**
 rather than greenfield: this RFC makes that machinery demand-driven (installed by a
@@ -1286,6 +1301,9 @@ dual-publish transition is needed because nothing about the data vertex changes.
    ruling 3: the pressure contract rides the surviving `reliability` bits × the
    class; a parallel selector would give one subscription two ways to say
    "reliable". The magnitudes go full-width, keyed by class (§4.1.1).
+   **Superseded 2026-08-24 by the selector erratum**: the rejection stands — a parallel
+   *subscription* key is still refused — but the surviving selector is not `reliability`
+   either. It is the receiving vertex's own declaration; both subscription spellings lost.
 5. **QoS-tag-on-the-op** (#863's alternative framing). Rejected — §4.8.
 6. **Per-sample values, no batching.** A TLV header + routing walk per sample is
    ≥ an order of magnitude of overhead at 1 Msps and dimensionally impossible at
@@ -1474,3 +1492,71 @@ no ratio in the table above moves, and neither instrument is added to the per-PR
 publish-leg arm is a subset of the already-gated `inproc` point, and a many-thread aggregate rate
 is a property of the host rather than of the code
 ([#1485](https://github.com/avatarsd-llc/libtracer/issues/1485)).
+
+## Erratum (2026-08-24) — §4.4's pressure arm is selected by the RECEIVING VERTEX's own declaration, not by the subscription's `reliability` bits ([#1204](https://github.com/avatarsd-llc/libtracer/issues/1204))
+
+**What the text said.** Three places named a per-subscription selector for the pressure contract:
+
+- **§4.4** — *"behaviour is selected by the subscription's **existing `reliability` bits**"*, with
+  the section titled `reliability` × class and the table keyed on `0` / `1`;
+- **§4.6** — a depth shortfall surfaces *"per the subscription's `reliability`"*;
+- **§4.1** — class semantics *"enforced at the producer's fan-out edge"*, and §8 alternative 4's
+  ruling recap restating that the contract *"rides the surviving `reliability` bits × the class"*.
+
+**What was wrong.** The selector, not the contract. Both arms of the §4.4 table — best-effort
+drop-oldest-with-a-gap, reliable refuse-and-backpressure — are implemented, pinned
+(`core/tests/ring_pressure_test.cpp`) and unchanged by this erratum. What no implementation can do
+at the stated price is read the arm **per edge**. Reading a subscription bit at the shed point
+means carrying it in `edge_view_t`, the always-inlined per-edge body of the wide fan-out loop, and
+that body's size is a **cliff, not a slope**: one added field flipped GCC's inline estimate for
+`dispatch_edge` and cost **12 %** on the gated hot path
+([#1223](https://github.com/avatarsd-llc/libtracer/issues/1223) /
+[#1250](https://github.com/avatarsd-llc/libtracer/issues/1250)). The reference implementation
+therefore selects the arm from `ring_state_t::reliable`, declared owner-side through
+`graph_t::set_ring_source`, and has done so since the ring landed at the receiver.
+
+That is not a shortfall against the RFC — it is the RFC's own doctrine arriving at §4.4 last.
+**Amendment 2 (§4.6.1) ruled that a producer never queues**: the ring is the RECEIVER's, sized in
+bytes by the receiver's own injected `mem::block_source_t`, and a subscriber that wants depth gets
+it by making **its own target vertex a STREAM**. Under receiver-pays, the party that owns the
+buffer, funds it and observes it overflow is the party that declares what overflow means. A
+subscription bit selecting the behaviour of somebody else's ring was the last surviving fragment of
+the producer-side edge state Amendments 2–4 dismantled.
+
+**The correction.**
+
+| | ruled reading |
+| --- | --- |
+| **selector** | the **receiving vertex's own declaration** — `ring_state_t::reliable`, set owner-side via `graph_t::set_ring_source`. Default `false` ⇒ best-effort, which is today's behaviour byte-identically. |
+| **the two arms** | **unchanged, verbatim.** Best-effort sheds the oldest whole, accounts the loss and raises `tr::flow::address_shift_gap` in order; reliable refuses the admission and answers the local producer `FLOW_BACKPRESSURE`. |
+| **`reliability` (bits 0–1)** | **carried verbatim, read by nothing** — the Amendment-4 vocabulary (`batch_count` / `batch_window_ns` / `stream_depth`), applied to a fourth field. It decodes, stores, reads back from `:subscribers[]` and re-emits exactly as before. |
+| **class semantics (§4.1)** | honoured by the **ROLE** of the vertex on each side of the edge plus the receiver's declared arm — never by a bit consulted in the fan-out loop. |
+
+**Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). **No
+wire surface moves.** The `delivery_policy` u16 keeps its layout, bits 0–1 keep their name, values
+and verbatim-carry rule; no TLV type, `opt` bit, grammar or error identity changes; decode, store
+and re-emit are untouched; **no published conformance vector's bytes move** —
+`subscriber/policy-absent`, `subscriber/policy-reserved-bits`, `subscriber/policy-last-wins` and
+`subscriber/policy-durability` all keep their meaning and their bytes. Nothing shipped ever selected an arm from those bits, so applying the correction
+changes what no conforming implementation does: it states the behaviour that was already agreed
+and already pinned. Maintainer ruling on
+[#1204](https://github.com/avatarsd-llc/libtracer/issues/1204), 2026-08-24 — the alternative on the
+table, *commissioning a per-edge selector with the 12 % priced*, was **declined**: receiver-pays is
+the doctrine, and the price is real.
+
+**What a future per-subscription selector would have to do.** Not foreclosed, but disqualified at
+entry unless it (a) reconciles with receiver-pays — the ring, its bytes and its overflow all belong
+to the receiver — and (b) grows neither `edge_view_t` nor the dispatch inline budget. The wire
+carrier for such a proposal already exists and is now inert: bits 0–1. Exploration is tracked as a
+standalone issue; **no commitment is implied, and nothing in this document reserves the behaviour**.
+
+**Text corrected alongside:** `core/include/libtracer/vertex.hpp` (`ring_state_t::reliable`'s doc
+block, which acknowledged §4.4 as selecting from the subscription's bits),
+`core/src/graph.cpp` (`dispatch_edge_local`'s receiver-seam comment),
+`core/include/libtracer/subscriber.hpp` (the *"awaiting the work that honours them"* promise, for
+`reliability` only — `priority` and `delivery_class` keep their wording),
+[reference/02](../../reference/02-graph-model.md),
+[reference/05](../../reference/05-protocol-tlvs.md),
+[reference/18](../../reference/18-composition-over-the-network.md) and
+`bindings/ros2/README.md` (the rmw `reliability` mapping is carried-but-unhonoured in the
+reference implementation).

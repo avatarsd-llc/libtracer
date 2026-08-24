@@ -61,9 +61,9 @@ per-vertex `:settings` container — `:settings.reliability`, `:settings.durabil
 [RFC-0022](../../docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md)
 (with its Amendment 1) deleted `settings_t` outright and removed the whole
 `:settings.<knob>` **write** surface: a write to any of the seven names now answers
-`SCHEMA_NOT_FOUND`, caller-independently (`core/src/graph.cpp:3323-3329`). The `:settings`
+`SCHEMA_NOT_FOUND`, caller-independently (`core/src/graph.cpp:3326-3332`). The `:settings`
 **read** container survives with its shape and none
-of its knobs — `SETTINGS{ [NAME "app" SETTINGS{…}] }`, `core/src/graph.cpp:3680` — so
+of its knobs — `SETTINGS{ [NAME "app" SETTINGS{…}] }`, `core/src/graph.cpp:3683` — so
 there is nothing left for QoS to round-trip through, and no wire surface a namespaced
 extension could ride. See [ADR-0023](../../docs/adr/0023-ros2-binding-via-rmw-tracer.md)'s
 two errata. Nothing shipped against the old mapping: this package has one real TU
@@ -73,7 +73,7 @@ What `qos.c` maps onto instead — **three carriers, not one**:
 
 | `rmw_qos_profile_t` field | libtracer carrier | where |
 | --- | --- | --- |
-| `reliability`, `durability` (libtracer packs a third bit-field, `priority`, that ROS has no profile member for) | the **subscription's** packed 16-bit `delivery_policy`, set at `rmw_create_subscription` time and carried in the `SUBSCRIBER`'s existing `SETTINGS` child as `NAME "delivery_policy" VALUE u16` | `core/include/libtracer/subscriber.hpp:104`, decoded at `core/src/graph.cpp:2639`, RFC-0022 §3.A |
+| `reliability`, `durability` (libtracer packs a third bit-field, `priority`, that ROS has no profile member for) | the **subscription's** packed 16-bit `delivery_policy`, set at `rmw_create_subscription` time and carried in the `SUBSCRIBER`'s existing `SETTINGS` child as `NAME "delivery_policy" VALUE u16`. **`reliability` is a carrier only** — it is carried verbatim and read by nothing in the reference implementation (RFC-0025's 2026-08-24 §4.4 selector erratum, [#1204](https://github.com/avatarsd-llc/libtracer/issues/1204)): the pressure arm is the *receiving* vertex's own declaration, so an rmw subscription asking for `RELIABLE` gets whatever arm its target vertex declares, not what the profile says. `durability` **is** honoured (the join latch). | `core/include/libtracer/subscriber.hpp:108`, decoded at `core/src/graph.cpp:2642`, RFC-0022 §3.A |
 | `history` + `depth` | **owner-side** ring depth, declared independently at each end — the subscription's own target vertex is a STREAM whose depth `rmw_tracer` sets locally (that ring is what `rmw_take` pops); what a subscriber cannot set is the *producer's* depth, which has no wire surface | `core/include/libtracer/graph.hpp:1349`, `core/include/libtracer/vertex.hpp:207` |
 | `deadline`, `liveliness`, `lifespan` | **no mapping at all** | — |
 
@@ -95,7 +95,7 @@ Two consequences `qos.c` has to live with:
 - **A libtracer-only delivery mode is `rmw_tracer`-local, not a QoS extension.**
   `delivery_mode_t` (`vertex.hpp:389` — `IF_NEWER` / `UNCONDITIONAL` / `EXPLICIT`; there is
   no `ON_CHANGE` member) is owner-side and wiring-time via `graph_t::set_delivery_mode`
-  (`core/src/graph.cpp:2542`) with no wire spelling. `rmw_tracer` may set it on vertices it
+  (`core/src/graph.cpp:2545`) with no wire spelling. `rmw_tracer` may set it on vertices it
   owns; it cannot round-trip it to a remote peer.
 
 ## Transports & the differentiators
@@ -117,7 +117,7 @@ returns `RMW_RET_UNSUPPORTED` so the library always links.
 | **R0 — loads** | `identity.c` (done), `init.c` (`rmw_init`/`shutdown`/`init_options`), `serialization.c`, plus an `unsupported.c` returning `RMW_RET_UNSUPPORTED` for the rest | `rmw_tracer` loads; `ros2 doctor` sees it |
 | **R1 — pub/sub (copy path)** | `node.c`, `publisher.c` (`rmw_publish` → `graph.write(path, VALUE=CDR)`), `subscription.c` (`rmw_take` pops the ring, copies out), `wait.c` (`rmw_wait` over graph `await` + guard conditions) | a `talker`/`listener` pair over `rmw_tracer` |
 | **R2 — zero-copy (the edge over `rmw_zenoh`)** | loaned-message TUs: `rmw_borrow_loaned_message`/`rmw_publish_loaned_message`/`rmw_take_loaned_message`/`rmw_return_loaned_message` | a `view_t` **is** the loaned message — no copy. This is the **`inproc-borrow` path the bench shows beating zenoh** (flat 80 ns @ 8 KB); intra-host SHM = `mem_shared`. |
-| **R3 — QoS + graph** | `qos.c` (`rmw_qos_profile_t` → the subscription's packed `delivery_policy` + owner-side `set_history_depth`; `deadline`/`liveliness`/`lifespan` unmapped — see [QoS](#qos-there-is-no-settings-to-map-onto)), `graph.c` (`rmw_get_node_names`, graph guard conditions via `:children[]`) | reliability/durability ride the subscribe; `ros2 topic list` works |
+| **R3 — QoS + graph** | `qos.c` (`rmw_qos_profile_t` → the subscription's packed `delivery_policy` + owner-side `set_history_depth`; `reliability` maps onto a carrier that nothing reads — the pressure arm is declared at the receiving vertex, so `rmw_tracer` sets it there, not on the subscription (§QoS); `deadline`/`liveliness`/`lifespan` unmapped — see [QoS](#qos-there-is-no-settings-to-map-onto)), `graph.c` (`rmw_get_node_names`, graph guard conditions via `:children[]`) | reliability/durability ride the subscribe; `ros2 topic list` works |
 | **R4 — services/actions** | `service.c`, `client.c` (request/response path pairs) | services; actions compose on top |
 | **R5 — transport differentiators** | wire `rmw_tracer` to libtracer transports | ROS over **CAN/UART** (header-elided, [ADR-0022](../../docs/adr/0022-transport-framing-modes-elided-full-tlv-advertise.md)); ROS into **GPU memory** ([mem_cuda](../../docs/adr/0024-mem-cuda-gpu-backend-heterogeneous-rope.md)); high-rate topics over **scatter-gather composition** (`send(iov)` — see [Performance](../../docs/performance.md)) |
 

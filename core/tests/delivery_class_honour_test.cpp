@@ -228,6 +228,84 @@ void test_flush_emission_follows_the_source_role() {
 }
 
 /**
+ * @brief §7 vector 7, `stream/attach-forward` — a class-3 subscriber's first delivery is the
+ *        first POST-ATTACH fan-out; the ring backfills nothing that predates the edge.
+ *
+ * §4.7 *Cold start*: *"the ring is drain machinery under pressure, **never history replay**:
+ * no ring backfill, no epoch rewind, no 'seamless history' promise"*, and
+ * `durability_request` (bit 5) keeps its ordinary meaning — the latched last value as the
+ * join gift, with the stream class governing only deliveries **after** it.
+ *
+ * A host test, not a conformance vector: there are **no wire-observable bytes** here. The
+ * proposition is about what does NOT arrive, and its instrument is a receiver's ring.
+ *
+ * The latch half of the vector is already pinned by `qos_policy_test.cpp`
+ * (`test_policy_durability_is_per_subscriber`); this pins the attach-forward half, and uses
+ * the latch as its ABLATION. The two edges below are admitted at the same instant, over the
+ * same producer holding the same three pre-attach writes, with **identical class bits**,
+ * differing in exactly one bit: bit 5. The requesting one receives a pre-attach value; the
+ * plain one receives nothing until the next write. So "nothing arrived" is a claim about
+ * attach-forward rather than about an inert harness — and what the latch delivers is ONE
+ * value, the LKV, never the producer's history.
+ */
+void test_attach_forward_never_backfills_the_ring() {
+    std::printf("§4.7 attach-forward — first delivery is the first post-attach fan-out:\n");
+    graph_t g;
+    const path_t src("/p/afwd");
+    const vertex_handle_t producer = g.register_vertex(src, role_t::STORED_VALUE);
+
+    // Three writes BEFORE any class-3 edge exists. The positive control that they happened.
+    for (std::uint8_t b = 1; b <= 3; ++b) (void)g.write(producer, make_value({b}));
+    const auto pre = g.read(producer);
+    check(pre.has_value(), "the producer holds a value written before any subscriber attached");
+    trace_t held;
+    note(held, **pre);
+    check(held.size() == 1 && held[0] == 3, "... the newest of the three pre-attach writes");
+
+    const path_t forward("/c/forward");
+    const vertex_handle_t rx = g.register_vertex(forward, role_t::STREAM);
+    g.set_history_depth(rx, 8);
+    const path_t latched("/c/latched");
+    const vertex_handle_t rx_latched = g.register_vertex(latched, role_t::STREAM);
+    g.set_history_depth(rx_latched, 8);
+
+    constexpr delivery_policy_t kStream = policy_of(delivery_class_t::STREAM);
+    constexpr delivery_policy_t kStreamDurable{
+        static_cast<std::uint16_t>(kStream.bits | delivery_policy_t::kDurabilityRequest)};
+    check(g.subscribe(src, forward, kStream).has_value() &&
+              g.subscribe(src, latched, kStreamDurable).has_value(),
+          "two class-3 edges admitted at the same instant, differing only in bit 5");
+
+    std::vector<std::shared_ptr<const rope_t>> owed;
+    const auto at_attach = g.drain_unflushed(rx, owed);
+    check(at_attach.has_value() && *at_attach == 0 && owed.empty(),
+          "the plain class-3 receiver owes NOTHING at attach — no backfill of the three "
+          "writes that predate its edge (§4.7: the ring is not history replay)");
+
+    // The ablation: the same producer, the same class, the same instant — bit 5 set.
+    owed.clear();
+    const auto joined = g.drain_unflushed(rx_latched, owed);
+    check(joined.has_value() && *joined == 1,
+          "... while the durability-requesting edge owes exactly ONE — so the harness CAN "
+          "carry a pre-attach value, and the empty drain above is attach-forward, not inertia");
+    trace_t gift;
+    for (const std::shared_ptr<const rope_t>& sp : owed) note(gift, *sp);
+    check(gift.size() == 1 && gift[0] == 3,
+          "... and it is the LATCH — the LKV alone, never the producer's three-write history");
+
+    // The first post-attach fan-out, and it is the FIRST delivery this edge ever sees.
+    for (std::uint8_t b = 4; b <= 5; ++b) (void)g.write(producer, make_value({b}));
+    owed.clear();
+    const auto after = g.drain_unflushed(rx, owed);
+    check(after.has_value() && *after == 2, "two post-attach writes => two deliveries");
+    trace_t forward_trace;
+    for (const std::shared_ptr<const rope_t>& sp : owed) note(forward_trace, *sp);
+    check(forward_trace.size() == 2 && forward_trace[0] == 4 && forward_trace[1] == 5,
+          "... and the FIRST of them is the first post-attach write (4), not the oldest "
+          "value the producer ever held (1)");
+}
+
+/**
  * @brief The class bits reach the edge, read back, and select NOTHING in the fan-out loop.
  *
  * Stated as a test rather than a comment because it is the load-bearing consequence of the
@@ -275,6 +353,7 @@ int main() {
     test_immediate_delivers_every_write_in_order();
     test_stream_class_no_conflate_at_a_stream_receiver();
     test_flush_emission_follows_the_source_role();
+    test_attach_forward_never_backfills_the_ring();
     test_class_bits_do_not_switch_the_fanout_loop();
     return tr::testing::summary("delivery_class honouring (RFC-0025 §4.1, as amended)");
 }

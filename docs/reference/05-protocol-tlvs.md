@@ -225,8 +225,11 @@ timer, rate cap or scheduler, and explicit flush is the host-side `graph_t::prop
 is a conforming sender (`subscriber/policy-absent`). Reserved bits MUST be ignored, never
 rejected, and are carried verbatim so they read back unchanged from `:subscribers[]`
 (`subscriber/policy-reserved-bits`). Only `durability_request` is honoured today (§the latch
-above, `subscriber/policy-durability`); `reliability` and `priority` are stored and read back,
-awaiting the transport work that honours them.
+above, `subscriber/policy-durability`); `priority` is stored and read back, awaiting the transport
+work that honours it. `reliability` is stored and read back too, but it awaits **nothing** — the
+§4.4 pressure arm is the receiving vertex's own owner-side declaration, so bits 0–1 are carried
+verbatim and read by nothing ([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md)
+§Erratum 2026-08-24).
 
 These three were per-**vertex** `:settings` knobs until RFC-0022: a single `reliability` or
 `priority` has no coherent meaning across a heterogeneous fan-out (one vertex to a CAN peer and a
