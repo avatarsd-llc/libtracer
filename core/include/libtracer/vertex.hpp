@@ -373,7 +373,7 @@ struct handlers_t {
      * byte for this (the rows are moved out at registration and live on the graph — see
      * `graph_t::declare_payload_rights`), and `graph_t::write_impl` stops at one relaxed
      * flag-bit test on a word the write path already holds. A row whose
-     * @ref payload_right_t::type equals the written value's leading TLV type supplies the
+     * `%payload_right_t::type` equals the written value's leading TLV type supplies the
      * right demanded instead; an unmatched type (and a value whose leading link cannot be read,
      * e.g. a device-memory link) falls back to `WRITE`. Rows are scanned in order, first match
      * wins — the table is a handful of entries on a control vertex, never a hot-path structure.
