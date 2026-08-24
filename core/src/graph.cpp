@@ -741,6 +741,7 @@ graph_t::graph_t(std::pmr::memory_resource* mr, mem::mem_backend_t* value_backen
     // registrable address, so no bound path ever names slot 0 — it is in the vector because
     // leaving a hole there would make "slot i is the i-th vertex_t allocated" false.
     vertex_slots_.push_back(root_.get());
+    note_owner_slot(*root_);
     // The one built-in creation-catalog type (#82, ADR-0017): `stored_value` makes a
     // plain last-writer-wins vertex at the composed child key. Its optional SPEC
     // `config` SETTINGS is ignored for now (a stored-value has no instantiation params
@@ -834,6 +835,7 @@ result_t<vertex_handle_t> graph_t::register_vertex_key_span(std::span<const std:
             // registration fills IN PLACE, so skipping them here would hand the same object
             // two different slots depending on which side of its fill() the mint happened.
             vertex_slots_.push_back(child);
+            note_owner_slot(*child);
         }
         node = child;
         i = e;
@@ -967,6 +969,7 @@ result_t<vertex_handle_t> graph_t::register_session_anchor(std::string_view id) 
             std::make_unique<vertex_t>(role_t::STORED_VALUE, path_key_t{rec}, handlers_t{});
         node = anchor_root_->add_child(std::move(fresh));
         vertex_slots_.push_back(node);
+        note_owner_slot(*node);
     }
     // Live already ⇒ the caller is telling us about a session that never left. Refuse rather
     // than re-fill: a second fill() would NOT bump the generation (only retirement does), so
@@ -1016,6 +1019,16 @@ std::size_t graph_t::session_anchor_slots() const noexcept {
     return n;
 }
 
+void graph_t::note_owner_slot(vertex_t& v) noexcept {
+    // The caller has just appended v, under the unique map lock, so the entry is the last
+    // one and the index is final. A u32 is the element field's own width (RFC-0024 §6.4);
+    // a graph that somehow held more slots than that could not mint for them anyway, and
+    // the memo is re-validated on read, so a truncated stamp degrades to the scan.
+    const std::size_t index = vertex_slots_.size() - 1;
+    if (index >= path_key_t::kNoOwnerSlot) return;
+    v.name_.owner_slot_ = static_cast<std::uint32_t>(index);
+}
+
 std::optional<vertex_slot_t> graph_t::vertex_slot(vertex_handle_t vh) const noexcept {
     const vertex_t* const v = vh.get();
     if (v == nullptr) return std::nullopt;
@@ -1030,6 +1043,22 @@ std::optional<vertex_slot_t> graph_t::vertex_slot(vertex_handle_t vh) const noex
     // two orderings is an immortal element, not a stale one.
     const std::uint32_t gen = v->retire_gen();
     if (gen == kGenerationSaturated) return std::nullopt;
+    // The memo (#1486). Written ONCE at slot assignment under a unique hold on this very
+    // lock, never invalidated (slots are immortal — the index is insert-only and
+    // pointer-stable, ADR-0057, and a retire re-virginizes in place), so a plain read under
+    // the shared hold is race-free and needs no ordering of its own.
+    //
+    // It is re-validated rather than trusted, and the two compares are not defensive
+    // decoration: they are what keeps a `vertex_t` that no graph ever slotted — the tests
+    // build them directly, and `anchor_root_` is one — resolving exactly as it did before,
+    // by falling through to the scan below. Cost of the fast path is a bounds test and one
+    // pointer compare against a `std::deque` element, against a scan measured at 450 ns per
+    // 10^3 resident vertices and 410 us at 10^6 (#1485/#1496) — held, all of it, under the
+    // shared map lock that every reader queues behind. Route formation over M bindings was
+    // O(M x N) for it; at M = N = 10^6 that is ~200 s of pure scan.
+    const std::uint32_t memo = v->name_.owner_slot_;
+    if (memo != path_key_t::kNoOwnerSlot && memo < vertex_slots_.size() && vertex_slots_[memo] == v)
+        return vertex_slot_t{.index = memo, .generation = gen};
     for (std::size_t i = 0; i < vertex_slots_.size(); ++i) {
         if (vertex_slots_[i] == v)
             return vertex_slot_t{.index = static_cast<std::uint32_t>(i), .generation = gen};

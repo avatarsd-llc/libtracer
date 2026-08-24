@@ -41,6 +41,30 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **`graph_t::vertex_slot` is O(1): the reverse index is memoized, in bytes that cost nothing**
+  ([#1486](https://github.com/avatarsd-llc/libtracer/issues/1486),
+  [#1487](https://github.com/avatarsd-llc/libtracer/issues/1487)). The terminus mint found a
+  vertex's slot by SCANNING `vertex_slots_` — O(N), and held under the shared `map_mutex_` the
+  whole time. Measured on the #1496 population ladder: 450 ns at 10³ resident vertices, **410 µs
+  at 10⁶**, per binding. Route formation over M bindings therefore cost O(M×N) — ~200 s at
+  M = N = 10⁶ — with every concurrent reader queued behind the hold. Each vertex now carries the
+  index of its own slot, stamped once when the slot is appended, under the same unique hold; the
+  mint validates it against the index and returns. The scan survives only as the fallback for a
+  `vertex_t` no graph ever slotted.
+  The memo was previously declined for lack of RAM, and the #1487 census falsified that premise:
+  there are 4 dead bytes at object offset 36–39 on **both** ABIs. Spending them costs **zero** —
+  `sizeof(vertex_t)` stays 96 (x86-64) / 72 (rv32), `offsetof(vertex_t, lkv_)` stays 0 (the #1285
+  straddle gate) and both `config_t` ratchets still pass, pinned to their measurements. The price
+  is a layering compromise, not bytes: on x86-64 those 4 B are the TAIL PADDING of the `name_`
+  subobject, which C++ makes unreachable to any sibling member of `vertex_t`, so the field lives
+  inside **`path_key_t`** (`owner_slot_`, private, documented as borrowed) and nowhere else.
+  `sizeof(path_key_t)` is now 24 on every target and is pinned by a `static_assert`.
+  **No API changes and no new accessor**: the memo is private to `graph_t`, is not readable
+  through `path_key_t`, is never copied or moved with a name, and is NOT a second staleness
+  signal — the generation remains the whole of that (RFC-0024 §5.1). Equivalence is gated by
+  `core/tests/bound_path_test.cpp`, which round-trips every slot in a mixed
+  placeholder/registered population in both directions and pins the foreign-vertex fallback.
+
 - **The composed branch read skips ENUMERATION-HIDDEN children** ([#492](https://github.com/avatarsd-llc/libtracer/issues/492),
   [RFC-0016](../docs/spec/rfcs/0016-composed-branch-read.md) Amendment 1). `graph_t::read` of a
   branch walked `registered()` children while both `:children[]` doors walk
