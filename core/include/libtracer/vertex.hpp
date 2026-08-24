@@ -761,8 +761,17 @@ class vertex_t {
         delete edges_.load(std::memory_order_acquire);
     }
 
-    /** @brief This vertex's behavioral role. */
-    [[nodiscard]] role_t role() const noexcept { return role_; }
+    /**
+     * @brief This vertex's behavioral role.
+     *
+     * A RELAXED atomic load (#1477). The read is lock-free and on the write hot path, while
+     * the writers (`%fill`, @ref revert_to_placeholder) run under the graph's unique map
+     * lock — so the load is unordered by construction and may observe either the retiring
+     * occupant's role or the placeholder default. What the atomic buys is that the race is
+     * WELL-DEFINED rather than UB; it does NOT serialise a write against a retire (see the
+     * doctrine note at `graph_t::write`).
+     */
+    [[nodiscard]] role_t role() const noexcept { return role_.load(std::memory_order_relaxed); }
     /** @brief This vertex's own canonical NAME record (its single path segment, ADR-0057);
      *         empty at the root. The full key is a parent-walk concatenation
      *         (`graph_t`'s `build_key`). */
@@ -884,7 +893,7 @@ class vertex_t {
      * a placeholder being registered in place (the allocation never moves, ADR-0057).
      */
     void fill(role_t role, handlers_t handlers) {
-        role_ = role;
+        role_.store(role, std::memory_order_relaxed);  // atomic since #1477 — see @ref role
         adopt_identity(role, std::move(handlers));
         registered_ = true;
         // Maintain the parent's lock-free fork bit (#652). Setting is unconditional and
@@ -1968,7 +1977,11 @@ class vertex_t {
         lkv_.clear(std::memory_order_release);  // a mid-read reader holds its own
                                                 // reference — safe under either policy.
         own_subs_.store(0, std::memory_order_relaxed);
-        role_ = role_t::STORED_VALUE;  // the placeholder default (see graph.cpp)
+        // The placeholder default (see graph.cpp). Relaxed, and atomic since #1477: the
+        // lock-free readers on the write path (`write_impl`'s role forks) run with no map
+        // lock, so a plain byte store here was a data race — UB, exactly like the
+        // `delivery_mode_` byte #895 had to move for the same reason.
+        role_.store(role_t::STORED_VALUE, std::memory_order_relaxed);
         // graph drops the unconditional_ entry (graph_t::retire, once the map lock is out).
         delivery_mode_.store(delivery_mode_t::IF_NEWER, std::memory_order_relaxed);
         value_handlers_t* detached = nullptr;
@@ -2913,7 +2926,17 @@ class vertex_t {
     std::atomic<std::uint32_t> listeners_above_{0};
 
     // -- flag bytes (one 4-byte group; all byte-wide by design) ------------------------
-    role_t role_;  // behavioral role (byte-wide enum)
+    // The behavioral role (byte-wide enum).
+    // ATOMIC (#1477), for the same reason `delivery_mode_` below is (#895) and with the same
+    // shape: the write path forks on `role()` with NO map lock held, while `fill` and
+    // `revert_to_placeholder` store to it under the graph's unique map lock. A plain byte
+    // there was a data race — UB, not a benign stale read — and it was the LAST plain member
+    // of this four-byte group that a lock-free reader touches. Byte-wide as an atomic too,
+    // so the group stays four bytes and `sizeof(vertex_t)` does not move.
+    // Relaxed on both ends: making the race defined is the whole of the fix. Ordering a
+    // write against a concurrent retire is the CALLING PLANE's job (the doctrine note at
+    // `graph_t::write`), which is why no map lock appears on the hot path here.
+    std::atomic<role_t> role_;
     // How this vertex participates in an ANCESTOR's propagate sweep (RFC-0008 §C).
     // Set at wiring time via graph_t::set_delivery_mode (the "configure before frames
     // flow" contract, like the storage policy); read on the assign path. Default IF_NEWER.
