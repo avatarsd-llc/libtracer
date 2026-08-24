@@ -44,6 +44,8 @@ on:
       - "tools/check_esp_srcs.py"
       - "tools/check_esp_ws_plane.py"
       - "tools/check_esp_thread_id.py"
+      - "tools/rv32_footprint.py"
+      - "core/tests/footprint/**"
       - ".github/workflows/esp-idf.yml"
   workflow_dispatch:
 
@@ -85,6 +87,57 @@ jobs:
       - uses: actions/checkout@v4
       - name: Guard ESP-IDF LIBTRACER_SRCS against core/src drift
         run: python3 tools/check_esp_srcs.py
+
+  # rv32 required-modules flash CENSUS (#1479) — ADVISORY, and advisory is the whole
+  # design, not a first step toward a gate.
+  #
+  # `tools/rv32_footprint.py` was written for RFC-0018's falsifier 6 and then referenced
+  # by no workflow at all: an instrument no job runs is a script, not a measurement. This
+  # job runs it, on the target that actually ships (ESP32-C6 class, rv32imac, ADR-0001),
+  # with the container's own GCC-15 RISC-V toolchain — the same compiler the component
+  # jobs below build with, which is what makes the number comparable to them.
+  #
+  # It publishes and it does not judge. No ceiling, per the footprint contract at the top
+  # of this file — the library must stay free to serve the thinnest client, and what has
+  # to fit is a PRODUCT image CI cannot know. And no drift ratchet either, which is a
+  # SEPARATE refusal from the ceiling one: a ratchet needs a measured run-to-run noise
+  # band to set its threshold against, this instrument has never run in CI, so a
+  # threshold today would be a guess policing an unknown distribution. What the job
+  # gives a reviewer instead is ATTRIBUTION: per-section (.text / .rodata / unwind /
+  # .data) and per-TRANSLATION-UNIT bytes, uploaded as a JSON artifact, so two commits'
+  # artifacts diff into "which object grew", not "the image is N bytes". The tool takes
+  # `--baseline-json` for exactly that comparison and it is deliberately NOT wired to a
+  # previous run's artifact here: fetching one needs `gh`, which the espressif/idf image
+  # does not carry, and a cross-run baseline is the ratchet's apparatus, not the
+  # census's. Run it by hand across two artifacts when a delta needs explaining.
+  #
+  # What CAN red this job is a failure to MEASURE — missing toolchain, compile error,
+  # link error, unparsable `size` table all exit 1 (the tool's own #982 lesson). A
+  # broken reporter must not look like a green report; that is the one verdict an
+  # advisory instrument still owes.
+  rv32-census:
+    runs-on: ubuntu-24.04
+    container: espressif/idf:release-v6.0
+    # A single -Os cross-compile of seven modules plus the sentinel fixture; the image
+    # pull dominates. 20 keeps it equal to the other container jobs in this file.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: rv32 required-modules flash census (report-only)
+        shell: bash
+        run: |
+          . "${IDF_PATH}/export.sh"
+          riscv32-esp-elf-g++ --version | head -1
+          python3 tools/rv32_footprint.py --out-json rv32-footprint.json
+
+      - name: Upload rv32 census artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rv32-footprint
+          path: rv32-footprint.json
+          if-no-files-found: ignore
 
   build:
     needs: srcs-drift

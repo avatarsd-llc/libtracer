@@ -179,9 +179,16 @@ measured node "has been over the 16 KiB bound continuously, so a hard gate would
 main", and the standing overage is explicitly **not attributed** today. The drift half is
 also `warn`. So: over budget, by an unexplained amount, and nothing fails.
 
-**A second footprint tool is wired into nothing.** `tools/rv32_footprint.py` exists and
-was used by hand for RFC-0018's falsifier 6, but it is referenced by no workflow. An
-instrument no job runs is a script, not a gate.
+**A second footprint tool used to be wired into nothing** — `tools/rv32_footprint.py`
+existed, was used by hand for RFC-0018's falsifier 6, and was referenced by no workflow,
+which made it a script rather than an instrument. It now runs on every ESP-plane change
+as the `rv32-census` job in `.github/workflows/esp-idf.yml`
+([#1479](https://github.com/avatarsd-llc/libtracer/issues/1479)). Read the correction at its own
+width: the job is **advisory** by ruling and stays so — it publishes per-section and
+per-translation-unit bytes as an artifact, and it sets no ceiling (the footprint contract
+in that file's header) and no drift ratchet (no run-to-run noise band has been measured
+yet to set one against). The gap that closed is "nothing runs it"; the gap that remains
+is that nothing on the rv32 side *fails*.
 
 **The implementer registry is empty.** `docs/implementations.md` lists `_(none yet)_`.
 Its closing paragraph says listing gives implementers "a standing seat in spec
