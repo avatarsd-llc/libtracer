@@ -102,7 +102,7 @@ A single name segment. UTF-8 bytes, **no NUL terminator on the wire**.
 - MUST NOT contain reserved characters (`/ : . [ ] * ?`).
 - MUST be valid UTF-8. Invalid byte sequences MUST be rejected with `ERROR{tr::path::invalid}`.
 
-> ⚠️ **Conformance gap — the reference implementation accepts `[` and `]` in a NAME.** Its segment predicate rejects only `/ : . * ?`, by its own account a deliberate temporary subset held until address-index parsing lands ([03-addressing.md](03-addressing.md) §reserved characters, `core/include/libtracer/path.hpp:51-59`). The rule above is unchanged.
+> ⚠️ **Conformance gap — the reference implementation accepts `[` and `]` in a NAME.** Its segment predicate rejects only `/ : . * ?`, by its own account a deliberate temporary subset held until address-index parsing lands ([03-addressing.md](03-addressing.md) §reserved characters, `core/include/libtracer/path.hpp:53-61`). The rule above is unchanged.
 
 ### Where it appears
 
@@ -643,7 +643,7 @@ The encoder's invariants:
 - **No inner headers and no inner trailers.** A record is length byte plus text — there is no per-segment type byte, no option byte, and nothing inside a PATH that can carry a TS or a CRC; the outer (when in transit) covers everything. This is what gives an address exactly **one** spelling.
 - **Reserved characters** (`/ : . [ ] * ?`) MUST NOT appear inside any segment_bytes.
 
-> ⚠️ **Conformance gap — the reference encoder does not enforce the bracket half of that rule** (`core/include/libtracer/path.hpp:51-59` rejects only `/ : . * ?`; §`0x02` NAME §constraints, [03-addressing.md](03-addressing.md) §reserved characters). The invariant above is unchanged.
+> ⚠️ **Conformance gap — the reference encoder does not enforce the bracket half of that rule** (`core/include/libtracer/path.hpp:53-61` rejects only `/ : . * ?`; §`0x02` NAME §constraints, [03-addressing.md](03-addressing.md) §reserved characters). The invariant above is unchanged.
 
 A path that resolves to more than 255 segments ([RFC-0023](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0023-path-segment-cap-repriced-32-to-255.md)), has a single segment longer than 64 bytes, or whose **encoded `PATH` body** exceeds the addressing-level cap MUST fail to encode.
 
