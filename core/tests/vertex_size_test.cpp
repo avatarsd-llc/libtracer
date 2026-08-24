@@ -8,11 +8,17 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * The ceilings are per-pointer-width, with headroom over the measured value (post-split:
- * 112 B on x86-64) so routine churn passes but re-inlining a cold member (handlers,
- * history, the ACL trio) fails the build — the "silent regression" this gate exists to
- * catch. Tightening a ceiling after a diet increment is expected; RAISING one is a
- * reviewed decision (#361).
+ * The bounds are per-pointer-width and they are RATCHETS, not ceilings with headroom: each
+ * is PINNED to the size actually measured — **96 B on x86-64, 72 B on rv32** (#1487's
+ * field-by-field census, re-taken after the fused #1461/#1462 receiver-ring landing and
+ * unchanged by it). They live on `config_t` (`kMaxVertexBytes64` / `kMaxVertexBytes32`)
+ * and are asserted in `%vertex.hpp` itself, so every translation unit on every target
+ * evaluates its OWN binding; this test carries the runtime half of the gate (the hot/cold
+ * split probes). Because the numbers are pinned there is zero headroom by construction:
+ * re-inlining a cold member (handlers, history, the ACL trio) fails the build, which is
+ * the "silent regression" this gate exists to catch. LOWERING a ratchet after a diet
+ * increment happens in the same commit that shrinks the struct; RAISING one is a reviewed
+ * decision (#361).
  */
 
 #include <bit>

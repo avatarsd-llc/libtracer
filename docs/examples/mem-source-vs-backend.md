@@ -18,7 +18,8 @@ the bytes will have** ([reference 09](../reference/09-memory-substrate.md) §the
   identical — copy is a clone, never a second buffer.
 - **A registered object has exactly one owner, so it is a source block.** A vertex, a route
   label, a reassembly entry — a refcount on them is pure overhead, and it is measurable
-  overhead: a `segment_t` is 20 B on rv32 / 40 B on x86-64 against an 80 B `vertex_t`.
+  overhead: a `segment_t` is 20 B on rv32 / 40 B on x86-64 against a `vertex_t` of 72 B on
+  rv32 / 96 B on x86-64.
 - **"No header" is checkable, and the example checks it.** A 64-byte slab serves exactly one
   64-byte block and then nothing. Any per-block bookkeeping would show up as a short slab
   immediately.

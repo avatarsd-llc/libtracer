@@ -124,7 +124,8 @@ struct source_stats_t {
  * @note Also distinct from @ref mem_backend_t, which vends a refcounted
  *       @ref view::segment_t. Control-plane blocks have a single owner and no
  *       header; a refcount on them is pure overhead (a `segment_t` measures 20 B on
- *       rv32 / 40 B on x86-64 against an 80 B `vertex_t`).
+ *       rv32 / 40 B on x86-64 against a `vertex_t` of 72 B on rv32 / 96 B on x86-64 —
+ *       the sizes the `config_t` ratchets pin, re-measured by the #1487 census).
  *
  * @note Blocks are host-owned storage: the source MUST outlive the `graph_t` and
  *       every object built in its blocks. Teardown is driven by whoever holds the

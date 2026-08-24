@@ -40,9 +40,15 @@ rather than requiring a comparison, a cursor, or per-subscriber state.
 
 **An array of values costs an array of vertices.** A node exposing 32 related values today
 registers 32 vertices to make them individually addressable and individually notifiable.
-`vertex_t` is gated at 112 B on 64-bit and **80 B on 32-bit** (`core/tests/vertex_size_test.cpp`),
+`vertex_t` is gated at ~~112 B on 64-bit and **80 B on 32-bit**
+(`core/tests/vertex_size_test.cpp`)~~ **96 B on 64-bit and 72 B on 32-bit
+(`config_t::kMaxVertexBytes64` / `kMaxVertexBytes32`, asserted in
+`core/include/libtracer/vertex.hpp`)** *(Erratum 1, 2026-08-24: both figures and the citation
+were stale — the ratchets moved to `config_t` and are now pinned to the measurement; #1487's
+census re-took them field by field on both ABIs. The motivation is unaffected in kind: a
+32-vertex array still costs 32 vertex bodies.)*,
 and each vertex additionally carries a canonical PATH key and a vertex-map entry. On an
-ESP32-C6 whose measured idle heap floor is ~4.3 KB, 31 redundant vertex bodies are ~2.5 KB
+ESP32-C6 whose measured idle heap floor is ~4.3 KB, 31 redundant vertex bodies are ~2.2 KB
 before keys and map entries — a cost paid purely for addressability, since the values are one
 logical array that a single vertex could hold as one structured TLV.
 
