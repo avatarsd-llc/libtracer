@@ -21,7 +21,7 @@ The configuration space therefore has exactly three kinds of axis, and no fourth
 
 | axis kind | what it selects | mechanism |
 | --- | --- | --- |
-| **module set** | which translation units compile at all | CMake `option()` / Kconfig — a dropped module leaves neither code nor a symbol. One module, `kBusLinks`, has no TU of its own and is stated in the config header instead — see *The one module that is not a TU list*, below |
+| **module set** | which translation units compile at all | CMake `option()` / Kconfig — a dropped module leaves neither code nor a symbol. One module, `kBusLinks`, has no TU of its own and is stated in the config header instead — see *The one module that is not a TU list*, below; one, `kSelfHealLinks`, needs both a switch and a member — see *The module that is BOTH*, below |
 | **buffer sizes** | how big the fixed tables are | `inline constexpr` in one hand-written header |
 | **policy types** | which implementation of a named seam is bound | `using` alias in the same header |
 
@@ -32,7 +32,7 @@ rather than a silent behavioural fork between translation units.
 
 The sizes and policies are members of **one named type**, `default_config_t`
 (`core/include/libtracer/config.hpp:84`), bound once by `using config_t = default_config_t;`
-(`:521`). An application declares its own by inheriting and overriding what differs (`:68-78`):
+(`:590`). An application declares its own by inheriting and overriding what differs (`:68-78`):
 
 ```cpp
 struct my_node_config_t : tr::graph::default_config_t {
@@ -43,7 +43,7 @@ using config_t = my_node_config_t;
 
 Inheriting means a knob added later does not break the preset — it inherits the new default
 rather than failing to compile. The rest of the library names the derived spellings re-exported
-below the traits type (`:566-589`), each of which is exactly its traits member, so introducing
+below the traits type (`:635-658`), each of which is exactly its traits member, so introducing
 `config_t` moved no call site.
 
 It is **bound once, not threaded as a template parameter**, and
@@ -152,6 +152,34 @@ construction — is a `static_assert`. Serving such a configuration as flat woul
 either: the listener's own per-frame tier select would keep delivering peer-named into a sink the
 router never installed.
 
+### The module that is BOTH — `kSelfHealLinks`
+
+The RFC-0014 §4 S5 link-liveness engine is the third shape, and the one this space did not have
+before [#1470](https://github.com/avatarsd-llc/libtracer/issues/1470): it *does* have a TU of its
+own (`core/src/self_heal_link.cpp`), so it is dropped by a build switch like every other module —
+and it *also* needs a configuration member, because the one place it is minted sits inside
+`transport_vertex.cpp`, a TU every net-plane node compiles. Without the member, dropping the TU
+is a link error rather than a trim.
+
+So it carries both, and they are held in step from opposite ends. `LIBTRACER_SELF_HEAL_LINKS`
+(CMake) / `CONFIG_LIBTRACER_SELF_HEAL_LINKS` (Kconfig) decides whether the TU compiles;
+`kSelfHealLinks` decides whether anything reaches it, folding the mint site and the four calls
+into the engine away at compile time so the linker never pulls the archive member back in. The
+ESP-IDF component drives both from the one Kconfig symbol, so they cannot disagree there; a core
+build pairs them by hand, and `self_heal_link.cpp` opens with a `static_assert(kSelfHealLinks, …)`
+that catches the mismatch in the direction a link error would not explain. The saving is the
+reporter's C6 measurement: **4,336 B** of reachable `self_heal_link_t` symbols, **0 B** of
+`.dram0.bss`.
+
+Closing it is a **refusal, never a silent downgrade**, on the same principle as the bus tier:
+`register_transport_type` does not catalogue a `self_heal_dial` kind on such a build (so a `SPEC`
+naming it answers `SCHEMA_NOT_FOUND`, and a debug build asserts at the registration), rather than
+registering it with the trait cleared — which would bring the connection up eagerly, with no
+redial and no liveness publishing, and say nothing. Today the whole question is latent: **no
+in-tree kind sets `self_heal_dial`**, so the engine is unreachable on every stock target and the
+knob is a pure saving until [#1548](https://github.com/avatarsd-llc/libtracer/issues/1548) flips
+the built-in point-to-point kinds onto it.
+
 ### The required-modules footprint ceiling
 
 The minimum-feature module set — `frame`, `tlv_arena`, `backend_set`, `mem_pool`, `mem_source`,
@@ -184,35 +212,38 @@ type-erasure bloat and template-instantiation bloat alike.
 Every knob is overridden the same way — as a member of the fragment's traits type. The column
 below names the member; a knob the fragment does not state keeps the default beside it.
 
-The **ESP-IDF column is that component's fragment**: it derives four knobs from its Kconfig
+The **ESP-IDF column is that component's fragment**: it derives six knobs from its Kconfig
 values and chip facts and writes them into a generated `libtracer/config_override.hpp`, listed
 ahead of `core/include` on the component's include path. Everything the column calls *inherited*
 is a knob the fragment does not state at all (#1244).
 
 | knob | kind | default | ESP-IDF |
 | --- | --- | --- | --- |
-| `kVertexLockStripes` (`config.hpp:98`) | count | 16 | menuconfig `CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES` (`integrations/esp-idf/libtracer/CMakeLists.txt:285`) |
-| `kCacheLineBytes` (`:122`) | padding width | 64 | derived from `CONFIG_FREERTOS_UNICORE`, not exposed (`integrations/esp-idf/libtracer/CMakeLists.txt:303`) |
+| `kVertexLockStripes` (`config.hpp:98`) | count | 16 | menuconfig `CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES` (`integrations/esp-idf/libtracer/CMakeLists.txt:295`) |
+| `kCacheLineBytes` (`:122`) | padding width | 64 | derived from `CONFIG_FREERTOS_UNICORE`, not exposed (`integrations/esp-idf/libtracer/CMakeLists.txt:313`) |
 | `kHazardReaderSlots` (`:149`) | count | 64 | inherited — the refcount slot never builds the domain |
-| `kEdgePinSlots` (`:162`) | count | 32 | set to 8 (`integrations/esp-idf/libtracer/CMakeLists.txt:298`) |
+| `kEdgePinSlots` (`:162`) | count | 32 | set to 8 (`integrations/esp-idf/libtracer/CMakeLists.txt:308`) |
 | `kMaxVertexBytes64` / `kMaxVertexBytes32` (`:198` / `:216`) | RAM ratchet | 96 / 72 | the preset — deliberately not overridable |
 | `kPinPayloadRatio` (`:262`) | ratio | 0 — the `kPinNever` sentinel | the preset |
 | `acl_policy_t` (`:271`) | policy type | `allow_only_policy_t` | inherited — the full policy is not selectable |
 | `lkv_slot_t` (`:287`) | policy type | `sp_atomic_slot_t` | inherited — the hazard slot is not selectable |
-| `kSpinWaitSafe` (`:573`) | target fact | `true` | derived from `IDF_TARGET` — `false` on every chip, `true` on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:319`) |
+| `kSpinWaitSafe` (`:642`) | target fact | `true` | derived from `IDF_TARGET` — `false` on every chip, `true` on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:329`) |
 | `kWeaklyOrdered` (`:446`) | target fact | `true` | inherited — every ESP chip is weakly ordered, which is the default |
-| `kBusLinks` (`:530`) | module presence | `true` | inherited — the component builds the full peer-named tier |
+| `kBusLinks` (`:599`) | module presence | `true` | inherited — the component builds the full peer-named tier |
+| `kSelfHealLinks` (`:530`) | module presence | `true` | menuconfig `CONFIG_LIBTRACER_SELF_HEAL_LINKS` (`integrations/esp-idf/libtracer/CMakeLists.txt:340`) |
+| `kSelfHealWorkerStackBytes` (`:557`) | size | `0` — the platform default | menuconfig `CONFIG_LIBTRACER_SELF_HEAL_WORKER_STACK` (`integrations/esp-idf/libtracer/CMakeLists.txt:346`) |
 
 Two CMake variables survive for one transition release, `-DLIBTRACER_ACL_FULL` and
 `-DLIBTRACER_LKV_SLOT`; `core/CMakeLists.txt` writes a fragment on their behalf. The five other
 cache variables this table used to list were deleted with the template (#1142).
 
 Each is documented at its declaration with what it costs and when to move it; that header is
-the reference, not this table. What matters here is the shape: **eleven knobs, all named, all
+the reference, not this table. What matters here is the shape: **thirteen knobs, all named, all
 finite.** Three are counts (`kVertexLockStripes`, `kHazardReaderSlots`, `kEdgePinSlots`), one is a
-padding width, one is a per-target RAM ceiling, one is a ratio, two are type bindings, two are
-target facts rather than preferences, and one — `kBusLinks`, below — states whether a *module* is
-present at all. `kSpinWaitSafe` says whether a task on this target may spin
+padding width, one is a per-target RAM ceiling, one is a ratio, one is a thread stack size
+(`kSelfHealWorkerStackBytes`), two are type bindings, two are
+target facts rather than preferences, and two — `kBusLinks`, below, and `kSelfHealLinks` (the
+RFC-0014 S5 link-liveness engine, #1470) — state whether a *module* is present at all. `kSpinWaitSafe` says whether a task on this target may spin
 for a lock another task holds, and the guard in `mem_pool.hpp` reads it to refuse
 `synchronized_pool_t<spin_sync_t>` where the answer is no (#1158). `kWeaklyOrdered` says whether
 the target's memory model may reorder a later relaxed load ahead of an earlier `seq_cst` store,
@@ -222,7 +253,7 @@ and the guard in `vertex.hpp` reads it to refuse a `kDeliverySkipOrder` weaker t
 which for the ordering fact is the STRICT one: asserting on a TSO host costs nothing, while a
 target that wrongly claims TSO disarms the check on the one class it exists for.
 
-Two of the ten carry no build-system variable at all. `kMaxVertexBytes64` / `kMaxVertexBytes32`
+Two of the thirteen carry no build-system variable at all. `kMaxVertexBytes64` / `kMaxVertexBytes32`
 and `kPinPayloadRatio` are preset members: an application moves them by declaring its own traits
 type, not by passing `-D`. `kPinPayloadRatio` is the pin/copy amplification ratio `K` — a
 trailer-less written value is stored as a subview of the inbound frame, rather than copied out,

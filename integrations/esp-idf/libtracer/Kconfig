@@ -144,6 +144,41 @@ menu "libtracer"
             ON by default. Turn OFF on a node with no CAN bus — this also drops the
             TWAI driver glue (twai_link.cpp).
 
+    config LIBTRACER_SELF_HEAL_LINKS
+        bool "Build the link-liveness engine (self-healing dial connections)"
+        default y
+        help
+            Compile the RFC-0014 S5 link-liveness engine (self_heal_link.cpp): a
+            connection whose kind asks for it is minted DORMANT, dials on demand,
+            and self-heals with backoff under its own worker thread.
+
+            Turn OFF on a flash-constrained node that does not use one. Measured
+            on an ESP32-C6 image: 4,336 B of reachable self_heal_link_t symbols,
+            and 0 B of .dram0.bss (the engine is code, not a static table).
+
+            NO BUILT-IN KIND ASKS FOR IT TODAY. The udp/tcp/ws factories construct
+            eagerly, and an ESP node stages its links with provide_link, which
+            bypasses the factory catalog entirely — so on a stock image the engine
+            is unreachable and this is a pure saving. With it off, registering a
+            self_heal_dial kind is REFUSED (the kind is not catalogued and a SPEC
+            naming it answers SCHEMA_NOT_FOUND) rather than quietly downgraded.
+
+    config LIBTRACER_SELF_HEAL_WORKER_STACK
+        int "Link-liveness worker stack (bytes, 0 = pthread default)"
+        range 0 32768
+        default 0
+        depends on LIBTRACER_SELF_HEAL_LINKS
+        help
+            Stack size for the link-liveness engine's worker thread, PER ENGINE-
+            MANAGED CONNECTION. 0 means the platform default, which on IDF is
+            CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT taken from the heap for every
+            such link — 12,288 B on the reporter's sdkconfig in #1470.
+
+            The worker is the sole dialer and the sole liveness publisher, so its
+            stack has to carry a connect() and the publish fan-out beneath it.
+            Size it deliberately on a board with tens of KB of free heap. A value
+            below the platform floor is ignored and the default stack is used.
+
     config LIBTRACER_VERTEX_LOCK_STRIPES
         int "Vertex lock-stripe count"
         range 1 256

@@ -467,6 +467,12 @@ void test_teardown_does_not_hold_ctl_over_the_engine_join() {
 }  // namespace
 
 int main() {
+    // See link_liveness_test's main: every exercise here registers a `self_heal_dial` kind,
+    // which a `kSelfHealLinks = false` build refuses to catalogue (#1470).
+    if constexpr (!tr::net::kSelfHealLinks)
+        return tr::testing::skipped("net_lock_order",
+                                    "kSelfHealLinks = false — the RFC-0014 S5 engine is not "
+                                    "in this build");
     std::printf("== RFC-0014 S6: the control-plane lock-order invariant (#492) ==\n");
     test_publish_does_not_hold_ctl_over_its_fan_out();
     test_creation_birth_publish_is_outside_ctl();

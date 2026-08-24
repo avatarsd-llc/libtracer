@@ -16,6 +16,38 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`tr::graph::default_config_t::kSelfHealLinks` and `kSelfHealWorkerStackBytes` — the
+  RFC-0014 S5 link-liveness engine becomes an excludable module with a sizable worker**
+  ([#1470](https://github.com/avatarsd-llc/libtracer/issues/1470)). `core/src/self_heal_link.cpp`
+  linked into every image unconditionally: measured by the reporter on an ESP32-C6 (riscv32,
+  `-Os -fno-exceptions -fno-rtti`), `nm` on the linked ELF finds **4,336 B** of reachable
+  `self_heal_link_t` symbols and **0 B** of `.dram0.bss`. Bound `false`, the mint site in
+  `transport_vertex.cpp` and the four calls into the engine are discarded at compile time, so
+  the linker never pulls the archive member in; the matching build switches
+  (`LIBTRACER_SELF_HEAL_LINKS`, `CONFIG_LIBTRACER_SELF_HEAL_LINKS`) drop the TU as well.
+  Measured host-side on the same source (x86-64, `RelWithDebInfo`, `size -t libtracer.a`):
+  **−21,843 B of `.text`**. Both default to today's behaviour, so no existing build moves.
+
+  **It is a REFUSAL, never a silent downgrade** — the `kBusLinks` rule (#375) applied to this
+  module: `register_transport_type` does not catalogue a `self_heal_dial` kind on a closed-out
+  build, so a `SPEC` naming it answers `SCHEMA_NOT_FOUND` and a debug build asserts at the
+  registration. Registering it with the trait cleared would bring the connection up eagerly,
+  with no redial and no liveness publishing, and say nothing. Note for readers sizing an image:
+  **no in-tree kind sets `self_heal_dial`** today — the built-in `udp`/`tcp`/`ws` factories
+  construct eagerly and an ESP node stages its links with `provide_link` — so the engine is
+  unreachable on every stock target until
+  [#1548](https://github.com/avatarsd-llc/libtracer/issues/1548).
+
+  `kSelfHealWorkerStackBytes` is the second half, and it is not ESP-specific: the engine's
+  worker was a bare `std::thread`, which has no stack-size parameter, so on any RTOS target it
+  took the pthread default from the heap **per link** (12,288 B on the reporter's sdkconfig,
+  against ~76 KB of free heap). It is now spawned with `pthread_create` +
+  `pthread_attr_setstacksize` — the mechanism `posix_endpoint_t::start` and
+  `socketcan_link_t::start` already use, honoured by glibc and by IDF's pthread alike — which
+  also removes a `std::thread`-constructor `std::abort()` on spawn failure under
+  `-fno-exceptions`. `0` (the default, and every host build) touches no attribute and leaves
+  the spawn byte-for-byte as it shipped.
+
 - **`tr::graph::payload_right_t` and `handlers_t::payload_rights` — a handler vertex may declare
   a payload-type → required-ACL-right table** ([#492](https://github.com/avatarsd-llc/libtracer/issues/492),
   [RFC-0014](../docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)

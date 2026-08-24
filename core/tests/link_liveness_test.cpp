@@ -559,6 +559,14 @@ void test_conformance_vectors() {
 }  // namespace
 
 int main() {
+    // The subject is a MODULE (#1470): with `kSelfHealLinks = false` the engine is not in
+    // this image and `register_transport_type` refuses the `self_heal_dial` kind every case
+    // below registers, so there is nothing here to exercise. State the skip rather than
+    // crash about a feature the binary was never built with (the `bus` suites' #1438 shape).
+    if constexpr (!tr::net::kSelfHealLinks)
+        return tr::testing::skipped("link_liveness",
+                                    "kSelfHealLinks = false — the RFC-0014 S5 engine is not "
+                                    "in this build");
     std::printf("== RFC-0014 §4 S5: the link-liveness engine (#492) ==\n");
     test_engine_creation_is_dormant();
     test_op_autowakes_and_dials();

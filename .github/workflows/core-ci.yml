@@ -381,6 +381,80 @@ jobs:
         if: always()
         run: chown -R "$(stat -c '%u:%g' ..)" . "$RUNNER_TEMP"
 
+  # The #1470 module gate, exercised: `kSelfHealLinks = false` + the matching TU switch. Same
+  # two-part shape as build-test-bus-closed above — a fragment binds the config member and the
+  # CMake option drops the TU, and the pair has to agree or `self_heal_link.cpp`'s own
+  # static_assert (or the link) says so. Without this leg the OFF path is never compiled and the
+  # knob rots.
+  build-test-self-heal-closed:
+    runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
+    container: ubuntu:24.04
+    # Same container + apt step as the group above; held at its 20-minute wedge bound.
+    timeout-minutes: 20
+    steps:
+      - name: Toolchain (container has no preinstalled tool set)
+        timeout-minutes: 8
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+            build-essential cmake git ca-certificates
+      - uses: actions/checkout@v4
+        with:
+          # See the WORKSPACE OWNERSHIP header: without this, checkout's post step
+          # re-roots `.git/config` after the cleanup step has already run.
+          persist-credentials: false
+      - name: Bind kSelfHealLinks = false, build + ctest
+        run: |
+          mkdir -p "$PWD/self-heal-closed/libtracer"
+          cat > "$PWD/self-heal-closed/libtracer/config_override.hpp" <<'FRAGMENT'
+          /**
+           * @file
+           * @brief GENERATED CI fixture — the RFC-0014 S5 liveness engine closed out (#1470).
+           */
+          #pragma once
+
+          namespace tr::graph {
+
+          /** @brief The defaults, with no link-liveness engine at all. */
+          struct self_heal_closed_config_t : default_config_t {
+              static constexpr bool kSelfHealLinks = false;
+          };
+
+          using config_t = self_heal_closed_config_t;
+
+          }  // namespace tr::graph
+          FRAGMENT
+          cmake -S core -B core/build-self-heal-closed -DBUILD_TESTING=ON \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo -DLIBTRACER_SELF_HEAL_LINKS=OFF \
+            -DCMAKE_CXX_FLAGS="-I$PWD/self-heal-closed"
+          cmake --build core/build-self-heal-closed -j "$(nproc)"
+          ctest --test-dir core/build-self-heal-closed -LE selfheal --output-on-failure
+      # The two deselected suites, run on purpose — the same claim the bus leg makes. Each
+      # states a skip from its own `main` and exits 77, which ctest reads as Skipped; this step
+      # fails the moment one of them crashes or fails instead.
+      - name: The deselected suites SKIP cleanly rather than crash
+        run: |
+          ctest --test-dir core/build-self-heal-closed --output-on-failure \
+            -R '^(link_liveness|net_lock_order)$'
+      # The engine's symbols are actually GONE — the point of the knob, not a side effect. A
+      # build that merely stopped calling it would keep the archive member and the flash.
+      - name: The liveness engine is absent from the archive
+        run: |
+          if nm -C core/build-self-heal-closed/libtracer.a \
+               | grep -E '^[0-9a-f]+ [TtWw] tr::net::self_heal_link_t::'; then
+            echo "ERROR: self_heal_link_t code is still in the archive on a closed-out build" >&2
+            exit 1
+          fi
+          echo "ok: no self_heal_link_t code in libtracer.a"
+      - name: Restore workspace ownership for the host runner
+        # Hands the container's root-owned tree back to the host runner user. WHY, and
+        # why it is duplicated inline rather than factored into a composite action: the
+        # WORKSPACE OWNERSHIP section of this file's header. Gated by
+        # tools/check_ci_workspace_cleanup.py — every self-hosted `container:` job must
+        # END with this exact step.
+        if: always()
+        run: chown -R "$(stat -c '%u:%g' ..)" . "$RUNNER_TEMP"
+
   build-test-reclaim-qsbr:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container: ubuntu:24.04
