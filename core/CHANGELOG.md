@@ -41,6 +41,35 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **BREAKING: `tr::net::path_label_table_t` takes an injected `tr::mem::block_source_t*`, not a
+  `std::pmr::memory_resource*`** ([#1478](https://github.com/avatarsd-llc/libtracer/issues/1478),
+  [RFC-0027](../docs/spec/rfcs/0027-label-switched-path-compression.md) §8.3,
+  [ADR-0065](../docs/adr/0065-failable-allocation-gets-its-own-seam-block-source.md),
+  [ADR-0079](../docs/adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md)). The mint table is fed by
+  **remote peers**, so its allocations are exactly the reachable-from-the-network class the
+  failable seam exists to bound — and it was the one such store still on the throwing pmr
+  channel, which on the `-fno-exceptions` shipping profile reaches ESP-IDF's link-wrapped
+  `__cxa_throw` → `abort()` stub. Exhaustion is now a **refusal by value**, counted into the
+  `refused_mints` §8.3 already defines, and never a throw.
+  Both arrays become `mem::block_array_t` (nothrow, `memcpy`-relocating). The **slot array is
+  reserved to `capacity` at construction**, so a mint takes a slot out of storage the table
+  already owns and the peer-provoked path allocates nothing at all; this reverses the earlier
+  grow-on-demand shape, which spread the same total across the traffic that provoked it. A
+  source that cannot serve the reservation leaves the table at `kMintsNothing` — the §6.3
+  conformant string-forwarding host — and `capacity()` reports the `0` rather than the table
+  pretending it was sized; construction never fails, because a failure a constructor cannot
+  report by value is the abort this seam removes.
+  **New fourth constructor parameter `max_peers`** with `kPeersFollowCapacity` (`0`) deriving it
+  from `capacity` — the bound that was always true, since a peer holds a census entry only while
+  it holds a live label — plus a `max_peers()` accessor. The census keeps a small reserved floor
+  and grows on demand up to that ceiling; reaching either the ceiling or an exhausted source
+  refuses the mint, returns the slot, and counts it.
+  **Migration**: `path_label_table_t{&my_pmr, cap, per_peer}` becomes
+  `path_label_table_t{&my_block_source, cap, per_peer}`; the default argument moves from
+  `std::pmr::get_default_resource()` to `&tr::mem::heap_source()`. An embedder holding only a
+  pmr arena points a `mem::pool_source_t` at the same storage — never a pmr-behind-the-seam
+  adapter, which `mem_source.hpp` documents as unable to report exhaustion at all.
+
 - **`graph_t::vertex_slot` is O(1): the reverse index is memoized, in bytes that cost nothing**
   ([#1486](https://github.com/avatarsd-llc/libtracer/issues/1486),
   [#1487](https://github.com/avatarsd-llc/libtracer/issues/1487)). The terminus mint found a
