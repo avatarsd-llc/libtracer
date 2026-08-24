@@ -884,18 +884,28 @@ def compare_intro() -> str:
 {head("zenoh")}
 
 Both engines on **one runner, best of 3 rounds**, so the numbers are directly comparable on
-identical hardware: three **in-process** axes — subscriber fan-out, payload size and topic
-count — and a **network latency** comparison over the real loopback kernel path, one socket
-and one paced value per transport in two processes. The charts plot **absolute** throughput,
+identical hardware: two **in-process** comparison axes — subscriber fan-out and payload size
+— and a **network latency** comparison over the real loopback kernel path, one socket and
+one paced value per transport in two processes. The charts plot **absolute** throughput,
 latency and bandwidth as series on shared axes; there are no speed-up ratios.
+
+The **topic-count** pair is charted for libtracer alone, and that is a fairness decision,
+not a gap in the run. The two arms are different operations — libtracer's row re-resolves
+the destination address inside every timed iteration, Zenoh's publishes through a declared
+handle and resolves nothing per put — so putting them on a shared axis would attribute a
+resolution term to topic scaling. The matched decomposition that replaced it (both
+spellings on both engines) is tabulated in the methodology below rather than charted here:
+one ladder costs about nine minutes and its content is structural.
 
 libtracer is compiled from source at `-O3`; Zenoh is the upstream prebuilt `zenoh-c 1.10.0`
 release binary that `bench/fetch_zenoh.sh` downloads, so its optimization profile is
 upstream's rather than a flag this repo sets. Both are optimized builds. Which rows do equal
 work, why there is no network *throughput* comparison, and which transports are absent and
 why, are all below — as are the three **designated model boundaries**, which say what the
-two engines are respectively buying with the costs these charts show, and which include the
-one axis where Zenoh is the better engine."""
+two engines are respectively buying with the costs these charts show. Topic count was once
+listed there as the one axis where Zenoh was the better engine; the matched
+`topics-bound` / `topics-addr` decomposition retired that reading, and the boundary section
+below states what replaced it."""
 
 
 def raw_data() -> str:
