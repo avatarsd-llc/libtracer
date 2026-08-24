@@ -51,18 +51,20 @@ on:
   push:
     branches: [main]
     paths:
+      # The CMake this job builds lives under core/ and bench/ (bench/CMakeLists.txt adds
+      # `../core` and nothing else), and both trees are enrolled whole — so an UNANCHORED
+      # `**/CMakeLists.txt` / `**/*.cmake` added no coverage and did add the exact vacuous
+      # run 1a warns about: an ESP-side or bindings-side CMake edit triggering an 8-30 min
+      # interleave of two BYTE-IDENTICAL binaries, whose tie reads as a pass on the PR page
+      # (#1479). Enrolling a path this job cannot measure is worse than not enrolling it.
       - 'core/**'
       - 'bench/**'
-      - '**/CMakeLists.txt'
-      - '**/*.cmake'
       - 'docs/methodology.md'
       - '.github/workflows/perf*.yml'
   pull_request:
     paths:
       - 'core/**'
       - 'bench/**'
-      - '**/CMakeLists.txt'
-      - '**/*.cmake'
       - 'docs/methodology.md'
       - '.github/workflows/perf*.yml'
 

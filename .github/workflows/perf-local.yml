@@ -80,10 +80,13 @@ on:
   push:
     branches: [main]
     paths:
+      # Anchored for the reason perf.yml's header gives (#1479): the CMake this workflow
+      # builds is all under core/ and bench/, both enrolled whole, so `**/CMakeLists.txt`
+      # bought no coverage and did buy vacuous runs on ESP/bindings CMake edits — which
+      # here cost the ONE pinned bench machine a measurement window on an unchanged
+      # binary. Keep this list and the density leg's git-log pathspec identical.
       - 'core/**'
       - 'bench/**'
-      - '**/CMakeLists.txt'
-      - '**/*.cmake'
       - '.github/workflows/perf-local.yml'
   # The catch-up leg (#1301). It measures ONLY when the density check says the store
   # has fallen behind, so a quiet week costs one cheap hosted-runner job a day and
@@ -129,7 +132,7 @@ jobs:
           # The same paths: filter above, as a commit list — first-parent, so one
           # merge is one candidate rather than every commit it carries.
           git log --first-parent HEAD --format=%H -- \
-            core bench '**/CMakeLists.txt' '**/*.cmake' \
+            core bench \
             .github/workflows/perf-local.yml > "$RUNNER_TEMP/bench_shas.txt"
           # depth=1: the store is ~28 MB and only its tip is ever read.
           git fetch --no-tags --depth=1 origin gh-pages
