@@ -26,11 +26,10 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <memory_resource>
 #include <mutex>
 #include <optional>
-#include <vector>
 
+#include "libtracer/mem_source.hpp"
 #include "libtracer/path_label.hpp"
 #include "libtracer/path_ref.hpp"
 #include "libtracer/transport.hpp"
@@ -69,10 +68,16 @@ using path_label_target_t = wire::path_ref_element_t;
  *
  * **Four bounds, all of them rulings** (§8.3):
  *
- * - **The store is injected.** Every allocation is drawn from the `memory_resource` the
- *   embedder passes — ADR-0079's per-plane composition axis, not a static array and not a
- *   library-chosen capacity. The standing no-synthetic-limits rule (`CONTEXT.md` §Resource
- *   bound): a bound comes from an injected resource, never from a prediction.
+ * - **The store is injected, and it is the FAILABLE seam.** Every allocation is drawn from the
+ *   @ref tr::mem::block_source_t the embedder passes — ADR-0079's per-plane composition axis,
+ *   not a static array and not a library-chosen capacity. The standing no-synthetic-limits rule
+ *   (`CONTEXT.md` §Resource bound): a bound comes from an injected resource, never from a
+ *   prediction. It is `block_source_t` and NOT `std::pmr` for the reason ADR-0065 gives and
+ *   #1478 made concrete here: this table is fed by REMOTE PEERS, so its allocations are the
+ *   reachable-from-the-network class the failable seam exists to bound, and
+ *   `%std::pmr::memory_resource::allocate` can only report exhaustion by throwing — which on
+ *   the `-fno-exceptions` shipping profile reaches ESP-IDF's link-wrapped `__cxa_throw`
+ *   `abort()` stub. Exhaustion here is a REFUSAL by value, counted, and nothing else.
  * - **A per-peer ceiling.** One peer cannot consume the table. It is per-target configuration,
  *   never a magic number, and it is counted against the peer handle the receiver seam already
  *   mints (§10 — the substrate this table hangs its accounting on with no new bookkeeping).
@@ -119,20 +124,55 @@ class path_label_table_t {
     static constexpr std::size_t kNoPeerCeiling = 0;
 
     /**
-     * @brief Build a table over @p mr, holding at most @p capacity slots, at most
-     *        @p max_per_peer of them for any one peer.
+     * @brief No explicit ceiling on DISTINCT peers — derive it from @ref capacity.
      *
-     * @param mr           Where every slot and every per-peer counter is allocated (ADR-0079).
-     *                     Must outlive this object.
+     * A peer only occupies a census entry while it holds at least one live label, so the
+     * number of entries can never exceed the number of live labels, which is @ref capacity.
+     * Deriving is therefore the bound that was always true, not a new one, and it is what
+     * keeps this migration a no-behaviour-change on every existing deployment.
+     */
+    static constexpr std::size_t kPeersFollowCapacity = 0;
+
+    /**
+     * @brief Build a table over @p src, holding at most @p capacity slots, at most
+     *        @p max_per_peer of them for any one peer and at most @p max_peers distinct peers.
+     *
+     * **The slot array is reserved to @p capacity here**, which is the point of the seam
+     * rather than a detail of it: after construction a mint takes a slot out of storage the
+     * table already owns, so the peer-provoked path performs NO allocation at all and cannot
+     * be the thing that finds the source empty. It also makes the injected bound REAL at the
+     * moment the deployment states it, instead of discovered later under peer traffic — the
+     * capacity was already chosen from the embedder's own slab (§6.3), so charging it up front
+     * changes when it is paid, not how much. (This reverses the earlier grow-on-demand shape,
+     * which spread the same total across the traffic that provoked it.) The per-peer census
+     * takes a small floor instead and grows on demand up to @p max_peers, because a node
+     * carries FEW peers and reserving one entry per possible slot would charge a large table
+     * for peers it will never see; a census growth that the source refuses is a counted mint
+     * refusal, exactly like reaching the ceiling.
+     *
+     * A source that cannot serve the reservation leaves the table at
+     * @ref kMintsNothing — the §6.3 conformant host that forwards strings — rather than
+     * throwing or aborting: @ref capacity then reads `0` and every @ref mint refuses and
+     * counts into @ref refused_mints. Construction never fails, because a failure a
+     * constructor cannot report by value is exactly the abort this seam exists to remove.
+     *
+     * @param src          Where the slot array and the per-peer census are allocated
+     *                     (ADR-0065, ADR-0079). Must outlive this object. Defaults to the
+     *                     process-wide platform heap, which is nothrow-failable like every
+     *                     other source.
      * @param capacity     Slots this host may ever hold live at once. Clamped to
      *                     @ref tr::wire::kPathLabelSlotSpace, which is where the 16-bit index
      *                     stops; `0` (@ref kMintsNothing) means this host never mints.
      * @param max_per_peer The §8.3 per-peer ceiling; `0` (@ref kNoPeerCeiling) leaves one peer
      *                     able to reach @p capacity.
+     * @param max_peers    Distinct peers that may hold a census entry at once; `0`
+     *                     (@ref kPeersFollowCapacity) derives it from @p capacity. Clamped to
+     *                     @p capacity, which no census can exceed anyway.
      */
-    explicit path_label_table_t(std::pmr::memory_resource* mr = std::pmr::get_default_resource(),
+    explicit path_label_table_t(mem::block_source_t* src = &mem::heap_source(),
                                 std::size_t capacity = kMintsNothing,
-                                std::size_t max_per_peer = kNoPeerCeiling);
+                                std::size_t max_per_peer = kNoPeerCeiling,
+                                std::size_t max_peers = kPeersFollowCapacity);
 
     path_label_table_t(const path_label_table_t&) = delete;
     path_label_table_t& operator=(const path_label_table_t&) = delete;
@@ -215,6 +255,9 @@ class path_label_table_t {
     /** @brief The §8.3 per-peer ceiling (`0` ⇒ @ref kNoPeerCeiling). */
     [[nodiscard]] std::size_t max_per_peer() const noexcept { return max_per_peer_; }
 
+    /** @brief Distinct peers that may hold a census entry at once — post-derive, post-clamp. */
+    [[nodiscard]] std::size_t max_peers() const noexcept { return max_peers_; }
+
     /** @brief Labels currently live across every peer. */
     [[nodiscard]] std::size_t live_count() const;
 
@@ -243,6 +286,11 @@ class path_label_table_t {
     /** @brief The free-list terminator — no slot index can collide with it. */
     static constexpr std::uint32_t kNoSlot = 0xFFFFFFFFU;
 
+    /** @brief Census entries reserved at construction — a floor, not the ceiling. A node
+     *         carries FEW peers, so this is what almost every deployment ever needs, and
+     *         the array still grows on demand up to `max_peers_` for the ones that do not. */
+    static constexpr std::size_t kPeerPrereserve = 8;
+
     /**
      * @brief One table slot: the peer that owns it, what it aliases, and its stamp.
      *
@@ -267,22 +315,30 @@ class path_label_table_t {
     /** @brief Release the live label in @p s (mutex held): bump, and retire on saturation. */
     void release_locked(slot_t& s, std::uint32_t index);
 
+    /** @brief The census entry for @p key, or `nullptr` (mutex held). */
+    [[nodiscard]] peer_census_t* find_census(std::uint64_t key) noexcept;
+
+    /** @brief Remove the census entry @p c — its peer holds no live label (mutex held). */
+    void drop_census(peer_census_t* c) noexcept;
+
     mutable std::mutex m_;
     std::size_t capacity_ = 0;
     std::size_t max_per_peer_ = 0;
+    std::size_t max_peers_ = 0;
     std::size_t live_ = 0;
     std::size_t retired_ = 0;
     std::size_t refused_ = 0;
-    // Grown on demand up to capacity_ rather than reserved up front: a host that mints a
-    // handful of parts pays for a handful of slots, and the injected store is not asked for
-    // 65 536 of them because the index could name that many. Freed slots come back through
-    // free_head_, so the vector's size is the high-water mark of live labels, never traffic.
-    std::pmr::vector<slot_t> slots_;
+    // RESERVED to capacity_ at construction, not grown on demand, so a peer-provoked mint
+    // allocates nothing. Freed slots come back through free_head_, so `size()` is the
+    // high-water mark of live labels and never tracks traffic; past that mark the array is
+    // already big enough and push_back cannot fail.
+    mem::block_array_t<slot_t> slots_;
     std::uint32_t free_head_ = kNoSlot;
     // Linear, and deliberately: a node carries FEW peers, the entry dies when its count hits
-    // zero, and a scan over a flat pmr vector beats a node-based map with no per-entry
-    // allocation (route_handle_t's per-link tables took the same shape for the same reason).
-    std::pmr::vector<peer_census_t> peers_;
+    // zero, and a scan over a flat array beats a node-based map with no per-entry allocation
+    // (route_handle_t's per-link tables took the same shape for the same reason). Reserved to
+    // max_peers_ for the same reason slots_ is.
+    mem::block_array_t<peer_census_t> peers_;
 };
 
 }  // namespace tr::net

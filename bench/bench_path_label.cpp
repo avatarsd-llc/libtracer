@@ -272,8 +272,7 @@ struct chain_t {
         for (std::size_t i = 0; i < nodes; ++i) graphs.push_back(std::make_unique<graph_t>());
         for (std::size_t i = 0; i < nodes; ++i) {
             routers.push_back(std::make_unique<fwd_router_t>(*graphs[i]));
-            tables.push_back(
-                std::make_unique<path_label_table_t>(std::pmr::get_default_resource(), 64, 16));
+            tables.push_back(std::make_unique<path_label_table_t>(&tr::mem::heap_source(), 64, 16));
             routers[i]->configure_path_labels(tables[i].get());
         }
         // The terminus residual, `depth` segments deep, registered ancestor-first.

@@ -234,7 +234,7 @@ std::optional<bytes_t> dst_body_of(std::span<const std::byte> frame) {
 struct hop_t {
     graph_t g;
     fwd_router_t r{g};
-    path_label_table_t labels{std::pmr::get_default_resource(), 64, 16};
+    path_label_table_t labels{&tr::mem::heap_source(), 64, 16};
     span_sink_t cli;
     span_sink_t up;
 

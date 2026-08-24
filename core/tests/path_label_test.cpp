@@ -36,7 +36,6 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
-#include <memory_resource>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -253,7 +252,7 @@ void conformance_vectors() {
 
 /** @brief Mint then look up — the whole point of the table, and the peer scoping around it. */
 void mint_and_lookup() {
-    path_label_table_t t(std::pmr::get_default_resource(), 8);
+    path_label_table_t t(&tr::mem::heap_source(), 8);
     const auto label = t.mint(kPeerA, kTarget);
     check(label.has_value() && label->valid(), "a mint under capacity yields a valid label");
     check(t.live_count() == 1 && t.live_count_for(kPeerA) == 1, "the mint is counted, once");
@@ -280,7 +279,7 @@ void mint_and_lookup() {
 
 /** @brief §7.1's departure bump: the label stops validating, and the slot comes back. */
 void release_bumps_and_reuses() {
-    path_label_table_t t(std::pmr::get_default_resource(), 4);
+    path_label_table_t t(&tr::mem::heap_source(), 4);
     const auto first = t.mint(kPeerA, kTarget).value();
     check(t.release(first), "a live label releases");
     check(t.live_count() == 0 && t.live_count_for(kPeerA) == 0, "the census drops with it");
@@ -316,7 +315,7 @@ void release_bumps_and_reuses() {
  * set for good, and the degrade is the ordinary §8.3 refusal rather than an error.
  */
 void saturate_and_retire() {
-    path_label_table_t t(std::pmr::get_default_resource(), 1);
+    path_label_table_t t(&tr::mem::heap_source(), 1);
     const auto very_first = t.mint(kPeerA, kTarget).value();
     check(very_first.generation == 1, "a fresh slot mints at generation 1, never 0");
     check(t.release(very_first), "…and releases");
@@ -355,7 +354,7 @@ void saturate_and_retire() {
 /** @brief §8.3 — the per-peer ceiling and the table capacity both REFUSE, never evict. */
 void ceiling_and_capacity() {
     // Per-peer ceiling: two peers, a table wide enough for both, a ceiling below it.
-    path_label_table_t t(std::pmr::get_default_resource(), 8, 2);
+    path_label_table_t t(&tr::mem::heap_source(), 8, 2);
     check(t.capacity() == 8 && t.max_per_peer() == 2, "capacity and ceiling are what was injected");
     const auto a1 = t.mint(kPeerA, kTarget).value();
     const auto a2 = t.mint(kPeerA, kTarget).value();
@@ -369,7 +368,7 @@ void ceiling_and_capacity() {
           "releasing under the ceiling makes room again");
 
     // Table capacity: one peer, no ceiling, and the injected capacity is the bound.
-    path_label_table_t small(std::pmr::get_default_resource(), 2);
+    path_label_table_t small(&tr::mem::heap_source(), 2);
     const auto s1 = small.mint(kPeerA, kTarget).value();
     const auto s2 = small.mint(kPeerA, kTarget).value();
     check(s1.index != s2.index, "two live labels never share a slot");
@@ -383,9 +382,55 @@ void ceiling_and_capacity() {
           "an unsized table mints nothing — the string path, which always works");
 
     // The capacity clamp: a 16-bit index cannot name more than 65 536 slots.
-    path_label_table_t huge(std::pmr::get_default_resource(), 1'000'000);
+    path_label_table_t huge(&tr::mem::heap_source(), 1'000'000);
     check(huge.capacity() == tr::wire::kPathLabelSlotSpace,
           "an over-sized capacity is clamped to the index space, not trusted");
+}
+
+/**
+ * @brief #1478 — the store is the FAILABLE seam: exhaustion is a refusal, never a throw.
+ *
+ * The table is fed by remote peers, so its allocations are the reachable-from-the-network
+ * class ADR-0065's seam exists to bound. Three properties, each with a positive control so
+ * none can pass vacuously: a source that cannot serve the reservation leaves a CONFORMANT
+ * mint-nothing host (§6.3) rather than aborting; a source that CAN serve it mints normally;
+ * and the distinct-peer census has a ceiling of its own that refuses and counts.
+ */
+void injected_source_refuses_rather_than_throws() {
+    // Positive control first: the same capacity against a source with room mints fine.
+    std::array<std::byte, 64 * 1024> slab{};
+    tr::mem::bump_source_t roomy(slab, tr::mem::null_source());
+    path_label_table_t ok(&roomy, 64, 16);
+    check(ok.capacity() == 64, "a source that can serve the reservation gives the full table");
+    check(ok.mint(kPeerA, kTarget).has_value(), "and it mints");
+
+    // The failure arm: a source that serves NOTHING. No throw, no abort — a mint-nothing host.
+    path_label_table_t starved(&tr::mem::null_source(), 64, 16);
+    check(starved.capacity() == 0,
+          "a source that cannot serve the reservation leaves the §6.3 mint-nothing host, and "
+          "capacity() says so rather than the table pretending it was sized");
+    check(!starved.mint(kPeerA, kTarget).has_value(), "every mint on it refuses");
+    check(starved.refused_mints() >= 1, "and the refusal is counted, not silent");
+
+    // The census ceiling: distinct PEERS are bounded too, and the bound refuses by value.
+    path_label_table_t two_peers(&tr::mem::heap_source(), 8, path_label_table_t::kNoPeerCeiling,
+                                 /*max_peers=*/2);
+    check(two_peers.max_peers() == 2, "the distinct-peer ceiling is what was injected");
+    check(two_peers.mint(peer_handle_t{1, 1}, kTarget).has_value(), "peer 1 gets a census entry");
+    check(two_peers.mint(peer_handle_t{2, 1}, kTarget).has_value(), "peer 2 gets one too");
+    const std::size_t before = two_peers.refused_mints();
+    check(!two_peers.mint(peer_handle_t{3, 1}, kTarget).has_value(),
+          "a third distinct peer is refused — the census is bounded, not unbounded");
+    check(two_peers.refused_mints() == before + 1, "and that refusal is counted");
+    check(two_peers.live_count() == 2,
+          "the refused mint gave its slot straight back — nothing leaked into the live count");
+    check(two_peers.mint(peer_handle_t{1, 1}, kTarget).has_value(),
+          "a peer that already holds an entry is unaffected by the census being full");
+
+    // By derivation, an unstated peer ceiling follows the capacity — the bound that was
+    // always true (a peer holds an entry only while it holds a live label).
+    path_label_table_t derived(&tr::mem::heap_source(), 5);
+    check(derived.max_peers() == 5, "an unstated peer ceiling derives from the capacity");
 }
 
 }  // namespace
@@ -400,5 +445,6 @@ int main() {
     release_bumps_and_reuses();
     saturate_and_retire();
     ceiling_and_capacity();
+    injected_source_refuses_rather_than_throws();
     return tr::testing::summary("path_label");
 }
