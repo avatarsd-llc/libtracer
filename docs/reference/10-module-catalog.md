@@ -129,9 +129,43 @@ These are required down to profile P0, the in-process build. "Required" does not
 
 | Module | Tag | What it does | Status |
 | ---- | ---- | ---- | ---- |
-| `discovery_mdns` | discovery | mDNS / DNS-SD over the local LAN | v1 |
-| `discovery_static` | discovery | A config file with explicit peer endpoints | v1 |
+| `discovery_mdns` | discovery | mDNS / DNS-SD over the local LAN, service name `_libtracer._tcp` (see below) | v1 scope; no reference module |
+| `discovery_static` | discovery | A config file with explicit peer endpoints | v1 scope; no reference module |
 | `discovery_gossip` | discovery | Gossip over WAN-friendly transports | post-MVP |
+
+**Discovery is scoped, not built — and the pieces that are COMMITTED are committed
+elsewhere** ([#1528](https://github.com/avatarsd-llc/libtracer/issues/1528)). Neither row above
+has a reference module in `core/`, `backends/` or `bindings/`, and the *scope* claim is what
+"v1" ever meant on them — the same idiom `transport_unix` / `transport_uart` carry above. What
+IS settled, and is normative or near-normative where it lives:
+
+- **The service name is `_libtracer._tcp`**, and it carries the protocol version:
+  `_libtracer._tcp` = v1, `_libtracer-v2._tcp` = v2 ([ADR-0002 — versioning: protocol vs
+  release, no per-frame version](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0002-versioning-protocol-vs-release-no-per-frame-version.md)).
+  That is the whole of libtracer's version negotiation — the wire carries no per-frame version
+  field — so an integrator rolling its own announce/browse must use this name and not invent
+  one. ADR-0002 is not demoted by the absence of a module: the name is a protocol commitment,
+  and a module would only be one of its users.
+- **What a discovery record may say is bounded.** Discovery is IP-peer bootstrap — "what can I
+  dial" and nothing else ([ADR-0044](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0044-stateless-transport-peer-enumeration-separate-paths-client-side-identity.md)
+  point 4). Carrying node IDENTITY there was considered and **rejected**
+  ([RFC-0011 §Alternatives](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0011-node-identity-facet.md)):
+  CAN peers and nodes behind one IP entry never appear in a discovery record at all, and the
+  consumers that need a node's key need it *through any path*, which only the in-graph
+  `read <vertex>:identity` provides. So a TXT record is a dial hint, never an identity claim.
+- **The doorway a discovered peer is dialed through is committed and implemented**: a `SPEC`
+  write to the per-(transport, role) creator endpoint
+  ([ADR-0059](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0059-creator-endpoint-creation-and-removal-are-writes-to-a-vertex.md),
+  [RFC-0014](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)).
+  An integrator that browses mDNS itself feeds what it found straight into that write; nothing
+  in the formation flow ([13 — Network formation](13-network-formation.md)) waits on a
+  discovery module existing.
+
+**And the design point is right: mDNS is per-target, so `discovery_mdns` needs the same backend
+split the transports have** — Espressif's `mdns` component on esp-idf, Avahi/Bonjour (or a small
+built-in responder) on POSIX hosts, and **nothing at all in a browser**, which cannot do mDNS.
+That last one is not a gap in the module; it is a property of the formation flow, and
+[13 — Network formation](13-network-formation.md) §Discovery now states it.
 
 ### Security
 

@@ -64,12 +64,39 @@ sequenceDiagram
 
 ### Discovery
 
-Peers are found by a discovery module emitting `(peer_id, transport_label,
-transport_address)` tuples — `discovery_static` (pre-configured) or `discovery_mdns`
-(dynamic announce); see [10 — Module catalog](10-module-catalog.md). Version
+Peers are found by a discovery module emitting `(transport_label, transport_address)`
+tuples — `discovery_static` (pre-configured) or `discovery_mdns` (dynamic announce);
+see [10 — Module catalog](10-module-catalog.md), which also records that both are v1
+*scope* with no reference module, and what the committed pieces are. Version
 compatibility is settled here, not per-frame: a distinct service name, port or CAN-ID
-prefix per protocol version ([ADR-0013 — Protocol-v1 scope boundaries](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0013-v1-scope-boundaries.md)).
+prefix per protocol version ([ADR-0013 — Protocol-v1 scope boundaries](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0013-v1-scope-boundaries.md));
+for mDNS that name is `_libtracer._tcp` ([ADR-0002](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0002-versioning-protocol-vs-release-no-per-frame-version.md)).
 See also [07 — Host embedding](07-host-embedding.md).
+
+```{admonition} Erratum (2026-08-24) — the tuple carries no identity
+:class: caution
+This tuple used to be written `(peer_id, transport_label, transport_address)`. That
+contradicts a decision already taken: **carrying identity at the discovery layer was
+considered and rejected** ([RFC-0011 §Alternatives](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0011-node-identity-facet.md)),
+because discovery is IP-peer bootstrap — *"what can I dial"* and nothing else
+([ADR-0044](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0044-stateless-transport-peer-enumeration-separate-paths-client-side-identity.md)
+point 4) — while CAN peers and nodes behind a single IP entry never appear in a
+discovery record at all, and the consumers that need a node's key need it *through any
+path*. A node's identity is read **in-band**, from `read <vertex>:identity`
+([RFC-0011](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0011-node-identity-facet.md)),
+after the dial. If a discovery record does carry a `peer_id`-shaped token, treat it as
+an **unauthenticated dial hint** and never as a subject: nothing authenticates it, and
+the ACL plane must not be keyed on it. Text-only — the wire surface does not move.
+```
+
+**A browser peer discovers nothing.** A JS/WASM binding cannot do mDNS at all, and the
+formation flow does not ask it to: a browser joins by dialing a URL it was given
+(§*The formation flow* — it is the *orchestrator*, the transient hat, not a discovered
+peer), and it learns about other peers **in-band**, by reading the graph it just
+reached — `:children[]` on a net root, the peer facets of a bus link. Discovery
+therefore happens on a native peer, and the browser's knowledge of the network arrives
+the same way every other fact does: as a read. This is why the tuple above is a
+*module's* output rather than a step every peer performs.
 
 ### Admin delegation
 
