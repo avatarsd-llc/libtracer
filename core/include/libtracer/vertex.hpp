@@ -63,6 +63,7 @@
 #include "libtracer/rope.hpp"
 #include "libtracer/status.hpp"
 #include "libtracer/subscriber.hpp"
+#include "libtracer/tlv.hpp"
 #include "libtracer/vertex_stripe.hpp"
 #include "libtracer/view.hpp"
 
@@ -323,6 +324,19 @@ struct write_ctx_t {
 };
 
 /**
+ * @brief One row of a handler vertex's payload-type → required-ACL-right table
+ *        (RFC-0014 Amendment 2).
+ *
+ * The selector is the written TLV's **type only** — never its content. That is what keeps the
+ * declaration ahead of the gate: `graph_t::write_impl` reads one byte of the value's leading
+ * link to pick the right, and no user code runs before the ACL check.
+ */
+struct payload_right_t {
+    wire::type_t type; /**< @brief The written value's LEADING TLV type. */
+    acl_right_t right; /**< @brief The right the write gate demands for that type. */
+};
+
+/**
  * @brief User behavior for a Handler-role vertex.
  *
  * `on_children` additionally applies to ANY role: when set, a read of the vertex's
@@ -349,11 +363,33 @@ struct handlers_t {
      *        metadata field).
      */
     std::function<void(std::string_view name, const view_t& value)> on_app_field_write;
+    /**
+     * @brief OPTIONAL payload-type → required-ACL-right table (RFC-0014 Amendment 2) — the
+     *        general contract by which a control vertex demands something other than plain
+     *        `WRITE` for a given written TLV type.
+     *
+     * Empty (the default) ⇒ every write to the vertex gates on `acl_right_t::WRITE`, which is
+     * both today's behaviour and today's cost: `graph_t::write_impl` consults the table only
+     * on a `role_t::HANDLER` target, so no other role's write path grows an instruction. A row
+     * whose @ref payload_right_t::type equals the written value's leading TLV type supplies the
+     * right demanded instead; an unmatched type (and a value whose leading link cannot be read,
+     * e.g. a device-memory link) falls back to `WRITE`. Rows are scanned in order, first match
+     * wins — the table is a handful of entries on a control vertex, never a hot-path structure.
+     *
+     * The refusal is still the ONE write gate's, counted into the single-sited
+     * `delivery_drops_t::denied`: this declaration changes WHICH right is demanded, never
+     * where the demand is made. The transport creator endpoint is the first user
+     * (`SPEC`→`CREATE`, `NAME`→`WRITE`, RFC-0014 §5); an application subtree-owner that
+     * implements create-on-write is the next (RFC-0003).
+     */
+    std::vector<payload_right_t> payload_rights;
 };
 
 /**
  * @brief The internal, lazily-allocated STORAGE of a vertex's VALUE seam (ADR-0058 Step 2)
- *        — the three seams `handlers_t` carries minus `on_app_field_write`.
+ *        — the three seams `handlers_t` carries minus `on_app_field_write`, plus the
+ *        RFC-0014 Amendment 2 payload-right table, which is not a seam but is read on the
+ *        same lock-free load.
  *
  * Split off from the public @ref handlers_t input so a vertex that installs none of the
  * three never allocates these ~96 B of `std::function`: the block lives behind a lazily
@@ -374,6 +410,12 @@ struct value_handlers_t {
      *         arguments are borrowed for the call only — copy if retained. */
     std::function<result_t<void>(const rope_t&, const write_ctx_t&)> on_write;
     std::function<result_t<view_t>()> on_children; /**< @brief Synthesized `:children[]` listing. */
+    /** @brief The vertex's payload-type → required-ACL-right table (RFC-0014 Amendment 2),
+     *         empty on every vertex that declares none. It rides THIS block because the write
+     *         gate reads it lock-free on the same acquire load as the seams, and because the
+     *         block is PARKED rather than freed on retirement — a gate that raced a retire
+     *         reads a parked table, never a dangling one. */
+    std::vector<payload_right_t> payload_rights;
 };
 
 /**
@@ -2762,8 +2804,9 @@ class vertex_t {
      * owner-side magnitudes materialise it only if an owner actually declares one.
      */
     void adopt_identity(role_t role, handlers_t handlers) {
-        const bool has_handlers = handlers.on_read || handlers.on_write || handlers.on_children ||
-                                  handlers.on_app_field_write;
+        const bool has_value_seam = handlers.on_read || handlers.on_write || handlers.on_children ||
+                                    !handlers.payload_rights.empty();
+        const bool has_handlers = has_value_seam || handlers.on_app_field_write;
         if (role != role_t::STREAM && !has_handlers &&
             ext_.load(std::memory_order_acquire) == nullptr)
             return;
@@ -2771,7 +2814,7 @@ class vertex_t {
         // Split the public input into its two lazy groups (ADR-0058 Step 2): the value
         // seam only when one of its three is set; the app-field group's apply seam only
         // when given. Registration is single-threaded for this vertex, so no lock here.
-        if (handlers.on_read || handlers.on_write || handlers.on_children) {
+        if (has_value_seam) {
             // Publish the seam atomically. `fill` only ever runs on an UNREGISTERED node
             // (register_vertex_key returns PATH_IN_USE otherwise), and such a node's seam
             // is null — a fresh placeholder never had one, and retirement already swapped a
@@ -2780,7 +2823,8 @@ class vertex_t {
             // ordering covers.
             e.handlers.store(
                 new value_handlers_t{std::move(handlers.on_read), std::move(handlers.on_write),
-                                     std::move(handlers.on_children)},
+                                     std::move(handlers.on_children),
+                                     std::move(handlers.payload_rights)},
                 std::memory_order_release);
         }
         if (handlers.on_app_field_write) {

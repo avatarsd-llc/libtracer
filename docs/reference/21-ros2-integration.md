@@ -155,7 +155,7 @@ target lives on the *consumer's* node
 overwrite for a stored value, **append for a stream** — so a consumer that declares its target
 STREAM gets its own bounded history ring, trimmed to a depth its own application declares through
 its own `graph_t::set_history_depth`: *"Role 2: the CONSUMER's bounded history ring"*
-(`core/include/libtracer/vertex.hpp:207`). Each reader does get its own queue, sized by the reader
+(`core/include/libtracer/vertex.hpp:208`). Each reader does get its own queue, sized by the reader
 — in BYTES, against the source that reader injects through `graph_t::set_ring_source`
 ([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.6.1).
 That ring is what `rmw_take` pops.

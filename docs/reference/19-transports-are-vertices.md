@@ -40,8 +40,8 @@ differences are load-bearing:
 | Position | What it is | Role | Value |
 | --- | --- | --- | --- |
 | `/net` | The net root — the `:children[]` creation target the constructor registers. Conventionally `/net`; the name is the constructor's default, overridable per node, never a library rule. | `role_t::STORED_VALUE` | none (a structural position) |
-| `/net/<module>` | One **module** — a *(transport kind, role)* pair, declared by the application (`register_module`, `core/include/libtracer/transport_vertex.hpp:462`). Minted eagerly when the module is declared (`core/src/transport_vertex.cpp:339`) and lazily on first creation (`:673`). | `role_t::STORED_VALUE` | none (a structural position) |
-| `/net/<module>/conn` | The module's **creator endpoint**. A write is *executed*, never assigned: the payload's TLV type selects create (`SPEC`) from remove (`NAME`) — `core/src/transport_vertex.cpp:384`. | `role_t::HANDLER` | none — write-only and valueless |
+| `/net/<module>` | One **module** — a *(transport kind, role)* pair, declared by the application (`register_module`, `core/include/libtracer/transport_vertex.hpp:462`). Minted eagerly when the module is declared (`core/src/transport_vertex.cpp:339`) and lazily on first creation (`:687`). | `role_t::STORED_VALUE` | none (a structural position) |
+| `/net/<module>/conn` | The module's **creator endpoint**. A write is *executed*, never assigned: the payload's TLV type selects create (`SPEC`) from remove (`NAME`) — `core/src/transport_vertex.cpp:398`. | `role_t::HANDLER` | none — write-only and valueless |
 | `/net/<module>/<name>` | The **connection vertex**: one link's identity, its config, and (when config-constructed) the socket it owns. | `role_t::STORED_VALUE` | the 1-byte link-liveness state |
 
 Three things are deliberately **not** vertices:
@@ -93,7 +93,7 @@ handle, no URI, no destination field, and no second naming layer
 This is not merely a spelling convenience: it is why the mount path and the routing key are
 the *same string*. Creation composes `net/<module>/<name>` once and registers it both as the
 graph key and as the router's child name — "the routing key IS the mount path"
-(`core/src/transport_vertex.cpp:648`, `:655`,
+(`core/src/transport_vertex.cpp:662`, `:669`,
 [ADR-0061](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md)) —
 so a hop's `src` prefix needs no per-hop assembly, and a route through a link cannot name a
 vertex the graph does not have. A design that kept transports outside the tree would have to
@@ -103,7 +103,7 @@ keep those two namespaces in agreement by hand.
 
 Creation and removal are ordinary writes, gated by the ordinary write path, and they collapse
 onto one control distinguished by the written TLV's type
-(`core/src/transport_vertex.cpp:384`). Removal un-routes first, then retires the identity
+(`core/src/transport_vertex.cpp:398`). Removal un-routes first, then retires the identity
 vertex, then destroys the socket — so a forward can never reach freed memory, and the path
 re-virginizes for a later connection of the same name
 ([RFC-0009](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0009-vertex-removal-and-subscriber-eviction.md) §B.6).
@@ -115,7 +115,7 @@ creator endpoint and the superseded `:children[]` spelling
 lookup onward, so they cannot drift into two creation semantics. Only the module resolution
 differs: the endpoint knows its module positionally, from its own path; the `:children[]`
 door derives it from the SPEC's `kind` through a declared *(kind, role)* mapping, or from a
-unique staging (`core/src/transport_vertex.cpp:592`).
+unique staging (`core/src/transport_vertex.cpp:606`).
 
 ```{mermaid}
 flowchart TD
@@ -180,7 +180,7 @@ socket), demand dial bounded by `connect_timeout`, self-heal with `backoff` whil
 standing binding (`acquire_link`/`release_link`) holds the link, and close-to-dormant on
 the last release. The BUILT-IN kinds are not yet opted in, so their value is still written
 by whoever knows: an eagerly-constructed socket publishes `UP` or `LISTENING` at creation
-(`core/src/transport_vertex.cpp:847`, `:850`), and a provided link reports through
+(`core/src/transport_vertex.cpp:865`, `:868`), and a provided link reports through
 `set_link_state`.
 
 ### 3. Structural vertices nobody declared
@@ -233,7 +233,7 @@ tree, and one is not:
 
 - The registry's refusal is the whole creation's verdict: when `add_child` cannot grow, the
   creation rolls back — retire the vertex, drop the entry, destroy the socket — and answers
-  `BACKPRESSURE` (`core/src/transport_vertex.cpp:828`, `:822`). Without that, a bounded node
+  `BACKPRESSURE` (`core/src/transport_vertex.cpp:846`, `:840`). Without that, a bounded node
   could be driven to publish connections that no `dst` resolves and no removal can take down.
 - `SPEC` naming an existing name answers `PATH_IN_USE`, and the reserved `conn` name is
   refused in both directions, so the endpoint cannot be made to destroy itself.
@@ -388,7 +388,7 @@ its conformance-vector merge; until then the values in
 - **"Transport" here means a connection, not a wire technology.** What a given kind does with
   the bytes — CAN's header elision and advertise map, WebSocket's session authentication —
   is [14](14-can-transport.md) and [16](16-websocket-session-auth.md).
-- **A staged link is not yet a vertex.** `provide_link` (`core/src/transport_vertex.cpp:549`)
+- **A staged link is not yet a vertex.** `provide_link` (`core/src/transport_vertex.cpp:563`)
   hands the plane a pre-built transport — the test/manual seam for loopback channels and
   kinds the catalog does not cover — but it registers nothing. The vertex appears when a
   `SPEC` for that `<module>/<name>` binds it, and removing that connection leaves the

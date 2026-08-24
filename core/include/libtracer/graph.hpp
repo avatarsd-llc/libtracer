@@ -955,7 +955,8 @@ class graph_t {
      *
      * **Which vertices park — handler PRESENCE, never role.** `vertex_t::adopt_identity`
      * allocates the `value_handlers_t` iff at least one of `on_read`, `on_write`,
-     * `on_children` was installed at registration; `role_t` is never consulted. So a
+     * `on_children` — or a non-empty RFC-0014 Amendment 2 `payload_rights` table, which rides
+     * the same block — was installed at registration; `role_t` is never consulted. So a
      * `role_t::STORED_VALUE` vertex registered with an `on_children` parks one seam on
      * retirement, and a `role_t::HANDLER` registered with an empty @ref handlers_t parks
      * nothing. Scoping a quiescent point by role excludes exactly the production case

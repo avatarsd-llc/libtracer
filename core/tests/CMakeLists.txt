@@ -1582,6 +1582,16 @@ if(LIBTRACER_NET_PLANE)
     set_tests_properties(net_lock_order PROPERTIES TIMEOUT 180)
 endif()
 
+if(LIBTRACER_NET_PLANE)
+    # #492 S2c — RFC-0014 Amendment 2 (§5.1): the payload-type => required-ACL-right table a
+    # handler vertex declares, and §5 discharged on the creator endpoint (SPEC=>CREATE,
+    # NAME=>WRITE). Also pins Amendment 3's empty-SETTINGS catalog envelope.
+    add_executable(payload_right_table_test payload_right_table_test.cpp)
+    target_link_libraries(payload_right_table_test PRIVATE libtracer)
+    libtracer_test_warnings(payload_right_table_test)
+    add_test(NAME payload_right_table COMMAND payload_right_table_test)
+endif()
+
 if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_UDP AND LIBTRACER_TRANSPORT_WS)
     # #83 Stage-1 — transport/connection as a / vertex (shell over the live fwd path).
     add_executable(transport_vertex_test transport_vertex_test.cpp)

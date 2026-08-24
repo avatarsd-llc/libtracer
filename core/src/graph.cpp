@@ -2198,6 +2198,36 @@ namespace {
            std::to_integer<std::uint8_t>(head[0]) == std::to_underlying(type_t::POINT) &&
            (std::to_integer<std::uint8_t>(head[1]) & 0x40) != 0;
 }
+
+/**
+ * @brief The right the ONE write gate must demand for @p value on @p v (RFC-0014 Amendment 2).
+ *
+ * Plain `WRITE` unless the target is a `role_t::HANDLER` that DECLARED a payload-type →
+ * required-ACL-right table, and the written value's leading TLV type has a row in it. The
+ * role test comes first and is the whole of the cost argument: every other role — the store
+ * hot path — answers `WRITE` off a register the frame already holds, without touching the
+ * extension block. The declaration is read on the same lock-free acquire load as the seams,
+ * from a block that is parked rather than freed on retirement.
+ *
+ * The selector is the TYPE BYTE alone. Nothing here parses the payload, and nothing user-owned
+ * runs: a gate that had to consult content would be running the vertex's own code before
+ * deciding whether the caller may reach it.
+ */
+[[nodiscard]] acl_right_t required_write_right(vertex_t* v, const rope_t& value) {
+    if (v->role() != role_t::HANDLER) return acl_right_t::WRITE;
+    const value_handlers_t& h = v->handlers();
+    if (h.payload_rights.empty()) return acl_right_t::WRITE;
+    // An empty rope, or one whose head is device memory, has no readable type byte — it is
+    // not a declared payload, so it takes the default right and the handler's own refusal
+    // (RFC-0014 §2 answers TYPE_MISMATCH for a payload that is neither SPEC nor NAME).
+    if (value.link_count() < 1 || !value.links()[0].is_host()) return acl_right_t::WRITE;
+    const std::span<const std::byte> head = value.links()[0].bytes();
+    if (head.empty()) return acl_right_t::WRITE;
+    const auto type = static_cast<type_t>(std::to_integer<std::uint8_t>(head[0]));
+    for (const payload_right_t& row : h.payload_rights)
+        if (row.type == type) return row.right;
+    return acl_right_t::WRITE;
+}
 }  // namespace
 
 result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, std::string_view caller) {
@@ -2209,7 +2239,14 @@ result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, std::string_view c
     // link. Counting an API caller's own denial as well is deliberate (see delivery_drops_t
     // ::denied): `denied` means refusals, not refusals-nobody-heard-about, and a counter
     // whose value depended on WHICH door a refusal came through could not be summed.
-    if (!acl_allows(v, caller, acl_right_t::WRITE)) {
+    //
+    // WHICH right is demanded is the vertex's own declaration (RFC-0014 Amendment 2,
+    // `required_write_right`): a handler vertex may map a written TLV type to a right other
+    // than `WRITE` — the creator endpoint demands `CREATE` for a `SPEC` — and everything else
+    // demands `WRITE`, as it always has. The gate itself does not move, and neither does the
+    // counter: one declaration decides the right, one site makes the demand and counts the
+    // refusal.
+    if (!acl_allows(v, caller, required_write_right(v, value))) {
         count_drop(drop_reason_t::DENIED, 1);
         return std::unexpected(status_t::PERMISSION_DENIED);
     }

@@ -14,6 +14,28 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Added
+
+- **`tr::graph::payload_right_t` and `handlers_t::payload_rights` — a handler vertex may declare
+  a payload-type → required-ACL-right table** ([#492](https://github.com/avatarsd-llc/libtracer/issues/492),
+  [RFC-0014](../docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)
+  §5.1 Amendment 2). The one value-write gate (`graph_t::write_impl`) hardcoded
+  `acl_right_t::WRITE` for every vertex; it now asks the **vertex** which right a written TLV
+  type costs. Absent declaration — every vertex in every existing program — is plain `WRITE`, and
+  the table is consulted only on a `role_t::HANDLER` target, so no other role's write path grows
+  an instruction. The selector is the written value's **leading TLV type and nothing else**: a
+  content-keyed rule would run the vertex's own parsing ahead of the ACL check. An undeclared type
+  falls back to `WRITE` (undeclared means `WRITE`, never ungated), the gate does not move, and a
+  refusal still counts into the single-sited `delivery_drops_t::denied`.
+  The transport **creator endpoint is the first user** and declares RFC-0014 §5's own mapping —
+  `SPEC` ⇒ `CREATE`, `NAME` ⇒ `WRITE` — so a peer can hold create-but-not-remove or the reverse,
+  delegable on the endpoint's own ACL with no right on the parent transport (§5 discharged). The
+  contract is deliberately general: an application subtree-owner implementing create-on-write
+  declares the same way, with no core change. Gated by `core/tests/payload_right_table_test.cpp`,
+  which also pins **Amendment 3** (§2.1): a `conn:schema` catalog read answers the ordinary
+  `POINT{NAME, SETTINGS{…}}` envelope with an **empty `SETTINGS`** for a module that declares no
+  catalog — never `SCHEMA_NOT_FOUND`, which would make the §6 creatability probe ambiguous.
+
 ### Changed
 
 - **`delivery_policy_t::reliability` (bits 0–1) is documented as CARRIED VERBATIM, READ BY

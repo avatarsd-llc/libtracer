@@ -354,9 +354,12 @@ result_t<void> transport_vertex_t::mint_module_locked(const std::string& module)
 
     // `role_t::HANDLER` is what makes the endpoint WRITE-ONLY AND VALUELESS (RFC-0014 §2):
     // the graph runs `on_write` and stores no last-known-value, so the write is EXECUTED,
-    // never assigned. No `on_read` is installed either — a read answers NOT_FOUND until S3
-    // teaches `:schema` to serve the module's config catalog, which is the endpoint's only
-    // readable facet.
+    // never assigned. No `on_read` is installed either — a whole-vertex read answers
+    // NOT_FOUND, and the endpoint's one readable facet is `:schema`, which the graph's own
+    // field door already serves as the RFC-0014 Amendment 3 catalog envelope:
+    // `POINT{NAME "conn", SETTINGS{…}}`, with an EMPTY `SETTINGS` for a module that declares
+    // no catalog. That empty answer is conforming, not a stub — the probe of §6 asks whether
+    // the endpoint EXISTS, and `SCHEMA_NOT_FOUND` would answer a question nobody asked.
     //
     // The lambda captures the module by VALUE. The path is the module, so the dispatch never
     // re-derives it from a payload the peer wrote — a creator cannot address one module's
@@ -365,6 +368,17 @@ result_t<void> transport_vertex_t::mint_module_locked(const std::string& module)
     handlers.on_write = [this, module](const view::rope_t& value,
                                        const graph::write_ctx_t&) -> result_t<void> {
         return endpoint_write(module, value);
+    };
+    // RFC-0014 §5, discharged by the Amendment 2 general contract: the two control payloads
+    // this endpoint accepts demand DIFFERENT rights, so the endpoint declares them rather
+    // than having `graph_t` learn a transport concept. `SPEC` (create) demands `CREATE`, so
+    // the create right is delegable on the endpoint's own ACL without any right on the parent
+    // transport; `NAME` (remove) demands `WRITE`, per RFC-0009 §A.2's reserved-and-unused
+    // `DELETE`. A peer may hold either without the other. Anything else written here takes the
+    // default `WRITE` and is refused by `endpoint_write` on its shape (§2), not by the gate.
+    handlers.payload_rights = {
+        graph::payload_right_t{wire::type_t::SPEC, graph::acl_right_t::CREATE},
+        graph::payload_right_t{wire::type_t::NAME, graph::acl_right_t::WRITE},
     };
     auto endpoint = graph_.register_vertex_key(std::move(endpoint_key), graph::role_t::HANDLER,
                                                std::move(handlers));
@@ -705,7 +719,11 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(ctl_txn_t& 
             // applies): creation must refuse a misconfigured SPEC at the write, never
             // defer it to a first dial that answers success today and failure later.
             // Kind-PRIVATE config stays the factory's to refuse, at dial time — the §2
-            // catalog validation proper is S3's, pending its own ruling.
+            // catalog validation proper is S3's. Its ENVELOPE is ruled (RFC-0014
+            // Amendment 3): the catalog is the `SETTINGS` of the endpoint's ordinary
+            // `:schema` record, empty until a module declares one, so what is still open
+            // here is the module-side declaration and the validation it would license,
+            // never the reply shape.
             if (settings.addr.empty() || settings.port == 0)
                 return std::unexpected(status_t::TYPE_MISMATCH);
             // The engine owns a byte COPY of the raw config: the decoded TLV borrows the
