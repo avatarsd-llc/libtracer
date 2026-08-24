@@ -5,16 +5,26 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 # RFC 0003 — Concrete-path delivery for bridged wildcard subscriptions
 
-> **Deferred (2026-07-07):** the design direction is sound, but this RFC governs *bridged* wildcard delivery, which no implementation exercises yet. Per the standing "stay 0.x DRAFT — don't lock a wire commitment before it is exercised" stance, it is **deferred** (tracked in [#303](https://github.com/avatarsd-llc/libtracer/issues/303)) rather than accepted-now or left to silently lapse. Re-open for comment when a real consumer (the migration of the originating production firmware — an ESP32-C6 smart-agriculture node — or a second implementation) exercises the path and the three open sub-questions in [§Discussion](#discussion) are resolved.
+> **Superseded (2026-08-24) — closed, not deferred.** ~~**Deferred (2026-07-07):** the design direction is sound, but this RFC governs *bridged* wildcard delivery, which no implementation exercises yet. Per the standing "stay 0.x DRAFT — don't lock a wire commitment before it is exercised" stance, it is **deferred** (tracked in [#303](https://github.com/avatarsd-llc/libtracer/issues/303)) rather than accepted-now or left to silently lapse. Re-open for comment when a real consumer (the migration of the originating production firmware — an ESP32-C6 smart-agriculture node — or a second implementation) exercises the path and the three open sub-questions in [§Discussion](#discussion) are resolved.~~
+>
+> Deferral was the right instrument in 2026-07-07, when the only missing thing was a consumer. The protocol has since moved underneath this document three ways, and what it proposes is **no longer buildable as written** ([#303](https://github.com/avatarsd-llc/libtracer/issues/303), closing ruling):
+>
+> 1. **The carrier was deleted.** The mechanism rides *"inside the `ROUTER` envelope"*; [ADR-0040](../../adr/0040-net-plane-is-explicit-source-routed-only.md) made the net plane explicit-source-routed only, and `0x0D` is now a reserved codepoint with no implemented mechanism — *"Senders MUST NOT emit `type=0x0D`"* ([reference/05](../../reference/05-protocol-tlvs.md) §`0x0D`).
+> 2. **The trigger is unspellable.** There is no wildcard grammar in v1 and a path carrying `*` or `?` MUST be refused with `ERROR{tr::path::invalid}` ([reference/03](../../reference/03-addressing.md) §the path grammar); [RFC-0005](0005-subtree-subscriptions.md) removed the need rather than deferring it.
+> 3. **The cost shape was ruled the other way.** Making the producer attach a concrete `PATH` to every delivery for a consumer's benefit is producer-pays; the 2026-08-19 ruling is **receiver-pays** ([RFC-0025](0025-stream-class-values.md) Amendment 2).
+>
+> What the opening requirement asked for is met without this RFC: provenance travels **in the data** ([CONTEXT.md](../../../CONTEXT.md) §SUBSCRIBER direction), local delivery has the concrete path out-of-band, and a remote operation's accumulated `src` **is** the full source route — [RFC-0004](0004-remote-operation-addressing.md) §B: *"exactly the provenance RFC-0003 wanted, now inherent."*
+>
+> **Reactivation:** superseded on the carrier and the cost shape, not rejected on the merits. A concrete bridged-wildcard interop need takes a **NEW RFC with a NEW carrier** — `0x0D` is held for a possible future flooding profile and is not it — at which point the three §Discussion sub-questions are re-posed against that carrier. The body below is retained unrewritten as the design of record.
 
 | Field | Value |
 | ---- | ---- |
 | **RFC** | 0003 |
 | **Title** | Concrete-path delivery for bridged wildcard subscriptions |
-| **Status** | **deferred** (2026-07-07 — sound direction; awaits a bridged-delivery consumer) |
+| **Status** | **superseded** (2026-08-24, [#303](https://github.com/avatarsd-llc/libtracer/issues/303)) — the `ROUTER` carrier was left MUST-NOT-emit by [ADR-0040](../../adr/0040-net-plane-is-explicit-source-routed-only.md), the wildcard trigger has no grammar, and the producer-pays shape was ruled the other way by receiver-pays. ~~**deferred** (2026-07-07 — sound direction; awaits a bridged-delivery consumer)~~ |
 | **Author(s)** | AvatarSD (maintainer) |
 | **Created** | 2026-06-25 |
-| **Comment window** | deferred — re-opens when bridged delivery is exercised (see banner above) |
+| **Comment window** | closed — this RFC is superseded; a returning need takes a new RFC with a new carrier (see banner above) |
 | **Tracking issue** | [#303](https://github.com/avatarsd-llc/libtracer/issues/303) |
 | **Target spec version** | v1 (draft refinement — no released v1 yet, so no v2 needed) |
 
@@ -26,7 +36,7 @@ A wildcard subscriber (e.g. `/sensor/*/temp`) receives TLVs from many concrete p
 
 [03-addressing.md](../../reference/03-addressing.md) §subscriber identity requires only that "a subscriber can determine which concrete path produced each delivered TLV," leaving the mechanism implementation-defined. That is acceptable in-node (subscriber and dispatcher share an address space, so the matched path is a callback argument). It is **not** acceptable across a bridge: the remote subscriber sees only the delivered data TLV, and nothing on the wire tells it whether the producer was `/sensor/A/temp` or `/sensor/B/temp`. Two independent implementations therefore cannot interoperate on bridged wildcard subscriptions — exactly the interop the reference suite exists to guarantee. The `ROUTER` TLV ([05-protocol-tlvs.md](../../reference/05-protocol-tlvs.md) §`0x0D`) already carries bridge metadata as NAME-tagged children and is the natural carrier.
 
-## Proposed change — **Deferred (design of record; not yet open for acceptance)**
+## Proposed change — **Superseded (design of record; never open for acceptance again in this form)**
 
 ### A. The delivery-path child
 When a node fans out a write to a subscriber whose subscription `PATH` contains a wildcard (`*`, `**`, or `[*]`) **and** the delivery crosses a bridge, the `ROUTER` envelope wrapping the data TLV MUST include the **matched concrete `PATH`** (`0x06`) as a metadata child, tagged `NAME "to"` immediately preceding it, placed among `ROUTER`'s metadata children **before** the terminating `NAME "data"` + wrapped data TLV:
