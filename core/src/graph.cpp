@@ -2310,8 +2310,16 @@ result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, std::string_view c
     // what it stored (a leaf VALUE, or each landed descendant of a branch POINT). This is
     // the FWD{WRITE}-terminus behavior: a TARGETED delivery of the written vertex(es), not
     // a subtree sweep. propagate(v) is the separate accumulate-then-flush primitive.
-    if (is_branch_point(value, v->role())) return write_branch(v, value, caller, /*notify=*/true);
-    if (v->role() == role_t::HANDLER) {
+    //
+    // ONE role load for the whole frame (#1477). The three forks below used to re-read
+    // `role()`; now that the member is atomic the compiler may not fold those reads, and —
+    // more to the point — three reads of a member a concurrent retire can store to could
+    // DISAGREE with each other, letting one write take the branch-POINT decision of the
+    // retiring occupant and the storage decision of the placeholder. A single snapshot makes
+    // the frame internally consistent whichever of the two it caught.
+    const role_t role = v->role();
+    if (is_branch_point(value, role)) return write_branch(v, value, caller, /*notify=*/true);
+    if (role == role_t::HANDLER) {
         // A handler stores no LKV (the user handler consumes the value), so there is no
         // published pointer to deliver from — the hot roles below deliver the exact
         // pointer store_value hands back. There is no CLONE either, and that is #1505:
@@ -2355,7 +2363,7 @@ result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, std::string_view c
     const result_t<std::shared_ptr<const rope_t>> stored =
         store_value(v, std::move(value), store_drops, caller);
     if (!stored) return std::unexpected(stored.error());
-    if (v->role() == role_t::STREAM) {
+    if (role == role_t::STREAM) {
         // Drain this RECEIVER's ring and advance its cursor, so a later propagate over the
         // same stream does not re-deliver what went out here (RFC-0008 §E). The entries are
         // the ones its own admission just queued — a queue, in order, not a coalesce.
@@ -2403,11 +2411,13 @@ result_t<void> graph_t::assign(vertex_handle_t vh, rope_t value, std::string_vie
     // status — the same answer `history` / `drain_unflushed` give a non-STREAM vertex —
     // and deliberately NOT `BACKPRESSURE`: nothing is under pressure and a retry will
     // never succeed. Use `write`, which dispatches the handler seam and delivers eagerly.
-    if (!role_retains(v->role())) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+    // One snapshot for both forks, for the reason `write_impl` states (#1477).
+    const role_t role = v->role();
+    if (!role_retains(role)) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
     // The STATE half only (RFC-0008 §A): swap the last-known-value / append the stream
     // ring / bump the write sequence (waking await), then mark v for the next covering
     // sweep. A branch POINT assigns each descendant the same way. Sends nothing.
-    if (is_branch_point(value, v->role())) return write_branch(v, value, caller, /*notify=*/false);
+    if (is_branch_point(value, role)) return write_branch(v, value, caller, /*notify=*/false);
     vertex_t::store_drops_t store_drops;
     const result_t<std::shared_ptr<const rope_t>> stored =
         store_value(v, std::move(value), store_drops, caller);
@@ -2777,6 +2787,33 @@ void graph_t::set_delivery_mode(vertex_handle_t vh, delivery_mode_t mode) {
     }
 }
 
+/**
+ * @brief Write a value into an already-resolved vertex (RFC-0008 §D).
+ *
+ * DOCTRINE — write-vs-retire (#1477, the ruling). `write(vertex_handle_t)` takes NO map lock,
+ * while `retire` mutates the vertex under the unique one. Serialising a write against a
+ * retire of the SAME vertex is therefore the CALLING PLANE's responsibility, not the graph's,
+ * and that is a decision rather than an omission:
+ *
+ * - A map lock here would sit on the delivery hot path, which ADR-0019/#1431 spent real work
+ *   making lock- and branch-free (delivery is byte- and instruction-identical per `link_id_t`
+ *   since then). Paying a graph-wide lock per write to fence a control-plane event is the
+ *   wrong trade at every point on the NARROW/MID/WIDE spectrum. RULED OUT.
+ * - A stateful debug assert ("the caller holds an appropriate guard") would need the graph to
+ *   model a guard it does not own, in a plane it cannot name. RULED OUT.
+ *
+ * What the graph DOES owe is that the race is well-defined rather than UB. Every member a
+ * lock-free reader touches on this path is atomic: the LKV slot, `edges_`, `ext_` and its
+ * value seam, the subscriber counters, `flags_`, `retire_gen_`, `delivery_mode_` (#895) and,
+ * since #1477, `role_`. A write that races a retire may see the retiring occupant's role or
+ * the placeholder default, and either answer is a legal outcome of an unordered pair of
+ * operations — the caller decides which it wanted by ordering them.
+ *
+ * The transport plane shows the shape a plane's own fence takes: `ctl_txn_t`'s `ops_m_`
+ * (#492 S6 / PR #1473) is held across BOTH phases of the decide-then-act seam, which is what
+ * makes its write-vs-retire window unreachable. Any future two-phase scheme un-masks the same
+ * window and owes itself the same fence.
+ */
 result_t<void> graph_t::write(vertex_handle_t v, rope_t value, std::string_view caller) {
     return write_impl(v.get(), std::move(value), caller);
 }

@@ -159,6 +159,22 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Fixed
 
+- **`vertex_t::role_` is atomic — the write path's role fork no longer races a concurrent
+  retire** ([#1477](https://github.com/avatarsd-llc/libtracer/issues/1477)). `graph_t::write`
+  takes no map lock and forks on `vertex_t::role()`, while `retire` stores the placeholder role
+  under the unique map lock. The member was a plain byte, so that pair was a **data race — UB,
+  not a benign stale read** — the last plain member of `vertex_t`'s four-byte flag group that a
+  lock-free reader touches, and the same defect [#895](https://github.com/avatarsd-llc/libtracer/issues/895)
+  had already moved `delivery_mode_` for. It is now `std::atomic<role_t>`, relaxed on both ends,
+  and `write_impl` / `assign` snapshot it **once per frame** instead of re-reading it at each
+  fork, so an overlapping write acts on one coherent role rather than a mix of two. No public
+  signature changes, `sizeof(vertex_t)` is unmoved (96 B x86-64 / 72 B rv32), and all seven
+  symbol-ratchet pins are byte-identical. **Ordering a write against a retire remains the calling
+  plane's responsibility** — the doctrine, and the two alternatives ruled out (a map lock on the
+  delivery hot path; a stateful caller-holds-a-guard assert), are stated at
+  `graph_t::write(vertex_handle_t)` and in
+  [`docs/design/concurrency/01-write-and-delivery-path.md`](../docs/design/concurrency/01-write-and-delivery-path.md)
+  §1.1.
 - **`tr::detail::thread_id_t` — the ownership stamp no longer calls `pthread_self()`, which
   ABORTED at boot on ESP-IDF** ([#1532](https://github.com/avatarsd-llc/libtracer/issues/1532)).
   **A released-version regression: v0.15.0 does not boot on an ESP-IDF node**, and this patch
