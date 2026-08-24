@@ -839,8 +839,43 @@ result_t<vertex_handle_t> graph_t::register_vertex_key_span(std::span<const std:
         i = e;
     }
     if (node->registered()) return std::unexpected(status_t::PATH_IN_USE);
+    // The RFC-0014 Amendment 2 declaration is taken OUT of the handlers here, before `fill`
+    // adopts the rest: the rows are the graph's (one immortal node per declaring
+    // registration), the vertex keeps only the flag bit that says they exist. We are under
+    // the unique map lock, which is exactly the hold `declare_payload_rights` requires.
+    declare_payload_rights(node, std::move(handlers.payload_rights));
     node->fill(role, std::move(handlers));
     return vertex_handle_t{node};
+}
+
+void graph_t::declare_payload_rights(vertex_t* v, std::vector<payload_right_t> rows) {
+    if (rows.empty()) return;  // the overwhelming majority: no node, no flag, no cost
+    // PREPEND, so a re-registration at the same address publishes rows the walk finds before
+    // any the previous occupant left behind (the list is never unlinked — see the member's
+    // doc for why that is what makes the gate's walk lock-free).
+    payload_right_store_.push_back(
+        std::make_unique<payload_right_node_t>(payload_right_node_t{v, std::move(rows), nullptr}));
+    payload_right_node_t* node = payload_right_store_.back().get();
+    node->next = payload_rights_.load(std::memory_order_relaxed);
+    payload_rights_.store(node, std::memory_order_release);
+    v->mark_payload_rights();
+}
+
+acl_right_t graph_t::declared_write_right(const vertex_t* v, wire::type_t type) const {
+    // Walks only for a vertex whose flag says it declared: the list holds one node per
+    // declaring registration (a creator endpoint per transport module — a handful), and a
+    // node is immortal, so no lock is needed to read one.
+    for (const payload_right_node_t* n = payload_rights_.load(std::memory_order_acquire);
+         n != nullptr; n = n->next) {
+        if (n->v != v) continue;
+        for (const payload_right_t& row : n->rows)
+            if (row.type == type) return row.right;
+        // The vertex's own (newest) table had no row for this type — an undeclared type
+        // takes `WRITE`, and an older table left by a previous occupant of this address must
+        // not answer for it.
+        return acl_right_t::WRITE;
+    }
+    return acl_right_t::WRITE;
 }
 
 void graph_t::retire_subtree(vertex_t* v, std::vector<std::vector<std::byte>>& keys) {
@@ -2200,33 +2235,16 @@ namespace {
 }
 
 /**
- * @brief The right the ONE write gate must demand for @p value on @p v (RFC-0014 Amendment 2).
+ * @brief The written value's LEADING TLV type, or nullopt when it has none.
  *
- * Plain `WRITE` unless the target is a `role_t::HANDLER` that DECLARED a payload-type →
- * required-ACL-right table, and the written value's leading TLV type has a row in it. The
- * role test comes first and is the whole of the cost argument: every other role — the store
- * hot path — answers `WRITE` off a register the frame already holds, without touching the
- * extension block. The declaration is read on the same lock-free acquire load as the seams,
- * from a block that is parked rather than freed on retirement.
- *
- * The selector is the TYPE BYTE alone. Nothing here parses the payload, and nothing user-owned
- * runs: a gate that had to consult content would be running the vertex's own code before
- * deciding whether the caller may reach it.
+ * A value with no links, or whose head is DEVICE memory (never dereferenced), has no type
+ * byte the gate may read — so it is not a declared payload and takes the default right.
  */
-[[nodiscard]] acl_right_t required_write_right(vertex_t* v, const rope_t& value) {
-    if (v->role() != role_t::HANDLER) return acl_right_t::WRITE;
-    const value_handlers_t& h = v->handlers();
-    if (h.payload_rights.empty()) return acl_right_t::WRITE;
-    // An empty rope, or one whose head is device memory, has no readable type byte — it is
-    // not a declared payload, so it takes the default right and the handler's own refusal
-    // (RFC-0014 §2 answers TYPE_MISMATCH for a payload that is neither SPEC nor NAME).
-    if (value.link_count() < 1 || !value.links()[0].is_host()) return acl_right_t::WRITE;
+[[nodiscard]] std::optional<type_t> leading_type(const rope_t& value) {
+    if (value.link_count() < 1 || !value.links()[0].is_host()) return std::nullopt;
     const std::span<const std::byte> head = value.links()[0].bytes();
-    if (head.empty()) return acl_right_t::WRITE;
-    const auto type = static_cast<type_t>(std::to_integer<std::uint8_t>(head[0]));
-    for (const payload_right_t& row : h.payload_rights)
-        if (row.type == type) return row.right;
-    return acl_right_t::WRITE;
+    if (head.empty()) return std::nullopt;
+    return static_cast<type_t>(std::to_integer<std::uint8_t>(head[0]));
 }
 }  // namespace
 
@@ -2240,13 +2258,22 @@ result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, std::string_view c
     // ::denied): `denied` means refusals, not refusals-nobody-heard-about, and a counter
     // whose value depended on WHICH door a refusal came through could not be summed.
     //
-    // WHICH right is demanded is the vertex's own declaration (RFC-0014 Amendment 2,
-    // `required_write_right`): a handler vertex may map a written TLV type to a right other
-    // than `WRITE` — the creator endpoint demands `CREATE` for a `SPEC` — and everything else
-    // demands `WRITE`, as it always has. The gate itself does not move, and neither does the
-    // counter: one declaration decides the right, one site makes the demand and counts the
-    // refusal.
-    if (!acl_allows(v, caller, required_write_right(v, value))) {
+    // WHICH right is demanded is the vertex's own declaration (RFC-0014 Amendment 2): a
+    // handler vertex may map a written TLV type to a right other than `WRITE` — the creator
+    // endpoint demands `CREATE` for a `SPEC` — and everything else demands `WRITE`, as it
+    // always has. The gate itself does not move, and neither does the counter: one
+    // declaration decides the right, one site makes the demand and counts the refusal.
+    //
+    // The cost of the feature to a vertex that declares nothing is the `has_payload_rights()`
+    // bit test below and NOTHING else — no byte on the vertex, no dereference, and no branch
+    // taken. The rows live on the graph (@ref graph_t::payload_rights_) precisely so that
+    // stays true.
+    acl_right_t right = acl_right_t::WRITE;
+    if (v->has_payload_rights()) {
+        if (const std::optional<type_t> t = leading_type(value))
+            right = declared_write_right(v, *t);
+    }
+    if (!acl_allows(v, caller, right)) {
         count_drop(drop_reason_t::DENIED, 1);
         return std::unexpected(status_t::PERMISSION_DENIED);
     }

@@ -371,8 +371,10 @@ endpoint, so a `SPEC` means create") inside the graph's narrowest, most-travelle
 alongside its handlers. Normatively:
 
 1. **Absent declaration ⇒ plain `WRITE`.** Today's behaviour, and today's cost: a vertex that
-   declares nothing is gated exactly as before. The declaration is consulted only on a handler-role
-   target, so no other role's write path grows an instruction.
+   declares nothing is gated exactly as before, and pays nothing — not a byte of storage and not a
+   taken branch — for a contract it does not use. (In the reference implementation the rows live on
+   the graph, and the vertex carries one bit saying they exist; that is an implementation choice the
+   clause does not mandate, but the *cost* it protects is the clause's point.)
 2. **The selector is the written TLV's TYPE, and only its type.** Never payload content. This is the
    load-bearing half: content-keyed selection would mean running the vertex's own parsing ahead of
    the ACL check, i.e. letting an unauthorized caller reach user code. A value with no readable

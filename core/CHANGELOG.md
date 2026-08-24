@@ -21,9 +21,12 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   [RFC-0014](../docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)
   §5.1 Amendment 2). The one value-write gate (`graph_t::write_impl`) hardcoded
   `acl_right_t::WRITE` for every vertex; it now asks the **vertex** which right a written TLV
-  type costs. Absent declaration — every vertex in every existing program — is plain `WRITE`, and
-  the table is consulted only on a `role_t::HANDLER` target, so no other role's write path grows
-  an instruction. The selector is the written value's **leading TLV type and nothing else**: a
+  type costs. Absent declaration — every vertex in every existing program — is plain `WRITE` at
+  **zero** cost: the rows are moved out of `handlers_t` at registration and kept on the graph in an
+  insert-only, immortal list, so no vertex grows a byte (`vertex_t`, `vertex_ext_t` and the
+  `value_handlers_t` seam block are all byte-identical, and the `reg_escape` memory probe measures
+  the same 312 B / 4 blocks as before), and the write gate stops at one relaxed flag-bit test on a
+  word it already holds. The selector is the written value's **leading TLV type and nothing else**: a
   content-keyed rule would run the vertex's own parsing ahead of the ACL check. An undeclared type
   falls back to `WRITE` (undeclared means `WRITE`, never ungated), the gate does not move, and a
   refusal still counts into the single-sited `delivery_drops_t::denied`.
