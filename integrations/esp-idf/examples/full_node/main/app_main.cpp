@@ -390,10 +390,13 @@ int run_host_probe(device_node_t& dev) {
         &reply_box);
 
     // Dial the device: a config-created udp client connection at /net/udp-client/dev.
+    // Since the RFC-0014 §4 S5 flip (#1548) the built-in DIAL kinds are engine-managed, so
+    // this write creates the connection DORMANT and the first op below auto-wakes it — the
+    // round trip is unchanged from the application's side, which is the point.
     const auto wa =
         graph.write(path_t("/net:children[]"),
                     conn_spec("client", "dev", conn_role_t::DIAL, kNodePort, "udp", "127.0.0.1"));
-    check(wa.has_value(), "SPEC{client, kind=udp, 127.0.0.1} constructs the dialing socket");
+    check(wa.has_value(), "SPEC{client, kind=udp, 127.0.0.1} creates the dialing connection");
 
     // 1) FWD{READ /dev/sensor/temp} — crosses the wire, resolves at the device
     //    terminus, and the REPLY source-routes back to our reply sink.

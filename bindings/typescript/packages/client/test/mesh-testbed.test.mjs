@@ -109,10 +109,13 @@ async function connectCtrl(name, budgetMs = 60000) {
 /**
  * @brief Remotely DIAL a link: write a client SPEC into `node`'s `/net:children[]`.
  *
- * Retries the WHOLE write: a built-in DIAL is synchronous with no retry, and a refused
- * dial returns before `register_vertex_key` — leaving NO vertex — so re-issuing the same
- * SPEC is the correct (and only) recovery. `linkName` is the FAR node's name, per the
- * naming rule.
+ * Retries the WHOLE write. Since the RFC-0014 §4 S5 flip (#1548) a built-in DIAL is
+ * engine-managed, so this write creates the connection DORMANT and the first frame routed
+ * through it auto-wakes the dial — the retry loop now covers a refused WRITE (an unready
+ * ctrl peer), not a refused connect. It is kept because before the flip a refused dial
+ * returned before `register_vertex_key`, leaving NO vertex, and re-issuing the same SPEC
+ * was the only recovery; a build that closes the engine out still behaves that way.
+ * `linkName` is the FAR node's name, per the naming rule.
  */
 async function dial(client, from, linkName, toNode, budgetMs = 30000) {
   const { host, port } = PEERS[toNode];
