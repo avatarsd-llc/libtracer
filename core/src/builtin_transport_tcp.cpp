@@ -22,8 +22,8 @@ namespace tr::net {
 
 void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_backend,
                             mem::block_source_t* egress_src) {
-    // Built-in `tcp`: DIAL = tcp_transport_t(addr, port) — a SYNCHRONOUS TCP connect at
-    // creation time (the peer's listener must be up, or the SPEC write fails TRANSPORT_DOWN);
+    // Built-in `tcp`: DIAL = tcp_transport_t(addr, port) — a SYNCHRONOUS TCP connect, run on
+    // the engine's first dial rather than at creation time (see the S5 note below);
     // LISTEN = transport_tcp_server(port), the multi-peer listener (the ws factory's
     // shape: a single-client deployment behaves exactly as the one-peer listener always
     // did). Length-prefix framing is internal to the transport. `keepalive` is ignored
@@ -52,8 +52,21 @@ void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
     // library registers NEITHER (ADR-0073 §4): the application declares each module under a
     // name IT chooses via register_module (kTcpClientSuggestedModule /
     // kTcpServerSuggestedModule in transport_tcp.hpp are the suggested defaults).
+    // RFC-0014 §4 S5 (#1548): `tcp` is a POINT-TO-POINT kind, so its DIAL connections are
+    // engine-managed — see `kBuiltinPointToPointTraits` for the whole reasoning, including
+    // why `self_heal_dial` is build-conditioned. The DIAL arm's synchronous connect
+    // described above therefore no longer happens at CREATION: creation mints the vertex
+    // DORMANT and this thunk runs on the engine's worker, once per dial attempt.
+    // RE-RUNNABILITY: the thunk captures two raw pointers that outlive the vertex, re-parses
+    // its kind-private keys from the raw config bytes the engine kept a copy of, and
+    // constructs a FRESH `tcp_transport_t` per run — no state survives a run. `defer_recv`
+    // stays true and stays correct: the engine wires the socket's sinks and then calls
+    // `start_receiving()` itself (`self_heal_link_t::wire_socket`), so the deferred-arm
+    // window this argument exists to close is closed by the engine exactly as
+    // `make_connection` closed it. The LISTEN arm never reaches the engine.
     vertex.register_transport_type(
-        "tcp", [rx_backend, egress_src](const conn_settings_t& s, const wire::tlv_t* raw_config) {
+        "tcp",
+        [rx_backend, egress_src](const conn_settings_t& s, const wire::tlv_t* raw_config) {
             const config_reader_t cfg(raw_config);
             const bool peer_named = cfg.flag("peer_named").value_or(false);
             // The bus-module refusal — the ws factory's twin; see its comment for why
@@ -86,7 +99,8 @@ void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
                 });
             // The ADR-0079 egress store, wired before the link is handed to the router (#873).
             return with_egress_source(std::move(link), egress_src);
-        });
+        },
+        kBuiltinPointToPointTraits);
 }
 
 }  // namespace tr::net

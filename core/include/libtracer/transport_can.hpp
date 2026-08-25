@@ -789,6 +789,17 @@ class transport_can : public transport_t, public bus_link_t {
  * come up (#929). The universal `role` is ignored — a bus has no dial/listen
  * asymmetry.
  *
+ * @note **Register it with the TRAITS-LESS overload — never `self_heal_dial`** (RFC-0014
+ *       §4 S5, #1548). The built-in point-to-point kinds `udp`/`tcp`/`ws` were flipped onto
+ *       the liveness engine; `can` and every other BUS kind deliberately stay on the eager
+ *       default, and not because nobody got to them. The engine constructs no socket at
+ *       creation, so the router's bus-facet wiring — `bus_of(*link)` at
+ *       `fwd_router_t::add_child`, the one moment the facet is looked for — would see the
+ *       engine (whose `bus()` is null by construction) instead of the CAN link, and the
+ *       connection's ADR-0044 peer listing and per-peer return routes would be dead for the
+ *       vertex's whole life. The dial/listen asymmetry the engine's state machine is built
+ *       on does not exist here either: there is nothing to re-dial on a bus.
+ *
  * @param reasm_mr Where every constructed transport's RX buffers draw their
  *                 structure — the injection point for the pmr seam the config TLV
  *                 cannot carry (a resource is a pointer, not a wire value). A host

@@ -40,7 +40,7 @@ differences are load-bearing:
 | Position | What it is | Role | Value |
 | --- | --- | --- | --- |
 | `/net` | The net root — the `:children[]` creation target the constructor registers. Conventionally `/net`; the name is the constructor's default, overridable per node, never a library rule. | `role_t::STORED_VALUE` | none (a structural position) |
-| `/net/<module>` | One **module** — a *(transport kind, role)* pair, declared by the application (`register_module`, `core/include/libtracer/transport_vertex.hpp:462`). Minted eagerly when the module is declared (`core/src/transport_vertex.cpp:362`) and lazily on first creation (`:710`). | `role_t::STORED_VALUE` | none (a structural position) |
+| `/net/<module>` | One **module** — a *(transport kind, role)* pair, declared by the application (`register_module`, `core/include/libtracer/transport_vertex.hpp:473`). Minted eagerly when the module is declared (`core/src/transport_vertex.cpp:362`) and lazily on first creation (`:710`). | `role_t::STORED_VALUE` | none (a structural position) |
 | `/net/<module>/conn` | The module's **creator endpoint**. A write is *executed*, never assigned: the payload's TLV type selects create (`SPEC`) from remove (`NAME`) — `core/src/transport_vertex.cpp:421`. | `role_t::HANDLER` | none — write-only and valueless |
 | `/net/<module>/<name>` | The **connection vertex**: one link's identity, its config, and (when config-constructed) the socket it owns. | `role_t::STORED_VALUE` | the 1-byte link-liveness state |
 
@@ -136,7 +136,7 @@ flowchart TD
 ### Uniform introspection
 
 **The connection vertex's value is its liveness state** — a 1-byte `link_state_t`
-(`core/include/libtracer/transport_vertex.hpp:105-112`) emitted as an ordinary `VALUE` TLV
+(`core/include/libtracer/transport_vertex.hpp:107-114`) emitted as an ordinary `VALUE` TLV
 (`core/src/transport_vertex.cpp:92`). Because it is a vertex value and not a side-channel
 callback, all three primitives already work on it: `read` it, `await` it, or **subscribe** to
 `/net/<module>/<name>` and receive every transition without polling (assign-then-deliver,
@@ -178,9 +178,12 @@ transitions RFC-0014 §4 describes are implemented by the S5 engine
 registered with `transport_kind_traits_t::self_heal_dial` gets DORMANT creation (no
 socket), demand dial bounded by `connect_timeout`, self-heal with `backoff` while a
 standing binding (`acquire_link`/`release_link`) holds the link, and close-to-dormant on
-the last release. The BUILT-IN kinds are not yet opted in, so their value is still written
-by whoever knows: an eagerly-constructed socket publishes `UP` or `LISTENING` at creation
-(`core/src/transport_vertex.cpp:902`, `:905`), and a provided link reports through
+the last release. The BUILT-IN point-to-point kinds `udp`, `tcp` and `ws` are opted in
+([#1548](https://github.com/avatarsd-llc/libtracer/issues/1548)) — their DIAL connections are
+engine-managed out of the box, so creation no longer fails when the peer is down. Everywhere
+else the value is still written by whoever knows: an eagerly-constructed socket (every LISTEN
+link, every bus kind, a `kSelfHealLinks = false` build) publishes `UP` or `LISTENING` at
+creation (`core/src/transport_vertex.cpp:902`, `:905`), and a provided link reports through
 `set_link_state`.
 
 ### 3. Structural vertices nobody declared
@@ -272,7 +275,7 @@ does not yet reach.
 **Standing requirement.** `tr::net::conn_settings_t` carries only the keys **every** transport
 kind means the same thing by. A kind's private configuration never lands there — the kind's
 own factory parses it from the raw config `SETTINGS` TLV it receives alongside the parsed
-universal settings (`core/include/libtracer/transport_vertex.hpp:129`, ADR-0043 §3, §5).
+universal settings (`core/include/libtracer/transport_vertex.hpp:131`, ADR-0043 §3, §5).
 
 The mechanism is the factory signature: a factory is
 `(const conn_settings_t&, const wire::tlv_t* raw_config) -> result_t<unique_ptr<transport_t>>`,
@@ -297,7 +300,7 @@ and none of them can see another's vocabulary
 - **A shared key that only one kind reads is a dead key.** The failure mode is already
   visible *inside* the universal set: `keepalive_ms` is parsed and no consumer anywhere in
   the tree reads it (`backoff_ms` / `connect_timeout_ms` escaped that condition when the
-  S5 liveness engine landed — `core/include/libtracer/transport_vertex.hpp:157`, `:161`;
+  S5 liveness engine landed — `core/include/libtracer/transport_vertex.hpp:159`, `:163`;
   [13](13-network-formation.md)). One record carrying N kinds' private vocabulary would be
   that condition by construction rather than by accident — and a mistyped or misplaced key is
   silently ignored, so nothing would report it.
@@ -347,16 +350,18 @@ the structural-vertex predicate; the lean factory signature and the runtime kind
 hiding `conn` from `/net/<module>:children[]` (S4 — the endpoint is not a member connection,
 but stays addressable so the §6 creatability probe still reaches it); and the S5 liveness
 engine (`self_heal_link_t`) for kinds registered `self_heal_dial`, with the
-standing-binding refcount seam (`acquire_link`/`release_link`).
+standing-binding refcount seam (`acquire_link`/`release_link`) — and the built-in
+point-to-point kinds' opt-in to it
+([#1548](https://github.com/avatarsd-llc/libtracer/issues/1548)): `udp`, `tcp` and `ws` DIAL
+connections are engine-managed out of the box, LISTEN links and bus kinds unchanged.
 
-**Not implemented.** The built-in kinds' opt-in to the S5 engine (they still construct
-eagerly and report through the creating call and `set_link_state`), and the routing-plane
+**Not implemented.** The routing-plane
 wiring that makes subscriptions/awaits drive the refcount seam automatically (S6);
 `:schema`-as-catalog on the endpoint
 (S3); the `CREATE`/`WRITE` gating split
 (S2c). RFC-0014's byte-level clauses — the liveness encoding among them — become normative on
 its conformance-vector merge; until then the values in
-`core/include/libtracer/transport_vertex.hpp:105-112` are the reference encoding.
+`core/include/libtracer/transport_vertex.hpp:107-114` are the reference encoding.
 ```
 
 ## Pitfalls

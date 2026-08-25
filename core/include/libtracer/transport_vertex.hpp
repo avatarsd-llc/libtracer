@@ -98,9 +98,11 @@ enum class conn_role_t : std::uint8_t { DIAL = 0, LISTEN = 1 };
  * listen-socket reachability as `LISTENING`/`BIND_FAILED` (never per-accepted-peer). The
  * DIAL transitions are driven by the RFC-0014 S5 liveness engine
  * (@ref tr::net::self_heal_link_t, #492) for kinds registered with
- * `transport_kind_traits_t::self_heal_dial`; everywhere else the value is still set
- * manually (eagerly-constructed sockets report `UP`/`LISTENING` at creation; provided
- * links report via @ref transport_vertex_t::set_link_state).
+ * `transport_kind_traits_t::self_heal_dial` — which since #1548 is every built-in
+ * point-to-point kind (`udp`, `tcp`, `ws`), so a stock DIAL connection is engine-managed.
+ * Everywhere else the value is still set manually (eagerly-constructed sockets — every
+ * LISTEN link, every bus kind — report `UP`/`LISTENING` at creation; provided links report
+ * via @ref transport_vertex_t::set_link_state).
  */
 enum class link_state_t : std::uint8_t {
     DORMANT = 0,      /**< @brief DIAL: vertex exists; no socket (refcount 0). */
@@ -193,7 +195,10 @@ inline constexpr std::string_view kConnEndpointName = "conn";
  *        ruling protects that record; this struct is the catalog's row, not the SPEC's).
  *
  * The defaults preserve every existing registration: a kind registered through the
- * traits-less overload keeps today's eager-construction behaviour exactly.
+ * traits-less overload keeps today's eager-construction behaviour exactly. The built-in
+ * point-to-point kinds do NOT take the defaults since #1548 — see
+ * `%kBuiltinPointToPointTraits` in `%builtin_transports.hpp` for the row they share and why
+ * `self_heal_dial` there is conditioned on the `kSelfHealLinks` build knob.
  */
 struct transport_kind_traits_t {
     /**
@@ -204,9 +209,10 @@ struct transport_kind_traits_t {
      * the engine dials on demand (any op auto-wakes it, bounded by `connect_timeout`),
      * self-heals with `backoff` while a standing binding holds it, and closes the socket
      * back to dormant on the last release. The kind's factory is then run once per dial
-     * attempt — it must be re-runnable (every built-in socket factory is). LISTEN
-     * connections of the same kind are untouched (RFC-0014 §4: a LISTEN link ignores
-     * refcount; it binds eagerly at creation as before).
+     * attempt — it must be re-runnable (every built-in socket factory is, and each states
+     * why in its own registration comment). LISTEN connections of the same kind are
+     * untouched (RFC-0014 §4: a LISTEN link ignores refcount; it binds eagerly at creation
+     * as before).
      *
      * Only for POINT-TO-POINT, connection-oriented kinds: a bus kind (CAN) must keep the
      * default — the engine has no socket at creation, so the router's bus-facet wiring
@@ -298,9 +304,14 @@ class transport_vertex_t {
      * Also registers the built-in transport factories: `udp` (DIAL: bind an ephemeral
      * port, peer = `addr:port`; LISTEN: bind `port`, peer learned from inbound
      * datagrams) and `ws` (DIAL: `transport_ws_client(addr, port)` — a synchronous
-     * connect + RFC 6455 handshake at creation time; LISTEN: `transport_ws_server(port)`
+     * connect + RFC 6455 handshake, run by the liveness engine on its first DIAL rather
+     * than at creation; LISTEN: `transport_ws_server(port)`
      * — accepts MANY concurrent inbound peers (#362), with the ws-private `peer_named` /
      * `max_peers` config keys selecting the ADR-0044 bus facet and the admission cap).
+     *
+     * All three built-ins are registered with `%kBuiltinPointToPointTraits` (#1548), so
+     * their DIAL connections are ENGINE-MANAGED: creation constructs no socket, mints the
+     * vertex `DORMANT`, and dials on first use. Their LISTEN halves bind eagerly as before.
      * @param net_root   The parent path for connection vertices (default "/net").
      * @param rx_backend The RX memory seam config-constructed view-delivering
      *                   transports draw their inbound frame segments from

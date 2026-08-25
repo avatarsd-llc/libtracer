@@ -109,10 +109,13 @@ async function connectCtrl(name, budgetMs = 60000) {
 /**
  * @brief Remotely DIAL a link: write a client SPEC into `node`'s `/net:children[]`.
  *
- * Retries the WHOLE write: a built-in DIAL is synchronous with no retry, and a refused
- * dial returns before `register_vertex_key` — leaving NO vertex — so re-issuing the same
- * SPEC is the correct (and only) recovery. `linkName` is the FAR node's name, per the
- * naming rule.
+ * Retries the WHOLE write. Since the RFC-0014 §4 S5 flip (#1548) a built-in DIAL is
+ * engine-managed, so this write creates the connection DORMANT and the first frame routed
+ * through it auto-wakes the dial — the retry loop now covers a refused WRITE (an unready
+ * ctrl peer), not a refused connect. It is kept because before the flip a refused dial
+ * returned before `register_vertex_key`, leaving NO vertex, and re-issuing the same SPEC
+ * was the only recovery; a build that closes the engine out still behaves that way.
+ * `linkName` is the FAR node's name, per the naming rule.
  */
 async function dial(client, from, linkName, toNode, budgetMs = 30000) {
   const { host, port } = PEERS[toNode];
@@ -321,6 +324,15 @@ test('mesh testbed: form a cyclic multi-node mesh in band, then route across it'
   await t.test('ADR-0044 Brick C: the bus lists its live peers from real traffic', async () => {
     // /net/mesh is a peer_named ws listener CREATED IN BAND (its peer_named key is
     // ws-private config, parsed by the ws factory — ADR-0043 §5). Both a and b dialled it.
+    //
+    // Since the RFC-0014 §4 S5 flip (#1548) a built-in DIAL is engine-managed: the SPEC
+    // creates the connection DORMANT and the socket is constructed on first use. So the two
+    // dials alone put NOTHING on the bus's wire, and the listing this case is about would
+    // legitimately be empty. One op through each link is what makes the peers real — which is
+    // what "from real traffic" always meant; before the flip a connect happened to supply it.
+    assert.equal(await nameVia(cli.a, via('bus')), 'bus');
+    assert.equal(await nameVia(cli.b, via('bus')), 'bus');
+
     const listing = await cli.bus.readField(['net', 'ws-server', 'mesh'], ':children[]');
     const peers = listingNames(listing);
     assert.equal(peers.length, 2, `the bus hears exactly its 2 dialers (got ${JSON.stringify(peers)})`);

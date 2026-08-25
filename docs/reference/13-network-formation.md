@@ -167,8 +167,10 @@ overridable per node), never a library rule — with names like `ws-client`, `ws
   today.** `keepalive` has no consumer anywhere in the tree — it is parsed and nothing
   reads it. `backoff` / `connect_timeout` feed the §4 liveness engine
   ([#492](https://github.com/avatarsd-llc/libtracer/issues/492) S5, `self_heal_link_t`)
-  on a kind registered `self_heal_dial`; on a kind not opted in (today: the built-ins)
-  they are parsed with no consumer. The per-key record,
+  on a kind registered `self_heal_dial` — since
+  [#1548](https://github.com/avatarsd-llc/libtracer/issues/1548) every built-in
+  point-to-point DIAL kind (`udp`, `tcp`, `ws`). On a kind not opted in (a bus kind such as
+  `can`, or a provided link) they are parsed with no consumer. The per-key record,
   including which kinds honour `max_frame`, is the
   [connection-config module page](../modules/connection-config.md).
 - **`SPEC` naming an existing name is `PATH_IN_USE`** — a re-`SPEC` is never a
@@ -196,8 +198,12 @@ both directions, and the endpoint is **hidden** from `/net/<module>:children[]` 
 listing returns the module's member connections only, while the endpoint itself stays
 addressable for the §6 creatability probe. The liveness engine (S5) is implemented too
 (`tr::net::self_heal_link_t`) for kinds registered with
-`transport_kind_traits_t::self_heal_dial`; the built-in kinds are not yet opted in, so a
-built-in DIAL connection still constructs eagerly and reports `UP` at creation. What is
+`transport_kind_traits_t::self_heal_dial`, and since
+[#1548](https://github.com/avatarsd-llc/libtracer/issues/1548) the built-in point-to-point
+kinds (`udp`, `tcp`, `ws`) are opted in: a built-in DIAL connection is minted `DORMANT` with
+no socket and dials on first use, so creation no longer fails when the peer is down. LISTEN
+connections still bind eagerly and report `LISTENING` at creation, and bus kinds (`can`) stay
+eager by design. What is
 **not** implemented is the rest: per-module `:schema`-as-catalog (S3) and the
 `CREATE`/`WRITE` gating split (S2c). The addressing half was already there — a created connection mounts and routes at
 `/net/<module>/<name>`, with the module name declared by the application (never
@@ -340,7 +346,7 @@ write-only, non-propagating creator endpoint.
 `dormant` takes `0` so a resting link is the falsy default. **The byte encoding becomes
 normative on the merge of RFC-0014's conformance vectors** — the RFC defers it, so these
 values are the reference encoding until then (`link_state_t`,
-`core/include/libtracer/transport_vertex.hpp:105-112`). A `LISTEN` vertex's liveness
+`core/include/libtracer/transport_vertex.hpp:107-114`). A `LISTEN` vertex's liveness
 reports **listen-socket reachability**, not per-accepted-peer connectivity; accepted-peer
 count and identity are exposed through the connection vertex's **synthesized
 `:children[]`**, built per read from the transport's own live-peer table
@@ -457,7 +463,7 @@ automatic**:
   and `port` are **creation-time config** (§Creation): they travel in the `SPEC`'s
   `config` and are parsed into the transport-private `tr::net::conn_settings_t`, whose
   only accessor hands out a **const** view
-  (`transport_vertex_t::settings_of`, `core/include/libtracer/transport_vertex.hpp:597`).
+  (`transport_vertex_t::settings_of`, `core/include/libtracer/transport_vertex.hpp:608`).
   The vertex `:settings` core namespace holds nothing to write — RFC-0022 §3.B deleted
   `settings_t`, so every flat knob name under it answers `SCHEMA_NOT_FOUND`
   caller-independently (`core/src/graph.cpp:3615`), leaving only the read container and

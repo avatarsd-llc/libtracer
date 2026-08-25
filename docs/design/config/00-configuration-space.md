@@ -32,7 +32,7 @@ rather than a silent behavioural fork between translation units.
 
 The sizes and policies are members of **one named type**, `default_config_t`
 (`core/include/libtracer/config.hpp:84`), bound once by `using config_t = default_config_t;`
-(`:590`). An application declares its own by inheriting and overriding what differs (`:68-78`):
+(`:601`). An application declares its own by inheriting and overriding what differs (`:68-78`):
 
 ```cpp
 struct my_node_config_t : tr::graph::default_config_t {
@@ -43,7 +43,7 @@ using config_t = my_node_config_t;
 
 Inheriting means a knob added later does not break the preset — it inherits the new default
 rather than failing to compile. The rest of the library names the derived spellings re-exported
-below the traits type (`:635-658`), each of which is exactly its traits member, so introducing
+below the traits type (`:646-669`), each of which is exactly its traits member, so introducing
 `config_t` moved no call site.
 
 It is **bound once, not threaded as a template parameter**, and
@@ -227,11 +227,11 @@ is a knob the fragment does not state at all (#1244).
 | `kPinPayloadRatio` (`:262`) | ratio | 0 — the `kPinNever` sentinel | the preset |
 | `acl_policy_t` (`:271`) | policy type | `allow_only_policy_t` | inherited — the full policy is not selectable |
 | `lkv_slot_t` (`:287`) | policy type | `sp_atomic_slot_t` | inherited — the hazard slot is not selectable |
-| `kSpinWaitSafe` (`:642`) | target fact | `true` | derived from `IDF_TARGET` — `false` on every chip, `true` on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:329`) |
+| `kSpinWaitSafe` (`:653`) | target fact | `true` | derived from `IDF_TARGET` — `false` on every chip, `true` on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:329`) |
 | `kWeaklyOrdered` (`:446`) | target fact | `true` | inherited — every ESP chip is weakly ordered, which is the default |
-| `kBusLinks` (`:599`) | module presence | `true` | inherited — the component builds the full peer-named tier |
-| `kSelfHealLinks` (`:530`) | module presence | `true` | menuconfig `CONFIG_LIBTRACER_SELF_HEAL_LINKS` (`integrations/esp-idf/libtracer/CMakeLists.txt:340`) |
-| `kSelfHealWorkerStackBytes` (`:557`) | size | `0` — the platform default | menuconfig `CONFIG_LIBTRACER_SELF_HEAL_WORKER_STACK` (`integrations/esp-idf/libtracer/CMakeLists.txt:346`) |
+| `kBusLinks` (`:610`) | module presence | `true` | inherited — the component builds the full peer-named tier |
+| `kSelfHealLinks` (`:541`) | module presence | `true` | menuconfig `CONFIG_LIBTRACER_SELF_HEAL_LINKS` (`integrations/esp-idf/libtracer/CMakeLists.txt:340`) |
+| `kSelfHealWorkerStackBytes` (`:568`) | size | `0` — the platform default | menuconfig `CONFIG_LIBTRACER_SELF_HEAL_WORKER_STACK` (`integrations/esp-idf/libtracer/CMakeLists.txt:346`) |
 
 Two CMake variables survive for one transition release, `-DLIBTRACER_ACL_FULL` and
 `-DLIBTRACER_LKV_SLOT`; `core/CMakeLists.txt` writes a fragment on their behalf. The five other

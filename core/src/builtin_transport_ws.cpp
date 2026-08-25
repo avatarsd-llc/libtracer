@@ -23,8 +23,8 @@ namespace tr::net {
 void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_backend,
                            mem::block_source_t* egress_src) {
     // Built-in `ws`: DIAL = transport_ws_client(addr, port) — a SYNCHRONOUS TCP connect +
-    // RFC 6455 opening handshake at creation time (the peer's server must be up, or the
-    // SPEC write fails TRANSPORT_DOWN); LISTEN = transport_ws_server(port), serving MANY
+    // RFC 6455 opening handshake, run on the engine's first dial rather than at creation
+    // (see the S5 note below); LISTEN = transport_ws_server(port), serving MANY
     // concurrent inbound peers (#362). `keepalive` is ignored by both (PING/PONG is
     // handled at the ws protocol layer).
     //
@@ -72,51 +72,71 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_ba
     // library registers NEITHER (ADR-0073 §4): the application declares each module under a
     // name IT chooses via register_module (kWsClientSuggestedModule / kWsServerSuggestedModule
     // in transport_ws.hpp are the suggested defaults).
-    vertex.register_transport_type("ws", [rx_backend, egress_src](const conn_settings_t& s,
-                                                                  const wire::tlv_t* raw_config) {
-        const config_reader_t cfg(raw_config);
-        const bool peer_named = cfg.flag("peer_named").value_or(false);
-        // The bus-module refusal (#375 deliverable 3). TYPE_MISMATCH, the status this
-        // factory family already answers an unhonourable `:settings` with — a PERMANENT
-        // "this node cannot serve that configuration", not the TRANSIENT TRANSPORT_DOWN a
-        // failed bind gets, because no retry will make this build grow a bus facet.
-        if constexpr (!kBusLinks)
-            if (peer_named)
-                return graph::result_t<std::unique_ptr<transport_t>>(
-                    std::unexpected(graph::status_t::TYPE_MISMATCH));
-        const auto max_peers = static_cast<std::size_t>(cfg.u32("max_peers").value_or(0));
-        const std::uint32_t liveness_window = cfg.u32("liveness_window").value_or(0);
-        const auto max_handshake = static_cast<std::size_t>(cfg.u32("max_handshake").value_or(0));
-        auto link = dial_or_listen(
-            s,
-            [&] {
-                // DEFERRED recv thread (#1025): the connection is dialled and handshaken here,
-                // but `transport_vertex_t::make_connection` only wires the receiver a few
-                // steps later (register the vertex, then `fwd_router_t::add_child`). A server
-                // that pushes its state the instant our connect completes has that message in
-                // flight through that whole window, and a recv thread running inside it would
-                // decode it into an empty sink and drop it with no counter moving. The vertex
-                // calls `start_receiving()` once the link is fully wired.
-                //
-                // The egress store goes in HERE, not through `with_egress_source` below:
-                // the client's masked-frame buffer is a `block_array_t` member that binds
-                // its source at construction (#873), so a setter applied afterwards would
-                // leave that one buffer on the process heap. `with_egress_source` still
-                // runs — it is what wires the LISTEN arm and the base gather — and this
-                // argument is what makes the DIAL arm's own buffer agree with it.
-                return make_checked<transport_ws_client>(s.addr, s.port, rx_backend, s.max_frame,
-                                                         /*recv_stack=*/std::size_t{0},
-                                                         /*defer_recv=*/true, liveness_window,
-                                                         egress_src, max_handshake);
-            },
-            [&] {
-                return make_checked<transport_ws_server>(s.port, rx_backend, s.max_frame, max_peers,
-                                                         peer_named, /*recv_stack=*/std::size_t{0},
-                                                         liveness_window, max_handshake);
-            });
-        // The ADR-0079 egress store, wired before the link is handed to the router (#873).
-        return with_egress_source(std::move(link), egress_src);
-    });
+    // RFC-0014 §4 S5 (#1548): `ws` is a POINT-TO-POINT kind, so its DIAL connections are
+    // engine-managed — see `kBuiltinPointToPointTraits` for the whole reasoning, including
+    // why `self_heal_dial` is build-conditioned. The synchronous connect + RFC 6455 opening
+    // handshake described above therefore no longer happens at CREATION: creation mints the
+    // vertex DORMANT and this thunk runs on the engine's worker, once per dial attempt —
+    // which is also what makes a ws client survive a server restart without the connection
+    // vertex being torn down and re-created.
+    // RE-RUNNABILITY: the thunk captures two raw pointers that outlive the vertex, re-parses
+    // its kind-private keys from the raw config bytes the engine kept a copy of, and
+    // constructs a FRESH `transport_ws_client` per run — including a fresh masked-frame
+    // buffer bound to `egress_src` at construction, so every healed socket is as bounded as
+    // the first. `defer_recv` stays correct for the same reason it does on `tcp`: the engine
+    // calls `start_receiving()` once it has wired the socket's sinks.
+    // The LISTEN arm never reaches the engine (a LISTEN link binds eagerly, RFC-0014 §4),
+    // which is also why the `peer_named` bus facet is unaffected by this flip — it exists
+    // only on the listener.
+    vertex.register_transport_type(
+        "ws",
+        [rx_backend, egress_src](const conn_settings_t& s, const wire::tlv_t* raw_config) {
+            const config_reader_t cfg(raw_config);
+            const bool peer_named = cfg.flag("peer_named").value_or(false);
+            // The bus-module refusal (#375 deliverable 3). TYPE_MISMATCH, the status this
+            // factory family already answers an unhonourable `:settings` with — a PERMANENT
+            // "this node cannot serve that configuration", not the TRANSIENT TRANSPORT_DOWN a
+            // failed bind gets, because no retry will make this build grow a bus facet.
+            if constexpr (!kBusLinks)
+                if (peer_named)
+                    return graph::result_t<std::unique_ptr<transport_t>>(
+                        std::unexpected(graph::status_t::TYPE_MISMATCH));
+            const auto max_peers = static_cast<std::size_t>(cfg.u32("max_peers").value_or(0));
+            const std::uint32_t liveness_window = cfg.u32("liveness_window").value_or(0);
+            const auto max_handshake =
+                static_cast<std::size_t>(cfg.u32("max_handshake").value_or(0));
+            auto link = dial_or_listen(
+                s,
+                [&] {
+                    // DEFERRED recv thread (#1025): the connection is dialled and handshaken here,
+                    // but `transport_vertex_t::make_connection` only wires the receiver a few
+                    // steps later (register the vertex, then `fwd_router_t::add_child`). A server
+                    // that pushes its state the instant our connect completes has that message in
+                    // flight through that whole window, and a recv thread running inside it would
+                    // decode it into an empty sink and drop it with no counter moving. The vertex
+                    // calls `start_receiving()` once the link is fully wired.
+                    //
+                    // The egress store goes in HERE, not through `with_egress_source` below:
+                    // the client's masked-frame buffer is a `block_array_t` member that binds
+                    // its source at construction (#873), so a setter applied afterwards would
+                    // leave that one buffer on the process heap. `with_egress_source` still
+                    // runs — it is what wires the LISTEN arm and the base gather — and this
+                    // argument is what makes the DIAL arm's own buffer agree with it.
+                    return make_checked<transport_ws_client>(
+                        s.addr, s.port, rx_backend, s.max_frame,
+                        /*recv_stack=*/std::size_t{0},
+                        /*defer_recv=*/true, liveness_window, egress_src, max_handshake);
+                },
+                [&] {
+                    return make_checked<transport_ws_server>(
+                        s.port, rx_backend, s.max_frame, max_peers, peer_named,
+                        /*recv_stack=*/std::size_t{0}, liveness_window, max_handshake);
+                });
+            // The ADR-0079 egress store, wired before the link is handed to the router
+            // (#873).
+            return with_egress_source(std::move(link), egress_src);
+        },
+        kBuiltinPointToPointTraits);
 }
 
 }  // namespace tr::net

@@ -166,8 +166,8 @@ the architecture working as intended; it does not belong in a register of gaps.
 ### 2. Teardown and link lifecycle — #407 / #66 (narrowed)
 
 - ~~**No reconnect anywhere.**~~ **Landed.** RFC-0014 §4 gave `transport_vertex.hpp` a
-  six-state `link_state_t` (`transport_vertex.hpp:105`) including `RECONNECTING`, plus
-  `backoff_ms` (`transport_vertex.hpp:157`) and `connect_timeout_ms` (`transport_vertex.hpp:161`).
+  six-state `link_state_t` (`transport_vertex.hpp:107`) including `RECONNECTING`, plus
+  `backoff_ms` (`transport_vertex.hpp:159`) and `connect_timeout_ms` (`transport_vertex.hpp:163`).
 - **No child removal**, so a link cannot be recreated under the same name after a failure
   (`PATH_IN_USE`). Recovery needs a **new name** — a hard blocker for stable-identity
   reconnection, and the sharpest argument for #407.
