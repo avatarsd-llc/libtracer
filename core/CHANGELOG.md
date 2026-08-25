@@ -16,6 +16,59 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`tr::net::fwd_router_t::adopt_path_label`, `label_dispatch` (+ `label_dispatch_t`) and
+  `fall_back_on_label_refusal` — the RFC-0027 ORIGIN, which closes the one seam the RFC left
+  unwired three times** ([#1551](https://github.com/avatarsd-llc/libtracer/issues/1551),
+  [RFC-0027](../docs/spec/rfcs/0027-label-switched-path-compression.md) §6.1 amendment 8).
+  Erratum 2 ended on it (*"what is still open, and is NOT ruled here"*), erratum 4 repeated it
+  verbatim, and this file recorded it beside the car-4 forwarder work as *"not wired"*. Until now
+  every label this codebase minted was written to a reply and then thrown away, and §7.2's deref
+  was exercised only by tests that hand-built the labelled request.
+
+  - **`adopt_path_label(path, link_name, reply)`** — the analogue of `adopt_binding`. It reads
+    the decoded `FWD{REPLY}`'s `src` (erratum 4: the only region any hop ever labels), prepends
+    the origin's own first-hop local part — the one hop no peer ever sees (§4.1) — and hands the
+    body to `path_t::cache_path_label`, whose existing refusals are the whole validation.
+  - **The handed spelling is cached VERBATIM, and the origin stands up NO mint table** (ruled
+    2026-08-24). Its own part goes on as **literal segments**: amendment 7 keeps the label table
+    opt-in and off by default because the per-hop saving is a **WIDE**-node claim (+2.3 ns/hop at
+    width 1, +64.0 ns/hop at width 64) and an origin is very often the narrowest node on the
+    route, while a mint is never load-bearing (§6.3). There is **no normalization and no
+    completion pass**: a mixed spelling — labels where hops minted, strings where they did not —
+    is the expected steady state (§5.2, `path-label/label-mixed`), not a degraded one.
+  - **`label_dispatch(path)`** — the spend. The origin consumes its own literal head through the
+    ordinary strip-K mount descent (ADR-0061, the same one a canonical `dst` takes) and puts the
+    labelled residual on the wire as the next request's `dst`. No ACL right is taken and the
+    asymmetry with `bound_dispatch` is deliberate: a binding's element 0 is a peer-visible
+    reference that must be dereferenced and re-checked (§6.2), whereas this head is a NAME this
+    node resolves locally. Every hop that reads a label re-checks the ACL at the vertex it
+    dereferences (§8.2). A bus mount is refused — bus children are never labelled.
+  - **`fall_back_on_label_refusal(path, reply)`** — §7.2, and nothing more: on
+    `tr::path::not_found`, drop the cached spelling. The canonical bytes were never discarded, so
+    the next operation goes out in strings and the reply after it re-mints. **No withdraw frame,
+    no unbind, no lease, no TTL, no repair, no retry against a different slot** (§7.3). The
+    identity is read narrowly, at `STATUS > ERROR > VALUE`: a denial or a malformed address says
+    nothing about the spelling, and clearing on one would re-mint a label that was never the
+    problem.
+  - **Raw graph slot indices are NOT the label**, and it is written down because it will be
+    proposed again: the 16/16 field cannot hold an unbounded deque position (a truncating cast
+    there is a silent mis-delivery), it would freeze `graph_t`'s storage layout into protocol ABI,
+    a dense global index space is an enumerable existence oracle that voids §8.3's per-peer
+    ceiling, and a label's generation tracks spelling departure while `vertex_t::retire_gen_`
+    tracks vertex retirement (ADR-0062) — different events, different meanings.
+  - **`core/tests/path_label_origin_test.cpp`** closes the round trip against the production
+    `fwd_router_t` on both ends, and `fwd/fwd-label-stale` — *"the bytes an origin sends after
+    caching the spelling `fwd/fwd-label-mint-reply` came back with"* — is now **emitted by the
+    origin** and pinned byte-exact instead of hand-built by a test.
+  - **The symbol ratchet is unmoved (+0 B on every pin)**, and one line of the implementation is
+    shaped by that: the residual `PATH` is emitted as `emit_header` + insert rather than
+    `emit_tlv`, because one more inlinable `emit_tlv` call in this TU re-partitions GCC's inline
+    budget and pushes `route_fwd_forward<rope_cursor>` back from 2620 B to the 2939 B shape the
+    ratchet re-pinned away from — on a hop that executes none of this code. The emitted bytes are
+    identical (`emit_tlv`'s only extra act is widening the length past 0xFFFF, and a labelled body
+    is bounded by `kMaxPathBytes` long before that). Measured, not asserted: the same source with
+    `emit_tlv` reads +319 B on that symbol.
+
 - **`tr::graph::default_config_t::kSelfHealLinks` and `kSelfHealWorkerStackBytes` — the
   RFC-0014 S5 link-liveness engine becomes an excludable module with a sizable worker**
   ([#1470](https://github.com/avatarsd-llc/libtracer/issues/1470)). `core/src/self_heal_link.cpp`

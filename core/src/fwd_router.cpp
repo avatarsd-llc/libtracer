@@ -1434,6 +1434,154 @@ std::optional<fwd_router_t::bound_dispatch_t> fwd_router_t::bound_dispatch(
     return out;
 }
 
+namespace {
+
+/**
+ * @brief The `src` PATH body of a decoded `FWD` — the ONE region a hop ever labels (erratum 4).
+ *
+ * A `FWD`'s two `PATH` children are `dst` then `src` (RFC-0004 §B), so the second one is the
+ * answer and there is no third to confuse it with. Read positionally rather than by type alone,
+ * because "the first PATH" is the return route and caching THAT would cache the reply endpoint.
+ */
+[[nodiscard]] std::span<const std::byte> fwd_src_body(const wire::tlv_t& fwd) noexcept {
+    const wire::tlv_t* first = nullptr;
+    for (const wire::tlv_t& c : fwd.children) {
+        if (c.type != wire::type_t::PATH) continue;
+        if (first == nullptr) {
+            first = &c;
+            continue;
+        }
+        return {c.payload.data(), c.payload.size()};
+    }
+    return {};
+}
+
+/**
+ * @brief Append @p link_name's mount run to @p out as LITERAL segment records.
+ *
+ * The origin's own first-hop local part, spelled the only way an origin with no mint table can
+ * spell it (§4.1, ruled 2026-08-24). A registry name is the qualified `"<module>/<name>"` run,
+ * so it is split on `/` exactly as the canonical parse splits the same run out of a path string.
+ *
+ * @return false, having appended a prefix of the run, when the name has no packed spelling — an
+ *         empty run or an empty/over-long segment. Callers build into a scratch buffer they drop.
+ */
+[[nodiscard]] bool emit_name_segments(std::vector<std::byte>& out, std::string_view link_name) {
+    if (link_name.empty()) return false;
+    std::size_t pos = 0;
+    for (;;) {
+        const std::size_t slash = link_name.find('/', pos);
+        const std::size_t end = slash == std::string_view::npos ? link_name.size() : slash;
+        if (!wire::emit_path_segment(out, link_name.substr(pos, end - pos))) return false;
+        if (slash == std::string_view::npos) return true;
+        pos = slash + 1;
+    }
+}
+
+/**
+ * @brief The registered error identity a `FWD{REPLY}` carries, or `nullopt` if it carries none.
+ *
+ * `assemble_error_reply` nests it as `STATUS > ERROR > VALUE(u16 LE)`, and this reads exactly
+ * that shape — not a recursive scan for any 2-byte VALUE, which would read a two-byte PAYLOAD as
+ * an error identity and clear a live cache on a successful reply.
+ */
+[[nodiscard]] std::optional<wire::err_t> reply_error_identity(const wire::tlv_t& fwd) noexcept {
+    for (const wire::tlv_t& status : fwd.children) {
+        if (status.type != wire::type_t::STATUS || status.children.empty()) continue;
+        const wire::tlv_t& err = status.children.front();
+        if (err.type != wire::type_t::ERROR || err.children.empty()) continue;
+        const wire::tlv_t& id = err.children.front();
+        if (id.type != wire::type_t::VALUE || id.payload.size() != 2) continue;
+        return static_cast<wire::err_t>(detail::load_le<std::uint16_t>(id.payload));
+    }
+    return std::nullopt;
+}
+
+}  // namespace
+
+[[gnu::cold]] bool fwd_router_t::adopt_path_label(graph::path_t& path, std::string_view link_name,
+                                                  const wire::tlv_t& reply) {
+    const std::span<const std::byte> src = fwd_src_body(reply);
+    // A reply whose `src` carries no label is every conformant reply this codebase shipped before
+    // RFC-0027 and every reply from a route that mints nothing (§6.3). It ends here, and the path
+    // stays canonical — the same non-event a failed mint is.
+    if (src.empty()) return false;
+    const wire::path_element_census_t census = wire::path_element_census(src);
+    if (!census.well_formed || census.labels == 0) return false;
+    // Built into a fresh buffer and handed over whole: the cache validates what it is given, and
+    // a half-built body must never be what it validates.
+    std::vector<std::byte> body;
+    body.reserve(link_name.size() + 1 + src.size());
+    if (!emit_name_segments(body, link_name)) return false;
+    body.insert(body.end(), src.begin(), src.end());
+    return path.cache_path_label(body);
+}
+
+[[gnu::cold]] std::optional<fwd_router_t::label_dispatch_t> fwd_router_t::label_dispatch(
+    const graph::path_t& path) const {
+    const graph::path_label_cache_t& c = path.path_label();
+    if (!c.cached || c.body.empty()) return std::nullopt;
+    const std::span<const std::byte> body{c.body.data(), c.body.size()};
+
+    // The LITERAL head is the only part this node resolves: everything from the first label
+    // element on belongs to hops downstream, which is the whole point of holding it.
+    std::vector<std::string_view> head;
+    wire::path_element_cursor_t walk(body);
+    while (const std::optional<wire::path_element_t> el = walk.next()) {
+        if (el->kind != wire::path_element_kind_t::SEGMENT) break;
+        head.push_back(detail::as_string_view(el->payload));
+    }
+    if (head.empty()) return std::nullopt;  // a head this node cannot consume is not this node's
+    // The descent asks whether anything exists BELOW the matched mount, and here the answer is
+    // "the labelled residual". An empty name answers exactly that and matches no registered
+    // child, so the sentinel cannot lengthen the run it is only there to prove is non-empty.
+    head.emplace_back();
+    const mount_hit_t hit = resolve_mount_segs(registry_, head);
+    // No mount (this node terminates the head), a bus link's own name with a residual below it,
+    // and a bus PEER are the same answer: no directed labelled egress from here. A bus child is
+    // never labelled at all — one label per child would stand for a different address per peer.
+    if (hit.link == nullptr || hit.rejected || !hit.peer.empty()) return std::nullopt;
+    if (hit.strip_k == 0 || hit.strip_k + 1 > head.size()) return std::nullopt;
+
+    // Where the consumed run ends in the CACHED bytes — walked again rather than remembered,
+    // because the run is a count of elements and the residual is a byte offset.
+    std::size_t residual_at = 0;
+    std::size_t consumed = 0;
+    wire::path_element_cursor_t cut(body);
+    while (const std::optional<wire::path_element_t> el = cut.next()) {
+        if (!el->ok()) return std::nullopt;
+        residual_at = el->at + el->bytes;
+        if (++consumed == hit.strip_k) break;
+    }
+    if (consumed != hit.strip_k || residual_at >= body.size()) return std::nullopt;
+
+    label_dispatch_t out;
+    out.link = hit.link;
+    // The 4-byte `PATH` header, then the residual bytes. Spelled as `emit_header` + insert
+    // rather than `emit_tlv`, and the reason is measured, not stylistic: one more inlinable
+    // `emit_tlv` call in THIS TU re-partitions GCC's inline budget and pushes the hot
+    // `route_fwd_forward<rope_cursor>` back from 2620 B to the 2939 B shape the symbol ratchet
+    // re-pinned away from — on a hop that executes none of this code. The bytes are identical:
+    // `emit_tlv`'s only extra act is widening the length field past 0xFFFF, and a labelled body
+    // is bounded by `graph::kMaxPathBytes` long before that.
+    wire::emit_header(out.dst, wire::type_t::PATH, wire::opt_t{}, body.size() - residual_at);
+    out.dst.insert(out.dst.end(), body.begin() + static_cast<std::ptrdiff_t>(residual_at),
+                   body.end());
+    return out;
+}
+
+[[gnu::cold]] bool fwd_router_t::fall_back_on_label_refusal(graph::path_t& path,
+                                                            const wire::tlv_t& reply) {
+    if (!path.path_label().cached) return false;
+    const std::optional<wire::err_t> id = reply_error_identity(reply);
+    // §7.2 names ONE identity, and narrowly: an unresolvable address is what a stale label is.
+    // A different refusal (a denial, a malformed address, backpressure) says nothing about the
+    // spelling, and dropping the cache on it would re-mint a label that was never the problem.
+    if (!id || *id != wire::err_t::PATH_NOT_FOUND) return false;
+    path.clear_path_label();
+    return true;
+}
+
 template <class Cursor, class Reject>
 bool fwd_router_t::route_bound_session_delivery(std::string_view inbound_name,
                                                 const child_rx_ctx_t* inbound_ctx, bool from_peer,

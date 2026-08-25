@@ -641,6 +641,93 @@ class fwd_router_t {
     [[nodiscard]] std::optional<bound_dispatch_t> bound_dispatch(const graph::path_t& path,
                                                                  graph::acl_right_t right) const;
 
+    // -- path labels, the ORIGIN's half (RFC-0027 §6.1 point 4, §7.2) ------------------
+    // The forwarder's half — mint on the reply leg, deref on receipt — is a branch inside the
+    // routing hop and needs no API. This is the other end of the same exchange: the node that
+    // receives a minted `src`, keeps it, and spells it as the `dst` of what it sends next.
+    //
+    // The origin stands up NO mint table of its own (ruled 2026-08-24, #1551). Amendment 7 keeps
+    // the label table opt-in and OFF BY DEFAULT because the per-hop saving is a WIDE-node claim,
+    // and an origin is very often the narrowest node on the route; a mint is never load-bearing
+    // (§6.3, §7.2), so a table here would buy an unmeasured saving with a permanent per-node
+    // cost. The origin's own first-hop local part — the one hop no peer ever sees (§4.1) — is
+    // therefore spelled as LITERAL segments, and the spelling it caches is MIXED by design.
+
+    /**
+     * @brief Cache the minted `src` of @p reply as @p path's labelled spelling (§6.1 point 4).
+     *
+     * The analogue of @ref adopt_binding, and the seam erratum 2 named and left unruled. @p reply
+     * is a decoded `FWD{REPLY}`; its `src` is the address as the route spelled it on the way back
+     * — a label element for every hop that minted, the literal mount run for every hop that did
+     * not (§5.2, §6.3). Those bytes are cached **verbatim**, with the origin's own first-hop local
+     * part (the mount run of @p link_name, spelled as literal segments) prepended, so the cached
+     * body is this node's spelling of the same address the canonical bytes spell.
+     *
+     * There is **no normalization and no completion pass**: a mixed spelling is the expected
+     * steady state, not a degraded one, and improving it is not this seam's job — carrying it is.
+     *
+     * The validation is `graph::path_t::cache_path_label`'s and nothing is added to it: a body
+     * with no label element, one that does not walk cleanly, one past `%kMaxPathBytes`, and a
+     * path already `PATH_REF`-bound (§11.2) are its refusals, and each leaves @p path exactly as
+     * it was — canonical, which always works.
+     *
+     * @param path      The path the operation addressed, still holding its canonical bytes.
+     * @param link_name This node's registry NAME for the child the request left over.
+     * @param reply     The decoded `FWD{REPLY}` that came back.
+     * @return true iff @p path came out carrying a labelled spelling.
+     */
+    bool adopt_path_label(graph::path_t& path, std::string_view link_name,
+                          const wire::tlv_t& reply);
+
+    /** @brief What the origin sends a labelled operation as: the link, and the `dst` on the wire.
+     */
+    struct label_dispatch_t {
+        transport_t* link = nullptr; /**< @brief The egress link the literal head resolved to. */
+        std::vector<std::byte> dst;  /**< @brief The `PATH` TLV carrying the labelled RESIDUAL. */
+    };
+
+    /**
+     * @brief Spell the next operation over @p path's cached label spelling — the origin's own hop.
+     *
+     * The origin consumes its own first-hop local part exactly as a forwarder consumes its own,
+     * and for the same reason: it selects the link and does NOT go on the wire. Here that part is
+     * a run of LITERAL segments (the origin mints nothing), so the run is resolved by the ordinary
+     * strip-K mount descent — the same one a canonical `dst` takes (ADR-0061) — and what goes out
+     * is the residual, which is where the labels are. That residual is what makes §7.2's deref
+     * reachable in a deployment at all; until this existed, every minted label was cached and
+     * then thrown away.
+     *
+     * No ACL right is taken, and the asymmetry with @ref bound_dispatch is deliberate: element 0
+     * of a binding is a peer-visible *reference* that must be dereferenced and re-checked (§6.2),
+     * whereas the head consumed here is a NAME this node resolves locally, exactly as it resolves
+     * the same name in the canonical spelling. Every hop that reads a label re-checks the ACL at
+     * the vertex it dereferences (§8.2), which is where a labelled operation's authorization is
+     * decided.
+     *
+     * @retval std::nullopt @p path carries no cached spelling, its head names no mount of this
+     *         node (or a bus mount, which is never labelled), or the residual has no spelling.
+     *         The caller's recovery is the one that always works: send the canonical path @p path
+     *         still holds.
+     */
+    [[nodiscard]] std::optional<label_dispatch_t> label_dispatch(const graph::path_t& path) const;
+
+    /**
+     * @brief §7.2's fallback: on a `NOT_FOUND`-class refusal, drop @p path's labelled spelling.
+     *
+     * A label a hop cannot validate answers `tr::path::not_found`, and the sender's whole recovery
+     * is to fall back to the full-string path it still holds, forget the bytes, and re-mint from
+     * the next reply. One failed operation is the entire cost.
+     *
+     * There is **no withdraw frame, no unbind, no lease, no TTL, no repair and no retry against a
+     * different slot** (§7.3, §7.2) — this clears a cache and nothing else. Static because it is:
+     * the recovery reads @p reply and touches no router state, because no router holds any for a
+     * label it was handed.
+     *
+     * @return true iff @p reply was a `tr::path::not_found` refusal and a cached spelling was
+     *         dropped — i.e. the caller should re-send canonically.
+     */
+    static bool fall_back_on_label_refusal(graph::path_t& path, const wire::tlv_t& reply);
+
     // -- observability / terminus sinks (fn-ptr + context, ADR-0047/ADR-0068 §3) -------
     // Not std::function: these fire on the per-frame RX path, where the erasure
     // machinery (code size, heap capability, exception paths) is the largest avoidable
