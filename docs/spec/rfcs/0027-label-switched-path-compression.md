@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0027 |
 | **Title** | Label-switched path compression: minting a per-host path label across the wire |
-| **Status** | **accepted** (2026-08-15; proposed 2026-08-15), maintainer-ratified; comment window waived by default per [GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window" (solo-maintainer clause) and not invoked. The design of §§4–10 was **ruled** in the 2026-08-15 grilling session; this document is its transcription in normative form, not a proposal seeking a direction. **All three §11.1 collisions the draft flagged are RESOLVED at acceptance** — see §11.1 and §16: **collision 1 (vocabulary)** is ruled **(a) qualify**, "**path label**" is ratified as a term distinct from RFC-0004 §E.1's per-link `u16` "label", carried into [RFC-0024](0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §2.1 by **amendment 3**; **collision 2 (generation)** is ruled **saturate-and-retire, NOT wrap** — a slot whose 16-bit generation reaches its maximum saturates and is **retired permanently**, never reused and never wrapped, which preserves RFC-0024 §4.4 rule 3 / §9.3's "MUST saturate, never wrap" at **zero wire cost**; **collision 3 (per-hop state)** is **accepted knowingly** as a recorded decision — RFC-0027 buys per-element degradation and terminus compaction at the price of a per-hop mint table, and the doc set states that trade rather than claiming statelessness on both forms. What remains open is **only the byte layout** (§5.3, deferred pending conformance vectors in the RFC-0014 discipline) and the §12.4 bench gate, which is normative for acceptance of the **implementation**, not of this document. **Amendment 4 (2026-08-15, §5.3.1) rules §5.3 sub-question 1 — the label element is a TLV child of `PATH`, not a tag in RFC-0018's packed segment grammar — and corrects that sub-question's premise: RFC-0018 and this RFC amend the same `PATH` body grammar and are NOT independent. **Amendment 5 (2026-08-15, §5.3.2) settles the wire spelling: RFC-0018's `len == 0` escape record (`00 <kind=0x16> <len=4> <u32>`, 7 B), sub-question 3 ruled NOT admissible as a `path_lookup_key`, and RFC-0018 implements before this RFC's element car. **Amendment 6 (2026-08-15, §5.3.3) rules sub-question 2: one label covers a hop's whole local part (its entire mount run), not one segment — with which §5.3 is CLOSED and no byte-layout question remains open.** **Amendment 7 (2026-08-17, §3.4) discharges §12.4's bench gate: the terminus-compaction case is BANKED on measurement, the per-hop claim is narrowed to WIDE nodes, and the label table is opt-in and off by default on NARROW — with which nothing this RFC left open remains open.** Spec, `CONTEXT.md` and code edits land after acceptance, car by car (§12). |
+| **Status** | **accepted** (2026-08-15; proposed 2026-08-15), maintainer-ratified; comment window waived by default per [GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window" (solo-maintainer clause) and not invoked. The design of §§4–10 was **ruled** in the 2026-08-15 grilling session; this document is its transcription in normative form, not a proposal seeking a direction. **All three §11.1 collisions the draft flagged are RESOLVED at acceptance** — see §11.1 and §16: **collision 1 (vocabulary)** is ruled **(a) qualify**, "**path label**" is ratified as a term distinct from RFC-0004 §E.1's per-link `u16` "label", carried into [RFC-0024](0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §2.1 by **amendment 3**; **collision 2 (generation)** is ruled **saturate-and-retire, NOT wrap** — a slot whose 16-bit generation reaches its maximum saturates and is **retired permanently**, never reused and never wrapped, which preserves RFC-0024 §4.4 rule 3 / §9.3's "MUST saturate, never wrap" at **zero wire cost**; **collision 3 (per-hop state)** is **accepted knowingly** as a recorded decision — RFC-0027 buys per-element degradation and terminus compaction at the price of a per-hop mint table, and the doc set states that trade rather than claiming statelessness on both forms. What remains open is **only the byte layout** (§5.3, deferred pending conformance vectors in the RFC-0014 discipline) and the §12.4 bench gate, which is normative for acceptance of the **implementation**, not of this document. **Amendment 4 (2026-08-15, §5.3.1) rules §5.3 sub-question 1 — the label element is a TLV child of `PATH`, not a tag in RFC-0018's packed segment grammar — and corrects that sub-question's premise: RFC-0018 and this RFC amend the same `PATH` body grammar and are NOT independent. **Amendment 5 (2026-08-15, §5.3.2) settles the wire spelling: RFC-0018's `len == 0` escape record (`00 <kind=0x16> <len=4> <u32>`, 7 B), sub-question 3 ruled NOT admissible as a `path_lookup_key`, and RFC-0018 implements before this RFC's element car. **Amendment 6 (2026-08-15, §5.3.3) rules sub-question 2: one label covers a hop's whole local part (its entire mount run), not one segment — with which §5.3 is CLOSED and no byte-layout question remains open.** **Amendment 7 (2026-08-17, §3.4) discharges §12.4's bench gate: the terminus-compaction case is BANKED on measurement, the per-hop claim is narrowed to WIDE nodes, and the label table is opt-in and off by default on NARROW — with which nothing this RFC left open remains open.** **Amendment 8 (2026-08-24, §6.1) rules the ORIGIN seam — the one item errata 2 and 4 each closed by naming as open: the origin caches the handed spelling VERBATIM (literal head segments kept, a mixed spelling is the first-class steady state), stands up NO mint table of its own, prepends its own first-hop local part as literal segments, spends the cached body as the `dst` of subsequent requests, and on `tr::path::not_found` falls back to the full string, clears the cache and re-mints from the next reply — no withdraw, no unbind, no lease, no TTL, no repair, no retry. No wire surface moves; §12.4 clause 3's `reply-spread` arm re-armed on the implementing car and PASSED (every delta inside the A/A null band).** Spec, `CONTEXT.md` and code edits land after acceptance, car by car (§12). |
 | **Author(s)** | AvatarSD (maintainer), with AI drafting |
 | **Created** | 2026-08-15 |
 | **Comment window** | waived by default while solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"); invoke explicitly if outside input is wanted. Verified: `docs/implementations.md:13` still reads `_(none yet)_`, so the waiver's revert trigger has not fired. |
@@ -716,7 +716,9 @@ one-segment mount name, which is precisely the reading amendment 6 rejected and 
 the analogue of RFC-0024's `adopt_binding`, which must prepend the origin's own first-hop part
 (the one hop no peer ever sees, §4.1) before handing the bytes to `path_t::cache_path_label`.
 Car 4 implements the forwarder and leaves the origin unwired; the vectors and the binding test
-pin the hop's emission, not the round trip.
+pin the hop's emission, not the round trip. **Ruled 2026-08-24 and implemented: see amendment 8
+below** — the prepend is literal segments, the origin stands up no mint table, and
+`core/tests/path_label_origin_test.cpp` binds the round trip.
 
 #### Erratum 4 (2026-08-21) — only the reply's `src` is ever labelled; the forward leg's `src` — and therefore the reply's `dst` — is not
 
@@ -762,7 +764,75 @@ It removes a claim the accepted text could not satisfy — §6.1's own point 4 i
 under the `dst` reading, which is what erratum 2 established — rather than changing what is
 required.
 
-**Still not ruled here**, unchanged from erratum 2: the origin-side adoption of the minted `src`.
+~~**Still not ruled here**, unchanged from erratum 2: the origin-side adoption of the minted
+`src`.~~ **Ruled 2026-08-24 — see amendment 8 below.**
+
+#### Amendment 8 (2026-08-24, ruled) — the origin caches the HANDED spelling, and stands up no mint table
+
+An **amendment**, not an erratum: §6.1 point 4 says only that *"the sender's `path_t` caches it"*,
+and what a sender does with a partially-minted route, what it spells for its own first hop, and
+whether it becomes a minting host itself were never stated. This adds normative text for the
+origin seam — the one thing erratum 2 and erratum 4 each closed by naming as open — so it takes
+the heavier instrument, per `GOVERNANCE.md`. **No wire surface moves**: every byte in this section
+is a byte §5.2 and §5.3.2 already admit, and a host that implements none of it stays conformant by
+§6.3.
+
+**Normative, in two halves.**
+
+1. **The origin caches the spelling AS IT ARRIVED.** Label elements where hops minted, **literal
+   segments where they did not**. A host **MUST NOT** normalize the cached spelling, complete a
+   partially-minted route, or condition caching on the route being fully minted. §5.2 already rules
+   that name and label elements mix in any order with no fully-minted state
+   (`path-label/label-mixed` is the vector), and §6.3 rules that a hop which mints nothing is fully
+   conformant — so a **mixed spelling is the expected steady state**, not a degraded one, and the
+   origin's job is to carry it, not to improve it.
+
+2. **The origin stands up NO mint table of its own**, and its own first-hop local part — the one
+   hop no peer ever sees (§4.1) — is prepended to the cached spelling as **literal segments**.
+   Amendment 7 is the doctrine: the label table *"is opt-in and OFF BY DEFAULT, and must stay that
+   way"*, because the per-hop saving was measured **WIDE-only** (+2.3 ns/hop at width 1 — below
+   what the instrument should be asked to resolve — and +64.0 ns/hop at width 64), and *"on a
+   NARROW node the per-hop claim is not made at all"*. An origin is very often the narrowest node
+   in the topology, and a mint is **never load-bearing** (§6.3, §7.2: the canonical string original
+   always works and is what the fallback uses). A table on the origin to save its own first hop
+   would buy an unmeasured saving with a permanent per-node table — the exact trade amendment 7
+   refused to make by default.
+
+**Spending it, and the refusal path**, both already ruled and restated here only because this is
+where the origin's half is written down: the origin spells the cached body as the `dst` of
+subsequent requests (erratum 4), which is what makes §7.2's deref reachable in a deployment at
+all; and on `tr::path::not_found` it falls back to the full-string path it still holds, clears the
+cache, and re-mints from the next reply. One failed operation is the entire cost. **No withdraw
+frame, no unbind, no lease, no TTL, no repair, and no retry against a different slot** (§7.3,
+§7.2).
+
+**Raw graph slot indices are not the label**, and this is recorded because it will be proposed
+again. (a) **The field does not fit** — a path label is a 16-bit slot index plus a 16-bit
+generation inside amendment 5's 4-byte payload, while `graph_t`'s slot indices are unbounded deque
+positions in an insert-only tree ([ADR-0057](../../adr/0057-graph-composite-vertex-tree.md)); a
+truncating cast there is a silent mis-delivery, which is the failure class labels exist to be
+immune to. (b) **It would freeze `graph_t`'s storage layout into protocol ABI** — §11.1 collision
+3's per-hop-state trade is priced on the table being the host's private business. (c) **Dense
+global indices are an enumerable existence oracle** — a peer holding one could walk `n±1` and learn
+what exists, voiding §8.3's per-peer ceiling and §8.1/§8.2's *"an address, never a capability"*;
+labels are **handed, never guessed**. (d) **The generations are different contracts** — a label's
+tracks spelling departure and saturate-retires (collision 2; erratum 5 narrows what counts), while
+`vertex_t::retire_gen_` tracks vertex retirement for resolve-once bindings
+([ADR-0062](../../adr/0062-resolve-once-label-bindings-hold-resolutions-not-names.md)); fusing them
+would make a dormant link look like a departed address, or a re-added child inherit a live label —
+and `fwd/fwd-label-terminus-stale` already pins the re-add case as a refusal.
+
+**Out of scope, and stated rather than discovered:** bus/multi-peer children are never labelled
+(one label per child stands for a different address per peer, which is a mis-delivery; the correct
+shape is one slot per `(egress peer, inbound target)` pair, deferred with car 4 and still
+deferred); §11.2's SHOULD is not promoted to a MUST; and minting is not enabled by default
+anywhere, on any node class.
+
+**Reference implementation:** `fwd_router_t::adopt_path_label`, `fwd_router_t::label_dispatch` and
+`fwd_router_t::fall_back_on_label_refusal`, bound end-to-end by
+`core/tests/path_label_origin_test.cpp` — which is also where `fwd/fwd-label-stale`'s *"the bytes
+an origin sends"* stops being hand-built and becomes what the origin emits. The re-armed §12.4
+clause 3 measurement is recorded in §12.4 below.
 
 ### 6.2 Each subscription's first fire triggers path creation and minting
 
@@ -1365,6 +1435,10 @@ Public-header changes go in `core/CHANGELOG.md`.
 > (`graph.cpp.o` byte-identical between arms); clause 5 measured +3 388 B flash and 0 B static-RAM
 > delta on rv32, with the table at 24 B/slot and a 304 B peak store at 8 mints. The clauses below
 > stand as written — they are the gate that ran, not a gate still pending.
+>
+> **Clause 3 RE-ARMED on the origin car (2026-08-25)** — the `reply-spread` arm was measured
+> against an implementation in which the origin did nothing, and amendment 8 is the first work on
+> the origin's reply-ingest path. Re-run and **passed**; the numbers are below the clause list.
 
 An implementation is **not acceptable** until it answers these with measurements taken under the A/B
 protocol RFC-0024 §8.2 made normative (`docs/methodology.md` §"The A/B protocol": pin both arms to
@@ -1384,6 +1458,49 @@ effect sits below the leg's noise floor).
    4/8/16/32/65 links.
 5. **rv32 flash/RAM delta**, including the label table at a realistic mint count. The standing census
    rule applies: **no "beat" is banked without it.**
+
+#### Clause 3 RE-ARMED and re-run for the origin car (2026-08-25)
+
+§12.4 is discharged for the mint + deref pair, but clause 3's mandatory `reply-spread` arm was
+measured against an implementation in which **the origin does nothing**. The origin car
+(amendment 8) is the first work placed on the origin's reply-ingest path, so clause 3 and **§15
+clause 1** re-arm and were re-run — *"a measured latency regression on any shipped shape rejects
+the implementation."*
+
+**No regression; the arm passes.** `bench_reply_leg`, `origin/main` against the origin car,
+`taskset -c 2` on both arms (one logical CPU, one core class), 13 interleaved rounds with the
+first discarded, best-of-rounds over the remaining 12, medians with ranges:
+
+| point | main (best) | origin car (best) | delta | main range | origin range |
+| --- | --- | --- | --- | --- | --- |
+| `reply-spread` fan=8, w=32 ×1 | 487 ns | 485 ns | **−0.41 %** | 487–510 ns | 485–495 ns |
+| `reply-spread` fan=8, w=32 ×2 | 485 ns | 485 ns | **+0.00 %** | 485–510 ns | 485–500 ns |
+| `reply-spread` fan=64, w=32 ×1 | 3280 ns | 3285 ns | **+0.15 %** | 3280–3370 ns | 3285–3385 ns |
+| `reply-spread` fan=64, w=32 ×2 | 3280 ns | 3265 ns | **−0.46 %** | 3280–3355 ns | 3265–3370 ns |
+
+**The A/A null beside it**, which is what those deltas have to be read against: the bench takes
+each arm twice per run, so the two readings of one binary are an in-binary A/A. On this host that
+null is **0.00 %–0.61 %** on the `reply-spread` shape itself (main 0.41 % / 0.00 %, origin car
+0.00 % / 0.61 %) and up to 0.88 % on the other shapes. **Every measured delta is inside the null
+band, and the two largest are negative.** The other shipped shapes in the same session move by
+−1.06 % to +0.83 % with nulls of the same size — i.e. nothing.
+
+**Why that is the expected answer, stated so the null is not read as luck:** the origin seam is
+three out-of-line functions the relay path never calls. The delivery leg this bench drives
+(`deliver_remote`) reaches none of them, and the **symbol ratchet reads +0 B on every pin** —
+including `route_fwd_forward<rope_cursor>`, which is where a TU re-partition would have shown up.
+Keeping that +0 cost one implementation choice, recorded because it is not obvious: the residual
+`PATH` is emitted with `emit_header` + insert rather than `emit_tlv`, because one more inlinable
+`emit_tlv` call in that TU pushes the hot template from 2620 B back to 2939 B (+319 B measured) on
+a hop that executes none of this code.
+
+**Clause 5's census, re-run on the same pair** (`tools/rv32_footprint.py`,
+`riscv32-esp-elf-g++ 14.2.0`, ESP32-C6 `-Os -fno-exceptions -fno-rtti`): the P0 required-modules
+sentinel is **+0 B flash and +0 B RAM** — it does not link the net plane. On a node that does, the
+`fwd_router.cpp` TU measures **70 889 → 73 165 B of `.text` (+2 276 B)** with `.data` and `.bss`
+unmoved; the three new symbols account for 1 868 B of that (`label_dispatch` 1 332 B,
+`adopt_path_label` 402 B, `fall_back_on_label_refusal` 134 B) and are `--gc-sections`-droppable in
+an image that never calls them, since nothing on the relay path references them.
 
 ### 12.5 Conformance vectors
 

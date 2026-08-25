@@ -15,6 +15,8 @@ The labelled request a hop **refuses** once the vertex its label stood for has d
 
 These are the bytes an origin sends after caching the spelling [`fwd/fwd-label-mint-reply`](../fwd-label-mint-reply/description.md) came back with: the hop's mount run is gone, replaced by the label that hop minted for it.
 
+They were hand-built by a test until the origin car (RFC-0027 §6.1 amendment 8): `core/tests/path_label_origin_test.cpp` now composes this frame from `fwd_router_t::adopt_path_label` + `fwd_router_t::label_dispatch` — the origin adopting the minted `src` and spending it as its next `dst` — and asserts it byte-exact against these bytes. Note what the origin contributed to the spelling and what it did not: its own first-hop local part goes on as **literal segments** (it stands up no label table of its own), so the run stripped out of the `dst` here is the origin's, and the label is the hop's.
+
 ## The same bytes serve both outcomes, and that is the point
 
 Against a **live** slot this frame forwards over the link the label names — the label is turned straight into the resolution the hop already made, with no digest fold, no segment compare and no name hash.
