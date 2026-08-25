@@ -324,6 +324,15 @@ test('mesh testbed: form a cyclic multi-node mesh in band, then route across it'
   await t.test('ADR-0044 Brick C: the bus lists its live peers from real traffic', async () => {
     // /net/mesh is a peer_named ws listener CREATED IN BAND (its peer_named key is
     // ws-private config, parsed by the ws factory — ADR-0043 §5). Both a and b dialled it.
+    //
+    // Since the RFC-0014 §4 S5 flip (#1548) a built-in DIAL is engine-managed: the SPEC
+    // creates the connection DORMANT and the socket is constructed on first use. So the two
+    // dials alone put NOTHING on the bus's wire, and the listing this case is about would
+    // legitimately be empty. One op through each link is what makes the peers real — which is
+    // what "from real traffic" always meant; before the flip a connect happened to supply it.
+    assert.equal(await nameVia(cli.a, via('bus')), 'bus');
+    assert.equal(await nameVia(cli.b, via('bus')), 'bus');
+
     const listing = await cli.bus.readField(['net', 'ws-server', 'mesh'], ':children[]');
     const peers = listingNames(listing);
     assert.equal(peers.length, 2, `the bus hears exactly its 2 dialers (got ${JSON.stringify(peers)})`);
