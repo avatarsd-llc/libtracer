@@ -191,6 +191,16 @@ if(LIBTRACER_NET_PLANE)
         LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
     libtracer_test_warnings(path_label_terminus_test)
     add_test(NAME path_label_terminus COMMAND path_label_terminus_test)
+
+    # RFC-0027 origin car — the ORIGIN: adopt the minted `src`, spend it as `dst`, fall back on
+    # `NOT_FOUND`. The two above pin the hop's EMISSION; this one closes the round trip, and it
+    # is where `fwd/fwd-label-stale`'s "the bytes an origin sends" stops being hand-built.
+    add_executable(path_label_origin_test path_label_origin_test.cpp)
+    target_link_libraries(path_label_origin_test PRIVATE libtracer)
+    target_compile_definitions(path_label_origin_test PRIVATE
+        LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
+    libtracer_test_warnings(path_label_origin_test)
+    add_test(NAME path_label_origin COMMAND path_label_origin_test)
 endif()
 
 # The wire grammar's total-encoded-size bound (grammar.hpp, #921) — pinned at

@@ -189,7 +189,7 @@ class child_registry_t {                 // the one NAME -> link demux table (AD
 ```
 
 Signature source: `core/include/libtracer/fwd_router.hpp:249` (constructor), `:479`
-(`add_child`), `:536` (`subscribe_toward`), `:656-668` (the sink function-pointer types);
+(`add_child`), `:536` (`subscribe_toward`), `:743-755` (the sink function-pointer types);
 `core/include/libtracer/child_registry.hpp:327` (`add`), `:585` (`resolve_peer`), `:600`
 (`erase`), `:633` (`entry_by_name`), `:654` (`by_name`), `:695`/`:705` (`size`/`live_size`).
 
@@ -218,15 +218,15 @@ flowchart TB
   address size grows with hop count, which is what `ADVERTISE`/`COMPACT` route handles exist to
   amortise on a steady flow.
 - **A reply is delivered as a rope, never flattened by the router**
-  (`core/include/libtracer/fwd_router.hpp:664-673`). A sink that wants contiguous bytes holds
+  (`core/include/libtracer/fwd_router.hpp:751-760`). A sink that wants contiguous bytes holds
   `const view_t m = reply.materialize()` and reads `m.bytes()`; a **single-link reply — the common
   case — is returned zero-copy, no allocation and no copy**, and only a multi-link reply pays one
   flatten, on demand. The escape hatch sits at the consumer, so the router never pays for a
   consumer that did not need contiguity. `m` must stay alive while its span is read.
 - **The default delivery leg copies nothing.** A full-route `FWD{WRITE}` fan-out scatter-gathers a
   fresh stack head, the stored return-route bytes, an empty `src`, and one span per link of the
-  stored value (`core/src/fwd_router.cpp:3279`). The `COMPACT` leg is the one that flattens,
-  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:3064`) — single-link, that
+  stored value (`core/src/fwd_router.cpp:3427`). The `COMPACT` leg is the one that flattens,
+  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:3212`) — single-link, that
   flatten is a zero-copy adopt, and multi-link it draws from the router's injected `flat` backend
   (#730), not the global heap.
 - **All rope flattens on the forward AND terminus paths draw from the injected seam.** `flat`
