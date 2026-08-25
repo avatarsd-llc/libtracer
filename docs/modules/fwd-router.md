@@ -96,6 +96,16 @@ The router also carries the origin's half — `connection_ref`, `bound_egress`, 
 egress. The origin's element is the one no peer can supply, since the hop out of this node is the
 one hop nobody else sees.
 
+The **path-label** origin (RFC-0027 §6.1 amendment 8) is the same shape one plane over:
+`adopt_path_label` caches the spelling a minted reply's `src` came back with, `label_dispatch`
+spends it as the next request's `dst`, and `fall_back_on_label_refusal` drops it on
+`tr::path::not_found`. What differs is what the origin contributes for its own first hop. A bound
+route needs an element only this node can mint, so the origin mints one; a labelled route does not
+— the origin stands up **no label table**, prepends its own local part as **literal segments**, and
+therefore holds a spelling that is mixed by construction. Consuming that head is the ordinary
+strip-K mount descent, not a dereference, which is why this dispatch takes no ACL right: the
+authorization of a labelled operation is decided at each hop that dereferences a label (§8.2).
+
 Alongside the routing legs the router installs the graph's **remote-delivery sink**: a write to a
 vertex that carries a remote subscriber fans out as `FWD{WRITE}` addressed by that subscriber's
 stored return route, or — when the subscription is compact-flagged — as a lean `COMPACT` bearing a

@@ -13,6 +13,11 @@
  * `fwd_router_t` wiring, or it is bound nowhere. That is RFC-0014's lesson stated as a file:
  * two silent misroutes shipped because no test used the production wiring.
  *
+ * What it does NOT bind is the ROUND TRIP: everything here drives one hop, and the labelled
+ * request an origin would send is hand-built by this file rather than emitted by an origin. That
+ * half is `path_label_origin_test.cpp` (RFC-0027 §6.1 amendment 8), which adopts the reply this
+ * hop mints and spends it back through this same production wiring.
+ *
  * The four conformance vectors this binds are `fwd/fwd-label-mint-reply`, `fwd/fwd-label-stale`,
  * `acl/label-vs-string-allow` and `acl/label-vs-string-deny`, each asserted byte-exact against
  * what the router really emits — the discipline `bound_forward_test.cpp` established for
