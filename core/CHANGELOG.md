@@ -86,10 +86,13 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   build, so a `SPEC` naming it answers `SCHEMA_NOT_FOUND` and a debug build asserts at the
   registration. Registering it with the trait cleared would bring the connection up eagerly,
   with no redial and no liveness publishing, and say nothing. Note for readers sizing an image:
-  **no in-tree kind sets `self_heal_dial`** today — the built-in `udp`/`tcp`/`ws` factories
-  construct eagerly and an ESP node stages its links with `provide_link` — so the engine is
-  unreachable on every stock target until
-  [#1548](https://github.com/avatarsd-llc/libtracer/issues/1548).
+  the built-in `udp`/`tcp`/`ws` factories now DO set `self_heal_dial`
+  ([#1548](https://github.com/avatarsd-llc/libtracer/issues/1548), the Changed entry below), so
+  a stock host node that creates connections from config reaches the engine. They read this very
+  knob at their own registration site, so binding it `false` leaves them catalogued and eager
+  rather than refused — the refusal above is for a third-party kind that *claims* the engine.
+  An ESP node that stages its links with `provide_link` still never reaches the engine at all,
+  and is the target this knob is for.
 
   `kSelfHealWorkerStackBytes` is the second half, and it is not ESP-specific: the engine's
   worker was a bare `std::thread`, which has no stack-size parameter, so on any RTOS target it
@@ -125,6 +128,49 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   catalog — never `SCHEMA_NOT_FOUND`, which would make the §6 creatability probe ambiguous.
 
 ### Changed
+
+- **BEHAVIOUR CHANGE: a built-in `udp`/`tcp`/`ws` DIAL connection no longer dials at creation —
+  it is minted `DORMANT` and dials on first use** ([#1548](https://github.com/avatarsd-llc/libtracer/issues/1548),
+  [RFC-0014](../docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md) §4
+  S5, [#492](https://github.com/avatarsd-llc/libtracer/issues/492)). The three built-in
+  point-to-point factories now register with
+  `transport_kind_traits_t{.self_heal_dial = …, .delivers_ropes = true}`
+  (`tr::net::kBuiltinPointToPointTraits`, `builtin_transports.hpp`), so their DIAL connections
+  are driven by the S5 liveness engine (`tr::net::self_heal_link_t`) instead of constructing a
+  socket on the creation path. The engine shipped in `[0.15.0]` and no in-tree kind reached it;
+  this is the flip that puts the shipped defaults on it, and it was deliberately sequenced after
+  the S6 control-plane ownership seam.
+
+  **What an embedder sees change.** A `SPEC{ kind = tcp|ws, addr, port }` written while the peer
+  is down used to fail the write with `TRANSPORT_DOWN` and leave nothing behind. It now
+  **succeeds**: the connection vertex exists, publishes `DORMANT` (0x00), and the socket is
+  constructed on the first op or the first `acquire_link` — bounded by `connect_timeout`,
+  self-healing with `backoff` while a standing binding holds, and closed back to dormant on the
+  last release. Code that treated a creating write as "the link is up" must read (or `await`) the
+  connection vertex's liveness value instead; code that retried creation on `TRANSPORT_DOWN` no
+  longer needs to. The `backoff` and `connect_timeout` config keys, parsed since S1 with no
+  consumer on any shipped kind, now have one.
+
+  **What does NOT change.** LISTEN connections of the same kinds still bind eagerly at creation
+  and report `LISTENING` (RFC-0014 §4: a LISTEN link ignores refcount) — including the ws/tcp
+  `peer_named` bus facet, which exists only on the listener. **Bus kinds keep the eager default**
+  and must not be registered `self_heal_dial`: the engine has no socket at creation, so the
+  router's `bus_of` wiring at `add_child` would never see the facet and a `can` connection's
+  ADR-0044 peer listing would be dead for its whole life (stated at `can_transport_factory`).
+  The out-of-tree `quic` / `webtransport` factories are embedder-registered and untouched.
+  `TRANSPORT_DOWN` still means what #929 made it mean — the factory's `make_checked` mapping is
+  unmoved; it now reaches an op's drop census rather than the creating write.
+
+  **On a `kSelfHealLinks = false` build the built-ins declare `self_heal_dial = false`** and keep
+  today's eager dial. They consult the knob at their own registration site, so the loud
+  `register_transport_type` refusal (#1470) does not fire for them — that refusal is reserved for
+  a THIRD-PARTY kind that *claims* an engine the image does not carry. This is not the silent
+  downgrade the refusal exists to prevent: a build-conditioned declaration never claims what it
+  cannot have, and making the refusal fire here would drop `udp`/`tcp`/`ws` out of the catalog
+  and turn a default-on feature into a default-broken build. Both shapes are pinned by
+  `transport_vertex_test`, which runs on the stock and the closed-out CI legs and asserts a
+  different outcome on each; the built-in end-to-end run through the engine — creation dormant,
+  real dial, remote hangup, factory re-run, heal back to `UP` — is `link_liveness_test`.
 
 - **BREAKING: `tr::net::path_label_table_t` takes an injected `tr::mem::block_source_t*`, not a
   `std::pmr::memory_resource*`** ([#1478](https://github.com/avatarsd-llc/libtracer/issues/1478),

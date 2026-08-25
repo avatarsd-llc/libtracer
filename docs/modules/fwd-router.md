@@ -323,7 +323,7 @@ connection is addressed under `/net/<module>/`, a first-level local vertex canno
 transport registers no module name, and an undeclared `(kind, role)` pair fails creation with
 `SCHEMA_NOT_FOUND` (`core/src/transport_vertex.cpp:335`). The application declares each module
 under a name it chooses through `register_module` (`core/src/transport_vertex.cpp:297`,
-`core/include/libtracer/transport_vertex.hpp:462`), a minting boundary gated by the shared
+`core/include/libtracer/transport_vertex.hpp:473`), a minting boundary gated by the shared
 segment-validity predicate — a reserved-character name answers `INVALID_PATH`. The built-in
 transports export *suggested*-name constants (`kWsClientSuggestedModule`, …) an application may
 adopt; `/net` itself is likewise only the recommended root convention (a constructor default).
@@ -342,7 +342,7 @@ registry slab exhausted. A `provide_link` staging is consumed only once the wiri
 
 **Liveness is the connection vertex's value.** `link_state_t` is six states —
 `DORMANT`, `DIALING`, `RECONNECTING`, `UP`, `LISTENING`, `BIND_FAILED`
-(`core/include/libtracer/transport_vertex.hpp:105-112`). `DIAL` links use the first four; `LISTEN`
+(`core/include/libtracer/transport_vertex.hpp:107-114`). `DIAL` links use the first four; `LISTEN`
 links report listen-socket reachability with the last two, never a per-accepted-peer state. The
 value is a 1-byte `VALUE` on the vertex, so it is `await`-able and subscribable: `subscribe
 /net/<module>/<name>` streams every transition. The liveness *engine* that would drive these
@@ -356,8 +356,9 @@ module mints it, a `SPEC{name, config}` written there creates `/net/<module>/<na
 `NAME{<name>}` removes it, with transport and role positional. What is **not** implemented is the
 rest of the surface around it — the `conn:schema` catalog read (S3), hiding `conn` from
 `/net/<module>:children[]` (S4) and the `CREATE`/`WRITE` gating split (S2c); the link-liveness
-engine (S5, `self_heal_link_t`) runs for kinds registered `self_heal_dial`, the built-ins not
-yet among them — and the `/net:children[]` catalog described above still works in parallel until
+engine (S5, `self_heal_link_t`) runs for kinds registered `self_heal_dial`, which since
+[#1548](https://github.com/avatarsd-llc/libtracer/issues/1548) includes the built-in
+point-to-point DIAL kinds — and the `/net:children[]` catalog described above still works in parallel until
 S7 retires it. One further
 boundary is open by design: RFC-0014 delivers the *link*, while third-party multi-hop `SUBSCRIBER`
 origination — making one node subscribe to another and then departing — is a separate unanswered
@@ -366,7 +367,7 @@ originate the **wires** ([#491]).
 
 ### Connection settings are transport-private
 
-`conn_settings_t` (`core/include/libtracer/transport_vertex.hpp:129`) and `conn_role_t` (`:84`) are
+`conn_settings_t` (`core/include/libtracer/transport_vertex.hpp:131`) and `conn_role_t` (`:84`) are
 a **device-private `:settings` facet** of a connection vertex
 ([ADR-0021 — the colon-field plane is the vertex ioctl](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0021-colon-field-plane-is-the-vertex-ioctl.md)
 draws the standard / device-private line). They live on the `tr::net` leaf record and are **never**

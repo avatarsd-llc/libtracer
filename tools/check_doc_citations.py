@@ -273,13 +273,13 @@ ANCHORS = [
     ("core/include/libtracer/child_registry.hpp:705", "live_size"),
     ("core/src/transport_vertex.cpp:877", "return std::unexpected(status_t::BACKPRESSURE);",
      "if (!router_.add_child(qualified, *link))"),
-    ("core/include/libtracer/transport_vertex.hpp:462", "result_t<void> register_module"),
-    ("core/include/libtracer/transport_vertex.hpp:105", "enum class link_state_t"),
+    ("core/include/libtracer/transport_vertex.hpp:473", "result_t<void> register_module"),
+    ("core/include/libtracer/transport_vertex.hpp:107", "enum class link_state_t"),
     # The #1392 erratum's two pins for "a connection's config is creation-time and const":
     # the record itself, and its ONLY accessor — whose `const conn_settings_t*` return is the
     # whole no-reconfiguration-door argument, so the anchor keeps the `const` in it.
-    ("core/include/libtracer/transport_vertex.hpp:133", "struct conn_settings_t {"),
-    ("core/include/libtracer/transport_vertex.hpp:597",
+    ("core/include/libtracer/transport_vertex.hpp:135", "struct conn_settings_t {"),
+    ("core/include/libtracer/transport_vertex.hpp:608",
      "const conn_settings_t* settings_of(std::string_view name) const;"),
     # The synthesized `:children[]` a bus connection answers accepted-peer enumeration from —
     # the fact that replaced reference/13's stale "`:children[]` / `:settings`".
@@ -461,20 +461,20 @@ ANCHORS = [
     ('core/include/libtracer/config.hpp:216', 'static constexpr std::size_t kMaxVertexBytes32 = 72;'),
     ('core/include/libtracer/config.hpp:287', 'using lkv_slot_t = sp_atomic_slot_t;',
      'A many-core host is the case for rebinding this'),
-    ('core/include/libtracer/config.hpp:590', 'using config_t = default_config_t;'),
+    ('core/include/libtracer/config.hpp:601', 'using config_t = default_config_t;'),
     ('core/include/libtracer/config.hpp:98',
      'static constexpr std::size_t kVertexLockStripes = 16;'),
     ('core/include/libtracer/config.hpp:122',
      'static constexpr std::size_t kCacheLineBytes = 64;'),
     ('core/include/libtracer/config.hpp:284',
      '* fragment: `using lkv_slot_t = hazard_slot_t;`. The named type must satisfy the contract in'),
-    ('core/include/libtracer/config.hpp:642',
+    ('core/include/libtracer/config.hpp:653',
      'inline constexpr bool kSpinWaitSafe = tr::graph::config_t::kSpinWaitSafe;'),
     ('core/include/libtracer/config.hpp:446', 'static constexpr bool kWeaklyOrdered = true;'),
     # Was pinned to the :316 banner rule, one of three IDENTICAL comment rules in this header —
     # an anchor no scope could ever separate. Re-pinned inside the SAME cited span
     # (the derived-spelling block the table cites) to the first derived spelling, which is unique.
-    ('core/include/libtracer/config.hpp:599',
+    ('core/include/libtracer/config.hpp:610',
      'inline constexpr std::size_t kVertexLockStripes = config_t::kVertexLockStripes;'),
     # core/include/libtracer/crc.hpp
     ('core/include/libtracer/crc.hpp:38', 'constexpr std::array<std::uint32_t, 256> crc32c_table() noexcept {'),
@@ -641,11 +641,11 @@ ANCHORS = [
     # core/include/libtracer/transport_vertex.hpp
     ('core/include/libtracer/transport_vertex.hpp:84',
      'enum class conn_role_t : std::uint8_t { DIAL = 0, LISTEN = 1 };'),
-    ('core/include/libtracer/transport_vertex.hpp:129',
+    ('core/include/libtracer/transport_vertex.hpp:131',
      "* §5 leanness ruling): a kind's PRIVATE config (e.g. quic's `cert`/`key` PEM paths) never"),
-    ('core/include/libtracer/transport_vertex.hpp:157',
+    ('core/include/libtracer/transport_vertex.hpp:159',
      'std::uint32_t backoff_ms = 0;         /**< @brief DIAL self-heal retry interval (RFC-0014 §4);'),
-    ('core/include/libtracer/transport_vertex.hpp:161',
+    ('core/include/libtracer/transport_vertex.hpp:163',
      'std::uint32_t connect_timeout_ms = 0; /**< @brief DIAL connect-attempt deadline (RFC-0014 §4):'),
     # core/include/libtracer/transport_webtransport.hpp
     ('core/include/libtracer/transport_webtransport.hpp:235',
@@ -937,8 +937,8 @@ ANCHORS = [
      'if(DEFINED CONFIG_LIBTRACER_SELF_HEAL_LINKS AND NOT CONFIG_LIBTRACER_SELF_HEAL_LINKS)'),
     ('integrations/esp-idf/libtracer/CMakeLists.txt:346',
      'if(CONFIG_LIBTRACER_SELF_HEAL_WORKER_STACK)'),
-    ('core/include/libtracer/config.hpp:530', 'static constexpr bool kSelfHealLinks = true;'),
-    ('core/include/libtracer/config.hpp:557',
+    ('core/include/libtracer/config.hpp:541', 'static constexpr bool kSelfHealLinks = true;'),
+    ('core/include/libtracer/config.hpp:568',
      'static constexpr std::size_t kSelfHealWorkerStackBytes = 0;'),
     ('integrations/esp-idf/libtracer/CMakeLists.txt:189',
      'list(APPEND LIBTRACER_SRCS "${LIBTRACER_ROOT}/core/src/transport_can.cpp")'),

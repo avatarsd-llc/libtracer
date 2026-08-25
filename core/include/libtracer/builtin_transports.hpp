@@ -24,6 +24,7 @@
 #include <memory>
 #include <utility>
 
+#include "libtracer/config.hpp"
 #include "libtracer/graph.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source.hpp"
@@ -31,6 +32,51 @@
 #include "libtracer/transport_vertex.hpp"
 
 namespace tr::net {
+
+/**
+ * @brief The RFC-0014 §4 S5 capability row every built-in POINT-TO-POINT kind registers
+ *        with (#1548) — the one locus for the flip's reasoning.
+ *
+ * `udp`, `tcp` and `ws` are point-to-point, connection-oriented dial kinds, so their DIAL
+ * connections are driven by the liveness engine (@ref tr::net::self_heal_link_t): creation
+ * mints the vertex `DORMANT` and constructs NO socket, the engine dials on demand bounded
+ * by `connect_timeout`, self-heals with `backoff` while a standing binding holds, and
+ * closes back to dormant on the last release. LISTEN connections of the same kinds are
+ * untouched — a LISTEN link ignores refcount and binds eagerly at creation, exactly as
+ * before.
+ *
+ * **`delivers_ropes` is `true` for all three** because every one of their DIAL classes
+ * (`udp_transport_t`, `tcp_transport_t`, `transport_ws_client`) overrides
+ * `transport_t::delivers_ropes` to `true` unconditionally. The engine must answer this
+ * for `fwd_router_t::add_child` BEFORE any socket exists, so it is declared statically
+ * here; a wrong answer would install the wrong receiver on the engine for its whole life.
+ *
+ * **`self_heal_dial` is BUILD-CONDITIONED** on @ref tr::net::kSelfHealLinks (#1470,
+ * maintainer ruling 2026-08-25, option (a)). On a build that closed the engine out, the
+ * built-ins declare `false` at this, their own registration site, and keep today's eager
+ * dial. That is not the silent downgrade `register_transport_type`'s loud refusal exists
+ * to prevent: the refusal targets a kind that *claims* `self_heal_dial` and would not get
+ * it, whereas the declaration here is itself build-conditioned — the built-ins never claim
+ * an engine this image does not contain. Making the refusal fire for the built-ins instead
+ * would turn a default-on feature into a default-broken build: every stock `udp`/`tcp`/`ws`
+ * kind would drop out of the catalog and every `SPEC` naming one would answer
+ * `SCHEMA_NOT_FOUND`.
+ *
+ * **Bus kinds keep the default** (`{}` — eager, no engine): `can`, and any other kind whose
+ * link exposes a `bus_link_t` facet, must NOT be registered here. The engine has no socket
+ * at creation, so the router's bus-facet wiring (`bus_of` at `fwd_router_t::add_child`)
+ * would never see the facet and the connection's peer listing would be dead for its whole
+ * life. See `%transport_can.hpp`'s `can_transport_factory` and `self_heal_dial`'s own
+ * contract in `%transport_vertex.hpp`.
+ *
+ * The trait also carries a re-runnability obligation: the engine runs the kind's factory
+ * once per dial attempt. Each built-in factory's own comment states why its DIAL thunk is
+ * re-runnable.
+ */
+inline constexpr transport_kind_traits_t kBuiltinPointToPointTraits{
+    .self_heal_dial = kSelfHealLinks,
+    .delivers_ropes = true,
+};
 
 /**
  * @brief Construct concrete transport `T`, mapping a failed `ok()` to `TRANSPORT_DOWN`.

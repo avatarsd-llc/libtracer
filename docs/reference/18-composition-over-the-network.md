@@ -320,8 +320,10 @@ The link-departure eviction is implemented and wired onto every connection-orien
 RFC-0009 §D.5. The **liveness engine** driving `link_state_t` transitions automatically
 (RFC-0014 §4 S5, `tr::net::self_heal_link_t`,
 [#492](https://github.com/avatarsd-llc/libtracer/issues/492)) runs for kinds registered
-`self_heal_dial`, consuming `backoff` and `connect_timeout`; the built-in kinds are not yet
-opted in, so their value is still set by the caller. Of the connection-config keys,
+`self_heal_dial`, consuming `backoff` and `connect_timeout` — which since
+[#1548](https://github.com/avatarsd-llc/libtracer/issues/1548) is every built-in
+point-to-point DIAL kind (`udp`, `tcp`, `ws`). Elsewhere — provided links, LISTEN links, bus
+kinds — the value is still set by the caller. Of the connection-config keys,
 `keepalive` has no consumer anywhere in the tree
 ([13](13-network-formation.md), [connection-config module page](../modules/connection-config.md)).
 So the recovery *semantics* above are specified and the *automation* of them is partly not yet

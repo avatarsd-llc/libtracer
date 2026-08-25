@@ -48,6 +48,7 @@
 
 #include "fwd_frame_builder.hpp"
 #include "libtracer/backend.hpp"
+#include "libtracer/builtin_transports.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/config_reader.hpp"
 #include "libtracer/error.hpp"
@@ -222,6 +223,27 @@ std::uint8_t read_link_state_byte(graph_t& g, std::string_view path) {
     return bytes.empty() ? 0xFF : static_cast<std::uint8_t>(bytes.back());
 }
 
+/**
+ * @brief Is a BUILT-IN DIAL kind engine-managed in THIS build (RFC-0014 §4 S5, #1548)?
+ *
+ * The built-in `udp`/`tcp`/`ws` factories register `self_heal_dial` conditioned on the
+ * `kSelfHealLinks` module knob (`%kBuiltinPointToPointTraits`), so a DIAL creation is
+ * DORMANT-with-no-socket on a stock build and eager on a closed-out one. Several cases below
+ * assert a different — and equally required — outcome per shape; this names the fork so each
+ * of them reads as one claim about the build rather than a conditional about nothing.
+ */
+constexpr bool kBuiltinDialIsEngineManaged = tr::net::kSelfHealLinks;
+
+/** @brief Poll @p path's liveness byte until it is @p want, or the backstop expires. */
+[[nodiscard]] bool await_link_state_byte(graph_t& g, std::string_view path, std::uint8_t want) {
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (read_link_state_byte(g, path) == want) return true;
+        std::this_thread::sleep_for(1ms);
+    }
+    return false;
+}
+
 void test_liveness_enum_value() {
     std::printf("Link-liveness value is the RFC-0014 6-state enum (S1):\n");
     graph_t node;
@@ -260,13 +282,20 @@ void test_constructed_link_reports_role_state() {
     const std::uint16_t srv_port = srv != nullptr ? srv->local_port() : 0;
     check(srv_port != 0, "the LISTENING socket reports its OS-granted bind port");
 
-    // A udp CLIENT is UP the moment its socket is constructed (0x03).
+    // The DIAL half is where the #1548 flip shows: engine-managed, a creation constructs no
+    // socket and reports DORMANT; on a build that closed the engine out the built-in declares
+    // eager and the socket is UP the moment it is constructed, exactly as it always was.
     const auto wc =
         node.write(path_t("/net:children[]"),
                    conn_spec("client", "cli", conn_role_t::DIAL, srv_port, "udp", "127.0.0.1"));
-    check(wc.has_value(), "SPEC{client, kind=udp} constructs the socket");
-    check(read_link_state_byte(node, "/net/udp-client/cli") == 3,
-          "a constructed DIAL reports UP (0x03)");
+    check(wc.has_value(), "SPEC{client, kind=udp} creates the connection");
+    if constexpr (kBuiltinDialIsEngineManaged) {
+        check(read_link_state_byte(node, "/net/udp-client/cli") == 0,
+              "an engine-managed DIAL reports DORMANT (0x00) — no socket yet (#1548)");
+    } else {
+        check(read_link_state_byte(node, "/net/udp-client/cli") == 3,
+              "an eagerly constructed DIAL reports UP (0x03)");
+    }
 }
 
 void test_backoff_connect_timeout_parsed() {
@@ -481,21 +510,24 @@ void test_config_constructed_udp() {
     check(s != nullptr && s->kind == "udp" && s->addr == "127.0.0.1" && s->port == b_port,
           "A: the parsed :settings carry kind/addr/port");
 
-    // Construction reported the DIAL socket UP — the /net/b vertex value is VALUE{UP}
-    // (0x03, the RFC-0014 liveness enum; S1 replaced the binary 0x01 "up").
-    const auto lv = node_a.read(path_t("/net/udp-client/b"));
-    bool up = false;
-    if (lv) {
-        const auto t = tr::wire::decode((*lv)->only());
-        up = t.has_value() && t->type == type_t::VALUE && t->payload.size() == 1 &&
-             t->payload[0] == std::byte{static_cast<std::uint8_t>(link_state_t::UP)};
-    }
-    check(up, "A: link state written UP at creation (await-able bring-up)");
+    // Since the #1548 S5 flip the DIAL half of a built-in kind is ENGINE-MANAGED, so creation
+    // constructs no socket and the vertex value is VALUE{DORMANT} (0x00); the op below is what
+    // wakes it. On a build that closed the engine out the built-in declares eager and the
+    // value is VALUE{UP} at creation, as it always was. Either way the value is the
+    // await-able bring-up signal and the application side of this case is unchanged.
+    check(read_link_state_byte(node_a, "/net/udp-client/b") ==
+              (kBuiltinDialIsEngineManaged ? static_cast<std::uint8_t>(link_state_t::DORMANT)
+                                           : static_cast<std::uint8_t>(link_state_t::UP)),
+          "A: the DIAL link's creation-time liveness matches this build's dial model");
 
-    // End-to-end: FWD{READ dst=/b/temp} from A crosses A's config-created socket to
+    // End-to-end: FWD{READ dst=/b/temp} from A AUTO-WAKES the dormant link (the §4 op door:
+    // one bounded dial attempt, then the frame goes), crosses A's socket to
     // B's terminus, and the REPLY source-routes back to A's reply sink — B's listener
     // learned A's ephemeral source address from the request datagram.
     router_a.on_frame("self", fwd_read({"net", "udp-client", "b", "temp"}, {"reply-ep"}));
+    check(await_link_state_byte(node_a, "/net/udp-client/b",
+                                static_cast<std::uint8_t>(link_state_t::UP)),
+          "A: the link is UP — the op woke it if this build's dial model is the engine's");
     const bool replied = fut.wait_for(3s) == std::future_status::ready;
     check(replied, "the READ reached B and the REPLY returned over the learned peer");
     if (replied) {
@@ -776,78 +808,14 @@ std::vector<std::byte> fwd_write(std::initializer_list<std::string_view> dst, st
 }
 
 /**
- * @brief A graph value backend that PARKS one allocation — the test's handle on the map lock.
- *
- * `graph_t::read_children_folded` frames each member's POINT header from the injected ADR-0060
- * value backend WHILE it holds the shared `map_mutex_`, so a backend that blocks inside `alloc`
- * leaves that lock held for exactly as long as the test wants. That is what lets the case below
- * stretch the instant `make_connection` spends between "the socket is up" and "the receiver is
- * wired" — a few microseconds of `register_vertex_key` + `add_child`, which is far too short to
- * observe — into a window a raw peer can be raced against on purpose. Nothing else changes:
- * every allocation but the single armed one goes straight to the heap backend.
- *
- * The window is not an invention of the test. #1025 is precisely the claim that this span is
- * long enough for a pushed message to be decoded inside it; the gate makes the span
- * MEASURABLE instead of leaving the guard at the mercy of how fast this host happens to start
- * a thread.
- */
-class map_lock_gate_t final : public tr::mem::mem_backend_t {
-   public:
-    map_lock_gate_t() noexcept : mem_backend_t("map_lock_gate") {}
-
-    /** @brief Arm the gate: the NEXT allocation parks until @ref release. */
-    void arm() { armed_.store(true, std::memory_order_relaxed); }
-
-    /** @brief Wait until an armed allocation has parked — i.e. the map lock IS now held. */
-    bool wait_parked(std::chrono::milliseconds budget) {
-        std::unique_lock lock(m_);
-        return cv_.wait_for(lock, budget, [this] { return parked_; });
-    }
-
-    /** @brief Let the parked allocation go, and the map lock with it. */
-    void release() {
-        {
-            const std::lock_guard lock(m_);
-            released_ = true;
-        }
-        cv_.notify_all();
-    }
-
-    /** @brief Park here once if armed, then allocate exactly as the heap backend would. */
-    tr::view::segment_t* alloc(std::size_t size, tr::mem::alloc_hint_t hint) override {
-        if (armed_.exchange(false, std::memory_order_relaxed)) {
-            std::unique_lock lock(m_);
-            parked_ = true;
-            cv_.notify_all();
-            cv_.wait(lock, [this] { return released_; });
-        }
-        return tr::mem::heap_backend().alloc(size, hint);
-    }
-
-    /** @brief Unreachable in practice: the heap backend stamps the segments it makes. */
-    void destroy(tr::view::segment_t* seg) noexcept override {
-        tr::mem::heap_backend().destroy(seg);
-    }
-
-   private:
-    std::atomic<bool> armed_{false}; /**< @brief Whether the next alloc parks. */
-    std::mutex m_;                   /**< @brief Guards the two flags below. */
-    std::condition_variable cv_;     /**< @brief Parked/released handoff. */
-    bool parked_ = false;            /**< @brief An armed allocation is sitting in the lock. */
-    bool released_ = false;          /**< @brief The test let it go. */
-};
-
-/**
  * @brief #1025 — a SPEC-created `kind=ws` DIAL delivers the message its peer pushed on connect.
  *
  * The other two guards each hold one end and neither covers the middle. The raw-peer case in
  * `ws_transport_test` constructs `transport_ws_client` DIRECTLY, so the factory's argument list
  * is never read; `test_link_is_armed_after_wiring` above goes in through `provide_link`, which
  * takes the staged-link branch and never calls a factory at all. The `defer_recv` argument the
- * built-in `ws` factory passes (`core/src/builtin_transport_ws.cpp`) sits between them. Drop it
- * and the SPEC-created DIAL is one-phase again: the recv thread is spawned inside the
- * constructor, `make_connection`'s `start_receiving()` finds the one-shot latch already set and
- * does nothing, and the push-on-connect message is back to racing the receiver install —
+ * built-in `ws` factory passes (`core/src/builtin_transport_ws.cpp`) sits between them: drop it
+ * and the recv thread is spawned inside the constructor, racing whoever installs the receiver —
  * silently, because a decode into an empty `receiver_slot_t` moves no counter at all.
  *
  * So this drives the raw-peer harness through the PRODUCTION creation path — a graph write of
@@ -855,16 +823,25 @@ class map_lock_gate_t final : public tr::mem::mem_backend_t {
  * The peer writes its `101` and a COMPLETE BINARY message carrying `FWD{WRITE dst=/temp}` in
  * ONE `::send`, so the whole message is off the wire and in the client's handshake carry-over
  * before the constructor returns; two writes would leave the client parked in `recv` and
- * reproduce nothing. The factory wires the router as the receiver, so a DELIVERED frame reaches
- * the terminus and lands in the LKV — `/temp` takes a write it had not taken before. A frame
- * decoded before the wiring reaches nothing, and `/temp` stays as it was.
+ * reproduce nothing. A DELIVERED frame reaches the terminus and lands in the LKV — `/temp`
+ * takes a write it had not taken before. A frame decoded before the wiring reaches nothing,
+ * and `/temp` stays as it was.
  *
- * The window is held open on purpose (see @ref map_lock_gate_t). Left to the host, the span
- * between the factory returning and `add_child` wiring the receiver is a couple of
- * microseconds while a fresh `pthread` needs tens to reach its first read — so the one-phase
- * shape would usually win the race by accident and the guard would assert nothing. Measured
- * here before the gate existed: 20 runs of the reverted factory, 20 deliveries. The gate stalls
- * the creation path INSIDE that span, which is the only state in which the two shapes differ.
+ * **Reshaped by the #1548 S5 flip.** The `ws` kind's DIAL connections are now engine-managed,
+ * which changes both halves of this case:
+ *
+ * - The dial no longer happens at CREATION. The SPEC mints the vertex `DORMANT` with no
+ *   socket — asserted below, along with the peer NOT being dialed — and the standing binding
+ *   (`acquire_link`) is what demands the link. That is the flip's own behaviour change, so it
+ *   is checked here rather than merely tolerated.
+ * - The window this case used to hold open with a map-lock gate is GONE by construction, and
+ *   the gate went with it. `fwd_router_t::add_child` installs the receiver on the ENGINE — a
+ *   stable routing identity that exists before any socket does — and every socket the engine
+ *   later constructs is wired by `self_heal_link_t::wire_socket`, which installs the sinks and
+ *   only THEN calls `start_receiving()`. The span the gate used to stretch (factory returns →
+ *   receiver wired) no longer exists on this path; the ordering is a straight line inside the
+ *   engine. `defer_recv` is still load-bearing, and for that ordering: without it the socket's
+ *   recv thread starts inside its own constructor, before `wire_socket` has installed anything.
  */
 void test_factory_built_ws_dial_delivers_push_on_connect() {
     std::printf("a SPEC-created kind=ws DIAL delivers the peer's push-on-connect (#1025):\n");
@@ -886,13 +863,13 @@ void test_factory_built_ws_dial_delivers_push_on_connect() {
     // The pushed message: a remote WRITE of one byte into this node's own /temp.
     const std::byte kPushed{0x5A};
     const std::vector<std::byte> pushed = fwd_write({"temp"}, kPushed);
-    // How long the creation path is held between the socket and the wiring. Three orders of
-    // magnitude more than a one-phase recv thread needs to decode what it was handed, so the
-    // reverted factory fails here deterministically rather than flakily.
-    constexpr auto kHeld = 200ms;
+    // How long the test waits to conclude that NOTHING dialed the peer at creation. Three
+    // orders of magnitude more than a loopback connect + handshake needs, so an eager factory
+    // (the pre-#1548 shape) fails the dormancy check here deterministically, not flakily.
+    constexpr auto kNoDialWindow = 200ms;
 
     std::promise<bool> one_write_done;  // the 101 and the message went out as ONE send
-    std::promise<void> peer_answered;   // ...and it is on the wire NOW (the hold's anchor)
+    std::promise<void> peer_answered;   // ...and it is on the wire NOW
     std::promise<void> test_done;       // safe to close the peer socket
     auto one_write_fut = one_write_done.get_future();
     auto answered_fut = peer_answered.get_future();
@@ -940,24 +917,17 @@ void test_factory_built_ws_dial_delivers_push_on_connect() {
         ::close(cfd);
     });
 
-    // Declared before the graph they serve: the gate IS the graph's value backend, and the
-    // counter and its callable outlive the vertex they are subscribed on.
-    map_lock_gate_t gate;
+    // Declared before the graph they serve: the counter and its callable outlive the vertex
+    // they are subscribed on.
     std::atomic<int> temp_writes{0};
     auto on_temp = [&temp_writes](const tr::view::rope_t&) {
         temp_writes.fetch_add(1, std::memory_order_relaxed);
     };
 
-    graph_t node(std::pmr::get_default_resource(), &gate);
+    graph_t node;
     fwd_router_t router(node);
     (void)node.register_vertex(path_t("/temp"), role_t::STORED_VALUE);
     (void)node.subscribe(path_t("/temp"), on_temp);
-    // The vertex whose `:children[]` fold parks the gate — it needs one REGISTERED child,
-    // because the member headers are what the fold draws from the value backend inside the
-    // map lock (the outer header is framed after the lock is dropped).
-    const tr::graph::vertex_handle_t gate_v =
-        node.register_vertex(path_t("/gate"), role_t::STORED_VALUE);
-    (void)node.register_vertex(path_t("/gate/x"), role_t::STORED_VALUE);
     const int before = temp_writes.load(std::memory_order_relaxed);
 
     {
@@ -967,47 +937,29 @@ void test_factory_built_ws_dial_delivers_push_on_connect() {
         // and graph it delivers into.
         transport_vertex_t net(node, router);
         declare_builtin_modules(net);  // ADR-0073 §4: the application mints the module names
-        // Pre-create the `/net/<module>` structural vertex `make_connection` would otherwise
-        // create lazily. That lazy call is a `register_vertex_key` BEFORE the factory runs, so
-        // leaving it would park the creation path on the gate with no socket built yet — the
-        // held window has to start AFTER the client exists to be the window #1025 is about.
-        (void)node.try_register_vertex(path_t("/net/ws-client"), role_t::STORED_VALUE);
-
-        gate.arm();
-        std::thread holder([&] { (void)node.read_children_folded(gate_v); });
-        check(gate.wait_parked(5s), "the gate parked inside the graph's map lock");
-
-        // The creation path is about to block, so the release cannot come from this thread.
-        // The hold is anchored to the instant the peer's `101` hit the wire — the client's
-        // constructor returns microseconds later — rather than to a wall-clock guess about how
-        // long a loopback handshake takes, so a loaded runner cannot eat the window.
-        std::chrono::steady_clock::time_point released_at;
-        std::thread releaser([&] {
-            (void)answered_fut.wait_for(5s);
-            std::this_thread::sleep_for(kHeld);
-            released_at = std::chrono::steady_clock::now();
-            gate.release();
-        });
 
         const auto w = node.write(
             path_t("/net:children[]"),
             conn_spec("client", "up", conn_role_t::DIAL, ntohs(bound.sin_port), "ws", "127.0.0.1"));
-        const auto spec_returned = std::chrono::steady_clock::now();
-        releaser.join();  // ...and with it the happens-before edge on `released_at`
-        holder.join();
 
         check(w.has_value(), "the SPEC created the connection through the built-in ws factory");
         check(net.link_of("net/ws-client/up") != nullptr,
               "the link is a CONSTRUCTED one (no provide_link staged anything here)");
-        check(one_write_fut.wait_for(3s) == std::future_status::ready && one_write_fut.get(),
+        if constexpr (kBuiltinDialIsEngineManaged) {
+            // The #1548 flip, observed from the peer's side: creation dialled NOTHING. The raw
+            // listener never accepted, so the pusher thread is still parked in `accept`.
+            check(read_link_state_byte(node, "/net/ws-client/up") == 0,
+                  "the engine-managed DIAL is minted DORMANT (0x00) — no socket at creation");
+            check(answered_fut.wait_for(kNoDialWindow) == std::future_status::timeout,
+                  "and the peer was never dialled — the engine waits for demand (#1548)");
+        }
+        // The standing binding IS the demand: the engine dials, handshakes, and the peer's
+        // push-on-connect rides the very first read the socket ever does. On a closed-out
+        // build the socket is already up and this is the documented no-op.
+        check(net.acquire_link("net/ws-client/up").has_value(),
+              "acquire_link takes the standing hold and kicks the dial");
+        check(one_write_fut.wait_for(5s) == std::future_status::ready && one_write_fut.get(),
               "the peer put the 101 and a COMPLETE pushed message in ONE write");
-        // Without this the case is vacuous: it would be asserting delivery across a window too
-        // short for either shape to lose, and would pass whatever the factory passes. The write
-        // returning only AFTER the gate let go is what proves it was gated — a creation path
-        // that ran to completion on its own would have returned long before.
-        check(spec_returned >= released_at,
-              "and the creation path was still INSIDE make_connection when the gate let go — "
-              "the window really was held open across it");
 
         bool delivered = false;
         const auto deadline = std::chrono::steady_clock::now() + 5s;
@@ -1053,11 +1005,9 @@ std::vector<std::byte> tcp_record(std::span<const std::byte> payload) {
  * factory's argument list is never read, and `test_link_is_armed_after_wiring` goes in through
  * `provide_link`, which takes the staged-link branch and calls no factory at all. The
  * `defer_recv` argument the built-in `tcp` factory passes
- * (`core/src/builtin_transport_tcp.cpp`) sits between them. Drop it and the SPEC-created DIAL
- * is one-phase again: the recv thread is spawned inside the constructor,
- * `make_connection`'s `start_receiving()` finds the one-shot latch already set and does
- * nothing, and the push-on-connect frame is back to racing the receiver install — silently,
- * because a decode into an empty `receiver_slot_t` moves no counter at all.
+ * (`core/src/builtin_transport_tcp.cpp`) sits between them. Drop it and the recv thread is
+ * spawned inside the constructor, racing the receiver install — silently, because a decode
+ * into an empty `receiver_slot_t` moves no counter at all.
  *
  * So this drives a raw-peer harness through the PRODUCTION creation path — a graph write of
  * SPEC{client, kind=tcp, addr, port} — and observes DOWNSTREAM of the link, where a drop
@@ -1067,9 +1017,11 @@ std::vector<std::byte> tcp_record(std::span<const std::byte> payload) {
  * the LKV — `/temp` takes a write it had not taken before. A frame decoded before the wiring
  * reaches nothing, and `/temp` stays as it was.
  *
- * The window is held open on purpose (see @ref map_lock_gate_t) — left to the host it is a
- * couple of microseconds, so the one-phase shape would usually win the race by accident and
- * the guard would assert nothing.
+ * **Reshaped by the #1548 S5 flip**, exactly as the `ws` twin above and for the same two
+ * reasons: creation is dormant (asserted here from the peer's side — nothing accepts until
+ * `acquire_link` demands the link), and the map-lock gate that used to stretch the
+ * factory-returns → receiver-wired span is retired because that span no longer exists on this
+ * path. See the twin's contract note for the ordering the engine puts in its place.
  */
 void test_factory_built_tcp_dial_delivers_push_on_connect() {
     std::printf("a SPEC-created kind=tcp DIAL delivers the peer's push-on-connect (#1045):\n");
@@ -1091,13 +1043,13 @@ void test_factory_built_tcp_dial_delivers_push_on_connect() {
     // The pushed frame: a remote WRITE of one byte into this node's own /temp.
     const std::byte kPushed{0x6B};
     const std::vector<std::byte> record = tcp_record(fwd_write({"temp"}, kPushed));
-    // How long the creation path is held between the socket and the wiring. Three orders of
-    // magnitude more than a one-phase recv thread needs to decode what is already sitting in
-    // its socket, so the reverted factory fails here deterministically rather than flakily.
-    constexpr auto kHeld = 200ms;
+    // How long the test waits to conclude that NOTHING dialled the peer at creation — three
+    // orders of magnitude more than a loopback connect needs, so an eager factory fails the
+    // dormancy check deterministically rather than flakily.
+    constexpr auto kNoDialWindow = 200ms;
 
     std::promise<bool> one_write_done;  // the whole record went out as ONE send
-    std::promise<void> peer_answered;   // ...and it is on the wire NOW (the hold's anchor)
+    std::promise<void> peer_answered;   // ...and it is on the wire NOW
     std::promise<void> test_done;       // safe to close the peer socket
     auto one_write_fut = one_write_done.get_future();
     auto answered_fut = peer_answered.get_future();
@@ -1120,22 +1072,17 @@ void test_factory_built_tcp_dial_delivers_push_on_connect() {
         ::close(cfd);
     });
 
-    // Declared before the graph they serve: the gate IS the graph's value backend, and the
-    // counter and its callable outlive the vertex they are subscribed on.
-    map_lock_gate_t gate;
+    // Declared before the graph they serve: the counter and its callable outlive the vertex
+    // they are subscribed on.
     std::atomic<int> temp_writes{0};
     auto on_temp = [&temp_writes](const tr::view::rope_t&) {
         temp_writes.fetch_add(1, std::memory_order_relaxed);
     };
 
-    graph_t node(std::pmr::get_default_resource(), &gate);
+    graph_t node;
     fwd_router_t router(node);
     (void)node.register_vertex(path_t("/temp"), role_t::STORED_VALUE);
     (void)node.subscribe(path_t("/temp"), on_temp);
-    // The vertex whose `:children[]` fold parks the gate — it needs one REGISTERED child.
-    const tr::graph::vertex_handle_t gate_v =
-        node.register_vertex(path_t("/gate"), role_t::STORED_VALUE);
-    (void)node.register_vertex(path_t("/gate/x"), role_t::STORED_VALUE);
     const int before = temp_writes.load(std::memory_order_relaxed);
 
     {
@@ -1150,45 +1097,26 @@ void test_factory_built_tcp_dial_delivers_push_on_connect() {
                                   conn_role_t::DIAL)
                   .has_value(),
               "the tcp DIAL module is declared");
-        // Pre-create the `/net/<module>` structural vertex `make_connection` would otherwise
-        // create lazily. That lazy call is a `register_vertex_key` BEFORE the factory runs, so
-        // leaving it would park the creation path on the gate with no socket built yet — the
-        // held window has to start AFTER the dialer exists to be the window #1045 is about.
-        (void)node.try_register_vertex(path_t("/net/tcp-client"), role_t::STORED_VALUE);
-
-        gate.arm();
-        std::thread holder([&] { (void)node.read_children_folded(gate_v); });
-        check(gate.wait_parked(5s), "the gate parked inside the graph's map lock");
-
-        // The creation path is about to block, so the release cannot come from this thread.
-        // The hold is anchored to the instant the peer's record hit the wire rather than to a
-        // wall-clock guess, so a loaded runner cannot eat the window.
-        std::chrono::steady_clock::time_point released_at;
-        std::thread releaser([&] {
-            (void)answered_fut.wait_for(5s);
-            std::this_thread::sleep_for(kHeld);
-            released_at = std::chrono::steady_clock::now();
-            gate.release();
-        });
 
         const auto w = node.write(path_t("/net:children[]"),
                                   conn_spec("client", "up", conn_role_t::DIAL,
                                             ntohs(bound.sin_port), "tcp", "127.0.0.1"));
-        const auto spec_returned = std::chrono::steady_clock::now();
-        releaser.join();  // ...and with it the happens-before edge on `released_at`
-        holder.join();
 
         check(w.has_value(), "the SPEC created the connection through the built-in tcp factory");
         check(net.link_of("net/tcp-client/up") != nullptr,
               "the link is a CONSTRUCTED one (no provide_link staged anything here)");
-        check(one_write_fut.wait_for(3s) == std::future_status::ready && one_write_fut.get(),
+        if constexpr (kBuiltinDialIsEngineManaged) {
+            // The #1548 flip, observed from the peer's side: creation dialled NOTHING.
+            check(read_link_state_byte(node, "/net/tcp-client/up") == 0,
+                  "the engine-managed DIAL is minted DORMANT (0x00) — no socket at creation");
+            check(answered_fut.wait_for(kNoDialWindow) == std::future_status::timeout,
+                  "and the peer was never dialled — the engine waits for demand (#1548)");
+        }
+        // The standing binding IS the demand (a no-op on a closed-out, eager build).
+        check(net.acquire_link("net/tcp-client/up").has_value(),
+              "acquire_link takes the standing hold and kicks the dial");
+        check(one_write_fut.wait_for(5s) == std::future_status::ready && one_write_fut.get(),
               "the peer put a COMPLETE pushed record on the wire in ONE write");
-        // Without this the case is vacuous: it would be asserting delivery across a window too
-        // short for either shape to lose, and would pass whatever the factory passes. The write
-        // returning only AFTER the gate let go is what proves it was gated.
-        check(spec_returned >= released_at,
-              "and the creation path was still INSIDE make_connection when the gate let go — "
-              "the window really was held open across it");
 
         bool delivered = false;
         const auto deadline = std::chrono::steady_clock::now() + 5s;
@@ -1598,13 +1526,31 @@ void test_refused_dial_is_transport_down() {
 
     const std::uint16_t dead = free_port();
     check(dead != 0, "reserved and released a loopback port — nothing listens on it");
+    // The FACTORY's own mapping, at its locus and on every build shape: `make_checked` is the
+    // one place `!ok()` becomes a status, and a refused loopback connect is what a peer-not-up
+    // dial hits. Asserted directly because since the #1548 S5 flip the engine no longer runs
+    // this factory on the CREATION path, so a creating write is no longer where the mapping is
+    // observable on a stock build.
+    const auto direct = tr::net::make_checked<tr::net::tcp_transport_t>("127.0.0.1", dead);
+    check(!direct.has_value() && direct.error() == status_t::TRANSPORT_DOWN,
+          "a refused tcp dial => TRANSPORT_DOWN (the pre-#929 answer was NOT_FOUND)");
+
     const auto w =
         node.write(path_t("/net:children[]"),
                    conn_spec("client", "refused", conn_role_t::DIAL, dead, "tcp", "127.0.0.1"));
-    check(!w.has_value() && w.error() == status_t::TRANSPORT_DOWN,
-          "a refused tcp dial => TRANSPORT_DOWN (the pre-#929 answer was NOT_FOUND)");
-    check(!node.find(path_t::parse("/net/tcp-client/refused")->key()).has_value(),
-          "the refused dial left no connection vertex behind");
+    if constexpr (kBuiltinDialIsEngineManaged) {
+        // The connect is DEFERRED to the engine's first dial (#1548), so creation succeeds and
+        // the vertex rests DORMANT. Nothing about #929 changes: the status the factory answers
+        // is the same one, it just reaches an op's drop census instead of the creating write.
+        check(w.has_value(), "engine build: the creating write does not dial, so it succeeds");
+        check(read_link_state_byte(node, "/net/tcp-client/refused") == 0,
+              "and the connection rests DORMANT with the peer down");
+    } else {
+        check(!w.has_value() && w.error() == status_t::TRANSPORT_DOWN,
+              "eager build: the refused dial fails the creating write with TRANSPORT_DOWN");
+        check(!node.find(path_t::parse("/net/tcp-client/refused")->key()).has_value(),
+              "and the refused dial left no connection vertex behind");
+    }
 
     // The wire disposition this status now carries — the consequence the collapse inverted.
     check(tr::wire::err_disposition(tr::wire::err_t::TRANSPORT_DOWN) ==
@@ -1687,6 +1633,61 @@ void test_conn_endpoint_constructs_socket() {
     check(w.has_value(), "SPEC{name=srv, config{port}} constructs the bound socket");
     check(read_link_state_byte(node, "/net/udp-server/srv") == 4,
           "the constructed LISTEN reports LISTENING (0x04) — the role came from the module");
+}
+
+/**
+ * @brief RFC-0014 §4 S5 (#1548): the BUILT-IN dial kinds declare `self_heal_dial`
+ *        BUILD-CONDITIONED on `kSelfHealLinks` — asserted on BOTH shapes.
+ *
+ * This is the one case that runs on the `build-test-self-heal-closed` CI leg as well as the
+ * stock one, and it asserts a DIFFERENT outcome on each. The subject is a `tcp` DIAL SPEC
+ * naming a port nothing is listening on:
+ *
+ * - **`kSelfHealLinks = true`** (stock): creation SUCCEEDS and mints the vertex `DORMANT`.
+ *   The factory did not run; the engine will dial on demand. That is the #1548 flip.
+ * - **`kSelfHealLinks = false`** (the #1470 module gate): the built-ins consult the knob at
+ *   their own registration site and declare `self_heal_dial = false`, so creation runs the
+ *   factory eagerly and a refused connect answers `TRANSPORT_DOWN` — today's behaviour,
+ *   unchanged. The LOUD `register_transport_type` refusal is reserved for a THIRD-PARTY kind
+ *   that *claims* the engine on a build that excluded it; a built-in never claims one it
+ *   cannot have, so it is not downgraded — it never asked. (Maintainer ruling 2026-08-25,
+ *   option (a).) The observable proof that no refusal fired: the kind is still CATALOGUED —
+ *   the write's answer is `TRANSPORT_DOWN`, the factory's own, not the `SCHEMA_NOT_FOUND` an
+ *   uncatalogued kind gives.
+ *
+ * The engine's own behaviour is `link_liveness_test`'s (it skips itself on the closed build);
+ * what is pinned here is only that the built-in kinds' DECLARATION tracks the knob.
+ */
+void test_builtin_dial_traits_track_the_build_knob() {
+    std::printf("RFC-0014 S5 (#1548): the built-in tcp DIAL kind follows kSelfHealLinks:\n");
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    check(net.register_module("tcp-client", "tcp", conn_role_t::DIAL).has_value(),
+          "declare the tcp dial module");
+
+    // A port with nothing behind it: bind an ephemeral listener and drop it, so a connect
+    // there is refused. This is the condition the two shapes answer differently.
+    std::uint16_t dead_port = 0;
+    {
+        const tr::net::transport_tcp_server probe(0);
+        check(probe.ok(), "an ephemeral probe listener bound");
+        dead_port = probe.local_port();
+    }
+    const auto w =
+        node.write(path_t("/net/tcp-client/conn"),
+                   conn_spec_t("a").kind("tcp").addr("127.0.0.1").port(dead_port).view());
+
+    if constexpr (kBuiltinDialIsEngineManaged) {
+        check(w.has_value(), "engine build: creation with the peer DOWN succeeds (#1548)");
+        check(read_link_state_byte(node, "/net/tcp-client/a") == 0,
+              "... and the vertex is minted DORMANT (0x00) — no socket at creation");
+    } else {
+        check(!w.has_value() && w.error() == status_t::TRANSPORT_DOWN,
+              "closed-out build: the built-in declares eager, so a dead peer fails at creation");
+        check(!node.find(path_t::parse("/net/tcp-client/a")->key()).has_value(),
+              "... and nothing landed");
+    }
 }
 
 /**
@@ -2535,6 +2536,7 @@ int main() {
     test_register_module_rejects_reserved_chars();
     test_conn_endpoint_spec_creates();
     test_conn_endpoint_constructs_socket();
+    test_builtin_dial_traits_track_the_build_knob();
     test_conn_endpoint_malformed_refuses();
     test_conn_endpoint_spec_in_use_is_idempotent_safe();
     test_conn_endpoint_name_removes();

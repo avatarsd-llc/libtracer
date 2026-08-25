@@ -23,13 +23,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   selectors are driven by one symbol and cannot disagree on this component. Defaults `y`: a
   stock image is byte-identical to before.
 
-  **No built-in kind asks for the engine today.** The `udp`/`tcp`/`ws` factories construct
-  eagerly, and an ESP node stages its links with `provide_link`, which bypasses the factory
-  catalog entirely — so on a stock chip image the engine is unreachable and this is a pure
-  saving until [#1548](https://github.com/avatarsd-llc/libtracer/issues/1548) flips the
-  built-in point-to-point kinds onto it. With it off, registering a `self_heal_dial` kind is
-  **refused** (the kind is not catalogued; a `SPEC` naming it answers `SCHEMA_NOT_FOUND`)
-  rather than quietly downgraded to eager construction.
+  **The built-in kinds now ask for the engine** ([#1548](https://github.com/avatarsd-llc/libtracer/issues/1548)):
+  `udp`/`tcp`/`ws` DIAL connections are engine-managed. An ESP node that stages its links with
+  `provide_link` bypasses the factory catalog entirely, so on such an image the engine is still
+  unreachable and turning this off is a pure saving; an ESP node that creates connections from
+  config now reaches it. With it off, the built-ins read the same symbol at their own
+  registration site and declare eager construction — they are NOT refused. The **refusal** (the
+  kind is not catalogued; a `SPEC` naming it answers `SCHEMA_NOT_FOUND`) applies to a
+  third-party kind that asks for `self_heal_dial` on an image that does not carry the engine,
+  which is still never a quiet downgrade to eager construction.
 
   The second is the reporter's other ask and the one that made the engine unusable here
   independently of flash: the worker was a bare `std::thread`, which on IDF takes

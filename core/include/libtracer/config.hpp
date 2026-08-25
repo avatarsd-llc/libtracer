@@ -512,12 +512,14 @@ struct default_config_t {
      * …) out of a +6,224 B image bump, and **0 B** of `.dram0.bss` — the engine is code and
      * per-instance state, not a static table.
      *
-     * **Who should set it.** Any node that does not use an engine-managed DIAL — which
-     * today is EVERY stock target, because **no in-tree transport kind sets
-     * `self_heal_dial`**: the built-in `udp`/`tcp`/`ws` factories construct eagerly, and an
-     * ESP-IDF node stages its links with `provide_link`, which bypasses the factory catalog
-     * entirely. Flipping the built-in point-to-point kinds onto the engine is #1548.
-     * Override fragment: `static constexpr bool kSelfHealLinks = false;`
+     * **Who should set it.** Any node that does not use an engine-managed DIAL. Since #1548
+     * the built-in `udp`/`tcp`/`ws` factories DO register `self_heal_dial`, so a stock host
+     * node that creates connections from config is using the engine and should leave this
+     * `true`. The targets that can still close it out are the ones whose DIAL connections
+     * never come from the factory catalog — an ESP-IDF node staging its links with
+     * `provide_link`, a `%slim_net_t` node registering only its own kinds, a listen-only or
+     * bus-only node. Override fragment:
+     * `static constexpr bool kSelfHealLinks = false;`
      *
      * **It is a REFUSAL, never a silent downgrade.** A build that binds it `false` and then
      * registers a `self_heal_dial` kind is rejected at `register_transport_type`: the kind
@@ -526,6 +528,15 @@ struct default_config_t {
      * Quietly registering it with the trait CLEARED would be worse than either: the
      * connection would come up eagerly, with no redial and no liveness publishing, and
      * nothing would say so.
+     *
+     * **The built-ins are not subject to that refusal, and are not downgraded by it**
+     * (maintainer ruling 2026-08-25, #1548): they read this knob at their OWN registration
+     * site (`%kBuiltinPointToPointTraits` in `%builtin_transports.hpp`) and declare
+     * `self_heal_dial = false` on a closed-out build, keeping the eager dial they always
+     * had. The refusal above targets a kind that CLAIMS an engine the image does not carry;
+     * a build-conditioned declaration claims nothing it cannot have. Making the refusal fire
+     * for the built-ins instead would drop `udp`/`tcp`/`ws` out of the catalog and turn a
+     * default-on feature into a default-broken build.
      */
     static constexpr bool kSelfHealLinks = true;
 

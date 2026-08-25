@@ -37,6 +37,7 @@
 #include "libtracer/conn_spec.hpp"
 #include "libtracer/self_heal_link.hpp"
 #include "libtracer/tracer.hpp"
+#include "libtracer/transport_tcp.hpp"
 #include "test_support.hpp"
 
 namespace {
@@ -450,6 +451,109 @@ void test_remove_while_healing_tears_down() {
     check(g_socks_alive.load() == 0, "no socket survives the removal");
 }
 
+/**
+ * @brief The FLIP itself (#1548): the BUILT-IN `tcp` kind, end to end through the engine —
+ *        a real socket, a real listener, a real remote hangup, a real heal.
+ *
+ * Every test above scripts a fake kind, which pins the ENGINE but says nothing about whether
+ * any kind the library ships actually reaches it — and until this flip none did. This case is
+ * the gate on that: it drives `tcp`, registered by the stock `transport_vertex_t` ctor, and
+ * asserts the four claims the flip makes.
+ *
+ *  1. **Creation with the peer DOWN succeeds** and mints the vertex `DORMANT`. This is the
+ *     behaviour change embedders see (`core/CHANGELOG.md`): the same SPEC used to answer
+ *     `TRANSPORT_DOWN` because the factory ran a synchronous `connect` on the creation path.
+ *  2. **The link IS the engine** (`self_heal_link_t`), and it answers `delivers_ropes()` the
+ *     way `tcp_transport_t` does — the static declaration in `kBuiltinPointToPointTraits`
+ *     has to match the socket it stands in for, because `fwd_router_t::add_child` installs
+ *     the matching receiver ONCE, on the engine, before any socket exists.
+ *  3. **A standing binding brings a REAL socket up** against a real listener.
+ *  4. **FACTORY RE-RUNNABILITY, demonstrated rather than asserted**: the listener is
+ *     destroyed under the live connection and a fresh one bound on the same port. The engine
+ *     re-runs the built-in `tcp` factory — the same lambda, a second and later time — and the
+ *     connection returns to `UP` on a freshly constructed socket, with the vertex never
+ *     retired and the routing identity never rebound.
+ *
+ * The LISTEN half is checked to be UNTOUCHED (RFC-0014 §4: a LISTEN link ignores refcount and
+ * binds eagerly) — it is created here and reports `LISTENING` at creation, with a real
+ * `transport_tcp_server` behind it, not an engine.
+ */
+void test_builtin_tcp_kind_runs_through_the_engine() {
+    std::printf("S5 flip (#1548): the BUILT-IN `tcp` kind is engine-managed end to end:\n");
+    graph_t node;
+    fwd_router_t router(node);
+    // The FULL ctor — the one that registers the built-in udp/tcp/ws catalog entries.
+    transport_vertex_t net(node, router);
+    check(net.register_module("tcp-client", "tcp", conn_role_t::DIAL).has_value(),
+          "the application declares the tcp DIAL module (ADR-0073 §4)");
+    check(net.register_module("tcp-server", "tcp", conn_role_t::LISTEN).has_value(),
+          "and the tcp LISTEN module");
+
+    // A port with nothing behind it: bind an ephemeral listener, take the port it was
+    // granted, and drop it. A connect there is refused, which is exactly the "peer is down"
+    // condition creation used to fail on.
+    std::uint16_t port = 0;
+    {
+        const tr::net::transport_tcp_server probe(0);
+        check(probe.ok(), "an ephemeral probe listener bound");
+        port = probe.local_port();
+    }
+    check(port != 0, "the probe reported its granted port");
+
+    // 1. Creation against a DEAD peer.
+    tr::net::conn_spec_t spec("a");
+    spec.kind("tcp").addr("127.0.0.1").port(port).backoff_ms(5).connect_timeout_ms(4000);
+    const auto w = node.write(path_t("/net/tcp-client/conn"), spec.view());
+    check(w.has_value(), "SPEC{a, kind=tcp} SUCCEEDS with nothing listening (the #1548 change)");
+    check(state_byte(node, "/net/tcp-client/a") == static_cast<std::uint8_t>(link_state_t::DORMANT),
+          "the built-in kind's DIAL vertex is minted DORMANT — no socket at creation");
+
+    // 2. The link is the engine, answering the statically declared capability.
+    tr::net::transport_t* const link = net.link_of("net/tcp-client/a");
+    check(dynamic_cast<tr::net::self_heal_link_t*>(link) != nullptr,
+          "the connection's link IS the S5 engine, not a tcp_transport_t");
+    check(link != nullptr && link->delivers_ropes(),
+          "and it declares delivers_ropes — the value tcp_transport_t itself answers");
+    check(!link->link_up(), "link_up() is false while dormant");
+
+    // 3. The peer comes up; a standing binding dials a REAL socket.
+    auto peer = std::make_unique<tr::net::transport_tcp_server>(port);
+    check(peer->ok(), "a real listener bound the same port");
+    check(net.acquire_link("net/tcp-client/a").has_value(), "acquire_link takes the standing hold");
+    check(await_state(node, "/net/tcp-client/a", link_state_t::UP),
+          "the engine ran the BUILT-IN factory and reached UP over a real TCP socket");
+    check(link->link_up(), "link_up() is true once UP");
+
+    // 4. Re-runnability: kill the listener under the live connection, bind a fresh one, and
+    // the engine's re-run of the same factory lambda brings the link back.
+    peer.reset();
+    check(await_state(node, "/net/tcp-client/a", link_state_t::RECONNECTING),
+          "the remote hangup is seen and, with a standing binding held, publishes RECONNECTING");
+    peer = std::make_unique<tr::net::transport_tcp_server>(port);
+    check(peer->ok(), "a replacement listener bound the same port (SO_REUSEADDR)");
+    check(await_state(node, "/net/tcp-client/a", link_state_t::UP),
+          "the RE-RUN built-in factory produced a fresh live socket — UP again, same vertex");
+    check(node.find(path_t::parse("/net/tcp-client/a")->key()).has_value(),
+          "the connection vertex was never retired across the heal (stable routing identity)");
+
+    // The last release closes the socket and re-dormants (RFC-0014 §4).
+    check(net.release_link("net/tcp-client/a").has_value(), "release_link drops the hold");
+    check(await_state(node, "/net/tcp-client/a", link_state_t::DORMANT),
+          "the last release closes the socket and re-dormants the built-in link");
+
+    // The LISTEN half of the SAME built-in kind is untouched: eager, and not an engine.
+    const auto wl = node.write(
+        path_t("/net/tcp-server/conn"),
+        tr::net::conn_spec_t("srv").kind("tcp").role(conn_role_t::LISTEN).port(0).view());
+    check(wl.has_value(), "SPEC{srv, kind=tcp, role=LISTEN} creates the listener");
+    check(state_byte(node, "/net/tcp-server/srv") ==
+              static_cast<std::uint8_t>(link_state_t::LISTENING),
+          "a LISTEN link still binds EAGERLY and reports LISTENING at creation (RFC-0014 §4)");
+    check(
+        dynamic_cast<tr::net::transport_tcp_server*>(net.link_of("net/tcp-server/srv")) != nullptr,
+        "and its link is the real listener — the flip is DIAL-only");
+}
+
 /** @brief The raw bytes of a conformance vector's `input.bin`. */
 std::vector<std::byte> vector_bytes(std::string_view case_dir) {
     const std::filesystem::path p =
@@ -575,6 +679,7 @@ int main() {
     test_standing_binding_selfheals();
     test_release_during_heal_stops_retry();
     test_remove_while_healing_tears_down();
+    test_builtin_tcp_kind_runs_through_the_engine();
     test_conformance_vectors();
     return tr::testing::summary("link_liveness");
 }

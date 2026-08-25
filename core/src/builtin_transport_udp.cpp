@@ -34,20 +34,33 @@ void register_udp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
     // library registers NEITHER (ADR-0073 §4): the application declares each module under a
     // name IT chooses via register_module (kUdpClientSuggestedModule /
     // kUdpServerSuggestedModule in transport_udp.hpp are the suggested defaults).
-    vertex.register_transport_type("udp", [rx_backend, egress_src](
-                                              const conn_settings_t& s,
-                                              const wire::tlv_t* /*raw_config*/) {
-        auto link = dial_or_listen(
-            s,
-            [&] {
-                return make_checked<udp_transport_t>(0, s.addr, s.port, rx_backend, s.max_frame);
-            },
-            [&] {
-                return make_checked<udp_transport_t>(s.port, s.addr, 0, rx_backend, s.max_frame);
-            });
-        // The ADR-0079 egress store, wired before the link is handed to the router (#873).
-        return with_egress_source(std::move(link), egress_src);
-    });
+    // RFC-0014 §4 S5 (#1548): `udp` is a POINT-TO-POINT kind, so its DIAL connections are
+    // engine-managed — see `kBuiltinPointToPointTraits` for the whole reasoning, including
+    // why `self_heal_dial` is build-conditioned. RE-RUNNABILITY (the engine runs this
+    // factory once per dial attempt): the thunk captures only two raw pointers whose
+    // lifetime outlives the vertex, and the DIAL arm constructs a FRESH `udp_transport_t`
+    // binding a fresh ephemeral local port each run — nothing here is consumed, moved from,
+    // or memoized between runs, so the second dial builds exactly what the first did (a new
+    // ephemeral source port, which no peer depends on: a udp DIAL socket is peer-addressed,
+    // never peer-known). The LISTEN arm never reaches the engine at all.
+    vertex.register_transport_type(
+        "udp",
+        [rx_backend, egress_src](const conn_settings_t& s, const wire::tlv_t* /*raw_config*/) {
+            auto link = dial_or_listen(
+                s,
+                [&] {
+                    return make_checked<udp_transport_t>(0, s.addr, s.port, rx_backend,
+                                                         s.max_frame);
+                },
+                [&] {
+                    return make_checked<udp_transport_t>(s.port, s.addr, 0, rx_backend,
+                                                         s.max_frame);
+                });
+            // The ADR-0079 egress store, wired before the link is handed to the router
+            // (#873).
+            return with_egress_source(std::move(link), egress_src);
+        },
+        kBuiltinPointToPointTraits);
 }
 
 }  // namespace tr::net
