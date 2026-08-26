@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief #981 — the two `try_*` call sites that MIGRATED off the `-fno-exceptions` probe
+ * @brief #981/#1570 — the `try_*` call sites that MIGRATED off the `-fno-exceptions` probe
  *        window really draw from the injected `block_source_t`, and answer its exhaustion
  *        by value.
  *
@@ -18,12 +18,18 @@
  * `std::vector` / `std::string`-element site keeps the helper and states the residual at the
  * site.
  *
- * Two sites migrated, and this file is their proof:
+ * Three sites migrated, and this file is their proof:
  *
  *   - `graph_t::read_subtree_folded`'s collect stack (`work_t` = a vertex pointer plus an
  *     index) — a peer picks which composed root to READ, so it picks how far this grows;
  *   - `fwd_router_t::deliver_remote`'s egress iov tables (`std::span`), both the
- *     reverse-list arm and the canonical full-route arm — one per remote delivery.
+ *     reverse-list arm and the canonical full-route arm — one per remote delivery;
+ *   - `fwd_router_t::resolve_terminus` / `::resolve_terminus_rope`'s REPLY iov tables
+ *     (`std::span`), one per inbound request frame — the last migratable window on the
+ *     reply path (#1570). A peer picks the reply's link count too: a composed-root read
+ *     answers with as many links as it produced, which is why the table has no fixed
+ *     bound. These two draw from the ROUTER's injected receive source rather than the
+ *     graph's `ctl` — the charge belongs where the frame's own arena is charged.
  *
  * @section instrument Why neither check is vacuous
  *
@@ -33,7 +39,7 @@
  * gate here is not "refuse everything": @ref gated_source_t refuses ONE exact block shape,
  * the `(elements * sizeof(T), alignof(T))` request the migrated container makes, and every
  * armed case asserts a POSITIVE instrument first — `served()` shows the source was really
- * asked for that shape. Revert either migration and the shape is never requested: the
+ * asked for that shape. Revert any of the migrations and the shape is never requested: the
  * instrument check fails AND the operation succeeds where the test demands a refusal, so
  * both halves redden. (The whole-source arm is deliberately NOT used: a graph draws its
  * arena and label-table blocks from the same `ctl`, so blanket refusal could not tell the
@@ -47,6 +53,7 @@
 #include <cstring>
 #include <new>
 #include <span>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -242,6 +249,8 @@ class counting_link_t final : public transport_t {
         ++frames_;
     }
     void inject(std::span<const std::byte> frame) { rx_.deliver_borrowed(frame); }
+    /** @brief Push @p frame up the ROPE tier — the second terminus (#1570 case (c)). */
+    void inject_rope(tr::view::rope_t frame) { rx_.deliver_rope(std::move(frame)); }
     std::size_t take() {
         const std::lock_guard lock(m_);
         return std::exchange(frames_, 0u);
@@ -298,11 +307,153 @@ void test_delivery_iov_on_the_seam() {
     check(link.take() == 1, "delivery resumes once the source recovers");
 }
 
+// --- (c) the terminus REPLY iov table (#1570) --------------------------------
+
+/** @brief The reply table is `reserve`d to the rope's exact link count, so its ONE request
+ *         is `links * sizeof(std::span<const std::byte>)` — no `+3` head/route/src spans:
+ *         the terminus sends the assembled reply rope and nothing beside it. */
+constexpr std::size_t reply_iov_bytes(std::size_t links) {
+    return links * sizeof(std::span<const std::byte>);
+}
+/**
+ * @brief The link count of the reply this case drives: a `FWD{REPLY}` over a single-segment
+ *        stored value assembles as TWO links — the resolver's freshly emitted head and the
+ *        stored value's own segment, adopted by reference (ADR-0053 5, no flatten).
+ *
+ * MEASURED, not assumed. The gate names one exact block shape, so a wrong count here would
+ * watch a shape nobody requests and the `served()` instrument would redden immediately —
+ * which is precisely the vacuity the @ref instrument section above exists to prevent.
+ */
+constexpr std::size_t kReplyLinks = 2;
+
+/**
+ * @brief `resolve_terminus`'s REPLY iov table draws from the router's injected RECEIVE
+ *        source, and its exhaustion drops the reply — never an abort, at any reply size.
+ *
+ * The third migrated site (#1570) and the last one on the reply path. Both termini built
+ * this table with `rope_t::try_to_iovec` — a `std::vector` on the GLOBAL heap, grown through
+ * `tr::detail::try_reserve`'s `-fno-exceptions` probe window — once per inbound request
+ * frame, behind no ACL. The source is the per-owner RECEIVE seam rather than the graph's
+ * `ctl`: this table is a transient cost of one peer's request on the receive thread, the
+ * same charge the frame's own arena decode takes two calls up (ADR-0067 §3).
+ *
+ * Non-vacuity, as in the two cases above: the gate names ONE exact block shape — the request
+ * the migrated `block_array_t` makes — and the permissive leg asserts `served()` first.
+ * Revert the migration and the shape is never requested, so the instrument check reddens as
+ * well as the refusal check.
+ */
+void test_reply_iov_on_the_seam() {
+    std::printf("resolve_terminus's reply iov table (block_array_t over the injected rx):\n");
+    gated_source_t rx;
+    graph_t g;
+    // The router's THIRD ctor parameter is the receive source; the label source stays the
+    // default heap so a label allocation cannot be mistaken for this table's.
+    fwd_router_t router(g, &tr::mem::heap_source(), &rx);
+    counting_link_t link;
+    (void)router.add_child("client", link);
+
+    const auto p = path_t::parse("/sensor/temp");
+    const auto v = g.register_vertex(*p, role_t::STORED_VALUE);
+    tr::view::rope_t val;
+    val.append(make_value({std::uint8_t{0x08}, 0x00, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00}));
+    check(g.write(v, std::move(val)).has_value(), "the vertex holds a value to reply with");
+
+    // A remote READ of that vertex: the frame terminates here, the resolver assembles a
+    // FWD{REPLY} rope, and the egress gathers its links into the table under test.
+    const auto read_once = [&link] {
+        link.inject(b_fwd(fwd_op_t::READ, b_path({"sensor", "temp"}), b_path({"client"}), {}, {}));
+    };
+
+    rx.watch(reply_iov_bytes(kReplyLinks), kIovAlign, false);
+    read_once();
+    check(rx.served() == 1, "the reply iov table came from the router's INJECTED rx source");
+    check(link.take() == 1, "the reply reached the requester");
+
+    // Armed: refuse exactly that table. The reply is DROPPED and counted; nothing aborts.
+    rx.watch(reply_iov_bytes(kReplyLinks), kIovAlign, true);
+    const std::size_t before = router.drop_stats().reply_iov_dropped;
+    read_once();
+    check(rx.refused() >= 1, "the injector fired (an unreached try_alloc would be vacuous)");
+    check(link.take() == 0, "an exhausted reply table DROPS the reply, never aborts");
+    check(router.drop_stats().reply_iov_dropped == before + 1,
+          "the drop is counted on reply_iov_dropped, the documented convention");
+
+    // Disarm: the next request is answered again — the refusal left no residue.
+    rx.watch(reply_iov_bytes(kReplyLinks), kIovAlign, false);
+    read_once();
+    check(link.take() == 1, "replies resume once the source recovers");
+
+    // The ROPE terminus is the SECOND site, and it is not the same code path: the frame is
+    // adopted as a lazy `tlv_view_t` rather than arena-decoded, and the reply is resolved
+    // straight off the rope. Same table, same source, same refusal — driven here through the
+    // rope ingress so a migration applied to only one of the two would redden.
+    const std::vector<std::byte> req =
+        b_fwd(fwd_op_t::READ, b_path({"sensor", "temp"}), b_path({"client"}), {}, {});
+    const auto read_once_roped = [&link, &req] {
+        tr::view::rope_t frame;
+        tr::view::segment_ptr_t seg = tr::view::heap_alloc(req.size());
+        std::memcpy(seg->bytes.data(), req.data(), req.size());
+        frame.append(tr::view::view_t::over(std::move(seg)));
+        link.inject_rope(std::move(frame));
+    };
+
+    rx.watch(reply_iov_bytes(kReplyLinks), kIovAlign, false);
+    read_once_roped();
+    check(rx.served() == 1, "the ROPE terminus's reply table comes from the same rx source");
+    check(link.take() == 1, "the rope-tier reply reached the requester");
+
+    rx.watch(reply_iov_bytes(kReplyLinks), kIovAlign, true);
+    const std::size_t before_rope = router.drop_stats().reply_iov_dropped;
+    read_once_roped();
+    check(rx.refused() >= 1, "the injector fired on the rope tier too");
+    check(link.take() == 0, "an exhausted table DROPS the rope-tier reply, never aborts");
+    check(router.drop_stats().reply_iov_dropped == before_rope + 1,
+          "and counts it on the same reply_iov_dropped");
+
+    // The COMPOSED-ROOT reply, which is why this table has no fixed bound. A branch read
+    // folds every registered descendant's landed LKV into one reply rope, so the peer that
+    // picks the root picks the link count: six children here already assemble a
+    // TWENTY-link reply. A fixed-size stack array — the shape #1570 was first proposed with
+    // — would have to be at least this wide, and the next child would overflow it; the only
+    // honest answers are a growable table or a dropped reply, and this asserts the first.
+    const auto branch = path_t::parse("/plant");
+    (void)g.register_vertex(*branch, role_t::STORED_VALUE);
+    for (const char* c : {"a", "b", "c", "d", "e", "f"}) {
+        const auto child = path_t::parse(std::string("/plant/") + c);
+        const auto cv = g.register_vertex(*child, role_t::STORED_VALUE);
+        tr::view::rope_t cval;
+        cval.append(make_value({std::uint8_t{0x08}, 0x00, 0x04, 0x00, 0x02, 0x00, 0x00, 0x00}));
+        (void)g.write(cv, std::move(cval));
+    }
+    const auto read_branch = [&link] {
+        link.inject(b_fwd(fwd_op_t::READ, b_path({"plant"}), b_path({"client"}), {}, {}));
+    };
+
+    // MEASURED. The exact width is incidental — what is load-bearing is that it is far past
+    // any small fixed array, and that the seam is asked for exactly this one block.
+    constexpr std::size_t kComposedLinks = 20;
+    static_assert(kComposedLinks > 4, "the composed reply must exceed any fixed-array proposal");
+    rx.watch(reply_iov_bytes(kComposedLinks), kIovAlign, false);
+    read_branch();
+    check(rx.served() == 1, "a 20-link composed-root reply draws ONE table of exactly that width");
+    check(link.take() == 1, "the composed-root reply goes out whole");
+
+    // And it degrades the same way: refused, not truncated and not aborted.
+    rx.watch(reply_iov_bytes(kComposedLinks), kIovAlign, true);
+    const std::size_t before_composed = router.drop_stats().reply_iov_dropped;
+    read_branch();
+    check(rx.refused() >= 1, "the injector fired on the composed reply");
+    check(link.take() == 0, "an exhausted table drops the composed reply whole");
+    check(router.drop_stats().reply_iov_dropped == before_composed + 1,
+          "counted on reply_iov_dropped at composed-root size too");
+}
+
 }  // namespace
 
 int main() {
-    std::printf("#981 — migrated try_* sites answer seam exhaustion by value\n\n");
+    std::printf("#981/#1570 — migrated try_* sites answer seam exhaustion by value\n\n");
     test_collect_stack_on_the_seam();
     test_delivery_iov_on_the_seam();
+    test_reply_iov_on_the_seam();
     return tr::testing::summary("try_probe_window");
 }

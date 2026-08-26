@@ -86,7 +86,7 @@ flowchart LR
 ```
 
 A rope holds its first two links in small-buffer storage (`kInline = 2`,
-`core/include/libtracer/rope.hpp:425`); the third link spills the whole chain to the
+`core/include/libtracer/rope.hpp:427`); the third link spills the whole chain to the
 heap, which is the chain's only allocation (`rope_t::append`, `rope.hpp:76-91`).
 
 ## Owning a copy of borrowed bytes
@@ -162,7 +162,7 @@ only where the surrounding code has already established that the rope is one lin
 **`to_iovec()` allocates and can throw.** It `reserve`s a span table per call, which
 under `-fno-exceptions` turns an out-of-memory into `abort()`. Egress paths that build
 this table per send use `try_to_iovec(out)`, which probes the exact allocation first and
-returns `false` instead, leaving `out` empty (`rope.hpp:301-332`). ⚠️ The probe is not a hard
+returns `false` instead, leaving `out` empty (`rope.hpp:301-334`). ⚠️ The probe is not a hard
 nothrow guarantee: `tr::detail::try_reserve` frees its probe block and *then* runs the
 throwing `reserve`, so on a multi-threaded node a racing allocation between the two can still
 abort ([#850](https://github.com/avatarsd-llc/libtracer/issues/850)); the header qualifies its
