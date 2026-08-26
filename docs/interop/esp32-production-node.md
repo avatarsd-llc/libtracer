@@ -385,7 +385,7 @@ JTAG session.
   link while host builds stay green.
 - **Platform TU selection is a build-system concern, not an `#ifdef`.** Chip targets
   compile `twai_link.cpp` plus a SocketCAN stub; the `linux` target compiles real
-  SocketCAN and no TWAI (`integrations/esp-idf/libtracer/CMakeLists.txt:188-189`).
+  SocketCAN and no TWAI (`integrations/esp-idf/libtracer/CMakeLists.txt:189-190`).
   Extend that pattern rather than adding macros.
 - Build with `-fno-exceptions -fno-rtti` and treat any throwing construct on the
   delivery path as a defect (§1).

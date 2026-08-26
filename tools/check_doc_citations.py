@@ -907,10 +907,10 @@ ANCHORS = [
     # The GPU backend's build moved out of core into its own tier project (#1381), so what
     # docs/modules/backends.md cites is the tier's target, not a core option.
     ('backends/cuda/CMakeLists.txt:36', 'add_library(libtracer_cuda STATIC src/mem_cuda.cpp)'),
-    ('core/CMakeLists.txt:289', 'option(LIBTRACER_WITH_QUIC "Configure the libtracer_quic transport module'),
-    ('core/CMakeLists.txt:374', 'write_basic_package_version_file('),
-    ('core/CMakeLists.txt:385', 'if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND EXISTS'),
-    ('core/CMakeLists.txt:392', 'option(LIBTRACER_BUILD_EXAMPLES "Build the core examples"'),
+    ('core/CMakeLists.txt:290', 'option(LIBTRACER_WITH_QUIC "Configure the libtracer_quic transport module'),
+    ('core/CMakeLists.txt:375', 'write_basic_package_version_file('),
+    ('core/CMakeLists.txt:386', 'if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND EXISTS'),
+    ('core/CMakeLists.txt:393', 'option(LIBTRACER_BUILD_EXAMPLES "Build the core examples"'),
     # `docs/examples/index.md` cited the two `if(LIBTRACER_NET_PLANE)` lines (58, 73). That
     # text appears THREE times in this file and the scope filter cannot separate 58 from 73
     # — a scope must sit ABOVE its candidate, and everything above 58 is also above 73. The
@@ -921,22 +921,22 @@ ANCHORS = [
     ('core/examples/CMakeLists.txt:87', 'if(BUILD_TESTING)'),
     ('core/examples/CMakeLists.txt:92', 'add_test(NAME example_wire_codec COMMAND wire_codec)'),
     ('integrations/esp-idf/libtracer/CMakeLists.txt:44', 'set(LIBTRACER_SRCS'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:188', 'if(CONFIG_LIBTRACER_TRANSPORT_CAN)'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:329', 'if(IDF_TARGET STREQUAL "linux")',
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:189', 'if(CONFIG_LIBTRACER_TRANSPORT_CAN)'),
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:330', 'if(IDF_TARGET STREQUAL "linux")',
      'unlike CONFIG_* is defined in BOTH CMake passes'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:308', 'set(LIBTRACER_EDGE_PIN_SLOTS 8)'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:295',
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:309', 'set(LIBTRACER_EDGE_PIN_SLOTS 8)'),
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:296',
      'set(LIBTRACER_VERTEX_LOCK_STRIPES ${CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES})'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:313', 'if(CONFIG_FREERTOS_UNICORE)'),
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:314', 'if(CONFIG_FREERTOS_UNICORE)'),
     # #1470: the S5 liveness-engine knobs the config-space table points at.
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:340',
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:341',
      'if(DEFINED CONFIG_LIBTRACER_SELF_HEAL_LINKS AND NOT CONFIG_LIBTRACER_SELF_HEAL_LINKS)'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:346',
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:347',
      'if(CONFIG_LIBTRACER_SELF_HEAL_WORKER_STACK)'),
     ('core/include/libtracer/config.hpp:541', 'static constexpr bool kSelfHealLinks = true;'),
     ('core/include/libtracer/config.hpp:568',
      'static constexpr std::size_t kSelfHealWorkerStackBytes = 0;'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:189',
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:190',
      'list(APPEND LIBTRACER_SRCS "${LIBTRACER_ROOT}/core/src/transport_can.cpp")'),
 
     # --- #1243: the backfill that made the pin list a COVERAGE list.
@@ -1199,7 +1199,7 @@ def source_map(root: pathlib.Path = None) -> dict:
 # nothing in the docs was talking about.
 #
 # Only a DOCUMENT breaks the run. A build file cited mid-sentence
-# (`CMakeLists.txt:188`) does not — the configuration page's knob table names
+# (`CMakeLists.txt:189`) does not — the configuration page's knob table names
 # `config.hpp` once and then walks down it in bare `:109` / `:136` refs, with each
 # row's CMake column citing a `CMakeLists.txt` line in between. The running citation
 # there is the header; the build file is an aside.
