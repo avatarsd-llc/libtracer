@@ -146,8 +146,7 @@ struct node_t {
     explicit node_t(bool folded)
         : net_src(net_slab, tr::mem::null_source()),
           graph_src(graph_slab, tr::mem::null_source()),
-          g(std::pmr::get_default_resource(), &tr::mem::heap_backend(),
-            folded ? &net_src : &graph_src),
+          g(folded ? &net_src : &graph_src),
           router(g, &net_src, &net_src) {}
 
     /** @brief The NET plane's slab. */

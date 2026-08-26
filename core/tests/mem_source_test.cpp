@@ -178,29 +178,35 @@ int main() {
         spilling.release(q, 64, 8);
     }
 
-    // Wiring: the graph defaults to the heap source, and an injected source is the
-    // one the graph reports. The parameter is APPENDED, so the two shorter forms
-    // must still compile unchanged — that is the zero-diff migration promise.
+    // Wiring: #873 phase 1 collapsed the graph's four positional seams into ONE injected
+    // `block_source_t`, so what is checked here is that the default composition still names
+    // the process heap, that an injected source is the one the graph reports, and that BOTH
+    // derived channels (control + the graph-level default ring) resolve to it.
     {
         tr::graph::graph_t g_default;
         check(&g_default.control_source() == &tr::mem::heap_source(),
               "graph_t{} defaults its control seam to heap_source()");
+        check(&g_default.default_ring_source() == &tr::mem::heap_source(),
+              "graph_t{} defaults its ring seam to heap_source() too");
 
-        tr::graph::graph_t g_mr{std::pmr::get_default_resource()};
-        check(&g_mr.control_source() == &tr::mem::heap_source(),
-              "graph_t{&mr} (the shipping host's spelling) still compiles and defaults");
-
-        tr::graph::graph_t g_two{std::pmr::get_default_resource(), &tr::mem::heap_backend()};
-        check(&g_two.control_source() == &tr::mem::heap_source(),
-              "graph_t{&mr, &backend} still compiles and defaults");
+        tr::graph::graph_t g_null{nullptr};
+        check(&g_null.control_source() == &tr::mem::heap_source(),
+              "graph_t{nullptr} means the process default, exactly as graph_t{} does");
 
         budget_source_t injected(8);
-        tr::graph::graph_t g_ctl{std::pmr::get_default_resource(), &tr::mem::heap_backend(),
-                                 &injected};
-        check(&g_ctl.control_source() == &injected,
+        tr::graph::graph_t g_ptr{&injected};
+        check(&g_ptr.control_source() == &injected,
               "an injected source is the one the graph holds");
-        check(std::strcmp(g_ctl.control_source().name(), "budget") == 0,
+        check(&g_ptr.default_ring_source() == &injected,
+              "and the SAME source is the graph-level ring default (one injection, #873)");
+        check(std::strcmp(g_ptr.control_source().name(), "budget") == 0,
               "the injected source reports its own name");
+
+        budget_source_t by_ref(8);
+        tr::graph::graph_t g_ref{by_ref};
+        check(&g_ref.control_source() == &by_ref,
+              "the reference spelling of the collapsed constructor wires the same seam");
+
         // Constructing a graph draws nothing from the seam — the first consumer is the
         // branch-write decode (graph.cpp), which only reaches the seam past its 4 KiB
         // stack buffer. Registration is still to migrate.

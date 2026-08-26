@@ -158,6 +158,22 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `POINT{NAME, SETTINGS{…}}` envelope with an **empty `SETTINGS`** for a module that declares no
   catalog — never `SCHEMA_NOT_FOUND`, which would make the §6 creatability probe ambiguous.
 
+### Added
+
+- **`mem_source_backend.hpp` — `tr::mem::source_backend_t`: the `mem_backend_t` WRAPPER over a
+  `block_source_t`** ([#873](https://github.com/avatarsd-llc/libtracer/issues/873) phase 1,
+  [ADR-0079](../docs/adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md)
+  amendment 2026-08-27). ADR-0079 kept `mem_backend_t` separate from `block_source_t` because a
+  segment carries what raw bytes do not — an intrusive refcount and the DMA cache-op hooks. The
+  2026-08-26 ruling settled how the two relate: the substrate is `block_source_t`, and
+  `mem_backend_t` survives as a **wrapper type** over it, no longer an injection seam of its own.
+  `alloc` takes two blocks from the source (control block + payload, mirroring
+  `heap_backend_t`'s `operator new` pair) and answers a **null `segment_t*`** when either is
+  refused — the BACKPRESSURE signal the write path already answered; `destroy` returns both in
+  the sizes they were taken in. Tagged `backend_tag::UNKNOWN`, so reclaim takes the virtual
+  `destroy` fallback every out-of-core backend already takes; giving the module set a `SOURCE`
+  enumerator is a phase-3 question. One direction only, exactly as `source_resource_t` is.
+
 ### Removed
 
 - **BREAKING — the `/net:children[]` connection-creation door is RETIRED, and with it the SPEC's
@@ -206,6 +222,70 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     identity and the liveness-enum encoding.
 
 ### Changed
+
+- **BREAKING — `graph_t`'s constructor collapses to ONE injected `tr::mem::block_source_t`**
+  ([#873](https://github.com/avatarsd-llc/libtracer/issues/873) phase 1, maintainer ruling
+  2026-08-26,
+  [ADR-0079](../docs/adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md)
+  amendment). The four positional, defaulted seams are gone:
+
+  ```cpp
+  // before
+  explicit graph_t(std::pmr::memory_resource* mr = std::pmr::get_default_resource(),
+                   mem::mem_backend_t*   value_backend = &mem::heap_backend(),
+                   mem::block_source_t*  ctl  = &mem::heap_source(),
+                   mem::block_source_t*  ring = &mem::heap_source());
+  // after
+  explicit graph_t(mem::block_source_t* src = &mem::heap_source());
+  explicit graph_t(mem::block_source_t& src);          // the no-null spelling
+  ```
+
+  **Migration.** `graph_t{}` is unchanged and keeps allocating exactly what it did. A caller that
+  passed `&mr` alone drops the argument. A caller that injected a `block_source_t` as `ctl`
+  passes it as the sole argument. A caller that injected a `pool_t`/custom `mem_backend_t` as
+  `value_backend` injects a `block_source_t` instead — the graph builds a
+  `tr::mem::source_backend_t` over it — or, if it needs its own backend at a *transport* seam,
+  is unaffected (that seam did not move).
+
+  **What now flows through the one source:** the per-write LKV control block and rope (through a
+  `tr::mem::source_resource_t` the graph builds internally), the write-path value `segment_t` and
+  both folded reads' POINT headers (through a `tr::mem::source_backend_t`), every failable #551
+  block (`control_source()`), and the graph-level default receiver ring
+  (`default_ring_source()`). `control_source()` and `default_ring_source()` both survive and now
+  answer the same object; `set_ring_source` per vertex is untouched, so per-vertex isolation
+  stays exactly where ADR-0079's amendment measured it.
+
+  **The failure convention does not leak.** The substrate speaks raw `nullptr`-on-exhaustion and
+  nothing wraps it in a `result_t`. Adapters translate at their own boundaries only: the pmr
+  adapter to `std::bad_alloc` (its contract requires a throw), the backend adapter to a null
+  `segment_t`. No channel falls back to the global heap.
+
+  **NARROW vs WIDE is which source, never a knob.** Passing nothing gets `heap_source()` —
+  unbounded, honestly reporting the platform heap's ceiling. A bounded node injects a
+  `pool_source_t` and the slab's size IS the bound. No `default_config_t` option was added and
+  none will be.
+
+  **The process-default composition is byte-for-byte the old one.** A graph handed nothing (or
+  `&heap_source()`, or `nullptr`) folds its pmr channel back onto `std::pmr::new_delete_resource()`
+  and its value channel back onto `mem::heap_backend()` — the exact objects the retired defaults
+  named, including the ADR-0047 §2 devirtualized `HEAP` reclaim arm. One branch at construction,
+  never again, so no default-built graph gains an indirection on the write path.
+
+  **Still bypassing the injection after phase 1**, phased rather than forgotten: the LKV
+  hazard-slot nodes (`lkv_slot.hpp`) stay on the global heap — **phase 2**, gated on a dedicated
+  hazard-slot acquisition A/B because the naive fix puts an atomic on `store()`
+  ([#897](https://github.com/avatarsd-llc/libtracer/issues/897)) — and re-layering the backend /
+  pmr adapters into the backend seam proper is **phase 3**.
+
+- **`tr::mem::heap_source_t` serves a fundamental-alignment request through the PLAIN nothrow
+  `operator new`, not the over-aligned one** ([#873](https://github.com/avatarsd-llc/libtracer/issues/873)
+  phase 1). A request at or below `__STDCPP_DEFAULT_NEW_ALIGNMENT__` no longer goes through the
+  `std::align_val_t` overload, which libstdc++ routes to `aligned_alloc`/`posix_memalign` even
+  when the plain allocator already guarantees that alignment — a different glibc path with a
+  different size-class layout. That distinction became load-bearing when the collapse above put
+  channels that had ALWAYS used the plain `operator new` behind this seam, and it is what makes
+  "the process default preserves today's behaviour byte-for-byte" literally rather than
+  approximately true. Over-aligned requests keep the aligned pair, so nothing loses a guarantee.
 
 - **The terminus REPLY egress no longer routes through the `-fno-exceptions` probe window**
   ([#1570](https://github.com/avatarsd-llc/libtracer/issues/1570), the reply path's half of

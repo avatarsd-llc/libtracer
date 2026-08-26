@@ -146,6 +146,17 @@ for it and when to migrate the store instead.
 :protected-members:
 ```
 
+The `mem_backend_t` wrapper — the same one-direction relationship on the other seam. Since
+[#873](https://github.com/avatarsd-llc/libtracer/issues/873) phase 1, `mem_backend_t` is a
+wrapper TYPE over the substrate (a source plus the refcount / DMA-hook table) rather than an
+injection seam of its own, and this class is that wrapper. A refused block becomes a **null
+`segment_t*`**, which is the BACKPRESSURE signal `alloc` already documented — the substrate's
+raw `nullptr` translated at this adapter's own boundary and nowhere else.
+
+```{doxygenclass} tr::mem::source_backend_t
+:members:
+```
+
 ```{doxygenstruct} tr::mem::sync_none_t
 :members:
 ```

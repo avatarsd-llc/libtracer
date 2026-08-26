@@ -52,6 +52,7 @@ set(LIBTRACER_SRCS
     "${LIBTRACER_ROOT}/core/src/device_backend.cpp"
     "${LIBTRACER_ROOT}/core/src/mem_heap.cpp"
     "${LIBTRACER_ROOT}/core/src/mem_source.cpp"
+    "${LIBTRACER_ROOT}/core/src/mem_source_backend.cpp"
     "${LIBTRACER_ROOT}/core/src/mem_pool.cpp"
     "${LIBTRACER_ROOT}/core/src/rope.cpp"
     "${LIBTRACER_ROOT}/core/src/rope_decode.cpp"

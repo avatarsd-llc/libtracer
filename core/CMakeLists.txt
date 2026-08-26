@@ -92,6 +92,7 @@ add_library(libtracer STATIC
     src/device_backend.cpp
     src/mem_heap.cpp
     src/mem_source.cpp
+    src/mem_source_backend.cpp
     src/mem_pool.cpp
     src/rope.cpp
     src/rope_decode.cpp

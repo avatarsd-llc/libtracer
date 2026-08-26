@@ -82,6 +82,7 @@
 #include "heap_probe.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/graph.hpp"
+#include "libtracer/mem_source.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport.hpp"
@@ -284,6 +285,36 @@ class counting_resource_t final : public std::pmr::memory_resource {
     /** @brief Identity equality — a stateful counter is only equal to itself. */
     [[nodiscard]] bool do_is_equal(const std::pmr::memory_resource& o) const noexcept override {
         return this == &o;
+    }
+};
+
+/**
+ * @brief The @ref counting_resource_t twin for the ONE injected `block_source_t` `graph_t`
+ *        takes since #873 phase 1 — same two counters, same disjointness discipline.
+ *
+ * Serves from `std::aligned_alloc` for exactly the reason @ref counting_resource_t does: the
+ * process heap source is `::operator new`, the form this TU overrides and counts, so
+ * forwarding there would charge every seam-served block to the ESCAPE column too and the
+ * registration row could never report the zero-escape result it exists to show.
+ */
+class counting_source_t final : public tr::mem::block_source_t {
+   public:
+    counting_source_t() noexcept : block_source_t("counting") {}
+
+    std::size_t allocs = 0; /**< @brief Total allocations served. */
+    std::size_t live = 0;   /**< @brief Allocations not yet released. */
+
+    /** @brief Serve from the C allocator, counting. */
+    [[nodiscard]] void* try_alloc(std::size_t n, std::size_t align) noexcept override {
+        ++allocs;
+        ++live;
+        const std::size_t rounded = (n + align - 1) / align * align;
+        return std::aligned_alloc(align, rounded != 0 ? rounded : align);
+    }
+    /** @brief Release to the C allocator, counting. */
+    void release(void* p, std::size_t, std::size_t) noexcept override {
+        --live;
+        std::free(p);
     }
 };
 
@@ -820,7 +851,7 @@ int main() {
     // Do not read a drop from 4 to 2 as "two sites fixed" — read the sites off the ledger
     // and this row off the tree shape it was measured on.
     {
-        counting_resource_t reg_mr;
+        counting_source_t reg_mr;
         graph_t reg_graph{&reg_mr};
         constexpr std::size_t kRegN = 256;
         bool reg_ok = true;
@@ -865,7 +896,7 @@ int main() {
         std::printf(
             "RESULT zeroheap reg_escape allocs=%zu frees=%zu bytes=%zu n=%zu mr_served=%zu "
             "ok=%d (report-only — GLOBAL-heap blocks per RUNTIME registration that bypass "
-            "the injected memory_resource; ADR-0039 / RFC-0014, #551)\n",
+            "the injected block_source_t; ADR-0039 / RFC-0014, #551, #873)\n",
             reg.allocs / kRegN, reg.frees / kRegN, per_reg(reg.live_bytes), kRegN,
             mr_served / kRegN, reg_ok ? 1 : 0);
         if (!reg_ok) {

@@ -10,6 +10,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING (inherited from core) — `graph_t` now takes ONE injected
+  `tr::mem::block_source_t`** ([#873](https://github.com/avatarsd-llc/libtracer/issues/873)
+  phase 1). A device recipe that wired the graph's `mr`, `value_backend` and `ctl` separately —
+  the "one slab, whole stack" spelling this component exists to make possible — now points a
+  single `tr::mem::pool_source_t` at the constructor and gets all three channels bounded by that
+  one slab: `graph_t g{pool};`. `critical_pool.hpp`'s guidance is unchanged in substance (the
+  peer-reachable byte seams still want the DRAM-critical pool); what changes is that the graph's
+  share of them is one argument instead of three. The bundled examples construct
+  `graph_t` with no argument and are unaffected. The LKV hazard-slot nodes still allocate on the
+  global heap — that is core's phase 2, and a device recipe cannot bound them yet.
+
 ### Removed
 
 - **BREAKING — connections are no longer created through `/net:children[]`**

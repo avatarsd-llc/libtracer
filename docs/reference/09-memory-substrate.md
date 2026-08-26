@@ -266,7 +266,27 @@ Why it is a distinct type rather than a `std::pmr::memory_resource` with a docum
 
 `-Os` is what an ESP-IDF node ships (`CONFIG_COMPILER_OPTIMIZATION_SIZE`). A seam whose failure signal disappears at exactly the optimization level the target uses is not a seam, so failable allocation gets its own type, whose `try_alloc` carries no such annotation and whose name cannot be confused with `allocate` at a call site ([ADR-0065 — failable allocation gets its own seam](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0065-failable-allocation-gets-its-own-seam-block-source.md)).
 
-The two seams are injected independently and a node may point both at the same underlying store ("one slab, whole stack") or split them.
+The two seams are injected independently at the transport and router seams, and a node may point both at the same underlying store ("one slab, whole stack") or split them. **At `graph_t` they are no longer independent at all** — see the next section.
+
+### One injection at the graph
+
+`graph_t`'s constructor used to take four positional, defaulted seams: a `std::pmr::memory_resource*`, a `mem_backend_t*`, and two `block_source_t*` (`ctl` and the default ring source). Since [#873](https://github.com/avatarsd-llc/libtracer/issues/873) phase 1 it takes **one**:
+
+```cpp
+tr::mem::pool_source_t<> store{slab, classes};
+tr::graph::graph_t g{store};          // or graph_t{&store}, or graph_t{} for the process heap
+```
+
+Everything the graph allocates comes from that source: the per-write LKV control block and rope (through a `source_resource_t` the graph builds internally), the write-path value `segment_t` and both folded reads' POINT headers (through a `source_backend_t`, the `mem_backend_t` **wrapper type** described below), every failable `#551` block, and the graph-level default receiver ring. The deployer sizes one slab and reads one census instead of reasoning about which of four channels a given byte travels.
+
+Three consequences are worth stating plainly.
+
+- **The failure convention does not leak.** The substrate speaks raw `nullptr`. Each adapter translates only at its own boundary — the pmr adapter to `std::bad_alloc` because `std::pmr`'s contract requires a throw, the backend adapter to a null `segment_t`, which is the BACKPRESSURE signal the write path already answered. Nothing wraps a refusal in a `result_t`, and nothing falls back to the global heap.
+- **NARROW versus WIDE is *which source*, not a config knob.** A host that injects nothing gets `heap_source()` — unbounded, and folded back onto `new_delete_resource()` / `heap_backend()` so a default-built graph allocates exactly what it always did. A bounded node injects a `pool_source_t` and the slab's size *is* the bound. There is no `default_config_t` option for this and there will not be one.
+- **Per-domain overrides survive at the seams that own the resource.** One injection is a default, not a mandate to share. A STREAM vertex that must not be affected by another receiver's exhaustion declares its own ring source through `graph_t::set_ring_source` (receiver-pays, [RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.6.1 clause 3).
+
+**What still bypasses the injection after phase 1.** The LKV hazard-slot nodes are still `new (std::nothrow)` on the global heap — phase 2, gated on a dedicated hazard-slot acquisition A/B because the naive fix puts an atomic on `store()`. Re-layering the backend and pmr adapters into the backend seam proper is phase 3. And the `std::vector` growth behind `tr::detail::try_reserve` / `try_push_back` migrates only where the container's element type allows it; the sites that cannot are annotated in place.
+
 
 Two companions ship with it, because the migrated call sites all need the same pair:
 
@@ -279,7 +299,7 @@ Two companions ship with it, because the migrated call sites all need the same p
 
 The terminus arena decoder is on the **RX path, behind no ACL**, and a peer chooses both the nesting depth and the node count of the frame it sends. All three of its draws (the node array, the walk's open-node stack, and the walk stack's spill past its inline slots) come from a `block_source_t`, so exhaustion is `TLV_NESTING_TOO_DEEP` — the status [RFC-0006](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0006-resource-bounded-nesting-depth.md) defines for "exceeds this receiver's decode resources" — and never an allocation failure. There is no depth constant anywhere in the decode, and none is wanted: the bound is the receiver's injected resource.
 
-A **scope-lifetime** consumer composes this as a `bump_source_t` over a stack buffer — construct it, decode, drop it. The branch-write decode does exactly that with a 4 KiB stack buffer, naming the graph's injected failable seam as the bump's *upstream*, so overflow spills into the node's own injected store rather than the global heap and exhaustion stays a value (`core/src/graph.cpp:2491-2492`). Naming `null_source()` as the upstream instead makes the buffer a hard ceiling; that is the composition a node picks when it wants the stack buffer to *be* the bound.
+A **scope-lifetime** consumer composes this as a `bump_source_t` over a stack buffer — construct it, decode, drop it. The branch-write decode does exactly that with a 4 KiB stack buffer, naming the graph's injected failable seam as the bump's *upstream*, so overflow spills into the node's own injected store rather than the global heap and exhaustion stays a value (`core/src/graph.cpp:2511-2512`). Naming `null_source()` as the upstream instead makes the buffer a hard ceiling; that is the composition a node picks when it wants the stack buffer to *be* the bound.
 
 A **long-lived** seam (a router's `rx`, a graph's `ctl`) must not be a bump source: bump blocks are never reclaimed, so it fills monotonically and then refuses everything. An 8 KiB bump source wired as a router's `rx`, **decoding a 53-byte FWD**, decoded **6 frames and rejected the next 194**. The frame size is what makes that a measurement rather than an anecdote — the figure is 8192 bytes divided by the arena footprint of one decode of *that* frame, so it is capacity arithmetic and does not vary with host or build flags ([ADR-0067 §1 — a bounded seam recycles through segregated size classes](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0067-bounded-recycling-source-and-per-owner-topology.md)).
 
@@ -352,7 +372,13 @@ tr::mem::source_resource_t pmr{pool};
 tr::net::can_reassembly_t reasm{&pmr, /*max_groups=*/16};
 ```
 
-**It runs one direction, and the reverse is forbidden.** `block_source_t` → `memory_resource` is offered; `memory_resource` → `block_source_t` is not, and must not be added. A wrapper in that direction would have to answer `nullptr` from a `try_alloc` built on an `allocate` that is annotated `returns_nonnull` and signals only by throwing — so the caller's null check is deleted at exactly the `-Os`/`-Oz` levels the reference node ships at (the table earlier in this section), and the throw reaches the `__cxa_throw` → `abort()` stub. That is the defect [ADR-0065](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0065-failable-allocation-gets-its-own-seam-block-source.md) created the block seam to escape, and `core/tests/mem_source_pmr_test.cpp` asserts the two types stay non-interconvertible.
+### The `mem_backend_t` wrapper: `source_backend_t`
+
+The backend twin of the adapter above is `tr::mem::source_backend_t`, in `core/include/libtracer/mem_source_backend.hpp`. [ADR-0079](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md) kept `mem_backend_t` separate from `block_source_t` because a segment carries what raw bytes do not — an intrusive refcount and the DMA cache-op hooks. #873 phase 1 settled how the two relate: the substrate is `block_source_t`, and `mem_backend_t` survives as a **wrapper type** over it (source + that refcount/hook table) rather than as an injection seam of its own. `alloc` takes two blocks from the source (the control block and the payload, mirroring `heap_backend_t`'s `operator new` pair) and answers a **null `segment_t*`** when either is refused; `destroy` returns both in the sizes they were taken in.
+
+It carries `backend_tag::UNKNOWN`, so reclaim takes the virtual `destroy` fallback rather than the [ADR-0047](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0047-module-set-closed-backend-dispatch.md) §2 devirtualized switch arm — the same path every out-of-core backend already takes. It costs the default composition nothing, because `graph_t` folds a process-default source straight back onto `heap_backend()` and never constructs this type. Whether the module set should gain a `SOURCE` enumerator is a phase-3 question, since that is the phase that decides whether this is the only backend left.
+
+**The pmr adapter runs one direction, and the reverse is forbidden.** `block_source_t` → `memory_resource` is offered; `memory_resource` → `block_source_t` is not, and must not be added. A wrapper in that direction would have to answer `nullptr` from a `try_alloc` built on an `allocate` that is annotated `returns_nonnull` and signals only by throwing — so the caller's null check is deleted at exactly the `-Os`/`-Oz` levels the reference node ships at (the table earlier in this section), and the throw reaches the `__cxa_throw` → `abort()` stub. That is the defect [ADR-0065](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0065-failable-allocation-gets-its-own-seam-block-source.md) created the block seam to escape, and `core/tests/mem_source_pmr_test.cpp` asserts the two types stay non-interconvertible.
 
 #### Migrating a host that already has a pmr arena
 

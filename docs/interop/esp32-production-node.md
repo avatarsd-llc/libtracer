@@ -81,9 +81,12 @@ source's own census — `288/2048 B used, 0/12 size classes, 0 block(s) overflow
 one link carrying one compact flow — so the sizing above is a number to check against
 your own node rather than one to copy.
 
-Those are the four injection points of `graph_t`'s constructor — the pmr resource,
-the value backend, the failable control source and the default receiver-ring source
-(`core/include/libtracer/graph.hpp:558-561`) — and the **four** of
+Those all reach the ONE injection point of `graph_t`'s constructor
+(`core/include/libtracer/graph.hpp:578`): since
+[#873](https://github.com/avatarsd-llc/libtracer/issues/873) phase 1 the graph takes a single
+`tr::mem::block_source_t` and builds the pmr resource and the value backend over it internally,
+so a device recipe sizes one slab where it used to wire four arguments. Beside it are the
+**four** of
 `fwd_router_t`: the failable `label_src` source its label tables draw from, the
 failable `rx` source, the `flat` byte backend its rope flattens draw from, and the
 `egress` byte backend the terminus reply head draws from
@@ -158,7 +161,7 @@ then refuses every frame. An 8 KiB bump source wired as a router's `rx`, decodin
 53-byte FWD, served **six frames and rejected the next 194**
 ([ADR-0067 — bounded recycling source](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0067-bounded-recycling-source-and-per-owner-topology.md)
 §1; the same figure is carried on the type at
-`core/include/libtracer/mem_source.hpp:272-273`). A frames-served count without the
+`core/include/libtracer/mem_source.hpp:292-293`). A frames-served count without the
 payload size is not a measurement — 194 rejected 53-byte frames is a different fact
 from 194 rejected 1 KiB frames.
 
@@ -166,7 +169,7 @@ Use `tr::mem::pool_source_t`, which recycles.
 :::
 
 `pool_source_t` takes the slab **and** a caller-owned span of `size_class_t` slots
-(`core/include/libtracer/mem_source.hpp:477`), so both bounds belong to the caller
+(`core/include/libtracer/mem_source.hpp:497`), so both bounds belong to the caller
 rather than to the library
 ([RFC-0006 — resource-bounded nesting depth](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0006-resource-bounded-nesting-depth.md)):
 
@@ -205,7 +208,7 @@ to `sync_none_t`, which compiles to nothing.
 :::
 
 After a soak run, `classes_used()` says how many slots the node really needed and
-`overflowed()` must read zero (`core/include/libtracer/mem_source.hpp:539,550`) — a
+`overflowed()` must read zero (`core/include/libtracer/mem_source.hpp:559,570`) — a
 non-zero count means the class span is too small and blocks are being lost to the
 slab.
 
@@ -356,8 +359,8 @@ itself, described via `:schema` like any other data
 ```
 
 The backpressure counters come from `graph_t::delivery_drops()`
-(`core/include/libtracer/graph.hpp:2361`), which snapshots four per-cause totals —
-`no_target`, `denied`, `out_of_memory`, `fan_out_truncated` (`graph.hpp:2361-2383`). Each
+(`core/include/libtracer/graph.hpp:2388`), which snapshots four per-cause totals —
+`no_target`, `denied`, `out_of_memory`, `fan_out_truncated` (`graph.hpp:2388-2410`). Each
 counts shed **deliveries**, not events, so a fan-out shed whole under memory pressure moves
 them by its width. `denied` counts an `:acl` refusal on every plane — a local API write, a
 `FWD{WRITE}` terminus, a `COMPACT` terminus and a subscription edge alike (#1068) — so on a

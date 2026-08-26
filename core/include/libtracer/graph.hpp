@@ -40,6 +40,8 @@
 #include "libtracer/link_id.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source.hpp"
+#include "libtracer/mem_source_backend.hpp"
+#include "libtracer/mem_source_pmr.hpp"
 #include "libtracer/path.hpp"
 #include "libtracer/reclaim.hpp"
 #include "libtracer/sink_slot.hpp"
@@ -500,65 +502,90 @@ using stats_sampler_fn_t = bool (*)(void* ctx, std::string_view seam_class,
  */
 class graph_t {
    public:
-    /** @brief Construct an empty graph (registers the built-in `stored_value` child type). */
     /**
-     * @brief Construct a graph drawing its per-write control-block allocations from
-     *        @p mr (ADR-0039 §1, #361 §5) and its write-path value byte-buffers from
-     *        @p value_backend (ADR-0060).
+     * @brief Construct a graph drawing **every** byte it allocates from the single
+     *        injected @p src (#873 phase 1) — the collapsed successor to the four-seam
+     *        constructor.
      *
-     * @p mr allocates the LKV control block + `rope_t` wrapper object; @p
-     * value_backend is the L0 byte-buffer seam the write-path copy-store draws its
-     * owned value @ref view::segment_t from — the single flatten of a branch or field
-     * write (`graph.cpp` sites 825, 1017). A bounded node points BOTH at one static
-     * slab ("one slab, whole stack"); a host passes nothing and gets the standard
-     * heap for each (zero churn, behaviour byte-identical).
+     * @par What this replaced, and why
+     * Until #873 phase 1 this constructor took four positional, defaulted seams —
+     * a `std::pmr::memory_resource*`, a @ref mem::mem_backend_t*, and two
+     * @ref mem::block_source_t* — so a deployer who wanted a bounded node had to know
+     * which of four allocation channels each of its bytes travelled on, and injecting all
+     * four still did not bound the process because a fifth channel (the un-injected global
+     * heap) ran alongside them. ADR-0079 settled the composition and the 2026-08-26 ruling
+     * settled the shape: **@ref mem::block_source_t is the substrate**, and the graph builds
+     * the other two vocabularies on top of the one source it is handed. `mem_backend_t`
+     * survives as a wrapper TYPE (@ref mem::source_backend_t), not as an injection seam.
      *
-     * The seam's scope is PAYLOAD bytes, which includes READ-path framing and not only
-     * the write-path copy-store (#831): BOTH folded READs frame their exactly-sized POINT
-     * headers from it — one per subtree node in the composed-root fold, and one per
-     * registered child plus the outer listing header in the `":children"` fold the wire
-     * field READ routes to. These are payload bytes whose length field wraps the stored
-     * TLV and the name records below it, as distinct from
-     * the route-byte-sized reply-egress seam of ADR-0074. Both counts are peer-influenced, so an
-     * injector sizing a bounded slab must budget for them; the size classes are the
-     * host's composition problem (ADR-0060 §3 keeps the graph size-agnostic).
+     * @par Which bytes flow through @p src after phase 1
+     * ALL of the following, where before they came from four separately-injected places:
+     * - the per-write LKV control block and `rope_t` wrapper (ADR-0039 §1, #361 §5) —
+     *   through an internally-built `std::pmr` adapter (@ref mem::source_resource_t);
+     * - the write-path copy-store's owned value @ref view::segment_t and both folded READs'
+     *   exactly-sized POINT headers (ADR-0060, #831) — through an internally-built
+     *   @ref mem::source_backend_t;
+     * - every #551 FAILABLE allocation a peer can provoke: vertex registration, the
+     *   branch-write decode's bump upstream, the composed read's collect stack
+     *   (@ref control_source);
+     * - the graph-level DEFAULT receiver-ring admissions of a STREAM vertex that has
+     *   declared no source of its own (@ref default_ring_source).
      *
-     * An injected @p value_backend MUST be thread-safe (ADR-0060 §2): a value @ref
-     * view::segment_t self-routes its reclaim on whatever thread drops the last ref —
-     * typically a reader/subscriber, concurrent with a writer's `alloc` — so
-     * sharding it per lock-stripe removes no race. The default `heap_backend()`
-     * already is thread-safe; a `pool_t` must be composed with the target's
-     * arch-selected synchronisation. On exhaustion `value_backend` returns `nullptr`
-     * (the BACKPRESSURE signal), and the write rejects rather than silently falling
-     * back to the heap (§3). @p mr and @p value_backend must both outlive the graph
-     * and every value handle obtained from it.
+     * @par Which bytes do NOT yet, and where that is tracked
+     * The LKV hazard-slot nodes (`lkv_slot.hpp`) are still `new (std::nothrow)` on the
+     * **global heap** — that is
+     * [#873](https://github.com/avatarsd-llc/libtracer/issues/873) **phase 2**, gated on a
+     * dedicated hazard-slot acquisition A/B because the naive fix there puts an atomic on
+     * `store()` (a latency reject, #897). Re-layering @ref mem::source_backend_t and the pmr
+     * adapter into the backend seam proper is **phase 3**. The `std::vector` growth behind
+     * `tr::detail::try_reserve`/`try_push_back` is migrated only where the container's
+     * element type permits it; the residual sites carry their own `#981 residual` notes.
      *
-     * @param ctl The #551 nothrow seam every FAILABLE allocation draws from — the ones a
-     *        PEER can provoke ("failable", not "control-plane": CONTEXT.md binds that
-     *        phrase to the `:` field-write plane): vertex registration first, then the
-     *        `route_handle` label tables, `tlv_arena` nodes, `fwd_router` iov and
-     *        `can_reassembly` maps as each migrates. On exhaustion it returns
-     *        `nullptr` and the operation answers BACKPRESSURE, so a peer's CREATE
-     *        frame can no longer reboot a `-fno-exceptions` node. Deliberately a
-     *        DIFFERENT C++ type from @p mr so the two contracts (must-not-be-null
-     *        vs may-be-null) cannot be transposed by a one-token edit, and so
-     *        retiring @p mr later is a compile error rather than a silent rebind.
-     *        Appended, not prepended, so every existing `graph_t{&mr}` call site
-     *        compiles unchanged. Must outlive the graph, like the other two.
+     * @par Failure convention
+     * The substrate speaks raw `nullptr`-on-exhaustion and the graph does not wrap it.
+     * Adapters translate at their own boundaries and nowhere else: the pmr adapter turns a
+     * refusal into `std::bad_alloc` because `std::pmr`'s contract requires a throw, and the
+     * backend adapter turns it into a null @ref view::segment_t, which is the BACKPRESSURE
+     * signal the write path already answered. So an injected @p src bounds the node, and a
+     * peer's CREATE frame can no longer reboot a `-fno-exceptions` node through the failable
+     * channels.
      *
-     * @param ring The GRAPH-LEVEL DEFAULT receiver-ring source (RFC-0025 §4.6.1 clause 3):
-     *        where a STREAM vertex's ring admissions are charged when that vertex has
-     *        declared no source of its own (@ref set_ring_source). It is a DEFAULT so that
-     *        every receiver has somewhere to charge — not a shared pool: composition stays
-     *        per-injection-point, and per-vertex isolation is a tested property. A different
-     *        seam from @p ctl on purpose — exhausting a node's control budget and exhausting
-     *        one plane's queue budget are different failures with different blast radii, and
-     *        the flood test asserts exactly that separation. Must outlive the graph.
+     * @par NARROW vs WIDE is WHICH source, never a config knob
+     * A host that passes nothing gets @ref mem::heap_source — unbounded, honestly reporting
+     * the platform heap's ceiling, and behaviourally what this graph always did: the
+     * process-default composition folds back onto `std::pmr::new_delete_resource()` and
+     * @ref mem::heap_backend, the exact objects the old defaults named, so no default-built
+     * graph changes an allocation. A bounded node injects a @ref mem::pool_source_t (or a
+     * @ref mem::bump_source_t over `null_source()`) and the slab's size IS the bound
+     * (ADR-0079). No `default_config_t` option expresses this and none will: the divergence
+     * is the injected object.
+     *
+     * @par Per-domain overrides still exist, at the seams that own the resource
+     * One injection is the DEFAULT, not a mandate that everything share a store. A STREAM
+     * vertex that must not be affected by another receiver's exhaustion declares its own
+     * ring source through @ref set_ring_source (receiver-pays, RFC-0025 §4.6.1 clause 3) —
+     * that seam is untouched, and per-vertex isolation stays a tested property.
+     *
+     * @param src The one nothrow failable block source every allocation above draws from.
+     *            Host-owned; it MUST outlive the graph and every value handle obtained
+     *            from it. An injected source must be thread-safe on a target where a value
+     *            segment's reclaim can self-route onto a reader/subscriber thread
+     *            concurrent with a writer's allocation (ADR-0060 §2) — @ref mem::heap_source
+     *            is; a @ref mem::pool_source_t must be composed with the target's
+     *            arch-selected synchronisation. `nullptr` is accepted and means "the
+     *            process default", so `graph_t{}` and `graph_t{nullptr}` agree.
      */
-    explicit graph_t(std::pmr::memory_resource* mr = std::pmr::get_default_resource(),
-                     mem::mem_backend_t* value_backend = &mem::heap_backend(),
-                     mem::block_source_t* ctl = &mem::heap_source(),
-                     mem::block_source_t* ring = &mem::heap_source());
+    explicit graph_t(mem::block_source_t* src = &mem::heap_source());
+
+    /**
+     * @brief The reference spelling of the collapsed constructor — same contract, no null.
+     *
+     * Offered beside the pointer form because a source is never optional once a deployer
+     * has one: `graph_t g{pool}` says so at the call site, where `graph_t g{&pool}` reads
+     * like a seam that might be absent.
+     */
+    explicit graph_t(mem::block_source_t& src) : graph_t(&src) {}
+
     graph_t(const graph_t&) = delete;
     graph_t& operator=(const graph_t&) = delete;
 
@@ -2740,19 +2767,27 @@ class graph_t {
     // route_handle clear_link dangling-ref class, fixed in #220); it needs a vertex
     // lifetime scheme (refcount / epoch reclamation, or a tombstone) first. Registering
     // the empty key fills this node in place (the "root vertex" the flat map allowed).
-    /** @brief The ADR-0039 injected resource per-write allocations draw from (#361 §5):
-     *         the LKV control block + rope of every `assign`. Host-owned; outlives the
-     *         graph. Defaults to the standard heap. */
+    /** @brief The ADR-0039 resource per-write allocations draw from (#361 §5): the LKV
+     *         control block + rope of every `assign`.
+     *
+     *         Since #873 phase 1 this is no longer injected — it POINTS at whichever
+     *         resource the constructor's single source resolved to: `new_delete_resource()`
+     *         for a process-default graph (so the default composition is byte-for-byte what
+     *         it always was), or the graph's own `src_mr_` adapter over the injected
+     *         source. A pointer rather than the object because those are two different
+     *         types and the hot path reads one indirection either way. */
     std::pmr::memory_resource* mr_ = std::pmr::get_default_resource();
 
-    /** @brief The ADR-0060 injected byte-buffer seam the write-path copy-store draws
-     *         its owned value @ref view::segment_t from (the flatten of a branch/field
-     *         write, `graph.cpp` sites 825/1017). Host-owned; outlives the graph.
-     *         Defaults to the standard heap, so behaviour is byte-identical until a
-     *         host injects a pool. MUST be thread-safe when injected (§2): a segment's
-     *         reclaim self-routes on the last-ref thread, concurrent with a writer's
-     *         alloc. On exhaustion it returns `nullptr` — the write BACKPRESSUREs
-     *         (§3), never a silent heap fallback. */
+    /** @brief The ADR-0060 byte-buffer seam the write-path copy-store draws its owned
+     *         value @ref view::segment_t from (the flatten of a branch/field write,
+     *         `graph.cpp` sites 825/1017), plus both folded READs' POINT headers (#831).
+     *
+     *         Since #873 phase 1 this is no longer injected either — it POINTS at
+     *         @ref mem::heap_backend for a process-default graph and at the graph's own
+     *         `src_backend_` wrapper over the injected source otherwise. On exhaustion
+     *         it answers `nullptr` and the write BACKPRESSUREs (§3), never a silent heap
+     *         fallback; thread-safety is the injected source's contract (§2), because a
+     *         segment's reclaim self-routes on the last-ref thread. */
     mem::mem_backend_t* value_backend_ = &mem::heap_backend();
     std::unique_ptr<vertex_t> root_;
     // The session identity anchors' private structural root (#1223, ADR-0044 §Amendment
@@ -2856,22 +2891,42 @@ class graph_t {
     // assign has marked anything — losing a race with a concurrent mark_pending leaves the
     // mark for the next sweep, an ordering the locked erase already permitted (ADR-0057).
     std::atomic<std::size_t> pending_count_{0};
-    /** @brief The #551 nothrow failable-block seam. Host-owned; outlives the
-     *         graph. Defaults to the platform heap, so behaviour is byte-identical
-     *         until a host injects a bounded source — except that exhaustion is a
-     *         `nullptr` return rather than the `-fno-exceptions` abort stub.
-     *         Its first consumer is the branch-write decode's bump upstream
-     *         (`graph.cpp`); registration and the remaining containers are still
-     *         to migrate. Kept a DIFFERENT type from `mr_` on purpose (see
-     *         @ref tr::mem::block_source_t).
+    /** @brief The #551 nothrow failable-block seam — and, since #873 phase 1, THE source:
+     *         the one the constructor was handed, from which every other channel is built.
+     *
+     *         Defaults to the platform heap, so behaviour is byte-identical until a host
+     *         injects a bounded source — except that exhaustion is a `nullptr` return
+     *         rather than the `-fno-exceptions` abort stub. Kept a DIFFERENT type from
+     *         `mr_` on purpose (see @ref tr::mem::block_source_t): the pmr channel may be
+     *         null-checked away and throws, this one cannot and does not.
      *
      *         LAST on purpose: no hot path reads it, so declaring it here keeps
      *         every other member at the byte offset it had before this seam
      *         existed. A cold pointer inserted mid-object would shift `root_` and
      *         everything after it, which is a layout change the forward-hop bench
-     *         can see and nothing gains from.
+     *         can see and nothing gains from. The two adapters below sit here for the
+     *         same reason.
      */
     mem::block_source_t* ctl_ = &mem::heap_source();
+
+    /** @brief The graph's OWN `mem_backend_t` over `ctl_` (#873 phase 1).
+     *
+     *         Constructed unconditionally and pointed at by `value_backend_` only when
+     *         a non-default source was injected — a process-default graph keeps
+     *         @ref mem::heap_backend so its value path is provably the pre-#873 one, down
+     *         to the ADR-0047 §2 devirtualized `HEAP` reclaim arm. Held BY VALUE: it is
+     *         three words, and making it optional would cost the same space plus a branch. */
+    mem::source_backend_t src_backend_;
+
+    /** @brief The graph's OWN `std::pmr::memory_resource` over `ctl_` (#873 phase 1).
+     *
+     *         Same story as `src_backend_`: pointed at by `mr_` only when a
+     *         non-default source was injected, so a process-default graph's per-write
+     *         control block still comes from `new_delete_resource()` through exactly one
+     *         virtual call, as it always did. This adapter is where the substrate's
+     *         `nullptr` becomes a `std::bad_alloc` — the ONE boundary in the graph that
+     *         translates the failure convention, and only because `std::pmr` requires it. */
+    mem::source_resource_t src_mr_;
 
     /** @brief The GRAPH-LEVEL DEFAULT receiver-ring source (RFC-0025 §4.6.1 clause 3): the seam
      *         a STREAM vertex charges its ring admissions against when it has declared none of

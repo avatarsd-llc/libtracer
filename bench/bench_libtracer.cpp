@@ -36,6 +36,7 @@
 #include "delivery_count.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_pool.hpp"
+#include "libtracer/mem_source.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tracer.hpp"
@@ -155,11 +156,12 @@ void emit_batch_row(const char* mode, std::size_t S, std::size_t F, std::size_t 
 void run_inproc(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc, bool by_path,
                 const char* mode, std::uint64_t budget = kDeliveryBudget,
                 std::uint64_t latbudget = kLatencyDeliveryBudget,
-                std::pmr::memory_resource* mr = nullptr, bool batch_row = true) {
-    // mr==nullptr keeps the default global-heap LKV (make_shared); an injected pool
-    // routes the per-write LKV allocate_shared through it (ADR-0060 mr_ seam) — the
-    // only difference between `inproc` and `inproc-pool` (graph.cpp store uses mr_).
-    graph_t g{mr ? mr : std::pmr::get_default_resource()};
+                tr::mem::block_source_t* src = nullptr, bool batch_row = true) {
+    // src==nullptr keeps the process-default source, which folds back onto the global-heap
+    // LKV (make_shared) exactly as before #873 phase 1; an injected source routes the
+    // per-write LKV allocate_shared through the graph's internal pmr adapter over it — the
+    // only difference between `inproc` and `inproc-pool`.
+    graph_t g{src};
     std::vector<vertex_handle_t> verts;
     std::vector<path_t> paths;
     verts.reserve(E);
@@ -264,12 +266,26 @@ void run_inproc(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc, bool
 void run_inproc_pool(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc, bool by_path,
                      const char* mode, std::uint64_t budget = kDeliveryBudget,
                      std::uint64_t latbudget = kLatencyDeliveryBudget) {
-    std::pmr::unsynchronized_pool_resource pool;
+    // Since #873 phase 1 the graph takes ONE `block_source_t`, so the pooled arm is a
+    // `tr::mem::pool_source_t` over a caller-owned slab rather than a
+    // `std::pmr::unsynchronized_pool_resource`. Same shape of instrument — a real recycling
+    // free-list pool, not a monotonic best-case — and it is now the shipping type rather
+    // than a std stand-in. Sized far above the steady state (the loop keeps a bounded number
+    // of LKV blocks live and every replacement is recycled by exact size class); a refusal
+    // would reach the graph's pmr adapter as a `bad_alloc`, so the arm asserts there was
+    // none rather than leaving that to chance.
+    std::vector<std::byte> slab(4u * 1024u * 1024u);
+    std::vector<tr::mem::size_class_t> classes(64);
+    tr::mem::pool_source_t<> pool{slab, classes};
     // No `-batch` twin (#553): what these rows are FOR is the pooled-vs-heap LKV
     // comparison, and that is gated by the `lkv` same-run throughput ratio
     // (perf_gate.py lkv_ratio_gate), not by a latency percentile. A batch twin here
     // would be ten more series with no chart reading them.
     run_inproc(S, F, E, alloc, by_path, mode, budget, latbudget, &pool, false);
+    if (pool.stats().refused != 0) {
+        std::fprintf(stderr, "FAIL: %s pooled arm exhausted its slab (%zu refusals)\n", mode,
+                     pool.stats().refused);
+    }
 }
 
 /** @brief Which local vertex kind a path-target edge re-dispatches INTO. */
