@@ -285,6 +285,10 @@ Three consequences are worth stating plainly.
 - **NARROW versus WIDE is *which source*, not a config knob.** A host that injects nothing gets `heap_source()` — unbounded, and folded back onto `new_delete_resource()` / `heap_backend()` so a default-built graph allocates exactly what it always did. A bounded node injects a `pool_source_t` and the slab's size *is* the bound. There is no `default_config_t` option for this and there will not be one.
 - **Per-domain overrides survive at the seams that own the resource.** One injection is a default, not a mandate to share. A STREAM vertex that must not be affected by another receiver's exhaustion declares its own ring source through `graph_t::set_ring_source` (receiver-pays, [RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.6.1 clause 3).
 
+### The router's demux table
+
+The other cold-path channel phase 1 closes is `tr::net::child_registry_t`'s chunked list — the one NAME→link demux table. It grew by `new (std::nothrow) chunk_t()`, so a node that had injected a source at every visible seam still could not bound its own routing table. It now takes a `block_source_t` (defaulting to `heap_source()`) and `fwd_router_t` wires it to **`label_src`**, not to `rx`. That split is the point: chunks are long-lived state whose high-water mark is the count of distinct link names ever registered, and a `bump_source_t` — a legitimate choice for the per-frame `rx` store — would fill monotonically under them. Nothing else changed: a refused chunk is still a `nullptr` that `add` reports and `make_connection` rolls back.
+
 **What still bypasses the injection after phase 1.** The LKV hazard-slot nodes are still `new (std::nothrow)` on the global heap — phase 2, gated on a dedicated hazard-slot acquisition A/B because the naive fix puts an atomic on `store()`. Re-layering the backend and pmr adapters into the backend seam proper is phase 3. And the `std::vector` growth behind `tr::detail::try_reserve` / `try_push_back` migrates only where the container's element type allows it; the sites that cannot are annotated in place.
 
 

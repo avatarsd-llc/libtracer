@@ -9,12 +9,19 @@
  * @section why Why this is its own executable
  *
  * The only allocation on `add_child`'s registry path that can fail SOFTLY is the registry
- * chunk: `child_registry_t::append` asks for it with `new (std::nothrow) chunk_t()` and reads
- * a null back rather than throwing. That is the seam, and the only way to drive it from a test
- * is to replace the global NOTHROW `operator new` — a whole-program decision, so it lives in
- * its own binary where nothing else is affected. The THROWING form is left alone, so every
- * `std::string` / `std::vector` in the test (and in `add_child` itself, which encodes the
- * mount run before it appends) allocates normally; only the seam is armed.
+ * chunk, which since #873 phase 1 `child_registry_t::append` draws from the router's INJECTED
+ * `label_src` (`src_->try_alloc`) rather than from `new (std::nothrow) chunk_t()`. It reads a
+ * null back rather than throwing either way, so the seam and this test's subject are
+ * unchanged; what changed is where the bytes come from.
+ *
+ * This router is built with the DEFAULT source, so that seam still bottoms out in the process
+ * heap source, and the way to drive it from a test is still to replace the global NOTHROW
+ * `operator new` — a whole-program decision, so it lives in its own binary where nothing else
+ * is affected. The THROWING form is left alone, so every `std::string` / `std::vector` in the
+ * test (and in `add_child` itself, which encodes the mount run before it appends) allocates
+ * normally; only the nothrow seam is armed. A test that wanted the refusal narrowed to the
+ * chunk ALONE now has a better instrument available — inject a `block_source_t` that refuses —
+ * and that is the shape a successor should reach for rather than widening this override.
  *
  * @section what What it pins
  *

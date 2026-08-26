@@ -260,6 +260,11 @@ class fwd_router_t {
           rx_(rx),
           flat_(flat),
           egress_(egress),
+          // The NAME->link demux table's chunks are long-lived control state whose high-water
+          // mark is the count of DISTINCT link names ever registered, so they take the LABEL
+          // store rather than the per-frame `rx` one — which a `bump_source_t` may legitimately
+          // be, and which would fill monotonically under them (#873 phase 1).
+          registry_(label_src != nullptr ? *label_src : mem::heap_source()),
           handles_(label_src, max_label_bindings_per_link) {
         // The captureless {fn, ctx} pair the ADR-0047 doctrine prescribes (#1049) — the same
         // shape as `on_reverse_ref` below. The graph publishes it through a `sink_slot_t`,
@@ -1995,7 +2000,8 @@ class fwd_router_t {
                                            // a null result is answered by value, never stored
     mem::mem_backend_t* egress_;           // terminus REPLY head + mint egress bytes (#795);
                                            // a refusal degrades to addressed BACKPRESSURE
-    child_registry_t registry_;            // the one NAME→link demux table (Brick 3a, ADR-0037)
+    child_registry_t registry_;            // the one NAME→link demux table (Brick 3a, ADR-0037);
+                                           // its chunks draw from `label_src` (#873 phase 1)
     route_handle_t handles_;               // per-link label tables (compact flows only)
     std::deque<child_rx_ctx_t> child_rx_;  // stable receiver contexts, one per child
     /** @brief Head of the LOCK-FREE published chain through `child_rx_` — the only spelling a

@@ -10,18 +10,28 @@
  * @section why Why this is its own executable
  *
  * Same instrument as `mount_add_oom_test`, one layer up. The only allocation on the
- * connection-create path that can fail SOFTLY is the registry chunk
- * (`child_registry_t::append` asks for it with `new (std::nothrow) chunk_t()` and reads a
- * null back), and the only way to drive it from a test is to replace the global NOTHROW
- * `operator new` — a whole-program decision, so it lives in its own binary.
+ * connection-create path that can fail SOFTLY is the registry chunk, which since #873 phase 1
+ * `child_registry_t::append` draws from the router's INJECTED `label_src` (`src_->try_alloc`)
+ * rather than from `new (std::nothrow) chunk_t()`. It reads a null back either way, so the
+ * subject is unchanged; this router takes the default source, so the seam still bottoms out in
+ * the process heap source, and the only way to drive it from a test is still to replace the
+ * global NOTHROW `operator new` — a whole-program decision, so it lives in its own binary.
  *
- * The replacement is surgical in two ways. It replaces only the UNALIGNED nothrow form, so
- * `mem::heap_source_t::try_alloc` (which calls the ALIGNED nothrow overload, a distinct
- * function that libstdc++ does not route through this one) keeps serving the graph's
- * control-plane blocks. And it leaves the THROWING form alone, so every `std::string` /
- * `std::vector` / `std::make_unique` on the create path — including the vertex the graph
- * registers and the transport the factory builds — allocates normally. What is armed is
- * exactly the one seam `add_child` reports `false` for.
+ * The replacement leaves the THROWING form alone, so every `std::string` / `std::vector` /
+ * `std::make_unique` on the create path — including the vertex the graph registers and the
+ * transport the factory builds — allocates normally.
+ *
+ * **What it no longer isolates, stated rather than left to rot.** This header used to claim
+ * the override was surgical in a second way: that it replaced only the UNALIGNED nothrow form,
+ * so `mem::heap_source_t::try_alloc` — which then called the ALIGNED overload — kept serving
+ * the graph's control-plane blocks. #873 phase 1 ended that: `heap_source_t` now serves a
+ * fundamental-alignment request through the plain nothrow form precisely so the channels it
+ * absorbed keep their old bytes, which means the armed window refuses the graph's failable
+ * blocks too. Every assertion below still holds and still fails on the ablation — the create
+ * answers `BACKPRESSURE` and rolls back — but it is no longer true that ONLY the registry
+ * chunk is refused inside the window. A successor wanting that isolation back should inject a
+ * `block_source_t` that refuses only `sizeof(chunk_t)`, which is now possible and is a
+ * strictly better instrument than a global-`operator new` override.
  *
  * @section what What it pins
  *
