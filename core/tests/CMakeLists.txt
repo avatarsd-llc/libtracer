@@ -2140,6 +2140,17 @@ target_compile_definitions(batch_test PRIVATE
 libtracer_test_warnings(batch_test)
 add_test(NAME batch COMMAND batch_test)
 
+# RFC-0025 §4.7 (#1546) — the reference PLAYOUT helper (playout.hpp): the receiver-side
+# derivation of the one clock never transmitted. Pins what it derives (uniform times as
+# arithmetic over the descriptor's rate at 0 B/sample, non-uniform out of the packed i32 run,
+# late flagged against the CALLER's now) and what its ruled scope REFUSES — no reorder, no
+# drop, no de-jitter, no pacing — plus the zero-allocation claim, with a live-counter positive
+# control. Host tests only: a receiver-side derivation has no wire-observable bytes.
+add_executable(playout_test playout_test.cpp)
+target_link_libraries(playout_test PRIVATE libtracer)
+libtracer_test_warnings(playout_test)
+add_test(NAME playout COMMAND playout_test)
+
 if(LIBTRACER_NET_PLANE)
     # RFC-0004 Amendment 2 (#1502) — the six empty-src conformance vectors: a zero-length
     # `src` is "no reply requested", so the terminus applies the WRITE and emits nothing,

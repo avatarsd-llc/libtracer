@@ -16,6 +16,37 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`playout.hpp` — `tr::wire::playout_batch`, `playout_cursor_t`, `playout_clock_t`,
+  `playout_sample_t`, `playout_report_t` and `playout_continuity_t`: the reference PLAYOUT
+  helper, header-only** ([#1546](https://github.com/avatarsd-llc/libtracer/issues/1546),
+  [RFC-0025](../docs/spec/rfcs/0025-stream-class-values.md) §4.7's SHOULD, scope ruled
+  2026-08-26). PLAYOUT is the one clock of §4.2.1's three-clock model that is never
+  transmitted — the consumer derives it from the SAMPLE time in the batch's payload `TIME`
+  (`0x0C`) child. This is that derivation, written once so every consumer spells it the same
+  way, and its whole scope is two things:
+
+  - **Per-sample timestamps.** `base + i × dt_ns` on a UNIFORM stream at **0 bytes per sample**
+    (the §4.3 descriptor's `dt_ns` is a reader's fact the producer already declared), `base +
+    offsets[i]` on a NON-UNIFORM one out of the packed `i32` run. A derivation that would leave
+    the representable ns epoch is reported UNDATED, never wrapped into a plausible time.
+  - **Late/gap flagging against a caller-supplied "now"** (`playout_clock_t`), with the
+    caller's own lateness budget. `late` is a FLAG, never a disposition: a late sample is still
+    visited, in order, like every other. A `tr::flow::address_shift_gap` the caller reports
+    surfaces as `playout_continuity_t::GAP` and **resets the sequence expectation** — loss is
+    never masked, and not one sample of the batch behind a gap is skipped.
+
+  **Explicitly refused: reorder, de-jitter, interpolate, pace.** Those are consumer policy (a
+  recorder wants none of them), and pacing *schedules* — RFC-0005's ban on timers stands
+  unqualified (RFC-0025 §4.1.3, Amendment 4). Nothing here sleeps, arms a timer or reads a
+  clock; the "now" is a number the application passes in, from its own thread and its own
+  clock, above the graph. It is a pure value-consuming derivation: it allocates nothing (pinned
+  by a global-`operator new` counter with a live-counter positive control), and the only state
+  it carries — a two-scalar `playout_cursor_t` sequence expectation — is declared and owned by
+  the CALLER. Header-only and in `tr::wire` because a batch is a value: an MCU pays the
+  footprint only if it includes the header. Host tests only (`core/tests/playout_test.cpp`) —
+  a receiver-side derivation has no wire-observable bytes, the reading §7 items 2/4/5/6/7/9
+  already carry — so no conformance vector moves and no wire surface changes.
+
 - **`tr::net::fwd_router_t::adopt_path_label`, `label_dispatch` (+ `label_dispatch_t`) and
   `fall_back_on_label_refusal` — the RFC-0027 ORIGIN, which closes the one seam the RFC left
   unwired three times** ([#1551](https://github.com/avatarsd-llc/libtracer/issues/1551),
