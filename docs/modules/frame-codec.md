@@ -232,6 +232,30 @@ playout time is never transmitted at all (the three-clock model of
 spell the convention — a reader's refusal, never the codec's: the same bytes still decode,
 still forward and still round-trip.
 
+## The playout helper — deriving the clock nobody transmits
+
+`playout.hpp` is the receiver-side half of the same convention, and the reference helper
+[RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md)
+§4.7 asks the library to ship. Of the three clocks, PLAYOUT is the one never put on the wire:
+the consumer derives it. `tr::wire::playout_batch(cursor, batch, clock, gaps_before[, visitor])`
+walks a decoded batch in frame order and hands each frame its derived sample time, its lateness
+against a **caller-supplied** "now", and a `late` flag against a **caller-supplied** budget. It
+returns a `playout_report_t` — the sample/late/undated census plus a continuity verdict.
+
+Its scope is exactly two things — per-sample timestamps and late/gap flagging — and the
+refusals are as load-bearing as the capabilities:
+
+- **It never reorders, de-jitters, interpolates or paces.** Those are consumer policy; a
+  recorder wants none of them. Pacing in particular *schedules*, and the timer ban of
+  [RFC-0005](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md)
+  is unqualified. Nothing in this header sleeps, arms a timer or reads a clock: `now_ns` is a
+  number the application passes in, from its own thread and its own clock.
+- **It never masks loss.** A `tr::flow::address_shift_gap` the caller reports (the `gap_before`
+  a STREAM ring drain hands back) makes the batch `GAP` and **resets the sequence
+  expectation** — and skips not one sample of the batch behind it.
+- **It holds nothing.** The only state is a `playout_cursor_t` — two scalars the *caller*
+  declares and owns. The helper allocates nothing at all.
+
 ## The terminus arena decoder
 
 Alongside the owning `tlv_t` model, the codec ships a second decoder for the FWD
@@ -308,7 +332,7 @@ Exhaustion answers `TLV_NESTING_TOO_DEEP`, never `std::bad_alloc` — which on a
 ## API reference
 
 Headers: `frame.hpp`, `tlv.hpp`, `tlv_emit.hpp`, `tlv_arena.hpp`, `batch.hpp`,
-`path_ref.hpp`, `crc.hpp` — all under `core/include/libtracer/`.
+`playout.hpp`, `path_ref.hpp`, `crc.hpp` — all under `core/include/libtracer/`.
 
 `tr::wire::opt_t` — the option bits carried in every header — is documented once, on
 [wire format bits](wire-format-bits.md), alongside the bit layout it names.

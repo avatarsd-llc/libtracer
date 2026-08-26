@@ -1353,6 +1353,24 @@ the reference playout helper. Sustained objections and their resolution will be
 recorded here; the comment window is waived by default per GOVERNANCE while
 solo-maintained.
 
+> **The scope of the reference playout helper is RULED, and §4.7's SHOULD is DISCHARGED**
+> (2026-08-26, [#1546](https://github.com/avatarsd-llc/libtracer/issues/1546); shipped as
+> `core/include/libtracer/playout.hpp`, `tr::wire::playout_batch`). The helper does **exactly
+> two things**: derives per-sample timestamps (uniform via the §4.3 descriptor's `dt_ns` at 0
+> bytes/sample, non-uniform out of the packed `i32` offset run) and flags late/gap against a
+> **caller-supplied** "now". It **explicitly refuses** to reorder, de-jitter, interpolate or
+> pace — pacing schedules, and §4.1.3 Amendment 4 keeps RFC-0005's timer ban unqualified, so
+> nothing in it sleeps, arms a timer or reads a clock. A `tr::flow::address_shift_gap` (§4.5)
+> reported mid-sequence **surfaces to the caller and resets the sequence expectation**; loss is
+> never masked. It lives in `tr::wire` and is **header-only** — a batch is a value, and an MCU
+> pays the footprint only if it includes the header — holds no library-internal buffers (the
+> sequence expectation is a two-scalar cursor the caller declares and owns), and is
+> receiver-side only (§4.6.1 Amendment 2: a producer never queues). Its conformance surface is
+> **host tests only**, on the reading §7 items 2/4/5/6/7/9 already carry: a receiver-side
+> derivation has no wire-observable bytes, so **no wire surface and no normative text moves** —
+> this discharges a SHOULD, it does not change one. The deferred list above keeps its other
+> three items.
+
 ## Erratum (2026-08-23) — §4.1.2 clause 6's `0x80` carriage is scoped to a STANDALONE flush; a FOLDED flush seats the same batch in the branch-write node's single structured `VALUE` ([#1500](https://github.com/avatarsd-llc/libtracer/issues/1500))
 
 **What the text said.** Amendment 3 (§4.1.2) states two things that read as unconditional and,
