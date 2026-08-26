@@ -3,7 +3,7 @@
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
  * The ENCODER half of the connection-creation grammar, shipped next to the decoder that
- * consumes it (`transport_vertex_t::make_connection` / `config_reader_t`). Before this
+ * consumes it (`transport_vertex_t::endpoint_write` / `config_reader_t`). Before this
  * header the library shipped only the decoder: every consumer that wanted to create a
  * connection — the production first-wiring step — hand-emitted the SPEC from
  * `wire::emit_tlv` / `wire::emit_name` and reached into `tr::detail::store_le` to encode
@@ -38,14 +38,17 @@
 namespace tr::net {
 
 /**
- * @brief Builds the `/net:children[]` connection-creation SPEC — the ONE encoder of the
+ * @brief Builds the creator-endpoint connection-creation SPEC — the ONE encoder of the
  *        grammar @ref transport_vertex_t decodes.
  *
- * The payload is
- * `SPEC{ NAME "type" NAME <type>, NAME "name" NAME <name>, NAME "config" SETTINGS{ pairs } }`,
- * written to `/net:children[]` (ADR-0027, RFC-0014, reference/05). `<type>` is the catalog
- * child type — `"client"` (DIAL default) or `"listener"` (LISTEN default) — and `<name>` is
- * the connection's leaf NAME.
+ * The payload is `SPEC{ NAME "name" NAME <name>, NAME "config" SETTINGS{ pairs } }`, written
+ * to the module's creator endpoint `/net/<module>/conn` (RFC-0014 §2, ADR-0027,
+ * reference/05). `<name>` is the connection's leaf NAME; there is no `type` pair, because the
+ * module segment in the path already fixes the transport and the role.
+ *
+ * The superseded `/net:children[]` spelling — which carried `type` (`"client"`/`"listener"`)
+ * and a `role` override — was retired with its door at RFC-0014 S7, and so were the builder
+ * members that emitted those two keys.
  *
  * **The config is built by APPENDING, in call order.** Each setter appends one
  * `(NAME key, value)` pair and returns `*this`, so a chain reads as the SETTINGS it emits
@@ -55,14 +58,12 @@ namespace tr::net {
  * ran emits **no `config` at all** — the config-less SPEC, which is the
  * @ref transport_vertex_t::provide_link spelling.
  *
- * **`kind` is how a SPEC names its module.** There is no `module` key and this builder does
- * not invent one: the module segment a connection mounts under is resolved from the
- * *(kind, role)* pair through the application's @ref transport_vertex_t::register_module
- * declaration, and that resolution runs BEFORE the staged-link lookup (#883). So
- * `.kind("ws").role(conn_role_t::DIAL)` selects the module declared for that pair — and a
- * `kind` with no declaration for that role is refused `SCHEMA_NOT_FOUND` rather than mounted
- * under a library-derived name (ADR-0073 §4). Omit `kind` only for the staged-link spelling,
- * where the module comes from the unique matching staging.
+ * **The module is the PATH, not a key.** There is no `module` key and this builder does not
+ * invent one: the endpoint a SPEC is written to IS the module. A `kind` pair, when present,
+ * must be one that module declares through @ref transport_vertex_t::register_module — a
+ * `kind` the module does not declare is refused `SCHEMA_NOT_FOUND` rather than mounted
+ * elsewhere (ADR-0073 §4). Omit `kind` when the module declares exactly one; a module
+ * declared for two kinds needs one to disambiguate.
  *
  * **Universal vs kind-private keys.** The named setters cover exactly the universal keys
  * `transport_vertex_t` parses into @ref conn_settings_t. A transport kind's PRIVATE keys
@@ -81,46 +82,27 @@ namespace tr::net {
 class conn_spec_t {
    public:
     /**
-     * @brief Begin a SPEC for catalog child type @p type naming the connection @p name.
-     *
-     * @param type The registered child type — `"client"` or `"listener"` for the built-in
-     *             catalog; the type's default role may be overridden with @ref role.
-     * @param name The connection's leaf NAME. It becomes the last segment of the
-     *             `/net/<module>/<name>` mount, so it must be a valid path segment —
-     *             `graph_t::create_child` gates that before this SPEC ever reaches
-     *             `make_connection` (ADR-0073 §1).
-     *
-     * @note Both are encoded to bytes HERE, not stored: the builder holds two byte buffers
-     *       and no `std::string`, so it never borrows a caller's storage (nothing to dangle)
-     *       and a call site pays no string machinery for a control-plane payload.
-     */
-    conn_spec_t(std::string_view type, std::string_view name) {
-        wire::emit_name(body_, "type");
-        wire::emit_name(body_, type);
-        wire::emit_name(body_, "name");
-        wire::emit_name(body_, name);
-    }
-
-    /**
      * @brief Begin the RFC-0014 CREATOR-ENDPOINT SPEC naming the connection @p name — the
      *        payload written to `/net/<module>/conn`.
      *
-     * The endpoint spelling carries `{ name, config }` and NO `type`: the module in the path
-     * fixes both the transport and the role, so there is no catalog type to select and a
-     * `role` pair is ignored by the endpoint (RFC-0014 §1 — the role is positional). Otherwise
-     * identical to the two-argument form: the same setters append the same `config` pairs.
+     * The endpoint spelling carries `{ name, config }` and NO `type` and NO `role`: the module
+     * in the path fixes both the transport and the role (RFC-0014 §1 — the role is positional).
+     * Since S7 retired the `:children[]` door there is no other spelling.
      *
      * @param name The connection's leaf NAME — REQUIRED, and required by design (ADR-0073 §5):
      *             a creator-chosen name is what makes a retried create idempotent
-     *             (`PATH_IN_USE` instead of a second connection).
+     *             (`PATH_IN_USE` instead of a second connection). It becomes the last segment
+     *             of the `/net/<module>/<name>` mount, so it must be a valid path segment;
+     *             the endpoint runs `graph::valid_segment` on it before anything is built.
+     *
+     * @note It is encoded to bytes HERE, not stored: the builder holds two byte buffers and no
+     *       `std::string`, so it never borrows a caller's storage (nothing to dangle) and a
+     *       call site pays no string machinery for a control-plane payload.
      */
     explicit conn_spec_t(std::string_view name) {
         wire::emit_name(body_, "name");
         wire::emit_name(body_, name);
     }
-
-    /** @brief `role` — VALUE u8; overrides the catalog type's default direction. */
-    conn_spec_t& role(conn_role_t value) { return u8("role", static_cast<std::uint8_t>(value)); }
 
     /** @brief `port` — VALUE u16; peer port on a DIAL, bind port on a LISTEN. */
     conn_spec_t& port(std::uint16_t value) { return u16("port", value); }
@@ -186,7 +168,7 @@ class conn_spec_t {
      * @brief The SPEC as raw wire bytes.
      *
      * The `config` SETTINGS is emitted only when at least one setter ran — an untouched
-     * builder yields `SPEC{type, name}`, the staged-link spelling.
+     * builder yields `SPEC{name}`, the config-less spelling a staged link takes.
      */
     [[nodiscard]] std::vector<std::byte> bytes() const {
         std::vector<std::byte> body = body_;
@@ -200,7 +182,8 @@ class conn_spec_t {
     }
 
     /**
-     * @brief The SPEC as an owned @ref tr::view::view_t, ready to `write` to `/net:children[]`.
+     * @brief The SPEC as an owned @ref tr::view::view_t, ready to `write` to
+     *        `/net/<module>/conn`.
      *
      * @return An EMPTY view when the copy could not be allocated — the same
      *         degrade-don't-throw contract the rest of the control plane keeps
@@ -214,8 +197,8 @@ class conn_spec_t {
     }
 
    private:
-    std::vector<std::byte> body_; /**< @brief The SPEC body's fixed head — the `type` and
-                                              `name` pairs, encoded by the constructor. */
+    std::vector<std::byte> body_; /**< @brief The SPEC body's fixed head — the `name` pair,
+                                              encoded by the constructor. */
     std::vector<std::byte> cfg_;  /**< @brief The `config` SETTINGS body, appended in call
                                               order; empty = emit no `config` at all. */
 };
@@ -223,21 +206,28 @@ class conn_spec_t {
 /**
  * @brief The connection SPEC in one call — the shape nearly every call site wants.
  *
- * Equivalent to `conn_spec_t(type, name).role(role).port(port)` plus `.kind(kind)` and
- * `.addr(addr)` when those are non-empty; an empty @p kind or @p addr omits the key. For a
- * kind-private key, a config-less SPEC, or any other field, build a @ref conn_spec_t.
+ * Equivalent to `conn_spec_t(name).port(port)` plus `.kind(kind)` and `.addr(addr)` when those
+ * are non-empty; an empty @p kind or @p addr omits the key. For a kind-private key, a
+ * config-less SPEC, or any other field, build a @ref conn_spec_t.
+ *
+ * There is no `role` argument and no `type` argument: both died with the `:children[]` door
+ * at RFC-0014 S7. The endpoint this payload is written to says which module — and therefore
+ * which transport and which role — the connection belongs to.
  *
  * @return An owned view of the SPEC bytes (empty on allocation failure — see
  *         @ref conn_spec_t::view).
  */
-[[nodiscard]] inline view::view_t conn_spec(std::string_view type, std::string_view name,
-                                            conn_role_t role, std::uint16_t port,
+[[nodiscard]] inline view::view_t conn_spec(std::string_view name, std::uint16_t port,
                                             std::string_view kind = {},
                                             std::string_view addr = {}) {
-    conn_spec_t spec(type, name);
-    spec.role(role).port(port);
+    conn_spec_t spec(name);
+    // Pair order is `kind`, `addr`, `port` — the order the `conn/create-via-spec` conformance
+    // vector carries and the TypeScript `encodeConnSpec` emits. The reader is order-insensitive
+    // (@ref tr::wire::config_reader_t walks positional pairs), so this is a byte-level agreement,
+    // not a semantic one — but it is the agreement that lets one vector pin all three cores.
     if (!kind.empty()) spec.kind(kind);
     if (!addr.empty()) spec.addr(addr);
+    spec.port(port);
     return spec.view();
 }
 

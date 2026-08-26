@@ -149,6 +149,16 @@ overridable per node), never a library rule — with names like `ws-client`, `ws
   `{ name, config }` with no `type` and no `role` field, and each module's `:schema` is
   its own catalog — a dial target and a bind port are different catalogs, which is the
   reason to split them.
+- **This endpoint is the ONE door.** The superseded global spelling
+  `write /net:children[] += SPEC{type, name, config}`, with its `client` / `listener`
+  child types and its `role` config override, was **retired** at
+  [#492](https://github.com/avatarsd-llc/libtracer/issues/492) S7: the reference
+  implementation registers those two child types no longer, so that write now answers
+  `SCHEMA_NOT_FOUND`. There is no second way in and no migration window. What survives
+  under the same spelling is `:children[]` as an **enumeration** — the reads in the
+  block above — and `:children[]` *creation* for `stored_value` and any type an
+  application registers itself with `graph_t::register_child_type`; only the two
+  connection types died.
 - **The path carries a name, never an address.** The created connection is addressed
   `/net/<module>/<name>`; `addr`, `port`, `keepalive`, `backoff` and `connect_timeout`
   are **creation-time config** — they travel in the `SPEC`'s `config` SETTINGS and are
@@ -208,7 +218,9 @@ eager by design. What is
 `CREATE`/`WRITE` gating split (S2c). The addressing half was already there — a created connection mounts and routes at
 `/net/<module>/<name>`, with the module name declared by the application (never
 library-derived — ADR-0073 §4) — and the `:children[]` creation spelling RFC-0014
-supersedes still works in parallel until S7 retires it. RFC-0014's byte-level clauses (the
+supersedes is **gone**: S7 unregistered the `client` and `listener` child types, so the
+endpoint is now the only door and a `:children[]` creation SPEC naming either type
+answers `SCHEMA_NOT_FOUND`. RFC-0014's byte-level clauses (the
 `SPEC`/`NAME`/`config` layout, the catalog reply bytes, the liveness encoding, the gate
 order, the error identities) are proposed pending code plus conformance vectors; its
 declaring clauses stand on acceptance.
@@ -346,11 +358,11 @@ write-only, non-propagating creator endpoint.
 `dormant` takes `0` so a resting link is the falsy default. **The byte encoding becomes
 normative on the merge of RFC-0014's conformance vectors** — the RFC defers it, so these
 values are the reference encoding until then (`link_state_t`,
-`core/include/libtracer/transport_vertex.hpp:107-114`). A `LISTEN` vertex's liveness
+`core/include/libtracer/transport_vertex.hpp:111-118`). A `LISTEN` vertex's liveness
 reports **listen-socket reachability**, not per-accepted-peer connectivity; accepted-peer
 count and identity are exposed through the connection vertex's **synthesized
 `:children[]`**, built per read from the transport's own live-peer table
-(`core/src/transport_vertex.cpp:808`) — never through `:settings`, whose core namespace
+(`core/src/transport_vertex.cpp:717`) — never through `:settings`, whose core namespace
 is empty. Once up, a link is bidirectional regardless of who dialed — `role` says only *who initiates*. The liveness
 engine that drives these transitions automatically is not implemented; the value is set
 by the caller.
@@ -463,7 +475,7 @@ automatic**:
   and `port` are **creation-time config** (§Creation): they travel in the `SPEC`'s
   `config` and are parsed into the transport-private `tr::net::conn_settings_t`, whose
   only accessor hands out a **const** view
-  (`transport_vertex_t::settings_of`, `core/include/libtracer/transport_vertex.hpp:608`).
+  (`transport_vertex_t::settings_of`, `core/include/libtracer/transport_vertex.hpp:617`).
   The vertex `:settings` core namespace holds nothing to write — RFC-0022 §3.B deleted
   `settings_t`, so every flat knob name under it answers `SCHEMA_NOT_FOUND`
   caller-independently (`core/src/graph.cpp:3615`), leaving only the read container and

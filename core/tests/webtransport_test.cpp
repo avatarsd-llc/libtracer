@@ -542,21 +542,21 @@ void test_fwd_read_round_trip() {
 }
 
 /**
- * @brief SPEC{ NAME "type" <type>, NAME "name" <name>, SETTINGS "config"{ role,
- *        port, kind=webtransport [, addr] [, cert, key] [, ca] [, insecure]
- *        [, path] } }.
+ * @brief SPEC{ NAME "name" <name>, SETTINGS "config"{ port, kind=webtransport
+ *        [, addr] [, cert, key] [, ca] [, insecure] [, path] } }, written to a
+ *        module's creator endpoint.
  *
  * `kind = "webtransport"` bound into the library's public SPEC builder (#902), including the
  * DIAL-side trust pair `ca`/`insecure` (#918) and the DIAL-side extended CONNECT `:path`
- * (#1023).
+ * (#1023). The role no longer travels in the SPEC — the `/net/<module>/conn` segment the
+ * write addresses carries both kind and role.
  */
-view_t wt_conn_spec(std::string_view type, std::string_view name, tr::net::conn_role_t role,
-                    std::uint16_t port, std::string_view addr = {}, std::string_view cert = {},
-                    std::string_view key = {}, std::string_view hijack_key = {},
-                    std::string_view ca = {}, std::optional<bool> insecure = std::nullopt,
-                    std::string_view wt_path = {}) {
-    tr::net::conn_spec_t spec(type, name);
-    spec.role(role).port(port).kind("webtransport");
+view_t wt_conn_spec(std::string_view name, std::uint16_t port, std::string_view addr = {},
+                    std::string_view cert = {}, std::string_view key = {},
+                    std::string_view hijack_key = {}, std::string_view ca = {},
+                    std::optional<bool> insecure = std::nullopt, std::string_view wt_path = {}) {
+    tr::net::conn_spec_t spec(name);
+    spec.port(port).kind("webtransport");
     if (!addr.empty()) spec.addr(addr);
     // The kind-private keys go through the generic pair setters (ADR-0043 §5).
     if (!cert.empty()) spec.text("cert", cert).text("key", key);
@@ -575,7 +575,7 @@ view_t wt_conn_spec(std::string_view type, std::string_view name, tr::net::conn_
 }
 
 void test_config_constructed_webtransport() {
-    std::printf("Config-constructed endpoints: kind=webtransport from :children[] SPECs:\n");
+    std::printf("Config-constructed endpoints: kind=webtransport from creator-endpoint SPECs:\n");
     graph_t node_a;
     graph_t node_b;
     tr::net::fwd_router_t router_a(node_a);
@@ -597,11 +597,9 @@ void test_config_constructed_webtransport() {
     // net.ipv4.ip_local_port_range, so a fixed literal races the kernel's ephemeral
     // allocator and loses at bind(2)), its dev cert/key handed in as the
     // kind-PRIVATE `cert`/`key` config keys.
-    const auto wb = node_b.write(
-        path_t("/net:children[]"),
-        wt_conn_spec("listener", "a", tr::net::conn_role_t::LISTEN, 0, {}, g_cert, g_key));
-    check(wb.has_value(),
-          "B: SPEC{listener, kind=webtransport, port, cert, key} constructs the listener");
+    const auto wb = node_b.write(path_t("/net/webtransport-server/conn"),
+                                 wt_conn_spec("a", 0, {}, g_cert, g_key));
+    check(wb.has_value(), "B: SPEC{kind=webtransport, port, cert, key} constructs the listener");
     check(router_b.registry().by_name("net/webtransport-server/a") != nullptr,
           "B: the endpoint is wired into the router");
     // Read the granted port back off the owned link — the dialer below names it.
@@ -614,21 +612,19 @@ void test_config_constructed_webtransport() {
     // A missing cert/key on a webtransport LISTEN is a TYPE_MISMATCH. The refusal is
     // about the CREDENTIALS, not the port: `port = 0` has been the legal EPHEMERAL
     // spelling on a LISTEN since #1362.
-    const auto bad = node_b.write(path_t("/net:children[]"),
-                                  wt_conn_spec("listener", "bad", tr::net::conn_role_t::LISTEN, 0));
+    const auto bad = node_b.write(path_t("/net/webtransport-server/conn"), wt_conn_spec("bad", 0));
     check(!bad.has_value(), "B: a webtransport listener without cert/key fails creation");
 
-    // #927 against the REAL parse_wt_config, over the REAL wire path (`:children[]` SPEC →
-    // graph_t::create_child → webtransport_transport_factory). `parse_wt_config` kept a
+    // #927 against the REAL parse_wt_config, over the REAL wire path (a creator-endpoint
+    // SPEC → the module's factory). `parse_wt_config` kept a
     // hand-rolled every-offset copy of the SETTINGS walk after the other parsers moved to
     // net::config_reader_t, so this — the one shape that names a PRIVATE KEY FILE — was the
     // last place the defect lived. The hijack target does not exist on disk, so a listener
     // that adopted it could not load credentials and the write would be refused; the
     // observable is that the listener still comes up on the REAL dev key.
-    const auto hj =
-        node_b.write(path_t("/net:children[]"),
-                     wt_conn_spec("listener", "hj", tr::net::conn_role_t::LISTEN, 0, {}, g_cert,
-                                  g_key, "/nonexistent/libtracer-attacker-key.pem"));
+    const auto hj = node_b.write(
+        path_t("/net/webtransport-server/conn"),
+        wt_conn_spec("hj", 0, {}, g_cert, g_key, "/nonexistent/libtracer-attacker-key.pem"));
     check(hj.has_value(),
           "B: a forward-compat `hint=\"key\"` pair does NOT re-point the private key (#927)");
     check(router_b.registry().by_name("net/webtransport-server/hj") != nullptr,
@@ -638,11 +634,10 @@ void test_config_constructed_webtransport() {
     // The dial VERIFIES B's certificate (#918): B serves the self-signed dev cert,
     // so this names that very file as its `ca` bundle. Without a trust key the
     // session would be refused — asserted in test_spec_dial_trust_keys.
-    const auto wa = node_a.write(path_t("/net:children[]"),
-                                 wt_conn_spec("client", "b", tr::net::conn_role_t::DIAL, srv_port,
-                                              "127.0.0.1", {}, {}, {}, g_cert));
+    const auto wa = node_a.write(path_t("/net/webtransport-client/conn"),
+                                 wt_conn_spec("b", srv_port, "127.0.0.1", {}, {}, {}, g_cert));
     check(wa.has_value(),
-          "A: SPEC{client, kind=webtransport, addr, port, ca} constructs the dialing endpoint");
+          "A: SPEC{kind=webtransport, addr, port, ca} constructs the dialing endpoint");
     const auto* s = net_a.settings_of("net/webtransport-client/b");
     check(
         s != nullptr && s->kind == "webtransport" && s->addr == "127.0.0.1" && s->port == srv_port,
@@ -677,9 +672,8 @@ void test_spec_dial_trust_keys() {
     bool listening = true;
     std::map<std::string_view, std::uint16_t> ports;
     for (const std::string_view nm : {"l1", "l2", "l3", "l4", "l5"}) {
-        const auto w = node_b.write(
-            path_t("/net:children[]"),
-            wt_conn_spec("listener", nm, tr::net::conn_role_t::LISTEN, 0, {}, g_cert, g_key));
+        const auto w = node_b.write(path_t("/net/webtransport-server/conn"),
+                                    wt_conn_spec(nm, 0, {}, g_cert, g_key));
         auto* const link = dynamic_cast<webtransport_transport_t*>(
             net_b.link_of(std::string("net/webtransport-server/").append(nm)));
         ports[nm] = (link != nullptr) ? link->local_port() : std::uint16_t{0};
@@ -689,38 +683,36 @@ void test_spec_dial_trust_keys() {
 
     // 1. No trust key: verification is the default, the dev cert validates against
     //    nothing, the session is REFUSED. This write SUCCEEDED before the fix.
-    const auto plain = node_a.write(
-        path_t("/net:children[]"),
-        wt_conn_spec("client", "verify", tr::net::conn_role_t::DIAL, ports["l1"], "127.0.0.1"));
+    const auto plain = node_a.write(path_t("/net/webtransport-client/conn"),
+                                    wt_conn_spec("verify", ports["l1"], "127.0.0.1"));
     check(!plain.has_value() && plain.error() == tr::graph::status_t::TRANSPORT_DOWN,
           "A: a SPEC dial carrying no trust key is REFUSED — the peer cert does not validate");
     check(router_a.registry().by_name("net/webtransport-client/verify") == nullptr,
           "A: the refused dial leaves no endpoint behind");
 
     // 2. `insecure = 1` — the explicit DEV-ONLY opt-out reaches the dialer.
-    const auto insec = node_a.write(path_t("/net:children[]"),
-                                    wt_conn_spec("client", "insec", tr::net::conn_role_t::DIAL,
-                                                 ports["l2"], "127.0.0.1", {}, {}, {}, {}, true));
+    const auto insec =
+        node_a.write(path_t("/net/webtransport-client/conn"),
+                     wt_conn_spec("insec", ports["l2"], "127.0.0.1", {}, {}, {}, {}, true));
     check(insec.has_value(), "A: `insecure = 1` connects to that same unvalidatable peer");
 
     // 3. `ca = <the peer's own cert>` — verification stays ON, against a private bundle.
-    const auto with_ca = node_a.write(path_t("/net:children[]"),
-                                      wt_conn_spec("client", "ca", tr::net::conn_role_t::DIAL,
-                                                   ports["l3"], "127.0.0.1", {}, {}, {}, g_cert));
+    const auto with_ca =
+        node_a.write(path_t("/net/webtransport-client/conn"),
+                     wt_conn_spec("ca", ports["l3"], "127.0.0.1", {}, {}, {}, g_cert));
     check(with_ca.has_value(), "A: `ca = <the peer's cert>` connects with verification ON");
 
     // 4. `insecure = 0` is the explicit "verify" spelling, not a weaker opt-out.
-    const auto zero = node_a.write(path_t("/net:children[]"),
-                                   wt_conn_spec("client", "zero", tr::net::conn_role_t::DIAL,
-                                                ports["l4"], "127.0.0.1", {}, {}, {}, {}, false));
+    const auto zero =
+        node_a.write(path_t("/net/webtransport-client/conn"),
+                     wt_conn_spec("zero", ports["l4"], "127.0.0.1", {}, {}, {}, {}, false));
     check(!zero.has_value(), "A: `insecure = 0` still verifies — the dial is REFUSED");
 
     // 5. `ca = <an UNRELATED bundle>` — the bundle is genuinely consulted, not
     //    merely accepted: one that does not certify this peer still refuses.
     const auto wrong_ca =
-        node_a.write(path_t("/net:children[]"),
-                     wt_conn_spec("client", "wrongca", tr::net::conn_role_t::DIAL, ports["l5"],
-                                  "127.0.0.1", {}, {}, {}, g_other_cert));
+        node_a.write(path_t("/net/webtransport-client/conn"),
+                     wt_conn_spec("wrongca", ports["l5"], "127.0.0.1", {}, {}, {}, g_other_cert));
     check(!wrong_ca.has_value(), "A: `ca = <an unrelated CA>` is REFUSED — the bundle is applied");
 }
 
@@ -736,7 +728,7 @@ void test_spec_dial_trust_keys() {
  *
  * The listeners are constructed DIRECTLY (not from a SPEC) because the test has
  * to HOLD the server object to interrogate it; the dialer — the thing under
- * test — goes through the real `:children[]` SPEC wire path every time. One
+ * test — goes through the real creator-endpoint SPEC wire path every time. One
  * listener per leg: a webtransport endpoint carries one session at a time.
  *
  * Legs 4 and 5 are #1039: the value the key carries must be origin-form, and
@@ -756,20 +748,18 @@ void test_spec_dial_connect_path() {
 
     // 1. `path = "/tracer"` — the key reaches the wire. Verification stays ON
     //    (`ca` = the peer's own self-signed cert), so this is a real session.
-    const auto named = node_a.write(
-        path_t("/net:children[]"),
-        wt_conn_spec("client", "named", tr::net::conn_role_t::DIAL, served.local_port(),
-                     "127.0.0.1", {}, {}, {}, g_cert, std::nullopt, "/tracer"));
-    check(named.has_value(), "A: SPEC{client, ..., path=\"/tracer\"} constructs the dialer");
+    const auto named = node_a.write(path_t("/net/webtransport-client/conn"),
+                                    wt_conn_spec("named", served.local_port(), "127.0.0.1", {}, {},
+                                                 {}, g_cert, std::nullopt, "/tracer"));
+    check(named.has_value(), "A: SPEC{..., path=\"/tracer\"} constructs the dialer");
     check(served.session_path() == "/tracer",
           "the CONNECT that reached the server named /tracer — the SPEC key is on the wire");
 
     // 2. No `path` key: the "/" default the factory used to hard-code is preserved.
     webtransport_transport_t defaulted(std::uint16_t{0}, g_cert, g_key);
-    const auto plain =
-        node_a.write(path_t("/net:children[]"),
-                     wt_conn_spec("client", "plain", tr::net::conn_role_t::DIAL,
-                                  defaulted.local_port(), "127.0.0.1", {}, {}, {}, g_cert));
+    const auto plain = node_a.write(
+        path_t("/net/webtransport-client/conn"),
+        wt_conn_spec("plain", defaulted.local_port(), "127.0.0.1", {}, {}, {}, g_cert));
     check(plain.has_value(), "A: a SPEC with no `path` key still constructs the dialer");
     check(defaulted.session_path() == "/", "a SPEC with no `path` key dials the / default");
 
@@ -797,12 +787,11 @@ void test_spec_dial_connect_path() {
     //    accepted no CONNECT and reports no session.
     webtransport_transport_t untouched(std::uint16_t{0}, g_cert, g_key);
     check(untouched.ok(), "a fresh listener for the refusal leg is up");
-    const auto bare = node_a.write(
-        path_t("/net:children[]"),
-        wt_conn_spec("client", "bare", tr::net::conn_role_t::DIAL, untouched.local_port(),
-                     "127.0.0.1", {}, {}, {}, g_cert, std::nullopt, "tracer"));
+    const auto bare = node_a.write(path_t("/net/webtransport-client/conn"),
+                                   wt_conn_spec("bare", untouched.local_port(), "127.0.0.1", {}, {},
+                                                {}, g_cert, std::nullopt, "tracer"));
     check(!bare.has_value() && bare.error() == tr::graph::status_t::TYPE_MISMATCH,
-          "A: SPEC{client, ..., path=\"tracer\"} is REFUSED with TYPE_MISMATCH");
+          "A: SPEC{..., path=\"tracer\"} is REFUSED with TYPE_MISMATCH");
     check(untouched.session_path().empty() && !untouched.session_up(),
           "the refused creation dialled nothing — the listener accepted no CONNECT");
     check(router_a.registry().by_name("net/webtransport-client/bare") == nullptr,
@@ -811,11 +800,10 @@ void test_spec_dial_connect_path() {
     // 5. The rule is the leading "/", not the spelling of leg 1: a deeper
     //    origin-form path still reaches the wire untouched.
     webtransport_transport_t deep(std::uint16_t{0}, g_cert, g_key);
-    const auto nested =
-        node_a.write(path_t("/net:children[]"),
-                     wt_conn_spec("client", "deep", tr::net::conn_role_t::DIAL, deep.local_port(),
-                                  "127.0.0.1", {}, {}, {}, g_cert, std::nullopt, "/a/b"));
-    check(nested.has_value(), "A: SPEC{client, ..., path=\"/a/b\"} still constructs the dialer");
+    const auto nested = node_a.write(path_t("/net/webtransport-client/conn"),
+                                     wt_conn_spec("deep", deep.local_port(), "127.0.0.1", {}, {},
+                                                  {}, g_cert, std::nullopt, "/a/b"));
+    check(nested.has_value(), "A: SPEC{..., path=\"/a/b\"} still constructs the dialer");
     check(deep.session_path() == "/a/b", "the origin-form path reached the server verbatim");
 }
 

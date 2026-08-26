@@ -12,7 +12,10 @@
  *
  * WHAT THIS BINARY DELIBERATELY DOES **NOT** DO: form the mesh. It creates only its own
  * LISTENERS — the sockets it owns — and then waits. Every inter-node link is DIALLED by a
- * `SPEC` the driver writes into this node's `/net:children[]` **remotely, over the wire**.
+ * `SPEC` the driver writes into this node's DIAL-module creator endpoint,
+ * `/net/ws-client/conn`, **remotely, over the wire** — i.e. a `FWD{ WRITE, dst=<route to this
+ * node>/net/ws-client/conn, SPEC{…} }`, the RFC-0014 §2 door that S7 left as the only one
+ * (the `/net:children[]` creation spelling is retired; `:children[]` survives as a READ).
  * That is the whole point of the testbed: it exercises the in-band formation plane a web UI
  * uses (ADR-0017 / ADR-0027, reference/13 §2) — a third party holding delegated admin
  * creates links on devices and departs, leaving the devices talking with nothing in the
@@ -123,15 +126,17 @@ view_t value_u32(std::uint32_t v) {
  * ws-private keys are spelled through the generic pair setters, because a kind's private
  * vocabulary is the kind factory's business and never the builder's (ADR-0043 §5).
  *
- * The TS `encodeConnSpec` is byte-pinned against this exact layout.
+ * The TS `encodeConnSpec` is byte-pinned against this exact layout, which is why the pair
+ * order here is `kind`, `addr`, `port` (then the ws-private pair) rather than call-site order:
+ * it is the order the `conn/create-via-spec` conformance vector carries.
  */
-view_t ws_conn_spec(std::string_view type, std::string_view name, conn_role_t role,
-                    std::uint16_t port, std::string_view kind = {}, std::string_view addr = {},
-                    bool peer_named = false, std::uint32_t max_peers = 0) {
-    tr::net::conn_spec_t spec(type, name);
-    spec.role(role).port(port);
+view_t ws_conn_spec(std::string_view name, std::uint16_t port, std::string_view kind = {},
+                    std::string_view addr = {}, bool peer_named = false,
+                    std::uint32_t max_peers = 0) {
+    tr::net::conn_spec_t spec(name);
     if (!kind.empty()) spec.kind(kind);
     if (!addr.empty()) spec.addr(addr);
+    spec.port(port);
     if (peer_named) spec.flag("peer_named", true).u32("max_peers", max_peers);
     return spec.view();
 }
@@ -245,7 +250,9 @@ int main(int argc, char** argv) {
     tr::net::transport_vertex_t net(graph, router);
     // ADR-0073 §4 (declared-only): the application mints the module names — the library
     // registers none. This node adopts the built-ins' suggested ws names, covering both
-    // its own listeners and any client link an in-band SPEC dials out.
+    // its own listeners and any client link an in-band SPEC dials out. Each declaration
+    // mints that module's creator endpoint: `/net/ws-server/conn` for the listeners created
+    // below, and `/net/ws-client/conn` — the door the DRIVER writes to remotely — for dials.
     (void)net.register_module(std::string(tr::net::kWsClientSuggestedModule), "ws",
                               conn_role_t::DIAL);
     (void)net.register_module(std::string(tr::net::kWsServerSuggestedModule), "ws",
@@ -282,12 +289,13 @@ int main(int argc, char** argv) {
     (void)graph.write(temp_v, value_u32(kSeededTemp));
 
     // ----- every LISTENER, created IN BAND ------------------------------------------
-    // A local graph.write of a SPEC is the identical code path an inbound FWD{WRITE} takes
-    // — same op_resolver, same make_connection, same factory. No provide_link anywhere.
+    // A local graph.write of a SPEC to the LISTEN module's creator endpoint is the identical
+    // code path an inbound FWD{WRITE} to the same endpoint takes — same op_resolver, same
+    // endpoint_write, same factory. No provide_link anywhere.
     for (const auto& ls : g_listens) {
-        const auto w = graph.write(path_t("/net:children[]"),
-                                   ws_conn_spec("listener", ls.name, conn_role_t::LISTEN, ls.port,
-                                                "ws", {}, ls.peer_named, ls.max_peers));
+        const auto w =
+            graph.write(path_t("/net/ws-server/conn"),
+                        ws_conn_spec(ls.name, ls.port, "ws", {}, ls.peer_named, ls.max_peers));
         if (!w) {
             std::fprintf(stderr, "mesh_node[%s]: listener %s:%u FAILED (status %d)\n",
                          g_name.c_str(), ls.name.c_str(), static_cast<unsigned>(ls.port),
@@ -298,8 +306,7 @@ int main(int argc, char** argv) {
 
     // ----- the ctrl listener, LAST (the readiness barrier; see the file header) -------
     const auto ctrl =
-        graph.write(path_t("/net:children[]"),
-                    ws_conn_spec("listener", "ctrl", conn_role_t::LISTEN, g_ctrl_port, "ws"));
+        graph.write(path_t("/net/ws-server/conn"), ws_conn_spec("ctrl", g_ctrl_port, "ws"));
     if (!ctrl) {
         std::fprintf(stderr, "mesh_node[%s]: ctrl listener :%u FAILED (status %d)\n",
                      g_name.c_str(), static_cast<unsigned>(g_ctrl_port),

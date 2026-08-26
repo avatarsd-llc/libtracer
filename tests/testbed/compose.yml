@@ -9,7 +9,7 @@
 #
 # NOTHING HERE FORMS THE MESH. Each service creates only its own listeners; every
 # inter-node link is DIALLED by a SPEC the TypeScript driver writes into that node's
-# /net:children[] remotely (the web-ui-as-setup-edge story — reference/13 §2). The
+# /net/<module>/conn remotely (the web-ui-as-setup-edge story — reference/13 §2). The
 # driver runs on the host and reaches each node through its published ctrl port.
 #
 # STATIC IPs ARE MANDATORY, not a style choice: the built-in socket factories resolve

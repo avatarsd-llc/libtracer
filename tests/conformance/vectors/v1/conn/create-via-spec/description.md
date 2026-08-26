@@ -31,12 +31,22 @@ The creator endpoint's `SPEC` carries `{ name, config }` and nothing else:
 
 - **No `type`.** The module segment in the path (`/net/<module>/conn`) already selects the
   transport, so there is no catalog child type left to name. The superseded global
-  `:children[]` door does need one — see `spec/conn-client-ws`, which is the same connection
-  spelled for that door and carries `type` and `role` on top of these fields.
+  `:children[]` door did need one — it carried `type` and `role` on top of these fields — and
+  RFC-0014 Amendment 4 (S7) retired that door and its `spec/conn-client-ws` vector with it.
+  There is no longer a second spelling to contrast with; these bytes are the only ones a
+  conforming core emits to create a connection.
 - **No `role`.** RFC-0014 §1/§3 make the role **positional**: it is fixed by *which module*
   the endpoint belongs to (`ws-client` = `DIAL`, `ws-server` = `LISTEN`), never by a payload
   field. An implementation that read a `role` pair here would let a peer create a listener
-  through a dialer's endpoint.
+  through a dialer's endpoint. Since S7 the reference implementation does not read a `role`
+  key at all: it is an ordinary unknown pair, ignored like any other.
+
+## The config's values are mixed by TYPE, and the two are not interchangeable
+
+`addr` is a textual `NAME`; `port` is an opaque `VALUE` u16. A string key is found only as a
+`NAME` child, so a core that can emit only one of the two forms cannot express half the
+record. This claim used to be carried by `spec/conn-client-ws`; it lives here now, because
+these bytes carry the same mix and this is the door that survives.
 
 `name` is required and stays required (ADR-0073 §5): a creator-chosen name is what makes a
 retried create idempotent — the retry answers `tr::path::in_use` (see `conn/spec-name-in-use`)

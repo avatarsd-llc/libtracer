@@ -132,15 +132,13 @@ constexpr std::size_t kNamesPerWriter = 4;
 /**@{*/
 
 /**
- * @brief `SPEC{ NAME "type" "client", NAME "name" <name>, SETTINGS "config"{ role=DIAL } }`.
+ * @brief `SPEC{ NAME "name" NAME <name> }` — the config-less, staged-link creation payload.
  *
- * The creation frame written to `/net:children[]`, i.e. the PRODUCTION wiring: the graph's
- * child-type catalog is what reaches `make_connection`, so the churn exercises the same entry
- * a peer's CREATE does rather than a private back door (the RFC-0014 lesson).
+ * The creation frame written to `/net/<module>/conn`, i.e. the PRODUCTION wiring: the module's
+ * creator endpoint is what reaches `make_connection`, so the churn exercises the same door a
+ * peer's CREATE does rather than a private back door (the RFC-0014 lesson).
  */
-view_t conn_spec(std::string_view name) {
-    return tr::net::conn_spec_t("client", name).role(conn_role_t::DIAL).view();
-}
+view_t conn_spec(std::string_view name) { return tr::net::conn_spec_t(name).view(); }
 
 /** @brief Create/remove cycles the connection writer runs — bounded, so CI cannot hang. */
 constexpr int kConnRounds = 1500;
@@ -179,6 +177,15 @@ void transport_vertex_control_plane_churn() {
     fwd_router_t router(g);
     transport_vertex_t net(g, router);
 
+    // The churned connections' module, declared once up front: `register_module` mints the
+    // `/net/m/conn` creator endpoint, which is the only door creation has. Its kind is empty
+    // because every connection here is a STAGED link — nothing is constructed from a factory —
+    // and an empty kind also keeps this declaration clear of the (kind, role) slot the declarer
+    // below rewrites thousands of times.
+    check(net.register_module(std::string(kChurnModule), "", conn_role_t::DIAL).has_value(),
+          "the churned module is declared — its creator endpoint is the creation door");
+    const path_t conn_endpoint("/net/" + std::string(kChurnModule) + "/conn");
+
     // Qualified keys are precomputed: the readers must spin on the LOOKUP, not on rebuilding
     // a string, or the window they are meant to hit is buried under allocation.
     std::vector<std::string> names, qualified;
@@ -195,7 +202,7 @@ void transport_vertex_control_plane_churn() {
                 // A staged link is CONSUMED by a successful creation, so it is re-staged every
                 // round; `provide_link` is itself a `ctl_m_` mutation.
                 net.provide_link(std::string(kChurnModule), names[i], links[i]);
-                if (g.write(path_t("/net:children[]"), conn_spec(names[i])))
+                if (g.write(conn_endpoint, conn_spec(names[i])))
                     created.fetch_add(1, std::memory_order_relaxed);
                 if (net.remove_connection(qualified[i]))
                     removed.fetch_add(1, std::memory_order_relaxed);

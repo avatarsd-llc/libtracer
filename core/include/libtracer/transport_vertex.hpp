@@ -3,8 +3,10 @@
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
  * #83 — a transport, and each connection inside it, as a first-class `/` vertex
- * (ADR-0027): connections appear in the graph as `/net/<conn>` vertices —
- * `:children[]`-created, `:settings`-readable, `await`-able for link up/down.
+ * (ADR-0027): connections appear in the graph as `/net/<module>/<conn>` vertices —
+ * created by a `SPEC` write to the module's creator endpoint `/net/<module>/conn`
+ * (RFC-0014 §2, the ONE wire creation door since S7 retired the `:children[]`
+ * spelling), `:settings`-readable, `await`-able for link up/down.
  *
  * The production path is CONFIG-CONSTRUCTED sockets: the SPEC's `config` names a
  * transport `kind` (`udp`, `ws`, or any kind registered via
@@ -14,11 +16,13 @@
  * @ref transport_vertex_t::provide_link remains the test/manual seam (loopback
  * channels, exotic transports) and takes precedence when staged.
  *
- * SOLID / layering: the graph owns the *addressing* (`register_child_type` composes
- * the `/net/<name>` key, #82); this `tr::net` seam owns the *catalog entry* — it
- * parses the connection's transport-private `{addr, port, role, kind}` config and
- * wires the transport into the router. L4 (`graph`) never learns what a `client`
- * or `listener` is.
+ * SOLID / layering: the graph owns the *addressing* and the generic write gate; this
+ * `tr::net` seam owns the whole creation semantics behind the creator endpoint — it
+ * parses the connection's transport-private `{addr, port, kind}` config, composes the
+ * `/net/<module>/<name>` key and wires the transport into the router. L4 (`graph`) never
+ * learns what a transport module is; the endpoint is an ordinary `role_t::HANDLER` vertex
+ * to it, and the one thing it learns is that a handler may say which ACL right a written
+ * payload TYPE costs (RFC-0014 Amendment 2).
  */
 #pragma once
 
@@ -53,7 +57,7 @@ class self_heal_link_t;
  * The default ctor is batteries-included: it registers the built-in socket
  * factories so a full node can create udp/tcp/ws connections from a SPEC `kind`.
  * A slim node binds its links DIRECTLY instead — @ref transport_vertex_t::provide_link stages a
- * hand-constructed transport and a `:children[]` SPEC wires it in (the way the
+ * hand-constructed transport and a creator-endpoint `SPEC` wires it in (the way the
  * device/VB nodes stage their ws and CAN links) — so it never routes creation
  * through the built-in factories. Yet while the ctor hard-references
  * `register_builtin_transports`, the linker must keep udp+tcp+ws (and their
@@ -89,10 +93,10 @@ enum class conn_role_t : std::uint8_t { DIAL = 0, LISTEN = 1 };
  * The 1-byte VALUE a connection vertex stores — `await`-able and subscribable, so a
  * `subscribe /net/<module>/<name>` streams every transition (assign-then-deliver under
  * RFC-0008 §D). Supersedes the binary up/down `set_link_state(name, bool)`. The six
- * states are RFC-0014 §4's table, in table order; the byte encoding becomes normative
- * on the S7 conformance-vector merge (the RFC defers it, so these values are the
- * reference encoding until then). `DORMANT` keeps the old "down" `0x00` so a resting
- * link stays the falsy default.
+ * states are RFC-0014 §4's table, in table order, and the byte encoding is **normative**:
+ * the `conn/liveness-enum` conformance vector plus its bound host test pinned it, and
+ * RFC-0014 Amendment 4 (S7) promoted the clause out of `proposed pending`. `DORMANT` keeps
+ * the old "down" `0x00` so a resting link stays the falsy default.
  *
  * DIAL links move through `DORMANT`/`DIALING`/`RECONNECTING`/`UP`; LISTEN links report
  * listen-socket reachability as `LISTENING`/`BIND_FAILED` (never per-accepted-peer). The
@@ -144,8 +148,11 @@ struct conn_settings_t {
                                                       the OS to pick the bind port (#1362). Read
                                                       the granted port back off the constructed
                                                       link (`local_port()`). */
-    conn_role_t role = conn_role_t::DIAL; /**< @brief Link direction (type default; config
-                                                      `role` overrides). */
+    conn_role_t role = conn_role_t::DIAL; /**< @brief Link direction. POSITIONAL: set from the
+                                                      module's own `register_module` declaration,
+                                                      never from the config. The `role` config key
+                                                      that once overrode it died with the
+                                                      `:children[]` door at RFC-0014 S7. */
     std::uint32_t keepalive_ms = 0;       /**< @brief Keepalive interval (transport-specific;
                                                       ignored by the built-ins). */
     std::uint32_t max_frame = 0;          /**< @brief Per-connection receive frame cap for every
@@ -230,27 +237,28 @@ struct transport_kind_traits_t {
 /**
  * @brief Groups connection vertices under `/net` and makes each a `/` vertex (ADR-0027).
  *
- * Construct over a live @ref graph::graph_t and `fwd_router_t`. Registers a
- * `client` and `listener` child type on the graph (via the #82 `register_child_type`
- * seam) so an in-band `write /net:children[] += SPEC{type, name, config}` instantiates
- * a connection vertex at `/net/<name>` and wires its transport into the router's
- * @ref child_registry_t — the single NAME→link demux table.
+ * Construct over a live @ref graph::graph_t and `fwd_router_t`.
  *
- * There are TWO creation doors, and they share one body below the module resolution. The
- * RFC-0014 door is the per-module CREATOR ENDPOINT (S2b): @ref register_module mints
- * `<net_root>/<module>/conn` (the `%kConnEndpointName` constant), and a
- * `SPEC{ name, config }` written there
- * creates `<net_root>/<module>/<name>` while a `NAME{ <name> }` removes it — the module in
- * the path fixes both the transport and the role, so the SPEC carries neither. The
- * superseded `:children[]` door below remains until RFC-0014 S7 retires it.
+ * There is exactly ONE wire creation door: the per-module CREATOR ENDPOINT (RFC-0014 §2,
+ * S2b). @ref register_module mints `<net_root>/<module>/conn` (the `%kConnEndpointName`
+ * constant), and a `SPEC{ name, config }` written there creates
+ * `<net_root>/<module>/<name>` and wires its transport into the router's
+ * @ref child_registry_t — the single NAME→link demux table — while a `NAME{ <name> }`
+ * removes it. The module in the path fixes both the transport and the role, so the SPEC
+ * carries neither a `type` nor a `role`.
  *
- * Creation resolves the MODULE first, then the transport — because the mount, the routing
- * key and the staging key are all `<module>/<name>`, and a NAME alone names none of them
- * (#883). A config `kind` decides the module, through the (kind, role) declaration
- * @ref register_module minted; a kind-less SPEC — the @ref provide_link spelling — takes it
- * from the staged set, and only when exactly one staging carries that leaf NAME (two do and
- * the SPEC carries no `kind` to tell them apart ⇒ creation is refused `TYPE_MISMATCH`,
- * rather than one of them being picked by map order).
+ * The superseded global `write /net:children[] += SPEC{type = "client"|"listener", …}`
+ * spelling is **retired** (RFC-0014 S7, executing the supersession ADR-0059 ruled): the
+ * `client`/`listener` catalog types are no longer registered, so that write now answers
+ * `SCHEMA_NOT_FOUND` like any other unregistered type. `/net:children[]` remains a
+ * read-only ENUMERATION of this plane's modules.
+ *
+ * The MODULE is therefore known POSITIONALLY, from the endpoint's own path, before any
+ * transport is resolved — which is what the mount, the routing key and the staging key all
+ * need, since each is `<module>/<name>` and a NAME alone names none of them (#883). A config
+ * `kind`, when present, must be one the module declares (@ref register_module); a kind-less
+ * SPEC — the @ref provide_link spelling — takes the module's own declared kind, and a module
+ * declared for two kinds is refused `TYPE_MISMATCH` rather than resolved by declaration order.
  *
  * The transport then comes from one of two sources, in precedence order **within that
  * module**:
@@ -316,7 +324,7 @@ class transport_vertex_t {
      * @param rx_backend The RX memory seam config-constructed view-delivering
      *                   transports draw their inbound frame segments from
      *                   (ADR-0042 §2): the built-in `udp` factory passes it to
-     *                   every socket it constructs, so a `:children[]`-created
+     *                   every socket it constructs, so a creator-endpoint-created
      *                   connection participates in owning delivery. Default: the
      *                   process heap; a bounded host injects its pool over its
      *                   static slab. Must outlive this object (and thus every
@@ -373,11 +381,12 @@ class transport_vertex_t {
     /**
      * @brief Register (or replace) the transport factory for config `kind` @p kind.
      *
-     * Mirrors the graph's child-type catalog (#82): a subsequent `:children[]` SPEC
-     * whose config carries `kind = <kind>` constructs its transport via @p factory. An
-     * unregistered kind fails creation with `SCHEMA_NOT_FOUND` (the same "unsupported
-     * catalog entry" convention as an unknown SPEC `type`). Call at setup, before
-     * frames flow (mirrors `register_child_type`'s thread contract).
+     * The transport-factory catalog (the kind selector), not the graph's child-type
+     * catalog: a subsequent creator-endpoint SPEC whose config carries `kind = <kind>`
+     * constructs its transport via @p factory. An unregistered kind fails creation with
+     * `SCHEMA_NOT_FOUND` (the same "unsupported catalog entry" convention the graph's own
+     * child-type catalog gives an unknown SPEC `type`). Call at setup, before frames flow
+     * (mirrors `%graph::graph_t::register_child_type`'s thread contract).
      * @param kind    The config `kind` selector (e.g. "udp", "quic").
      * @param factory Builds an owning transport from the parsed universal settings
      *                plus the raw config TLV (for its kind-private keys).
@@ -496,7 +505,7 @@ class transport_vertex_t {
      *        vertex (#1096)?
      *
      * `transport_vertex_t` mints two vertices nobody asked for: the net root (the
-     * `:children[]` creation target) and, lazily, each `<net_root>/<module>` segment a
+     * `:children[]` ENUMERATION root) and, lazily, each `<net_root>/<module>` segment a
      * connection mounts under. Both are registered `role_t::STORED_VALUE` and carry no
      * descriptor table, so an embedder walking @ref graph::graph_t::for_each_vertex sees
      * them as ordinary value vertices someone forgot to describe — byte-identical `:schema`
@@ -537,7 +546,7 @@ class transport_vertex_t {
      *
      * The test/manual seam: the link is not constructed from the config — it is handed
      * in here (a loopback endpoint, a test channel, a transport the catalog doesn't
-     * cover) and wired into the router when the matching `:children[]` SPEC is created.
+     * cover) and wired into the router when the matching creator-endpoint SPEC is created.
      * The caller keeps ownership. Call at setup, before the SPEC write.
      *
      * The staging key is `<module>/<name>` in BOTH halves (#883). A creating SPEC reaches
@@ -627,7 +636,7 @@ class transport_vertex_t {
     // One connection leaf: the graph identity vertex, its transport-private config, and —
     // when config-constructed — the OWNED transport (`owned` empty for a provided link).
     // The NAME→link routing table is NOT duplicated here — it has one owner, the router's
-    // child_registry_t (Brick 3a); make_connection registers the link there.
+    // child_registry_t (Brick 3a); `make_connection_locked` registers the link there.
     struct conn_t {
         graph::vertex_handle_t vertex;  // the /net/<name> identity vertex (set on creation)
         conn_settings_t settings;
@@ -761,27 +770,21 @@ class transport_vertex_t {
     /** @brief True iff THIS thread is inside an `OPERATION` transaction (see `ops_owner_`). */
     [[nodiscard]] bool ops_held_by_this_thread() const noexcept;
 
-    // The catalog factory shared by the `client`/`listener` types: parse the SPEC config,
-    // resolve the link (provided > config-constructed), record the leaf, wire the link
-    // into the router. `role` distinguishes the two types (a config `role` overrides).
-    graph::result_t<graph::vertex_handle_t> make_connection(std::vector<std::byte> child_key,
-                                                            const wire::tlv_t* config,
-                                                            conn_role_t role);
-
     /**
-     * @brief Creation's SECOND half, for a caller that already holds `ctl_m_` and has already
+     * @brief Creation's body, for a caller that already holds `ctl_m_` and has already
      *        resolved the MODULE: stage-or-construct the link, mint the vertex, wire the router.
      *
-     * The split is what lets the two creation doors share one body. The `:children[]` door
-     * (`%make_connection`) derives the module from the SPEC's `kind` or from the unique
-     * staging; the RFC-0014 creator endpoint knows it POSITIONALLY, from its own path. Only
-     * that resolution differs — everything from the staged-link lookup onward is one
-     * implementation, so the two doors cannot drift into two creation semantics.
+     * The `_locked` split dates from when there were TWO creation doors sharing one body.
+     * RFC-0014 S7 retired the other one — the `:children[]` `client`/`listener` catalog types
+     * — so the creator endpoint is now the sole wire caller and `%endpoint_create_locked` the
+     * sole in-tree one. The split is kept because the module resolution above it is the
+     * endpoint's own (positional, from its path) and this half is deliberately ignorant of
+     * where the module came from.
      * @param module   The module segment the connection mounts under.
      * @param name     The connection's leaf NAME (already segment-validated).
      * @param config   The SPEC's raw `config` SETTINGS, for the kind factory's private keys.
-     * @param settings The universal keys parsed out of @p config, with `role` (and, on the
-     *                 endpoint door, `kind`) already fixed by the module.
+     * @param settings The universal keys parsed out of @p config, with `role` and `kind`
+     *                 already fixed by the module's declaration.
      * @param txn      The open transaction — creation's birth liveness (RFC-0014 §4's
      *                 `UP`/`LISTENING`/`DORMANT`) is COLLECTED on it, not published here,
      *                 because publishing fans out to subscribers under `ctl_m_`.
@@ -846,7 +849,7 @@ class transport_vertex_t {
      * declaration must be THIS module's for that kind, or the kind is not one this endpoint
      * creates (`SCHEMA_NOT_FOUND`). An empty @p kind takes the module's sole declaration;
      * a module declared for two kinds is genuinely ambiguous without one (`TYPE_MISMATCH`),
-     * the same refusal the kind-less `:children[]` spelling gives an ambiguous staging.
+     * the same refusal an ambiguous staging used to give the retired `:children[]` spelling.
      */
     [[nodiscard]] graph::result_t<module_decl_t> declaration_for_locked(
         std::string_view module, std::string_view kind) const;
@@ -854,10 +857,10 @@ class transport_vertex_t {
     /**
      * @brief `module_for`'s body, for a caller that ALREADY holds `ctl_m_`.
      *
-     * `make_connection` resolves a module from inside its own locked section, and `ctl_m_`
-     * is a plain, NON-RECURSIVE `std::mutex` — so it cannot reach the public entry, which
-     * would self-deadlock. That constraint is why #881 is a split rather than a lock added
-     * in place: one body, two surfaces, exactly one acquisition per call.
+     * A creation resolves a module from inside its own locked section, and `ctl_m_` is a
+     * plain, NON-RECURSIVE `std::mutex` — so it cannot reach the public entry, which would
+     * self-deadlock. That constraint is why #881 is a split rather than a lock added in
+     * place: one body, two surfaces, exactly one acquisition per call.
      */
     [[nodiscard]] graph::result_t<std::string> module_for_locked(std::string_view kind,
                                                                  conn_role_t role) const;
@@ -876,7 +879,7 @@ class transport_vertex_t {
     /**
      * @brief Serializes every CONTROL-PLANE mutation here (ADR-0063 §3).
      *
-     * This class had no synchronization at all, yet `make_connection` writes `conns_` and
+     * This class had no synchronization at all, yet a creation writes `conns_` and
      * `pending_links_` while `settings_of` / `link_of` / `remove_connection` traverse `conns_`
      * — and the graph invokes the connection factory OUTSIDE `map_mutex_`, on whichever
      * transport's receive thread delivered the CREATE. Two transports means two such threads,

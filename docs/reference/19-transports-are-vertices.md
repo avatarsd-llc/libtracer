@@ -39,9 +39,9 @@ differences are load-bearing:
 
 | Position | What it is | Role | Value |
 | --- | --- | --- | --- |
-| `/net` | The net root — the `:children[]` creation target the constructor registers. Conventionally `/net`; the name is the constructor's default, overridable per node, never a library rule. | `role_t::STORED_VALUE` | none (a structural position) |
-| `/net/<module>` | One **module** — a *(transport kind, role)* pair, declared by the application (`register_module`, `core/include/libtracer/transport_vertex.hpp:473`). Minted eagerly when the module is declared (`core/src/transport_vertex.cpp:362`) and lazily on first creation (`:710`). | `role_t::STORED_VALUE` | none (a structural position) |
-| `/net/<module>/conn` | The module's **creator endpoint**. A write is *executed*, never assigned: the payload's TLV type selects create (`SPEC`) from remove (`NAME`) — `core/src/transport_vertex.cpp:421`. | `role_t::HANDLER` | none — write-only and valueless |
+| `/net` | The net root the constructor registers, and the position every module hangs under; `:children[]` on it **enumerates** the modules. Conventionally `/net`; the name is the constructor's default, overridable per node, never a library rule. | `role_t::STORED_VALUE` | none (a structural position) |
+| `/net/<module>` | One **module** — a *(transport kind, role)* pair, declared by the application (`register_module`, `core/include/libtracer/transport_vertex.hpp:482`). Minted eagerly when the module is declared (`core/src/transport_vertex.cpp:349`) and lazily on first creation (`:619`). | `role_t::STORED_VALUE` | none (a structural position) |
+| `/net/<module>/conn` | The module's **creator endpoint**. A write is *executed*, never assigned: the payload's TLV type selects create (`SPEC`) from remove (`NAME`) — `core/src/transport_vertex.cpp:408`. | `role_t::HANDLER` | none — write-only and valueless |
 | `/net/<module>/<name>` | The **connection vertex**: one link's identity, its config, and (when config-constructed) the socket it owns. | `role_t::STORED_VALUE` | the 1-byte link-liveness state |
 
 Three things are deliberately **not** vertices:
@@ -51,7 +51,7 @@ Three things are deliberately **not** vertices:
   vertex is ever created for a peer, so a node stays O(its own links) rather than O(the
   network) ([ADR-0044](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0044-stateless-transport-peer-enumeration-separate-paths-client-side-identity.md);
   [07](07-host-embedding.md) §node identity).
-- **A connection's config.** `addr`, `port`, `role`, `keepalive`, `max_frame`, `backoff` and
+- **A connection's config.** `addr`, `port`, `kind`, `keepalive`, `max_frame`, `backoff` and
   `connect_timeout` are creation-time config carried in the `SPEC`, parsed into the
   transport-private `conn_settings_t`. They are not a vertex `:settings` surface — that core
   namespace was emptied outright by
@@ -93,7 +93,7 @@ handle, no URI, no destination field, and no second naming layer
 This is not merely a spelling convenience: it is why the mount path and the routing key are
 the *same string*. Creation composes `net/<module>/<name>` once and registers it both as the
 graph key and as the router's child name — "the routing key IS the mount path"
-(`core/src/transport_vertex.cpp:685`, `:692`,
+(`core/src/transport_vertex.cpp:594`, `:601`,
 [ADR-0061](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md)) —
 so a hop's `src` prefix needs no per-hop assembly, and a route through a link cannot name a
 vertex the graph does not have. A design that kept transports outside the tree would have to
@@ -103,19 +103,22 @@ keep those two namespaces in agreement by hand.
 
 Creation and removal are ordinary writes, gated by the ordinary write path, and they collapse
 onto one control distinguished by the written TLV's type
-(`core/src/transport_vertex.cpp:421`). Removal un-routes first, then retires the identity
+(`core/src/transport_vertex.cpp:408`). Removal un-routes first, then retires the identity
 vertex, then destroys the socket — so a forward can never reach freed memory, and the path
 re-virginizes for a later connection of the same name
 ([RFC-0009](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0009-vertex-removal-and-subscriber-eviction.md) §B.6).
 
-The uniformity extends *inward*, not only outward. There are two creation doors — the
+The uniformity extends *inward*, not only outward. There is exactly **one** creation door —
+the
 [RFC-0014 — Creator endpoint: connection lifecycle and link liveness](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)
-creator endpoint and the superseded `:children[]` spelling
-(`core/src/transport_vertex.cpp:237`, `:241`) — and they share one body from the staged-link
-lookup onward, so they cannot drift into two creation semantics. Only the module resolution
-differs: the endpoint knows its module positionally, from its own path; the `:children[]`
-door derives it from the SPEC's `kind` through a declared *(kind, role)* mapping, or from a
-unique staging (`core/src/transport_vertex.cpp:629`).
+creator endpoint at `/net/<module>/conn`. There were two until
+[#492](https://github.com/avatarsd-llc/libtracer/issues/492) S7 retired the superseded
+`:children[]` spelling: the net plane no longer registers the `client` and `listener` child
+types, so a `:children[]` creation SPEC naming either answers `SCHEMA_NOT_FOUND`. Two doors
+sharing one body could not drift into two creation semantics; one door cannot drift at all.
+Module resolution is now purely positional — the endpoint knows its module from its own path,
+and the SPEC's `kind`, when present, only cross-checks that module's declaration rather than
+selecting one.
 
 ```{mermaid}
 flowchart TD
@@ -136,8 +139,8 @@ flowchart TD
 ### Uniform introspection
 
 **The connection vertex's value is its liveness state** — a 1-byte `link_state_t`
-(`core/include/libtracer/transport_vertex.hpp:107-114`) emitted as an ordinary `VALUE` TLV
-(`core/src/transport_vertex.cpp:92`). Because it is a vertex value and not a side-channel
+(`core/include/libtracer/transport_vertex.hpp:111-118`) emitted as an ordinary `VALUE` TLV
+(`core/src/transport_vertex.cpp:83`). Because it is a vertex value and not a side-channel
 callback, all three primitives already work on it: `read` it, `await` it, or **subscribe** to
 `/net/<module>/<name>` and receive every transition without polling (assign-then-deliver,
 [RFC-0008](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0008-vertex-operations-assign-propagate.md) §D).
@@ -183,7 +186,7 @@ the last release. The BUILT-IN point-to-point kinds `udp`, `tcp` and `ws` are op
 engine-managed out of the box, so creation no longer fails when the peer is down. Everywhere
 else the value is still written by whoever knows: an eagerly-constructed socket (every LISTEN
 link, every bus kind, a `kSelfHealLinks = false` build) publishes `UP` or `LISTENING` at
-creation (`core/src/transport_vertex.cpp:902`, `:905`), and a provided link reports through
+creation (`core/src/transport_vertex.cpp:811`, `:814`), and a provided link reports through
 `set_link_state`.
 
 ### 3. Structural vertices nobody declared
@@ -236,7 +239,7 @@ tree, and one is not:
 
 - The registry's refusal is the whole creation's verdict: when `add_child` cannot grow, the
   creation rolls back — retire the vertex, drop the entry, destroy the socket — and answers
-  `BACKPRESSURE` (`core/src/transport_vertex.cpp:883`, `:877`). Without that, a bounded node
+  `BACKPRESSURE` (`core/src/transport_vertex.cpp:792`, `:786`). Without that, a bounded node
   could be driven to publish connections that no `dst` resolves and no removal can take down.
 - `SPEC` naming an existing name answers `PATH_IN_USE`, and the reserved `conn` name is
   refused in both directions, so the endpoint cannot be made to destroy itself.
@@ -275,13 +278,13 @@ does not yet reach.
 **Standing requirement.** `tr::net::conn_settings_t` carries only the keys **every** transport
 kind means the same thing by. A kind's private configuration never lands there — the kind's
 own factory parses it from the raw config `SETTINGS` TLV it receives alongside the parsed
-universal settings (`core/include/libtracer/transport_vertex.hpp:131`, ADR-0043 §3, §5).
+universal settings (`core/include/libtracer/transport_vertex.hpp:135`, ADR-0043 §3, §5).
 
 The mechanism is the factory signature: a factory is
 `(const conn_settings_t&, const wire::tlv_t* raw_config) -> result_t<unique_ptr<transport_t>>`,
 registered at runtime through `transport_vertex_t::register_transport_type`
-(`core/src/transport_vertex.cpp:270`). The central parse reads the universal keys and nothing
-else (`core/src/transport_vertex.cpp:52`, `:63`); unknown pairs are ignored, so a newer peer
+(`core/src/transport_vertex.cpp:257`). The central parse reads the universal keys and nothing
+else (`core/src/transport_vertex.cpp:52`, `:55`); unknown pairs are ignored, so a newer peer
 may send keys this node has never heard of. `quic` reads its own `cert` / `key` / `ca` /
 `insecure`, `ws` and `tcp` read `peer_named` / `max_peers`, `can` reads its bus identity —
 and none of them can see another's vocabulary
@@ -300,7 +303,7 @@ and none of them can see another's vocabulary
 - **A shared key that only one kind reads is a dead key.** The failure mode is already
   visible *inside* the universal set: `keepalive_ms` is parsed and no consumer anywhere in
   the tree reads it (`backoff_ms` / `connect_timeout_ms` escaped that condition when the
-  S5 liveness engine landed — `core/include/libtracer/transport_vertex.hpp:159`, `:163`;
+  S5 liveness engine landed — `core/include/libtracer/transport_vertex.hpp:166`, `:170`;
   [13](13-network-formation.md)). One record carrying N kinds' private vocabulary would be
   that condition by construction rather than by accident — and a mistyped or misplaced key is
   silently ignored, so nothing would report it.
@@ -353,7 +356,11 @@ engine (`self_heal_link_t`) for kinds registered `self_heal_dial`, with the
 standing-binding refcount seam (`acquire_link`/`release_link`) — and the built-in
 point-to-point kinds' opt-in to it
 ([#1548](https://github.com/avatarsd-llc/libtracer/issues/1548)): `udp`, `tcp` and `ws` DIAL
-connections are engine-managed out of the box, LISTEN links and bus kinds unchanged.
+connections are engine-managed out of the box, LISTEN links and bus kinds unchanged. And
+**S7**: the superseded `:children[]` creation spelling is retired — the `client` and
+`listener` child types are no longer registered and the `role` config key is no longer read,
+so the creator endpoint is the sole door and the role is positional in fact, not only on
+paper.
 
 **Not implemented.** The routing-plane
 wiring that makes subscriptions/awaits drive the refcount seam automatically (S6);
@@ -361,7 +368,7 @@ wiring that makes subscriptions/awaits drive the refcount seam automatically (S6
 (S3); the `CREATE`/`WRITE` gating split
 (S2c). RFC-0014's byte-level clauses — the liveness encoding among them — become normative on
 its conformance-vector merge; until then the values in
-`core/include/libtracer/transport_vertex.hpp:107-114` are the reference encoding.
+`core/include/libtracer/transport_vertex.hpp:111-118` are the reference encoding.
 ```
 
 ## Pitfalls
@@ -393,7 +400,7 @@ its conformance-vector merge; until then the values in
 - **"Transport" here means a connection, not a wire technology.** What a given kind does with
   the bytes — CAN's header elision and advertise map, WebSocket's session authentication —
   is [14](14-can-transport.md) and [16](16-websocket-session-auth.md).
-- **A staged link is not yet a vertex.** `provide_link` (`core/src/transport_vertex.cpp:586`)
+- **A staged link is not yet a vertex.** `provide_link` (`core/src/transport_vertex.cpp:574`)
   hands the plane a pre-built transport — the test/manual seam for loopback channels and
   kinds the catalog does not cover — but it registers nothing. The vertex appears when a
   `SPEC` for that `<module>/<name>` binds it, and removing that connection leaves the

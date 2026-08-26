@@ -1219,7 +1219,7 @@ void test_reverse_mint_closes_the_disclosure() {
     // B's connection vertex for its link to A MUST exist BEFORE add_child: the bound-path
     // join resolves `conn_slot` at registration, and it is what the responder's reverse
     // completion and the delivery-time element-0 consumption both dereference. Production
-    // wiring gets this from the `/net:children[]` SPEC door; the harness registers it bare.
+    // wiring gets this from the `/net/<module>/conn` SPEC door; the harness registers it bare.
     (void)gb.register_vertex(path_t("/a"), role_t::STORED_VALUE);
     (void)rb.add_child("a", b_to_a);
     vertex_handle_t sensor = gb.register_vertex(path_t("/sensor"), role_t::STORED_VALUE);

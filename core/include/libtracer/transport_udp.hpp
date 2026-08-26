@@ -71,7 +71,7 @@ class udp_transport_t : public transport_t, private posix_endpoint_t {
      * @p bind_port 0 = ephemeral (see @ref local_port). @p peer_host is an IPv4 dotted-quad
      * (e.g. "127.0.0.1"). Listener mode: with an unresolved peer (@p peer_host empty or
      * @p peer_port 0) the transport LEARNS its peer from each inbound datagram's source
-     * address — the single-peer UDP-server shape that lets a config-created `listener`
+     * address — the single-peer UDP-server shape that lets a config-created LISTEN-module
      * connection (#83) reply to a dialing client whose ephemeral port is unknowable in
      * advance; until the first datagram arrives, @ref send is a no-op.
      *

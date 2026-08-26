@@ -724,29 +724,30 @@ test('fwd-bound-forward / fwd-bound-forwarded are one hop apart, byte for byte',
 /* -------------------------------- #877 — the creation SPEC's field value TYPE --- */
 
 /**
- * @brief `spec/conn-client-ws` — `encodeConnSpec` reproduces the shared vector exactly.
+ * @brief `conn/create-via-spec` — `encodeConnSpec` reproduces the shared vector exactly.
  *
- * TypeScript is the parity reference for this vector: it already emitted the correct
- * shape, so this test passing is what confirms the vector encodes the right bytes rather
- * than merely the bytes one core happens to produce. `test/conn-spec.test.mjs` pins the
- * same bytes against the C++ emitter's captured output; this pins them against the file
- * every core now reads.
+ * This replaces the pin against `spec/conn-client-ws`, the SUPERSEDED global `:children[]`
+ * creation spelling that RFC-0014 S7 retired together with its door and its vector. The
+ * surviving door is the module's creator endpoint, `write /net/<module>/conn <- SPEC{…}`,
+ * and these are its bytes: `{ name, config }` and nothing else — no `type` (the module
+ * segment already selects the transport) and no `role` (RFC-0014 §1/§3 make it POSITIONAL,
+ * fixed by which module owns the endpoint).
  *
- * The load-bearing detail is the value TYPE of each field. `type`/`name` and the string
- * settings `kind`/`addr` are NAME (0x02) nodes; only the integer settings `role`/`port`
- * are VALUE (0x01). The terminus matches each (NAME key, value) pair on the value's type,
- * so the two are not interchangeable — and since a VALUE-typed SPEC round-trips itself
- * perfectly, the codec harness cannot tell the difference. This byte pin can.
+ * The load-bearing detail survives the move unchanged: the value TYPE of each field. `name`
+ * and the string setting `addr` are NAME (0x02) nodes; only the integer setting `port` is
+ * VALUE (0x01). The terminus matches each (NAME key, value) pair on the value's type, so the
+ * two are not interchangeable — and since a VALUE-typed SPEC round-trips itself perfectly,
+ * the codec harness cannot tell the difference. This byte pin can.
+ *
+ * The vector also fixes the emitted pair ORDER (`addr` then `port`), which the C++
+ * `conn_spec_t` gets from its append-in-call-order builder and this encoder now matches.
  */
-test('encodeConnSpec matches the spec/conn-client-ws vector byte-for-byte', () => {
-  const expected = vector('spec/conn-client-ws');
+test('encodeConnSpec matches the conn/create-via-spec vector byte-for-byte', () => {
+  const expected = vector('conn/create-via-spec');
   const built = encodeConnSpec({
-    type: 'client',
     name: 'up',
-    role: 'dial',
-    port: 8080,
-    kind: 'ws',
     addr: '127.0.0.1',
+    port: 8080,
   });
   assert.ok(sameBytes(built, expected), `built ${hex(built)} != ${hex(expected)}`);
 });

@@ -21,8 +21,8 @@
  * binding HARNESS.md requires for them — it fails if either strip-K descent changes.
  *
  * Production wiring throughout (the RFC-0014 lesson — two silent misroutes shipped because no
- * test used it): every link is bound by an in-band `write /net:children[] += SPEC{...}` through
- * @ref tr::net::transport_vertex_t, so each mount key is composed by
+ * test used it): every link is bound by an in-band `write /net/<module>/conn <- SPEC{...}`
+ * through @ref tr::net::transport_vertex_t, so each mount key is composed by
  * `transport_vertex.cpp` itself and never hand-spelled into `add_child`.
  *
  * Asserted:
@@ -107,10 +107,17 @@ using tr::testing::b_fwd;
  *
  * `kind` is omitted on purpose: every link here is staged by
  * @ref tr::net::transport_vertex_t::provide_link, which takes precedence over factory
- * construction — so the SPEC carries only what selects the catalog type and the NAME.
+ * construction — so the SPEC carries only the NAME. The module the connection mounts under is
+ * the creator endpoint it is written to, not a pair in these bytes.
  */
-view_t conn_spec(std::string_view type, std::string_view name) {
-    return tr::net::conn_spec(type, name, conn_role_t::DIAL, 0);
+view_t conn_spec(std::string_view name) { return tr::net::conn_spec(name, 0); }
+
+/** @brief The creator endpoint of @p module — the one wire door that creates a connection. */
+path_t conn_endpoint(std::string_view module) {
+    std::string text = "/net/";
+    text += module;
+    text += "/conn";
+    return path_t(text);
 }
 
 /**
@@ -171,7 +178,7 @@ int main() {
     std::printf("Two-mount FWD route (#419): client -> A -> B -> C, one dst crossing TWO mounts\n");
 
     // ----- the four nodes. Each owns a graph, a router and a /net vertex; every link
-    //       is bound through the production `:children[]` SPEC door.
+    //       is bound through the production `/net/<module>/conn` SPEC door.
     graph_t g_cli;
     fwd_router_t r_cli(g_cli);
     transport_vertex_t net_cli(g_cli, r_cli);
@@ -208,12 +215,25 @@ int main() {
     net_b.provide_link("uplink", "c", ch_bc.a());
     net_c.provide_link("downlink", "b", ch_bc.b());
 
-    const auto mk = [](graph_t& g, std::string_view name) {
-        return g.write(path_t("/net:children[]"), conn_spec("client", name));
+    // One module declaration per staged link, each with a `kind` of its own: a declaration is
+    // keyed on (kind, role), so two modules on one node that shared a kind would collapse into
+    // one and the second would silently rename the first. Nothing constructs from these kinds —
+    // a staged link outranks a factory — so the module's own name serves as its kind.
+    (void)net_cli.register_module("uplink", "uplink", conn_role_t::DIAL);
+    (void)net_a.register_module("downlink", "downlink", conn_role_t::DIAL);
+    (void)net_a.register_module("uplink", "uplink", conn_role_t::DIAL);
+    (void)net_b.register_module("downlink", "downlink", conn_role_t::DIAL);
+    (void)net_b.register_module("uplink", "uplink", conn_role_t::DIAL);
+    (void)net_c.register_module("downlink", "downlink", conn_role_t::DIAL);
+
+    const auto mk = [](graph_t& g, std::string_view module, std::string_view name) {
+        return g.write(conn_endpoint(module), conn_spec(name));
     };
-    check(mk(g_cli, "a").has_value() && mk(g_a, "cli").has_value() && mk(g_a, "b").has_value() &&
-              mk(g_b, "a").has_value() && mk(g_b, "c").has_value() && mk(g_c, "b").has_value(),
-          "all six connections created through /net:children[] SPEC (production wiring)");
+    check(mk(g_cli, "uplink", "a").has_value() && mk(g_a, "downlink", "cli").has_value() &&
+              mk(g_a, "uplink", "b").has_value() && mk(g_b, "downlink", "a").has_value() &&
+              mk(g_b, "uplink", "c").has_value() && mk(g_c, "downlink", "b").has_value(),
+          "all six connections created through the /net/<module>/conn creator endpoint "
+          "(production wiring)");
 
     // ----- the per-hop probes and the client's reply sink.
     hop_probe_t at_b;

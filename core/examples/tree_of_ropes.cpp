@@ -29,7 +29,8 @@
  *      holds a wholly separate rope. Tree-of-ropes, not rope-of-ropes.
  *
  *   3. **A transport is an identity, not memory** — mounting a transport
- *      (ADR-0027) via an in-band `/net:children[]` write adds exactly one
+ *      (ADR-0027) via an in-band write to the `can` module's creator endpoint
+ *      `/net/can/conn` adds exactly one
  *      addressable `/net/can/link0` vertex whose value is a tiny link-state rope
  *      (one VALUE TLV), and only once the link reports — a fresh mount holds no
  *      value at all. The transport's real bytes live *outside* the graph, in the
@@ -151,13 +152,17 @@ void axis_transport_is_identity() {
     fwd_router_t router(g);
     transport_vertex_t net(g, router);
 
+    // The application declares WHERE this kind mounts: module `can`, dialling. That one
+    // declaration mints the module's creator endpoint `/net/can/conn` and fixes the role,
+    // which is why the SPEC below carries neither a `type` nor a `role` — the path says both.
+    (void)net.register_module("can", "can", conn_role_t::DIAL);
+
     tr::net::loopback_channel_t channel;  // in-process, deterministic, no hardware
     net.provide_link("can", "link0", channel.a());
 
-    const auto cw =
-        g.write(P("/net:children[]"), conn_spec("client", "link0", conn_role_t::DIAL, 8080));
+    const auto cw = g.write(P("/net/can/conn"), conn_spec("link0", 8080));
     check(cw.has_value(),
-          "mounting a transport is an in-band :children[] write (no new primitive)");
+          "mounting a transport is an in-band write to /net/<module>/conn (no new primitive)");
 
     const auto link_h = g.find(P("/net/can/link0").key());
     check(link_h.has_value(), "the mount added exactly ONE addressable vertex: /net/can/link0");

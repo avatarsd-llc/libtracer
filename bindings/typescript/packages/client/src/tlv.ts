@@ -281,22 +281,17 @@ function valueLe(v: number, width: number): Tlv {
   return { type: TYPE.VALUE, opt: opt(), payload: bytes, children: [], trailer: null };
 }
 
-/** @brief The link direction of a connection (`role`), per ADR-0027 / `conn_role_t`. */
-export type ConnRole = 'dial' | 'listen';
-
-/** @brief The connection SPEC a {@link encodeConnSpec} call describes (ADR-0027 / reference/13). */
+/** @brief The connection SPEC a {@link encodeConnSpec} call describes (RFC-0014 §2 / reference/13). */
 export interface ConnSpecOptions {
-  /** @brief The device-catalog child type: `client` (DIAL default) or `listener` (LISTEN default). */
-  readonly type: 'client' | 'listener';
-  /** @brief The connection NAME — the `/net/<name>` segment AND the routing key a `dst` hops through. */
+  /** @brief The connection NAME — the `/net/<module>/<name>` segment AND the routing key a `dst` hops through. */
   readonly name: string;
-  /** @brief The link direction; overrides the type's default. */
-  readonly role: ConnRole;
   /** @brief Peer port (DIAL) / bind port (LISTEN). Required — 0 is rejected by every built-in factory. */
   readonly port: number;
-  /** @brief The transport-factory selector (`ws`, `tcp`, `udp`, …). Omit only for a pre-staged link. */
+  /** @brief The transport-factory selector (`ws`, `tcp`, `udp`, …). Omit when the module declares
+   * exactly one kind, or for a pre-staged link. */
   readonly kind?: string;
-  /** @brief Peer IPv4 dotted-quad. Required for DIAL; the built-ins are `inet_pton`-only (no DNS). */
+  /** @brief Peer IPv4 dotted-quad. Required by every built-in DIAL factory (`inet_pton`-only, no
+   * DNS) and ignored on a LISTEN. NOT validated here — see {@link encodeConnSpec}. */
   readonly addr?: string;
   /** @brief ws-private (LISTEN): expose the ADR-0044 bus facet, so `:children[]` lists live peers. */
   readonly peerNamed?: boolean;
@@ -306,46 +301,53 @@ export interface ConnSpecOptions {
 
 /**
  * @brief Build a connection-creation SPEC TLV (`type=0x0e`, PL=1) — the payload of the
- * in-band `write /net:children[] += SPEC{…}` that brings a transport link up (ADR-0027,
- * reference/13 §2).
+ * in-band `write /net/<module>/conn <- SPEC{…}` that brings a transport link up
+ * (RFC-0014 §2, ADR-0027, reference/13 §2).
  *
  * This is the wire form of the formation write a third party (typically a web UI holding
  * delegated admin) issues on a device to create a link — the mechanism that makes a
  * device-to-device connection with no third party in the data path.
  *
  * ```
- * SPEC{ NAME "type" NAME <type>, NAME "name" NAME <name>,
- *       NAME "config" SETTINGS{ NAME "role"       VALUE u8   (0=DIAL, 1=LISTEN),
- *                               NAME "port"       VALUE u16  (LE),
- *                             [ NAME "kind"       NAME  <kind> ],
- *                             [ NAME "addr"       NAME  <addr> ],
- *                             [ NAME "peer_named" VALUE u8   ],
- *                             [ NAME "max_peers"  VALUE u32  (LE) ] } }
+ * SPEC{ NAME "name"   NAME <name>,
+ *       NAME "config" SETTINGS{ [ NAME "kind"       NAME  <kind> ],
+ *                               [ NAME "addr"       NAME  <addr> ],
+ *                                 NAME "port"       VALUE u16  (LE),
+ *                               [ NAME "peer_named" VALUE u8   ],
+ *                               [ NAME "max_peers"  VALUE u32  (LE) ] } }
  * ```
  *
- * Key order matters only for readability — the C++ `config_reader_t` walk is
- * order-insensitive and ignores unknown keys (forward-compat). `peer_named` / `max_peers`
- * are **ws-private** keys parsed by the ws factory itself (ADR-0043 §5); they are ignored
- * by other kinds and on a DIAL.
+ * **There is no `type` pair and no `role` pair.** RFC-0014 S7 retired the global
+ * `write /net:children[] += SPEC{…}` creation door; the surviving door is the module's own
+ * creator endpoint, and the module segment of the path it is written to fixes BOTH the
+ * transport and the link direction. A `role` pair here would be an ignored unknown pair,
+ * not an override — so this encoder does not emit one, under that or any other spelling.
+ * (Removal is the same endpoint written with a bare `NAME{<name>}`, not a SPEC.)
  *
- * Byte-pinned against the C++ emitter in `test/conn-spec.test.mjs`.
+ * Key order matters only for readability — the C++ `config_reader_t` walk is
+ * order-insensitive and ignores unknown keys (forward-compat). The order emitted here is
+ * the one the shared `conn/create-via-spec` conformance vector uses, so the two agree
+ * byte-for-byte. `peer_named` / `max_peers` are **ws-private** keys parsed by the ws
+ * factory itself (ADR-0043 §5); they are ignored by other kinds and on a DIAL.
+ *
+ * @note **No client-side DIAL/`addr` check.** The caller now learns the role from the
+ *       endpoint it writes to, not from this record, so this encoder cannot know whether a
+ *       missing `addr` is a bug (a DIAL) or correct (a LISTEN, where `addr` is ignored).
+ *       Rather than reintroduce `role` under another name it emits what it is given — the
+ *       same contract as the C++ `tr::net::conn_spec_t`, which validates no key against any
+ *       kind either. A DIAL module handed an `addr`-less config answers `TYPE_MISMATCH`.
+ *
+ * Byte-pinned against the shared `conn/create-via-spec` vector in `test/vectors.test.mjs`.
  *
  * @param o the connection to describe
- * @returns the encoded SPEC TLV bytes — the payload of a `:children[]` field-write
- * @throws {RangeError} on a DIAL with no `addr`, or a text field over 64 UTF-8 bytes
+ * @returns the encoded SPEC TLV bytes — the payload of a `write` to `/net/<module>/conn`
+ * @throws {RangeError} on a text field over 64 UTF-8 bytes
  */
 export function encodeConnSpec(o: ConnSpecOptions): Uint8Array {
-  if (o.role === 'dial' && !o.addr) {
-    throw new RangeError('a DIAL connection requires an addr (the built-in factories reject it as TYPE_MISMATCH)');
-  }
-  const cfg: Tlv[] = [
-    textTlv('role'),
-    valueLe(o.role === 'listen' ? 1 : 0, 1),
-    textTlv('port'),
-    valueLe(o.port, 2),
-  ];
+  const cfg: Tlv[] = [];
   if (o.kind !== undefined) cfg.push(textTlv('kind'), textTlv(o.kind));
   if (o.addr !== undefined) cfg.push(textTlv('addr'), textTlv(o.addr));
+  cfg.push(textTlv('port'), valueLe(o.port, 2));
   if (o.peerNamed !== undefined) cfg.push(textTlv('peer_named'), valueLe(o.peerNamed ? 1 : 0, 1));
   if (o.maxPeers !== undefined) cfg.push(textTlv('max_peers'), valueLe(o.maxPeers, 4));
 
@@ -360,14 +362,7 @@ export function encodeConnSpec(o: ConnSpecOptions): Uint8Array {
     type: TYPE.SPEC,
     opt: opt({ pl: true }),
     payload: new Uint8Array(0),
-    children: [
-      textTlv('type'),
-      textTlv(o.type),
-      textTlv('name'),
-      textTlv(o.name),
-      textTlv('config'),
-      settings,
-    ],
+    children: [textTlv('name'), textTlv(o.name), textTlv('config'), settings],
     trailer: null,
   };
   return encode(spec);

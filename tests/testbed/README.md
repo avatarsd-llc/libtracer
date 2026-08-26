@@ -45,7 +45,7 @@ argv, via a local `graph.write` of a SPEC — the identical code path an inbound
 takes) and then waits.
 
 **Every inter-node link is dialled by the driver, remotely**, by writing a `SPEC` into that
-node's `/net:children[]` over the wire. That is the whole point: it exercises the in-band
+node's `/net/<module>/conn` creator endpoint over the wire. That is the whole point: it exercises the in-band
 formation plane a web UI uses (ADR-0017 / ADR-0027, [reference/13](../../docs/reference/13-network-formation.md) §2)
 — a third party holding delegated admin creates links on devices and departs, leaving the
 devices talking with nothing in the data path. **No `provide_link` seam is used anywhere**;
@@ -100,7 +100,7 @@ is what `via('b', 'c')` builds in the driver.
 >
 > It also claimed *"the driver pins the implementation and asserts the documented form does
 > not resolve, so the docs cannot quietly become true without this going red."* The driver
-> does pin the implementation — `mesh-testbed.test.mjs:24-25` states the qualified rule and
+> does pin the implementation — `mesh-testbed.test.mjs:25-25` states the qualified rule and
 > `:222` tests `/net/ws-client/b/node/name`. It pinned the **new** form while this file kept
 > describing the old one, so the guard was green and the doc was wrong at the same time. A
 > guard only protects the claim it actually checks.
@@ -166,8 +166,8 @@ the architecture working as intended; it does not belong in a register of gaps.
 ### 2. Teardown and link lifecycle — #407 / #66 (narrowed)
 
 - ~~**No reconnect anywhere.**~~ **Landed.** RFC-0014 §4 gave `transport_vertex.hpp` a
-  six-state `link_state_t` (`transport_vertex.hpp:107`) including `RECONNECTING`, plus
-  `backoff_ms` (`transport_vertex.hpp:159`) and `connect_timeout_ms` (`transport_vertex.hpp:163`).
+  six-state `link_state_t` (`transport_vertex.hpp:111`) including `RECONNECTING`, plus
+  `backoff_ms` (`transport_vertex.hpp:166`) and `connect_timeout_ms` (`transport_vertex.hpp:170`).
 - **No child removal**, so a link cannot be recreated under the same name after a failure
   (`PATH_IN_USE`). Recovery needs a **new name** — a hard blocker for stable-identity
   reconnection, and the sharpest argument for #407.

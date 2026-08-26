@@ -33,9 +33,10 @@
  *       (`make_checked`, #1059) turns the configuration error into a link that did not come
  *       up. A silent demotion to FLAT would leave the listener's own per-frame tier select
  *       delivering peer-named into a sink the router never installed;
- *   (e) the same refusal through the IN-BAND door — a `SPEC{listener, kind=ws|tcp,
- *       peer_named=1}` write is answered with an error instead of creating a connection,
- *       while the same SPEC without the key is created under both bindings;
+ *   (e) the same refusal through the IN-BAND door — a `SPEC{kind=ws|tcp, peer_named=1}` written
+ *       to a listener module's creator endpoint `/net/<module>/conn` is answered with an error
+ *       instead of creating a connection, while the same SPEC without the key is created under
+ *       both bindings;
  *   (f) the PROVIDER half (#1438) — a listener's LAYOUT follows the binding as well as its
  *       behaviour: on a closed build it does not INHERIT the facet, so it does not carry the
  *       base subobject, the second vptr, the peer-named receiver slot or the notifier pairs.
@@ -122,11 +123,22 @@ void declare_listener_modules(transport_vertex_t& net) {
                               conn_role_t::LISTEN);
 }
 
-/** @brief A LISTENER SPEC for @p kind, optionally carrying the `peer_named` key. */
+/**
+ * @brief The creator endpoint of @p module — `/net/<module>/conn`, the ONE door a connection
+ *        is created through since RFC-0014 S7 retired the `/net:children[]` spelling.
+ */
+std::string endpoint_of(std::string_view module) { return "/net/" + std::string(module) + "/conn"; }
+
+/**
+ * @brief A LISTENER SPEC for @p kind, optionally carrying the `peer_named` key.
+ *
+ * No `type` and no `role`: the module segment of the endpoint this is written to fixes both.
+ * The `kind` pair stays because these two modules are exactly what kind selection is about.
+ */
 tr::view::view_t listener_spec(std::string_view kind, std::string_view name, bool peer_named,
                                bool with_key) {
-    conn_spec_t spec("listener", name);
-    (void)spec.role(conn_role_t::LISTEN).port(kEphemeral).kind(kind);
+    conn_spec_t spec(name);
+    (void)spec.port(kEphemeral).kind(kind);
     if (with_key) (void)spec.flag("peer_named", peer_named);
     return spec.view();
 }
@@ -203,26 +215,25 @@ void test_a_peer_named_listener_is_refused_when_closed() {
 
 /** @brief (e) The same refusal through the in-band SPEC door, for both stream kinds. */
 void test_the_spec_factory_refuses_the_key_when_closed() {
-    std::printf("(e) SPEC{listener, peer_named=1} is answered with an error when closed:\n");
+    std::printf("(e) SPEC{peer_named=1} is answered with an error when closed:\n");
     graph_t node;
     fwd_router_t router(node);
     transport_vertex_t net(node, router);
     declare_listener_modules(net);
+    const std::string ws_conn = endpoint_of(tr::net::kWsServerSuggestedModule);
+    const std::string tcp_conn = endpoint_of(tr::net::kTcpServerSuggestedModule);
 
     // The CONTROL, on both kinds: no `peer_named` key at all. Created under every binding —
     // this is the shape a bus-less target actually deploys, and it must not regress.
-    check(node.write(path_t("/net:children[]"),
-                     listener_spec("ws", "plain-ws", false, /*with_key=*/false))
+    check(node.write(path_t(ws_conn), listener_spec("ws", "plain-ws", false, /*with_key=*/false))
               .has_value(),
           "a ws listener with no peer_named key is created under both bindings");
-    check(node.write(path_t("/net:children[]"),
-                     listener_spec("tcp", "plain-tcp", false, /*with_key=*/false))
+    check(node.write(path_t(tcp_conn), listener_spec("tcp", "plain-tcp", false, /*with_key=*/false))
               .has_value(),
           "a tcp listener with no peer_named key is created under both bindings");
 
     // The SUBJECT: the key asserted true. Answered, not silently downgraded.
-    const auto ws_named =
-        node.write(path_t("/net:children[]"), listener_spec("ws", "bus-ws", true, true));
+    const auto ws_named = node.write(path_t(ws_conn), listener_spec("ws", "bus-ws", true, true));
     check(ws_named.has_value() == kBusLinks,
           "SPEC{kind=ws, peer_named=1} is served iff this build carries the bus module");
     check(ws_named.has_value() || ws_named.error() == tr::graph::status_t::TYPE_MISMATCH,
@@ -231,7 +242,7 @@ void test_the_spec_factory_refuses_the_key_when_closed() {
           "a refused SPEC leaves NO connection behind");
 
     const auto tcp_named =
-        node.write(path_t("/net:children[]"), listener_spec("tcp", "bus-tcp", true, true));
+        node.write(path_t(tcp_conn), listener_spec("tcp", "bus-tcp", true, true));
     check(tcp_named.has_value() == kBusLinks,
           "SPEC{kind=tcp, peer_named=1} answers exactly as the ws twin does");
     check(tcp_named.has_value() || tcp_named.error() == tr::graph::status_t::TYPE_MISMATCH,

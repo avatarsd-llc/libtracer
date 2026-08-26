@@ -7,6 +7,36 @@ versioning/publish strategy.
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING — `@avatarsd-llc/libtracer-client`: `encodeConnSpec` emits the creator-endpoint
+  SPEC; `type` and `role` are gone** ([#1492](https://github.com/avatarsd-llc/libtracer/issues/1492),
+  RFC-0014 Amendment 4 / S7). The device no longer accepts
+  `write /net:children[] += SPEC{ type, name, config{ role, … } }`. The one wire door for
+  creating a connection is now a WHOLE-VERTEX write to the owning module's creator endpoint,
+  `write /net/<module>/conn <- SPEC{ name, config{…} }`, with removal spelled as the same
+  endpoint written with a bare `NAME{<name>}`.
+
+  - `ConnSpecOptions.type` and `ConnSpecOptions.role` are **removed**, as is the exported
+    `ConnRole` type. The module segment of the path fixes both the transport and the link
+    direction, so neither is expressible in the payload — a `role` pair on the wire is now an
+    ignored unknown pair, not an override.
+  - The emitted config pair ORDER changed to `kind`, `addr`, `port`, `peer_named`,
+    `max_peers`, matching the shared `conn/create-via-spec` conformance vector, which
+    replaces the retired `spec/conn-client-ws` as this encoder's byte pin. Readers are
+    order-insensitive, so only byte-level comparisons are affected.
+  - **`encodeConnSpec` no longer throws on a DIAL with no `addr`.** Without `role` the encoder
+    cannot tell a DIAL (where a missing `addr` is fatal) from a LISTEN (where `addr` is
+    ignored); only the endpoint the caller writes to knows. It now emits what it is given, and
+    a DIAL module answers `TYPE_MISMATCH` — the same contract as the C++
+    `tr::net::conn_spec_t`, which validates no key against any kind either.
+
+  Migration: `encodeConnSpec({ type: 'client', name, role: 'dial', port, kind, addr })` and
+  `client.writeField('/net', ':children[]', spec)` become
+  `encodeConnSpec({ name, port, kind, addr })` and
+  `client.write(['net', 'ws-client', 'conn'], spec)`. `writeField` with `":children[]"` is
+  otherwise unchanged — generic (`stored_value`) in-band creation still uses it.
+
 ### Fixed
 
 - **`@avatarsd-llc/libtracer-client`: FWD replies are correlated by the reply's own `src`, not

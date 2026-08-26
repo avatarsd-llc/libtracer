@@ -58,12 +58,9 @@ class sink_link_t : public tr::net::transport_t {
     std::vector<std::vector<std::byte>> sent_;
 };
 
-/** @brief SPEC{ type, name } with no config — the provide_link-staged connection form. */
-tr::view::view_t conn_spec(std::string_view type, std::string_view name) {
-    return tr::net::conn_spec_t(type, name).view();
-}
+/** @brief SPEC{ name } with no config — the provide_link-staged connection form. */
+tr::view::view_t conn_spec(std::string_view name) { return tr::net::conn_spec_t(name).view(); }
 
-/** @brief Create connection @p name over the staged @p link via the `:children[]` SPEC. */
 /** @brief The module staged connections in this test mount under. */
 constexpr std::string_view kModule = "ws-client";
 
@@ -72,11 +69,20 @@ std::string mount_of(std::string_view name) {
     return "net/" + std::string(kModule) + "/" + std::string(name);
 }
 
+/**
+ * @brief Create connection @p name over the staged @p link through the module's CREATOR
+ *        ENDPOINT — `/net/<module>/conn`, the one creation door since RFC-0014 S7.
+ *
+ * The module is declared with an EMPTY kind: a staged link bypasses the transport factory, so
+ * there is no kind to name, and the kind-less SPEC below resolves to that one declaration.
+ * `register_module` deduplicates on (kind, role), so repeating it per create declares once.
+ */
 bool create_conn(graph_t& g, transport_vertex_t& net, sink_link_t& link, std::string_view name) {
+    if (!net.register_module(std::string(kModule), "", tr::net::conn_role_t::DIAL)) return false;
     net.provide_link(std::string(kModule), std::string(name), link);
-    const auto p = path_t::parse("/net:children[]");
+    const auto p = path_t::parse("/net/" + std::string(kModule) + "/conn");
     if (!p) return false;
-    return g.write(*p, conn_spec("client", name)).has_value();
+    return g.write(*p, conn_spec(name)).has_value();
 }
 
 // --- the tests ---------------------------------------------------------------

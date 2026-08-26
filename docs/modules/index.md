@@ -69,8 +69,8 @@ Each module has its own page in the sidebar, grouped by layer:
 - **L4 graph** — [path](path.md) (addressing), [graph](graph.md) (vertices, read/write/await,
   dispatch), [fwd-router](fwd-router.md) (FWD source-routing and the `/net` plane)
 - **L4 transport** — [transport](transport.md) (loopback · UDP · TCP · WS; QUIC / WebTransport opt-in),
-  [connection config](connection-config.md) (the SPEC `config` keys a `/net:children[]` creation
-  carries — universal and kind-private), [can](can.md) (the header-elided CAN stack: ID codec,
+  [connection config](connection-config.md) (the SPEC `config` keys a
+  `/net/<module>/conn` creation carries — universal and kind-private), [can](can.md) (the header-elided CAN stack: ID codec,
   advertise, splitter, reassembly, binding)
 - **Cross-cutting** — [status & errors](status.md) (`status_t` / `result_t<T>` / `err_t`),
   [config](config.md) (the named-traits type and the policies it selects),

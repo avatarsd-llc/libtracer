@@ -4,7 +4,7 @@
 """Gate the connection-config key reference against the source that reads the keys.
 
 `docs/modules/connection-config.md` is the reference home for the SPEC `config`
-SETTINGS keys a `/net:children[]` creation carries — the universal ones parsed into
+SETTINGS keys a `/net/<module>/conn` creation carries — the universal ones parsed into
 `conn_settings_t` and the *kind-private* ones each transport factory parses for
 itself (the ADR-0043 §5 leanness ruling). A hand-maintained table of those keys is
 exactly the artifact this repo has watched rot before, so the page does not carry

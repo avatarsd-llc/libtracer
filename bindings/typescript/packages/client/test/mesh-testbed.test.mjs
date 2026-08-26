@@ -7,7 +7,8 @@
  *
  * The driver is a third libtracer node (the TS client SDK) wearing the ORCHESTRATING
  * hat (reference/13): it holds a ctrl link to each device, DIALS every inter-node link
- * by writing a `SPEC` into that device's `/net:children[]` **remotely**, and then routes
+ * by writing a `SPEC` to that device's `/net/ws-client/conn` creator endpoint **remotely**,
+ * and then routes
  * through the mesh it just made. That is the web-ui-as-setup-edge story executed
  * end to end — no `provide_link`, no config file, no test seam: every link is a real ws
  * socket the built-in `ws` factory constructs from a SPEC's config.
@@ -106,8 +107,16 @@ async function connectCtrl(name, budgetMs = 60000) {
   throw new Error(`ctrl connect to ${name} (${host}:${port}) timed out: ${lastErr}`);
 }
 
+/** @brief The DIAL module every node declares (`kWsClientSuggestedModule`, `mesh_node.cpp`). */
+const WS_CLIENT_MODULE = 'ws-client';
+
 /**
- * @brief Remotely DIAL a link: write a client SPEC into `node`'s `/net:children[]`.
+ * @brief Remotely DIAL a link: write a SPEC to `node`'s `/net/ws-client/conn` endpoint.
+ *
+ * RFC-0014 S7 (#1492) retired the global `/net:children[]` creation door, so the SPEC now
+ * goes to the DIAL module's own creator endpoint as a WHOLE-VERTEX write. That endpoint is
+ * what carries the role and the transport, which is why the payload names neither: the
+ * connection lands at `/net/ws-client/<linkName>`, the same path the assertions below read.
  *
  * Retries the WHOLE write. Since the RFC-0014 §4 S5 flip (#1548) a built-in DIAL is
  * engine-managed, so this write creates the connection DORMANT and the first frame routed
@@ -120,9 +129,7 @@ async function connectCtrl(name, budgetMs = 60000) {
 async function dial(client, from, linkName, toNode, budgetMs = 30000) {
   const { host, port } = PEERS[toNode];
   const spec = encodeConnSpec({
-    type: 'client',
     name: linkName,
-    role: 'dial',
     port,
     kind: 'ws',
     addr: host,
@@ -131,7 +138,7 @@ async function dial(client, from, linkName, toNode, budgetMs = 30000) {
   let lastErr;
   while (Date.now() < deadline) {
     try {
-      await client.writeField(['net'], ':children[]', spec);
+      await client.write(['net', WS_CLIENT_MODULE, 'conn'], spec);
       return;
     } catch (err) {
       lastErr = err;

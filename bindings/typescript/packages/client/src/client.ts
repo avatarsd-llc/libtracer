@@ -470,12 +470,20 @@ export class LibtracerClient {
    * src=…, payload }` — the write counterpart of {@link readField}.
    *
    * The append form (`":children[]"` — a whole-array ELEMENT selector with no index) is
-   * how a vertex is CREATED in band: `writeField('/net', ':children[]', encodeConnSpec(…))`
-   * brings a transport link up on a remote device (ADR-0017 / ADR-0027, reference/13 §2),
-   * and `writeField('/sensor/temp', ':subscribers[]', encodeSubscriber(…))` binds a
+   * how a vertex is CREATED in band: `writeField('/cfg', ':children[]', spec)` mints a
+   * `stored_value` child on a remote device (ADR-0017), and
+   * `writeField('/sensor/temp', ':subscribers[]', encodeSubscriber(…))` binds a
    * consumer-initiated subscription (ADR-0026). Neither was expressible from this client
    * before: {@link write} takes no selector, so every field-addressed write — the entire
    * in-band formation plane — was out of reach.
+   *
+   * A CONNECTION is the one thing this door no longer creates. RFC-0014 S7 retired
+   * `writeField('/net', ':children[]', …)`: a transport link is now brought up by a
+   * WHOLE-VERTEX write to its module's creator endpoint —
+   * `write(['net', '<module>', 'conn'], encodeConnSpec(…))`. Removal is the same endpoint
+   * written with a bare `NAME{<name>}` payload instead of a SPEC (RFC-0014 §2,
+   * reference/13 §2). The module segment is what fixes the transport and the role, which is
+   * why the payload carries neither. Generic `:children[]` creation is unaffected.
    *
    * Vector-pinned by `fwd-write-subscriber-field`.
    *

@@ -21,8 +21,9 @@
  *       latches the current value — RFC-0022 §3.A);
  *     - `transport_vertex_t` with the built-in udp/tcp/ws transport catalog;
  *       the UDP listener connection is created IN-BAND via a
- *       `write /net:children[] SPEC{listener, kind=udp, port}` — config-created,
- *       exactly how a deployed node is wired;
+ *       `write /net/udp-server/conn <- SPEC{name, config{kind=udp, port}}` to the
+ *       module's creator endpoint — config-created, exactly how a deployed node is
+ *       wired, and since RFC-0014 S7 the only door there is;
  *     - a publish loop writing the sensor (each write fans out a real
  *       FWD{WRITE} to every remote subscriber).
  *
@@ -336,9 +337,12 @@ struct device_node_t {
         // The UDP listener, created IN-BAND from config — the production path.
         // NAME "host" is the segment this node prepends to inbound src (the way
         // back) and the segment a dst routes onward through this link.
+        //
+        // The write goes to the MODULE's creator endpoint, which the declaration
+        // above minted. The SPEC carries neither a `type` nor a `role`: the module
+        // in the path is `udp-server`, which says both (RFC-0014 §1/§3).
         const auto w =
-            graph.write(path_t("/net:children[]"),
-                        conn_spec("listener", "host", conn_role_t::LISTEN, kNodePort, "udp"));
+            graph.write(path_t("/net/udp-server/conn"), conn_spec("host", kNodePort, "udp"));
         return w.has_value();
     }
 
@@ -393,10 +397,11 @@ int run_host_probe(device_node_t& dev) {
     // Since the RFC-0014 §4 S5 flip (#1548) the built-in DIAL kinds are engine-managed, so
     // this write creates the connection DORMANT and the first op below auto-wakes it — the
     // round trip is unchanged from the application's side, which is the point.
-    const auto wa =
-        graph.write(path_t("/net:children[]"),
-                    conn_spec("client", "dev", conn_role_t::DIAL, kNodePort, "udp", "127.0.0.1"));
-    check(wa.has_value(), "SPEC{client, kind=udp, 127.0.0.1} creates the dialing connection");
+    const auto wa = graph.write(path_t("/net/udp-client/conn"),
+                                conn_spec("dev", kNodePort, "udp", "127.0.0.1"));
+    check(wa.has_value(),
+          "SPEC{name=dev, kind=udp, 127.0.0.1} at /net/udp-client/conn creates the dialing "
+          "connection");
 
     // 1) FWD{READ /dev/sensor/temp} — crosses the wire, resolves at the device
     //    terminus, and the REPLY source-routes back to our reply sink.

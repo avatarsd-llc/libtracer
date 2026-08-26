@@ -36,21 +36,13 @@ using wire::type_t;
 namespace {
 
 /**
- * @brief The last NAME segment of a canonical PATH-payload key = the connection's NAME.
- *
- * The key is `<...prior NAMEs...><NAME len-prefixed name>`. The record walk is
- * `wire::key_view_t::last_segment` — key_view is the single locus for canonical-key
- * navigation, and this TU hand-rolled a second copy of it (#932). The result is
- * still materialised as an owning `std::string` because the caller needs one.
- */
-[[nodiscard]] std::string last_segment(std::span<const std::byte> key) {
-    return std::string(detail::as_string_view(wire::key_view_t{key}.last_segment()));
-}
-
-/**
  * @brief Parse the optional SPEC `config` SETTINGS (the shared config_reader_t walk): NAME "addr"
- *        NAME <utf8>, NAME "kind" NAME <utf8>, NAME "port" VALUE u16, NAME "role" VALUE u8
- *        (overrides the type default), NAME "keepalive" VALUE u32.
+ *        NAME <utf8>, NAME "kind" NAME <utf8>, NAME "port" VALUE u16, NAME "keepalive" VALUE u32.
+ *
+ * There is no `role` key. The role is POSITIONAL — it IS the module (RFC-0014 §1/§3) — and
+ * the only key that ever carried it was the superseded `:children[]` spelling's override,
+ * retired with that door at S7. A `role` pair on the wire is now an unknown pair: ignored,
+ * like every other unknown pair, never obeyed.
  *
  * ONLY the universal
  * keys land here (ADR-0043 §5 leanness): kind-private pairs (e.g. quic's `cert`/`key`)
@@ -65,7 +57,6 @@ void parse_config(const tlv_t* config, conn_settings_t& s) {
         s.port = *v;
         s.port_set = true;
     }
-    if (const auto v = cfg.u8("role")) s.role = *v == 0 ? conn_role_t::DIAL : conn_role_t::LISTEN;
     if (const auto v = cfg.u32("keepalive")) s.keepalive_ms = *v;
     if (const auto v = cfg.u32("max_frame")) s.max_frame = *v;
     if (const auto v = cfg.u32("backoff")) s.backoff_ms = *v;
@@ -228,20 +219,16 @@ transport_vertex_t::transport_vertex_t(graph::graph_t& graph, fwd_router_t& rout
       // `egress_source()` answered the process heap unconditionally — it could not be told
       // otherwise, so the accessor lied about that node's store.
       egress_src_(egress_src != nullptr ? egress_src : &mem::heap_source()) {
-    // Register the `/net` parent if it isn't already (it is the `:children[]` target).
+    // Register the `<net_root>` grouping vertex if it isn't already. It is the ENUMERATION
+    // root (`/net:children[]` lists this plane's modules) and nothing more: RFC-0014 S7
+    // retired the `client`/`listener` CREATION registrations that used to hang off it, so a
+    // `write /net:children[] += SPEC{type = "client"|"listener", …}` now answers
+    // `SCHEMA_NOT_FOUND` like any other unregistered catalog type. The ONE wire creation door
+    // for a connection is the per-module creator endpoint `<net_root>/<module>/conn`
+    // (`register_module` mints it; RFC-0014 §1/§2).
     if (!graph_.find(path_t::parse(net_root_)->key())) {
         (void)graph_.register_vertex(*path_t::parse(net_root_), graph::role_t::STORED_VALUE);
     }
-    // Register the two catalog types on the graph via the #82 seam. Both build a
-    // connection leaf; `role` is the type default (a `:settings` `role` may override).
-    graph_.register_child_type(
-        "client", [this](graph::graph_t&, std::vector<std::byte> key, const tlv_t* config) {
-            return make_connection(std::move(key), config, conn_role_t::DIAL);
-        });
-    graph_.register_child_type(
-        "listener", [this](graph::graph_t&, std::vector<std::byte> key, const tlv_t* config) {
-            return make_connection(std::move(key), config, conn_role_t::LISTEN);
-        });
     // The `quic` kind is NOT a builtin: it lives in the separate libtracer_quic
     // module (ADR-0043), which extends this catalog through register_transport_type
     // (quic_transport_factory) — this file never learns about msquic (open/closed).
@@ -354,7 +341,7 @@ result_t<transport_vertex_t::module_decl_t> transport_vertex_t::declaration_for_
     if (hits == 0) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
     // One module declared for two kinds, and a kind-less SPEC: genuinely ambiguous, so it is
     // refused rather than resolved by declaration order — the same ruling (and the same
-    // status) the kind-less `:children[]` spelling gives two stagings sharing a leaf NAME.
+    // status) the retired `:children[]` spelling gave two stagings sharing a leaf NAME.
     if (hits > 1) return std::unexpected(status_t::TYPE_MISMATCH);
     return *found;
 }
@@ -484,7 +471,8 @@ result_t<void> transport_vertex_t::endpoint_create_locked(ctl_txn_t& txn, const 
     // The wire minting boundary runs THE shared segment predicate (ADR-0073 §1) — the same
     // one `graph_t::create_child` runs on the other door — so a name that enters the graph
     // here is expressible in the addressing grammar. Without it the endpoint could mint an
-    // enumerable-but-unaddressable connection, which the `:children[]` door cannot.
+    // enumerable-but-unaddressable connection — the failure the retired `:children[]` door was
+    // structurally incapable of, because `graph_t::create_child` ran the predicate for it.
     if (!graph::valid_segment(name)) return std::unexpected(status_t::INVALID_PATH);
     // The reserved name, refused BEFORE anything is built (RFC-0014 §3 create-side).
     // Falling through would answer PATH_IN_USE anyway — `register_vertex_key` collides with
@@ -502,10 +490,10 @@ result_t<void> transport_vertex_t::endpoint_create_locked(ctl_txn_t& txn, const 
 
     const auto declared = declaration_for_locked(module, settings.kind);
     if (!declared) return std::unexpected(declared.error());
-    // The role is POSITIONAL — it IS the module (RFC-0014 §1/§3) — so the declaration's role
-    // OVERWRITES whatever the config's `role` pair said. That pair is the superseded
-    // `:children[]` spelling's override, and honouring it here would let a creator mount a
-    // LISTEN socket under a module whose path promises DIAL.
+    // The role is POSITIONAL — it IS the module (RFC-0014 §1/§3) — so the declaration SETS it.
+    // Nothing on the wire can say otherwise: the `role` config pair died with the superseded
+    // `:children[]` spelling it belonged to (S7), and `parse_config` no longer reads one, so a
+    // creator cannot mount a LISTEN socket under a module whose path promises DIAL.
     settings.role = declared->role;
     // A kind-less SPEC is the staged-link spelling; the module's declared kind is the kind
     // this endpoint constructs, so recording it keeps `settings_of` honest about what the
@@ -551,7 +539,7 @@ bool transport_vertex_t::is_structural(wire::key_view_t key) const {
     const std::string_view root = std::string_view(net_root_).substr(1);
     const wire::key_view_t parent = key.parent();
     const std::string_view leaf = detail::as_string_view(key.last_segment());
-    // `<net_root>` itself: the `:children[]` creation target the ctor registers.
+    // `<net_root>` itself: the enumeration root the ctor registers.
     if (parent.empty()) return leaf == root;
     // `<net_root>/<module>`: exactly two segments, the first the root. Anything deeper is a
     // connection (`<net_root>/<module>/<name>`) or below one — the peer's mounted graph.
@@ -591,85 +579,6 @@ void transport_vertex_t::provide_link(std::string module, std::string name, tran
     pending_links_.insert_or_assign(std::move(key), &link);
 }
 
-result_t<vertex_handle_t> transport_vertex_t::make_connection(std::vector<std::byte> child_key,
-                                                              const tlv_t* config,
-                                                              conn_role_t role) {
-    ctl_txn_t txn(*this, ctl_scope_t::OPERATION);  // ADR-0063 §3 serialization
-    // ORDERING INVARIANT (#688 trace): this function is reached ONLY through the graph's
-    // child-type catalog, i.e. from `graph_t::create_child`, which runs THE segment
-    // predicate (`graph::valid_segment`, ADR-0073 §1) on the peer-supplied name BEFORE it
-    // composes the key or looks up a factory. That matters because `name` becomes the last
-    // segment of the router MOUNT below — an unaddressable name here would register a
-    // healthy-looking child that no conforming `dst` can reach. The check is NOT repeated
-    // here: one predicate, one call site per boundary, is what stops the tiers drifting
-    // (the drift is the defect, #681). `transport_vertex_test.cpp`'s
-    // `test_wire_name_reaches_add_child` pins the ordering against the production wiring.
-    const std::string name = last_segment(child_key);
-    if (name.empty()) return std::unexpected(status_t::INVALID_PATH);
-
-    conn_settings_t settings;
-    settings.role = role;  // the type default; config may override
-    parse_config(config, settings);
-
-    // Which MODULE does this connection mount under (RFC-0014 §1, ADR-0061)? The SPEC decides
-    // whenever it can: a `kind` names a declared (kind, role) module (ADR-0073 §4). Only the
-    // kind-less SPEC — the `provide_link` spelling — takes its module from the staged set,
-    // and then only when the leaf NAME identifies exactly ONE staging. The connection lives
-    // at `/net/<module>/<name>` and routes by that same path.
-    //
-    // The module half of a staging key is now COMPARED, never merely read back out of the
-    // first hit (#883). The old scan matched the leaf NAME alone and adopted the module of
-    // whichever key came first in map order — the creating SPEC's own intent was the only
-    // thing that knew better, and the scan never looked at it. Two silent mis-binds followed:
-    // with `mod-a/x` and `mod-b/x` staged, the SPEC meaning `mod-b` mounted at `net/mod-a/x`
-    // over `mod-a`'s transport (wrong module AND wrong link); and because the scan ran BEFORE
-    // the (kind, role) lookup, a SPEC naming a kind was captured by any staging sharing its
-    // leaf NAME — the kind's factory never ran. One defect: a key composed of two halves,
-    // matched on one.
-    std::string module;
-    if (!settings.kind.empty()) {
-        auto declared = module_for_locked(settings.kind, settings.role);
-        // Declared-only (ADR-0073 §4): a kind the application never mapped to a module
-        // fails creation explicitly instead of mounting under a library-derived name.
-        if (!declared) return std::unexpected(declared.error());
-        module = std::move(*declared);
-    } else {
-        // Kind-less: the staged set is the ONLY module source, so count the leaf-NAME hits
-        // rather than taking the first. Iteration order is lexicographic and carries no
-        // intent — two stagings sharing a leaf NAME are genuinely ambiguous here.
-        std::size_t hits = 0;
-        for (const auto& [key, staged] : pending_links_) {
-            const std::size_t slash = key.rfind('/');
-            if (slash == std::string::npos) continue;
-            if (key.compare(slash + 1, std::string::npos, name) != 0) continue;
-            if (++hits > 1) break;
-            module.assign(key, 0, slash);
-        }
-        // Neither a staged link nor a construction kind — nothing can carry the bytes. The
-        // config is INCOMPLETE (`kind` is a required field once no staging supplies the
-        // module), not an address to a missing thing, so this answers TYPE_MISMATCH like the
-        // other missing-required-field gates (a DIAL missing `addr`, either role missing
-        // `port`) — never NOT_FOUND, whose wire form `tr::path::not_found` is RFC-0014's
-        // reserved "no such creator endpoint" probe answer (#1062).
-        if (hits == 0) return std::unexpected(status_t::TYPE_MISMATCH);
-        // Ambiguous: refuse instead of picking by map order. The SPEC must carry a `kind`
-        // whose declared module says WHICH staging it meant. TYPE_MISMATCH is the config-is-
-        // underspecified answer this creation path already uses (a DIAL missing `addr`/`port`
-        // answers the same), and it goes out PERMANENT — re-sending this SPEC cannot help.
-        if (hits > 1) return std::unexpected(status_t::TYPE_MISMATCH);
-    }
-
-    // The module is resolved; everything below is the door-independent half (RFC-0014 S2b
-    // split the creator endpoint out as a SECOND door onto exactly this body).
-    const auto made = make_connection_locked(txn, module, name, config, std::move(settings));
-    // Phase 2 before the handle goes back to the graph's `create_child`, so a `:children[]`
-    // creation still returns with its birth liveness already published — the observable
-    // shape is unchanged; only the lock state under the publish is. Status dropped for the
-    // reason `endpoint_write`'s create leg gives.
-    (void)txn.discharge();
-    return made;
-}
-
 result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(ctl_txn_t& txn,
                                                                      const std::string& module,
                                                                      const std::string& name,
@@ -700,7 +609,7 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(ctl_txn_t& 
     // unrelated local vertex.
 
     // Compose the mount key: `<net_root>/<module>/<name>`, replacing the flat key the
-    // graph's `:children[]` machinery handed us (the endpoint door never had one).
+    // graph's `:children[]` machinery used to hand the retired door (the endpoint never had one).
     std::vector<std::byte> mount_key;
     for (std::string_view seg : {std::string_view(net_root_).substr(1), std::string_view(module),
                                  std::string_view(name)}) {
@@ -895,10 +804,10 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(ctl_txn_t& 
     // is `LISTENING` (a bind failure returns an error from the factory above, so a
     // constructed LISTEN is always bound). Provided links report via set_link_state.
     //
-    // The role read here is the EFFECTIVE one — the same field the factory was handed —
-    // not the catalog type's default. They differ only when a `:children[]` SPEC overrode
-    // `role` in its config, and in that case the old read published a `client` type's `UP`
-    // over a socket the factory had just BOUND as a listener.
+    // The role read here is the EFFECTIVE one — the same field the factory was handed. Since
+    // S7 that is always the endpoint module's declared role and nothing else can move it; the
+    // read is kept honest anyway, because publishing anything but what the factory acted on is
+    // how a `client`'s `UP` once landed over a socket the factory had just BOUND as a listener.
     if (constructed)
         (void)set_link_state_locked(
             txn, qualified,

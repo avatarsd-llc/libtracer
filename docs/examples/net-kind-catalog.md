@@ -5,12 +5,16 @@ Nothing in the routing plane knows the word `tcp`. A connection is created from 
 
 1. the **factory catalog** — `register_transport_type(kind, factory)` — which decides what gets
    constructed;
-2. the **module declaration** — `register_module(module, kind, role)` — which decides where it
-   mounts, `/net/<module>/<name>`.
+2. the **module declaration** — `register_module(module, kind, role)` — which mints the creator
+   endpoint the SPEC is written to, decides where the connection mounts
+   (`/net/<module>/<name>`), and fixes the role positionally. Since RFC-0014 S7 retired the
+   `/net:children[]` creation door, this is the only way a connection comes into being — and it
+   is why the SPEC carries no `type` and no `role`.
 
 Both are open and both are strict. The example registers a kind that exists nowhere in the
-library, creates a connection of it from an ordinary `:children[]` SPEC, watches the routing
-plane wire it up — and then asks for a kind nobody registered and gets `SCHEMA_NOT_FOUND`.
+library, creates a connection of it with an ordinary `SPEC` write to that module's creator
+endpoint `/net/<module>/conn`, watches the routing plane wire it up — and then asks for a kind
+nobody registered and gets `SCHEMA_NOT_FOUND`.
 
 ## What to notice
 
@@ -30,8 +34,9 @@ plane wire it up — and then asks for a kind nobody registered and gets `SCHEMA
   What they use to join a node is this page and nothing more — `quic_transport_factory()` passed
   to `register_transport_type`, exactly like the kind invented here. `can` is registered the same
   way.
-- **The factory parses its own private keys.** Universal keys (`addr`, `port`, `role`,
-  `max_frame`, …) arrive already parsed in `conn_settings_t`; a kind's private config (quic's
+- **The factory parses its own private keys.** Universal keys (`addr`, `port`, `kind`,
+  `max_frame`, …) arrive already parsed in `conn_settings_t` — with `role` filled in from the
+  module's declaration rather than from the wire; a kind's private config (quic's
   `cert`/`key` PEM paths) is the factory's business, read out of the raw config TLV. That split
   is what keeps `conn_settings_t` lean (ADR-0043 §5) — no kind-specific field ever lands in the
   shared record.
