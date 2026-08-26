@@ -154,11 +154,13 @@ the SPEC carries no `type` and no `role`
 ([RFC-0014 — creator endpoint: connection lifecycle and link liveness](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)).
 The `config` member `kind` selects which transport factory builds the link
 (`core/src/transport_vertex.cpp:55`, factories registered through
-`register_transport_type` at `:257`) and cross-checks the module's declaration. The
+`register_transport_type` at `:257`, catalogued at `:281`) and cross-checks the module's declaration. The
 created connection is mounted and routed at **`/net/<module>/<name>`**, where `module`
 is **declared by the application** through `register_module` — modules are declared-only
 (ADR-0073 §4); an undeclared `(kind, role)` pair fails creation with `SCHEMA_NOT_FOUND`
-(`core/src/transport_vertex.cpp:281-299`).
+(`core/src/transport_vertex.cpp:284`, refused at `:339`). One *(kind, role)*
+pair is declared once: a second module claiming a pair another module already declared
+is refused `PATH_IN_USE` rather than silently renaming the first.
 
 The global `:children[]` spelling — `SPEC{type = "client"|"listener", …}` written to
 `/net:children[]` — was **retired** at RFC-0014 S7: those two child types are no longer

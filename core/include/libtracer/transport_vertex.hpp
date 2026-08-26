@@ -471,13 +471,25 @@ class transport_vertex_t {
      * are idempotent — a second declaration naming the same module (a module serving two
      * kinds) finds them and mints nothing. The endpoint is minted HIDDEN from the module's
      * `:children[]` (RFC-0014 §3, S4) — see `%kConnEndpointName`.
+     *
+     * **A *(kind, role)* pair is declared exactly once.** The declaration is KEYED on that
+     * pair — @ref module_for resolves through it — so re-declaring an already-declared pair
+     * under a DIFFERENT @p module answers `PATH_IN_USE` and changes nothing. It used to
+     * overwrite the recorded name in place, which left the first module's creator endpoint
+     * minted and answering while every later resolution pointed at the second name: two live
+     * doors, one of them unreachable through the resolver, and no diagnostic. Declaring the
+     * SAME triple again is idempotent and still succeeds. One module may serve several pairs
+     * (a `can` module for both roles, a module declared for two kinds); what is refused is
+     * one pair claimed by two modules.
      * @param module The module segment (e.g. `"ws-client"`, `"can"`); must satisfy
      *               `tr::graph::valid_segment`.
      * @param kind   The config `kind` this module constructs (e.g. `"ws"`).
      * @param role   The role this module fixes positionally.
-     * @return `INVALID_PATH` if @p module is not a valid path segment; the graph's own
-     *         refusal (e.g. `BACKPRESSURE`) if the endpoint could not be registered — in
-     *         which case nothing is declared either.
+     * @return `INVALID_PATH` if @p module is not a valid path segment; `PATH_IN_USE` if
+     *         *(@p kind, @p role)* is already declared under another module (nothing is
+     *         minted and nothing is recorded); the graph's own refusal (e.g. `BACKPRESSURE`)
+     *         if the endpoint could not be registered — in which case nothing is declared
+     *         either.
      */
     [[nodiscard]] graph::result_t<void> register_module(std::string module, std::string kind,
                                                         conn_role_t role);
@@ -536,8 +548,9 @@ class transport_vertex_t {
      *            handle unwrapping needed — the signature matches).
      * @return true iff @p key is `<net_root>`, or `<net_root>/<module>` for a module of this
      *         plane — one declared through @ref register_module, one staged through
-     *         @ref provide_link (the kind-less spelling never declares its module), or one
-     *         carrying a live connection.
+     *         @ref provide_link (which takes the module as data and declares nothing, so a
+     *         staging can name a module no declaration ever did), or one carrying a live
+     *         connection.
      */
     [[nodiscard]] bool is_structural(wire::key_view_t key) const;
 

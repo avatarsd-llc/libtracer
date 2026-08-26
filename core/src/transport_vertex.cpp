@@ -287,17 +287,34 @@ result_t<void> transport_vertex_t::register_module(std::string module, std::stri
     // predicate gates the name here, exactly as path_t::parse gates the local string tier.
     if (!graph::valid_segment(module)) return std::unexpected(status_t::INVALID_PATH);
     const ctl_txn_t txn(*this, ctl_scope_t::OPERATION);  // ADR-0063 §3 serialization
+    // A declaration is KEYED on (kind, role) — `module_for` resolves through that pair — so a
+    // second declaration of a pair already declared under a DIFFERENT module used to
+    // overwrite the first one's name in place. That is a SILENT RENAME: the first module's
+    // `/net/<module>/conn` endpoint stayed minted and answering, while every subsequent
+    // `module_for` sent connections of that pair to the second name. Two live doors, one of
+    // them unreachable through the resolver, and nothing said so. It is now a loud refusal by
+    // value, on the seam's own convention: the pair is already taken, which is what
+    // `PATH_IN_USE` says everywhere else in this file (the reserved-name collision, the
+    // duplicate connection name).
+    //
+    // Refused BEFORE the mint below, so a rejected declaration leaves nothing behind — not
+    // even the second name's grouping vertex.
+    bool declared = false;
+    for (const module_decl_t& d : modules_) {
+        if (d.kind != kind || d.role != role) continue;
+        // Identical re-declaration stays idempotent-OK: setup code that declares the same
+        // (module, kind, role) triple twice — a module serving one pair, registered from two
+        // places — is not making a contradictory claim, so it keeps succeeding.
+        if (d.module != module) return std::unexpected(status_t::PATH_IN_USE);
+        declared = true;
+        break;
+    }
     // "Adding a module adds its creator endpoint and catalog" (RFC-0014 §1). Minted BEFORE
     // the declaration is recorded, so a refusal leaves nothing half-declared: a module whose
     // endpoint could not be registered would advertise a (kind, role) the wire has no door to.
+    // Idempotent, so the re-declaration path above runs it again and mints nothing.
     if (auto minted = mint_module_locked(module); !minted) return minted;
-    for (module_decl_t& d : modules_) {
-        if (d.kind == kind && d.role == role) {
-            d.module = std::move(module);
-            return {};
-        }
-    }
-    modules_.push_back({std::move(module), std::move(kind), role});
+    if (!declared) modules_.push_back({std::move(module), std::move(kind), role});
     return {};
 }
 
@@ -549,10 +566,11 @@ bool transport_vertex_t::is_structural(wire::key_view_t key) const {
     for (const module_decl_t& d : modules_) {
         if (d.module == leaf) return true;
     }
-    // A module reached through the KIND-LESS spelling is never declared — `make_connection`
-    // takes its name from the staging key instead (`provide_link`, the test/manual seam), and
-    // mints the same `<net_root>/<module>` vertex for it. So the staged set and the live
-    // connections are the other two places a module name of this plane can be read back from.
+    // A module can also be known to this plane without ever having been DECLARED: since S7
+    // the wire door needs a declaration, but `provide_link` — the public test/manual seam —
+    // takes the module as data and declares nothing, so a staging is a module name `modules_`
+    // has never seen. So the staged set and the live connections are the other two places a
+    // module name of this plane can be read back from.
     // No fourth container is added for this (commit `221ed983` deleted exactly that state):
     // these are the ones the class already keeps for creation and teardown.
     std::string under(leaf);

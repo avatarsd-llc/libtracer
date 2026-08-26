@@ -146,7 +146,7 @@ constexpr int kConnRounds = 1500;
 constexpr std::size_t kConnNames = 4;
 /** @brief The module every churned connection mounts under (`/net/m/<name>`). */
 constexpr std::string_view kChurnModule = "m";
-/** @brief The `kind` whose module declaration the declarer rewrites under the resolver. */
+/** @brief The `kind` the resolver thread resolves while the declarer appends under it. */
 constexpr std::string_view kChurnKind = "k";
 
 /**
@@ -159,10 +159,14 @@ constexpr std::string_view kChurnKind = "k";
  *     `erase` per cycle; the liveness thread calls the PUBLIC `set_link_state` throughout.
  *     Unfixed, that `find` walks the map mid-rebalance and can be handed the very node the
  *     erase is destroying — the returned `conn_t::vertex` is then read after free.
- *   - **`module_for` vs `register_module`.** The declarer rewrites an existing declaration's
- *     module string in place AND periodically appends a new one, so the resolver's walk faces
- *     both a mutating `std::string` and the vector reallocation that invalidates the walk
- *     outright. The string rewrite is the dense signal; the append is the reported one.
+ *   - **`module_for` vs `register_module`.** The declarer appends a fresh declaration every
+ *     round — alternating two module names either side of the small-string boundary — so the
+ *     resolver's walk faces the vector reallocation that invalidates it outright, which is
+ *     the reported signal. It no longer faces a `std::string` mutating UNDER the walk,
+ *     because that hazard was retired at the source: re-declaring an already-declared
+ *     *(kind, role)* under a different module is now `PATH_IN_USE` rather than an in-place
+ *     rename, so nothing rewrites a recorded module name any more. The declarer is kept
+ *     driving the append arm at full rate in its place.
  *
  * Both readers are the entry an application actually calls, so this fails at the surface the
  * fix moved. With TSan it reports; without it, it is a smoke test that the churn completes and
@@ -212,16 +216,17 @@ void transport_vertex_control_plane_churn() {
 
     const auto declarer = [&] {
         for (int r = 0; r < kConnRounds; ++r) {
-            // Rewrite the SAME (kind, role)'s module in place — two names either side of the
-            // small-string boundary, so the assignment touches heap storage the resolver may
-            // be copying out.
+            // Grow the vector every round: a push_back reallocates it under the walk. The
+            // module name alternates either side of the small-string boundary, so the
+            // reallocation moves heap-owning strings the resolver may be copying out, and
+            // the KIND is fresh per round — a repeat would now be refused `PATH_IN_USE`
+            // (the pair is declared once) and append nothing.
             (void)net.register_module(
                 (r & 1) ? "uplink" : "uplink-long-enough-to-leave-the-small-string-buffer",
-                std::string(kChurnKind), conn_role_t::DIAL);
-            // And grow the vector now and then: a push_back reallocates it under the walk.
-            if (r % 8 == 0)
-                (void)net.register_module("g", std::string(kChurnKind) + std::to_string(r),
-                                          conn_role_t::DIAL);
+                std::string(kChurnKind) + std::to_string(r), conn_role_t::DIAL);
+            // The pair the resolver thread actually reads, declared ONCE up front so the walk
+            // has a hit to find at every reallocation.
+            if (r == 0) (void)net.register_module("g", std::string(kChurnKind), conn_role_t::DIAL);
         }
     };
 
@@ -253,17 +258,16 @@ void transport_vertex_control_plane_churn() {
           "every create/remove cycle ran — the liveness reader faced a populated table");
 
     // The writers left both tables in a definite state, and the readers must not have
-    // disturbed it: the last act per name was a removal, and the declarer's last write wins.
+    // disturbed it: the last act per name was a removal, and every declaration the declarer
+    // appended is still exactly what it appended (nothing rewrites a recorded module now).
     int lingering = 0;
     for (const std::string& q : qualified)
         if (net.settings_of(q) != nullptr) ++lingering;
     check(lingering == 0, "no connection outlived its removal (conns_ survived the churn intact)");
 
     const auto declared = net.module_for(kChurnKind, conn_role_t::DIAL);
-    check(declared.has_value() &&
-              (*declared == "uplink" || *declared == "uplink-long-enough-to-leave-the-small-string-"
-                                                     "buffer"),
-          "module_for answers one of the churned declarations, not a torn string");
+    check(declared.has_value() && *declared == "g",
+          "module_for answers the churned pair's one declaration, not a torn string");
 }
 
 /**@}*/

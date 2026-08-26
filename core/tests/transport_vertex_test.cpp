@@ -1887,6 +1887,60 @@ void test_register_module_rejects_reserved_chars() {
 }
 
 /**
+ * @brief A *(kind, role)* pair is declared ONCE — a second module claiming it is refused
+ *        `PATH_IN_USE`, not served by silently renaming the first.
+ *
+ * `register_module` keys its record on *(kind, role)*, so a second declaration of the same
+ * pair under a different module name used to overwrite the recorded name in place. The first
+ * module's `/net/<module>/conn` endpoint stayed minted and answering while every later
+ * `module_for` pointed at the second name — two live creation doors, one unreachable through
+ * the resolver, and no diagnostic anywhere. The refusal is loud and by value now.
+ *
+ * The three legs: an identical re-declaration still succeeds (idempotent setup is not a
+ * contradictory claim), a different module for the same pair is refused AND leaves both the
+ * declaration and the graph untouched, and one module serving SEVERAL pairs is unaffected —
+ * what is refused is one pair claimed by two modules, never one module claiming two pairs.
+ */
+void test_register_module_refuses_a_second_module_for_one_pair() {
+    std::printf("register_module: a (kind, role) pair is declared once, loudly:\n");
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+
+    check(net.register_module("ws-client", "ws", conn_role_t::DIAL).has_value(),
+          "the first declaration of (ws, DIAL) succeeds");
+    check(net.register_module("ws-client", "ws", conn_role_t::DIAL).has_value(),
+          "re-declaring the SAME triple is idempotent-OK");
+
+    const auto clash = net.register_module("ws-uplink", "ws", conn_role_t::DIAL);
+    check(!clash.has_value() && clash.error() == status_t::PATH_IN_USE,
+          "a DIFFERENT module for the already-declared (ws, DIAL) answers PATH_IN_USE");
+
+    // Nothing was renamed: the pair still resolves to the module that claimed it, and the
+    // creation door the first declaration minted is still the one a SPEC reaches.
+    const auto m = net.module_for("ws", conn_role_t::DIAL);
+    check(m.has_value() && *m == "ws-client", "the first declaration is intact, not renamed");
+    check(node.find(path_t("/net/ws-client/conn").key()).has_value(),
+          "the first module's creator endpoint is still minted");
+    // And the refusal minted NOTHING for the name it refused — no orphan grouping vertex, no
+    // second creation door for a pair that resolves elsewhere.
+    check(!node.find(path_t("/net/ws-uplink").key()).has_value(),
+          "the refused declaration minted no grouping vertex");
+    check(!node.find(path_t("/net/ws-uplink/conn").key()).has_value(),
+          "the refused declaration minted no second creator endpoint");
+
+    // One module, several pairs: the other direction is not restricted. `can` is exactly this
+    // shape — one module for both roles — and a module declared for two kinds is legal too
+    // (a kind-less SPEC there is the TYPE_MISMATCH `declaration_for_locked` already gives).
+    check(net.register_module("can", "can", conn_role_t::DIAL).has_value(),
+          "a module takes its first pair");
+    check(net.register_module("can", "can", conn_role_t::LISTEN).has_value(),
+          "the SAME module takes a second pair (one bus module, both roles)");
+    check(net.register_module("can", "can2", conn_role_t::DIAL).has_value(),
+          "and a second kind under that module");
+}
+
+/**
  * @brief ADR-0073 §4 / #621: the application owns its whole path shape — a transport
  *        registered under an app-chosen root AND module name (`/io/w`, `/io/l`) creates
  *        and carries traffic end-to-end. This was impossible while the module half of
@@ -2018,8 +2072,9 @@ void test_structural_vertex_partition() {
 }
 
 /**
- * @brief #1096 — the edges of the predicate: an app-chosen root, an undeclared module name,
- *        the graph root, and the `/net/<module>/conn` creator endpoint.
+ * @brief #1096 — the edges of the predicate: an app-chosen root, a module known only from a
+ *        staging, an undeclared module name, the graph root, and the `/net/<module>/conn`
+ *        creator endpoint.
  */
 void test_structural_vertex_edges() {
     std::printf("#1096: structural-vertex edges (custom root, undeclared module, conn):\n");
@@ -2042,6 +2097,17 @@ void test_structural_vertex_edges() {
     check(structural_at("/io"), "the app-chosen net root /io is structural");
     check(structural_at("/io/w"),
           "a module declared for no kind (the provide_link spelling) is structural too");
+
+    // The STAGED-SET arm of the predicate, which is the only one a module name never passed
+    // to `register_module` can reach: `provide_link` is a public seam that takes the module
+    // as data and declares nothing, so after this call `pending_links_` is the ONE container
+    // holding the name "s" — `modules_` does not (no declaration) and `conns_` does not (a
+    // creation would need a `/io/s/conn` endpoint, which only a declaration mints). Since S7
+    // retired the `:children[]` creation door this is the whole of the arm's reachable state,
+    // and it is reachable exactly here.
+    net.provide_link("s", "x", channel.b());
+    check(structural_at("/io/s"),
+          "a module known ONLY from a provide_link staging is structural (the staged-set arm)");
     check(!structural_at("/io/w/b"), "the connection leaf /io/w/b is not");
     check(!structural_at("/io/nope"), "a module name of no connection and no declaration is not");
     check(!structural_at("/net"),
@@ -2535,6 +2601,7 @@ int main() {
     test_refused_dial_is_transport_down();
     test_unregistered_kind_is_schema_not_found();
     test_register_module_rejects_reserved_chars();
+    test_register_module_refuses_a_second_module_for_one_pair();
     test_conn_endpoint_spec_creates();
     test_conn_endpoint_constructs_socket();
     test_builtin_dial_traits_track_the_build_knob();
