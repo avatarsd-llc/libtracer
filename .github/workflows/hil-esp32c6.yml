@@ -1,0 +1,300 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# ON-SILICON gate: flash a real ESP32-C6 and watch it boot (#1557; first slice #1532).
+#
+# WHAT IS NEW HERE. `esp-idf.yml` cross-compiles the ESP plane, links it, reads its
+# objects (`check_esp_thread_id.py` — the one #1532 call that only fails on silicon)
+# and censuses its flash. What it has never done is EXECUTE a libtracer instruction
+# on the chip, because no hosted runner has one attached. This workflow is the other
+# half: a self-hosted runner with a C6 devkit on USB, a flash, and a console read.
+#
+# THE FIRST SLICE IS A BOOLEAN, on purpose. `full_node` on a chip with no Wi-Fi SSID
+# configured (the CI default) runs the SAME self-proof the `linux` target runs in
+# esp-idf.yml: a device node and an in-process host peer over REAL datagrams through
+# lwIP's loopback netif — FWD{READ} round trip, a `:subscribers[]` subscribe write,
+# a durability latch, a producer fan-out observed with `graph.await`. So one
+# transcript answers the question #1532 is held open for: does a v0.15.x-line node
+# reach `app_main` and answer a write over the wire? `tools/hil/hil_monitor.py`
+# renders that verdict; everything above it is plumbing.
+#
+# ── DORMANCY ────────────────────────────────────────────────────────────────
+# This file lands BEFORE the hardware exists and must cost nothing until it does.
+# The `guard` job runs on a HOSTED runner and decides; every job that touches the
+# device is `needs: guard` and skips cleanly when the answer is no. Three gates,
+# in order, and each answers a different way of not being ready:
+#
+#   1. `vars.HIL_ENABLED == 'true'` — a repository VARIABLE, set by a human as the
+#      last act of registering the runner. This is the primary switch precisely
+#      because it needs no token scope and cannot be wrong by accident: an
+#      un-plugged, un-registered repo has it unset and every run here is a green
+#      no-op with a notice.
+#   2. a best-effort ONLINE-RUNNER probe against the runners API. A job dispatched
+#      to a `runs-on:` label no runner carries does not fail — it QUEUES, invisibly,
+#      until GitHub expires it a day later, which is the one failure mode a
+#      scheduled workflow must not have. The probe is BEST EFFORT because the
+#      runners API needs admin rights that `GITHUB_TOKEN` may not carry; a probe
+#      that cannot answer warns and proceeds, on the reasoning that a human who set
+#      HIL_ENABLED knows the machine exists.
+#   3. for `pull_request`, the `hil` LABEL and a SAME-REPOSITORY head branch.
+#
+# ── TRIGGERS: never on plain push ───────────────────────────────────────────
+# One chip is one queue. `workflow_dispatch` (ask for it), a `hil`-labelled PR (opt
+# in per change), and a nightly (the standing instrument). A push trigger would
+# make every merge wait on a device that flashes in minutes, which is how a
+# hardware runner becomes the thing people route around.
+#
+# ── SECURITY: a public repo and a machine in someone's flat ─────────────────
+# `pull_request` runs the HEAD of the PR branch. Fork code must never execute on
+# the host that owns the hardware, so the guard requires
+# `head.repo.full_name == github.repository` — the same rule core-ci's and
+# doc-citations' self-hosted routing expression applies, spelled as a skip rather
+# than as a fallback because there is no hosted machine that can flash a chip.
+#
+# ── ONE CONCURRENCY GROUP, NEVER CANCELLED ──────────────────────────────────
+# perf-local's rule, for the harder version of its reason: two jobs on one bench
+# host is a contaminated sample, two jobs on one chip is a corrupted flash. The
+# group is workflow-wide (the build job is in it too — serialising a cheap hosted
+# build costs nothing and keeps "one run at a time" true end to end), and
+# `cancel-in-progress: false` because a run killed mid-`write_flash` leaves the
+# device in a state the NEXT run has to discover.
+name: hil-esp32c6
+
+on:
+  workflow_dispatch:
+    inputs:
+      monitor_timeout:
+        description: 'Seconds to watch the console before giving up on the verdict line'
+        type: string
+        default: '90'
+  # Label-gated, NOT path-gated. A `paths:` filter here would defeat the label: a
+  # maintainer who labels a PR to ask for a hardware run means that PR, whatever it
+  # touched. The cost of the missing filter is one ~15 s hosted `guard` check per
+  # PR, which is what makes the label the whole trigger.
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  # The standing instrument. Off the hour to miss the cron stampede, and late
+  # enough not to collide with perf-local's 05:23 catch-up leg on the same host.
+  schedule:
+    - cron: '43 4 * * *'
+
+concurrency:
+  group: hil-esp32c6
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # Decides whether the hardware plane runs. HOSTED, and it must stay hosted: asking
+  # "is there a device?" on the machine with the device is a question that hangs when
+  # the answer is no.
+  guard:
+    runs-on: ubuntu-24.04
+    # Two `gh api` calls at worst. 10 = the short-job floor used across this repo.
+    timeout-minutes: 10
+    outputs:
+      ready: ${{ steps.decide.outputs.ready }}
+    steps:
+      - name: Is the HIL plane armed, labelled, and attended by an online runner?
+        id: decide
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HIL_ENABLED: ${{ vars.HIL_ENABLED }}
+          # Hardcoded, not a variable: `runs-on:` below cannot read one without a
+          # `fromJSON(format(...))` expression, and a probe that checks a different
+          # label from the one the job routes to is a guard that lies.
+          HIL_RUNNER_LABEL: hil-esp32c6
+          EVENT: ${{ github.event_name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          set -euo pipefail
+          not_ready() { echo "ready=false" >> "$GITHUB_OUTPUT"; echo "::notice::$1"; exit 0; }
+
+          if [ "${{ github.repository }}" != "avatarsd-llc/libtracer" ]; then
+            not_ready "not the upstream repository — the HIL device lives on one host"
+          fi
+
+          # Fork PRs never reach the hardware host. Stated first among the PR checks
+          # so a fork sees the security reason, not the label reason.
+          if [ "$EVENT" = "pull_request" ]; then
+            if [ "$HEAD_REPO" != "${{ github.repository }}" ]; then
+              not_ready "fork pull request — HIL jobs never run fork code on the hardware host"
+            fi
+            case ",${PR_LABELS}," in
+              *,hil,*) : ;;
+              *) not_ready "this PR is not labelled 'hil' — add the label to ask for a hardware run" ;;
+            esac
+          fi
+
+          if [ "${HIL_ENABLED:-}" != "true" ]; then
+            not_ready "the HIL plane is DORMANT: repository variable HIL_ENABLED is not 'true'. \
+          Register a runner labelled '${HIL_RUNNER_LABEL}' (tools/hil/README.md), then \
+          'gh variable set HIL_ENABLED --body true'."
+          fi
+
+          # Best effort — see the DORMANCY note at the top of this file. The runners
+          # API needs admin rights GITHUB_TOKEN may not carry; a probe that cannot
+          # answer must not veto a plane a human explicitly armed.
+          if online=$(gh api "repos/${{ github.repository }}/actions/runners" \
+                        --jq "[.runners[] | select(.status == \"online\") \
+                              | select([.labels[].name] | index(\"${HIL_RUNNER_LABEL}\"))] | length" \
+                      2>/dev/null); then
+            if [ "${online:-0}" -lt 1 ]; then
+              not_ready "no ONLINE runner carries the label '${HIL_RUNNER_LABEL}' — skipping rather \
+          than queueing a job nothing can pick up"
+            fi
+            echo "::notice::${online} online runner(s) carry '${HIL_RUNNER_LABEL}'"
+          else
+            echo "::warning::could not probe the runners API (GITHUB_TOKEN lacks admin rights?) — \
+          proceeding because HIL_ENABLED is set. If no runner carries \
+          '${HIL_RUNNER_LABEL}', the device job will QUEUE until GitHub expires it."
+          fi
+
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+  # Builds and STAGES the image on a hosted container runner. The device host never
+  # installs ESP-IDF — see tools/hil/hil_flash.py's header for why the two halves are
+  # split. Same image and same example as esp-idf.yml's `full-node` job, so a green
+  # build here is not new coverage; the artifact is the point.
+  build-image:
+    needs: guard
+    if: needs.guard.outputs.ready == 'true'
+    runs-on: ubuntu-24.04
+    container: espressif/idf:release-v6.0
+    # esp-idf.yml measures this example at 3.90-4.15 min per target; 25 keeps the
+    # image pull inside one reviewable number with the same ~5x headroom.
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build full_node for esp32c6
+        shell: bash
+        working-directory: integrations/esp-idf/examples/full_node
+        run: |
+          . "${IDF_PATH}/export.sh"
+          idf.py set-target esp32c6
+          idf.py build
+
+      - name: Stage the flashable image
+        shell: bash
+        working-directory: integrations/esp-idf/examples/full_node
+        run: |
+          python3 "${GITHUB_WORKSPACE}/tools/hil/hil_flash.py" stage \
+            --build-dir build --out hil-image \
+            --note "full_node esp32c6, espressif/idf:release-v6.0"
+          ls -lR hil-image
+
+      - name: Upload the staged image
+        uses: actions/upload-artifact@v4
+        with:
+          name: hil-image-esp32c6
+          path: integrations/esp-idf/examples/full_node/hil-image
+          if-no-files-found: error
+          retention-days: 14
+
+  # The device job. Self-hosted, NOT containerised: a container would have to be
+  # handed the USB device node AND would write the workspace as root, and the whole
+  # dependency here is `esptool` from pip.
+  flash-and-boot:
+    needs: [guard, build-image]
+    if: needs.guard.outputs.ready == 'true'
+    runs-on: [self-hosted, hil-esp32c6]
+    # Flash is ~10 s, the console watch is bounded by --timeout (90 s default), the
+    # pip install dominates a cold run. 25 leaves room for a slow index and still
+    # fails a wedged USB stack in minutes rather than at GitHub's 6-hour ceiling.
+    timeout-minutes: 25
+    env:
+      HIL_PORT: ${{ vars.HIL_PORT || '/dev/hil-esp32c6' }}
+      # esptool 4.x CLI (`write_flash`, underscored flags). esptool 5 renamed the
+      # subcommands, so the major version is pinned here rather than floated: a
+      # silent CLI change would read as a flash failure on the device.
+      ESPTOOL_VERSION: '4.8.1'
+    steps:
+      # BEFORE checkout, because checkout is what it saves. Same self-heal
+      # perf-local carries, for the same measured reason (#1538): container jobs on
+      # this host leave root-owned files in the shared `_work` tree and the next
+      # `actions/checkout` dies in its clean step, which reads as a breakage of
+      # whatever job ran next. `|| true` deliberately — a workspace this cannot
+      # repair must be named by checkout, with checkout's diagnostics.
+      - name: Reclaim any root-owned leftovers from a container job
+        run: sudo -n chown -R "$(id -un):$(id -gn)" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" || true
+
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: The device must be present and usable WITHOUT root
+        run: |
+          set -euo pipefail
+          if [ ! -e "$HIL_PORT" ]; then
+            echo "::error::$HIL_PORT does not exist — is the ESP32-C6 devkit plugged in, and is"
+            echo "::error::tools/hil/99-libtracer-hil.rules installed in /etc/udev/rules.d/?"
+            exit 1
+          fi
+          ls -l "$HIL_PORT"
+          if [ ! -r "$HIL_PORT" ] || [ ! -w "$HIL_PORT" ]; then
+            echo "::error::$HIL_PORT is not readable+writable by $(id -un). The udev rule must set"
+            echo "::error::OWNER to the runner user — a HIL job that needs sudo for the device is"
+            echo "::error::a HIL job that can do anything on the host."
+            exit 1
+          fi
+
+      - name: Install esptool (the device host's whole toolchain)
+        run: |
+          set -euo pipefail
+          python3 -m venv "$RUNNER_TEMP/hilvenv"
+          "$RUNNER_TEMP/hilvenv/bin/pip" install --quiet --upgrade pip
+          "$RUNNER_TEMP/hilvenv/bin/pip" install --quiet "esptool==${ESPTOOL_VERSION}"
+          "$RUNNER_TEMP/hilvenv/bin/python" -m esptool version
+
+      - name: Download the staged image
+        uses: actions/download-artifact@v4
+        with:
+          name: hil-image-esp32c6
+          path: hil-image
+
+      - name: Flash the C6
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          cat hil-image/image.json
+          "$RUNNER_TEMP/hilvenv/bin/python" tools/hil/hil_flash.py flash \
+            --image hil-image --port "$HIL_PORT"
+
+      # THE GATE. Everything above is delivery; this is the observation. The script
+      # exits non-zero on a boot loop, a panic, a node that never reached app_main,
+      # or a self-proof that failed a leg — each named separately in the annotation
+      # and in the step summary.
+      - name: Watch the console and render the boot verdict (#1532)
+        id: verdict
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/hilvenv/bin/python" tools/hil/hil_monitor.py \
+            --port "$HIL_PORT" \
+            --timeout "${{ github.event.inputs.monitor_timeout || '90' }}" \
+            --transcript hil-transcript.txt \
+            --json hil-result.json
+
+      # ALWAYS: a failed run's transcript is the whole diagnosis, and it is the one
+      # artifact nobody can reproduce without the hardware.
+      - name: Upload the console transcript and the verdict
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hil-esp32c6-${{ github.run_id }}
+          path: |
+            hil-transcript.txt
+            hil-result.json
+          if-no-files-found: warn
+          retention-days: 90
+
+      # LAST, and `always()`: a step after this one can re-dirty the tree it just
+      # handed back. This job runs no container, so `tools/check_ci_workspace_cleanup.py`
+      # does not police it — the step is here because the host is SHARED with jobs
+      # that do, and a HIL run that leaves the workspace unusable breaks the bench
+      # instrument next.
+      - name: Restore workspace ownership for the next job on this host
+        if: always()
+        run: sudo -n chown -R "$(id -un):$(id -gn)" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" || true

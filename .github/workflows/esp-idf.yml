@@ -23,6 +23,15 @@
 # Keep this matrix and that `targets:` list in sync in both directions: adding a
 # target here without adding it there supports nothing, and adding it there
 # without adding it here claims something untested.
+#
+# WHAT THIS WORKFLOW STILL CANNOT DO, and where that lives now (#1557): every job
+# below cross-compiles, links, reads objects or censuses flash. None of them
+# EXECUTES a libtracer instruction on a chip, because no hosted runner has one
+# attached. `hil-esp32c6.yml` is the other half — it flashes a real ESP32-C6 and
+# reads its console — and it is DORMANT until a runner labelled `hil-esp32c6`
+# exists and `HIL_ENABLED` is set (tools/hil/README.md). The object-level #1532
+# assertion in `full-node` below stays regardless: it is the cheap gate every PR
+# gets, and the on-silicon boot repro is the expensive one hardware answers.
 name: esp-idf
 
 on:
