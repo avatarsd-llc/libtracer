@@ -26,6 +26,7 @@
 #include "libtracer/key_view.hpp"
 #include "libtracer/mem_borrowed.hpp"
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_source_alloc.hpp"
 #include "libtracer/packed_path.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv.hpp"
@@ -606,7 +607,8 @@ struct branch_node_t {
  */
 [[nodiscard]] result_t<bool> parse_branch_node(const wire::tlv_arena_t& a, std::uint32_t root,
                                                const view_t& frame_view, std::vector<std::byte> key,
-                                               std::vector<branch_node_t>& out) {
+                                               mem::source_vector_t<branch_node_t>& out,
+                                               mem::block_source_t& src) {
     /**
      * @brief One open POINT node: its arena index, the sibling cursor over its
      *        remaining children, its key, and the strict-shape accumulators.
@@ -621,19 +623,25 @@ struct branch_node_t {
         bool subtree_value = false;   /**< @brief A VALUE landed below this node. */
     };
 
-    std::vector<open_t> stack;
+    mem::source_vector_t<open_t> stack{mem::source_allocator_t<open_t>{src}};
     // Validate a POINT node's shape (structured, trailer-less, leading NAME) and
     // open it with the sibling cursor past that NAME. The open-node stack grows
     // NOTHROW (#477 — a branch write runs on the writer thread): OOM soft-fails the
     // whole branch write as BACKPRESSURE (the store-leg status), never an abort.
     //
-    // #981 residual, STATED HERE: "never an abort" holds only where the growth THROWS.
-    // Under `-fno-exceptions` `try_push_back` degrades to probe-then-commit — the probe
-    // block is freed before `reserve` asks for one, and a FreeRTOS context switch in that
-    // window lets another task take it, so the `reserve` hits exhaustion inside a `noexcept`
-    // and abort()s the MCU node (#850). This site cannot take the ADR-0065 failable seam:
-    // `open_t` owns a `std::vector<std::byte>` key, so it is neither trivially copyable nor
-    // trivially destructible and `block_array_t`'s memcpy relocation would tear it.
+    // #873 phase 1: the stack's BLOCKS come from the injected source now, not the global
+    // heap. `open_t` still owns a `std::vector<std::byte>` key, so it is neither trivially
+    // copyable nor trivially destructible and `block_array_t`'s memcpy relocation would
+    // still tear it — which is exactly why this site takes a source ALLOCATOR instead: it
+    // changes where the vector's block comes from and leaves the element type alone.
+    //
+    // #981 residual, NARROWED and stated here: "never an abort" still holds only where the
+    // growth THROWS. Under `-fno-exceptions` `try_push_back` is still probe-then-commit and
+    // a FreeRTOS context switch between the probe's release and the `reserve` still aborts
+    // the MCU node (#850). What phase 1 fixed is WHICH allocator the probe asks: it now
+    // probes the same store the growth draws from, where before it probed the global heap
+    // for a growth that would have come from there too. The window is unchanged; the answer
+    // is no longer about the wrong memory.
     const auto open = [&a, &stack](std::uint32_t node, std::vector<std::byte> k) -> result_t<void> {
         if (!a[node].opt.pl || !trailer_less(a[node]))
             return std::unexpected(status_t::TYPE_MISMATCH);
@@ -2516,8 +2524,11 @@ result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, std::stri
     // `-fno-exceptions` probe window (abort() on a lost race, #850).
     std::vector<std::byte> parse_key;
     if (!detail::try_assign(parse_key, root_key)) return std::unexpected(status_t::BACKPRESSURE);
-    std::vector<branch_node_t> plan;  // post-order; plan.back() is the root
-    const result_t<bool> parsed = parse_branch_node(a, 0, *head, std::move(parse_key), plan);
+    // post-order; plan.back() is the root. Its blocks come from the injected source (#873
+    // phase 1) — the node count is PEER-CHOSEN (the peer picks how deep and how wide the
+    // branch it writes is), so this is exactly the growth a bounded node must be able to cap.
+    mem::source_vector_t<branch_node_t> plan{mem::source_allocator_t<branch_node_t>{*ctl_}};
+    const result_t<bool> parsed = parse_branch_node(a, 0, *head, std::move(parse_key), plan, *ctl_);
     if (!parsed) return std::unexpected(parsed.error());
     if (!*parsed) return {};  // a value-free branch is a no-op write
 
@@ -2535,11 +2546,13 @@ result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, std::stri
         // direction (a duplicate delivery, never a lost one).
         std::shared_ptr<const rope_t> stored;
     };
-    std::vector<site_t> sites;
-    // Nothrow (#477): OOM => BACKPRESSURE. #981 residual: `site_t` owns a `std::shared_ptr`,
-    // so the admission table cannot take the ADR-0065 seam (`block_array_t` relocates by
-    // memcpy) and this growth keeps `try_reserve`'s `-fno-exceptions` probe window — a task
-    // switch between the probe's free and the `reserve` abort()s the node (#850).
+    // Nothrow (#477): OOM => BACKPRESSURE. `site_t` owns a `std::shared_ptr`, so the
+    // admission table still cannot take the ADR-0065 seam (`block_array_t` relocates by
+    // memcpy) — but since #873 phase 1 it does not have to in order to be bounded: a source
+    // ALLOCATOR moves the block onto the injected store and leaves the element type alone.
+    // #981 residual, narrowed: the `-fno-exceptions` arm is still probe-then-commit and still
+    // carries the #850 window; the probe now asks the store the growth will use.
+    mem::source_vector_t<site_t> sites{mem::source_allocator_t<site_t>{*ctl_}};
     if (!detail::try_reserve(sites, plan.size())) return std::unexpected(status_t::BACKPRESSURE);
     for (const branch_node_t& node : plan) {
         if (node.store.empty()) continue;
@@ -4132,7 +4145,11 @@ result_t<rope_t> graph_t::read_subtree_folded(vertex_handle_t vh, std::string_vi
     // load, and the node's OWN body contribution (its NAME record below the root; its
     // stored TLV's total length verbatim). Descendant HANDLER on_read seams are NOT
     // invoked — the composed read serves landed LKVs only.
-    std::vector<snap_node_t> nodes;
+    // The node table's blocks come from `ctl_` (#873 phase 1). `snap_node_t` holds a
+    // `std::shared_ptr`, so `block_array_t` is still out — a source allocator is what bounds
+    // it without changing the element type. The node COUNT is peer-chosen, like the collect
+    // stack below it.
+    mem::source_vector_t<snap_node_t> nodes{mem::source_allocator_t<snap_node_t>{*ctl_}};
     {
         /** @brief One unvisited subtree root: the vertex and its parent's array index. */
         struct work_t {
@@ -4151,11 +4168,11 @@ result_t<rope_t> graph_t::read_subtree_folded(vertex_handle_t vh, std::string_vi
         // peer-chosen (it picks which composed root to READ), so this is exactly the growth
         // a peer can drive to exhaustion.
         mem::block_array_t<work_t> stack(*ctl_);
-        // `nodes` stays on the throwing-growth-guarded helper: `snap_node_t` holds a
-        // `std::shared_ptr`, so it is neither trivially copyable nor trivially destructible
-        // and `block_array_t`'s memcpy relocation cannot carry it (#981 — the residual is
-        // documented at that push below). A lambda cannot return the error, so the child
-        // push latches `oom` and the loop propagates it after each visit.
+        // `nodes` stays on the throwing-growth-guarded helper — `snap_node_t` holds a
+        // `std::shared_ptr`, so `block_array_t`'s memcpy relocation cannot carry it — but it
+        // draws from the SAME `ctl_` store this stack does (#873 phase 1). A lambda cannot
+        // return the error, so the child push latches `oom` and the loop propagates it after
+        // each visit.
         bool oom = false;
         if (!stack.push_back(work_t{.v = root, .parent = kNoParent}))
             return std::unexpected(status_t::BACKPRESSURE);
@@ -4170,12 +4187,12 @@ result_t<rope_t> graph_t::read_subtree_folded(vertex_handle_t vh, std::string_vi
             n.body_len =
                 (w.parent == kNoParent ? 0 : kNameHeaderBytes + child_segment(*w.v).size()) +
                 (n.lkv ? n.lkv->total_length() : 0);
-            // #981 residual, STATED HERE: on the `-fno-exceptions` profile this growth is a
-            // probe-then-commit — `probe_bytes` frees its block before `reserve` takes one,
-            // and a task switch in that window makes the `reserve` abort() the node (#850).
-            // It cannot take the ADR-0065 seam: `snap_node_t` owns a `std::shared_ptr`, which
-            // `block_array_t`'s memcpy relocation would tear. Closing it needs a relocating
-            // failable array, not a change here.
+            // #981 residual, NARROWED and stated here: on the `-fno-exceptions` profile this
+            // growth is still probe-then-commit and a task switch in the window still aborts
+            // the node (#850). #873 phase 1 aimed the probe at `ctl_` — the store the growth
+            // actually draws from — instead of the global heap; it did not close the window.
+            // Closing it needs a relocating FAILABLE array, which `snap_node_t`'s
+            // `std::shared_ptr` still rules out here.
             if (!detail::try_push_back(nodes, std::move(n)))
                 return std::unexpected(status_t::BACKPRESSURE);
             // Push the children, then reverse the just-pushed run: the LIFO pop then

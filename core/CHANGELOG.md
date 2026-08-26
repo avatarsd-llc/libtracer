@@ -223,6 +223,42 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **`tr::detail::try_reserve` / `try_push_back` take any allocator, and their
+  `-fno-exceptions` probe now asks the RIGHT store**
+  ([#873](https://github.com/avatarsd-llc/libtracer/issues/873) phase 1, narrowing the #981
+  residuals). The helpers were `std::vector<T>`-only and probed the global heap. They are now
+  generic over the allocator, and a new `tr::detail::try_grow_from` probes the store an
+  allocator publishes.
+
+  This is deliberately NOT the generalization `mem_heap.hpp` has a standing warning against.
+  That warning is about `std::pmr::vector`, and every sentence of it turns on the probe testing
+  a DIFFERENT allocator from the one the growth uses — answering "yes" about memory the
+  container will never touch, then aborting on the real allocation. A `source_allocator_t`
+  publishes its store (`source()`), so the probe asks exactly the store the growth will draw
+  from. The #850 probe-then-commit race window is UNCHANGED and still documented at each site;
+  what stops is asking the wrong memory. `probe_fail_hook` is honoured on both arms.
+
+  The default-allocator path is untouched by construction: `growth_source` is a `constexpr`
+  two-overload dispatch returning `nullptr` for any allocator that publishes no store, so a
+  plain `std::vector<T>` folds straight back to the old `try_grow` call with no branch.
+
+- **Four `graph.cpp` growth sites move off the global heap onto the graph's injected source**
+  ([#873](https://github.com/avatarsd-llc/libtracer/issues/873) phase 1). The branch-write
+  decode's open-node stack and its landing-site PLAN, the branch-write admission table, and the
+  composed read's NODE table. All four are peer-driven counts — a peer picks how deep and wide
+  the branch it writes is, and which composed root it reads — so they are exactly the growth a
+  bounded node must be able to cap, and all four carried a `#981 residual` note saying they
+  could not take `block_array_t` because their elements own a `std::vector`, a `shared_ptr` or
+  a `view_t`. Those notes are narrowed rather than deleted: the blocks are bounded now, the
+  `-fno-exceptions` window is not.
+
+  **Not migrated, and why**: every remaining `try_assign` / `try_reserve` on a
+  `std::vector<std::byte>` KEY (`try_build_key`'s out-parameter, `select_sweep`'s output, the
+  branch-write child-key composition, the sweep snapshot's element type). Their container type
+  is fixed by member-function signatures and by the `pending_` / `unconditional_` key sets, so
+  moving them is a key-type change across the graph rather than an allocator swap — out of
+  phase 1's scope, and stated here rather than left to be rediscovered.
+
 - **BREAKING — `graph_t`'s constructor collapses to ONE injected `tr::mem::block_source_t`**
   ([#873](https://github.com/avatarsd-llc/libtracer/issues/873) phase 1, maintainer ruling
   2026-08-26,
@@ -285,6 +321,21 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   hazard-slot acquisition A/B because the naive fix puts an atomic on `store()`
   ([#897](https://github.com/avatarsd-llc/libtracer/issues/897)) — and re-layering the backend /
   pmr adapters into the backend seam proper is **phase 3**.
+
+- **`mem_source_alloc.hpp` — `tr::mem::source_allocator_t<T>` and `tr::mem::source_vector_t<T>`:
+  the standard-`Allocator` face of the substrate** ([#873](https://github.com/avatarsd-llc/libtracer/issues/873)
+  phase 1). `block_array_t` requires trivially copyable AND trivially destructible elements,
+  which is why the graph's collection tables — holding `std::vector<std::byte>` keys,
+  `std::shared_ptr` LKVs and refcounted `view_t`s — sat on `std::vector` over the GLOBAL heap
+  with a `#981 residual` note apiece. An allocator changes only WHERE the block comes from and
+  leaves the element type and its destructors alone, so those sites become bounded without
+  being rewritten. It still THROWS on exhaustion (the Allocator requirements admit no other
+  signal); `tr::detail::try_reserve` is what turns that into a value. A path that must survive
+  exhaustion with no throw anywhere still migrates to `block_array_t`.
+
+  A separate header for the reason `mem_source_sync.hpp` and `mem_source_pmr.hpp` are:
+  `mem_source.hpp` is compiled into the freestanding footprint sentinel and this one needs
+  `<vector>`.
 
 - **`tr::net::child_registry_t`'s chunks draw from an injected `tr::mem::block_source_t`, not
   the global heap** ([#873](https://github.com/avatarsd-llc/libtracer/issues/873) phase 1,

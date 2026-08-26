@@ -157,6 +157,19 @@ raw `nullptr` translated at this adapter's own boundary and nowhere else.
 :members:
 ```
 
+The standard-`Allocator` face, for the containers neither of the two above can serve. A
+`block_array_t` needs trivially copyable and trivially destructible elements; a store holding
+`std::shared_ptr`s or `std::vector` keys has neither, and before
+[#873](https://github.com/avatarsd-llc/libtracer/issues/873) phase 1 those sites were stranded
+on the global heap. This changes only where the vector's block comes from and leaves the
+element type alone. It still THROWS on exhaustion — the Allocator requirements admit no other
+signal — so it delivers **placement and bounding**, and the by-value refusal comes from
+`tr::detail::try_reserve` one level up.
+
+```{doxygenclass} tr::mem::source_allocator_t
+:members:
+```
+
 ```{doxygenstruct} tr::mem::sync_none_t
 :members:
 ```

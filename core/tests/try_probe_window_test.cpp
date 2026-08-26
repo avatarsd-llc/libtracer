@@ -51,6 +51,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <new>
 #include <span>
 #include <string>
@@ -148,6 +149,29 @@ struct work_shape_t {
     void* v = nullptr;
     std::size_t parent = 0;
 };
+
+/**
+ * @brief The composed read's NODE-TABLE element, mirrored for the same reason
+ *        @ref work_shape_t is: to compute the block shape its first growth asks for.
+ *
+ * `snap_node_t` holds a `std::shared_ptr`, so it can never take `block_array_t`'s memcpy
+ * relocation — which is why #873 phase 1 put it on a source ALLOCATOR instead: the element
+ * type and its destructors are untouched and only the block moves onto the injected store.
+ * The mirror must therefore carry a `shared_ptr` too, or the size is wrong.
+ */
+struct snap_shape_t {
+    const void* v = nullptr;
+    std::shared_ptr<const void> lkv;
+    std::size_t parent = 0;
+    std::size_t body_len = 0;
+};
+
+/**
+ * @brief The node table's FIRST growth. `tr::detail::try_push_back` grows an empty vector to
+ *        `grow_capacity(0) == 1`, so the first request is exactly one element.
+ */
+constexpr std::size_t kNodeTableBytes = sizeof(snap_shape_t);
+constexpr std::size_t kNodeTableAlign = alignof(snap_shape_t);
 
 /**
  * @brief `block_array_t`'s FIRST growth is 8 elements (`grow()`: `have < 4 ? 8 : have * 2`),
@@ -448,11 +472,52 @@ void test_reply_iov_on_the_seam() {
           "counted on reply_iov_dropped at composed-root size too");
 }
 
+// --- (d) the composed-read NODE TABLE, on a source ALLOCATOR (#873 phase 1) ---
+
+/**
+ * @brief `read_subtree_folded`'s node table draws from the graph's injected source too, and
+ *        its exhaustion is BACKPRESSURE.
+ *
+ * Section (a) pins the collect STACK, which took `block_array_t` because its element is two
+ * words. The node table beside it could not: `snap_node_t` owns a `std::shared_ptr`, so a
+ * memcpy relocation would tear it, and the site carried a `#981 residual` note saying it was
+ * stranded on the global heap. #873 phase 1 closed it with a source ALLOCATOR — the container
+ * and element type are unchanged, only the block moves. This is the ablation for that: revert
+ * the allocator and `served()` reads 0, because the growth goes back to `operator new`.
+ */
+void test_node_table_on_the_seam() {
+    std::printf("read_subtree_folded's node table (std::vector over a source allocator):\n");
+    gated_source_t src;
+    graph_t g(&src);
+
+    const auto root_path = path_t::parse("/plant");
+    auto root = g.register_vertex(*root_path, role_t::STORED_VALUE);
+    for (std::string_view leaf : {"/plant/t", "/plant/h", "/plant/p"}) {
+        const auto p = path_t::parse(leaf);
+        auto v = g.register_vertex(*p, role_t::STORED_VALUE);
+        tr::view::rope_t val;
+        val.append(make_value({0x08, 0x00, 0x01, 0x00, 0x2A}));
+        (void)g.write(v, std::move(val));
+    }
+
+    src.watch(kNodeTableBytes, kNodeTableAlign, false);
+    const auto ok = g.read_subtree_folded(root, "peer");
+    check(ok.has_value(), "the composed read succeeds with a permissive source");
+    check(src.served() >= 1, "the node table took its first block from the INJECTED source");
+
+    src.watch(kNodeTableBytes, kNodeTableAlign, true);
+    const auto refused = g.read_subtree_folded(root, "peer");
+    check(src.refused() >= 1, "the injector fired (an unreached growth would be vacuous)");
+    check(!refused.has_value() && refused.error() == tr::graph::status_t::BACKPRESSURE,
+          "an exhausted node table answers BACKPRESSURE, never an abort");
+}
+
 }  // namespace
 
 int main() {
     std::printf("#981/#1570 — migrated try_* sites answer seam exhaustion by value\n\n");
     test_collect_stack_on_the_seam();
+    test_node_table_on_the_seam();
     test_delivery_iov_on_the_seam();
     test_reply_iov_on_the_seam();
     return tr::testing::summary("try_probe_window");
