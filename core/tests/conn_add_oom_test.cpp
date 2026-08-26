@@ -98,20 +98,28 @@ struct fake_link_t : tr::net::transport_t {
 };
 
 /**
- * @brief A connection-creation SPEC (reference/05 §0x0E shape).
+ * @brief A connection-creation SPEC (reference/05 §0x0E shape), creator-endpoint spelling.
  *
- * SPEC{ NAME "type" NAME "client", NAME "name" NAME <name>,
- *       NAME "config" SETTINGS{ NAME "role" VALUE u8 [, NAME "kind" NAME <kind>] } }
+ * SPEC{ NAME "name" NAME <name> [, NAME "config" SETTINGS{ NAME "kind" NAME <kind> }] }
  *
- * An empty @p kind omits the key, which is the staged-link (`provide_link`) spelling: the
- * module then follows from the staging rather than from a factory selector.
+ * There is no `type` and no `role`: the endpoint this is written to — `/net/fake-client/conn`,
+ * minted by the module declaration below — fixes both. An empty @p kind omits the key too,
+ * which is the staged-link (`provide_link`) spelling: the link then follows from the staging
+ * rather than from a factory selector.
  */
 view_t conn_spec(std::string_view name, std::string_view kind = "fake") {
-    tr::net::conn_spec_t spec("client", name);
-    spec.role(conn_role_t::DIAL);
+    tr::net::conn_spec_t spec(name);
     if (!kind.empty()) spec.kind(kind);
     return spec.view();
 }
+
+/**
+ * @brief The `fake-client` module's creator endpoint — the one wire door creation has.
+ *
+ * Built at static-init time, so its own storage is never asked for while the refusing
+ * allocator is armed: what is under test is the registry chunk, and only that.
+ */
+const path_t kConnEndpoint("/net/fake-client/conn");
 
 /**
  * @brief The published 1-byte link-liveness VALUE at @p path, or `0xFF` when the address
@@ -176,7 +184,7 @@ void test_refused_wiring_rolls_back() {
 
     const view_t spec = conn_spec("a");  // built BEFORE the arming
     g_refuse_nothrow_new = true;         // the FIRST chunk the registry asks for is refused
-    const auto w = node.write(path_t("/net:children[]"), spec);
+    const auto w = node.write(kConnEndpoint, spec);
     g_refuse_nothrow_new = false;
 
     check(!w.has_value(), "the create REPORTS the failure rather than returning success");
@@ -201,7 +209,7 @@ void test_refused_wiring_rolls_back() {
     // The rollback is total, not partial: the address and the qualified name are both free
     // again, so the very next create under an open allocator takes them.
     const view_t again = conn_spec("a");
-    const auto w2 = node.write(path_t("/net:children[]"), again);
+    const auto w2 = node.write(kConnEndpoint, again);
     check(w2.has_value(), "the same name creates cleanly afterwards — no half-built residue");
 }
 
@@ -216,7 +224,7 @@ void test_open_allocator_creates() {
     declare_fake_module(net);
 
     const view_t spec = conn_spec("a");
-    const auto w = node.write(path_t("/net:children[]"), spec);
+    const auto w = node.write(kConnEndpoint, spec);
     check(w.has_value(), "the create succeeds");
     check(node.find(path_t::parse("/net/fake-client/a")->key()).has_value(),
           "the identity vertex resolves");
@@ -251,14 +259,14 @@ void test_refused_wiring_leaves_staged_link_reusable() {
 
     const view_t spec = conn_spec("s", {});  // no `kind`: the staged link is the one to use
     g_refuse_nothrow_new = true;
-    const auto w = node.write(path_t("/net:children[]"), spec);
+    const auto w = node.write(kConnEndpoint, spec);
     g_refuse_nothrow_new = false;
     check(!w.has_value() && w.error() == status_t::BACKPRESSURE, "the create answers BACKPRESSURE");
     check(!node.find(path_t::parse("/net/fake-client/s")->key()).has_value(),
           "no identity vertex is left behind");
 
     const view_t again = conn_spec("s", {});
-    const auto w2 = node.write(path_t("/net:children[]"), again);
+    const auto w2 = node.write(kConnEndpoint, again);
     check(w2.has_value(), "the staged link was NOT consumed — the retry creates the connection");
     check(router.registry().by_name("net/fake-client/s") == &staged,
           "and it is the SAME staged link that ends up wired");

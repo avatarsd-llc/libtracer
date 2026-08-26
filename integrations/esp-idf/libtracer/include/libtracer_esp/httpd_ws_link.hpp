@@ -35,7 +35,7 @@
  * does — one inbound BINARY WebSocket frame is one libtracer TLV; a peer-named
  * server tags each frame with the sending peer's `<ip>:<port>` so a directed FWD
  * reply reaches only the tab that asked (ADR-0044); `send()` broadcasts. So it
- * drops into the node's construction site (provide_link + a `:children[]` SPEC)
+ * drops into the node's construction site (provide_link + a creator-endpoint SPEC)
  * behind the request-plane admission gate with no wiring change.
  *
  * Threading (the review-critical part):

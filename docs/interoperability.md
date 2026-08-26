@@ -41,25 +41,27 @@ self-descriptions.
 
 ### The connection surface a reader addresses
 
-Connections are ordinary vertices, so they are discovered by the same walk. Two
-spellings must be told apart, because the accepted specification and this
-implementation differ.
+Connections are ordinary vertices, so they are discovered by the same walk. There is
+**one** creation spelling, and the accepted specification and this implementation agree
+on it.
 
 | | Surface | Catalog |
 | ---- | ---- | ---- |
-| **What the implementation accepts** | a CREATE-gated `SPEC{ NAME "type", NAME "name", SETTINGS "config" }` write to `/net:children[]` (`graph_t::create_child`, `core/src/graph.cpp:3624`) | one global set of registered child types — `client` and `listener` (`core/src/transport_vertex.cpp:242-250`); the concrete transport is selected by a `kind` key inside the `config` SETTINGS (`core/src/transport_vertex.cpp:52,71`), extended per transport module through `register_transport_type` (`core/src/transport_vertex.cpp:297`) |
-| **What RFC-0014 specifies** | a per-module creator endpoint `/net/<module>/conn` — `SPEC{ name, config }` creates, `NAME{ name }` retires, with the transport and the role both positional in `<module>` | each module's own `conn:schema` |
+| **What RFC-0014 specifies, and what the implementation accepts** | a per-module creator endpoint `/net/<module>/conn` — `SPEC{ NAME "name" NAME <name>, NAME "config" SETTINGS{…} }` creates, `NAME{ <name> }` retires, with the transport and the role both positional in `<module>` | each module's own `conn:schema` — **specified, not yet implemented** (S3); until it lands, the config keys are documented out of band on [connection config](modules/connection-config.md) |
+| **Retired** | the global `SPEC{ NAME "type", NAME "name", SETTINGS "config" }` write to `/net:children[]`, with its `client` / `listener` child types and its `role` config override | gone at [#492](https://github.com/avatarsd-llc/libtracer/issues/492) S7 — those child types are no longer registered, so the write answers `SCHEMA_NOT_FOUND` |
+
+`:children[]` survives as an **enumeration**, which is a read and was never part of the
+retirement: `/net:children[]` lists this plane's modules and `/net/<module>:children[]` lists
+that module's connections (with the `conn` endpoint hidden from the listing).
 
 The created connection vertex is mounted and routed at **`/net/<module>/<name>`**,
 `<module>` **declared by the application** through `register_module` — modules are
 declared-only (ADR-0073 §4): the library derives and auto-registers no module names, and an
-undeclared `kind` fails creation with `SCHEMA_NOT_FOUND`
-(`core/src/transport_vertex.cpp:297-302,294-508,594-620`). `/net` itself is the recommended root
-convention (a constructor default, overridable per node). The per-module creator endpoint is
-the accepted direction and is **not implemented**: an integration written against
-this implementation writes the global `:children[]` catalog
-([RFC-0014 — Creator endpoint: connection lifecycle and link
-liveness](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)).
+undeclared `(kind, role)` pair fails creation with `SCHEMA_NOT_FOUND`
+(`core/src/transport_vertex.cpp:284-289`, refused at `:322`). `/net` itself is the recommended root
+convention (a constructor default, overridable per node). See
+[RFC-0014 — Creator endpoint: connection lifecycle and link
+liveness](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md).
 
 ---
 

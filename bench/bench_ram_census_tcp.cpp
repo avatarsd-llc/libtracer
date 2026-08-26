@@ -14,10 +14,11 @@
  *
  * `bench_conn_ram` prices ONE CONNECTION and constructs its transports by hand; this
  * bench prices the WHOLE NODE and constructs its listener the way the wire does — an
- * in-band `write /net:children[] += SPEC{listener, kind=tcp, port}` (ADR-0027,
- * RFC-0014). Nothing is hand-wired into the router, so every byte counted below is on
- * a production path (the RFC-0014 lesson: two silent misroutes shipped because no test
- * used the production wiring).
+ * in-band `write /net/tcp-server/conn <- SPEC{name, config{kind=tcp, port}}` to the
+ * module's creator endpoint (ADR-0027, RFC-0014; the module segment carries the role, so
+ * the SPEC has no `type` and no `role` pair). Nothing is hand-wired into the router, so
+ * every byte counted below is on a production path (the RFC-0014 lesson: two silent
+ * misroutes shipped because no test used the production wiring).
  *
  * ### The five stages (each a LIVE-balance reading, relative to the pre-graph baseline)
  *
@@ -36,8 +37,8 @@
  * The peer is a SEPARATE PROCESS — forked ONCE at the top of `main`, before any thread
  * or graph exists, and driven per repetition over a pipe. It is a full libtracer node
  * (its own `graph_t` + `fwd_router_t` + `transport_vertex_t`) whose TCP client is also
- * created from a `/net:children[]` SPEC, and it drives ops through its own router's
- * egress. So the measured process contains exactly ONE libtracer instance: no
+ * created from a SPEC written to `/net/tcp-client/conn`, and it drives ops through its own
+ * router's egress. So the measured process contains exactly ONE libtracer instance: no
  * `loopback_channel_t`, no in-process shortcut, and not one counted byte belongs to
  * the peer.
  *
@@ -274,12 +275,15 @@ std::vector<std::byte> array_value(std::size_t n, std::uint8_t fill) {
 /**
  * @brief The connection-creation SPEC (ADR-0027 / reference 05) — the tcp_test shape.
  *
- * SPEC{ NAME "type" <type>, NAME "name" <name>, SETTINGS "config"{ NAME "role" VALUE u8,
- *       NAME "port" VALUE u16, NAME "kind" NAME "tcp" [, NAME "addr" NAME <addr>] } }
+ * SPEC{ NAME "name" <name>, SETTINGS "config"{ NAME "port" VALUE u16,
+ *       NAME "kind" NAME "tcp" [, NAME "addr" NAME <addr>] } }
+ *
+ * There is no `type` and no `role` pair: this payload is written to a module's creator
+ * endpoint `/net/<module>/conn`, and the module was declared for exactly one (kind, role),
+ * so the path already fixes both (RFC-0014 S7).
  */
-view_t tcp_conn_spec(std::string_view type, std::string_view name, tr::net::conn_role_t role,
-                     std::uint16_t port, std::string_view addr = {}) {
-    return tr::net::conn_spec(type, name, role, port, "tcp", addr);
+view_t tcp_conn_spec(std::string_view name, std::uint16_t port, std::string_view addr = {}) {
+    return tr::net::conn_spec(name, port, "tcp", addr);
 }
 
 /** @brief FWD{ op=WRITE, dst=<segs...>, src=<empty>, payload } — a remote write (ADR-0040). */
@@ -399,7 +403,8 @@ struct reply_sink_t {
 
 /**
  * @brief The peer PROCESS body: a full libtracer node that dials the census node's
- *        listener from a `/net:children[]` SPEC and drives ops over its own router.
+ *        listener from a SPEC written to `/net/tcp-client/conn` and drives ops over its
+ *        own router.
  *
  * Protocol on the pipes, one line each way:
  *   `RUN <port> <ops> <mix>` → dial, one verified round-trip, reply `READY`; wait for
@@ -438,9 +443,8 @@ int peer_main(int cmd_fd, int rsp_fd) {
             },
             &sink);
 
-        const auto w = g.write(path_t("/net:children[]"),
-                               tcp_conn_spec("client", "srv", tr::net::conn_role_t::DIAL,
-                                             static_cast<std::uint16_t>(port), "127.0.0.1"));
+        const auto w = g.write(path_t("/net/tcp-client/conn"),
+                               tcp_conn_spec("srv", static_cast<std::uint16_t>(port), "127.0.0.1"));
         if (!w.has_value()) {
             (void)write_all(rsp_fd, "FAIL\n", 5);
             continue;
@@ -543,8 +547,7 @@ sample_t run_census(mix_t mix, std::size_t ops, int cmd_fd, int rsp_fd) {
     tr::net::transport_vertex_t net(g, router);
     (void)net.register_module(std::string(tr::net::kTcpServerSuggestedModule), "tcp",
                               tr::net::conn_role_t::LISTEN);
-    const auto wl = g.write(path_t("/net:children[]"),
-                            tcp_conn_spec("listener", "peer", tr::net::conn_role_t::LISTEN, port));
+    const auto wl = g.write(path_t("/net/tcp-server/conn"), tcp_conn_spec("peer", port));
     if (!wl.has_value()) return s;
     if (router.registry().by_name("net/tcp-server/peer") == nullptr) return s;
     quiesce();
@@ -705,7 +708,7 @@ int main(int argc, char** argv) {
     std::printf("# bench_ram_census_tcp vertices=%zu ops=%zu reps=%zu (first discarded)\n",
                 kVertices, ops, reps);
     std::printf("# transport: tr::net::transport_tcp_server (kind=tcp, LISTEN) — the canonical\n");
-    std::printf("# TCP transport, constructed in-band via write /net:children[] += SPEC\n");
+    std::printf("# TCP transport, constructed in-band via write /net/tcp-server/conn <- SPEC\n");
     std::printf("# sizeof: graph_t=%zu vertex_t=%zu tcp_server=%zu transport_vertex_t=%zu\n",
                 sizeof(tr::graph::graph_t), sizeof(tr::graph::vertex_t),
                 sizeof(tr::net::transport_tcp_server), sizeof(tr::net::transport_vertex_t));

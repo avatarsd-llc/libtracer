@@ -334,9 +334,12 @@ void test_spec_pair_scan_cannot_be_hijacked() {
  *    the vertex it names. That is the half a codec harness structurally cannot check: a
  *    round-trip is satisfied by any well-formed TLV, including one every terminus refuses.
  *
- * The `conn-client-ws` case additionally carries a `config` whose values are mixed by TYPE
- * (`role`/`port` opaque VALUEs, `kind`/`addr` textual NAMEs), and is read back through the
- * production `config_reader_t` — the typed read a transport factory performs.
+ * This file's slot covers the GENERIC `:children[]` creation grammar only. The connection
+ * spelling that used to live here — `spec/conn-client-ws` — was retired with its door by
+ * RFC-0014 Amendment 4 (S7): a connection is created through the per-module creator endpoint
+ * now, and its bytes are the `conn/create-via-spec` vector, bound in
+ * `core/tests/transport_vertex_test.cpp`. The mixed-value-type claim that vector's `config`
+ * carried (opaque `VALUE`s and textual `NAME`s in one record) moved there with it.
  */
 void test_conformance_vectors() {
     std::printf("the shared spec/ vectors are the bytes we emit AND the bytes we accept:\n");
@@ -355,40 +358,6 @@ void test_conformance_vectors() {
         check(w.has_value(), "the vector's bytes are ACCEPTED by :children[]");
         check(g.find(path_t::parse("/dev/temp")->key()).has_value(),
               "... and created /dev/temp, the vertex the vector names");
-    }
-
-    // --- spec/conn-client-ws -----------------------------------------------------
-    {
-        const std::vector<std::byte> vec = vector_bytes("spec/conn-client-ws");
-
-        graph_t g;
-        (void)g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
-
-        // Stand in for a transport factory: capture the `config` SETTINGS the creation
-        // door hands over, and read it with the production reader.
-        bool saw_config = false;
-        std::optional<std::uint8_t> role;
-        std::optional<std::uint16_t> port;
-        std::string kind;
-        std::string addr;
-        g.register_child_type(
-            "client", [&](graph_t& gg, std::vector<std::byte> key, const tr::wire::tlv_t* config) {
-                saw_config = config != nullptr;
-                const tr::net::config_reader_t cfg(config);
-                role = cfg.u8("role");
-                port = cfg.u16("port");
-                if (const auto k = cfg.name("kind")) kind.assign(*k);
-                if (const auto a = cfg.name("addr")) addr.assign(*a);
-                return gg.register_vertex_key(std::move(key), role_t::STREAM);
-            });
-
-        const auto w = g.write(path_t("/dev:children[]"), owned(vec));
-        check(w.has_value(), "spec/conn-client-ws is ACCEPTED by :children[]");
-        check(g.find(path_t::parse("/dev/up")->key()).has_value(), "... and created /dev/up");
-        check(saw_config, "the vector's config SETTINGS reached the factory");
-        check(role == 0 && port == 8080, "config_reader_t reads role=DIAL(0) and port=8080");
-        check(kind == "ws" && addr == "127.0.0.1",
-              "... and reads the STRING keys kind/addr, which only a NAME value can carry");
     }
 
     // --- spec/desync-stray-value (#995) — bytes we REFUSE, shared with the bindings ---

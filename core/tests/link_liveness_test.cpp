@@ -542,10 +542,10 @@ void test_builtin_tcp_kind_runs_through_the_engine() {
           "the last release closes the socket and re-dormants the built-in link");
 
     // The LISTEN half of the SAME built-in kind is untouched: eager, and not an engine.
-    const auto wl = node.write(
-        path_t("/net/tcp-server/conn"),
-        tr::net::conn_spec_t("srv").kind("tcp").role(conn_role_t::LISTEN).port(0).view());
-    check(wl.has_value(), "SPEC{srv, kind=tcp, role=LISTEN} creates the listener");
+    const auto wl = node.write(path_t("/net/tcp-server/conn"),
+                               tr::net::conn_spec_t("srv").kind("tcp").port(0).view());
+    check(wl.has_value(),
+          "SPEC{srv, kind=tcp} on the LISTEN module's endpoint creates the listener");
     check(state_byte(node, "/net/tcp-server/srv") ==
               static_cast<std::uint8_t>(link_state_t::LISTENING),
           "a LISTEN link still binds EAGERLY and reports LISTENING at creation (RFC-0014 §4)");

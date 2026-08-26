@@ -11,7 +11,8 @@
  * malformed. Plus the ADR-0042 owning-delivery segment identity, backpressure
  * drain (framing sync survives exhaustion), an end-to-end two-node FWD delivery
  * through graph_t + fwd_router_t over TCP (ADR-0040 explicit source routing), and
- * a config-created `kind=tcp` connection via a /net:children[] SPEC. Built under
+ * a config-created `kind=tcp` connection via a SPEC written to a module's creator
+ * endpoint `/net/<module>/conn` (RFC-0014 §2 — S7 retired the `:children[]` door). Built under
  * TSan (the recv thread + receiver handoff) and ASan+UBSan. Listeners bind
  * ephemeral ports (local_port()) except the fixed-port config test.
  */
@@ -585,13 +586,12 @@ view_t owned(std::span<const std::byte> bytes) {
 }
 
 /** @brief `kind = "tcp"` bound into the library's own SPEC builder (#902). */
-view_t tcp_conn_spec(std::string_view type, std::string_view name, tr::net::conn_role_t role,
-                     std::uint16_t port, std::string_view addr = {}) {
-    return tr::net::conn_spec(type, name, role, port, "tcp", addr);
+view_t tcp_conn_spec(std::string_view name, std::uint16_t port, std::string_view addr = {}) {
+    return tr::net::conn_spec(name, port, "tcp", addr);
 }
 
 void test_config_constructed_tcp() {
-    std::printf("Config-constructed sockets: two nodes over TCP from :children[] SPECs:\n");
+    std::printf("Config-constructed sockets: two nodes over TCP from creator-endpoint SPECs:\n");
     // No provide_link anywhere — both nodes' transports are CONSTRUCTED from the SPEC
     // config (`kind=tcp`) and OWNED by their connection vertices. Declaration order
     // matters: each transport_vertex_t (owning the sockets, hence the recv threads)
@@ -651,18 +651,16 @@ void test_config_constructed_tcp() {
     const std::byte tb{0x2A};
     tr::wire::emit_tlv(tv, type_t::VALUE, opt_t{}, std::span<const std::byte>(&tb, 1));
     (void)node_b.write(path_t("/temp"), owned(tv));
-    const auto wb =
-        node_b.write(path_t("/net:children[]"),
-                     tcp_conn_spec("listener", "a", tr::net::conn_role_t::LISTEN, port));
-    check(wb.has_value(), "B: SPEC{listener, kind=tcp, port} constructs the bound socket");
+    const auto wb = node_b.write(path_t("/net/tcp-server/conn"), tcp_conn_spec("a", port));
+    check(wb.has_value(), "B: SPEC{kind=tcp, port} on the LISTEN module constructs the socket");
     check(router_b.registry().by_name("net/tcp-server/a") != nullptr,
           "B: the socket is wired into the router");
 
     // A: a tcp CLIENT dialing B's port — a SYNCHRONOUS connect from config.
     const auto wa =
-        node_a.write(path_t("/net:children[]"),
-                     tcp_conn_spec("client", "b", tr::net::conn_role_t::DIAL, port, "127.0.0.1"));
-    check(wa.has_value(), "A: SPEC{client, kind=tcp, addr, port} constructs the dialing socket");
+        node_a.write(path_t("/net/tcp-client/conn"), tcp_conn_spec("b", port, "127.0.0.1"));
+    check(wa.has_value(),
+          "A: SPEC{kind=tcp, addr, port} on the DIAL module constructs the dialing socket");
     const auto* s = net_a.settings_of("net/tcp-client/b");
     check(s != nullptr && s->kind == "tcp" && s->addr == "127.0.0.1" && s->port == port,
           "A: the parsed :settings carry kind/addr/port");

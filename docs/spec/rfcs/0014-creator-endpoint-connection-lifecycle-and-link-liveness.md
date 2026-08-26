@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0014 |
 | **Title** | Creator endpoint: connection lifecycle and link liveness |
-| **Status** | **accepted** (2026-07-24 — maintainer ruling; comment window waived on this solo-maintained spec, per the RFC-0009 precedent). **Amendment 1 (2026-08-21, §4.1)** replaces §4's literal "refcount → 0 → close socket" steady-state reading with MAY-shape wording: an op-woken socket with no standing binding **MAY** remain up until loss (the reference implementation does) or be closed eagerly, and only three MUSTs bind — no background retry at refcount 0, re-dormant with no retry on loss or a failed wake-dial at refcount 0, and close-plus-re-dormant on the last **standing** release. Ruled on the divergence flagged in [PR #1455](https://github.com/avatarsd-llc/libtracer/pull/1455). **Amendment 2 (2026-08-24, §5.1)** generalizes §5: the demanded right is a **payload-type → required-ACL-right table the vertex declares**, keyed on the written TLV's type only, consulted by the one write gate, which does not move — absent declaration is plain `WRITE`. The creator endpoint declares §5's own mapping and §5 is discharged. **Amendment 3 (2026-08-24, §2.1)** pins the `conn:schema` catalog envelope as the ordinary `POINT{NAME, SETTINGS{…}}` record, with an **empty `SETTINGS`** — never `SCHEMA_NOT_FOUND` — for a module that declares no catalog. |
+| **Status** | **accepted** (2026-07-24 — maintainer ruling; comment window waived on this solo-maintained spec, per the RFC-0009 precedent). **Amendment 1 (2026-08-21, §4.1)** replaces §4's literal "refcount → 0 → close socket" steady-state reading with MAY-shape wording: an op-woken socket with no standing binding **MAY** remain up until loss (the reference implementation does) or be closed eagerly, and only three MUSTs bind — no background retry at refcount 0, re-dormant with no retry on loss or a failed wake-dial at refcount 0, and close-plus-re-dormant on the last **standing** release. Ruled on the divergence flagged in [PR #1455](https://github.com/avatarsd-llc/libtracer/pull/1455). **Amendment 2 (2026-08-24, §5.1)** generalizes §5: the demanded right is a **payload-type → required-ACL-right table the vertex declares**, keyed on the written TLV's type only, consulted by the one write gate, which does not move — absent declaration is plain `WRITE`. The creator endpoint declares §5's own mapping and §5 is discharged. **Amendment 3 (2026-08-24, §2.1)** pins the `conn:schema` catalog envelope as the ordinary `POINT{NAME, SETTINGS{…}}` record, with an **empty `SETTINGS`** — never `SCHEMA_NOT_FOUND` — for a module that declares no catalog. **Amendment 4 (2026-08-26, §Compatibility)** EXECUTES the supersession: the `:children[]` `client`/`listener` creation registrations are removed, so the creator endpoint is the only wire creation path and the `role` config key is retired with the catalog type it overrode; and, the conformance vectors having landed, every `proposed pending` byte clause is promoted to **normative**. BREAKING for an orchestrator still using the old spelling. |
 | **Author(s)** | AvatarSD (maintainer) |
 | **Created** | 2026-07-24 |
 | **Comment window closes** | waived |
@@ -40,7 +40,8 @@ Two independent lifecycles are specified:
 
 This unblocks the transport-link half of
 [#407](https://github.com/avatarsd-llc/libtracer/issues/407) and retires the superseded
-`:children[]` creation spelling still live in `transport_vertex.cpp`.
+`:children[]` creation spelling that was live in `transport_vertex.cpp` when this RFC was written
+(retirement executed at S7 — Amendment 4).
 
 ## Motivation
 
@@ -57,22 +58,27 @@ This unblocks the transport-link half of
   **browser-relaying** between boards (`relay.service.ts`) rather than owner-mediated links. RFC-0014
   supplies the *link* half of un-stubbing that (see §Scope boundary for the *wire* half it does
   **not** supply). Un-stubbing tracks **#82** (the code's cited issue) and **#407**.
-- **The current creation path is the superseded spelling.** `transport_vertex_t` registers ONE
-  global `client`/`listener` catalog through `register_child_type` as a `:children[]` target on
-  `/net` (`graph.cpp:1645`), and the `quic` module extends the *same* catalog via
+- **The creation path at drafting time was the superseded spelling.** `transport_vertex_t`
+  registered ONE global `client`/`listener` catalog through `register_child_type` as a
+  `:children[]` target on `/net`, and the `quic` module extended the *same* catalog via
   `register_transport_type` with a `kind` selector (open/closed). RFC-0014 keeps that module
   ownership but **replaces the single-global-catalog mechanism** with a per-*(transport, role)*
   module endpoint (§1); the per-module structure, the positional role, and `conn:schema`-as-catalog
-  are all **new code**, not a preservation of the current seam.
+  are all **new code**, not a preservation of the old seam. *(Historical as of Amendment 4: the
+  global catalog registration no longer exists.)*
 
 ## Proposed change
 
-> **Implementation status.** Except where noted, this describes **new mechanism**. Today connections
-> register flat at `/net/<name>` (not `/net/<module>/<name>`), the catalog is a single global
-> `:children[]` target, `:schema` is whole-vertex-only (`graph.cpp:1978`, `size()==1`), `set_link_state`
-> is a manual binary up/down bool, and no refcount / dormancy / self-heal exists. Per the clause-kind
-> rule (see Discussion) the byte-level clauses here are **proposed pending** code + conformance
-> vectors.
+> **Implementation status (superseded by Amendment 4 — kept as the drafting-time record).** Except
+> where noted, this described **new mechanism**: at drafting, connections registered flat at
+> `/net/<name>` (not `/net/<module>/<name>`), the catalog was a single global `:children[]` target,
+> `:schema` was whole-vertex-only, `set_link_state` was a manual binary up/down bool, and no
+> refcount / dormancy / self-heal existed. Per the clause-kind rule (see Discussion) the byte-level
+> clauses here were **proposed pending** code + conformance vectors.
+>
+> **As of Amendment 4 (S7) all of it is SHIPPED and every byte clause is normative.** The
+> `:children[]` creation target is gone, the per-module endpoint is the only creation door, and the
+> clause-by-clause instrument table is in Amendment 4.
 
 ### 1. A per-module creator endpoint, designated by the transport module
 
@@ -472,16 +478,84 @@ fails-fast `link-down` and is reaped.
   unknown" case (§2). (The ADR-0021 `SCHEMA_NOT_FOUND`/ENOTTY pattern is for an unsupported `:field`,
   not a missing `/` vertex.)
 - **Supersedes the `:children[]` creation spelling** (as ADR-0059 already ruled); **reuses
-  `retire()` unchanged** (RFC-0009).
+  `retire()` unchanged** (RFC-0009). *(Executed at S7 — see Amendment 4 below. The supersession is
+  no longer a statement of intent: the `client`/`listener` catalog types are gone.)*
 - **New conformance vectors** (required before the byte clauses are normative): `create-via-SPEC`,
   `remove-via-NAME`, `remove-nonexistent-noop`, `remove-reserved-rejected`, `spec-name-in-use`,
   `bad-payload-type`, `catalog-read`, `absent-endpoint-PATH_NOT_FOUND`, `gate-CREATE`, `gate-WRITE`,
   and the liveness transitions (`dormant→dialing→up`, `up→reconnecting→up`, `refcount-0→dormant`,
   `listen→listening`). *(Amendment 1, §4.1: `refcount-0→dormant` pins the three MUSTs only — it
   must not assert **when** an op-woken socket with no standing binding closes, which is a MAY.)*
-- **Migration.** Additive; deployed devices keep working. That consumer's web UI's deferred stub
-  (`#82`) gains its *link* half; the browser-relay wires need the origination dependency above before
-  they become owner-mediated.
+  *(All landed — see Amendment 4 for the final disposition of each, including the three that carry
+  no wire-observable bytes and are therefore bound by a host test alone.)*
+- **Migration.** ~~Additive; deployed devices keep working.~~ **BREAKING as of S7** (Amendment 4): a
+  deployed orchestrator that creates connections through `write /net:children[] += SPEC{type, name,
+  config}` stops working and must move to the creator endpoint. That consumer's web UI's deferred
+  stub (`#82`) gains its *link* half; the browser-relay wires need the origination dependency above
+  before they become owner-mediated.
+
+### Amendment 4 (2026-08-26, ruled) — the supersession is EXECUTED, and the byte clauses are normative
+
+**Instrument: amendment**, window waived by default under
+[GOVERNANCE.md](../../../.github/GOVERNANCE.md)'s solo-maintainer clause and not invoked. Two things
+move the normative surface at once, and both are the RFC's own machinery arriving rather than a new
+design:
+
+1. **A wire door is REMOVED.** Not deprecated, not discouraged — removed. This RFC and
+   [ADR-0059](../../adr/0059-creator-endpoint-creation-and-removal-are-writes-to-a-vertex.md) both
+   ruled the `:children[]` creation spelling superseded, but a superseded door that still answers is
+   still a door, and two doors onto one creation semantics is exactly the drift the split body was
+   built to prevent. S7 executes the ruling: the reference implementation no longer registers the
+   `client` and `listener` child types, so
+   `write /net:children[] += SPEC{ type = "client"|"listener", name, config }` now answers
+   `SCHEMA_NOT_FOUND` — the ordinary unregistered-catalog-type answer, not a new identity. The
+   creator endpoint of §2 is the **only** wire path that creates a connection vertex.
+2. **The `role` config key is retired with it.** `role` existed to override the catalog type's
+   default direction, and the catalog type is what died. §1/§3 already made the role **positional**;
+   the endpoint always overwrote a written `role` with its module's declared one, so the key was
+   inert before it was removed. It is now an ordinary unknown pair: **ignored**, per the config
+   walk's forward-compatibility rule, never obeyed and never an error.
+
+**What is NOT retired — stated because conflating the two is the likely misreading.** `:children[]`
+remains, in both of its other capacities. As an **enumeration** it is untouched: `/net:children[]`
+lists this plane's modules, `/net/<module>:children[]` lists that module's member connections (with
+`conn` hidden per §3), and a bus connection's `:children[]` still serves its live peers. As a
+**generic creation** surface ([RFC-0013](0013-creatable-child-type-catalog.md)) it is untouched too:
+`stored_value` and any type an application registers still create through it. What died is two
+registrations, not a mechanism.
+
+**The byte clauses are now normative.** §Discussion's clause-kind rule made every byte / error-identity
+/ gate-order clause in this RFC *proposed pending* code plus a conformance vector. That condition is
+discharged, and the promotion is what makes this an amendment rather than a code change: clauses that
+did not bind now bind. Their instruments, in full:
+
+| clause | instrument |
+| --- | --- |
+| the `SPEC`/`NAME`/`config` layout (§2) | `conn/create-via-spec`, `conn/remove-via-name` |
+| the §2 error identities | `conn/remove-nonexistent-noop`, `conn/remove-reserved-rejected` (`0x0050`), `conn/spec-name-in-use` (`0x0022`), `conn/bad-payload-type` (`0x0030`) |
+| the §Compatibility absent-endpoint identity | `conn/absent-endpoint-not-found` (`0x0020`) |
+| the liveness-enum encoding (§4) | `conn/liveness-enum`, plus the transitions in `link_liveness_test.cpp` |
+| the §4.1 three MUSTs | `conn/refcount-0-dormant` — **host-test-only, no vector directory**, because none of the three has a wire surface of its own. The §4.1 MAY is deliberately **not** pinned. |
+| the `conn:schema` catalog reply bytes (§2.1) | Amendment 3 plus `graph_t::read_schema` and its host test |
+| the `CREATE`/`WRITE` gate order (§5) | Amendment 2 plus `core/tests/payload_right_table_test.cpp` |
+
+Three of those clauses have **no wire-observable bytes** and so carry **no codec vector** — the gate
+order, the three MUSTs, and the `conn:schema` shape (an existing banked record). Per
+`tests/conformance/HARNESS.md` the conformance instrument for such a clause is the bound host test
+alone, and that is not a weaker pin: a vector for a clause whose subject is the *absence* of a dial
+would claim carriage of bytes the clause is not about.
+
+**One vector is retired with the door.** `spec/conn-client-ws` was the `:children[]` spelling of the
+same connection and carried the `type` and `role` pairs. It is deleted. The one claim it held that
+outlives the door — that a config's values are typed **per key** and the two forms are not
+interchangeable (`addr` a textual `NAME`, `port` an opaque `VALUE`) — moved to `conn/create-via-spec`,
+whose `config` carries the same mix.
+
+**Reference-implementation surface.** `tr::net::conn_spec_t`'s two-argument (`type`, `name`)
+constructor, its `role()` setter, and the `conn_spec(type, name, role, port, …)` free function are
+removed; the TypeScript binding's `encodeConnSpec` loses `type` and `role` for the same reason. That
+is API, not wire, and is recorded in the respective `CHANGELOG.md` files — but it is named here
+because a spec that removes a door owes the reader the fact that the encoder for it went too.
 
 ## Alternatives considered
 
@@ -512,12 +586,13 @@ fails-fast `link-down` and is reaped.
   refcount governs DIAL only; liveness target rule) stand on acceptance. The byte clauses (the
   `SPEC`/`NAME`/`config` layout, the `conn:schema` reply bytes, the liveness-enum encoding, the
   `CREATE`/`WRITE` gate order, the error identities in §2/§Compatibility) were **proposed pending**.
-  Two of them are now **pinned**: the `conn:schema` reply bytes by Amendment 3 (§2.1) plus
+  Two of them were pinned first: the `conn:schema` reply bytes by Amendment 3 (§2.1) plus
   `graph_t::read_schema` and its host test, and the `CREATE`/`WRITE` gate order by Amendment 2 (§5.1)
   plus `core/tests/payload_right_table_test.cpp`. Neither pin has a codec vector, and neither needs
   one: the schema reply is an existing banked shape and the gate order has no wire-observable bytes
   of its own — for such a clause the conformance instrument is the bound host test
-  (`tests/conformance/HARNESS.md`). The remaining byte clauses stay proposed pending.
+  (`tests/conformance/HARNESS.md`). **The rest were discharged at S7: no byte clause in this RFC is
+  `proposed pending` any more — see Amendment 4's instrument table.**
 - **Amends ADR-0059** on three points (per-transport rather than one global endpoint; `SPEC`/`NAME`
   collapsed onto one control; the gating **resolved** as `CREATE`-for-SPEC / `WRITE`-for-NAME) and
   **extends** it with the link-liveness layer. ADR-0059's load-bearing decisions are unchanged.

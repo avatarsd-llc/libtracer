@@ -8,11 +8,11 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 ```{admonition} In one paragraph
 :class: tip
 Creating a connection is an ordinary write — `write /net/<module>/conn = SPEC{name,
-config}` at the RFC-0014 creator endpoint, or the superseded `write /net:children[] +=
-SPEC{type, name, config}` — and everything the new link needs is in that `config`
-SETTINGS TLV.
+config}` at the RFC-0014 creator endpoint, the ONE door since S7 retired the
+`/net:children[]` creation spelling — and everything the new link needs is in that
+`config` SETTINGS TLV.
 Its keys come in two families. The **universal** ones (`kind`, `addr`, `port`,
-`role`, …) are parsed centrally into `tr::net::conn_settings_t`, which every
+`max_frame`, …) are parsed centrally into `tr::net::conn_settings_t`, which every
 transport kind shares. The **kind-private** ones are parsed by the selected kind's
 own factory, module-side, and never land on that shared record — so `quic` reads
 `cert`/`key`/`ca`/`insecure`, `ws` and `tcp` read `peer_named`/`max_peers`, `can`
@@ -29,7 +29,7 @@ existed, a key was discoverable only from the factory's own Doxygen block or fro
 `core/CHANGELOG.md` — including the two `quic` keys that decide whether a dialer
 authenticates its peer at all.
 
-It is not the creation *protocol*: the SPEC shape, the ACL gate on the append, the
+It is not the creation *protocol*: the SPEC shape, the ACL gate on the write, the
 `/net/<module>/<name>` mount and the liveness value all belong to
 [fwd-router § the /net connection model](fwd-router.md). It is not the *walk*
 either — the positional pair grammar and its forward-compat rules are
@@ -38,7 +38,7 @@ keys exist, which factory reads each one, what wire value each takes, and what i
 does.
 
 Its subject is deliberately bounded to what the *transport-side* readers read. The
-creation SPEC's own envelope (`type`, `name`, `config`) and the SUBSCRIBER QoS
+creation SPEC's own envelope (`name`, `config`) and the SUBSCRIBER QoS
 SETTINGS read the same positional grammar — since
 [#985](https://github.com/avatarsd-llc/libtracer/issues/985) through the same
 `tr::wire::config_reader_t` type — but they are not connection config, and the ACL
@@ -79,27 +79,23 @@ wrap the pairs in the `config` SETTINGS and the whole thing in the `SPEC`.
 using tr::net::conn_role_t;
 using tr::net::conn_spec_t;
 
+// A module must exist before anything can be created in it: it mints the endpoint and
+// fixes the (kind, role) pair positionally.
+(void)net.register_module("ws-client", "ws", conn_role_t::DIAL);
+(void)net.register_module("ws-server", "ws", conn_role_t::LISTEN);
+
 // The one-call form — the 90% case.
-graph.write(*path_t::parse("/net:children[]"),
-            tr::net::conn_spec("client", "up", conn_role_t::DIAL, 8080, "ws", "127.0.0.1"));
+graph.write(*path_t::parse("/net/ws-client/conn"),
+            tr::net::conn_spec("up", 8080, "ws", "127.0.0.1"));
 
 // The builder, for the rest: universal keys by name, kind-private keys as pairs.
-graph.write(*path_t::parse("/net:children[]"), conn_spec_t("listener", "srv")
-                                                   .role(conn_role_t::LISTEN)
-                                                   .port(8080)
-                                                   .kind("ws")
-                                                   .max_frame(4096)
-                                                   .flag("peer_named", true)   // ws-private
-                                                   .u32("max_peers", 8)        // ws-private
-                                                   .view());
-
-// The RFC-0014 creator-endpoint spelling (S2b): the module in the PATH fixes both the
-// transport and the role, so the SPEC carries neither a `type` nor a `role` — the same
-// config keys, one door down.
+// The module in the PATH fixes both the transport and the role, so the SPEC carries
+// neither a `type` nor a `role`.
 graph.write(*path_t::parse("/net/ws-server/conn"), conn_spec_t("srv")
                                                        .port(8080)
                                                        .max_frame(4096)
-                                                       .flag("peer_named", true)
+                                                       .flag("peer_named", true)   // ws-private
+                                                       .u32("max_peers", 8)        // ws-private
                                                        .view());
 
 // Removal is the other half of that one control: a bare NAME, told apart by TLV type.
@@ -118,8 +114,9 @@ Two properties are worth knowing before you build one:
 - **A builder on which no setter ran emits no `config` at all** — that is the
   `provide_link`-staged spelling, where the module comes from the staging rather
   than from a `kind`.
-- **There is no `module` key, and the builder invents none.** A SPEC names its
-  module through `kind` together with `role`; see the `kind` row below.
+- **There is no `module` key, and the builder invents none.** The endpoint a SPEC is
+  written to *is* the module; a `kind` pair, when present, must be one that module
+  declares. See the `kind` row below.
 
 The builder does **not** validate a key against a kind — it cannot, for the reason
 above — so the misspelling hazard in the paragraph before this section is unchanged.
@@ -135,10 +132,9 @@ factory receives the parsed record alongside the raw config TLV.
 
 | key | value | applies to | default | meaning |
 | --- | --- | --- | --- | --- |
-| `kind` | `NAME` utf-8 | both | empty | Selects the transport factory (`udp`, `tcp`, `ws`, or any kind registered through `register_transport_type`) **and, via its `register_module` declaration for this `role`, the module the connection mounts under** — resolved *before* any staged link is consulted (#883), so a `provide_link` staging that merely shares the leaf NAME cannot capture the creation. Empty is the `provide_link` spelling: the module then comes from the staging, and a leaf NAME matching **two or more** stagings is refused `TYPE_MISMATCH` (nothing in the SPEC says which was meant). An **absent** `kind` matching **no** staging at all is refused `TYPE_MISMATCH` too (#1062): the config is missing a required field — the `addr`/`port` precedent — and never answers `NOT_FOUND`, whose wire form `tr::path::not_found` RFC-0014 reserves for an *absent creator endpoint* (the creatability probe). A staging under the *resolved* module still wins over construction; one under a different module is a different connection and is left untouched. A kind with **no module declared for this role** fails creation with `SCHEMA_NOT_FOUND` (ADR-0073 §4) — module resolution runs first, so that check precedes both the staging lookup and the factory lookup, and it fires even when a link is staged under the matching leaf NAME. An **unregistered** kind (no `register_transport_type`) fails the same way only when construction is actually reached: a staging under the resolved module short-circuits ahead of the factory lookup, so a `kind` declared purely to disambiguate two stagings needs a `register_module` and no factory at all. |
+| `kind` | `NAME` utf-8 | both | empty | Selects the transport factory (`udp`, `tcp`, `ws`, or any kind registered through `register_transport_type`) — and, because the endpoint's module already fixes a *(kind, role)* declaration, it is a **cross-check on that module**, not a module selector: the module is the PATH the SPEC was written to. A kind the endpoint's module does not declare is refused `SCHEMA_NOT_FOUND` rather than mounted elsewhere (ADR-0073 §4); the check runs *before* any staged link is consulted (#883), so a `provide_link` staging that merely shares the leaf NAME cannot capture the creation. Empty is legal and is the usual spelling when the module declares exactly one kind — the declared kind is then recorded on the settings so `settings_of` still reports what the connection is. A module declared for **two or more** kinds and a kind-less SPEC is refused `TYPE_MISMATCH` (nothing in the SPEC says which was meant). A staging under the resolved module still wins over construction; one under a different module is a different connection and is left untouched. An **unregistered** kind (no `register_transport_type`) fails only when construction is actually reached: a staging under the resolved module short-circuits ahead of the factory lookup, so a `kind` declared purely to disambiguate needs a `register_module` and no factory at all. |
 | `addr` | `NAME` utf-8 | DIAL | empty | Peer address, IPv4 dotted-quad. A DIAL with it empty answers `TYPE_MISMATCH` in all five socket factories — the three built-ins (`udp`, `tcp`, `ws`) share one precondition helper, and `quic`/`webtransport` repeat the check. `can` never reads it. |
 | `port` | `VALUE` u16 | both | absent | Peer port on a DIAL, bind port on a LISTEN. On a **DIAL**, `0` answers `TYPE_MISMATCH` in the same five socket factories — there is no such thing as dialling the ephemeral port. On a **LISTEN** the *key* is what is required, not a nonzero value: an **absent** key answers `TYPE_MISMATCH` (the config is missing a required field), while an explicit `port = 0` is the **EPHEMERAL request** — the OS picks a free bind port and the grant is read back off the constructed link with `local_port()` (#1362). Before that the LISTEN arm rejected `0` as if it were an omitted key, which conflated "you forgot the port" with "you do not care which port" and left an in-band-created listener no way to ask for one. `can` never reads it. |
-| `role` | `VALUE` u8 | both | the child type's default | `0` = DIAL, non-zero = LISTEN. Overrides the default the catalog type carries (`client` = DIAL, `listener` = LISTEN), and selects which declared module the connection mounts under. |
 | `keepalive` | `VALUE` u32 | both | `0` | Keepalive interval in ms. **Nothing reads it**: `conn_settings_t::keepalive_ms` has no consumer outside the parse that fills it. UDP is connectionless, TCP has its own, WS handles PING/PONG at the protocol layer. |
 | `max_frame` | `VALUE` u32 | both | `0` | Per-connection inbound frame cap in bytes, honoured by five of the six kinds — `tcp`, `quic` and `webtransport` read it off their u32 length prefix, `ws` off the RFC 6455 header, `udp` off the received datagram's length (one datagram = one frame). `0` = the 16 MiB protocol default on the framed kinds, and `udp_transport_t::kMaxDatagram` (64 KiB) on `udp`. It **only ever tightens**, on every kind that reads it. On the four framed kinds each transport resolves the configured value through `length_prefix_framer::configured_cap` — `0` → the 16 MiB default, otherwise `min(value, 16 MiB)` — so a config-writable key can narrow what the node buffers off the wire but never widen it (#1035); the effective cap is then further bounded by the injected backend's `max_segment_size()`. On `udp` it can only tighten for a different reason — a datagram cannot exceed 64 KiB, so a larger configured value is inert. A declared length **over** the cap is refuse-and-close on the framed kinds (`malformed_rx()`, then the link is torn down: a desynced stream cannot be re-framed) and refuse-and-continue on `udp` (`malformed_rx()`, socket unaffected — datagrams need no resync). A length **at** the cap is legal and delivered whole. On `quic` and `webtransport` the configured value bounds **egress** as well as ingress (#1409): a local send over the cap is shed with `dropped_tx()` and the link stays up, rather than being put on the wire for a conformant peer to count `malformed_rx` on and tear the connection down. `can` (its own fragmentation) does not read it. |
 | `backoff` | `VALUE` u32 | DIAL | `0` | Self-heal retry interval in ms (RFC-0014 §4), consumed by the S5 liveness engine (`self_heal_link_t`) on a kind registered `self_heal_dial`. `0` = the engine's default (`kDefaultBackoffMs`, 1000 ms). The built-in point-to-point kinds `udp`, `tcp` and `ws` are opted in ([#1548](https://github.com/avatarsd-llc/libtracer/issues/1548)), so on a stock build this key has a consumer on every built-in DIAL. On a kind not opted in — a bus kind such as `can`, or any kind on a `kSelfHealLinks = false` build — it is parsed but has no consumer. |
@@ -184,8 +180,9 @@ a peer.
 
 <!-- config-keys:begin core/src/builtin_transport_udp.cpp -->
 
-The `udp` factory constructs no config reader at all: `addr`/`port`/`role`/`max_frame`
-from the universal set are the whole of its configuration. A DIAL binds an ephemeral
+The `udp` factory constructs no config reader at all: `addr`/`port`/`max_frame` from
+the universal set, plus the role its module fixes, are the whole of its
+configuration. A DIAL binds an ephemeral
 local port and targets `addr:port`; a LISTEN binds `port` (or an OS-granted one when the
 key is spelled `0`) and learns its peer from the first inbound datagram's source.
 
@@ -198,9 +195,10 @@ true](#how-this-page-is-kept-true).
 
 Of the six transport factories in this tree, `can` is the only one that ignores
 `conn_settings_t` outright — its lambda takes the record as an unnamed parameter — so
-`addr`, `port`, `keepalive` and `max_frame` do nothing on a `can` connection. (`kind` and `role` still matter — they are consumed
-by the connection vertex itself, to select this factory and to resolve the module
-the vertex mounts under.)
+`addr`, `port`, `keepalive` and `max_frame` do nothing on a `can` connection. (`kind`
+still matters — it is consumed by the connection vertex itself, to select this factory
+and to cross-check the module the SPEC was written to. A bus has no dial/listen
+asymmetry, so `can` is ONE module for both roles.)
 
 <!-- config-keys:begin core/src/transport_can.cpp -->
 
@@ -350,9 +348,10 @@ out of the raw config TLV it already receives, and in a block on this page. Not 
   a listener demoted only at the router would keep delivering peer-named into a sink
   nothing installed.
 - **The builder types the universal keys, not the kind-private ones.**
-  `conn_spec_t`'s named setters ([#902]) make `kind`, `addr`, `port`, `role` and the
-  four u32s unmisspellable, and they replaced the sixteen hand-written emitters that
-  used to exist. A kind's PRIVATE keys still go through the generic
+  `conn_spec_t`'s named setters ([#902]) make `kind`, `addr`, `port` and the four u32s
+  unmisspellable, and they replaced the sixteen hand-written emitters that used to
+  exist. (The `role` setter is gone with the key: S7 made the role positional — it is
+  the module in the endpoint's path.) A kind's PRIVATE keys still go through the generic
   `text`/`u8`/`u16`/`u32`/`flag` pairs — the builder cannot know them without the
   coupling ADR-0043 §5 forbids — so for those, a key's spelling is still only as good
   as the string literal next to it.

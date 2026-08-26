@@ -203,10 +203,8 @@ view_t owned(std::span<const std::byte> bytes) {
     return view_t::over(std::move(seg));
 }
 
-/** @brief SPEC{ type, name } with no config — the provide_link-staged connection form. */
-view_t conn_spec(std::string_view type, std::string_view name) {
-    return tr::net::conn_spec_t(type, name).view();
-}
+/** @brief SPEC{ name } with no config — the provide_link-staged connection form. */
+view_t conn_spec(std::string_view name) { return tr::net::conn_spec_t(name).view(); }
 
 /** @brief The peer names inside a members POINT (POINT{ POINT{NAME}... }) view/TLV. */
 std::set<std::string> member_names(const tlv_t& point) {
@@ -276,8 +274,12 @@ void test_enumeration_and_forwarding() {
 
     tr::net::transport_can tcan_t(std::make_unique<fake_link_t>(bus),
                                   {0, 1, tr::view::can_frame_mode_t::CLASSIC, "transit"});
+    // A bus has no dial/listen asymmetry, so `can` is ONE module for both roles (RFC-0014 §1).
+    // Declaring it mints the creator endpoint /net/can/conn this SPEC is written to.
+    check(net_t.register_module("can", "can", tr::net::conn_role_t::DIAL).has_value(),
+          "the CAN module is declared");
     net_t.provide_link("can", "can0", tcan_t);
-    const auto made = graph_t_.write(path_t("/net:children[]"), conn_spec("client", "can0"));
+    const auto made = graph_t_.write(path_t("/net/can/conn"), conn_spec("can0"));
     check(made.has_value(), "the CAN connection vertex /net/can/can0 is SPEC-created");
 
     // ----- peer P (CAN node 5): terminus with /a/b holding a known VALUE. ----

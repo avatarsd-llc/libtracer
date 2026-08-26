@@ -262,8 +262,9 @@ cmake --build bench/build --target bench_ram_census_tcp -j
 balance at five points: an empty `graph_t`, +100 vertices registered, +their values written
 once, +the `fwd_router_t` / `transport_vertex_t` / SPEC-created TCP listener, +a peer
 **process** connected over loopback, and +steady state after N mixed FWD read/write ops from
-that peer. The listener is created the way the wire creates one — `write /net:children[] +=
-SPEC{listener, kind=tcp, port}` — so no byte is counted on a hand-wired path.
+that peer. The listener is created the way the wire creates one — `write /net/tcp-server/conn
+<- SPEC{name, config{kind=tcp, port}}`, the RFC-0014 creator endpoint — so no byte is counted
+on a hand-wired path.
 
 Three arms differing in exactly one variable (every value 4 B, the 4..64 B mix, every value
 64 B) give the value-size sensitivity. A NULL arm is printed with the rest and must read 0;

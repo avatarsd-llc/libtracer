@@ -105,8 +105,8 @@ pub fn named_field(tlv: &Tlv, key: &str) -> Result<Option<Tlv>, BuildError> {
  * @brief The value a SETTINGS key carries — and, inseparably, the TLV **type** that
  * spells it. The two forms are not interchangeable: a reader looks a key up BY type,
  * so a string written as [`SettingValue::Value`] is invisible where a string is
- * expected, and vice versa. Vector-pinned: `spec/conn-client-ws` carries both in one
- * record (`role`/`port` opaque, `kind`/`addr` textual).
+ * expected, and vice versa. Vector-pinned: `conn/create-via-spec` carries both in one
+ * record (`port` opaque, `addr` textual).
  */
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingValue<'a> {
@@ -129,7 +129,7 @@ fn settings_of(children: Vec<Tlv>) -> Tlv {
 
 /**
  * @brief Build a SETTINGS TLV (`type=0x0B`, `PL=1`) from `NAME` key → typed value pairs,
- * choosing the value TLV type per key. Vector-pinned: `spec/conn-client-ws`.
+ * choosing the value TLV type per key. Vector-pinned: `conn/create-via-spec`.
  *
  * # Errors
  * A per-key or per-value segment error from [`name`] / [`text_name`].
@@ -648,7 +648,16 @@ pub fn acl_aces(tlv: &Tlv) -> Result<Vec<Ace>, BuildError> {
  * @brief Build a SPEC TLV (`type=0x0E`, `PL=1`) for in-band vertex creation
  * (reference/05 §0x0E): NAME-tagged `type` (catalog selector) and `name` (the
  * new child's path component), plus an optional `config` SETTINGS child.
- * Vector-pinned: `spec/create-child`, `spec/conn-client-ws`.
+ * Vector-pinned: `spec/create-child`.
+ *
+ * @note This is the GENERIC `:children[]` creation SPEC, which still needs a catalog
+ *       `type`. It is NOT the connection-creation spelling: RFC-0014 S7 retired the
+ *       global `/net:children[]` door (and its `spec/conn-client-ws` vector), and the
+ *       surviving `write /net/<module>/conn` payload — `conn/create-via-spec` — carries
+ *       `{ name, config }` and NO `type`, because the module segment of the path already
+ *       fixes the transport and the role. Build that one from [`name`] + [`settings_typed`]
+ *       rather than from here, or this builder will emit a `type` pair the endpoint does
+ *       not want.
  *
  * Both field VALUES are `NAME` (`0x02`) nodes, not `VALUE` (`0x01`): the terminus
  * matches each `(NAME key, value)` pair on the value's TYPE and skips any other,

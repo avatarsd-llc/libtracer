@@ -10,8 +10,9 @@
  *        same terms as a built-in one, and a kind nobody registered is REFUSED rather than
  *        defaulted to something plausible.
  *
- * Nothing in the routing plane knows the word `tcp`. A connection is created from a SPEC
- * carrying `kind = <name>`, and that name is looked up twice:
+ * Nothing in the routing plane knows the word `tcp`. A connection is created by writing a
+ * SPEC to a module's creator endpoint `/net/<module>/conn`, and the `kind = <name>` that
+ * SPEC carries is looked up twice:
  *
  *  1. the FACTORY catalog — `register_transport_type(kind, factory)` — which decides what
  *     object gets constructed. `udp`, `tcp` and `ws` are pre-registered by the default
@@ -24,10 +25,18 @@
  *     not even for its built-ins (ADR-0073 §4): `kTcpClientSuggestedModule` is a suggestion
  *     a header offers, never a registration a constructor performs.
  *
+ * The module declaration is also why the SPEC carries no `type` and no `role`. The retired
+ * `/net:children[]` door needed both, because a flat write had nothing else to say what was
+ * being built or which way it faced; the endpoint door puts that in the PATH — a module is
+ * declared for exactly one `(kind, role)`, so writing to `/net/tcp-client/conn` already
+ * means "a tcp DIAL". Two data fields the creator could contradict became one addressed
+ * door it cannot (RFC-0014 S7).
+ *
  * Both halves are open and both are strict, which is the actual claim: this example
- * registers a kind that exists nowhere in the library, creates a connection of it from an
- * ordinary `:children[]` SPEC, and watches the routing plane wire it up — and then asks for
- * a kind nobody registered and gets `SCHEMA_NOT_FOUND` instead of a default.
+ * registers a kind that exists nowhere in the library, creates a connection of it with an
+ * ordinary SPEC written to that kind's module endpoint, and watches the routing plane wire
+ * it up — and then asks for a kind nobody registered and gets `SCHEMA_NOT_FOUND` instead of
+ * a default.
  *
  * `quic` and `webtransport` are the shipped instances of the out-of-tree case: they live in
  * a separate `libtracer_quic` target that needs msquic, and nothing in the core references
@@ -124,12 +133,12 @@ int main() {
     check(ok, net.register_module("demo-client", "demo", conn_role_t::DIAL).has_value(),
           "register_module accepts a kind that exists only in this file");
 
-    // 3. Create one, the ordinary way: a SPEC written to the connection catalog. Nothing in
-    // this write is kind-specific except the four letters of the name.
+    // 3. Create one, the ordinary way: a SPEC written to the module's creator endpoint.
+    // Nothing in this write is kind-specific except the four letters of the name — and no
+    // `type`/`role` pair, because `/net/demo-client/conn` already says both.
     const auto created =
-        g.write(path_t("/net:children[]"),
-                tr::net::conn_spec("client", "one", conn_role_t::DIAL, /*port=*/0, "demo"));
-    check(ok, created.has_value(), "SPEC{ type=client, name=one, kind=demo } created a connection");
+        g.write(path_t("/net/demo-client/conn"), tr::net::conn_spec("one", /*port=*/0, "demo"));
+    check(ok, created.has_value(), "SPEC{ name=one, kind=demo } created a connection");
     check(ok, router.registry().by_name("net/demo-client/one") != nullptr,
           "…and the routing plane wired it in under /net/<module>/<name>");
     check(ok, g.read(path_t("/net/demo-client/one")).has_value(),
@@ -138,10 +147,14 @@ int main() {
     // 4. And a kind nobody registered. The refusal is the point: an unresolvable kind must
     // not fall back to a default transport, because "some link came up" is indistinguishable
     // from the right one until traffic silently goes nowhere.
+    // Declaring a module for it is allowed and does not help: `register_module` records
+    // where a kind WOULD mount, it does not promise anybody can build one. The factory
+    // catalog is the half that constructs, and it is consulted at the write.
     std::printf("a kind nobody registered:\n");
+    check(ok, net.register_module("nosuch-client", "nosuch", conn_role_t::DIAL).has_value(),
+          "a module may be declared for a kind no factory answers for");
     const auto refused =
-        g.write(path_t("/net:children[]"),
-                tr::net::conn_spec("client", "two", conn_role_t::DIAL, /*port=*/0, "nosuch"));
+        g.write(path_t("/net/nosuch-client/conn"), tr::net::conn_spec("two", /*port=*/0, "nosuch"));
     check(ok, !refused.has_value(), "SPEC{ kind=nosuch } was refused");
     check(ok, !refused.has_value() && refused.error() == tr::graph::status_t::SCHEMA_NOT_FOUND,
           "…as SCHEMA_NOT_FOUND — the same verdict a missing module gives");

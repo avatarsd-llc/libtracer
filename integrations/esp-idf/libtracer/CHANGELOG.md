@@ -10,6 +10,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Removed
+
+- **BREAKING — connections are no longer created through `/net:children[]`**
+  ([#492](https://github.com/avatarsd-llc/libtracer/issues/492) S7,
+  [RFC-0014](../../../docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)
+  Amendment 4). The `client` and `listener` child types are gone from the core, so a device
+  recipe that wired its links with `write /net:children[] += SPEC{type, name, config}` — the
+  spelling this component's README and `full_node` example both carried — now gets
+  `SCHEMA_NOT_FOUND`. The recipe is: declare the module with
+  `transport_vertex_t::register_module(module, kind, role)`, then
+  `write /net/<module>/conn <- SPEC{name, config{…}}`. Removal is `NAME{name}` to the same
+  vertex. The `role` config key went with the catalog type it overrode — the role is the
+  module now. This is a **core** change; the component inherits it, and the ESP-side seams
+  (`provide_link` staging, `defer_recv`, `httpd_ws_link_t`, `twai_link_t`) are unaffected apart
+  from which write arms them. `examples/full_node` and the component README ship the migrated
+  recipe.
+
 ### Added
 
 - **`CONFIG_LIBTRACER_SELF_HEAL_LINKS` and `CONFIG_LIBTRACER_SELF_HEAL_WORKER_STACK` — the

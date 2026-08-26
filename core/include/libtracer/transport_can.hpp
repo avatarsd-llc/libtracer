@@ -765,8 +765,9 @@ class transport_can : public transport_t, public bus_link_t {
  * @brief The ready-to-register `can` transport factory — how the CAN module plugs
  *        into the ADR-0027 connection-vertex catalog.
  *
- * Register at setup: `net.register_transport_type("can", can_transport_factory())`.
- * A subsequent `write /net:children[] += SPEC{type, name, config{kind = "can", …}}`
+ * Register at setup: `net.register_transport_type("can", can_transport_factory())`
+ * plus `net.register_module("can", "can", conn_role_t::DIAL)`, which mints the module's
+ * creator endpoint. A subsequent `write /net/can/conn <- SPEC{name, config{kind = "can", …}}`
  * then constructs a @ref transport_can over a production @ref socketcan_link_t and
  * the connection vertex owns it. Per the ADR-0043 §5 leanness ruling, every
  * CAN-private key is parsed HERE from the raw config SETTINGS TLV — nothing lands
@@ -786,8 +787,8 @@ class transport_can : public transport_t, public bus_link_t {
  * A missing/invalid `ifname` or `node` fails with `TYPE_MISMATCH`; a socket that
  * cannot bind (no kernel CAN / non-Linux stub) fails with `TRANSPORT_DOWN` — the
  * TRANSIENT status, because the address resolved and it was the link that did not
- * come up (#929). The universal `role` is ignored — a bus has no dial/listen
- * asymmetry.
+ * come up (#929). The role the module declares is ignored — a bus has no dial/listen
+ * asymmetry, which is why one `can` module serves it.
  *
  * @note **Register it with the TRAITS-LESS overload — never `self_heal_dial`** (RFC-0014
  *       §4 S5, #1548). The built-in point-to-point kinds `udp`/`tcp`/`ws` were flipped onto

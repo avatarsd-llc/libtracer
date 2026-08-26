@@ -124,7 +124,7 @@ none — and remains a conforming node that any forwarder routes and any peer re
 | **Remote-writable actuators** | third parties drive your hardware through the apply seam | device is observe-only |
 | **`:subscribers[]` fan-out** | push delivery, subtree subscriptions, lazy sources | peers poll with `read` |
 | **`:acl` (ALLOW-only MCU subset)** | device-local authorization: who may read/write/subscribe/create | open device (fine on a trusted bus) |
-| **In-band creation** (`:children[]` `SPEC` write) | orchestrators instantiate your connections and controllers at run time, bounded by your own catalog | fixed function; wiring baked at build |
+| **In-band creation** (a `SPEC` write — to a creator endpoint for connections, to `:children[]` for your own registered types) | orchestrators instantiate your connections and controllers at run time, bounded by your own catalog | fixed function; wiring baked at build |
 | **Vertex retirement** | a dynamic child can be withdrawn: its address answers `PATH_NOT_FOUND`, its subscriber edges are evicted, and a later revive inherits nothing of the old owner | the tree only grows; a withdrawn child stays addressable and keeps delivering |
 | **Write-creates** | your own local writes materialize vertices `mkdir -p`-style under CREATE ACL (a *peer* creates through the creator endpoint — a remote write to an unresolved address is `PATH_NOT_FOUND`) | static tree only |
 | **Multiple transports + FWD** | the device becomes a forwarder — one address space across CAN + IP | leaf node on one link |
@@ -145,25 +145,32 @@ optional `config` SETTINGS carries the instantiation parameters; an unregistered
 (`graph_t::create_child`, `core/src/graph.cpp:3605-3632`). Reading `:children[]`
 returns the parent's **members**, never SPECs.
 
-On the `/net` plane the registered child types are `client` and `listener`
-(`core/src/transport_vertex.cpp:237-244`); the `config` member `kind` selects which
-transport factory builds the link (`core/src/transport_vertex.cpp:63`, factories
-registered through `register_transport_type` at `:270`). The created connection is
-mounted and routed at **`/net/<module>/<name>`**, where `module` is **declared by the
-application** through `register_module` — modules are declared-only (ADR-0073 §4); an
-undeclared kind fails creation with `SCHEMA_NOT_FOUND`
-(`core/src/transport_vertex.cpp:294-312,629-655`).
-
-A per-module creator endpoint — `/net/<module>/conn`, one self-contained module per
-*(transport, role)*, replacing the single global catalog — is the accepted
-direction and is **not implemented**; no such vertex is served
+**The `/net` plane is the exception, and it is now a different door.** A connection is
+*not* created through `:children[]`: it is created by writing
+`SPEC{ NAME "name" NAME <name>, NAME "config" SETTINGS{…} }` to the module's own
+**creator endpoint** `/net/<module>/conn` — one self-contained module per
+*(transport, role)*, so both the transport and the role are positional in the path and
+the SPEC carries no `type` and no `role`
 ([RFC-0014 — creator endpoint: connection lifecycle and link liveness](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)).
-A vendor builds against the `:children[]` surface above and expects the endpoint to
-arrive beside it, not instead of it.
+The `config` member `kind` selects which transport factory builds the link
+(`core/src/transport_vertex.cpp:55`, factories registered through
+`register_transport_type` at `:257`) and cross-checks the module's declaration. The
+created connection is mounted and routed at **`/net/<module>/<name>`**, where `module`
+is **declared by the application** through `register_module` — modules are declared-only
+(ADR-0073 §4); an undeclared `(kind, role)` pair fails creation with `SCHEMA_NOT_FOUND`
+(`core/src/transport_vertex.cpp:281-299`).
 
-Removal has no wire spelling on either surface: a `[N]` clear of `:children[]` is
+The global `:children[]` spelling — `SPEC{type = "client"|"listener", …}` written to
+`/net:children[]` — was **retired** at RFC-0014 S7: those two child types are no longer
+registered, so that write answers `SCHEMA_NOT_FOUND`. A vendor builds against the
+endpoint, not beside it. `:children[]` *creation* remains available for a device's own
+registered types, and `:children[]` as an enumeration is untouched on every plane.
+
+Removal has no wire spelling on the `:children[]` surface: a `[N]` clear of `:children[]` is
 not implemented, and `graph_t::retire` is an owner-side call with no wire operation
-behind it (`core/include/libtracer/graph.hpp:636-640`). Retirement empties the
+behind it (`core/include/libtracer/graph.hpp:636-640`). A connection is the exception:
+`NAME{<name>}` to its module's `conn` endpoint retires it, the other half of that one
+control. Retirement empties the
 vertex in place rather than freeing it — the handle stays dereferenceable and a
 holder that caches a resolution re-checks `retire_generation` before use — and it
 re-virginizes the address, clearing the previous owner's `:acl`, value seam, stored

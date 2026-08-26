@@ -35,7 +35,7 @@
  * frame. Point-to-point (one dialed peer), so it is NOT a bus link
  * (`bus() == nullptr`) and delivers borrowed spans (`delivers_ropes() == false`).
  * It drops into the node's construction site behind the request-plane admission
- * gate with the same `provide_link("ws-client", name, link)` + DIAL `:children[]`
+ * gate with the same `provide_link("ws-client", name, link)` + DIAL creator-endpoint
  * SPEC wiring `httpd_ws_link_t` uses for the listener.
  *
  * Threading (the review-critical part):

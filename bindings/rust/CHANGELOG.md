@@ -8,6 +8,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Documentation only — the connection-creation SPEC is no longer built with
+  `structured::spec`** ([#1492](https://github.com/avatarsd-llc/libtracer/issues/1492),
+  RFC-0014 Amendment 4 / S7). No public item changes signature or behaviour, and no byte
+  this crate emits moves.
+
+  RFC-0014 S7 retired the global `write /net:children[] += SPEC{ type, name, config{ role, … } }`
+  creation door together with its `spec/conn-client-ws` conformance vector. The surviving door
+  is a whole-vertex `write /net/<module>/conn <- SPEC{ name, config{…} }`: it carries **no
+  `type`** (the module segment of the path already selects the transport) and **no `role`**
+  (RFC-0014 §1/§3 make the role positional — a `role` pair there is an ignored unknown pair).
+
+  `structured::spec` remains the GENERIC `:children[]` creation builder and still emits a
+  catalog `type`; its docs now say so, and say to assemble the connection payload from
+  `libtracer::name` + `structured::settings_typed` instead. The `SettingValue` /
+  `settings_typed` docs re-cite `conn/create-via-spec` as the vector that pins a config with
+  values mixed by TYPE (`addr` textual `NAME`, `port` opaque `VALUE`), the claim
+  `spec/conn-client-ws` used to carry.
+
 ## [0.15.1] — 2026-08-23
 
 No changes. This package is an independent native implementation of the protocol — it does

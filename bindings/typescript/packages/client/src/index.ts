@@ -40,7 +40,7 @@ export {
   deliveryClassBits,
   deliveryClassOf,
 } from './tlv.js';
-export type { ValueOptions, SubscriberOptions, ConnSpecOptions, ConnRole } from './tlv.js';
+export type { ValueOptions, SubscriberOptions, ConnSpecOptions } from './tlv.js';
 
 export { walkTopology, routeKey, CONN_ENDPOINT_NAME } from './topology.js';
 export type {

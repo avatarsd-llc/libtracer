@@ -24,8 +24,8 @@
  * Every refusal is shown non-vacuous by ablation: the same frame, one field sound, lands.
  *
  * Production wiring throughout (the RFC-0014 lesson): every link is bound through the in-band
- * `/net:children[]` SPEC door, so each connection vertex — the thing a forwarder's element
- * names — is created by `transport_vertex.cpp` and never hand-spelled.
+ * creator endpoint `write /net/<module>/conn <- SPEC{…}`, so each connection vertex — the thing
+ * a forwarder's element names — is created by `transport_vertex.cpp` and never hand-spelled.
  */
 
 #include <chrono>
@@ -111,8 +111,14 @@ std::vector<std::byte> b_path_ref(std::span<const path_ref_element_t> elements) 
 }
 
 /** @brief A connection-creation SPEC with no transport `kind` (every link is provided). */
-view_t conn_spec(std::string_view type, std::string_view name) {
-    return tr::net::conn_spec_t(type, name).role(conn_role_t::DIAL).view();
+view_t conn_spec(std::string_view name) { return tr::net::conn_spec_t(name).view(); }
+
+/** @brief The creator endpoint of @p module — the one wire door that creates a connection. */
+path_t conn_endpoint(std::string_view module) {
+    std::string text = "/net/";
+    text += module;
+    text += "/conn";
+    return path_t(text);
 }
 
 /**
@@ -253,12 +259,23 @@ int main() {
     net_a.provide_link("uplink", "b", ch_ab.a());
     net_b.provide_link("downlink", "a", ch_ab.b());
 
-    const auto mk = [](graph_t& g, std::string_view name) {
-        return g.write(path_t("/net:children[]"), conn_spec("client", name));
+    // A module is declared per staged link, and each declaration takes a `kind` of its own:
+    // `register_module` keys a declaration on (kind, role), so two modules on one node that
+    // shared a kind would be one declaration and the second would silently rename the first.
+    // The kind names no factory — a staged link is preferred over one — so it is the module's
+    // own name, which is the only thing that distinguishes them here.
+    (void)net_cli.register_module("uplink", "uplink", conn_role_t::DIAL);
+    (void)net_a.register_module("downlink", "downlink", conn_role_t::DIAL);
+    (void)net_a.register_module("uplink", "uplink", conn_role_t::DIAL);
+    (void)net_b.register_module("downlink", "downlink", conn_role_t::DIAL);
+
+    const auto mk = [](graph_t& g, std::string_view module, std::string_view name) {
+        return g.write(conn_endpoint(module), conn_spec(name));
     };
-    check(mk(g_cli, "a").has_value() && mk(g_a, "cli").has_value() && mk(g_a, "b").has_value() &&
-              mk(g_b, "a").has_value(),
-          "all four connections created through /net:children[] SPEC (production wiring)");
+    check(mk(g_cli, "uplink", "a").has_value() && mk(g_a, "downlink", "cli").has_value() &&
+              mk(g_a, "uplink", "b").has_value() && mk(g_b, "downlink", "a").has_value(),
+          "all four connections created through the /net/<module>/conn creator endpoint "
+          "(production wiring)");
 
     hop_probe_t at_b;
     at_b.link = "net/downlink/a";

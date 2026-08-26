@@ -127,6 +127,53 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `POINT{NAME, SETTINGS{…}}` envelope with an **empty `SETTINGS`** for a module that declares no
   catalog — never `SCHEMA_NOT_FOUND`, which would make the §6 creatability probe ambiguous.
 
+### Removed
+
+- **BREAKING — the `/net:children[]` connection-creation door is RETIRED, and with it the SPEC's
+  `type` pair and the `role` config key** ([#492](https://github.com/avatarsd-llc/libtracer/issues/492)
+  S7, [RFC-0014](../docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)
+  **Amendment 4**, executing the supersession
+  [ADR-0059](../docs/adr/0059-creator-endpoint-creation-and-removal-are-writes-to-a-vertex.md) ruled).
+
+  - **Wire.** `transport_vertex_t` no longer registers the `client` and `listener` child types on
+    the graph, so `write /net:children[] += SPEC{ type = "client"|"listener", name, config }`
+    answers `SCHEMA_NOT_FOUND` — the ordinary unregistered-catalog-type answer, not a new error
+    identity. The ONE wire path that creates a connection is now the per-module creator endpoint:
+    `write /net/<module>/conn <- SPEC{ name, config }`, removal `<- NAME{ name }`. An orchestrator
+    still on the old spelling must move; there is no compatibility shim, deliberately — a
+    superseded door that still answers is still a door, and two doors onto one creation semantics
+    is the drift the shared body was split to prevent.
+  - **The `role` config key is gone.** It existed only to override the catalog type's default
+    direction, and the catalog type is what died. The role has been POSITIONAL since S2b — it *is*
+    the module (`ws-client` = DIAL, `ws-server` = LISTEN) — and the endpoint always overwrote a
+    written `role` with the module's, so the key was already inert. `parse_config` no longer reads
+    it: a `role` pair on the wire is now an ordinary unknown pair, **ignored** per the config
+    walk's forward-compatibility rule, never obeyed and never an error.
+  - **C++ API.** `tr::net::conn_spec_t(type, name)` and `conn_spec_t::role(conn_role_t)` are
+    removed, and the free function changes shape:
+    `conn_spec(type, name, role, port, kind, addr)` → **`conn_spec(name, port, kind, addr)`**.
+    `explicit conn_spec_t(name)` — the endpoint spelling — is unchanged and is now the only one.
+    `transport_vertex_t::make_connection` (the private child-factory adapter) is gone;
+    `make_connection_locked` is unchanged and is reached only through the endpoint.
+    `register_module(module, kind, role)` is what an application must now call before any
+    connection can be created — it is what mints `/net/<module>/conn`.
+  - **NOT retired, and the distinction is the whole point.** `:children[]` as an **enumeration** is
+    untouched: `/net:children[]` lists this plane's modules, `/net/<module>:children[]` lists that
+    module's member connections (with `conn` hidden, RFC-0014 §3), and a bus connection's
+    `:children[]` still serves its live peers. `:children[]` as a **generic creation** surface
+    ([RFC-0013](../docs/spec/rfcs/0013-creatable-child-type-catalog.md)) is untouched too —
+    `stored_value` and every application-registered type still create through it, and
+    `graph_t::register_child_type` is unchanged public API. What was removed is two registrations,
+    not a mechanism.
+  - **Conformance.** The `spec/conn-client-ws` vector — the retired door's spelling of the same
+    connection — is deleted, per the ruling that it lives exactly as long as its door. The one
+    claim it carried that outlives the door (a config's values are typed **per key**: `addr` a
+    textual `NAME`, `port` an opaque `VALUE` u16, neither substituting for the other) moved to
+    `conn/create-via-spec`, whose `config` carries the same mix. With the vectors complete,
+    Amendment 4 promotes **every remaining `proposed pending` byte clause in RFC-0014 to
+    normative** — the `SPEC`/`NAME`/`config` layout, the §2 error identities, the absent-endpoint
+    identity and the liveness-enum encoding.
+
 ### Changed
 
 - **BEHAVIOUR CHANGE: a built-in `udp`/`tcp`/`ws` DIAL connection no longer dials at creation —

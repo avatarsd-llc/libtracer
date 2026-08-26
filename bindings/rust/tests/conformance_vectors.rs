@@ -1191,54 +1191,68 @@ fn spec_value_typed_fields_are_not_the_vector() {
 }
 
 /**
- * @brief `spec/conn-client-ws` — a connection-formation SPEC whose `config` mixes both
- * value types: `role`/`port` as opaque `VALUE`, `kind`/`addr` as textual `NAME`.
+ * @brief `conn/create-via-spec` — a connection-formation SPEC whose `config` mixes both
+ * value types: `port` as an opaque `VALUE`, `addr` as a textual `NAME`.
  *
  * Before #877 the Rust settings builder could emit only the `VALUE` form, so the
  * string-valued keys were inexpressible — a link this core described was never formed.
+ * That claim used to be carried by `spec/conn-client-ws`, the SUPERSEDED global
+ * `:children[]` creation spelling; RFC-0014 S7 retired that door and its vector, so the
+ * claim moves HERE, onto the creator-endpoint payload that survives.
+ *
+ * The endpoint spelling also carries NO `type` and NO `role`, which is why the SPEC is
+ * assembled by hand rather than through [`structured::spec`]: that builder is the generic
+ * `:children[]` creation SPEC and always emits a catalog `type`. The two absences are
+ * asserted below, because a core that emitted either would let a peer create a listener
+ * through a dialer's endpoint.
  */
 #[test]
-fn spec_conn_client_ws() {
-    let bin = assert_vector_consistent("spec/conn-client-ws");
+fn conn_create_via_spec() {
+    let bin = assert_vector_consistent("conn/create-via-spec");
     let config = structured::settings_typed(&[
-        ("role", SettingValue::Value(&[0])),
-        ("port", SettingValue::Value(&8080u16.to_le_bytes())),
-        ("kind", SettingValue::Name("ws")),
         ("addr", SettingValue::Name("127.0.0.1")),
+        ("port", SettingValue::Value(&8080u16.to_le_bytes())),
     ])
     .unwrap();
+    let built = Tlv {
+        type_code: libtracer::type_code::SPEC,
+        opt: Opt::structured(),
+        payload: Vec::new(),
+        children: vec![
+            libtracer::name("name").unwrap(),
+            libtracer::name("up").unwrap(),
+            libtracer::name("config").unwrap(),
+            config,
+        ],
+        trailer: None,
+    };
     assert_eq!(
-        encode(&structured::spec("client", "up", Some(config)).unwrap()),
+        encode(&built),
         bin,
-        "the conn SPEC builder must reproduce the shared vector byte-for-byte"
+        "the conn SPEC must reproduce the shared vector byte-for-byte"
     );
 
     let t = decode(&bin).unwrap();
+    // The name is there; the catalog `type` is NOT, and never was on this door.
     assert_eq!(
         structured::spec_type_name(&t).unwrap(),
-        (Some("client".to_string()), Some("up".to_string()))
+        (None, Some("up".to_string()))
     );
     let cfg = structured::named_field(&t, "config").unwrap().unwrap();
     assert_eq!(cfg.type_code, libtracer::type_code::SETTINGS);
-    // The string keys read back only through the NAME-typed accessor …
-    assert_eq!(
-        structured::settings_str(&cfg, "kind").unwrap(),
-        Some("ws".to_string())
-    );
+    // The string key reads back only through the NAME-typed accessor …
     assert_eq!(
         structured::settings_str(&cfg, "addr").unwrap(),
         Some("127.0.0.1".to_string())
     );
-    // … and the integer keys are NOT strings, so the typed accessor declines them.
+    // … and the integer key is NOT a string, so the typed accessor declines it.
     assert_eq!(structured::settings_str(&cfg, "port").unwrap(), None);
     assert_eq!(
         structured::settings_get(&cfg, "port").unwrap(),
         Some(vec![0x90, 0x1f])
     );
-    assert_eq!(
-        structured::settings_get(&cfg, "role").unwrap(),
-        Some(vec![0])
-    );
+    // The role is POSITIONAL since RFC-0014 §1/§3 — no `role` pair rides in this config.
+    assert_eq!(structured::settings_get(&cfg, "role").unwrap(), None);
 }
 
 /* --------------------------------------------------------------- Unit 4 — FWD --- */

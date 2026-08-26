@@ -406,7 +406,7 @@ the seam: clearing a sink does not stop a dispatch already in flight.
 
 | Seam | Effect | Default |
 | --- | --- | --- |
-| `register_child_type(type, factory)` | populates the in-band creation catalog: which `type` selector a `:children[]` `SPEC` write may instantiate | only the built-in `stored_value`; an unregistered `type` answers `SCHEMA_NOT_FOUND` |
+| `register_child_type(type, factory)` | populates the in-band creation catalog: which `type` selector a `:children[]` `SPEC` write may instantiate. Generic, and still live — but **not** the door to a connection any more: the net plane's `client` / `listener` types were unregistered at RFC-0014 S7, which left `/net/<module>/conn` the only connection-creation surface | only the built-in `stored_value`; an unregistered `type` answers `SCHEMA_NOT_FOUND` |
 | `set_identity(kind, key)` / `clear_identity()` | installs the node-scoped record `read <vertex>:identity` serves, byte-identical from every vertex | absent — `:identity` answers `SCHEMA_NOT_FOUND` |
 | `configure_remote_delivery_sink(fn, ctx)` | where the producer fan-out hands each **remote** subscriber's delivery | **null — remote subscriber slots are stored but never deliver** |
 | `configure_subject_resolver(fn, ctx)` | maps a caller context to a subject token, enabling ACL evaluation | **none — enforcement is entirely off; every operation is allowed** |

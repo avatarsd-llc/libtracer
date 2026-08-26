@@ -105,10 +105,11 @@ Every piece a minimal backend needs is in the tree today:
   (`core/include/libtracer/transport_vertex.hpp:311`) is the documented out-of-tree hook; an
   unregistered kind fails creation with `SCHEMA_NOT_FOUND`.
 - **In-band wiring as data.** A connection is created by writing a SPEC built with
-  `tr::net::conn_spec_t` (`core/include/libtracer/conn_spec.hpp`) to `/net:children[]`; its
-  `kind` NAME selects the factory, and `text` / `u32` / `flag` are the kind-private escape
-  hatch. So "which libtracer link does this nnstreamer node ride" is configuration, not a
-  recompile.
+  `tr::net::conn_spec_t` (`core/include/libtracer/conn_spec.hpp`) to the module's creator
+  endpoint `/net/<module>/conn` — the module (declared with `register_module`) fixes the
+  transport and the role positionally; its `kind` NAME names the factory, and `text` / `u32`
+  / `flag` are the kind-private escape hatch. So "which libtracer link does this nnstreamer
+  node ride" is configuration, not a recompile.
 - **Built-in kinds to ride on day one.** `transport_tcp.hpp`, `transport_quic.hpp`,
   `transport_can.hpp`, `builtin_transports.hpp`.
 
@@ -181,7 +182,7 @@ Those remain real, and they are the plugin's design problem rather than an eleme
 
 - **Element lifecycle vs graph lifecycle.** GStreamer state changes map onto the vtable
   (`create`/`start`/`connect`/`subscribe` … `disconnect`/`stop`/`close`). libtracer's
-  connection lifecycle is in-band — a `:children[]` SPEC write creates the connection and the
+  connection lifecycle is in-band — a creator-endpoint SPEC write creates the connection and the
   RFC-0014 §4 `backoff` key drives self-heal. The two do not disagree, but they do not agree
   either: **who owns retry** when GStreamer says PLAYING and the libtracer link is down is an
   open question, not a settled mapping.

@@ -14,9 +14,10 @@
  *     A (consumer)  <--ws dial--  B (producer)  <--ws-->  C (orchestrator, departs)
  *
  * The recipe under test is the ADR-0073 §Consequences three-write contract:
- *   1. C, connected to B, creates B's link toward A through B's creator surface (the
- *      `:children[]` SPEC spelling RFC-0014 supersedes-but-keeps, reference/13
- *      "Realisation status") under a NAME C CHOSE (`a-link`);
+ *   1. C, connected to B, creates B's link toward A through B's creator surface — a SPEC
+ *      written to B's DIAL-module creator endpoint `/net/ws-client/conn` (RFC-0014 §2; S7
+ *      retired the `:children[]` creation spelling, reference/13 "Realisation status") —
+ *      under a NAME C CHOSE (`a-link`);
  *   2. C writes the subscription on B's PRODUCER with the B-rooted target it composed
  *      OFFLINE from the name it minted:
  *      `write /sensor/temp:subscribers[] += SUBSCRIBER{target=/net/ws-client/a-link/sink/val}`;
@@ -153,30 +154,28 @@ view_t owned(std::span<const std::byte> bytes) {
  * Built through the SHIPPED `tr::net::conn_spec_t` builder — the same bytes every other
  * creator call site emits, so nothing on the recipe path is a test-local re-encoding.
  */
-tr::net::conn_spec_t spec_of(std::string_view type, std::string_view name, conn_role_t role,
-                             std::uint16_t port, std::string_view kind = {},
+tr::net::conn_spec_t spec_of(std::string_view name, std::uint16_t port, std::string_view kind = {},
                              std::string_view addr = {}, bool peer_named = false,
                              std::uint32_t max_peers = 0) {
-    tr::net::conn_spec_t spec(type, name);
-    spec.role(role).port(port);
+    tr::net::conn_spec_t spec(name);
+    spec.port(port);
     if (!kind.empty()) spec.kind(kind);
     if (!addr.empty()) spec.addr(addr);
     if (peer_named) spec.flag("peer_named", true).u32("max_peers", max_peers);
     return spec;
 }
 
-/** @brief The SPEC as an owned view — the payload of a LOCAL `/net:children[]` write. */
-view_t conn_spec_view(std::string_view type, std::string_view name, conn_role_t role,
-                      std::uint16_t port, std::string_view kind = {}, std::string_view addr = {},
-                      bool peer_named = false, std::uint32_t max_peers = 0) {
-    return spec_of(type, name, role, port, kind, addr, peer_named, max_peers).view();
+/** @brief The SPEC as an owned view — the payload of a LOCAL `/net/<module>/conn` write. */
+view_t conn_spec_view(std::string_view name, std::uint16_t port, std::string_view kind = {},
+                      std::string_view addr = {}, bool peer_named = false,
+                      std::uint32_t max_peers = 0) {
+    return spec_of(name, port, kind, addr, peer_named, max_peers).view();
 }
 
-/** @brief The same SPEC as raw TLV bytes (the wire payload of a creator write). */
-std::vector<std::byte> conn_spec_bytes(std::string_view type, std::string_view name,
-                                       conn_role_t role, std::uint16_t port,
+/** @brief The same SPEC as raw TLV bytes (the wire payload of a creator-endpoint write). */
+std::vector<std::byte> conn_spec_bytes(std::string_view name, std::uint16_t port,
                                        std::string_view kind = {}, std::string_view addr = {}) {
-    return spec_of(type, name, role, port, kind, addr).bytes();
+    return spec_of(name, port, kind, addr).bytes();
 }
 
 /**
@@ -281,8 +280,9 @@ int main() {
         "delivery must continue after the departure (ADR-0073 Consequences recipe).\n\n");
 
     // ===== node A: the CONSUMER =====================================================
-    // A full production node: its listener is config-constructed from a local
-    // `:children[]` SPEC write — the identical code path an inbound creator write takes.
+    // A full production node: its listener is config-constructed from a local SPEC write to
+    // the ws LISTEN module's creator endpoint — the identical code path an inbound creator
+    // write takes.
     graph_t graph_a;
     fwd_router_t router_a(graph_a);
     // A's delivery mailbox, declared BEFORE `net_a` and therefore destroyed AFTER it
@@ -297,9 +297,8 @@ int main() {
     (void)net_a.register_module(std::string(tr::net::kWsServerSuggestedModule), "ws",
                                 conn_role_t::LISTEN);
     {
-        const auto w = graph_a.write(
-            path_t("/net:children[]"),
-            conn_spec_view("listener", "l", conn_role_t::LISTEN, kPortEphemeral, "ws"));
+        const auto w =
+            graph_a.write(path_t("/net/ws-server/conn"), conn_spec_view("l", kPortEphemeral, "ws"));
         check(w.has_value(), "A: listener /net/ws-server/l created from a SPEC");
     }
     // The consumer endpoint: a delivery is an ordinary write here (RFC-0004 §D). The
@@ -336,10 +335,9 @@ int main() {
     // B's ctrl listener — the orchestrator's door. peer_named: each accepted session gets
     // its own return-route identity (ADR-0044 / ADR-0073 §2), the web-UI session shape.
     {
-        const auto w = graph_b.write(
-            path_t("/net:children[]"),
-            conn_spec_view("listener", "ctrl", conn_role_t::LISTEN, kPortEphemeral, "ws", {},
-                           /*peer_named=*/true, /*max_peers=*/8));
+        const auto w = graph_b.write(path_t("/net/ws-server/conn"),
+                                     conn_spec_view("ctrl", kPortEphemeral, "ws", {},
+                                                    /*peer_named=*/true, /*max_peers=*/8));
         check(w.has_value(), "B: ctrl listener /net/ws-server/ctrl created from a SPEC");
     }
     auto* const srv_b = static_cast<transport_ws_server*>(net_b.link_of("net/ws-server/ctrl"));
@@ -375,9 +373,8 @@ int main() {
             },
             &c_misroutes);
         {
-            const auto w = graph_c.write(
-                path_t("/net:children[]"),
-                conn_spec_view("client", "b", conn_role_t::DIAL, b_port, "ws", "127.0.0.1"));
+            const auto w = graph_c.write(path_t("/net/ws-client/conn"),
+                                         conn_spec_view("b", b_port, "ws", "127.0.0.1"));
             check(w.has_value(), "C: connection to B /net/ws-client/b created from a SPEC");
         }
         tr::net::transport_t* const c_to_b = net_c.link_of("net/ws-client/b");
@@ -394,9 +391,12 @@ int main() {
 
         // ----- recipe step 1: C creates B's link toward A (name C CHOSE) ------------
         std::printf("\nStep 1 — C creates B's dial toward A through the creator surface:\n");
-        c_to_b->send(b_fwd(
-            fwd_op_t::WRITE, b_path({"net"}), b_path({"reply-ep"}), b_field_append("children"),
-            conn_spec_bytes("client", "a-link", conn_role_t::DIAL, a_port, "ws", "127.0.0.1")));
+        // The remote door is B's DIAL-module creator endpoint: a plain FWD{WRITE} at
+        // `/net/ws-client/conn` — no `:children[]` field, because the endpoint IS the vertex
+        // and the module segment carries both the transport kind and the role.
+        c_to_b->send(b_fwd(fwd_op_t::WRITE, b_path({"net", "ws-client", "conn"}),
+                           b_path({"reply-ep"}), {},
+                           conn_spec_bytes("a-link", a_port, "ws", "127.0.0.1")));
         {
             const auto r = c_replies.wait(kBudget);
             check(r.has_value(), "C received a REPLY for the creator write");

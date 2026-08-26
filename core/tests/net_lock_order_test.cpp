@@ -288,8 +288,11 @@ void test_publish_does_not_hold_ctl_over_its_fan_out() {
     transport_vertex_t net(node, router);
     fake_sock_t sock;
     net.provide_link("manual", "a", sock);
-    const auto made =
-        node.write(path_t("/net:children[]"), tr::net::conn_spec_t("client", "a").view());
+    // The staged link's module: declared with no kind, because nothing is constructed here —
+    // the staging outranks any factory — and the declaration is what mints the creator endpoint
+    // the SPEC below is written to.
+    (void)net.register_module("manual", "", conn_role_t::DIAL);
+    const auto made = node.write(path_t("/net/manual/conn"), tr::net::conn_spec_t("a").view());
     check(made.has_value(), "the staged link is wired in as /net/manual/a");
 
     standing_binding_t binding{net, "net/manual/a"};
@@ -311,7 +314,7 @@ void test_publish_does_not_hold_ctl_over_its_fan_out() {
 /**
  * @brief Section 2 — creation's BIRTH liveness is under the same rule.
  *
- * A `:children[]` or endpoint create publishes `UP`/`LISTENING`/`DORMANT` before it
+ * A creator-endpoint create publishes `UP`/`LISTENING`/`DORMANT` before it
  * returns, and that publish fans out exactly like any other. Pre-S6 it ran deep inside
  * `make_connection_locked`, with `ctl_m_` held over the whole creation.
  */
