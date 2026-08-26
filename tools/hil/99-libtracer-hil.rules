@@ -1,0 +1,57 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# udev rules for the libtracer ESP32-C6 HIL runner (#1557).
+#
+# TWO THINGS THIS BUYS, and the CI job needs both.
+#
+# 1. A STABLE PATH. Kernel names (/dev/ttyACM0, /dev/ttyUSB0) are assigned in
+#    enumeration order, so a reboot, a re-plug or a second USB device renames the
+#    board underneath a workflow that named it. `SYMLINK+="hil-esp32c6"` gives the
+#    device one name that is a property of the DEVICE, and that name is what
+#    .github/workflows/hil-esp32c6.yml uses (`HIL_PORT`).
+#
+# 2. OWNERSHIP BY THE RUNNER USER, so no CI step needs root. A self-hosted runner
+#    that has to `sudo` to reach its hardware is a runner whose jobs can do
+#    anything on the host; the device is the only privilege the HIL job should
+#    need, and a udev OWNER= is how it gets exactly that and nothing else.
+#
+# INSTALL (as root, once, on the runner host):
+#
+#     sed 's/github-runner/<your runner user>/' tools/hil/99-libtracer-hil.rules \
+#       > /etc/udev/rules.d/99-libtracer-hil.rules
+#     udevadm control --reload-rules && udevadm trigger --subsystem-match=tty
+#     ls -l /dev/hil-esp32c6     # must exist and be owned by the runner user
+#
+# TWO DEVICES ON ONE HOST (a C6 and a C3, per #1557's "and ideally a C3"): VID/PID
+# alone cannot tell two identical devkits apart. Uncomment the ATTRS{serial}
+# variants at the bottom and fill in each board's serial, read with:
+#
+#     udevadm info -a -n /dev/ttyACM0 | grep '{serial}' | head -1
+#
+# The serial-matched rules must come AFTER the generic ones (last SYMLINK wins for
+# the same key) or, better, the generic ones deleted once serials are pinned.
+
+ACTION!="add|change", GOTO="libtracer_hil_end"
+SUBSYSTEM!="tty", GOTO="libtracer_hil_end"
+
+# --- ESP32-C6 --------------------------------------------------------------
+# The chip's BUILT-IN USB-Serial/JTAG peripheral (Espressif VID 0x303a). This is
+# the "USB" port on an ESP32-C6-DevKitC-1/M-1 and the one to prefer: it needs no
+# bridge chip, and esptool drives reset/boot over the same CDC control lines.
+ATTRS{idVendor}=="303a", ATTRS{idProduct}=="1001", OWNER="github-runner", GROUP="dialout", MODE="0660", SYMLINK+="hil-esp32c6", TAG+="uaccess"
+
+# The devkit's other port, via a USB-UART bridge. Silicon Labs CP210x is what
+# ESP32-C6-DevKitC-1 ships; WCH CH343/CH9102 appears on several clones. Either
+# works — DTR/RTS auto-reset is the classic two-transistor circuit.
+ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", OWNER="github-runner", GROUP="dialout", MODE="0660", SYMLINK+="hil-esp32c6", TAG+="uaccess"
+ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d3", OWNER="github-runner", GROUP="dialout", MODE="0660", SYMLINK+="hil-esp32c6", TAG+="uaccess"
+
+# --- ESP32-C3 (optional second target) -------------------------------------
+# Same built-in USB-Serial/JTAG VID/PID as the C6 — the two are indistinguishable
+# by VID/PID, which is exactly why a two-board host must match on serial below.
+# Left commented so a single-board host gets one unambiguous symlink.
+#ATTRS{idVendor}=="303a", ATTRS{idProduct}=="1001", ATTRS{serial}=="<C3 SERIAL>", OWNER="github-runner", GROUP="dialout", MODE="0660", SYMLINK+="hil-esp32c3", TAG+="uaccess"
+#ATTRS{idVendor}=="303a", ATTRS{idProduct}=="1001", ATTRS{serial}=="<C6 SERIAL>", OWNER="github-runner", GROUP="dialout", MODE="0660", SYMLINK+="hil-esp32c6", TAG+="uaccess"
+
+LABEL="libtracer_hil_end"
