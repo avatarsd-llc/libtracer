@@ -566,6 +566,19 @@ class graph_t {
      * ring source through @ref set_ring_source (receiver-pays, RFC-0025 §4.6.1 clause 3) —
      * that seam is untouched, and per-vertex isolation stays a tested property.
      *
+     * @warning **A `value_ref_t` must not outlive the graph it was read from.** This is the
+     *          one contract the collapse tightens, and it is stated rather than discovered: a
+     *          stored LKV is an `allocate_shared<rope_t>` through the graph's pmr channel, so
+     *          the handle's control block calls `deallocate` on that channel's resource when
+     *          the last reference drops. Before the collapse that resource was HOST-owned and
+     *          the host could keep it alive past the graph; now it is a graph member, so a
+     *          handle released after `~graph_t` calls a destroyed object. The graph's own
+     *          members are safe by construction — the two adapters are declared FIRST, so they
+     *          are destroyed LAST, after the vertex tree that holds every stored LKV — but a
+     *          handle the application copied out is the application's to drop first. Every
+     *          `vertex_handle_t` obtained from the graph already dangles at that point, so
+     *          nothing in the reference API is meant to outlive it.
+     *
      * @param src The one nothrow failable block source every allocation above draws from.
      *            Host-owned; it MUST outlive the graph and every value handle obtained
      *            from it. An injected source must be thread-safe on a target where a value
@@ -2755,6 +2768,43 @@ class graph_t {
      */
     void note_owner_slot(vertex_t& v) noexcept;
 
+    // ---- DECLARED FIRST so they are DESTROYED LAST (#873 phase 1) ---------------------
+    //
+    // These two are the graph's internal faces of the one injected source, and their
+    // position in the object is a LIFETIME requirement, not a preference. A stored LKV is
+    // an `allocate_shared<rope_t>` through `mr_`, so its control block carries a
+    // `polymorphic_allocator` pointing at `src_mr_` and calls `deallocate` on it when the
+    // last reference drops — which happens inside `~graph_t`, when `root_`'s vertex tree is
+    // torn down. Members are destroyed in REVERSE declaration order, so an adapter declared
+    // after `root_` is already dead by then: a virtual call on a destroyed object, caught by
+    // UBSan's `vptr` check as "member call on address ... which does not point to an object
+    // of type 'memory_resource'" across six tests. Declaring them first inverts that and is
+    // robust by construction — it does not depend on anyone enumerating which member might
+    // hold a pmr allocation, which an explicit teardown order would.
+    //
+    // The cost is that every member below sits 40 B further into the object than it did.
+    // That was measured rather than assumed: the symbol ratchet's seven pins are unmoved.
+
+    /** @brief The graph's OWN `mem_backend_t` over the injected source (#873 phase 1).
+     *
+     *         Constructed unconditionally and pointed at by `value_backend_` only when
+     *         a non-default source was injected — a process-default graph keeps
+     *         @ref mem::heap_backend so its value path is provably the pre-#873 one, down
+     *         to the ADR-0047 §2 devirtualized `HEAP` reclaim arm. Held BY VALUE: it is
+     *         three words, and making it optional would cost the same space plus a branch. */
+    mem::source_backend_t src_backend_;
+
+    /** @brief The graph's OWN `std::pmr::memory_resource` over the injected source (#873
+     *         phase 1).
+     *
+     *         Same story as `src_backend_`: pointed at by `mr_` only when a
+     *         non-default source was injected, so a process-default graph's per-write
+     *         control block still comes from `new_delete_resource()` through exactly one
+     *         virtual call, as it always did. This adapter is where the substrate's
+     *         `nullptr` becomes a `std::bad_alloc` — the ONE boundary in the graph that
+     *         translates the failure convention, and only because `std::pmr` requires it. */
+    mem::source_resource_t src_mr_;
+
     mutable std::shared_mutex map_mutex_;
     // The Composite vertex tree's root (ADR-0057): an unregistered structural node whose
     // children container owns every top-level vertex (each child a non-moving unique_ptr
@@ -2908,25 +2958,6 @@ class graph_t {
      *         same reason.
      */
     mem::block_source_t* ctl_ = &mem::heap_source();
-
-    /** @brief The graph's OWN `mem_backend_t` over `ctl_` (#873 phase 1).
-     *
-     *         Constructed unconditionally and pointed at by `value_backend_` only when
-     *         a non-default source was injected — a process-default graph keeps
-     *         @ref mem::heap_backend so its value path is provably the pre-#873 one, down
-     *         to the ADR-0047 §2 devirtualized `HEAP` reclaim arm. Held BY VALUE: it is
-     *         three words, and making it optional would cost the same space plus a branch. */
-    mem::source_backend_t src_backend_;
-
-    /** @brief The graph's OWN `std::pmr::memory_resource` over `ctl_` (#873 phase 1).
-     *
-     *         Same story as `src_backend_`: pointed at by `mr_` only when a
-     *         non-default source was injected, so a process-default graph's per-write
-     *         control block still comes from `new_delete_resource()` through exactly one
-     *         virtual call, as it always did. This adapter is where the substrate's
-     *         `nullptr` becomes a `std::bad_alloc` — the ONE boundary in the graph that
-     *         translates the failure convention, and only because `std::pmr` requires it. */
-    mem::source_resource_t src_mr_;
 
     /** @brief The GRAPH-LEVEL DEFAULT receiver-ring source (RFC-0025 §4.6.1 clause 3): the seam
      *         a STREAM vertex charges its ring admissions against when it has declared none of

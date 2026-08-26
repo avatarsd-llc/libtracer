@@ -82,7 +82,7 @@ one link carrying one compact flow — so the sizing above is a number to check 
 your own node rather than one to copy.
 
 Those all reach the ONE injection point of `graph_t`'s constructor
-(`core/include/libtracer/graph.hpp:578`): since
+(`core/include/libtracer/graph.hpp:591`): since
 [#873](https://github.com/avatarsd-llc/libtracer/issues/873) phase 1 the graph takes a single
 `tr::mem::block_source_t` and builds the pmr resource and the value backend over it internally,
 so a device recipe sizes one slab where it used to wire four arguments. Beside it are the
@@ -359,8 +359,8 @@ itself, described via `:schema` like any other data
 ```
 
 The backpressure counters come from `graph_t::delivery_drops()`
-(`core/include/libtracer/graph.hpp:2388`), which snapshots four per-cause totals —
-`no_target`, `denied`, `out_of_memory`, `fan_out_truncated` (`graph.hpp:2388-2410`). Each
+(`core/include/libtracer/graph.hpp:2401`), which snapshots four per-cause totals —
+`no_target`, `denied`, `out_of_memory`, `fan_out_truncated` (`graph.hpp:2401-2423`). Each
 counts shed **deliveries**, not events, so a fan-out shed whole under memory pressure moves
 them by its width. `denied` counts an `:acl` refusal on every plane — a local API write, a
 `FWD{WRITE}` terminus, a `COMPACT` terminus and a subscription edge alike (#1068) — so on a

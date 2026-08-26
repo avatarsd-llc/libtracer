@@ -247,6 +247,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `tr::mem::source_backend_t` over it — or, if it needs its own backend at a *transport* seam,
   is unaffected (that seam did not move).
 
+  **One contract TIGHTENS: a `value_ref_t` must not outlive the graph.** A stored LKV is an
+  `allocate_shared<rope_t>` through the pmr channel, so a handle's control block calls
+  `deallocate` on that channel's resource when the last reference drops. That resource used to
+  be host-owned and could be kept alive past the graph; it is now a graph member. The graph's
+  own state is safe by construction — the two adapters are declared FIRST, so they are
+  destroyed LAST, after the vertex tree holding every LKV — but an application that copies a
+  `value_ref_t` out must drop it before the graph. Every `vertex_handle_t` obtained from the
+  graph already dangles at that point, so nothing in the reference API was meant to outlive it.
+
   **What now flows through the one source:** the per-write LKV control block and rope (through a
   `tr::mem::source_resource_t` the graph builds internally), the write-path value `segment_t` and
   both folded reads' POINT headers (through a `tr::mem::source_backend_t`), every failable #551
