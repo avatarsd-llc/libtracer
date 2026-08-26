@@ -262,7 +262,7 @@ there is no `type` pair and no `role` key, because the module segment in the pat
 both the transport and the role. The created connection mounts and routes at
 `/net/<module>/<name>`, the module **declared by the application** via `register_module`
 (`:284`) — declared-only per ADR-0073 §4, so an undeclared `(kind, role)` pair fails
-creation with `SCHEMA_NOT_FOUND` (`:322`). This is the surface
+creation with `SCHEMA_NOT_FOUND` (`:339`). This is the surface
 [RFC-0014 — creator endpoint, connection lifecycle and link liveness](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)
 specifies, and it is the only one: the single global `/net:children[]` catalog it
 replaced was retired at S7, so a node built against this release writes

@@ -261,7 +261,8 @@ int main() {
 
     // A module is declared per staged link, and each declaration takes a `kind` of its own:
     // `register_module` keys a declaration on (kind, role), so two modules on one node that
-    // shared a kind would be one declaration and the second would silently rename the first.
+    // shared a kind would be claiming one declaration and the second would be REFUSED
+    // `PATH_IN_USE` (it used to silently rename the first).
     // The kind names no factory — a staged link is preferred over one — so it is the module's
     // own name, which is the only thing that distinguishes them here.
     (void)net_cli.register_module("uplink", "uplink", conn_role_t::DIAL);

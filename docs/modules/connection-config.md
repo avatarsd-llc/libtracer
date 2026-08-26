@@ -142,6 +142,24 @@ factory receives the parsed record alongside the raw config TLV.
 
 <!-- config-keys:end -->
 
+### Refusals the endpoint owns, not a key
+
+One creation refusal is not any single key's: it is a property of the SPEC *as a
+whole* at the `/net/<module>/conn` endpoint, so it sits below the generated table
+rather than in it (`tools/check_config_keys.py` derives that table's rows from the
+keys the source reads, and this rule is bound on an ABSENT key).
+
+| SPEC written to `/net/<module>/conn` | status | why |
+| --- | --- | --- |
+| no `kind`, and **no** `provide_link` staging under `<module>/<name>` | `TYPE_MISMATCH` | Nothing can carry the connection's bytes: with no `kind` there is no factory to construct a link, and with no staging there is no pre-built one to adopt ([#1062](https://github.com/avatarsd-llc/libtracer/issues/1062)). The config is missing a required field — the `addr`/`port` precedent — so the answer is the config-shape status, and deliberately **never** `NOT_FOUND`: RFC-0014 reserves that wire form (`tr::path::not_found`) for an *absent creator endpoint*, which is the creatability probe. The endpoint here exists and answered; it is the SPEC that is unusable. (`make_connection_locked`, the final arm of the link-resolution `if`.) |
+
+The rule outlives the spelling it was written against. Before S7 retired the
+`/net:children[]` creation door, an absent `kind` meant "resolve the module from the
+staging", so this refusal read as "no staging matched". At the `conn` endpoint the
+module comes from the PATH, so an absent `kind` is no longer a module selector at
+all — and the refusal binds one step later, on the link resolution, where it is
+still exactly as live.
+
 ## Kind-private keys
 
 Each kind's factory parses its own keys out of the raw config TLV. Nothing here is

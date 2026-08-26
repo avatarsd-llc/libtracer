@@ -176,6 +176,21 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **BEHAVIOUR CHANGE: `tr::net::transport_vertex_t::register_module` REFUSES a second module
+  for an already-declared *(kind, role)* pair with `PATH_IN_USE` instead of silently renaming
+  the first.** A declaration is keyed on the pair — `module_for` resolves through it — so
+  `register_module("b", "ws", DIAL)` after `register_module("a", "ws", DIAL)` used to overwrite
+  the recorded name in place. The result was two live creation doors: `a`'s
+  `/net/a/conn` endpoint stayed minted and answering, while every later resolution of
+  *(ws, DIAL)* pointed at `b`. Nothing said so — a silent rename where this repo's convention
+  is a loud refusal by value. Re-declaring the SAME `(module, kind, role)` triple is unchanged
+  and still succeeds (idempotent setup is not a contradictory claim), and one module may still
+  serve several pairs (`can` for both roles, a module declared for two kinds). What is refused
+  is one pair claimed by two modules. The refusal is taken BEFORE the mint, so it leaves no
+  grouping vertex and no second creator endpoint behind. Callers that relied on the rename to
+  re-point a pair must now pick the module name once; a `[[nodiscard]]` result was already on
+  the signature, so a caller that checks it sees the new status at the call site.
+
 - **BEHAVIOUR CHANGE: a built-in `udp`/`tcp`/`ws` DIAL connection no longer dials at creation —
   it is minted `DORMANT` and dials on first use** ([#1548](https://github.com/avatarsd-llc/libtracer/issues/1548),
   [RFC-0014](../docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md) §4
