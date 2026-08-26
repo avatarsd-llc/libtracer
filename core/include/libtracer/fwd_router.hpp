@@ -95,8 +95,9 @@ struct router_stats_t {
     /** @brief Terminus REPLIES dropped because the resolver assembled an EMPTY rope — an
      *         allocation refusal inside reply assembly, surfaced as `link_count() == 0`. */
     std::size_t assemble_dropped = 0;
-    /** @brief Terminus REPLIES dropped because the egress span table could not grow
-     *         (`try_to_iovec` refused). The request is lost; the client retries. */
+    /** @brief Terminus REPLIES dropped because the egress span table could not be drawn
+     *         from the per-owner receive source (#1570). The request is lost; the client
+     *         retries — at any reply size, including a composed root's. */
     std::size_t reply_iov_dropped = 0;
     /** @brief Remote DELIVERIES dropped because the delivery iov table could not be built
      *         from the control source (`deliver_remote`, both the COMPACT and full-route
@@ -1586,8 +1587,8 @@ class fwd_router_t {
      * pre-rope path, zero heap — a stack `iov` array), a @ref wire::grammar::rope_cursor reads
      * a scatter-gather frame (the egress gathers each region's per-link sub-spans into a
      * @ref mem::block_array_t drawn from the injected `rx_` — still no payload copy, and
-     * exhaustion DROPS the frame rather than throwing, matching the reply path's
-     * `try_to_iovec` (#596)).
+     * exhaustion DROPS the frame rather than throwing, matching the reply path's own
+     * failable-seam gather (#596, #1570)).
      *
      * @tparam Cursor A grammar byte-source cursor (span or rope).
      * @param cur     The cursor positioned at the inbound FWD frame's first byte.

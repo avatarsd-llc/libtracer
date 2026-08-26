@@ -310,18 +310,20 @@ class rope_t {
      *        soft-failing instead of aborting when the span table cannot be grown.
      *
      * The `reserve` in @ref to_iovec throws on OOM (an `abort()` under
-     * `-fno-exceptions`); the terminus reply egress builds this table per send, so on
-     * a fragmented heap that aborted the node. This nothrow-reserves @p out to
-     * @ref link_count first and drops the reply on failure. @p out is cleared on entry.
+     * `-fno-exceptions`); a per-send egress table on a fragmented heap therefore aborted the
+     * node. This nothrow-reserves @p out to @ref link_count first and reports the failure by
+     * value instead. @p out is cleared on entry.
      *
-     * @note #981 residual: `std::span` IS trivially copyable, so unlike the link chain this
-     *       table could sit on the ADR-0065 seam — but @p out is caller storage of a type
-     *       this signature fixes, so the migration is an API change (a
-     *       `%tr::mem::block_array_t` overload plus a source at every caller), not an
-     *       edit here. Until then the growth keeps `%tr::detail::try_reserve`'s
-     *       `-fno-exceptions` probe window: a task switch between the probe's free and the
-     *       `reserve` abort()s the node (#850). The router's own egress iov tables took
-     *       exactly that migration in #981 and no longer route through this helper.
+     * @note Residual, and NO in-tree router path is on it any more. `std::span` IS trivially
+     *       copyable, so unlike the link chain this table could sit on the ADR-0065 seam —
+     *       but @p out is caller storage of a type this signature fixes, so the migration is
+     *       an API change (a `%tr::mem::block_array_t` overload plus a source at every
+     *       caller), not an edit here. What the growth keeps until then is
+     *       `%tr::detail::try_reserve`'s `-fno-exceptions` probe window: a task switch
+     *       between the probe's free and the `reserve` abort()s the node (#850). The
+     *       router's egress iov tables took that migration in #981 and its two TERMINUS
+     *       REPLY tables in #1570, each gathering `links()` into a `%block_array_t` at the
+     *       call site; this helper is now used by tests, examples and the bench only.
      * @retval false The span table could not be reserved — @p out is left empty.
      */
     [[nodiscard]] bool try_to_iovec(std::vector<std::span<const std::byte>>& out) const noexcept {

@@ -2591,6 +2591,37 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
     }
 }
 
+namespace {
+
+/**
+ * @brief Gather a terminus reply's links into @p iov — the reply egress's scatter-gather
+ *        table, on the ADR-0065 failable seam (#1570).
+ *
+ * The LAST migratable `-fno-exceptions` probe window on the reply path. Both termini used to
+ * build this table as a `std::vector` through `rope_t::try_to_iovec`, whose growth goes
+ * through `tr::detail::try_reserve`: on a profile whose allocation does not throw, that
+ * helper probes the GLOBAL heap, frees the probe block, and then runs the throwing `reserve`
+ * on the inference that the block is still free — a task switch in that window `abort()`s the
+ * node (#850). Once per inbound request frame, behind no ACL, on a table whose element type
+ * (`std::span`) is trivially copyable. #981 ruled exactly this shape onto the failable seam
+ * and took the router's own EGRESS tables there; this is the reply path catching up.
+ *
+ * Sized to the rope, with no synthetic cap: a composed-root reply has as many links as the
+ * read produced, so a fixed-size array would either drop every composed read's reply or need
+ * a heap arm behind it anyway. One refusable `try_alloc` per gather, no window.
+ * @retval false The table could not be grown — the caller drops the reply and the client
+ *               retries. Never an abort, at any reply size.
+ */
+[[nodiscard]] bool gather_reply_iov(const view::rope_t& reply,
+                                    mem::block_array_t<std::span<const std::byte>>& iov) {
+    if (!iov.reserve(reply.link_count())) return false;
+    for (const view_t& l : reply.links())
+        if (!iov.push_back(l.bytes())) return false;
+    return true;
+}
+
+}  // namespace
+
 void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<const std::byte> frame,
                                     const view_t* frame_view, const child_rx_ctx_t* inbound_ctx,
                                     const wire::path_ref_element_t* dst_label_target,
@@ -2632,14 +2663,18 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<con
         return;
     }
     if (transport_t* in = registry_.by_name(inbound_name)) {
-        // Nothrow scatter-gather egress: the span table growth would abort() under
-        // -fno-exceptions on a fragmented heap — drop the reply instead (the client retries).
-        std::vector<std::span<const std::byte>> iov;
-        if (!reply->try_to_iovec(iov)) {
+        // Nothrow scatter-gather egress on the failable seam (#1570, see `gather_reply_iov`),
+        // drawn from the SAME source this frame's own decode drew from two calls up: the
+        // per-owner receive source (ADR-0067 §3), not the graph's control budget. The table
+        // is a transient cost of THIS peer's request, charged on the receive thread, so it
+        // belongs where the arena is charged — one peer's replies cannot then exhaust the
+        // control budget the whole node's mutations share.
+        mem::block_array_t<std::span<const std::byte>> iov{rx_for(inbound_ctx)};
+        if (!gather_reply_iov(*reply, iov)) {
             count_drop(reply_iov_dropped_);
             return;
         }
-        in->send(std::span<const std::span<const std::byte>>(iov));
+        in->send(std::span<const std::span<const std::byte>>(iov.data(), iov.size()));
     }
 }
 
@@ -2682,14 +2717,17 @@ void fwd_router_t::resolve_terminus_rope(std::string_view inbound_name, view::ro
         return;
     }
     if (transport_t* in = registry_.by_name(inbound_name)) {
-        // Nothrow scatter-gather egress (see resolve_terminus): drop rather than abort on
-        // a span-table growth failure.
-        std::vector<std::span<const std::byte>> iov;
-        if (!reply->try_to_iovec(iov)) {
+        // Nothrow scatter-gather egress (see `resolve_terminus`): the same failable-seam
+        // table, from the same per-owner receive source, dropping rather than aborting on a
+        // growth failure. This tier is where the unbounded case actually lives — a rope-tier
+        // terminus resolves composed reads straight off the rope — so the absence of a fixed
+        // bound here is load-bearing, not defensive.
+        mem::block_array_t<std::span<const std::byte>> iov{rx_for(inbound_ctx)};
+        if (!gather_reply_iov(*reply, iov)) {
             count_drop(reply_iov_dropped_);
             return;
         }
-        in->send(std::span<const std::span<const std::byte>>(iov));
+        in->send(std::span<const std::span<const std::byte>>(iov.data(), iov.size()));
     }
 }
 

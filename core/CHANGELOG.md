@@ -176,6 +176,24 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **The terminus REPLY egress no longer routes through the `-fno-exceptions` probe window**
+  ([#1570](https://github.com/avatarsd-llc/libtracer/issues/1570), the reply path's half of
+  [#981](https://github.com/avatarsd-llc/libtracer/issues/981)). `fwd_router_t::resolve_terminus`
+  and `::resolve_terminus_rope` built their scatter-gather span table with
+  `tr::view::rope_t::try_to_iovec` — a `std::vector` on the global heap, grown through
+  `tr::detail::try_reserve`, which on a profile whose allocation does not throw probes the heap,
+  frees the probe block and then runs the throwing `reserve` on the inference that the block is
+  still free. A task switch in that window `abort()`s the node
+  ([#850](https://github.com/avatarsd-llc/libtracer/issues/850)) — once per inbound request
+  frame, behind no ACL. Both sites now gather the reply rope's `links()` into a
+  `tr::mem::block_array_t` drawn from the router's injected RECEIVE source (the same seam the
+  frame's own arena decode charges, ADR-0067 §3), so growth is ONE refusable `try_alloc` with no
+  window. Failure is unchanged in kind and now unconditional in reach: the reply is dropped and
+  counted on `router_stats_t::reply_iov_dropped`, at any reply size including a composed root's
+  — there is no fixed-size table anywhere on the path, so a wide composed reply cannot be
+  truncated or refused for its width. `rope_t::try_to_iovec` itself is unchanged (no API moved);
+  it now has no in-tree router caller, and its documented residual says so.
+
 - **BEHAVIOUR CHANGE: `tr::net::transport_vertex_t::register_module` REFUSES a second module
   for an already-declared *(kind, role)* pair with `PATH_IN_USE` instead of silently renaming
   the first.** A declaration is keyed on the pair — `module_for` resolves through it — so
