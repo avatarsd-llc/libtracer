@@ -723,19 +723,49 @@ struct branch_node_t {
     return k.record_end(e) == 0 ? key.size() : e;  // ragged remainder: glue it onto this record
 }
 
+/**
+ * @brief True when @p src is the process-wide default source — the test the constructor's
+ *        "process-default fold" turns on (#873 phase 1).
+ *
+ * A graph handed nothing (or the process default explicitly) must allocate exactly what it
+ * allocated before the four seams collapsed into one. That is not a nicety: the pmr channel
+ * would otherwise gain a second virtual hop (`source_resource_t` → `heap_source_t`) on the
+ * per-write control block, and the value channel would swap the ADR-0047 §2 devirtualized
+ * `HEAP` reclaim arm for the virtual fallback — on the hot write path, for a composition
+ * that by construction cannot behave differently. So the default folds onto the very objects
+ * the retired defaults named, and the adapters are used only where a host actually injected
+ * something. One branch, at construction, never again.
+ */
+[[nodiscard]] bool is_default_source(const mem::block_source_t* src) noexcept {
+    return src == nullptr || src == &mem::heap_source();
+}
+
+/** @brief The constructor's `nullptr`-means-the-process-default normalization, as a
+ *         reference — so the adapters can be initialized before `ctl_` exists. */
+[[nodiscard]] mem::block_source_t& source_or_default(mem::block_source_t* src) noexcept {
+    return src != nullptr ? *src : mem::heap_source();
+}
+
 }  // namespace
 
-graph_t::graph_t(std::pmr::memory_resource* mr, mem::mem_backend_t* value_backend,
-                 mem::block_source_t* ctl, mem::block_source_t* ring)
-    : mr_(mr),
-      value_backend_(value_backend),
+graph_t::graph_t(mem::block_source_t* src)
+    : src_backend_(source_or_default(src)),
+      src_mr_(source_or_default(src)),
       root_(std::make_unique<vertex_t>(role_t::STORED_VALUE, path_key_t{}, handlers_t{})),
       // The anchors' private structural root (#1223). It takes NO vertex slot: it is never
       // an anchor itself and no element can name it, and giving it one would put a second
       // unaddressable hole in an index whose only documented hole is slot 0.
       anchor_root_(std::make_unique<vertex_t>(role_t::STORED_VALUE, path_key_t{}, handlers_t{})),
-      ctl_(ctl),
-      ring_(ring != nullptr ? ring : &mem::heap_source()) {
+      ctl_(&source_or_default(src)),
+      ring_(ctl_) {
+    // The process-default FOLD. Resolved in the BODY rather than in the member-initializer
+    // list: `&src_mr_` there would convert a pointer to an object whose lifetime has not
+    // started into a pointer to its base, which is undefined even though the adapters are now
+    // declared first. Two stores at construction, never read again.
+    if (!is_default_source(src)) {
+        mr_ = &src_mr_;
+        value_backend_ = &src_backend_;
+    }
     // Slot 0 is the structural root (RFC-0024 §6.4): the index is seeded here so it stays
     // allocation-ordered from the first vertex_t this graph owns. The root is not a
     // registrable address, so no bound path ever names slot 0 — it is in the vector because

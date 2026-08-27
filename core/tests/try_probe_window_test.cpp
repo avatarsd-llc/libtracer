@@ -172,7 +172,7 @@ constexpr std::size_t kIovAlign = alignof(std::span<const std::byte>);
 void test_collect_stack_on_the_seam() {
     std::printf("read_subtree_folded's collect stack (block_array_t over the injected ctl):\n");
     gated_source_t src;
-    graph_t g(std::pmr::get_default_resource(), &tr::mem::heap_backend(), &src);
+    graph_t g(&src);
 
     const auto root_path = path_t::parse("/plant");
     auto root = g.register_vertex(*root_path, role_t::STORED_VALUE);
@@ -268,7 +268,7 @@ class counting_link_t final : public transport_t {
 void test_delivery_iov_on_the_seam() {
     std::printf("deliver_remote's egress iov table (block_array_t over the injected ctl):\n");
     gated_source_t src;
-    graph_t g(std::pmr::get_default_resource(), &tr::mem::heap_backend(), &src);
+    graph_t g(&src);
     fwd_router_t router(g);
     counting_link_t link;
     (void)router.add_child("client", link);

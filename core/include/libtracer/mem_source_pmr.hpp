@@ -21,10 +21,16 @@
  *
  * Deliberately a separate header, for the same reason `%mem_source_sync.hpp` is one:
  * `%mem_source.hpp` is compiled into the freestanding footprint sentinel, and
- * `<memory_resource>` is a hosted facility. Nothing under `core/src` or
- * `core/include` includes this file, and it is deliberately absent from the
- * `%tracer.hpp` umbrella — a target that does not name @ref tr::mem::source_resource_t
- * compiles byte-identical objects with and without it.
+ * `<memory_resource>` is a hosted facility. It stays out of that sentinel's include
+ * set for that reason.
+ *
+ * @note Until #873 phase 1 nothing under `core/` included this header at all. `%graph.hpp`
+ *       now does: the collapsed `graph_t` constructor builds a @ref tr::mem::source_resource_t
+ *       over its single injected source, which is how the graph's `std::pmr` channel reaches
+ *       the substrate. That costs `%graph.hpp` nothing it did not already carry — it has
+ *       named `std::pmr::memory_resource` since ADR-0039 — but the old claim that no in-tree
+ *       header includes this one is no longer true, and is corrected here rather than left to
+ *       mislead the next reader of the footprint sentinel's include list.
  *
  * @note ONE DIRECTION. The reverse adapter — wrapping a `std::pmr::memory_resource`
  *       so it can be used *as* a `block_source_t` — is not offered and must not be

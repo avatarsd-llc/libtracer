@@ -713,6 +713,45 @@ class counting_resource_t : public std::pmr::memory_resource {
     std::size_t live_ = 0;          /**< @brief Outstanding bytes. */
     std::size_t peak_ = 0;          /**< @brief Largest `live_` ever observed. */
     std::uint64_t allocs_ = 0;      /**< @brief Allocations forwarded. */
+
+   public:
+    /**
+     * @brief The @ref tr::mem::block_source_t FACE of the same counters — what the live
+     *        `graph_t` arm needs since #873 phase 1 collapsed its four seams into one source.
+     *
+     * Not the forbidden pmr→source wrapper: this face draws from
+     * @ref tr::mem::heap_source directly and can therefore answer `nullptr` honestly. It
+     * shares the enclosing object's `live_`/`peak_`/`allocs_` so the SUB_WIRE arm's RAM row
+     * still reports one number for the whole arm, exactly as it did when the graph took a
+     * `std::pmr::memory_resource*`.
+     */
+    class source_face_t final : public tr::mem::block_source_t {
+       public:
+        explicit source_face_t(counting_resource_t& owner) noexcept
+            : block_source_t("counting"), o_(&owner) {}
+
+        [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+            void* const p = tr::mem::heap_source().try_alloc(bytes, align);
+            if (p == nullptr) return nullptr;
+            o_->live_ += bytes;
+            ++o_->allocs_;
+            if (o_->live_ > o_->peak_) o_->peak_ = o_->live_;
+            return p;
+        }
+        void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+            o_->live_ -= bytes;
+            tr::mem::heap_source().release(p, bytes, align);
+        }
+
+       private:
+        counting_resource_t* o_;
+    };
+
+    /** @brief This counter's source face; stable for the counter's lifetime. */
+    [[nodiscard]] source_face_t& as_source() noexcept { return face_; }
+
+   private:
+    source_face_t face_{*this};
 };
 
 /**
@@ -1012,7 +1051,7 @@ class driver_t {
 
     /** @brief Stand up a fresh live graph and its vertices — the untimed half of @ref reset. */
     void build_live_graph() {
-        graph_ = std::make_unique<graph_t>(mr_);
+        graph_ = std::make_unique<graph_t>(&mr_->as_source());
         graph_->configure_remote_delivery_sink(&null_remote_sink, nullptr);
         vertices_.reserve(verts_);
         for (std::size_t i = 0; i < verts_; ++i) {
@@ -1287,8 +1326,9 @@ int calibrate() {
     // token stops validating. Checked here because the transcription arms can only show that
     // the SHAPE has these properties; this shows the shipped code does.
     {
-        counting_resource_t mr_g;
-        graph_t g(&mr_g);
+        // #873 phase 1: the graph takes ONE `block_source_t`. Nothing in this block reads the
+        // counter — it only needed a graph — so the process default is the honest wiring.
+        graph_t g;
         const tr::graph::link_id_t a = g.intern_link("p0");
         const tr::graph::link_id_t b = g.intern_link("p0");
         expect("intern_link is idempotent by NAME (same-NAME redial, #1263)",

@@ -157,7 +157,7 @@ void test_one_seam_is_one_block() {
         std::array<std::byte, 4096> slab{};
         std::array<tr::mem::size_class_t, 8> classes{};
         tr::mem::pool_source_t pool(slab, classes);
-        graph_t g(std::pmr::get_default_resource(), &tr::mem::heap_backend(), &pool);
+        graph_t g(&pool);
         (void)g.register_vertex(path_t("/n"), role_t::STORED_VALUE);
 
         // The bytes must OUTLIVE the decode: a `tlv_t`'s children are spans INTO them.

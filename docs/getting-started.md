@@ -43,10 +43,10 @@ first build; the rest of the module set is enumerated in
 
 | option | default | what it selects |
 | --- | --- | --- |
-| `BUILD_TESTING` | unset (off) | compiles `core/tests` and registers the example programs as `example_*` smoke tests (`core/CMakeLists.txt:385`) |
-| `LIBTRACER_BUILD_EXAMPLES` | on when libtracer is the top-level project | compiles the seven programs under `core/examples/` (`core/CMakeLists.txt:392`) |
+| `BUILD_TESTING` | unset (off) | compiles `core/tests` and registers the example programs as `example_*` smoke tests (`core/CMakeLists.txt:386`) |
+| `LIBTRACER_BUILD_EXAMPLES` | on when libtracer is the top-level project | compiles the seven programs under `core/examples/` (`core/CMakeLists.txt:393`) |
 | `LIBTRACER_NET_PLANE` | `ON` | the FWD routing plane — `op_resolve`, `route_handle`, `fwd_router_t`, `transport_vertex` (`core/CMakeLists.txt:63`) |
-| `LIBTRACER_WITH_QUIC` | `OFF` | configures the separate `libtracer_quic` target (QUIC and WebTransport); needs msquic installed (`core/CMakeLists.txt:289`) |
+| `LIBTRACER_WITH_QUIC` | `OFF` | configures the separate `libtracer_quic` target (QUIC and WebTransport); needs msquic installed (`core/CMakeLists.txt:290`) |
 
 Two of the seven examples — `two_node_fwd` and `tree_of_ropes` — are built and
 registered only under `LIBTRACER_NET_PLANE`, so `ctest -R example_` runs five of seven
@@ -77,7 +77,7 @@ target_link_libraries(app PRIVATE libtracer::libtracer)
 ```
 
 The package version file is written with `COMPATIBILITY SameMinorVersion`
-(`core/CMakeLists.txt:374-356`): pre-1.0, a minor bump may break the C++ API, so a
+(`core/CMakeLists.txt:375-356`): pre-1.0, a minor bump may break the C++ API, so a
 request for one minor never silently accepts another. The repository version is
 `0.6.0`; asking for `0.3` against it fails to configure.
 
@@ -149,7 +149,7 @@ place that turns a byte span into an owned `view_t`. A hand-rolled
 loses the allocation-failure signal that `std::optional` carries.
 
 **`read` returns a reference, not a copy.** `graph_t::read` and `graph_t::await` return
-`result_t<value_ref_t>` (`core/include/libtracer/graph.hpp:1357,1563`), so `(*got)` is a
+`result_t<value_ref_t>` (`core/include/libtracer/graph.hpp:1397,1603`), so `(*got)` is a
 `value_ref_t` and `(*got)->…` reaches the referenced `rope_t`. The rule: *a read of a
 published value returns a reference to it; a read that composes a new value returns the
 value* — which is why `read_children_folded` and its siblings still return a `rope_t`.
@@ -189,7 +189,7 @@ The callback form is sugar over the primitive
 `subscribe(const path_t&, subscriber_fn_t fn, void* ctx)` with
 `subscriber_fn_t = void (*)(void*, const rope_t&)`
 (`core/include/libtracer/subscriber.hpp:157`). The sugar takes the callable as `F&`
-(`core/include/libtracer/graph.hpp:1771-1774`), so a temporary lambda written inline at
+(`core/include/libtracer/graph.hpp:1811-1814`), so a temporary lambda written inline at
 the call site does not compile — and would dangle if it did. **Lifetime obligation:**
 the bound callable is the `ctx`, and `ctx` must outlive every possible delivery;
 `unsubscribe` only deactivates the edge slot, and a delivery already in flight

@@ -21,7 +21,8 @@
  *
  * WHERE IT GOES. Nothing defaults to it. It is opt-in construction at any shared byte
  * seam a node wants inside its own slab — `transport_vertex_t`'s `rx_backend` (#770),
- * `graph_t`'s `value_backend`, `fwd_router_t`'s `flat` — each of which is reached from
+ * `graph_t`'s single injected source (which since #873 phase 1 carries what the separate
+ * `value_backend` argument used to), `fwd_router_t`'s `flat` — each of which is reached from
  * several threads and therefore may not take a bare `tr::mem::pool_t`:
  *
  * ```cpp

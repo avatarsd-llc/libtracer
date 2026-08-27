@@ -466,7 +466,7 @@ void test_malformed_frames_land_in_one_bucket() {
 void test_delivery_iov_refusal_is_counted() {
     std::printf("a delivery whose iov table is refused counts delivery_iov_dropped:\n");
     arming_source_t ctl;
-    graph_t g(std::pmr::get_default_resource(), &tr::mem::heap_backend(), &ctl);
+    graph_t g(&ctl);
     fwd_router_t router(g);
     rec_link_t client;
     (void)router.add_child("client", client);

@@ -212,13 +212,33 @@ class heap_source_t final : public block_source_t {
     /** @brief Constant-initializable, so the process-wide default costs no dynamic init. */
     constexpr heap_source_t() noexcept : block_source_t("heap") {}
 
-    /** @brief Nothrow aligned heap allocation; `nullptr` on exhaustion. */
+    /**
+     * @brief Nothrow heap allocation; `nullptr` on exhaustion.
+     *
+     * @par Why the plain-`new` arm exists (#873 phase 1)
+     * A request at or below `__STDCPP_DEFAULT_NEW_ALIGNMENT__` takes the PLAIN nothrow
+     * `operator new`, not the over-aligned one. The two are not the same code: libstdc++
+     * routes the `align_val_t` overload through `aligned_alloc`/`posix_memalign` even when
+     * the alignment is one the plain allocator already guarantees, which is a different
+     * glibc path with a different size-class layout. That distinction became load-bearing
+     * when #873 phase 1 moved channels that had ALWAYS used the plain `operator new` — the
+     * child-registry chunks and the graph's pmr-served control blocks — behind this seam:
+     * with this arm, "the process default preserves today's behaviour byte-for-byte" is
+     * literally true rather than approximately true. Over-aligned requests (a DMA source's
+     * clients, a cache-line-padded stripe) keep the aligned pair, so nothing loses a
+     * guarantee it had.
+     */
     [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        if (align <= __STDCPP_DEFAULT_NEW_ALIGNMENT__) return ::operator new(bytes, std::nothrow);
         return ::operator new(bytes, std::align_val_t{align}, std::nothrow);
     }
 
-    /** @brief Sized, aligned reclaim matching @ref try_alloc. */
+    /** @brief Sized reclaim matching @ref try_alloc, on whichever arm served the block. */
     void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        if (align <= __STDCPP_DEFAULT_NEW_ALIGNMENT__) {
+            ::operator delete(p, bytes);
+            return;
+        }
         ::operator delete(p, bytes, std::align_val_t{align});
     }
 };

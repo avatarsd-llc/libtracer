@@ -322,3 +322,35 @@ because the graph plane is one locked store in all of them — that is Stage 2
 The §Staging programme, its family order, the gated/never-gated column split
 ([#1428](https://github.com/avatarsd-llc/libtracer/issues/1428)), and the separation of need C
 (segments) all stand unchanged.
+
+## Amendment (2026-08-27) — `graph_t` takes ONE source; the wiring sketches above are historical
+
+The 2026-08-26 grill on [#873](https://github.com/avatarsd-llc/libtracer/issues/873) ruled the
+shape this ADR left open, and phase 1 has landed it. **`graph_t`'s constructor collapses to one
+injected `block_source_t`.** The `std::pmr::memory_resource*`, the `mem_backend_t*` and the
+second (ring) source are gone from the signature; the graph builds a `source_resource_t` and a
+`source_backend_t` over the single source internally. This ADR already sanctioned the outcome —
+§"Building each configuration" said the `mr` argument is *"demoted to the std-container adapter
+role on non-failable paths (or dropped)"* — so what changes is only that the parenthesis won.
+
+Consequences for the text above:
+
+- **The three `graph_t g{/*mr adapter*/, value_backend, &store};` sketches are historical.** The
+  current spelling of each is `graph_t g{store};` — WIDE points that one store at the transports
+  too, MID gives the graph its own, NARROW gives the graph its own and fans the net plane per RX
+  thread. The compositions themselves are unchanged; only the graph's argument list is.
+- **Decision 3's "`std::pmr` at `graph.hpp:353`" is discharged for the graph.** It survives only
+  as the graph's internal adapter over the injected source, which is exactly the "thin adapter
+  for std-container interop on non-failable paths" the decision allows.
+- **Need C is still not folded into the substrate — it is re-expressed on top of it.**
+  `mem_backend_t` remains the type that carries the refcount and the DMA hooks; it is no longer
+  an injection seam. `source_backend_t` is that wrapper. Deployers who inject their own backend
+  at a *transport* seam are unaffected.
+- **Ring and control are one default, not one pool by stealth.** The graph-level default ring
+  source now resolves to the same injected source, and per-vertex isolation stays where the
+  amendment's own measurement put it — at `set_ring_source`, which is untouched.
+
+Two channels the decision names are still open and are explicitly phased, not forgotten:
+`lkv_slot.hpp`'s hazard-slot nodes are **phase 2** (gated on a hazard-slot acquisition A/B,
+because the naive fix adds an atomic to `store()`), and re-layering the backend/pmr adapters is
+**phase 3**.

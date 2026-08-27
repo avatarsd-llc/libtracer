@@ -384,12 +384,14 @@ struct stores_t {
     /** @brief NARROW's per-link egress stores — one sending thread each, so `sync_none_t`. */
     std::vector<std::unique_ptr<tr::mem::pool_source_t<tr::mem::sync_none_t>>> lane_tx;
 
-    /** @brief The `std::pmr` face of whichever store the graph's `mr` channel draws from. */
-    std::unique_ptr<tr::mem::source_resource_t> mr_adapter;
-
-    /** @brief Optional counting decorators, one per channel — `hwm` and `calibrate` only. */
+    /** @brief Optional counting decorators, one per channel — `hwm` and `calibrate` only.
+     *
+     *  The graph's `mr` channel had one of its own until #873 phase 1 retired it: `graph_t`
+     *  now takes ONE source and builds its `std::pmr` adapter over it internally, so the LKV
+     *  control blocks arrive on the SAME channel as the composed read's collect stack. The
+     *  `graph-ctl` row therefore covers both, and `graph-mr` is gone rather than reporting a
+     *  channel that no longer exists separately. */
     std::unique_ptr<counting_source_t> count_ctl;
-    std::unique_ptr<counting_source_t> count_mr;  /**< @brief Wraps the `mr` channel's store. */
     std::unique_ptr<counting_source_t> count_rx;  /**< @brief Wraps the router's DEFAULT rx. */
     std::unique_ptr<counting_source_t> count_egr; /**< @brief Wraps the shared egress store. */
     std::vector<std::unique_ptr<counting_source_t>> count_lane_rx; /**< @brief NARROW per-child. */
@@ -437,7 +439,7 @@ struct lane_t {
  * @brief The whole node under one arm: stores, graph, router and @p lanes lanes.
  *
  * Declaration order IS destruction order reversed, and it matters: the graph holds `std::pmr`
- * containers built over @ref stores_t::mr_adapter, so the graph must die before the stores.
+ * containers over its OWN adapter above the injected store, so it must die before the stores.
  */
 class node_t {
    public:
@@ -489,19 +491,20 @@ class node_t {
     void step_net(lane_t& l) { l.in.inject(l.frame); }
 
     /**
-     * @brief LEG 2 — one graph WRITE. Draws the `std::pmr` `mr` channel.
+     * @brief LEG 2 — one graph WRITE. Draws the graph's `std::pmr` traffic.
      *
      * `vertex_t::store` mints the LKV control block and the rope wrapper through `mr_`
-     * (`core/src/graph.cpp`'s `store_value`). The value is a BORROWED view over the lane's own
-     * stable buffer, so the `value_backend` — held constant at `heap_backend()` in every arm —
-     * contributes nothing here and the `mr` draw is isolated.
+     * (`core/src/graph.cpp`'s `store_value`), which since #873 phase 1 is the graph's own
+     * adapter over the injected source. The value is a BORROWED view over the lane's own
+     * stable buffer, so the value backend contributes nothing here and this leg's draw is the
+     * control block alone.
      */
     void step_write(lane_t& l) {
         (void)g_->write(*l.leaf, tr::view::view_t::over(tr::view::borrow_const(l.value)));
     }
 
     /**
-     * @brief LEG 3 — one composed subtree READ. Draws the graph's `ctl` channel.
+     * @brief LEG 3 — one composed subtree READ. Draws the graph's failable channel.
      *
      * `read_subtree_folded` walks the subtree on a `mem::block_array_t<work_t>` collect stack
      * over `ctl_` (the #981 migration), so a root with @ref kSubtreeChildren registered children
@@ -567,7 +570,6 @@ class node_t {
             if (p) out.push_back(p.get());
         };
         add(st_.count_ctl);
-        add(st_.count_mr);
         add(st_.count_rx);
         add(st_.count_egr);
         for (const auto& p : st_.count_lane_rx) add(p);
@@ -622,31 +624,28 @@ class node_t {
         switch (arm_) {
             case arm_t::H_BASELINE:
                 ctl_src_ = heap;
-                mr_src_ = heap;
                 rx_src_ = heap;
                 egr_src_ = heap;
                 break;
             case arm_t::WIDE:
-                ctl_src_ = mr_src_ = rx_src_ = egr_src_ = st_.wide.get();
+                ctl_src_ = rx_src_ = egr_src_ = st_.wide.get();
                 break;
             case arm_t::MID:
-                ctl_src_ = mr_src_ = st_.graph.get();
+                ctl_src_ = st_.graph.get();
                 rx_src_ = egr_src_ = st_.net.get();
                 break;
             case arm_t::NARROW:
-                ctl_src_ = mr_src_ = st_.graph.get();
+                ctl_src_ = st_.graph.get();
                 rx_src_ = egr_src_ = nullptr;  // per-lane; see build_lanes
                 break;
         }
         // The undecorated store a NARROW node's node-wide wiring (the router's label table)
         // falls back to, so no arm leaves an allocation on the process heap by accident.
-        plane_fallback_ = arm_ == arm_t::H_BASELINE ? heap : mr_src_;
+        plane_fallback_ = arm_ == arm_t::H_BASELINE ? heap : ctl_src_;
 
         if (count_channels) {
             st_.count_ctl = std::make_unique<counting_source_t>(ctl_src_);
-            st_.count_mr = std::make_unique<counting_source_t>(mr_src_);
             ctl_src_ = st_.count_ctl.get();
-            mr_src_ = st_.count_mr.get();
             if (rx_src_ != nullptr) {
                 st_.count_rx = std::make_unique<counting_source_t>(rx_src_);
                 st_.count_egr = std::make_unique<counting_source_t>(egr_src_);
@@ -654,25 +653,18 @@ class node_t {
                 egr_src_ = st_.count_egr.get();
             }
         }
-
-        // The `mr` channel is a `std::pmr` seam, so it reaches its store through #1401's
-        // adapter. The baseline is the ONE arm whose `mr` normally stays on the process-default
-        // resource, which is exactly what makes it the control. It is routed through the
-        // adapter ONLY when counting, so the census can say how many blocks the channel draws
-        // at all — a reference the injected arms' counts are read against. The consequence is
-        // disclosed rather than hidden: the baseline's `hwm` / `chan` rows describe a very
-        // slightly different composition from its TIMED rows, which never see the adapter.
-        if (arm_ != arm_t::H_BASELINE || count_channels) {
-            st_.mr_adapter = std::make_unique<tr::mem::source_resource_t>(*mr_src_);
-        }
     }
 
-    /** @brief Stand up the graph on the resolved `mr` / `ctl` channels, then the router. */
+    /** @brief Stand up the graph on the resolved single channel, then the router.
+     *
+     * The harness used to hand the graph a `std::pmr` adapter for its `mr` seam alongside the
+     * `ctl` source, and the H-baseline arm was the control precisely because its `mr` stayed
+     * on the process-default resource. #873 phase 1 removed that seam: the graph builds the
+     * adapter itself over the ONE source, and the baseline's control property is now expressed
+     * where it belongs — by injecting `heap_source()`, which the graph folds straight back onto
+     * `new_delete_resource()`. Same composition, one knob instead of two. */
     void build_graph() {
-        std::pmr::memory_resource* const mr =
-            st_.mr_adapter ? static_cast<std::pmr::memory_resource*>(st_.mr_adapter.get())
-                           : std::pmr::get_default_resource();
-        g_ = std::make_unique<graph_t>(mr, &tr::mem::heap_backend(), ctl_src_);
+        g_ = std::make_unique<graph_t>(ctl_src_);
         // `label_src` and the DEFAULT `rx` both take the net-plane store, per ADR-0079's
         // composition table. NARROW has no node-wide net store — every child overrides `rx`
         // through `add_child` — so its label table takes the GRAPH store rather than the heap:
@@ -740,7 +732,6 @@ class node_t {
     std::size_t lanes_n_; /**< @brief Lane (and receive-thread) count. */
     stores_t st_;         /**< @brief Declared FIRST so it outlives the graph. */
     tr::mem::block_source_t* ctl_src_ = nullptr; /**< @brief Resolved graph `ctl` channel. */
-    tr::mem::block_source_t* mr_src_ = nullptr;  /**< @brief Resolved graph `mr` channel. */
     tr::mem::block_source_t* rx_src_ = nullptr;  /**< @brief Resolved router `rx`; null=per-lane. */
     tr::mem::block_source_t* egr_src_ = nullptr; /**< @brief Resolved egress; null=per-lane. */
     tr::mem::block_source_t* plane_fallback_ = nullptr; /**< @brief Node-wide wiring fallback. */

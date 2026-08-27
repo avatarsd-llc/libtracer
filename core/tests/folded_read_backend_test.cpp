@@ -55,7 +55,7 @@
 #include <string_view>
 #include <vector>
 
-#include "libtracer/mem_pool.hpp"
+#include "libtracer/mem_source.hpp"
 #include "libtracer/tracer.hpp"
 #include "test_support.hpp"
 
@@ -160,21 +160,34 @@ constexpr std::size_t kNamedHeaderBytes = kShortHeaderBytes + 4;
 constexpr int kNodeCount = 5;
 
 /**
- * @brief A `mem_backend_t` that serves from an upstream backend until its budget runs out, then
- *        refuses — the exhaustion stand-in, with the refusal point movable.
+ * @brief A `block_source_t` that serves from the process heap source but can REFUSE the
+ *        header-width draws — the exhaustion stand-in, with the refusal point movable.
  *
- * Delegation, not a private allocator (the `terminus_egress_backend_test` precedent): a served
- * segment is the upstream's own, so it reclaims exactly as an un-injected graph's would. The ONLY
- * difference between serving and refusing is the `nullptr`.
+ * @par Why it watches a size set rather than every draw (#873 phase 1)
+ * Until the constructor collapse this instrument was a `mem_backend_t` injected as
+ * `value_backend`, so every draw it saw was by construction a value-seam draw. `graph_t` now
+ * takes ONE source and builds the backend over it, so an unfiltered source would also see the
+ * pmr control blocks, the registration blocks and the composed read's collect stack — and
+ * `served() == kNodeCount` would stop meaning "one header per node".
+ *
+ * So the instrument watches exactly the two folded-header widths (@ref kShortHeaderBytes and
+ * @ref kNamedHeaderBytes) and passes every other size straight through, untouched and
+ * uncounted. That keeps every assertion below meaning what it meant, and keeps the ablation
+ * non-vacuous in the same way: put the headers back on `view::heap_alloc` and the watched
+ * count is 0, reddening the routing rows.
  */
-class arming_backend_t final : public tr::mem::mem_backend_t {
+class arming_source_t final : public tr::mem::block_source_t {
    public:
-    explicit arming_backend_t(tr::mem::mem_backend_t& upstream = tr::mem::heap_backend()) noexcept
-        : mem_backend_t("test_folded_value"), up_(upstream) {}
+    arming_source_t() noexcept : block_source_t("test_folded_value") {}
 
-    [[nodiscard]] tr::view::segment_t* alloc(
-        std::size_t size, tr::mem::alloc_hint_t hint = tr::mem::alloc_hint_t::NONE) override {
-        if (serve_first_ >= 0) {  // serve the leading N draws, then refuse
+    /** @brief True for a draw this instrument watches (a folded POINT header's bytes). */
+    [[nodiscard]] static bool watched(std::size_t n) noexcept {
+        return n == kShortHeaderBytes || n == kNamedHeaderBytes;
+    }
+
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        if (!watched(bytes)) return tr::mem::heap_source().try_alloc(bytes, align);
+        if (serve_first_ >= 0) {  // serve the leading N watched draws, then refuse
             if (serve_first_ == 0) {
                 ++refusals_;
                 return nullptr;
@@ -186,32 +199,25 @@ class arming_backend_t final : public tr::mem::mem_backend_t {
         } else if (budget_ > 0) {
             --budget_;
         }
-        tr::view::segment_t* const seg = up_.alloc(size, hint);
-        if (seg != nullptr) {
+        void* const p = tr::mem::heap_source().try_alloc(bytes, align);
+        if (p != nullptr) {
             ++served_;
-            sizes_.push_back(size);
+            sizes_.push_back(bytes);
         }
-        return seg;
+        return p;
     }
-    void destroy(tr::view::segment_t* seg) noexcept override { up_.destroy(seg); }
-    [[nodiscard]] std::size_t alignment() const noexcept override { return up_.alignment(); }
-    [[nodiscard]] std::size_t max_segment_size() const noexcept override {
-        return up_.max_segment_size();
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        tr::mem::heap_source().release(p, bytes, align);
     }
 
-    /** @brief Refuse every allocation from now on. */
+    /** @brief Refuse every watched allocation from now on. */
     void arm() noexcept { budget_ = 0; }
-    /** @brief Serve the first @p k draws, then refuse — isolates a LATE header refusal. */
+    /** @brief Serve the first @p k watched draws, then refuse — isolates a LATE refusal. */
     void serve_first(int k) noexcept { serve_first_ = k; }
-    /** @brief How many allocations were REFUSED — the refusal instrument. */
+    /** @brief How many watched allocations were REFUSED — the refusal instrument. */
     [[nodiscard]] int refusals() const noexcept { return refusals_; }
     /** @brief How many were SERVED — the "the seam is consulted at all" instrument. */
     [[nodiscard]] int served() const noexcept { return served_; }
-    /** @brief Were ALL served draws exactly @p n bytes (the site-specific instrument)? */
-    [[nodiscard]] bool all_served_size(std::size_t n) const noexcept {
-        return !sizes_.empty() && std::all_of(sizes_.begin(), sizes_.end(),
-                                              [n](std::size_t s) noexcept { return s == n; });
-    }
     /** @brief Were ALL served draws either @p a or @p b bytes — the folded header widths,
      *         which differ by whether the node also carries its own `NAME` header. */
     [[nodiscard]] bool all_served_size_either(std::size_t a, std::size_t b) const noexcept {
@@ -221,20 +227,26 @@ class arming_backend_t final : public tr::mem::mem_backend_t {
     }
 
    private:
-    tr::mem::mem_backend_t& up_;
     int budget_ = -1;       // <0 ⇒ unlimited
-    int serve_first_ = -1;  // <0 ⇒ inactive; else draws to serve before refusing forever
+    int serve_first_ = -1;  // <0 ⇒ inactive; else watched draws to serve before refusing forever
     int refusals_ = 0;
     int served_ = 0;
     std::vector<std::size_t> sizes_{};
 };
 
-/** @brief Carve a caller-owned slab into a pool of @p slot-byte slots. */
+/**
+ * @brief A caller-owned slab served by a recycling @ref tr::mem::pool_source_t — the BOUNDED
+ *        composition arm, and after #873 phase 1 the whole graph's store rather than only its
+ *        value backend.
+ *
+ * Sized generously (64 KiB, 32 size classes) because the collapse means this one source now
+ * serves the pmr control blocks and the failable channel too, not just the header segments.
+ */
 struct scratch_pool_t {
     std::vector<std::byte> slab;
-    tr::mem::pool_t pool;
-    explicit scratch_pool_t(std::size_t slot, std::size_t slots = 64)
-        : slab(slots * (sizeof(tr::view::segment_t) + slot + 64)), pool(slab, slot) {}
+    std::vector<tr::mem::size_class_t> classes;
+    tr::mem::pool_source_t<> pool;
+    scratch_pool_t() : slab(64u * 1024u), classes(32), pool(slab, classes) {}
 };
 
 /**
@@ -291,8 +303,8 @@ int main() {
     // exactly the short-form header width. Checked BEFORE anything else: on the old
     // `view::heap_alloc` code the backend is asked for nothing and served() is 0.
     {
-        arming_backend_t be;
-        graph_t g(std::pmr::get_default_resource(), &be);
+        arming_source_t be;
+        graph_t g(&be);
         const vertex_handle_t root = build_subtree(g, payload);
         const int before = be.served();
         check(before == 0, "no write in the fixture touches the value seam (single-link stores)");
@@ -301,7 +313,7 @@ int main() {
         check(be.served() == kNodeCount, "one seam draw per folded node (the header count)");
         check(be.all_served_size_either(kShortHeaderBytes, kNamedHeaderBytes),
               "every seam draw is the POINT header width, plus the NAME header below the root");
-        check(be.refusals() == 0, "an unarmed backend refuses nothing");
+        check(be.refusals() == 0, "an unarmed source refuses nothing");
     }
 
     // (a2) ...and NOT the global heap: the identical folded read over a POOL-backed graph makes
@@ -310,8 +322,8 @@ int main() {
     {
         graph_t heap_g;
         const vertex_handle_t heap_root = build_subtree(heap_g, payload);
-        scratch_pool_t sp(/*slot=*/64);
-        graph_t pool_g(std::pmr::get_default_resource(), &sp.pool);
+        scratch_pool_t sp;
+        graph_t pool_g(&sp.pool);
         const vertex_handle_t pool_root = build_subtree(pool_g, payload);
         // Warm both paths once outside the count so no first-touch lazily-built state is
         // attributed to either arm.
@@ -332,19 +344,24 @@ int main() {
         // `heap_backend_t::alloc` makes TWO global-new calls per segment — the bytes and the
         // `segment_t` control object — where the pool carves both from its slab, so the exact
         // expected delta is 2 per node.
-        check(heap_arm - pool_arm == 2u * static_cast<std::size_t>(kNodeCount),
-              "the difference is exactly the per-node header count (2 global news each)");
+        // AT LEAST, not exactly, since #873 phase 1: the pool arm's ONE injected source now
+        // also serves the composed read's collect stack and any pmr block the read touches,
+        // where before those stayed on the global heap in both arms and the delta was exactly
+        // the header count. The floor is still the header count, and on the old code the two
+        // arms are equal, so the row is non-vacuous in the same way.
+        check(heap_arm - pool_arm >= 2u * static_cast<std::size_t>(kNodeCount),
+              "the difference covers at least the per-node header count (2 global news each)");
     }
 
     // (b) EXHAUSTION answered BY VALUE. A fully refusing backend makes the FIRST header
     // allocation fail: BACKPRESSURE, by value, never an abort and never a partial rope.
     {
-        arming_backend_t be;
-        graph_t g(std::pmr::get_default_resource(), &be);
+        arming_source_t be;
+        graph_t g(&be);
         const vertex_handle_t root = build_subtree(g, payload);
         be.arm();
         const auto r = g.read_subtree_folded(root, "peer");
-        check(be.refusals() > 0, "the armed backend WAS consulted (the refusal instrument)");
+        check(be.refusals() > 0, "the armed source WAS consulted (the refusal instrument)");
         check(!r.has_value() && r.error() == status_t::BACKPRESSURE,
               "a refused header degrades to BACKPRESSURE by value");
     }
@@ -352,8 +369,8 @@ int main() {
     // ...and a LATE refusal is not silently truncated: serve every header but the last, and the
     // whole read still rejects rather than returning a short subtree.
     {
-        arming_backend_t be;
-        graph_t g(std::pmr::get_default_resource(), &be);
+        arming_source_t be;
+        graph_t g(&be);
         const vertex_handle_t root = build_subtree(g, payload);
         be.serve_first(kNodeCount - 1);
         const auto r = g.read_subtree_folded(root, "peer");
@@ -368,8 +385,8 @@ int main() {
     {
         graph_t heap_g;
         const vertex_handle_t heap_root = build_subtree(heap_g, payload);
-        scratch_pool_t sp(/*slot=*/64);
-        graph_t pool_g(std::pmr::get_default_resource(), &sp.pool);
+        scratch_pool_t sp;
+        graph_t pool_g(&sp.pool);
         const vertex_handle_t pool_root = build_subtree(pool_g, payload);
         const std::vector<std::byte> a = folded_bytes(heap_g, heap_root);
         const std::vector<std::byte> b = folded_bytes(pool_g, pool_root);
@@ -382,8 +399,8 @@ int main() {
     // READ routes THERE, not to read_subtree_folded. Same instrument, same order — routing
     // first, and on the old `view::over_bytes` code served() is 0.
     {
-        arming_backend_t be;
-        graph_t g(std::pmr::get_default_resource(), &be);
+        arming_source_t be;
+        graph_t g(&be);
         const vertex_handle_t root = build_subtree(g, payload);
         check(be.served() == 0, "no write in the fixture touches the value seam (:children arm)");
         const auto r = g.read_children_folded(root);
@@ -393,14 +410,14 @@ int main() {
         check(be.all_served_size_either(kShortHeaderBytes, kNamedHeaderBytes),
               "every :children seam draw is the POINT header width, plus each member's NAME "
               "header");
-        check(be.refusals() == 0, "an unarmed backend refuses nothing on the :children fold");
+        check(be.refusals() == 0, "an unarmed source refuses nothing on the :children fold");
     }
 
     // ...and through the PRODUCTION wire route — the ":children" field READ, the path a peer
     // actually reaches this code by. Without this the fix could be proven only on a direct call.
     {
-        arming_backend_t be;
-        graph_t g(std::pmr::get_default_resource(), &be);
+        arming_source_t be;
+        graph_t g(&be);
         (void)build_subtree(g, payload);
         const auto r = g.read(path_t("/s:children"));
         check(r.has_value(), "the production :children field read succeeds");
@@ -415,8 +432,8 @@ int main() {
     {
         graph_t heap_g;
         const vertex_handle_t heap_root = build_subtree(heap_g, payload);
-        scratch_pool_t sp(/*slot=*/64);
-        graph_t pool_g(std::pmr::get_default_resource(), &sp.pool);
+        scratch_pool_t sp;
+        graph_t pool_g(&sp.pool);
         const vertex_handle_t pool_root = build_subtree(pool_g, payload);
         (void)children_bytes(heap_g, heap_root);  // warm both arms outside the count
         (void)children_bytes(pool_g, pool_root);
@@ -432,26 +449,26 @@ int main() {
 
         std::printf("    (:children global new: heap arm %zu, pool arm %zu)\n", heap_arm, pool_arm);
         check(pool_arm < heap_arm, "a pool-backed :children fold hits the global heap LESS");
-        check(heap_arm - pool_arm == 2u * static_cast<std::size_t>(kDirectChildCount + 1),
-              "the difference is exactly the member+outer header count (2 global news each)");
+        check(heap_arm - pool_arm >= 2u * static_cast<std::size_t>(kDirectChildCount + 1),
+              "the difference covers at least the member+outer header count (2 news each)");
     }
 
     // (e) EXHAUSTION on the :children fold, answered BY VALUE. Fully refusing first, then a LATE
     // refusal (serve every member header, refuse only the OUTER one) — a truncated listing must
     // never be returned under an OK status.
     {
-        arming_backend_t be;
-        graph_t g(std::pmr::get_default_resource(), &be);
+        arming_source_t be;
+        graph_t g(&be);
         const vertex_handle_t root = build_subtree(g, payload);
         be.arm();
         const auto r = g.read_children_folded(root);
-        check(be.refusals() > 0, "the armed backend WAS consulted on the :children fold");
+        check(be.refusals() > 0, "the armed source WAS consulted on the :children fold");
         check(!r.has_value() && r.error() == status_t::BACKPRESSURE,
               "a refused member header degrades to BACKPRESSURE by value");
     }
     {
-        arming_backend_t be;
-        graph_t g(std::pmr::get_default_resource(), &be);
+        arming_source_t be;
+        graph_t g(&be);
         const vertex_handle_t root = build_subtree(g, payload);
         be.serve_first(kDirectChildCount);  // every member header, then refuse the outer one
         const auto r = g.read_children_folded(root);
@@ -466,8 +483,8 @@ int main() {
     {
         graph_t heap_g;
         const vertex_handle_t heap_root = build_subtree(heap_g, payload);
-        scratch_pool_t sp(/*slot=*/64);
-        graph_t pool_g(std::pmr::get_default_resource(), &sp.pool);
+        scratch_pool_t sp;
+        graph_t pool_g(&sp.pool);
         const vertex_handle_t pool_root = build_subtree(pool_g, payload);
         const std::vector<std::byte> a = children_bytes(heap_g, heap_root);
         const std::vector<std::byte> b = children_bytes(pool_g, pool_root);

@@ -24,7 +24,7 @@
 #include <string_view>
 #include <vector>
 
-#include "libtracer/mem_pool.hpp"
+#include "libtracer/mem_source.hpp"
 #include "libtracer/tracer.hpp"
 #include "test_support.hpp"
 
@@ -59,19 +59,60 @@ rope_t multilink(std::span<const std::byte> bytes) {
     return r;
 }
 
-/** @brief Carve @p slab (caller-owned) into a pool of @p slot-byte slots. */
-struct scratch_pool_t {
-    std::vector<std::byte> slab;
-    tr::mem::pool_t pool;
-    explicit scratch_pool_t(std::size_t slot, std::size_t slots = 16)
-        : slab(slots * (sizeof(tr::view::segment_t) + slot + 64)), pool(slab, slot) {}
+/**
+ * @brief A pass-through source that refuses a draw of EXACTLY @p refuse_bytes and counts what
+ *        it served — the ADR-0060 seam instrument, re-aimed at the one injected source.
+ *
+ * @par Why a size predicate and not a budget (#873 phase 1)
+ * The old instrument was a `tr::mem::pool_t` injected as `value_backend`, so "a slot too small
+ * to hold the value" isolated the flatten by construction. `graph_t` now takes ONE source and
+ * builds the backend over it, so a source that simply refuses past a budget would starve the
+ * vertex registration and the per-write LKV control block long before the flatten — proving
+ * nothing about the seam under test.
+ *
+ * Refusing exactly the flattened TLV's byte count isolates the same allocation the undersized
+ * pool used to: it is the ONE draw `value.materialize(*value_backend_)` makes, and no other
+ * channel in this fixture asks for that size. `served_exactly()` is the positive half — the
+ * routing instrument that reddens if the flatten stops using the seam at all.
+ */
+class value_probe_source_t final : public tr::mem::block_source_t {
+   public:
+    /** @brief Refuse draws of exactly @p refuse_bytes; 0 refuses nothing. */
+    explicit value_probe_source_t(std::size_t refuse_bytes = 0) noexcept
+        : block_source_t("value_probe"), refuse_(refuse_bytes) {}
+
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        if (refuse_ != 0 && bytes == refuse_) {
+            ++refused_;
+            return nullptr;
+        }
+        void* const p = tr::mem::heap_source().try_alloc(bytes, align);
+        if (p != nullptr && bytes == watch_) ++served_watched_;
+        return p;
+    }
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        tr::mem::heap_source().release(p, bytes, align);
+    }
+
+    /** @brief Count draws of exactly @p n bytes from now on (the routing instrument). */
+    void watch(std::size_t n) noexcept { watch_ = n; }
+    /** @brief How many watched-size draws were served. */
+    [[nodiscard]] std::size_t served_watched() const noexcept { return served_watched_; }
+    /** @brief How many draws were refused. */
+    [[nodiscard]] std::size_t refused() const noexcept { return refused_; }
+
+   private:
+    std::size_t refuse_;
+    std::size_t watch_ = 0;
+    std::size_t served_watched_ = 0;
+    std::size_t refused_ = 0;
 };
 
 }  // namespace
 
 /** @brief Run the ADR-0060 value-backend seam probes. */
 int main() {
-    std::printf("graph_t value_backend_ seam (ADR-0060):\n");
+    std::printf("graph_t value seam over the injected source (ADR-0060, #873 phase 1):\n");
 
     // The field-write value: a 4-byte VALUE (5000 LE) written to an owner-declared app
     // field. Any field write flattens a multi-link value at the ONE ADR-0060 seam site
@@ -105,17 +146,21 @@ int main() {
     // ROUTING + BEHAVIOUR: a pool with room accepts the multi-link field write and
     // reads it back exactly — the flatten drew from the injected pool.
     {
-        scratch_pool_t sp(/*slot=*/64);
-        graph_t g(std::pmr::get_default_resource(), &sp.pool);
+        value_probe_source_t src;
+        src.watch(tlv.size());
+        graph_t g(&src);
         const auto v = with_field(g);
         const auto w = g.write(v, fp->field(), multilink(tlv));
-        check(w.has_value(), "multi-link field write through a pool-backed graph succeeds");
+        check(w.has_value(), "multi-link field write through a source-backed graph succeeds");
+        check(src.served_watched() == 1,
+              "the flatten drew EXACTLY the TLV's bytes from the injected source (routing)");
         check(stored_bytes(g, v) == tlv, "value read back byte-exact (the flattened VALUE TLV)");
         // A plain single-link value write never materializes — the seam is untouched
         // and the ordinary store path is unaffected.
         const std::array<std::byte, 3> pv_bytes{std::byte{0xAA}, std::byte{0xBB}, std::byte{0xCC}};
         const auto pv = g.write(v, rope_t{view_t::over(tr::view::borrow_const(pv_bytes))});
-        check(pv.has_value(), "ordinary single-link value write is unaffected by the pool seam");
+        check(pv.has_value(), "ordinary single-link value write is unaffected by the seam");
+        check(src.served_watched() == 1, "...and never reaches the flatten (no second draw)");
     }
 
     // BACKPRESSURE (§3): a pool whose slot cannot hold the value makes the flatten
@@ -123,20 +168,21 @@ int main() {
     // heap fallback). The SAME value on the default heap accepts — proving the seam is
     // actually consulted, not ignored.
     {
-        scratch_pool_t tiny(/*slot=*/4);  // < the ~10-byte flattened TLV
-        graph_t g(std::pmr::get_default_resource(), &tiny.pool);
+        value_probe_source_t refusing(tlv.size());  // refuses the flatten, serves all else
+        graph_t g(&refusing);
         const auto v = with_field(g);
         const auto w = g.write(v, fp->field(), multilink(tlv));
+        check(refusing.refused() > 0, "the refusing source WAS consulted by the flatten");
         check(!w.has_value() && w.error() == status_t::BACKPRESSURE,
-              "an undersized pool BACKPRESSUREs the write (no heap fallback, no TYPE_MISMATCH)");
+              "a refused flatten BACKPRESSUREs the write (no heap fallback, no TYPE_MISMATCH)");
         check(stored_bytes(g, v).empty(), "the rejected write landed nothing");
     }
     {
-        graph_t heap;  // default heap backend
+        graph_t heap;  // the process-default source
         const auto v = with_field(heap);
         const auto w = heap.write(v, fp->field(), multilink(tlv));
         check(w.has_value() && stored_bytes(heap, v) == tlv,
-              "the identical write on the default-heap graph accepts (contrast: seam is live)");
+              "the identical write on the default-source graph accepts (contrast: seam is live)");
     }
 
     return tr::testing::summary("graph_value_backend");
