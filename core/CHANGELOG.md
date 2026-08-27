@@ -582,6 +582,20 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   re-emission are unchanged, and no conformance vector's bytes move. The §4.7 attach-forward
   contract (§7 vector 7) is newly pinned by `core/tests/delivery_class_honour_test.cpp`.
 
+### Fixed
+
+- **`tr::wire::playout_batch` no longer signed-overflows when the last derived sample time is
+  negative** ([#1580](https://github.com/avatarsd-llc/libtracer/issues/1580)). The re-prime
+  computed its epoch headroom as `int64max - last_ns`, which is undefined behaviour the moment
+  `last_ns < 0` — peer-reachable, because a NON-UNIFORM batch's time is `base + offsets[i]` and
+  RFC-0025 §4.2.1 permits a negative `i32` offset, so `read_batch`'s `base_ns >= 0` guarantee
+  does not survive the addition. Reproduced under `-fsanitize=undefined` with a single negative
+  offset. The headroom is now computed on both arms of the sign, mirroring the guarded addition
+  of `batch_view_t::sample_time_ns`, and the re-prime's own sum is spelled unsigned so it stays
+  defined for every `dt_ns` the guard admits. Behaviour on a non-negative derived time is
+  unchanged, and the zero-allocation pin is unchanged; regression pinned by claim 7 of
+  `core/tests/playout_test.cpp`.
+
 ## [0.15.1] — 2026-08-23
 
 ### Added
