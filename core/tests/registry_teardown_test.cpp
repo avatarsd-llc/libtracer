@@ -17,7 +17,10 @@
  *     which is what keeps a concurrent lock-free reader's iteration valid;
  *   - re-creating the same NAME REUSES its tombstone, so create/remove churn on a stable
  *     name set does not grow the table (the aggressive-churn HIL case);
- *   - removing an unknown NAME is a clean NotFound, and removal is idempotent.
+ *   - removing an unknown NAME is a clean NotFound, and removal is idempotent;
+ *   - and, since #873 phase 1, that the chunks the table grows by come from the INJECTED
+ *     `tr::mem::block_source_t`, are returned to it at teardown, and answer a refusal by
+ *     value rather than falling back to the global heap.
  */
 
 #include <cstddef>
@@ -29,6 +32,7 @@
 #include <string_view>
 #include <vector>
 
+#include "libtracer/mem_source.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "test_support.hpp"
@@ -229,6 +233,72 @@ void test_duplicate_add_rebinds() {
  * Pinned by ADDRESS rather than by value: a stale pointer into a reallocated vector usually
  * still reads plausible bytes, so only identity catches the regression.
  */
+/**
+ * @brief The chunks come from the INJECTED source, are RETURNED at teardown, and a refusal
+ *        is a clean `false` rather than a fallback to the global heap (#873 phase 1).
+ *
+ * Three properties in one fixture, because they are the same claim from three sides. The
+ * counting source proves the bytes travel the seam at all (on the pre-#873 code it serves
+ * nothing and the first row reddens); its balance at scope exit proves teardown releases
+ * every chunk in the size it took it, which is what a pool source needs to recycle them; and
+ * a source that refuses proves the registry answers by value on the growth path it always
+ * answered by value on — the seam `conn_add_oom_test` drives from the other end.
+ */
+void test_chunks_draw_from_the_injected_source() {
+    std::printf("registry chunks draw from the injected block_source_t (#873 phase 1)\n");
+
+    /** @brief A pass-through source counting live blocks and the sizes it served. */
+    class counting_source_t final : public tr::mem::block_source_t {
+       public:
+        counting_source_t() noexcept : block_source_t("counting") {}
+        std::size_t served = 0; /**< @brief Blocks handed out. */
+        std::size_t live = 0;   /**< @brief Blocks not yet returned. */
+        bool refuse = false;    /**< @brief Refuse everything from now on. */
+
+        [[nodiscard]] void* try_alloc(std::size_t n, std::size_t a) noexcept override {
+            if (refuse) return nullptr;
+            void* const p = tr::mem::heap_source().try_alloc(n, a);
+            if (p == nullptr) return nullptr;
+            ++served;
+            ++live;
+            return p;
+        }
+        void release(void* p, std::size_t n, std::size_t a) noexcept override {
+            --live;
+            tr::mem::heap_source().release(p, n, a);
+        }
+    };
+
+    counting_source_t src;
+    std::vector<std::unique_ptr<sink_link_t>> links;
+    {
+        child_registry_t reg(src);
+        // Enough names to cross at least one chunk boundary, so more than one block is drawn.
+        constexpr std::size_t kN = 9;
+        bool added = true;
+        for (std::size_t i = 0; i < kN; ++i) {
+            links.push_back(std::make_unique<sink_link_t>());
+            added = added && reg.add("net/ws-client/c" + std::to_string(i), *links.back());
+        }
+        check(added && reg.live_size() == kN, "every child registered through the seam");
+        check(src.served >= 2, "the INJECTED source served the chunks (more than one of them)");
+        check(src.live == src.served, "and nothing was returned while the table is alive");
+    }
+    check(src.live == 0, "teardown returned every chunk to the source (sized release)");
+
+    // A refusing source: the growth answers by value, exactly as a full table does — never an
+    // abort, and never a silent fallback to the global heap.
+    {
+        counting_source_t refusing;
+        refusing.refuse = true;
+        child_registry_t reg(refusing);
+        sink_link_t link;
+        check(!reg.add("net/ws-client/x", link), "a refused chunk makes add() report failure");
+        check(reg.size() == 0, "and registers nothing at all");
+        check(refusing.served == 0, "nothing was served, so nothing escaped to the heap either");
+    }
+}
+
 void test_slot_addresses_are_stable() {
     std::printf("slot addresses survive appends (#521)\n");
     child_registry_t reg;
@@ -333,6 +403,7 @@ int main() {
 
     test_duplicate_add_rebinds();
     test_slot_addresses_are_stable();
+    test_chunks_draw_from_the_injected_source();
     test_digest_paths_agree();
     return tr::testing::summary("registry_teardown");
 }

@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "libtracer/byteorder.hpp"
+#include "libtracer/mem_source.hpp"
 #include "libtracer/packed_path.hpp"
 #include "libtracer/tlv.hpp"
 #include "libtracer/tlv_emit.hpp"
@@ -89,14 +90,34 @@ namespace tr::net {
  */
 class child_registry_t {
    public:
-    child_registry_t() = default;
+    /**
+     * @brief Draw this table's chunks from @p src (#873 phase 1).
+     *
+     * The chunks were `new (std::nothrow) chunk_t()` on the **global heap** — one of the four
+     * channels #873 named, and the one an injected-everywhere node could still not bound. They
+     * are long-lived control state whose high-water mark is the count of DISTINCT link names
+     * ever registered, so a bounded node wants them inside its slab like everything else.
+     * `fwd_router_t` points this at its `label_src` for exactly that reason: same lifetime
+     * class as the label tables, and deliberately NOT the per-frame `rx` store, which a
+     * @ref tr::mem::bump_source_t may legitimately be.
+     *
+     * The default is @ref tr::mem::heap_source, and the process-default composition is
+     * byte-for-byte what it was: `heap_source_t` serves a fundamental-alignment request
+     * through the same plain nothrow `operator new` the `new (std::nothrow)` expression used.
+     *
+     * @param src Must outlive this registry and every slot reference handed out of it.
+     */
+    explicit child_registry_t(mem::block_source_t& src = mem::heap_source()) noexcept
+        : src_(&src) {}
     child_registry_t(const child_registry_t&) = delete;
     child_registry_t& operator=(const child_registry_t&) = delete;
-    /** @brief Frees the chunks. Nothing is reclaimed before this point, by design. */
+    /** @brief Returns the chunks to the injected source. Nothing is reclaimed before this
+     *         point, by design — see the class's slot-stability contract. */
     ~child_registry_t() {
         for (chunk_t* c = head_.load(std::memory_order_relaxed); c != nullptr;) {
             chunk_t* const nxt = c->next.load(std::memory_order_relaxed);
-            delete c;
+            c->~chunk_t();
+            src_->release(c, sizeof(chunk_t), alignof(chunk_t));
             c = nxt;
         }
     }
@@ -874,11 +895,26 @@ class child_registry_t {
         }
     }
 
+    /**
+     * @brief One chunk from the injected source, or `nullptr` — the ONE locus of this
+     *        table's allocation (#873 phase 1).
+     *
+     * Factored out so the two growth sites in `append` spell the refusal once. A refused
+     * chunk is not an abort and not a fallback to the global heap: `append` answers
+     * `nullptr` and `add` reports that it could not grow, which is the same answer a full
+     * table already gave.
+     */
+    [[nodiscard]] chunk_t* new_chunk() noexcept {
+        void* const raw = src_->try_alloc(sizeof(chunk_t), alignof(chunk_t));
+        if (raw == nullptr) return nullptr;
+        return new (raw) chunk_t();
+    }
+
     /** @brief Append a slot and publish it. Control plane only — serialized by the caller. */
     child_t* append() {
         chunk_t* c = head_.load(std::memory_order_relaxed);
         if (c == nullptr) {
-            c = new (std::nothrow) chunk_t();
+            c = new_chunk();
             if (c == nullptr) return nullptr;
             head_.store(c, std::memory_order_release);
         }
@@ -887,7 +923,7 @@ class child_registry_t {
             if (n < kChunk) return &c->slots[n];  // caller fills, then calls publish()
             chunk_t* nxt = c->next.load(std::memory_order_relaxed);
             if (nxt == nullptr) {
-                nxt = new (std::nothrow) chunk_t();
+                nxt = new_chunk();
                 if (nxt == nullptr) return nullptr;
                 c->next.store(nxt, std::memory_order_release);
             }
@@ -906,6 +942,11 @@ class child_registry_t {
             }
         }
     }
+
+    /** @brief Where the chunks come from (#873 phase 1). Borrowed; never owned, and it must
+     *         outlive this registry. Declared beside the head for the same layout reason
+     *         `graph_t`'s cold seams are declared last: nothing on the resolve path reads it. */
+    mem::block_source_t* src_;
 
     std::atomic<chunk_t*> head_{nullptr};
     /** @brief The mount-shape generation (#765) — see @ref mount_generation. */

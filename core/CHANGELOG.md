@@ -286,6 +286,29 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   ([#897](https://github.com/avatarsd-llc/libtracer/issues/897)) — and re-layering the backend /
   pmr adapters into the backend seam proper is **phase 3**.
 
+- **`tr::net::child_registry_t`'s chunks draw from an injected `tr::mem::block_source_t`, not
+  the global heap** ([#873](https://github.com/avatarsd-llc/libtracer/issues/873) phase 1,
+  the second of the two cold-path channels the ruling names). The NAME→link demux table grew
+  by `new (std::nothrow) chunk_t()` — one of the four allocation channels #873 was filed
+  about, and the one that meant a node injecting sources at every seam still could not bound
+  its own routing table. `child_registry_t` now takes
+  `mem::block_source_t& src = mem::heap_source()` and allocates its chunks with
+  `src.try_alloc(sizeof(chunk_t), alignof(chunk_t))`, returning them with the matching sized
+  `release` at teardown.
+
+  `fwd_router_t` wires it to **`label_src`**, deliberately and not to `rx`: chunks are
+  long-lived control state whose high-water mark is the count of DISTINCT link names ever
+  registered, so they belong with the label tables and must not sit on a per-frame store that
+  a `bump_source_t` may legitimately be (it would fill monotonically under them). No public
+  `fwd_router_t` signature changed.
+
+  Behaviour is unchanged in every direction that matters: a refused chunk is still `nullptr`,
+  `append` still answers `nullptr`, `add` still reports it could not grow, and
+  `transport_vertex_t::make_connection` still rolls the whole creation back with
+  `BACKPRESSURE` (`conn_add_oom_test`, `mount_add_oom_test`). The process default is
+  byte-for-byte the old allocation: `heap_source_t` serves a fundamental-alignment request
+  through the same plain nothrow `operator new` the `new (std::nothrow)` expression used.
+
 - **`tr::mem::heap_source_t` serves a fundamental-alignment request through the PLAIN nothrow
   `operator new`, not the over-aligned one** ([#873](https://github.com/avatarsd-llc/libtracer/issues/873)
   phase 1). A request at or below `__STDCPP_DEFAULT_NEW_ALIGNMENT__` no longer goes through the

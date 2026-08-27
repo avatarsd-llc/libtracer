@@ -245,12 +245,12 @@ ANCHORS = [
     # silently (they cited the pre-#739 header). Anchored so they cannot rot again.
     # zero-copy-and-flatten.md's rope-tier citations and ADR-0072's stale-comment pointer —
     # all four had rotted on main and were re-asserted by a mechanical +24 shift (#768 verify).
-    ("core/include/libtracer/fwd_router.hpp:1522", "Terminus over a MULTI-LINK rope"),
-    ("core/include/libtracer/fwd_router.hpp:1528", "64 KB / 2 links"),
-    ("core/include/libtracer/fwd_router.hpp:1581", "The forward hop, read entirely by OFFSET"),
+    ("core/include/libtracer/fwd_router.hpp:1527", "Terminus over a MULTI-LINK rope"),
+    ("core/include/libtracer/fwd_router.hpp:1533", "64 KB / 2 links"),
+    ("core/include/libtracer/fwd_router.hpp:1586", "The forward hop, read entirely by OFFSET"),
     ("core/include/libtracer/fwd_router.hpp:250", "explicit fwd_router_t"),
-    ("core/include/libtracer/fwd_router.hpp:480", "bool add_child"),
-    ("core/include/libtracer/fwd_router.hpp:745", "using reply_fn_t"),
+    ("core/include/libtracer/fwd_router.hpp:485", "bool add_child"),
+    ("core/include/libtracer/fwd_router.hpp:750", "using reply_fn_t"),
     ('core/include/libtracer/fwd_router.hpp:252', 'mem::block_source_t* rx = &mem::heap_source(),'),
     ('core/include/libtracer/fwd_router.hpp:253', 'mem::mem_backend_t* flat = &mem::heap_backend(),'),
     # ("core/include/libtracer/fwd_router.hpp", "Slot addresses are NOT stable") — anchor
@@ -259,15 +259,15 @@ ANCHORS = [
     # live tree moves while its citation is frozen by policy: any edit above it orphans the
     # anchor and reds the gate, with no correct re-pin available on either side. An anchor
     # exists to keep a LIVE doc citation from rotting; this text has no live citer left.
-    ("core/include/libtracer/child_registry.hpp:327", "bool add(std::string name"),
-    ("core/include/libtracer/child_registry.hpp:585",
+    ("core/include/libtracer/child_registry.hpp:348", "bool add(std::string name"),
+    ("core/include/libtracer/child_registry.hpp:606",
      "[[nodiscard]] static transport_t* resolve_peer(const child_t& child, std::string_view peer) {"),
-    ("core/include/libtracer/child_registry.hpp:600", "bool erase(std::string_view name) {"),
-    ("core/include/libtracer/child_registry.hpp:633", "entry_by_name"),
-    ("core/include/libtracer/child_registry.hpp:654",
+    ("core/include/libtracer/child_registry.hpp:621", "bool erase(std::string_view name) {"),
+    ("core/include/libtracer/child_registry.hpp:654", "entry_by_name"),
+    ("core/include/libtracer/child_registry.hpp:675",
      "[[nodiscard]] transport_t* by_name(std::string_view name) const {"),
-    ("core/include/libtracer/child_registry.hpp:695", "std::size_t size()"),
-    ("core/include/libtracer/child_registry.hpp:705", "live_size"),
+    ("core/include/libtracer/child_registry.hpp:716", "std::size_t size()"),
+    ("core/include/libtracer/child_registry.hpp:726", "live_size"),
     ("core/src/transport_vertex.cpp:804", "return std::unexpected(status_t::BACKPRESSURE);",
      "if (!router_.add_child(qualified, *link))"),
     ("core/include/libtracer/transport_vertex.hpp:494", "result_t<void> register_module"),
@@ -491,9 +491,9 @@ ANCHORS = [
      "* @param flat  The byte backend EVERY rope flatten on the router's forward AND terminus"),
     ('core/include/libtracer/fwd_router.hpp:251',
      'mem::block_source_t* label_src = &mem::heap_source(),'),
-    ('core/include/libtracer/fwd_router.hpp:761',
+    ('core/include/libtracer/fwd_router.hpp:766',
      "* Invoked (with the `FWD{REPLY}` frame as a @ref view::rope_t) when a REPLY's first"),
-    ('core/include/libtracer/fwd_router.hpp:1969',
+    ('core/include/libtracer/fwd_router.hpp:1974',
      '[[nodiscard]] mem::block_source_t& rx_for(const child_rx_ctx_t* ctx) const noexcept {'),
     # core/include/libtracer/grammar.hpp
     ('core/include/libtracer/grammar.hpp:461',
@@ -816,7 +816,7 @@ ANCHORS = [
     ('core/src/transport_ws.cpp:739', 'std::array<std::byte, 4096> chunk;',
      'void transport_ws_client::serve(int fd, std::vector<std::byte> pipelined) {'),
     # core/tests/registry_teardown_test.cpp
-    ('core/tests/registry_teardown_test.cpp:281', 'void test_digest_paths_agree() {'),
+    ('core/tests/registry_teardown_test.cpp:351', 'void test_digest_paths_agree() {'),
     # core/tests/tlv_arena_test.cpp
     ('core/tests/tlv_arena_test.cpp:324', 'const std::vector<std::byte> deep_bytes = encode(nested(100));'),
     # integrations/esp-idf/libtracer/httpd_ws_link.cpp
@@ -967,9 +967,9 @@ ANCHORS = [
      'if (path_len > kAdvertiseMaxPathLen) return std::nullopt;  // wedge bound (see constant)'),
     ('core/include/libtracer/config.hpp:162',
      '* every index taken falls back to copying the CURRENT array under the vertex stripe mutex,'),
-    ('core/include/libtracer/fwd_router.hpp:537',
+    ('core/include/libtracer/fwd_router.hpp:542',
      '[[nodiscard]] graph::result_t<void> subscribe_toward(const graph::path_t& producer,'),
-    ('core/include/libtracer/fwd_router.hpp:1495',
+    ('core/include/libtracer/fwd_router.hpp:1500',
      '*         link delivers ropes (nullptr on the borrowed-span path). @p bus_child is the'),
     ('core/include/libtracer/graph.hpp:891',
      "* @brief This node's own reference to @p vh — the MINT side of a bound-path element"),
@@ -1145,13 +1145,13 @@ ANCHORS = [
      '[[nodiscard]] virtual source_stats_t stats() const noexcept { return {}; }'),
     # core/include/libtracer/fwd_router.hpp
     ('core/include/libtracer/fwd_router.hpp:83', 'struct router_stats_t {'),
-    ('core/include/libtracer/fwd_router.hpp:389',
+    ('core/include/libtracer/fwd_router.hpp:394',
      '[[nodiscard]] router_stats_t drop_stats() const noexcept {'),
-    ('core/include/libtracer/fwd_router.hpp:412',
-     '[[nodiscard]] mem::block_source_t& label_source() const noexcept { return *label_src_; }'),
-    ('core/include/libtracer/fwd_router.hpp:415',
-     '[[nodiscard]] mem::block_source_t& rx_source() const noexcept { return *rx_; }'),
     ('core/include/libtracer/fwd_router.hpp:417',
+     '[[nodiscard]] mem::block_source_t& label_source() const noexcept { return *label_src_; }'),
+    ('core/include/libtracer/fwd_router.hpp:420',
+     '[[nodiscard]] mem::block_source_t& rx_source() const noexcept { return *rx_; }'),
+    ('core/include/libtracer/fwd_router.hpp:422',
      '[[nodiscard]] mem::mem_backend_t& flatten_backend() const noexcept { return *flat_; }'),
     # core/include/libtracer/route_handle.hpp
     ('core/include/libtracer/route_handle.hpp:243',
