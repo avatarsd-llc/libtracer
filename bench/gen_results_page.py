@@ -507,6 +507,14 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "nothing but a lock stripe.",
         "ops/s · ns p50, per thread count"),
     instrument_t(
+        "bench_hazard_node.cpp", "scaling", (),
+        "Isolates hazard-slot NODE ACQUISITION, which every other LKV bench amortizes away: it "
+        "holds thousands of never-written slots live so that each publish takes the allocating "
+        "arm rather than the free list, and reports that arm, the retire-scan-free path and a "
+        "free-list-hit control separately. Batch-derived per-operation figures, so the "
+        "distribution columns carry no distribution.",
+        "ns per acquisition · ns per release"),
+    instrument_t(
         "bench_contention.cpp", "scaling", (),
         "Measures the machine rather than libtracer: nine arms isolating a thread-private "
         "counter, a shared read, contended read-modify-writes, false sharing and lock costs, so "

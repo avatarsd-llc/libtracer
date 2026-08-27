@@ -289,7 +289,31 @@ Three consequences are worth stating plainly.
 
 The other cold-path channel phase 1 closes is `tr::net::child_registry_t`'s chunked list — the one NAME→link demux table. It grew by `new (std::nothrow) chunk_t()`, so a node that had injected a source at every visible seam still could not bound its own routing table. It now takes a `block_source_t` (defaulting to `heap_source()`) and `fwd_router_t` wires it to **`label_src`**, not to `rx`. That split is the point: chunks are long-lived state whose high-water mark is the count of distinct link names ever registered, and a `bump_source_t` — a legitimate choice for the per-frame `rx` store — would fill monotonically under them. Nothing else changed: a refused chunk is still a `nullptr` that `add` reports and `make_connection` rolls back.
 
-**What still bypasses the injection after phase 1.** The LKV hazard-slot nodes are still `new (std::nothrow)` on the global heap — phase 2, gated on a dedicated hazard-slot acquisition A/B because the naive fix puts an atomic on `store()`. Re-layering the backend and pmr adapters into the backend seam proper is phase 3. And the `std::vector` growth behind `tr::detail::try_reserve` / `try_push_back` migrates only where the container's element type allows it; the sites that cannot are annotated in place.
+**What still bypasses the injection after phase 1.** Re-layering the backend and pmr adapters into the backend seam proper is phase 3. And the `std::vector` growth behind `tr::detail::try_reserve` / `try_push_back` migrates only where the container's element type allows it; the sites that cannot are annotated in place. The LKV hazard-slot nodes were phase 2, and they are a **carve-out** — see the next section.
+
+### The carve-out: LKV hazard-slot nodes stay on the global heap
+
+`hazard_slot_t`'s indirection nodes (`core/include/libtracer/lkv_slot.hpp`, `detail_hp::acquire_node`) allocate with `new (std::nothrow) node_t` and free with `delete`, and that is now a **decision**, not an omission. [#873](https://github.com/avatarsd-llc/libtracer/issues/873) phase 2 was staged as "move them onto the injected `block_source_t`, gated on a dedicated before/after acquisition A/B; a regression outside the null band reverts the phase and documents the carve-out." It was implemented, measured, and reverted on that gate.
+
+The instrument is `bench/bench_hazard_node.cpp`, written for this question because no existing bench could answer it: acquisition is amortized to a free-list hit after a participant's first publish, so a bench that publishes in a loop reads a flat line whatever the substrate does. It holds thousands of never-written slots live so every publish takes the allocating arm, and reports that arm (`hazard-acquire`), the free path (`hazard-release`) and a free-list-hit control (`hazard-steady`) separately.
+
+Measured under the A/B protocol (`docs/methodology.md` §"The A/B protocol", spliced into the [Performance & conformance](../performance.md) page) — same source directory, two build directories, both arms pinned to one logical CPU, 12 interleaved rounds with the first discarded, best-of-rounds, on an AMD EPYC 9115:
+
+| arm | global heap | injected source | delta | two-binary A/A null |
+| --- | ---: | ---: | ---: | ---: |
+| `hazard-acquire` (allocating publish) | 10.62 ns/op | 13.03 ns/op | **+22.7 %** | +0.45 % |
+| `hazard-steady` (free-list hit) | 10.45 ns/op | 10.82 ns/op | **+3.5 %** | −1.1 % |
+| `hazard-release` (retire → scan → free) | 43.18 ns/op | 44.01 ns/op | +1.9 % | +2.1 % |
+
+Ranges are disjoint on the first two arms (acquire 10.62–11.17 against 13.03–13.72; steady 10.45–10.77 against 10.82–11.29), so this is not a window. End to end at the `hazard_slot_t` binding, `bench_libtracer fan` reads **−3.6 % to −6.9 %** deliveries/s and **+3.6 % to +7.1 %** p50 across the fan-out ladder, reproduced across two independent 12-round sessions; `bench_libtracer lkv`'s publish-path rows stay inside ±1.3 % with identical p50s.
+
+Three things the numbers say, in the order they matter:
+
+- **The cost is the indirect call, and it is irreducible at this seam.** A `block_source_t` draw is a virtual `try_alloc` through a base the compiler cannot devirtualize; the path it replaces is a direct call to the plain nothrow `operator new`, which glibc's tcache serves in about ten nanoseconds. There is no version of the injected draw that is cheaper than the call it adds.
+- **The free-list arm regressed too, and that is the disqualifying half.** `hazard-steady` never reaches the substrate. It moved because the substrate call re-partitioned the compiler's budget around `scan`, which a steady publisher runs once every `kRetireBatch` publishes. Moving the allocating body out of line (`noinline`/`cold`) was tried — the standard neutralization — and did not recover it; applying the same treatment to the free body made it worse.
+- **What a bounded node would have bought here is small.** A hazard node is two words plus a `shared_ptr`, one per *participant thread* in steady state, not one per write — the free list makes the steady publish allocation-free by construction. So the bound this migration would have added covers a working set of `kHazardReaderSlots`-ish nodes, against a measured tax on every publish at the binding that uses them.
+
+A future attempt should therefore start from a different shape rather than from this one — the obvious candidate is drawing from the source only when one has actually been installed, keeping the plain-`operator new` arm as the untouched default, which trades the uniformity of "one injection feeds everything" for a hot path that does not move. That is a design question for whoever reopens it, not a tuning exercise on the code that was reverted. Re-run `bench_hazard_node` under the protocol above before believing any replacement.
 
 
 Two companions ship with it, because the migrated call sites all need the same pair:

@@ -142,6 +142,15 @@ add_executable(bench_lkv_slot bench_lkv_slot.cpp)
 target_link_libraries(bench_lkv_slot PRIVATE libtracer)
 target_compile_options(bench_lkv_slot PRIVATE -Wall -Wextra)
 
+# Hazard-slot node ACQUISITION in isolation (#873 phase 2). bench_lkv_slot above measures the
+# slot under concurrency, where acquisition is amortized to a free-list hit and a substrate
+# change would read as a flat line; this one holds thousands of never-written slots live so
+# every publish takes the allocating arm. Instantiates hazard_slot_t DIRECTLY, so it measures
+# the same code at either -DLIBTRACER_LKV_SLOT binding. Diagnostic, not a perf gate.
+add_executable(bench_hazard_node bench_hazard_node.cpp)
+target_link_libraries(bench_hazard_node PRIVATE libtracer)
+target_compile_options(bench_hazard_node PRIVATE -Wall -Wextra)
+
 # What one shared cache line costs, with libtracer entirely out of the picture: nine
 # primitives (private counter, read-only share, 1/2/4 contended RMWs, shared_mutex read
 # lock, mutex, atomic<shared_ptr> load, shared_ptr copy) swept across thread counts. The
