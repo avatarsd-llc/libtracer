@@ -21,7 +21,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   peer-reachable byte seams still want the DRAM-critical pool); what changes is that the graph's
   share of them is one argument instead of three. The bundled examples construct
   `graph_t` with no argument and are unaffected. The LKV hazard-slot nodes still allocate on the
-  global heap — that is core's phase 2, and a device recipe cannot bound them yet.
+  global heap — core's phase 2 measured that migration off its own gate and **reverted** it, so
+  that is now a documented carve-out rather than pending work, and a device recipe cannot bound
+  them.
+
+- **(inherited from core) Two more channels reach the injected slab, and a segment costs one
+  block instead of two** ([#873](https://github.com/avatarsd-llc/libtracer/issues/873) phase 3).
+  A device that injects a `tr::mem::pool_source_t` gets two changes it can see in its slab
+  census. The graph's **read-back encoders** — `:point`, `:settings`, `:acl`, `:children`, the
+  identity record and the rest — now mint their segments from that slab instead of the global
+  heap, so a peer's READ is charged to the deployer's memory like every other channel; size the
+  slab for it. And `source_backend_t` draws the `segment_t` control block and the payload in
+  ONE block rather than two, which on a size-classed `pool_source_t` removes one class
+  allocation and one rounding per segment. No component API changed.
 
 ### Removed
 

@@ -56,6 +56,7 @@
 #include <vector>
 
 #include "libtracer/mem_source.hpp"
+#include "libtracer/mem_source_backend.hpp"
 #include "libtracer/tracer.hpp"
 #include "test_support.hpp"
 
@@ -156,6 +157,22 @@ constexpr std::size_t kShortHeaderBytes = 4;
  */
 constexpr std::size_t kNamedHeaderBytes = kShortHeaderBytes + 4;
 
+/**
+ * @brief The one BLOCK a folded header's segment costs at the injected source, for each of
+ *        the two header widths (#873 phase 3).
+ *
+ * `source_backend_t` packs the `segment_t` control block and the payload into a SINGLE
+ * `try_alloc`, so what reaches the source is one draw of `block_bytes(width)` rather than the
+ * two draws (payload, then control block) phase 1 made. The instrument below watches these
+ * sizes for the reason it watched the widths before: they are the sizes no other channel in
+ * this fixture asks for.
+ */
+constexpr std::size_t kShortHeaderBlockBytes =
+    tr::mem::source_backend_t::block_bytes(kShortHeaderBytes);
+/** @brief The named header's block — @ref kShortHeaderBlockBytes plus the `NAME` framing. */
+constexpr std::size_t kNamedHeaderBlockBytes =
+    tr::mem::source_backend_t::block_bytes(kNamedHeaderBytes);
+
 /** @brief The subtree the fixture builds: the root plus four registered descendants. */
 constexpr int kNodeCount = 5;
 
@@ -182,7 +199,7 @@ class arming_source_t final : public tr::mem::block_source_t {
 
     /** @brief True for a draw this instrument watches (a folded POINT header's bytes). */
     [[nodiscard]] static bool watched(std::size_t n) noexcept {
-        return n == kShortHeaderBytes || n == kNamedHeaderBytes;
+        return n == kShortHeaderBlockBytes || n == kNamedHeaderBlockBytes;
     }
 
     [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
@@ -311,7 +328,7 @@ int main() {
         const auto r = g.read_subtree_folded(root, "peer");
         check(r.has_value(), "the folded read succeeds through the injected backend");
         check(be.served() == kNodeCount, "one seam draw per folded node (the header count)");
-        check(be.all_served_size_either(kShortHeaderBytes, kNamedHeaderBytes),
+        check(be.all_served_size_either(kShortHeaderBlockBytes, kNamedHeaderBlockBytes),
               "every seam draw is the POINT header width, plus the NAME header below the root");
         check(be.refusals() == 0, "an unarmed source refuses nothing");
     }
@@ -407,7 +424,7 @@ int main() {
         check(r.has_value(), "the folded :children read succeeds through the injected backend");
         check(be.served() == kDirectChildCount + 1,
               "one seam draw per registered child, plus the outer listing header");
-        check(be.all_served_size_either(kShortHeaderBytes, kNamedHeaderBytes),
+        check(be.all_served_size_either(kShortHeaderBlockBytes, kNamedHeaderBlockBytes),
               "every :children seam draw is the POINT header width, plus each member's NAME "
               "header");
         check(be.refusals() == 0, "an unarmed source refuses nothing on the :children fold");

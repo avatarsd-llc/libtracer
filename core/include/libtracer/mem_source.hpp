@@ -213,6 +213,38 @@ class heap_source_t final : public block_source_t {
     constexpr heap_source_t() noexcept : block_source_t("heap") {}
 
     /**
+     * @brief The platform-heap acquisition arm as a FREE, non-virtual entry point (#873 phase 3).
+     *
+     * The same two arms @ref try_alloc dispatches, callable without an object and therefore
+     * without a virtual call. It exists so that the one in-tree @ref mem_backend_t that still
+     * acquires its bytes from the platform heap — @ref heap_backend_t — can express that
+     * acquisition **on the substrate** rather than on a second, independently-spelled
+     * platform-heap pair. Phase 3's re-layering is a layering claim, not a new indirection:
+     * @ref heap_backend_t is the process default and sits on the hottest allocation path in the
+     * library, so routing it through a `block_source_t&` would have bought no bounding (a
+     * deployer who wants bounding injects a source and gets @ref source_backend_t) at the cost
+     * of the virtual draw #873 phase 2 measured at +22.7 % on the hazard domain. A `static`
+     * entry point gives the layering with a direct call.
+     *
+     * @param bytes Size of the block.
+     * @param align Minimum alignment, a power of two.
+     * @retval nullptr Exhaustion.
+     */
+    [[nodiscard]] static void* acquire(std::size_t bytes, std::size_t align) noexcept {
+        if (align <= __STDCPP_DEFAULT_NEW_ALIGNMENT__) return ::operator new(bytes, std::nothrow);
+        return ::operator new(bytes, std::align_val_t{align}, std::nothrow);
+    }
+
+    /** @brief The sized-reclaim twin of @ref acquire, on whichever arm served the block. */
+    static void reclaim(void* p, std::size_t bytes, std::size_t align) noexcept {
+        if (align <= __STDCPP_DEFAULT_NEW_ALIGNMENT__) {
+            ::operator delete(p, bytes);
+            return;
+        }
+        ::operator delete(p, bytes, std::align_val_t{align});
+    }
+
+    /**
      * @brief Nothrow heap allocation; `nullptr` on exhaustion.
      *
      * @par Why the plain-`new` arm exists (#873 phase 1)
@@ -229,17 +261,12 @@ class heap_source_t final : public block_source_t {
      * guarantee it had.
      */
     [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
-        if (align <= __STDCPP_DEFAULT_NEW_ALIGNMENT__) return ::operator new(bytes, std::nothrow);
-        return ::operator new(bytes, std::align_val_t{align}, std::nothrow);
+        return acquire(bytes, align);
     }
 
     /** @brief Sized reclaim matching @ref try_alloc, on whichever arm served the block. */
     void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
-        if (align <= __STDCPP_DEFAULT_NEW_ALIGNMENT__) {
-            ::operator delete(p, bytes);
-            return;
-        }
-        ::operator delete(p, bytes, std::align_val_t{align});
+        reclaim(p, bytes, align);
     }
 };
 

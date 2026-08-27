@@ -32,6 +32,14 @@
  *       header includes this one is no longer true, and is corrected here rather than left to
  *       mislead the next reader of the footprint sentinel's include list.
  *
+ * @note **#873 phase 3 changed nothing here, and that is the finding.** Phase 3's brief
+ *       included promoting a pmr-over-`block_source_t` adapter to a public header if one was
+ *       warranted — but this header already IS that adapter, public and reusable since
+ *       before phase 1, and `graph_t` builds its internal channel out of this very type
+ *       rather than a private twin. The failure translation is where the ruling put it:
+ *       `nullptr` → `std::bad_alloc` at THIS boundary and at no other, because `std::pmr`'s
+ *       contract requires a throw. Nothing was duplicated and nothing was moved.
+ *
  * @note ONE DIRECTION. The reverse adapter — wrapping a `std::pmr::memory_resource`
  *       so it can be used *as* a `block_source_t` — is not offered and must not be
  *       added. `memory_resource::allocate` is annotated `returns_nonnull` in libstdc++

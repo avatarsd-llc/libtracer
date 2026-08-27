@@ -529,17 +529,34 @@ class graph_t {
      *   branch-write decode's bump upstream, the composed read's collect stack
      *   (@ref control_source);
      * - the graph-level DEFAULT receiver-ring admissions of a STREAM vertex that has
-     *   declared no source of its own (@ref default_ring_source).
+     *   declared no source of its own (@ref default_ring_source);
+     * - every segment the graph's READ-BACK encoders mint (#873 phase 3) — `:point`,
+     *   `:settings`, `:settings.app`, `:acl`, `:children`, the identity record, the stats
+     *   block, an app field's stored bytes, and the subscriber / mount-route records
+     *   `subscribe` composes. These reached `tr::view::over_bytes`'s single-argument,
+     *   global-heap overload until phase 3 pointed them at @ref value_backend, so a peer's
+     *   READ is now charged to the deployer's slab like every other channel.
      *
-     * @par Which bytes do NOT yet, and where that is tracked
-     * The LKV hazard-slot nodes (`lkv_slot.hpp`) are still `new (std::nothrow)` on the
-     * **global heap** — that is
-     * [#873](https://github.com/avatarsd-llc/libtracer/issues/873) **phase 2**, gated on a
-     * dedicated hazard-slot acquisition A/B because the naive fix there puts an atomic on
-     * `store()` (a latency reject, #897). Re-layering @ref mem::source_backend_t and the pmr
-     * adapter into the backend seam proper is **phase 3**. The `std::vector` growth behind
-     * `tr::detail::try_reserve`/`try_push_back` is migrated only where the container's
-     * element type permits it; the residual sites carry their own `#981 residual` notes.
+     * @par Which bytes do NOT, and where that is tracked
+     * Two carve-outs, both measured or documented rather than pending:
+     * - the LKV **hazard-slot nodes** (`lkv_slot.hpp`) stay `new (std::nothrow)` on the
+     *   global heap. #873 phase 2 built the migration, measured it, and **reverted** it:
+     *   +22.7 % on hazard-node acquisition and +3.5 % on the free-list-hit steady arm, with
+     *   disjoint ranges against an A/A null band of −0.12 %. The seam's own `@note` carries
+     *   the figures.
+     * - the plain **`std::vector<std::byte>`** sites are an allocator swap only in
+     *   appearance, because their container type is fixed by the signatures they cross.
+     *   Two groups: the KEY containers (`try_build_key`'s out-parameter, `select_sweep`'s
+     *   output, the branch-write child-key composition, the sweep snapshot's element type),
+     *   pinned by member-function signatures and by the `pending_` / `unconditional_` key
+     *   sets, so moving them is a key-TYPE change across the graph; and the read-back
+     *   encoders' STAGING buffers, pinned by `tr::wire::emit_tlv`'s `std::vector<std::byte>&`
+     *   sink. Phase 3 moved the resulting SEGMENT onto the injection; the transient buffer it
+     *   is copied from is still the global heap's, and that is stated rather than glossed.
+     *
+     * The `std::vector` growth behind `tr::detail::try_reserve`/`try_push_back` is otherwise
+     * migrated where the container's element type permits it; the residual sites carry their
+     * own `#981 residual` notes.
      *
      * @par Failure convention
      * The substrate speaks raw `nullptr`-on-exhaustion and the graph does not wrap it.
@@ -619,6 +636,20 @@ class graph_t {
      * host can name it in a memory census and so the wiring is observable.
      */
     [[nodiscard]] mem::block_source_t& default_ring_source() const noexcept { return *ring_; }
+
+    /**
+     * @brief The @ref tr::mem::mem_backend_t every @ref view::segment_t this graph owns is
+     *        drawn from (#873 phase 3).
+     *
+     * @ref mem::heap_backend for a process-default graph, and the graph's own
+     * @ref mem::source_backend_t over the injected source otherwise — the pointer the
+     * constructor resolved once. Exposed for the reason @ref control_source is (census and
+     * observable wiring) and because the graph's own read-back encoders, which are free
+     * functions in `graph.cpp` rather than members, need to name it: every segment the graph
+     * mints must come from the one injection, not from the global heap that
+     * `tr::view::over_bytes`'s single-argument overload reaches.
+     */
+    [[nodiscard]] mem::mem_backend_t& value_backend() const noexcept { return *value_backend_; }
 
     /**
      * @brief Register a vertex at a known-good @p path LITERAL, parsing nothing further (any
@@ -2834,7 +2865,11 @@ class graph_t {
      *
      *         Since #873 phase 1 this is no longer injected either — it POINTS at
      *         @ref mem::heap_backend for a process-default graph and at the graph's own
-     *         `src_backend_` wrapper over the injected source otherwise. On exhaustion
+     *         `src_backend_` wrapper over the injected source otherwise. Since phase 3 it is
+     *         also where every READ-BACK encoder's segment comes from (published as
+     *         @ref value_backend so the free functions in `graph.cpp` can name it), so the
+     *         name is now narrower than the role: it is the graph's ONE segment seam, not
+     *         only the write path's. On exhaustion
      *         it answers `nullptr` and the write BACKPRESSUREs (§3), never a silent heap
      *         fallback; thread-safety is the injected source's contract (§2), because a
      *         segment's reclaim self-routes on the last-ref thread. */

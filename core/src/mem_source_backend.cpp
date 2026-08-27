@@ -23,25 +23,33 @@
 
 namespace tr::mem {
 
+/**
+ * @brief One draw: the control block at the head of the block, the payload behind it (#873
+ *        phase 3).
+ *
+ * The zero-size request keeps a NULL, empty `bytes` span rather than a one-past pointer into
+ * the header, so an empty segment from this backend is indistinguishable from
+ * @ref heap_backend_t's — the block is still released at @ref block_bytes(0), which is what
+ * @ref destroy recomputes from `bytes.size()`.
+ */
 view::segment_t* source_backend_t::alloc(std::size_t size, alloc_hint_t /*hint*/) {
-    void* raw = nullptr;
-    if (size != 0) {
-        raw = src_->try_alloc(size);
-        if (raw == nullptr) return nullptr;
-    }
-    void* const cb = src_->try_alloc(sizeof(view::segment_t), alignof(view::segment_t));
-    if (cb == nullptr) {
-        if (raw != nullptr) src_->release(raw, size);
-        return nullptr;
-    }
-    return new (cb) view::segment_t(this, std::span<std::byte>(static_cast<std::byte*>(raw), size));
+    void* const block = src_->try_alloc(block_bytes(size), kBlockAlign);
+    if (block == nullptr) return nullptr;
+    auto* const base = static_cast<std::byte*>(block);
+    std::byte* const payload = size != 0 ? base + kHeaderBytes : nullptr;
+    return new (base) view::segment_t(this, std::span<std::byte>(payload, size));
 }
 
+/**
+ * @brief Destroy the control block and return the single block, sized as @ref alloc took it.
+ *
+ * `bytes.size()` is the originating request: nothing in the tree rewrites a live segment's
+ * span, and @ref heap_backend_t's reclaim depends on the same invariant.
+ */
 void source_backend_t::destroy(view::segment_t* seg) noexcept {
-    const std::span<std::byte> bytes = seg->bytes;
+    const std::size_t size = seg->bytes.size();
     seg->~segment_t();
-    src_->release(seg, sizeof(view::segment_t), alignof(view::segment_t));
-    if (!bytes.empty()) src_->release(bytes.data(), bytes.size());
+    src_->release(seg, block_bytes(size), kBlockAlign);
 }
 
 }  // namespace tr::mem
