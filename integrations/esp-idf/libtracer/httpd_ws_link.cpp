@@ -1049,15 +1049,20 @@ class httpd_ws_link_t::peer_resolution_t final : public transport_t {
  *        it outlives the send() caller's spans until the httpd task drains the work
  *        item.
  *
- * ONE storage shape since #949: the work item IS a @ref tx_slot_t member, and `payload`
- * points at the slot's inline buffer — or at `owned` for the one frame shape that outgrows
- * it, which keeps the pooled shell and takes a nothrow heap payload. There is no
- * shell-on-the-heap arm any more: a send that finds the pool exhausted is dropped and
+ * ONE SHELL since #949: the work item IS a @ref tx_slot_t member. There is no
+ * shell-on-the-heap arm any more — a send that finds the pool exhausted is dropped and
  * counted, so the number of items this link can have outstanding in the control queue is
- * the pool size and nothing else. Never a `std::vector` for the copy — the vector's
- * THROWING allocator inside a braced initializer defeated the `new (std::nothrow)` guard on
- * the shell: under `-fno-exceptions` a reply-sized copy hitting heap exhaustion aborted the
- * node (the browser-session crash).
+ * the pool size and nothing else.
+ *
+ * Its PAYLOAD has three storages, in the order the gather tries them: the slot's own inline
+ * buffer (`tx_inline_bytes`, the common frame, no allocation); a buffer borrowed from the
+ * declared LARGE size class where the frame lands in its band and an integrator declared one
+ * (#1566, @ref large_busy, still no allocation); and `owned`, the per-frame nothrow heap
+ * payload, for the exceptional tail past both. A frame that fits the inline buffer has taken
+ * the first of those since #949 and takes it unchanged today. Never a `std::vector` for the copy —
+ * the vector's THROWING allocator inside a braced initializer defeated the `new (std::nothrow)`
+ * guard on the shell: under `-fno-exceptions` a reply-sized copy hitting heap exhaustion aborted
+ * the node (the browser-session crash).
  */
 struct httpd_ws_link_t::tx_work_t {
     httpd_handle_t handle = nullptr; /**< @brief Owning httpd instance. */
@@ -1089,7 +1094,22 @@ struct httpd_ws_link_t::tx_work_t {
      *        link's life and never null on a queued item.
      */
     tx_slot_t* slot = nullptr;
-    std::unique_ptr<std::byte[]> owned; /**< @brief Heap payload (oversize frames only). */
+    std::unique_ptr<std::byte[]> owned; /**< @brief Heap payload (the exceptional tail only). */
+    /**
+     * @brief The LARGE-class claimed flag this item holds, or null when it borrowed no
+     *        large buffer (#1566).
+     *
+     * The FLAG and not the bytes, and not an index into the class either: @ref
+     * httpd_ws_link_t::release_tx_work is `static` — it must be, because an item can drain
+     * on an adopted server's task after the link that owns the class is gone — so the
+     * release has to reach the buffer's lifetime bit without a link to ask. The pointer is
+     * safe on exactly the terms @ref payload is: the teardown that cannot drain an
+     * in-flight item LEAKS the class rather than freeing it, so both stay addressable for
+     * as long as this item can run. Written by the claimer before the item is posted and
+     * cleared by the release, so it is single-owner throughout and needs no synchronization
+     * of its own.
+     */
+    std::atomic<bool>* large_busy = nullptr;
 };
 
 /**
@@ -1173,7 +1193,8 @@ struct httpd_ws_link_t::close_req_t {
 httpd_ws_link_t::httpd_ws_link_t(std::uint16_t bind_port, std::size_t max_peers, bool peer_named,
                                  std::uint32_t send_timeout_ms, std::uint32_t auth_deadline_ms,
                                  std::size_t rx_scratch_bytes, std::size_t tx_pool_slots,
-                                 std::size_t tx_inline_bytes)
+                                 std::size_t tx_inline_bytes, std::size_t tx_large_bytes,
+                                 std::size_t tx_large_slots)
     : port_(bind_port),
       max_peers_(max_peers),
       auth_deadline_us_(resolve_auth_deadline_us(auth_deadline_ms)),
@@ -1181,7 +1202,9 @@ httpd_ws_link_t::httpd_ws_link_t(std::uint16_t bind_port, std::size_t max_peers,
       rx_scratch_bytes_(resolve_size(rx_scratch_bytes, kDefaultRxScratchBytes)),
       tx_inline_bytes_(resolve_size(tx_inline_bytes, kDefaultTxInlineBytes)),
       tx_pool_slots_(resolve_size(tx_pool_slots, kDefaultTxPoolSlots)),
-      tx_slots_total_(tx_pool_slots_ + kTxReplySlots) {
+      tx_slots_total_(tx_pool_slots_ + kTxReplySlots),
+      tx_large_bytes_(tx_large_bytes),
+      tx_large_slots_(tx_large_slots) {
     if (!open_gate()) return;  // ok() stays false; nothing was registered
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port = bind_port;
@@ -1242,14 +1265,17 @@ httpd_ws_link_t::httpd_ws_link_t(httpd_handle_t external, const char* uri_patter
                                  std::size_t max_peers, bool peer_named,
                                  std::uint32_t send_timeout_ms, std::uint32_t auth_deadline_ms,
                                  std::size_t rx_scratch_bytes, std::size_t tx_pool_slots,
-                                 std::size_t tx_inline_bytes)
+                                 std::size_t tx_inline_bytes, std::size_t tx_large_bytes,
+                                 std::size_t tx_large_slots)
     : max_peers_(max_peers),
       auth_deadline_us_(resolve_auth_deadline_us(auth_deadline_ms)),
       peer_named_(peer_named),
       rx_scratch_bytes_(resolve_size(rx_scratch_bytes, kDefaultRxScratchBytes)),
       tx_inline_bytes_(resolve_size(tx_inline_bytes, kDefaultTxInlineBytes)),
       tx_pool_slots_(resolve_size(tx_pool_slots, kDefaultTxPoolSlots)),
-      tx_slots_total_(tx_pool_slots_ + kTxReplySlots) {
+      tx_slots_total_(tx_pool_slots_ + kTxReplySlots),
+      tx_large_bytes_(tx_large_bytes),
+      tx_large_slots_(tx_large_slots) {
     if (!open_gate()) return;  // ok() stays false; nothing was registered
     // The adopted server's httpd_config_t belongs to the caller and esp_http_server
     // exposes no reader for it, so the clamp uses IDF's default send_wait_timeout — the
@@ -1374,6 +1400,90 @@ void httpd_ws_link_t::alloc_buffers() {
         tx_pool_[i].work.slot = &tx_pool_[i];
         tx_pool_[i].inline_buf = tx_inline_.get() + i * tx_inline_bytes_;
     }
+    alloc_tx_large();
+}
+
+void httpd_ws_link_t::alloc_tx_large() {
+    // The large size class is the integrator's declaration and nothing else (#1566): unset,
+    // this returns having allocated nothing and every frame past tx_inline_bytes_ keeps the
+    // per-frame nothrow heap arm it has always taken. There is no default to fall back to
+    // on purpose — the other three sizes have one because every deployment needs SOME value
+    // of them, while this is extra RAM bought for a payload band only the integrator can
+    // describe.
+    //
+    // A declaration is rejected here rather than clamped, and it is INERT rather than fatal:
+    // a class no wider than the inline capacity would never be reached (the band is empty),
+    // and a class of zero buffers is a bound of zero, which is a link that drops every large
+    // frame instead of sending it. Neither is worth failing a node's construction over, and
+    // neither may be silently rounded into something the operator did not ask for — so the
+    // effective values are zeroed, the reason is logged ONCE at construction, and
+    // tx_large_bytes()/tx_large_slot_capacity() report the class the link is really running
+    // (#1160: report the ceiling, never the constant that was asked for).
+    if (tx_large_bytes_ == 0 && tx_large_slots_ == 0) return;  // nothing declared: the norm
+    if (tx_large_bytes_ <= tx_inline_bytes_ || tx_large_slots_ == 0) {
+        ESP_LOGW(kTag, "tx large class ignored (bytes=%u slots=%u, inline=%u) - heap tail kept",
+                 (unsigned)tx_large_bytes_, (unsigned)tx_large_slots_, (unsigned)tx_inline_bytes_);
+        tx_large_bytes_ = 0;
+        tx_large_slots_ = 0;
+        return;
+    }
+    tx_large_.reset(new (std::nothrow) std::byte[tx_large_slots_ * tx_large_bytes_]);
+    tx_large_busy_.reset(new (std::nothrow) std::atomic<bool>[tx_large_slots_]);
+    // The pair fails together, exactly as tx_pool_/tx_inline_ do: a flag with no bytes
+    // behind it is a claimable buffer that cannot be written into. Failure is not fatal
+    // either — it degrades to the heap tail, which is where these frames were before the
+    // class existed — but the size must be zeroed with the pointer so that the band test in
+    // queue_send can never route a frame at storage that is not there.
+    if (tx_large_ == nullptr || tx_large_busy_ == nullptr) {
+        tx_large_.reset();
+        tx_large_busy_.reset();
+        ESP_LOGE(kTag, "tx large class alloc failed (%u x %u B) - falling back to the heap arm",
+                 (unsigned)tx_large_slots_, (unsigned)tx_large_bytes_);
+        tx_large_bytes_ = 0;
+        tx_large_slots_ = 0;
+        return;
+    }
+    for (std::size_t i = 0; i < tx_large_slots_; ++i)
+        tx_large_busy_[i].store(false, std::memory_order_relaxed);
+}
+
+std::byte* httpd_ws_link_t::claim_tx_large(tx_work_t* work) {
+    // Undeclared, rejected or failed: the caller's band test already excluded that case
+    // (tx_large_bytes_ is 0 and no frame is <= 0 bytes past the inline capacity), so this is
+    // belt and braces for a future caller rather than a live arm.
+    if (tx_large_busy_ == nullptr) return nullptr;
+    for (std::size_t i = 0; i < tx_large_slots_; ++i) {
+        bool expected = false;
+        if (!tx_large_busy_[i].compare_exchange_strong(expected, true, std::memory_order_acquire))
+            continue;
+        work->large_busy = &tx_large_busy_[i];
+        note_tx_large_peak();
+        return tx_large_.get() + i * tx_large_bytes_;
+    }
+    return nullptr;  // every buffer of the class in flight — the caller drops and counts
+}
+
+void httpd_ws_link_t::note_tx_large_peak() {
+    // The high-water mark of the class's occupancy, which is the number an operator SIZES
+    // `tx_large_slots` with — and the one thing a scan-on-demand accessor cannot
+    // reconstruct after the fact, so it is sampled here, at the claim that could have set it.
+    //
+    // This is the file's one counter update on a success arm, and it is confined to the
+    // large band by construction: a frame that fits `tx_inline_bytes_` never reaches this
+    // function, so the steady-state send the counting doctrine protects (core/STYLE.md
+    // §counting doctrine ¶1) gains no instruction at all. The scan is over a handful of
+    // flags — the class is a small pool by declaration — and is the same shape
+    // @ref tx_slots_busy has always had.
+    //
+    // Relaxed throughout, and not a consistent cut: a claim racing this one may or may not
+    // be seen, so the peak is a lower bound on the true occupancy. That is the ordinary
+    // snapshot-coherence clause (core/STYLE.md §Introspection) and it is the right trade —
+    // an exact peak would need the claim path to take a lock in order to serve a diagnostic.
+    const std::uint32_t now = static_cast<std::uint32_t>(tx_large_in_use());
+    std::uint32_t peak = tx_large_peak_.load(std::memory_order_relaxed);
+    while (peak < now && !tx_large_peak_.compare_exchange_weak(peak, now, std::memory_order_relaxed,
+                                                               std::memory_order_relaxed)) {
+    }
 }
 
 httpd_ws_link_t::tx_slot_t* httpd_ws_link_t::claim_tx_slot(bool in_call) {
@@ -1437,7 +1547,16 @@ httpd_ws_link_t::tx_slot_t* httpd_ws_link_t::claim_tx_slot_waiting() {
 void httpd_ws_link_t::release_tx_work(tx_work_t* work) {
     // Every work item is a pool slot's own member since #949 — there is no heap shell to
     // free, and `slot` is bound once in alloc_buffers, so it is never null here.
-    work->owned.reset();  // drop an oversize heap payload before the slot recycles
+    work->owned.reset();  // drop an exceptional-tail heap payload before the slot recycles
+    // Hand back the large-class buffer this item borrowed, if it borrowed one (#1566) —
+    // through the flag it carries, because this function has no link to ask (see
+    // tx_work_t::large_busy). Released BEFORE the slot's own flag, so a sender that wins
+    // the slot cannot find the class still holding a buffer this item has finished with.
+    if (work->large_busy != nullptr) {
+        std::atomic<bool>* const flag = work->large_busy;
+        work->large_busy = nullptr;
+        flag->store(false, std::memory_order_release);
+    }
     work->slot->busy.store(false, std::memory_order_release);
 }
 
@@ -1510,9 +1629,15 @@ httpd_ws_link_t::~httpd_ws_link_t() {
             // never this link, so the leaked pool is the one allocation that must outlive
             // us — BOTH halves of it since #1160: the slot array and the inline payload
             // block the slots point into, which an in-flight send is still reading from.
+            // Since #1566 the large size class is leaked on the same terms and for the same
+            // reason: an in-flight item's `payload` may point into that block, and its
+            // release stores through the busy flag beside it. Leaking the bytes without the
+            // flags (or the reverse) would leave one half of a live pair dangling.
             ESP_LOGW(kTag, "tx pool leaked at teardown: a queued send outlived the drain bound");
             (void)tx_pool_.release();
             (void)tx_inline_.release();
+            (void)tx_large_.release();
+            (void)tx_large_busy_.release();
         }
     }
     // The gate outlives the link exactly when the server does. Owning mode: httpd_stop
@@ -2758,8 +2883,10 @@ void httpd_ws_link_t::queue_send(const session_ref_t& to,
     // Gather-copy the payload ONCE: httpd_queue_work is asynchronous, so the caller's
     // spans are gone by the time the httpd task runs tx_work. The destination is a
     // pre-allocated pool slot claimed lock-free (CAS), gathered straight into its inline
-    // buffer — no allocation at all. The single remaining arm that allocates is a frame
-    // past tx_inline_bytes_, which keeps its pooled shell and takes a nothrow heap payload.
+    // buffer — no allocation at all. Past tx_inline_bytes_ the slot keeps its shell and the
+    // payload comes from the declared LARGE size class if the frame is in its band (#1566,
+    // still no allocation), and only past THAT from a per-frame nothrow heap payload — the
+    // exceptional tail, which is the one arm here that can still allocate.
     //
     // A pool that has nothing free is where this used to grow a heap work item and post it
     // anyway, which turned a bounded, observable condition into an unbounded, invisible
@@ -2783,6 +2910,26 @@ void httpd_ws_link_t::queue_send(const session_ref_t& to,
         work->len = total;
         if (total <= tx_inline_bytes_) {
             dst = slot->inline_buf;
+        } else if (total <= tx_large_bytes_) {
+            // The LARGE band (#1566), and it exists only where an integrator declared it:
+            // with no class, tx_large_bytes_ is 0, no frame satisfies this test, and the arm
+            // below is reached exactly as before. A class that IS declared takes the routine
+            // multi-KB frames — the periodic snapshot fanned to several subscribers — off
+            // the heap and onto a bound the node chose, which is the whole point: N
+            // subscribers x rate allocations per second of multi-KB blocks is fragmentation
+            // pressure and an unbounded transient footprint for a working set that was
+            // perfectly predictable.
+            dst = claim_tx_large(work);
+            if (dst == nullptr) {  // the class is exhausted: recycle the slot, drop below
+                // Fail CLOSED, never onto the heap. Falling back would hand back precisely
+                // the unbounded footprint the class was declared to remove, and would do it
+                // under exactly the load that motivated the declaration. It is #949's
+                // named-drop arm — counted at the link, and counted again here so an
+                // operator can size `tx_large_slots` against it rather than guess.
+                tx_large_dropped_.fetch_add(1, std::memory_order_relaxed);
+                release_tx_work(work);
+                work = nullptr;
+            }
         } else {
             work->owned.reset(new (std::nothrow) std::byte[total]);
             dst = work->owned.get();
@@ -2903,7 +3050,18 @@ void httpd_ws_link_t::send_in_call(const session_ref_t& to,
         }
         scratch = &slot->work;
         std::byte* dst = slot->inline_buf;
-        if (total > tx_inline_bytes_) {
+        if (total > tx_inline_bytes_ && total <= tx_large_bytes_) {
+            // The same large band the queued path takes (#1566) — a rope reply is gathered
+            // out of the declared class rather than off the heap. Exhaustion is the same
+            // fail-closed drop, for the same reason.
+            dst = claim_tx_large(scratch);
+            if (dst == nullptr) {
+                tx_large_dropped_.fetch_add(1, std::memory_order_relaxed);
+                release_tx_work(scratch);
+                note_enqueue_drop(fd, total);
+                return;
+            }
+        } else if (total > tx_inline_bytes_) {
             // Nothrow END TO END on the one arm that can still allocate — never a
             // std::vector, whose throwing allocator once aborted the node under
             // -fno-exceptions on a reply-sized copy.
@@ -2950,6 +3108,8 @@ httpd_ws_link_t::stats_t httpd_ws_link_t::stats() const noexcept {
     s.enqueue_drops = enqueue_drops_.load(std::memory_order_relaxed);
     s.tx_pool_misses = tx_pool_misses_.load(std::memory_order_relaxed);
     s.tx_pool_waits = tx_pool_waits_.load(std::memory_order_relaxed);
+    s.tx_large_dropped = tx_large_dropped_.load(std::memory_order_relaxed);
+    s.tx_large_peak = tx_large_peak_.load(std::memory_order_relaxed);
     s.tx_to_dead_peer = tx_to_dead_peer_.load(std::memory_order_relaxed);
     s.peers_refused = peers_refused_.load(std::memory_order_relaxed);
     s.sessions_condemned = sessions_condemned_.load(std::memory_order_relaxed);
@@ -2974,12 +3134,26 @@ std::size_t httpd_ws_link_t::rx_scratch_bytes() const noexcept { return rx_scrat
 
 std::size_t httpd_ws_link_t::tx_inline_bytes() const noexcept { return tx_inline_bytes_; }
 
+std::size_t httpd_ws_link_t::tx_large_bytes() const noexcept { return tx_large_bytes_; }
+
+std::size_t httpd_ws_link_t::tx_large_slot_capacity() const noexcept { return tx_large_slots_; }
+
+std::size_t httpd_ws_link_t::tx_large_in_use() const noexcept {
+    if (tx_large_busy_ == nullptr) return 0;
+    std::size_t held = 0;
+    for (std::size_t i = 0; i < tx_large_slots_; ++i)
+        if (tx_large_busy_[i].load(std::memory_order_relaxed)) ++held;
+    return held;
+}
+
 std::size_t httpd_ws_link_t::buffer_bytes() const noexcept {
     // What was actually allocated, not what was asked for: rx_scratch_bytes_ is zeroed on a
-    // failed RX allocation, and a link whose pool failed reports no pool cost at all.
+    // failed RX allocation, a link whose pool failed reports no pool cost at all, and a
+    // large class that was rejected or could not be allocated has had BOTH its numbers
+    // zeroed, so its term vanishes from this sum without a test of its own.
     const std::size_t pool =
         tx_pool_ != nullptr ? tx_slots_total_ * (sizeof(tx_slot_t) + tx_inline_bytes_) : 0;
-    return rx_scratch_bytes_ + pool;
+    return rx_scratch_bytes_ + pool + tx_large_slots_ * tx_large_bytes_;
 }
 
 std::size_t httpd_ws_link_t::tx_reply_reserve() noexcept { return kTxReplySlots; }

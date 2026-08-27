@@ -402,9 +402,13 @@ and an allocation failure becomes the same drop the link's send contract defines
 The copy is structural; the *allocation* is not. `httpd_ws_link_t` fronts the gather with a
 once-per-link pool of TX work slots claimed lock-free (a CAS scan — senders run on any task, the
 httpd task releases the slot as the send drains): a steady-state frame gathers straight into the
-slot's inline payload and allocates nothing. The nothrow-end-to-end heap shape above remains for
-exactly one arm — a frame past the inline capacity keeps its pooled shell and takes a nothrow heap
-payload — with the drop-on-OOM contract on it. A momentarily exhausted pool has **no** arm: the
+slot's inline payload and allocates nothing. Past the inline capacity there may be a SECOND bounded
+size class, if an integrator declared one (#1566, `tx_large_bytes` x `tx_large_slots`): a frame in
+its band borrows a buffer from that class and still allocates nothing, and an exhausted class is a
+named drop rather than a fallback, because a fallback would hand back the unbounded transient
+footprint the declaration was made to bound. The nothrow-end-to-end heap shape above therefore
+remains for exactly one arm — the exceptional tail past every declared class, which keeps its
+pooled shell and takes a nothrow heap payload — with the drop-on-OOM contract on it. A momentarily exhausted pool has **no** arm: the
 pool is the link's outstanding-send bound, and a send that finds it full is dropped and counted
 rather than posted from a heap work item, because the fallback bounded the in-flight depth by the
 heap instead of by the queue behind it and left the event unobservable (#949; the exhaustion
