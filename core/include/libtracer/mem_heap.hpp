@@ -308,35 +308,59 @@ template <class T, class Alloc>
 namespace tr::mem {
 
 /**
- * @brief The host allocator backend: owns `operator new`'d bytes, frees them and
- *        the `segment_t` control block on destroy.
+ * @brief The host allocator backend: owns platform-heap bytes, frees them and the
+ *        `segment_t` control block on destroy.
  *
  * Exposed here (rather than TU-local) so the module-set destroy dispatch
  * (backend_set.cpp, ADR-0047 §2) can devirtualize its release; a `final` class,
  * so the qualified call in that switch is a direct call.
+ *
+ * @par The layering, after #873 phase 3
+ * Both draws go through @ref heap_source_t::acquire and both returns through
+ * @ref heap_source_t::reclaim — the substrate's OWN platform-heap arm, so the backend tier no
+ * longer spells the platform-heap allocation a second time. It is a `static` entry point
+ * rather than an injected @ref block_source_t reference on purpose: this backend
+ * is the process default on the hottest allocation path in the library, and an injected draw
+ * there would buy no bounding whatever (a deployer who wants bounding injects a source into
+ * `graph_t` and gets @ref source_backend_t) while costing the virtual call #873 phase 2
+ * measured at +22.7 % on the hazard domain. The re-layering is a layering claim; it is not an
+ * excuse to add an indirection nobody can use.
+ *
+ * @note One consequence is worth naming rather than leaving to be discovered. The payload
+ *       draw used to name the OVER-ALIGNED `operator new` unconditionally
+ *       (`std::align_val_t{alignof(std::max_align_t)}`), which libstdc++ routes through
+ *       `aligned_alloc`/`posix_memalign` even when the plain allocator already guarantees that
+ *       alignment. @ref heap_source_t::acquire takes the plain nothrow arm whenever
+ *       `align <= __STDCPP_DEFAULT_NEW_ALIGNMENT__` — which is the *definition* of the
+ *       guarantee plain `operator new` gives, so nothing loses an alignment it had — and the
+ *       reclaim becomes the SIZED `operator delete(p, bytes)`. Both are the arms every other
+ *       #873 channel already takes; the allocation COUNT is unchanged (two draws per segment,
+ *       which is what `bench_forward_heap`'s `allocs=` pins count).
  */
 class heap_backend_t final : public mem_backend_t {
    public:
     heap_backend_t() noexcept : mem_backend_t("mem_heap") {}
 
     view::segment_t* alloc(std::size_t size, alloc_hint_t /*hint*/) override {
-        const std::align_val_t al{alignof(std::max_align_t)};
-        void* raw = size ? ::operator new(size, al, std::nothrow) : nullptr;
+        constexpr std::size_t kPayloadAlign = alignof(std::max_align_t);
+        void* raw = size ? heap_source_t::acquire(size, kPayloadAlign) : nullptr;
         if (size && raw == nullptr) return nullptr;
-        auto* seg = new (std::nothrow)
-            view::segment_t(this, std::span<std::byte>(static_cast<std::byte*>(raw), size));
-        if (seg == nullptr) {
-            if (raw) ::operator delete(raw, al);
+        void* const cb = heap_source_t::acquire(sizeof(view::segment_t), alignof(view::segment_t));
+        if (cb == nullptr) {
+            if (raw) heap_source_t::reclaim(raw, size, kPayloadAlign);
             return nullptr;
         }
-        return seg;
+        return new (cb)
+            view::segment_t(this, std::span<std::byte>(static_cast<std::byte*>(raw), size));
     }
 
     void destroy(view::segment_t* seg) noexcept override {
-        if (!seg->bytes.empty()) {
-            ::operator delete(seg->bytes.data(), std::align_val_t{alignof(std::max_align_t)});
+        const std::span<std::byte> bytes = seg->bytes;
+        seg->~segment_t();
+        heap_source_t::reclaim(seg, sizeof(view::segment_t), alignof(view::segment_t));
+        if (!bytes.empty()) {
+            heap_source_t::reclaim(bytes.data(), bytes.size(), alignof(std::max_align_t));
         }
-        delete seg;
     }
 
     [[nodiscard]] backend_tag tag() const noexcept override { return backend_tag::HEAP; }

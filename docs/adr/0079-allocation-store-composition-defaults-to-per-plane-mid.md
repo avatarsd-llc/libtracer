@@ -354,3 +354,37 @@ Two channels the decision names are still open and are explicitly phased, not fo
 `lkv_slot.hpp`'s hazard-slot nodes are **phase 2** (gated on a hazard-slot acquisition A/B,
 because the naive fix adds an atomic to `store()`), and re-layering the backend/pmr adapters is
 **phase 3**.
+
+### Final state (2026-08-27, phases 2 and 3 closed)
+
+Both phases named in the paragraph above are now terminal, so this amendment is complete rather
+than partial.
+
+- **Phase 2 is a CARVE-OUT, by measurement.** The hazard-slot migration was built, measured and
+  reverted on the gate the ruling set for it: +22.7 % on hazard-node acquisition and +3.5 % on
+  the free-list-hit *steady* arm that never touches the substrate, ranges disjoint against a
+  −0.12 % A/A null. `lkv_slot.hpp`'s nodes stay on the global heap, with the figures recorded at
+  the seam and in reference 09. The ruling named this an acceptable terminal outcome.
+- **Phase 3 is landed, and it is smaller than this ADR imagined.** Two of its three parts were
+  already true. The pmr adapter needed no promotion: `source_resource_t` has been a public,
+  reusable header since before phase 1, and the graph builds its channel out of that very type.
+  `source_backend_t` was already the `mem_backend_t`-over-`block_source_t` wrapper. What phase 3
+  actually changed is three things: `source_backend_t` now draws **one block per segment**
+  instead of two (the packing phase 1 deferred, and the shape a size-classed `pool_source_t`
+  needs); `heap_backend_t`'s acquisition is expressed on the substrate's own
+  `heap_source_t::acquire`/`reclaim` arm, as a `static` non-virtual entry point rather than an
+  injected `block_source_t&` — the layering claim without the indirection phase 2 priced; and
+  the graph's **read-back encoders** stopped reaching the global heap through
+  `view::over_bytes`'s one-argument overload and now mint their segments from the graph's own
+  backend, so a peer's READ is charged to the deployer's slab like every other channel.
+- **`source_backend_t` is NOT the only backend left, and the module set gains no `SOURCE`
+  enumerator.** `heap_backend_t` (the process default), `mem_pool` (a caller-owned slab whose
+  slab *is* the bound, with nothing to re-layer) and the two borrowed backends (which acquire
+  nothing) all stay in the fast set for stated reasons. That question, left open by phase 1, is
+  answered here rather than deferred again.
+- **What one injection now bounds, and the two things it does not**, is tabulated in
+  [reference 09 §"The channel ledger, at #873's close"](../reference/09-memory-substrate.md).
+  The carve-outs are the hazard-slot nodes above and the plain `std::vector<std::byte>` sites
+  whose container type is fixed by the signatures they cross. The router's and transports'
+  own seams are outside the ledger on purpose — receiver-pays, per ADR-0060 erratum 1's
+  shared-pool measurement — not by omission.

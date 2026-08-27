@@ -509,7 +509,7 @@ void emit_counter(std::vector<std::byte>& out, std::string_view noun, std::uint6
     wire::emit_tlv(block, type_t::SETTINGS, opt_t{.pl = true}, members);
     // `block` is non-empty by construction; `nullopt` is exactly an alloc failure
     // → BACKPRESSURE (the audited alloc/copy/over locus).
-    const auto out = view::over_bytes(block);
+    const auto out = view::over_bytes(block, g.value_backend());
     if (!out) return std::unexpected(status_t::BACKPRESSURE);
     return *out;
 }
@@ -3196,7 +3196,7 @@ result_t<void> graph_t::subscribe(const path_t& src, const path_t& target,
     wire::emit_header(sub, type_t::PATH, opt_t{}, key.size());
     sub.insert(sub.end(), key.begin(), key.end());
     sub.insert(sub.end(), qos.begin(), qos.end());
-    const std::optional<view_t> value = view::over_bytes(sub);
+    const std::optional<view_t> value = view::over_bytes(sub, *value_backend_);
     if (!value) return std::unexpected(status_t::BACKPRESSURE);
     field_path_t field;
     field.steps.push_back(field_step_t{.name = "subscribers", .indexed = true, .append = true});
@@ -3361,7 +3361,8 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view_t source_view, v
                 // `src` arrives in. An empty residual never reaches here: the descent reports
                 // a mount named exactly as `unroutable`.
                 wire::emit_tlv(mount_route_tlv, type_t::PATH, opt_t{}, split.residual);
-                std::optional<view_t> route_view = view::over_bytes(mount_route_tlv);
+                std::optional<view_t> route_view =
+                    view::over_bytes(mount_route_tlv, *value_backend_);
                 if (!route_view) return std::unexpected(status_t::BACKPRESSURE);
                 return_route = *std::move(route_view);
                 delivery_link.assign(split.link);
@@ -3761,7 +3762,7 @@ result_t<view_t> graph_t::read_schema(vertex_t* v) const {
 
     // `point` is a POINT TLV (never empty); `nullopt` is exactly an alloc failure
     // → BACKPRESSURE. One audited locus for the alloc/copy/over triplet.
-    const auto out = view::over_bytes(point);
+    const auto out = view::over_bytes(point, *value_backend_);
     if (!out) return std::unexpected(status_t::BACKPRESSURE);
     return *out;
 }
@@ -3848,7 +3849,8 @@ result_t<view_t> graph_t::read_identity() const {
     }
     // Pre-serialized at install, so every vertex of this node serves BYTE-IDENTICAL
     // bytes (§C.1) — the invariant that makes the record a valid cross-path key.
-    const auto out = view::over_bytes(std::span<const std::byte>(scratch.data(), len));
+    const auto out =
+        view::over_bytes(std::span<const std::byte>(scratch.data(), len), *value_backend_);
     if (!out) return std::unexpected(status_t::BACKPRESSURE);
     return *out;
 }
@@ -3873,7 +3875,7 @@ result_t<view_t> graph_t::read_settings(vertex_t* v) const {
     wire::emit_tlv(out, type_t::SETTINGS, opt_t{.pl = true}, children);
     // `out` is non-empty by construction; `nullopt` is exactly an alloc failure
     // → BACKPRESSURE (the audited alloc/copy/over locus).
-    const auto res = view::over_bytes(out);
+    const auto res = view::over_bytes(out, *value_backend_);
     if (!res) return std::unexpected(status_t::BACKPRESSURE);
     return *res;
 }
@@ -3891,7 +3893,7 @@ result_t<view_t> graph_t::read_settings_app(vertex_t* v) const {
     wire::emit_tlv(out, type_t::SETTINGS, opt_t{.pl = true}, children);
     // `out` is non-empty by construction (the SETTINGS header at minimum); `nullopt` is
     // exactly an alloc failure → BACKPRESSURE (the audited alloc/copy/over locus).
-    const auto res = view::over_bytes(out);
+    const auto res = view::over_bytes(out, *value_backend_);
     if (!res) return std::unexpected(status_t::BACKPRESSURE);
     return *res;
 }
@@ -3904,7 +3906,7 @@ result_t<view_t> graph_t::read_acl(vertex_t* v) const {
         return set ? encode_acl(aces) : std::vector<std::byte>{};
     });
     if (acl.empty()) return std::unexpected(status_t::NOT_FOUND);
-    const auto out = view::over_bytes(acl);
+    const auto out = view::over_bytes(acl, *value_backend_);
     if (!out) return std::unexpected(status_t::BACKPRESSURE);
     return *out;
 }
@@ -3948,7 +3950,7 @@ result_t<view_t> graph_t::read_children(vertex_t* v) const {
     wire::emit_tlv(out, type_t::POINT, opt_t{.pl = true}, members);
     // `out` is non-empty by construction; `nullopt` is exactly an alloc failure
     // → BACKPRESSURE (the audited alloc/copy/over locus).
-    const auto res = view::over_bytes(out);
+    const auto res = view::over_bytes(out, *value_backend_);
     if (!res) return std::unexpected(status_t::BACKPRESSURE);
     return *res;
 }
@@ -4670,7 +4672,7 @@ result_t<rope_t> graph_t::read(vertex_handle_t vh, const field_path_t& field,
                 }
                 // `bytes` is a non-empty stored TLV; `nullopt` is exactly an alloc
                 // failure → BACKPRESSURE (the audited alloc/copy/over locus).
-                const auto out = view::over_bytes(bytes);
+                const auto out = view::over_bytes(bytes, *value_backend_);
                 if (!out) return std::unexpected(status_t::BACKPRESSURE);
                 return *out;
             }

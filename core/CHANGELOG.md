@@ -160,6 +160,18 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`tr::graph::graph_t::value_backend()`** — the `mem_backend_t` every `view::segment_t` the
+  graph owns is drawn from ([#873](https://github.com/avatarsd-llc/libtracer/issues/873)
+  phase 3). `mem::heap_backend` for a process-default graph, the graph's own
+  `mem::source_backend_t` over the injected source otherwise. Published for the reason
+  `control_source()` and `default_ring_source()` are — census and observable wiring — and
+  because the read-back encoders in `graph.cpp` are free functions that need to name it.
+
+- **`tr::mem::heap_source_t::acquire` / `reclaim`** — the platform-heap arms as `static`,
+  non-virtual entry points, so a caller that must not pay a virtual draw can still express
+  its acquisition on the substrate ([#873](https://github.com/avatarsd-llc/libtracer/issues/873)
+  phase 3). `try_alloc` / `release` forward to them unchanged.
+
 - **`mem_source_backend.hpp` — `tr::mem::source_backend_t`: the `mem_backend_t` WRAPPER over a
   `block_source_t`** ([#873](https://github.com/avatarsd-llc/libtracer/issues/873) phase 1,
   [ADR-0079](../docs/adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md)
@@ -167,12 +179,14 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   segment carries what raw bytes do not — an intrusive refcount and the DMA cache-op hooks. The
   2026-08-26 ruling settled how the two relate: the substrate is `block_source_t`, and
   `mem_backend_t` survives as a **wrapper type** over it, no longer an injection seam of its own.
-  `alloc` takes two blocks from the source (control block + payload, mirroring
-  `heap_backend_t`'s `operator new` pair) and answers a **null `segment_t*`** when either is
-  refused — the BACKPRESSURE signal the write path already answered; `destroy` returns both in
-  the sizes they were taken in. Tagged `backend_tag::UNKNOWN`, so reclaim takes the virtual
-  `destroy` fallback every out-of-core backend already takes; giving the module set a `SOURCE`
-  enumerator is a phase-3 question. One direction only, exactly as `source_resource_t` is.
+  `alloc` answers a **null `segment_t*`** on refusal — the BACKPRESSURE signal the write path
+  already answered; `destroy` returns what it took, sized. (Phase 1 shipped this as two draws
+  per segment, control block + payload, mirroring `heap_backend_t`'s `operator new` pair;
+  **phase 3, below, packs them into one** — the shape that ships. Same release, so the two-draw
+  form was never released.) Tagged `backend_tag::UNKNOWN`, so reclaim takes the virtual
+  `destroy` fallback every out-of-core backend already takes; the module-set `SOURCE`
+  enumerator is decided against in phase 3. One direction only, exactly as `source_resource_t`
+  is.
 
 ### Removed
 
@@ -222,6 +236,47 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     identity and the liveness-enum encoding.
 
 ### Changed
+
+- **`tr::mem::source_backend_t` draws ONE block per segment, and `tr::mem::heap_backend_t`
+  acquires through the substrate's own platform-heap arm**
+  ([#873](https://github.com/avatarsd-llc/libtracer/issues/873) **phase 3** — the last of the
+  three phases; phase 2 was measured and carved out).
+
+  - `source_backend_t::alloc` packs the `segment_t` control block and the payload into a
+    **single** `block_source_t::try_alloc` (`block_bytes(size)` at `kBlockAlign`, the header
+    padded so the payload keeps `alignment()`), where phase 1 took two draws. On the
+    deployments that construct this type — a bounded node with an injected `pool_source_t` —
+    two draws meant two size classes, two refusal opportunities and the per-class rounding
+    paid twice for one segment. `destroy` returns the one block, sized. The new public
+    constants `kBlockAlign`, `kHeaderBytes` and `block_bytes(size)` let a deployer size its
+    slab and let an instrument name the draw. **Behaviour change for any test or census that
+    counted the phase-1 two-draw shape**; `core/tests/mem_source_backend_test.cpp` pins the
+    new one.
+  - `heap_backend_t`'s two draws and two returns now go through `heap_source_t::acquire` /
+    `heap_source_t::reclaim` — new `static`, non-virtual entry points on the substrate's
+    platform-heap source, so the backend tier no longer carries a second, independently
+    spelled `::operator new` pair. It is deliberately NOT an injected `block_source_t&`: this
+    backend is the process default on the hottest allocation path, an injected draw there
+    buys no bounding (bounding comes from injecting a source into `graph_t`, which yields a
+    `source_backend_t`), and phase 2 measured that virtual draw at +22.7 % on the hazard
+    domain. One visible consequence: the payload draw takes the PLAIN nothrow `operator new`
+    whenever `alignof(std::max_align_t) <= __STDCPP_DEFAULT_NEW_ALIGNMENT__` instead of
+    always naming the over-aligned overload, and the reclaim is the sized
+    `operator delete(p, bytes)`. No alignment guarantee is lost (the guard is the definition
+    of plain `operator new`'s guarantee) and the allocation COUNT is unchanged.
+  - **`graph_t`'s read-back encoders draw their segments from the graph's own backend.**
+    `:point`, `:settings`, `:settings.app`, `:acl`, `:children`, the identity record, the
+    stats block, an app field's stored bytes and the subscriber / mount-route records
+    `subscribe` composes were all calling `tr::view::over_bytes`'s single-argument,
+    global-heap overload, so a peer's READ escaped the one injection. They now use the
+    backend `graph_t` resolved at construction, and a refusal is the BACKPRESSURE every one
+    of those sites already returned. On a bounded node this charges reads to the deployer's
+    slab; on a process-default graph nothing moves.
+  - The **module-set `SOURCE` enumerator** phase 1 deferred to "the phase that decides
+    whether `source_backend_t` is the only backend left" is **decided: not added.** It is not
+    the only backend left (`heap_backend_t`, `pool_t` and the two borrowed backends all stay,
+    each for a stated reason), and a fifth `backend_set.cpp` arm would cost every host target
+    text for a devirtualization only the injected-source composition uses.
 
 - **`tr::detail::try_reserve` / `try_push_back` take any allocator, and their
   `-fno-exceptions` probe now asks the RIGHT store**

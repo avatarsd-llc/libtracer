@@ -46,20 +46,33 @@ namespace tr::mem {
  * `result_t` appears in the substrate — contrast @ref source_resource_t, whose `std::pmr`
  * contract forces it to translate the same `nullptr` into a `std::bad_alloc`.
  *
- * @par Two blocks per segment, deliberately
- * The control block and the payload bytes are two separate @ref block_source_t::try_alloc
- * calls, mirroring @ref heap_backend_t's `operator new` pair one for one. Packing them into
- * one block would be cheaper and is the obvious improvement — it is deliberately NOT taken
- * here, because phase 1's contract is that the process-default composition behaves as it
- * always did; re-layering the backend is #873 phase 3.
+ * @par ONE block per segment (#873 phase 3)
+ * The control block and the payload live in a SINGLE @ref block_source_t::try_alloc call — the
+ * segment header first, padded up to @ref alignment, then the payload. Phase 1 took two
+ * separate draws, mirroring @ref heap_backend_t's `operator new` pair one for one, and said
+ * so — the packing was the obvious improvement, deliberately deferred because phase 1's
+ * contract was that the process-default composition behaves as it always did. It is taken
+ * here because this type is never on the process-default path (see the tag note below), and
+ * because on the deployments that DO construct it the two-draw shape is actively wrong: a
+ * @ref pool_source_t serves the control block from one size class and the payload from
+ * another, so a bounded node paid two class allocations, two refusal opportunities and the
+ * per-class rounding twice for one segment. One draw is the shape @ref pool_t (the other
+ * bounded backend) has always had — header and payload carved into one slot.
  *
- * @note The tag stays @ref backend_tag::UNKNOWN, so reclaim takes the virtual `destroy`
- *       fallback rather than the ADR-0047 §2 devirtualized switch arm. That is the same
- *       path every out-of-core backend already takes, and it costs the DEFAULT composition
- *       nothing: `graph_t` folds a process-default source back onto @ref heap_backend
- *       (tagged `HEAP`) and never constructs this type at all. Giving the module set a
- *       `SOURCE` enumerator is a phase-3 question, since it is the backend/pmr re-layering
- *       that decides whether this type is the only backend left.
+ * @note The tag stays @ref backend_tag::UNKNOWN, and phase 3 is where that stops being a
+ *       deferral and becomes a decision. Phase 1 left the module-set `SOURCE` enumerator to
+ *       "the phase that decides whether this type is the only backend left"; it is not. The
+ *       fast set keeps @ref heap_backend_t (the process default, whose bytes now come from
+ *       the substrate's own @ref heap_source_t arm), @ref pool_t (a caller-owned slab with
+ *       no acquisition to re-layer — its slab IS the bound) and the two borrowed backends
+ *       (which acquire nothing at all). An enumerator would devirtualize reclaim only for
+ *       the injected-source composition, at the cost of a fifth switch arm and this type's
+ *       `destroy` body in `backend_set.cpp` for every target that links the multi-member
+ *       set — i.e. every host target, none of which is the one that benefits. Recorded here
+ *       as DECIDED, not deferred again. The virtual `destroy` fallback is the same path every
+ *       out-of-core backend already takes, and it costs the DEFAULT composition nothing:
+ *       `graph_t` folds a process-default source back onto @ref heap_backend (tagged `HEAP`)
+ *       and never constructs this type at all.
  *
  * @note @ref alloc and @ref destroy are defined OUT OF LINE (`core/src/mem_source_backend.cpp`),
  *       unlike @ref heap_backend_t's, and that is deliberate rather than stylistic. This type is
@@ -86,22 +99,40 @@ class source_backend_t final : public mem_backend_t {
     [[nodiscard]] block_source_t& source() const noexcept { return *src_; }
 
     /**
-     * @brief Allocate a @p size-byte segment (refcount 1) from the source.
+     * @brief Allocate a @p size-byte segment (refcount 1) from the source, in ONE block.
      *
      * @param size Payload bytes; a zero-size request yields an empty-but-valid segment,
-     *             exactly as @ref heap_backend_t's does.
-     * @retval nullptr The source refused either block — BACKPRESSURE. Any block already
-     *                 taken is returned before answering, so a refusal leaks nothing.
+     *             exactly as @ref heap_backend_t's does (an empty `bytes` span).
+     * @retval nullptr The source refused — BACKPRESSURE. One draw, so there is nothing to
+     *                 unwind on a refusal.
      */
     [[nodiscard]] view::segment_t* alloc(std::size_t size,
                                          alloc_hint_t hint = alloc_hint_t::NONE) override;
 
-    /** @brief Return both blocks to the source, in the sizes @ref alloc took them in. */
+    /** @brief Return the single block to the source, in the size @ref alloc took it in. */
     void destroy(view::segment_t* seg) noexcept override;
 
     /** @brief The alignment @ref block_source_t::try_alloc's default requests. */
-    [[nodiscard]] std::size_t alignment() const noexcept override {
-        return alignof(std::max_align_t);
+    [[nodiscard]] std::size_t alignment() const noexcept override { return kBlockAlign; }
+
+    /**
+     * @brief The block alignment one segment is drawn at — the stricter of the payload's
+     *        fundamental alignment and the control block's own.
+     */
+    static constexpr std::size_t kBlockAlign = alignof(std::max_align_t) > alignof(view::segment_t)
+                                                   ? alignof(std::max_align_t)
+                                                   : alignof(view::segment_t);
+
+    /**
+     * @brief Bytes the control block occupies at the head of the block, padded so the payload
+     *        that follows it starts at @ref kBlockAlign.
+     */
+    static constexpr std::size_t kHeaderBytes =
+        (sizeof(view::segment_t) + kBlockAlign - 1) / kBlockAlign * kBlockAlign;
+
+    /** @brief The single block @ref alloc draws for a @p size-byte segment. */
+    [[nodiscard]] static constexpr std::size_t block_bytes(std::size_t size) noexcept {
+        return kHeaderBytes + size;
     }
 
     // Module-set traits (ADR-0047 §2), read only by a `transfer_host<>` instantiation.

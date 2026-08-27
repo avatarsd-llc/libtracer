@@ -1186,6 +1186,13 @@ target_compile_definitions(substrate_test PRIVATE
     LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
 add_test(NAME substrate COMMAND substrate_test)
 
+# The source-backed mem_backend_t wrapper's block contract (#873 phase 3): ONE block per
+# segment, sized reclaim, aligned payload, null-on-refusal.
+add_executable(mem_source_backend_test mem_source_backend_test.cpp)
+target_link_libraries(mem_source_backend_test PRIVATE libtracer)
+libtracer_test_warnings(mem_source_backend_test)
+add_test(NAME mem_source_backend COMMAND mem_source_backend_test)
+
 # vertex_t verb interface — a BARE vertex (no graph_t): store/LKV, STREAM ring trim +
 # drain cursor, await wake, edge snapshot under concurrent add, ACL verbs.
 add_executable(vertex_test vertex_test.cpp)

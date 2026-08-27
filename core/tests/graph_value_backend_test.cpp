@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "libtracer/mem_source.hpp"
+#include "libtracer/mem_source_backend.hpp"
 #include "libtracer/tracer.hpp"
 #include "test_support.hpp"
 
@@ -147,7 +148,11 @@ int main() {
     // reads it back exactly — the flatten drew from the injected pool.
     {
         value_probe_source_t src;
-        src.watch(tlv.size());
+        // The SEGMENT's block, not the payload's: since #873 phase 3 `source_backend_t`
+        // draws the control block and the payload in ONE `try_alloc`, so the size that
+        // isolates the flatten is `block_bytes(tlv.size())`. Watching `tlv.size()` would
+        // watch a draw the backend no longer makes.
+        src.watch(tr::mem::source_backend_t::block_bytes(tlv.size()));
         graph_t g(&src);
         const auto v = with_field(g);
         const auto w = g.write(v, fp->field(), multilink(tlv));
@@ -158,9 +163,15 @@ int main() {
         // A plain single-link value write never materializes — the seam is untouched
         // and the ordinary store path is unaffected.
         const std::array<std::byte, 3> pv_bytes{std::byte{0xAA}, std::byte{0xBB}, std::byte{0xCC}};
+        // Sampled HERE rather than compared against the literal 1: since #873 phase 3 the
+        // graph's read-back encoders draw their segments from the same seam, so the
+        // `stored_bytes` call above legitimately adds a watched draw of the stored TLV's
+        // width. What this row tests is that the single-link WRITE adds none.
+        const std::size_t before_pv = src.served_watched();
         const auto pv = g.write(v, rope_t{view_t::over(tr::view::borrow_const(pv_bytes))});
         check(pv.has_value(), "ordinary single-link value write is unaffected by the seam");
-        check(src.served_watched() == 1, "...and never reaches the flatten (no second draw)");
+        check(src.served_watched() == before_pv,
+              "...and never reaches the flatten (no second draw)");
     }
 
     // BACKPRESSURE (§3): a pool whose slot cannot hold the value makes the flatten
@@ -168,7 +179,8 @@ int main() {
     // heap fallback). The SAME value on the default heap accepts — proving the seam is
     // actually consulted, not ignored.
     {
-        value_probe_source_t refusing(tlv.size());  // refuses the flatten, serves all else
+        // Refuses the flatten's one block (see the watch above), serves all else.
+        value_probe_source_t refusing(tr::mem::source_backend_t::block_bytes(tlv.size()));
         graph_t g(&refusing);
         const auto v = with_field(g);
         const auto w = g.write(v, fp->field(), multilink(tlv));
