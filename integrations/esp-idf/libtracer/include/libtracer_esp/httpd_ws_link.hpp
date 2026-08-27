@@ -125,6 +125,17 @@
  * @ref tx_slot_capacity, @ref tx_inline_bytes, @ref buffer_bytes — so a node can REPORT
  * the ceiling that produced a drop instead of quoting a constant out of these sources.
  *
+ * A FIFTH thing is configurable and is not a number at all (#1565): the RX DELIVERY MODE.
+ * Left unset, an inbound frame is delivered BORROWED out of the reusable RX scratch — zero
+ * per-frame allocation, and exactly right for the decode-and-forget consumer the router is.
+ * Given a `rx_backend` — a bounded, integrator-owned `tr::mem::mem_backend_t`, the
+ * ADR-0067 recycling-source shape every other transport in the tree already takes — the
+ * link instead RECVs each frame straight into a refcounted segment from that source and
+ * hands the sink an OWNING rope. A consumer that must keep the payload past the callback
+ * (to store it as a value, or to queue it to another task) then pays the ingress recv and
+ * nothing else, instead of recv plus a second full copy out of the borrowed scratch.
+ * Borrowed stays the default; the pool is the integrator's and the library owns no buffer.
+ *
  * A FOURTH number is configurable and has NO default at all (#1566): the LARGE TX size
  * class (`tx_large_bytes` × `tx_large_slots`, @ref tx_large_bytes / @ref
  * tx_large_slot_capacity). Left unset it does not exist and this link behaves exactly as
@@ -300,12 +311,17 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *                   does not exist. Both this and @p tx_large_bytes must be non-zero,
      *                   and @p tx_large_bytes must exceed the effective inline capacity,
      *                   or the declaration is inert and reported as such.
+     * @param rx_backend Opt in to OWNING RX delivery by naming a bounded, caller-owned
+     *                   byte source; `nullptr` (the default) keeps borrowed delivery and
+     *                   every property it has. See @ref rx_backend for what it changes,
+     *                   what it costs, and the two lifetime rules on it.
      */
     explicit httpd_ws_link_t(std::uint16_t bind_port, std::size_t max_peers = 0,
                              bool peer_named = false, std::uint32_t send_timeout_ms = 0,
                              std::uint32_t auth_deadline_ms = 0, std::size_t rx_scratch_bytes = 0,
                              std::size_t tx_pool_slots = 0, std::size_t tx_inline_bytes = 0,
-                             std::size_t tx_large_bytes = 0, std::size_t tx_large_slots = 0);
+                             std::size_t tx_large_bytes = 0, std::size_t tx_large_slots = 0,
+                             mem::mem_backend_t* rx_backend = nullptr);
 
     /**
      * @brief Adopt an already-running `esp_http_server` and register the WebSocket URI
@@ -380,12 +396,16 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *                   default) means the class does not exist — see @ref tx_large_bytes.
      * @param tx_large_slots Large buffers to allocate; 0 (the default) means the class
      *                   does not exist.
+     * @param rx_backend Opt in to OWNING RX delivery by naming a bounded, caller-owned
+     *                   byte source; `nullptr` (the default) keeps borrowed delivery —
+     *                   see @ref rx_backend.
      */
     httpd_ws_link_t(httpd_handle_t external, const char* uri, std::size_t max_peers = 0,
                     bool peer_named = false, std::uint32_t send_timeout_ms = 0,
                     std::uint32_t auth_deadline_ms = 0, std::size_t rx_scratch_bytes = 0,
                     std::size_t tx_pool_slots = 0, std::size_t tx_inline_bytes = 0,
-                    std::size_t tx_large_bytes = 0, std::size_t tx_large_slots = 0);
+                    std::size_t tx_large_bytes = 0, std::size_t tx_large_slots = 0,
+                    mem::mem_backend_t* rx_backend = nullptr);
 
     /**
      * @brief Stop the owned httpd instance (or unregister the adopted WS URI) and release
@@ -423,9 +443,23 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      */
     void send(std::span<const std::span<const std::byte>> iov) override;
 
-    /** @brief Span delivery: the router services each inbound frame in-call, so no
-     *         frame outlives its callback (one override covers both bases). */
-    [[nodiscard]] bool delivers_ropes() const override { return false; }
+    /**
+     * @brief True iff this link hands its sink OWNING frames — i.e. iff an integrator named
+     *        an @ref rx_backend (#1565). One override covers both bases (`transport_t` and
+     *        `bus_link_t`), as it always has.
+     *
+     * Borrowed by default, and that is not a limitation to be apologised for: the router
+     * services each inbound frame IN-CALL, so nothing needs to outlive the callback and a
+     * borrowed span costs no allocation at all. The owning mode exists for the OTHER
+     * consumer — one that must keep the payload (store it as a value, hand it to another
+     * task) and would otherwise copy it out of the borrowed scratch itself.
+     *
+     * A CONSTRUCTOR fact, deliberately, and never a runtime switch: `fwd_router_t::add_child`
+     * reads this once, at wiring time, to decide which sink to install. A link that could
+     * change its answer afterwards would have the wrong sink installed for the rest of its
+     * life — and a mid-flight flip would be a data race on the RX path for no gain.
+     */
+    [[nodiscard]] bool delivers_ropes() const override { return rx_backend_ != nullptr; }
 
     /** @brief The @ref bus_link_t facet when constructed `peer_named`, else nullptr. */
     [[nodiscard]] bus_link_t* bus() override { return peer_named_ ? this : nullptr; }
@@ -736,6 +770,25 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
          *         allocated. The session is closed with them. */
         std::uint32_t rx_dropped_alloc = 0;
         /**
+         * @brief Inbound frames dropped because the injected @ref rx_backend refused a
+         *        segment — the `dropped` noun for the OWNING RX mode (#1565).
+         *
+         * Its own counter, apart from @ref rx_dropped_alloc, because it is the one an
+         * operator SIZES something against (`core/STYLE.md` §counting doctrine ¶4): a rising
+         * count means the injected pool is too small (or too slow to be returned) for the
+         * inbound rate, which is a decision the integrator makes and can act on. A rising
+         * `rx_dropped_alloc` means the global heap failed, which is not.
+         *
+         * The capacity side of the pair is NOT reported here, on purpose: the pool belongs to
+         * the integrator, and its `capacity`/`in_use`/`peak` are its own
+         * `tr::mem::source_stats_t` census to answer. What this link owns is the loss.
+         *
+         * Zero forever on a link that named no backend. Fail-CLOSED: a refusal is never
+         * served from the heap instead, which would return the unbounded footprint the
+         * injected pool exists to bound.
+         */
+        std::uint32_t rx_dropped_pool = 0;
+        /**
          * @brief Sessions closed because the auth hook answered REJECT — a credential this
          *        node was OFFERED and refused.
          *
@@ -774,13 +827,15 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *
      * Projected from this link's own richer counters: an ingress frame refused at the
      * abuse cap is the `malformed_rx` class (the peer broke the agreed bound and is
-     * dropped with it), an ingress allocation failure is `dropped_rx` (backpressure),
-     * and both egress classes — an enqueue that found no slot/queue/heap, and a send to
-     * a peer that had already departed — sum into `dropped_tx`.
+     * dropped with it), an ingress allocation failure — the global heap's, or the injected
+     * @ref rx_backend's — is `dropped_rx` (backpressure), and both egress classes — an
+     * enqueue that found no slot/queue/heap, and a send to a peer that had already departed
+     * — sum into `dropped_tx`.
      */
     [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
         const stats_t s = stats();
-        return {s.rx_dropped_alloc, s.rx_dropped_oversize,
+        return {static_cast<std::uint64_t>(s.rx_dropped_alloc) + s.rx_dropped_pool,
+                s.rx_dropped_oversize,
                 static_cast<std::uint64_t>(s.enqueue_drops) + s.tx_to_dead_peer};
     }
 
@@ -824,6 +879,37 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *         `tx_inline_bytes`. A frame past it keeps its pooled shell and takes a
      *         nothrow heap payload, so this is the size above which a send allocates. */
     [[nodiscard]] std::size_t tx_inline_bytes() const noexcept;
+
+    /**
+     * @brief The bounded byte source OWNING RX delivery draws from, or null when this link
+     *        delivers borrowed (the default) — #1565.
+     *
+     * WHAT IT CHANGES. With a backend named, an unfragmented inbound frame is `recv`'d
+     * STRAIGHT INTO a refcounted segment carved from it and handed up as an owning rope, so
+     * a consumer that must keep the payload — publish it as a stored value through
+     * `view::borrow` then `rope_t` then `graph_t::write`, or queue it to another task — pays
+     * the ingress recv and nothing else. Without one, the same frame is delivered borrowed
+     * out of the reusable RX scratch and such a consumer copies it out itself: the recv,
+     * plus a second full copy at the seam, on every frame.
+     *
+     * WHAT IT COSTS, and who pays. The bytes are the INTEGRATOR's — an ADR-0067
+     * `tr::mem::pool_source_t` behind a `tr::mem::source_backend_t` is the shape, and it is
+     * the same seam `tcp_transport_t` and its siblings have always taken. The library
+     * allocates no buffer of its own for this and chooses no size: a bounded pool that
+     * refuses is the point, and a library-picked default would be an unbounded heap wearing
+     * a pool's name. A refusal is a NAMED DROP (@ref stats_t::rx_dropped_pool), never a
+     * fallback onto the global heap.
+     *
+     * TWO LIFETIME RULES, both on the caller:
+     *   1. the backend must outlive this link — it is read on every inbound frame; and
+     *   2. it must outlive every SEGMENT handed up from it, which can be longer, because the
+     *      whole point of the mode is that the sink may keep one. A rope pinned by a stored
+     *      value releases when that value is retired, which may be well after this link is
+     *      gone (the #814 shape: the app can destroy the link from inside the delivery).
+     *
+     * A CONSTRUCTOR fact, for the reason @ref delivers_ropes records.
+     */
+    [[nodiscard]] mem::mem_backend_t* rx_backend() const noexcept { return rx_backend_; }
 
     /**
      * @brief Effective payload capacity of one LARGE TX buffer, bytes — the ceiling of the
@@ -1834,6 +1920,9 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     void note_rx_oversize(std::size_t len);
     /** @brief Count+log an RX payload allocation failure, out of line. */
     void note_rx_alloc_fail(std::size_t len);
+    /** @brief Count+log an inbound frame the injected @ref rx_backend refused, out of line
+     *         and for the same per-frame reason. */
+    void note_rx_pool_refusal(std::size_t len);
     /** @brief Log a reassembly that would pass the cap, out of line. */
     void note_reassembly_over_cap(std::size_t had, std::size_t adding);
     std::atomic<std::uint32_t> tx_pool_misses_{0};
@@ -1912,6 +2001,31 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     /** @brief Once-allocated RX scratch (httpd-task-only, so lock-free by construction):
      *         a frame that fits reads here instead of a per-frame allocation. */
     std::unique_ptr<std::byte[]> rx_scratch_;
+    /** @brief The injected owning-RX source, or null for borrowed delivery — see
+     *         @ref rx_backend. Written once by the constructor and never again, so the
+     *         httpd task reads it with no synchronization at all. */
+    mem::mem_backend_t* rx_backend_ = nullptr;
+    std::atomic<std::uint32_t> rx_dropped_pool_{0}; /**< @brief @ref stats_t::rx_dropped_pool. */
+    /**
+     * @brief Deliver one OWNING frame to whichever sink this link's mode installed — the
+     *        twin of @ref deliver, and never reached on a borrowed link.
+     *
+     * Separate from @ref deliver rather than a branch inside it, because @ref deliver IS the
+     * borrowed hot path: the dispatch-inline cliff (#1223/#1250) is close enough that a
+     * frame-rate seam does not get a test added to it in order to serve a mode it is not in.
+     */
+    void deliver_owned(peer_handle_t peer, view::view_t frame);
+    /**
+     * @brief Copy @p body into a segment from @ref rx_backend_ and deliver it owning; count
+     *        and drop if the source refuses.
+     *
+     * The FRAGMENTED arm's ending. An assembled message is already in `asm_buf`, so it
+     * cannot be recv'd into pool memory the way an unfragmented frame is — it is copied in
+     * once at the end instead. That is one copy on a path that is already quadratic in its
+     * fragment count, and it is what keeps a rope-only sink from being starved by the one
+     * message shape this link cannot hand it directly.
+     */
+    void deliver_owned_copy(peer_handle_t peer, std::span<const std::byte> body);
     /** @brief Set once @ref check_httpd_stack has reported a thin stack — it then stops
      *         sampling. Plain `bool`: written and read only on the httpd task, like
      *         @ref rx_scratch_ and the reassembly buffer. */

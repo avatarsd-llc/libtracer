@@ -417,6 +417,15 @@ buffer: a frame that fits reads into it and is delivered borrowed (the httpd tas
 thread and delivery is synchronous, so one scratch needs no lock); only an oversized frame takes
 the exact-size nothrow allocation.
 
+That RX default serves the decode-and-forget consumer, which is what the router is. A consumer
+that must OWN the payload past the callback copies it out of the borrowed scratch itself, so its
+inbound path is the recv plus a second full copy per frame — and for that one, the link takes an
+optional `rx_backend` (#1565): a bounded, INTEGRATOR-injected `mem_backend_t` the frame is recv'd
+straight into, delivered up as an owning rope the sink may keep. The library still owns no buffer
+and picks no size; a source that refuses is a counted drop (`rx_dropped_pool`) and never a heap
+fallback, which is the same fail-closed answer the TX side gives. Borrowed remains the default,
+and a link that names no backend is byte-for-byte the link that shipped before.
+
 ## Pitfalls
 
 **A bump block is never reclaimed.** `bump_source_t` has a cursor and no free list, so a source that

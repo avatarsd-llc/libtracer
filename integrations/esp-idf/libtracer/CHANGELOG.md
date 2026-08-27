@@ -54,6 +54,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`httpd_ws_link_t` takes an optional OWNING RX delivery mode — `rx_backend`**
+  ([#1565](https://github.com/avatarsd-llc/libtracer/issues/1565)). One more trailing
+  constructor argument on both constructors, defaulted to `nullptr`, plus the accessor
+  `rx_backend()` and the `stats_t` field `rx_dropped_pool`. Name a bounded, caller-owned
+  `tr::mem::mem_backend_t` — an ADR-0067 `pool_source_t` behind a `source_backend_t` is the
+  shape, the same seam `tcp_transport_t` and its siblings already take — and an unfragmented
+  inbound frame is `recv`'d STRAIGHT INTO a refcounted segment from it and handed up as an
+  owning rope (`delivers_ropes()` flips to true, so `fwd_router_t::add_child` installs the
+  rope receiver). A consumer that must keep the payload past the callback — publish it as a
+  stored value, queue it to another task — then pays the ingress recv and nothing else,
+  instead of the recv plus a second full copy out of the borrowed scratch on every frame.
+  A reassembled FRAGMENTED message reaches the same owning sink, at one copy into a pool
+  segment, so turning the mode on cannot silently starve a rope-only sink. **Borrowed
+  delivery remains the default and is untouched**: with no backend named the RX path is
+  byte-for-byte what it was, zero per-frame allocation included, and the frame-rate `deliver`
+  seam gained nothing at all (the owning path is a separate function — the dispatch-inline
+  cliff, #1223/#1250). A refusal by the injected source is a **named drop**
+  (`rx_dropped_pool`, and `dropped_rx` through `transport_drop_stats_t`) with no heap
+  fallback and no torn-down session; the pool's own `capacity`/`in_use`/`peak` stay the
+  integrator's census to report. Two lifetime rules on the caller: the backend must outlive
+  the link, and it must outlive every segment handed up from it — which can be longer,
+  because the whole point is that the sink may keep one.
+
 - **`httpd_ws_link_t` takes an optional BOUNDED LARGE TX size class — `tx_large_bytes` ×
   `tx_large_slots`** ([#1566](https://github.com/avatarsd-llc/libtracer/issues/1566)). Two new
   trailing constructor arguments on both constructors (port-binding and adopting), defaulted to
@@ -871,7 +894,7 @@ core 0.10.0 reaches it.
 
 - **Public headers now propagate their ESP-IDF dependencies (#963.4).** `esp_http_server`,
   `tcp_transport` and `esp_driver_twai` moved from `PRIV_REQUIRES` to **`REQUIRES`**. Those
-  three are named by headers under `include/libtracer_esp/` (`httpd_ws_link.hpp:162`,
+  three are named by headers under `include/libtracer_esp/` (`httpd_ws_link.hpp:173`,
   `esp_ws_client_link.hpp:195`, `twai_link.hpp:36-37`), and `PRIV_REQUIRES` does not
   propagate include dirs — so a dependent that included one of ours without independently
   requiring the base component died with `esp_http_server.h: No such file or directory` and

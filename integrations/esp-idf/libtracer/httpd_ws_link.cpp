@@ -1194,11 +1194,12 @@ httpd_ws_link_t::httpd_ws_link_t(std::uint16_t bind_port, std::size_t max_peers,
                                  std::uint32_t send_timeout_ms, std::uint32_t auth_deadline_ms,
                                  std::size_t rx_scratch_bytes, std::size_t tx_pool_slots,
                                  std::size_t tx_inline_bytes, std::size_t tx_large_bytes,
-                                 std::size_t tx_large_slots)
+                                 std::size_t tx_large_slots, mem::mem_backend_t* rx_backend)
     : port_(bind_port),
       max_peers_(max_peers),
       auth_deadline_us_(resolve_auth_deadline_us(auth_deadline_ms)),
       peer_named_(peer_named),
+      rx_backend_(rx_backend),
       rx_scratch_bytes_(resolve_size(rx_scratch_bytes, kDefaultRxScratchBytes)),
       tx_inline_bytes_(resolve_size(tx_inline_bytes, kDefaultTxInlineBytes)),
       tx_pool_slots_(resolve_size(tx_pool_slots, kDefaultTxPoolSlots)),
@@ -1266,10 +1267,11 @@ httpd_ws_link_t::httpd_ws_link_t(httpd_handle_t external, const char* uri_patter
                                  std::uint32_t send_timeout_ms, std::uint32_t auth_deadline_ms,
                                  std::size_t rx_scratch_bytes, std::size_t tx_pool_slots,
                                  std::size_t tx_inline_bytes, std::size_t tx_large_bytes,
-                                 std::size_t tx_large_slots)
+                                 std::size_t tx_large_slots, mem::mem_backend_t* rx_backend)
     : max_peers_(max_peers),
       auth_deadline_us_(resolve_auth_deadline_us(auth_deadline_ms)),
       peer_named_(peer_named),
+      rx_backend_(rx_backend),
       rx_scratch_bytes_(resolve_size(rx_scratch_bytes, kDefaultRxScratchBytes)),
       tx_inline_bytes_(resolve_size(tx_inline_bytes, kDefaultTxInlineBytes)),
       tx_pool_slots_(resolve_size(tx_pool_slots, kDefaultTxPoolSlots)),
@@ -2172,21 +2174,60 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
     // on OOM the payload cannot be drained, so fail the handler — httpd closes just
     // this session (backpressure), never the whole node.
     std::unique_ptr<std::byte[]> heap_payload;
+    // The OWNING-RX segment (#1565), when an integrator named a source to draw it from. It
+    // is the recv DESTINATION, not a copy of one: the frame lands in pool memory once and
+    // travels from there by refcount, which is the entire saving the mode exists for. Empty
+    // on a borrowed link, on a fragmented frame, and on a refusal — the three cases below.
+    view::segment_ptr_t owned_seg;
+    bool pool_refused = false;
     std::byte* payload = nullptr;
     if (frame.len != 0) {
-        if (rx_scratch_ != nullptr && frame.len <= rx_scratch_bytes_) {
-            payload = rx_scratch_.get();
-        } else {
-            heap_payload.reset(new (std::nothrow) std::byte[frame.len]);
-            if (heap_payload == nullptr) {
-                note_rx_alloc_fail(frame.len);
-                return ESP_FAIL;
+        // ONE test in front of the two arms that were already here, against a member written
+        // once by the constructor and never again. A borrowed link answers it false and
+        // takes the scratch arm exactly as it always has — no allocation, no second read of
+        // anything, and nothing at all added to `deliver` itself (the frame-rate seam this
+        // deliberately stays out of; see deliver_owned).
+        if (rx_backend_ != nullptr) {
+            if (view::segment_t* const seg = rx_backend_->alloc(frame.len); seg != nullptr) {
+                owned_seg = view::segment_ptr_t::adopt(seg);
+                payload = owned_seg->bytes.data();
+            } else {
+                // The injected source refused: a bounded pool doing its job. Do NOT reach for
+                // the heap — that would hand back the unbounded footprint the injection was
+                // made to bound. The frame is dropped, but its BYTES must still leave the
+                // stream or the next recv reads them as a header, so it is drained through
+                // the scratch below and discarded after (see `pool_refused`).
+                pool_refused = true;
             }
-            payload = heap_payload.get();
+        }
+        if (payload == nullptr) {
+            if (rx_scratch_ != nullptr && frame.len <= rx_scratch_bytes_) {
+                payload = rx_scratch_.get();
+            } else if (pool_refused) {
+                // A refused frame too large to drain through the scratch. Allocating a
+                // drain buffer here would defeat the refusal, so the only bounded answer is
+                // the one the sibling OOM arm already gives: fail the handler and let httpd
+                // close THIS session. Counted first, as its own cause.
+                note_rx_pool_refusal(frame.len);
+                return ESP_FAIL;
+            } else {
+                heap_payload.reset(new (std::nothrow) std::byte[frame.len]);
+                if (heap_payload == nullptr) {
+                    note_rx_alloc_fail(frame.len);
+                    return ESP_FAIL;
+                }
+                payload = heap_payload.get();
+            }
         }
         frame.payload = reinterpret_cast<std::uint8_t*>(payload);
         err = httpd_ws_recv_frame(req, &frame, frame.len);
         if (err != ESP_OK) return err;
+    }
+    if (pool_refused) {
+        // Drained, and now dropped: the stream stays framed, the peer stays connected, and
+        // the loss is named rather than silent.
+        note_rx_pool_refusal(frame.len);
+        return ESP_OK;
     }
     const std::span<const std::byte> body(payload, frame.len);
     // Only data frames carry a TLV (control frames are httpd's —
@@ -2285,8 +2326,17 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
         // resolution, fan-out) close the same door from the outbound side.
         if (pending)
             on_auth_message(slot, body);
+        else if (owned_seg)
+            // OWNING (#1565): the bytes are already in the integrator's pool memory — this
+            // hands the segment up, it does not copy it. The move empties `owned_seg`, so
+            // the sink's rope is the only reference and nothing is released underneath it.
+            deliver_owned(handle, view::view_t{std::move(owned_seg), 0, body.size()});
         else
-            deliver(handle, body);  // unfragmented: deliver borrowed, no extra copy
+            // Borrowed: no extra copy, and no owned segment either — the borrowed link, and
+            // also the EMPTY frame on an owning one, which has no bytes to hand up. An empty
+            // data frame carries no TLV and is rejected at decode wherever it lands, so a
+            // rope sink that never sees it is told nothing it did not already know.
+            deliver(handle, body);
         return ESP_OK;
     }
     if (frame.type == HTTPD_WS_TYPE_CONTINUE && slot->asm_buf.empty())
@@ -2319,6 +2369,13 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
         // same route rather than being the one shape that leaks into the graph.
         if (pending)
             on_auth_message(slot, message.bytes());
+        else if (rx_backend_ != nullptr)
+            // The reassembled message cannot have been recv'd into pool memory — it was
+            // built fragment by fragment in `asm_buf` before its total size was known — so
+            // the owning mode pays ONE copy into a pool segment here. That is the price of
+            // not starving a rope sink of the one message shape this link cannot hand it
+            // directly, on a path that is already quadratic in its fragment count.
+            deliver_owned_copy(handle, message.bytes());
         else
             deliver(handle, message.bytes());
     }
@@ -2833,6 +2890,22 @@ void httpd_ws_link_t::note_rx_drop(session_t* slot) {
     ESP_LOGW(kTag, "rx alloc failed (len=%u) - closing session", (unsigned)len);
 }
 
+/**
+ * @brief Count and name an inbound frame the injected owning-RX source refused (#1565).
+ *
+ * `noinline` for the reason on @ref httpd_ws_link_t::note_rx_oversize: `on_data_frame` runs
+ * per FRAME, and a log call site inlined into it costs a format string and its argument
+ * setup on every frame that never needs one.
+ *
+ * The `len` is in the message because it is the number an operator sizes the injected pool
+ * against — the refusal is either "the pool is full" or "no class of it is this wide", and
+ * the two look identical from here but not from the pool's own census.
+ */
+[[gnu::noinline]] void httpd_ws_link_t::note_rx_pool_refusal(std::size_t len) {
+    rx_dropped_pool_.fetch_add(1, std::memory_order_relaxed);
+    ESP_LOGW(kTag, "rx pool refused a segment (len=%u) - frame dropped", (unsigned)len);
+}
+
 /** @brief Name a reassembly that would pass the cap — the per-peer counter is bumped by the
  *         caller, which holds the slot; this adds only the log the site never had.
  *         `noinline` for the reason on @ref note_rx_oversize. */
@@ -2849,6 +2922,30 @@ void httpd_ws_link_t::deliver(peer_handle_t peer, std::span<const std::byte> fra
         peer_rx_.deliver_borrowed(peer, frame);
     else
         rx_.deliver_borrowed(frame);
+}
+
+void httpd_ws_link_t::deliver_owned(peer_handle_t peer, view::view_t frame) {
+    // The same two-slot fork as @ref deliver, one tier up. `receiver_slot_t::deliver` is the
+    // TIER SELECT: a rope sink — which is what fwd_router_t::add_child installed, because
+    // delivers_ropes() answered true for this link — takes the frame owning and may pin it,
+    // subrope it, or forward it; a span-only sink installed by some other embedder gets the
+    // same bytes borrowed for the call. Either way this function is unreachable unless an
+    // integrator named an rx_backend, so no borrowed link pays a single instruction of it.
+    if (peer_named_)
+        peer_rx_.deliver(peer, std::move(frame));
+    else
+        rx_.deliver(std::move(frame));
+}
+
+void httpd_ws_link_t::deliver_owned_copy(peer_handle_t peer, std::span<const std::byte> body) {
+    view::segment_t* const seg = rx_backend_->alloc(body.size());
+    if (seg == nullptr) {
+        note_rx_pool_refusal(body.size());
+        return;  // named drop — never the heap, for the reason on rx_backend()
+    }
+    view::segment_ptr_t held = view::segment_ptr_t::adopt(seg);
+    if (!body.empty()) std::memcpy(held->bytes.data(), body.data(), body.size());
+    deliver_owned(peer, view::view_t{std::move(held), 0, body.size()});
 }
 
 // ---------------------------------------------------------------------------
@@ -3115,6 +3212,7 @@ httpd_ws_link_t::stats_t httpd_ws_link_t::stats() const noexcept {
     s.sessions_condemned = sessions_condemned_.load(std::memory_order_relaxed);
     s.rx_dropped_oversize = rx_dropped_oversize_.load(std::memory_order_relaxed);
     s.rx_dropped_alloc = rx_dropped_alloc_.load(std::memory_order_relaxed);
+    s.rx_dropped_pool = rx_dropped_pool_.load(std::memory_order_relaxed);
     s.auth_rejected = auth_rejected_.load(std::memory_order_relaxed);
     s.auth_expired = auth_expired_.load(std::memory_order_relaxed);
     return s;
