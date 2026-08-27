@@ -507,6 +507,29 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     set_tests_properties(httpd_ws_tx_large_class
         PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
 
+    # #1565 — OPT-IN OWNING RX delivery from a bounded, INJECTED pool, on the same fake and
+    # the same allocation-counting instrument. Four subjects: the borrowed default must stay
+    # zero-alloc (the dispatch-inline cliff, #1223/#1250), a named backend must hand the sink
+    # a rope it can KEEP, an exhausted pool must be a named drop with no heap fallback and no
+    # torn-down session, and a fragmented message must reach the owning sink too.
+    add_executable(httpd_ws_rx_owned_test
+        "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_rx_owned_test.cpp"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
+        "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
+    target_include_directories(httpd_ws_rx_owned_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        "${LIBTRACER_ESP_DIR}/libtracer/include")
+    target_link_libraries(httpd_ws_rx_owned_test PRIVATE libtracer)
+    target_link_options(httpd_ws_rx_owned_test PRIVATE
+        "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+    libtracer_test_warnings(httpd_ws_rx_owned_test)
+    add_test(NAME httpd_ws_rx_owned COMMAND httpd_ws_rx_owned_test)
+    # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and
+    # every case here constructs an adopting link — same exemption as the suites above.
+    set_tests_properties(httpd_ws_rx_owned
+        PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+
     # #1494 — the IN-CALL REPLY leaves by the socket, not by the control queue. The pool
     # suite above pins what a QUEUED send costs; this one pins that a reply serviced inside
     # the handler frame pays none of it, and survives the full pool + refusing queue that
@@ -2053,6 +2076,7 @@ set(LIBTRACER_BUS_TESTS
     httpd_ws_fanout_width
     httpd_ws_in_call_reply
     httpd_ws_keepalive
+    httpd_ws_rx_owned
     httpd_ws_send_stall
     httpd_ws_session_identity
     httpd_ws_teardown

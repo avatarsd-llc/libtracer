@@ -823,7 +823,7 @@ ANCHORS = [
     # integrations/esp-idf/libtracer/httpd_ws_link.cpp
     ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:131',
      '* (F2b, 2026-07-09): the /unit batch apply overflowed 8 KB and needed ~12 KB. It is named'),
-    ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:203',
+    ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:214',
      'static constexpr std::size_t kRequiredHttpdStack = 12288;'),
     ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:631', 'if (chunk.empty()) return true;'),
     ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:637',
@@ -873,9 +873,9 @@ ANCHORS = [
     ('tools/cortexm0_footprint.py:151', 'cxx_flags = ['),
     ('tools/cortexm0_footprint.py:158', '"-DLIBTRACER_NO_ATOMIC",'),
     ('tools/cortexm0_footprint.py:172', '"--specs=nano.specs",'),
-    ('core/tests/CMakeLists.txt:1804', 'add_executable(substrate_test_no_atomic'),
-    ('core/tests/CMakeLists.txt:1819', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
-    ('core/tests/CMakeLists.txt:1820', '    LIBTRACER_NO_ATOMIC'),
+    ('core/tests/CMakeLists.txt:1827', 'add_executable(substrate_test_no_atomic'),
+    ('core/tests/CMakeLists.txt:1842', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
+    ('core/tests/CMakeLists.txt:1843', '    LIBTRACER_NO_ATOMIC'),
     # The leading indent is load-bearing: the bare token also appears in the comment
     # three lines above the executable, and an anchor that matches both is not an anchor.
 
@@ -1092,7 +1092,7 @@ ANCHORS = [
      'if (const auto v = cfg.u32("backoff")) s.backoff_ms = *v;'),
     ('integrations/esp-idf/libtracer/include/libtracer_esp/esp_ws_client_link.hpp:195',
      '#include "esp_transport.h"'),
-    ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:162',
+    ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:173',
      '#include "esp_http_server.h"'),
     ('integrations/esp-idf/libtracer/include/libtracer_esp/twai_link.hpp:36',
      '#include "esp_twai.h"'),
@@ -1163,9 +1163,9 @@ ANCHORS = [
     ('core/include/libtracer/transport.hpp:475',
      '[[nodiscard]] virtual transport_drop_stats_t drop_stats() const noexcept { return {}; }'),
     # integrations/esp-idf/libtracer/httpd_ws_link.cpp
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:3131',
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:3229',
      'std::size_t httpd_ws_link_t::tx_slot_capacity() const noexcept { return tx_pool_slots_; }'),
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:2974',
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:3071',
      'void httpd_ws_link_t::send_in_call(const session_ref_t& to,'),
 ]
 
