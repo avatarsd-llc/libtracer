@@ -2056,6 +2056,7 @@ set(LIBTRACER_BUS_TESTS
     httpd_ws_send_stall
     httpd_ws_session_identity
     httpd_ws_teardown
+    httpd_ws_tx_large_class
     httpd_ws_tx_pool)
 foreach(_libtracer_bus_test IN LISTS LIBTRACER_BUS_TESTS)
     if(TEST ${_libtracer_bus_test})
