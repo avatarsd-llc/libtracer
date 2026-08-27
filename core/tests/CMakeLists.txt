@@ -2207,6 +2207,17 @@ target_link_libraries(playout_test PRIVATE libtracer)
 libtracer_test_warnings(playout_test)
 add_test(NAME playout COMMAND playout_test)
 
+# #1583 — the #873 phase-3 READ-BACK encoders. `folded_read_backend_test` pins the `:children`
+# FOLD and `graph_value_backend_test` the write-path flatten; the other ten `view::over_bytes`
+# migrations in graph.cpp were unpinned, so reverting one to the one-argument (global-heap)
+# spelling stayed green. One family per migrated site, three arms each: measure the record's
+# width, assert exactly ONE draw of that block at the injected source, and assert a REFUSED
+# draw degrades to BACKPRESSURE by value — the arm that rules out a silent heap fallback.
+add_executable(read_back_backend_test read_back_backend_test.cpp)
+target_link_libraries(read_back_backend_test PRIVATE libtracer)
+libtracer_test_warnings(read_back_backend_test)
+add_test(NAME read_back_backend COMMAND read_back_backend_test)
+
 if(LIBTRACER_NET_PLANE)
     # RFC-0004 Amendment 2 (#1502) — the six empty-src conformance vectors: a zero-length
     # `src` is "no reply requested", so the terminus applies the WRITE and emits nothing,
