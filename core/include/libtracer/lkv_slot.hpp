@@ -641,6 +641,23 @@ inline void retire_and_flush(node_t* n) {
  * Every publish displaces exactly one node, so after the first the free list keeps up and a
  * publish allocates nothing at all. That is what keeps ADR-0069 §5's "one allocation per
  * publish" off the steady-state write path; only a participant's first publish can allocate.
+ *
+ * @note **This is the global heap ON PURPOSE, and it is the one channel #873 does not close.**
+ *       Phase 2 of that issue moved this allocation (and the matching `delete`s in `%recycle`,
+ *       `%~participant_t` and `%~final_sweep_t`) onto the graph's injected
+ *       @ref tr::mem::block_source_t, with a process default of @ref tr::mem::heap_source().
+ *       It was implemented, measured against the gate the ruling staged it behind, and
+ *       REVERTED: `bench/bench_hazard_node.cpp`, both arms pinned to one logical CPU over 12
+ *       interleaved rounds, read **+22.7 %** on the allocating publish and — the disqualifying
+ *       half — **+3.5 % on the FREE-LIST arm, which never touches the substrate at all**,
+ *       against a two-binary A/A null of +0.45 % / −1.1 % and with disjoint ranges. End to end
+ *       at this binding `bench_libtracer fan` lost 3.6-6.9 % of its deliveries/s.
+ *       The cost is the indirect `try_alloc` against the direct `operator new` this line calls,
+ *       plus the compiler budget that call re-partitions around `%scan`; moving the body out of
+ *       line did not recover it. Do not re-migrate this site without re-running that bench under
+ *       `docs/methodology.md` §"The A/B protocol" — the rationale, the full table and the shape
+ *       a future attempt should start from instead are in
+ *       `docs/reference/09-memory-substrate.md` §"The carve-out".
  */
 [[nodiscard]] inline node_t* acquire_node(lists_t& l) {
     if (node_t* n = l.freelist) {
