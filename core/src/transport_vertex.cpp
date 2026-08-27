@@ -320,9 +320,11 @@ result_t<void> transport_vertex_t::register_module(std::string module, std::stri
 
 result_t<std::string> transport_vertex_t::module_for(std::string_view kind,
                                                      conn_role_t role) const {
-    // The PUBLIC entry locks (#881); `make_connection` already holds `ctl_m_` — a plain,
-    // NON-RECURSIVE std::mutex (ADR-0063 erratum 1) — so it calls the body directly. The
-    // fix is a split precisely because a lock added in place would self-deadlock there.
+    // The PUBLIC entry locks (#881); a creation running inside its own locked section —
+    // `endpoint_create_locked` and the `*_locked` family below it, since S7 retired the
+    // `:children[]` door — already holds `ctl_m_`, a plain NON-RECURSIVE std::mutex
+    // (ADR-0063 erratum 1), so such a caller reaches the body directly. The fix is a split
+    // precisely because a lock added in place would self-deadlock there.
     const ctl_txn_t txn(*this);  // ADR-0063 §3 control-plane serialization
     return module_for_locked(kind, role);
 }
@@ -550,8 +552,9 @@ result_t<void> transport_vertex_t::endpoint_remove_locked(ctl_txn_t& txn, const 
 
 bool transport_vertex_t::is_structural(wire::key_view_t key) const {
     if (key.empty()) return false;  // the graph root is nobody's structural vertex
-    // The net root is emitted as ONE NAME segment everywhere in this file (`make_connection`
-    // composes the mount key the same way), so the whole predicate is two segment compares
+    // The net root is emitted as ONE NAME segment everywhere in this file
+    // (`make_connection_locked` composes the mount key the same way), so the whole
+    // predicate is two segment compares
     // over the key bytes — no key is materialised and nothing is allocated.
     const std::string_view root = std::string_view(net_root_).substr(1);
     const wire::key_view_t parent = key.parent();
@@ -893,7 +896,7 @@ result_t<void> transport_vertex_t::set_link_state(std::string_view name, link_st
     // The PUBLIC entry opens the transaction (#881). This is the liveness door a TRANSPORT
     // thread knocks on for a provided link, while create/remove is wire-driven on a receive
     // thread — so the unguarded find here walked `conns_` mid-rebalance and could return a
-    // node `remove_connection` was erasing. `make_connection` collects creation liveness on
+    // node `remove_connection` was erasing. `make_connection_locked` collects creation liveness on
     // its own transaction via `set_link_state_locked`, which is why the fix is a split:
     // `ctl_m_` is non-recursive, so it cannot re-enter through this wrapper. `OPERATION`
     // scope: the resolution and the write it defers are ONE step against a concurrent

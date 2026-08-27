@@ -2570,8 +2570,9 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
         // A `std::pmr::vector` here was a peer-reachable abort(): the element count is chosen
         // by the sender (link count x region count), the growth is `operator new`, and on
         // -fno-exceptions the throw is a reboot. This is the FORWARD path — it sits behind no
-        // ACL, exactly like the RX decode (#588). The reply path immediately below already
-        // refused by value via `try_to_iovec`; this closes the asymmetry.
+        // ACL, exactly like the RX decode (#588). Both TERMINUS REPLY tables took the same
+        // migration in #1570 — see `gather_reply_iov` and its two call sites — so no egress
+        // iov in this file is on the throwing `reserve` any more.
         //
         // Exhaustion drops the frame. That is the correct answer for a forward hop: FWD is
         // not delivery-guaranteed, the sender retries, and emitting a partial iov would put a

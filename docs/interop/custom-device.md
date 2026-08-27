@@ -158,7 +158,7 @@ The `config` member `kind` selects which transport factory builds the link
 created connection is mounted and routed at **`/net/<module>/<name>`**, where `module`
 is **declared by the application** through `register_module` — modules are declared-only
 (ADR-0073 §4); an undeclared `(kind, role)` pair fails creation with `SCHEMA_NOT_FOUND`
-(`core/src/transport_vertex.cpp:284`, refused at `:339`). One *(kind, role)*
+(`core/src/transport_vertex.cpp:284`, refused at `:341`). One *(kind, role)*
 pair is declared once: a second module claiming a pair another module already declared
 is refused `PATH_IN_USE` rather than silently renaming the first.
 

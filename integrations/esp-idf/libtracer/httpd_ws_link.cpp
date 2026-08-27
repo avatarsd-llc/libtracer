@@ -3091,8 +3091,8 @@ void httpd_ws_link_t::send_in_call(const session_ref_t& to,
     // half of #1494's report. Above this component's floor (`idf: ">=5.5.5"`) the enqueue
     // verdict is trustworthy — `httpd_queue_work` reserves its mbox slot through a counting
     // semaphore before the `sendto`, so ESP_OK means the item will run and release its slot
-    // (#949; the paragraph in @ref condemn describing an ESP_OK that lies predates that
-    // floor and describes the pre-floor `sendto`). Below it, the silent bin was real, and a
+    // (#949; @ref condemn records the same floor, and the pre-floor ESP_OK-that-lies it
+    // displaced). Below it, the silent bin was real, and a
     // dropped `tx_work` item left `tx_slot_t::busy` set forever. A reply that claims no slot
     // is immune to that whether the verdict lies or not — and it needs no reclamation sweep,
     // which is the remedy this one displaces: reclaiming a slot from a merely LATE item
@@ -3290,17 +3290,14 @@ void httpd_ws_link_t::condemn(int fd) {
     // entry ahead of it costs a full send bound on a stalled socket. On silicon the close
     // was asked for repeatedly and never took effect; the fd kept failing for two minutes.
     //
-    // The FIFO argument is the whole of it above this component's ESP-IDF floor. The rest
-    // of what this paragraph used to say — that on the default non-blocking path
-    // `httpd_queue_work` is a bare `sendto` (httpd_main.c) whose overflow lwIP bins in
-    // silence while still returning success, so an ESP_OK from `trigger_close` is not
-    // evidence that anything was queued — described the pre-floor server and was written
-    // before #949 raised that floor to `>=5.5.5`, where the mbox slot is reserved through a
-    // counting semaphore BEFORE the `sendto` and a full queue is an ESP_FAIL the caller
-    // sees. It is recorded here rather than deleted because an audit of #1494 read it as
-    // current and derived a permanently-stranded TX slot from it: that mechanism is real
-    // below the floor and unreachable above it. `shutdown` is still the right answer, for
-    // the three reasons below and not for that one.
+    // The FIFO argument is the WHOLE of it: this component's floor is `idf: ">=5.5.5"`
+    // (#949), where `httpd_queue_work` reserves its mbox slot through a counting semaphore
+    // before the `sendto`, so a full queue is an ESP_FAIL the caller sees and an ESP_OK
+    // means the item will run. The older reading — an ESP_OK that lies, because the bare
+    // non-blocking `sendto` overflowed into lwIP's silent bin — describes the PRE-floor
+    // server only, and an audit of #1494 that took it as current derived a permanently
+    // stranded TX slot from a mechanism this component cannot reach. `shutdown` is the
+    // right answer for the three reasons below, and not for that one.
     //
     // `shutdown` answers instead, because it is not a request of the server at all:
     //   - it costs one syscall, taking effect before this function returns;

@@ -58,7 +58,7 @@ The created connection vertex is mounted and routed at **`/net/<module>/<name>`*
 `<module>` **declared by the application** through `register_module` — modules are
 declared-only (ADR-0073 §4): the library derives and auto-registers no module names, and an
 undeclared `(kind, role)` pair fails creation with `SCHEMA_NOT_FOUND`
-(`core/src/transport_vertex.cpp:284-289`, refused at `:339`). `/net` itself is the recommended root
+(`core/src/transport_vertex.cpp:284-289`, refused at `:341`). `/net` itself is the recommended root
 convention (a constructor default, overridable per node). See
 [RFC-0014 — Creator endpoint: connection lifecycle and link
 liveness](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md).
