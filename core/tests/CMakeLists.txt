@@ -483,6 +483,30 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     set_tests_properties(httpd_ws_tx_pool
         PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
 
+    # #1566 — the BOUNDED LARGE TX SIZE CLASS, on the same fake. It borrows the fan-out
+    # suite's instrument (the WHOLE global operator new/delete family, replaced) because the
+    # claim is an allocation count: a declared class must take the routine multi-KB frame
+    # off the per-frame heap arm entirely, the inline band must not move, the heap arm must
+    # survive as the exceptional tail past the class, and an exhausted class must drop and
+    # count rather than fall back to the heap it exists to bound.
+    add_executable(httpd_ws_tx_large_class_test
+        "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_tx_large_class_test.cpp"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
+        "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
+    target_include_directories(httpd_ws_tx_large_class_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        "${LIBTRACER_ESP_DIR}/libtracer/include")
+    target_link_libraries(httpd_ws_tx_large_class_test PRIVATE libtracer)
+    target_link_options(httpd_ws_tx_large_class_test PRIVATE
+        "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+    libtracer_test_warnings(httpd_ws_tx_large_class_test)
+    add_test(NAME httpd_ws_tx_large_class COMMAND httpd_ws_tx_large_class_test)
+    # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and
+    # every case here constructs an adopting link — same exemption as the suites above.
+    set_tests_properties(httpd_ws_tx_large_class
+        PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+
     # #1494 — the IN-CALL REPLY leaves by the socket, not by the control queue. The pool
     # suite above pins what a QUEUED send costs; this one pins that a reply serviced inside
     # the handler frame pays none of it, and survives the full pool + refusing queue that

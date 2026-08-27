@@ -125,6 +125,16 @@
  * @ref tx_slot_capacity, @ref tx_inline_bytes, @ref buffer_bytes — so a node can REPORT
  * the ceiling that produced a drop instead of quoting a constant out of these sources.
  *
+ * A FOURTH number is configurable and has NO default at all (#1566): the LARGE TX size
+ * class (`tx_large_bytes` × `tx_large_slots`, @ref tx_large_bytes / @ref
+ * tx_large_slot_capacity). Left unset it does not exist and this link behaves exactly as
+ * it always has. Set, it takes the frames between @ref tx_inline_bytes and its own slot
+ * size off the per-frame heap arm and onto a bounded pool, which is what a node fanning a
+ * steady stream of multi-KB snapshots to several subscribers needs in order to have a
+ * memory model at all. It has no default BECAUSE the band is a property of the
+ * deployment's payloads and its cost is RAM this component may not spend on a node's
+ * behalf: nobody but the integrator knows whether 4 × 8 KiB is affordable here.
+ *
  * Everything else stays fixed ON PURPOSE, and each one says why where it is defined in
  * `httpd_ws_link.cpp`. In short: the send bound and the TX wait bound are DERIVED (from
  * `CONFIG_ESP_TASK_WDT_TIMEOUT_S`, the peer cap and the strike cap) and a knob over a
@@ -280,12 +290,22 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *                   (@ref tx_reply_reserve) is allocated ON TOP of it.
      * @param tx_inline_bytes Inline payload capacity of one TX slot, bytes; 0 (the
      *                   default) uses @ref kDefaultTxInlineBytes. A frame past it keeps
-     *                   its pooled shell and takes a nothrow heap payload.
+     *                   its pooled shell and takes a nothrow heap payload — unless the
+     *                   large size class below covers it.
+     * @param tx_large_bytes Payload capacity of one LARGE TX buffer, bytes; 0 (the
+     *                   default) means the class does not exist and the heap arm keeps
+     *                   every frame past @p tx_inline_bytes. There is NO library default:
+     *                   see @ref tx_large_bytes.
+     * @param tx_large_slots Large buffers to allocate; 0 (the default) means the class
+     *                   does not exist. Both this and @p tx_large_bytes must be non-zero,
+     *                   and @p tx_large_bytes must exceed the effective inline capacity,
+     *                   or the declaration is inert and reported as such.
      */
     explicit httpd_ws_link_t(std::uint16_t bind_port, std::size_t max_peers = 0,
                              bool peer_named = false, std::uint32_t send_timeout_ms = 0,
                              std::uint32_t auth_deadline_ms = 0, std::size_t rx_scratch_bytes = 0,
-                             std::size_t tx_pool_slots = 0, std::size_t tx_inline_bytes = 0);
+                             std::size_t tx_pool_slots = 0, std::size_t tx_inline_bytes = 0,
+                             std::size_t tx_large_bytes = 0, std::size_t tx_large_slots = 0);
 
     /**
      * @brief Adopt an already-running `esp_http_server` and register the WebSocket URI
@@ -356,11 +376,16 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *                   the host's own routes.
      * @param tx_inline_bytes Inline payload capacity of one TX slot, bytes; 0 (the
      *                   default) uses @ref kDefaultTxInlineBytes.
+     * @param tx_large_bytes Payload capacity of one LARGE TX buffer, bytes; 0 (the
+     *                   default) means the class does not exist — see @ref tx_large_bytes.
+     * @param tx_large_slots Large buffers to allocate; 0 (the default) means the class
+     *                   does not exist.
      */
     httpd_ws_link_t(httpd_handle_t external, const char* uri, std::size_t max_peers = 0,
                     bool peer_named = false, std::uint32_t send_timeout_ms = 0,
                     std::uint32_t auth_deadline_ms = 0, std::size_t rx_scratch_bytes = 0,
-                    std::size_t tx_pool_slots = 0, std::size_t tx_inline_bytes = 0);
+                    std::size_t tx_pool_slots = 0, std::size_t tx_inline_bytes = 0,
+                    std::size_t tx_large_bytes = 0, std::size_t tx_large_slots = 0);
 
     /**
      * @brief Stop the owned httpd instance (or unregister the adopted WS URI) and release
@@ -655,6 +680,34 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
          */
         std::uint32_t tx_pool_waits = 0;
         /**
+         * @brief Of @ref enqueue_drops, the ones that found the LARGE size class exhausted
+         *        (#1566) — the `dropped` noun of `core/STYLE.md` §Introspection for that
+         *        class.
+         *
+         * Distinct from @ref tx_pool_misses, which is the WORK-slot depth: a frame counted
+         * here held a work slot and lost its payload buffer, so what it sizes against is
+         * `tx_large_slots`, not `tx_pool_slots`. It is a hard drop and not a degrade on
+         * purpose — falling back to the heap here would give back exactly the unbounded
+         * transient footprint the class exists to remove — so the class has no `refused`
+         * counterpart: nothing is ever answered by value.
+         *
+         * Zero forever on a link that declared no large class; such a link's frames past
+         * @ref tx_inline_bytes take the heap arm they always took.
+         */
+        std::uint32_t tx_large_dropped = 0;
+        /**
+         * @brief High-water mark of @ref tx_large_in_use since construction — the `peak`
+         *        noun, and the number a large class is SIZED with (#1566).
+         *
+         * A peak that never approaches @ref tx_large_slot_capacity means the class is
+         * over-declared; a peak pinned at the capacity with @ref tx_large_dropped climbing
+         * means it is under-declared. Unlike every other field here it is not a count of
+         * events, and it is the one number in this struct maintained on a SUCCESS arm —
+         * legitimately, because that arm is the large-frame claim and never the inline
+         * send the counting doctrine protects (`core/STYLE.md` §counting doctrine ¶1).
+         */
+        std::uint32_t tx_large_peak = 0;
+        /**
          * @brief Frames dropped at the head of the send path because the destination had
          *        already departed, been condemned, or had its slot reclaimed by a new
          *        session.
@@ -772,10 +825,49 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *         nothrow heap payload, so this is the size above which a send allocates. */
     [[nodiscard]] std::size_t tx_inline_bytes() const noexcept;
 
+    /**
+     * @brief Effective payload capacity of one LARGE TX buffer, bytes — the ceiling of the
+     *        second, bounded TX size class (#1566), or 0 when this link declared none.
+     *
+     * The `capacity` noun of `core/STYLE.md` §Introspection, in its EFFECTIVE sense: it
+     * reports what this link actually allocated, so a declaration that was rejected (a slot
+     * size no bigger than @ref tx_inline_bytes, a zero count) or whose allocation failed
+     * reads 0 here and the operator sees the class it is really running with rather than
+     * the one it asked for (#1160).
+     *
+     * The band this covers is `(tx_inline_bytes(), tx_large_bytes()]`. Below it nothing
+     * changed — a fitting frame still gathers straight into its work slot's inline buffer,
+     * byte for byte the path it took before this class existed. Above it the per-frame
+     * nothrow heap arm survives, demoted to the exceptional tail it was always suited to:
+     * one composed-root snapshot is a heap block worth taking, a steady stream of them is
+     * not.
+     *
+     * There is deliberately NO `kDefaultTxLargeBytes` to name. The other three sizing
+     * numbers have defaults because every deployment needs SOME value of them; this one is
+     * pure additional RAM bought for a payload band only the integrator can describe, and a
+     * library-chosen figure would spend a node's heap on a guess about its traffic.
+     */
+    [[nodiscard]] std::size_t tx_large_bytes() const noexcept;
+
+    /** @brief Large TX buffers this link allocated — the `capacity` noun in SLOTS for the
+     *         class @ref tx_large_bytes sizes, and this link's bound on frames of that band
+     *         in flight at one instant. 0 when no class was declared (or its allocation
+     *         failed); a claim that finds all of them busy is @ref stats_t::tx_large_dropped
+     *         and never a heap fallback. */
+    [[nodiscard]] std::size_t tx_large_slot_capacity() const noexcept;
+
+    /** @brief Large TX buffers held RIGHT NOW — the `in_use` noun, used-polarity
+     *         (`tx_large_slot_capacity() - tx_large_in_use()` is the free count, which this
+     *         surface deliberately does not report). Spelled for `core/STYLE.md`
+     *         §Introspection rather than after its older sibling @ref tx_slots_busy, which
+     *         predates that vocabulary and measures the WORK slots. */
+    [[nodiscard]] std::size_t tx_large_in_use() const noexcept;
+
     /** @brief This link's whole per-link buffer cost, bytes:
      *         `rx_scratch_bytes() + (tx_slot_capacity() + tx_reply_reserve()) *
-     *         tx_inline_bytes()`, plus the slot shells. What a RAM audit asks for, and
-     *         what #1160 exists to make reportable rather than derivable-from-sources. */
+     *         tx_inline_bytes() + tx_large_slot_capacity() * tx_large_bytes()`, plus the
+     *         slot shells. What a RAM audit asks for, and what #1160 exists to make
+     *         reportable rather than derivable-from-sources. */
     [[nodiscard]] std::size_t buffer_bytes() const noexcept;
 
     /**
@@ -1850,6 +1942,46 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     /** @brief Slots ALLOCATED: @ref tx_pool_slots_ plus the in-call reserve. Cached
      *         because every pool sweep walks it. */
     std::size_t tx_slots_total_ = 0;
+    /**
+     * @brief The LARGE size class's payload storage, one flat block of
+     *        `tx_large_slots_ * tx_large_bytes_` — null when no class was declared (#1566).
+     *
+     * One block for the reason @ref tx_inline_ is one block: allocated once per link, never
+     * grown, and abandoned as a unit by the teardown's leak-instead-of-free arm.
+     */
+    std::unique_ptr<std::byte[]> tx_large_;
+    /** @brief One claimed flag per large buffer, claimed by CAS exactly as @ref
+     *         tx_slot_t::busy is. A separate array rather than a member of a shell type:
+     *         the large class has no work item of its own — it lends a BUFFER to a work
+     *         item that already holds a @ref tx_slot_t. */
+    std::unique_ptr<std::atomic<bool>[]> tx_large_busy_;
+    /** @brief Effective capacity of one large buffer — the ctor's `tx_large_bytes`, zeroed
+     *         if the declaration was rejected or its allocation failed, so the size and the
+     *         pointer can never disagree (the @ref rx_scratch_bytes_ discipline). */
+    std::size_t tx_large_bytes_ = 0;
+    /** @brief Effective large-buffer count — the ctor's `tx_large_slots`, zeroed on the
+     *         same terms. */
+    std::size_t tx_large_slots_ = 0;
+    std::atomic<std::uint32_t> tx_large_peak_{0};    /**< @brief @ref stats_t::tx_large_peak. */
+    std::atomic<std::uint32_t> tx_large_dropped_{0}; /**< @brief @ref stats_t::tx_large_dropped. */
+    /**
+     * @brief Claim a large buffer for @p work and bind it, or return nullptr when the class
+     *        is undeclared or every buffer of it is in flight.
+     *
+     * Callers treat a null exactly as they treat a failed `new (std::nothrow)`: recycle the
+     * work slot and take the counted drop. It never waits — the wait in @ref
+     * claim_tx_slot_waiting is about the httpd task's DRAIN of the control queue, and a
+     * large buffer is freed by the same drain, so a second wait would only stack a bound on
+     * a bound for the frames least able to afford it.
+     */
+    [[nodiscard]] std::byte* claim_tx_large(tx_work_t* work);
+    /** @brief Validate the declared large size class and allocate it — the tail of
+     *         @ref alloc_buffers, out of line because a rejected or failed declaration is
+     *         reported rather than clamped and that is three arms of prose. */
+    void alloc_tx_large();
+    /** @brief Re-sample @ref stats_t::tx_large_peak from the class's occupancy — called
+     *         from @ref claim_tx_large, the only edge that can raise it. */
+    void note_tx_large_peak();
     /**
      * @brief The handler-admission gate registered as the URI's `user_ctx` — every
      *        dispatch resolves this link through it (see @ref close_gate).

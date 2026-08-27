@@ -54,6 +54,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`httpd_ws_link_t` takes an optional BOUNDED LARGE TX size class — `tx_large_bytes` ×
+  `tx_large_slots`** ([#1566](https://github.com/avatarsd-llc/libtracer/issues/1566)). Two new
+  trailing constructor arguments on both constructors (port-binding and adopting), defaulted to
+  `0`/`0`, plus the accessors `tx_large_bytes()`, `tx_large_slot_capacity()`,
+  `tx_large_in_use()` and the `stats_t` fields `tx_large_dropped` / `tx_large_peak`. Until now
+  a frame past `tx_inline_bytes` (1600 B by default) took a per-frame, per-subscriber
+  `new (std::nothrow) std::byte[total]`; that is right for a rare oversize reply and wrong for a
+  *steady stream* of moderately large frames — a periodic state snapshot fanned to several
+  subscribers at tens of Hz put N × rate multi-KB allocations per second on an embedded heap for
+  a working set that was small and perfectly predictable. Declaring a class routes the band
+  `(tx_inline_bytes, tx_large_bytes]` through a small pool instead, allocation-free, and demotes
+  the heap arm to the exceptional tail past it. Exhaustion is the existing
+  [#949](https://github.com/avatarsd-llc/libtracer/issues/949) named drop — counted at the link
+  and again as `tx_large_dropped` — and never a heap fallback, which would hand back the exact
+  footprint the declaration bounds. **There is no library default and no Kconfig knob**: the
+  band is a property of the deployment's payloads and its cost is RAM this component may not
+  spend on a node's behalf. A link that declares nothing is byte-for-byte the link that shipped
+  before, including for every frame that fits `tx_inline_bytes`; a declaration that cannot be
+  honoured (a slot no wider than the inline capacity, a count of zero, a failed allocation) is
+  inert, logged once, and reported as `0` so an operator reads the class the link is really
+  running.
+
 - **`CONFIG_LIBTRACER_SELF_HEAL_LINKS` and `CONFIG_LIBTRACER_SELF_HEAL_WORKER_STACK` — the
   link-liveness engine is now excludable, and its worker's stack sizable**
   ([#1470](https://github.com/avatarsd-llc/libtracer/issues/1470)). `self_heal_link.cpp` became
@@ -849,7 +871,7 @@ core 0.10.0 reaches it.
 
 - **Public headers now propagate their ESP-IDF dependencies (#963.4).** `esp_http_server`,
   `tcp_transport` and `esp_driver_twai` moved from `PRIV_REQUIRES` to **`REQUIRES`**. Those
-  three are named by headers under `include/libtracer_esp/` (`httpd_ws_link.hpp:152`,
+  three are named by headers under `include/libtracer_esp/` (`httpd_ws_link.hpp:162`,
   `esp_ws_client_link.hpp:195`, `twai_link.hpp:36-37`), and `PRIV_REQUIRES` does not
   propagate include dirs — so a dependent that included one of ours without independently
   requiring the base component died with `esp_http_server.h: No such file or directory` and
