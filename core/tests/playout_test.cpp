@@ -10,7 +10,7 @@
  * DERIVES it from the SAMPLE time in the batch's payload `TIME` child. This file pins that
  * derivation and — equally — the four things §4.7's ruled scope refuses.
  *
- * Six claims:
+ * Seven claims:
  *
  * 1. **A uniform stream's times are ARITHMETIC over the descriptor's rate**, at 0 bytes per
  *    sample: `t(i) = base + i × dt_ns`, with the record carrying no offset run at all.
@@ -28,6 +28,8 @@
  *    a clock to prove that; the helper never does.
  * 6. **An underivable time is reported, never wrapped**, and the expectation is dropped rather
  *    than projected past the representable epoch. Lateness saturates for the same reason.
+ * 7. **A NEGATIVE derived time re-primes rather than overflowing** (#1580): the epoch headroom
+ *    is computed on both arms, so a peer's negative offset cannot reach signed overflow.
  *
  * Plus the structural claim the "no library-internal buffers" doctrine turns on: **the
  * derivation allocates nothing.** The instrument is the global `operator new` counter of
@@ -366,6 +368,33 @@ void an_underivable_time_is_reported_not_wrapped() {
           "an underflowing difference SATURATES — a hopelessly early sample never reads late");
 }
 
+/**
+ * @brief Claim 7 (#1580): a NEGATIVE derived sample time re-primes the cursor instead of
+ *        overflowing the headroom subtraction.
+ *
+ * The re-prime's headroom used to be spelled `int64max - last_ns`, which is signed overflow —
+ * UB — the moment the last derived time is negative. That is peer-reachable: a non-uniform
+ * batch is `base + offsets[i]` and §4.2.1 permits a negative `i32` offset, so `read_batch`'s
+ * `base_ns >= 0` guarantee does not survive the addition.
+ *
+ * Only the `dt_ns == 0` arm is pinned, because it is the only one a batch can actually be in
+ * with a negative derived time: `read_batch` pins `base_ns >= 0`, and the RATE arm adds a
+ * non-negative `i * dt_ns` to that base, so a rated batch's times are never negative.
+ */
+void a_negative_derived_time_re_primes_without_overflow() {
+    std::printf("§4.2.1 edges — a NEGATIVE derived time re-primes, it does not overflow:\n");
+    constexpr std::array<std::int32_t, kSamples> kBackwards{-3000, -2000, -1000};
+    const decoded_batch_t d = build(0, 0, kBackwards);
+
+    playout_cursor_t cursor{};
+    trace_t t;
+    const playout_report_t r = playout_batch(cursor, d.view, playout_clock_t{.now_ns = 0}, 0, t);
+    check(r.samples == kSamples && t.time_ns[2] == -1000,
+          "a base of 0 with negative offsets derives times BEFORE the epoch origin");
+    check(cursor.primed && cursor.next_sample_time_ns == -1000,
+          "the cursor re-primes at the last derived time plus dt (0 here) — no UB, no forget()");
+}
+
 /** @brief The structural claim: the derivation allocates NOTHING. */
 void the_derivation_allocates_nothing() {
     std::printf("no library-internal buffers — the derivation allocates nothing:\n");
@@ -404,6 +433,7 @@ int main() {
     a_gap_surfaces_and_resets_the_expectation();
     nothing_is_reordered_dropped_or_paced();
     an_underivable_time_is_reported_not_wrapped();
+    a_negative_derived_time_re_primes_without_overflow();
     the_derivation_allocates_nothing();
     return tr::testing::summary("playout");
 }

@@ -260,12 +260,24 @@ template <class on_sample_t>
     // must not shift the expectation to a time no sample was actually at.
     if (have_last) {
         const std::uint64_t dt = batch.dt_ns;
-        const auto headroom =
-            static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() - last_ns);
+        // Two arms, because the derived time can be NEGATIVE: a non-uniform batch is
+        // `base + offsets[i]` and §4.2.1 permits a negative i32 offset, so `read_batch`'s
+        // `base_ns >= 0` guarantee does not survive the addition. Spelling the headroom as
+        // `int64max - last_ns` would then be signed overflow — UB on peer-supplied bytes
+        // (#1580). Mirrors the guarded addition of `batch_view_t::sample_time_ns`.
+        const std::uint64_t headroom =
+            last_ns >= 0
+                ? static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() - last_ns)
+                : static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) +
+                      (0u - static_cast<std::uint64_t>(last_ns));
         if (dt > headroom) {
             cursor.forget();  // the next sample would sit past the representable epoch
         } else {
-            cursor.next_sample_time_ns = last_ns + static_cast<std::int64_t>(dt);
+            // `last_ns + dt` is in range by the guard above, so the unsigned sum carries the
+            // right two's-complement bits — and, unlike the signed spelling, it stays defined
+            // for a `dt` that alone exceeds `int64max` (reachable only when `last_ns < 0`).
+            cursor.next_sample_time_ns =
+                static_cast<std::int64_t>(static_cast<std::uint64_t>(last_ns) + dt);
             cursor.primed = true;
         }
     }
