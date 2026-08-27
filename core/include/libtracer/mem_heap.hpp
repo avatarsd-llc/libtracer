@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "libtracer/backend.hpp"
+#include "libtracer/mem_source.hpp"
 #include "libtracer/segment.hpp"
 #include "libtracer/view.hpp"
 
@@ -98,6 +99,17 @@ inline bool (*probe_fail_hook)(std::size_t bytes) noexcept = nullptr;
  * introduced `tr::mem::block_source_t` (`try_alloc` returns `nullptr`) as a separate seam
  * rather than widening this one. A pmr-backed structure that must survive exhaustion migrates
  * to that seam; it does not get a `try_reserve` overload.
+ *
+ * @note **What IS generalized, and why the objection above does not reach it (#873 phase 1).**
+ *       The helpers now take any allocator, and `tr::mem::source_allocator_t`
+ *       (`%mem_source_alloc.hpp`) is the one the graph's migrated growth sites use. Every
+ *       sentence above turns on the probe testing a DIFFERENT allocator from the one the
+ *       growth uses; a source allocator publishes the store it draws from
+ *       (`source_allocator_t::source()`), so @ref try_grow probes THAT store with
+ *       `try_alloc`/`release` instead of the global heap. The `-fno-exceptions` probe is still
+ *       probe-then-commit and still carries the #850 race window — what it stops being is
+ *       an answer about the wrong memory. `probe_fail_hook` is honoured on both arms, so the
+ *       OOM-injection seam still reaches these paths.
  */
 
 /**
@@ -171,6 +183,55 @@ template <class F>
 }
 
 /**
+ * @brief The @ref try_grow twin whose `-fno-exceptions` probe tests @p src rather than the
+ *        global heap (#873 phase 1).
+ *
+ * Identical on a profile that can catch — the growth's own allocation is the one whose failure
+ * is reported, and where the bytes came from is irrelevant to that. The difference is the
+ * exception-free arm: probing the global heap for a growth that will draw from an injected
+ * store answers about memory the container will never touch, which is precisely the defect
+ * `%mem_heap.hpp`'s standing warning above describes for `std::pmr`. Here the store is
+ * reachable, so the probe asks it.
+ *
+ * @param src   The store the growth will draw from; probed with `try_alloc`/`release`.
+ * @param bytes The byte count the growth will request.
+ * @param grow  The throwing growth; it must leave its container unchanged when it throws.
+ * @retval false The growth allocation failed — the container is unchanged.
+ */
+template <class F>
+[[nodiscard]] inline bool try_grow_from(mem::block_source_t& src, std::size_t bytes,
+                                        F&& grow) noexcept {
+#if LIBTRACER_GROWTH_IS_CATCHABLE
+    if (!probe_hook_ok(bytes)) return false;  // test-only OOM injection
+    try {
+        grow();
+    } catch (...) {
+        return false;
+    }
+    return true;
+#else
+    if (!probe_hook_ok(bytes)) return false;  // test-only OOM injection
+    void* const p = src.try_alloc(bytes);
+    if (p == nullptr) return false;
+    src.release(p, bytes);
+    grow();
+    return true;
+#endif
+}
+
+/**
+ * @brief The store a growth of @p v will draw from, when its allocator publishes one.
+ *
+ * The two-overload dispatch that keeps the source-aware probe out of the default-allocator
+ * path entirely: a plain `std::vector<T>` picks the `nullptr` overload and @ref try_reserve
+ * routes to @ref try_grow exactly as before, so nothing about the pre-#873 codegen changes.
+ */
+template <class Alloc>
+[[nodiscard]] constexpr mem::block_source_t* growth_source(const Alloc&) noexcept {
+    return nullptr;
+}
+
+/**
  * @brief Nothrow `std::vector::reserve`: grow @p v to hold at least @p n elements
  *        WITHOUT ever aborting.
  *
@@ -179,11 +240,15 @@ template <class F>
  * @retval false Allocation would fail / @p n is impossible — nothing changed.
  * @retval true  @p v now has capacity for at least @p n elements.
  */
-template <class T>
-[[nodiscard]] bool try_reserve(std::vector<T>& v, std::size_t n) noexcept {
+template <class T, class Alloc>
+[[nodiscard]] bool try_reserve(std::vector<T, Alloc>& v, std::size_t n) noexcept {
     if (n <= v.capacity()) return true;
     if (n > v.max_size()) return false;  // impossible count — the reserve would throw length_error
-    return try_grow(n * sizeof(T), [&v, n] { v.reserve(n); });
+    const auto grow = [&v, n] { v.reserve(n); };
+    if (mem::block_source_t* const src = growth_source(v.get_allocator()); src != nullptr) {
+        return try_grow_from(*src, n * sizeof(T), grow);
+    }
+    return try_grow(n * sizeof(T), grow);
 }
 
 /**
@@ -197,8 +262,8 @@ template <class T>
  * play is @ref try_reserve's — which reports its failure by value (#923).
  * @retval false The growth allocation failed — @p x was NOT appended.
  */
-template <class T>
-[[nodiscard]] bool try_push_back(std::vector<T>& v, T&& x) noexcept {
+template <class T, class Alloc>
+[[nodiscard]] bool try_push_back(std::vector<T, Alloc>& v, T&& x) noexcept {
     static_assert(std::is_nothrow_move_constructible_v<T>,
                   "the in-capacity push_back must not be able to throw out of this noexcept");
     if (v.size() == v.capacity() && !try_reserve(v, grow_capacity(v.capacity()))) return false;

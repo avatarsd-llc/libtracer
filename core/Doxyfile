@@ -96,6 +96,7 @@ INPUT                  = core/include/libtracer/config.hpp \
                          core/include/libtracer/mem_source_sync.hpp \
                          core/include/libtracer/mem_source_pmr.hpp \
                          core/include/libtracer/mem_source_backend.hpp \
+                         core/include/libtracer/mem_source_alloc.hpp \
                          core/include/libtracer/pin_instrument.hpp \
                          core/include/libtracer/posix_endpoint.hpp \
                          core/include/libtracer/receiver_slot.hpp \
