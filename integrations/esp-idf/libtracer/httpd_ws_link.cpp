@@ -1049,15 +1049,20 @@ class httpd_ws_link_t::peer_resolution_t final : public transport_t {
  *        it outlives the send() caller's spans until the httpd task drains the work
  *        item.
  *
- * ONE storage shape since #949: the work item IS a @ref tx_slot_t member, and `payload`
- * points at the slot's inline buffer — or at `owned` for the one frame shape that outgrows
- * it, which keeps the pooled shell and takes a nothrow heap payload. There is no
- * shell-on-the-heap arm any more: a send that finds the pool exhausted is dropped and
+ * ONE SHELL since #949: the work item IS a @ref tx_slot_t member. There is no
+ * shell-on-the-heap arm any more — a send that finds the pool exhausted is dropped and
  * counted, so the number of items this link can have outstanding in the control queue is
- * the pool size and nothing else. Never a `std::vector` for the copy — the vector's
- * THROWING allocator inside a braced initializer defeated the `new (std::nothrow)` guard on
- * the shell: under `-fno-exceptions` a reply-sized copy hitting heap exhaustion aborted the
- * node (the browser-session crash).
+ * the pool size and nothing else.
+ *
+ * Its PAYLOAD has three storages, in the order the gather tries them: the slot's own inline
+ * buffer (`tx_inline_bytes`, the common frame, no allocation); a buffer borrowed from the
+ * declared LARGE size class where the frame lands in its band and an integrator declared one
+ * (#1566, @ref large_busy, still no allocation); and `owned`, the per-frame nothrow heap
+ * payload, for the exceptional tail past both. A frame that fits the inline buffer has taken
+ * the first of those since #949 and takes it unchanged today. Never a `std::vector` for the copy —
+ * the vector's THROWING allocator inside a braced initializer defeated the `new (std::nothrow)`
+ * guard on the shell: under `-fno-exceptions` a reply-sized copy hitting heap exhaustion aborted
+ * the node (the browser-session crash).
  */
 struct httpd_ws_link_t::tx_work_t {
     httpd_handle_t handle = nullptr; /**< @brief Owning httpd instance. */
@@ -2878,8 +2883,10 @@ void httpd_ws_link_t::queue_send(const session_ref_t& to,
     // Gather-copy the payload ONCE: httpd_queue_work is asynchronous, so the caller's
     // spans are gone by the time the httpd task runs tx_work. The destination is a
     // pre-allocated pool slot claimed lock-free (CAS), gathered straight into its inline
-    // buffer — no allocation at all. The single remaining arm that allocates is a frame
-    // past tx_inline_bytes_, which keeps its pooled shell and takes a nothrow heap payload.
+    // buffer — no allocation at all. Past tx_inline_bytes_ the slot keeps its shell and the
+    // payload comes from the declared LARGE size class if the frame is in its band (#1566,
+    // still no allocation), and only past THAT from a per-frame nothrow heap payload — the
+    // exceptional tail, which is the one arm here that can still allocate.
     //
     // A pool that has nothing free is where this used to grow a heap work item and post it
     // anyway, which turned a bounded, observable condition into an unbounded, invisible

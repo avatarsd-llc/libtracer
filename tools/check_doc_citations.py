@@ -1163,9 +1163,9 @@ ANCHORS = [
     ('core/include/libtracer/transport.hpp:475',
      '[[nodiscard]] virtual transport_drop_stats_t drop_stats() const noexcept { return {}; }'),
     # integrations/esp-idf/libtracer/httpd_ws_link.cpp
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:3124',
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:3131',
      'std::size_t httpd_ws_link_t::tx_slot_capacity() const noexcept { return tx_pool_slots_; }'),
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:2967',
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:2974',
      'void httpd_ws_link_t::send_in_call(const session_ref_t& to,'),
 ]
 
