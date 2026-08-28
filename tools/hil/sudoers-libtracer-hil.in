@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# sudoers drop-in for the libtracer ESP32-C6 HIL runner (#1586).
+#
+# WHAT IT IS FOR. The HIL workflow opens and closes with a self-heal step:
+#
+#     sudo -n chown -R "$(id -un):$(id -gn)" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" || true
+#
+# It reclaims root-owned files a CONTAINER job left in the SHARED `_work` tree —
+# the #1538 failure mode, where the next `actions/checkout` dies in its clean step
+# and reads as a breakage of whatever job happened to run next. `sudo -n` never
+# prompts, and `|| true` swallows the refusal, so on a host with no rule for this
+# the repair is a SILENT no-op and the leftovers resurface somewhere else. This
+# file is what makes the step actually do its job.
+#
+# INSTALLED BY `tools/hil/register_hil_runner.sh`, which fills the placeholders in
+# and validates the result with `visudo -cf` before putting it in place. Editing
+# it by hand on the host is fine; re-running the script overwrites it.
+#
+# SCOPE, and its honest limit. One command, one recursive flag, one ownership
+# pair, and only under this runner's own `_work` tree — a floor, not a sandbox.
+# sudoers does not canonicalise argument paths, so a `..` inside the pattern would
+# escape it; what makes that uninteresting here is that the runner user already
+# owns the tree and can run arbitrary job steps as itself. The point of the
+# scoping is that this drop-in does not silently become a general root grant.
+#
+# Note for the studio host specifically: `/etc/sudoers.d/github-runner` there
+# already carries a blanket `NOPASSWD:ALL` for the runner user, so this file
+# changes nothing on it. It is written for the host that does NOT.
+
+Cmnd_Alias LIBTRACER_HIL_CHOWN = \
+    /usr/bin/chown -R @USER@\:@GROUP@ @WORK@/*, \
+    /usr/bin/chown -R @USER@\:@GROUP@ @WORK@/* @WORK@/*, \
+    /bin/chown -R @USER@\:@GROUP@ @WORK@/*, \
+    /bin/chown -R @USER@\:@GROUP@ @WORK@/* @WORK@/*
+
+@USER@ ALL=(root) NOPASSWD: LIBTRACER_HIL_CHOWN

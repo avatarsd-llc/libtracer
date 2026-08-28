@@ -218,6 +218,12 @@ jobs:
       # `actions/checkout` dies in its clean step, which reads as a breakage of
       # whatever job ran next. `|| true` deliberately — a workspace this cannot
       # repair must be named by checkout, with checkout's diagnostics.
+      #
+      # The grant this needs is `/etc/sudoers.d/libtracer-hil`, installed and PROVEN
+      # by `tools/hil/register_hil_runner.sh` at registration (#1586). Without it
+      # `sudo -n` is refused, `|| true` swallows the refusal, and this step is a
+      # silent no-op — which is exactly why the registration script verifies the
+      # grant instead of leaving it to be discovered as a broken checkout elsewhere.
       - name: Reclaim any root-owned leftovers from a container job
         run: sudo -n chown -R "$(id -un):$(id -gn)" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" || true
 

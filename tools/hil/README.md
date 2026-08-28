@@ -6,7 +6,9 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 # ESP32-C6 hardware-in-the-loop runner
 
 Everything the on-silicon CI plane needs, except the three acts that require hands
-on a device (#1557).
+on a device (#1557). Nothing here runs until a runner labelled `hil-esp32c6` exists
+**and** `HIL_ENABLED` is `true`; installing the pieces below on a host is dormant
+until both hold.
 
 The workflow is `.github/workflows/hil-esp32c6.yml`. It is **dormant**: until a
 runner labelled `hil-esp32c6` exists and the repository variable `HIL_ENABLED` is
@@ -45,7 +47,8 @@ on a self-proof that failed a named leg.
 | file | what it is |
 | --- | --- |
 | `99-libtracer-hil.rules` | udev rule: a stable `/dev/hil-esp32c6` owned by the runner user, so no CI step needs root |
-| `register_hil_runner.sh` | installs the rule, downloads and registers the runner as a systemd service |
+| `sudoers-libtracer-hil.in` | sudoers drop-in template: passwordless `chown -R` for the runner user, inside its own `_work` tree and nowhere else — what makes the workflow's self-heal steps do anything |
+| `register_hil_runner.sh` | installs the rule and the drop-in, downloads and registers the runner as a systemd service, and proves the self-heal grant |
 | `hil_flash.py` | `stage` packages a build's flashable image; `flash` drives esptool from the build's own manifest |
 | `hil_monitor.py` | captures the console, renders the verdict, exits non-zero with the reason |
 | `../tests/test_hil_monitor.py` | the verdict rules and the flash-argument derivation, tested without hardware |
@@ -98,6 +101,10 @@ A separate runner rather than a label on the bench runner, deliberately: the ben
 runner's validity rests on the host being quiet (`perf-local.yml`'s quiescence
 guard), and minutes of USB traffic inside a bench window is a contaminated sample.
 
+It also installs `/etc/sudoers.d/libtracer-hil` and then **proves** it — see the
+next section. A host that cannot run the self-heal command fails registration
+loudly, with the fix in the error, rather than deferring the discovery.
+
 Then arm the plane:
 
 ```sh
@@ -107,6 +114,43 @@ gh workflow run hil-esp32c6.yml --repo avatarsd-llc/libtracer     # smoke it
 
 To disarm — device unplugged, host rebuilt, board wedged — set `HIL_ENABLED` to
 anything else. Everything goes back to a green no-op.
+
+## The self-heal grant, and why registration insists on it
+
+The workflow opens and closes with the same line `perf-local.yml` carries:
+
+```sh
+sudo -n chown -R "$(id -un):$(id -gn)" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" || true
+```
+
+It reclaims root-owned files a **container** job left in the shared `_work` tree.
+That is #1538's failure mode: the next `actions/checkout` dies in its clean step,
+and it reads as a breakage of whatever job happened to run next rather than of the
+container job that caused it.
+
+`sudo -n` never prompts and `|| true` swallows the refusal, so on a host with no
+rule for this the repair is a **silent no-op** and the leftovers resurface hours
+later somewhere unrelated (#1586). `register_hil_runner.sh` therefore installs
+`sudoers-libtracer-hil.in` as `/etc/sudoers.d/libtracer-hil`, filling in the runner
+user, its group and its `_work` root, and validates the result with `visudo -cf`
+**before** putting it in place — a syntax error there breaks `sudo` for the whole
+host.
+
+It is scoped on purpose: one command, one recursive flag, one ownership pair, and
+only under this runner's own `_work` tree. That is a floor rather than a sandbox —
+sudoers does not canonicalise argument paths — and what makes the looseness
+uninteresting is that the runner user already owns the tree and runs arbitrary job
+steps as itself. The point is that the drop-in does not quietly become a general
+root grant.
+
+Registration then **proves** the grant by running the workflow's own command
+against the workflow's own paths, and dies with the fix in the message if it is
+refused. Pass `--skip-sudoers` if the host grants the equivalent some other way
+(the studio host's `/etc/sudoers.d/github-runner` already carries a blanket
+`NOPASSWD:ALL` for the runner user, so the drop-in changes nothing there) — the
+proof still runs, and still fails loudly.
+
+To undo it: `sudo rm /etc/sudoers.d/libtracer-hil`.
 
 ## Running it against a PR
 
