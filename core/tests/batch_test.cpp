@@ -39,6 +39,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -207,6 +208,47 @@ void the_descriptor_decides_the_shape() {
           "... and derive from the rate, since a uniform batch carries no offsets");
 }
 
+/**
+ * @brief Claim 2b: the uniform derivation holds for a NEGATIVE base (#1600).
+ *
+ * `read_batch` pins `base_ns >= 0`, so no peer can reach this — but `batch_view_t` is a public
+ * aggregate a caller may fill from a non-wire source, and the rate arm's headroom used to be
+ * spelled `int64max - base_ns`, which is signed overflow for any negative base. Same defect
+ * #1580 fixed in the playout re-prime, one designated initialiser away.
+ */
+void a_uniform_derivation_survives_a_negative_base() {
+    std::printf("§4.2.1 uniform — a negative base derives, it does not overflow (#1600):\n");
+    std::array<tr::wire::tlv_t, 3> frames{};
+    const std::span<const tr::wire::tlv_t> samples{frames};
+
+    batch_view_t v{};
+    v.base_ns = -5000;
+    v.dt_ns = 1000;
+    v.samples = samples;
+    check(v.uniform() && v.sample_time_ns(0) == -5000 && v.sample_time_ns(1) == -4000 &&
+              v.sample_time_ns(2) == -3000,
+          "t(i) = base + i × dt_ns holds below the epoch origin, with no UB on the headroom");
+
+    // The far edge on the same arm: int64min has the WIDEST headroom (int64max - int64min ==
+    // 2^64-1), so a dt no signed spelling could hold is still derivable.
+    batch_view_t deepest{};
+    deepest.base_ns = std::numeric_limits<std::int64_t>::min();
+    deepest.dt_ns = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) + 1u;
+    deepest.samples = samples;
+    check(deepest.sample_time_ns(0) == std::numeric_limits<std::int64_t>::min() &&
+              deepest.sample_time_ns(1) == 0 && !deepest.sample_time_ns(2).has_value(),
+          "... and a dt past int64max is answerable once, then past the epoch — never wrapped");
+
+    // The guard still declines at the TOP of the epoch, exactly as before.
+    batch_view_t high{};
+    high.base_ns = std::numeric_limits<std::int64_t>::max() - 500;
+    high.dt_ns = 1000;
+    high.samples = samples;
+    check(high.sample_time_ns(0) == std::numeric_limits<std::int64_t>::max() - 500 &&
+              !high.sample_time_ns(1).has_value(),
+          "a derivation past the representable epoch is still reported, never wrapped");
+}
+
 /** @brief Claim 4: the reader declines shapes the codec still carries. */
 void a_readers_refusal_is_not_the_codecs() {
     std::printf("§User range — the graph never interprets a BATCH (claim 5):\n");
@@ -348,6 +390,7 @@ int main() {
     fold_is_a_concatenation();
     uniform_time_is_derived();
     the_descriptor_decides_the_shape();
+    a_uniform_derivation_survives_a_negative_base();
     a_readers_refusal_is_not_the_codecs();
     composition_references_rather_than_copies();
     delivery_class_bits();
