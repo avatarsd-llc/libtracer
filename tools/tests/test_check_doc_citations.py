@@ -1077,6 +1077,125 @@ class RepinHoldVerdictTest(unittest.TestCase):
             self.assertNotIn("HOLD", out)
 
 
+class RepinFromRevIdempotenceTest(unittest.TestCase):
+    """`--from-rev` must REFUSE a second application of the same delta (#1591).
+
+    That mode's map is derived from source files alone, so re-pinning the docs does not
+    change it: run it, apply it, run it again against the same `REV` and every pin moves
+    by the same delta twice. `RepinOnePassTest` already shows the damage one level down,
+    at the document rewriter; these pin the driver's refusal to get there.
+
+    The signature is the ANCHORS table, which the first run re-pins too. Before a run, an
+    anchor in a shifted file names where the text USED to be — not a fixed point, and the
+    map agrees the line moved. After a run it names where the text IS — a fixed point the
+    unchanged map still wants to move. That combination cannot occur on a first run, and
+    an anchor sitting above the edit does not produce it either, because the map leaves
+    that line alone.
+
+    A clean verify pass would NOT have been a sufficient test, which is why it is not the
+    one used: a first run may legitimately leave a HOLD, and then the gate is still red
+    while every other pin has already moved — the exact tree a second run corrupts
+    wholesale, and the shape the live reproduction took.
+    """
+
+    # An anchored file the revision map shifts by one from line 10 down.
+    SHIFTED = {GRAPH: {n: n + 1 for n in range(10, 40)}}
+
+    def test_a_first_run_is_not_flagged(self):
+        # The anchor still names the OLD line, so `anchor_line_maps` finds its text
+        # elsewhere: not a fixed point, nothing to refuse.
+        with _anchor_maps({GRAPH: {12: 13, 20: 21}}):
+            self.assertEqual(cdc.already_repinned(self.SHIFTED), [])
+
+    def test_a_SECOND_run_is_flagged(self):
+        # The first run moved the anchors, so they resolve in place — while the unchanged
+        # revision map still says those lines must move.
+        after = {GRAPH: {13: 13, 21: 21}}
+        with _anchor_maps(after):
+            self.assertEqual(cdc.already_repinned(self.SHIFTED), [GRAPH])
+
+    def test_an_anchor_ABOVE_the_edit_is_not_a_false_positive(self):
+        # A fixed point the map also leaves alone says nothing either way, and every
+        # first run over a file edited below its anchors has some.
+        with _anchor_maps({GRAPH: {3: 3, 12: 13}}):
+            self.assertEqual(cdc.already_repinned(self.SHIFTED), [])
+
+    def test_a_file_with_no_anchors_cannot_be_judged_and_is_not_flagged(self):
+        with _anchor_maps({}):
+            self.assertEqual(cdc.already_repinned(self.SHIFTED), [])
+
+    def test_the_driver_refuses_and_writes_nothing(self):
+        # `apply=True`, and the doc must come back byte-identical: half a double-repin is
+        # not better than all of it, so the refusal has to land before any write.
+        with _repin_from_rev({GRAPH: {13: 13}}, self.SHIFTED) as (code, out, doc):
+            self.assertEqual(code, 1, "a refusal is a verdict a shell can see (#1243)")
+            self.assertIn("REFUSE", out)
+            self.assertIn("#1591", out)
+            self.assertIn("--from-rev HEAD", out)
+            self.assertNotIn("REPIN", out)
+            self.assertEqual(doc.read_text(), "`core/src/graph.cpp:12`\n")
+
+    def test_the_driver_still_re_pins_a_FIRST_run(self):
+        # The other half: a guard that fired on a legitimate run would turn the documented
+        # rebase procedure back into a hand sweep.
+        with _repin_from_rev({GRAPH: {12: 13}}, self.SHIFTED) as (_, out, doc):
+            self.assertIn("REPIN", out)
+            self.assertNotIn("REFUSE", out)
+            self.assertEqual(doc.read_text(), "`core/src/graph.cpp:13`\n")
+
+    def test_the_anchor_derived_mode_is_NOT_gated(self):
+        # Its map comes from the anchors, which the first re-pin moves too, so a second
+        # run sees fixed points everywhere and is idempotent with no guard at all.
+        with _repin_from_rev({GRAPH: {13: 13}}, self.SHIFTED, from_rev=None) as (_, out, _):
+            self.assertNotIn("REFUSE", out)
+
+
+@contextlib.contextmanager
+def _anchor_maps(maps):
+    """Stand in for the anchor-derived line map (what the ANCHORS table currently says)."""
+    real = cdc.anchor_line_maps
+    try:
+        cdc.anchor_line_maps = lambda *a, **k: (maps, [])
+        yield
+    finally:
+        cdc.anchor_line_maps = real
+
+
+@contextlib.contextmanager
+def _repin_from_rev(anchored, rev_maps, from_rev="origin/main"):
+    """Run the `--repin` driver for real — `apply=True` — over a THROWAWAY repo root.
+
+    The driver hardcodes `REPO/tools/check_doc_citations.py` as its anchor-table target,
+    so a run that wrote would edit the tool under test. Pointing `cdc.REPO` at a tmpdir
+    with a stand-in table is what lets these cases assert the doc's bytes rather than
+    settle for "the driver said it would not".
+    """
+    tmp = tempfile.mkdtemp()
+    root = pathlib.Path(tmp)
+    (root / "tools").mkdir()
+    (root / "tools" / "check_doc_citations.py").write_text("ANCHORS = []\n")
+    # The cited file has to EXIST for `source_map` to resolve the spelling; its contents
+    # are irrelevant, because both line maps are stated above.
+    (root / "core" / "src").mkdir(parents=True)
+    (root / "core" / "src" / "graph.cpp").write_text("\n".join(f"// {n}" for n in range(60)))
+    (root / "docs" / "design").mkdir(parents=True)
+    doc = root / "docs" / "design" / "probe.md"
+    doc.write_text("`core/src/graph.cpp:12`\n")
+    real = (cdc.REPO, cdc.all_docs, cdc.anchor_line_maps, cdc.revision_line_maps)
+    buf = io.StringIO()
+    try:
+        cdc.REPO = root
+        cdc.all_docs = lambda: [doc]
+        cdc.anchor_line_maps = lambda *a, **k: (anchored, [])
+        cdc.revision_line_maps = lambda rev, r=None: (rev_maps, [])
+        with contextlib.redirect_stdout(buf):
+            code = cdc.repin(from_rev, True)
+        yield code, buf.getvalue(), doc
+    finally:
+        (cdc.REPO, cdc.all_docs, cdc.anchor_line_maps, cdc.revision_line_maps) = real
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 class AnchorHitsTest(unittest.TestCase):
     """The scope filter, including the `!` inversion #1271 added.
 

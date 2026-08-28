@@ -74,6 +74,15 @@ The rules below are load-bearing there, each paid for:
   the same reason those genres are not enrolled above: an ADR or an RFC cites the tree as
   it stood, and moving its citations forward rewrites the record. Their moves are counted
   and reported, never applied.
+* **`--from-rev` refuses a SECOND application.** That mode's map is derived from source
+  files alone, so re-pinning the docs does not change it: running it again against the
+  same `REV` moves every pin by the same delta twice. The result is syntactically fine,
+  is reported as "N citation(s) rewritten", and is wrong — it bit twice before it was
+  named (#1591). The tell is the anchor table, which the first run re-pins too: an anchor
+  that resolves IN PLACE at a line the revision map still says must move can only mean
+  the delta has been applied already. A run that sees that writes nothing and exits
+  non-zero. The anchor-derived mode needs no guard — its map comes from those same
+  anchors, so a second run sees fixed points everywhere and moves nothing.
 * **A HOLD is a verdict, not a remark.** `--repin` used to exit 0 whether it re-pinned
   everything or held half of it for a human, so a rebase procedure that ran it and looked at
   the exit status read "held" as "done" and shipped stale citations (#1243). A run that ends
@@ -1805,11 +1814,66 @@ def is_historical(rel: str) -> bool:
     return rel.startswith(HISTORICAL_GENRES)
 
 
+def already_repinned(rev_maps: dict, root: pathlib.Path = None) -> list:
+    """The paths whose pins have ALREADY absorbed `rev_maps`, sorted — a SECOND run.
+
+    `--from-rev REV` is not idempotent, and the reason is structural: its map is derived
+    from source files alone, so re-pinning the docs does not change it. Run it, apply it,
+    run it again against the same `REV` and every pin moves by the same delta a second
+    time — output that is syntactically fine, is reported as "N citation(s) rewritten",
+    and is wrong. It has bitten twice (session memory records it as an operator gotcha;
+    Car M hit it again on PR #1588 and recovered by resetting the repin-only files).
+
+    A clean verify pass is NOT the test. The first run can legitimately leave a HOLD, and
+    then the gate is still red while every other pin has moved — which is exactly the
+    tree a second run corrupts wholesale.
+
+    The ANCHORS table is the test, because the first run re-pins it too:
+
+      * BEFORE any run, an anchor in a shifted file names the line the text used to sit
+        on. `anchor_line_maps` finds the text elsewhere, so the anchor is NOT a fixed
+        point — and the revision map agrees that the line moved.
+      * AFTER a run, the anchor names where the text actually IS: a fixed point. The
+        revision map, unchanged, still says that line number must move.
+
+    So "an anchor that resolves in place, at a line this map would move" is the
+    signature, and it cannot fire on a first run. An anchor sitting ABOVE the edit is a
+    fixed point too, but the map leaves it alone, so it is silent — which is what keeps
+    a file with edits below its anchors from being flagged.
+    """
+    anchored, _ = anchor_line_maps(root=root)
+    flagged = []
+    for path, shifts in rev_maps.items():
+        fixed = anchored.get(path)
+        if not fixed:
+            continue
+        if any(new == old and shifts.get(old, old) != old for old, new in fixed.items()):
+            flagged.append(path)
+    return sorted(flagged)
+
+
 def repin(from_rev: str = None, apply: bool = False) -> int:
     """The `--repin` driver: build ONE map, rewrite every LIVING surface once, report."""
     filemap = source_map()
     if from_rev:
         maps, notes = revision_line_maps(from_rev)
+        # A second application of the same delta silently corrupts every pin the first
+        # one fixed (#1591). Refused, not warned about, and refused BEFORE anything is
+        # written — half a double-repin is not better than all of it.
+        if repeated := already_repinned(maps):
+            print(f"REFUSE  this tree has ALREADY absorbed the {from_rev} delta — "
+                  f"re-applying it would corrupt every pin the first run fixed (#1591).")
+            for path in repeated:
+                print(f"        {path}: its anchors resolve where they are pinned, and this "
+                      f"map still says those lines moved.")
+            print(f"        Nothing was written. If a LATER source edit moved lines again, "
+                  f"commit the")
+            print(f"        first re-pin and pass --from-rev HEAD — the delta is measured from "
+                  f"where the")
+            print(f"        docs currently sit, not from where the branch started. If the first "
+                  f"run left a")
+            print(f"        HOLD, fix that one citation by hand; do not re-run this.")
+            return 1
     else:
         maps, notes = anchor_line_maps()
     targets = [(REPO / "tools" / "check_doc_citations.py", repin_anchor_table)] + [
