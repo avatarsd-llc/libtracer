@@ -465,6 +465,23 @@ class RepinAnchorTableTest(unittest.TestCase):
     def test_an_unmapped_file_is_untouched(self):
         self.assertEqual(cdc.repin_anchor_table(self.TABLE, {})[0], self.TABLE)
 
+    def test_an_ENROLLED_non_source_entry_moves(self):
+        # #1592: the regex matched source suffixes only, so every edit above ~line 1780 of
+        # `core/tests/CMakeLists.txt` needed a hand edit in TWO places — the citing page
+        # and this table — and both of Car M's PRs paid it.
+        entry = f"    ('{TESTS_CMAKE}:1827', 'add_executable(substrate_test_no_atomic'),\n"
+        out, moves, _ = cdc.repin_anchor_table(entry, {TESTS_CMAKE: {1827: 1830}})
+        self.assertIn(f"('{TESTS_CMAKE}:1830'", out)
+        self.assertEqual(moves, [(TESTS_CMAKE, 1827, 1830)])
+
+    def test_an_UNENROLLED_non_source_entry_is_still_not_matched(self):
+        # Enrolment stays an allowlist: a `.py` or `.yml` nobody enrolled is not a
+        # citation surface, and the table has no business rewriting it.
+        entry = "    ('tools/sync-version.py:42', 'VERSION = ('),\n"
+        out, moves, _ = cdc.repin_anchor_table(entry, {"tools/sync-version.py": {42: 50}})
+        self.assertEqual(out, entry)
+        self.assertEqual(moves, [])
+
 
 class AnchorLineMapsTest(unittest.TestCase):
     """Where the map comes from when no revision is named: what the gate can PROVE moved."""
@@ -632,18 +649,32 @@ class CitableNonSourcePathTest(unittest.TestCase):
         # maintainer's call and is not what this table answers.
         self.assertEqual(locs("`tools/sync-version.py:42`"), set())
 
-    def test_a_repin_leaves_an_enrolled_path_alone(self):
-        # `revision_line_maps` derives maps from sources only, so there is no map to move
-        # these by. Leaving doc and anchor in step is what makes the gate's DRIFT report
-        # the whole fix rather than half of it.
+    def test_a_repin_MOVES_an_enrolled_path(self):
+        # #1592: it used to decline, because `ANCHOR_ENTRY_RE` could not follow the table
+        # entry and moving the doc alone puts the two out of step. The regex reads the
+        # enrolled spellings now, so both halves move together and the hand edit — two
+        # places on every edit above ~line 1780 of core/tests/CMakeLists.txt — is gone.
         self.assertEqual(repinned(f"`{FOOTPRINT}:101`", {FOOTPRINT: {101: 120}}),
-                         f"`{FOOTPRINT}:101`")
+                         f"`{FOOTPRINT}:120`")
 
-    def test_a_repin_REPORTS_the_enrolled_path_it_declined(self):
-        # #1095 acceptance: `--repin` either handles what is newly enrolled or says
-        # plainly that it will not. It declines (above); this is the saying-so.
-        _, _, held = cdc.repin_document(f"`{FOOTPRINT}:101`", {FOOTPRINT: {101: 120}}, FILEMAP)
+    def test_an_enrolled_range_moves_at_BOTH_ends(self):
+        self.assertEqual(repinned(f"`{TESTS_CMAKE}:1827,1842-1843`",
+                                  {TESTS_CMAKE: {1827: 1830, 1842: 1845, 1843: 1846}}),
+                         f"`{TESTS_CMAKE}:1830,1845-1846`")
+
+    def test_an_enrolled_path_with_NO_map_is_still_reported_as_held(self):
+        # The #1095 acceptance survives the change: what `--repin` cannot move it says so
+        # about, rather than skipping in silence.
+        _, _, held = cdc.repin_document(f"`{FOOTPRINT}:101`", {}, FILEMAP)
         self.assertEqual(held, [(FOOTPRINT, "101")])
+
+    def test_an_enrolled_citation_STILL_does_not_become_the_running_file(self):
+        # The one property the old decline also carried, and the one a naive "just re-pin
+        # it too" would drop: a bare `:N` after an enrolled aside inherits the SOURCE file
+        # named before it, not the build file.
+        text = f"`config.hpp.in:86` `{FOOTPRINT}:101` `:109`"
+        maps = {FOOTPRINT: {101: 120}, "core/include/libtracer/config.hpp.in": {86: 90, 109: 113}}
+        self.assertEqual(repinned(text, maps), f"`config.hpp.in:90` `{FOOTPRINT}:120` `:113`")
 
     def test_a_partial_path_resolves_to_the_enrolled_file(self):
         # `integrations/esp-idf/README.md` cites its own component as

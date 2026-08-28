@@ -2088,6 +2088,57 @@ foreach(_libtracer_bus_test IN LISTS LIBTRACER_BUS_TESTS)
     endif()
 endforeach()
 
+# The guard on the hand-maintained list above (#1592). The `httpd_ws_*` family is the one
+# part of it that is derivable: a link that IS a bus by construction never comes up on a
+# bus-less build, so every suite under `${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_*_test.cpp`
+# either carries the label or is named below as a deliberate exception. Forgetting to enrol
+# one used to pass locally and fail only in `build-test-bus-closed`, one CI wave later —
+# which cost Car M exactly that.
+#
+# It is a CONFIGURE-time assertion rather than a derivation because the label is a claim
+# about the SUITE, and the exceptions are real: `httpd_ws_counters` drives the #1503
+# introspection counters, which a bus-less build still has. Deriving the label would
+# silently enrol it and deselect a suite that passes; asserting makes the author of the
+# next one state which it is, in one diffable place, and the assertion fires at
+# `cmake` time rather than in CI.
+#
+# `LIBTRACER_BUS_TESTS_EXEMPT` is the opt-out and takes the same shape as the
+# `link_token_carry` note above: not on the list, and the reason written down.
+set(LIBTRACER_BUS_TESTS_EXEMPT
+    # Reads the link's published counters (#1503 vocabulary: capacity/in_use/peak/
+    # refused/dropped). Nothing in it needs a peer-named listener or a multi-peer link,
+    # and it passes on a `kBusLinks = false` build — labelling it would deselect a suite
+    # from the configuration that ships without a bus, which is where the counters matter
+    # most.
+    httpd_ws_counters)
+if(EXISTS "${LIBTRACER_ESP_DIR}/tests/host")
+    file(GLOB _libtracer_ws_host_sources
+        "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_*_test.cpp")
+    set(_libtracer_bus_unenrolled "")
+    foreach(_src IN LISTS _libtracer_ws_host_sources)
+        get_filename_component(_name "${_src}" NAME_WE)
+        string(REGEX REPLACE "_test$" "" _name "${_name}")
+        # Only a suite this build actually registered can be labelled; the family is
+        # module-gated above, so an un-built one is not a missing label.
+        if(NOT TEST ${_name})
+            continue()
+        endif()
+        if(NOT _name IN_LIST LIBTRACER_BUS_TESTS AND NOT _name IN_LIST LIBTRACER_BUS_TESTS_EXEMPT)
+            list(APPEND _libtracer_bus_unenrolled "${_name}")
+        endif()
+    endforeach()
+    if(_libtracer_bus_unenrolled)
+        string(REPLACE ";" ", " _libtracer_bus_unenrolled_pretty "${_libtracer_bus_unenrolled}")
+        message(FATAL_ERROR
+            "httpd_ws host suite(s) in neither LIBTRACER_BUS_TESTS nor "
+            "LIBTRACER_BUS_TESTS_EXEMPT: ${_libtracer_bus_unenrolled_pretty}.\n"
+            "A suite over a link that is a bus by construction must carry the `bus` label, or "
+            "`ctest -LE bus` runs it on a kBusLinks=false build and it fails there (#1592). "
+            "Add it to LIBTRACER_BUS_TESTS in this file — or, if it really is tier-blind, to "
+            "LIBTRACER_BUS_TESTS_EXEMPT with the reason, beside httpd_ws_counters.")
+    endif()
+endif()
+
 # The suites above that SEGFAULTED rather than failed under `kBusLinks = false` (#1438). The
 # label already deselects them; this is about what happens to someone who runs the closed build
 # WITHOUT the label filter, which used to be five crashes. Each of these now states a skip from
