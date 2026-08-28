@@ -596,6 +596,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   unchanged, and the zero-allocation pin is unchanged; regression pinned by claim 7 of
   `core/tests/playout_test.cpp`.
 
+- **`tr::wire::batch_view_t::sample_time_ns` no longer signed-overflows on its UNIFORM arm for
+  a negative `base_ns`** ([#1600](https://github.com/avatarsd-llc/libtracer/issues/1600)). The
+  rate arm spelled its epoch headroom as `int64max - base_ns`, the same undefined behaviour
+  [#1580](https://github.com/avatarsd-llc/libtracer/issues/1580) fixed in the playout re-prime.
+  Not peer-reachable — `read_batch` pins `base_ns >= 0` — but `batch_view_t` is a public
+  aggregate a caller may fill from a non-wire source, so the UB was one designated initialiser
+  away. Reproduced under `-fsanitize=undefined`. The headroom is now computed on both arms of
+  the sign and the derivation's own sum is spelled unsigned, exactly as the non-uniform arm
+  three lines above and as `playout.hpp`'s re-prime; behaviour on a non-negative `base_ns` is
+  byte-identical. Regression pinned by claim 2b of `core/tests/batch_test.cpp`.
+
 ## [0.15.1] — 2026-08-23
 
 ### Added

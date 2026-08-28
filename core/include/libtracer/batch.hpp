@@ -359,10 +359,21 @@ struct batch_view_t {
                 return std::nullopt;
             return base_ns + off;
         }
+        // Two arms, for the same reason the non-uniform arm above is guarded: `read_batch`
+        // pins `base_ns >= 0`, but `batch_view_t` is an aggregate a caller may fill from a
+        // non-wire source, and `int64max - base_ns` is signed overflow for a negative base
+        // (#1600 — the defect #1580 fixed in the playout re-prime).
         const std::uint64_t headroom =
-            static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() - base_ns);
+            base_ns >= 0
+                ? static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max() - base_ns)
+                : static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) +
+                      (0u - static_cast<std::uint64_t>(base_ns));
         if (static_cast<std::uint64_t>(i) > headroom / dt_ns) return std::nullopt;
-        return base_ns + static_cast<std::int64_t>(static_cast<std::uint64_t>(i) * dt_ns);
+        // `base_ns + i * dt_ns` is in range by the guard, so the unsigned sum carries the right
+        // two's-complement bits — and, unlike the signed spelling, it stays defined for a step
+        // that alone exceeds `int64max` (reachable only when `base_ns < 0`).
+        return static_cast<std::int64_t>(static_cast<std::uint64_t>(base_ns) +
+                                         static_cast<std::uint64_t>(i) * dt_ns);
     }
 };
 
