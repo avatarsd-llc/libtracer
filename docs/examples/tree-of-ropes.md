@@ -25,7 +25,7 @@ example asserts they never merge.
   exactly one addressable vertex at `/net/<module>/<name>` — here `/net/can/link0`,
   under the `can` module the example declares with `register_module`, whose staged link
   the creation then picks up (`transport_vertex_t::provide_link`,
-  `core/src/transport_vertex.cpp:592`). The module declaration also fixes the role, which
+  `core/src/transport_vertex.cpp:595`). The module declaration also fixes the role, which
   is why the SPEC carries no `type` and no `role`. The transport's real bytes live *outside*
   the graph, in the FWD router's demux; no per-peer vertex or memory is added
   (ADR-0044). Attaching a bus does not "grow the rope."

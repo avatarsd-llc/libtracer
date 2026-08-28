@@ -2989,8 +2989,15 @@ class graph_t {
      *         every other member at the byte offset it had before this seam
      *         existed. A cold pointer inserted mid-object would shift `root_` and
      *         everything after it, which is a layout change the forward-hop bench
-     *         can see and nothing gains from. The two adapters below sit here for the
-     *         same reason.
+     *         can see and nothing gains from.
+     *
+     *         The two adapters built over this source — `src_backend_` and `src_mr_` — do
+     *         NOT sit here for that reason: they are declared FIRST in the class (see the
+     *         "DECLARED FIRST so they are DESTROYED LAST" block), because a stored LKV's
+     *         control block calls back into `src_mr_` while `root_`'s vertex tree is torn
+     *         down, and members die in reverse declaration order. Moving them down here to
+     *         match this member's layout argument reintroduces the UBSan `vptr` lifetime
+     *         bug that placement fixed.
      */
     mem::block_source_t* ctl_ = &mem::heap_source();
 

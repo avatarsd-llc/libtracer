@@ -218,28 +218,28 @@ ANCHORS = [
     # refusal that RFC-0014 S2b added below it, and the unregistered-kind refusal in creation.
     # No scope separates all three, so the anchor is the WHOLE indented statement instead: the
     # other two carry a leading `if (…)` on the same line and no longer match.
-    ("core/src/transport_vertex.cpp:339",
+    ("core/src/transport_vertex.cpp:341",
      "    return std::unexpected(status_t::SCHEMA_NOT_FOUND);"),
     # RFC-0014 S2b's creator endpoint: the mint site CONTEXT.md cites for "declaring a
     # module mints /net/<module>/conn", and the dispatch site it cites for "the written
     # TLV's TYPE selects the operation".
-    ("core/src/transport_vertex.cpp:366", "transport_vertex_t::mint_module_locked"),
-    ("core/src/transport_vertex.cpp:425", "transport_vertex_t::endpoint_write"),
-    ("core/src/transport_vertex.cpp:592", "transport_vertex_t::provide_link"),
-    ("core/src/transport_vertex.cpp:612", "routing key IS the mount path"),
+    ("core/src/transport_vertex.cpp:368", "transport_vertex_t::mint_module_locked"),
+    ("core/src/transport_vertex.cpp:427", "transport_vertex_t::endpoint_write"),
+    ("core/src/transport_vertex.cpp:595", "transport_vertex_t::provide_link"),
+    ("core/src/transport_vertex.cpp:615", "routing key IS the mount path"),
     # The qualified-key compose repeats since S2b: the creation path builds it here, and
     # the endpoint's `NAME` remove builds the same key earlier in the file. The mount-path
     # comment sits directly above THIS one and below the other.
-    ("core/src/transport_vertex.cpp:619", "qualified += name", "routing key IS the mount path"),
-    ("core/src/transport_vertex.cpp:637", "structural vertex, created lazily"),
+    ("core/src/transport_vertex.cpp:622", "qualified += name", "routing key IS the mount path"),
+    ("core/src/transport_vertex.cpp:640", "structural vertex, created lazily"),
     # Two module-vertex mints since S2b — `register_module`'s eager one and creation's
     # lazy one. The lazy-mint comment selects this (later) one.
-    ("core/src/transport_vertex.cpp:645", "register_vertex_key(mod_key",
+    ("core/src/transport_vertex.cpp:648", "register_vertex_key(mod_key",
      "structural vertex, created lazily"),
-    ("core/src/transport_vertex.cpp:796", "if (!router_.add_child(qualified, *link))"),
-    ("core/src/transport_vertex.cpp:810", "pending_links_.erase(pl)"),
-    ("core/src/transport_vertex.cpp:829", "if (constructed)"),
-    ("core/src/transport_vertex.cpp:832", "? link_state_t::LISTENING"),
+    ("core/src/transport_vertex.cpp:799", "if (!router_.add_child(qualified, *link))"),
+    ("core/src/transport_vertex.cpp:813", "pending_links_.erase(pl)"),
+    ("core/src/transport_vertex.cpp:832", "if (constructed)"),
+    ("core/src/transport_vertex.cpp:835", "? link_state_t::LISTENING"),
     ('core/src/transport_vertex.cpp:83', '[[nodiscard]] view_t link_state_value(link_state_t state) {'),
     # fwd-router.md's "Signature source" line — bare :NNN shorthands that had ALL rotted
     # silently (they cited the pre-#739 header). Anchored so they cannot rot again.
@@ -268,7 +268,7 @@ ANCHORS = [
      "[[nodiscard]] transport_t* by_name(std::string_view name) const {"),
     ("core/include/libtracer/child_registry.hpp:716", "std::size_t size()"),
     ("core/include/libtracer/child_registry.hpp:726", "live_size"),
-    ("core/src/transport_vertex.cpp:804", "return std::unexpected(status_t::BACKPRESSURE);",
+    ("core/src/transport_vertex.cpp:807", "return std::unexpected(status_t::BACKPRESSURE);",
      "if (!router_.add_child(qualified, *link))"),
     ("core/include/libtracer/transport_vertex.hpp:494", "result_t<void> register_module"),
     ("core/include/libtracer/transport_vertex.hpp:111", "enum class link_state_t"),
@@ -280,7 +280,7 @@ ANCHORS = [
      "const conn_settings_t* settings_of(std::string_view name) const;"),
     # The synthesized `:children[]` a bus connection answers accepted-peer enumeration from —
     # the fact that replaced reference/13's stale "`:children[]` / `:settings`".
-    ("core/src/transport_vertex.cpp:735", "handlers.on_children = [bus]() -> result_t<view_t> {"),
+    ("core/src/transport_vertex.cpp:738", "handlers.on_children = [bus]() -> result_t<view_t> {"),
     ("core/src/graph.cpp:3438", "sel == field_sel_t::TAIL", 'step0.name == "subscribers"'),
     ("core/src/graph.cpp:3558", "!whole_field(field)", 'step0.name == "acl"'),
     ("core/src/graph.cpp:3598", "field_selector(field) != field_sel_t::APPEND"),
@@ -322,10 +322,10 @@ ANCHORS = [
     ('core/include/libtracer/graph.hpp:2566', 'void deliver_vertex(vertex_t* v, const rope_t& value);'),
     ('core/include/libtracer/graph.hpp:2860', 'std::pmr::memory_resource* mr_ = std::pmr::get_default_resource();'),
     ('core/include/libtracer/graph.hpp:2876', 'mem::mem_backend_t* value_backend_ = &mem::heap_backend();'),
-    ('core/include/libtracer/graph.hpp:2995', 'mem::block_source_t* ctl_ = &mem::heap_source();'),
+    ('core/include/libtracer/graph.hpp:3002', 'mem::block_source_t* ctl_ = &mem::heap_source();'),
     # The graph-level DEFAULT receiver-ring source (#1462, RFC-0025 §4.6.1) — cited by
     # docs/design/allocation-and-backpressure.md's seam table beside the other three.
-    ('core/include/libtracer/graph.hpp:3010', 'mem::block_source_t* ring_ = &mem::heap_source();'),
+    ('core/include/libtracer/graph.hpp:3017', 'mem::block_source_t* ring_ = &mem::heap_source();'),
     ('core/include/libtracer/graph.hpp:1813',
      '* @param ctx Caller-owned context, passed back to @p fn on every delivery. Its lifetime'),
     ('core/include/libtracer/graph.hpp:2266', '[[nodiscard]] result_t<value_ref_t> read(const path_t& path) const;'),
@@ -369,25 +369,25 @@ ANCHORS = [
      "field_write read an empty head"),
     ("core/src/graph.cpp:3410", "result_t<void> graph_t::field_write"),
     ("core/src/graph.cpp:3600", "acl_right_t::CREATE", 'step0.name == "children"'),
-    ("core/src/fwd_router.cpp:3354", "fwd_router_t::deliver_remote"),
-    ("core/src/fwd_router.cpp:3392", "value.try_materialize(*flat_)"),
-    ("core/src/fwd_router.cpp:3393", "if (!flat) return;", "A REFUSED materialize drops the delivery"),
-    ("core/src/fwd_router.cpp:3395", "emit_compact", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:3355", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:3393", "value.try_materialize(*flat_)"),
+    ("core/src/fwd_router.cpp:3394", "if (!flat) return;", "A REFUSED materialize drops the delivery"),
+    ("core/src/fwd_router.cpp:3396", "emit_compact", "fwd_router_t::deliver_remote"),
     # The FULL-ROUTE delivery leg's iov, and the scope is load-bearing: this exact statement
     # appears four times in the file and TWICE inside `deliver_remote` — once in the bound
     # reverse-list arm and once in the default full-route arm below it. The old scope named
     # the function, which both arms are inside, so a re-pin resolved the citation onto the
     # bound arm (the wrong paragraph). "Default: full-route" sits between the two and only
     # ever above this one.
-    ("core/src/fwd_router.cpp:3485",
+    ("core/src/fwd_router.cpp:3486",
      "mem::block_array_t<std::span<const std::byte>> iov(graph_.control_source());",
      "Default: full-route"),
     # #730 — the two INGRESS flatten guards. Anchored because the whole point of the
     # seam is that these are testable; a citation to them silently rotting would be the
     # first step back to "the guard nobody can prove still works".
-    ("core/src/fwd_router.cpp:2771", "if (route.empty() && head->child1_total != 0) return;"),
-    ("core/src/fwd_router.cpp:2790", "if (payload.empty() && head->child1_total != 0) return;"),
-    ("core/src/fwd_router.cpp:2783", "const std::span<const std::byte> payload = contig(head->child1_off, head->child1_total);"),
+    ("core/src/fwd_router.cpp:2772", "if (route.empty() && head->child1_total != 0) return;"),
+    ("core/src/fwd_router.cpp:2791", "if (payload.empty() && head->child1_total != 0) return;"),
+    ("core/src/fwd_router.cpp:2784", "const std::span<const std::byte> payload = contig(head->child1_off, head->child1_total);"),
     ("core/src/fwd_router.cpp:2152", "frame.subrope(0, frame.total_length()).try_materialize",
      "if (hit.rejected) {"),
     # #766/#793 — the terminus resolver's three rope-tier draws, and the two allocations the
@@ -401,7 +401,7 @@ ANCHORS = [
     ("core/src/fwd_reply.cpp:130", "view::segment_alloc(egress, head_len)"),
     ('core/src/fwd_reply.cpp:33', "*        the u16 the kind=ERROR reply's ERROR{VALUE} identity carries."),
     ('core/src/fwd_reply.cpp:139', 'out.tlv_sliced(route.dst_wire);'),
-    ("core/src/fwd_router.cpp:2638", "decode_into(frame, rx_for(inbound_ctx))"),
+    ("core/src/fwd_router.cpp:2639", "decode_into(frame, rx_for(inbound_ctx))"),
     # `vertex.hpp:<parent_>` was pinned here TWICE, and the only doc that cites it is
     # `docs/spec/rfcs/0019` — a historical genre this tool's own header excludes from
     # pinning ("dated records of a decision ... pinning them would demand rewriting
@@ -703,14 +703,14 @@ ANCHORS = [
      'void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_t frame,'),
     ('core/src/fwd_router.cpp:2126', 'if (frame.link_count() == 1) {'),
     ('core/src/fwd_router.cpp:2187', '// A REPLY that reaches its originator here is handed to the sink'),
-    ('core/src/fwd_router.cpp:2799',
+    ('core/src/fwd_router.cpp:2800',
      'void fwd_router_t::on_control_rope(std::string_view inbound_name, view::rope_t frame,'),
-    ('core/src/fwd_router.cpp:2750', 'const auto head = peek_control(cur, wire::grammar::crc_check_t::VERIFY);'),
-    ('core/src/fwd_router.cpp:2764', 'const std::span<const std::byte> route = contig(head->child1_off, head->child1_total);'),
-    ('core/src/fwd_router.cpp:2816', 'frame.subrope(off, total).try_materialize(*flat_);'),
-    ('core/src/fwd_router.cpp:3371',
+    ('core/src/fwd_router.cpp:2751', 'const auto head = peek_control(cur, wire::grammar::crc_check_t::VERIFY);'),
+    ('core/src/fwd_router.cpp:2765', 'const std::span<const std::byte> route = contig(head->child1_off, head->child1_total);'),
+    ('core/src/fwd_router.cpp:2817', 'frame.subrope(off, total).try_materialize(*flat_);'),
+    ('core/src/fwd_router.cpp:3372',
      "// else. A dropped fresh ADVERTISE self-heals via the peer's HANDLE_NACK (§E.1). NOT yet"),
-    ('core/src/fwd_router.cpp:3461',
+    ('core/src/fwd_router.cpp:3462',
      'constexpr std::array<std::byte, 5> op_tlv{std::byte{0x01}, std::byte{0x00}, std::byte{0x01},'),
     # core/src/graph.cpp
     ('core/src/graph.cpp:609', 'const view_t& frame_view, std::vector<std::byte> key,'),
@@ -800,7 +800,7 @@ ANCHORS = [
      'void parse_config(const tlv_t* config, conn_settings_t& s) {'),
     ('core/src/transport_vertex.cpp:321',
      'result_t<std::string> transport_vertex_t::module_for(std::string_view kind,'),
-    ('core/src/transport_vertex.cpp:629',
+    ('core/src/transport_vertex.cpp:632',
      '// Compose the mount key: `<net_root>/<module>/<name>`, replacing the flat key the'),
     # core/src/transport_ws.cpp
     ('core/src/transport_ws.cpp:86',
@@ -1014,31 +1014,31 @@ ANCHORS = [
     # Three lines now spell this table: the FORWARD hop's rope arm (this one) and the two
     # TERMINUS reply gathers #1570 migrated onto the same seam. The forward arm is the only
     # one under the rope-source comment, which is what selects it.
-    ('core/src/fwd_router.cpp:2579',
+    ('core/src/fwd_router.cpp:2580',
      'mem::block_array_t<std::span<const std::byte>> iov{rx_for(inbound_ctx)};',
      '// Rope source: a region may cross several links, so the sub-span count is only known'),
-    ('core/src/fwd_router.cpp:2805',
+    ('core/src/fwd_router.cpp:2806',
      'const wire::grammar::rope_cursor cur{frame};',
      'if (!frame.all_host()) return;'),
-    ('core/src/fwd_router.cpp:3100', 'const auto payload_view = view::over_bytes(payload_bytes);'),
-    ('core/src/fwd_router.cpp:3111',
+    ('core/src/fwd_router.cpp:3101', 'const auto payload_view = view::over_bytes(payload_bytes);'),
+    ('core/src/fwd_router.cpp:3112',
      'graph_.count_external_drop(graph::graph_t::external_drop_t::OUT_OF_MEMORY, 1);',
      'if (!value.try_reserve(1)) {'),
-    ('core/src/fwd_router.cpp:3149',
+    ('core/src/fwd_router.cpp:3150',
      'graph_.count_external_drop(graph::graph_t::external_drop_t::NO_TARGET, 1);',
      'if (!binding) {'),
-    ('core/src/fwd_router.cpp:3250',
+    ('core/src/fwd_router.cpp:3251',
      'const std::optional<graph::vertex_handle_t> v = resolve_route_vertex(route_path);'),
-    ('core/src/fwd_router.cpp:3254',
+    ('core/src/fwd_router.cpp:3255',
      'graph_.count_external_drop(graph::graph_t::external_drop_t::NO_TARGET, 1);',
      '// the same outcome either way: an admitted delivery with nowhere to land.'),
-    ('core/src/fwd_router.cpp:3261',
+    ('core/src/fwd_router.cpp:3262',
      'graph_.count_external_drop(graph::graph_t::external_drop_t::OUT_OF_MEMORY, 1);',
      'const auto payload_view = view::over_bytes(payload);'),
-    ('core/src/fwd_router.cpp:3394', 'if (fresh) emit_advertise(*link, label, route);'),
-    ('core/src/fwd_router.cpp:3464',
-     'constexpr std::array<std::byte, 4> empty_src{std::byte{0x06}, std::byte{0x00}, std::byte{0x00},'),
+    ('core/src/fwd_router.cpp:3395', 'if (fresh) emit_advertise(*link, label, route);'),
     ('core/src/fwd_router.cpp:3465',
+     'constexpr std::array<std::byte, 4> empty_src{std::byte{0x06}, std::byte{0x00}, std::byte{0x00},'),
+    ('core/src/fwd_router.cpp:3466',
      'std::byte{0x00}};',
      'constexpr std::array<std::byte, 4> empty_src{std::byte{0x06}, std::byte{0x00}, std::byte{0x00},'),
     ('core/src/graph.cpp:1129', 'return acl_allows(v.get(), caller, right);'),
@@ -1057,7 +1057,11 @@ ANCHORS = [
     ('core/src/graph.cpp:2483',
      'const std::expected<view_t, tr::view::flatten_err_t> head =',
      '// a DEVICE-link value, which no retry makes CPU-decodable, is TYPE_MISMATCH.'),
-    ('core/src/graph.cpp:2532', 'if (!parsed) return std::unexpected(parsed.error());'),
+    # Re-aimed (#1584): 09-memory-substrate.md's scope-lifetime bump-source example cited
+    # `2532-2533` — the branch plan vector and the `parse_branch_node` call — where the
+    # composition it describes is the stack buffer and the bump built over `*ctl_`.
+    ('core/src/graph.cpp:2501', 'std::array<std::byte, 4096> stack;'),
+    ('core/src/graph.cpp:2502', 'mem::bump_source_t src(stack, *ctl_);'),
     ('core/src/graph.cpp:2691', 'if (!detail::try_assign(copy, k)) return false;'),
     ('core/src/graph.cpp:2788',
      '// Empty-set fast path (the per-eager-write case when nobody uses assign+propagate):'),
