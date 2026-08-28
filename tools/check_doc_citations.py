@@ -897,9 +897,10 @@ ANCHORS = [
     # landed on a BLANK line and two on a bare `endif()`. Every entry below is pinned to
     # the line the prose actually names, and the citing doc was re-pinned to match.
     #
-    # `--repin` does NOT move these (see @ref repin_document): the ANCHORS table is
-    # rewritten by source suffix only, so a doc citation that moved without its table
-    # entry would leave the two out of step. The gate reds on both and names the page.
+    # `--repin` DOES move these, since #1592: @ref ANCHOR_ENTRY_RE matches the enrolled
+    # spellings by exact path, so a table entry travels with the doc citation it pins.
+    # Before that it did not, and moving one without the other left the two out of step —
+    # which is why the old rule was to move neither and let the gate red on both.
     # Anchored on the job's own `name:` rather than on `matrix:`. #1376 added a SECOND
     # TSan job (`tsan-reclaim-qsbr`) with an identical `matrix:` block, which made the old
     # anchor ambiguous inside its own `  tsan:` scope — the scope runs to EOF, not to the
@@ -1696,18 +1697,29 @@ def repin_document(text: str, maps: dict, filemap: dict = None) -> tuple:
             last = None  # a cited DOCUMENT ends the inheritance run
             continue
         elif m.group("other"):
-            # An enrolled non-source path is re-pinned by HAND, and is REPORTED as held
-            # rather than skipped in silence (#1095). Two independent reasons, both still
-            # true after the list grew to nine paths: `revision_line_maps` derives its maps
-            # from source files only, so `--from-rev` has no map to move these by; and
-            # `ANCHOR_ENTRY_RE` matches source suffixes only, so even under the
-            # anchor-derived map the TABLE entry would stay put while the doc citation
-            # moved. Half-applying it that way puts doc and anchor out of step, which is
-            # strictly worse than leaving both — the gate then reds on both and names the
-            # page that cites them.
+            # An enrolled non-source path is re-pinned like any other now (#1592). Both
+            # halves of the old refusal are gone: `revision_line_maps` builds maps for the
+            # enrolled paths, and `ANCHOR_ENTRY_RE` matches their table entries by exact
+            # spelling — so doc and anchor move TOGETHER, which was the property whose
+            # absence made half-applying worse than leaving both alone (#1095). What has
+            # not changed is that an enrolled path never becomes the running file: `last`
+            # is left where it was, so a bare `:N` after one still inherits the source file
+            # named before it.
+            #
+            # With no map for it the citation is still HELD and reported, not silently
+            # skipped — the driver drops that report when the file did not move at all.
             enrolled = resolve_enrolled(m.group("other"))
-            if enrolled:
+            if not enrolled:
+                continue
+            if enrolled not in lookups:
                 held.append((enrolled, m.group("otherspec")))
+                continue
+            other_spec, other_moves, other_held = _repin_spec(m.group("otherspec"),
+                                                              lookups[enrolled])
+            held += [(enrolled, n) for n in other_held]
+            if other_spec != m.group("otherspec"):
+                edits.append((*m.span("otherspec"), other_spec))
+                moves += [(enrolled, a, b) for a, b in other_moves]
             continue
         elif last:
             spec, span = m.group(4), m.span(4)
@@ -1737,8 +1749,17 @@ def repin_document(text: str, maps: dict, filemap: dict = None) -> tuple:
 # re-pin that way. The backreference makes the quote irrelevant, and requiring an
 # opening paren before it keeps the rewrite to element 0 of a tuple, never an anchor's
 # quoted TEXT.
+#
+# The ENROLLED non-source paths are matched too, by exact spelling (#1592). They used to
+# be excluded, which made every edit above ~line 1780 of `core/tests/CMakeLists.txt` a
+# hand edit in two places — the citing page AND the table — because moving one without
+# the other reds the gate. Both of Car M's PRs paid it. An exact alternation is the right
+# shape here and NOT in `CITATION_RE`: a doc writes a non-source citation in three
+# spellings, two of them partial, but the anchor table always writes the full path.
+_ENROLLED_ALT = "|".join(re.escape(p) for p in CITABLE_NON_SOURCE_PATHS)
 ANCHOR_ENTRY_RE = re.compile(
-    r"(\(\s*)(['\"])((?:[A-Za-z0-9_./-]*/)?[A-Za-z0-9_][A-Za-z0-9_.-]*\.(?:" + _EXTS + r")):(\d+)\2"
+    r"(\(\s*)(['\"])((?:[A-Za-z0-9_./-]*/)?[A-Za-z0-9_][A-Za-z0-9_.-]*\.(?:" + _EXTS + r")"
+    r"|" + _ENROLLED_ALT + r"):(\d+)\2"
 )
 
 
@@ -1775,10 +1796,12 @@ def revision_line_maps(rev: str, root: pathlib.Path = None) -> tuple:
     edit moved the lines; the anchor-derived map is the fallback that re-pins only what
     the gate can prove moved.
 
-    An ENROLLED non-source path gets a map here too, and it is never used to rewrite one:
-    @ref repin_document declines those before it consults a lookup. It exists so the
-    driver can tell a shifted enrolled file from an untouched one and report only the
-    former — 32 identical "held" lines on every clean run is how a report gets ignored.
+    An ENROLLED non-source path gets a map here too, and since #1592 it is USED: @ref
+    repin_document moves those citations and @ref ANCHOR_ENTRY_RE moves their table
+    entries, so the two stay in step — which is the property whose absence made the old
+    refusal the right answer. The map also still tells a shifted enrolled file from an
+    untouched one, which is what keeps a clean run from printing 32 identical "held"
+    lines nobody reads.
     """
     root = root or REPO
     git = ["git", "-C", str(root)]
@@ -1888,7 +1911,7 @@ def repin(from_rev: str = None, apply: bool = False) -> int:
     # exit status below (#1243) without reddening every clean run.
     shifted = {p for p, m in maps.items()
                if any(new is None or new != old for old, new in m.items())}
-    total, historical, held_all, enrolled_held = 0, 0, list(notes), []
+    total, historical, held_all = 0, 0, list(notes)
     for path, table_fn in targets:
         try:
             text = path.read_text()
@@ -1903,15 +1926,14 @@ def repin(from_rev: str = None, apply: bool = False) -> int:
             # Counted, never written: the number is worth knowing, the edit is not.
             historical += len(moves)
             continue
-        # Two different reasons a citation is held, and saying "no derivable shift" for
-        # both would misreport the enrolled one as a map gap the tool could close (#1095).
+        # ONE reason a citation is held, since #1592 made the enrolled non-source paths
+        # ordinary: the map has no derivable shift for that line. The second reason
+        # #1095 had to report separately — "this path's TABLE entry cannot follow, so
+        # moving the doc alone would put the two out of step" — no longer exists.
         for p, n in held:
             if p not in shifted:
                 continue  # the file did not move; there is nothing to re-pin and nothing to say
-            if p in CITABLE_NON_SOURCE_PATHS:
-                enrolled_held.append(f"{rel}: {p}:{n}")
-            else:
-                held_all.append(f"{rel}: {p}:{n} — no derivable shift, re-pin by hand")
+            held_all.append(f"{rel}: {p}:{n} — no derivable shift, re-pin by hand")
         if not moves:
             continue
         total += len(moves)
@@ -1921,16 +1943,9 @@ def repin(from_rev: str = None, apply: bool = False) -> int:
             path.write_text(new_text)
     for note in dict.fromkeys(held_all):
         print(f"HOLD  {note}")
-    # Said plainly rather than skipped in silence (#1095): --repin will not move these,
-    # and the reason is structural, not a gap it could close on a later run.
-    for note in dict.fromkeys(enrolled_held):
-        print(f"MANUAL {note} — enrolled non-source path; --repin does not move these "
-              f"(ANCHOR_ENTRY_RE matches source suffixes only, so the table entry would "
-              f"stay put while the doc moved). Re-pin the doc AND its anchor, by hand.")
     verb = "rewritten" if apply else "would move (dry run; pass --apply to write)"
-    n_held, n_enrolled = len(dict.fromkeys(held_all)), len(dict.fromkeys(enrolled_held))
-    print(f"\n{total} citation(s) {verb}; {n_held} held for a human"
-          f"; {n_enrolled} in enrolled non-source paths need a hand re-pin.")
+    n_held = len(dict.fromkeys(held_all))
+    print(f"\n{total} citation(s) {verb}; {n_held} held for a human.")
     if historical:
         print(f"      {historical} more sit in {', '.join(g.rstrip('/') for g in HISTORICAL_GENRES)} "
               f"and were left alone — a dated record cites the tree as it stood.")
@@ -1938,8 +1953,8 @@ def repin(from_rev: str = None, apply: bool = False) -> int:
     # rebase procedure that gated on the exit status read "held" as "done" and carried stale
     # citations through — the same false green the verify pass had, one command over. A run
     # that left anything for a human says so where a shell can see it.
-    if n_held or n_enrolled:
-        print(f"HELD  {n_held + n_enrolled} citation(s) were NOT re-pinned and need a hand — "
+    if n_held:
+        print(f"HELD  {n_held} citation(s) were NOT re-pinned and need a hand — "
               f"this run is INCOMPLETE (exit 1). Re-run this gate after fixing them.")
         return 1
     return 0
