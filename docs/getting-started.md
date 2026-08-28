@@ -143,7 +143,7 @@ a runtime string uses the fallible `path_t::parse`. The infallible-register rule
 [ADR-0056](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0056-vertex-handle-infallible-register.md);
 a path whose collision is a genuine runtime outcome uses `try_register_vertex` instead.
 
-`tr::view::over_bytes` (`core/include/libtracer/mem_heap.hpp:429`) is the one audited
+`tr::view::over_bytes` (`core/include/libtracer/mem_heap.hpp:433`) is the one audited
 place that turns a byte span into an owned `view_t`. A hand-rolled
 `heap_alloc` + `memcpy` + `view_t::over` triplet is the pattern it replaces, and it
 loses the allocation-failure signal that `std::optional` carries.

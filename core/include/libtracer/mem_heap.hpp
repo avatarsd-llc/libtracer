@@ -194,13 +194,17 @@ template <class F>
  * reachable, so the probe asks it.
  *
  * @param src   The store the growth will draw from; probed with `try_alloc`/`release`.
+ *              `[[maybe_unused]]` because only the exception-free arm probes it — the
+ *              catchable arm just runs @p grow and catches, so every host TU (where
+ *              `LIBTRACER_GROWTH_IS_CATCHABLE` is on) would otherwise emit
+ *              `-Wunused-parameter` on instantiation (#1601).
  * @param bytes The byte count the growth will request.
  * @param grow  The throwing growth; it must leave its container unchanged when it throws.
  * @retval false The growth allocation failed — the container is unchanged.
  */
 template <class F>
-[[nodiscard]] inline bool try_grow_from(mem::block_source_t& src, std::size_t bytes,
-                                        F&& grow) noexcept {
+[[nodiscard]] inline bool try_grow_from([[maybe_unused]] mem::block_source_t& src,
+                                        std::size_t bytes, F&& grow) noexcept {
 #if LIBTRACER_GROWTH_IS_CATCHABLE
     if (!probe_hook_ok(bytes)) return false;  // test-only OOM injection
     try {
