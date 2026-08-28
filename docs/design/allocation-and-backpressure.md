@@ -358,7 +358,7 @@ and returns `false` without touching `out` further when the table cannot be grow
 the reply (`rope.hpp:308-327`).
 
 Be exact about what that helper buys, because the twin is named for its *signature*, not for an
-absolute guarantee. `tr::detail::try_reserve` (`core/include/libtracer/mem_heap.hpp:244`) routes
+absolute guarantee. `tr::detail::try_reserve` (`core/include/libtracer/mem_heap.hpp:248`) routes
 the ordinary **throwing** `std::vector::reserve` through `try_grow` (`:169-183`), which
 converts its failure into a `false` the caller answers with BACKPRESSURE — the whole of the
 improvement over `to_iovec`. The allocation whose failure is reported is the one the vector
