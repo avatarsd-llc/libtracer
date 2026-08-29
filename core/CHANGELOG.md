@@ -16,6 +16,42 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`vertex.hpp` — `tr::graph::admission_t`, `handlers_t::on_admit` and
+  `handlers_t::on_app_field_admit`: a pre-store ADMISSION seam for stored-value and app-field
+  writes.** Until now the only user callback in the write path was `on_write`, which runs on the
+  HANDLER role alone — and a handler retains nothing. A consumer therefore had to choose between
+  RETENTION (a `STORED_VALUE`/`STREAM` vertex, with its last-known-value, `await` wake and
+  composed reads) and VALIDATION (a handler that can refuse), or keep both and reconcile them by
+  hand. These two seams close that gap without moving anything else:
+
+  - `std::function<admission_t(const rope_t&, const write_ctx_t&)> on_admit` runs inside
+    `graph_t::store_value`, on the retaining roles, BEFORE the value is stored — therefore before
+    the sequence bump, the `await` wake, a STREAM ring admission and every subscriber delivery.
+    `admission_t` is `result_t<std::optional<rope_t>>`: `std::nullopt` accepts the write as
+    written, a rope is stored INSTEAD of it (normalisation — and it is what every reader and
+    subscriber then sees), and `std::unexpected(status)` refuses, propagating to the writer
+    exactly as an `on_write` refusal does while the prior last-known-value stands. Every door
+    that stores is filtered (`write`, `assign`, a `FWD{WRITE}` terminus, an inbound edge's
+    delivery, each landing site of a branch decomposition); the owner's own writes included, told
+    apart by `write_ctx_t::is_local_owner`. A HANDLER-role vertex still takes `on_write` and never
+    this. A vertex that installs no filter pays one flag-bit test and no seam-block load.
+  - `std::function<result_t<view_t>(std::string_view, const view_t&)> on_app_field_admit` is the
+    same power on the RFC-0010 app-field plane: it runs below the ACL and writability gates and
+    above the store, and may return the view it was handed (verbatim, the pre-existing
+    behaviour), a different view (normalisation — stored, read back, and handed to the apply
+    seam), or a status (refused — prior bytes intact, `on_app_field_write` unfired). The void
+    `on_app_field_write` apply seam is unchanged and keeps firing exactly as before for admitted
+    writes, so existing users need no edit.
+
+  A refused delivery arriving at a filtered target over a local-target edge is now counted as
+  `delivery_drops().denied` rather than `out_of_memory`: the store-failure leg reads the status
+  instead of assuming a resource cause, which it no longer is in every case.
+
+  Both filters are stored on the GRAPH, in the same insert-only immortal declaration list the
+  RFC-0014 payload-right rows use, with one flag bit on the vertex saying they exist. No
+  per-vertex structure grows: a vertex that installs no filter is byte-for-byte what it was, and
+  so is one that bears a value seam or declares app fields.
+
 - **`playout.hpp` — `tr::wire::playout_batch`, `playout_cursor_t`, `playout_clock_t`,
   `playout_sample_t`, `playout_report_t` and `playout_continuity_t`: the reference PLAYOUT
   helper, header-only** ([#1546](https://github.com/avatarsd-llc/libtracer/issues/1546),

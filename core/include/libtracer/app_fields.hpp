@@ -244,7 +244,11 @@ struct app_field_table_t {
 struct app_field_group_t {
     app_field_table_t table; /**< @brief The view-slot descriptor table + lazy value store. */
     /** @brief The owner apply seam (RFC-0010 §A.3): fires after a declared field write
-     *         stored its bytes, OUTSIDE the vertex lock. Unset ⇒ bytes just store. */
+     *         stored its bytes, OUTSIDE the vertex lock. Unset ⇒ bytes just store. Never fires
+     *         for a write the field ADMISSION filter refused — that filter lives on the GRAPH
+     *         (`tr::graph::graph_t::admissions_`), NOT here: this group is carried by every
+     *         app-field-bearing vertex, and a filter almost none of them install may not cost
+     *         all of them a `std::function`. */
     std::function<void(std::string_view name, const view_t& value)> on_app_field_write;
 };
 

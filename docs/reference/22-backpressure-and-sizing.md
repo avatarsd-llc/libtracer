@@ -108,8 +108,8 @@ beats completeness: the newest frame of a camera or an IMU is worth more than th
 displaced.
 
 The canonical instance of the pair is the receiving STREAM vertex's ring, whose arm is declared
-at wiring time and read at admission (`core/include/libtracer/vertex.hpp:1231`,
-`core/include/libtracer/vertex.hpp:1245`):
+at wiring time and read at admission (`core/include/libtracer/vertex.hpp:1330`,
+`core/include/libtracer/vertex.hpp:1344`):
 
 | | reliable | best-effort (the default) |
 | --- | --- | --- |
@@ -131,7 +131,7 @@ Three properties of this pair that a deployment must design around:
 3. **Depth and bytes compose.** The declared depth intent retires *before* the byte bound charges,
    so a ring at its declared depth funds the new admission out of the entry it was going to drop
    anyway — and a source sized for exactly N entries does not spuriously shed on the N+1th
-   (`core/include/libtracer/vertex.hpp:1259`).
+   (`core/include/libtracer/vertex.hpp:1358`).
 
 ---
 
@@ -301,15 +301,15 @@ role and schema).
 
 | Plane | Needs the LKV because |
 | --- | --- |
-| Local + remote `READ` | a leaf read serves the stored pointer (`core/src/graph.cpp:1967`; the `FWD{READ}` terminus is the same call) — null ⇒ `NOT_FOUND`, unless the vertex composes an answer from its `on_read` seam (`core/src/graph.cpp:1933`) |
-| `await`'s return value | the wake rides the write sequence and the stripe condvar (retention-free), but the value handed back is served through the **same role dispatch** `read` runs (`core/src/graph.cpp:2907`) |
-| `assign` / `propagate` sweep | **the hard dependency** — RFC-0008 §C: `propagate` takes no value argument, "the last-known-value is the single source of truth" (`core/src/graph.cpp:2624`) |
-| Composed subtree reads | RFC-0016 serves **landed** LKVs only, one atomic load per node (`core/src/graph.cpp:4187`); a non-retaining child contributes nothing |
-| Late-joiner replay | the durability latch snapshots the LKV at edge-add (RFC-0022 §3.A bit 5, `core/include/libtracer/vertex.hpp:1479`) |
+| Local + remote `READ` | a leaf read serves the stored pointer (`core/src/graph.cpp:1998`; the `FWD{READ}` terminus is the same call) — null ⇒ `NOT_FOUND`, unless the vertex composes an answer from its `on_read` seam (`core/src/graph.cpp:1964`) |
+| `await`'s return value | the wake rides the write sequence and the stripe condvar (retention-free), but the value handed back is served through the **same role dispatch** `read` runs (`core/src/graph.cpp:3009`) |
+| `assign` / `propagate` sweep | **the hard dependency** — RFC-0008 §C: `propagate` takes no value argument, "the last-known-value is the single source of truth" (`core/src/graph.cpp:2726`) |
+| Composed subtree reads | RFC-0016 serves **landed** LKVs only, one atomic load per node (`core/src/graph.cpp:4312`); a non-retaining child contributes nothing |
+| Late-joiner replay | the durability latch snapshots the LKV at edge-add (RFC-0022 §3.A bit 5, `core/include/libtracer/vertex.hpp:1578`) |
 
 **Not on the list: the whole callback / delivery plane.** Fan-out never reads the slot. A
-storing role delivers the just-published pointer (`core/src/graph.cpp:2417`); a HANDLER delivers
-from the incoming value (`core/src/graph.cpp:2361`). If subscribers are all a vertex has, it does
+storing role delivers the just-published pointer (`core/src/graph.cpp:2492`); a HANDLER delivers
+from the incoming value (`core/src/graph.cpp:2436`). If subscribers are all a vertex has, it does
 not need to retain.
 
 ### What shipped in RFC-0008 Amendment 2
@@ -322,7 +322,7 @@ preceded it:
   plus the `VALUE`. The degradation that remains is the *read contract's* — a handler with no
   `on_read` still answers `NOT_FOUND`, exactly as `read` does.
 - **`assign` and `propagate` refuse a non-retaining vertex with `SCHEMA_NOT_FOUND`**
-  (`core/src/graph.cpp:2454`, `core/src/graph.cpp:2641-2647`) — the taxonomy's contract-mismatch
+  (`core/src/graph.cpp:2529`, `core/src/graph.cpp:2743-2749`) — the taxonomy's contract-mismatch
   status, deliberately **not** `BACKPRESSURE`: nothing is under pressure and a retry will never
   succeed. At a handler vertex the call is **`write`**, which dispatches the seam and delivers
   eagerly; the accumulate-then-flush pair needs retention. `propagate(v)` is
@@ -359,7 +359,7 @@ preceded it:
    The handler leg used to take a nothrow rope clone before storing, because it publishes no LKV
    and so has no stored pointer to deliver. It does now: `store_value`'s HANDLER leg only *reads*
    the value and returns the null "consumed" sentinel, so the caller's rope is still live and is
-   delivered directly (`core/src/graph.cpp:2361`). Measured x86-64 `-O3`, p50 ns per write:
+   delivered directly (`core/src/graph.cpp:2436`). Measured x86-64 `-O3`, p50 ns per write:
 
    | links | fan-out | `STORED_VALUE` | `HANDLER` |
    | ---: | ---: | ---: | ---: |
