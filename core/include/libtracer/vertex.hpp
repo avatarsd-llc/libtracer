@@ -411,7 +411,7 @@ struct handlers_t {
     std::function<admission_t(const rope_t&, const write_ctx_t&)> on_admit;
     /**
      * @brief The app-field plane's admission seam (RFC-0010 §A.3), the field-shaped twin of
-     *        `on_admit`: runs BEFORE a declared `:settings.app.<name>` write stores its
+     *        @ref on_admit — runs BEFORE a declared `:settings.app.<name>` write stores its
      *        bytes, and may refuse it or normalise it.
      *
      * Called with the field's key (below `settings.app.`) and the written TLV, after the ACL
@@ -465,17 +465,18 @@ struct handlers_t {
  *        — the seams `handlers_t` carries minus the two app-field ones.
  *
  * Split off from the public @ref handlers_t input so a vertex that installs none of the
- * four never allocates these ~128 B of `std::function`: the block lives behind a lazily
+ * four never allocates these ~160 B of `std::function`: the block lives behind a lazily
  * published pointer in the extension block, null unless at least one of `on_read`,
- * `on_write`, `on_children`, `on_admit` was given. Allocation is keyed on that PRESENCE, not on
- * `role_t` — `adopt_identity` never consults the role — so a `STORED_VALUE` vertex
- * given an `on_children` (the `/net/<module>/<name>` identity vertex of a bus link) does
+ * `on_write`, `on_children`, `on_admit`, `on_app_field_admit` was given. Allocation is keyed on
+ * that PRESENCE, not on `role_t` — `adopt_identity` never consults the role — so a `STORED_VALUE`
+ * vertex given an `on_children` (the `/net/<module>/<name>` identity vertex of a bus link) does
  * carry one, and a `HANDLER` vertex registered with an empty @ref handlers_t does not.
- * Which of the four is ever CONSULTED is a separate, per-seam question: `on_read` /
+ * Which of the five is ever CONSULTED is a separate, per-seam question: `on_read` /
  * `on_write` run only on a HANDLER-role target, `on_admit` only on a RETAINING one (the
  * complementary halves of the write path's role fork — a vertex is never asked both), while
- * `on_children` serves the synthesized listing whatever the role. `on_app_field_write` and
- * `on_app_field_admit` co-occur with app fields, not the value seam, so they live in
+ * `on_children` serves the synthesized listing whatever the role, and `on_app_field_admit` serves
+ * the field plane (it lives here for the cost reason its own comment gives, not because it is a
+ * value seam). `on_app_field_write` co-occurs with app fields and stays in
  * @ref app_field_group_t.
  * Set once at registration (`vertex_t::adopt_identity`), read lock-free thereafter.
  */
@@ -489,6 +490,19 @@ struct value_handlers_t {
      *         @ref handlers_t::on_admit. Consulted by `graph_t::store_value` only when
      *         `vertex_t::has_admission` says it is there. */
     std::function<admission_t(const rope_t&, const write_ctx_t&)> on_admit;
+    /**
+     * @brief The APP-FIELD plane's admission filter — see @ref handlers_t::on_app_field_admit.
+     *
+     * It sits in the VALUE-seam block despite belonging to the field plane, and the placement is
+     * deliberate: @ref app_field_group_t is carried by every vertex that declares an app field,
+     * while this filter is installed by almost none of them, so a slot there would spend ~32 B
+     * on every app-field vertex in the tree to serve the few. This block is allocated on seam
+     * PRESENCE — a vertex that installs the filter materialises it and pays for what it asked
+     * for, and one that does not is byte-for-byte what it was. It is read here lock-free, like
+     * every other seam in this block, rather than under the vertex lock the apply seam beside it
+     * needs.
+     */
+    std::function<result_t<view_t>(std::string_view, const view_t&)> on_app_field_admit;
 };
 
 /**
@@ -904,19 +918,6 @@ class vertex_t {
         const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
         return (e != nullptr && e->app) ? e->app->on_app_field_write
                                         : std::function<void(std::string_view, const view_t&)>{};
-    }
-
-    /** @brief A copy of this vertex's app-field ADMISSION filter (@ref
-     *         handlers_t::on_app_field_admit), or empty when none — taken under the vertex lock
-     *         for the reason its apply-seam twin above is, and fired OUTSIDE it for the same
-     *         one. Empty ⇒ declared field writes store verbatim, as they always did. */
-    [[nodiscard]] std::function<result_t<view_t>(std::string_view, const view_t&)>
-    on_app_field_admit() {
-        const std::lock_guard lock(vertex_stripe_of(this).m);
-        const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
-        return (e != nullptr && e->app)
-                   ? e->app->on_app_field_admit
-                   : std::function<result_t<view_t>(std::string_view, const view_t&)>{};
     }
 
     // -- Composite tree links (ADR-0057) -------------------------------------------------
@@ -2965,7 +2966,8 @@ class vertex_t {
         // Split the public input into its two lazy groups (ADR-0058 Step 2): the value
         // seam only when one of its three is set; the app-field group's apply seam only
         // when given. Registration is single-threaded for this vertex, so no lock here.
-        if (handlers.on_read || handlers.on_write || handlers.on_children || handlers.on_admit) {
+        if (handlers.on_read || handlers.on_write || handlers.on_children || handlers.on_admit ||
+            handlers.on_app_field_admit) {
             // Publish the seam atomically. `fill` only ever runs on an UNREGISTERED node
             // (register_vertex_key returns PATH_IN_USE otherwise), and such a node's seam
             // is null — a fresh placeholder never had one, and retirement already swapped a
@@ -2979,14 +2981,14 @@ class vertex_t {
             const bool admits = static_cast<bool>(handlers.on_admit);
             e.handlers.store(
                 new value_handlers_t{std::move(handlers.on_read), std::move(handlers.on_write),
-                                     std::move(handlers.on_children), std::move(handlers.on_admit)},
+                                     std::move(handlers.on_children), std::move(handlers.on_admit),
+                                     std::move(handlers.on_app_field_admit)},
                 std::memory_order_release);
             if (admits) set_flag(flag_t::ADMISSION, true);
         }
-        if (handlers.on_app_field_write || handlers.on_app_field_admit) {
+        if (handlers.on_app_field_write) {
             if (e.app == nullptr) e.app = std::make_unique<app_field_group_t>();
             e.app->on_app_field_write = std::move(handlers.on_app_field_write);
-            e.app->on_app_field_admit = std::move(handlers.on_app_field_admit);
         }
     }
 

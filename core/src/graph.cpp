@@ -3723,12 +3723,15 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
         // one). ABOVE the store, which is the whole point — a refusal leaves the field's prior
         // bytes untouched and `on_app_field_write` unfired, because there is nothing to apply.
         //
-        // The seam is copied out under the vertex lock and fired outside it, the discipline the
-        // apply seam below already follows: it may re-enter the graph. `admitted` is a view the
-        // filter returned, READ by the store on the next line and never retained past it.
+        // The seam is read LOCK-FREE off the value-seam block (where it lives for the cost
+        // reason `value_handlers_t::on_app_field_admit` states) and called with no vertex lock
+        // held, so it may re-enter the graph like the apply seam below. The block is loaded once
+        // into a reference — a concurrent retire parks it rather than freeing it, so the
+        // reference stays valid for the call. `admitted` is the view the filter returned, READ by
+        // the store on the next line and never retained past it.
         view_t admitted = value;
-        if (auto gate = v->on_app_field_admit(); gate) {
-            result_t<view_t> decided = gate(key, value);
+        if (const value_handlers_t& h = v->handlers(); h.on_app_field_admit) {
+            result_t<view_t> decided = h.on_app_field_admit(key, value);
             if (!decided) return std::unexpected(decided.error());
             admitted = std::move(*decided);
         }

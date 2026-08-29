@@ -47,6 +47,10 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `delivery_drops().denied` rather than `out_of_memory`: the store-failure leg reads the status
   instead of assuming a resource cause, which it no longer is in every case.
 
+  Both filters are stored in the lazily-allocated value-seam block, so a vertex that installs
+  neither is byte-for-byte what it was — including a vertex that declares app fields, whose
+  per-vertex `app_field_group_t` is deliberately left untouched.
+
 - **`playout.hpp` — `tr::wire::playout_batch`, `playout_cursor_t`, `playout_clock_t`,
   `playout_sample_t`, `playout_report_t` and `playout_continuity_t`: the reference PLAYOUT
   helper, header-only** ([#1546](https://github.com/avatarsd-llc/libtracer/issues/1546),
