@@ -3153,10 +3153,10 @@ class graph_t {
      * scan skips dead slots without a second predicate.
      */
     struct link_slot_t {
-        link_entry_t e;                       /**< @brief The candidate list. */
-        std::uint32_t generation = 0;         /**< @brief Bumped on release; `0` ⇒ never minted. */
-        std::uint8_t len = 0;                 /**< @brief Inline name length; `0` ⇒ DEAD,
-                                               *          `kOverflowLinkNameLen` ⇒ overflowed. */
+        link_entry_t e;               /**< @brief The candidate list. */
+        std::uint32_t generation = 0; /**< @brief Bumped on release; `0` ⇒ never minted. */
+        std::uint8_t len = 0;         /**< @brief Inline name length; `0` ⇒ DEAD,
+                                       *          `kOverflowLinkNameLen` ⇒ overflowed. */
         char name[kInlineLinkNameChars] = {}; /**< @brief The ADMITTED-OVER spelling. */
     };
     // The property worth pinning is that the name rides INSIDE the slot for free — no padding
