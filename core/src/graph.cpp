@@ -2066,8 +2066,18 @@ namespace {
     // directly gets the BACKPRESSURE status itself, which is the whole reach v1 has (the wire
     // carrier waits on the credit window §4.6.1 clause 7 parks).
     vertex_t::store_drops_t store_drops;
-    if (!store_value(target, std::move(clone), store_drops, e.caller())) {
-        count_drop(drop_reason_t::OUT_OF_MEMORY, 1);
+    if (const auto stored = store_value(target, std::move(clone), store_drops, e.caller());
+        !stored) {
+        // The cause is now read off the status rather than assumed. Every refusal this leg
+        // could see used to be a resource one (`BACKPRESSURE` — a soft-failed LKV allocation
+        // or a declined ring admission), so counting it as OUT_OF_MEMORY was exact. The
+        // target's admission filter adds a leg that is not: a filter refusing a delivery is a
+        // POLICY refusal, of a piece with the fan-in ACL denial counted a few lines above, and
+        // folding it into the memory counter would make an operator read a rejected value as an
+        // exhausted node. One status test, on a path already off the hot arm.
+        count_drop(stored.error() == status_t::BACKPRESSURE ? drop_reason_t::OUT_OF_MEMORY
+                                                            : drop_reason_t::DENIED,
+                   1);
         return;
     }
     count_store_drops(target, store_drops);
@@ -2222,6 +2232,40 @@ result_t<std::shared_ptr<const rope_t>> graph_t::store_value(vertex_t* v, rope_t
         if (!r) return std::unexpected(r.error());
         v->note_write();
         return std::shared_ptr<const rope_t>{};  // handler consumed it — nothing stored
+    }
+    // ADMISSION (the retaining roles' pre-store seam). It sits HERE — inside the one function
+    // every store goes through, and above the tail every storing role shares — because that is
+    // the only placement under which the filter cannot be bypassed: `write`, `assign`, a
+    // `FWD{WRITE}` terminus, an inbound edge's fan-in delivery and each landing site of a
+    // branch-POINT decomposition all reach storage through this call and no other. Admission is
+    // a property of the VERTEX, not of a door; a filter that only saw remote writes would state
+    // an invariant the owner could break by accident.
+    //
+    // BEFORE `store`, therefore before the sequence bump, the `await` wake, the STREAM ring
+    // admission and every delivery: the callers deliver what this function RETURNS (the
+    // published LKV pointer) or, on the STREAM arm, what the ring drained, so a normalised value
+    // is the only value any subscriber can observe and a refused one is observable nowhere.
+    //
+    // The flag test is the whole cost to a vertex that installed no filter: one relaxed load of
+    // the same word the write gate's `has_payload_rights()` reads, no seam-block dereference,
+    // and no branch taken. The seam is loaded ONCE into a reference (a retire may swap the block
+    // out) exactly as the HANDLER leg above loads it, and the `on_admit` re-test is not
+    // redundant with the bit: the bit is cleared and the block swapped in two separate steps at
+    // retirement, so a racing store may legitimately see one without the other. Seeing the bit
+    // without the seam admits the write — a retiring vertex has no invariant left to defend, and
+    // the alternative (refusing) would turn a retire into spurious write failures.
+    if (v->has_admission()) {
+        const value_handlers_t& h = v->handlers();
+        if (h.on_admit) {
+            // Same `caller` the ACL gate one frame up ran on (#375): the filter and the gate
+            // that admitted the write cannot disagree about who wrote.
+            const write_ctx_t ctx{.subject = caller};
+            admission_t decided = h.on_admit(value, ctx);
+            if (!decided) return std::unexpected(decided.error());
+            // Engaged ⇒ store the NORMALISED rope instead. The writer's rope dies here, which is
+            // the point: nothing downstream can reach the spelling the filter rejected.
+            if (*decided) value = std::move(**decided);
+        }
     }
     // The storage verb has ONE tail for every role now (RFC-0025 §4.6.1 clause 1): publish the
     // LKV lock-free, bump the sequence, wake awaiters. A PRODUCER NEVER QUEUES — the ring the
@@ -2545,6 +2589,11 @@ result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, std::stri
         // null on a vertex that holds an LKV simply fails that compare, which is the safe
         // direction (a duplicate delivery, never a lost one).
         std::shared_ptr<const rope_t> stored;
+        // Did this site's own admission filter REFUSE its slice? Distinct from a null `stored`,
+        // which a soft-failed store also produces: the notify half below must not fan a refused
+        // slice out, and it must keep fanning out a soft-failed one exactly as it always has
+        // (that value did reach the seam; only its retention failed).
+        bool refused = false;
     };
     // Nothrow (#477): OOM => BACKPRESSURE. `site_t` owns a `std::shared_ptr`, so the
     // admission table still cannot take the ADR-0065 seam (`block_array_t` relocates by
@@ -2566,7 +2615,7 @@ result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, std::stri
             if (!acl_allows(vx, caller, acl_right_t::WRITE))
                 return std::unexpected(status_t::PERMISSION_DENIED);
         }
-        sites.push_back(site_t{vx, &node, nullptr});
+        sites.push_back(site_t{vx, &node, nullptr, false});
     }
 
     // Apply: land every slice. Admission was atomic; application is per-vertex and
@@ -2576,8 +2625,17 @@ result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, std::stri
     for (site_t& site : sites) {
         vertex_t::store_drops_t store_drops;
         if (result_t<std::shared_ptr<const rope_t>> r =
-                store_value(site.vx, site.node->store, store_drops, caller))
+                store_value(site.vx, site.node->store, store_drops, caller)) {
             site.stored = std::move(*r);
+        } else {
+            // A landing site's own admission filter may refuse its slice, and per the
+            // non-transaction rule above that un-lands nothing else. Record it so the notify
+            // half skips THIS site: the branch's per-site refusal is worth exactly as much as
+            // the plain path's if a subscriber can still see the slice that was refused.
+            // BACKPRESSURE keeps its old behaviour (delivered, unretained) — that is a
+            // resource event, not a verdict on the value.
+            site.refused = r.error() != status_t::BACKPRESSURE;
+        }
         // Counted ONLY on the assign half. The notify half below delivers each covered site's
         // slice through fan_out and then mark_flushed()es the cursor, so on that path the ring
         // was never the delivery vehicle: a shed append costs a HISTORY entry, not a delivery,
@@ -2595,11 +2653,24 @@ result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, std::stri
     // Notify: one delivery per covered subscription point, with its slice — the
     // VALUE for a leaf landing site, the node's POINT subtree for an interior
     // node, and the whole written TLV as-is at the root and (via bubbling) above.
+    //
+    // TWO LIMITS of admission on THIS path, stated rather than papered over. (1) The slices
+    // fanned out here are cut from the WRITTEN tree, not read back from what each site stored,
+    // so a filter that NORMALISES a branch slice changes what is retained and read, not what
+    // this eager notify delivers — the pre-existing property of the branch path, unchanged.
+    // (2) The bubbled delivery below carries the whole written tree to ancestor subscribers,
+    // which no per-site skip can carve a refused leaf out of without re-encoding the tree.
+    // REFUSAL at the site's own subscription point is what is enforced here, and it is the half
+    // that matters: the vertex whose invariant the filter defends never delivers the value it
+    // rejected.
     for (const branch_node_t& node : plan) {
         const bool is_root = &node == &plan.back();
         if (!node.subtree_has_value) continue;
         const view_t& slice = is_root ? *head : node.notify;
         if (slice.empty()) continue;
+        const bool refused = std::ranges::any_of(
+            sites, [&node](const site_t& s) { return s.node == &node && s.refused; });
+        if (refused) continue;
         vertex_t* vx = is_root ? v : find_ptr(node.key);
         if (vx != nullptr) fan_out(vx, slice);
     }
@@ -3641,10 +3712,29 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
         // both checks — it is updating its own projection, not a caller.
         if (!caller.empty() && *access == app_access_t::RO)
             return std::unexpected(status_t::SCHEMA_NOT_FOUND);
-        // Store verbatim (§D — bytes in, bytes out; the descriptor is consumer
-        // self-description, never a runtime validation schema). A false return means a
+        // ADMISSION (§A.3), the field plane's twin of the value plane's `on_admit`. The
+        // descriptor table is still consumer self-description and still never a runtime
+        // validation schema — this is the OWNER's own filter, not a schema the protocol
+        // enforces, and a vertex that installs none stores verbatim exactly as before.
+        //
+        // Placement: BELOW the ACL gate and BELOW the RFC-0010 §A.3 writability check, so a
+        // denied or read-only caller is answered by the gates and the owner's filter never runs
+        // on a write that was never going to land (and cannot become an existence oracle for
+        // one). ABOVE the store, which is the whole point — a refusal leaves the field's prior
+        // bytes untouched and `on_app_field_write` unfired, because there is nothing to apply.
+        //
+        // The seam is copied out under the vertex lock and fired outside it, the discipline the
+        // apply seam below already follows: it may re-enter the graph. `admitted` is a view the
+        // filter returned, READ by the store on the next line and never retained past it.
+        view_t admitted = value;
+        if (auto gate = v->on_app_field_admit(); gate) {
+            result_t<view_t> decided = gate(key, value);
+            if (!decided) return std::unexpected(decided.error());
+            admitted = std::move(*decided);
+        }
+        // Store (§D — bytes in, bytes out). A false return means a
         // concurrent table replacement un-declared the name between gate and store.
-        if (!v->app_field_store(key, value.bytes()))
+        if (!v->app_field_store(key, admitted.bytes()))
             return std::unexpected(status_t::SCHEMA_NOT_FOUND);
         // The owner apply seam (§A.3), OUTSIDE the vertex lock — it may re-enter the
         // graph (apply the config, restructure children, then ANNOUNCE per §C). The
@@ -3652,7 +3742,9 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
         // the property plane is silent (ADR-0021 / RFC-0010 §C).
         // Snapshot the seam under the vertex lock (ADR-0058 Step 2 moved it to the lazy
         // app-field group), then fire the copy here, unlocked.
-        if (auto seam = v->on_app_field_write(); seam) seam(key, value);
+        // Fired with the ADMITTED bytes — what actually landed, which is what an apply seam
+        // must act on. Absent a filter that is the written value, byte-for-byte as before.
+        if (auto seam = v->on_app_field_write(); seam) seam(key, admitted);
         return {};
     }
 

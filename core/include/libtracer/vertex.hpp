@@ -337,6 +337,24 @@ struct payload_right_t {
 };
 
 /**
+ * @brief What an ADMISSION filter decided about one write, BEFORE it becomes state.
+ *
+ * Three outcomes in one value, and no fourth:
+ *
+ * - a value holding `std::nullopt` — **accept as written**. The rope the writer handed in is
+ *   stored unchanged; this is the zero-work answer and the one a pure validator gives.
+ * - a value holding a rope — **accept, normalised**. THAT rope is stored instead, and it is
+ *   what every later reader sees: the last-known-value, an `await` wake, a composed read, and
+ *   every subscriber delivery. The filter owns the canonical form; the writer's spelling never
+ *   lands anywhere.
+ * - `std::unexpected(status)` — **refuse**. Nothing is stored, no subscriber is delivered, the
+ *   prior last-known-value stands, and @p status reaches the writer exactly as a HANDLER's
+ *   `on_write` refusal does (`TYPE_MISMATCH` for a value the vertex cannot represent,
+ *   `PERMISSION_DENIED` for a policy the ACL cannot express, etc.).
+ */
+using admission_t = result_t<std::optional<rope_t>>;
+
+/**
  * @brief User behavior for a Handler-role vertex.
  *
  * `on_children` additionally applies to ANY role: when set, a read of the vertex's
@@ -353,6 +371,61 @@ struct handlers_t {
      *         arguments are borrowed for the call only — copy if retained. */
     std::function<result_t<void>(const rope_t&, const write_ctx_t&)> on_write;
     std::function<result_t<view_t>()> on_children; /**< @brief Synthesized `:children[]` listing. */
+    /**
+     * @brief The ADMISSION seam of a RETAINING vertex: runs BEFORE the write becomes state,
+     *        and decides whether — and in what form — it does (`admission_t`).
+     *
+     * The gap it closes. `on_write` is the HANDLER role's seam, and a HANDLER retains nothing:
+     * choosing it to validate a write meant giving up the last-known-value, the `await` wake and
+     * the whole composed-read surface that make a `STORED_VALUE` the graph-authoritative form of
+     * a datum. So a consumer had to pick RETENTION or VALIDATION and could not have both. This
+     * seam is the same refusal power on the storing roles, taken at the one place every store
+     * goes through (`graph_t::store_value`) rather than bolted onto one door.
+     *
+     * WHERE it runs, exactly: after the write gate's ACL decision, before `vertex_t::store`,
+     * therefore before the sequence bump, before any `await` wake, before a STREAM ring
+     * admission and before ANY subscriber delivery — local, bubbled or remote. A refused write
+     * is unobservable except as the writer's error; a normalised one is observable ONLY in its
+     * normalised form.
+     *
+     * WHICH writes it sees: every write that would STORE at this vertex, whatever the door.
+     * `write` and `assign` alike, a `FWD{WRITE}` terminus, a delivery landing here from an
+     * inbound edge (the fan-in write), and this vertex's own slice of a branch-POINT
+     * decomposition. Admission is a property OF THE VERTEX, not of a channel — a vertex whose
+     * invariant only held against remote writers would not hold. The owner's own writes are
+     * included and are told apart by `write_ctx_t::is_local_owner`, which is what a filter that
+     * wants to admit the owner unconditionally tests.
+     *
+     * WHICH it does NOT see: a HANDLER-role vertex (`on_write` is its seam and already has this
+     * power — installing both, the role's `on_write` runs and this does not), and the app-field
+     * plane, which is a different plane with its own seam (@ref on_app_field_admit).
+     *
+     * COST. Unset ⇒ **nothing**: the store path tests one bit of a flags word the write path
+     * already holds and never loads the seam block. That bit is the whole per-vertex cost.
+     *
+     * @warning Both arguments are BORROWED for the call — the same contract `on_write` carries.
+     *          Copy what you retain. The seam runs on the WRITER's thread with no vertex lock
+     *          held, so it may re-enter the graph, and it is on the hot write path: a filter
+     *          that blocks blocks the writer.
+     */
+    std::function<admission_t(const rope_t&, const write_ctx_t&)> on_admit;
+    /**
+     * @brief The app-field plane's admission seam (RFC-0010 §A.3), the field-shaped twin of
+     *        `on_admit`: runs BEFORE a declared `:settings.app.<name>` write stores its
+     *        bytes, and may refuse it or normalise it.
+     *
+     * Called with the field's key (below `settings.app.`) and the written TLV, after the ACL
+     * gate and after the RFC-0010 §A.3 writability check, before `app_field_store`. Return the
+     * view handed in to store it verbatim (the pre-existing behaviour), a DIFFERENT view to
+     * store those bytes instead, or `std::unexpected(status)` to refuse — in which case nothing
+     * is stored, the field keeps its prior bytes, @ref on_app_field_write does NOT fire, and the
+     * status is the writer's answer.
+     *
+     * @warning A returned view is READ during the call that returned it — the store copies the
+     *          bytes out before returning — so it may point at storage the filter owns, but that
+     *          storage must outlive the return. Unset ⇒ bytes store verbatim, as before.
+     */
+    std::function<result_t<view_t>(std::string_view name, const view_t& value)> on_app_field_admit;
     /**
      * @brief The owner apply seam (RFC-0010 §A.3): fires after a declared
      *        `:settings.app.<name>` field write stored its bytes, with the field's key
@@ -389,19 +462,21 @@ struct handlers_t {
 
 /**
  * @brief The internal, lazily-allocated STORAGE of a vertex's VALUE seam (ADR-0058 Step 2)
- *        — the three seams `handlers_t` carries minus `on_app_field_write`.
+ *        — the seams `handlers_t` carries minus the two app-field ones.
  *
  * Split off from the public @ref handlers_t input so a vertex that installs none of the
- * three never allocates these ~96 B of `std::function`: the block lives behind a lazily
+ * four never allocates these ~128 B of `std::function`: the block lives behind a lazily
  * published pointer in the extension block, null unless at least one of `on_read`,
- * `on_write`, `on_children` was given. Allocation is keyed on that PRESENCE, not on
+ * `on_write`, `on_children`, `on_admit` was given. Allocation is keyed on that PRESENCE, not on
  * `role_t` — `adopt_identity` never consults the role — so a `STORED_VALUE` vertex
  * given an `on_children` (the `/net/<module>/<name>` identity vertex of a bus link) does
  * carry one, and a `HANDLER` vertex registered with an empty @ref handlers_t does not.
- * Which of the three is ever CONSULTED is a separate, per-seam question: `on_read` /
- * `on_write` run only on a HANDLER-role target, while `on_children` serves the
- * synthesized listing whatever the role. `on_app_field_write`
- * co-occurs with app fields, not the value seam, so it moved to @ref app_field_group_t.
+ * Which of the four is ever CONSULTED is a separate, per-seam question: `on_read` /
+ * `on_write` run only on a HANDLER-role target, `on_admit` only on a RETAINING one (the
+ * complementary halves of the write path's role fork — a vertex is never asked both), while
+ * `on_children` serves the synthesized listing whatever the role. `on_app_field_write` and
+ * `on_app_field_admit` co-occur with app fields, not the value seam, so they live in
+ * @ref app_field_group_t.
  * Set once at registration (`vertex_t::adopt_identity`), read lock-free thereafter.
  */
 struct value_handlers_t {
@@ -410,6 +485,10 @@ struct value_handlers_t {
      *         arguments are borrowed for the call only — copy if retained. */
     std::function<result_t<void>(const rope_t&, const write_ctx_t&)> on_write;
     std::function<result_t<view_t>()> on_children; /**< @brief Synthesized `:children[]` listing. */
+    /** @brief The pre-store admission filter of a RETAINING vertex — see
+     *         @ref handlers_t::on_admit. Consulted by `graph_t::store_value` only when
+     *         `vertex_t::has_admission` says it is there. */
+    std::function<admission_t(const rope_t&, const write_ctx_t&)> on_admit;
 };
 
 /**
@@ -827,6 +906,19 @@ class vertex_t {
                                         : std::function<void(std::string_view, const view_t&)>{};
     }
 
+    /** @brief A copy of this vertex's app-field ADMISSION filter (@ref
+     *         handlers_t::on_app_field_admit), or empty when none — taken under the vertex lock
+     *         for the reason its apply-seam twin above is, and fired OUTSIDE it for the same
+     *         one. Empty ⇒ declared field writes store verbatim, as they always did. */
+    [[nodiscard]] std::function<result_t<view_t>(std::string_view, const view_t&)>
+    on_app_field_admit() {
+        const std::lock_guard lock(vertex_stripe_of(this).m);
+        const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
+        return (e != nullptr && e->app)
+                   ? e->app->on_app_field_admit
+                   : std::function<result_t<view_t>(std::string_view, const view_t&)>{};
+    }
+
     // -- Composite tree links (ADR-0057) -------------------------------------------------
     //
     // The graph is a Composite of vertices: each node owns its children (one non-moving
@@ -943,6 +1035,21 @@ class vertex_t {
      *         the write gate's one-load precondition for consulting the graph's rows. */
     [[nodiscard]] bool has_payload_rights() const noexcept {
         return test_flag(flag_t::PAYLOAD_RIGHTS, std::memory_order_relaxed);
+    }
+
+    /**
+     * @brief True iff this vertex installed an admission filter (@ref handlers_t::on_admit) —
+     *        the store path's one-load precondition for consulting the value-seam block.
+     *
+     * The same shape, and the same argument, as `has_payload_rights`: a vertex that
+     * installed no filter pays one relaxed test of an already-hot word and no dereference, so
+     * the seam costs the plain leaf write nothing. Set at registration by `adopt_identity`
+     * (single-threaded for the vertex, before it is reachable); cleared by
+     * `revert_to_placeholder`, because the filter belongs to the retiring occupant and never
+     * to the address.
+     */
+    [[nodiscard]] bool has_admission() const noexcept {
+        return test_flag(flag_t::ADMISSION, std::memory_order_relaxed);
     }
 
    public:
@@ -1974,6 +2081,11 @@ class vertex_t {
         // parked and unreachable — nothing consults them while this bit is clear — and a
         // re-registration that declares again publishes its own, newer rows.
         set_flag(flag_t::PAYLOAD_RIGHTS, false);
+        // And for the admission filter, for the third time the same reason: the seam block it
+        // lives in is swapped out below, so leaving the bit set would point the store path at a
+        // block the successor never installed. Cleared BEFORE the swap — the opposite order to
+        // `adopt_identity`'s — so neither direction can expose the bit without its seam.
+        set_flag(flag_t::ADMISSION, false);
         lkv_.clear(std::memory_order_release);  // a mid-read reader holds its own
                                                 // reference — safe under either policy.
         own_subs_.store(0, std::memory_order_relaxed);
@@ -2500,6 +2612,10 @@ class vertex_t {
                                      *          rows live on the graph, not here; this bit is
                                      *          what keeps the write gate from looking for them
                                      *          on the vertices that declared none. */
+        ADMISSION = 1U << 4,        /**< @brief This vertex installed an `on_admit` filter. The
+                                     *          seam lives in the value-seam block; this bit is
+                                     *          what keeps the store path from loading that
+                                     *          block on the vertices that installed none. */
     };
 
     /** @brief Set or clear @p f. An RMW, because the bits have different writers. */
@@ -2840,7 +2956,8 @@ class vertex_t {
      */
     void adopt_identity(role_t role, handlers_t handlers) {
         const bool has_handlers = handlers.on_read || handlers.on_write || handlers.on_children ||
-                                  handlers.on_app_field_write;
+                                  handlers.on_admit || handlers.on_app_field_write ||
+                                  handlers.on_app_field_admit;
         if (role != role_t::STREAM && !has_handlers &&
             ext_.load(std::memory_order_acquire) == nullptr)
             return;
@@ -2848,21 +2965,28 @@ class vertex_t {
         // Split the public input into its two lazy groups (ADR-0058 Step 2): the value
         // seam only when one of its three is set; the app-field group's apply seam only
         // when given. Registration is single-threaded for this vertex, so no lock here.
-        if (handlers.on_read || handlers.on_write || handlers.on_children) {
+        if (handlers.on_read || handlers.on_write || handlers.on_children || handlers.on_admit) {
             // Publish the seam atomically. `fill` only ever runs on an UNREGISTERED node
             // (register_vertex_key returns PATH_IN_USE otherwise), and such a node's seam
             // is null — a fresh placeholder never had one, and retirement already swapped a
             // retired node's out. So the prior is provably null and a plain release store
             // suffices; the store races only the lock-free reader, which the release
             // ordering covers.
+            // The ADMISSION bit is set BEFORE the seam is published, so the store path can
+            // never see the bit without the block behind it. (Registration is single-threaded
+            // for this vertex — it is not yet reachable — so the ordering is documentation of
+            // intent as much as it is synchronisation; the release store below publishes both.)
+            const bool admits = static_cast<bool>(handlers.on_admit);
             e.handlers.store(
                 new value_handlers_t{std::move(handlers.on_read), std::move(handlers.on_write),
-                                     std::move(handlers.on_children)},
+                                     std::move(handlers.on_children), std::move(handlers.on_admit)},
                 std::memory_order_release);
+            if (admits) set_flag(flag_t::ADMISSION, true);
         }
-        if (handlers.on_app_field_write) {
+        if (handlers.on_app_field_write || handlers.on_app_field_admit) {
             if (e.app == nullptr) e.app = std::make_unique<app_field_group_t>();
             e.app->on_app_field_write = std::move(handlers.on_app_field_write);
+            e.app->on_app_field_admit = std::move(handlers.on_app_field_admit);
         }
     }
 

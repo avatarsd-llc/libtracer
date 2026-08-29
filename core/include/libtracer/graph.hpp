@@ -2503,7 +2503,9 @@ class graph_t {
     // HANDLER leg (#375). REQUIRED, not defaulted, for the same reason
     // `fwd_router_t::deliver_local`'s is: empty means the trusted local host, so a defaulted
     // parameter would let a new write path silently present a remote write to a handler as
-    // the owner's own.
+    // the owner's own. It is also `write_ctx_t::subject` for the retaining roles' ADMISSION
+    // filter (`handlers_t::on_admit`), which runs here — above the storing tail, so a refusal
+    // never becomes state and a normalisation is the only value any reader can reach.
     [[nodiscard]] result_t<std::shared_ptr<const rope_t>> store_value(
         vertex_t* v, rope_t&& value, vertex_t::store_drops_t& drops, std::string_view caller);
     // The source a receiving vertex charges its ring admissions against — its own injected
