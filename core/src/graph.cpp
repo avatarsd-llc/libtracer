@@ -884,6 +884,10 @@ result_t<vertex_handle_t> graph_t::register_vertex_key_span(std::span<const std:
     // registration), the vertex keeps only the flag bit that says they exist. We are under
     // the unique map lock, which is exactly the hold `declare_payload_rights` requires.
     declare_payload_rights(node, std::move(handlers.payload_rights));
+    // Same treatment, same hold, and for the same reason (see `graph_t::admissions_`): the two
+    // ADMISSION filters are moved out here, before `fill` adopts the rest, so the seam block
+    // `adopt_identity` may allocate is byte-for-byte the one it allocated before this feature.
+    declare_admission(node, std::move(handlers.on_admit), std::move(handlers.on_app_field_admit));
     node->fill(role, std::move(handlers));
     return vertex_handle_t{node};
 }
@@ -899,6 +903,33 @@ void graph_t::declare_payload_rights(vertex_t* v, std::vector<payload_right_t> r
     node->next = payload_rights_.load(std::memory_order_relaxed);
     payload_rights_.store(node, std::memory_order_release);
     v->mark_payload_rights();
+}
+
+void graph_t::declare_admission(
+    vertex_t* v, std::function<admission_t(const rope_t&, const write_ctx_t&)> on_admit,
+    std::function<result_t<view_t>(std::string_view, const view_t&)> on_app_field_admit) {
+    // The overwhelming majority: no node, no flag, no cost.
+    if (!on_admit && !on_app_field_admit) return;
+    // PREPEND, so a re-registration at the same address publishes a filter the walk finds
+    // before any the previous occupant left behind (the list is never unlinked — see the
+    // member's doc for why that is what makes the read lock-free).
+    admission_store_.push_back(std::make_unique<admission_node_t>(
+        admission_node_t{v, std::move(on_admit), std::move(on_app_field_admit), nullptr}));
+    admission_node_t* node = admission_store_.back().get();
+    node->next = admissions_.load(std::memory_order_relaxed);
+    admissions_.store(node, std::memory_order_release);
+    v->mark_admission();
+}
+
+const graph_t::admission_node_t* graph_t::admission_for(const vertex_t* v) const noexcept {
+    // Walks only for a vertex whose flag says it installed one: the list holds one node per
+    // declaring registration, and a node is immortal, so no lock is needed to read one. The
+    // FIRST match is the vertex's own newest declaration — an older node left by a previous
+    // occupant of this address sits behind it and must never answer for it.
+    for (const admission_node_t* n = admissions_.load(std::memory_order_acquire); n != nullptr;
+         n = n->next)
+        if (n->v == v) return n;
+    return nullptr;
 }
 
 acl_right_t graph_t::declared_write_right(const vertex_t* v, wire::type_t type) const {
@@ -2247,20 +2278,20 @@ result_t<std::shared_ptr<const rope_t>> graph_t::store_value(vertex_t* v, rope_t
     // is the only value any subscriber can observe and a refused one is observable nowhere.
     //
     // The flag test is the whole cost to a vertex that installed no filter: one relaxed load of
-    // the same word the write gate's `has_payload_rights()` reads, no seam-block dereference,
-    // and no branch taken. The seam is loaded ONCE into a reference (a retire may swap the block
-    // out) exactly as the HANDLER leg above loads it, and the `on_admit` re-test is not
-    // redundant with the bit: the bit is cleared and the block swapped in two separate steps at
-    // retirement, so a racing store may legitimately see one without the other. Seeing the bit
-    // without the seam admits the write — a retiring vertex has no invariant left to defend, and
-    // the alternative (refusing) would turn a retire into spurious write failures.
+    // the same word the write gate's `has_payload_rights()` reads, and no list walk. The filter
+    // itself lives on the GRAPH (`graph_t::admissions_`) rather than on the vertex, so it costs
+    // the seam-bearing and app-field-bearing vertices nothing either — the reason that member
+    // states, measured. The null re-test is not redundant with the bit: retirement clears the
+    // bit and leaves the node parked, so a racing store may see one without the other, and a
+    // vertex mid-retire has no invariant left to defend — it admits, rather than turning a
+    // retire into spurious write failures.
     if (v->has_admission()) {
-        const value_handlers_t& h = v->handlers();
-        if (h.on_admit) {
+        const admission_node_t* a = admission_for(v);
+        if (a != nullptr && a->on_admit) {
             // Same `caller` the ACL gate one frame up ran on (#375): the filter and the gate
             // that admitted the write cannot disagree about who wrote.
             const write_ctx_t ctx{.subject = caller};
-            admission_t decided = h.on_admit(value, ctx);
+            admission_t decided = a->on_admit(value, ctx);
             if (!decided) return std::unexpected(decided.error());
             // Engaged ⇒ store the NORMALISED rope instead. The writer's rope dies here, which is
             // the point: nothing downstream can reach the spelling the filter rejected.
@@ -3723,15 +3754,14 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
         // one). ABOVE the store, which is the whole point — a refusal leaves the field's prior
         // bytes untouched and `on_app_field_write` unfired, because there is nothing to apply.
         //
-        // The seam is read LOCK-FREE off the value-seam block (where it lives for the cost
-        // reason `value_handlers_t::on_app_field_admit` states) and called with no vertex lock
-        // held, so it may re-enter the graph like the apply seam below. The block is loaded once
-        // into a reference — a concurrent retire parks it rather than freeing it, so the
-        // reference stays valid for the call. `admitted` is the view the filter returned, READ by
-        // the store on the next line and never retained past it.
+        // The filter is read LOCK-FREE off the graph's immortal declaration list (where it
+        // lives for the cost reason `graph_t::admissions_` states) and called with no vertex
+        // lock held, so it may re-enter the graph like the apply seam below. `admitted` is the
+        // view it returned, READ by the store on the next line and never retained past it.
         view_t admitted = value;
-        if (const value_handlers_t& h = v->handlers(); h.on_app_field_admit) {
-            result_t<view_t> decided = h.on_app_field_admit(key, value);
+        const admission_node_t* adm = v->has_admission() ? admission_for(v) : nullptr;
+        if (adm != nullptr && adm->on_app_field_admit) {
+            result_t<view_t> decided = adm->on_app_field_admit(key, value);
             if (!decided) return std::unexpected(decided.error());
             admitted = std::move(*decided);
         }

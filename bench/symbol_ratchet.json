@@ -30,7 +30,7 @@
       "binary": "bench_libtracer",
       "symbol": "tr::graph::graph_t::dispatch_edge_remote",
       "bytes": 350,
-      "note": "RE-PINNED 318 -> 350 (+32) by the admission seam, and NOT by any edit to this function or to the leg that calls it — an inline-budget flip of the same genre as the 298 -> 318 re-pin before it. Bisected in a clean tree, one file at a time: with `graph.cpp` pristine and only `vertex.hpp` applied it is 350 B; reverting `vertex.hpp` alone puts it back at 318 B with everything else in place. The cause is the header, where `value_handlers_t` gained two `std::function` members (the value-plane and app-field admission filters) and its size re-partitioned this TU's inline budget. Nothing this function does changed; the code it emits was re-laid-out around it."
+      "note": "RE-PINNED 318 -> 350 (+32) by the admission seam, and NOT by any edit to this function or to the leg that calls it — an inline-budget flip of the same genre as the 298 -> 318 re-pin before it. Bisected in a clean tree, one file and then one declaration at a time: applying `vertex.hpp` alone produces 350 B with `graph.cpp` pristine, and deleting just the two new `std::function` members from the PUBLIC `handlers_t` — the by-value registration struct, now 64 B wider — puts it back at 318 with everything else in place. So the cause is the width of a registration-time parameter type re-partitioning this TU's inline budget, not anything on the delivery path: nothing this function does changed, and the code around it was re-laid-out. The filters themselves are deliberately NOT on the vertex (see `graph_t::admissions_`), so no per-vertex memory probe moves."
     },
     {
       "binary": "bench_libtracer",

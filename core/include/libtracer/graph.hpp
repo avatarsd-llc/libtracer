@@ -3153,10 +3153,10 @@ class graph_t {
      * scan skips dead slots without a second predicate.
      */
     struct link_slot_t {
-        link_entry_t e;               /**< @brief The candidate list. */
-        std::uint32_t generation = 0; /**< @brief Bumped on release; `0` ⇒ never minted. */
-        std::uint8_t len = 0;         /**< @brief Inline name length; `0` ⇒ DEAD,
-                                       *          `kOverflowLinkNameLen` ⇒ overflowed. */
+        link_entry_t e;                       /**< @brief The candidate list. */
+        std::uint32_t generation = 0;         /**< @brief Bumped on release; `0` ⇒ never minted. */
+        std::uint8_t len = 0;                 /**< @brief Inline name length; `0` ⇒ DEAD,
+                                               *          `kOverflowLinkNameLen` ⇒ overflowed. */
         char name[kInlineLinkNameChars] = {}; /**< @brief The ADMITTED-OVER spelling. */
     };
     // The property worth pinning is that the name rides INSIDE the slot for free — no padding
@@ -3264,6 +3264,57 @@ class graph_t {
     /** @brief The right @p v demands for a written TLV of @p type — `WRITE` unless @p v
      *         declared a row for it. Lock-free; the caller has already tested the flag. */
     [[nodiscard]] acl_right_t declared_write_right(const vertex_t* v, wire::type_t type) const;
+
+    /**
+     * @brief One vertex's ADMISSION filters (`handlers_t::on_admit` and
+     *        `handlers_t::on_app_field_admit`), as a node of the graph's insert-only, immortal
+     *        declaration list.
+     */
+    struct admission_node_t {
+        const vertex_t* v = nullptr; /**< @brief The declaring vertex. */
+        /** @brief The value plane's pre-store filter, or empty. */
+        std::function<admission_t(const rope_t&, const write_ctx_t&)> on_admit;
+        /** @brief The app-field plane's pre-store filter, or empty. */
+        std::function<result_t<view_t>(std::string_view, const view_t&)> on_app_field_admit;
+        admission_node_t* next = nullptr; /**< @brief The previously declared node. */
+    };
+
+    /**
+     * @brief Head of the ADMISSION declaration list — the pre-store filters of every vertex
+     *        that installed one, NEWEST FIRST.
+     *
+     * **Why the filters are here and not on the vertex**, which is the same question
+     * `%payload_rights_` answers and the same answer, measured the same way. A filter is
+     * control-plane data on the few vertices that defend an invariant; every per-vertex home
+     * charges the vertices that install none. Two `std::function`s on the value-seam block cost
+     * **+64 B on every seam-bearing vertex** (the `reg_escape` memory probe caught exactly
+     * that), and one on the app-field group costs +32 B on every vertex that declares a field
+     * (the `vertex_app5` probes caught that). Neither population is the one using the feature.
+     * Off-vertex, a vertex that installs no filter pays one flag bit and nothing else, and a
+     * vertex that installs one pays a single node here.
+     *
+     * **Insert-only and immortal, so the read is lock-free** — node lifetime, retirement and
+     * re-registration all work exactly as `%payload_rights_` describes: prepended under the
+     * unique map lock, never unlinked, and retirement clears the vertex's `ADMISSION` flag
+     * rather than removing anything, so a newer declaration is simply found first.
+     */
+    std::atomic<admission_node_t*> admissions_{nullptr};
+
+    /** @brief OWNERSHIP of the `%admissions_` chain, separate from the atomic head readers
+     *         walk — for the reason `%payload_right_store_` states, including why `graph_t`
+     *         must not grow a user-provided destructor. */
+    std::vector<std::unique_ptr<admission_node_t>> admission_store_;
+
+    /** @brief Publish @p on_admit / @p on_app_field_admit as @p v's filters and set its flag.
+     *         Call with `map_mutex_` held UNIQUE (the registration hold). Silently ignores a
+     *         declaration with neither filter set. */
+    void declare_admission(
+        vertex_t* v, std::function<admission_t(const rope_t&, const write_ctx_t&)> on_admit,
+        std::function<result_t<view_t>(std::string_view, const view_t&)> on_app_field_admit);
+
+    /** @brief @p v's admission node, or null when it has none. Lock-free; the caller has
+     *         already tested the flag. */
+    [[nodiscard]] const admission_node_t* admission_for(const vertex_t* v) const noexcept;
 };
 
 }  // namespace tr::graph
