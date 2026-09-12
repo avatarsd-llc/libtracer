@@ -2283,3 +2283,11 @@ if(LIBTRACER_NET_PLANE)
     libtracer_test_warnings(empty_src_unacked_test)
     add_test(NAME empty_src_unacked COMMAND empty_src_unacked_test)
 endif()
+
+# The SUBSCRIPTION-RETAINED seam (#1610): a remote SUBSCRIBE's two life-of-the-subscription
+# allocations can be taken from a backend the host chooses, so a size-classed `flat` front is
+# not filled by a set that never returns.
+add_executable(retained_subscription_seam_test retained_subscription_seam_test.cpp)
+target_link_libraries(retained_subscription_seam_test PRIVATE libtracer)
+libtracer_test_warnings(retained_subscription_seam_test)
+add_test(NAME retained_subscription_seam COMMAND retained_subscription_seam_test)

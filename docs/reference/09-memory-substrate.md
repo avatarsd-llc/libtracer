@@ -310,9 +310,46 @@ So: **one injected source bounds every byte channel `graph_t` owns except two**,
 - **Carve-out 1 — LKV hazard-slot nodes.** Phase 2 built the migration and measured it off the cliff: +22.7 % on hazard-node acquisition, +3.5 % on the free-list-hit *steady* arm that never touches the substrate, with disjoint ranges against a −0.12 % A/A null. The next section carries the full table and the three findings.
 - **Carve-out 2 — the plain `std::vector<std::byte>` sites.** These look like an allocator swap and are not, because their container type is fixed by the signatures they cross. The KEY containers (`try_build_key`'s out-parameter, `select_sweep`'s output, the branch-write child-key composition, the sweep snapshot's element type) are pinned by member-function signatures and by the `pending_` / `unconditional_` key sets, so moving them is a key-*type* change across the graph. The read-back encoders' staging buffers are pinned by `tr::wire::emit_tlv`'s `std::vector<std::byte>&` sink; phase 3 moved the resulting *segment* onto the injection, but the transient buffer it is copied from is still the global heap's.
 
-**What is deliberately outside this ledger, and is not a carve-out.** `fwd_router_t` and the transports keep their own `block_source_t` / `mem_backend_t` seams (`rx`, `label_src`, `egress_src`, a transport's `rx_backend`) rather than sharing the graph's. That is receiver-pays, not an omission: a peer-driven receive path that exhausts must not be able to starve the graph's write path, and [ADR-0060](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0060-value-copy-draws-from-an-injected-backend.md) erratum 1 measured a *shared* free-list pool collapsing to ~1/15 of its single-thread rate on a 12-core host. A node that genuinely wants one store passes the same object to each.
+**What is deliberately outside this ledger, and is not a carve-out.** `fwd_router_t` and the transports keep their own `block_source_t` / `mem_backend_t` seams (`rx`, `label_src`, `egress_src`, `retained`, a transport's `rx_backend`) rather than sharing the graph's. That is receiver-pays, not an omission: a peer-driven receive path that exhausts must not be able to starve the graph's write path, and [ADR-0060](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0060-value-copy-draws-from-an-injected-backend.md) erratum 1 measured a *shared* free-list pool collapsing to ~1/15 of its single-thread rate on a 12-core host. A node that genuinely wants one store passes the same object to each.
 
 ### The carve-out: LKV hazard-slot nodes stay on the global heap
+
+### The router's seams are split by LIFETIME, not by tidiness
+
+`fwd_router_t` takes four memory seams, and each split has the same justification: a seam is
+its own injection when its live set is governed by a *different* quantity, because a host
+sizes a slab against that quantity and a shared seam silently re-scopes it.
+
+| seam | live set governed by | shape it wants |
+| --- | --- | --- |
+| `rx` | threads that can be inside the router | fixed slots |
+| `egress` | replies in flight | fixed slots |
+| `flat` | per-operation flattens in flight | fixed slots / byte budget |
+| `retained` | **the subscription population** | scales with subscribers |
+
+`retained` ([#1610](https://github.com/avatarsd-llc/libtracer/issues/1610)) is the backend for
+the two allocations a remote SUBSCRIBE keeps for the life of the subscription: the source
+`SUBSCRIBER` TLV and the ONE route copy ([ADR-0041](../adr/0041-terminus-arena-decode-span-contract.md) §2).
+It was split out of `flat` for the reason `egress` was: `flat` is documented and sized against
+per-operation FLATTEN bytes, and these are neither per-operation nor flattens.
+
+The failure the split prevents is specific and was measured on an MCU node. A host that puts
+static size classes in front of `flat` finds them filled by a set that never returns — one
+occupied slot per subscription per allocation — so once the subscriber count reaches half the
+class, every per-operation flatten falls through to the fallback arm. The classes stop working
+exactly when a client is attached, which is the only time they are needed. Growing them does
+not fix it: the population they would have to chase is the subscriber count, which is the same
+unbounded quantity that made `flat` a byte budget rather than a fixed pool.
+
+**`retained` defaults to null, meaning `flat`** — where both allocations have always been
+taken. An un-injected router is byte-for-byte unchanged, so the seam costs nothing to ignore.
+A host that injects it typically points it at a plain counted heap arm: one allocation and one
+free per subscription is not churn and wants no class.
+
+Note this is a *lifetime* split, not a hint. [ADR-0016](../adr/0016-substrate-zero-copy-layer-namespaces-no-templates-through-seam.md)
+rejected a shared cross-backend hint vocabulary as a bloat vector, and that rejection stands:
+`alloc_hint_t` remains opaque and backend-private. A distinct seam says the same thing without
+a registry — the caller names the backend, and no backend has to interpret anyone else's flag.
 
 `hazard_slot_t`'s indirection nodes (`core/include/libtracer/lkv_slot.hpp`, `detail_hp::acquire_node`) allocate with `new (std::nothrow) node_t` and free with `delete`, and that is now a **decision**, not an omission. [#873](https://github.com/avatarsd-llc/libtracer/issues/873) phase 2 was staged as "move them onto the injected `block_source_t`, gated on a dedicated before/after acquisition A/B; a regression outside the null band reverts the phase and documents the carve-out." It was implemented, measured, and reverted on that gate.
 

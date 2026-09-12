@@ -271,8 +271,9 @@ class op_resolver_t {
      *              thread-safe on the same terms as @p flat. Must outlive the resolver.
      */
     explicit op_resolver_t(graph_t& graph, mem::mem_backend_t* flat = &mem::heap_backend(),
-                           mem::mem_backend_t* egress = &mem::heap_backend()) noexcept
-        : graph_(graph), flat_(flat), egress_(egress) {}
+                           mem::mem_backend_t* egress = &mem::heap_backend(),
+                           mem::mem_backend_t* retained = nullptr) noexcept
+        : graph_(graph), flat_(flat), egress_(egress), retained_(retained) {}
 
     /**
      * @brief Resolve an arena-decoded request FWD and build the zero-copy `FWD{REPLY}` rope.
@@ -533,7 +534,21 @@ class op_resolver_t {
 
    private:
     graph_t& graph_;
-    mem::mem_backend_t* flat_ = &mem::heap_backend();    // rope-tier terminus flattens (#766)
+    mem::mem_backend_t* flat_ = &mem::heap_backend();  // rope-tier terminus flattens (#766)
+    // The SUBSCRIPTION-RETAINED seam (#1610). Null means "the same place flattens come
+    // from", which is where these allocations have always been taken and keeps this an
+    // additive change for every existing host.
+    mem::mem_backend_t* retained_ = nullptr;
+    /** @brief The retained seam, or @p fallback when none was injected.
+     *
+     *  The fallback is the CALLER's flatten backend rather than a member, because the two
+     *  tiers do not share one: the span tier flattens from `flat_`, the view tier from the
+     *  root segment's own backend. Passing it in keeps "un-injected means byte-unchanged"
+     *  true on both. */
+    [[nodiscard]] mem::mem_backend_t& retained_backend(
+        mem::mem_backend_t& fallback) const noexcept {
+        return retained_ != nullptr ? *retained_ : fallback;
+    }
     mem::mem_backend_t* egress_ = &mem::heap_backend();  // reply head + mint egress bytes (#795)
     reverse_ref_fn_t reverse_ref_fn_ = nullptr;  // responder's reverse-mint seam (amendment 1)
     void* reverse_ref_ctx_ = nullptr;            /**< @brief Its caller-owned context. */

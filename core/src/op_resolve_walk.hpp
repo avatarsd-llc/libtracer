@@ -626,10 +626,11 @@ template <class N>
 [[nodiscard]] result_t<rope_t> apply_op(
     graph_t& graph, const parsed_fwd_t<N>& req, vertex_handle_t v, std::string_view inbound_link,
     std::string_view subject, const view_t* frame_view, mem::mem_backend_t& flat,
-    mem::mem_backend_t& egress, const reply_route_t& route, const field_path_t& field,
-    bool has_field, op_resolver_t::reverse_ref_fn_t reverse_ref_fn = nullptr,
-    void* reverse_ref_ctx = nullptr, op_resolver_t::path_label_fn_t path_label_fn = nullptr,
-    void* path_label_ctx = nullptr, bool dst_labelled = false, link_token_seam_t link_token = {}) {
+    mem::mem_backend_t& egress, mem::mem_backend_t& retained, const reply_route_t& route,
+    const field_path_t& field, bool has_field,
+    op_resolver_t::reverse_ref_fn_t reverse_ref_fn = nullptr, void* reverse_ref_ctx = nullptr,
+    op_resolver_t::path_label_fn_t path_label_fn = nullptr, void* path_label_ctx = nullptr,
+    bool dst_labelled = false, link_token_seam_t link_token = {}) {
     // The mint answer (RFC-0024 §7.5): this node's own reference to the target vertex, as a
     // one-element `PATH_REF` the origin stacks under whatever it already holds for the hops
     // in front of it. 4 + 8 bytes, on the reply only, and only when asked — the request side
@@ -812,12 +813,12 @@ template <class N>
                 // MALFORMED for the same reason an empty-src READ is (RFC-0004 Amendment 2),
                 // and takes the same terminus drop.
                 if (req.no_reply) return std::unexpected(status_t::INVALID_PATH);
-                const view_t sub_value = own_tlv(payload_node, flat);
+                const view_t sub_value = own_tlv(payload_node, retained);
                 if (sub_value.empty())
                     return assemble_error_reply(route, status_t::BACKPRESSURE, egress);
                 // The ONE route copy of the subscription's life (ADR-0041 §2), into a
                 // refcounted segment — every later delivery clones the refcount.
-                const view_t return_route = own_tlv(req.src, flat);
+                const view_t return_route = own_tlv(req.src, retained);
                 if (return_route.empty())
                     return assemble_error_reply(route, status_t::BACKPRESSURE, egress);
                 // The responder's COMPLETION of the reverse-direction list (RFC-0024 §7.1
@@ -973,9 +974,10 @@ template <class N>
 [[nodiscard]] result_t<rope_t> resolve_node(
     graph_t& graph, const N& root, std::string_view inbound_link, std::string_view subject,
     const view_t* frame_view, mem::mem_backend_t& flat, mem::mem_backend_t& egress,
-    op_resolver_t::reverse_ref_fn_t reverse_ref_fn = nullptr, void* reverse_ref_ctx = nullptr,
-    op_resolver_t::path_label_fn_t path_label_fn = nullptr, void* path_label_ctx = nullptr,
-    const wire::path_ref_element_t* dst_label_target = nullptr, link_token_seam_t link_token = {}) {
+    mem::mem_backend_t& retained, op_resolver_t::reverse_ref_fn_t reverse_ref_fn = nullptr,
+    void* reverse_ref_ctx = nullptr, op_resolver_t::path_label_fn_t path_label_fn = nullptr,
+    void* path_label_ctx = nullptr, const wire::path_ref_element_t* dst_label_target = nullptr,
+    link_token_seam_t link_token = {}) {
     result_t<parsed_fwd_t<N>> parsed = parse_fwd(root);
     if (!parsed) return std::unexpected(parsed.error());
     parsed_fwd_t<N>& req = *parsed;
@@ -1127,9 +1129,9 @@ template <class N>
         // REPLACED the string bytes, so there is nothing left to walk. By value, which the
         // router turns into a drop, exactly as the stale bound element below.
         if (!bound) return std::unexpected(status_t::NOT_FOUND);
-        return apply_op(graph, req, *bound, inbound_link, subject, frame_view, flat, egress, route,
-                        field, has_field, reverse_ref_fn, reverse_ref_ctx, path_label_fn,
-                        path_label_ctx,
+        return apply_op(graph, req, *bound, inbound_link, subject, frame_view, flat, egress,
+                        retained, route, field, has_field, reverse_ref_fn, reverse_ref_ctx,
+                        path_label_fn, path_label_ctx,
                         /*dst_labelled=*/true, link_token);
     }
 
@@ -1149,9 +1151,9 @@ template <class N>
         // No write-creates on a bound dst, deliberately: `ensure_vertex` mkdir-p's an ADDRESS,
         // and an element is not one. A vref names a vertex that existed when it was minted, so
         // "it is not there any more" is exactly the stale case the deref just refused.
-        return apply_op(graph, req, *bound, inbound_link, subject, frame_view, flat, egress, route,
-                        field, has_field, reverse_ref_fn, reverse_ref_ctx, path_label_fn,
-                        path_label_ctx, /*dst_labelled=*/false, link_token);
+        return apply_op(graph, req, *bound, inbound_link, subject, frame_view, flat, egress,
+                        retained, route, field, has_field, reverse_ref_fn, reverse_ref_ctx,
+                        path_label_fn, path_label_ctx, /*dst_labelled=*/false, link_token);
     }
 
     // dst resolution is the router's PATH-keyed dispatch — span-aliased for a
@@ -1194,8 +1196,8 @@ template <class N>
     // caller is the node's own trusted code and owns its graph's structure. The asymmetry is
     // the point of the amendment, not an oversight left in it.
     if (!found) return reply_error(status_t::NOT_FOUND);
-    return apply_op(graph, req, *found, inbound_link, subject, frame_view, flat, egress, route,
-                    field, has_field, reverse_ref_fn, reverse_ref_ctx, path_label_fn,
+    return apply_op(graph, req, *found, inbound_link, subject, frame_view, flat, egress, retained,
+                    route, field, has_field, reverse_ref_fn, reverse_ref_ctx, path_label_fn,
                     path_label_ctx, /*dst_labelled=*/false, link_token);
 }
 
