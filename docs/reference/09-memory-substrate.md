@@ -329,7 +329,7 @@ sizes a slab against that quantity and a shared seam silently re-scopes it.
 
 `retained` ([#1610](https://github.com/avatarsd-llc/libtracer/issues/1610)) is the backend for
 the two allocations a remote SUBSCRIBE keeps for the life of the subscription: the source
-`SUBSCRIBER` TLV and the ONE route copy ([ADR-0041](../adr/0041-terminus-arena-decode-span-contract.md) §2).
+`SUBSCRIBER` TLV and the ONE route copy ([ADR-0041](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0041-terminus-arena-decode-span-contract.md) §2).
 It was split out of `flat` for the reason `egress` was: `flat` is documented and sized against
 per-operation FLATTEN bytes, and these are neither per-operation nor flattens.
 
@@ -346,7 +346,7 @@ taken. An un-injected router is byte-for-byte unchanged, so the seam costs nothi
 A host that injects it typically points it at a plain counted heap arm: one allocation and one
 free per subscription is not churn and wants no class.
 
-Note this is a *lifetime* split, not a hint. [ADR-0016](../adr/0016-substrate-zero-copy-layer-namespaces-no-templates-through-seam.md)
+Note this is a *lifetime* split, not a hint. [ADR-0016](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0016-substrate-zero-copy-layer-namespaces-no-templates-through-seam.md)
 rejected a shared cross-backend hint vocabulary as a bloat vector, and that rejection stands:
 `alloc_hint_t` remains opaque and backend-private. A distinct seam says the same thing without
 a registry — the caller names the backend, and no backend has to interpret anyone else's flag.
