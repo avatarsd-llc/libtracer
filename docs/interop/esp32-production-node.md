@@ -88,10 +88,16 @@ Those all reach the ONE injection point of `graph_t`'s constructor
 so a device recipe sizes one slab where it used to wire four arguments. Beside it are the
 **four** of
 `fwd_router_t`: the failable `label_src` source its label tables draw from, the
-failable `rx` source, the `flat` byte backend its rope flattens draw from, and the
-`egress` byte backend the terminus reply head draws from
-(`core/include/libtracer/fwd_router.hpp:250-255`; `egress` is #795 /
-ADR-0074, and the `max_label_bindings_per_link` bound sits between the last two).
+failable `rx` source, the `flat` byte backend its rope flattens draw from, the
+`egress` byte backend the terminus reply head draws from, and the `retained`
+backend a remote SUBSCRIBE's two life-of-the-subscription allocations draw from
+(`core/include/libtracer/fwd_router.hpp:270-276`; `egress` is #795 / ADR-0074,
+`retained` is #1610 and defaults to `flat` when un-injected, and the
+`max_label_bindings_per_link` bound sits between `flat` and `egress`).
+Each is its own injection because each one's live set is governed by a different
+quantity — threads inside the router, replies in flight, flattens in flight, and
+the subscription population respectively — and a slab is sized against that
+quantity, so a shared seam silently re-scopes it.
 `label_src` was a `std::pmr::memory_resource` until #603 defect 1 — it could not
 stay one, because a peer's `ADVERTISE` reaches it and pmr reports exhaustion by
 throwing. The full set of
