@@ -535,6 +535,7 @@ class op_resolver_t {
    private:
     graph_t& graph_;
     mem::mem_backend_t* flat_ = &mem::heap_backend();  // rope-tier terminus flattens (#766)
+    mem::mem_backend_t* egress_ = &mem::heap_backend();  // reply head + mint egress bytes (#795)
     // The SUBSCRIPTION-RETAINED seam (#1610). Null means "the same place flattens come
     // from", which is where these allocations have always been taken and keeps this an
     // additive change for every existing host.
@@ -549,7 +550,6 @@ class op_resolver_t {
         mem::mem_backend_t& fallback) const noexcept {
         return retained_ != nullptr ? *retained_ : fallback;
     }
-    mem::mem_backend_t* egress_ = &mem::heap_backend();  // reply head + mint egress bytes (#795)
     reverse_ref_fn_t reverse_ref_fn_ = nullptr;  // responder's reverse-mint seam (amendment 1)
     void* reverse_ref_ctx_ = nullptr;            /**< @brief Its caller-owned context. */
     path_label_fn_t path_label_fn_ = nullptr;    // RFC-0027 §6.1 point 3 terminus mint seam
