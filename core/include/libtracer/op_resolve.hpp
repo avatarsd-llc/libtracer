@@ -534,7 +534,7 @@ class op_resolver_t {
 
    private:
     graph_t& graph_;
-    mem::mem_backend_t* flat_ = &mem::heap_backend();  // rope-tier terminus flattens (#766)
+    mem::mem_backend_t* flat_ = &mem::heap_backend();    // rope-tier terminus flattens (#766)
     mem::mem_backend_t* egress_ = &mem::heap_backend();  // reply head + mint egress bytes (#795)
     // The SUBSCRIPTION-RETAINED seam (#1610). Null means "the same place flattens come
     // from", which is where these allocations have always been taken and keeps this an
