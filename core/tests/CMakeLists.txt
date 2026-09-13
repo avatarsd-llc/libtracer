@@ -2287,7 +2287,13 @@ endif()
 # The SUBSCRIPTION-RETAINED seam (#1610): a remote SUBSCRIBE's two life-of-the-subscription
 # allocations can be taken from a backend the host chooses, so a size-classed `flat` front is
 # not filled by a set that never returns.
-add_executable(retained_subscription_seam_test retained_subscription_seam_test.cpp)
-target_link_libraries(retained_subscription_seam_test PRIVATE libtracer)
-libtracer_test_warnings(retained_subscription_seam_test)
-add_test(NAME retained_subscription_seam COMMAND retained_subscription_seam_test)
+#
+# Net-plane only. The seam is a parameter of `fwd_router_t` and `op_resolver_t`, both of which
+# live in src/op_resolve*.cpp behind LIBTRACER_NET_PLANE — so with the plane off this test has
+# no `op_resolver_t::resolve` to link against, which is what the minimal module set found.
+if(LIBTRACER_NET_PLANE)
+    add_executable(retained_subscription_seam_test retained_subscription_seam_test.cpp)
+    target_link_libraries(retained_subscription_seam_test PRIVATE libtracer)
+    libtracer_test_warnings(retained_subscription_seam_test)
+    add_test(NAME retained_subscription_seam COMMAND retained_subscription_seam_test)
+endif()
