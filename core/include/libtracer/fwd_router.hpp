@@ -246,16 +246,39 @@ class fwd_router_t {
      *              empty-rope → `or_backpressure` → addressed `STATUS{BACKPRESSURE}` path OOM
      *              already takes — answered by value, never an abort. MUST be thread-safe on the
      *              same terms as @p flat. Must outlive the router.
+     * @param retained  The backend for the two allocations a REMOTE SUBSCRIBE keeps for the
+     *              LIFE OF THE SUBSCRIPTION — the source `SUBSCRIBER` TLV and "the ONE route
+     *              copy of the subscription's life" (ADR-0041 §2). A DEDICATED injection for
+     *              the reason @p egress is one: @p flat is documented and sized against
+     *              per-operation FLATTEN bytes, and these are neither per-operation nor
+     *              flattens. Their live set is the SUBSCRIPTION POPULATION, so a host that
+     *              size-classes @p flat finds the classes filled by a set that never returns
+     *              and has nothing left for the churn they were cut for — the classes stop
+     *              working exactly when a client is attached, which is the only time they
+     *              are needed.
+     *
+     *              DEFAULTS TO NULL, meaning "@p flat" — where both have always been taken.
+     *              An un-injected router is byte-for-byte unchanged, so this costs nothing
+     *              to ignore. A host that injects it can send these to a plain heap arm:
+     *              one alloc and one free per subscription is not churn and wants no class.
+     *
+     *              Sized against the subscription population, NOT a concurrency factor.
+     *              Exhaustion is answered by value — a `BACKPRESSURE` on the subscribe, which
+     *              simply does not bind. MUST be thread-safe on the same terms as @p flat.
+     *              Must outlive the router.
      */
     explicit fwd_router_t(graph::graph_t& graph,
                           mem::block_source_t* label_src = &mem::heap_source(),
                           mem::block_source_t* rx = &mem::heap_source(),
                           mem::mem_backend_t* flat = &mem::heap_backend(),
                           std::size_t max_label_bindings_per_link = 0,
-                          mem::mem_backend_t* egress = &mem::heap_backend())
+                          mem::mem_backend_t* egress = &mem::heap_backend(),
+                          mem::mem_backend_t* retained = nullptr)
         : graph_(graph),
-          resolver_(graph, flat, egress),  // the terminus tier draws flatten from the SAME
-                                           // seam (#766) and reply egress from `egress` (#795)
+          resolver_(graph, flat, egress, retained),  // the terminus tier draws flatten from
+                                                     // the SAME seam (#766), reply egress from
+                                                     // `egress` (#795), and subscription-scoped
+                                                     // retention from `retained` (#1610)
           label_src_(label_src),
           rx_(rx),
           flat_(flat),

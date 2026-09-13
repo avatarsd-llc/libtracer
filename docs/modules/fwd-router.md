@@ -198,8 +198,8 @@ class child_registry_t {                 // the one NAME -> link demux table (AD
 }  // namespace tr::net
 ```
 
-Signature source: `core/include/libtracer/fwd_router.hpp:250` (constructor), `:485`
-(`add_child`), `:542` (`subscribe_toward`), `:749-761` (the sink function-pointer types);
+Signature source: `core/include/libtracer/fwd_router.hpp:270` (constructor), `:508`
+(`add_child`), `:565` (`subscribe_toward`), `:772-784` (the sink function-pointer types);
 `core/include/libtracer/child_registry.hpp:348` (`add`), `:606` (`resolve_peer`), `:621`
 (`erase`), `:654` (`entry_by_name`), `:675` (`by_name`), `:716`/`:726` (`size`/`live_size`).
 
@@ -228,7 +228,7 @@ flowchart TB
   address size grows with hop count, which is what `ADVERTISE`/`COMPACT` route handles exist to
   amortise on a steady flow.
 - **A reply is delivered as a rope, never flattened by the router**
-  (`core/include/libtracer/fwd_router.hpp:757-766`). A sink that wants contiguous bytes holds
+  (`core/include/libtracer/fwd_router.hpp:780-789`). A sink that wants contiguous bytes holds
   `const view_t m = reply.materialize()` and reads `m.bytes()`; a **single-link reply — the common
   case — is returned zero-copy, no allocation and no copy**, and only a multi-link reply pays one
   flatten, on demand. The escape hatch sits at the consumer, so the router never pays for a
@@ -338,7 +338,7 @@ adopt; `/net` itself is likewise only the recommended root convention (a constru
 **Creation is all-or-nothing.** A connection is built in three steps — register the identity
 vertex, insert the `conns_` entry, wire the link into the router's `child_registry_t` — and only
 the last can be refused: `add_child` answers `false` when the registry cannot grow, and it is the
-only place that can say so (`core/include/libtracer/fwd_router.hpp:485`,
+only place that can say so (`core/include/libtracer/fwd_router.hpp:508`,
 `core/include/libtracer/child_registry.hpp:348`). A refusal unwinds the first two in reverse —
 retire the vertex, then erase the entry, which destroys the config-constructed socket — publishes
 no liveness, and answers `BACKPRESSURE` (`core/src/transport_vertex.cpp:799-807`). Discarding that

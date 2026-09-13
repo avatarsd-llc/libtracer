@@ -61,11 +61,11 @@ flowchart LR
 | Stage | The bound | Where the capacity comes from | Refusal | Observed by |
 | --- | --- | --- | --- | --- |
 | **transport RX** | the link's own scratch and its peer-agreed max frame — or, on a link put into OWNING delivery, the bounded source the integrator injected (#1565: `httpd_ws_link_t`'s `rx_backend`, `tcp_transport_t`'s `backend`) | per-connection `:settings`, the link's ctor | counted drop (`dropped_rx`) or a malformed reject (`malformed_rx`) — the peer is not told. An injected source that refuses is the same counted drop, never a heap fallback | `transport_t::drop_stats()` (`core/include/libtracer/transport.hpp:475`), one shape for every link kind (#932) |
-| **rx arena** | the injected failable source the terminus decode carves its node table from | `fwd_router_t`'s `rx` seam — reachable as `rx_source()` (`core/include/libtracer/fwd_router.hpp:420`) | refused **by value**: `TLV_NESTING_TOO_DEEP`, spelled by RFC-0006 as "exceeds this receiver's decode resources" | `router_stats_t::arena_dropped` (`core/include/libtracer/fwd_router.hpp:83`) |
+| **rx arena** | the injected failable source the terminus decode carves its node table from | `fwd_router_t`'s `rx` seam — reachable as `rx_source()` (`core/include/libtracer/fwd_router.hpp:443`) | refused **by value**: `TLV_NESTING_TOO_DEEP`, spelled by RFC-0006 as "exceeds this receiver's decode resources" | `router_stats_t::arena_dropped` (`core/include/libtracer/fwd_router.hpp:83`) |
 | **graph write** | the ACL gate, plus the value backend the store draws its durable bytes from | `graph_t`'s four injected seams (see the design companion) | `PERMISSION_DENIED` by value; an exhausted value store answers `BACKPRESSURE` | `graph_t::delivery_drops()` — `denied`, `out_of_memory` (`core/include/libtracer/graph.hpp:2400`) |
 | **ring admission** | a **byte** budget: `try_alloc(retained_bytes)` against the receiving vertex's own source | `graph_t::set_ring_source` (`core/include/libtracer/graph.hpp:1577`), per vertex, never a shared pool | **arm-dependent** — see §2 | `ring_reserved_bytes()` / `stream_gaps()` (`core/include/libtracer/graph.hpp:1581`) |
 | **fan-out** | the subscriber snapshot's inline prefix, then a heap widen | `kInlineFanout`, then the allocator | counted shed of the whole delivery (`fan_out_truncated`, `out_of_memory`) | `graph_t::delivery_drops()` |
-| **flat / egress seams** | the reply-flatten and egress span tables | `fwd_router_t`'s `flat` / `egress` seams — `flatten_backend()`, `egress_backend()` (`core/include/libtracer/fwd_router.hpp:422`) | counted drop of the reply or the forward hop — **drop, never truncate** | `router_stats_t::flatten_dropped`, `reply_iov_dropped`, `forward_iov_dropped`, `delivery_iov_dropped` |
+| **flat / egress seams** | the reply-flatten and egress span tables | `fwd_router_t`'s `flat` / `egress` seams — `flatten_backend()`, `egress_backend()` (`core/include/libtracer/fwd_router.hpp:445`) | counted drop of the reply or the forward hop — **drop, never truncate** | `router_stats_t::flatten_dropped`, `reply_iov_dropped`, `forward_iov_dropped`, `delivery_iov_dropped` |
 | **TX pool** | outstanding sends in flight, plus a reserve slots deep held back for replies | the link's ctor (`tx_slot_capacity()` + `tx_reply_reserve()` on the ESP httpd link, `integrations/esp-idf/libtracer/httpd_ws_link.cpp:3229`) | counted `dropped_tx`; a refused enqueue names the queue it could not enter | `transport_t::drop_stats()`; the link's own richer `stats()` where it has one |
 | **TX payload size classes** (ESP httpd link) | which storage a gathered frame is copied into: the work slot's inline buffer, an optional bounded LARGE class, or the exceptional-tail heap arm | the link's ctor — `tx_inline_bytes()`, and `tx_large_bytes()` × `tx_large_slot_capacity()` where an integrator declared the second class (#1566, `integrations/esp-idf/libtracer/httpd_ws_link.cpp`) | an exhausted large class is a counted `dropped` — fail-closed, never a heap fallback | `stats().tx_large_dropped` and `stats().tx_large_peak`, against `tx_large_in_use()` |
 | **label space** (forwarders) | 65535 wire labels per link, and the per-link binding table | `route_handle_t`'s ctor `max_bindings_per_link` (`core/include/libtracer/route_handle.hpp:243`) | a **silent degrade**, not a loss: the flow falls back to full-route `FWD{WRITE}` | `labels_used(link)` / `labels_exhausted()` (`core/include/libtracer/route_handle.hpp:622`) |
@@ -169,7 +169,7 @@ queue or shed — and what every other stage does instead.
   egress. A forwarder that appears to be under memory pressure in the middle is a forwarder with
   a mis-sized edge, not a slow router.
 - **Naming the seams**: `label_source()`, `rx_source()`, `flatten_backend()` and
-  `egress_backend()` (`core/include/libtracer/fwd_router.hpp:417`) reach the four injected
+  `egress_backend()` (`core/include/libtracer/fwd_router.hpp:440`) reach the four injected
   objects even when the host took the defaults — which is what makes the §5 loop runnable on a
   gateway at all.
 - **Watch the silent degrade**: label exhaustion. `labels_used(link)` against the wire constant
@@ -404,7 +404,7 @@ staging run with the C++ accessors in reach (see §6 for the remote arm and its 
    tail is chosen by the peer, so this is the only figure that generalises.
 5. **Re-run with the bounds armed and assert `refused == 0` on every stage except the designated
    pressure point.** For a forwarder, `router_stats_t::arena_dropped`
-   (`core/include/libtracer/fwd_router.hpp:394`) is the one to assert zero against when sizing
+   (`core/include/libtracer/fwd_router.hpp:417`) is the one to assert zero against when sizing
    `rx`. A non-zero `refused` anywhere else means the bottleneck is still being discovered rather
    than chosen.
 

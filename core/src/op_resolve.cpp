@@ -33,10 +33,14 @@ result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, const inbound_re
     // answers by value through the empty view (see `arena_node::spans_intact`).
     // `egress` is the reply head + mint seam (#795, ADR-0074), injected alongside `flat`; the
     // default is the global heap, so an un-injected span-tier resolve is byte-unchanged.
-    return resolve_node(graph_, arena_node{&fwd, 0}, inbound.link, subject, frame_view,
-                        flat_ != nullptr ? *flat_ : mem::heap_backend(),
-                        egress_ != nullptr ? *egress_ : mem::heap_backend(), reverse_ref_fn_,
-                        reverse_ref_ctx_, path_label_fn_, path_label_ctx_, dst_label_target,
+    // `retained` is the subscription-scoped seam (#1610): the SUBSCRIBER TLV and the ONE
+    // route copy of a remote subscribe's life. Un-injected it IS `flat`, which is where
+    // both have always been taken, so this resolve stays byte-unchanged.
+    mem::mem_backend_t& flat_be = flat_ != nullptr ? *flat_ : mem::heap_backend();
+    return resolve_node(graph_, arena_node{&fwd, 0}, inbound.link, subject, frame_view, flat_be,
+                        egress_ != nullptr ? *egress_ : mem::heap_backend(),
+                        retained_backend(flat_be), reverse_ref_fn_, reverse_ref_ctx_,
+                        path_label_fn_, path_label_ctx_, dst_label_target,
                         link_token_seam(inbound));
 }
 

@@ -105,9 +105,9 @@ returned. The full ledger is
 [reference 09 §"The channel ledger, at #873's close"](../reference/09-memory-substrate.md).
 
 `fwd_router_t` carries the same failable seam separately as its `rx` parameter
-(`core/include/libtracer/fwd_router.hpp:252`), because the terminus arena decode belongs to the
+(`core/include/libtracer/fwd_router.hpp:272`), because the terminus arena decode belongs to the
 router's receive thread rather than to the graph. It carries a **fourth** injection beside it, and
-for a different contract: `flat` (`fwd_router.hpp:253`, documented at `:171`), the `mem_backend_t` **every rope flatten on
+for a different contract: `flat` (`fwd_router.hpp:273`, documented at `:171`), the `mem_backend_t` **every rope flatten on
 the forward and terminus paths** draws its owned `segment` from — the byte-buffer seam, with cache
 hooks and a refcount, which the block source is not. The split is `graph_t`'s `ctl_` /
 `value_backend_` split one layer out. Like `value_backend_`, an injected `flat` **MUST be
@@ -271,8 +271,8 @@ defines for "exceeds this receiver's decode resources".
 | Ingress `ADVERTISE` route flatten | flatten `core/src/fwd_router.cpp:2817` (the make-contiguous seam the ADVERTISE arm asks at `:2765`), answered at `:2772` | the empty flatten **fails the `wire::decode`** ⇒ the frame is **dropped**; the label stays **unbound** (the peer's COMPACTs draw a `HANDLE_NACK`) |
 | Ingress `COMPACT` payload flatten | flatten `core/src/fwd_router.cpp:2817` (the same seam, asked at `:2784`), answered at `:2791` | the delivery is **dropped**; the subscriber keeps its last-known value |
 | Bus-name rejection reply flatten (cold) | flatten `core/src/fwd_router.cpp:1399`, answered by the `wire::decode` opening `reject_bus_name_hop` | the frame is **dropped** by value — no reply |
-| Terminus per-node span materialize (rope tier) | flatten `core/src/op_resolve_view.cpp:259`, answered at `core/src/op_resolve_walk.hpp:1007` / `core/src/op_resolve_walk.hpp:1177` | a refusal on the reply's own route bytes ⇒ `BACKPRESSURE` on the error side ⇒ the frame is **dropped**; anywhere else before dispatch ⇒ an **addressed** `kind=ERROR STATUS{BACKPRESSURE}` reply |
-| Terminus ownership flatten (rope tier, ADR-0053 ⑤, MULTI-link) | flatten `core/src/op_resolve_view.cpp:141`, answered by the empty-value guards in `resolve_node` (`core/src/op_resolve_walk.hpp:914-915`) | the write is **not stored** — the vertex keeps its previous value — and the reply is `BACKPRESSURE` |
+| Terminus per-node span materialize (rope tier) | flatten `core/src/op_resolve_view.cpp:259`, answered at `core/src/op_resolve_walk.hpp:1009` / `core/src/op_resolve_walk.hpp:1179` | a refusal on the reply's own route bytes ⇒ `BACKPRESSURE` on the error side ⇒ the frame is **dropped**; anywhere else before dispatch ⇒ an **addressed** `kind=ERROR STATUS{BACKPRESSURE}` reply |
+| Terminus ownership flatten (rope tier, ADR-0053 ⑤, MULTI-link) | flatten `core/src/op_resolve_view.cpp:141`, answered by the empty-value guards in `resolve_node` (`core/src/op_resolve_walk.hpp:915-916`) | the write is **not stored** — the vertex keeps its previous value — and the reply is `BACKPRESSURE` |
 | Terminus ownership **copy** (rope tier, ADR-0041 §2, SINGLE-link) | copy `core/src/op_resolve_view.cpp:151`, answered by the same guards | the write is **not stored** — the vertex keeps its previous value — and the reply is `BACKPRESSURE` |
 | Terminus ownership **copy** (SPAN tier, ADR-0041 §2) | copy `core/src/op_resolve_walk.hpp:164`, answered by the same guards | the write is **not stored** — the vertex keeps its previous value — and the reply is `BACKPRESSURE`. Note this row's refusal does **not** set the walk's `spans_intact()` flag, and must not: an arena span is borrowed from the frame, so a refused copy shortens nothing and the empty view is the whole channel |
 | Terminus reply **head** + mint (egress seam, both tiers) | alloc `core/src/fwd_reply.cpp:130`, answered at `core/src/op_resolve_walk.hpp:565` | a refused RESULT head yields an empty rope; `or_backpressure` answers an **addressed** `kind=ERROR STATUS{BACKPRESSURE}` when the smaller error head can still be built, else the frame is **dropped** — never an abort, never a `kind=RESULT` on bytes it could not allocate. A refused mint is not an error: the plain reply is rebuilt without it |
@@ -453,7 +453,7 @@ of them ([`../reference/09-memory-substrate.md:305`](../reference/09-memory-subs
 
 **A pool shared across receive threads is slower than the heap it replaced.** See the topology
 result below; `fwd_router_t::add_child` takes an optional per-child source
-(`fwd_router.hpp:485`, resolved at `fwd_router.hpp:1974-1974`) precisely so each transport's receive
+(`fwd_router.hpp:508`, resolved at `fwd_router.hpp:1997-1997`) precisely so each transport's receive
 thread owns one. A source shared at *wiring* frequency — a graph's `ctl` — is fine behind a lock.
 
 **A `size_class_t` span is a bound the caller sets, not the library.** `pool_source_t` classes do
