@@ -24,6 +24,12 @@ libtracer is a spec-first protocol project. See [GOVERNANCE.md](.github/GOVERNAN
 
 This repo is set up for use with Matt Pocock's engineering skills (`triage`, `to-issues`, `to-prd`, `improve-codebase-architecture`, `diagnose`, `tdd`, `grill-with-docs`, etc.).
 
+### PR review
+
+Every push to an open pull request gets an automated first-pass review from a cloud routine on the maintainer's Claude account, judged against [docs/agents/pr-review.md](docs/agents/pr-review.md) — the same rubric a maintainer should use by hand, and the one a contributor can run on themselves by naming it (`Review my branch against docs/agents/pr-review.md`). The routine reads that file from the checkout, so **the review criteria are edited there, in git, and not in the routine's prompt.**
+
+Its approval is the floor of review, not the ceiling. Two things it will not do: it never comments on an issue (the tracker is human-owned, and its surface is the pull request), and it never puts a suspected vulnerability in a public comment — that goes to a private advisory per [SECURITY.md](SECURITY.md).
+
 ### Issue tracker
 
 Issues live in **GitHub Issues at [`avatarsd-llc/libtracer`](https://github.com/avatarsd-llc/libtracer/issues)**. Use the `gh` CLI for all operations:
