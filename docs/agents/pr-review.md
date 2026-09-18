@@ -437,16 +437,32 @@ passed. A declared gap is accepted; silence about one is not.
 
 ## Verdict
 
-The reviewer leaves its inline comments and a summary body on every pass, and
-casts a formal verdict with it. **One inline comment per located finding, on the
-line it is about** — a finding that lives only in the summary body blocks nothing
-and can be scrolled past.
+The reviewer leaves a summary body on every pass and casts a formal verdict with
+it. **One inline comment per blocking finding, on the line it is about** — a
+finding that lives only in the summary body blocks nothing and can be scrolled
+past. An approving pass leaves no inline comment at all; see below.
+
+That is the reason to put a finding inline, and it is equally the reason not to.
+`required_review_thread_resolution` is on for this repository — a repository
+setting, so verify it with
+`gh api repos/{owner}/{repo}/rulesets` rather than from this file — so an inline
+thread *is* a merge block, and the ruleset counts threads without reading the
+label on one: a thread marked `subjective` holds the branch exactly as hard as
+the one marked fatal. So the placement follows from whether you mean to block,
+not from how located the note is.
 
 - **APPROVE** (`gh pr review <n> --approve`) — no Spec finding, no Standards
   finding above a judgement call, and the evidence the change claims actually
-  exists. Aesthetic notes may ride along, labelled `subjective`. **Approval is a
-  real outcome**: when both axes come back clean, approve and say so rather than
-  manufacturing a reservation.
+  exists. Aesthetic notes may ride along **in the summary body**, labelled
+  `subjective`, naming their `file:line` in prose so they stay located without
+  latching the branch. **Approval is a real outcome**: when both axes come back
+  clean, approve and say so rather than manufacturing a reservation — and an
+  approval leaves no open thread behind it. If a point is worth an inline
+  thread, it is worth REQUEST CHANGES; if it is not worth blocking, it is worth
+  a line in the body. Approving with a `subjective` thread left open is the one
+  combination to avoid: it reads to the author as two contradictory answers, a
+  green approval above a merge button GitHub refuses, and the caveat that would
+  explain it is invisible to the thing doing the blocking.
 - **REQUEST CHANGES** (`--request-changes`) — any missing requirement, any scope
   creep, any unverified claim, any load-bearing claim eroded, any wire change
   with no compatibility story, any layering violation, any new primitive beyond
@@ -456,7 +472,28 @@ and can be scrolled past.
 
 On a pull request authored by the account the routine runs as, GitHub refuses
 both verbs; the review is posted as a comment carrying the same verdict, and the
-inline threads are then the only thing holding the merge.
+inline threads are then the only thing holding the merge. The direction does not
+change there — blocking still means a thread — but the thread becomes the only
+gate, so a blocking finding *must* be one or it holds nothing at all.
+
+**Ask the author to resolve the threads, and say why.** The reviewer must not
+resolve its own findings — that would let it clear its own gate — so every
+thread it opens waits on a click only the author or a maintainer can make. A
+first-time contributor has no reason to know that: the review reads as feedback
+to weigh, not as a latch to release, and the pull request simply sits. So a
+review that opens any thread closes its body with a short line saying all three
+parts:
+
+1. **what to do** — reply on each thread, then press **Resolve conversation** on
+   the ones now addressed;
+2. **why it is needed** — the merge is held until every thread is resolved, by
+   the branch ruleset and not by the reviewer's opinion;
+3. **what not to do** — never resolve by silence or by force-push alone, and if
+   a finding is wrong, say so on the thread and leave it open for a maintainer.
+
+Point 3 carries as much weight as the other two: a resolved thread is a claim
+that the point was handled, so resolving one the author disagrees with buries
+the disagreement instead of settling it.
 
 **An automated approval is the floor of review, not the ceiling.** Say in the
 body that a maintainer should still read the diff.
