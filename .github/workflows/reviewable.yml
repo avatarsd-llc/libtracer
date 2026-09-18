@@ -195,27 +195,41 @@ jobs:
             fi
           fi
 
+          # ONE read of the PR, assigned. Three separate reads were three
+          # chances for a failed call to be mistaken for an answer, and one of
+          # them was exactly that: `if [ "$(gh …)" = "true" ]` is exempt from
+          # `set -e` for the same reason a pipeline in an `if` is — the shell
+          # inspects only `[`'s status, and `[ "" = "true" ]` is merely false.
+          # A 5xx or a rate limit therefore read as "not a draft", and a green
+          # DRAFT would get labelled; the routine then refuses it for being a
+          # draft, and at `ready_for_review` the label is already present, so
+          # the idempotent add emits no event and it is never reviewed at all.
+          # That is the same hole the draft handling was added to close.
+          #
+          # A plain assignment from a command substitution DOES trip `set -e`.
+          # So every field below comes from one fetch that either succeeded or
+          # killed the job, and no test can see a failure as data.
+          PRJSON=$(gh pr view "$PR" --repo "$REPO" --json headRefOid,isDraft,labels)
+          HEAD=$(printf '%s' "$PRJSON" | jq -r '.headRefOid')
+          DRAFT=$(printf '%s' "$PRJSON" | jq -r '.isDraft')
+          HAVE=$(printf '%s' "$PRJSON" | jq -r '.labels[].name')
+
           # A CI run that outlived its push resolves to a PR whose head has
           # MOVED ON: `commits/<old>/pulls` still names it, because the old
           # commit remains in its history. Labelling then asserts green for a
           # head nobody checked.
-          HEAD=$(gh pr view "$PR" --repo "$REPO" --json headRefOid -q .headRefOid)
           if [ "$HEAD" != "$SHA" ]; then
             echo "#$PR has moved to ${HEAD:0:8}; this run is about ${SHA:0:8}. Not labelling."
             exit 0
           fi
 
-          # A draft is never labelled: the routine refuses drafts, and a label
-          # applied while draft would still be present at `ready_for_review`,
-          # where an idempotent add emits no event — so it would never be
-          # reviewed at all.
-          if [ "$(gh pr view "$PR" --repo "$REPO" --json isDraft -q .isDraft)" = "true" ]; then
+          # A draft is never labelled, per the reasoning above.
+          if [ "$DRAFT" = "true" ]; then
             echo "#$PR is a draft — not labelling. Marking it ready re-runs this."
             exit 0
           fi
 
           # Already labelled for THIS head, since a push clears it.
-          HAVE=$(gh pr view "$PR" --repo "$REPO" --json labels -q '.labels[].name')
           if printf '%s\n' "$HAVE" | grep -qx "$LABEL"; then
             echo "#$PR already carries '$LABEL' for ${SHA:0:8} — the routine has been fired."
             exit 0
