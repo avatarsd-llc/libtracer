@@ -230,8 +230,32 @@ jobs:
           # The printed listing below is for humans only — a check-run name is
           # free text and may contain a tab, so a name must never be a field in
           # something we count.
-          ALL=$(jq -s --arg mine "/runs/$GITHUB_RUN_ID/" \
-                  '[.[].check_runs[] | select((.details_url // "") | contains($mine) | not)]' \
+          # EVERY run of this workflow on this head must be excluded, not just
+          # the current one. Under the premise above — our check runs land on
+          # the SHA we inspect — one head also carries the clearing run and one
+          # run per CI completion, up to twenty of them. All are ours, none are
+          # CI, and any that FAILS leaves a completed check run with conclusion
+          # `failure` on the SHA.
+          #
+          # That is reachable, and the previous round's fix is what made it so:
+          # a transient failure on `--remove-label` now fails the job loudly, as
+          # it should. Excluding only `$GITHUB_RUN_ID` then means every LATER
+          # evaluation of that head computes RED=1 and refuses to label,
+          # reporting "a human fixes CI first" when CI is entirely green and
+          # there is nothing to fix. The label is never applied and nothing
+          # re-fires.
+          OURS=$(gh api --paginate \
+                   "repos/$REPO/actions/workflows/reviewable.yml/runs?head_sha=$SHA&per_page=100" \
+                   --jq '.workflow_runs[].id')
+          # $GITHUB_RUN_ID is always set, so the pattern is never empty — an
+          # empty pattern would match every URL and exclude all of CI.
+          PAT=$(printf '%s\n%s\n' "$OURS" "$GITHUB_RUN_ID" \
+                  | sed '/^$/d' | sort -u \
+                  | sed 's#^#/actions/runs/#; s#$#/#' | paste -sd'|' -)
+          echo "Excluding this workflow's own runs on $SHA: $PAT"
+
+          ALL=$(jq -s --arg pat "$PAT" \
+                  '[.[].check_runs[] | select((.details_url // "") | test($pat) | not)]' \
                   "$RUNFILE")
 
           TOTAL=$(printf '%s' "$ALL" | jq 'length')
