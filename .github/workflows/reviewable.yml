@@ -64,6 +64,13 @@
 # must not depend on the self-hosted pool being up to unblock a review, and
 # `workflow_run` carries the base repository's token, so a fork's PR is labelled
 # without that fork's code ever executing here.
+#
+# That is also why this file may use `gh` at all: it is present on GitHub's
+# hosted images. A sibling private repository runs the equivalent workflow on a
+# self-hosted pool that has neither `gh` nor `jq`, where a `gh`-based version
+# reported success five times while doing nothing, so it had to be rewritten in
+# `actions/github-script`. If this job is ever moved to a self-hosted runner,
+# that is the same trap waiting.
 name: reviewable
 
 on:
@@ -137,8 +144,16 @@ jobs:
             # the job if it fails. Swallowing its error would report "nothing to
             # clear" for an auth or API failure too, and the stale label would
             # ride onto the next head carrying a green claim nobody checked.
-            if gh pr view "$PR_NUM" --repo "$REPO" --json labels \
-                 -q '.labels[].name' | grep -qx "$LABEL"; then
+            # Assigned, not used as an `if` condition. A pipeline in an `if`
+            # is exempt from `set -e`, and `pipefail` only makes its status
+            # non-zero — which is just the `else` branch. That made a failed
+            # `gh` call (a 401, a 5xx, a rate limit, a missing binary)
+            # indistinguishable from an absent label, and every one of them
+            # meant "nothing to clear, exit 0, green". A plain assignment from
+            # a command substitution DOES trip `set -e`, so a failure here is
+            # now fatal instead of a branch.
+            HAVE=$(gh pr view "$PR_NUM" --repo "$REPO" --json labels -q '.labels[].name')
+            if printf '%s\n' "$HAVE" | grep -qx "$LABEL"; then
               echo "$ACTION on #$PR_NUM — clearing '$LABEL' so it cannot outlive $PR_SHA."
               gh pr edit "$PR_NUM" --repo "$REPO" --remove-label "$LABEL"
             else
@@ -191,8 +206,8 @@ jobs:
           fi
 
           # Already labelled for THIS head, since a push clears it.
-          if gh pr view "$PR" --repo "$REPO" --json labels \
-               -q '.labels[].name' | grep -qx "$LABEL"; then
+          HAVE=$(gh pr view "$PR" --repo "$REPO" --json labels -q '.labels[].name')
+          if printf '%s\n' "$HAVE" | grep -qx "$LABEL"; then
             echo "#$PR already carries '$LABEL' for ${SHA:0:8} — the routine has been fired."
             exit 0
           fi
