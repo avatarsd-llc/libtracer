@@ -119,7 +119,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
           LABEL: reviewable
-          SELF: ${{ github.job }}
+          RUNFILE: ${{ runner.temp }}/check-runs.json
           EVENT: ${{ github.event_name }}
           ACTION: ${{ github.event.action }}
           WR_SHA: ${{ github.event.workflow_run.head_sha }}
@@ -132,9 +132,17 @@ jobs:
           # label outlives the head that earned it, and "present" stops meaning
           # "this head is green".
           if [ "$EVENT" = "pull_request_target" ] && [ "$ACTION" != "ready_for_review" ]; then
-            echo "$ACTION on #$PR_NUM — clearing '$LABEL' so it cannot outlive $PR_SHA."
-            gh pr edit "$PR_NUM" --repo "$REPO" --remove-label "$LABEL" 2>/dev/null \
-              || echo "  (not present — nothing to clear)"
+            # Decide WHETHER to remove by asking, and then let the remove fail
+            # the job if it fails. Swallowing its error would report "nothing to
+            # clear" for an auth or API failure too, and the stale label would
+            # ride onto the next head carrying a green claim nobody checked.
+            if gh pr view "$PR_NUM" --repo "$REPO" --json labels \
+                 -q '.labels[].name' | grep -qx "$LABEL"; then
+              echo "$ACTION on #$PR_NUM — clearing '$LABEL' so it cannot outlive $PR_SHA."
+              gh pr edit "$PR_NUM" --repo "$REPO" --remove-label "$LABEL"
+            else
+              echo "$ACTION on #$PR_NUM — '$LABEL' not present, nothing to clear."
+            fi
             exit 0
           fi
 
@@ -179,30 +187,46 @@ jobs:
 
           # --paginate because twenty workflows can exceed one page, and a missed
           # page would read as "still pending" and stall the review in silence.
-          #
-          # This job's OWN check run lands on the same SHA, so it must be
-          # excluded: counting itself makes PENDING permanently non-zero and the
-          # label would never be applied at all.
-          RUNS=$(gh api --paginate "repos/$REPO/commits/$SHA/check-runs" \
-                   --jq '.check_runs[] | select(.name != env.SELF)
-                         | "\(.name)\t\(.status)\t\(.conclusion // "-")"')
+          # `jq -s` slurps the concatenated per-page objects into one array.
+          gh api --paginate "repos/$REPO/commits/$SHA/check-runs" > "$RUNFILE"
 
-          if [ -z "$RUNS" ]; then
+          # This job's OWN check run lands on the same SHA and must be excluded,
+          # or PENDING is permanently non-zero and the label is never applied.
+          #
+          # Identify it by the RUN ID in its `details_url`
+          # (`.../actions/runs/<run_id>/job/<job_id>`), never by job name: on a
+          # fork's pull request the names in this list come from the FORK's
+          # workflow files, so a name is attacker-chosen and a check run called
+          # `label` would exclude itself from the count.
+          #
+          # Counting is done in jq over `.status` and `.conclusion` directly.
+          # The printed listing below is for humans only — a check-run name is
+          # free text and may contain a tab, so a name must never be a field in
+          # something we count.
+          ALL=$(jq -s --arg mine "/runs/$GITHUB_RUN_ID/" \
+                  '[.[].check_runs[] | select((.details_url // "") | contains($mine) | not)]' \
+                  "$RUNFILE")
+
+          TOTAL=$(printf '%s' "$ALL" | jq 'length')
+          if [ "$TOTAL" -eq 0 ]; then
             echo "No check runs on $SHA besides this one — refusing to call that green."
             exit 0
           fi
 
-          echo "Check runs on $SHA (excluding '$SELF'):"
-          printf '%s\n' "$RUNS" | sed 's/^/  /'
+          echo "Check runs on $SHA ($TOTAL, excluding this run):"
+          printf '%s' "$ALL" | jq -r '.[] | "  \(.name) \(.status) \(.conclusion // "-")"'
 
-          PENDING=$(printf '%s\n' "$RUNS" | awk -F'\t' '$2 != "completed"' | wc -l)
+          PENDING=$(printf '%s' "$ALL" | jq '[.[] | select(.status != "completed")] | length')
           if [ "$PENDING" -ne 0 ]; then
             echo "$PENDING check run(s) still in flight — a later workflow re-fires this."
             exit 0
           fi
 
-          RED=$(printf '%s\n' "$RUNS" \
-                  | awk -F'\t' '$3 != "success" && $3 != "skipped" && $3 != "neutral"' | wc -l)
+          # SUCCESS, SKIPPED and NEUTRAL are all "not red".
+          RED=$(printf '%s' "$ALL" | jq '[.[]
+                  | select(.conclusion != "success"
+                           and .conclusion != "skipped"
+                           and .conclusion != "neutral")] | length')
           if [ "$RED" -ne 0 ]; then
             echo "$RED check run(s) did not pass — not labelling. A human fixes CI first."
             exit 0
