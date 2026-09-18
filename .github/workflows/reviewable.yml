@@ -1,0 +1,134 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# WHY THIS WORKFLOW EXISTS
+#
+# The first-pass PR reviewer (`docs/agents/pr-review.md`, a cloud routine on the
+# maintainer's account) fires off a GitHub webhook. It must know CI has finished
+# before reviewing, and **GitHub has no event meaning "all checks passed"**:
+# `check_run`, `check_suite`, `workflow_run` and `status` are all per-unit. This
+# repository has twenty workflows on `pull_request`, so a push can produce twenty
+# `check_suite.completed` events and no aggregate. Auto-merge and merge queues
+# compute the aggregate internally and never expose it.
+#
+# Without an aggregate the routine had to poll, holding a cloud sandbox open for
+# the length of the build. This workflow is the aggregate event GitHub does not
+# provide: when the last CI workflow finishes it applies the `reviewable` label,
+# and a `pull_request.labeled` webhook fires the routine, which then reviews
+# immediately instead of waiting.
+#
+# WHAT THE LABEL MEANS: *every check run on this head SHA has concluded, and none
+# failed.* It does NOT mean mergeable. That distinction matters more here than it
+# looks, because of the next paragraph.
+#
+# WHY IT IS DELIBERATELY NOT "the required checks are green". The default branch
+# ruleset requires `build`, `build-test` and `check`. Eight workflows in this
+# repository define a job by one of those three names, and the two that define
+# `build-test` -- core-ci.yml and ts.yml -- are BOTH path-filtered. A docs-only
+# diff matches neither, so `build-test` is never queued, never reports, and is
+# therefore never "green". Gating the label on required checks would leave every
+# documentation PR unreviewable forever, which is exactly the class of trap that
+# already blocks those PRs from MERGING (see the issue linked in the label's own
+# description). The merge gate is the ruleset's business; the review gate should
+# not inherit its defect.
+#
+# So SUCCESS, SKIPPED and NEUTRAL all count as "not red". A path-filtered job
+# that reported SKIPPED has said its piece.
+#
+# WHY REMOVE-THEN-ADD. The label persists across pushes. Re-adding a label that
+# is already present is a no-op and emits no event, so the next green head would
+# never be reviewed. Removing first guarantees `labeled` fires every time.
+# Nothing is wired to `unlabeled`.
+#
+# MANUAL RE-REVIEW is free: remove the label and add it back.
+#
+# RUNS ON A HOSTED RUNNER on purpose. Applying a label is seconds of work, this
+# must not depend on the self-hosted pool being up to unblock a review, and
+# `workflow_run` carries the base repository's token, so a fork's PR is labelled
+# without that fork's code ever executing here.
+name: reviewable
+
+on:
+  workflow_run:
+    types: [completed]
+    workflows:
+      - "can-vcan-e2e"
+      - "capability-matrix"
+      - "conformance"
+      - "core-ci"
+      - "doc-citations"
+      - "docs"
+      - "esp-idf"
+      - "footprint-cortexm0"
+      - "hil-esp32c6"
+      - "mermaid-lint"
+      - "mesh-testbed"
+      - "no-binaries"
+      - "perf"
+      - "pio-esp32-can"
+      - "quic"
+      - "ts"
+      - "version-consistency"
+      - "wireshark-dissector"
+      - "ws-interop"
+      - "wt-interop"
+permissions:
+  pull-requests: write
+  checks: read
+
+# Twenty workflows completing fires this up to twenty times for one head.
+# Serialising per SHA means all but the last exit at the "still in flight" check.
+concurrency:
+  group: reviewable-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  label:
+    if: github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Label the PR when CI has finished and nothing is red
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          LABEL: reviewable
+        run: |
+          set -euo pipefail
+
+          PR=$(gh api "repos/$REPO/commits/$SHA/pulls" \
+                 --jq '[.[] | select(.state == "open")][0].number // empty')
+          if [ -z "$PR" ]; then
+            echo "No open PR for $SHA — nothing to label."
+            exit 0
+          fi
+
+          # --paginate because twenty workflows can exceed one page, and a missed
+          # page would read as "still pending" and stall the review in silence.
+          RUNS=$(gh api --paginate "repos/$REPO/commits/$SHA/check-runs" \
+                   --jq '.check_runs[] | "\(.name)\t\(.status)\t\(.conclusion // "-")"')
+
+          if [ -z "$RUNS" ]; then
+            echo "No check runs on $SHA — refusing to call that green."
+            exit 0
+          fi
+
+          echo "Check runs on $SHA:"
+          printf '%s\n' "$RUNS" | sed 's/^/  /'
+
+          PENDING=$(printf '%s\n' "$RUNS" | awk -F'\t' '$2 != "completed"' | wc -l)
+          if [ "$PENDING" -ne 0 ]; then
+            echo "$PENDING check run(s) still in flight — a later workflow re-fires this."
+            exit 0
+          fi
+
+          RED=$(printf '%s\n' "$RUNS" \
+                  | awk -F'\t' '$3 != "success" && $3 != "skipped" && $3 != "neutral"' | wc -l)
+          if [ "$RED" -ne 0 ]; then
+            echo "$RED check run(s) did not pass — not labelling. A human fixes CI first."
+            exit 0
+          fi
+
+          echo "All check runs concluded, none red. Labelling #$PR."
+          gh pr edit "$PR" --repo "$REPO" --remove-label "$LABEL" 2>/dev/null || true
+          gh pr edit "$PR" --repo "$REPO" --add-label "$LABEL"
