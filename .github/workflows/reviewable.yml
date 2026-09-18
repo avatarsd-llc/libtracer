@@ -14,9 +14,10 @@
 # Without an aggregate the routine had to poll, holding a cloud sandbox open for
 # the length of the build. This workflow is the aggregate event GitHub does not
 # provide: when the last CI workflow finishes it applies the `reviewable` label,
-# and a `pull_request.labeled` webhook fires the routine, which will then be
-# taught to trust the label instead of polling. Until that change lands the
-# routine still waits, so this header must not be read as describing today.
+# and a `pull_request.labeled` webhook fires the routine, which reviews at once.
+# The routine does not wait and does not poll — the label is both the trigger
+# and the proof that CI is done, which is what `docs/agents/pr-review.md` and
+# `.github/CONTRIBUTING.md` say in this same diff.
 #
 # WHAT THE LABEL MEANS: *every check run on this head SHA has concluded, and none
 # failed.* It does NOT mean mergeable. That distinction matters more here than it
@@ -151,8 +152,19 @@ jobs:
             SHA="$PR_SHA"
           else
             SHA="$WR_SHA"
+            # Select the PR whose HEAD *is* this SHA. The endpoint lists every
+            # open PR whose commit range CONTAINS it, which a stacked branch
+            # produces routinely: PR A head X, PR B branched off A with one more
+            # commit, and X is in B's range too. Taking [0] could pick B, whose
+            # head is not X, and the head guard below would then exit blaming a
+            # push to B — leaving A unlabelled for X, silently, with nothing to
+            # re-fire it.
+            #
+            # Filtered with a local jq, not `gh api --jq`: `gh` does not accept
+            # jq's `--arg`.
             PR=$(gh api "repos/$REPO/commits/$SHA/pulls" \
-                   --jq '[.[] | select(.state == "open")][0].number // empty')
+                   | jq -r --arg sha "$SHA" \
+                       '[.[] | select(.state == "open" and .head.sha == $sha)][0].number // empty')
             if [ -z "$PR" ]; then
               echo "No open PR for $SHA — nothing to label."
               exit 0
