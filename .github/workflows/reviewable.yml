@@ -14,8 +14,9 @@
 # Without an aggregate the routine had to poll, holding a cloud sandbox open for
 # the length of the build. This workflow is the aggregate event GitHub does not
 # provide: when the last CI workflow finishes it applies the `reviewable` label,
-# and a `pull_request.labeled` webhook fires the routine, which then reviews
-# immediately instead of waiting.
+# and a `pull_request.labeled` webhook fires the routine, which will then be
+# taught to trust the label instead of polling. Until that change lands the
+# routine still waits, so this header must not be read as describing today.
 #
 # WHAT THE LABEL MEANS: *every check run on this head SHA has concluded, and none
 # failed.* It does NOT mean mergeable. That distinction matters more here than it
@@ -35,10 +36,26 @@
 # So SUCCESS, SKIPPED and NEUTRAL all count as "not red". A path-filtered job
 # that reported SKIPPED has said its piece.
 #
-# WHY REMOVE-THEN-ADD. The label persists across pushes. Re-adding a label that
-# is already present is a no-op and emits no event, so the next green head would
-# never be reviewed. Removing first guarantees `labeled` fires every time.
+# HOW EXACTLY ONE EVENT IS PRODUCED PER GREEN HEAD. The label carries no SHA, so
+# two things are needed together:
+#
+#   * a push CLEARS it (the `pull_request_target` arm below), so "present"
+#     always means "this head, already labelled";
+#   * adding is therefore idempotent — present means exit, because a second add
+#     emits no `labeled` event anyway and the first already fired the routine.
+#
+# That is what keeps twenty workflows finishing from producing twenty reviews.
+# `concurrency` only serialises them; it deduplicates nothing by itself.
 # Nothing is wired to `unlabeled`.
+#
+# WHY `pull_request_target` FOR THE CLEARING ARM. On a pull request from a fork,
+# `pull_request` hands the job a READ-ONLY token, so removing a label would fail
+# on exactly the contributions this repository exists to accept.
+# `pull_request_target` runs in the base repository's context with the token
+# declared above. It is safe here for the usual reason: **nothing is ever
+# checked out.** This workflow reads the event payload and calls the API, so no
+# code from the pull request executes, which is the only hazard that trigger
+# has.
 #
 # MANUAL RE-REVIEW is free: remove the label and add it back.
 #
@@ -72,48 +89,110 @@ on:
       - "wireshark-dissector"
       - "ws-interop"
       - "wt-interop"
+  # Clears a stale label when the head moves. `ready_for_review` EVALUATES
+  # instead: a draft is never labelled, so a PR marked ready must be assessed
+  # fresh rather than find a label already sitting on it emitting nothing.
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
 permissions:
   pull-requests: write
   checks: read
 
 # Twenty workflows completing fires this up to twenty times for one head.
-# Serialising per SHA means all but the last exit at the "still in flight" check.
+# Serialising per SHA stops them racing each other's label edit; all but the
+# last exit at the "still in flight" check, and any that get past it exit at the
+# idempotent-add check. Deduplication is those checks, NOT this block.
 concurrency:
-  group: reviewable-${{ github.event.workflow_run.head_sha }}
+  group: reviewable-${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha }}
   cancel-in-progress: false
 
 jobs:
   label:
-    if: github.event.workflow_run.event == 'pull_request'
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      github.event.workflow_run.event == 'pull_request'
     runs-on: ubuntu-24.04
     steps:
-      - name: Label the PR when CI has finished and nothing is red
+      - name: Clear a stale label, or label when CI has finished and nothing is red
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
-          SHA: ${{ github.event.workflow_run.head_sha }}
           LABEL: reviewable
+          SELF: ${{ github.job }}
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          WR_SHA: ${{ github.event.workflow_run.head_sha }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+          PR_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
 
-          PR=$(gh api "repos/$REPO/commits/$SHA/pulls" \
-                 --jq '[.[] | select(.state == "open")][0].number // empty')
-          if [ -z "$PR" ]; then
-            echo "No open PR for $SHA — nothing to label."
+          # A push clears the label and evaluates nothing. Without this the
+          # label outlives the head that earned it, and "present" stops meaning
+          # "this head is green".
+          if [ "$EVENT" = "pull_request_target" ] && [ "$ACTION" != "ready_for_review" ]; then
+            echo "$ACTION on #$PR_NUM — clearing '$LABEL' so it cannot outlive $PR_SHA."
+            gh pr edit "$PR_NUM" --repo "$REPO" --remove-label "$LABEL" 2>/dev/null \
+              || echo "  (not present — nothing to clear)"
+            exit 0
+          fi
+
+          if [ "$EVENT" = "pull_request_target" ]; then
+            PR="$PR_NUM"
+            SHA="$PR_SHA"
+          else
+            SHA="$WR_SHA"
+            PR=$(gh api "repos/$REPO/commits/$SHA/pulls" \
+                   --jq '[.[] | select(.state == "open")][0].number // empty')
+            if [ -z "$PR" ]; then
+              echo "No open PR for $SHA — nothing to label."
+              exit 0
+            fi
+          fi
+
+          # A CI run that outlived its push resolves to a PR whose head has
+          # MOVED ON: `commits/<old>/pulls` still names it, because the old
+          # commit remains in its history. Labelling then asserts green for a
+          # head nobody checked.
+          HEAD=$(gh pr view "$PR" --repo "$REPO" --json headRefOid -q .headRefOid)
+          if [ "$HEAD" != "$SHA" ]; then
+            echo "#$PR has moved to ${HEAD:0:8}; this run is about ${SHA:0:8}. Not labelling."
+            exit 0
+          fi
+
+          # A draft is never labelled: the routine refuses drafts, and a label
+          # applied while draft would still be present at `ready_for_review`,
+          # where an idempotent add emits no event — so it would never be
+          # reviewed at all.
+          if [ "$(gh pr view "$PR" --repo "$REPO" --json isDraft -q .isDraft)" = "true" ]; then
+            echo "#$PR is a draft — not labelling. Marking it ready re-runs this."
+            exit 0
+          fi
+
+          # Already labelled for THIS head, since a push clears it.
+          if gh pr view "$PR" --repo "$REPO" --json labels \
+               -q '.labels[].name' | grep -qx "$LABEL"; then
+            echo "#$PR already carries '$LABEL' for ${SHA:0:8} — the routine has been fired."
             exit 0
           fi
 
           # --paginate because twenty workflows can exceed one page, and a missed
           # page would read as "still pending" and stall the review in silence.
+          #
+          # This job's OWN check run lands on the same SHA, so it must be
+          # excluded: counting itself makes PENDING permanently non-zero and the
+          # label would never be applied at all.
           RUNS=$(gh api --paginate "repos/$REPO/commits/$SHA/check-runs" \
-                   --jq '.check_runs[] | "\(.name)\t\(.status)\t\(.conclusion // "-")"')
+                   --jq '.check_runs[] | select(.name != env.SELF)
+                         | "\(.name)\t\(.status)\t\(.conclusion // "-")"')
 
           if [ -z "$RUNS" ]; then
-            echo "No check runs on $SHA — refusing to call that green."
+            echo "No check runs on $SHA besides this one — refusing to call that green."
             exit 0
           fi
 
-          echo "Check runs on $SHA:"
+          echo "Check runs on $SHA (excluding '$SELF'):"
           printf '%s\n' "$RUNS" | sed 's/^/  /'
 
           PENDING=$(printf '%s\n' "$RUNS" | awk -F'\t' '$2 != "completed"' | wc -l)
@@ -130,5 +209,4 @@ jobs:
           fi
 
           echo "All check runs concluded, none red. Labelling #$PR."
-          gh pr edit "$PR" --repo "$REPO" --remove-label "$LABEL" 2>/dev/null || true
           gh pr edit "$PR" --repo "$REPO" --add-label "$LABEL"

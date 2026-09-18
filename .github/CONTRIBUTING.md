@@ -37,6 +37,36 @@ We use DCO rather than a CLA to keep the contribution barrier low. The maintaine
 
 Cutting a release (version bump, tag, registry publishes) follows [RELEASING.md](RELEASING.md).
 
+### What happens to your PR automatically
+
+Once every check run on your PR's current head has concluded without failing, a
+workflow applies the **`reviewable`** label, and that label dispatches an
+automated first-pass review judged against
+[`docs/agents/pr-review.md`](../docs/agents/pr-review.md) — the same rubric you
+can run on yourself before asking for review.
+
+Three things about that label are not guessable from its name:
+
+- **It does not mean your PR is mergeable.** The branch ruleset decides that
+  from named required checks, and some of those are path-filtered and never
+  report on a docs-only diff. The label says "CI finished and nothing is red",
+  which is a question worth answering separately.
+- **Removing it and adding it back is the re-review button.** That is the
+  supported way to ask for another pass against your current head. It is not
+  free — each one starts a fresh cloud session — so use it when the head has
+  actually changed or the review went wrong, not to retry a verdict.
+- **A push clears it automatically.** You never need to remove it yourself to
+  get your next push reviewed.
+
+The review's inline comments are threads, and **the merge is held until every
+thread is resolved** — that is a branch-ruleset setting, not the reviewer's
+opinion. Only you or a maintainer can resolve one, so reply on each thread and
+press **Resolve conversation** on the ones you have addressed. If you think a
+finding is wrong, say so on the thread and leave it open for a maintainer:
+resolving it buries the disagreement instead of settling it. An automated
+approval is the floor of review, not the ceiling; a maintainer still reads the
+diff.
+
 ## New integrations
 
 A new integration (a new platform, transport, or framework wrapper) goes under `integrations/<name>/`. Include:
