@@ -1,0 +1,310 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# WHY THIS WORKFLOW EXISTS
+#
+# The first-pass PR reviewer (`docs/agents/pr-review.md`, a cloud routine on the
+# maintainer's account) fires off a GitHub webhook. It must know CI has finished
+# before reviewing, and **GitHub has no event meaning "all checks passed"**:
+# `check_run`, `check_suite`, `workflow_run` and `status` are all per-unit. This
+# repository has twenty workflows on `pull_request`, so a push can produce twenty
+# `check_suite.completed` events and no aggregate. Auto-merge and merge queues
+# compute the aggregate internally and never expose it.
+#
+# Without an aggregate the routine had to poll, holding a cloud sandbox open for
+# the length of the build. This workflow is the aggregate event GitHub does not
+# provide: when the last CI workflow finishes it applies the `reviewable` label,
+# and a `pull_request.labeled` webhook fires the routine, which reviews at once.
+# The routine does not wait and does not poll — the label is both the trigger
+# and the proof that CI is done, which is what `docs/agents/pr-review.md` and
+# `.github/CONTRIBUTING.md` say in this same diff.
+#
+# WHAT THE LABEL MEANS: *every check run on this head SHA has concluded, and none
+# failed.* It does NOT mean mergeable. That distinction matters more here than it
+# looks, because of the next paragraph.
+#
+# WHY IT IS DELIBERATELY NOT "the required checks are green". The default branch
+# ruleset requires `build`, `build-test` and `check`. Eight workflows in this
+# repository define a job by one of those three names, and the two that define
+# `build-test` -- core-ci.yml and ts.yml -- are BOTH path-filtered. A docs-only
+# diff matches neither, so `build-test` is never queued, never reports, and is
+# therefore never "green". Gating the label on required checks would leave every
+# documentation PR unreviewable forever, which is exactly the class of trap that
+# already blocks those PRs from MERGING (see the issue linked in the label's own
+# description). The merge gate is the ruleset's business; the review gate should
+# not inherit its defect.
+#
+# So SUCCESS, SKIPPED and NEUTRAL all count as "not red". A path-filtered job
+# that reported SKIPPED has said its piece.
+#
+# HOW EXACTLY ONE EVENT IS PRODUCED PER GREEN HEAD. The label carries no SHA, so
+# two things are needed together:
+#
+#   * a push CLEARS it (the `pull_request_target` arm below), so "present"
+#     always means "this head, already labelled";
+#   * adding is therefore idempotent — present means exit, because a second add
+#     emits no `labeled` event anyway and the first already fired the routine.
+#
+# That is what keeps twenty workflows finishing from producing twenty reviews.
+# `concurrency` only serialises them; it deduplicates nothing by itself.
+# Nothing is wired to `unlabeled`.
+#
+# WHY `pull_request_target` FOR THE CLEARING ARM. On a pull request from a fork,
+# `pull_request` hands the job a READ-ONLY token, so removing a label would fail
+# on exactly the contributions this repository exists to accept.
+# `pull_request_target` runs in the base repository's context with the token
+# declared above. It is safe here for the usual reason: **nothing is ever
+# checked out.** This workflow reads the event payload and calls the API, so no
+# code from the pull request executes, which is the only hazard that trigger
+# has.
+#
+# MANUAL RE-REVIEW is free: remove the label and add it back.
+#
+# RUNS ON A HOSTED RUNNER on purpose. Applying a label is seconds of work, this
+# must not depend on the self-hosted pool being up to unblock a review, and
+# `workflow_run` carries the base repository's token, so a fork's PR is labelled
+# without that fork's code ever executing here.
+#
+# That is also why this file may use `gh` at all: it is present on GitHub's
+# hosted images. A sibling private repository runs the equivalent workflow on a
+# self-hosted pool that has neither `gh` nor `jq`, where a `gh`-based version
+# reported success five times while doing nothing, so it had to be rewritten in
+# `actions/github-script`. If this job is ever moved to a self-hosted runner,
+# that is the same trap waiting.
+name: reviewable
+
+on:
+  workflow_run:
+    types: [completed]
+    workflows:
+      - "can-vcan-e2e"
+      - "capability-matrix"
+      - "conformance"
+      - "core-ci"
+      - "doc-citations"
+      - "docs"
+      - "esp-idf"
+      - "footprint-cortexm0"
+      - "hil-esp32c6"
+      - "mermaid-lint"
+      - "mesh-testbed"
+      - "no-binaries"
+      - "perf"
+      - "pio-esp32-can"
+      - "quic"
+      - "ts"
+      - "version-consistency"
+      - "wireshark-dissector"
+      - "ws-interop"
+      - "wt-interop"
+  # Clears a stale label when the head moves. `ready_for_review` EVALUATES
+  # instead: a draft is never labelled, so a PR marked ready must be assessed
+  # fresh rather than find a label already sitting on it emitting nothing.
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+# Naming ANY permission makes every unnamed one `none`, so each of these has to
+# be here explicitly:
+#   pull-requests: write — add and remove the label
+#   checks: read         — read the check runs on the head
+#   actions: read        — list this workflow's OWN runs for the head, which is
+#                          how they are excluded from the CI verdict. Without it
+#                          the evaluating branch dies on "Resource not
+#                          accessible by integration" and the label NEVER lands.
+permissions:
+  pull-requests: write
+  checks: read
+  actions: read
+
+# Twenty workflows completing fires this up to twenty times for one head.
+# Serialising per SHA stops them racing each other's label edit; all but the
+# last exit at the "still in flight" check, and any that get past it exit at the
+# idempotent-add check. Deduplication is those checks, NOT this block.
+concurrency:
+  group: reviewable-${{ github.event.workflow_run.head_sha || github.event.pull_request.head.sha }}
+  cancel-in-progress: false
+
+jobs:
+  label:
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Clear a stale label, or label when CI has finished and nothing is red
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          LABEL: reviewable
+          RUNFILE: ${{ runner.temp }}/check-runs.json
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          WR_SHA: ${{ github.event.workflow_run.head_sha }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+          PR_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          # A push clears the label and evaluates nothing. Without this the
+          # label outlives the head that earned it, and "present" stops meaning
+          # "this head is green".
+          if [ "$EVENT" = "pull_request_target" ] && [ "$ACTION" != "ready_for_review" ]; then
+            # Decide WHETHER to remove by asking, and then let the remove fail
+            # the job if it fails. Swallowing its error would report "nothing to
+            # clear" for an auth or API failure too, and the stale label would
+            # ride onto the next head carrying a green claim nobody checked.
+            # Assigned, not used as an `if` condition. A pipeline in an `if`
+            # is exempt from `set -e`, and `pipefail` only makes its status
+            # non-zero — which is just the `else` branch. That made a failed
+            # `gh` call (a 401, a 5xx, a rate limit, a missing binary)
+            # indistinguishable from an absent label, and every one of them
+            # meant "nothing to clear, exit 0, green". A plain assignment from
+            # a command substitution DOES trip `set -e`, so a failure here is
+            # now fatal instead of a branch.
+            HAVE=$(gh pr view "$PR_NUM" --repo "$REPO" --json labels -q '.labels[].name')
+            if printf '%s\n' "$HAVE" | grep -qx "$LABEL"; then
+              echo "$ACTION on #$PR_NUM — clearing '$LABEL' so it cannot outlive $PR_SHA."
+              gh pr edit "$PR_NUM" --repo "$REPO" --remove-label "$LABEL"
+            else
+              echo "$ACTION on #$PR_NUM — '$LABEL' not present, nothing to clear."
+            fi
+            exit 0
+          fi
+
+          if [ "$EVENT" = "pull_request_target" ]; then
+            PR="$PR_NUM"
+            SHA="$PR_SHA"
+          else
+            SHA="$WR_SHA"
+            # Select the PR whose HEAD *is* this SHA. The endpoint lists every
+            # open PR whose commit range CONTAINS it, which a stacked branch
+            # produces routinely: PR A head X, PR B branched off A with one more
+            # commit, and X is in B's range too. Taking [0] could pick B, whose
+            # head is not X, and the head guard below would then exit blaming a
+            # push to B — leaving A unlabelled for X, silently, with nothing to
+            # re-fire it.
+            #
+            # Filtered with a local jq, not `gh api --jq`: `gh` does not accept
+            # jq's `--arg`.
+            PR=$(gh api "repos/$REPO/commits/$SHA/pulls" \
+                   | jq -r --arg sha "$SHA" \
+                       '[.[] | select(.state == "open" and .head.sha == $sha)][0].number // empty')
+            if [ -z "$PR" ]; then
+              echo "No open PR for $SHA — nothing to label."
+              exit 0
+            fi
+          fi
+
+          # ONE read of the PR, assigned. Three separate reads were three
+          # chances for a failed call to be mistaken for an answer, and one of
+          # them was exactly that: `if [ "$(gh …)" = "true" ]` is exempt from
+          # `set -e` for the same reason a pipeline in an `if` is — the shell
+          # inspects only `[`'s status, and `[ "" = "true" ]` is merely false.
+          # A 5xx or a rate limit therefore read as "not a draft", and a green
+          # DRAFT would get labelled; the routine then refuses it for being a
+          # draft, and at `ready_for_review` the label is already present, so
+          # the idempotent add emits no event and it is never reviewed at all.
+          # That is the same hole the draft handling was added to close.
+          #
+          # A plain assignment from a command substitution DOES trip `set -e`.
+          # So every field below comes from one fetch that either succeeded or
+          # killed the job, and no test can see a failure as data.
+          PRJSON=$(gh pr view "$PR" --repo "$REPO" --json headRefOid,isDraft,labels)
+          HEAD=$(printf '%s' "$PRJSON" | jq -r '.headRefOid')
+          DRAFT=$(printf '%s' "$PRJSON" | jq -r '.isDraft')
+          HAVE=$(printf '%s' "$PRJSON" | jq -r '.labels[].name')
+
+          # A CI run that outlived its push resolves to a PR whose head has
+          # MOVED ON: `commits/<old>/pulls` still names it, because the old
+          # commit remains in its history. Labelling then asserts green for a
+          # head nobody checked.
+          if [ "$HEAD" != "$SHA" ]; then
+            echo "#$PR has moved to ${HEAD:0:8}; this run is about ${SHA:0:8}. Not labelling."
+            exit 0
+          fi
+
+          # A draft is never labelled, per the reasoning above.
+          if [ "$DRAFT" = "true" ]; then
+            echo "#$PR is a draft — not labelling. Marking it ready re-runs this."
+            exit 0
+          fi
+
+          # Already labelled for THIS head, since a push clears it.
+          if printf '%s\n' "$HAVE" | grep -qx "$LABEL"; then
+            echo "#$PR already carries '$LABEL' for ${SHA:0:8} — the routine has been fired."
+            exit 0
+          fi
+
+          # --paginate because twenty workflows can exceed one page, and a missed
+          # page would read as "still pending" and stall the review in silence.
+          # `jq -s` slurps the concatenated per-page objects into one array.
+          gh api --paginate "repos/$REPO/commits/$SHA/check-runs" > "$RUNFILE"
+
+          # This job's OWN check run lands on the same SHA and must be excluded,
+          # or PENDING is permanently non-zero and the label is never applied.
+          #
+          # Identify it by the RUN ID in its `details_url`
+          # (`.../actions/runs/<run_id>/job/<job_id>`), never by job name: on a
+          # fork's pull request the names in this list come from the FORK's
+          # workflow files, so a name is attacker-chosen and a check run called
+          # `label` would exclude itself from the count.
+          #
+          # Counting is done in jq over `.status` and `.conclusion` directly.
+          # The printed listing below is for humans only — a check-run name is
+          # free text and may contain a tab, so a name must never be a field in
+          # something we count.
+          # EVERY run of this workflow on this head must be excluded, not just
+          # the current one. Under the premise above — our check runs land on
+          # the SHA we inspect — one head also carries the clearing run and one
+          # run per CI completion, up to twenty of them. All are ours, none are
+          # CI, and any that FAILS leaves a completed check run with conclusion
+          # `failure` on the SHA.
+          #
+          # That is reachable, and the previous round's fix is what made it so:
+          # a transient failure on `--remove-label` now fails the job loudly, as
+          # it should. Excluding only `$GITHUB_RUN_ID` then means every LATER
+          # evaluation of that head computes RED=1 and refuses to label,
+          # reporting "a human fixes CI first" when CI is entirely green and
+          # there is nothing to fix. The label is never applied and nothing
+          # re-fires.
+          OURS=$(gh api --paginate \
+                   "repos/$REPO/actions/workflows/reviewable.yml/runs?head_sha=$SHA&per_page=100" \
+                   --jq '.workflow_runs[].id')
+          # $GITHUB_RUN_ID is always set, so the pattern is never empty — an
+          # empty pattern would match every URL and exclude all of CI.
+          PAT=$(printf '%s\n%s\n' "$OURS" "$GITHUB_RUN_ID" \
+                  | sed '/^$/d' | sort -u \
+                  | sed 's#^#/actions/runs/#; s#$#/#' | paste -sd'|' -)
+          echo "Excluding this workflow's own runs on $SHA: $PAT"
+
+          ALL=$(jq -s --arg pat "$PAT" \
+                  '[.[].check_runs[] | select((.details_url // "") | test($pat) | not)]' \
+                  "$RUNFILE")
+
+          TOTAL=$(printf '%s' "$ALL" | jq 'length')
+          if [ "$TOTAL" -eq 0 ]; then
+            echo "No check runs on $SHA besides this one — refusing to call that green."
+            exit 0
+          fi
+
+          echo "Check runs on $SHA ($TOTAL, excluding this run):"
+          printf '%s' "$ALL" | jq -r '.[] | "  \(.name) \(.status) \(.conclusion // "-")"'
+
+          PENDING=$(printf '%s' "$ALL" | jq '[.[] | select(.status != "completed")] | length')
+          if [ "$PENDING" -ne 0 ]; then
+            echo "$PENDING check run(s) still in flight — a later workflow re-fires this."
+            exit 0
+          fi
+
+          # SUCCESS, SKIPPED and NEUTRAL are all "not red".
+          RED=$(printf '%s' "$ALL" | jq '[.[]
+                  | select(.conclusion != "success"
+                           and .conclusion != "skipped"
+                           and .conclusion != "neutral")] | length')
+          if [ "$RED" -ne 0 ]; then
+            echo "$RED check run(s) did not pass — not labelling. A human fixes CI first."
+            exit 0
+          fi
+
+          echo "All check runs concluded, none red. Labelling #$PR."
+          gh pr edit "$PR" --repo "$REPO" --add-label "$LABEL"

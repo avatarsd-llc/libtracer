@@ -1,7 +1,20 @@
 # Automated PR review
 
-A cloud routine on the maintainer's Claude account runs this rubric on every push
-to an open pull request, once CI is green. It is also the rubric a human should
+A cloud routine on the maintainer's Claude account runs this rubric when a pull
+request becomes **`reviewable`** — the label
+`.github/workflows/reviewable.yml` applies once every check run on the current
+head has concluded with none failed. The label is the trigger and the proof that
+CI is done; the routine does not wait and does not poll.
+
+Two consequences worth knowing before you wonder why nothing happened:
+
+- **A push alone does not summon it.** Pushing restarts CI, which clears the
+  label and re-applies it when CI finishes — so the review follows a push, but
+  by way of the label rather than the push itself.
+- **Removing the label and adding it back is the re-review button**, against
+  whatever the current head is.
+
+It is also the rubric a human should
 use by hand, and the one a contributor can run on themselves before asking for
 review — by naming this file, since no built-in command is bound to it:
 
