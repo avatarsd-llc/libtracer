@@ -296,7 +296,7 @@ struct default_config_t {
      * Today the slot does not depend on it for memory safety (its guard serializes writers as
      * well as readers); later work on the value path may. Override fragment:
      * `static constexpr bool kSingleWriter = true;`, together with
-     * `using lkv_slot_t = single_writer_slot_t;` and a @ref reader_guard_t.
+     * `using lkv_slot_t = single_writer_slot_t;` and a `reader_guard_t`.
      */
     static constexpr bool kSingleWriter = false;
 
@@ -321,7 +321,7 @@ struct default_config_t {
      * 4x the refcount slot at twenty-four readers on one shared vertex).
      *
      * A single-core or single-writer target binds `single_writer_slot_t` instead, with
-     * @ref kSingleWriter and a @ref reader_guard_t. It has no registry, no deferred reclamation
+     * `kSingleWriter` and a `reader_guard_t`. It has no registry, no deferred reclamation
      * and a publish that cannot fail, and its one wait is the guard (#1618). Override fragment:
      * `using lkv_slot_t = single_writer_slot_t;`. The named type must satisfy the contract in
      * `%lkv_slot.hpp` — in particular `load()` returns an OWNING handle, and the policy declares
