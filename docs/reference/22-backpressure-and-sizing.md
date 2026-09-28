@@ -108,8 +108,8 @@ beats completeness: the newest frame of a camera or an IMU is worth more than th
 displaced.
 
 The canonical instance of the pair is the receiving STREAM vertex's ring, whose arm is declared
-at wiring time and read at admission (`core/include/libtracer/vertex.hpp:1330`,
-`core/include/libtracer/vertex.hpp:1344`):
+at wiring time and read at admission (`core/include/libtracer/vertex.hpp:1369`,
+`core/include/libtracer/vertex.hpp:1383`):
 
 | | reliable | best-effort (the default) |
 | --- | --- | --- |
@@ -131,7 +131,7 @@ Three properties of this pair that a deployment must design around:
 3. **Depth and bytes compose.** The declared depth intent retires *before* the byte bound charges,
    so a ring at its declared depth funds the new admission out of the entry it was going to drop
    anyway — and a source sized for exactly N entries does not spuriously shed on the N+1th
-   (`core/include/libtracer/vertex.hpp:1358`).
+   (`core/include/libtracer/vertex.hpp:1397`).
 
 ---
 
@@ -305,7 +305,7 @@ role and schema).
 | `await`'s return value | the wake rides the write sequence and the stripe condvar (retention-free), but the value handed back is served through the **same role dispatch** `read` runs (`core/src/graph.cpp:3009`) |
 | `assign` / `propagate` sweep | **the hard dependency** — RFC-0008 §C: `propagate` takes no value argument, "the last-known-value is the single source of truth" (`core/src/graph.cpp:2726`) |
 | Composed subtree reads | RFC-0016 serves **landed** LKVs only, one atomic load per node (`core/src/graph.cpp:4312`); a non-retaining child contributes nothing |
-| Late-joiner replay | the durability latch snapshots the LKV at edge-add (RFC-0022 §3.A bit 5, `core/include/libtracer/vertex.hpp:1578`) |
+| Late-joiner replay | the durability latch snapshots the LKV at edge-add (RFC-0022 §3.A bit 5, `core/include/libtracer/vertex.hpp:1617`) |
 
 **Not on the list: the whole callback / delivery plane.** Fan-out never reads the slot. A
 storing role delivers the just-published pointer (`core/src/graph.cpp:2492`); a HANDLER delivers

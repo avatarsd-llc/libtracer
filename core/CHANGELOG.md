@@ -226,6 +226,44 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Removed
 
+- **BREAKING — `tr::graph::sp_atomic_slot_t` is removed; the host default LKV slot is now
+  `hazard_slot_t`, and single-writer builds bind the new `single_writer_slot_t`**
+  ([#1618](https://github.com/avatarsd-llc/libtracer/issues/1618), RFC 0028 §5.5 slice 1,
+  [#1627](https://github.com/avatarsd-llc/libtracer/pull/1627)). The removed slot was
+  `std::atomic<std::shared_ptr<const rope_t>>`, which libstdc++ implements with a pointer-lock bit
+  that `load` and `store` spin on with `sched_yield`. On a priority-preemptive single core,
+  `sched_yield` yields only to equal or higher priority, so a high-priority reader that preempted
+  a low-priority writer inside that window spun until the task watchdog fired. It was the default
+  on every target, the ESP-IDF chip builds included, and nothing asserted against it.
+  Reproduced on the host with two `SCHED_FIFO` threads pinned to one CPU: the reader livelocks on
+  the first run.
+
+  - **Added** `single_writer_slot_t` (and the template behind it,
+    `basic_single_writer_slot_t<guard_t>`). It is a plain `shared_ptr`, swapped on publish and
+    copied on read inside `config_t::reader_guard_t`. The displaced value is released after the
+    guard closes, so no destructor runs with interrupts masked. A publish cannot fail, and the
+    slot has no registry.
+  - **Added** `default_config_t::kSingleWriter` (per-build, default `false`),
+    `default_config_t::reader_guard_t` (default `no_guard_t`), `tr::graph::no_guard_t`, and
+    `tr::graph::mutex_guard_t` (the host guard: one process-wide mutex, whose waiters sleep and
+    never spin). A build that binds `single_writer_slot_t` must also set `kSingleWriter`, which
+    `vertex.hpp` asserts.
+  - **Added** a mandatory `static constexpr bool may_spin` on every slot policy. `vertex.hpp`
+    refuses a policy that does not declare it, and refuses one that declares `true` where
+    `kSpinWaitSafe` is `false`. The `spin_slot_guard` ctest checks both refusals by their
+    diagnostics. Both shipped policies declare `false`.
+  - **Changed** `default_config_t::lkv_slot_t` from `sp_atomic_slot_t` to `hazard_slot_t`. A raw
+    `-I` host consumer now builds the hazard domain (`(kHazardReaderSlots + 1) * 128` B of
+    `.bss` at the defaults) and gets its deferred-reclamation lifetime rule. An embedded target
+    without an override fragment should bind `single_writer_slot_t`.
+  - **Changed** the `LIBTRACER_LKV_SLOT` CMake option to default to `hazard_slot_t` and to accept
+    only `hazard_slot_t` or `single_writer_slot_t`. The second writes `kSingleWriter = true` and
+    `reader_guard_t = mutex_guard_t` into the generated fragment. `sp_atomic_slot_t` is a
+    configure-time error.
+  - **Migration:** an override fragment that named `sp_atomic_slot_t` binds
+    `single_writer_slot_t` with `kSingleWriter = true` and a `reader_guard_t`, or drops the line
+    to take `hazard_slot_t`. A custom slot policy adds `may_spin`.
+
 - **BREAKING — the `/net:children[]` connection-creation door is RETIRED, and with it the SPEC's
   `type` pair and the `role` config key** ([#492](https://github.com/avatarsd-llc/libtracer/issues/492)
   S7, [RFC-0014](../docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)

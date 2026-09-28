@@ -287,8 +287,7 @@ endif()
 # existed to guarantee.
 # What this component deliberately does NOT state, because core's default is already the right
 # answer here: the ACL profile (`allow_only_policy_t`, the MCU profile — no full-ACL Kconfig
-# yet), the LKV slot (`sp_atomic_slot_t` — a write-dominated single core keeps the refcount
-# slot) and the hazard reader slots (unused, since the refcount slot never builds the domain).
+# yet) and the hazard reader slots (unused on a chip, which binds the single-writer slot below).
 # CONFIG_* is defined only in the SECOND (build) CMake pass; in the early
 # requirement-expansion pass the fallback writes the stock default (16), which the
 # second pass then overwrites with the real value before anything compiles.
@@ -332,6 +331,23 @@ if(IDF_TARGET STREQUAL "linux")
 else()
     set(LIBTRACER_SPIN_WAIT_SAFE false)
 endif()
+# The LKV slot (#1618, RFC 0028 §5.5) — DERIVED with the spin-wait fact above, because it is
+# the same fact. core refuses any slot that can spin where kSpinWaitSafe is false, so every chip
+# target binds `single_writer_slot_t`, whose one wait is an interrupt-masked critical section
+# (`tr::esp::critical_guard_t`), and states the single-writer contract that slot is named for.
+# The `linux` host target, where spinning is safe, keeps core's default (`hazard_slot_t`). The
+# guard header includes only FreeRTOS, so including it from the fragment is not a cycle.
+if(LIBTRACER_SPIN_WAIT_SAFE)
+    set(LIBTRACER_SLOT_INCLUDE "")
+    set(LIBTRACER_SLOT_BINDING "")
+else()
+    set(LIBTRACER_SLOT_INCLUDE "#include \"libtracer_esp/critical_guard.hpp\"\n")
+    set(LIBTRACER_SLOT_BINDING
+"    static constexpr bool kSingleWriter = true;
+    using reader_guard_t = tr::esp::critical_guard_t;
+    using lkv_slot_t = single_writer_slot_t;
+")
+endif()
 # The S5 liveness engine (#1470). CONFIG_* is undefined in the early requirement-expansion
 # pass, so the fallback is the Kconfig DEFAULT (y) rather than off — the second pass then
 # writes the real value before anything compiles. Getting this backwards would render a
@@ -363,7 +379,7 @@ set(LIBTRACER_CONFIG_OVERRIDE_TEXT
 #pragma once
 
 #include <cstddef>
-
+${LIBTRACER_SLOT_INCLUDE}
 namespace tr::graph {
 
 /** @brief Core's defaults with this component's Kconfig and chip-derived knobs applied. */
@@ -374,7 +390,7 @@ struct esp_config_t : default_config_t {
     static constexpr bool kSpinWaitSafe = ${LIBTRACER_SPIN_WAIT_SAFE};
     static constexpr bool kSelfHealLinks = ${LIBTRACER_SELF_HEAL_LINKS};
     static constexpr std::size_t kSelfHealWorkerStackBytes = ${LIBTRACER_SELF_HEAL_WORKER_STACK};
-};
+${LIBTRACER_SLOT_BINDING}};
 
 using config_t = esp_config_t;
 

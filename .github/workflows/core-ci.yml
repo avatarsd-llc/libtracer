@@ -145,17 +145,19 @@ jobs:
     # (acl_full=ON). LIBTRACER_ACL_FULL swaps acl_policy_t at compile time, so
     # the full config is a distinct compilation the default job never covers (#345).
     #
-    # The third leg rebinds tr::graph::lkv_slot_t to the hazard-reclamation slot
-    # (ADR-0069 §1). lkv_slot_test covers both policies in every leg by naming them,
-    # but only a rebound build puts one under graph_t — which is what caught the
-    # deferred-reclamation-vs-injected-pmr-resource break in graph_pmr_test.
+    # The first two legs rebind tr::graph::lkv_slot_t to the single-writer slot (the
+    # binding an RTOS target uses, RFC 0028 §5.5, here over the host mutex guard); the
+    # third keeps the hazard-reclamation default (ADR-0069 §1). lkv_slot_test covers both
+    # policies in every leg by naming them, but only a rebound build puts one under
+    # graph_t — which is what caught the deferred-reclamation-vs-injected-pmr-resource
+    # break in graph_pmr_test.
     strategy:
       matrix:
         include:
           - acl_full: OFF
-            lkv_slot: sp_atomic_slot_t
+            lkv_slot: single_writer_slot_t
           - acl_full: ON
-            lkv_slot: sp_atomic_slot_t
+            lkv_slot: single_writer_slot_t
           - acl_full: OFF
             lkv_slot: hazard_slot_t
     name: build-test (acl_full=${{ matrix.acl_full }}, slot=${{ matrix.lkv_slot }})
@@ -595,7 +597,7 @@ jobs:
     timeout-minutes: 25
     strategy:
       matrix:
-        lkv_slot: [sp_atomic_slot_t, hazard_slot_t]
+        lkv_slot: [single_writer_slot_t, hazard_slot_t]
     name: sanitizers (slot=${{ matrix.lkv_slot }})
     steps:
       - uses: actions/checkout@v4
@@ -618,7 +620,7 @@ jobs:
     timeout-minutes: 35
     strategy:
       matrix:
-        lkv_slot: [sp_atomic_slot_t, hazard_slot_t]
+        lkv_slot: [single_writer_slot_t, hazard_slot_t]
     name: tsan (slot=${{ matrix.lkv_slot }})
     steps:
       - uses: actions/checkout@v4
@@ -639,7 +641,7 @@ jobs:
     runs-on: ubuntu-24.04
     strategy:
       matrix:
-        lkv_slot: [sp_atomic_slot_t, hazard_slot_t]
+        lkv_slot: [single_writer_slot_t, hazard_slot_t]
     name: tsan qsbr (slot=${{ matrix.lkv_slot }})
     steps:
       - uses: actions/checkout@v4

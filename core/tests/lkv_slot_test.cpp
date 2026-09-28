@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief ADR-0069 — the LKV slot policies, both of them, in whatever build this is.
+ * @brief ADR-0069, RFC 0028 §5.5 — the LKV slot policies, both of them, in whatever build this is.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -35,7 +35,15 @@
  *     here by replacing this binary's nothrow `operator new` rather than by inspection;
  *   - **the exit sweep spares live participants** (#898) — driven by an injected
  *     `final_sweep_t`, since a static-destruction object is otherwise unobservable, once as a
- *     deterministic snapshot of a blocked worker's lists and once as a race a sanitizer sees.
+ *     deterministic snapshot of a blocked worker's lists and once as a race a sanitizer sees;
+ *   - **the single-writer slot's guard discipline** (#1618) — every operation is exactly one
+ *     guarded section, and a displaced value is released OUTSIDE it, so a rope's destructor
+ *     never runs with interrupts masked on the target that binds a critical section.
+ *
+ * The single-writer slot is instantiated over a counting mutex guard of this file's own, which
+ * is what lets the concurrent run exercise it under real threads; the no-spin property against
+ * a preempted writer is `lkv_slot_inversion_test`, and the build-time refusal of a spinning
+ * policy is `spin_slot_guard`.
  */
 
 #include "libtracer/lkv_slot.hpp"
@@ -49,6 +57,7 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <new>
 #include <string_view>
 #include <thread>
@@ -59,7 +68,6 @@
 namespace {
 
 using tr::graph::hazard_slot_t;
-using tr::graph::sp_atomic_slot_t;
 using tr::view::rope_t;
 
 using tr::testing::check;
@@ -69,6 +77,45 @@ constexpr std::memory_order relaxed_ = std::memory_order_relaxed;
 
 /** @brief How many ropes this test has published and not yet seen freed. */
 std::atomic<std::size_t> g_live{0};
+
+/** @brief How deep inside @ref counting_guard_t the calling thread is. */
+thread_local int t_guard_depth = 0;
+
+/** @brief Sections @ref counting_guard_t has opened, process-wide. */
+std::atomic<std::size_t> g_guard_entries{0};
+
+/** @brief Ropes freed while their freeing thread was inside a guard — must stay 0. */
+std::atomic<std::size_t> g_freed_in_guard{0};
+
+/**
+ * @brief The single-writer slot's guard for this test: a mutex that counts its sections and
+ *        lets the rope deleter see whether it is running inside one.
+ */
+struct counting_guard_t {
+    counting_guard_t() {
+        mu().lock();
+        ++t_guard_depth;
+        g_guard_entries.fetch_add(1, relaxed_);
+    }
+    ~counting_guard_t() {
+        --t_guard_depth;
+        mu().unlock();
+    }
+    counting_guard_t(const counting_guard_t&) = delete;
+    counting_guard_t& operator=(const counting_guard_t&) = delete;
+
+    /** @brief The one mutex every test slot shares. */
+    static std::mutex& mu() {
+        static std::mutex m;
+        return m;
+    }
+};
+
+/** @brief The single-writer slot as this test instantiates it. */
+using single_writer_slot_t = tr::graph::basic_single_writer_slot_t<counting_guard_t>;
+
+static_assert(!single_writer_slot_t::may_spin, "the single-writer slot must never spin-wait");
+static_assert(!hazard_slot_t::may_spin, "the hazard slot must never spin-wait");
 
 /**
  * @brief A rope carrying a self-checking identity, so a reader can tell a live value from
@@ -86,6 +133,7 @@ struct tagged_rope_t : rope_t {
     raw->inverse = ~tag;
     g_live.fetch_add(1, std::memory_order_relaxed);
     return std::shared_ptr<const tagged_rope_t>(raw, [](const tagged_rope_t* p) {
+        if (t_guard_depth != 0) g_freed_in_guard.fetch_add(1, relaxed_);
         g_live.fetch_sub(1, std::memory_order_relaxed);
         delete p;
     });
@@ -216,7 +264,7 @@ void bounded_parking(const char* name, std::size_t publishes) {
             peak = std::max(peak, g_live.load(std::memory_order_relaxed));
         }
     }
-    // One batch of parked nodes, plus the value the slot itself holds. `sp_atomic_slot_t`
+    // One batch of parked nodes, plus the value the slot itself holds. `single_writer_slot_t`
     // reclaims on the spot and sits at 1; the point is that neither grows with `publishes`.
     const std::size_t bound = tr::graph::detail_hp::kRetireBatch + 2;
     std::printf("    peak live ropes over %zu publishes = %zu (bound %zu)\n", publishes, peak,
@@ -608,10 +656,10 @@ void declined_publish() {
     check(slot.load() == nullptr, "a clear succeeds even with no memory at all");
 }
 
-/** @brief The refcount slot allocates nothing to publish, so starvation cannot reach it. */
-void sp_atomic_never_declines() {
-    std::printf("sp_atomic_slot_t — nothing to allocate, so nothing to decline:\n");
-    sp_atomic_slot_t slot;
+/** @brief The single-writer slot allocates nothing to publish, so starvation cannot reach it. */
+void single_writer_never_declines() {
+    std::printf("single_writer_slot_t — nothing to allocate, so nothing to decline:\n");
+    single_writer_slot_t slot;
     bool ok = false;
     std::thread cold([&] {
         g_starve.store(true, std::memory_order_relaxed);
@@ -623,23 +671,58 @@ void sp_atomic_never_declines() {
     slot.clear();
 }
 
+/**
+ * @brief Every single-writer operation is ONE guarded section, and nothing is freed inside it.
+ *
+ * The second half is the one a target cares about: there the guard masks interrupts, and a
+ * rope's destructor (and the memory resource behind it) must not run in that window.
+ */
+void single_writer_guard_discipline() {
+    std::printf("single_writer_slot_t — one guarded section per operation, nothing freed in it:\n");
+    g_freed_in_guard.store(0);
+    {
+        single_writer_slot_t slot;
+        std::size_t before = g_guard_entries.load();
+        check(slot.store(make_tagged(1)), "a first publish succeeds");
+        check(g_guard_entries.load() - before == 1, "a publish opens exactly one guarded section");
+
+        before = g_guard_entries.load();
+        check(slot.store(make_tagged(2)), "a replacing publish succeeds");
+        check(g_guard_entries.load() - before == 1, "and so does a replacing one");
+
+        before = g_guard_entries.load();
+        const auto held = slot.load();
+        check(g_guard_entries.load() - before == 1, "a read opens exactly one guarded section");
+        check(intact(held) && tag_of(held) == 2, "and returns the published value");
+
+        before = g_guard_entries.load();
+        slot.clear(std::memory_order_release);
+        check(g_guard_entries.load() - before == 1, "a clear opens exactly one guarded section");
+    }
+    check(g_freed_in_guard.load() == 0,
+          "no displaced or cleared value was released inside the guard");
+    check(g_live.load() == 0, "and every one of them was released");
+}
+
 }  // namespace
 
 /** @brief Run every slot-policy probe. */
 int main() {
-    std::printf("LKV slot policies (ADR-0069): sp_atomic_slot_t and hazard_slot_t\n\n");
+    std::printf("LKV slot policies (ADR-0069): single_writer_slot_t and hazard_slot_t\n\n");
 
-    contract<sp_atomic_slot_t>("sp_atomic_slot_t");
+    contract<single_writer_slot_t>("single_writer_slot_t");
     contract<hazard_slot_t>("hazard_slot_t");
+    single_writer_guard_discipline();
 
     const std::size_t hw = std::max<std::size_t>(std::thread::hardware_concurrency(), 2);
     const std::size_t readers = std::min<std::size_t>(hw, 8);
-    concurrent<sp_atomic_slot_t>("sp_atomic_slot_t", 2, readers, 5000);
-    check(g_live.load() == 0, "sp_atomic_slot_t: the concurrent run freed every rope");
+    // One writer: the single-writer slot is exercised under the contract it is named for.
+    concurrent<single_writer_slot_t>("single_writer_slot_t", 1, readers, 10000);
+    check(g_live.load() == 0, "single_writer_slot_t: the concurrent run freed every rope");
     concurrent<hazard_slot_t>("hazard_slot_t", 2, readers, 5000);
     check(g_live.load() == 0, "hazard_slot_t: the concurrent run freed every rope");
 
-    bounded_parking<sp_atomic_slot_t>("sp_atomic_slot_t", 20000);
+    bounded_parking<single_writer_slot_t>("single_writer_slot_t", 20000);
     bounded_parking<hazard_slot_t>("hazard_slot_t", 20000);
 
     claiming_writes_nothing_into_the_announcement_table();
@@ -654,7 +737,7 @@ int main() {
     sweep_spares_a_live_participant();
     sweep_races_a_live_writer(200);
 
-    sp_atomic_never_declines();
+    single_writer_never_declines();
     declined_publish();
     check(g_live.load() == 0, "the starvation probes freed every rope too");
 

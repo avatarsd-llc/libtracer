@@ -130,7 +130,7 @@ edges along with the departed one's.
 ## Closing the bus module out at build time
 
 The peer-named tier is a **module**, and a node whose links are all point-to-point does not
-have to carry it. `tr::graph::default_config_t::kBusLinks` (`core/include/libtracer/config.hpp:488`)
+have to carry it. `tr::graph::default_config_t::kBusLinks` (`core/include/libtracer/config.hpp:534`)
 is the knob; bound `false` by an
 [ADR-0068](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0068-build-configuration-is-plain-cpp-config-header.md)
 override fragment, not a `-D`:
@@ -181,7 +181,7 @@ would keep delivering peer-named into a sink the router never installed.
 ## QUIC and WebTransport
 
 Both live in the separate `libtracer_quic` target, configured by
-`LIBTRACER_WITH_QUIC` (`core/CMakeLists.txt:290`, default `OFF` because msquic must
+`LIBTRACER_WITH_QUIC` (`core/CMakeLists.txt:303`, default `OFF` because msquic must
 be installed). Core itself contains no `#ifdef` and no msquic reference: the module
 extends the transport catalog through `register_transport_type`, registering
 `quic_transport_factory()` under kind `quic` and `webtransport_transport_factory()`

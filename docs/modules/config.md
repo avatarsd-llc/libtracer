@@ -74,7 +74,9 @@ ahead of `libtracer/config.hpp` on the include path:
 ```cpp
 struct my_node_config_t : tr::graph::default_config_t {
     static constexpr std::size_t kCacheLineBytes = 0;   // single-core: no false sharing
-    using lkv_slot_t = tr::graph::hazard_slot_t;        // many-core: no shared pointer lock
+    static constexpr bool kSingleWriter = true;         // one publisher per vertex
+    using reader_guard_t = my_rtos_critical_section_t;  // interrupt-masked, never spins
+    using lkv_slot_t = tr::graph::single_writer_slot_t;
 };
 using config_t = my_node_config_t;
 ```
@@ -94,16 +96,17 @@ first-match-per-bit, DENY included. See [security & ACL](security-acl.md) for
 what the entries mean.
 
 **LKV slot policy** — `lkv_slot_t` picks how a vertex publishes and reads its
-last-known value. `sp_atomic_slot_t` is the default: an
-`std::atomic<std::shared_ptr<const rope_t>>` whose reclamation *is* the refcount,
-so there is no scheme to implement and no registry to size. `hazard_slot_t` is
-the many-core alternative: a lock-free `atomic<node_t*>` reclaimed with hazard
-pointers, which removes the pointer-lock both `load` and `store` take in the
-default slot. The trade is explicit — the hazard slot buys nothing at one thread,
-costs a fixed registry sized by `kHazardReaderSlots`, and has a publish that can
-fail under memory exhaustion, which the default slot cannot. Both return an
-*owning* handle from `load()`; that is the contract a third policy would have to
-satisfy.
+last-known value. `hazard_slot_t` is the host default: a lock-free
+`atomic<node_t*>` reclaimed with hazard pointers. It costs a fixed registry sized
+by `kHazardReaderSlots` and has a publish that can fail under memory exhaustion.
+`single_writer_slot_t` is the single-writer and RTOS binding: a plain
+`shared_ptr` swapped and copied inside `reader_guard_t` (an interrupt-masked
+critical section on a chip, `mutex_guard_t` on a host), with no registry and a
+publish that cannot fail. A build that binds it also sets `kSingleWriter`. Every
+policy returns an *owning* handle from `load()` and declares `may_spin`, and a
+build whose `kSpinWaitSafe` is `false` refuses a policy that can spin. The
+refcount slot `sp_atomic_slot_t` was removed because libstdc++ spin-locks it
+(#1618).
 
 ## Pitfalls
 
@@ -211,7 +214,22 @@ plane read their own spellings, so that neither L0 nor `tr::net` has to name an 
 :members:
 ```
 
-```{doxygenclass} tr::graph::sp_atomic_slot_t
+```{doxygenclass} tr::graph::single_writer_slot_t
+:project: libtracer
+:members:
+```
+
+```{doxygenclass} tr::graph::basic_single_writer_slot_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::graph::mutex_guard_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::graph::no_guard_t
 :project: libtracer
 :members:
 ```
