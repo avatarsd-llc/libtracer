@@ -235,8 +235,8 @@ flowchart TB
   consumer that did not need contiguity. `m` must stay alive while its span is read.
 - **The default delivery leg copies nothing.** A full-route `FWD{WRITE}` fan-out scatter-gathers a
   fresh stack head, the stored return-route bytes, an empty `src`, and one span per link of the
-  stored value (`core/src/fwd_router.cpp:3639`). The `COMPACT` leg is the one that flattens,
-  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:3424`) — single-link, that
+  stored value (`core/src/fwd_router.cpp:3644`). The `COMPACT` leg is the one that flattens,
+  because a `COMPACT` wraps a contiguous payload (`core/src/fwd_router.cpp:3429`) — single-link, that
   flatten is a zero-copy adopt, and multi-link it draws from the router's injected `flat` backend
   (#730), not the global heap.
 - **All rope flattens on the forward AND terminus paths draw from the injected seam.** `flat`
@@ -493,6 +493,11 @@ tested against hand-built frames with no live transport.
 ```
 
 ```{doxygenstruct} tr::net::router_stats_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::net::forward_stats_t
 :project: libtracer
 :members:
 ```

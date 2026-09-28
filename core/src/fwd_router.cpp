@@ -1041,7 +1041,8 @@ bool fwd_router_t::remove_child(std::string_view name) {
     // work link_down does, reused rather than duplicated.
     // The departing link as a forward target, captured while it still resolves: the pending
     // forwards sent over it are answered once the tombstone is up (#1625).
-    const transport_t* const gone = registry_.by_name(name);
+    const child_registry_t::child_t* const entry = registry_.entry_by_name(name);
+    const transport_t* const gone = entry != nullptr ? entry->link() : nullptr;
     if (!registry_.erase(name)) return false;
     // TOMBSTONE the receiver ctx (#884) — it stays on the published chain, because a lock-free
     // reader may be standing on it right now and the transport still holds its address, but it
@@ -1112,7 +1113,11 @@ void fwd_router_t::link_down(std::string_view link_name) {
     clear_link(link_name);
     // Forwards sent over the departed link are answered now rather than at their deadline,
     // and forwards it asked for are dropped — there is nobody left to answer (#1625).
-    settle_forwards_via(registry_.by_name(link_name));
+    // Exact child names only: `by_name`'s bus-peer fallback makes a virtual call on each bus
+    // child, and this hook runs on a transport's own thread while that transport may be
+    // mid-destruction on another. A departed bus peer's entries fall to their deadline.
+    const child_registry_t::child_t* const gone = registry_.entry_by_name(link_name);
+    settle_forwards_via(gone != nullptr ? gone->link() : nullptr);
 }
 
 std::string fwd_router_t::session_anchor_id(std::string_view mount, std::string_view peer) {
