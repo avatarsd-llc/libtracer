@@ -82,6 +82,8 @@ INPUT                  = core/include/libtracer/config.hpp \
                          core/include/libtracer/transport_vertex.hpp \
                          core/include/libtracer/self_heal_link.hpp \
                          core/include/libtracer/fwd_router.hpp \
+                         core/include/libtracer/fwd_pending.hpp \
+                         core/include/libtracer/tx_handoff.hpp \
                          core/include/libtracer/fwd_frame_view.hpp \
                          core/include/libtracer/grammar.hpp \
                          core/include/libtracer/route_handle.hpp \

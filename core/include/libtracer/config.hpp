@@ -26,6 +26,7 @@
  */
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 
@@ -566,6 +567,46 @@ struct default_config_t {
      * `static constexpr std::size_t kSelfHealWorkerStackBytes = 4096;`
      */
     static constexpr std::size_t kSelfHealWorkerStackBytes = 0;
+
+    /**
+     * @brief How long a forwarder waits for the reply to a request it forwarded before it
+     *        answers the requester itself with `tr::flow::timeout` (RFC 0028 §4.7, #1625).
+     *
+     * A hop used to keep nothing about a forwarded request, so a far end that never answered
+     * left the requester with no reply and no error, and a requester that sends one request
+     * at a time stalled behind the silent one until its own timeout tore the session down.
+     * Each hop now bounds its own leg: past this deadline the requester gets an addressed
+     * error in place of the reply. A reply that arrives after the deadline is still
+     * forwarded — the requester then sees the error first and the late reply second.
+     *
+     * Only READ forwards that asked for a reply (a non-empty `src`) are bounded. An AWAIT
+     * carries its own timeout, and a WRITE is left unbounded so that a producer streaming
+     * acknowledged writes through a hop is never refused by a full table. Override fragment:
+     * `static constexpr std::chrono::milliseconds kForwardDeadline{1000};`
+     */
+    static constexpr std::chrono::milliseconds kForwardDeadline{250};
+
+    /**
+     * @brief Forwarded requests a forwarder may hold open at once, awaiting their replies
+     *        (#1625) — the fixed entry count of its pending-reply table.
+     *
+     * A full table refuses the next forward at once with `BACKPRESSURE` rather than growing,
+     * so the table's RAM is fixed at build time: about
+     * `kForwardPendingSlots * (kForwardRouteBytes + 48)` bytes per router on a 64-bit host. `0`
+     * removes the table and the deadline with it — forwards are then unbounded, as before. Override
+     * fragment: `static constexpr std::size_t kForwardPendingSlots = 4;`
+     */
+    static constexpr std::size_t kForwardPendingSlots = 16;
+
+    /**
+     * @brief Route bytes one pending-reply entry holds: the forwarded request's `src` body
+     *        plus its `dst` body, which are the two routes the hop's own error reply needs.
+     *
+     * A forward whose routes do not fit is forwarded unbounded, as before, and counted in
+     * `forward_stats_t::untracked` so the budget can be sized against real routes. Override
+     * fragment: `static constexpr std::size_t kForwardRouteBytes = 64;`
+     */
+    static constexpr std::size_t kForwardRouteBytes = 128;
 };
 
 }  // namespace tr::graph
@@ -701,5 +742,15 @@ inline constexpr bool kSelfHealLinks = tr::graph::config_t::kSelfHealLinks;
  */
 inline constexpr std::size_t kSelfHealWorkerStackBytes =
     tr::graph::config_t::kSelfHealWorkerStackBytes;
+
+/**
+ * @brief How long a forwarder waits for a forwarded request's reply before answering the
+ *        requester itself with `tr::flow::timeout`.
+ *
+ * The transport plane's spelling of @ref tr::graph::default_config_t::kForwardDeadline, which
+ * carries the rationale. Its one consumer is the forward hop's pending-reply table
+ * (`fwd_router.cpp`).
+ */
+inline constexpr std::chrono::milliseconds kForwardDeadline = tr::graph::config_t::kForwardDeadline;
 
 }  // namespace tr::net

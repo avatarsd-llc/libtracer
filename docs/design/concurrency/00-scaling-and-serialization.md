@@ -64,7 +64,7 @@ hold and recurses under it. The doc comment at `:535` states the same contract f
 
 **The RFC-0024 bound-path slot API is on this list, and it is not control plane.** Minting an
 element takes the lock (`op_resolve_walk.hpp:653` → `vertex_slot`) and honouring one takes it
-again (`op_resolve_walk.hpp:1149` and `fwd_router.cpp:1377-1383` → `deref_vertex_slot`), so a bound-path hop pays
+again (`op_resolve_walk.hpp:1149` and `fwd_router.cpp:1384-1390` → `deref_vertex_slot`), so a bound-path hop pays
 `map_mutex_` on both ends of the round trip that bound paths exist to make cheap. The two are not
 the same cost: `vertex_slot` **scans `vertex_slots_` linearly** inside the hold, while
 `deref_vertex_slot` and `vertex_slot_at` are a bounds check and one compare — the asymmetry
@@ -115,7 +115,7 @@ what the `stripe1` bench topology exists to measure.
 
 ### 2.3 The LKV slot — per vertex, policy-selected
 
-`lkv_slot_t` is a compile-time policy (`core/include/libtracer/config.hpp:287`,
+`lkv_slot_t` is a compile-time policy (`core/include/libtracer/config.hpp:288`,
 [ADR-0069 — LKV slot is a compile-time policy](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0069-lkv-slot-is-a-compile-time-policy-hazard-reclamation.md)).
 Two bindings ship:
 

@@ -16,6 +16,45 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **BREAKING — enqueue-then-write in the stream links, and a deadline on every forwarded
+  request (RFC 0028 slice 2; fixes [#1619](https://github.com/avatarsd-llc/libtracer/issues/1619),
+  [#1625](https://github.com/avatarsd-llc/libtracer/issues/1625)).** A stalled or silent peer can
+  no longer stall an unrelated writer. Wire-neutral: no frame changes shape.
+
+  - **`tx_handoff.hpp` — `tr::net::tx_handoff_t`, new.** A bounded enqueue-then-write queue: a
+    link's lock guards the queue and a "writer in flight" flag and is never held across I/O. The
+    publisher that finds no write in flight becomes the writer; one that finds a write in flight
+    copies its record into a slot and returns at once; one that finds every slot taken drops it
+    and the link counts it. Slot storage comes from a failable `block_source_t`.
+  - **`posix_endpoint.hpp` — the single-peer stream senders (`tcp_transport_t`,
+    `transport_ws_client`) send through `stream_endpoint_t::handoff_send`.** A second publisher
+    no longer waits on `write_m_` for the rest of another publisher's write to a peer that
+    stopped reading (it used to wait up to the whole liveness window). Behaviour change: when
+    more than `stream_endpoint_t::kTxQueueDepth` (8) records are already waiting behind the
+    writer, the next one is dropped and counted in `dropped_tx()` instead of waited on. The
+    writer's own write is still bounded per record by the liveness window (#838).
+    **Removed:** `stream_endpoint_t::send_all_locked` (protected, no caller) — use
+    `handoff_send`.
+  - **`fwd_pending.hpp` — `tr::net::fwd_pending_t` and `tr::net::forward_stats_t`, new;
+    `fwd_router_t::expire_forwards()` and `fwd_router_t::forward_stats()`, new.** Each forward
+    hop keeps a fixed-size table of the READ requests it forwarded that asked for a reply. The reply that retraces the forward settles its entry. An entry still open past
+    `config_t::kForwardDeadline` (250 ms) is answered to the requester by the hop with an
+    addressed `FWD{REPLY, kind=ERROR, STATUS{tr::flow::timeout}}`. A full table refuses the new
+    forward at once with `tr::flow::backpressure`. A far end that goes away (`link_down`,
+    `remove_child`) has its open forwards answered with `tr::transport::down` at once. The
+    forward path sweeps overdue entries whenever it runs; a node whose traffic can go quiet
+    calls `expire_forwards()` from its own loop. Behaviour change: a reply that arrives after
+    the deadline is still forwarded, so the requester sees the timeout first and the late reply
+    second. WRITE forwards (so an acknowledged write stream is never refused by a full
+    table), AWAIT forwards (which carry their own timeout), empty-`src` forwards (no reply asked
+    for), bound (`PATH_REF`) destinations and requests arriving from a bus peer are not tracked.
+  - **`config.hpp` — `kForwardDeadline` (250 ms), `kForwardPendingSlots` (16) and
+    `kForwardRouteBytes` (128), new traits; `tr::net::kForwardDeadline`, new.** The table's RAM
+    is fixed at build time, about `kForwardPendingSlots * (kForwardRouteBytes + 48)` bytes per
+    router on a 64-bit host (2,816 B at the defaults). `kForwardPendingSlots = 0` removes the
+    table and the deadline. A forward whose two routes exceed `kForwardRouteBytes` is forwarded
+    unbounded and counted in `forward_stats_t::untracked`.
+
 - **`vertex.hpp` — `tr::graph::admission_t`, `handlers_t::on_admit` and
   `handlers_t::on_app_field_admit`: a pre-store ADMISSION seam for stored-value and app-field
   writes.** Until now the only user callback in the write path was `on_write`, which runs on the

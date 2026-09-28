@@ -1039,6 +1039,9 @@ bool fwd_router_t::remove_child(std::string_view name) {
     // so the caller is free to destroy the transport as soon as this returns. Then the
     // ordinary departure eviction reclaims the graph edges and label state — the same
     // work link_down does, reused rather than duplicated.
+    // The departing link as a forward target, captured while it still resolves: the pending
+    // forwards sent over it are answered once the tombstone is up (#1625).
+    const transport_t* const gone = registry_.by_name(name);
     if (!registry_.erase(name)) return false;
     // TOMBSTONE the receiver ctx (#884) — it stays on the published chain, because a lock-free
     // reader may be standing on it right now and the transport still holds its address, but it
@@ -1063,6 +1066,7 @@ bool fwd_router_t::remove_child(std::string_view name) {
         if (ctx->peer_tokens_own != nullptr) ctx->peer_tokens_own->clear();
     }
     link_down(name);
+    settle_forwards_via(gone);
     return true;
 }
 
@@ -1106,6 +1110,9 @@ void fwd_router_t::clear_link(std::string_view link_name) { handles_.clear_link(
 void fwd_router_t::link_down(std::string_view link_name) {
     graph_.evict_link_edges(link_name);
     clear_link(link_name);
+    // Forwards sent over the departed link are answered now rather than at their deadline,
+    // and forwards it asked for are dropped — there is nobody left to answer (#1625).
+    settle_forwards_via(registry_.by_name(link_name));
 }
 
 std::string fwd_router_t::session_anchor_id(std::string_view mount, std::string_view peer) {
@@ -2433,6 +2440,159 @@ template <class Cursor>
         peer_handle_from_bits(egress->label_peer.load(std::memory_order_relaxed)));
 }
 
+namespace {
+
+/** @brief FNV-1a over the cursor window `[off, off + len)` — a pending-reply key (#1625). */
+template <class Cursor>
+[[nodiscard]] std::uint32_t route_key(const Cursor& cur, std::size_t off, std::size_t len) {
+    std::uint32_t h = 2166136261u;
+    cur.for_each_span(off, len, [&h](std::span<const std::byte> s) {
+        for (const std::byte b : s) {
+            h ^= std::to_integer<std::uint8_t>(b);
+            h *= 16777619u;
+        }
+    });
+    return h;
+}
+
+/** @brief Copy the cursor window `[off, off + len)` to @p out (exactly @p len bytes). */
+template <class Cursor>
+void copy_window(const Cursor& cur, std::size_t off, std::size_t len, std::byte* out) {
+    cur.for_each_span(off, len, [&out](std::span<const std::byte> s) {
+        std::memcpy(out, s.data(), s.size());
+        out += s.size();
+    });
+}
+
+/** @brief Whether the cursor window `[off, off + len)` equals @p want byte for byte. */
+template <class Cursor>
+[[nodiscard]] bool window_equals(const Cursor& cur, std::size_t off, std::size_t len,
+                                 std::span<const std::byte> want) {
+    if (len != want.size()) return false;
+    bool same = true;
+    std::size_t at = 0;
+    cur.for_each_span(off, len, [&](std::span<const std::byte> s) {
+        if (same && std::memcmp(s.data(), want.data() + at, s.size()) != 0) same = false;
+        at += s.size();
+    });
+    return same;
+}
+
+}  // namespace
+
+template <class Cursor>
+bool fwd_router_t::note_forward(const child_rx_ctx_t* inbound_ctx, bool from_peer,
+                                const transport_t& child, const Cursor& cur, const fwd_pre_t* pre,
+                                const fwd_rebuild_t& rebuilt) {
+    if constexpr (fwd_pending_t::kSlots == 0) {
+        return true;
+    } else {
+        // Anything already overdue is answered first: a busy hop is its own timer, so only a
+        // hop whose traffic goes quiet needs the embedder to call expire_forwards().
+        if (pending_.any_open()) (void)expire_forwards();
+        // Only a frame whose offsets the peek recorded, arriving over a registered child, is
+        // bookkept — the router's context for that child is what the error reply is sent
+        // through. A bus PEER's request is left unbounded: its return route carries the peer
+        // segment, which this hop strips on a different leg than the one it matches on.
+        if (inbound_ctx == nullptr) return true;
+        const transport_t* const arrived = inbound_ctx->link.load(std::memory_order_relaxed);
+        if (arrived == nullptr) return true;
+        const auto op =
+            static_cast<graph::fwd_op_t>(cur.byte_at(pre->op_body_off) & graph::kFwdOpcodeMask);
+        if (op == graph::fwd_op_t::REPLY) {
+            // A reply retracing a forward this hop made: its remaining `dst` is, byte for byte,
+            // the `src` the request arrived with, and it is leaving over the link that request
+            // arrived on — which is the whole key.
+            if (!pending_.any_open()) return true;
+            const std::uint32_t key = route_key(cur, rebuilt.rem_dst_off, rebuilt.rem_dst_len);
+            (void)pending_.settle(&child, key, [&](std::span<const std::byte> src) {
+                return window_equals(cur, rebuilt.rem_dst_off, rebuilt.rem_dst_len, src);
+            });
+            return true;
+        }
+        // READ only (#1625): an AWAIT carries its own timeout, and a WRITE stream with acks
+        // must not be refused by a table sized for request/response traffic. An empty `src`
+        // asked for no reply (RFC-0004 Amendment 2), so there is nothing to wait for. A bound
+        // `dst` (`PATH_REF`) has no canonical body to echo, and is left unbounded.
+        if (from_peer || op != graph::fwd_op_t::READ || rebuilt.src_body_len == 0 ||
+            static_cast<wire::type_t>(cur.byte_at(pre->op_pos + pre->op_total)) !=
+                wire::type_t::PATH)
+            return true;
+        const std::size_t src_len = rebuilt.src_body_len;
+        const std::size_t dst_len = pre->dst_end - pre->dst_body_off;
+        const auto fill = [&](std::span<std::byte> out) {
+            copy_window(cur, rebuilt.src_body_off, src_len, out.data());
+            copy_window(cur, pre->dst_body_off, dst_len, out.data() + src_len);
+        };
+        const std::uint32_t key = route_key(cur, rebuilt.src_body_off, src_len);
+        switch (pending_.track(arrived, inbound_ctx, &child, key, src_len, dst_len,
+                               fwd_pending_t::clock_t::now() + kForwardDeadline, fill)) {
+            case fwd_pending_t::track_t::TRACKED:
+            case fwd_pending_t::track_t::UNTRACKED:
+                return true;
+            case fwd_pending_t::track_t::FULL:
+                break;
+        }
+        // A full table refuses the forward at once, by value, instead of growing: the
+        // requester learns now that this hop is saturated rather than waiting on a request
+        // nobody is bounding.
+        fwd_pending_t::entry_t refused;
+        refused.reply_to = inbound_ctx;
+        refused.src_len = static_cast<std::uint16_t>(src_len);
+        refused.dst_len = static_cast<std::uint16_t>(dst_len);
+        fill(std::span<std::byte>(refused.route.data(), src_len + dst_len));
+        answer_forward(refused, graph::status_t::BACKPRESSURE);
+        return false;
+    }
+}
+
+void fwd_router_t::answer_forward(const fwd_pending_t::entry_t& e, graph::status_t status) {
+    const auto* const ctx = static_cast<const child_rx_ctx_t*>(e.reply_to);
+    // The requester's link was removed in the meantime: nobody is left to answer.
+    if (ctx == nullptr || ctx->retired.load(std::memory_order_acquire)) return;
+    transport_t* const up = ctx->link.load(std::memory_order_relaxed);
+    if (up == nullptr) return;
+    // The two route TLVs, re-headed around the stored bodies: reply dst = request src (the
+    // return route), reply src = request dst (what the requester asked for, echoed so it can
+    // correlate) — the swap every addressed error reply makes.
+    stack_writer<fwd_pending_t::kRouteBytes + 8> rdst;
+    rdst.header_path(e.src_len);
+    rdst.raw(e.src());
+    stack_writer<fwd_pending_t::kRouteBytes + 8> rsrc;
+    rsrc.header_path(e.dst_len);
+    rsrc.raw(e.dst());
+    if (rdst.span().empty() || rsrc.span().empty()) return;
+    const graph::reply_route_t route{.dst_wire = rdst.span(), .src_wire = rsrc.span()};
+    const view::rope_t reply = graph::assemble_error_reply(route, status, *egress_);
+    // One link by construction (no echo stamp is carried); zero is the egress refusal.
+    if (reply.link_count() == 1) up->send(reply.links()[0].bytes());
+}
+
+std::size_t fwd_router_t::expire_forwards() {
+    if constexpr (fwd_pending_t::kSlots == 0) {
+        return 0;
+    } else {
+        if (!pending_.any_open()) return 0;
+        const auto now = fwd_pending_t::clock_t::now();
+        std::size_t answered = 0;
+        fwd_pending_t::entry_t e;
+        while (pending_.take_expired(now, e)) {
+            answer_forward(e, graph::status_t::TIMEOUT);
+            ++answered;
+        }
+        return answered;
+    }
+}
+
+void fwd_router_t::settle_forwards_via(const transport_t* link) {
+    if constexpr (fwd_pending_t::kSlots != 0) {
+        if (link == nullptr) return;
+        fwd_pending_t::entry_t e;
+        while (pending_.take_via(link, e)) answer_forward(e, graph::status_t::TRANSPORT_DOWN);
+        pending_.forget_requester(link);
+    }
+}
+
 template <class Cursor>
 void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
                                      const child_rx_ctx_t* inbound_ctx, bool from_peer,
@@ -2516,6 +2676,19 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
     if (!rebuilt->ok()) {  // malformed oversized op ⇒ drop, no overrun
         count_drop(malformed_rx_);
         return;
+    }
+    // The pending-reply table (#1625): one out-of-line call, which bounds a forwarded READ
+    // with a deadline, settles the entry a forwarded reply answers, answers overdue entries,
+    // and refuses the forward by value when the table is full. Gated here on the op byte the
+    // peek already located and on one relaxed load, so the hop that forwards WRITEs with no
+    // entry open — the streaming shape `bench_forward_demux` prices — never makes the call.
+    if constexpr (fwd_pending_t::kSlots != 0) {
+        if (pre != nullptr && pre->valid &&
+            ((cur_src.byte_at(pre->op_body_off) & graph::kFwdOpcodeMask) ==
+                 static_cast<std::uint8_t>(graph::fwd_op_t::READ) ||
+             pending_.any_open()) &&
+            !note_forward(inbound_ctx, from_peer, child, cur_src, pre, *rebuilt))
+            return;
     }
 
     // Scatter-gather egress: the small stack heads interleaved with the untouched inbound

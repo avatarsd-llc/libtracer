@@ -14,6 +14,7 @@
 
 #include <array>
 #include <cerrno>
+#include <cstring>
 #include <memory>
 #include <mutex>
 #include <utility>
@@ -216,26 +217,31 @@ void tcp_transport_t::send(std::span<const std::span<const std::byte>> iov) {
         dropped_tx_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    // Hold write_m_ across the whole write so (a) the recv thread cannot close and
-    // reset conn_fd_ underneath us, and (b) two senders can never interleave their
-    // length-prefixed records on the stream; read the fd inside the lock to pair
-    // with the teardown.
-    //
-    // The hold is BOUNDED (#838). It used to span a fully blocking write, so a peer whose
-    // TCP receive window filled and stayed full froze this thread — and every other sender
-    // waiting on write_m_ — indefinitely. The record now carries the derived send bound (one
-    // peer here, so the whole liveness window), and a peer that keeps missing it is closed
-    // rather than blocked on forever.
-    const std::lock_guard lock(write_m_);
-    const int fd = conn_fd_.load(std::memory_order_relaxed);
-    if (fd < 0) {  // no live peer (still dialing, or torn down) => a counted drop
-        dropped_tx_.fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
-    const write_result_t r =
-        write_all_iov(fd, rec.span(), derive_send_bound_ms(liveness_window_ms_, 1));
-    if (note_write_result(r, fd, tx_stall_streak_))
-        dropped_tx_.fetch_add(1, std::memory_order_relaxed);  // shed by the bound, counted
+    // Enqueue-then-write (RFC 0028 §4.7, #1619). The writer holds write_m_ across each
+    // record, so records never interleave on the stream and the recv thread cannot close the
+    // fd underneath one; but a publisher that arrives while a write is in flight copies its
+    // record into the queue and returns instead of waiting on write_m_ for the rest of that
+    // write. Each record's write is still bounded by the derived send bound (#838: one peer
+    // here, so the whole liveness window), and a peer that keeps missing it is closed.
+    const std::uint64_t shed = handoff_send(
+        [&](int fd) {
+            const write_result_t r =
+                write_all_iov(fd, rec.span(), derive_send_bound_ms(liveness_window_ms_, 1));
+            return note_write_result(r, fd, tx_stall_streak_);
+        },
+        [&](mem::block_array_t<std::byte>& slot) -> std::size_t {
+            // The queued copy of the record: the gathered spans, prefix included.
+            std::size_t total = 0;
+            for (const ::iovec& v : rec.span()) total += v.iov_len;
+            if (!slot.reserve(total)) return 0;
+            std::size_t off = 0;
+            for (const ::iovec& v : rec.span()) {
+                std::memcpy(slot.data() + off, v.iov_base, v.iov_len);
+                off += v.iov_len;
+            }
+            return total;
+        });
+    if (shed != 0) dropped_tx_.fetch_add(shed, std::memory_order_relaxed);
 }
 
 bool tcp_transport_t::read_exact(int fd, std::byte* dst, std::size_t len) {

@@ -594,7 +594,8 @@ class transport_ws_client : public transport_t, private stream_endpoint_t {
     std::atomic<std::uint64_t> malformed_rx_{0};
     std::atomic<std::uint64_t> dropped_tx_{0};
     /**
-     * @brief The REUSED masked-frame buffer `send` encodes into, guarded by `write_m_`.
+     * @brief The REUSED masked-frame buffer `send` encodes into, touched only by the thread
+     *        holding the enqueue-then-write writer role (`handoff_send`).
      *
      * A client frame must be masked (RFC 6455 §5.1), so its wire bytes are not the caller's
      * bytes and cannot be gathered by reference — this is the one WS egress path that still

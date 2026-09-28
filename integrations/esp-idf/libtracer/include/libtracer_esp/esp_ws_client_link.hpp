@@ -194,6 +194,7 @@
 
 #include "esp_transport.h"
 #include "libtracer/transport.hpp"
+#include "libtracer/tx_handoff.hpp"
 #include "libtracer_esp/link_stats.hpp"
 
 namespace tr::net {
@@ -296,11 +297,17 @@ class esp_ws_client_link_t : public transport_t {
      * @brief Send @p frame as one masked BINARY WebSocket message to the peer. Drops
      *        (best-effort, like the UDP path) when not currently connected.
      *
-     * Blocking, and BOUNDED: a peer whose TCP window has closed costs the calling task
-     * one write budget (a quarter of the task-watchdog period, split across the three
-     * legs IDF spends the timeout on) and then drops the frame, tearing the connection
-     * down for the recv thread to re-dial. It used to cost up to three times a 4 s
-     * literal, which is a watchdog panic rather than a dropped frame (#952).
+     * Enqueue-then-write (RFC 0028 §4.7): only ONE task writes at a time. A task that
+     * finds a write in flight copies its frame into one of
+     * `CONFIG_LIBTRACER_WS_CLIENT_TX_QUEUE_DEPTH` slots and returns at once — the writing
+     * task sends it next — or, past the depth, drops it and counts it in `tx_drops`. So
+     * no task ever waits on another task's write (#1619).
+     *
+     * The writing task itself is BOUNDED: a peer whose TCP window has closed costs it one
+     * write budget (a quarter of the task-watchdog period, split across the three legs
+     * IDF spends the timeout on) and then drops the frame, tearing the connection down
+     * for the recv thread to re-dial. It used to cost up to three times a 4 s literal,
+     * which is a watchdog panic rather than a dropped frame (#952).
      */
     void send(std::span<const std::byte> frame) override;
 
@@ -521,6 +528,19 @@ class esp_ws_client_link_t : public transport_t {
      *         departure and re-dials. The report is NOT made here — this runs under the
      *         syscall serializer, and the notifier re-enters the routing plane. */
     void drop();
+    /**
+     * @brief Write ONE record to the peer under the syscall serializer — the writer's step.
+     *
+     * Called only by the sender holding the enqueue-then-write writer role (#1619), once for
+     * its own frame and once per frame it drains. Leaves without touching a handle once
+     * `stop_` is set, drops and counts toward a peer that is down, and tears the connection
+     * down on an error or a short write.
+     *
+     * @param wire The bytes the transport masks in place and writes.
+     * @param src  Copied into @p wire first when non-empty (the writer's own, possibly
+     *             shared, frame); empty when @p wire is already a private queued copy.
+     */
+    void write_locked(std::span<std::byte> wire, std::span<const std::byte> src);
 
     const std::string host_;
     const std::uint16_t port_;
@@ -547,7 +567,10 @@ class esp_ws_client_link_t : public transport_t {
     esp_transport_handle_t ws_ = nullptr;   // WS transport over tcp_ (owned)
 
     std::vector<std::byte> rx_buf_;  // reusable RX fill (zero-copy read target)
-    std::vector<std::byte> tx_buf_;  // reusable TX scratch (masked in-place under write_m_)
+    std::vector<std::byte> tx_buf_;  // reusable TX scratch (masked in-place by the writer)
+    /** @brief Enqueue-then-write (RFC 0028 §4.7, #1619): frames other senders queued while
+     *         a write was in flight, drained by the sender holding the writer role. */
+    tr::net::tx_handoff_t tx_;
 
     // Serializes the esp_transport read/write SYSCALLS (the write is bounded). It does
     // NOT cover the re-dial's rebuild of the handles above — assuming it did is the

@@ -2282,6 +2282,15 @@ if(LIBTRACER_NET_PLANE)
     target_link_libraries(empty_src_unacked_test PRIVATE libtracer)
     libtracer_test_warnings(empty_src_unacked_test)
     add_test(NAME empty_src_unacked COMMAND empty_src_unacked_test)
+
+    # RFC 0028 slice 2 / #1625 — a forwarded READ that asked for a reply always gets one
+    # answer in bounded time: the far end's reply, or the hop's own addressed timeout,
+    # backpressure (full table) or transport-down (far end departed). Real router, loopback
+    # links; the timed cases each spend one kForwardDeadline.
+    add_executable(fwd_forward_deadline_test fwd_forward_deadline_test.cpp)
+    target_link_libraries(fwd_forward_deadline_test PRIVATE libtracer)
+    libtracer_test_warnings(fwd_forward_deadline_test)
+    add_test(NAME fwd_forward_deadline COMMAND fwd_forward_deadline_test)
 endif()
 
 # The SUBSCRIPTION-RETAINED seam (#1610): a remote SUBSCRIBE's two life-of-the-subscription

@@ -436,6 +436,72 @@ void test_concurrent_directed_sends_share_one_window() {
     for (const int c : clients) ::close(c);
 }
 
+/**
+ * @brief RFC 0028 slice 2 (#1619): a second publisher never waits on the first one's write.
+ *
+ * The defect this reddens on: `tcp_transport_t::send` held `write_m_` across the bounded
+ * write, so while one publisher sat in a write to a peer that had stopped reading, a second
+ * publisher to the same link queued on the mutex for the rest of that write — up to the whole
+ * liveness window. Delivery is in-call, so that second publisher is whatever unrelated task
+ * wrote a vertex. With enqueue-then-write the second publisher copies its record into the
+ * link's queue and returns at once; the writer already on the wire drains it.
+ *
+ * The bound asserted is a small fraction of the window, so it is independent of the write
+ * budget: before the fix the second send took about the rest of the window.
+ */
+void test_second_publisher_never_waits_on_a_stalled_write() {
+    std::printf("a second publisher returns at once while the first is stuck on a stalled peer:\n");
+    const int listener = ::socket(AF_INET, SOCK_STREAM, 0);
+    check(listener >= 0, "listener socket");
+    const int one = 1;
+    ::setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    const int small = 4096;
+    ::setsockopt(listener, SOL_SOCKET, SO_RCVBUF, &small, sizeof(small));
+    sockaddr_in local{};
+    local.sin_family = AF_INET;
+    local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    local.sin_port = 0;
+    check(::bind(listener, reinterpret_cast<sockaddr*>(&local), sizeof(local)) == 0, "bound");
+    check(::listen(listener, 1) == 0, "listening");
+    socklen_t llen = sizeof(local);
+    check(::getsockname(listener, reinterpret_cast<sockaddr*>(&local), &llen) == 0,
+          "port resolved");
+
+    // A LONG window, so "the rest of the first write" is unmistakable against the bound below.
+    const std::uint32_t window = 3000;
+    tr::net::tcp_transport_t link("127.0.0.1", ntohs(local.sin_port), &tr::mem::heap_backend(),
+                                  /*max_frame=*/0, /*recv_stack=*/0, /*defer_recv=*/false, window);
+    check(link.ok(), "the dial succeeded");
+    const int peer = ::accept(listener, nullptr, nullptr);
+    check(peer >= 0, "the peer accepted the connection — and now never reads a byte");
+
+    // The first publisher: one record far larger than both socket buffers, so its write is
+    // still in flight when the second publisher arrives.
+    const std::vector<std::byte> big(8 * 1024 * 1024);
+    std::atomic<bool> first_done{false};
+    std::thread first([&] {
+        link.send(std::span(big));
+        first_done.store(true, std::memory_order_release);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    check(!first_done.load(std::memory_order_acquire),
+          "the first publisher is stuck in its write to the stalled peer");
+
+    const std::vector<std::byte> small_frame(64);
+    const auto t0 = clock_t_::now();
+    link.send(std::span(small_frame));
+    const std::int64_t took = ms_since(t0);
+    const bool first_still_writing = !first_done.load(std::memory_order_acquire);
+    check(took < 100,
+          "the second publisher returned at once — it did not wait out the first one's write");
+    check(first_still_writing, "and it returned while the first write was still in flight");
+    std::printf("  second send took %lld ms (window %u ms)\n", static_cast<long long>(took),
+                window);
+
+    first.join();
+    ::close(peer);
+    ::close(listener);
+}
 }  // namespace
 
 int main() {
@@ -455,6 +521,7 @@ int main() {
     test_bound_derivation();
     test_max_peers_derivation();
     test_tcp_link_sheds_and_drops_a_stalled_peer();
+    test_second_publisher_never_waits_on_a_stalled_write();
     test_concurrent_directed_sends_share_one_window();
     // The shared runner's verdict, not a hard-coded "all checks passed": this suite used to
     // print that line and `return 0` whatever the counter said, so a red check here could

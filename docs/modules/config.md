@@ -199,6 +199,10 @@ plane read their own spellings, so that neither L0 nor `tr::net` has to name an 
 :project: libtracer
 ```
 
+```{doxygenvariable} tr::net::kForwardDeadline
+:project: libtracer
+```
+
 ### The selectable policies
 
 ```{doxygenstruct} tr::graph::allow_only_policy_t

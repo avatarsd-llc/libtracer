@@ -552,6 +552,51 @@ void test_the_blocking_bounds_are_derived_from_the_watchdog() {
     check(fake_ws::handle_misuse() == 0, "with no handle misuse anywhere in the case");
 }
 
+/**
+ * @brief RFC 0028 slice 2 (#1619): a second sender never waits on the first one's write.
+ *
+ * Sender A is parked inside `esp_transport_write` on a peer whose window has closed. Before
+ * enqueue-then-write, sender B queued on `write_m_` behind it for the rest of A's write — up
+ * to a whole write budget — and delivery is in-call, so B is whatever unrelated task
+ * published. Now B copies its frame into the link's queue and returns at once, and A, still
+ * the writer, sends it as soon as its own write completes. The bound asserted is a small
+ * fraction of one write leg, so it does not depend on the write budget.
+ */
+void test_a_second_sender_does_not_wait_on_a_parked_write() {
+    std::printf("a second sender returns at once while the first is parked in a write:\n");
+    fake_ws::reset();
+    fake_ws::hold_writes(true);
+
+    auto link = dialing_link();
+    check(wait_until([&] { return link->link_up(); }, 2s), "and came up connected");
+    esp_ws_client_link_t* const under_test = link.get();
+
+    const std::vector<std::byte> first = payload();
+    std::vector<std::byte> second = payload();
+    second[0] = std::byte{0x5A};
+
+    std::thread a([&] { under_test->send(first); });
+    check(wait_until([] { return fake_ws::writers_inside() >= 1; }, 2s),
+          "sender A is parked INSIDE the transport");
+
+    const auto start = std::chrono::steady_clock::now();
+    under_test->send(second);
+    const long long took = ms_since(start);
+    const bool a_still_parked = fake_ws::writers_inside() >= 1;
+    std::printf("       second send took %lld ms\n", took);
+    check_under_ms(took, 50, "sender B returned at once instead of waiting out A's write");
+    check(a_still_parked, "and it returned while A was still inside the transport");
+    check(fake_ws::writes_started() == 1, "B did not reach the transport itself");
+
+    // Release the peer: A finishes its own write and then drains B's queued frame.
+    fake_ws::hold_writes(false);
+    a.join();
+    check(fake_ws::writes_started() == 2, "the writer sent the queued frame after its own");
+    check(fake_ws::last_write_payload() == second, "byte for byte, and in admission order");
+    check(fake_ws::handle_misuse() == 0, "with no handle misuse anywhere in the case");
+    link.reset();
+    check(drained_fake(), "and the link drained");
+}
 }  // namespace
 
 int main() {
@@ -564,6 +609,7 @@ int main() {
     test_teardown_racing_the_dials_resolution_releases_once();
     test_send_during_a_redial_reads_no_handle();
     test_the_blocking_bounds_are_derived_from_the_watchdog();
+    test_a_second_sender_does_not_wait_on_a_parked_write();
     // Nothing detached may still be running here: a condemned dial's recv thread outlives
     // its link by design, and one still inside the transport at process exit is a crash
     // under ASan/TSan and a leak under LSan. Every case drains, and this is the backstop.
