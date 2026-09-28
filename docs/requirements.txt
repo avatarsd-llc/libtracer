@@ -6,6 +6,6 @@ myst-parser>=2.0
 furo>=2024.1.29
 sphinx-design>=0.6
 sphinxcontrib-mermaid>=0.9
-breathe>=4.35
+breathe>=4.35,<5    # 5.0.0 doubles `constexpr` on constexpr constructors and fails the -W build
 sphinx-sitemap>=2.6      # emit sitemap.xml (SEO)
 sphinxext-opengraph>=0.9 # Open Graph + Twitter cards + meta descriptions (SEO)
