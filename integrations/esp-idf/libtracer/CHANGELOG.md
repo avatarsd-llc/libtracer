@@ -12,6 +12,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **BREAKING (behaviour) — `esp_ws_client_link_t::send` enqueues then writes; a concurrent
+  sender never waits on another sender's write** (RFC 0028 slice 2, fixes
+  [#1619](https://github.com/avatarsd-llc/libtracer/issues/1619)). `send` used to hold
+  `write_m_` across `esp_transport_write`, so while one task sat in a write to a peer whose
+  window had closed, every other task publishing to the link queued on the mutex for up to a
+  whole write budget (a quarter of the task-watchdog period). Delivery is in-call, so those
+  were unrelated tasks. Now a sender that finds a write in flight copies its frame into one of
+  `CONFIG_LIBTRACER_WS_CLIENT_TX_QUEUE_DEPTH` slots (new Kconfig, default 2) and returns at
+  once; the writing task sends it after its own frame. Past the depth the frame is dropped and
+  counted in `tx_drops`. Each slot grows to the largest frame queued in it (at most
+  `tx_bytes`) the first time it is used and keeps that memory; `0` queues nothing. The task
+  that is writing still waits on I/O for its own frame and for each queued frame it drains,
+  each bounded by the write budget.
+
 - **BREAKING (inherited from core) — `graph_t` now takes ONE injected
   `tr::mem::block_source_t`** ([#873](https://github.com/avatarsd-llc/libtracer/issues/873)
   phase 1). A device recipe that wired the graph's `mr`, `value_backend` and `ctl` separately —

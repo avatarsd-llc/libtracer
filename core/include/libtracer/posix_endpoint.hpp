@@ -37,6 +37,7 @@
 #include <vector>
 
 #include "libtracer/transport.hpp"
+#include "libtracer/tx_handoff.hpp"
 
 /** @brief The POSIX scatter-gather descriptor (`<sys/uio.h>`), forward-declared
  *         so this header need not pull the system socket headers in. */
@@ -416,7 +417,10 @@ class posix_endpoint_t {
  * @ref write_m_ held across the WHOLE write — so (a) two senders can never
  * interleave their records on the stream, and (b) the recv thread cannot
  * close and reset the fd underneath an in-flight write. `send()` reads
- * @ref conn_fd_ INSIDE the lock, pairing with the teardown below.
+ * @ref conn_fd_ INSIDE the lock, pairing with the teardown below. Only the
+ * sender holding the enqueue-then-write writer role (@ref handoff_send) ever
+ * takes it to write, so no publisher queues on it behind another publisher's
+ * write (RFC 0028 §4.7).
  *
  * **Teardown-under-write-lock invariant:** a recv thread that closes the peer
  * fd MUST reset @ref conn_fd_ to -1 under @ref write_m_ BEFORE `close(2)`
@@ -537,15 +541,57 @@ class stream_endpoint_t : protected posix_endpoint_t {
     bool note_write_result(const write_result_t& r, int fd, std::uint8_t& streak);
 
     /**
-     * @brief Write @p bytes to the live peer as one serialized record.
+     * @brief Put one record on the wire through the enqueue-then-write queue (RFC 0028 §4.7).
      *
-     * The whole write-serialization invariant in one call: takes
-     * @ref write_m_, reads @ref conn_fd_ inside the lock, and @ref write_all
-     * s the bytes. No-op while no peer is connected.
+     * The single-peer senders' one door. A publisher that finds no write in flight becomes
+     * the writer: it takes @ref write_m_, reads @ref conn_fd_ inside it, and runs @p own on
+     * the live fd, then drains whatever other publishers queued meanwhile, one record per
+     * @ref write_m_ hold. A publisher that finds a write in flight copies its record into a
+     * slot through @p fill and returns at once, and one that finds every slot taken drops it.
+     * So no publisher waits on another publisher's write to a stalled peer (#1619); the
+     * writer's own wait stays bounded per record by the liveness window (#838).
      *
-     * @param bytes One complete encoded record's bytes.
+     * @ref write_m_ keeps its two other jobs: it still orders a write against
+     * @ref teardown_peer, and it still serializes records on the stream, because only the
+     * writer ever takes it to write.
+     *
+     * @tparam Own  Callable `bool(int fd)`: write the caller's own record to @p fd and return
+     *              true when it was shed (the caller's `dropped_tx_` then counts it).
+     * @tparam Fill Callable `std::size_t(mem::block_array_t<std::byte>&)`: copy the record
+     *              into a queue slot, returning its byte count, or 0 to refuse.
+     * @return Records shed by this call: a refused enqueue, a record written into no peer,
+     *         or one the bound shed — each one the caller's `dropped_tx_` counts.
      */
-    void send_all_locked(std::span<const std::byte> bytes);
+    template <class Own, class Fill>
+    std::uint64_t handoff_send(Own&& own, Fill&& fill) {
+        switch (tx_.admit(std::forward<Fill>(fill))) {
+            case tx_handoff_t::admit_t::REFUSED:
+                return 1;
+            case tx_handoff_t::admit_t::QUEUED:
+                return 0;
+            case tx_handoff_t::admit_t::WRITE:
+                break;
+        }
+        std::uint64_t shed = 0;
+        {
+            const std::lock_guard lock(write_m_);
+            const int fd = conn_fd_.load(std::memory_order_relaxed);
+            // No live peer (still dialing, or torn down) => a counted drop.
+            if (fd < 0 || std::forward<Own>(own)(fd)) ++shed;
+        }
+        for (std::span<std::byte> rec = tx_.next(); !rec.empty(); rec = tx_.next()) {
+            const std::lock_guard lock(write_m_);
+            const int fd = conn_fd_.load(std::memory_order_relaxed);
+            if (fd < 0) {
+                ++shed;
+                continue;
+            }
+            const write_result_t r =
+                write_all(fd, rec, derive_send_bound_ms(liveness_window_ms_, 1));
+            if (note_write_result(r, fd, tx_stall_streak_)) ++shed;
+        }
+        return shed;
+    }
 
     /**
      * @brief Tear the peer connection down (recv-thread side).
@@ -589,6 +635,11 @@ class stream_endpoint_t : protected posix_endpoint_t {
     /** @brief The ONE peer's consecutive-stall streak (guarded by @ref write_m_) — the
      *         multi-peer servers keep one per slot instead. */
     std::uint8_t tx_stall_streak_ = 0;
+    /** @brief Records a single-peer sender may queue behind the write in flight
+     *         (@ref handoff_send). Past it a publisher drops and counts rather than waits. */
+    static constexpr std::size_t kTxQueueDepth = 8;
+    /** @brief The enqueue-then-write queue @ref handoff_send drives (RFC 0028 §4.7). */
+    tx_handoff_t tx_{kTxQueueDepth, mem::heap_source()};
 };
 
 /**
