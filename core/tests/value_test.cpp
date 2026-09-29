@@ -32,6 +32,7 @@
 #include <cstdio>
 #include <new>
 #include <span>
+#include <type_traits>
 
 #include "libtracer/graph.hpp"
 #include "test_support.hpp"
@@ -54,6 +55,19 @@ using tr::view::view_t;
 
 /** @brief The size a one-link value must fit in on the host (RFC-0028 §6.3's slice-3 gate). */
 constexpr std::size_t kOneLinkGateBytes = 40;
+
+/**
+ * @brief Whether the bound slot drops a replaced value's reference AT the swap.
+ *
+ * `single_writer_slot_t` releases the displaced value as `store` returns, so a replaced block
+ * goes back to its source the moment the last handle drops. `hazard_slot_t` parks the displaced
+ * NODE — which owns that reference — on a retire list that a later scan drains once no reader
+ * announces it (ADR-0069), so the same block returns at a grace period, not synchronously; the
+ * "returns to the source now" checks below are true of the first policy only and are asserted
+ * on that binding, while the block's INTEGRITY is asserted on both.
+ */
+constexpr bool kSlotReleasesAtSwap =
+    std::is_same_v<tr::graph::config_t::lkv_slot_t, tr::graph::single_writer_slot_t>;
 
 /**
  * @brief A source that counts draws of the value-block shape, remembers how many of its blocks
@@ -198,17 +212,28 @@ void test_one_block_per_publish() {
     check(g.write(v, std::move(second)).has_value(), "the replacing write lands");
     check(src.served() == 2 && src.released() == 0,
           "one more block; the replaced one is still alive — a reader parked it");
-    check(parked->use_count() == 1 && only_byte(*parked) == 0x11,
-          "the parked handle is now the only owner and reads the OLD bytes intact");
-    parked.reset();
-    check(src.released() == 1 && src.live() == 1,
-          "dropping the parked handle returns the replaced block to the source");
+    check(only_byte(*parked) == 0x11, "the parked handle reads the OLD bytes intact");
+    if constexpr (kSlotReleasesAtSwap) {
+        check(parked->use_count() == 1, "and is now the replaced value's only owner");
+        parked.reset();
+        check(src.released() == 1 && src.live() == 1,
+              "dropping the parked handle returns the replaced block to the source");
+    } else {
+        // The hazard slot's retired node still owns one reference until a scan drains it.
+        check(parked->use_count() >= 1, "and the retired node may still share it (hazard)");
+        parked.reset();
+        check(src.live() >= 1, "the current value's block is live either way");
+    }
 
     rope_t third;
     third.append(make_value({0x33}));
     check(g.write(v, std::move(third)).has_value(), "a third write lands");
-    check(src.served() == 3 && src.released() == 2,
-          "with no reader parked, the replaced block goes straight back");
+    check(src.served() == 3, "which drew its own one block");
+    if constexpr (kSlotReleasesAtSwap) {
+        check(src.released() == 2, "with no reader parked, the replaced block goes straight back");
+    } else {
+        check(src.released() <= 2, "the hazard slot returns replaced blocks at its next scan");
+    }
 }
 
 /** @brief A HANDLER sink sees the written links as a `value_t` with no block drawn. */
