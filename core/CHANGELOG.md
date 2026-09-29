@@ -245,10 +245,18 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     slot has no registry.
   - **Added** `default_config_t::kSingleWriter` (per-build, default `false`),
     `default_config_t::reader_guard_t`, `tr::graph::no_guard_t` (for a single-threaded build), and
-    `tr::graph::mutex_guard_t` (the host guard: 64 cache-line-padded mutexes striped by slot
-    address, whose waiters sleep and never spin). `kSingleWriter` states the one-publisher
-    contract; the guard serializes writers either way, so a build that breaks it stays
-    memory-safe.
+    `tr::graph::mutex_guard_t` (the host guard: 64 cache-line-padded one-word locks striped by
+    slot address — one `exchange` to take, one release store to give back; a contender re-reads
+    briefly and then sleeps in bounded naps, never spinning on a descheduled holder). A
+    `std::mutex` per stripe was the first cut and the blocking perf gate refused it
+    ([#1628](https://github.com/avatarsd-llc/libtracer/pull/1628): `inproc-target-stored`
+    −13 %, one guarded section per delivery); a parking mutex's unlock must fence or RMW to
+    find its sleeper, and a lock whose contender sleeps on a timer has no wakeup to lose.
+    `kSingleWriter` states the one-publisher contract; the guard serializes writers either way,
+    so a build that breaks it stays memory-safe. It does **not** let the writer skip the guard:
+    a `shared_ptr` is two words, so one reader can observe a half-done swap or retain a control
+    block the writer has just released, single publisher or not. That shortcut becomes sound
+    only with the one-word intrusive slot of RFC 0028 slice 3, and `lkv_slot.hpp` says why.
   - **Added** a mandatory `static constexpr bool may_spin` on every slot policy. `vertex.hpp`
     refuses a policy that does not declare it, and refuses one that declares `true` where
     `kSpinWaitSafe` is `false`. The `spin_slot_guard` ctest checks both refusals by their

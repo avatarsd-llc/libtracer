@@ -130,7 +130,7 @@ edges along with the departed one's.
 ## Closing the bus module out at build time
 
 The peer-named tier is a **module**, and a node whose links are all point-to-point does not
-have to carry it. `tr::graph::default_config_t::kBusLinks` (`core/include/libtracer/config.hpp:530`)
+have to carry it. `tr::graph::default_config_t::kBusLinks` (`core/include/libtracer/config.hpp:531`)
 is the knob; bound `false` by an
 [ADR-0068](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0068-build-configuration-is-plain-cpp-config-header.md)
 override fragment, not a `-D`:

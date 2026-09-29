@@ -52,7 +52,8 @@
  *
  *   - @ref tr::graph::single_writer_slot_t — the default, and the only one an RTOS target can
  *     bind: its one wait is `config_t::reader_guard_t`, an interrupt-masked critical section
- *     there and address-striped mutexes on a host, neither of which is spun on (#1618).
+ *     there and an address-striped one-word lock on a host, whose contender sleeps rather than
+ *     spins on a descheduled holder (#1618).
  *   - @ref tr::graph::hazard_slot_t — the lock-free opt-in for a host whose reads of one shared
  *     vertex contend across many cores.
  *
@@ -88,11 +89,12 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
 #include <memory>
-#include <mutex>
+#include <thread>
 #include <type_traits>
 
 #include "libtracer/config.hpp"
@@ -101,45 +103,105 @@
 namespace tr::graph {
 
 /**
- * @brief The host reader guard: one of @ref kStripes padded mutexes, chosen by slot address.
+ * @brief The host reader guard: one of @ref kStripes padded locks, chosen by slot address.
  *
  * @ref single_writer_slot_t swaps and copies a `shared_ptr` inside `config_t::reader_guard_t`.
  * On a single-core RTOS that guard is an interrupt-masked critical section (the ESP-IDF
  * component binds `tr::esp::critical_guard_t`), which makes the window unpreemptable. A host
- * process cannot mask interrupts, so this is the host's spelling of the same promise: a waiter
- * SLEEPS on a futex instead of spinning, which hands the CPU back to whoever holds the window.
+ * process cannot mask interrupts, so this is the host's spelling of the same promise: a
+ * contender that finds the window held gives the CPU back to whoever holds it, instead of
+ * spinning until the holder is scheduled again.
  *
- * Striped rather than one mutex, and by address rather than per slot. One process-wide mutex
- * serializes every vertex's publish against every other thread's. A mutex per slot would put
- * 40 bytes in every vertex. A static table of padded mutexes costs `kStripes * 64` bytes once,
- * and two vertices share a lock only when their addresses hash to the same stripe.
+ * ## The shape of the lock, and why it is not `std::mutex`
+ *
+ * Taking it is one read-modify-write (`exchange`), releasing it is one plain release store —
+ * the shape the `std::atomic<std::shared_ptr>` slot this replaced had for its pointer-lock bit.
+ * The first cut of this guard was a `std::mutex` per stripe, and the blocking perf gate refused
+ * it (#1628): `inproc-target-stored/64/8/1` lost 13 % of its deliveries per second, ~11 ns per
+ * guarded section on the gate's runner, one section per delivery. A parking mutex cannot be
+ * cheaper than two read-modify-writes: its unlock has to publish the release AND then look for
+ * a sleeper, and that store-then-load pair needs a full fence or an RMW or it loses a wakeup.
+ *
+ * This lock has no wakeup to lose, so its unlock needs no fence. A contender re-reads the flag
+ * @ref kSpinsBeforeNap times, then SLEEPS for @ref kNap and looks again, for as long as it
+ * takes. The holder's window is a pointer swap or a handle copy — a handful of instructions —
+ * so a contender only ever reaches the nap when the holder was descheduled inside the window,
+ * and the nap is exactly what lets a descheduled holder run: on one CPU under priority
+ * preemption a `sched_yield` spinner never lets a lower-priority holder back (the #1618 hang);
+ * a sleeper does. `lkv_slot_inversion` checks that on the host with `SCHED_FIFO`.
+ *
+ * ## Striped, by address
+ *
+ * One process-wide lock serializes every vertex's publish against every other thread's. A lock
+ * per slot would put bytes in every vertex, and `sizeof(vertex_t)` is ratcheted. A static table
+ * of padded flags costs `kStripes * 64` bytes once, and two vertices share a lock only when their
+ * addresses hash to the same stripe.
  */
 struct mutex_guard_t {
     /** @brief Stripes in the process-wide table. */
     static constexpr std::size_t kStripes = 64;
 
-    /** @brief Lock the stripe the slot at @p at hashes to. */
-    explicit mutex_guard_t(const void* at) : m_(stripe(at)) { m_.lock(); }
-    ~mutex_guard_t() { m_.unlock(); }
+    /** @brief Re-reads of a held flag before a contender sleeps; covers a cross-core release. */
+    static constexpr unsigned kSpinsBeforeNap = 128;
+
+    /**
+     * @brief How long a contender sleeps between looks once it has spun out.
+     *
+     * Only a holder descheduled inside its few-instruction window makes anyone sleep, so this
+     * bounds the extra latency of that rare case, not the common one. Bounded from below by
+     * what one `nanosleep` costs anyway.
+     */
+    static constexpr std::chrono::microseconds kNap{20};
+
+    /** @brief Take the stripe the slot at @p at hashes to. */
+    explicit mutex_guard_t(const void* at) : taken_(stripe(at)) {
+        if (!taken_.exchange(true, std::memory_order_acquire)) [[likely]]
+            return;
+        wait_for_window();
+    }
+    /** @brief Give the stripe back: a release store, and nobody to notify (see the class). */
+    ~mutex_guard_t() { taken_.store(false, std::memory_order_release); }
     mutex_guard_t(const mutex_guard_t&) = delete;
     mutex_guard_t& operator=(const mutex_guard_t&) = delete;
 
    private:
     /** @brief One stripe, on a cache line of its own so two stripes never false-share. */
     struct alignas(64) cell_t {
-        std::mutex m; /**< @brief The stripe's lock. */
+        std::atomic<bool> taken{false}; /**< @brief Whether some thread is inside the window. */
     };
 
+    static_assert(std::atomic<bool>::is_always_lock_free,
+                  "the host guard is a one-word flag; a target without a lock-free bool atomic "
+                  "cannot bind it and binds an interrupt-masked reader_guard_t instead");
+
     /** @brief The stripe for address @p at: a Fibonacci hash of the address, top bits. */
-    static std::mutex& stripe(const void* at) {
+    static std::atomic<bool>& stripe(const void* at) {
         static cell_t table[kStripes];
         auto a = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(at));
         a ^= a >> 17;
         a *= 0x9E3779B97F4A7C15ull;
-        return table[(a >> 58) % kStripes].m;
+        return table[(a >> 58) % kStripes].taken;
     }
 
-    std::mutex& m_;
+    /**
+     * @brief The contended path: re-read, then nap, until an `exchange` finds the flag clear.
+     *
+     * Out of line so the uncontended constructor stays one RMW and a branch at every call site.
+     * Reads before the RMW so contenders do not bounce the line between them while they wait.
+     */
+    [[gnu::noinline]] void wait_for_window() {
+        for (;;) {
+            for (unsigned spins = 0; taken_.load(std::memory_order_relaxed); ++spins) {
+                if (spins >= kSpinsBeforeNap) {
+                    std::this_thread::sleep_for(kNap);
+                    spins = 0;
+                }
+            }
+            if (!taken_.exchange(true, std::memory_order_acquire)) return;
+        }
+    }
+
+    std::atomic<bool>& taken_;
 };
 
 /**
@@ -170,7 +232,7 @@ struct guard_for_t : guard_t {
  * only to equal or higher priority, so a high-priority reader that preempts a low-priority
  * writer inside that window spins until the task watchdog fires. Here the window is a guard
  * that cannot be spun on: an interrupt-masked critical section cannot be preempted at all, and
- * the host's @ref mutex_guard_t puts a waiter to sleep.
+ * the host's @ref mutex_guard_t puts a contender to sleep once it has spun out.
  *
  * **What the guard covers, and what it does not.** `store` swaps the pointer inside the guard
  * and releases the displaced value AFTER leaving it, so a rope's destructor and its memory
@@ -182,6 +244,21 @@ struct guard_for_t : guard_t {
  * serialize on the guard like a writer and a reader do, which is why the host default binds this
  * slot with `config_t::kSingleWriter` false. The name comes from RFC 0028 §5.5, where the
  * single-writer build is the one that must bind it.
+ *
+ * **Why `kSingleWriter` does not let the writer skip the guard here.** It is tempting: one
+ * publisher, so nothing to exclude on the write side, publish with `release` and let readers
+ * `acquire`. That is sound for the one-word slot RFC 0028 §5.5 describes (an intrusive
+ * `value_t*`, slice 3), where the publish is a single atomic `exchange` and a reader's `retain`
+ * inside its guard cannot interleave with the writer's release. It is NOT sound for this slot,
+ * and the single-writer contract does not help: a `shared_ptr` is two words, so a writer's swap
+ * outside the guard can be observed half-done by ONE reader inside it — a pointer from the new
+ * value paired with the control block of the old — and a reader that read a consistent pair
+ * can still increment a control block the writer released a moment later. Neither race needs a
+ * second writer. On a single core the reader that preempts the writer mid-swap is exactly the
+ * high-priority task #1618 is about. So the writer keeps the guard on every target until the
+ * slot is one word, and `kSingleWriter` stays a contract, not a code path, in this slice.
+ * `lkv_slot_test`'s one-writer / N-reader run is the test that bites when this is tried: with
+ * the writer's guard removed, a reader reads a rope after its free (ASan: heap-use-after-free).
  *
  * @tparam guard_t An RAII type whose lifetime is the critical section, constructible either
  *                 from the slot's address (`const void*`) or from nothing.

@@ -41,7 +41,7 @@ struct allow_only_policy_t;  // security_acl.hpp — the ALLOW-only MCU profile 
 struct full_acl_policy_t;    // security_acl.hpp — ordered first-match-per-bit with DENY
 class hazard_slot_t;         // lkv_slot.hpp — lock-free atomic<node*>; hazard-pointer reclamation
 class single_writer_slot_t;  // lkv_slot.hpp — shared_ptr swapped inside reader_guard_t; no spin
-struct mutex_guard_t;        // lkv_slot.hpp — the host reader guard: address-striped mutexes
+struct mutex_guard_t;        // lkv_slot.hpp — the host reader guard: address-striped locks
 struct reclaim_strict_t;     // reclaim.hpp — grace point: `unsubscribe()` returns
 struct reclaim_local_t;      // reclaim.hpp — grace point: this thread's dispatch stack unwinds
 struct reclaim_qsbr_t;  // reclaim.hpp — grace point: EVERY thread has passed a quiescent state
@@ -301,9 +301,10 @@ struct default_config_t {
      * @brief The RAII guard `single_writer_slot_t` opens around its pointer swap and its
      *        handle copy (RFC 0028 §5.5).
      *
-     * `mutex_guard_t` by default: a table of address-striped mutexes, so a waiter sleeps
-     * instead of spinning and unrelated vertices rarely share a lock. A single-core RTOS build
-     * binds an interrupt-masked critical section (the ESP-IDF component:
+     * `mutex_guard_t` by default: a table of address-striped one-word locks — one RMW to take,
+     * a release store to give back — whose contender re-reads briefly and then sleeps instead
+     * of spinning on a descheduled holder; unrelated vertices rarely share one. A single-core
+     * RTOS build binds an interrupt-masked critical section (the ESP-IDF component:
      * `tr::esp::critical_guard_t`). A guard that takes a `const void*` is handed the slot's
      * address. The guard must never spin-wait where @ref kSpinWaitSafe is `false` — that is the
      * whole of #1618.

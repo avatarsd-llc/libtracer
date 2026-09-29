@@ -466,21 +466,21 @@ ANCHORS = [
     ('core/include/libtracer/config.hpp:275', 'static constexpr std::uint32_t kPinPayloadRatio = 0;'),
     ('core/include/libtracer/config.hpp:284', 'using acl_policy_t = allow_only_policy_t;'),
     ('core/include/libtracer/config.hpp:229', 'static constexpr std::size_t kMaxVertexBytes32 = 72;'),
-    ('core/include/libtracer/config.hpp:326', 'using lkv_slot_t = single_writer_slot_t;'),
-    ('core/include/libtracer/config.hpp:643', 'using config_t = default_config_t;'),
+    ('core/include/libtracer/config.hpp:327', 'using lkv_slot_t = single_writer_slot_t;'),
+    ('core/include/libtracer/config.hpp:644', 'using config_t = default_config_t;'),
     ('core/include/libtracer/config.hpp:110',
      'static constexpr std::size_t kVertexLockStripes = 16;'),
     ('core/include/libtracer/config.hpp:134',
      'static constexpr std::size_t kCacheLineBytes = 64;'),
-    ('core/include/libtracer/config.hpp:321',
+    ('core/include/libtracer/config.hpp:322',
      '* contend across many cores. Override fragment: `using lkv_slot_t = hazard_slot_t;`. The'),
-    ('core/include/libtracer/config.hpp:699',
+    ('core/include/libtracer/config.hpp:700',
      'inline constexpr bool kSpinWaitSafe = tr::graph::config_t::kSpinWaitSafe;'),
-    ('core/include/libtracer/config.hpp:488', 'static constexpr bool kWeaklyOrdered = true;'),
+    ('core/include/libtracer/config.hpp:489', 'static constexpr bool kWeaklyOrdered = true;'),
     # Was pinned to the :316 banner rule, one of three IDENTICAL comment rules in this header —
     # an anchor no scope could ever separate. Re-pinned inside the SAME cited span
     # (the derived-spelling block the table cites) to the first derived spelling, which is unique.
-    ('core/include/libtracer/config.hpp:652',
+    ('core/include/libtracer/config.hpp:653',
      'inline constexpr std::size_t kVertexLockStripes = config_t::kVertexLockStripes;'),
     # core/include/libtracer/crc.hpp
     ('core/include/libtracer/crc.hpp:38', 'constexpr std::array<std::uint32_t, 256> crc32c_table() noexcept {'),
@@ -850,7 +850,7 @@ ANCHORS = [
      'flat_slot_server_t>;'),
     # The #375-deliverable-3 bus-module seam: the knob, and the ONE door the routing plane
     # asks the facet through.
-    ('core/include/libtracer/config.hpp:530', 'static constexpr bool kBusLinks = true;'),
+    ('core/include/libtracer/config.hpp:531', 'static constexpr bool kBusLinks = true;'),
     ('core/include/libtracer/transport.hpp:818',
      '[[nodiscard]] inline bus_link_t* bus_of(transport_t& link) {'),
     ('core/include/libtracer/edge_pin.hpp:153', 'class pin_t {'),
@@ -941,8 +941,8 @@ ANCHORS = [
      'if(DEFINED CONFIG_LIBTRACER_SELF_HEAL_LINKS AND NOT CONFIG_LIBTRACER_SELF_HEAL_LINKS)'),
     ('integrations/esp-idf/libtracer/CMakeLists.txt:363',
      'if(CONFIG_LIBTRACER_SELF_HEAL_WORKER_STACK)'),
-    ('core/include/libtracer/config.hpp:583', 'static constexpr bool kSelfHealLinks = true;'),
-    ('core/include/libtracer/config.hpp:610',
+    ('core/include/libtracer/config.hpp:584', 'static constexpr bool kSelfHealLinks = true;'),
+    ('core/include/libtracer/config.hpp:611',
      'static constexpr std::size_t kSelfHealWorkerStackBytes = 0;'),
     ('integrations/esp-idf/libtracer/CMakeLists.txt:190',
      'list(APPEND LIBTRACER_SRCS "${LIBTRACER_ROOT}/core/src/transport_can.cpp")'),

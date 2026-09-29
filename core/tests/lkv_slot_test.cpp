@@ -38,12 +38,17 @@
  *     deterministic snapshot of a blocked worker's lists and once as a race a sanitizer sees;
  *   - **the single-writer slot's guard discipline** (#1618) — every operation is exactly one
  *     guarded section, and a displaced value is released OUTSIDE it, so a rope's destructor
- *     never runs with interrupts masked on the target that binds a critical section.
+ *     never runs with interrupts masked on the target that binds a critical section;
+ *   - **the host guard excludes** (#1628) — `mutex_guard_t` is a one-word lock with a plain
+ *     store for an unlock and a sleeping contender, so its mutual exclusion is asserted
+ *     directly: many threads on ONE stripe, holders that get descheduled inside the window so
+ *     contenders reach the nap path, and never two inside at once.
  *
  * The single-writer slot is instantiated over a counting mutex guard of this file's own, which
- * is what lets the concurrent run exercise it under real threads; the no-spin property against
- * a preempted writer is `lkv_slot_inversion_test`, and the build-time refusal of a spinning
- * policy is `spin_slot_guard`.
+ * is what lets the concurrent run count sections; the same one-writer / N-reader run is repeated
+ * on `tr::graph::single_writer_slot_t` as this build bound it, over the real host guard. The
+ * no-spin property against a preempted writer is `lkv_slot_inversion_test`, and the build-time
+ * refusal of a spinning policy is `spin_slot_guard`.
  */
 
 #include "libtracer/lkv_slot.hpp"
@@ -704,6 +709,42 @@ void single_writer_guard_discipline() {
     check(g_live.load() == 0, "and every one of them was released");
 }
 
+/**
+ * @brief The host guard is a lock: never two threads inside one stripe's window at once.
+ *
+ * `mutex_guard_t` takes its stripe with one `exchange` and gives it back with a plain store, and
+ * a contender that spins out SLEEPS rather than being woken — so there is no wakeup to lose, and
+ * also nothing but this test to say the exclusion holds. Every thread here guards the SAME
+ * address, so all of them contend for one stripe, and every fourth section yields inside the
+ * window so a holder is descheduled there and the others reach the nap. Two counters make the
+ * exclusion observable: an atomic `inside` that must never read 2, and a plain `total` that
+ * only comes out right if the increments never overlapped.
+ */
+void host_guard_excludes(std::size_t threads, std::size_t sections) {
+    std::printf("mutex_guard_t — %zu threads contending for one stripe, %zu sections each:\n",
+                threads, sections);
+    static int anchor = 0;  // every guard is opened at this one address: one stripe for all
+    std::atomic<int> inside{0};
+    std::atomic<std::size_t> overlaps{0};
+    std::size_t total = 0;  // plain on purpose: a torn increment is what exclusion forbids
+    std::vector<std::thread> pool;
+    for (std::size_t t = 0; t < threads; ++t) {
+        pool.emplace_back([&] {
+            for (std::size_t i = 0; i < sections; ++i) {
+                const tr::graph::mutex_guard_t g{&anchor};
+                if (inside.fetch_add(1, std::memory_order_acq_rel) != 0)
+                    overlaps.fetch_add(1, relaxed_);
+                ++total;
+                if (i % 4 == 0) std::this_thread::yield();  // get descheduled INSIDE the window
+                inside.fetch_sub(1, std::memory_order_acq_rel);
+            }
+        });
+    }
+    for (std::thread& th : pool) th.join();
+    check(overlaps.load() == 0, "no thread ever entered a window another thread was inside");
+    check(total == threads * sections, "every guarded increment landed exactly once");
+}
+
 }  // namespace
 
 /** @brief Run every slot-policy probe. */
@@ -719,6 +760,14 @@ int main() {
     // One writer: the single-writer slot is exercised under the contract it is named for.
     concurrent<single_writer_slot_t>("single_writer_slot_t", 1, readers, 10000);
     check(g_live.load() == 0, "single_writer_slot_t: the concurrent run freed every rope");
+    // The host lock on its own, then the same run on the slot AS BOUND — over the real host
+    // guard, not this file's counting one. That run is the one that reads a rope after its free
+    // (ASan: heap-use-after-free) if the writer's guard is ever dropped on the strength of
+    // `kSingleWriter`; see lkv_slot.hpp for why a single publisher does not make that safe.
+    host_guard_excludes(std::max<std::size_t>(hw, 4), 5000);
+    concurrent<tr::graph::single_writer_slot_t>("single_writer_slot_t (bound guard)", 1, readers,
+                                                10000);
+    check(g_live.load() == 0, "the bound single-writer slot's concurrent run freed every rope");
     concurrent<hazard_slot_t>("hazard_slot_t", 2, readers, 5000);
     check(g_live.load() == 0, "hazard_slot_t: the concurrent run freed every rope");
 
