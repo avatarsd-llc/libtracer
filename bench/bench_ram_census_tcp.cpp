@@ -347,7 +347,7 @@ std::size_t value_bytes_for(std::size_t i, mix_t mix) {
  * The shape rotates through the three kinds the question names: an int scalar (a flat
  * opaque VALUE), an ARRAY (a PL=1 VALUE with homogeneous 4-byte children), and a STREAM
  * -role vertex (the bounded history ring — the only role that appends). The STREAM
- * vertices get an explicit owner-side retention depth: `set_history_depth` is a
+ * vertices get an explicit owner-side retention depth: `set_retention` (`retention_t::N`) is a
  * construction parameter with no wire surface (RFC-0022 §3.C), not a synthetic bound.
  */
 void register_census_vertices(graph_t& g, std::vector<tr::graph::vertex_handle_t>& handles) {
@@ -355,7 +355,7 @@ void register_census_vertices(graph_t& g, std::vector<tr::graph::vertex_handle_t
         const role_t role = i % 3 == 2 ? role_t::STREAM : role_t::STORED_VALUE;
         tr::graph::vertex_handle_t vh =
             g.register_vertex(path_t(std::string("/") + vname(i)), role);
-        if (role == role_t::STREAM) g.set_history_depth(vh, 4);
+        if (role == role_t::STREAM) (void)g.set_retention(vh, tr::graph::retention_t::N, 4);
         handles.push_back(vh);
     }
 }

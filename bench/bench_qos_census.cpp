@@ -121,7 +121,7 @@ int main() {
         for (int i = 0; i < kPer; ++i) {
             const std::string p = "/stream/v" + std::to_string(i);
             const vertex_handle_t v = g.register_vertex(path_t(p), role_t::STREAM);
-            g.set_history_depth(v, 8);
+            (void)g.set_retention(v, tr::graph::retention_t::N, 8);
             classify(v, c);
         }
         report("STREAM, depth 8", c, "the STREAM role (the depth is free)", total);

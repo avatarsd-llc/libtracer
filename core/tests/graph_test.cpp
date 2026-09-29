@@ -176,7 +176,7 @@ void test_stream() {
     graph_t g;
     const auto path = path_t::parse("/log/events");
     tr::graph::vertex_handle_t v = g.register_vertex(*path, role_t::STREAM);
-    g.set_history_depth(v, 3);
+    (void)g.set_retention(v, tr::graph::retention_t::N, 3);
 
     for (std::uint8_t i = 1; i <= 5; ++i) (void)g.write(v, make_value({i}));
 
@@ -207,7 +207,7 @@ void test_stream_drain_cursor() {
     std::printf("STREAM drain cursor through the handle (RFC-0008 §E):\n");
     graph_t g;
     tr::graph::vertex_handle_t v = g.register_vertex(path_t("/log/drain"), role_t::STREAM);
-    g.set_history_depth(v, 3);
+    (void)g.set_retention(v, tr::graph::retention_t::N, 3);
     for (std::uint8_t b = 1; b <= 5; ++b) (void)g.assign(v, make_value({b}));
 
     const auto hist = g.history(v);
@@ -416,8 +416,11 @@ void test_field_write_settings() {
         "a former knob name => SchemaNotFound");
     check(!g.write(path_t("/sensor/temp:settings.bogus"), value_tlv(payload)).has_value(),
           "unknown settings field => SchemaNotFound");
-    // The owner-side declaration is where the ring depth lives now, and it takes effect.
-    g.set_history_depth(v, 5000);
+    // The owner-side declaration is where retention lives now (RFC-0028 §5.4), and it takes
+    // effect — on a STORED_VALUE that is LAST, and a ring depth is refused by value.
+    check(g.set_retention(v, tr::graph::retention_t::LAST).has_value() &&
+              !g.set_retention(v, tr::graph::retention_t::N, 5000).has_value(),
+          "the owner-side retention declaration: LAST accepted, a ring depth refused");
     check(g.write(v, make_value({0x01})).has_value(), "the vertex still takes ordinary writes");
 }
 

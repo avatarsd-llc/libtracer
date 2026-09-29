@@ -1523,27 +1523,50 @@ class graph_t {
      */
     void set_delivery_mode(vertex_handle_t v, delivery_mode_t mode);
     /**
-     * @brief Declare how many entries @p v's STREAM ring retains (RFC-0022 §3.C).
+     * @brief Declare what @p v retains after a write is delivered (RFC-0028 §5.4, D4):
+     *        nothing, its last value, or the last @p depth entries of its ring.
      *
-     * The ring depth is **not** protocol QoS: it encodes what the APPLICATION wants kept,
-     * and only the application can supply it. So it is an owner-side wiring call in the
-     * shape of @ref set_delivery_mode and @ref set_app_fields — a declaration the owner
-     * makes host-side after registration — and it has **no wire surface at all**: no peer
-     * can read it and none can write it. Callable at any time; the next append trims to
-     * the new depth. @p keep of 0 behaves as 1 (the ring always keeps the last value).
+     * Retention is **not** protocol QoS: it encodes what the APPLICATION wants kept, and only
+     * the application can supply it. So it is an owner-side wiring call in the shape of
+     * @ref set_delivery_mode and @ref set_app_fields — a declaration the owner makes
+     * host-side after registration — and it has **no wire surface at all**: no peer can read
+     * it and none can write it. Each role has a default and a set of legal retentions (see
+     * @ref tr::graph::retention_t):
      *
-     * Meaningful on the STREAM role, which is the only role that appends a ring; setting
-     * it on another role stores the number and changes nothing. Costs a STREAM vertex zero
-     * additional bytes — a STREAM identity already allocates the extension block.
+     * - `STORED_VALUE` defaults to `LAST`; `NONE` makes it a pure relay — every write is
+     *   delivered to its subscribers and released, the write sequence still moves (so `await`
+     *   wakes), `read` answers `NOT_FOUND`, and `assign` / `propagate` refuse with
+     *   `SCHEMA_NOT_FOUND` exactly as on a `HANDLER` (RFC-0008 Amendment 2: nothing is retained
+     *   to flush). A direct write whose only subscribers are callbacks draws no block at all:
+     *   the value is delivered from the stack.
+     * - `STREAM` defaults to `N` with depth 1; `N` sets the depth (callable at any time — the
+     *   next append trims to it; 0 behaves as 1), and `NONE` empties and stops the ring.
+     * - `HANDLER` is `NONE` and nothing else — its `on_write` consumes the value.
+     *
+     * Switching to `NONE` drops what is already held (the last value and every ring entry,
+     * whose reservations go back to the source that served them). Costs zero bytes: `NONE` is
+     * a bit in the vertex's flag byte, and the depth lives in the extension block a STREAM
+     * identity already allocates.
+     *
+     * @param v     The vertex.
+     * @param r     The retention.
+     * @param depth The ring depth under `retention_t::N`; ignored otherwise.
+     * @return `SCHEMA_NOT_FOUND` when @p r is not legal for @p v's role (a `HANDLER` asked to
+     *         retain, a `STORED_VALUE` asked for a ring, a `STREAM` asked for `LAST`) — the
+     *         taxonomy's contract-mismatch status, and nothing changes.
      */
-    void set_history_depth(vertex_handle_t v, std::uint32_t keep);
+    [[nodiscard]] result_t<void> set_retention(vertex_handle_t v, retention_t r,
+                                               std::uint32_t depth = 1);
+    /** @brief What @p v retains (RFC-0028 §5.4): its role's default unless it declared
+     *         otherwise through @ref set_retention. */
+    [[nodiscard]] retention_t retention(vertex_handle_t v) const noexcept;
     /**
      * @brief Bind the RECEIVING vertex @p v's own ring source and §4.4 pressure arm
      *        (RFC-0025 §4.6.1 clause 3) — owner-side wiring, no wire surface.
      *
      * A producer never queues; the queue belongs to whoever consumes it, and it is bounded in
      * BYTES by that party's own injected `tr::mem::block_source_t`. This is the seam that
-     * injects it, sited beside @ref set_history_depth because the two compose: the depth is
+     * injects it, sited beside @ref set_retention because the two compose: the depth is
      * the owner's retention INTENT (entries), the source is the BOUND (bytes), and a shortfall
      * surfaces through §4.4's pressure contract rather than as a silent shrink of the depth.
      *
@@ -1562,8 +1585,7 @@ class graph_t {
      * it and the ring is emptied, so this is a wiring-time call like its neighbours.
      *
      * @param v        The receiving STREAM vertex. Meaningful only on that role; on another it
-     *                 stores the wiring and changes nothing, exactly as @ref set_history_depth
-     *                 does.
+     *                 stores the wiring and changes nothing.
      * @param src      The source to charge against; `nullptr` restores @ref default_ring_source.
      * @param reliable The §4.4 arm. `false` (default) is BEST-EFFORT: a refused admission sheds
      *                 the oldest entry whole, accounts the loss, and raises
@@ -1693,7 +1715,7 @@ class graph_t {
      * a flush can say about it is "nothing is owed".
      *
      * Ungated beyond the role check, unlike @ref drain_unflushed — it discloses no bytes and
-     * has no wire surface — the same owner-side shape @ref propagate and @ref set_history_depth
+     * has no wire surface — the same owner-side shape @ref propagate and @ref set_retention
      * carry.
      *
      * @retval status_t::SCHEMA_NOT_FOUND @p v is not a STREAM.
@@ -2467,6 +2489,9 @@ class graph_t {
     // for a direct write; a delivered subscription's stored context terminates at
     // its target instead — see dispatch_edge_target, ADR-0051).
     [[nodiscard]] result_t<void> write_impl(vertex_t* v, rope_t value, std::string_view caller);
+    // write_impl's `retention_t::NONE` arm (RFC-0028 §5.4): admit, bump the sequence, and
+    // deliver from the stack — no block, nothing retained.
+    [[nodiscard]] result_t<void> relay_write(vertex_t* v, rope_t value, std::string_view caller);
     // The store half of a write (LKV/history/handler + seq bump + await wake),
     // WITHOUT fan-out — shared by write_impl and the branch-write apply (RFC-0005).
     // Hands back the exact published LKV pointer (null for a Handler-role write —

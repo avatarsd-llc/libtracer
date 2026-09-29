@@ -114,7 +114,7 @@ int main() {
 
     // Declare the STREAM ring depth OWNER-SIDE (RFC-0022 §3.C — it has no wire surface),
     // then discover the vertex shape via :schema.
-    g.set_history_depth(temp, 8);
+    (void)g.set_retention(temp, tr::graph::retention_t::N, 8);
     auto schema = g.read(path_t("/sensor/temp:schema"));
     std::size_t schema_children = 0;
     if (schema) {

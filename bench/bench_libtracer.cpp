@@ -794,7 +794,8 @@ void run_eptype_stream() {
     graph_t g;
     const path_t path = *path_t::parse("/bench/stream");
     auto v = g.register_vertex(path, role_t::STREAM);
-    g.set_history_depth(v, 16);  // a real bounded ring: retention work on every write
+    (void)g.set_retention(v, tr::graph::retention_t::N,
+                          16);  // a real bounded ring: retention work on every write
     std::atomic<std::uint64_t> recv{0};
     auto cb = [&](const tr::graph::value_t&) { recv.fetch_add(1, std::memory_order_relaxed); };
     (void)g.subscribe(path, cb);

@@ -18,13 +18,22 @@ has a **role**: *stored-value* (last-writer-wins), *stream* (the CONSUMER's boun
 a producer never queues, so the ring lives on the *receiving* vertex and is bounded in BYTES
 by that vertex's own injected `mem::block_source_t` via `set_ring_source`
 ([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.6.1) — whose depth the
-owner declares host-side with `set_history_depth`, and which no peer can read or write —
+owner declares host-side with `set_retention`, and which no peer can read or write —
 [RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.C), or *handler* (`on_read` / `on_write` — covering
 computed, proxy, sink, live-MMIO patterns). The last-known-value slot is a one-word
 `value_t*` swap under the slot policy ([RFC-0028](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0028-lean-value-path.md) slice 3), so `read` / `write` of the value take **no
 per-vertex mutex**; that mutex guards the subscriber list, the history ring and the
 `await` waiter accounting, and a per-vertex condvar makes `await` block until the next
 write.
+
+What a vertex keeps after a write is one policy, `retention_t { NONE, LAST, N }`
+([RFC-0028](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0028-lean-value-path.md) §5.4),
+declared owner-side with `set_retention`. Each role has a default — a handler keeps `NONE`, a
+stored value `LAST`, a stream `N` — and a stored value or a stream may be declared `NONE`: the
+pure relay, which delivers every write to its subscribers, keeps nothing, and answers `read`
+with `NOT_FOUND`. A relay whose subscribers are all callbacks delivers from the writer's stack
+and draws no block at all. App fields carry the same enum: a `wo` field is `NONE`, so its
+write reaches `on_app_field_write` and is stored nowhere.
 
 The slot is a build-time policy. By default it is `single_writer_slot_t`, whose one wait
 is a reader guard that never spins (#1618): a striped mutex on a host, an interrupt-masked
@@ -48,11 +57,12 @@ re-emitting on its execution. `:schema` reads return a `POINT` descriptor.
 
 ```cpp
 enum class role_t { STORED_VALUE, STREAM, HANDLER };
+enum class retention_t { NONE, LAST, N };  // RFC-0028 §5.4 — per vertex AND per app field
 enum class delivery_mode_t { IF_NEWER, UNCONDITIONAL, EXPLICIT };
 
 // There is NO per-vertex settings type. RFC-0022 §3.B deleted `settings_t` outright: four
 // of its seven knobs were inert, `durability` became the subscription's (below), and the two
-// survivors are construction parameters an OWNER declares — see set_history_depth /
+// survivors are construction parameters an OWNER declares — see set_retention /
 // set_share_threshold_bytes (RFC-0028 §5.3). Nothing is inherited (§3.F).
 
 struct delivery_policy_t {  // ONE subscription's delivery policy (RFC-0022 §3.A) — 2 B packed
@@ -113,7 +123,9 @@ class graph_t {
     result_t<void>        mark_flushed(vertex_handle_t);
 
     // owner-side storage declarations (RFC-0022 §3.C) — host API only, NO wire surface
-    void          set_history_depth     (vertex_handle_t, std::uint32_t keep);
+    result_t<void> set_retention        (vertex_handle_t, retention_t,   // RFC-0028 §5.4
+                                         std::uint32_t depth = 1);
+    retention_t   retention             (vertex_handle_t) const noexcept;
     // the RECEIVER's byte bound (RFC-0025 §4.6.1) — admission reservations, not placement
     void          set_ring_source       (vertex_handle_t, mem::block_source_t*,
                                          bool reliable = false);
@@ -158,7 +170,7 @@ temporary lambda does not compile.
 
 ```{admonition} `ctx` lives until the reclamation policy's grace point — and the library tells you when
 :class: important
-`unsubscribe` **deactivates** the slot (`core/include/libtracer/graph.hpp:1846`); a
+`unsubscribe` **deactivates** the slot (`core/include/libtracer/graph.hpp:1868`); a
 delivery already in flight snapshotted the edge and completes, and the `{fn, ctx}` pair is
 the one leg of that snapshot the library owns no copy of. So "when may I free `ctx`?" is answered by this build's **reclamation policy**
 ([ADR-0080](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0080-reclamation-policy-is-a-build-time-closed-per-target-seam.md),
@@ -175,7 +187,7 @@ The hook runs exactly once, on your thread, outside every graph lock: **inline, 
 **before the enclosing `write()` returns** when you called it from inside one. The
 one-argument overload retires the edge identically and simply carries no signal — which is
 sufficient whenever you unsubscribe from outside a callback, since that call is already
-quiescent on return (`core/include/libtracer/graph.hpp:1805` states the bound on `ctx`).
+quiescent on return (`core/include/libtracer/graph.hpp:1827` states the bound on `ctx`).
 ```
 
 ```{admonition} No strings on the hot path
@@ -225,7 +237,7 @@ for (...) g.write(v, p.field(), setpoint_tlv);           // hot loop — zero st
 ## What a read hands back
 
 `read` and `await` return `result_t<value_ref_t>`, not `result_t<rope_t>`
-(`core/include/libtracer/graph.hpp:1429,1626` by handle, `:2257,2263` by path;
+(`core/include/libtracer/graph.hpp:1429,1648` by handle, `:2279,2285` by path;
 `value_ref_t` at `core/include/libtracer/value.hpp:559`). A `value_ref_t` is an **owning
 reference** to the value the vertex published: the LKV slot holds one intrusive `value_t*`
 — a refcount, the link count and the link chain in a single block drawn from the vertex's
@@ -297,7 +309,7 @@ seam and delivers in one step. Only the sweep **root** is judged. The same amend
 vertex answers an `await` with its `on_read`-composed value instead of `NOT_FOUND`.
 
 `set_delivery_mode(v, mode)` sets that per-vertex policy. It is a wiring-time host API call,
-in the same family as `set_history_depth`, `set_share_threshold_bytes` and `set_app_fields` — an
+in the same family as `set_retention`, `set_share_threshold_bytes` and `set_app_fields` — an
 owner declaration with no wire surface.
 
 | `delivery_mode_t` | An ancestor's sweep includes this vertex |
@@ -578,6 +590,10 @@ under — admission, not placement: the payload stays where the publish put it.
 ```
 
 ```{doxygenenum} tr::graph::role_t
+:project: libtracer
+```
+
+```{doxygenenum} tr::graph::retention_t
 :project: libtracer
 ```
 

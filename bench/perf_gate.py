@@ -137,7 +137,7 @@ DEFAULT_TIER = "advisory"
 # under an endpoint-type name (`run_eptype`), so they are the SAME code as `inproc/64/1/1`
 # and `inproc-borrow/64/1/1` — already gated, twice over, and gating them again would buy
 # correlated evidence rather than coverage. `eptype-stream` is not a re-emission: it is
-# the only point on this list that runs `set_history_depth` and therefore the only one
+# the only point on this list that runs `set_retention` and therefore the only one
 # downstream of the STREAM role's bounded-ring RETENTION work, which every write to a
 # STREAM vertex pays before fan-out. Nothing else here touches that path, so a pullback
 # confined to retention was invisible to all fourteen predecessors — the same guard-gap

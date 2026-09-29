@@ -84,8 +84,8 @@ carrier for a semantic tag plus a natural-language brief:
 static constexpr std::array<std::byte, kRampDescLen> kRampDesc = encode_ramp_descriptor();
 
 static constexpr std::array<tr::graph::app_field_static_t, 1> kLevelFields{{
-    // key below settings.app.  remote access                 descriptor bytes
-    {"ramp_ms",                 tr::graph::app_access_t::RW,  kRampDesc},
+    // key below settings.app.  remote access                 retention (RFC-0028 §5.4)      descriptor bytes
+    {"ramp_ms",                 tr::graph::app_access_t::RW,  tr::graph::retention_t::LAST,  kRampDesc},
 }};
 
 graph.set_app_fields_static(level_vertex, kLevelFields);
@@ -137,12 +137,12 @@ none — and remains a conforming node that any forwarder routes and any peer re
 
 Creation is not a new verb. It is an **append of a `SPEC` TLV to a parent's
 `:children[]` field**, gated by that parent's `CREATE` right
-(`core/src/graph.cpp:3751-3755`;
+(`core/src/graph.cpp:3809-3813`;
 [ADR-0020 — NFSv4-style ACEs with inheritance](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0020-acl-nfsv4-style-aces-with-inheritance.md)).
 The SPEC's `type` member names one of the device's registered child types and its
 optional `config` SETTINGS carries the instantiation parameters; an unregistered
 `type` answers `SCHEMA_NOT_FOUND`, the `ENOTTY` of an unsupported field
-(`graph_t::create_child`, `core/src/graph.cpp:3825-3852`). Reading `:children[]`
+(`graph_t::create_child`, `core/src/graph.cpp:3883-3910`). Reading `:children[]`
 returns the parent's **members**, never SPECs.
 
 **The `/net` plane is the exception, and it is now a different door.** A connection is

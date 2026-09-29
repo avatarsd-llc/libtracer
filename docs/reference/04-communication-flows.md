@@ -213,7 +213,7 @@ After a clear:
 ```
 Owner (host API, no wire)         Vertex
    |                                |
-   | g.set_history_depth(v, 8)      |
+   | g.set_retention(v, N, 8)       |
    |───────────────────────────────>|
    |                                |── (the next store trims to the new depth)
    |                                |
@@ -228,7 +228,7 @@ Peer                              Vertex
 
 The vertex's `:settings` **core namespace is empty** ([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.B): every flat knob name
 answers `SCHEMA_NOT_FOUND`, on read and on write, caller-independently. The two survivors of the
-old knob set are declared through the host API — `set_history_depth` for the STREAM ring depth
+old knob set are declared through the host API — `set_retention` for the STREAM ring depth
 (§3.C) and `set_share_threshold_bytes` for the copy-or-share threshold ([RFC-0028](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0028-lean-value-path.md) §5.3,
 which replaced the §3.D pin ratio) — and **neither has any wire surface at all**. A declaration applies to the **next** store; in-flight dispatches are not
 re-evaluated.

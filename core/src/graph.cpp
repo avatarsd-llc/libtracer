@@ -520,8 +520,8 @@ void emit_counter(std::vector<std::byte>& out, std::string_view noun, std::uint6
 // `history_keep_last`, `store_ref_min_bytes` — answer `SCHEMA_NOT_FOUND`, which is the
 // honest answer an unsupported field already gives. The two survivors did not move to
 // another name; they stopped being remotely writable at all and became owner-side
-// declarations (`graph_t::set_history_depth`, and the pin ratio that RFC-0028 D3 later
-// replaced with `graph_t::set_share_threshold_bytes`).
+// declarations (the ring depth, which RFC-0028 D4 later folded into `graph_t::set_retention`,
+// and the pin ratio that D3 replaced with `graph_t::set_share_threshold_bytes`).
 
 /** @brief Emit the RFC-0010 §A.4 app-container members into @p out: each declared,
  *         non-`wo` field HOLDING a value, in table order — `NAME <name>` then the stored
@@ -1827,14 +1827,32 @@ std::size_t graph_t::share_threshold_bytes(vertex_handle_t v) const noexcept {
     return v.get()->share_threshold_bytes();
 }
 
-void graph_t::set_history_depth(vertex_handle_t v, std::uint32_t keep) {
-    v.get()->set_history_depth(keep);
+/**
+ * @brief Declare what a vertex retains (RFC-0028 §5.4): validate the retention against the
+ *        role, then let the vertex record it.
+ *
+ * The role/retention table lives here, in one place: a `HANDLER` retains nothing by role, a
+ * `STORED_VALUE` holds at most its last value, and a `STREAM`'s retention IS its ring. A
+ * pairing outside the table changes nothing and answers `SCHEMA_NOT_FOUND`.
+ */
+result_t<void> graph_t::set_retention(vertex_handle_t v, retention_t r, std::uint32_t depth) {
+    vertex_t* const vx = v.get();
+    const role_t role = vx->role();
+    const bool legal = r == retention_t::NONE ||
+                       (r == retention_t::LAST && role == role_t::STORED_VALUE) ||
+                       (r == retention_t::N && role == role_t::STREAM);
+    if (!legal) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+    if (role == role_t::HANDLER) return {};  // already NONE, and no bit to carry it
+    vx->set_retention(r, depth);
+    return {};
 }
+
+retention_t graph_t::retention(vertex_handle_t v) const noexcept { return v.get()->retention(); }
 
 /**
  * @brief Bind a receiving vertex's own ring source and §4.4 arm (RFC-0025 §4.6.1 clause 3).
  *
- * Sited beside `set_history_depth` because the two compose — intent in entries, bound in bytes
+ * Sited beside `set_retention` because the two compose — intent in entries, bound in bytes
  * — and both are owner-side wiring with no wire surface. The vertex verb drains the ring on a
  * rebind so every reservation returns to the source that served it.
  */
@@ -2345,6 +2363,17 @@ result_t<value_ref_t> graph_t::publish_value(vertex_t* v, value_ref_t sp,
     // The retained width is measured ONLY for a STREAM. `total_length()` walks the value's
     // links, and a producer must not pay a walk for a queue it does not have:
     // measured, hoisting it out of this branch cost the 4-writer plain-write point ~30%.
+    //
+    // A vertex that retains NOTHING (`retention_t::NONE`, RFC-0028 §5.4) keeps neither slot nor
+    // ring: the write still moves the sequence and wakes awaiters, and the caller delivers the
+    // value it gets back and then lets it go. `write_impl` never reaches here for such a vertex
+    // (it relays from the stack); this arm serves the stores that do — a target delivery, which
+    // adopts the source's block, and a branch landing site.
+    if (v->retains_none()) {
+        if (!sp) return std::unexpected(status_t::BACKPRESSURE);  // the block was refused
+        v->note_write();
+        return sp;
+    }
     const bool receives = v->role() == role_t::STREAM;
     const std::size_t retained = receives && sp ? sp->total_length() + kRingEntryOverhead : 0;
     if (sp && !v->store(sp)) sp.reset();  // the slot declined: nothing published (#477)
@@ -2526,6 +2555,12 @@ result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, std::string_view c
         clear_pending(v, stored->get());
         return {};
     }
+    // RETENTION NONE (RFC-0028 §5.4): the pure relay. Nothing is kept, so nothing needs a
+    // block of its own — the value is delivered from the stack exactly as the HANDLER arm above
+    // delivers it, and a vertex whose subscribers are all callbacks draws ZERO blocks per
+    // write. A target subscriber still gets a block of its own (it retains; the source did
+    // not mint one to share). One relaxed test of the flag byte the admission check reads.
+    if (v->retains_none()) return relay_write(v, std::move(value), caller);
     vertex_t::store_drops_t store_drops;
     const result_t<value_ref_t> stored = store_value(v, std::move(value), store_drops, caller);
     if (!stored) return std::unexpected(stored.error());
@@ -2552,19 +2587,42 @@ result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, std::string_view c
     return {};
 }
 
+/**
+ * @brief The `retention_t::NONE` write: admit, move the sequence, deliver from the stack, keep
+ *        nothing (RFC-0028 §5.4).
+ *
+ * The HANDLER arm's delivery shape without the handler: `deliver_unstored` wraps the rope in a
+ * `value_storage_t` on this frame, so callback subscribers see the value and nothing is
+ * allocated for it. The admission filter still runs — it is a property of the vertex, not of
+ * whether the vertex keeps what it admits — and a normalised value is the one delivered.
+ */
+result_t<void> graph_t::relay_write(vertex_t* v, rope_t value, std::string_view caller) {
+    if (v->has_admission()) {
+        admission_t decided = admit(v, value, caller);
+        if (!decided) return std::unexpected(decided.error());
+        if (*decided) value = std::move(**decided);
+    }
+    v->note_write();
+    deliver_unstored(v, value, &graph_t::deliver_vertex, v->own_subs() + v->listeners_above());
+    return {};
+}
+
 namespace {
 /**
- * @brief Does @p r RETAIN a last-known-value — the one hard dependency RFC-0008's
+ * @brief Does @p v RETAIN a last-known-value — the one hard dependency RFC-0008's
  *        sweep plane has on the state plane?
  *
- * `STORED_VALUE` and `STREAM` publish an LKV every store; a `HANDLER` hands the value to
- * `on_write` and keeps nothing (`graph_t::store_value`'s null-shared_ptr success sentinel).
- * Since `propagate` takes no value argument — "the last-known-value is the single source of
- * truth", RFC-0008 §C — the accumulate-then-flush pair has nothing to flush at a vertex that
- * retains nothing, and RFC-0008 Amendment 2 refuses it at the verb rather than sweeping
- * silence. One load on two cold verbs.
+ * `STORED_VALUE` and `STREAM` publish an LKV every store unless declared `retention_t::NONE`
+ * (RFC-0028 §5.4); a `HANDLER` hands the value to `on_write` and keeps nothing
+ * (`graph_t::store_value`'s null success sentinel). Since `propagate` takes no value argument
+ * — "the last-known-value is the single source of truth", RFC-0008 §C — the
+ * accumulate-then-flush pair has nothing to flush at a vertex that retains nothing, and
+ * RFC-0008 Amendment 2 refuses it at the verb rather than sweeping silence. Two loads on two
+ * cold verbs.
  */
-[[nodiscard]] constexpr bool role_retains(role_t r) noexcept { return r != role_t::HANDLER; }
+[[nodiscard]] bool retains(const vertex_t* v, role_t r) noexcept {
+    return r != role_t::HANDLER && !v->retains_none();
+}
 }  // namespace
 
 result_t<void> graph_t::assign(vertex_handle_t vh, rope_t value, std::string_view caller) {
@@ -2579,7 +2637,7 @@ result_t<void> graph_t::assign(vertex_handle_t vh, rope_t value, std::string_vie
     // never succeed. Use `write`, which dispatches the handler seam and delivers eagerly.
     // One snapshot for both forks, for the reason `write_impl` states (#1477).
     const role_t role = v->role();
-    if (!role_retains(role)) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+    if (!retains(v, role)) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
     // The STATE half only (RFC-0008 §A): swap the last-known-value / append the stream
     // ring / bump the write sequence (waking await), then mark v for the next covering
     // sweep. A branch POINT assigns each descendant the same way. Sends nothing.
@@ -2798,7 +2856,7 @@ result_t<void> graph_t::propagate(vertex_handle_t v) {
     // Amendment 2). Descendants are untouched by this: a sweep rooted at a RETAINING ancestor
     // still walks past non-retaining vertices exactly as before — they simply carry no mark,
     // because `assign` no longer admits one.
-    if (!role_retains(v.get()->role())) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+    if (!retains(v.get(), v.get()->role())) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
     propagate_impl(v.get());
     return {};
 }
@@ -2813,7 +2871,7 @@ result_t<void> graph_t::propagate(vertex_handle_t v, emission_mode_t mode) {
     // The non-retaining refusal is the VERB's, not the emission mode's: a fold rooted at a
     // vertex that retains nothing has the same nothing to fold (RFC-0008 Amendment 2), and
     // refusing it here keeps the two modes answering alike for the same root.
-    if (!role_retains(v.get()->role())) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+    if (!retains(v.get(), v.get()->role())) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
     return propagate_folded_impl(v.get());
 }
 
@@ -3085,7 +3143,7 @@ result_t<void> graph_t::mark_flushed(vertex_handle_t vh) {
     vertex_t* v = vh.get();
     if (v->role() != role_t::STREAM) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
     // No ACL gate: nothing is disclosed and nothing is delivered — the cursor just moves. The
-    // owner-side shape `propagate` and `set_history_depth` already carry.
+    // owner-side shape `propagate` and `set_retention` already carry.
     v->mark_flushed();
     return {};
 }
