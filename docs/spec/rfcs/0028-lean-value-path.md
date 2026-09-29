@@ -702,7 +702,7 @@ catches that interleave today (§9 item 6). **Risk: medium-high** — the transp
 change shape, and a retained-`value_t` send is a partial write away from a corrupted frame.
 Adds a retained-send virtual on `transport_t` (§8.2).
 
-**As landed in slice 9** (PR_PLACEHOLDER; the race test landed first as
+**As landed in slice 9** ([PR #1657](https://github.com/avatarsd-llc/libtracer/pull/1657); the race test landed first as
 [PR #1656](https://github.com/avatarsd-llc/libtracer/pull/1656)), with three deviations from
 the text above:
 
