@@ -807,8 +807,9 @@ class transport_vertex_t {
         const wire::tlv_t* config, conn_settings_t settings);
 
     /**
-     * @brief `remove_connection`'s body, for a caller that ALREADY holds `ctl_m_` — same
-     *        non-recursive-mutex constraint as `%module_for_locked`.
+     * @brief `remove_connection`'s body, for a caller that ALREADY holds `ctl_m_` — the
+     *        plain, NON-RECURSIVE `std::mutex` a public entry acquires (ADR-0063 erratum 1),
+     *        so an internal caller cannot reach the public entry without self-deadlocking.
      *
      * Phase 1 only: the `conns_` entry goes here, and the un-route / engine stop / vertex
      * retire / socket destruction are collected on @p txn for phase 2. Erasing the entry
@@ -866,17 +867,6 @@ class transport_vertex_t {
      */
     [[nodiscard]] graph::result_t<module_decl_t> declaration_for_locked(
         std::string_view module, std::string_view kind) const;
-
-    /**
-     * @brief `module_for`'s body, for a caller that ALREADY holds `ctl_m_`.
-     *
-     * A creation resolves a module from inside its own locked section, and `ctl_m_` is a
-     * plain, NON-RECURSIVE `std::mutex` — so it cannot reach the public entry, which would
-     * self-deadlock. That constraint is why #881 is a split rather than a lock added in
-     * place: one body, two surfaces, exactly one acquisition per call.
-     */
-    [[nodiscard]] graph::result_t<std::string> module_for_locked(std::string_view kind,
-                                                                 conn_role_t role) const;
 
     /**
      * @brief `set_link_state`'s body, for a caller that ALREADY holds `ctl_m_`.
