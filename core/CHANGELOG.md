@@ -14,6 +14,21 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Changed
+
+- **A subscription's target leg ADOPTS the published value (RFC 0028 slice 4, D2; part of
+  [#1620](https://github.com/avatarsd-llc/libtracer/issues/1620)).** `subscribe(src, target)`
+  used to clone the delivered links into a `rope_t` and mint the target a `value_t` of its own,
+  so K stored targets cost K + 1 blocks per publish. The target's slot now takes one reference
+  on the block the source published: `bench_lean_value_path local-target` at K=32 goes from 33
+  allocations / 1,320 B to **1 / 40 B** per publish. Observable: `read(target)` and
+  `read(src)` now answer the **same** `value_t` (identity, not only equal bytes), and a
+  target's value is released to the source it was drawn from once the last slot moves off it.
+  The target's admission filter, ring admission and ACL gate run as before, on the shared
+  block; only a normalising filter mints the target a block. Two shapes still clone, inside
+  the store: a HANDLER target (its `on_write` reads a `rope_t`) and a value in caller-owned
+  storage (a HANDLER source's unstored delivery). No public signature changes.
+
 ### Breaking
 
 - **The copy-or-share threshold replaces the pin ratio (RFC 0028 slice 5, D3).** A written
@@ -91,7 +106,14 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     process-default `heap_source_t::try_alloc` honours it, so an injected refusal reaches a
     `value_t` draw. `heap_source_t::acquire` — the direct-call arm — does not consult it.
 
+## [0.16.1] — 2026-09-29
+
 ### Added
+
+- **`tr::net::fwd_router_t` takes an optional seventh seam, `retained`**
+  ([#1610](https://github.com/avatarsd-llc/libtracer/issues/1610)). A remote SUBSCRIBE's two
+  life-of-the-subscription allocations draw from it; it defaults to `flat` when not injected,
+  so existing six-argument callers are unchanged.
 
 - **BREAKING — enqueue-then-write in the stream links (RFC 0028 slice 2; fixes
   [#1619](https://github.com/avatarsd-llc/libtracer/issues/1619)).** A stalled or silent peer can
@@ -114,6 +136,97 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     windows.
     **Removed:** `stream_endpoint_t::send_all_locked` (protected, no caller) — use
     `handoff_send`.
+
+### Changed
+
+- **`tr::net::fwd_router_t`'s four peer-reachable ownership copies draw from its injected
+  `flat` backend, never the global heap**
+  ([#1582](https://github.com/avatarsd-llc/libtracer/issues/1582)). The COMPACT delivery
+  payload copy (both the memoized warm arm and the cold `deliver_local` arm) and the host-local
+  `subscribe_toward` door's return-route PATH TLV and `SUBSCRIBER` TLV took the one-argument
+  `view::over_bytes` — an unbounded heap draw on a receive thread behind no ACL — while the
+  router already held `flat` for exactly this. A refusal is answered as before: a counted
+  `delivery_drops().out_of_memory` for the two deliveries, `BACKPRESSURE` by value for the
+  subscribe; there is no heap fallback. A host that size-classes `flat` now sees these draws
+  there (one per COMPACT delivery; two per host-local subscribe, retained for the subscription's
+  life). Wire-neutral; an un-injected router is unchanged. Test: `router_flat_seam_test`.
+
+### Removed
+
+- **BREAKING — `tr::net::transport_vertex_t::module_for_locked` is removed**
+  ([#1602](https://github.com/avatarsd-llc/libtracer/issues/1602)). It had no internal caller
+  since S7; its body is folded into the public `module_for`, which takes the lock itself. A
+  caller that held `ctl_m_` and called the `_locked` form calls `module_for` without the lock.
+
+- **BREAKING — `tr::graph::sp_atomic_slot_t` is removed; the default LKV slot is now the new
+  `single_writer_slot_t`**
+  ([#1618](https://github.com/avatarsd-llc/libtracer/issues/1618), RFC 0028 §5.5 slice 1,
+  [#1627](https://github.com/avatarsd-llc/libtracer/pull/1627)). The removed slot was
+  `std::atomic<std::shared_ptr<const rope_t>>`, which libstdc++ implements with a pointer-lock bit
+  that `load` and `store` spin on with `sched_yield`. On a priority-preemptive single core,
+  `sched_yield` yields only to equal or higher priority, so a high-priority reader that preempted
+  a low-priority writer inside that window spun until the task watchdog fired. It was the default
+  on every target, the ESP-IDF chip builds included, and nothing asserted against it.
+  Reproduced on the host with two `SCHED_FIFO` threads pinned to one CPU: the reader livelocks on
+  the first run.
+
+  - **Added** `single_writer_slot_t` (and the template behind it,
+    `basic_single_writer_slot_t<guard_t>`). It is a plain `shared_ptr`, swapped on publish and
+    copied on read inside `config_t::reader_guard_t`. The displaced value is released after the
+    guard closes, so no destructor runs with interrupts masked. A publish cannot fail, and the
+    slot has no registry.
+  - **Added** `default_config_t::kSingleWriter` (per-build, default `false`),
+    `default_config_t::reader_guard_t`, `tr::graph::no_guard_t` (for a single-threaded build), and
+    `tr::graph::mutex_guard_t` (the host guard: 64 cache-line-padded one-word locks striped by
+    slot address — one `exchange` to take, one release store to give back; a contender re-reads
+    briefly and then sleeps in bounded naps, never spinning on a descheduled holder). A
+    `std::mutex` per stripe was the first cut and the blocking perf gate refused it
+    ([#1628](https://github.com/avatarsd-llc/libtracer/pull/1628): `inproc-target-stored`
+    −13 %, one guarded section per delivery); a parking mutex's unlock must fence or RMW to
+    find its sleeper, and a lock whose contender sleeps on a timer has no wakeup to lose.
+    `kSingleWriter` states the one-publisher contract; the guard serializes writers either way,
+    so a build that breaks it stays memory-safe. It does **not** let the writer skip the guard:
+    a `shared_ptr` is two words, so one reader can observe a half-done swap or retain a control
+    block the writer has just released, single publisher or not. That shortcut becomes sound
+    only with the one-word intrusive slot of RFC 0028 slice 3, and `lkv_slot.hpp` says why.
+  - **Added** a mandatory `static constexpr bool may_spin` on every slot policy. `vertex.hpp`
+    refuses a policy that does not declare it, and refuses one that declares `true` where
+    `kSpinWaitSafe` is `false`. The `spin_slot_guard` ctest checks both refusals by their
+    diagnostics. Both shipped policies declare `false`.
+  - **Changed** `default_config_t::lkv_slot_t` from `sp_atomic_slot_t` to `single_writer_slot_t`
+    and `default_config_t::reader_guard_t` to `mutex_guard_t`. The host perf gate passes with no
+    allowance: bytes per vertex and per value are unchanged, and `mixed` is within noise.
+    `hazard_slot_t` stays a host opt-in; on that gate it adds 23 B and one block per published
+    value (its indirection node) and loses 24–30 % on `mixed`, because deferred reclamation of
+    displaced values defeats the allocator's thread cache. An embedded target overrides
+    `reader_guard_t` with an interrupt-masking guard.
+  - **Changed** the `LIBTRACER_LKV_SLOT` CMake option to default to `single_writer_slot_t` and to
+    accept only `single_writer_slot_t` or `hazard_slot_t`. `sp_atomic_slot_t` is a configure-time
+    error.
+  - **Migration:** an override fragment that named `sp_atomic_slot_t` drops the line to take
+    `single_writer_slot_t`, or binds `hazard_slot_t`. A custom slot policy adds `may_spin`.
+
+### Fixed
+
+- **A request the `fwd_router_t` terminus cannot serve for want of memory is answered, not
+  dropped** ([#1612](https://github.com/avatarsd-llc/libtracer/issues/1612)). The three resource
+  arms of the terminus — the rx block source refusing the decode arena, the egress backend refusing
+  the reply head, the rx source refusing the reply's iov table — counted a drop and returned, so
+  the requester saw only its own timeout and a memory condition read as a lost frame or a dead
+  link. Each arm now also emits an **addressed** `FWD{REPLY, kind=ERROR,
+  STATUS{tr::flow::backpressure}}` whose `dst` is the request's own `src`, located by offset in the
+  raw frame bytes (no decode, no arena) and built on the stack — the reply reaches **no allocator**,
+  because the memory that just refused cannot fund it (reference 04 §"Exhaustion is a value" now
+  states this corollary). The request's TF=0 wire-time stamp is echoed as on every other reply. A
+  refused frame whose `src` cannot be located stays a counted drop with nothing on the wire. The
+  counters are unchanged and still move; the forward hop is untouched. Wire-neutral for a
+  conforming peer — the frame is the existing RFC-0004 §D error reply, emitted where silence was.
+  Pinned by `core/tests/fwd_terminus_refusal_reply_test.cpp`, including a zero-global-allocation
+  count across the refused receive.
+
+## [0.16.0] — 2026-08-29
+
+### Added
 
 - **`vertex.hpp` — `tr::graph::admission_t`, `handlers_t::on_admit` and
   `handlers_t::on_app_field_admit`: a pre-store ADMISSION seam for stored-value and app-field
@@ -293,8 +406,6 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `POINT{NAME, SETTINGS{…}}` envelope with an **empty `SETTINGS`** for a module that declares no
   catalog — never `SCHEMA_NOT_FOUND`, which would make the §6 creatability probe ambiguous.
 
-### Added
-
 - **`tr::graph::graph_t::value_backend()`** — the `mem_backend_t` every `view::segment_t` the
   graph owns is drawn from ([#873](https://github.com/avatarsd-llc/libtracer/issues/873)
   phase 3). `mem::heap_backend` for a process-default graph, the graph's own
@@ -323,127 +434,8 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   enumerator is decided against in phase 3. One direction only, exactly as `source_resource_t`
   is.
 
-### Removed
-
-- **BREAKING — `tr::graph::sp_atomic_slot_t` is removed; the default LKV slot is now the new
-  `single_writer_slot_t`**
-  ([#1618](https://github.com/avatarsd-llc/libtracer/issues/1618), RFC 0028 §5.5 slice 1,
-  [#1627](https://github.com/avatarsd-llc/libtracer/pull/1627)). The removed slot was
-  `std::atomic<std::shared_ptr<const rope_t>>`, which libstdc++ implements with a pointer-lock bit
-  that `load` and `store` spin on with `sched_yield`. On a priority-preemptive single core,
-  `sched_yield` yields only to equal or higher priority, so a high-priority reader that preempted
-  a low-priority writer inside that window spun until the task watchdog fired. It was the default
-  on every target, the ESP-IDF chip builds included, and nothing asserted against it.
-  Reproduced on the host with two `SCHED_FIFO` threads pinned to one CPU: the reader livelocks on
-  the first run.
-
-  - **Added** `single_writer_slot_t` (and the template behind it,
-    `basic_single_writer_slot_t<guard_t>`). It is a plain `shared_ptr`, swapped on publish and
-    copied on read inside `config_t::reader_guard_t`. The displaced value is released after the
-    guard closes, so no destructor runs with interrupts masked. A publish cannot fail, and the
-    slot has no registry.
-  - **Added** `default_config_t::kSingleWriter` (per-build, default `false`),
-    `default_config_t::reader_guard_t`, `tr::graph::no_guard_t` (for a single-threaded build), and
-    `tr::graph::mutex_guard_t` (the host guard: 64 cache-line-padded one-word locks striped by
-    slot address — one `exchange` to take, one release store to give back; a contender re-reads
-    briefly and then sleeps in bounded naps, never spinning on a descheduled holder). A
-    `std::mutex` per stripe was the first cut and the blocking perf gate refused it
-    ([#1628](https://github.com/avatarsd-llc/libtracer/pull/1628): `inproc-target-stored`
-    −13 %, one guarded section per delivery); a parking mutex's unlock must fence or RMW to
-    find its sleeper, and a lock whose contender sleeps on a timer has no wakeup to lose.
-    `kSingleWriter` states the one-publisher contract; the guard serializes writers either way,
-    so a build that breaks it stays memory-safe. It does **not** let the writer skip the guard:
-    a `shared_ptr` is two words, so one reader can observe a half-done swap or retain a control
-    block the writer has just released, single publisher or not. That shortcut becomes sound
-    only with the one-word intrusive slot of RFC 0028 slice 3, and `lkv_slot.hpp` says why.
-  - **Added** a mandatory `static constexpr bool may_spin` on every slot policy. `vertex.hpp`
-    refuses a policy that does not declare it, and refuses one that declares `true` where
-    `kSpinWaitSafe` is `false`. The `spin_slot_guard` ctest checks both refusals by their
-    diagnostics. Both shipped policies declare `false`.
-  - **Changed** `default_config_t::lkv_slot_t` from `sp_atomic_slot_t` to `single_writer_slot_t`
-    and `default_config_t::reader_guard_t` to `mutex_guard_t`. The host perf gate passes with no
-    allowance: bytes per vertex and per value are unchanged, and `mixed` is within noise.
-    `hazard_slot_t` stays a host opt-in; on that gate it adds 23 B and one block per published
-    value (its indirection node) and loses 24–30 % on `mixed`, because deferred reclamation of
-    displaced values defeats the allocator's thread cache. An embedded target overrides
-    `reader_guard_t` with an interrupt-masking guard.
-  - **Changed** the `LIBTRACER_LKV_SLOT` CMake option to default to `single_writer_slot_t` and to
-    accept only `single_writer_slot_t` or `hazard_slot_t`. `sp_atomic_slot_t` is a configure-time
-    error.
-  - **Migration:** an override fragment that named `sp_atomic_slot_t` drops the line to take
-    `single_writer_slot_t`, or binds `hazard_slot_t`. A custom slot policy adds `may_spin`.
-
-- **BREAKING — the `/net:children[]` connection-creation door is RETIRED, and with it the SPEC's
-  `type` pair and the `role` config key** ([#492](https://github.com/avatarsd-llc/libtracer/issues/492)
-  S7, [RFC-0014](../docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)
-  **Amendment 4**, executing the supersession
-  [ADR-0059](../docs/adr/0059-creator-endpoint-creation-and-removal-are-writes-to-a-vertex.md) ruled).
-
-  - **Wire.** `transport_vertex_t` no longer registers the `client` and `listener` child types on
-    the graph, so `write /net:children[] += SPEC{ type = "client"|"listener", name, config }`
-    answers `SCHEMA_NOT_FOUND` — the ordinary unregistered-catalog-type answer, not a new error
-    identity. The ONE wire path that creates a connection is now the per-module creator endpoint:
-    `write /net/<module>/conn <- SPEC{ name, config }`, removal `<- NAME{ name }`. An orchestrator
-    still on the old spelling must move; there is no compatibility shim, deliberately — a
-    superseded door that still answers is still a door, and two doors onto one creation semantics
-    is the drift the shared body was split to prevent.
-  - **The `role` config key is gone.** It existed only to override the catalog type's default
-    direction, and the catalog type is what died. The role has been POSITIONAL since S2b — it *is*
-    the module (`ws-client` = DIAL, `ws-server` = LISTEN) — and the endpoint always overwrote a
-    written `role` with the module's, so the key was already inert. `parse_config` no longer reads
-    it: a `role` pair on the wire is now an ordinary unknown pair, **ignored** per the config
-    walk's forward-compatibility rule, never obeyed and never an error.
-  - **C++ API.** `tr::net::conn_spec_t(type, name)` and `conn_spec_t::role(conn_role_t)` are
-    removed, and the free function changes shape:
-    `conn_spec(type, name, role, port, kind, addr)` → **`conn_spec(name, port, kind, addr)`**.
-    `explicit conn_spec_t(name)` — the endpoint spelling — is unchanged and is now the only one.
-    `transport_vertex_t::make_connection` (the private child-factory adapter) is gone;
-    `make_connection_locked` is unchanged and is reached only through the endpoint.
-    `register_module(module, kind, role)` is what an application must now call before any
-    connection can be created — it is what mints `/net/<module>/conn`.
-  - **NOT retired, and the distinction is the whole point.** `:children[]` as an **enumeration** is
-    untouched: `/net:children[]` lists this plane's modules, `/net/<module>:children[]` lists that
-    module's member connections (with `conn` hidden, RFC-0014 §3), and a bus connection's
-    `:children[]` still serves its live peers. `:children[]` as a **generic creation** surface
-    ([RFC-0013](../docs/spec/rfcs/0013-creatable-child-type-catalog.md)) is untouched too —
-    `stored_value` and every application-registered type still create through it, and
-    `graph_t::register_child_type` is unchanged public API. What was removed is two registrations,
-    not a mechanism.
-  - **Conformance.** The `spec/conn-client-ws` vector — the retired door's spelling of the same
-    connection — is deleted, per the ruling that it lives exactly as long as its door. The one
-    claim it carried that outlives the door (a config's values are typed **per key**: `addr` a
-    textual `NAME`, `port` an opaque `VALUE` u16, neither substituting for the other) moved to
-    `conn/create-via-spec`, whose `config` carries the same mix. With the vectors complete,
-    Amendment 4 promotes **every remaining `proposed pending` byte clause in RFC-0014 to
-    normative** — the `SPEC`/`NAME`/`config` layout, the §2 error identities, the absent-endpoint
-    identity and the liveness-enum encoding.
-
 ### Changed
 
-- **A subscription's target leg ADOPTS the published value (RFC 0028 slice 4, D2; part of
-  [#1620](https://github.com/avatarsd-llc/libtracer/issues/1620)).** `subscribe(src, target)`
-  used to clone the delivered links into a `rope_t` and mint the target a `value_t` of its own,
-  so K stored targets cost K + 1 blocks per publish. The target's slot now takes one reference
-  on the block the source published: `bench_lean_value_path local-target` at K=32 goes from 33
-  allocations / 1,320 B to **1 / 40 B** per publish. Observable: `read(target)` and
-  `read(src)` now answer the **same** `value_t` (identity, not only equal bytes), and a
-  target's value is released to the source it was drawn from once the last slot moves off it.
-  The target's admission filter, ring admission and ACL gate run as before, on the shared
-  block; only a normalising filter mints the target a block. Two shapes still clone, inside
-  the store: a HANDLER target (its `on_write` reads a `rope_t`) and a value in caller-owned
-  storage (a HANDLER source's unstored delivery). No public signature changes.
-
-- **`tr::net::fwd_router_t`'s four peer-reachable ownership copies draw from its injected
-  `flat` backend, never the global heap**
-  ([#1582](https://github.com/avatarsd-llc/libtracer/issues/1582)). The COMPACT delivery
-  payload copy (both the memoized warm arm and the cold `deliver_local` arm) and the host-local
-  `subscribe_toward` door's return-route PATH TLV and `SUBSCRIBER` TLV took the one-argument
-  `view::over_bytes` — an unbounded heap draw on a receive thread behind no ACL — while the
-  router already held `flat` for exactly this. A refusal is answered as before: a counted
-  `delivery_drops().out_of_memory` for the two deliveries, `BACKPRESSURE` by value for the
-  subscribe; there is no heap fallback. A host that size-classes `flat` now sees these draws
-  there (one per COMPACT delivery; two per host-local subscribe, retained for the subscription's
-  life). Wire-neutral; an un-injected router is unchanged. Test: `router_flat_seam_test`.
 - **`tr::mem::source_backend_t` draws ONE block per segment, and `tr::mem::heap_backend_t`
   acquires through the substrate's own platform-heap arm**
   ([#873](https://github.com/avatarsd-llc/libtracer/issues/873) **phase 3** — the last of the
@@ -789,6 +781,53 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   re-emission are unchanged, and no conformance vector's bytes move. The §4.7 attach-forward
   contract (§7 vector 7) is newly pinned by `core/tests/delivery_class_honour_test.cpp`.
 
+### Removed
+
+- **BREAKING — the `/net:children[]` connection-creation door is RETIRED, and with it the SPEC's
+  `type` pair and the `role` config key** ([#492](https://github.com/avatarsd-llc/libtracer/issues/492)
+  S7, [RFC-0014](../docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)
+  **Amendment 4**, executing the supersession
+  [ADR-0059](../docs/adr/0059-creator-endpoint-creation-and-removal-are-writes-to-a-vertex.md) ruled).
+
+  - **Wire.** `transport_vertex_t` no longer registers the `client` and `listener` child types on
+    the graph, so `write /net:children[] += SPEC{ type = "client"|"listener", name, config }`
+    answers `SCHEMA_NOT_FOUND` — the ordinary unregistered-catalog-type answer, not a new error
+    identity. The ONE wire path that creates a connection is now the per-module creator endpoint:
+    `write /net/<module>/conn <- SPEC{ name, config }`, removal `<- NAME{ name }`. An orchestrator
+    still on the old spelling must move; there is no compatibility shim, deliberately — a
+    superseded door that still answers is still a door, and two doors onto one creation semantics
+    is the drift the shared body was split to prevent.
+  - **The `role` config key is gone.** It existed only to override the catalog type's default
+    direction, and the catalog type is what died. The role has been POSITIONAL since S2b — it *is*
+    the module (`ws-client` = DIAL, `ws-server` = LISTEN) — and the endpoint always overwrote a
+    written `role` with the module's, so the key was already inert. `parse_config` no longer reads
+    it: a `role` pair on the wire is now an ordinary unknown pair, **ignored** per the config
+    walk's forward-compatibility rule, never obeyed and never an error.
+  - **C++ API.** `tr::net::conn_spec_t(type, name)` and `conn_spec_t::role(conn_role_t)` are
+    removed, and the free function changes shape:
+    `conn_spec(type, name, role, port, kind, addr)` → **`conn_spec(name, port, kind, addr)`**.
+    `explicit conn_spec_t(name)` — the endpoint spelling — is unchanged and is now the only one.
+    `transport_vertex_t::make_connection` (the private child-factory adapter) is gone;
+    `make_connection_locked` is unchanged and is reached only through the endpoint.
+    `register_module(module, kind, role)` is what an application must now call before any
+    connection can be created — it is what mints `/net/<module>/conn`.
+  - **NOT retired, and the distinction is the whole point.** `:children[]` as an **enumeration** is
+    untouched: `/net:children[]` lists this plane's modules, `/net/<module>:children[]` lists that
+    module's member connections (with `conn` hidden, RFC-0014 §3), and a bus connection's
+    `:children[]` still serves its live peers. `:children[]` as a **generic creation** surface
+    ([RFC-0013](../docs/spec/rfcs/0013-creatable-child-type-catalog.md)) is untouched too —
+    `stored_value` and every application-registered type still create through it, and
+    `graph_t::register_child_type` is unchanged public API. What was removed is two registrations,
+    not a mechanism.
+  - **Conformance.** The `spec/conn-client-ws` vector — the retired door's spelling of the same
+    connection — is deleted, per the ruling that it lives exactly as long as its door. The one
+    claim it carried that outlives the door (a config's values are typed **per key**: `addr` a
+    textual `NAME`, `port` an opaque `VALUE` u16, neither substituting for the other) moved to
+    `conn/create-via-spec`, whose `config` carries the same mix. With the vectors complete,
+    Amendment 4 promotes **every remaining `proposed pending` byte clause in RFC-0014 to
+    normative** — the `SPEC`/`NAME`/`config` layout, the §2 error identities, the absent-endpoint
+    identity and the liveness-enum encoding.
+
 ### Fixed
 
 - **`tr::wire::playout_batch` no longer signed-overflows when the last derived sample time is
@@ -813,22 +852,6 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   the sign and the derivation's own sum is spelled unsigned, exactly as the non-uniform arm
   three lines above and as `playout.hpp`'s re-prime; behaviour on a non-negative `base_ns` is
   byte-identical. Regression pinned by claim 2b of `core/tests/batch_test.cpp`.
-
-- **A request the `fwd_router_t` terminus cannot serve for want of memory is answered, not
-  dropped** ([#1612](https://github.com/avatarsd-llc/libtracer/issues/1612)). The three resource
-  arms of the terminus — the rx block source refusing the decode arena, the egress backend refusing
-  the reply head, the rx source refusing the reply's iov table — counted a drop and returned, so
-  the requester saw only its own timeout and a memory condition read as a lost frame or a dead
-  link. Each arm now also emits an **addressed** `FWD{REPLY, kind=ERROR,
-  STATUS{tr::flow::backpressure}}` whose `dst` is the request's own `src`, located by offset in the
-  raw frame bytes (no decode, no arena) and built on the stack — the reply reaches **no allocator**,
-  because the memory that just refused cannot fund it (reference 04 §"Exhaustion is a value" now
-  states this corollary). The request's TF=0 wire-time stamp is echoed as on every other reply. A
-  refused frame whose `src` cannot be located stays a counted drop with nothing on the wire. The
-  counters are unchanged and still move; the forward hop is untouched. Wire-neutral for a
-  conforming peer — the frame is the existing RFC-0004 §D error reply, emitted where silence was.
-  Pinned by `core/tests/fwd_terminus_refusal_reply_test.cpp`, including a zero-global-allocation
-  count across the refused receive.
 
 ## [0.15.1] — 2026-08-23
 

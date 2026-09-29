@@ -20,6 +20,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   zero-copy store on one vertex declares it with `graph_t::set_share_threshold_bytes`. The copy
   itself is now ONE block (header + bytes) from the graph's source instead of three. The
   `pin_bench` example's arms are thresholds (`A-copy`, `T64`, `T512`, `C-share`).
+
+## [0.16.1] — 2026-09-29
+
+### Changed
+
 - **BREAKING (inherited from core) — chip targets bind the single-writer LKV slot**
   ([#1618](https://github.com/avatarsd-llc/libtracer/issues/1618)). Core removed
   `sp_atomic_slot_t`, the spin-locked slot every chip build used by default. On a
@@ -46,45 +51,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   that is writing still waits on I/O for its own frame and for each queued frame it drains,
   each bounded by the write budget.
 
-- **BREAKING (inherited from core) — `graph_t` now takes ONE injected
-  `tr::mem::block_source_t`** ([#873](https://github.com/avatarsd-llc/libtracer/issues/873)
-  phase 1). A device recipe that wired the graph's `mr`, `value_backend` and `ctl` separately —
-  the "one slab, whole stack" spelling this component exists to make possible — now points a
-  single `tr::mem::pool_source_t` at the constructor and gets all three channels bounded by that
-  one slab: `graph_t g{pool};`. `critical_pool.hpp`'s guidance is unchanged in substance (the
-  peer-reachable byte seams still want the DRAM-critical pool); what changes is that the graph's
-  share of them is one argument instead of three. The bundled examples construct
-  `graph_t` with no argument and are unaffected. The LKV hazard-slot nodes still allocate on the
-  global heap — core's phase 2 measured that migration off its own gate and **reverted** it, so
-  that is now a documented carve-out rather than pending work, and a device recipe cannot bound
-  them.
-
-- **(inherited from core) Two more channels reach the injected slab, and a segment costs one
-  block instead of two** ([#873](https://github.com/avatarsd-llc/libtracer/issues/873) phase 3).
-  A device that injects a `tr::mem::pool_source_t` gets two changes it can see in its slab
-  census. The graph's **read-back encoders** — `:point`, `:settings`, `:acl`, `:children`, the
-  identity record and the rest — now mint their segments from that slab instead of the global
-  heap, so a peer's READ is charged to the deployer's memory like every other channel; size the
-  slab for it. And `source_backend_t` draws the `segment_t` control block and the payload in
-  ONE block rather than two, which on a size-classed `pool_source_t` removes one class
-  allocation and one rounding per segment. No component API changed.
-
-### Removed
-
-- **BREAKING — connections are no longer created through `/net:children[]`**
-  ([#492](https://github.com/avatarsd-llc/libtracer/issues/492) S7,
-  [RFC-0014](../../../docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)
-  Amendment 4). The `client` and `listener` child types are gone from the core, so a device
-  recipe that wired its links with `write /net:children[] += SPEC{type, name, config}` — the
-  spelling this component's README and `full_node` example both carried — now gets
-  `SCHEMA_NOT_FOUND`. The recipe is: declare the module with
-  `transport_vertex_t::register_module(module, kind, role)`, then
-  `write /net/<module>/conn <- SPEC{name, config{…}}`. Removal is `NAME{name}` to the same
-  vertex. The `role` config key went with the catalog type it overrode — the role is the
-  module now. This is a **core** change; the component inherits it, and the ESP-side seams
-  (`provide_link` staging, `defer_recv`, `httpd_ws_link_t`, `twai_link_t`) are unaffected apart
-  from which write arms them. `examples/full_node` and the component README ship the migrated
-  recipe.
+## [0.16.0] — 2026-08-29
 
 ### Added
 
@@ -161,6 +128,48 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `pthread_create` with `pthread_attr_setstacksize`, the mechanism `posix_endpoint_t` and
   `socketcan_link_t` already use, so the size is a plain integer knob. `0` (the default) means
   the platform default and touches no attribute at all.
+
+### Changed
+
+- **BREAKING (inherited from core) — `graph_t` now takes ONE injected
+  `tr::mem::block_source_t`** ([#873](https://github.com/avatarsd-llc/libtracer/issues/873)
+  phase 1). A device recipe that wired the graph's `mr`, `value_backend` and `ctl` separately —
+  the "one slab, whole stack" spelling this component exists to make possible — now points a
+  single `tr::mem::pool_source_t` at the constructor and gets all three channels bounded by that
+  one slab: `graph_t g{pool};`. `critical_pool.hpp`'s guidance is unchanged in substance (the
+  peer-reachable byte seams still want the DRAM-critical pool); what changes is that the graph's
+  share of them is one argument instead of three. The bundled examples construct
+  `graph_t` with no argument and are unaffected. The LKV hazard-slot nodes still allocate on the
+  global heap — core's phase 2 measured that migration off its own gate and **reverted** it, so
+  that is now a documented carve-out rather than pending work, and a device recipe cannot bound
+  them.
+
+- **(inherited from core) Two more channels reach the injected slab, and a segment costs one
+  block instead of two** ([#873](https://github.com/avatarsd-llc/libtracer/issues/873) phase 3).
+  A device that injects a `tr::mem::pool_source_t` gets two changes it can see in its slab
+  census. The graph's **read-back encoders** — `:point`, `:settings`, `:acl`, `:children`, the
+  identity record and the rest — now mint their segments from that slab instead of the global
+  heap, so a peer's READ is charged to the deployer's memory like every other channel; size the
+  slab for it. And `source_backend_t` draws the `segment_t` control block and the payload in
+  ONE block rather than two, which on a size-classed `pool_source_t` removes one class
+  allocation and one rounding per segment. No component API changed.
+
+### Removed
+
+- **BREAKING — connections are no longer created through `/net:children[]`**
+  ([#492](https://github.com/avatarsd-llc/libtracer/issues/492) S7,
+  [RFC-0014](../../../docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)
+  Amendment 4). The `client` and `listener` child types are gone from the core, so a device
+  recipe that wired its links with `write /net:children[] += SPEC{type, name, config}` — the
+  spelling this component's README and `full_node` example both carried — now gets
+  `SCHEMA_NOT_FOUND`. The recipe is: declare the module with
+  `transport_vertex_t::register_module(module, kind, role)`, then
+  `write /net/<module>/conn <- SPEC{name, config{…}}`. Removal is `NAME{name}` to the same
+  vertex. The `role` config key went with the catalog type it overrode — the role is the
+  module now. This is a **core** change; the component inherits it, and the ESP-side seams
+  (`provide_link` staging, `defer_recv`, `httpd_ws_link_t`, `twai_link_t`) are unaffected apart
+  from which write arms them. `examples/full_node` and the component README ship the migrated
+  recipe.
 
 ## [0.15.1] — 2026-08-23
 
