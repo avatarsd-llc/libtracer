@@ -79,7 +79,8 @@ across the columns:
 - **The target leg breaks the promise.** `dispatch_edge_target` clones the rope's links
   (`try_clone_rope`, a refcount per link) and then calls `store_value` on the target, which
   calls `vertex_t::store` → `try_make_lkv` → a *fresh* `make_shared` per target
-  (`core/src/graph.cpp:2076-2100`, `core/include/libtracer/vertex.hpp:2639-2660`). K targets
+  (as of `3fc129f2`, before slice 4 deleted the pair: `core/src/graph.cpp` `dispatch_edge_target`
+  and `vertex_t::store` / `try_make_lkv` in `core/include/libtracer/vertex.hpp`). K targets
   ⇒ K + 1 blocks holding K + 1 copies of the same 80 B rope header around one shared payload.
 - **A locally produced value costs two blocks and one copy before the write even starts**:
   `heap_alloc` allocates the 40 B `segment_t` header and the payload block separately, then
@@ -191,7 +192,7 @@ today, #1608 tier 1) move onto the same carrier in §6.3d.
 ### 4.2 D2 — the per-target re-wrap (L3)
 
 **What.** The `try_clone_rope` + `store_value(target, …)` pair in `dispatch_edge_target`
-(`graph.cpp:2076-2100`), as a *value-producing* step.
+(as of `3fc129f2`; removed by slice 4, [PR #1642](https://github.com/avatarsd-llc/libtracer/pull/1642)), as a *value-producing* step.
 
 **Why.** The target's LKV must hold the same bytes the source published; it does not need its
 own wrapper around them. With D1 the source's block already carries the refcount.
@@ -406,6 +407,12 @@ owner-less byte form, so there is nothing for an inline arm to be a view *over* 
 (D3) adds the copy-or-share decision; the "24 + size" figure and the `bytes[len]` arm are that
 slice's prototype, not slice 3's.
 
+**As landed in slice 5** ([PR #1643](https://github.com/avatarsd-llc/libtracer/pull/1643)) the
+inline arm costs **80 + size on the host and 44 + size on rv32**, not 24 + size / 16 + size.
+Every stored byte range needs an owning segment, so the inline block embeds one next to the
+header. The prototype had no owner and could not be read through a `view_t`, so its figure
+was a lower bound the shipped shape cannot reach.
+
 ### 5.2 The path
 
 ```text
@@ -452,7 +459,7 @@ One number per vertex, `share_threshold_bytes`, default `config_t::kShareThresho
 | --- | --- | --- |
 | HANDLER | `NONE` | none — already stores nothing |
 | STORED_VALUE | `LAST` | none |
-| STREAM | `N` + RFC-0025 byte charge | `set_history_depth` → `set_policy` |
+| STREAM | `N` + RFC-0025 byte charge | `set_history_depth` → `set_retention` (slice 6), `set_policy` at slice 10 |
 | app field `ro`/`rw` | `LAST` | none |
 | app field `wo` | `NONE` | **stores nothing** (today it stores and refuses reads) |
 
@@ -632,11 +639,25 @@ only bytes an injected source does not bound.
 change is inside `dispatch_edge_target`. Must re-measure the `always_inline` body against the
 #1223 cliff.
 
+**As landed** ([PR #1642](https://github.com/avatarsd-llc/libtracer/pull/1642)): 33 → 1 holds for
+**stored** targets (1,320 B → 40 B at K=32). A HANDLER target and a value held in
+`value_storage_t` still took one copy each; the HANDLER copy is removed by slice 7, which
+rewrites the handler callback to receive `const value_t&`. `dispatch_edge_target` shrank
+555 → 384 B; the `always_inline` body is unchanged.
+
 ### 6.5 Slice 5 — the size threshold (D3; closes #1624's P2)
 
 `share_threshold_bytes` on the vertex; ingress selects by it; `set_pin_payload_ratio` and the
 ratio deleted. **Gate:** `ingress-pin` becomes the ≥-threshold row and `ingress-copy` the
 <-threshold row of one arm. **Risk: low** — the pin path exists; only the predicate changes.
+
+**As landed** ([PR #1643](https://github.com/avatarsd-llc/libtracer/pull/1643)): the knob ships as
+`graph_t::set_share_threshold_bytes(v, bytes)`, a stand-in verb until slice 10 introduces
+`vertex_policy_t`. It is stored as a saturating 32-bit word in `vertex_ext_t`, so
+`vertex_t` does not grow. The ESP-IDF build default is copy-always (`SIZE_MAX`) until an
+on-silicon threshold sweep exists. The stored copy of a remote write now draws from the
+graph's `control_source()`, not the router's `flat` backend, because the value's lifetime is
+the vertex's.
 
 ### 6.6 Slice 6 — retention (D4; closes #1624's P3; answers #1623's retention half only)
 
@@ -648,6 +669,17 @@ this slice does **not** close #1623. `set_history_depth` is deleted in the same 
 **Gate:** an app-field test that a `wo` write reaches `on_app_field_write` and leaves
 `values` unallocated; a `NONE` value vertex answers `read` with `NOT_FOUND` after a delivered
 write. **Risk: low.**
+
+**As landed** ([PR #1652](https://github.com/avatarsd-llc/libtracer/pull/1652)):
+- Retention ships as `graph_t::set_retention(v, r, depth)`, a stand-in verb until slice 10's
+  `vertex_policy_t` (§4.4, §5.4 and the §8.2 table name `set_policy`, which does not exist yet).
+- Allowed pairings: STORED_VALUE `NONE`|`LAST`, STREAM `NONE`|`N`, HANDLER `NONE`. An app field
+  holds one value, so `N` on a field is treated as `LAST`.
+- The ring moved onto the injected block source here (ruling Q12b), which §6.6 and the §6.3a–e
+  table omitted: each ring entry lives inside the reservation it was admitted under, the
+  `std::deque` is gone, and `kRingEntryOverhead` fell 48 → 40 B. `ring_state_t` stays heap.
+- A `NONE` vertex whose only subscribers are synchronous handlers draws **0 blocks per publish**.
+  A `NONE` source has no shared block, so each target subscriber of it makes its own copy.
 
 ### 6.7 Slice 7 — one callback idiom, one read type (D10, D11)
 
@@ -728,7 +760,8 @@ proto-fanout  65536  32   1.000 65544.0    0    1223
 ```
 
 Read against §7.1: at K=32 the publish goes from **33 allocations to 1** and from 3,432 B of
-per-publish heap to the value's own 24 + size; the indicative time from 2,458 ns to 493 ns at
+per-publish heap to the value's own block (40 B for a one-link value as landed in slice 3;
+the prototype's 24 + size is the lower bound §5.1 corrects); the indicative time from 2,458 ns to 493 ns at
 16 B. The prototype's `ns` includes the producer's `memset` of the payload (its own fill, not a
 library copy), which is why the 64 KB row is fill-bound.
 
@@ -760,8 +793,8 @@ verifiable against the existing vectors.
 | --- | --- | --- |
 | `vertex_t::store(rope_t, std::pmr::memory_resource*)` | `vertex_t::store(value_t*)` | 3 |
 | `read` → `rope_t`, `history` → `std::vector<rope_t>` | `value_ref_t`, `history(v, span)` | 7 |
-| `set_pin_payload_ratio`, `kPinPayloadRatio`, `kPinNever` | `vertex_policy_t::share_threshold_bytes`, `kShareThresholdBytes` | 5 |
-| `set_history_depth` | `vertex_policy_t::retention` | 6 |
+| `set_pin_payload_ratio`, `kPinPayloadRatio`, `kPinNever` | `set_share_threshold_bytes` (landed), folding into `vertex_policy_t::share_threshold_bytes` at 10; `kShareThresholdBytes` | 5 |
+| `set_history_depth` | `set_retention` (landed), folding into `vertex_policy_t::retention` at 10 | 6 |
 | `std::function` hooks | `{fn, ctx}` slots + `tr::graph::thunk<F>` | 7 |
 | `subscriber_remote_t::link/caller` strings | `link_id_t`, `subject_id_t` | 8 |
 | `sp_atomic_slot_t` | `single_writer_slot_t` / `hazard_slot_t` | 1 (landed) |
