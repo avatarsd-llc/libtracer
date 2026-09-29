@@ -135,10 +135,10 @@ int main() {
         for (int i = 0; i < kPer; ++i) {
             const std::string p = "/policy/v" + std::to_string(i);
             const vertex_handle_t v = g.register_vertex(path_t(p), role_t::STORED_VALUE);
-            g.set_pin_payload_ratio(v, 256);
+            g.set_share_threshold_bytes(v, 256);
             classify(v, c);
         }
-        report("owner-declared pin", c, "the declaration itself", total);
+        report("owner-declared threshold", c, "the declaration itself", total);
     }
 
     // RFC-0022 §3.F: a leaf under a declaring ancestor. Before Amendment 1 this shape
@@ -149,7 +149,7 @@ int main() {
         graph_t g;
         census_t c;
         const vertex_handle_t root = g.register_vertex(path_t("/inh"), role_t::STORED_VALUE);
-        g.set_pin_payload_ratio(root, 256);
+        g.set_share_threshold_bytes(root, 256);
         for (int i = 0; i < kPer; ++i) {
             const std::string p = "/inh/v" + std::to_string(i);
             classify(g.register_vertex(path_t(p), role_t::STORED_VALUE), c);

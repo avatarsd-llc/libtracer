@@ -12,6 +12,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **BREAKING (inherited from core) — the pin ratio is gone; chip targets copy always.** Core
+  replaced `set_pin_payload_ratio` / `kPinPayloadRatio` with an absolute copy-or-share threshold
+  (RFC-0028 slice 5). The generated `config_override.hpp` now sets
+  `kShareThresholdBytes = SIZE_MAX` — copy every written value, never borrow an RX pool slot —
+  which is exactly the never-pin posture chip builds shipped before. An application that wants a
+  zero-copy store on one vertex declares it with `graph_t::set_share_threshold_bytes`. The copy
+  itself is now ONE block (header + bytes) from the graph's source instead of three. The
+  `pin_bench` example's arms are thresholds (`A-copy`, `T64`, `T512`, `C-share`).
 - **BREAKING (inherited from core) — chip targets bind the single-writer LKV slot**
   ([#1618](https://github.com/avatarsd-llc/libtracer/issues/1618)). Core removed
   `sp_atomic_slot_t`, the spin-locked slot every chip build used by default. On a

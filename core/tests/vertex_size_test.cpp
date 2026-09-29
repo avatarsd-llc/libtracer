@@ -105,9 +105,9 @@ void late_declaration_allocates_lazily() {
     graph_t g;
     const auto h = g.register_vertex(path_t("/diet/late"), role_t::STORED_VALUE);
     require(!has_ext(h), "the leaf starts extension-less");
-    g.set_pin_payload_ratio(h, 64);
+    g.set_share_threshold_bytes(h, 64);
     require(has_ext(h), "the declaration allocated the cold block");
-    require(g.pin_payload_ratio(h) == 64, "g.pin_payload_ratio(h) == 64");
+    require(g.share_threshold_bytes(h) == 64, "g.share_threshold_bytes(h) == 64");
 }
 
 }  // namespace

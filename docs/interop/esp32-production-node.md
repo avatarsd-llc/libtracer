@@ -294,8 +294,8 @@ replaces, not by shaving the core.
   mutable buffer libtracer links: `N * sizeof(vertex_stripe_t)` bytes of `.bss`
   reserved at link time, plus the same for the condvar table. Sixteen stripes suit a
   multi-core host — that is the default (`kVertexLockStripes = 16`,
-  `core/include/libtracer/config.hpp:110`) — while a single-core chip reclaims RAM at
-  **4–8** (`config.hpp:100`). A stripe's platform mutex is lazy: on FreeRTOS it
+  `core/include/libtracer/config.hpp:104`) — while a single-core chip reclaims RAM at
+  **4–8** (`config.hpp:94`). A stripe's platform mutex is lazy: on FreeRTOS it
   costs ~90 B of heap on its first lock, so an untouched stripe costs its struct and
   no heap.
 - **Pin task priorities deliberately**: transport RX threads just below the
@@ -365,8 +365,8 @@ itself, described via `:schema` like any other data
 ```
 
 The backpressure counters come from `graph_t::delivery_drops()`
-(`core/include/libtracer/graph.hpp:2432`), which snapshots four per-cause totals —
-`no_target`, `denied`, `out_of_memory`, `fan_out_truncated` (`graph.hpp:2432-2454`). Each
+(`core/include/libtracer/graph.hpp:2422`), which snapshots four per-cause totals —
+`no_target`, `denied`, `out_of_memory`, `fan_out_truncated` (`graph.hpp:2422-2444`). Each
 counts shed **deliveries**, not events, so a fan-out shed whole under memory pressure moves
 them by its width. `denied` counts an `:acl` refusal on every plane — a local API write, a
 `FWD{WRITE}` terminus, a `COMPACT` terminus and a subscription edge alike (#1068) — so on a

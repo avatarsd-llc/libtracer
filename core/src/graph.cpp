@@ -520,7 +520,8 @@ void emit_counter(std::vector<std::byte>& out, std::string_view noun, std::uint6
 // `history_keep_last`, `store_ref_min_bytes` — answer `SCHEMA_NOT_FOUND`, which is the
 // honest answer an unsupported field already gives. The two survivors did not move to
 // another name; they stopped being remotely writable at all and became owner-side
-// declarations (`graph_t::set_history_depth`, `graph_t::set_pin_payload_ratio`).
+// declarations (`graph_t::set_history_depth`, and the pin ratio that RFC-0028 D3 later
+// replaced with `graph_t::set_share_threshold_bytes`).
 
 /** @brief Emit the RFC-0010 §A.4 app-container members into @p out: each declared,
  *         non-`wo` field HOLDING a value, in table order — `NAME <name>` then the stored
@@ -1822,8 +1823,8 @@ std::optional<vertex_handle_t> graph_t::find(std::span<const std::byte> key) con
     return vertex_handle_t{p};
 }
 
-std::uint32_t graph_t::pin_payload_ratio(vertex_handle_t v) const noexcept {
-    return v.get()->pin_payload_ratio();
+std::size_t graph_t::share_threshold_bytes(vertex_handle_t v) const noexcept {
+    return v.get()->share_threshold_bytes();
 }
 
 void graph_t::set_history_depth(vertex_handle_t v, std::uint32_t keep) {
@@ -1855,8 +1856,8 @@ result_t<std::uint64_t> graph_t::stream_gaps(vertex_handle_t v) const {
     return vx->ring_gap_count();
 }
 
-void graph_t::set_pin_payload_ratio(vertex_handle_t v, std::uint32_t k) {
-    v.get()->set_pin_payload_ratio(k);
+void graph_t::set_share_threshold_bytes(vertex_handle_t v, std::size_t bytes) {
+    v.get()->set_share_threshold_bytes(bytes);
 }
 
 void graph_t::configure_subject_resolver(subject_resolver_fn_t fn, void* ctx) noexcept {

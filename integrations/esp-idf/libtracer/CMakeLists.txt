@@ -278,13 +278,20 @@ endif()
 # as plain C++ (ADR-0068 §Erratum 1). The DEFAULTS are not spelled here at all: they are C++
 # literals in the checked-in core/include/libtracer/config.hpp, which discovers this fragment
 # with __has_include and uses the `tr::graph::config_t` it binds. The fragment INHERITS
-# `tr::graph::default_config_t` and states only the six knobs an ESP target changes, so a knob
+# `tr::graph::default_config_t` and states only the seven knobs an ESP target changes, so a knob
 # added to config.hpp later reaches this build at its new default — which is why no drift gate
 # has to hold the two files in step.
 # The generated directory is listed BEFORE core/include in INCLUDE_DIRS below, so the fragment
 # is found from the component's own sources AND from every dependent (`REQUIRES libtracer`) —
 # one file per build means every TU agrees, which is what the old PUBLIC compile definition
 # existed to guarantee.
+# The copy-or-share threshold (RFC-0028 §5.3) is the NARROW per-build trait §11 ruling 2 leaves
+# to the target: copy always (SIZE_MAX). A shared value holds its whole RX pool slot for as long
+# as it is a vertex's value, and a small fixed pool cannot fund that borrow — RFC-0022
+# Amendment 2 measured a 29-slot C6 pool collapsing once the live shared set crossed the slot
+# count. It is exactly the posture this component shipped before the knob (the retired pin
+# ratio's never-pin sentinel); an app that wants zero-copy on a vertex declares it per vertex
+# with `graph_t::set_share_threshold_bytes`.
 # What this component deliberately does NOT state, because core's default is already the right
 # answer here: the ACL profile (`allow_only_policy_t`, the MCU profile — no full-ACL Kconfig
 # yet) and the hazard reader slots (unused on a chip, which binds the single-writer slot below).
@@ -390,6 +397,7 @@ struct esp_config_t : default_config_t {
     static constexpr bool kSpinWaitSafe = ${LIBTRACER_SPIN_WAIT_SAFE};
     static constexpr bool kSelfHealLinks = ${LIBTRACER_SELF_HEAL_LINKS};
     static constexpr std::size_t kSelfHealWorkerStackBytes = ${LIBTRACER_SELF_HEAL_WORKER_STACK};
+    static constexpr std::size_t kShareThresholdBytes = ~std::size_t{0};
 ${LIBTRACER_SLOT_BINDING}};
 
 using config_t = esp_config_t;

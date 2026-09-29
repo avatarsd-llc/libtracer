@@ -136,10 +136,6 @@ refcount slot `sp_atomic_slot_t` was removed because libstdc++ spin-locks it
 :project: libtracer
 ```
 
-```{doxygenvariable} tr::graph::kPinNever
-:project: libtracer
-```
-
 ```{doxygenvariable} tr::graph::kVertexLockStripes
 :project: libtracer
 ```
@@ -152,7 +148,7 @@ refcount slot `sp_atomic_slot_t` was removed because libstdc++ spin-locks it
 :project: libtracer
 ```
 
-```{doxygenvariable} tr::graph::kPinPayloadRatio
+```{doxygenvariable} tr::graph::kShareThresholdBytes
 :project: libtracer
 ```
 

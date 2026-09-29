@@ -633,6 +633,15 @@ struct ring_state_t {
 };
 
 /**
+ * @brief A share threshold (RFC-0028 §5.3) as the 32-bit word `%vertex_ext_t` stores:
+ *        anything from `UINT32_MAX` up saturates to `UINT32_MAX`, which reads back as
+ *        `SIZE_MAX` — copy always.
+ */
+[[nodiscard]] constexpr std::uint32_t saturate_threshold(std::size_t bytes) noexcept {
+    return bytes >= UINT32_MAX ? UINT32_MAX : static_cast<std::uint32_t>(bytes);
+}
+
+/**
  * @brief The lazily-allocated COLD half of a vertex (issue #361 §1): every member a plain
  *        STORED_VALUE leaf with default storage policy, no handlers, and no `:acl` never touches.
  *
@@ -722,25 +731,20 @@ struct vertex_ext_t {
      */
     std::uint32_t history_keep_last = 1;
     /**
-     * @brief RFC-0022 §3.D pin amplification RATIO `K` (ADR-0042 §3): a view-delivered,
-     *        trailer-less WRITE whose `payload_bytes * K >= segment_bytes` is stored as a
-     *        SUBVIEW of the inbound frame (refcount pin, zero copy) instead of the one-copy
-     *        trailer-sliced store. 0 (@ref tr::graph::kPinNever, the default) NEVER pins.
+     * @brief This vertex's copy-or-share threshold (RFC-0028 §5.3, D3), SATURATED to 32 bits:
+     *        a written value of at least this many bytes is shared, one below it is copied
+     *        into the value's own block. `UINT32_MAX` reads back as `SIZE_MAX` (copy always).
      *
-     * A ratio, NOT a byte count — the predicate prices what a pin would hold (the whole
-     * segment) against the payload it holds it for, which an absolute threshold could not
-     * see. Owner-side like @ref history_keep_last, and for the same reason: it is a
-     * deployment copy/pin trade, not a quality-of-service property, so it lost its remote
-     * write surface with the rest of the RFC-0022 §3.B removal. Declared through
-     * `graph_t::set_pin_payload_ratio`. Read on every view-delivered write
-     * (`%op_resolve_walk.hpp`) with no lock, so it stays ONE inline load off this block.
-     *
-     * @note This overrides the per-target `config_t::kPinPayloadRatio`, which Amendment 2
-     *       fixes at the sentinel on both targets; the override exists so §6-style arms
-     *       rotate inside one process. Left unset, behaviour is exactly what shipped
-     *       before this RFC.
+     * Owner-side like @ref history_keep_last, and for the same reason: it is a deployment
+     * copy/share trade, not a quality-of-service property, so it has no wire surface.
+     * Declared through `graph_t::set_share_threshold_bytes`; a vertex that never declared one
+     * answers `config_t::kShareThresholdBytes`, which is also what this member starts at. Read
+     * on every view-delivered write (`%op_resolve_walk.hpp`) with no lock, so it stays ONE
+     * inline load off this block. 32 bits because it shares a word with
+     * @ref history_keep_last — a `size_t` here would grow the block by 8 B on the host for a
+     * range no frame can reach.
      */
-    std::uint32_t pin_payload_ratio = 0;
+    std::uint32_t share_threshold_bytes = saturate_threshold(config_t::kShareThresholdBytes);
     /** @brief The RFC-0010 APP-FIELD group (ADR-0058 Step 2) — the descriptor table plus
      *         its `on_app_field_write` apply seam, LAZILY allocated: a vertex with no app
      *         fields and no apply seam keeps this null. Guarded by the vertex mutex,
@@ -852,16 +856,18 @@ class vertex_t {
     }
 
     /**
-     * @brief This vertex's declared pin amplification ratio `K` (0 ⇒ never pin, the default).
+     * @brief This vertex's copy-or-share threshold in bytes (RFC-0028 §5.3):
+     *        `config_t::kShareThresholdBytes` unless it declared its own.
      *
      * ONE inline load and nothing more: it is read on EVERY view-delivered write
      * (`%op_resolve_walk.hpp`), so it may never become an ancestor walk. Nothing is
-     * inherited (RFC-0022 §3.F) — a vertex that was never given a ratio answers 0,
-     * whatever its ancestors hold.
+     * inherited (RFC-0022 §3.F) — a vertex that was never given a threshold answers the
+     * build's default, whatever its ancestors hold.
      */
-    [[nodiscard]] std::uint32_t pin_payload_ratio() const noexcept {
+    [[nodiscard]] std::size_t share_threshold_bytes() const noexcept {
         const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
-        return e != nullptr ? e->pin_payload_ratio : 0;
+        if (e == nullptr) return config_t::kShareThresholdBytes;
+        return e->share_threshold_bytes == UINT32_MAX ? SIZE_MAX : e->share_threshold_bytes;
     }
     /** @brief This vertex's user handlers (Handler role behavior + the `on_children` seam);
      *         an all-empty shared constant when no extension block. */
@@ -2093,7 +2099,7 @@ class vertex_t {
             e->eff_aces.clear();
             invalidate_acl_cache(*e);  // ADR-0078: nothing here a rebuilder can clobber
             e->history_keep_last = 1;
-            e->pin_payload_ratio = 0;
+            e->share_threshold_bytes = saturate_threshold(config_t::kShareThresholdBytes);
             e->app.reset();
             e->appended_since_flush = 0;  // cleared WITH `ring` — the drain's invariant
         }
@@ -2470,17 +2476,18 @@ class vertex_t {
     }
 
     /**
-     * @brief Set the RFC-0022 §3.D pin amplification ratio `K` (ADR-0042 §3) — owner-side,
-     *        never over the wire. 0 (@ref tr::graph::kPinNever) never pins.
+     * @brief Set this vertex's copy-or-share threshold (RFC-0028 §5.3) — owner-side, never
+     *        over the wire. `0` shares always; `SIZE_MAX` (or anything from `UINT32_MAX` up)
+     *        copies always.
      *
-     * Published under the vertex mutex; the write-path reader (@ref pin_payload_ratio)
-     * takes no lock, because a ratio changing under a concurrent write only decides
+     * Published under the vertex mutex; the write-path reader (@ref share_threshold_bytes)
+     * takes no lock, because a threshold changing under a concurrent write only decides
      * WHICH correct store shape that write takes.
      */
-    void set_pin_payload_ratio(std::uint32_t k) {
+    void set_share_threshold_bytes(std::size_t bytes) {
         vertex_ext_t& e = ensure_ext();
         const std::lock_guard lock(vertex_stripe_of(this).m);
-        e.pin_payload_ratio = k;
+        e.share_threshold_bytes = saturate_threshold(bytes);
     }
 
     /**
@@ -2878,7 +2885,7 @@ class vertex_t {
      * (graph map lock) and the field-write verbs (vertex mutex) resolve by
      * compare-exchange — the loser frees its candidate and adopts the winner's block.
      * The pointer is never cleared once published (ADR-0057 insert-only lifetime), so
-     * lock-free readers (@ref pin_payload_ratio / @ref handlers) stay valid forever.
+     * lock-free readers (@ref share_threshold_bytes / @ref handlers) stay valid forever.
      */
     vertex_ext_t& ensure_ext() {
         vertex_ext_t* e = ext_.load(std::memory_order_acquire);

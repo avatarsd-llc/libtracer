@@ -26,6 +26,7 @@
  */
 
 #include <array>
+#include <cstring>
 #include <optional>
 #include <utility>
 
@@ -176,27 +177,22 @@ class view_node {
     }
 
     /**
-     * @brief The bytes a pin would KEEP ALIVE (RFC-0022 §3.D's `segment_bytes`): the sum of the
-     *        ALLOCATED sizes of the segments the pinned subrope's links belong to.
-     *
-     * The rope tier is the multi-link case, so the held quantity is a sum, not one segment: a
-     * payload straddling three RX segments pins all three in full, and pricing only the first
-     * would under-report the RAM the ratio exists to bound. Distinct owners are counted once —
-     * two links into the same segment hold it once, and double-counting would make the
-     * predicate decline a pin that costs nothing extra.
+     * @brief Gather the trailer-excluded whole TLV into @p out (exactly @ref wire_size bytes) —
+     *        the copy arm's fill of an inline value (RFC-0028 §5.1): one `memcpy` per link, no
+     *        flatten block.
+     * @retval false A link is not CPU-readable (DEVICE space): the caller takes the
+     *         `own_wire` flatten, which moves device bytes through the backend's transfer.
      */
-    [[nodiscard]] std::size_t segment_bytes(const view_t*) const {
+    [[nodiscard]] bool copy_wire_into(std::span<std::byte> out) const {
         const rope_t sub = v_->wire().subrope(0, wire_size());
-        std::size_t total = 0;
-        const std::span<const view_t> links = sub.links();
-        for (std::size_t i = 0; i < links.size(); ++i) {
-            if (!links[i].owner) continue;
-            bool seen = false;
-            for (std::size_t j = 0; j < i && !seen; ++j)
-                seen = links[j].owner.get() == links[i].owner.get();
-            if (!seen) total += links[i].owner->bytes.size();
+        if (!sub.all_host()) return false;
+        std::size_t at = 0;
+        for (const view_t& l : sub.links()) {
+            const std::span<const std::byte> b = l.bytes();
+            std::memcpy(out.data() + at, b.data(), b.size());
+            at += b.size();
         }
-        return total;
+        return true;
     }
 
     /**

@@ -1,7 +1,8 @@
 /**
  * @file
- * @brief pin_bench — RFC-0022 §6's MCU half, ON SILICON: what §3.D's pin predicate costs an
- *        ESP32-C6 in store latency, receive-pool occupancy and free heap.
+ * @brief pin_bench — RFC-0022 §6's MCU half, ON SILICON: what sharing an RX segment instead of
+ *        copying the payload costs an ESP32-C6 in store latency, receive-pool occupancy and
+ *        free heap, swept over RFC-0028 §5.3 copy-or-share thresholds.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -16,7 +17,7 @@
  * pooled allocation is ~2.5x glibc on the host because tcache serves a hot same-size `malloc`
  * in ~15 ns, while ESP-IDF's `multi_heap` costs hundreds of nanoseconds and fragments. The
  * copy branch is the branch that allocates, so a host-only verdict is structurally biased
- * toward "pinning looks good". This app is what removes that bias.
+ * toward "sharing looks good". This app is what removes that bias.
  *
  * @section pinb_shape What it drives
  *
@@ -28,24 +29,22 @@
  *
  * @section pinb_arms Arms, and why they interleave inside one boot
  *
- * K is declared per vertex through `graph_t::set_pin_payload_ratio` rather than through
- * `config_t::kPinPayloadRatio`, exactly as in the host bench, so every arm rotates inside ONE
- * image and ONE boot. Building one flash image per K and running them back to back would
- * reintroduce the sequential-run confound at the worst possible place — a reflash changes heap
- * layout, and heap layout is half of what this app measures.
+ * The threshold is declared per vertex through `graph_t::set_share_threshold_bytes` rather
+ * than through `config_t::kShareThresholdBytes`, exactly as in the host bench, so every arm
+ * rotates inside ONE image and ONE boot. Building one flash image per threshold and running
+ * them back to back would reintroduce the sequential-run confound at the worst possible place
+ * — a reflash changes heap layout, and heap layout is half of what this app measures.
  *
- * **The control arm is `A-sentinel`, `tr::graph::kPinNever` on this same image** — the
- * ADR-0041 §2 one-copy store branch — and not a separate pre-RFC firmware. It never was one on
- * silicon, and it cannot become one now: RFC-0022 §3.B deleted `settings_t`, so no build of
- * this source exists against a pre-RFC tree. Every arm's figure is read as a paired
- * per-round delta against `A-sentinel` on the same boot.
+ * **The control arm is `A-copy`, copy-always (`SIZE_MAX`) on this same image** — the one-copy
+ * store branch, which is also this component's build default. Every arm's figure is read as a
+ * paired per-round delta against `A-copy` on the same boot.
  *
  * @section pinb_reach Reachability
  *
  * Every row carries `pins`/`copies` decided by segment-pointer identity between the stored
  * value and the pool's own slots, and the app refuses to print a table at all if its
- * calibration line-break fails: a CRC-trailered payload and a K that cannot clear the ratio
- * must both report zero pins, and a pin-always arm must report all of them.
+ * calibration line-break fails: a CRC-trailered payload and a payload below the threshold
+ * must both report zero pins, and a share-always arm must report all of them.
  */
 
 #include <cinttypes>
@@ -213,14 +212,14 @@ std::uint32_t quantile(std::vector<std::uint32_t>& v, double q) {
 }
 
 /**
- * @brief Run one (K, vertices) cell.
+ * @brief Run one (threshold, vertices) cell.
  *
  * The frame is copied into a POOL segment each iteration — the transport's own cost, paid in
  * every arm — and the copy is untimed. Only `resolve` is timed. If the pool refuses (every
  * slot pinned), the iteration is counted as backpressure and skipped, which is exactly what a
  * transport does with the datagram.
  */
-cell_t run_cell(rx_pool_t& pool, std::uint32_t k, std::size_t vertices, std::size_t payload,
+cell_t run_cell(rx_pool_t& pool, std::size_t threshold, std::size_t vertices, std::size_t payload,
                 bool crc = false) {
     graph_t g;
     op_resolver_t resolver(g);
@@ -228,7 +227,7 @@ cell_t run_cell(rx_pool_t& pool, std::uint32_t k, std::size_t vertices, std::siz
     for (std::size_t i = 0; i < vertices; ++i) {
         handles.push_back(
             g.register_vertex(path_t("/s/b" + std::to_string(i)), role_t::STORED_VALUE));
-        g.set_pin_payload_ratio(handles.back(), k);  // the arm's K (RFC-0022 §3.D)
+        g.set_share_threshold_bytes(handles.back(), threshold);  // the arm's threshold
     }
 
     std::vector<std::vector<std::byte>> frames;
@@ -289,14 +288,19 @@ cell_t run_cell(rx_pool_t& pool, std::uint32_t k, std::size_t vertices, std::siz
     return out;
 }
 
-/** @brief The arms, rotated per round inside this one boot; `A-sentinel` is the CONTROL. */
+/** @brief Copy always — the CONTROL arm (RFC-0028 §5.3's `SIZE_MAX` end). */
+constexpr std::size_t kCopyAlways = SIZE_MAX;
+
+/** @brief The arms, rotated per round inside this one boot; `A-copy` is the CONTROL. */
 struct arm_t {
     const char* label;
-    std::uint32_t k;
+    std::size_t threshold;
 };
 constexpr arm_t kArms[] = {
-    {"A-sentinel", tr::graph::kPinNever}, {"D2", 2}, {"D8", 8}, {"D64", 64},
-    {"C-pin-always", 0xFFFFFFFFu},
+    {"A-copy", kCopyAlways},
+    {"T64", 64},
+    {"T512", 512},
+    {"C-share", 0},
 };
 constexpr std::size_t kVertexSet[] = {1, 8, 32};
 constexpr std::size_t kPayloads[] = {64, 512};
@@ -311,16 +315,16 @@ bool calibrate(rx_pool_t& pool) {
                  what, got, want);
         if (!good) ok = false;
     };
-    const cell_t pos = run_cell(pool, 0xFFFFFFFFu, 1, 512);
-    expect("pin-always pins every store", pos.copies, 0);
-    expect("pin-always pin count is the store count", pos.pins, pos.stores);
-    const cell_t sent = run_cell(pool, tr::graph::kPinNever, 1, 512);
-    expect("the control arm (kPinNever) never pins", sent.pins, 0);
-    const cell_t crc = run_cell(pool, 0xFFFFFFFFu, 1, 512, /*crc=*/true);
-    expect("CRC-trailered payload never pins", crc.pins, 0);
-    // 64 B payload cannot clear a 1024 B slot at K = 2 (64 * 2 = 128).
-    const cell_t ratio = run_cell(pool, 2, 1, 64);
-    expect("K=2 against a 1024 B slot at 64 B payload never pins", ratio.pins, 0);
+    const cell_t pos = run_cell(pool, 0, 1, 512);
+    expect("share-always shares every store", pos.copies, 0);
+    expect("share-always share count is the store count", pos.pins, pos.stores);
+    const cell_t ctl = run_cell(pool, kCopyAlways, 1, 512);
+    expect("the control arm (copy-always) never shares", ctl.pins, 0);
+    const cell_t crc = run_cell(pool, 0, 1, 512, /*crc=*/true);
+    expect("CRC-trailered payload never shares", crc.pins, 0);
+    // A 64 B payload (68 B TLV) is below a 512 B threshold.
+    const cell_t below = run_cell(pool, 512, 1, 64);
+    expect("threshold 512 at a 64 B payload never shares", below.pins, 0);
     return ok;
 }
 
@@ -339,7 +343,7 @@ extern "C" void app_main() {
         return;
     }
     ESP_LOGI(kTag,
-             "# PINROW round arm K payload vertices p50ns p99ns meanns pins copies stores "
+             "# PINROW round arm threshold payload vertices p50ns p99ns meanns pins copies stores "
              "free_floor refused min_free");
 
     for (int r = 0; r < kRounds; ++r) {
@@ -349,13 +353,14 @@ extern "C" void app_main() {
             const arm_t& arm = kArms[(static_cast<std::size_t>(r) + j) % nA];
             for (std::size_t payload : kPayloads) {
                 for (std::size_t V : kVertexSet) {
-                    const cell_t c = run_cell(pool, arm.k, V, payload);
+                    const cell_t c = run_cell(pool, arm.threshold, V, payload);
                     ESP_LOGI(kTag,
-                             "PINROW %d %s %" PRIu32 " %u %u %" PRIu32 " %" PRIu32 " %" PRIu32
-                             " %" PRIu32 " %" PRIu32 " %" PRIu32 " %u %" PRIu32 " %u",
-                             r, arm.label, arm.k, static_cast<unsigned>(payload),
-                             static_cast<unsigned>(V), c.p50_ns, c.p99_ns, c.mean_ns, c.pins,
-                             c.copies, c.stores, static_cast<unsigned>(c.free_floor), c.refused,
+                             "PINROW %d %s %u %u %u %" PRIu32 " %" PRIu32 " %" PRIu32 " %" PRIu32
+                             " %" PRIu32 " %" PRIu32 " %u %" PRIu32 " %u",
+                             r, arm.label, static_cast<unsigned>(arm.threshold),
+                             static_cast<unsigned>(payload), static_cast<unsigned>(V), c.p50_ns,
+                             c.p99_ns, c.mean_ns, c.pins, c.copies, c.stores,
+                             static_cast<unsigned>(c.free_floor), c.refused,
                              static_cast<unsigned>(c.min_free));
                     vTaskDelay(pdMS_TO_TICKS(5));
                 }

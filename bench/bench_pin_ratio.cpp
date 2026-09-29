@@ -1,14 +1,18 @@
 /**
  * @file
- * @brief RFC-0022 §6 — the WRITE store leg, copy versus pinned subview, over a
- *        (payload_bytes x segment_bytes) grid, with every arm interleaved inside one process.
+ * @brief The WRITE store leg, copy versus shared subview, over a (payload_bytes x
+ *        segment_bytes) grid, with every copy-or-share threshold arm interleaved inside one
+ *        process (RFC-0022 §6; arms re-cut as RFC-0028 §5.3 thresholds).
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * §6 refuses to let §3.D's on-by-default pinning land on an assertion, and §8 Q3 leaves
- * `kPinPayloadRatio`'s value to this measurement rather than to argument. This is the host
- * half's store-leg microbench; `bench_pin_net` is the two-process delivery-counted half.
+ * RFC-0022 §6 measured §3.D's pin ratio here and Amendment 2 kept it off by default; RFC-0028
+ * D3 then replaced the ratio with an absolute copy-or-share threshold
+ * (`graph_t::set_share_threshold_bytes`, default `config_t::kShareThresholdBytes`), because the
+ * variable this grid showed to matter is the absolute payload size. The arms are now
+ * thresholds. This is the host half's store-leg microbench; `bench_pin_net` is the two-process
+ * delivery-counted half.
  *
  * @section pin_bench_unit What one timed sample is
  *
@@ -24,9 +28,8 @@
  *
  * ADR-0041 §Brick-2 and ADR-0042 §3 already measured that a copy beats pinning under a few
  * hundred bytes even at amplification ~1 — `view::borrow`'s ~32 B control block against a
- * ~30 B `memcpy`. §3.D's predicate is PURE RATIO, so it pins those cells regardless. The grid
- * therefore includes small-absolute cells specifically so that contradiction is measured
- * rather than inherited.
+ * ~30 B `memcpy`. The grid includes small-absolute cells so the threshold's knee is measured
+ * rather than inherited, and large segments so the RAM a share holds is visible beside it.
  *
  * @section pin_bench_reach The reachability instrument, and how to break its line
  *
@@ -36,28 +39,22 @@
  * identity between the stored value and the frame — an OUTCOME, independent of any
  * compile-time switch — and, when built with `LIBTRACER_PIN_INSTRUMENT`, the decision site's
  * own counters. `--calibrate` breaks the line on purpose: it drives a CRC-trailered payload
- * and a borrowed (span-delivered) frame through the arm that pins everything and requires zero
- * pins from both instruments, so an inert instrument fails loudly before any cell is believed.
+ * and a borrowed (span-delivered) frame through the share-always arm and requires zero shares
+ * from both instruments, so an inert instrument fails loudly before any cell is believed.
  *
  * @section pin_bench_arms The arms, and why they share one process
  *
- * **The control arm is arm B, the SENTINEL arm, and it is this same binary.** It was once a
- * separate build of this source against untouched `origin/main`; that arm is gone for good,
- * because RFC-0022 §3.B deleted `settings_t` and the pre-RFC threshold it carried, so main no
- * longer has an API this source could be compiled against. What arm B controls for is exactly
- * what remains controllable: `pin_payload_ratio == kPinNever` takes the ADR-0041 §2 one-copy
- * store, byte for byte the branch the pre-RFC build took, on the same binary the pinning arms
- * run on. That is a *stronger* pairing than the old cross-binary A, not a weaker one — a
- * separate binary also varied code layout, and the standing interleave rule exists because
+ * **The control arm is arm B, COPY-ALWAYS (`SIZE_MAX`), and it is this same binary.** It takes
+ * the one-copy store at every size — since RFC-0028 slice 5 into the value's own inline block —
+ * on the same binary the sharing arms run on; the standing interleave rule exists because
  * cross-invocation comparisons on identical code swung 2.8x.
  *
- * Arms B (sentinel), C (pin-always) and D<K> (the ratio sweep) therefore all live in this one
- * process and rotate per round. K reaches the decision site through the owner-declared
- * per-vertex `graph_t::set_pin_payload_ratio` (RFC-0022 §3.D; the override exists precisely so
- * these arms rotate inside one process).
+ * Arms B (copy-always), C (share-always, threshold 0) and T<n> (the threshold sweep) therefore
+ * all live in this one process and rotate per round. The threshold reaches the decision site
+ * through the owner-declared per-vertex `graph_t::set_share_threshold_bytes`.
  *
  * Usage:
- *   bench_pin_ratio --rounds=N [--arms=B,C,D2,D4,D8,D64,D1024] [--calibrate] [--round0=i]
+ *   bench_pin_ratio --rounds=N [--arms=B,C,T64,T256,T1024,T4096] [--calibrate] [--round0=i]
  */
 #include <algorithm>
 #include <cstddef>
@@ -156,19 +153,15 @@ tr::view::view_t frame_view_over(std::span<const std::byte> frame, std::size_t s
     return tr::view::view_t::over(std::move(seg)).subview(0, frame.size());
 }
 
-/**
- * @brief RFC-0022 §3.D's reserved sentinel: never pin — and this bench's CONTROL arm.
- *
- * `tr::graph::kPinNever` itself, no longer spelled locally: the local spelling existed only so
- * this file also compiled against untouched `origin/main`, which since §3.B has no `settings_t`
- * to compile against.
- */
-constexpr std::uint32_t kSentinel = tr::graph::kPinNever;
+/** @brief Copy always — this bench's CONTROL arm (RFC-0028 §5.3's `SIZE_MAX` end). */
+constexpr std::size_t kCopyAlways = SIZE_MAX;
+/** @brief Share whatever can be shared (§5.3's `0` end). */
+constexpr std::size_t kShareAlways = 0;
 
-/** @brief One arm: a label and the K it drives the decision site with. */
+/** @brief One arm: a label and the threshold it drives the decision site with. */
 struct arm_t {
     const char* label;
-    std::uint32_t k;
+    std::size_t threshold;
 };
 
 /** @brief One grid cell's outcome for one arm in one round. */
@@ -179,7 +172,7 @@ struct cell_result_t {
 #ifdef LIBTRACER_PIN_INSTRUMENT
     std::uint64_t site_pins = 0;    /**< the decision site's own pin counter */
     std::uint64_t site_copies = 0;  /**< ... and its copy counter */
-    std::uint64_t site_refused = 0; /**< predicate said pin, reader could not */
+    std::uint64_t site_refused = 0; /**< predicate said share, reader could not */
 #endif
 };
 
@@ -188,18 +181,19 @@ struct cell_result_t {
 constexpr std::size_t kItersPerCell = 20000;
 
 /**
- * @brief Drive `kItersPerCell` FWD{WRITE} resolutions at one (payload, segment, K) point.
+ * @brief Drive `kItersPerCell` FWD{WRITE} resolutions at one (payload, segment, threshold)
+ *        point.
  *
  * @param borrowed Deliver the frame as a BORROWED span (no owning view) — the definitionally
  *                 inert negative control the `--calibrate` line-break needs.
  */
-cell_result_t run_cell(std::size_t payload_bytes, std::size_t segment_bytes, std::uint32_t k,
+cell_result_t run_cell(std::size_t payload_bytes, std::size_t segment_bytes, std::size_t threshold,
                        bool crc = false, bool borrowed = false) {
     graph_t g;
     op_resolver_t resolver(g);
     const tr::graph::vertex_handle_t v =
         g.register_vertex(path_t("/sensor/blob"), role_t::STORED_VALUE);
-    g.set_pin_payload_ratio(v, k);  // the arm's K, owner-declared (RFC-0022 §3.D)
+    g.set_share_threshold_bytes(v, threshold);  // the arm's threshold, owner-declared
 
     const std::vector<std::byte> frame = b_fwd_write(b_value(payload_bytes, crc));
     const std::size_t seg_bytes = std::max(segment_bytes, frame.size());
@@ -253,10 +247,10 @@ constexpr std::size_t kPayloads[] = {8, 32, 64, 256, 1024, 4096, 16384};
 constexpr std::size_t kSegments[] = {0, 2048, 65536};
 
 /** @brief `RESULT_PIN` — one arm at one grid cell in one round. Tab-separated, own tag. */
-void emit_pin(int round, const char* arm, std::uint32_t k, std::size_t payload, std::size_t segment,
-              const cell_result_t& r) {
-    std::printf("RESULT_PIN\t%d\t%s\t%u\t%zu\t%zu\t%llu\t%llu\t%llu\t%llu\t%llu\t%zu", round, arm,
-                k, payload, segment, static_cast<unsigned long long>(r.lat.p50),
+void emit_pin(int round, const char* arm, std::size_t threshold, std::size_t payload,
+              std::size_t segment, const cell_result_t& r) {
+    std::printf("RESULT_PIN\t%d\t%s\t%zu\t%zu\t%zu\t%llu\t%llu\t%llu\t%llu\t%llu\t%zu", round, arm,
+                threshold, payload, segment, static_cast<unsigned long long>(r.lat.p50),
                 static_cast<unsigned long long>(r.lat.p99),
                 static_cast<unsigned long long>(r.lat.mean),
                 static_cast<unsigned long long>(r.pins), static_cast<unsigned long long>(r.copies),
@@ -275,12 +269,12 @@ void emit_pin(int round, const char* arm, std::uint32_t k, std::size_t payload, 
 /**
  * @brief Every arm this binary knows; `--arms` selects a subset, in this order.
  *
- * `B-sentinel` leads because it is the CONTROL: every other arm's verdict is a paired
- * per-round delta against it. There is no `A-control` — see @ref pin_bench_arms.
+ * `B-copy` leads because it is the CONTROL: every other arm's verdict is a paired per-round
+ * delta against it — see @ref pin_bench_arms.
  */
 const arm_t kAllArms[] = {
-    {"B-sentinel", kSentinel},     {"D2", 2}, {"D4", 4}, {"D8", 8}, {"D64", 64}, {"D1024", 1024},
-    {"C-pin-always", 0xFFFFFFFFu},
+    {"B-copy", kCopyAlways}, {"T64", 64},     {"T256", 256},
+    {"T1024", 1024},         {"T4096", 4096}, {"C-share", kShareAlways},
 };
 
 /**
@@ -290,10 +284,9 @@ const arm_t kAllArms[] = {
  * a positive case that must report ALL pins, so "zero everywhere" cannot pass as calibration.
  * Run on every invocation, not once at authoring time.
  *
- * The first pair is what the control arm itself rests on: at `kPinNever` a trailer-less owning
+ * The first pair is what the control arm itself rests on: at copy-always a trailer-less owning
  * frame still copies every store. If that ever stopped holding, arm B would silently become a
- * pinning arm and every paired delta in the table would be a comparison of pinning against
- * pinning.
+ * sharing arm and every paired delta in the table would compare sharing against sharing.
  *
  * @return 0 on success; non-zero is a refusal to report any number from this binary.
  */
@@ -307,34 +300,32 @@ int calibrate() {
     };
 
     // --- true in every build: the sentinel copies, and the structural blockers block --------
-    const cell_result_t sentinel = run_cell(1024, 0, kSentinel);
-    expect("kPinNever (the control arm B) never pins", sentinel.pins, 0);
-    expect("kPinNever copies every store", sentinel.copies, sentinel.lat.n);
+    const cell_result_t control = run_cell(1024, 0, kCopyAlways);
+    expect("copy-always (the control arm B) never shares", control.pins, 0);
+    expect("copy-always copies every store", control.copies, control.lat.n);
 
-    // The arm that intends to pin everything: ratio, so payload * K >= any segment.
-    constexpr std::uint32_t kPinsEverything = 0xFFFFFFFFu;
-    const cell_result_t pos = run_cell(1024, 0, kPinsEverything);
-    expect("pin-intending arm on a trailer-less owning frame pins every store", pos.copies, 0);
-    expect("... and its pin count is the sample count", pos.pins, pos.lat.n);
+    // The arm that intends to share everything: threshold 0.
+    const cell_result_t pos = run_cell(1024, 0, kShareAlways);
+    expect("share-always arm on a trailer-less owning frame shares every store", pos.copies, 0);
+    expect("... and its share count is the sample count", pos.pins, pos.lat.n);
 
-    const cell_result_t crc = run_cell(1024, 0, kPinsEverything, /*crc=*/true);
-    expect("CRC-trailered payload never pins", crc.pins, 0);
-    const cell_result_t borrowed = run_cell(1024, 0, kPinsEverything, false, /*borrowed=*/true);
-    expect("span-delivered (borrowed) frame never pins", borrowed.pins, 0);
+    const cell_result_t crc = run_cell(1024, 0, kShareAlways, /*crc=*/true);
+    expect("CRC-trailered payload never shares", crc.pins, 0);
+    const cell_result_t borrowed = run_cell(1024, 0, kShareAlways, false, /*borrowed=*/true);
+    expect("span-delivered (borrowed) frame never shares", borrowed.pins, 0);
 
     // --- the predicate's own declining direction ------------------------------------------
-    // Ratio: a 64 B payload cannot clear a 64 KB segment at K = 2 (64 * 2 << 65,536).
-    expect("K=2 against a 64 KB segment never pins", run_cell(64, 65536, 2).pins, 0);
+    // Threshold: a 64 B payload (68 B TLV) is below a 4,096 B threshold.
+    expect("threshold 4096 never shares a 64 B payload", run_cell(64, 65536, 4096).pins, 0);
 
 #ifdef LIBTRACER_PIN_INSTRUMENT
     expect("decision-site counter agrees with the outcome (positive)", pos.site_pins, pos.pins);
     expect("decision-site counter agrees with the outcome (CRC)", crc.site_pins, 0);
-    // A borrowed frame has no owning segment, so `segment_bytes` answers 0 and the ratio
-    // declines it BEFORE `pin_wire` is asked — it is a copy, not a refusal. `g_pin_refused` is
-    // therefore a tripwire that must read zero on the span tier for as long as those two
-    // agree; a non-zero here means one started answering for a frame the other did not, which
-    // would make every pin count in this file suspect.
-    expect("borrowed frame is DECLINED by segment_bytes==0, not refused", borrowed.site_refused, 0);
+    // A borrowed frame clears the threshold, so the predicate asks `pin_wire` — which has no
+    // owning segment to share and refuses. Every store is therefore a REFUSAL that falls
+    // through to a copy; the two counters must agree on that, sample for sample.
+    expect("borrowed frame is REFUSED by pin_wire at share-always", borrowed.site_refused,
+           borrowed.lat.n);
     expect("borrowed frame is counted as a copy", borrowed.site_copies, borrowed.lat.n);
 #endif
     return bad;
@@ -380,7 +371,7 @@ int main(int argc, char** argv) {
     if (do_calibrate) return 0;
 
     std::printf(
-        "# RESULT_PIN round arm K payload segment p50ns p99ns meanns pins copies n "
+        "# RESULT_PIN round arm threshold payload segment p50ns p99ns meanns pins copies n "
         "site_pins site_copies site_refused\n");
     for (int r = 0; r < rounds; ++r) {
         // Rotate the arm order every round: arm i leads round i. Interleaving is the whole
@@ -391,8 +382,8 @@ int main(int argc, char** argv) {
             const arm_t& arm = arms[(static_cast<std::size_t>(r + round0) + j) % n];
             for (std::size_t payload : kPayloads)
                 for (std::size_t segment : kSegments)
-                    emit_pin(r + round0, arm.label, arm.k, payload, segment,
-                             run_cell(payload, segment, arm.k));
+                    emit_pin(r + round0, arm.label, arm.threshold, payload, segment,
+                             run_cell(payload, segment, arm.threshold));
         }
     }
     return 0;

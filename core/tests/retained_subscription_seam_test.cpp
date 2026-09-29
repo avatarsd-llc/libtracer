@@ -156,7 +156,7 @@ void uninjected_retention_still_comes_from_flat() {
 }
 
 void the_seam_is_for_retention_only() {
-    std::printf("scope: an ordinary WRITE's flatten still comes from `flat`:\n");
+    std::printf("scope: an ordinary WRITE's copy never comes from `retained`:\n");
     tr::graph::graph_t g;
     build(g);
     counting_backend_t flat("flat");
@@ -169,7 +169,10 @@ void the_seam_is_for_retention_only() {
     tr::testing::check(retained.allocs == 0,
                        "`retained` is for SUBSCRIPTION-scoped allocations only — a host cannot "
                        "re-scope the hot path by injecting it");
-    tr::testing::check(flat.allocs > 0, "…and the per-operation flatten still came from `flat`");
+    // A contiguous WRITE below the share threshold copies into the value's own block, drawn
+    // from the GRAPH's source (RFC-0028 §5.1) — so neither router seam is asked at all.
+    tr::testing::check(flat.allocs == 0,
+                       "…and its ownership copy is the value's own block, not a `flat` draw");
 }
 
 void a_refusing_retained_seam_answers_by_value() {

@@ -31,12 +31,6 @@
 
 namespace tr::graph {
 
-/**
- * @brief The reserved @ref default_config_t::kPinPayloadRatio sentinel: never pin, always take
- *        the ADR-0041 §2 one-copy store (RFC-0022 §3.D).
- */
-inline constexpr std::uint32_t kPinNever = 0;
-
 struct allow_only_policy_t;  // security_acl.hpp — the ALLOW-only MCU profile (ADR-0020 subset)
 struct full_acl_policy_t;    // security_acl.hpp — ordered first-match-per-bit with DENY
 class hazard_slot_t;         // lkv_slot.hpp — lock-free atomic<node*>; hazard-pointer reclamation
@@ -231,50 +225,41 @@ struct default_config_t {
     static constexpr std::size_t kMaxVertexBytes32 = 72;
 
     /**
-     * @brief The RFC-0022 §3.D pin/copy amplification ratio — pin the written value as a subview
-     *        of the inbound frame iff `payload_bytes * K >= segment_bytes` (and the payload is
-     *        trailer-less).
+     * @brief The copy-or-share threshold (RFC-0028 §5.3, D3): a written value of AT LEAST this
+     *        many bytes is SHARED, one below it is COPIED into the value's own block.
      *
-     * `K` is not a synthetic limit: both branches are correct and `K` selects which correct
-     * branch is cheaper. Pinning holds the whole owning RX **segment** for the value's lifetime,
-     * so `K` bounds the waste at `(K-1)x` the payload where an absolute byte threshold bounded
-     * it not at all.
+     * The default every vertex answers until `graph_t::set_share_threshold_bytes` gives it its
+     * own. At ingress, "shared" means the stored value links the inbound receive segment
+     * (refcount, zero copy) and "copied" means the bytes land inline in the one `value_t` block
+     * the publish costs (`value_t::make_inline`: one allocation, one `memcpy`). A payload whose
+     * TLV carries a CRC/TS trailer is always copied — a shared frame's opt byte cannot be
+     * patched — and so is one whose reader cannot share (a borrowed, span-delivered frame).
      *
-     * `segment_bytes` is the ALLOCATED size of the segment the pin would keep alive, not the
-     * length of the delivered frame view. Those differ by a lot on a real transport:
-     * `udp_transport_t` receives every datagram into a `kMaxDatagram`-sized segment and delivers
-     * a length-`n` window over it, so a 1 KB datagram pins 64 KB. Measuring the view length instead
-     * would price a cost nobody pays and ignore the one everybody does.
+     * `0` shares always; `SIZE_MAX` copies always. The two ends are the old `kPinNever` and
+     * "pin unconditionally", now edge cases of one comparison on the absolute payload size —
+     * the variable that was actually measured (RFC-0028 R6); the retired ratio was the
+     * measurement rig's rotation knob (#774).
      *
-     * @ref kPinNever (0) is the reserved sentinel: never pin. It is the value shipped here, and
-     * it reproduces the pre-RFC default behaviour exactly (the old absolute threshold defaulted
-     * to 0 and its predicate required `> 0`). RFC-0022 §8 Q3 was answered by §6's measurement
-     * (Amendment 2, PR #771): the sentinel is the landing default on BOTH targets — the
-     * on-by-default flip does not land.
+     * @section share_borrow Sharing BORROWS the receive segment, and this is the knob that prices
+     * it
      *
-     * @section pin_borrow The borrow is APP-OWNED policy, and this constant is the decision surface
+     * A shared value holds its whole inbound RX **segment** for as long as it is the vertex's
+     * last-known value (or sits in a STREAM ring). On a pooled RX backend that is a **pool
+     * slot** — receive capacity the transport cannot use until the value is displaced. The
+     * library makes the deferred release *safe*; only the application knows its pool geometry
+     * and retention pattern, so the budget is the consumer's number (RFC-0022 Amendment 2).
+     * Size against `live shared values x segment_bytes`; `bench/README.md` §"RFC-0022 §6 —
+     * receive-pool occupancy" measured a 29-slot ESP32-C6 pool collapsing once the live shared
+     * set crossed the slot count.
      *
-     * A pinned value **borrows** its inbound RX segment for its whole lifetime — not for the
-     * delivery window, for as long as the value is the vertex's last-known value. On a pooled RX
-     * backend that borrow is a **pool slot**, i.e. receive capacity, unavailable to the transport
-     * until the value is displaced or the vertex dies. The library makes the deferred release
-     * *safe* — atomic segment refcounts, so a borrow outliving the recv frame is never a
-     * use-after-free — but nothing in the library bounds the *budget*, and nothing can: only the
-     * application knows its pool geometry and its retention pattern.
-     *
-     * So the quantity to size against is `live pinned values x segment_bytes`. `K` bounds the
-     * waste per value; it does **not** bound the number of values, which is why no `K` is a
-     * remedy for a retain-heavy workload — measured, see `bench/README.md` §"RFC-0022 §6 —
-     * receive-pool occupancy": at the ESP32-C6 RX geometry every `K` that pins at all collapsed a
-     * 29-slot pool identically once the live vertex count crossed the slot count.
-     *
-     * Target-class guidance, and the reason the shipped value is the sentinel on both:
-     * - **NARROW** — set the sentinel. A fixed, small RX pool cannot fund an indefinite borrow;
-     *   the same off-by-default-on-NARROW posture as the RFC-0027 label table.
-     * - **WIDE / MID** — may borrow freely; the pool is large relative to the retained set, and
-     *   the borrow is the zero-copy latency win.
+     * Target-class defaults (§11 ruling 2):
+     * - **host (WIDE / MID)** — 4,096 B, RFC-0022 Amendment 2's knee: below it the copy is
+     *   cheaper than the borrow, above it the zero-copy share wins.
+     * - **NARROW** — a per-build trait: a fixed, small RX pool states its own value in its
+     *   `config_override.hpp` (the ESP-IDF component binds `SIZE_MAX`, copy always, which is
+     *   exactly the posture it shipped before this knob).
      */
-    static constexpr std::uint32_t kPinPayloadRatio = 0;
+    static constexpr std::size_t kShareThresholdBytes = 4096;
 
     /**
      * @brief The target's selected ACL policy (ADR-0047 §1 build-time module set).
@@ -659,8 +644,8 @@ inline constexpr std::size_t kCacheLineBytes = config_t::kCacheLineBytes;
 inline constexpr std::size_t kHazardReaderSlots = config_t::kHazardReaderSlots;
 /** @brief @ref default_config_t::kEdgePinSlots for this build. */
 inline constexpr std::size_t kEdgePinSlots = config_t::kEdgePinSlots;
-/** @brief @ref default_config_t::kPinPayloadRatio for this build. */
-inline constexpr std::uint32_t kPinPayloadRatio = config_t::kPinPayloadRatio;
+/** @brief @ref default_config_t::kShareThresholdBytes for this build. */
+inline constexpr std::size_t kShareThresholdBytes = config_t::kShareThresholdBytes;
 /** @brief @ref default_config_t::kDeferredReleaseSlots for this build. */
 inline constexpr std::size_t kDeferredReleaseSlots = config_t::kDeferredReleaseSlots;
 /** @brief @ref default_config_t::kQsbrParticipants for this build. */

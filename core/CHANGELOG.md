@@ -16,6 +16,45 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Breaking
 
+- **The copy-or-share threshold replaces the pin ratio (RFC 0028 slice 5, D3).** A written
+  value is now SHARED (the stored value links the inbound receive segment, zero copy) iff its
+  TLV is **at least** the target vertex's `share_threshold_bytes` and trailer-less, and
+  otherwise COPIED — and the copy lands **inline in the value's own block** (§5.1), so a
+  below-threshold ingress publish costs ONE allocation of header + bytes where it cost three
+  (the value's link block, the copied segment's header, its bytes). The absolute payload size
+  is the variable RFC-0022 §6 actually measured; the ratio was the rig's rotation knob (#774).
+  Host default 4,096 B (§11 ruling 2); the ESP-IDF component binds `SIZE_MAX` (copy always),
+  exactly its previous never-pin posture. `bench_lean_value_path`: `ingress-copy` (16 B)
+  5 → 3 allocations per publish, 181 → 181 B; `ingress-pin` unchanged at 3 / 121 B.
+  No shims — every in-tree caller, test, example and bench moved.
+
+  - **`config.hpp` — `kPinNever` and `default_config_t::kPinPayloadRatio` (and the derived
+    `tr::graph::kPinPayloadRatio`) removed;** `default_config_t::kShareThresholdBytes`
+    (`std::size_t`, 4096) and the derived `tr::graph::kShareThresholdBytes` added. `0` shares
+    always, `SIZE_MAX` copies always.
+  - **`graph.hpp` — `set_pin_payload_ratio(vertex_handle_t, std::uint32_t)` and
+    `pin_payload_ratio(vertex_handle_t)` removed;** `set_share_threshold_bytes(vertex_handle_t,
+    std::size_t)` and `share_threshold_bytes(vertex_handle_t) -> std::size_t` added. Owner-side,
+    no wire surface, nothing inherited — the same contract the ratio had.
+  - **`vertex.hpp` — `vertex_ext_t::pin_payload_ratio` is `share_threshold_bytes`** (still a
+    32-bit word beside `history_keep_last`, saturating: `UINT32_MAX` reads back as `SIZE_MAX`),
+    so `sizeof(vertex_ext_t)` does not move; `vertex_t::set_pin_payload_ratio` /
+    `pin_payload_ratio` are `set_share_threshold_bytes` / `share_threshold_bytes`; new free
+    function `saturate_threshold`.
+  - **`value.hpp` — the inline arm.** `value_t::make_inline(len, source)` (one block of
+    `inline_bytes_for(len)` = 80 + len on 64-bit, 44 + len on rv32: header, one `view_t` link,
+    an embedded `segment_t`, the bytes), `make_copy(span, source)`, `inline_bytes()` (the
+    maker's fill window), `is_inline()`, `inline_owner(link)`, `inline_bytes_for(len)`; the
+    `inline_value_backend_t` reclaimer and `inline_value_backend()`. `make(rope_t&&, …)` now
+    ADOPTS a rope that is exactly one live inline value's bytes (one reference, no draw).
+    `block_bytes()` answers the inline size for an inline value.
+  - **The terminus's ownership copy moved seams.** It used to draw from the router's `flat`
+    `mem_backend_t` (#793, #801); it is now the value's own block, drawn from the graph's
+    `block_source_t` (`graph_t::control_source()`) — the source every published value is
+    drawn from (D9). A node that bounds its graph's source bounds the copy; a refusal is still
+    BACKPRESSURE by value. A payload whose rope-tier links are not all host-resident still
+    takes the old `flat` flatten.
+
 - **`value_t` replaces the LKV wrapper (RFC 0028 slice 3, D1 + the first half of D9).** A
   publish now costs ONE block — an intrusive refcounted `value_t` (`value.hpp`, new: a 16 B
   header on 64-bit / 12 B on rv32, followed by its `view_t` link chain) drawn from the

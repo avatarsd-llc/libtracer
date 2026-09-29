@@ -569,13 +569,14 @@ void test_non_canonical_dst() {
 }
 
 /**
- * @brief ADR-0042 §3 — the owner-declared `pin_payload_ratio` referenced WRITE store: a view-
- *        delivered frame's big trailer-less payload stores as a SUBVIEW of the frame (segment-
- *        pointer identity, zero copy, frame pinned); the default (0), a small payload, a trailered
- *        payload, and a span-delivered frame all keep the ADR-0041 one-copy trailer-sliced store.
+ * @brief RFC-0028 §5.3 (D3) — the copy-or-share threshold at the WRITE store: a view-delivered
+ *        frame's trailer-less payload of AT LEAST `share_threshold_bytes` stores as a SUBVIEW of
+ *        the frame (segment-pointer identity, zero copy, frame held); below it — and for a
+ *        trailered payload at any size — the one-copy trailer-sliced store lands INLINE in the
+ *        value's own block (§5.1).
  */
-void test_pin_payload_ratio_store() {
-    std::printf("pin_payload_ratio — referenced vs copied WRITE store (ADR-0042 §3):\n");
+void test_share_threshold_store() {
+    std::printf("share_threshold_bytes — shared vs copied WRITE store (RFC-0028 §5.3):\n");
     graph_t g;
     op_resolver_t resolver(g);
     const auto path = path_t::parse("/sensor/blob");
@@ -591,14 +592,19 @@ void test_pin_payload_ratio_store() {
     // The frame as an OWNING view (what a view-delivering transport hands up).
     tr::view::view_t frame = make_value(fwd_big);
 
-    // Default threshold 0 => referencing DISABLED: stored segment differs (copied).
+    // The build default (4096 B on the host) is far above a 36 B TLV => COPIED, inline.
+    check(g.share_threshold_bytes(v) == tr::graph::kShareThresholdBytes,
+          "an undeclared vertex answers the build's default threshold");
     {
         const auto arena = tr::wire::decode_into(frame.bytes(), tr::mem::heap_source());
         auto reply = resolver.resolve(*arena, {}, &frame);
         check(reply.has_value(), "WRITE with default threshold produced a reply");
         const auto rd = g.read(v);
         check(rd.has_value() && (*rd)->only().owner.get() != frame.owner.get(),
-              "default pin_payload_ratio=0 => stored bytes are a COPY (segment differs)");
+              "below the default threshold => stored bytes are a COPY (segment differs)");
+        check(rd.has_value() && (*rd)->is_inline() &&
+                  (*rd)->block_bytes() == tr::graph::value_t::inline_bytes_for(big_tlv.size()),
+              "... and the copy is INLINE: one block of header + bytes (RFC-0028 §5.1)");
         check(rd.has_value() && (*rd)->only().bytes().size() == big_tlv.size() &&
                   std::memcmp((*rd)->only().bytes().data(), big_tlv.data(), big_tlv.size()) == 0,
               "copied store holds the payload TLV bytes");
@@ -612,10 +618,19 @@ void test_pin_payload_ratio_store() {
                    make_value(b_value({0x08, 0x00, 0x00, 0x00})))
                .has_value(),
           "the removed `:settings.store_ref_min_bytes` write surface refuses");
-    g.set_pin_payload_ratio(v, 8);
-    check(g.pin_payload_ratio(v) == 8, "the owner-side declaration takes the threshold (8)");
+    // One byte over the TLV's size: still a copy — the boundary is AT OR ABOVE.
+    g.set_share_threshold_bytes(v, big_tlv.size() + 1);
+    {
+        const auto arena = tr::wire::decode_into(frame.bytes(), tr::mem::heap_source());
+        check(resolver.resolve(*arena, {}, &frame).has_value(), "WRITE under threshold replied");
+        const auto rd = g.read(v);
+        check(rd.has_value() && (*rd)->is_inline(), "threshold = size + 1 => copied inline");
+    }
+    g.set_share_threshold_bytes(v, big_tlv.size());
+    check(g.share_threshold_bytes(v) == big_tlv.size(),
+          "the owner-side declaration takes the threshold (36)");
 
-    // Big trailer-less payload >= threshold => the stored view IS the frame segment.
+    // Trailer-less payload AT the threshold => the stored view IS the frame segment.
     {
         const auto arena = tr::wire::decode_into(frame.bytes(), tr::mem::heap_source());
         auto reply = resolver.resolve(*arena, {}, &frame);
@@ -670,6 +685,35 @@ void test_pin_payload_ratio_store() {
         const auto rd = g.read(v);
         check(rd.has_value() && (*rd)->only().owner.get() != small_frame.owner.get(),
               "payload under the threshold => copied (a small copy beats pinning)");
+        check(rd.has_value() && (*rd)->is_inline(), "... into the value's own block");
+    }
+
+    // The two ends: SIZE_MAX copies always, 0 shares whatever can be shared.
+    g.set_share_threshold_bytes(v, SIZE_MAX);
+    check(g.share_threshold_bytes(v) == SIZE_MAX, "SIZE_MAX reads back as SIZE_MAX");
+    {
+        tr::view::view_t f = make_value(fwd_big);
+        const auto arena = tr::wire::decode_into(f.bytes(), tr::mem::heap_source());
+        check(resolver.resolve(*arena, {}, &f).has_value(), "copy-always WRITE replied");
+        const auto rd = g.read(v);
+        check(rd.has_value() && (*rd)->is_inline(), "SIZE_MAX => copied");
+    }
+    g.set_share_threshold_bytes(v, 0);
+    {
+        const auto fwd_small = b_fwd(fwd_op_t::WRITE, b_path({"sensor", "blob"}),
+                                     b_path({"reply-ep"}), {}, b_value({0x2A}));
+        tr::view::view_t f = make_value(fwd_small);
+        const auto arena = tr::wire::decode_into(f.bytes(), tr::mem::heap_source());
+        check(resolver.resolve(*arena, {}, &f).has_value(), "share-always WRITE replied");
+        const auto rd = g.read(v);
+        check(rd.has_value() && (*rd)->only().owner.get() == f.owner.get(),
+              "0 => even a 5-byte TLV is shared");
+        // A span-delivered (borrowed) frame has no owning segment: nothing to share, so it
+        // copies whatever the threshold says.
+        const auto arena2 = tr::wire::decode_into(f.bytes(), tr::mem::heap_source());
+        check(resolver.resolve(*arena2, {}, nullptr).has_value(), "borrowed WRITE replied");
+        const auto rd2 = g.read(v);
+        check(rd2.has_value() && (*rd2)->is_inline(), "a borrowed frame copies even at 0");
     }
 }
 
@@ -684,7 +728,7 @@ void test_store_ref_concurrent() {
     op_resolver_t resolver(g);
     const auto path = path_t::parse("/sensor/blob");
     tr::graph::vertex_handle_t v = g.register_vertex(*path, role_t::STORED_VALUE);
-    g.set_pin_payload_ratio(v, 8);
+    g.set_share_threshold_bytes(v, 32);
 
     std::vector<std::byte> big(64);
     for (std::size_t i = 0; i < big.size(); ++i) big[i] = static_cast<std::byte>(0xA0 + i);
@@ -1326,7 +1370,7 @@ int main() {
     test_await_at_a_handler_replies_with_the_composed_value();
     test_subscribers_field();
     test_write_trailer_sliced();
-    test_pin_payload_ratio_store();
+    test_share_threshold_store();
     test_store_ref_concurrent();
     test_non_canonical_dst();
     test_wildcard_and_not_local();
