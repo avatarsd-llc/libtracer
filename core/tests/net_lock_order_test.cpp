@@ -254,7 +254,7 @@ struct standing_binding_t {
     std::atomic<bool> held{false};  /**< @brief Whether the hold is currently taken. */
 
     /** @brief One liveness delivery: re-enter the control plane, both doors. */
-    void operator()(const tr::view::rope_t&) {
+    void operator()(const tr::graph::value_t&) {
         deliveries.fetch_add(1);
         // Both the refcount seam and a plain reader — a routing plane drives both, and
         // both take `ctl_m_`.
@@ -398,7 +398,7 @@ struct worker_fanout_binding_t {
     std::atomic<int> reentries{0}; /**< @brief Control-plane calls that RETURNED. */
 
     /** @brief One liveness delivery; the interesting ones run on the engine's worker. */
-    void operator()(const tr::view::rope_t&) {
+    void operator()(const tr::graph::value_t&) {
         if (std::this_thread::get_id() != test_thread) {
             bool first = false;
             {

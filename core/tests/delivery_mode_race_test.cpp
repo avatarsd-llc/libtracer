@@ -111,7 +111,9 @@ void test_no_double_delivery_across_a_mode_flip() {
     auto leaf = g.register_vertex(path_t(spelling), role_t::STORED_VALUE);
     // The leaf carries its OWN subscriber, so the counter sees the leaf's deliveries and
     // nothing else — and it is what lifts mark_pending off its unobserved-write fast path.
-    auto on_leaf = [](const tr::view::rope_t&) { g_hits.fetch_add(1, std::memory_order_relaxed); };
+    auto on_leaf = [](const tr::graph::value_t&) {
+        g_hits.fetch_add(1, std::memory_order_relaxed);
+    };
     (void)g.subscribe(path_t(spelling), on_leaf);
 
     std::atomic<bool> stop{false};

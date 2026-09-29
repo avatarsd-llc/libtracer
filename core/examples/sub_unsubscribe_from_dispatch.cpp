@@ -49,7 +49,7 @@ struct sink_t {
 void on_release(void* ctx) { static_cast<sink_t*>(ctx)->released = true; }
 
 /** @brief A delivery that retires its own subscription (the re-entrant case). */
-void on_delivery(void* ctx, const tr::view::rope_t&) {
+void on_delivery(void* ctx, const tr::graph::value_t&) {
     auto* s = static_cast<sink_t*>(ctx);
     ++s->seen;
     (void)s->g->unsubscribe(s->sub, &on_release);

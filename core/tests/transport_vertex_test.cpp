@@ -387,7 +387,7 @@ void test_local_path_untouched() {
 
     (void)node.register_vertex(path_t("/sensor"), role_t::STORED_VALUE);
     std::atomic<int> hits{0};
-    auto on_sensor = [&hits](const tr::view::rope_t&) {
+    auto on_sensor = [&hits](const tr::graph::value_t&) {
         hits.fetch_add(1, std::memory_order_relaxed);
     };
     (void)node.subscribe(path_t("/sensor"), on_sensor);
@@ -917,7 +917,7 @@ void test_factory_built_ws_dial_delivers_push_on_connect() {
     // Declared before the graph they serve: the counter and its callable outlive the vertex
     // they are subscribed on.
     std::atomic<int> temp_writes{0};
-    auto on_temp = [&temp_writes](const tr::view::rope_t&) {
+    auto on_temp = [&temp_writes](const tr::graph::value_t&) {
         temp_writes.fetch_add(1, std::memory_order_relaxed);
     };
 
@@ -1072,7 +1072,7 @@ void test_factory_built_tcp_dial_delivers_push_on_connect() {
     // Declared before the graph they serve: the counter and its callable outlive the vertex
     // they are subscribed on.
     std::atomic<int> temp_writes{0};
-    auto on_temp = [&temp_writes](const tr::view::rope_t&) {
+    auto on_temp = [&temp_writes](const tr::graph::value_t&) {
         temp_writes.fetch_add(1, std::memory_order_relaxed);
     };
 

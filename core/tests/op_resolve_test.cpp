@@ -1037,7 +1037,7 @@ void test_subscription_observer() {
     // --- silence: the local doors ------------------------------------------------------
     (void)g.subscribe(*path_t::parse("/sensor/temp"), *path_t::parse("/ui/panel"));
     check(seen.empty(), "a DIRECT graph_t::subscribe(src, target) does NOT fire the observer");
-    auto sink = [](const tr::view::rope_t&) {};
+    auto sink = [](const tr::graph::value_t&) {};
     const auto sub = g.subscribe(*path_t::parse("/sensor/temp"), sink);
     check(seen.empty(), "the callback-form subscribe sugar does NOT fire it either");
     if (sub)

@@ -149,8 +149,12 @@ void score(void* ctx, char expected) {
     p->hits.fetch_add(1, std::memory_order_relaxed);
 }
 
-void sink_a(void* ctx, const tr::graph::remote_delivery_t&, const rope_t&) { score(ctx, 'A'); }
-void sink_b(void* ctx, const tr::graph::remote_delivery_t&, const rope_t&) { score(ctx, 'B'); }
+void sink_a(void* ctx, const tr::graph::remote_delivery_t&, const tr::graph::value_t&) {
+    score(ctx, 'A');
+}
+void sink_b(void* ctx, const tr::graph::remote_delivery_t&, const tr::graph::value_t&) {
+    score(ctx, 'B');
+}
 
 std::expected<tr::graph::subject_token_t, tr::wire::err_t> resolver_a(void* ctx,
                                                                       std::string_view caller) {

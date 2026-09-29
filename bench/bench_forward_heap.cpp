@@ -562,7 +562,7 @@ int main() {
     {
         graph_t fg;
         std::atomic<std::uint64_t> got{0};
-        auto cb = [&](const tr::view::rope_t&) { got.fetch_add(1, std::memory_order_relaxed); };
+        auto cb = [&](const tr::graph::value_t&) { got.fetch_add(1, std::memory_order_relaxed); };
         std::optional<tr::graph::vertex_handle_t> fv;
         if (const auto p = tr::graph::path_t::parse("/wide/v")) {
             fv = fg.register_vertex(*p, tr::graph::role_t::STORED_VALUE);

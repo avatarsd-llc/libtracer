@@ -272,7 +272,7 @@ long long rss_bytes() {
  */
 struct sink_t {
     /** @brief Consume one delivery and do nothing measurable with it. */
-    void operator()(const tr::view::rope_t&) const noexcept {}
+    void operator()(const tr::graph::value_t&) const noexcept {}
 };
 sink_t g_sink; /**< @brief The single, address-stable delivery sink. */
 

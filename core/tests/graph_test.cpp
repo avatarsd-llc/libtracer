@@ -216,7 +216,7 @@ void test_stream_drain_cursor() {
               std::to_integer<int>((*hist)[2].only().bytes()[0]) == 5,
           "trim drops the oldest entries (ring holds 3,4,5)");
 
-    std::vector<std::shared_ptr<const tr::view::rope_t>> batch;
+    std::vector<tr::graph::value_ref_t> batch;
     const auto d1 = g.drain_unflushed(v, batch);
     check(d1.has_value() && *d1 == 3, "5 unflushed appends drain to the 3 ring survivors");
     check(batch.size() == 3 && std::to_integer<int>(batch[0]->only().bytes()[0]) == 3 &&
@@ -379,7 +379,7 @@ void test_subscribe_callback() {
     auto seen = std::make_shared<int>(-1);
     tr::graph::vertex_handle_t src =
         g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
-    auto on_temp = [seen](const tr::view::rope_t& v) {
+    auto on_temp = [seen](const tr::graph::value_t& v) {
         *seen = std::to_integer<int>(v.only().bytes()[0]);
     };
     (void)g.subscribe(path_t("/sensor/temp"), on_temp);
@@ -647,7 +647,7 @@ void test_admission_door_uniformity() {
         (void)g.write(src, make_value({0x5A}));  // seed the LKV BEFORE subscribing
 
         auto seen = std::make_shared<int>(-1);
-        auto on_latch = [seen](const tr::view::rope_t& v) {
+        auto on_latch = [seen](const tr::graph::value_t& v) {
             *seen = std::to_integer<int>(v.only().bytes()[0]);
         };
         (void)g.subscribe(path_t("/tl"), on_latch, kDurableSub);
@@ -668,11 +668,11 @@ void test_admission_door_uniformity() {
         tr::graph::vertex_handle_t src = g.register_vertex(path_t("/vol"), role_t::STORED_VALUE);
         (void)g.write(src, make_value({0x77}));
         auto fired = std::make_shared<int>(0);
-        auto on_vol = [fired](const tr::view::rope_t&) { ++*fired; };
+        auto on_vol = [fired](const tr::graph::value_t&) { ++*fired; };
         (void)g.subscribe(path_t("/vol"), on_vol);
         check(*fired == 0, "default subscription: no latch");
         auto latched = std::make_shared<int>(0);
-        auto on_dur = [latched](const tr::view::rope_t&) { ++*latched; };
+        auto on_dur = [latched](const tr::graph::value_t&) { ++*latched; };
         (void)g.subscribe(path_t("/vol"), on_dur, kDurableSub);
         check(*latched == 1 && *fired == 0,
               "... and a durability_request on the SAME vertex does latch (per-subscription)");
@@ -820,7 +820,7 @@ void test_subscribe_never_misses_a_racing_write() {
     std::atomic<unsigned> seen{0};
     std::atomic<int> gate{-1};  // the round the writer may start
     std::atomic<int> done{-1};  // the round the writer has finished
-    auto on_value = [&seen](const tr::view::rope_t& v) {
+    auto on_value = [&seen](const tr::graph::value_t& v) {
         seen.fetch_or(1U << std::to_integer<unsigned>(v.only().bytes()[0]),
                       std::memory_order_relaxed);
     };
@@ -916,7 +916,7 @@ void test_assign_never_misses_a_racing_subscribe() {
     std::atomic<unsigned> seen{0};
     std::atomic<int> gate{-1};  // the round the assigner may start
     std::atomic<int> done{-1};  // the round the assigner has finished
-    auto on_value = [&seen](const tr::view::rope_t& v) {
+    auto on_value = [&seen](const tr::graph::value_t& v) {
         seen.fetch_or(1U << std::to_integer<unsigned>(v.only().bytes()[0]),
                       std::memory_order_relaxed);
     };
@@ -959,7 +959,7 @@ void test_delivery_terminates_at_target() {
     tr::graph::vertex_handle_t a = g.register_vertex(path_t("/a"), role_t::STORED_VALUE);
     (void)g.register_vertex(path_t("/b"), role_t::STORED_VALUE);
     auto b_relayed = std::make_shared<int>(0);
-    auto on_b = [b_relayed](const tr::view::rope_t&) { ++*b_relayed; };
+    auto on_b = [b_relayed](const tr::graph::value_t&) { ++*b_relayed; };
     (void)g.subscribe(path_t("/a"), path_t("/b"));  // A -> B target edge
     (void)g.subscribe(path_t("/b"), on_b);          // an observer on B's own subscribers
     (void)g.write(a, make_value({0x55}));
@@ -974,7 +974,7 @@ void test_delivery_terminates_at_target() {
     tr::graph::vertex_handle_t x = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
     (void)g.register_vertex(path_t("/y"), role_t::STORED_VALUE);
     auto hops = std::make_shared<int>(0);
-    auto on_hop = [hops](const tr::view::rope_t&) { ++*hops; };
+    auto on_hop = [hops](const tr::graph::value_t&) { ++*hops; };
     (void)g.subscribe(path_t("/x"), path_t("/y"));
     (void)g.subscribe(path_t("/y"), path_t("/x"));
     (void)g.subscribe(path_t("/x"), on_hop);
@@ -987,7 +987,7 @@ void test_delivery_terminates_at_target() {
     // logic, not the runtime's.
     (void)g.register_vertex(path_t("/out"), role_t::STORED_VALUE);
     auto sink_seen = std::make_shared<int>(-1);
-    auto on_out = [sink_seen](const tr::view::rope_t& in) {
+    auto on_out = [sink_seen](const tr::graph::value_t& in) {
         *sink_seen = std::to_integer<int>(in.only().bytes()[0]);
     };
     (void)g.subscribe(path_t("/out"), on_out);
@@ -1018,9 +1018,9 @@ void test_assign_propagate() {
     auto ca = std::make_shared<int>(0);
     auto cb = std::make_shared<int>(0);
     auto cc = std::make_shared<int>(0);
-    auto on_a = [ca](const tr::view::rope_t&) { ++*ca; };
-    auto on_b = [cb](const tr::view::rope_t&) { ++*cb; };
-    auto on_c = [cc](const tr::view::rope_t&) { ++*cc; };
+    auto on_a = [ca](const tr::graph::value_t&) { ++*ca; };
+    auto on_b = [cb](const tr::graph::value_t&) { ++*cb; };
+    auto on_c = [cc](const tr::graph::value_t&) { ++*cc; };
     (void)g.subscribe(path_t("/r/a"), on_a);
     (void)g.subscribe(path_t("/r/b"), on_b);
     (void)g.subscribe(path_t("/r/c"), on_c);
@@ -1064,7 +1064,7 @@ void test_assign_propagate() {
     // write() remains the eager §D composition (assign then deliver the vertex).
     auto cw = std::make_shared<int>(0);
     auto w = g.register_vertex(path_t("/w"), role_t::STORED_VALUE);
-    auto on_w = [cw](const tr::view::rope_t&) { ++*cw; };
+    auto on_w = [cw](const tr::graph::value_t&) { ++*cw; };
     (void)g.subscribe(path_t("/w"), on_w);
     (void)g.write(w, make_value({0x77}));
     check(*cw == 1, "write() delivers immediately (assign + targeted propagate)");
@@ -1078,7 +1078,7 @@ void test_assign_propagate() {
     auto x = g.register_vertex(path_t("/s/x"), role_t::STORED_VALUE);
     auto seen = std::make_shared<std::vector<int>>();
     auto armed = std::make_shared<bool>(true);
-    auto on_x = [&g, x, seen, armed](const tr::view::rope_t& in) {
+    auto on_x = [&g, x, seen, armed](const tr::graph::value_t& in) {
         seen->push_back(std::to_integer<int>(in.only().bytes()[0]));
         if (!*armed) return;
         *armed = false;  // once — the sweep below re-enters this same callback

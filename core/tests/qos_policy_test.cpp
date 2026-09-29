@@ -115,9 +115,9 @@ struct decoded_t {
 };
 
 /** @brief The rope behind a read result, whichever surface produced it. */
-inline const rope_t& deref_rope(const rope_t& r) noexcept { return r; }
+inline rope_t deref_rope(const rope_t& r) { return r; }
 /** @brief Overload for the reference form a value read returns. */
-inline const rope_t& deref_rope(const tr::graph::value_ref_t& r) noexcept { return *r; }
+inline rope_t deref_rope(const tr::graph::value_ref_t& r) { return r->rope(); }
 
 /** @brief Flatten + decode a read result into an owning @ref decoded_t (nullopt on failure). */
 template <class T>
@@ -156,7 +156,7 @@ void test_policy_absent_is_todays_behaviour() {
     (void)g.write(src, byte_value(0x11));  // an LKV EXISTS before the subscribe
 
     int seen = 0;
-    auto sink = [&seen](const rope_t&) { ++seen; };
+    auto sink = [&seen](const tr::graph::value_t&) { ++seen; };
     const auto sub = g.subscribe(path_t("/p/absent"), sink);
     check(sub.has_value(), "a policy-less subscribe is admitted");
     check(seen == 0, "join delivers nothing (no durability request)");
@@ -180,7 +180,7 @@ void test_policy_durability_is_per_subscriber() {
 
     int latched = 0;
     std::uint8_t latched_byte = 0;
-    auto on_latch = [&latched, &latched_byte](const rope_t& v) {
+    auto on_latch = [&latched, &latched_byte](const tr::graph::value_t& v) {
         ++latched;
         latched_byte = std::to_integer<std::uint8_t>(v.only().bytes()[0]);
     };
@@ -190,7 +190,7 @@ void test_policy_durability_is_per_subscriber() {
     check(latched_byte == 0x5A, "... carrying the producer's current value");
 
     int plain = 0;
-    auto on_plain = [&plain](const rope_t&) { ++plain; };
+    auto on_plain = [&plain](const tr::graph::value_t&) { ++plain; };
     const auto volatile_sub = g.subscribe(path_t("/p/dur"), on_plain);
     check(volatile_sub.has_value() && plain == 0,
           "the SAME producer, no request => no delivery on join (the ablation)");
@@ -220,7 +220,7 @@ void test_policy_reserved_bits_are_ignored() {
     // Every reserved bit set, plus the durability request underneath them.
     constexpr std::uint16_t kReserved = 0xFF00;
     int seen = 0;
-    auto sink = [&seen](const rope_t&) { ++seen; };
+    auto sink = [&seen](const tr::graph::value_t&) { ++seen; };
     const auto sub = g.subscribe(path_t("/p/rsvd"), sink,
                                  delivery_policy_t{static_cast<std::uint16_t>(
                                      kReserved | delivery_policy_t::kDurabilityRequest)});

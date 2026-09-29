@@ -100,7 +100,7 @@ struct release_probe_t {
 };
 
 /** @brief The subscriber: counts, and reports whether it ran after its own release. */
-void probe_sink(void* ctx, const tr::view::rope_t&) {
+void probe_sink(void* ctx, const tr::graph::value_t&) {
     auto* p = static_cast<release_probe_t*>(ctx);
     p->hits.fetch_add(1, std::memory_order_relaxed);
     if (p->released.load(std::memory_order_acquire) != 0)
@@ -165,7 +165,7 @@ struct unsubscriber_t {
 };
 
 /** @brief Unsubscribe the sibling edge from inside a delivery the same fan-out is walking. */
-void unsubscribing_sink(void* ctx, const tr::view::rope_t&) {
+void unsubscribing_sink(void* ctx, const tr::graph::value_t&) {
     auto* u = static_cast<unsubscriber_t*>(ctx);
     if (u->done.load(std::memory_order_acquire)) return;  // only the first delivery unsubscribes
     const bool ok = u->g->unsubscribe(u->victim, &probe_release).has_value();
@@ -241,13 +241,13 @@ struct nested_t {
 };
 
 /** @brief The INNER sink: unsubscribes the victim from two dispatch levels down. */
-void nested_inner_sink(void* ctx, const tr::view::rope_t&) {
+void nested_inner_sink(void* ctx, const tr::graph::value_t&) {
     auto* n = static_cast<nested_t*>(ctx);
     (void)n->g->unsubscribe(n->victim, &probe_release);
 }
 
 /** @brief The OUTER sink: drives one nested publish, then samples the hook count. */
-void nested_outer_sink(void* ctx, const tr::view::rope_t&) {
+void nested_outer_sink(void* ctx, const tr::graph::value_t&) {
     auto* n = static_cast<nested_t*>(ctx);
     if (n->fired.exchange(true)) return;
     (void)n->g->write(n->inner, tr::view::view_t::over(tr::view::borrow_const(n->frame)));
@@ -300,7 +300,7 @@ struct flood_t {
 };
 
 /** @brief Retire every victim from inside one delivery — more than the park can hold. */
-void flooding_sink(void* ctx, const tr::view::rope_t&) {
+void flooding_sink(void* ctx, const tr::graph::value_t&) {
     auto* f = static_cast<flood_t*>(ctx);
     if (f->fired.exchange(true)) return;
     for (const subscription_t& v : f->victims) (void)f->g->unsubscribe(v, &probe_release);
@@ -408,7 +408,7 @@ struct latched_sink_t {
 };
 
 /** @brief Announce that a delivery is in flight, then hold the dispatch open until told. */
-void latched_probe_sink(void* ctx, const tr::view::rope_t& value) {
+void latched_probe_sink(void* ctx, const tr::graph::value_t& value) {
     auto* l = static_cast<latched_sink_t*>(ctx);
     probe_sink(l->probe, value);
     l->entered.store(true, std::memory_order_release);

@@ -22,6 +22,34 @@
  *        buffer and a nothrow growable array.
  */
 
+namespace tr::detail {
+
+/**
+ * @brief Test-only OOM-injection seam over the nothrow heap draws: when set, a draw of
+ *        @p bytes that the hook rejects soft-fails as if the heap were exhausted.
+ *
+ * The nothrow soft-fail paths cannot be exercised by really exhausting the host heap, so
+ * this is their failure-injection tool — the global-heap twin of the failing `mem_backend_t`
+ * the `graph_value_backend_test` precedent injects (ADR-0060 §3). Production never sets it;
+ * the cost is one predictable null-check on the growth/probe paths and on the
+ * process-default @ref tr::mem::heap_source_t draw (the one a `value_t` block takes when no
+ * source is injected). It lives here, at L0, so that source can see it.
+ */
+inline bool (*probe_fail_hook)(std::size_t bytes) noexcept = nullptr;
+
+/**
+ * @brief The @ref probe_fail_hook gate alone (no real probe): true when no hook is set or
+ *        the hook admits @p bytes.
+ *
+ * For soft-fail sites whose failure leg is not the probe itself (e.g. a host-profile
+ * `catch (bad_alloc)`) but that must still honor the test seam.
+ */
+[[nodiscard]] inline bool probe_hook_ok(std::size_t bytes) noexcept {
+    return probe_fail_hook == nullptr || probe_fail_hook(bytes);
+}
+
+}  // namespace tr::detail
+
 namespace tr::mem {
 
 /**
@@ -259,8 +287,14 @@ class heap_source_t final : public block_source_t {
      * literally true rather than approximately true. Over-aligned requests (a DMA source's
      * clients, a cache-line-padded stripe) keep the aligned pair, so nothing loses a
      * guarantee it had.
+     *
+     * The virtual entry — and only it, never @ref acquire — consults the test-only
+     * `tr::detail::probe_hook_ok` seam first, so an injected refusal reaches whatever draws
+     * through the process-default source (a `value_t` block, a control-plane container)
+     * without the hot direct-call arm @ref heap_backend_t takes paying for it.
      */
     [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        if (!tr::detail::probe_hook_ok(bytes)) return nullptr;  // test-only OOM injection
         return acquire(bytes, align);
     }
 

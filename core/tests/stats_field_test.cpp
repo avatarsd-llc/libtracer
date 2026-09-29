@@ -66,7 +66,7 @@ std::vector<std::byte> as_bytes(std::string_view s) {
 }
 
 /** @brief A delivery-counting subscriber — the control that proves nothing was published. */
-void count_cb(void* ctx, const tr::view::rope_t& /*value*/) { ++*static_cast<int*>(ctx); }
+void count_cb(void* ctx, const tr::graph::value_t& /*value*/) { ++*static_cast<int*>(ctx); }
 
 /** @brief The test resolver (ADR-0018): the caller context IS the subject token. */
 std::expected<subject_token_t, tr::wire::err_t> caller_is_subject(void*, std::string_view caller) {

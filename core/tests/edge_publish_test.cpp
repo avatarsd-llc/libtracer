@@ -76,7 +76,7 @@ struct sink_t {
 };
 
 /** @brief The plain sink callback: validate the context, count the delivery. */
-void on_value(void* ctx, const rope_t&) {
+void on_value(void* ctx, const tr::graph::value_t&) {
     auto* s = static_cast<sink_t*>(ctx);
     if (s->magic != sink_t::kMagic) {
         s->torn.fetch_add(1, std::memory_order_relaxed);
@@ -242,7 +242,7 @@ struct reentrant_ctx_t {
  * dispatch was copied from. If the pin were still announced, `pin_t`'s constructor assertion
  * fires.
  */
-void on_reentrant(void* ctx, const rope_t&) {
+void on_reentrant(void* ctx, const tr::graph::value_t&) {
     auto* r = static_cast<reentrant_ctx_t*>(ctx);
     const std::size_t d = r->depth.fetch_add(1, std::memory_order_relaxed);
     for (std::size_t m = r->max_depth.load(std::memory_order_relaxed); d + 1 > m;)
@@ -374,16 +374,17 @@ void test_remote_cold_half_under_churn(std::size_t publishers) {
     std::promise<void> first_remote;
     std::future<void> first_remote_f = first_remote.get_future();
     std::atomic<bool> signalled{false};
-    const tr::testing::remote_sink_guard_t sink(g, [&](const remote_delivery_t& d, const rope_t&) {
-        const bool ok = d.link.size() == 64 && d.caller.size() == 64 &&
-                        d.link.find_first_not_of('L') == std::string_view::npos &&
-                        d.caller.find_first_not_of('C') == std::string_view::npos &&
-                        !d.return_route.bytes().empty();
-        (ok ? remote_hits : remote_torn).fetch_add(1, std::memory_order_relaxed);
-        if (!signalled.load(std::memory_order_relaxed) &&
-            !signalled.exchange(true, std::memory_order_acq_rel))
-            first_remote.set_value();
-    });
+    const tr::testing::remote_sink_guard_t sink(
+        g, [&](const remote_delivery_t& d, const tr::graph::value_t&) {
+            const bool ok = d.link.size() == 64 && d.caller.size() == 64 &&
+                            d.link.find_first_not_of('L') == std::string_view::npos &&
+                            d.caller.find_first_not_of('C') == std::string_view::npos &&
+                            !d.return_route.bytes().empty();
+            (ok ? remote_hits : remote_torn).fetch_add(1, std::memory_order_relaxed);
+            if (!signalled.load(std::memory_order_relaxed) &&
+                !signalled.exchange(true, std::memory_order_acq_rel))
+                first_remote.set_value();
+        });
 
     sink_t standing;  // slot 0, so the churn's wire edge always reoccupies slot 1
     check(g.subscribe(src, on_value, &standing).has_value(), "the standing local edge is admitted");

@@ -37,9 +37,14 @@ tr::view::view_t value_of(std::string_view text) {
 }
 
 /** @brief True iff @p r's single view holds @p text. */
-bool holds(const tr::view::rope_t& r, std::string_view text) {
+bool holds(const tr::graph::value_t& r, std::string_view text) {
     return r.only().bytes().size() == text.size() &&
            std::memcmp(r.only().bytes().data(), text.data(), text.size()) == 0;
+}
+
+/** @brief The same test on a rope (what `history` hands back). */
+bool holds(const tr::view::rope_t& r, std::string_view text) {
+    return holds(tr::graph::value_storage_t<2>{r}.get(), text);
 }
 
 /** @brief Report expectation @p what and record a failure on @p ok. */

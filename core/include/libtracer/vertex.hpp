@@ -42,7 +42,6 @@
 #include <deque>
 #include <functional>
 #include <memory>
-#include <memory_resource>
 #include <mutex>
 #include <new>
 #include <optional>
@@ -65,6 +64,7 @@
 #include "libtracer/status.hpp"
 #include "libtracer/subscriber.hpp"
 #include "libtracer/tlv.hpp"
+#include "libtracer/value.hpp"
 #include "libtracer/vertex_stripe.hpp"
 #include "libtracer/view.hpp"
 
@@ -255,63 +255,6 @@ enum class role_t : std::uint8_t {
                        `tr::mem::block_source_t` and retained to a depth declared
                        owner-side by `graph_t::set_history_depth` (RFC-0022 §3.C). */
     HANDLER,      /**< @brief Roles 3-7: user `on_read` / `on_write` supplies the behavior. */
-};
-
-/**
- * @brief An owning reference to a vertex's PUBLISHED value — what @ref graph_t::read and
- *        @ref graph_t::await hand back.
- *
- * The value a vertex publishes is already refcounted: the LKV slot holds it as a
- * `std::shared_ptr<const rope_t>`, and the policy contract in `%lkv_slot.hpp` fixes that shape
- * because `load()` must return an OWNING handle. A read therefore has a choice — hand the
- * caller that reference, or copy the rope out of it. Copying is not free: a rope copy clones
- * one `segment_ptr_t` per link, and each clone is a contended refcount RMW on a line every
- * reader of that vertex shares, so it costs more as links grow AND as readers grow.
- *
- * Measured on the real path, both arms alternating inside ONE binary (24-thread host, 102
- * paired samples): median **1.37x** aggregate, 89/102 samples favouring the reference, and p50
- * improving most where it hurts most — 2,104 ns to 1,193 ns at sixteen readers on one shared
- * vertex. The composed BRANCH read, which must build a value rather than share one, measured
- * **1.00x (15/30)**: the shape that cannot benefit does not pay either.
- *
- * The rule this draws: **a read of a PUBLISHED value returns a reference to it; a read that
- * COMPOSES a new value returns the value.** That is why @ref graph_t::read_children_folded and
- * its siblings still return a `rope_t` — there is no published object for them to reference.
- *
- * Holding one keeps that value alive, exactly as the reader's own reference did before. Under
- * an injected `std::pmr::memory_resource` that is a real obligation: the value was allocated
- * from the graph's resource, so an outstanding reference pins it (ADR-0069, deferred
- * reclamation).
- */
-class value_ref_t {
-   public:
-    value_ref_t() = default;
-
-    /** @brief Wrap a published value's handle. */
-    explicit value_ref_t(std::shared_ptr<const rope_t> p) noexcept : p_(std::move(p)) {}
-
-    /**
-     * @brief Take ownership of a freshly COMPOSED value, giving it a published value's shape.
-     *
-     * The composed branch read builds a rope no vertex published; this is what lets it answer
-     * the same signature. It allocates a control block, which the published path does not —
-     * measured neutral (1.00x over 30 paired samples), because a subtree walk dominates it.
-     */
-    [[nodiscard]] static value_ref_t composed(rope_t&& r) {
-        return value_ref_t{std::make_shared<const rope_t>(std::move(r))};
-    }
-
-    /** @brief The referenced value. Undefined if this reference is empty. */
-    [[nodiscard]] const rope_t& operator*() const noexcept { return *p_; }
-    /** @brief Member access on the referenced value. */
-    [[nodiscard]] const rope_t* operator->() const noexcept { return p_.get(); }
-    /** @brief The referenced value, or null. */
-    [[nodiscard]] const rope_t* get() const noexcept { return p_.get(); }
-    /** @brief Whether this reference names a value. */
-    [[nodiscard]] explicit operator bool() const noexcept { return static_cast<bool>(p_); }
-
-   private:
-    std::shared_ptr<const rope_t> p_;
 };
 
 /**
@@ -583,7 +526,7 @@ enum class emission_mode_t : std::uint8_t {
  * receiver injected.
  *
  * It does **NOT** bound PLACEMENT. The payload never moves: @ref value stays exactly the
- * `shared_ptr` the publish handed out, in whatever allocator the value backend gave it, so
+ * `value_t` block the publish minted, its links in whatever backend gave them, so
  * the zero-copy handoff is preserved and a ring append is still a refcount bump. Physical
  * placement migration is the later #873 family, explicitly out of scope here. A reader who
  * assumes the ring's bytes physically move into the injected source will be wrong, and the
@@ -591,7 +534,7 @@ enum class emission_mode_t : std::uint8_t {
  */
 struct ring_entry_t {
     /** @brief The published value — a refcount share of the LKV, never a byte copy. */
-    std::shared_ptr<const rope_t> value;
+    value_ref_t value;
     /** @brief The admission reservation, or `nullptr` for an entry admitted at zero cost.
      *         Released with @ref bytes and @ref kAlign, the sized-reclaim contract. */
     void* token = nullptr;
@@ -1288,10 +1231,10 @@ class vertex_t {
      * to the consumer, so the queue moved to the RECEIVING vertex (%ring_admit) and is
      * bounded there in BYTES by that vertex's own injected source.
      *
-     * One allocation (`make_shared`): the rope's inline small-buffer holds the
-     * single-link trivial case, so a scalar write costs exactly what the `view_t`
-     * slot cost (ADR-0053 §6). Not for Handler-role writes — the graph runs
-     * `handlers().on_write` and calls @ref note_write instead.
+     * Zero allocations here: the caller minted the one `value_t` block the publish costs
+     * (RFC-0028 §5.1; `graph_t::store_value` draws it from the graph's source) and this verb
+     * only publishes it. Not for Handler-role writes — the graph runs `handlers().on_write`
+     * and calls @ref note_write instead.
      *
      * @note **Cross-writer total order is no longer implied here.** The stripe mutex used to
      *       serialize STREAM appends, so ring order doubled as a global order across writers.
@@ -1299,28 +1242,31 @@ class vertex_t {
      *       stamp, read off the value, and a receiver ring fed by N producers
      *       orders by stamp rather than minting a sequence of its own. An embedder that read a
      *       global order off append order must read it off the stamp instead.
-     * @param value The value to publish (moved into the LKV slot).
-     * @param mr    The ADR-0039 injected resource the LKV control block + rope are
-     *              allocated from (#361 §5) — the graph passes its own; `nullptr`
-     *              (the default, and every direct caller) keeps plain `make_shared`.
-     *              Lifetime: the resource must outlive every `shared_ptr` obtained
-     *              from this vertex — the same "handles do not outlive the graph's
+     * @param value The value to publish. The slot takes ONE reference of its own; the
+     *              caller keeps the one it holds, which is exactly what a concurrent
+     *              @ref read_stored observes — so the write path can deliver the stored value
+     *              (RFC-0008 §D "deliver exactly what was stored") without recloning anything.
+     *              Its block must have been drawn from a source that outlives every reference
+     *              obtained from this vertex — the same "handles do not outlive the graph's
      *              memory" contract the injection seam already imposes.
-     * @return The published LKV pointer — exactly what a concurrent @ref read_stored
-     *         observes — so the write path can deliver the stored value (RFC-0008 §D
-     *         "deliver exactly what was stored") without recloning the rope.
-     * @retval nullptr The LKV control-block allocation failed (OOM): NOTHING was
-     *         published (#477 nothrow soft-fail — the graph maps this to
-     *         `BACKPRESSURE`; the store verb never aborts the node).
+     * @retval true  Published.
+     * @retval false The slot declined (a lazily-reclaiming policy could not obtain its node):
+     *         NOTHING was published and @p value is still only the caller's (#477 nothrow
+     *         soft-fail — the graph maps this to `BACKPRESSURE`; the store verb never aborts
+     *         the node).
      */
-    std::shared_ptr<const rope_t> store(rope_t value, std::pmr::memory_resource* mr = nullptr) {
-        std::shared_ptr<const rope_t> sp = try_make_lkv(std::move(value), mr);
-        if (!sp) return nullptr;  // OOM: nothing published — the caller soft-fails (#477)
-        // Publish the new last-known-value through the bound slot policy (see lkv_). A slot that
-        // reclaims lazily has to allocate to publish, so this can decline — and when it does,
-        // NOTHING was published: fail exactly as an LKV allocation failure does, rather than
-        // returning a handle to a value the vertex is not actually holding.
-        if (!lkv_.store(sp)) return nullptr;  // #477 soft-fail — the graph maps it to BACKPRESSURE
+    [[nodiscard]] bool store(const value_ref_t& value) noexcept {
+        // Publish the new last-known-value through the bound slot policy (see lkv_). The slot
+        // adopts the reference handed to it, so take one for it here; a slot that reclaims
+        // lazily has to allocate to publish, so this can decline — and when it does, NOTHING
+        // was published: give the reference back and fail, rather than report a write the
+        // vertex is not actually holding.
+        auto* v = const_cast<value_t*>(value.get());
+        v->retain();
+        if (!lkv_.store(v)) {  // #477 soft-fail — the graph maps it to BACKPRESSURE
+            value_t::release(v);
+            return false;
+        }
 
         // WAITERLESS PUBLISH: no ring to append and nobody in `await` ⇒ take no lock at all
         // (#555). #370 already skipped the condvar CALL on this path; the mutex itself was
@@ -1344,10 +1290,10 @@ class vertex_t {
         // never a correctness change).
         vertex_stripe_t& st = vertex_stripe_of(this);  // one lookup per verb (#370)
         write_seq_.fetch_add(1, std::memory_order_seq_cst);
-        if (st.waiters.load(std::memory_order_seq_cst) == 0) return sp;
+        if (st.waiters.load(std::memory_order_seq_cst) == 0) return true;
         const std::lock_guard lock(st.m);
         vertex_stripe_cv(vertex_stripe_index(this)).notify_all();
-        return sp;
+        return true;
     }
 
     /**
@@ -1385,8 +1331,8 @@ class vertex_t {
      * @return true iff the entry was queued. False is the RELIABLE refusal — and only that, so
      *         a caller can map it straight to `BACKPRESSURE` without re-deriving the arm.
      */
-    bool ring_admit(const std::shared_ptr<const rope_t>& sp, std::size_t bytes,
-                    tr::mem::block_source_t& src, store_drops_t* drops) {
+    bool ring_admit(const value_ref_t& sp, std::size_t bytes, tr::mem::block_source_t& src,
+                    store_drops_t* drops) {
         const std::lock_guard lock(vertex_stripe_of(this).m);
         vertex_ext_t* e = ext_.load(std::memory_order_acquire);
         if (e == nullptr) return true;  // no ext, no ring — nothing to admit into, nothing shed
@@ -1474,7 +1420,7 @@ class vertex_t {
     }
 
     /** @brief The stored last-known-value (lock-free; null ⇒ never assigned / Handler role). */
-    [[nodiscard]] std::shared_ptr<const rope_t> read_stored() const { return lkv_.load(); }
+    [[nodiscard]] value_ref_t read_stored() const { return lkv_.load(); }
 
     /**
      * @brief Block until the write sequence moves past @p seq0 or @p timeout elapses.
@@ -1551,7 +1497,7 @@ class vertex_t {
      * @return The number of entries drained (0 ⇒ nothing appended since the last flush,
      *         or the snapshot could not be allocated — retry on the next flush).
      */
-    std::size_t drain_unflushed(std::vector<std::shared_ptr<const rope_t>>& out,
+    std::size_t drain_unflushed(std::vector<value_ref_t>& out,
                                 std::uint64_t* gap_before = nullptr) {
         const std::lock_guard lock(vertex_stripe_of(this).m);
         vertex_ext_t* e = ext_.load(std::memory_order_acquire);
@@ -1587,7 +1533,7 @@ class vertex_t {
         const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
         if (e == nullptr || !e->ring) return out;
         out.reserve(e->ring->entries.size());
-        for (const ring_entry_t& entry : e->ring->entries) out.push_back(*entry.value);
+        for (const ring_entry_t& entry : e->ring->entries) out.push_back(entry.value->rope());
         return out;
     }
 
@@ -1673,7 +1619,7 @@ class vertex_t {
                 return kNoSlot;
             }
             if (latch != nullptr && subs[idx].policy.durability_request()) {
-                if (std::shared_ptr<const rope_t> lkv = lkv_.load()) {
+                if (value_ref_t lkv = lkv_.load()) {
                     latch->value = std::move(lkv);
                     latch->edge = edge_view_of(subs[idx]);
                 }
@@ -1781,7 +1727,7 @@ class vertex_t {
             deactivate_published(*b, idx);
             (void)try_publish_edges(*b);
             if (latch != nullptr && subs[idx].policy.durability_request()) {
-                if (std::shared_ptr<const rope_t> lkv = lkv_.load()) {
+                if (value_ref_t lkv = lkv_.load()) {
                     latch->value = std::move(lkv);
                     latch->edge = edge_view_of(subs[idx]);
                 }
@@ -2669,40 +2615,6 @@ class vertex_t {
         return (flags_.load(order) & static_cast<std::uint8_t>(f)) != 0;
     }
 
-    /**
-     * @brief The `%store` LKV allocation (control block + rope), NOTHROW: `nullptr` on
-     *        OOM instead of the bad_alloc that abort()s under the MCU profile's
-     *        `-fno-exceptions` (#477, the engine-task storm crash class).
-     *
-     * Host profile (exceptions on): catch — zero cost on the hot success path, no probe
-     * race. MCU profile: the `%mem_heap.hpp` probe-then-commit discipline; the probe covers
-     * the rope payload + a control-header bound and targets the global heap — exact for
-     * the default resource (every production graph today); an ADR-0039 injected @p mr
-     * keeps its own contract, the probe being a best-effort proxy for it.
-     */
-    [[nodiscard]] static std::shared_ptr<const rope_t> try_make_lkv(
-        rope_t&& value, std::pmr::memory_resource* mr) noexcept {
-        static constexpr std::size_t kCtrlSlack = 4 * sizeof(void*);  // ≥ both mainstream ABIs
-#if defined(__cpp_exceptions)
-        if (!tr::detail::probe_hook_ok(sizeof(rope_t) + kCtrlSlack)) return nullptr;  // test seam
-        try {
-            return mr == nullptr
-                       ? std::make_shared<const rope_t>(std::move(value))
-                       : std::allocate_shared<const rope_t>(
-                             std::pmr::polymorphic_allocator<rope_t>(mr), std::move(value));
-        } catch (...) {
-            // Only the allocation can throw here (the rope move is noexcept), so any
-            // exception — bad_alloc or an injected resource's own type — IS the OOM leg.
-            return nullptr;
-        }
-#else
-        if (!tr::detail::probe_bytes(sizeof(rope_t) + kCtrlSlack)) return nullptr;
-        return mr == nullptr ? std::make_shared<const rope_t>(std::move(value))
-                             : std::allocate_shared<const rope_t>(
-                                   std::pmr::polymorphic_allocator<rope_t>(mr), std::move(value));
-#endif
-    }
-
     // The dispatch view of one slot; call with m_ held. Every field is a pointer copy or a
     // refcount: the target key and the cold half are both immutable shared records, so the
     // view keeps each alive across a concurrent unsubscribe without owning any bytes
@@ -3035,8 +2947,8 @@ class vertex_t {
     // unchanged on both ABIs, and @ref vertex_layout_gate_t pins it. `alignas(16)` on the
     // member would NOT be free — it leaves an 8-byte hole and spends the #361 ratchet.
 
-    // The stored value is a rope (ADR-0053 §6): a contiguous scalar is a single-link
-    // rope (small-buffer inline, no extra alloc), a chunked stream keeps its links.
+    // The stored value is one `value_t` block (RFC-0028 §5.1): its refcount and its link
+    // chain together, a single-link scalar and a chunked stream alike (ADR-0053 §6).
     /** @brief The last-known value, held through the slot policy this target bound
      *         (`tr::graph::lkv_slot_t` in `%config.hpp`; ADR-0069 §1):
      *         `single_writer_slot_t` by default, `hazard_slot_t` as a host opt-in.
@@ -3095,7 +3007,7 @@ class vertex_t {
     // not a benign torn read. Byte-wide as an atomic too, so the group stays four bytes.
     std::atomic<delivery_mode_t> delivery_mode_{delivery_mode_t::IF_NEWER};
     // Three lock-free predicates, packed into ONE byte so the flag group stays exactly four
-    // bytes wide and `sizeof(vertex_t)` stays at the size the ratchets pin (96 B on x86-64,
+    // bytes wide and `sizeof(vertex_t)` stays at the size the ratchets pin (88 B on x86-64,
     // 72 B on rv32 — the #361 diet's measurement as re-taken by the #1487 census) — the size
     // gate's own failure message says to put a new member behind vertex_ext_t rather than
     // inline it, and a bit costs less than either. (`ENUM_HIDDEN`, the RFC-0014 §3 hide seam,
@@ -3183,8 +3095,9 @@ class vertex_t {
  * 8-aligned-but-not-16 lets its two words land on DIFFERENT 64-byte cache lines for one of the
  * four block alignments glibc can return — doubling the coherence footprint of every publish
  * (measured x0.34 throughput, 1.9x cache misses, at `address % 64 == 32` with the slot at
- * offset 24). `single_writer_slot_t` is the same 16 bytes on a 64-bit host, so the gate still
- * holds for it; for the 8-byte hazard slot it is free.
+ * offset 24). Since RFC-0028 slice 3 both policies are ONE word (`value_t*` / `node_t*`), so
+ * the straddle is unreachable and the gate is free; it stays because it is what keeps a future
+ * two-word slot from reintroducing the placement unnoticed.
  *
  * Pinning the offset to a multiple of 16 makes that placement unreachable: any 16-byte-aligned
  * block puts a 16-aligned interior offset back on a 16-byte boundary, and 16 bytes starting on
@@ -3204,7 +3117,7 @@ struct vertex_layout_gate_t {
 #endif
     static_assert(offsetof(vertex_t, lkv_) % 16 == 0,
                   "vertex_t::lkv_ must start at a 16-byte-aligned offset (#1285) — otherwise "
-                  "the 16-byte, 8-aligned atomic slot straddles a 64-byte cache line for one "
+                  "a two-word, 8-aligned slot straddles a 64-byte cache line for one "
                   "malloc placement in four and the contended write path loses ~3x. Reorder "
                   "the members to restore it; do NOT pad or alignas, that spends the #361 "
                   "RAM ratchet asserted below");

@@ -54,7 +54,7 @@ int main() {
         g.register_vertex(path_t("/dev/b/temp"), role_t::STORED_VALUE);
 
     int seen = 0;
-    auto on_dev = [&](const tr::view::rope_t& v) {
+    auto on_dev = [&](const tr::graph::value_t& v) {
         ++seen;
         // The value arrives as written; the edge carries no "which leaf" field.
         std::printf("  delivery %d: %u\n", seen,

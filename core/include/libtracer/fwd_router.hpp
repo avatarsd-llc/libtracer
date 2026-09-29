@@ -299,7 +299,7 @@ class fwd_router_t {
         // constructing a router against a graph that is ALREADY serving frames is
         // unsupported, which is what `configure_` in the verb's name says.
         graph_.configure_remote_delivery_sink(
-            [](void* ctx, const graph::remote_delivery_t& sub, const view::rope_t& value) {
+            [](void* ctx, const graph::remote_delivery_t& sub, const graph::value_t& value) {
                 static_cast<fwd_router_t*>(ctx)->deliver_remote(sub, value);
             },
             this);
@@ -1965,7 +1965,7 @@ class fwd_router_t {
      * lean `COMPACT` (RFC-0004 §D/§E.1). Fires on the writer thread (outside the vertex
      * lock); all label state is in the mutex-guarded @ref route_handle_t.
      */
-    void deliver_remote(const graph::remote_delivery_t& sub, const view::rope_t& value);
+    void deliver_remote(const graph::remote_delivery_t& sub, const graph::value_t& val);
 
     // The {fn, ctx} context a point-to-point child's receiver is bound with: the
     // router plus the child's inbound NAME (a bus link tags frames with the peer

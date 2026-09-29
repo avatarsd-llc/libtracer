@@ -42,7 +42,7 @@ class remote_sink_guard_t {
     /** @brief Install @p f on @p g; it stays installed until this guard dies. */
     remote_sink_guard_t(tr::graph::graph_t& g, F f) : fn_(std::move(f)) {
         g.configure_remote_delivery_sink(
-            [](void* ctx, const tr::graph::remote_delivery_t& d, const tr::view::rope_t& v) {
+            [](void* ctx, const tr::graph::remote_delivery_t& d, const tr::graph::value_t& v) {
                 static_cast<remote_sink_guard_t*>(ctx)->fn_(d, v);
             },
             this);

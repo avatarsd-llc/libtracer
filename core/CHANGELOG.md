@@ -14,6 +14,44 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Breaking
+
+- **`value_t` replaces the LKV wrapper (RFC 0028 slice 3, D1 + the first half of D9).** A
+  publish now costs ONE block — an intrusive refcounted `value_t` (`value.hpp`, new: a 16 B
+  header on 64-bit / 12 B on rv32, followed by its `view_t` link chain) drawn from the
+  vertex's `block_source_t` — where it used to cost a `std::shared_ptr<const rope_t>` control
+  block plus an 80 B `rope_t` through a `std::pmr` channel. `bench_lean_value_path local-cb`:
+  1 alloc / 104 B → 1 alloc / 40 B per publish. `sizeof(vertex_t)` 96 → 88 on 64-bit
+  (`config_t::kMaxVertexBytes64` re-pinned; rv32 stays 72). No shims and no deprecated
+  aliases — every in-tree caller, test, example and bench moved.
+
+  - **`value.hpp` — new.** `tr::graph::value_t` (`make(rope_t&&, block_source_t&)`,
+    `make(std::span<const view_t>, block_source_t&)`, `retain`, static `release`, `use_count`,
+    `links`, `only`, `walk`, `rope` / `try_rope`, `materialize`, `flatten`, `to_iovec` and
+    their `try_` forms, `bytes_for`); `tr::graph::value_ref_t` moved here from `vertex.hpp`
+    and is now a handle over an intrusive `value_t*` (`adopt`, `share`, `composed`, copy =
+    retain; the `std::shared_ptr` constructor is gone; `composed` may hand back an EMPTY
+    handle when the heap refuses); `tr::graph::value_storage_t<N>` — an on-stack `value_t`
+    with up to `N` links for handing an unstored write to a HANDLER sink without a heap draw.
+  - **`subscriber.hpp` — `subscriber_fn_t` is `void (*)(void* ctx, const value_t& value)`**
+    (was `const rope_t&`); `edge_latch_t::value` is a `value_ref_t`. `graph_t::subscribe`'s
+    lambda sugar requires `std::invocable<F&, const value_t&>`.
+  - **`graph.hpp` — `remote_delivery_fn_t` takes `const value_t&`;** `store_value` returns
+    `result_t<value_ref_t>`; `drain_unflushed` fills a `std::vector<value_ref_t>`.
+    `fwd_router_t::deliver_remote` takes `const graph::value_t&` to match.
+  - **`vertex.hpp` — `try_make_lkv` removed;** `store(rope_t, std::pmr::memory_resource*)`
+    is `store(const value_ref_t&)`; `read_stored` returns a `value_ref_t`;
+    `ring_entry_t::value` is a `value_ref_t`; `ring_admit` / `drain_unflushed` follow.
+  - **`lkv_slot.hpp` — both slot policies speak `value_t*`:** `store(value_t*)` ADOPTS the
+    reference it is handed (a `false` return leaves it the caller's), `load()` returns a
+    `value_ref_t`; the `value_ptr_t` alias is gone; `detail_hp::node_t::sp` is `v`
+    (`const value_t*`).
+  - **`rope.hpp` — `links()` gains a mutable overload** (what `value_t::make` moves out of).
+  - **`mem_source.hpp` / `mem_heap.hpp` — the test-only `tr::detail::probe_fail_hook` /
+    `probe_hook_ok` seam moved down to `mem_source.hpp`** (same names), and the
+    process-default `heap_source_t::try_alloc` honours it, so an injected refusal reaches a
+    `value_t` draw. `heap_source_t::acquire` — the direct-call arm — does not consult it.
+
 ### Added
 
 - **BREAKING — enqueue-then-write in the stream links (RFC 0028 slice 2; fixes

@@ -37,7 +37,7 @@ struct sink_t {
 };
 
 /** @brief The per-delivery sink (`subscriber_fn_t`): a plain function pointer, no erasure. */
-void on_delivery(void* ctx, const tr::view::rope_t&) { ++static_cast<sink_t*>(ctx)->seen; }
+void on_delivery(void* ctx, const tr::graph::value_t&) { ++static_cast<sink_t*>(ctx)->seen; }
 
 /** @brief The release hook — libtracer calls it once, at the policy's grace point. */
 void on_release(void* ctx) { static_cast<sink_t*>(ctx)->released = true; }

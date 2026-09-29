@@ -118,14 +118,14 @@ struct hook_guard_t {
 };
 
 /** @brief The delivered-count callback: bumps the int behind @p ctx. */
-void count_cb(void* ctx, const rope_t& /*value*/) { ++*static_cast<int*>(ctx); }
+void count_cb(void* ctx, const tr::graph::value_t& /*value*/) { ++*static_cast<int*>(ctx); }
 
 /**
  * @brief The delivered-SEQUENCE callback: appends each single-link value's first byte to
  *        the vector behind @p ctx — a count alone cannot tell a duplicate from a fresh
  *        entry, which is exactly what #925 is about.
  */
-void record_cb(void* ctx, const rope_t& value) {
+void record_cb(void* ctx, const tr::graph::value_t& value) {
     static_cast<std::vector<std::uint8_t>*>(ctx)->push_back(
         std::to_integer<std::uint8_t>(value.only().bytes()[0]));
 }
@@ -377,7 +377,7 @@ void test_remote_edge_snapshot_is_allocation_free() {
     int deliveries = 0;
     std::size_t seen_link_len = 0;
     const tr::testing::remote_sink_guard_t sink_guard(
-        g, [&](const tr::graph::remote_delivery_t& d, const rope_t&) {
+        g, [&](const tr::graph::remote_delivery_t& d, const tr::graph::value_t&) {
             ++deliveries;
             seen_link_len = d.link.size();
         });
@@ -553,7 +553,7 @@ void test_ring_best_effort_sheds_oldest_with_a_gap() {
           "the ring holds what the SOURCE could fund, never the declared depth");
     check(!hist->empty(), "…and the newest entries survived: oldest-first is the shed order");
 
-    std::vector<std::shared_ptr<const tr::view::rope_t>> batch;
+    std::vector<tr::graph::value_ref_t> batch;
     std::uint64_t gap_before = 0;
     (void)g.drain_unflushed(v, batch, &gap_before);
     check(gap_before > 0, "the consumer is TOLD about the discontinuity, in order, at the drain");

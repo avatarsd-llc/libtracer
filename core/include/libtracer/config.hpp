@@ -40,7 +40,7 @@ inline constexpr std::uint32_t kPinNever = 0;
 struct allow_only_policy_t;  // security_acl.hpp — the ALLOW-only MCU profile (ADR-0020 subset)
 struct full_acl_policy_t;    // security_acl.hpp — ordered first-match-per-bit with DENY
 class hazard_slot_t;         // lkv_slot.hpp — lock-free atomic<node*>; hazard-pointer reclamation
-class single_writer_slot_t;  // lkv_slot.hpp — shared_ptr swapped inside reader_guard_t; no spin
+class single_writer_slot_t;  // lkv_slot.hpp — one value_t* swapped inside reader_guard_t; no spin
 struct mutex_guard_t;        // lkv_slot.hpp — the host reader guard: address-striped locks
 struct reclaim_strict_t;     // reclaim.hpp — grace point: `unsubscribe()` returns
 struct reclaim_local_t;      // reclaim.hpp — grace point: this thread's dispatch stack unwinds
@@ -194,9 +194,11 @@ struct default_config_t {
      * won after #380 §1 were invisible to the build and free to be spent again by anyone.
      * Pinned to the measurement, every byte reclaimed is kept by construction.
      *
-     * History, newest first: 96 (measured across all three CI legs — `acl_full` OFF/ON and
-     * both `lkv_slot_t` bindings agree), 112 post-#380 §1, 144 post-packing, 168 post-§3,
-     * 160 post-§2, 248 post-§1, 536 pre-split.
+     * History, newest first: 88 (RFC-0028 slice 3 — the LKV slot is one `value_t*` word, where
+     * the `std::shared_ptr<const rope_t>` it replaced was two; both `lkv_slot_t` bindings
+     * agree), 96 (measured across all three CI legs — `acl_full` OFF/ON and both `lkv_slot_t`
+     * bindings agree), 112 post-#380 §1, 144 post-packing, 168 post-§3, 160 post-§2, 248
+     * post-§1, 536 pre-split.
      *
      * It lives HERE, in the configuration, because it is a per-target budget — and it is
      * enforced in `%vertex.hpp` beside the type it constrains, so **every** build on **every**
@@ -208,7 +210,7 @@ struct default_config_t {
      * make a build pass. LOWERING one is the routine half: a change that shrinks `vertex_t`
      * lowers the number in the same commit, or the gain is handed back to the next author.
      */
-    static constexpr std::size_t kMaxVertexBytes64 = 96;
+    static constexpr std::size_t kMaxVertexBytes64 = 88;
 
     /**
      * @brief The RAM-diet RATCHET on `sizeof(vertex_t)`, 32-bit (MCU) targets.
@@ -315,7 +317,7 @@ struct default_config_t {
      * @brief The target's selected LKV slot policy (ADR-0069 §1).
      *
      * How a vertex publishes and reads its last-known value. Default: `single_writer_slot_t`,
-     * a `shared_ptr` swapped and copied inside @ref reader_guard_t. It has no registry, no
+     * one `value_t*` swapped and retained inside @ref reader_guard_t. It has no registry, no
      * deferred reclamation and a publish that cannot fail, and its one wait is the guard (#1618).
      *
      * `hazard_slot_t` is the lock-free alternative for a host whose reads of one shared vertex

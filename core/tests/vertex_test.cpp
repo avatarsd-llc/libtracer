@@ -176,7 +176,7 @@ void test_edges_snapshot_clear_latch() {
     // subscriber_t is move-only (#380 §3 cold-half unique_ptr): mint a fresh edge per add.
     const auto mk_edge = [&hits](std::uint16_t policy_bits = 0) {
         subscriber_t s;
-        s.callback = [](void* ctx, const rope_t&) { ++*static_cast<int*>(ctx); };
+        s.callback = [](void* ctx, const tr::graph::value_t&) { ++*static_cast<int*>(ctx); };
         s.callback_ctx = &hits;
         s.policy.bits = policy_bits;
         return s;
@@ -199,9 +199,9 @@ void test_edges_snapshot_clear_latch() {
           "3 active edges snapshot into the inline buffer (no heap)");
     check(!drops.any(), "an unpressured snapshot sheds nothing (#896)");
     // The dispatch view stands on its own: the value handed to a snapshotted edge is the
-    // caller's rope, never something the vertex had to be holding.
-    const rope_t dispatched = make_value(0x11);
-    buf[0].callback(buf[0].callback_ctx, dispatched);
+    // caller's, never something the vertex had to be holding.
+    const tr::graph::value_storage_t<1> dispatched{make_value(0x11)};
+    buf[0].callback(buf[0].callback_ctx, dispatched.get());
     check(hits == 1, "a snapshotted edge dispatches through its {fn, ctx} pair");
 
     check(v.clear_edge(0), "clearing an active slot reports true");
@@ -222,7 +222,7 @@ void test_snapshot_under_concurrent_add() {
     std::atomic<int> dummy{0};
     const auto mk_proto = [&dummy] {
         subscriber_t s;
-        s.callback = [](void* ctx, const rope_t&) {
+        s.callback = [](void* ctx, const tr::graph::value_t&) {
             static_cast<std::atomic<int>*>(ctx)->fetch_add(1, std::memory_order_relaxed);
         };
         s.callback_ctx = &dummy;

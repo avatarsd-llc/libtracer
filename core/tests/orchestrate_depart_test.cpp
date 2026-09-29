@@ -221,8 +221,8 @@ int reply_kind(std::span<const std::byte> frame) {
     return value_u8(dec->children[3]);
 }
 
-/** @brief The trailing u32 VALUE payload of a delivered rope (A's consumer sink). */
-std::uint32_t rope_value_u32(const tr::view::rope_t& value) {
+/** @brief The trailing u32 VALUE payload of a delivered value (A's consumer sink). */
+std::uint32_t rope_value_u32(const tr::graph::value_t& value) {
     const view_t mat = value.materialize();
     const auto dec = tr::wire::decode(mat.bytes());
     if (!dec || dec->type != type_t::VALUE || dec->payload.size() != 4) return 0;
@@ -306,7 +306,7 @@ int main() {
     const auto sink_v = graph_a.register_vertex(*path_t::parse("/sink/val"), role_t::STORED_VALUE);
     (void)graph_a.subscribe(
         path_t("/sink/val"),
-        [](void* ctx, const tr::view::rope_t& value) {
+        [](void* ctx, const tr::graph::value_t& value) {
             const std::uint32_t v = rope_value_u32(value);
             std::vector<std::byte> b(4);
             tr::detail::store_le<std::uint32_t>(b, v);

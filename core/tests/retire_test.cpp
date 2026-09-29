@@ -264,7 +264,7 @@ void test_idempotent_and_silent() {
 
     // A subtree subscriber above the retired vertex, to catch any spurious delivery.
     auto deliveries = std::make_shared<std::atomic<int>>(0);
-    auto on_deliver = [deliveries](const tr::view::rope_t&) {
+    auto on_deliver = [deliveries](const tr::graph::value_t&) {
         deliveries->fetch_add(1, std::memory_order_relaxed);
     };
     (void)g.subscribe(path_t("/p"), on_deliver);

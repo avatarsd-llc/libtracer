@@ -406,11 +406,9 @@ add_executable(bench_source_role_alloc bench_source_role_alloc.cpp)
 target_link_libraries(bench_source_role_alloc PRIVATE libtracer)
 target_compile_options(bench_source_role_alloc PRIVATE -Wall -Wextra)
 
-# The value-path census behind RFC-0028: heap blocks, heap bytes and payload copies per
-# publish at each stage (local publish, fan-out to K callback/target subscribers, egress
-# gather, wire ingress copy vs pin), against a minimal prototype of the RFC's core slice.
-# Its own binary for the bench_source_role_alloc reason: the counting override must not
-# sit in a timing TU.
+# RFC-0028's per-publish allocation census: allocs / bytes / copies per stage of the value
+# path (local callback fan-out, local target, producer-own, egress, ingress). The `local-cb`
+# row is slice 3's gate (one block per publish, <= 40 B on the host).
 add_executable(bench_lean_value_path bench_lean_value_path.cpp)
 target_link_libraries(bench_lean_value_path PRIVATE libtracer)
 target_compile_options(bench_lean_value_path PRIVATE -Wall -Wextra)

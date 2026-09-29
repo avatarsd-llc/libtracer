@@ -13,12 +13,9 @@
 #pragma once
 
 #include <atomic>
-#include <memory>
 #include <utility>
 
-namespace tr::view {
-class rope_t;
-}  // namespace tr::view
+#include "libtracer/value.hpp"
 
 namespace tr::graph {
 
@@ -26,20 +23,24 @@ namespace tr::graph {
  *         spin declaration is what the arm varies. */
 class probe_slot_t {
    public:
-    using value_ptr_t = std::shared_ptr<const view::rope_t>; /**< @brief The owning handle. */
+    probe_slot_t() = default;
+    probe_slot_t(const probe_slot_t&) = delete;
+    probe_slot_t& operator=(const probe_slot_t&) = delete;
+    ~probe_slot_t() { clear(); }
 
-    /** @brief Publish. */
-    [[nodiscard]] bool store(value_ptr_t sp, std::memory_order = std::memory_order_seq_cst) {
-        v_ = std::move(sp);
+    /** @brief Publish: the slot adopts @p v's reference and drops the one it held. */
+    [[nodiscard]] bool store(value_t* v, std::memory_order = std::memory_order_seq_cst) {
+        value_t* const old = std::exchange(v_, v);
+        if (old != nullptr) value_t::release(old);
         return true;
     }
     /** @brief Drop the published value. */
-    void clear(std::memory_order = std::memory_order_seq_cst) { v_.reset(); }
-    /** @brief Read the published value. */
-    [[nodiscard]] value_ptr_t load() const { return v_; }
+    void clear(std::memory_order = std::memory_order_seq_cst) { (void)store(nullptr); }
+    /** @brief Read the published value: one more reference to it. */
+    [[nodiscard]] value_ref_t load() const { return value_ref_t::share(v_); }
 
    private:
-    value_ptr_t v_{};
+    value_t* v_ = nullptr; /**< @brief The one published value, or null. */
 };
 
 /** @brief The defaults with spin-waiting refused and the probe policy bound. */

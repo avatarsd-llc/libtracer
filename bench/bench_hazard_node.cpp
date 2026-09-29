@@ -77,6 +77,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -110,9 +111,17 @@ constexpr std::size_t kBatches = 2000;
 /** @brief Publishes on the steady (free-list) arm — same wall-clock target as the cold one. */
 constexpr std::size_t kSteadyOps = 20'000'000;
 
-/** @brief One shared payload, so the arms measure the node and not rope construction. */
-[[nodiscard]] std::shared_ptr<const tr::view::rope_t> payload() {
-    static const std::shared_ptr<const tr::view::rope_t> p = std::make_shared<tr::view::rope_t>();
+/**
+ * @brief One shared payload, so the arms measure the node and not value construction.
+ *
+ * The slot ADOPTS the reference it is handed (RFC-0028 slice 3), so every call retains the
+ * one static value once more — the same relaxed increment the `shared_ptr` copy used to be.
+ */
+[[nodiscard]] tr::graph::value_t* payload() {
+    static tr::graph::value_t* const p =
+        tr::graph::value_t::make(std::span<const tr::view::view_t>{}, tr::mem::heap_source());
+    if (p == nullptr) std::exit(1);
+    p->retain();
     return p;
 }
 
@@ -139,7 +148,6 @@ void run_cold() {
     std::vector<std::unique_ptr<hazard_slot_t>> slots;
     slots.reserve(kLiveSlots);
 
-    const auto sp = payload();
     std::uint64_t acquire_ns = 0;
     std::uint64_t release_ns = 0;
 
@@ -150,7 +158,7 @@ void run_cold() {
 
         const std::uint64_t t0 = bench::now_ns();
         for (std::size_t i = 0; i < kLiveSlots; ++i) {
-            if (!slots[i]->store(sp)) {
+            if (!slots[i]->store(payload())) {
                 std::fprintf(stderr, "hazard store refused at %zu — out of memory?\n", i);
                 std::exit(1);
             }
@@ -170,13 +178,12 @@ void run_cold() {
 /** @brief The control arm: one slot republished, so every acquisition is a free-list hit. */
 void run_steady() {
     hazard_slot_t slot;
-    const auto sp = payload();
 
-    if (!slot.store(sp)) std::exit(1);  // the one allocating publish, outside the window
+    if (!slot.store(payload())) std::exit(1);  // the one allocating publish, outside the window
 
     const std::uint64_t t0 = bench::now_ns();
     for (std::size_t i = 0; i < kSteadyOps; ++i) {
-        if (!slot.store(sp)) std::exit(1);
+        if (!slot.store(payload())) std::exit(1);
     }
     const std::uint64_t total = bench::now_ns() - t0;
 

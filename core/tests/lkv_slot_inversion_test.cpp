@@ -32,7 +32,6 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
-#include <memory>
 #include <mutex>
 #include <thread>
 
@@ -41,8 +40,8 @@
 
 namespace {
 
+using tr::graph::value_t;
 using tr::testing::check;
-using tr::view::rope_t;
 
 /** @brief Reader wake-ups per policy: enough that a slot which CAN be caught mid-window is. */
 constexpr std::size_t kReads = 20000;
@@ -125,11 +124,18 @@ struct test_mutex_guard_t {
  * @brief Run the writer/reader pair on one CPU for one policy.
  * @return `true` iff the reader never stalled past @ref kStallLimit.
  */
+/** @brief A link-less value from the heap: the cheapest thing a slot can publish. */
+[[nodiscard]] value_t* make_empty() {
+    value_t* v = value_t::make(std::span<const tr::view::view_t>{}, tr::mem::heap_source());
+    if (v == nullptr) std::abort();
+    return v;
+}
+
 template <typename slot_t>
 [[nodiscard]] bool no_livelock(const char* name, int work, int watch) {
     std::printf("%s — high-priority reader vs low-priority writer on CPU %d:\n", name, work);
     slot_t slot;
-    (void)slot.store(std::make_shared<const rope_t>());
+    (void)slot.store(make_empty());
 
     std::atomic<bool> stop{false};
     std::atomic<std::size_t> progress{0};
@@ -140,7 +146,7 @@ template <typename slot_t>
     std::thread writer([&] {
         if (!pin_to(work) || !go_fifo(kWriterPriority)) setup_ok.store(false);
         while (!stop.load(std::memory_order_relaxed)) {
-            (void)slot.store(std::make_shared<const rope_t>());
+            (void)slot.store(make_empty());
             writes.fetch_add(1, std::memory_order_relaxed);
         }
     });
@@ -154,7 +160,7 @@ template <typename slot_t>
         const timespec period{0, kReadPeriodNs};
         for (std::size_t i = 0; i < kReads; ++i) {
             clock_nanosleep(CLOCK_MONOTONIC, 0, &period, nullptr);
-            if (slot.load() == nullptr) empty.fetch_add(1, std::memory_order_relaxed);
+            if (!slot.load()) empty.fetch_add(1, std::memory_order_relaxed);
             progress.fetch_add(1, std::memory_order_release);
         }
     });

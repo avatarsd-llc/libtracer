@@ -31,6 +31,7 @@
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/segment.hpp"
+#include "libtracer/value.hpp"
 #include "libtracer/view.hpp"
 
 /**
@@ -152,9 +153,11 @@ struct delivery_policy_t {
  *
  * Snapshotting one under the fan-out lock is a trivial copy — no per-publish
  * `std::function` copy (which heap-allocates once captures exceed the SBO). The value
- * crosses as the rope it is (ADR-0053 §6); the sink may clone links (refcount bumps).
+ * crosses as the published block it is (`value_t`, RFC-0028 §5.1) — no wrapper, no copy;
+ * the sink reads its links in place and may clone them (`value_t::rope`, refcount bumps)
+ * if it keeps them past the call.
  */
-using subscriber_fn_t = void (*)(void* ctx, const rope_t& value);
+using subscriber_fn_t = void (*)(void* ctx, const value_t& value);
 
 /**
  * @brief The COLD wire/gate half of a subscription edge (#380 §3), lazily allocated and
@@ -412,7 +415,7 @@ struct target_binding_t {
 /**
  * @brief Wrap @p key as a shared `target_key_t`, NOTHROW — null on OOM or empty input.
  *
- * Mirrors `vertex_t::try_make_lkv`'s probe-then-commit discipline (#477): under the MCU
+ * The `%mem_heap.hpp` probe-then-commit discipline (#477): under the MCU
  * profile a `bad_alloc` is an `abort()`, and admission is reachable from a peer's bytes
  * (RFC-0014 made registration wire-driven), so this soft-fails by value instead.
  * @param key The canonical PATH key bytes; an empty span yields null (no target).
@@ -646,8 +649,8 @@ static_assert(sizeof(void*) != 8 || sizeof(edge_view_t) == 48,
  * RFC-0022 §3.A — or the producer holds no LKV yet).
  */
 struct edge_latch_t {
-    std::shared_ptr<const rope_t> value; /**< @brief The latched LKV; null ⇒ no latch. */
-    edge_view_t edge;                    /**< @brief The admitted edge's dispatch view. */
+    value_ref_t value; /**< @brief The latched LKV; empty ⇒ no latch. */
+    edge_view_t edge;  /**< @brief The admitted edge's dispatch view. */
 };
 
 /**

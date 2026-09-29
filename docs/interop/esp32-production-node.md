@@ -82,7 +82,7 @@ one link carrying one compact flow — so the sizing above is a number to check 
 your own node rather than one to copy.
 
 Those all reach the ONE injection point of `graph_t`'s constructor
-(`core/include/libtracer/graph.hpp:608`): since
+(`core/include/libtracer/graph.hpp:609`): since
 [#873](https://github.com/avatarsd-llc/libtracer/issues/873) phase 1 the graph takes a single
 `tr::mem::block_source_t` and builds the pmr resource and the value backend over it internally,
 so a device recipe sizes one slab where it used to wire four arguments. Beside it are the
@@ -167,7 +167,7 @@ then refuses every frame. An 8 KiB bump source wired as a router's `rx`, decodin
 53-byte FWD, served **six frames and rejected the next 194**
 ([ADR-0067 — bounded recycling source](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0067-bounded-recycling-source-and-per-owner-topology.md)
 §1; the same figure is carried on the type at
-`core/include/libtracer/mem_source.hpp:319-320`). A frames-served count without the
+`core/include/libtracer/mem_source.hpp:353-354`). A frames-served count without the
 payload size is not a measurement — 194 rejected 53-byte frames is a different fact
 from 194 rejected 1 KiB frames.
 
@@ -175,7 +175,7 @@ Use `tr::mem::pool_source_t`, which recycles.
 :::
 
 `pool_source_t` takes the slab **and** a caller-owned span of `size_class_t` slots
-(`core/include/libtracer/mem_source.hpp:524`), so both bounds belong to the caller
+(`core/include/libtracer/mem_source.hpp:558`), so both bounds belong to the caller
 rather than to the library
 ([RFC-0006 — resource-bounded nesting depth](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0006-resource-bounded-nesting-depth.md)):
 
@@ -214,7 +214,7 @@ to `sync_none_t`, which compiles to nothing.
 :::
 
 After a soak run, `classes_used()` says how many slots the node really needed and
-`overflowed()` must read zero (`core/include/libtracer/mem_source.hpp:586,597`) — a
+`overflowed()` must read zero (`core/include/libtracer/mem_source.hpp:620,631`) — a
 non-zero count means the class span is too small and blocks are being lost to the
 slab.
 

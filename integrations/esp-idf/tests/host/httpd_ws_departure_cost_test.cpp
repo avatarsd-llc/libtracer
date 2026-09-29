@@ -160,7 +160,7 @@ void test_departure_cost_is_bounded_by_the_departing_peer() {
     vertex_handle_t mine = g.register_vertex(path_t("/mine"), role_t::STORED_VALUE);
     std::size_t mine_hits = 0, bystander_hits = 0;
     const tr::testing::remote_sink_guard_t sink_guard(
-        g, [&](const tr::graph::remote_delivery_t& d, const rope_t&) {
+        g, [&](const tr::graph::remote_delivery_t& d, const tr::graph::value_t&) {
             (d.link == "p0" ? mine_hits : bystander_hits) += 1;
         });
     claim_session(task, 700);  // lands in slot 0 ⇒ routable name "p0"

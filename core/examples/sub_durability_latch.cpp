@@ -56,11 +56,11 @@ int main() {
 
     int durable_seen = 0, plain_seen = 0;
     std::uint8_t latched = 0;
-    auto on_durable = [&](const tr::view::rope_t& v) {
+    auto on_durable = [&](const tr::graph::value_t& v) {
         ++durable_seen;
         latched = std::to_integer<std::uint8_t>(v.only().bytes()[0]);
     };
-    auto on_plain = [&](const tr::view::rope_t&) { ++plain_seen; };
+    auto on_plain = [&](const tr::graph::value_t&) { ++plain_seen; };
 
     (void)g.subscribe(path_t("/sensor/temp"), on_durable,
                       delivery_policy_t{delivery_policy_t::kDurabilityRequest});

@@ -60,8 +60,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
-#include <memory>
 #include <mutex>
 #include <new>
 #include <string_view>
@@ -73,7 +73,8 @@
 namespace {
 
 using tr::graph::hazard_slot_t;
-using tr::view::rope_t;
+using tr::graph::value_ref_t;
+using tr::graph::value_t;
 
 using tr::testing::check;
 
@@ -123,38 +124,58 @@ static_assert(!single_writer_slot_t::may_spin, "the single-writer slot must neve
 static_assert(!hazard_slot_t::may_spin, "the hazard slot must never spin-wait");
 
 /**
- * @brief A rope carrying a self-checking identity, so a reader can tell a live value from
- *        recycled memory without a sanitizer's help.
+ * @brief The block source every test value is drawn from: counts live blocks, and notes a
+ *        release that lands inside a guarded section (the single-writer slot must never do
+ *        that — a value's teardown is what the guard exists to keep out of the window).
+ *
+ * `malloc`, not `operator new`: `declined_publish` rigs the nothrow `operator new` to fail so
+ * that the hazard slot's NODE allocation is the thing that declines, and the value itself must
+ * still be mintable under that rig.
  */
-struct tagged_rope_t : rope_t {
-    std::uint64_t tag = 0;     /**< @brief Which publish produced this rope. */
-    std::uint64_t inverse = 0; /**< @brief `~tag`, re-derived on every read. */
+class counting_source_t final : public tr::mem::block_source_t {
+   public:
+    counting_source_t() : block_source_t("counting") {}
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t) noexcept override {
+        void* p = std::malloc(bytes);
+        if (p != nullptr) g_live.fetch_add(1, relaxed_);
+        return p;
+    }
+    void release(void* p, std::size_t, std::size_t) noexcept override {
+        if (t_guard_depth != 0) g_freed_in_guard.fetch_add(1, relaxed_);
+        g_live.fetch_sub(1, relaxed_);
+        std::free(p);
+    }
 };
 
-/** @brief Publish-ready rope number @p tag, counted into @ref g_live until it is freed. */
-[[nodiscard]] std::shared_ptr<const rope_t> make_tagged(std::uint64_t tag) {
-    auto* raw = new tagged_rope_t;
-    raw->tag = tag;
-    raw->inverse = ~tag;
-    g_live.fetch_add(1, std::memory_order_relaxed);
-    return std::shared_ptr<const tagged_rope_t>(raw, [](const tagged_rope_t* p) {
-        if (t_guard_depth != 0) g_freed_in_guard.fetch_add(1, relaxed_);
-        g_live.fetch_sub(1, std::memory_order_relaxed);
-        delete p;
-    });
+/** @brief The one source; `g_live` is its live-block count. */
+[[nodiscard]] counting_source_t& source() {
+    static counting_source_t src;
+    return src;
 }
 
-/** @brief Whether @p sp is a rope this test published and still holds its own identity. */
-[[nodiscard]] bool intact(const std::shared_ptr<const rope_t>& sp) {
-    if (!sp) return false;
-    const auto* t = static_cast<const tagged_rope_t*>(sp.get());
-    return t->inverse == ~t->tag;
+/**
+ * @brief Mint a value carrying @p tag: one link whose `length` is the tag and whose `offset`
+ *        is `~tag`, so a read can prove the block it reached is intact and is the one it
+ *        expects. No segment is needed — the link is never dereferenced.
+ * @return The value, holding the caller's ONE reference.
+ */
+[[nodiscard]] value_t* make_tagged(std::uint64_t tag) {
+    const tr::view::view_t link{tr::view::segment_ptr_t{}, static_cast<std::size_t>(~tag),
+                                static_cast<std::size_t>(tag)};
+    value_t* v = value_t::make(std::span<const tr::view::view_t>(&link, 1), source());
+    if (v == nullptr) std::abort();  // the test's own allocation, not the slot's — cannot decline
+    return v;
 }
 
-/** @brief The identity @ref make_tagged stamped into @p sp. */
-[[nodiscard]] std::uint64_t tag_of(const std::shared_ptr<const rope_t>& sp) {
-    return static_cast<const tagged_rope_t*>(sp.get())->tag;
+/** @brief Whether @p r names a value whose tag and inverse still agree. */
+[[nodiscard]] bool intact(const value_ref_t& r) {
+    if (!r) return false;
+    const tr::view::view_t& l = r->only();
+    return l.offset == static_cast<std::size_t>(~static_cast<std::uint64_t>(l.length));
 }
+
+/** @brief The tag @p r carries. */
+[[nodiscard]] std::uint64_t tag_of(const value_ref_t& r) { return r->only().length; }
 
 /** @brief The `vertex.hpp` call shape, on one policy, single-threaded. */
 template <typename slot_t>
@@ -162,7 +183,7 @@ void contract(const char* name) {
     std::printf("%s — the contract vertex.hpp calls:\n", name);
     {
         slot_t slot;
-        check(slot.load() == nullptr, "a slot nobody wrote reads as empty");
+        check(!slot.load(), "a slot nobody wrote reads as empty");
 
         check(slot.store(make_tagged(1)), "a publish onto a fresh slot reports success");
         const auto first = slot.load();
@@ -175,10 +196,10 @@ void contract(const char* name) {
         check(intact(second) && tag_of(second) == 2, "and the replacement is what reads back");
 
         slot.clear(std::memory_order_release);  // revert_to_placeholder's clear
-        check(slot.load() == nullptr, "a release-ordered clear empties the slot");
+        check(!slot.load(), "a release-ordered clear empties the slot");
         check(intact(second) && tag_of(second) == 2, "the cleared value is still the reader's");
     }
-    check(g_live.load() == 0, "every published rope was freed by the time the slot was gone");
+    check(g_live.load() == 0, "every published value was freed by the time the slot was gone");
 }
 
 /**
@@ -241,7 +262,11 @@ void concurrent(const char* name, std::size_t writers, std::size_t readers, std:
                    std::chrono::steady_clock::now() < deadline)
                 std::this_thread::yield();
             for (std::size_t i = 0; i < rounds; ++i) {
-                if (!slot.store(make_tagged(w * rounds + i + 1))) bad.fetch_add(1, relaxed_);
+                value_t* v = make_tagged(w * rounds + i + 1);
+                if (!slot.store(v)) {  // declined: the reference is still ours to drop
+                    bad.fetch_add(1, relaxed_);
+                    value_t::release(v);
+                }
             }
         });
     }
@@ -272,7 +297,7 @@ void bounded_parking(const char* name, std::size_t publishes) {
     // One batch of parked nodes, plus the value the slot itself holds. `single_writer_slot_t`
     // reclaims on the spot and sits at 1; the point is that neither grows with `publishes`.
     const std::size_t bound = tr::graph::detail_hp::kRetireBatch + 2;
-    std::printf("    peak live ropes over %zu publishes = %zu (bound %zu)\n", publishes, peak,
+    std::printf("    peak live values over %zu publishes = %zu (bound %zu)\n", publishes, peak,
                 bound);
     check(peak <= bound, "the parked set is one batch, not a function of the write count");
     check(g_live.load() == 0, "and it drains completely when the slot dies");
@@ -474,22 +499,22 @@ void orphans_drain_at_the_next_scan() {
 
     const bool orphaned = reg.orphans.load(std::memory_order_relaxed) != nullptr;
     const std::size_t after_exit = g_live.load(relaxed_);
-    std::printf("    after the writer exited: orphans=%s, live ropes=%zu (was %zu)\n",
+    std::printf("    after the writer exited: orphans=%s, live values=%zu (was %zu)\n",
                 orphaned ? "present" : "none", after_exit, base);
     check(orphaned, "the exited writer really did orphan its retired list (non-vacuous)");
     check(after_exit == base + 2,
-          "and both ropes are still allocated — the parked one and the slot's own");
+          "and both values are still allocated — the parked one and the slot's own");
 
     // The next scan on any thread. This is the whole of the weakened guarantee.
     hp::retire_and_flush(nullptr);
 
     const std::size_t after_scan = g_live.load(relaxed_);
-    std::printf("    after the next scan:      orphans=%s, live ropes=%zu\n",
+    std::printf("    after the next scan:      orphans=%s, live values=%zu\n",
                 reg.orphans.load(std::memory_order_relaxed) != nullptr ? "present" : "none",
                 after_scan);
     check(reg.orphans.load(std::memory_order_relaxed) == nullptr,
           "the scan adopted the orphan list");
-    check(after_scan == base + 1, "and released the parked rope, leaving only the slot's value");
+    check(after_scan == base + 1, "and released the parked value, leaving only the slot's own");
 
     slot.clear();
     hp::retire_and_flush(nullptr);
@@ -555,7 +580,7 @@ void sweep_spares_a_live_participant() {
         worker.join();
         check(reread_ok.load(), "the worker publishes and reads correctly on the far side");
     }
-    check(g_live.load() == 0, "and every rope is still reclaimed once the slot dies");
+    check(g_live.load() == 0, "and every value is still reclaimed once the slot dies");
 }
 
 /**
@@ -574,7 +599,11 @@ void sweep_races_a_live_writer(std::size_t sweeps) {
         std::atomic<bool> stop{false};
         std::thread worker([&] {
             for (std::uint64_t i = 1; !stop.load(relaxed_); ++i) {
-                if (!slot.store(make_tagged(i))) bad.fetch_add(1, relaxed_);
+                value_t* v = make_tagged(i);
+                if (!slot.store(v)) {
+                    bad.fetch_add(1, relaxed_);
+                    value_t::release(v);
+                }
                 if (!intact(slot.load())) bad.fetch_add(1, relaxed_);
             }
         });
@@ -586,7 +615,7 @@ void sweep_races_a_live_writer(std::size_t sweeps) {
         worker.join();
     }
     check(bad.load() == 0, "every publish took and every read returned an intact value");
-    check(g_live.load() == 0, "and the run freed every rope");
+    check(g_live.load() == 0, "and the run freed every value");
 }
 
 /**
@@ -639,7 +668,9 @@ void declined_publish() {
     bool recovered = false;
     std::thread cold([&] {
         g_starve.store(true, std::memory_order_relaxed);
-        declined = !slot.store(make_tagged(2));
+        value_t* two = make_tagged(2);
+        declined = !slot.store(two);
+        if (declined) value_t::release(two);  // the reference came back to us
         const auto still = slot.load();
         preserved = intact(still) && tag_of(still) == 1;
         g_starve.store(false, std::memory_order_relaxed);
@@ -658,7 +689,7 @@ void declined_publish() {
         g_starve.store(false, std::memory_order_relaxed);
     });
     cold2.join();
-    check(slot.load() == nullptr, "a clear succeeds even with no memory at all");
+    check(!slot.load(), "a clear succeeds even with no memory at all");
 }
 
 /** @brief The single-writer slot allocates nothing to publish, so starvation cannot reach it. */
@@ -759,9 +790,9 @@ int main() {
     const std::size_t readers = std::min<std::size_t>(hw, 8);
     // One writer: the single-writer slot is exercised under the contract it is named for.
     concurrent<single_writer_slot_t>("single_writer_slot_t", 1, readers, 10000);
-    check(g_live.load() == 0, "single_writer_slot_t: the concurrent run freed every rope");
+    check(g_live.load() == 0, "single_writer_slot_t: the concurrent run freed every value");
     // The host lock on its own, then the same run on the slot AS BOUND — over the real host
-    // guard, not this file's counting one. That run is the one that reads a rope after its free
+    // guard, not this file's counting one. That run is the one that reads a value after its free
     // (ASan: heap-use-after-free) if the writer's guard is ever dropped on the strength of
     // `kSingleWriter`; see lkv_slot.hpp for why a single publisher does not make that safe.
     host_guard_excludes(std::max<std::size_t>(hw, 4), 5000);
@@ -769,26 +800,26 @@ int main() {
                                                 10000);
     check(g_live.load() == 0, "the bound single-writer slot's concurrent run freed every rope");
     concurrent<hazard_slot_t>("hazard_slot_t", 2, readers, 5000);
-    check(g_live.load() == 0, "hazard_slot_t: the concurrent run freed every rope");
+    check(g_live.load() == 0, "hazard_slot_t: the concurrent run freed every value");
 
     bounded_parking<single_writer_slot_t>("single_writer_slot_t", 20000);
     bounded_parking<hazard_slot_t>("hazard_slot_t", 20000);
 
     claiming_writes_nothing_into_the_announcement_table();
     exhausted_registry();
-    check(g_live.load() == 0, "the overflow run freed every rope too");
+    check(g_live.load() == 0, "the overflow run freed every value too");
     overflow_thread_stops_sweeping_the_claim_table();
-    check(g_live.load() == 0, "the over-capacity probe freed every rope too");
+    check(g_live.load() == 0, "the over-capacity probe freed every value too");
     the_overflow_lock_does_not_dirty_the_orphan_line();
     orphans_drain_at_the_next_scan();
-    check(g_live.load() == 0, "the orphan-drain probe freed every rope too");
+    check(g_live.load() == 0, "the orphan-drain probe freed every value too");
 
     sweep_spares_a_live_participant();
     sweep_races_a_live_writer(200);
 
     single_writer_never_declines();
     declined_publish();
-    check(g_live.load() == 0, "the starvation probes freed every rope too");
+    check(g_live.load() == 0, "the starvation probes freed every value too");
 
     return tr::testing::summary("lkv_slot");
 }
