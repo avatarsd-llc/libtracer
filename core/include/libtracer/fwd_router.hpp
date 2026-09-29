@@ -101,9 +101,11 @@ struct router_stats_t {
      *         from the per-owner receive source (#1570). The request is lost; the client
      *         retries — at any reply size, including a composed root's. */
     std::size_t reply_iov_dropped = 0;
-    /** @brief Remote DELIVERIES dropped because the delivery iov table could not be built
-     *         from the control source (`deliver_remote`, both the COMPACT and full-route
-     *         arms). */
+    /** @brief Remote DELIVERIES dropped because the delivery's head could not be built
+     *         (`deliver_remote`, full-route arm). Since RFC-0028 slice 9 the delivery draws
+     *         no iov table (the head rides stack spans and the value goes to the link by
+     *         reference), so this stays 0 unless a head outgrows its fixed stack buffer. A
+     *         link that refuses the frame counts it in its own `dropped_tx`. */
     std::size_t delivery_iov_dropped = 0;
     /** @brief Frames dropped as MALFORMED — a failed decode, a failed root CRC, an oversized
      *         or non-forwardable op, an unknown/unauthorized opcode. ONE bucket by ruling:

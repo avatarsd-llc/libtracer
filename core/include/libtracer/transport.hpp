@@ -25,11 +25,13 @@
 #include <vector>
 
 #include "libtracer/config.hpp"
+#include "libtracer/iov_table.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/peer_handle.hpp"
 #include "libtracer/receiver_slot.hpp"
 #include "libtracer/rope.hpp"
+#include "libtracer/value.hpp"
 #include "libtracer/view.hpp"
 
 namespace tr::net {
@@ -522,6 +524,55 @@ class transport_t {
             off += s.size();
         }
         send(std::span<const std::byte>(out, total));
+    }
+
+    /**
+     * @brief Retained send (RFC-0028 §6.9, §8.2): emit @p head followed by @p value's bytes as
+     *        ONE frame, where a link that writes LATER keeps the value by reference instead of
+     *        gathering a copy of it.
+     *
+     * The egress half of the lean value path. A remote delivery is a small head (the FWD
+     * header, the op, the return route) in front of a published value; the head is the
+     * caller's and short-lived, the value is a refcounted block. A link that writes in-call
+     * (`writev` under its write lock) needs neither kept, and the DEFAULT below is exactly
+     * that: it lowers to @ref send(std::span<const std::span<const std::byte>>) over
+     * `head ++ value.links()`, through an iov table on the stack. A link that QUEUES the frame
+     * and writes it from another thread overrides this: it copies the head (header-sized) into
+     * its queue slot and RETAINS the value (`value_ref_t::keep` — one refcount for a published
+     * block), so the payload is written from the block it was published in and never
+     * gathered. That is the difference between a queued fan-out to K peers costing K payload
+     * copies and costing K refcounts.
+     *
+     * Same best-effort contract as @ref send(std::span<const std::byte>): `void`, and a frame
+     * the link cannot carry (the iov table's overflow refused, the value could not be kept,
+     * the queue is full) is dropped, never truncated — and counted in @ref drop_stats by every
+     * link that counts, which is every link that overrides this.
+     *
+     * @warning An overriding link owns the one hazard the queued form adds (RFC-0028 §9 item
+     *          6): the frame's bytes now leave in several writes from a queue shared with every
+     *          other frame on the socket, so a partial write MUST end the frame's stream (close
+     *          the peer), never let another frame's bytes follow it.
+     *
+     * @param head  The frame's leading bytes, in order. Borrowed for the call only.
+     * @param value The payload that completes the frame. Borrowed for the call; a link that
+     *              writes later keeps it through `value_ref_t::keep`.
+     */
+    virtual void send(std::span<const std::span<const std::byte>> head,
+                      const graph::value_t& value) {
+        // The #1620 (c) table: a delivery's head is a handful of spans and a value is one or
+        // two links, so the stack array holds the common frame and the overflow block (from
+        // this link's egress store) is the exception, not a per-send allocation.
+        std::array<std::span<const std::byte>, 8> inline_iov;
+        iov_table_t<std::span<const std::byte>> table(inline_iov, egress_source());
+        const std::size_t n = head.size() + value.link_count();
+        std::span<const std::byte>* const iov = table.acquire(n);
+        // Overflow refused: the frame is dropped exactly as the base gather above drops a
+        // refused temporary — a link with a counter overrides one of the two entries.
+        if (iov == nullptr) return;
+        std::size_t i = 0;
+        for (const std::span<const std::byte>& h : head) iov[i++] = h;
+        for (const view::view_t& l : value.links()) iov[i++] = l.bytes();
+        send(std::span<const std::span<const std::byte>>(iov, n));
     }
 
     /**

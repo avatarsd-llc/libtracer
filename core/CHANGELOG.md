@@ -32,6 +32,39 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Breaking
 
+- **Scatter-gather egress and the ingress loan (RFC 0028 slice 9, L4 + L8; closes the egress
+  half of [#1620](https://github.com/avatarsd-llc/libtracer/issues/1620) and
+  [#1626](https://github.com/avatarsd-llc/libtracer/issues/1626)).** A link that queues a frame
+  now keeps the value it carries (one reference) and copies only the frame's head, and a large
+  receive block now carries the header of the value that will be stored from it.
+  - **New virtual `transport_t::send(std::span<const std::span<const std::byte>> head, const
+    graph::value_t& value)`.** The default lowers to `send(head ++ value.links())` through an
+    8-entry inline table, so every existing link keeps working unchanged. `tcp_transport_t` and
+    the ESP `httpd_ws_link_t` override it to queue a retained record. `fwd_router_t::deliver_remote`
+    calls it for every full-route delivery and no longer draws an iov table from the graph's
+    control source. As a result, `router_stats_t::delivery_iov_dropped` stays 0 in practice.
+    **Migration:** a link that queues frames overrides the new virtual; a `using
+    transport_t::send;` is needed wherever a link overrides only one `send` overload.
+  - **`tx_handoff_t::next()` returns `tx_handoff_t::record_t`** (the copied `bytes` plus an
+    optional retained `value`) instead of `std::span<std::byte>`, and `admit(fill)` gains an
+    optional `const value_t* retain`. **Migration:** a drain loop writes `rec.bytes` followed by
+    `rec.value->links()` when `rec.value` is set, and ends on `!rec` instead of `rec.empty()`.
+  - **The ingress loan.** `view::alloc_rx(backend, len, loan_min)` returns an `rx_block_t`
+    `{seg, off}`. At or above `loan_min` it is one block holding `kRxLoanBytes` of reserve (48 B
+    on 64-bit, 32 B on 32-bit) in front of the frame, marked by the new `segment_t::rx_loan`
+    byte (it fills padding, so `sizeof(segment_t)` is unchanged). `value_t::make(rope_t&&)`
+    places a one-link value over such a block **in** the reserve, with no draw from the graph's
+    source, and `value_t::is_loaned()` reports it. The TCP and host WebSocket receive paths
+    reserve at the build's `kShareThresholdBytes`; ESP (`SIZE_MAX`) never reserves.
+    `length_prefix_framer::on_prefix` gains `loan_min` (default `SIZE_MAX`), and
+    `prefix_decision_t` gains `off`. **Migration:** a pull-loop transport reads into
+    `seg->bytes.data() + dec.off` and delivers `view_t{seg, dec.off, len}`.
+  - Bench (`bench_lean_value_path`, host): `egress-queued` 1 whole-frame copy → **0 copies, 0
+    allocations**; `ingress-pin-noack` (a delivery-shaped `FWD{WRITE}`) 1 allocation / 40 B →
+    **0 / 0 B**; `ingress-pin` (acked) 3 / 121 B → 2 / 81 B (the reply head remains).
+    Symbol ratchet: `dispatch_edge_target` 427 → 384 B (slice 7's inline flip reversed), and
+    every other pin is +0.
+
 - **One callback idiom and one read type (RFC 0028 slice 7, D10 + D11; part of
   [#1624](https://github.com/avatarsd-llc/libtracer/issues/1624) and
   [#1620](https://github.com/avatarsd-llc/libtracer/issues/1620)).** Every graph seam is a

@@ -344,6 +344,26 @@ write_result_t stream_endpoint_t::write_all_iov(int fd, std::span<const ::iovec>
     return {write_outcome_t::COMPLETE, false};
 }
 
+write_result_t stream_endpoint_t::write_record(int fd, const tx_handoff_t::record_t& rec,
+                                               std::uint32_t bound_ms) {
+    if (rec.value == nullptr) return write_all(fd, rec.bytes, bound_ms);
+    // A retained record (RFC-0028 §6.9): the head the fill copied, then the value's links,
+    // straight from the published block. One gathered record under the caller's write_m_
+    // hold, so its bytes cannot interleave with another record's.
+    std::array<::iovec, kMaxInlineIov> inline_vec;
+    iov_table_t<::iovec> table(inline_vec, mem::heap_source());
+    ::iovec* const vec = table.acquire(1 + rec.value->link_count());
+    // Refused before a byte moved: a shed record, never a desync.
+    if (vec == nullptr) return {write_outcome_t::FAILED, false};
+    std::size_t n = 0;
+    if (!rec.bytes.empty()) vec[n++] = ::iovec{rec.bytes.data(), rec.bytes.size()};
+    for (const view::view_t& l : rec.value->links()) {
+        const std::span<const std::byte> b = l.bytes();
+        if (!b.empty()) vec[n++] = ::iovec{const_cast<std::byte*>(b.data()), b.size()};
+    }
+    return write_all_iov(fd, std::span<const ::iovec>(vec, n), bound_ms);
+}
+
 bool stream_endpoint_t::note_write_result(const write_result_t& r, int fd, std::uint8_t& streak) {
     if (r.outcome != write_outcome_t::STALLED) {
         // Any record that COMPLETES clears the streak — the trichotomy's middle arm: a peer

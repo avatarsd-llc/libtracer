@@ -555,16 +555,26 @@ class stream_endpoint_t : protected posix_endpoint_t {
      * @ref teardown_peer, and it still serializes records on the stream, because only the
      * writer ever takes it to write.
      *
+     * A RETAINED record (RFC-0028 §6.9) passes @p retain: @p fill then copies only the
+     * record's head (the link's framing plus the caller's head spans), the queue keeps one
+     * reference to @p retain, and the writer that drains it puts head and value on the wire
+     * as ONE gathered record (@ref write_record) — the payload is never copied into a slot.
+     * The record still leaves under one @ref write_m_ hold and one bound, so it cannot
+     * interleave with another record, and a partial write condemns the peer exactly as a
+     * copied record's does.
+     *
      * @tparam Own  Callable `bool(int fd)`: write the caller's own record to @p fd and return
      *              true when it was shed (the caller's `dropped_tx_` then counts it).
      * @tparam Fill Callable `std::size_t(mem::block_array_t<std::byte>&)`: copy the record
-     *              into a queue slot, returning its byte count, or 0 to refuse.
+     *              (or, with @p retain, its head) into a queue slot, returning its byte count,
+     *              or 0 to refuse.
+     * @param retain The value a retained record's bytes end with, or null for a copied one.
      * @return Records shed by this call: a refused enqueue, a record written into no peer,
      *         or one the bound shed — each one the caller's `dropped_tx_` counts.
      */
     template <class Own, class Fill>
-    std::uint64_t handoff_send(Own&& own, Fill&& fill) {
-        switch (tx_.admit(std::forward<Fill>(fill))) {
+    std::uint64_t handoff_send(Own&& own, Fill&& fill, const graph::value_t* retain = nullptr) {
+        switch (tx_.admit(std::forward<Fill>(fill), retain)) {
             case tx_handoff_t::admit_t::REFUSED:
                 return 1;
             case tx_handoff_t::admit_t::QUEUED:
@@ -579,7 +589,7 @@ class stream_endpoint_t : protected posix_endpoint_t {
             // No live peer (still dialing, or torn down) => a counted drop.
             if (fd < 0 || std::forward<Own>(own)(fd)) ++shed;
         }
-        for (std::span<std::byte> rec = tx_.next(); !rec.empty(); rec = tx_.next()) {
+        for (tx_handoff_t::record_t rec = tx_.next(); rec; rec = tx_.next()) {
             const std::lock_guard lock(write_m_);
             const int fd = conn_fd_.load(std::memory_order_relaxed);
             if (fd < 0) {
@@ -587,11 +597,29 @@ class stream_endpoint_t : protected posix_endpoint_t {
                 continue;
             }
             const write_result_t r =
-                write_all(fd, rec, derive_send_bound_ms(liveness_window_ms_, 1));
+                write_record(fd, rec, derive_send_bound_ms(liveness_window_ms_, 1));
             if (note_write_result(r, fd, tx_stall_streak_)) ++shed;
         }
         return shed;
     }
+
+    /**
+     * @brief Write one queued record to @p fd as ONE record: its copied bytes, then — for a
+     *        retained record — its value's links, gathered (RFC-0028 §6.9).
+     *
+     * A copied record is @ref write_all over its bytes. A retained one is @ref write_all_iov
+     * over `[bytes, link0, link1, ...]`, through an inline table (the overflow comes from the
+     * heap and is refused rather than thrown); a refused table writes NOTHING and is reported
+     * as `write_result_t::failed` with no byte on the wire, which the caller's stall policy
+     * counts as a shed record and never as a desync. The caller holds @ref write_m_.
+     *
+     * @param fd       The destination fd.
+     * @param rec      The record, as @ref tx_handoff_t::next handed it out.
+     * @param bound_ms The record's send bound (see @ref write_all).
+     * @return How the write ended.
+     */
+    static write_result_t write_record(int fd, const tx_handoff_t::record_t& rec,
+                                       std::uint32_t bound_ms);
 
     /**
      * @brief Tear the peer connection down (recv-thread side).

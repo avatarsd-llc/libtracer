@@ -195,6 +195,25 @@ std::size_t server_t::writes(int fd) const {
     return it == writes_.end() ? 0 : it->second;
 }
 
+std::vector<std::byte> server_t::wire(int fd) const {
+    const std::lock_guard lock(m_);
+    const auto it = wire_.find(fd);
+    return it == wire_.end() ? std::vector<std::byte>{} : it->second;
+}
+
+void server_t::clear_wire(int fd) {
+    const std::lock_guard lock(m_);
+    wire_.erase(fd);
+}
+
+void server_t::note_wire(int fd, const void* buf, std::size_t n) {
+    if (buf == nullptr || n == 0) return;
+    const std::lock_guard lock(m_);
+    const auto* const b = static_cast<const std::byte*>(buf);
+    std::vector<std::byte>& w = wire_[fd];
+    w.insert(w.end(), b, b + n);
+}
+
 esp_err_t server_t::set_send_override(int fd, httpd_send_func_t send_fn) {
     const std::lock_guard lock(m_);
     const auto it = sessions_.find(fd);
@@ -309,6 +328,7 @@ int server_t::raw_send(int fd, std::size_t buf_len) {
     (void)flags;
     if (buf == nullptr) return HTTPD_SOCK_ERR_INVALID;
     const int ret = static_cast<server_t*>(hd)->raw_send(fd, buf_len);
+    if (ret > 0) static_cast<server_t*>(hd)->note_wire(fd, buf, static_cast<std::size_t>(ret));
     if (ret < 0)
         return errno == EAGAIN || errno == EWOULDBLOCK ? HTTPD_SOCK_ERR_TIMEOUT
                                                        : HTTPD_SOCK_ERR_FAIL;
@@ -663,6 +683,15 @@ esp_err_t httpd_ws_send_frame_async(httpd_handle_t handle, int fd, httpd_ws_fram
     return ESP_OK;
 }
 
+int httpd_socket_send(httpd_handle_t handle, int sockfd, const char* buf, std::size_t buf_len,
+                      int flags) {
+    (void)handle;
+    // IDF's public raw write: through the session's send override when one is installed,
+    // exactly as the two writes of httpd_ws_send_frame_async go. A retained frame (RFC-0028
+    // §6.9) is written through this, one call per part.
+    return fake_httpd::instance().socket_send(sockfd, buf, buf_len, flags);
+}
+
 esp_err_t httpd_sess_set_send_override(httpd_handle_t handle, int sockfd,
                                        httpd_send_func_t send_fn) {
     (void)handle;
@@ -680,7 +709,9 @@ esp_err_t httpd_sess_set_send_override(httpd_handle_t handle, int sockfd,
 extern "C" ssize_t __real_send(int fd, const void* buf, std::size_t len, int flags);
 extern "C" ssize_t __wrap_send(int fd, const void* buf, std::size_t len, int flags) {
     if (!fake_httpd::instance().owns_socket(fd)) return __real_send(fd, buf, len, flags);
-    return fake_httpd::instance().raw_send(fd, len);
+    const int ret = fake_httpd::instance().raw_send(fd, len);
+    if (ret > 0) fake_httpd::instance().note_wire(fd, buf, static_cast<std::size_t>(ret));
+    return ret;
 }
 
 /**

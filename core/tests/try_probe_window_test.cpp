@@ -289,11 +289,17 @@ class counting_link_t final : public transport_t {
 };
 
 /**
- * @brief `deliver_remote`'s full-route egress iov table draws from the graph's `ctl` source,
- *        and its exhaustion DROPS that one delivery — never an abort.
+ * @brief `deliver_remote` no longer builds an egress iov table at all (RFC-0028 §6.9): the
+ *        head rides three stack spans and the value goes to the link by reference, so the
+ *        graph's `ctl` source is not asked for the table #981 moved onto it — and refusing
+ *        that shape can no longer cost a delivery.
+ *
+ * The inverse of the #981 arm this replaces, which pinned that the table came from the
+ * injected source and that its refusal dropped the delivery. Both halves are now moot, and
+ * the regression this guards is the table coming back.
  */
 void test_delivery_iov_on_the_seam() {
-    std::printf("deliver_remote's egress iov table (block_array_t over the injected ctl):\n");
+    std::printf("deliver_remote draws no egress iov table (retained send, RFC-0028 §6.9):\n");
     gated_source_t src;
     graph_t g(&src);
     fwd_router_t router(g);
@@ -306,7 +312,7 @@ void test_delivery_iov_on_the_seam() {
                       b_field_subscribers_append(), b_subscriber(b_path({"client"}))));
     (void)link.take();  // discard the subscribe REPLY
 
-    // A single-link value: the table is head + route + empty src + 1 payload span.
+    // A single-link value: head + route + empty src + 1 payload span, all by reference.
     const auto write_one = [&g, &v](std::uint32_t x) {
         tr::view::rope_t val;
         val.append(make_value({std::uint8_t{0x08}, 0x00, 0x04, 0x00,
@@ -314,24 +320,16 @@ void test_delivery_iov_on_the_seam() {
         return g.write(v, std::move(val)).has_value();
     };
 
-    // Instrument: the delivery must ASK the seam for the 4-span table. Pre-#981 that table
-    // was a std::vector on the global heap and this count is 0.
     src.watch(iov_bytes(1), kIovAlign, false);
     check(write_one(1), "the write lands with a permissive source");
-    check(src.served() == 1, "the egress iov table came from the INJECTED ctl source");
+    check(src.served() == 0, "the delivery asked the ctl source for NO iov table");
     check(link.take() == 1, "one delivery frame reached the subscriber");
 
-    // Armed: refuse exactly that table. The delivery drops; the STORE still lands (the
-    // fan-out is best-effort per RFC-0004 §D) and nothing aborts.
+    // Armed: refusing the old table's shape is now a no-op for the delivery.
     src.watch(iov_bytes(1), kIovAlign, true);
-    check(write_one(2), "the write still lands when the egress table cannot be allocated");
-    check(src.refused() >= 1, "the injector fired (an unreached try_alloc would be vacuous)");
-    check(link.take() == 0, "an exhausted iov table DROPS the delivery, never aborts");
-
-    // Disarm: the very next write delivers again — the refusal left no residue.
+    check(write_one(2), "the write lands with that shape refused");
+    check(link.take() == 1, "and the delivery still goes out — there is no table to refuse");
     src.watch(iov_bytes(1), kIovAlign, false);
-    check(write_one(3), "the write lands again");
-    check(link.take() == 1, "delivery resumes once the source recovers");
 }
 
 // --- (c) the terminus REPLY iov table (#1570) --------------------------------

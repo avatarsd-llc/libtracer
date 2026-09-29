@@ -33,19 +33,19 @@ There is no separate `release()` step.
 
 The atomic orderings are the canonical intrusive_ptr pattern, specified once in
 [reference/02](../reference/02-graph-model.md) §required atomic operations:
-increment `relaxed` (`core/include/libtracer/segment.hpp:52` — the caller already
+increment `relaxed` (`core/include/libtracer/segment.hpp:53` — the caller already
 holds a reference, so the data dependency travels through it), decrement
-`acq_rel` (`:53-55` — release the writes before another thread observes the count
-drop, acquire on observing the drop to zero), inspect `acquire` (`:56-58`). The
+`acq_rel` (`:54-56` — release the writes before another thread observes the count
+drop, acquire on observing the drop to zero), inspect `acquire` (`:57-59`). The
 decrement returns the value *before* it, so a return of `1` identifies the caller
 that dropped the last reference.
 
 `LIBTRACER_NO_ATOMIC` replaces the atomic with a plain `uint_least32_t` for
 single-threaded and Cortex-M0/M0+ targets that have no LDREX/STREX
-(`core/include/libtracer/segment.hpp:21,44`). It is a compile definition, not a
+(`core/include/libtracer/segment.hpp:22,45`). It is a compile definition, not a
 CMake option: the constrained-target footprint build sets it
 (`tools/cortexm0_footprint.py:158`) and the substrate test is built a second time
-with it (`core/tests/CMakeLists.txt:1883,1898-1899`).
+with it (`core/tests/CMakeLists.txt:1902,1917-1918`).
 
 ## API reference
 
@@ -120,11 +120,11 @@ sequenceDiagram
 - **`adopt` and `retain` are not interchangeable.** `adopt` takes over an
   existing reference without bumping — the shape `mem_backend_t::alloc` returns
   (a raw `segment_t*` at refcount 1); `retain` adds a new reference to an
-  already-live segment (`segment.hpp:116,120`). Adopting a segment twice
+  already-live segment (`segment.hpp:129,133`). Adopting a segment twice
   double-frees it; retaining an `alloc` result leaks it, because the reference
   `alloc` already created is never dropped.
 - **`use_count` is not a synchronization primitive.** It is an acquire load for
-  debug and metrics (`segment.hpp:154-157`). A count of 1 does not mean no other
+  debug and metrics (`segment.hpp:167-170`). A count of 1 does not mean no other
   thread is about to clone the handle, and branching on it reintroduces the race
   the refcount exists to remove.
 - **`LIBTRACER_NO_ATOMIC` is an application promise, not a portability switch.**
@@ -133,11 +133,11 @@ sequenceDiagram
   all access to segments.
 - **`bytes` is writable at the type level; legality is the backend's contract.**
   A borrow over ROM or a caller's `const` buffer hands out a mutable
-  `std::span<std::byte>` all the same (`segment.hpp:73-76,81`); writing through
+  `std::span<std::byte>` all the same (`segment.hpp:74-77,82`); writing through
   it is undefined even though it compiles.
 - **A `DEVICE` segment must not be CPU-dereferenced.** The span looks ordinary,
   but `space` records that the bytes are not CPU-addressable
-  (`segment.hpp:82`, `backend.hpp:57-68`); such a segment may back only an opaque
+  (`segment.hpp:83`, `backend.hpp:57-68`); such a segment may back only an opaque
   VALUE payload, with header and trailer kept in `HOST` segments
   ([ADR-0024 — mem_cuda GPU backend, heterogeneous rope](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0024-mem-cuda-gpu-backend-heterogeneous-rope.md)).
 

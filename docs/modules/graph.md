@@ -255,7 +255,7 @@ for (...) g.write(v, p.field(), setpoint_tlv);           // hot loop — zero st
 
 `read` and `await` return `result_t<value_ref_t>`, not `result_t<rope_t>`
 (`core/include/libtracer/graph.hpp:1449,1668` by handle, `:2315,2321` by path;
-`value_ref_t` at `core/include/libtracer/value.hpp:559`). A `value_ref_t` is an **owning
+`value_ref_t` at `core/include/libtracer/value.hpp:638`). A `value_ref_t` is an **owning
 reference** to the value the vertex published: the LKV slot holds one intrusive `value_t*`
 — a refcount, the link count and the link chain in a single block drawn from the vertex's
 `block_source_t` — so handing that reference back costs one refcount increment instead of

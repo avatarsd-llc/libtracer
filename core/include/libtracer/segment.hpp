@@ -12,6 +12,7 @@
  */
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <span>
 #include <utility>
@@ -81,6 +82,18 @@ struct segment_t {
     std::span<std::byte> bytes; /**< @brief The backing bytes this segment holds a reference to. */
     mem::mem_space_t space; /**< @brief Address space (HOST/DEVICE), inherited from @ref backend. */
     mem::backend_tag btag; /**< @brief Module-set tag, inherited from @ref backend (ADR-0047 §2). */
+    /**
+     * @brief Nonzero iff the first @ref kRxLoanBytes of @ref bytes are an INGRESS-LOAN reserve
+     *        (RFC-0028 §6.9, #1626), not payload.
+     *
+     * Set only by @ref alloc_rx, on a receive block a transport allocated with room for the
+     * record the graph will need, so the terminus that stores a value shared out of this
+     * frame builds that record IN the block instead of allocating one. A structural bit, never
+     * an in-band marker: the reserve's bytes are never read to decide whether it exists, so a
+     * peer cannot forge one. Rides the padding after @ref btag (`sizeof(segment_t)` is
+     * unchanged on every target).
+     */
+    std::uint8_t rx_loan = 0;
 
     /** @brief Construct a segment over @p by, reclaimed by @p b, with @p initial refcount.
      *
@@ -162,5 +175,54 @@ class segment_ptr_t {
     }
     segment_t* seg_ = nullptr;
 };
+
+/**
+ * @brief Bytes a loaned receive block reserves in front of its frame (RFC-0028 §6.9, #1626):
+ *        the claim word, then room for a one-link `tr::graph::value_t` header.
+ *
+ * Sized for the value's header and its one link — 16 + 24 B on a 64-bit host, 12 + 12 B on
+ * rv32 — after an aligned claim word. `value.hpp` asserts the fit, so a change to either side
+ * fails the build rather than overrunning a frame.
+ */
+inline constexpr std::size_t kRxLoanBytes = sizeof(void*) >= 8 ? 48 : 32;
+
+/** @brief Offset of the value header inside the reserve: one pointer-aligned word past its
+ *         start, which is where the claim word sits. */
+inline constexpr std::size_t kRxLoanValueOffset = sizeof(void*);
+
+/**
+ * @brief The reserve's claim word: `0` = unclaimed, `1` = a value lives in the reserve.
+ *
+ * One claim per block, ever. A receive block carries one frame, and a frame stores at most one
+ * value out of itself; a second attempt (a second subview of the same frame stored elsewhere)
+ * finds the word taken and falls back to allocating its record, exactly as a block with no
+ * reserve does.
+ */
+#ifdef LIBTRACER_NO_ATOMIC
+using rx_loan_word_t = std::uint32_t;
+#else
+using rx_loan_word_t = std::atomic<std::uint32_t>;
+#endif
+
+/**
+ * @brief Claim @p seg's ingress-loan reserve for one value, once.
+ *
+ * @retval true  This caller owns the reserve: the value header may be placed at
+ *               `bytes.data() + kRxLoanValueOffset`.
+ * @retval false No reserve, or it is already claimed.
+ */
+[[nodiscard]] inline bool claim_rx_loan(segment_t* seg) noexcept {
+    if (seg == nullptr || seg->rx_loan == 0) return false;
+    auto* const word = reinterpret_cast<rx_loan_word_t*>(seg->bytes.data());
+#ifdef LIBTRACER_NO_ATOMIC
+    if (*word != 0) return false;
+    *word = 1;
+    return true;
+#else
+    std::uint32_t expected = 0;
+    return word->compare_exchange_strong(expected, 1, std::memory_order_acquire,
+                                         std::memory_order_relaxed);
+#endif
+}
 
 }  // namespace tr::view

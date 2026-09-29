@@ -3638,25 +3638,13 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const gra
             head.raw(op_tlv);
             head.header_bare(type_t::PATH_REF, dst_body.size());
             if (head.ok()) {
-                // The iov table on the ADR-0065 failable seam (#981) — see the default arm
-                // below for the argument; this arm is the same table, same element type.
-                mem::block_array_t<std::span<const std::byte>> iov(graph_.control_source());
-                if (!iov.reserve(3 + val.link_count())) {  // OOM — drop
-                    count_drop(delivery_iov_dropped_);
-                    return;
-                }
-                const bool built = iov.push_back(head.span()) && iov.push_back(dst_body) &&
-                                   iov.push_back(std::span<const std::byte>(empty_src));
-                if (!built) {
-                    count_drop(delivery_iov_dropped_);
-                    return;
-                }
-                for (const view_t& l : val.links())
-                    if (!iov.push_back(l.bytes())) {
-                        count_drop(delivery_iov_dropped_);
-                        return;
-                    }
-                out->send(std::span<const std::span<const std::byte>>(iov.data(), iov.size()));
+                // The retained send (RFC-0028 §6.9): the head spans on the stack, the value by
+                // reference. A link that writes in-call gathers the lot; one that queues keeps
+                // the value and copies only the head — no iov table here, no payload copy
+                // anywhere on this leg.
+                const std::array<std::span<const std::byte>, 3> head_iov{
+                    head.span(), dst_body, std::span<const std::byte>(empty_src)};
+                out->send(std::span<const std::span<const std::byte>>(head_iov), val);
                 return;
             }
         }
@@ -3679,40 +3667,23 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const gra
     stack_writer<16> head;  // FWD header (≤6) + the 5-byte op TLV
     head.header(type_t::FWD, body_len);
     head.raw(op_tlv);
-    if (!head.ok()) return;
+    if (!head.ok()) {
+        // Unreachable for a head this size (the FWD header is at most 6 bytes), and counted
+        // rather than silent if a future head ever outgrows its buffer.
+        count_drop(delivery_iov_dropped_);
+        return;
+    }
 
-    // iov = head + route + empty_src + one span per value link (sized to the rope, no
-    // synthetic cap — the same per-send iov table the rope terminus reply builds).
-    //
-    // MIGRATED to the ADR-0065 failable seam (#981), which is the destination `graph_t`'s
-    // `ctl` parameter names for "`fwd_router` iov". `std::vector` + `detail::try_reserve`
-    // was nothrow only where the growth THROWS: under `-fno-exceptions` that helper probes
-    // the global heap, frees the probe block, and then runs the throwing `reserve` on the
-    // inference that the block is still there — a writer-thread context switch in that
-    // window makes the `reserve` abort() the node (#850). A `block_array_t` growth is ONE
-    // refusable `try_alloc`, so there is no window to lose, and the table is drawn from the
-    // node's injected source rather than the global heap. `std::span` is trivially copyable,
-    // so the memcpy relocation is exact. Exhaustion still just drops this delivery.
-    mem::block_array_t<std::span<const std::byte>> iov(graph_.control_source());
-    if (!iov.reserve(3 + val.link_count())) {  // OOM — drop
-        count_drop(delivery_iov_dropped_);
-        return;
-    }
-    // Reserved to the exact final count above, so none of these can grow again; they are
-    // still checked because `push_back` is `[[nodiscard]]` and a silent short table would
-    // put a truncated frame on the wire.
-    const bool built = iov.push_back(head.span()) && iov.push_back(route) &&
-                       iov.push_back(std::span<const std::byte>(empty_src));
-    if (!built) {
-        count_drop(delivery_iov_dropped_);
-        return;
-    }
-    for (const view_t& l : val.links())
-        if (!iov.push_back(l.bytes())) {
-            count_drop(delivery_iov_dropped_);
-            return;
-        }
-    link->send(std::span<const std::span<const std::byte>>(iov.data(), iov.size()));
+    // The retained send (RFC-0028 §6.9): head + stored route + empty src as three spans on the
+    // stack, and the value by reference. The per-delivery iov table this leg used to draw from
+    // `graph_.control_source()` (#981) is gone with it: the link lowers `head ++ value.links()`
+    // through its own inline table (`transport_t::send(head, value)`), and a link that QUEUES
+    // the frame keeps the value (one refcount) and copies only the head — so neither this leg
+    // nor a queued link copies the payload, and neither allocates for a value of up to five
+    // links. A multi-link value still crosses as its own segments (ADR-0053 ⑤).
+    const std::array<std::span<const std::byte>, 3> head_iov{head.span(), route,
+                                                             std::span<const std::byte>(empty_src)};
+    link->send(std::span<const std::span<const std::byte>>(head_iov), val);
 }
 
 }  // namespace tr::net

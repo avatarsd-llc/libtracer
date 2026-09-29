@@ -61,7 +61,7 @@ sanctioned L0↔L1 boundary type, and the only `tr::view` symbol the L0 interfac
 permitted to name
 ([ADR-0016 — substrate, zero-copy, layer namespaces](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0016-substrate-zero-copy-layer-namespaces-no-templates-through-seam.md) §2).
 `alloc` returns a **raw** `segment_t*` with a refcount of 1; the caller adopts it
-with `tr::view::segment_ptr_t::adopt` (`core/include/libtracer/segment.hpp:116`).
+with `tr::view::segment_ptr_t::adopt` (`core/include/libtracer/segment.hpp:129`).
 The handle-producing conveniences `heap_alloc` / `borrow` / `borrow_const`
 therefore live in `tr::view`, not here.
 

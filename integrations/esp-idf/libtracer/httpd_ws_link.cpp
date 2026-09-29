@@ -18,6 +18,7 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 
+#include <array>
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
@@ -1004,6 +1005,11 @@ class httpd_ws_link_t::peer_resolution_t final : public transport_t {
      *         (no intermediate flatten temporary — see the owning link's iovec
      *         @ref httpd_ws_link_t::send). */
     void send(std::span<const std::span<const std::byte>> iov) override;
+    /** @brief Directed RETAINED send (RFC-0028 §6.9): queued as head bytes plus one
+     *         reference to @p value (see the owning link's retained @ref httpd_ws_link_t::send);
+     *         in-call it is the gathered in-call write. */
+    void send(std::span<const std::span<const std::byte>> head,
+              const graph::value_t& value) override;
     /**
      * @brief The owning LINK's shed-frame counters, projected through this handle (#1494).
      *
@@ -1095,6 +1101,15 @@ struct httpd_ws_link_t::tx_work_t {
      */
     tx_slot_t* slot = nullptr;
     std::unique_ptr<std::byte[]> owned; /**< @brief Heap payload (the exceptional tail only). */
+    /**
+     * @brief A RETAINED item's payload (RFC-0028 §6.9): @ref payload then holds the frame's
+     *        encoded WebSocket header and head, and these bytes follow them on the wire,
+     *        written straight from the published block. Empty for a gathered item.
+     *
+     * Dropped by @ref httpd_ws_link_t::release_tx_work, on whichever task drains the item —
+     * the reference is the value's own and needs no link to release.
+     */
+    graph::value_ref_t value;
     /**
      * @brief The LARGE-class claimed flag this item holds, or null when it borrowed no
      *        large buffer (#1566).
@@ -1550,6 +1565,7 @@ void httpd_ws_link_t::release_tx_work(tx_work_t* work) {
     // Every work item is a pool slot's own member since #949 — there is no heap shell to
     // free, and `slot` is bound once in alloc_buffers, so it is never null here.
     work->owned.reset();  // drop an exceptional-tail heap payload before the slot recycles
+    work->value.reset();  // and a retained item's value reference (RFC-0028 §6.9)
     // Hand back the large-class buffer this item borrowed, if it borrowed one (#1566) —
     // through the flag it carries, because this function has no link to ask (see
     // tx_work_t::large_busy). Released BEFORE the slot's own flag, so a sender that wins
@@ -3643,7 +3659,8 @@ void httpd_ws_link_t::tx_work(void* arg) {
         // httpd task with the synchronous send between them.
         session_t* const slot = work->to.slot;
         if (slot != nullptr) slot->open_tx_frame();
-        err = httpd_ws_send_frame_async(work->handle, fd, &f);
+        err = work->value ? send_retained(work->handle, fd, *work)
+                          : httpd_ws_send_frame_async(work->handle, fd, &f);
         if (err == ESP_OK && refresh_lru) {
             // Tell the ADOPTED server this session is not idle (#955). Apart from this very
             // API, IDF advances a session's LRU counter in one place — the tail of
@@ -3697,14 +3714,14 @@ void httpd_ws_link_t::tx_work(void* arg) {
             // wire, and that is now a measured precondition (`on_wire == 0`) rather than a
             // property assumed of every ESP_FAIL.
             ESP_LOGW(kTag, "ws send failed (%s) fd=%d len=%u - frame dropped", esp_err_to_name(err),
-                     fd, (unsigned)work->len);
+                     fd, (unsigned)(work->len + (work->value ? work->value->total_length() : 0)));
         }
     }
     // Copy out everything the accounting needs BEFORE the slot goes back to the pool:
     // once released, another task may claim it and overwrite the work item.
     gate_t* const gate = work->gate;
     const session_ref_t to = work->to;
-    const std::size_t len = work->len;
+    const std::size_t len = work->len + (work->value ? work->value->total_length() : 0);
     release_tx_work(work);  // recycle the pool slot (and any oversize heap payload)
     // A skipped send is not evidence for the STREAK: no result. Every skip qualifies — the
     // peer departed, a different session now holds its slot, or it was condemned and the
@@ -3726,6 +3743,132 @@ void httpd_ws_link_t::tx_work(void* arg) {
     const std::lock_guard lock(gate->m);
     if (httpd_ws_link_t* const owner = gate->link; owner != nullptr)
         owner->note_tx_result(to, err == ESP_OK, len);
+}
+
+esp_err_t httpd_ws_link_t::send_retained(httpd_handle_t handle, int fd, const tx_work_t& work) {
+    // The frame as the gathered item would have put it on the wire, in 1 + links writes
+    // instead of 2: the slot's bytes (the WebSocket header this link encoded, then the head),
+    // then each of the value's links straight from the published block. Every write goes
+    // through the session's send override (send_guarded) inside the bracket tx_work opened,
+    // so a failure after the first byte is the #951 truncation it already condemns, and a
+    // short write is the desync it already condemns — the frame is written whole or the
+    // session is closed; no other frame's bytes can follow a partial one.
+    //
+    // A write that returns fewer bytes than asked is a failure here too, not only a negative
+    // one: send_guarded already turns a short write into one, but a session whose override is
+    // not installed would otherwise have the NEXT part written behind a partial one.
+    const auto write_part = [handle, fd](const void* p, std::size_t n) {
+        const int ret = httpd_socket_send(handle, fd, static_cast<const char*>(p), n, 0);
+        return ret >= 0 && static_cast<std::size_t>(ret) == n;
+    };
+    if (!write_part(work.payload, work.len)) return ESP_FAIL;
+    for (const view::view_t& l : work.value->links()) {
+        const std::span<const std::byte> b = l.bytes();
+        if (!b.empty() && !write_part(b.data(), b.size())) return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
+void httpd_ws_link_t::queue_send_retained(const session_ref_t& to,
+                                          std::span<const std::span<const std::byte>> head,
+                                          const graph::value_t& value) {
+    std::size_t head_len = 0;
+    for (const auto& part : head) head_len += part.size();
+    const std::size_t payload_len = head_len + value.total_length();
+    // The server frame header (RFC 6455 §5.2: FIN|BINARY, unmasked, 7/16/64-bit length) —
+    // the bytes httpd_ws_send_frame_async writes for the gathered item, encoded here because
+    // the retained item writes its own frame.
+    std::array<std::byte, 10> ws_hdr{};
+    std::size_t ws_len = 2;
+    ws_hdr[0] = std::byte{0x82};
+    if (payload_len < 126) {
+        ws_hdr[1] = static_cast<std::byte>(payload_len);
+    } else if (payload_len <= 0xFFFF) {
+        ws_hdr[1] = std::byte{126};
+        ws_hdr[2] = static_cast<std::byte>((payload_len >> 8) & 0xFF);
+        ws_hdr[3] = static_cast<std::byte>(payload_len & 0xFF);
+        ws_len = 4;
+    } else {
+        ws_hdr[1] = std::byte{127};
+        for (int i = 0; i < 8; ++i)
+            ws_hdr[2 + i] = static_cast<std::byte>(
+                (static_cast<std::uint64_t>(payload_len) >> (8 * (7 - i))) & 0xFF);
+        ws_len = 10;
+    }
+    const std::size_t slot_len = ws_len + head_len;
+    if (slot_len > tx_inline_bytes_) {
+        // A head wider than a slot's inline buffer: the gathered path, which has the large
+        // class and the heap tail for exactly this. Built on the stack for the common width.
+        std::array<std::span<const std::byte>, 8> iov;
+        if (head.size() + value.link_count() > iov.size()) {
+            note_enqueue_drop(live_fd(to), payload_len);
+            return;
+        }
+        std::size_t n = 0;
+        for (const auto& part : head) iov[n++] = part;
+        for (const view::view_t& l : value.links()) iov[n++] = l.bytes();
+        queue_send(to, std::span<const std::span<const std::byte>>(iov.data(), n));
+        return;
+    }
+    // Everything below mirrors queue_send's single-load, re-resolve and slot discipline; see
+    // there for the reasons. Only the payload differs: header-sized, plus a reference.
+    const httpd_handle_t h = handle_.load(std::memory_order_relaxed);
+    gate_t* const g = gate_.load(std::memory_order_relaxed);
+    if (h == nullptr) return;
+    const int fd = live_fd(to);
+    if (fd < 0) {
+        tx_to_dead_peer_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    tx_slot_t* const slot = claim_tx_slot_waiting();
+    if (slot == nullptr) {
+        tx_pool_misses_.fetch_add(1, std::memory_order_relaxed);
+        note_enqueue_drop(fd, payload_len);
+        return;
+    }
+    tx_work_t* const work = &slot->work;
+    work->value = graph::value_ref_t::keep(value);
+    if (!work->value) {  // a caller-owned value whose links could not be kept: drop, counted
+        release_tx_work(work);
+        note_enqueue_drop(fd, payload_len);
+        return;
+    }
+    work->handle = h;
+    work->gate = g;
+    work->to = to;
+    work->payload = slot->inline_buf;
+    work->len = slot_len;
+    std::memcpy(work->payload, ws_hdr.data(), ws_len);
+    std::byte* p = work->payload + ws_len;
+    for (const auto& part : head) {
+        if (!part.empty()) std::memcpy(p, part.data(), part.size());
+        p += part.size();
+    }
+    if (httpd_queue_work(h, &httpd_ws_link_t::tx_work, work) != ESP_OK) {
+        release_tx_work(work);
+        note_enqueue_drop(fd, payload_len);
+    }
+}
+
+void httpd_ws_link_t::send(std::span<const std::span<const std::byte>> head,
+                           const graph::value_t& value) {
+    // The broadcast's snapshot-then-enqueue shape (see the iovec override below), with the
+    // retained enqueue in place of the gathered one.
+    session_ref_t targets[kFanoutChunk];
+    std::size_t next = 0;
+    for (bool more = true; more;) {
+        std::size_t n = 0;
+        {
+            const std::lock_guard lock(peers_m_);
+            while (next < slots_.size() && n < kFanoutChunk) {
+                const auto& s = slots_[next++];
+                if (s->open && !s->dead && !s->auth_pending)
+                    targets[n++] = session_ref_t{s.get(), s->gen};
+            }
+            more = next < slots_.size();
+        }
+        for (std::size_t i = 0; i < n; ++i) queue_send_retained(targets[i], head, value);
+    }
 }
 
 void httpd_ws_link_t::send(std::span<const std::byte> frame) {
@@ -3835,6 +3978,39 @@ void httpd_ws_link_t::peer_resolution_t::send(std::span<const std::span<const st
         owner->send_in_call(to, iov);
     else
         owner->queue_send(to, iov);
+}
+
+void httpd_ws_link_t::peer_resolution_t::send(std::span<const std::span<const std::byte>> head,
+                                              const graph::value_t& value) {
+    // The directed twin of the retained broadcast, with the identity test of the iovec
+    // override above (#1013 / #954) — see there.
+    httpd_ws_link_t* const owner = owner_;
+    if (owner == nullptr) return;
+    session_ref_t to;
+    {
+        const std::lock_guard lock(owner->peers_m_);
+        session_t* const slot = slot_;
+        if (slot == nullptr || !slot->open || slot->dead || slot->gen != gen_) {
+            owner->tx_to_dead_peer_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        to = session_ref_t{slot, gen_};
+    }
+    if (t_serving_link == owner) {
+        // In-call (#1494): the socket write happens now, from memory alive for the call, so
+        // there is nothing to retain — the gathered in-call path, over head ++ links.
+        std::array<std::span<const std::byte>, 8> iov;
+        if (head.size() + value.link_count() > iov.size()) {
+            owner->note_enqueue_drop(owner->live_fd(to), value.total_length());
+            return;
+        }
+        std::size_t n = 0;
+        for (const auto& part : head) iov[n++] = part;
+        for (const view::view_t& l : value.links()) iov[n++] = l.bytes();
+        owner->send_in_call(to, std::span<const std::span<const std::byte>>(iov.data(), n));
+        return;
+    }
+    owner->queue_send_retained(to, head, value);
 }
 
 // ---------------------------------------------------------------------------

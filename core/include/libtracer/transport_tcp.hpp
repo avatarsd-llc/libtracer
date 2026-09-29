@@ -196,6 +196,24 @@ class tcp_transport_t : public transport_t, private stream_endpoint_t {
     void send(std::span<const std::span<const std::byte>> iov) override;
 
     /**
+     * @brief Retained send (RFC-0028 §6.9): one length-prefixed record of @p head then
+     *        @p value — written in-call when no write is in flight, and otherwise QUEUED as the
+     *        prefix and head bytes plus one reference to @p value, never as a copy of it.
+     *
+     * The queued form is the one this override exists for: the enqueue-then-write queue used
+     * to copy the whole record into its slot, so a large value published while another write
+     * was in flight cost a payload copy. The writer that drains the record gathers the head
+     * and the value's links into one `sendmsg` record under the same write lock and bound as
+     * any other record, so the two-frame race on one socket (RFC-0028 §9 item 6) stays
+     * whole: a record is written entirely, or a partial write condemns the peer.
+     *
+     * @param head  The record's leading spans (borrowed for the call).
+     * @param value The payload (kept by reference only if the record is queued).
+     */
+    void send(std::span<const std::span<const std::byte>> head,
+              const graph::value_t& value) override;
+
+    /**
      * @brief Spawn the recv thread a `defer_recv` DIAL construction held back (#1045).
      *
      * The second phase of the two-phase bring-up: the socket is connected and NOTHING has
