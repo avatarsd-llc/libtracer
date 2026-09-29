@@ -1003,7 +1003,7 @@ before any ACL gate:
 | ---- | ---- |
 | `reliability`, `priority`, `durability` | the subscription's packed delivery policy (§`0x04` SUBSCRIBER) — they describe a producer→subscriber *relationship*, not a vertex |
 | `deadline_ns`, `queue_max_bytes` | deleted: inert, and with no coherent per-vertex meaning |
-| `history_keep_last` | owner-side vertex state (`graph_t::set_history_depth`) — an application retention intent, with no wire surface |
+| `history_keep_last` | owner-side vertex state (`graph_t::set_retention`) — an application retention intent, with no wire surface |
 | `store_ref_min_bytes` | owner-side vertex state — a deployment copy/pin trade ([ADR-0042](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md) §3), with no wire surface; the host call is `graph_t::set_share_threshold_bytes` — an absolute copy-or-share threshold in bytes ([RFC-0028](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0028-lean-value-path.md) §5.3, which replaced the RFC-0022 §3.D ratio `K`). What that declaration buys and what it costs — a shared value **borrows its inbound RX segment for its whole lifetime**, which on a pooled RX backend is a pool slot of receive capacity, and the **application** owns that budget because no per-value knob bounds the *number* of retained values — is in [02 §"The pin is a BORROW, and the application owns the budget"](02-graph-model.md). The host default is 4,096 B; NARROW targets copy always (the ESP-IDF component binds `SIZE_MAX`) |
 
 No deprecation window: the protocol is DRAFT, and of the seven only three ever drove behaviour —

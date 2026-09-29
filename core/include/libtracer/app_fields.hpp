@@ -15,6 +15,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <span>
@@ -33,6 +34,32 @@ namespace tr::graph {
 
 // L1 types this layer consumes (upward dependency on tr::view, docs/adr/0016 §2).
 using view::view_t;
+
+/**
+ * @brief What a vertex — or one of its application fields — RETAINS after a write is
+ *        delivered (RFC-0028 §5.4, D4): one property with one spelling, where there used to
+ *        be three (a role rule, a depth verb, and a separate store for `wo` fields).
+ *
+ * | holder | default | legal |
+ * | --- | --- | --- |
+ * | `HANDLER` vertex | `NONE` | `NONE` — the handler consumes the value |
+ * | `STORED_VALUE` vertex | `LAST` | `NONE`, `LAST` |
+ * | `STREAM` vertex | `N` (depth 1) | `NONE`, `N` with a depth |
+ * | app field `ro` / `rw` | `LAST` | `NONE`, `LAST` (`N` reads as `LAST` — a field holds one value)
+ * | | app field `wo` | `NONE` | `NONE` — a write-only field has no read surface, so it stores
+ * nothing |
+ *
+ * `NONE` on a value vertex is the pure-relay shape: the write is delivered to every
+ * subscriber and released, the write sequence still moves (so `await` wakes), and `read`
+ * answers `NOT_FOUND`. It is a permitted policy, not a named role (RFC-0028 §11 ruling 3).
+ * Owner-side and host-only: no peer reads or writes it.
+ */
+enum class retention_t : std::uint8_t {
+    NONE = 0, /**< @brief Deliver and release; keep nothing (`read` ⇒ `NOT_FOUND`). */
+    LAST = 1, /**< @brief Keep the last-known value — one slot, displaced by the next write. */
+    N = 2,    /**< @brief Keep the last N entries in the receiving vertex's ring (RFC-0025
+               *          §4.6.1): the depth is the INTENT, the ring source's bytes the BOUND. */
+};
 
 /**
  * @brief Owner-declared REMOTE writability of one application property field (RFC-0010
@@ -75,13 +102,19 @@ struct app_field_t {
      *         steps (`"kp"`, `"wifi.ssid"`); the runtime keys the joined string flat. */
     std::string name{};
     app_access_t access = app_access_t::RO; /**< @brief Owner-declared remote writability. */
+    /** @brief What a write to this field retains (RFC-0028 §5.4). Defaults from the access —
+     *         a `wo` field is @ref retention_t::NONE — its write reaches
+     *         @ref handlers_t::on_app_field_write and stores nothing, since nothing may read
+     *         it back — and every other field @ref retention_t::LAST. A `wo` field stores
+     *         nothing whatever this says. Lands in the padding after @ref access. */
+    retention_t retention = access == app_access_t::WO ? retention_t::NONE : retention_t::LAST;
     /** @brief The §B.1 descriptor record members (dtype/unit/min/max/label…, concatenated
      *         child TLVs) served inside this field's `:schema` entry VERBATIM, after the
      *         runtime-projected `access` member. Never parsed by the runtime. */
     std::vector<std::byte> descriptor{};
     /** @brief The field's current TLV bytes, stored and served verbatim (§D). Empty ⇒
      *         never written (reads `NOT_FOUND`; omitted from container reads). An install
-     *         MAY carry an initial value here. */
+     *         MAY carry an initial value here; on a field that retains nothing it is dropped. */
     std::vector<std::byte> value{};
 };
 
@@ -104,9 +137,20 @@ struct app_field_t {
  * (ADR-0058 erratum 1).
  */
 struct app_field_slot_t {
-    std::string_view name;                   /**< @brief Field key below `settings.app.` (§A.1). */
-    app_access_t access = app_access_t::RO;  /**< @brief Owner-declared remote writability. */
+    std::string_view name;                  /**< @brief Field key below `settings.app.` (§A.1). */
+    app_access_t access = app_access_t::RO; /**< @brief Owner-declared remote writability. */
+    /** @brief What a write to this field retains — @ref app_field_t::retention, with the same
+     *         access-derived default. One byte beside @ref access, in the padding the span's
+     *         alignment already left, so the slot does not grow; a positional table spells it
+     *         third (`{name, access, retention, descriptor}`). */
+    retention_t retention = access == app_access_t::WO ? retention_t::NONE : retention_t::LAST;
     std::span<const std::byte> descriptor{}; /**< @brief §B.1 descriptor bytes, served verbatim. */
+
+    /** @brief True iff a write to this field stores nothing: declared @ref retention_t::NONE,
+     *         or `wo` (no read surface, so nothing to keep). */
+    [[nodiscard]] constexpr bool retains_nothing() const noexcept {
+        return access == app_access_t::WO || retention == retention_t::NONE;
+    }
 };
 
 /** @brief The install-time spelling of @ref app_field_slot_t — the same type. Kept as a name
@@ -224,9 +268,10 @@ struct app_field_table_t {
      *         slots view caller storage. */
     std::vector<std::byte> backing{};
     /** @brief Class-③ per-field values, index-aligned with @ref slots — LAZILY allocated,
-     *         null until the first field write on this vertex (#389 pattern). A
-     *         declared-but-never-written table costs zero value RAM. `(*values)[i]` empty
-     *         ⇒ field i unset. */
+     *         null until the first write to a RETAINING field on this vertex (#389 pattern).
+     *         A declared-but-never-written table, and one whose only writes went to `wo` /
+     *         @ref retention_t::NONE fields, costs zero value RAM (RFC-0028 §5.4).
+     *         `(*values)[i]` empty ⇒ field i unset. */
     std::unique_ptr<std::vector<std::vector<std::byte>>> values{};
 };
 

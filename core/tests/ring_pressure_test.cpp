@@ -176,15 +176,15 @@ struct sink_t {
 /**
  * @brief A receiving STREAM vertex wired to its own metered source, with an edge of its own.
  *
- * `set_history_depth` is deliberately GENEROUS: the depth intent must not be what trims the
- * ring, or the arms below would be measuring RFC-0025 §4.6's depth bound instead of §4.6.1
- * clause 3's BYTE bound. The two compose, and this suite is about the byte one.
+ * `set_retention` (`retention_t::N`) is deliberately GENEROUS: the depth intent must not be what
+ * trims the ring, or the arms below would be measuring RFC-0025 §4.6's depth bound instead of
+ * §4.6.1 clause 3's BYTE bound. The two compose, and this suite is about the byte one.
  */
 struct receiver_t {
     /** @brief Wire the vertex at @p where, charging its ring to @p src under @p reliable. */
     receiver_t(graph_t& g, const char* where, metered_source_t& src, bool reliable)
         : v(g.register_vertex(*path_t::parse(where), role_t::STREAM)) {
-        g.set_history_depth(v, kGenerousDepth);
+        (void)g.set_retention(v, tr::graph::retention_t::N, kGenerousDepth);
         g.set_ring_source(v, &src, reliable);
         const tr::graph::result_t<tr::graph::subscription_t> s =
             g.subscribe(*path_t::parse(where), sink);

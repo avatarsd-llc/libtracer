@@ -1293,6 +1293,15 @@ target_link_libraries(target_adopt_test PRIVATE libtracer)
 libtracer_test_warnings(target_adopt_test)
 add_test(NAME target_adopt COMMAND target_adopt_test)
 
+# RFC-0028 slice 6 — retention_t { NONE, LAST, N } per vertex and per app field (D4): a `wo`
+# field stores nothing (its write reaches the seam, `values` is never allocated); a NONE value
+# vertex relays from the stack and reads NOT_FOUND after a delivered write; the STREAM ring's
+# entries live in their own reservations on the injected source, not on the global heap.
+add_executable(retention_test retention_test.cpp)
+target_link_libraries(retention_test PRIVATE libtracer)
+libtracer_test_warnings(retention_test)
+add_test(NAME retention COMMAND retention_test)
+
 # #361 §5 / ADR-0039 §1 — graph_t's injected memory_resource: per-write LKV
 # allocations route through it (counting pass-through), released in full at
 # graph destruction; a default graph never touches a foreign resource.

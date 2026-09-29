@@ -26,8 +26,8 @@
  *                                               knobs: `SETTINGS{ [NAME "app" SETTINGS{...}] }`,
  *                                               empty when no app fields are declared.
  *   6. `settings/schema-enumerates-nothing`   — `:schema` carries no protocol-knob entries.
- *   7. `stream/history-depth-host-only`       — `set_history_depth` changes the retained ring
- *                                               depth, and no wire operation reaches it.
+ *   7. `stream/history-depth-host-only`       — `set_retention` (`retention_t::N`) changes the
+ * retained ring depth, and no wire operation reaches it.
  *
  * §5.8 `store/pin-ratio` is covered at the decision site (`op_resolve_test`, `udp_test`), not
  * here; RFC-0028 D3 replaced the ratio with an absolute copy-or-share threshold. What this file
@@ -361,7 +361,8 @@ void test_schema_enumerates_nothing() {
 // §5.7 — the ring depth is owner-side, and nothing is inherited (§3.F).
 
 /**
- * @brief `set_history_depth` drives the RECEIVER's ring; no wire operation reaches it.
+ * @brief `set_retention` (`retention_t::N`) drives the RECEIVER's ring; no wire operation reaches
+ * it.
  *
  * RETARGETED to the receiver side for RFC-0025 §4.6.1 Amendment 2. A producer never queues:
  * the ring belongs to whoever consumes it, so the depth declaration is exercised on the vertex
@@ -390,11 +391,11 @@ void test_history_depth_is_host_only() {
 
     // The owner declares a depth; the ADMISSION path must read the new value, not merely
     // report it.
-    g.set_history_depth(stream, 3);
+    (void)g.set_retention(stream, tr::graph::retention_t::N, 3);
     for (std::uint8_t i = 1; i <= 5; ++i) (void)g.write(producer, byte_value(i));
     const auto deep = g.history(stream);
     check(deep.has_value() && deep->size() == 3,
-          "set_history_depth(3) => the receiver ring TRIMS to three (the admission read it)");
+          "set_retention(N, 3) => the receiver ring TRIMS to three (the admission read it)");
 
     // And no wire operation reaches it — write or read, whatever the caller.
     check(fails_with(g.write(path_t("/h/s:settings.history_keep_last"), value_le(9, 4)),
@@ -413,7 +414,8 @@ void test_nothing_is_inherited() {
     graph_t g;
     const vertex_handle_t parent = g.register_vertex(path_t("/i/root"), role_t::STORED_VALUE);
     g.set_share_threshold_bytes(parent, 256);
-    g.set_history_depth(parent, 4);
+    check(!g.set_retention(parent, tr::graph::retention_t::N, 4).has_value(),
+          "a STORED_VALUE has no ring to give a depth to (RFC-0028 §5.4) — refused, by value");
     check(g.share_threshold_bytes(parent) == 256, "the parent holds its own declared threshold");
 
     // A child registered UNDER it inherits nothing — the whole hole Amendment 1 closed.
@@ -664,7 +666,7 @@ void test_conformance_vectors() {
         check(fails_with(g.write(path_t("/hd:settings.history_keep_last"), value_le(4, 4)),
                          status_t::SCHEMA_NOT_FOUND),
               "... which is the status the ring-depth write returns");
-        g.set_history_depth(s, 2);
+        (void)g.set_retention(s, tr::graph::retention_t::N, 2);
         for (std::uint8_t i = 1; i <= 3; ++i) (void)g.write(s, byte_value(i));
         const auto hist = g.history(s);
         check(hist.has_value() && hist->size() == 2,

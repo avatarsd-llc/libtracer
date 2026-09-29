@@ -31,6 +31,47 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Breaking
 
+- **`retention_t` replaces `set_history_depth` and the role-encoded retention (RFC 0028
+  slice 6, D4).** What a vertex keeps after a write is one owner-side policy,
+  `retention_t { NONE, LAST, N }` (`app_fields.hpp`), on the vertex and on each app field. Each
+  role keeps its default (HANDLER `NONE`, STORED_VALUE `LAST`, STREAM `N` at depth 1), so an
+  unchanged caller sees no behaviour change. No shims — every in-tree caller, test, example and
+  bench moved.
+
+  - **`graph.hpp` — `set_history_depth(vertex_handle_t, std::uint32_t)` removed.** Rewrite
+    `g.set_history_depth(v, n)` as `(void)g.set_retention(v, tr::graph::retention_t::N, n)`.
+    `set_retention(vertex_handle_t, retention_t, std::uint32_t depth = 1) -> result_t<void>`
+    and `retention(vertex_handle_t) -> retention_t` added. An illegal pairing (a HANDLER asked
+    to retain, a STORED_VALUE asked for a ring, a STREAM asked for `LAST`) answers
+    `SCHEMA_NOT_FOUND` and changes nothing — where `set_history_depth` on a non-STREAM stored
+    the number silently.
+  - **`NONE` on a value vertex is the pure relay** (§11 ruling 3: permitted, not a named role).
+    A write is delivered to every subscriber and released; the write sequence still moves;
+    `read` answers `NOT_FOUND`; `assign` and `propagate` refuse with `SCHEMA_NOT_FOUND`, as on a
+    HANDLER. Switching to `NONE` drops the held value and every ring entry. A direct write whose
+    subscribers are all callbacks delivers from the writer's stack: `bench_lean_value_path`'s
+    new `local-none` row is **0 allocations / 0 B per publish** at K = 1, 8, 32 and every size,
+    against `local-cb`'s 1 / 40 B. The bit lives in `vertex_t`'s flag byte: `sizeof(vertex_t)`
+    does not move.
+  - **`app_fields.hpp` — `app_field_t::retention` and `app_field_slot_t::retention` added**
+    (one byte, in padding after `access`; both structs keep their size), defaulting from the
+    access: `wo` is `NONE`, `ro` / `rw` are `LAST`. **A `wo` field now stores nothing**: its
+    write reaches `on_app_field_write` and the lazy `values` store is never allocated on its
+    account (it used to store bytes nobody could read); an install-time value on it is dropped.
+    An `ro`/`rw` field declared `NONE` is applied and reads back `NOT_FOUND`. A positional
+    `app_field_slot_t{name, access, descriptor}` initializer now spells the retention third.
+  - **`vertex.hpp` — the STREAM ring's entries live in their own reservations.** The
+    `std::deque<ring_entry_t>` is gone: `ring_state_t` is an intrusive doubly-linked list
+    (`head`, `tail`, `count`, `push_back`, `pop_front`), and each `ring_entry_t` is placed at the
+    front of the block its admission reserved from the receiver's injected `block_source_t` —
+    so the ring draws nothing from the global heap (the deque took a chunk every 16 appends and
+    a ~512 B map). `ring_entry_t::token` removed (the entry IS the reservation) and `prev` /
+    `next` added; `kRingEntryOverhead` is now `sizeof(ring_entry_t)` (40 B on 64-bit, was 48);
+    `release_reservation` takes the entry by pointer and destroys it.
+    `vertex_ext_t::history_keep_last` is `retention_depth`; `vertex_t::set_history_depth` /
+    `history_depth` are `set_retention` / `retention_depth`, and `retention()` /
+    `retains_none()` are added.
+
 - **The copy-or-share threshold replaces the pin ratio (RFC 0028 slice 5, D3).** A written
   value is now SHARED (the stored value links the inbound receive segment, zero copy) iff its
   TLV is **at least** the target vertex's `share_threshold_bytes` and trailer-less, and
@@ -52,7 +93,7 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     std::size_t)` and `share_threshold_bytes(vertex_handle_t) -> std::size_t` added. Owner-side,
     no wire surface, nothing inherited — the same contract the ratio had.
   - **`vertex.hpp` — `vertex_ext_t::pin_payload_ratio` is `share_threshold_bytes`** (still a
-    32-bit word beside `history_keep_last`, saturating: `UINT32_MAX` reads back as `SIZE_MAX`),
+    32-bit word beside `history_keep_last` — `retention_depth` since slice 6 — saturating: `UINT32_MAX` reads back as `SIZE_MAX`),
     so `sizeof(vertex_ext_t)` does not move; `vertex_t::set_pin_payload_ratio` /
     `pin_payload_ratio` are `set_share_threshold_bytes` / `share_threshold_bytes`; new free
     function `saturate_threshold`.

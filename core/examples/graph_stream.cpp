@@ -11,8 +11,8 @@
  * additionally appends each write to a bounded ring, and its contract is "observe every
  * buffered entry" rather than "the latest" (`docs/reference/02-graph-model.md` §Stream drain
  * semantics). The depth is a RETENTION INTENT only the application can supply, so it is an
- * owner-side call with **no wire surface at all** — `set_history_depth`, not a `:settings`
- * knob (RFC-0022 §3.C; the withdrawn `history_keep_last` reads `SCHEMA_NOT_FOUND`).
+ * owner-side call with **no wire surface at all** — `set_retention` (`retention_t::N`), not a
+ * `:settings` knob (RFC-0022 §3.C; the withdrawn `history_keep_last` reads `SCHEMA_NOT_FOUND`).
  *
  * A plain `read` is unchanged: it still serves the latest value, never the ring.
  *
@@ -60,7 +60,8 @@ int main() {
     bool ok = true;
 
     const auto events = g.register_vertex(path_t("/dev/can0/rx"), role_t::STREAM);
-    g.set_history_depth(events, 3);  // owner-side retention intent; no peer can read or write it
+    (void)g.set_retention(events, tr::graph::retention_t::N,
+                          3);  // owner-side retention intent; no peer can read or write it
 
     for (const char* frame : {"f1", "f2", "f3", "f4"}) (void)g.write(events, value_of(frame));
 

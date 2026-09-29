@@ -145,7 +145,7 @@ enum class arm_t { LOCKFREE, STREAM };
     const path_t path = *path_t::parse("/bench/fanin");
     const vertex_handle_t v =
         g.register_vertex(path, a == arm_t::STREAM ? role_t::STREAM : role_t::STORED_VALUE);
-    if (a == arm_t::STREAM) (void)g.set_history_depth(v, kHistoryDepth);
+    if (a == arm_t::STREAM) (void)g.set_retention(v, tr::graph::retention_t::N, kHistoryDepth);
 
     const std::vector<std::byte> tlv = value_tlv(kSize);
     std::atomic<std::uint64_t> ok{0};

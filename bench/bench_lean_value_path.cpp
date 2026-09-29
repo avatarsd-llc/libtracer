@@ -32,6 +32,9 @@
  *                  library's own per-publish cost from the producer's.
  *   local-target   the same write with K TARGET subscribers (subscribe(src, target)), each
  *                  target a distinct STORED_VALUE vertex.
+ *   local-none     the local-cb write to a vertex declared `retention_t::NONE` (RFC-0028
+ *                  §5.4, slice 6): the pure relay, whose callback subscribers are delivered a
+ *                  `value_storage_t` on the writer's stack — the §6.6 claim is 0 blocks.
  *   producer-own   what the producer pays to hand the library `size` bytes it does not own:
  *                  `view::over_bytes` (one segment, one memcpy) — the local-publish
  *                  ownership copy of design doc zero-copy-and-flatten ①.
@@ -186,6 +189,19 @@ void run_local_cb(std::size_t size, std::size_t k) {
     if (recv.load() != (kWarm + kOps) * k) std::fprintf(stderr, "local-cb: fan-out not wired\n");
 }
 
+void run_local_none(std::size_t size, std::size_t k) {
+    graph_t g;
+    const path_t src = *path_t::parse("/bench/src");
+    const vertex_handle_t v = g.register_vertex(src, role_t::STORED_VALUE);
+    if (!g.set_retention(v, tr::graph::retention_t::NONE))
+        std::fprintf(stderr, "local-none: NONE refused\n");
+    std::atomic<std::uint64_t> recv{0};
+    for (std::size_t i = 0; i < k; ++i) (void)g.subscribe(src, &callback_sink, &recv);
+    const value_t fx{size};
+    measure("local-none", size, k, 0, [&] { (void)g.write(v, fx.make()); });
+    if (recv.load() != (kWarm + kOps) * k) std::fprintf(stderr, "local-none: fan-out not wired\n");
+}
+
 void run_local_target(std::size_t size, std::size_t k) {
     graph_t g;
     const path_t src = *path_t::parse("/bench/src");
@@ -332,6 +348,7 @@ void run_proto(std::size_t size, std::size_t k) {
 int main() {
     for (const std::size_t size : kSizes) {
         for (const std::size_t k : kFans) run_local_cb(size, k);
+        for (const std::size_t k : kFans) run_local_none(size, k);
         for (const std::size_t k : kFans) run_local_target(size, k);
         run_producer_own(size);
         run_egress_gather(size);

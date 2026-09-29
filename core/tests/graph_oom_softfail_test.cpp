@@ -490,7 +490,7 @@ void test_stream_ring_shed() {
     graph_t g;
     auto v = g.register_vertex(path_t("/s/log"), role_t::STREAM);
     g.set_ring_source(v, &src);
-    g.set_history_depth(v, 4);
+    (void)g.set_retention(v, tr::graph::retention_t::N, 4);
     {
         src.refuse = true;  // the receiver's own budget declines the reservation
         check(g.write(v, make_value({0x10})).has_value(), "the stream write succeeds");
@@ -523,7 +523,7 @@ void test_ring_reservations_are_symmetric() {
         graph_t g;
         auto v = g.register_vertex(path_t("/s/sym"), role_t::STREAM);
         g.set_ring_source(v, &src);
-        g.set_history_depth(v, 3);
+        (void)g.set_retention(v, tr::graph::retention_t::N, 3);
         for (int i = 0; i < 10; ++i) check(g.write(v, make_value({0x20})).has_value(), "write");
         check(src.live == 3, "the trim released every entry the depth intent dropped");
         const auto held = g.ring_reserved_bytes(v);
@@ -547,8 +547,8 @@ void test_ring_sources_are_isolated_per_vertex() {
     auto b = g.register_vertex(path_t("/iso/b"), role_t::STREAM);
     g.set_ring_source(a, &dry);
     g.set_ring_source(b, &healthy);
-    g.set_history_depth(a, 4);
-    g.set_history_depth(b, 4);
+    (void)g.set_retention(a, tr::graph::retention_t::N, 4);
+    (void)g.set_retention(b, tr::graph::retention_t::N, 4);
 
     dry.refuse = true;
     check(g.write(a, make_value({0x30})).has_value(), "the exhausted receiver's write succeeds");
@@ -574,7 +574,8 @@ void test_ring_best_effort_sheds_oldest_with_a_gap() {
     graph_t g;
     auto v = g.register_vertex(path_t("/s/gap"), role_t::STREAM);
     g.set_ring_source(v, &pool, /*reliable=*/false);
-    g.set_history_depth(v, 64);  // depth intent far past what the byte bound can fund
+    (void)g.set_retention(v, tr::graph::retention_t::N,
+                          64);  // depth intent far past what the byte bound can fund
 
     int seen = 0;
     (void)g.subscribe(path_t("/s/gap"), count_cb, &seen);
@@ -614,7 +615,7 @@ void test_ring_reliable_answers_backpressure() {
     graph_t g;
     auto v = g.register_vertex(path_t("/s/rel"), role_t::STREAM);
     g.set_ring_source(v, &src, /*reliable=*/true);
-    g.set_history_depth(v, 4);
+    (void)g.set_retention(v, tr::graph::retention_t::N, 4);
     check(g.write(v, make_value({0x40})).has_value(), "a funded write lands normally");
     check(g.history(v)->size() == 1, "…and queues its entry");
 
@@ -648,7 +649,7 @@ void test_stream_shed_append_no_redelivery() {
     graph_t g;
     auto v = g.register_vertex(path_t("/s/shed"), role_t::STREAM);
     g.set_ring_source(v, &src);
-    g.set_history_depth(v, 4);
+    (void)g.set_retention(v, tr::graph::retention_t::N, 4);
     std::vector<std::uint8_t> seen;
     (void)g.subscribe(path_t("/s/shed"), record_cb, &seen);
 
@@ -698,7 +699,7 @@ void test_stream_shed_is_counted() {
     graph_t g;
     auto v = g.register_vertex(path_t("/s/counted"), role_t::STREAM);
     g.set_ring_source(v, &src);
-    g.set_history_depth(v, 4);
+    (void)g.set_retention(v, tr::graph::retention_t::N, 4);
     constexpr int kSubs = 3;
     int seen = 0;
     for (int i = 0; i < kSubs; ++i) (void)g.subscribe(path_t("/s/counted"), count_cb, &seen);
@@ -785,7 +786,7 @@ void test_stream_drain_defer() {
     std::printf("stream drain — an OOM propagate defers the batch, never loses it:\n");
     graph_t g;
     auto v = g.register_vertex(path_t("/s/tail"), role_t::STREAM);
-    g.set_history_depth(v, 8);
+    (void)g.set_retention(v, tr::graph::retention_t::N, 8);
     int count = 0;
     (void)g.subscribe(path_t("/s/tail"), count_cb, &count);
     (void)g.assign(v, make_value({0x01}));

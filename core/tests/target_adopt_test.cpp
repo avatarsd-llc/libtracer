@@ -195,7 +195,7 @@ void test_stream_target() {
     graph_t g;
     const auto s = g.register_vertex(path_t("/c/src"), role_t::STORED_VALUE);
     const auto t = g.register_vertex(path_t("/c/log"), role_t::STREAM);
-    g.set_history_depth(t, 4);
+    (void)g.set_retention(t, tr::graph::retention_t::N, 4);
     check(g.subscribe(path_t("/c/src"), path_t("/c/log")).has_value(), "wire src -> log");
     check(g.write(s, byte_value(0x31)).has_value() && g.write(s, byte_value(0x32)).has_value(),
           "two writes land");

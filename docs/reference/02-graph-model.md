@@ -588,11 +588,11 @@ parameters** ([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/doc
 
 | what | who supplies it | how |
 | ---- | ---- | ---- |
-| STREAM ring depth | the application — a retention *intent* no peer and no injected resource can supply | `graph_t::set_history_depth(v, keep)` |
+| STREAM ring depth | the application — a retention *intent* no peer and no injected resource can supply | `graph_t::set_retention(v, retention_t::N, depth)` |
 | the ring's *capacity* | the vertex's **own** injected `mem::block_source_t` — the intent above is bounded in **bytes** by it, and a shortfall surfaces as a shed-with-gap or as backpressure, never as a silent shrink | the source injected at that vertex, never a shared pool |
 | copy-or-share threshold (bytes) | the deployment — a copy/share trade ([ADR-0042](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md) §3, [RFC-0028](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0028-lean-value-path.md) §5.3); defaults to `config_t::kShareThresholdBytes` | `graph_t::set_share_threshold_bytes(v, bytes)` |
 
-`set_history_depth` is a **host-only intent** and stays one: it is declared on the vertex that
+`set_retention` is a **host-only intent** and stays one: it is declared on the vertex that
 **holds** the ring — which, since [RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md)
 §4.6.1, is the **receiving** vertex of the party that wants depth, not a producer's fan-out edge.
 A subscriber that wants a queue makes its own target vertex a STREAM and sizes it with its own
