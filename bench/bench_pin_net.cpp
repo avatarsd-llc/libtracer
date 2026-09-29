@@ -17,13 +17,12 @@
  * half is where the latency win is supposed to live. A heap-backed receiver can measure only
  * the second: `heap_backend` never refuses, so no arm can ever show the cost of holding a
  * segment. Backing the receiver with `sync_pool_t` over a fixed slab makes the first
- * observable on the host too: a pinned value holds its whole RX slot for its lifetime, so
+ * observable on the host too: a shared value holds its whole RX slot for its lifetime, so
  * `available()` is a free-slot floor and `dropped_rx()` is backpressure onset, both sampled
- * while the load runs. It also puts `segment_bytes` under the bench's control, because the
- * transport sizes its RX segment at `min(kMaxDatagram, backend->max_segment_size())` — which
- * is the ONLY lever that makes §3.D's predicate reachable at a sane K (on the default heap
- * backend the segment is 65,536 B whatever the datagram's length, so a 1 KB payload needs
- * K >= 64 before it pins at all).
+ * while the load runs. It also puts the RX segment size under the bench's control, because the
+ * transport sizes it at `min(kMaxDatagram, backend->max_segment_size())` — on the default heap
+ * backend it is 65,536 B whatever the datagram's length, which is the hold a share of even a
+ * small payload costs (RFC-0028 §5.3's retention hazard, the consumer's number to price).
  *
  * One recv thread allocates from the pool, so `sync_pool_t`'s mutex is uncontended here and
  * ADR-0060 Erratum 1's multi-thread pool collapse is not in play — and it is identical in
@@ -33,24 +32,22 @@
  *
  * The subscriber reports `pins` / `copies` by segment-pointer identity between the stored
  * value and the RX segments the backend handed out — an outcome, available with or without
- * `LIBTRACER_PIN_INSTRUMENT`. An arm that intends to pin and reports zero pins invalidates its
+ * `LIBTRACER_PIN_INSTRUMENT`. An arm that intends to share and reports zero pins invalidates its
  * own row.
  *
  * @section pin_net_control What the control arm is
  *
- * **Arm B, the SENTINEL arm — this same binary run at `K = tr::graph::kPinNever`**, not a
- * separate pre-RFC build. This source used to double as a build against untouched
- * `origin/main`; RFC-0022 §3.B deleted `settings_t`, so there is no longer a main for it to
- * compile against and that arm is gone permanently. The sentinel arm controls for the thing
- * that is still controllable — the ADR-0041 §2 one-copy store branch, reached on the same
- * binary, the same pool and the same transport as every pinning arm — which is what the paired
- * per-round delta in `collate_pin.py` is taken against.
+ * **Arm B, COPY-ALWAYS — this same binary run at threshold `SIZE_MAX`**: the one-copy store
+ * branch (since RFC-0028 slice 5, into the value's own inline block), reached on the same
+ * binary, the same pool and the same transport as every sharing arm.
  *
- * K reaches the store site through `graph_t::set_pin_payload_ratio`, the owner-declared
- * per-vertex override RFC-0022 §3.D keeps for exactly this: rotating arms inside one process.
+ * The threshold reaches the store site through `graph_t::set_share_threshold_bytes`, the
+ * owner-declared per-vertex copy-or-share threshold (RFC-0028 §5.3), so arms rotate inside one
+ * process.
  *
  * Usage:
- *   bench_pin_net sub <port> <K> <payload_bytes> <slot_bytes> <slots> <ms> [vertices] [label]
+ *   bench_pin_net sub <port> <threshold> <payload_bytes> <slot_bytes> <slots> <ms> [vertices]
+ *                     [label]
  *   bench_pin_net pub <port> <payload_bytes> <count> [vertices]
  */
 #include <atomic>
@@ -200,7 +197,7 @@ class recording_pool_t final : public tr::mem::mem_backend_t {
 /** @brief The delivery-COUNTING receiver process. */
 int run_sub(int argc, char** argv) {
     const std::uint16_t port = static_cast<std::uint16_t>(std::atoi(argv[2]));
-    const std::uint32_t k = static_cast<std::uint32_t>(std::strtoul(argv[3], nullptr, 10));
+    const std::size_t threshold = static_cast<std::size_t>(std::strtoull(argv[3], nullptr, 10));
     const std::size_t payload = static_cast<std::size_t>(std::atoi(argv[4]));
     const std::size_t slot = static_cast<std::size_t>(std::atoi(argv[5]));
     const std::size_t slots = static_cast<std::size_t>(std::atoi(argv[6]));
@@ -219,7 +216,7 @@ int run_sub(int argc, char** argv) {
         return 1;
     }
 
-    // WHY MANY VERTICES. A single STORED_VALUE vertex holds exactly ONE value, so pinning it
+    // WHY MANY VERTICES. A single STORED_VALUE vertex holds exactly ONE value, so sharing it
     // holds exactly ONE RX slot however large the segment is — the pool never gets tight and
     // §6's RAM question cannot be asked at all. The held quantity is `live vertices x
     // segment_bytes`, so the vertex count IS the RAM axis: at `vertices > slots` a pinned
@@ -228,7 +225,7 @@ int run_sub(int argc, char** argv) {
     for (std::size_t i = 0; i < vertices; ++i) {
         const tr::graph::vertex_handle_t v =
             node.register_vertex(path_t("/sensor/blob" + std::to_string(i)), role_t::STORED_VALUE);
-        node.set_pin_payload_ratio(v, k);  // the arm's K, owner-declared (RFC-0022 §3.D)
+        node.set_share_threshold_bytes(v, threshold);  // the arm's threshold, owner-declared
     }
     router.add_child("a", t);
 
@@ -271,8 +268,8 @@ int run_sub(int argc, char** argv) {
     const std::uint64_t n = delivered.load();
 
     std::printf(
-        "RESULT_PINNET\t%s\t%u\t%zu\t%zu\t%zu\t%llu\t%.0f\t%llu\t%llu\t%zu\t%llu\t%zu\t%zu\n",
-        label, k, payload, slot, slots, static_cast<unsigned long long>(n),
+        "RESULT_PINNET\t%s\t%zu\t%zu\t%zu\t%zu\t%llu\t%.0f\t%llu\t%llu\t%zu\t%llu\t%zu\t%zu\n",
+        label, threshold, payload, slot, slots, static_cast<unsigned long long>(n),
         secs > 0 ? static_cast<double>(n) / secs : 0.0,
         static_cast<unsigned long long>(pins.load()),
         static_cast<unsigned long long>(copies.load()), free_floor,
@@ -322,7 +319,7 @@ int main(int argc, char** argv) {
     if (argc >= 8 && std::string_view(argv[1]) == "sub") return run_sub(argc, argv);
     if (argc >= 5 && std::string_view(argv[1]) == "pub") return run_pub(argc, argv);
     std::fprintf(stderr,
-                 "usage: bench_pin_net sub <port> <K> <payload> <slot> <slots> <ms> "
+                 "usage: bench_pin_net sub <port> <threshold> <payload> <slot> <slots> <ms> "
                  "[vertices] [label]\n"
                  "       bench_pin_net pub <port> <payload> <count> [vertices]\n");
     return 2;

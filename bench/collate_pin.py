@@ -11,10 +11,10 @@ carries the same sign in EVERY round.  One flip prints `indistinguishable`, and 
 median separation upgrades that.  See `verdict` for why the test is paired and not an
 unpaired range overlap.
 
-THE CONTROL ARM IS `B-sentinel` (`kControlArm`), the K = 0 arm of the SAME binary.  It was once
-`A-control`, a build of the bench source against untouched origin/main; RFC-0022 §3.B deleted
-`settings_t`, so that build no longer exists and cannot be recreated.  Rows whose arm is the
-control print `control` in the verdict column instead of a delta against themselves.
+THE CONTROL ARM IS `B-copy` (`kControlArm`), the copy-always (threshold `SIZE_MAX`) arm of the
+SAME binary.  The arms are RFC-0028 §5.3 copy-or-share thresholds (the RFC-0022 §3.D pin ratio
+they replaced is gone).  Rows whose arm is the control print `control` in the verdict column
+instead of a delta against themselves.
 """
 import sys
 import statistics
@@ -22,7 +22,7 @@ from collections import defaultdict
 
 
 #: The arm every other arm's paired delta is taken against.  See the module docstring.
-kControlArm = "B-sentinel"
+kControlArm = "B-copy"
 
 
 def rng(xs):
@@ -73,7 +73,7 @@ def main(argv):
     byround = defaultdict(dict)    # (arm, payload, segment) -> {round: p50}
     reach = defaultdict(lambda: [0, 0])  # (arm, payload, segment) -> [pins, copies]
     ks = {}
-    net = defaultdict(list)        # (label, K, payload, slot) -> [(deliv/s, pins, copies, floor, drops)]
+    net = defaultdict(list)        # (label, threshold, payload, slot) -> [(deliv/s, pins, copies, floor, drops)]
 
     for ln in lines:
         f = ln.split("\t")
@@ -95,7 +95,7 @@ def main(argv):
         rounds = max(len(v) for v in grid.values())
         arms = sorted({a for a, _, _ in grid}, key=lambda a: (a != kControlArm, a))
         print(f"\n## Store leg — p50 ns, min/median/max across {rounds} interleaved rounds\n")
-        print("| payload B | segment B | arm | K | p50 min/med/max ns | pins | copies "
+        print("| payload B | segment B | arm | threshold B | p50 min/med/max ns | pins | copies "
               f"| paired delta vs {kControlArm} min/med/max ns | verdict |")
         print("| ---: | ---: | --- | ---: | --- | ---: | ---: | --- | --- |")
         cells = sorted({(p, s) for _, p, s in grid})
@@ -120,7 +120,7 @@ def main(argv):
 
     if net:
         print("\n## Delivered throughput — counted by the RECEIVER process\n")
-        print("| vertices | pool slots | arm | K | payload B | slot B "
+        print("| vertices | pool slots | arm | threshold B | payload B | slot B "
               "| receiver deliv/s min/med/max | delivered | pins | copies "
               "| free-slot floor | rx drops |")
         print("| ---: | ---: | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: |")

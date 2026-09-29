@@ -318,15 +318,14 @@ class op_resolver_t {
      *
      * A non-null @p frame_view marks the frame as OWNING (delivered as a
      * refcounted `view_t` over the same bytes the arena borrows — the ADR-0042
-     * receiver seam). Then a WRITE whose payload TLV (`node.wire`) clears the
-     * RFC-0022 §3.D amplification predicate `payload * K >= segment` — `K` being the
-     * target vertex's owner-declared `pin_payload_ratio` when set and
-     * `config_t::kPinPayloadRatio` otherwise — and whose opt byte carries no trailer
-     * bits is stored as a SUBVIEW of the frame — a refcount
-     * bump that pins the whole frame, zero copy. Segment-dominated, trailered, or
-     * span-delivered payloads keep the ADR-0041 one-copy trailer-sliced store,
-     * byte-identical to before; the remote-subscriber return route always keeps
-     * its subscription-scoped one-copy behavior.
+     * receiver seam). Then a WRITE whose payload TLV (`node.wire`) is at least the
+     * target vertex's copy-or-share threshold (RFC-0028 §5.3,
+     * `graph_t::share_threshold_bytes`) and whose opt byte carries no trailer bits is
+     * stored as a SUBVIEW of the frame — a refcount bump that holds the whole frame,
+     * zero copy. Smaller, trailered, or span-delivered payloads take the one-copy
+     * trailer-sliced store, into ONE inline `value_t` block (header plus bytes); the
+     * remote-subscriber return route always keeps its subscription-scoped one-copy
+     * behavior.
      *
      * @param fwd          An arena-decoded request FWD (from `wire::decode_into`).
      * @param inbound      WHERE the request arrived and WHO sent it (@ref inbound_ref_t) —

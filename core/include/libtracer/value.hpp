@@ -31,12 +31,42 @@
  * should not: an outstanding `value_ref_t` pins the block, exactly as the reader's own
  * `shared_ptr` did before (ADR-0069, deferred reclamation).
  *
- * The payload is a LINK CHAIN, not bytes: a `value_t` is what a `rope_t` is to its readers —
- * `links()`, `only()`, `total_length()`, `walk()`, `materialize()` — and the bytes stay where
- * the producer or the transport put them (zero-copy is preserved, ADR-0053 §6). RFC-0028 §5.1's
- * inline-bytes arm ("below the threshold the bytes follow the header") is the copy-or-share
- * policy of slice 5 and is not here. `rope_t` stays the EGRESS and the WRITE type: a caller
- * that needs one clones the links with @ref tr::graph::value_t::rope.
+ * The payload is a LINK CHAIN: a `value_t` is what a `rope_t` is to its readers — `links()`,
+ * `only()`, `total_length()`, `walk()`, `materialize()` — and a SHARED value's bytes stay where
+ * the producer or the transport put them (zero-copy is preserved, ADR-0053 §6). `rope_t` stays
+ * the EGRESS and the WRITE type: a caller that needs one clones the links with
+ * @ref tr::graph::value_t::rope.
+ *
+ * ## The inline arm (RFC-0028 §5.1, slice 5)
+ *
+ * A value BELOW its vertex's share threshold is COPIED, and the copy lands in the value's own
+ * block — no second allocation for the bytes, no third for a segment header:
+ *
+ * ```text
+ * value_t, inline                (one try_alloc; value_t::make_inline)
+ * ┌──────────┬──────────┬─────────┬──────────────┬──────────────────────┬──────────────┐
+ * │ refs u32 │ links=1  │ source* │ view_t link  │ segment_t (embedded) │ bytes[len]   │
+ * └──────────┴──────────┴─────────┴──────────────┴──────────────────────┴──────────────┘
+ * ```
+ *
+ * The one link is an ordinary `view_t` over a `segment_t` embedded in the same block, so the
+ * whole read surface — `links()`, `only()`, `materialize()`, a `rope()` clone a sink keeps —
+ * works unchanged: `view_t` has no owner-less byte form, and a `segment_t` is the smallest
+ * owner it has. That owner is why the block is **80 + len bytes on the host (44 + len on
+ * rv32)** and not the prototype's 24 + len: 16 B header + 24 B link + 40 B segment (12 + 12 +
+ * 20 on rv32). It replaces the copy arm's THREE blocks (the value's link block, the copied
+ * segment's header, its bytes) of the same total size.
+ *
+ * Two lifetimes share the block. `refs` counts VALUE references (slots, handles); the embedded
+ * segment's refcount counts the LINK and every clone of it. The last value reference drops the
+ * link's segment reference and nothing else, and the block goes back to its source when the
+ * segment's count reaches zero — so a `rope_t` a sink cloned out of the value keeps the bytes
+ * alive past the value, exactly as it would for a shared value's segment.
+ *
+ * A rope that is exactly one live inline value's bytes IS that value:
+ * @ref tr::graph::value_t::make adopts it (one reference) instead of drawing a block, which is
+ * how a terminus hands an inline copy to `graph_t::write`'s `rope_t` surface and still publishes
+ * ONE block.
  *
  * ## Ownership
  *
@@ -57,6 +87,7 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <expected>
 #include <new>
 #include <span>
@@ -66,12 +97,46 @@
 #include "libtracer/backend.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/rope.hpp"
+#include "libtracer/segment.hpp"
 #include "libtracer/view.hpp"
 
 namespace tr::graph {
 
 using tr::view::rope_t;
 using tr::view::view_t;
+
+/**
+ * @brief The reclaimer of an inline value's embedded segment (RFC-0028 §5.1, slice 5).
+ *
+ * One process-wide instance, @ref inline_value_backend. It allocates nothing: its only job is
+ * the last segment reference's `destroy`, which hands the WHOLE block — header, link, segment
+ * and bytes — back to the `block_source_t` the value was drawn from. It is also the identity
+ * that marks a segment as embedded: a segment whose backend is this one lives inside a
+ * `value_t`'s block (`value_t::inline_owner`).
+ */
+class inline_value_backend_t final : public mem::mem_backend_t {
+   public:
+    /** @brief The singleton's name, as census and diagnostics print it. */
+    inline_value_backend_t() noexcept : mem::mem_backend_t("value_inline") {}
+    /** @brief Return the enclosing value block to its source. Defined after `value_t`. */
+    void destroy(view::segment_t* seg) noexcept override;
+    /** @brief The inline bytes follow the segment header, so they are aligned to it. */
+    [[nodiscard]] std::size_t alignment() const noexcept override {
+        return alignof(view::segment_t);
+    }
+};
+
+/**
+ * @brief The one @ref inline_value_backend_t.
+ *
+ * Constructed on first use into static storage and NEVER destroyed: a value released during
+ * static destruction (a graph with static storage duration) still reaches a live reclaimer.
+ */
+[[nodiscard]] inline inline_value_backend_t& inline_value_backend() noexcept {
+    alignas(inline_value_backend_t) static std::byte storage[sizeof(inline_value_backend_t)];
+    static inline_value_backend_t* const b = new (storage) inline_value_backend_t();
+    return *b;
+}
 
 /**
  * @brief One published value: an intrusive refcount, its source, and its link chain, in one
@@ -115,6 +180,15 @@ class value_t {
      *         refused the block.
      */
     [[nodiscard]] static value_t* make(rope_t&& links, mem::block_source_t& source) noexcept {
+        // A rope that is exactly one live inline value's bytes IS that value: adopt it (one
+        // reference) rather than drawing a second block that links to the first.
+        if (links.link_count() == 1) {
+            value_t* const inl = inline_owner(links.links()[0]);
+            if (inl != nullptr && inl->try_retain()) {
+                links = rope_t{};
+                return inl;
+            }
+        }
         const std::span<view_t> in = links.links();
         value_t* v = place(in.size(), source);
         if (v == nullptr) return nullptr;
@@ -137,6 +211,79 @@ class value_t {
         view_t* out = v->slots();
         for (std::size_t i = 0; i < links.size(); ++i) new (out + i) view_t(links[i]);
         return v;
+    }
+
+    /**
+     * @brief The block size an INLINE value of @p len bytes occupies: header, its one link,
+     *        the embedded segment, and the bytes.
+     */
+    [[nodiscard]] static constexpr std::size_t inline_bytes_for(std::size_t len) noexcept {
+        return bytes_for(1) + sizeof(view::segment_t) + len;
+    }
+
+    /**
+     * @brief Mint an INLINE value of @p len bytes — the copy arm of the copy-or-share policy
+     *        (RFC-0028 §5.1 / §5.3): ONE `try_alloc` of `inline_bytes_for(len)` on @p source.
+     *
+     * The bytes are UNINITIALISED: the maker fills them through @ref inline_bytes before it
+     * publishes the value or hands out a reference (the only window in which a value's bytes
+     * may be written). Nothrow (#477): exhaustion is `nullptr`.
+     *
+     * @return The value, holding ONE reference (the caller's), or `nullptr` when @p source
+     *         refused the block or @p len does not fit the header's count.
+     */
+    [[nodiscard]] static value_t* make_inline(std::size_t len,
+                                              mem::block_source_t& source) noexcept {
+        if constexpr (sizeof(std::size_t) > sizeof(std::uint32_t)) {
+            if (len > UINT32_MAX) return nullptr;
+        }
+        void* p = source.try_alloc(inline_bytes_for(len), kAlign);
+        if (p == nullptr) return nullptr;
+        auto* v = new (p) value_t(1, &source);
+        auto* raw = static_cast<std::byte*>(p);
+        auto* seg = new (raw + bytes_for(1)) view::segment_t(
+            &inline_value_backend(),
+            std::span<std::byte>(raw + bytes_for(1) + sizeof(view::segment_t), len));
+        new (v->slots()) view_t{view::segment_ptr_t::adopt(seg), 0, len};
+        return v;
+    }
+
+    /** @brief @ref make_inline over a copy of @p bytes — one block, one `memcpy`. */
+    [[nodiscard]] static value_t* make_copy(std::span<const std::byte> bytes,
+                                            mem::block_source_t& source) noexcept {
+        value_t* v = make_inline(bytes.size(), source);
+        if (v != nullptr && !bytes.empty())
+            std::memcpy(v->inline_bytes().data(), bytes.data(), bytes.size());
+        return v;
+    }
+
+    /**
+     * @brief The inline value whose embedded segment @p link is the WHOLE of, or `nullptr`.
+     *
+     * The backend identity says the segment lives inside a value block; the full-window test
+     * says the link is the value's bytes and not a subview of them (a subview is a different
+     * value, and publishes as a link to this one).
+     */
+    [[nodiscard]] static value_t* inline_owner(const view_t& link) noexcept {
+        view::segment_t* const seg = link.owner.get();
+        if (seg == nullptr || seg->backend != &inline_value_backend()) return nullptr;
+        if (link.offset != 0 || link.length != seg->bytes.size()) return nullptr;
+        return reinterpret_cast<value_t*>(reinterpret_cast<std::byte*>(seg) - bytes_for(1));
+    }
+
+    /** @brief Whether this value's bytes live in its own block (the copy arm). */
+    [[nodiscard]] bool is_inline() const noexcept {
+        return n_ == 1 && slots()[0].owner.get() == embedded_segment() &&
+               embedded_segment()->backend == &inline_value_backend();
+    }
+
+    /**
+     * @brief The inline bytes, WRITABLE — for the maker to fill between @ref make_inline and
+     *        publication. Precondition: @ref is_inline.
+     */
+    [[nodiscard]] std::span<std::byte> inline_bytes() noexcept {
+        assert(is_inline());
+        return embedded_segment()->bytes;
     }
 
     /** @brief Take one more reference. Relaxed: a holder retaining already owns one. */
@@ -164,8 +311,11 @@ class value_t {
      *         (@ref value_storage_t). */
     [[nodiscard]] mem::block_source_t* source() const noexcept { return source_; }
 
-    /** @brief The block's size in bytes: @ref bytes_for of its link count. */
-    [[nodiscard]] std::size_t block_bytes() const noexcept { return bytes_for(n_); }
+    /** @brief The block's size in bytes: @ref inline_bytes_for its length for an inline value,
+     *         else @ref bytes_for its link count. */
+    [[nodiscard]] std::size_t block_bytes() const noexcept {
+        return is_inline() ? inline_bytes_for(slots()[0].length) : bytes_for(n_);
+    }
 
     // ---- the read surface: `rope_t`'s read-only half ------------------------------------
 
@@ -283,6 +433,30 @@ class value_t {
    private:
     template <std::size_t N>
     friend class value_storage_t;
+    friend class inline_value_backend_t;
+
+    /** @brief The segment an inline value embeds, right after its one link (meaningful only
+     *         when @ref is_inline). */
+    [[nodiscard]] view::segment_t* embedded_segment() const noexcept {
+        return reinterpret_cast<view::segment_t*>(
+            const_cast<std::byte*>(reinterpret_cast<const std::byte*>(this)) + bytes_for(1));
+    }
+
+    /**
+     * @brief Take a reference only while one is still held — the weak-to-strong upgrade a
+     *        rope over an inline value's bytes needs, since the rope pins the BLOCK (through
+     *        the segment) but not the VALUE: once the last value reference is gone the value
+     *        is dead, and resurrecting it would publish a link that was already torn down.
+     */
+    [[nodiscard]] bool try_retain() const noexcept {
+        std::uint32_t n = refs_.load(std::memory_order_relaxed);
+        while (n != 0) {
+            if (refs_.compare_exchange_weak(n, n + 1, std::memory_order_acquire,
+                                            std::memory_order_relaxed))
+                return true;
+        }
+        return false;
+    }
 
     /**
      * @brief The last reference's teardown: destroy the links, hand the block back.
@@ -295,6 +469,15 @@ class value_t {
      * ratchet, for a path that runs once per value. One call, in `.text.unlikely`.
      */
     [[gnu::noinline, gnu::cold]] static void destroy(value_t* self) noexcept {
+        if (self->is_inline()) {
+            // The link's segment reference is the block's; move it OUT first, so the view's
+            // own teardown writes nothing into a block its last reference may free. The block
+            // goes back to its source when the segment's count reaches zero — now, or when the
+            // last rope a sink cloned out of this value lets go.
+            view::segment_ptr_t link = std::move(self->slots()[0].owner);
+            self->slots()[0].~view_t();
+            return;  // `link` drops here: inline_value_backend_t::destroy reclaims the block
+        }
         mem::block_source_t* const source = self->source_;
         const std::size_t bytes = self->block_bytes();
         self->~value_t();
@@ -339,6 +522,23 @@ class value_t {
 static_assert(sizeof(value_t) % alignof(view_t) == 0,
               "the links follow the header in the same block, so the header must end on a "
               "link boundary — pad the header explicitly if a member is added");
+static_assert(value_t::bytes_for(1) % alignof(view::segment_t) == 0,
+              "an inline value's segment follows its one link in the same block");
+
+/**
+ * @brief The last segment reference of an inline value: hand the whole block back.
+ *
+ * The header outlives the value on purpose — `refs`, the count and `source` are trivially
+ * destructible and nothing tore them down — so the reclaimer reads `source` here.
+ */
+inline void inline_value_backend_t::destroy(view::segment_t* seg) noexcept {
+    auto* const block = reinterpret_cast<std::byte*>(seg) - value_t::bytes_for(1);
+    const auto* const v = reinterpret_cast<const value_t*>(block);
+    mem::block_source_t* const source = v->source_;
+    const std::size_t bytes = value_t::inline_bytes_for(seg->bytes.size());
+    seg->~segment_t();
+    if (source != nullptr) source->release(block, bytes, value_t::kAlign);
+}
 
 /**
  * @brief An owning reference to a vertex's PUBLISHED value — what @ref graph_t::read and

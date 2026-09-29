@@ -38,10 +38,13 @@
  *   egress-gather  `transport_t::send(iov)` through the BASE default a link inherits when it
  *                  does not override the scatter-gather entry: one block, one whole-frame
  *                  copy per frame (copy ⑨ of the same doc, host form).
- *   ingress-copy   a FWD{WRITE} frame resolved through the terminus (view tier) at the
- *                  default `kPinPayloadRatio` (never pin): the ADR-0041 ownership copy.
- *   ingress-pin    the same frame with the per-vertex ratio set so the payload is PINNED
- *                  (RFC-0022 §3.D / ADR-0042 §3): the copy is a refcount share instead.
+ *   ingress-copy   a FWD{WRITE} frame resolved through the terminus (view tier) whose value
+ *                  TLV is BELOW the vertex's copy-or-share threshold (the build default,
+ *                  `config_t::kShareThresholdBytes`): the ownership copy, landing inline in
+ *                  the value's own block (RFC-0028 §5.1 / §5.3).
+ *   ingress-pin    the SAME arm — same vertex, same default threshold — at a size AT OR ABOVE
+ *                  it: the value links the receive segment (ADR-0042 §3), a refcount share.
+ *                  One arm, two rows: the size alone picks the row (RFC-0028 §6.5's gate).
  *   proto-fanout   the RFC-0028 prototype: ONE block holding {refcount, length, bytes},
  *                  published to a slot and shared to K target slots by refcount, egress as
  *                  a one-entry iov. Allocations per publish are the claim; the ns are the
@@ -248,21 +251,23 @@ std::vector<std::byte> make_write_frame(std::size_t payload_bytes) {
     return frame;
 }
 
-void run_ingress(std::size_t size, bool pin) {
+void run_ingress(std::size_t size) {
     graph_t g;
     const vertex_handle_t v =
         g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
-    // k=4: the value TLV is the bulk of the frame, so `payload * 4 >= segment` at every
-    // size in the ladder; kPinNever (the default) is the copy arm.
-    if (pin) g.set_pin_payload_ratio(v, 4);
     tr::graph::op_resolver_t r(g);
     const std::vector<std::byte> bytes = make_write_frame(size);
+    // ONE arm (RFC-0028 §6.5): the vertex keeps the build's default threshold, and the value
+    // TLV's size alone decides whether this row is the copy or the share. The TLV is the
+    // payload plus its 4-byte header, so 4096 B of payload is already at the host default.
+    const std::size_t tlv = size + 4;
+    const bool share = tlv >= g.share_threshold_bytes(v);
     // The frame segment is minted OUTSIDE the window (a transport would have minted it on
     // receive); the window holds the terminus decode, the write, and the reply assembly —
-    // the last of which is identical across the two arms.
+    // the last of which is identical across the two rows.
     const value_t fx{bytes.size()};
     std::memcpy(fx.seg->bytes.data(), bytes.data(), bytes.size());
-    measure(pin ? "ingress-pin" : "ingress-copy", size, 1, pin ? 0 : 1, [&] {
+    measure(share ? "ingress-pin" : "ingress-copy", size, 1, share ? 0 : 1, [&] {
         const auto fv = tr::wire::tlv_view_t::over(fx.make());
         if (fv) (void)r.resolve(*fv, "cli");
     });
@@ -330,8 +335,7 @@ int main() {
         for (const std::size_t k : kFans) run_local_target(size, k);
         run_producer_own(size);
         run_egress_gather(size);
-        run_ingress(size, false);
-        run_ingress(size, true);
+        run_ingress(size);
         for (const std::size_t k : kFans) run_proto(size, k);
     }
     return 0;

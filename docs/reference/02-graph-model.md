@@ -590,7 +590,7 @@ parameters** ([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/doc
 | ---- | ---- | ---- |
 | STREAM ring depth | the application — a retention *intent* no peer and no injected resource can supply | `graph_t::set_history_depth(v, keep)` |
 | the ring's *capacity* | the vertex's **own** injected `mem::block_source_t` — the intent above is bounded in **bytes** by it, and a shortfall surfaces as a shed-with-gap or as backpressure, never as a silent shrink | the source injected at that vertex, never a shared pool |
-| pin amplification ratio `K` | the deployment — a copy/pin trade ([ADR-0042](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md) §3, [RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.D) | `graph_t::set_pin_payload_ratio(v, k)` |
+| copy-or-share threshold (bytes) | the deployment — a copy/share trade ([ADR-0042](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md) §3, [RFC-0028](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0028-lean-value-path.md) §5.3); defaults to `config_t::kShareThresholdBytes` | `graph_t::set_share_threshold_bytes(v, bytes)` |
 
 `set_history_depth` is a **host-only intent** and stays one: it is declared on the vertex that
 **holds** the ring — which, since [RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md)
@@ -607,7 +607,7 @@ owner-side configuration.
 **Nothing is inherited** (§3.F). A declaration reaches exactly the vertex it names: there is no
 ancestor walk, no cached ancestor reference, and no propagation question when a parent's
 configuration changes after its children exist. Both readers therefore stay a single inline load
-off the vertex's own extension block — `pin_payload_ratio` is read on every view-delivered write
+off the vertex's own extension block — `share_threshold_bytes` is read on every view-delivered write
 and the ring depth on every STREAM store, so a walk on either path would be disqualifying under
 this project's latency-first ordering.
 
@@ -619,10 +619,12 @@ two magnitudes on it, which is the only case storage itself pays for.
 
 #### The pin is a BORROW, and the application owns the budget
 
-`K` is the surface on which an application declares *whether borrowing is permitted at all*, so
-what the borrow costs belongs here rather than in a footnote:
+The copy-or-share threshold ([RFC-0028](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0028-lean-value-path.md) §5.3) is the surface on which an application
+declares *which values may borrow at all* — a trailer-less written value of at least that many
+bytes is shared, a smaller one is copied into the value's own block — so what the borrow costs
+belongs here rather than in a footnote:
 
-**A pinned value borrows its inbound RX segment for its whole lifetime.** Not for the delivery
+**A shared (pinned) value borrows its inbound RX segment for its whole lifetime.** Not for the delivery
 window — for as long as it remains the vertex's last-known value. On a pooled RX backend that
 borrow is a **pool slot**, i.e. receive capacity, unavailable to the transport until the value is
 displaced or the vertex dies. The library makes the deferred release *safe* — segment refcounts
@@ -632,26 +634,31 @@ retention pattern. This is the same division as the embedder-driven `collect()` 
 same Stage-2 posture as user-pinned memory ([09](09-memory-substrate.md)): the library guarantees
 safety, the embedder decides when and whether.
 
-The quantity to size against is therefore **`live pinned values × segment_bytes`**. `K` bounds
-the waste *per value*; it never bounds the *number* of values, so **no value of `K` is a remedy
-for a retain-heavy workload** — a workload that retains twenty pinned values holds twenty
-segments at every `K` that pins it at all. That is measured, not argued: at the ESP32-C6 RX
-geometry (1 KiB slots, 24 slots) every pinning arm — `K` ∈ {2, 4, 8, 16, ∞} — drove a 29-slot
-pool to a free-slot floor of **0** with ~10⁶ dropped datagrams the moment the live vertex count
-crossed the slot count, while the sentinel arm held a floor of 28 and zero drops across the same
-sweep ([`bench/README.md` §"RFC-0022 §6 — receive-pool occupancy"](https://github.com/avatarsd-llc/libtracer/blob/main/bench/README.md)).
+The quantity to size against is therefore **`live shared values × segment_bytes`**. No knob on a
+single value bounds the *number* of values, so **no threshold is a remedy for a retain-heavy
+workload** — a workload that retains twenty shared values holds twenty segments. That is measured,
+not argued: at the ESP32-C6 RX geometry (1 KiB slots, 24 slots) every pinning arm of the retired
+RFC-0022 §3.D ratio — `K` ∈ {2, 4, 8, 16, ∞} — drove a 29-slot pool to a free-slot floor of **0**
+with ~10⁶ dropped datagrams the moment the live vertex count crossed the slot count, while the
+never-pin arm held a floor of 28 and zero drops across the same sweep
+([`bench/README.md` §"RFC-0022 §6 — receive-pool occupancy"](https://github.com/avatarsd-llc/libtracer/blob/main/bench/README.md)).
 
-Class guidance, which is also why the shipped default is the sentinel on **both** targets:
+Class guidance ([RFC-0028](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0028-lean-value-path.md) §11 ruling 2 — the threshold is a per-build trait on a narrow
+target):
 
 | class | posture | why |
 | ---- | ---- | ---- |
-| **NARROW** | set the sentinel — never pin | a fixed, small RX pool cannot fund an indefinite borrow; same off-by-default-on-NARROW posture as the [RFC-0027](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0027-label-switched-path-compression.md) label table |
-| **MID / WIDE** | may borrow freely | the pool is large relative to the retained set, and the borrow *is* the zero-copy latency win |
+| **NARROW** | copy always (`SIZE_MAX`) — the ESP-IDF component's binding | a fixed, small RX pool cannot fund an indefinite borrow; same off-by-default-on-NARROW posture as the [RFC-0027](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0027-label-switched-path-compression.md) label table |
+| **MID / WIDE** | the host default, 4,096 B — share at or above it | the pool is large relative to the retained set, and above the knee the borrow *is* the zero-copy latency win |
+
+Below the threshold the copy costs **one** allocation: the bytes land inline in the value's own
+block, after its header ([RFC-0028](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0028-lean-value-path.md) §5.1 — 80 B of header, link and embedded
+segment on the host, 44 B on rv32, plus the bytes).
 
 Note the asymmetry this exposes: latency is bought per *write*, but the RAM is paid per *retained
 value*. A vertex that is written constantly and read constantly borrows one slot; a config vertex
-written once at boot borrows one slot **forever**. Long-held vertices are the ones to leave on
-the sentinel, whatever the class.
+written once at boot borrows one slot **forever**. Long-held vertices are the ones to set to copy
+always, whatever the class.
 
 ### Owner-declared application fields (`settings.app`)
 

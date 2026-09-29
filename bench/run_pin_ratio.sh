@@ -9,11 +9,10 @@
 # that produced the recorded 55.2 / 53.0 / 149.8 M deliv/s swing on identical code, and nothing
 # here does that.
 #
-# THE CONTROL ARM IS B-sentinel, in this same binary. It used to be a second binary built from
-# this same source against untouched origin/main; RFC-0022 §3.B deleted `settings_t`, so that
-# build no longer exists and cannot be recreated. B-sentinel controls for what is still
-# controllable — the one-copy store branch, on the same binary as every pinning arm — and
-# collate_pin.py takes every other arm's verdict as a paired per-round delta against it.
+# THE CONTROL ARM IS B-copy (copy-always, threshold SIZE_MAX), in this same binary: the one-copy
+# store branch, on the same binary as every sharing arm. The other arms are RFC-0028 §5.3
+# copy-or-share thresholds (T<n>) and share-always (C-share). collate_pin.py takes every other
+# arm's verdict as a paired per-round delta against B-copy.
 #
 #   run_pin_ratio.sh <bench-dir> [rounds] > raw.tsv
 #
@@ -24,7 +23,7 @@ set -euo pipefail
 BIN="${1:?bench build dir}"
 ROUNDS="${2:-10}"
 
-ARMS="B-sentinel,D2,D4,D8,D64,D1024,C-pin-always"
+ARMS="B-copy,T64,T256,T1024,T4096,C-share"
 
 # Reachability before numbers, every run.
 "$BIN/bench_pin_ratio" --calibrate || { echo "calibration FAILED" >&2; exit 2; }

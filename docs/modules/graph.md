@@ -53,7 +53,7 @@ enum class delivery_mode_t { IF_NEWER, UNCONDITIONAL, EXPLICIT };
 // There is NO per-vertex settings type. RFC-0022 §3.B deleted `settings_t` outright: four
 // of its seven knobs were inert, `durability` became the subscription's (below), and the two
 // survivors are construction parameters an OWNER declares — see set_history_depth /
-// set_pin_payload_ratio. Nothing is inherited (§3.F).
+// set_share_threshold_bytes (RFC-0028 §5.3). Nothing is inherited (§3.F).
 
 struct delivery_policy_t {  // ONE subscription's delivery policy (RFC-0022 §3.A) — 2 B packed
     std::uint16_t bits;     // 0-1 reliability | 2-4 priority | 5 durability_request | 6-15 rsvd
@@ -119,8 +119,8 @@ class graph_t {
                                          bool reliable = false);
     result_t<std::size_t>   ring_reserved_bytes(vertex_handle_t) const;
     result_t<std::uint64_t> stream_gaps        (vertex_handle_t) const;
-    void          set_pin_payload_ratio (vertex_handle_t, std::uint32_t k);
-    std::uint32_t pin_payload_ratio     (vertex_handle_t) const noexcept;
+    void          set_share_threshold_bytes(vertex_handle_t, std::size_t bytes);
+    std::size_t   share_threshold_bytes    (vertex_handle_t) const noexcept;
 
     // composed reads — they build a value, so they return one
     result_t<rope_t> read_children_folded(vertex_handle_t) const;
@@ -158,7 +158,7 @@ temporary lambda does not compile.
 
 ```{admonition} `ctx` lives until the reclamation policy's grace point — and the library tells you when
 :class: important
-`unsubscribe` **deactivates** the slot (`core/include/libtracer/graph.hpp:1855`); a
+`unsubscribe` **deactivates** the slot (`core/include/libtracer/graph.hpp:1846`); a
 delivery already in flight snapshotted the edge and completes, and the `{fn, ctx}` pair is
 the one leg of that snapshot the library owns no copy of. So "when may I free `ctx`?" is answered by this build's **reclamation policy**
 ([ADR-0080](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0080-reclamation-policy-is-a-build-time-closed-per-target-seam.md),
@@ -175,7 +175,7 @@ The hook runs exactly once, on your thread, outside every graph lock: **inline, 
 **before the enclosing `write()` returns** when you called it from inside one. The
 one-argument overload retires the edge identically and simply carries no signal — which is
 sufficient whenever you unsubscribe from outside a callback, since that call is already
-quiescent on return (`core/include/libtracer/graph.hpp:1814` states the bound on `ctx`).
+quiescent on return (`core/include/libtracer/graph.hpp:1805` states the bound on `ctx`).
 ```
 
 ```{admonition} No strings on the hot path
@@ -225,8 +225,8 @@ for (...) g.write(v, p.field(), setpoint_tlv);           // hot loop — zero st
 ## What a read hands back
 
 `read` and `await` return `result_t<value_ref_t>`, not `result_t<rope_t>`
-(`core/include/libtracer/graph.hpp:1429,1635` by handle, `:2266,2272` by path;
-`value_ref_t` at `core/include/libtracer/value.hpp:359`). A `value_ref_t` is an **owning
+(`core/include/libtracer/graph.hpp:1429,1626` by handle, `:2257,2263` by path;
+`value_ref_t` at `core/include/libtracer/value.hpp:559`). A `value_ref_t` is an **owning
 reference** to the value the vertex published: the LKV slot holds one intrusive `value_t*`
 — a refcount, the link count and the link chain in a single block drawn from the vertex's
 `block_source_t` — so handing that reference back costs one refcount increment instead of
@@ -297,7 +297,7 @@ seam and delivers in one step. Only the sweep **root** is judged. The same amend
 vertex answers an `await` with its `on_read`-composed value instead of `NOT_FOUND`.
 
 `set_delivery_mode(v, mode)` sets that per-vertex policy. It is a wiring-time host API call,
-in the same family as `set_history_depth`, `set_pin_payload_ratio` and `set_app_fields` — an
+in the same family as `set_history_depth`, `set_share_threshold_bytes` and `set_app_fields` — an
 owner declaration with no wire surface.
 
 | `delivery_mode_t` | An ancestor's sweep includes this vertex |
@@ -738,6 +738,19 @@ a reply already being assembled.
 ```{doxygenclass} tr::graph::value_storage_t
 :project: libtracer
 :members:
+```
+
+```{doxygenclass} tr::graph::inline_value_backend_t
+:project: libtracer
+:members:
+```
+
+```{doxygenfunction} tr::graph::inline_value_backend
+:project: libtracer
+```
+
+```{doxygenfunction} tr::graph::saturate_threshold
+:project: libtracer
 ```
 
 ### Edges

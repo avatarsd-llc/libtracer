@@ -178,29 +178,27 @@ struct arena_node {
      *        `nullopt` when the frame is borrowed (no owning view to pin).
      *
      * The eligibility test
-     * (opt-in, size, trailer-less) is `own_or_ref_tlv`'s — this only produces the rope.
+     * (size, trailer-less) is `share_or_copy_tlv`'s — this only produces the rope.
      */
     [[nodiscard]] std::optional<rope_t> pin_wire(const view_t* frame_view) const {
-        if (frame_view == nullptr) return std::nullopt;
+        // No OWNING segment — a borrowed, span-delivered frame — means nothing to share: a
+        // subview of an owner-less view would store bytes whose lifetime nobody holds.
+        if (frame_view == nullptr || !frame_view->owner) return std::nullopt;
         const std::span<const std::byte> w = node().wire;
         const std::size_t off = static_cast<std::size_t>(w.data() - frame_view->bytes().data());
         return rope_t(frame_view->subview(off, w.size()));
     }
 
     /**
-     * @brief The bytes a pin would KEEP ALIVE (RFC-0022 §3.D's `segment_bytes`): the owning
-     *        segment's ALLOCATED size, not the delivered frame view's length.
-     *
-     * A subview shares the segment's refcount, so the segment is freed only when the last
-     * subview dies — the held quantity is `owner->bytes.size()`, whatever window the transport
-     * narrowed the frame to. `udp_transport_t` makes the gap concrete: it receives into a
-     * `kMaxDatagram` (64 KB) segment and delivers a length-`n` window, so a 200-byte datagram's
-     * payload pins 64 KB. 0 when there is no owning segment (a borrowed, span-delivered frame),
-     * which the predicate reads as "cannot pin" without ever consulting the ratio.
+     * @brief Copy the trailer-excluded whole TLV into @p out (exactly @ref wire_size bytes) —
+     *        the copy arm's fill of an inline value (RFC-0028 §5.1). One `memcpy`: an arena
+     *        span is contiguous and host-resident.
+     * @retval true always on this tier.
      */
-    [[nodiscard]] std::size_t segment_bytes(const view_t* frame_view) const noexcept {
-        if (frame_view == nullptr || !frame_view->owner) return 0;
-        return frame_view->owner->bytes.size();
+    [[nodiscard]] bool copy_wire_into(std::span<std::byte> out) const noexcept {
+        const std::span<const std::byte> w = node().wire;
+        std::memcpy(out.data(), w.data(), w.size());
+        return true;
     }
 
     /** @brief Forward-only child cursor — the shared shape of `tlv_view_t::children_t`. */
@@ -476,57 +474,73 @@ template <class N>
 }
 
 /**
- * @brief The RFC-0022 §3.D stored-value decision: PIN the payload as a subrope of the owning
- *        delivery (refcount, zero copy) iff `payload_bytes * K >= segment_bytes`, the payload is
- *        trailer-less, AND the reader can pin (`pin_wire`) — the span tier pins a subview of the
- *        contiguous owning `frame_view`, the rope tier a subrope of its own scatter-gather
- *        segments. Otherwise the ADR-0041 §2 one-copy `own_tlv`.
+ * @brief A stored WRITE value as the terminus hands it to `graph_t::write`: the rope, and —
+ *        on the copy arm — the reference that keeps the inline value it names alive until
+ *        the store has adopted it.
  *
- * @param k The amplification ratio (`config_t::kPinPayloadRatio`, or a per-vertex override while
- *          RFC-0022 §6's measurement runs). @ref tr::graph::kPinNever disables pinning outright
- *          and short-circuits before the segment size is even asked for.
+ * The rope over an inline value's bytes pins the BLOCK (through the embedded segment) but not
+ * the VALUE; `value_t::make` adopts the value only while a reference is still held, so the
+ * terminus holds one across the write. On the share arm @ref inline_value is empty.
+ */
+struct stored_tlv_t {
+    rope_t rope;              /**< @brief What `graph_t::write` stores (empty ⇒ BACKPRESSURE). */
+    value_ref_t inline_value; /**< @brief The copy arm's value, held across the write. */
+};
+
+/**
+ * @brief The copy arm: the trailer-excluded whole TLV copied into ONE inline `value_t` block
+ *        drawn from @p source (RFC-0028 §5.1), its opt byte's trailer bits cleared (§4 — the
+ *        stored TLV is trailer-less at rest and self-consistent).
  *
- * @section pin_ratio_why Why a ratio and not an absolute threshold
- *
- * The two branches are asymmetric in RAM, not in correctness: a copy holds the payload, a pin
- * holds the whole owning **segment** for the value's lifetime. An absolute byte threshold
- * (`store_ref_min_bytes`, as this knob was named before RFC-0022 §3.D) prices the payload and
- * never looks at what is held, so a 4 KB payload
- * in a 4 KB frame and the same 4 KB payload in a 256 KB frame — opposite trades — satisfy it
- * identically, and the waste is bounded not at all. The ratio bounds it at `(K-1)x` the payload
- * using two quantities already in hand three lines from the branch.
- *
- * @section pin_ratio_segment What `segment_bytes` is
- *
- * `N::segment_bytes` answers the ALLOCATED size of the segment(s) a pin would keep alive, not
- * the length of the delivered frame view. On a real transport those differ by orders of
- * magnitude: `udp_transport_t` receives every datagram into a `kMaxDatagram`-sized segment and
- * delivers a length-`n` window over it, so pinning a 1 KB datagram's payload holds 64 KB. Pricing
- * the view length instead would measure a cost nobody pays.
- *
- * The eligibility test lives HERE, one locus for both readers; each reader only produces its
- * pinned rope and answers for its own segment shape. Returns a rope so a multi-link pinned
- * payload keeps its segments.
+ * A reader that cannot copy into a contiguous host span (a rope-tier payload with a DEVICE
+ * link) takes the ADR-0041 §2 `own_tlv` copy through @p flat instead — the pre-slice-5 shape,
+ * and a second block. Exhaustion is the empty rope either way.
  */
 template <class N>
-[[nodiscard]] rope_t own_or_ref_tlv(const N& node, const view_t* frame_view, std::uint32_t k,
+[[nodiscard]] stored_tlv_t copy_tlv(const N& node, mem::block_source_t& source,
                                     mem::mem_backend_t& flat) {
-    if (k != tr::graph::kPinNever && trailer_less(node)) {
-        // 64-bit product: `payload * k` overflows 32 bits at k = pin-always on any real payload,
-        // and an overflowed product decides the branch backwards.
-        const std::uint64_t payload = node.wire_size();
-        const std::uint64_t segment = node.segment_bytes(frame_view);
-        if (segment != 0 && payload * std::uint64_t{k} >= segment) {
-            if (std::optional<rope_t> pinned = node.pin_wire(frame_view)) {
-                LIBTRACER_TICK_PIN();
-                return std::move(*pinned);
-            }
-            LIBTRACER_TICK_PIN_REFUSED();
-            return rope_t(own_tlv(node, flat));
-        }
-    }
     LIBTRACER_TICK_COPY();
-    return rope_t(own_tlv(node, flat));
+    const std::size_t n = node.wire_size();
+    value_ref_t v = value_ref_t::adopt(value_t::make_inline(n, source));
+    if (!v) return {};
+    const std::span<std::byte> out = const_cast<value_t*>(v.get())->inline_bytes();
+    if (!node.copy_wire_into(out)) return {rope_t(own_tlv(node, flat)), value_ref_t{}};
+    out[1] = struct_opt(out[1]);
+    rope_t r;
+    r.append(v->only());  // a segment reference: the store adopts `v` itself through it
+    return {std::move(r), std::move(v)};
+}
+
+/**
+ * @brief The RFC-0028 §5.3 copy-or-share decision for a stored WRITE value (D3): SHARE the
+ *        payload as a subrope of the owning delivery (refcount, zero copy) iff it is at least
+ *        @p threshold bytes, trailer-less, AND the reader can share (`pin_wire`) — the span
+ *        tier shares a subview of the contiguous owning `frame_view`, the rope tier a subrope of
+ *        its own scatter-gather segments. Otherwise the copy arm, @ref copy_tlv: one block.
+ *
+ * @param threshold The target vertex's `share_threshold_bytes` (`config_t::kShareThresholdBytes`
+ *                  unless declared). `0` shares whatever can be shared; `SIZE_MAX` never shares.
+ *
+ * The measured variable is the absolute payload size (RFC-0028 R6), so that is the whole
+ * predicate. What sharing HOLDS — the whole receive segment, for the value's lifetime — is the
+ * retention hazard the threshold exists to price, and it is the consumer's number: a pool-backed
+ * deployment sets its threshold with its pool geometry in mind (RFC-0022 Amendment 2).
+ *
+ * The test lives HERE, one locus for both readers; each reader only produces its shared rope or
+ * its copy. Returns a rope so a multi-link shared payload keeps its segments.
+ */
+template <class N>
+[[nodiscard]] stored_tlv_t share_or_copy_tlv(const N& node, const view_t* frame_view,
+                                             std::size_t threshold, mem::block_source_t& source,
+                                             mem::mem_backend_t& flat) {
+    if (node.wire_size() >= threshold && trailer_less(node)) {
+        if (std::optional<rope_t> shared = node.pin_wire(frame_view)) {
+            LIBTRACER_TICK_PIN();
+            return {std::move(*shared), value_ref_t{}};
+        }
+        LIBTRACER_TICK_PIN_REFUSED();
+    }
+    return copy_tlv(node, source, flat);
 }
 
 /**
@@ -894,28 +908,19 @@ template <class N>
                     egress);  // OK, empty payload
             }
 
-            // The stored written value: ADR-0041 §2 one ownership copy, trailer-sliced by
-            // construction (§4 — an arriving CRC/TS trailer is NOT stored; stored TLVs are
-            // trailer-less at rest, ADR-0035) — or, when RFC-0022 §3.D's amplification ratio
-            // says the payload dominates the segment it would pin, an ADR-0042 §3 pinned
-            // subrope of the frame (refcount, zero copy; multi-link on the rope tier). An
-            // empty rope is an allocation failure.
-            //
-            // K comes from the vertex's owner-declared u32 when set and from
-            // `config_t::kPinPayloadRatio` otherwise. The per-vertex override exists ONLY so
-            // RFC-0022 §6's arms rotate inside ONE process: measuring them as separate
-            // binaries is what produced the 2.8x swing on identical code that the standing
-            // interleave rule was written against. §3.D's landing form is the config constant
-            // alone, and the sentinel is both defaults — so this branch changes no observable
-            // behaviour by itself. Whether the override survives at all is a live maintainer
-            // question (#774); the name now at least says what the value is.
-            const std::uint32_t pin_k = graph.pin_payload_ratio(v) != 0
-                                            ? graph.pin_payload_ratio(v)
-                                            : tr::graph::kPinPayloadRatio;
-            const rope_t value = own_or_ref_tlv(payload_node, frame_view, pin_k, flat);
-            if (value.total_length() == 0) return write_error(status_t::BACKPRESSURE);
+            // The stored written value, by the vertex's copy-or-share threshold (RFC-0028
+            // §5.3): below it, ONE inline block holding a trailer-sliced copy (§4 — an
+            // arriving CRC/TS trailer is NOT stored; stored TLVs are trailer-less at rest,
+            // ADR-0035); at or above it, an ADR-0042 §3 shared subrope of the frame
+            // (refcount, zero copy; multi-link on the rope tier). An empty rope is an
+            // allocation failure.
+            const stored_tlv_t value =
+                share_or_copy_tlv(payload_node, frame_view, graph.share_threshold_bytes(v),
+                                  graph.control_source(), flat);
+            if (value.rope.total_length() == 0) return write_error(status_t::BACKPRESSURE);
 
-            result_t<void> w = graph.write(v, has_field ? field : field_path_t{}, value, subject);
+            result_t<void> w =
+                graph.write(v, has_field ? field : field_path_t{}, value.rope, subject);
             // RFC-0004 Amendment 2's whole effect, in one line: the write ran (or was
             // refused by the ACL, or failed) and the terminus stays silent either way. The
             // origin loses per-write backpressure feedback — `or_backpressure` never runs on

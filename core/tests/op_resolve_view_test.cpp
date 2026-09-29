@@ -276,18 +276,18 @@ int main() {
     }
 
     // ADR-0053 ⑤ / ADR-0042 §3 — the rope-tier referenced store: a view-delivered
-    // MULTI-LINK payload on a vertex that opted in (pin_payload_ratio > 0) is PINNED
-    // as a subrope of the delivery (its segments kept, ZERO copy), yet byte-identical
-    // to the copy a default vertex makes. The arena tier proves the contiguous-frame
-    // twin in op_resolve_test's store_ref_threshold; here the payload spans many links.
+    // MULTI-LINK payload at or above the vertex's share threshold is SHARED as a
+    // subrope of the delivery (its segments kept, ZERO copy), yet byte-identical to the
+    // copy a default vertex makes. The arena tier proves the contiguous-frame twin in
+    // op_resolve_test's share_threshold_store; here the payload spans many links.
     {
-        std::printf("rope-tier pinned store (pin_payload_ratio, multi-link payload):\n");
+        std::printf("rope-tier shared store (share_threshold_bytes, multi-link payload):\n");
         graph_t g;
         tr::graph::vertex_handle_t v =
             g.register_vertex(path_t("/sensor/blob"), role_t::STORED_VALUE);
-        // Opt in through the OWNER-side declaration (RFC-0022 §3.B withdrew the wire knob),
+        // Declare a threshold the 36 B TLV clears, OWNER-side (there is no wire knob),
         // matching the arena test.
-        g.set_pin_payload_ratio(v, 8);
+        g.set_share_threshold_bytes(v, 32);
 
         std::vector<std::byte> big(32);
         for (std::size_t i = 0; i < big.size(); ++i) big[i] = static_cast<std::byte>(i);
@@ -311,6 +311,34 @@ int main() {
         check(rd.has_value() && (*rd)->flatten().bytes().size() == big_tlv.size() &&
                   std::memcmp((*rd)->flatten().bytes().data(), big_tlv.data(), big_tlv.size()) == 0,
               "pinned store reads back byte-identical to the written VALUE TLV");
+    }
+
+    // The same fragmented payload BELOW the threshold (the host default) is gathered into ONE
+    // inline value block — one memcpy per link, no flatten block, no segment of its own.
+    {
+        std::printf("rope-tier copied store (below threshold, multi-link payload):\n");
+        graph_t g;
+        tr::graph::vertex_handle_t v =
+            g.register_vertex(path_t("/sensor/blob"), role_t::STORED_VALUE);
+        std::vector<std::byte> big(32);
+        for (std::size_t i = 0; i < big.size(); ++i) big[i] = static_cast<std::byte>(i);
+        std::vector<std::byte> big_tlv;
+        tr::wire::emit_tlv(big_tlv, type_t::VALUE, opt_t{}, big);
+        const auto wframe =
+            b_fwd(fwd_op_t::WRITE, b_path({"sensor", "blob"}), b_path({"reply-ep"}), {}, big_tlv);
+        std::vector<std::size_t> every_byte;
+        for (std::size_t i = 1; i < wframe.size(); ++i) every_byte.push_back(i);
+        op_resolver_t r(g);
+        const auto view = tr::wire::tlv_view_t::over(rope_split(wframe, every_byte));
+        check(view.has_value() && r.resolve(*view).has_value(),
+              "rope-tier WRITE below threshold produced a reply");
+        const auto rd = g.read(v);
+        check(rd.has_value() && (*rd)->is_inline() &&
+                  (*rd)->block_bytes() == tr::graph::value_t::inline_bytes_for(big_tlv.size()),
+              "multi-link payload below threshold => ONE inline block");
+        check(rd.has_value() && (*rd)->only().bytes().size() == big_tlv.size() &&
+                  std::memcmp((*rd)->only().bytes().data(), big_tlv.data(), big_tlv.size()) == 0,
+              "the gathered copy reads back byte-identical to the written VALUE TLV");
     }
 
     // Remote subscribe — a :subscribers[] APPEND over a link (inbound_link set)

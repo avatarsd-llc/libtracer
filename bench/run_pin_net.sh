@@ -8,17 +8,14 @@
 # leaves this script is the count the SUBSCRIBER observed landing in its graph, never the
 # publisher's send rate. Arms rotate per round, for the same reason as run_pin_ratio.sh.
 #
-# THE CONTROL ARM IS B-sentinel, run from the same binary at K = 0 (`tr::graph::kPinNever`).
-# It used to be a second binary built against untouched origin/main; RFC-0022 §3.B deleted
-# `settings_t`, so that build no longer exists and cannot be recreated. What B-sentinel
-# controls for is the one-copy store branch on the same binary, pool and transport as every
-# pinning arm.
+# THE CONTROL ARM IS B-copy, run from the same binary at the copy-always threshold (SIZE_MAX):
+# the one-copy store branch on the same binary, pool and transport as every sharing arm. The
+# other arms are RFC-0028 §5.3 copy-or-share thresholds (T<n>) and share-always (C-share).
 #
-# The subscriber's RX backend is a bounded pool, so a pinned value holds a whole RX SLOT for
-# its lifetime and `available()` becomes a measurable free-slot floor. That is the only lever
-# that makes §3.D reachable at a defensible K at all: on the default heap backend the RX
-# segment is `kMaxDatagram` (65,536 B) whatever the datagram's length, so a 1 KB payload needs
-# K >= 64 before it pins.
+# The subscriber's RX backend is a bounded pool, so a shared value holds a whole RX SLOT for
+# its lifetime and `available()` becomes a measurable free-slot floor — the retention hazard
+# the threshold prices. On the default heap backend the RX segment is `kMaxDatagram`
+# (65,536 B) whatever the datagram's length.
 #
 # VERTICES is the RAM axis. A single STORED_VALUE vertex holds one value, so pinning it holds
 # one RX slot however big the segment; the held quantity is `live vertices x segment_bytes`.
@@ -40,26 +37,25 @@ COUNT="${COUNT:-200000}"
 WINDOW_MS="${WINDOW_MS:-6000}"
 
 # THE A/A NULL IS AN ARM, NOT A POST-HOC ESTIMATE. `B2-null` is a byte-for-byte duplicate of
-# `B-sentinel` — same K = 0, same binary, same pool, same transport — rotated through the same
-# interleave. The B-sentinel-vs-B2-null spread at a given (vertices, payload, slot) cell IS the
+# `B-copy` — same threshold, same binary, same pool, same transport — rotated through the same
+# interleave. The B-copy-vs-B2-null spread at a given (vertices, payload, slot) cell IS the
 # instrument's null, and no pinning-arm delta narrower than it may be quoted. It has to be an
 # in-band arm here because collate_pin.py's paired sign test covers only the store-leg table:
 # RESULT_PINNET carries no round index, so the net table is unpaired min/med/max and per-round
 # pairing is unavailable on this leg.
 #
-# D16 exists because the predicate is `payload * K >= segment_bytes`. At slot = 1024 a 512 B
-# payload pins from K >= 2, but a 64 B payload needs K >= 16 — without D16 the 64 B sweep would
-# have NO arm that pins below C-pin-always and its D-rows would be vacuous.
+# The threshold is absolute, so an arm shares a payload iff the payload TLV is at least its
+# threshold: T64 shares every payload in the default sweep, T512 the 512 B and larger ones, and
+# T4096 (the host default) only the largest.
 #
-# arm : K
+# arm : threshold (18446744073709551615 = SIZE_MAX, copy always)
 ARMS=(
-    "B-sentinel:0"
-    "B2-null:0"
-    "D2:2"
-    "D4:4"
-    "D8:8"
-    "D16:16"
-    "C-pin-always:4294967295"
+    "B-copy:18446744073709551615"
+    "B2-null:18446744073709551615"
+    "T64:64"
+    "T512:512"
+    "T4096:4096"
+    "C-share:0"
 )
 
 VERTEX_SET="${VERTEX_SET:-1 8 32 128}"

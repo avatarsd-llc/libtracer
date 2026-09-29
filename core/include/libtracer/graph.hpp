@@ -1585,35 +1585,26 @@ class graph_t {
      *         non-conforming). `SCHEMA_NOT_FOUND` on a non-STREAM role. */
     [[nodiscard]] result_t<std::uint64_t> stream_gaps(vertex_handle_t v) const;
     /**
-     * @brief Declare @p v's RFC-0022 §3.D pin amplification ratio `K` (ADR-0042 §3);
-     *        @ref tr::graph::kPinNever (0, the default) disables pinning on this vertex.
+     * @brief Declare @p v's copy-or-share threshold in bytes (RFC-0028 §5.3, D3): a written
+     *        value of at least @p bytes is SHARED, one below it is COPIED.
      *
-     * @p k is a RATIO, not a byte count. A view-delivered WRITE is stored as a refcounted
-     * SUBVIEW of the inbound frame — no allocation, no copy — iff
-     * `payload_bytes * k >= segment_bytes` and the payload is trailer-less; otherwise it
-     * takes the one-copy trailer-sliced store. Pinning holds the WHOLE inbound segment for
-     * the value's lifetime, so it buys latency and pays in RAM bounded at `(k-1)x` the
-     * payload; that trade is a deployment call, which is why this is an owner-side
-     * declaration and not, since RFC-0022 §3.B, a remotely writable knob. Nothing is
-     * inherited (§3.F).
+     * At the terminus, a view-delivered, trailer-less WRITE of at least @p bytes is stored as
+     * a refcounted link to the inbound receive segment — no allocation for the bytes, no
+     * copy; a smaller one (or one carrying a CRC/TS trailer, or one whose reader cannot
+     * share) is copied into the value's own block, ONE allocation of header plus bytes
+     * (`value_t::make_inline`). `0` shares always; `SIZE_MAX` copies always. Owner-side, never
+     * over the wire, and nothing is inherited (RFC-0022 §3.F). A vertex that never declared
+     * one answers @ref tr::graph::config_t::kShareThresholdBytes.
      *
-     * What "for the value's lifetime" costs on a POOLED RX backend: the pin is a **borrow** of
-     * a pool slot — receive capacity — held until the value is displaced, not merely for the
-     * delivery window. The library keeps that deferred release safe (atomic segment refcounts);
-     * the APPLICATION owns the occupancy budget, since only it knows the pool geometry and the
-     * retention pattern. Size against `live pinned values x segment_bytes`: @p k bounds the
-     * waste per value and never the number of values. Declaring a non-sentinel @p k on a
-     * long-held vertex — a config vertex, a rarely-updated setpoint — is exactly the shape that
-     * starves a small pool. See @ref tr::graph::config_t::kPinPayloadRatio for the target-class
-     * guidance (NARROW sets the sentinel; WIDE/MID may borrow freely).
-     *
-     * @note This is a per-vertex OVERRIDE of `config_t::kPinPayloadRatio`, which Amendment 2
-     *       fixes at the sentinel on both targets. It exists so §6-style measurement arms
-     *       rotate inside one process — measuring them as separate binaries is what produced
-     *       a 2.8x swing on identical code. Setting it IS the opt-in for that vertex; the
-     *       override's existence changes nothing shipped, since both defaults are the sentinel.
+     * What sharing costs on a POOLED RX backend: the shared value **borrows** a pool slot —
+     * receive capacity — until it is displaced, not merely for the delivery window. The
+     * library keeps that deferred release safe (atomic segment refcounts); the APPLICATION owns
+     * the occupancy budget, since only it knows the pool geometry and the retention pattern.
+     * Size against `live shared values x segment_bytes`. A low threshold on a long-held vertex
+     * — a config vertex, a rarely-updated setpoint — is exactly the shape that starves a small
+     * pool; see @ref tr::graph::config_t::kShareThresholdBytes for the target-class defaults.
      */
-    void set_pin_payload_ratio(vertex_handle_t v, std::uint32_t k);
+    void set_share_threshold_bytes(vertex_handle_t v, std::size_t bytes);
     /**
      * @brief Block until the vertex's value changes or @p timeout elapses; return the value.
      *
@@ -2276,15 +2267,14 @@ class graph_t {
     [[nodiscard]] std::optional<vertex_handle_t> find(std::span<const std::byte> key) const;
 
     /**
-     * @brief @p v's declared RFC-0022 §3.D pin amplification ratio `K` (ADR-0042 §3);
-     *        @ref tr::graph::kPinNever (0) ⇒ this vertex never pins.
+     * @brief @p v's copy-or-share threshold in bytes (RFC-0028 §5.3): what it declared with
+     *        @ref set_share_threshold_bytes, else @ref tr::graph::config_t::kShareThresholdBytes.
      *
      * The read accessor the opaque handle does not expose directly: the WRITE resolver
      * (`%op_resolve_walk.hpp`) queries it here instead of dereferencing the vertex. One
-     * inline load, and nothing is inherited (RFC-0022 §3.F) — a vertex whose owner never
-     * called @ref set_pin_payload_ratio answers 0 whatever its ancestors hold.
+     * inline load, and nothing is inherited (RFC-0022 §3.F).
      */
-    [[nodiscard]] std::uint32_t pin_payload_ratio(vertex_handle_t v) const noexcept;
+    [[nodiscard]] std::size_t share_threshold_bytes(vertex_handle_t v) const noexcept;
 
     /**
      * @brief Find-or-create the vertex at @p key (write-creates, RFC-0005).

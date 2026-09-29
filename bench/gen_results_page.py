@@ -321,7 +321,8 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "Counts every allocation and byte one publish costs, stage by stage along the value "
         "path — a local write with callback subscribers, the same write fanned to K target "
         "vertices, a producer handing over its own bytes, a FWD{WRITE} through the terminus "
-        "with and without the pin arm, egress through the base scatter-gather, and the "
+        "below and at-or-above the copy-or-share threshold, egress through the base "
+        "scatter-gather, and the "
         "RFC-0028 one-block prototype — over a warm window of 1,000 publishes.",
         "allocs · heap bytes · payload copies, per publish per stage"),
     instrument_t(
@@ -338,11 +339,11 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
     instrument_t(
         "bench_pin_ratio.cpp", "counted", (),
         "Times the WRITE store leg over a (payload x segment) grid with the copy branch and the "
-        "pinned-subview branch rotating as interleaved arms inside one process, and reports each "
-        "cell's pin/copy split two independent ways so no timing is read off an arm that never "
-        "reached the branch. Pairs with `bench_pin_net.cpp`; the control is the SENTINEL arm "
-        "(`kPinNever`, the one-copy branch) of this same binary, not a separate build — "
-        "RFC-0022 §3.B deleted the pre-RFC knob, so no such build exists.",
+        "shared-subview branch rotating as interleaved copy-or-share THRESHOLD arms inside one "
+        "process (RFC-0028 §5.3), and reports each cell's share/copy split two independent ways "
+        "so no timing is read off an arm that never reached the branch. Pairs with "
+        "`bench_pin_net.cpp`; the control is the copy-always arm (threshold `SIZE_MAX`) of this "
+        "same binary.",
         "ns per store · pins and copies per cell"),
     instrument_t(
         "bench_scale_sweep.cpp", "inproc", (),

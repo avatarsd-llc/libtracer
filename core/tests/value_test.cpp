@@ -26,10 +26,12 @@
 
 #include "libtracer/value.hpp"
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <new>
 #include <span>
 #include <type_traits>
@@ -293,6 +295,104 @@ void test_refusal_is_backpressure() {
 
 }  // namespace
 
+/**
+ * @brief A source that counts every draw and release by size — for the inline arm, whose block
+ *        size depends on the payload, not the link count.
+ */
+class block_meter_t final : public tr::mem::block_source_t {
+   public:
+    block_meter_t() noexcept : block_source_t("block-meter") {}
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        ++draws;
+        last_bytes = bytes;
+        return ::operator new(bytes, std::align_val_t{align}, std::nothrow);
+    }
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        ++releases;
+        released_bytes = bytes;
+        ::operator delete(p, std::align_val_t{align});
+    }
+    std::size_t draws = 0;          /**< @brief Blocks served. */
+    std::size_t releases = 0;       /**< @brief Blocks handed back. */
+    std::size_t last_bytes = 0;     /**< @brief Size of the last draw. */
+    std::size_t released_bytes = 0; /**< @brief Size of the last release (sized reclaim). */
+};
+
+/**
+ * @brief RFC-0028 §5.1's inline arm (slice 5): a copied value is ONE block of header + link +
+ *        embedded segment + bytes; a rope a sink cloned out of it keeps the block alive past
+ *        the value; a rope that is exactly a live inline value's bytes is adopted by `make`.
+ */
+void test_inline_arm() {
+    std::printf("inline arm:\n");
+    const std::array<std::byte, 20> bytes{std::byte{0xC3}, std::byte{0x01}, std::byte{0x02}};
+    if constexpr (sizeof(void*) == 8) {
+        check(value_t::inline_bytes_for(0) == 80,
+              "the inline overhead on the host is 80 B: 16 header + 24 link + 40 segment");
+    } else {
+        check(value_t::inline_bytes_for(0) == 44,
+              "the inline overhead on a 32-bit target is 44 B: 12 header + 12 link + 20 segment");
+    }
+    std::printf("    inline_bytes_for(0)=%zu  sizeof(segment_t)=%zu\n",
+                value_t::inline_bytes_for(0), sizeof(tr::view::segment_t));
+
+    block_meter_t src;
+    value_t* v = value_t::make_copy(bytes, src);
+    check(v != nullptr && src.draws == 1 && src.last_bytes == value_t::inline_bytes_for(20),
+          "make_copy draws exactly ONE block of inline_bytes_for(len)");
+    check(v->is_inline() && v->link_count() == 1 && v->total_length() == 20 &&
+              v->block_bytes() == value_t::inline_bytes_for(20),
+          "the value is inline, one link long, and knows its block size");
+    check(std::memcmp(v->only().bytes().data(), bytes.data(), bytes.size()) == 0,
+          "the link reads the copied bytes");
+    check(!v->only().is_device() && v->all_host(), "the embedded segment is host memory");
+
+    // make(rope over the value's whole bytes) ADOPTS it: same block, one more reference.
+    {
+        rope_t r;
+        r.append(v->only());
+        value_t* same = value_t::make(std::move(r), src);
+        check(same == v && src.draws == 1 && v->use_count() == 2 && r.link_count() == 0,
+              "a rope over a live inline value's bytes is adopted, not re-drawn");
+        value_t::release(same);
+    }
+    // A SUBVIEW is a different value: it publishes as a link block over this one's segment.
+    {
+        rope_t r;
+        r.append(v->only().subview(1, 4));
+        value_t* sub = value_t::make(std::move(r), src);
+        check(sub != nullptr && sub != v && !sub->is_inline() && src.draws == 2,
+              "a subview rope draws its own link block");
+        value_t::release(sub);
+    }
+
+    // A rope a sink cloned out keeps the BLOCK alive past the last value reference.
+    rope_t kept = v->rope();
+    const std::size_t releases_before = src.releases;
+    value_t::release(v);  // the last VALUE reference
+    check(src.releases == releases_before,
+          "the value is gone but the block is not — the kept rope holds its segment");
+    check(kept.total_length() == 20 &&
+              std::memcmp(kept.links()[0].bytes().data(), bytes.data(), bytes.size()) == 0,
+          "and the kept rope still reads the bytes");
+    // ...and a rope over a DEAD inline value is not resurrected: `make` draws a link block.
+    {
+        rope_t r = kept;
+        value_t* fresh = value_t::make(std::move(r), src);
+        check(fresh != nullptr && fresh != v && !fresh->is_inline(),
+              "a rope over a dead inline value publishes a new link block (no resurrection)");
+        value_t::release(fresh);
+    }
+    kept = rope_t{};
+    check(
+        src.releases == releases_before + 2 && src.released_bytes == value_t::inline_bytes_for(20),
+        "the last segment reference returns the WHOLE inline block, sized");
+
+    // Exhaustion is nullptr by value.
+    tr::mem::null_source_t none;
+    check(value_t::make_inline(8, none) == nullptr, "a refused inline block is nullptr");
+}
+
 int main() {
     std::printf("value_t — one block per publish (RFC-0028 slice 3)\n\n");
     test_shapes();
@@ -300,5 +400,6 @@ int main() {
     test_one_block_per_publish();
     test_handler_sees_value_without_a_draw();
     test_refusal_is_backpressure();
+    test_inline_arm();
     return tr::testing::summary("value");
 }
