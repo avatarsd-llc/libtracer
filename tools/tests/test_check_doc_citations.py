@@ -1299,7 +1299,7 @@ class AmbiguousAnchorGateTest(unittest.TestCase):
     # time (#1308) rather than written down: what the class needs is "a line whose text
     # repeats, which this scope pins down to one", and both halves are asserted below.
     ANCHOR_TEXT = "if (!acl_allows(v, caller, acl_right_t::READ))"
-    SCOPE = "result_t<value_ref_t> graph_t::read("
+    SCOPE = "result_t<value_ref_t> graph_t::read(vertex_handle_t vh, std::string_view caller) const {"
     # The no-false-positive half needs the opposite property: a signature that occurs ONCE.
     UNIQUE_TEXT = "result_t<void> graph_t::create_child(vertex_t* parent, const view_t& spec_value) {"
 
