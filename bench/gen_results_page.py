@@ -317,6 +317,14 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "storm, with a null arm and residual check bracketing every run.",
         "live bytes · blocks, per stage · bytes per vertex"),
     instrument_t(
+        "bench_lean_value_path.cpp", "counted", ("memory",),
+        "Counts every allocation and byte one publish costs, stage by stage along the value "
+        "path — a local write with callback subscribers, the same write fanned to K target "
+        "vertices, a producer handing over its own bytes, a FWD{WRITE} through the terminus "
+        "with and without the pin arm, egress through the base scatter-gather, and the "
+        "RFC-0028 one-block prototype — over a warm window of 1,000 publishes.",
+        "allocs · heap bytes · payload copies, per publish per stage"),
+    instrument_t(
         "bench_failable_census.cpp", "counted", (),
         "Counts the blocks each peer-driven control-plane operation draws from the injected "
         "resource against those that escape to the global heap, and A/Bs the two growable-array "
