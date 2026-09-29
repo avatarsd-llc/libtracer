@@ -1587,6 +1587,11 @@ if(LIBTRACER_NET_PLANE)
     target_link_libraries(router_drop_stats_test PRIVATE libtracer)
     libtracer_test_warnings(router_drop_stats_test)
     add_test(NAME router_drop_stats COMMAND router_drop_stats_test)
+
+    add_executable(fwd_terminus_refusal_reply_test fwd_terminus_refusal_reply_test.cpp)
+    target_link_libraries(fwd_terminus_refusal_reply_test PRIVATE libtracer)
+    libtracer_test_warnings(fwd_terminus_refusal_reply_test)
+    add_test(NAME fwd_terminus_refusal_reply COMMAND fwd_terminus_refusal_reply_test)
 endif()
 
 if(LIBTRACER_NET_PLANE)

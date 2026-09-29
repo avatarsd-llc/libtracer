@@ -90,7 +90,9 @@ struct router_stats_t {
     std::size_t forward_iov_dropped = 0;
     /** @brief Terminus requests dropped because the injected rx source could not serve the
      *         decode arena — `TLV_NESTING_TOO_DEEP`, which RFC-0006 spells as "exceeds this
-     *         receiver's decode resources". The number a deployment grows `rx` against. */
+     *         receiver's decode resources". The number a deployment grows `rx` against. The
+     *         request is still ANSWERED — an addressed `STATUS{BACKPRESSURE}` built on the
+     *         stack from its own bytes (#1612) — so this counts work lost, not silence. */
     std::size_t arena_dropped = 0;
     /** @brief Terminus REPLIES dropped because the resolver assembled an EMPTY rope — an
      *         allocation refusal inside reply assembly, surfaced as `link_count() == 0`. */
@@ -164,7 +166,9 @@ class fwd_router_t {
      *              path, behind no ACL: a `std::pmr::memory_resource` cannot report
      *              exhaustion by value, so on `-fno-exceptions` its only failure mode
      *              is `abort()`. Drawing the arena from a @ref mem::block_source_t
-     *              instead makes an over-large frame a `TLV_NESTING_TOO_DEEP` reject.
+     *              instead makes an over-large frame a `TLV_NESTING_TOO_DEEP` refusal, counted
+     *              as `arena_dropped` and answered with an addressed `STATUS{BACKPRESSURE}`
+     *              that draws from no source at all (#1612).
      *              Appended with a default, so every existing call site is unchanged;
      *              a bounded node points this at the same slab as @p label_src. Must outlive
      *              the router.

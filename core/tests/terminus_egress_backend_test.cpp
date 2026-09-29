@@ -430,9 +430,10 @@ void test_mint_site_draws_from_egress() {
  *        does not abort, and no `kind=RESULT` reply is built on bytes it could not allocate.
  *
  * When egress refuses the RESULT head the rope is empty; `or_backpressure` then tries the error
- * head, which the same refusing backend also declines — so the whole reply cannot be built and
- * the router DROPS it. A drop is the by-value answer here (never an abort). The reachability of
- * the addressed BACKPRESSURE reply — where the error head CAN be built — is the next case.
+ * head, which the same refusing backend also declines — so no reply can be built FROM THE
+ * BACKEND and the router drops the RESULT. Since #1612 the router then answers from the stack:
+ * an addressed `STATUS{BACKPRESSURE}` that reaches no allocator. Never an abort either way. The
+ * backend-built BACKPRESSURE reply — where the error head CAN be allocated — is the next case.
  */
 void test_egress_refusal_is_answered_by_value() {
     std::printf("a terminus READ under a fully-refusing egress backend is answered by value:\n");
@@ -447,8 +448,16 @@ void test_egress_refusal_is_answered_by_value() {
     router.on_frame("in", read_frame());
     check(egress.refusals() > 0,
           "instrument: the egress backend was ASKED and refused (a head alloc really happened)");
-    check(n.in.sent.empty(),
-          "the reply cannot be built at all, so it is DROPPED — by value, never an abort");
+    // Neither head could be built from the egress backend, so the RESULT is dropped (counted
+    // `assemble_dropped`) — and the requester is answered anyway, from the stack: the refusal
+    // reply must not need the memory that just refused (#1612). By value, never an abort.
+    check(n.in.sent.size() == 1,
+          "the RESULT cannot be built, so the requester gets ONE stack-built error reply instead");
+    if (n.in.sent.size() == 1) {
+        const reply_facts_t f = read_reply(n.in.sent[0]);
+        check(f.is_fwd_reply && f.kind_error && f.code == backpressure_code(),
+              "which is the addressed kind=ERROR STATUS{BACKPRESSURE} (#1612)");
+    }
 
     // The positive control: the same request is served once memory returns, so the drop above
     // was the exhaustion and not a frame that never reached the terminus.

@@ -91,7 +91,7 @@ so a device recipe sizes one slab where it used to wire four arguments. Beside i
 failable `rx` source, the `flat` byte backend its rope flattens draw from, the
 `egress` byte backend the terminus reply head draws from, and the `retained`
 backend a remote SUBSCRIBE's two life-of-the-subscription allocations draw from
-(`core/include/libtracer/fwd_router.hpp:270-276`; `egress` is #795 / ADR-0074,
+(`core/include/libtracer/fwd_router.hpp:274-280`; `egress` is #795 / ADR-0074,
 `retained` is #1610 and defaults to `flat` when un-injected, and the
 `max_label_bindings_per_link` bound sits between `flat` and `egress`).
 Each is its own injection because each one's live set is governed by a different

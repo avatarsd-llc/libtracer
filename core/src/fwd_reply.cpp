@@ -172,10 +172,9 @@ rope_t assemble_reply(const reply_route_t& route, reply_kind_t kind,
     return rope;
 }
 
-rope_t assemble_error_reply(const reply_route_t& route, status_t status,
-                            mem::mem_backend_t& egress) {
+std::array<std::byte, kErrorStatusTailBytes> error_status_tail(status_t status) noexcept {
     const std::uint16_t code = std::to_underlying(error_code(status));
-    const std::array<std::byte, 14> tail{
+    return {
         static_cast<std::byte>(std::to_underlying(type_t::STATUS)),
         static_cast<std::byte>(opt_t{.pl = true}.encode()),
         std::byte{10},
@@ -191,6 +190,11 @@ rope_t assemble_error_reply(const reply_route_t& route, status_t status,
         static_cast<std::byte>(code & 0xFFu),
         static_cast<std::byte>(code >> 8),
     };
+}
+
+rope_t assemble_error_reply(const reply_route_t& route, status_t status,
+                            mem::mem_backend_t& egress) {
+    const std::array<std::byte, kErrorStatusTailBytes> tail = error_status_tail(status);
     return assemble_reply(route, reply_kind_t::ERROR, tail, {}, 0, egress);
 }
 
