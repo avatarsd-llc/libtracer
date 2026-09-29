@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0029 |
 | **Title** | One path primitive: the owner-issued `(index, generation)` pair, carried per hop, local = forwarded |
-| **Status** | **draft** (2026-09-29). The design of §§4–11 was **ruled** by the maintainer on 2026-09-29 in [#1631](https://github.com/avatarsd-llc/libtracer/issues/1631) (the issue body and its feasibility comment, rulings 1–4); this document transcribes those rulings in normative form and resolves the one fact the comment left open (§8.2). It proposes nothing that was not ruled, except where a section says so in so many words (§14). |
+| **Status** | **draft** (2026-09-29). The design of §§4–11 was **ruled** by the maintainer on 2026-09-29 in [#1631](https://github.com/avatarsd-llc/libtracer/issues/1631) (the issue body and its feasibility comment, rulings 1–4); this document transcribes those rulings in normative form and resolves the one fact the comment left open (§8.2). The first-fire learn of §7.2, which closes ruling 7's two gaps, was **confirmed by the maintainer on 2026-09-29** and is adopted, not proposed. It proposes nothing that was not ruled, except where a section says so in so many words (§14). |
 | **Author(s)** | AvatarSD (maintainer), with AI drafting |
 | **Created** | 2026-09-29 |
 | **Comment window** | waived by default while solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"); invoke explicitly if outside input is wanted. Verified at drafting: `docs/implementations.md` still lists no registered implementation, so the waiver's revert trigger has not fired. |
@@ -398,7 +398,7 @@ left with no chain forever. **Gap 2 — `subscribe_toward`** (`core/src/fwd_rout
 host-local dual every board→peer wire uses, installs an edge with a string residual and puts
 nothing on the wire at subscribe time, so there is no request leg to learn from.
 
-**Normative — the first-fire learn.** An edge whose target is reached through a link and that
+**Normative — the first-fire learn (ruled 2026-09-29).** An edge whose target is reached through a link and that
 holds **no chain** sends its **first** delivery with a non-empty `src` — a node-local reply endpoint
 the edge owns — so that the terminus answers a `REPLY` whose `src` carries the forward chain per
 §6.2. The edge adopts that chain; every later delivery is `src`-empty as today. A chain the edge
@@ -651,7 +651,7 @@ their number.
 | **S0** | spec | this RFC accepted; §12's text lands (`v1.md`, the reference pages, `CONTEXT.md`, status rows on 0024/0027) | doc gates |
 | **S1** | element + hop arm | `kind = 0x16, len = 8` encoder/decoder; §6's PAIR arm in `route_fwd_ingress` for a `PATH`-spelled `dst` (deref → egress / terminus / refuse); terminus applies `apply_op`; `NOT_FOUND` on every refusal; `0x14` refused as a `dst` | conformance vectors (§13.4); `bench_hop_chain` and `bench_forward_*` level |
 | **S2** | learning | §6.2 reply-`src` accumulation (PAIR or NAME run, never nothing) at hop, terminus and origin; origin adoption into `path_t` (generalised `cache_path_label`), string fallback on `NOT_FOUND`; delete bit 7, `mint_request`, the trailing reply list, `route_bound_forward` | `reply-spread` four-link arm inside the A/A null band (RFC-0024 §8.2 clause 3); round-trip test replacing `path_label_origin_test` |
-| **S3** | delete the table | every §11 row for RFC-0027; `label_peer` and `next_label_peer_bits`; carnation-side `configure_label_mint_table` comment (`tracer_graph.cpp`) | ratchet shows the §11 deltas; `bench_path_label` retired |
+| **S3** | delete the table | every §11 row for RFC-0027; `label_peer` and `next_label_peer_bits` | ratchet shows the §11 deltas; `bench_path_label` retired |
 | **S4** | the bump (§8.2) | `graph_t::restamp`; `remove_child` and point-to-point `link_down` call it; tests: remove + same-name re-add refuses the old pair; link loss + re-up refuses the old pair; the RFC-0014 teardown still works with the double bump | `bound_forward_test` extended; no hot-path change |
 | **S5** | subscriptions (§7) | `PATH_REF_REVERSE` unconditional (no flag); first-fire learn for mount-routed (`graph.cpp:3480`) and `subscribe_toward` edges; the edge's owned reply endpoint; `deliver_remote` unconditional chain-first | `fwd_two_mount_test`, `bound_forward_test` delivery arms; `bench_compact_delivery` level |
 | **S6** | one lookup, one gate (ruling 9) | a NAME-spelled prefix resolves by the tree walk to the connection vertex and `ctx_by_conn_slot` yields the egress; the registry keeps egress state only; **one `allows` site** for both arms of §6 step 3 | `bench_mount_resolve` A/B: the tree walk must not lose to `longest_prefix`'s 25 ns/pass at W = 12, N = 64, or S6 keeps the registry index as an *accelerator* of the same lookup |
@@ -659,8 +659,8 @@ their number.
 | **S8** | shared mounts (§10, ruling 8) | egress **through** a session anchor: a directed per-peer send keyed on the anchor's slot; `bound_egress` admits an anchor; `reverse_hop_ref`'s anchor becomes bidirectional | ws-server multi-peer test; `bench_forward_demux` level |
 
 S1→S2→S3 are ordered; S4 and S5 depend on S1 only; S6, S7, S8 are independent of each other and
-follow S2. Carnation enables none of the three optional mechanisms today (inventory §1), so the
-downstream board pays nothing until it opts into spelling chains.
+follow S2. An embedder that enables none of the three optional mechanisms today pays nothing
+until it opts into spelling chains.
 
 ### 13.3 Ordering against other work
 
@@ -733,9 +733,10 @@ their `dst` bytes and gain the §6.2 `src`.
 1. **`PATH_REF_REVERSE` as a `PATH` too?** §7.1 keeps `0x15`'s bare array (positional, with
    erratum 1's strip). Spelling it as a `PATH` of PAIR/NAME elements would remove the last positional
    list and the last strip rule at +3 B per element. Proposed for S5's review, not ruled.
-2. **The edge's reply endpoint for the first-fire learn** (§7.2): one node-local endpoint per edge,
-   or one per node with the edge identified in the reply's `dst` tail? The per-request return-route
-   pattern #1198 used downstream suggests per edge; the byte cost is one segment.
+2. **The edge's reply endpoint for the first-fire learn** (§7.2 — the learn itself is adopted; only
+   its endpoint shape is open): one node-local endpoint per edge, or one per node with the edge
+   identified in the reply's `dst` tail? A per-edge endpoint is the simpler correlation; the byte
+   cost is one segment.
 3. **Per-boot epoch** (§14) as a complement to §8.2 rule 2, for links whose transport cannot report
    a session boundary.
 4. **`kind = 0x16` or a fresh kind for the 8-byte payload?** Reusing the code with a new length
