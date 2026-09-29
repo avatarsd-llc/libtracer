@@ -1792,6 +1792,19 @@ if(LIBTRACER_TRANSPORT_WS)
 endif()
 
 if(LIBTRACER_TRANSPORT_WS)
+    # RFC-0028 §6.9 / §9 item 6 — the two-frame race on one socket, the guard slice 9 lands
+    # behind: two threads publish onto ONE WS peer (the client's enqueue-then-write queue, and
+    # the server's broadcast + directed doors), and every frame must arrive whole, in each
+    # thread's order, or be dropped and counted. A retained-value queued send is one partial
+    # write away from a torn frame, and nothing else here races two frames onto one socket.
+    add_executable(ws_frame_race_test ws_frame_race_test.cpp)
+    target_link_libraries(ws_frame_race_test PRIVATE libtracer)
+    libtracer_test_warnings(ws_frame_race_test)
+    add_test(NAME ws_frame_race COMMAND ws_frame_race_test)
+    set_tests_properties(ws_frame_race PROPERTIES TIMEOUT 240)
+endif()
+
+if(LIBTRACER_TRANSPORT_WS)
     # #934 car B — the WS OPENING HANDSHAKE is bounded by an injected PRE-AUTH budget: a
     # never-terminated Upgrade request is refused BEFORE it is buffered (measured against the
     # process peak RSS, not inferred), the refusal is counted and closes the link, the honored
