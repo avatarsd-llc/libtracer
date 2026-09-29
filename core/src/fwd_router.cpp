@@ -2507,13 +2507,14 @@ bool fwd_router_t::note_forward(const child_rx_ctx_t* inbound_ctx, bool from_pee
         if (op == graph::fwd_op_t::REPLY) {
             // A reply retracing a forward this hop made: its remaining `dst` is, byte for byte,
             // the `src` the request arrived with, and it is leaving over the link that request
-            // arrived on — which is the whole key.
+            // arrived on — which is the whole key. A reply whose oldest match is a tombstone is
+            // LATE: this hop already answered that request itself, so forwarding it would be a
+            // second answer, and the requester would take it for its next request's. Dropped.
             if (!pending_.any_open()) return true;
             const std::uint32_t key = route_key(cur, rebuilt.rem_dst_off, rebuilt.rem_dst_len);
-            (void)pending_.settle(&child, key, [&](std::span<const std::byte> src) {
+            return pending_.settle(&child, key, [&](std::span<const std::byte> src) {
                 return window_equals(cur, rebuilt.rem_dst_off, rebuilt.rem_dst_len, src);
-            });
-            return true;
+            }) != fwd_pending_t::settle_t::LATE;
         }
         // READ only (#1625): an AWAIT carries its own timeout, and a WRITE stream with acks
         // must not be refused by a table sized for request/response traffic. An empty `src`
@@ -2581,7 +2582,7 @@ std::size_t fwd_router_t::expire_forwards() {
         const auto now = fwd_pending_t::clock_t::now();
         std::size_t answered = 0;
         fwd_pending_t::entry_t e;
-        while (pending_.take_expired(now, e)) {
+        while (pending_.take_expired(now, kForwardDeadline, e)) {
             answer_forward(e, graph::status_t::TIMEOUT);
             ++answered;
         }

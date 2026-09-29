@@ -25,6 +25,13 @@
  *     `tr::transport::down` at once, not at the deadline.
  *  5. **Not a READ** — a WRITE, even one asking for an ack, opens no entry and draws no
  *     timeout: a producer streaming acknowledged writes is never refused by a full table.
+ *  6. **A late reply** — a requester sending one READ at a time, whose first reply arrives
+ *     after the hop already answered it with a timeout: the late reply is dropped (one answer
+ *     per request), and it does not settle the second READ, whose own deadline stays live.
+ *  7. **`remove_child` of the far end** — the same `tr::transport::down` at once as
+ *     `link_down`, through the removal path.
+ *  8. **`remove_child` of the requester** — its open forwards are closed with no answer sent:
+ *     nobody is left to answer.
  */
 
 #include <atomic>
@@ -175,6 +182,27 @@ struct hop_t {
     void read_far() {
         req_ch.a().send(b_fwd(fwd_op_t::READ, b_path({"far", "x"}), b_path({"cli"})));
     }
+
+    /**
+     * @brief The far end answers forwarded frame @p i the way a terminus does: a `RESULT`
+     *        `FWD{REPLY}` to the accumulated `src`, which this hop grew by the requester
+     *        link's mount.
+     * @retval false Frame @p i did not decode.
+     */
+    bool far_answers(std::size_t i) {
+        // Kept alive for the decode: the decoded tree's payload spans view these bytes.
+        const std::vector<std::byte> forwarded = far_end.at(i);
+        const auto fwd = tr::wire::decode(forwarded);
+        if (!fwd || fwd->children.size() < 3) return false;
+        std::vector<std::byte> reply_dst;
+        tr::wire::emit_tlv(reply_dst, type_t::PATH, tr::wire::opt_t{}, fwd->children[2].payload);
+        std::vector<std::byte> kind;
+        const std::byte ok{static_cast<std::uint8_t>(tr::graph::reply_kind_t::RESULT)};
+        tr::wire::emit_tlv(kind, type_t::VALUE, tr::wire::opt_t{},
+                           std::span<const std::byte>(&ok, 1));
+        far_ch.b().send(b_fwd(fwd_op_t::REPLY, reply_dst, b_path({"x"}), {}, kind));
+        return true;
+    }
 };
 
 /** @brief Case 1: a silent far end costs the requester one deadline, then an answer. */
@@ -211,20 +239,7 @@ void test_answered_forward_is_settled() {
     h.read_far();
     check(wait_for([&] { return h.far_end.count() == 1; }, 2s, [] {}),
           "  the READ was forwarded to the far end");
-    // The far end answers the way a terminus does: FWD{REPLY} to the accumulated src, which
-    // this hop grew by the requester link's mount.
-    // Kept alive for the decode: the decoded tree's payload spans view these bytes.
-    const std::vector<std::byte> forwarded = h.far_end.at(0);
-    const auto fwd = tr::wire::decode(forwarded);
-    check(fwd.has_value() && fwd->children.size() >= 3, "  the forwarded frame decodes");
-    if (!fwd || fwd->children.size() < 3) return;
-    const tr::wire::tlv_t& grown_src = fwd->children[2];
-    std::vector<std::byte> reply_dst;
-    tr::wire::emit_tlv(reply_dst, type_t::PATH, tr::wire::opt_t{}, grown_src.payload);
-    std::vector<std::byte> kind;
-    const std::byte ok{static_cast<std::uint8_t>(tr::graph::reply_kind_t::RESULT)};
-    tr::wire::emit_tlv(kind, type_t::VALUE, tr::wire::opt_t{}, std::span<const std::byte>(&ok, 1));
-    h.far_ch.b().send(b_fwd(fwd_op_t::REPLY, reply_dst, b_path({"x"}), {}, kind));
+    check(h.far_answers(0), "  the forwarded frame decodes and the far end answers it");
 
     check(wait_for([&] { return h.client.count() >= 1; }, 2s, [] {}),
           "  the reply reached the requester");
@@ -300,6 +315,79 @@ void test_write_opens_nothing() {
           "  so nothing is ever answered on their behalf");
 }
 
+/** @brief Case 6: a late reply is dropped, and does not settle the requester's next READ. */
+void test_late_reply_is_dropped_not_settling_the_next() {
+    std::printf("a late reply is dropped and leaves the next READ's deadline live:\n");
+    hop_t h;
+    const auto tick = [&] { (void)h.router.expire_forwards(); };
+    // READ A: the far end is slow, so the hop answers A itself at the deadline.
+    h.read_far();
+    check(wait_for([&] { return h.far_end.count() == 1; }, 2s, [] {}),
+          "  READ A was forwarded to the far end");
+    check(wait_for([&] { return h.client.count() >= 1; }, tr::net::kForwardDeadline + 2s, tick),
+          "  A was answered by the hop");
+    if (h.client.count() == 0) return;
+    check(is_error(read_reply(h.client.at(0)), err_t::FLOW_TIMEOUT), "  with tr::flow::timeout");
+
+    // READ B, one at a time: same link, same return route, so the same key as A.
+    const auto t_b = clock_t_::now();
+    h.read_far();
+    check(wait_for([&] { return h.far_end.count() == 2; }, 2s, [] {}),
+          "  READ B was forwarded to the far end");
+    // A's reply finally arrives. It byte-matches B's stored route too.
+    check(h.far_answers(0), "  the far end answers A, late");
+    std::this_thread::sleep_for(50ms);
+    check(h.client.count() == 1, "  the late reply was NOT forwarded: A has exactly one answer");
+    const auto st = h.router.forward_stats();
+    check(st.late == 1, "  it is counted as late");
+    check(st.in_use == 1, "  and B's entry is still open — the late reply did not settle it");
+
+    // B's far end stays silent: B still gets its own bounded answer.
+    check(wait_for([&] { return h.client.count() >= 2; }, tr::net::kForwardDeadline + 2s, tick),
+          "  B was answered too");
+    const long long took = ms_since(t_b);
+    if (h.client.count() < 2) return;
+    check(is_error(read_reply(h.client.at(1)), err_t::FLOW_TIMEOUT),
+          "  with its own tr::flow::timeout");
+    check(took >= tr::net::kForwardDeadline.count(), "  at B's own deadline");
+    std::this_thread::sleep_for(50ms);
+    check(h.client.count() == 2, "  two requests, two answers");
+}
+
+/** @brief Case 7: removing the far child answers its open forwards at once. */
+void test_removed_far_end_resolves_at_once() {
+    std::printf("remove_child of the far end: tr::transport::down at once:\n");
+    hop_t h;
+    h.read_far();
+    check(wait_for([&] { return h.far_end.count() == 1; }, 2s, [] {}),
+          "  the READ was forwarded to the far end");
+    const auto t0 = clock_t_::now();
+    check(h.router.remove_child("far"), "  the far child was removed");
+    check(wait_for([&] { return h.client.count() >= 1; }, 1s, [] {}),
+          "  the requester was answered");
+    const long long took = ms_since(t0);
+    if (h.client.count() == 0) return;
+    check(is_error(read_reply(h.client.at(0)), err_t::TRANSPORT_DOWN),
+          "  with an addressed tr::transport::down");
+    check(took < tr::net::kForwardDeadline.count(), "  at once, not at the deadline");
+    check(h.router.forward_stats().in_use == 0, "  and the entry is closed");
+}
+
+/** @brief Case 8: removing the requester closes its open forwards with no answer. */
+void test_removed_requester_is_forgotten() {
+    std::printf("remove_child of the requester: its forwards close, nothing is sent:\n");
+    hop_t h;
+    h.read_far();
+    check(wait_for([&] { return h.far_end.count() == 1; }, 2s, [] {}),
+          "  the READ was forwarded to the far end");
+    check(h.router.forward_stats().in_use == 1, "  one entry is open");
+    check(h.router.remove_child("req"), "  the requester child was removed");
+    check(h.router.forward_stats().in_use == 0, "  its entry is closed at once");
+    std::this_thread::sleep_for(tr::net::kForwardDeadline + 100ms);
+    check(h.router.expire_forwards() == 0, "  so the deadline finds nothing to answer");
+    check(h.client.count() == 0, "  and nothing was sent to the departed requester");
+}
+
 }  // namespace
 
 int main() {
@@ -313,5 +401,8 @@ int main() {
     test_full_table_refuses_at_once();
     test_departed_far_end_resolves_at_once();
     test_write_opens_nothing();
+    test_late_reply_is_dropped_not_settling_the_next();
+    test_removed_far_end_resolves_at_once();
+    test_removed_requester_is_forgotten();
     return tr::testing::summary("fwd_forward_deadline_test");
 }

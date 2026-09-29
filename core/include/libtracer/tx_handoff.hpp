@@ -20,8 +20,10 @@
  * taken drops the record and the link counts it — the same answer the async server link
  * already gives on an empty TX pool. So no publisher ever waits on another publisher's write.
  *
- * The writer itself still waits on its own write, bounded by the link's write budget exactly
- * as before; what changes is that nobody queues behind it.
+ * The writer itself still waits on I/O: on its own record and then on each record it drains
+ * for the others. Each write is bounded by the link's write budget, and a stream link tears the
+ * peer down after `kMaxConsecutiveStalls` (3) stalled writes in a row, so the writer pays up to
+ * three write windows before the link gives up — never more, and nobody queues behind it.
  */
 #pragma once
 
@@ -54,8 +56,9 @@ namespace tr::net {
  * what hands the writer role back. Records leave in admission order.
  *
  * Slot storage comes from a failable @ref mem::block_source_t (ADR-0065): a slot that cannot
- * grow refuses its record by value, never throws, so the queue is safe on a
- * `-fno-exceptions` profile.
+ * grow refuses its record by value, never throws, so the send path is safe on a
+ * `-fno-exceptions` profile. The array of slot headers itself is a `std::vector` sized once,
+ * on the global heap, at construction — never at send time.
  *
  * @note Thread-safe. The internal mutex is held only for a slot fill (a copy) or an index
  *       step, never across the caller's I/O.

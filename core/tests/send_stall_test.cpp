@@ -39,6 +39,7 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 #include <array>
@@ -48,6 +49,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <memory>
 #include <span>
 #include <string>
 #include <thread>
@@ -502,6 +504,159 @@ void test_second_publisher_never_waits_on_a_stalled_write() {
     ::close(peer);
     ::close(listener);
 }
+
+/**
+ * @brief A dialed `tcp_transport_t` whose accepted peer does not read until told to — the
+ *        fixture for the two queue-delivery cases below.
+ */
+struct parked_peer_t {
+    int listener = -1; /**< @brief The listening socket. */
+    int peer = -1;     /**< @brief The accepted end, which reads only in @ref read_records. */
+    std::unique_ptr<tr::net::tcp_transport_t> link; /**< @brief The link under test. */
+
+    /** @brief Dial with a window of @p window ms and a small peer receive buffer. */
+    explicit parked_peer_t(std::uint32_t window) {
+        listener = ::socket(AF_INET, SOCK_STREAM, 0);
+        const int one = 1;
+        ::setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+        const int small = 4096;
+        ::setsockopt(listener, SOL_SOCKET, SO_RCVBUF, &small, sizeof(small));
+        sockaddr_in local{};
+        local.sin_family = AF_INET;
+        local.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        (void)::bind(listener, reinterpret_cast<sockaddr*>(&local), sizeof(local));
+        (void)::listen(listener, 1);
+        socklen_t llen = sizeof(local);
+        (void)::getsockname(listener, reinterpret_cast<sockaddr*>(&local), &llen);
+        link = std::make_unique<tr::net::tcp_transport_t>(
+            "127.0.0.1", ntohs(local.sin_port), &tr::mem::heap_backend(), /*max_frame=*/0,
+            /*recv_stack=*/0, /*defer_recv=*/false, window);
+        peer = ::accept(listener, nullptr, nullptr);
+        const timeval tv{.tv_sec = 5, .tv_usec = 0};
+        ::setsockopt(peer, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    }
+    ~parked_peer_t() {
+        link.reset();
+        if (peer >= 0) ::close(peer);
+        if (listener >= 0) ::close(listener);
+    }
+    parked_peer_t(const parked_peer_t&) = delete;
+    parked_peer_t& operator=(const parked_peer_t&) = delete;
+
+    /** @brief One record as it arrived: its length and its first byte (the test's marker). */
+    struct record_t {
+        std::size_t len = 0;   /**< @brief Body bytes after the 4-byte length prefix. */
+        std::uint8_t mark = 0; /**< @brief The body's first byte. */
+    };
+
+    /** @brief Read exactly @p n bytes, or fail on EOF / the 5 s receive timeout. */
+    bool read_n(std::byte* dst, std::size_t n) const {
+        std::size_t off = 0;
+        while (off < n) {
+            const ssize_t r = ::recv(peer, dst + off, n - off, 0);
+            if (r <= 0) return false;
+            off += static_cast<std::size_t>(r);
+        }
+        return true;
+    }
+
+    /** @brief Start reading now: collect up to @p want records, in arrival order. */
+    std::vector<record_t> read_records(std::size_t want) const {
+        std::vector<record_t> out;
+        std::vector<std::byte> body;
+        while (out.size() < want) {
+            std::array<std::byte, 4> prefix{};
+            if (!read_n(prefix.data(), prefix.size())) break;
+            const std::size_t len = std::to_integer<std::size_t>(prefix[0]) |
+                                    (std::to_integer<std::size_t>(prefix[1]) << 8) |
+                                    (std::to_integer<std::size_t>(prefix[2]) << 16) |
+                                    (std::to_integer<std::size_t>(prefix[3]) << 24);
+            body.resize(len);
+            if (!read_n(body.data(), len)) break;
+            out.push_back(
+                {len, len == 0 ? std::uint8_t{0} : std::to_integer<std::uint8_t>(body[0])});
+        }
+        return out;
+    }
+};
+
+/**
+ * @brief #1619: every record a publisher queued behind a stalled write reaches the peer, in
+ *        admission order, once the peer reads again.
+ *
+ * The case above proves a queued publisher RETURNS at once; this one proves its record is
+ * not lost. A queue that discarded what it queued would pass the case above and fail here.
+ */
+void test_queued_records_are_all_delivered_in_order() {
+    std::printf("every record queued behind a stalled write is delivered, in order:\n");
+    parked_peer_t p(/*window=*/3000);
+    check(p.link->ok() && p.peer >= 0, "the link is dialed and the peer accepted");
+    const std::vector<std::byte> big(8 * 1024 * 1024, std::byte{0x11});
+    std::atomic<bool> first_done{false};
+    std::thread first([&] {
+        p.link->send(std::span(big));
+        first_done.store(true, std::memory_order_release);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    check(!first_done.load(std::memory_order_acquire), "the first write is parked on the peer");
+    const std::vector<std::byte> a(64, std::byte{0xA1});
+    const std::vector<std::byte> b(64, std::byte{0xA2});
+    p.link->send(std::span(a));
+    p.link->send(std::span(b));
+    check(!first_done.load(std::memory_order_acquire), "two records queued behind it");
+
+    // The peer reads again, well inside the window: the writer finishes its own record and
+    // then drains the two it queued.
+    const std::vector<parked_peer_t::record_t> got = p.read_records(3);
+    first.join();
+    check(got.size() == 3, "all three records reached the peer");
+    if (got.size() == 3) {
+        check(got[0].len == big.size() && got[0].mark == 0x11, "the writer's own record first");
+        check(got[1].len == 64 && got[1].mark == 0xA1, "then the first queued record");
+        check(got[2].len == 64 && got[2].mark == 0xA2, "then the second, in admission order");
+    }
+    check(p.link->dropped_tx() == 0, "and nothing was dropped");
+}
+
+/**
+ * @brief #1619: past the queue's depth a record is dropped and COUNTED, never waited on — and
+ *        only that record: everything queued before it is still delivered.
+ */
+void test_full_queue_drops_and_counts() {
+    std::printf("a full queue drops the next record and counts it:\n");
+    // The queue depth of the single-peer stream senders, `stream_endpoint_t::kTxQueueDepth`.
+    constexpr std::size_t depth = 8;
+    parked_peer_t p(/*window=*/3000);
+    check(p.link->ok() && p.peer >= 0, "the link is dialed and the peer accepted");
+    const std::vector<std::byte> big(8 * 1024 * 1024, std::byte{0x11});
+    std::atomic<bool> first_done{false};
+    std::thread first([&] {
+        p.link->send(std::span(big));
+        first_done.store(true, std::memory_order_release);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    check(!first_done.load(std::memory_order_acquire), "the first write is parked on the peer");
+    const std::uint64_t before = p.link->dropped_tx();
+    for (std::size_t i = 0; i < depth; ++i) {
+        const std::vector<std::byte> rec(64, std::byte{static_cast<std::uint8_t>(0xB0 + i)});
+        p.link->send(std::span(rec));
+    }
+    check(p.link->dropped_tx() == before, "the queue took all of its depth");
+    const auto t0 = clock_t_::now();
+    const std::vector<std::byte> extra(64, std::byte{0xEE});
+    p.link->send(std::span(extra));
+    check(ms_since(t0) < 100, "the record past the depth returned at once");
+    check(p.link->dropped_tx() == before + 1, "and was dropped and counted");
+    check(!first_done.load(std::memory_order_acquire), "while the first write was still parked");
+
+    const std::vector<parked_peer_t::record_t> got = p.read_records(depth + 2);
+    first.join();
+    check(got.size() == depth + 1, "the writer's record and every queued one arrived, no more");
+    bool order = got.size() == depth + 1 && got[0].mark == 0x11;
+    for (std::size_t i = 1; order && i < got.size(); ++i)
+        order = got[i].mark == static_cast<std::uint8_t>(0xB0 + (i - 1));
+    check(order, "in admission order, and the dropped record is not among them");
+}
 }  // namespace
 
 int main() {
@@ -522,6 +677,8 @@ int main() {
     test_max_peers_derivation();
     test_tcp_link_sheds_and_drops_a_stalled_peer();
     test_second_publisher_never_waits_on_a_stalled_write();
+    test_queued_records_are_all_delivered_in_order();
+    test_full_queue_drops_and_counts();
     test_concurrent_directed_sends_share_one_window();
     // The shared runner's verdict, not a hard-coded "all checks passed": this suite used to
     // print that line and `return 0` whatever the counter said, so a red check here could

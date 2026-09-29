@@ -32,7 +32,10 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     stopped reading (it used to wait up to the whole liveness window). Behaviour change: when
     more than `stream_endpoint_t::kTxQueueDepth` (8) records are already waiting behind the
     writer, the next one is dropped and counted in `dropped_tx()` instead of waited on. The
-    writer's own write is still bounded per record by the liveness window (#838).
+    writer still waits on I/O — its own record, then each queued record it drains — bounded per
+    record by the liveness window (#838), and the peer is torn down after
+    `kMaxConsecutiveStalls` (3) stalled writes in a row, so the writer pays at most three
+    windows.
     **Removed:** `stream_endpoint_t::send_all_locked` (protected, no caller) — use
     `handoff_send`.
   - **`fwd_pending.hpp` — `tr::net::fwd_pending_t` and `tr::net::forward_stats_t`, new;
@@ -43,15 +46,19 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     forward at once with `tr::flow::backpressure`. A far end that goes away (`link_down`,
     `remove_child`) has its open forwards answered with `tr::transport::down` at once. The
     forward path sweeps overdue entries whenever it runs; a node whose traffic can go quiet
-    calls `expire_forwards()` from its own loop. Behaviour change: a reply that arrives after
-    the deadline is still forwarded, so the requester sees the timeout first and the late reply
-    second. WRITE forwards (so an acknowledged write stream is never refused by a full
+    calls `expire_forwards()` from its own loop. An entry the hop answered stays behind as a
+    tombstone for one more deadline, and a reply that matches it is LATE: dropped, not
+    forwarded, and counted in `forward_stats_t::late`. So a requester sees exactly one answer
+    per request, a late reply can never settle the requester's next request on the same route,
+    and on a chain of hops the inner hop's own timeout is swallowed by the outer hop that
+    already answered. WRITE forwards (so an acknowledged write stream is never refused by a full
     table), AWAIT forwards (which carry their own timeout), empty-`src` forwards (no reply asked
     for), bound (`PATH_REF`) destinations and requests arriving from a bus peer are not tracked.
   - **`config.hpp` — `kForwardDeadline` (250 ms), `kForwardPendingSlots` (16) and
     `kForwardRouteBytes` (128), new traits; `tr::net::kForwardDeadline`, new.** The table's RAM
     is fixed at build time, about `kForwardPendingSlots * (kForwardRouteBytes + 48)` bytes per
-    router on a 64-bit host (2,816 B at the defaults). `kForwardPendingSlots = 0` removes the
+    router: 2,856 B at the defaults on a 32-bit target (rv32, 176 B per entry) and 3,048 B on a
+    64-bit host (184 B per entry). `kForwardPendingSlots = 0` removes the
     table and the deadline. A forward whose two routes exceed `kForwardRouteBytes` is forwarded
     unbounded and counted in `forward_stats_t::untracked`.
 

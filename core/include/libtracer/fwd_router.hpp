@@ -440,7 +440,9 @@ class fwd_router_t {
      * The forward path calls this itself whenever it runs and an entry is open, so a busy
      * node needs nothing more. A node whose traffic can go quiet while a forward is open
      * calls it from its own periodic loop (every `kForwardDeadline / 2` or so); the router
-     * has no thread of its own. Safe from any thread; it sends with no router lock held.
+     * has no thread of its own. It takes only the table's own lock and sends with no router
+     * lock held; the send carries the same transport-lifetime caveat as any forward (the
+     * requester link is checked `retired` first, not pinned — RFC-0014 S5).
      *
      * @return How many overdue requests were answered.
      */
@@ -1632,22 +1634,6 @@ class fwd_router_t {
                            const child_rx_ctx_t* inbound_ctx, bool from_peer, Observe&& observe,
                            Reject&& reject, Terminus&& terminus, Reply&& reply);
     /**
-     * @brief The forward hop, read entirely by OFFSET — no decoded tree (ADR-0038 inv. #1).
-     *
-     * Strips the leading `dst` segment, prepends the inbound-link NAME to `src` (unless a
-     * REPLY), and scatter-gather-sends onward via @p child. @p child is the transport the
-     * first `dst` segment already resolved to. Templated over the grammar `Cursor` (ADR-0053
-     * ④b): a @ref wire::grammar::span_cursor reads a contiguous frame (byte-identical to the
-     * pre-rope path, zero heap — a stack `iov` array), a @ref wire::grammar::rope_cursor reads
-     * a scatter-gather frame (the egress gathers each region's per-link sub-spans into a
-     * @ref mem::block_array_t drawn from the injected `rx_` — still no payload copy, and
-     * exhaustion DROPS the frame rather than throwing, matching the reply path's own
-     * failable-seam gather (#596, #1570)).
-     *
-     * @tparam Cursor A grammar byte-source cursor (span or rope).
-     * @param cur     The cursor positioned at the inbound FWD frame's first byte.
-     */
-    /**
      * @brief The forward hop's pending-reply bookkeeping (#1625): open an entry for a
      *        forwarded request that asked for a reply, settle one for a forwarded reply, and
      *        answer any entry already overdue.
@@ -1655,8 +1641,9 @@ class fwd_router_t {
      * Out of line and called once from `route_fwd_forward` so the pinned hop body gains
      * one call and nothing else. Reads only offsets the peek and the rebuild already found.
      *
-     * @retval false The table was full: the requester has been answered with
-     *               `BACKPRESSURE` and the caller must not forward the request.
+     * @retval false The caller must not forward the frame: either the table was full and
+     *               the requester has been answered with `BACKPRESSURE`, or the frame is a
+     *               LATE reply to a request this hop already answered itself.
      */
     template <class Cursor>
     [[gnu::noinline]] bool note_forward(const child_rx_ctx_t* inbound_ctx, bool from_peer,
@@ -1675,6 +1662,22 @@ class fwd_router_t {
      */
     void settle_forwards_via(const transport_t* link);
 
+    /**
+     * @brief The forward hop, read entirely by OFFSET — no decoded tree (ADR-0038 inv. #1).
+     *
+     * Strips the leading `dst` segment, prepends the inbound-link NAME to `src` (unless a
+     * REPLY), and scatter-gather-sends onward via @p child. @p child is the transport the
+     * first `dst` segment already resolved to. Templated over the grammar `Cursor` (ADR-0053
+     * ④b): a @ref wire::grammar::span_cursor reads a contiguous frame (byte-identical to the
+     * pre-rope path, zero heap — a stack `iov` array), a @ref wire::grammar::rope_cursor reads
+     * a scatter-gather frame (the egress gathers each region's per-link sub-spans into a
+     * @ref mem::block_array_t drawn from the injected `rx_` — still no payload copy, and
+     * exhaustion DROPS the frame rather than throwing, matching the reply path's own
+     * failable-seam gather (#596, #1570)).
+     *
+     * @tparam Cursor A grammar byte-source cursor (span or rope).
+     * @param cur     The cursor positioned at the inbound FWD frame's first byte.
+     */
     template <class Cursor>
     void route_fwd_forward(std::string_view inbound_name, const child_rx_ctx_t* inbound_ctx,
                            bool from_peer, std::size_t strip_k, const Cursor& cur,
