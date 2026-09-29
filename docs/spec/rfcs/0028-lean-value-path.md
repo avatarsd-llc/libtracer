@@ -240,8 +240,9 @@ is the one it defaults to. `hazard_slot_t` already serves a host whose reads of 
 vertex contend across many cores. What is missing is the policy for a single-writer build,
 not a guard on this one.
 
-**Instead.** `single_writer_slot_t` (§5.5): `std::atomic<value_t*>` exchange on publish; the
-read is `load` + `retain` inside `config_t::reader_guard_t` — a trait that is an
+**Instead.** `single_writer_slot_t` (§5.5): a `value_t*` swapped **inside** `config_t::reader_guard_t`
+on publish, with the displaced value's `release` run after the guard closes; the read is
+`load` + `retain` inside the same guard — a trait that is an
 interrupt-masked critical section on the single-core RTOS build (`tr::esp::critical_guard_t`),
 an address-striped one-word lock whose contender sleeps on the host (`mutex_guard_t`), and
 nothing at all on a build that selects the hazard slot. **As landed in slice 1 (PR #1628)**
@@ -396,6 +397,15 @@ value_t                      (from the vertex's block_source_t; one try_alloc pe
 **Cost per publish** (host, measured on the prototype, §7.2): **1 allocation of 24 + size
 bytes** (16 B header on rv32), independent of K and of stage.
 
+**As landed in slice 3** ([PR #1639](https://github.com/avatarsd-llc/libtracer/pull/1639)) the
+block is the **link-chain form only**: a header `{refs u32, n u32, source*}` — **16 B on the
+host, 12 B on rv32**, no `flags` word yet — followed by `view_t links[n]` (24 B / 12 B each), so
+a one-link publish is **40 B host / 24 B rv32** and a multi-link rope IS a `value_t` shape (its
+links, verbatim). This corrects the layout above for the shipped slice because `view_t` has no
+owner-less byte form, so there is nothing for an inline arm to be a view *over* until slice 5
+(D3) adds the copy-or-share decision; the "24 + size" figure and the `bytes[len]` arm are that
+slice's prototype, not slice 3's.
+
 ### 5.2 The path
 
 ```text
@@ -481,10 +491,15 @@ retires it) and 0.70–0.76× on `mixed/0/6/128`; `single_writer_slot_t` over th
 of one shared vertex contend across many cores, and the per-value node goes away only with
 slice 3's intrusive `value_t`, at which point the hazard default is re-measured, not assumed.
 
-`single_writer_slot_t::store` is one exchange and one `release` after the guard closes;
-`::load` is `reader_guard_t g; p = slot.load(acquire); retain(p);`. Under `kSingleWriter` a
-debug build asserts the publishing thread's identity on the vertex (not in slice 1; lands
-with slice 3). No slot policy may spin when `!kSpinWaitSafe`; the assertion is on the policy
+`single_writer_slot_t::store` takes the guard, swaps the one-word `value_t*` inside it, and runs
+the displaced value's `release` after the guard closes; `::load` is
+`reader_guard_t g; p = slot.load(acquire); retain(p);`. **The writer takes the guard too, on
+every build, `kSingleWriter` included** — as landed in slice 3, correcting the draft's "one
+exchange on publish": a reader's *load-then-retain* is two steps, and a writer that swaps and
+releases between them frees a block the reader is about to retain, however few words the slot
+is, so the guard exists to keep the writer's `release` out of that window, not to serialize
+writers. Under `kSingleWriter` a debug build asserts the publishing thread's identity on the
+vertex (not landed; deferred past slice 3). No slot policy may spin when `!kSpinWaitSafe`; the assertion is on the policy
 (`S::may_spin`, landed), so a future policy cannot forget it.
 
 **One Sync vocabulary, not two.** `reader_guard_t` and the pool's `Sync` policy
@@ -518,8 +533,8 @@ refuses it when `!kSpinWaitSafe`.
 
 | | host today | host after | rv32 today | rv32 after (estimate — measured at slice 3's gate) |
 | --- | ---: | ---: | ---: | ---: |
-| `vertex_t` | 96 | 88 | 72 | 64 |
-| held value (wrapper + payload header) | 104 + 40 | 24 | 52 + 20 | 16 |
+| `vertex_t` | 96 | 88 (measured, slice 3) | 72 | **72** (measured, slice 3 — the draft's 64 was wrong) |
+| held value (wrapper + payload header) | 104 + 40 | 40 for one link at slice 3 (16 B header + one 24 B link); 24 is slice 5's inline arm | 52 + 20 | 24 for one link at slice 3 (12 + 12); 16 is slice 5's inline arm |
 | `subscriber_remote_t` | 120 | 56 | ~72 | ~32 |
 | `handlers_t` | 216 | 96 | ~120 | ~56 |
 | `value_handlers_t` | 96 | 48 | ~52 | ~28 |
@@ -528,8 +543,11 @@ The `vertex_t` saving is the slot (the 16 B `shared_ptr` that `single_writer_slo
 since slice 1 — the same width as the `atomic<shared_ptr>` it replaced, so slice 1 left
 `vertex_t` at 96 / 72 B and `kMaxVertexBytes64/32` where they were — becomes an 8 B
 `value_t*` at slice 3) and the sequence (8 → 4 B, slice 8); the ratchets in `config.hpp`
-(`kMaxVertexBytes64/32`) move down with it, never up. The "after" column is reached at slice
-8, not slice 1.
+(`kMaxVertexBytes64/32`) move down with it, never up. Slice 3 moved `kMaxVertexBytes64` 96 → 88
+and left `kMaxVertexBytes32` at 72: on rv32 the `shared_ptr` was two 4 B words and the
+`value_t*` is one, but the 4 B it frees is absorbed by the struct's 8 B alignment padding, so
+the measured size does not move until another 4 B member goes (slice 8's sequence). The
+"after" column is reached at slice 8, not slice 1.
 
 ## 6. Step 4 — slices
 
@@ -569,16 +587,21 @@ wire-neutral. Retired.
 
 ### 6.3 Slice 3 — `value_t` replaces the wrapper (D1, D9's first half; closes #1624's P1)
 
-One block per publish; `value_ref_t` over it; `hazard_slot_t` ported to raw pointers; the pmr
-channel, `src_mr_`, `try_make_lkv` and the six pmr control-plane containers of D1 deleted
-(`link_index_` and family onto `block_array_t`). Lands **after the refusal car** (§6 intro).
-**Gate:** `local-cb` stays at 1 allocation and drops from 104 B to ≤ 40 B; every existing
-bench within its A/A band. **Risk: medium-high** — every slot policy and `read_stored` caller
-moves, and the hazard domain's retire list holds a raw `value_t*`: a retire that outlives the
-block's last `release`, or a `release` that races a hazard scan, is a **use-after-free**, the
-class that ADR-0069's `shared_ptr` node made unreachable by construction. The slice-1 tests
-(`lkv_slot_test`, `lkv_slot_inversion`) are rewritten a second time for the raw-pointer
-contract, and the slice adds an ASan run of the T=24 read bench to its gate (§9 item 7).
+**Landed** as [PR #1639](https://github.com/avatarsd-llc/libtracer/pull/1639). One block per
+publish (`value.hpp`); `value_ref_t` over it; both slot policies speak `value_t*` — `store`
+**adopts** the reference it is handed, `load()` returns a `value_ref_t`; the pmr channel,
+`src_mr_` and `try_make_lkv` deleted **on the value path**. Two corrections to the draft, as
+built: (1) **`hazard_slot_t` keeps its node indirection** — the slot still holds
+`atomic<node_t*>` and the 16 B node owns one reference to the value (`node_t{const value_t* v;
+next}`), released when the node is recycled or destroyed — because that is what keeps a hazard
+scan that misses a reader, or a `release` racing the retire list, from freeing a block a reader
+holds: the value's last owner is always a node or a handle, never "whoever released last", so
+the use-after-free class the draft named stays unreachable by construction and the ASan gate is
+moot; (2) **the six pmr control-plane containers (`link_index_` and family) did not move** —
+they are not on the value path, and their `block_array_t` port is a separate car under §6.3a–e.
+**Gate, as run:** `local-cb` 1 allocation, 104 B → **40 B**; `kMaxVertexBytes64` 96 → 88;
+`bench_forward_heap` zero-alloc PASS; symbol ratchet PASS (`dispatch_edge` +0, `edge_view_t`
+48 B); the slot tests (`lkv_slot_test`, `lkv_slot_inversion`) rewritten for the adopt contract.
 
 #### 6.3a–e — the structural mints (D9's registration half; closes #1608)
 
@@ -710,8 +733,8 @@ per-publish heap to the value's own 24 + size; the indicative time from 2,458 ns
 library copy), which is why the 64 KB row is fill-bound.
 
 What the prototype does **not** measure, and the slices must: the ACL gate and admission
-filter on the target leg (unchanged code, run on a shared block), the hazard slot over raw
-pointers (slice 3), and the rv32 sizes of §5.7.
+filter on the target leg (unchanged code, run on a shared block), and the rv32 sizes of §5.7
+(slice 3 measured `vertex_t` at 72 B on rv32, not the 64 B estimated).
 
 ### 7.3 Reproducing
 
@@ -773,8 +796,9 @@ are unaffected.
 3. **The always-inline fan-out body** (`dispatch_edge`) is one field away from the #1223
    cliff. Slice 4 re-runs the fan-out gate before and after; a regression there blocks the
    slice, not the RFC.
-4. **The hazard domain over raw pointers** (slice 3) re-opens ADR-0069's retire path. The
-   existing `lkv_slot_test` and the T=24 read bench are the gate.
+4. **The hazard domain over raw pointers** (slice 3) would have re-opened ADR-0069's retire
+   path; slice 3 as landed kept the node indirection with the node owning one reference
+   (§6.3), so the retire path is unchanged and this risk is retired.
 5. **Ten slices is a long tail.** Slices 1–2 stand alone and have landed; slices 3–5 are
    the RFC's core and are worth landing as a unit; 6–10 are cleanups whose value is bytes and
    surface, and each can be dropped without invalidating the others.
@@ -783,13 +807,10 @@ are unaffected.
    with every other frame that link emits; nothing in the bench set or the host suite exercises
    two frames racing on one socket, so a torn frame would ship green. **Gate added:** the
    two-frame race host test of §6.9 must exist and pass *before* slice 9 lands, not with it.
-7. **Ungated today: slice 3's hazard retire over a raw `value_t*` is use-after-free class.**
-   ADR-0069's domain retires `shared_ptr` nodes, whose last owner is the control block; over a
-   raw pointer the last owner is whoever calls `release` last, and a hazard scan that misses a
-   reader, or a `release` that runs before the retire list is drained, frees a block a reader
-   still holds. The slice-1 tests are rewritten a second time for this contract; the T=24 read
-   bench runs under ASan as part of the gate; and `hazard_slot_t` stays opt-in until that run
-   is green, so the default path never carries the risk.
+7. **Retired with slice 3 as landed.** The draft's hazard retire over a raw `value_t*` was
+   use-after-free class because the last owner became "whoever calls `release` last"; the
+   shipped slot keeps a node that owns one reference (§6.3), so the last owner is always a node
+   or a `value_ref_t` and no ASan arm is needed. `hazard_slot_t` remains the host opt-in.
 
 ## 10. Alternatives considered
 
