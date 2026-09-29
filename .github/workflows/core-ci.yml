@@ -135,7 +135,14 @@ on:
 jobs:
   build-test:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
-    container: ubuntu:24.04
+    container:
+      image: ubuntu:24.04
+      # Container jobs run in Docker's own cgroup, not the runner's systemd unit, so the
+      # host-side runners.slice quota never reaches them: this cap is the ONLY thing that
+      # bounds a container job on the self-hosted host (#1637). 6 CPUs matches BUILD_JOBS,
+      # 10g the per-unit memory budget. Harmless on the hosted fallback: ubuntu-24.04
+      # runners have 4 cores / 16 GB, both under the cap.
+      options: --cpus 6 --memory 10g
     # Measured healthy max 4.82 min across the three legs (p50 ~4.5). 20 = ~4x, with
     # extra room over a bare 3x because the image pull and the apt step below are inside
     # the measured job time and are exactly the wedge surface.
@@ -216,7 +223,14 @@ jobs:
   # sources, the minimal option set, BUILD_TESTING=ON, and the reduced ctest suite run.
   build-test-minimal-set:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
-    container: ubuntu:24.04
+    container:
+      image: ubuntu:24.04
+      # Container jobs run in Docker's own cgroup, not the runner's systemd unit, so the
+      # host-side runners.slice quota never reaches them: this cap is the ONLY thing that
+      # bounds a container job on the self-hosted host (#1637). 6 CPUs matches BUILD_JOBS,
+      # 10g the per-unit memory budget. Harmless on the hosted fallback: ubuntu-24.04
+      # runners have 4 cores / 16 GB, both under the cap.
+      options: --cpus 6 --memory 10g
     # Measured healthy max 2.97 min. Held at the build-test group's 20 rather than
     # tightened: same container + apt step, same wedge surface.
     timeout-minutes: 20
@@ -271,7 +285,14 @@ jobs:
   # plain C++. Three lines that inherit the defaults, so it cannot drift from them.
   build-test-reclaim-strict:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
-    container: ubuntu:24.04
+    container:
+      image: ubuntu:24.04
+      # Container jobs run in Docker's own cgroup, not the runner's systemd unit, so the
+      # host-side runners.slice quota never reaches them: this cap is the ONLY thing that
+      # bounds a container job on the self-hosted host (#1637). 6 CPUs matches BUILD_JOBS,
+      # 10g the per-unit memory budget. Harmless on the hosted fallback: ubuntu-24.04
+      # runners have 4 cores / 16 GB, both under the cap.
+      options: --cpus 6 --memory 10g
     # Measured healthy max 4.88 min. 20 = ~4x; same group, same container apt step.
     timeout-minutes: 20
     steps:
@@ -351,7 +372,14 @@ jobs:
   # is absent AND that every door which could ask for it refuses rather than degrading.
   build-test-bus-closed:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
-    container: ubuntu:24.04
+    container:
+      image: ubuntu:24.04
+      # Container jobs run in Docker's own cgroup, not the runner's systemd unit, so the
+      # host-side runners.slice quota never reaches them: this cap is the ONLY thing that
+      # bounds a container job on the self-hosted host (#1637). 6 CPUs matches BUILD_JOBS,
+      # 10g the per-unit memory budget. Harmless on the hosted fallback: ubuntu-24.04
+      # runners have 4 cores / 16 GB, both under the cap.
+      options: --cpus 6 --memory 10g
     # Same container + apt step as the group above; held at its 20-minute wedge bound.
     timeout-minutes: 20
     steps:
@@ -426,7 +454,14 @@ jobs:
   # knob rots.
   build-test-self-heal-closed:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
-    container: ubuntu:24.04
+    container:
+      image: ubuntu:24.04
+      # Container jobs run in Docker's own cgroup, not the runner's systemd unit, so the
+      # host-side runners.slice quota never reaches them: this cap is the ONLY thing that
+      # bounds a container job on the self-hosted host (#1637). 6 CPUs matches BUILD_JOBS,
+      # 10g the per-unit memory budget. Harmless on the hosted fallback: ubuntu-24.04
+      # runners have 4 cores / 16 GB, both under the cap.
+      options: --cpus 6 --memory 10g
     # Same container + apt step as the group above; held at its 20-minute wedge bound.
     timeout-minutes: 20
     steps:
@@ -504,7 +539,14 @@ jobs:
 
   build-test-reclaim-qsbr:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
-    container: ubuntu:24.04
+    container:
+      image: ubuntu:24.04
+      # Container jobs run in Docker's own cgroup, not the runner's systemd unit, so the
+      # host-side runners.slice quota never reaches them: this cap is the ONLY thing that
+      # bounds a container job on the self-hosted host (#1637). 6 CPUs matches BUILD_JOBS,
+      # 10g the per-unit memory budget. Harmless on the hosted fallback: ubuntu-24.04
+      # runners have 4 cores / 16 GB, both under the cap.
+      options: --cpus 6 --memory 10g
     steps:
       # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
       # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
@@ -601,7 +643,14 @@ jobs:
   # GCC 15 is not in ubuntu-24.04's default repos; the toolchain test PPA carries it.
   build-test-gcc15:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
-    container: ubuntu:24.04
+    container:
+      image: ubuntu:24.04
+      # Container jobs run in Docker's own cgroup, not the runner's systemd unit, so the
+      # host-side runners.slice quota never reaches them: this cap is the ONLY thing that
+      # bounds a container job on the self-hosted host (#1637). 6 CPUs matches BUILD_JOBS,
+      # 10g the per-unit memory budget. Harmless on the hosted fallback: ubuntu-24.04
+      # runners have 4 cores / 16 GB, both under the cap.
+      options: --cpus 6 --memory 10g
     # Measured healthy max 4.68 min (5.17 on the incident day) — the worst of the
     # build-test group, because it adds an `add-apt-repository` PPA round-trip on top of
     # the container apt step. 20 = ~3.9x.
@@ -779,7 +828,14 @@ jobs:
   # target before they reach a consumer.
   install-consume:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
-    container: ubuntu:24.04
+    container:
+      image: ubuntu:24.04
+      # Container jobs run in Docker's own cgroup, not the runner's systemd unit, so the
+      # host-side runners.slice quota never reaches them: this cap is the ONLY thing that
+      # bounds a container job on the self-hosted host (#1637). 6 CPUs matches BUILD_JOBS,
+      # 10g the per-unit memory budget. Harmless on the hosted fallback: ubuntu-24.04
+      # runners have 4 cores / 16 GB, both under the cap.
+      options: --cpus 6 --memory 10g
     # Measured max 1.78 min (p50 ~1.1). Short-job floor of 15 rather than 3x (~5 min):
     # the entire risk here is the container apt step, so the ceiling answers "how long is
     # it acceptable to be wedged", not "how long does the work take".
@@ -837,7 +893,14 @@ jobs:
   # load. Ablate it by reverting any bench to a deleted API — the job goes red.
   bench-compile:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
-    container: ubuntu:24.04
+    container:
+      image: ubuntu:24.04
+      # Container jobs run in Docker's own cgroup, not the runner's systemd unit, so the
+      # host-side runners.slice quota never reaches them: this cap is the ONLY thing that
+      # bounds a container job on the self-hosted host (#1637). 6 CPUs matches BUILD_JOBS,
+      # 10g the per-unit memory budget. Harmless on the hosted fallback: ubuntu-24.04
+      # runners have 4 cores / 16 GB, both under the cap.
+      options: --cpus 6 --memory 10g
     # Measured max 2.10 min (p50 ~1.3) — the longest of the short container jobs.
     # Short-job floor of 15; see install-consume for why it is not 3x.
     timeout-minutes: 15
@@ -894,7 +957,14 @@ jobs:
   # `census_canary_seam_only ... verdict=FAIL`.
   census-gate:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
-    container: ubuntu:24.04
+    container:
+      image: ubuntu:24.04
+      # Container jobs run in Docker's own cgroup, not the runner's systemd unit, so the
+      # host-side runners.slice quota never reaches them: this cap is the ONLY thing that
+      # bounds a container job on the self-hosted host (#1637). 6 CPUs matches BUILD_JOBS,
+      # 10g the per-unit memory budget. Harmless on the hosted fallback: ubuntu-24.04
+      # runners have 4 cores / 16 GB, both under the cap.
+      options: --cpus 6 --memory 10g
     # One bench target plus libtracer, then two sub-second runs. Short-job floor of 15.
     timeout-minutes: 15
     steps:
@@ -960,7 +1030,14 @@ jobs:
   # — the job goes red naming that entry.
   ci-paths:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
-    container: ubuntu:24.04
+    container:
+      image: ubuntu:24.04
+      # Container jobs run in Docker's own cgroup, not the runner's systemd unit, so the
+      # host-side runners.slice quota never reaches them: this cap is the ONLY thing that
+      # bounds a container job on the self-hosted host (#1637). 6 CPUs matches BUILD_JOBS,
+      # 10g the per-unit memory budget. Harmless on the hosted fallback: ubuntu-24.04
+      # runners have 4 cores / 16 GB, both under the cap.
+      options: --cpus 6 --memory 10g
     # Measured max 1.80 min (p50 ~1.0). Short-job floor of 15 (has a package install).
     timeout-minutes: 15
     steps:
@@ -1005,7 +1082,14 @@ jobs:
 
   format:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
-    container: ubuntu:24.04
+    container:
+      image: ubuntu:24.04
+      # Container jobs run in Docker's own cgroup, not the runner's systemd unit, so the
+      # host-side runners.slice quota never reaches them: this cap is the ONLY thing that
+      # bounds a container job on the self-hosted host (#1637). 6 CPUs matches BUILD_JOBS,
+      # 10g the per-unit memory budget. Harmless on the hosted fallback: ubuntu-24.04
+      # runners have 4 cores / 16 GB, both under the cap.
+      options: --cpus 6 --memory 10g
     # Measured max 1.17 min (p50 0.7) — but it apt-installs TWICE (the toolchain step and
     # clang-format below), so the short-job floor of 15 covers both round-trips.
     timeout-minutes: 15
@@ -1046,7 +1130,14 @@ jobs:
 
   doxygen-gate:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
-    container: ubuntu:24.04
+    container:
+      image: ubuntu:24.04
+      # Container jobs run in Docker's own cgroup, not the runner's systemd unit, so the
+      # host-side runners.slice quota never reaches them: this cap is the ONLY thing that
+      # bounds a container job on the self-hosted host (#1637). 6 CPUs matches BUILD_JOBS,
+      # 10g the per-unit memory budget. Harmless on the hosted fallback: ubuntu-24.04
+      # runners have 4 cores / 16 GB, both under the cap.
+      options: --cpus 6 --memory 10g
     # Measured max 1.30 min (p50 0.8). Short-job floor of 15; like `format` it
     # apt-installs twice, so both round-trips are inside this ceiling.
     timeout-minutes: 15
