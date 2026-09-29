@@ -9,14 +9,14 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0028 |
 | **Title** | The lean value path: one block per publish, copy-or-share by size, retention per vertex, sync as a trait |
-| **Status** | **draft** (2026-09-28). A design proposal seeking a maintainer ruling per section; nothing here is ruled yet. Every number in §2 and §7 is measured on the host build at the commit this RFC was drafted against and is reproducible with `bench_lean_value_path` (§7.3). |
+| **Status** | **draft** (2026-09-28), **reviewed 2026-09-29** on [PR #1627](https://github.com/avatarsd-llc/libtracer/pull/1627) against `main` 641eff22: direction accepted, the five §11 questions ruled (recorded in §11), and the review's seven text/scope corrections applied in this revision; **acceptance is pending merge**. Every number in §2 and §7 is measured on the host build at the commit this RFC was drafted against and is reproducible with `bench_lean_value_path` (§7.3). |
 | **Author(s)** | AvatarSD (maintainer), with AI drafting |
 | **Created** | 2026-09-28 |
 | **Comment window** | waived by default while solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"); invoke explicitly if outside input is wanted. |
-| **Instrument** | **Implementation RFC.** No wire surface moves (§8.1): every frame that is valid today is valid after every slice, byte for byte. The public C++ API of `core/` (implementation-defined per [ADR-0013](../../adr/0013-v1-scope-boundaries.md)) changes in the ways §8.2 lists, each with a migration. |
-| **Tracking issue** | [#1624](https://github.com/avatarsd-llc/libtracer/issues/1624) (value-path design). Absorbs [#1618](https://github.com/avatarsd-llc/libtracer/issues/1618), [#1619](https://github.com/avatarsd-llc/libtracer/issues/1619), [#1620](https://github.com/avatarsd-llc/libtracer/issues/1620), [#1621](https://github.com/avatarsd-llc/libtracer/issues/1621), [#1622](https://github.com/avatarsd-llc/libtracer/issues/1622), [#1623](https://github.com/avatarsd-llc/libtracer/issues/1623), [#1625](https://github.com/avatarsd-llc/libtracer/issues/1625), [#1626](https://github.com/avatarsd-llc/libtracer/issues/1626) — each is closed by a named slice in §6. |
+| **Instrument** | **Implementation RFC.** No wire surface moves (§8.1): every frame that is valid today is valid after every slice, byte for byte. The public C++ API of `core/` (implementation-defined per [ADR-0013](../../adr/0013-v1-scope-boundaries.md)) changes in the ways §8.2 lists; each old name is **deleted outright in the same bump** — no shims, deprecation aliases or transition releases (§11 ruling 4 as amended). |
+| **Tracking issue** | [#1624](https://github.com/avatarsd-llc/libtracer/issues/1624) (value-path design). Absorbs [#1618](https://github.com/avatarsd-llc/libtracer/issues/1618), [#1619](https://github.com/avatarsd-llc/libtracer/issues/1619), [#1620](https://github.com/avatarsd-llc/libtracer/issues/1620), [#1621](https://github.com/avatarsd-llc/libtracer/issues/1621), [#1622](https://github.com/avatarsd-llc/libtracer/issues/1622), [#1623](https://github.com/avatarsd-llc/libtracer/issues/1623), [#1625](https://github.com/avatarsd-llc/libtracer/issues/1625), [#1626](https://github.com/avatarsd-llc/libtracer/issues/1626) — each is closed by a named slice in §6, except #1623, which slice 6 answers only in its retention half: its persistence ask is tooling ([#58](https://github.com/avatarsd-llc/libtracer/issues/58), CONTEXT.md §network formation) and the `enabled` bit with its `bound` read-back is [#1533](https://github.com/avatarsd-llc/libtracer/issues/1533)'s own car. |
 | **Target spec version** | none. `docs/spec/v1.md` is untouched; this RFC is about what the reference implementation allocates, copies and locks, not about what it puts on the wire. |
-| **Scope** | **v-NEXT.** Gates no release. Slice 1 (§6.1) is a liveness fix and is the one part a maintainer may want to pull forward. |
+| **Scope** | **v-NEXT.** Gates no release. Slices 1 (§6.1) and 2 (§6.2) landed ahead of acceptance as ordinary fixes per §11 ruling 5 ([PR #1628](https://github.com/avatarsd-llc/libtracer/pull/1628), [PR #1629](https://github.com/avatarsd-llc/libtracer/pull/1629)). |
 | **Amends / extends** | [RFC-0022](0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.D (the pin RATIO becomes an absolute SIZE threshold, §4.3 — the amendment RFC-0022 Amendment 2 itself measured the case for); [RFC-0025](0025-stream-class-values.md) §4.6.1 (the receiver ring becomes the `N` arm of one retention policy, §4.4; the byte charge is unchanged); [ADR-0060](../../adr/0060-lkv-copy-store-injected-value-backend.md) §1 (its stated, unimplemented end-state — "one allocation per write packing wrapper + value into one segment, retiring `mr_`" — is §4.1 of this RFC); [ADR-0064](../../adr/0064-lkv-publish-is-waiterless-and-the-slot-becomes-lock-free.md), [ADR-0069](../../adr/0069-lkv-slot-is-a-compile-time-policy-hazard-reclamation.md), [ADR-0080](../../adr/0080-reclamation-policy-is-a-build-time-closed-per-target-seam.md) (the slot and reclamation policies stay traits; §4.5 adds the single-writer one and deletes the default that hangs); [ADR-0079](../../adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md) Decision 3 (the throwing `std::pmr` channel is removed from the LKV path, as it ruled). |
 
 > **Numbering note.** 0012 was closed unmerged and 0015 was withdrawn; neither gap is reusable
@@ -109,7 +109,7 @@ Each is an upstream issue; each is closed by a slice named in §6.
 | L4 | Egress gathers a copy per peer (§2.1, last bullet). | [#1620](https://github.com/avatarsd-llc/libtracer/issues/1620) |
 | L5 | `vertex_t::write_seq_` is a `std::atomic<uint64_t>` bumped `seq_cst` on every publish; on a 32-bit target without 64-bit AMO that is a libatomic lock per publish. | [#1621](https://github.com/avatarsd-llc/libtracer/issues/1621) |
 | L6 | `subscriber_remote_t` (120 B) holds the link and caller identities as two `std::string`s per remote subscriber, though the graph already interns links (`graph_t::intern_link`). | [#1622](https://github.com/avatarsd-llc/libtracer/issues/1622) |
-| L7 | A subscription's durability/enabled state is two bits consumed out of a 16-bit `delivery_policy_t`, latched through a separate admission path. | [#1623](https://github.com/avatarsd-llc/libtracer/issues/1623) |
+| L7 | A subscription's RFC-0022 §3.A latch and its enabled state are two bits consumed out of a 16-bit `delivery_policy_t`, latched through a separate admission path. | [#1623](https://github.com/avatarsd-llc/libtracer/issues/1623) (retention half only — slice 6; the `enabled` bit + `bound` read-back is [#1533](https://github.com/avatarsd-llc/libtracer/issues/1533); persistence is tooling, [#58](https://github.com/avatarsd-llc/libtracer/issues/58)) |
 | L8 | Reply assembly emits through `std::vector<std::byte>&` emitters (`tlv_emit.hpp`), so a reply is built by copy and then gathered again at the link. | [#1620](https://github.com/avatarsd-llc/libtracer/issues/1620) |
 | L9 | `lkv_slot.hpp:66-71` documents a `map_mutex_` protection that the read path no longer takes — the prose and the code disagree about which lock protects the slot (`graph.cpp:1998` reads the slot with no lock). Corrected in slice 1, which rewrites that header. | [#1624](https://github.com/avatarsd-llc/libtracer/issues/1624) |
 | — | A forwarded read has no deadline: a stale peer holds the forwarder's reply slot indefinitely. | [#1625](https://github.com/avatarsd-llc/libtracer/issues/1625) |
@@ -145,7 +145,7 @@ with no owner is deleted with its mechanism.
 | R12 | A remote edge must know which link to deliver on and which subject subscribed. | The router. | **Keep the requirement;** serve it with the interned link index the graph already keeps, not two strings per edge (§4.8). |
 | R13 | Callbacks are `std::function` in `handlers_t` and `{fn, ctx}` in `subscriber_t`. | Nobody: ADR-0047's amendment kept `std::function` "pending measurement". | **One idiom** (§4.10). |
 | R14 | `read` returns `value_ref_t`; field `read` returns `rope_t`; `history` returns `std::vector<rope_t>`. | Nobody. | **One owning read type** (§4.11). |
-| R15 | Every wiring knob is a `graph_t` verb (70 public names). | Accretion. | **Fold** the per-vertex ones into a policy set at registration and the graph-wide hooks into a construction-time struct (§4.12). |
+| R15 | Every wiring knob is a `graph_t` verb (a fresh count of `graph_t`'s public members on `main` gives ~103; the final figure is counted at slice 10's gate, §6.10). | Accretion. | **Fold** the per-vertex ones into a policy set at registration and the graph-wide hooks into a construction-time struct (§4.12). |
 | R16 | An unsubscribe may run re-entrantly inside a delivery. | Every deployment (ADR-0080). | **Keep.** Unchanged by this RFC. |
 | R17 | Delivery to a target terminates there (never re-dispatches). | ADR-0051 / RFC-0007. | **Keep.** Unchanged. |
 
@@ -171,6 +171,22 @@ guess whether that seam will throw.
 **Instead.** `value_t` (§5.1): one block from the vertex's `block_source_t`, refcount inline,
 sized to the value. `value_ref_t` becomes the one owning handle over it. Direct callers of
 `vertex_t::store(rope_t, mr)` pass no resource.
+
+**`mr_`'s live users, and their replacement.** `mr_` is not only the value path's channel;
+six pmr-typed control-plane containers on `graph_t` draw through it today and go with it:
+`link_index_` (`std::pmr::vector<link_slot_t>`), `link_free_` (`std::pmr::vector<uint32_t>`),
+`link_long_names_` (`std::pmr::vector<link_long_name_t>`), the per-slot candidate list
+`link_slot_t::vs` (`std::pmr::vector<vertex_t*>`), the long-name spelling
+`link_long_name_t::text` (`std::pmr::string`), and the `link_candidates` return type
+(`std::pmr::vector<vertex_t*>`) — `core/include/libtracer/graph.hpp:2629`, `:3123`, `:3177`,
+`:3200-3205`. Each becomes a `mem::block_array_t<T>` drawn from the injected `block_source_t`
+directly (the nothrow, sized-release array `iov_table.hpp` already uses for its overflow block):
+a refused growth is a `nullptr` the caller reports by value, never a `std::bad_alloc`, and
+`link_candidates` fills a caller-owned span. The same carrier takes #1608's structural mints
+(D9, §6.3a–e), so `src_mr_`, `source_resource_t`'s translation of refusal into a throw, and
+`std::pmr::get_default_resource()` as a fallback all leave the graph together. `retired_seams_`
+and the `pending_`/`unconditional_` key sets (`std::vector` / `std::set` on the global heap
+today, #1608 tier 1) move onto the same carrier in §6.3d.
 
 ### 4.2 D2 — the per-target re-wrap (L3)
 
@@ -211,22 +227,28 @@ vector-of-vectors that stores `wo` fields.
 **Instead.** `retention_t { NONE, LAST, N }` per vertex **and per app field** (§5.4). A
 HANDLER is `NONE`; a STORED_VALUE is `LAST`; a STREAM is `N` with the RFC-0025 byte charge
 unchanged; a `wo` field is `NONE` and retains no bytes — `app_field_store` on a `wo` field
-delivers to `on_app_field_write` and stores nothing. `set_history_depth(v, n)` becomes
-`set_retention(v, retention_t::N, n)` for one release and is then removed.
+delivers to `on_app_field_write` and stores nothing. `set_history_depth(v, n)` is deleted
+outright in the same bump; a caller writes `set_policy(v, {.retention = retention_t::N,
+.depth = n})` (§4.12). No forwarding shim is kept (§11 ruling 4 as amended).
 
 ### 4.5 D5 — `sp_atomic_slot_t` as a shipped policy (L1)
 
 **What.** The type (`lkv_slot.hpp`), and its selection as `default_config_t::lkv_slot_t`.
 
 **Why.** It is the only slot policy that can spin, and the one build where spinning is a hang
-is the one it defaults to. `hazard_slot_t` already serves the host. What is missing is the
-policy for a single-writer build, not a guard on this one.
+is the one it defaults to. `hazard_slot_t` already serves a host whose reads of one shared
+vertex contend across many cores. What is missing is the policy for a single-writer build,
+not a guard on this one.
 
 **Instead.** `single_writer_slot_t` (§5.5): `std::atomic<value_t*>` exchange on publish; the
 read is `load` + `retain` inside `config_t::reader_guard_t` — a trait that is an
-interrupt-masked critical section on the single-core RTOS build and nothing at all on a build
-that selects the hazard slot. `default_config_t::lkv_slot_t` is `hazard_slot_t` on hosts and
-`single_writer_slot_t` where `kSingleWriter` is set. A `static_assert` refuses any spinning
+interrupt-masked critical section on the single-core RTOS build (`tr::esp::critical_guard_t`),
+an address-striped one-word lock whose contender sleeps on the host (`mutex_guard_t`), and
+nothing at all on a build that selects the hazard slot. **As landed in slice 1 (PR #1628)**
+`default_config_t::lkv_slot_t` is `single_writer_slot_t` over `mutex_guard_t` on *every*
+target, the host included — the blocking perf gate refused `hazard_slot_t` as the host default
+(§5.5) — and `hazard_slot_t` is the host opt-in (`LIBTRACER_LKV_SLOT=hazard_slot_t`).
+`sp_atomic_slot_t` was deleted outright, not kept for a release. A `static_assert` refuses any spinning
 policy when `!kSpinWaitSafe`, mirroring `mem_pool.hpp:199` — the guard that should have
 covered the slot from the start covers every slot policy, because there is nothing left for it
 to guard.
@@ -285,6 +307,19 @@ allocation where `heap_alloc` makes two today — the `producer-own` row of §2.
 `before_io`/`after_io` stay on the derived type for device memory (ADR-0024). Every injection
 point takes a `block_source_t&`; a deployer that injects one slab has one slab.
 
+**The structural mints draw from the same source.** #1608 measured that every
+registration- and subscribe-time byte escapes the injected source today (+0 B on the seam
+whatever is injected): `vertex_t`, `vertex_ext_t`, `value_handlers_t`, `edge_block_t`, the
+path-key spill and the payload-right nodes all land on the global heap. With `mem_backend_t`
+deriving from `block_source_t`, those mints draw from the vertex's source directly — placement
+into `try_alloc`, sized `release` (`len` is on the block, so no pool needs a header) — in five
+ratchet-gated sub-slices after slice 3 (§6.3a–e). A registration the source refuses is
+reported **by value** on `try_register_vertex` (`result_t<vertex_handle_t>`, already the
+failable spelling; `register_vertex` keeps its contract-violation meaning). The two constructor
+roots — the root vertex and the graph's own bookkeeping allocated before any source is bound —
+stay on the global heap, documented at the constructor. This is what makes "an injected source
+bounds the node" a true sentence rather than a hot-path one.
+
 ### 4.10 D10 — the second callback idiom (R13)
 
 **What.** `std::function` in `handlers_t` (6), `value_handlers_t` (3), `app_field_group_t`
@@ -318,14 +353,17 @@ Graph-wide: `configure_remote_delivery_sink`, `configure_stats_sampler`,
 **Instead.** `vertex_policy_t { retention, share_threshold_bytes, ring_source, ring_reliable,
 delivery_mode, app_fields }` passed to `register_vertex` (and changeable through one
 `set_policy(v, vertex_policy_t)`); `graph_hooks_t` with the five `{fn, ctx}` slots passed to
-`graph_t`'s constructor. 70 public names → 58. The value verbs (`read`, `write`, `assign`,
-`propagate`, `await`, `subscribe`, `unsubscribe`, `history`) do not move.
+`graph_t`'s constructor. The public-name count is **re-counted at slice 10's gate** on the
+final surface (a fresh count on `main` gives ~103 public members; the drafted "70 → 58" was
+unverified and is withdrawn). The value verbs (`read`, `write`, `assign`, `propagate`, `await`,
+`subscribe`, `unsubscribe`, `history`) do not move.
 
 ### 4.13 What was added back
 
 Four things, against twelve deletions: `share_threshold_bytes` (one knob replacing a ratio and
 a rig), `retention_t` (one enum replacing a verb, a field and a role rule), `reader_guard_t` +
-`kSingleWriter` (one trait pair replacing a spin lock), and `kForwardDeadline` (one constant
+`kSingleWriter` (one trait pair replacing a spin lock — and `reader_guard_t` is the pool's
+`Sync` policy under one name, §5.5, so it adds a use, not a vocabulary), and `kForwardDeadline` (one constant
 replacing an unbounded wait). Each is a *policy* the application states, in place of a
 *mechanism* the library guessed.
 
@@ -409,27 +447,53 @@ One number per vertex, `share_threshold_bytes`, default `config_t::kShareThresho
 | app field `wo` | `NONE` | **stores nothing** (today it stores and refuses reads) |
 
 `NONE` on a value vertex is legal and is the pure-relay shape: the value is delivered and
-released, and `read` answers `NOT_FOUND`.
+released, and `read` answers `NOT_FOUND`. It is a permitted policy, not a named role (§11
+ruling 3).
+
+Retention is the whole of this policy. A subscription's RFC-0022 §3.A **latch** (the bit the
+draft called "durability") and its `enabled` bit are edge state, not vertex retention, and are
+out of this RFC's scope: the `enabled` bit and the `bound` read-back land as #1533's own car,
+and persistence across restarts is tooling (#58), not a bit in a policy word — a bit neither
+persists nor re-arms anything.
 
 ### 5.5 Sync as traits
 
 ```cpp
 struct default_config_t {
-    static constexpr bool kSingleWriter = false;  // one publisher thread per vertex, by contract
-    static constexpr bool kSpinWaitSafe = true;   // unchanged; now asserted by every slot policy
-    using lkv_slot_t     = hazard_slot_t;         // host default; single_writer_slot_t when kSingleWriter
-    using reader_guard_t = no_guard_t;            // critical_section_t on a single-core RTOS build
+    static constexpr bool kSingleWriter = false;  // one publisher thread per vertex, by contract (per-build trait, §11 ruling 1)
+    static constexpr bool kSpinWaitSafe = true;   // unchanged; now asserted by every slot policy (landed, PR #1628)
+    using lkv_slot_t     = single_writer_slot_t;  // the default on EVERY target (landed); hazard_slot_t is the host opt-in
+    using reader_guard_t = mutex_guard_t;         // host: address-striped one-word locks whose contender sleeps (landed);
+                                                  // tr::esp::critical_guard_t on the ESP-IDF chip targets; no_guard_t single-threaded
     using stripe_lock_t  = std::mutex;            // the await/edge-mutation lock; a scheduler-suspend
                                                   // guard, or no_lock_t, on a single-writer build
-    static constexpr std::chrono::milliseconds kForwardDeadline{250};
-    static constexpr std::size_t kShareThresholdBytes = 4096;
+    static constexpr std::chrono::milliseconds kForwardDeadline{250};   // landed, PR #1629
+    static constexpr std::size_t kShareThresholdBytes = 4096;          // host default (§11 ruling 2); deployments set per vertex
 };
 ```
 
-`single_writer_slot_t::store` is one `exchange` and one `release`; `::load` is
-`reader_guard_t g; p = slot.load(acquire); retain(p);`. Under `kSingleWriter` a debug build
-asserts the publishing thread's identity on the vertex. No slot policy may spin when
-`!kSpinWaitSafe`; the assertion is on the policy, so a future policy cannot forget it.
+The draft named `hazard_slot_t` as the host default. Slice 1 as landed (PR #1628) refuted
+that: the blocking perf gate measured `hazard_slot_t` at 112 B `mem:vertex` but 127 B per held
+value (a 24 B node per published `shared_ptr`, whichever reclamation scheme — hazard or QSBR —
+retires it) and 0.70–0.76× on `mixed/0/6/128`; `single_writer_slot_t` over the striped
+`mutex_guard_t` measured 1.03× with no memory allowance. So `single_writer_slot_t` over
+`mutex_guard_t` is the shipped host default, `hazard_slot_t` is opt-in for a host whose reads
+of one shared vertex contend across many cores, and the per-value node goes away only with
+slice 3's intrusive `value_t`, at which point the hazard default is re-measured, not assumed.
+
+`single_writer_slot_t::store` is one exchange and one `release` after the guard closes;
+`::load` is `reader_guard_t g; p = slot.load(acquire); retain(p);`. Under `kSingleWriter` a
+debug build asserts the publishing thread's identity on the vertex (not in slice 1; lands
+with slice 3). No slot policy may spin when `!kSpinWaitSafe`; the assertion is on the policy
+(`S::may_spin`, landed), so a future policy cannot forget it.
+
+**One Sync vocabulary, not two.** `reader_guard_t` and the pool's `Sync` policy
+(`mem_pool.hpp`'s `pool_sync_policy` concept: `lock()`/`unlock()`, `is_isr_safe`,
+`is_nonblocking`, `name`) are the same thing — a critical-section type the build binds once
+per target: `spin_sync_t` / `mutex_guard_t` on the host, `portmux_sync_t` /
+`critical_guard_t` on ESP-IDF. Slice 10 folds them into **one** trait: `reader_guard_t`
+satisfies `pool_sync_policy`, the pool takes `config_t::reader_guard_t` as its `Sync` default,
+and the two ESP-IDF spellings become one type (Q11 of the deployment-profile design).
 
 The stripe mutex and condvar (`vertex_stripe.hpp`) stay for `await` and edge mutation —
 control-plane frequency — but are taken through `stripe_lock_t`, so the single-writer build
@@ -460,38 +524,84 @@ refuses it when `!kSpinWaitSafe`.
 | `handlers_t` | 216 | 96 | ~120 | ~56 |
 | `value_handlers_t` | 96 | 48 | ~52 | ~28 |
 
-The `vertex_t` saving is the slot (16 B `atomic<shared_ptr>` → 8 B pointer on the host) and
-the sequence (8 → 4 B); the ratchets in `config.hpp` (`kMaxVertexBytes64/32`) move down with
-it, never up.
+The `vertex_t` saving is the slot (the 16 B `shared_ptr` that `single_writer_slot_t` holds
+since slice 1 — the same width as the `atomic<shared_ptr>` it replaced, so slice 1 left
+`vertex_t` at 96 / 72 B and `kMaxVertexBytes64/32` where they were — becomes an 8 B
+`value_t*` at slice 3) and the sequence (8 → 4 B, slice 8); the ratchets in `config.hpp`
+(`kMaxVertexBytes64/32`) move down with it, never up. The "after" column is reached at slice
+8, not slice 1.
 
 ## 6. Step 4 — slices
 
 Each slice ships alone, keeps every host test and bench green, and carries its own gate row
-in `bench_lean_value_path`. Order is payoff over risk, with the liveness fixes first.
+in `bench_lean_value_path`. Order is payoff over risk, with the liveness fixes first. Every
+slice deletes the old API it replaces in the same bump — no shim, alias or transition release
+(§11 ruling 4 as amended).
+
+**Sequencing against the open queue.** The refusal car — [#1612](https://github.com/avatarsd-llc/libtracer/issues/1612)
+(static BACKPRESSURE reply), [#1582](https://github.com/avatarsd-llc/libtracer/issues/1582)
+(router `flat` sites) and [#1602](https://github.com/avatarsd-llc/libtracer/issues/1602) — lands
+**before slice 3**: it is doctrine repair (exhaustion is a value) with no ratchet risk, and
+slice 3 rewrites the paths it touches. The link-config aggregate
+([#1593](https://github.com/avatarsd-llc/libtracer/issues/1593), absorbing #1606 asks 1–2)
+lands **in the same bump as slice 10's** surface fold, so consumers see one breaking release,
+not two.
 
 ### 6.1 Slice 1 — the slot that cannot spin (L1; closes #1618)
 
-Add `single_writer_slot_t` and `reader_guard_t`; add `kSingleWriter`; make the policy-level
-`may_spin` assertion; retire `sp_atomic_slot_t` from the default (keep the type one release
-for a host that opted into it, then delete). Touches `lkv_slot.hpp`, `config.hpp`,
-`vertex.hpp:1272-1307`, `lkv_slot_test.cpp`. **Gate:** the existing slot tests under all three
-policies; a new test that publishes from one thread while a lower-priority reader holds the
-window, on the host with `SCHED_FIFO` where available. **Risk: low** — the slot policy seam
-already exists (`config.hpp:287`), this adds a policy and moves a default.
+**Landed** as [PR #1628](https://github.com/avatarsd-llc/libtracer/pull/1628) (2026-09-29).
+Added `single_writer_slot_t` (`basic_single_writer_slot_t<guard_t>`), `reader_guard_t` with
+`mutex_guard_t` (host default) / `no_guard_t` / `tr::esp::critical_guard_t`, `kSingleWriter`,
+and the policy-level `may_spin` assertion; **deleted `sp_atomic_slot_t` outright** — no
+one-release keep. The default is `single_writer_slot_t` on every target; `hazard_slot_t` is
+the host opt-in (see §5.5 for the gate numbers that decided it). **Gate, as run:** the slot
+tests under both remaining policies; `lkv_slot_inversion` (`SCHED_FIFO` writer and
+higher-priority reader on one CPU — fails on the old default, passes on both remaining
+policies); `spin_slot_guard` compile check. **Risk: low**, retired.
 
 ### 6.2 Slice 2 — no lock across a blocking write; a deadline on forwarded ops (L2; closes #1619, #1625)
 
-Enqueue-then-write in the two links that hold a mutex across the write; `kForwardDeadline` on
-the forwarder's reply slots. **Gate:** a stalled-transport test shows the publishing thread
-returns in a bound independent of the link's write budget. **Risk: medium** — the router's
-reply-slot lifetime; wire-neutral.
+**Landed** as [PR #1629](https://github.com/avatarsd-llc/libtracer/pull/1629). Enqueue-then-write
+in the two links that held a mutex across the write; `kForwardDeadline` on the forwarder's
+reply slots. **Gate:** a stalled-transport test shows the publishing thread returns in a bound
+independent of the link's write budget. **Risk: medium** — the router's reply-slot lifetime;
+wire-neutral. Retired.
 
 ### 6.3 Slice 3 — `value_t` replaces the wrapper (D1, D9's first half; closes #1624's P1)
 
 One block per publish; `value_ref_t` over it; `hazard_slot_t` ported to raw pointers; the pmr
-channel and `try_make_lkv` deleted. **Gate:** `local-cb` stays at 1 allocation and drops from
-104 B to ≤ 40 B; every existing bench within its A/A band. **Risk: medium** — every slot policy
-and `read_stored` caller moves; the hazard domain's retire list holds `value_t*`.
+channel, `src_mr_`, `try_make_lkv` and the six pmr control-plane containers of D1 deleted
+(`link_index_` and family onto `block_array_t`). Lands **after the refusal car** (§6 intro).
+**Gate:** `local-cb` stays at 1 allocation and drops from 104 B to ≤ 40 B; every existing
+bench within its A/A band. **Risk: medium-high** — every slot policy and `read_stored` caller
+moves, and the hazard domain's retire list holds a raw `value_t*`: a retire that outlives the
+block's last `release`, or a `release` that races a hazard scan, is a **use-after-free**, the
+class that ADR-0069's `shared_ptr` node made unreachable by construction. The slice-1 tests
+(`lkv_slot_test`, `lkv_slot_inversion`) are rewritten a second time for the raw-pointer
+contract, and the slice adds an ASan run of the T=24 read bench to its gate (§9 item 7).
+
+#### 6.3a–e — the structural mints (D9's registration half; closes #1608)
+
+Five ratchet-gated sub-slices, each after slice 3 and each alone, moving one registration- or
+subscribe-time mint from the global heap to the vertex's `block_source_t` by placement into
+`try_alloc` with sized `release`. **Gate, shared:** a counting-source test registers `V`
+vertices with `E` edges and asserts the injected source's `blocks` and `bytes` rose by the
+mint's exact footprint and the global-heap count by 0; `sizeof` ratchets (`kMaxVertexBytes*`,
+`edge_view_t`, `dispatch_edge`'s inline body) unchanged; refusal is returned by value on
+`try_register_vertex` / `subscribe`. **Risk: low each** — the types do not change shape, only
+where they live.
+
+| sub-slice | mint | refusal surfaces as |
+| --- | --- | --- |
+| 3a | `vertex_t` | `try_register_vertex` → `BACKPRESSURE` by value; `register_vertex` keeps its contract meaning |
+| 3b | `vertex_ext_t`, `value_handlers_t` | the registering call that needed the ext (`set_policy`, handler install) refuses by value |
+| 3c | `edge_block_t` (published + parked arrays) | `subscribe` refuses by value, as an exhausted ring does today |
+| 3d | path-key spill (`register_vertex_key`'s `std::vector<std::byte>` → `block_array_t<std::byte>`), `retired_seams_`, the `pending_`/`unconditional_` key sets | the key-bearing call refuses by value |
+| 3e | payload-right nodes (`payload_right_store_`, each node's `rows`) and the admission nodes | the grant / admission install refuses by value |
+
+The two constructor roots (the root vertex; the graph's own bookkeeping before a source is
+bound) stay on the global heap and are documented at the constructor as the residual — the
+only bytes an injected source does not bound.
 
 ### 6.4 Slice 4 — target adopt (D2, L3; closes #1620's fan-out half)
 
@@ -505,12 +615,16 @@ change is inside `dispatch_edge_target`. Must re-measure the `always_inline` bod
 ratio deleted. **Gate:** `ingress-pin` becomes the ≥-threshold row and `ingress-copy` the
 <-threshold row of one arm. **Risk: low** — the pin path exists; only the predicate changes.
 
-### 6.6 Slice 6 — retention (D4; closes #1623, #1624's P3)
+### 6.6 Slice 6 — retention (D4; closes #1624's P3; answers #1623's retention half only)
 
-`retention_t` on `vertex_policy_t` and `app_field_t`; `wo` retains nothing; durability and
-enabled become two bits of the edge's own policy word rather than a separate latch (L7).
+`retention_t { NONE, LAST, N }` on `vertex_policy_t` and `app_field_t`; `wo` stores nothing.
+**Retention only**: the RFC-0022 §3.A latch and the `enabled` bit stay where they are — the
+`enabled` bit and the `bound` read-back land as [#1533](https://github.com/avatarsd-llc/libtracer/issues/1533)'s
+own car (it is `ready-for-agent`), and persistence is tooling ([#58](https://github.com/avatarsd-llc/libtracer/issues/58));
+this slice does **not** close #1623. `set_history_depth` is deleted in the same bump.
 **Gate:** an app-field test that a `wo` write reaches `on_app_field_write` and leaves
-`values` unallocated. **Risk: low.**
+`values` unallocated; a `NONE` value vertex answers `read` with `NOT_FOUND` after a delivered
+write. **Risk: low.**
 
 ### 6.7 Slice 7 — one callback idiom, one read type (D10, D11)
 
@@ -525,13 +639,23 @@ API-wide; mechanical.
 
 Span-form emitters for the delivery header; queued links retain the `value_t` instead of
 gathering; transports allocate receive blocks with a `value_t` header reserve. **Gate:**
-`egress-gather` copies 0 through a queued link; `ingress-pin` at 0 allocations. **Risk:
-medium** — the transports' tx queues change shape.
+`egress-gather` copies 0 through a queued link; `ingress-pin` at 0 allocations; **and, before
+this slice lands, a host test with a two-frame race on one socket** — two publishes to the
+same WS peer from two threads, the queued send of the first interleaving with the second's
+frame — asserting every byte of both frames arrives whole and in order. No bench or test
+catches that interleave today (§9 item 6). **Risk: medium-high** — the transports' tx queues
+change shape, and a retained-`value_t` send is a partial write away from a corrupted frame.
+Adds a retained-send virtual on `transport_t` (§8.2).
 
 ### 6.10 Slice 10 — one seam, one surface (D9's second half, D12, §5.6)
 
-`mem_backend_t` derives from `block_source_t`; `vertex_policy_t` and `graph_hooks_t`;
-concepts. **Gate:** `producer-own` 2 → 1 allocation; `graph_t` public names ≤ 58.
+`mem_backend_t` derives from `block_source_t` (every downstream backend re-based);
+`vertex_policy_t` and `graph_hooks_t`; `reader_guard_t` unified with the pool `Sync` trait
+(§5.5); concepts. In the same bump: the `fwd_router_t` constructor takes `router_planes_t` and
+the link constructors take their config aggregates (#1593, absorbing #1606 asks 1–2), so the
+breaking release is one. **Gate:** `producer-own` 2 → 1 allocation; `graph_t`'s public members
+**counted on the final surface at this gate** and recorded in the CHANGELOG (the draft's "≤ 58"
+was unverified; `main` holds ~103) — the count is of what ships, since nothing old is kept.
 **Risk: medium** — the widest API change, the least behaviour change.
 
 ## 7. Measurements
@@ -617,12 +741,24 @@ verifiable against the existing vectors.
 | `set_history_depth` | `vertex_policy_t::retention` | 6 |
 | `std::function` hooks | `{fn, ctx}` slots + `tr::graph::thunk<F>` | 7 |
 | `subscriber_remote_t::link/caller` strings | `link_id_t`, `subject_id_t` | 8 |
-| `sp_atomic_slot_t` | `single_writer_slot_t` / `hazard_slot_t` | 1 |
+| `sp_atomic_slot_t` | `single_writer_slot_t` / `hazard_slot_t` | 1 (landed) |
 | `set_*` / `configure_*` verbs (12) | `vertex_policy_t`, `graph_hooks_t` | 10 |
+| `subscriber_fn_t` signature (`const rope_t&`-shaped) | `fn(ctx, const value_t&)` | 3 |
+| `store_value` returning a wrapper / bool | returns `result_t<value_ref_t>`, refusal by value | 3 |
+| `value_ref_t` over `std::shared_ptr<const rope_t>` | `value_ref_t` over an intrusive `value_t*` (same verbs, new shape and size) | 3 |
+| `graph_t(std::pmr::memory_resource*, mem_backend_t*, …)` and the `mr_` channel | `graph_t(block_source_t&, graph_hooks_t)` — one source, one hooks struct | 3 (source), 10 (hooks) |
+| `current_seq()` → `uint64_t`, `write_seq_` 64-bit | `uint32_t` with wrap-safe compare | 8 |
+| `transport_t::send(iov)` as the only egress verb | plus a retained-send virtual (`send(value_ref_t, header_span)`) that a queued link overrides | 9 |
+| `mem_backend_t` as a free-standing vtable | `mem_backend_t : block_source_t` — every downstream backend (`heap`, pools, ESP, device) re-based | 10 |
+| `fwd_router_t(graph_t&, <positional planes>)` | `fwd_router_t(graph_t&, router_planes_t)` | 10 |
+| `httpd_ws_link_t` / link constructors with positional knobs | per-link config aggregates (#1593) | 10 |
+| the six pmr control-plane containers on `graph_t` (D1), `link_candidates` → `std::pmr::vector` | `block_array_t<T>`; `link_candidates(name, std::span<vertex_t*> out)` | 3 |
 
-Each removal keeps a deprecated forwarding shim for one release where a shim is expressible
-(all but the pmr parameter, which has no non-throwing meaning to forward to). The bindings
-(`bindings/`) consume the wire, not this API, and are unaffected.
+**No removal keeps a shim.** Per §11 ruling 4 as amended there is no backward compatibility:
+every old name is deleted in the bump that introduces its replacement, with no deprecation
+alias or transition release, and consumers adapt in the same bump. Each row's CHANGELOG entry
+carries the one-line rewrite. The bindings (`bindings/`) consume the wire, not this API, and
+are unaffected.
 
 ## 9. Risks
 
@@ -639,10 +775,21 @@ Each removal keeps a deprecated forwarding shim for one release where a shim is 
    slice, not the RFC.
 4. **The hazard domain over raw pointers** (slice 3) re-opens ADR-0069's retire path. The
    existing `lkv_slot_test` and the T=24 read bench are the gate.
-5. **Ten slices is a long tail.** Slices 1–2 stand alone and are worth landing even if nothing
-   else does; slices 3–5 are the RFC's core and are worth landing as a unit; 6–10 are
-   cleanups whose value is bytes and surface, and each can be dropped without invalidating
-   the others.
+5. **Ten slices is a long tail.** Slices 1–2 stand alone and have landed; slices 3–5 are
+   the RFC's core and are worth landing as a unit; 6–10 are cleanups whose value is bytes and
+   surface, and each can be dropped without invalidating the others.
+6. **Ungated today: slice 9's queued WS send can interleave with another frame on the same
+   socket.** A link that retains a `value_t` and writes it from its queue shares the socket
+   with every other frame that link emits; nothing in the bench set or the host suite exercises
+   two frames racing on one socket, so a torn frame would ship green. **Gate added:** the
+   two-frame race host test of §6.9 must exist and pass *before* slice 9 lands, not with it.
+7. **Ungated today: slice 3's hazard retire over a raw `value_t*` is use-after-free class.**
+   ADR-0069's domain retires `shared_ptr` nodes, whose last owner is the control block; over a
+   raw pointer the last owner is whoever calls `release` last, and a hazard scan that misses a
+   reader, or a `release` that runs before the retire list is drained, frees a block a reader
+   still holds. The slice-1 tests are rewritten a second time for this contract; the T=24 read
+   bench runs under ASan as part of the gate; and `hazard_slot_t` stays opt-in until that run
+   is green, so the default path never carries the risk.
 
 ## 10. Alternatives considered
 
@@ -665,7 +812,15 @@ Each removal keeps a deprecated forwarding shim for one release where a shim is 
 
 ## 11. Discussion
 
-Open for the maintainer's ruling, in the order the slices need them:
+**Rulings (2026-09-29, PR #1627).** 1. `kSingleWriter` is a per-build trait. 2. The host
+default for `kShareThresholdBytes` is 4,096 B; deployments set their own value per vertex.
+3. `NONE` retention on a value vertex is a permitted policy, not a named role. 4. (as
+amended) There is **no backward compatibility**: the surface fold and every slice delete the
+old API outright, with no shims, deprecation aliases or transition releases; consumers adapt
+in the same bump, and §6.10's gate counts the final surface only. 5. Slices 1 and 2 land
+ahead of acceptance as ordinary fixes (done: PR #1628, PR #1629).
+
+The questions as posed, kept for the record:
 
 1. §5.5 — is `kSingleWriter` a per-build trait (proposed) or a per-vertex bit? Per-build is
    the only form that removes the primitive from the binary.
@@ -673,7 +828,7 @@ Open for the maintainer's ruling, in the order the slices need them:
    `SIZE_MAX` (copy always, today's behaviour) until a deployment measures.
 3. §4.4 — whether a `NONE`-retention *value* vertex (pure relay) is a role the library wants
    to name, or only a policy it permits.
-4. §4.12 — how far the surface fold goes in one release; the shims cost nothing but the
-   count in §6.10's gate assumes one release.
+4. §4.12 — how far the surface fold goes in one release. (Ruled: all of it, in one bump,
+   with nothing kept.)
 5. §6 — whether slices 1 and 2 land ahead of this RFC's acceptance as ordinary fixes, since
    neither depends on §5.
