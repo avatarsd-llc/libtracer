@@ -381,6 +381,19 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **A subscription's target leg ADOPTS the published value (RFC 0028 slice 4, D2; part of
+  [#1620](https://github.com/avatarsd-llc/libtracer/issues/1620)).** `subscribe(src, target)`
+  used to clone the delivered links into a `rope_t` and mint the target a `value_t` of its own,
+  so K stored targets cost K + 1 blocks per publish. The target's slot now takes one reference
+  on the block the source published: `bench_lean_value_path local-target` at K=32 goes from 33
+  allocations / 1,320 B to **1 / 40 B** per publish. Observable: `read(target)` and
+  `read(src)` now answer the **same** `value_t` (identity, not only equal bytes), and a
+  target's value is released to the source it was drawn from once the last slot moves off it.
+  The target's admission filter, ring admission and ACL gate run as before, on the shared
+  block; only a normalising filter mints the target a block. Two shapes still clone, inside
+  the store: a HANDLER target (its `on_write` reads a `rope_t`) and a value in caller-owned
+  storage (a HANDLER source's unstored delivery). No public signature changes.
+
 - **`tr::net::fwd_router_t`'s four peer-reachable ownership copies draw from its injected
   `flat` backend, never the global heap**
   ([#1582](https://github.com/avatarsd-llc/libtracer/issues/1582)). The COMPACT delivery

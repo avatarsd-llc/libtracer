@@ -1284,6 +1284,15 @@ target_link_libraries(value_test PRIVATE libtracer Threads::Threads)
 libtracer_test_warnings(value_test)
 add_test(NAME value COMMAND value_test)
 
+# RFC-0028 slice 4 — target adopt: a subscription's target leg takes a reference on the
+# published block instead of minting its own, so K stored targets cost one block per publish.
+# Pins identity, the admission filter on the shared block, a STREAM target's ring, and the two
+# shapes that still clone (caller-owned storage, a HANDLER target).
+add_executable(target_adopt_test target_adopt_test.cpp)
+target_link_libraries(target_adopt_test PRIVATE libtracer)
+libtracer_test_warnings(target_adopt_test)
+add_test(NAME target_adopt COMMAND target_adopt_test)
+
 # #361 §5 / ADR-0039 §1 — graph_t's injected memory_resource: per-write LKV
 # allocations route through it (counting pass-through), released in full at
 # graph destruction; a default graph never touches a foreign resource.

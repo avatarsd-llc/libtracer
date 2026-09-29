@@ -266,10 +266,12 @@ class value_t {
      * @brief Nothrow @ref rope into @p out: reserves the chain first, so the appends cannot
      *        reallocate.
      *
-     * Out of line: this is the delivery clone `dispatch_edge_target` takes once per bound
-     * edge, and inlining the reserve-then-append loop there cost that pinned symbol ~100 B
-     * on the symbol ratchet against the one `concat` call it replaced. One call keeps the
-     * dispatch body's shape; the loop itself is the same either way.
+     * Out of line: until RFC-0028 slice 4 this was the delivery clone `dispatch_edge_target`
+     * took once per bound edge, and inlining the reserve-then-append loop there cost that
+     * pinned symbol ~100 B on the symbol ratchet. A target now ADOPTS the published block, and
+     * the adopting `store_value` takes this clone only where it cannot adopt (a HANDLER
+     * target, caller-owned storage) or to show an admission filter the links. One call keeps
+     * each of those bodies' shape; the loop itself is the same either way.
      * @retval false The chain could not be reserved — @p out is left as it was.
      */
     [[gnu::noinline]] [[nodiscard]] bool try_rope(rope_t& out) const noexcept {

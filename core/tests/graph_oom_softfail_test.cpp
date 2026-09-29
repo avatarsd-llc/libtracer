@@ -12,12 +12,13 @@
  *     nothing published (the prior value survives);
  *   - the HANDLER null-shared_ptr "consumed" sentinel is NOT misread as that OOM;
  *   - DELIVERY legs drop (never abort, never corrupt): a wide fan-out degrades to the
- *     inline prefix, a spilled-rope target clone drops one leg, a stream ring append
- *     is shed (bounded-lossy history) — while TWO sites that used to have a drop of their
- *     own no longer allocate at all and are pinned here as INVERTED assertions: the
+ *     inline prefix, a HANDLER target's spilled-rope clone drops one leg, a stream ring
+ *     append is shed (bounded-lossy history) — while THREE sites that used to have a drop of
+ *     their own no longer allocate at all and are pinned here as INVERTED assertions: the
  *     per-edge dispatch snapshot (#1448 — a remote fan-out survives a total heap refusal
- *     intact) and the HANDLER write's delivery (#1505 — the notify clone is gone, so the
- *     widest OOM shed in the graph is not narrower but impossible);
+ *     intact), the HANDLER write's delivery (#1505 — the notify clone is gone, so the
+ *     widest OOM shed in the graph is not narrower but impossible), and a stored target's
+ *     delivery (RFC-0028 slice 4 — the target adopts the published block);
  *   - a stream drain under OOM DEFERS (cursor kept) and catches up once memory returns;
  *   - the two sheds that happen BEFORE the fan-out — a STREAM ring append and a
  *     `mark_pending` leg — are COUNTED at one per subscriber while the write still answers
@@ -289,7 +290,7 @@ void test_wide_fanout_degrade() {
  *
  * @note This is the leg #854's own-subs-wide ruling governed. The ruling is annotated, not
  *       overturned: `out_of_memory` is still counted at own-subs width by `mark_pending`'s
- *       shed pending mark, and at width 1 by `dispatch_edge_target`'s per-edge clone.
+ *       shed pending mark, and at width 1 by `dispatch_edge_target`'s declined store.
  */
 void test_handler_delivery_allocates_nothing() {
     std::printf("handler notify — the delivery takes no clone, so nothing can shed it:\n");
@@ -413,32 +414,69 @@ void test_remote_edge_snapshot_is_allocation_free() {
     check(d.fan_out_truncated == before.fan_out_truncated, "and no capacity degrade either");
 }
 
-/** @brief A spilled (>2-link) value's target-edge clone drops that ONE leg on OOM. */
-void test_target_clone_drop() {
-    std::printf("target edge — the spilled-rope delivery clone drops on OOM:\n");
+/**
+ * @brief A spilled (>2-link) value reaches a STORED_VALUE target under the SAME refusal that
+ *        used to drop it — the target adopts the published block (RFC-0028 slice 4), so the
+ *        leg has no clone left to fail. An INVERTED assertion, like the two above.
+ */
+void test_target_adopt_allocates_nothing() {
+    std::printf("target edge — a stored target adopts the block, so the refusal sheds nothing:\n");
     graph_t g;
     auto a = g.register_vertex(path_t("/s/src"), role_t::STORED_VALUE);
     auto b = g.register_vertex(path_t("/s/dst"), role_t::STORED_VALUE);
     (void)g.subscribe(path_t("/s/src"), path_t("/s/dst"));
     const std::uint64_t oom_before = g.delivery_drops().out_of_memory;
     {
+        g_reject_size = 3 * sizeof(view_t);  // exactly the chain reserve the old clone took
+        const hook_guard_t oom(fail_exact);
+        rope_t probe;
+        check(!probe.try_reserve(3),
+              "canary: the injection is live and refuses the 3-link chain reserve");
+        check(g.write(a, three_link()).has_value(), "the source write itself succeeds");
+    }
+    const auto src = g.read(a);
+    const auto dst = g.read(b);
+    check(dst.has_value(), "the target delivery LANDED under the refusal");
+    check(src.has_value() && dst.has_value() && src->get() == dst->get(),
+          "and the target holds the SAME block the source published — adopted, not cloned");
+    check(g.delivery_drops().out_of_memory == oom_before, "so no OOM drop is counted");
+}
+
+/**
+ * @brief A HANDLER target cannot adopt (it stores nothing and its `on_write` reads a rope),
+ *        so its leg still clones — and a spilled clone refused by the heap drops that ONE leg,
+ *        counted once as OUT_OF_MEMORY. This is the width-1 site #854's ruling still names.
+ */
+void test_handler_target_clone_drop() {
+    std::printf("handler target — the one target leg that still clones drops on OOM:\n");
+    graph_t g;
+    int handled = 0;
+    tr::graph::handlers_t h;
+    h.on_write = [&handled](const rope_t&,
+                            const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
+        ++handled;
+        return {};
+    };
+    auto a = g.register_vertex(path_t("/s/src"), role_t::STORED_VALUE);
+    (void)g.register_vertex(path_t("/s/act"), role_t::HANDLER, std::move(h));
+    (void)g.subscribe(path_t("/s/src"), path_t("/s/act"));
+    const std::uint64_t oom_before = g.delivery_drops().out_of_memory;
+    {
         g_reject_size = 3 * sizeof(view_t);  // exactly the clone's chain reserve
         const hook_guard_t oom(fail_exact);
         check(g.write(a, three_link()).has_value(), "the source write itself succeeds");
     }
-    check(!g.read(b).has_value(), "the target delivery leg was dropped (no partial write)");
+    check(handled == 0, "the handler target's delivery leg was dropped (no partial write)");
 
     // ASSERT THE OBSERVABLE, not only the behaviour. A dropped delivery is otherwise
     // indistinguishable from one that never had a target, and `delivery_drops()` is the only
-    // thing that tells an operator which happened. This path was already exercised here and
-    // the counter was never checked, so `out_of_memory` could have stopped counting without
-    // any test noticing.
+    // thing that tells an operator which happened.
     const auto d = g.delivery_drops();
     check(d.out_of_memory == oom_before + 1, "the OOM drop is counted once, by its own cause");
     check(d.no_target == 0 && d.denied == 0,
           "and is not attributed to a missing target or a denied write");
 
-    check(g.write(a, three_link()).has_value() && g.read(b).has_value(),
+    check(g.write(a, three_link()).has_value() && handled == 1,
           "the target edge delivers again once memory returns");
     check(g.delivery_drops().out_of_memory == oom_before + 1,
           "and the successful redelivery counts no further drop");
@@ -839,7 +877,8 @@ int main() {
     test_handler_sentinel();
     test_small_fanout_allocation_free();
     test_wide_fanout_degrade();
-    test_target_clone_drop();
+    test_target_adopt_allocates_nothing();
+    test_handler_target_clone_drop();
     test_handler_delivery_allocates_nothing();
     test_remote_edge_snapshot_is_allocation_free();
     test_stream_ring_shed();
