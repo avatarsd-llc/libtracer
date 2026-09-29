@@ -25,6 +25,7 @@
  */
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstring>
 #include <optional>
@@ -202,5 +203,24 @@ struct reply_route_t {
  */
 [[nodiscard]] view::rope_t assemble_error_reply(const reply_route_t& route, status_t status,
                                                 mem::mem_backend_t& egress);
+
+/** @brief Byte length of @ref error_status_tail — `STATUS{ ERROR{ VALUE u16 } }`, three
+ *         4-byte headers plus the 2-byte registered code. */
+inline constexpr std::size_t kErrorStatusTailBytes = 14;
+
+/**
+ * @brief The `STATUS{ ERROR{ VALUE u16 LE code } }` tail of an addressed error reply, as a
+ *        stack array — the bytes @ref assemble_error_reply appends after `kind`.
+ *
+ * Split out so a reply that must be built WITHOUT an allocator can carry the identical tail:
+ * the terminus refusal reply (#1612) answers a request whose decode the rx source refused, and
+ * "the reply must not need the memory that just refused" (reference 04 §Exhaustion is a
+ * value) rules out `assemble_error_reply`'s head segment there. One definition of the tail,
+ * two emitters — the status code mapping (RFC-0002 §D) cannot drift between them.
+ *
+ * @param status The L4 outcome; mapped to its registered wire code.
+ */
+[[nodiscard]] std::array<std::byte, kErrorStatusTailBytes> error_status_tail(
+    status_t status) noexcept;
 
 }  // namespace tr::graph

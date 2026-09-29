@@ -727,6 +727,185 @@ void reject_bus_name_hop(const child_registry_t& registry, std::string_view inbo
     }
 }
 
+/**
+ * @brief Below this many reply bytes the refusal reply is gathered into a stack buffer and
+ *        sent contiguous; above it, the collected spans go out through the link's
+ *        scatter-gather `send`. A strategy selector, not a limit — every reply is emitted
+ *        either way (`core/STYLE.md` §Introspection: "tuning knobs are not limits").
+ */
+constexpr std::size_t kRefusalReplyInlineBytes = 256;
+
+/**
+ * @brief The most spans a refusal reply gathers: the head, the two route bodies (each one span
+ *        on the contiguous tier, one per straddled link on the rope tier), the middle route
+ *        header, the status tail and the echo trailer.
+ */
+constexpr std::size_t kRefusalReplySpans = 12;
+
+/**
+ * @brief Answer a request this terminus could not serve for want of MEMORY with an addressed
+ *        `FWD{REPLY, kind=ERROR, STATUS{ERROR{tr::flow::backpressure}}}` — built on the
+ *        stack, from the request's own bytes, through no allocator at all (#1612).
+ *
+ * The three resource arms of the terminus — the rx source refusing the decode arena, the
+ * egress backend refusing the reply head, the rx source refusing the reply's iov table — used
+ * to count a drop and return, so a requester whose frame met an exhausted receiver saw only
+ * its own timeout: a memory condition indistinguishable from a lost frame, an unreachable
+ * node or a wedged link. Reference 04 §"Exhaustion is a value" now states the rule this
+ * emitter exists for: *the reply must not need the memory that just refused*.
+ * `tr::graph::assemble_error_reply` — the ordinary addressed-error path — draws its head from
+ * the egress backend, which on two of the three arms is exactly what refused, and on the
+ * third shares the node's memory ceiling with it. So this reply borrows the request instead.
+ *
+ * The request's routes are located by OFFSET through the one grammar (`read_fwd_header`, the
+ * same five header reads @ref peek_refused_route makes) with no decode and no arena: `op` is
+ * child 0, `dst` the first `PATH` / `PATH_REF` after it, `src` the next `PATH` after `dst` —
+ * the scan `reject_bus_name_hop` runs over a decoded tree, run over the raw bytes, so a
+ * `FIELD` selector between the two routes (a `:subscribers[]` SUBSCRIBE carries one) is
+ * stepped over. The reply is the resolver's own grammar — routes swapped, each route header
+ * re-emitted with its trailer bits cleared and its body sliced exactly as `struct_opt` does,
+ * `kind=ERROR`, then `error_status_tail` — so a requester cannot tell which emitter answered.
+ * A request whose `src` cannot be located has nowhere to reply to and stays a counted drop,
+ * which is the correct answer for it; so does one whose `src` is EMPTY, because that is the
+ * origin declining a reply (RFC-0004 Amendment 2), not a route.
+ *
+ * The wire-time echo (#1109) rides too when the request's TF=0 stamp sits in one span: the
+ * origin measuring RTT against an exhausted node still gets its stamp back. TF=1 is not echoed
+ * (anchorless at the root, the spec's own MUST-reject case), and a stamp straddling a rope link
+ * is dropped rather than stitched — the echo is a capability, the reply is the obligation.
+ *
+ * Two egress shapes, one span list: a reply that fits @ref kRefusalReplyInlineBytes is
+ * gathered into a stack buffer and sent contiguous — the transport's scatter-gather gather (which
+ * draws from the link's egress store) is never reached, so nothing on this path can allocate.
+ * A longer reply goes out through the link's `send(iov)`; a transport with native
+ * scatter-gather still allocates nothing, and one without answers from its own egress seam.
+ *
+ * `[[gnu::cold]]` and out of line: this is a refusal arm, and the terminus's warm path must
+ * not carry its stack frame.
+ *
+ * @tparam Cursor A grammar byte-source cursor (span or rope) over the request frame.
+ * @param  cur    The cursor positioned at the request's first byte.
+ * @param  link   The link the request arrived on — the reply goes back the way it came.
+ * @param  status The refusal; `BACKPRESSURE` at every current caller.
+ */
+template <class Cursor>
+[[gnu::noinline, gnu::cold]] void emit_refusal_reply(const Cursor& cur, transport_t& link,
+                                                     graph::status_t status) {
+    const auto outer = read_fwd_header(cur, 0);
+    if (!outer || outer->type != type_t::FWD || !outer->opt.pl) return;
+    const std::size_t end = outer->body_off + outer->body_len;
+    // Child 0 — the op, one byte, masked (RFC-0024 §9.3). A REPLY is never answered with a
+    // reply: an exhausted node erroring BACK at a reply would ping-pong between two nodes.
+    const auto op = read_fwd_header(cur, outer->body_off);
+    if (!op || op->type != type_t::VALUE || op->body_len != 1) return;
+    if (static_cast<fwd_op_t>(cur.byte_at(op->body_off) & graph::kFwdOpcodeMask) == fwd_op_t::REPLY)
+        return;
+    // dst = the first routable child after the op; src = the next PATH after dst. Anything
+    // between them (a FIELD selector) is stepped over; anything after src is never read.
+    std::optional<fwd_hdr_t> dst;
+    std::optional<fwd_hdr_t> src;
+    std::size_t dst_pos = 0;
+    std::size_t src_pos = 0;
+    for (std::size_t pos = outer->body_off + op->total; pos < end && !src;) {
+        const auto h = read_fwd_header(cur, pos);
+        if (!h || pos + h->total > end) return;  // ragged child ⇒ malformed ⇒ nowhere to reply
+        if (!dst) {
+            if (h->type == type_t::PATH || h->type == type_t::PATH_REF) {
+                dst = h;
+                dst_pos = pos;
+            }
+        } else if (h->type == type_t::PATH) {
+            src = h;
+            src_pos = pos;
+        }
+        pos += h->total;
+    }
+    // An EMPTY `src` is not a route: it is the origin declining a reply (RFC-0004 Amendment 2,
+    // #1491) — the resolver answers such a WRITE with nothing, and so does this arm. Answering
+    // it would mint exactly the addressed error on a zero-length route the amendment forbids.
+    if (!dst || !src || src->body_len == 0) return;
+
+    // The echo stamp: the request's TF=0 outer trailer sits right after its body. Echoed only
+    // when it is one span, decided BEFORE the head is written so the TS bit tells the truth.
+    std::span<const std::byte> echo;
+    if (outer->opt.ts && !outer->opt.tf) {
+        std::size_t pieces = 0;
+        cur.for_each_span(end, wire::trailer_ts_bytes(false), [&](std::span<const std::byte> s) {
+            ++pieces;
+            echo = s;
+        });
+        if (pieces != 1) echo = {};
+    }
+
+    // A route header re-emitted trailer-less: the same bytes, `opt` cleared of TS/TF/CR/CW as
+    // `struct_opt` clears them, because the body copied below excludes the trailer the bits
+    // would otherwise announce. The length field is untouched — it never counted the trailer.
+    const auto route_header = [&cur](const fwd_hdr_t& h, std::size_t pos,
+                                     std::array<std::byte, 6>& out) {
+        for (std::size_t i = 0; i < h.header_len; ++i) out[i] = std::byte{cur.byte_at(pos + i)};
+        out[1] = static_cast<std::byte>(h.opt.without_trailer().encode());
+        return std::span<const std::byte>(out.data(), h.header_len);
+    };
+
+    // Reply = FWD{ op=REPLY, dst=req.src, src=req.dst, kind=ERROR, STATUS tail }: the routes
+    // swap, so the reply's FIRST route is the request's src.
+    constexpr std::size_t kU8Value = 5;
+    const std::size_t body_len = kU8Value + src->header_len + src->body_len + dst->header_len +
+                                 dst->body_len + kU8Value + graph::kErrorStatusTailBytes;
+    std::array<std::byte, 6> rdst_hdr{};
+    std::array<std::byte, 6> rsrc_hdr{};
+    const std::span<const std::byte> rdst = route_header(*src, src_pos, rdst_hdr);
+    const std::span<const std::byte> rsrc = route_header(*dst, dst_pos, rsrc_hdr);
+    const std::array<std::byte, kU8Value> reply_op{
+        static_cast<std::byte>(std::to_underlying(type_t::VALUE)), std::byte{0}, std::byte{1},
+        std::byte{0}, static_cast<std::byte>(std::to_underlying(fwd_op_t::REPLY))};
+    stack_writer<18> head;  // FWD header (<=6) + the 5-byte op + the reply-dst header (<=6)
+    head.header(type_t::FWD, body_len, opt_t{.ts = !echo.empty(), .tf = false});
+    head.raw(reply_op);
+    head.raw(rdst);
+    if (!head.ok()) return;  // cannot happen at N=18; drop rather than emit a truncated head
+    // kind=ERROR then the status tail — one constant-sized block.
+    std::array<std::byte, kU8Value + graph::kErrorStatusTailBytes> tail{
+        static_cast<std::byte>(std::to_underlying(type_t::VALUE)), std::byte{0}, std::byte{1},
+        std::byte{0}, static_cast<std::byte>(std::to_underlying(graph::reply_kind_t::ERROR))};
+    const std::array<std::byte, graph::kErrorStatusTailBytes> status_tail =
+        graph::error_status_tail(status);
+    std::memcpy(tail.data() + kU8Value, status_tail.data(), status_tail.size());
+
+    // Gather the spans: nothing below copies a route byte; the bodies are the request's own.
+    std::array<std::span<const std::byte>, kRefusalReplySpans> iov{};
+    std::size_t n = 0;
+    bool overflow = false;
+    const auto put = [&](std::span<const std::byte> s) {
+        if (n == iov.size()) {
+            overflow = true;
+            return;
+        }
+        iov[n++] = s;
+    };
+    put(head.span());
+    cur.for_each_span(src->body_off, src->body_len, put);
+    put(rsrc);
+    cur.for_each_span(dst->body_off, dst->body_len, put);
+    put(tail);
+    if (!echo.empty()) put(echo);
+    if (overflow) return;  // a route straddling more links than the table holds — drop
+
+    std::size_t total = 0;
+    for (std::size_t i = 0; i < n; ++i) total += iov[i].size();
+    if (total <= kRefusalReplyInlineBytes) {
+        std::array<std::byte, kRefusalReplyInlineBytes> buf;
+        std::size_t off = 0;
+        for (std::size_t i = 0; i < n; ++i) {
+            if (!iov[i].empty()) std::memcpy(buf.data() + off, iov[i].data(), iov[i].size());
+            off += iov[i].size();
+        }
+        link.send(std::span<const std::byte>(buf.data(), total));
+        return;
+    }
+    link.send(std::span<const std::span<const std::byte>>(iov.data(), n));
+}
+
 /** @brief The reply-`src` window @ref peek_refused_route hands back — offsets, not a span,
  *         because the source may be a rope the caller re-slices from its own cursor. */
 struct refused_src_t {
@@ -2642,8 +2821,18 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<con
         // documented as "exceeds this RECEIVER's decode resources" — the rx source refused
         // a draw, which is a RESOURCE drop an operator sizes the terminus arena against.
         // Everything else is the frame's own fault and joins the malformed bucket.
-        count_drop(arena.error() == wire::err_t::TLV_NESTING_TOO_DEEP ? arena_dropped_
-                                                                      : malformed_rx_);
+        if (arena.error() != wire::err_t::TLV_NESTING_TOO_DEEP) {
+            count_drop(malformed_rx_);
+            return;
+        }
+        count_drop(arena_dropped_);
+        // Counted AND answered (#1612): the requester learns its frame met an exhausted
+        // receiver instead of inferring a lost frame from its own timeout. The reply is built
+        // from the request's bytes on the stack — it cannot draw from the source that just
+        // refused, and it does not draw from anything else either (`emit_refusal_reply`).
+        if (transport_t* const in = registry_.by_name(inbound_name))
+            emit_refusal_reply(wire::grammar::span_cursor{frame}, *in,
+                               graph::status_t::BACKPRESSURE);
         return;
     }
     // §7.2's terminus deref rides as the fourth argument and nothing else changes: a labelled
@@ -2659,8 +2848,13 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<con
         count_drop(malformed_rx_);
         return;
     }
-    if (reply->link_count() == 0) {  // assemble OOM ⇒ empty rope ⇒ drop (no garbage frame)
+    if (reply->link_count() == 0) {  // assemble OOM ⇒ empty rope ⇒ no garbage frame
+        // The resolver's own `or_backpressure` already tried to answer this by value and the
+        // egress backend refused THAT head too; the stack emitter needs neither (#1612).
         count_drop(assemble_dropped_);
+        if (transport_t* const in = registry_.by_name(inbound_name))
+            emit_refusal_reply(wire::grammar::span_cursor{frame}, *in,
+                               graph::status_t::BACKPRESSURE);
         return;
     }
     if (transport_t* in = registry_.by_name(inbound_name)) {
@@ -2672,7 +2866,12 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<con
         // control budget the whole node's mutations share.
         mem::block_array_t<std::span<const std::byte>> iov{rx_for(inbound_ctx)};
         if (!gather_reply_iov(*reply, iov)) {
+            // The rx source refused the table — the same source the reply head would need,
+            // so the answer is the stack-built one (#1612). `reply` is released with the
+            // arena; the requester gets BACKPRESSURE and retries.
             count_drop(reply_iov_dropped_);
+            emit_refusal_reply(wire::grammar::span_cursor{frame}, *in,
+                               graph::status_t::BACKPRESSURE);
             return;
         }
         in->send(std::span<const std::span<const std::byte>>(iov.data(), iov.size()));
@@ -2713,8 +2912,13 @@ void fwd_router_t::resolve_terminus_rope(std::string_view inbound_name, view::ro
         count_drop(malformed_rx_);
         return;
     }
-    if (reply->link_count() == 0) {  // assemble OOM ⇒ empty rope ⇒ drop (no garbage frame)
+    if (reply->link_count() == 0) {  // assemble OOM ⇒ empty rope ⇒ no garbage frame
+        // Answered from the request's own links (#1612), as at the arena terminus: the rope
+        // cursor hands the emitter the same offsets the contiguous one does.
         count_drop(assemble_dropped_);
+        if (transport_t* const in = registry_.by_name(inbound_name))
+            emit_refusal_reply(wire::grammar::rope_cursor{view->wire()}, *in,
+                               graph::status_t::BACKPRESSURE);
         return;
     }
     if (transport_t* in = registry_.by_name(inbound_name)) {
@@ -2726,6 +2930,8 @@ void fwd_router_t::resolve_terminus_rope(std::string_view inbound_name, view::ro
         mem::block_array_t<std::span<const std::byte>> iov{rx_for(inbound_ctx)};
         if (!gather_reply_iov(*reply, iov)) {
             count_drop(reply_iov_dropped_);
+            emit_refusal_reply(wire::grammar::rope_cursor{view->wire()}, *in,
+                               graph::status_t::BACKPRESSURE);
             return;
         }
         in->send(std::span<const std::span<const std::byte>>(iov.data(), iov.size()));

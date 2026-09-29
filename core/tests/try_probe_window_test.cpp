@@ -393,12 +393,14 @@ void test_reply_iov_on_the_seam() {
     check(rx.served() == 1, "the reply iov table came from the router's INJECTED rx source");
     check(link.take() == 1, "the reply reached the requester");
 
-    // Armed: refuse exactly that table. The reply is DROPPED and counted; nothing aborts.
+    // Armed: refuse exactly that table. The RESULT reply is dropped and counted, and the
+    // requester is answered with a stack-built BACKPRESSURE instead (#1612); nothing aborts.
     rx.watch(reply_iov_bytes(kReplyLinks), kIovAlign, true);
     const std::size_t before = router.drop_stats().reply_iov_dropped;
     read_once();
     check(rx.refused() >= 1, "the injector fired (an unreached try_alloc would be vacuous)");
-    check(link.take() == 0, "an exhausted reply table DROPS the reply, never aborts");
+    check(link.take() == 1,
+          "an exhausted reply table answers an addressed BACKPRESSURE (#1612), never aborts");
     check(router.drop_stats().reply_iov_dropped == before + 1,
           "the drop is counted on reply_iov_dropped, the documented convention");
 
@@ -430,7 +432,8 @@ void test_reply_iov_on_the_seam() {
     const std::size_t before_rope = router.drop_stats().reply_iov_dropped;
     read_once_roped();
     check(rx.refused() >= 1, "the injector fired on the rope tier too");
-    check(link.take() == 0, "an exhausted table DROPS the rope-tier reply, never aborts");
+    check(link.take() == 1,
+          "an exhausted table answers the rope-tier request with BACKPRESSURE, never aborts");
     check(router.drop_stats().reply_iov_dropped == before_rope + 1,
           "and counts it on the same reply_iov_dropped");
 
@@ -467,7 +470,8 @@ void test_reply_iov_on_the_seam() {
     const std::size_t before_composed = router.drop_stats().reply_iov_dropped;
     read_branch();
     check(rx.refused() >= 1, "the injector fired on the composed reply");
-    check(link.take() == 0, "an exhausted table drops the composed reply whole");
+    check(link.take() == 1,
+          "an exhausted table replaces the composed reply with one BACKPRESSURE frame");
     check(router.drop_stats().reply_iov_dropped == before_composed + 1,
           "counted on reply_iov_dropped at composed-root size too");
 }

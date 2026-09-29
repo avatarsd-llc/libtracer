@@ -724,6 +724,22 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   three lines above and as `playout.hpp`'s re-prime; behaviour on a non-negative `base_ns` is
   byte-identical. Regression pinned by claim 2b of `core/tests/batch_test.cpp`.
 
+- **A request the `fwd_router_t` terminus cannot serve for want of memory is answered, not
+  dropped** ([#1612](https://github.com/avatarsd-llc/libtracer/issues/1612)). The three resource
+  arms of the terminus — the rx block source refusing the decode arena, the egress backend refusing
+  the reply head, the rx source refusing the reply's iov table — counted a drop and returned, so
+  the requester saw only its own timeout and a memory condition read as a lost frame or a dead
+  link. Each arm now also emits an **addressed** `FWD{REPLY, kind=ERROR,
+  STATUS{tr::flow::backpressure}}` whose `dst` is the request's own `src`, located by offset in the
+  raw frame bytes (no decode, no arena) and built on the stack — the reply reaches **no allocator**,
+  because the memory that just refused cannot fund it (reference 04 §"Exhaustion is a value" now
+  states this corollary). The request's TF=0 wire-time stamp is echoed as on every other reply. A
+  refused frame whose `src` cannot be located stays a counted drop with nothing on the wire. The
+  counters are unchanged and still move; the forward hop is untouched. Wire-neutral for a
+  conforming peer — the frame is the existing RFC-0004 §D error reply, emitted where silence was.
+  Pinned by `core/tests/fwd_terminus_refusal_reply_test.cpp`, including a zero-global-allocation
+  count across the refused receive.
+
 ## [0.15.1] — 2026-08-23
 
 ### Added
