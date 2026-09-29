@@ -37,12 +37,21 @@ jobs:
     # core-ci.yml's header for the tree-wide policy.
     timeout-minutes: 15
     steps:
+      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
+      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
+      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
+      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS)
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "BUILD_JOBS=$jobs"
       - uses: actions/checkout@v4
 
       - name: Build the C++ ws_interop_server helper binary
         run: |
           cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
-          cmake --build core/build --target ws_interop_server -j
+          cmake --build core/build --target ws_interop_server --parallel "$BUILD_JOBS"
 
       - uses: actions/setup-node@v4
         with:
@@ -78,12 +87,21 @@ jobs:
     # Measured max 1.38 min (healthy 1.08), p50 ~0.9. Short-job floor, same `npm ci`.
     timeout-minutes: 15
     steps:
+      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
+      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
+      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
+      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS)
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "BUILD_JOBS=$jobs"
       - uses: actions/checkout@v4
 
       - name: Build the C++ fwd_node_server helper binary
         run: |
           cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
-          cmake --build core/build --target fwd_node_server -j
+          cmake --build core/build --target fwd_node_server --parallel "$BUILD_JOBS"
 
       - uses: actions/setup-node@v4
         with:
@@ -119,12 +137,21 @@ jobs:
     # Measured max 1.35 min (healthy 1.07), p50 ~0.9. Short-job floor, same `npm ci`.
     timeout-minutes: 15
     steps:
+      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
+      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
+      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
+      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS)
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "BUILD_JOBS=$jobs"
       - uses: actions/checkout@v4
 
       - name: Build the C++ ws_fuzz_harness
         run: |
           cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
-          cmake --build core/build --target ws_fuzz_harness -j
+          cmake --build core/build --target ws_fuzz_harness --parallel "$BUILD_JOBS"
 
       - uses: actions/setup-node@v4
         with:

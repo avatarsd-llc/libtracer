@@ -162,6 +162,15 @@ jobs:
             lkv_slot: hazard_slot_t
     name: build-test (acl_full=${{ matrix.acl_full }}, slot=${{ matrix.lkv_slot }})
     steps:
+      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
+      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
+      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
+      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS)
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "BUILD_JOBS=$jobs"
       # Runs as root INSIDE the container — never `sudo`, which the self-hosted runner
       # user does not have. `git` + `ca-certificates` come first because checkout falls
       # back to a REST tarball without them.
@@ -187,7 +196,7 @@ jobs:
       - name: Configure + build (C++23) + ctest
         run: |
           cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo -DLIBTRACER_ACL_FULL=${{ matrix.acl_full }} -DLIBTRACER_LKV_SLOT=${{ matrix.lkv_slot }}
-          cmake --build core/build -j "$(nproc)"
+          cmake --build core/build --parallel "$BUILD_JOBS"
           ctest --test-dir core/build --output-on-failure
       - name: Restore workspace ownership for the host runner
         # Hands the container's root-owned tree back to the host runner user. WHY, and
@@ -212,6 +221,15 @@ jobs:
     # tightened: same container + apt step, same wedge surface.
     timeout-minutes: 20
     steps:
+      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
+      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
+      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
+      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS)
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "BUILD_JOBS=$jobs"
       - name: Toolchain (container has no preinstalled tool set)
         # The wedge surface. Measured over 90 runs of this step across the jobs below:
         # p50 0.67 min, max 1.32. 8 = ~6x the worst healthy install.
@@ -231,7 +249,7 @@ jobs:
             -DLIBTRACER_NET_PLANE=OFF \
             -DLIBTRACER_TRANSPORT_TCP=OFF -DLIBTRACER_TRANSPORT_UDP=OFF \
             -DLIBTRACER_TRANSPORT_WS=OFF -DLIBTRACER_TRANSPORT_CAN=OFF
-          cmake --build core/build-minimal -j "$(nproc)"
+          cmake --build core/build-minimal --parallel "$BUILD_JOBS"
           ctest --test-dir core/build-minimal --output-on-failure
       - name: Restore workspace ownership for the host runner
         # Hands the container's root-owned tree back to the host runner user. WHY, and
@@ -257,6 +275,15 @@ jobs:
     # Measured healthy max 4.88 min. 20 = ~4x; same group, same container apt step.
     timeout-minutes: 20
     steps:
+      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
+      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
+      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
+      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS)
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "BUILD_JOBS=$jobs"
       - name: Toolchain (container has no preinstalled tool set)
         # The wedge surface. Measured over 90 runs of this step across the jobs below:
         # p50 0.67 min, max 1.32. 8 = ~6x the worst healthy install.
@@ -293,7 +320,7 @@ jobs:
           FRAGMENT
           cmake -S core -B core/build-strict -DBUILD_TESTING=ON \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS="-I$PWD/reclaim-strict"
-          cmake --build core/build-strict -j "$(nproc)"
+          cmake --build core/build-strict --parallel "$BUILD_JOBS"
           ctest --test-dir core/build-strict --output-on-failure
       - name: Restore workspace ownership for the host runner
         # Hands the container's root-owned tree back to the host runner user. WHY, and
@@ -328,6 +355,15 @@ jobs:
     # Same container + apt step as the group above; held at its 20-minute wedge bound.
     timeout-minutes: 20
     steps:
+      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
+      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
+      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
+      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS)
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "BUILD_JOBS=$jobs"
       - name: Toolchain (container has no preinstalled tool set)
         timeout-minutes: 8
         run: |
@@ -363,7 +399,7 @@ jobs:
           cmake -S core -B core/build-bus-closed -DBUILD_TESTING=ON \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo -DLIBTRACER_TRANSPORT_CAN=OFF \
             -DCMAKE_CXX_FLAGS="-I$PWD/bus-closed"
-          cmake --build core/build-bus-closed -j "$(nproc)"
+          cmake --build core/build-bus-closed --parallel "$BUILD_JOBS"
           ctest --test-dir core/build-bus-closed -LE bus --output-on-failure
       # The DESELECTED suites, run on purpose (#1438). Five of them used to SEGFAULT here
       # rather than report — the label filter hid it, so nothing in CI ever noticed. They now
@@ -394,6 +430,15 @@ jobs:
     # Same container + apt step as the group above; held at its 20-minute wedge bound.
     timeout-minutes: 20
     steps:
+      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
+      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
+      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
+      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS)
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "BUILD_JOBS=$jobs"
       - name: Toolchain (container has no preinstalled tool set)
         timeout-minutes: 8
         run: |
@@ -429,7 +474,7 @@ jobs:
           cmake -S core -B core/build-self-heal-closed -DBUILD_TESTING=ON \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo -DLIBTRACER_SELF_HEAL_LINKS=OFF \
             -DCMAKE_CXX_FLAGS="-I$PWD/self-heal-closed"
-          cmake --build core/build-self-heal-closed -j "$(nproc)"
+          cmake --build core/build-self-heal-closed --parallel "$BUILD_JOBS"
           ctest --test-dir core/build-self-heal-closed -LE selfheal --output-on-failure
       # The two deselected suites, run on purpose — the same claim the bus leg makes. Each
       # states a skip from its own `main` and exits 77, which ctest reads as Skipped; this step
@@ -461,6 +506,15 @@ jobs:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container: ubuntu:24.04
     steps:
+      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
+      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
+      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
+      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS)
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "BUILD_JOBS=$jobs"
       - name: Toolchain (container has no preinstalled tool set)
         run: |
           apt-get update -qq
@@ -494,7 +548,7 @@ jobs:
           FRAGMENT
           cmake -S core -B core/build-qsbr -DBUILD_TESTING=ON \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS="-I$PWD/reclaim-strict"
-          cmake --build core/build-qsbr -j "$(nproc)"
+          cmake --build core/build-qsbr --parallel "$BUILD_JOBS"
           ctest --test-dir core/build-qsbr --output-on-failure
       - name: Restore workspace ownership for the host runner
         # Hands the container's root-owned tree back to the host runner user. WHY, and
@@ -524,11 +578,20 @@ jobs:
     # number is kept equal to the rest of the build-test group so one review covers them.
     timeout-minutes: 20
     steps:
+      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
+      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
+      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
+      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS)
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "BUILD_JOBS=$jobs"
       - uses: actions/checkout@v4
       - name: Configure + build (C++23, aarch64) + ctest
         run: |
           cmake -S core -B core/build-arm64 -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
-          cmake --build core/build-arm64 -j "$(nproc)"
+          cmake --build core/build-arm64 --parallel "$BUILD_JOBS"
           ctest --test-dir core/build-arm64 --output-on-failure
 
   # GCC-15 host gate: build the core + ctest with GCC 15 (the same major the
@@ -544,6 +607,15 @@ jobs:
     # the container apt step. 20 = ~3.9x.
     timeout-minutes: 20
     steps:
+      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
+      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
+      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
+      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS)
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "BUILD_JOBS=$jobs"
       # Same PPA as before, minus `sudo` (root in the container) plus
       # software-properties-common, which the hosted image preinstalls and a bare
       # ubuntu:24.04 does not. Same noble base, so apt resolves g++-15 identically.
@@ -569,7 +641,7 @@ jobs:
         run: |
           cmake -S core -B core/build-gcc15 -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DCMAKE_C_COMPILER=gcc-15 -DCMAKE_CXX_COMPILER=g++-15
-          cmake --build core/build-gcc15 -j "$(nproc)"
+          cmake --build core/build-gcc15 --parallel "$BUILD_JOBS"
           ctest --test-dir core/build-gcc15 --output-on-failure
       - name: Restore workspace ownership for the host runner
         # Hands the container's root-owned tree back to the host runner user. WHY, and
@@ -600,13 +672,22 @@ jobs:
         lkv_slot: [single_writer_slot_t, hazard_slot_t]
     name: sanitizers (slot=${{ matrix.lkv_slot }})
     steps:
+      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
+      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
+      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
+      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS)
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "BUILD_JOBS=$jobs"
       - uses: actions/checkout@v4
       - name: ASan + UBSan build + ctest
         run: |
           cmake -S core -B core/build-asan -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Debug \
             -DLIBTRACER_LKV_SLOT=${{ matrix.lkv_slot }} \
             -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -g"
-          cmake --build core/build-asan -j "$(nproc)"
+          cmake --build core/build-asan --parallel "$BUILD_JOBS"
           # ASLR can make ASan/TSan abort in this runner; pin it off.
           setarch "$(uname -m)" -R ctest --test-dir core/build-asan --output-on-failure
 
@@ -623,13 +704,22 @@ jobs:
         lkv_slot: [single_writer_slot_t, hazard_slot_t]
     name: tsan (slot=${{ matrix.lkv_slot }})
     steps:
+      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
+      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
+      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
+      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS)
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "BUILD_JOBS=$jobs"
       - uses: actions/checkout@v4
       - name: ThreadSanitizer build + ctest (graph concurrency)
         run: |
           cmake -S core -B core/build-tsan -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Debug \
             -DLIBTRACER_LKV_SLOT=${{ matrix.lkv_slot }} \
             -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1"
-          cmake --build core/build-tsan -j "$(nproc)"
+          cmake --build core/build-tsan --parallel "$BUILD_JOBS"
           setarch "$(uname -m)" -R ctest --test-dir core/build-tsan --output-on-failure
 
   # The SAME TSan matrix with `reclaim_qsbr_t` bound (#1376). A separate job rather than a third
@@ -644,6 +734,15 @@ jobs:
         lkv_slot: [single_writer_slot_t, hazard_slot_t]
     name: tsan qsbr (slot=${{ matrix.lkv_slot }})
     steps:
+      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
+      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
+      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
+      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS)
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "BUILD_JOBS=$jobs"
       - uses: actions/checkout@v4
       - name: ThreadSanitizer build + ctest (reclaim_qsbr grace period)
         run: |
@@ -669,7 +768,7 @@ jobs:
           cmake -S core -B core/build-tsan-qsbr -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Debug \
             -DLIBTRACER_LKV_SLOT=${{ matrix.lkv_slot }} \
             -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1 -I$PWD/reclaim-qsbr-tsan"
-          cmake --build core/build-tsan-qsbr -j "$(nproc)"
+          cmake --build core/build-tsan-qsbr --parallel "$BUILD_JOBS"
           setarch "$(uname -m)" -R ctest --test-dir core/build-tsan-qsbr --output-on-failure
 
   # Regression guard for the CMake install/export (find_package packaging). Builds
@@ -686,6 +785,15 @@ jobs:
     # it acceptable to be wedged", not "how long does the work take".
     timeout-minutes: 15
     steps:
+      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
+      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
+      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
+      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS)
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "BUILD_JOBS=$jobs"
       - name: Toolchain (container has no preinstalled tool set)
         # The wedge surface. Measured over 90 runs of this step across the jobs below:
         # p50 0.67 min, max 1.32. 8 = ~6x the worst healthy install.
@@ -702,13 +810,13 @@ jobs:
       - name: Build + install core to a staging prefix
         run: |
           cmake -S core -B core/build-install -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release
-          cmake --build core/build-install -j "$(nproc)"
+          cmake --build core/build-install --parallel "$BUILD_JOBS"
           cmake --install core/build-install --prefix "${RUNNER_TEMP}/prefix"
       - name: Consume via find_package(libtracer)
         run: |
           cmake -S tests/packaging -B "${RUNNER_TEMP}/consumer" \
             -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/prefix"
-          cmake --build "${RUNNER_TEMP}/consumer" -j "$(nproc)"
+          cmake --build "${RUNNER_TEMP}/consumer" --parallel "$BUILD_JOBS"
           "${RUNNER_TEMP}/consumer/app"
       - name: Restore workspace ownership for the host runner
         # Hands the container's root-owned tree back to the host runner user. WHY, and
@@ -734,6 +842,15 @@ jobs:
     # Short-job floor of 15; see install-consume for why it is not 3x.
     timeout-minutes: 15
     steps:
+      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
+      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
+      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
+      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS)
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "BUILD_JOBS=$jobs"
       - name: Toolchain (container has no preinstalled tool set)
         # The wedge surface. Measured over 90 runs of this step across the jobs below:
         # p50 0.67 min, max 1.32. 8 = ~6x the worst healthy install.
@@ -750,7 +867,7 @@ jobs:
       - name: Configure + build every bench target (compile only, nothing is run)
         run: |
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
-          cmake --build bench/build -j "$(nproc)"
+          cmake --build bench/build --parallel "$BUILD_JOBS"
       - name: Restore workspace ownership for the host runner
         # Hands the container's root-owned tree back to the host runner user. WHY, and
         # why it is duplicated inline rather than factored into a composite action: the
@@ -781,6 +898,15 @@ jobs:
     # One bench target plus libtracer, then two sub-second runs. Short-job floor of 15.
     timeout-minutes: 15
     steps:
+      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
+      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
+      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
+      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS)
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "BUILD_JOBS=$jobs"
       - name: Toolchain (container has no preinstalled tool set)
         # Same step and same measured distribution as bench-compile's (p50 0.67, max 1.32).
         timeout-minutes: 8
@@ -798,7 +924,7 @@ jobs:
         # runner the two jobs can share a workspace.
         run: |
           cmake -S bench -B bench/build-census -DCMAKE_BUILD_TYPE=Release
-          cmake --build bench/build-census --target bench_failable_census -j "$(nproc)"
+          cmake --build bench/build-census --target bench_failable_census --parallel "$BUILD_JOBS"
       # Each gate is ONE command, not a pipeline. `container:` has no bash, so every `run:`
       # here is `sh -e {0}` — dash, whose `set` has no `-o pipefail`. A first cut wrote
       # `set -o pipefail && … | tee …` and the step died on `Illegal option -o pipefail`

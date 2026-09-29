@@ -35,6 +35,15 @@ jobs:
     # incident day — a tight, honest distribution. 15 = ~3.6x the observed max.
     timeout-minutes: 15
     steps:
+      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
+      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
+      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
+      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS)
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "BUILD_JOBS=$jobs"
       - uses: actions/checkout@v4
 
       - name: Set up vcan0 (best-effort; the test self-skips if it fails)
@@ -47,11 +56,10 @@ jobs:
       - name: Build core (C++23)
         run: |
           cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
-          # Bounded, as core-ci does. A bare `-j` is UNLIMITED parallelism, and this is the
-          # only job that combines that with an all-targets build: every other bare `-j` here
-          # builds one `--target`. On a 4-core / 16 GB runner it OOMs (SIGTERM, exit 143,
-          # ~70% through, no compile error) as soon as a branch adds a heavy TU.
-          cmake --build core/build -j "$(nproc)"
+          # Bounded by BUILD_JOBS (#1637), as every build here is. This is an all-targets
+          # build: with unbounded parallelism a 4-core / 16 GB runner OOMs (SIGTERM, exit
+          # 143, ~70% through, no compile error) as soon as a branch adds a heavy TU.
+          cmake --build core/build --parallel "$BUILD_JOBS"
 
       - name: Run the real-vcan transport_can E2E smoke test
         run: |

@@ -79,6 +79,15 @@ jobs:
     # set where it can never trip on a slow-but-honest sample. See core-ci.yml's header.
     timeout-minutes: 30
     steps:
+      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
+      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
+      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
+      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS)
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "BUILD_JOBS=$jobs"
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0  # need origin/main history to build the same-runner baseline
@@ -86,7 +95,7 @@ jobs:
         run: |
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
           cmake --build bench/build --target bench_libtracer bench_forward_heap \
-            bench_compact_delivery bench_forward_demux -j
+            bench_compact_delivery bench_forward_demux --parallel "$BUILD_JOBS"
       # A hard, absolute gate (no baseline needed): the FWD forward hop MUST allocate
       # zero heap (ADR-0038 §16KB-RAM), measured by a global operator-new counter.
       - name: Zero-heap forward gate (ADR-0038 §16KB-RAM)
@@ -100,7 +109,7 @@ jobs:
           git worktree add --detach ../main-baseline origin/main
           cmake -S ../main-baseline/bench -B ../main-baseline/bench/build -DCMAKE_BUILD_TYPE=Release
           cmake --build ../main-baseline/bench/build --target bench_libtracer bench_forward_heap \
-            bench_compact_delivery bench_forward_demux -j
+            bench_compact_delivery bench_forward_demux --parallel "$BUILD_JOBS"
       # The gate's OWN decision rules, unit-tested before anything is timed: #763 was a
       # defect in the gate, not in what it measures, so the rules are regression-tested
       # against the recorded false-failure and true-regression sample sets.
@@ -166,7 +175,7 @@ jobs:
       # publishes nothing. Bytes built in-process — no network, no subprocess, no timing.
       - name: Composition-bench receiver guard tests
         run: |
-          cmake --build bench/build --target test_compose_record -j
+          cmake --build bench/build --target test_compose_record --parallel "$BUILD_JOBS"
           ./bench/build/test_compose_record
       # The in-process rows' delivery figure (#1481): `delivery_count.hpp` against a
       # path-target topology that sheds on purpose, where a counted figure and
@@ -174,7 +183,7 @@ jobs:
       # exactly whenever the graph delivers in full, which on an idle runner it does.
       - name: In-process delivery-count guard test
         run: |
-          cmake --build bench/build --target test_delivery_count -j
+          cmake --build bench/build --target test_delivery_count --parallel "$BUILD_JOBS"
           ./bench/build/test_delivery_count
       # TIER: blocking. This is the repo's only PRE-MERGE perf verdict, and it is the one
       # shape hardened against runner noise from the inside — same runner, interleaved
@@ -209,11 +218,20 @@ jobs:
     # than 3x, which would be 2.5 min and would red on any transient runner stall.
     timeout-minutes: 15
     steps:
+      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
+      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
+      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
+      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS)
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "BUILD_JOBS=$jobs"
       - uses: actions/checkout@v4
       - name: Build the bench targets carrying the pinned symbols (Release = -O3 -DNDEBUG)
         run: |
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
-          cmake --build bench/build --target bench_libtracer bench_compact_delivery -j
+          cmake --build bench/build --target bench_libtracer bench_compact_delivery --parallel "$BUILD_JOBS"
       # Printed on every run, pass or fail: the measured sizes are the record, and a gate
       # whose numbers are only visible when it fails cannot be re-pinned from its own log.
       - name: Measured symbol sizes (the record, whatever the verdict)
@@ -243,6 +261,15 @@ jobs:
     # entirely apt/network, not compute.
     timeout-minutes: 20
     steps:
+      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
+      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
+      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
+      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS)
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "BUILD_JOBS=$jobs"
       - uses: actions/checkout@v4
       # strace is the instrument. Without it syscall_guard.py reports verdict=UNAVAILABLE,
       # and check_compose_audit.py treats that as a FAILURE rather than a pass — a guard that
@@ -257,7 +284,7 @@ jobs:
       - name: Build the composition arm
         run: |
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
-          cmake --build bench/build --target bench_compose_net -j
+          cmake --build bench/build --target bench_compose_net --parallel "$BUILD_JOBS"
       # The missing-arm contract, asserted rather than assumed: pointed at a build directory
       # it cannot build into, the harness must exit non-zero instead of reporting on an arm
       # that is not there. This is a live negative control on every run, not a one-off demo.
@@ -299,6 +326,15 @@ jobs:
       matrix:
         replica: [1, 2, 3]
     steps:
+      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
+      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
+      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
+      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS)
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "BUILD_JOBS=$jobs"
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0  # need the parent commit for the ratchet baseline
@@ -306,7 +342,7 @@ jobs:
         run: |
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
           cmake --build bench/build --target bench_libtracer bench_forward_heap \
-            bench_forward_demux bench_compact_delivery -j
+            bench_forward_demux bench_compact_delivery --parallel "$BUILD_JOBS"
       # The zero-heap gate is deterministic (allocation counts, not time) — running it
       # per replica is a free consistency check; its transcript feeds the memory series.
       - name: Zero-heap forward gate (ADR-0038 §16KB-RAM)
@@ -353,7 +389,7 @@ jobs:
         run: |
           if bash bench/fetch_zenoh.sh; then
             cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
-            if cmake --build bench/build --target bench_zenoh -j; then
+            if cmake --build bench/build --target bench_zenoh --parallel "$BUILD_JOBS"; then
               ./bench/build/bench_zenoh >bench/bench_zenoh_raw.txt || true
             fi
           fi
@@ -367,7 +403,7 @@ jobs:
             git worktree add --detach ../parent-baseline HEAD^
             cmake -S ../parent-baseline/bench -B ../parent-baseline/bench/build -DCMAKE_BUILD_TYPE=Release
             cmake --build ../parent-baseline/bench/build --target bench_libtracer \
-              bench_forward_heap bench_compact_delivery bench_forward_demux -j
+              bench_forward_heap bench_compact_delivery bench_forward_demux --parallel "$BUILD_JOBS"
           else
             echo "root commit — no parent to ratchet against"
           fi

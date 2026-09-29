@@ -69,6 +69,15 @@ jobs:
     # convert "wedged forever" into "red in an hour, retry it".
     timeout-minutes: 60
     steps:
+      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
+      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
+      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
+      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS)
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
+          echo "BUILD_JOBS=$jobs"
       - uses: actions/checkout@v4
         with:
           # Full history + tags: the released-version doc subtrees are rebuilt
@@ -120,13 +129,13 @@ jobs:
       - name: Build harnesses for the results page
         run: |
           cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Release
-          cmake --build core/build -j "$(nproc)"   # all test targets, for the live test report
+          cmake --build core/build --parallel "$BUILD_JOBS"   # all test targets, for the live test report
           bash bench/fetch_zenoh.sh || echo "zenoh fetch failed — comparison will be omitted"
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
-          cmake --build bench/build --target bench_libtracer bench_codec bench_forward_heap bench_transports bench_forward_demux bench_compact_delivery -j
+          cmake --build bench/build --target bench_libtracer bench_codec bench_forward_heap bench_transports bench_forward_demux bench_compact_delivery --parallel "$BUILD_JOBS"
           # zenoh is optional: build it separately so a missing/failed vendor never breaks
           # the docs deploy (the comparison degrades to a note; libtracer numbers stand).
-          cmake --build bench/build --target bench_zenoh bench_zenoh_net bench_zenoh_compose -j || echo "bench_zenoh unavailable — comparison omitted"
+          cmake --build bench/build --target bench_zenoh bench_zenoh_net bench_zenoh_compose --parallel "$BUILD_JOBS" || echo "bench_zenoh unavailable — comparison omitted"
       # Run the libtracer-vs-Zenoh sweep ONCE here; both the docs page and the PR comment
       # consume this file (LIBTRACER_COMPARE_TSV) so the ~40s sweep isn't paid twice.
       - name: Run the libtracer-vs-Zenoh comparison sweep
