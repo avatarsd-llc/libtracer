@@ -8,6 +8,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.16.1] — 2026-09-29
+
+No changes to this package. Its version moves in lockstep with core; see the core section of these release notes.
+
+## [0.16.0] — 2026-08-29
+
 ### Changed
 
 - **Documentation only — the connection-creation SPEC is no longer built with

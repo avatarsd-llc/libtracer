@@ -18,6 +18,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.16.1] — 2026-09-29
+
+No changes to this package. Its version moves in lockstep with core; see the core section of these release notes.
+
 ## [0.15.1] — 2026-08-23
 
 No `rmw_tracer`-specific changes. 0.15.1 is a patch release for an ESP-IDF boot regression
