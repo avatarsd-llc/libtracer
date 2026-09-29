@@ -96,13 +96,14 @@ first-match-per-bit, DENY included. See [security & ACL](security-acl.md) for
 what the entries mean.
 
 **LKV slot policy** — `lkv_slot_t` picks how a vertex publishes and reads its
-last-known value. `hazard_slot_t` is the host default: a lock-free
-`atomic<node_t*>` reclaimed with hazard pointers. It costs a fixed registry sized
-by `kHazardReaderSlots` and has a publish that can fail under memory exhaustion.
-`single_writer_slot_t` is the single-writer and RTOS binding: a plain
-`shared_ptr` swapped and copied inside `reader_guard_t` (an interrupt-masked
-critical section on a chip, `mutex_guard_t` on a host), with no registry and a
-publish that cannot fail. A build that binds it also sets `kSingleWriter`. Every
+last-known value. `single_writer_slot_t` is the default: a plain `shared_ptr`
+swapped and copied inside `reader_guard_t` (an interrupt-masked critical section
+on a chip, the address-striped `mutex_guard_t` on a host), with no registry and a
+publish that cannot fail. An RTOS build also sets `kSingleWriter`.
+`hazard_slot_t` is the lock-free host opt-in: an `atomic<node_t*>` reclaimed
+with hazard pointers, which costs a fixed registry sized by `kHazardReaderSlots`,
+a heap node per published value, and a publish that can fail under memory
+exhaustion. Every
 policy returns an *owning* handle from `load()` and declares `may_spin`, and a
 build whose `kSpinWaitSafe` is `false` refuses a policy that can spin. The
 refcount slot `sp_atomic_slot_t` was removed because libstdc++ spin-locks it

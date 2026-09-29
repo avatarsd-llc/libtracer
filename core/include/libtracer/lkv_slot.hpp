@@ -50,10 +50,11 @@
  *
  * ## The two policies
  *
- *   - @ref tr::graph::hazard_slot_t — the host default. Lock-free, hazard-pointer reclaimed.
- *   - @ref tr::graph::single_writer_slot_t — for a single-writer build (`config_t::kSingleWriter`),
- * and the only one an RTOS target can bind: its one wait is `config_t::reader_guard_t`, an
- *     interrupt-masked critical section there, which cannot be spun on (#1618).
+ *   - @ref tr::graph::single_writer_slot_t — the default, and the only one an RTOS target can
+ *     bind: its one wait is `config_t::reader_guard_t`, an interrupt-masked critical section
+ *     there and address-striped mutexes on a host, neither of which is spun on (#1618).
+ *   - @ref tr::graph::hazard_slot_t — the lock-free opt-in for a host whose reads of one shared
+ *     vertex contend across many cores.
  *
  * The refcount slot both replace, `std::atomic<std::shared_ptr<const rope_t>>`
  * (`sp_atomic_slot_t`), was deleted because it was the only policy that could spin: libstdc++
@@ -88,9 +89,11 @@
 #include <array>
 #include <atomic>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <type_traits>
 
 #include "libtracer/config.hpp"
 #include "libtracer/rope.hpp"
@@ -98,31 +101,63 @@
 namespace tr::graph {
 
 /**
- * @brief The reader guard for a single-writer build on a host: one process-wide mutex.
+ * @brief The host reader guard: one of @ref kStripes padded mutexes, chosen by slot address.
  *
  * @ref single_writer_slot_t swaps and copies a `shared_ptr` inside `config_t::reader_guard_t`.
  * On a single-core RTOS that guard is an interrupt-masked critical section (the ESP-IDF
  * component binds `tr::esp::critical_guard_t`), which makes the window unpreemptable. A host
  * process cannot mask interrupts, so this is the host's spelling of the same promise: a waiter
  * SLEEPS on a futex instead of spinning, which hands the CPU back to whoever holds the window.
- * It is what `-DLIBTRACER_LKV_SLOT=single_writer_slot_t` binds, so the host test suite can run
- * the single-writer slot under real threads and sanitizers.
  *
- * One mutex for every slot on purpose: the section is a pointer swap or a refcount increment,
- * and a per-slot mutex would cost bytes in every vertex to shorten a wait nobody measures.
+ * Striped rather than one mutex, and by address rather than per slot. One process-wide mutex
+ * serializes every vertex's publish against every other thread's. A mutex per slot would put
+ * 40 bytes in every vertex. A static table of padded mutexes costs `kStripes * 64` bytes once,
+ * and two vertices share a lock only when their addresses hash to the same stripe.
  */
 struct mutex_guard_t {
-    mutex_guard_t() { mu().lock(); }
-    ~mutex_guard_t() { mu().unlock(); }
+    /** @brief Stripes in the process-wide table. */
+    static constexpr std::size_t kStripes = 64;
+
+    /** @brief Lock the stripe the slot at @p at hashes to. */
+    explicit mutex_guard_t(const void* at) : m_(stripe(at)) { m_.lock(); }
+    ~mutex_guard_t() { m_.unlock(); }
     mutex_guard_t(const mutex_guard_t&) = delete;
     mutex_guard_t& operator=(const mutex_guard_t&) = delete;
 
    private:
-    /** @brief The one mutex every guarded slot in the process shares. */
-    static std::mutex& mu() {
-        static std::mutex m;
-        return m;
+    /** @brief One stripe, on a cache line of its own so two stripes never false-share. */
+    struct alignas(64) cell_t {
+        std::mutex m; /**< @brief The stripe's lock. */
+    };
+
+    /** @brief The stripe for address @p at: a Fibonacci hash of the address, top bits. */
+    static std::mutex& stripe(const void* at) {
+        static cell_t table[kStripes];
+        auto a = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(at));
+        a ^= a >> 17;
+        a *= 0x9E3779B97F4A7C15ull;
+        return table[(a >> 58) % kStripes].m;
     }
+
+    std::mutex& m_;
+};
+
+/**
+ * @brief Open a reader guard of type @p guard_t for the slot at a given address.
+ *
+ * A guard that takes a `const void*` (like @ref mutex_guard_t) is handed the slot's address; an
+ * address-blind one (an interrupt mask) is default-constructed.
+ */
+template <typename guard_t>
+struct guard_for_t : guard_t {
+    /** @brief Construct the guard with the slot address. */
+    explicit guard_for_t(const void* at)
+        requires std::is_constructible_v<guard_t, const void*>
+        : guard_t(at) {}
+    /** @brief Construct an address-blind guard. */
+    explicit guard_for_t(const void*)
+        requires(!std::is_constructible_v<guard_t, const void*>)
+    {}
 };
 
 /**
@@ -144,11 +179,12 @@ struct mutex_guard_t {
  * of instructions and call nothing that can block.
  *
  * **Writers are serialized too.** Nothing here relies on a single publisher: two writers
- * serialize on the guard like a writer and a reader do. The name is the build's contract
- * (`config_t::kSingleWriter`), which the rest of the library may rely on; this policy does not
- * need it for memory safety.
+ * serialize on the guard like a writer and a reader do, which is why the host default binds this
+ * slot with `config_t::kSingleWriter` false. The name comes from RFC 0028 §5.5, where the
+ * single-writer build is the one that must bind it.
  *
- * @tparam guard_t A default-constructible RAII type whose lifetime is the critical section.
+ * @tparam guard_t An RAII type whose lifetime is the critical section, constructible either
+ *                 from the slot's address (`const void*`) or from nothing.
  *                 The bound slot uses `config_t::reader_guard_t`; tests instantiate this
  *                 template directly with a guard of their own.
  */
@@ -169,29 +205,28 @@ class basic_single_writer_slot_t {
      * @brief Publish. The swap happens inside the guard; the displaced value is released
      *        after it, outside.
      *
-     * The trailing fence is what makes a `seq_cst` publish share one total order with the
-     * `write_seq_` bump and the waiter count, as the contract asks (#555). A guard orders the
-     * section against other sections, not against the atomics that follow it.
+     * No fence follows the guard. What `vertex_t::store` needs from the slot is that the value
+     * is visible to anyone who observes the next `write_seq_` bump, and the bump is a `seq_cst`
+     * read-modify-write sequenced after the guard's release, so it already carries the swap.
+     * The waiterless-publish argument (#555) is about `write_seq_` and the waiter count only.
      *
      * @return Always `true`. A swap allocates nothing, so there is no failure to report.
      */
-    [[nodiscard]] bool store(value_ptr_t sp, std::memory_order order = std::memory_order_seq_cst) {
+    [[nodiscard]] bool store(value_ptr_t sp, std::memory_order = std::memory_order_seq_cst) {
         {
-            const guard_t g;
+            const guard_for_t<guard_t> g{this};
             v_.swap(sp);
         }
-        if (order == std::memory_order_seq_cst) std::atomic_thread_fence(order);
         return true;  // `sp` now holds the displaced value and is released here, unguarded
     }
 
     /** @brief Drop the published value. Releases a reference outside the guard; cannot fail. */
-    void clear(std::memory_order order = std::memory_order_seq_cst) {
+    void clear(std::memory_order = std::memory_order_seq_cst) {
         value_ptr_t old;
         {
-            const guard_t g;
+            const guard_for_t<guard_t> g{this};
             v_.swap(old);
         }
-        if (order == std::memory_order_seq_cst) std::atomic_thread_fence(order);
     }
 
     /**
@@ -201,7 +236,7 @@ class basic_single_writer_slot_t {
      * only work inside it.
      */
     [[nodiscard]] value_ptr_t load() const {
-        const guard_t g;
+        const guard_for_t<guard_t> g{this};
         return v_;
     }
 
@@ -914,7 +949,7 @@ inline final_sweep_t::~final_sweep_t() {
  * readers (7.4 M/s) — see the table in this file's header, and ADR-0069 §6 for why the
  * model bench's 20.8× did not survive contact with the whole read path.
  *
- * The host default. The gain over the refcount slot it replaced is a concurrency gain, so a
+ * A host opt-in. The gain over the refcount slot it replaced is a concurrency gain, so a
  * single-core node buys nothing from it and still pays `(kHazardReaderSlots + 1) * 128` bytes
  * of registry, a deferred-reclamation lifetime rule (see `retire_and_flush`), and a publish
  * that can fail. Such a node binds @ref single_writer_slot_t.

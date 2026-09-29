@@ -18,7 +18,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   priority-preemptive scheduler that spin could hang a task in the watchdog. The generated
   `config_override.hpp` now sets `kSingleWriter = true`,
   `reader_guard_t = tr::esp::critical_guard_t` and `lkv_slot_t = single_writer_slot_t` on every
-  chip target. The `linux` target keeps core's host default, `hazard_slot_t`. The new header
+  chip target. The `linux` target keeps core's default, `single_writer_slot_t` over the host `mutex_guard_t`. The new header
   `libtracer_esp/critical_guard.hpp` defines the guard: a `portENTER_CRITICAL_SAFE` section on
   one shared portMUX, so it is ISR-safe. An application that publishes one vertex from two tasks
   is still memory-safe, because the guard serializes writers too. `kSingleWriter` is the contract

@@ -121,16 +121,6 @@ static_assert(config_t::kSpinWaitSafe || !lkv_slot_t::may_spin,
               "single_writer_slot_t with an interrupt-masked reader_guard_t");
 
 /**
- * @brief A build that binds `%single_writer_slot_t` states the contract it is named for.
- *
- * The slot itself stays memory-safe with two writers; the trait is what the rest of the value
- * path may rely on, so a build must not have one without the other.
- */
-static_assert(!std::is_same_v<lkv_slot_t, single_writer_slot_t> || kSingleWriter,
-              "this build binds single_writer_slot_t but does not set kSingleWriter = true — "
-              "state the single-writer contract in the same override fragment");
-
-/**
  * @brief The memory order of the DELIVERY-SKIP Dekker pair (#635, #1140) — the one order in
  *        this library whose value is a correctness precondition on the TARGET rather than a
  *        local choice, so it is named once instead of spelled at each of its two sites.
@@ -3033,8 +3023,8 @@ class vertex_t {
     // The stored value is a rope (ADR-0053 §6): a contiguous scalar is a single-link
     // rope (small-buffer inline, no extra alloc), a chunked stream keeps its links.
     /** @brief The last-known value, held through the slot policy this target bound
-     *         (`tr::graph::lkv_slot_t` in `%config.hpp`; ADR-0069 §1): `hazard_slot_t` on a
-     *         host by default, `single_writer_slot_t` on a single-writer build.
+     *         (`tr::graph::lkv_slot_t` in `%config.hpp`; ADR-0069 §1):
+     *         `single_writer_slot_t` by default, `hazard_slot_t` as a host opt-in.
      *         `%lkv_slot.hpp` documents both and the contract any policy must satisfy. */
     lkv_slot_t lkv_{};
 

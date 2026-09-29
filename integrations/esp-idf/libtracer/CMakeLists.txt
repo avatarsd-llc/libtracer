@@ -335,7 +335,7 @@ endif()
 # the same fact. core refuses any slot that can spin where kSpinWaitSafe is false, so every chip
 # target binds `single_writer_slot_t`, whose one wait is an interrupt-masked critical section
 # (`tr::esp::critical_guard_t`), and states the single-writer contract that slot is named for.
-# The `linux` host target, where spinning is safe, keeps core's default (`hazard_slot_t`). The
+# The `linux` host target keeps core's default (the same slot over the host mutex guard). The
 # guard header includes only FreeRTOS, so including it from the fragment is not a cycle.
 if(LIBTRACER_SPIN_WAIT_SAFE)
     set(LIBTRACER_SLOT_INCLUDE "")

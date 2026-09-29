@@ -230,26 +230,23 @@ option(LIBTRACER_ACL_FULL "Evaluate ACLs with the full security_acl host policy 
 # pass on the command line keep working, by writing that fragment on their behalf. A NEW knob
 # does not get a CMake variable — it is set in the fragment, as ordinary C++.
 #
-# LIBTRACER_LKV_SLOT takes `hazard_slot_t` (the default) or `single_writer_slot_t`. The second is
-# a single-writer build, so the fragment also states the contract (kSingleWriter) and binds the
-# host reader guard (mutex_guard_t): a host cannot mask interrupts, and the guard must never spin.
-set(LIBTRACER_LKV_SLOT hazard_slot_t CACHE STRING
+# LIBTRACER_LKV_SLOT takes `single_writer_slot_t` (the default, over the striped host mutex
+# guard) or `hazard_slot_t` (the lock-free host opt-in), which the fragment then binds.
+set(LIBTRACER_LKV_SLOT single_writer_slot_t CACHE STRING
     "DEPRECATED (one release): LKV slot policy type. Prefer a libtracer/config_override.hpp")
-set_property(CACHE LIBTRACER_LKV_SLOT PROPERTY STRINGS hazard_slot_t single_writer_slot_t)
+set_property(CACHE LIBTRACER_LKV_SLOT PROPERTY STRINGS single_writer_slot_t hazard_slot_t)
 if(NOT LIBTRACER_LKV_SLOT MATCHES "^(hazard_slot_t|single_writer_slot_t)$")
     message(FATAL_ERROR "LIBTRACER_LKV_SLOT=${LIBTRACER_LKV_SLOT}: expected hazard_slot_t or "
                         "single_writer_slot_t (sp_atomic_slot_t was removed — it spin-waits). A "
                         "build directory configured before the removal caches the old default: "
-                        "reconfigure with -DLIBTRACER_LKV_SLOT=hazard_slot_t")
+                        "reconfigure with -DLIBTRACER_LKV_SLOT=single_writer_slot_t")
 endif()
 set(_lt_cfg_binding "")
 if(LIBTRACER_ACL_FULL)
     string(APPEND _lt_cfg_binding "    using acl_policy_t = full_acl_policy_t;\n")
 endif()
-if(LIBTRACER_LKV_SLOT STREQUAL "single_writer_slot_t")
-    string(APPEND _lt_cfg_binding "    static constexpr bool kSingleWriter = true;\n")
-    string(APPEND _lt_cfg_binding "    using reader_guard_t = mutex_guard_t;\n")
-    string(APPEND _lt_cfg_binding "    using lkv_slot_t = single_writer_slot_t;\n")
+if(LIBTRACER_LKV_SLOT STREQUAL "hazard_slot_t")
+    string(APPEND _lt_cfg_binding "    using lkv_slot_t = hazard_slot_t;\n")
 endif()
 if(NOT _lt_cfg_binding STREQUAL "")
     message(STATUS "libtracer: writing a config_override.hpp for the deprecated -D knobs "
