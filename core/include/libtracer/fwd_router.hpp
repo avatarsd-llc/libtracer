@@ -45,7 +45,6 @@
 
 #include "libtracer/child_registry.hpp"
 #include "libtracer/frame.hpp"
-#include "libtracer/fwd_pending.hpp"
 #include "libtracer/graph.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/op_resolve.hpp"
@@ -62,9 +61,6 @@ namespace tr::net {
  *         Forward-declared: the router only passes it through by pointer, so this header does
  *         not pull in the forward-plane cluster. */
 struct fwd_pre_t;
-/** @brief The forward hop's rebuilt head (defined in fwd_frame_view.hpp). Forward-declared
- *         for the same reason as @ref fwd_pre_t: it is only passed through by reference. */
-struct fwd_rebuild_t;
 
 /**
  * @brief The router's counted cold-path drops — one snapshot of every frame this router
@@ -427,30 +423,6 @@ class fwd_router_t {
                 .delivery_iov_dropped = delivery_iov_dropped_.load(std::memory_order_relaxed),
                 .malformed_rx = malformed_rx_.load(std::memory_order_relaxed)};
     }
-
-    /**
-     * @brief Answer every forwarded request whose reply is overdue (RFC 0028 §4.7, #1625).
-     *
-     * Each hop keeps a bounded table of the READ requests it forwarded that asked
-     * for a reply (see `config_t::kForwardDeadline`). An entry still open past its deadline
-     * is answered to its requester here, by the hop, with an addressed
-     * `FWD{REPLY, kind=ERROR, STATUS{tr::flow::timeout}}` — the requester always gets one
-     * answer in bounded time instead of silence.
-     *
-     * The forward path calls this itself whenever it runs and an entry is open, so a busy
-     * node needs nothing more. A node whose traffic can go quiet while a forward is open
-     * calls it from its own periodic loop (every `kForwardDeadline / 2` or so); the router
-     * has no thread of its own. It takes only the table's own lock and sends with no router
-     * lock held; the send carries the same transport-lifetime caveat as any forward (the
-     * requester link is checked `retired` first, not pinned — RFC-0014 S5).
-     *
-     * @return How many overdue requests were answered.
-     */
-    std::size_t expire_forwards();
-
-    /** @brief One snapshot of the pending-reply table (#1625) — see @ref
-     *         net::forward_stats_t. */
-    [[nodiscard]] forward_stats_t forward_stats() const { return pending_.stats(); }
 
     /**
      * @name The four injected seams, exposed
@@ -1634,35 +1606,6 @@ class fwd_router_t {
                            const child_rx_ctx_t* inbound_ctx, bool from_peer, Observe&& observe,
                            Reject&& reject, Terminus&& terminus, Reply&& reply);
     /**
-     * @brief The forward hop's pending-reply bookkeeping (#1625): open an entry for a
-     *        forwarded request that asked for a reply, settle one for a forwarded reply, and
-     *        answer any entry already overdue.
-     *
-     * Out of line and called once from `route_fwd_forward` so the pinned hop body gains
-     * one call and nothing else. Reads only offsets the peek and the rebuild already found.
-     *
-     * @retval false The caller must not forward the frame: either the table was full and
-     *               the requester has been answered with `BACKPRESSURE`, or the frame is a
-     *               LATE reply to a request this hop already answered itself.
-     */
-    template <class Cursor>
-    [[gnu::noinline]] bool note_forward(const child_rx_ctx_t* inbound_ctx, bool from_peer,
-                                        const transport_t& child, const Cursor& cur,
-                                        const fwd_pre_t* pre, const fwd_rebuild_t& rebuilt);
-    /**
-     * @brief Send @p e's requester the hop's own addressed error reply with @p status.
-     *        Called with no router lock held.
-     */
-    void answer_forward(const fwd_pending_t::entry_t& e, graph::status_t status);
-    /**
-     * @brief A link went away: answer every open forward sent over it with
-     *        `TRANSPORT_DOWN` now, and drop every open forward it asked for.
-     *
-     * @param link The departed link (null: nothing to settle).
-     */
-    void settle_forwards_via(const transport_t* link);
-
-    /**
      * @brief The forward hop, read entirely by OFFSET — no decoded tree (ADR-0038 inv. #1).
      *
      * Strips the leading `dst` segment, prepends the inbound-link NAME to `src` (unless a
@@ -2074,14 +2017,12 @@ class fwd_router_t {
     // a peer-provoked receive thread before. Held here as well as inside `handles_` because
     // those router-side reads are the store's callers, not the store.
     mem::block_source_t* label_src_;
-    mem::block_source_t* rx_;     // DEFAULT terminus-arena source, NOTHROW (#588);
-                                  // a child may carry its own (ADR-0067 §3)
-    mem::mem_backend_t* flat_;    // every rope flatten the router performs (#730);
-                                  // a null result is answered by value, never stored
-    mem::mem_backend_t* egress_;  // terminus REPLY head + mint egress bytes (#795);
-                                  // a refusal degrades to addressed BACKPRESSURE
-    /** @brief The forwarded requests awaiting a reply, each with a deadline (#1625). */
-    fwd_pending_t pending_;
+    mem::block_source_t* rx_;              // DEFAULT terminus-arena source, NOTHROW (#588);
+                                           // a child may carry its own (ADR-0067 §3)
+    mem::mem_backend_t* flat_;             // every rope flatten the router performs (#730);
+                                           // a null result is answered by value, never stored
+    mem::mem_backend_t* egress_;           // terminus REPLY head + mint egress bytes (#795);
+                                           // a refusal degrades to addressed BACKPRESSURE
     child_registry_t registry_;            // the one NAME→link demux table (Brick 3a, ADR-0037);
                                            // its chunks draw from `label_src` (#873 phase 1)
     route_handle_t handles_;               // per-link label tables (compact flows only)

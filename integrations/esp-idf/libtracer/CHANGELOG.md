@@ -24,9 +24,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   counted in `tx_drops`. Each slot grows to the largest frame queued in it (at most
   `tx_bytes`) the first time it is used and keeps that memory; `0` queues nothing. The task
   that is writing still waits on I/O for its own frame and for each queued frame it drains,
-  each bounded by the write budget. Also
-  inherited from core: forwarded requests now carry a deadline (`kForwardDeadline`), and a
-  node whose traffic can go quiet should call `fwd_router_t::expire_forwards()` periodically.
+  each bounded by the write budget.
 
 - **BREAKING (inherited from core) — `graph_t` now takes ONE injected
   `tr::mem::block_source_t`** ([#873](https://github.com/avatarsd-llc/libtracer/issues/873)

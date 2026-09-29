@@ -16,9 +16,8 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
-- **BREAKING — enqueue-then-write in the stream links, and a deadline on every forwarded
-  request (RFC 0028 slice 2; fixes [#1619](https://github.com/avatarsd-llc/libtracer/issues/1619),
-  [#1625](https://github.com/avatarsd-llc/libtracer/issues/1625)).** A stalled or silent peer can
+- **BREAKING — enqueue-then-write in the stream links (RFC 0028 slice 2; fixes
+  [#1619](https://github.com/avatarsd-llc/libtracer/issues/1619)).** A stalled or silent peer can
   no longer stall an unrelated writer. Wire-neutral: no frame changes shape.
 
   - **`tx_handoff.hpp` — `tr::net::tx_handoff_t`, new.** A bounded enqueue-then-write queue: a
@@ -38,32 +37,6 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     windows.
     **Removed:** `stream_endpoint_t::send_all_locked` (protected, no caller) — use
     `handoff_send`.
-  - **`fwd_pending.hpp` — `tr::net::fwd_pending_t` and `tr::net::forward_stats_t`, new;
-    `fwd_router_t::expire_forwards()` and `fwd_router_t::forward_stats()`, new.** Each forward
-    hop keeps a fixed-size table of the READ requests it forwarded that asked for a reply. The reply that retraces the forward settles its entry. An entry still open past
-    `config_t::kForwardDeadline` (250 ms) is answered to the requester by the hop with an
-    addressed `FWD{REPLY, kind=ERROR, STATUS{tr::flow::timeout}}`. A full table refuses the new
-    forward at once with `tr::flow::backpressure`. A far end that goes away (`link_down`,
-    `remove_child`) has its open forwards answered with `tr::transport::down` at once. The
-    forward path sweeps overdue entries whenever it runs; a node whose traffic can go quiet
-    calls `expire_forwards()` from its own loop. An entry the hop answered stays behind as a
-    tombstone for one more deadline, and a reply that matches it is LATE: dropped, not
-    forwarded, and counted in `forward_stats_t::dropped`. A reply settles only a request that
-    was forwarded over the link the reply came back on. Tombstones hold slots
-    (`forward_stats_t::tombstones`), so a full table can refuse while `in_use` is below
-    capacity. So a requester sees exactly one answer
-    per request, a late reply can never settle the requester's next request on the same route,
-    and on a chain of hops the inner hop's own timeout is swallowed by the outer hop that
-    already answered. WRITE forwards (so an acknowledged write stream is never refused by a full
-    table), AWAIT forwards (which carry their own timeout), empty-`src` forwards (no reply asked
-    for), bound (`PATH_REF`) destinations and requests arriving from a bus peer are not tracked.
-  - **`config.hpp` — `kForwardDeadline` (250 ms), `kForwardPendingSlots` (16) and
-    `kForwardRouteBytes` (128), new traits; `tr::net::kForwardDeadline`, new.** The table's RAM
-    is fixed at build time, about `kForwardPendingSlots * (kForwardRouteBytes + 48)` bytes per
-    router: 2,856 B at the defaults on a 32-bit target (rv32, 176 B per entry) and 3,048 B on a
-    64-bit host (184 B per entry). `kForwardPendingSlots = 0` removes the
-    table and the deadline. A forward whose two routes exceed `kForwardRouteBytes` is forwarded
-    unbounded and counted in `forward_stats_t::untracked`.
 
 - **`vertex.hpp` — `tr::graph::admission_t`, `handlers_t::on_admit` and
   `handlers_t::on_app_field_admit`: a pre-store ADMISSION seam for stored-value and app-field

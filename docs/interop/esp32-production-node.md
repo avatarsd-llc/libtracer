@@ -91,7 +91,7 @@ so a device recipe sizes one slab where it used to wire four arguments. Beside i
 failable `rx` source, the `flat` byte backend its rope flattens draw from, the
 `egress` byte backend the terminus reply head draws from, and the `retained`
 backend a remote SUBSCRIBE's two life-of-the-subscription allocations draw from
-(`core/include/libtracer/fwd_router.hpp:274-280`; `egress` is #795 / ADR-0074,
+(`core/include/libtracer/fwd_router.hpp:270-276`; `egress` is #795 / ADR-0074,
 `retained` is #1610 and defaults to `flat` when un-injected, and the
 `max_label_bindings_per_link` bound sits between `flat` and `egress`).
 Each is its own injection because each one's live set is governed by a different
@@ -294,8 +294,8 @@ replaces, not by shaving the core.
   mutable buffer libtracer links: `N * sizeof(vertex_stripe_t)` bytes of `.bss`
   reserved at link time, plus the same for the condvar table. Sixteen stripes suit a
   multi-core host — that is the default (`kVertexLockStripes = 16`,
-  `core/include/libtracer/config.hpp:99`) — while a single-core chip reclaims RAM at
-  **4–8** (`config.hpp:89`). A stripe's platform mutex is lazy: on FreeRTOS it
+  `core/include/libtracer/config.hpp:98`) — while a single-core chip reclaims RAM at
+  **4–8** (`config.hpp:88`). A stripe's platform mutex is lazy: on FreeRTOS it
   costs ~90 B of heap on its first lock, so an untouched stripe costs its struct and
   no heap.
 - **Pin task priorities deliberately**: transport RX threads just below the
@@ -343,7 +343,7 @@ without the project-side symbol, the line is inert.
   reconnect storm.
 - **Egress is gather, not copy.** The rope-to-wire path lowers to an iovec `sendmsg`
   (`core/src/posix_endpoint.cpp:294,181`; the TCP assembly is at
-  `core/src/transport_tcp.cpp:59-81`), and lwIP provides `sendmsg` unmodified. Do not
+  `core/src/transport_tcp.cpp:60-82`), and lwIP provides `sendmsg` unmodified. Do not
   flatten payloads before send; the only legitimate flatten is a substrate boundary
   DMA cannot span.
 - **Backpressure beats buffering.** Where a node buffers for a slow subscriber, the
