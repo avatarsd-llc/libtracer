@@ -93,19 +93,19 @@ for a peer and no peer state is stored.
 `transport_t::bus()` returns the facet or `nullptr`. CAN always returns it
 (`transport_can.hpp:564`); the TCP and WebSocket **servers** return it when
 configured peer-named — one implementation, on the slot-server base both of them
-inherit (`posix_endpoint.hpp:1159`); every other kind keeps the `nullptr` default.
+inherit (`posix_endpoint.hpp:1210`); every other kind keeps the `nullptr` default.
 
 That base is picked by the BUILD. `slot_server_t` owns the slot table and answers every
 peer query off it, but it is not itself a `bus_link_t`; the facet — the base subobject, its
 peer-named receiver slot and its two peer-lifecycle notifier pairs — lives one tier below,
 in `bus_slot_server_t`, and the two servers derive from `stream_server_base_t`
-(`posix_endpoint.hpp:1233`), which is that tier or the facet-free `flat_slot_server_t`
+(`posix_endpoint.hpp:1284`), which is that tier or the facet-free `flat_slot_server_t`
 according to `tr::net::kBusLinks`. So on a target that closed the bus module out a listener
 does not merely refuse to hand the facet out: its LAYOUT does not contain one.
 
 Whether a link's peer-named tier exists is one query, `bus_link_t::peer_named()`
 (`transport.hpp:193`): the constructed flag for the two stream servers
-(`posix_endpoint.hpp:715`), `true` by construction for a kind that is a bus outright.
+(`posix_endpoint.hpp:766`), `true` by construction for a kind that is a bus outright.
 `bus_link_t` **refuses** each of its peer-named wiring calls — `set_peer_receiver`,
 `set_peer_rope_receiver`, `set_peer_down_notifier` — while it is false. That refusal matters
 because `bus_link_t` is a public base: on a flat server the setters are reachable by an
@@ -124,7 +124,7 @@ Departure follows the same split. A **peer-named** server evicts exactly the dep
 (`notify_peer_down(name)`); a **flat** server has one routing identity for every peer it
 carries — the registered child NAME — so its only seam is the whole link
 (`transport_t::notify_down`), and it therefore waits until the **last** open session departs
-(`posix_endpoint.cpp:733`). Firing it on a mid-life close would evict the surviving peers'
+(`posix_endpoint.cpp:722`). Firing it on a mid-life close would evict the surviving peers'
 edges along with the departed one's.
 
 ## Closing the bus module out at build time

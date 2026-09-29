@@ -121,6 +121,22 @@ menu "libtracer"
             the CPU. Lower it for a node that tears links down on a UI action;
             raise it on a battery node where an idle WS client is pure overhead.
 
+    config LIBTRACER_WS_CLIENT_TX_QUEUE_DEPTH
+        int "WS client: frames queued behind an in-flight write"
+        depends on LIBTRACER_TRANSPORT_WS
+        range 0 64
+        default 2
+        help
+            How many outbound frames esp_ws_client_link_t may hold while another
+            task is already writing to the socket. A sender that finds a write in
+            flight copies its frame into one of these slots and returns at once;
+            the writing task sends it next. Past the depth the frame is dropped and
+            counted in tx_drops — no sender ever waits on another sender's write,
+            so a stalled peer cannot stall an unrelated task that publishes toward
+            it. Each slot grows to the largest frame queued in it (at most the
+            link's tx buffer) the first time it is used and keeps that memory.
+            0 queues nothing: a concurrent sender always drops.
+
     config LIBTRACER_WS_CLIENT_RECONNECT_BACKOFF_MS
         int "WS client: backoff before re-dialing (ms)"
         depends on LIBTRACER_TRANSPORT_WS

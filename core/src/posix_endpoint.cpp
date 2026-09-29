@@ -370,17 +370,6 @@ bool stream_endpoint_t::note_write_result(const write_result_t& r, int fd, std::
     return true;  // the frame was shed — the caller counts it in its own dropped_tx_
 }
 
-void stream_endpoint_t::send_all_locked(std::span<const std::byte> bytes) {
-    // Hold write_m_ across the whole write so the recv thread cannot close and
-    // reset conn_fd_ underneath us; read the fd inside the lock to pair with
-    // teardown_peer.
-    const std::lock_guard lock(write_m_);
-    const int fd = conn_fd_.load(std::memory_order_relaxed);
-    // One peer in this "round", so the whole liveness window is this record's bound (#838).
-    const write_result_t r = write_all(fd, bytes, derive_send_bound_ms(liveness_window_ms_, 1));
-    (void)note_write_result(r, fd, tx_stall_streak_);
-}
-
 void stream_endpoint_t::teardown_peer(int fd) {
     // Reset under write_m_ BEFORE ::close so a concurrent send() never writes
     // to (or reads) a closed/reused fd.

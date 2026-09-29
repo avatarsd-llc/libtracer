@@ -772,7 +772,7 @@ ANCHORS = [
     # The multi-peer servers' per-chunk receive scratch — ONE buffer since #871 folded the
     # tcp and ws poll loops into slot_server_t (it used to be one apiece, cited as
     # transport_tcp.cpp:508 and transport_ws.cpp:420).
-    ('core/src/posix_endpoint.cpp:661', 'std::array<std::byte, 4096> chunk;',
+    ('core/src/posix_endpoint.cpp:650', 'std::array<std::byte, 4096> chunk;',
      'void slot_server_t::service_peer(session_base_t& s) {'),
     # core/src/rope.cpp
     ('core/src/rope.cpp:21', 'if (!all_host()) {'),
@@ -785,17 +785,17 @@ ANCHORS = [
     ('core/src/tlv_arena.cpp:134', 'std::array<grammar::walk_frame_t<grammar::span_cursor>, 8> slots;'),
     ('core/src/tlv_arena.cpp:135', 'grammar::walk_stack_t<grammar::span_cursor> stack(slots, &src);'),
     # core/src/transport_tcp.cpp
-    ('core/src/transport_tcp.cpp:56',
+    ('core/src/transport_tcp.cpp:57',
      '*        MEASURED (`bench_transport_iov`): the fallback fires at exactly **17'),
-    ('core/src/transport_tcp.cpp:59',
+    ('core/src/transport_tcp.cpp:60',
      "*        `bench_forward_heap`'s `allocs=0` gate cannot see it: that bench drives"),
-    ('core/src/transport_tcp.cpp:241', 'bool tcp_transport_t::read_exact(int fd, std::byte* dst, std::size_t len) {'),
-    ('core/src/transport_tcp.cpp:261', 'std::array<std::byte, 4096> scratch;'),
-    ('core/src/transport_tcp.cpp:304', 'if (!read_exact(fd, seg->bytes.data(), len)) return;'),
+    ('core/src/transport_tcp.cpp:247', 'bool tcp_transport_t::read_exact(int fd, std::byte* dst, std::size_t len) {'),
+    ('core/src/transport_tcp.cpp:267', 'std::array<std::byte, 4096> scratch;'),
+    ('core/src/transport_tcp.cpp:310', 'if (!read_exact(fd, seg->bytes.data(), len)) return;'),
     # zero-copy-and-flatten.md quotes this comment's tail verbatim, so the anchor carries the
     # QUOTED line — pinning `serve()`'s signature two constructs up passed while the citation
     # pointed at code the doc never quotes.
-    ('core/src/transport_tcp.cpp:283',
+    ('core/src/transport_tcp.cpp:289',
      '// buffer, no copy; feeding recv chunks through feed() would add one).'),
     # core/src/transport_udp.cpp
     ('core/src/transport_udp.cpp:145',
@@ -819,7 +819,7 @@ ANCHORS = [
     # which #871 moved out of this TU into slot_server_t::bind_listen; the entry sheds the
     # scope entirely instead, because the array is now spelled `pristine_inline` here and
     # `inline_vec` only in the directed facade — one anchor, one hit, no positional filter.
-    ('core/src/transport_ws.cpp:739', 'std::array<std::byte, 4096> chunk;',
+    ('core/src/transport_ws.cpp:736', 'std::array<std::byte, 4096> chunk;',
      'void transport_ws_client::serve(int fd, std::vector<std::byte> pipelined) {'),
     # core/tests/registry_teardown_test.cpp
     ('core/tests/registry_teardown_test.cpp:351', 'void test_digest_paths_agree() {'),
@@ -841,11 +841,11 @@ ANCHORS = [
     ('core/include/libtracer/fwd_frame_view.hpp:1053', 'inline constexpr std::size_t kFwdMaxIov = 10;'),
     # ONE `bus()` since #871: both stream servers inherit slot_server_t's (they used to
     # restate it, cited as transport_tcp.hpp:343 and transport_ws.hpp:233).
-    ('core/include/libtracer/posix_endpoint.hpp:1159',
+    ('core/include/libtracer/posix_endpoint.hpp:1210',
      '[[nodiscard]] bus_link_t* bus() override { return bus_mode() ? this : nullptr; }'),
     # The #1438 PROVIDER half: which arm a concrete stream server derives from is the binding's
     # choice, so the facet is absent from a bus-less listener's LAYOUT and not merely withheld.
-    ('core/include/libtracer/posix_endpoint.hpp:1233',
+    ('core/include/libtracer/posix_endpoint.hpp:1284',
      'using stream_server_base_t = std::conditional_t<kBusLinks, bus_slot_server_t, '
      'flat_slot_server_t>;'),
     # The #375-deliverable-3 bus-module seam: the knob, and the ONE door the routing plane
@@ -994,7 +994,7 @@ ANCHORS = [
     ('core/include/libtracer/path.hpp:53',
      "* separates field levels, `[` / `]` delimit the grammar's index suffix (which sits"),
     ('core/include/libtracer/path.hpp:337', 'inline path_t::path_t(std::string_view text) {'),
-    ('core/include/libtracer/posix_endpoint.hpp:715',
+    ('core/include/libtracer/posix_endpoint.hpp:766',
      "/** @brief Visit the currently-OPEN peers' names, `p<slot>` (#426). */"),
     ('core/include/libtracer/tlv.hpp:67', 'PATH_REF = 0x14,'),
     ('core/include/libtracer/transport.hpp:193',
@@ -1094,10 +1094,10 @@ ANCHORS = [
     ('core/src/path.cpp:124',
      'return std::unexpected(status_t::INVALID_PATH);',
      'if (p.field_.steps.size() > kMaxFieldDepth)'),
-    ('core/src/posix_endpoint.cpp:733',
+    ('core/src/posix_endpoint.cpp:722',
      'return false;',
      'if (s->open.load(std::memory_order_relaxed)) return true;'),
-    ('core/src/transport_tcp.cpp:51',
+    ('core/src/transport_tcp.cpp:52',
      '*        count is chosen by the sending peer) and answered by DROPPING the'),
     ('core/src/transport_vertex.cpp:62',
      'if (const auto v = cfg.u32("backoff")) s.backoff_ms = *v;'),

@@ -16,6 +16,28 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **BREAKING — enqueue-then-write in the stream links (RFC 0028 slice 2; fixes
+  [#1619](https://github.com/avatarsd-llc/libtracer/issues/1619)).** A stalled or silent peer can
+  no longer stall an unrelated writer. Wire-neutral: no frame changes shape.
+
+  - **`tx_handoff.hpp` — `tr::net::tx_handoff_t`, new.** A bounded enqueue-then-write queue: a
+    link's lock guards the queue and a "writer in flight" flag and is never held across I/O. The
+    publisher that finds no write in flight becomes the writer; one that finds a write in flight
+    copies its record into a slot and returns at once; one that finds every slot taken drops it
+    and the link counts it. Slot storage comes from a failable `block_source_t`.
+  - **`posix_endpoint.hpp` — the single-peer stream senders (`tcp_transport_t`,
+    `transport_ws_client`) send through `stream_endpoint_t::handoff_send`.** A second publisher
+    no longer waits on `write_m_` for the rest of another publisher's write to a peer that
+    stopped reading (it used to wait up to the whole liveness window). Behaviour change: when
+    more than `stream_endpoint_t::kTxQueueDepth` (8) records are already waiting behind the
+    writer, the next one is dropped and counted in `dropped_tx()` instead of waited on. The
+    writer still waits on I/O — its own record, then each queued record it drains — bounded per
+    record by the liveness window (#838), and the peer is torn down after
+    `kMaxConsecutiveStalls` (3) stalled writes in a row, so the writer pays at most three
+    windows.
+    **Removed:** `stream_endpoint_t::send_all_locked` (protected, no caller) — use
+    `handoff_send`.
+
 - **`vertex.hpp` — `tr::graph::admission_t`, `handlers_t::on_admit` and
   `handlers_t::on_app_field_admit`: a pre-store ADMISSION seam for stored-value and app-field
   writes.** Until now the only user callback in the write path was `on_write`, which runs on the

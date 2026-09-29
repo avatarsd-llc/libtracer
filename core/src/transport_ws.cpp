@@ -627,33 +627,30 @@ std::uint32_t transport_ws_client::next_mask_key() {
 }
 
 void transport_ws_client::send(std::span<const std::byte> frame) {
-    // One serialized MASKED record under write_m_ (the stream_endpoint_t
-    // write-serialization invariant). A client frame MUST be masked (RFC 6455 §5.1), so
-    // unlike every server-side send this one cannot gather the caller's bytes by reference
-    // and genuinely needs a buffer — the single WS egress site that keeps an allocation.
-    // It is the NOTHROW twin over a REUSED buffer (#848): steady state allocates nothing,
-    // and exhaustion drops the frame instead of aborting under -fno-exceptions.
+    // One MASKED record per frame, through the enqueue-then-write queue (RFC 0028 §4.7,
+    // #1619). A client frame MUST be masked (RFC 6455 §5.1), so unlike every server-side send
+    // this one cannot gather the caller's bytes by reference and genuinely needs a buffer —
+    // the NOTHROW encode over a REUSED buffer (#848): steady state allocates nothing, and
+    // exhaustion drops the frame instead of aborting under -fno-exceptions.
     //
-    // tx_buf_ is guarded by write_m_, the same lock that serializes the write, so the
-    // encode happens inside it rather than through send_all_locked.
-    const std::lock_guard lock(write_m_);
-    const std::size_t n =
-        ws::try_encode_client_frame(tx_buf_, ws::opcode_t::BINARY, frame, next_mask_key());
-    if (n == 0) {  // frame buffer exhausted => drop the frame, and COUNT it (#932)
-        dropped_tx_.fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
-    const int fd = conn_fd_.load(std::memory_order_relaxed);
-    if (fd < 0) {  // no live connection => a counted egress drop, not a silent one
-        dropped_tx_.fetch_add(1, std::memory_order_relaxed);
-        return;
-    }
-    // Bounded by the liveness window (#838): the hold used to span a fully blocking write,
-    // so a server that stopped reading froze this thread and every sender behind it.
-    const write_result_t r = write_all(fd, std::span<const std::byte>(tx_buf_.data(), n),
-                                       derive_send_bound_ms(liveness_window_ms_, 1));
-    if (note_write_result(r, fd, tx_stall_streak_))
-        dropped_tx_.fetch_add(1, std::memory_order_relaxed);  // shed by the bound, counted
+    // The writer encodes into tx_buf_, which only the thread holding the writer role touches
+    // (the handshake writes its own bytes); a publisher that arrives while a write is in
+    // flight encodes straight into its queue slot and returns rather than waiting on write_m_
+    // for the rest of that write. Each record is still bounded by the liveness window (#838).
+    const std::uint32_t key = next_mask_key();
+    const std::uint64_t shed = handoff_send(
+        [&](int fd) {
+            const std::size_t n =
+                ws::try_encode_client_frame(tx_buf_, ws::opcode_t::BINARY, frame, key);
+            if (n == 0) return true;  // frame buffer exhausted => drop, and COUNT it (#932)
+            const write_result_t r = write_all(fd, std::span<const std::byte>(tx_buf_.data(), n),
+                                               derive_send_bound_ms(liveness_window_ms_, 1));
+            return note_write_result(r, fd, tx_stall_streak_);
+        },
+        [&](mem::block_array_t<std::byte>& slot) {
+            return ws::try_encode_client_frame(slot, ws::opcode_t::BINARY, frame, key);
+        });
+    if (shed != 0) dropped_tx_.fetch_add(shed, std::memory_order_relaxed);
 }
 
 bool transport_ws_client::handshake(int fd, const std::string& host, std::uint16_t port,

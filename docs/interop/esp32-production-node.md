@@ -343,7 +343,7 @@ without the project-side symbol, the line is inert.
   reconnect storm.
 - **Egress is gather, not copy.** The rope-to-wire path lowers to an iovec `sendmsg`
   (`core/src/posix_endpoint.cpp:294,181`; the TCP assembly is at
-  `core/src/transport_tcp.cpp:59-81`), and lwIP provides `sendmsg` unmodified. Do not
+  `core/src/transport_tcp.cpp:60-82`), and lwIP provides `sendmsg` unmodified. Do not
   flatten payloads before send; the only legitimate flatten is a substrate boundary
   DMA cannot span.
 - **Backpressure beats buffering.** Where a node buffers for a slow subscriber, the

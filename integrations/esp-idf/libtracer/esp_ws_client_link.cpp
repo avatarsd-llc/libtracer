@@ -140,6 +140,21 @@ constexpr int kPollMs = 200;
 #endif
 
 /**
+ * @brief Frames a sender may queue behind the write in flight (RFC 0028 §4.7, #1619).
+ *
+ * Kconfig (`CONFIG_LIBTRACER_WS_CLIENT_TX_QUEUE_DEPTH`) because it is RAM traded against
+ * loss: each slot grows to the largest frame queued in it (at most `tx_bytes`) the first
+ * time two tasks send at once, and keeps that block for the link's life. `0` is the
+ * zero-RAM form — a sender that finds a write in flight drops and counts instead of
+ * queueing. It never makes a sender wait: past the depth the frame is dropped.
+ */
+#ifdef CONFIG_LIBTRACER_WS_CLIENT_TX_QUEUE_DEPTH
+constexpr std::size_t kTxQueueDepth = CONFIG_LIBTRACER_WS_CLIENT_TX_QUEUE_DEPTH;
+#else
+constexpr std::size_t kTxQueueDepth = 2;
+#endif
+
+/**
  * @brief Backoff before re-dialing after a failed/lost connection (ms) — an upper
  *        bound only: the wait is on a condition variable the destructor signals.
  *
@@ -273,6 +288,7 @@ esp_ws_client_link_t::esp_ws_client_link_t(std::string host, std::uint16_t port,
       dial_(std::make_shared<dial_t>(host_, port_, ws_path_, handshake_headers_)),
       rx_buf_(rx_bytes),
       tx_buf_(tx_bytes),
+      tx_(kTxQueueDepth, tr::mem::heap_source()),
       armed_(!defer_recv) {
     // Every member the recv thread reads is initialized ABOVE this line, which is the
     // whole of #959: the thread spawned below dials at once, so a knob delivered after the
@@ -655,20 +671,55 @@ void esp_ws_client_link_t::send(std::span<const std::byte> frame) {
         bump([this] { ++st_.tx_drops; });
         return;
     }
-    // Announce this sender BEFORE queueing on write_m_ (#952). The queue on that mutex
-    // is the hazard: it is held across the transport write, so a sender can be parked
-    // on it while the destructor runs, and pre-#952 it woke up owning a destroyed
+    // Announce this sender BEFORE it can reach write_m_ (#952). A sender that becomes the
+    // writer holds write_m_ across the transport write, so it can still be inside the
+    // transport while the destructor runs, and pre-#952 a sender woke up owning a destroyed
     // handle. The tally is what the destructor drains before it lets this object's own
-    // members go.
+    // members go — and a writer drains the queue inside this same tally, so the records it
+    // writes for other publishers are covered too.
     senders_.fetch_add(1, std::memory_order_relaxed);
     const sender_exit_t leaving(senders_);
+    // Enqueue-then-write (RFC 0028 §4.7, #1619). Only ONE sender writes at a time; one that
+    // arrives while a write is in flight copies its frame into a queue slot and returns at
+    // once rather than queueing on write_m_ for the rest of that write — up to a whole write
+    // budget on a peer whose window has closed. Delivery is in-call, so that sender is
+    // whatever unrelated task published; it must not pay for this peer's socket. A sender
+    // that finds every slot taken drops the frame and counts it, as the async server link
+    // does on an empty tx pool.
+    switch (tx_.admit([&](tr::mem::block_array_t<std::byte>& slot) -> std::size_t {
+        if (!slot.reserve(frame.size())) return 0;
+        std::memcpy(slot.data(), frame.data(), frame.size());
+        return frame.size();
+    })) {
+        case tr::net::tx_handoff_t::admit_t::REFUSED:
+            bump([this] { ++st_.tx_drops; });
+            return;
+        case tr::net::tx_handoff_t::admit_t::QUEUED:
+            return;
+        case tr::net::tx_handoff_t::admit_t::WRITE:
+            break;
+    }
+    // This thread is the writer. Its own frame goes through the private scratch:
+    // esp_transport_write masks IN-PLACE and unmasks back (RFC 6455 client rule), but a
+    // delivered frame may be shared with the concurrent server link reading the same bytes,
+    // so the caller's bytes must not be transiently mutated — hence the copy. A queued
+    // frame is already a private copy, so it is written from its slot directly.
+    write_locked(std::span<std::byte>(tx_buf_.data(), frame.size()), frame);
+    for (std::span<std::byte> rec = tx_.next(); !rec.empty(); rec = tx_.next())
+        write_locked(rec, {});
+}
+
+void esp_ws_client_link_t::write_locked(std::span<std::byte> wire, std::span<const std::byte> src) {
+    const auto bump = [this](auto fn) {
+        const std::lock_guard<std::mutex> lk(st_m_);
+        fn();
+    };
     const std::lock_guard<std::mutex> lk(write_m_);
-    // Re-checked, not re-read for tidiness: teardown may have run while this sender was
-    // queued, and it disarms `stop_` BEFORE it takes this very lock to null the handles,
-    // so a sender that wakes to a set `stop_` leaves without touching either handle.
-    // NOT counted as a drop: the link is being destroyed, which is not a loss toward the
-    // peer, and a teardown that bumped a counter would make every clean shutdown look
-    // like a failure.
+    // Re-checked, not re-read for tidiness: teardown may have run while this record waited,
+    // and it disarms `stop_` BEFORE it takes this very lock to null the handles, so a writer
+    // that sees a set `stop_` leaves without touching either handle. NOT counted as a drop:
+    // the link is being destroyed, which is not a loss toward the peer, and a teardown that
+    // bumped a counter would make every clean shutdown look like a failure.
     if (stop_.load(std::memory_order_acquire)) return;
     // THE handle gate, and the reason nothing above it may read `ws_`. `write_m_` does
     // NOT order a handle read against a re-dial: connect_once() destroys and rewrites
@@ -687,21 +738,17 @@ void esp_ws_client_link_t::send(std::span<const std::byte> frame) {
         bump([this] { ++st_.tx_drops; });
         return;
     }
-    // Copy into the reusable scratch: esp_transport_write masks IN-PLACE and unmasks
-    // back (RFC 6455 client rule), but a delivered frame may be shared with the
-    // concurrent server link reading the same bytes, so the caller's bytes must not be
-    // transiently mutated — hence the copy onto our private scratch.
-    std::memcpy(tx_buf_.data(), frame.data(), frame.size());
-    const int n = esp_transport_write(ws_, reinterpret_cast<char*>(tx_buf_.data()),
-                                      static_cast<int>(frame.size()), kWriteTimeoutMs);
-    if (n < 0 || n < static_cast<int>(frame.size())) {
+    if (!src.empty()) std::memcpy(wire.data(), src.data(), src.size());
+    const int n = esp_transport_write(ws_, reinterpret_cast<char*>(wire.data()),
+                                      static_cast<int>(wire.size()), kWriteTimeoutMs);
+    if (n < 0 || n < static_cast<int>(wire.size())) {
         // Error or short write (a partial WS frame would desync the peer) — tear the
         // connection down so the recv loop rebuilds it; the frame is best-effort-lost.
         bump([this] { ++st_.tx_drops; });
         connected_.store(false, std::memory_order_release);
         return;
     }
-    bump([this, n = frame.size()] {
+    bump([this, n = wire.size()] {
         ++st_.tx_frames;
         st_.tx_bytes += static_cast<std::uint32_t>(n);
     });
