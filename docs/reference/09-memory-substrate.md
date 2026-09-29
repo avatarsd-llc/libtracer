@@ -302,6 +302,7 @@ All three phases are terminal: phase 1 landed, phase 2 was measured and **revert
 | Every failable `#551` block — vertex registration, the branch-write decode's bump upstream, the composed read's collect stack | the injected source directly (`control_source()`) | `graph_oom_softfail_test`, `bench_failable_census` |
 | Default receiver-ring admissions of a STREAM vertex with no source of its own | the injected source (`default_ring_source()`), overridable per vertex at `set_ring_source` | `ring_pressure_test` |
 | The router's NAME→link demux chunks | `fwd_router_t`'s `label_src` (its own injection, by design — see below) | `plane_isolation_test`, `conn_add_oom_test` |
+| The router's peer-reachable ownership copies — the COMPACT delivery payload (cold and warm arms) and the host-local subscribe door's route + `SUBSCRIBER` TLVs | `fwd_router_t`'s `flat` (its own injection, by design — see below; these were on the global heap via the one-argument `view::over_bytes` until [#1582](https://github.com/avatarsd-llc/libtracer/issues/1582)) | `router_flat_seam_test` |
 | **LKV hazard-slot nodes** | **the global heap — carve-out 1**, measured | `bench_hazard_node` |
 | **Plain `std::vector<std::byte>` sites** — the KEY containers and the read-back encoders' staging buffers | **the global heap — carve-out 2**, a container-type constraint | — |
 

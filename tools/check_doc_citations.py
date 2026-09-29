@@ -378,17 +378,17 @@ ANCHORS = [
      "field_write read an empty head"),
     ("core/src/graph.cpp:3512", "result_t<void> graph_t::field_write"),
     ("core/src/graph.cpp:3702", "acl_right_t::CREATE", 'step0.name == "children"'),
-    ("core/src/fwd_router.cpp:3355", "fwd_router_t::deliver_remote"),
-    ("core/src/fwd_router.cpp:3393", "value.try_materialize(*flat_)"),
-    ("core/src/fwd_router.cpp:3394", "if (!flat) return;", "A REFUSED materialize drops the delivery"),
-    ("core/src/fwd_router.cpp:3396", "emit_compact", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:3359", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:3397", "value.try_materialize(*flat_)"),
+    ("core/src/fwd_router.cpp:3398", "if (!flat) return;", "A REFUSED materialize drops the delivery"),
+    ("core/src/fwd_router.cpp:3400", "emit_compact", "fwd_router_t::deliver_remote"),
     # The FULL-ROUTE delivery leg's iov, and the scope is load-bearing: this exact statement
     # appears four times in the file and TWICE inside `deliver_remote` — once in the bound
     # reverse-list arm and once in the default full-route arm below it. The old scope named
     # the function, which both arms are inside, so a re-pin resolved the citation onto the
     # bound arm (the wrong paragraph). "Default: full-route" sits between the two and only
     # ever above this one.
-    ("core/src/fwd_router.cpp:3486",
+    ("core/src/fwd_router.cpp:3490",
      "mem::block_array_t<std::span<const std::byte>> iov(graph_.control_source());",
      "Default: full-route"),
     # #730 — the two INGRESS flatten guards. Anchored because the whole point of the
@@ -713,9 +713,9 @@ ANCHORS = [
     ('core/src/fwd_router.cpp:2751', 'const auto head = peek_control(cur, wire::grammar::crc_check_t::VERIFY);'),
     ('core/src/fwd_router.cpp:2765', 'const std::span<const std::byte> route = contig(head->child1_off, head->child1_total);'),
     ('core/src/fwd_router.cpp:2817', 'frame.subrope(off, total).try_materialize(*flat_);'),
-    ('core/src/fwd_router.cpp:3372',
+    ('core/src/fwd_router.cpp:3376',
      "// else. A dropped fresh ADVERTISE self-heals via the peer's HANDLE_NACK (§E.1). NOT yet"),
-    ('core/src/fwd_router.cpp:3462',
+    ('core/src/fwd_router.cpp:3466',
      'constexpr std::array<std::byte, 5> op_tlv{std::byte{0x01}, std::byte{0x00}, std::byte{0x01},'),
     # core/src/graph.cpp
     ('core/src/graph.cpp:609', 'const view_t& frame_view, std::vector<std::byte> key,'),
@@ -1027,7 +1027,7 @@ ANCHORS = [
     ('core/src/fwd_router.cpp:2806',
      'const wire::grammar::rope_cursor cur{frame};',
      'if (!frame.all_host()) return;'),
-    ('core/src/fwd_router.cpp:3101', 'const auto payload_view = view::over_bytes(payload_bytes);'),
+    ('core/src/fwd_router.cpp:3101', 'const auto payload_view = view::over_bytes(payload_bytes, *flat_);'),
     ('core/src/fwd_router.cpp:3112',
      'graph_.count_external_drop(graph::graph_t::external_drop_t::OUT_OF_MEMORY, 1);',
      'if (!value.try_reserve(1)) {'),
@@ -1039,13 +1039,13 @@ ANCHORS = [
     ('core/src/fwd_router.cpp:3255',
      'graph_.count_external_drop(graph::graph_t::external_drop_t::NO_TARGET, 1);',
      '// the same outcome either way: an admitted delivery with nowhere to land.'),
-    ('core/src/fwd_router.cpp:3262',
+    ('core/src/fwd_router.cpp:3264',
      'graph_.count_external_drop(graph::graph_t::external_drop_t::OUT_OF_MEMORY, 1);',
-     'const auto payload_view = view::over_bytes(payload);'),
-    ('core/src/fwd_router.cpp:3395', 'if (fresh) emit_advertise(*link, label, route);'),
-    ('core/src/fwd_router.cpp:3465',
+     'const auto payload_view = view::over_bytes(payload, *flat_);'),
+    ('core/src/fwd_router.cpp:3399', 'if (fresh) emit_advertise(*link, label, route);'),
+    ('core/src/fwd_router.cpp:3469',
      'constexpr std::array<std::byte, 4> empty_src{std::byte{0x06}, std::byte{0x00}, std::byte{0x00},'),
-    ('core/src/fwd_router.cpp:3466',
+    ('core/src/fwd_router.cpp:3470',
      'std::byte{0x00}};',
      'constexpr std::array<std::byte, 4> empty_src{std::byte{0x06}, std::byte{0x00}, std::byte{0x00},'),
     ('core/src/graph.cpp:1160', 'return acl_allows(v.get(), caller, right);'),

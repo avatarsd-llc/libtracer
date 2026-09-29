@@ -343,6 +343,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **`tr::net::fwd_router_t`'s four peer-reachable ownership copies draw from its injected
+  `flat` backend, never the global heap**
+  ([#1582](https://github.com/avatarsd-llc/libtracer/issues/1582)). The COMPACT delivery
+  payload copy (both the memoized warm arm and the cold `deliver_local` arm) and the host-local
+  `subscribe_toward` door's return-route PATH TLV and `SUBSCRIBER` TLV took the one-argument
+  `view::over_bytes` — an unbounded heap draw on a receive thread behind no ACL — while the
+  router already held `flat` for exactly this. A refusal is answered as before: a counted
+  `delivery_drops().out_of_memory` for the two deliveries, `BACKPRESSURE` by value for the
+  subscribe; there is no heap fallback. A host that size-classes `flat` now sees these draws
+  there (one per COMPACT delivery; two per host-local subscribe, retained for the subscription's
+  life). Wire-neutral; an un-injected router is unchanged. Test: `router_flat_seam_test`.
 - **`tr::mem::source_backend_t` draws ONE block per segment, and `tr::mem::heap_backend_t`
   acquires through the substrate's own platform-heap arm**
   ([#873](https://github.com/avatarsd-llc/libtracer/issues/873) **phase 3** — the last of the

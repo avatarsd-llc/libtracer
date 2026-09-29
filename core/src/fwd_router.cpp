@@ -3098,7 +3098,7 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
             // `graph_.write` counts it at the gate that produces it, so this arm must not
             // add a second count for the same refusal. Nothing is counted on success — the
             // steady-state warm path is exactly the instructions it was before.
-            const auto payload_view = view::over_bytes(payload_bytes);
+            const auto payload_view = view::over_bytes(payload_bytes, *flat_);
             if (!payload_view) {  // alloc failure ⇒ drop (one audited locus)
                 graph_.count_external_drop(graph::graph_t::external_drop_t::OUT_OF_MEMORY, 1);
                 return;
@@ -3255,9 +3255,11 @@ bool fwd_router_t::deliver_local(std::span<const std::byte> route_path,
         graph_.count_external_drop(graph::graph_t::external_drop_t::NO_TARGET, 1);
         return false;
     }
-    // `payload` is a wire-encoded TLV (never empty); `nullopt` is exactly an alloc
-    // failure → drop the delivery (one audited alloc/copy/over locus).
-    const auto payload_view = view::over_bytes(payload);
+    // `payload` is a wire-encoded TLV (never empty); `nullopt` is exactly a REFUSAL of the
+    // injected `flat` seam (#1582) → drop the delivery, counted (one audited alloc/copy/over
+    // locus). Never the global heap: this is a peer-driven receive path behind no ACL, and the
+    // ledger's receiver-pays claim (docs/reference/09) holds only if the copy is bounded HERE.
+    const auto payload_view = view::over_bytes(payload, *flat_);
     if (!payload_view) {
         graph_.count_external_drop(graph::graph_t::external_drop_t::OUT_OF_MEMORY, 1);
         return false;
@@ -3328,11 +3330,13 @@ graph::result_t<void> fwd_router_t::subscribe_toward(const graph::path_t& produc
     if (split.link.empty()) return std::unexpected(graph::status_t::INVALID_PATH);
 
     // The return route is the residual below the mount, as ONE owned PATH TLV — the
-    // single copy every delivery then clones by refcount (ADR-0041 §2).
+    // single copy every delivery then clones by refcount (ADR-0041 §2). Both owned copies
+    // below draw from the injected `flat` seam (#1582), the same store the wire door's
+    // un-injected default lands on; a refusal is BACKPRESSURE by value, never a heap fallback.
     const std::span<const std::byte> residual = split.residual;
     std::vector<std::byte> route_tlv;
     wire::emit_tlv(route_tlv, wire::type_t::PATH, wire::opt_t{}, residual);
-    const auto route_view = view::over_bytes(route_tlv);
+    const auto route_view = view::over_bytes(route_tlv, *flat_);
     if (!route_view) return std::unexpected(graph::status_t::BACKPRESSURE);
 
     // A minimal SUBSCRIBER composite — the same admission door as the wire append
@@ -3340,7 +3344,7 @@ graph::result_t<void> fwd_router_t::subscribe_toward(const graph::path_t& produc
     // full-route FWD{WRITE} form).
     std::vector<std::byte> sub_tlv;
     wire::emit_tlv(sub_tlv, wire::type_t::SUBSCRIBER, wire::opt_t{.pl = true}, {});
-    const auto sub_view = view::over_bytes(sub_tlv);
+    const auto sub_view = view::over_bytes(sub_tlv, *flat_);
     if (!sub_view) return std::unexpected(graph::status_t::BACKPRESSURE);
 
     // The mount's own interned token rides along (#1437). This door builds no SUBSCRIBER PATH
