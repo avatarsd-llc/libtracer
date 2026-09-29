@@ -49,10 +49,15 @@ using tr::view::rope_t;
 using tr::testing::check;
 using tr::testing::make_value;
 
-/** @brief The single byte a one-byte rope carries (0 when the rope is not that shape). */
-[[nodiscard]] std::uint8_t only_byte(const rope_t& r) {
+/** @brief The single byte a one-byte value carries (0 when the value is not that shape). */
+[[nodiscard]] std::uint8_t only_byte(const tr::graph::value_t& r) {
     if (r.link_count() != 1 || r.links()[0].bytes().size() != 1) return 0;
     return std::to_integer<std::uint8_t>(r.links()[0].bytes()[0]);
+}
+
+/** @brief The same, on the rope a handler or admission filter is handed. */
+[[nodiscard]] std::uint8_t only_byte(const rope_t& r) {
+    return only_byte(tr::graph::value_storage_t<2>{r}.get());
 }
 
 /**
@@ -196,8 +201,8 @@ void test_assign_at_a_non_retaining_vertex_refuses() {
 
     auto at_h = std::make_shared<int>(0);
     auto at_s = std::make_shared<int>(0);
-    auto on_h = [at_h](const rope_t&) { ++*at_h; };
-    auto on_s = [at_s](const rope_t&) { ++*at_s; };
+    auto on_h = [at_h](const tr::graph::value_t&) { ++*at_h; };
+    auto on_s = [at_s](const tr::graph::value_t&) { ++*at_s; };
     check(g.subscribe(path_t("/r/h"), on_h).has_value(), "subscribe to the handler vertex");
     check(g.subscribe(path_t("/r/s"), on_s).has_value(), "subscribe to the stored sibling");
 
@@ -234,8 +239,8 @@ void test_propagate_at_a_non_retaining_vertex_refuses() {
 
     auto at_h = std::make_shared<int>(0);
     auto at_p = std::make_shared<int>(0);
-    auto on_h = [at_h](const rope_t&) { ++*at_h; };
-    auto on_p = [at_p](const rope_t&) { ++*at_p; };
+    auto on_h = [at_h](const tr::graph::value_t&) { ++*at_h; };
+    auto on_p = [at_p](const tr::graph::value_t&) { ++*at_p; };
     check(g.subscribe(path_t("/p/h"), on_h).has_value(), "subscribe to the handler vertex");
     check(g.subscribe(path_t("/p"), on_p).has_value(), "subscribe to the retaining root");
 

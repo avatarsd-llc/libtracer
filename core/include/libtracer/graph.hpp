@@ -132,7 +132,8 @@ struct remote_delivery_t {
  *       `tr::net::fwd_router_t`) and must outlive every dispatch the graph can still make,
  *       exactly as `receiver_slot_t`'s context must.
  */
-using remote_delivery_fn_t = void (*)(void* ctx, const remote_delivery_t& sub, const rope_t& value);
+using remote_delivery_fn_t = void (*)(void* ctx, const remote_delivery_t& sub,
+                                      const value_t& value);
 
 /**
  * @brief Announce that THIS thread holds no `%edge_view_t` snapshot and drain whatever that
@@ -585,8 +586,8 @@ class graph_t {
      *
      * @warning **A `value_ref_t` must not outlive the graph it was read from.** This is the
      *          one contract the collapse tightens, and it is stated rather than discovered: a
-     *          stored LKV is an `allocate_shared<rope_t>` through the graph's pmr channel, so
-     *          the handle's control block calls `deallocate` on that channel's resource when
+     *          stored LKV is a `value_t` block drawn from the graph's source, so the handle's
+     *          last `release` hands the block back to that source when
      *          the last reference drops. Before the collapse that resource was HOST-owned and
      *          the host could keep it alive past the graph; now it is a graph member, so a
      *          handle released after `~graph_t` calls a destroyed object. The graph's own
@@ -1688,9 +1689,9 @@ class graph_t {
      *         SAME bytes @ref history serves, so leaving it ungated would be a READ-gate
      *         bypass wearing a different verb's name.
      */
-    [[nodiscard]] result_t<std::size_t> drain_unflushed(
-        vertex_handle_t v, std::vector<std::shared_ptr<const rope_t>>& out,
-        std::uint64_t* gap_before = nullptr);
+    [[nodiscard]] result_t<std::size_t> drain_unflushed(vertex_handle_t v,
+                                                        std::vector<value_ref_t>& out,
+                                                        std::uint64_t* gap_before = nullptr);
     /**
      * @brief Advance @p v's STREAM drain cursor to "now" WITHOUT draining (RFC-0008 §E) — an
      *        eager delivery already flushed the ring, so a later sweep must not re-deliver.
@@ -1840,12 +1841,11 @@ class graph_t {
      * @return A @ref subscription_t handle for @ref unsubscribe (as the `{fn, ctx}` form).
      */
     template <typename F>
-        requires std::invocable<F&, const view::rope_t&>
+        requires std::invocable<F&, const value_t&>
     [[nodiscard]] result_t<subscription_t> subscribe(const path_t& src, F& callback,
                                                      delivery_policy_t policy = {}) {
         return subscribe(
-            src, [](void* c, const view::rope_t& v) { (*static_cast<F*>(c))(v); }, &callback,
-            policy);
+            src, [](void* c, const value_t& v) { (*static_cast<F*>(c))(v); }, &callback, policy);
     }
 
     /**
@@ -2506,8 +2506,9 @@ class graph_t {
     // the owner's own. It is also `write_ctx_t::subject` for the retaining roles' ADMISSION
     // filter (`handlers_t::on_admit`), which runs here — above the storing tail, so a refusal
     // never becomes state and a normalisation is the only value any reader can reach.
-    [[nodiscard]] result_t<std::shared_ptr<const rope_t>> store_value(
-        vertex_t* v, rope_t&& value, vertex_t::store_drops_t& drops, std::string_view caller);
+    [[nodiscard]] result_t<value_ref_t> store_value(vertex_t* v, rope_t&& value,
+                                                    vertex_t::store_drops_t& drops,
+                                                    std::string_view caller);
     // The source a receiving vertex charges its ring admissions against — its own injected
     // one, else the graph-level default. One spelling, so "per-injection-point, never a
     // shared pool" cannot drift between call sites.
@@ -2524,20 +2525,23 @@ class graph_t {
     // `assign` path) marks each landed vertex for the next sweep and delivers nothing.
     [[nodiscard]] result_t<void> write_branch(vertex_t* v, const rope_t& value,
                                               std::string_view caller, bool notify);
-    void fan_out(vertex_t* v, const rope_t& value);
+    void fan_out(vertex_t* v, const value_t& value);
+    // The same fan-out over a SLICE no vertex stored (a branch write's per-site cut): the view
+    // is wrapped in stack storage for the duration of the dispatch.
+    void fan_out_slice(vertex_t* v, const view_t& slice);
     // The ONE dispatch of a subscription edge's three legs (in-process callback, local
     // target re-dispatch, remote sink) — shared by fan_out and the admission durability
     // latch (ADR-0049), always called OUTSIDE the vertex lock. The target/remote legs
     // are split out so the per-edge body stays small enough to inline into the fan-out
     // loop (the wide-fan-out hot loop; the callback leg is the in-process hot case).
-    void dispatch_edge(const edge_view_t& e, const rope_t& value);
+    void dispatch_edge(const edge_view_t& e, const value_t& value);
     // A SUBSCRIBER delivery TERMINATES at its target (ADR-0051 / RFC-0007): apply the
     // target-local effects of a write — store (LKV/history per role) + await wake + the
     // target's own handler reaction — gated by the TARGET's WRITE :acl, and NEVER
     // re-dispatch to the target's own :subscribers[]. Propagation past a target is the
     // target's own logic; a dispatch cycle is impossible by construction (no depth cap).
-    void dispatch_edge_target(const edge_view_t& e, const rope_t& value);
-    void dispatch_edge_remote(const edge_view_t& e, const rope_t& value);
+    void dispatch_edge_target(const edge_view_t& e, const value_t& value);
+    void dispatch_edge_remote(const edge_view_t& e, const value_t& value);
     // The cause a delivery was declined for — the argument of the ONE counting door
     // below. Kept private: the enum names the internal drop sites, while the public
     // surface is delivery_drops_t, whose fields are what an operator reads.
@@ -2561,11 +2565,18 @@ class graph_t {
     void count_store_drops(vertex_t* v, const vertex_t::store_drops_t& drops) noexcept;
     // Vertical bubbling (RFC-0005): fan `value` out to every registered ancestor's
     // subscribers. Called only when v->listeners_above_ says someone is listening.
-    void bubble_up(vertex_t* v, const rope_t& value);
+    void bubble_up(vertex_t* v, const value_t& value);
+    // Deliver an UNSTORED rope (a HANDLER write's value, a branch write's whole tree) through
+    // `fn` as the `value_t` the receivers read: stack storage while the chain fits
+    // kUnstoredInline links (the #1505 no-clone property, kept), else one block from the
+    // graph's source whose refusal sheds the delivery — counted OUT_OF_MEMORY at `width`.
+    static constexpr std::size_t kUnstoredInline = 8;
+    void deliver_unstored(vertex_t* v, const rope_t& value,
+                          void (graph_t::*fn)(vertex_t*, const value_t&), std::size_t width);
     // Deliver `value` as `v`'s value to v's full observer set: v's own edges (fan_out)
     // + every ancestor subtree subscriber (bubble_up, gated on listeners_above_). The
     // per-vertex delivery unit both `write` (eager) and `propagate` (sweep) build on.
-    void deliver_vertex(vertex_t* v, const rope_t& value);
+    void deliver_vertex(vertex_t* v, const value_t& value);
     // Deliver v's CURRENT stored value (propagate reads the LKV — no value argument).
     // STORED_VALUE: the last-known-value once; STREAM: drains the ring entries appended
     // since the last flush, in order (RFC-0008 §E — a queue, not a coalesce); HANDLER /
@@ -2601,7 +2612,7 @@ class graph_t {
     // that is still v's CURRENT LKV, so a mark left by an assign that raced this write —
     // whose newer value this writer never delivered — survives instead of being dropped
     // (#1185, the #854-survivor locked-erase drop).
-    void clear_pending(vertex_t* v, const std::shared_ptr<const rope_t>& delivered);
+    void clear_pending(vertex_t* v, const value_t* delivered);
     // Subscribe/unsubscribe bookkeeping (RFC-0005): bump v's own active-slot count
     // and every descendant's listeners_above_, under the map lock (shared — the
     // counters are atomics; the lock only excludes concurrent vertex creation so
@@ -2689,6 +2700,9 @@ class graph_t {
     // acl_right_t::READ up front and this arm does not re-check. Out of line so the
     // retaining arm of either door keeps its `read_stored()` fast path unencumbered.
     [[nodiscard]] result_t<value_ref_t> read_handler_gated(vertex_t* v) const;
+    // A COMPOSED read's value (a handler's, a folded subtree's) given a published value's
+    // shape: one heap block, whose refusal is BACKPRESSURE by value (#477), never a throw.
+    [[nodiscard]] static result_t<value_ref_t> composed_or_backpressure(rope_t&& r) noexcept;
     // ":schema" read => a POINT descriptor (name + settings).
     [[nodiscard]] result_t<view_t> read_schema(vertex_t* v) const;
     // ":identity" read => the node-scoped SETTINGS{kind,key} record (RFC-0011 §B), or
@@ -2804,16 +2818,18 @@ class graph_t {
     // ---- DECLARED FIRST so they are DESTROYED LAST (#873 phase 1) ---------------------
     //
     // These two are the graph's internal faces of the one injected source, and their
-    // position in the object is a LIFETIME requirement, not a preference. A stored LKV is
-    // an `allocate_shared<rope_t>` through `mr_`, so its control block carries a
-    // `polymorphic_allocator` pointing at `src_mr_` and calls `deallocate` on it when the
-    // last reference drops — which happens inside `~graph_t`, when `root_`'s vertex tree is
-    // torn down. Members are destroyed in REVERSE declaration order, so an adapter declared
-    // after `root_` is already dead by then: a virtual call on a destroyed object, caught by
-    // UBSan's `vptr` check as "member call on address ... which does not point to an object
-    // of type 'memory_resource'" across six tests. Declaring them first inverts that and is
-    // robust by construction — it does not depend on anyone enumerating which member might
-    // hold a pmr allocation, which an explicit teardown order would.
+    // position in the object is a LIFETIME requirement, not a preference. The value path no
+    // longer draws through them (a stored LKV is a `value_t` block drawn straight from `ctl_`
+    // since RFC-0028 slice 3, and `ctl_` is the caller's object), but the control-plane pmr
+    // containers below still allocate through `mr_` → `src_mr_`, and a payload segment a
+    // vertex retains still reclaims through `src_backend_` — both from inside `~graph_t`, when
+    // `root_`'s vertex tree is torn down. Members are destroyed in REVERSE declaration order,
+    // so an adapter declared after `root_` is already dead by then: a virtual call on a
+    // destroyed object, caught by UBSan's `vptr` check as "member call on address ... which
+    // does not point to an object of type 'memory_resource'" across six tests. Declaring them
+    // first inverts that and is robust by construction — it does not depend on anyone
+    // enumerating which member might hold such an allocation, which an explicit teardown
+    // order would.
     //
     // The cost is that every member below sits 40 B further into the object than it did.
     // That was measured rather than assumed: the symbol ratchet's seven pins are unmoved.
@@ -2831,9 +2847,9 @@ class graph_t {
      *         phase 1).
      *
      *         Same story as `src_backend_`: pointed at by `mr_` only when a
-     *         non-default source was injected, so a process-default graph's per-write
-     *         control block still comes from `new_delete_resource()` through exactly one
-     *         virtual call, as it always did. This adapter is where the substrate's
+     *         non-default source was injected, so a process-default graph's control-plane
+     *         containers still come from `new_delete_resource()` through exactly one
+     *         virtual call, as they always did. This adapter is where the substrate's
      *         `nullptr` becomes a `std::bad_alloc` — the ONE boundary in the graph that
      *         translates the failure convention, and only because `std::pmr` requires it. */
     mem::source_resource_t src_mr_;
@@ -2850,8 +2866,10 @@ class graph_t {
     // route_handle clear_link dangling-ref class, fixed in #220); it needs a vertex
     // lifetime scheme (refcount / epoch reclamation, or a tombstone) first. Registering
     // the empty key fills this node in place (the "root vertex" the flat map allowed).
-    /** @brief The ADR-0039 resource per-write allocations draw from (#361 §5): the LKV
-     *         control block + rope of every `assign`.
+    /** @brief The ADR-0039 pmr resource the CONTROL-PLANE containers draw from (the link
+     *         index, its free list and long names). NOT the value path: since RFC-0028 slice 3
+     *         a publish draws its one `value_t` block straight from `ctl_`, and this channel's
+     *         throwing seam (ADR-0079 Decision 3) is off the hot path for good.
      *
      *         Since #873 phase 1 this is no longer injected — it POINTS at whichever
      *         resource the constructor's single source resolved to: `new_delete_resource()`
@@ -2995,8 +3013,8 @@ class graph_t {
      *
      *         The two adapters built over this source — `src_backend_` and `src_mr_` — do
      *         NOT sit here for that reason: they are declared FIRST in the class (see the
-     *         "DECLARED FIRST so they are DESTROYED LAST" block), because a stored LKV's
-     *         control block calls back into `src_mr_` while `root_`'s vertex tree is torn
+     *         "DECLARED FIRST so they are DESTROYED LAST" block), because a retained payload
+     *         segment reclaims through `src_backend_` while `root_`'s vertex tree is torn
      *         down, and members die in reverse declaration order. Moving them down here to
      *         match this member's layout argument reintroduces the UBSan `vptr` lifetime
      *         bug that placement fixed.

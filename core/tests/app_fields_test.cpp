@@ -70,9 +70,9 @@ std::vector<std::byte> value_tlv(std::string_view payload) {
 }
 
 /** @brief A rope, whether held directly or behind a @ref tr::graph::value_ref_t. */
-inline const rope_t& deref_rope(const rope_t& r) noexcept { return r; }
+inline rope_t deref_rope(const rope_t& r) { return r; }
 /** @brief Overload for the reference form a value read returns. */
-inline const rope_t& deref_rope(const tr::graph::value_ref_t& r) noexcept { return *r; }
+inline rope_t deref_rope(const tr::graph::value_ref_t& r) { return r->rope(); }
 
 /**
  * @brief Flatten a read result and compare against the exact expected bytes.
@@ -398,8 +398,8 @@ void test_announce_flow() {
 
     int deliveries = 0;
     check(g.subscribe(
-               path_t("/unit"), [](void* ctx, const rope_t&) { ++*static_cast<int*>(ctx); },
-               &deliveries)
+               path_t("/unit"),
+               [](void* ctx, const tr::graph::value_t&) { ++*static_cast<int*>(ctx); }, &deliveries)
               .has_value(),
           "subtree subscriber above the vertex lands");
 

@@ -167,7 +167,7 @@ void run_inproc(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc, bool
     verts.reserve(E);
     paths.reserve(E);
     std::atomic<std::uint64_t> recv{0};
-    auto cb = [&](const rope_t&) { recv.fetch_add(1, std::memory_order_relaxed); };
+    auto cb = [&](const tr::graph::value_t&) { recv.fetch_add(1, std::memory_order_relaxed); };
     for (std::size_t e = 0; e < E; ++e) {
         path_t path = *path_t::parse("/bench/v" + std::to_string(e));
         auto v = g.register_vertex(path, role_t::STORED_VALUE);
@@ -474,7 +474,7 @@ void run_inproc_remote(std::size_t S, std::size_t F, const char* mode,
     };
     sink_ctx_t sink_ctx{&recv, 0};
     g.configure_remote_delivery_sink(
-        [](void* ctx, const tr::graph::remote_delivery_t& d, const rope_t&) {
+        [](void* ctx, const tr::graph::remote_delivery_t& d, const tr::graph::value_t&) {
             auto* s = static_cast<sink_ctx_t*>(ctx);
             s->n->fetch_add(1, std::memory_order_relaxed);
             s->link_bytes += d.link.size();  // READ the borrowed spelling, don't just count
@@ -565,7 +565,7 @@ void run_inproc_deliver(std::size_t S, std::size_t F, std::uint64_t budget = kDe
     const path_t path = *path_t::parse("/bench/deliver");
     auto v = g.register_vertex(path, role_t::STORED_VALUE);
     std::atomic<std::uint64_t> recv{0};
-    auto cb = [&](const rope_t&) { recv.fetch_add(1, std::memory_order_relaxed); };
+    auto cb = [&](const tr::graph::value_t&) { recv.fetch_add(1, std::memory_order_relaxed); };
     for (std::size_t f = 0; f < F; ++f) (void)g.subscribe(path, cb);
     const std::vector<std::byte> tlv = value_tlv(S);
     (void)g.write(v, owned_view(tlv));  // store ONCE — the timed ops below move no bytes
@@ -631,7 +631,7 @@ void run_mixed() {
     std::vector<std::size_t> fan;
     std::vector<std::vector<std::byte>> tlvs;
     std::atomic<std::uint64_t> recv{0};
-    auto cb = [&](const rope_t&) { recv.fetch_add(1, std::memory_order_relaxed); };
+    auto cb = [&](const tr::graph::value_t&) { recv.fetch_add(1, std::memory_order_relaxed); };
     std::size_t total_fan = 0;
     for (std::size_t e = 0; e < E; ++e) {
         path_t path = *path_t::parse("/bench/m" + std::to_string(e));
@@ -700,7 +700,7 @@ void run_inproc_mt(std::size_t T) {
         w->v = w->g.register_vertex(*path_t::parse("/bench/mt"), role_t::STORED_VALUE);
         (void)w->g.subscribe(
             *path_t::parse("/bench/mt"),
-            [](void* ctx, const rope_t&) {
+            [](void* ctx, const tr::graph::value_t&) {
                 static_cast<worker_t*>(ctx)->recv.fetch_add(1, std::memory_order_relaxed);
             },
             w.get());
@@ -796,7 +796,7 @@ void run_eptype_stream() {
     auto v = g.register_vertex(path, role_t::STREAM);
     g.set_history_depth(v, 16);  // a real bounded ring: retention work on every write
     std::atomic<std::uint64_t> recv{0};
-    auto cb = [&](const rope_t&) { recv.fetch_add(1, std::memory_order_relaxed); };
+    auto cb = [&](const tr::graph::value_t&) { recv.fetch_add(1, std::memory_order_relaxed); };
     (void)g.subscribe(path, cb);
 
     const std::vector<std::byte> tlv = value_tlv(S);

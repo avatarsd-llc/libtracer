@@ -840,7 +840,7 @@ constexpr const char* kControlArm = "S-sentinel";
 }
 
 /** @brief A remote-delivery sink that does nothing — the live arm needs one installed. */
-void null_remote_sink(void*, const tr::graph::remote_delivery_t&, const tr::view::rope_t&) {}
+void null_remote_sink(void*, const tr::graph::remote_delivery_t&, const tr::graph::value_t&) {}
 
 /**
  * @brief One arm's driver over one grid cell, warmed to steady state and ready to be timed.

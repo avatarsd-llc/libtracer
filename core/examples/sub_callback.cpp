@@ -53,7 +53,7 @@ int main() {
     std::uint8_t last = 0;
     // The callback is bound BY ADDRESS (lvalues only) and is the edge's `ctx`, so it must
     // outlive the subscription — here, main's frame.
-    auto on_temp = [&](const tr::view::rope_t& v) {
+    auto on_temp = [&](const tr::graph::value_t& v) {
         ++deliveries;
         last = std::to_integer<std::uint8_t>(v.only().bytes()[0]);
         std::printf("  delivery %d: %u\n", deliveries, last);

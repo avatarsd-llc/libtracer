@@ -32,27 +32,8 @@
 
 namespace tr::detail {
 
-/**
- * @brief Test-only OOM-injection seam over @ref probe_bytes: when set, a probe of @p bytes
- *        that the hook rejects soft-fails as if the heap were exhausted.
- *
- * The nothrow soft-fail paths cannot be exercised by really exhausting the host heap, so
- * this is their failure-injection tool — the global-heap twin of the failing `mem_backend_t`
- * the `graph_value_backend_test` precedent injects (ADR-0060 §3). Production never sets it;
- * the cost is one predictable null-check on the (cold) growth/probe paths.
- */
-inline bool (*probe_fail_hook)(std::size_t bytes) noexcept = nullptr;
-
-/**
- * @brief The @ref probe_fail_hook gate alone (no real probe): true when no hook is set or
- *        the hook admits @p bytes.
- *
- * For soft-fail sites whose failure leg is not the probe itself (e.g. a host-profile
- * `catch (bad_alloc)`) but that must still honor the test seam.
- */
-[[nodiscard]] inline bool probe_hook_ok(std::size_t bytes) noexcept {
-    return probe_fail_hook == nullptr || probe_fail_hook(bytes);
-}
+// The test-only OOM-injection seam (`probe_fail_hook` / `probe_hook_ok`) lives one layer
+// down in mem_source.hpp, so the process-default `heap_source_t` can honour it too.
 
 /**
  * @brief Probe whether a @p bytes-sized heap allocation would succeed, nothrow — the ONE

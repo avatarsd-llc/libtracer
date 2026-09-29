@@ -237,7 +237,7 @@ int run_sub(int argc, char** argv) {
     std::atomic<std::uint64_t> copies{0};
     // Counted in the subscribe callback: the store has already happened when this fires, so
     // the value it reads is the one that landed, and its segment is the pin/copy verdict.
-    auto on_blob = [&](const tr::view::rope_t& r) {
+    auto on_blob = [&](const tr::graph::value_t& r) {
         delivered.fetch_add(1, std::memory_order_relaxed);
         if (r.link_count() == 1 && r.links()[0].owner && pool.issued(r.links()[0].owner.get()))
             pins.fetch_add(1, std::memory_order_relaxed);

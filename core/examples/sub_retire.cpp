@@ -57,8 +57,8 @@ int main() {
     tr::graph::vertex_handle_t leaf = g.register_vertex(path_t("/p/leaf"), role_t::STORED_VALUE);
 
     int on_leaf_seen = 0, on_parent_seen = 0;
-    auto on_leaf = [&](const tr::view::rope_t&) { ++on_leaf_seen; };
-    auto on_parent = [&](const tr::view::rope_t&) { ++on_parent_seen; };
+    auto on_leaf = [&](const tr::graph::value_t&) { ++on_leaf_seen; };
+    auto on_parent = [&](const tr::graph::value_t&) { ++on_parent_seen; };
     (void)g.subscribe(path_t("/p/leaf"), on_leaf);  // an edge ON the doomed vertex
     (void)g.subscribe(path_t("/p"), on_parent);     // an edge on its surviving ancestor
     (void)g.write(leaf, value_byte(0x01));

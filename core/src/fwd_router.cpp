@@ -3562,7 +3562,7 @@ graph::result_t<void> fwd_router_t::subscribe_toward(const graph::path_t& produc
                                  split.token);
 }
 
-void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const view::rope_t& value) {
+void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const graph::value_t& val) {
     transport_t* const link = registry_.by_name(sub.link);
     if (link == nullptr) return;  // link torn down between subscribe and this write
     const std::span<const std::byte> route = sub.return_route.bytes();  // the stored PATH TLV
@@ -3600,7 +3600,7 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const vie
             // value this COMPACT cannot carry either way. The old `empty && total != 0`
             // inference is gone — the error channel names the failure, and a legitimately
             // empty value now emits the empty COMPACT it always should have.
-            const std::expected<view_t, view::flatten_err_t> flat = value.try_materialize(*flat_);
+            const std::expected<view_t, view::flatten_err_t> flat = val.try_materialize(*flat_);
             if (!flat) return;
             if (fresh) emit_advertise(*link, label, route);
             emit_compact(*link, label, flat->bytes());
@@ -3632,7 +3632,7 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const vie
             constexpr std::array<std::byte, 4> empty_src{std::byte{0x06}, std::byte{0x00},
                                                          std::byte{0x00}, std::byte{0x00}};
             const std::size_t body_len =
-                op_tlv.size() + 4u + dst_body.size() + empty_src.size() + value.total_length();
+                op_tlv.size() + 4u + dst_body.size() + empty_src.size() + val.total_length();
             stack_writer<20> head;  // FWD header (<=6) + 5-byte op + 4-byte PATH_REF header
             head.header(type_t::FWD, body_len);
             head.raw(op_tlv);
@@ -3641,7 +3641,7 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const vie
                 // The iov table on the ADR-0065 failable seam (#981) — see the default arm
                 // below for the argument; this arm is the same table, same element type.
                 mem::block_array_t<std::span<const std::byte>> iov(graph_.control_source());
-                if (!iov.reserve(3 + value.link_count())) {  // OOM — drop
+                if (!iov.reserve(3 + val.link_count())) {  // OOM — drop
                     count_drop(delivery_iov_dropped_);
                     return;
                 }
@@ -3651,7 +3651,7 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const vie
                     count_drop(delivery_iov_dropped_);
                     return;
                 }
-                for (const view_t& l : value.links())
+                for (const view_t& l : val.links())
                     if (!iov.push_back(l.bytes())) {
                         count_drop(delivery_iov_dropped_);
                         return;
@@ -3675,7 +3675,7 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const vie
     constexpr std::array<std::byte, 4> empty_src{std::byte{0x06}, std::byte{0x00}, std::byte{0x00},
                                                  std::byte{0x00}};
     const std::size_t body_len =
-        op_tlv.size() + route.size() + empty_src.size() + value.total_length();
+        op_tlv.size() + route.size() + empty_src.size() + val.total_length();
     stack_writer<16> head;  // FWD header (≤6) + the 5-byte op TLV
     head.header(type_t::FWD, body_len);
     head.raw(op_tlv);
@@ -3694,7 +3694,7 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const vie
     // node's injected source rather than the global heap. `std::span` is trivially copyable,
     // so the memcpy relocation is exact. Exhaustion still just drops this delivery.
     mem::block_array_t<std::span<const std::byte>> iov(graph_.control_source());
-    if (!iov.reserve(3 + value.link_count())) {  // OOM — drop
+    if (!iov.reserve(3 + val.link_count())) {  // OOM — drop
         count_drop(delivery_iov_dropped_);
         return;
     }
@@ -3707,7 +3707,7 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const vie
         count_drop(delivery_iov_dropped_);
         return;
     }
-    for (const view_t& l : value.links())
+    for (const view_t& l : val.links())
         if (!iov.push_back(l.bytes())) {
             count_drop(delivery_iov_dropped_);
             return;

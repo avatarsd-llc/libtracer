@@ -58,7 +58,7 @@ bool run_fanout(std::size_t fanout, std::uint32_t writes, bool& ok) {
 
     // One delivery counter shared by every callback — each fires inline per write.
     std::uint64_t deliveries = 0;
-    auto on_temp = [&deliveries](const tr::view::rope_t&) { ++deliveries; };
+    auto on_temp = [&deliveries](const tr::graph::value_t&) { ++deliveries; };
     for (std::size_t s = 0; s < fanout; ++s) (void)g.subscribe(path_t("/sensor/temp"), on_temp);
 
     auto t0 = clock_t_::now();

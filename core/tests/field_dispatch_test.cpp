@@ -531,7 +531,7 @@ void test_subscribe_wire_requires_return_route() {
 
     std::size_t deliveries = 0;
     const tr::testing::remote_sink_guard_t sink_guard(
-        g, [&](const tr::graph::remote_delivery_t&, const tr::view::rope_t&) { ++deliveries; });
+        g, [&](const tr::graph::remote_delivery_t&, const tr::graph::value_t&) { ++deliveries; });
 
     // The defective state, admitted through the public door: a link to deliver over, and no
     // route to deliver to.

@@ -1961,6 +1961,12 @@ void graph_t::mark_subtree_acl_dirty(vertex_t* v) {
  * Out of line, and reached only through a taken branch: the retaining arm of either door keeps
  * its `read_stored()` fast path, which pays no handler-dispatch cost at all.
  */
+result_t<value_ref_t> graph_t::composed_or_backpressure(rope_t&& r) noexcept {
+    value_ref_t out = value_ref_t::composed(std::move(r));
+    if (!out) return std::unexpected(status_t::BACKPRESSURE);
+    return out;
+}
+
 [[gnu::noinline]] result_t<value_ref_t> graph_t::read_handler_gated(vertex_t* v) const {
     // Load the seam ONCE: it is an atomic pointer a concurrent retire may swap to
     // null (RFC-0009 §B.6), so a check-then-call across two loads would race — the
@@ -1973,7 +1979,7 @@ void graph_t::mark_subtree_acl_dirty(vertex_t* v) {
     if (h.on_read) {
         auto produced = h.on_read();
         if (!produced) return std::unexpected(produced.error());
-        return value_ref_t::composed(std::move(*produced));
+        return composed_or_backpressure(std::move(*produced));
     }
     return std::unexpected(status_t::NOT_FOUND);
 }
@@ -1993,14 +1999,14 @@ result_t<value_ref_t> graph_t::read(vertex_handle_t vh, std::string_view caller)
         // one control block this costs.
         auto folded = read_subtree_folded(vh, caller);
         if (!folded) return std::unexpected(folded.error());
-        return value_ref_t::composed(std::move(*folded));
+        return composed_or_backpressure(std::move(*folded));
     }
-    std::shared_ptr<const rope_t> sp = v->read_stored();  // lock-free
+    value_ref_t sp = v->read_stored();  // lock-free
     if (!sp) return std::unexpected(status_t::NOT_FOUND);
     // The published value is handed back BY REFERENCE. This used to be `return *sp`, which
     // copied the rope and so cloned one segment_ptr_t per link — a contended refcount RMW per
     // link, on the line every reader of this vertex shares.
-    return value_ref_t{std::move(sp)};
+    return sp;
 }
 
 namespace {
@@ -2020,14 +2026,12 @@ namespace {
  * that relocates by move, tracked on the umbrella (#873).
  * @retval false The chain could not be reserved — @p dst is empty, drop the leg.
  */
-[[nodiscard]] bool try_clone_rope(rope_t& dst, const rope_t& src) noexcept {
-    if (!dst.try_reserve(src.link_count())) return false;
-    dst.concat(src);  // reserved (or inline) — the appends cannot reallocate
-    return true;
+[[nodiscard]] bool try_clone_rope(rope_t& dst, const value_t& src) noexcept {
+    return src.try_rope(dst);  // reserves the chain first — the appends cannot reallocate
 }
 }  // namespace
 
-[[gnu::noinline]] void graph_t::dispatch_edge_target(const edge_view_t& e, const rope_t& value) {
+[[gnu::noinline]] void graph_t::dispatch_edge_target(const edge_view_t& e, const value_t& value) {
     // The bound spelling first (#830): a slot deref is a bounds check, a slot load and a
     // generation compare — flat at every address depth — where `find_ptr` walks the key
     // segment by segment. `deref_vertex_slot` refuses a stale generation, a saturated one, an
@@ -2114,7 +2118,7 @@ namespace {
     count_store_drops(target, store_drops);
 }
 
-[[gnu::noinline]] void graph_t::dispatch_edge_remote(const edge_view_t& e, const rope_t& value) {
+[[gnu::noinline]] void graph_t::dispatch_edge_remote(const edge_view_t& e, const value_t& value) {
     // Remote delivery (#136): a write fans out to a remote subscriber as a
     // FWD{WRITE} (or auto-promoted COMPACT) via the injected sink — outside the
     // vertex lock, like every other dispatch leg, since the sink does transport I/O.
@@ -2154,17 +2158,22 @@ namespace {
  *        and the in-process delivery gate paid 12% (#1223 steps 3+4; same hazard as #1250).
  */
 [[gnu::always_inline]] inline void graph_t::dispatch_edge(const edge_view_t& e,
-                                                          const rope_t& value) {
+                                                          const value_t& value) {
     // The ONE dispatch of a subscription edge's three legs — shared by the per-write
     // fan_out and the admission durability latch (ADR-0049), so the legs cannot diverge.
     // Always called OUTSIDE the vertex lock (each leg may re-enter the graph or do I/O).
     if (e.callback != nullptr)
-        e.callback(e.callback_ctx, value);  // the rope by const ref (sink may clone links)
+        e.callback(e.callback_ctx, value);  // the value by const ref (sink may clone links)
     if (e.target_key) dispatch_edge_target(e, value);
     if (e.has_remote_leg() && remote_sink_.installed()) dispatch_edge_remote(e, value);
 }
 
-void graph_t::fan_out(vertex_t* v, const rope_t& value) {
+void graph_t::fan_out_slice(vertex_t* v, const view_t& slice) {
+    const value_storage_t<1> sv{slice};
+    fan_out(v, sv.get());
+}
+
+void graph_t::fan_out(vertex_t* v, const value_t& value) {
     // NOBODY SUBSCRIBED HERE ⇒ do no snapshot work at all (#635). When this gate landed
     // `snapshot_edges` took the vertex STRIPE mutex, shared by kVertexLockStripes-many
     // vertices, so without it two unrelated vertices serialised their writes on nothing but a
@@ -2247,9 +2256,9 @@ void graph_t::fan_out(vertex_t* v, const rope_t& value) {
         for (const edge_view_t& e : heap_buf) dispatch_edge(e, value);
 }
 
-result_t<std::shared_ptr<const rope_t>> graph_t::store_value(vertex_t* v, rope_t&& value,
-                                                             vertex_t::store_drops_t& drops,
-                                                             std::string_view caller) {
+result_t<value_ref_t> graph_t::store_value(vertex_t* v, rope_t&& value,
+                                           vertex_t::store_drops_t& drops,
+                                           std::string_view caller) {
     drops = vertex_t::store_drops_t{};
     if (v->role() == role_t::HANDLER) {
         const value_handlers_t& h = v->handlers();  // load once — a retire may swap it out
@@ -2262,7 +2271,7 @@ result_t<std::shared_ptr<const rope_t>> graph_t::store_value(vertex_t* v, rope_t
         result_t<void> r = h.on_write(value, ctx);
         if (!r) return std::unexpected(r.error());
         v->note_write();
-        return std::shared_ptr<const rope_t>{};  // handler consumed it — nothing stored
+        return value_ref_t{};  // handler consumed it — nothing stored
     }
     // ADMISSION (the retaining roles' pre-store seam). It sits HERE — inside the one function
     // every store goes through, and above the tail every storing role shares — because that is
@@ -2307,7 +2316,11 @@ result_t<std::shared_ptr<const rope_t>> graph_t::store_value(vertex_t* v, rope_t
     // measured, hoisting it out of this branch cost the 4-writer plain-write point ~30%.
     const bool receives = v->role() == role_t::STREAM;
     const std::size_t retained = receives ? value.total_length() + kRingEntryOverhead : 0;
-    std::shared_ptr<const rope_t> sp = v->store(std::move(value), mr_);
+    // THE one allocation a publish costs (RFC-0028 §5.1): the value's block, refcount and
+    // link chain together, drawn from the graph's source and moved — not cloned — out of the
+    // caller's rope. Exhaustion is a `nullptr` by value; the rope is then still the caller's.
+    value_ref_t sp = value_ref_t::adopt(value_t::make(std::move(value), *ctl_));
+    if (sp && !v->store(sp)) sp.reset();  // the slot declined: nothing published (#477)
     // vertex_t::store soft-fails its LKV allocation nothrow (#477): null here (a
     // non-handler role always publishes a pointer) is exactly OOM — report it as the
     // injected-resource status (BACKPRESSURE, ADR-0060 §3), never abort. Distinct from
@@ -2344,7 +2357,22 @@ mem::block_source_t& graph_t::ring_source_for(vertex_t* v) const noexcept {
     return own != nullptr ? *own : *ring_;
 }
 
-void graph_t::bubble_up(vertex_t* v, const rope_t& value) {
+void graph_t::deliver_unstored(vertex_t* v, const rope_t& value,
+                               void (graph_t::*fn)(vertex_t*, const value_t&), std::size_t width) {
+    if (value.link_count() <= kUnstoredInline) {
+        const value_storage_t<kUnstoredInline> sv{value};
+        (this->*fn)(v, sv.get());
+        return;
+    }
+    const value_ref_t heap = value_ref_t::adopt(value_t::make(value.links(), *ctl_));
+    if (!heap) {
+        count_drop(drop_reason_t::OUT_OF_MEMORY, width);
+        return;
+    }
+    (this->*fn)(v, *heap);
+}
+
+void graph_t::bubble_up(vertex_t* v, const value_t& value) {
     // Entered only when v->listeners_above() says an ancestor subscriber exists —
     // the idle write path never walks (RFC-0005 §near-free-when-idle; the counter
     // below is what tests/benches assert on via ancestor_walks()).
@@ -2452,8 +2480,7 @@ result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, std::string_view c
         // A HANDLER stores no LKV and owns no ring, so this tally is structurally clean —
         // required by the signature, and that is the point: the seam cannot be skipped.
         vertex_t::store_drops_t store_drops;
-        const result_t<std::shared_ptr<const rope_t>> stored =
-            store_value(v, std::move(value), store_drops, caller);
+        const result_t<value_ref_t> stored = store_value(v, std::move(value), store_drops, caller);
         if (!stored) return std::unexpected(stored.error());
         // No OUT_OF_MEMORY tally here any more, and the leg it counted is not merely
         // narrower — it is IMPOSSIBLE. This frame used to shed the vertex's ENTIRE fan-out
@@ -2465,16 +2492,15 @@ result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, std::string_view c
         // pending mark (mark_pending, at own-subs width) and on dispatch_edge_target's own
         // per-edge clone (at width 1), so the reason code stays live and `1 never stands in
         // for N` still holds everywhere it can still be raised.
-        deliver_vertex(v, value);
+        deliver_unstored(v, value, &graph_t::deliver_vertex, v->own_subs() + v->listeners_above());
         // Eager delivery flushes any pending mark a prior assign left — but only while
         // what this write published is still current (#1185); on the handler leg that is
         // the null "consumed" sentinel, matching the handler's permanently null LKV.
-        clear_pending(v, *stored);
+        clear_pending(v, stored->get());
         return {};
     }
     vertex_t::store_drops_t store_drops;
-    const result_t<std::shared_ptr<const rope_t>> stored =
-        store_value(v, std::move(value), store_drops, caller);
+    const result_t<value_ref_t> stored = store_value(v, std::move(value), store_drops, caller);
     if (!stored) return std::unexpected(stored.error());
     if (role == role_t::STREAM) {
         // Drain this RECEIVER's ring and advance its cursor, so a later propagate over the
@@ -2495,7 +2521,7 @@ result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, std::string_view c
     }
     // Eager delivery flushes any pending mark a prior assign left — but only while what
     // this write published is still v's current LKV (#1185).
-    clear_pending(v, *stored);
+    clear_pending(v, stored->get());
     return {};
 }
 
@@ -2532,8 +2558,7 @@ result_t<void> graph_t::assign(vertex_handle_t vh, rope_t value, std::string_vie
     // sweep. A branch POINT assigns each descendant the same way. Sends nothing.
     if (is_branch_point(value, role)) return write_branch(v, value, caller, /*notify=*/false);
     vertex_t::store_drops_t store_drops;
-    const result_t<std::shared_ptr<const rope_t>> stored =
-        store_value(v, std::move(value), store_drops, caller);
+    const result_t<value_ref_t> stored = store_value(v, std::move(value), store_drops, caller);
     if (!stored) return std::unexpected(stored.error());
     // A shed ring append here loses the delivery the NEXT covering sweep would have drained
     // — deferred, not eager, but lost all the same, and the sweep has no way to know an
@@ -2619,7 +2644,7 @@ result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, std::stri
         // vertex's current LKV so a racing assign's mark keeps its delivery (#1185); a
         // null on a vertex that holds an LKV simply fails that compare, which is the safe
         // direction (a duplicate delivery, never a lost one).
-        std::shared_ptr<const rope_t> stored;
+        value_ref_t stored;
         // Did this site's own admission filter REFUSE its slice? Distinct from a null `stored`,
         // which a soft-failed store also produces: the notify half below must not fan a refused
         // slice out, and it must keep fanning out a soft-failed one exactly as it always has
@@ -2646,7 +2671,7 @@ result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, std::stri
             if (!acl_allows(vx, caller, acl_right_t::WRITE))
                 return std::unexpected(status_t::PERMISSION_DENIED);
         }
-        sites.push_back(site_t{vx, &node, nullptr, false});
+        sites.push_back(site_t{vx, &node, value_ref_t{}, false});
     }
 
     // Apply: land every slice. Admission was atomic; application is per-vertex and
@@ -2655,8 +2680,7 @@ result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, std::stri
     // §atomicity non-promise; each leaf is its own consistent refcounted snapshot).
     for (site_t& site : sites) {
         vertex_t::store_drops_t store_drops;
-        if (result_t<std::shared_ptr<const rope_t>> r =
-                store_value(site.vx, site.node->store, store_drops, caller)) {
+        if (result_t<value_ref_t> r = store_value(site.vx, site.node->store, store_drops, caller)) {
             site.stored = std::move(*r);
         } else {
             // A landing site's own admission filter may refuse its slice, and per the
@@ -2703,19 +2727,20 @@ result_t<void> graph_t::write_branch(vertex_t* v, const rope_t& value, std::stri
             sites, [&node](const site_t& s) { return s.node == &node && s.refused; });
         if (refused) continue;
         vertex_t* vx = is_root ? v : find_ptr(node.key);
-        if (vx != nullptr) fan_out(vx, slice);
+        if (vx != nullptr) fan_out_slice(vx, slice);
     }
-    if (v->listeners_above() > 0) bubble_up(v, value);
+    if (v->listeners_above() > 0)
+        deliver_unstored(v, value, &graph_t::bubble_up, v->listeners_above());
     // Eager branch delivered these landing sites — clear any pending mark (a prior assign)
     // and advance stream drain cursors so a later sweep does not re-deliver (RFC-0008 §E).
     for (const site_t& site : sites) {
-        clear_pending(site.vx, site.stored);
+        clear_pending(site.vx, site.stored.get());
         if (site.vx->role() == role_t::STREAM) site.vx->mark_flushed();
     }
     return {};
 }
 
-void graph_t::deliver_vertex(vertex_t* v, const rope_t& value) {
+void graph_t::deliver_vertex(vertex_t* v, const value_t& value) {
     fan_out(v, value);
     // Vertical bubbling (RFC-0005): every subscription observes its vertex AND all
     // descendants, so a delivery also fans out to each ancestor's subscribers. Gated on
@@ -2728,13 +2753,13 @@ void graph_t::deliver_current(vertex_t* v) {
         // A stream is a queue (RFC-0008 §E): drain the RECEIVER's ring entries appended since
         // the last flush, in order — NOT a coalesce. Snapshot under the lock
         // (vertex_t::drain_unflushed), deliver outside.
-        std::vector<std::shared_ptr<const rope_t>> batch;
+        std::vector<value_ref_t> batch;
         if (v->drain_unflushed(batch) == 0) return;  // nothing appended since the last flush
-        for (const std::shared_ptr<const rope_t>& sp : batch) deliver_vertex(v, *sp);
+        for (const value_ref_t& sp : batch) deliver_vertex(v, *sp);
         return;
     }
     // STORED_VALUE: the last-known-value, once. HANDLER / never-assigned: null LKV, nothing.
-    const std::shared_ptr<const rope_t> sp = v->read_stored();
+    const value_ref_t sp = v->read_stored();
     if (!sp) return;
     deliver_vertex(v, *sp);
 }
@@ -2884,7 +2909,7 @@ void graph_t::mark_pending(vertex_t* v) {
         count_drop(drop_reason_t::OUT_OF_MEMORY, v->own_subs());
 }
 
-void graph_t::clear_pending(vertex_t* v, const std::shared_ptr<const rope_t>& delivered) {
+void graph_t::clear_pending(vertex_t* v, const value_t* delivered) {
     // Same idle fast path as mark_pending: an unobserved vertex was never marked.
     if (v->own_subs() == 0 && v->listeners_above() == 0) return;
     // Empty-set fast path (the per-eager-write case when nobody uses assign+propagate):
@@ -2911,7 +2936,7 @@ void graph_t::clear_pending(vertex_t* v, const std::shared_ptr<const rope_t>& de
     // handler leg's null "consumed" sentinel matches a handler's permanently null LKV and
     // erases as before — a handler sweep delivers nothing anyway, deliver_current on a
     // null LKV.)
-    if (v->read_stored() != delivered) return;
+    if (v->read_stored().get() != delivered) return;
     if (pending_.erase(key) != 0) pending_count_.fetch_sub(1, std::memory_order_relaxed);
 }
 
@@ -3005,9 +3030,9 @@ result_t<value_ref_t> graph_t::await(vertex_handle_t vh, std::chrono::nanosecond
     // observes assigns at ITS OWN vertex (RFC-0008 §A), so a branch vertex's await hands back
     // that vertex's own last-known-value, as it always has, not the composed subtree fold.
     if (v->role() == role_t::HANDLER) return read_handler_gated(v);
-    std::shared_ptr<const rope_t> sp = v->read_stored();
+    value_ref_t sp = v->read_stored();
     if (!sp) return std::unexpected(status_t::NOT_FOUND);  // never assigned
-    return value_ref_t{std::move(sp)};
+    return sp;
 }
 
 result_t<std::vector<rope_t>> graph_t::history(vertex_handle_t vh) const {
@@ -3018,8 +3043,7 @@ result_t<std::vector<rope_t>> graph_t::history(vertex_handle_t vh) const {
     return v->history_snapshot();  // clones each entry (refcount bumps)
 }
 
-result_t<std::size_t> graph_t::drain_unflushed(vertex_handle_t vh,
-                                               std::vector<std::shared_ptr<const rope_t>>& out,
+result_t<std::size_t> graph_t::drain_unflushed(vertex_handle_t vh, std::vector<value_ref_t>& out,
                                                std::uint64_t* gap_before) {
     vertex_t* v = vh.get();
     if (v->role() != role_t::STREAM) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
@@ -4249,11 +4273,11 @@ result_t<rope_t> graph_t::read_subtree_folded(vertex_handle_t vh, std::string_vi
      *        wire order: a node's POINT header precedes its NAME/value/children bytes).
      */
     struct snap_node_t {
-        const vertex_t* v = nullptr;       /**< @brief The pinned vertex (name bytes immutable). */
-        std::shared_ptr<const rope_t> lkv; /**< @brief Its landed LKV — loaded ONCE, atomically. */
-        std::size_t parent = 0;            /**< @brief Parent's index in the array (kNoParent at
-                                                       the root). */
-        std::size_t body_len = 0;          /**< @brief POINT body length, completed bottom-up. */
+        const vertex_t* v = nullptr; /**< @brief The pinned vertex (name bytes immutable). */
+        value_ref_t lkv;             /**< @brief Its landed LKV — loaded ONCE, atomically. */
+        std::size_t parent = 0;      /**< @brief Parent's index in the array (kNoParent at
+                                                 the root). */
+        std::size_t body_len = 0;    /**< @brief POINT body length, completed bottom-up. */
     };
     constexpr std::size_t kNoParent = static_cast<std::size_t>(-1);
     // The POINT header width and the header framing itself both come from the file-local
@@ -4396,7 +4420,9 @@ result_t<rope_t> graph_t::read_subtree_folded(vertex_handle_t vh, std::string_vi
             out.append(view::view_t::over(std::move(hseg)));  // owned POINT + NAME headers
             out.append(view::view_t::over(std::move(nseg)));  // borrowed name (zero copy)
         }
-        if (n.lkv) out.concat(*n.lkv);  // stored TLV verbatim — links cloned, refcount bump
+        if (n.lkv) {  // stored TLV verbatim — links cloned, refcount bump
+            for (const view_t& l : n.lkv->links()) out.append(l);
+        }
     }
     return out;
 }
@@ -4413,7 +4439,7 @@ namespace {
  * answer the question, so two bytes are what this reads. A device-resident link (`all_host()`
  * false) is not dereferenceable here at all, which is a refusal rather than a guess.
  */
-[[nodiscard]] std::optional<std::pair<type_t, opt_t>> peek_tlv_head(const rope_t& r) noexcept {
+[[nodiscard]] std::optional<std::pair<type_t, opt_t>> peek_tlv_head(const value_t& r) noexcept {
     if (r.total_length() < 2 || !r.all_host()) return std::nullopt;
     std::array<std::byte, 2> head{};
     std::size_t got = 0;
@@ -4437,15 +4463,15 @@ namespace {
  * inventing a value or resurrecting a stale one.
  */
 struct fold_node_t {
-    vertex_t* vx = nullptr;            /**< @brief The named vertex; its segment text is
-                                                   pinned and immutable, so it is borrowable. */
-    std::shared_ptr<const rope_t> lkv; /**< @brief Its contributed VALUE, or null (skeleton). */
-    bool selected = false;             /**< @brief True iff the sweep selected this vertex. */
-    std::size_t body_len = 0;          /**< @brief This node's POINT body length. */
-    std::size_t kids_len = 0;          /**< @brief Bytes its sub-branches contribute. */
-    rope_t kids;                       /**< @brief Those sub-branches' frames, in key order. */
-    rope_t frame;                      /**< @brief This node's WHOLE POINT TLV — the §B notify
-                                                   slice for an interior node. */
+    vertex_t* vx = nullptr;   /**< @brief The named vertex; its segment text is
+                                          pinned and immutable, so it is borrowable. */
+    value_ref_t lkv;          /**< @brief Its contributed VALUE, or null (skeleton). */
+    bool selected = false;    /**< @brief True iff the sweep selected this vertex. */
+    std::size_t body_len = 0; /**< @brief This node's POINT body length. */
+    std::size_t kids_len = 0; /**< @brief Bytes its sub-branches contribute. */
+    rope_t kids;              /**< @brief Those sub-branches' frames, in key order. */
+    rope_t frame;             /**< @brief This node's WHOLE POINT TLV — the §B notify
+                                          slice for an interior node. */
 };
 
 }  // namespace
@@ -4570,9 +4596,11 @@ result_t<void> graph_t::propagate_folded_impl(vertex_t* v) {
             return std::unexpected(status_t::BACKPRESSURE);
         n.frame.append(view::view_t::over(std::move(hseg)));  // owned POINT + NAME headers
         n.frame.append(view::view_t::over(std::move(nseg)));  // borrowed name (zero copy)
-        if (n.lkv) n.frame.concat(*n.lkv);                    // the stored VALUE, verbatim
-        n.frame.concat(n.kids);                               // the sub-branches, in key order
-        if (std::ranges::equal(it->first, lo)) continue;      // the root folds into nobody
+        if (n.lkv) {                                          // the stored VALUE, verbatim
+            for (const view_t& l : n.lkv->links()) n.frame.append(l);
+        }
+        n.frame.concat(n.kids);                           // the sub-branches, in key order
+        if (std::ranges::equal(it->first, lo)) continue;  // the root folds into nobody
         const std::span<const std::byte> pk = key_view_t{it->first}.parent().bytes();
         const auto parent = tree.find(std::vector<std::byte>(pk.begin(), pk.end()));
         if (parent == tree.end()) continue;  // unreachable: admit() inserted every level
@@ -4596,13 +4624,14 @@ result_t<void> graph_t::propagate_folded_impl(vertex_t* v) {
         if (n.vx == nullptr || std::ranges::equal(it->first, lo)) continue;
         if (n.kids_len == 0) {
             if (n.lkv) fan_out(n.vx, *n.lkv);  // leaf landing site: its VALUE slice
-        } else {
-            fan_out(n.vx, n.frame);  // interior node: its whole POINT subtree
+        } else {  // interior node: its whole POINT subtree — a frame no vertex stored
+            deliver_unstored(n.vx, n.frame, &graph_t::fan_out, n.vx->own_subs());
         }
     }
     const fold_node_t& root = tree.begin()->second;
-    fan_out(v, root.frame);
-    if (v->listeners_above() > 0) bubble_up(v, root.frame);
+    deliver_unstored(v, root.frame, &graph_t::fan_out, v->own_subs());
+    if (v->listeners_above() > 0)
+        deliver_unstored(v, root.frame, &graph_t::bubble_up, v->listeners_above());
 
     // Retire the marks this sweep just discharged — the SAME door the eager branch write uses
     // for its landing sites, and for the same reason: it erases only while the value this call
@@ -4610,7 +4639,7 @@ result_t<void> graph_t::propagate_folded_impl(vertex_t* v) {
     // validation above keeps its mark and its delivery instead of losing both to the peek/drain
     // window an unconditional erase here would have opened.
     for (const auto& [key, n] : tree) {
-        if (n.vx != nullptr && n.selected) clear_pending(n.vx, n.lkv);
+        if (n.vx != nullptr && n.selected) clear_pending(n.vx, n.lkv.get());
     }
     return {};
 }
@@ -4623,7 +4652,7 @@ result_t<rope_t> graph_t::read(vertex_handle_t vh, const field_path_t& field,
         // other branch below composes, so materialize here rather than widen the surface.
         auto v_ref = read(vh, caller);
         if (!v_ref) return std::unexpected(v_ref.error());
-        return **v_ref;
+        return (*v_ref)->rope();  // the field seam is rope-valued (D11 is RFC-0028 slice 7)
     }
     // ":children[]" (or bare ":children") — member enumeration, the read dual of the
     // SPEC-creating append — is served FOLDED (L4 fold, Slice 0): a scatter-gather rope
@@ -4839,7 +4868,7 @@ result_t<value_ref_t> graph_t::read(const path_t& path) const {
     if (path.field().empty()) return read(vertex_handle_t{v});
     auto composed = read(vertex_handle_t{v}, path.field());
     if (!composed) return std::unexpected(composed.error());
-    return value_ref_t::composed(std::move(*composed));
+    return composed_or_backpressure(std::move(*composed));
 }
 
 result_t<void> graph_t::write(const path_t& path, rope_t value) {

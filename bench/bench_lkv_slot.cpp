@@ -821,7 +821,7 @@ void run_graph(topo_t topo, std::size_t T, std::size_t subs, op_t op) {
         recv.push_back(std::make_unique<slot_u64_t>());
         (void)g.subscribe(
             paths[idx[t]],
-            [](void* ctx, const tr::view::rope_t&) {
+            [](void* ctx, const tr::graph::value_t&) {
                 static_cast<slot_u64_t*>(ctx)->v.fetch_add(1, std::memory_order_relaxed);
             },
             recv.back().get());

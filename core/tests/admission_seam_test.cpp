@@ -64,11 +64,16 @@ using tr::view::view_t;
 using tr::testing::check;
 using tr::testing::make_value;
 
-/** @brief The single byte a one-byte rope carries (0 when the rope is not that shape). */
-[[nodiscard]] std::uint8_t only_byte(const rope_t& r) {
+/** @brief The single byte a one-byte value carries (0 when the value is not that shape). */
+[[nodiscard]] std::uint8_t only_byte(const tr::graph::value_t& r) {
     const view_t flat = r.flatten();
     const std::span<const std::byte> b = flat.bytes();
     return b.size() == 1 ? std::to_integer<std::uint8_t>(b[0]) : 0;
+}
+
+/** @brief The same, on the rope a handler or admission filter is handed. */
+[[nodiscard]] std::uint8_t only_byte(const rope_t& r) {
+    return only_byte(tr::graph::value_storage_t<2>{r}.get());
 }
 
 /** @brief The single byte currently stored at @p p, or 0 when nothing is stored there. */
@@ -129,7 +134,7 @@ void test_accept_as_written() {
     const vertex_handle_t v = g.register_vertex(path_t("/v"), role_t::STORED_VALUE, std::move(h));
 
     log_t seen;
-    auto on_value = [&seen](const rope_t& r) { seen.bytes.push_back(only_byte(r)); };
+    auto on_value = [&seen](const tr::graph::value_t& r) { seen.bytes.push_back(only_byte(r)); };
     check(g.subscribe(path_t("/v"), on_value).has_value(), "subscribe to the filtered vertex");
 
     check(g.write(v, byte_value(0x11)).has_value(), "the accepted write succeeds");
@@ -158,7 +163,7 @@ void test_normalise_replaces_the_stored_value() {
     const vertex_handle_t v = g.register_vertex(path_t("/v"), role_t::STORED_VALUE, std::move(h));
 
     log_t seen;
-    auto on_value = [&seen](const rope_t& r) { seen.bytes.push_back(only_byte(r)); };
+    auto on_value = [&seen](const tr::graph::value_t& r) { seen.bytes.push_back(only_byte(r)); };
     check(g.subscribe(path_t("/v"), on_value).has_value(), "subscribe to the normalising vertex");
 
     check(g.write(v, byte_value(0x7f)).has_value(), "the normalised write succeeds");
@@ -194,7 +199,7 @@ void test_refusal_propagates_and_preserves_the_lkv() {
     const vertex_handle_t v = g.register_vertex(path_t("/v"), role_t::STORED_VALUE, std::move(h));
 
     log_t seen;
-    auto on_value = [&seen](const rope_t& r) { seen.bytes.push_back(only_byte(r)); };
+    auto on_value = [&seen](const tr::graph::value_t& r) { seen.bytes.push_back(only_byte(r)); };
     check(g.subscribe(path_t("/v"), on_value).has_value(), "subscribe to the refusing vertex");
 
     check(g.write(v, byte_value(0x20)).has_value(), "the admitted write lands");
@@ -233,7 +238,7 @@ void test_admission_precedes_store_and_delivery() {
         return std::nullopt;
     };
     const vertex_handle_t v = g.register_vertex(path_t("/v"), role_t::STORED_VALUE, std::move(h));
-    auto on_value = [&seen](const rope_t& r) { seen.bytes.push_back(only_byte(r)); };
+    auto on_value = [&seen](const tr::graph::value_t& r) { seen.bytes.push_back(only_byte(r)); };
     check(g.subscribe(path_t("/v"), on_value).has_value(), "subscribe to the observed vertex");
 
     check(g.write(v, byte_value(0x40)).has_value(), "the first write lands");
@@ -269,7 +274,7 @@ void test_no_filter_is_unchanged() {
         g.register_vertex(path_t("/seamed"), role_t::STORED_VALUE, std::move(h));
 
     log_t seen;
-    auto on_value = [&seen](const rope_t& r) { seen.bytes.push_back(only_byte(r)); };
+    auto on_value = [&seen](const tr::graph::value_t& r) { seen.bytes.push_back(only_byte(r)); };
     check(g.subscribe(path_t("/bare"), on_value).has_value(), "subscribe to the bare leaf");
 
     check(g.write(bare, byte_value(0x55)).has_value(), "the bare leaf accepts every write");
@@ -303,7 +308,7 @@ void test_assign_takes_the_same_seam() {
     const vertex_handle_t v = g.register_vertex(path_t("/v"), role_t::STORED_VALUE, std::move(h));
 
     log_t seen;
-    auto on_value = [&seen](const rope_t& r) { seen.bytes.push_back(only_byte(r)); };
+    auto on_value = [&seen](const tr::graph::value_t& r) { seen.bytes.push_back(only_byte(r)); };
     check(g.subscribe(path_t("/v"), on_value).has_value(), "subscribe to the filtered vertex");
 
     const auto refused = g.assign(v, byte_value(0xee));
@@ -370,7 +375,7 @@ void test_stream_ring_queues_the_admitted_value() {
     const vertex_handle_t v = g.register_vertex(path_t("/s"), role_t::STREAM, std::move(h));
 
     log_t seen;
-    auto on_value = [&seen](const rope_t& r) { seen.bytes.push_back(only_byte(r)); };
+    auto on_value = [&seen](const tr::graph::value_t& r) { seen.bytes.push_back(only_byte(r)); };
     check(g.subscribe(path_t("/s"), on_value).has_value(), "subscribe to the stream");
 
     check(g.write(v, byte_value(0x70)).has_value(), "the admitted stream write succeeds");

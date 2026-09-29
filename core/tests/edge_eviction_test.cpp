@@ -183,8 +183,8 @@ bool wire_sub(graph_t& g, vertex_handle_t v, std::string_view link, std::string_
         .has_value();
 }
 
-/** @brief The flat bytes of a rope (test-side compare; frames here are small). */
-std::vector<std::byte> rope_bytes(const rope_t& r) {
+/** @brief The flat bytes of a delivered value (test-side compare; frames here are small). */
+std::vector<std::byte> rope_bytes(const tr::graph::value_t& r) {
     std::vector<std::byte> out;
     for (const view_t& l : r.links()) out.insert(out.end(), l.bytes().begin(), l.bytes().end());
     return out;
@@ -352,11 +352,11 @@ void test_evict_scoped_to_link() {
 
     std::size_t cli = 0, other = 0;
     const tr::testing::remote_sink_guard_t sink_guard(
-        g, [&](const tr::graph::remote_delivery_t& d, const rope_t&) {
+        g, [&](const tr::graph::remote_delivery_t& d, const tr::graph::value_t&) {
             (d.link == "cli" ? cli : other) += 1;
         });
     std::size_t local = 0;
-    auto on_local = [&](const rope_t&) { ++local; };
+    auto on_local = [&](const tr::graph::value_t&) { ++local; };
 
     check(wire_sub(g, a, "cli", "c0") && wire_sub(g, a, "cli", "c1") && wire_sub(g, x, "cli", "c2"),
           "three edges over 'cli' (/a x2, /x)");
@@ -410,7 +410,7 @@ void test_departure_cost_is_scoped_to_the_peer() {
     std::printf("#1071 — a departure's cost tracks the departing peer, not the graph:\n");
     graph_t g;
     const tr::testing::remote_sink_guard_t sink_guard2(
-        g, [](const tr::graph::remote_delivery_t&, const rope_t&) {});
+        g, [](const tr::graph::remote_delivery_t&, const tr::graph::value_t&) {});
 
     vertex_handle_t mine = g.register_vertex(path_t("/mine"), role_t::STORED_VALUE);
     check(wire_sub(g, mine, "cli", "m0"), "the peer under test subscribes on ONE vertex");
@@ -464,7 +464,7 @@ void test_index_recreated_after_a_full_eviction() {
     graph_t g;
     std::size_t cli = 0;
     const tr::testing::remote_sink_guard_t sink_guard3(
-        g, [&](const tr::graph::remote_delivery_t& d, const rope_t&) {
+        g, [&](const tr::graph::remote_delivery_t& d, const tr::graph::value_t&) {
             if (d.link == "cli") ++cli;
         });
     vertex_handle_t v = g.register_vertex(path_t("/v"), role_t::STORED_VALUE);
@@ -510,7 +510,7 @@ void test_index_insert_is_idempotent() {
     std::printf("#1266 — the index insert is idempotent, and peers stay independent:\n");
     graph_t g;
     const tr::testing::remote_sink_guard_t sink_guard_many(
-        g, [](const tr::graph::remote_delivery_t&, const rope_t&) {});
+        g, [](const tr::graph::remote_delivery_t&, const tr::graph::value_t&) {});
 
     constexpr int kLinks = 96;  // well past any node's live-link count, prefixes all shared
     std::vector<std::string> peers;
@@ -570,7 +570,7 @@ void test_stale_index_entries_are_harmless() {
     graph_t g;
     std::size_t cli = 0;
     const tr::testing::remote_sink_guard_t sink_guard4(
-        g, [&](const tr::graph::remote_delivery_t& d, const rope_t&) {
+        g, [&](const tr::graph::remote_delivery_t& d, const tr::graph::value_t&) {
             if (d.link == "cli") ++cli;
         });
     vertex_handle_t v = g.register_vertex(path_t("/v"), role_t::STORED_VALUE);
@@ -697,8 +697,9 @@ void test_slot_reuse_and_index_stability() {
     // The reused slots DELIVER (the reclaimed shell became a real edge again).
     std::size_t hits = 0;
     const tr::testing::remote_sink_guard_t sink_guard5(
-        g,
-        [&](const tr::graph::remote_delivery_t& d, const rope_t&) { hits += d.link == "cli:2"; });
+        g, [&](const tr::graph::remote_delivery_t& d, const tr::graph::value_t&) {
+            hits += d.link == "cli:2";
+        });
     check(g.write(v, make_value({0x11})).has_value(), "write /v");
     check(hits == 3, "D, E and F (two reused slots + one appended) all deliver");
 }
@@ -928,7 +929,9 @@ void test_concurrent_evict_vs_writes() {
     vertex_handle_t u = g.register_vertex(path_t("/v/u"), role_t::STORED_VALUE);
     std::atomic<std::size_t> delivered{0};
     const tr::testing::remote_sink_guard_t sink_guard6(
-        g, [&](const tr::graph::remote_delivery_t&, const rope_t&) { delivered.fetch_add(1); });
+        g, [&](const tr::graph::remote_delivery_t&, const tr::graph::value_t&) {
+            delivered.fetch_add(1);
+        });
     check(wire_sub(g, v, "cli", "s0") && wire_sub(g, v, "keep", "k0"), "seed edges");
 
     std::thread writer([&] {
@@ -1054,7 +1057,7 @@ void test_local_unsubscribe() {
     vertex_handle_t ab = g.register_vertex(path_t("/a/b"), role_t::STORED_VALUE);
 
     std::size_t local = 0;
-    auto on_local = [&](const rope_t&) { ++local; };
+    auto on_local = [&](const tr::graph::value_t&) { ++local; };
 
     const auto sub = g.subscribe(path_t("/a"), on_local);
     check(sub.has_value(), "subscribe returns a subscription_t handle");
@@ -1082,7 +1085,7 @@ void test_local_unsubscribe() {
 
     // §D.2 slot reuse: a fresh subscribe reuses the freed slot and delivers; the old stays silent.
     std::size_t again = 0;
-    auto on_again = [&](const rope_t&) { ++again; };
+    auto on_again = [&](const tr::graph::value_t&) { ++again; };
     const auto sub2 = g.subscribe(path_t("/a"), on_again);
     // The handle is opaque, so the reuse is observed the only way a caller can observe it:
     // the fresh handle compares EQUAL to the retired one — same producer, same slot index.

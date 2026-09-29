@@ -16,17 +16,20 @@
  *
  * ## The policy contract
  *
- * A slot type must provide, for `value_ptr_t = std::shared_ptr<const view::rope_t>`:
+ * A slot type must provide, over the intrusive `value_t` of `%value.hpp` (RFC 0028 §5.1):
  *
- *   - `[[nodiscard]] bool store(value_ptr_t)` — publish, sequentially consistent. The order
+ *   - `[[nodiscard]] bool store(value_t*)` — publish, sequentially consistent. The slot ADOPTS
+ *     the one reference the caller passes and releases the displaced value's. The order
  *     matters: `vertex_t::store` relies on this sharing one total order with the `write_seq_`
  *     bump and the waiter count, which is what makes the waiterless publish (#555) unable to
  *     lose a wakeup. **`false` means nothing was published** and the previous value still
- *     stands — the caller must soft-fail (#477), never report the write as taken.
+ *     stands — the reference stays the caller's, who must soft-fail (#477), never report the
+ *     write as taken.
  *   - `void clear(std::memory_order)` — drop the published value. Cannot fail, and says so in
  *     the return type: a clear releases resources rather than acquiring any. Only
  *     `revert_to_placeholder` calls it, with `release`.
- *   - `load() const` — read the published value.
+ *   - `[[nodiscard]] value_ref_t load() const` — read the published value as an OWNING handle
+ *     (one `retain` the reader's `value_ref_t` releases).
  *   - `static constexpr bool may_spin` — whether any operation can SPIN-WAIT on another
  *     thread's progress. Declaring it is mandatory: `%vertex.hpp` refuses a policy that does not,
  *     and refuses one that says `true` on a target whose `config_t::kSpinWaitSafe` is `false`
@@ -80,7 +83,7 @@
  * write shapes) landed inside the 1.4-2.2x run-to-run spread, so the projected single-core
  * write penalty is not observable through `graph_t::write`.
  *
- * On one shared vertex the limit that remains is the rope's control-block increment, the
+ * On one shared vertex the limit that remains is the value's refcount increment, the
  * promotion an owning read cannot skip (ADR-0069 §6, second erratum), which makes the next lever
  * for THAT shape an API question rather than a reclamation one.
  */
@@ -93,19 +96,18 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
-#include <memory>
 #include <thread>
 #include <type_traits>
 
 #include "libtracer/config.hpp"
-#include "libtracer/rope.hpp"
+#include "libtracer/value.hpp"
 
 namespace tr::graph {
 
 /**
  * @brief The host reader guard: one of @ref kStripes padded locks, chosen by slot address.
  *
- * @ref single_writer_slot_t swaps and copies a `shared_ptr` inside `config_t::reader_guard_t`.
+ * @ref single_writer_slot_t exchanges and retains a `value_t*` inside `config_t::reader_guard_t`.
  * On a single-core RTOS that guard is an interrupt-masked critical section (the ESP-IDF
  * component binds `tr::esp::critical_guard_t`), which makes the window unpreemptable. A host
  * process cannot mask interrupts, so this is the host's spelling of the same promise: a
@@ -225,8 +227,8 @@ struct guard_for_t : guard_t {
 };
 
 /**
- * @brief The slot for a single-writer build (RFC 0028 §5.5): a plain `shared_ptr`, swapped and
- *        copied inside the reader guard @p guard_t, which never spins.
+ * @brief The slot for a single-writer build (RFC 0028 §5.5): one `value_t*`, exchanged and
+ *        retained inside the reader guard @p guard_t, which never spins.
  *
  * Why it exists (#1618). The refcount slot this replaced, `std::atomic<std::shared_ptr>`, is
  * spin-locked in libstdc++: `load` and `store` take a pointer-lock bit and a contender spins on
@@ -237,8 +239,8 @@ struct guard_for_t : guard_t {
  * the host's @ref mutex_guard_t puts a contender to sleep once it has spun out.
  *
  * **What the guard covers, and what it does not.** `store` swaps the pointer inside the guard
- * and releases the displaced value AFTER leaving it, so a rope's destructor and its memory
- * resource never run with interrupts masked. `load` copies the handle inside the guard, so the
+ * and releases the displaced value AFTER leaving it, so a value's link destructors and its
+ * block source never run with interrupts masked. `load` retains inside the guard, so the
  * refcount increment cannot interleave with the writer's release. Both sections are a handful
  * of instructions and call nothing that can block.
  *
@@ -247,20 +249,21 @@ struct guard_for_t : guard_t {
  * slot with `config_t::kSingleWriter` false. The name comes from RFC 0028 §5.5, where the
  * single-writer build is the one that must bind it.
  *
- * **Why `kSingleWriter` does not let the writer skip the guard here.** It is tempting: one
- * publisher, so nothing to exclude on the write side, publish with `release` and let readers
- * `acquire`. That is sound for the one-word slot RFC 0028 §5.5 describes (an intrusive
- * `value_t*`, slice 3), where the publish is a single atomic `exchange` and a reader's `retain`
- * inside its guard cannot interleave with the writer's release. It is NOT sound for this slot,
- * and the single-writer contract does not help: a `shared_ptr` is two words, so a writer's swap
- * outside the guard can be observed half-done by ONE reader inside it — a pointer from the new
- * value paired with the control block of the old — and a reader that read a consistent pair
- * can still increment a control block the writer released a moment later. Neither race needs a
- * second writer. On a single core the reader that preempts the writer mid-swap is exactly the
- * high-priority task #1618 is about. So the writer keeps the guard on every target until the
- * slot is one word, and `kSingleWriter` stays a contract, not a code path, in this slice.
- * `lkv_slot_test`'s one-writer / N-reader run is the test that bites when this is tried: with
- * the writer's guard removed, a reader reads a rope after its free (ASan: heap-use-after-free).
+ * **Why `kSingleWriter` does not let the writer skip the guard, even now the slot is one
+ * word.** It is tempting: one publisher, so nothing to exclude on the write side, publish with
+ * a single atomic `exchange` and let readers `acquire`. The slot IS one word since RFC 0028
+ * slice 3 (an intrusive `value_t*`), so the torn two-word swap the `shared_ptr` slot had is
+ * gone — but the race that matters never needed two words. A reader inside its guard has loaded
+ * the pointer and not yet retained it; a writer that exchanges outside the guard goes on to
+ * `release` the displaced value, and if that was the last reference the block is freed under
+ * the reader's `retain`. The reader's guard excludes the writer only if the writer's exchange
+ * is inside a guard too: exclusion is pairwise, and the single-writer contract says nothing
+ * about readers. So the writer keeps the guard on every target, and `kSingleWriter` stays a
+ * contract, not a code path. (RFC 0028 §5.5's sentence that a reader's `retain` inside its
+ * guard "cannot interleave with the writer's release" once the slot is one word is the claim
+ * this paragraph corrects.) `lkv_slot_test`'s one-writer / N-reader run is the test that bites
+ * when this is tried: with the writer's guard removed, a reader reads a value after its free
+ * (ASan: heap-use-after-free).
  *
  * @tparam guard_t An RAII type whose lifetime is the critical section, constructible either
  *                 from the slot's address (`const void*`) or from nothing.
@@ -270,9 +273,6 @@ struct guard_for_t : guard_t {
 template <typename guard_t>
 class basic_single_writer_slot_t {
    public:
-    /** @brief The handle a publish takes and a read returns — owning, as the contract requires. */
-    using value_ptr_t = std::shared_ptr<const view::rope_t>;
-
     /** @brief This policy never spin-waits: the only wait is the guard, and a guard may not. */
     static constexpr bool may_spin = false;
 
@@ -289,38 +289,44 @@ class basic_single_writer_slot_t {
      * read-modify-write sequenced after the guard's release, so it already carries the swap.
      * The waiterless-publish argument (#555) is about `write_seq_` and the waiter count only.
      *
+     * @param v The value to publish; the slot adopts the caller's reference. Null clears.
      * @return Always `true`. A swap allocates nothing, so there is no failure to report.
      */
-    [[nodiscard]] bool store(value_ptr_t sp, std::memory_order = std::memory_order_seq_cst) {
+    [[nodiscard]] bool store(value_t* v, std::memory_order = std::memory_order_seq_cst) {
         {
             const guard_for_t<guard_t> g{this};
-            v_.swap(sp);
+            std::swap(v_, v);
         }
-        return true;  // `sp` now holds the displaced value and is released here, unguarded
+        value_t::release(v);  // `v` is now the displaced value, released here, unguarded
+        return true;
     }
 
     /** @brief Drop the published value. Releases a reference outside the guard; cannot fail. */
     void clear(std::memory_order = std::memory_order_seq_cst) {
-        value_ptr_t old;
+        value_t* old = nullptr;
         {
             const guard_for_t<guard_t> g{this};
-            v_.swap(old);
+            std::swap(v_, old);
         }
+        value_t::release(old);
     }
 
     /**
-     * @brief Read the published value: one guarded copy of the handle.
+     * @brief Read the published value: one guarded `retain`.
      *
-     * The copy is the refcount increment that lets the handle outlive the guard, and it is the
+     * The retain is the refcount increment that lets the handle outlive the guard, and it is the
      * only work inside it.
      */
-    [[nodiscard]] value_ptr_t load() const {
+    [[nodiscard]] value_ref_t load() const {
         const guard_for_t<guard_t> g{this};
-        return v_;
+        return value_ref_t::share(v_);
     }
 
+    /** @brief Release whatever is still published. No reader can be inside the guard by now. */
+    ~basic_single_writer_slot_t() { value_t::release(v_); }
+
    private:
-    value_ptr_t v_{};
+    value_t* v_ = nullptr; /**< @brief The published value; the slot owns one reference. */
 };
 
 /**
@@ -344,21 +350,23 @@ class single_writer_slot_t : public basic_single_writer_slot_t<config_t::reader_
 namespace detail_hp {
 
 /**
- * @brief The indirection node the slot publishes — it owns the rope's `shared_ptr`
- *        (ADR-0069 §5).
+ * @brief The indirection node the slot publishes — it owns ONE reference on the value
+ *        (ADR-0069 §5, over RFC 0028's intrusive `value_t`).
  *
- * The slot cannot hold the rope pointer directly: `std::atomic<std::shared_ptr<T>>` and
- * `std::atomic<std::weak_ptr<T>>` are both non-lock-free on libstdc++ (measured), and from
- * a bare `const rope_t*` there is no route back to a control block. So the slot holds
- * `atomic<node_t*>` — lock-free — and a read copies the `shared_ptr` **out of the pinned
- * node**, which is what turns a pin into the owning handle `read_stored()` must return.
+ * The slot holds `atomic<node_t*>` — lock-free — rather than the `value_t*` itself, so that
+ * the retire list and the hazard protocol stay typed to a node the domain owns end to end: a
+ * `clear` publishes `nullptr` and retires the node it displaces without allocating, and the
+ * value's own reference is dropped exactly once, when a scan proves the node unpinned
+ * (`recycle`). A read pins the node, re-validates, and `retain`s **out of the pinned node**,
+ * which is what turns a pin into the owning `value_ref_t` `read_stored()` must return; that
+ * retain cannot race the release because the release waits on the scan that saw no pin.
  *
- * `sp` is immutable while the node is published; `next` is touched only once the node is
- * off the slot, so the two never race.
+ * `v` is immutable while the node is published; `next` is touched only once the node is off
+ * the slot, so the two never race.
  */
 struct node_t {
-    std::shared_ptr<const view::rope_t> sp; /**< @brief The published value. */
-    node_t* next = nullptr;                 /**< @brief Retire / free-list link. */
+    const value_t* v = nullptr; /**< @brief The published value; this node holds one reference. */
+    node_t* next = nullptr;     /**< @brief Retire / free-list link. */
 };
 
 /**
@@ -564,6 +572,13 @@ inline void release_claim(registry_t& r, std::size_t i) {
 }
 
 /** @brief The one domain. Emitted only in a build that actually binds @ref hazard_slot_t. */
+/** @brief Free a node that no reader can reach, releasing the value reference it still holds
+ *         (a retired node's; a free-list node's is already null). */
+inline void destroy_node(node_t* n) noexcept {
+    value_t::release(n->v);
+    delete n;
+}
+
 [[nodiscard]] inline registry_t& registry() {
     static constinit registry_t reg{};
     static final_sweep_t sweep;  // destroyed at exit, while `reg`'s storage is still valid
@@ -668,9 +683,10 @@ class ticket_t {
 
 /** @brief Park a scanned-clean node for reuse, or free it once the free list is at its bound. */
 inline void recycle(lists_t& l, node_t* n) {
-    n->sp.reset();  // drop the rope reference NOW, not whenever the node is next published
+    value_t::release(n->v);  // drop the value's reference NOW, not when the node is next used
+    n->v = nullptr;
     if (l.freelist_n >= kRetireBatch) {
-        delete n;
+        destroy_node(n);
         return;
     }
     n->next = l.freelist;
@@ -911,7 +927,7 @@ inline participant_t::~participant_t() {
     // them and the next scan on any thread (or the final sweep) finishes the job.
     while (node_t* n = l.freelist) {
         l.freelist = n->next;
-        delete n;
+        destroy_node(n);
     }
     l.freelist_n = 0;
     if (node_t* head = l.retired) {
@@ -984,13 +1000,13 @@ inline final_sweep_t::~final_sweep_t() {
     }
 
     // A kept node is unlinked from every list by the time this returns, so the `next` it is
-    // left holding is unreachable — a reader only ever dereferences `sp`.
+    // left holding is unreachable — a reader only ever dereferences `v`.
     auto drop = [&pinned, np](node_t* n) {
         while (n != nullptr) {
             node_t* next = n->next;
             bool held = false;
             for (std::size_t i = 0; i < np && !held; ++i) held = pinned[i] == n;
-            if (!held) delete n;
+            if (!held) destroy_node(n);
             n = next;
         }
     };
@@ -1018,7 +1034,7 @@ inline final_sweep_t::~final_sweep_t() {
 
 /**
  * @brief The host slot (ADR-0069 §1): a lock-free `atomic<node_t*>` reclaimed with hazard
- *        pointers, returning the same owning `shared_ptr` @ref single_writer_slot_t does.
+ *        pointers, returning the same owning `value_ref_t` @ref single_writer_slot_t does.
  *
  * Why this exists: today's slot INVERTS under concurrent readers — measured through the real
  * path, `graph_t::read` on one shared LKV falls from 21.1 M/s at one reader to 1.7 M/s at
@@ -1034,14 +1050,14 @@ inline final_sweep_t::~final_sweep_t() {
  * that can fail. Such a node binds @ref single_writer_slot_t.
  *
  * **Publish can fail under memory exhaustion**, which @ref single_writer_slot_t cannot: an empty
- * free list makes the first publish per participant allocate a 24-byte node. It is *reported*,
+ * free list makes the first publish per participant allocate a 16-byte node. It is *reported*,
  * not silent — `store` returns `false` and `vertex_t::store` turns that into the same
  * `nullptr` → `BACKPRESSURE` soft-fail an LKV allocation failure already produces (#477), so
  * no write is ever reported as taken when it was not. Every later publish reuses the node its
  * own displacement recycled, so the window is a warm-up one — but it is still a real
  * difference in the policy's failure surface, and a third reason the MCU does not bind this
  * slot. Note also that the node comes from the **global heap**, not from a graph's injected
- * `std::pmr::memory_resource`: the slot policy is never handed one, and a bounded target that
+ * `block_source_t`: the slot policy is never handed one, and a bounded target that
  * needs every byte accounted for is another target that should bind @ref single_writer_slot_t.
  *
  * **It does not spin-wait.** The one loop in the domain that waits on another thread is the
@@ -1051,9 +1067,6 @@ inline final_sweep_t::~final_sweep_t() {
  */
 class hazard_slot_t {
    public:
-    /** @brief The handle a publish takes and a read returns — owning, as the contract requires. */
-    using value_ptr_t = std::shared_ptr<const view::rope_t>;
-
     /** @brief No operation spin-waits on another thread; see the class comment. */
     static constexpr bool may_spin = false;
 
@@ -1078,10 +1091,11 @@ class hazard_slot_t {
      *         publish can reach that: every later one reuses the node its own displacement
      *         recycled, so the free list makes the steady state allocation-free.
      *
-     * An empty handle is not a publish — use @ref clear.
+     * A null value is not a publish — use @ref clear. On success the node adopts the caller's
+     * reference; on `false` the reference is still the caller's.
      */
-    [[nodiscard]] bool store(value_ptr_t sp, std::memory_order order = std::memory_order_seq_cst) {
-        if (!sp) {
+    [[nodiscard]] bool store(value_t* v, std::memory_order order = std::memory_order_seq_cst) {
+        if (v == nullptr) {
             clear(order);
             return true;
         }
@@ -1089,7 +1103,7 @@ class hazard_slot_t {
         detail_hp::lists_t& l = detail_hp::registry().lists[t.index()];
         detail_hp::node_t* fresh = detail_hp::acquire_node(l);
         if (fresh == nullptr) return false;  // nothing published; the caller soft-fails (#477)
-        fresh->sp = std::move(sp);
+        fresh->v = v;
         detail_hp::node_t* old = slot_.exchange(fresh, rmw_order(order));
         if (old != nullptr) detail_hp::retire(l, old);
         return true;
@@ -1109,7 +1123,7 @@ class hazard_slot_t {
     /**
      * @brief Read the published value.
      *
-     * Announce, re-read, then copy the `shared_ptr` out of the pinned node — the copy is the
+     * Announce, re-read, then `retain` the value out of the pinned node — the retain is the
      * promotion that lets the handle outlive the pin, and it is the one shared-cache-line RMW
      * this scheme cannot remove. A slot nobody has written costs a single acquire load and
      * never touches the domain at all.
@@ -1126,7 +1140,7 @@ class hazard_slot_t {
      * and republished, and revalidate against the same address. That is not a bug — `n` is live
      * and holds a value some writer published, which is all a read promises.
      */
-    [[nodiscard]] value_ptr_t load() const {
+    [[nodiscard]] value_ref_t load() const {
         detail_hp::node_t* n = slot_.load(std::memory_order_acquire);
         if (n == nullptr) return {};
         detail_hp::ticket_t t;
@@ -1141,7 +1155,7 @@ class hazard_slot_t {
                 return {};
             }
         }
-        value_ptr_t out = n->sp;
+        value_ref_t out = value_ref_t::share(n->v);
         cell.store(nullptr, std::memory_order_release);
         return out;
     }

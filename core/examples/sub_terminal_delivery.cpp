@@ -53,7 +53,7 @@ int main() {
     const tr::graph::vertex_handle_t b = g.register_vertex(path_t("/b"), role_t::STORED_VALUE);
 
     int relayed = 0;
-    auto on_b = [&](const tr::view::rope_t&) { ++relayed; };
+    auto on_b = [&](const tr::graph::value_t&) { ++relayed; };
     (void)g.subscribe(path_t("/a"), path_t("/b"));  // A -> B: a target-vertex edge
     (void)g.subscribe(path_t("/b"), on_b);          // an observer on B's OWN subscribers
 

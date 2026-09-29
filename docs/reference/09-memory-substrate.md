@@ -277,7 +277,7 @@ tr::mem::pool_source_t<> store{slab, classes};
 tr::graph::graph_t g{store};          // or graph_t{&store}, or graph_t{} for the process heap
 ```
 
-Everything the graph allocates comes from that source: the per-write LKV control block and rope (through a `source_resource_t` the graph builds internally), the write-path value `segment_t`, both folded reads' POINT headers and — since phase 3 — every segment the graph's **read-back encoders** mint (through a `source_backend_t`, the `mem_backend_t` **wrapper type** described below), every failable `#551` block, and the graph-level default receiver ring. The deployer sizes one slab and reads one census instead of reasoning about which of four channels a given byte travels.
+Everything the graph allocates comes from that source: the per-write `value_t` block (one `try_alloc` per publish, holding the refcount and the link chain — RFC-0028 slice 3), the write-path value `segment_t`, both folded reads' POINT headers and — since phase 3 — every segment the graph's **read-back encoders** mint (through a `source_backend_t`, the `mem_backend_t` **wrapper type** described below), every failable `#551` block, and the graph-level default receiver ring. The deployer sizes one slab and reads one census instead of reasoning about which of four channels a given byte travels.
 
 Three consequences are worth stating plainly.
 
@@ -295,7 +295,7 @@ All three phases are terminal: phase 1 landed, phase 2 was measured and **revert
 
 | Channel | Where it draws from | Instrument |
 | --- | --- | --- |
-| Per-write LKV control block + `rope_t` (`allocate_shared`) | the injected source, through the graph's internal `source_resource_t` | `graph_pmr_test` |
+| Per-write `value_t` block (refcount + link chain, one `try_alloc`) | the injected source, directly | `value_test` |
 | Write-path value `segment_t` (the branch/field-write flatten) | the injected source, through the graph's internal `source_backend_t` | `graph_value_backend_test` |
 | Folded READ POINT/NAME headers (`read_subtree_folded`, `read_children_folded`) | same `source_backend_t` | `folded_read_backend_test` |
 | Read-back encoder segments — `:point`, `:settings`, `:settings.app`, `:acl`, `:children`, identity, stats, an app field's stored bytes, the subscriber and mount-route records | same `source_backend_t` (**phase 3**; these were on the global heap via the one-argument `view::over_bytes`) | `read_back_backend_test` (one family per migrated site), plus `folded_read_backend_test` for the `:children` fold and `graph_value_backend_test` for the write-path flatten |
@@ -386,7 +386,7 @@ Two companions ship with it, because the migrated call sites all need the same p
 
 The terminus arena decoder is on the **RX path, behind no ACL**, and a peer chooses both the nesting depth and the node count of the frame it sends. All three of its draws (the node array, the walk's open-node stack, and the walk stack's spill past its inline slots) come from a `block_source_t`, so exhaustion is `TLV_NESTING_TOO_DEEP` — the status [RFC-0006](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0006-resource-bounded-nesting-depth.md) defines for "exceeds this receiver's decode resources" — and never an allocation failure. There is no depth constant anywhere in the decode, and none is wanted: the bound is the receiver's injected resource.
 
-A **scope-lifetime** consumer composes this as a `bump_source_t` over a stack buffer — construct it, decode, drop it. The branch-write decode does exactly that with a 4 KiB stack buffer, naming the graph's injected failable seam as the bump's *upstream*, so overflow spills into the node's own injected store rather than the global heap and exhaustion stays a value (`core/src/graph.cpp:2576-2577`). Naming `null_source()` as the upstream instead makes the buffer a hard ceiling; that is the composition a node picks when it wants the stack buffer to *be* the bound.
+A **scope-lifetime** consumer composes this as a `bump_source_t` over a stack buffer — construct it, decode, drop it. The branch-write decode does exactly that with a 4 KiB stack buffer, naming the graph's injected failable seam as the bump's *upstream*, so overflow spills into the node's own injected store rather than the global heap and exhaustion stays a value (`core/src/graph.cpp:2601-2602`). Naming `null_source()` as the upstream instead makes the buffer a hard ceiling; that is the composition a node picks when it wants the stack buffer to *be* the bound.
 
 A **long-lived** seam (a router's `rx`, a graph's `ctl`) must not be a bump source: bump blocks are never reclaimed, so it fills monotonically and then refuses everything. An 8 KiB bump source wired as a router's `rx`, **decoding a 53-byte FWD**, decoded **6 frames and rejected the next 194**. The frame size is what makes that a measurement rather than an anecdote — the figure is 8192 bytes divided by the arena footprint of one decode of *that* frame, so it is capacity arithmetic and does not vary with host or build flags ([ADR-0067 §1 — a bounded seam recycles through segregated size classes](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0067-bounded-recycling-source-and-per-owner-topology.md)).
 

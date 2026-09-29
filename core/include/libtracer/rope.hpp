@@ -193,6 +193,18 @@ class rope_t {
     }
 
     /**
+     * @brief The link chain, MUTABLE — for a caller that owns the rope and moves its links
+     *        out (`tr::graph::value_t::make`), so a publish costs no refcount traffic.
+     *
+     * A link moved from is an empty view still counted in `link_count()`; reset the rope
+     * afterwards rather than reading it.
+     */
+    [[nodiscard]] std::span<view_t> links() noexcept {
+        if (heap_.empty()) return std::span<view_t>(inline_.data(), inline_n_);
+        return std::span<view_t>(heap_);
+    }
+
+    /**
      * @brief The single contiguous link — the consumer's explicit "this value is
      *        one segment" (ADR-0053 §6), zero copy.
      * @note Precondition: `link_count() == 1` (debug-asserted). A consumer that

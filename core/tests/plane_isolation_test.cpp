@@ -226,7 +226,7 @@ struct sink_t {
     std::size_t deliveries = 0; /**< @brief How many values arrived. */
     std::uint8_t last = 0;      /**< @brief The first byte of the most recent one. */
     /** @brief The subscriber callback — `graph_t::subscribe`'s zero-erasure sugar binds this. */
-    void operator()(const rope_t& value) {
+    void operator()(const tr::graph::value_t& value) {
         ++deliveries;
         last = std::to_integer<std::uint8_t>(value.only().bytes()[0]);
     }

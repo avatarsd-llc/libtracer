@@ -154,14 +154,15 @@ struct work_shape_t {
  * @brief The composed read's NODE-TABLE element, mirrored for the same reason
  *        @ref work_shape_t is: to compute the block shape its first growth asks for.
  *
- * `snap_node_t` holds a `std::shared_ptr`, so it can never take `block_array_t`'s memcpy
- * relocation — which is why #873 phase 1 put it on a source ALLOCATOR instead: the element
- * type and its destructors are untouched and only the block moves onto the injected store.
- * The mirror must therefore carry a `shared_ptr` too, or the size is wrong.
+ * `snap_node_t` holds a `value_ref_t` — a one-word intrusive handle with a destructor — so it
+ * can never take `block_array_t`'s memcpy relocation, which is why #873 phase 1 put it on a
+ * source ALLOCATOR instead: the element type and its destructors are untouched and only the
+ * block moves onto the injected store. The mirror carries one pointer where the handle sits
+ * (RFC-0028 slice 3 shrank it from a `shared_ptr`), or the size is wrong.
  */
 struct snap_shape_t {
     const void* v = nullptr;
-    std::shared_ptr<const void> lkv;
+    const void* lkv = nullptr;
     std::size_t parent = 0;
     std::size_t body_len = 0;
 };
@@ -213,7 +214,9 @@ void test_collect_stack_on_the_seam() {
     src.watch(kStackBytes, kStackAlign, false);
     const auto ok = g.read_subtree_folded(root, "peer");
     check(ok.has_value(), "the composed read succeeds with a permissive source");
-    check(src.served() == 1, "the collect stack took its block from the INJECTED ctl source");
+    // A floor, not an exact count: since RFC-0028 slice 3 the node table's element is 32 B,
+    // so its growth to four slots asks the same 128 B / 8 shape the collect stack does.
+    check(src.served() >= 1, "the collect stack took its block from the INJECTED ctl source");
 
     // Armed: refuse exactly that block. The read must degrade by value.
     src.watch(kStackBytes, kStackAlign, true);

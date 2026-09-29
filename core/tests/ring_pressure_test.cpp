@@ -164,7 +164,7 @@ class metered_source_t final : public tr::mem::block_source_t {
 struct sink_t {
     std::size_t deliveries = 0; /**< @brief How many values arrived. */
     /** @brief The subscriber callback. */
-    void operator()(const rope_t&) { ++deliveries; }
+    void operator()(const tr::graph::value_t&) { ++deliveries; }
 };
 
 /** @brief One admission's worth of value — @p tag repeated, so a read-back names its writer. */
@@ -270,7 +270,7 @@ void test_best_effort_sheds_and_accounts(std::size_t entry) {
           "best-effort: the ring never grew past the byte bound it was given");
 
     // The CONSUMER's face of the same loss: an in-order gap, delivered once, at the shed point.
-    std::vector<std::shared_ptr<const rope_t>> batch;
+    std::vector<tr::graph::value_ref_t> batch;
     std::uint64_t gap = 0;
     const tr::graph::result_t<std::size_t> drained = g.drain_unflushed(rx.v, batch, &gap);
     check(drained.has_value(), "best-effort: the consumer drains its own ring");
@@ -364,7 +364,7 @@ void test_recovery_resumes_stops_counting_and_leaks_nothing(std::size_t entry) {
           "recovery: the ring grows again, now that its budget allows it");
 
     // The CONSUMER learns of the whole loss exactly once, then hears only clean batches.
-    std::vector<std::shared_ptr<const rope_t>> batch;
+    std::vector<tr::graph::value_ref_t> batch;
     std::uint64_t gap = 0;
     check(g.drain_unflushed(rx.v, batch, &gap).has_value() && gap == shed,
           "recovery: the drain accounts exactly what was dropped, once");

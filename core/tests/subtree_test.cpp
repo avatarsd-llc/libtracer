@@ -118,10 +118,10 @@ void test_bubbling_and_idle_walk() {
 
     std::vector<std::vector<std::byte>> at_a;
     std::vector<std::vector<std::byte>> at_x;
-    auto on_a = [&](const rope_t& v) {
+    auto on_a = [&](const tr::graph::value_t& v) {
         at_a.emplace_back(v.only().bytes().begin(), v.only().bytes().end());
     };
-    auto on_x = [&](const rope_t& v) {
+    auto on_x = [&](const tr::graph::value_t& v) {
         at_x.emplace_back(v.only().bytes().begin(), v.only().bytes().end());
     };
     check(g.subscribe(path_t("/a"), on_a).has_value(), "subscribe callback at ancestor /a");
@@ -155,7 +155,7 @@ void test_bubbling_to_late_created_descendant() {
     graph_t g;
     (void)g.register_vertex(path_t("/a"), role_t::STORED_VALUE);
     std::size_t hits = 0;
-    auto on_hit = [&](const rope_t&) { ++hits; };
+    auto on_hit = [&](const tr::graph::value_t&) { ++hits; };
     check(g.subscribe(path_t("/a"), on_hit).has_value(), "subscribe at /a first");
     // The descendant is created afterwards (write-creates) — its creation-time
     // ancestor-listener sum must still route its writes up.
@@ -177,7 +177,7 @@ void test_remote_ancestor_subscriber() {
     std::vector<std::byte> seen_value;
     std::vector<std::byte> seen_route;
     const tr::testing::remote_sink_guard_t sink_guard(
-        g, [&](const tr::graph::remote_delivery_t& d, const rope_t& v) {
+        g, [&](const tr::graph::remote_delivery_t& d, const tr::graph::value_t& v) {
             ++deliveries;
             seen_link.assign(d.link);
             seen_value.assign(v.only().bytes().begin(), v.only().bytes().end());
@@ -204,10 +204,10 @@ void test_branch_write_decomposition() {
 
     std::vector<std::vector<std::byte>> at_s;
     std::vector<view_t> at_st;
-    auto on_s = [&](const rope_t& v) {
+    auto on_s = [&](const tr::graph::value_t& v) {
         at_s.emplace_back(v.only().bytes().begin(), v.only().bytes().end());
     };
-    auto on_st = [&](const rope_t& v) { at_st.push_back(v.only()); };
+    auto on_st = [&](const tr::graph::value_t& v) { at_st.push_back(v.only()); };
     check(g.subscribe(path_t("/s"), on_s).has_value(), "subscribe at the branch root /s");
     check(g.subscribe(path_t("/s/t"), on_st).has_value(), "subscribe at the leaf /s/t");
 
@@ -280,7 +280,7 @@ void test_branch_write_strictness() {
 
     // A value-free branch is a no-op write (nothing stored, nothing delivered).
     std::size_t hits = 0;
-    auto on_hit = [&](const rope_t&) { ++hits; };
+    auto on_hit = [&](const tr::graph::value_t&) { ++hits; };
     check(g.subscribe(path_t("/s"), on_hit).has_value(), "subscribe at /s");
     check(g.write(s, make_value(point_tlv("s", point_tlv("t", {})))).has_value(),
           "value-free branch write is accepted");
@@ -444,7 +444,7 @@ void test_demand_driven_predicate() {
     check(!g.has_subscribers(abc), "quiet graph: has_subscribers agrees — skipping is correct");
 
     std::vector<std::vector<std::byte>> at_a;
-    auto on_a = [&](const rope_t& v) {
+    auto on_a = [&](const tr::graph::value_t& v) {
         at_a.emplace_back(v.only().bytes().begin(), v.only().bytes().end());
     };
     check(g.subscribe(path_t("/a"), on_a).has_value(), "subscribe at the ANCESTOR /a");
@@ -462,7 +462,7 @@ void test_demand_driven_predicate() {
 
     // And the near half still works: a subscriber ON the vertex shows up in both.
     std::vector<std::vector<std::byte>> at_c;
-    auto on_c = [&](const rope_t& v) {
+    auto on_c = [&](const tr::graph::value_t& v) {
         at_c.emplace_back(v.only().bytes().begin(), v.only().bytes().end());
     };
     check(g.subscribe(path_t("/a/b/c"), on_c).has_value(), "subscribe AT /a/b/c");

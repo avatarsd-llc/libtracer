@@ -168,7 +168,7 @@ struct value_t {
     }
 };
 
-void callback_sink(void* ctx, const rope_t&) {
+void callback_sink(void* ctx, const tr::graph::value_t&) {
     static_cast<std::atomic<std::uint64_t>*>(ctx)->fetch_add(1, std::memory_order_relaxed);
 }
 

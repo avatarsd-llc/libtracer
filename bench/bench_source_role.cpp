@@ -102,7 +102,7 @@ void run_role(bool handler, std::size_t fan, std::size_t links, const char* mode
     std::atomic<std::uint64_t> hits{0};
     const vertex_handle_t v = register_src(g, src, handler, hits);
     std::atomic<std::uint64_t> recv{0};
-    auto cb = [&](const rope_t&) { recv.fetch_add(1, std::memory_order_relaxed); };
+    auto cb = [&](const tr::graph::value_t&) { recv.fetch_add(1, std::memory_order_relaxed); };
     for (std::size_t f = 0; f < fan; ++f) (void)g.subscribe(src, cb);
 
     const value_fixture_t fx{links};

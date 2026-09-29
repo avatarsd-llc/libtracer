@@ -66,7 +66,14 @@ using tr::testing::make_value;
 /** @brief One recorded delivery: the bytes a subscriber was handed, verbatim. */
 using log_t = std::vector<std::vector<std::byte>>;
 
-/** @brief A whole rope's bytes, gathered — a folded frame is scatter-gather by construction. */
+/** @brief A whole value's bytes, gathered — a folded frame is scatter-gather by construction. */
+std::vector<std::byte> bytes_of(const tr::graph::value_t& r) {
+    std::vector<std::byte> out;
+    r.walk([&out](std::span<const std::byte> s) { out.insert(out.end(), s.begin(), s.end()); });
+    return out;
+}
+
+/** @brief The same, on a composed rope (a field read's result). */
 std::vector<std::byte> bytes_of(const rope_t& r) {
     std::vector<std::byte> out;
     r.walk([&out](std::span<const std::byte> s) { out.insert(out.end(), s.begin(), s.end()); });
@@ -162,8 +169,8 @@ void test_default_emission_unchanged() {
     std::printf("the default emission does not move (RFC-0008 §D stays the floor):\n");
     log_t at_one;
     log_t at_two;
-    auto on_one = [&at_one](const rope_t& v) { at_one.push_back(bytes_of(v)); };
-    auto on_two = [&at_two](const rope_t& v) { at_two.push_back(bytes_of(v)); };
+    auto on_one = [&at_one](const tr::graph::value_t& v) { at_one.push_back(bytes_of(v)); };
+    auto on_two = [&at_two](const tr::graph::value_t& v) { at_two.push_back(bytes_of(v)); };
     fixture_t one;
     fixture_t two;
     check(one.g.subscribe(path_t("/s"), on_one).has_value(),
@@ -194,10 +201,14 @@ void test_fold_is_one_frame_with_the_same_leaf_truth() {
     log_t leaf_default;
     log_t root_fold;
     log_t leaf_fold;
-    auto on_rd = [&root_default](const rope_t& v) { root_default.push_back(bytes_of(v)); };
-    auto on_ld = [&leaf_default](const rope_t& v) { leaf_default.push_back(bytes_of(v)); };
-    auto on_rf = [&root_fold](const rope_t& v) { root_fold.push_back(bytes_of(v)); };
-    auto on_lf = [&leaf_fold](const rope_t& v) { leaf_fold.push_back(bytes_of(v)); };
+    auto on_rd = [&root_default](const tr::graph::value_t& v) {
+        root_default.push_back(bytes_of(v));
+    };
+    auto on_ld = [&leaf_default](const tr::graph::value_t& v) {
+        leaf_default.push_back(bytes_of(v));
+    };
+    auto on_rf = [&root_fold](const tr::graph::value_t& v) { root_fold.push_back(bytes_of(v)); };
+    auto on_lf = [&leaf_fold](const tr::graph::value_t& v) { leaf_fold.push_back(bytes_of(v)); };
     // Two arms are two graphs, so one arm's sweep state cannot bleed into the other's.
     fixture_t d;
     fixture_t f;
@@ -237,7 +248,7 @@ void test_fold_is_one_frame_with_the_same_leaf_truth() {
 void test_trailer_carrying_node_is_rejected() {
     std::printf("a trailer-carrying node is REJECTED inside a branch write (§B strictness):\n");
     log_t at_root;
-    auto on_root = [&at_root](const rope_t& v) { at_root.push_back(bytes_of(v)); };
+    auto on_root = [&at_root](const tr::graph::value_t& v) { at_root.push_back(bytes_of(v)); };
     fixture_t fx;
     check(fx.g.subscribe(path_t("/s"), on_root).has_value(), "subtree subscriber at /s");
     check(fx.g.assign(fx.leaf, make_value(timestamped_value_tlv(0x77))).has_value(),
@@ -257,7 +268,7 @@ void test_trailer_carrying_node_is_rejected() {
 void test_selected_stream_is_refused() {
     std::printf("a selected STREAM refuses the fold (a LIST has no §B seat):\n");
     log_t at_root;
-    auto on_root = [&at_root](const rope_t& v) { at_root.push_back(bytes_of(v)); };
+    auto on_root = [&at_root](const tr::graph::value_t& v) { at_root.push_back(bytes_of(v)); };
     graph_t g;
     vertex_handle_t s = g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
     vertex_handle_t st = g.register_vertex(path_t("/s/st"), role_t::STREAM);
@@ -278,8 +289,8 @@ void test_disjoint_subtrees_are_several_frames() {
     std::printf("disjoint subtrees are SEVERAL branch writes, never a container (§E):\n");
     log_t at_p;
     log_t at_q;
-    auto on_p = [&at_p](const rope_t& v) { at_p.push_back(bytes_of(v)); };
-    auto on_q = [&at_q](const rope_t& v) { at_q.push_back(bytes_of(v)); };
+    auto on_p = [&at_p](const tr::graph::value_t& v) { at_p.push_back(bytes_of(v)); };
+    auto on_q = [&at_q](const tr::graph::value_t& v) { at_q.push_back(bytes_of(v)); };
     graph_t g;
     vertex_handle_t p = g.register_vertex(path_t("/p"), role_t::STORED_VALUE);
     vertex_handle_t pl = g.register_vertex(path_t("/p/l"), role_t::STORED_VALUE);
@@ -313,7 +324,7 @@ void test_disjoint_subtrees_are_several_frames() {
 void test_fold_carries_a_composed_batch() {
     std::printf("§4.1.3 — the fold carries a COMPOSED batch with zero graph change:\n");
     log_t at_root;
-    auto on_root = [&at_root](const rope_t& v) { at_root.push_back(bytes_of(v)); };
+    auto on_root = [&at_root](const tr::graph::value_t& v) { at_root.push_back(bytes_of(v)); };
     graph_t g;
     vertex_handle_t s = g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
     vertex_handle_t adc = g.register_vertex(path_t("/s/adc0"), role_t::STORED_VALUE);

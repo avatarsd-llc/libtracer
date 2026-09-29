@@ -1688,7 +1688,7 @@ craft libtracer":
 
 | mode | what it exercises |
 | --- | --- |
-| `inproc` | **write (store+notify+deliver)**: `write` → subscriber callback. Per message this pays one segment alloc + one memcpy (the owned view) + one LKV `make_shared` store + the await/readiness sequence bump, then delivers. *Not* zero-copy per message — that is `inproc-borrow`. |
+| `inproc` | **write (store+notify+deliver)**: `write` → subscriber callback. Per message this pays one segment alloc + one memcpy (the owned view) + one LKV `value_t` block store + the await/readiness sequence bump, then delivers. *Not* zero-copy per message — that is `inproc-borrow`. |
 | `inproc-deliver` | **deliver-only (`propagate`)**: the value is stored once, then each op is `graph_t::propagate(v)` — deliver the current LKV to the subscribers, no per-op store/alloc/copy. The semantic analogue of Zenoh's transient put (RFC-0008 edge transition). |
 | `inproc-borrow` | the **zero-copy loaned path** — a borrowed view, *zero alloc, zero copy* (a refcount handoff). libtracer-only semantics: Zenoh's matched rows use its copying put. |
 | `inproc-path` | write **by path** (registry hash + lookup per publish) — the "many topics" cost. |

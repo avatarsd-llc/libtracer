@@ -103,7 +103,7 @@ int main() {
     std::condition_variable cv;
     std::uint64_t delivered = 0;
     std::vector<std::byte> last;
-    auto on_temp = [&](const tr::view::rope_t& v) {
+    auto on_temp = [&](const tr::graph::value_t& v) {
         const auto b = v.only().bytes();
         std::lock_guard<std::mutex> lk(m);
         last.assign(b.begin(), b.end());

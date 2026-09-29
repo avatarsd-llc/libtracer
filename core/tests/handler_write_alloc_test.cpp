@@ -176,7 +176,7 @@ struct fixture_t {
         return g.register_vertex(src, role_t::HANDLER, std::move(h));
     }();
     std::atomic<std::uint64_t> recv{0};
-    auto cb = [&](const rope_t&) { recv.fetch_add(1, std::memory_order_relaxed); };
+    auto cb = [&](const tr::graph::value_t&) { recv.fetch_add(1, std::memory_order_relaxed); };
     (void)g.subscribe(src, cb);
 
     const fixture_t fx{links};

@@ -208,11 +208,12 @@ void test_reclaim_leaves_the_survivors_intact() {
     std::vector<std::string> seen_links;
     std::vector<std::string> seen_callers;
     std::size_t empty_routes = 0;
-    const tr::testing::remote_sink_guard_t sink(g, [&](const remote_delivery_t& d, const rope_t&) {
-        seen_links.emplace_back(d.link);
-        seen_callers.emplace_back(d.caller);
-        if (d.return_route.bytes().empty()) ++empty_routes;
-    });
+    const tr::testing::remote_sink_guard_t sink(
+        g, [&](const remote_delivery_t& d, const tr::graph::value_t&) {
+            seen_links.emplace_back(d.link);
+            seen_callers.emplace_back(d.caller);
+            if (d.return_route.bytes().empty()) ++empty_routes;
+        });
 
     for (std::size_t i = 0; i < 3; ++i)
         check(g.subscribe_wire(v, subscriber_tlv(), route_tlv(), long_link(i), view_t{},
@@ -278,12 +279,13 @@ void test_delivery_allocation_is_flat() {
     const path_t src = *path_t::parse("/t/share/deliver");
     const auto v = g.register_vertex(src, role_t::STORED_VALUE);
     std::size_t delivered = 0;
-    const tr::testing::remote_sink_guard_t sink(g, [&](const remote_delivery_t& d, const rope_t&) {
-        // Touch the borrowed spellings: a snapshot that handed back a dangling view
-        // rather than a held record is a read of freed bytes here, which is what the
-        // ASan/TSan legs of this binary are for.
-        delivered += d.link.size() + d.caller.size();
-    });
+    const tr::testing::remote_sink_guard_t sink(
+        g, [&](const remote_delivery_t& d, const tr::graph::value_t&) {
+            // Touch the borrowed spellings: a snapshot that handed back a dangling view
+            // rather than a held record is a read of freed bytes here, which is what the
+            // ASan/TSan legs of this binary are for.
+            delivered += d.link.size() + d.caller.size();
+        });
 
     std::vector<std::size_t> per_write(kEdges, 0);
     for (std::size_t i = 0; i < kEdges; ++i) {

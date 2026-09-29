@@ -80,7 +80,7 @@ using tr::testing::make_value;
 using trace_t = std::vector<std::uint8_t>;
 
 /** @brief Append the first payload byte of @p v to @p out. */
-void note(trace_t& out, const rope_t& v) {
+void note(trace_t& out, const tr::graph::value_t& v) {
     const std::span<const std::byte> bytes = v.only().bytes();
     out.push_back(bytes.empty() ? 0u : std::to_integer<std::uint8_t>(bytes[0]));
 }
@@ -110,7 +110,7 @@ void note(trace_t& out, const rope_t& v) {
 void test_immediate_delivers_every_write_in_order() {
     std::printf("class 1 IMMEDIATE — every write, in order, none conflated:\n");
     trace_t eager;
-    auto sink = [&eager](const rope_t& v) { note(eager, v); };
+    auto sink = [&eager](const tr::graph::value_t& v) { note(eager, v); };
 
     graph_t g;
     const path_t p("/p/imm");
@@ -159,11 +159,11 @@ void test_stream_class_no_conflate_at_a_stream_receiver() {
 
     for (std::uint8_t b = 1; b <= 5; ++b) (void)g.write(producer, make_value({b}));
 
-    std::vector<std::shared_ptr<const rope_t>> owed;
+    std::vector<tr::graph::value_ref_t> owed;
     const auto drained = g.drain_unflushed(rx, owed);
     check(drained.has_value() && *drained == 5, "the STREAM receiver owes all five, none lost");
     trace_t order;
-    for (const std::shared_ptr<const rope_t>& sp : owed) note(order, *sp);
+    for (const tr::graph::value_ref_t& sp : owed) note(order, *sp);
     check(is_run(order, 5), "... in write order — a queue, not a coalesce (RFC-0008 §E)");
 
     // The ablation: the same five deliveries into a plain receiver keep only the newest.
@@ -193,8 +193,8 @@ void test_flush_emission_follows_the_source_role() {
         "§4.1.2 clause 2 — flush emits snapshot on a plain source, the list on a STREAM:\n");
     trace_t plain_out;
     trace_t stream_out;
-    auto plain_sink = [&plain_out](const rope_t& v) { note(plain_out, v); };
-    auto stream_sink = [&stream_out](const rope_t& v) { note(stream_out, v); };
+    auto plain_sink = [&plain_out](const tr::graph::value_t& v) { note(plain_out, v); };
+    auto stream_sink = [&stream_out](const tr::graph::value_t& v) { note(stream_out, v); };
 
     graph_t g;
     const path_t plain("/s/plain");
@@ -276,7 +276,7 @@ void test_attach_forward_never_backfills_the_ring() {
               g.subscribe(src, latched, kStreamDurable).has_value(),
           "two class-3 edges admitted at the same instant, differing only in bit 5");
 
-    std::vector<std::shared_ptr<const rope_t>> owed;
+    std::vector<tr::graph::value_ref_t> owed;
     const auto at_attach = g.drain_unflushed(rx, owed);
     check(at_attach.has_value() && *at_attach == 0 && owed.empty(),
           "the plain class-3 receiver owes NOTHING at attach — no backfill of the three "
@@ -289,7 +289,7 @@ void test_attach_forward_never_backfills_the_ring() {
           "... while the durability-requesting edge owes exactly ONE — so the harness CAN "
           "carry a pre-attach value, and the empty drain above is attach-forward, not inertia");
     trace_t gift;
-    for (const std::shared_ptr<const rope_t>& sp : owed) note(gift, *sp);
+    for (const tr::graph::value_ref_t& sp : owed) note(gift, *sp);
     check(gift.size() == 1 && gift[0] == 3,
           "... and it is the LATCH — the LKV alone, never the producer's three-write history");
 
@@ -299,7 +299,7 @@ void test_attach_forward_never_backfills_the_ring() {
     const auto after = g.drain_unflushed(rx, owed);
     check(after.has_value() && *after == 2, "two post-attach writes => two deliveries");
     trace_t forward_trace;
-    for (const std::shared_ptr<const rope_t>& sp : owed) note(forward_trace, *sp);
+    for (const tr::graph::value_ref_t& sp : owed) note(forward_trace, *sp);
     check(forward_trace.size() == 2 && forward_trace[0] == 4 && forward_trace[1] == 5,
           "... and the FIRST of them is the first post-attach write (4), not the oldest "
           "value the producer ever held (1)");
@@ -322,9 +322,9 @@ void test_class_bits_do_not_switch_the_fanout_loop() {
     trace_t conflate;
     trace_t immediate;
     trace_t stream;
-    auto c_sink = [&conflate](const rope_t& v) { note(conflate, v); };
-    auto i_sink = [&immediate](const rope_t& v) { note(immediate, v); };
-    auto s_sink = [&stream](const rope_t& v) { note(stream, v); };
+    auto c_sink = [&conflate](const tr::graph::value_t& v) { note(conflate, v); };
+    auto i_sink = [&immediate](const tr::graph::value_t& v) { note(immediate, v); };
+    auto s_sink = [&stream](const tr::graph::value_t& v) { note(stream, v); };
 
     graph_t g;
     const path_t p("/p/classes");

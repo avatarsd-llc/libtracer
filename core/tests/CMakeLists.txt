@@ -1276,6 +1276,14 @@ target_link_libraries(lkv_slot_test PRIVATE libtracer Threads::Threads)
 libtracer_test_warnings(lkv_slot_test)
 add_test(NAME lkv_slot COMMAND lkv_slot_test)
 
+# RFC-0028 slice 3 — `value_t`: one intrusive refcounted block per publish, drawn from the
+# vertex's injected source; the slot is one word. Pins the block and vertex shapes, the
+# handle's reference discipline, one-draw-per-write, and refusal-as-BACKPRESSURE.
+add_executable(value_test value_test.cpp)
+target_link_libraries(value_test PRIVATE libtracer Threads::Threads)
+libtracer_test_warnings(value_test)
+add_test(NAME value COMMAND value_test)
+
 # #361 §5 / ADR-0039 §1 — graph_t's injected memory_resource: per-write LKV
 # allocations route through it (counting pass-through), released in full at
 # graph destruction; a default graph never touches a foreign resource.

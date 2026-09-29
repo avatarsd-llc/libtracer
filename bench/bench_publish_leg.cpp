@@ -138,7 +138,7 @@ void run(verb_t verb, std::size_t subs) {
     // Function scope, NOT the `if` below: the `F&` subscribe overload binds the callback by
     // reference, so a lambda declared inside the branch would be destroyed while the edge
     // still pointed at it — and the arm would time a dangling call rather than a delivery.
-    auto cb = [&](const tr::view::rope_t&) { received.fetch_add(1, std::memory_order_relaxed); };
+    auto cb = [&](const tr::graph::value_t&) { received.fetch_add(1, std::memory_order_relaxed); };
     if (subs != 0) (void)g.subscribe(path, cb);
 
     const std::vector<std::byte> tlv = value_tlv(kSize);

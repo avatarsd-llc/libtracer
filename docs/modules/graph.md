@@ -20,8 +20,8 @@ by that vertex's own injected `mem::block_source_t` via `set_ring_source`
 ([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.6.1) — whose depth the
 owner declares host-side with `set_history_depth`, and which no peer can read or write —
 [RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.C), or *handler* (`on_read` / `on_write` — covering
-computed, proxy, sink, live-MMIO patterns). The last-known-value slot is an
-`atomic<shared_ptr<const rope_t>>` swap, so `read` / `write` of the value take **no
+computed, proxy, sink, live-MMIO patterns). The last-known-value slot is a one-word
+`value_t*` swap under the slot policy ([RFC-0028](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0028-lean-value-path.md) slice 3), so `read` / `write` of the value take **no
 per-vertex mutex**; that mutex guards the subscriber list, the history ring and the
 `await` waiter accounting, and a per-vertex condvar makes `await` block until the next
 write.
@@ -71,7 +71,7 @@ struct handlers_t {                                       // four seams, not two
     std::function<void(std::string_view, const view_t&)>     on_app_field_write;
 };
 
-using subscriber_fn_t = void (*)(void* ctx, const rope_t& value);
+using subscriber_fn_t = void (*)(void* ctx, const value_t& value);
 class  subscription_t { /* opaque: producer vertex + :subscribers[] slot index; graph_t is the
                            sole friend. Public: default-construct, copy, operator==. */ };
 
@@ -108,7 +108,7 @@ class graph_t {
     result_t<std::vector<rope_t>> history(vertex_handle_t) const;   // stream window (RETAINED)
     // RFC-0008 §E drain cursor — what the stream OWES, and how to say it is paid
     result_t<std::size_t> drain_unflushed(vertex_handle_t,
-                                          std::vector<std::shared_ptr<const rope_t>>& out,
+                                          std::vector<value_ref_t>& out,
                                           std::uint64_t* gap_before = nullptr);
     result_t<void>        mark_flushed(vertex_handle_t);
 
@@ -175,7 +175,7 @@ The hook runs exactly once, on your thread, outside every graph lock: **inline, 
 **before the enclosing `write()` returns** when you called it from inside one. The
 one-argument overload retires the edge identically and simply carries no signal — which is
 sufficient whenever you unsubscribe from outside a callback, since that call is already
-quiescent on return (`core/include/libtracer/graph.hpp:1813` states the bound on `ctx`).
+quiescent on return (`core/include/libtracer/graph.hpp:1814` states the bound on `ctx`).
 ```
 
 ```{admonition} No strings on the hot path
@@ -225,11 +225,12 @@ for (...) g.write(v, p.field(), setpoint_tlv);           // hot loop — zero st
 ## What a read hands back
 
 `read` and `await` return `result_t<value_ref_t>`, not `result_t<rope_t>`
-(`core/include/libtracer/graph.hpp:1428,1634` by handle, `:2266,2272` by path;
-`value_ref_t` at `core/include/libtracer/vertex.hpp:286`). A `value_ref_t` is an **owning
-reference** to the value the vertex published: the LKV slot holds it as a
-`std::shared_ptr<const rope_t>`, so handing that reference back costs a refcount clone of
-one control block instead of one `segment_ptr_t` clone per link.
+(`core/include/libtracer/graph.hpp:1429,1635` by handle, `:2266,2272` by path;
+`value_ref_t` at `core/include/libtracer/value.hpp:357`). A `value_ref_t` is an **owning
+reference** to the value the vertex published: the LKV slot holds one intrusive `value_t*`
+— a refcount, the link count and the link chain in a single block drawn from the vertex's
+`block_source_t` — so handing that reference back costs one refcount increment instead of
+one `segment_ptr_t` clone per link.
 
 The rule, and the reason the API is not uniform:
 
@@ -258,8 +259,8 @@ is the correct spelling — one dereference for the `result_t`, one for the refe
 ```{admonition} A held reference pins the value
 :class: warning
 Holding a `value_ref_t` keeps the value alive, exactly as the reader's own copy did. Under
-an **injected `std::pmr::memory_resource`** that is a real obligation rather than a
-formality: the value was allocated from the graph's resource, so an outstanding reference
+an **injected `block_source_t`** that is a real obligation rather than a
+formality: the value's block was drawn from the graph's source, so an outstanding reference
 pins that allocation and defers its reclamation
 ([ADR-0069 — LKV slot is a compile-time policy, hazard reclamation](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0069-lkv-slot-is-a-compile-time-policy-hazard-reclamation.md)).
 A reader that parks a `value_ref_t` in long-lived state holds a bounded pool's block for
@@ -724,7 +725,17 @@ a reply already being assembled.
 :project: libtracer
 ```
 
+```{doxygenclass} tr::graph::value_t
+:project: libtracer
+:members:
+```
+
 ```{doxygenclass} tr::graph::value_ref_t
+:project: libtracer
+:members:
+```
+
+```{doxygenclass} tr::graph::value_storage_t
 :project: libtracer
 :members:
 ```
