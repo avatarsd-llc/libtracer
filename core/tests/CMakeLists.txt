@@ -2298,6 +2298,16 @@ if(LIBTRACER_NET_PLANE)
     add_test(NAME retained_subscription_seam COMMAND retained_subscription_seam_test)
 endif()
 
+# #1582 — the router's four peer-reachable `view::over_bytes` ownership copies (the cold and
+# warm COMPACT payload, the host-local subscribe door's route + SUBSCRIBER TLVs) draw from the
+# injected `flat` seam; a refusal is a counted drop / BACKPRESSURE, never a heap fallback.
+if(LIBTRACER_NET_PLANE)
+    add_executable(router_flat_seam_test router_flat_seam_test.cpp)
+    target_link_libraries(router_flat_seam_test PRIVATE libtracer)
+    libtracer_test_warnings(router_flat_seam_test)
+    add_test(NAME router_flat_seam COMMAND router_flat_seam_test)
+endif()
+
 # #1618 — no slot policy may livelock a high-priority reader against a low-priority writer on
 # one CPU: two SCHED_FIFO threads pinned together, the RTOS hazard reproduced on the host. Needs
 # CAP_SYS_NICE and two CPUs; without them it exits 77 and ctest reports it SKIPPED, never passed.
