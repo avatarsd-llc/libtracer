@@ -214,6 +214,9 @@ jobs:
           { echo "${desc}"; echo; lscpu; } > bench/host.txt
           { echo "### bench-local host"; echo '```'; echo "${desc}"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
+      # Deliberately `-j "$(nproc)"`, not BUILD_JOBS (#1637): this runner (`studio-bench`)
+      # is un-quota'd so bench timings stay clean, and these steps only COMPILE — the
+      # benches themselves run serially, pinned to one CPU, after the quiescence guard.
       - name: Build the benchmark set (Release)
         run: |
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
@@ -297,6 +300,7 @@ jobs:
         run: |
           if bash bench/fetch_zenoh.sh; then
             cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
+            # Compile-only on the un-quota'd bench runner; keeps `nproc` (#1637, see above).
             if cmake --build bench/build --target bench_zenoh -j "$(nproc)"; then
               taskset -c "$BENCH_CPU" ./bench/build/bench_zenoh >bench/bench_zenoh_raw.txt || true
             fi
