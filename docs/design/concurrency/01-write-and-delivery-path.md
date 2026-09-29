@@ -270,8 +270,8 @@ struct delivery_drops_t {
 | `no_target` | the target PATH resolved to no live vertex — retired, or never created | `graph.cpp:2052-2055` |
 | `denied` | a subscription edge's delivery was refused by the target's `:acl`, gated on the **edge's stored caller**, not the writer's | `graph.cpp:2069-2072` |
 | `denied` | a WRITE was refused at the graph's own gate — the API write, the `FWD{WRITE}` terminus and both `COMPACT` terminus arms enter through it | `graph.cpp:2421-2475` |
-| `no_target` | a net-plane route resolved to no vertex (`fwd_router.cpp:3255`), or its binding vanished under a concurrent unbind (`:3150`) | `fwd_router.cpp:3150`, `:3255` |
-| `out_of_memory` | a `COMPACT` terminus could not take the payload view or reserve its rope | `fwd_router.cpp:3101-3103`, `:3112`, `:3262` |
+| `no_target` | a net-plane route resolved to no vertex (`fwd_router.cpp:3461`), or its binding vanished under a concurrent unbind (`:3356`) | `fwd_router.cpp:3356`, `:3461` |
+| `out_of_memory` | a `COMPACT` terminus could not take the payload view or reserve its rope | `fwd_router.cpp:3307-3309`, `:3318`, `:3470` |
 | `out_of_memory` | the nothrow delivery clone could not be allocated | `graph.cpp:2081-2084` |
 | `fan_out_truncated` | the wide-fan-out overflow buffer could not be reserved, so every edge past the inline prefix was abandoned | `vertex.hpp:2774` |
 

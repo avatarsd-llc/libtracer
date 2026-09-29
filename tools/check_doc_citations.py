@@ -289,7 +289,7 @@ ANCHORS = [
      "const conn_settings_t* settings_of(std::string_view name) const;"),
     # The synthesized `:children[]` a bus connection answers accepted-peer enumeration from —
     # the fact that replaced reference/13's stale "`:children[]` / `:settings`".
-    ("core/src/transport_vertex.cpp:738", "handlers.on_children = [bus]() -> result_t<view_t> {"),
+    ("core/src/transport_vertex.cpp:733", "handlers.on_children = [bus]() -> result_t<view_t> {"),
     ("core/src/graph.cpp:3564", "sel == field_sel_t::TAIL", 'step0.name == "subscribers"'),
     ("core/src/graph.cpp:3684", "!whole_field(field)", 'step0.name == "acl"'),
     ("core/src/graph.cpp:3724", "field_selector(field) != field_sel_t::APPEND"),
@@ -378,10 +378,10 @@ ANCHORS = [
      "field_write read an empty head"),
     ("core/src/graph.cpp:3536", "result_t<void> graph_t::field_write"),
     ("core/src/graph.cpp:3726", "acl_right_t::CREATE", 'step0.name == "children"'),
-    ("core/src/fwd_router.cpp:3355", "fwd_router_t::deliver_remote"),
-    ("core/src/fwd_router.cpp:3393", "val.try_materialize(*flat_)"),
-    ("core/src/fwd_router.cpp:3394", "if (!flat) return;", "A REFUSED materialize drops the delivery"),
-    ("core/src/fwd_router.cpp:3396", "emit_compact", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:3565", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:3603", "val.try_materialize(*flat_)"),
+    ("core/src/fwd_router.cpp:3604", "if (!flat) return;", "A REFUSED materialize drops the delivery"),
+    ("core/src/fwd_router.cpp:3606", "emit_compact", "fwd_router_t::deliver_remote"),
     # The FULL-ROUTE delivery leg's iov, and the scope is load-bearing: this exact statement
     # appears four times in the file and TWICE inside `deliver_remote` — once in the bound
     # reverse-list arm and once in the default full-route arm below it. The old scope named
@@ -761,7 +761,7 @@ ANCHORS = [
     ('core/src/graph.cpp:3817', 'result_t<void> graph_t::create_child(vertex_t* parent, const view_t& spec_value) {'),
     ('core/src/graph.cpp:4874', 'result_t<void> graph_t::write(const path_t& path, rope_t value) {'),
     # core/src/op_resolve_walk.hpp
-    ('core/src/fwd_reply.hpp:109', 'void tlv_sliced(std::span<const std::byte> wire) {'),
+    ('core/src/fwd_reply.hpp:110', 'void tlv_sliced(std::span<const std::byte> wire) {'),
     ('core/src/op_resolve_walk.hpp:1011',
      'if (!req.src.spans_intact()) return std::unexpected(status_t::BACKPRESSURE);'),
     # core/src/path.cpp
@@ -878,9 +878,9 @@ ANCHORS = [
     ('tools/cortexm0_footprint.py:151', 'cxx_flags = ['),
     ('tools/cortexm0_footprint.py:158', '"-DLIBTRACER_NO_ATOMIC",'),
     ('tools/cortexm0_footprint.py:172', '"--specs=nano.specs",'),
-    ('core/tests/CMakeLists.txt:1840', 'add_executable(substrate_test_no_atomic'),
-    ('core/tests/CMakeLists.txt:1855', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
-    ('core/tests/CMakeLists.txt:1856', '    LIBTRACER_NO_ATOMIC'),
+    ('core/tests/CMakeLists.txt:1845', 'add_executable(substrate_test_no_atomic'),
+    ('core/tests/CMakeLists.txt:1860', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
+    ('core/tests/CMakeLists.txt:1861', '    LIBTRACER_NO_ATOMIC'),
     # The leading indent is load-bearing: the bare token also appears in the comment
     # three lines above the executable, and an anchor that matches both is not an anchor.
 
