@@ -7,6 +7,12 @@ versioning/publish strategy.
 
 ## [Unreleased]
 
+## [0.16.1] — 2026-09-29
+
+No changes to this package. Its version moves in lockstep with core; see the core section of these release notes.
+
+## [0.16.0] — 2026-08-29
+
 ### Changed
 
 - **BREAKING — `@avatarsd-llc/libtracer-client`: `encodeConnSpec` emits the creator-endpoint
