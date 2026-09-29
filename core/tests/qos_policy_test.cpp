@@ -54,6 +54,7 @@
 #include "libtracer/config_reader.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_history.hpp"
 #include "test_support.hpp"
 #include "test_values.hpp"
 
@@ -384,16 +385,16 @@ void test_history_depth_is_host_only() {
 
     // Default depth is 1: the receiver's ring keeps the last value only.
     for (std::uint8_t i = 1; i <= 4; ++i) (void)g.write(producer, byte_value(i));
-    const auto shallow = g.history(stream);
+    const auto shallow = tr::testing::history_of(g, stream);
     check(shallow.has_value() && shallow->size() == 1, "an undeclared ring keeps ONE entry");
-    check(g.history(producer).error() == status_t::SCHEMA_NOT_FOUND,
+    check(tr::testing::history_of(g, producer).error() == status_t::SCHEMA_NOT_FOUND,
           "and the PRODUCER holds no ring at all — a producer never queues");
 
     // The owner declares a depth; the ADMISSION path must read the new value, not merely
     // report it.
     (void)g.set_retention(stream, tr::graph::retention_t::N, 3);
     for (std::uint8_t i = 1; i <= 5; ++i) (void)g.write(producer, byte_value(i));
-    const auto deep = g.history(stream);
+    const auto deep = tr::testing::history_of(g, stream);
     check(deep.has_value() && deep->size() == 3,
           "set_retention(N, 3) => the receiver ring TRIMS to three (the admission read it)");
 
@@ -401,7 +402,7 @@ void test_history_depth_is_host_only() {
     check(fails_with(g.write(path_t("/h/s:settings.history_keep_last"), value_le(9, 4)),
                      status_t::SCHEMA_NOT_FOUND),
           "a `:settings.history_keep_last` write answers SCHEMA_NOT_FOUND");
-    const auto after = g.history(stream);
+    const auto after = tr::testing::history_of(g, stream);
     check(after.has_value() && after->size() == 3, "... and did not change the depth");
     const std::optional<decoded_t> settings = decode_read(g.read(path_t("/h/s:settings")));
     check(settings.has_value() && settings->tlv.children.empty(),
@@ -561,13 +562,15 @@ void register_client(graph_t& g) {
     g_client_writes = 0;
     g_client_last = 0;
     tr::graph::handlers_t h;
-    h.on_write = [](const rope_t& v, const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
+    auto h_on_write = [](const tr::graph::value_t& v,
+                         const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
         ++g_client_writes;
         const tr::view::view_t flat = v.flatten();
         const std::span<const std::byte> b = flat.bytes();
         if (!b.empty()) g_client_last = std::to_integer<std::uint8_t>(b[0]);
         return {};
     };
+    h.on_write = tr::graph::thunk(h_on_write);
     (void)g.register_vertex(path_t("/client"), role_t::HANDLER, std::move(h));
 }
 
@@ -668,7 +671,7 @@ void test_conformance_vectors() {
               "... which is the status the ring-depth write returns");
         (void)g.set_retention(s, tr::graph::retention_t::N, 2);
         for (std::uint8_t i = 1; i <= 3; ++i) (void)g.write(s, byte_value(i));
-        const auto hist = g.history(s);
+        const auto hist = tr::testing::history_of(g, s);
         check(hist.has_value() && hist->size() == 2,
               "... while the HOST-side declaration does take effect (the vector's other half)");
     }

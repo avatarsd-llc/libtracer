@@ -19,6 +19,7 @@
  * Runs under ctest as `example_graph_stream`; returns non-zero on any failed check.
  */
 
+#include <array>
 #include <cstdio>
 #include <cstring>
 #include <span>
@@ -42,11 +43,6 @@ bool holds(const tr::graph::value_t& r, std::string_view text) {
            std::memcmp(r.only().bytes().data(), text.data(), text.size()) == 0;
 }
 
-/** @brief The same test on a rope (what `history` hands back). */
-bool holds(const tr::view::rope_t& r, std::string_view text) {
-    return holds(tr::graph::value_storage_t<2>{r}.get(), text);
-}
-
 /** @brief Report expectation @p what and record a failure on @p ok. */
 void check(bool& ok, bool cond, const char* what) {
     std::printf("  [%s] %s\n", cond ? "ok" : "FAIL", what);
@@ -65,13 +61,15 @@ int main() {
 
     for (const char* frame : {"f1", "f2", "f3", "f4"}) (void)g.write(events, value_of(frame));
 
-    const auto ring = g.history(events);
-    check(ok, ring.has_value(), "a STREAM vertex serves its history ring");
-    std::printf("ring holds %zu of the 4 writes\n", ring ? ring->size() : 0u);
-    check(ok, ring && ring->size() == 3,
-          "the ring is bounded at the declared depth (oldest trimmed)");
-    check(ok, ring && holds(ring->front(), "f2"), "history is oldest-first, and f1 was trimmed");
-    check(ok, ring && holds(ring->back(), "f4"), "history is newest-last");
+    // `history` fills caller storage and allocates nothing: each slot is a refcount share of a
+    // retained block. A span as long as the declared depth always holds the whole ring.
+    std::array<tr::graph::value_ref_t, 3> ring;
+    const auto n = g.history(events, ring);
+    check(ok, n.has_value(), "a STREAM vertex serves its history ring");
+    std::printf("ring holds %zu of the 4 writes\n", n ? *n : 0u);
+    check(ok, n && *n == 3, "the ring is bounded at the declared depth (oldest trimmed)");
+    check(ok, n && holds(*ring.front(), "f2"), "history is oldest-first, and f1 was trimmed");
+    check(ok, n && holds(*ring.back(), "f4"), "history is newest-last");
 
     const auto latest = g.read(events);
     check(ok, latest && holds(**latest, "f4"),

@@ -172,14 +172,18 @@ struct seen_t {
 
 /** @brief A HANDLER at @p path recording every write's subject into @p log. */
 vertex_handle_t register_recorder(graph_t& g, std::string_view path, std::vector<seen_t>& log) {
+    // `ctx` is the caller's log, which outlives the graph — this helper returns long before
+    // the first write, so the hook must not point at anything of its own frame.
     handlers_t h;
-    h.on_write = [&log](const tr::view::rope_t&,
-                        const write_ctx_t& ctx) -> tr::graph::result_t<void> {
-        log.push_back(
-            seen_t{.subject = std::string(ctx.subject), .local_owner = ctx.is_local_owner()});
-        return {};
-    };
-    return g.register_vertex(*path_t::parse(path), role_t::HANDLER, std::move(h));
+    h.on_write = {
+        [](void* c, const tr::graph::value_t&,
+           const write_ctx_t& ctx) -> tr::graph::result_t<void> {
+            static_cast<std::vector<seen_t>*>(c)->push_back(
+                seen_t{.subject = std::string(ctx.subject), .local_owner = ctx.is_local_owner()});
+            return {};
+        },
+        &log};
+    return g.register_vertex(*path_t::parse(path), role_t::HANDLER, h);
 }
 
 /** @brief A `PATH` TLV over the given `/`-segments. */

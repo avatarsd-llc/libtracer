@@ -139,7 +139,7 @@ int main() {
     const auto stored_bytes = [&](graph_t& g, tr::graph::vertex_handle_t v) {
         const auto r = g.read(v, fp->field());
         if (!r) return std::vector<std::byte>{};
-        const tr::view::view_t flat = r->flatten();
+        const tr::view::view_t flat = (*r)->flatten();
         const std::span<const std::byte> b = flat.bytes();
         return std::vector<std::byte>(b.begin(), b.end());
     };

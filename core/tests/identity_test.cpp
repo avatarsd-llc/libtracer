@@ -90,8 +90,8 @@ std::string hex(std::span<const std::byte> b) {
 }
 
 /** @brief Read `path:field` as @p caller — the handle+field overload the FWD resolver uses. */
-tr::graph::result_t<tr::view::rope_t> read_as(graph_t& g, const char* path,
-                                              std::string_view caller) {
+tr::graph::result_t<tr::graph::value_ref_t> read_as(graph_t& g, const char* path,
+                                                    std::string_view caller) {
     const auto p = path_t::parse(path);
     if (!p) return std::unexpected(status_t::INVALID_PATH);
     const auto v = g.find(p->key());
@@ -103,7 +103,7 @@ tr::graph::result_t<tr::view::rope_t> read_as(graph_t& g, const char* path,
 std::vector<std::byte> read_identity_bytes(graph_t& g, const char* path, std::string_view caller) {
     const auto r = read_as(g, path, caller);
     if (!r) return {};
-    const tr::view::view_t flat = r->flatten();
+    const tr::view::view_t flat = (*r)->flatten();
     const auto span = flat.bytes();
     return std::vector<std::byte>(span.begin(), span.end());
 }

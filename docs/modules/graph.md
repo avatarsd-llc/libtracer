@@ -72,14 +72,23 @@ struct delivery_policy_t {  // ONE subscription's delivery policy (RFC-0022 §3.
 struct write_ctx_t {         // the per-call context a write carries into on_write (#375)
     std::string_view subject;  // the writer's resolved subject token; EMPTY = the local host
     bool is_local_owner() const noexcept;  // subject.empty()
-};                           // BORROWED for the call, like the rope beside it — copy if retained
+};                           // BORROWED for the call, like the value beside it — copy if retained
 
-struct handlers_t {                                       // four seams, not two
-    std::function<result_t<rope_t>()>                        on_read;
-    std::function<result_t<void>(const rope_t&, const write_ctx_t&)> on_write;
-    std::function<result_t<view_t>()>                        on_children;
-    std::function<void(std::string_view, const view_t&)>     on_app_field_write;
+template <class R, class... A>
+struct hook_t<R(A...)> {     // THE callback idiom (RFC-0028 D10): {fn, ctx}, 16 B, owns nothing
+    R (*fn)(void* ctx, A...);
+    void* ctx;               // caller-owned; must outlive the vertex
 };
+thunk(f);                    // hook over a callable you keep alive (a stateless one: any lifetime)
+
+struct handlers_t {                                       // six hooks, 96 B on the host
+    hook_t<result_t<rope_t>()>                                    on_read;
+    hook_t<result_t<void>(const value_t&, const write_ctx_t&)>    on_write;   // BY REFERENCE
+    hook_t<result_t<view_t>()>                                    on_children;
+    hook_t<admission_t(const value_t&, const write_ctx_t&)>       on_admit;
+    hook_t<result_t<view_t>(std::string_view, const view_t&)>     on_app_field_admit;
+    hook_t<void(std::string_view, const view_t&)>                 on_app_field_write;
+};                            // keep a value past on_write/on_admit: value_ref_t::keep(value)
 
 using subscriber_fn_t = void (*)(void* ctx, const value_t& value);
 class  subscription_t { /* opaque: producer vertex + :subscribers[] slot index; graph_t is the
@@ -91,8 +100,10 @@ class graph_t {
                      mem::block_source_t* ctl          = &mem::heap_source());
 
     // registration and removal
-    vertex_handle_t register_vertex(const path_t&, role_t, handlers_t = {});
-    result_t<vertex_handle_t> try_register_vertex(const path_t&, role_t, handlers_t = {});
+    vertex_handle_t register_vertex(const path_t&, role_t, handlers_t = {},
+                                    std::span<const payload_right_t> rights = {});
+    result_t<vertex_handle_t> try_register_vertex(const path_t&, role_t, handlers_t = {},
+                                                  std::span<const payload_right_t> rights = {});
     result_t<void> retire(vertex_handle_t);                       // logical absence, subtree-wide
     std::uint32_t  retire_generation(vertex_handle_t) const noexcept;
     void           collect();                    // free the parked value seams — CALLER-timed
@@ -115,7 +126,9 @@ class graph_t {
     result_t<void>        assign(vertex_handle_t, rope_t, std::string_view caller = {});
     result_t<void>        propagate(vertex_handle_t);
     void                  set_delivery_mode(vertex_handle_t, delivery_mode_t);
-    result_t<std::vector<rope_t>> history(vertex_handle_t) const;   // stream window (RETAINED)
+    result_t<std::size_t> history(vertex_handle_t, std::span<value_ref_t> out) const;  // 0 allocs
+    result_t<value_ref_t> read (vertex_handle_t, const field_path_t&,       // ONE read type
+                                std::string_view caller = {}) const;        // (RFC-0028 D11)
     // RFC-0008 §E drain cursor — what the stream OWES, and how to say it is paid
     result_t<std::size_t> drain_unflushed(vertex_handle_t,
                                           std::vector<value_ref_t>& out,
@@ -160,8 +173,12 @@ class graph_t {
 };
 ```
 
-There is no `std::function` subscribe overload and no `result_t<void>` callback form. The
-per-edge sink is a `{fn, ctx}` pair so the per-publish edge snapshot under the fan-out lock
+There is no `std::function` anywhere on the graph's seams (RFC-0028 D10): every hook — the
+subscription edge, the six `handlers_t` seams, the child-type catalog — is a `{fn, ctx}` pair,
+and a caller keeps the `ctx` alive. A seam that is handed `const value_t&` (a callback edge,
+`on_write`, `on_admit`) borrows it for the call; to keep it, take `value_ref_t::keep(value)`,
+which shares a published block and copies the links out of a relay's stack storage. There is
+no `result_t<void>` callback form. The per-edge sink is a `{fn, ctx}` pair so the per-publish edge snapshot under the fan-out lock
 is a trivial copy rather than a `std::function` clone that heap-allocates once captures
 exceed the small-buffer size
 ([ADR-0047 — build-time closed module sets, compile-time seams](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0047-build-time-closed-module-sets-compile-time-seams.md)).
@@ -170,7 +187,7 @@ temporary lambda does not compile.
 
 ```{admonition} `ctx` lives until the reclamation policy's grace point — and the library tells you when
 :class: important
-`unsubscribe` **deactivates** the slot (`core/include/libtracer/graph.hpp:1868`); a
+`unsubscribe` **deactivates** the slot (`core/include/libtracer/graph.hpp:1904`); a
 delivery already in flight snapshotted the edge and completes, and the `{fn, ctx}` pair is
 the one leg of that snapshot the library owns no copy of. So "when may I free `ctx`?" is answered by this build's **reclamation policy**
 ([ADR-0080](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0080-reclamation-policy-is-a-build-time-closed-per-target-seam.md),
@@ -187,7 +204,7 @@ The hook runs exactly once, on your thread, outside every graph lock: **inline, 
 **before the enclosing `write()` returns** when you called it from inside one. The
 one-argument overload retires the edge identically and simply carries no signal — which is
 sufficient whenever you unsubscribe from outside a callback, since that call is already
-quiescent on return (`core/include/libtracer/graph.hpp:1827` states the bound on `ctx`).
+quiescent on return (`core/include/libtracer/graph.hpp:1863` states the bound on `ctx`).
 ```
 
 ```{admonition} No strings on the hot path
@@ -237,7 +254,7 @@ for (...) g.write(v, p.field(), setpoint_tlv);           // hot loop — zero st
 ## What a read hands back
 
 `read` and `await` return `result_t<value_ref_t>`, not `result_t<rope_t>`
-(`core/include/libtracer/graph.hpp:1429,1648` by handle, `:2279,2285` by path;
+(`core/include/libtracer/graph.hpp:1449,1668` by handle, `:2315,2321` by path;
 `value_ref_t` at `core/include/libtracer/value.hpp:559`). A `value_ref_t` is an **owning
 reference** to the value the vertex published: the LKV slot holds one intrusive `value_t*`
 — a refcount, the link count and the link chain in a single block drawn from the vertex's
@@ -720,6 +737,19 @@ a reply already being assembled.
 ```{doxygenstruct} tr::graph::write_ctx_t
 :project: libtracer
 :members:
+```
+
+```{doxygenstruct} tr::graph::hook_t
+:project: libtracer
+```
+
+```{doxygenstruct} tr::graph::hook_t< R(A...)>
+:project: libtracer
+:members:
+```
+
+```{doxygenfunction} tr::graph::thunk(F &f) noexcept
+:project: libtracer
 ```
 
 ```{doxygenstruct} tr::graph::handlers_t

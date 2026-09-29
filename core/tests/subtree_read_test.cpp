@@ -382,7 +382,7 @@ void test_acl_prune() {
         if (!at_v) continue;
         const auto members = g.read(*at_v, at_children.field(), "peer");
         if (!members) continue;  // READ denied here => cannot enumerate below
-        const view_t flat = members->flatten();
+        const view_t flat = (*members)->flatten();
         const auto listing = parse_snapshot(flat.bytes());  // POINT{ POINT{NAME}… } parses too
         if (!listing) continue;
         for (const std::string& child : listing->topology) {
@@ -467,7 +467,8 @@ void test_leaf_and_handler_regression() {
 
     // A HANDLER target's on_read keeps precedence over the snapshot even with children.
     tr::graph::handlers_t h;
-    h.on_read = [] { return rope_t{make_value({0x2A})}; };
+    auto h_on_read = [] { return rope_t{make_value({0x2A})}; };
+    h.on_read = tr::graph::thunk(h_on_read);
     vertex_handle_t hv = g.register_vertex(path_t("/hnd"), role_t::HANDLER, std::move(h));
     (void)g.register_vertex(path_t("/hnd/child"), role_t::STORED_VALUE);
     (void)g.write(path_t("/hnd/child"), make_value(value_tlv({0x11})));

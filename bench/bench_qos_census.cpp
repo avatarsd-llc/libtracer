@@ -108,8 +108,9 @@ int main() {
         for (int i = 0; i < kPer; ++i) {
             const std::string p = "/handler/v" + std::to_string(i);
             tr::graph::handlers_t h;
-            h.on_read = [] { return tr::view::view_t{}; };
-            classify(g.register_vertex(path_t(p), role_t::HANDLER, std::move(h)), c);
+            h.on_read = tr::graph::thunk(
+                []() -> tr::graph::result_t<tr::view::rope_t> { return tr::view::rope_t{}; });
+            classify(g.register_vertex(path_t(p), role_t::HANDLER, h), c);
         }
         report("handler", c, "the handler", total);
     }

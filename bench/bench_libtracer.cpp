@@ -341,12 +341,14 @@ void run_inproc_target(std::size_t S, std::size_t F, target_kind_t kind, const c
         const std::string seg = "t" + std::to_string(f);
         if (kind == target_kind_t::HANDLER) {
             tr::graph::handlers_t h;
-            h.on_write = [&recv](const rope_t&,
-                                 const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
-                recv.fetch_add(1, std::memory_order_relaxed);
-                return {};
-            };
-            (void)g.register_vertex(*path_t::parse("/" + seg), role_t::HANDLER, std::move(h));
+            h.on_write = {[](void* c, const tr::graph::value_t&,
+                             const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
+                              static_cast<std::atomic<std::uint64_t>*>(c)->fetch_add(
+                                  1, std::memory_order_relaxed);
+                              return {};
+                          },
+                          &recv};
+            (void)g.register_vertex(*path_t::parse("/" + seg), role_t::HANDLER, h);
         } else {
             (void)g.register_vertex(*path_t::parse("/" + seg), role_t::STORED_VALUE);
         }

@@ -48,6 +48,7 @@
 #include "libtracer/byteorder.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_history.hpp"
 #include "test_support.hpp"
 #include "test_values.hpp"
 
@@ -203,11 +204,12 @@ void test_handler_sentinel() {
     graph_t g;
     int seen = -1;
     tr::graph::handlers_t h;
-    h.on_write = [&seen](const rope_t& in,
-                         const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
+    auto h_on_write = [&seen](const tr::graph::value_t& in,
+                              const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
         seen = std::to_integer<int>(in.only().bytes()[0]);
         return {};
     };
+    h.on_write = tr::graph::thunk(h_on_write);
     auto v = g.register_vertex(path_t("/h/sink"), role_t::HANDLER, std::move(h));
     const hook_guard_t oom(fail_all);
     const auto w = g.write(v, make_value({0x5A}));
@@ -298,11 +300,12 @@ void test_handler_delivery_allocates_nothing() {
     graph_t g;
     int handled = 0;
     tr::graph::handlers_t h;
-    h.on_write = [&handled](const rope_t&,
-                            const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
+    auto h_on_write2 = [&handled](const tr::graph::value_t&,
+                                  const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
         ++handled;
         return {};
     };
+    h.on_write = tr::graph::thunk(h_on_write2);
     auto v = g.register_vertex(path_t("/h/fan"), role_t::HANDLER, std::move(h));
     std::array<int, kSubs> counts{};
     for (int& c : counts) (void)g.subscribe(path_t("/h/fan"), count_cb, &c);
@@ -443,43 +446,40 @@ void test_target_adopt_allocates_nothing() {
 }
 
 /**
- * @brief A HANDLER target cannot adopt (it stores nothing and its `on_write` reads a rope),
- *        so its leg still clones — and a spilled clone refused by the heap drops that ONE leg,
- *        counted once as OUT_OF_MEMORY. This is the width-1 site #854's ruling still names.
+ * @brief A HANDLER target is handed the published block BY REFERENCE (RFC-0028 D10), so its
+ *        leg allocates nothing and an exhausted heap cannot shed it. Until slice 7 this leg
+ *        cloned the links into a rope, and a spilled clone refused by the heap dropped it —
+ *        the width-1 site #854's ruling named; that site is gone with the clone.
  */
-void test_handler_target_clone_drop() {
-    std::printf("handler target — the one target leg that still clones drops on OOM:\n");
+void test_handler_target_takes_no_clone() {
+    std::printf("handler target — the leg takes no clone, so an exhausted heap sheds nothing:\n");
     graph_t g;
     int handled = 0;
+    std::size_t seen_links = 0;
     tr::graph::handlers_t h;
-    h.on_write = [&handled](const rope_t&,
-                            const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
+    auto h_on_write3 = [&](const tr::graph::value_t& v,
+                           const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
         ++handled;
+        seen_links = v.link_count();
         return {};
     };
+    h.on_write = tr::graph::thunk(h_on_write3);
     auto a = g.register_vertex(path_t("/s/src"), role_t::STORED_VALUE);
-    (void)g.register_vertex(path_t("/s/act"), role_t::HANDLER, std::move(h));
+    (void)g.register_vertex(path_t("/s/act"), role_t::HANDLER, h);
     (void)g.subscribe(path_t("/s/src"), path_t("/s/act"));
+    // Publish once with memory available so the source's block exists; then refuse EVERY
+    // allocation of the clone's old size and publish again. The source mints its block
+    // (a different size) and the handler leg must still land, drawing nothing.
+    check(g.write(a, three_link()).has_value() && handled == 1, "baseline delivery lands");
     const std::uint64_t oom_before = g.delivery_drops().out_of_memory;
     {
-        g_reject_size = 3 * sizeof(view_t);  // exactly the clone's chain reserve
+        g_reject_size = 3 * sizeof(view_t);  // exactly the chain reserve the old clone took
         const hook_guard_t oom(fail_exact);
         check(g.write(a, three_link()).has_value(), "the source write itself succeeds");
     }
-    check(handled == 0, "the handler target's delivery leg was dropped (no partial write)");
-
-    // ASSERT THE OBSERVABLE, not only the behaviour. A dropped delivery is otherwise
-    // indistinguishable from one that never had a target, and `delivery_drops()` is the only
-    // thing that tells an operator which happened.
-    const auto d = g.delivery_drops();
-    check(d.out_of_memory == oom_before + 1, "the OOM drop is counted once, by its own cause");
-    check(d.no_target == 0 && d.denied == 0,
-          "and is not attributed to a missing target or a denied write");
-
-    check(g.write(a, three_link()).has_value() && handled == 1,
-          "the target edge delivers again once memory returns");
-    check(g.delivery_drops().out_of_memory == oom_before + 1,
-          "and the successful redelivery counts no further drop");
+    check(handled == 2, "the handler target was delivered under the refusal");
+    check(seen_links == 3, "... the whole three-link value, by reference");
+    check(g.delivery_drops().out_of_memory == oom_before, "so no OOM drop is counted");
 }
 
 /** @brief A receiver ring's admission is refused by ITS OWN source (bounded-lossy), the LKV
@@ -497,11 +497,11 @@ void test_stream_ring_shed() {
         const auto r = g.read(v);
         check(r.has_value() && std::to_integer<int>((*r)->only().bytes()[0]) == 0x10,
               "the LKV published even though the ring entry was refused admission");
-        const auto hist = g.history(v);
+        const auto hist = tr::testing::history_of(g, v);
         check(hist.has_value() && hist->empty(), "the refused entry never entered the ring");
     }
     src.refuse = false;
-    check(g.write(v, make_value({0x11})).has_value() && g.history(v)->size() == 1,
+    check(g.write(v, make_value({0x11})).has_value() && tr::testing::history_of(g, v)->size() == 1,
           "the ring admits again once the source can fund it");
     check(src.live == 1, "exactly one reservation is held — charge on append, one entry kept");
     check(g.ring_reserved_bytes(v).has_value() && *g.ring_reserved_bytes(v) > 0,
@@ -528,7 +528,8 @@ void test_ring_reservations_are_symmetric() {
         check(src.live == 3, "the trim released every entry the depth intent dropped");
         const auto held = g.ring_reserved_bytes(v);
         check(held.has_value() && *held > 0, "the ring reports the bytes it holds reserved");
-        check(g.history(v)->size() == 3, "and the depth intent is what bounds the entry count");
+        check(tr::testing::history_of(g, v)->size() == 3,
+              "and the depth intent is what bounds the entry count");
     }
     check(src.live == 0, "tearing the graph down returned every reservation — no leak");
 }
@@ -552,9 +553,10 @@ void test_ring_sources_are_isolated_per_vertex() {
 
     dry.refuse = true;
     check(g.write(a, make_value({0x30})).has_value(), "the exhausted receiver's write succeeds");
-    check(g.history(a)->empty(), "…and queues nothing — its own budget declined");
+    check(tr::testing::history_of(g, a)->empty(), "…and queues nothing — its own budget declined");
     check(g.write(b, make_value({0x31})).has_value(), "the other receiver's write succeeds");
-    check(g.history(b)->size() == 1, "…and queues normally — the flood is a blast radius");
+    check(tr::testing::history_of(g, b)->size() == 1,
+          "…and queues normally — the flood is a blast radius");
     check(healthy.live == 1 && dry.live == 0, "each ring charged its OWN seam, never a pool");
 }
 
@@ -587,7 +589,7 @@ void test_ring_best_effort_sheds_oldest_with_a_gap() {
     check(gaps.has_value() && *gaps > 0, "the byte bound bit: shed points were recorded");
     check(g.delivery_drops().out_of_memory > before.out_of_memory,
           "and every shed is ACCOUNTED — a silent shed is non-conforming");
-    const auto hist = g.history(v);
+    const auto hist = tr::testing::history_of(g, v);
     check(hist.has_value() && hist->size() < 64,
           "the ring holds what the SOURCE could fund, never the declared depth");
     check(!hist->empty(), "…and the newest entries survived: oldest-first is the shed order");
@@ -617,13 +619,14 @@ void test_ring_reliable_answers_backpressure() {
     g.set_ring_source(v, &src, /*reliable=*/true);
     (void)g.set_retention(v, tr::graph::retention_t::N, 4);
     check(g.write(v, make_value({0x40})).has_value(), "a funded write lands normally");
-    check(g.history(v)->size() == 1, "…and queues its entry");
+    check(tr::testing::history_of(g, v)->size() == 1, "…and queues its entry");
 
     src.refuse = true;
     const auto r = g.write(v, make_value({0x41}));
     check(!r && r.error() == status_t::BACKPRESSURE,
           "the refused admission answers BACKPRESSURE to the rate-aware producer");
-    check(g.history(v)->size() == 1, "NOTHING was shed — the reliable arm never drops");
+    check(tr::testing::history_of(g, v)->size() == 1,
+          "NOTHING was shed — the reliable arm never drops");
     check(g.stream_gaps(v).has_value() && *g.stream_gaps(v) == 0,
           "…and raises no gap: a gap means a loss, and there was none");
 }
@@ -665,7 +668,7 @@ void test_stream_shed_append_no_redelivery() {
     // queued entry (whole, one per admission) to try to fund itself, and still could not.
     // What is asserted here is what #925 is actually about — the DRAIN must not fabricate a
     // tail out of the un-appended entry — so the ring being empty is fine; a re-delivery is not.
-    check(g.history(v).has_value() && g.history(v)->empty(),
+    check(tr::testing::history_of(g, v).has_value() && tr::testing::history_of(g, v)->empty(),
           "the refused entry never entered the ring, and the oldest was shed to try");
     check(seen.size() == 1, "the shed append delivered NOTHING — no phantom tail entry");
     check(seen.size() == 1 && seen.back() == 0x10, "0x10 was NOT re-delivered as 0x11's entry");
@@ -879,7 +882,7 @@ int main() {
     test_small_fanout_allocation_free();
     test_wide_fanout_degrade();
     test_target_adopt_allocates_nothing();
-    test_handler_target_clone_drop();
+    test_handler_target_takes_no_clone();
     test_handler_delivery_allocates_nothing();
     test_remote_edge_snapshot_is_allocation_free();
     test_stream_ring_shed();

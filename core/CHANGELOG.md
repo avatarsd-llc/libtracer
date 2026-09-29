@@ -27,9 +27,78 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   The target's admission filter, ring admission and ACL gate run as before, on the shared
   block; only a normalising filter mints the target a block. Two shapes still clone, inside
   the store: a HANDLER target (its `on_write` reads a `rope_t`) and a value in caller-owned
-  storage (a HANDLER source's unstored delivery). No public signature changes.
+  storage (a HANDLER source's unstored delivery). No public signature changes. (Slice 7,
+  under Breaking, removes the HANDLER clone.)
 
 ### Breaking
+
+- **One callback idiom and one read type (RFC 0028 slice 7, D10 + D11; part of
+  [#1624](https://github.com/avatarsd-llc/libtracer/issues/1624) and
+  [#1620](https://github.com/avatarsd-llc/libtracer/issues/1620)).** Every graph seam is a
+  `{fn, ctx}` pair and every value read answers a `value_ref_t`. No shims — every in-tree
+  caller, test, example and bench moved.
+
+  - **New: `tr::graph::hook_t<R(A...)>` and `tr::graph::thunk` (`hook.hpp`).** A hook is
+    `{fn, ctx}` — 16 B, trivially copyable, owns nothing; `fn`'s first argument is `ctx`, which
+    the caller keeps alive for as long as the vertex is registered. `thunk(f)` builds one over a
+    callable you keep alive (`ctx = &f`); a captureless lambda may be passed as a temporary
+    (its hook needs nothing alive), a capturing one may not (it does not compile).
+  - **`handlers_t`: all six seams are `hook_t`s** (`on_read`, `on_write`, `on_children`,
+    `on_admit`, `on_app_field_admit`, `on_app_field_write`): `sizeof(handlers_t)` 216 → **96 B**,
+    the per-vertex seam block `value_handlers_t` 96 → **48 B**, and the app-field group's apply
+    seam 32 → 16 B. A parked seam now frees without running user code.
+  - **`on_write` and `on_admit` take `const value_t&`, not `const rope_t&`.** A HANDLER target of
+    a subscription is handed the block the source published — no clone of its links, as a
+    stored target adopts it (slice 4) — and an admission filter reads the same block.
+    `bench_lean_value_path`'s new `local-handler` row: 1 block / 40 B per publish at K = 1, 8,
+    32 (unchanged — the old per-handler clone fit the rope's inline links, so it was 2 refcount
+    RMWs per link per handler, not a block; a ≥ 3-link value also spilled a 72 B reserve per
+    handler, now gone), and K = 32 falls from ~1,760 to ~1,190 ns. **The value is borrowed for
+    the call:** it may be storage on the writer's stack (a local write, a relay). A handler that
+    keeps it takes **`value_ref_t::keep(value)`** (new) — a refcount share of a published block,
+    one block of copied links out of stack storage — and never keeps the reference or its
+    address. `value_t` has the whole read surface a handler used on the rope (`links()`,
+    `only()`, `total_length()`, `flatten()`, `materialize()`, `walk()`); `value.rope()` makes a
+    rope when a rope-typed API needs one.
+  - **`handlers_t::payload_rights` removed** — the rows are not a seam. They are the new
+    trailing `std::span<const payload_right_t> rights` argument of `register_vertex`,
+    `try_register_vertex` and `register_vertex_key` (borrowed for the call, copied onto the
+    graph under the registration lock, so the declaration is still in force before the first
+    write).
+  - **`graph_t::child_factory_t` is a `hook_t`** (`register_child_type(type, factory)`).
+  - **`history(vertex_handle_t) -> result_t<std::vector<rope_t>>` removed** →
+    `history(vertex_handle_t, std::span<value_ref_t> out) -> result_t<std::size_t>`: fills the
+    newest `min(out.size(), retained)` entries oldest first, each a refcount share. **Allocates
+    nothing** (was one vector per call). A span of the declared `retention_t::N` depth holds the
+    whole ring.
+  - **`read(vertex_handle_t, const field_path_t&, caller)` answers `result_t<value_ref_t>`**
+    (was `result_t<rope_t>`). An empty field is now the published reference itself (no rope
+    clone); a composed field is wrapped once, as `read(const path_t&)` already did.
+
+  **Migration recipe** (the ~100 downstream handler lambdas):
+
+  ```cpp
+  // before
+  h.on_write = [this](const rope_t& v, const write_ctx_t& w) -> result_t<void> { return apply(v, w); };
+  h.on_read  = [this]() -> result_t<rope_t> { return current(); };
+  h.payload_rights = {{type_t::SPEC, acl_right_t::CREATE}};
+  g.register_vertex(p, role_t::HANDLER, std::move(h));
+  auto ring = g.history(v);                 // std::vector<rope_t>
+  auto f = g.read(v, field);  f->flatten(); // rope_t
+  // after
+  h.on_write = {[](void* self, const value_t& v, const write_ctx_t& w) -> result_t<void> {
+                    return static_cast<device_t*>(self)->apply(v, w);  // apply takes const value_t&
+                }, this};
+  h.on_read  = {[](void* self) -> result_t<rope_t> { return static_cast<device_t*>(self)->current(); }, this};
+  const payload_right_t rights[] = {{type_t::SPEC, acl_right_t::CREATE}};
+  g.register_vertex(p, role_t::HANDLER, h, rights);
+  std::array<value_ref_t, kDepth> ring;  auto n = g.history(v, ring);  // *n entries, 0 allocs
+  auto f = g.read(v, field);  (*f)->flatten();                        // value_ref_t
+  ```
+
+  One line: `seam = [cap](args){…}` → `seam = {[](void* ctx, args){…}, ctx}` (or
+  `seam = tr::graph::thunk(named_lambda)`), `const rope_t&` → `const value_t&`, and anything
+  kept past the call → `value_ref_t::keep(value)`.
 
 - **`retention_t` replaces `set_history_depth` and the role-encoded retention (RFC 0028
   slice 6, D4).** What a vertex keeps after a write is one owner-side policy,

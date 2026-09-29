@@ -122,16 +122,18 @@ void test_declared_table_selects_the_right() {
     // "the gate passed and the handler declined".
     int executed = 0;
     tr::graph::handlers_t handlers;
-    handlers.on_write = [&executed](const tr::view::rope_t&,
-                                    const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
+    auto handlers_on_write = [&executed](
+                                 const tr::graph::value_t&,
+                                 const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
         ++executed;
         return {};
     };
-    handlers.payload_rights = {
+    handlers.on_write = tr::graph::thunk(handlers_on_write);
+    const payload_right_t rights[] = {
         payload_right_t{type_t::SPEC, acl_right_t::CREATE},
         payload_right_t{type_t::NAME, acl_right_t::WRITE},
     };
-    const vertex_handle_t v = g.register_vertex(path_t("/ctl"), role_t::HANDLER, handlers);
+    const vertex_handle_t v = g.register_vertex(path_t("/ctl"), role_t::HANDLER, handlers, rights);
     check(g.write(path_t("/ctl:acl"), make_value(allow({{"peer-c", acl_right_t::CREATE},
                                                         {"peer-w", acl_right_t::WRITE}})))
               .has_value(),
@@ -166,10 +168,11 @@ void test_undeclared_handler_is_unchanged() {
     graph_t g;
     g.configure_subject_resolver(caller_is_subject, nullptr);
     tr::graph::handlers_t handlers;
-    handlers.on_write = [](const tr::view::rope_t&,
-                           const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
+    auto handlers_on_write2 = [](const tr::graph::value_t&,
+                                 const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
         return {};
     };
+    handlers.on_write = tr::graph::thunk(handlers_on_write2);
     const vertex_handle_t v = g.register_vertex(path_t("/ctl"), role_t::HANDLER, handlers);
     check(g.write(path_t("/ctl:acl"), make_value(allow({{"peer-c", acl_right_t::CREATE},
                                                         {"peer-w", acl_right_t::WRITE}})))

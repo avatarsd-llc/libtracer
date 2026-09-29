@@ -17,8 +17,14 @@ and whose read reports the device's state.
   `handlers_t` allocates none, and a `STORED_VALUE` vertex given an `on_children` does
   ([reference 02](../reference/02-graph-model.md) §Vertex lifecycle;
   `value_handlers_t` in `core/include/libtracer/vertex.hpp`).
-- **`on_write` is where the device acts.** It receives the written rope and the writer's
-  `write_ctx_t`; both are borrowed for the call only, so anything retained must be copied.
+- **Each seam is a `{fn, ctx}` hook** (`core/include/libtracer/hook.hpp`, RFC-0028 D10): a
+  captureless function whose first argument is a `ctx` the owner keeps alive for as long as
+  the vertex is registered. Nothing is captured and nothing is owned, so registering a seam
+  allocates nothing beyond the seam block itself.
+- **`on_write` is where the device acts.** It receives the written value as a
+  `const value_t&` — for a subscription delivery, the very block the source published, with
+  no copy — and the writer's `write_ctx_t`. Both are borrowed for the call only: a handler
+  that keeps the value takes `value_ref_t::keep(value)`, never the reference itself.
   The handler returns a `result_t<void>` — a refusal is the device's, not the graph's.
 - **This is the sink shape a subscription delivers into.** Delivery *is* a write
   ([CONTEXT.md](../../CONTEXT.md) §SUBSCRIBER direction), so a handler vertex is what a

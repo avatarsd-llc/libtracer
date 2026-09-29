@@ -55,6 +55,7 @@
 #include "libtracer/app_fields.hpp"
 #include "libtracer/config.hpp"
 #include "libtracer/edge_pin.hpp"
+#include "libtracer/hook.hpp"
 #include "libtracer/lkv_slot.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/path.hpp"
@@ -341,23 +342,47 @@ struct payload_right_t {
  */
 using admission_t = result_t<std::optional<rope_t>>;
 
+/** @brief The @ref hook_t shape of `handlers_t::on_admit` (RFC-0028 D10). */
+using admit_hook_t = hook_t<admission_t(const value_t& value, const write_ctx_t& ctx)>;
+/** @brief The @ref hook_t shape of `handlers_t::on_app_field_admit` (RFC-0028 D10). */
+using app_field_admit_hook_t = hook_t<result_t<view_t>(std::string_view name, const view_t& value)>;
+
 /**
- * @brief User behavior for a Handler-role vertex.
+ * @brief User behavior for a Handler-role vertex — six @ref hook_t seams, 96 B on the host
+ *        (RFC-0028 D10: one callback idiom).
  *
  * `on_children` additionally applies to ANY role: when set, a read of the vertex's
  * `:children[]` field serves this synthesized member listing (a complete POINT TLV view)
  * INSTEAD of enumerating registered child vertices — the ADR-0044 seam by which a
  * transport/connection vertex lists its live bus peers without ever creating a vertex for
- * them. The value seam is rope-typed (ADR-0053 §6): `on_read` supplies the vertex value as
- * the rope it is (a contiguous scalar is the single-link case), `on_write` receives the
- * written value without a flatten copy.
+ * them. `on_read` supplies the vertex value as the rope it is (a contiguous scalar is the
+ * single-link case); `on_write` and `on_admit` receive the written value as the @ref value_t
+ * the write path already holds — by reference, with no clone of its links.
+ *
+ * Every seam is a `{fn, ctx}` pair whose `ctx` the CALLER keeps alive for as long as the
+ * vertex is registered (see `libtracer/hook.hpp` for the two idiomatic spellings and
+ * @ref tr::graph::thunk). An empty hook is an uninstalled seam.
+ *
+ * The RFC-0014 Amendment 2 payload-right rows are not a seam and are not carried here: they
+ * are the trailing `rights` argument of `graph_t::register_vertex` and its siblings.
  */
 struct handlers_t {
-    std::function<result_t<rope_t>()> on_read; /**< @brief Supplies the vertex value on read. */
-    /** @brief Receives the written value and the writer's @ref write_ctx_t (#375). Both
-     *         arguments are borrowed for the call only — copy if retained. */
-    std::function<result_t<void>(const rope_t&, const write_ctx_t&)> on_write;
-    std::function<result_t<view_t>()> on_children; /**< @brief Synthesized `:children[]` listing. */
+    /** @brief Supplies the vertex value on read. */
+    hook_t<result_t<rope_t>()> on_read;
+    /**
+     * @brief Receives the written value and the writer's @ref write_ctx_t (#375).
+     *
+     * @warning Both arguments are BORROWED for the call. The value is the one the write path
+     *          holds — for a delivery from a subscription edge, the very block the source
+     *          published (RFC-0028 D2: a HANDLER target adopts like a stored target, no
+     *          per-handler copy); for a relay or a local write it may be storage on the
+     *          writer's stack. A handler that keeps the value past its return takes
+     *          `value_ref_t::keep(value)` — a refcount share of a published block, a copy of
+     *          the links out of stack storage — and NEVER keeps the reference or its address.
+     */
+    hook_t<result_t<void>(const value_t& value, const write_ctx_t& ctx)> on_write;
+    /** @brief Synthesized `:children[]` listing. */
+    hook_t<result_t<view_t>()> on_children;
     /**
      * @brief The ADMISSION seam of a RETAINING vertex: runs BEFORE the write becomes state,
      *        and decides whether — and in what form — it does (`admission_t`).
@@ -390,12 +415,12 @@ struct handlers_t {
      * COST. Unset ⇒ **nothing**: the store path tests one bit of a flags word the write path
      * already holds and never loads the seam block. That bit is the whole per-vertex cost.
      *
-     * @warning Both arguments are BORROWED for the call — the same contract `on_write` carries.
-     *          Copy what you retain. The seam runs on the WRITER's thread with no vertex lock
-     *          held, so it may re-enter the graph, and it is on the hot write path: a filter
-     *          that blocks blocks the writer.
+     * @warning Both arguments are BORROWED for the call — the same contract `on_write` carries,
+     *          including `value_ref_t::keep` for a filter that retains the value. The seam runs
+     *          on the WRITER's thread with no vertex lock held, so it may re-enter the graph,
+     *          and it is on the hot write path: a filter that blocks blocks the writer.
      */
-    std::function<admission_t(const rope_t&, const write_ctx_t&)> on_admit;
+    admit_hook_t on_admit;
     /**
      * @brief The app-field plane's admission seam (RFC-0010 §A.3), the field-shaped twin of
      *        @ref on_admit — runs BEFORE a declared `:settings.app.<name>` write stores its
@@ -412,7 +437,7 @@ struct handlers_t {
      *          bytes out before returning — so it may point at storage the filter owns, but that
      *          storage must outlive the return. Unset ⇒ bytes store verbatim, as before.
      */
-    std::function<result_t<view_t>(std::string_view name, const view_t& value)> on_app_field_admit;
+    app_field_admit_hook_t on_app_field_admit;
     /**
      * @brief The owner apply seam (RFC-0010 §A.3): fires after a declared
      *        `:settings.app.<name>` field write stored its bytes, with the field's key
@@ -422,37 +447,16 @@ struct handlers_t {
      *        wakes `await` and never propagates). Unset ⇒ the bytes just store (a passive
      *        metadata field).
      */
-    std::function<void(std::string_view name, const view_t& value)> on_app_field_write;
-    /**
-     * @brief OPTIONAL payload-type → required-ACL-right table (RFC-0014 Amendment 2) — the
-     *        general contract by which a control vertex demands something other than plain
-     *        `WRITE` for a given written TLV type.
-     *
-     * Empty (the default) ⇒ every write to the vertex gates on `acl_right_t::WRITE`, which is
-     * both today's behaviour and today's cost: a vertex that declares nothing carries not one
-     * byte for this (the rows are moved out at registration and live on the graph — see
-     * `graph_t::declare_payload_rights`), and `graph_t::write_impl` stops at one relaxed
-     * flag-bit test on a word the write path already holds. A row whose
-     * `%payload_right_t::type` equals the written value's leading TLV type supplies the
-     * right demanded instead; an unmatched type (and a value whose leading link cannot be read,
-     * e.g. a device-memory link) falls back to `WRITE`. Rows are scanned in order, first match
-     * wins — the table is a handful of entries on a control vertex, never a hot-path structure.
-     *
-     * The refusal is still the ONE write gate's, counted into the single-sited
-     * `delivery_drops_t::denied`: this declaration changes WHICH right is demanded, never
-     * where the demand is made. The transport creator endpoint is the first user
-     * (`SPEC`→`CREATE`, `NAME`→`WRITE`, RFC-0014 §5); an application subtree-owner that
-     * implements create-on-write is the next (RFC-0003).
-     */
-    std::vector<payload_right_t> payload_rights;
+    app_field_write_hook_t on_app_field_write;
 };
 
 /**
  * @brief The internal, lazily-allocated STORAGE of a vertex's VALUE seam (ADR-0058 Step 2)
- *        — the seams `handlers_t` carries minus the two app-field ones.
+ *        — the seams `handlers_t` carries minus the app-field ones and the admission filter:
+ *        three @ref hook_t pairs, 48 B on the host.
  *
  * Split off from the public @ref handlers_t input so a vertex that installs none of the
- * four never allocates these ~96 B of `std::function`: the block lives behind a lazily
+ * three never allocates this block: it lives behind a lazily
  * published pointer in the extension block, null unless at least one of `on_read`,
  * `on_write`, `on_children` was given. Allocation is keyed on
  * that PRESENCE, not on `role_t` — `adopt_identity` never consults the role — so a `STORED_VALUE`
@@ -467,11 +471,11 @@ struct handlers_t {
  * Set once at registration (`vertex_t::adopt_identity`), read lock-free thereafter.
  */
 struct value_handlers_t {
-    std::function<result_t<rope_t>()> on_read; /**< @brief Supplies the vertex value on read. */
-    /** @brief Receives the written value and the writer's @ref write_ctx_t (#375). Both
-     *         arguments are borrowed for the call only — copy if retained. */
-    std::function<result_t<void>(const rope_t&, const write_ctx_t&)> on_write;
-    std::function<result_t<view_t>()> on_children; /**< @brief Synthesized `:children[]` listing. */
+    hook_t<result_t<rope_t>()> on_read; /**< @brief Supplies the vertex value on read. */
+    /** @brief Receives the written value and the writer's @ref write_ctx_t (#375) — the
+     *         @ref handlers_t::on_write contract, verbatim. */
+    hook_t<result_t<void>(const value_t& value, const write_ctx_t& ctx)> on_write;
+    hook_t<result_t<view_t>()> on_children; /**< @brief Synthesized `:children[]` listing. */
 };
 
 /**
@@ -926,12 +930,12 @@ class vertex_t {
 
     /** @brief A copy of this vertex's owner apply seam (RFC-0010 §A.3), or empty when none —
      *         taken under the vertex lock so the caller can fire it OUTSIDE the lock (the
-     *         seam may re-enter the graph). Empty ⇒ declared field writes just store. */
-    [[nodiscard]] std::function<void(std::string_view, const view_t&)> on_app_field_write() {
+     *         seam may re-enter the graph). Two words; copying it allocates nothing. Empty ⇒
+     *         declared field writes just store. */
+    [[nodiscard]] app_field_write_hook_t on_app_field_write() {
         const std::lock_guard lock(vertex_stripe_of(this).m);
         const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
-        return (e != nullptr && e->app) ? e->app->on_app_field_write
-                                        : std::function<void(std::string_view, const view_t&)>{};
+        return (e != nullptr && e->app) ? e->app->on_app_field_write : app_field_write_hook_t{};
     }
 
     // -- Composite tree links (ADR-0057) -------------------------------------------------
@@ -1578,17 +1582,24 @@ class vertex_t {
         return out.size();
     }
 
-    /** @brief The STREAM ring contents, oldest first — each entry a rope clone (refcount
-     *         bumps, no byte copy). */
-    [[nodiscard]] std::vector<rope_t> history_snapshot() {
+    /**
+     * @brief Copy the NEWEST `min(out.size(), ring count)` STREAM ring entries into @p out,
+     *        oldest first — each a `value_ref_t` share of the entry's block (one refcount bump,
+     *        no byte copy, no allocation; RFC-0028 D11).
+     * @return The number of entries written; `out[0, n)` holds them, the rest is untouched.
+     */
+    [[nodiscard]] std::size_t history_into(std::span<value_ref_t> out) {
         const std::lock_guard lock(vertex_stripe_of(this).m);
-        std::vector<rope_t> out;
         const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
-        if (e == nullptr || !e->ring) return out;
-        out.reserve(e->ring->count);
-        for (const ring_entry_t* it = e->ring->head; it != nullptr; it = it->next)
-            out.push_back(it->value->rope());
-        return out;
+        if (e == nullptr || !e->ring || out.empty()) return 0;
+        const std::size_t take = std::min<std::size_t>(out.size(), e->ring->count);
+        if (take == 0) return 0;
+        // The newest `take` entries: step back from the tail, then walk forward in order.
+        const ring_entry_t* it = e->ring->tail;
+        for (std::size_t i = 1; i < take; ++i) it = it->prev;
+        std::size_t n = 0;
+        for (; it != nullptr; it = it->next) out[n++] = it->value;
+        return n;
     }
 
     /** @brief Total bytes this receiver currently holds RESERVED against its injected ring
@@ -3012,7 +3023,7 @@ class vertex_t {
      * before: registration can no longer force the cold block onto a vertex, and the two
      * owner-side magnitudes materialise it only if an owner actually declares one.
      */
-    void adopt_identity(role_t role, handlers_t handlers) {
+    void adopt_identity(role_t role, const handlers_t& handlers) {
         const bool has_handlers = handlers.on_read || handlers.on_write || handlers.on_children ||
                                   handlers.on_app_field_write;
         if (role != role_t::STREAM && !has_handlers &&
@@ -3030,13 +3041,12 @@ class vertex_t {
             // suffices; the store races only the lock-free reader, which the release
             // ordering covers.
             e.handlers.store(
-                new value_handlers_t{std::move(handlers.on_read), std::move(handlers.on_write),
-                                     std::move(handlers.on_children)},
+                new value_handlers_t{handlers.on_read, handlers.on_write, handlers.on_children},
                 std::memory_order_release);
         }
         if (handlers.on_app_field_write) {
             if (e.app == nullptr) e.app = std::make_unique<app_field_group_t>();
-            e.app->on_app_field_write = std::move(handlers.on_app_field_write);
+            e.app->on_app_field_write = handlers.on_app_field_write;
         }
     }
 

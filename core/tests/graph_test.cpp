@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "libtracer/tracer.hpp"
+#include "test_history.hpp"
 #include "test_support.hpp"
 #include "test_values.hpp"
 
@@ -140,8 +141,9 @@ void test_assign_lkv_and_seq_bump() {
     // so the wake answers NOT_FOUND rather than TIMEOUT. That is `note_write` observed through
     // the only public seam that can see it.
     tr::graph::handlers_t h;
-    h.on_write = [](const tr::view::rope_t&,
-                    const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> { return {}; };
+    auto h_on_write = [](const tr::graph::value_t&,
+                         const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> { return {}; };
+    h.on_write = tr::graph::thunk(h_on_write);
     tr::graph::vertex_handle_t hv =
         g.register_vertex(path_t("/lkv/sink"), role_t::HANDLER, std::move(h));
     // The #1418 edge-trigger again, on the HANDLER arm: `note_write` bumps the same sequence
@@ -180,11 +182,11 @@ void test_stream() {
 
     for (std::uint8_t i = 1; i <= 5; ++i) (void)g.write(v, make_value({i}));
 
-    auto hist = g.history(v);
+    auto hist = tr::testing::history_of(g, v);
     check(hist.has_value() && hist->size() == 3, "history bounded to keep_last = 3");
-    check(hist && std::to_integer<int>((*hist)[0].only().bytes()[0]) == 3,
+    check(hist && std::to_integer<int>((*hist)[0]->only().bytes()[0]) == 3,
           "oldest kept is the 3rd write");
-    check(hist && std::to_integer<int>((*hist)[2].only().bytes()[0]) == 5,
+    check(hist && std::to_integer<int>((*hist)[2]->only().bytes()[0]) == 5,
           "newest kept is the 5th write");
     auto latest = g.read(v);
     check(latest && std::to_integer<int>((*latest)->only().bytes()[0]) == 5,
@@ -210,10 +212,10 @@ void test_stream_drain_cursor() {
     (void)g.set_retention(v, tr::graph::retention_t::N, 3);
     for (std::uint8_t b = 1; b <= 5; ++b) (void)g.assign(v, make_value({b}));
 
-    const auto hist = g.history(v);
+    const auto hist = tr::testing::history_of(g, v);
     check(hist.has_value() && hist->size() == 3, "the ring keeps exactly the owner-declared depth");
-    check(hist && hist->size() == 3 && std::to_integer<int>((*hist)[0].only().bytes()[0]) == 3 &&
-              std::to_integer<int>((*hist)[2].only().bytes()[0]) == 5,
+    check(hist && hist->size() == 3 && std::to_integer<int>((*hist)[0]->only().bytes()[0]) == 3 &&
+              std::to_integer<int>((*hist)[2]->only().bytes()[0]) == 5,
           "trim drops the oldest entries (ring holds 3,4,5)");
 
     std::vector<tr::graph::value_ref_t> batch;
@@ -252,13 +254,15 @@ void test_handler() {
     const auto path = path_t::parse("/compute/answer");
     auto written = std::make_shared<std::vector<std::byte>>();
     tr::graph::handlers_t h;
-    h.on_read = [] { return make_value({0x2A}); };  // always 42
-    h.on_write = [written](const tr::view::rope_t& in,
-                           const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
+    auto h_on_read = [] { return make_value({0x2A}); };
+    h.on_read = tr::graph::thunk(h_on_read);  // always 42
+    auto h_on_write2 = [written](const tr::graph::value_t& in,
+                                 const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
         const auto b = in.only().bytes();
         written->assign(b.begin(), b.end());
         return {};
     };
+    h.on_write = tr::graph::thunk(h_on_write2);
     tr::graph::vertex_handle_t v = g.register_vertex(*path, role_t::HANDLER, std::move(h));
 
     auto r = g.read(v);
@@ -392,11 +396,12 @@ void test_subscribe_target() {
     graph_t g;
     auto sink_seen = std::make_shared<int>(-1);
     tr::graph::handlers_t h;
-    h.on_write = [sink_seen](const tr::view::rope_t& in,
-                             const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
+    auto h_on_write3 = [sink_seen](const tr::graph::value_t& in,
+                                   const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
         *sink_seen = std::to_integer<int>(in.only().bytes()[0]);
         return {};
     };
+    h.on_write = tr::graph::thunk(h_on_write3);
     (void)g.register_vertex(path_t("/log/temp"), role_t::HANDLER, std::move(h));
     tr::graph::vertex_handle_t src =
         g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
@@ -448,11 +453,12 @@ void test_subscribe_via_field_write_and_unsubscribe() {
     graph_t g;
     auto sink_seen = std::make_shared<int>(0);
     tr::graph::handlers_t h;
-    h.on_write = [sink_seen](const tr::view::rope_t& in,
-                             const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
+    auto h_on_write4 = [sink_seen](const tr::graph::value_t& in,
+                                   const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
         *sink_seen += std::to_integer<int>(in.only().bytes()[0]);
         return {};
     };
+    h.on_write = tr::graph::thunk(h_on_write4);
     (void)g.register_vertex(path_t("/sink"), role_t::HANDLER, std::move(h));
     tr::graph::vertex_handle_t src =
         g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
@@ -484,13 +490,15 @@ void test_subscribers_indexed_write_discriminates() {
     graph_t g;
     auto seen_a = std::make_shared<int>(0);
     auto seen_b = std::make_shared<int>(0);
-    auto sink = [](std::shared_ptr<int> tally) {
+    // `ctx` is the tally the caller keeps alive, not anything of this lambda's own frame.
+    auto sink = [](const std::shared_ptr<int>& tally) {
         tr::graph::handlers_t h;
-        h.on_write = [tally](const tr::view::rope_t& in,
-                             const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
-            *tally += std::to_integer<int>(in.only().bytes()[0]);
-            return {};
-        };
+        h.on_write = {[](void* c, const tr::graph::value_t& in,
+                         const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
+                          *static_cast<int*>(c) += std::to_integer<int>(in.only().bytes()[0]);
+                          return {};
+                      },
+                      tally.get()};
         return h;
     };
     (void)g.register_vertex(path_t("/sink_a"), role_t::HANDLER, sink(seen_a));
@@ -567,11 +575,12 @@ void test_subscribers_addressed_whole() {
         graph_t g;
         auto sink_seen = std::make_shared<int>(0);
         tr::graph::handlers_t h;
-        h.on_write = [sink_seen](const tr::view::rope_t& in,
-                                 const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
+        auto h_on_write6 = [sink_seen](const tr::graph::value_t& in,
+                                       const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
             *sink_seen += std::to_integer<int>(in.only().bytes()[0]);
             return {};
         };
+        h.on_write = tr::graph::thunk(h_on_write6);
         (void)g.register_vertex(path_t("/sink"), role_t::HANDLER, std::move(h));
         tr::graph::vertex_handle_t src =
             g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
@@ -995,10 +1004,11 @@ void test_delivery_terminates_at_target() {
     };
     (void)g.subscribe(path_t("/out"), on_out);
     tr::graph::handlers_t hc;
-    hc.on_write = [&g](const tr::view::rope_t& in,
-                       const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
-        return g.write(path_t("/out"), in);  // re-emit on the controller's own execution
+    auto hc_on_write = [&g](const tr::graph::value_t& in,
+                            const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
+        return g.write(path_t("/out"), in.rope());  // re-emit on the controller's own execution
     };
+    hc.on_write = tr::graph::thunk(hc_on_write);
     (void)g.register_vertex(path_t("/ctrl"), role_t::HANDLER, std::move(hc));
     tr::graph::vertex_handle_t ctrl_src =
         g.register_vertex(path_t("/ctrl_src"), role_t::STORED_VALUE);

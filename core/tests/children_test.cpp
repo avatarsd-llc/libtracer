@@ -233,11 +233,11 @@ void test_custom_factory() {
     // a controller / transport connection. The graph composes the key; the factory
     // only chooses the role (and could register several port sub-vertices).
     bool factory_ran = false;
-    g.register_child_type(
-        "streamy", [&factory_ran](graph_t& gg, std::vector<std::byte> key, const tr::wire::tlv_t*) {
-            factory_ran = true;
-            return gg.register_vertex_key(std::move(key), role_t::STREAM);
-        });
+    auto streamy = [&factory_ran](graph_t& gg, std::vector<std::byte> key, const tr::wire::tlv_t*) {
+        factory_ran = true;
+        return gg.register_vertex_key(std::move(key), role_t::STREAM);
+    };
+    g.register_child_type("streamy", tr::graph::thunk(streamy));
 
     const auto w = g.write(path_t("/dev:children[]"), spec("streamy", "s"));
     check(w.has_value(), "SPEC of a custom-registered type is accepted");

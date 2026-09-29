@@ -638,9 +638,10 @@ void child_catalog_flip_race() {
         for (int i = 0; !stop.load(std::memory_order_relaxed); ++i) {
             g.register_child_type(
                 fillers[static_cast<std::size_t>(i) % fillers.size()],
-                [](graph_t& gg, std::vector<std::byte> key, const tr::wire::tlv_t*) {
-                    return gg.register_vertex_key(std::move(key), role_t::STORED_VALUE);
-                });
+                tr::graph::thunk(
+                    [](graph_t& gg, std::vector<std::byte> key, const tr::wire::tlv_t*) {
+                        return gg.register_vertex_key(std::move(key), role_t::STORED_VALUE);
+                    }));
             registrations.fetch_add(1, std::memory_order_relaxed);
             armed.store(true, std::memory_order_release);
         }
@@ -788,7 +789,7 @@ void identity_flip_race() {
                 }
                 continue;
             }
-            const view_t flat = r->flatten();
+            const view_t flat = (*r)->flatten();
             const auto bytes = flat.bytes();
             // 60 bytes is the RFC-0011 §B ed25519 record, pinned by identity_test. Any other
             // size is a record this graph never built.

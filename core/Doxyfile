@@ -48,6 +48,7 @@ INPUT                  = core/include/libtracer/config.hpp \
                          core/include/libtracer/transport.hpp \
                          core/include/libtracer/frame.hpp \
                          core/include/libtracer/graph.hpp \
+                         core/include/libtracer/hook.hpp \
                          core/include/libtracer/value.hpp \
                          core/include/libtracer/vertex.hpp \
                          core/include/libtracer/app_fields.hpp \

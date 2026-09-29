@@ -64,13 +64,17 @@ struct value_fixture_t {
                                                              bool handler,
                                                              std::atomic<std::uint64_t>& hits) {
     if (!handler) return g.register_vertex(src, tr::graph::role_t::STORED_VALUE);
+    // `ctx` is the caller's counter: this helper returns before the first write, so the hook
+    // must not point into its own frame (RFC-0028 D10).
     tr::graph::handlers_t h;
-    h.on_write = [&hits](const tr::view::rope_t&,
-                         const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
-        hits.fetch_add(1, std::memory_order_relaxed);
-        return {};
-    };
-    return g.register_vertex(src, tr::graph::role_t::HANDLER, std::move(h));
+    h.on_write = {[](void* c, const tr::graph::value_t&,
+                     const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
+                      static_cast<std::atomic<std::uint64_t>*>(c)->fetch_add(
+                          1, std::memory_order_relaxed);
+                      return {};
+                  },
+                  &hits};
+    return g.register_vertex(src, tr::graph::role_t::HANDLER, h);
 }
 
 }  // namespace bench_role

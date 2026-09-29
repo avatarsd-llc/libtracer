@@ -35,6 +35,7 @@
 
 #include "libtracer/graph.hpp"
 #include "libtracer/value.hpp"
+#include "test_history.hpp"
 #include "test_support.hpp"
 #include "test_values.hpp"
 
@@ -104,11 +105,6 @@ class value_meter_t final : public tr::mem::block_source_t {
     return std::to_integer<std::uint8_t>(v.only().bytes()[0]);
 }
 
-/** @brief The same, on a rope an admission filter or a handler is handed. */
-[[nodiscard]] std::uint8_t only_byte(const rope_t& r) {
-    return only_byte(tr::graph::value_storage_t<2>{r}.get());
-}
-
 /** @brief The block @p p currently holds, or null. */
 [[nodiscard]] const value_t* block_at(graph_t& g, const path_t& p) {
     const auto r = g.read(p);
@@ -165,11 +161,12 @@ void test_admission_on_the_shared_block() {
     graph_t g(&src);
     int seen = 0;
     handlers_t h;
-    h.on_admit = [&seen](const rope_t& value, const write_ctx_t&) -> admission_t {
+    auto h_on_admit = [&seen](const tr::graph::value_t& value, const write_ctx_t&) -> admission_t {
         seen = only_byte(value);
         if (seen == 0x10) return rope_t{make_value({0x11})};  // normalise 0x10 -> 0x11
         return std::nullopt;
     };
+    h.on_admit = tr::graph::thunk(h_on_admit);
     const auto s = g.register_vertex(path_t("/b/src"), role_t::STORED_VALUE);
     (void)g.register_vertex(path_t("/b/sink"), role_t::STORED_VALUE, std::move(h));
     check(g.subscribe(path_t("/b/src"), path_t("/b/sink")).has_value(), "wire src -> sink");
@@ -199,10 +196,10 @@ void test_stream_target() {
     check(g.subscribe(path_t("/c/src"), path_t("/c/log")).has_value(), "wire src -> log");
     check(g.write(s, byte_value(0x31)).has_value() && g.write(s, byte_value(0x32)).has_value(),
           "two writes land");
-    const auto hist = g.history(t);
+    const auto hist = tr::testing::history_of(g, t);
     check(hist.has_value() && hist->size() == 2, "the ring admitted both deliveries");
-    check(hist.has_value() && hist->size() == 2 && only_byte((*hist)[0]) == 0x31 &&
-              only_byte((*hist)[1]) == 0x32,
+    check(hist.has_value() && hist->size() == 2 && only_byte(*(*hist)[0]) == 0x31 &&
+              only_byte(*(*hist)[1]) == 0x32,
           "in order, with the source's bytes");
     check(block_at(g, path_t("/c/log")) == block_at(g, path_t("/c/src")),
           "and the target's last value is the source's block");
@@ -214,7 +211,9 @@ void test_unstored_source_is_cloned() {
     value_meter_t src;
     graph_t g(&src);
     handlers_t h;
-    h.on_write = [](const rope_t&, const write_ctx_t&) -> tr::graph::result_t<void> { return {}; };
+    auto h_on_write = [](const tr::graph::value_t&,
+                         const write_ctx_t&) -> tr::graph::result_t<void> { return {}; };
+    h.on_write = tr::graph::thunk(h_on_write);
     const auto s = g.register_vertex(path_t("/d/act"), role_t::HANDLER, std::move(h));
     (void)g.register_vertex(path_t("/d/mirror"), role_t::STORED_VALUE);
     check(g.subscribe(path_t("/d/act"), path_t("/d/mirror")).has_value(), "wire act -> mirror");
@@ -234,10 +233,12 @@ void test_handler_target() {
     graph_t g;
     int seen = 0;
     handlers_t h;
-    h.on_write = [&seen](const rope_t& value, const write_ctx_t&) -> tr::graph::result_t<void> {
+    auto h_on_write2 = [&seen](const tr::graph::value_t& value,
+                               const write_ctx_t&) -> tr::graph::result_t<void> {
         seen = only_byte(value);
         return {};
     };
+    h.on_write = tr::graph::thunk(h_on_write2);
     const auto s = g.register_vertex(path_t("/e/src"), role_t::STORED_VALUE);
     (void)g.register_vertex(path_t("/e/act"), role_t::HANDLER, std::move(h));
     check(g.subscribe(path_t("/e/src"), path_t("/e/act")).has_value(), "wire src -> act");

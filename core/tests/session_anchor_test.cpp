@@ -101,19 +101,25 @@ std::vector<std::string> peers_of(const tr::net::transport_tcp_server& s) {
  */
 vertex_handle_t register_mount(graph_t& g, tr::net::bus_link_t& bus) {
     tr::graph::handlers_t handlers;
-    handlers.on_children = [&bus]() -> tr::graph::result_t<tr::view::view_t> {
-        bytes_t members;
-        bus.enumerate_peers([&members](std::string_view peer) {
-            bytes_t body;
-            tr::wire::emit_name(body, peer);
-            tr::wire::emit_tlv(members, tr::wire::type_t::POINT, tr::wire::opt_t{.pl = true}, body);
-        });
-        bytes_t out;
-        tr::wire::emit_tlv(out, tr::wire::type_t::POINT, tr::wire::opt_t{.pl = true}, members);
-        const auto res = tr::view::over_bytes(out);
-        if (!res) return std::unexpected(tr::graph::status_t::BACKPRESSURE);
-        return *res;
-    };
+    // The hook's ctx is the bus itself, which outlives the mount — never a lambda local to
+    // this helper, which would dangle the moment it returns.
+    handlers.on_children = {[](void* ctx) -> tr::graph::result_t<tr::view::view_t> {
+                                bytes_t members;
+                                static_cast<tr::net::bus_link_t*>(ctx)->enumerate_peers(
+                                    [&members](std::string_view peer) {
+                                        bytes_t body;
+                                        tr::wire::emit_name(body, peer);
+                                        tr::wire::emit_tlv(members, tr::wire::type_t::POINT,
+                                                           tr::wire::opt_t{.pl = true}, body);
+                                    });
+                                bytes_t out;
+                                tr::wire::emit_tlv(out, tr::wire::type_t::POINT,
+                                                   tr::wire::opt_t{.pl = true}, members);
+                                const auto res = tr::view::over_bytes(out);
+                                if (!res) return std::unexpected(tr::graph::status_t::BACKPRESSURE);
+                                return *res;
+                            },
+                            &bus};
     bytes_t key;
     for (std::string_view seg : {"net", "tcp-server", "srv"}) tr::wire::emit_name(key, seg);
     const auto v = g.register_vertex_key(std::move(key), role_t::STORED_VALUE, std::move(handlers));

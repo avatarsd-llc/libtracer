@@ -169,11 +169,13 @@ struct fixture_t {
     auto v = [&] {
         if (!handler) return g.register_vertex(src, role_t::STORED_VALUE);
         handlers_t h;
-        h.on_write = [&hits](const rope_t&, const write_ctx_t&) -> result_t<void> {
-            hits.fetch_add(1, std::memory_order_relaxed);
-            return {};
-        };
-        return g.register_vertex(src, role_t::HANDLER, std::move(h));
+        h.on_write = {[](void* c, const tr::graph::value_t&, const write_ctx_t&) -> result_t<void> {
+                          static_cast<std::atomic<std::uint64_t>*>(c)->fetch_add(
+                              1, std::memory_order_relaxed);
+                          return {};
+                      },
+                      &hits};
+        return g.register_vertex(src, role_t::HANDLER, h);
     }();
     std::atomic<std::uint64_t> recv{0};
     auto cb = [&](const tr::graph::value_t&) { recv.fetch_add(1, std::memory_order_relaxed); };

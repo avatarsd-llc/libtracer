@@ -207,7 +207,7 @@ void test_no_stale_handler() {
     auto ran = std::make_shared<std::atomic<int>>(0);
 
     tr::graph::handlers_t h;
-    h.on_children = [ran]() -> tr::graph::result_t<tr::view::view_t> {
+    auto h_on_children = [ran]() -> tr::graph::result_t<tr::view::view_t> {
         ran->fetch_add(1, std::memory_order_relaxed);
         // A recognisable synthesized listing (an empty POINT is enough to tell it ran).
         std::vector<std::byte> pt;
@@ -216,6 +216,7 @@ void test_no_stale_handler() {
         if (!v) return std::unexpected(status_t::BACKPRESSURE);
         return *v;
     };
+    h.on_children = tr::graph::thunk(h_on_children);
     (void)g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
     vertex_handle_t handler = g.register_vertex(path_t("/dev/h"), role_t::HANDLER, std::move(h));
 
@@ -289,13 +290,14 @@ void test_concurrent_read_vs_retire() {
     std::printf("TSAN: lock-free :children readers race retire on the same vertex:\n");
     auto make_handler = [] {
         tr::graph::handlers_t h;
-        h.on_children = []() -> tr::graph::result_t<tr::view::view_t> {
+        auto h_on_children2 = []() -> tr::graph::result_t<tr::view::view_t> {
             std::vector<std::byte> pt;
             tr::wire::emit_tlv(pt, type_t::POINT, opt_t{.pl = true}, std::span<const std::byte>{});
             const auto v = tr::view::over_bytes(pt);
             if (!v) return std::unexpected(status_t::BACKPRESSURE);
             return *v;
         };
+        h.on_children = tr::graph::thunk(h_on_children2);
         return h;
     };
     graph_t g;

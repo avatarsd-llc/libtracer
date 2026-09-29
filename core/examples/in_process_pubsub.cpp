@@ -75,14 +75,18 @@ int main() {
 
     // A "sink" vertex backed by a callback handler — the target of a spec-faithful
     // SUBSCRIBER (subscriber 2 below re-dispatches to it).
+    // Its `on_write` is a `{fn, ctx}` hook: `ctx` is `&sink_got`, which outlives the graph's
+    // use of it, and the value arrives by reference — the very block /sensor/temp published.
     tr::graph::handlers_t sink;
-    sink.on_write = [&sink_got](const tr::view::rope_t& in,
-                                const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
-        sink_got = as_u32(in.only());
-        std::printf("  [sink vertex /log/temp] received %u\n", sink_got);
-        return {};
-    };
-    (void)g.register_vertex(path_t("/log/temp"), role_t::HANDLER, std::move(sink));
+    sink.on_write = {[](void* ctx, const tr::graph::value_t& in,
+                        const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
+                         auto& got = *static_cast<std::uint32_t*>(ctx);
+                         got = as_u32(in.only());
+                         std::printf("  [sink vertex /log/temp] received %u\n", got);
+                         return {};
+                     },
+                     &sink_got};
+    (void)g.register_vertex(path_t("/log/temp"), role_t::HANDLER, sink);
 
     // subscriber_t 1 — direct in-process callback.
     auto on_temp = [&cb_got](const tr::graph::value_t& v) {
