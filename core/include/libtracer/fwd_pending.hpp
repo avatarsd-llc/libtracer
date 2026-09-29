@@ -54,15 +54,20 @@ struct forward_stats_t {
     std::size_t capacity = 0; /**< @brief Entries the table was built with. */
     std::size_t in_use = 0;   /**< @brief Forwarded requests still awaiting their reply. */
     std::size_t peak = 0;     /**< @brief High-water mark of @ref in_use. */
-    /** @brief Forwards refused because the table was full — answered to the requester with
-     *         `BACKPRESSURE` instead of being forwarded. */
+    /** @brief Slots held by tombstones: requests the hop already answered itself, kept for
+     *         one more deadline to drop a late reply. They occupy capacity, so the table is
+     *         full when `in_use + tombstones == capacity` — @ref refused can rise while
+     *         @ref in_use alone is below @ref capacity. */
+    std::size_t tombstones = 0;
+    /** @brief Forwards refused because every slot was taken (open or tombstone) — answered
+     *         to the requester with `BACKPRESSURE` instead of being forwarded. */
     std::size_t refused = 0;
     /** @brief Entries answered by the hop itself with an error: the deadline passed, or the
      *         far end went away first. */
     std::size_t expired = 0;
-    /** @brief Late replies dropped: the reply matched a tombstone, so the hop had already
+    /** @brief Replies dropped as LATE: the reply matched a tombstone, so the hop had already
      *         answered that request itself and forwarding it would be a second answer. */
-    std::size_t late = 0;
+    std::size_t dropped = 0;
     /** @brief Forwards that asked for a reply but could not be tracked, because their two
      *         routes together exceed `kForwardRouteBytes`. They are forwarded unbounded, as
      *         before; this counts how often, so the route budget can be sized against it. */
@@ -72,11 +77,11 @@ struct forward_stats_t {
 /**
  * @brief The fixed-size table of forwarded requests awaiting a reply.
  *
- * Entries are keyed by the link the request arrived on (an opaque pointer the router owns)
- * and a hash of the request's `src` as it arrived — which is byte for byte the remaining
- * `dst` of the reply that retraces it through this hop, so a reply finds its entry without
- * any correlation field on the wire. Two open requests with the same key are settled in
- * admission order.
+ * Entries are keyed by the link the request arrived on, the link it was forwarded over
+ * (opaque pointers the router owns), and a hash of the request's `src` as it arrived — which
+ * is byte for byte the remaining `dst` of the reply that retraces it through this hop, so a
+ * reply finds its entry without any correlation field on the wire. Two open requests with
+ * the same key are settled in admission order.
  *
  * @note Thread-safe: every operation takes the internal mutex, which is never held across a
  *       send. The router copies an entry out (@ref take_expired, @ref take_via) and emits
@@ -174,28 +179,37 @@ class fwd_pending_t {
     /**
      * @brief Match a reply against the oldest slot it answers, open or tombstone.
      *
-     * Replies on one route come back in request order, so the reply belongs to the OLDEST
-     * matching slot. If that slot is a tombstone the reply is late: the tombstone is consumed
-     * and the caller drops the reply. Otherwise the open entry is closed.
+     * A slot matches when the reply is leaving over the link its request arrived on, came in
+     * over the link its request was forwarded on, and its remaining `dst` equals the request's
+     * `src`. Replies over one far link come back in request order, so the reply belongs to the
+     * OLDEST matching slot. If that slot is a tombstone the reply is late: the tombstone is
+     * consumed and the caller drops the reply. Otherwise the open entry is closed.
+     *
+     * Two open requests that share requester, `src` AND far link, but address different
+     * vertices beyond that link, are told apart only by that reply order — which is exactly
+     * what the far link, a single in-order session, guarantees.
      *
      * @param requester The link the reply is being forwarded onto (the request's arrival).
+     * @param responder The link the reply arrived over (the request's forward).
      * @param key       Hash of the reply's remaining `dst` body.
      * @param same      Callable `bool(std::span<const std::byte> src)`: whether a candidate
      *                  slot's stored `src` equals the reply's remaining `dst` byte for byte.
      */
     template <class Same>
-    settle_t settle(const void* requester, std::uint32_t key, Same&& same) {
+    settle_t settle(const void* requester, const void* responder, std::uint32_t key, Same&& same) {
         if (hint_.load(std::memory_order_relaxed) == 0) return settle_t::NONE;
         const std::lock_guard lock(m_);
         entry_t* oldest = nullptr;
         for (entry_t& e : slots_) {
-            if (!e.used || e.requester != requester || e.key != key || !same(e.src())) continue;
+            if (!e.used || e.requester != requester || e.responder != responder || e.key != key ||
+                !same(e.src()))
+                continue;
             if (oldest == nullptr || e.deadline < oldest->deadline) oldest = &e;
         }
         if (oldest == nullptr) return settle_t::NONE;
         if (oldest->tomb) {
             free_tomb(*oldest);
-            ++late_;
+            ++dropped_;
             return settle_t::LATE;
         }
         release(*oldest);
@@ -276,13 +290,8 @@ class fwd_pending_t {
     /** @brief One snapshot of the table's counters (see @ref forward_stats_t). */
     [[nodiscard]] forward_stats_t stats() const {
         const std::lock_guard lock(m_);
-        return {kSlots,
-                in_use_,
-                peak_,
-                refused_,
-                expired_,
-                late_,
-                untracked_.load(std::memory_order_relaxed)};
+        return {kSlots,   in_use_,  peak_,    tombs_,
+                refused_, expired_, dropped_, untracked_.load(std::memory_order_relaxed)};
     }
 
    private:
@@ -309,7 +318,7 @@ class fwd_pending_t {
     std::array<entry_t, kSlots> slots_{}; /**< @brief The entries. */
     std::size_t in_use_ = 0;              /**< @brief Open entries. */
     std::size_t tombs_ = 0;               /**< @brief Tombstones. */
-    std::size_t late_ = 0;                /**< @brief Late replies dropped on a tombstone. */
+    std::size_t dropped_ = 0;             /**< @brief Late replies dropped on a tombstone. */
     std::size_t peak_ = 0;                /**< @brief High-water mark of `in_use_`. */
     std::size_t refused_ = 0;             /**< @brief Forwards refused on a full table. */
     std::size_t expired_ = 0;             /**< @brief Entries the hop answered itself. */

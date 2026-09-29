@@ -32,6 +32,9 @@
  *     `link_down`, through the removal path.
  *  8. **`remove_child` of the requester** — its open forwards are closed with no answer sent:
  *     nobody is left to answer.
+ *  9. **Two far ends, one route back** — READ A to a silent far end, then READ B from the
+ *     same client to a second far end that answers: B's reply settles B, never A. B gets one
+ *     answer, and A still gets its own timeout.
  */
 
 #include <atomic>
@@ -162,18 +165,23 @@ struct hop_t {
     fwd_router_t router{graph};
     loopback_channel_t req_ch;
     loopback_channel_t far_ch;
-    capture_t client;  /**< @brief What came back to the requester. */
-    capture_t far_end; /**< @brief What was forwarded to the far end. */
+    loopback_channel_t far2_ch;
+    capture_t client;   /**< @brief What came back to the requester. */
+    capture_t far_end;  /**< @brief What was forwarded to the far end. */
+    capture_t far2_end; /**< @brief What was forwarded to the second far end. */
 
     hop_t() {
         req_ch.a().set_receiver(client);
         far_ch.b().set_receiver(far_end);
+        far2_ch.b().set_receiver(far2_end);
         check(router.add_child("req", req_ch.b()), "the requester link is a child");
         check(router.add_child("far", far_ch.a()), "the far link is a child");
+        check(router.add_child("far2", far2_ch.a()), "the second far link is a child");
     }
     ~hop_t() {
         req_ch.shutdown();
         far_ch.shutdown();
+        far2_ch.shutdown();
     }
     hop_t(const hop_t&) = delete;
     hop_t& operator=(const hop_t&) = delete;
@@ -189,9 +197,20 @@ struct hop_t {
      *        link's mount.
      * @retval false Frame @p i did not decode.
      */
-    bool far_answers(std::size_t i) {
+    bool far_answers(std::size_t i) { return answers(far_end, far_ch, i); }
+
+    /** @brief The client sends a READ of `/far2/y`, asking for a reply at `cli`. */
+    void read_far2() {
+        req_ch.a().send(b_fwd(fwd_op_t::READ, b_path({"far2", "y"}), b_path({"cli"})));
+    }
+
+    /** @brief The second far end answers its forwarded frame @p i (see @ref far_answers). */
+    bool far2_answers(std::size_t i) { return answers(far2_end, far2_ch, i); }
+
+    /** @brief The far end behind @p ch answers the frame @p seen captured at @p i. */
+    static bool answers(capture_t& seen, loopback_channel_t& ch, std::size_t i) {
         // Kept alive for the decode: the decoded tree's payload spans view these bytes.
-        const std::vector<std::byte> forwarded = far_end.at(i);
+        const std::vector<std::byte> forwarded = seen.at(i);
         const auto fwd = tr::wire::decode(forwarded);
         if (!fwd || fwd->children.size() < 3) return false;
         std::vector<std::byte> reply_dst;
@@ -200,7 +219,7 @@ struct hop_t {
         const std::byte ok{static_cast<std::uint8_t>(tr::graph::reply_kind_t::RESULT)};
         tr::wire::emit_tlv(kind, type_t::VALUE, tr::wire::opt_t{},
                            std::span<const std::byte>(&ok, 1));
-        far_ch.b().send(b_fwd(fwd_op_t::REPLY, reply_dst, b_path({"x"}), {}, kind));
+        ch.b().send(b_fwd(fwd_op_t::REPLY, reply_dst, b_path({"x"}), {}, kind));
         return true;
     }
 };
@@ -339,7 +358,8 @@ void test_late_reply_is_dropped_not_settling_the_next() {
     std::this_thread::sleep_for(50ms);
     check(h.client.count() == 1, "  the late reply was NOT forwarded: A has exactly one answer");
     const auto st = h.router.forward_stats();
-    check(st.late == 1, "  it is counted as late");
+    check(st.dropped == 1, "  it is counted as dropped");
+    check(st.tombstones == 0, "  and it consumed A's tombstone");
     check(st.in_use == 1, "  and B's entry is still open — the late reply did not settle it");
 
     // B's far end stays silent: B still gets its own bounded answer.
@@ -388,6 +408,47 @@ void test_removed_requester_is_forgotten() {
     check(h.client.count() == 0, "  and nothing was sent to the departed requester");
 }
 
+/** @brief Case 9: a reply from one far end never settles a request sent to another. */
+void test_reply_settles_only_its_own_far_end() {
+    std::printf("two far ends: a reply settles only the request sent to its own far end:\n");
+    hop_t h;
+    const auto tick = [&] { (void)h.router.expire_forwards(); };
+    // A to the silent far end, then B from the same client (same `src`) to the second one.
+    h.read_far();
+    check(wait_for([&] { return h.far_end.count() == 1; }, 2s, [] {}), "  READ A was forwarded");
+    h.read_far2();
+    check(wait_for([&] { return h.far2_end.count() == 1; }, 2s, [] {}), "  READ B was forwarded");
+    check(h.router.forward_stats().in_use == 2, "  two entries are open");
+
+    check(h.far2_answers(0), "  the second far end answers B");
+    check(wait_for([&] { return h.client.count() >= 1; }, 2s, [] {}), "  B's reply came back");
+    if (h.client.count() == 0) return;
+    const reply_t b = read_reply(h.client.at(0));
+    check(b.is_reply && b.kind == static_cast<std::uint8_t>(tr::graph::reply_kind_t::RESULT),
+          "  it is B's RESULT");
+    check(h.router.forward_stats().in_use == 1, "  one entry is still open");
+
+    // A's far end stays silent: A, not B, is the one that times out.
+    check(wait_for([&] { return h.client.count() >= 2; }, tr::net::kForwardDeadline + 2s, tick),
+          "  a second answer arrived");
+    if (h.client.count() < 2) return;
+    const reply_t a = read_reply(h.client.at(1));
+    check(is_error(a, err_t::FLOW_TIMEOUT), "  it is a tr::flow::timeout");
+    // The hop's error reply echoes the request's dst as its src: A's is `/far/x`.
+    const std::vector<std::byte> far_x = b_path({"far", "x"});
+    const std::vector<std::byte> far_x_body(far_x.begin() + 4, far_x.end());
+    // Kept alive: the decoded tree views the frame bytes.
+    const std::vector<std::byte> frame = h.client.at(1);
+    const auto tree = tr::wire::decode(frame);
+    const bool for_a = tree && tree->children.size() >= 3 &&
+                       std::vector<std::byte>(tree->children[2].payload.begin(),
+                                              tree->children[2].payload.end()) == far_x_body;
+    check(for_a, "  and it answers A (echoes /far/x), not B");
+    std::this_thread::sleep_for(tr::net::kForwardDeadline + 100ms);
+    (void)h.router.expire_forwards();
+    check(h.client.count() == 2, "  two requests, two answers — none for B twice");
+}
+
 }  // namespace
 
 int main() {
@@ -404,5 +465,6 @@ int main() {
     test_late_reply_is_dropped_not_settling_the_next();
     test_removed_far_end_resolves_at_once();
     test_removed_requester_is_forgotten();
+    test_reply_settles_only_its_own_far_end();
     return tr::testing::summary("fwd_forward_deadline_test");
 }

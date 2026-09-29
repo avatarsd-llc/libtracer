@@ -48,7 +48,10 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     forward path sweeps overdue entries whenever it runs; a node whose traffic can go quiet
     calls `expire_forwards()` from its own loop. An entry the hop answered stays behind as a
     tombstone for one more deadline, and a reply that matches it is LATE: dropped, not
-    forwarded, and counted in `forward_stats_t::late`. So a requester sees exactly one answer
+    forwarded, and counted in `forward_stats_t::dropped`. A reply settles only a request that
+    was forwarded over the link the reply came back on. Tombstones hold slots
+    (`forward_stats_t::tombstones`), so a full table can refuse while `in_use` is below
+    capacity. So a requester sees exactly one answer
     per request, a late reply can never settle the requester's next request on the same route,
     and on a chain of hops the inner hop's own timeout is swallowed by the outer hop that
     already answered. WRITE forwards (so an acknowledged write stream is never refused by a full

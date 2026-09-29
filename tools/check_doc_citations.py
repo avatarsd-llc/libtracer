@@ -378,25 +378,25 @@ ANCHORS = [
      "field_write read an empty head"),
     ("core/src/graph.cpp:3512", "result_t<void> graph_t::field_write"),
     ("core/src/graph.cpp:3702", "acl_right_t::CREATE", 'step0.name == "children"'),
-    ("core/src/fwd_router.cpp:3534", "fwd_router_t::deliver_remote"),
-    ("core/src/fwd_router.cpp:3572", "value.try_materialize(*flat_)"),
-    ("core/src/fwd_router.cpp:3573", "if (!flat) return;", "A REFUSED materialize drops the delivery"),
-    ("core/src/fwd_router.cpp:3575", "emit_compact", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:3536", "fwd_router_t::deliver_remote"),
+    ("core/src/fwd_router.cpp:3574", "value.try_materialize(*flat_)"),
+    ("core/src/fwd_router.cpp:3575", "if (!flat) return;", "A REFUSED materialize drops the delivery"),
+    ("core/src/fwd_router.cpp:3577", "emit_compact", "fwd_router_t::deliver_remote"),
     # The FULL-ROUTE delivery leg's iov, and the scope is load-bearing: this exact statement
     # appears four times in the file and TWICE inside `deliver_remote` — once in the bound
     # reverse-list arm and once in the default full-route arm below it. The old scope named
     # the function, which both arms are inside, so a re-pin resolved the citation onto the
     # bound arm (the wrong paragraph). "Default: full-route" sits between the two and only
     # ever above this one.
-    ("core/src/fwd_router.cpp:3665",
+    ("core/src/fwd_router.cpp:3667",
      "mem::block_array_t<std::span<const std::byte>> iov(graph_.control_source());",
      "Default: full-route"),
     # #730 — the two INGRESS flatten guards. Anchored because the whole point of the
     # seam is that these are testable; a citation to them silently rotting would be the
     # first step back to "the guard nobody can prove still works".
-    ("core/src/fwd_router.cpp:2951", "if (route.empty() && head->child1_total != 0) return;"),
-    ("core/src/fwd_router.cpp:2970", "if (payload.empty() && head->child1_total != 0) return;"),
-    ("core/src/fwd_router.cpp:2963", "const std::span<const std::byte> payload = contig(head->child1_off, head->child1_total);"),
+    ("core/src/fwd_router.cpp:2953", "if (route.empty() && head->child1_total != 0) return;"),
+    ("core/src/fwd_router.cpp:2972", "if (payload.empty() && head->child1_total != 0) return;"),
+    ("core/src/fwd_router.cpp:2965", "const std::span<const std::byte> payload = contig(head->child1_off, head->child1_total);"),
     ("core/src/fwd_router.cpp:2164", "frame.subrope(0, frame.total_length()).try_materialize",
      "if (hit.rejected) {"),
     # #766/#793 — the terminus resolver's three rope-tier draws, and the two allocations the
@@ -410,7 +410,7 @@ ANCHORS = [
     ("core/src/fwd_reply.cpp:130", "view::segment_alloc(egress, head_len)"),
     ('core/src/fwd_reply.cpp:33', "*        the u16 the kind=ERROR reply's ERROR{VALUE} identity carries."),
     ('core/src/fwd_reply.cpp:139', 'out.tlv_sliced(route.dst_wire);'),
-    ("core/src/fwd_router.cpp:2818", "decode_into(frame, rx_for(inbound_ctx))"),
+    ("core/src/fwd_router.cpp:2820", "decode_into(frame, rx_for(inbound_ctx))"),
     # `vertex.hpp:<parent_>` was pinned here TWICE, and the only doc that cites it is
     # `docs/spec/rfcs/0019` — a historical genre this tool's own header excludes from
     # pinning ("dated records of a decision ... pinning them would demand rewriting
@@ -712,14 +712,14 @@ ANCHORS = [
      'void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_t frame,'),
     ('core/src/fwd_router.cpp:2138', 'if (frame.link_count() == 1) {'),
     ('core/src/fwd_router.cpp:2199', '// A REPLY that reaches its originator here is handed to the sink'),
-    ('core/src/fwd_router.cpp:2979',
+    ('core/src/fwd_router.cpp:2981',
      'void fwd_router_t::on_control_rope(std::string_view inbound_name, view::rope_t frame,'),
-    ('core/src/fwd_router.cpp:2930', 'const auto head = peek_control(cur, wire::grammar::crc_check_t::VERIFY);'),
-    ('core/src/fwd_router.cpp:2944', 'const std::span<const std::byte> route = contig(head->child1_off, head->child1_total);'),
-    ('core/src/fwd_router.cpp:2996', 'frame.subrope(off, total).try_materialize(*flat_);'),
-    ('core/src/fwd_router.cpp:3551',
+    ('core/src/fwd_router.cpp:2932', 'const auto head = peek_control(cur, wire::grammar::crc_check_t::VERIFY);'),
+    ('core/src/fwd_router.cpp:2946', 'const std::span<const std::byte> route = contig(head->child1_off, head->child1_total);'),
+    ('core/src/fwd_router.cpp:2998', 'frame.subrope(off, total).try_materialize(*flat_);'),
+    ('core/src/fwd_router.cpp:3553',
      "// else. A dropped fresh ADVERTISE self-heals via the peer's HANDLE_NACK (§E.1). NOT yet"),
-    ('core/src/fwd_router.cpp:3641',
+    ('core/src/fwd_router.cpp:3643',
      'constexpr std::array<std::byte, 5> op_tlv{std::byte{0x01}, std::byte{0x00}, std::byte{0x01},'),
     # core/src/graph.cpp
     ('core/src/graph.cpp:609', 'const view_t& frame_view, std::vector<std::byte> key,'),
@@ -1030,31 +1030,31 @@ ANCHORS = [
     # Three lines now spell this table: the FORWARD hop's rope arm (this one) and the two
     # TERMINUS reply gathers #1570 migrated onto the same seam. The forward arm is the only
     # one under the rope-source comment, which is what selects it.
-    ('core/src/fwd_router.cpp:2759',
+    ('core/src/fwd_router.cpp:2761',
      'mem::block_array_t<std::span<const std::byte>> iov{rx_for(inbound_ctx)};',
      '// Rope source: a region may cross several links, so the sub-span count is only known'),
-    ('core/src/fwd_router.cpp:2985',
+    ('core/src/fwd_router.cpp:2987',
      'const wire::grammar::rope_cursor cur{frame};',
      'if (!frame.all_host()) return;'),
-    ('core/src/fwd_router.cpp:3280', 'const auto payload_view = view::over_bytes(payload_bytes);'),
-    ('core/src/fwd_router.cpp:3291',
+    ('core/src/fwd_router.cpp:3282', 'const auto payload_view = view::over_bytes(payload_bytes);'),
+    ('core/src/fwd_router.cpp:3293',
      'graph_.count_external_drop(graph::graph_t::external_drop_t::OUT_OF_MEMORY, 1);',
      'if (!value.try_reserve(1)) {'),
-    ('core/src/fwd_router.cpp:3329',
+    ('core/src/fwd_router.cpp:3331',
      'graph_.count_external_drop(graph::graph_t::external_drop_t::NO_TARGET, 1);',
      'if (!binding) {'),
-    ('core/src/fwd_router.cpp:3430',
+    ('core/src/fwd_router.cpp:3432',
      'const std::optional<graph::vertex_handle_t> v = resolve_route_vertex(route_path);'),
-    ('core/src/fwd_router.cpp:3434',
+    ('core/src/fwd_router.cpp:3436',
      'graph_.count_external_drop(graph::graph_t::external_drop_t::NO_TARGET, 1);',
      '// the same outcome either way: an admitted delivery with nowhere to land.'),
-    ('core/src/fwd_router.cpp:3441',
+    ('core/src/fwd_router.cpp:3443',
      'graph_.count_external_drop(graph::graph_t::external_drop_t::OUT_OF_MEMORY, 1);',
      'const auto payload_view = view::over_bytes(payload);'),
-    ('core/src/fwd_router.cpp:3574', 'if (fresh) emit_advertise(*link, label, route);'),
-    ('core/src/fwd_router.cpp:3644',
+    ('core/src/fwd_router.cpp:3576', 'if (fresh) emit_advertise(*link, label, route);'),
+    ('core/src/fwd_router.cpp:3646',
      'constexpr std::array<std::byte, 4> empty_src{std::byte{0x06}, std::byte{0x00}, std::byte{0x00},'),
-    ('core/src/fwd_router.cpp:3645',
+    ('core/src/fwd_router.cpp:3647',
      'std::byte{0x00}};',
      'constexpr std::array<std::byte, 4> empty_src{std::byte{0x06}, std::byte{0x00}, std::byte{0x00},'),
     ('core/src/graph.cpp:1160', 'return acl_allows(v.get(), caller, right);'),

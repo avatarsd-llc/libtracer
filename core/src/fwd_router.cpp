@@ -2506,13 +2506,15 @@ bool fwd_router_t::note_forward(const child_rx_ctx_t* inbound_ctx, bool from_pee
             static_cast<graph::fwd_op_t>(cur.byte_at(pre->op_body_off) & graph::kFwdOpcodeMask);
         if (op == graph::fwd_op_t::REPLY) {
             // A reply retracing a forward this hop made: its remaining `dst` is, byte for byte,
-            // the `src` the request arrived with, and it is leaving over the link that request
-            // arrived on — which is the whole key. A reply whose oldest match is a tombstone is
+            // the `src` the request arrived with, it is leaving over the link that request
+            // arrived on, and it came in over the link the request was forwarded on (`arrived`
+            // here) — so a reply from one far end never settles a request sent to another.
+            // A reply whose oldest match is a tombstone is
             // LATE: this hop already answered that request itself, so forwarding it would be a
             // second answer, and the requester would take it for its next request's. Dropped.
             if (!pending_.any_open()) return true;
             const std::uint32_t key = route_key(cur, rebuilt.rem_dst_off, rebuilt.rem_dst_len);
-            return pending_.settle(&child, key, [&](std::span<const std::byte> src) {
+            return pending_.settle(&child, arrived, key, [&](std::span<const std::byte> src) {
                 return window_equals(cur, rebuilt.rem_dst_off, rebuilt.rem_dst_len, src);
             }) != fwd_pending_t::settle_t::LATE;
         }
