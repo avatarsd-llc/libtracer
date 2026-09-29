@@ -633,7 +633,7 @@ struct ring_state_t {
 };
 
 /**
- * @brief A share threshold (RFC-0028 §5.3) as the 32-bit word @ref vertex_ext_t stores:
+ * @brief A share threshold (RFC-0028 §5.3) as the 32-bit word `%vertex_ext_t` stores:
  *        anything from `UINT32_MAX` up saturates to `UINT32_MAX`, which reads back as
  *        `SIZE_MAX` — copy always.
  */
