@@ -27,6 +27,10 @@
  *     the return type: a clear releases resources rather than acquiring any. Only
  *     `revert_to_placeholder` calls it, with `release`.
  *   - `load() const` — read the published value.
+ *   - `static constexpr bool may_spin` — whether any operation can SPIN-WAIT on another
+ *     thread's progress. Declaring it is mandatory: `%vertex.hpp` refuses a policy that does not,
+ *     and refuses one that says `true` on a target whose `config_t::kSpinWaitSafe` is `false`
+ *     (#1618). The assertion is on the policy, so a future policy cannot forget it.
  *
  * `store` returning `bool` is not ceremony. A slot that reclaims lazily has to allocate to
  * publish, and a policy surface that cannot say "I did not take this" forces the one thing
@@ -44,12 +48,26 @@
  * between a 1,806x and a 20.8x read win at twenty-four readers, which is why ADR-0069
  * carries the smaller number (see #642, and the erratum in #643).
  *
- * ## What the second policy actually bought
+ * ## The two policies
  *
- * Measured end to end, `graph_t::read` on one shared LKV, both slots built from this tree
- * (medians of six alternating runs, 24-core host — ADR-0069 §6):
+ *   - @ref tr::graph::single_writer_slot_t — the default, and the only one an RTOS target can
+ *     bind: its one wait is `config_t::reader_guard_t`, an interrupt-masked critical section
+ *     there and an address-striped one-word lock on a host, whose contender sleeps rather than
+ *     spins on a descheduled holder (#1618).
+ *   - @ref tr::graph::hazard_slot_t — the lock-free opt-in for a host whose reads of one shared
+ *     vertex contend across many cores.
  *
- * | readers | `sp_atomic_slot_t` | `hazard_slot_t` | gain |
+ * The refcount slot both replace, `std::atomic<std::shared_ptr<const rope_t>>`
+ * (`sp_atomic_slot_t`), was deleted because it was the only policy that could spin: libstdc++
+ * implements it with a pointer-lock bit that `load` and `store` spin on (RFC 0028 §4.5).
+ *
+ * ## What the hazard policy bought
+ *
+ * Measured end to end, `graph_t::read` on one shared LKV, the refcount slot against the hazard
+ * slot, both built from the tree of the time (medians of six alternating runs, 24-core host —
+ * ADR-0069 §6):
+ *
+ * | readers | refcount slot | `hazard_slot_t` | gain |
  * | ---: | ---: | ---: | ---: |
  * | 1 | 21.1 M/s | 18.7 M/s | within run-to-run spread |
  * | 8 | 2.2 M/s | 5.2 M/s | 2.4x |
@@ -62,27 +80,22 @@
  * write shapes) landed inside the 1.4-2.2x run-to-run spread, so the projected single-core
  * write penalty is not observable through `graph_t::write`.
  *
- * Two limits sit above this slot, and only the second is the slot's business (ADR-0069 §6,
- * second erratum — measured by ablation, after two wrong inferences):
- *
- *   - **Every `graph_t::read` takes `map_mutex_` shared** before it reaches the slot, to decide
- *     the leaf/branch fork (`graph.cpp:697` -> `:706`). That caps all reads at roughly 20 M/s
- *     per process whatever the topology; short-circuiting it takes the distinct-vertex read
- *     from 19.7 to 165.3 M/s at twenty-four readers. No slot policy can move it.
- *   - **On one shared vertex that lock is not what binds** — removing it changes nothing
- *     (1.74 -> 1.64 M/s). There the limit is the rope's control-block increment, the promotion
- *     an owning read cannot skip, which makes the next lever for THAT shape an API question
- *     rather than a reclamation one: the three `read_stored()` call sites that never keep the
- *     handle could take a scoped read instead.
+ * On one shared vertex the limit that remains is the rope's control-block increment, the
+ * promotion an owning read cannot skip (ADR-0069 §6, second erratum), which makes the next lever
+ * for THAT shape an API question rather than a reclamation one.
  */
 #pragma once
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <memory>
+#include <thread>
+#include <type_traits>
 
 #include "libtracer/config.hpp"
 #include "libtracer/rope.hpp"
@@ -90,53 +103,235 @@
 namespace tr::graph {
 
 /**
- * @brief The slot libtracer ships today: `std::atomic<std::shared_ptr<const rope_t>>`.
+ * @brief The host reader guard: one of @ref kStripes padded locks, chosen by slot address.
  *
- * Reclamation is the shared_ptr refcount, so there is no scheme to implement and no
- * registry to size — the reason this is the checked-in default, and the reason a raw `-I`
- * consumer and the stock ESP-IDF component keep building exactly what they built before
- * the slot became a policy.
+ * @ref single_writer_slot_t swaps and copies a `shared_ptr` inside `config_t::reader_guard_t`.
+ * On a single-core RTOS that guard is an interrupt-masked critical section (the ESP-IDF
+ * component binds `tr::esp::critical_guard_t`), which makes the window unpreemptable. A host
+ * process cannot mask interrupts, so this is the host's spelling of the same promise: a
+ * contender that finds the window held gives the CPU back to whoever holds it, instead of
+ * spinning until the holder is scheduled again.
  *
- * **Lock-free BY CONTRACT, and spin-locked in practice.**
- * `std::atomic<std::shared_ptr<T>>::is_lock_free()` returns 0 on libstdc++, so both load
- * and store take its internal pointer-lock bit (`lock cmpxchg` to acquire, an `xchg` to
- * release). Measured, that is ~77 of the ~316 cycles of an in-process write and the
- * largest single term left on the path — 88% of `store`'s samples land on those three
- * instructions. Do not read "lock-free" here as "no serializing operation"; ADR-0064 §2
- * records why, and ADR-0069 records what replaces it on a host.
+ * ## The shape of the lock, and why it is not `std::mutex`
+ *
+ * Taking it is one read-modify-write (`exchange`), releasing it is one plain release store —
+ * the shape the `std::atomic<std::shared_ptr>` slot this replaced had for its pointer-lock bit.
+ * The first cut of this guard was a `std::mutex` per stripe, and the blocking perf gate refused
+ * it (#1628): `inproc-target-stored/64/8/1` lost 13 % of its deliveries per second, ~11 ns per
+ * guarded section on the gate's runner, one section per delivery. A parking mutex cannot be
+ * cheaper than two read-modify-writes: its unlock has to publish the release AND then look for
+ * a sleeper, and that store-then-load pair needs a full fence or an RMW or it loses a wakeup.
+ *
+ * This lock has no wakeup to lose, so its unlock needs no fence. A contender re-reads the flag
+ * @ref kSpinsBeforeNap times, then SLEEPS for @ref kNap and looks again, for as long as it
+ * takes. The holder's window is a pointer swap or a handle copy — a handful of instructions —
+ * so a contender only ever reaches the nap when the holder was descheduled inside the window,
+ * and the nap is exactly what lets a descheduled holder run: on one CPU under priority
+ * preemption a `sched_yield` spinner never lets a lower-priority holder back (the #1618 hang);
+ * a sleeper does. `lkv_slot_inversion` checks that on the host with `SCHED_FIFO`.
+ *
+ * ## Striped, by address
+ *
+ * One process-wide lock serializes every vertex's publish against every other thread's. A lock
+ * per slot would put bytes in every vertex, and `sizeof(vertex_t)` is ratcheted. A static table
+ * of padded flags costs `kStripes * 64` bytes once, and two vertices share a lock only when their
+ * addresses hash to the same stripe.
  */
-class sp_atomic_slot_t {
-   public:
-    /** @brief The handle a publish takes and a read returns — owning, by the contract above. */
-    using value_ptr_t = std::shared_ptr<const view::rope_t>;
+struct mutex_guard_t {
+    /** @brief Stripes in the process-wide table. */
+    static constexpr std::size_t kStripes = 64;
+
+    /** @brief Re-reads of a held flag before a contender sleeps; covers a cross-core release. */
+    static constexpr unsigned kSpinsBeforeNap = 128;
 
     /**
-     * @brief Publish. Sequentially consistent unless the caller says otherwise — the default
-     *        is what orders the publish with `write_seq_` and the waiter count, which is what
-     *        makes the waiterless publish (#555) unable to lose a wakeup.
-     * @return Always `true`. This policy allocates nothing to publish — it takes a reference
-     *         it was handed — so it has no failure to report. The signature exists because the
-     *         *contract* has one (see the file header), not because this implementation does.
-     */
-    [[nodiscard]] bool store(value_ptr_t sp, std::memory_order order = std::memory_order_seq_cst) {
-        v_.store(std::move(sp), order);
-        return true;
-    }
-
-    /** @brief Drop the published value. Releases a reference; cannot fail. */
-    void clear(std::memory_order order = std::memory_order_seq_cst) { v_.store({}, order); }
-
-    /**
-     * @brief Read the published value.
+     * @brief How long a contender sleeps between looks once it has spun out.
      *
-     * A mid-read reader holds its own reference, so a concurrent publish or clear cannot
-     * free the value under it — that is the whole of this policy's reclamation.
+     * Only a holder descheduled inside its few-instruction window makes anyone sleep, so this
+     * bounds the extra latency of that rare case, not the common one. Bounded from below by
+     * what one `nanosleep` costs anyway.
      */
-    [[nodiscard]] value_ptr_t load() const { return v_.load(); }
+    static constexpr std::chrono::microseconds kNap{20};
+
+    /** @brief Take the stripe the slot at @p at hashes to. */
+    explicit mutex_guard_t(const void* at) : taken_(stripe(at)) {
+        if (!taken_.exchange(true, std::memory_order_acquire)) [[likely]]
+            return;
+        wait_for_window();
+    }
+    /** @brief Give the stripe back: a release store, and nobody to notify (see the class). */
+    ~mutex_guard_t() { taken_.store(false, std::memory_order_release); }
+    mutex_guard_t(const mutex_guard_t&) = delete;
+    mutex_guard_t& operator=(const mutex_guard_t&) = delete;
 
    private:
-    std::atomic<value_ptr_t> v_{};
+    /** @brief One stripe, on a cache line of its own so two stripes never false-share. */
+    struct alignas(64) cell_t {
+        std::atomic<bool> taken{false}; /**< @brief Whether some thread is inside the window. */
+    };
+
+    // The flag must be a lock-free atomic, or the "one RMW" above is a libatomic lock. That is
+    // asserted in `vertex.hpp` beside the BINDING, not here: this header is included by every
+    // consumer of a vertex, esp32c3 (rv32imc, no atomics at all) included, and a class-scope
+    // assertion fires there even though that target binds an interrupt-masked guard and never
+    // instantiates this one (#1628, the C3 legs).
+
+    /** @brief The stripe for address @p at: a Fibonacci hash of the address, top bits. */
+    static std::atomic<bool>& stripe(const void* at) {
+        static cell_t table[kStripes];
+        auto a = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(at));
+        a ^= a >> 17;
+        a *= 0x9E3779B97F4A7C15ull;
+        return table[(a >> 58) % kStripes].taken;
+    }
+
+    /**
+     * @brief The contended path: re-read, then nap, until an `exchange` finds the flag clear.
+     *
+     * Out of line so the uncontended constructor stays one RMW and a branch at every call site.
+     * Reads before the RMW so contenders do not bounce the line between them while they wait.
+     */
+    [[gnu::noinline]] void wait_for_window() {
+        for (;;) {
+            for (unsigned spins = 0; taken_.load(std::memory_order_relaxed); ++spins) {
+                if (spins >= kSpinsBeforeNap) {
+                    std::this_thread::sleep_for(kNap);
+                    spins = 0;
+                }
+            }
+            if (!taken_.exchange(true, std::memory_order_acquire)) return;
+        }
+    }
+
+    std::atomic<bool>& taken_;
 };
+
+/**
+ * @brief Open a reader guard of type @p guard_t for the slot at a given address.
+ *
+ * A guard that takes a `const void*` (like @ref mutex_guard_t) is handed the slot's address; an
+ * address-blind one (an interrupt mask) is default-constructed.
+ */
+template <typename guard_t>
+struct guard_for_t : guard_t {
+    /** @brief Construct the guard with the slot address. */
+    explicit guard_for_t(const void* at)
+        requires std::is_constructible_v<guard_t, const void*>
+        : guard_t(at) {}
+    /** @brief Construct an address-blind guard. */
+    explicit guard_for_t(const void*)
+        requires(!std::is_constructible_v<guard_t, const void*>)
+    {}
+};
+
+/**
+ * @brief The slot for a single-writer build (RFC 0028 §5.5): a plain `shared_ptr`, swapped and
+ *        copied inside the reader guard @p guard_t, which never spins.
+ *
+ * Why it exists (#1618). The refcount slot this replaced, `std::atomic<std::shared_ptr>`, is
+ * spin-locked in libstdc++: `load` and `store` take a pointer-lock bit and a contender spins on
+ * it with `sched_yield`. On a priority-preemptive single-core scheduler, `sched_yield` yields
+ * only to equal or higher priority, so a high-priority reader that preempts a low-priority
+ * writer inside that window spins until the task watchdog fires. Here the window is a guard
+ * that cannot be spun on: an interrupt-masked critical section cannot be preempted at all, and
+ * the host's @ref mutex_guard_t puts a contender to sleep once it has spun out.
+ *
+ * **What the guard covers, and what it does not.** `store` swaps the pointer inside the guard
+ * and releases the displaced value AFTER leaving it, so a rope's destructor and its memory
+ * resource never run with interrupts masked. `load` copies the handle inside the guard, so the
+ * refcount increment cannot interleave with the writer's release. Both sections are a handful
+ * of instructions and call nothing that can block.
+ *
+ * **Writers are serialized too.** Nothing here relies on a single publisher: two writers
+ * serialize on the guard like a writer and a reader do, which is why the host default binds this
+ * slot with `config_t::kSingleWriter` false. The name comes from RFC 0028 §5.5, where the
+ * single-writer build is the one that must bind it.
+ *
+ * **Why `kSingleWriter` does not let the writer skip the guard here.** It is tempting: one
+ * publisher, so nothing to exclude on the write side, publish with `release` and let readers
+ * `acquire`. That is sound for the one-word slot RFC 0028 §5.5 describes (an intrusive
+ * `value_t*`, slice 3), where the publish is a single atomic `exchange` and a reader's `retain`
+ * inside its guard cannot interleave with the writer's release. It is NOT sound for this slot,
+ * and the single-writer contract does not help: a `shared_ptr` is two words, so a writer's swap
+ * outside the guard can be observed half-done by ONE reader inside it — a pointer from the new
+ * value paired with the control block of the old — and a reader that read a consistent pair
+ * can still increment a control block the writer released a moment later. Neither race needs a
+ * second writer. On a single core the reader that preempts the writer mid-swap is exactly the
+ * high-priority task #1618 is about. So the writer keeps the guard on every target until the
+ * slot is one word, and `kSingleWriter` stays a contract, not a code path, in this slice.
+ * `lkv_slot_test`'s one-writer / N-reader run is the test that bites when this is tried: with
+ * the writer's guard removed, a reader reads a rope after its free (ASan: heap-use-after-free).
+ *
+ * @tparam guard_t An RAII type whose lifetime is the critical section, constructible either
+ *                 from the slot's address (`const void*`) or from nothing.
+ *                 The bound slot uses `config_t::reader_guard_t`; tests instantiate this
+ *                 template directly with a guard of their own.
+ */
+template <typename guard_t>
+class basic_single_writer_slot_t {
+   public:
+    /** @brief The handle a publish takes and a read returns — owning, as the contract requires. */
+    using value_ptr_t = std::shared_ptr<const view::rope_t>;
+
+    /** @brief This policy never spin-waits: the only wait is the guard, and a guard may not. */
+    static constexpr bool may_spin = false;
+
+    basic_single_writer_slot_t() = default;
+    basic_single_writer_slot_t(const basic_single_writer_slot_t&) = delete;
+    basic_single_writer_slot_t& operator=(const basic_single_writer_slot_t&) = delete;
+
+    /**
+     * @brief Publish. The swap happens inside the guard; the displaced value is released
+     *        after it, outside.
+     *
+     * No fence follows the guard. What `vertex_t::store` needs from the slot is that the value
+     * is visible to anyone who observes the next `write_seq_` bump, and the bump is a `seq_cst`
+     * read-modify-write sequenced after the guard's release, so it already carries the swap.
+     * The waiterless-publish argument (#555) is about `write_seq_` and the waiter count only.
+     *
+     * @return Always `true`. A swap allocates nothing, so there is no failure to report.
+     */
+    [[nodiscard]] bool store(value_ptr_t sp, std::memory_order = std::memory_order_seq_cst) {
+        {
+            const guard_for_t<guard_t> g{this};
+            v_.swap(sp);
+        }
+        return true;  // `sp` now holds the displaced value and is released here, unguarded
+    }
+
+    /** @brief Drop the published value. Releases a reference outside the guard; cannot fail. */
+    void clear(std::memory_order = std::memory_order_seq_cst) {
+        value_ptr_t old;
+        {
+            const guard_for_t<guard_t> g{this};
+            v_.swap(old);
+        }
+    }
+
+    /**
+     * @brief Read the published value: one guarded copy of the handle.
+     *
+     * The copy is the refcount increment that lets the handle outlive the guard, and it is the
+     * only work inside it.
+     */
+    [[nodiscard]] value_ptr_t load() const {
+        const guard_for_t<guard_t> g{this};
+        return v_;
+    }
+
+   private:
+    value_ptr_t v_{};
+};
+
+/**
+ * @brief @ref basic_single_writer_slot_t over this build's `config_t::reader_guard_t` — the
+ *        name an override fragment binds.
+ *
+ * A class rather than an alias so `%config.hpp` can forward-declare it: the fragment names the
+ * slot before this header has been seen, and the guard it will use is a member of the very
+ * traits type the fragment is defining.
+ */
+class single_writer_slot_t : public basic_single_writer_slot_t<config_t::reader_guard_t> {};
 
 /**
  * @brief The process-wide hazard-pointer domain behind @ref hazard_slot_t (ADR-0069 §2/§5).
@@ -572,7 +767,7 @@ inline void retire(lists_t& l, node_t* n) {
  * scan, its exit, or process exit — so an injected resource must outlive the threads that
  * wrote through it, not merely the graph. For the process-lifetime heap a host build
  * actually uses, that is vacuous; for a scoped arena it is a real constraint, and one more
- * reason `sp_atomic_slot_t` stays the default.
+ * reason a bounded target binds @ref single_writer_slot_t instead.
  *
  * ## What the orphan probe promises, and why it is not "at slot death" (#1037)
  *
@@ -823,7 +1018,7 @@ inline final_sweep_t::~final_sweep_t() {
 
 /**
  * @brief The host slot (ADR-0069 §1): a lock-free `atomic<node_t*>` reclaimed with hazard
- *        pointers, returning the same owning `shared_ptr` @ref sp_atomic_slot_t does.
+ *        pointers, returning the same owning `shared_ptr` @ref single_writer_slot_t does.
  *
  * Why this exists: today's slot INVERTS under concurrent readers — measured through the real
  * path, `graph_t::read` on one shared LKV falls from 21.1 M/s at one reader to 1.7 M/s at
@@ -833,14 +1028,12 @@ inline final_sweep_t::~final_sweep_t() {
  * readers (7.4 M/s) — see the table in this file's header, and ADR-0069 §6 for why the
  * model bench's 20.8× did not survive contact with the whole read path.
  *
- * Why the default is still `sp_atomic_slot_t`: the gain is entirely a concurrency gain —
- * at one thread the two slots are indistinguishable within run-to-run spread, so a
- * single-core node buys nothing and still pays `(kHazardReaderSlots + 1) * 128` bytes of
- * registry, a deferred-reclamation lifetime rule (see `retire_and_flush`), and
- * a publish that can fail. Bind this one from a host preset:
- * `-DLIBTRACER_LKV_SLOT=hazard_slot_t`.
+ * A host opt-in. The gain over the refcount slot it replaced is a concurrency gain, so a
+ * single-core node buys nothing from it and still pays `(kHazardReaderSlots + 1) * 128` bytes
+ * of registry, a deferred-reclamation lifetime rule (see `retire_and_flush`), and a publish
+ * that can fail. Such a node binds @ref single_writer_slot_t.
  *
- * **Publish can fail under memory exhaustion**, which @ref sp_atomic_slot_t cannot: an empty
+ * **Publish can fail under memory exhaustion**, which @ref single_writer_slot_t cannot: an empty
  * free list makes the first publish per participant allocate a 24-byte node. It is *reported*,
  * not silent — `store` returns `false` and `vertex_t::store` turns that into the same
  * `nullptr` → `BACKPRESSURE` soft-fail an LKV allocation failure already produces (#477), so
@@ -849,12 +1042,20 @@ inline final_sweep_t::~final_sweep_t() {
  * difference in the policy's failure surface, and a third reason the MCU does not bind this
  * slot. Note also that the node comes from the **global heap**, not from a graph's injected
  * `std::pmr::memory_resource`: the slot policy is never handed one, and a bounded target that
- * needs every byte accounted for is another target that should keep the default.
+ * needs every byte accounted for is another target that should bind @ref single_writer_slot_t.
+ *
+ * **It does not spin-wait.** The one loop in the domain that waits on another thread is the
+ * overflow index's lock in `detail_hp::ticket_t`, and it waits with `atomic_flag::wait`, which
+ * blocks (a futex, or libstdc++'s pooled condition variable) after a bounded spin. The read's
+ * announce-and-revalidate loop retries only when a publish moved the slot, which is progress.
  */
 class hazard_slot_t {
    public:
     /** @brief The handle a publish takes and a read returns — owning, as the contract requires. */
     using value_ptr_t = std::shared_ptr<const view::rope_t>;
+
+    /** @brief No operation spin-waits on another thread; see the class comment. */
+    static constexpr bool may_spin = false;
 
     hazard_slot_t() = default;
     hazard_slot_t(const hazard_slot_t&) = delete;

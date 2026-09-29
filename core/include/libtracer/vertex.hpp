@@ -35,6 +35,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <concepts>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
@@ -82,14 +83,57 @@ namespace tr::graph {
  *
  * A thread that failed to claim re-probes this table on every operation, so a probe that took
  * a libatomic lock would serialize the very readers `%hazard_slot_t` exists to keep
- * lock-free — the binding would be actively worse than the `sp_atomic_slot_t` default rather
- * than merely no better.
+ * lock-free — the binding would be actively worse than `single_writer_slot_t` rather than
+ * merely no better.
  */
 static_assert(!std::is_same_v<lkv_slot_t, hazard_slot_t> || detail_hp::kClaimWords == 0 ||
                   std::atomic<detail_hp::claim_word_t>::is_always_lock_free,
               "this target binds hazard_slot_t but cannot claim a hazard index without taking "
-              "a lock — bind sp_atomic_slot_t here, or build for a target with lock-free "
+              "a lock — bind single_writer_slot_t here, or build for a target with lock-free "
               "atomics of pointer width");
+
+/**
+ * @brief The host reader guard is a one-word lock-free flag, or it is not the host guard (#1628).
+ *
+ * `mutex_guard_t`'s whole point is one RMW to take a stripe; on a target whose `atomic<bool>` is
+ * not lock-free that RMW is a libatomic lock, and the target should bind an interrupt-masked
+ * `reader_guard_t` instead (every ESP chip target does). Asserted here, beside the binding, for
+ * the reason the hazard assertion above is: `%lkv_slot.hpp` is included on targets that never
+ * bind the guard, and esp32c3 (rv32imc) has no lock-free atomic of any width.
+ */
+static_assert(!std::is_same_v<reader_guard_t, mutex_guard_t> ||
+                  std::atomic<bool>::is_always_lock_free,
+              "this target binds mutex_guard_t, the host reader guard, but has no lock-free bool "
+              "atomic — its one-word lock would take a libatomic lock; bind an interrupt-masked "
+              "reader_guard_t here (the ESP-IDF component's tr::esp::critical_guard_t)");
+
+/**
+ * @brief An LKV slot policy declares whether it can spin-wait (#1618, RFC 0028 §5.6).
+ *
+ * The declaration is mandatory, so a new policy cannot slip past the assertion below by
+ * forgetting it.
+ */
+template <typename slot_t>
+concept lkv_slot_policy = requires {
+    { slot_t::may_spin } -> std::convertible_to<bool>;
+};
+
+static_assert(lkv_slot_policy<lkv_slot_t>,
+              "the bound lkv_slot_t does not declare `static constexpr bool may_spin` — every "
+              "slot policy must say whether it can spin-wait (see lkv_slot.hpp)");
+
+/**
+ * @brief No slot policy that can spin-wait may be bound where spin-waiting hangs (#1618).
+ *
+ * The pool guard in `%mem_pool.hpp` has the same shape. It lives here, beside the binding, for
+ * the reason the hazard assertion above does: this is where `%lkv_slot_t` and the policy's
+ * declaration are both visible.
+ */
+static_assert(config_t::kSpinWaitSafe || !lkv_slot_t::may_spin,
+              "this target sets kSpinWaitSafe = false, and the bound lkv_slot_t declares "
+              "may_spin = true: a high-priority reader could spin on a window a preempted "
+              "writer never leaves, and the target hangs in the watchdog — bind "
+              "single_writer_slot_t with an interrupt-masked reader_guard_t");
 
 /**
  * @brief The memory order of the DELIVERY-SKIP Dekker pair (#635, #1140) — the one order in
@@ -1272,7 +1316,7 @@ class vertex_t {
     std::shared_ptr<const rope_t> store(rope_t value, std::pmr::memory_resource* mr = nullptr) {
         std::shared_ptr<const rope_t> sp = try_make_lkv(std::move(value), mr);
         if (!sp) return nullptr;  // OOM: nothing published — the caller soft-fails (#477)
-        // Publish the new last-known-value (lock-free by CONTRACT; see lkv_). A slot that
+        // Publish the new last-known-value through the bound slot policy (see lkv_). A slot that
         // reclaims lazily has to allocate to publish, so this can decline — and when it does,
         // NOTHING was published: fail exactly as an LKV allocation failure does, rather than
         // returning a handle to a value the vertex is not actually holding.
@@ -2994,11 +3038,9 @@ class vertex_t {
     // The stored value is a rope (ADR-0053 §6): a contiguous scalar is a single-link
     // rope (small-buffer inline, no extra alloc), a chunked stream keeps its links.
     /** @brief The last-known value, held through the slot policy this target bound
-     *         (`tr::graph::lkv_slot_t` in `%config.hpp`; ADR-0069 §1). The default binding is
-     *         `sp_atomic_slot_t` — today's `std::atomic<std::shared_ptr<const rope_t>>`,
-     *         which is lock-free by CONTRACT and spin-locked in practice. `%lkv_slot.hpp`
-     *         documents that caveat and the contract any replacement must satisfy. Do not
-     *         read "lock-free" here as "no serializing operation". */
+     *         (`tr::graph::lkv_slot_t` in `%config.hpp`; ADR-0069 §1):
+     *         `single_writer_slot_t` by default, `hazard_slot_t` as a host opt-in.
+     *         `%lkv_slot.hpp` documents both and the contract any policy must satisfy. */
     lkv_slot_t lkv_{};
 
     path_key_t name_;  // own canonical NAME record (one segment; empty at the root) — the
@@ -3135,13 +3177,14 @@ class vertex_t {
 /**
  * @brief The cache-line straddle gate (#1285), enforced beside the type it constrains.
  *
- * `lkv_` is the contended word of the write hot path: with the default `sp_atomic_slot_t`
- * binding this libstdc++ keeps the spin lock as the LSB of the slot's second word, so N
- * concurrent writers do `lock cmpxchg` on one address inside the slot. The slot is 16 bytes
- * wide but only 8-byte aligned, so an offset that is 8-aligned-but-not-16 lets its two words
- * land on DIFFERENT 64-byte cache lines for one of the four block alignments glibc can return
- * — doubling the coherence footprint of every publish (measured x0.34 throughput, 1.9x cache
- * misses, at `address % 64 == 32` with the slot at offset 24).
+ * `lkv_` is the contended word of the write hot path. The gate was set for the refcount slot
+ * `single_writer_slot_t` and `hazard_slot_t` replaced (`std::atomic<std::shared_ptr>`, whose
+ * spin lock sat in the LSB of its second word): a 16-byte, 8-aligned slot at an offset that is
+ * 8-aligned-but-not-16 lets its two words land on DIFFERENT 64-byte cache lines for one of the
+ * four block alignments glibc can return — doubling the coherence footprint of every publish
+ * (measured x0.34 throughput, 1.9x cache misses, at `address % 64 == 32` with the slot at
+ * offset 24). `single_writer_slot_t` is the same 16 bytes on a 64-bit host, so the gate still
+ * holds for it; for the 8-byte hazard slot it is free.
  *
  * Pinning the offset to a multiple of 16 makes that placement unreachable: any 16-byte-aligned
  * block puts a 16-aligned interior offset back on a 16-byte boundary, and 16 bytes starting on

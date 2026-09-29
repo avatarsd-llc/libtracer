@@ -12,6 +12,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **BREAKING (inherited from core) — chip targets bind the single-writer LKV slot**
+  ([#1618](https://github.com/avatarsd-llc/libtracer/issues/1618)). Core removed
+  `sp_atomic_slot_t`, the spin-locked slot every chip build used by default. On a
+  priority-preemptive scheduler that spin could hang a task in the watchdog. The generated
+  `config_override.hpp` now sets `kSingleWriter = true`,
+  `reader_guard_t = tr::esp::critical_guard_t` and `lkv_slot_t = single_writer_slot_t` on every
+  chip target. The `linux` target keeps core's default, `single_writer_slot_t` over the host `mutex_guard_t`. The new header
+  `libtracer_esp/critical_guard.hpp` defines the guard: a `portENTER_CRITICAL_SAFE` section on
+  one shared portMUX, so it is ISR-safe. An application that publishes one vertex from two tasks
+  is still memory-safe, because the guard serializes writers too. `kSingleWriter` is the contract
+  that later value-path work may rely on.
+
 - **BREAKING (behaviour) — `esp_ws_client_link_t::send` enqueues then writes; a concurrent
   sender never waits on another sender's write** (RFC 0028 slice 2, fixes
   [#1619](https://github.com/avatarsd-llc/libtracer/issues/1619)). `send` used to hold

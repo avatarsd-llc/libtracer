@@ -2297,3 +2297,22 @@ if(LIBTRACER_NET_PLANE)
     libtracer_test_warnings(retained_subscription_seam_test)
     add_test(NAME retained_subscription_seam COMMAND retained_subscription_seam_test)
 endif()
+
+# #1618 — no slot policy may livelock a high-priority reader against a low-priority writer on
+# one CPU: two SCHED_FIFO threads pinned together, the RTOS hazard reproduced on the host. Needs
+# CAP_SYS_NICE and two CPUs; without them it exits 77 and ctest reports it SKIPPED, never passed.
+add_executable(lkv_slot_inversion_test lkv_slot_inversion_test.cpp)
+target_link_libraries(lkv_slot_inversion_test PRIVATE libtracer Threads::Threads)
+libtracer_test_warnings(lkv_slot_inversion_test)
+add_test(NAME lkv_slot_inversion COMMAND lkv_slot_inversion_test)
+set_property(TEST lkv_slot_inversion PROPERTY SKIP_RETURN_CODE 77)
+
+# #1618 — the slot twin of the spin_pool_guard check. Every LKV slot policy declares
+# `may_spin`, and vertex.hpp refuses a spinning one where kSpinWaitSafe is false (and one that
+# declares nothing). The fixtures are checked-in override fragments, one directory per arm.
+add_test(NAME spin_slot_guard COMMAND ${CMAKE_COMMAND}
+         -DLT_CXX=${CMAKE_CXX_COMPILER}
+         -DLT_CORE_INCLUDE=${CMAKE_CURRENT_SOURCE_DIR}/../include
+         -DLT_FIXTURES=${CMAKE_CURRENT_SOURCE_DIR}/spin_slot_guard
+         -DLT_PROBE=${CMAKE_CURRENT_SOURCE_DIR}/spin_slot_guard_probe.cpp
+         -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/spin_slot_guard.cmake)

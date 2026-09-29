@@ -26,12 +26,11 @@ per-vertex mutex**; that mutex guards the subscriber list, the history ring and 
 `await` waiter accounting, and a per-vertex condvar makes `await` block until the next
 write.
 
-The slot is not free of serializing instructions. `std::atomic<std::shared_ptr<T>>` is
-not lock-free on libstdc++, so both load and store take its internal pointer-lock bit —
-"lock-free by contract, spin-locked in practice" (`sp_atomic_slot_t`,
-`core/include/libtracer/lkv_slot.hpp:100-105`). The claim the code supports is the mutex
-one, not an absence of contention; the cost of that spin and the policy that replaces it
-on a host are in [design/concurrency](../design/concurrency/README.md).
+The slot is a build-time policy. By default it is `single_writer_slot_t`, whose one wait
+is a reader guard that never spins (#1618): a striped mutex on a host, an interrupt-masked
+section on a chip. A host can opt into `hazard_slot_t`, which is lock-free but still pays
+one contended increment to promote a read into an owning handle. The claim the code supports is the mutex one, not an absence of
+contention; the costs are in [design/concurrency](../design/concurrency/README.md).
 
 **Subscriptions are field-writes, not a verb**
 ([ADR-0006 — read/write/await API, no connect](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0006-read-write-await-api-no-connect.md)):
@@ -227,7 +226,7 @@ for (...) g.write(v, p.field(), setpoint_tlv);           // hot loop — zero st
 
 `read` and `await` return `result_t<value_ref_t>`, not `result_t<rope_t>`
 (`core/include/libtracer/graph.hpp:1428,1634` by handle, `:2266,2272` by path;
-`value_ref_t` at `core/include/libtracer/vertex.hpp:242`). A `value_ref_t` is an **owning
+`value_ref_t` at `core/include/libtracer/vertex.hpp:286`). A `value_ref_t` is an **owning
 reference** to the value the vertex published: the LKV slot holds it as a
 `std::shared_ptr<const rope_t>`, so handing that reference back costs a refcount clone of
 one control block instead of one `segment_ptr_t` clone per link.

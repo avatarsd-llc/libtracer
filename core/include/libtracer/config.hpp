@@ -39,11 +39,22 @@ inline constexpr std::uint32_t kPinNever = 0;
 
 struct allow_only_policy_t;  // security_acl.hpp — the ALLOW-only MCU profile (ADR-0020 subset)
 struct full_acl_policy_t;    // security_acl.hpp — ordered first-match-per-bit with DENY
-class sp_atomic_slot_t;      // lkv_slot.hpp — atomic<shared_ptr>; reclamation is the refcount
 class hazard_slot_t;         // lkv_slot.hpp — lock-free atomic<node*>; hazard-pointer reclamation
+class single_writer_slot_t;  // lkv_slot.hpp — shared_ptr swapped inside reader_guard_t; no spin
+struct mutex_guard_t;        // lkv_slot.hpp — the host reader guard: address-striped locks
 struct reclaim_strict_t;     // reclaim.hpp — grace point: `unsubscribe()` returns
 struct reclaim_local_t;      // reclaim.hpp — grace point: this thread's dispatch stack unwinds
 struct reclaim_qsbr_t;  // reclaim.hpp — grace point: EVERY thread has passed a quiescent state
+
+/**
+ * @brief The reader guard that guards nothing — for a build whose slot policy needs no guard.
+ *
+ * A build that binds `hazard_slot_t` never opens a guard, so this is never constructed there.
+ * A build that binds `single_writer_slot_t` with this guard is asserting
+ * that no other thread ever touches a vertex's value concurrently — true of a single-threaded
+ * program and of nothing else.
+ */
+struct no_guard_t {};
 
 /**
  * @brief The target's build configuration, as ONE named type (ADR-0070).
@@ -71,7 +82,8 @@ struct reclaim_qsbr_t;  // reclaim.hpp — grace point: EVERY thread has passed 
  * namespace tr::graph {
  * struct my_node_config_t : default_config_t {
  *     static constexpr std::size_t kCacheLineBytes = 0;  // single-core: no false sharing
- *     using lkv_slot_t = sp_atomic_slot_t;
+ *     static constexpr bool kSingleWriter = true;
+ *     using reader_guard_t = my_rtos_critical_section_t;
  * };
  * using config_t = my_node_config_t;
  * }  // namespace tr::graph
@@ -130,9 +142,10 @@ struct default_config_t {
      * `static constexpr std::size_t kHazardReaderSlots = 24;`.
      *
      * Sizing: one index per such thread, and **nothing at all** unless @ref lkv_slot_t is bound
-     * to `hazard_slot_t` — the default binding never references the registry, so it is never
-     * emitted. Undersizing is not a correctness problem: threads past the bound share one
-     * reserved index under a spin lock, so they serialize with each other and with nobody else.
+     * to `hazard_slot_t` — the default binding (`single_writer_slot_t`) never references the
+     * registry, so it is never emitted.
+     * Undersizing is not a correctness problem: threads past the bound share one reserved index
+     * under a spin lock, so they serialize with each other and with nobody else.
      *
      * What the domain costs when it IS bound, measured on rv32 at N = 64 (`-Os`, real
      * `core/src/graph.cpp`, GCC 15.2) — the padding knob dominates it:
@@ -271,20 +284,47 @@ struct default_config_t {
     using acl_policy_t = allow_only_policy_t;
 
     /**
+     * @brief Whether every vertex has at most ONE publishing thread, by contract (RFC 0028 §5.5).
+     *
+     * A per-build trait, not a per-vertex bit: the per-build form is the only one that can take
+     * a synchronization primitive out of the binary. It is a PROMISE the integrator makes — the
+     * library cannot detect two tasks publishing one vertex in a release build.
+     *
+     * No slot depends on it for memory safety today: `single_writer_slot_t`'s guard serializes
+     * writers as well as readers, which is why the host default binds that slot with this
+     * trait `false`. Later work on the value path may rely on it. Override fragment:
+     * `static constexpr bool kSingleWriter = true;`.
+     */
+    static constexpr bool kSingleWriter = false;
+
+    /**
+     * @brief The RAII guard `single_writer_slot_t` opens around its pointer swap and its
+     *        handle copy (RFC 0028 §5.5).
+     *
+     * `mutex_guard_t` by default: a table of address-striped one-word locks — one RMW to take,
+     * a release store to give back — whose contender re-reads briefly and then sleeps instead
+     * of spinning on a descheduled holder; unrelated vertices rarely share one. A single-core
+     * RTOS build binds an interrupt-masked critical section (the ESP-IDF component:
+     * `tr::esp::critical_guard_t`). A guard that takes a `const void*` is handed the slot's
+     * address. The guard must never spin-wait where @ref kSpinWaitSafe is `false` — that is the
+     * whole of #1618.
+     */
+    using reader_guard_t = mutex_guard_t;
+
+    /**
      * @brief The target's selected LKV slot policy (ADR-0069 §1).
      *
-     * How a vertex publishes and reads its last-known value. Default: `sp_atomic_slot_t`, the
-     * `std::atomic<std::shared_ptr<const rope_t>>` libtracer has always used, whose reclamation
-     * is the refcount and whose registry cost is zero — the right choice for a write-dominated
-     * single-core node, and the reason a raw `-I` consumer builds what it always built.
+     * How a vertex publishes and reads its last-known value. Default: `single_writer_slot_t`,
+     * a `shared_ptr` swapped and copied inside @ref reader_guard_t. It has no registry, no
+     * deferred reclamation and a publish that cannot fail, and its one wait is the guard (#1618).
      *
-     * A many-core host is the case for rebinding this: today's slot INVERTS under concurrent
-     * readers, and a reclamation scheme that does not serialize recovers roughly 4x of that at
-     * twenty-four readers (ADR-0069 §6 — the real path, not the model bench's 20.8x). Override
-     * fragment: `using lkv_slot_t = hazard_slot_t;`. The named type must satisfy the contract in
-     * `%lkv_slot.hpp` — in particular `load()` returns an OWNING handle.
+     * `hazard_slot_t` is the lock-free alternative for a host whose reads of one shared vertex
+     * contend across many cores. Override fragment: `using lkv_slot_t = hazard_slot_t;`. The
+     * named type must satisfy the contract in `%lkv_slot.hpp` — in particular `load()` returns an
+     * OWNING handle, and the policy declares `may_spin`, which is refused where
+     * @ref kSpinWaitSafe is `false`.
      */
-    using lkv_slot_t = sp_atomic_slot_t;
+    using lkv_slot_t = single_writer_slot_t;
 
     /**
      * @brief The target's selected RECLAMATION policy (ADR-0080) — WHEN the library may free
@@ -411,6 +451,9 @@ struct default_config_t {
      * CPU the holder needs to release the lock — the wait becomes unbounded priority inversion
      * and the board hangs in the watchdog rather than merely running slowly. That is true of a
      * single-core chip and equally of an SMP chip whose spinner and holder share a core.
+     *
+     * Asserted against the pool's sync policy (`%mem_pool.hpp`) and against every LKV slot
+     * policy's `may_spin` (`%vertex.hpp`, #1618).
      */
     static constexpr bool kSpinWaitSafe = true;
 
@@ -624,6 +667,10 @@ inline constexpr std::size_t kQsbrParticipants = config_t::kQsbrParticipants;
 inline constexpr bool kWeaklyOrdered = config_t::kWeaklyOrdered;
 /** @brief @ref default_config_t::acl_policy_t for this build. */
 using acl_policy_t = config_t::acl_policy_t;
+/** @brief @ref default_config_t::kSingleWriter for this build. */
+inline constexpr bool kSingleWriter = config_t::kSingleWriter;
+/** @brief @ref default_config_t::reader_guard_t for this build. */
+using reader_guard_t = config_t::reader_guard_t;
 /** @brief @ref default_config_t::lkv_slot_t for this build. */
 using lkv_slot_t = config_t::lkv_slot_t;
 /** @brief @ref default_config_t::reclaim_policy_t for this build. */

@@ -248,6 +248,54 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Removed
 
+- **BREAKING — `tr::graph::sp_atomic_slot_t` is removed; the default LKV slot is now the new
+  `single_writer_slot_t`**
+  ([#1618](https://github.com/avatarsd-llc/libtracer/issues/1618), RFC 0028 §5.5 slice 1,
+  [#1627](https://github.com/avatarsd-llc/libtracer/pull/1627)). The removed slot was
+  `std::atomic<std::shared_ptr<const rope_t>>`, which libstdc++ implements with a pointer-lock bit
+  that `load` and `store` spin on with `sched_yield`. On a priority-preemptive single core,
+  `sched_yield` yields only to equal or higher priority, so a high-priority reader that preempted
+  a low-priority writer inside that window spun until the task watchdog fired. It was the default
+  on every target, the ESP-IDF chip builds included, and nothing asserted against it.
+  Reproduced on the host with two `SCHED_FIFO` threads pinned to one CPU: the reader livelocks on
+  the first run.
+
+  - **Added** `single_writer_slot_t` (and the template behind it,
+    `basic_single_writer_slot_t<guard_t>`). It is a plain `shared_ptr`, swapped on publish and
+    copied on read inside `config_t::reader_guard_t`. The displaced value is released after the
+    guard closes, so no destructor runs with interrupts masked. A publish cannot fail, and the
+    slot has no registry.
+  - **Added** `default_config_t::kSingleWriter` (per-build, default `false`),
+    `default_config_t::reader_guard_t`, `tr::graph::no_guard_t` (for a single-threaded build), and
+    `tr::graph::mutex_guard_t` (the host guard: 64 cache-line-padded one-word locks striped by
+    slot address — one `exchange` to take, one release store to give back; a contender re-reads
+    briefly and then sleeps in bounded naps, never spinning on a descheduled holder). A
+    `std::mutex` per stripe was the first cut and the blocking perf gate refused it
+    ([#1628](https://github.com/avatarsd-llc/libtracer/pull/1628): `inproc-target-stored`
+    −13 %, one guarded section per delivery); a parking mutex's unlock must fence or RMW to
+    find its sleeper, and a lock whose contender sleeps on a timer has no wakeup to lose.
+    `kSingleWriter` states the one-publisher contract; the guard serializes writers either way,
+    so a build that breaks it stays memory-safe. It does **not** let the writer skip the guard:
+    a `shared_ptr` is two words, so one reader can observe a half-done swap or retain a control
+    block the writer has just released, single publisher or not. That shortcut becomes sound
+    only with the one-word intrusive slot of RFC 0028 slice 3, and `lkv_slot.hpp` says why.
+  - **Added** a mandatory `static constexpr bool may_spin` on every slot policy. `vertex.hpp`
+    refuses a policy that does not declare it, and refuses one that declares `true` where
+    `kSpinWaitSafe` is `false`. The `spin_slot_guard` ctest checks both refusals by their
+    diagnostics. Both shipped policies declare `false`.
+  - **Changed** `default_config_t::lkv_slot_t` from `sp_atomic_slot_t` to `single_writer_slot_t`
+    and `default_config_t::reader_guard_t` to `mutex_guard_t`. The host perf gate passes with no
+    allowance: bytes per vertex and per value are unchanged, and `mixed` is within noise.
+    `hazard_slot_t` stays a host opt-in; on that gate it adds 23 B and one block per published
+    value (its indirection node) and loses 24–30 % on `mixed`, because deferred reclamation of
+    displaced values defeats the allocator's thread cache. An embedded target overrides
+    `reader_guard_t` with an interrupt-masking guard.
+  - **Changed** the `LIBTRACER_LKV_SLOT` CMake option to default to `single_writer_slot_t` and to
+    accept only `single_writer_slot_t` or `hazard_slot_t`. `sp_atomic_slot_t` is a configure-time
+    error.
+  - **Migration:** an override fragment that named `sp_atomic_slot_t` drops the line to take
+    `single_writer_slot_t`, or binds `hazard_slot_t`. A custom slot policy adds `may_spin`.
+
 - **BREAKING — the `/net:children[]` connection-creation door is RETIRED, and with it the SPEC's
   `type` pair and the `role` config key** ([#492](https://github.com/avatarsd-llc/libtracer/issues/492)
   S7, [RFC-0014](../docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)
