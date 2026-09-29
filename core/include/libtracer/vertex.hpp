@@ -93,6 +93,21 @@ static_assert(!std::is_same_v<lkv_slot_t, hazard_slot_t> || detail_hp::kClaimWor
               "atomics of pointer width");
 
 /**
+ * @brief The host reader guard is a one-word lock-free flag, or it is not the host guard (#1628).
+ *
+ * `mutex_guard_t`'s whole point is one RMW to take a stripe; on a target whose `atomic<bool>` is
+ * not lock-free that RMW is a libatomic lock, and the target should bind an interrupt-masked
+ * `reader_guard_t` instead (every ESP chip target does). Asserted here, beside the binding, for
+ * the reason the hazard assertion above is: `%lkv_slot.hpp` is included on targets that never
+ * bind the guard, and esp32c3 (rv32imc) has no lock-free atomic of any width.
+ */
+static_assert(!std::is_same_v<reader_guard_t, mutex_guard_t> ||
+                  std::atomic<bool>::is_always_lock_free,
+              "this target binds mutex_guard_t, the host reader guard, but has no lock-free bool "
+              "atomic — its one-word lock would take a libatomic lock; bind an interrupt-masked "
+              "reader_guard_t here (the ESP-IDF component's tr::esp::critical_guard_t)");
+
+/**
  * @brief An LKV slot policy declares whether it can spin-wait (#1618, RFC 0028 §5.6).
  *
  * The declaration is mandatory, so a new policy cannot slip past the assertion below by

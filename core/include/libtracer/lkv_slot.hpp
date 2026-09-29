@@ -170,9 +170,11 @@ struct mutex_guard_t {
         std::atomic<bool> taken{false}; /**< @brief Whether some thread is inside the window. */
     };
 
-    static_assert(std::atomic<bool>::is_always_lock_free,
-                  "the host guard is a one-word flag; a target without a lock-free bool atomic "
-                  "cannot bind it and binds an interrupt-masked reader_guard_t instead");
+    // The flag must be a lock-free atomic, or the "one RMW" above is a libatomic lock. That is
+    // asserted in `vertex.hpp` beside the BINDING, not here: this header is included by every
+    // consumer of a vertex, esp32c3 (rv32imc, no atomics at all) included, and a class-scope
+    // assertion fires there even though that target binds an interrupt-masked guard and never
+    // instantiates this one (#1628, the C3 legs).
 
     /** @brief The stripe for address @p at: a Fibonacci hash of the address, top bits. */
     static std::atomic<bool>& stripe(const void* at) {
