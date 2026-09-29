@@ -320,18 +320,13 @@ result_t<void> transport_vertex_t::register_module(std::string module, std::stri
 
 result_t<std::string> transport_vertex_t::module_for(std::string_view kind,
                                                      conn_role_t role) const {
-    // The PUBLIC entry locks (#881); a creation running inside its own locked section —
-    // `endpoint_create_locked` and the `*_locked` family below it, since S7 retired the
-    // `:children[]` door — already holds `ctl_m_`, a plain NON-RECURSIVE std::mutex
-    // (ADR-0063 erratum 1), so such a caller reaches the body directly. The fix is a split
-    // precisely because a lock added in place would self-deadlock there.
+    // The public entry locks (#881) and IS the body: since S7 retired the `:children[]`
+    // creation door, no caller resolves a module from inside its own locked section — a
+    // creation goes through `declaration_for_locked` — so the #881 entry-locks/`_locked`-body
+    // split this used to carry had one caller, this wrapper, and was folded (#1602). `ctl_m_`
+    // is a plain NON-RECURSIVE std::mutex (ADR-0063 erratum 1): a future internal caller that
+    // already holds it must re-split rather than call this, which would self-deadlock.
     const ctl_txn_t txn(*this);  // ADR-0063 §3 control-plane serialization
-    return module_for_locked(kind, role);
-}
-
-/** @brief `module_for`'s body, for a caller that already holds `ctl_m_`. */
-result_t<std::string> transport_vertex_t::module_for_locked(std::string_view kind,
-                                                            conn_role_t role) const {
     for (const module_decl_t& d : modules_) {
         if (d.kind == kind && d.role == role) return d.module;
     }
