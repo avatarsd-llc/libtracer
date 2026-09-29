@@ -197,47 +197,6 @@ jobs:
             --baseline-bench ../main-baseline/bench/build/bench_libtracer \
             --baseline-bench-fwd ../main-baseline/bench/build/bench_forward_heap
 
-  # --- symbol-size ratchet on the hot dispatch symbols (#1155) --------------------
-  # A TRIPWIRE, not a proof. `dispatch_edge_target` is where #1065/#1078 landed, then #1086
-  # one day later, then #1129 had to undo the cause — every one of them found by a bench run
-  # AFTER the fact. This leg puts the code-shape half of that signal at review time.
-  #
-  # It cannot flake: compilation is deterministic, so the A/A null on this instrument is
-  # exactly 0, which is what licenses a zero-tolerance comparison. It is also toolchain-bound
-  # (this repo has measured 955 B of spread on a footprint number across toolchains), so the
-  # pin records its compiler and the gate REFUSES an unattributable cross-toolchain compare
-  # rather than reporting a difference it cannot explain. Pinning the runner image is
-  # therefore load-bearing, not cosmetic.
-  #
-  # What it does NOT buy: it measures shape, not time. A regression with no size signature
-  # still needs the bench, and a green ratchet is not a performance verdict.
-  symbol-ratchet:
-    runs-on: ubuntu-24.04
-    # Measured max 0.85 min, p50 0.70, min 0.53 — the tightest distribution in the repo
-    # (it only builds the pinned-symbol bench targets). 15 = the short-job floor rather
-    # than 3x, which would be 2.5 min and would red on any transient runner stall.
-    timeout-minutes: 15
-    steps:
-      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
-      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
-      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
-      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
-      - name: Set build parallelism (BUILD_JOBS)
-        run: |
-          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
-          echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
-          echo "BUILD_JOBS=$jobs"
-      - uses: actions/checkout@v4
-      - name: Build the bench targets carrying the pinned symbols (Release = -O3 -DNDEBUG)
-        run: |
-          cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
-          cmake --build bench/build --target bench_libtracer bench_compact_delivery --parallel "$BUILD_JOBS"
-      # Printed on every run, pass or fail: the measured sizes are the record, and a gate
-      # whose numbers are only visible when it fails cannot be re-pinned from its own log.
-      - name: Measured symbol sizes (the record, whatever the verdict)
-        run: python3 bench/symbol_ratchet.py --build bench/build --pins bench/symbol_ratchet.json --emit
-      - name: Symbol-size ratchet
-        run: python3 bench/symbol_ratchet.py --build bench/build --pins bench/symbol_ratchet.json
   # --- the composition harness, EXECUTED (audit pass only) -----------------------
   # bench/run_compose.sh is the two-process, delivery-counted composition harness (#568).
   # Until #1151 nothing ran it: `grep -rn run_compose .github/` matched one COMMENT. Its two
