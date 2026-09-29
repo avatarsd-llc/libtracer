@@ -1701,7 +1701,7 @@ void graph_t::count_snapshot_drops(const vertex_t::snapshot_drops_t& drops) noex
     // ONE cause since #1448: the per-edge copy cannot fail any more (the cold half is a
     // refcount share, not an owning string copy), so the snapshot's only shed is the
     // wide-fan-out capacity degrade. OUT_OF_MEMORY as a DELIVERY cause is unaffected —
-    // `dispatch_edge_target`'s rope clone and the store legs still report it.
+    // the target leg's store (a declined slot, ring or clone) still reports it.
     if (drops.truncated != 0) count_drop(drop_reason_t::FAN_OUT_TRUNCATED, drops.truncated);
 }
 
@@ -2009,28 +2009,6 @@ result_t<value_ref_t> graph_t::read(vertex_handle_t vh, std::string_view caller)
     return sp;
 }
 
-namespace {
-/**
- * @brief The NOTHROW delivery clone of a stored value (#477), ONE non-inline copy for
- *        both writer-thread clone legs (target-edge dispatch, handler notify): a spilled
- *        (> kInline links) rope's copy grows a heap chain that threw bad_alloc — an
- *        abort() under `-fno-exceptions`. `try_reserve` is a no-op while the chain fits
- *        inline (the hot case), and on OOM the caller drops that delivery leg.
- *
- * #981 residual: only the INLINE arm is unconditionally safe (it reaches no allocator at
- * all). Once the chain spills, `rope_t::try_reserve` grows a `std::vector<view_t>` through
- * `detail::try_reserve`, which under `-fno-exceptions` is probe-then-commit — a task switch
- * between the probe's free and the `reserve` still abort()s the node (#850). `view_t` is
- * refcounted, so the rope's link chain cannot take the ADR-0065 `block_array_t` seam
- * (memcpy relocation would drop the refcount clones); closing this needs a failable array
- * that relocates by move, tracked on the umbrella (#873).
- * @retval false The chain could not be reserved — @p dst is empty, drop the leg.
- */
-[[nodiscard]] bool try_clone_rope(rope_t& dst, const value_t& src) noexcept {
-    return src.try_rope(dst);  // reserves the chain first — the appends cannot reallocate
-}
-}  // namespace
-
 [[gnu::noinline]] void graph_t::dispatch_edge_target(const edge_view_t& e, const value_t& value) {
     // The bound spelling first (#830): a slot deref is a bounds check, a slot load and a
     // generation compare — flat at every address depth — where `find_ptr` walks the key
@@ -2077,11 +2055,6 @@ namespace {
     // the target's own logic (a controller re-emits on its execution; a handler re-emits
     // when it chooses), so a dispatch-level subscription cycle cannot form — no depth cap,
     // no dedup, no drain queue. An app wanting pure relay subscribes the consumer directly.
-    rope_t clone;  // the NOTHROW delivery clone (#477) — on OOM this one leg drops
-    if (!try_clone_rope(clone, value)) {
-        count_drop(drop_reason_t::OUT_OF_MEMORY, 1);
-        return;
-    }
     // Delivery TERMINATES here, so the target's own edges are never dispatched by this write —
     // but a STREAM target's ring still feeds the next propagate over it, exactly as an assign's
     // does. A shed append therefore loses that deferred delivery, and is counted at the
@@ -2100,16 +2073,22 @@ namespace {
     // and this leg counts the declined delivery; a LOCAL producer writing the receiving vertex
     // directly gets the BACKPRESSURE status itself, which is the whole reach v1 has (the wire
     // carrier waits on the credit window §4.6.1 clause 7 parks).
+    //
+    // The target ADOPTS the delivered value (RFC-0028 D2, slice 4): its slot takes one more
+    // reference on the block the source published — one `retain`, one exchange — instead of
+    // cloning the links into a rope and minting a block of its own. K targets are K refcount
+    // bumps, not K allocations. The admission filter, the ring admission and the handler
+    // reaction all still run, inside the adopting `store_value`, on the shared block.
     vertex_t::store_drops_t store_drops;
-    if (const auto stored = store_value(target, std::move(clone), store_drops, e.caller());
-        !stored) {
+    if (const auto stored = store_value(target, value, store_drops, e.caller()); !stored) {
         // The cause is now read off the status rather than assumed. Every refusal this leg
-        // could see used to be a resource one (`BACKPRESSURE` — a soft-failed LKV allocation
-        // or a declined ring admission), so counting it as OUT_OF_MEMORY was exact. The
-        // target's admission filter adds a leg that is not: a filter refusing a delivery is a
-        // POLICY refusal, of a piece with the fan-in ACL denial counted a few lines above, and
-        // folding it into the memory counter would make an operator read a rejected value as an
-        // exhausted node. One status test, on a path already off the hot arm.
+        // could see used to be a resource one (`BACKPRESSURE` — a declined slot publish, a
+        // declined ring admission, or the rope arm's clone or block), so counting it as
+        // OUT_OF_MEMORY was exact.
+        // The target's admission filter adds a leg that is not: a filter refusing a delivery
+        // is a POLICY refusal, of a piece with the fan-in ACL denial counted a few lines above,
+        // and folding it into the memory counter would make an operator read a rejected value
+        // as an exhausted node. One status test, on a path already off the hot arm.
         count_drop(stored.error() == status_t::BACKPRESSURE ? drop_reason_t::OUT_OF_MEMORY
                                                             : drop_reason_t::DENIED,
                    1);
@@ -2295,36 +2274,83 @@ result_t<value_ref_t> graph_t::store_value(vertex_t* v, rope_t&& value,
     // vertex mid-retire has no invariant left to defend — it admits, rather than turning a
     // retire into spurious write failures.
     if (v->has_admission()) {
-        const admission_node_t* a = admission_for(v);
-        if (a != nullptr && a->on_admit) {
-            // Same `caller` the ACL gate one frame up ran on (#375): the filter and the gate
-            // that admitted the write cannot disagree about who wrote.
-            const write_ctx_t ctx{.subject = caller};
-            admission_t decided = a->on_admit(value, ctx);
-            if (!decided) return std::unexpected(decided.error());
-            // Engaged ⇒ store the NORMALISED rope instead. The writer's rope dies here, which is
-            // the point: nothing downstream can reach the spelling the filter rejected.
-            if (*decided) value = std::move(**decided);
-        }
+        admission_t decided = admit(v, value, caller);
+        if (!decided) return std::unexpected(decided.error());
+        // Engaged ⇒ store the NORMALISED rope instead. The writer's rope dies here, which is
+        // the point: nothing downstream can reach the spelling the filter rejected.
+        if (*decided) value = std::move(**decided);
     }
+    // THE one allocation a publish costs (RFC-0028 §5.1): the value's block, refcount and
+    // link chain together, drawn from the graph's source and moved — not cloned — out of the
+    // caller's rope. Exhaustion is a `nullptr` by value; the rope is then still the caller's.
+    return publish_value(v, value_ref_t::adopt(value_t::make(std::move(value), *ctl_)), drops);
+}
+
+result_t<value_ref_t> graph_t::store_value(vertex_t* v, const value_t& value,
+                                           vertex_t::store_drops_t& drops,
+                                           std::string_view caller) {
+    // Two shapes cannot be adopted, and take the rope arm above — one clone of the links, the
+    // behaviour every target delivery had before RFC-0028 slice 4:
+    //  - a value with no source is CALLER-OWNED storage (`value_storage_t`, the slice a branch
+    //    write delivers without storing): a reference kept past the call would outlive the
+    //    frame it lives in;
+    //  - a HANDLER stores nothing, and its `on_write` reads a `rope_t`.
+    // `try_rope` is nothrow and allocates nothing while the chain fits the rope's inline links;
+    // a refused spill is BACKPRESSURE by value, which the delivery leg counts as OUT_OF_MEMORY.
+    if (value.source() == nullptr || v->role() == role_t::HANDLER) {
+        rope_t clone;
+        if (!value.try_rope(clone)) {
+            drops = vertex_t::store_drops_t{};
+            return std::unexpected(status_t::BACKPRESSURE);
+        }
+        return store_value(v, std::move(clone), drops, caller);
+    }
+    drops = vertex_t::store_drops_t{};
+    // The admission filter still runs, on the SHARED block: it reads a `rope_t` over the same
+    // links (refcount clones, no allocation while the chain fits inline) and only a
+    // normalisation mints a block of the vertex's own. A filter that admits unchanged costs the
+    // adoption nothing more. Same seam, same `caller`, same placement above the storing tail as
+    // the rope arm — admission is a property of the vertex, not of a door.
+    if (v->has_admission()) {
+        rope_t links;
+        if (!value.try_rope(links)) return std::unexpected(status_t::BACKPRESSURE);
+        admission_t decided = admit(v, links, caller);
+        if (!decided) return std::unexpected(decided.error());
+        if (*decided)
+            return publish_value(v, value_ref_t::adopt(value_t::make(std::move(**decided), *ctl_)),
+                                 drops);
+    }
+    // ADOPT (RFC-0028 D2): one more reference on the block that is already the value. Zero
+    // allocations, zero copies — the target's slot and the source's hold the same block, which
+    // is released through the source it was drawn from when the last of them lets go.
+    return publish_value(v, value_ref_t::share(&value), drops);
+}
+
+admission_t graph_t::admit(vertex_t* v, const rope_t& value, std::string_view caller) const {
+    const admission_node_t* a = admission_for(v);
+    if (a == nullptr || !a->on_admit) return std::optional<rope_t>{};
+    // Same `caller` the ACL gate one frame up ran on (#375): the filter and the gate that
+    // admitted the write cannot disagree about who wrote.
+    const write_ctx_t ctx{.subject = caller};
+    return a->on_admit(value, ctx);
+}
+
+result_t<value_ref_t> graph_t::publish_value(vertex_t* v, value_ref_t sp,
+                                             vertex_t::store_drops_t& drops) {
     // The storage verb has ONE tail for every role now (RFC-0025 §4.6.1 clause 1): publish the
     // LKV lock-free, bump the sequence, wake awaiters. A PRODUCER NEVER QUEUES — the ring the
     // STREAM arm used to append here moved to the RECEIVING vertex, below.
     //
-    // The retained width is measured BEFORE the move and ONLY for a STREAM. `total_length()`
-    // walks the rope's links, and a producer must not pay a walk for a queue it does not have:
+    // The retained width is measured ONLY for a STREAM. `total_length()` walks the value's
+    // links, and a producer must not pay a walk for a queue it does not have:
     // measured, hoisting it out of this branch cost the 4-writer plain-write point ~30%.
     const bool receives = v->role() == role_t::STREAM;
-    const std::size_t retained = receives ? value.total_length() + kRingEntryOverhead : 0;
-    // THE one allocation a publish costs (RFC-0028 §5.1): the value's block, refcount and
-    // link chain together, drawn from the graph's source and moved — not cloned — out of the
-    // caller's rope. Exhaustion is a `nullptr` by value; the rope is then still the caller's.
-    value_ref_t sp = value_ref_t::adopt(value_t::make(std::move(value), *ctl_));
+    const std::size_t retained = receives && sp ? sp->total_length() + kRingEntryOverhead : 0;
     if (sp && !v->store(sp)) sp.reset();  // the slot declined: nothing published (#477)
     // vertex_t::store soft-fails its LKV allocation nothrow (#477): null here (a
     // non-handler role always publishes a pointer) is exactly OOM — report it as the
     // injected-resource status (BACKPRESSURE, ADR-0060 §3), never abort. Distinct from
-    // the handler leg above, whose null shared_ptr is the "consumed, nothing stored"
+    // `store_value`'s handler leg, whose empty reference is the "consumed, nothing stored"
     // SUCCESS sentinel.
     if (!sp) return std::unexpected(status_t::BACKPRESSURE);
     // THE RECEIVER'S QUEUE. A STREAM vertex is a consumer-owned ring: whoever wants depth
@@ -2489,8 +2515,8 @@ result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, std::string_view c
         // nothing left on this path to fail to allocate, so the event cannot occur and a
         // counting site for it would be dead code. #854's own-subs-wide ruling is
         // ANNOTATED, not overturned: OUT_OF_MEMORY still counts on the assign path's shed
-        // pending mark (mark_pending, at own-subs width) and on dispatch_edge_target's own
-        // per-edge clone (at width 1), so the reason code stays live and `1 never stands in
+        // pending mark (mark_pending, at own-subs width) and on dispatch_edge_target's
+        // declined store (at width 1), so the reason code stays live and `1 never stands in
         // for N` still holds everywhere it can still be raised.
         deliver_unstored(v, value, &graph_t::deliver_vertex, v->own_subs() + v->listeners_above());
         // Eager delivery flushes any pending mark a prior assign left — but only while

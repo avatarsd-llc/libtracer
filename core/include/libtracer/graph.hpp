@@ -2509,6 +2509,41 @@ class graph_t {
     [[nodiscard]] result_t<value_ref_t> store_value(vertex_t* v, rope_t&& value,
                                                     vertex_t::store_drops_t& drops,
                                                     std::string_view caller);
+    /**
+     * @brief The ADOPTING store (RFC-0028 D2, slice 4): publish a value some other vertex
+     *        already published by taking one more reference on its block — no clone, no
+     *        allocation.
+     *
+     * The target leg of a subscription delivery lands here, so K target subscribers cost K
+     * refcount bumps rather than K blocks. Same gates and same tail as the rope overload:
+     * the admission filter runs over a `rope_t` of the same links (only a normalisation mints
+     * a block), the ring admission charges the receiving vertex's own source, and `drops` is
+     * zeroed on entry. Two shapes take the rope overload instead, through one nothrow clone
+     * of the links: caller-owned storage (`value.source() == nullptr`, a `value_storage_t` a
+     * branch write delivers without storing — a kept reference would outlive its frame) and a
+     * HANDLER target, whose `on_write` reads a rope.
+     * @return The published reference (the same block as @p value on the adopting arm), the
+     *         empty "consumed" sentinel on a HANDLER, or the refusal by value.
+     */
+    [[nodiscard]] result_t<value_ref_t> store_value(vertex_t* v, const value_t& value,
+                                                    vertex_t::store_drops_t& drops,
+                                                    std::string_view caller);
+    /**
+     * @brief Run @p v's admission filter over @p value under @p caller — the one call both
+     *        `store_value` overloads make, so the filter has a single spelling.
+     * @return Disengaged to admit unchanged, engaged to store the normalised rope instead, or
+     *         the filter's refusal. A vertex whose filter is mid-retire admits.
+     */
+    [[nodiscard]] admission_t admit(vertex_t* v, const rope_t& value,
+                                    std::string_view caller) const;
+    /**
+     * @brief The storing tail every non-HANDLER store shares: publish @p sp to @p v's slot,
+     *        then admit it into @p v's ring when @p v is a STREAM.
+     * @param sp The value to publish; EMPTY means the block could not be minted, and is
+     *           answered as BACKPRESSURE like a declined slot.
+     */
+    [[nodiscard]] result_t<value_ref_t> publish_value(vertex_t* v, value_ref_t sp,
+                                                      vertex_t::store_drops_t& drops);
     // The source a receiving vertex charges its ring admissions against — its own injected
     // one, else the graph-level default. One spelling, so "per-injection-point, never a
     // shared pool" cannot drift between call sites.

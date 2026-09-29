@@ -1910,7 +1910,7 @@ class vertex_t {
      * edge shape and cannot fail. What remains is the capacity degrade: a fan-out wider
      * than the inline snapshot, on a heap that would not lend it a buffer. The
      * OUT_OF_MEMORY *delivery* cause is untouched and still counted from the legs that can
-     * still hit it (`graph_t::dispatch_edge_target`'s rope clone, the store legs).
+     * still hit it (`graph_t::dispatch_edge_target`'s store — a declined slot, ring or clone).
      */
     struct snapshot_drops_t {
         /** @brief Edges past the inline prefix, abandoned because the overflow buffer for a
