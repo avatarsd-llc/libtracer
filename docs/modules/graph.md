@@ -735,6 +735,11 @@ a reply already being assembled.
 :members:
 ```
 
+```{doxygenclass} tr::graph::value_storage_t
+:project: libtracer
+:members:
+```
+
 ### Edges
 
 ```{doxygenstruct} tr::graph::edge_view_t
