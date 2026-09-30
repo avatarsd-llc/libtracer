@@ -98,10 +98,11 @@
 # statistics" step) — the cache's global counters are shared by every runner at once.
 #
 # BUILD_JOBS=4 on the self-hosted route: the slice gives ALL runners and containers 11
-# cores, and up to ~3 container jobs run at once, so 3 x 4 = 12 is ~one compiler per core
-# with a little slack for link/IO stalls (6 each oversubscribed the slice ~1.6x). Memory
-# is not the binding limit — the heaviest TUs peak at ~0.55 GB RSS (graph.cpp, measured
-# RelWithDebInfo), so 4 compilers sit far under the 10g per-job cap.
+# cores / 24 GB, and the three `ci-local` runners (studio-ci-1, studio-lt-7, studio-lt-8)
+# run up to 3 container jobs at once, so 3 x 4 = 12 is ~one compiler per core with a
+# little slack for link/IO stalls (6 each asked for 18, ~1.6x the slice). Memory is not
+# the binding limit — the heaviest TUs peak at ~0.55 GB RSS (graph.cpp, measured
+# RelWithDebInfo), so 3 jobs x 4 compilers stay near 7 GB, far under the 24 GB slice.
 #
 # ── TIMEOUT CEILINGS (the tree-wide policy; the fuller explanation lives here) ──────
 # Every job in this repo carries a `timeout-minutes`, and this file is where the policy
