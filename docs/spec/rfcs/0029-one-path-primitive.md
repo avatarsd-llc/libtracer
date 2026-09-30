@@ -418,7 +418,9 @@ holds **no chain** sends its **first** delivery with a non-empty `src` — the n
 followed by a tail that names the edge — so that the terminus answers a `REPLY` whose `src` carries
 the forward chain per §6.2. The edge adopts that chain; every later delivery is `src`-empty as today. A chain the edge
 holds is spent until a refusal or a departure clears it (§8), at which point the next fire is again
-a learning fire. One reply per learn is the whole cost; no new frame and no new field. This is
+a learning fire. The cost is **one `REPLY` per edge, once per learn**, sent by the terminus to
+the edge's learning fire. That is the one frame the learn adds; it is an ordinary `REPLY`, so it adds
+no new frame *type* and no new field, and no frame at all on any later delivery. This is
 RFC-0027 §6.2's "each subscription's first fire triggers minting" applied to the edges that have
 no request leg, and it closes both gaps with one rule: the mount-routed edge and the
 `subscribe_toward` edge both start with no chain and both learn on their first fire.
@@ -600,6 +602,17 @@ Announce-census peers (CAN) create no vertex (ADR-0044 amendment) and stay NAMEs
 the wire: +3 B per hop over the bare `PATH_REF` it replaces, +4 B over the label (§5.2).
 `path_t::cache_path_label` (`core/include/libtracer/path.hpp`) is **generalised** to the 8-byte
 element rather than deleted — it is the origin-side cache §6.2 fills.
+
+**What is added.** §6.2's "never nothing" rule has a wire cost that the deletions above do not
+offset:
+
+| item | where | cost (estimated; **measured at S2**) |
+| --- | --- | --- |
+| reply-`src` growth at a **non-minting** relaying hop: its inbound mount run as NAMEs, where RFC-0027 erratum 2 had it contribute nothing | every `REPLY` relayed over a shared mount, a child with no connection vertex, or a saturated slot (§6.2) | one NAME run per such hop, **≈13–32 B** (one `1 + len` segment record per mount-run segment; 13 B for the shortest shipped `net/<module>/<name>` run, up to §5.2's 20–32 B canonical figure) |
+| reply-`src` growth at a **minting** hop | every other relayed or issued `REPLY` | **11 B** per hop (one PAIR element, §5.2) |
+
+Both are paid on the reply leg only. The `reply-spread` four-link arm (S2's gate, §15 clause 1)
+prices them against today's replies.
 
 ## 12. Spec text changes
 
