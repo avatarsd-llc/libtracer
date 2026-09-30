@@ -1238,8 +1238,7 @@ void test_the_handshake_budget_is_the_configured_one() {
         webtransport_transport_t peer(std::uint16_t{0}, g_cert, g_key);
         webtransport_transport_t dead("127.0.0.1", peer.local_port(), "/",
                                       webtransport_dial_tls_t{.ca_file = g_other_cert},
-                                      &tr::mem::heap_backend(), /*max_frame=*/0,
-                                      /*defer_rx=*/false, /*max_handshake=*/4096);
+                                      {.max_handshake = 4096});
         check(!dead.ok(), "leg 3: the wrong-CA dial did not come up");
         check(dead.effective_max_handshake() == 4096,
               "leg 3: a DIAL that never came up still reports its own budget");
@@ -1435,7 +1434,7 @@ void test_start_receiving_is_inert_where_it_must_be() {
     webtransport_transport_t listener2(std::uint16_t{0}, g_cert, g_key);
     webtransport_transport_t dead("127.0.0.1", listener2.local_port(), "/",
                                   webtransport_dial_tls_t{.ca_file = g_other_cert},
-                                  &tr::mem::heap_backend(), /*max_frame=*/0, /*defer_rx=*/true);
+                                  {.defer_rx = true});
     check(!dead.ok(), "the wrong-CA dial did not come up (no session, no frame stream)");
     dead.start_receiving();
     dead.start_receiving();
