@@ -19,6 +19,10 @@ namespace tr::graph {
 /** @brief The defaults, with the dev-only SPEC `insecure` key honoured. */
 struct insecure_tls_config_t : default_config_t {
     static constexpr bool kAllowInsecureTls = true;
+    /** @brief This preset replaces the test build's own, so it re-states the tiers that build
+     *         compiles (`transport_can.cpp` / `self_heal_link.cpp` assert them). */
+    static constexpr bool kBusLinks = true;
+    static constexpr bool kSelfHealLinks = true; /**< @brief See @ref kBusLinks. */
 };
 
 using config_t = insecure_tls_config_t;
