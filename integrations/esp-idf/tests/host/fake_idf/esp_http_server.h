@@ -166,6 +166,8 @@ esp_err_t httpd_sess_update_lru_counter(httpd_handle_t handle, int sockfd);
 esp_err_t httpd_queue_work(httpd_handle_t handle, httpd_work_fn_t work, void* arg);
 esp_err_t httpd_ws_recv_frame(httpd_req_t* req, httpd_ws_frame_t* frame, std::size_t max_len);
 esp_err_t httpd_ws_send_frame_async(httpd_handle_t handle, int fd, httpd_ws_frame_t* frame);
+int httpd_socket_send(httpd_handle_t handle, int sockfd, const char* buf, std::size_t buf_len,
+                      int flags);
 esp_err_t httpd_sess_set_send_override(httpd_handle_t handle, int sockfd,
                                        httpd_send_func_t send_fn);
 httpd_ws_client_info_t httpd_ws_get_fd_info(httpd_handle_t handle, int fd);

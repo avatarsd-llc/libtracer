@@ -38,6 +38,7 @@
 
 #include "libtracer/backend.hpp"
 #include "libtracer/byteorder.hpp"
+#include "libtracer/mem_heap.hpp"
 #include "libtracer/segment.hpp"
 
 /**
@@ -97,10 +98,13 @@ class length_prefix_framer {
             MALFORMED, /**< @brief `len` exceeds the PROTOCOL cap — tear the stream down. */
             DROP,   /**< @brief The backend could not hold the frame (`alloc` failed, or the frame
                           exceeds this backend's segment size) — drain the body, count a drop. */
-            ACCEPT, /**< @brief @ref seg owns exactly `len` bytes, ready to fill. */
+            ACCEPT, /**< @brief @ref seg holds `len` frame bytes at @ref off, ready to fill. */
         };
         kind_t kind = kind_t::EMPTY; /**< @brief The decision. */
         tr::view::segment_ptr_t seg; /**< @brief The accepted frame's segment (ACCEPT only). */
+        /** @brief Where the frame starts in `seg`: `0`, or `view::kRxLoanBytes` for a block
+         *         drawn with the ingress-loan reserve (RFC-0028 §6.9). */
+        std::size_t off = 0;
     };
 
     /**
@@ -146,18 +150,23 @@ class length_prefix_framer {
      *                  this backend produces) comes back as `DROP`, so a legitimate peer is
      *                  backpressured rather than disconnected over OUR local capacity (#932).
      * @param len       The decoded length prefix.
+     * @param loan_min  Frames at or above this size are drawn with the ingress-loan reserve
+     *                  (`view::alloc_rx`, RFC-0028 §6.9) — a pull-mode reader that delivers
+     *                  from `off` passes its build's share threshold; the default never loans,
+     *                  which keeps @ref feed (whose `on_frame` contract is offset 0) unchanged.
      * @return The @ref prefix_decision_t; `ACCEPT` carries the freshly allocated segment.
      */
     [[nodiscard]] static prefix_decision_t on_prefix(mem::mem_backend_t& backend,
-                                                     std::size_t max_frame, std::size_t len) {
+                                                     std::size_t max_frame, std::size_t len,
+                                                     std::size_t loan_min = SIZE_MAX) {
         if (len == 0) return {prefix_decision_t::kind_t::EMPTY, {}};
         if (len > max_frame) return {prefix_decision_t::kind_t::MALFORMED, {}};
         // Undeliverable-but-in-spec is backpressure, not a framing error: ask the
         // backend, and let a refusal (exhaustion OR a too-small slot) be the DROP.
         if (len > backend.max_segment_size()) return {prefix_decision_t::kind_t::DROP, {}};
-        auto seg = tr::view::segment_ptr_t::adopt(backend.alloc(len));
-        if (!seg) return {prefix_decision_t::kind_t::DROP, {}};
-        return {prefix_decision_t::kind_t::ACCEPT, std::move(seg)};
+        tr::view::rx_block_t blk = tr::view::alloc_rx(backend, len, loan_min);
+        if (!blk.seg) return {prefix_decision_t::kind_t::DROP, {}};
+        return {prefix_decision_t::kind_t::ACCEPT, std::move(blk.seg), blk.off};
     }
 
     /**

@@ -228,6 +228,20 @@ class server_t {
     void set_send_script(int fd, std::vector<send_result_t> script);
     /** @brief How many socket writes @p fd has taken, whatever they returned. */
     [[nodiscard]] std::size_t writes(int fd) const;
+    /**
+     * @brief Every byte the raw socket write on @p fd accepted, in order: the byte stream the
+     *        PEER would parse.
+     *
+     * A short write records only its accepted prefix, which is exactly what makes a torn
+     * frame visible here. The headers of frames written through `httpd_ws_send_frame_async`
+     * are recorded as the fake writes them (zeroes); a link that encodes its own header (the
+     * retained send, RFC-0028 §6.9) is recorded byte-exact.
+     */
+    [[nodiscard]] std::vector<std::byte> wire(int fd) const;
+    /** @brief Forget @p fd's recorded byte stream. */
+    void clear_wire(int fd);
+    /** @brief Record @p n accepted bytes of a raw write on @p fd (called by the write paths). */
+    void note_wire(int fd, const void* buf, std::size_t n);
 
     /**
      * @brief Run @p hook between the handler's header pass and its payload pass — the
@@ -314,6 +328,7 @@ class server_t {
     std::size_t frames_sent_ = 0;
     std::vector<sent_frame_t> sent_frames_; /**< @brief See @ref sent_frames. */
     std::map<int, std::size_t> writes_;
+    std::map<int, std::vector<std::byte>> wire_; /**< @brief See @ref wire. */
     bool queue_refusing_ = false;
     std::size_t queue_cap_ = 0;   /**< @brief 0 = unbounded; see set_queue_capacity. */
     std::size_t queue_drops_ = 0; /**< @brief Enqueues a full mbox refused. */

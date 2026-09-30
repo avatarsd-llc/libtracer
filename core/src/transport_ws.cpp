@@ -97,6 +97,24 @@ struct ws_assembler_t {
             return {assemble_status_t::OVERSIZE, {}};
         }
 
+        // A whole message in ONE frame is the common case, and its block is the frame's
+        // receive block: large enough to be shared, it carries the ingress-loan reserve
+        // (RFC-0028 §6.9), so the terminus that stores the value builds its record in it.
+        // A fragmented message's links stay plain — its value is a multi-link rope, which the
+        // graph links rather than places.
+        if (op == ws::opcode_t::BINARY && fin && !payload.empty()) {
+            tr::view::rx_block_t blk =
+                tr::view::alloc_rx(backend, payload.size(), tr::graph::kShareThresholdBytes);
+            if (!blk.seg) {
+                reset();
+                return {assemble_status_t::DROPPED, {}};
+            }
+            std::memcpy(blk.frame(payload.size()).data(), payload.data(), payload.size());
+            tr::view::rope_t whole;
+            whole.append(blk.take(payload.size()));
+            reset();
+            return {assemble_status_t::COMPLETE, std::move(whole)};
+        }
         const std::optional<tr::view::view_t> link = tr::view::over_bytes(payload, backend);
         if (!link) {  // backend refused => drop the message (backpressure)
             reset();

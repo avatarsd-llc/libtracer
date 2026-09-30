@@ -642,6 +642,14 @@ void esp_ws_client_link_t::drop() {
 }
 
 void esp_ws_client_link_t::send(std::span<const std::byte> frame) {
+    // One span through the gathered path — the one implementation (#1620 (a)).
+    const std::span<const std::byte> one[1] = {frame};
+    send(std::span<const std::span<const std::byte>>(one));
+}
+
+void esp_ws_client_link_t::send(std::span<const std::span<const std::byte>> iov) {
+    std::size_t total = 0;
+    for (const std::span<const std::byte>& part : iov) total += part.size();
     // Counted under st_m_, never under write_m_ — write_m_ is held across the transport
     // write below for up to kWriteTimeoutMs, and a counter that rode it would make every
     // stats() snapshot inherit that wait. st_m_ is only ever taken for these bumps, so it
@@ -653,7 +661,7 @@ void esp_ws_client_link_t::send(std::span<const std::byte> frame) {
     };
     // This early-out stays AHEAD of the sender tally and of write_m_ (#952 ordering): it
     // reads nothing the destructor can be racing. Counted without any lock held.
-    if (frame.empty() || frame.size() > tx_buf_.size()) {  // drop oversize/empty
+    if (total == 0 || total > tx_buf_.size()) {  // drop oversize/empty
         // The oversize half is the `tx_bytes` CEILING, and this is the only place that can
         // name it. `transport_t::send` returns void, so the router cannot be told the frame
         // died; `st_.tx_drops` says one did, but the `!connected_` arm and the short-write
@@ -665,9 +673,9 @@ void esp_ws_client_link_t::send(std::span<const std::byte> frame) {
         // frame size, which is a misconfiguration to fix, not a rate to live with. The
         // empty half needs no log — there is nothing to put on the wire and no knob to
         // name — but it is the same drop and is counted the same way.
-        if (!frame.empty())
+        if (total != 0)
             ESP_LOGW(kTag, "outbound frame %u B exceeds %u B tx buffer — dropped",
-                     static_cast<unsigned>(frame.size()), static_cast<unsigned>(tx_buf_.size()));
+                     static_cast<unsigned>(total), static_cast<unsigned>(tx_buf_.size()));
         bump([this] { ++st_.tx_drops; });
         return;
     }
@@ -686,10 +694,13 @@ void esp_ws_client_link_t::send(std::span<const std::byte> frame) {
     // whatever unrelated task published; it must not pay for this peer's socket. A sender
     // that finds every slot taken drops the frame and counts it, as the async server link
     // does on an empty tx pool.
+    // The queued copy is GATHERED straight from the caller's spans — a rope reply or a
+    // delivery's head + value arrives here as several spans, and the base default used to
+    // flatten them into an egress temporary first and then copy that again (#1620 (a)).
     switch (tx_.admit([&](tr::mem::block_array_t<std::byte>& slot) -> std::size_t {
-        if (!slot.reserve(frame.size())) return 0;
-        std::memcpy(slot.data(), frame.data(), frame.size());
-        return frame.size();
+        if (!slot.reserve(total)) return 0;
+        gather_into(slot.data(), iov);
+        return total;
     })) {
         case tr::net::tx_handoff_t::admit_t::REFUSED:
             bump([this] { ++st_.tx_drops; });
@@ -699,17 +710,29 @@ void esp_ws_client_link_t::send(std::span<const std::byte> frame) {
         case tr::net::tx_handoff_t::admit_t::WRITE:
             break;
     }
-    // This thread is the writer. Its own frame goes through the private scratch:
+    // This thread is the writer. Its own frame is gathered into the private scratch:
     // esp_transport_write masks IN-PLACE and unmasks back (RFC 6455 client rule), but a
     // delivered frame may be shared with the concurrent server link reading the same bytes,
-    // so the caller's bytes must not be transiently mutated — hence the copy. A queued
-    // frame is already a private copy, so it is written from its slot directly.
-    write_locked(std::span<std::byte>(tx_buf_.data(), frame.size()), frame);
-    for (std::span<std::byte> rec = tx_.next(); !rec.empty(); rec = tx_.next())
-        write_locked(rec, {});
+    // so the caller's bytes must not be transiently mutated — hence the copy, which is also
+    // the ONE copy a gathered frame costs (it used to be two, #1620 (a)). A queued frame is
+    // already a private copy, so it is written from its slot directly. This link never
+    // queues a RETAINED record (it does not override the retained send: a masked frame
+    // cannot be written from a shared block), so every record here is a copy.
+    write_locked(std::span<std::byte>(tx_buf_.data(), total), iov);
+    for (tr::net::tx_handoff_t::record_t rec = tx_.next(); rec; rec = tx_.next())
+        write_locked(rec.bytes, {});
 }
 
-void esp_ws_client_link_t::write_locked(std::span<std::byte> wire, std::span<const std::byte> src) {
+void esp_ws_client_link_t::gather_into(std::byte* dst,
+                                       std::span<const std::span<const std::byte>> iov) noexcept {
+    for (const std::span<const std::byte>& part : iov) {
+        if (!part.empty()) std::memcpy(dst, part.data(), part.size());
+        dst += part.size();
+    }
+}
+
+void esp_ws_client_link_t::write_locked(std::span<std::byte> wire,
+                                        std::span<const std::span<const std::byte>> src) {
     const auto bump = [this](auto fn) {
         const std::lock_guard<std::mutex> lk(st_m_);
         fn();
@@ -738,7 +761,7 @@ void esp_ws_client_link_t::write_locked(std::span<std::byte> wire, std::span<con
         bump([this] { ++st_.tx_drops; });
         return;
     }
-    if (!src.empty()) std::memcpy(wire.data(), src.data(), src.size());
+    if (!src.empty()) gather_into(wire.data(), src);
     const int n = esp_transport_write(ws_, reinterpret_cast<char*>(wire.data()),
                                       static_cast<int>(wire.size()), kWriteTimeoutMs);
     if (n < 0 || n < static_cast<int>(wire.size())) {

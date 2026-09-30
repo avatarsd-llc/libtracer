@@ -139,6 +139,38 @@ class inline_value_backend_t final : public mem::mem_backend_t {
 }
 
 /**
+ * @brief The "source" of a value whose header lives in a loaned receive block (RFC-0028 §6.9,
+ *        #1626) — it serves nothing and reclaims nothing.
+ *
+ * A loaned value's header sits in the receive block's reserve (`view::kRxLoanBytes`), and the
+ * block goes back to ITS backend when the last segment reference drops, exactly as it did
+ * before the value existed. So there is nothing for a value source to hand out or take back:
+ * `try_alloc` refuses and `release` is never asked. It exists as an IDENTITY — non-null, so a
+ * loaned value is a published block to every seam that tells a stack value from a shared one
+ * (`value_ref_t::keep`, the target adopt), and unique, so the last release knows which arm it
+ * is on.
+ */
+class rx_loan_source_t final : public mem::block_source_t {
+   public:
+    /** @brief The singleton's name, as census and diagnostics print it. */
+    rx_loan_source_t() noexcept : mem::block_source_t("rx_loan") {}
+    /** @brief Refuses: a loaned header is never drawn, it is placed. */
+    [[nodiscard]] void* try_alloc(std::size_t, std::size_t) noexcept override { return nullptr; }
+    /** @brief Never reached: the loaned arm of the last release returns before it. */
+    void release(void*, std::size_t, std::size_t) noexcept override {}
+};
+
+/**
+ * @brief The one @ref rx_loan_source_t. Static storage, never destroyed, for the reason
+ *        @ref inline_value_backend gives.
+ */
+[[nodiscard]] inline rx_loan_source_t& rx_loan_source() noexcept {
+    alignas(rx_loan_source_t) static std::byte storage[sizeof(rx_loan_source_t)];
+    static rx_loan_source_t* const s = new (storage) rx_loan_source_t();
+    return *s;
+}
+
+/**
  * @brief One published value: an intrusive refcount, its source, and its link chain, in one
  *        block (RFC-0028 §5.1).
  *
@@ -187,6 +219,12 @@ class value_t {
             if (inl != nullptr && inl->try_retain()) {
                 links = rope_t{};
                 return inl;
+            }
+            // A loaned receive block (RFC-0028 §6.9): the record goes IN the block. One byte
+            // tested inline; the claim and the placement are out of line and cold.
+            const view::segment_t* const seg = links.links()[0].owner.get();
+            if (seg != nullptr && seg->rx_loan != 0) [[unlikely]] {
+                if (value_t* const loaned = make_loaned(links)) return loaned;
             }
         }
         const std::span<view_t> in = links.links();
@@ -270,6 +308,9 @@ class value_t {
         if (link.offset != 0 || link.length != seg->bytes.size()) return nullptr;
         return reinterpret_cast<value_t*>(reinterpret_cast<std::byte*>(seg) - bytes_for(1));
     }
+
+    /** @brief Whether this value's header lives in a loaned receive block (RFC-0028 §6.9). */
+    [[nodiscard]] bool is_loaned() const noexcept { return source_ == &rx_loan_source(); }
 
     /** @brief Whether this value's bytes live in its own block (the copy arm). */
     [[nodiscard]] bool is_inline() const noexcept {
@@ -469,6 +510,14 @@ class value_t {
      * ratchet, for a path that runs once per value. One call, in `.text.unlikely`.
      */
     [[gnu::noinline, gnu::cold]] static void destroy(value_t* self) noexcept {
+        if (self->is_loaned()) {
+            // The header lives INSIDE the block its one link references, so the link is the
+            // last thing touched: moved out first, the view torn down, and the block returned
+            // to its backend as the moved reference drops — possibly freeing this header.
+            view::segment_ptr_t link = std::move(self->slots()[0].owner);
+            self->slots()[0].~view_t();
+            return;
+        }
         if (self->is_inline()) {
             // The link's segment reference is the block's; move it OUT first, so the view's
             // own teardown writes nothing into a block its last reference may free. The block
@@ -482,6 +531,31 @@ class value_t {
         const std::size_t bytes = self->block_bytes();
         self->~value_t();
         if (source != nullptr) source->release(self, bytes, kAlign);
+    }
+
+    /**
+     * @brief The ingress loan (RFC-0028 §6.9, #1626): place the value over @p links' one link
+     *        IN the reserve of the receive block that link views, and move the link in.
+     *
+     * The block's `rx_loan` bit says the reserve exists (`view::alloc_rx` set it); the claim
+     * word says nobody placed a value in it yet. A link that reaches into the reserve itself
+     * is refused (no transport hands one out, and the header would overlay its bytes). Every
+     * refusal returns `nullptr` and leaves @p links intact, so the caller draws its record
+     * from its source exactly as it would for an ordinary block.
+     *
+     * The value holds one reference to the block it lives in, through its own link, so the
+     * block outlives the header by construction; the last value reference's teardown
+     * (`destroy()`) moves that link out before dropping it.
+     */
+    [[gnu::noinline, gnu::cold]] static value_t* make_loaned(rope_t& links) noexcept {
+        view_t& link = links.links()[0];
+        view::segment_t* const seg = link.owner.get();
+        if (link.offset < view::kRxLoanBytes || !view::claim_rx_loan(seg)) return nullptr;
+        auto* const v =
+            new (seg->bytes.data() + view::kRxLoanValueOffset) value_t(1, &rx_loan_source());
+        new (v->slots()) view_t(std::move(link));
+        links = rope_t{};
+        return v;
     }
 
     /** @brief Place the header; the links follow and are the caller's to construct. */
@@ -524,6 +598,11 @@ static_assert(sizeof(value_t) % alignof(view_t) == 0,
               "link boundary — pad the header explicitly if a member is added");
 static_assert(value_t::bytes_for(1) % alignof(view::segment_t) == 0,
               "an inline value's segment follows its one link in the same block");
+static_assert(view::kRxLoanValueOffset % value_t::kAlign == 0 &&
+                  view::kRxLoanValueOffset >= sizeof(view::rx_loan_word_t) &&
+                  view::kRxLoanValueOffset + value_t::bytes_for(1) <= view::kRxLoanBytes,
+              "a loaned receive block's reserve must hold the claim word and a one-link value "
+              "header, aligned (RFC-0028 §6.9)");
 
 /**
  * @brief The last segment reference of an inline value: hand the whole block back.

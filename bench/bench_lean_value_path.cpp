@@ -45,13 +45,25 @@
  *   egress-gather  `transport_t::send(iov)` through the BASE default a link inherits when it
  *                  does not override the scatter-gather entry: one block, one whole-frame
  *                  copy per frame (copy ⑨ of the same doc, host form).
+ *   egress-queued  the tx_handoff_t queue a link drains from (RFC-0028 §4.7), as it runs
+ *                  with a writer in flight: admit a RETAINED record (the fill copies a short
+ *                  head, the slot keeps one reference to the value) and hand it to the writer.
+ *                  The payload is not copied (RFC-0028 §6.9, slice 9).
+ *   egress-queued-copy  the same queue with the pre-slice-9 fill: the whole frame copied into
+ *                  the slot. The row slice 9 retires, kept for scale.
  *   ingress-copy   a FWD{WRITE} frame resolved through the terminus (view tier) whose value
  *                  TLV is BELOW the vertex's copy-or-share threshold (the build default,
  *                  `config_t::kShareThresholdBytes`): the ownership copy, landing inline in
- *                  the value's own block (RFC-0028 §5.1 / §5.3).
+ *                  the value's own block (RFC-0028 §5.1 / §5.3). The frame asks for a reply
+ *                  (non-empty src), so the window also holds the reply's assembly.
  *   ingress-pin    the SAME arm — same vertex, same default threshold — at a size AT OR ABOVE
  *                  it: the value links the receive segment (ADR-0042 §3), a refcount share.
  *                  One arm, two rows: the size alone picks the row (RFC-0028 §6.5's gate).
+ *                  Each frame arrives in its own receive block, minted outside the window the
+ *                  way the transport mints it (`view::alloc_rx`, with the ingress-loan reserve
+ *                  since slice 9), so the value header is placed IN the block.
+ *   ingress-*-noack  the same two rows for a DELIVERY-shaped frame: empty src, no reply
+ *                  (RFC-0028 §6.9's claim — the stored value's only record is the loan).
  *   proto-fanout   the RFC-0028 prototype: ONE block holding {refcount, length, bytes},
  *                  published to a slot and shared to K target slots by refcount, egress as
  *                  a one-entry iov. Allocations per publish are the claim; the ns are the
@@ -129,6 +141,7 @@ void operator delete[](void* p, const std::nothrow_t&) noexcept { counted_free(p
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tlv_view.hpp"
 #include "libtracer/tracer.hpp"
+#include "libtracer/tx_handoff.hpp"
 
 namespace {
 
@@ -278,8 +291,51 @@ void run_egress_gather(std::size_t size) {
     if (link.bytes != (kWarm + kOps) * size) std::fprintf(stderr, "egress-gather: short send\n");
 }
 
-/** @brief A FWD{WRITE} addressed at a local vertex, carrying @p payload_bytes of value. */
-std::vector<std::byte> make_write_frame(std::size_t payload_bytes) {
+/** @brief The retained record the queue rows admit: the short head a delivery carries. */
+constexpr std::size_t kQueuedHead = 24;
+
+void run_egress_queued(std::size_t size, bool retained) {
+    tr::net::tx_handoff_t q(4, tr::mem::heap_source());
+    const tr::graph::value_ref_t v = tr::graph::value_ref_t::adopt(tr::graph::value_t::make_copy(
+        std::vector<std::byte>(size, std::byte{0xAB}), tr::mem::heap_source()));
+    const std::array<std::byte, kQueuedHead> head{};
+    std::uint64_t bytes = 0;
+    // A writer in flight: every admit below queues, and each op hands the writer one record.
+    (void)q.admit([](tr::mem::block_array_t<std::byte>&) -> std::size_t { return 1; });
+    const auto fill_head = [&](tr::mem::block_array_t<std::byte>& slot) -> std::size_t {
+        if (!slot.reserve(head.size())) return 0;
+        std::memcpy(slot.data(), head.data(), head.size());
+        return head.size();
+    };
+    const auto fill_whole = [&](tr::mem::block_array_t<std::byte>& slot) -> std::size_t {
+        const std::size_t n = head.size() + size;
+        if (!slot.reserve(n)) return 0;
+        std::memcpy(slot.data(), head.data(), head.size());
+        std::memcpy(slot.data() + head.size(), v->links()[0].bytes().data(), size);
+        return n;
+    };
+    measure(retained ? "egress-queued" : "egress-queued-copy", size, 1, retained ? 0 : 1, [&] {
+        const auto a = retained ? q.admit(fill_head, v.get()) : q.admit(fill_whole);
+        if (a != tr::net::tx_handoff_t::admit_t::QUEUED) std::fprintf(stderr, "queue refused\n");
+        bytes += q.next().size();
+    });
+    while (q.next()) {
+    }
+    if (bytes != (kWarm + kOps) * (kQueuedHead + size))
+        std::fprintf(stderr, "egress-queued: short record\n");
+}
+
+/** @brief One receive block holding @p n frame bytes, minted as the transport mints it. */
+view_t mint_rx(std::span<const std::byte> frame) {
+    tr::view::rx_block_t blk =
+        tr::view::alloc_rx(tr::mem::heap_backend(), frame.size(), tr::graph::kShareThresholdBytes);
+    std::memcpy(blk.frame(frame.size()).data(), frame.data(), frame.size());
+    return blk.take(frame.size());
+}
+
+/** @brief A FWD{WRITE} addressed at a local vertex, carrying @p payload_bytes of value. With
+ *         @p acked false the src is EMPTY (the delivery shape): no reply is assembled. */
+std::vector<std::byte> make_write_frame(std::size_t payload_bytes, bool acked = true) {
     std::vector<std::byte> body;
     const std::byte op{static_cast<std::uint8_t>(tr::graph::fwd_op_t::WRITE)};
     tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&op, 1));
@@ -287,7 +343,7 @@ std::vector<std::byte> make_write_frame(std::size_t payload_bytes) {
     for (std::string_view s : {"sensor", "temp"}) (void)tr::wire::emit_path_segment(dst, s);
     tr::wire::emit_tlv(body, type_t::PATH, opt_t{}, dst);
     std::vector<std::byte> src;
-    (void)tr::wire::emit_path_segment(src, "origin");
+    if (acked) (void)tr::wire::emit_path_segment(src, "origin");
     tr::wire::emit_tlv(body, type_t::PATH, opt_t{}, src);
     std::vector<std::byte> payload(payload_bytes, std::byte{0xAB});
     tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(payload));
@@ -296,24 +352,30 @@ std::vector<std::byte> make_write_frame(std::size_t payload_bytes) {
     return frame;
 }
 
-void run_ingress(std::size_t size) {
+void run_ingress(std::size_t size, bool acked) {
     graph_t g;
     const vertex_handle_t v =
         g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
     tr::graph::op_resolver_t r(g);
-    const std::vector<std::byte> bytes = make_write_frame(size);
+    const std::vector<std::byte> bytes = make_write_frame(size, acked);
     // ONE arm (RFC-0028 §6.5): the vertex keeps the build's default threshold, and the value
     // TLV's size alone decides whether this row is the copy or the share. The TLV is the
     // payload plus its 4-byte header, so 4096 B of payload is already at the host default.
     const std::size_t tlv = size + 4;
     const bool share = tlv >= g.share_threshold_bytes(v);
-    // The frame segment is minted OUTSIDE the window (a transport would have minted it on
-    // receive); the window holds the terminus decode, the write, and the reply assembly —
-    // the last of which is identical across the two rows.
-    const value_t fx{bytes.size()};
-    std::memcpy(fx.seg->bytes.data(), bytes.data(), bytes.size());
-    measure(share ? "ingress-pin" : "ingress-copy", size, 1, share ? 0 : 1, [&] {
-        const auto fv = tr::wire::tlv_view_t::over(fx.make());
+    // Every frame gets its OWN receive block, minted OUTSIDE the window (a transport mints it
+    // on receive, and a loaned reserve is claimed once per block); the window holds the
+    // terminus decode, the write, and — when the frame asks for one — the reply assembly.
+    std::vector<view_t> frames;
+    frames.reserve(kWarm + kOps);
+    for (std::size_t i = 0; i < kWarm + kOps; ++i) frames.push_back(mint_rx(bytes));
+    std::size_t next = 0;
+    const char* const stage = acked ? (share ? "ingress-pin" : "ingress-copy")
+                                    : (share ? "ingress-pin-noack" : "ingress-copy-noack");
+    measure(stage, size, 1, share ? 0 : 1, [&] {
+        rope_t one;
+        one.append(std::move(frames[next++]));
+        const auto fv = tr::wire::tlv_view_t::over(std::move(one));
         if (fv) (void)r.resolve(*fv, "cli");
     });
 }
@@ -382,7 +444,10 @@ int main() {
         for (const std::size_t k : kFans) run_local_handler(size, k);
         run_producer_own(size);
         run_egress_gather(size);
-        run_ingress(size);
+        run_egress_queued(size, true);
+        run_egress_queued(size, false);
+        run_ingress(size, true);
+        run_ingress(size, false);
         for (const std::size_t k : kFans) run_proto(size, k);
     }
     return 0;

@@ -1387,6 +1387,14 @@ target_link_libraries(nonretaining_contract_test PRIVATE libtracer)
 libtracer_test_warnings(nonretaining_contract_test)
 add_test(NAME nonretaining_contract COMMAND nonretaining_contract_test)
 
+# RFC-0028 slice 9 (#1626): the ingress loan. alloc_rx reserves a value header in a large
+# receive block, value_t::make places the stored value there once (no source draw), and a
+# graph write of a loaned frame stores it that way end to end.
+add_executable(rx_loan_test rx_loan_test.cpp)
+target_link_libraries(rx_loan_test PRIVATE libtracer)
+libtracer_test_warnings(rx_loan_test)
+add_test(NAME rx_loan COMMAND rx_loan_test)
+
 add_executable(graph_test graph_test.cpp)
 target_link_libraries(graph_test PRIVATE libtracer)
 libtracer_test_warnings(graph_test)
@@ -1730,6 +1738,17 @@ if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_TCP)
     target_link_libraries(tcp_test PRIVATE libtracer)
     libtracer_test_warnings(tcp_test)
     add_test(NAME tcp COMMAND tcp_test)
+endif()
+
+if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_TCP)
+    # RFC-0028 slice 9 (#1620): the retained send. tx_handoff_t keeps a queued record's value,
+    # the base lowering is head ++ links byte-exact, and two senders race retained frames onto
+    # one TCP dial link (whole, ordered, accounted, every value released once drained).
+    add_executable(retained_send_test retained_send_test.cpp)
+    target_link_libraries(retained_send_test PRIVATE libtracer)
+    libtracer_test_warnings(retained_send_test)
+    add_test(NAME retained_send COMMAND retained_send_test)
+    set_tests_properties(retained_send PROPERTIES TIMEOUT 240)
 endif()
 
 if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_TCP)

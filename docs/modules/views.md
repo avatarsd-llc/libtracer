@@ -28,12 +28,12 @@ decode-into-a-struct step: the wire bytes **are** the in-memory value.
 Ownership is an intrusive refcount on the segment, not on the view: cloning a
 `segment_ptr_t` increments **relaxed**, dropping one decrements **acq_rel** and fires
 the backend's `destroy` when the pre-decrement value was 1 (`tr::view::detail::ref_count_t`,
-`core/include/libtracer/segment.hpp:52-54`; the clone and release sites are
-`segment_ptr_t`'s copy constructor and `reset`, `segment.hpp:126` and `:139`). Relaxed
+`core/include/libtracer/segment.hpp:53-55`; the clone and release sites are
+`segment_ptr_t`'s copy constructor and `reset`, `segment.hpp:139` and `:152`). Relaxed
 on the increment is sound because a clone is always made from a reference the caller
 already holds; the acq_rel decrement is what orders the last writer's stores before the
 destructor reads them. A `LIBTRACER_NO_ATOMIC` build substitutes a plain counter with
-the same call shape (`segment.hpp:44-47`).
+the same call shape (`segment.hpp:45-48`).
 
 ## Interface
 
@@ -48,7 +48,7 @@ struct view_t {                                          // view.hpp
 };
 
 /** Own a copy of borrowed bytes as a view_t; nullopt == allocation failure. */
-std::optional<view_t> over_bytes(std::span<const std::byte>) noexcept;  // mem_heap.hpp:414
+std::optional<view_t> over_bytes(std::span<const std::byte>) noexcept;  // mem_heap.hpp:459
 std::optional<view_t> over_bytes(std::span<const std::byte>, mem::mem_backend_t&) noexcept; // :375
 
 class rope_t {                                           // rope.hpp — ordered chain of views
@@ -94,8 +94,8 @@ heap, which is the chain's only allocation (`rope_t::append`, `rope.hpp:76-91`).
 Bytes handed up by a transport are borrowed: they live in a connection buffer that is
 reused as soon as the callback returns. Keeping them means owning a copy, and the
 canonical way to take one is `tr::view::over_bytes`
-(`core/include/libtracer/mem_heap.hpp:414`) — one call in place of the
-`heap_alloc` + `memcpy` + `view_t::over` triplet. A second overload (`:451`) takes the
+(`core/include/libtracer/mem_heap.hpp:459`) — one call in place of the
+`heap_alloc` + `memcpy` + `view_t::over` triplet. A second overload (`:496`) takes the
 backend to draw from, which is what a peer-driven ownership copy uses so the copy lands in
 the node's injected seam rather than the global heap.
 
@@ -119,7 +119,7 @@ The `std::optional` return exists to separate two outcomes that a bare `view_t` 
 The same call — in its seam-taking overload, drawing from the transport's injected
 backend rather than the global heap — is what the RFC 6455 fragment assembler uses to turn
 each borrowed fragment into an owning link before chaining it (`ws_assembler_t::on_data`,
-`core/src/transport_ws.cpp:100`), so the copy out of the connection buffer is the one
+`core/src/transport_ws.cpp:118`), so the copy out of the connection buffer is the one
 legitimate substrate-boundary copy and the chaining that follows is pointer-linking.
 
 ## Consequences
@@ -150,11 +150,11 @@ multi-link value is read as if the first buffer were the whole message — a sil
 truncation, not a diagnostic. This is invisible on a purely local graph, where every
 value is one segment, and appears the moment a real transport is attached: every
 transport whose `transport_t::delivers_ropes()` returns true
-(`core/include/libtracer/transport.hpp:656`; TCP, UDP, WS, QUIC, WebTransport and CAN
+(`core/include/libtracer/transport.hpp:707`; TCP, UDP, WS, QUIC, WebTransport and CAN
 all override it) can hand up a chain. A CAN reassembly group chains one link per slice
 (`can_reassembly_t::assemble`, `core/include/libtracer/can_reassembly.hpp:191-199`), and
 a fragmented WebSocket message chains one link per fragment
-(`ws_assembler_t::on_data`, `core/src/transport_ws.cpp:86-111`). A consumer that cannot
+(`ws_assembler_t::on_data`, `core/src/transport_ws.cpp:86-129`). A consumer that cannot
 promise contiguity calls `materialize()` (`rope.hpp:231`) instead — zero copy when the
 rope happens to be single-link, one `flatten` copy otherwise. `only()` is the right call
 only where the surrounding code has already established that the rope is one link.
@@ -197,6 +197,18 @@ reports a failed allocation as a successful write of nothing.
 ```
 
 ```{doxygenfunction} tr::view::segment_alloc
+:project: libtracer
+```
+
+A transport's receive block comes from `alloc_rx`, which adds the ingress-loan
+reserve (RFC-0028 §6.9) in front of a frame large enough to be shared:
+
+```{doxygenstruct} tr::view::rx_block_t
+:project: libtracer
+:members:
+```
+
+```{doxygenfunction} tr::view::alloc_rx
 :project: libtracer
 ```
 

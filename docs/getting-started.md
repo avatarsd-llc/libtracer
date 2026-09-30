@@ -143,7 +143,7 @@ a runtime string uses the fallible `path_t::parse`. The infallible-register rule
 [ADR-0056](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0056-vertex-handle-infallible-register.md);
 a path whose collision is a genuine runtime outcome uses `try_register_vertex` instead.
 
-`tr::view::over_bytes` (`core/include/libtracer/mem_heap.hpp:414`) is the one audited
+`tr::view::over_bytes` (`core/include/libtracer/mem_heap.hpp:459`) is the one audited
 place that turns a byte span into an owned `view_t`. A hand-rolled
 `heap_alloc` + `memcpy` + `view_t::over` triplet is the pattern it replaces, and it
 loses the allocation-failure signal that `std::optional` carries.
@@ -154,7 +154,7 @@ loses the allocation-failure signal that `std::optional` carries.
 published value returns a reference to it; a read that composes a new value returns the
 value* — which is why `read_children_folded` and its siblings still return a `rope_t`.
 Under an injected `std::pmr::memory_resource` an outstanding `value_ref_t` **pins** the
-value it names (`core/include/libtracer/value.hpp:554-557`), so a long-lived reference
+value it names (`core/include/libtracer/value.hpp:633-636`), so a long-lived reference
 holds the graph's memory; take the bytes and drop it.
 
 ```{note}

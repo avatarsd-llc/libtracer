@@ -360,7 +360,13 @@ void test_settings_max_frame_boundary() {
     check(sink.count() == 1 && sink.at(0) == at_cap, "and arrives byte-identical, whole");
     check(listener.malformed_rx() == 0, "an at-cap frame is not malformed");
     check(listener.dropped_rx() == 0, "nor shed as backpressure");
-    check(watch.largest() == kCap, "the segment drawn for it was the declared length exactly");
+    // At or above the build's share threshold the block carries the ingress-loan reserve in
+    // front of the frame (RFC-0028 §6.9) — a fixed, frame-independent header, never a function
+    // of the declared length.
+    const std::size_t drawn =
+        kCap + (kCap >= tr::graph::kShareThresholdBytes ? tr::view::kRxLoanBytes : 0);
+    check(watch.largest() == drawn,
+          "the segment drawn for it was the declared length exactly (plus the loan reserve)");
 
     // ----- one byte over: refused off the PREFIX, before any body-sized allocation. -----
     const std::size_t calls_before = watch.calls();
@@ -375,7 +381,7 @@ void test_settings_max_frame_boundary() {
     check(sink.count() == 1, "and nothing further was delivered");
     check(watch.calls() == calls_before,
           "the refusal cost ZERO allocations — the cap is checked before backend.alloc (#934)");
-    check(watch.largest() == kCap,
+    check(watch.largest() == drawn,
           "so no segment of the over-cap declared length was ever asked for");
 
     // Refuse-AND-CLOSE: a desynced stream cannot be re-framed, so the peer sees EOF.

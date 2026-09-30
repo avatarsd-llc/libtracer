@@ -444,6 +444,24 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     void send(std::span<const std::span<const std::byte>> iov) override;
 
     /**
+     * @brief Broadcast a RETAINED frame (RFC-0028 §6.9): @p head then @p value as one BINARY
+     *        message per open peer, each queued as the head bytes plus one reference to
+     *        @p value — the payload is never gathered into a tx slot.
+     *
+     * The egress half of #1620 on this link. A fan-out of a V-byte value to K sessions used
+     * to copy V into K tx slots; it now copies each session's head (the WebSocket header,
+     * the FWD header and the return route — header-sized) and takes K refcounts on the one
+     * published block, and the httpd task writes the payload from that block. A head that
+     * does not fit a slot's inline buffer takes the gathered path (@ref queue_send), as does
+     * a value that cannot be kept. The frame leaves in several socket writes on the httpd
+     * task, bracketed as one frame, so a write that fails after the first byte condemns the
+     * session exactly as a truncated gathered frame does (#951) — never another frame's
+     * bytes after a partial one.
+     */
+    void send(std::span<const std::span<const std::byte>> head,
+              const graph::value_t& value) override;
+
+    /**
      * @brief True iff this link hands its sink OWNING frames — i.e. iff an integrator named
      *        an @ref rx_backend (#1565). One override covers both bases (`transport_t` and
      *        `bus_link_t`), as it always has.
@@ -1312,8 +1330,11 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     static esp_err_t ws_pre_handshake(httpd_req_t* req);
     static void on_session_closed(void* slot_ctx);  // free_ctx_fn: a peer departed
     static void tx_work(void* work_arg);            // httpd_queue_work fn: one queued send
-    static void detach_work(void* req_arg);         // httpd_queue_work fn: teardown detach
-    static void close_work(void* req_arg);          // httpd_queue_work fn: one close_peer
+    /** @brief Write a RETAINED item's frame (RFC-0028 §6.9): its slot bytes, then its value's
+     *         links, each through the session's send override inside @ref tx_work's bracket. */
+    static esp_err_t send_retained(httpd_handle_t handle, int fd, const tx_work_t& work);
+    static void detach_work(void* req_arg);  // httpd_queue_work fn: teardown detach
+    static void close_work(void* req_arg);   // httpd_queue_work fn: one close_peer
 
     // --- instance handlers (run on the httpd task) ---
     esp_err_t on_data_frame(httpd_req_t* req);  // recv one WS frame, (reassemble,) deliver
@@ -1392,6 +1413,18 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     void queue_send(const session_ref_t& to, std::span<const std::span<const std::byte>> iov);
     void queue_send(const session_ref_t& to,
                     std::span<const std::byte> frame);  // one-span sugar over the gather
+    /**
+     * @brief Queue a RETAINED frame to @p to (RFC-0028 §6.9): the WebSocket header and
+     *        @p head are copied into a pool slot's inline buffer, and the slot keeps one
+     *        reference to @p value, whose links @ref tx_work writes after them.
+     *
+     * Falls back to the gathered @ref queue_send when the header and head do not fit the
+     * inline buffer, or when @p value cannot be kept; every other refusal (no slot, a
+     * refused enqueue) is the same counted drop @ref queue_send makes.
+     */
+    void queue_send_retained(const session_ref_t& to,
+                             std::span<const std::span<const std::byte>> head,
+                             const graph::value_t& value);
 
     /**
      * @brief Send a directed reply to @p to RIGHT NOW — the fork @ref queue_send is not

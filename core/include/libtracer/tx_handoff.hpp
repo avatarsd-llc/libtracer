@@ -24,6 +24,12 @@
  * for the others. Each write is bounded by the link's write budget, and a stream link tears the
  * peer down after `kMaxConsecutiveStalls` (3) stalled writes in a row, so the writer pays up to
  * three write windows before the link gives up — never more, and nobody queues behind it.
+ *
+ * A queued record is either a COPY of the whole frame, or — since RFC-0028 slice 9 (§6.9) — a
+ * copy of the frame's short head plus a RETAINED value: the slot holds one reference to the
+ * published block and the writer puts its bytes on the wire straight from it. The retained
+ * form is what a link's `transport_t::send(head, value)` override queues, so a payload is
+ * never gathered into a slot and the slot storage is sized by headers, not by values.
  */
 #pragma once
 
@@ -35,6 +41,7 @@
 #include <vector>
 
 #include "libtracer/mem_source.hpp"
+#include "libtracer/value.hpp"
 
 namespace tr::net {
 
@@ -65,6 +72,27 @@ namespace tr::net {
  */
 class tx_handoff_t {
    public:
+    /**
+     * @brief One record the writer puts on the wire: the bytes the fill wrote, then — for a
+     *        retained record — the value's bytes, as ONE frame.
+     *
+     * Valid until the writer's next call to @ref next. `value` is null for a copied record.
+     */
+    struct record_t {
+        std::span<std::byte> bytes;            /**< @brief The copied part (whole frame, or
+                                                          the retained frame's head). */
+        const graph::value_t* value = nullptr; /**< @brief The retained payload, or null. */
+
+        /** @brief False for the empty record that ends the writer's drain. */
+        [[nodiscard]] explicit operator bool() const noexcept {
+            return !bytes.empty() || value != nullptr;
+        }
+        /** @brief The record's whole length on the wire. */
+        [[nodiscard]] std::size_t size() const noexcept {
+            return bytes.size() + (value != nullptr ? value->total_length() : 0);
+        }
+    };
+
     /** @brief What @ref admit decided for one record. */
     enum class admit_t : std::uint8_t {
         WRITE,   /**< @brief No writer was in flight: the caller is now the writer. */
@@ -102,10 +130,17 @@ class tx_handoff_t {
      * wrote; `0` refuses (the slot could not grow, or the record cannot be encoded), and the
      * slot stays free.
      *
+     * With @p retain the record is RETAINED: the fill writes only the frame's head, and the
+     * slot keeps one reference to @p retain (`value_ref_t::keep` — a refcount for a published
+     * block; a clone of its links for a caller-owned one) whose bytes follow the head on the
+     * wire. A value that cannot be kept refuses the record, like a fill that returns 0 — and
+     * a retained record's head is never empty (every link frames its records), so 0 refuses
+     * it too.
+     *
      * @tparam Fill Callable `std::size_t(mem::block_array_t<std::byte>&)`.
      */
     template <class Fill>
-    [[nodiscard]] admit_t admit(Fill&& fill) {
+    [[nodiscard]] admit_t admit(Fill&& fill, const graph::value_t* retain = nullptr) {
         const std::lock_guard lock(m_);
         if (!busy_) {
             busy_ = true;
@@ -117,6 +152,10 @@ class tx_handoff_t {
         }
         slot_t& slot = slots_[(head_ + count_) % slots_.size()];
         slot.len = std::forward<Fill>(fill)(slot.buf);
+        if (slot.len != 0 && retain != nullptr) {
+            slot.value = graph::value_ref_t::keep(*retain);
+            if (!slot.value) slot.len = 0;  // not kept: refuse below, the slot stays free
+        }
         if (slot.len == 0) {
             ++refused_;
             return admit_t::REFUSED;
@@ -129,12 +168,19 @@ class tx_handoff_t {
     /**
      * @brief The writer's step: release the record handed out last, hand out the next one.
      *
-     * @return The next queued record, valid until the following call; or an empty span, in
+     * Releasing a retained record drops its value reference here, under the queue's lock but
+     * after the writer finished with it — the only thread that read the value's bytes.
+     *
+     * @return The next queued record, valid until the following call; or an empty record, in
      *         which case the queue was empty and the caller is no longer the writer.
      */
-    [[nodiscard]] std::span<std::byte> next() {
+    [[nodiscard]] record_t next() {
+        graph::value_ref_t done;  // released AFTER the lock: a last reference may free a block
         const std::lock_guard lock(m_);
         if (handed_) {
+            slot_t& old = slots_[head_];
+            done = std::move(old.value);
+            old.len = 0;
             head_ = (head_ + 1) % slots_.size();
             --count_;
             handed_ = false;
@@ -145,7 +191,7 @@ class tx_handoff_t {
         }
         handed_ = true;
         slot_t& slot = slots_[head_];
-        return {slot.buf.data(), slot.len};
+        return {std::span<std::byte>(slot.buf.data(), slot.len), slot.value.get()};
     }
 
     /** @brief The slot count this queue was built with — its effective ceiling. */
@@ -170,6 +216,8 @@ class tx_handoff_t {
         explicit slot_t(mem::block_source_t& src) noexcept : buf(src) {}
         mem::block_array_t<std::byte> buf; /**< @brief The record's storage. */
         std::size_t len = 0;               /**< @brief Bytes of `buf` that are the record. */
+        graph::value_ref_t value;          /**< @brief A retained record's payload (RFC-0028
+                                                       §6.9); empty for a copied record. */
     };
 
     mutable std::mutex m_;      /**< @brief Guards every field below; never held across the

@@ -312,6 +312,22 @@ class esp_ws_client_link_t : public transport_t {
     void send(std::span<const std::byte> frame) override;
 
     /**
+     * @brief Scatter-gather send (#1620 (a)): the same masked frame as @ref send, gathered
+     *        straight from @p iov into the writer's scratch or the queue slot.
+     *
+     * The base default flattened the spans into an egress temporary and then handed that to
+     * @ref send, which copied it again into the scratch — two copies and an allocation per
+     * gathered frame. A masked frame needs ONE private copy (the transport masks in place),
+     * and this is it. The retained send (`transport_t::send(head, value)`) lowers here too:
+     * a client frame cannot be written from a shared block, so this link keeps the value by
+     * copying it, once.
+     *
+     * @param iov The frame's spans, concatenated as one message.
+     */
+    void send(std::span<const std::span<const std::byte>> iov) override;
+    using transport_t::send;
+
+    /**
      * @brief Open this link's delivery gate: release the `defer_recv` dial latch, so the
      *        recv thread makes its first dial (ADR-0081, #1102).
      *
@@ -537,10 +553,13 @@ class esp_ws_client_link_t : public transport_t {
      * down on an error or a short write.
      *
      * @param wire The bytes the transport masks in place and writes.
-     * @param src  Copied into @p wire first when non-empty (the writer's own, possibly
+     * @param src  Gathered into @p wire first when non-empty (the writer's own, possibly
      *             shared, frame); empty when @p wire is already a private queued copy.
      */
-    void write_locked(std::span<std::byte> wire, std::span<const std::byte> src);
+    void write_locked(std::span<std::byte> wire, std::span<const std::span<const std::byte>> src);
+    /** @brief Copy the spans of @p iov, in order, to @p dst (sized by the caller). */
+    static void gather_into(std::byte* dst,
+                            std::span<const std::span<const std::byte>> iov) noexcept;
 
     const std::string host_;
     const std::uint16_t port_;

@@ -51,7 +51,9 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <memory>
@@ -61,6 +63,7 @@
 
 #include "fake_httpd.hpp"
 #include "libtracer/path.hpp"
+#include "libtracer/value.hpp"
 #include "libtracer_esp/httpd_ws_link.hpp"
 
 namespace {
@@ -531,6 +534,133 @@ void test_a_frame_that_never_started_is_still_only_dropped() {
     fake_httpd::instance().close_all();
 }
 
+// ---------------------------------------------------------------------------
+// 11 — the retained send (RFC-0028 §6.9): the frame is written whole, or the session closes.
+// ---------------------------------------------------------------------------
+/** @brief A published value of @p n patterned bytes (the payload a delivery retains). */
+tr::graph::value_ref_t retained_value(std::size_t n) {
+    std::vector<std::byte> b(n);
+    for (std::size_t i = 0; i < n; ++i) b[i] = std::byte(static_cast<std::uint8_t>(i * 5u + 1u));
+    return tr::graph::value_ref_t::adopt(tr::graph::value_t::make_copy(b, tr::mem::heap_source()));
+}
+
+/** @brief The head spans a delivery would pass: two short parts and an empty one. */
+const std::byte kHead0[] = {std::byte{0x0F}, std::byte{0x84}, std::byte{0x23}};
+const std::byte kHead1[] = {std::byte{0x14}, std::byte{0x00}};
+
+/** @brief Send @p v retained to every peer, the way a delivery does, and drain. */
+void send_retained(httpd_ws_link_t& link, const tr::graph::value_t& v) {
+    const std::span<const std::byte> head[3] = {
+        std::span<const std::byte>(kHead0), std::span<const std::byte>(kHead1), {}};
+    link.send(std::span<const std::span<const std::byte>>(head), v);
+    drain();
+}
+
+/** @brief The exact bytes a peer must parse for one retained frame of @p v. */
+std::vector<std::byte> retained_wire(const tr::graph::value_t& v) {
+    const std::size_t len = sizeof(kHead0) + sizeof(kHead1) + v.total_length();
+    std::vector<std::byte> w{std::byte{0x82}};
+    if (len < 126) {
+        w.push_back(static_cast<std::byte>(len));
+    } else if (len <= 0xFFFF) {
+        w.push_back(std::byte{126});
+        w.push_back(static_cast<std::byte>(len >> 8));
+        w.push_back(static_cast<std::byte>(len & 0xFF));
+    } else {
+        w.push_back(std::byte{127});
+        for (int i = 7; i >= 0; --i)
+            w.push_back(
+                static_cast<std::byte>((static_cast<std::uint64_t>(len) >> (8 * i)) & 0xFF));
+    }
+    w.insert(w.end(), std::begin(kHead0), std::end(kHead0));
+    w.insert(w.end(), std::begin(kHead1), std::end(kHead1));
+    for (const auto& l : v.links()) w.insert(w.end(), l.bytes().begin(), l.bytes().end());
+    return w;
+}
+
+/**
+ * @brief A retained frame goes out as the slot's bytes (WebSocket header + head) followed by
+ *        the value's links from the published block, byte-exact, and the queue lets go of
+ *        the value once the frame is written.
+ */
+void test_retained_frame_is_whole() {
+    std::printf("a retained frame (RFC-0028 §6.9) on a healthy socket:\n");
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    claim(910);
+    fake_httpd::instance().clear_wire(910);
+    const std::size_t writes_before = fake_httpd::instance().writes(910);
+
+    for (const std::size_t n : {std::size_t{40}, std::size_t{9000}, std::size_t{70000}}) {
+        const tr::graph::value_ref_t v = retained_value(n);
+        fake_httpd::instance().clear_wire(910);
+        send_retained(*link, *v);
+        check(fake_httpd::instance().wire(910) == retained_wire(*v),
+              "the peer reads ONE well-formed frame: header, head, then the value, byte-exact");
+        check(v->use_count() == 1, "the written frame released its reference to the value");
+    }
+    check(fake_httpd::instance().writes(910) == writes_before + 6,
+          "each frame is two writes: the slot's bytes, then the one link, in place");
+    check(fake_httpd::instance().has_session(910), "the session is healthy");
+
+    link.reset();
+    fake_httpd::instance().close_all();
+}
+
+/**
+ * @brief The partial-write rule for the retained frame: once its first byte is on the wire,
+ *        a failed or short write of ANY later part closes the session, and nothing of any
+ *        other frame follows the partial one.
+ */
+void test_retained_frame_cut_off_closes() {
+    std::printf("a retained frame cut off after its head:\n");
+    for (const send_result_t cut : {send_result_t::TIMEOUT, send_result_t::SHORT}) {
+        auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+        claim(911);
+        fake_httpd::instance().clear_wire(911);
+        const tr::graph::value_ref_t v = retained_value(9000);
+        const std::vector<std::byte> whole = retained_wire(*v);
+        const std::size_t slot_bytes = whole.size() - v->total_length();
+        fake_httpd::instance().set_send_script(911, {send_result_t::FULL, cut});
+
+        send_retained(*link, *v);
+        const std::vector<std::byte> seen = fake_httpd::instance().wire(911);
+        check(!fake_httpd::instance().has_session(911),
+              "the announced, unfinished frame closes the session (#951)");
+        check(seen.size() < whole.size() && seen.size() >= slot_bytes &&
+                  std::equal(seen.begin(), seen.end(), whole.begin()),
+              "what reached the wire is a PREFIX of this frame and nothing else");
+        check(v->use_count() == 1, "the failed frame still released the value");
+
+        // A later frame to the condemned session never lands behind the partial one.
+        send_retained(*link, *v);
+        check(fake_httpd::instance().wire(911) == seen, "no bytes follow the partial frame");
+
+        link.reset();
+        fake_httpd::instance().close_all();
+    }
+}
+
+/** @brief A retained frame whose FIRST write fails is only dropped (#481), as any other. */
+void test_retained_frame_never_started_is_dropped() {
+    std::printf("a retained frame whose first write fails:\n");
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    claim(912);
+    const tr::graph::value_ref_t v = retained_value(9000);
+    fake_httpd::instance().set_send_script(912, {send_result_t::TIMEOUT});
+    send_retained(*link, *v);
+    check(fake_httpd::instance().has_session(912), "nothing reached the wire: the session stays");
+    check(v->use_count() == 1, "the dropped frame released the value");
+
+    fake_httpd::instance().set_send_script(912, {send_result_t::FULL});
+    fake_httpd::instance().clear_wire(912);
+    send_retained(*link, *v);
+    check(fake_httpd::instance().wire(912) == retained_wire(*v),
+          "the next retained frame arrives whole on the same socket");
+
+    link.reset();
+    fake_httpd::instance().close_all();
+}
+
 }  // namespace
 
 int main() {
@@ -545,6 +675,9 @@ int main() {
     test_peer_name_on_an_ipv6_socket();
     test_truncated_frame_closes_the_session();
     test_a_frame_that_never_started_is_still_only_dropped();
+    test_retained_frame_is_whole();
+    test_retained_frame_cut_off_closes();
+    test_retained_frame_never_started_is_dropped();
     if (g_failures != 0) {
         std::printf("FAILED: %d check(s)\n", g_failures);
         return 1;

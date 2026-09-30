@@ -702,6 +702,33 @@ catches that interleave today (§9 item 6). **Risk: medium-high** — the transp
 change shape, and a retained-`value_t` send is a partial write away from a corrupted frame.
 Adds a retained-send virtual on `transport_t` (§8.2).
 
+**As landed in slice 9** ([PR #1657](https://github.com/avatarsd-llc/libtracer/pull/1657); the race test landed first as
+[PR #1656](https://github.com/avatarsd-llc/libtracer/pull/1656)), with three deviations from
+the text above:
+
+- **The virtual's signature.** It is `transport_t::send(std::span<const std::span<const
+  std::byte>> head, const value_t& value)`, not `send(value_ref_t, header_span)`. The caller
+  passes the value by reference and the link calls `value_ref_t::keep` only when it actually
+  queues. An in-call writer therefore takes no reference at all. The head is an iov rather than
+  one span, so the delivery's stored return route (up to a couple of KB) is never copied into a
+  contiguous stack buffer, which an ESP task stack could not afford. The default lowers to
+  `send(head ++ value.links())` through an 8-entry inline table. `deliver_remote` no longer
+  draws the per-delivery iov table from the control source.
+- **Which row measures the gate.** `egress-gather` is the base default lowering, and a link that
+  does not override the gather still copies once there. The queued-link claim is measured by a
+  new row, `egress-queued` (the `tx_handoff_t` a stream link drains), which drops from one
+  whole-frame copy to 0 copies and 0 allocations. The host queued links that write straight
+  from the block are the TCP dial link and, on ESP, `httpd_ws_link_t`. A WebSocket *client*
+  frame is masked in place (RFC 6455 §5.3), so it cannot be written from a shared block: the
+  host WS client and `esp_ws_client_link_t` keep one gathered copy, down from two on the ESP
+  client.
+- **Which frame meets `ingress-pin` at 0.** The loan removes the stored value's record (1 → 0
+  allocations), so a delivery-shaped `FWD{WRITE}` (empty src, no reply) is 0 allocations and
+  0 bytes (`ingress-pin-noack`). An acked write still assembles its reply head (2 allocations),
+  which is outside this slice. The reserve is `kRxLoanBytes` (48 B on 64-bit, 32 B on 32-bit)
+  in front of a receive block of at least `kShareThresholdBytes`, and it is claimed once per
+  block. A build whose threshold is `SIZE_MAX` (ESP's default) never reserves.
+
 ### 6.10 Slice 10 — one seam, one surface (D9's second half, D12, §5.6)
 
 `mem_backend_t` derives from `block_source_t` (every downstream backend re-based);
@@ -804,7 +831,7 @@ verifiable against the existing vectors.
 | `value_ref_t` over `std::shared_ptr<const rope_t>` | `value_ref_t` over an intrusive `value_t*` (same verbs, new shape and size) | 3 |
 | `graph_t(std::pmr::memory_resource*, mem_backend_t*, …)` and the `mr_` channel | `graph_t(block_source_t&, graph_hooks_t)` — one source, one hooks struct | 3 (source), 10 (hooks) |
 | `current_seq()` → `uint64_t`, `write_seq_` 64-bit | `uint32_t` with wrap-safe compare | 8 |
-| `transport_t::send(iov)` as the only egress verb | plus a retained-send virtual (`send(value_ref_t, header_span)`) that a queued link overrides | 9 |
+| `transport_t::send(iov)` as the only egress verb | plus a retained-send virtual that a queued link overrides — as landed, `send(head_iov, const value_t&)` (§6.9) | 9 |
 | `mem_backend_t` as a free-standing vtable | `mem_backend_t : block_source_t` — every downstream backend (`heap`, pools, ESP, device) re-based | 10 |
 | `fwd_router_t(graph_t&, <positional planes>)` | `fwd_router_t(graph_t&, router_planes_t)` | 10 |
 | `httpd_ws_link_t` / link constructors with positional knobs | per-link config aggregates (#1593) | 10 |

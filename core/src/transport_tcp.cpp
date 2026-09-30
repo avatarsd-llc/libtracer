@@ -244,6 +244,51 @@ void tcp_transport_t::send(std::span<const std::span<const std::byte>> iov) {
     if (shed != 0) dropped_tx_.fetch_add(shed, std::memory_order_relaxed);
 }
 
+void tcp_transport_t::send(std::span<const std::span<const std::byte>> head,
+                           const graph::value_t& value) {
+    // The record's spans on the stack: a delivery's head is two or three spans and a value one
+    // or two links, so an unusually wide one takes the base's general lowering (the copy path)
+    // rather than growing a table here.
+    std::array<std::span<const std::byte>, kMaxInlineIov> parts;
+    const std::size_t n = head.size() + value.link_count();
+    if (n > parts.size()) {
+        transport_t::send(head, value);
+        return;
+    }
+    std::size_t i = 0;
+    for (const std::span<const std::byte>& h : head) parts[i++] = h;
+    for (const view::view_t& l : value.links()) parts[i++] = l.bytes();
+    const prefixed_iov_t rec(std::span<const std::span<const std::byte>>(parts.data(), n),
+                             kMaxFrame, egress_source());
+    if (!rec.ok) {
+        dropped_tx_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    // In-call, the whole record gathers straight from the caller's spans, as `send(iov)` does.
+    // Queued, the slot takes the prefix and the head — header-sized — and the queue keeps one
+    // reference to the value, whose links the writer gathers when it drains the record.
+    const std::uint64_t shed = handoff_send(
+        [&](int fd) {
+            const write_result_t r =
+                write_all_iov(fd, rec.span(), derive_send_bound_ms(liveness_window_ms_, 1));
+            return note_write_result(r, fd, tx_stall_streak_);
+        },
+        [&](mem::block_array_t<std::byte>& slot) -> std::size_t {
+            std::size_t total = rec.prefix.size();
+            for (const std::span<const std::byte>& h : head) total += h.size();
+            if (!slot.reserve(total)) return 0;
+            std::memcpy(slot.data(), rec.prefix.data(), rec.prefix.size());
+            std::size_t off = rec.prefix.size();
+            for (const std::span<const std::byte>& h : head) {
+                if (!h.empty()) std::memcpy(slot.data() + off, h.data(), h.size());
+                off += h.size();
+            }
+            return total;
+        },
+        &value);
+    if (shed != 0) dropped_tx_.fetch_add(shed, std::memory_order_relaxed);
+}
+
 bool tcp_transport_t::read_exact(int fd, std::byte* dst, std::size_t len) {
     std::size_t off = 0;
     while (off < len) {
@@ -288,7 +333,10 @@ void tcp_transport_t::serve(int fd) {
         // the socket into the accepted segment (ADR-0042 §2/§4 — no library
         // buffer, no copy; feeding recv chunks through feed() would add one).
         using kind_t = length_prefix_framer::prefix_decision_t::kind_t;
-        auto dec = length_prefix_framer::on_prefix(*backend_, max_frame_, len);
+        // Large frames come with the ingress-loan reserve (RFC-0028 §6.9): the terminus that
+        // shares the value out of this frame builds its record in the block, not beside it.
+        auto dec = length_prefix_framer::on_prefix(*backend_, max_frame_, len,
+                                                   graph::kShareThresholdBytes);
         if (dec.kind == kind_t::EMPTY) continue;  // an empty record carries no TLV — a no-op
         if (dec.kind == kind_t::MALFORMED) {
             // Beyond the protocol cap (corrupt/hostile): count it and tear the
@@ -307,12 +355,12 @@ void tcp_transport_t::serve(int fd) {
         }
 
         view::segment_ptr_t seg = std::move(dec.seg);
-        if (!read_exact(fd, seg->bytes.data(), len)) return;
+        if (!read_exact(fd, seg->bytes.data() + dec.off, len)) return;
 
         // Tier select lives in the slot (receiver_slot.hpp): the rope sink gets the
         // frame OWNING, narrowed by aggregate init (over().subview() would copy the
         // handle, leaving a 2nd ref live across the callback, #845); span sink borrows.
-        rx_.deliver(view::view_t{std::move(seg), 0, len});
+        rx_.deliver(view::view_t{std::move(seg), dec.off, len});
     }
 }
 

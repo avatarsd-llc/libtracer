@@ -50,7 +50,7 @@ A transport that can hand up *owning* frames implements the rope-receiver seam
 view delivery](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md),
 generalized to ropes by [ADR-0053 — lazy rope-backed decode, view partial-path
 routing](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0053-lazy-rope-backed-decode-view-partial-path-routing.md)):
-it overrides `delivers_ropes()` (`core/include/libtracer/transport.hpp:656`) and
+it overrides `delivers_ropes()` (`core/include/libtracer/transport.hpp:707`) and
 delivers each inbound frame as a `rope_t` of refcounted links over segments drawn
 from a host-injected `mem_backend_t`. A contiguous frame is the single-link case; a
 scattered one — a CAN reassembly group, a fragmented WebSocket message — crosses the
@@ -65,7 +65,7 @@ the rope form for an owning link, the span form otherwise (`fwd_router.cpp:1198,
 `fwd_router.cpp:1136,1143` for the peer-named bus equivalent).
 
 Every socket transport in the tree declares the owning tier: UDP
-(`transport_udp.hpp:111`), TCP client and server (`transport_tcp.hpp:218,409`),
+(`transport_udp.hpp:111`), TCP client and server (`transport_tcp.hpp:236,427`),
 WebSocket server and client (`transport_ws.hpp:280,507`), CAN
 (`transport_can.hpp:606`), QUIC (`transport_quic.hpp:153`) and WebTransport
 (`transport_webtransport.hpp:235`). The borrowed-span path is the base-class default
@@ -76,7 +76,7 @@ and the tier an out-of-tree transport gets for free.
 A point-to-point link carries one peer, so the child NAME the router registers it
 under fully addresses the far side. A **bus** link reaches many peers over one wire
 and exposes them through the optional `bus_link_t` facet
-(`core/include/libtracer/transport.hpp:76`, [ADR-0044 — stateless transport peer
+(`core/include/libtracer/transport.hpp:78`, [ADR-0044 — stateless transport peer
 enumeration](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0044-stateless-transport-peer-enumeration-separate-paths-client-side-identity.md)):
 `enumerate_peers` synthesizes the currently-audible names from the wire's own live
 traffic, `peer_link` resolves one name to a directed sending endpoint, and
@@ -93,19 +93,19 @@ for a peer and no peer state is stored.
 `transport_t::bus()` returns the facet or `nullptr`. CAN always returns it
 (`transport_can.hpp:564`); the TCP and WebSocket **servers** return it when
 configured peer-named — one implementation, on the slot-server base both of them
-inherit (`posix_endpoint.hpp:1210`); every other kind keeps the `nullptr` default.
+inherit (`posix_endpoint.hpp:1238`); every other kind keeps the `nullptr` default.
 
 That base is picked by the BUILD. `slot_server_t` owns the slot table and answers every
 peer query off it, but it is not itself a `bus_link_t`; the facet — the base subobject, its
 peer-named receiver slot and its two peer-lifecycle notifier pairs — lives one tier below,
 in `bus_slot_server_t`, and the two servers derive from `stream_server_base_t`
-(`posix_endpoint.hpp:1284`), which is that tier or the facet-free `flat_slot_server_t`
+(`posix_endpoint.hpp:1312`), which is that tier or the facet-free `flat_slot_server_t`
 according to `tr::net::kBusLinks`. So on a target that closed the bus module out a listener
 does not merely refuse to hand the facet out: its LAYOUT does not contain one.
 
 Whether a link's peer-named tier exists is one query, `bus_link_t::peer_named()`
-(`transport.hpp:193`): the constructed flag for the two stream servers
-(`posix_endpoint.hpp:766`), `true` by construction for a kind that is a bus outright.
+(`transport.hpp:195`): the constructed flag for the two stream servers
+(`posix_endpoint.hpp:794`), `true` by construction for a kind that is a bus outright.
 `bus_link_t` **refuses** each of its peer-named wiring calls — `set_peer_receiver`,
 `set_peer_rope_receiver`, `set_peer_down_notifier` — while it is false. That refusal matters
 because `bus_link_t` is a public base: on a flat server the setters are reachable by an
@@ -124,7 +124,7 @@ Departure follows the same split. A **peer-named** server evicts exactly the dep
 (`notify_peer_down(name)`); a **flat** server has one routing identity for every peer it
 carries — the registered child NAME — so its only seam is the whole link
 (`transport_t::notify_down`), and it therefore waits until the **last** open session departs
-(`posix_endpoint.cpp:722`). Firing it on a mid-life close would evict the surviving peers'
+(`posix_endpoint.cpp:742`). Firing it on a mid-life close would evict the surviving peers'
 edges along with the departed one's.
 
 ## Closing the bus module out at build time
@@ -146,7 +146,7 @@ using config_t = flat_node_config_t;
 ```
 
 The routing plane reaches the facet through exactly one door, `tr::net::bus_of`
-(`core/include/libtracer/transport.hpp:818`), and every consumer asks there: the registry's
+(`core/include/libtracer/transport.hpp:869`), and every consumer asks there: the registry's
 mount-shape stamp and its two peer-resolution paths, `fwd_router_t::add_child`'s peer wiring,
 and the connection vertex's synthesized peer listing. `transport_t::bus()` itself is
 untouched — still a virtual, still `nullptr` by default — so a transport may still *be* a
@@ -352,7 +352,7 @@ flowchart LR
   and a callable destroyed early dangles exactly like a stale `ctx`.
 - **Overriding `send(iov)` is not optional for a scatter-gather wire.** The base
   implementation gathers into a temporary buffer and, when that allocation fails,
-  **drops the frame** rather than aborting (`transport.hpp:492`). A transport with a
+  **drops the frame** rather than aborting (`transport.hpp:494`). A transport with a
   native `sendmsg`/`writev` that does not override it silently pays a copy per
   forward hop and inherits a drop path it did not intend.
 - **The egress gather draws from the link's own injected store.** That temporary — and

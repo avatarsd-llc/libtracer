@@ -210,28 +210,29 @@ It has two legs, and only one of them copies payload bytes.
 
 **The default full-route leg copies nothing.** It emits
 `FWD{ op=WRITE, dst=<stored return route>, src=<empty PATH>, payload=<VALUE> }` as a
-scatter-gather send: a fresh stack header, the stored route, an empty `src`, and one span per
-rope link (`fwd_router.cpp:3675-3682`). The header is a `stack_writer<16>` — the FWD header of at
+retained send (RFC-0028 §6.9): three head spans on the stack (a fresh header, the stored route,
+an empty `src`) and the value by reference, handed to `transport_t::send(head, value)`
+(`fwd_router.cpp:3684-3686`). The header is a `stack_writer<16>` — the FWD header of at
 most 6 bytes plus the 5-byte op TLV — and both constant TLVs are `constexpr` arrays with no
-runtime construction (`fwd_router.cpp:3672-3676`). The route bytes were copied once at subscribe
+runtime construction (`fwd_router.cpp:3660-3664`). The route bytes were copied once at subscribe
 time, so a delivery re-uses them by reference; a multi-link value crosses as its own segments,
-with no flatten. The iov table is a `mem::block_array_t` over the graph's injected `ctl`
-`block_source_t`, sized once up front to its exact final entry count, and a refused reservation
-drops that delivery rather than emitting a truncated frame (`fwd_router.cpp:3696-3698`). Its entry
-count is the *sending* side's choice — `3 + link_count` — so a bounded node bounds it by sizing
-that source.
+with no flatten. The link lowers `head ++ value.links()` through its own 8-entry inline table,
+drawing an overflow block from its egress source only past five links; a link that QUEUES the
+frame keeps one reference to the value and copies only the head, so the payload is never
+gathered into a queue slot.
 
-That container is the point, not an implementation detail. `std::vector` +
-`tr::detail::try_reserve` sat here until
-[#981](https://github.com/avatarsd-llc/libtracer/issues/981), and that helper answers by value only
-where the growth **throws** (`core/include/libtracer/mem_heap.hpp:150-164`): under
+Until slice 9 this leg drew the iov table itself, as a `mem::block_array_t` over the graph's
+injected `ctl` `block_source_t`, and a refused reservation dropped the delivery. That container
+replaced `std::vector` + `tr::detail::try_reserve` in
+[#981](https://github.com/avatarsd-llc/libtracer/issues/981), because that helper answers by value
+only where the growth **throws** (`core/include/libtracer/mem_heap.hpp:150-164`): under
 `-fno-exceptions` it can only probe the global heap, free the probe block and then run the throwing
 `reserve`, so a writer-thread context switch in that window makes the `reserve` `abort()` the node
 ([#850](https://github.com/avatarsd-llc/libtracer/issues/850), the residual
-[#923](https://github.com/avatarsd-llc/libtracer/issues/923) could not reach). A `block_array_t`
-growth is one refusable `try_alloc` with no second step — no window to lose on any profile — and
-`std::span` is trivially copyable, so its `memcpy` relocation is exact. The `try_*` sites whose
-element types cannot ride that relocation keep the residual, tabulated in
+[#923](https://github.com/avatarsd-llc/libtracer/issues/923) could not reach). The link-side
+table keeps that property — `iov_table_t` grows by one refusable `try_alloc` with no second step —
+and the delivery itself no longer allocates at all. The `try_*` sites whose element types cannot
+ride that relocation keep the residual, tabulated in
 [`../allocation-and-backpressure.md`](../allocation-and-backpressure.md) and stated at each site.
 
 **The COMPACT leg is the one that flattens.** `value.try_materialize(*flat_)`
