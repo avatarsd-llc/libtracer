@@ -315,8 +315,11 @@ def _cmd_stamp(args: argparse.Namespace) -> int:
     desc = args.desc
     if args.compiler:
         desc += SEP + compiler_identity(args.cxx)
-    if args.note:
-        desc += SEP + args.note
+    # Several verdicts can flag one sample (the A/A bracket, and since #1676 the
+    # measurement-conditions ledger); each non-empty one is stamped, in order.
+    for note in args.note or []:
+        if note:
+            desc += SEP + note
     n = stamp([pathlib.Path(p) for p in args.json], desc)
     print(f"host_guard: stamped {n} points -> {desc}")
     return 0
@@ -359,7 +362,8 @@ def main(argv: list[str] | None = None) -> int:
     s = sub.add_parser("stamp", help="write host/compiler/flag onto every emitted point")
     s.add_argument("--json", action="append", required=True)
     s.add_argument("--desc", required=True)
-    s.add_argument("--note", default="")
+    s.add_argument("--note", action="append", default=[],
+                   help="a verdict fragment to append (repeatable; empty ones are skipped)")
     s.add_argument("--cxx", default=None)
     s.add_argument("--compiler", action="store_true",
                    help="append the compiler identity to the descriptor")

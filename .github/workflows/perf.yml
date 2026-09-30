@@ -45,6 +45,14 @@
 #     on the identical thresholds and reports it without failing. Which invocation gets
 #     which is argued at the invocation, next to the flag, not here — that is the whole
 #     point of moving the policy out of a comment.
+#  6. Measurement CONDITIONS (#1676) — every timed bench execution, inside `perf_gate.py`
+#     and in the transcript steps below, goes through `bench/bench_conditions.py`, which
+#     samples foreign CPU time on the measured CPUs and the host's CPU pressure around it
+#     and re-runs a contended execution. Only a clean run may PASS or FAIL: a gate whose
+#     executions stayed contended prints `PERF: INCONCLUSIVE` (blocking tier: exit 3, re-run
+#     the job; advisory: a warning). These runners are unpinned and cannot be isolated, so
+#     their conditions are read over the whole affinity set; the interleaved A/B remains
+#     their primary defence, and none of them is compared against the pinned-host series.
 name: perf
 
 on:
@@ -128,6 +136,12 @@ jobs:
       # would use exists and is tested; the pinned-host leg that would use it does not.
       - name: Bench-host quiescence-guard tests
         run: python3 bench/test_host_guard.py
+      # The measurement-condition classifier (#1676): clean, contended, and
+      # contended-then-clean-on-re-run, on synthetic /proc samples, plus one live case — a
+      # busy neighbour pinned onto the measured CPU must read CONTENDED. It decides whether
+      # the verdict below may be PASS/FAIL at all, so it is tested before anything is timed.
+      - name: Measurement-condition classifier tests
+        run: python3 bench/test_bench_conditions.py
       # The BANKED-SERIES rules (#1301), tested in the same place and for the same
       # reason: they decide whether the pinned store has a point for a commit at all,
       # and the rolling comparator is warn-only, so a wrong verdict there is as
@@ -313,11 +327,14 @@ jobs:
       # to an empty transcript (metric omitted) if GNU time is absent on the runner.
       - name: Run the bench once (this replica's history transcript)
         run: |
+          # Through the condition classifier (#1676): unpinned here, re-run while
+          # contended, and recorded in bench/conditions.jsonl beside the transcript.
+          measure="python3 bench/bench_conditions.py run --record bench/conditions.jsonl"
           if [ -x /usr/bin/time ]; then
-            /usr/bin/time -v ./bench/build/bench_libtracer \
-              >bench/bench_libtracer_raw.txt 2>bench/bench_libtracer_time.txt
+            $measure --out bench/bench_libtracer_raw.txt --err bench/bench_libtracer_time.txt \
+              -- /usr/bin/time -v ./bench/build/bench_libtracer
           else
-            ./bench/build/bench_libtracer >bench/bench_libtracer_raw.txt
+            $measure --out bench/bench_libtracer_raw.txt -- ./bench/build/bench_libtracer
             : >bench/bench_libtracer_time.txt
           fi
       # The NETWORK-plane series. These emit the same 12-column RESULT rows as
@@ -329,8 +346,9 @@ jobs:
         env:
           LIBTRACER_BENCH_SECONDS: "1"
         run: |
-          ./bench/build/bench_forward_demux >bench/bench_forward_demux_raw.txt || true
-          ./bench/build/bench_compact_delivery >bench/bench_compact_delivery_raw.txt || true
+          measure="python3 bench/bench_conditions.py run --record bench/conditions.jsonl"
+          $measure --out bench/bench_forward_demux_raw.txt -- ./bench/build/bench_forward_demux || true
+          $measure --out bench/bench_compact_delivery_raw.txt -- ./bench/build/bench_compact_delivery || true
           # `|| true` keeps a crashing bench from costing this commit its whole history
           # point — but it also silently swallowed a MISSING BINARY once, producing a green
           # job that recorded nothing. Make an empty transcript visible in the log.
@@ -349,7 +367,8 @@ jobs:
           if bash bench/fetch_zenoh.sh; then
             cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
             if cmake --build bench/build --target bench_zenoh --parallel "$BUILD_JOBS"; then
-              ./bench/build/bench_zenoh >bench/bench_zenoh_raw.txt || true
+              python3 bench/bench_conditions.py run --record bench/conditions.jsonl \
+                --out bench/bench_zenoh_raw.txt -- ./bench/build/bench_zenoh || true
             fi
           fi
           # Same visibility rule as the network-plane benches above: an empty transcript is
@@ -406,6 +425,7 @@ jobs:
             bench/bench_forward_demux_raw.txt
             bench/bench_compact_delivery_raw.txt
             bench/bench_zenoh_raw.txt
+            bench/conditions.jsonl
           retention-days: 90
 
   # --- main push: persist the build-to-build history (best across runners) --------
