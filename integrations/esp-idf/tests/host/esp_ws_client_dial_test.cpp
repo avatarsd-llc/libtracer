@@ -321,13 +321,21 @@ void test_oversize_frame_is_refused_and_counted() {
         check(wait_until([&] { return link.link_up(); }, 2s), "the link came up");
         const std::vector<std::byte> ok_frame(kBufBytes, std::byte{0x11});
         link.send(std::span<const std::byte>(ok_frame));
-        check(link.stats().c.tx_frames == 1, "a frame that fits is sent");
+        // The transport's own write count is the "sent" oracle in both images; tx_frames
+        // is checked beside it only where the image keeps traffic counters (#1663).
+        check(fake_ws::writes_started() == 1, "a frame that fits is sent");
+#ifdef CONFIG_LIBTRACER_LINK_TRAFFIC_STATS
+        check(link.stats().c.tx_frames == 1, "and counted on tx_frames (traffic stats on)");
+#endif
         check(link.stats().c.tx_drops == 0, "and is not counted as a drop");
         const std::vector<std::byte> big(kBufBytes + 1, std::byte{0x22});
         const std::string logged =
             capture_stderr([&] { link.send(std::span<const std::byte>(big)); });
         check(link.stats().c.tx_drops == 1, "one byte over the ceiling is counted as a drop");
-        check(link.stats().c.tx_frames == 1, "and did not reach the transport");
+        check(fake_ws::writes_started() == 1, "and did not reach the transport");
+#ifdef CONFIG_LIBTRACER_LINK_TRAFFIC_STATS
+        check(link.stats().c.tx_frames == 1, "and tx_frames did not move");
+#endif
         // Asserted rather than described: the counter above is shared with the peer-down
         // and short-write arms, so this line is the only place the ceiling is nameable.
         const std::string wanted = "outbound frame " + std::to_string(kBufBytes + 1) +
@@ -400,6 +408,27 @@ static_assert(has_dial_counters<tr::net::esp_ws_client_link_t::stats_t> ==
               "#1662: stats_t carries dial counters iff CONFIG_LIBTRACER_WS_CLIENT_DIAL_STATS");
 
 /**
+ * @brief Does @p counters_t carry the per-message traffic half (#1663)?
+ */
+template <class counters_t>
+concept has_traffic_counters = requires(counters_t c) {
+    c.rx_frames;
+    c.rx_bytes;
+    c.tx_frames;
+    c.tx_bytes;
+    c.last_rx_us;
+};
+
+/**
+ * @brief #1663 — the client's snapshot carries the traffic half exactly when the image
+ *        asked for it. Built both ways (core/tests/CMakeLists.txt).
+ */
+static_assert(has_traffic_counters<decltype(tr::net::esp_ws_client_link_t::stats_t{}.c)> ==
+                  tr::net::kLinkTrafficStats,
+              "#1663: stats().c carries rx/tx frames and bytes iff "
+              "CONFIG_LIBTRACER_LINK_TRAFFIC_STATS");
+
+/**
  * @brief #1606 asks 1–2, #1662 — a failed dial releases its transport pair on the failure
  *        path, and is counted and logged only when the image opted in.
  *
@@ -432,6 +461,7 @@ void test_failed_dials_are_released_and_observed_only_on_request() {
         check(failed, "a dial was attempted and failed");
         const auto st = link->stats();
         check(st.reconnects == 0, "and no handshake is claimed");
+        check(st.c.connected_at_us == -1, "and connected_at_us still says never (#1663)");
         check(fake_ws::live_handles() == 0,
               "the failed pair is released on the failure path, not held through the backoff");
         const bool logged_dial = logged.find("dial ws://") != std::string::npos;
@@ -444,6 +474,9 @@ void test_failed_dials_are_released_and_observed_only_on_request() {
 #endif
         fake_ws::fail_connects(false);
         check(wait_until([&] { return link->link_up(); }, 10s), "the next dial lands");
+        const auto landed = link->stats();
+        check(landed.reconnects == 1 && landed.c.connected_at_us >= 0,
+              "the handshake is counted and dated in every image (#1663)");
 #ifdef CONFIG_LIBTRACER_WS_CLIENT_DIAL_STATS
         const auto up = link->stats();
         check(up.dial_attempts == up.dial_failures + 1,

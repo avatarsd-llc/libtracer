@@ -44,6 +44,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   **Migration:** code that reads `stats().dial_attempts` or `stats().dial_failures` sets
   `CONFIG_LIBTRACER_WS_CLIENT_DIAL_STATS=y` in its `sdkconfig.defaults`. Without that, the
   read fails to compile.
+- **BREAKING — per-message traffic counters are opt-in, per image
+  ([#1663](https://github.com/avatarsd-llc/libtracer/issues/1663)).** New Kconfig option
+  `CONFIG_LIBTRACER_LINK_TRAFFIC_STATS`, default `n`. `link_counters_t` splits in two. The
+  drop half (`tx_drops`, `rx_drops`) and `connected_at_us` are always present. The traffic
+  half (`rx_frames`, `rx_bytes`, `tx_frames`, `tx_bytes`, `last_rx_us`) exists only with the
+  option on. It was bumped on every delivered or written message: the client took its
+  counter mutex per frame, and the server took its link-wide `peers_m_` and read the timer
+  per received message. With the option off, the fields are absent, neither success path
+  takes a lock or reads the clock for them, and `esp_ws_client_link_t` carries no counter
+  mutex at all: its drop count and connect-edge facts are now relaxed atomics, in both
+  settings. `tr::net::kLinkTrafficStats` reports the setting.
+  **Migration:** code that reads `c.rx_frames`, `c.rx_bytes`, `c.tx_frames`, `c.tx_bytes` or
+  `c.last_rx_us` (from `esp_ws_client_link_t::stats()` or `httpd_ws_link_t::peer_stats_t`)
+  sets `CONFIG_LIBTRACER_LINK_TRAFFIC_STATS=y` in its `sdkconfig.defaults`. Without that,
+  the read fails to compile.
 
 - **BREAKING (inherited from core) — the pin ratio is gone; chip targets copy always.** Core
   replaced `set_pin_payload_ratio` / `kPinPayloadRatio` with an absolute copy-or-share threshold
@@ -971,7 +986,7 @@ core 0.10.0 reaches it.
 - **Public headers now propagate their ESP-IDF dependencies (#963.4).** `esp_http_server`,
   `tcp_transport` and `esp_driver_twai` moved from `PRIV_REQUIRES` to **`REQUIRES`**. Those
   three are named by headers under `include/libtracer_esp/` (`httpd_ws_link.hpp:173`,
-  `esp_ws_client_link.hpp:199`, `twai_link.hpp:36-37`), and `PRIV_REQUIRES` does not
+  `esp_ws_client_link.hpp:203`, `twai_link.hpp:36-37`), and `PRIV_REQUIRES` does not
   propagate include dirs — so a dependent that included one of ours without independently
   requiring the base component died with `esp_http_server.h: No such file or directory` and
   no hint that libtracer was the cause. `lwip` and `esp_driver_gpio` stay private: they are

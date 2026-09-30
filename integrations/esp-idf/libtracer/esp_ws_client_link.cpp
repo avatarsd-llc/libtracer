@@ -439,10 +439,8 @@ esp_ws_client_link_t::dial_outcome_t esp_ws_client_link_t::connect_once() {
     // for the destructor to condemn, or the destructor wins and this load sees the stop
     // and never dials at all. There is no third interleaving and hence no window.
 #ifdef CONFIG_LIBTRACER_WS_CLIENT_DIAL_STATS
-    {
-        const std::lock_guard<std::mutex> lk(st_m_);
-        ++dial_attempts_;  // #1606 ask 1: the attempt is counted whatever it ends as
-    }
+    // #1606 ask 1: the attempt is counted whatever it ends as.
+    dial_attempts_.fetch_add(1, std::memory_order_relaxed);
 #endif
     const std::shared_ptr<dial_t> slot = dial_;
     {
@@ -529,11 +527,7 @@ esp_ws_client_link_t::dial_outcome_t esp_ws_client_link_t::connect_once() {
             tcp_ = nullptr;
         }
 #ifdef CONFIG_LIBTRACER_WS_CLIENT_DIAL_STATS
-        std::uint32_t failures = 0;
-        {
-            const std::lock_guard<std::mutex> lk(st_m_);
-            failures = ++dial_failures_;
-        }
+        const std::uint32_t failures = dial_failures_.fetch_add(1, std::memory_order_relaxed) + 1;
         // #1606 ask 1: the failure arm is no longer silent. Rate-limited, because a peer
         // that stays unreachable fails once per backoff forever; the counter carries the
         // exact tally, the log only has to say it is happening.
@@ -606,15 +600,18 @@ esp_ws_client_link_t::dial_outcome_t esp_ws_client_link_t::connect_once() {
     }
     // The connection edge, and the only place the link can observe one: `drop()`
     // deliberately stays silent (see below), so this counter IS the reconnect signal.
-    // The traffic counters are per-CONNECTION, so they reset here; `last_rx_us` goes
-    // back to "never" rather than carrying the previous session's staleness forward.
+    // The per-connection counters reset here; `last_rx_us` goes back to "never" rather
+    // than carrying the previous session's staleness forward.
+#ifdef CONFIG_LIBTRACER_LINK_TRAFFIC_STATS
     {
         const std::lock_guard<std::mutex> lk(st_m_);
-        st_ = {};
-        st_.connected_at_us = esp_timer_get_time();
-        connect_ms_ = static_cast<std::uint32_t>(dial_us / 1000);
-        ++reconnects_;
+        traffic_ = {};
     }
+#endif
+    tx_drops_.store(0, std::memory_order_relaxed);
+    connected_at_us_.store(esp_timer_get_time(), std::memory_order_relaxed);
+    connect_ms_.store(static_cast<std::uint32_t>(dial_us / 1000), std::memory_order_relaxed);
+    reconnects_.fetch_add(1, std::memory_order_relaxed);
     // The came-up fact latches here and is never cleared (#1059/#1203): `ok()` reports
     // "a handshake landed at least once", `connected_` (published release, below) reports
     // whether one is standing NOW. Relaxed — it is a hint, not a synchronisation point —
@@ -629,6 +626,7 @@ esp_ws_client_link_t::dial_outcome_t esp_ws_client_link_t::connect_once() {
 
 esp_ws_client_link_t::stats_t esp_ws_client_link_t::stats() const {
     stats_t out;
+#ifdef CONFIG_LIBTRACER_LINK_TRAFFIC_STATS
     {
         // st_m_, NOT write_m_. write_m_ is held across esp_transport_write for up to
         // kWriteTimeoutMs (4 s) on a stalled socket, so a snapshot taken under it
@@ -636,20 +634,29 @@ esp_ws_client_link_t::stats_t esp_ws_client_link_t::stats() const {
         // its own lock across this call — into that wait. This mutex is only ever
         // held for a counter bump or this copy, so the snapshot is bounded-brief.
         const std::lock_guard<std::mutex> lk(st_m_);
-        out.c = st_;
-        out.reconnects = reconnects_;
-#ifdef CONFIG_LIBTRACER_WS_CLIENT_DIAL_STATS
-        out.dial_attempts = dial_attempts_;
-        out.dial_failures = dial_failures_;
-#endif
-        out.connect_ms = connect_ms_;
+        out.c.rx_frames = traffic_.rx_frames;
+        out.c.rx_bytes = traffic_.rx_bytes;
+        out.c.tx_frames = traffic_.tx_frames;
+        out.c.tx_bytes = traffic_.tx_bytes;
+        out.c.last_rx_us = traffic_.last_rx_us;
     }
-    // Filled from `dropped_rx_`, not kept in `st_`: the receive path already tallies every
-    // inbound discard there (#953/#901), and a second counter bumped at the same sites
-    // could only drift from it. `c.rx_drops` and `dropped_rx()` are therefore two
-    // spellings of one number, never two numbers. Saturating, because the block is 32-bit
-    // and the atomic is 64-bit — a link that really dropped 4 billion messages reports the
-    // cap here and the exact figure through `dropped_rx()`.
+#endif
+    // Relaxed loads, one by one: none of these is used to check another, and each is
+    // written only on a failure or at a (re)connect, never per frame (#1663).
+    out.c.tx_drops = tx_drops_.load(std::memory_order_relaxed);
+    out.c.connected_at_us = connected_at_us_.load(std::memory_order_relaxed);
+    out.reconnects = reconnects_.load(std::memory_order_relaxed);
+#ifdef CONFIG_LIBTRACER_WS_CLIENT_DIAL_STATS
+    out.dial_attempts = dial_attempts_.load(std::memory_order_relaxed);
+    out.dial_failures = dial_failures_.load(std::memory_order_relaxed);
+#endif
+    out.connect_ms = connect_ms_.load(std::memory_order_relaxed);
+    // Filled from `dropped_rx_`, not kept in a second counter: the receive path already tallies
+    // every inbound discard there (#953/#901), and a second counter bumped at the same sites could
+    // only drift from it. `c.rx_drops` and `dropped_rx()` are therefore two spellings of one
+    // number, never two numbers. Saturating, because the block is 32-bit and the atomic is 64-bit —
+    // a link that really dropped 4 billion messages reports the cap here and the exact figure
+    // through `dropped_rx()`.
     const std::uint64_t rx_dropped = dropped_rx_.load(std::memory_order_relaxed);
     out.c.rx_drops = static_cast<std::uint32_t>(
         std::min<std::uint64_t>(rx_dropped, std::numeric_limits<std::uint32_t>::max()));
@@ -694,21 +701,15 @@ void esp_ws_client_link_t::send(std::span<const std::byte> frame) {
 void esp_ws_client_link_t::send(std::span<const std::span<const std::byte>> iov) {
     std::size_t total = 0;
     for (const std::span<const std::byte>& part : iov) total += part.size();
-    // Counted under st_m_, never under write_m_ — write_m_ is held across the transport
+    // A drop is a relaxed atomic bump, never a lock: write_m_ is held across the transport
     // write below for up to kWriteTimeoutMs, and a counter that rode it would make every
-    // stats() snapshot inherit that wait. st_m_ is only ever taken for these bumps, so it
-    // is uncontended and syscall-free. Where both are held the order is always
-    // write_m_ -> st_m_ and never the reverse, which keeps it acyclic.
-    const auto bump = [this](auto fn) {
-        const std::lock_guard<std::mutex> lk(st_m_);
-        fn();
-    };
+    // stats() snapshot inherit that wait (#1663 took the drop half off st_m_ as well).
     // This early-out stays AHEAD of the sender tally and of write_m_ (#952 ordering): it
     // reads nothing the destructor can be racing. Counted without any lock held.
     if (total == 0 || total > tx_buf_.size()) {  // drop oversize/empty
         // The oversize half is the `tx_bytes` CEILING, and this is the only place that can
         // name it. `transport_t::send` returns void, so the router cannot be told the frame
-        // died; `st_.tx_drops` says one did, but the `!connected_` arm and the short-write
+        // died; `tx_drops_` says one did, but the `!connected_` arm and the short-write
         // arm below bump that same counter, so a bump alone does not even say WHICH drop
         // this was, let alone which knob was too small. A per-frame ceiling nobody can see
         // is how a blob-carrying value or a composed reply vanishes with clean logs on both
@@ -720,7 +721,7 @@ void esp_ws_client_link_t::send(std::span<const std::span<const std::byte>> iov)
         if (total != 0)
             ESP_LOGW(kTag, "outbound frame %u B exceeds %u B tx buffer — dropped",
                      static_cast<unsigned>(total), static_cast<unsigned>(tx_buf_.size()));
-        bump([this] { ++st_.tx_drops; });
+        tx_drops_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
     // Announce this sender BEFORE it can reach write_m_ (#952). A sender that becomes the
@@ -747,7 +748,7 @@ void esp_ws_client_link_t::send(std::span<const std::span<const std::byte>> iov)
         return total;
     })) {
         case tr::net::tx_handoff_t::admit_t::REFUSED:
-            bump([this] { ++st_.tx_drops; });
+            tx_drops_.fetch_add(1, std::memory_order_relaxed);
             return;
         case tr::net::tx_handoff_t::admit_t::QUEUED:
             return;
@@ -777,10 +778,6 @@ void esp_ws_client_link_t::gather_into(std::byte* dst,
 
 void esp_ws_client_link_t::write_locked(std::span<std::byte> wire,
                                         std::span<const std::span<const std::byte>> src) {
-    const auto bump = [this](auto fn) {
-        const std::lock_guard<std::mutex> lk(st_m_);
-        fn();
-    };
     const std::lock_guard<std::mutex> lk(write_m_);
     // Re-checked, not re-read for tidiness: teardown may have run while this record waited,
     // and it disarms `stop_` BEFORE it takes this very lock to null the handles, so a writer
@@ -802,7 +799,7 @@ void esp_ws_client_link_t::write_locked(std::span<std::byte> wire,
     // This one IS a drop: the push vanishes toward a peer that is simply down, and it is
     // the loss that used to be completely invisible.
     if (!connected_.load(std::memory_order_acquire)) {  // best-effort, like UDP
-        bump([this] { ++st_.tx_drops; });
+        tx_drops_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
     if (!src.empty()) gather_into(wire.data(), src);
@@ -811,14 +808,17 @@ void esp_ws_client_link_t::write_locked(std::span<std::byte> wire,
     if (n < 0 || n < static_cast<int>(wire.size())) {
         // Error or short write (a partial WS frame would desync the peer) — tear the
         // connection down so the recv loop rebuilds it; the frame is best-effort-lost.
-        bump([this] { ++st_.tx_drops; });
+        tx_drops_.fetch_add(1, std::memory_order_relaxed);
         connected_.store(false, std::memory_order_release);
         return;
     }
-    bump([this, n = wire.size()] {
-        ++st_.tx_frames;
-        st_.tx_bytes += static_cast<std::uint32_t>(n);
-    });
+#ifdef CONFIG_LIBTRACER_LINK_TRAFFIC_STATS
+    // The success path counts only when the application asked for traffic counters
+    // (#1663). Nesting is write_m_ -> st_m_, never the reverse.
+    const std::lock_guard<std::mutex> st_lk(st_m_);
+    ++traffic_.tx_frames;
+    traffic_.tx_bytes += static_cast<std::uint32_t>(wire.size());
+#endif
 }
 
 void esp_ws_client_link_t::recv_loop() {
@@ -1062,18 +1062,21 @@ void esp_ws_client_link_t::recv_loop() {
             // in-call by the router on this recv thread. `off == rx_buf_.size()` is an
             // EXACT FIT and delivers — it used to take the overflow branch (#901).
             //
-            // Counted BEFORE the delivery, under st_m_ and NOT write_m_: write_m_ is held
-            // across a transport write for up to kWriteTimeoutMs, so counting under it
-            // would stall every inbound graph op behind one slow outbound frame. No lock
-            // at all is held across the delivery itself — the router runs the app in-call
-            // and the app may call back into send() on this very stack.
+            // Counted BEFORE the delivery, and only when the application asked for traffic
+            // counters (#1663) — under st_m_ and NOT write_m_: write_m_ is held across a
+            // transport write for up to kWriteTimeoutMs, so counting under it would stall
+            // every inbound graph op behind one slow outbound frame. No lock at all is
+            // held across the delivery itself — the router runs the app in-call and the
+            // app may call back into send() on this very stack.
             if (off > 0) {
+#ifdef CONFIG_LIBTRACER_LINK_TRAFFIC_STATS
                 {
                     const std::lock_guard<std::mutex> lk(st_m_);
-                    ++st_.rx_frames;
-                    st_.rx_bytes += static_cast<std::uint32_t>(off);
-                    st_.last_rx_us = esp_timer_get_time();
+                    ++traffic_.rx_frames;
+                    traffic_.rx_bytes += static_cast<std::uint32_t>(off);
+                    traffic_.last_rx_us = esp_timer_get_time();
                 }
+#endif
                 // This connection has now proved the peer admitted it, so its eventual
                 // death is a DROP to retry at once rather than a refusal to back off from
                 // (#1128). Set before the delivery: the router runs the app in-call here

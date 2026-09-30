@@ -168,11 +168,15 @@
  *     object's own fields. That is the invariant a host relies on when it holds its
  *     own lock across a `stats()` call — it keeps the lock order acyclic, so keep
  *     any future work under either mutex strictly local.
- *   - The counters live under their OWN mutex (`st_m_`), not the write serializer.
- *     `write_m_` is held across a transport write for up to `kWriteTimeoutMs`, so
- *     `stats()` under it would block for seconds on a stalled peer and recv delivery
- *     would queue behind slow sends. `st_m_` is only ever held for a bump or a copy,
- *     which is what makes `stats()` safe to call from a periodic task.
+ *   - No counter rides the write serializer. `write_m_` is held across a transport
+ *     write for up to `kWriteTimeoutMs`, so `stats()` under it would block for seconds
+ *     on a stalled peer and recv delivery would queue behind slow sends. The drop
+ *     counter and the connect-edge facts are relaxed atomics, touched only on a failure
+ *     or a (re)connect. The per-message TRAFFIC counters exist only with
+ *     `CONFIG_LIBTRACER_LINK_TRAFFIC_STATS` (#1663), and then live under their OWN
+ *     mutex (`st_m_`), which is only ever held for a bump or a copy. With the option
+ *     off (the default) there is no `st_m_` at all, and the success path takes no
+ *     counter lock.
  *
  * NO per-frame heap: the rx/tx buffers are allocated ONCE at construction (bounded,
  * tunable); steady-state send/recv touch neither the global heap nor a per-frame
@@ -470,12 +474,15 @@ class esp_ws_client_link_t : public transport_t {
     };
 
     /**
-     * @brief Copy out @ref stats_t under a brief hold of the counter mutex.
+     * @brief Copy out @ref stats_t: relaxed loads, plus a brief hold of the traffic
+     *        mutex when `CONFIG_LIBTRACER_LINK_TRAFFIC_STATS` is on.
      *
-     * Callable from ANY task. It takes `st_m_` only for the struct copy — no syscall, no
-     * allocation, and it NEVER calls back into the embedder, which is what lets a host
-     * hold its own lock across this call without introducing a cycle (a downstream
-     * publisher holds its own dial mutex across this call).
+     * Callable from ANY task. It takes `st_m_` (when it exists) only for the traffic copy —
+     * no syscall, no allocation, and it NEVER calls back into the embedder, which is what
+     * lets a host hold its own lock across this call without introducing a cycle (a
+     * downstream publisher holds its own dial mutex across this call). The fields are
+     * read one by one, so a snapshot is not atomic across them; none of them is used to
+     * check another.
      */
     [[nodiscard]] stats_t stats() const;
 
@@ -651,8 +658,21 @@ class esp_ws_client_link_t : public transport_t {
     std::mutex backoff_m_;
     std::condition_variable backoff_cv_; /**< @brief Signalled by the destructor and by
                                           *          @ref start_receiving. */
+#ifdef CONFIG_LIBTRACER_LINK_TRAFFIC_STATS
     /**
-     * @brief Guards the counter block below, and NOTHING else.
+     * @brief The per-message TRAFFIC half of @ref link_counters_t (#1663), kept only when
+     *        the application asked for it — see link_stats.hpp.
+     */
+    struct traffic_t {
+        std::uint32_t rx_frames = 0;  /**< @brief Messages delivered inbound. */
+        std::uint32_t rx_bytes = 0;   /**< @brief Payload bytes delivered inbound. */
+        std::uint32_t tx_frames = 0;  /**< @brief Messages written outbound. */
+        std::uint32_t tx_bytes = 0;   /**< @brief Payload bytes written outbound. */
+        std::int64_t last_rx_us = -1; /**< @brief Last delivered message; -1 = never. */
+    };
+    /**
+     * @brief Guards @ref traffic_ below, and NOTHING else. Exists only with
+     *        `CONFIG_LIBTRACER_LINK_TRAFFIC_STATS` (#1663).
      *
      * Deliberately not `write_m_`: that one is held across `esp_transport_write` for
      * up to `kWriteTimeoutMs` (4 s) on a stalled socket, so counters riding it would
@@ -663,22 +683,30 @@ class esp_ws_client_link_t : public transport_t {
      * `write_m_ -> st_m_`, never the reverse. `mutable` for the const snapshot.
      */
     mutable std::mutex st_m_;
-    /** @brief Passive traffic counters — st_m_. `rx_drops` is filled from `dropped_rx_`
-     *         at snapshot time and is never bumped here. See @ref stats. */
-    link_counters_t st_;
-    /** @brief Completed handshakes since construction — st_m_. */
-    std::uint32_t reconnects_ = 0;
+    /** @brief Per-connection traffic counters — st_m_. Reset at every handshake. */
+    traffic_t traffic_;
+#endif
+    /** @brief `esp_timer_get_time()` when the current connection came up; -1 = never.
+     *         Written by the recv thread at the handshake. A 64-bit atomic is not lock-free
+     *         on RV32, which is fine here: it is touched once per connect and once per
+     *         @ref stats, never per frame. */
+    std::atomic<std::int64_t> connected_at_us_{-1};
+    /** @brief Frames dropped toward the peer since the current connection came up. Bumped
+     *         only on a drop, from any sending task; reset at every handshake. */
+    std::atomic<std::uint32_t> tx_drops_{0};
+    /** @brief Completed handshakes since construction; recv thread writes. */
+    std::atomic<std::uint32_t> reconnects_{0};
+    /** @brief Last successful dial's handshake duration in ms; recv thread writes. */
+    std::atomic<std::uint32_t> connect_ms_{0};
 #ifdef CONFIG_LIBTRACER_WS_CLIENT_DIAL_STATS
-    /** @brief Dial attempts since construction — st_m_ (#1606). */
-    std::uint32_t dial_attempts_ = 0;
-    /** @brief Dial attempts that completed no handshake — st_m_ (#1606). */
-    std::uint32_t dial_failures_ = 0;
+    /** @brief Dial attempts since construction; recv thread writes (#1606). */
+    std::atomic<std::uint32_t> dial_attempts_{0};
+    /** @brief Dial attempts that completed no handshake; recv thread writes (#1606). */
+    std::atomic<std::uint32_t> dial_failures_{0};
     /** @brief `esp_timer_get_time()` of the last failed-dial WARN, for its rate limit; recv
      *         thread only. */
     std::int64_t last_dial_warn_us_ = 0;
 #endif
-    /** @brief Last successful dial's handshake duration in ms — st_m_. */
-    std::uint32_t connect_ms_ = 0;
     /** @brief Liveness — what @ref link_up reports, and the handles' publication flag.
      *         Set by `connect_once()`, cleared by `drop()`, by `send()`'s failed/short-write
      *         arm and by the destructor. */

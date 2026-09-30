@@ -1541,6 +1541,9 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * sending client's `tx_frames` directly comparable with this side's `rx_frames`.
      * Called BEFORE the delivery, never after — the delivery runs the app in-call and the
      * app may destroy this link (#814), after which the slot is gone.
+     *
+     * A no-op, taking no lock and reading no clock, unless
+     * `CONFIG_LIBTRACER_LINK_TRAFFIC_STATS` is on (#1663).
      */
     void note_rx_message(session_t* slot, std::size_t bytes);
 

@@ -876,9 +876,9 @@ ANCHORS = [
     ('tools/cortexm0_footprint.py:151', 'cxx_flags = ['),
     ('tools/cortexm0_footprint.py:158', '"-DLIBTRACER_NO_ATOMIC",'),
     ('tools/cortexm0_footprint.py:172', '"--specs=nano.specs",'),
-    ('core/tests/CMakeLists.txt:1920', 'add_executable(substrate_test_no_atomic'),
-    ('core/tests/CMakeLists.txt:1935', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
-    ('core/tests/CMakeLists.txt:1936', '    LIBTRACER_NO_ATOMIC'),
+    ('core/tests/CMakeLists.txt:1957', 'add_executable(substrate_test_no_atomic'),
+    ('core/tests/CMakeLists.txt:1972', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
+    ('core/tests/CMakeLists.txt:1973', '    LIBTRACER_NO_ATOMIC'),
     # The leading indent is load-bearing: the bare token also appears in the comment
     # three lines above the executable, and an anchor that matches both is not an anchor.
 
@@ -1102,7 +1102,7 @@ ANCHORS = [
      '*        count is chosen by the sending peer) and answered by DROPPING the'),
     ('core/src/transport_vertex.cpp:62',
      'if (const auto v = cfg.u32("backoff")) s.backoff_ms = *v;'),
-    ('integrations/esp-idf/libtracer/include/libtracer_esp/esp_ws_client_link.hpp:199',
+    ('integrations/esp-idf/libtracer/include/libtracer_esp/esp_ws_client_link.hpp:203',
      '#include "esp_transport.h"'),
     ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:173',
      '#include "esp_http_server.h"'),
@@ -1175,9 +1175,9 @@ ANCHORS = [
     ('core/include/libtracer/transport.hpp:506',
      '[[nodiscard]] virtual transport_drop_stats_t drop_stats() const noexcept { return {}; }'),
     # integrations/esp-idf/libtracer/httpd_ws_link.cpp
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:3241',
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:3248',
      'std::size_t httpd_ws_link_t::tx_slot_capacity() const noexcept { return tx_pool_slots_; }'),
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:3083',
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:3090',
      'void httpd_ws_link_t::send_in_call(const session_ref_t& to,'),
 ]
 

@@ -32,12 +32,30 @@
  *       accounting — #1503 step 3 gave it per-SEAM counters, which is the ADR-0079 shape;
  *       per-link attribution of core's delivery drops remains a future change.
  *
- * Threading: PLAIN fields, no atomics. Every one of them is read and written under
- * the owning link's EXISTING mutex (`esp_ws_client_link_t::write_m_`,
- * `httpd_ws_link_t::peers_m_`) — so the block costs no new lock, and the two 64-bit
- * timestamps stay coherent with the counts they belong to. `std::atomic<int64_t>`
- * would not be lock-free on RV32 anyway: it would take a hidden libatomic lock per
- * access, which is strictly worse than the mutex already being held.
+ * Two halves, one of them optional (#1663):
+ *   - The TRAFFIC half — `rx_frames`, `rx_bytes`, `tx_frames`, `tx_bytes` and
+ *     `last_rx_us` — is bumped on the SUCCESS path, once per delivered or written
+ *     message, under a lock and (on receive) with a timer read. `core/STYLE.md` has
+ *     counters bump only on failure, so this half exists only when the application
+ *     asks for it: `CONFIG_LIBTRACER_LINK_TRAFFIC_STATS`, default OFF. With it off the
+ *     five fields are ABSENT (reading one does not compile), no success path takes a
+ *     lock or reads the clock for them, and the client link carries no counter mutex.
+ *     @ref tr::net::kLinkTrafficStats reports the setting.
+ *   - The DROP half — `tx_drops`, `rx_drops` — and `connected_at_us` are always
+ *     there. The drops bump only when a frame is lost, and the server's auth deadline
+ *     is computed from `connected_at_us`, so neither is observability the application
+ *     can opt out of.
+ *
+ *   This header reads `sdkconfig.h` itself, so every translation unit that includes it
+ *   agrees on the layout.
+ *
+ * Threading: the block is a SNAPSHOT type. `httpd_ws_link_t` keeps one per session as
+ * plain fields under its existing `peers_m_`. `esp_ws_client_link_t` assembles one in
+ * `stats()`: the drop half and `connected_at_us` come from relaxed atomics that are
+ * touched only on a failure or at a (re)connect, and the traffic half, when compiled
+ * in, from plain fields under the link's own `st_m_`. The one 64-bit atomic there
+ * (`connected_at_us`) is not lock-free on RV32; it is touched once per connect and once
+ * per snapshot, never per frame.
  *
  * Units and definitions:
  *   - `rx_frames`/`rx_bytes` count DELIVERED MESSAGES and their payload bytes, not
@@ -54,21 +72,41 @@
 
 #include <cstdint>
 
+#if __has_include("sdkconfig.h")
+#include "sdkconfig.h"
+#endif
+
 namespace tr::net {
 
 /**
- * @brief One connection's passive traffic counters — see the file comment for the
- *        threading contract (owner's mutex) and the message-granularity definition.
+ * @brief Whether this image keeps the per-message TRAFFIC half of @ref link_counters_t —
+ *        the application's compile-time choice, `CONFIG_LIBTRACER_LINK_TRAFFIC_STATS`
+ *        (#1663). Off by default; the file comment says what each setting costs.
+ */
+#ifdef CONFIG_LIBTRACER_LINK_TRAFFIC_STATS
+inline constexpr bool kLinkTrafficStats = true;
+#else
+inline constexpr bool kLinkTrafficStats = false;
+#endif
+
+/**
+ * @brief One connection's passive counters — see the file comment for the two halves,
+ *        the threading contract and the message-granularity definition.
  */
 struct link_counters_t {
-    std::uint32_t rx_frames = 0; /**< @brief Messages delivered inbound. */
-    std::uint32_t rx_bytes = 0;  /**< @brief Payload bytes delivered inbound. */
-    std::uint32_t tx_frames = 0; /**< @brief Messages written outbound. */
-    std::uint32_t tx_bytes = 0;  /**< @brief Payload bytes written outbound. */
-    std::uint32_t tx_drops = 0;  /**< @brief Frames dropped toward this connection. */
-    std::uint32_t rx_drops = 0;  /**< @brief Inbound discards (oversize / reassembly). */
-    /** @brief `esp_timer_get_time()` of the last delivered message; -1 = never. */
+#ifdef CONFIG_LIBTRACER_LINK_TRAFFIC_STATS
+    std::uint32_t rx_frames = 0; /**< @brief Messages delivered inbound (traffic half). */
+    std::uint32_t rx_bytes = 0;  /**< @brief Payload bytes delivered inbound (traffic half). */
+    std::uint32_t tx_frames = 0; /**< @brief Messages written outbound (traffic half). */
+    std::uint32_t tx_bytes = 0;  /**< @brief Payload bytes written outbound (traffic half). */
+#endif
+    std::uint32_t tx_drops = 0; /**< @brief Frames dropped toward this connection. */
+    std::uint32_t rx_drops = 0; /**< @brief Inbound discards (oversize / reassembly). */
+#ifdef CONFIG_LIBTRACER_LINK_TRAFFIC_STATS
+    /** @brief `esp_timer_get_time()` of the last delivered message; -1 = never (traffic
+     *         half). */
     std::int64_t last_rx_us = -1;
+#endif
     /** @brief `esp_timer_get_time()` when this connection came up; -1 = not connected. */
     std::int64_t connected_at_us = -1;
 };
