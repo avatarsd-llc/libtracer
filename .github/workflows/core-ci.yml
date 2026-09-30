@@ -73,6 +73,37 @@
 # assume a toolchain these runners are not yet asserted to carry. The arm64 leg is a
 # different architecture and stays hosted permanently.
 #
+# ── COMPILER CACHE (#1691) ──────────────────────────────────────────────────────────
+# Every job that compiles on the self-hosted route shares ONE persistent ccache: the host
+# directory /home/github-runner/ccache (runner user, 0775) is bind-mounted at `/ccache`.
+# The mount lives in `container.options`, selected by the SAME trust guard as `runs-on`,
+# so a hosted or fork run never names a host path (a fork cannot reach it, and on the
+# hosted fallback the `-v` would just create an empty directory). The "Set build
+# parallelism" step switches ccache on only when `/ccache` exists, by exporting
+# CMAKE_{C,CXX}_COMPILER_LAUNCHER — CMake reads those from the environment, so no
+# `cmake -S` line below changes and the hosted route compiles exactly as before.
+#
+# Why it is safe to share one cache across every leg: ccache keys on the compiler's
+# full argument list plus the preprocessed source, so a leg with other flags or another
+# config override (-I fixture dirs, -DLIBTRACER_*, Release vs RelWithDebInfo) can never
+# be served another leg's object. `compiler_check=content` hashes the compiler binary
+# itself, so the gcc-13 legs and the g++-15 leg cannot collide either, whatever the
+# image's mtimes. `CCACHE_BASEDIR` is the workspace, so paths stay relocatable if a
+# runner's `_work` ever moves. Size cap 20G (LRU-evicted by ccache itself). The files it
+# writes are root-owned (the container runs as root) — every writer is a root container,
+# so that is harmless, and they live OUTSIDE the workspace the cleanup step chowns.
+# perf-local.yml / perf.yml / bench builds are untouched: they do not set the launcher.
+#
+# Each job logs its own hit rate (`CCACHE_STATSLOG`, printed by the "Compiler cache
+# statistics" step) — the cache's global counters are shared by every runner at once.
+#
+# BUILD_JOBS=4 on the self-hosted route: the slice gives ALL runners and containers 11
+# cores / 24 GB, and the three `ci-local` runners (studio-ci-1, studio-lt-7, studio-lt-8)
+# run up to 3 container jobs at once, so 3 x 4 = 12 is ~one compiler per core with a
+# little slack for link/IO stalls (6 each asked for 18, ~1.6x the slice). Memory is not
+# the binding limit — the heaviest TUs peak at ~0.55 GB RSS (graph.cpp, measured
+# RelWithDebInfo), so 3 jobs x 4 compilers stay near 7 GB, far under the 24 GB slice.
+#
 # ── TIMEOUT CEILINGS (the tree-wide policy; the fuller explanation lives here) ──────
 # Every job in this repo carries a `timeout-minutes`, and this file is where the policy
 # is written down once rather than pasted onto each job.
@@ -137,12 +168,12 @@ jobs:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ubuntu:24.04
-      # Container jobs run in Docker's own cgroup, not the runner's systemd unit, so the
-      # host-side runners.slice quota never reaches them: this cap is the ONLY thing that
-      # bounds a container job on the self-hosted host (#1637). 6 CPUs matches BUILD_JOBS,
-      # 10g the per-unit memory budget. Harmless on the hosted fallback: ubuntu-24.04
-      # runners have 4 cores / 16 GB, both under the cap.
-      options: --cpus 6 --memory 10g
+      # CPU is bounded host-side: dockerd's cgroup-parent puts every container under
+      # runners.slice (11 cores for all runners + containers together), so no per-container
+      # `--cpus` (#1691). 10g is the per-job memory budget. The trusted (self-hosted) route
+      # also mounts the persistent compiler cache — see COMPILER CACHE in the header; the
+      # guard is the `runs-on` one verbatim, so hosted and fork runs get no mount.
+      options: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
     # Measured healthy max 4.82 min across the three legs (p50 ~4.5). 20 = ~4x, with
     # extra room over a bare 3x because the image pull and the apt step below are inside
     # the measured job time and are exactly the wedge surface.
@@ -169,15 +200,28 @@ jobs:
             lkv_slot: hazard_slot_t
     name: build-test (acl_full=${{ matrix.acl_full }}, slot=${{ matrix.lkv_slot }})
     steps:
-      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
-      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
-      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
-      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
-      - name: Set build parallelism (BUILD_JOBS)
+      # Build parallelism (#1637, #1691): 4 on the self-hosted runners (11-core slice shared
+      # by up to ~3 concurrent jobs), `nproc` on hosted runners. RUNNER_ENVIRONMENT comes
+      # from the runner, so this follows the runtime `runs-on` routing. The compiler cache
+      # switches on only where `/ccache` is mounted (COMPILER CACHE in the header). POSIX
+      # sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
-          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=4; else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
           echo "BUILD_JOBS=$jobs"
+          if [ -d /ccache ]; then
+            {
+              echo "CMAKE_C_COMPILER_LAUNCHER=ccache"
+              echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache"
+              echo "CCACHE_DIR=/ccache"
+              echo "CCACHE_MAXSIZE=20G"
+              echo "CCACHE_COMPILERCHECK=content"
+              echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+              echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-stats.log"
+            } >> "$GITHUB_ENV"
+            echo "ccache: ON (/ccache)"
+          fi
       # Runs as root INSIDE the container — never `sudo`, which the self-hosted runner
       # user does not have. `git` + `ca-certificates` come first because checkout falls
       # back to a REST tarball without them.
@@ -188,7 +232,7 @@ jobs:
         run: |
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-            build-essential cmake git ca-certificates
+            build-essential cmake ccache git ca-certificates
       - uses: actions/checkout@v4
         with:
           # NOT tidiness. checkout's POST step calls `removeAuth()` unconditionally,
@@ -205,6 +249,11 @@ jobs:
           cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo -DLIBTRACER_ACL_FULL=${{ matrix.acl_full }} -DLIBTRACER_LKV_SLOT=${{ matrix.lkv_slot }}
           cmake --build core/build --parallel "$BUILD_JOBS"
           ctest --test-dir core/build --output-on-failure
+      - name: Compiler cache statistics (this job)
+        # Hit rate of THIS job only: the stats log is per-job, the cache's own counters
+        # are shared by every runner. Absent on the hosted route (no `/ccache`).
+        if: always() && env.CCACHE_DIR != ''
+        run: ccache --show-log-stats -v || true
       - name: Restore workspace ownership for the host runner
         # Hands the container's root-owned tree back to the host runner user. WHY, and
         # why it is duplicated inline rather than factored into a composite action: the
@@ -225,25 +274,38 @@ jobs:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ubuntu:24.04
-      # Container jobs run in Docker's own cgroup, not the runner's systemd unit, so the
-      # host-side runners.slice quota never reaches them: this cap is the ONLY thing that
-      # bounds a container job on the self-hosted host (#1637). 6 CPUs matches BUILD_JOBS,
-      # 10g the per-unit memory budget. Harmless on the hosted fallback: ubuntu-24.04
-      # runners have 4 cores / 16 GB, both under the cap.
-      options: --cpus 6 --memory 10g
+      # CPU is bounded host-side: dockerd's cgroup-parent puts every container under
+      # runners.slice (11 cores for all runners + containers together), so no per-container
+      # `--cpus` (#1691). 10g is the per-job memory budget. The trusted (self-hosted) route
+      # also mounts the persistent compiler cache — see COMPILER CACHE in the header; the
+      # guard is the `runs-on` one verbatim, so hosted and fork runs get no mount.
+      options: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
     # Measured healthy max 2.97 min. Held at the build-test group's 20 rather than
     # tightened: same container + apt step, same wedge surface.
     timeout-minutes: 20
     steps:
-      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
-      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
-      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
-      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
-      - name: Set build parallelism (BUILD_JOBS)
+      # Build parallelism (#1637, #1691): 4 on the self-hosted runners (11-core slice shared
+      # by up to ~3 concurrent jobs), `nproc` on hosted runners. RUNNER_ENVIRONMENT comes
+      # from the runner, so this follows the runtime `runs-on` routing. The compiler cache
+      # switches on only where `/ccache` is mounted (COMPILER CACHE in the header). POSIX
+      # sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
-          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=4; else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
           echo "BUILD_JOBS=$jobs"
+          if [ -d /ccache ]; then
+            {
+              echo "CMAKE_C_COMPILER_LAUNCHER=ccache"
+              echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache"
+              echo "CCACHE_DIR=/ccache"
+              echo "CCACHE_MAXSIZE=20G"
+              echo "CCACHE_COMPILERCHECK=content"
+              echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+              echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-stats.log"
+            } >> "$GITHUB_ENV"
+            echo "ccache: ON (/ccache)"
+          fi
       - name: Toolchain (container has no preinstalled tool set)
         # The wedge surface. Measured over 90 runs of this step across the jobs below:
         # p50 0.67 min, max 1.32. 8 = ~6x the worst healthy install.
@@ -251,7 +313,7 @@ jobs:
         run: |
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-            build-essential cmake git ca-certificates
+            build-essential cmake ccache git ca-certificates
       - uses: actions/checkout@v4
         with:
           # See the WORKSPACE OWNERSHIP header: without this, checkout's post step
@@ -265,6 +327,11 @@ jobs:
             -DLIBTRACER_TRANSPORT_WS=OFF -DLIBTRACER_TRANSPORT_CAN=OFF
           cmake --build core/build-minimal --parallel "$BUILD_JOBS"
           ctest --test-dir core/build-minimal --output-on-failure
+      - name: Compiler cache statistics (this job)
+        # Hit rate of THIS job only: the stats log is per-job, the cache's own counters
+        # are shared by every runner. Absent on the hosted route (no `/ccache`).
+        if: always() && env.CCACHE_DIR != ''
+        run: ccache --show-log-stats -v || true
       - name: Restore workspace ownership for the host runner
         # Hands the container's root-owned tree back to the host runner user. WHY, and
         # why it is duplicated inline rather than factored into a composite action: the
@@ -287,24 +354,37 @@ jobs:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ubuntu:24.04
-      # Container jobs run in Docker's own cgroup, not the runner's systemd unit, so the
-      # host-side runners.slice quota never reaches them: this cap is the ONLY thing that
-      # bounds a container job on the self-hosted host (#1637). 6 CPUs matches BUILD_JOBS,
-      # 10g the per-unit memory budget. Harmless on the hosted fallback: ubuntu-24.04
-      # runners have 4 cores / 16 GB, both under the cap.
-      options: --cpus 6 --memory 10g
+      # CPU is bounded host-side: dockerd's cgroup-parent puts every container under
+      # runners.slice (11 cores for all runners + containers together), so no per-container
+      # `--cpus` (#1691). 10g is the per-job memory budget. The trusted (self-hosted) route
+      # also mounts the persistent compiler cache — see COMPILER CACHE in the header; the
+      # guard is the `runs-on` one verbatim, so hosted and fork runs get no mount.
+      options: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
     # Measured healthy max 4.88 min. 20 = ~4x; same group, same container apt step.
     timeout-minutes: 20
     steps:
-      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
-      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
-      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
-      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
-      - name: Set build parallelism (BUILD_JOBS)
+      # Build parallelism (#1637, #1691): 4 on the self-hosted runners (11-core slice shared
+      # by up to ~3 concurrent jobs), `nproc` on hosted runners. RUNNER_ENVIRONMENT comes
+      # from the runner, so this follows the runtime `runs-on` routing. The compiler cache
+      # switches on only where `/ccache` is mounted (COMPILER CACHE in the header). POSIX
+      # sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
-          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=4; else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
           echo "BUILD_JOBS=$jobs"
+          if [ -d /ccache ]; then
+            {
+              echo "CMAKE_C_COMPILER_LAUNCHER=ccache"
+              echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache"
+              echo "CCACHE_DIR=/ccache"
+              echo "CCACHE_MAXSIZE=20G"
+              echo "CCACHE_COMPILERCHECK=content"
+              echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+              echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-stats.log"
+            } >> "$GITHUB_ENV"
+            echo "ccache: ON (/ccache)"
+          fi
       - name: Toolchain (container has no preinstalled tool set)
         # The wedge surface. Measured over 90 runs of this step across the jobs below:
         # p50 0.67 min, max 1.32. 8 = ~6x the worst healthy install.
@@ -312,7 +392,7 @@ jobs:
         run: |
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-            build-essential cmake git ca-certificates
+            build-essential cmake ccache git ca-certificates
       - uses: actions/checkout@v4
         with:
           # See the WORKSPACE OWNERSHIP header: without this, checkout's post step
@@ -343,6 +423,11 @@ jobs:
             -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS="-I$PWD/reclaim-strict"
           cmake --build core/build-strict --parallel "$BUILD_JOBS"
           ctest --test-dir core/build-strict --output-on-failure
+      - name: Compiler cache statistics (this job)
+        # Hit rate of THIS job only: the stats log is per-job, the cache's own counters
+        # are shared by every runner. Absent on the hosted route (no `/ccache`).
+        if: always() && env.CCACHE_DIR != ''
+        run: ccache --show-log-stats -v || true
       - name: Restore workspace ownership for the host runner
         # Hands the container's root-owned tree back to the host runner user. WHY, and
         # why it is duplicated inline rather than factored into a composite action: the
@@ -374,30 +459,43 @@ jobs:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ubuntu:24.04
-      # Container jobs run in Docker's own cgroup, not the runner's systemd unit, so the
-      # host-side runners.slice quota never reaches them: this cap is the ONLY thing that
-      # bounds a container job on the self-hosted host (#1637). 6 CPUs matches BUILD_JOBS,
-      # 10g the per-unit memory budget. Harmless on the hosted fallback: ubuntu-24.04
-      # runners have 4 cores / 16 GB, both under the cap.
-      options: --cpus 6 --memory 10g
+      # CPU is bounded host-side: dockerd's cgroup-parent puts every container under
+      # runners.slice (11 cores for all runners + containers together), so no per-container
+      # `--cpus` (#1691). 10g is the per-job memory budget. The trusted (self-hosted) route
+      # also mounts the persistent compiler cache — see COMPILER CACHE in the header; the
+      # guard is the `runs-on` one verbatim, so hosted and fork runs get no mount.
+      options: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
     # Same container + apt step as the group above; held at its 20-minute wedge bound.
     timeout-minutes: 20
     steps:
-      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
-      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
-      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
-      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
-      - name: Set build parallelism (BUILD_JOBS)
+      # Build parallelism (#1637, #1691): 4 on the self-hosted runners (11-core slice shared
+      # by up to ~3 concurrent jobs), `nproc` on hosted runners. RUNNER_ENVIRONMENT comes
+      # from the runner, so this follows the runtime `runs-on` routing. The compiler cache
+      # switches on only where `/ccache` is mounted (COMPILER CACHE in the header). POSIX
+      # sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
-          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=4; else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
           echo "BUILD_JOBS=$jobs"
+          if [ -d /ccache ]; then
+            {
+              echo "CMAKE_C_COMPILER_LAUNCHER=ccache"
+              echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache"
+              echo "CCACHE_DIR=/ccache"
+              echo "CCACHE_MAXSIZE=20G"
+              echo "CCACHE_COMPILERCHECK=content"
+              echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+              echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-stats.log"
+            } >> "$GITHUB_ENV"
+            echo "ccache: ON (/ccache)"
+          fi
       - name: Toolchain (container has no preinstalled tool set)
         timeout-minutes: 8
         run: |
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-            build-essential cmake git ca-certificates
+            build-essential cmake ccache git ca-certificates
       - uses: actions/checkout@v4
         with:
           # See the WORKSPACE OWNERSHIP header: without this, checkout's post step
@@ -438,6 +536,11 @@ jobs:
         run: |
           ctest --test-dir core/build-bus-closed --output-on-failure \
             -R '^(edge_eviction|send_stall|session_anchor|tcp|ws_transport)$'
+      - name: Compiler cache statistics (this job)
+        # Hit rate of THIS job only: the stats log is per-job, the cache's own counters
+        # are shared by every runner. Absent on the hosted route (no `/ccache`).
+        if: always() && env.CCACHE_DIR != ''
+        run: ccache --show-log-stats -v || true
       - name: Restore workspace ownership for the host runner
         # Hands the container's root-owned tree back to the host runner user. WHY, and
         # why it is duplicated inline rather than factored into a composite action: the
@@ -456,30 +559,43 @@ jobs:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ubuntu:24.04
-      # Container jobs run in Docker's own cgroup, not the runner's systemd unit, so the
-      # host-side runners.slice quota never reaches them: this cap is the ONLY thing that
-      # bounds a container job on the self-hosted host (#1637). 6 CPUs matches BUILD_JOBS,
-      # 10g the per-unit memory budget. Harmless on the hosted fallback: ubuntu-24.04
-      # runners have 4 cores / 16 GB, both under the cap.
-      options: --cpus 6 --memory 10g
+      # CPU is bounded host-side: dockerd's cgroup-parent puts every container under
+      # runners.slice (11 cores for all runners + containers together), so no per-container
+      # `--cpus` (#1691). 10g is the per-job memory budget. The trusted (self-hosted) route
+      # also mounts the persistent compiler cache — see COMPILER CACHE in the header; the
+      # guard is the `runs-on` one verbatim, so hosted and fork runs get no mount.
+      options: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
     # Same container + apt step as the group above; held at its 20-minute wedge bound.
     timeout-minutes: 20
     steps:
-      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
-      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
-      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
-      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
-      - name: Set build parallelism (BUILD_JOBS)
+      # Build parallelism (#1637, #1691): 4 on the self-hosted runners (11-core slice shared
+      # by up to ~3 concurrent jobs), `nproc` on hosted runners. RUNNER_ENVIRONMENT comes
+      # from the runner, so this follows the runtime `runs-on` routing. The compiler cache
+      # switches on only where `/ccache` is mounted (COMPILER CACHE in the header). POSIX
+      # sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
-          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=4; else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
           echo "BUILD_JOBS=$jobs"
+          if [ -d /ccache ]; then
+            {
+              echo "CMAKE_C_COMPILER_LAUNCHER=ccache"
+              echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache"
+              echo "CCACHE_DIR=/ccache"
+              echo "CCACHE_MAXSIZE=20G"
+              echo "CCACHE_COMPILERCHECK=content"
+              echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+              echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-stats.log"
+            } >> "$GITHUB_ENV"
+            echo "ccache: ON (/ccache)"
+          fi
       - name: Toolchain (container has no preinstalled tool set)
         timeout-minutes: 8
         run: |
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-            build-essential cmake git ca-certificates
+            build-essential cmake ccache git ca-certificates
       - uses: actions/checkout@v4
         with:
           # See the WORKSPACE OWNERSHIP header: without this, checkout's post step
@@ -528,6 +644,11 @@ jobs:
             exit 1
           fi
           echo "ok: no self_heal_link_t code in libtracer.a"
+      - name: Compiler cache statistics (this job)
+        # Hit rate of THIS job only: the stats log is per-job, the cache's own counters
+        # are shared by every runner. Absent on the hosted route (no `/ccache`).
+        if: always() && env.CCACHE_DIR != ''
+        run: ccache --show-log-stats -v || true
       - name: Restore workspace ownership for the host runner
         # Hands the container's root-owned tree back to the host runner user. WHY, and
         # why it is duplicated inline rather than factored into a composite action: the
@@ -541,27 +662,40 @@ jobs:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ubuntu:24.04
-      # Container jobs run in Docker's own cgroup, not the runner's systemd unit, so the
-      # host-side runners.slice quota never reaches them: this cap is the ONLY thing that
-      # bounds a container job on the self-hosted host (#1637). 6 CPUs matches BUILD_JOBS,
-      # 10g the per-unit memory budget. Harmless on the hosted fallback: ubuntu-24.04
-      # runners have 4 cores / 16 GB, both under the cap.
-      options: --cpus 6 --memory 10g
+      # CPU is bounded host-side: dockerd's cgroup-parent puts every container under
+      # runners.slice (11 cores for all runners + containers together), so no per-container
+      # `--cpus` (#1691). 10g is the per-job memory budget. The trusted (self-hosted) route
+      # also mounts the persistent compiler cache — see COMPILER CACHE in the header; the
+      # guard is the `runs-on` one verbatim, so hosted and fork runs get no mount.
+      options: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
     steps:
-      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
-      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
-      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
-      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
-      - name: Set build parallelism (BUILD_JOBS)
+      # Build parallelism (#1637, #1691): 4 on the self-hosted runners (11-core slice shared
+      # by up to ~3 concurrent jobs), `nproc` on hosted runners. RUNNER_ENVIRONMENT comes
+      # from the runner, so this follows the runtime `runs-on` routing. The compiler cache
+      # switches on only where `/ccache` is mounted (COMPILER CACHE in the header). POSIX
+      # sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
-          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=4; else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
           echo "BUILD_JOBS=$jobs"
+          if [ -d /ccache ]; then
+            {
+              echo "CMAKE_C_COMPILER_LAUNCHER=ccache"
+              echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache"
+              echo "CCACHE_DIR=/ccache"
+              echo "CCACHE_MAXSIZE=20G"
+              echo "CCACHE_COMPILERCHECK=content"
+              echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+              echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-stats.log"
+            } >> "$GITHUB_ENV"
+            echo "ccache: ON (/ccache)"
+          fi
       - name: Toolchain (container has no preinstalled tool set)
         run: |
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-            build-essential cmake git ca-certificates
+            build-essential cmake ccache git ca-certificates
       - uses: actions/checkout@v4
         with:
           # See the WORKSPACE OWNERSHIP header: without this, checkout's post step
@@ -592,6 +726,11 @@ jobs:
             -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS="-I$PWD/reclaim-strict"
           cmake --build core/build-qsbr --parallel "$BUILD_JOBS"
           ctest --test-dir core/build-qsbr --output-on-failure
+      - name: Compiler cache statistics (this job)
+        # Hit rate of THIS job only: the stats log is per-job, the cache's own counters
+        # are shared by every runner. Absent on the hosted route (no `/ccache`).
+        if: always() && env.CCACHE_DIR != ''
+        run: ccache --show-log-stats -v || true
       - name: Restore workspace ownership for the host runner
         # Hands the container's root-owned tree back to the host runner user. WHY, and
         # why it is duplicated inline rather than factored into a composite action: the
@@ -620,15 +759,28 @@ jobs:
     # number is kept equal to the rest of the build-test group so one review covers them.
     timeout-minutes: 20
     steps:
-      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
-      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
-      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
-      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
-      - name: Set build parallelism (BUILD_JOBS)
+      # Build parallelism (#1637, #1691): 4 on the self-hosted runners (11-core slice shared
+      # by up to ~3 concurrent jobs), `nproc` on hosted runners. RUNNER_ENVIRONMENT comes
+      # from the runner, so this follows the runtime `runs-on` routing. The compiler cache
+      # switches on only where `/ccache` is mounted (COMPILER CACHE in the header). POSIX
+      # sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
-          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=4; else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
           echo "BUILD_JOBS=$jobs"
+          if [ -d /ccache ]; then
+            {
+              echo "CMAKE_C_COMPILER_LAUNCHER=ccache"
+              echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache"
+              echo "CCACHE_DIR=/ccache"
+              echo "CCACHE_MAXSIZE=20G"
+              echo "CCACHE_COMPILERCHECK=content"
+              echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+              echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-stats.log"
+            } >> "$GITHUB_ENV"
+            echo "ccache: ON (/ccache)"
+          fi
       - uses: actions/checkout@v4
       - name: Configure + build (C++23, aarch64) + ctest
         run: |
@@ -645,26 +797,39 @@ jobs:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ubuntu:24.04
-      # Container jobs run in Docker's own cgroup, not the runner's systemd unit, so the
-      # host-side runners.slice quota never reaches them: this cap is the ONLY thing that
-      # bounds a container job on the self-hosted host (#1637). 6 CPUs matches BUILD_JOBS,
-      # 10g the per-unit memory budget. Harmless on the hosted fallback: ubuntu-24.04
-      # runners have 4 cores / 16 GB, both under the cap.
-      options: --cpus 6 --memory 10g
+      # CPU is bounded host-side: dockerd's cgroup-parent puts every container under
+      # runners.slice (11 cores for all runners + containers together), so no per-container
+      # `--cpus` (#1691). 10g is the per-job memory budget. The trusted (self-hosted) route
+      # also mounts the persistent compiler cache — see COMPILER CACHE in the header; the
+      # guard is the `runs-on` one verbatim, so hosted and fork runs get no mount.
+      options: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
     # Measured healthy max 4.68 min (5.17 on the incident day) — the worst of the
     # build-test group, because it adds an `add-apt-repository` PPA round-trip on top of
     # the container apt step. 20 = ~3.9x.
     timeout-minutes: 20
     steps:
-      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
-      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
-      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
-      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
-      - name: Set build parallelism (BUILD_JOBS)
+      # Build parallelism (#1637, #1691): 4 on the self-hosted runners (11-core slice shared
+      # by up to ~3 concurrent jobs), `nproc` on hosted runners. RUNNER_ENVIRONMENT comes
+      # from the runner, so this follows the runtime `runs-on` routing. The compiler cache
+      # switches on only where `/ccache` is mounted (COMPILER CACHE in the header). POSIX
+      # sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
-          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=4; else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
           echo "BUILD_JOBS=$jobs"
+          if [ -d /ccache ]; then
+            {
+              echo "CMAKE_C_COMPILER_LAUNCHER=ccache"
+              echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache"
+              echo "CCACHE_DIR=/ccache"
+              echo "CCACHE_MAXSIZE=20G"
+              echo "CCACHE_COMPILERCHECK=content"
+              echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+              echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-stats.log"
+            } >> "$GITHUB_ENV"
+            echo "ccache: ON (/ccache)"
+          fi
       # Same PPA as before, minus `sudo` (root in the container) plus
       # software-properties-common, which the hosted image preinstalls and a bare
       # ubuntu:24.04 does not. Same noble base, so apt resolves g++-15 identically.
@@ -674,7 +839,7 @@ jobs:
         run: |
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-            build-essential cmake git ca-certificates software-properties-common
+            build-essential cmake ccache git ca-certificates software-properties-common
           add-apt-repository -y ppa:ubuntu-toolchain-r/test
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends g++-15 gcc-15
@@ -692,6 +857,11 @@ jobs:
             -DCMAKE_C_COMPILER=gcc-15 -DCMAKE_CXX_COMPILER=g++-15
           cmake --build core/build-gcc15 --parallel "$BUILD_JOBS"
           ctest --test-dir core/build-gcc15 --output-on-failure
+      - name: Compiler cache statistics (this job)
+        # Hit rate of THIS job only: the stats log is per-job, the cache's own counters
+        # are shared by every runner. Absent on the hosted route (no `/ccache`).
+        if: always() && env.CCACHE_DIR != ''
+        run: ccache --show-log-stats -v || true
       - name: Restore workspace ownership for the host runner
         # Hands the container's root-owned tree back to the host runner user. WHY, and
         # why it is duplicated inline rather than factored into a composite action: the
@@ -721,15 +891,28 @@ jobs:
         lkv_slot: [single_writer_slot_t, hazard_slot_t]
     name: sanitizers (slot=${{ matrix.lkv_slot }})
     steps:
-      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
-      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
-      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
-      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
-      - name: Set build parallelism (BUILD_JOBS)
+      # Build parallelism (#1637, #1691): 4 on the self-hosted runners (11-core slice shared
+      # by up to ~3 concurrent jobs), `nproc` on hosted runners. RUNNER_ENVIRONMENT comes
+      # from the runner, so this follows the runtime `runs-on` routing. The compiler cache
+      # switches on only where `/ccache` is mounted (COMPILER CACHE in the header). POSIX
+      # sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
-          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=4; else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
           echo "BUILD_JOBS=$jobs"
+          if [ -d /ccache ]; then
+            {
+              echo "CMAKE_C_COMPILER_LAUNCHER=ccache"
+              echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache"
+              echo "CCACHE_DIR=/ccache"
+              echo "CCACHE_MAXSIZE=20G"
+              echo "CCACHE_COMPILERCHECK=content"
+              echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+              echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-stats.log"
+            } >> "$GITHUB_ENV"
+            echo "ccache: ON (/ccache)"
+          fi
       - uses: actions/checkout@v4
       - name: ASan + UBSan build + ctest
         run: |
@@ -753,15 +936,28 @@ jobs:
         lkv_slot: [single_writer_slot_t, hazard_slot_t]
     name: tsan (slot=${{ matrix.lkv_slot }})
     steps:
-      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
-      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
-      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
-      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
-      - name: Set build parallelism (BUILD_JOBS)
+      # Build parallelism (#1637, #1691): 4 on the self-hosted runners (11-core slice shared
+      # by up to ~3 concurrent jobs), `nproc` on hosted runners. RUNNER_ENVIRONMENT comes
+      # from the runner, so this follows the runtime `runs-on` routing. The compiler cache
+      # switches on only where `/ccache` is mounted (COMPILER CACHE in the header). POSIX
+      # sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
-          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=4; else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
           echo "BUILD_JOBS=$jobs"
+          if [ -d /ccache ]; then
+            {
+              echo "CMAKE_C_COMPILER_LAUNCHER=ccache"
+              echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache"
+              echo "CCACHE_DIR=/ccache"
+              echo "CCACHE_MAXSIZE=20G"
+              echo "CCACHE_COMPILERCHECK=content"
+              echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+              echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-stats.log"
+            } >> "$GITHUB_ENV"
+            echo "ccache: ON (/ccache)"
+          fi
       - uses: actions/checkout@v4
       - name: ThreadSanitizer build + ctest (graph concurrency)
         run: |
@@ -783,15 +979,28 @@ jobs:
         lkv_slot: [single_writer_slot_t, hazard_slot_t]
     name: tsan qsbr (slot=${{ matrix.lkv_slot }})
     steps:
-      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
-      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
-      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
-      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
-      - name: Set build parallelism (BUILD_JOBS)
+      # Build parallelism (#1637, #1691): 4 on the self-hosted runners (11-core slice shared
+      # by up to ~3 concurrent jobs), `nproc` on hosted runners. RUNNER_ENVIRONMENT comes
+      # from the runner, so this follows the runtime `runs-on` routing. The compiler cache
+      # switches on only where `/ccache` is mounted (COMPILER CACHE in the header). POSIX
+      # sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
-          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=4; else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
           echo "BUILD_JOBS=$jobs"
+          if [ -d /ccache ]; then
+            {
+              echo "CMAKE_C_COMPILER_LAUNCHER=ccache"
+              echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache"
+              echo "CCACHE_DIR=/ccache"
+              echo "CCACHE_MAXSIZE=20G"
+              echo "CCACHE_COMPILERCHECK=content"
+              echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+              echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-stats.log"
+            } >> "$GITHUB_ENV"
+            echo "ccache: ON (/ccache)"
+          fi
       - uses: actions/checkout@v4
       - name: ThreadSanitizer build + ctest (reclaim_qsbr grace period)
         run: |
@@ -830,26 +1039,39 @@ jobs:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ubuntu:24.04
-      # Container jobs run in Docker's own cgroup, not the runner's systemd unit, so the
-      # host-side runners.slice quota never reaches them: this cap is the ONLY thing that
-      # bounds a container job on the self-hosted host (#1637). 6 CPUs matches BUILD_JOBS,
-      # 10g the per-unit memory budget. Harmless on the hosted fallback: ubuntu-24.04
-      # runners have 4 cores / 16 GB, both under the cap.
-      options: --cpus 6 --memory 10g
+      # CPU is bounded host-side: dockerd's cgroup-parent puts every container under
+      # runners.slice (11 cores for all runners + containers together), so no per-container
+      # `--cpus` (#1691). 10g is the per-job memory budget. The trusted (self-hosted) route
+      # also mounts the persistent compiler cache — see COMPILER CACHE in the header; the
+      # guard is the `runs-on` one verbatim, so hosted and fork runs get no mount.
+      options: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
     # Measured max 1.78 min (p50 ~1.1). Short-job floor of 15 rather than 3x (~5 min):
     # the entire risk here is the container apt step, so the ceiling answers "how long is
     # it acceptable to be wedged", not "how long does the work take".
     timeout-minutes: 15
     steps:
-      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
-      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
-      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
-      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
-      - name: Set build parallelism (BUILD_JOBS)
+      # Build parallelism (#1637, #1691): 4 on the self-hosted runners (11-core slice shared
+      # by up to ~3 concurrent jobs), `nproc` on hosted runners. RUNNER_ENVIRONMENT comes
+      # from the runner, so this follows the runtime `runs-on` routing. The compiler cache
+      # switches on only where `/ccache` is mounted (COMPILER CACHE in the header). POSIX
+      # sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
-          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=4; else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
           echo "BUILD_JOBS=$jobs"
+          if [ -d /ccache ]; then
+            {
+              echo "CMAKE_C_COMPILER_LAUNCHER=ccache"
+              echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache"
+              echo "CCACHE_DIR=/ccache"
+              echo "CCACHE_MAXSIZE=20G"
+              echo "CCACHE_COMPILERCHECK=content"
+              echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+              echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-stats.log"
+            } >> "$GITHUB_ENV"
+            echo "ccache: ON (/ccache)"
+          fi
       - name: Toolchain (container has no preinstalled tool set)
         # The wedge surface. Measured over 90 runs of this step across the jobs below:
         # p50 0.67 min, max 1.32. 8 = ~6x the worst healthy install.
@@ -857,7 +1079,7 @@ jobs:
         run: |
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-            build-essential cmake git ca-certificates
+            build-essential cmake ccache git ca-certificates
       - uses: actions/checkout@v4
         with:
           # See the WORKSPACE OWNERSHIP header: without this, checkout's post step
@@ -874,6 +1096,11 @@ jobs:
             -DCMAKE_PREFIX_PATH="${RUNNER_TEMP}/prefix"
           cmake --build "${RUNNER_TEMP}/consumer" --parallel "$BUILD_JOBS"
           "${RUNNER_TEMP}/consumer/app"
+      - name: Compiler cache statistics (this job)
+        # Hit rate of THIS job only: the stats log is per-job, the cache's own counters
+        # are shared by every runner. Absent on the hosted route (no `/ccache`).
+        if: always() && env.CCACHE_DIR != ''
+        run: ccache --show-log-stats -v || true
       - name: Restore workspace ownership for the host runner
         # Hands the container's root-owned tree back to the host runner user. WHY, and
         # why it is duplicated inline rather than factored into a composite action: the
@@ -895,25 +1122,38 @@ jobs:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ubuntu:24.04
-      # Container jobs run in Docker's own cgroup, not the runner's systemd unit, so the
-      # host-side runners.slice quota never reaches them: this cap is the ONLY thing that
-      # bounds a container job on the self-hosted host (#1637). 6 CPUs matches BUILD_JOBS,
-      # 10g the per-unit memory budget. Harmless on the hosted fallback: ubuntu-24.04
-      # runners have 4 cores / 16 GB, both under the cap.
-      options: --cpus 6 --memory 10g
+      # CPU is bounded host-side: dockerd's cgroup-parent puts every container under
+      # runners.slice (11 cores for all runners + containers together), so no per-container
+      # `--cpus` (#1691). 10g is the per-job memory budget. The trusted (self-hosted) route
+      # also mounts the persistent compiler cache — see COMPILER CACHE in the header; the
+      # guard is the `runs-on` one verbatim, so hosted and fork runs get no mount.
+      options: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
     # Measured max 2.10 min (p50 ~1.3) — the longest of the short container jobs.
     # Short-job floor of 15; see install-consume for why it is not 3x.
     timeout-minutes: 15
     steps:
-      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
-      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
-      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
-      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
-      - name: Set build parallelism (BUILD_JOBS)
+      # Build parallelism (#1637, #1691): 4 on the self-hosted runners (11-core slice shared
+      # by up to ~3 concurrent jobs), `nproc` on hosted runners. RUNNER_ENVIRONMENT comes
+      # from the runner, so this follows the runtime `runs-on` routing. The compiler cache
+      # switches on only where `/ccache` is mounted (COMPILER CACHE in the header). POSIX
+      # sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
-          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=4; else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
           echo "BUILD_JOBS=$jobs"
+          if [ -d /ccache ]; then
+            {
+              echo "CMAKE_C_COMPILER_LAUNCHER=ccache"
+              echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache"
+              echo "CCACHE_DIR=/ccache"
+              echo "CCACHE_MAXSIZE=20G"
+              echo "CCACHE_COMPILERCHECK=content"
+              echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+              echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-stats.log"
+            } >> "$GITHUB_ENV"
+            echo "ccache: ON (/ccache)"
+          fi
       - name: Toolchain (container has no preinstalled tool set)
         # The wedge surface. Measured over 90 runs of this step across the jobs below:
         # p50 0.67 min, max 1.32. 8 = ~6x the worst healthy install.
@@ -921,7 +1161,7 @@ jobs:
         run: |
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-            build-essential cmake git ca-certificates
+            build-essential cmake ccache git ca-certificates
       - uses: actions/checkout@v4
         with:
           # See the WORKSPACE OWNERSHIP header: without this, checkout's post step
@@ -931,6 +1171,11 @@ jobs:
         run: |
           cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
           cmake --build bench/build --parallel "$BUILD_JOBS"
+      - name: Compiler cache statistics (this job)
+        # Hit rate of THIS job only: the stats log is per-job, the cache's own counters
+        # are shared by every runner. Absent on the hosted route (no `/ccache`).
+        if: always() && env.CCACHE_DIR != ''
+        run: ccache --show-log-stats -v || true
       - name: Restore workspace ownership for the host runner
         # Hands the container's root-owned tree back to the host runner user. WHY, and
         # why it is duplicated inline rather than factored into a composite action: the
@@ -959,31 +1204,44 @@ jobs:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ubuntu:24.04
-      # Container jobs run in Docker's own cgroup, not the runner's systemd unit, so the
-      # host-side runners.slice quota never reaches them: this cap is the ONLY thing that
-      # bounds a container job on the self-hosted host (#1637). 6 CPUs matches BUILD_JOBS,
-      # 10g the per-unit memory budget. Harmless on the hosted fallback: ubuntu-24.04
-      # runners have 4 cores / 16 GB, both under the cap.
-      options: --cpus 6 --memory 10g
+      # CPU is bounded host-side: dockerd's cgroup-parent puts every container under
+      # runners.slice (11 cores for all runners + containers together), so no per-container
+      # `--cpus` (#1691). 10g is the per-job memory budget. The trusted (self-hosted) route
+      # also mounts the persistent compiler cache — see COMPILER CACHE in the header; the
+      # guard is the `runs-on` one verbatim, so hosted and fork runs get no mount.
+      options: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
     # One bench target plus libtracer, then two sub-second runs. Short-job floor of 15.
     timeout-minutes: 15
     steps:
-      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
-      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
-      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
-      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
-      - name: Set build parallelism (BUILD_JOBS)
+      # Build parallelism (#1637, #1691): 4 on the self-hosted runners (11-core slice shared
+      # by up to ~3 concurrent jobs), `nproc` on hosted runners. RUNNER_ENVIRONMENT comes
+      # from the runner, so this follows the runtime `runs-on` routing. The compiler cache
+      # switches on only where `/ccache` is mounted (COMPILER CACHE in the header). POSIX
+      # sh on purpose: `container:` jobs may resolve the shell to dash.
+      - name: Set build parallelism (BUILD_JOBS) + compiler cache
         run: |
-          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=4; else jobs="$(nproc)"; fi
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
           echo "BUILD_JOBS=$jobs"
+          if [ -d /ccache ]; then
+            {
+              echo "CMAKE_C_COMPILER_LAUNCHER=ccache"
+              echo "CMAKE_CXX_COMPILER_LAUNCHER=ccache"
+              echo "CCACHE_DIR=/ccache"
+              echo "CCACHE_MAXSIZE=20G"
+              echo "CCACHE_COMPILERCHECK=content"
+              echo "CCACHE_BASEDIR=$GITHUB_WORKSPACE"
+              echo "CCACHE_STATSLOG=$RUNNER_TEMP/ccache-stats.log"
+            } >> "$GITHUB_ENV"
+            echo "ccache: ON (/ccache)"
+          fi
       - name: Toolchain (container has no preinstalled tool set)
         # Same step and same measured distribution as bench-compile's (p50 0.67, max 1.32).
         timeout-minutes: 8
         run: |
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-            build-essential cmake git ca-certificates
+            build-essential cmake ccache git ca-certificates
       - uses: actions/checkout@v4
         with:
           # See the WORKSPACE OWNERSHIP header: without this, checkout's post step
@@ -1006,6 +1264,11 @@ jobs:
       # truncates the name — which it did, on the first cut.
       - name: "Allocation escape gate (guard) — #848"
         run: ./bench/build-census/bench_failable_census guard
+      - name: Compiler cache statistics (this job)
+        # Hit rate of THIS job only: the stats log is per-job, the cache's own counters
+        # are shared by every runner. Absent on the hosted route (no `/ccache`).
+        if: always() && env.CCACHE_DIR != ''
+        run: ccache --show-log-stats -v || true
       - name: Restore workspace ownership for the host runner
         # Hands the container's root-owned tree back to the host runner user. WHY, and
         # why it is duplicated inline rather than factored into a composite action: the
@@ -1032,12 +1295,11 @@ jobs:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ubuntu:24.04
-      # Container jobs run in Docker's own cgroup, not the runner's systemd unit, so the
-      # host-side runners.slice quota never reaches them: this cap is the ONLY thing that
-      # bounds a container job on the self-hosted host (#1637). 6 CPUs matches BUILD_JOBS,
-      # 10g the per-unit memory budget. Harmless on the hosted fallback: ubuntu-24.04
-      # runners have 4 cores / 16 GB, both under the cap.
-      options: --cpus 6 --memory 10g
+      # CPU is bounded host-side: dockerd's cgroup-parent puts every container under
+      # runners.slice (11 cores for all runners + containers together), so no per-container
+      # `--cpus` (#1691). 10g is the per-job memory budget; harmless on the hosted fallback
+      # (ubuntu-24.04 runners have 16 GB).
+      options: --memory 10g
     # Measured max 1.80 min (p50 ~1.0). Short-job floor of 15 (has a package install).
     timeout-minutes: 15
     steps:
@@ -1084,12 +1346,11 @@ jobs:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ubuntu:24.04
-      # Container jobs run in Docker's own cgroup, not the runner's systemd unit, so the
-      # host-side runners.slice quota never reaches them: this cap is the ONLY thing that
-      # bounds a container job on the self-hosted host (#1637). 6 CPUs matches BUILD_JOBS,
-      # 10g the per-unit memory budget. Harmless on the hosted fallback: ubuntu-24.04
-      # runners have 4 cores / 16 GB, both under the cap.
-      options: --cpus 6 --memory 10g
+      # CPU is bounded host-side: dockerd's cgroup-parent puts every container under
+      # runners.slice (11 cores for all runners + containers together), so no per-container
+      # `--cpus` (#1691). 10g is the per-job memory budget; harmless on the hosted fallback
+      # (ubuntu-24.04 runners have 16 GB).
+      options: --memory 10g
     # Measured max 1.17 min (p50 0.7) — but it apt-installs TWICE (the toolchain step and
     # clang-format below), so the short-job floor of 15 covers both round-trips.
     timeout-minutes: 15
@@ -1132,12 +1393,11 @@ jobs:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ubuntu:24.04
-      # Container jobs run in Docker's own cgroup, not the runner's systemd unit, so the
-      # host-side runners.slice quota never reaches them: this cap is the ONLY thing that
-      # bounds a container job on the self-hosted host (#1637). 6 CPUs matches BUILD_JOBS,
-      # 10g the per-unit memory budget. Harmless on the hosted fallback: ubuntu-24.04
-      # runners have 4 cores / 16 GB, both under the cap.
-      options: --cpus 6 --memory 10g
+      # CPU is bounded host-side: dockerd's cgroup-parent puts every container under
+      # runners.slice (11 cores for all runners + containers together), so no per-container
+      # `--cpus` (#1691). 10g is the per-job memory budget; harmless on the hosted fallback
+      # (ubuntu-24.04 runners have 16 GB).
+      options: --memory 10g
     # Measured max 1.30 min (p50 0.8). Short-job floor of 15; like `format` it
     # apt-installs twice, so both round-trips are inside this ceiling.
     timeout-minutes: 15
