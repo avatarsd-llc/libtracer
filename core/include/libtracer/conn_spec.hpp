@@ -113,7 +113,8 @@ class conn_spec_t {
     /** @brief `addr` — NAME; the peer address (IPv4 dotted-quad) a DIAL connects to. */
     conn_spec_t& addr(std::string_view value) { return text("addr", value); }
 
-    /** @brief `keepalive` — VALUE u32, in ms. Parsed into @ref conn_settings_t; no consumer. */
+    /** @brief `keepalive` — VALUE u32, in ms. Accepted and IGNORED by the core parse (#1666);
+     *         kept so existing configs still spell it. */
     conn_spec_t& keepalive_ms(std::uint32_t value) { return u32("keepalive", value); }
 
     /** @brief `max_frame` — VALUE u32; the per-connection inbound frame cap, in bytes. */

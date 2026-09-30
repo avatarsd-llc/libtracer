@@ -121,7 +121,7 @@ enum class link_state_t : std::uint8_t {
  * @brief One connection's transport-private settings — a `tr::net` record, not part of
  *        any vertex's protocol `:settings` surface.
  *
- * `addr`/`port`/`role`/`keepalive_ms`/`kind` are a *device-private* `:settings` facet of
+ * `addr`/`port`/`role`/`kind` are a *device-private* `:settings` facet of
  * a connection vertex (ADR-0021: standard vs device-private fields), so they live here on
  * the `tr::net` leaf record. They are reached through this transport's own config door,
  * never through the vertex `:settings` core namespace — which RFC-0022 §3.B emptied
@@ -134,7 +134,9 @@ enum class link_state_t : std::uint8_t {
  * This record carries ONLY the universal keys every transport kind shares (the ADR-0043
  * §5 leanness ruling): a kind's PRIVATE config (e.g. quic's `cert`/`key` PEM paths) never
  * lands here — the kind's own factory parses it from the raw config SETTINGS TLV it
- * receives alongside these settings.
+ * receives alongside these settings. A universal key with no consumer is not kept here either:
+ * the `keepalive` key is still ACCEPTED on the wire (existing configs parse) but is ignored and
+ * lands nowhere (#1666) — a keepalive a kind needs belongs in that kind's own config.
  */
 struct conn_settings_t {
     std::string addr;                     /**< @brief Peer IPv4 dotted-quad (DIAL). */
@@ -153,8 +155,6 @@ struct conn_settings_t {
                                                       never from the config. The `role` config key
                                                       that once overrode it died with the
                                                       `:children[]` door at RFC-0014 S7. */
-    std::uint32_t keepalive_ms = 0;       /**< @brief Keepalive interval (transport-specific;
-                                                      ignored by the built-ins). */
     std::uint32_t max_frame = 0;          /**< @brief Per-connection receive frame cap for every
                                                       framed transport — the length-prefix streams
                                                       (`tcp`, `quic`, `webtransport`) read it off

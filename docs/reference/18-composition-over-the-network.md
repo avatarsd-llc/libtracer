@@ -324,7 +324,7 @@ RFC-0009 §D.5. The **liveness engine** driving `link_state_t` transitions autom
 [#1548](https://github.com/avatarsd-llc/libtracer/issues/1548) is every built-in
 point-to-point DIAL kind (`udp`, `tcp`, `ws`). Elsewhere — provided links, LISTEN links, bus
 kinds — the value is still set by the caller. Of the connection-config keys,
-`keepalive` has no consumer anywhere in the tree
+`keepalive` is accepted and ignored
 ([13](13-network-formation.md), [connection-config module page](../modules/connection-config.md)).
 So the recovery *semantics* above are specified and the *automation* of them is partly not yet
 true.

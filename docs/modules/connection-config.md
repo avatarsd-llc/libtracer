@@ -135,12 +135,22 @@ factory receives the parsed record alongside the raw config TLV.
 | `kind` | `NAME` utf-8 | both | empty | Selects the transport factory (`udp`, `tcp`, `ws`, or any kind registered through `register_transport_type`) — and, because the endpoint's module already fixes a *(kind, role)* declaration, it is a **cross-check on that module**, not a module selector: the module is the PATH the SPEC was written to. A kind the endpoint's module does not declare is refused `SCHEMA_NOT_FOUND` rather than mounted elsewhere (ADR-0073 §4); the check runs *before* any staged link is consulted (#883), so a `provide_link` staging that merely shares the leaf NAME cannot capture the creation. Empty is legal and is the usual spelling when the module declares exactly one kind — the declared kind is then recorded on the settings so `settings_of` still reports what the connection is. A module declared for **two or more** kinds and a kind-less SPEC is refused `TYPE_MISMATCH` (nothing in the SPEC says which was meant). A staging under the resolved module still wins over construction; one under a different module is a different connection and is left untouched. An **unregistered** kind (no `register_transport_type`) fails only when construction is actually reached: a staging under the resolved module short-circuits ahead of the factory lookup, so a `kind` declared purely to disambiguate needs a `register_module` and no factory at all. |
 | `addr` | `NAME` utf-8 | DIAL | empty | Peer address, IPv4 dotted-quad. A DIAL with it empty answers `TYPE_MISMATCH` in all five socket factories — the three built-ins (`udp`, `tcp`, `ws`) share one precondition helper, and `quic`/`webtransport` repeat the check. `can` never reads it. |
 | `port` | `VALUE` u16 | both | absent | Peer port on a DIAL, bind port on a LISTEN. On a **DIAL**, `0` answers `TYPE_MISMATCH` in the same five socket factories — there is no such thing as dialling the ephemeral port. On a **LISTEN** the *key* is what is required, not a nonzero value: an **absent** key answers `TYPE_MISMATCH` (the config is missing a required field), while an explicit `port = 0` is the **EPHEMERAL request** — the OS picks a free bind port and the grant is read back off the constructed link with `local_port()` (#1362). Before that the LISTEN arm rejected `0` as if it were an omitted key, which conflated "you forgot the port" with "you do not care which port" and left an in-band-created listener no way to ask for one. `can` never reads it. |
-| `keepalive` | `VALUE` u32 | both | `0` | Keepalive interval in ms. **Nothing reads it**: `conn_settings_t::keepalive_ms` has no consumer outside the parse that fills it. UDP is connectionless, TCP has its own, WS handles PING/PONG at the protocol layer. |
 | `max_frame` | `VALUE` u32 | both | `0` | Per-connection inbound frame cap in bytes, honoured by five of the six kinds — `tcp`, `quic` and `webtransport` read it off their u32 length prefix, `ws` off the RFC 6455 header, `udp` off the received datagram's length (one datagram = one frame). `0` = the 16 MiB protocol default on the framed kinds, and `udp_transport_t::kMaxDatagram` (64 KiB) on `udp`. It **only ever tightens**, on every kind that reads it. On the four framed kinds each transport resolves the configured value through `length_prefix_framer::configured_cap` — `0` → the 16 MiB default, otherwise `min(value, 16 MiB)` — so a config-writable key can narrow what the node buffers off the wire but never widen it (#1035); the effective cap is then further bounded by the injected backend's `max_segment_size()`. On `udp` it can only tighten for a different reason — a datagram cannot exceed 64 KiB, so a larger configured value is inert. A declared length **over** the cap is refuse-and-close on the framed kinds (`malformed_rx()`, then the link is torn down: a desynced stream cannot be re-framed) and refuse-and-continue on `udp` (`malformed_rx()`, socket unaffected — datagrams need no resync). A length **at** the cap is legal and delivered whole. On `quic` and `webtransport` the configured value bounds **egress** as well as ingress (#1409): a local send over the cap is shed with `dropped_tx()` and the link stays up, rather than being put on the wire for a conformant peer to count `malformed_rx` on and tear the connection down. `can` (its own fragmentation) does not read it. |
 | `backoff` | `VALUE` u32 | DIAL | `0` | Self-heal retry interval in ms (RFC-0014 §4), consumed by the S5 liveness engine (`self_heal_link_t`) on a kind registered `self_heal_dial`. `0` = the engine's default (`kDefaultBackoffMs`, 1000 ms). The built-in point-to-point kinds `udp`, `tcp` and `ws` are opted in ([#1548](https://github.com/avatarsd-llc/libtracer/issues/1548)), so on a stock build this key has a consumer on every built-in DIAL. On a kind not opted in — a bus kind such as `can`, or any kind on a `kSelfHealLinks = false` build — it is parsed but has no consumer. |
 | `connect_timeout` | `VALUE` u32 | DIAL | `0` | How long one dial attempt waits for `UP`, in ms (RFC-0014 §4) — the S5 engine's bound on an op's auto-wake wait, and handed to the kind's factory in its parsed settings. `0` = the engine's default (`kDefaultConnectTimeoutMs`, 5000 ms). Same opt-in scope as `backoff`. |
 
 <!-- config-keys:end -->
+
+### `keepalive` — accepted, ignored
+
+A `keepalive` pair (`VALUE` u32, ms) is still **accepted**, so an existing config that
+spells it parses and creates exactly as before, and `conn_spec_t::keepalive_ms` still
+emits it. Nothing reads it: it is an unknown pair to the universal parse, dropped like any
+other ([#1666](https://github.com/avatarsd-llc/libtracer/issues/1666)). It used to be
+stored in `conn_settings_t::keepalive_ms`, a field with no consumer that every transport
+vertex carried; that field is gone. UDP is connectionless, TCP has its own, WS handles
+PING/PONG at the protocol layer — a kind that ever needs a keepalive knob parses it from
+its own config, like any kind-private key.
 
 ### Refusals the endpoint owns, not a key
 
@@ -340,8 +350,8 @@ out of the raw config TLV it already receives, and in a block on this page. Not 
   connection comes up looking healthy.
 - **`can` ignores the universal keys.** Setting `port` or `max_frame` on a `can`
   connection changes nothing; its identity is `ifname` + `node`.
-- **`keepalive` has no consumer at all.** It is parsed into `conn_settings_t` and no
-  transport in the tree reads the field.
+- **`keepalive` is accepted and ignored.** It is not stored anywhere (#1666); no
+  transport in the tree reads it.
 - **`backoff` and `connect_timeout` are dormant.** They parse, they land in
   `conn_settings_t`, and nothing reads them yet.
 - **`max_frame` cannot be used to buy headroom.** It is TIGHTEN-ONLY: every framed kind

@@ -47,6 +47,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   code that asserted on either counter against a stock build now reads `0`; gate such
   assertions on `tr::graph::kInstrumentCounters`.
 
+- **`tr::net::conn_settings_t::keepalive_ms` is removed
+  ([#1666](https://github.com/avatarsd-llc/libtracer/issues/1666)).** It was parsed from the
+  `keepalive` config key and read by nothing, yet every transport vertex carried it (the
+  ADR-0043 §5 leanness rule). `sizeof(conn_settings_t)` drops 88 → 80 B on x86-64 (68 → 64 B
+  on ILP32). The `keepalive` key is still **accepted** — existing configs parse and create as
+  before — and is ignored like any unknown pair; `conn_spec_t::keepalive_ms` still emits it.
+  **Migration:** drop reads of `settings_of(...)->keepalive_ms`; a kind that needs a keepalive
+  parses its own key from the raw config TLV its factory receives.
+
 - **One surface for memory, per-vertex policy, graph-wide seams and link construction (RFC 0028
   slice 10; [#1593](https://github.com/avatarsd-llc/libtracer/issues/1593),
   [#1606](https://github.com/avatarsd-llc/libtracer/issues/1606) asks 1–2).** This is the

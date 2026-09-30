@@ -155,12 +155,12 @@ returns the parent's **members**, never SPECs.
 the SPEC carries no `type` and no `role`
 ([RFC-0014 — creator endpoint: connection lifecycle and link liveness](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)).
 The `config` member `kind` selects which transport factory builds the link
-(`core/src/transport_vertex.cpp:55`, factories registered through
-`register_transport_type` at `:257`, catalogued at `:281`) and cross-checks the module's declaration. The
+(`core/src/transport_vertex.cpp:57`, factories registered through
+`register_transport_type` at `:258`, catalogued at `:282`) and cross-checks the module's declaration. The
 created connection is mounted and routed at **`/net/<module>/<name>`**, where `module`
 is **declared by the application** through `register_module` — modules are declared-only
 (ADR-0073 §4); an undeclared `(kind, role)` pair fails creation with `SCHEMA_NOT_FOUND`
-(`core/src/transport_vertex.cpp:284`, refused at `:336`). One *(kind, role)*
+(`core/src/transport_vertex.cpp:285`, refused at `:337`). One *(kind, role)*
 pair is declared once: a second module claiming a pair another module already declared
 is refused `PATH_IN_USE` rather than silently renaming the first.
 
