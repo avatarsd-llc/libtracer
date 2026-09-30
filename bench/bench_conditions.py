@@ -27,15 +27,22 @@ What is sampled, around each invocation:
     /proc/<pid>/status prints as `nonvoluntary_ctxt_switches`. Recorded, not gated: a
     multi-threaded bench pinned to one CPU preempts itself, so the count alone cannot
     tell a neighbour from the bench's own threads.
-  * CPU PRESSURE — /proc/pressure/cpu `some avg10`, sampled as the run starts. The
-    reading is taken at launch, not at exit, on purpose: several bench modes run N
+  * CPU PRESSURE — `some avg10`, sampled as the run starts, from one of two sources:
+      - PINNED (a CPU named by BENCH_CPU — the bench host): the bench job's OWN cgroup,
+        `<cgroupfs>/<path from /proc/self/cgroup>/cpu.pressure`. The bench CPUs there are
+        cgroup-isolated for the bench runner, so host-wide pressure (40-68 on the
+        saturated studio host while the bench runner's cgroup read ~0) says nothing
+        about the bench CPU and would flag every point. Host-wide pressure is still
+        RECORDED, for information only.
+      - UNPINNED (hosted runners — nothing to isolate): host-wide /proc/pressure/cpu.
+    The reading is taken at launch, not at exit, on purpose: several bench modes run N
     threads on one pinned CPU, and PSI cannot tell our own runnable threads from a
     neighbour's, so a post-run reading would charge the bench for its own threads.
-    The pre-launch reading is the host's state as the measurement began; foreign time
-    is what covers the window itself. The exit reading is recorded beside it.
+    Foreign time is what covers the window itself. The exit reading is recorded.
 
 The rule (`classify`): a run is CONTENDED when foreign time exceeds `FOREIGN_MAX_PCT`
-(2%) of the window, or launch pressure exceeds `PRESSURE_MAX` (5). Otherwise CLEAN.
+(2%) of the window, or the launch pressure from the source above exceeds
+`PRESSURE_MAX` (5). Otherwise CLEAN.
 `measure()` re-runs a contended invocation up to `attempts` times and keeps the first
 clean one; if none is clean it keeps the last and says so. A `Ledger` over a job's
 invocations is CLEAN only if every one of them is — and a ledger that is not clean is
@@ -93,6 +100,8 @@ DEFAULT_ATTEMPTS = 3
 CLK_TCK = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
 PROC_STAT = "/proc/stat"
 PROC_PSI = "/proc/pressure/cpu"
+PROC_SELF_CGROUP = "/proc/self/cgroup"
+CGROUP_FS = "/sys/fs/cgroup"
 
 
 def _read(path: str) -> str | None:
@@ -110,7 +119,8 @@ class Sample:
     wall_ns: int                 # monotonic clock, ns
     busy: int                    # busy ticks summed over the set (incl. irq + steal)
     total: int                   # all ticks summed over the set
-    psi_avg10: float | None      # /proc/pressure/cpu `some avg10`, None when absent
+    psi_avg10: float | None      # host-wide /proc/pressure/cpu `some avg10`, None if absent
+    cg_avg10: float | None = None  # this job's own cgroup `cpu.pressure` `some avg10`
 
 
 def parse_proc_stat(text: str, cpus: Iterable[int]) -> tuple[int, int]:
@@ -147,11 +157,26 @@ def parse_psi_avg10(text: str | None) -> float | None:
     return None
 
 
+def cgroup_pressure_path(self_cgroup: str | None) -> str | None:
+    """@brief `<cgroupfs>/<path>/cpu.pressure` for the cgroup-v2 line of /proc/self/cgroup.
+
+    The bench is a child of this process and inherits its cgroup, so the wrapper's own
+    cgroup IS the bench job's. None on a cgroup-v1-only host (no `0::` line).
+    """
+    for line in (self_cgroup or "").splitlines():
+        if line.startswith("0::"):
+            rel = line[3:].strip().lstrip("/")
+            return f"{CGROUP_FS}/{rel}/cpu.pressure" if rel else f"{CGROUP_FS}/cpu.pressure"
+    return None
+
+
 def snapshot(cpus: Iterable[int], read: Callable[[str], str | None] = _read,
              now: Callable[[], int] = time.monotonic_ns) -> Sample:
     """@brief Sample the measured CPU set. @p read and @p now are injected for tests."""
     busy, total = parse_proc_stat(read(PROC_STAT) or "", cpus)
-    return Sample(now(), busy, total, parse_psi_avg10(read(PROC_PSI)))
+    cg = cgroup_pressure_path(read(PROC_SELF_CGROUP))
+    return Sample(now(), busy, total, parse_psi_avg10(read(PROC_PSI)),
+                  parse_psi_avg10(read(cg)) if cg else None)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -164,10 +189,12 @@ class Conditions:
     foreign_pct: float
     own_cpu_s: float
     nivcsw: int
-    pressure: float | None       # `some avg10` at launch — the gated reading
-    pressure_exit: float | None  # `some avg10` at exit — recorded only (self-polluted)
+    pressure: float | None       # `some avg10` at launch from `pressure_source` — gated
+    pressure_exit: float | None  # the same source at exit — recorded only (self-polluted)
     verdict: str
     reason: str
+    pressure_source: str = "host"  # "cgroup" when pinned, "host" when unpinned
+    host_pressure: float | None = None  # host-wide avg10 at launch — information only
 
     @property
     def clean(self) -> bool:
@@ -177,8 +204,11 @@ class Conditions:
     def line(self) -> str:
         """@brief One human-auditable line: the numbers and the verdict path."""
         psi = "n/a" if self.pressure is None else f"{self.pressure:.1f}"
+        host = ("" if self.pressure_source == "host" or self.host_pressure is None
+                else f" (host {self.host_pressure:.1f}, info)")
         return (f"{_cpuset(self.cpus)}{'' if self.pinned else ' (unpinned)'}: "
-                f"foreign {self.foreign_pct:.1f}% of {self.wall_s:.1f}s, psi {psi}, "
+                f"foreign {self.foreign_pct:.1f}% of {self.wall_s:.1f}s, "
+                f"{self.pressure_source} psi {psi}{host}, "
                 f"nivcsw {self.nivcsw} -> {self.verdict}"
                 + (f" ({self.reason})" if self.reason else ""))
 
@@ -204,6 +234,10 @@ def classify(before: Sample, after: Sample, own_cpu_s: float, nivcsw: int,
              pressure_max: float = PRESSURE_MAX, clk_tck: int = CLK_TCK) -> Conditions:
     """@brief The decision rule: CLEAN, or CONTENDED with the reason spoken.
 
+    Pinned runs gate on foreign time and the job's OWN cgroup pressure only; host-wide
+    pressure is recorded beside them and never decides. Unpinned runs, which have no
+    isolation to lean on, gate on foreign time and host-wide pressure.
+
     Pure — two snapshots and the bench's own usage in, a verdict out — so the rule is
     tested on synthetic /proc text rather than on a machine that happens to be busy.
     """
@@ -215,13 +249,17 @@ def classify(before: Sample, after: Sample, own_cpu_s: float, nivcsw: int,
     reasons = []
     if foreign_ticks > QUANTUM_TICKS and foreign_pct > foreign_max_pct:
         reasons.append(f"foreign {foreign_pct:.1f}% > {foreign_max_pct:g}%")
-    if before.psi_avg10 is not None and before.psi_avg10 > pressure_max:
-        reasons.append(f"psi {before.psi_avg10:.1f} > {pressure_max:g}")
+    source = "cgroup" if pinned else "host"
+    psi0 = before.cg_avg10 if pinned else before.psi_avg10
+    psi1 = after.cg_avg10 if pinned else after.psi_avg10
+    if psi0 is not None and psi0 > pressure_max:
+        reasons.append(f"{source} psi {psi0:.1f} > {pressure_max:g}")
     return Conditions(cpus=cpus, pinned=pinned,
                       wall_s=max(0, after.wall_ns - before.wall_ns) / 1e9,
                       foreign_pct=foreign_pct, own_cpu_s=own_cpu_s, nivcsw=nivcsw,
-                      pressure=before.psi_avg10, pressure_exit=after.psi_avg10,
-                      verdict=CONTENDED if reasons else CLEAN, reason="; ".join(reasons))
+                      pressure=psi0, pressure_exit=psi1,
+                      verdict=CONTENDED if reasons else CLEAN, reason="; ".join(reasons),
+                      pressure_source=source, host_pressure=before.psi_avg10)
 
 
 @dataclasses.dataclass
@@ -337,9 +375,12 @@ class Ledger:
         worst_f = max(c.foreign_pct for c in kept)
         psis = [c.pressure for c in kept if c.pressure is not None]
         worst_p = f"{max(psis):.1f}" if psis else "n/a"
+        hosts = [c.host_pressure for c in kept if c.host_pressure is not None]
+        host = (f" (host psi <={max(hosts):.1f}, info)"
+                if kept[0].pressure_source != "host" and hosts else "")
         n_clean = sum(c.clean for c in kept)
         return (f"bench {_cpuset(kept[0].cpus)}{'' if kept[0].pinned else ' unpinned'}: "
-                f"foreign <={worst_f:.1f}%, psi <={worst_p}, "
+                f"foreign <={worst_f:.1f}%, {kept[0].pressure_source} psi <={worst_p}{host}, "
                 f"nivcsw {sum(c.nivcsw for c in kept)}, "
                 f"{n_clean}/{len(kept)} clean ({self.reruns()} re-run)")
 

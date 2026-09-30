@@ -1064,7 +1064,7 @@ def print_conditions() -> None:
     """@brief The measurement-conditions block every verdict is printed under (#1676)."""
     print(f"Measurement conditions ({'CLEAN' if LEDGER.clean else 'CONTENDED'}; "
           f"contended = foreign > {bc.FOREIGN_MAX_PCT:g}% on the bench CPU or "
-          f"psi > {bc.PRESSURE_MAX:g}, re-run up to {bc.DEFAULT_ATTEMPTS}x):")
+          f"CPU pressure > {bc.PRESSURE_MAX:g} (own cgroup if pinned, host if not), re-run up to {bc.DEFAULT_ATTEMPTS}x):")
     print(f"  {LEDGER.line()}")
     for x in LEDGER.report(notable_only=True):
         print(x)

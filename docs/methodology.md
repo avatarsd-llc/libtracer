@@ -242,9 +242,12 @@ Details that make these trustworthy:
   which samples the conditions around it and records them: the measured CPU's **foreign
   time** (busy time in `/proc/stat` — including irq and hypervisor steal — minus the bench
   process's own CPU time), the bench's **involuntary context switches** (the
-  `nonvoluntary_ctxt_switches` counter), and the host's **CPU pressure**
-  (`/proc/pressure/cpu` `some avg10`, read as the execution starts, because a bench that
-  runs several threads on one pinned CPU raises pressure itself). An execution is
+  `nonvoluntary_ctxt_switches` counter), and **CPU pressure** (`some avg10`, read as the
+  execution starts, because a bench that runs several threads on one pinned CPU raises
+  pressure itself). On the pinned host the pressure that decides is the bench job's
+  **own cgroup's** `cpu.pressure`: its CPUs are cgroup-isolated, so host-wide
+  `/proc/pressure/cpu` says nothing about them and is recorded for information only. On
+  unpinned hosted runners, host-wide pressure decides. An execution is
   **contended** when foreign time exceeds **2 %** of its window or pressure exceeds **5**;
   a contended execution is re-run, up to three attempts, and the first clean one is kept.
   If any execution is still contended after its last attempt, the gate prints

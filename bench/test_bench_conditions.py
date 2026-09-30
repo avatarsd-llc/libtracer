@@ -53,9 +53,20 @@ def psi(avg10: float) -> str:
             f"full avg10=0.00 avg60=0.00 avg300=0.00 total=0\n")
 
 
-def sample(stat: str, pressure: float | None, wall_ns: int, cpu: int = 7) -> bc.Sample:
-    """@brief One snapshot built from synthetic /proc text through the real reader."""
+CG = "/runners.slice/actions.runner.studio-bench.service"
+
+
+def sample(stat: str, pressure: float | None, wall_ns: int, cpu: int = 7,
+           cgroup: float | None = None) -> bc.Sample:
+    """@brief One snapshot built from synthetic /proc text through the real reader.
+
+    @p pressure is host-wide PSI; @p cgroup, when given, is this job's own cgroup PSI,
+    reached the way the real reader reaches it — through /proc/self/cgroup.
+    """
     files = {bc.PROC_STAT: stat, bc.PROC_PSI: None if pressure is None else psi(pressure)}
+    if cgroup is not None:
+        files[bc.PROC_SELF_CGROUP] = f"0::{CG}\n"
+        files[f"{bc.CGROUP_FS}{CG}/cpu.pressure"] = psi(cgroup)
     return bc.snapshot((cpu,), read=files.get, now=lambda: wall_ns)
 
 
@@ -126,17 +137,44 @@ class Classify(unittest.TestCase):
         c = bc.classify(T0, t1, own_cpu_s=0.08, nivcsw=0, cpus=[7])
         self.assertTrue(c.clean, c.line())
 
-    def test_pressure_at_launch_contends(self):
+    def test_unpinned_host_pressure_at_launch_contends(self):
+        """Hosted runners have nothing to isolate: host-wide pressure decides there."""
         t0 = sample(proc_stat(7, 1000, 500, 8000), 41.4, 0)
-        c = bc.classify(t0, after(1000, 0), own_cpu_s=10.0, nivcsw=0, cpus=[7])
+        c = bc.classify(t0, after(1000, 0), own_cpu_s=10.0, nivcsw=0, cpus=[7],
+                        pinned=False)
         self.assertEqual(c.verdict, bc.CONTENDED)
-        self.assertIn("psi 41.4 > 5", c.reason)
+        self.assertIn("host psi 41.4 > 5", c.reason)
+
+    def test_pinned_host_pressure_high_cgroup_quiet_cpu_clean_is_clean(self):
+        """The pinned host's bench CPUs are cgroup-isolated: host-wide pressure of 40-68
+        says nothing about them. Own cgroup ~0 and a clean CPU must read CLEAN, with the
+        host figure recorded for information."""
+        t0 = sample(proc_stat(7, 1000, 500, 8000), 55.2, 0, cgroup=0.0)
+        t1 = sample(proc_stat(7, 2000, 500, 8000), 61.0, 10_000_000_000, cgroup=0.1)
+        c = bc.classify(t0, t1, own_cpu_s=10.0, nivcsw=0, cpus=[7], pinned=True)
+        self.assertEqual(c.verdict, bc.CLEAN, c.line())
+        self.assertEqual(c.pressure_source, "cgroup")
+        self.assertEqual(c.pressure, 0.0)
+        self.assertEqual(c.host_pressure, 55.2)
+        self.assertIn("host 55.2, info", c.line())
+
+    def test_pinned_own_cgroup_pressure_contends(self):
+        t0 = sample(proc_stat(7, 1000, 500, 8000), 0.0, 0, cgroup=12.5)
+        c = bc.classify(t0, after(1000, 0), own_cpu_s=10.0, nivcsw=0, cpus=[7],
+                        pinned=True)
+        self.assertEqual(c.verdict, bc.CONTENDED)
+        self.assertIn("cgroup psi 12.5 > 5", c.reason)
+
+    def test_cgroup_pressure_path(self):
+        self.assertEqual(bc.cgroup_pressure_path(f"0::{CG}\n"),
+                         f"{bc.CGROUP_FS}{CG}/cpu.pressure")
+        self.assertIsNone(bc.cgroup_pressure_path("12:cpu,cpuacct:/foo\n"))  # v1-only
 
     def test_pressure_at_exit_is_recorded_not_gated(self):
         """A bench that runs N threads on one pinned CPU raises PSI itself; charging it
         for its own threads would make every such run INCONCLUSIVE."""
         c = bc.classify(T0, after(1000, 0, pressure=80.0), own_cpu_s=10.0, nivcsw=0,
-                        cpus=[7])
+                        cpus=[7], pinned=False)
         self.assertTrue(c.clean, c.line())
         self.assertEqual(c.pressure_exit, 80.0)
 
