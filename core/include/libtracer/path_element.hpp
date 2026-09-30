@@ -32,6 +32,13 @@
  * address would answer `tr::path::invalid` where the spec answers `tr::path::not_found`, which
  * is a wire-surface divergence and would need an amendment rather than a codec.
  *
+ * **RFC-0029 adds the fifth answer, the PAIR** (`path_pair.hpp`): the same `kind = 0x16` at
+ * `len = 8`, carrying the owner-issued `(index, generation)` itself. The declared length is
+ * what tells the two `0x16` spellings apart, so the structural rule stays "kind, then length"
+ * and still has no third clause: `len = 4` is a label (until RFC-0029 S3 deletes that form),
+ * `len = 8` is a pair, and every other length is MALFORMED — RFC-0029 §5.1's "refuses the
+ * address, never the frame".
+ *
  * **Nothing here mints.** Emitting a label element says how a local part is SPELLED, never
  * that a mint is due: §6.2's trigger, the reply-leg rewrite, the table deref and the
  * `NOT_FOUND` answer are the forwarder's (car 4 of #1325). This header is `tr::wire` (L2/L3)
@@ -50,6 +57,7 @@
 
 #include "libtracer/packed_path.hpp"
 #include "libtracer/path_label.hpp"
+#include "libtracer/path_pair.hpp"
 
 /**
  * @file
@@ -59,17 +67,20 @@
 namespace tr::wire {
 
 /**
- * @brief What one record of a packed `PATH` body IS — the four answers a reader needs.
+ * @brief What one record of a packed `PATH` body IS — the five answers a reader needs.
  *
- * There are four and not two because the two refusals differ in what a host does next
- * (RFC-0027 §12.5 erratum 1): a @ref FOREIGN record is relayed intact, a @ref MALFORMED one
- * refuses the address.
+ * The two refusals differ in what a host does next (RFC-0027 §12.5 erratum 1): a @ref FOREIGN
+ * record is relayed intact, a @ref MALFORMED one refuses the address. The two `0x16` answers
+ * (@ref LABEL, @ref PAIR) differ by declared length and nothing else (RFC-0029 §5.1).
  */
 enum class path_element_kind_t : std::uint8_t {
     /** @brief A literal segment record `[u8 len][utf8]` — the canonical spelling (RFC-0018). */
     SEGMENT,
     /** @brief RFC-0027's label element — an escape at `kind = 0x16` carrying one valid label. */
     LABEL,
+    /** @brief RFC-0029's PAIR element — an escape at `kind = 0x16`, `len = 8`, carrying the
+     *         owner-issued `(index, generation)` (decoded into @ref path_element_t::pair). */
+    PAIR,
     /** @brief An escape record of some other kind: skippable by length, never interpreted. */
     FOREIGN,
     /** @brief Not a readable element: a ragged record, or a `0x16` record that is not a label. */
@@ -93,11 +104,15 @@ struct path_element_t {
     /** @brief SEGMENT: the segment's UTF-8 bytes. FOREIGN: the escape's declared payload.
      *         Empty for every other kind — a label's value is in @ref label, decoded. */
     std::span<const std::byte> payload{};
-    /** @brief The escape `kind` byte, for @ref LABEL and @ref FOREIGN; `0` otherwise. */
+    /** @brief The escape `kind` byte, for @ref LABEL, @ref PAIR and @ref FOREIGN; `0` otherwise. */
     std::uint8_t escape_kind = 0;
     /** @brief The decoded label, meaningful only when @ref kind is @ref LABEL — and then still
      *         possibly not `valid()`, when the record carries the reserved zero generation. */
     path_label_t label{};
+    /** @brief The decoded `(index, generation)`, meaningful only when @ref kind is @ref PAIR.
+     *         Every value is structurally a pair; whether it names a live vertex is the
+     *         owner's deref to answer (RFC-0029 §6 step 2), never the codec's. */
+    path_pair_t pair{};
 
     /** @brief True unless this record refuses the address (@ref MALFORMED). */
     [[nodiscard]] constexpr bool ok() const noexcept {
@@ -117,9 +132,10 @@ struct path_element_t {
  *
  * The kind decides the reading, in this order and no other: ragged framing refuses first,
  * a non-escape record is a literal segment, an escape of a kind this host does not own is
- * @ref path_element_kind_t::FOREIGN, and a `kind = 0x16` record whose payload is exactly four
- * bytes reads as @ref path_element_kind_t::LABEL. Those are §12.5 erratum 1's two structural
- * clauses and there is no third.
+ * @ref path_element_kind_t::FOREIGN, a `kind = 0x16` record whose payload is exactly eight
+ * bytes reads as @ref path_element_kind_t::PAIR (RFC-0029 §5.1) and one of exactly four bytes
+ * as @ref path_element_kind_t::LABEL. Those are §12.5 erratum 1's two structural clauses —
+ * kind, then declared length — and there is no third.
  *
  * @note A `LABEL` element may carry a path label that is not `valid()` — the reserved zero
  *       generation. That is deliberate and it is where this differs from car 2's
@@ -150,6 +166,13 @@ struct path_element_t {
                               .payload = payload,
                               .escape_kind = kind};
 
+    if (path_pair_record_valid(kind, payload.size()))
+        return path_element_t{.kind = path_element_kind_t::PAIR,
+                              .at = at,
+                              .bytes = span,
+                              .payload = payload,
+                              .escape_kind = kind,
+                              .pair = path_pair_load(payload)};
     if (!path_label_record_valid(kind, payload.size()))
         return path_element_t{
             .kind = path_element_kind_t::MALFORMED, .at = at, .bytes = span, .escape_kind = kind};
@@ -203,10 +226,10 @@ class path_element_cursor_t {
 };
 
 /**
- * @brief What a whole packed `PATH` body is made of — one walk, four counts.
+ * @brief What a whole packed `PATH` body is made of — one walk, five counts.
  *
- * The counts are what a caller decides with: `labels != 0` is "this body is a frame path and
- * not a key" (`packed_path_valid_key` is the rule's other side), and `!well_formed` is the
+ * The counts are what a caller decides with: `labels + pairs != 0` is "this body is a frame path
+ * and not a key" (`packed_path_valid_key` is the rule's other side), and `!well_formed` is the
  * `tr::path::invalid` refusal.
  */
 struct path_element_census_t {
@@ -218,6 +241,8 @@ struct path_element_census_t {
     std::size_t segments = 0;
     /** @brief RFC-0027 label elements. */
     std::size_t labels = 0;
+    /** @brief RFC-0029 PAIR elements. */
+    std::size_t pairs = 0;
     /** @brief Escape records of a kind this host does not own. */
     std::size_t foreign = 0;
     /** @brief Value equality over every count. */
@@ -243,6 +268,9 @@ struct path_element_census_t {
                 break;
             case path_element_kind_t::LABEL:
                 ++c.labels;
+                break;
+            case path_element_kind_t::PAIR:
+                ++c.pairs;
                 break;
             case path_element_kind_t::FOREIGN:
                 ++c.foreign;
@@ -278,6 +306,8 @@ struct path_element_census_t {
  * - @ref path_element_kind_t::LABEL — one label element, @ref emit_path_label, which re-derives
  *   the bytes from the DECODED @ref path_element_t::label rather than copying the payload span,
  *   so a value that could not be minted cannot be laundered back onto the wire by round-trip.
+ * - @ref path_element_kind_t::PAIR — one PAIR element, @ref emit_path_pair, re-derived from the
+ *   decoded @ref path_element_t::pair for the same reason as a label.
  * - @ref path_element_kind_t::FOREIGN — the escape record verbatim, kind and payload,
  *   @ref emit_path_escape. Relaying a kind this host does not own is exactly what §5.2 requires
  *   of a non-implementing hop, so it is an emit and not a refusal.
@@ -299,6 +329,9 @@ struct path_element_census_t {
             return emit_path_segment(out, element.payload);
         case path_element_kind_t::LABEL:
             return emit_path_label(out, element.label);
+        case path_element_kind_t::PAIR:
+            emit_path_pair(out, element.pair);
+            return true;
         case path_element_kind_t::FOREIGN:
             return emit_path_escape(out, element.escape_kind, element.payload);
         case path_element_kind_t::MALFORMED:

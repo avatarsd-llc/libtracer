@@ -32,6 +32,34 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Breaking
 
+- **The bound spelling of a `dst` is a `PATH` of PAIR elements; a `PATH_REF` (`0x14`) is no
+  longer an address (RFC-0029 slice S1, [#1634](https://github.com/avatarsd-llc/libtracer/pull/1634)).**
+  An owner-issued `(u32 index, u32 generation)` pair now rides INSIDE a canonical `PATH` as the
+  escape record `00 16 08 <idx LE><gen LE>` (11 bytes), and every node runs RFC-0029 §6 on a
+  PAIR head: dereference it (bounds, generation, registered), then a connection vertex with a
+  tail is a HOP (the head is consumed, the tail forwarded, `src` grown canonically), a last
+  element is the TERMINUS (the same `apply_op` the NAME spelling reaches; a connection vertex
+  named last reads its own facets), and any other vertex with a tail is refused. Observable:
+  - A `dst` spelled as a `PATH_REF` is refused `tr::path::invalid` at the router and at the
+    terminus, and never applied. The RFC-0024 vectors `fwd/fwd-bound-forward`,
+    `fwd/fwd-bound-forwarded` and `acl/bound-vs-canonical-{allow,deny}` remain codec vectors
+    only (retired by S2).
+  - A refused PAIR is **answered** `tr::path::not_found` (stale or saturated generation, index
+    out of range, retired vertex, a hop with no egress or denied by its `:acl`); RFC-0024's
+    bound hop dropped these silently. A tail below an ordinary vertex answers
+    `tr::path::invalid`, below a bus mount `tr::path::not_found`.
+  - `fwd_router_t::bound_dispatch` returns its `dst` spelled as PAIRs (`4 + 11 × (H − 1)`
+    bytes), and the reverse-list delivery leg and `vertex_t::evict_route_edges` store and match
+    the PAIR spelling.
+  - **One authorization gate per hop, whatever the spelling (RFC-0029 §6.4).** When the graph
+    has a subject resolver installed, a NAME-spelled request crossing a connection vertex is now
+    checked at that vertex for the operation's own right — the same `bound_egress` check the
+    PAIR and RFC-0027 label spellings run — and refused `tr::path::not_found`. Before, the
+    canonical mount descent gated nowhere and only the terminus checked. Replies are routed,
+    never gated. A graph without a subject resolver is unaffected.
+  - `path_element_kind_t` gains `PAIR` (kind `0x16` at length 8; length 4 stays the RFC-0027
+    `LABEL`, any other length is `MALFORMED`), and `path_element_census_t` gains `pairs`.
+
 - **`graph_t`'s two instrumentation counters are compiled out by default:
   `config_t::kInstrumentCounters` ([#1664](https://github.com/avatarsd-llc/libtracer/issues/1664)).**
   `ancestor_walks()` (RFC-0005) and `target_canonical_resolves()` (#830) were a relaxed 64-bit
@@ -346,6 +374,16 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     `probe_hook_ok` seam moved down to `mem_source.hpp`** (same names), and the
     process-default `heap_source_t::try_alloc` honours it, so an injected refusal reaches a
     `value_t` draw. `heap_source_t::acquire` — the direct-call arm — does not consult it.
+
+### Added
+
+- **`libtracer/path_pair.hpp` — the RFC-0029 PAIR element codec.** `path_pair_t` (the
+  `(index, generation)` pair), `kPathPairRecordBytes` (11), `path_pair_record_valid`,
+  `path_pair_store` / `emit_path_pair` (writer), `path_pair_load` / `path_pair_at` (reader).
+  Constexpr and allocation-free; the emitter appends to a caller's vector.
+- **`graph_t::acl_enforced()`** — true when a subject resolver is installed, i.e. when an
+  `:acl` can refuse anything. The router reads it to skip the per-hop gate on graphs that have
+  no ACL plane, so the NAME forward hop costs nothing there.
 
 ## [0.16.1] — 2026-09-29
 

@@ -1586,12 +1586,16 @@ std::size_t graph_t::evict_route_edges(std::string_view link_name,
     // Same index, same saving as its whole-link sibling — but the entry is COPIED, not
     // taken: this reclaims only the edges matching one route, so the link keeps whatever
     // else it holds and must stay indexed for its eventual teardown.
-    // Classify the echo's form ONCE, here, where wire types are spoken: a `PATH_REF` echo
-    // is a refused reverse-list delivery (RFC-0024 §7.1 amendment 1) and matches the stored
-    // reverse list's emitted suffix; anything else runs the canonical byte-equal match.
+    // Classify the echo's form ONCE, here, where wire types are spoken: a `PATH` whose body
+    // opens with an escape record is element-spelled — a refused reverse-list delivery
+    // (RFC-0024 §7.1 amendment 1, spelled per RFC-0029 §4.2) — and matches the stored
+    // reverse chain's emitted suffix; a canonical route opens with a NAME and runs the
+    // byte-equal match. The 4-byte header is the grammar's (`PATH` is never `opt.LL`).
     const bool bound_echo =
+        route_wire.size() > 4 &&
         static_cast<wire::type_t>(std::to_integer<std::uint8_t>(route_wire[0])) ==
-        wire::type_t::PATH_REF;
+            wire::type_t::PATH &&
+        std::to_integer<std::uint8_t>(route_wire[4]) == wire::kPackedEscapeLen;
     const std::pmr::vector<vertex_t*> candidates = link_candidates(link_name, /*take=*/false);
     std::size_t total = 0;
     for (vertex_t* v : candidates) {

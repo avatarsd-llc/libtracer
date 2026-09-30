@@ -49,6 +49,7 @@
 #include "fwd_frame_builder.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/loopback.hpp"
+#include "libtracer/path_pair.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
@@ -103,10 +104,15 @@ std::vector<std::byte> b_value_u32(std::uint32_t v) {
 
 using tr::testing::b_fwd_raw_op;
 
-/** @brief A `PATH_REF` TLV over @p elements — the bound spelling of an address. */
+/**
+ * @brief The bound spelling of an address over @p elements: a `PATH` of PAIR elements
+ *        (RFC-0029 §4), head first. The `PATH_REF` (`0x14`) spelling is no longer an address.
+ */
 std::vector<std::byte> b_path_ref(std::span<const path_ref_element_t> elements) {
+    std::vector<std::byte> body;
+    for (const path_ref_element_t& e : elements) tr::wire::emit_path_pair(body, e);
     std::vector<std::byte> out;
-    (void)tr::wire::emit_path_ref(out, elements);
+    tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, body);
     return out;
 }
 
@@ -223,6 +229,26 @@ constexpr auto kBudget = 5000ms;
 constexpr auto kDropBudget = 500ms;
 
 std::uint8_t value_u8(const tlv_t& v) { return tr::detail::load_le<std::uint8_t>(v.payload); }
+
+/**
+ * @brief The `ERROR` code a `FWD{REPLY}` frame carries, or `0` when it is not an ERROR reply.
+ *
+ * RFC-0029 §6: every refusal of a PAIR element is ANSWERED, so the refusal cases below assert
+ * the code that came back rather than the silence the RFC-0024 drop used to leave.
+ */
+std::uint16_t error_code_of(std::span<const std::byte> frame) {
+    const auto dec = tr::wire::decode(frame);
+    if (!dec || dec->children.size() < 5) return 0;
+    if (value_u8(dec->children[3]) != static_cast<std::uint8_t>(reply_kind_t::ERROR)) return 0;
+    const tlv_t& status = dec->children[4];
+    if (status.type != type_t::STATUS || status.children.empty()) return 0;
+    const tlv_t& err = status.children[0];
+    if (err.type != type_t::ERROR || err.children.empty()) return 0;
+    return tr::detail::load_le<std::uint16_t>(err.children[0].payload);
+}
+
+/** @brief `tr::path::not_found` — the one answer every PAIR refusal carries (RFC-0029 §6). */
+constexpr std::uint16_t kNotFound = 0x0020;
 
 }  // namespace
 
@@ -395,7 +421,7 @@ int main() {
     }
 
     // ===== 3) a mid-chain generation mismatch drops AT A =================================
-    std::printf("A stale MID-CHAIN element drops at the consuming hop, not later (§5.3):\n");
+    std::printf("A stale MID-CHAIN element is refused at the consuming hop (RFC-0029 §6):\n");
     {
         const std::size_t before = at_b.count();
         const std::size_t before_cli = at_cli.count();
@@ -405,9 +431,11 @@ int main() {
                                      b_value_u32(0xDEADBEEFu)));
         check(!at_b.wait_for_count(before + 1, kDropBudget),
               "B never sees it — A refused the element it was asked to consume");
-        check(!at_cli.wait_for_count(before_cli + 1, kDropBudget),
-              "and it does not come BACK either: a drop, not a bounce onto the inbound link");
-        check(!inbox.wait(kDropBudget).has_value(), "and nothing answers: a drop, not an error");
+        check(at_cli.wait_for_count(before_cli + 1, kBudget),
+              "the refusal comes BACK down the inbound link, as the reply");
+        const auto refused = inbox.wait(kBudget);
+        check(refused.has_value() && error_code_of(*refused) == kNotFound,
+              "and it answers NOT_FOUND — never a delivery to the slot's new tenant");
     }
     // ===== 4) an out-of-range mid-chain index drops AT A =================================
     {
@@ -417,9 +445,12 @@ int main() {
         ch_cli.a().send(b_fwd_raw_op(kWrite, b_path_ref(absurd), b_path({"reply-ep"}), {},
                                      b_value_u32(0xDEADBEEFu)));
         check(!at_b.wait_for_count(before + 1, kDropBudget),
-              "a peer-chosen u32 maximum mid-chain drops at A rather than faulting");
-        check(!at_cli.wait_for_count(before_cli + 1, kDropBudget),
-              "and nothing goes back down the inbound link");
+              "a peer-chosen u32 maximum mid-chain is refused at A rather than faulting");
+        check(at_cli.wait_for_count(before_cli + 1, kBudget),
+              "and the refusal goes back down the inbound link");
+        const auto refused = inbox.wait(kBudget);
+        check(refused.has_value() && error_code_of(*refused) == kNotFound,
+              "as NOT_FOUND — out of range and stale are one answer");
     }
     // ===== 5) an element naming a NON-egress vertex of A drops ===========================
     {
@@ -434,10 +465,14 @@ int main() {
                                              elem_b};
         ch_cli.a().send(b_fwd_raw_op(kWrite, b_path_ref(wrong), b_path({"reply-ep"}), {},
                                      b_value_u32(0xDEADBEEFu)));
-        check(!at_b.wait_for_count(before + 1, kDropBudget),
-              "a VALID element that names no egress drops — a vref is an address, not a route");
-        check(!at_cli.wait_for_count(before_cli + 1, kDropBudget),
-              "and it is not resolved to the inbound link instead — the drop is a drop");
+        check(
+            !at_b.wait_for_count(before + 1, kDropBudget),
+            "a VALID element that names no egress is refused — a pair is an address, not a route");
+        check(at_cli.wait_for_count(before_cli + 1, kBudget),
+              "and it is answered, not resolved to the inbound link instead");
+        const auto refused = inbox.wait(kBudget);
+        check(refused.has_value() && error_code_of(*refused) != 0,
+              "as an ERROR reply (a tail below a non-connection vertex, §6 step 3)");
     }
     // ===== 6) the ablation: the sound binding still lands ================================
     {
@@ -481,7 +516,7 @@ int main() {
     // The harness routes nothing (HARNESS.md §"the execution model has ONE forwarder"), so a
     // vector for a FORWARDED bound frame can only be gated here: the pair is the frame a hop
     // receives and the frame it puts on the wire, and this is the one place both exist.
-    std::printf("The forwarded-PATH_REF vectors, byte-exact against the hop (§9.4):\n");
+    std::printf("The forwarded-PATH_REF vectors are retired as addresses (RFC-0029 S1):\n");
     {
         // A bare forwarder: `/up` is the connection vertex of the child named "up", so the
         // graph hands out slot 1 (the structural root is slot 0) at generation 0.
@@ -493,23 +528,24 @@ int main() {
         (void)r.add_child("cli", cli);
         (void)r.add_child("up", up);
 
+        // The RFC-0024 vector spells its dst as a PATH_REF (0x14): no longer an address, so the
+        // hop forwards nothing and answers the refusal down the inbound link.
+        r.on_frame("cli", vector_bytes("fwd/fwd-bound-forward"));
+        check(up.sent.empty(), "fwd/fwd-bound-forward (a 0x14 dst) is not forwarded");
+        check(cli.sent.size() == 1 && error_code_of(cli.sent[0]) != 0,
+              "and it is refused with an ERROR reply down the inbound link");
+
+        // The same route spelled as PAIR elements forwards, consuming its head element.
         const path_ref_element_t route[2] = {{.index = 1, .generation = 0},
                                              {.index = 0x0000BEEFu, .generation = 7}};
-        const std::vector<std::byte> inbound =
-            b_fwd_raw_op(kRead, b_path_ref(route), b_path({"reply-ep"}), {}, b_value_u32(9));
-        r.on_frame("cli", inbound);
-        check(up.sent.size() == 1, "the hop forwarded exactly one frame");
-        check(inbound == vector_bytes("fwd/fwd-bound-forward"),
-              "fwd/fwd-bound-forward is byte-exact the frame a forwarder receives");
-        check(up.sent.size() == 1 && up.sent[0] == vector_bytes("fwd/fwd-bound-forwarded"),
-              "fwd/fwd-bound-forwarded is byte-exact what this hop puts on the wire");
-        if (up.sent.size() == 1) {
-            std::printf("    inbound  = ");
-            for (const std::byte b : inbound) std::printf("%02x", std::to_integer<unsigned>(b));
-            std::printf("\n    egress   = ");
-            for (const std::byte b : up.sent[0]) std::printf("%02x", std::to_integer<unsigned>(b));
-            std::printf("\n");
-        }
+        r.on_frame("cli", b_fwd_raw_op(kRead, b_path_ref(route), b_path({"reply-ep"}), {},
+                                       b_value_u32(9)));
+        check(up.sent.size() == 1, "the PAIR spelling of that route is forwarded exactly once");
+        const auto dec =
+            up.sent.empty() ? std::nullopt : std::optional(tr::wire::decode(up.sent[0]));
+        check(dec && *dec && (*dec)->children.size() > 1 &&
+                  tr::wire::encode((*dec)->children[1]) == b_path_ref(std::span(&route[1], 1)),
+              "and its dst is the residual — the one element this hop did not consume");
     }
 
     // ===== 9) a hop that cannot mint STRIPS the answer (§7.1, car-3 erratum) =============

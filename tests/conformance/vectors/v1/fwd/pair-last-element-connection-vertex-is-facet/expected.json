@@ -1,0 +1,12 @@
+{
+  "name": "pair-last-element-connection-vertex-is-facet",
+  "category": "fwd",
+  "hex": "0F402100010001000006000B00001608070000000100000006000900087265706C792D6570",
+  "total_bytes": 37,
+  "decoded": {
+    "type": "0x0F FWD",
+    "structured": true,
+    "meaning": "FWD{ op=READ, dst=<pair 7:1>, src=/reply-ep } - the ONLY element dereferences to a connection vertex. With no tail there is no hop: the element addresses the connection vertex itself (its value and its :-facets) and this node is the terminus (RFC-0029 6 step 3, RFC-0004 A's dual nature).",
+    "note": "Byte-identical in shape to fwd/pair-terminus - whether 7:1 names a connection vertex or an ordinary one is a fact about the owner's index, not about these bytes, and only the tail's presence decides hop versus terminus."
+  }
+}
