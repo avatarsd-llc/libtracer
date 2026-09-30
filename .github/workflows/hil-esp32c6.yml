@@ -70,7 +70,8 @@ on:
   # Label-gated, NOT path-gated. A `paths:` filter here would defeat the label: a
   # maintainer who labels a PR to ask for a hardware run means that PR, whatever it
   # touched. The cost of the missing filter is one ~15 s hosted `guard` check per
-  # PR, which is what makes the label the whole trigger.
+  # PR, which is what makes the label the whole trigger. `labeled` is listed for the
+  # `hil` label only; `guard` filters out every other label (#1617).
   pull_request:
     types: [opened, synchronize, reopened, labeled]
   # The standing instrument. Off the hour to miss the cron stampede, and late
@@ -90,6 +91,14 @@ jobs:
   # "is there a device?" on the machine with the device is a question that hangs when
   # the answer is no.
   guard:
+    # `labeled` fires for EVERY label, and `reviewable.yml` applies `reviewable` to
+    # each green head — so without this filter every green head started a hosted
+    # guard that concluded "not labelled 'hil'" and, on completing, woke
+    # reviewable.yml once more to find its label already there (#1617). Only the
+    # label that summons a hardware run is a reason to re-decide; any other label
+    # changes nothing the guard reads, since opened/synchronize/reopened already
+    # evaluated this head. The skip happens before a runner is allocated.
+    if: github.event.action != 'labeled' || github.event.label.name == 'hil'
     runs-on: ubuntu-24.04
     # Two `gh api` calls at worst. 10 = the short-job floor used across this repo.
     timeout-minutes: 10
