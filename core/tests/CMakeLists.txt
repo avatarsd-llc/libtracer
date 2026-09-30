@@ -1016,6 +1016,14 @@ if(LIBTRACER_NET_PLANE)
     target_link_libraries(acl_test PRIVATE libtracer)
     libtracer_test_warnings(acl_test)
     add_test(NAME acl COMMAND acl_test)
+
+    # #1665 — acl_allows reads the ACE-expiry clock only once an ACL will be evaluated.
+    # Counts libstdc++'s system_clock::now() by interposition; exit 77 = not observable here.
+    add_executable(acl_clock_read_test acl_clock_read_test.cpp)
+    target_link_libraries(acl_clock_read_test PRIVATE libtracer)
+    libtracer_test_warnings(acl_clock_read_test)
+    add_test(NAME acl_clock_read COMMAND acl_clock_read_test)
+    set_tests_properties(acl_clock_read PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
 if(LIBTRACER_NET_PLANE)
