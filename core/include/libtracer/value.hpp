@@ -545,7 +545,7 @@ class value_t {
      *
      * The value holds one reference to the block it lives in, through its own link, so the
      * block outlives the header by construction; the last value reference's teardown
-     * (@ref destroy) moves that link out before dropping it.
+     * (`destroy()`) moves that link out before dropping it.
      */
     [[gnu::noinline, gnu::cold]] static value_t* make_loaned(rope_t& links) noexcept {
         view_t& link = links.links()[0];
