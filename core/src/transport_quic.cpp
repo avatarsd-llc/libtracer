@@ -249,6 +249,9 @@ struct quic_private_cfg_t {
     bool insecure = false; /**< @brief DEV ONLY: skip server-certificate validation on
                                        the DIAL side entirely. Must be asked for
                                        explicitly — the default is to verify (DIAL). */
+    bool retired = false;  /**< @brief The config still carries a retired `ca`/`cert`/`key`
+                                       key: refused, never skipped — skipping would
+                                       silently change the link's trust. */
 };
 
 /** @brief Process-wide count of `quic` SPECs refused for carrying `insecure` = nonzero on a
@@ -258,13 +261,15 @@ std::atomic<std::uint64_t> g_insecure_refusals{0};
 
 /** @brief The shared config_reader_t walk over the quic-private keys: NAME "tls"
  *         NAME <profile>, NAME "insecure" VALUE <u8>; unknown pairs ignored
- *         (forward-compat) — including the retired `ca`/`cert`/`key`, which no
- *         longer mean anything here. Pair-consuming (#927). */
+ *         (forward-compat). The retired `ca`/`cert`/`key` are the exception: their
+ *         presence (any value type) is recorded so the factory refuses the SPEC.
+ *         Pair-consuming (#927). */
 [[nodiscard]] quic_private_cfg_t parse_quic_config(const wire::tlv_t* raw_config) {
     quic_private_cfg_t out;
     const config_reader_t cfg(raw_config);
     if (const auto v = cfg.name("tls")) out.tls = *v;
     if (const auto v = cfg.flag("insecure")) out.insecure = *v;
+    out.retired = cfg.has("ca") || cfg.has("cert") || cfg.has("key");
     return out;
 }
 
@@ -291,9 +296,11 @@ transport_vertex_t::transport_factory_t quic_transport_factory(
         }
         // The SPEC names a profile; the app's table decides what that name means. A
         // name the app never registered is a config error, answered before any file
-        // is opened — the status says nothing about the filesystem.
+        // is opened — the status says nothing about the filesystem. So is a stale
+        // config still carrying a retired path key: skipping it would quietly move a
+        // dial that pinned a private CA onto the system trust store.
         const tls_profile_t* const prof = find_tls_profile(profiles, priv.tls);
-        if (prof == nullptr && !priv.tls.empty())
+        if (priv.retired || (prof == nullptr && !priv.tls.empty()))
             return std::unexpected(graph::status_t::TYPE_MISMATCH);
         std::unique_ptr<quic_transport_t> t;
         if (s.role == conn_role_t::DIAL) {

@@ -289,9 +289,11 @@ one with a resource to name and the only one with an H3 handshake to bound:
 `tools/gen-dev-cert.sh` emits a self-signed pair for a profile's LISTEN side.
 
 The keys `ca`, `cert` and `key` no longer exist. Through v0.16 they carried
-filesystem paths straight from the SPEC; a SPEC that still carries them now has them
-ignored like any unknown pair, so a dial falls back to the default profile (or the
-system trust store) and a listen without a profile is refused. Migration: move
+filesystem paths straight from the SPEC. A SPEC that still carries any of them is
+now **refused** with `TYPE_MISMATCH` — the same answer as an unknown profile, before
+any file is opened — rather than skipped like an unknown pair: skipping would move a
+stale dial that pinned a private CA onto the system trust store without a word.
+Migration: move
 `ca`/`cert`/`key` into the app's link config — a `tls_profile_t` table passed to the
 factory — and, if more than one is needed, select it with `tls`.
 

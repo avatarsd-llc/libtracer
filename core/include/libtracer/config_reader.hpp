@@ -82,6 +82,25 @@ class config_reader_t {
     }
 
     /**
+     * @brief Whether @p key appears as a key in any well-paired position, whatever
+     *        its value's type or width.
+     *
+     * The presence test for a key a reader must REFUSE rather than skip (a retired
+     * key whose silent omission would change behaviour): unlike the typed
+     * accessors, a value of the wrong type still counts. Same pair-consuming walk
+     * as find(), so a value child spelling @p key is never mistaken for it.
+     */
+    [[nodiscard]] bool has(std::string_view key) const noexcept {
+        if (config_ == nullptr) return false;
+        const std::vector<tlv_t>& ch = config_->children;
+        for (std::size_t i = 0; i + 1 < ch.size(); i += 2) {
+            if (ch[i].type != type_t::NAME) break;
+            if (detail::as_string_view(ch[i].payload) == key) return true;
+        }
+        return false;
+    }
+
+    /**
      * @brief The raw payload bytes of @p key (a `NAME` value child), if present.
      *
      * The byte-span twin of name() for a value that is a wire segment rather than

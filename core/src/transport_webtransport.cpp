@@ -1136,6 +1136,10 @@ struct wt_private_cfg_t {
                                                0 = webtransport_transport_t::
                                                kMaxHandshakeBytes, and TIGHTEN-ONLY
                                                against it (both roles, #1408). */
+    bool retired = false;          /**< @brief The config still carries a retired
+                                               `ca`/`cert`/`key` key: refused, never skipped
+                                               — skipping would silently change the link's
+                                               trust. */
 };
 
 /** @brief Process-wide count of `webtransport` SPECs refused for carrying `insecure` = nonzero on a
@@ -1146,7 +1150,8 @@ std::atomic<std::uint64_t> g_insecure_refusals{0};
 /** @brief The shared config_reader_t walk over the webtransport-private keys: NAME
  *         "tls" NAME <profile>, NAME "insecure" VALUE <u8>, NAME "path" NAME
  *         <resource>, NAME "max_handshake" VALUE <u32>; unknown pairs ignored
- *         (forward-compat) — including the retired `ca`/`cert`/`key`. Pair-consuming
+ *         (forward-compat); the retired `ca`/`cert`/`key` are recorded (any value
+ *         type) so the factory refuses the SPEC. Pair-consuming
  *         (#927), like every other config parse: a forward-compat pair whose string
  *         value reads `"tls"` must not bind the FOLLOWING child as the profile name. */
 [[nodiscard]] wt_private_cfg_t parse_wt_config(const wire::tlv_t* raw_config) {
@@ -1156,6 +1161,7 @@ std::atomic<std::uint64_t> g_insecure_refusals{0};
     if (const auto v = cfg.flag("insecure")) out.insecure = *v;
     if (const auto v = cfg.name("path")) out.path = std::string(*v);
     out.max_handshake = static_cast<std::size_t>(cfg.u32("max_handshake").value_or(0));
+    out.retired = cfg.has("ca") || cfg.has("cert") || cfg.has("key");
     return out;
 }
 
@@ -1182,9 +1188,11 @@ transport_vertex_t::transport_factory_t webtransport_transport_factory(
         }
         // The SPEC names a profile; the app's table decides what that name means. A
         // name the app never registered is a config error, answered before any file
-        // is opened — the status says nothing about the filesystem.
+        // is opened — the status says nothing about the filesystem. So is a stale
+        // config still carrying a retired path key: skipping it would quietly move a
+        // dial that pinned a private CA onto the system trust store.
         const tls_profile_t* const prof = find_tls_profile(profiles, priv.tls);
-        if (prof == nullptr && !priv.tls.empty())
+        if (priv.retired || (prof == nullptr && !priv.tls.empty()))
             return std::unexpected(graph::status_t::TYPE_MISMATCH);
         std::unique_ptr<webtransport_transport_t> t;
         if (s.role == conn_role_t::DIAL) {

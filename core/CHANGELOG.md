@@ -45,9 +45,13 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   profile anchor verifies against the system trust store, as before. The factory keeps
   the span, not a copy (no library-held buffer): the table must outlive the factory and
   its transports. `rx_backend` moves to the second parameter. No compatibility shim: a
-  SPEC still carrying `ca`/`cert`/`key` has them ignored as unknown pairs. `insecure`
-  keeps the `kAllowInsecureTls` gate of the entry above, which this change composes with:
-  that entry's "reach a self-signed peer with `ca`" now means a profile's `ca_file`. The direct `quic_transport_t` / `webtransport_transport_t` constructors
+  SPEC still carrying `ca`, `cert` or `key` (any value type) is now **refused** with
+  `TYPE_MISMATCH`, the same code as an unknown profile and before any file is opened,
+  so a stale config that pinned a private CA cannot silently fall back to the system
+  trust store. New `config_reader_t::has(key)` is the type-blind presence test the
+  refusal uses. `insecure` keeps the `kAllowInsecureTls` gate of the entry below, which
+  this change composes with: that entry's "reach a self-signed peer with `ca`" now means
+  a profile's `ca_file`. The direct `quic_transport_t` / `webtransport_transport_t` constructors
   still take paths, since only the application calls them.
   **Migration:** move `ca`/`cert`/`key` into the app's link config — build a
   `tls_profile_t` table, pass it to the factory, and name a non-default profile from

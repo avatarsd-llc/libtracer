@@ -872,14 +872,16 @@ void test_spec_cannot_name_tls_files() {
     tr::net::conn_spec_t dial("dial");
     dial.port(served.local_port()).kind("quic").addr("127.0.0.1").text("ca", g_cert);
     const auto d = node.write(path_t("/net/quic-client/conn"), dial.view());
-    check(!d.has_value(), "a SPEC `ca` path does not become the dialer's trust anchor");
+    check(!d.has_value() && d.error() == tr::graph::status_t::TYPE_MISMATCH,
+          "a SPEC `ca` path is REFUSED with TYPE_MISMATCH, never a trust anchor");
     check(router.registry().by_name("net/quic-client/dial") == nullptr,
           "the refused dial leaves no connection behind");
 
     tr::net::conn_spec_t listen("listen");
     listen.port(0).kind("quic").text("cert", g_cert).text("key", g_key);
     const auto l = node.write(path_t("/net/quic-server/conn"), listen.view());
-    check(!l.has_value(), "a SPEC `cert`/`key` pair does not become the served credential");
+    check(!l.has_value() && l.error() == tr::graph::status_t::TYPE_MISMATCH,
+          "a SPEC `cert`/`key` pair is REFUSED with TYPE_MISMATCH, never a credential");
     check(router.registry().by_name("net/quic-server/listen") == nullptr,
           "the refused listen leaves no listener behind");
 
@@ -926,6 +928,25 @@ void test_app_default_profile() {
     const auto d =
         node.write(path_t("/net/quic-client/conn"), quic_conn_spec("cli", port, "127.0.0.1"));
     check(d.has_value(), "a DIAL with no `tls` key verifies against the default profile's CA");
+
+    // A stale config still carrying a retired key is REFUSED even where a usable
+    // default profile exists: skipping `ca` would silently re-anchor the dial. Any
+    // value type counts, and the value is never opened (it names no real file).
+    for (const std::string_view retired : {"ca", "cert", "key"}) {
+        tr::net::conn_spec_t stale("stale");
+        stale.port(port).kind("quic").addr("127.0.0.1").text(retired, "/nonexistent.pem");
+        const auto s = node.write(path_t("/net/quic-client/conn"), stale.view());
+        check(!s.has_value() && s.error() == tr::graph::status_t::TYPE_MISMATCH,
+              "a DIAL SPEC carrying a retired TLS path key is REFUSED with TYPE_MISMATCH");
+    }
+    tr::net::conn_spec_t stale_u8("stale-u8");
+    stale_u8.port(0).kind("quic").u8("cert", 1);
+    const auto su = node.write(path_t("/net/quic-server/conn"), stale_u8.view());
+    check(!su.has_value() && su.error() == tr::graph::status_t::TYPE_MISMATCH,
+          "a LISTEN SPEC carrying a retired key under any value type is REFUSED");
+    check(router.registry().by_name("net/quic-client/stale") == nullptr &&
+              router.registry().by_name("net/quic-server/stale-u8") == nullptr,
+          "no stale-key refusal leaves a connection behind");
 }
 
 }  // namespace
