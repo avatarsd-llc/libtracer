@@ -837,6 +837,15 @@ static_assert(std::atomic<write_seq_t>::is_always_lock_free,
 struct vertex_layout_gate_t;
 
 /**
+ * @brief TEST-ONLY door that presets a vertex's write sequence, so a test can drive the real
+ *        atomic through the 2^32 wrap (#1621) without 4 x 10^9 publishes.
+ *
+ * Declared here and never defined by the library: only `core/tests/write_seq_test.cpp`
+ * defines it. It is not part of the API; code outside the test suite must not define it.
+ */
+struct vertex_seq_test_door_t;
+
+/**
  * @brief An L4 graph vertex: a named, addressable position holding a value, a bounded
  *        history, or a user handler (docs/reference/11 §roles).
  *
@@ -1017,8 +1026,9 @@ class vertex_t {
     }
 
    private:
-    friend class graph_t;                // sole caller of the map-lock mutators below (#867).
-    friend struct vertex_layout_gate_t;  // reads the private member offsets the #1285 gate pins.
+    friend class graph_t;                  // sole caller of the map-lock mutators below (#867).
+    friend struct vertex_layout_gate_t;    // reads the private member offsets the #1285 gate pins.
+    friend struct vertex_seq_test_door_t;  // test-only: presets write_seq_ to reach the wrap.
 
     /**
      * @brief Fill this node with a registration's identity: set the role and handlers, and
@@ -1529,7 +1539,7 @@ class vertex_t {
     }
 
     /** @brief The current write sequence (bumped per assign — the await predicate base).
-     *         32-bit and wrapping (@ref write_seq_t): compare it for equality only. */
+     *         32-bit and wrapping (`write_seq_t`): compare it for equality only. */
     [[nodiscard]] write_seq_t current_seq() const {
         // Lock-free (#555): the sequence is atomic, and a publish no longer holds the stripe
         // mutex while bumping it — so taking the lock here would synchronize against nothing.

@@ -11,8 +11,8 @@
  * not an event. This test pins:
  *
  *  - the WIDTH: `write_seq_t` is 4 bytes and a lock-free atomic (no libatomic call on rv32);
- *  - the WRAP: a snapshot one bump before the wrap sees the change, and a real vertex's
- *    `wait_for_change` fed that snapshot returns at once;
+ *  - the WRAP: a test-only door presets a real vertex's atomic to 0xFFFFFFFE, two bumps wrap it
+ *    through 0, and `wait_for_change` (blocked or not) and `graph_t::await` see every bump;
  *  - the WAKE on all three shapes a publish can take, each of which bumps the sequence: a
  *    STORED_VALUE vertex, a HANDLER vertex (stores nothing; its `on_write` consumes), and a
  *    `retention_t::NONE` value vertex (stores nothing). The last two are why the sequence
@@ -22,6 +22,7 @@
  */
 
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -32,6 +33,18 @@
 #include "libtracer/vertex.hpp"
 #include "test_support.hpp"
 #include "test_values.hpp"
+
+namespace tr::graph {
+
+/** @brief The test-only door `vertex.hpp` declares (#1621): presets the write sequence. */
+struct vertex_seq_test_door_t {
+    /** @brief Store @p seq into @p v's write sequence (seq_cst, like the bump). */
+    static void preset(vertex_t& v, write_seq_t seq) {
+        v.write_seq_.store(seq, std::memory_order_seq_cst);
+    }
+};
+
+}  // namespace tr::graph
 
 namespace {
 
@@ -74,20 +87,72 @@ void test_wrap_arithmetic() {
           "exactly 2^32 bumps alias to 'no change' (49 days at 1 kHz; bounded by the timeout)");
 }
 
-/** @brief The await predicate on a REAL vertex, fed a snapshot one bump before the wrap. */
+/**
+ * @brief The await predicate on a REAL vertex whose atomic is driven through 2^32 -> 0.
+ *
+ * The test door presets `write_seq_` to 0xFFFFFFFE; two `note_write()` bumps then really wrap
+ * the counter (0xFFFFFFFE -> 0xFFFFFFFF -> 0), and every snapshot must see each bump.
+ */
 void test_wait_across_wrap() {
-    std::printf("write sequence: wait_for_change across the wrap:\n");
+    std::printf("write sequence: wait_for_change while the atomic wraps through 0:\n");
     tr::graph::vertex_t v{role_t::STORED_VALUE, {}, {}};
-    const write_seq_t now = v.current_seq();
-    // A fresh vertex starts at 0, so a snapshot one bump behind it is spelled 0xFFFFFFFF.
-    const write_seq_t before = static_cast<write_seq_t>(now - 1u);
-    check(now == 0 && before == 0xFFFFFFFFu, "the snapshot straddles the wrap");
-    check(v.wait_for_change(before, 0ms),
-          "a snapshot one bump behind, across the wrap, is a change");
-    check(!v.wait_for_change(now, 5ms), "the current sequence is not a change (timeout)");
+    tr::graph::vertex_seq_test_door_t::preset(v, 0xFFFFFFFEu);
+    const write_seq_t s0 = v.current_seq();
+    check(s0 == 0xFFFFFFFEu, "the door presets the sequence two bumps before the wrap");
+    check(!v.wait_for_change(s0, 5ms), "no bump yet: the preset snapshot times out");
+
     v.note_write();
-    check(static_cast<write_seq_t>(v.current_seq() - now) == 1u, "one bump moves it by one");
-    check(v.wait_for_change(now, 0ms), "and the old snapshot now sees the change");
+    const write_seq_t s1 = v.current_seq();
+    check(s1 == 0xFFFFFFFFu, "first bump: 0xFFFFFFFE -> 0xFFFFFFFF");
+    check(v.wait_for_change(s0, 0ms), "the first bump wakes the preset snapshot");
+    check(!v.wait_for_change(s1, 5ms), "and 0xFFFFFFFF itself is not a change yet");
+
+    // A BLOCKED waiter across the wrap: the snapshot is 0xFFFFFFFF, taken on this thread before
+    // the waiter starts (level-triggered, as in vertex_test), and the bump lands it on 0.
+    std::atomic<bool> woke{false};
+    std::thread waiter([&] {
+        if (v.wait_for_change(s1, 5s)) woke.store(true);
+    });
+    std::this_thread::sleep_for(10ms);  // widens the blocked case; not load-bearing
+    v.note_write();
+    waiter.join();
+    check(v.current_seq() == 0u, "second bump: 0xFFFFFFFF -> 0, the atomic really wrapped");
+    check(woke.load(), "the bump across the wrap wakes a blocked waiter");
+    check(v.wait_for_change(s1, 0ms) && v.wait_for_change(s0, 0ms),
+          "both pre-wrap snapshots see the change after the wrap");
+    check(!v.wait_for_change(0u, 5ms), "the post-wrap value is not a change to itself");
+}
+
+/**
+ * @brief `graph_t::await` returns across a sequence preset to the wrap.
+ *
+ * The vertex's sequence is preset to 0xFFFFFFFF, so the first publish lands it on 0. The
+ * writer delays its first write so the awaiter normally snapshots 0xFFFFFFFF first, then
+ * re-arms until the awaiter is out (#1418); the wrap-exact assertions are the
+ * `wait_for_change` ones above, which is the predicate `await` runs.
+ */
+void test_graph_await_across_wrap() {
+    std::printf("write sequence: graph_t::await across the wrap:\n");
+    graph_t g;
+    const vertex_handle_t h = g.register_vertex(path_t("/seq/wrap"), role_t::STORED_VALUE);
+    tr::graph::vertex_t* v = std::bit_cast<tr::graph::vertex_t*>(h);
+    tr::graph::vertex_seq_test_door_t::preset(*v, 0xFFFFFFFFu);
+    std::atomic<bool> awaited{false};
+    std::thread writer([&] {
+        std::this_thread::sleep_for(20ms);
+        const auto deadline = std::chrono::steady_clock::now() + 30s;  // backstop
+        while (!awaited.load(std::memory_order_acquire) &&
+               std::chrono::steady_clock::now() < deadline) {
+            (void)g.write(h, make_value({0x77}));
+            std::this_thread::sleep_for(2ms);
+        }
+    });
+    const auto r = g.await(h, 5s);
+    awaited.store(true, std::memory_order_release);
+    writer.join();
+    check(r.has_value() && std::to_integer<int>((*r)->only().bytes()[0]) == 0x77,
+          "await returns the value published across the wrap");
+    check(v->current_seq() < 0x80000000u, "the sequence wrapped through 0 (small again)");
 }
 
 /**
@@ -149,6 +214,7 @@ void test_await_wakes_every_role() {
 int main() {
     test_wrap_arithmetic();
     test_wait_across_wrap();
+    test_graph_await_across_wrap();
     test_await_wakes_every_role();
     return tr::testing::summary("write_seq");
 }
