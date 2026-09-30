@@ -29,11 +29,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `synchronized_pool_t<critical_guard_t>`, over the same interrupt-masked guard the chip's LKV
   slot uses. **Migration:** a direct `synchronized_pool_t<portmux_sync_t>` becomes
   `tr::esp::critical_pool_t`.
-- **`esp_ws_client_link_t::stats_t` gains `dial_attempts` and `dial_failures`
-  ([#1606](https://github.com/avatarsd-llc/libtracer/issues/1606) asks 1–2).** A failed dial
+- **A failed WebSocket client dial releases its handles at once
+  ([#1606](https://github.com/avatarsd-llc/libtracer/issues/1606) ask 2).** A failed dial
   now destroys its client and transport handles before the backoff sleep, instead of holding
-  them until the next attempt. Each failure is counted and logged, with the warning limited to
-  one a minute.
+  them until the next attempt.
+- **BREAKING — dial counting and the failed-dial warning are opt-in, per image
+  ([#1662](https://github.com/avatarsd-llc/libtracer/issues/1662); #1606 ask 1).** New Kconfig
+  option `CONFIG_LIBTRACER_WS_CLIENT_DIAL_STATS`, default `n`. With it on,
+  `esp_ws_client_link_t::stats_t` has `dial_attempts` and `dial_failures`, and each failed
+  dial logs a WARN, limited to one a minute. With it off, `stats_t` has neither field, the
+  link carries no dial counters, and a failed dial logs nothing. The choice is made at compile
+  time, so a link pays nothing for observability the application did not ask for.
+  `esp_ws_client_link_t::kDialStats` reports the setting.
+  **Migration:** code that reads `stats().dial_attempts` or `stats().dial_failures` sets
+  `CONFIG_LIBTRACER_WS_CLIENT_DIAL_STATS=y` in its `sdkconfig.defaults`. Without that, the
+  read fails to compile.
 
 - **BREAKING (inherited from core) — the pin ratio is gone; chip targets copy always.** Core
   replaced `set_pin_payload_ratio` / `kPinPayloadRatio` with an absolute copy-or-share threshold
@@ -961,7 +971,7 @@ core 0.10.0 reaches it.
 - **Public headers now propagate their ESP-IDF dependencies (#963.4).** `esp_http_server`,
   `tcp_transport` and `esp_driver_twai` moved from `PRIV_REQUIRES` to **`REQUIRES`**. Those
   three are named by headers under `include/libtracer_esp/` (`httpd_ws_link.hpp:173`,
-  `esp_ws_client_link.hpp:195`, `twai_link.hpp:36-37`), and `PRIV_REQUIRES` does not
+  `esp_ws_client_link.hpp:199`, `twai_link.hpp:36-37`), and `PRIV_REQUIRES` does not
   propagate include dirs — so a dependent that included one of ours without independently
   requiring the base component died with `esp_http_server.h: No such file or directory` and
   no hint that libtracer was the cause. `lwip` and `esp_driver_gpio` stay private: they are

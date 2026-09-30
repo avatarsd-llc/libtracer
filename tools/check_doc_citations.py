@@ -876,9 +876,9 @@ ANCHORS = [
     ('tools/cortexm0_footprint.py:151', 'cxx_flags = ['),
     ('tools/cortexm0_footprint.py:158', '"-DLIBTRACER_NO_ATOMIC",'),
     ('tools/cortexm0_footprint.py:172', '"--specs=nano.specs",'),
-    ('core/tests/CMakeLists.txt:1902', 'add_executable(substrate_test_no_atomic'),
-    ('core/tests/CMakeLists.txt:1917', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
-    ('core/tests/CMakeLists.txt:1918', '    LIBTRACER_NO_ATOMIC'),
+    ('core/tests/CMakeLists.txt:1920', 'add_executable(substrate_test_no_atomic'),
+    ('core/tests/CMakeLists.txt:1935', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
+    ('core/tests/CMakeLists.txt:1936', '    LIBTRACER_NO_ATOMIC'),
     # The leading indent is load-bearing: the bare token also appears in the comment
     # three lines above the executable, and an anchor that matches both is not an anchor.
 
@@ -1101,7 +1101,7 @@ ANCHORS = [
      '*        count is chosen by the sending peer) and answered by DROPPING the'),
     ('core/src/transport_vertex.cpp:62',
      'if (const auto v = cfg.u32("backoff")) s.backoff_ms = *v;'),
-    ('integrations/esp-idf/libtracer/include/libtracer_esp/esp_ws_client_link.hpp:195',
+    ('integrations/esp-idf/libtracer/include/libtracer_esp/esp_ws_client_link.hpp:199',
      '#include "esp_transport.h"'),
     ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:173',
      '#include "esp_http_server.h"'),
