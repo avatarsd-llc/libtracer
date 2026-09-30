@@ -114,7 +114,8 @@ void test_bubbling_and_idle_walk() {
 
     // Idle: nobody listens above — a write never walks ancestors.
     check(g.write(abc, make_value({0x01})).has_value(), "leaf write with no subscribers");
-    check(g.ancestor_walks() == 0, "no subscriber anywhere => no ancestor walk");
+    if constexpr (tr::graph::kInstrumentCounters)
+        check(g.ancestor_walks() == 0, "no subscriber anywhere => no ancestor walk");
 
     std::vector<std::vector<std::byte>> at_a;
     std::vector<std::vector<std::byte>> at_x;
@@ -130,7 +131,8 @@ void test_bubbling_and_idle_walk() {
     const std::vector<std::byte> written{std::byte{0x01}, std::byte{0x00}, std::byte{0x02},
                                          std::byte{0x00}, std::byte{0xAB}, std::byte{0xCD}};
     check(g.write(abc, make_value(written)).has_value(), "leaf write under a subscribed ancestor");
-    check(g.ancestor_walks() == 1, "listening ancestor => exactly one walk");
+    if constexpr (tr::graph::kInstrumentCounters)
+        check(g.ancestor_walks() == 1, "listening ancestor => exactly one walk");
     check(at_a.size() == 1, "ancestor subscriber notified once");
     check(at_a.size() == 1 && std::ranges::equal(at_a[0], written),
           "ancestor receives the written TLV as-is");
@@ -139,13 +141,15 @@ void test_bubbling_and_idle_walk() {
     // A write at the subscription point itself is the trivial (leaf) case.
     check(g.write(a, make_value({0x09, 0x00, 0x00, 0x00})).has_value(), "write at /a itself");
     check(at_a.size() == 2, "subscriber at /a also observes writes to /a");
-    check(g.ancestor_walks() == 1, "write at /a (nothing above) does not walk");
+    if constexpr (tr::graph::kInstrumentCounters)
+        check(g.ancestor_walks() == 1, "write at /a (nothing above) does not walk");
 
     // Unsubscribe (clear the slot) => the walk stops.
     check(g.write(path_t("/a:subscribers[0]"), make_value({0x09, 0x00, 0x00, 0x00})).has_value(),
           "clear /a:subscribers[0] (unsubscribe)");
     check(g.write(abc, make_value({0x05})).has_value(), "leaf write after unsubscribe");
-    check(g.ancestor_walks() == 1, "unsubscribed => the walk stops again");
+    if constexpr (tr::graph::kInstrumentCounters)
+        check(g.ancestor_walks() == 1, "unsubscribed => the walk stops again");
     check(at_a.size() == 2, "cleared slot no longer delivers");
     (void)x;
 }

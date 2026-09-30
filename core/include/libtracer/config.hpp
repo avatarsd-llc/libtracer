@@ -594,6 +594,33 @@ struct default_config_t {
      * `static constexpr std::size_t kSelfHealWorkerStackBytes = 4096;`
      */
     static constexpr std::size_t kSelfHealWorkerStackBytes = 0;
+
+    /**
+     * @brief Whether @ref tr::graph::graph_t carries its two INSTRUMENTATION counters —
+     *        `ancestor_walks()` and `target_canonical_resolves()` (#1664).
+     *
+     * Both are relaxed 64-bit `fetch_add`s on a node-wide counter that nothing in the library
+     * reads: no `:stats` noun, no wire surface, no decision. Only tests and benches consume
+     * them, as ablations proving a write took the leg its name claims — the bubbling walk
+     * (RFC-0005) and the target-edge canonical fallback (#830). Paying for them on a shipped
+     * node is pure loss, and the loss is not uniform: on rv32 a 64-bit atomic RMW is a
+     * libatomic call, taken once per write that has an ancestor subscriber and once per
+     * unbound target-edge delivery.
+     *
+     * **Default `false` — the lean choice.** Closed out, the two members occupy no bytes of
+     * `graph_t` (`[[no_unique_address]]` over an empty type), the two increment sites compile
+     * to nothing, and the accessors answer `0`. It is a compile-time member rather than the
+     * `LIBTRACER_PIN_INSTRUMENT` macro `%pin_instrument.hpp` uses, for ADR-0068's reason: a
+     * macro can differ per TU, and these counters change `graph_t`'s layout.
+     *
+     * **Who sets it.** The core test build and the `bench/` build's
+     * `LIBTRACER_INSTRUMENT_COUNTERS` option opt in through the checked-in preset fragment
+     * `core/tests/instrumented/libtracer/config_override.hpp`. A test that asserts on either
+     * counter gates the assertion on this knob, so a CI leg binding its own fragment (which
+     * inherits `false`) still runs the rest of the test. Override fragment:
+     * `static constexpr bool kInstrumentCounters = true;`
+     */
+    static constexpr bool kInstrumentCounters = false;
 };
 
 }  // namespace tr::graph
@@ -654,6 +681,8 @@ inline constexpr bool kWeaklyOrdered = config_t::kWeaklyOrdered;
 using acl_policy_t = config_t::acl_policy_t;
 /** @brief @ref default_config_t::kSingleWriter for this build. */
 inline constexpr bool kSingleWriter = config_t::kSingleWriter;
+/** @brief @ref default_config_t::kInstrumentCounters for this build. */
+inline constexpr bool kInstrumentCounters = config_t::kInstrumentCounters;
 /** @brief @ref default_config_t::reader_guard_t for this build. */
 using reader_guard_t = config_t::reader_guard_t;
 /** @brief @ref default_config_t::lkv_slot_t for this build. */

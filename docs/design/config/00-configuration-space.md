@@ -32,7 +32,7 @@ rather than a silent behavioural fork between translation units.
 
 The sizes and policies are members of **one named type**, `default_config_t`
 (`core/include/libtracer/config.hpp:81`), bound once by `using config_t = default_config_t;`
-(`:629`). An application declares its own by inheriting and overriding what differs (`:65-77`):
+(`:656`). An application declares its own by inheriting and overriding what differs (`:65-77`):
 
 ```cpp
 struct my_node_config_t : tr::graph::default_config_t {
@@ -43,7 +43,7 @@ using config_t = my_node_config_t;
 
 Inheriting means a knob added later does not break the preset — it inherits the new default
 rather than failing to compile. The rest of the library names the derived spellings re-exported
-below the traits type (`:628-651`), each of which is exactly its traits member, so introducing
+below the traits type (`:655-678`), each of which is exactly its traits member, so introducing
 `config_t` moved no call site.
 
 It is **bound once, not threaded as a template parameter**, and
@@ -227,18 +227,19 @@ is a knob the fragment does not state at all (#1244).
 | `kShareThresholdBytes` (`:253`) | size | 4,096 — RFC-0028 §11 ruling 2 | `SIZE_MAX`, copy always (`integrations/esp-idf/libtracer/CMakeLists.txt:400`) |
 | `acl_policy_t` (`:262`) | policy type | `allow_only_policy_t` | inherited — the full policy is not selectable |
 | `lkv_slot_t` (`:312`) | policy type | `single_writer_slot_t` | `single_writer_slot_t` on every chip, with `kSingleWriter = true` and `reader_guard_t = tr::esp::critical_guard_t`; inherited on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:347`) |
-| `kSpinWaitSafe` (`:685`) | target fact | `true` | derived from `IDF_TARGET` — `false` on every chip, `true` on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:336`) |
+| `kSpinWaitSafe` (`:714`) | target fact | `true` | derived from `IDF_TARGET` — `false` on every chip, `true` on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:336`) |
 | `kWeaklyOrdered` (`:474`) | target fact | `true` | inherited — every ESP chip is weakly ordered, which is the default |
-| `kBusLinks` (`:638`) | module presence | `true` | inherited — the component builds the full peer-named tier |
+| `kBusLinks` (`:665`) | module presence | `true` | inherited — the component builds the full peer-named tier |
 | `kSelfHealLinks` (`:569`) | module presence | `true` | menuconfig `CONFIG_LIBTRACER_SELF_HEAL_LINKS` (`integrations/esp-idf/libtracer/CMakeLists.txt:364`) |
 | `kSelfHealWorkerStackBytes` (`:596`) | size | `0` — the platform default | menuconfig `CONFIG_LIBTRACER_SELF_HEAL_WORKER_STACK` (`integrations/esp-idf/libtracer/CMakeLists.txt:370`) |
+| `kInstrumentCounters` (`:623`) | instrumentation | `false` — compiled out | inherited — only the core test build and `bench/`'s `LIBTRACER_INSTRUMENT_COUNTERS` bind it (#1664) |
 
 Two CMake variables survive for one transition release, `-DLIBTRACER_ACL_FULL` and
 `-DLIBTRACER_LKV_SLOT`; `core/CMakeLists.txt` writes a fragment on their behalf. The five other
 cache variables this table used to list were deleted with the template (#1142).
 
 Each is documented at its declaration with what it costs and when to move it; that header is
-the reference, not this table. What matters here is the shape: **thirteen knobs, all named, all
+the reference, not this table. What matters here is the shape: **fourteen knobs, all named, all
 finite.** Three are counts (`kVertexLockStripes`, `kHazardReaderSlots`, `kEdgePinSlots`), one is a
 padding width, one is a per-target RAM ceiling, two are sizes (`kShareThresholdBytes` and the
 thread stack size `kSelfHealWorkerStackBytes`), two are type bindings, two are
@@ -253,7 +254,14 @@ and the guard in `vertex.hpp` reads it to refuse a `kDeliverySkipOrder` weaker t
 which for the ordering fact is the STRICT one: asserting on a TSO host costs nothing, while a
 target that wrongly claims TSO disarms the check on the one class it exists for.
 
-Two of the thirteen carry no build-system variable at all. `kMaxVertexBytes64` / `kMaxVertexBytes32`
+`kInstrumentCounters` is the one knob that selects no behaviour at all: it decides whether
+`graph_t` carries the two counters that only tests and benches read (`ancestor_walks()`,
+`target_canonical_resolves()`), each a relaxed 64-bit `fetch_add` — a libatomic call on rv32 —
+on a node-wide line. The shipped default compiles them out; the core test build opts in through
+the checked-in preset fragment `core/tests/instrumented/`, which yields to any fragment a CI leg
+supplies (#1664).
+
+Two of the fourteen carry no build-system variable at all. `kMaxVertexBytes64` / `kMaxVertexBytes32`
 and `kShareThresholdBytes` are preset members: an application moves them by declaring its own
 traits type, not by passing `-D`. `kShareThresholdBytes` is the copy-or-share threshold of
 [RFC-0028](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0028-lean-value-path.md)

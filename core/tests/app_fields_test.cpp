@@ -409,11 +409,12 @@ void test_announce_flow() {
           "subtree subscriber above the vertex lands");
 
     const path_t p("/unit/temp:settings.app.offset");
-    const std::uint64_t walks0 = g.ancestor_walks();
+    [[maybe_unused]] const std::uint64_t walks0 = g.ancestor_walks();
     check(g.write(temp, p.field(), make_value(value_tlv("42")), "linkA").has_value(),
           "caller-attributed app-field write lands (ACL open)");
     check(deliveries == 0, "the field write delivered NOTHING (no propagation)");
-    check(g.ancestor_walks() == walks0, "the field write never walked ancestors");
+    if constexpr (tr::graph::kInstrumentCounters)
+        check(g.ancestor_walks() == walks0, "the field write never walked ancestors");
     check(fails_with(g.await(temp, std::chrono::milliseconds(30)), status_t::TIMEOUT),
           "await did not wake on the field write (write seq untouched)");
 

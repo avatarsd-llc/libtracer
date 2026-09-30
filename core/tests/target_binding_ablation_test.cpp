@@ -158,6 +158,13 @@ void test_stale_generation_falls_back_and_still_delivers() {
 
 int main() {
     std::printf("#830 target_binding_t ablation — which resolve leg did the edge take?\n\n");
+    // The counter this whole file reads is compiled out of a lean build (#1664). A CI leg that
+    // binds its own configuration fragment gets that lean layout, and there is nothing to
+    // ablate: report SKIPPED (77), never a pass on an instrument that does not exist.
+    if constexpr (!tr::graph::kInstrumentCounters) {
+        std::printf("SKIP: config_t::kInstrumentCounters is false in this build\n");
+        return 77;
+    }
     test_bound_edge_never_resolves_canonically();
     test_edge_admitted_before_its_target_falls_back_every_time();
     test_stale_generation_falls_back_and_still_delivers();

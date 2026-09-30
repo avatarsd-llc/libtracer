@@ -32,6 +32,21 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Breaking
 
+- **`graph_t`'s two instrumentation counters are compiled out by default:
+  `config_t::kInstrumentCounters` ([#1664](https://github.com/avatarsd-llc/libtracer/issues/1664)).**
+  `ancestor_walks()` (RFC-0005) and `target_canonical_resolves()` (#830) were a relaxed 64-bit
+  `fetch_add` per ancestor-walking write and per unbound target-edge delivery, on node-wide
+  counters nothing in the library reads — a libatomic call on rv32. The new
+  `default_config_t::kInstrumentCounters` (default `false`, derived spelling
+  `tr::graph::kInstrumentCounters`) decides whether they exist. Lean: `sizeof(graph_t)` −16 B
+  (x86-64 968 → 952, rv32 416 → 400), `dispatch_edge_target` −16 B, both increment sites gone;
+  both accessors stay and answer `0`. Opt in with an override fragment line
+  `static constexpr bool kInstrumentCounters = true;` — the core test build does so through the
+  preset `core/tests/instrumented/libtracer/config_override.hpp`, and the `bench/` build through
+  `-DLIBTRACER_INSTRUMENT_COUNTERS=ON` (which also gates `bench_target_binding`). **Observable:**
+  code that asserted on either counter against a stock build now reads `0`; gate such
+  assertions on `tr::graph::kInstrumentCounters`.
+
 - **One surface for memory, per-vertex policy, graph-wide seams and link construction (RFC 0028
   slice 10; [#1593](https://github.com/avatarsd-llc/libtracer/issues/1593),
   [#1606](https://github.com/avatarsd-llc/libtracer/issues/1606) asks 1–2).** This is the

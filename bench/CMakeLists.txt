@@ -13,6 +13,19 @@ endif()
 # Build libtracer from ../core (its tests/examples self-gate on PROJECT_IS_TOP_LEVEL).
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../core ${CMAKE_BINARY_DIR}/core)
 
+# graph_t's two instrumentation counters (ancestor_walks, target_canonical_resolves) are compiled
+# out by default (config_t::kInstrumentCounters, #1664), and so they are here: the perf gate and
+# the symbol ratchet build from this file and must measure the library a node ships. ON binds the
+# core test build's instrumented preset fragment for the WHOLE build (one fragment, one graph_t
+# layout) and adds bench_target_binding, whose ablation reads the canonical-fallback counter.
+option(LIBTRACER_INSTRUMENT_COUNTERS
+       "Compile graph_t's instrumentation counters in (instrumented preset; bench_target_binding)"
+       OFF)
+if(LIBTRACER_INSTRUMENT_COUNTERS)
+    target_include_directories(libtracer BEFORE PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/../core/tests/instrumented)
+endif()
+
 add_executable(bench_libtracer bench_libtracer.cpp)
 target_link_libraries(bench_libtracer PRIVATE libtracer)
 target_compile_options(bench_libtracer PRIVATE -Wall -Wextra)
@@ -260,9 +273,15 @@ target_compile_options(bench_reply_leg PRIVATE -Wall -Wextra)
 # between `deref_vertex_slot` and the `find_ptr` fallback, its A/A null, and the
 # target_canonical_resolves() ablation — all in ONE binary, because both arms are the same
 # shipped `dispatch_edge_target` selected by the shipped mint rule in `admit_subscriber`.
-add_executable(bench_target_binding bench_target_binding.cpp)
-target_link_libraries(bench_target_binding PRIVATE libtracer)
-target_compile_options(bench_target_binding PRIVATE -Wall -Wextra)
+#
+# Its ablation READS graph_t::target_canonical_resolves(), an instrumentation counter a lean build
+# compiles out (config_t::kInstrumentCounters, #1664), so it is built only when the bench build
+# opts in to the instrumented preset below.
+if(LIBTRACER_INSTRUMENT_COUNTERS)
+    add_executable(bench_target_binding bench_target_binding.cpp)
+    target_link_libraries(bench_target_binding PRIVATE libtracer)
+    target_compile_options(bench_target_binding PRIVATE -Wall -Wextra)
+endif()
 
 add_executable(bench_mount_resolve bench_mount_resolve.cpp)
 target_link_libraries(bench_mount_resolve PRIVATE libtracer)
