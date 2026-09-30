@@ -180,12 +180,15 @@ void test_one_seam_is_one_block() {
         check(after && after->children.size() == 10,
               "five nouns for a mem seam (capacity/in_use/peak/refused/largest_refused)");
 
-        // The ring seam is a DIFFERENT seam and says so — per-seam, never aggregated
-        // (ADR-0079). This graph left `ring` at the default heap source.
+        // The ring seam is its own NAME, read from its own accessor (per-seam, never
+        // aggregated — ADR-0079), but since #873 phase 1 (09feda62) the graph's default ring
+        // source IS the one injected source, so both names sample the same pool. This check
+        // used to expect 0 here (a separate heap ring); it went red at 09feda62 unseen,
+        // because `main()` returned 0 until #1636.
         const auto ring_bytes = read_bytes(g, "/n:stats.mem.ring", {});
         const auto ring = tr::wire::decode(ring_bytes);
-        check(ring && counter(*ring, "refused") == 0,
-              ":stats.mem.ring is the OTHER seam — the control seam's refusal is not its");
+        check(ring && counter(*ring, "refused") == 1 && counter(*ring, "capacity") == slab.size(),
+              ":stats.mem.ring samples the ONE injected source — the same refusal, the same slab");
     }
 }
 
@@ -350,6 +353,5 @@ int main() {
     test_unknown_spellings_are_caller_independent();
     test_census_is_read_only();
     test_reading_the_census_is_not_a_write();
-    std::printf("\nall :stats field checks passed\n");
-    return 0;
+    return tr::testing::summary("stats_field");
 }

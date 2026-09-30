@@ -352,6 +352,5 @@ int main() {
     test_net_seams_are_node_scoped();
     test_unserved_net_names_are_caller_independent();
     test_net_seams_are_read_only();
-    std::printf("stats_net_seam_test: OK\n");
-    return 0;
+    return tr::testing::summary("stats_net_seam");
 }

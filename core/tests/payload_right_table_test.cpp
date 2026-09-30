@@ -309,6 +309,5 @@ int main() {
     test_undeclared_handler_is_unchanged();
     test_creator_endpoint_splits_create_from_remove();
     test_catalog_envelope_is_an_empty_settings();
-    std::printf("\nOK\n");
-    return 0;
+    return tr::testing::summary("payload_right_table");
 }
