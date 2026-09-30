@@ -878,9 +878,9 @@ ANCHORS = [
     ('tools/cortexm0_footprint.py:151', 'cxx_flags = ['),
     ('tools/cortexm0_footprint.py:158', '"-DLIBTRACER_NO_ATOMIC",'),
     ('tools/cortexm0_footprint.py:172', '"--specs=nano.specs",'),
-    ('core/tests/CMakeLists.txt:1863', 'add_executable(substrate_test_no_atomic'),
-    ('core/tests/CMakeLists.txt:1878', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
-    ('core/tests/CMakeLists.txt:1879', '    LIBTRACER_NO_ATOMIC'),
+    ('core/tests/CMakeLists.txt:1876', 'add_executable(substrate_test_no_atomic'),
+    ('core/tests/CMakeLists.txt:1891', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
+    ('core/tests/CMakeLists.txt:1892', '    LIBTRACER_NO_ATOMIC'),
     # The leading indent is load-bearing: the bare token also appears in the comment
     # three lines above the executable, and an anchor that matches both is not an anchor.
 
