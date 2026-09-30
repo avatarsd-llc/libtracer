@@ -268,7 +268,7 @@ void test_none_vertex_relays() {
     const vertex_handle_t d = g.register_vertex(dst, role_t::STORED_VALUE);
     check(g.set_policy(d, {.retention = retention_t::NONE}).has_value(), "a NONE target");
     check(g.subscribe(src, dst).has_value(), "wired src -> dst");
-    const std::uint64_t dseq = vx(d)->current_seq();
+    const tr::graph::write_seq_t dseq = vx(d)->current_seq();
     check(g.write(s, make_value({0x05})).has_value(), "the source write lands");
     check(vx(d)->current_seq() == dseq + 1, "the delivery reached the NONE target");
     check(!g.read(d).has_value(), "... which retains nothing — read is NOT_FOUND");

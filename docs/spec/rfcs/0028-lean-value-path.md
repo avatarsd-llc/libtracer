@@ -690,6 +690,10 @@ API-wide; mechanical.
 
 **Gate:** `sizeof(subscriber_remote_t)` ≤ 56; `vertex_t` ratchets lowered. **Risk: low.**
 
+**As landed**, slice 8 split in two: the 32-bit sequence (D6, #1621) landed on its own, with no
+configuration trait and an equality-only compare (`kMaxVertexBytes32` 72 → 64); the interned
+identities (D8, #1622) land through RFC-0029 S5/S6 instead.
+
 ### 6.9 Slice 9 — scatter-gather egress and the ingress loan (L4, L8; closes #1620's egress half, #1626)
 
 Span-form emitters for the delivery header; queued links retain the `value_t` instead of

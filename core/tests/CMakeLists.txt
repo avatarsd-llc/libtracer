@@ -1383,6 +1383,12 @@ target_link_libraries(retention_test PRIVATE libtracer)
 libtracer_test_warnings(retention_test)
 add_test(NAME retention COMMAND retention_test)
 
+# #1621: the 32-bit write sequence — its width, the wrap, and await waking on every role.
+add_executable(write_seq_test write_seq_test.cpp)
+target_link_libraries(write_seq_test PRIVATE libtracer)
+libtracer_test_warnings(write_seq_test)
+add_test(NAME write_seq COMMAND write_seq_test)
+
 # #361 §5 / ADR-0039 §1 — graph_t's injected memory_resource: per-write LKV
 # allocations route through it (counting pass-through), released in full at
 # graph destruction; a default graph never touches a foreign resource.

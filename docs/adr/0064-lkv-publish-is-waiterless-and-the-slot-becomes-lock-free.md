@@ -136,6 +136,8 @@ None of these is obviously right, and the honest expected win is **~15 ns on a ~
 
 - **`current_seq()` is lock-free**, so callers no longer serialise on the stripe to read a sequence.
 
+- **Note (2026-09-30, [#1621](https://github.com/avatarsd-llc/libtracer/issues/1621)):** `write_seq_` is 32 bits wide on every target (`write_seq_t`), and it is compared for equality only (`current != seq0`), so a wrap is not an event; the `seq_cst` pairing above is unchanged.
+
 - ~~**The multi-writer win is unmeasured.** No bench in this repo exercises concurrent publishers on one stripe, so the contention benefit is argued, not shown. A bench that does would also make §2's case measurable, and is the natural prerequisite to attempting it.~~
 
   **Measured 2026-07-29 ([#635](https://github.com/avatarsd-llc/libtracer/issues/635)); `bench/bench_lkv_slot.cpp` is that bench.** It answers the question in three parts, and the parts do not agree with each other — which is the useful result.
