@@ -91,7 +91,7 @@ so a device recipe sizes one slab where it used to wire four arguments. Beside i
 failable `rx` source, the `flat` byte backend its rope flattens draw from, the
 `egress` byte backend the terminus reply head draws from, and the `retained`
 backend a remote SUBSCRIBE's two life-of-the-subscription allocations draw from
-(`core/include/libtracer/fwd_router.hpp:134-230`, the `router_planes_t` aggregate; `egress` is #795 / ADR-0074,
+(`core/include/libtracer/fwd_router.hpp:135-231`, the `router_planes_t` aggregate; `egress` is #795 / ADR-0074,
 `retained` is #1610 and defaults to `flat` when un-injected, and the
 `max_label_bindings_per_link` bound sits between `flat` and `egress`).
 Each is its own injection because each one's live set is governed by a different
@@ -365,8 +365,8 @@ itself, described via `:schema` like any other data
 ```
 
 The backpressure counters come from `graph_t::delivery_drops()`
-(`core/include/libtracer/graph.hpp:2425`), which snapshots four per-cause totals —
-`no_target`, `denied`, `out_of_memory`, `fan_out_truncated` (`graph.hpp:2425-2463`). Each
+(`core/include/libtracer/graph.hpp:2436`), which snapshots four per-cause totals —
+`no_target`, `denied`, `out_of_memory`, `fan_out_truncated` (`graph.hpp:2436-2474`). Each
 counts shed **deliveries**, not events, so a fan-out shed whole under memory pressure moves
 them by its width. `denied` counts an `:acl` refusal on every plane — a local API write, a
 `FWD{WRITE}` terminus, a `COMPACT` terminus and a subscription edge alike (#1068) — so on a

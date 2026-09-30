@@ -1,0 +1,28 @@
+{
+  "name": "element-pair-bad-len",
+  "category": "path",
+  "hex": "060011000673656E736F7200160703000000010000",
+  "total_bytes": 21,
+  "decoded": {
+    "type": "0x06 PATH",
+    "opt": {
+      "raw": "0x00",
+      "PL": 0,
+      "TS": 0,
+      "CR": 0,
+      "LL": 0,
+      "CW": 0,
+      "TF": 0,
+      "reserved_bit7": 0,
+      "reserved_bit0": 0
+    },
+    "length": 17,
+    "payload_hex": "0673656E736F7200160703000000010000",
+    "trailer": {
+      "ts": null,
+      "crc": null
+    },
+    "meaning": "A kind = 0x16 escape record whose declared payload is SEVEN bytes, not eight. A PAIR is exactly a u32 index and a u32 generation (RFC-0029 5.1), so these bytes are a malformed ADDRESS: a hop refuses it with ERROR{tr::path::invalid} (0x0021) and MUST NOT read a short field as a pair. The FRAME is not refused - the record is self-delimiting, so every codec carries it and a hop that does not implement kind 0x16 steps over it by length.",
+    "note": "Not a reject.bin case: a packed PATH body is opt.PL = 0, opaque to the codec, the same reasoning as path-label/label-wrong-length. The requirement is a RESOLVER requirement."
+  }
+}

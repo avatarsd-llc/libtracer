@@ -1,0 +1,12 @@
+{
+  "name": "pair-terminus",
+  "category": "fwd",
+  "hex": "0F402100010001000006000B00001608030000000100000006000900087265706C792D6570",
+  "total_bytes": 37,
+  "decoded": {
+    "type": "0x0F FWD",
+    "structured": true,
+    "meaning": "FWD{ op=READ, dst=<pair 3:1>, src=/reply-ep } - a chain of length one: its only element names the target on the receiving node, which applies the op with the same apply_op the NAME spelling reaches (RFC-0029 6 step 3). A bound terminus never write-creates.",
+    "note": "37 bytes, against 38 for the NAME spelling /sensor/temp of the same operation, and 4 bytes a hop more than the retired 7-byte label (5.2). The ACL verdict is the resolver's own gate at the dereferenced vertex - a generation match authorizes nothing (6.4)."
+  }
+}

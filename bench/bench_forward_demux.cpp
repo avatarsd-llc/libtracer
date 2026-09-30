@@ -29,6 +29,10 @@
  *    strip-K shrinks**: today's `by_name` scans every link and then asks every bus child
  *    to `peer_link`, whereas the per-module key and the per-endpoint `resolve_peer`
  *    narrow both passes to one module's members.
+ *  - `acl` — the `fixed` shape on an ACL-ENFORCING graph: a subject resolver is installed and
+ *    the target's connection vertex carries an `:acl` granting the inbound link READ|WRITE.
+ *    `acl(N) - fixed(N)` is what RFC-0029 §6.4's per-hop gate costs a NAME-spelled hop that
+ *    is ALLOWED (the hop still forwards; a WARN row says so if it does not).
  *
  * Emits one RESULT row per (mode, N) in bench_common's shared format, so collate.py and
  * the perf history pick it up unchanged. `fanout` carries N (registered children) and
@@ -39,11 +43,13 @@
  * no thread handoff, and no allocation on the measured path.
  */
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <expected>
 #include <initializer_list>
 #include <iterator>
 #include <optional>
@@ -56,6 +62,7 @@
 #include "bench_common.hpp"
 #include "libtracer/fwd_frame_view.hpp"
 #include "libtracer/graph.hpp"
+#include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport.hpp"
@@ -67,6 +74,40 @@ using tr::net::fwd_router_t;
 using tr::net::transport_t;
 using tr::wire::opt_t;
 using tr::wire::type_t;
+
+/**
+ * @brief The `acl` arm's subject resolver (ADR-0018's test shape): the caller context IS the
+ *        subject token, so the inbound link's qualified name is what the `:acl` grants.
+ */
+std::expected<tr::graph::subject_token_t, tr::wire::err_t> caller_is_subject(
+    void*, std::string_view caller) {
+    const auto* p = reinterpret_cast<const std::byte*>(caller.data());
+    return tr::graph::subject_token_t(p, p + caller.size());
+}
+
+/** @brief Make @p g ACL-enforcing and grant @p subject READ|WRITE on vertex @p path. */
+void grant_hop(graph_t& g, std::string_view path, std::string_view subject) {
+    auto hooks = g.hooks();
+    hooks.subject_resolver = {caller_is_subject, nullptr};
+    g.set_hooks(hooks);
+    (void)g.register_vertex(tr::graph::path_t(path), tr::graph::role_t::STORED_VALUE);
+    const auto* sp = reinterpret_cast<const std::byte*>(subject.data());
+    const tr::graph::ace_t ace{
+        .type = tr::graph::ace_type_t::ALLOW,
+        .flags = 0,
+        .subject = std::vector<std::byte>(sp, sp + subject.size()),
+        .access_mask = static_cast<std::uint32_t>(tr::graph::acl_right_t::READ) |
+                       static_cast<std::uint32_t>(tr::graph::acl_right_t::WRITE),
+        .expires_ns = 0,
+    };
+    const std::vector<std::byte> acl =
+        tr::graph::encode_acl(std::span<const tr::graph::ace_t>(&ace, 1));
+    tr::view::segment_ptr_t seg = tr::view::heap_alloc(acl.size());
+    std::copy(acl.begin(), acl.end(), seg->bytes.begin());
+    std::string key(path);
+    key += ":acl";
+    (void)g.write(tr::graph::path_t(key), tr::view::view_t::over(std::move(seg)));
+}
 
 /** @brief Registry sizes swept — N = children registered on the node. */
 constexpr std::size_t kLinkCounts[] = {1, 2, 4, 8, 16, 32, 64};
@@ -375,10 +416,15 @@ class legacy_dst_seg_walk_t {
  * ("l0", "l1", …) pad the registry so the target sits at scan position @p target_pos.
  * @param links      Total forwardable children registered (N).
  * @param target_pos 1-based position of "out" among them (1 = first, `links` = last).
- * @param mode       RESULT mode tag ("fixed" or "scan").
+ * @param mode       RESULT mode tag ("fixed", "scan" or "acl").
+ * @param acl        Make the graph ACL-enforcing, with the hop's connection vertex granting
+ *                   the inbound link READ|WRITE — registered BEFORE the children, so every
+ *                   build under comparison can bind it.
  */
-std::uint64_t run_point(std::size_t links, std::size_t target_pos, const char* mode) {
+std::uint64_t run_point(std::size_t links, std::size_t target_pos, const char* mode,
+                        bool acl = false) {
     graph_t graph;
+    if (acl) grant_hop(graph, "/net/ws-client/out", "net/ws-server/in");
     fwd_router_t router(graph);
     capture_transport_t in_link;
     capture_transport_t out_link;
@@ -574,6 +620,9 @@ int main() {
     // Axis 2 — scan cost: target last, so by_name walks the whole table. The delta from
     // axis 1 at the same N is the scan's marginal cost — the term strip-K NARROWS.
     for (const std::size_t n : kLinkCounts) scan.push_back(run_point(n, n, "fwd-demux-scan"));
+    // Axis 1b — the fixed hop on an ACL-ENFORCING graph: the price of RFC-0029 §6.4's per-hop
+    // gate on an allowed NAME-spelled hop, read against axis 1 at the same N.
+    for (const std::size_t n : kLinkCounts) (void)run_point(n, 1, "fwd-demux-acl", true);
 
     // The derived answer to ADR-0061's acceptance question, so it need not be
     // reconstructed by hand from the RESULT rows.
