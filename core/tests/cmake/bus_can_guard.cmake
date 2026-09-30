@@ -8,7 +8,9 @@
 # the CAN module is a contradiction — the transport would come up and none of its peers would be
 # addressable. What is under test is therefore a build REJECTION, which no compiled test binary
 # can observe, so this drives the compiler itself over the REAL translation unit (not a proxy
-# probe) under two renderings of libtracer/config.hpp:
+# probe) under two renderings of libtracer/config.hpp. Both are bound EXPLICITLY by a fragment:
+# since #1670 the stock default is itself `kBusLinks = false`, and a guard whose arms lean on the
+# default would silently swap meaning the next time it moved.
 #
 #   ALLOWED   (kBusLinks = true)  -> must compile. Without this arm the check would pass just as
 #                                    happily if transport_can.cpp stopped compiling for any
@@ -20,16 +22,18 @@
 #
 # -fsyntax-only: the assert fires in the front end, so codegen and linking would buy nothing.
 #
-# Required -D arguments: LT_CXX, LT_CORE_INCLUDE, LT_BUS_CLOSED_INCLUDE, LT_PROBE.
+# Required -D arguments: LT_CXX, LT_CORE_INCLUDE, LT_BUS_OPEN_INCLUDE, LT_BUS_CLOSED_INCLUDE,
+# LT_PROBE.
 
-foreach(_arg LT_CXX LT_CORE_INCLUDE LT_BUS_CLOSED_INCLUDE LT_PROBE)
+foreach(_arg LT_CXX LT_CORE_INCLUDE LT_BUS_OPEN_INCLUDE LT_BUS_CLOSED_INCLUDE LT_PROBE)
     if(NOT DEFINED ${_arg})
         message(FATAL_ERROR "bus_can_guard.cmake: -D${_arg}=... is required")
     endif()
 endforeach()
 
 execute_process(
-    COMMAND "${LT_CXX}" -std=c++23 -fsyntax-only "-I${LT_CORE_INCLUDE}" "${LT_PROBE}"
+    COMMAND "${LT_CXX}" -std=c++23 -fsyntax-only "-I${LT_BUS_OPEN_INCLUDE}"
+            "-I${LT_CORE_INCLUDE}" "${LT_PROBE}"
     RESULT_VARIABLE _allowed_rc
     OUTPUT_VARIABLE _allowed_out
     ERROR_VARIABLE _allowed_err)

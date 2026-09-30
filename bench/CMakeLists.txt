@@ -10,6 +10,13 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)  # -O3 for both sides; a fair comparison
 endif()
 
+# The two link modules are lean-default OFF since v0.17.0 (#1670); benches here measure both
+# (peer-named listeners, a CAN link, the engine-managed DIAL), so this build opts in: the TU
+# switches here, the matching config members in the preset fragment bound below. Cache
+# defaults, not FORCE, so a caller can still turn either off on the command line.
+set(LIBTRACER_TRANSPORT_CAN ON CACHE BOOL "Build the CAN transport (bench opts in, #1670)")
+set(LIBTRACER_SELF_HEAL_LINKS ON CACHE BOOL "Build the S5 liveness engine (bench opts in, #1670)")
+
 # Build libtracer from ../core (its tests/examples self-gate on PROJECT_IS_TOP_LEVEL).
 add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../core ${CMAKE_BINARY_DIR}/core)
 
@@ -21,9 +28,13 @@ add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../core ${CMAKE_BINARY_DIR}/core)
 option(LIBTRACER_INSTRUMENT_COUNTERS
        "Compile graph_t's instrumentation counters in (instrumented preset; bench_target_binding)"
        OFF)
+# Either preset binds the two link-module opt-ins above (#1670); the instrumented one adds the
+# counters. Exactly one is on the include path, so every TU resolves the same fragment.
 if(LIBTRACER_INSTRUMENT_COUNTERS)
     target_include_directories(libtracer BEFORE PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/../core/tests/instrumented)
+else()
+    target_include_directories(libtracer BEFORE PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/preset)
 endif()
 
 add_executable(bench_libtracer bench_libtracer.cpp)

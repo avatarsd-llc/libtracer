@@ -37,3 +37,14 @@ CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=12288
 # before this, no CI job built that TU, because the portable server it replaces
 # was quietly standing in for it.
 CONFIG_HTTPD_WS_SUPPORT=y
+
+# The two link modules are OFF by default since v0.17.0 (#1670, the lean default). This is
+# the FULL-node example — its CI job proves the whole component compiles and links on every
+# target, CAN/TWAI and the WS server included — and its self-proof dials a config-created
+# udp connection that the S5 engine mints DORMANT and wakes on first use. So it opts in to
+# both, explicitly:
+#   * the bus tier (peer-named links). Needed by CAN (a bus by construction; the CAN
+#     option is only offered with it) and by the IDF-native WS server httpd_ws_link_t.
+#   * the link-liveness engine (self_heal_link.cpp + kSelfHealLinks = true).
+CONFIG_LIBTRACER_BUS_LINKS=y
+CONFIG_LIBTRACER_SELF_HEAL_LINKS=y

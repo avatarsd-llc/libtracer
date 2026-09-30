@@ -1,7 +1,7 @@
 /**
  * @file
  * @brief The instrumented preset — the defaults with `graph_t`'s test/bench instrumentation
- *        counters compiled in (#1664).
+ *        counters compiled in (#1664) and the two link modules opted in (#1670).
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -11,6 +11,13 @@
  * `LIBTRACER_INSTRUMENT_COUNTERS` option put this directory FIRST on `libtracer`'s include
  * path, so the whole library and every consumer resolve this one fragment and agree on
  * `graph_t`'s layout.
+ *
+ * **The link modules.** `kBusLinks` and `kSelfHealLinks` default to `false` since v0.17.0
+ * (#1670). The test build exercises both — the peer-named tier, CAN, and the S5 liveness
+ * engine — so it opts in here, and `core/CMakeLists.txt` compiles the matching TUs
+ * (`LIBTRACER_TRANSPORT_CAN`, `LIBTRACER_SELF_HEAL_LINKS`) by default for the same build. A
+ * `bench/` build that binds this preset turns `LIBTRACER_SELF_HEAL_LINKS` on for the same
+ * reason.
  *
  * **It yields to a fragment the build already supplies.** A CI leg that binds its own
  * configuration (a reclamation policy, the bus module closed, ...) lists its fragment later on
@@ -33,9 +40,11 @@
 
 namespace tr::graph {
 
-/** @brief The defaults, with the two instrumentation counters compiled in. */
+/** @brief The defaults, with the instrumentation counters and both link modules compiled in. */
 struct instrumented_config_t : default_config_t {
     static constexpr bool kInstrumentCounters = true;
+    static constexpr bool kBusLinks = true;
+    static constexpr bool kSelfHealLinks = true;
 };
 
 using config_t = instrumented_config_t;

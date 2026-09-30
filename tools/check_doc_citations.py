@@ -848,7 +848,7 @@ ANCHORS = [
      'flat_slot_server_t>;'),
     # The #375-deliverable-3 bus-module seam: the knob, and the ONE door the routing plane
     # asks the facet through.
-    ('core/include/libtracer/config.hpp:516', 'static constexpr bool kBusLinks = true;'),
+    ('core/include/libtracer/config.hpp:522', 'static constexpr bool kBusLinks = false;'),
     ('core/include/libtracer/transport.hpp:898',
      '[[nodiscard]] inline bus_link_t* bus_of(transport_t& link) {'),
     ('core/include/libtracer/edge_pin.hpp:153', 'class pin_t {'),
@@ -905,17 +905,17 @@ ANCHORS = [
     # which the qsbr leg's is not — no scope needed.
     ('.github/workflows/core-ci.yml:982', '-DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1"'),
     ('.github/workflows/footprint-cortexm0.yml:13', '`--mode warn` governs the BUDGET VERDICT only'),
-    ('bench/CMakeLists.txt:43', 'bench_libtracer_net (two-process ROUTER-flood bench) was retired'),
+    ('bench/CMakeLists.txt:54', 'bench_libtracer_net (two-process ROUTER-flood bench) was retired'),
     ('bindings/typescript/packages/client/test/mesh-testbed.test.mjs:25',
      "ADDRESSING: a connection's routing key IS its vertex path"),
-    ('core/CMakeLists.txt:63', 'option(LIBTRACER_NET_PLANE'),
+    ('core/CMakeLists.txt:67', 'option(LIBTRACER_NET_PLANE'),
     # The GPU backend's build moved out of core into its own tier project (#1381), so what
     # docs/modules/backends.md cites is the tier's target, not a core option.
     ('backends/cuda/CMakeLists.txt:36', 'add_library(libtracer_cuda STATIC src/mem_cuda.cpp)'),
-    ('core/CMakeLists.txt:300', 'option(LIBTRACER_WITH_QUIC "Configure the libtracer_quic transport module'),
-    ('core/CMakeLists.txt:385', 'write_basic_package_version_file('),
-    ('core/CMakeLists.txt:396', 'if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND EXISTS'),
-    ('core/CMakeLists.txt:409', 'option(LIBTRACER_BUILD_EXAMPLES "Build the core examples"'),
+    ('core/CMakeLists.txt:328', 'option(LIBTRACER_WITH_QUIC "Configure the libtracer_quic transport module'),
+    ('core/CMakeLists.txt:413', 'write_basic_package_version_file('),
+    ('core/CMakeLists.txt:424', 'if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND EXISTS'),
+    ('core/CMakeLists.txt:438', 'option(LIBTRACER_BUILD_EXAMPLES "Build the core examples"'),
     # `docs/examples/index.md` cited the two `if(LIBTRACER_NET_PLANE)` lines (58, 73). That
     # text appears THREE times in this file and the scope filter cannot separate 58 from 73
     # — a scope must sit ABOVE its candidate, and everything above 58 is also above 73. The
@@ -930,19 +930,18 @@ ANCHORS = [
     ('integrations/esp-idf/libtracer/CMakeLists.txt:336', 'if(IDF_TARGET STREQUAL "linux")',
      'unlike CONFIG_* is defined in BOTH CMake passes'),
     ('integrations/esp-idf/libtracer/CMakeLists.txt:315', 'set(LIBTRACER_EDGE_PIN_SLOTS 8)'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:400',
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:407',
      'static constexpr std::size_t kShareThresholdBytes = ~std::size_t{0};'),
     ('integrations/esp-idf/libtracer/CMakeLists.txt:347', 'if(LIBTRACER_SPIN_WAIT_SAFE)'),
     ('integrations/esp-idf/libtracer/CMakeLists.txt:302',
      'set(LIBTRACER_VERTEX_LOCK_STRIPES ${CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES})'),
     ('integrations/esp-idf/libtracer/CMakeLists.txt:320', 'if(CONFIG_FREERTOS_UNICORE)'),
     # #1470: the S5 liveness-engine knobs the config-space table points at.
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:364',
-     'if(DEFINED CONFIG_LIBTRACER_SELF_HEAL_LINKS AND NOT CONFIG_LIBTRACER_SELF_HEAL_LINKS)'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:370',
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:366', 'set(LIBTRACER_SELF_HEAL_LINKS true)'),
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:376',
      'if(CONFIG_LIBTRACER_SELF_HEAL_WORKER_STACK)'),
-    ('core/include/libtracer/config.hpp:569', 'static constexpr bool kSelfHealLinks = true;'),
-    ('core/include/libtracer/config.hpp:596',
+    ('core/include/libtracer/config.hpp:577', 'static constexpr bool kSelfHealLinks = false;'),
+    ('core/include/libtracer/config.hpp:604',
      'static constexpr std::size_t kSelfHealWorkerStackBytes = 0;'),
     ('core/include/libtracer/config.hpp:623', 'static constexpr bool kInstrumentCounters = false;'),
     ('core/include/libtracer/config.hpp:655', 'static constexpr bool kAllowInsecureTls = false;'),

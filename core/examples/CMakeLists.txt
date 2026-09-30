@@ -371,7 +371,9 @@ endif()
 #
 # `net_multi_peer_listener` is additionally the ONE target in the whole examples tree whose
 # subject a build can compile out WITHOUT CMake being able to see it: the ADR-0044 bus module
-# is bound by `kBusLinks` in config_override.hpp (ADR-0068), which is plain C++. It follows the
+# is bound by `kBusLinks` in config_override.hpp (ADR-0068), which is plain C++ — and is OUT
+# by default since v0.17.0 (#1670), so a plain examples build skips it; the test build's
+# preset opts in. It follows the
 # binding with `if constexpr`, states the skip, and exits 77 — and the SKIP_RETURN_CODE
 # property below is what makes ctest read that as `Skipped` rather than as a pass. That is
 # strictly better than the two older run-time skips in this file, which exit 0 and are

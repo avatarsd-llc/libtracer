@@ -413,6 +413,10 @@ jobs:
           /** @brief The defaults, with re-entrant unsubscribe forbidden (an MCU target). */
           struct reclaim_strict_config_t : default_config_t {
               using reclaim_policy_t = reclaim_strict_t;
+              // The two link modules are opt-in since v0.17.0 (#1670); this leg's subject is
+              // elsewhere, so it keeps the full test build's modules on.
+              static constexpr bool kBusLinks = true;
+              static constexpr bool kSelfHealLinks = true;
           };
 
           using config_t = reclaim_strict_config_t;
@@ -438,8 +442,12 @@ jobs:
         run: chown -R "$(stat -c '%u:%g' ..)" . "$RUNNER_TEMP"
 
   # THE BUS MODULE CLOSED OUT (#375 deliverable 3, ADR-0044 + ADR-0047 §1). Every other leg
-  # here compiles `kBusLinks = true`; a seam whose other member nothing ever builds is a seam
-  # that has already rotted. Bound with an ORDINARY override fragment rather than a `-D`, per
+  # here compiles `kBusLinks = true` — the test preset and each leg's own fragment opt in, since
+  # the stock default has been `false` since v0.17.0 (#1670) — and a seam whose other member
+  # nothing ever builds is a seam that has already rotted. This leg is the closed variant WITH
+  # the rest of the test build's configuration kept, so its fragment states `kBusLinks = false`
+  # explicitly and keeps the engine opted in (`kSelfHealLinks = true`, whose TU the test build
+  # compiles by default). Bound with an ORDINARY override fragment rather than a `-D`, per
   # ADR-0068: a new configuration member does not get a CMake variable.
   #
   # `-DLIBTRACER_TRANSPORT_CAN=OFF` is MANDATORY, not tidiness — `transport_can.cpp` carries a
@@ -513,9 +521,11 @@ jobs:
 
           namespace tr::graph {
 
-          /** @brief The defaults, with no peer-named links at all (a point-to-point node). */
+          /** @brief No peer-named links at all (a point-to-point node); the engine kept. */
           struct bus_closed_config_t : default_config_t {
               static constexpr bool kBusLinks = false;
+              // Only the bus module is under test: the engine stays opted in (#1670).
+              static constexpr bool kSelfHealLinks = true;
           };
 
           using config_t = bus_closed_config_t;
@@ -553,8 +563,10 @@ jobs:
   # The #1470 module gate, exercised: `kSelfHealLinks = false` + the matching TU switch. Same
   # two-part shape as build-test-bus-closed above — a fragment binds the config member and the
   # CMake option drops the TU, and the pair has to agree or `self_heal_link.cpp`'s own
-  # static_assert (or the link) says so. Without this leg the OFF path is never compiled and the
-  # knob rots.
+  # static_assert (or the link) says so. `false` is the stock default since v0.17.0 (#1670), but
+  # this leg states it explicitly and keeps the bus tier opted in, so it stays the closed variant
+  # of the FULL test configuration rather than a second lean build. Without this leg the OFF
+  # path is never compiled under the test suite and the knob rots.
   build-test-self-heal-closed:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
@@ -613,8 +625,10 @@ jobs:
 
           namespace tr::graph {
 
-          /** @brief The defaults, with no link-liveness engine at all. */
+          /** @brief No link-liveness engine at all; the bus tier kept. */
           struct self_heal_closed_config_t : default_config_t {
+              // Only the engine is under test: the bus tier stays opted in (#1670).
+              static constexpr bool kBusLinks = true;
               static constexpr bool kSelfHealLinks = false;
           };
 
@@ -727,6 +741,10 @@ jobs:
           /** @brief The defaults, with a grace point spanning every thread (a many-core host). */
           struct reclaim_qsbr_config_t : default_config_t {
               using reclaim_policy_t = reclaim_qsbr_t;
+              // The two link modules are opt-in since v0.17.0 (#1670); this leg's subject is
+              // elsewhere, so it keeps the full test build's modules on.
+              static constexpr bool kBusLinks = true;
+              static constexpr bool kSelfHealLinks = true;
           };
 
           using config_t = reclaim_qsbr_config_t;
@@ -1033,6 +1051,10 @@ jobs:
           /** @brief The defaults, with a grace point spanning every thread (a many-core host). */
           struct reclaim_qsbr_config_t : default_config_t {
               using reclaim_policy_t = reclaim_qsbr_t;
+              // The two link modules are opt-in since v0.17.0 (#1670); this leg's subject is
+              // elsewhere, so it keeps the full test build's modules on.
+              static constexpr bool kBusLinks = true;
+              static constexpr bool kSelfHealLinks = true;
           };
 
           using config_t = reclaim_qsbr_config_t;

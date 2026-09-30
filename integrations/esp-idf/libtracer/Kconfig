@@ -178,33 +178,53 @@ menu "libtracer"
             mutex. The drop counters and connected_at_us are always kept. This
             is a per-image choice, not a per-link one (#1663).
 
+    config LIBTRACER_BUS_LINKS
+        bool "Carry the bus tier (peer-named links, per-peer addressing)"
+        default n
+        help
+            Bind tr::graph::default_config_t::kBusLinks = true: the ADR-0044
+            peer-named tier — per-peer addressing, in-band peer enumeration and
+            the peer-lifecycle notifiers — that a link serving MANY named peers
+            needs (#1670).
+
+            OFF by default since v0.17.0, the lean choice: a point-to-point node
+            does not pay for it (measured on rv32: 2,078 B of flash across
+            fwd_router.cpp and transport_vertex.cpp, 0 B of .bss). Turn it ON for
+            the WS server (httpd_ws_link_t) or for CAN — both are buses by
+            construction; CAN is only offered below when this is on. With it off,
+            asking for a peer-named listener is REFUSED rather than quietly served
+            as a flat one — and httpd_ws_link_t, the IDF-native WS server, which is
+            peer-named by construction, reports ok() == false. So a node that
+            serves WebSocket sessions (the SPA at /tracer-ws) opts in here.
+
     config LIBTRACER_TRANSPORT_CAN
         bool "Build the CAN transport"
+        depends on LIBTRACER_BUS_LINKS
         default y
         help
             Compile the CAN transport (transport_can.cpp portable framing/reassembly +
             the TWAI-backed can_link_t on chip targets, SocketCAN on the linux host).
-            ON by default. Turn OFF on a node with no CAN bus — this also drops the
-            TWAI driver glue (twai_link.cpp).
+            Needs LIBTRACER_BUS_LINKS (a CAN link is peer-named by construction), and
+            is ON by default once that is. Turn OFF on a bus node with no CAN bus —
+            this also drops the TWAI driver glue (twai_link.cpp).
 
     config LIBTRACER_SELF_HEAL_LINKS
         bool "Build the link-liveness engine (self-healing dial connections)"
-        default y
+        default n
         help
-            Compile the RFC-0014 S5 link-liveness engine (self_heal_link.cpp): a
-            connection whose kind asks for it is minted DORMANT, dials on demand,
+            Compile the RFC-0014 S5 link-liveness engine (self_heal_link.cpp) and
+            bind kSelfHealLinks = true: a config-created DIAL connection of a
+            built-in kind (udp/tcp/ws) is then minted DORMANT, dials on demand,
             and self-heals with backoff under its own worker thread.
 
-            Turn OFF on a flash-constrained node that does not use one. Measured
-            on an ESP32-C6 image: 4,336 B of reachable self_heal_link_t symbols,
-            and 0 B of .dram0.bss (the engine is code, not a static table).
-
-            NO BUILT-IN KIND ASKS FOR IT TODAY. The udp/tcp/ws factories construct
-            eagerly, and an ESP node stages its links with provide_link, which
-            bypasses the factory catalog entirely — so on a stock image the engine
-            is unreachable and this is a pure saving. With it off, registering a
-            self_heal_dial kind is REFUSED (the kind is not catalogued and a SPEC
-            naming it answers SCHEMA_NOT_FOUND) rather than quietly downgraded.
+            OFF by default since v0.17.0 (#1670), the lean choice. Measured on an
+            ESP32-C6 image: 4,336 B of reachable self_heal_link_t symbols, and
+            0 B of .dram0.bss (the engine is code, not a static table). With it
+            off the built-in DIAL kinds dial EAGERLY at creation (no redial, no
+            backoff), a node staging its links with provide_link is unaffected,
+            and registering a custom self_heal_dial kind is REFUSED (the kind is
+            not catalogued and a SPEC naming it answers SCHEMA_NOT_FOUND) rather
+            than quietly downgraded.
 
     config LIBTRACER_SELF_HEAL_WORKER_STACK
         int "Link-liveness worker stack (bytes, 0 = pthread default)"

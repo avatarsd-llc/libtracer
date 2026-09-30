@@ -2315,7 +2315,9 @@ endforeach()
 # drives the compiler over the REAL TU under both bindings, exactly as the #1158 spin-pool guard
 # does. Gated on the CAN module because that is the option whose combination with `kBusLinks =
 # false` is the contradiction; the bus-closed CI leg turns CAN off and so never reaches it, which
-# is precisely why this guard has to exist separately.
+# is precisely why this guard has to exist separately. The ALLOWED arm binds the test preset
+# (tests/instrumented, `kBusLinks = true`), the FORBIDDEN arm the fragment written here — both
+# explicit, because the stock default has been `false` since #1670.
 if(LIBTRACER_TRANSPORT_CAN)
     file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/bus-closed/libtracer/config_override.hpp
 "/**
@@ -2338,6 +2340,7 @@ using config_t = bus_closed_config_t;
     add_test(NAME bus_can_guard COMMAND ${CMAKE_COMMAND}
              -DLT_CXX=${CMAKE_CXX_COMPILER}
              -DLT_CORE_INCLUDE=${CMAKE_CURRENT_SOURCE_DIR}/../include
+             -DLT_BUS_OPEN_INCLUDE=${CMAKE_CURRENT_SOURCE_DIR}/instrumented
              -DLT_BUS_CLOSED_INCLUDE=${CMAKE_CURRENT_BINARY_DIR}/bus-closed
              -DLT_PROBE=${CMAKE_CURRENT_SOURCE_DIR}/../src/transport_can.cpp
              -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/bus_can_guard.cmake)
@@ -2471,3 +2474,10 @@ add_executable(instrument_counters_test instrument_counters_test.cpp)
 target_link_libraries(instrument_counters_test PRIVATE libtracer)
 libtracer_test_warnings(instrument_counters_test)
 add_test(NAME instrument_counters COMMAND instrument_counters_test)
+
+# #1670 — kBusLinks / kSelfHealLinks are lean by default; the test build opts in through its
+# preset, and this pins the default itself (it fails on any build whose default carries either).
+add_executable(lean_link_defaults_test lean_link_defaults_test.cpp)
+target_link_libraries(lean_link_defaults_test PRIVATE libtracer)
+libtracer_test_warnings(lean_link_defaults_test)
+add_test(NAME lean_link_defaults COMMAND lean_link_defaults_test)

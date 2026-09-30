@@ -394,9 +394,11 @@ int run_host_probe(device_node_t& dev) {
         &reply_box);
 
     // Dial the device: a config-created udp client connection at /net/udp-client/dev.
-    // Since the RFC-0014 §4 S5 flip (#1548) the built-in DIAL kinds are engine-managed, so
-    // this write creates the connection DORMANT and the first op below auto-wakes it — the
-    // round trip is unchanged from the application's side, which is the point.
+    // Since the RFC-0014 §4 S5 flip (#1548) the built-in DIAL kinds are engine-managed on a
+    // build that carries the engine — opt-in since v0.17.0 (#1670), and this example opts in
+    // (sdkconfig.defaults) — so this write creates the connection DORMANT and the first op
+    // below auto-wakes it. On a lean build it dials eagerly instead; the round trip is
+    // unchanged from the application's side either way, which is the point.
     const auto wa = graph.write(path_t("/net/udp-client/conn"),
                                 conn_spec("dev", kNodePort, "udp", "127.0.0.1"));
     check(wa.has_value(),

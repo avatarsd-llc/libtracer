@@ -45,6 +45,22 @@ bus. Construct a `tr::net::twai_link_t{{tx_gpio, rx_gpio, bitrate}}`, hand it to
 **CLASSIC** `transport_can` (TWAI is classic-only, no CAN-FD), and register
 `can_transport_factory()`. On every other platform the hook is a no-op.
 
+**CAN needs the bus tier, which is opt-in since v0.17.0**
+([#1670](https://github.com/avatarsd-llc/libtracer/issues/1670)). Set it in `platformio.ini`;
+the hook then compiles `transport_can.cpp` (and, on `espressif32`, `twai_link.cpp`) AND binds
+`kBusLinks = true` in a generated `libtracer/config_override.hpp`, so the two halves cannot
+disagree. The S5 liveness engine is the same shape:
+
+```ini
+[env:esp32c6]
+custom_libtracer_bus_links = yes        ; CAN/TWAI, peer-named tcp listeners
+custom_libtracer_self_heal_links = yes  ; self-healing udp/tcp DIAL connections
+```
+
+Both default to `no`. A `libtracer/config_override.hpp` of your own still works: the generated
+one includes it instead of binding its own, and `static_assert`s that it binds the two members
+the way these options say.
+
 This glue is gated at **compile + link** by the `pio-esp32-can` workflow, which packs
 the package and `pio run`s the `framework = espidf` consumer in
 [`tests/packaging/pio_esp32_can/`](../../tests/packaging/pio_esp32_can/). Moving frames

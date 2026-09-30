@@ -30,8 +30,10 @@ namespace tr::net {
 // rather than let it link (#375 deliverable 3).
 static_assert(kBusLinks,
               "LIBTRACER_TRANSPORT_CAN needs the bus module: a CAN link is peer-named by "
-              "construction. Either configure -DLIBTRACER_TRANSPORT_CAN=OFF, or drop "
-              "`kBusLinks = false` from libtracer/config_override.hpp.");
+              "construction, and kBusLinks is false by default since v0.17.0. Either bind "
+              "`static constexpr bool kBusLinks = true;` in libtracer/config_override.hpp "
+              "(ESP-IDF: CONFIG_LIBTRACER_BUS_LINKS=y), or configure "
+              "-DLIBTRACER_TRANSPORT_CAN=OFF.");
 
 namespace {
 

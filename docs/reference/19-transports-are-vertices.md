@@ -182,10 +182,12 @@ registered with `transport_kind_traits_t::self_heal_dial` gets DORMANT creation 
 socket), demand dial bounded by `connect_timeout`, self-heal with `backoff` while a
 standing binding (`acquire_link`/`release_link`) holds the link, and close-to-dormant on
 the last release. The BUILT-IN point-to-point kinds `udp`, `tcp` and `ws` are opted in
-([#1548](https://github.com/avatarsd-llc/libtracer/issues/1548)) — their DIAL connections are
-engine-managed out of the box, so creation no longer fails when the peer is down. Everywhere
+([#1548](https://github.com/avatarsd-llc/libtracer/issues/1548)) — on a build that carries the
+engine (`kSelfHealLinks = true`, opt-in since v0.17.0,
+[#1670](https://github.com/avatarsd-llc/libtracer/issues/1670)) their DIAL connections are
+engine-managed, so creation does not fail when the peer is down. Everywhere
 else the value is still written by whoever knows: an eagerly-constructed socket (every LISTEN
-link, every bus kind, a `kSelfHealLinks = false` build) publishes `UP` or `LISTENING` at
+link, every bus kind, a stock `kSelfHealLinks = false` build) publishes `UP` or `LISTENING` at
 creation (`core/src/transport_vertex.cpp:838`, `:841`), and a provided link reports through
 `set_link_state`.
 
@@ -356,7 +358,9 @@ engine (`self_heal_link_t`) for kinds registered `self_heal_dial`, with the
 standing-binding refcount seam (`acquire_link`/`release_link`) — and the built-in
 point-to-point kinds' opt-in to it
 ([#1548](https://github.com/avatarsd-llc/libtracer/issues/1548)): `udp`, `tcp` and `ws` DIAL
-connections are engine-managed out of the box, LISTEN links and bus kinds unchanged. And
+connections are engine-managed on a build that carries the engine (opt-in since v0.17.0,
+[#1670](https://github.com/avatarsd-llc/libtracer/issues/1670)), LISTEN links and bus kinds
+unchanged. And
 **S7**: the superseded `:children[]` creation spelling is retired — the `client` and
 `listener` child types are no longer registered and the `role` config key is no longer read,
 so the creator endpoint is the sole door and the role is positional in fact, not only on

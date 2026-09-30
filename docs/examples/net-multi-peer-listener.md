@@ -33,8 +33,9 @@ that is where the two naming regimes part company.
 
 ## The one run-time skip in this group, and why it is not silent
 
-The subject here is the ADR-0044 peer-named tier, and a target can compile that out with
-`kBusLinks = false` — a C++ binding in `config_override.hpp`
+The subject here is the ADR-0044 peer-named tier, which a target carries only when it opts in
+with `kBusLinks = true` (the default is `false` since v0.17.0, #1670; the core test build opts
+in) — a C++ binding in `config_override.hpp`
 ([ADR-0068](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0068-build-configuration-is-plain-cpp-config-header.md)),
 invisible to CMake, so no build guard can express it. Neither move the earlier domains used is
 available: there is no second arm to name (with the module closed out there is no peer-named

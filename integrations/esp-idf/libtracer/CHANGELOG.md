@@ -12,6 +12,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **BREAKING — the two link modules are opt-in
+  ([#1670](https://github.com/avatarsd-llc/libtracer/issues/1670)).** New
+  `CONFIG_LIBTRACER_BUS_LINKS` (default `n`) binds `kBusLinks`, and
+  `CONFIG_LIBTRACER_SELF_HEAL_LINKS` now defaults to `n`. `CONFIG_LIBTRACER_TRANSPORT_CAN`
+  `depends on` the bus symbol, so a stock image carries no CAN/TWAI plane. **Observable:**
+  `httpd_ws_link_t` — peer-named by construction — reports `ok() == false` unless the bus tier
+  is on, and config-created udp/tcp/ws DIALs dial eagerly. **Migration:** a node that serves
+  WebSocket sessions or uses CAN sets `CONFIG_LIBTRACER_BUS_LINKS=y`; a node that wants
+  self-healing DIALs sets `CONFIG_LIBTRACER_SELF_HEAL_LINKS=y`. The `full_node` example does
+  both in its `sdkconfig.defaults`.
 - **BREAKING — link construction takes one config aggregate (RFC-0028 slice 10,
   [#1593](https://github.com/avatarsd-llc/libtracer/issues/1593)).** Both link constructors
   change, and there are no shims:
