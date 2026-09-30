@@ -160,7 +160,7 @@ overridable per node), never a library rule — with names like `ws-client`, `ws
   application registers itself with `graph_t::register_child_type`; only the two
   connection types died.
 - **The path carries a name, never an address.** The created connection is addressed
-  `/net/<module>/<name>`; `addr`, `port`, `keepalive`, `backoff` and `connect_timeout`
+  `/net/<module>/<name>`; `addr`, `port`, `backoff` and `connect_timeout`
   are **creation-time config** — they travel in the `SPEC`'s `config` SETTINGS and are
   parsed into the transport-private `tr::net::conn_settings_t`. They do **not** live in
   the vertex `:settings` namespace: that core namespace was emptied outright by
@@ -173,9 +173,8 @@ overridable per node), never a library rule — with names like `ws-client`, `ws
   retiring the connection (`NAME`) and re-creating it (`SPEC`), which does tear down the
   routes under it, because `remove_connection` un-routes and retires the identity vertex.
   Routing that makes `/net/<module>/<name>` addressable is [ADR-0061 — Per-module mount routing](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0061-per-transport-mount-routing-strip-k-l5-demux.md).
-- **Of those five keys, `addr`, `port`, `backoff` and `connect_timeout` are consumed
-  today.** `keepalive` has no consumer anywhere in the tree — it is parsed and nothing
-  reads it. `backoff` / `connect_timeout` feed the §4 liveness engine
+- **All four of those keys are consumed today.** (A `keepalive` pair is still accepted
+  but ignored — it had no consumer, so #1666 removed the field that stored it.) `backoff` / `connect_timeout` feed the §4 liveness engine
   ([#492](https://github.com/avatarsd-llc/libtracer/issues/492) S5, `self_heal_link_t`)
   on a kind registered `self_heal_dial` — since
   [#1548](https://github.com/avatarsd-llc/libtracer/issues/1548) every built-in
@@ -362,7 +361,7 @@ values are the reference encoding until then (`link_state_t`,
 reports **listen-socket reachability**, not per-accepted-peer connectivity; accepted-peer
 count and identity are exposed through the connection vertex's **synthesized
 `:children[]`**, built per read from the transport's own live-peer table
-(`core/src/transport_vertex.cpp:741`) — never through `:settings`, whose core namespace
+(`core/src/transport_vertex.cpp:742`) — never through `:settings`, whose core namespace
 is empty. Once up, a link is bidirectional regardless of who dialed — `role` says only *who initiates*. The liveness
 engine that drives these transitions automatically is not implemented; the value is set
 by the caller.

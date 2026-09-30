@@ -1410,6 +1410,34 @@ void test_udp_max_frame_reaches_the_transport() {
           "and the CONFIGURED cap is the one the socket honors");
 }
 
+/** @brief Does @p T still carry a `keepalive_ms` member? (#1666 deleted it.) */
+template <typename T>
+constexpr bool kHasKeepaliveMs = requires(const T& t) { t.keepalive_ms; };
+
+/**
+ * @brief #1666 — `keepalive` is ACCEPTED and IGNORED; `conn_settings_t` no longer stores it.
+ *
+ * The field had no consumer, yet every transport vertex carried it (the ADR-0043 §5 leanness
+ * rule). The key must still parse, so an existing config creates the same connection and the
+ * keys beside it keep landing.
+ */
+void test_keepalive_key_is_accepted_and_not_stored() {
+    std::printf("#1666: a config keepalive is accepted, ignored, and not stored:\n");
+    check(!kHasKeepaliveMs<tr::net::conn_settings_t>,
+          "conn_settings_t carries no keepalive_ms field");
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    declare_builtin_modules(net);
+    const auto made = node.write(
+        path_t("/net/udp-server/conn"),
+        conn_spec_t("ka").port(kEphemeral).kind("udp").keepalive_ms(30000).max_frame(4096).view());
+    check(made.has_value(), "SPEC{kind=udp, keepalive=30000} still constructs the socket");
+    const auto* const s = net.settings_of("net/udp-server/ka");
+    check(s != nullptr && s->max_frame == 4096 && s->kind == "udp",
+          "the keys beside the ignored keepalive are still parsed");
+}
+
 /**
  * @brief #408 / ADR-0043 §5 / ADR-0044: the ws-private `peer_named` config key makes the
  *        Brick-C peer listing reachable from a purely IN-BAND SPEC write.
@@ -2577,6 +2605,7 @@ int main() {
     test_conn_spec_bytes_pinned();
     test_conn_spec_round_trips_through_the_reader();
     test_create_connection_vertex();
+    test_keepalive_key_is_accepted_and_not_stored();
     test_await_link_state();
     test_liveness_enum_value();
     test_constructed_link_reports_role_state();

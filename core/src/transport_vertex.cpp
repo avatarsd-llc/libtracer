@@ -37,7 +37,8 @@ namespace {
 
 /**
  * @brief Parse the optional SPEC `config` SETTINGS (the shared config_reader_t walk): NAME "addr"
- *        NAME <utf8>, NAME "kind" NAME <utf8>, NAME "port" VALUE u16, NAME "keepalive" VALUE u32.
+ *        NAME <utf8>, NAME "kind" NAME <utf8>, NAME "port" VALUE u16, NAME "max_frame" /
+ *        "backoff" / "connect_timeout" VALUE u32.
  *
  * There is no `role` key. The role is POSITIONAL — it IS the module (RFC-0014 §1/§3) — and
  * the only key that ever carried it was the superseded `:children[]` spelling's override,
@@ -47,7 +48,8 @@ namespace {
  * ONLY the universal
  * keys land here (ADR-0043 §5 leanness): kind-private pairs (e.g. quic's `cert`/`key`)
  * are the kind's factory's business — it parses them from the raw config TLV it
- * receives. Unknown pairs are ignored (forward-compat).
+ * receives. Unknown pairs are ignored (forward-compat). `keepalive` is one of them since
+ * #1666: it had no consumer, so it is accepted and dropped rather than stored.
  */
 void parse_config(const tlv_t* config, conn_settings_t& s) {
     const config_reader_t cfg(config);
@@ -57,7 +59,6 @@ void parse_config(const tlv_t* config, conn_settings_t& s) {
         s.port = *v;
         s.port_set = true;
     }
-    if (const auto v = cfg.u32("keepalive")) s.keepalive_ms = *v;
     if (const auto v = cfg.u32("max_frame")) s.max_frame = *v;
     if (const auto v = cfg.u32("backoff")) s.backoff_ms = *v;
     if (const auto v = cfg.u32("connect_timeout")) s.connect_timeout_ms = *v;
