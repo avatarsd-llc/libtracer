@@ -71,11 +71,6 @@ using tr::testing::make_value;
     return b.size() == 1 ? std::to_integer<std::uint8_t>(b[0]) : 0;
 }
 
-/** @brief The same, on the rope a handler or admission filter is handed. */
-[[nodiscard]] std::uint8_t only_byte(const rope_t& r) {
-    return only_byte(tr::graph::value_storage_t<2>{r}.get());
-}
-
 /** @brief The single byte currently stored at @p p, or 0 when nothing is stored there. */
 [[nodiscard]] std::uint8_t stored_byte(graph_t& g, const path_t& p) {
     const auto r = g.read(p);
@@ -127,10 +122,11 @@ void test_accept_as_written() {
     graph_t g;
     int calls = 0;
     handlers_t h;
-    h.on_admit = [&calls](const rope_t&, const write_ctx_t&) -> admission_t {
+    auto h_on_admit = [&calls](const tr::graph::value_t&, const write_ctx_t&) -> admission_t {
         ++calls;
         return std::nullopt;
     };
+    h.on_admit = tr::graph::thunk(h_on_admit);
     const vertex_handle_t v = g.register_vertex(path_t("/v"), role_t::STORED_VALUE, std::move(h));
 
     log_t seen;
@@ -156,10 +152,11 @@ void test_normalise_replaces_the_stored_value() {
     std::printf("vector 2 — normalise:\n");
     graph_t g;
     handlers_t h;
-    h.on_admit = [](const rope_t& value, const write_ctx_t&) -> admission_t {
+    auto h_on_admit2 = [](const tr::graph::value_t& value, const write_ctx_t&) -> admission_t {
         if (only_byte(value) == 0) return std::nullopt;  // already canonical
         return rope_t{make_value({0x01})};
     };
+    h.on_admit = tr::graph::thunk(h_on_admit2);
     const vertex_handle_t v = g.register_vertex(path_t("/v"), role_t::STORED_VALUE, std::move(h));
 
     log_t seen;
@@ -192,10 +189,11 @@ void test_refusal_propagates_and_preserves_the_lkv() {
     graph_t g;
     handlers_t h;
     // Even bytes only — an invariant a stored value could not previously defend.
-    h.on_admit = [](const rope_t& value, const write_ctx_t&) -> admission_t {
+    auto h_on_admit3 = [](const tr::graph::value_t& value, const write_ctx_t&) -> admission_t {
         if ((only_byte(value) & 1U) != 0) return std::unexpected(status_t::TYPE_MISMATCH);
         return std::nullopt;
     };
+    h.on_admit = tr::graph::thunk(h_on_admit3);
     const vertex_handle_t v = g.register_vertex(path_t("/v"), role_t::STORED_VALUE, std::move(h));
 
     log_t seen;
@@ -232,11 +230,12 @@ void test_admission_precedes_store_and_delivery() {
     std::size_t deliveries_during = 0xff;
 
     handlers_t h;
-    h.on_admit = [&](const rope_t&, const write_ctx_t&) -> admission_t {
+    auto h_on_admit4 = [&](const tr::graph::value_t&, const write_ctx_t&) -> admission_t {
         seen_during = stored_byte(g, path_t("/v"));
         deliveries_during = seen.bytes.size();
         return std::nullopt;
     };
+    h.on_admit = tr::graph::thunk(h_on_admit4);
     const vertex_handle_t v = g.register_vertex(path_t("/v"), role_t::STORED_VALUE, std::move(h));
     auto on_value = [&seen](const tr::graph::value_t& r) { seen.bytes.push_back(only_byte(r)); };
     check(g.subscribe(path_t("/v"), on_value).has_value(), "subscribe to the observed vertex");
@@ -269,7 +268,8 @@ void test_no_filter_is_unchanged() {
     const vertex_handle_t bare = g.register_vertex(path_t("/bare"), role_t::STORED_VALUE);
 
     handlers_t h;
-    h.on_children = []() -> tr::graph::result_t<view_t> { return make_value({0x00}); };
+    auto h_on_children = []() -> tr::graph::result_t<view_t> { return make_value({0x00}); };
+    h.on_children = tr::graph::thunk(h_on_children);
     const vertex_handle_t seamed =
         g.register_vertex(path_t("/seamed"), role_t::STORED_VALUE, std::move(h));
 
@@ -299,12 +299,13 @@ void test_assign_takes_the_same_seam() {
     std::printf("vector 6 — assign is filtered too:\n");
     graph_t g;
     handlers_t h;
-    h.on_admit = [](const rope_t& value, const write_ctx_t&) -> admission_t {
+    auto h_on_admit5 = [](const tr::graph::value_t& value, const write_ctx_t&) -> admission_t {
         const std::uint8_t b = only_byte(value);
         if (b == 0xee) return std::unexpected(status_t::TYPE_MISMATCH);
         if (b == 0xaa) return rope_t{make_value({0xab})};
         return std::nullopt;
     };
+    h.on_admit = tr::graph::thunk(h_on_admit5);
     const vertex_handle_t v = g.register_vertex(path_t("/v"), role_t::STORED_VALUE, std::move(h));
 
     log_t seen;
@@ -340,14 +341,17 @@ void test_handler_role_takes_on_write_only() {
     int writes = 0;
     int admits = 0;
     handlers_t h;
-    h.on_write = [&writes](const rope_t&, const write_ctx_t&) -> tr::graph::result_t<void> {
+    auto h_on_write = [&writes](const tr::graph::value_t&,
+                                const write_ctx_t&) -> tr::graph::result_t<void> {
         ++writes;
         return {};
     };
-    h.on_admit = [&admits](const rope_t&, const write_ctx_t&) -> admission_t {
+    h.on_write = tr::graph::thunk(h_on_write);
+    auto h_on_admit6 = [&admits](const tr::graph::value_t&, const write_ctx_t&) -> admission_t {
         ++admits;
         return std::unexpected(status_t::TYPE_MISMATCH);  // would be visible if it ran
     };
+    h.on_admit = tr::graph::thunk(h_on_admit6);
     const vertex_handle_t v = g.register_vertex(path_t("/h"), role_t::HANDLER, std::move(h));
 
     check(g.write(v, byte_value(0x60)).has_value(), "the handler write succeeds");
@@ -368,10 +372,11 @@ void test_stream_ring_queues_the_admitted_value() {
     std::printf("vector 8 — a STREAM queues what was admitted:\n");
     graph_t g;
     handlers_t h;
-    h.on_admit = [](const rope_t& value, const write_ctx_t&) -> admission_t {
+    auto h_on_admit7 = [](const tr::graph::value_t& value, const write_ctx_t&) -> admission_t {
         if (only_byte(value) == 0x71) return std::unexpected(status_t::TYPE_MISMATCH);
         return rope_t{make_value({0x99})};
     };
+    h.on_admit = tr::graph::thunk(h_on_admit7);
     const vertex_handle_t v = g.register_vertex(path_t("/s"), role_t::STREAM, std::move(h));
 
     log_t seen;
@@ -400,10 +405,11 @@ void test_fan_in_delivery_is_filtered_and_counted() {
     std::printf("vector 9 — a fan-in delivery meets the target's filter:\n");
     graph_t g;
     handlers_t h;
-    h.on_admit = [](const rope_t& value, const write_ctx_t&) -> admission_t {
+    auto h_on_admit8 = [](const tr::graph::value_t& value, const write_ctx_t&) -> admission_t {
         if (only_byte(value) == 0x81) return std::unexpected(status_t::TYPE_MISMATCH);
         return std::nullopt;
     };
+    h.on_admit = tr::graph::thunk(h_on_admit8);
     const vertex_handle_t src = g.register_vertex(path_t("/src"), role_t::STORED_VALUE);
     (void)g.register_vertex(path_t("/sink"), role_t::STORED_VALUE, std::move(h));
     check(g.subscribe(path_t("/src"), path_t("/sink")).has_value(), "wire src -> sink");
@@ -433,13 +439,15 @@ void test_field_admission_accepts() {
     int admits = 0;
     int applied = 0;
     handlers_t h;
-    h.on_app_field_admit = [&admits](std::string_view name,
-                                     const view_t& value) -> tr::graph::result_t<view_t> {
+    auto h_on_app_field_admit = [&admits](std::string_view name,
+                                          const view_t& value) -> tr::graph::result_t<view_t> {
         ++admits;
         check(name == "mode", "the filter is handed the field key below settings.app.");
         return value;
     };
-    h.on_app_field_write = [&applied](std::string_view, const view_t&) { ++applied; };
+    h.on_app_field_admit = tr::graph::thunk(h_on_app_field_admit);
+    auto h_on_app_field_write = [&applied](std::string_view, const view_t&) { ++applied; };
+    h.on_app_field_write = tr::graph::thunk(h_on_app_field_write);
     const vertex_handle_t v = g.register_vertex(path_t("/dev"), role_t::STORED_VALUE, std::move(h));
     std::vector<app_field_t> table;
     table.push_back(app_field_t{.name = "mode", .access = app_access_t::RW});
@@ -465,13 +473,16 @@ void test_field_admission_normalises() {
     graph_t g;
     std::vector<std::byte> applied_bytes;
     handlers_t h;
-    h.on_app_field_admit = [](std::string_view, const view_t&) -> tr::graph::result_t<view_t> {
+    auto h_on_app_field_admit2 = [](std::string_view,
+                                    const view_t&) -> tr::graph::result_t<view_t> {
         return make_value(value_tlv("ECO"));  // the canonical spelling, whatever was written
     };
-    h.on_app_field_write = [&applied_bytes](std::string_view, const view_t& value) {
+    h.on_app_field_admit = tr::graph::thunk(h_on_app_field_admit2);
+    auto h_on_app_field_write2 = [&applied_bytes](std::string_view, const view_t& value) {
         const std::span<const std::byte> b = value.bytes();
         applied_bytes.assign(b.begin(), b.end());
     };
+    h.on_app_field_write = tr::graph::thunk(h_on_app_field_write2);
     const vertex_handle_t v = g.register_vertex(path_t("/dev"), role_t::STORED_VALUE, std::move(h));
     std::vector<app_field_t> table;
     table.push_back(app_field_t{.name = "mode", .access = app_access_t::RW});
@@ -500,12 +511,14 @@ void test_field_admission_refuses() {
     // shape of validation the descriptor table deliberately does not perform for the owner.
     const std::size_t limit = value_tlv("eco").size();
     handlers_t h;
-    h.on_app_field_admit = [limit](std::string_view,
-                                   const view_t& value) -> tr::graph::result_t<view_t> {
+    auto h_on_app_field_admit3 = [limit](std::string_view,
+                                         const view_t& value) -> tr::graph::result_t<view_t> {
         if (value.bytes().size() > limit) return std::unexpected(status_t::TYPE_MISMATCH);
         return value;
     };
-    h.on_app_field_write = [&applied](std::string_view, const view_t&) { ++applied; };
+    h.on_app_field_admit = tr::graph::thunk(h_on_app_field_admit3);
+    auto h_on_app_field_write3 = [&applied](std::string_view, const view_t&) { ++applied; };
+    h.on_app_field_write = tr::graph::thunk(h_on_app_field_write3);
     const vertex_handle_t v = g.register_vertex(path_t("/dev"), role_t::STORED_VALUE, std::move(h));
     std::vector<app_field_t> table;
     table.push_back(app_field_t{.name = "mode", .access = app_access_t::RW});

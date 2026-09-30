@@ -584,6 +584,28 @@ class value_ref_t {
         return value_ref_t{value_t::make(std::move(r), mem::heap_source())};
     }
 
+    /**
+     * @brief Keep a BORROWED value past the call that lent it — the one way a seam that was
+     *        handed `const value_t&` (a subscriber callback, `handlers_t::on_write`,
+     *        `handlers_t::on_admit`) retains it (RFC-0028 D10).
+     *
+     * A value drawn from a source (a published block — what a subscription edge delivers) is
+     * SHARED: one refcount bump, no allocation. A value with no source is caller-owned storage
+     * on the writer's stack (`value_storage_t`, the relay and local-handler shape), which dies
+     * when the call returns, so its links are cloned into ONE fresh block from @p source — the
+     * payload bytes are never copied, only the links' references.
+     *
+     * Never keep the reference itself, or its address: a stack value's storage asserts, on the
+     * way out, that nothing did.
+     *
+     * @return The reference, or an EMPTY one when @p source refused the block (#477).
+     */
+    [[nodiscard]] static value_ref_t keep(
+        const value_t& v, mem::block_source_t& source = mem::heap_source()) noexcept {
+        if (v.source() != nullptr) return share(&v);
+        return value_ref_t{value_t::make(v.links(), source)};
+    }
+
     /** @brief A copy is one more reference to the same value. */
     value_ref_t(const value_ref_t& other) noexcept : p_(other.p_) {
         if (p_ != nullptr) p_->retain();
@@ -651,6 +673,16 @@ class value_storage_t {
         : value_storage_t(std::span<const view_t>(&link, 1)) {}
     /** @brief Build over a rope's chain. Precondition: `r.link_count() <= N`. */
     explicit value_storage_t(const rope_t& r) noexcept : value_storage_t(r.links()) {}
+    /** @brief Build over a rope's chain by MOVING its links in — no refcount traffic; @p r is
+     *         left empty. Precondition: `r.link_count() <= N`. */
+    explicit value_storage_t(rope_t&& r) noexcept {
+        const std::span<view_t> in = r.links();
+        assert(in.size() <= N);
+        auto* v = new (buf_) value_t(static_cast<std::uint32_t>(in.size()), nullptr);
+        view_t* out = v->slots();
+        for (std::size_t i = 0; i < in.size(); ++i) new (out + i) view_t(std::move(in[i]));
+        r = rope_t{};
+    }
 
     value_storage_t(const value_storage_t&) = delete;
     value_storage_t& operator=(const value_storage_t&) = delete;

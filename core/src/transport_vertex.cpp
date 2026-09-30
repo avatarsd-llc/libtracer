@@ -385,14 +385,21 @@ result_t<void> transport_vertex_t::mint_module_locked(const std::string& module)
     // no catalog. That empty answer is conforming, not a stub — the probe of §6 asks whether
     // the endpoint EXISTS, and `SCHEMA_NOT_FOUND` would answer a question nobody asked.
     //
-    // The lambda captures the module by VALUE. The path is the module, so the dispatch never
-    // re-derives it from a payload the peer wrote — a creator cannot address one module's
-    // endpoint and have the connection mount under another.
+    // The seam's context holds the module by VALUE. The path is the module, so the dispatch
+    // never re-derives it from a payload the peer wrote — a creator cannot address one module's
+    // endpoint and have the connection mount under another. The context is a hook's `ctx`
+    // (RFC-0028 D10), so it must outlive the vertex: it lives in `endpoints_`, one heap node
+    // per minted module that never moves, for as long as this object — the lifetime every
+    // seam here has.
+    endpoints_.push_back(std::make_unique<endpoint_ctx_t>(endpoint_ctx_t{this, module}));
+    endpoint_ctx_t& ctx = *endpoints_.back();
     graph::handlers_t handlers;
-    handlers.on_write = [this, module](const view::rope_t& value,
-                                       const graph::write_ctx_t&) -> result_t<void> {
-        return endpoint_write(module, value);
-    };
+    handlers.on_write = {
+        [](void* c, const graph::value_t& value, const graph::write_ctx_t&) -> result_t<void> {
+            auto* e = static_cast<endpoint_ctx_t*>(c);
+            return e->self->endpoint_write(e->module, value);
+        },
+        &ctx};
     // RFC-0014 §5, discharged by the Amendment 2 general contract: the two control payloads
     // this endpoint accepts demand DIFFERENT rights, so the endpoint declares them rather
     // than having `graph_t` learn a transport concept. `SPEC` (create) demands `CREATE`, so
@@ -400,12 +407,12 @@ result_t<void> transport_vertex_t::mint_module_locked(const std::string& module)
     // transport; `NAME` (remove) demands `WRITE`, per RFC-0009 §A.2's reserved-and-unused
     // `DELETE`. A peer may hold either without the other. Anything else written here takes the
     // default `WRITE` and is refused by `endpoint_write` on its shape (§2), not by the gate.
-    handlers.payload_rights = {
+    static constexpr graph::payload_right_t kRights[] = {
         graph::payload_right_t{wire::type_t::SPEC, graph::acl_right_t::CREATE},
         graph::payload_right_t{wire::type_t::NAME, graph::acl_right_t::WRITE},
     };
     auto endpoint = graph_.register_vertex_key(std::move(endpoint_key), graph::role_t::HANDLER,
-                                               std::move(handlers));
+                                               handlers, kRights);
     if (!endpoint) return std::unexpected(endpoint.error());
     // RFC-0014 §3 (S4): `conn` is HIDDEN from `<net_root>/<module>:children[]`, which returns
     // the module's member CONNECTIONS. The endpoint is the control that creates them, not one
@@ -420,7 +427,7 @@ result_t<void> transport_vertex_t::mint_module_locked(const std::string& module)
 }
 
 result_t<void> transport_vertex_t::endpoint_write(const std::string& module,
-                                                  const view::rope_t& value) {
+                                                  const graph::value_t& value) {
     // A DEVICE-link payload is permanently un-parsable on the CPU (ADR-0024), so it is a
     // malformed control write rather than a transient one — the same classification
     // `graph_t::write`'s field surface makes.
@@ -728,27 +735,30 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(ctl_txn_t& 
     graph::handlers_t handlers;
     // Asked through `bus_of` (#375 deliverable 3): on a target that closed the bus module out
     // every connection vertex is the plain one, and the synthesis below — with the TLV
-    // emission and the `std::function` it captures into — is never compiled.
+    // emission it performs — is never compiled. The hook's `ctx` is the bus facet itself,
+    // which lives exactly as long as the link (RFC-0028 D10: nothing captured, nothing owned).
     if (bus_link_t* const bus = bus_of(*link)) {
-        handlers.on_children = [bus]() -> result_t<view_t> {
-            std::vector<std::byte> members;
-            bus->enumerate_peers([&members](std::string_view peer) {
-                std::vector<std::byte> body;
-                wire::emit_name(body, peer);
-                wire::emit_tlv(members, type_t::POINT, wire::opt_t{.pl = true}, body);
-            });
-            std::vector<std::byte> out;
-            wire::emit_tlv(out, type_t::POINT, wire::opt_t{.pl = true}, members);
-            const auto res = view::over_bytes(out);
-            if (!res) return std::unexpected(status_t::BACKPRESSURE);
-            return *res;
-        };
+        handlers.on_children = {
+            [](void* c) -> result_t<view_t> {
+                std::vector<std::byte> members;
+                static_cast<bus_link_t*>(c)->enumerate_peers([&members](std::string_view peer) {
+                    std::vector<std::byte> body;
+                    wire::emit_name(body, peer);
+                    wire::emit_tlv(members, type_t::POINT, wire::opt_t{.pl = true}, body);
+                });
+                std::vector<std::byte> out;
+                wire::emit_tlv(out, type_t::POINT, wire::opt_t{.pl = true}, members);
+                const auto res = view::over_bytes(out);
+                if (!res) return std::unexpected(status_t::BACKPRESSURE);
+                return *res;
+            },
+            bus};
     }
 
     // Register the identity vertex at the composed /net/<name> key (graph owns addressing).
     // On failure the just-constructed socket (if any) is torn down by `owned`'s destructor.
-    result_t<vertex_handle_t> v = graph_.register_vertex_key(
-        std::move(mount_key), graph::role_t::STORED_VALUE, std::move(handlers));
+    result_t<vertex_handle_t> v =
+        graph_.register_vertex_key(std::move(mount_key), graph::role_t::STORED_VALUE, handlers);
     if (!v) return v;  // PATH_IN_USE on a duplicate connection name
 
     // The engine is the sole writer of this connection's DIAL transitions (RFC-0014 §4):

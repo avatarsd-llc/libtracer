@@ -53,6 +53,7 @@
 #include <vector>
 
 #include "libtracer/tracer.hpp"
+#include "test_history.hpp"
 #include "test_support.hpp"
 #include "test_values.hpp"
 
@@ -167,7 +168,7 @@ void test_stream_class_no_conflate_at_a_stream_receiver() {
     check(is_run(order, 5), "... in write order — a queue, not a coalesce (RFC-0008 §E)");
 
     // The ablation: the same five deliveries into a plain receiver keep only the newest.
-    const auto flat_history = g.history(flat_rx);
+    const auto flat_history = tr::testing::history_of(g, flat_rx);
     check(!flat_history.has_value() && flat_history.error() == status_t::SCHEMA_NOT_FOUND,
           "the plain receiver has no ring to hold a history in (the role IS the difference)");
     const auto flat_now = g.read(flat_rx);

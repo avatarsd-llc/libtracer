@@ -42,6 +42,7 @@
 
 #include "libtracer/mem_source.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_history.hpp"
 #include "test_support.hpp"
 #include "test_values.hpp"
 
@@ -161,12 +162,13 @@ void test_wo_field_stores_nothing() {
     int fired = 0;
     std::vector<std::byte> seen;
     handlers_t h;
-    h.on_app_field_write = [&](std::string_view name, const view_t& value) {
+    auto h_on_app_field_write = [&](std::string_view name, const view_t& value) {
         if (name == "secret") {
             ++fired;
             seen.assign(value.bytes().begin(), value.bytes().end());
         }
     };
+    h.on_app_field_write = tr::graph::thunk(h_on_app_field_write);
     const vertex_handle_t v =
         g.register_vertex(path_t("/dev/a"), role_t::STORED_VALUE, std::move(h));
     std::vector<app_field_t> table;
@@ -281,15 +283,15 @@ void test_none_vertex_relays() {
     check(g.set_retention(st, retention_t::NONE).has_value(), "NONE is legal on a STREAM");
     check(g.write(st, make_value({0x06})).has_value() && srecv.load() == 1,
           "a NONE STREAM still delivers its write");
-    const auto hist = g.history(st);
+    const auto hist = tr::testing::history_of(g, st);
     check(hist.has_value() && hist->empty() && !g.read(st).has_value(),
           "... and keeps no ring entry and no value");
 
     // A HANDLER is NONE and nothing else.
     handlers_t h;
-    h.on_write = [](const rope_t&, const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
-        return {};
-    };
+    auto h_on_write = [](const tr::graph::value_t&,
+                         const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> { return {}; };
+    h.on_write = tr::graph::thunk(h_on_write);
     const vertex_handle_t hv = g.register_vertex(path_t("/relay/h"), role_t::HANDLER, std::move(h));
     check(g.retention(hv) == retention_t::NONE, "a HANDLER retains NONE");
     check(g.set_retention(hv, retention_t::NONE).has_value() &&
@@ -374,7 +376,7 @@ void test_ring_rides_the_source() {
         const auto held = g.ring_reserved_bytes(st);
         check(held.has_value() && *held == src.live && src.live > 0,
               "every byte the ring holds is a reservation on ITS source");
-        const auto hist = g.history(st);
+        const auto hist = tr::testing::history_of(g, st);
         check(hist.has_value() && hist->size() == 64, "the ring holds exactly its depth");
     }
     check(src.live == 0, "teardown returned every reservation — the entries went with them");

@@ -1260,7 +1260,7 @@ void test_resolver_deny_arm_is_denied_at_every_gate() {
         check(denied(g.write(v, acl_field->field(), make_value(hijack), kUnnameable)),
               "WRITE_ACL: the UNNAMEABLE caller may NOT rewrite the policy");
         const auto still = g.read(v, acl_field->field(), "peer-ok");
-        check(still.has_value() && still->flatten().bytes().size() == open_to_everyone.size(),
+        check(still.has_value() && (*still)->flatten().bytes().size() == open_to_everyone.size(),
               "WRITE_ACL: the denied admin write left the stored ACL in place");
         check(g.write(v, acl_field->field(), make_value(open_to_everyone), "peer-ok").has_value(),
               "WRITE_ACL: the nameable caller may rewrite the policy");

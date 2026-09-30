@@ -32,6 +32,7 @@
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "test_history.hpp"
 #include "test_support.hpp"
 #include "test_values.hpp"
 
@@ -504,12 +505,13 @@ void test_apply_seam() {
         int fired = 0;
     } seen;
     handlers_t h;
-    h.on_app_field_write = [&seen](std::string_view name, const tr::view::view_t& value) {
+    auto h_on_app_field_write = [&seen](std::string_view name, const tr::view::view_t& value) {
         seen.name.assign(name);
         const std::span<const std::byte> b = value.bytes();
         seen.bytes.assign(b.begin(), b.end());
         ++seen.fired;
     };
+    h.on_app_field_write = tr::graph::thunk(h_on_app_field_write);
     const vertex_handle_t v =
         g.register_vertex(path_t("/dev/h"), role_t::STORED_VALUE, std::move(h));
 
@@ -714,11 +716,12 @@ void test_shape_gates_no_test_defended() {
           "the declared field still holds its ORIGINAL bytes — no indexed form misrouted");
 
     // graph.cpp:1254 — history() is STREAM-only.
-    check(fails_with(g.history(v), status_t::SCHEMA_NOT_FOUND),
+    check(fails_with(tr::testing::history_of(g, v), status_t::SCHEMA_NOT_FOUND),
           "history() on a STORED_VALUE -> SCHEMA_NOT_FOUND (STREAM-only)");
     {
         const vertex_handle_t s = g.register_vertex(path_t("/ctrl/stream"), role_t::STREAM);
-        check(g.history(s).has_value(), "history() on a STREAM succeeds (the gate is not blanket)");
+        check(tr::testing::history_of(g, s).has_value(),
+              "history() on a STREAM succeeds (the gate is not blanket)");
     }
 }
 

@@ -370,9 +370,9 @@ void test_field_wildcard_divergence() {
     const auto seeded = g.read(v, slot0, {});
     check(seeded.has_value(), "seed reads back");
     const std::vector<std::byte> seeded_bytes =
-        seeded
-            ? std::vector<std::byte>(seeded->only().bytes().begin(), seeded->only().bytes().end())
-            : std::vector<std::byte>{};
+        seeded ? std::vector<std::byte>((*seeded)->only().bytes().begin(),
+                                        (*seeded)->only().bytes().end())
+               : std::vector<std::byte>{};
 
     expect(write_status(g, v, star, subscriber_tlv("sink_b"), {}), status_t::INVALID_PATH,
            "write :subscribers[*] is INVALID_PATH");
@@ -383,8 +383,8 @@ void test_field_wildcard_divergence() {
     const auto after = g.read(v, slot0, {});
     check(after.has_value(), "slot 0 still reads back after the refused wildcard write");
     if (after) {
-        const std::vector<std::byte> after_bytes(after->only().bytes().begin(),
-                                                 after->only().bytes().end());
+        const std::vector<std::byte> after_bytes((*after)->only().bytes().begin(),
+                                                 (*after)->only().bytes().end());
         check(!seeded_bytes.empty() && seeded_bytes == after_bytes,
               "... and it is BYTE-IDENTICAL — no wildcard write landed in slot 0 (#579)");
     }
@@ -464,7 +464,7 @@ void test_subscriber_door_parity() {
     const auto back = g2.read(v2, fp("subscribers", sel_t::SLOT), {});
     check(back.has_value(), "the retained record reads back from :subscribers[0]");
     if (back) {
-        const auto decoded = tr::wire::decode(back->only());
+        const auto decoded = tr::wire::decode((*back)->only());
         check(decoded && decoded->type == tr::wire::type_t::SUBSCRIBER,
               "... and it is the SUBSCRIBER TLV, verbatim");
     }

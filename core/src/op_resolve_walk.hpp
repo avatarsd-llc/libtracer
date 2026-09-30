@@ -768,17 +768,11 @@ template <class N>
                                    sub_len, egress, mint),
                     ok, egress);
             }
-            // A `:field` read composes a value and is rope-valued; a plain value read hands
-            // back a REFERENCE to the published one. Both feed the same reply assembly, which
-            // only ever reads the rope, so bind whichever arrived without copying it.
-            result_t<value_ref_t> r = has_field ? [&]() -> result_t<value_ref_t> {
-                auto composed = graph.read(v, field, subject);
-                if (!composed) return std::unexpected(composed.error());
-                value_ref_t out = value_ref_t::composed(std::move(*composed));
-                if (!out) return std::unexpected(status_t::BACKPRESSURE);  // one block, refused
-                return out;
-            }()
-                : graph.read(v, subject);
+            // One read type (RFC-0028 D11): a `:field` read composes a value, a plain value
+            // read hands back a REFERENCE to the published one, and both arrive as a
+            // `value_ref_t` the reply assembly reads without copying.
+            result_t<value_ref_t> r =
+                has_field ? graph.read(v, field, subject) : graph.read(v, subject);
             if (!r) return assemble_error_reply(route, r.error(), egress);
             // The composed-root case: graph.read may SUCCEED (a folded ~hundreds-of-links
             // snapshot) yet the reply's own link-table reserve fail on the fragmented heap.

@@ -13,6 +13,11 @@
  * register, a computation, a device command. The role is host state and appears on no wire:
  * a peer sees one address with `read`/`write`, exactly as for a stored value.
  *
+ * Each seam is a `{fn, ctx}` hook (`libtracer/hook.hpp`): a captureless function and a
+ * pointer to state the caller keeps alive for as long as the vertex is registered. `on_write`
+ * receives the written value by reference — a handler that keeps it past the call takes
+ * `tr::graph::value_ref_t::keep(value)`.
+ *
  * The seam block is allocated on the PRESENCE of a handler, not on the role
  * (`core/include/libtracer/vertex.hpp`, `value_handlers_t`), so a `HANDLER` vertex
  * registered with an empty `handlers_t` allocates none.
@@ -51,17 +56,22 @@ int main() {
     bool ok = true;
     int commands = 0;
 
+    // `ctx` is `&commands`: it outlives `g`'s use of the seams, which is the whole contract.
     handlers_t relay;
-    relay.on_write = [&commands](const tr::view::rope_t& in,
-                                 const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
-        ++commands;  // the device acts here; nothing is assigned to the vertex
-        std::printf("  [relay] command #%d, %zu bytes\n", commands, in.total_length());
-        return {};
-    };
-    relay.on_read = [&commands]() -> tr::graph::result_t<tr::view::rope_t> {
-        return tr::view::rope_t{value_of(commands % 2 ? "ON" : "OFF")};  // computed, never stored
-    };
-    const auto sw = g.register_vertex(path_t("/dev/relay0"), role_t::HANDLER, std::move(relay));
+    relay.on_write = {[](void* ctx, const tr::graph::value_t& in,
+                         const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
+                          int& n = *static_cast<int*>(ctx);
+                          ++n;  // the device acts here; nothing is assigned to the vertex
+                          std::printf("  [relay] command #%d, %zu bytes\n", n, in.total_length());
+                          return {};
+                      },
+                      &commands};
+    relay.on_read = {[](void* ctx) -> tr::graph::result_t<tr::view::rope_t> {
+                         const int n = *static_cast<const int*>(ctx);
+                         return tr::view::rope_t{value_of(n % 2 ? "ON" : "OFF")};  // never stored
+                     },
+                     &commands};
+    const auto sw = g.register_vertex(path_t("/dev/relay0"), role_t::HANDLER, relay);
 
     const auto before = g.read(sw);
     check(ok, before && before->get()->only().bytes().size() == 3,

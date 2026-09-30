@@ -16,13 +16,13 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <memory>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "libtracer/hook.hpp"
 #include "libtracer/view.hpp"
 
 /**
@@ -275,6 +275,10 @@ struct app_field_table_t {
     std::unique_ptr<std::vector<std::vector<std::byte>>> values{};
 };
 
+/** @brief The owner apply seam's @ref hook_t shape (RFC-0010 §A.3): the field's key below
+ *         `settings.app.` and the written TLV, both borrowed for the call. */
+using app_field_write_hook_t = hook_t<void(std::string_view name, const view_t& value)>;
+
 /**
  * @brief The lazily-allocated APP-FIELD group of the extension block (ADR-0058 Step 2):
  *        the RFC-0010 descriptor table plus its owner apply seam, together.
@@ -282,7 +286,7 @@ struct app_field_table_t {
  * `on_app_field_write` co-occurs with the field table (it is the table's apply seam), NOT
  * with the vertex's value seam — so it lives here, not in
  * @ref value_handlers_t. A vertex with no app fields and no apply seam keeps this group
- * null and pays neither the table nor the ~32 B `std::function`. Allocated on the first of
+ * null and pays neither the table nor the 16 B hook. Allocated on the first of
  * either `set_app_fields*` (the table) or an `on_app_field_write` at registration; guarded
  * by the vertex mutex, insert-only (never freed before the vertex).
  */
@@ -293,8 +297,8 @@ struct app_field_group_t {
      *         for a write the field ADMISSION filter refused — that filter lives on the GRAPH
      *         (`tr::graph::graph_t::admissions_`), NOT here: this group is carried by every
      *         app-field-bearing vertex, and a filter almost none of them install may not cost
-     *         all of them a `std::function`. */
-    std::function<void(std::string_view name, const view_t& value)> on_app_field_write;
+     *         all of them a hook. */
+    app_field_write_hook_t on_app_field_write;
 };
 
 }  // namespace tr::graph

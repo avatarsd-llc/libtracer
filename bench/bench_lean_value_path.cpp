@@ -32,6 +32,10 @@
  *                  library's own per-publish cost from the producer's.
  *   local-target   the same write with K TARGET subscribers (subscribe(src, target)), each
  *                  target a distinct STORED_VALUE vertex.
+ *   local-handler  the same write with K HANDLER targets (subscribe(src, target), each target a
+ *                  HANDLER vertex with an `on_write`): since RFC-0028 slice 7 the handler reads
+ *                  the published block by `const value_t&`, so the claim is the local-target
+ *                  one — the source's one block, and no per-handler clone of its links.
  *   local-none     the local-cb write to a vertex declared `retention_t::NONE` (RFC-0028
  *                  §5.4, slice 6): the pure relay, whose callback subscribers are delivered a
  *                  `value_storage_t` on the writer's stack — the §6.6 claim is 0 blocks.
@@ -218,6 +222,31 @@ void run_local_target(std::size_t size, std::size_t k) {
         std::fprintf(stderr, "local-target: deliveries dropped\n");
 }
 
+/** @brief The HANDLER targets' `on_write`: counts deliveries into the `ctx` it was given. */
+tr::graph::result_t<void> handler_sink(void* ctx, const tr::graph::value_t&,
+                                       const tr::graph::write_ctx_t&) {
+    static_cast<std::atomic<std::uint64_t>*>(ctx)->fetch_add(1, std::memory_order_relaxed);
+    return {};
+}
+
+void run_local_handler(std::size_t size, std::size_t k) {
+    graph_t g;
+    const path_t src = *path_t::parse("/bench/src");
+    const vertex_handle_t v = g.register_vertex(src, role_t::STORED_VALUE);
+    std::atomic<std::uint64_t> recv{0};
+    for (std::size_t i = 0; i < k; ++i) {
+        const path_t t = *path_t::parse("/bench/h" + std::to_string(i));
+        tr::graph::handlers_t h;
+        h.on_write = {&handler_sink, &recv};
+        (void)g.register_vertex(t, role_t::HANDLER, h);
+        if (!g.subscribe(src, t)) std::fprintf(stderr, "local-handler: subscribe failed\n");
+    }
+    const value_t fx{size};
+    measure("local-handler", size, k, 0, [&] { (void)g.write(v, fx.make()); });
+    if (recv.load() != (kWarm + kOps) * k)
+        std::fprintf(stderr, "local-handler: fan-out not wired\n");
+}
+
 void run_producer_own(std::size_t size) {
     const std::vector<std::byte> app(size, std::byte{0xCD});
     measure("producer-own", size, 0, 1, [&] {
@@ -350,6 +379,7 @@ int main() {
         for (const std::size_t k : kFans) run_local_cb(size, k);
         for (const std::size_t k : kFans) run_local_none(size, k);
         for (const std::size_t k : kFans) run_local_target(size, k);
+        for (const std::size_t k : kFans) run_local_handler(size, k);
         run_producer_own(size);
         run_egress_gather(size);
         run_ingress(size);

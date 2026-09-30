@@ -663,16 +663,35 @@ class graph_t {
      * For a genuine runtime path whose collision is a real outcome, use @ref try_register_vertex.
      */
     [[nodiscard]] vertex_handle_t register_vertex(const path_t& path, role_t role,
-                                                  handlers_t handlers = {});
+                                                  handlers_t handlers = {},
+                                                  std::span<const payload_right_t> rights = {});
 
     /**
      * @brief Register a vertex at @p path — FALLIBLE (the runtime-path form of
      *        @ref register_vertex).
+     * @param handlers The vertex's user seams (@ref handlers_t); every `ctx` must outlive
+     *        the registration.
+     * @param rights OPTIONAL payload-type → required-ACL-right table (RFC-0014 Amendment 2) —
+     *        the general contract by which a control vertex demands something other than
+     *        plain `WRITE` for a given written TLV type. BORROWED for the call: the rows are
+     *        copied onto the graph, under the same lock that publishes the vertex, so the
+     *        declaration is in force before the first write can reach it. Empty (the default)
+     *        ⇒ every write gates on `acl_right_t::WRITE`, and the vertex carries not one byte
+     *        for this; the write gate then stops at one relaxed flag-bit test on a word it
+     *        already holds. A row whose `%payload_right_t::type` equals the written value's
+     *        leading TLV type supplies the right demanded instead; an unmatched type (and a
+     *        value whose leading link cannot be read, e.g. a device-memory link) falls back to
+     *        `WRITE`. Rows are scanned in order, first match wins. The refusal is still the
+     *        ONE write gate's, counted into `delivery_drops_t::denied`: this declaration
+     *        changes WHICH right is demanded, never where the demand is made. (It was
+     *        `handlers_t::payload_rights` until RFC-0028 slice 7 took it out of the seam
+     *        struct.)
      * @return The pinned @ref vertex_handle_t, or `PATH_IN_USE` if the path is already
      *         registered.
      */
-    [[nodiscard]] result_t<vertex_handle_t> try_register_vertex(const path_t& path, role_t role,
-                                                                handlers_t handlers = {});
+    [[nodiscard]] result_t<vertex_handle_t> try_register_vertex(
+        const path_t& path, role_t role, handlers_t handlers = {},
+        std::span<const payload_right_t> rights = {});
 
     /**
      * @brief Register a vertex by its canonical PATH-payload @p key directly (the in-band
@@ -683,9 +702,9 @@ class graph_t {
      * fallible.
      * @return The pinned @ref vertex_handle_t, or `PATH_IN_USE` if the key is already registered.
      */
-    [[nodiscard]] result_t<vertex_handle_t> register_vertex_key(std::vector<std::byte> key,
-                                                                role_t role,
-                                                                handlers_t handlers = {});
+    [[nodiscard]] result_t<vertex_handle_t> register_vertex_key(
+        std::vector<std::byte> key, role_t role, handlers_t handlers = {},
+        std::span<const payload_right_t> rights = {});
 
     /**
      * @brief Retire a vertex and its whole subtree — the owner-facing mirror of
@@ -1388,8 +1407,9 @@ class graph_t {
      * SPEC `config` SETTINGS, it registers the child vertex(es) and returns the primary
      * handle (or a status — e.g. `PATH_IN_USE`). The graph owns the *addressing* (the key
      * is composed for it); the factory owns the *catalog* (what a `type` instantiates).
+     * A @ref hook_t (RFC-0028 D10): its `ctx` must outlive the graph.
      */
-    using child_factory_t = std::function<result_t<vertex_handle_t>(
+    using child_factory_t = hook_t<result_t<vertex_handle_t>(
         graph_t&, std::vector<std::byte> child_key, const wire::tlv_t* config)>;
 
     /**
@@ -1650,13 +1670,17 @@ class graph_t {
     /**
      * @brief Field-read by handle (the read dual of the field-write overload).
      *
-     * An empty @p field is an ordinary value read (the stored rope); otherwise serve
-     * `:schema`, `:acl`, or a single `:subscribers[N]` slot (the slot's stored SUBSCRIBER
-     * view, zero-copy) as a single-link rope. For the whole-array `:subscribers[]` read use
-     * @ref read_subscribers. Used by the FWD resolver.
+     * An empty @p field is an ordinary value read — the SAME reference @ref read hands back,
+     * no copy; otherwise serve `:schema`, `:acl`, `:children[]` (the folded listing) or a
+     * single `:subscribers[N]` slot (the slot's stored SUBSCRIBER view, zero-copy). For the
+     * whole-array `:subscribers[]` read use @ref read_subscribers. Used by the FWD resolver.
+     *
+     * One read type (RFC-0028 D11): a field answer is a @ref value_ref_t like every other
+     * read. A field value is COMPOSED — nothing published it — so it costs the one block
+     * `value_ref_t::composed` draws from the heap; an empty @p field costs nothing.
      */
-    [[nodiscard]] result_t<rope_t> read(vertex_handle_t v, const field_path_t& field,
-                                        std::string_view caller = {}) const;
+    [[nodiscard]] result_t<value_ref_t> read(vertex_handle_t v, const field_path_t& field,
+                                             std::string_view caller = {}) const;
     /**
      * @brief Read the `:subscribers[]` array — the populated slot SUBSCRIBER views in slot order.
      *
@@ -1665,8 +1689,20 @@ class graph_t {
      */
     [[nodiscard]] result_t<std::vector<view_t>> read_subscribers(
         vertex_handle_t v, std::string_view caller = {}) const;
-    /** @brief Stream history, newest last (Stream role only) — each entry the stored rope value. */
-    [[nodiscard]] result_t<std::vector<rope_t>> history(vertex_handle_t v) const;
+    /**
+     * @brief Stream history into caller storage, oldest first (Stream role only) — RFC-0028 D11.
+     *
+     * Fills @p out with the NEWEST `min(out.size(), retained)` ring entries, oldest first, each
+     * a @ref value_ref_t share of the retained block: one refcount bump per entry, NO
+     * allocation and no byte copy. A span as long as the vertex's `retention_t::N` depth
+     * always holds the whole ring. Entries past the returned count are left untouched.
+     *
+     * @return The number of entries written to @p out.
+     * @retval status_t::SCHEMA_NOT_FOUND @p v is not a STREAM.
+     * @retval status_t::PERMISSION_DENIED The local caller lacks READ.
+     */
+    [[nodiscard]] result_t<std::size_t> history(vertex_handle_t v,
+                                                std::span<value_ref_t> out) const;
 
     /**
      * @brief Drain @p v's STREAM entries appended since the last flush, in order — a queue,
@@ -2481,9 +2517,9 @@ class graph_t {
     // retains the key, so the public owning-vector overload is a convenience wrapper and the
     // graph's own callers (write-creates, path registration) pass a span rather than paying a
     // heap copy just to spell the call (#1139/#873).
-    [[nodiscard]] result_t<vertex_handle_t> register_vertex_key_span(std::span<const std::byte> key,
-                                                                     role_t role,
-                                                                     handlers_t handlers);
+    [[nodiscard]] result_t<vertex_handle_t> register_vertex_key_span(
+        std::span<const std::byte> key, role_t role, const handlers_t& handlers,
+        std::span<const payload_right_t> rights = {});
     // Update the vertex value (LKV/history/handler), then fan out to subscribers.
     // `caller` is the ACL caller context gating the WRITE right (the API caller's
     // for a direct write; a delivered subscription's stored context terminates at
@@ -2504,9 +2540,8 @@ class graph_t {
     // budget for this TU, which is what made an unrelated header change measurable as
     // a latency regression (#888/#1086). An rvalue reference binds what the caller
     // already owns, so there is no temporary to build and none to destroy.
-    // NOTE the asymmetry this creates: the Handler leg never moves from `value`, so the
-    // CALLER's rope now survives the call on that path holding its refcounts, where the
-    // by-value temporary used to die at the call. Destruction count is unchanged.
+    // The Handler leg MOVES the links out of `value` into stack storage (RFC-0028 D10), so on
+    // every arm the caller's rope is consumed by the call — never read it afterwards.
     // `drops` reports what the store SHED (vertex_t::store_drops_t), zeroed on entry. REQUIRED,
     // not defaulted, and that is the whole point (#1003): this is the ONE funnel every graph
     // write reaches vertex_t::store through, so a required out-param is what makes "a write
@@ -2533,10 +2568,11 @@ class graph_t {
      * refcount bumps rather than K blocks. Same gates and same tail as the rope overload:
      * the admission filter runs over a `rope_t` of the same links (only a normalisation mints
      * a block), the ring admission charges the receiving vertex's own source, and `drops` is
-     * zeroed on entry. Two shapes take the rope overload instead, through one nothrow clone
-     * of the links: caller-owned storage (`value.source() == nullptr`, a `value_storage_t` a
-     * branch write delivers without storing — a kept reference would outlive its frame) and a
-     * HANDLER target, whose `on_write` reads a rope.
+     * zeroed on entry. A HANDLER target is handed @p value itself by reference (RFC-0028
+     * D10) — no clone, no block. Caller-owned storage (`value.source() == nullptr`, a
+     * `value_storage_t` a branch write delivers without storing — a kept reference would
+     * outlive its frame) takes the rope overload instead, through one nothrow clone of the
+     * links.
      * @return The published reference (the same block as @p value on the adopting arm), the
      *         empty "consumed" sentinel on a HANDLER, or the refusal by value.
      */
@@ -2549,8 +2585,29 @@ class graph_t {
      * @return Disengaged to admit unchanged, engaged to store the normalised rope instead, or
      *         the filter's refusal. A vertex whose filter is mid-retire admits.
      */
-    [[nodiscard]] admission_t admit(vertex_t* v, const rope_t& value,
+    [[nodiscard]] admission_t admit(vertex_t* v, const value_t& value,
                                     std::string_view caller) const;
+    /**
+     * @brief The HANDLER leg of both `store_value` overloads: hand @p value to @p v's
+     *        `on_write` by reference (RFC-0028 D10) and store nothing.
+     * @return The empty "consumed" sentinel, `NOT_FOUND` when no `on_write` is installed, or
+     *         the handler's own refusal.
+     */
+    [[nodiscard]] result_t<value_ref_t> handler_write(vertex_t* v, const value_t& value,
+                                                      std::string_view caller);
+    /**
+     * @brief The rope arm's HANDLER leg: move a local write's links into stack storage (or,
+     *        past `kUnstoredInline` links, one block) and run %handler_write over it.
+     */
+    [[nodiscard]] result_t<value_ref_t> handler_write_rope(vertex_t* v, rope_t&& value,
+                                                           std::string_view caller);
+    /**
+     * @brief `write_impl`'s HANDLER arm: build ONE value from @p value (moved onto this frame,
+     *        or one block past `kUnstoredInline` links), hand it to `on_write`, then deliver the
+     *        same value to the vertex's own subscribers (#1505: no clone).
+     */
+    [[nodiscard]] result_t<void> handler_write_deliver(vertex_t* v, rope_t&& value,
+                                                       std::string_view caller);
     /**
      * @brief The storing tail every non-HANDLER store shares: publish @p sp to @p v's slot,
      *        then admit it into @p v's ring when @p v is a STREAM.
@@ -2753,6 +2810,10 @@ class graph_t {
     // A COMPOSED read's value (a handler's, a folded subtree's) given a published value's
     // shape: one heap block, whose refusal is BACKPRESSURE by value (#477), never a throw.
     [[nodiscard]] static result_t<value_ref_t> composed_or_backpressure(rope_t&& r) noexcept;
+    // The field read's composing arms — every `:field` shape but the empty one — as the rope
+    // they build; the public field `read` wraps it once (RFC-0028 D11).
+    [[nodiscard]] result_t<rope_t> read_field_rope(vertex_handle_t v, const field_path_t& field,
+                                                   std::string_view caller) const;
     // ":schema" read => a POINT descriptor (name + settings).
     [[nodiscard]] result_t<view_t> read_schema(vertex_t* v) const;
     // ":identity" read => the node-scoped SETTINGS{kind,key} record (RFC-0011 §B), or
@@ -3327,7 +3388,7 @@ class graph_t {
 
     /** @brief Publish @p rows as @p v's declaration and set its flag. Call with `map_mutex_`
      *         held UNIQUE (the registration hold). Silently ignores an empty table. */
-    void declare_payload_rights(vertex_t* v, std::vector<payload_right_t> rows);
+    void declare_payload_rights(vertex_t* v, std::span<const payload_right_t> rows);
 
     /** @brief The right @p v demands for a written TLV of @p type — `WRITE` unless @p v
      *         declared a row for it. Lock-free; the caller has already tested the flag. */
@@ -3341,9 +3402,9 @@ class graph_t {
     struct admission_node_t {
         const vertex_t* v = nullptr; /**< @brief The declaring vertex. */
         /** @brief The value plane's pre-store filter, or empty. */
-        std::function<admission_t(const rope_t&, const write_ctx_t&)> on_admit;
+        admit_hook_t on_admit;
         /** @brief The app-field plane's pre-store filter, or empty. */
-        std::function<result_t<view_t>(std::string_view, const view_t&)> on_app_field_admit;
+        app_field_admit_hook_t on_app_field_admit;
         admission_node_t* next = nullptr; /**< @brief The previously declared node. */
     };
 
@@ -3357,9 +3418,10 @@ class graph_t {
      * charges the vertices that install none. Two `std::function`s on the value-seam block cost
      * **+64 B on every seam-bearing vertex** (the `reg_escape` memory probe caught exactly
      * that), and one on the app-field group costs +32 B on every vertex that declares a field
-     * (the `vertex_app5` probes caught that). Neither population is the one using the feature.
-     * Off-vertex, a vertex that installs no filter pays one flag bit and nothing else, and a
-     * vertex that installs one pays a single node here.
+     * (the `vertex_app5` probes caught that); as @ref hook_t pairs since RFC-0028 slice 7 it
+     * would be half that, and half is still not nothing. Neither population is the one using the
+     * feature. Off-vertex, a vertex that installs no filter pays one flag bit and nothing else, and
+     * a vertex that installs one pays a single node here.
      *
      * **Insert-only and immortal, so the read is lock-free** — node lifetime, retirement and
      * re-registration all work exactly as `%payload_rights_` describes: prepended under the
@@ -3376,9 +3438,8 @@ class graph_t {
     /** @brief Publish @p on_admit / @p on_app_field_admit as @p v's filters and set its flag.
      *         Call with `map_mutex_` held UNIQUE (the registration hold). Silently ignores a
      *         declaration with neither filter set. */
-    void declare_admission(
-        vertex_t* v, std::function<admission_t(const rope_t&, const write_ctx_t&)> on_admit,
-        std::function<result_t<view_t>(std::string_view, const view_t&)> on_app_field_admit);
+    void declare_admission(vertex_t* v, admit_hook_t on_admit,
+                           app_field_admit_hook_t on_app_field_admit);
 
     /** @brief @p v's admission node, or null when it has none. Lock-free; the caller has
      *         already tested the flag. */

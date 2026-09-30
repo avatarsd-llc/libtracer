@@ -842,7 +842,7 @@ class transport_vertex_t {
      * @param value  The written value, exactly as the graph handed it over (borrowed).
      */
     [[nodiscard]] graph::result_t<void> endpoint_write(const std::string& module,
-                                                       const view::rope_t& value);
+                                                       const graph::value_t& value);
 
     /** @brief The `SPEC` ⇒ create leg of `%endpoint_write`; runs in @p txn's phase 1. */
     [[nodiscard]] graph::result_t<void> endpoint_create_locked(ctl_txn_t& txn,
@@ -987,6 +987,15 @@ class transport_vertex_t {
     // does not — and it costs a whole extra container instantiation in flash. Nothing here is
     // on the forward path.
     std::vector<module_decl_t> modules_;
+
+    /** @brief The creator endpoint's `on_write` context — the hook's `ctx` (RFC-0028 D10). */
+    struct endpoint_ctx_t {
+        transport_vertex_t* self; /**< @brief The owning transport vertex. */
+        std::string module;       /**< @brief The module the endpoint creates under. */
+    };
+    /** @brief One context per minted creator endpoint, each a heap node that never moves, so a
+     *         hook's `ctx` stays valid for this object's lifetime. Appended under `ctl_m_`. */
+    std::vector<std::unique_ptr<endpoint_ctx_t>> endpoints_;
 };
 
 }  // namespace tr::net

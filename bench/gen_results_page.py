@@ -320,7 +320,8 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "bench_lean_value_path.cpp", "counted", ("memory",),
         "Counts every allocation and byte one publish costs, stage by stage along the value "
         "path — a local write with callback subscribers, the same write to a vertex that "
-        "retains nothing, the same write fanned to K target vertices, a producer handing over "
+        "retains nothing, the same write fanned to K stored target vertices and to K HANDLER "
+        "targets, a producer handing over "
         "its own bytes, a FWD{WRITE} through the terminus "
         "below and at-or-above the copy-or-share threshold, egress through the base "
         "scatter-gather, and the "

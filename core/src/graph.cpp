@@ -786,12 +786,12 @@ graph_t::graph_t(mem::block_source_t* src)
     // `config` SETTINGS is ignored for now (a stored-value has no instantiation params
     // beyond the standard `:settings` field, written separately). Devices add richer
     // types (controllers, transport connections — #83) via register_child_type.
-    register_child_type("stored_value",
-                        [](graph_t& g, std::vector<std::byte> child_key,
-                           const tlv_t*) -> result_t<vertex_handle_t> {
-                            return g.register_vertex_key(std::move(child_key),
-                                                         role_t::STORED_VALUE);
-                        });
+    register_child_type("stored_value", {[](void*, graph_t& g, std::vector<std::byte> child_key,
+                                            const tlv_t*) -> result_t<vertex_handle_t> {
+                                             return g.register_vertex_key(std::move(child_key),
+                                                                          role_t::STORED_VALUE);
+                                         },
+                                         nullptr});
 }
 
 void graph_t::register_child_type(std::string type, child_factory_t factory) {
@@ -799,11 +799,12 @@ void graph_t::register_child_type(std::string type, child_factory_t factory) {
     // doctrine; locked so that a caller who ignores that gets a serialized registration
     // rather than a torn walk of a red-black tree driven by a peer's bytes.
     const std::unique_lock lock(child_types_mutex_);
-    child_types_.insert_or_assign(std::move(type), std::move(factory));
+    child_types_.insert_or_assign(std::move(type), factory);
 }
 
-vertex_handle_t graph_t::register_vertex(const path_t& path, role_t role, handlers_t handlers) {
-    result_t<vertex_handle_t> h = try_register_vertex(path, role, std::move(handlers));
+vertex_handle_t graph_t::register_vertex(const path_t& path, role_t role, handlers_t handlers,
+                                         std::span<const payload_right_t> rights) {
+    result_t<vertex_handle_t> h = try_register_vertex(path, role, handlers, rights);
     // PATH_IN_USE on a compile-site literal is a source bug, not a runtime outcome — fail loud
     // (ADR-0056, mirroring path_t(std::string_view)) rather than hand back a result the caller
     // would only `*`-deref unchecked. A genuine runtime path uses try_register_vertex.
@@ -812,22 +813,25 @@ vertex_handle_t graph_t::register_vertex(const path_t& path, role_t role, handle
 }
 
 result_t<vertex_handle_t> graph_t::try_register_vertex(const path_t& path, role_t role,
-                                                       handlers_t handlers) {
-    return register_vertex_key_span(path.key(), role, std::move(handlers));
+                                                       handlers_t handlers,
+                                                       std::span<const payload_right_t> rights) {
+    return register_vertex_key_span(path.key(), role, handlers, rights);
 }
 
 result_t<vertex_handle_t> graph_t::register_vertex_key(std::vector<std::byte> key, role_t role,
-                                                       handlers_t handlers) {
+                                                       handlers_t handlers,
+                                                       std::span<const payload_right_t> rights) {
     // The owning-vector spelling is the public door and nothing more: the descent below
     // never retains the argument — every record it keeps is copied into the vertex's own
     // `path_key_t` — so the vector is pure convenience for a caller that already has one,
     // and callers that hold borrowed bytes take the span door instead of allocating a copy
     // to satisfy this signature (#1139).
-    return register_vertex_key_span(key, role, std::move(handlers));
+    return register_vertex_key_span(key, role, handlers, rights);
 }
 
-result_t<vertex_handle_t> graph_t::register_vertex_key_span(std::span<const std::byte> key,
-                                                            role_t role, handlers_t handlers) {
+result_t<vertex_handle_t> graph_t::register_vertex_key_span(
+    std::span<const std::byte> key, role_t role, const handlers_t& handlers,
+    std::span<const payload_right_t> rights) {
     const std::unique_lock lock(map_mutex_);
     // Descend the Composite tree (ADR-0057), creating unregistered PLACEHOLDER nodes for
     // missing intermediate levels — invisible to find/read_children until a registration
@@ -880,42 +884,41 @@ result_t<vertex_handle_t> graph_t::register_vertex_key_span(std::span<const std:
         i = e;
     }
     if (node->registered()) return std::unexpected(status_t::PATH_IN_USE);
-    // The RFC-0014 Amendment 2 declaration is taken OUT of the handlers here, before `fill`
-    // adopts the rest: the rows are the graph's (one immortal node per declaring
-    // registration), the vertex keeps only the flag bit that says they exist. We are under
-    // the unique map lock, which is exactly the hold `declare_payload_rights` requires.
-    declare_payload_rights(node, std::move(handlers.payload_rights));
+    // The RFC-0014 Amendment 2 declaration is copied in here, before `fill` adopts the
+    // handlers: the rows are the graph's (one immortal node per declaring registration), the
+    // vertex keeps only the flag bit that says they exist. We are under the unique map lock,
+    // which is exactly the hold `declare_payload_rights` requires.
+    declare_payload_rights(node, rights);
     // Same treatment, same hold, and for the same reason (see `graph_t::admissions_`): the two
-    // ADMISSION filters are moved out here, before `fill` adopts the rest, so the seam block
+    // ADMISSION filters are taken here, before `fill` adopts the rest, so the seam block
     // `adopt_identity` may allocate is byte-for-byte the one it allocated before this feature.
-    declare_admission(node, std::move(handlers.on_admit), std::move(handlers.on_app_field_admit));
-    node->fill(role, std::move(handlers));
+    declare_admission(node, handlers.on_admit, handlers.on_app_field_admit);
+    node->fill(role, handlers);
     return vertex_handle_t{node};
 }
 
-void graph_t::declare_payload_rights(vertex_t* v, std::vector<payload_right_t> rows) {
+void graph_t::declare_payload_rights(vertex_t* v, std::span<const payload_right_t> rows) {
     if (rows.empty()) return;  // the overwhelming majority: no node, no flag, no cost
     // PREPEND, so a re-registration at the same address publishes rows the walk finds before
     // any the previous occupant left behind (the list is never unlinked — see the member's
     // doc for why that is what makes the gate's walk lock-free).
-    payload_right_store_.push_back(
-        std::make_unique<payload_right_node_t>(payload_right_node_t{v, std::move(rows), nullptr}));
+    payload_right_store_.push_back(std::make_unique<payload_right_node_t>(
+        payload_right_node_t{v, std::vector<payload_right_t>(rows.begin(), rows.end()), nullptr}));
     payload_right_node_t* node = payload_right_store_.back().get();
     node->next = payload_rights_.load(std::memory_order_relaxed);
     payload_rights_.store(node, std::memory_order_release);
     v->mark_payload_rights();
 }
 
-void graph_t::declare_admission(
-    vertex_t* v, std::function<admission_t(const rope_t&, const write_ctx_t&)> on_admit,
-    std::function<result_t<view_t>(std::string_view, const view_t&)> on_app_field_admit) {
+void graph_t::declare_admission(vertex_t* v, admit_hook_t on_admit,
+                                app_field_admit_hook_t on_app_field_admit) {
     // The overwhelming majority: no node, no flag, no cost.
     if (!on_admit && !on_app_field_admit) return;
     // PREPEND, so a re-registration at the same address publishes a filter the walk finds
     // before any the previous occupant left behind (the list is never unlinked — see the
     // member's doc for why that is what makes the read lock-free).
     admission_store_.push_back(std::make_unique<admission_node_t>(
-        admission_node_t{v, std::move(on_admit), std::move(on_app_field_admit), nullptr}));
+        admission_node_t{v, on_admit, on_app_field_admit, nullptr}));
     admission_node_t* node = admission_store_.back().get();
     node->next = admissions_.load(std::memory_order_relaxed);
     admissions_.store(node, std::memory_order_release);
@@ -2258,19 +2261,7 @@ result_t<value_ref_t> graph_t::store_value(vertex_t* v, rope_t&& value,
                                            vertex_t::store_drops_t& drops,
                                            std::string_view caller) {
     drops = vertex_t::store_drops_t{};
-    if (v->role() == role_t::HANDLER) {
-        const value_handlers_t& h = v->handlers();  // load once — a retire may swap it out
-        if (!h.on_write) return std::unexpected(status_t::NOT_FOUND);
-        // The subject is NOT re-derived here (#375): `caller` is the identical value the
-        // WRITE gate one stack frame up passed to `acl_allows`, so the handler and the ACL
-        // that admitted the write cannot disagree about who wrote. The ctx is a borrowed
-        // view built on the stack — no allocation, nothing stored on the vertex.
-        const write_ctx_t ctx{.subject = caller};
-        result_t<void> r = h.on_write(value, ctx);
-        if (!r) return std::unexpected(r.error());
-        v->note_write();
-        return value_ref_t{};  // handler consumed it — nothing stored
-    }
+    if (v->role() == role_t::HANDLER) return handler_write_rope(v, std::move(value), caller);
     // ADMISSION (the retaining roles' pre-store seam). It sits HERE — inside the one function
     // every store goes through, and above the tail every storing role shares — because that is
     // the only placement under which the filter cannot be bypassed: `write`, `assign`, a
@@ -2292,31 +2283,114 @@ result_t<value_ref_t> graph_t::store_value(vertex_t* v, rope_t&& value,
     // bit and leaves the node parked, so a racing store may see one without the other, and a
     // vertex mid-retire has no invariant left to defend — it admits, rather than turning a
     // retire into spurious write failures.
-    if (v->has_admission()) {
-        admission_t decided = admit(v, value, caller);
-        if (!decided) return std::unexpected(decided.error());
-        // Engaged ⇒ store the NORMALISED rope instead. The writer's rope dies here, which is
-        // the point: nothing downstream can reach the spelling the filter rejected.
-        if (*decided) value = std::move(**decided);
-    }
+    //
     // THE one allocation a publish costs (RFC-0028 §5.1): the value's block, refcount and
     // link chain together, drawn from the graph's source and moved — not cloned — out of the
     // caller's rope. Exhaustion is a `nullptr` by value; the rope is then still the caller's.
-    return publish_value(v, value_ref_t::adopt(value_t::make(std::move(value), *ctl_)), drops);
+    // It is minted BEFORE the filter runs, because the filter reads the value as a `value_t`
+    // (RFC-0028 D10) and this block is the one an admitted write publishes anyway: an
+    // admitted write still costs exactly one block, and only a refusal pays for one it frees.
+    value_ref_t block = value_ref_t::adopt(value_t::make(std::move(value), *ctl_));
+    if (block && v->has_admission()) {
+        admission_t decided = admit(v, *block, caller);
+        if (!decided) return std::unexpected(decided.error());
+        // Engaged ⇒ store the NORMALISED rope instead. The writer's block dies here, which is
+        // the point: nothing downstream can reach the spelling the filter rejected.
+        if (*decided) block = value_ref_t::adopt(value_t::make(std::move(**decided), *ctl_));
+    }
+    return publish_value(v, std::move(block), drops);
+}
+
+[[gnu::noinline]] result_t<value_ref_t> graph_t::handler_write(vertex_t* v, const value_t& value,
+                                                               std::string_view caller) {
+    const value_handlers_t& h = v->handlers();  // load once — a retire may swap it out
+    if (!h.on_write) return std::unexpected(status_t::NOT_FOUND);
+    // The subject is NOT re-derived here (#375): `caller` is the identical value the
+    // WRITE gate one stack frame up passed to `acl_allows`, so the handler and the ACL
+    // that admitted the write cannot disagree about who wrote. The ctx is a borrowed
+    // view built on the stack — no allocation, nothing stored on the vertex.
+    const write_ctx_t ctx{.subject = caller};
+    if (result_t<void> r = h.on_write(value, ctx); !r) return std::unexpected(r.error());
+    v->note_write();
+    return value_ref_t{};  // handler consumed it — nothing stored
+}
+
+[[gnu::noinline]] result_t<void> graph_t::handler_write_deliver(vertex_t* v, rope_t&& value,
+                                                                std::string_view caller) {
+    // A handler stores no LKV (the user handler consumes the value), so there is no
+    // published pointer to deliver from — the hot roles deliver the exact pointer
+    // store_value hands back. There is no CLONE either, and that is #1505: the ONE value the
+    // handler reads by reference (RFC-0028 D10) is the value this vertex's own subscribers are
+    // delivered, built once on this frame by MOVING the writer's links in (no block, no
+    // refcount traffic), or — past `kUnstoredInline` links — as one block from the graph's
+    // source.
+    //
+    // What the clone #1505 removed cost, measured (#1516's bench_source_role): past the
+    // rope's inline link capacity (knee between 2 and 3 links) it was one heap block on EVERY
+    // handler write, ~40 ns flat in fan-out — a per-write term, paid in full even at fan-out
+    // zero — and it made the non-retaining role the more expensive one at multi-link values,
+    // inverting the ordering the role system advertises.
+    //
+    // No OUT_OF_MEMORY tally here, and the leg it counted is not merely narrower — it is
+    // IMPOSSIBLE. This frame used to shed the vertex's ENTIRE fan-out when the notify clone
+    // could not be allocated, counted one per subscriber (the widest drop in the graph). The
+    // one resource this path can still be refused — the block of a chain past the inline
+    // bound — is taken BEFORE the handler runs, so a refusal is the writer's BACKPRESSURE and
+    // nothing ran. #854's own-subs-wide ruling is ANNOTATED, not overturned: OUT_OF_MEMORY
+    // still counts on the assign path's shed pending mark (mark_pending, at own-subs width)
+    // and on dispatch_edge_target's declined store (at width 1), so the reason code stays live
+    // and `1 never stands in for N` still holds everywhere it can still be raised.
+    const auto run = [&](const value_t& val) -> result_t<void> {
+        const result_t<value_ref_t> stored = handler_write(v, val, caller);
+        if (!stored) return std::unexpected(stored.error());
+        deliver_vertex(v, val);
+        // Eager delivery flushes any pending mark a prior assign left — but only while
+        // what this write published is still current (#1185); on the handler leg that is
+        // the null "consumed" sentinel, matching the handler's permanently null LKV.
+        clear_pending(v, stored->get());
+        return {};
+    };
+    if (value.link_count() <= kUnstoredInline) {
+        const value_storage_t<kUnstoredInline> sv{std::move(value)};
+        return run(sv.get());
+    }
+    const value_ref_t block = value_ref_t::adopt(value_t::make(std::move(value), *ctl_));
+    if (!block) return std::unexpected(status_t::BACKPRESSURE);
+    return run(*block);
+}
+
+[[gnu::noinline]] result_t<value_ref_t> graph_t::handler_write_rope(vertex_t* v, rope_t&& value,
+                                                                    std::string_view caller) {
+    // The handler reads a `value_t` (RFC-0028 D10). A local write owns its rope, so the links
+    // MOVE into storage on this frame — no block, no refcount traffic — exactly the relay's
+    // shape; a chain past the inline bound takes one block from the graph's source instead.
+    // Out of line so the 200-odd bytes of storage stay off `store_value`'s own frame.
+    if (value.link_count() <= kUnstoredInline) {
+        const value_storage_t<kUnstoredInline> sv{std::move(value)};
+        return handler_write(v, sv.get(), caller);
+    }
+    const value_ref_t block = value_ref_t::adopt(value_t::make(std::move(value), *ctl_));
+    if (!block) return std::unexpected(status_t::BACKPRESSURE);
+    return handler_write(v, *block, caller);
 }
 
 result_t<value_ref_t> graph_t::store_value(vertex_t* v, const value_t& value,
                                            vertex_t::store_drops_t& drops,
                                            std::string_view caller) {
-    // Two shapes cannot be adopted, and take the rope arm above — one clone of the links, the
-    // behaviour every target delivery had before RFC-0028 slice 4:
-    //  - a value with no source is CALLER-OWNED storage (`value_storage_t`, the slice a branch
-    //    write delivers without storing): a reference kept past the call would outlive the
-    //    frame it lives in;
-    //  - a HANDLER stores nothing, and its `on_write` reads a `rope_t`.
-    // `try_rope` is nothrow and allocates nothing while the chain fits the rope's inline links;
-    // a refused spill is BACKPRESSURE by value, which the delivery leg counts as OUT_OF_MEMORY.
-    if (value.source() == nullptr || v->role() == role_t::HANDLER) {
+    // A HANDLER stores nothing and reads the value by reference (RFC-0028 D10): it is handed
+    // the delivered block itself — no clone of its links, no block of its own — exactly as a
+    // stored target adopts it below. What it keeps past the call it keeps through
+    // `value_ref_t::keep`, which is also what makes caller-owned storage safe to hand it.
+    if (v->role() == role_t::HANDLER) {
+        drops = vertex_t::store_drops_t{};
+        return handler_write(v, value, caller);
+    }
+    // A value with no source is CALLER-OWNED storage (`value_storage_t`, the slice a branch
+    // write delivers without storing): a reference kept past the call would outlive the frame
+    // it lives in, so it takes the rope arm above — one clone of the links. `try_rope` is
+    // nothrow and allocates nothing while the chain fits the rope's inline links; a refused
+    // spill is BACKPRESSURE by value, which the delivery leg counts as OUT_OF_MEMORY.
+    if (value.source() == nullptr) {
         rope_t clone;
         if (!value.try_rope(clone)) {
             drops = vertex_t::store_drops_t{};
@@ -2325,15 +2399,12 @@ result_t<value_ref_t> graph_t::store_value(vertex_t* v, const value_t& value,
         return store_value(v, std::move(clone), drops, caller);
     }
     drops = vertex_t::store_drops_t{};
-    // The admission filter still runs, on the SHARED block: it reads a `rope_t` over the same
-    // links (refcount clones, no allocation while the chain fits inline) and only a
-    // normalisation mints a block of the vertex's own. A filter that admits unchanged costs the
-    // adoption nothing more. Same seam, same `caller`, same placement above the storing tail as
-    // the rope arm — admission is a property of the vertex, not of a door.
+    // The admission filter still runs, on the SHARED block itself — no clone of its links —
+    // and only a normalisation mints a block of the vertex's own. A filter that admits
+    // unchanged costs the adoption nothing more. Same seam, same `caller`, same placement above
+    // the storing tail as the rope arm — admission is a property of the vertex, not of a door.
     if (v->has_admission()) {
-        rope_t links;
-        if (!value.try_rope(links)) return std::unexpected(status_t::BACKPRESSURE);
-        admission_t decided = admit(v, links, caller);
+        admission_t decided = admit(v, value, caller);
         if (!decided) return std::unexpected(decided.error());
         if (*decided)
             return publish_value(v, value_ref_t::adopt(value_t::make(std::move(**decided), *ctl_)),
@@ -2345,7 +2416,7 @@ result_t<value_ref_t> graph_t::store_value(vertex_t* v, const value_t& value,
     return publish_value(v, value_ref_t::share(&value), drops);
 }
 
-admission_t graph_t::admit(vertex_t* v, const rope_t& value, std::string_view caller) const {
+admission_t graph_t::admit(vertex_t* v, const value_t& value, std::string_view caller) const {
     const admission_node_t* a = admission_for(v);
     if (a == nullptr || !a->on_admit) return std::optional<rope_t>{};
     // Same `caller` the ACL gate one frame up ran on (#375): the filter and the gate that
@@ -2516,45 +2587,7 @@ result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, std::string_view c
     // the frame internally consistent whichever of the two it caught.
     const role_t role = v->role();
     if (is_branch_point(value, role)) return write_branch(v, value, caller, /*notify=*/true);
-    if (role == role_t::HANDLER) {
-        // A handler stores no LKV (the user handler consumes the value), so there is no
-        // published pointer to deliver from — the hot roles below deliver the exact
-        // pointer store_value hands back. There is no CLONE either, and that is #1505:
-        // store_value's HANDLER leg only READS `value` and returns the null "consumed"
-        // sentinel — it does not move from it, and since #1116 (`rope_t&&`) that is a
-        // property of the leg rather than an accident of the signature — so the caller's
-        // rope is still live after the call and is delivered directly.
-        //
-        // What the clone this replaces cost, measured (#1505, #1516's bench_source_role):
-        // past the rope's inline link capacity (knee between 2 and 3 links) it was one heap
-        // block on EVERY handler write, ~40 ns flat in fan-out — a per-write term, paid in
-        // full even at fan-out zero — and it made the non-retaining role the more expensive
-        // one at multi-link values, inverting the ordering the role system advertises.
-        // Delivering `value` makes HANDLER the cheaper role at every point measured, and
-        // leaves the storing arm below byte-for-byte identical.
-        //
-        // A HANDLER stores no LKV and owns no ring, so this tally is structurally clean —
-        // required by the signature, and that is the point: the seam cannot be skipped.
-        vertex_t::store_drops_t store_drops;
-        const result_t<value_ref_t> stored = store_value(v, std::move(value), store_drops, caller);
-        if (!stored) return std::unexpected(stored.error());
-        // No OUT_OF_MEMORY tally here any more, and the leg it counted is not merely
-        // narrower — it is IMPOSSIBLE. This frame used to shed the vertex's ENTIRE fan-out
-        // when the notify clone could not be allocated, counted one per subscriber (the
-        // widest drop in the graph). With the value delivered without a clone there is
-        // nothing left on this path to fail to allocate, so the event cannot occur and a
-        // counting site for it would be dead code. #854's own-subs-wide ruling is
-        // ANNOTATED, not overturned: OUT_OF_MEMORY still counts on the assign path's shed
-        // pending mark (mark_pending, at own-subs width) and on dispatch_edge_target's
-        // declined store (at width 1), so the reason code stays live and `1 never stands in
-        // for N` still holds everywhere it can still be raised.
-        deliver_unstored(v, value, &graph_t::deliver_vertex, v->own_subs() + v->listeners_above());
-        // Eager delivery flushes any pending mark a prior assign left — but only while
-        // what this write published is still current (#1185); on the handler leg that is
-        // the null "consumed" sentinel, matching the handler's permanently null LKV.
-        clear_pending(v, stored->get());
-        return {};
-    }
+    if (role == role_t::HANDLER) return handler_write_deliver(v, std::move(value), caller);
     // RETENTION NONE (RFC-0028 §5.4): the pure relay. Nothing is kept, so nothing needs a
     // block of its own — the value is delivered from the stack exactly as the HANDLER arm above
     // delivers it, and a vertex whose subscribers are all callbacks draws ZERO blocks per
@@ -2598,7 +2631,18 @@ result_t<void> graph_t::write_impl(vertex_t* v, rope_t value, std::string_view c
  */
 result_t<void> graph_t::relay_write(vertex_t* v, rope_t value, std::string_view caller) {
     if (v->has_admission()) {
-        admission_t decided = admit(v, value, caller);
+        // The filter reads a `value_t` (RFC-0028 D10): show it the writer's links on this frame
+        // (a refcount clone per link, as the relay's own delivery below takes), or — past the
+        // inline bound — in one block, which a relay that retains nothing frees on return.
+        admission_t decided = [&]() -> admission_t {
+            if (value.link_count() <= kUnstoredInline) {
+                const value_storage_t<kUnstoredInline> sv{value};
+                return admit(v, sv.get(), caller);
+            }
+            const value_ref_t block = value_ref_t::adopt(value_t::make(value.links(), *ctl_));
+            if (!block) return std::unexpected(status_t::BACKPRESSURE);
+            return admit(v, *block, caller);
+        }();
         if (!decided) return std::unexpected(decided.error());
         if (*decided) value = std::move(**decided);
     }
@@ -3120,12 +3164,12 @@ result_t<value_ref_t> graph_t::await(vertex_handle_t vh, std::chrono::nanosecond
     return sp;
 }
 
-result_t<std::vector<rope_t>> graph_t::history(vertex_handle_t vh) const {
+result_t<std::size_t> graph_t::history(vertex_handle_t vh, std::span<value_ref_t> out) const {
     vertex_t* v = vh.get();
     if (v->role() != role_t::STREAM) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
     if (!acl_allows(v, {}, acl_right_t::READ))  // local-only helper => local (empty) context
         return std::unexpected(status_t::PERMISSION_DENIED);
-    return v->history_snapshot();  // clones each entry (refcount bumps)
+    return v->history_into(out);  // one refcount share per entry, no allocation
 }
 
 result_t<std::size_t> graph_t::drain_unflushed(vertex_handle_t vh, std::vector<value_ref_t>& out,
@@ -4729,16 +4773,20 @@ result_t<void> graph_t::propagate_folded_impl(vertex_t* v) {
     return {};
 }
 
-result_t<rope_t> graph_t::read(vertex_handle_t vh, const field_path_t& field,
-                               std::string_view caller) const {
+result_t<value_ref_t> graph_t::read(vertex_handle_t vh, const field_path_t& field,
+                                    std::string_view caller) const {
+    // One read type (RFC-0028 D11): every arm answers a `value_ref_t`. The empty field IS the
+    // value read, so it hands back the published reference itself; every other arm composes a
+    // value nothing published and wraps it once, at the bottom.
+    if (field.empty()) return read(vh, caller);
+    auto composed = read_field_rope(vh, field, caller);
+    if (!composed) return std::unexpected(composed.error());
+    return composed_or_backpressure(std::move(*composed));
+}
+
+result_t<rope_t> graph_t::read_field_rope(vertex_handle_t vh, const field_path_t& field,
+                                          std::string_view caller) const {
     vertex_t* v = vh.get();
-    if (field.empty()) {
-        // The value read now returns a REFERENCE; this overload is rope-valued because every
-        // other branch below composes, so materialize here rather than widen the surface.
-        auto v_ref = read(vh, caller);
-        if (!v_ref) return std::unexpected(v_ref.error());
-        return (*v_ref)->rope();  // the field seam is rope-valued (D11 is RFC-0028 slice 7)
-    }
     // ":children[]" (or bare ":children") — member enumeration, the read dual of the
     // SPEC-creating append — is served FOLDED (L4 fold, Slice 0): a scatter-gather rope
     // (outer POINT header + per-child borrowed NAME), byte-identical on flatten() to the
@@ -4947,13 +4995,9 @@ result_t<std::vector<view_t>> graph_t::read_subscribers(vertex_handle_t vh,
 result_t<value_ref_t> graph_t::read(const path_t& path) const {
     vertex_t* v = find_ptr(path.key());
     if (!v) return std::unexpected(status_t::NOT_FOUND);
-    // A plain value read SHARES the published value; a `:field` read composes one, so it goes
-    // through the field surface and wraps. Splitting here rather than inside the field overload
-    // keeps the cheap path free of the wrap.
-    if (path.field().empty()) return read(vertex_handle_t{v});
-    auto composed = read(vertex_handle_t{v}, path.field());
-    if (!composed) return std::unexpected(composed.error());
-    return composed_or_backpressure(std::move(*composed));
+    // A plain value read SHARES the published value; a `:field` read composes one — the field
+    // overload makes that split itself (RFC-0028 D11).
+    return read(vertex_handle_t{v}, path.field());
 }
 
 result_t<void> graph_t::write(const path_t& path, rope_t value) {

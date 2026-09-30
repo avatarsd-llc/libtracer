@@ -10,16 +10,15 @@
  * and the retiring thread cannot free a block a reader may still hold. Until #576 the park
  * had ONE append site and ZERO release sites, so a BUS node's connection teardown
  * (`transport_vertex_t::remove_connection` retires the `/net/<module>/<name>` identity
- * vertex) leaked ~96 B of `std::function` permanently. Four properties are asserted here:
+ * vertex) leaked its seam block (then ~96 B of `std::function`) permanently. Four properties are
+ * asserted here:
  *
  *   (a) the park is BOUNDED and OBSERVABLE — N retired seam-bearing vertices show as N
  *       parked seams, and `collect()` takes that to 0;
- *   (b) the free happens OUTSIDE every graph lock — the load-bearing one. Three earlier
- *       design rounds each died exactly here: a free performed while the graph's map lock is
- *       held puts arbitrary user destructor code inside the widest lock in the runtime, and
- *       a seam callback that owns anything graph-shaped deadlocks on the way out. The probe
- *       installs a seam whose DESTRUCTOR re-enters the graph (`find()`), and a watchdog
- *       turns the resulting hang into a FAIL line rather than a stuck CI job.
+ *   (b) the free runs NO user code. Three earlier design rounds each died on a free that put
+ *       arbitrary user destructor code (a `std::function`'s captures) inside the graph's map
+ *       lock; since RFC-0028 slice 7 a seam is a `{fn, ctx}` hook that owns nothing, so the
+ *       parked block is trivially destructible and the caller's context is never touched.
  *   (c) the population is keyed on handler PRESENCE, never on `role_t`: `adopt_identity`
  *       allocates the seam iff `on_read || on_write || on_children`. `STORED_VALUE` +
  *       `{on_read}` parks 1; `HANDLER` + an empty `handlers_t` parks 0 — the exact inverse
@@ -43,6 +42,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -67,50 +67,11 @@ using tr::testing::check;
 /** @brief An inert `on_read` seam — enough to make a vertex allocate a `value_handlers_t`. */
 tr::graph::result_t<tr::view::rope_t> inert_read() { return std::unexpected(status_t::NOT_FOUND); }
 
-/**
- * @brief A value-seam callback whose DESTRUCTOR re-enters the graph — the probe for (b).
- *
- * Stands in for the real thing a seam captures: a connection object, a handle, a callback
- * bundle whose release path touches the graph. If `collect()` freed the parked block under
- * `map_mutex_`, this `find()` would block forever on a non-recursive `std::shared_mutex`
- * already held by the very thread running the destructor.
- *
- * Copyable because `std::function` demands it; the move constructor disarms the source so a
- * moved-from husk re-enters nothing.
- */
-struct reentrant_seam_t {
-    graph_t* g{nullptr};                 /**< @brief Disarmed (null) in a moved-from husk. */
-    std::atomic<int>* fired{nullptr};    /**< @brief Bumped once per armed destructor run. */
-    std::atomic<int>* resolved{nullptr}; /**< @brief Bumped when the re-entrant find succeeded. */
-
-    reentrant_seam_t(graph_t* graph, std::atomic<int>* f, std::atomic<int>* r)
-        : g(graph), fired(f), resolved(r) {}
-    reentrant_seam_t(const reentrant_seam_t&) = default;
-    reentrant_seam_t& operator=(const reentrant_seam_t&) = default;
-    reentrant_seam_t(reentrant_seam_t&& other) noexcept
-        : g(std::exchange(other.g, nullptr)), fired(other.fired), resolved(other.resolved) {}
-    reentrant_seam_t& operator=(reentrant_seam_t&& other) noexcept {
-        g = std::exchange(other.g, nullptr);
-        fired = other.fired;
-        resolved = other.resolved;
-        return *this;
-    }
-
-    ~reentrant_seam_t() {
-        if (g == nullptr) return;
-        // THE re-entry: a graph operation from inside the free of a parked seam.
-        const bool ok = g->find(path_t("/probe").key()).has_value();
-        if (ok && resolved != nullptr) resolved->fetch_add(1, std::memory_order_relaxed);
-        if (fired != nullptr) fired->fetch_add(1, std::memory_order_release);
-    }
-
-    tr::graph::result_t<tr::view::rope_t> operator()() const { return inert_read(); }
-};
-
 /** @brief Register `/dev/h<i>` as a HANDLER bearing an inert value seam. */
 vertex_handle_t make_handler_vertex(graph_t& g, const std::string& path) {
     handlers_t h;
-    h.on_read = [] { return inert_read(); };
+    auto h_on_read = [] { return inert_read(); };
+    h.on_read = tr::graph::thunk(h_on_read);
     return g.register_vertex(path_t(path), role_t::HANDLER, std::move(h));
 }
 
@@ -125,9 +86,10 @@ vertex_handle_t make_handler_vertex(graph_t& g, const std::string& path) {
  */
 vertex_handle_t make_stored_value_children_vertex(graph_t& g, const std::string& path) {
     handlers_t h;
-    h.on_children = []() -> tr::graph::result_t<tr::view::view_t> {
+    auto h_on_children = []() -> tr::graph::result_t<tr::view::view_t> {
         return std::unexpected(status_t::NOT_FOUND);
     };
+    h.on_children = tr::graph::thunk(h_on_children);
     return g.register_vertex(path_t(path), role_t::STORED_VALUE, std::move(h));
 }
 
@@ -178,65 +140,33 @@ void test_parked_count_and_collect() {
 }
 
 // ---------------------------------------------------------------------------
-// (b) THE load-bearing one: the free runs outside every graph lock. A seam destructor that
-// re-enters the graph must neither deadlock nor throw.
-void test_free_runs_outside_graph_locks() {
-    std::printf("#576(b): the parked seam is freed OUTSIDE every graph lock:\n");
-    std::atomic<int> fired{0};
-    std::atomic<int> resolved{0};
+// (b) The free runs no user code at all, so no lock placement can make it deadlock.
+void test_free_runs_no_user_code() {
+    std::printf("#576(b): freeing a parked seam runs NO user code (RFC-0028 D10):\n");
+    // The hazard (b) used to guard — a parked `std::function` whose captured state's DESTRUCTOR
+    // re-enters the graph from inside `collect()` — is gone by construction: a seam is a
+    // `{fn, ctx}` hook that owns nothing, so the block `collect()` frees has a trivial
+    // destructor and the caller's context is never touched by the free.
+    static_assert(std::is_trivially_destructible_v<tr::graph::value_handlers_t>,
+                  "a parked seam block must free without running user code");
+    struct ctx_t {
+        int reads = 0;
+    } ctx;
 
     graph_t g;
-    // The vertex the seam destructor resolves on its way out — proof the re-entry actually
-    // reached the graph rather than bailing early.
-    (void)g.register_vertex(path_t("/probe"), role_t::STORED_VALUE);
     (void)g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
-
-    {
-        handlers_t h;
-        h.on_read = reentrant_seam_t{&g, &fired, &resolved};
-        const vertex_handle_t v =
-            g.register_vertex(path_t("/dev/reentrant"), role_t::HANDLER, std::move(h));
-        check(g.retire(v).has_value(), "retire the vertex bearing the re-entrant seam");
-    }
-    check(g.parked_seam_count() == 1, "its seam is parked, not yet freed");
-
-    const int before = fired.load(std::memory_order_acquire);
-
-    // Run collect() on a worker so a deadlocked free is a reported FAIL, not a hung job. A
-    // free performed under map_mutex_ (the shape rounds 2 and 3 died on) hangs right here:
-    // the destructor's find() waits for a shared hold on a mutex this same thread owns.
-    std::atomic<bool> done{false};
-    std::thread worker([&] {
-        g.collect();
-        done.store(true, std::memory_order_release);
-    });
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
-    while (!done.load(std::memory_order_acquire) && std::chrono::steady_clock::now() < deadline)
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-
-    if (!done.load(std::memory_order_acquire)) {
-        check(false, "collect() returned — the seam free is outside the graph locks");
-        std::printf(
-            "  !! DEADLOCK: collect() did not return within 10 s. The parked seam is being "
-            "freed while a graph lock is held, and its destructor's re-entry cannot get in.\n");
-        std::fflush(stdout);
-        // The worker owns a lock it will never release; unwinding is not an option.
-        std::_Exit(1);
-    }
-    worker.join();
-    check(true, "collect() returned — the seam free is outside the graph locks");
-    check(fired.load(std::memory_order_acquire) > before,
-          "the parked seam's destructor RAN during collect()");
-    check(resolved.load(std::memory_order_acquire) > 0,
-          "and it re-entered the graph from inside that free (find() resolved /probe)");
-    check(g.parked_seam_count() == 0, "the park is empty afterwards");
-
-    // Nothing re-entrant may be left parked. The graph's own teardown is a growth backstop
-    // only: retired_seams_ is declared before map_mutex_ and root_, so it destructs LAST —
-    // after the vertex tree and the map lock are already gone — and a seam destructor that
-    // re-enters the graph then re-enters a half-destroyed object. Hence the @note's "safe
-    // HERE and only here": such an owner must be collected explicitly.
-    check(g.parked_seam_count() == 0, "no re-entrant seam is left for teardown to free");
+    handlers_t h;
+    h.on_read = {[](void* c) -> tr::graph::result_t<tr::view::rope_t> {
+                     ++static_cast<ctx_t*>(c)->reads;
+                     return inert_read();
+                 },
+                 &ctx};
+    const vertex_handle_t v = g.register_vertex(path_t("/dev/seam"), role_t::HANDLER, h);
+    check(g.retire(v).has_value(), "retire the vertex bearing the seam");
+    check(g.parked_seam_count() == 1, "its seam block is parked, not yet freed");
+    g.collect();
+    check(g.parked_seam_count() == 0, "collect() freed it");
+    check(ctx.reads == 0, "and the caller's context was never called or touched by the free");
 }
 
 // ---------------------------------------------------------------------------
@@ -250,7 +180,8 @@ void test_park_is_keyed_on_handler_presence_not_role() {
 
     // STORED_VALUE + {on_read}: the role says "not a handler", the seam exists anyway.
     handlers_t sv_read;
-    sv_read.on_read = [] { return inert_read(); };
+    auto sv_read_on_read = [] { return inert_read(); };
+    sv_read.on_read = tr::graph::thunk(sv_read_on_read);
     const vertex_handle_t sv =
         g.register_vertex(path_t("/dev/sv_read"), role_t::STORED_VALUE, std::move(sv_read));
     check(g.retire(sv).has_value(), "retire a STORED_VALUE vertex carrying {on_read}");
@@ -274,10 +205,11 @@ void test_park_is_keyed_on_handler_presence_not_role() {
 
     // And the third seam, for completeness: presence of ANY of the three allocates.
     handlers_t sv_write;
-    sv_write.on_write = [](const tr::view::rope_t&,
-                           const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
+    auto sv_write_on_write = [](const tr::graph::value_t&,
+                                const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
         return {};
     };
+    sv_write.on_write = tr::graph::thunk(sv_write_on_write);
     const vertex_handle_t w =
         g.register_vertex(path_t("/dev/sv_write"), role_t::STORED_VALUE, std::move(sv_write));
     check(g.retire(w).has_value(), "retire a STORED_VALUE vertex carrying {on_write}");
@@ -423,7 +355,7 @@ void test_churn_is_bounded_by_collect() {
 
 int main() {
     test_parked_count_and_collect();
-    test_free_runs_outside_graph_locks();
+    test_free_runs_no_user_code();
     test_park_is_keyed_on_handler_presence_not_role();
     test_remove_connection_parks_only_over_a_bus_link();
     test_churn_is_bounded_by_collect();

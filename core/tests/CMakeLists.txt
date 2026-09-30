@@ -1063,6 +1063,13 @@ target_link_libraries(handler_write_alloc_test PRIVATE libtracer)
 libtracer_test_warnings(handler_write_alloc_test)
 add_test(NAME handler_write_alloc COMMAND handler_write_alloc_test)
 
+# RFC-0028 slice 7: one callback idiom (hook_t), one read type (history into a span), and the
+# HANDLER target that adopts the published block. Owns a counting operator new, so its own TU.
+add_executable(one_idiom_test one_idiom_test.cpp)
+target_link_libraries(one_idiom_test PRIVATE libtracer)
+libtracer_test_warnings(one_idiom_test)
+add_test(NAME one_idiom COMMAND one_idiom_test)
+
 add_executable(edge_cold_half_share_test edge_cold_half_share_test.cpp)
 target_link_libraries(edge_cold_half_share_test PRIVATE libtracer)
 libtracer_test_warnings(edge_cold_half_share_test)

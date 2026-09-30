@@ -55,11 +55,6 @@ using tr::testing::make_value;
     return std::to_integer<std::uint8_t>(r.links()[0].bytes()[0]);
 }
 
-/** @brief The same, on the rope a handler or admission filter is handed. */
-[[nodiscard]] std::uint8_t only_byte(const rope_t& r) {
-    return only_byte(tr::graph::value_storage_t<2>{r}.get());
-}
-
 /**
  * @brief Await @p v while a writer thread re-arms the write until the await is out.
  *
@@ -99,12 +94,16 @@ void test_await_at_a_handler_serves_the_read_contract() {
     graph_t g;
     auto last = std::make_shared<std::uint8_t>(0);
     handlers_t h;
-    h.on_write = [last](const rope_t& value,
-                        const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
+    auto h_on_write = [last](const tr::graph::value_t& value,
+                             const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
         *last = only_byte(value);
         return {};
     };
-    h.on_read = [last]() -> tr::graph::result_t<rope_t> { return rope_t{make_value({*last})}; };
+    h.on_write = tr::graph::thunk(h_on_write);
+    auto h_on_read = [last]() -> tr::graph::result_t<rope_t> {
+        return rope_t{make_value({*last})};
+    };
+    h.on_read = tr::graph::thunk(h_on_read);
     vertex_handle_t v = g.register_vertex(path_t("/h/seam"), role_t::HANDLER, std::move(h));
 
     // POSITIVE CONTROL: the seam answers `read`. If this fails the vector below proves nothing.
@@ -130,9 +129,11 @@ void test_await_at_a_seamless_handler_is_still_not_found() {
     std::printf("vector 2 — AWAIT at a HANDLER with no on_read stays NOT_FOUND:\n");
     graph_t g;
     handlers_t h;
-    h.on_write = [](const rope_t&, const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
+    auto h_on_write2 = [](const tr::graph::value_t&,
+                          const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
         return {};
     };
+    h.on_write = tr::graph::thunk(h_on_write2);
     vertex_handle_t v = g.register_vertex(path_t("/h/bare"), role_t::HANDLER, std::move(h));
 
     // POSITIVE CONTROL: `read` refuses this vertex for exactly the same reason.
@@ -190,11 +191,12 @@ void test_assign_at_a_non_retaining_vertex_refuses() {
     graph_t g;
     auto writes = std::make_shared<int>(0);
     handlers_t h;
-    h.on_write = [writes](const rope_t&,
-                          const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
+    auto h_on_write3 = [writes](const tr::graph::value_t&,
+                                const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
         ++*writes;
         return {};
     };
+    h.on_write = tr::graph::thunk(h_on_write3);
     vertex_handle_t root = g.register_vertex(path_t("/r"), role_t::STORED_VALUE);
     vertex_handle_t hv = g.register_vertex(path_t("/r/h"), role_t::HANDLER, std::move(h));
     vertex_handle_t sv = g.register_vertex(path_t("/r/s"), role_t::STORED_VALUE);
@@ -233,7 +235,8 @@ void test_propagate_at_a_non_retaining_vertex_refuses() {
     std::printf("vector 5 — propagate at a HANDLER refuses by value:\n");
     graph_t g;
     handlers_t h;
-    h.on_read = []() -> tr::graph::result_t<rope_t> { return rope_t{make_value({0x09})}; };
+    auto h_on_read2 = []() -> tr::graph::result_t<rope_t> { return rope_t{make_value({0x09})}; };
+    h.on_read = tr::graph::thunk(h_on_read2);
     vertex_handle_t root = g.register_vertex(path_t("/p"), role_t::STORED_VALUE);
     vertex_handle_t hv = g.register_vertex(path_t("/p/h"), role_t::HANDLER, std::move(h));
 

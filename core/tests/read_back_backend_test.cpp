@@ -227,6 +227,12 @@ result_t<std::size_t> record_width(result_t<rope_t> r) {
     return r->flatten().bytes().size();
 }
 
+/** @brief The same count off a field read, which answers a `value_ref_t` (RFC-0028 D11). */
+result_t<std::size_t> record_width(result_t<tr::graph::value_ref_t> r) {
+    if (!r) return std::unexpected(r.error());
+    return (*r)->flatten().bytes().size();
+}
+
 /** @brief Read one field spelling off @p v — the whole `path:field` form, parsed once. */
 result_t<std::size_t> read_field(const graph_t& g, vertex_handle_t v, std::string_view spelling) {
     const result_t<path_t> p = path_t::parse(spelling);
