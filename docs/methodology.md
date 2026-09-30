@@ -235,6 +235,29 @@ build if one does not.
 
 Details that make these trustworthy:
 
+- **Only a clean run may PASS or FAIL.** Every *timed* bench execution — inside
+  `perf_gate.py` and in the transcript steps of both perf workflows — runs through one
+  classifier,
+  [`bench_conditions.py`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/bench_conditions.py),
+  which samples the conditions around it and records them: the measured CPU's **foreign
+  time** (busy time in `/proc/stat` — including irq and hypervisor steal — minus the bench
+  process's own CPU time), the bench's **involuntary context switches** (the
+  `nonvoluntary_ctxt_switches` counter), and the host's **CPU pressure**
+  (`/proc/pressure/cpu` `some avg10`, read as the execution starts, because a bench that
+  runs several threads on one pinned CPU raises pressure itself). An execution is
+  **contended** when foreign time exceeds **2 %** of its window or pressure exceeds **5**;
+  a contended execution is re-run, up to three attempts, and the first clean one is kept.
+  If any execution is still contended after its last attempt, the gate prints
+  **`PERF: INCONCLUSIVE`** instead of PASS or FAIL — the comparison's numbers still print,
+  marked `?` as unverified — and the blocking tier exits 3 so the job is re-run rather than
+  merged on an unverified green. On the pinned host the same verdict is stamped next to the
+  host descriptor on every recorded point (and so in every chart tooltip), and a contended
+  sample carries the `CONTAMINATED` flag: it stays in the store as evidence, but it never
+  counts as coverage and never enters the rolling-drift baseline. GitHub-hosted runners
+  cannot be isolated: they run unpinned, their conditions are read over the whole affinity
+  set, and the interleaved A/B remains their primary defence. The allocation-count
+  instruments (the zero-alloc gate, the memory probes, the RAM censuses) are exempt —
+  load cannot move a count.
 - The per-PR gate watches **fifteen canonical points** — a representative slice of the
   fan-out / payload / topic sweeps plus a fold-width point, one per *gated* family
   (`inproc` and `inproc-borrow` share one), so a pullback on any of those legs is caught and

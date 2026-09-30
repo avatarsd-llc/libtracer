@@ -962,7 +962,9 @@ different questions and are never mixed: GitHub-hosted runners vary ~2× in abso
 run to run, so the hosted store reads as a portability envelope (best-across-three-runners
 per point), while the bench-local store is the **absolute-trend instrument** — same silicon
 every point, host characteristics recorded on every point (each point's tooltip carries the
-host descriptor; `host.txt` next to the store holds the full `lscpu` capture). A two-point
+host descriptor and, beside it, the measurement conditions the point was taken under — the
+bench CPU's foreign time, CPU pressure and context switches, with a `CONTAMINATED` flag on a
+sample that stayed contended; `host.txt` next to the store holds the full `lscpu` capture). A two-point
 regression verdict is only ever read from the bench-local store or from a same-host
 interleaved A/B, never from the hosted one."""
 

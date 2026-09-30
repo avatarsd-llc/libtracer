@@ -30,6 +30,16 @@
 # HEAD-vs-parent build and interleaved comparison on this machine — does not. Do not
 # read "pinned host = blocking tier" off this file until a step below invokes the gate.
 #
+# CONDITIONS (#1676): every TIMED bench invocation below runs through
+# `bench/bench_conditions.py run`, which pins it to BENCH_CPU, samples the CPU's foreign
+# time and the host's CPU pressure around it, re-runs it while it is contended (up to 3
+# attempts), and appends what it saw to BENCH_CONDITIONS_RECORD. One `summary` step turns
+# that record into the verdict: its line is stamped next to the host descriptor on every
+# point, and a job that stayed contended stamps host_guard's CONTAMINATED flag, so the
+# point is banked as evidence but never counts as coverage or as rolling baseline. The
+# deterministic instruments (allocation counts — the zero-heap gate and both RAM
+# censuses) keep a bare `taskset`: load cannot move a count, so there is nothing to verify.
+#
 # DENSITY (#1301): push-to-main behind a `paths:` filter is not a publication
 # guarantee. A run that never happens leaves a hole nothing notices — filtered out,
 # failed, skipped by the quiescence guard, or cancelled while QUEUED because GitHub
@@ -183,6 +193,8 @@ jobs:
       contents: write # benchmark-action pushes the history to the gh-pages branch
     env:
       BENCH_CPU: "2" # the one pinned logical CPU — every measured process runs here
+      # Where `bench_conditions.py run` records each timed invocation's conditions (#1676).
+      BENCH_CONDITIONS_RECORD: bench/conditions.jsonl
     steps:
       # SELF-HEAL (#1538), and it runs BEFORE checkout because checkout is what it saves.
       # This leg is the only self-hosted job in the tree that runs directly on the host as
@@ -243,7 +255,9 @@ jobs:
         if: steps.guard.outputs.bank == 'true'
         env:
           LIBTRACER_BENCH_SECONDS: "1"
-        run: taskset -c "$BENCH_CPU" ./bench/build/bench_forward_demux >bench/aa_pre.txt || true
+        run: |
+          python3 bench/bench_conditions.py run --out bench/aa_pre.txt \
+            -- ./bench/build/bench_forward_demux || true
 
       # Deterministic (allocation counts, not time) — a free consistency check per
       # point, and its transcript feeds the memory series (mirrors perf.yml).
@@ -257,15 +271,17 @@ jobs:
         env:
           LIBTRACER_BENCH_SECONDS: "1"
         run: |
+          # `bench_conditions.py run` pins to BENCH_CPU and records the conditions (#1676).
+          measure="python3 bench/bench_conditions.py run"
           if [ -x /usr/bin/time ]; then
-            /usr/bin/time -v taskset -c "$BENCH_CPU" ./bench/build/bench_libtracer \
-              >bench/bench_libtracer_raw.txt 2>bench/bench_libtracer_time.txt
+            $measure --out bench/bench_libtracer_raw.txt --err bench/bench_libtracer_time.txt \
+              -- /usr/bin/time -v ./bench/build/bench_libtracer
           else
-            taskset -c "$BENCH_CPU" ./bench/build/bench_libtracer >bench/bench_libtracer_raw.txt
+            $measure --out bench/bench_libtracer_raw.txt -- ./bench/build/bench_libtracer
             : >bench/bench_libtracer_time.txt
           fi
-          taskset -c "$BENCH_CPU" ./bench/build/bench_forward_demux >bench/bench_forward_demux_raw.txt || true
-          taskset -c "$BENCH_CPU" ./bench/build/bench_compact_delivery >bench/bench_compact_delivery_raw.txt || true
+          $measure --out bench/bench_forward_demux_raw.txt -- ./bench/build/bench_forward_demux || true
+          $measure --out bench/bench_compact_delivery_raw.txt -- ./bench/build/bench_compact_delivery || true
           # An empty transcript is a silent non-recording — say so (mirrors perf.yml,
           # where `|| true` once swallowed a missing binary into a green job).
           for f in bench/bench_forward_demux_raw.txt bench/bench_compact_delivery_raw.txt; do
@@ -286,9 +302,8 @@ jobs:
         env:
           STORE_SWEEP_SCOPE: deterministic
         run: |
-          set -o pipefail
-          bash bench/run_store_sweep.sh bench/build 13 "$BENCH_CPU" \
-            | tee bench/bench_store_sweep_raw.txt
+          python3 bench/bench_conditions.py run --tee --out bench/bench_store_sweep_raw.txt \
+            -- bash bench/run_store_sweep.sh bench/build 13 "$BENCH_CPU"
           [ -s bench/bench_store_sweep_raw.txt ] || \
             echo "::warning::no store-sweep transcript — its series will not be recorded"
 
@@ -302,7 +317,8 @@ jobs:
             cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release
             # Compile-only on the un-quota'd bench runner; keeps `nproc` (#1637, see above).
             if cmake --build bench/build --target bench_zenoh -j "$(nproc)"; then
-              taskset -c "$BENCH_CPU" ./bench/build/bench_zenoh >bench/bench_zenoh_raw.txt || true
+              python3 bench/bench_conditions.py run --out bench/bench_zenoh_raw.txt \
+                -- ./bench/build/bench_zenoh || true
             fi
           fi
           [ -s bench/bench_zenoh_raw.txt ] || \
@@ -315,12 +331,24 @@ jobs:
         if: steps.guard.outputs.bank == 'true'
         env:
           LIBTRACER_BENCH_SECONDS: "1"
-        run: taskset -c "$BENCH_CPU" ./bench/build/bench_forward_demux >bench/aa_post.txt || true
+        run: |
+          python3 bench/bench_conditions.py run --out bench/aa_post.txt \
+            -- ./bench/build/bench_forward_demux || true
 
       - name: A/A bracket verdict
         id: bracket
         if: steps.guard.outputs.bank == 'true'
         run: python3 bench/host_guard.py bracket --pre bench/aa_pre.txt --post bench/aa_post.txt
+
+      # The measurement-conditions verdict (#1676), over EVERY timed invocation above —
+      # decided once, here, by the one module that samples them. `line` goes next to the
+      # host descriptor on every point and in the job summary; `note` is host_guard's
+      # CONTAMINATED flag when any invocation stayed contended through its re-runs, which
+      # keeps the point out of the density count and the rolling-drift baseline below.
+      - name: Measurement-conditions verdict (bench CPU foreign time + CPU pressure)
+        id: conditions
+        if: steps.guard.outputs.bank == 'true'
+        run: python3 bench/bench_conditions.py summary --record "$BENCH_CONDITIONS_RECORD"
 
       # --- RAM census (#1228) ----------------------------------------------------
       # Steady-state RAM decides whether a node fits the 16 KB target, and it was the
@@ -490,10 +518,12 @@ jobs:
           python3 bench/host_guard.py stamp \
             --json bench/benchmark_output.json \
             --json bench/benchmark_throughput.json \
-            --desc "$HOST_DESC" --compiler --note "$AA_NOTE"
+            --desc "$HOST_DESC · $COND_LINE" --compiler --note "$AA_NOTE" --note "$COND_NOTE"
         env:
           HOST_DESC: ${{ steps.host.outputs.desc }}
           AA_NOTE: ${{ steps.bracket.outputs.note }}
+          COND_LINE: ${{ steps.conditions.outputs.line }}
+          COND_NOTE: ${{ steps.conditions.outputs.note }}
 
       - name: Upload this point's transcripts + host capture
         if: always()
@@ -513,6 +543,7 @@ jobs:
             bench/bench_store_sweep_raw.txt
             bench/aa_pre.txt
             bench/aa_post.txt
+            bench/conditions.jsonl
           retention-days: 90
 
       # BANKING is conditional (#1236): a busy host contributes no point at all. The

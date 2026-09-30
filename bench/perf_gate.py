@@ -87,6 +87,28 @@ BASELINE = HERE / "perf_baseline.json"
 # that runs this file from elsewhere fails on the import instead of on the rule.
 sys.path.insert(0, str(HERE))
 from host_guard import is_contaminated  # noqa: E402
+import bench_conditions as bc  # noqa: E402
+
+# --- MEASUREMENT CONDITIONS (#1676): only a clean run may PASS or FAIL ---------------
+# Every TIMED bench execution below goes through `bench_conditions.measure`, which samples
+# the bench CPU's foreign time and the host's CPU pressure around it, re-runs a contended
+# execution up to `bc.DEFAULT_ATTEMPTS` times, and records the kept attempt in `LEDGER`.
+# The gate never reads /proc itself: "were the conditions clean?" is decided in that one
+# module, and the only thing this file does with the answer is refuse to render PASS or
+# FAIL on a ledger that is not clean (`render_verdict` -> INCONCLUSIVE, exit 3 on the
+# blocking tier). The memory probes are NOT routed through it: allocation counts do not
+# move with load, so there is nothing for contention to contaminate.
+#
+# `BENCH_CPU` pins every timed execution (the pinned host sets it); unset — every hosted
+# runner — runs unpinned and is classified over the process's whole affinity set.
+LEDGER = bc.Ledger()
+CPUS = bc.cpus_from_env()
+EXIT_INCONCLUSIVE = 3
+
+
+def timed(argv: list[str], timeout: float) -> str:
+    """@brief Run one timed bench execution under the classifier; its kept stdout."""
+    return LEDGER.add(bc.measure(argv, cpus=CPUS, timeout=timeout, log=print)).stdout
 
 # --- VERDICT TIERS (#1251): who a breached ratchet is allowed to stop --------------
 # The two-tier policy used to live in a `perf.yml` comment, which meant the gate could
@@ -454,8 +476,7 @@ def lkv_ratio_gate(bench: pathlib.Path) -> list[str]:
     the bench's isolated `lkv` sweep (fast); best-of-3 max ops/s per size."""
     best: dict[int, dict[str, float]] = {}
     for _ in range(3):
-        out = subprocess.run([str(bench), "lkv"], capture_output=True, text=True,
-                             timeout=120).stdout
+        out = timed([str(bench), "lkv"], timeout=120)
         for line in out.splitlines():
             f = line.split("\t")
             if len(f) == 12 and f[0] == "RESULT" and f[2] in ("lkv-alloc-heap", "lkv-alloc-pool"):
@@ -481,7 +502,7 @@ def run_bench_once(bench: pathlib.Path) -> list[tuple]:
         print(f"perf_gate: {bench} not built — run: cmake -S {HERE} -B {HERE}/build "
               f"-DCMAKE_BUILD_TYPE=Release && cmake --build {HERE}/build -j", file=sys.stderr)
         sys.exit(2)
-    out = subprocess.run([str(bench)], capture_output=True, text=True, timeout=180).stdout
+    out = timed([str(bench)], timeout=180)
     rows = []
     for line in out.splitlines():
         f = line.split("\t")
@@ -851,7 +872,8 @@ def enforces(tier: str, sample_note: str | None = None) -> tuple[bool, str]:
 
 
 def render_verdict(fails: list[str], warns: list[str], tier: str,
-                   sample_note: str | None = None) -> int:
+                   sample_note: str | None = None,
+                   conditions: bc.Ledger | None = None) -> int:
     """@brief Print the verdict under its tier and return the process exit code.
 
     Same numbers, same lines, same markers in both tiers — `!` for a breached ratchet,
@@ -863,7 +885,27 @@ def render_verdict(fails: list[str], warns: list[str], tier: str,
     unenforced breach is never quiet: it names itself in the verdict line AND raises a
     `::warning::` annotation, because a downgraded failure that printed nothing would
     be indistinguishable from a point that never regressed.
+
+    INCONCLUSIVE (#1676) comes first and overrides both: when @p conditions says a timed
+    execution stayed contended through every re-run, the comparison was made on a
+    machine that was not ours, so neither PASS nor FAIL is true. The numbers still print
+    (under `?`, never `!`); the blocking tier exits `EXIT_INCONCLUSIVE` so the job is
+    re-run rather than merged on an unverified green, and the advisory tier exits 0.
     """
+    if conditions is not None and not conditions.clean:
+        kept = conditions.kept()
+        bad = sum(not c.clean for c in kept)
+        print(f"PERF: INCONCLUSIVE  [tier={tier}] — {bad} of {len(kept)} timed "
+              f"execution(s) ran on a contended bench CPU through every re-run; this is "
+              f"not a verdict on the code. Re-run the job.")
+        mark = "::error::" if tier == "blocking" else "::warning::"
+        print(f"{mark}perf gate INCONCLUSIVE — {conditions.note()}; "
+              f"re-run on a quiet runner (a PASS or FAIL needs clean conditions)")
+        for x in fails:
+            print("  ? " + x + "  (unverified — contended)")
+        for x in warns:
+            print("  ~ " + x)
+        return EXIT_INCONCLUSIVE if tier == "blocking" else 0
     enforced, why = enforces(tier, sample_note)
     if not fails:
         print(f"PERF: PASS  [tier={tier}]")
@@ -949,7 +991,8 @@ def main() -> int:
         fails = gate_paired(cand_bins, base_bins, pairs)
         fails += mem_ratchet(bench_fwd, base_fwd)
         fails += lkv_ratio_gate(bench)  # ADR-0060 same-run ratio (no baseline needed)
-        return render_verdict(fails, [], tier, sample_note)
+        print_conditions()
+        return render_verdict(fails, [], tier, sample_note, LEDGER)
 
     runs = int(args[args.index("--runs") + 1]) if "--runs" in args else DEFAULT_RUNS
     cur = best_of(cand_bins, runs)
@@ -1007,10 +1050,24 @@ def main() -> int:
                 fails.append(f"{k} deliv {v['deliv_s']:,.0f} under floor {FLOOR_DELIV:,}")
         print(line)
     fails += lkv_ratio_gate(bench)  # ADR-0060 same-run ratio (no baseline; skips if absent)
-    if base is None or "--update-baseline" in args:
+    print_conditions()
+    if not LEDGER.clean:
+        # A contended sample must not become the recorded baseline either.
+        print("  (baseline NOT recorded — the measurement conditions were contended)")
+    elif base is None or "--update-baseline" in args:
         BASELINE.write_text(json.dumps(cur, indent=2) + "\n")
         print(f"  ({'recorded' if base is None else 'updated'} baseline -> {BASELINE.name})")
-    return render_verdict(fails, warns, tier, sample_note)
+    return render_verdict(fails, warns, tier, sample_note, LEDGER)
+
+
+def print_conditions() -> None:
+    """@brief The measurement-conditions block every verdict is printed under (#1676)."""
+    print(f"Measurement conditions ({'CLEAN' if LEDGER.clean else 'CONTENDED'}; "
+          f"contended = foreign > {bc.FOREIGN_MAX_PCT:g}% on the bench CPU or "
+          f"psi > {bc.PRESSURE_MAX:g}, re-run up to {bc.DEFAULT_ATTEMPTS}x):")
+    print(f"  {LEDGER.line()}")
+    for x in LEDGER.report(notable_only=True):
+        print(x)
 
 
 if __name__ == "__main__":

@@ -4,6 +4,8 @@ build/
 .venv/
 perf_baseline.json
 benchmark_output.json
+# The measurement-conditions record bench_conditions.py appends to (#1676).
+conditions.jsonl
 # Local preview from grid.sh (the docs generate their own copy in CI).
 preview.html
 build-cmp/
