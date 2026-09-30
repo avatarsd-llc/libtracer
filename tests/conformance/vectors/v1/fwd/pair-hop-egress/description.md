@@ -1,6 +1,6 @@
 # fwd/pair-hop-egress
 
-A two-element chain (RFC-0029 (`docs/spec/rfcs/0029-one-path-primitive.md`, [#1634](https://github.com/avatarsd-llc/libtracer/pull/1634)) §4.2):
+A two-element chain ([RFC-0029](../../../../../docs/spec/rfcs/0029-one-path-primitive.md) §4.2):
 
 ```
 0F 40 2C 00                          FWD, opt = 0x40 (PL = 1), length 44

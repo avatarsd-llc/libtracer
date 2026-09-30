@@ -205,16 +205,16 @@ target](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0007-
 
 ## 5. Remote delivery legs
 
-`fwd_router_t::deliver_remote` (`core/src/fwd_router.cpp:3626`) is the sink the remote leg calls.
+`fwd_router_t::deliver_remote` (`core/src/fwd_router.cpp:3627`) is the sink the remote leg calls.
 It has two legs, and only one of them copies payload bytes.
 
 **The default full-route leg copies nothing.** It emits
 `FWD{ op=WRITE, dst=<stored return route>, src=<empty PATH>, payload=<VALUE> }` as a
 retained send (RFC-0028 §6.9): three head spans on the stack (a fresh header, the stored route,
 an empty `src`) and the value by reference, handed to `transport_t::send(head, value)`
-(`fwd_router.cpp:3747-3749`). The header is a `stack_writer<16>` — the FWD header of at
+(`fwd_router.cpp:3748-3750`). The header is a `stack_writer<16>` — the FWD header of at
 most 6 bytes plus the 5-byte op TLV — and both constant TLVs are `constexpr` arrays with no
-runtime construction (`fwd_router.cpp:3723-3727`). The route bytes were copied once at subscribe
+runtime construction (`fwd_router.cpp:3724-3728`). The route bytes were copied once at subscribe
 time, so a delivery re-uses them by reference; a multi-link value crosses as its own segments,
 with no flatten. The link lowers `head ++ value.links()` through its own 8-entry inline table,
 drawing an overflow block from its egress source only past five links; a link that QUEUES the
@@ -236,10 +236,10 @@ ride that relocation keep the residual, tabulated in
 [`../allocation-and-backpressure.md`](../allocation-and-backpressure.md) and stated at each site.
 
 **The COMPACT leg is the one that flattens.** `value.try_materialize(*flat_)`
-(`fwd_router.cpp:3664`) precedes the compact encode, because a COMPACT wraps a contiguous
+(`fwd_router.cpp:3665`) precedes the compact encode, because a COMPACT wraps a contiguous
 payload. Single-link — the common case — that materialize is a zero-copy adopt; a multi-link
 value pays one flatten per delivery, out of the router's INJECTED byte backend rather than the
-global heap. A REFUSED flatten drops the delivery (`fwd_router.cpp:3665`) — since #917 that is a
+global heap. A REFUSED flatten drops the delivery (`fwd_router.cpp:3666`) — since #917 that is a
 test on the named refusal, so a legitimately empty value is delivered rather than swept up with
 the OOM by an `empty()` guess.
 Auto-promotion advertises the label once per flow and then streams
@@ -275,8 +275,8 @@ struct delivery_drops_t {
 | `no_target` | the target PATH resolved to no live vertex — retired, or never created | `graph.cpp:2101-2104` |
 | `denied` | a subscription edge's delivery was refused by the target's `:acl`, gated on the **edge's stored caller**, not the writer's | `graph.cpp:2118-2121` |
 | `denied` | a WRITE was refused at the graph's own gate — the API write, the `FWD{WRITE}` terminus and both `COMPACT` terminus arms enter through it | `graph.cpp:2598-2625` |
-| `no_target` | a net-plane route resolved to no vertex (`fwd_router.cpp:3522`), or its binding vanished under a concurrent unbind (`:3417`) | `fwd_router.cpp:3417`, `:3522` |
-| `out_of_memory` | a `COMPACT` terminus could not take the payload view or reserve its rope | `fwd_router.cpp:3368-3370`, `:3379`, `:3531` |
+| `no_target` | a net-plane route resolved to no vertex (`fwd_router.cpp:3523`), or its binding vanished under a concurrent unbind (`:3418`) | `fwd_router.cpp:3418`, `:3523` |
+| `out_of_memory` | a `COMPACT` terminus could not take the payload view or reserve its rope | `fwd_router.cpp:3369-3371`, `:3380`, `:3532` |
 | `out_of_memory` | a target delivery's store was declined — the slot publish, the receiving ring's admission, or the clone a HANDLER target still takes | `graph.cpp:2154-2166` |
 | `fan_out_truncated` | the wide-fan-out overflow buffer could not be reserved, so every edge past the inline prefix was abandoned | `vertex.hpp:2909` |
 

@@ -1,7 +1,7 @@
 # path/element-pair-encode
 
 A packed `PATH` body that **mixes** NAME and PAIR elements
-(RFC-0029 (`docs/spec/rfcs/0029-one-path-primitive.md`, [#1634](https://github.com/avatarsd-llc/libtracer/pull/1634)) §4.1–§4.2):
+([RFC-0029](../../../../../docs/spec/rfcs/0029-one-path-primitive.md) §4.1–§4.2):
 
 ```
 06 00 14 00                          PATH, opt = 0x00, body 20 bytes

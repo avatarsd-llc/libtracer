@@ -1,7 +1,7 @@
 # fwd/pair-stale-generation-not-found
 
 The answer a node gives a PAIR it **cannot validate**
-(RFC-0029 (`docs/spec/rfcs/0029-one-path-primitive.md`, [#1634](https://github.com/avatarsd-llc/libtracer/pull/1634)) §6 step 2, §6.3):
+([RFC-0029](../../../../../docs/spec/rfcs/0029-one-path-primitive.md) §6 step 2, §6.3):
 
 ```
 0F 40 34 00                          FWD, opt = 0x40 (PL = 1), length 52

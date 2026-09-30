@@ -33,7 +33,7 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 ### Breaking
 
 - **The bound spelling of a `dst` is a `PATH` of PAIR elements; a `PATH_REF` (`0x14`) is no
-  longer an address (RFC-0029 slice S1, [#1634](https://github.com/avatarsd-llc/libtracer/pull/1634)).**
+  longer an address ([RFC-0029](../docs/spec/rfcs/0029-one-path-primitive.md) slice S1).**
   An owner-issued `(u32 index, u32 generation)` pair now rides INSIDE a canonical `PATH` as the
   escape record `00 16 08 <idx LE><gen LE>` (11 bytes), and every node runs RFC-0029 §6 on a
   PAIR head: dereference it (bounds, generation, registered), then a connection vertex with a

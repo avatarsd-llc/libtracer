@@ -1,7 +1,7 @@
 # fwd/pair-last-element-connection-vertex-is-facet
 
 A PAIR that dereferences to a **connection vertex** as the **last** element
-(RFC-0029 (`docs/spec/rfcs/0029-one-path-primitive.md`, [#1634](https://github.com/avatarsd-llc/libtracer/pull/1634)) §6 step 3):
+([RFC-0029](../../../../../docs/spec/rfcs/0029-one-path-primitive.md) §6 step 3):
 
 ```
 0F 40 21 00                          FWD, opt = 0x40 (PL = 1), length 33

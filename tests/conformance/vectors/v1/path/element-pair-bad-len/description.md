@@ -9,7 +9,7 @@ A `kind = 0x16` escape record whose declared payload is **seven** bytes, not eig
 ```
 
 A PAIR is exactly a `u32` index and a `u32` generation
-(RFC-0029 (`docs/spec/rfcs/0029-one-path-primitive.md`, [#1634](https://github.com/avatarsd-llc/libtracer/pull/1634)) §5.1). A `kind = 0x16`
+([RFC-0029](../../../../../docs/spec/rfcs/0029-one-path-primitive.md) §5.1). A `kind = 0x16`
 record of any other length is **malformed** and **refuses the address, never the frame**.
 
 ## What a core must do

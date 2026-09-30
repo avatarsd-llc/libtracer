@@ -1,6 +1,6 @@
 # fwd/pair-terminus
 
-A **chain of length one** (RFC-0029 (`docs/spec/rfcs/0029-one-path-primitive.md`, [#1634](https://github.com/avatarsd-llc/libtracer/pull/1634))
+A **chain of length one** ([RFC-0029](../../../../../docs/spec/rfcs/0029-one-path-primitive.md)
 §4.2):
 
 ```
