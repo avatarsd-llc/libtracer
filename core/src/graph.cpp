@@ -1959,7 +1959,6 @@ bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right
     // like the resolver's own error arm above.
     if (is_reserved_subject(*subject)) return false;
     const auto bit = static_cast<std::uint32_t>(right);
-    const std::uint64_t now = now_ns();
     // #361 §3: ACL state lives only on BEARING vertices (those with own ACEs). A bare
     // vertex walks the immutable parent chain LOCK-FREE (has_own_aces is an atomic;
     // parent links never change) to its nearest bearing ancestor and evaluates that
@@ -1972,6 +1971,10 @@ bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right
         bearer = bearer->parent();
     if (bearer == nullptr || bearer->parent() == nullptr)
         return true;  // no ACL anywhere up the chain (root excluded) — open by default
+    // The ACE-expiry reference clock is read only HERE, once an ACL will actually be
+    // evaluated (#1665): an attributed remote op on an unguarded subtree never pays a
+    // `system_clock::now()` — that open-by-default arm returns above.
+    const std::uint64_t now = now_ns();
     const bool self = bearer == v;
 
     // The ADR-0050 cached effective-ACE merge, now held by the BEARER: the data-plane
