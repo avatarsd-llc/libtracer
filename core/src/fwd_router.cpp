@@ -1790,23 +1790,24 @@ std::optional<graph::acl_right_t> fwd_router_t::fwd_op_right(std::uint8_t op_byt
 }
 
 template <class Cursor>
-bool fwd_router_t::name_hop_allows(std::string_view link_name, std::string_view caller,
+bool fwd_router_t::name_hop_allows(const child_registry_t::child_t& entry, std::string_view caller,
                                    const Cursor& cur, const fwd_pre_t& pre) const {
     // A REPLY is routed, never authorized: it answers an operation every gate already passed on
     // the way in, and refusing it here would strand the answer (RFC-0004 §B).
     if (pre.op_body_len == 0) return true;  // no op byte ⇒ the terminus tier's refusal stands
     const auto op_byte = static_cast<std::uint8_t>(cur.byte_at(pre.op_body_off));
     if (static_cast<fwd_op_t>(op_byte & graph::kFwdOpcodeMask) == fwd_op_t::REPLY) return true;
-    // The connection vertex this NAME run descended to, spelled as the pair its owner — this
-    // node — issues for it. A child with no connection vertex has no `:acl` to evaluate, and
-    // a PAIR cannot name it either, so both spellings answer alike.
-    const std::optional<wire::path_ref_element_t> conn = connection_ref(link_name);
+    // The connection vertex this NAME run descended to, found by the matched entry's own
+    // mount key — the canonical key `add_child` resolved the child's `conn_slot` from. A child
+    // with no connection vertex has no `:acl` to evaluate, and a PAIR cannot name it either,
+    // so both spellings answer alike.
+    const std::optional<graph::vertex_handle_t> conn = graph_.find(entry.mount_tlv);
     if (!conn) return true;
     const std::optional<graph::acl_right_t> right = fwd_op_right(op_byte);
-    // ONE gate for both spellings (RFC-0029 §6.4): the PAIR arm reaches `bound_egress` with the
-    // element it was handed, this arm with the element the descent resolved — same function,
-    // same (vertex, caller, right), so the verdict cannot depend on how the hop was spelled.
-    return right && bound_egress(*conn, caller, *right) != nullptr;
+    // ONE gate for both spellings (RFC-0029 §6.4): `bound_egress` asks `graph_t::allows` at the
+    // vertex a PAIR dereferences to, this arm at the vertex the descent resolved — same
+    // function, same (vertex, caller, right), so the verdict cannot depend on the spelling.
+    return right && graph_.allows(*conn, caller, *right);
 }
 
 bool fwd_router_t::is_bus_mount_vertex(graph::vertex_handle_t v) const {
@@ -2313,7 +2314,7 @@ bool fwd_router_t::route_fwd_ingress(std::string_view inbound_name, const Cursor
             // only when this graph enforces an ACL at all — one relaxed load otherwise — and
             // only on the point-to-point arm, the one a PAIR can name (§10).
             if (hit.entry != nullptr && graph_.acl_enforced() &&
-                !name_hop_allows(hit.link_name, inbound_name, cur, pre)) {
+                !name_hop_allows(*hit.entry, inbound_name, cur, pre)) {
                 reject(graph::status_t::NOT_FOUND);
                 return true;
             }

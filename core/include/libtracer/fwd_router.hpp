@@ -1706,16 +1706,20 @@ class fwd_router_t {
         std::uint8_t op_byte) noexcept;
     /**
      * @brief RFC-0029 §6.4 for a NAME-spelled hop: may @p caller carry this frame's op through
-     *        the connection vertex of point-to-point child @p link_name?
+     *        the connection vertex of the point-to-point child @p entry the descent matched?
      *
-     * Evaluated through @ref bound_egress with the pair this node issues for that vertex — the
-     * same function, and so the same verdict, the PAIR arm reaches. A REPLY and a child with
-     * no connection vertex pass (there is nothing to authorize, and no PAIR could name it).
-     * The caller asks only when the graph enforces an ACL at all.
+     * The vertex is found by the entry's own mount key — the bytes the descent already holds,
+     * one keyed find — and asked `graph_t::allows(vertex, caller, right)`: the one check
+     * @ref bound_egress runs for the PAIR and label arms, so the verdict cannot depend on the
+     * spelling. No name-keyed re-resolution of the child (`ctx_by_name`) and no slot deref:
+     * the descent already proved the egress. A REPLY and a child with no connection vertex
+     * pass (nothing to authorize, and no PAIR could name it). The caller asks only when the
+     * graph enforces an ACL at all.
      */
     template <class Cursor>
-    [[nodiscard]] bool name_hop_allows(std::string_view link_name, std::string_view caller,
-                                       const Cursor& cur, const fwd_pre_t& pre) const;
+    [[nodiscard]] bool name_hop_allows(const child_registry_t::child_t& entry,
+                                       std::string_view caller, const Cursor& cur,
+                                       const fwd_pre_t& pre) const;
     /**
      * @brief True iff @p v is the connection vertex of a live BUS (shared) mount — the COLD
      *        test that picks RFC-0029 §10's `NOT_FOUND` for a PAIR that tries to hop through one.

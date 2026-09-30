@@ -57,6 +57,14 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     PAIR and RFC-0027 label spellings run — and refused `tr::path::not_found`. Before, the
     canonical mount descent gated nowhere and only the terminus checked. Replies are routed,
     never gated. A graph without a subject resolver is unaffected.
+    **Migration:** an `:acl` that was written to lock only connection creation — e.g. on
+    `/net` or a module vertex, meant to gate SPEC writes to the `conn` endpoint — is inherited
+    by the connection vertices below it and now also gates every FORWARDED operation through
+    that node: forwarded WRITEs, and multi-hop subscription deliveries (a delivery carries an
+    empty `src`, so its refusal has no one to answer and is dropped silently). An opcode this
+    build cannot name has no right to check and is refused at every gated hop. Operators must
+    grant the forward rights explicitly — READ and/or WRITE for the inbound link's subject on
+    each connection vertex a route crosses — before upgrading a node that enforces ACLs.
   - `path_element_kind_t` gains `PAIR` (kind `0x16` at length 8; length 4 stays the RFC-0027
     `LABEL`, any other length is `MALFORMED`), and `path_element_census_t` gains `pairs`.
 
