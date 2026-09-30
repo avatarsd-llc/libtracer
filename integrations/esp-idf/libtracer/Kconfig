@@ -151,6 +151,18 @@ menu "libtracer"
             refused admission costs before the next dial, so a node whose peer
             gates admission pays this per rejected attempt.
 
+    config LIBTRACER_WS_CLIENT_DIAL_STATS
+        bool "WS client: count and log failed dials"
+        depends on LIBTRACER_TRANSPORT_WS
+        default n
+        help
+            Adds dial_attempts and dial_failures to esp_ws_client_link_t::stats_t
+            and logs one WARN per failed dial, limited to one a minute (#1606).
+            OFF by default: the link then carries no dial counters and a failed
+            dial logs nothing. This is a per-image choice, not a per-link one
+            (#1662). Turn it on for a node whose operator has to tell "hammering
+            an unreachable peer" apart from "never tried".
+
     config LIBTRACER_TRANSPORT_CAN
         bool "Build the CAN transport"
         default y

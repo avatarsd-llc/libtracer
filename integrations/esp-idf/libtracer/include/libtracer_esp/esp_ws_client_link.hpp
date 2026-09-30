@@ -192,6 +192,10 @@
 #include <thread>
 #include <vector>
 
+#if __has_include("sdkconfig.h")
+#include "sdkconfig.h"
+#endif
+
 #include "esp_transport.h"
 #include "libtracer/transport.hpp"
 #include "libtracer/tx_handoff.hpp"
@@ -256,6 +260,25 @@ struct esp_ws_client_config_t {
  */
 class esp_ws_client_link_t : public transport_t {
    public:
+    /**
+     * @brief Whether this image counts and logs failed dials — the application's
+     *        compile-time choice, `CONFIG_LIBTRACER_WS_CLIENT_DIAL_STATS` (#1662).
+     *
+     * Off by default. With it off, @ref stats_t has no dial fields, the link carries no
+     * dial members, and a failed dial emits no log line: the library states nothing the
+     * application did not ask for. With it on, @ref stats_t gains `dial_attempts` and
+     * `dial_failures` (#1606 asks 1–2) and a failed dial logs one WARN, limited to one a
+     * minute. A per-image switch rather than a per-link template policy: the saving is
+     * a few bytes on a cold path, which does not pay for templating this class (#1662).
+     * The header reads `sdkconfig.h` itself, so every translation unit that includes it
+     * agrees on the layout.
+     */
+#ifdef CONFIG_LIBTRACER_WS_CLIENT_DIAL_STATS
+    static constexpr bool kDialStats = true;
+#else
+    static constexpr bool kDialStats = false;
+#endif
+
     /**
      * @brief Start the recv thread, which dials `ws://<host>:<port><ws_path>` — at once
      *        by default, or only after @ref start_receiving when `defer_recv` is set.
@@ -425,19 +448,22 @@ class esp_ws_client_link_t : public transport_t {
      * `c.rx_drops` is NOT a second tally: it is read straight from @ref dropped_rx, so
      * this link has exactly one inbound-drop truth and both spellings always agree.
      *
-     * `dial_attempts` / `dial_failures` make the failure arm visible (#1606 ask 1): a
-     * failed dial also logs a WARN, rate-limited to one per `kDialWarnIntervalUs`, naming
-     * the peer and the running failure count.
+     * `dial_attempts` / `dial_failures` make the failure arm visible (#1606 ask 1). They
+     * exist only when @ref kDialStats is on, and then a failed dial also logs a WARN,
+     * rate-limited to one per `kDialWarnIntervalUs`, naming the peer and the running
+     * failure count. With it off, neither the fields nor the log line exist (#1662).
      */
     struct stats_t {
         link_counters_t c;            /**< @brief Traffic counters (see link_stats.hpp). */
         std::uint32_t reconnects = 0; /**< @brief Completed handshakes since construction. */
+#ifdef CONFIG_LIBTRACER_WS_CLIENT_DIAL_STATS
         /** @brief Dial attempts since construction, successful or not (#1606). */
         std::uint32_t dial_attempts = 0;
         /** @brief Dial attempts that did NOT complete a handshake (#1606) — together with
          *         @ref dial_attempts, what tells "hammering an unreachable peer" apart from
          *         "never tried". */
         std::uint32_t dial_failures = 0;
+#endif
         std::uint32_t connect_ms = 0; /**< @brief Last handshake duration, ms (0 = never). */
         bool up = false; /**< @brief @ref link_up at the instant of the snapshot — LIVENESS,
                           *          which is what this field always meant (#1203). */
@@ -642,6 +668,7 @@ class esp_ws_client_link_t : public transport_t {
     link_counters_t st_;
     /** @brief Completed handshakes since construction — st_m_. */
     std::uint32_t reconnects_ = 0;
+#ifdef CONFIG_LIBTRACER_WS_CLIENT_DIAL_STATS
     /** @brief Dial attempts since construction — st_m_ (#1606). */
     std::uint32_t dial_attempts_ = 0;
     /** @brief Dial attempts that completed no handshake — st_m_ (#1606). */
@@ -649,6 +676,7 @@ class esp_ws_client_link_t : public transport_t {
     /** @brief `esp_timer_get_time()` of the last failed-dial WARN, for its rate limit; recv
      *         thread only. */
     std::int64_t last_dial_warn_us_ = 0;
+#endif
     /** @brief Last successful dial's handshake duration in ms — st_m_. */
     std::uint32_t connect_ms_ = 0;
     /** @brief Liveness — what @ref link_up reports, and the handles' publication flag.

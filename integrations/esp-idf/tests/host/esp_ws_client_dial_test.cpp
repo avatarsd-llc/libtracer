@@ -378,34 +378,77 @@ void test_the_effective_config_is_readable() {
 }  // namespace
 
 /**
- * @brief #1606 asks 1–2 — a failing dial is COUNTED, and its transport pair is released on
- *        the failure path rather than held through the backoff.
+ * @brief Does @p stats_t carry the dial counters?
  *
- * Before the fix the failure arm bumped nothing (`reconnects` counts completed handshakes
- * only), so a link hammering an unreachable peer read exactly like one that never tried; and
- * the pair a failed dial built stayed live until the TOP of the next attempt, so a backing-off
- * link permanently held one. `live_handles()` is the fake's release oracle: 0 during the
- * backoff means the pair went back on the failure path.
+ * Named as a question so the assertion below reads as the answer (#1662).
  */
-void test_failed_dials_are_counted_and_released() {
-    std::printf("#1606 a failed dial is counted, and its pair released at once:\n");
+template <class stats_t>
+concept has_dial_counters = requires(stats_t st) {
+    st.dial_attempts;
+    st.dial_failures;
+};
+
+/**
+ * @brief #1662 — the dial counters exist exactly when the image asked for them.
+ *
+ * Compile-time, like the #959 guard above: with `CONFIG_LIBTRACER_WS_CLIENT_DIAL_STATS`
+ * off, reading `dial_attempts` must not compile, so an application cannot read a counter
+ * nobody maintains. This suite is built twice, once per setting (core/tests/CMakeLists.txt).
+ */
+static_assert(has_dial_counters<tr::net::esp_ws_client_link_t::stats_t> ==
+                  tr::net::esp_ws_client_link_t::kDialStats,
+              "#1662: stats_t carries dial counters iff CONFIG_LIBTRACER_WS_CLIENT_DIAL_STATS");
+
+/**
+ * @brief #1606 asks 1–2, #1662 — a failed dial releases its transport pair on the failure
+ *        path, and is counted and logged only when the image opted in.
+ *
+ * The release is unconditional: a backing-off link holds no pair, whatever the option.
+ * `live_handles()` is the fake's release oracle: 0 during the backoff means the pair went
+ * back on the failure path. What the option decides is observability. On, the failure is
+ * counted and one WARN names the peer. Off (the default), the library says nothing at all:
+ * the captured stderr carries no dial line, which is the #1662 "no log unless asked" gate.
+ */
+void test_failed_dials_are_released_and_observed_only_on_request() {
+    std::printf("#1606/#1662 a failed dial is released, and observed only on request (%s):\n",
+                tr::net::esp_ws_client_link_t::kDialStats ? "dial stats ON" : "dial stats OFF");
     fake_ws::reset();
     fake_ws::fail_connects(true);
     {
-        tr::net::esp_ws_client_link_t link("127.0.0.1", 8080,
-                                           {.rx_bytes = kBufBytes, .tx_bytes = kBufBytes});
-        check(wait_until([&] { return link.stats().dial_failures >= 1; }, 2s),
-              "the failed dial is counted on dial_failures");
-        const auto st = link.stats();
-        check(st.dial_attempts >= st.dial_failures, "every failure is also an attempt");
+        std::optional<tr::net::esp_ws_client_link_t> link;
+        bool failed = false;
+        const std::string logged = capture_stderr([&] {
+            link.emplace(
+                "127.0.0.1", 8080,
+                tr::net::esp_ws_client_config_t{.rx_bytes = kBufBytes, .tx_bytes = kBufBytes});
+            // The fake counts the dial on ENTRY; the failure arm (release, count, log) runs
+            // after it returns, so wait for the release before the capture window closes.
+            failed = wait_until(
+                [&] { return fake_ws::connect_count() >= 1 && fake_ws::live_handles() == 0; }, 2s);
+            // The count and the log come just AFTER the release, so hold the window open a
+            // little longer. The next dial is a whole reconnect backoff (1.5 s) away.
+            std::this_thread::sleep_for(100ms);
+        });
+        check(failed, "a dial was attempted and failed");
+        const auto st = link->stats();
         check(st.reconnects == 0, "and no handshake is claimed");
         check(fake_ws::live_handles() == 0,
               "the failed pair is released on the failure path, not held through the backoff");
+        const bool logged_dial = logged.find("dial ws://") != std::string::npos;
+#ifdef CONFIG_LIBTRACER_WS_CLIENT_DIAL_STATS
+        check(st.dial_failures >= 1, "the failed dial is counted on dial_failures");
+        check(st.dial_attempts >= st.dial_failures, "every failure is also an attempt");
+        check(logged_dial, "and the failure is logged, because the image asked for it");
+#else
+        check(!logged_dial, "the library logs NOTHING about the failed dial (#1662)");
+#endif
         fake_ws::fail_connects(false);
-        check(wait_until([&] { return link.link_up(); }, 10s), "the next dial lands");
-        const auto up = link.stats();
+        check(wait_until([&] { return link->link_up(); }, 10s), "the next dial lands");
+#ifdef CONFIG_LIBTRACER_WS_CLIENT_DIAL_STATS
+        const auto up = link->stats();
         check(up.dial_attempts == up.dial_failures + 1,
               "attempts = failures + the one that came up");
+#endif
     }
     check_drained();
 }
@@ -417,7 +460,7 @@ int main() {
     test_no_headers_leaves_the_field_null();
     test_oversize_frame_is_refused_and_counted();
     test_the_effective_config_is_readable();
-    test_failed_dials_are_counted_and_released();
+    test_failed_dials_are_released_and_observed_only_on_request();
     // Defensive: `main` must never return under a detached orphan still inside the fake,
     // whose static state is destroyed on the way out (#1456).
     check_drained();

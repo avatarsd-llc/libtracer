@@ -35,9 +35,11 @@ namespace tr::net {
 namespace {
 /** @brief Log tag for this link. */
 constexpr const char* kTag = "ws_client_link";
+#ifdef CONFIG_LIBTRACER_WS_CLIENT_DIAL_STATS
 /** @brief Minimum spacing of the failed-dial WARN (#1606), microseconds: one line a minute
- *         at most, whatever the backoff. */
+ *         at most, whatever the backoff. Only with the dial-stats option on (#1662). */
 constexpr std::int64_t kDialWarnIntervalUs = 60LL * 1000 * 1000;
+#endif
 
 /**
  * @brief The task-watchdog period, seconds — the numerator every blocking bound on
@@ -436,10 +438,12 @@ esp_ws_client_link_t::dial_outcome_t esp_ws_client_link_t::connect_once() {
     // BEFORE it takes this mutex. Either this side wins and publishes an in-flight dial
     // for the destructor to condemn, or the destructor wins and this load sees the stop
     // and never dials at all. There is no third interleaving and hence no window.
+#ifdef CONFIG_LIBTRACER_WS_CLIENT_DIAL_STATS
     {
         const std::lock_guard<std::mutex> lk(st_m_);
         ++dial_attempts_;  // #1606 ask 1: the attempt is counted whatever it ends as
     }
+#endif
     const std::shared_ptr<dial_t> slot = dial_;
     {
         const std::lock_guard<std::mutex> lk(slot->m);
@@ -524,6 +528,7 @@ esp_ws_client_link_t::dial_outcome_t esp_ws_client_link_t::connect_once() {
             esp_transport_destroy(tcp_);
             tcp_ = nullptr;
         }
+#ifdef CONFIG_LIBTRACER_WS_CLIENT_DIAL_STATS
         std::uint32_t failures = 0;
         {
             const std::lock_guard<std::mutex> lk(st_m_);
@@ -539,6 +544,9 @@ esp_ws_client_link_t::dial_outcome_t esp_ws_client_link_t::connect_once() {
                      static_cast<unsigned>(port_), ws_path_.c_str(),
                      static_cast<unsigned>(failures));
         }
+#endif
+        // With the option off (the default, #1662) a failed dial says nothing: counting and
+        // logging are the application's choice, and it did not make one.
         return dial_outcome_t::FAILED;
     }
     // Disable Nagle on the freshly connected socket, symmetric with the server side
@@ -630,8 +638,10 @@ esp_ws_client_link_t::stats_t esp_ws_client_link_t::stats() const {
         const std::lock_guard<std::mutex> lk(st_m_);
         out.c = st_;
         out.reconnects = reconnects_;
+#ifdef CONFIG_LIBTRACER_WS_CLIENT_DIAL_STATS
         out.dial_attempts = dial_attempts_;
         out.dial_failures = dial_failures_;
+#endif
         out.connect_ms = connect_ms_;
     }
     // Filled from `dropped_rx_`, not kept in `st_`: the receive path already tallies every
