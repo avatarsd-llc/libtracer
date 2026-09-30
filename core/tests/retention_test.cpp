@@ -176,7 +176,7 @@ void test_wo_field_stores_nothing() {
     table.push_back(app_field_t{.name = "mode", .access = app_access_t::RW});
     table.push_back(
         app_field_t{.name = "pulse", .access = app_access_t::RW, .retention = retention_t::NONE});
-    g.set_app_fields(v, std::move(table));
+    (void)g.set_policy(v, {.app_fields = std::move(table)});
 
     check(tr::graph::app_field_slot_t{.name = "w", .access = app_access_t::WO}.retention ==
                   retention_t::NONE &&
@@ -219,7 +219,7 @@ void test_wo_field_stores_nothing() {
     std::vector<app_field_t> t2;
     t2.push_back(app_field_t{.name = "key", .access = app_access_t::WO, .value = val});
     const vertex_handle_t w = g.register_vertex(path_t("/dev/b"), role_t::STORED_VALUE);
-    g.set_app_fields(w, std::move(t2));
+    (void)g.set_policy(w, {.app_fields = std::move(t2)});
     const std::vector<app_field_t> snap = vx(w)->app_fields_snapshot();
     check(snap.size() == 1 && snap[0].value.empty(),
           "an install-time value on a `wo` field is not stored either");
@@ -239,7 +239,8 @@ void test_none_vertex_relays() {
     // Held first, so the switch is seen to DROP what it held.
     check(g.write(v, make_value({0x01})).has_value() && g.read(v).has_value(),
           "under LAST a write is readable");
-    check(g.set_retention(v, retention_t::NONE).has_value(), "NONE is legal on a STORED_VALUE");
+    check(g.set_policy(v, {.retention = retention_t::NONE}).has_value(),
+          "NONE is legal on a STORED_VALUE");
     check(g.retention(v) == retention_t::NONE, "... and reads back as NONE");
     check(!g.read(v).has_value() && g.read(v).error() == status_t::NOT_FOUND,
           "switching to NONE drops the held value — read is NOT_FOUND at once");
@@ -256,7 +257,7 @@ void test_none_vertex_relays() {
     check(!g.propagate(v).has_value(), "propagate refuses for the same reason");
 
     // Back to LAST: retention resumes with the next write.
-    check(g.set_retention(v, retention_t::LAST).has_value() &&
+    check(g.set_policy(v, {.retention = retention_t::LAST}).has_value() &&
               g.write(v, make_value({0x04})).has_value() && g.read(v).has_value(),
           "back to LAST, the next write is readable again");
 
@@ -265,7 +266,7 @@ void test_none_vertex_relays() {
     const path_t dst("/relay/dst");
     const vertex_handle_t s = g.register_vertex(src, role_t::STORED_VALUE);
     const vertex_handle_t d = g.register_vertex(dst, role_t::STORED_VALUE);
-    check(g.set_retention(d, retention_t::NONE).has_value(), "a NONE target");
+    check(g.set_policy(d, {.retention = retention_t::NONE}).has_value(), "a NONE target");
     check(g.subscribe(src, dst).has_value(), "wired src -> dst");
     const std::uint64_t dseq = vx(d)->current_seq();
     check(g.write(s, make_value({0x05})).has_value(), "the source write lands");
@@ -279,8 +280,10 @@ void test_none_vertex_relays() {
     std::atomic<std::uint64_t> srecv{0};
     check(g.subscribe(sp, &count_sink, &srecv).has_value(), "a STREAM subscriber");
     check(g.retention(st) == retention_t::N, "a STREAM retains N by default");
-    check(!g.set_retention(st, retention_t::LAST).has_value(), "LAST is refused on a STREAM");
-    check(g.set_retention(st, retention_t::NONE).has_value(), "NONE is legal on a STREAM");
+    check(!g.set_policy(st, {.retention = retention_t::LAST}).has_value(),
+          "LAST is refused on a STREAM");
+    check(g.set_policy(st, {.retention = retention_t::NONE}).has_value(),
+          "NONE is legal on a STREAM");
     check(g.write(st, make_value({0x06})).has_value() && srecv.load() == 1,
           "a NONE STREAM still delivers its write");
     const auto hist = tr::testing::history_of(g, st);
@@ -294,9 +297,9 @@ void test_none_vertex_relays() {
     h.on_write = tr::graph::thunk(h_on_write);
     const vertex_handle_t hv = g.register_vertex(path_t("/relay/h"), role_t::HANDLER, std::move(h));
     check(g.retention(hv) == retention_t::NONE, "a HANDLER retains NONE");
-    check(g.set_retention(hv, retention_t::NONE).has_value() &&
-              !g.set_retention(hv, retention_t::LAST).has_value() &&
-              !g.set_retention(hv, retention_t::N, 4).has_value(),
+    check(g.set_policy(hv, {.retention = retention_t::NONE}).has_value() &&
+              !g.set_policy(hv, {.retention = retention_t::LAST}).has_value() &&
+              !g.set_policy(hv, {.retention = retention_t::N, .depth = 4}).has_value(),
           "a HANDLER accepts NONE and refuses LAST and N");
 
     // Retirement resets the declaration: the next occupant starts from its role's default.
@@ -317,7 +320,8 @@ void test_none_relay_draws_no_block() {
     const path_t pl("/z/last");
     const vertex_handle_t none = g.register_vertex(pn, role_t::STORED_VALUE);
     const vertex_handle_t last = g.register_vertex(pl, role_t::STORED_VALUE);
-    check(g.set_retention(none, retention_t::NONE).has_value(), "the relay arm is NONE");
+    check(g.set_policy(none, {.retention = retention_t::NONE}).has_value(),
+          "the relay arm is NONE");
     for (int i = 0; i < 8; ++i) {
         (void)g.subscribe(pn, &count_sink, &recv);
         (void)g.subscribe(pl, &count_sink, &recv);
@@ -363,8 +367,9 @@ void test_ring_rides_the_source() {
         graph_t g;
         const vertex_handle_t st = g.register_vertex(path_t("/r/stream"), role_t::STREAM);
         const vertex_handle_t sv = g.register_vertex(path_t("/r/stored"), role_t::STORED_VALUE);
-        check(g.set_retention(st, retention_t::N, 64).has_value(), "a ring 64 deep");
-        g.set_ring_source(st, &src);
+        check(g.set_policy(st, {.retention = retention_t::N, .depth = 64, .ring_source = &src})
+                  .has_value(),
+              "a ring 64 deep over its own source");
         // `assign` stores without delivering, so the only difference between the two arms is
         // the ring admission itself. The retired deque allocated a chunk every 16 appends.
         const std::size_t stream_allocs = count_allocs([&] { (void)g.assign(st, rope_t{seg}); });

@@ -223,7 +223,7 @@ void test_field_shape_matrix() {
     const vertex_handle_t v = g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
     std::vector<app_field_t> table;
     table.push_back(app_field_t{.name = "kp", .access = app_access_t::RW});
-    g.set_app_fields(v, std::move(table));
+    (void)g.set_policy(v, {.app_fields = std::move(table)});
     const tr::view::view_t val = make_value({0x01, 0x00, 0x01, 0x00, 0x2a});
     constexpr std::string_view kOwner{};  // the empty (owner) caller — no ACL is installed
 
@@ -393,7 +393,11 @@ void test_field_wildcard_divergence() {
     // BELOW its own, so one spelling has two answers split by who is asking.
     graph_t gated;
     const vertex_handle_t gv = gated.register_vertex(path_t("/g"), role_t::STORED_VALUE);
-    gated.configure_subject_resolver(caller_is_subject, nullptr);
+    {
+        auto hooks = gated.hooks();
+        hooks.subject_resolver = {caller_is_subject, nullptr};
+        gated.set_hooks(hooks);
+    }
     // A non-empty ACL that grants "peer-a" nothing at all (an empty effective ACL would be
     // unrestricted, so the ACE has to exist and name someone else).
     std::vector<tr::graph::ace_t> closed;

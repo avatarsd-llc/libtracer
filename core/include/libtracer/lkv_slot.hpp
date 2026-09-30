@@ -93,6 +93,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -100,130 +101,23 @@
 #include <type_traits>
 
 #include "libtracer/config.hpp"
+#include "libtracer/reader_guard.hpp"
 #include "libtracer/value.hpp"
 
 namespace tr::graph {
 
 /**
- * @brief The host reader guard: one of @ref kStripes padded locks, chosen by slot address.
+ * @brief The LKV slot contract as a concept (RFC-0028 §5.6): a nothrow adopting `store`, a
+ *        nothrow owning `load`, and the mandatory `may_spin` declaration.
  *
- * @ref single_writer_slot_t exchanges and retains a `value_t*` inside `config_t::reader_guard_t`.
- * On a single-core RTOS that guard is an interrupt-masked critical section (the ESP-IDF
- * component binds `tr::esp::critical_guard_t`), which makes the window unpreemptable. A host
- * process cannot mask interrupts, so this is the host's spelling of the same promise: a
- * contender that finds the window held gives the CPU back to whoever holds it, instead of
- * spinning until the holder is scheduled again.
- *
- * ## The shape of the lock, and why it is not `std::mutex`
- *
- * Taking it is one read-modify-write (`exchange`), releasing it is one plain release store —
- * the shape the `std::atomic<std::shared_ptr>` slot this replaced had for its pointer-lock bit.
- * The first cut of this guard was a `std::mutex` per stripe, and the blocking perf gate refused
- * it (#1628): `inproc-target-stored/64/8/1` lost 13 % of its deliveries per second, ~11 ns per
- * guarded section on the gate's runner, one section per delivery. A parking mutex cannot be
- * cheaper than two read-modify-writes: its unlock has to publish the release AND then look for
- * a sleeper, and that store-then-load pair needs a full fence or an RMW or it loses a wakeup.
- *
- * This lock has no wakeup to lose, so its unlock needs no fence. A contender re-reads the flag
- * @ref kSpinsBeforeNap times, then SLEEPS for @ref kNap and looks again, for as long as it
- * takes. The holder's window is a pointer swap or a handle copy — a handful of instructions —
- * so a contender only ever reaches the nap when the holder was descheduled inside the window,
- * and the nap is exactly what lets a descheduled holder run: on one CPU under priority
- * preemption a `sched_yield` spinner never lets a lower-priority holder back (the #1618 hang);
- * a sleeper does. `lkv_slot_inversion` checks that on the host with `SCHED_FIFO`.
- *
- * ## Striped, by address
- *
- * One process-wide lock serializes every vertex's publish against every other thread's. A lock
- * per slot would put bytes in every vertex, and `sizeof(vertex_t)` is ratcheted. A static table
- * of padded flags costs `kStripes * 64` bytes once, and two vertices share a lock only when their
- * addresses hash to the same stripe.
+ * `%vertex.hpp` asserts it on the bound `lkv_slot_t`, and separately refuses a policy that
+ * says `may_spin` on a target whose `kSpinWaitSafe` is `false` (#1618).
  */
-struct mutex_guard_t {
-    /** @brief Stripes in the process-wide table. */
-    static constexpr std::size_t kStripes = 64;
-
-    /** @brief Re-reads of a held flag before a contender sleeps; covers a cross-core release. */
-    static constexpr unsigned kSpinsBeforeNap = 128;
-
-    /**
-     * @brief How long a contender sleeps between looks once it has spun out.
-     *
-     * Only a holder descheduled inside its few-instruction window makes anyone sleep, so this
-     * bounds the extra latency of that rare case, not the common one. Bounded from below by
-     * what one `nanosleep` costs anyway.
-     */
-    static constexpr std::chrono::microseconds kNap{20};
-
-    /** @brief Take the stripe the slot at @p at hashes to. */
-    explicit mutex_guard_t(const void* at) : taken_(stripe(at)) {
-        if (!taken_.exchange(true, std::memory_order_acquire)) [[likely]]
-            return;
-        wait_for_window();
-    }
-    /** @brief Give the stripe back: a release store, and nobody to notify (see the class). */
-    ~mutex_guard_t() { taken_.store(false, std::memory_order_release); }
-    mutex_guard_t(const mutex_guard_t&) = delete;
-    mutex_guard_t& operator=(const mutex_guard_t&) = delete;
-
-   private:
-    /** @brief One stripe, on a cache line of its own so two stripes never false-share. */
-    struct alignas(64) cell_t {
-        std::atomic<bool> taken{false}; /**< @brief Whether some thread is inside the window. */
-    };
-
-    // The flag must be a lock-free atomic, or the "one RMW" above is a libatomic lock. That is
-    // asserted in `vertex.hpp` beside the BINDING, not here: this header is included by every
-    // consumer of a vertex, esp32c3 (rv32imc, no atomics at all) included, and a class-scope
-    // assertion fires there even though that target binds an interrupt-masked guard and never
-    // instantiates this one (#1628, the C3 legs).
-
-    /** @brief The stripe for address @p at: a Fibonacci hash of the address, top bits. */
-    static std::atomic<bool>& stripe(const void* at) {
-        static cell_t table[kStripes];
-        auto a = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(at));
-        a ^= a >> 17;
-        a *= 0x9E3779B97F4A7C15ull;
-        return table[(a >> 58) % kStripes].taken;
-    }
-
-    /**
-     * @brief The contended path: re-read, then nap, until an `exchange` finds the flag clear.
-     *
-     * Out of line so the uncontended constructor stays one RMW and a branch at every call site.
-     * Reads before the RMW so contenders do not bounce the line between them while they wait.
-     */
-    [[gnu::noinline]] void wait_for_window() {
-        for (;;) {
-            for (unsigned spins = 0; taken_.load(std::memory_order_relaxed); ++spins) {
-                if (spins >= kSpinsBeforeNap) {
-                    std::this_thread::sleep_for(kNap);
-                    spins = 0;
-                }
-            }
-            if (!taken_.exchange(true, std::memory_order_acquire)) return;
-        }
-    }
-
-    std::atomic<bool>& taken_;
-};
-
-/**
- * @brief Open a reader guard of type @p guard_t for the slot at a given address.
- *
- * A guard that takes a `const void*` (like @ref mutex_guard_t) is handed the slot's address; an
- * address-blind one (an interrupt mask) is default-constructed.
- */
-template <typename guard_t>
-struct guard_for_t : guard_t {
-    /** @brief Construct the guard with the slot address. */
-    explicit guard_for_t(const void* at)
-        requires std::is_constructible_v<guard_t, const void*>
-        : guard_t(at) {}
-    /** @brief Construct an address-blind guard. */
-    explicit guard_for_t(const void*)
-        requires(!std::is_constructible_v<guard_t, const void*>)
-    {}
+template <class S>
+concept lkv_slot = requires(S s, value_t* v) {
+    { s.store(v) } noexcept -> std::same_as<bool>;
+    { s.load() } noexcept -> std::same_as<value_ref_t>;
+    { S::may_spin } -> std::convertible_to<bool>;
 };
 
 /**
@@ -265,16 +159,15 @@ struct guard_for_t : guard_t {
  * when this is tried: with the writer's guard removed, a reader reads a value after its free
  * (ASan: heap-use-after-free).
  *
- * @tparam guard_t An RAII type whose lifetime is the critical section, constructible either
- *                 from the slot's address (`const void*`) or from nothing.
+ * @tparam guard_t A `reader_guard`; the slot takes `guard_t::for_address(this)`.
  *                 The bound slot uses `config_t::reader_guard_t`; tests instantiate this
  *                 template directly with a guard of their own.
  */
-template <typename guard_t>
+template <reader_guard guard_t>
 class basic_single_writer_slot_t {
    public:
-    /** @brief This policy never spin-waits: the only wait is the guard, and a guard may not. */
-    static constexpr bool may_spin = false;
+    /** @brief This policy's only wait is its guard, so it spins exactly when the guard does. */
+    static constexpr bool may_spin = guard_t::may_spin;
 
     basic_single_writer_slot_t() = default;
     basic_single_writer_slot_t(const basic_single_writer_slot_t&) = delete;
@@ -292,9 +185,9 @@ class basic_single_writer_slot_t {
      * @param v The value to publish; the slot adopts the caller's reference. Null clears.
      * @return Always `true`. A swap allocates nothing, so there is no failure to report.
      */
-    [[nodiscard]] bool store(value_t* v, std::memory_order = std::memory_order_seq_cst) {
+    [[nodiscard]] bool store(value_t* v, std::memory_order = std::memory_order_seq_cst) noexcept {
         {
-            const guard_for_t<guard_t> g{this};
+            const guard_scope_t<guard_t> g{this};
             std::swap(v_, v);
         }
         value_t::release(v);  // `v` is now the displaced value, released here, unguarded
@@ -302,10 +195,10 @@ class basic_single_writer_slot_t {
     }
 
     /** @brief Drop the published value. Releases a reference outside the guard; cannot fail. */
-    void clear(std::memory_order = std::memory_order_seq_cst) {
+    void clear(std::memory_order = std::memory_order_seq_cst) noexcept {
         value_t* old = nullptr;
         {
-            const guard_for_t<guard_t> g{this};
+            const guard_scope_t<guard_t> g{this};
             std::swap(v_, old);
         }
         value_t::release(old);
@@ -317,8 +210,8 @@ class basic_single_writer_slot_t {
      * The retain is the refcount increment that lets the handle outlive the guard, and it is the
      * only work inside it.
      */
-    [[nodiscard]] value_ref_t load() const {
-        const guard_for_t<guard_t> g{this};
+    [[nodiscard]] value_ref_t load() const noexcept {
+        const guard_scope_t<guard_t> g{this};
         return value_ref_t::share(v_);
     }
 
@@ -1094,7 +987,8 @@ class hazard_slot_t {
      * A null value is not a publish — use @ref clear. On success the node adopts the caller's
      * reference; on `false` the reference is still the caller's.
      */
-    [[nodiscard]] bool store(value_t* v, std::memory_order order = std::memory_order_seq_cst) {
+    [[nodiscard]] bool store(value_t* v,
+                             std::memory_order order = std::memory_order_seq_cst) noexcept {
         if (v == nullptr) {
             clear(order);
             return true;
@@ -1113,7 +1007,7 @@ class hazard_slot_t {
      * @brief Drop the published value. Cannot fail — it publishes `nullptr`, which needs no
      *        node, so a clear allocates nothing even on a cold participant.
      */
-    void clear(std::memory_order order = std::memory_order_seq_cst) {
+    void clear(std::memory_order order = std::memory_order_seq_cst) noexcept {
         detail_hp::node_t* old = slot_.exchange(nullptr, rmw_order(order));
         if (old == nullptr) return;
         detail_hp::ticket_t t;
@@ -1140,7 +1034,7 @@ class hazard_slot_t {
      * and republished, and revalidate against the same address. That is not a bug — `n` is live
      * and holds a value some writer published, which is all a read promises.
      */
-    [[nodiscard]] value_ref_t load() const {
+    [[nodiscard]] value_ref_t load() const noexcept {
         detail_hp::node_t* n = slot_.load(std::memory_order_acquire);
         if (n == nullptr) return {};
         detail_hp::ticket_t t;

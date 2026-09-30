@@ -23,6 +23,7 @@
 
 #include "libtracer/backend.hpp"
 #include "libtracer/config.hpp"
+#include "libtracer/reader_guard.hpp"
 #include "libtracer/segment.hpp"
 
 /**
@@ -52,7 +53,17 @@ class pool_t final : public mem_backend_t {
            std::size_t align = alignof(std::max_align_t)) noexcept;
 
     /**
-     * @brief Hand out the next free slot as a `segment_t` of @p size bytes.
+     * @brief One slot as a raw block — the @ref block_source_t half (RFC-0028 §4.9): a request
+     *        that fits a slot (header included) at no stricter alignment than the slab's.
+     * @retval nullptr The pool is empty, or the request does not fit one slot.
+     */
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override;
+    /** @brief Return a slot @ref try_alloc handed out (the size is implied by the stride). */
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override;
+
+    /**
+     * @brief Hand out the next free slot as a `segment_t` of @p size bytes — the one-block
+     *        layout, the header at the slot's head.
      * @retval nullptr `size` exceeds the slot payload, or the pool is exhausted.
      */
     view::segment_t* alloc(std::size_t size, alloc_hint_t hint = alloc_hint_t::NONE) override;
@@ -69,7 +80,7 @@ class pool_t final : public mem_backend_t {
     // free-list ops are syscall-free — but `alloc`/`destroy` do an UNSYNCHRONIZED RMW on
     // `free_head_`/`free_count_`, so an ISR interleaving with task-context use corrupts the
     // list. ISR safety is a critical section, i.e. `synchronized_pool_t` with an ISR-safe
-    // policy (`tr::esp::portmux_sync_t`), never the bare pool.
+    // policy (`tr::esp::critical_pool_t`), never the bare pool.
     static constexpr bool needs_cache_ops =
         false; /**< @brief No DMA cache maintenance (plain RAM slab). */
     static constexpr bool is_isr_safe =
@@ -115,53 +126,6 @@ class pool_t final : public mem_backend_t {
 };
 
 /**
- * @brief The compile-time synchronisation seam of `synchronized_pool_t` (ADR-0047 §2
- *        module-set trait, ADR-0068 compile-time doctrine).
- *
- * A policy owns ONE critical-section mechanism: `lock()` / `unlock()` around the pool's
- * O(1) free-list ops, plus the facts the seam publishes upward — whether the section is
- * ISR-safe, whether acquiring it can block (heap/syscall/OS wait — distinct from ISR
- * safety, #928), and what the resulting backend is called. The target knows its concurrency
- * model at BUILD time (a single-core priority-preemptive MCU never becomes a multi-core
- * host), so the choice is a template argument, not a runtime knob: no branch, no vtable,
- * no per-alloc indirection on a ~120 ns operation.
- */
-template <class P>
-concept pool_sync_policy = requires(P& p) {
-    { p.lock() } noexcept;
-    { p.unlock() } noexcept;
-    { P::is_isr_safe } -> std::convertible_to<bool>;
-    { P::is_nonblocking } -> std::convertible_to<bool>;
-    { P::name } -> std::convertible_to<const char*>;
-};
-
-/**
- * @brief The MULTI-CORE HOST policy: an `std::atomic_flag` spinlock.
- *
- * Negligible contention on an O(1) section, and it avoids the ~2 µs OS-mutex round-trip
- * that would dominate the ~120 ns free-list op. NOT ISR-safe, and wrong for a single-core
- * priority-preemptive target, where a lower-priority holder cannot run while a
- * higher-priority task spins (ADR-0060 §2) — such a target supplies the interrupt-disable
- * critical-section policy instead (`tr::esp::portmux_sync_t` for ESP-IDF).
- */
-struct spin_sync_t {
-    static constexpr bool is_isr_safe = false; /**< @brief Spin => not ISR-safe. */
-    static constexpr bool is_nonblocking =
-        true; /**< @brief No heap, no syscall, no OS wait — it spins on an O(1) section. */
-    static constexpr const char* name = "mem_sync_pool"; /**< @brief Backend name. */
-    /** @brief Acquire the flag, spinning (the guarded section is O(1)). */
-    void lock() noexcept {
-        while (lk_.test_and_set(std::memory_order_acquire)) { /* spin: O(1) section */
-        }
-    }
-    /** @brief Release the flag. */
-    void unlock() noexcept { lk_.clear(std::memory_order_release); }
-
-   private:
-    std::atomic_flag lk_{};
-};
-
-/**
  * @brief A thread-safe `pool_t` whose SYNCHRONISATION IS A COMPILE-TIME POLICY
  *        (ADR-0060 §2), guarding the O(1) free-list with @p Sync.
  *
@@ -172,12 +136,14 @@ struct spin_sync_t {
  * `flat`, and `transport_vertex_t`'s `rx_backend`). A single thread-safe pool (never
  * per-stripe sharding, which removes no race and adds partition imbalance) is the answer.
  *
- * The mechanism is the target's to pick, because only the target knows its concurrency
- * model: @ref spin_sync_t on a multi-core host, an interrupt-disable critical section on a
- * single-core priority-preemptive MCU (`tr::esp::portmux_sync_t`, shipped by the ESP-IDF
- * component — it needs FreeRTOS headers, so it lives outside `core/`). The many-core
- * lock-free index+tag CAS upgrade (the free list is already index-based) stays the
- * recorded ADR-0060 §2 follow-up.
+ * The policy is a `graph::reader_guard` — the SAME critical-section trait the LKV slot
+ * binds (RFC-0028 §5.5, slice 10), so a target states its concurrency model once:
+ * @ref graph::reader_guard_t is the default, which is `mutex_guard_t` on a host (one RMW to
+ * take; a contender naps rather than spins) and the interrupt-masked `tr::esp::critical_guard_t`
+ * on an ESP-IDF chip (`tr::esp::critical_pool_t`). The target knows its concurrency model at
+ * BUILD time, so the choice is a template argument, not a runtime knob: no branch, no vtable,
+ * no per-alloc indirection on a ~120 ns operation. The many-core lock-free index+tag CAS
+ * upgrade (the free list is already index-based) stays the recorded ADR-0060 §2 follow-up.
  *
  * This is **opt-in construction only** — no seam defaults to it. `heap_backend()` remains
  * the default everywhere; a target that wants its receive/value bytes inside its own slab
@@ -190,17 +156,16 @@ struct spin_sync_t {
  * re-point is invisible to the inner pool. The re-point touches only the just-allocated
  * segment, which no other thread can observe until the caller publishes it.
  */
-template <pool_sync_policy Sync>
+template <graph::reader_guard Sync = graph::reader_guard_t>
 class synchronized_pool_t final : public mem_backend_t {
-    // The one policy this library ships that spin-waits. On a target that says spin-waiting is
-    // unsafe (`kSpinWaitSafe`), binding it here is not "slower" — it is a hang, and only the
-    // build knows which target this is. Checked on INSTANTIATION, so the `sync_pool_t` alias
-    // below still names the type freely; declaring or constructing one is what trips the guard.
-    static_assert(kSpinWaitSafe || !std::is_same_v<Sync, spin_sync_t>,
-                  "synchronized_pool_t<spin_sync_t> (a.k.a. tr::mem::sync_pool_t) spin-waits, "
+    // On a target that says spin-waiting is unsafe (`kSpinWaitSafe`), a guard that spin-waits
+    // is not "slower" — it is a hang, and only the build knows which target this is. Checked
+    // on INSTANTIATION, the pool twin of the slot's `may_spin` assertion in `%vertex.hpp`.
+    static_assert(kSpinWaitSafe || !Sync::may_spin,
+                  "synchronized_pool_t over a guard that declares may_spin = true spin-waits, "
                   "and this build set tr::mem::kSpinWaitSafe = false: a spinner that outranks "
                   "the lock holder never yields the CPU the holder needs, so the wait is "
-                  "unbounded and the target hangs. Bind the target's interrupt-disable policy "
+                  "unbounded and the target hangs. Bind the target's interrupt-masked guard "
                   "instead -- on ESP-IDF that is tr::esp::critical_pool_t "
                   "(libtracer_esp/critical_pool.hpp).");
 
@@ -209,6 +174,20 @@ class synchronized_pool_t final : public mem_backend_t {
     synchronized_pool_t(std::span<std::byte> slab, std::size_t slot_payload,
                         std::size_t align = alignof(std::max_align_t)) noexcept
         : mem_backend_t(Sync::name), inner_(slab, slot_payload, align) {}
+
+    /** @brief @ref pool_t::try_alloc inside @p Sync's critical section. */
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        sync_.lock();
+        void* const p = inner_.try_alloc(bytes, align);
+        sync_.unlock();
+        return p;
+    }
+    /** @brief @ref pool_t::release inside @p Sync's critical section. */
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        sync_.lock();
+        inner_.release(p, bytes, align);
+        sync_.unlock();
+    }
 
     /** @brief @ref pool_t::alloc inside @p Sync's critical section; reclaim re-routed here. */
     view::segment_t* alloc(std::size_t size, alloc_hint_t hint = alloc_hint_t::NONE) override {
@@ -271,15 +250,5 @@ class synchronized_pool_t final : public mem_backend_t {
     pool_t inner_;
     Sync sync_{};
 };
-
-/**
- * @brief The multi-core-host spelling of `synchronized_pool_t` — a spinlock-guarded pool.
- *
- * The name predates the policy seam and is kept as the host default (ADR-0060 §2's
- * spinlock variant); a single-core MCU wants the critical-section policy instead — and
- * because the short name is the discoverable one, a build that sets `kSpinWaitSafe` to
- * false rejects this instantiation outright rather than shipping a hang.
- */
-using sync_pool_t = synchronized_pool_t<spin_sync_t>;
 
 }  // namespace tr::mem

@@ -80,7 +80,7 @@ int main() {
 
     counting_source_t counter;
     {
-        graph_t g(&counter);
+        graph_t g(counter);
         const auto v = g.register_vertex(path_t("/pmr/leaf"), role_t::STORED_VALUE);
 
         const std::size_t before = counter.allocs;

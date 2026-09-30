@@ -30,9 +30,10 @@ namespace {
 }  // namespace
 
 udp_transport_t::udp_transport_t(std::uint16_t bind_port, const std::string& peer_host,
-                                 std::uint16_t peer_port, mem::mem_backend_t* backend,
-                                 std::size_t max_frame, std::size_t recv_stack)
-    : backend_(backend) {
+                                 std::uint16_t peer_port, const udp_config_t& config)
+    : backend_(config.memory.rx) {
+    const std::size_t max_frame = config.max_frame;
+    const std::size_t recv_stack = config.recv_stack;
     // `:settings max_frame` (0 = unset) tightens the accepted-datagram cap. kMaxDatagram is
     // not a policy default here but the datagram ceiling itself — a UDP payload cannot be
     // larger — so a configured value above it is inert, never a widened ingress bound.

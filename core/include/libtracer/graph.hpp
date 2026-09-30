@@ -101,7 +101,7 @@ static_assert(sizeof(vertex_handle_t) == sizeof(vertex_t*));
  * A pure description of one remote subscription edge: the consumer's accumulated
  * return route and this node's NAME for the link it arrived on, both opaque to L4,
  * plus the `vertex_t::subscriber_t` delivery_compact opt-in. The injected sink
- * (a `tr::net` concern — @ref graph_t::configure_remote_delivery_sink) interprets these:
+ * (a `tr::net` concern — @ref graph_hooks_t::remote_delivery) interprets these:
  * it maps @ref link to a transport child and emits a full-route `FWD{WRITE}` or,
  * when @ref delivery_compact, an auto-promoted label `COMPACT` (RFC-0004 §D/§E.1).
  * @ref link is borrowed for the sink call only; @ref return_route is a refcount
@@ -122,7 +122,7 @@ struct remote_delivery_t {
 };
 
 /**
- * @brief The remote-delivery sink itself — what @ref graph_t::configure_remote_delivery_sink
+ * @brief The remote-delivery sink itself — what @ref graph_hooks_t::remote_delivery
  *        installs and the producer fan-out calls per remote subscription edge.
  *
  * @note The ADR-0047 `{fn, ctx}` shape, NOT a `std::function` (#1049) — see
@@ -287,7 +287,7 @@ using subject_resolver_fn_t =
 
 /**
  * @brief One EXTERNAL mutation of a producer's `:subscribers[]` — what @ref
- *        graph_t::configure_subscription_observer reports.
+ *        graph_hooks_t::subscription_observer reports.
  *
  * "External" is exactly the ADR-0018 caller context being NON-EMPTY: the op arrived through
  * `op_resolver_t` carrying an inbound link NAME. It is the same discriminator the SUBSCRIBE
@@ -347,7 +347,7 @@ struct sub_event_t {
  *          simpler ground that an observer which mutates the graph while a `:subscribers[]`
  *          write is mid-flight makes the event stream depend on its own side effects.
  *          Deferral — queueing the event and acting on it from the app's own task — is the
- *          APP's job, exactly as it is for @ref graph_t::configure_remote_delivery_sink.
+ *          APP's job, exactly as it is for @ref graph_hooks_t::remote_delivery.
  *
  * @note The ADR-0047 `{fn, ctx}` shape, NOT a `std::function` (#1049) — see
  *       `subject_resolver_fn_t` for why. @p ctx is caller-owned and must outlive every
@@ -470,7 +470,7 @@ struct stats_block_t {
  * Amendment 1 §D.4 drew the census boundary at the graph, because L4 cannot reach DOWN into
  * the net plane to sample a router or a link. This seam inverts the direction instead of the
  * dependency: the router, which already knows the graph, registers a sampler UP — the same
- * shape as `configure_remote_delivery_sink` and the four resolver seams its constructor
+ * shape as `graph_hooks_t::remote_delivery` and the four resolver seams its constructor
  * installs — so L4 still names nothing below it.
  *
  * @param ctx        The caller-owned context installed beside the function.
@@ -489,6 +489,185 @@ struct stats_block_t {
  */
 using stats_sampler_fn_t = bool (*)(void* ctx, std::string_view seam_class,
                                     std::string_view seam_name, stats_block_t* out);
+
+/**
+ * @brief One `{fn, ctx}` graph seam: a captureless function pointer and the context handed
+ *        back as its first argument (ADR-0047, #1049).
+ *
+ * The shape `receiver_slot_t` and `hook_t` already use. A null @ref fn is the uninstalled
+ * seam — the graph's documented default for each one.
+ */
+template <class Fn>
+struct graph_hook_t {
+    Fn fn = nullptr;     /**< @brief The callback, or null when the seam is not installed. */
+    void* ctx = nullptr; /**< @brief Handed back as @ref fn's first argument; caller-owned. */
+};
+
+/**
+ * @brief The graph's five wiring seams as ONE aggregate (RFC-0028 §4.12, D12) — what
+ *        `graph_t`'s constructor and @ref graph_t::set_hooks take, in place of the five
+ *        `configure_*` verbs slice 10 deleted.
+ *
+ * Every slot is a @ref graph_hook_t, published through a `tr::sink_slot_t`, so a hot-path
+ * reader dispatches from one coherent `{fn, ctx}` snapshot — never a new `fn` beside a stale
+ * `ctx`. Every slot defaults to null, which is each seam's documented default, so
+ * `graph_hooks_t{}` is the un-wired graph and a caller names only what it installs:
+ *
+ * @code
+ * tr::graph::graph_t g{pool, {.subject_resolver = {&resolve, &my_acl}}};
+ * @endcode
+ *
+ * CONFIGURATION, not runtime knobs (#1049): install at wiring time, from one thread, before
+ * frames flow. Each `ctx` must outlive every dispatch that can still reach its seam.
+ */
+struct graph_hooks_t {
+    /**
+     * @brief The ACL enforcement switch (ADR-0018): maps a non-empty caller context to a
+     *        subject token.
+     *
+     * Null (the default) DISABLES enforcement: every operation is allowed and the hot path
+     * pays one relaxed load. With a resolver, each gated operation with a NON-EMPTY caller
+     * evaluates the target's *effective* ACL (own ACEs + inherited, ADR-0020); denial returns
+     * `PERMISSION_DENIED`. The EMPTY caller context is the local-API convention and is
+     * trusted without consulting the resolver (#905), so the resolver's error arm is free to
+     * mean DENY. A token equal to `tr::graph::kEveryoneSubject` is refused at every gate
+     * (#908): the wire has one spelling for a subject token.
+     */
+    graph_hook_t<subject_resolver_fn_t> subject_resolver{};
+
+    /**
+     * @brief The EXTERNAL subscription observer — fired on every `:subscribers[]` mutation
+     *        that arrived over a transport (see @ref sub_event_t for what "external" means).
+     *
+     * Fires from the one admission door every subscribe lands in and from the
+     * `:subscribers[N]` clear. `evict_link_edges` and a local `unsubscribe` stay silent, by
+     * design. Null (the default) costs one relaxed load on the subscribe path.
+     */
+    graph_hook_t<sub_observer_fn_t> subscription_observer{};
+
+    /**
+     * @brief The sink the producer fan-out hands each REMOTE subscriber's delivery to (#136,
+     *        RFC-0004 §D/§E.1) — the transport plane's seam; `tr::net::fwd_router_t`'s
+     *        constructor installs it.
+     *
+     * Fires on whatever thread calls `write` (outside the vertex lock), and on `subscribe`
+     * for a transient-local latch. Null ⇒ remote slots are stored but never deliver.
+     */
+    graph_hook_t<remote_delivery_fn_t> remote_delivery{};
+
+    /**
+     * @brief The wire SUBSCRIBER target resolver (RFC-0021) — the transport plane's mount
+     *        descent, borrowed by the `:subscribers[]` wire door; the router installs it.
+     *
+     * Null ⇒ a wire `SUBSCRIBER`'s `PATH` child is inert, every pre-RFC-0021 embedder's
+     * behaviour. With one, a subscribe whose target routes through a mount binds the edge to
+     * `(that mount, the residual below it)` (#491).
+     */
+    graph_hook_t<wire_target_fn_t> wire_target{};
+
+    /**
+     * @brief The NET-PLANE `:stats` seam sampler (RFC-0010 Amendment 2, #1503); the router
+     *        installs it.
+     *
+     * Null ⇒ the census answers for the graph alone and every `router` / `labels` / `link`
+     * spelling answers `SCHEMA_NOT_FOUND`.
+     */
+    graph_hook_t<stats_sampler_fn_t> stats_sampler{};
+};
+
+/**
+ * @brief Everything the OWNER declares about one vertex, as ONE aggregate (RFC-0028 §4.12,
+ *        D12) — what `graph_t::register_vertex` and @ref graph_t::set_policy take, in place of
+ *        the per-vertex `set_*` wiring verbs slice 10 deleted.
+ *
+ * Owner-side, host-only, with no wire surface: no peer can read or write any of it, and
+ * nothing is inherited (RFC-0022 §3.F). Every member defaults to what an undeclared vertex
+ * does, so `vertex_policy_t{}` is the default vertex and a caller names only what differs:
+ *
+ * @code
+ * const auto v = g.register_vertex(path, role_t::STREAM, {},
+ *                                  {.retention = retention_t::N, .depth = 64,
+ *                                   .ring_source = &ring_pool, .ring_reliable = true});
+ * @endcode
+ *
+ * A policy is stated WHOLE: @ref graph_t::set_policy applies every member, so a member left
+ * at its default resets that property. Applying a member that already holds costs nothing —
+ * in particular a default policy on a fresh vertex allocates no extension block.
+ */
+struct vertex_policy_t {
+    /**
+     * @brief What the vertex retains after a write is delivered (RFC-0028 §5.4, D4); unset ⇒
+     *        the role's default (`STORED_VALUE` → `LAST`, `STREAM` → `N` at depth 1,
+     *        `HANDLER` → `NONE`).
+     *
+     * Legal pairings: `STORED_VALUE` `NONE`|`LAST`, `STREAM` `NONE`|`N`, `HANDLER` `NONE`. An
+     * illegal one answers `SCHEMA_NOT_FOUND` from the verb that applies the policy.
+     * - `NONE` on a `STORED_VALUE` makes it a pure relay: every write is delivered and
+     *   released, the write sequence still moves (so `await` wakes), `read` answers
+     *   `NOT_FOUND`, and `assign` / `propagate` refuse with `SCHEMA_NOT_FOUND`. A direct write
+     *   whose only subscribers are callbacks draws no block at all.
+     * - `N` sets the ring depth (@ref depth); `NONE` on a `STREAM` empties and stops the ring.
+     *
+     * Switching to `NONE` drops what is already held. Costs zero bytes: `NONE` is a bit in the
+     * vertex's flag byte, and the depth lives in the extension block a STREAM already has.
+     */
+    std::optional<retention_t> retention{};
+
+    /** @brief Ring depth under `retention_t::N` (0 behaves as 1); ignored otherwise. */
+    std::uint32_t depth = 1;
+
+    /**
+     * @brief The copy-or-share threshold in bytes (RFC-0028 §5.3, D3): a written value of at
+     *        least this many bytes is SHARED, one below it is COPIED.
+     *
+     * At the terminus, a view-delivered, trailer-less WRITE of at least this size is stored
+     * as a refcounted link to the inbound receive segment — no allocation for the bytes, no
+     * copy; a smaller one is copied into the value's own block. `0` shares always; `SIZE_MAX`
+     * copies always. What sharing costs on a POOLED RX backend: the shared value BORROWS a
+     * pool slot until it is displaced, so size against `live shared values x segment_bytes`
+     * (see `config_t::kShareThresholdBytes` for the target-class defaults).
+     */
+    std::size_t share_threshold_bytes = kShareThresholdBytes;
+
+    /**
+     * @brief The receiving STREAM vertex's own ring source (RFC-0025 §4.6.1 clause 3); null ⇒
+     *        the graph's @ref graph_t::default_ring_source.
+     *
+     * A producer never queues; the queue belongs to whoever consumes it, bounded in BYTES by
+     * that party's own source. Each admitted entry reserves its retained width from the
+     * source until it retires. Per-injection-point, never a shared pool: one receiver running
+     * its source dry must not affect another. Changing it DRAINS the ring (every reservation
+     * goes back to the source that served it). Meaningful only on a `STREAM`.
+     */
+    mem::block_source_t* ring_source = nullptr;
+
+    /**
+     * @brief The §4.4 pressure arm for `ring_source`: `false` (default) BEST-EFFORT — a
+     *        refused admission sheds the oldest entry whole, accounts the loss and raises
+     *        `tr::flow::address_shift_gap`; `true` RELIABLE — the admission is refused,
+     *        nothing is shed, and the LOCAL producer's write answers `BACKPRESSURE`.
+     */
+    bool ring_reliable = false;
+
+    /**
+     * @brief How the vertex participates in an ANCESTOR's propagate sweep (RFC-0008 §C);
+     *        default `IF_NEWER`. Maintains the sweep's UNCONDITIONAL membership.
+     */
+    delivery_mode_t delivery_mode = delivery_mode_t::IF_NEWER;
+
+    /**
+     * @brief The vertex's application property field table (RFC-0010 §A) — owning, or
+     *        BORROWED from static storage (ADR-0058); empty ⇒ no fields (the closed
+     *        `ENOTTY` surface).
+     *
+     * Applying a policy REPLACES the table (atomically with respect to concurrent field
+     * operations), unless the declaration is the very one already installed — the same
+     * borrowed array, or an owning table while one of the same shape stands, in which case
+     * stored field values are kept. A borrowed table AND the bytes it points at must outlive
+     * the vertex.
+     */
+    app_fields_decl_t app_fields{};
+};
 
 /**
  * @brief The L4 in-process graph runtime: the Composite vertex tree plus the whole data
@@ -581,8 +760,8 @@ class graph_t {
      * @par Per-domain overrides still exist, at the seams that own the resource
      * One injection is the DEFAULT, not a mandate that everything share a store. A STREAM
      * vertex that must not be affected by another receiver's exhaustion declares its own
-     * ring source through @ref set_ring_source (receiver-pays, RFC-0025 §4.6.1 clause 3) —
-     * that seam is untouched, and per-vertex isolation stays a tested property.
+     * ring source through @ref vertex_policy_t::ring_source (receiver-pays, RFC-0025 §4.6.1 clause
+     * 3) — that seam is untouched, and per-vertex isolation stays a tested property.
      *
      * @warning **A `value_ref_t` must not outlive the graph it was read from.** This is the
      *          one contract the collapse tightens, and it is stated rather than discovered: a
@@ -597,25 +776,20 @@ class graph_t {
      *          `vertex_handle_t` obtained from the graph already dangles at that point, so
      *          nothing in the reference API is meant to outlive it.
      *
+     * @param hooks The graph's wiring seams (@ref graph_hooks_t), installed before the
+     *              constructor returns. Default: none — ACL enforcement off, no observer, no
+     *              transport plane. A router constructed later installs its three through
+     *              @ref set_hooks.
      * @param src The one nothrow failable block source every allocation above draws from.
      *            Host-owned; it MUST outlive the graph and every value handle obtained
      *            from it. An injected source must be thread-safe on a target where a value
      *            segment's reclaim can self-route onto a reader/subscriber thread
      *            concurrent with a writer's allocation (ADR-0060 §2) — @ref mem::heap_source
      *            is; a @ref mem::pool_source_t must be composed with the target's
-     *            arch-selected synchronisation. `nullptr` is accepted and means "the
-     *            process default", so `graph_t{}` and `graph_t{nullptr}` agree.
+     *            arch-selected synchronisation. Any `mem_backend_t` is a source too
+     *            (RFC-0028 slice 10), so a deployer that injects one slab has one slab.
      */
-    explicit graph_t(mem::block_source_t* src = &mem::heap_source());
-
-    /**
-     * @brief The reference spelling of the collapsed constructor — same contract, no null.
-     *
-     * Offered beside the pointer form because a source is never optional once a deployer
-     * has one: `graph_t g{pool}` says so at the call site, where `graph_t g{&pool}` reads
-     * like a seam that might be absent.
-     */
-    explicit graph_t(mem::block_source_t& src) : graph_t(&src) {}
+    explicit graph_t(mem::block_source_t& src = mem::heap_source(), graph_hooks_t hooks = {});
 
     graph_t(const graph_t&) = delete;
     graph_t& operator=(const graph_t&) = delete;
@@ -633,8 +807,8 @@ class graph_t {
      * @brief The graph-level DEFAULT receiver-ring source (RFC-0025 §4.6.1 clause 3).
      *
      * What a STREAM vertex charges its ring admissions against until it declares its own
-     * through @ref set_ring_source. Exposed for the same reason @ref control_source is: so a
-     * host can name it in a memory census and so the wiring is observable.
+     * through @ref vertex_policy_t::ring_source. Exposed for the same reason @ref control_source
+     * is: so a host can name it in a memory census and so the wiring is observable.
      */
     [[nodiscard]] mem::block_source_t& default_ring_source() const noexcept { return *ring_; }
 
@@ -664,6 +838,7 @@ class graph_t {
      */
     [[nodiscard]] vertex_handle_t register_vertex(const path_t& path, role_t role,
                                                   handlers_t handlers = {},
+                                                  vertex_policy_t policy = {},
                                                   std::span<const payload_right_t> rights = {});
 
     /**
@@ -671,6 +846,9 @@ class graph_t {
      *        @ref register_vertex).
      * @param handlers The vertex's user seams (@ref handlers_t); every `ctx` must outlive
      *        the registration.
+     * @param policy The owner's declarations about the vertex (@ref vertex_policy_t), applied
+     *        before the handle is returned. A default policy costs nothing. An illegal
+     *        retention for @p role answers `SCHEMA_NOT_FOUND` and registers nothing.
      * @param rights OPTIONAL payload-type → required-ACL-right table (RFC-0014 Amendment 2) —
      *        the general contract by which a control vertex demands something other than
      *        plain `WRITE` for a given written TLV type. BORROWED for the call: the rows are
@@ -690,7 +868,7 @@ class graph_t {
      *         registered.
      */
     [[nodiscard]] result_t<vertex_handle_t> try_register_vertex(
-        const path_t& path, role_t role, handlers_t handlers = {},
+        const path_t& path, role_t role, handlers_t handlers = {}, vertex_policy_t policy = {},
         std::span<const payload_right_t> rights = {});
 
     /**
@@ -704,7 +882,7 @@ class graph_t {
      */
     [[nodiscard]] result_t<vertex_handle_t> register_vertex_key(
         std::vector<std::byte> key, role_t role, handlers_t handlers = {},
-        std::span<const payload_right_t> rights = {});
+        vertex_policy_t policy = {}, std::span<const payload_right_t> rights = {});
 
     /**
      * @brief Retire a vertex and its whole subtree — the owner-facing mirror of
@@ -1420,7 +1598,7 @@ class graph_t {
      * (the ENOTTY of an unsupported creation). The built-in `stored_value` type is
      * registered by the constructor.
      *
-     * CONFIGURATION, like the three `configure_*` sinks: populate the catalog at setup,
+     * CONFIGURATION, like the `graph_hooks_t` seams: populate the catalog at setup,
      * before frames flow. Unlike them the catalog is a `std::map`, so #1049's `{fn, ctx}`
      * publication does not reach it — a concurrent insert rebalances a tree the in-band
      * creation path may be walking. Registration and lookup therefore take a lock, which
@@ -1535,89 +1713,29 @@ class graph_t {
      * @param mode The emission mode.
      */
     [[nodiscard]] result_t<void> propagate(vertex_handle_t v, emission_mode_t mode);
-    /**
-     * @brief Set v's per-vertex propagation policy (RFC-0008 §C).
-     *
-     * A wiring-time call (the "configure before frames flow" contract), like settings;
-     * maintains the sweep's UNCONDITIONAL membership. Default (unset) is IF_NEWER.
-     */
-    void set_delivery_mode(vertex_handle_t v, delivery_mode_t mode);
-    /**
-     * @brief Declare what @p v retains after a write is delivered (RFC-0028 §5.4, D4):
-     *        nothing, its last value, or the last @p depth entries of its ring.
-     *
-     * Retention is **not** protocol QoS: it encodes what the APPLICATION wants kept, and only
-     * the application can supply it. So it is an owner-side wiring call in the shape of
-     * @ref set_delivery_mode and @ref set_app_fields — a declaration the owner makes
-     * host-side after registration — and it has **no wire surface at all**: no peer can read
-     * it and none can write it. Each role has a default and a set of legal retentions (see
-     * @ref tr::graph::retention_t):
-     *
-     * - `STORED_VALUE` defaults to `LAST`; `NONE` makes it a pure relay — every write is
-     *   delivered to its subscribers and released, the write sequence still moves (so `await`
-     *   wakes), `read` answers `NOT_FOUND`, and `assign` / `propagate` refuse with
-     *   `SCHEMA_NOT_FOUND` exactly as on a `HANDLER` (RFC-0008 Amendment 2: nothing is retained
-     *   to flush). A direct write whose only subscribers are callbacks draws no block at all:
-     *   the value is delivered from the stack.
-     * - `STREAM` defaults to `N` with depth 1; `N` sets the depth (callable at any time — the
-     *   next append trims to it; 0 behaves as 1), and `NONE` empties and stops the ring.
-     * - `HANDLER` is `NONE` and nothing else — its `on_write` consumes the value.
-     *
-     * Switching to `NONE` drops what is already held (the last value and every ring entry,
-     * whose reservations go back to the source that served them). Costs zero bytes: `NONE` is
-     * a bit in the vertex's flag byte, and the depth lives in the extension block a STREAM
-     * identity already allocates.
-     *
-     * @param v     The vertex.
-     * @param r     The retention.
-     * @param depth The ring depth under `retention_t::N`; ignored otherwise.
-     * @return `SCHEMA_NOT_FOUND` when @p r is not legal for @p v's role (a `HANDLER` asked to
-     *         retain, a `STORED_VALUE` asked for a ring, a `STREAM` asked for `LAST`) — the
-     *         taxonomy's contract-mismatch status, and nothing changes.
-     */
-    [[nodiscard]] result_t<void> set_retention(vertex_handle_t v, retention_t r,
-                                               std::uint32_t depth = 1);
-    /** @brief What @p v retains (RFC-0028 §5.4): its role's default unless it declared
-     *         otherwise through @ref set_retention. */
+    /** @brief What @p v retains (RFC-0028 §5.4): its role's default unless its
+     *         @ref vertex_policy_t declared otherwise. */
     [[nodiscard]] retention_t retention(vertex_handle_t v) const noexcept;
+
     /**
-     * @brief Bind the RECEIVING vertex @p v's own ring source and §4.4 pressure arm
-     *        (RFC-0025 §4.6.1 clause 3) — owner-side wiring, no wire surface.
+     * @brief Apply @p policy to @p v WHOLE (RFC-0028 §4.12, D12) — the one owner-side wiring
+     *        verb that replaced `set_retention`, `set_share_threshold_bytes`,
+     *        `set_ring_source`, `set_delivery_mode`, `set_app_fields` and
+     *        `set_app_fields_static`.
      *
-     * A producer never queues; the queue belongs to whoever consumes it, and it is bounded in
-     * BYTES by that party's own injected `tr::mem::block_source_t`. This is the seam that
-     * injects it, sited beside @ref set_retention because the two compose: the depth is
-     * the owner's retention INTENT (entries), the source is the BOUND (bytes), and a shortfall
-     * surfaces through §4.4's pressure contract rather than as a silent shrink of the depth.
+     * Every member of @ref vertex_policy_t is applied, so a member left at its default resets
+     * that property; a member that already holds is skipped, so re-applying a policy costs
+     * nothing and a default policy on a fresh vertex allocates nothing. A wiring-time call,
+     * like `register_vertex` (the "configure before frames flow" contract): changing the ring
+     * source drains the ring, switching retention to `NONE` drops what is held, and
+     * re-declaring an owning field table resets its values to the declared ones.
      *
-     * **Charging is reservation ADMISSION, not placement.** Each admitted entry reserves its
-     * retained width from @p src and holds it until the entry retires. The payload bytes
-     * physically stay with the allocators that already hold them — the `shared_ptr` zero-copy
-     * handoff is preserved and an append is still a refcount bump. Physical placement
-     * migration is the later #873 family, not this seam. A reader who assumes the ring's bytes
-     * move into @p src will be wrong.
-     *
-     * **Per-injection-point, never a shared pool.** ADR-0079's amendment measured a folded
-     * source collapsing to 0.01x of its own single-thread rate at T=24; composition is a knob
-     * varied per target, and one receiver running its source dry must not affect another.
-     *
-     * REBINDING DRAINS: every queued entry's reservation is released to the source that served
-     * it and the ring is emptied, so this is a wiring-time call like its neighbours.
-     *
-     * @param v        The receiving STREAM vertex. Meaningful only on that role; on another it
-     *                 stores the wiring and changes nothing.
-     * @param src      The source to charge against; `nullptr` restores @ref default_ring_source.
-     * @param reliable The §4.4 arm. `false` (default) is BEST-EFFORT: a refused admission sheds
-     *                 the oldest entry whole, accounts the loss, and raises
-     *                 `tr::flow::address_shift_gap` in order at the shed point. `true` is
-     *                 RELIABLE: the admission is refused, nothing is shed, the ring never grows
-     *                 past its byte bound, and the LOCAL producer's write answers
-     *                 `status_t::BACKPRESSURE`. There is no wire carrier for backpressure in v1
-     *                 — the per-edge credit window is parked as the v2 escalation (§4.6.1
-     *                 clause 7) — so a remote producer sees the local receiver's drop tally,
-     *                 not a stall.
+     * @return `SCHEMA_NOT_FOUND` when the policy's retention is illegal for @p v's role (a
+     *         `HANDLER` asked to retain, a `STORED_VALUE` asked for a ring, a `STREAM` asked
+     *         for `LAST`) — checked before anything is applied, so a refused policy changes
+     *         nothing.
      */
-    void set_ring_source(vertex_handle_t v, mem::block_source_t* src, bool reliable = false);
+    [[nodiscard]] result_t<void> set_policy(vertex_handle_t v, vertex_policy_t policy);
     /** @brief Bytes @p v's receiver ring currently holds RESERVED against its source — the
      *         byte bound's observable. `SCHEMA_NOT_FOUND` on a non-STREAM role, matching
      *         @ref history. */
@@ -1626,27 +1744,6 @@ class graph_t {
      *         `tr::flow::address_shift_gap` census (RFC-0025 §4.4: a shed with no accounting is
      *         non-conforming). `SCHEMA_NOT_FOUND` on a non-STREAM role. */
     [[nodiscard]] result_t<std::uint64_t> stream_gaps(vertex_handle_t v) const;
-    /**
-     * @brief Declare @p v's copy-or-share threshold in bytes (RFC-0028 §5.3, D3): a written
-     *        value of at least @p bytes is SHARED, one below it is COPIED.
-     *
-     * At the terminus, a view-delivered, trailer-less WRITE of at least @p bytes is stored as
-     * a refcounted link to the inbound receive segment — no allocation for the bytes, no
-     * copy; a smaller one (or one carrying a CRC/TS trailer, or one whose reader cannot
-     * share) is copied into the value's own block, ONE allocation of header plus bytes
-     * (`value_t::make_inline`). `0` shares always; `SIZE_MAX` copies always. Owner-side, never
-     * over the wire, and nothing is inherited (RFC-0022 §3.F). A vertex that never declared
-     * one answers @ref tr::graph::config_t::kShareThresholdBytes.
-     *
-     * What sharing costs on a POOLED RX backend: the shared value **borrows** a pool slot —
-     * receive capacity — until it is displaced, not merely for the delivery window. The
-     * library keeps that deferred release safe (atomic segment refcounts); the APPLICATION owns
-     * the occupancy budget, since only it knows the pool geometry and the retention pattern.
-     * Size against `live shared values x segment_bytes`. A low threshold on a long-held vertex
-     * — a config vertex, a rarely-updated setpoint — is exactly the shape that starves a small
-     * pool; see @ref tr::graph::config_t::kShareThresholdBytes for the target-class defaults.
-     */
-    void set_share_threshold_bytes(vertex_handle_t v, std::size_t bytes);
     /**
      * @brief Block until the vertex's value changes or @p timeout elapses; return the value.
      *
@@ -1751,7 +1848,7 @@ class graph_t {
      * a flush can say about it is "nothing is owed".
      *
      * Ungated beyond the role check, unlike @ref drain_unflushed — it discloses no bytes and
-     * has no wire surface — the same owner-side shape @ref propagate and @ref set_retention
+     * has no wire surface — the same owner-side shape @ref propagate and @ref set_policy
      * carry.
      *
      * @retval status_t::SCHEMA_NOT_FOUND @p v is not a STREAM.
@@ -2002,24 +2099,6 @@ class graph_t {
     static void thread_quiescent() noexcept { pass_quiescent_state<reclaim_policy_t>(); }
 
     /**
-     * @brief Install (or replace) @p v's field descriptor table — the OWNER declaring its
-     *        application property fields under `:settings.app.` (RFC-0010 §A).
-     *
-     * A local, owner-facing host API, the mirror of @ref register_vertex (the RFC-0009
-     * §A.1 doctrine: the field catalog is device state, so there is no wire operation
-     * that declares a field) — remote peers write DECLARED fields, per their declared
-     * `app_access_t` and under the vertex WRITE right, never invent them; every
-     * undeclared name keeps `SCHEMA_NOT_FOUND` (the `ENOTTY` default). Entries may carry
-     * an initial value and the §B.1 descriptor bytes `read :schema` serves verbatim
-     * (after the runtime-projected `access` member). Replacing the table is atomic with
-     * respect to concurrent field operations on @p v; an empty table uninstalls (back to
-     * the closed pre-RFC surface). Callable at any time — declaration is not one-shot.
-     * App-field writes never wake `await` and never propagate (§C): a change consumers
-     * should notice is followed by the owner's ordinary announce write.
-     */
-    void set_app_fields(vertex_handle_t v, std::vector<app_field_t> table);
-
-    /**
      * @brief Install this NODE's identity — the key `read <vertex>:identity` serves
      *        (#406, RFC-0011; ADR-0045 decision 3 "the public key *is* the identity").
      *
@@ -2063,171 +2142,30 @@ class graph_t {
     void clear_identity();
 
     /**
-     * @brief Install (or replace) @p v's field descriptor table from BORROWED, static-storage
-     *        declarations (ADR-0058) — the same owner-facing semantics as @ref set_app_fields,
-     *        but the `name`/`descriptor` bytes are VIEWED, never copied.
+     * @brief Replace the graph's five wiring seams WHOLE (RFC-0028 §4.12, D12) — the one
+     *        verb that replaced the five `configure_*` verbs.
      *
-     * For an MCU owner whose field table is `constexpr` in flash, this costs **zero
-     * declaration RAM**: the runtime views @p table itself, so the caller MUST keep
-     * **@p table and the bytes it points at** alive for the vertex's lifetime (pass a
-     * `static`/`constexpr` array in flash / `.rodata`, never a stack array or a soon-freed
-     * heap block). Note this is the ARRAY as well as its bytes — an earlier revision copied
-     * @p table's entries into an owned vector, so only the bytes had to outlive the vertex,
-     * and the "zero declaration RAM" above was untrue by ~200 B per vertex on host
-     * (ADR-0058 erratum 1; measured by the `vertex_app5_static` gate row). Declaration
-     * only — no initial value; write values later through the field-write surface. Empty
-     * @p table uninstalls, exactly as @ref set_app_fields. Wire-invariant: `:schema` serves
-     * the same verbatim bytes as the owning overload.
+     * The constructor takes the application's hooks; this verb exists for the party that
+     * can only be built AFTER the graph — `tr::net::fwd_router_t`, whose constructor takes
+     * the graph and installs its three transport-plane seams (`remote_delivery`,
+     * `wire_target`, `stats_sampler`) by reading @ref hooks, filling its slots and handing
+     * the whole struct back, so the application's two stay as they were.
      *
-     * @p table is a @ref borrowed_fields_t, which converts implicitly from the array
-     * spellings a static table takes and NOT from a `std::vector` — so the erratum-1
-     * lifetime tightening lands on a stale caller as a compile error rather than silently
-     * (ADR-0058 erratum 2). A runtime-sized table opts out via `borrowed_fields_t::unchecked`.
+     * CONFIGURATION, not a runtime knob (#1049): from one thread, before frames flow. Each
+     * slot is published through its own `tr::sink_slot_t`, so a dispatch racing the install
+     * sees a whole new pair, a whole old one, or none — never a new `fn` beside a stale
+     * `ctx`; what it does NOT do is stop a dispatch already in flight, so every `ctx` must
+     * outlive every dispatch that can still reach its seam.
      */
-    void set_app_fields_static(vertex_handle_t v, borrowed_fields_t table);
+    void set_hooks(const graph_hooks_t& hooks) noexcept;
 
-    /**
-     * @brief Install the sink the producer fan-out hands each REMOTE subscriber's delivery
-     *        to (#136, RFC-0004 §D/§E.1).
-     *
-     * CONFIGURATION, not a runtime knob (#1049): install it at wiring time, from ONE thread,
-     * before frames flow. The verb is named `configure_` to say so in the API rather than in
-     * a comment asking callers to be careful — `tr::net::fwd_router_t`'s constructor installs
-     * it, and a router constructed against a graph that is already serving frames is
-     * UNSUPPORTED. The sink then fires on whatever thread calls @ref write (outside the
-     * vertex lock), and on @ref subscribe for a transient-local latch. L4 keeps it as an
-     * opaque function pointer, so the graph never depends on a transport. A null @p fn (the
-     * default) ⇒ remote slots are stored but never deliver. The value reaches the sink as a
-     * rope (ADR-0053 §6): a single-link value materializes zero-copy, a multi-link value is
-     * handed over as the rope it is.
-     *
-     * The pair is published through a @ref tr::sink_slot_t, so violating the contract is
-     * DEFINED rather than undefined: a fan-out racing an install either sees the whole new
-     * pair, the whole old one, or no sink for that one edge — never a new `fn` beside a
-     * stale `ctx`, and never the freed capture state the `std::function` predecessor could
-     * hand it. What the slot does NOT do is stop a dispatch already in flight, so @p ctx
-     * must outlive every write that can still reach the fan-out.
-     *
-     * @param fn  The sink; @p ctx is handed back as its first argument. Null clears.
-     * @param ctx Caller-owned context; must outlive every possible dispatch.
-     */
-    void configure_remote_delivery_sink(remote_delivery_fn_t fn, void* ctx) noexcept;
-
-    /**
-     * @brief Install the pluggable subject resolver (ADR-0018) — the ACL enforcement switch.
-     *
-     * No resolver (the default) ⇒ enforcement is DISABLED: every operation is allowed,
-     * exactly today's behavior, and the hot path pays one null check. With a resolver
-     * installed, each gated operation with a NON-EMPTY caller context maps it through the
-     * resolver and — when a subject token comes back — evaluates the target vertex's
-     * *effective* ACL (own ACEs + ancestor ACEs carrying INHERIT, ADR-0020): allowed iff
-     * some non-expired ACE with a matching subject (or `"EVERYONE@"`) grants the
-     * operation's right bit; a vertex whose effective ACL is empty stays open (enforcement
-     * is opt-in per vertex via ACL presence). Denial returns status_t::PERMISSION_DENIED
-     * (`tr::access::denied` on the wire, RFC-0002).
-     *
-     * The EMPTY caller context is the local-API convention and is trusted WITHOUT consulting
-     * the resolver (#905) — a remote op always carries its inbound link NAME, so it cannot
-     * spell the trusted context. The resolver's own error arm is therefore free to mean
-     * DENY: an unresolvable caller is refused, not waved through.
-     *
-     * The wildcard spelling is RESERVED against the resolver's OUTPUT (#908): a token equal to
-     * `tr::graph::kEveryoneSubject` is not a principal — that caller is refused at every gate,
-     * guarded vertex or not — because the wire has one spelling for a subject token, so a
-     * resolver that passes a caller-supplied identity through could otherwise mint a principal
-     * indistinguishable from the wildcard ACE.
-     *
-     * CONFIGURATION, not a runtime knob (#1049): install it at wiring time, from ONE thread,
-     * before frames flow — which the verb's name now says, and the `{fn, ctx}` shape makes
-     * safe to get wrong. The gate reads the pair through a `tr::sink_slot_t`: with no
-     * resolver that is ONE relaxed load, exactly what the null check cost, and with one
-     * installed the gate dispatches from a coherent snapshot, so a concurrent
-     * install/replace can neither pair a new `fn` with a stale `ctx` nor free the state a
-     * running resolver is standing on. @p ctx must outlive every gated operation.
-     *
-     * @param fn  The resolver; @p ctx is handed back as its first argument. Null (the
-     *            default) DISABLES enforcement.
-     * @param ctx Caller-owned context; must outlive every gated operation.
-     */
-    void configure_subject_resolver(subject_resolver_fn_t fn, void* ctx) noexcept;
-
-    /**
-     * @brief Install the EXTERNAL subscription observer — a callback fired on every
-     *        `:subscribers[]` mutation that arrived over a transport.
-     *
-     * The app-side answer to "who is watching what, right now": a producer that wants to
-     * spin up a source only while a peer is subscribed, an inventory of live remote
-     * subscriptions, a projection of the fan-out graph. Today that is discoverable only by
-     * polling `read_subscribers` over every vertex; this is the edge-triggered form.
-     *
-     * Fires from the ONE admission door every subscribe lands in (ADR-0049
-     * `admit_subscriber`) and from the `:subscribers[N]` clear, so an append, a `[N]`
-     * replace (a `REMOVED` for the displaced edge then an `ADDED`) and a clear are all
-     * reported, whichever wire shape carried them — the wire `:subscribers[]` APPEND that
-     * binds a REMOTE subscriber (`subscribe_wire`, target empty) and the one that names a
-     * LOCAL target alike.
-     *
-     * **Only EXTERNAL mutations fire it** — see @ref sub_event_t for what that means and
-     * why. Two further silences are by design, not oversight:
-     * - `evict_link_edges` — the transport-plane hook that drops a departed link's edges
-     *   wholesale (RFC-0009 §D) — emits NOTHING. It is a local host API, not an op, and it
-     *   clears k edges of one link in a batch. An app tracking live subscriptions must
-     *   therefore treat its own link-down signal as the removal for every edge of that link.
-     * - `unsubscribe(subscription_t)` is a local door and stays silent like the rest.
-     *
-     * CONFIGURATION, not a runtime knob (#1049): install it at wiring time, from ONE thread,
-     * before frames flow — the `configure_remote_delivery_sink` /
-     * `configure_subject_resolver` contract, now stated by the verb and enforced by the
-     * `{fn, ctx}` shape rather than requested in a comment. A null @p fn (the default) costs
-     * one relaxed load on the subscribe path and nothing anywhere else. @p ctx must outlive
-     * every subscription mutation the graph can still report.
-     *
-     * @param fn  The observer; @p ctx is handed back as its first argument. Null clears.
-     * @param ctx Caller-owned context; must outlive every reportable mutation.
-     */
-    void configure_subscription_observer(sub_observer_fn_t fn, void* ctx) noexcept;
-
-    /**
-     * @brief Install the wire SUBSCRIBER target resolver (RFC-0021) — the transport plane's
-     *        mount descent, borrowed by the `:subscribers[]` wire door.
-     *
-     * With no resolver (the default) a wire `SUBSCRIBER`'s `PATH` child is inert, which is
-     * every pre-RFC-0021 embedder's behaviour, unchanged. With one installed,
-     * @ref subscribe_wire asks it whether the target routes through a mount and, when it
-     * does, binds the edge to `(that mount, the residual below it)` instead of to the
-     * session the subscribe-write arrived on — which is what lets a third party wire a flow
-     * between two OTHER nodes and then depart (#491).
-     *
-     * CONFIGURATION, not a runtime knob (#1049): `fwd_router_t` installs it in its
-     * constructor, so a node with a transport plane has it and one without cannot.
-     *
-     * @param fn  The resolver; @p ctx is handed back as its first argument. Null clears.
-     * @param ctx Caller-owned context; must outlive every wire subscribe.
-     */
-    void configure_wire_target_resolver(wire_target_fn_t fn, void* ctx) noexcept;
-
-    /**
-     * @brief Install the NET-PLANE `:stats` seam sampler (RFC-0010 Amendment 2, #1503).
-     *
-     * With no sampler (the default) the census answers for the GRAPH alone — the three
-     * Amendment 1 §D.4 seams — and every `router` / `labels` / `link` spelling answers
-     * `SCHEMA_NOT_FOUND`, which Amendment 1 §Compatibility already spells as "this node does
-     * not publish that seam". With one installed those classes answer too, sampled at the
-     * entities that own the counters.
-     *
-     * CONFIGURATION, not a runtime knob (#1049), and the SIXTH `{fn, ctx}` seam
-     * `fwd_router_t`'s constructor installs — so a node with a transport plane publishes the
-     * net-plane census and one without cannot. Re-binding a graph to a second router is
-     * UNSUPPORTED, exactly as the other five seams document.
-     *
-     * @param fn  The sampler; @p ctx is handed back as its first argument. Null clears.
-     * @param ctx Caller-owned context; must outlive every read the graph can still serve.
-     */
-    void configure_stats_sampler(stats_sampler_fn_t fn, void* ctx) noexcept;
+    /** @brief The five wiring seams as currently installed — the read half of
+     *         @ref set_hooks (one coherent snapshot per slot). */
+    [[nodiscard]] graph_hooks_t hooks() const noexcept;
 
     /**
      * @brief Ask the installed sampler for one net-plane seam — the read side of
-     *        @ref configure_stats_sampler.
+     *        @ref graph_hooks_t::stats_sampler.
      *
      * Public because the census encoder is a free function over `graph_t`'s public accessors
      * (it needs no friendship and mints no other symbol), and useful on its own to an
@@ -2326,7 +2264,8 @@ class graph_t {
 
     /**
      * @brief @p v's copy-or-share threshold in bytes (RFC-0028 §5.3): what it declared with
-     *        @ref set_share_threshold_bytes, else @ref tr::graph::config_t::kShareThresholdBytes.
+     *        @ref vertex_policy_t::share_threshold_bytes, else @ref
+     * tr::graph::config_t::kShareThresholdBytes.
      *
      * The read accessor the opaque handle does not expose directly: the WRITE resolver
      * (`%op_resolve_walk.hpp`) queries it here instead of dereferencing the vertex. One
@@ -2507,6 +2446,22 @@ class graph_t {
     void count_external_drop(external_drop_t why, std::uint64_t n) noexcept;
 
    private:
+    /**
+     * @brief The one registration door that takes a policy: refuse an illegal one before the
+     *        descent, register, then apply it outside the map lock.
+     */
+    [[nodiscard]] result_t<vertex_handle_t> register_with_policy(
+        std::span<const std::byte> key, role_t role, const handlers_t& handlers,
+        vertex_policy_t&& policy, std::span<const payload_right_t> rights);
+
+    /** @brief Apply a legal @ref vertex_policy_t to @p vx, skipping every member that holds;
+     *         an owning field table is MOVED into the vertex, never copied. */
+    void apply_policy(vertex_t* vx, vertex_policy_t&& policy);
+
+    /** @brief Set @p v's propagation policy and maintain the sweep's UNCONDITIONAL membership
+     *         under the sweep lock (RFC-0008 §C) — the delivery-mode arm of `apply_policy`. */
+    void apply_delivery_mode(vertex_t* v, delivery_mode_t mode);
+
     // Internal (raw `vertex_t*`) forms of the public handle-returning resolvers: the graph's
     // own machinery threads raw pointers (ADR-0056 — internal methods keep `vertex_t*`), and
     // the public @ref find / @ref ensure_vertex wrap these once at the boundary.
@@ -2759,7 +2714,7 @@ class graph_t {
         vertex_t* v, subscriber_t s, std::string_view caller,
         std::optional<std::size_t> slot = std::nullopt, link_id_t link_token = {});
     // Fire the external-subscription observer for ONE slot mutation
-    // (configure_subscription_observer). Returns immediately when no observer is installed or
+    // (graph_hooks_t::subscription_observer). Returns immediately when no observer is installed or
     // `caller` is EMPTY — the latter is the whole external/local discrimination, in one place.
     // `sub_tlv` is the slot's stored SUBSCRIBER TLV (empty for a callback-only slot, which no
     // external door can create); the event's target key is decoded from its PATH child. Called with
@@ -3042,7 +2997,7 @@ class graph_t {
     // The five CONFIGURATION sinks (#1049). Each is the ADR-0047 {fn, ctx} pair published
     // through a sink_slot_t — the mechanism #914 established for fwd_router_t's five, hoisted
     // to the layer-neutral `tr` namespace so L4 can hold one without naming the net plane.
-    // The doctrine is setup-only and the verbs are named `configure_*` to say it; the slot is
+    // The doctrine is setup-only and `set_hooks` says so; the slot is
     // what makes a violation DEFINED (a skipped dispatch) rather than the use-after-free the
     // std::function predecessors had, since assigning a std::function destroys the old
     // target — freeing its captures while a reader is inside the call. An unset slot reads as
@@ -3134,7 +3089,7 @@ class graph_t {
 
     /** @brief The GRAPH-LEVEL DEFAULT receiver-ring source (RFC-0025 §4.6.1 clause 3): the seam
      *         a STREAM vertex charges its ring admissions against when it has declared none of
-     *         its own through @ref set_ring_source.
+     *         its own through @ref vertex_policy_t::ring_source.
      *
      *         A default, not a shared pool by stealth. ADR-0079's amendment measured a FOLDED
      *         source collapsing to 0.01x of its own single-thread rate at T=24, which is why

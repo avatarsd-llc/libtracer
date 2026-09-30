@@ -177,6 +177,74 @@
 namespace tr::net {
 
 /**
+ * @brief `httpd_ws_link_t`'s knobs as one aggregate (#1593, RFC-0028 §8.2), after the port
+ *        (or the adopted server and URI).
+ *
+ * Every member defaults to the historical default, so `httpd_ws_config_t{}` is the
+ * unconfigured link and a caller names only what it sets:
+ * `{.max_peers = 4, .tx_large = {.bytes = 4096, .slots = 1}}`.
+ */
+struct httpd_ws_config_t {
+    /**
+     * @brief The optional LARGE TX size class: `slots` pre-allocated buffers of `bytes` each,
+     *        for frames past the inline capacity. Both zero (the default) = the class does not
+     *        exist and the heap arm keeps every oversize frame. There is NO library default —
+     *        see `httpd_ws_link_t::tx_large_bytes`. Both must be non-zero and `bytes` must
+     *        exceed the effective inline capacity, or the declaration is inert and reported.
+     */
+    struct tx_large_class_t {
+        std::size_t bytes = 0; /**< @brief Payload capacity of one large buffer, bytes. */
+        std::size_t slots = 0; /**< @brief Large buffers to allocate. */
+    };
+
+    /**
+     * @brief Concurrent-peer admission cap; 0 = unbounded. Beyond it the peer is refused at
+     *        the edge that claims its slot — the HANDSHAKE for a session the three-valued
+     *        predicate answered `ADMIT_AUTHENTICATED` for, its FIRST frame for every other
+     *        (#1334). Clean either way, mirroring `transport_ws_server`. In adopted mode the
+     *        host's own socket policy still decides which peers are accepted at all.
+     */
+    std::size_t max_peers = 0;
+    /** @brief Expose the @ref bus_link_t facet: each inbound peer gets its own `<ip>:<port>`
+     *         return-route identity (the browser-tabs deployment). Off keeps point-to-point
+     *         hop naming. */
+    bool peer_named = false;
+    /** @brief Per-socket send bound for UPGRADED sockets, ms; 0 derives it (see
+     *         `httpd_ws_link_t::send_timeout_ms`). Clamped to the server's own
+     *         `send_wait_timeout`. */
+    std::uint32_t send_timeout_ms = 0;
+    /**
+     * @brief How long an admitted session may stay UNAUTHENTICATED before the link closes it,
+     *        ms; 0 = `httpd_ws_link_t::kDefaultAuthDeadlineMs`. Inert unless `set_auth_cb`
+     *        installed a hook, and inert for a session the admission predicate already
+     *        authenticated (#1334).
+     */
+    std::uint32_t auth_deadline_ms = 0;
+    /** @brief Reusable RX scratch capacity, bytes; 0 = `kDefaultRxScratchBytes`. A frame past
+     *         it still arrives, on a per-frame nothrow heap buffer. */
+    std::size_t rx_scratch_bytes = 0;
+    /** @brief TX work slots any sender may claim; 0 = `kDefaultTxPoolSlots`. The in-call
+     *         reserve (`tx_reply_reserve`) is allocated ON TOP of it. On an ADOPTED server
+     *         this is the knob worth revisiting: the shared task also serves the host's
+     *         routes. */
+    std::size_t tx_pool_slots = 0;
+    /** @brief Inline payload capacity of one TX slot, bytes; 0 = `kDefaultTxInlineBytes`. A
+     *         frame past it keeps its pooled shell and takes a nothrow heap payload — unless
+     *         @ref tx_large covers it. */
+    std::size_t tx_inline_bytes = 0;
+    /** @brief The optional large TX size class (see @ref tx_large_class_t). */
+    tx_large_class_t tx_large{};
+    /**
+     * @brief The link's memory (@ref link_memory_t). `rx` opts in to OWNING RX delivery by
+     *        naming a bounded, caller-owned byte source; `nullptr` (THIS kind's default) keeps
+     *        borrowed delivery and every property it has — see `httpd_ws_link_t::rx_backend`
+     *        for what it changes, what it costs, and the two lifetime rules on it. `io` is
+     *        unused by this kind (its TX buffers are the pre-allocated slot pool).
+     */
+    link_memory_t memory{.rx = nullptr};
+};
+
+/**
  * @brief A WebSocket (RFC 6455) server `transport_t` on `esp_http_server` — accepts
  *        many inbound peers and exposes them through the @ref bus_link_t facet.
  *
@@ -265,63 +333,10 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *        URI handler at "/"; confirm with @ref ok.
      *
      * @param bind_port  TCP port to serve the graph WS on (the node's WS port).
-     * @param max_peers  Concurrent-peer admission cap; 0 = unbounded. Beyond it the
-     *                   peer is refused at the edge that claims its slot — a clean refusal
-     *                   either way, mirroring transport_ws_server. WHICH edge depends on
-     *                   the admission verdict (#1334): a session the three-valued predicate
-     *                   answered @ref admission_verdict_t::ADMIT_AUTHENTICATED for is charged
-     *                   at the HANDSHAKE, where the upgrade is abandoned outright; every
-     *                   other session is charged on its FIRST frame (the handler fails,
-     *                   httpd closes the socket), one step later than the handshake because
-     *                   that is the first moment such a peer is known to this link at all.
-     * @param peer_named Expose the @ref bus_link_t facet: each inbound peer gets its
-     *                   own `<ip>:<port>` return-route identity (the browser-tabs
-     *                   deployment). Off keeps point-to-point hop naming (send()
-     *                   fans out; inbound arrives as the registered child NAME).
-     * @param send_timeout_ms Per-socket send bound for UPGRADED sockets, milliseconds;
-     *                   0 (the default) derives it — see @ref send_timeout_ms. Pass a
-     *                   value only on a host whose watchdog regime differs from the
-     *                   derivation's inputs; it is clamped to the server's own
-     *                   `send_wait_timeout`.
-     * @param auth_deadline_ms How long an admitted session may stay UNAUTHENTICATED before
-     *                   this link closes it, milliseconds; 0 (the default) uses
-     *                   @ref kDefaultAuthDeadlineMs. Inert unless @ref set_auth_cb installed
-     *                   a hook — with no hook every session is served immediately and there
-     *                   is no unauthenticated state to bound. Inert also for a session the
-     *                   admission predicate answered @ref
-     *                   admission_verdict_t::ADMIT_AUTHENTICATED for (#1334): no deadline is
-     *                   armed for it at all, because it has already answered the question the
-     *                   deadline exists to time out, and a native dialer entitled to stay
-     *                   silent has no way to answer it a second time in-band.
-     * @param rx_scratch_bytes Reusable RX scratch capacity, bytes; 0 (the default) uses
-     *                   @ref kDefaultRxScratchBytes. A frame past it still arrives — it
-     *                   takes a per-frame nothrow heap buffer instead of the scratch.
-     * @param tx_pool_slots TX work slots any sender may claim; 0 (the default) uses
-     *                   @ref kDefaultTxPoolSlots. The in-call reserve
-     *                   (@ref tx_reply_reserve) is allocated ON TOP of it.
-     * @param tx_inline_bytes Inline payload capacity of one TX slot, bytes; 0 (the
-     *                   default) uses @ref kDefaultTxInlineBytes. A frame past it keeps
-     *                   its pooled shell and takes a nothrow heap payload — unless the
-     *                   large size class below covers it.
-     * @param tx_large_bytes Payload capacity of one LARGE TX buffer, bytes; 0 (the
-     *                   default) means the class does not exist and the heap arm keeps
-     *                   every frame past @p tx_inline_bytes. There is NO library default:
-     *                   see @ref tx_large_bytes.
-     * @param tx_large_slots Large buffers to allocate; 0 (the default) means the class
-     *                   does not exist. Both this and @p tx_large_bytes must be non-zero,
-     *                   and @p tx_large_bytes must exceed the effective inline capacity,
-     *                   or the declaration is inert and reported as such.
-     * @param rx_backend Opt in to OWNING RX delivery by naming a bounded, caller-owned
-     *                   byte source; `nullptr` (the default) keeps borrowed delivery and
-     *                   every property it has. See @ref rx_backend for what it changes,
-     *                   what it costs, and the two lifetime rules on it.
+     * @param config     The link's knobs (@ref httpd_ws_config_t): peer cap, bus facet, send
+     *                   and auth bounds, RX scratch, TX pool shape, and the RX memory seam.
      */
-    explicit httpd_ws_link_t(std::uint16_t bind_port, std::size_t max_peers = 0,
-                             bool peer_named = false, std::uint32_t send_timeout_ms = 0,
-                             std::uint32_t auth_deadline_ms = 0, std::size_t rx_scratch_bytes = 0,
-                             std::size_t tx_pool_slots = 0, std::size_t tx_inline_bytes = 0,
-                             std::size_t tx_large_bytes = 0, std::size_t tx_large_slots = 0,
-                             mem::mem_backend_t* rx_backend = nullptr);
+    explicit httpd_ws_link_t(std::uint16_t bind_port, const httpd_ws_config_t& config = {});
 
     /**
      * @brief Adopt an already-running `esp_http_server` and register the WebSocket URI
@@ -355,10 +370,10 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *      successful send, so a peer it is actively pushing to is no longer preferentially
      *      chosen — but that is not immunity: at the host's socket ceiling SOME session is
      *      still evicted, and this link reports such an eviction as an ordinary departure.
-     *   3. A socket budget consistent with @p max_peers. The port-binding ctor sizes
+     *   3. A socket budget consistent with `config.max_peers`. The port-binding ctor sizes
      *      `max_open_sockets` to the cap plus slack; a shared server's budget is its
      *      owner's, spent on SPA assets and browser keep-alives too. This link's OWN cap
-     *      is still enforced in adopted mode (a peer past @p max_peers is refused at its
+     *      is still enforced in adopted mode (a peer past `config.max_peers` is refused at its
      *      claim, exactly as below), but which peers get accepted at all is the host's
      *      socket policy, decided before this handler runs.
      *
@@ -367,45 +382,9 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * @param uri        WS URI pattern to register the handler at (e.g. "/ws"). Register
      *                   it BEFORE any wildcard route so registration-order precedence
      *                   routes it to the WS handler; keep it an exact literal.
-     * @param max_peers  Concurrent-peer admission cap; 0 = unbounded. Beyond it the peer is
-     *                   refused at the edge that claims its slot — the HANDSHAKE for a
-     *                   session the three-valued predicate answered @ref
-     *                   admission_verdict_t::ADMIT_AUTHENTICATED for, its FIRST frame for
-     *                   every other (#1334). Clean either way, mirroring transport_ws_server.
-     * @param peer_named Expose the @ref bus_link_t facet: each inbound peer gets its
-     *                   own `<ip>:<port>` return-route identity (the browser-tabs
-     *                   deployment). Off keeps point-to-point hop naming (send()
-     *                   fans out; inbound arrives as the registered child NAME).
-     * @param send_timeout_ms Per-socket send bound for UPGRADED sockets, milliseconds;
-     *                   0 (the default) derives it — see @ref send_timeout_ms.
-     * @param auth_deadline_ms How long an admitted session may stay UNAUTHENTICATED before
-     *                   this link closes it, milliseconds; 0 (the default) uses
-     *                   @ref kDefaultAuthDeadlineMs. Inert unless @ref set_auth_cb installed
-     *                   a hook, and inert for a session the admission predicate already
-     *                   authenticated (#1334) — no deadline is armed for such a session.
-     * @param rx_scratch_bytes Reusable RX scratch capacity, bytes; 0 (the default) uses
-     *                   @ref kDefaultRxScratchBytes.
-     * @param tx_pool_slots TX work slots any sender may claim; 0 (the default) uses
-     *                   @ref kDefaultTxPoolSlots. On an ADOPTED server this is the knob
-     *                   worth revisiting: the in-flight depth that fits depends on how
-     *                   promptly the shared task drains, and that task is also serving
-     *                   the host's own routes.
-     * @param tx_inline_bytes Inline payload capacity of one TX slot, bytes; 0 (the
-     *                   default) uses @ref kDefaultTxInlineBytes.
-     * @param tx_large_bytes Payload capacity of one LARGE TX buffer, bytes; 0 (the
-     *                   default) means the class does not exist — see @ref tx_large_bytes.
-     * @param tx_large_slots Large buffers to allocate; 0 (the default) means the class
-     *                   does not exist.
-     * @param rx_backend Opt in to OWNING RX delivery by naming a bounded, caller-owned
-     *                   byte source; `nullptr` (the default) keeps borrowed delivery —
-     *                   see @ref rx_backend.
+     * @param config     The link's knobs (@ref httpd_ws_config_t) — as the port-binding ctor.
      */
-    httpd_ws_link_t(httpd_handle_t external, const char* uri, std::size_t max_peers = 0,
-                    bool peer_named = false, std::uint32_t send_timeout_ms = 0,
-                    std::uint32_t auth_deadline_ms = 0, std::size_t rx_scratch_bytes = 0,
-                    std::size_t tx_pool_slots = 0, std::size_t tx_inline_bytes = 0,
-                    std::size_t tx_large_bytes = 0, std::size_t tx_large_slots = 0,
-                    mem::mem_backend_t* rx_backend = nullptr);
+    httpd_ws_link_t(httpd_handle_t external, const char* uri, const httpd_ws_config_t& config = {});
 
     /**
      * @brief Stop the owned httpd instance (or unregister the adopted WS URI) and release

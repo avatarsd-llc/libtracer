@@ -197,7 +197,7 @@ constexpr std::size_t kIovAlign = alignof(std::span<const std::byte>);
 void test_collect_stack_on_the_seam() {
     std::printf("read_subtree_folded's collect stack (block_array_t over the injected ctl):\n");
     gated_source_t src;
-    graph_t g(&src);
+    graph_t g(src);
 
     const auto root_path = path_t::parse("/plant");
     auto root = g.register_vertex(*root_path, role_t::STORED_VALUE);
@@ -301,7 +301,7 @@ class counting_link_t final : public transport_t {
 void test_delivery_iov_on_the_seam() {
     std::printf("deliver_remote draws no egress iov table (retained send, RFC-0028 §6.9):\n");
     gated_source_t src;
-    graph_t g(&src);
+    graph_t g(src);
     fwd_router_t router(g);
     counting_link_t link;
     (void)router.add_child("client", link);
@@ -373,7 +373,7 @@ void test_reply_iov_on_the_seam() {
     graph_t g;
     // The router's THIRD ctor parameter is the receive source; the label source stays the
     // default heap so a label allocation cannot be mistaken for this table's.
-    fwd_router_t router(g, &tr::mem::heap_source(), &rx);
+    fwd_router_t router(g, {.rx = &rx});
     counting_link_t link;
     (void)router.add_child("client", link);
 
@@ -493,7 +493,7 @@ void test_reply_iov_on_the_seam() {
 void test_node_table_on_the_seam() {
     std::printf("read_subtree_folded's node table (std::vector over a source allocator):\n");
     gated_source_t src;
-    graph_t g(&src);
+    graph_t g(src);
 
     const auto root_path = path_t::parse("/plant");
     auto root = g.register_vertex(*root_path, role_t::STORED_VALUE);

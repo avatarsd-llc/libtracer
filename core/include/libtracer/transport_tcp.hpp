@@ -83,6 +83,83 @@ inline constexpr std::string_view kTcpClientSuggestedModule = "tcp-client";
 inline constexpr std::string_view kTcpServerSuggestedModule = "tcp-server";
 
 /**
+ * @brief `tcp_transport_t`'s knobs as one aggregate (#1593): what both its constructors take
+ *        after the peer address, in place of positional, defaulted parameters.
+ *
+ * Every member defaults to the historical default, so `tcp_config_t{}` is the unconfigured
+ * link and a caller names only what it sets: `{.memory = {.rx = &pool}, .defer_recv = true}`.
+ */
+struct tcp_config_t {
+    /**
+     * @brief The link's memory (@ref link_memory_t). `rx`: each inbound frame is read into a
+     *        fresh exactly-`len`-byte segment from it (ADR-0042 §2); exhaustion is
+     *        backpressure — the frame is drained off the stream, dropped, and `dropped_rx()`
+     *        ticks; never an OOM.
+     */
+    link_memory_t memory{};
+    /**
+     * @brief Receive cap, bytes (0 → @ref tcp_transport_t::kMaxFrame). TIGHTEN-ONLY: a value
+     *        above `kMaxFrame` is clamped to it (`length_prefix_framer::configured_cap`,
+     *        #1035); a frame inside the cap the backend cannot hold is shed as backpressure,
+     *        not treated as malformed (#932).
+     */
+    std::size_t max_frame = 0;
+    /** @brief Recv-thread stack size in bytes, 0 = platform default
+     *         (`posix_endpoint_t::start`). Non-zero right-sizes the recv thread on an MCU. */
+    std::size_t recv_stack = 0;
+    /**
+     * @brief DIAL only — two-phase bring-up (#1045): the connect still runs in the
+     *        constructor (so `ok()` answers for it on return) but the recv thread is NOT
+     *        spawned until @ref tcp_transport_t::start_receiving, so a peer that pushes the
+     *        instant the connect completes cannot land a frame before the receiver is
+     *        installed. The LISTEN constructor ignores it.
+     */
+    bool defer_recv = false;
+    /**
+     * @brief The app-provided PEER LIVENESS WINDOW in ms, `0` = `kDefaultLivenessWindowMs`
+     *        (#838): how long the peer may fail to take bytes before it is treated as broken.
+     *        It bounds every `send` (and the write-mutex hold it takes); `kMaxConsecutiveStalls`
+     *        records in a row that hit it — or one that half-reached the wire — close the
+     *        connection.
+     */
+    std::uint32_t liveness_window_ms = 0;
+};
+
+/**
+ * @brief `transport_tcp_server`'s knobs as one aggregate (#1593), after the bind port.
+ */
+struct tcp_server_config_t {
+    /** @brief The link's memory (@ref link_memory_t); `rx` is the per-connection receive
+     *         seam — see @ref tcp_config_t::memory. */
+    link_memory_t memory{};
+    /** @brief Per-connection receive cap (0 → @ref tcp_transport_t::kMaxFrame);
+     *         tighten-only — see @ref tcp_config_t::max_frame. */
+    std::size_t max_frame = 0;
+    /**
+     * @brief Concurrent-peer admission cap (RFC-0006) — a connection beyond it is accepted
+     *        and immediately closed. `0` takes the liveness window's own ceiling
+     *        (`window / kBoundedWaitMs`, #1295), and a larger request is clamped to it,
+     *        because the cap is the denominator every send bound divides by. Read the
+     *        enforced value back from `slot_server_t::max_peers`.
+     */
+    std::size_t max_peers = 0;
+    /** @brief Expose the @ref bus_link_t facet (see @ref transport_t::bus) — the board↔board
+     *         wiring choice, same contract as `transport_ws_server`'s. */
+    bool peer_named = false;
+    /** @brief Poll-thread stack size in bytes, 0 = platform default. One thread serves every
+     *         peer, so this is the whole server's recv-stack knob. */
+    std::size_t recv_stack = 0;
+    /**
+     * @brief The PEER LIVENESS WINDOW in ms, `0` = `kDefaultLivenessWindowMs` (#838). One
+     *        fan-out round is bounded by it (each peer gets window ÷ peers-in-the-round) and a
+     *        DIRECTED send by window ÷ @ref max_peers (#1295); a session that stalls
+     *        `kMaxConsecutiveStalls` records in a row, or once mid-record, is closed. It also
+     *        SIZES the peer cap.
+     */
+    std::uint32_t liveness_window_ms = 0;
+};
+
+/**
  * @brief A TCP stream transport_t (M6) — length-prefix framing over one peer.
  *
  * Every frame is sent as `u32-LE length ++ frame bytes`; the receive thread
@@ -112,41 +189,11 @@ class tcp_transport_t : public transport_t, private stream_endpoint_t {
      *
      * @param peer_host Dotted-quad IPv4 address of the peer (e.g. "127.0.0.1").
      * @param peer_port TCP port of the peer (host byte order).
-     * @param backend   The host-injected RX memory seam (ADR-0042 §2): each
-     *                  inbound frame is read into a fresh exactly-`len`-byte
-     *                  segment from it (default: the process heap; a bounded
-     *                  host passes its pool). Exhaustion is backpressure — the
-     *                  frame is drained off the stream, dropped, and
-     *                  dropped_rx() ticks; never an OOM. Must outlive the
-     *                  transport.
-     * @param recv_stack Recv-thread stack size in bytes, 0 = platform default
-     *                  (`posix_endpoint_t::start`). Non-zero right-sizes this
-     *                  transport's recv thread on an MCU.
-     * @param defer_recv Two-phase bring-up (#1045, the transport_ws_client
-     *                  contract verbatim): with `true` the connect still runs
-     *                  HERE (so ok() answers for it on return) but the recv
-     *                  thread is NOT spawned — not one byte is read off the
-     *                  socket until @ref start_receiving. That is the ordering in
-     *                  which the set_receiver contract above is satisfiable on a
-     *                  DIAL socket: a peer that pushes the instant our connect
-     *                  completes has its first frame in flight before this
-     *                  constructor returns, and the default (`false`, the
-     *                  historical shape) decodes it on the recv thread into
-     *                  whatever sink is installed by then — possibly none, in
-     *                  which case it is dropped with no counter moving.
-     * @param liveness_window_ms The app-provided PEER LIVENESS WINDOW in ms, `0` =
-     *                  `kDefaultLivenessWindowMs` (#838): how long this peer may fail to
-     *                  take bytes before it is treated as broken. It bounds every `send`
-     *                  (and the write-mutex hold it takes), so no peer can freeze the
-     *                  sending thread; `kMaxConsecutiveStalls` records in a row that hit
-     *                  it — or one that half-reached the wire — close the connection. The
-     *                  same contract CAN's `peer_ttl` (ADR-0044) states, and the number
-     *                  RFC-0014's §S5 liveness engine converges on.
+     * @param config    The link's knobs (@ref tcp_config_t): memory, receive cap, recv-thread
+     *                  stack, deferred receive, liveness window.
      */
     tcp_transport_t(const std::string& peer_host, std::uint16_t peer_port,
-                    mem::mem_backend_t* backend = &mem::heap_backend(), std::size_t max_frame = 0,
-                    std::size_t recv_stack = 0, bool defer_recv = false,
-                    std::uint32_t liveness_window_ms = 0);
+                    const tcp_config_t& config = {});
 
     /**
      * @brief LISTEN mode: bind+listen on @p bind_port, accept ONE inbound peer.
@@ -157,15 +204,10 @@ class tcp_transport_t : public transport_t, private stream_endpoint_t {
      * request resolved) is observable via local_port().
      *
      * @param bind_port TCP port to listen on (host byte order; 0 → ephemeral).
-     * @param backend   The RX memory seam — see the DIAL constructor.
-     * @param recv_stack Recv-thread stack size in bytes, 0 = platform default
-     *                  (`posix_endpoint_t::start`).
-     * @param liveness_window_ms The peer liveness window — see the DIAL constructor (#838).
+     * @param config    The link's knobs (@ref tcp_config_t); `defer_recv` is DIAL-only and
+     *                  ignored here.
      */
-    explicit tcp_transport_t(std::uint16_t bind_port,
-                             mem::mem_backend_t* backend = &mem::heap_backend(),
-                             std::size_t max_frame = 0, std::size_t recv_stack = 0,
-                             std::uint32_t liveness_window_ms = 0);
+    explicit tcp_transport_t(std::uint16_t bind_port, const tcp_config_t& config = {});
 
     /** @brief Stop the receive thread and close all sockets. */
     ~tcp_transport_t() override;
@@ -345,50 +387,10 @@ class transport_tcp_server : public stream_server_base_t {
      * listen socket bound; the bound port is observable via local_port().
      *
      * @param bind_port  TCP port to listen on (host byte order; 0 → ephemeral).
-     * @param backend    The host-injected RX memory seam (ADR-0042 §2): each
-     *                   inbound frame reassembles into a fresh exactly-len-byte
-     *                   segment from it.  Exhaustion is backpressure — the
-     *                   frame is drained in-framer, dropped, and dropped_rx()
-     *                   ticks; never an OOM.  Must outlive the transport.
-     * @param max_frame  Per-connection receive cap (0 → @ref
-     *                   tcp_transport_t::kMaxFrame). TIGHTEN-ONLY: a value
-     *                   above kMaxFrame is clamped to it
-     *                   (`length_prefix_framer::configured_cap`, #1035) — a
-     *                   config-writable key must not raise the ingress
-     *                   buffering bound. A frame inside this cap that the
-     *                   backend cannot hold (`length_prefix_framer::effective_cap`
-     *                   — the no-synthetic-limits doctrine) is shed as
-     *                   backpressure, NOT treated as malformed (#932); only a
-     *                   length above this cap closes the connection.
-     * @param max_peers  Concurrent-peer admission cap. A deployment-injected
-     *                   bound (RFC-0006) — a connection beyond it is accepted
-     *                   and immediately closed (a clean refusal, not a hung
-     *                   SYN). `0` no longer means UNBOUNDED (#1295): it takes
-     *                   the liveness window's own ceiling
-     *                   (`window / kBoundedWaitMs`), and a larger request is
-     *                   clamped to that ceiling, because the cap is the
-     *                   denominator every send bound divides by. Read the
-     *                   enforced value back from `slot_server_t::max_peers`.
-     * @param peer_named Expose the @ref bus_link_t facet (see @ref transport_t::bus) — the
-     *                   board↔board wiring choice, same contract as
-     *                   transport_ws_server's.
-     * @param recv_stack Poll-thread stack size in bytes, 0 = platform default
-     *                   (`posix_endpoint_t::start`). One thread serves every
-     *                   peer, so this is the whole server's recv-stack knob.
-     * @param liveness_window_ms The app-provided PEER LIVENESS WINDOW in ms, `0` =
-     *                   `kDefaultLivenessWindowMs` (#838). One fan-out round is bounded
-     *                   by it (each peer gets window ÷ peers-in-the-round) and a DIRECTED
-     *                   send by window ÷ @p max_peers (#1295), so a peer that stops
-     *                   reading can no longer freeze the sending thread — or the other
-     *                   peers' frames — behind it, on either path; a session that stalls
-     *                   `kMaxConsecutiveStalls` records in a row, or once mid-record, is
-     *                   closed. It also SIZES the peer cap: see @p max_peers.
+     * @param config     The server's knobs (@ref tcp_server_config_t): memory, receive cap,
+     *                   peer cap, bus facet, poll-thread stack, liveness window.
      */
-    explicit transport_tcp_server(std::uint16_t bind_port,
-                                  mem::mem_backend_t* backend = &mem::heap_backend(),
-                                  std::size_t max_frame = 0, std::size_t max_peers = 0,
-                                  bool peer_named = false, std::size_t recv_stack = 0,
-                                  std::uint32_t liveness_window_ms = 0);
+    explicit transport_tcp_server(std::uint16_t bind_port, const tcp_server_config_t& config = {});
 
     /** @brief Stop the poll thread and close all sockets. */
     ~transport_tcp_server() override;

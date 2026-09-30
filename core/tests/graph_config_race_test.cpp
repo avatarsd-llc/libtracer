@@ -362,12 +362,25 @@ void remote_sink_flip_race() {
         }
         // Arm with A installed, so the storm never runs against an empty slot for a reason
         // that has nothing to do with the seam under test.
-        g.configure_remote_delivery_sink(&sink_a, &a);
+        {
+            auto hooks = g.hooks();
+            hooks.remote_delivery = {&sink_a, &a};
+            g.set_hooks(hooks);
+        }
         armed.store(true, std::memory_order_release);
         while (!stop.load(std::memory_order_relaxed)) {
-            if (!burst_then_settle([&] { g.configure_remote_delivery_sink(&sink_a, &a); },
-                                   [&] { g.configure_remote_delivery_sink(&sink_b, &b); }, cycles,
-                                   publishes, stop))
+            if (!burst_then_settle(
+                    [&] {
+                        auto h = g.hooks();
+                        h.remote_delivery = {&sink_a, &a};
+                        g.set_hooks(h);
+                    },
+                    [&] {
+                        auto h = g.hooks();
+                        h.remote_delivery = {&sink_b, &b};
+                        g.set_hooks(h);
+                    },
+                    cycles, publishes, stop))
                 break;
         }
     });
@@ -395,7 +408,11 @@ void remote_sink_flip_race() {
     check(hits > 0, "the sink was reachable DURING the storm (the torn check is not vacuous)");
     check(g_torn.load() == torn_before, "no sink was handed the other sink's context");
     // Settled positive control: no flipper, so EVERY write must reach the sink, exactly.
-    g.configure_remote_delivery_sink(&sink_a, &a);
+    {
+        auto hooks = g.hooks();
+        hooks.remote_delivery = {&sink_a, &a};
+        g.set_hooks(hooks);
+    }
     const long before = a.hits.load();
     for (int i = 0; i < kSettled; ++i) (void)g.write(v, make_value({0x41}));
     check(a.hits.load() - before == kSettled, "settled: every write reaches the sink, exactly");
@@ -423,12 +440,25 @@ void subject_resolver_flip_race() {
     std::thread flipper([&] {
         while (!go.load(std::memory_order_acquire)) {
         }
-        g.configure_subject_resolver(&resolver_a, &a);
+        {
+            auto hooks = g.hooks();
+            hooks.subject_resolver = {&resolver_a, &a};
+            g.set_hooks(hooks);
+        }
         armed.store(true, std::memory_order_release);
         while (!stop.load(std::memory_order_relaxed)) {
-            if (!burst_then_settle([&] { g.configure_subject_resolver(&resolver_a, &a); },
-                                   [&] { g.configure_subject_resolver(&resolver_b, &b); }, cycles,
-                                   publishes, stop))
+            if (!burst_then_settle(
+                    [&] {
+                        auto h = g.hooks();
+                        h.subject_resolver = {&resolver_a, &a};
+                        g.set_hooks(h);
+                    },
+                    [&] {
+                        auto h = g.hooks();
+                        h.subject_resolver = {&resolver_b, &b};
+                        g.set_hooks(h);
+                    },
+                    cycles, publishes, stop))
                 break;
         }
     });
@@ -462,7 +492,11 @@ void subject_resolver_flip_race() {
     check(hits > 0, "the resolver was reachable DURING the storm (the torn check is not vacuous)");
     check(g_torn.load() == torn_before, "no resolver was handed the other resolver's context");
     // Settled positive control — no flipper, so every gated read must consult the resolver.
-    g.configure_subject_resolver(&resolver_a, &a);
+    {
+        auto hooks = g.hooks();
+        hooks.subject_resolver = {&resolver_a, &a};
+        g.set_hooks(hooks);
+    }
     const long before = a.hits.load();
     for (int i = 0; i < kSettled; ++i) (void)g.read(v, "peer-a");
     check(a.hits.load() - before == kSettled, "settled: every gated read consults the resolver");
@@ -512,12 +546,25 @@ void subscription_observer_flip_race() {
     std::thread flipper([&] {
         while (!go.load(std::memory_order_acquire)) {
         }
-        g.configure_subscription_observer(&observer_a, &a);
+        {
+            auto hooks = g.hooks();
+            hooks.subscription_observer = {&observer_a, &a};
+            g.set_hooks(hooks);
+        }
         armed.store(true, std::memory_order_release);
         while (!stop.load(std::memory_order_relaxed)) {
-            if (!burst_then_settle([&] { g.configure_subscription_observer(&observer_a, &a); },
-                                   [&] { g.configure_subscription_observer(&observer_b, &b); },
-                                   cycles, publishes, stop))
+            if (!burst_then_settle(
+                    [&] {
+                        auto h = g.hooks();
+                        h.subscription_observer = {&observer_a, &a};
+                        g.set_hooks(h);
+                    },
+                    [&] {
+                        auto h = g.hooks();
+                        h.subscription_observer = {&observer_b, &b};
+                        g.set_hooks(h);
+                    },
+                    cycles, publishes, stop))
                 break;
         }
     });
@@ -548,7 +595,11 @@ void subscription_observer_flip_race() {
     check(hits > 0, "the observer was reachable DURING the storm (the torn check is not vacuous)");
     check(g_torn.load() == torn_before, "no observer was handed the other observer's context");
     // Settled positive control — no flipper, so every subscribe must reach the observer.
-    g.configure_subscription_observer(&observer_a, &a);
+    {
+        auto hooks = g.hooks();
+        hooks.subscription_observer = {&observer_a, &a};
+        g.set_hooks(hooks);
+    }
     const long before = a.hits.load();
     for (int i = 0; i < kSettled; ++i)
         (void)wire_sub(g, vs[static_cast<std::size_t>(i) % vs.size()], "cli", "c");

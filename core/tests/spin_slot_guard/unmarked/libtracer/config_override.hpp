@@ -29,15 +29,15 @@ class probe_slot_t {
     ~probe_slot_t() { clear(); }
 
     /** @brief Publish: the slot adopts @p v's reference and drops the one it held. */
-    [[nodiscard]] bool store(value_t* v, std::memory_order = std::memory_order_seq_cst) {
+    [[nodiscard]] bool store(value_t* v, std::memory_order = std::memory_order_seq_cst) noexcept {
         value_t* const old = std::exchange(v_, v);
         if (old != nullptr) value_t::release(old);
         return true;
     }
     /** @brief Drop the published value. */
-    void clear(std::memory_order = std::memory_order_seq_cst) { (void)store(nullptr); }
+    void clear(std::memory_order = std::memory_order_seq_cst) noexcept { (void)store(nullptr); }
     /** @brief Read the published value: one more reference to it. */
-    [[nodiscard]] value_ref_t load() const { return value_ref_t::share(v_); }
+    [[nodiscard]] value_ref_t load() const noexcept { return value_ref_t::share(v_); }
 
    private:
     value_t* v_ = nullptr; /**< @brief The one published value, or null. */

@@ -621,14 +621,14 @@ void test_share_threshold_store() {
                .has_value(),
           "the removed `:settings.store_ref_min_bytes` write surface refuses");
     // One byte over the TLV's size: still a copy — the boundary is AT OR ABOVE.
-    g.set_share_threshold_bytes(v, big_tlv.size() + 1);
+    (void)g.set_policy(v, {.share_threshold_bytes = big_tlv.size() + 1});
     {
         const auto arena = tr::wire::decode_into(frame.bytes(), tr::mem::heap_source());
         check(resolver.resolve(*arena, {}, &frame).has_value(), "WRITE under threshold replied");
         const auto rd = g.read(v);
         check(rd.has_value() && (*rd)->is_inline(), "threshold = size + 1 => copied inline");
     }
-    g.set_share_threshold_bytes(v, big_tlv.size());
+    (void)g.set_policy(v, {.share_threshold_bytes = big_tlv.size()});
     check(g.share_threshold_bytes(v) == big_tlv.size(),
           "the owner-side declaration takes the threshold (36)");
 
@@ -691,7 +691,7 @@ void test_share_threshold_store() {
     }
 
     // The two ends: SIZE_MAX copies always, 0 shares whatever can be shared.
-    g.set_share_threshold_bytes(v, SIZE_MAX);
+    (void)g.set_policy(v, {.share_threshold_bytes = SIZE_MAX});
     check(g.share_threshold_bytes(v) == SIZE_MAX, "SIZE_MAX reads back as SIZE_MAX");
     {
         tr::view::view_t f = make_value(fwd_big);
@@ -700,7 +700,7 @@ void test_share_threshold_store() {
         const auto rd = g.read(v);
         check(rd.has_value() && (*rd)->is_inline(), "SIZE_MAX => copied");
     }
-    g.set_share_threshold_bytes(v, 0);
+    (void)g.set_policy(v, {.share_threshold_bytes = 0});
     {
         const auto fwd_small = b_fwd(fwd_op_t::WRITE, b_path({"sensor", "blob"}),
                                      b_path({"reply-ep"}), {}, b_value({0x2A}));
@@ -730,7 +730,7 @@ void test_store_ref_concurrent() {
     op_resolver_t resolver(g);
     const auto path = path_t::parse("/sensor/blob");
     tr::graph::vertex_handle_t v = g.register_vertex(*path, role_t::STORED_VALUE);
-    g.set_share_threshold_bytes(v, 32);
+    (void)g.set_policy(v, {.share_threshold_bytes = 32});
 
     std::vector<std::byte> big(64);
     for (std::size_t i = 0; i < big.size(); ++i) big[i] = static_cast<std::byte>(0xA0 + i);
@@ -998,7 +998,7 @@ void test_out_of_range_index_mode() {
 }
 
 // ---------------------------------------------------------------------------
-// The external subscription observer (graph_t::configure_subscription_observer).
+// The external subscription observer (graph_hooks_t::subscription_observer).
 // ---------------------------------------------------------------------------
 
 /** @brief `/a/b` spelled back from a canonical key, so an event is asserted on readable text. */

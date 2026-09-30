@@ -150,7 +150,8 @@ void test_departure_cost_is_bounded_by_the_departing_peer() {
     server_task_t task;
     graph_t g;
     fwd_router_t router(g);
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, /*peer_named=*/true);
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
+                                                  tr::net::httpd_ws_config_t{.peer_named = true});
     check(link->ok(), "the adopting link registered its URI");
     // add_child installs the bus peer-down notifier, so a session's departure reaches
     // fwd_router_t::link_down under the peer's ROUTABLE name (#994) — `p<slot>`.

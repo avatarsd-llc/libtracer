@@ -90,7 +90,9 @@ constexpr std::uint32_t kSendTimeoutMs = 100;
 
 /** @brief A link that adopts the fake server, with the bound above. */
 std::unique_ptr<httpd_ws_link_t> make_link() {
-    return std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true, kSendTimeoutMs);
+    return std::make_unique<httpd_ws_link_t>(
+        handle(), "/ws",
+        tr::net::httpd_ws_config_t{.peer_named = true, .send_timeout_ms = kSendTimeoutMs});
 }
 
 /** @brief Drain the control queue to quiescence, as the httpd task does. */

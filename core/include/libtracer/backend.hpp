@@ -17,6 +17,8 @@
 #include <cstdint>
 #include <span>
 
+#include "libtracer/mem_source.hpp"
+
 /**
  * @file
  * @brief L0 (`tr::mem`) memory-backend interface and its DMA/allocation enums.
@@ -93,24 +95,50 @@ enum class backend_tag : std::uint8_t {
 };
 
 /**
- * @brief A memory backend: the L0 seam libtracer binds any substrate behind.
+ * @brief A memory backend: a @ref block_source_t that also vends refcounted segments — the
+ *        L0 seam libtracer binds any substrate behind (RFC-0028 §4.9, D9).
  *
- * Subclass this to bind libtracer to any allocator — a heap, a fixed
- * caller-owned arena, live registers, lwIP pbufs, DMA descriptors. The
- * interface deliberately does not make allocation mandatory: many substrates
- * cannot allocate (MMIO, hardware FIFOs), so @ref alloc may return `nullptr`.
+ * A backend **is** a block source (RFC-0028 slice 10): the raw failable block
+ * (@ref block_source_t::try_alloc / @ref block_source_t::release) is the one allocation seam,
+ * and a backend is that seam plus a refcounted segment and the space / cache hooks device
+ * memory needs (ADR-0024). The default @ref alloc draws ONE block through @ref try_alloc and
+ * places the @ref view::segment_t header at its head, the payload after it; the default
+ * @ref destroy hands that one block back through a sized @ref release. So a backend that
+ * implements the two block virtuals gets segments for free, and a deployer that injects one
+ * slab has one slab — every injection point that takes a `block_source_t&` accepts a backend.
+ *
+ * Subclass this to bind libtracer to any allocator — a heap, a fixed caller-owned arena, live
+ * registers, lwIP pbufs, DMA descriptors. Allocation stays optional: many substrates cannot
+ * allocate (MMIO, hardware FIFOs), and the default @ref try_alloc refuses, so the default
+ * @ref alloc returns `nullptr` for them. A substrate whose segment does not live in one block
+ * (a borrowed span, device memory with a host-side header) overrides @ref alloc and
+ * @ref destroy directly.
  *
  * @note Each backend declares its own concurrency/ISR-safety contract; the
  *       protocol mandates none (docs/adr/0012).
  */
-class mem_backend_t {
+class mem_backend_t : public block_source_t {
    public:
     /** @brief Construct a backend with a stable, human-readable @p name (e.g. "mem_heap"). */
-    explicit mem_backend_t(const char* name) noexcept : name_(name) {}
-    virtual ~mem_backend_t() = default;
+    explicit mem_backend_t(const char* name) noexcept : block_source_t(name) {}
 
-    mem_backend_t(const mem_backend_t&) = delete;
-    mem_backend_t& operator=(const mem_backend_t&) = delete;
+    /**
+     * @brief Obtain one raw block — the @ref block_source_t half of a backend.
+     *
+     * The default refuses, which is right for an allocation-incapable substrate (a borrowed
+     * span, MMIO, a hardware FIFO): its @ref alloc then refuses too.
+     * @retval nullptr Exhaustion, or a substrate that cannot allocate.
+     */
+    [[nodiscard]] void* try_alloc(
+        [[maybe_unused]] std::size_t bytes,
+        [[maybe_unused]] std::size_t align = alignof(std::max_align_t)) noexcept override {
+        return nullptr;
+    }
+
+    /** @brief Return a block @ref try_alloc handed out. The default has nothing to return. */
+    void release([[maybe_unused]] void* p, [[maybe_unused]] std::size_t bytes,
+                 [[maybe_unused]] std::size_t align = alignof(std::max_align_t)) noexcept override {
+    }
 
     /**
      * @brief Allocate a fresh segment of at least @p size bytes (refcount = 1).
@@ -118,27 +146,28 @@ class mem_backend_t {
      * The returned segment is the caller's to adopt via
      * `tr::view::segment_ptr_t::adopt`. A **raw** `segment_t*` is returned, not
      * a `segment_ptr_t`, to keep L0 from naming L1's owning handle
-     * (docs/adr/0016 §2). Allocation-incapable substrates (MMIO, FIFOs) leave
-     * this default and return `nullptr`.
+     * (docs/adr/0016 §2).
+     *
+     * The default is ONE block: @ref try_alloc for the header padded to @ref alignment plus
+     * @p size, the header placed at the block's head (`%segment.hpp`). One allocation where
+     * the pre-slice-10 heap backend made two.
      *
      * @param hint     Backend-private allocation hint; `NONE` for "don't care".
      * @retval nullptr Backpressure (pool exhausted / OOM) or allocation unsupported.
      */
     [[nodiscard]] virtual view::segment_t* alloc(
-        [[maybe_unused]] std::size_t size,
-        [[maybe_unused]] alloc_hint_t hint = alloc_hint_t::NONE) {
-        return nullptr;
-    }
+        std::size_t size, [[maybe_unused]] alloc_hint_t hint = alloc_hint_t::NONE);
 
     /**
      * @brief Reclaim a segment whose refcount has reached zero (the only reclaim path).
      *
      * Frees whatever the backend owns (the bytes and/or the `segment_t` control
      * block) and nothing it does not — a borrowed backend never frees the
-     * user's bytes. Invoked by `segment_ptr_t` at zero, never by user code.
+     * user's bytes. Invoked by `segment_ptr_t` at zero, never by user code. The default is
+     * the mirror of the default `alloc()`: one sized @ref release of the whole block.
      * @warning Never called on a live segment.
      */
-    virtual void destroy(view::segment_t* seg) noexcept = 0;
+    virtual void destroy(view::segment_t* seg) noexcept;
 
     /**
      * @brief Cache prep *before* handing the segment to a DMA transfer.
@@ -183,11 +212,18 @@ class mem_backend_t {
      */
     [[nodiscard]] virtual backend_tag tag() const noexcept { return backend_tag::UNKNOWN; }
 
-    /** @brief The backend's stable identifier (e.g. for introspection / metrics). */
-    [[nodiscard]] const char* name() const noexcept { return name_; }
+   protected:
+    /**
+     * @brief The one-block segment layout: draw `header + size` bytes at @p align through
+     *        @ref try_alloc and place the header at the head. Defined in `%segment.hpp`.
+     *
+     * Non-virtual so a concrete backend's own @ref alloc can reuse the layout with a
+     * compile-time @p align and no virtual call on its hot path.
+     */
+    [[nodiscard]] view::segment_t* alloc_in_block(std::size_t size, std::size_t align) noexcept;
 
-   private:
-    const char* name_;
+    /** @brief The mirror of `alloc_in_block()`: one sized @ref release of the whole block. */
+    void destroy_in_block(view::segment_t* seg, std::size_t align) noexcept;
 };
 
 /**
@@ -287,3 +323,7 @@ void destroy_dispatch(view::segment_t* seg) noexcept;
 [[nodiscard]] bool transfer(view::segment_t* seg, std::span<std::byte> host, io_dir_t dir) noexcept;
 
 }  // namespace tr::mem
+
+// The segment type, and the inline bodies of the one-block defaults above, which need its
+// size. Included LAST so `%segment.hpp` (which includes this header first) sees the class.
+#include "libtracer/segment.hpp"

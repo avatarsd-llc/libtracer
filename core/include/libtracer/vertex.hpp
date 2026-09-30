@@ -108,19 +108,22 @@ static_assert(!std::is_same_v<reader_guard_t, mutex_guard_t> ||
               "reader_guard_t here (the ESP-IDF component's tr::esp::critical_guard_t)");
 
 /**
- * @brief An LKV slot policy declares whether it can spin-wait (#1618, RFC 0028 §5.6).
- *
- * The declaration is mandatory, so a new policy cannot slip past the assertion below by
- * forgetting it.
+ * @brief The bound slot models `lkv_slot` (RFC 0028 §5.6), whose `may_spin` declaration is
+ *        mandatory (#1618) — a new policy cannot slip past the assertion below by forgetting it.
  */
-template <typename slot_t>
-concept lkv_slot_policy = requires {
-    { slot_t::may_spin } -> std::convertible_to<bool>;
-};
+static_assert(lkv_slot<lkv_slot_t>,
+              "the bound lkv_slot_t does not model tr::graph::lkv_slot: either it does not "
+              "declare `static constexpr bool may_spin` (every slot policy must say whether it "
+              "can spin-wait), or its store(value_t*) / load() are not noexcept (see "
+              "lkv_slot.hpp)");
 
-static_assert(lkv_slot_policy<lkv_slot_t>,
-              "the bound lkv_slot_t does not declare `static constexpr bool may_spin` — every "
-              "slot policy must say whether it can spin-wait (see lkv_slot.hpp)");
+/**
+ * @brief The bound reader guard models `reader_guard` — the one critical-section trait the
+ *        slot and the pool share (RFC 0028 §5.5).
+ */
+static_assert(reader_guard<reader_guard_t>,
+              "the bound reader_guard_t does not model tr::graph::reader_guard (lock()/unlock(), "
+              "for_address(), is_isr_safe, is_nonblocking, may_spin, name; see reader_guard.hpp)");
 
 /**
  * @brief No slot policy that can spin-wait may be bound where spin-waiting hangs (#1618).
@@ -2378,7 +2381,7 @@ class vertex_t {
      *        @ref borrowed_fields_t is what constrains the argument's shape to match.
      *        Declaration only; values are written later via the field-write surface. Same
      *        uninstall-on-empty and allocate-nothing-on-empty-leaf semantics as
-     *        @ref set_app_fields.
+     *        @ref vertex_policy_t::app_fields.
      */
     void set_app_fields_static(borrowed_fields_t table) {
         if (table.empty() && ext_.load(std::memory_order_acquire) == nullptr) return;
@@ -2571,6 +2574,22 @@ class vertex_t {
         e.appended_since_flush = 0;
         e.ring->source = src;
         e.ring->reliable = reliable;
+    }
+
+    /** @brief This receiver's §4.4 arm: `true` once declared RELIABLE (see
+     *         @ref set_ring_source); `false` by default. */
+    [[nodiscard]] bool ring_reliable() const noexcept {
+        const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
+        return e != nullptr && e->ring ? e->ring->reliable : false;
+    }
+
+    /** @brief The installed app-field slots (empty when none) — what `graph_t::set_policy`
+     *         compares a borrowed declaration against, so re-applying it keeps the values. */
+    [[nodiscard]] std::span<const app_field_slot_t> app_field_slots() const {
+        const vertex_ext_t* e = ext_.load(std::memory_order_acquire);
+        if (e == nullptr) return {};
+        const std::lock_guard lock(vertex_stripe_of(this).m);
+        return e->app ? e->app->table.slots : std::span<const app_field_slot_t>{};
     }
 
     /** @brief This receiver's bound ring source, or `nullptr` while it still draws the

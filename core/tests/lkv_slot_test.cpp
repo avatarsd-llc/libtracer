@@ -98,23 +98,30 @@ std::atomic<std::size_t> g_freed_in_guard{0};
  *        lets the rope deleter see whether it is running inside one.
  */
 struct counting_guard_t {
-    counting_guard_t() {
-        mu().lock();
+    static constexpr bool is_isr_safe = false;           /**< @brief A host mutex. */
+    static constexpr bool is_nonblocking = false;        /**< @brief The waiter sleeps. */
+    static constexpr bool may_spin = false;              /**< @brief Never a pure spin. */
+    static constexpr const char* name = "test_counting"; /**< @brief Diagnostic name. */
+
+    /** @brief Enter the section, counting it. */
+    void lock() noexcept {
+        m_.lock();
         ++t_guard_depth;
         g_guard_entries.fetch_add(1, relaxed_);
     }
-    ~counting_guard_t() {
+    /** @brief Leave it. */
+    void unlock() noexcept {
         --t_guard_depth;
-        mu().unlock();
+        m_.unlock();
     }
-    counting_guard_t(const counting_guard_t&) = delete;
-    counting_guard_t& operator=(const counting_guard_t&) = delete;
+    /** @brief The `reader_guard` lookup: the one mutex every test slot shares. */
+    static counting_guard_t& for_address(const void*) noexcept {
+        static counting_guard_t g;
+        return g;
+    }
 
-    /** @brief The one mutex every test slot shares. */
-    static std::mutex& mu() {
-        static std::mutex m;
-        return m;
-    }
+   private:
+    std::mutex m_; /**< @brief The shared mutex. */
 };
 
 /** @brief The single-writer slot as this test instantiates it. */
@@ -762,7 +769,7 @@ void host_guard_excludes(std::size_t threads, std::size_t sections) {
     for (std::size_t t = 0; t < threads; ++t) {
         pool.emplace_back([&] {
             for (std::size_t i = 0; i < sections; ++i) {
-                const tr::graph::mutex_guard_t g{&anchor};
+                const tr::graph::guard_scope_t<tr::graph::mutex_guard_t> g{&anchor};
                 if (inside.fetch_add(1, std::memory_order_acq_rel) != 0)
                     overlaps.fetch_add(1, relaxed_);
                 ++total;

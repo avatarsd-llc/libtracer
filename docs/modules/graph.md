@@ -16,9 +16,9 @@ bump, no copy). The last-known-value path takes **no per-vertex mutex**.
 `graph_t` owns the vertex map (keyed on canonical [path](path.md) bytes). Each vertex
 has a **role**: *stored-value* (last-writer-wins), *stream* (the CONSUMER's bounded ring —
 a producer never queues, so the ring lives on the *receiving* vertex and is bounded in BYTES
-by that vertex's own injected `mem::block_source_t` via `set_ring_source`
+by that vertex's own injected `mem::block_source_t` via `vertex_policy_t::ring_source`
 ([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.6.1) — whose depth the
-owner declares host-side with `set_retention`, and which no peer can read or write —
+owner declares host-side with `vertex_policy_t::retention`, and which no peer can read or write —
 [RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.C), or *handler* (`on_read` / `on_write` — covering
 computed, proxy, sink, live-MMIO patterns). The last-known-value slot is a one-word
 `value_t*` swap under the slot policy ([RFC-0028](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0028-lean-value-path.md) slice 3), so `read` / `write` of the value take **no
@@ -28,7 +28,7 @@ write.
 
 What a vertex keeps after a write is one policy, `retention_t { NONE, LAST, N }`
 ([RFC-0028](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0028-lean-value-path.md) §5.4),
-declared owner-side with `set_retention`. Each role has a default — a handler keeps `NONE`, a
+declared owner-side with `vertex_policy_t::retention`. Each role has a default — a handler keeps `NONE`, a
 stored value `LAST`, a stream `N` — and a stored value or a stream may be declared `NONE`: the
 pure relay, which delivers every write to its subscribers, keeps nothing, and answers `read`
 with `NOT_FOUND`. A relay whose subscribers are all callbacks delivers from the writer's stack
@@ -62,8 +62,8 @@ enum class delivery_mode_t { IF_NEWER, UNCONDITIONAL, EXPLICIT };
 
 // There is NO per-vertex settings type. RFC-0022 §3.B deleted `settings_t` outright: four
 // of its seven knobs were inert, `durability` became the subscription's (below), and the two
-// survivors are construction parameters an OWNER declares — see set_retention /
-// set_share_threshold_bytes (RFC-0028 §5.3). Nothing is inherited (§3.F).
+// survivors are construction parameters an OWNER declares — see vertex_policy_t below
+// (RFC-0028 §4.12, D12). Nothing is inherited (§3.F).
 
 struct delivery_policy_t {  // ONE subscription's delivery policy (RFC-0022 §3.A) — 2 B packed
     std::uint16_t bits;     // 0-1 reliability | 2-4 priority | 5 durability_request | 6-15 rsvd
@@ -94,15 +94,34 @@ using subscriber_fn_t = void (*)(void* ctx, const value_t& value);
 class  subscription_t { /* opaque: producer vertex + :subscribers[] slot index; graph_t is the
                            sole friend. Public: default-construct, copy, operator==. */ };
 
-class graph_t {
-    explicit graph_t(std::pmr::memory_resource* mr    = std::pmr::get_default_resource(),
-                     mem::mem_backend_t* value_backend = &mem::heap_backend(),
-                     mem::block_source_t* ctl          = &mem::heap_source());
+template <class Fn> struct graph_hook_t { Fn fn; void* ctx; };  // one graph-wide seam
+struct graph_hooks_t {        // the five graph-wide seams as ONE aggregate (RFC-0028 D9)
+    graph_hook_t<subject_resolver_fn_t> subject_resolver;       // ACL enforcement switch
+    graph_hook_t<sub_observer_fn_t>     subscription_observer;
+    graph_hook_t<remote_delivery_fn_t>  remote_delivery;        // the router installs it
+    graph_hook_t<wire_target_fn_t>      wire_target;            // the router installs it
+    graph_hook_t<stats_sampler_fn_t>    stats_sampler;          // the router installs it
+};
 
-    // registration and removal
+struct vertex_policy_t {      // everything the OWNER declares about one vertex (RFC-0028 D12)
+    std::optional<retention_t> retention;          // unset ⇒ the role's default (§5.4)
+    std::uint32_t              depth = 1;          // ring depth under retention_t::N
+    std::size_t                share_threshold_bytes = kShareThresholdBytes;  // §5.3
+    mem::block_source_t*       ring_source = nullptr;   // RFC-0025 §4.6.1; null ⇒ graph default
+    bool                       ring_reliable = false;   // §4.4 pressure arm
+    delivery_mode_t            delivery_mode = delivery_mode_t::IF_NEWER;
+    app_fields_decl_t          app_fields;         // owning OR borrowed (RFC-0010 §A)
+};
+
+class graph_t {
+    explicit graph_t(mem::block_source_t& src = mem::heap_source(), graph_hooks_t hooks = {});
+
+    // registration and removal — the policy is applied WHOLE, at registration
     vertex_handle_t register_vertex(const path_t&, role_t, handlers_t = {},
+                                    vertex_policy_t policy = {},
                                     std::span<const payload_right_t> rights = {});
     result_t<vertex_handle_t> try_register_vertex(const path_t&, role_t, handlers_t = {},
+                                                  vertex_policy_t policy = {},
                                                   std::span<const payload_right_t> rights = {});
     result_t<void> retire(vertex_handle_t);                       // logical absence, subtree-wide
     std::uint32_t  retire_generation(vertex_handle_t) const noexcept;
@@ -125,7 +144,6 @@ class graph_t {
                                 std::string_view caller = {});
     result_t<void>        assign(vertex_handle_t, rope_t, std::string_view caller = {});
     result_t<void>        propagate(vertex_handle_t);
-    void                  set_delivery_mode(vertex_handle_t, delivery_mode_t);
     result_t<std::size_t> history(vertex_handle_t, std::span<value_ref_t> out) const;  // 0 allocs
     result_t<value_ref_t> read (vertex_handle_t, const field_path_t&,       // ONE read type
                                 std::string_view caller = {}) const;        // (RFC-0028 D11)
@@ -135,17 +153,17 @@ class graph_t {
                                           std::uint64_t* gap_before = nullptr);
     result_t<void>        mark_flushed(vertex_handle_t);
 
-    // owner-side storage declarations (RFC-0022 §3.C) — host API only, NO wire surface
-    result_t<void> set_retention        (vertex_handle_t, retention_t,   // RFC-0028 §5.4
-                                         std::uint32_t depth = 1);
+    // owner-side declarations (RFC-0022 §3.C) — host API only, NO wire surface. ONE verb:
+    // the policy is stated whole, so a member left at its default resets that property.
+    result_t<void> set_policy(vertex_handle_t, vertex_policy_t);  // SCHEMA_NOT_FOUND if illegal
     retention_t   retention             (vertex_handle_t) const noexcept;
-    // the RECEIVER's byte bound (RFC-0025 §4.6.1) — admission reservations, not placement
-    void          set_ring_source       (vertex_handle_t, mem::block_source_t*,
-                                         bool reliable = false);
     result_t<std::size_t>   ring_reserved_bytes(vertex_handle_t) const;
     result_t<std::uint64_t> stream_gaps        (vertex_handle_t) const;
-    void          set_share_threshold_bytes(vertex_handle_t, std::size_t bytes);
     std::size_t   share_threshold_bytes    (vertex_handle_t) const noexcept;
+
+    // graph-wide seams — read-modify-write, for a party wired after construction (the router)
+    void          set_hooks(const graph_hooks_t&) noexcept;
+    graph_hooks_t hooks() const noexcept;
 
     // composed reads — they build a value, so they return one
     result_t<rope_t> read_children_folded(vertex_handle_t) const;
@@ -187,7 +205,7 @@ temporary lambda does not compile.
 
 ```{admonition} `ctx` lives until the reclamation policy's grace point — and the library tells you when
 :class: important
-`unsubscribe` **deactivates** the slot (`core/include/libtracer/graph.hpp:1904`); a
+`unsubscribe` **deactivates** the slot (`core/include/libtracer/graph.hpp:2001`); a
 delivery already in flight snapshotted the edge and completes, and the `{fn, ctx}` pair is
 the one leg of that snapshot the library owns no copy of. So "when may I free `ctx`?" is answered by this build's **reclamation policy**
 ([ADR-0080](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0080-reclamation-policy-is-a-build-time-closed-per-target-seam.md),
@@ -204,7 +222,7 @@ The hook runs exactly once, on your thread, outside every graph lock: **inline, 
 **before the enclosing `write()` returns** when you called it from inside one. The
 one-argument overload retires the edge identically and simply carries no signal — which is
 sufficient whenever you unsubscribe from outside a callback, since that call is already
-quiescent on return (`core/include/libtracer/graph.hpp:1863` states the bound on `ctx`).
+quiescent on return (`core/include/libtracer/graph.hpp:1960` states the bound on `ctx`).
 ```
 
 ```{admonition} No strings on the hot path
@@ -254,7 +272,7 @@ for (...) g.write(v, p.field(), setpoint_tlv);           // hot loop — zero st
 ## What a read hands back
 
 `read` and `await` return `result_t<value_ref_t>`, not `result_t<rope_t>`
-(`core/include/libtracer/graph.hpp:1449,1668` by handle, `:2315,2321` by path;
+(`core/include/libtracer/graph.hpp:1627,1765` by handle, `:2253,2259` by path;
 `value_ref_t` at `core/include/libtracer/value.hpp:638`). A `value_ref_t` is an **owning
 reference** to the value the vertex published: the LKV slot holds one intrusive `value_t*`
 — a refcount, the link count and the link chain in a single block drawn from the vertex's
@@ -325,9 +343,10 @@ seam and delivers in one step. Only the sweep **root** is judged. The same amend
 `await` serve its woken value through the **same role dispatch** `read` uses, so a handler
 vertex answers an `await` with its `on_read`-composed value instead of `NOT_FOUND`.
 
-`set_delivery_mode(v, mode)` sets that per-vertex policy. It is a wiring-time host API call,
-in the same family as `set_retention`, `set_share_threshold_bytes` and `set_app_fields` — an
-owner declaration with no wire surface.
+`vertex_policy_t::delivery_mode` sets that per-vertex policy, declared at `register_vertex` or
+through `set_policy`. It is a wiring-time host declaration, stated alongside retention, the
+share threshold, the ring source and the app field table — an owner declaration with no wire
+surface.
 
 | `delivery_mode_t` | An ancestor's sweep includes this vertex |
 | --- | --- |
@@ -411,8 +430,10 @@ total over a `status_t` that had no member for it.
 
 Five installers configure a graph before frames flow. Each is set once at wiring time,
 from one thread. That is the **doctrine**, and since #1049 it is stated by the API rather
-than requested in a comment: the three callback seams are spelled `configure_*` and take
-the ADR-0047 `{fn, ctx}` pair, never a `std::function`.
+than requested in a comment: the callback seams are `{fn, ctx}` slots of one
+`graph_hooks_t` aggregate (RFC-0028 D9) — handed to the constructor, or installed later with
+`set_hooks` (a router wired after its graph reads `hooks()`, sets its three, and writes the
+whole back) — never a `std::function`.
 
 The shape is the enforcement. A `std::function` cannot be handed to a racing reader at
 all — assigning one *destroys the old target*, freeing its captures while a reader may be
@@ -437,8 +458,8 @@ the seam: clearing a sink does not stop a dispatch already in flight.
 | --- | --- | --- |
 | `register_child_type(type, factory)` | populates the in-band creation catalog: which `type` selector a `:children[]` `SPEC` write may instantiate. Generic, and still live — but **not** the door to a connection any more: the net plane's `client` / `listener` types were unregistered at RFC-0014 S7, which left `/net/<module>/conn` the only connection-creation surface | only the built-in `stored_value`; an unregistered `type` answers `SCHEMA_NOT_FOUND` |
 | `set_identity(kind, key)` / `clear_identity()` | installs the node-scoped record `read <vertex>:identity` serves, byte-identical from every vertex | absent — `:identity` answers `SCHEMA_NOT_FOUND` |
-| `configure_remote_delivery_sink(fn, ctx)` | where the producer fan-out hands each **remote** subscriber's delivery | **null — remote subscriber slots are stored but never deliver** |
-| `configure_subject_resolver(fn, ctx)` | maps a caller context to a subject token, enabling ACL evaluation | **none — enforcement is entirely off; every operation is allowed** |
+| `graph_hooks_t::remote_delivery` | where the producer fan-out hands each **remote** subscriber's delivery (the router installs it) | **null — remote subscriber slots are stored but never deliver** |
+| `graph_hooks_t::subject_resolver` | maps a caller context to a subject token, enabling ACL evaluation | **none — enforcement is entirely off; every operation is allowed** |
 | `subscribe_wire(v, source, route, link, reverse, caller)` | the inbound `:subscribers[]` append: one parse, the SUBSCRIBE gate, the slot append, the durability latch the subscriber requested. `link` is WHERE the edge delivers; `caller` is WHO subscribed (empty ⇒ the same as `link`, every pre-#375-Part-2 caller) | — (called by the FWD resolver, not a default) |
 
 The two defaults in bold are load-bearing and are the two failure modes a node wired by
@@ -516,11 +537,13 @@ struct app_field_t {                      // owning install
     std::vector<std::byte> value;         // optional initial value
 };
 
-void set_app_fields       (vertex_handle_t, std::vector<app_field_t>);  // owning
-void set_app_fields_static(vertex_handle_t, borrowed_fields_t);        // borrowed, zero-copy
+// declared through vertex_policy_t::app_fields (an app_fields_decl_t), at registration or
+// through set_policy — one member, two spellings:
+g.set_policy(v, {.app_fields = std::vector<app_field_t>{...}});  // owning (moved in)
+g.set_policy(v, {.app_fields = kFlashTable});                    // borrowed, zero-copy
 ```
 
-| | `set_app_fields` | `set_app_fields_static` |
+| | owning (`std::vector<app_field_t>`) | borrowed (`borrowed_fields_t`) |
 | --- | --- | --- |
 | Name and descriptor bytes | copied into the graph | **viewed**, never copied |
 | Initial value | may carry one | declaration only; write values afterwards |
@@ -575,6 +598,21 @@ followed by the owner's own announce write.
   goes on the wire.
 
 ## API reference
+
+```{doxygenstruct} tr::graph::vertex_policy_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::graph::graph_hooks_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::graph::graph_hook_t
+:project: libtracer
+:members:
+```
 
 ```{doxygenclass} tr::graph::graph_t
 :project: libtracer

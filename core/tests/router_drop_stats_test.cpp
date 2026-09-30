@@ -287,7 +287,8 @@ void test_seam_accessors_report_the_injected_objects() {
     arming_source_t rx_src;
     arming_backend_t flat;
     arming_backend_t egress;
-    fwd_router_t router(g, &label_src, &rx_src, &flat, 0, &egress);
+    fwd_router_t router(g,
+                        {.label_src = &label_src, .rx = &rx_src, .flat = &flat, .egress = &egress});
 
     check(&router.label_source() == &label_src, "label_source() is the injected label source");
     check(&router.rx_source() == &rx_src, "rx_source() is the injected rx source");
@@ -322,7 +323,7 @@ void test_flatten_refusal_is_counted() {
     std::printf("a refused bus-name-rejection flatten is counted as flatten_dropped:\n");
     graph_t g;
     arming_backend_t fb;
-    fwd_router_t router(g, &tr::mem::heap_source(), &tr::mem::heap_source(), &fb);
+    fwd_router_t router(g, {.flat = &fb});
     bus_link_impl_t bus;
     p2p_link_t alice;
     bus.peers.emplace_back("alice", &alice);
@@ -370,7 +371,7 @@ void test_arena_refusal_counts_apart_from_malformed() {
     graph_t g;
     (void)g.register_vertex(*path_t::parse("/sink"), role_t::STORED_VALUE);
     arming_source_t rx;
-    fwd_router_t router(g, &tr::mem::heap_source(), &rx);
+    fwd_router_t router(g, {.rx = &rx});
     rec_link_t up;
     (void)router.add_child("up", up);
 
@@ -466,7 +467,7 @@ void test_malformed_frames_land_in_one_bucket() {
 void test_delivery_iov_refusal_is_counted() {
     std::printf("a delivery whose iov table is refused counts delivery_iov_dropped:\n");
     arming_source_t ctl;
-    graph_t g(&ctl);
+    graph_t g(ctl);
     fwd_router_t router(g);
     rec_link_t client;
     (void)router.add_child("client", client);

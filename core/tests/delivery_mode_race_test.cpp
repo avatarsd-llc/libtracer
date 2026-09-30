@@ -13,8 +13,8 @@
  *
  * `graph_t::mark_pending` decided which set a vertex belonged in by reading
  * `vertex_t::delivery_mode()` with NO lock, then rendering the key (an O(depth) parent walk
- * plus an allocation), and only THEN taking `sweep_mutex_` to insert. `set_delivery_mode`
- * holds that same lock across the mode store and both set edits. A flip to UNCONDITIONAL
+ * plus an allocation), and only THEN taking `sweep_mutex_` to insert. `set_policy` delivery-mode
+ * flip holds that same lock across the mode store and both set edits. A flip to UNCONDITIONAL
  * landing inside that window therefore ran to completion — insert into `unconditional_`,
  * erase from `pending_` (empty) — before the marker's insert put the key into `pending_`
  * as well. The key was then in BOTH sets, and the next covering propagate collected it from
@@ -29,8 +29,8 @@
  * So this file is a genuine racer, and it carries the two claims separately:
  *
  * - **Double delivery** (visible in an ordinary build, no sanitizer): the main thread is the
- *   ONLY deliverer — `assign` is state-plane-only and `set_delivery_mode` delivers nothing —
- *   so the per-sweep counter around one `propagate(root)` counts exactly how many times the
+ *   ONLY deliverer — `assign` is state-plane-only and `set_policy` delivery-mode flip delivers
+ * nothing — so the per-sweep counter around one `propagate(root)` counts exactly how many times the
  *   sweep delivered the racing leaf. It is 0 (clean IF_NEWER), or 1 (marked, or
  *   UNCONDITIONAL), and 2 ONLY under double membership. `>= 2` is therefore the defect
  *   itself, directly observed, with no timing interpretation attached.
@@ -95,7 +95,7 @@ std::atomic<int> g_hits{0};
 
 /**
  * @brief One vertex must never be delivered twice by one covering sweep, however a
- *        concurrent `set_delivery_mode` interleaves with the assigns marking it.
+ *        concurrent `set_policy` delivery-mode flip interleaves with the assigns marking it.
  */
 void test_no_double_delivery_across_a_mode_flip() {
     std::printf("delivery_mode flip vs assign — sweep-set exclusion (#895):\n");
@@ -128,8 +128,8 @@ void test_no_double_delivery_across_a_mode_flip() {
     }
     std::thread flipper([&g, leaf, &stop, &flips] {
         while (!stop.load(std::memory_order_relaxed)) {
-            g.set_delivery_mode(leaf, delivery_mode_t::UNCONDITIONAL);
-            g.set_delivery_mode(leaf, delivery_mode_t::IF_NEWER);
+            (void)g.set_policy(leaf, {.delivery_mode = delivery_mode_t::UNCONDITIONAL});
+            (void)g.set_policy(leaf, {.delivery_mode = delivery_mode_t::IF_NEWER});
             flips.fetch_add(1, std::memory_order_relaxed);
         }
     });

@@ -92,7 +92,8 @@ void drain() {
 
 /** @brief A peer-named link that adopts the fake server (the directed-reply mode). */
 std::unique_ptr<httpd_ws_link_t> make_link() {
-    return std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    return std::make_unique<httpd_ws_link_t>(handle(), "/ws",
+                                             tr::net::httpd_ws_config_t{.peer_named = true});
 }
 
 /**

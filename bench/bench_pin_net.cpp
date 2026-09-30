@@ -16,7 +16,7 @@
  * §6's MCU half is a pool-dynamics question — "the receive pool is small" — and the host
  * half is where the latency win is supposed to live. A heap-backed receiver can measure only
  * the second: `heap_backend` never refuses, so no arm can ever show the cost of holding a
- * segment. Backing the receiver with `sync_pool_t` over a fixed slab makes the first
+ * segment. Backing the receiver with `synchronized_pool_t<>` over a fixed slab makes the first
  * observable on the host too: a shared value holds its whole RX slot for its lifetime, so
  * `available()` is a free-slot floor and `dropped_rx()` is backpressure onset, both sampled
  * while the load runs. It also puts the RX segment size under the bench's control, because the
@@ -24,7 +24,7 @@
  * backend it is 65,536 B whatever the datagram's length, which is the hold a share of even a
  * small payload costs (RFC-0028 §5.3's retention hazard, the consumer's number to price).
  *
- * One recv thread allocates from the pool, so `sync_pool_t`'s mutex is uncontended here and
+ * One recv thread allocates from the pool, so the pool's guard is uncontended here and
  * ADR-0060 Erratum 1's multi-thread pool collapse is not in play — and it is identical in
  * every arm regardless.
  *
@@ -41,7 +41,7 @@
  * branch (since RFC-0028 slice 5, into the value's own inline block), reached on the same
  * binary, the same pool and the same transport as every sharing arm.
  *
- * The threshold reaches the store site through `graph_t::set_share_threshold_bytes`, the
+ * The threshold reaches the store site through `vertex_policy_t::share_threshold_bytes`, the
  * owner-declared per-vertex copy-or-share threshold (RFC-0028 §5.3), so arms rotate inside one
  * process.
  *
@@ -149,8 +149,8 @@ class recording_pool_t final : public tr::mem::mem_backend_t {
         const std::lock_guard<std::mutex> g(m_);
         tr::view::segment_t* seg = inner_.alloc(n, hint);
         if (seg != nullptr) {
-            // Re-point reclaim at THIS backend (sync_pool_t's trick): the devirtualized POOL
-            // fast path in destroy_dispatch would return the slot without the mutex, and the
+            // Re-point reclaim at THIS backend (synchronized_pool_t's trick): the devirtualized
+            // POOL fast path in destroy_dispatch would return the slot without the mutex, and the
             // free-slot floor would then be sampled against a racing counter.
             seg->backend = this;
             seg->btag = tr::mem::backend_tag::UNKNOWN;
@@ -210,7 +210,8 @@ int run_sub(int argc, char** argv) {
 
     graph_t node;
     tr::net::fwd_router_t router(node);
-    tr::net::udp_transport_t t(port, "127.0.0.1", static_cast<std::uint16_t>(port + 1), &pool);
+    tr::net::udp_transport_t t(port, "127.0.0.1", static_cast<std::uint16_t>(port + 1),
+                               {.memory = {.rx = &pool}});
     if (!t.ok()) {
         std::fprintf(stderr, "sub: bind failed on %u\n", port);
         return 1;
@@ -225,7 +226,8 @@ int run_sub(int argc, char** argv) {
     for (std::size_t i = 0; i < vertices; ++i) {
         const tr::graph::vertex_handle_t v =
             node.register_vertex(path_t("/sensor/blob" + std::to_string(i)), role_t::STORED_VALUE);
-        node.set_share_threshold_bytes(v, threshold);  // the arm's threshold, owner-declared
+        (void)node.set_policy(
+            v, {.share_threshold_bytes = threshold});  // the arm's threshold, owner-declared
     }
     router.add_child("a", t);
 

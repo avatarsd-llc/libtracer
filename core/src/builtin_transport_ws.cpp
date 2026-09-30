@@ -123,14 +123,21 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_ba
                     // runs — it is what wires the LISTEN arm and the base gather — and this
                     // argument is what makes the DIAL arm's own buffer agree with it.
                     return make_checked<transport_ws_client>(
-                        s.addr, s.port, rx_backend, s.max_frame,
-                        /*recv_stack=*/std::size_t{0},
-                        /*defer_recv=*/true, liveness_window, egress_src, max_handshake);
+                        s.addr, s.port,
+                        ws_client_config_t{.memory = {.rx = rx_backend, .io = egress_src},
+                                           .max_frame = s.max_frame,
+                                           .defer_recv = true,
+                                           .liveness_window_ms = liveness_window,
+                                           .max_handshake = max_handshake});
                 },
                 [&] {
                     return make_checked<transport_ws_server>(
-                        s.port, rx_backend, s.max_frame, max_peers, peer_named,
-                        /*recv_stack=*/std::size_t{0}, liveness_window, max_handshake);
+                        s.port, ws_server_config_t{.memory = {.rx = rx_backend},
+                                                   .max_frame = s.max_frame,
+                                                   .max_peers = max_peers,
+                                                   .peer_named = peer_named,
+                                                   .liveness_window_ms = liveness_window,
+                                                   .max_handshake = max_handshake});
                 });
             // The ADR-0079 egress store, wired before the link is handed to the router
             // (#873).

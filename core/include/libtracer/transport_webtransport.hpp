@@ -55,6 +55,34 @@ struct webtransport_dial_tls_t {
 };
 
 /**
+ * @brief `webtransport_transport_t`'s knobs as one aggregate (#1593), after the address (and,
+ *        on a dial, the CONNECT path and TLS trust).
+ */
+struct webtransport_config_t {
+    /** @brief The link's memory (@ref link_memory_t). `rx`: each inbound frame lands in a
+     *         fresh exactly-sized segment from it; exhaustion is backpressure (`dropped_rx()`),
+     *         never an OOM. */
+    link_memory_t memory{};
+    /** @brief Per-link RX cap (`:settings max_frame`); 0 = the default. */
+    std::size_t max_frame = 0;
+    /**
+     * @brief DIAL only — hold inbound FRAMES until `start_receiving` (#1101, ADR-0081 §2).
+     *        The session is established as always, but the frame channel's bytes are left in
+     *        msquic's per-stream flow-control window, so a server that pushes the instant the
+     *        session comes up cannot be decoded into a sink the owner has not installed yet.
+     *        The LISTEN constructor ignores it.
+     */
+    bool defer_rx = false;
+    /**
+     * @brief Pre-auth H3 handshake budget; 0 = `kMaxHandshakeBytes`. TIGHTEN-ONLY
+     *        (`handshake_cap`). A dial bounds the CONNECT RESPONSE's field section; a listener
+     *        bounds per-stream classification/HEADERS accumulation and a HEADERS frame's
+     *        DECLARED length.
+     */
+    std::size_t max_handshake = 0;
+};
+
+/**
  * @brief The WebTransport transport_t (ADR-0043 Phase B): an HTTP/3 extended
  *        CONNECT session whose ONE bidirectional WebTransport stream carries
  *        the 4-byte u32-LE length-prefix framing.
@@ -125,7 +153,7 @@ class webtransport_transport_t : public transport_t {
      *
      * Confirm with ok(); on failure the object is inert. On success frames may
      * flow immediately, so receivers must be installed before the peer sends
-     * (the set_receiver contract) — or the link is constructed with @p defer_rx
+     * (the set_receiver contract) — or the link is constructed with `defer_rx`
      * and armed with @ref start_receiving once they are.
      *
      * @param peer_host Server hostname or dotted-quad IPv4 (the CONNECT
@@ -136,30 +164,12 @@ class webtransport_transport_t : public transport_t {
      *                  normalised to "/". A SPEC-created dialer reaches this
      *                  through the kind-private `path` config key (#1023).
      * @param tls       Server-certificate trust (see @ref webtransport_dial_tls_t).
-     * @param backend   The host-injected RX memory seam (ADR-0042 §2); each
-     *                  inbound frame lands in a fresh exactly-sized segment
-     *                  from it. Exhaustion is backpressure (dropped_rx()),
-     *                  never an OOM. Must outlive the transport.
-     * @param max_frame Per-link RX cap (`:settings max_frame`); 0 = the default.
-     * @param defer_rx  Hold inbound FRAMES until @ref start_receiving (#1101,
-     *                  ADR-0081 §2). The session is established here as always —
-     *                  the H3 handshake keeps consuming — but the frame channel's
-     *                  bytes are left in msquic's per-stream flow-control window,
-     *                  so a server that pushes the instant the session comes up
-     *                  cannot be decoded into a sink the owner has not installed
-     *                  yet. Nothing is buffered library-side. Default false (the
-     *                  historical one-phase shape); `transport_vertex_t` builds a
-     *                  SPEC-created dialer with it set.
-     * @param max_handshake Pre-auth H3 handshake budget (`max_handshake`); 0 = the
-     *                  @ref kMaxHandshakeBytes default. TIGHTEN-ONLY — see
-     *                  @ref handshake_cap. On the DIAL side it bounds the CONNECT
-     *                  RESPONSE's field section, declared length included.
+     * @param config    The link's knobs (@ref webtransport_config_t): memory, receive cap,
+     *                  deferred receive, handshake budget.
      */
     webtransport_transport_t(const std::string& peer_host, std::uint16_t peer_port,
                              const std::string& path = "/", webtransport_dial_tls_t tls = {},
-                             mem::mem_backend_t* backend = &mem::heap_backend(),
-                             std::size_t max_frame = 0, bool defer_rx = false,
-                             std::size_t max_handshake = 0);
+                             const webtransport_config_t& config = {});
 
     /**
      * @brief LISTEN mode: serve WebTransport (ALPN `h3`) on @p bind_port with
@@ -176,19 +186,11 @@ class webtransport_transport_t : public transport_t {
      * @param bind_port UDP port to listen on (host byte order; 0 → ephemeral).
      * @param cert_file PEM server-certificate path.
      * @param key_file  PEM private-key path matching @p cert_file.
-     * @param backend   The RX memory seam — see the DIAL constructor.
-     * @param max_frame Per-link RX cap (`:settings max_frame`); 0 = the default.
-     * @param max_handshake Pre-auth H3 handshake budget (`max_handshake`); 0 = the
-     *                  @ref kMaxHandshakeBytes default. TIGHTEN-ONLY — see
-     *                  @ref handshake_cap. On this LISTEN side it bounds per-stream
-     *                  classification/HEADERS accumulation, and the DECLARED length of a
-     *                  HEADERS or unknown/GREASE frame, so an over-declaration is refused
-     *                  before one body byte is buffered.
+     * @param config    The link's knobs (@ref webtransport_config_t); `defer_rx` is
+     *                  DIAL-only and ignored here.
      */
     webtransport_transport_t(std::uint16_t bind_port, const std::string& cert_file,
-                             const std::string& key_file,
-                             mem::mem_backend_t* backend = &mem::heap_backend(),
-                             std::size_t max_frame = 0, std::size_t max_handshake = 0);
+                             const std::string& key_file, const webtransport_config_t& config = {});
 
     /** @brief Shut the session down, drain msquic callbacks, and release the
      *         msquic API (listener → streams → connection → registration order). */

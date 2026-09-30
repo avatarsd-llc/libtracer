@@ -112,7 +112,8 @@ void broadcast(httpd_ws_link_t& link) {
 // ---------------------------------------------------------------------------
 void test_queue_jam_strikes_nobody() {
     std::printf("control-queue jam, two live peers:\n");
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
+                                                  tr::net::httpd_ws_config_t{.peer_named = true});
     check(link->ok(), "the adopting link registered its URI");
     claim(300);
     claim(301);
@@ -138,7 +139,8 @@ void test_queue_jam_strikes_nobody() {
 // ---------------------------------------------------------------------------
 void test_send_timeout_strikes_the_stalled_peer() {
     std::printf("one stalled peer under fan-out:\n");
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
+                                                  tr::net::httpd_ws_config_t{.peer_named = true});
     claim(400);
     claim(401);
     // 400's window is full and stays full; 401 drains normally.
@@ -165,7 +167,8 @@ void test_send_timeout_strikes_the_stalled_peer() {
 // ---------------------------------------------------------------------------
 void test_interleaved_success_never_closes() {
     std::printf("an oversized reply failing between small frames (#481):\n");
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
+                                                  tr::net::httpd_ws_config_t{.peer_named = true});
     claim(500);
     // The shipped #481 shape: the big reply times out, the small frames around it go out
     // fine. A drop streak is CONSECUTIVE, so this peer must never reach the cap.
@@ -196,7 +199,8 @@ void test_interleaved_success_never_closes() {
 // ---------------------------------------------------------------------------
 void test_short_write_closes_immediately() {
     std::printf("a write that expires MID-frame:\n");
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
+                                                  tr::net::httpd_ws_config_t{.peer_named = true});
     claim(600);
     // Header out in full, payload half-written — where a bounded write actually expires
     // mid-buffer on silicon, since a 2-byte header either fits the remaining window or
@@ -226,10 +230,10 @@ void test_send_bound_derivation() {
     // to condemn it (#840); the write legs are there because SO_SNDTIMEO is a per-`send`
     // property and IDF writes a frame as a header call plus a payload call, so one frame
     // to one peer costs TWO bounds, not one (#956, httpd_ws.c:447 and :455).
-    const httpd_ws_link_t derived(handle(), "/ws", 4, true);
+    const httpd_ws_link_t derived(handle(), "/ws", {.max_peers = 4, .peer_named = true});
     check(derived.send_timeout_ms() == 208,
           "default = watchdog / (peer cap * strike cap * write legs) (5000 / (4*3*2))");
-    const httpd_ws_link_t capless(handle(), "/ws", 0, true);
+    const httpd_ws_link_t capless(handle(), "/ws", {.peer_named = true});
     check(capless.send_timeout_ms() == 208, "an unbounded cap derives from the socket budget");
     // THE property, and the reason the shape is what it is: one peer set, fully stalled,
     // cannot hold the httpd task for a whole watchdog window before every one of them is
@@ -239,12 +243,14 @@ void test_send_bound_derivation() {
     // #956 defect 3: the division has no natural floor, and SO_SNDTIMEO = 0 means BLOCK
     // FOREVER — the exact failure this derivation exists to remove, reachable by a
     // large-but-legal cap. 5000 / (2000*3*2) truncates to 0 without the clamp.
-    const httpd_ws_link_t huge(handle(), "/ws", 2000, true);
+    const httpd_ws_link_t huge(handle(), "/ws", {.max_peers = 2000, .peer_named = true});
     check(huge.send_timeout_ms() != 0,
           "a cap large enough to divide the window to zero still yields a BOUNDED send");
-    const httpd_ws_link_t injected(handle(), "/ws", 4, true, 200);
+    const httpd_ws_link_t injected(handle(), "/ws",
+                                   {.max_peers = 4, .peer_named = true, .send_timeout_ms = 200});
     check(injected.send_timeout_ms() == 200, "an injected bound is honoured verbatim");
-    const httpd_ws_link_t clamped(handle(), "/ws", 4, true, 60000);
+    const httpd_ws_link_t clamped(handle(), "/ws",
+                                  {.max_peers = 4, .peer_named = true, .send_timeout_ms = 60000});
     check(clamped.send_timeout_ms() == 5000,
           "an injected bound is clamped to the server's own send_wait_timeout");
     fake_httpd::instance().close_all();
@@ -281,7 +287,8 @@ void test_send_bound_derivation() {
  */
 void test_jammed_queue_still_closes_the_doomed_fd() {
     std::printf("a peer found broken with its backlog already queued, control queue full:\n");
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
+                                                  tr::net::httpd_ws_config_t{.peer_named = true});
     claim(700);
     claim(701);
     // The deepest backlog this link can build: one queued send per TX pool slot.
@@ -351,7 +358,8 @@ void test_jammed_queue_still_closes_the_doomed_fd() {
  */
 void test_dead_mark_does_not_outlive_its_session() {
     std::printf("the same fd number, reused by a new peer:\n");
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
+                                                  tr::net::httpd_ws_config_t{.peer_named = true});
     claim(800);
     fake_httpd::instance().set_send_script(800, {send_result_t::TIMEOUT});
     for (int i = 0; i < 3; ++i) broadcast(*link);
@@ -428,7 +436,8 @@ void test_peer_name_on_an_ipv6_socket() {
 
     // Admit that REAL descriptor as the peer's socket: the link names it at admission,
     // through the same getpeername the strike log's name comes from.
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
+                                                  tr::net::httpd_ws_config_t{.peer_named = true});
     claim(peer_fd);
     std::string named;
     link->enumerate_peers([&named](std::string_view p) { named = std::string(p); });
@@ -478,7 +487,8 @@ void test_peer_name_on_an_ipv6_socket() {
  */
 void test_truncated_frame_closes_the_session() {
     std::printf("a frame whose header went out and whose payload did not:\n");
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
+                                                  tr::net::httpd_ws_config_t{.peer_named = true});
     claim(900);
     fake_httpd::instance().set_send_script(900, {send_result_t::FULL, send_result_t::TIMEOUT});
 
@@ -511,7 +521,8 @@ void test_truncated_frame_closes_the_session() {
  */
 void test_a_frame_that_never_started_is_still_only_dropped() {
     std::printf("a frame whose very first write fails:\n");
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
+                                                  tr::net::httpd_ws_config_t{.peer_named = true});
     claim(901);
     fake_httpd::instance().set_send_script(901, {send_result_t::TIMEOUT});
 
@@ -585,7 +596,8 @@ std::vector<std::byte> retained_wire(const tr::graph::value_t& v) {
  */
 void test_retained_frame_is_whole() {
     std::printf("a retained frame (RFC-0028 §6.9) on a healthy socket:\n");
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
+                                                  tr::net::httpd_ws_config_t{.peer_named = true});
     claim(910);
     fake_httpd::instance().clear_wire(910);
     const std::size_t writes_before = fake_httpd::instance().writes(910);
@@ -614,7 +626,8 @@ void test_retained_frame_is_whole() {
 void test_retained_frame_cut_off_closes() {
     std::printf("a retained frame cut off after its head:\n");
     for (const send_result_t cut : {send_result_t::TIMEOUT, send_result_t::SHORT}) {
-        auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+        auto link = std::make_unique<httpd_ws_link_t>(
+            handle(), "/ws", tr::net::httpd_ws_config_t{.peer_named = true});
         claim(911);
         fake_httpd::instance().clear_wire(911);
         const tr::graph::value_ref_t v = retained_value(9000);
@@ -643,7 +656,8 @@ void test_retained_frame_cut_off_closes() {
 /** @brief A retained frame whose FIRST write fails is only dropped (#481), as any other. */
 void test_retained_frame_never_started_is_dropped() {
     std::printf("a retained frame whose first write fails:\n");
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
+                                                  tr::net::httpd_ws_config_t{.peer_named = true});
     claim(912);
     const tr::graph::value_ref_t v = retained_value(9000);
     fake_httpd::instance().set_send_script(912, {send_result_t::TIMEOUT});

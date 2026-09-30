@@ -40,6 +40,29 @@ inline constexpr std::string_view kUdpClientSuggestedModule = "udp-client";
 inline constexpr std::string_view kUdpServerSuggestedModule = "udp-server";
 
 /**
+ * @brief `udp_transport_t`'s knobs as one aggregate (#1593), after the local port and peer.
+ */
+struct udp_config_t {
+    /**
+     * @brief The link's memory (@ref link_memory_t). `rx`: when a rope receiver is installed,
+     *        each datagram is recvfrom'd straight into a fresh segment drawn from it, sized
+     *        `min(kMaxDatagram, rx->max_segment_size())` — so the backend BOUNDS the datagram a
+     *        node accepts. Exhaustion is backpressure — the datagram is dropped and
+     *        `dropped_rx` ticks, never an OOM.
+     */
+    link_memory_t memory{};
+    /**
+     * @brief The universal `:settings max_frame` receive cap, bytes — the largest datagram
+     *        accepted (0 → `udp_transport_t::kMaxDatagram`). A longer datagram is refused
+     *        (`malformed_rx` ticks), provided the backend can furnish `max_frame + 1` bytes
+     *        (#1074). It also sizes the RX segment, so a tight cap is a RAM lever.
+     */
+    std::size_t max_frame = 0;
+    /** @brief Recv-thread stack size in bytes, 0 = platform default. */
+    std::size_t recv_stack = 0;
+};
+
+/**
  * @brief A single-peer UDP datagram @ref transport_t (one datagram = one frame).
  *
  * Binds a local UDP socket and sends to one peer; a listener-mode instance learns its peer
@@ -75,28 +98,11 @@ class udp_transport_t : public transport_t, private posix_endpoint_t {
      * connection (#83) reply to a dialing client whose ephemeral port is unknowable in
      * advance; until the first datagram arrives, @ref send is a no-op.
      *
-     * @p backend is the host-injected RX memory seam (ADR-0042 §2): when a rope receiver is
-     * installed, each datagram is recvfrom'd straight into a fresh segment drawn from it,
-     * sized `min(kMaxDatagram, backend->max_segment_size())` — so the backend BOUNDS the
-     * datagram a node accepts (a pool over a static MCU slab works as-is; default is the
-     * process heap, unbounded, keeping the full cap). Exhaustion is backpressure — the
-     * datagram is dropped and @ref dropped_rx ticks, never an OOM. Must outlive the transport.
-     *
-     * @param max_frame The universal `:settings max_frame` receive cap, in bytes — the
-     *        largest datagram this connection accepts (0 → @ref kMaxDatagram). A longer
-     *        datagram is refused: it is never delivered, @ref malformed_rx ticks, and the
-     *        socket stays usable — provided @p backend can furnish `max_frame + 1` bytes,
-     *        since a segment bounded below that truncates the datagram before its length
-     *        can be judged (#1074). It also sizes the RX segment, so a tight cap is a RAM
-     *        lever, not only an admission one. Tighten-only by construction: a datagram
-     *        cannot exceed @ref kMaxDatagram, so a larger configured value is inert.
-     * @param recv_stack Recv-thread stack size in bytes, 0 = platform default
-     *        (`posix_endpoint_t::start`). Non-zero right-sizes this transport's
-     *        recv thread on an MCU instead of raising the global pthread default.
+     * @param config The link's knobs (@ref udp_config_t): memory (the RX seam that bounds the
+     *        datagram), receive cap, recv-thread stack.
      */
     udp_transport_t(std::uint16_t bind_port, const std::string& peer_host, std::uint16_t peer_port,
-                    mem::mem_backend_t* backend = &mem::heap_backend(), std::size_t max_frame = 0,
-                    std::size_t recv_stack = 0);
+                    const udp_config_t& config = {});
     ~udp_transport_t() override;
 
     udp_transport_t(const udp_transport_t&) = delete;

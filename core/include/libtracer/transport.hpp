@@ -383,6 +383,35 @@ class bus_link_t {
 };
 
 /**
+ * @brief The memory a link draws from, as the one nested member every per-kind link config
+ *        carries (#1593, RFC-0028 §8.2).
+ *
+ * Shared, and deliberately tiny: the transport-vertex lean rule keeps kind-private knobs in
+ * the kind's own config struct, and this holds only the two memory planes every link kind
+ * has. A deployer that bounds a node points both at its slab; since RFC-0028 slice 10 a
+ * `mem_backend_t` IS a `block_source_t`, so one synchronized pool can serve both.
+ *
+ * Each must outlive the link, and each must be thread-safe on a target where the link's
+ * receive thread and a sender run concurrently.
+ */
+struct link_memory_t {
+    /**
+     * @brief The RX memory seam (ADR-0042 §2): each inbound frame is read into a segment drawn
+     *        from it. Exhaustion is backpressure — the frame is dropped and counted, never an
+     *        OOM. Default: the process heap. A kind whose zero-copy delivery is opt-in (the
+     *        ESP-IDF `httpd_ws_link_t`) defaults it to null, meaning "borrowed delivery".
+     */
+    mem::mem_backend_t* rx = &mem::heap_backend();
+    /**
+     * @brief The link's EGRESS store (ADR-0079, #873): the per-frame scratch a kind draws
+     *        while one outbound frame is in flight — `transport_ws_client`'s masked-frame copy
+     *        and the base class's gather temporary. A kind with no such draw ignores it.
+     *        Default: the process heap.
+     */
+    mem::block_source_t* io = &mem::heap_source();
+};
+
+/**
  * @brief One transport's shed-frame counters, as a generic `transport_t*` holder
  *        can read them (#932).
  *

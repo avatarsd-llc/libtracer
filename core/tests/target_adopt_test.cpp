@@ -116,7 +116,7 @@ void test_fan_out_is_one_block() {
     std::printf("vector 1 — K=32 targets adopt the one published block:\n");
     constexpr int kTargets = 32;
     value_meter_t src;
-    graph_t g(&src);
+    graph_t g(src);
     const auto s = g.register_vertex(path_t("/a/src"), role_t::STORED_VALUE);
     std::array<path_t, kTargets> targets;
     for (int i = 0; i < kTargets; ++i) {
@@ -158,7 +158,7 @@ void test_fan_out_is_one_block() {
 void test_admission_on_the_shared_block() {
     std::printf("vector 2 — the target's admission filter sees the shared block:\n");
     value_meter_t src;
-    graph_t g(&src);
+    graph_t g(src);
     int seen = 0;
     handlers_t h;
     auto h_on_admit = [&seen](const tr::graph::value_t& value, const write_ctx_t&) -> admission_t {
@@ -192,7 +192,7 @@ void test_stream_target() {
     graph_t g;
     const auto s = g.register_vertex(path_t("/c/src"), role_t::STORED_VALUE);
     const auto t = g.register_vertex(path_t("/c/log"), role_t::STREAM);
-    (void)g.set_retention(t, tr::graph::retention_t::N, 4);
+    (void)g.set_policy(t, {.retention = tr::graph::retention_t::N, .depth = 4});
     check(g.subscribe(path_t("/c/src"), path_t("/c/log")).has_value(), "wire src -> log");
     check(g.write(s, byte_value(0x31)).has_value() && g.write(s, byte_value(0x32)).has_value(),
           "two writes land");
@@ -209,7 +209,7 @@ void test_stream_target() {
 void test_unstored_source_is_cloned() {
     std::printf("vector 4 — a HANDLER source's unstored delivery is cloned, not adopted:\n");
     value_meter_t src;
-    graph_t g(&src);
+    graph_t g(src);
     handlers_t h;
     auto h_on_write = [](const tr::graph::value_t&,
                          const write_ctx_t&) -> tr::graph::result_t<void> { return {}; };

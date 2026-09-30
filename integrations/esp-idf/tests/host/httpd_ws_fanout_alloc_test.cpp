@@ -188,7 +188,9 @@ void drain() {
 
 /** @brief A link that adopts the fake server with the suite's tight send bound. */
 std::unique_ptr<httpd_ws_link_t> make_link() {
-    return std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true, kSendBoundMs);
+    return std::make_unique<httpd_ws_link_t>(
+        handle(), "/ws",
+        tr::net::httpd_ws_config_t{.peer_named = true, .send_timeout_ms = kSendBoundMs});
 }
 
 /** @brief Admit @p fd and claim it as a peer (the lazy first-data-frame claim). */

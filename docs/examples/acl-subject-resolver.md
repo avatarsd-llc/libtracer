@@ -33,7 +33,7 @@ libtracer does **authorization**, and the transport does authentication.
   `sink_slot_t` and the gate reads a coherent snapshot
   ([#1049](https://github.com/avatarsd-llc/libtracer/issues/1049)). Whatever state the resolver
   needs travels in `ctx`, which the caller owns and must keep alive across every gated operation.
-- **Install it at wiring time, from one thread, before frames flow.** `configure_subject_resolver`
+- **Install it at wiring time, from one thread, before frames flow.** `graph_hooks_t::subject_resolver`
   is configuration, which the verb says on purpose.
 - **Nothing here is conditional** — the target builds and runs under every CI leg.
 

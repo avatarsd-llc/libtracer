@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief ADR-0060 §2 — the thread-safe pool `value_backend_`: `mem::sync_pool_t` must
+ * @brief ADR-0060 §2 — the thread-safe pool `value_backend_`: `mem::synchronized_pool_t<>` must
  *        serialize concurrent `alloc` (writer threads) with cross-thread `destroy`
  *        (a `segment` reclaimed on the reader/subscriber thread that drops the last ref).
  *
@@ -32,7 +32,7 @@
 
 namespace {
 
-using tr::mem::sync_pool_t;
+using tr::mem::synchronized_pool_t;
 using tr::view::segment_ptr_t;
 using tr::view::segment_t;
 
@@ -46,7 +46,7 @@ void contended_alloc_destroy() {
     // Room for every thread to hold one slot at once (+ headroom) so alloc rarely
     // backpressures — the test is about correctness under concurrency, not exhaustion.
     std::vector<std::byte> slab(2 * kThreads * (kSlotPayload + sizeof(segment_t) + 64));
-    sync_pool_t pool(slab, kSlotPayload);
+    synchronized_pool_t<> pool(slab, kSlotPayload);
 
     std::atomic<std::size_t> mismatches{0};
     std::atomic<std::size_t> allocs{0};
@@ -63,7 +63,7 @@ void contended_alloc_destroy() {
                 for (auto byte : b)               // no other live segment shares it
                     if (byte != tag) mismatches.fetch_add(1, std::memory_order_relaxed);
                 allocs.fetch_add(1, std::memory_order_relaxed);
-                // p drops here -> release -> sync_pool_t::destroy (locked), on THIS thread.
+                // p drops here -> release -> synchronized_pool_t::destroy (locked), on THIS thread.
             }
         });
     }
@@ -80,7 +80,7 @@ void cross_thread_reclaim() {
     constexpr std::size_t kConsumers = 4;
     constexpr std::size_t kPerProducer = 20000;
     std::vector<std::byte> slab(4096 * (kSlotPayload + sizeof(segment_t) + 64));
-    sync_pool_t pool(slab, kSlotPayload);
+    synchronized_pool_t<> pool(slab, kSlotPayload);
 
     std::mutex qmu;  // guards the HAND-OFF queue only; the POOL guards itself.
     std::vector<segment_ptr_t> q;

@@ -732,7 +732,7 @@ int main() {
         };
         if (const auto warm = tr::graph::path_t::parse("/app/warm")) {
             const auto h = app_graph.register_vertex(*warm, tr::graph::role_t::STORED_VALUE);
-            app_graph.set_app_fields(h, mk_table());
+            (void)app_graph.set_policy(h, {.app_fields = mk_table()});
         }
         constexpr std::size_t kAppN = 256;
         bool app_ok = true;
@@ -745,7 +745,7 @@ int main() {
             app_ok = app_ok && p.has_value();
             if (p) {
                 const auto h = app_graph.register_vertex(*p, tr::graph::role_t::STORED_VALUE);
-                app_graph.set_app_fields(h, mk_table());
+                (void)app_graph.set_policy(h, {.app_fields = mk_table()});
             }
         }
         const probe::counts_t app = probe::snapshot();
@@ -764,14 +764,14 @@ int main() {
     }
 
     // --- the BORROWED install of the same table (ADR-0058, REPORT-ONLY) --------
-    // The row above measures `set_app_fields`, which COPIES the declaration into the
-    // table's `backing`. ADR-0058 also gives owners `set_app_fields_static`, whose slots
-    // VIEW caller storage — built precisely for the MCU case #388 argues from, where the
-    // descriptor tables are compile-time constants in flash. That path decides whether
-    // per-endpoint schemas beat the `/meta` workaround on the target, and until now
-    // nothing measured it: the economics were claimed, never gated. This row is the
-    // borrowed twin of `vertex_app5`, same five fields and same descriptor width, so the
-    // pair reads as the copy-vs-view delta rather than two unrelated numbers.
+    // The row above measures `vertex_policy_t::app_fields` (owning), which COPIES the declaration
+    // into the table's `backing`. ADR-0058 also gives owners `vertex_policy_t::app_fields`
+    // (borrowed), whose slots VIEW caller storage — built precisely for the MCU case #388 argues
+    // from, where the descriptor tables are compile-time constants in flash. That path decides
+    // whether per-endpoint schemas beat the `/meta` workaround on the target, and until now nothing
+    // measured it: the economics were claimed, never gated. This row is the borrowed twin of
+    // `vertex_app5`, same five fields and same descriptor width, so the pair reads as the
+    // copy-vs-view delta rather than two unrelated numbers.
     {
         graph_t app_graph;
         static constexpr std::array<std::byte, 16> kDescriptor{};
@@ -789,7 +789,7 @@ int main() {
         }();
         if (const auto warm = tr::graph::path_t::parse("/sapp/warm")) {
             const auto h = app_graph.register_vertex(*warm, tr::graph::role_t::STORED_VALUE);
-            app_graph.set_app_fields_static(h, kTable);
+            (void)app_graph.set_policy(h, {.app_fields = kTable});
         }
         constexpr std::size_t kAppN = 256;
         bool sapp_ok = true;
@@ -802,7 +802,7 @@ int main() {
             sapp_ok = sapp_ok && p.has_value();
             if (p) {
                 const auto h = app_graph.register_vertex(*p, tr::graph::role_t::STORED_VALUE);
-                app_graph.set_app_fields_static(h, kTable);
+                (void)app_graph.set_policy(h, {.app_fields = kTable});
             }
         }
         const probe::counts_t sapp = probe::snapshot();
@@ -852,7 +852,7 @@ int main() {
     // and this row off the tree shape it was measured on.
     {
         counting_source_t reg_mr;
-        graph_t reg_graph{&reg_mr};
+        graph_t reg_graph{reg_mr};
         constexpr std::size_t kRegN = 256;
         bool reg_ok = true;
 

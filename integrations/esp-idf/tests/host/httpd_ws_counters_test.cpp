@@ -78,7 +78,8 @@ bool refusing_hook(void*, httpd_req_t*) { return false; }
 // ---------------------------------------------------------------------------
 void test_peers_refused_counts_both_paths() {
     std::printf("#953 peers_refused counts the admission hook AND the max_peers ceiling:\n");
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 2, true);
+    auto link = std::make_unique<httpd_ws_link_t>(
+        handle(), "/ws", tr::net::httpd_ws_config_t{.max_peers = 2, .peer_named = true});
     check(link->stats().peers_refused == 0, "a fresh link has refused nobody");
 
     // (a) the predicate says no. The refusal happens in the PRE-handshake callback, which
@@ -111,7 +112,8 @@ void test_peers_refused_counts_both_paths() {
 // ---------------------------------------------------------------------------
 void test_rx_oversize_is_counted() {
     std::printf("#953 an over-cap inbound frame is counted (it was silent entirely):\n");
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
+                                                  tr::net::httpd_ws_config_t{.peer_named = true});
     claim(710);
     check(link->stats().rx_dropped_oversize == 0, "no oversize frame yet");
 
@@ -140,7 +142,8 @@ void test_rx_oversize_is_counted() {
 // ---------------------------------------------------------------------------
 void test_send_to_departed_peer_is_counted() {
     std::printf("#953 a frame aimed at a departed session is counted, not silently lost:\n");
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
+                                                  tr::net::httpd_ws_config_t{.peer_named = true});
     claim(720);
     drain();
 
@@ -171,7 +174,8 @@ void test_send_to_departed_peer_is_counted() {
 // ---------------------------------------------------------------------------
 void test_pool_miss_is_a_labelled_subset() {
     std::printf("#953 a refused enqueue lands on enqueue_drops and NOT on tx_pool_misses:\n");
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
+                                                  tr::net::httpd_ws_config_t{.peer_named = true});
     claim(730);
     drain();
     const auto before = link->stats();
@@ -202,7 +206,8 @@ void test_pool_miss_is_a_labelled_subset() {
 // ---------------------------------------------------------------------------
 void test_pool_exhaustion_is_counted() {
     std::printf("#953 exhausting the TX pool increments tx_pool_misses:\n");
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
+                                                  tr::net::httpd_ws_config_t{.peer_named = true});
     claim(735);
     drain();
     const auto before = link->stats();
@@ -236,7 +241,8 @@ void test_pool_exhaustion_is_counted() {
 // ---------------------------------------------------------------------------
 void test_condemn_is_counted() {
     std::printf("#953 a link-initiated teardown is counted (a departure is not):\n");
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
+                                                  tr::net::httpd_ws_config_t{.peer_named = true});
 
     // A peer that simply LEAVES must not look like one the link killed.
     claim(740);
@@ -276,7 +282,8 @@ void test_condemn_is_counted() {
 // ---------------------------------------------------------------------------
 void test_condemned_peer_leaves_the_facet() {
     std::printf("#963 a condemned peer stops being visible before httpd reaps it:\n");
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
+                                                  tr::net::httpd_ws_config_t{.peer_named = true});
     claim(760);
     drain();
 
@@ -333,7 +340,8 @@ void test_condemned_peer_leaves_the_facet() {
 // ---------------------------------------------------------------------------
 void test_stats_snapshot_tracks() {
     std::printf("#953 stats() re-reads rather than latching a first answer:\n");
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
+                                                  tr::net::httpd_ws_config_t{.peer_named = true});
     const auto a = link->stats();
     claim(750);
     const std::vector<std::byte> huge(32768 + 1, std::byte{0xAB});
@@ -367,7 +375,8 @@ void test_stats_snapshot_tracks() {
  */
 void test_directed_handle_projects_link_drop_stats() {
     std::printf("#1494 the directed peer handle answers the LINK's drop counters:\n");
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
+                                                  tr::net::httpd_ws_config_t{.peer_named = true});
     claim(770);
     drain();
 

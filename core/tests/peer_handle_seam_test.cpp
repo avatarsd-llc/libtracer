@@ -149,8 +149,7 @@ void test_seam_over_slot_server() {
     handle_sink_t sink;
     lifecycle_probe_t probe;
 
-    tr::net::transport_tcp_server server(0, &tr::mem::heap_backend(), 0, /*max_peers=*/0,
-                                         /*peer_named=*/true);
+    tr::net::transport_tcp_server server(0, {.peer_named = true});
     check(server.ok(), "listen socket bound");
     bus_link_t* const bus = server.bus();
     check(bus != nullptr, "a peer_named server exposes the bus facet");

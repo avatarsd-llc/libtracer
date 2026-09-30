@@ -496,8 +496,7 @@ void test_ws_server_send_iov_overflow_drops() {
 void test_ws_peer_endpoint_send_iov_overflow_drops() {
     std::printf(
         "ws peer_endpoint send — directed span allocates nothing, gather drops (A2/A3/B1):\n");
-    tr::net::transport_ws_server server(0, &tr::mem::heap_backend(), /*max_frame=*/0,
-                                        /*max_peers=*/0, /*peer_named=*/true);
+    tr::net::transport_ws_server server(0, {.peer_named = true});
     check(server.ok(), "peer-named server bound");
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
@@ -893,8 +892,7 @@ void test_tcp_server_iov_uses_injected_egress_source() {
     std::printf("tcp server broadcast + directed facade — draw from the injected store:\n");
     sink_t at_peer;
     auto peer_rx = [&](std::span<const std::byte> f) { at_peer.push(f); };
-    tr::net::transport_tcp_server server(0, &tr::mem::heap_backend(), /*max_frame=*/0,
-                                         /*max_peers=*/0, /*peer_named=*/true);
+    tr::net::transport_tcp_server server(0, {.peer_named = true});
     check(server.ok(), "peer-named tcp server bound");
     tr::net::tcp_transport_t peer("127.0.0.1", server.local_port());
     check(peer.ok(), "peer connected");
@@ -960,8 +958,7 @@ void test_udp_send_iov_uses_injected_egress_source() {
 /** @brief ws's broadcast gather, and its directed facade's `owner_->` spelling. */
 void test_ws_server_iov_uses_injected_egress_source() {
     std::printf("ws server broadcast + directed facade — draw from the injected store:\n");
-    tr::net::transport_ws_server server(0, &tr::mem::heap_backend(), /*max_frame=*/0,
-                                        /*max_peers=*/0, /*peer_named=*/true);
+    tr::net::transport_ws_server server(0, {.peer_named = true});
     check(server.ok(), "peer-named ws server bound");
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
@@ -1049,9 +1046,7 @@ void test_ws_client_tx_buf_uses_injected_egress_source() {
     roomy_egress_t roomy;
     {
         tr::net::transport_ws_client wired("127.0.0.1", server.local_port(),
-                                           &tr::mem::heap_backend(), /*max_frame=*/0,
-                                           /*recv_stack=*/std::size_t{0}, /*defer_recv=*/false,
-                                           /*liveness_window_ms=*/0u, &roomy.store);
+                                           {.memory = {.io = &roomy.store}});
         check(wired.ok(), "store-injected ws client handshaken");
         check(count_allocs([&] { wired.send(payload); }) == 0,
               "wired, the cold send draws NOTHING from the process heap");
@@ -1065,9 +1060,7 @@ void test_ws_client_tx_buf_uses_injected_egress_source() {
     {
         tight_egress_t tight;
         tr::net::transport_ws_client bounded("127.0.0.1", server.local_port(),
-                                             &tr::mem::heap_backend(), /*max_frame=*/0,
-                                             /*recv_stack=*/std::size_t{0}, /*defer_recv=*/false,
-                                             /*liveness_window_ms=*/0u, &tight.store);
+                                             {.memory = {.io = &tight.store}});
         check(bounded.ok(), "hard-bounded ws client handshaken");
         check(count_allocs([&] { bounded.send(payload); }) == 0,
               "a refused injected store draws NOTHING from the heap");

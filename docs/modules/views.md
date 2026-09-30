@@ -28,12 +28,12 @@ decode-into-a-struct step: the wire bytes **are** the in-memory value.
 Ownership is an intrusive refcount on the segment, not on the view: cloning a
 `segment_ptr_t` increments **relaxed**, dropping one decrements **acq_rel** and fires
 the backend's `destroy` when the pre-decrement value was 1 (`tr::view::detail::ref_count_t`,
-`core/include/libtracer/segment.hpp:53-55`; the clone and release sites are
-`segment_ptr_t`'s copy constructor and `reset`, `segment.hpp:139` and `:152`). Relaxed
+`core/include/libtracer/segment.hpp:54-56`; the clone and release sites are
+`segment_ptr_t`'s copy constructor and `reset`, `segment.hpp:140` and `:153`). Relaxed
 on the increment is sound because a clone is always made from a reference the caller
 already holds; the acq_rel decrement is what orders the last writer's stores before the
 destructor reads them. A `LIBTRACER_NO_ATOMIC` build substitutes a plain counter with
-the same call shape (`segment.hpp:45-48`).
+the same call shape (`segment.hpp:46-49`).
 
 ## Interface
 
@@ -48,7 +48,7 @@ struct view_t {                                          // view.hpp
 };
 
 /** Own a copy of borrowed bytes as a view_t; nullopt == allocation failure. */
-std::optional<view_t> over_bytes(std::span<const std::byte>) noexcept;  // mem_heap.hpp:459
+std::optional<view_t> over_bytes(std::span<const std::byte>) noexcept;  // mem_heap.hpp:472
 std::optional<view_t> over_bytes(std::span<const std::byte>, mem::mem_backend_t&) noexcept; // :375
 
 class rope_t {                                           // rope.hpp — ordered chain of views
@@ -94,8 +94,8 @@ heap, which is the chain's only allocation (`rope_t::append`, `rope.hpp:76-91`).
 Bytes handed up by a transport are borrowed: they live in a connection buffer that is
 reused as soon as the callback returns. Keeping them means owning a copy, and the
 canonical way to take one is `tr::view::over_bytes`
-(`core/include/libtracer/mem_heap.hpp:459`) — one call in place of the
-`heap_alloc` + `memcpy` + `view_t::over` triplet. A second overload (`:496`) takes the
+(`core/include/libtracer/mem_heap.hpp:472`) — one call in place of the
+`heap_alloc` + `memcpy` + `view_t::over` triplet. A second overload (`:509`) takes the
 backend to draw from, which is what a peer-driven ownership copy uses so the copy lands in
 the node's injected seam rather than the global heap.
 
@@ -150,7 +150,7 @@ multi-link value is read as if the first buffer were the whole message — a sil
 truncation, not a diagnostic. This is invisible on a purely local graph, where every
 value is one segment, and appears the moment a real transport is attached: every
 transport whose `transport_t::delivers_ropes()` returns true
-(`core/include/libtracer/transport.hpp:707`; TCP, UDP, WS, QUIC, WebTransport and CAN
+(`core/include/libtracer/transport.hpp:736`; TCP, UDP, WS, QUIC, WebTransport and CAN
 all override it) can hand up a chain. A CAN reassembly group chains one link per slice
 (`can_reassembly_t::assemble`, `core/include/libtracer/can_reassembly.hpp:191-199`), and
 a fragmented WebSocket message chains one link per fragment

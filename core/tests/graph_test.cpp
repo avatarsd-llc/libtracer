@@ -178,7 +178,7 @@ void test_stream() {
     graph_t g;
     const auto path = path_t::parse("/log/events");
     tr::graph::vertex_handle_t v = g.register_vertex(*path, role_t::STREAM);
-    (void)g.set_retention(v, tr::graph::retention_t::N, 3);
+    (void)g.set_policy(v, {.retention = tr::graph::retention_t::N, .depth = 3});
 
     for (std::uint8_t i = 1; i <= 5; ++i) (void)g.write(v, make_value({i}));
 
@@ -209,7 +209,7 @@ void test_stream_drain_cursor() {
     std::printf("STREAM drain cursor through the handle (RFC-0008 §E):\n");
     graph_t g;
     tr::graph::vertex_handle_t v = g.register_vertex(path_t("/log/drain"), role_t::STREAM);
-    (void)g.set_retention(v, tr::graph::retention_t::N, 3);
+    (void)g.set_policy(v, {.retention = tr::graph::retention_t::N, .depth = 3});
     for (std::uint8_t b = 1; b <= 5; ++b) (void)g.assign(v, make_value({b}));
 
     const auto hist = tr::testing::history_of(g, v);
@@ -423,8 +423,8 @@ void test_field_write_settings() {
           "unknown settings field => SchemaNotFound");
     // The owner-side declaration is where retention lives now (RFC-0028 §5.4), and it takes
     // effect — on a STORED_VALUE that is LAST, and a ring depth is refused by value.
-    check(g.set_retention(v, tr::graph::retention_t::LAST).has_value() &&
-              !g.set_retention(v, tr::graph::retention_t::N, 5000).has_value(),
+    check(g.set_policy(v, {.retention = tr::graph::retention_t::LAST}).has_value() &&
+              !g.set_policy(v, {.retention = tr::graph::retention_t::N, .depth = 5000}).has_value(),
           "the owner-side retention declaration: LAST accepted, a ring depth refused");
     check(g.write(v, make_value({0x01})).has_value(), "the vertex still takes ordinary writes");
 }
@@ -435,7 +435,7 @@ void test_field_write_handle() {
     auto v = g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
     std::vector<tr::graph::app_field_t> table;
     table.push_back(tr::graph::app_field_t{.name = "kp", .access = tr::graph::app_access_t::RW});
-    g.set_app_fields(v, std::move(table));
+    (void)g.set_policy(v, {.app_fields = std::move(table)});
     // Parse the field path ONCE; reuse the vertex_handle_t + field_path_t thereafter
     // (no per-call string parse, no map lookup).
     const auto fp = path_t::parse("/sensor/temp:settings.app.kp");
@@ -1060,14 +1060,14 @@ void test_assign_propagate() {
     check(*ca == 1, "an unassigned descendant is not re-sent");
 
     // UNCONDITIONAL rides every sweep, even with no assignment since the last one.
-    g.set_delivery_mode(a, delivery_mode_t::UNCONDITIONAL);
+    (void)g.set_policy(a, {.delivery_mode = delivery_mode_t::UNCONDITIONAL});
     (void)g.propagate(r);
     check(*ca == 2, "UNCONDITIONAL is swept every time (even unassigned)");
     check(*cb == 1 && *cc == 1, "IF_NEWER siblings stay clean across an UNCONDITIONAL sweep");
 
     // EXPLICIT is never pulled in by an ancestor sweep; a direct propagate still delivers it
     // (the argument of propagate is always delivered — RFC-0008 §C).
-    g.set_delivery_mode(b, delivery_mode_t::EXPLICIT);
+    (void)g.set_policy(b, {.delivery_mode = delivery_mode_t::EXPLICIT});
     (void)g.assign(b, make_value({0x11}));
     (void)g.propagate(r);
     check(*cb == 1, "EXPLICIT is never included by an ancestor sweep");

@@ -109,8 +109,7 @@ class fake_link_t : public transport_t {
 void refused_bind_leaves_no_strand() {
     std::printf("A refused forwarding bind returns the downstream table to its census (#833):\n");
     graph_t g;
-    fwd_router_t node(g, &tr::mem::heap_source(), &tr::mem::heap_source(), &tr::mem::heap_backend(),
-                      kBound);
+    fwd_router_t node(g, {.max_label_bindings_per_link = kBound});
     fake_link_t up;
     fake_link_t up2;
     fake_link_t down;
@@ -173,8 +172,7 @@ void refused_bind_leaves_no_strand() {
 void established_flow_survives_a_refusal() {
     std::printf("The established-flow reuse path is unaffected by a refusal (#833):\n");
     graph_t g;
-    fwd_router_t node(g, &tr::mem::heap_source(), &tr::mem::heap_source(), &tr::mem::heap_backend(),
-                      kBound);
+    fwd_router_t node(g, {.max_label_bindings_per_link = kBound});
     fake_link_t up;
     fake_link_t up2;
     fake_link_t down;

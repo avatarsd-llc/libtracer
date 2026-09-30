@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief `tr::esp::portmux_sync_t` / `tr::esp::critical_pool_t` — the interrupt-disable
+ * @brief `tr::esp::critical_pool_t` — the interrupt-disable
  *        critical-section policy for `tr::mem::synchronized_pool_t` on ESP-IDF.
  *
  * SPDX-License-Identifier: Apache-2.0
@@ -8,7 +8,8 @@
  *
  * ADR-0060 §2 names two synchronisation mechanisms for a shared `mem_backend_t`: a
  * spinlock for a multi-core host, an interrupt-disable critical section for a single-core
- * priority-preemptive target. `tr::mem::spin_sync_t` is the first; this is the second.
+ * priority-preemptive target. The host `tr::graph::mutex_guard_t` is the first; this is the
+ * second.
  * On a single-core MCU the spinlock is the WRONG one — a lower-priority task holding it
  * cannot run while a higher-priority task spins on it (unbounded priority inversion),
  * whereas a critical section cannot be preempted at all, so the ~120 ns free-list section
@@ -44,38 +45,18 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "libtracer/mem_pool.hpp"
+#include "libtracer_esp/critical_guard.hpp"
 
 namespace tr::esp {
 
 /**
- * @brief The SINGLE-CORE MCU sync policy: an ESP-IDF portMUX critical section.
- *
- * `portENTER_CRITICAL_SAFE` disables interrupts (and, on a dual-core chip, takes the
- * portMUX spinlock as well, so the same policy stays correct on an S3), which is what
- * makes the guarded free-list update atomic against both task preemption and an ISR.
- */
-struct portmux_sync_t {
-    static constexpr bool is_isr_safe = true; /**< @brief Interrupts off — ISR-callable. */
-    static constexpr bool is_nonblocking =
-        true; /**< @brief Interrupt-disable — no heap, no syscall, no OS wait (#928). */
-    static constexpr const char* name = "mem_critsec_pool"; /**< @brief Backend name. */
-
-    /** @brief Enter the critical section (interrupts off for the O(1) free-list op). */
-    void lock() noexcept { portENTER_CRITICAL_SAFE(&mux_); }
-    /** @brief Leave the critical section. */
-    void unlock() noexcept { portEXIT_CRITICAL_SAFE(&mux_); }
-
-   private:
-    portMUX_TYPE mux_ = portMUX_INITIALIZER_UNLOCKED;
-};
-
-/**
  * @brief A bounded, caller-slab pool safe to inject at a shared seam on an ESP32.
  *
- * `tr::mem::synchronized_pool_t` specialised on @ref portmux_sync_t — the variant
+ * `tr::mem::synchronized_pool_t` specialised on `tr::esp::critical_guard_t` (the one
+ * interrupt-masked guard this component binds for the LKV slot too) — the variant
  * ADR-0060 §2 names for a single-core priority-preemptive target. Construct it over the
  * application's own slab and inject it; see the file comment for the wiring.
  */
-using critical_pool_t = tr::mem::synchronized_pool_t<portmux_sync_t>;
+using critical_pool_t = tr::mem::synchronized_pool_t<critical_guard_t>;
 
 }  // namespace tr::esp

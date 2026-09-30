@@ -7,6 +7,7 @@
  */
 #pragma once
 
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -227,6 +228,14 @@ class block_source_t {
    private:
     const char* name_; /**< @brief Borrowed literal; never owned. */
 };
+
+/**
+ * @brief The allocation-seam contract as a concept (RFC-0028 §5.6): a type IS a block source
+ *        when it derives from `block_source_t` — every `mem_backend_t` included, since
+ *        slice 10 re-based the backend on this seam (§4.9).
+ */
+template <class B>
+concept block_source = std::derived_from<B, block_source_t>;
 
 /**
  * @brief The default source: the platform heap, nothrow.

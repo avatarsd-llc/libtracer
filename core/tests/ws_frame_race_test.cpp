@@ -285,8 +285,7 @@ void test_client_queue_race() {
 void test_server_two_doors_race() {
     std::printf("server -> client: broadcast and directed sends onto one peer stay whole:\n");
     race_sink_t sink;
-    tr::net::transport_ws_server server(0, &tr::mem::heap_backend(), /*max_frame=*/0,
-                                        /*max_peers=*/0, /*peer_named=*/tr::net::kBusLinks);
+    tr::net::transport_ws_server server(0, {.peer_named = tr::net::kBusLinks});
     check(server.ok(), "server listening");
     tr::net::transport_ws_client client("127.0.0.1", server.local_port());
     check(client.ok(), "client connected");

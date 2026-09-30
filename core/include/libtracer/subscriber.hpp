@@ -99,7 +99,7 @@ enum class delivery_class_t : std::uint8_t {
  * back, awaiting the work that honours them — the honest shape RFC-0022 §3.E chose over
  * moving dead per-vertex fields. @ref reliability is **not** awaiting anything: RFC-0025's
  * 2026-08-24 §4.4 selector erratum (#1204) rules the pressure arm to be the RECEIVING
- * vertex's own declaration (`graph_t::set_ring_source`), so these two bits are **carried
+ * vertex's own declaration (`vertex_policy_t::ring_source`), so these two bits are **carried
  * verbatim and read by nothing** — decoded, stored, read back from `:subscribers[]` and
  * re-emitted unchanged, with no behaviour behind them and none promised.
  *

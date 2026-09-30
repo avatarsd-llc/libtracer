@@ -185,9 +185,7 @@ void test_the_registry_follows_the_gate() {
 /** @brief (c) A FLAT listener is what the knob must not disturb. */
 void test_a_flat_listener_is_untouched() {
     std::printf("(c) a FLAT listener comes up and stays flat under both bindings:\n");
-    tr::net::transport_ws_server flat(kEphemeral, &tr::mem::heap_backend(),
-                                      /*max_frame=*/1024, /*max_peers=*/4,
-                                      /*peer_named=*/false);
+    tr::net::transport_ws_server flat(kEphemeral, {.max_frame = 1024, .max_peers = 4});
     check(flat.ok(), "a peer_named=false ws listener comes up on every binding");
     check(flat.bus() == nullptr && bus_of(flat) == nullptr, "and exposes no bus facet, either way");
     check(!flat.peer_named(), "its mode authority answers FLAT");
@@ -204,9 +202,8 @@ void test_a_flat_listener_is_untouched() {
 /** @brief (d) A PEER-NAMED listener is refused rather than demoted, when the module is closed. */
 void test_a_peer_named_listener_is_refused_when_closed() {
     std::printf("(d) a peer_named listener: served when present, REFUSED when closed:\n");
-    tr::net::transport_ws_server named(kEphemeral, &tr::mem::heap_backend(),
-                                       /*max_frame=*/1024, /*max_peers=*/4,
-                                       /*peer_named=*/true);
+    tr::net::transport_ws_server named(kEphemeral,
+                                       {.max_frame = 1024, .max_peers = 4, .peer_named = true});
     check(named.ok() == kBusLinks,
           "ok() — the came-up predicate make_checked asks — is true iff the module is present");
     check((named.bus() != nullptr) == kBusLinks, "and the facet follows it");

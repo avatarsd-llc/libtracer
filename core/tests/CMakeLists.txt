@@ -946,7 +946,7 @@ target_link_libraries(acl_cache_race_test PRIVATE libtracer Threads::Threads)
 libtracer_test_warnings(acl_cache_race_test)
 add_test(NAME acl_cache_race COMMAND acl_cache_race_test)
 
-# #895 — RFC-0008 sweep-set exclusion under a concurrent `set_delivery_mode`: the flip must
+# #895 — RFC-0008 sweep-set exclusion under a concurrent `set_policy` delivery-mode flip: the flip must
 # not leave one vertex in BOTH `pending_` and `unconditional_` (a sweep would deliver it
 # twice). Also a TSan target — the marker's lock-free `delivery_mode()` read against the
 # flipper's store is what made the plain byte a data race.

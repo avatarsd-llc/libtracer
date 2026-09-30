@@ -289,7 +289,7 @@ constexpr std::size_t kSmallCap = 64u * 1024u;
  */
 void test_oversize_declared_length_is_refused_and_bounded() {
     std::printf("ws server — a 1 TiB declared length is refused off the header (#872):\n");
-    tr::net::transport_ws_server server(0, &tr::mem::heap_backend(), /*max_frame=*/kSmallCap);
+    tr::net::transport_ws_server server(0, {.max_frame = kSmallCap});
     check(server.ok(), "server bound");
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
@@ -342,7 +342,7 @@ void test_partial_frame_under_the_cap_is_held_then_delivered() {
     // thread is joined by its destructor, and a sink destroyed first would be delivered
     // into during that window.
     frame_sink_t sink;
-    tr::net::transport_ws_server server(0, &tr::mem::heap_backend(), /*max_frame=*/kSmallCap);
+    tr::net::transport_ws_server server(0, {.max_frame = kSmallCap});
     server.set_receiver(sink);
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
@@ -401,7 +401,7 @@ void test_the_cap_is_the_configured_one() {
         // thread is joined by its destructor, and a sink destroyed first would be delivered
         // into during that window.
         frame_sink_t sink;
-        tr::net::transport_ws_server tight(0, &tr::mem::heap_backend(), /*max_frame=*/4096);
+        tr::net::transport_ws_server tight(0, {.max_frame = 4096});
         tight.set_receiver(sink);
         const int cfd = tcp_connect(tight.local_port());
         check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken (4 KiB cap)");
@@ -440,7 +440,7 @@ void test_fragments_cannot_walk_past_the_cap() {
     // thread is joined by its destructor, and a sink destroyed first would be delivered
     // into during that window.
     frame_sink_t sink;
-    tr::net::transport_ws_server server(0, &tr::mem::heap_backend(), /*max_frame=*/kCap);
+    tr::net::transport_ws_server server(0, {.max_frame = kCap});
     server.set_receiver(sink);
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
@@ -478,11 +478,11 @@ void test_effective_cap_is_the_min_of_the_two_seams() {
     std::vector<std::byte> slab(64u * 1024u);
     tr::mem::pool_t pool(slab, /*slot_payload=*/4096);
 
-    const tr::net::transport_ws_server pooled(0, &pool, /*max_frame=*/1u << 20);
+    const tr::net::transport_ws_server pooled(0, {.memory = {.rx = &pool}, .max_frame = 1u << 20});
     check(pooled.effective_max_frame() == pool.max_segment_size(),
           "a pool narrower than max_frame bounds the cap");
 
-    const tr::net::transport_ws_server tight(0, &tr::mem::heap_backend(), /*max_frame=*/1024);
+    const tr::net::transport_ws_server tight(0, {.max_frame = 1024});
     check(tight.effective_max_frame() == 1024, "a max_frame narrower than the backend wins");
 
     const tr::net::transport_ws_server plain(0);
@@ -493,8 +493,7 @@ void test_effective_cap_is_the_min_of_the_two_seams() {
     // ingress cap — it is clamped to kMaxFrame at assignment (configured_cap). Non-vacuous:
     // without the clamp the heap backend's unbounded max_segment_size lets 32 MiB through.
     const tr::net::transport_ws_server wide(
-        0, &tr::mem::heap_backend(),
-        /*max_frame=*/2 * tr::net::transport_ws_server::kMaxFrame);
+        0, {.max_frame = 2 * tr::net::transport_ws_server::kMaxFrame});
     check(wide.effective_max_frame() == tr::net::transport_ws_server::kMaxFrame,
           "a max_frame ABOVE the default is clamped to kMaxFrame — tighten-only, never raise");
 }
@@ -523,7 +522,7 @@ void test_backend_exhaustion_is_counted_backpressure() {
     // the recv thread allocates from `pool` and delivers to `sink` right up until the
     // destructor joins it.
     frame_sink_t sink;
-    tr::net::transport_ws_server server(0, &pool);
+    tr::net::transport_ws_server server(0, {.memory = {.rx = &pool}});
     server.set_receiver(sink);
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
@@ -627,7 +626,7 @@ void test_client_refuses_an_oversize_server_frame() {
     std::thread hostile([lfd] { hostile_ws_server(lfd, std::uint64_t{1} << 40); });
 
     tr::net::transport_ws_client client("127.0.0.1", ntohs(bound.sin_port),
-                                        &tr::mem::heap_backend(), /*max_frame=*/kSmallCap);
+                                        {.max_frame = kSmallCap});
     check(client.ok(), "the client completed its opening handshake");
     check(wait_until([&] { return client.malformed_rx() == 1; }, 5s),
           "the client counted the over-cap frame as malformed");

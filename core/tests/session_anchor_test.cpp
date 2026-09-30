@@ -78,9 +78,8 @@ bool wait_until(Fn f, std::chrono::milliseconds timeout = 3000ms) {
 /** @brief A real TCP client session against the node's listener — dial, then hang up. */
 struct client_t {
     explicit client_t(std::uint16_t port)
-        : link(std::make_unique<tr::net::tcp_transport_t>("127.0.0.1", port,
-                                                          &tr::mem::heap_backend(), 0, 0,
-                                                          /*defer_recv=*/true)) {}
+        : link(std::make_unique<tr::net::tcp_transport_t>(
+              "127.0.0.1", port, tr::net::tcp_config_t{.defer_recv = true})) {}
     [[nodiscard]] bool ok() const { return link && link->ok(); }
     std::unique_ptr<tr::net::tcp_transport_t> link;
 };
@@ -162,8 +161,7 @@ bytes_t children_bytes(const graph_t& g, vertex_handle_t mount) {
 void run() {
     graph_t node;
     fwd_router_t router(node);
-    tr::net::transport_tcp_server server(0, &tr::mem::heap_backend(), 0, /*max_peers=*/2,
-                                         /*peer_named=*/true);
+    tr::net::transport_tcp_server server(0, {.max_peers = 2, .peer_named = true});
     check(server.ok(), "the listener bound an ephemeral port");
     const vertex_handle_t mount = register_mount(node, *server.bus());
     check(router.add_child(std::string(kMount), server), "the listener mounts on the router");

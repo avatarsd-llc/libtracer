@@ -14,6 +14,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <new>
 #include <span>
 #include <utility>
 
@@ -226,3 +227,70 @@ using rx_loan_word_t = std::atomic<std::uint32_t>;
 }
 
 }  // namespace tr::view
+
+namespace tr::view {
+
+/**
+ * @brief The alignment a one-block segment is drawn at for a backend that guarantees
+ *        @p align: the stricter of @p align and the header's own (RFC-0028 §4.9).
+ */
+[[nodiscard]] constexpr std::size_t segment_block_align(std::size_t align) noexcept {
+    return align < alignof(segment_t) ? alignof(segment_t) : align;
+}
+
+/**
+ * @brief Bytes the @ref segment_t header occupies at the head of a one-block segment, padded
+ *        so the payload after it starts at `segment_block_align()`.
+ */
+[[nodiscard]] constexpr std::size_t segment_header_bytes(std::size_t align) noexcept {
+    const std::size_t a = segment_block_align(align);
+    return (sizeof(segment_t) + a - 1) / a * a;
+}
+
+/** @brief The whole block a one-block segment of @p size payload bytes draws at @p align. */
+[[nodiscard]] constexpr std::size_t segment_block_bytes(std::size_t size,
+                                                        std::size_t align) noexcept {
+    return segment_header_bytes(align) + size;
+}
+
+/**
+ * @brief Place a @ref segment_t over the one block @p block, reclaimed by @p backend: the
+ *        header at the head, @p size payload bytes after it (a null, empty span for 0).
+ */
+[[nodiscard]] inline segment_t* place_segment(mem::mem_backend_t* backend, void* block,
+                                              std::size_t size, std::size_t align) noexcept {
+    auto* const base = static_cast<std::byte*>(block);
+    std::byte* const payload = size != 0 ? base + segment_header_bytes(align) : nullptr;
+    return new (base) segment_t(backend, std::span<std::byte>(payload, size));
+}
+
+}  // namespace tr::view
+
+namespace tr::mem {
+
+/** @brief The one-block layout (see the declaration in `%backend.hpp`). */
+inline view::segment_t* mem_backend_t::alloc_in_block(std::size_t size,
+                                                      std::size_t align) noexcept {
+    void* const block =
+        try_alloc(view::segment_block_bytes(size, align), view::segment_block_align(align));
+    return block != nullptr ? view::place_segment(this, block, size, align) : nullptr;
+}
+
+/** @brief The mirror of @ref mem_backend_t::alloc_in_block. */
+inline void mem_backend_t::destroy_in_block(view::segment_t* seg, std::size_t align) noexcept {
+    const std::size_t size = seg->bytes.size();
+    seg->~segment_t();
+    release(seg, view::segment_block_bytes(size, align), view::segment_block_align(align));
+}
+
+/** @brief The default segment: one block through @ref mem_backend_t::try_alloc. */
+inline view::segment_t* mem_backend_t::alloc(std::size_t size, alloc_hint_t /*hint*/) {
+    return alloc_in_block(size, alignment());
+}
+
+/** @brief The default reclaim: one sized release of the block @ref mem_backend_t::alloc drew. */
+inline void mem_backend_t::destroy(view::segment_t* seg) noexcept {
+    destroy_in_block(seg, alignment());
+}
+
+}  // namespace tr::mem

@@ -67,16 +67,23 @@ constexpr int kReaderPriority = 20;
  * this test asks of a policy, and only the second exists in a user-space host process.
  */
 struct test_mutex_guard_t {
-    test_mutex_guard_t() { mu().lock(); }
-    ~test_mutex_guard_t() { mu().unlock(); }
-    test_mutex_guard_t(const test_mutex_guard_t&) = delete;
-    test_mutex_guard_t& operator=(const test_mutex_guard_t&) = delete;
+    static constexpr bool is_isr_safe = false;        /**< @brief A host mutex. */
+    static constexpr bool is_nonblocking = false;     /**< @brief The waiter sleeps. */
+    static constexpr bool may_spin = false;           /**< @brief Never a pure spin. */
+    static constexpr const char* name = "test_mutex"; /**< @brief Diagnostic name. */
 
-    /** @brief The one mutex every slot in this binary shares. */
-    static std::mutex& mu() {
-        static std::mutex m;
-        return m;
+    /** @brief Enter the one process-wide section. */
+    void lock() noexcept { m_.lock(); }
+    /** @brief Leave it. */
+    void unlock() noexcept { m_.unlock(); }
+    /** @brief The `reader_guard` lookup: one mutex every slot in this binary shares. */
+    static test_mutex_guard_t& for_address(const void*) noexcept {
+        static test_mutex_guard_t g;
+        return g;
     }
+
+   private:
+    std::mutex m_; /**< @brief The shared mutex. */
 };
 
 /** @brief Pin the calling thread to @p cpu. */

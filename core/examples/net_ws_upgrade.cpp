@@ -235,11 +235,9 @@ int main() {
     // --- The budget the handshake makes necessary ---------------------------------------
     check(ok, server.effective_max_handshake() > 0,
           "the pre-auth handshake budget is a real, positive bound (#934)");
-    tr::net::transport_ws_server tight(std::uint16_t{0}, &tr::mem::heap_backend(), 0, 0, false, 0,
-                                       0, /*max_handshake=*/256);
+    tr::net::transport_ws_server tight(std::uint16_t{0}, {.max_handshake = 256});
     check(ok, tight.effective_max_handshake() == 256, "a smaller budget is honoured…");
-    tr::net::transport_ws_server loose(std::uint16_t{0}, &tr::mem::heap_backend(), 0, 0, false, 0,
-                                       0, /*max_handshake=*/1u << 30);
+    tr::net::transport_ws_server loose(std::uint16_t{0}, {.max_handshake = 1u << 30});
     check(ok, loose.effective_max_handshake() == server.effective_max_handshake(),
           "…and a LARGER one is clamped back — tighten-only, because the peer is anonymous");
 

@@ -141,7 +141,7 @@ void compact_deliveries_charge_flat() {
     graph_t g;
     (void)g.register_vertex(*path_t::parse("/sink"), role_t::STORED_VALUE);
     counting_backend_t flat("flat");
-    fwd_router_t router(g, &tr::mem::heap_source(), &tr::mem::heap_source(), &flat);
+    fwd_router_t router(g, {.flat = &flat});
     rec_link_t up;
     (void)router.add_child("net/ws-client/up", up);
     router.on_frame("net/ws-client/up", tr::net::encode_advertise(5, path_tlv({"sink"})));
@@ -164,7 +164,7 @@ void a_refused_warm_compact_is_a_counted_drop() {
     graph_t g;
     (void)g.register_vertex(*path_t::parse("/sink"), role_t::STORED_VALUE);
     counting_backend_t flat("flat");
-    fwd_router_t router(g, &tr::mem::heap_source(), &tr::mem::heap_source(), &flat);
+    fwd_router_t router(g, {.flat = &flat});
     rec_link_t up;
     (void)router.add_child("net/ws-client/up", up);
     router.on_frame("net/ws-client/up", tr::net::encode_advertise(5, path_tlv({"sink"})));
@@ -192,7 +192,7 @@ void a_refused_cold_compact_is_a_counted_drop() {
     graph_t g;
     (void)g.register_vertex(*path_t::parse("/sink"), role_t::STORED_VALUE);
     counting_backend_t flat("flat");
-    fwd_router_t router(g, &tr::mem::heap_source(), &tr::mem::heap_source(), &flat);
+    fwd_router_t router(g, {.flat = &flat});
     rec_link_t up;
     (void)router.add_child("net/ws-client/up", up);
     router.on_frame("net/ws-client/up", tr::net::encode_advertise(5, path_tlv({"sink"})));
@@ -212,7 +212,7 @@ void subscribe_toward_charges_flat() {
     std::printf("subscribe_toward: the route and SUBSCRIBER TLVs charge `flat`:\n");
     graph_t g;
     counting_backend_t flat("flat");
-    fwd_router_t router(g, &tr::mem::heap_source(), &tr::mem::heap_source(), &flat);
+    fwd_router_t router(g, {.flat = &flat});
     rec_link_t b;
     (void)router.add_child("net/ws-client/b", b);
     (void)g.register_vertex(path_t("/light/rgb"), role_t::STORED_VALUE);
@@ -231,7 +231,7 @@ void a_refused_subscribe_toward_answers_backpressure() {
     std::printf("subscribe_toward: a refusing `flat` is BACKPRESSURE by value, no bind:\n");
     graph_t g;
     counting_backend_t flat("flat");
-    fwd_router_t router(g, &tr::mem::heap_source(), &tr::mem::heap_source(), &flat);
+    fwd_router_t router(g, {.flat = &flat});
     rec_link_t b;
     (void)router.add_child("net/ws-client/b", b);
     (void)g.register_vertex(path_t("/light/rgb"), role_t::STORED_VALUE);

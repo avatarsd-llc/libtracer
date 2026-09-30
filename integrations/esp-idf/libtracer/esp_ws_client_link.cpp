@@ -35,6 +35,9 @@ namespace tr::net {
 namespace {
 /** @brief Log tag for this link. */
 constexpr const char* kTag = "ws_client_link";
+/** @brief Minimum spacing of the failed-dial WARN (#1606), microseconds: one line a minute
+ *         at most, whatever the backoff. */
+constexpr std::int64_t kDialWarnIntervalUs = 60LL * 1000 * 1000;
 
 /**
  * @brief The task-watchdog period, seconds — the numerator every blocking bound on
@@ -274,22 +277,20 @@ struct esp_ws_client_link_t::dial_t {
 };
 
 esp_ws_client_link_t::esp_ws_client_link_t(std::string host, std::uint16_t port,
-                                           std::string ws_path, std::string handshake_headers,
-                                           std::size_t rx_bytes, std::size_t tx_bytes,
-                                           std::size_t recv_stack, bool defer_recv)
+                                           const esp_ws_client_config_t& config)
     : host_(std::move(host)),
       port_(port),
-      ws_path_(std::move(ws_path)),
-      handshake_headers_(std::move(handshake_headers)),
+      ws_path_(config.ws_path),
+      handshake_headers_(config.handshake_headers),
       // Allocated ONCE, here, and reused by every dial — not per dial: the three strings
       // are `const` for the link's life, so one slot serves them all and the file's "NO
       // per-frame heap" posture is untouched. Initialized from the MEMBERS above (already
       // moved-to; member init order is declaration order), never from the parameters.
       dial_(std::make_shared<dial_t>(host_, port_, ws_path_, handshake_headers_)),
-      rx_buf_(rx_bytes),
-      tx_buf_(tx_bytes),
+      rx_buf_(config.rx_bytes),
+      tx_buf_(config.tx_bytes),
       tx_(kTxQueueDepth, tr::mem::heap_source()),
-      armed_(!defer_recv) {
+      armed_(!config.defer_recv) {
     // Every member the recv thread reads is initialized ABOVE this line, which is the
     // whole of #959: the thread spawned below dials at once, so a knob delivered after the
     // spawn is a data race, and for a handshake token it also leaves it undefined whether
@@ -302,7 +303,7 @@ esp_ws_client_link_t::esp_ws_client_link_t(std::string host, std::uint16_t port,
     // network. recv_stack==0 uses the pthread default; any other value is APPLIED —
     // this thread runs in-call delivery through the graph's on_write seam, so a node
     // that knows its delivery depth must be able to size it (#900).
-    recv_thread_ = esp::spawn_thread(recv_stack, "ws_cli_rx", [this] { recv_loop(); });
+    recv_thread_ = esp::spawn_thread(config.recv_stack, "ws_cli_rx", [this] { recv_loop(); });
 }
 
 void esp_ws_client_link_t::start_receiving() {
@@ -435,6 +436,10 @@ esp_ws_client_link_t::dial_outcome_t esp_ws_client_link_t::connect_once() {
     // BEFORE it takes this mutex. Either this side wins and publishes an in-flight dial
     // for the destructor to condemn, or the destructor wins and this load sees the stop
     // and never dials at all. There is no third interleaving and hence no window.
+    {
+        const std::lock_guard<std::mutex> lk(st_m_);
+        ++dial_attempts_;  // #1606 ask 1: the attempt is counted whatever it ends as
+    }
     const std::shared_ptr<dial_t> slot = dial_;
     {
         const std::lock_guard<std::mutex> lk(slot->m);
@@ -506,7 +511,34 @@ esp_ws_client_link_t::dial_outcome_t esp_ws_client_link_t::connect_once() {
         slot->tcp = nullptr;
     }
     if (rc != 0) {
-        if (ws_ != nullptr) esp_transport_close(ws_);
+        // #1606 ask 2: release the failed pair HERE, on the failure path, not at the top of
+        // the next attempt — so a link backing off from an unreachable peer holds no
+        // transport pair for the whole backoff. Safe without a lock for the reason the
+        // top-of-dial teardown is: `connected_` is false, so no sender may read either handle.
+        if (ws_ != nullptr) {
+            esp_transport_close(ws_);
+            esp_transport_destroy(ws_);
+            ws_ = nullptr;
+        }
+        if (tcp_ != nullptr) {
+            esp_transport_destroy(tcp_);
+            tcp_ = nullptr;
+        }
+        std::uint32_t failures = 0;
+        {
+            const std::lock_guard<std::mutex> lk(st_m_);
+            failures = ++dial_failures_;
+        }
+        // #1606 ask 1: the failure arm is no longer silent. Rate-limited, because a peer
+        // that stays unreachable fails once per backoff forever; the counter carries the
+        // exact tally, the log only has to say it is happening.
+        const std::int64_t now = esp_timer_get_time();
+        if (failures == 1 || now - last_dial_warn_us_ >= kDialWarnIntervalUs) {
+            last_dial_warn_us_ = now;
+            ESP_LOGW(kTag, "dial ws://%s:%u%s failed (%u failures so far)", host_.c_str(),
+                     static_cast<unsigned>(port_), ws_path_.c_str(),
+                     static_cast<unsigned>(failures));
+        }
         return dial_outcome_t::FAILED;
     }
     // Disable Nagle on the freshly connected socket, symmetric with the server side
@@ -598,6 +630,8 @@ esp_ws_client_link_t::stats_t esp_ws_client_link_t::stats() const {
         const std::lock_guard<std::mutex> lk(st_m_);
         out.c = st_;
         out.reconnects = reconnects_;
+        out.dial_attempts = dial_attempts_;
+        out.dial_failures = dial_failures_;
         out.connect_ms = connect_ms_;
     }
     // Filled from `dropped_rx_`, not kept in `st_`: the receive path already tallies every

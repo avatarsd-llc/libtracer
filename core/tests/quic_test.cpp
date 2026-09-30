@@ -386,7 +386,7 @@ void test_view_delivery_segment_identity() {
         f = tr::view::rope_t{};           // -1: the rope's link is gone before the wake
         got.set_value(std::move(v));      // hand the sole reference to the waiter
     };
-    quic_transport_t listener(std::uint16_t{0}, g_cert, g_key, &rec);
+    quic_transport_t listener(std::uint16_t{0}, g_cert, g_key, {.memory = {.rx = &rec}});
     check(listener.delivers_ropes(), "quic_transport_t::delivers_ropes() is true");
     quic_transport_t dialer("127.0.0.1", listener.local_port(), dev_tls());
 
@@ -421,7 +421,7 @@ void test_backpressure_drain() {
     recording_backend_t rec(2);  // the first two allocations fail
     frame_sink_t sink;
     auto rope_rx = [&](tr::view::rope_t f) { sink.push(f.links()[0].bytes()); };
-    quic_transport_t listener(std::uint16_t{0}, g_cert, g_key, &rec);
+    quic_transport_t listener(std::uint16_t{0}, g_cert, g_key, {.memory = {.rx = &rec}});
     listener.set_rope_receiver(rope_rx);
     quic_transport_t dialer("127.0.0.1", listener.local_port(), dev_tls());
 
@@ -524,10 +524,9 @@ void test_tx_honours_the_connection_cap() {
     constexpr std::size_t kCap = 64 * 1024;
     frame_sink_t sink;
     auto rx = [&](std::span<const std::byte> f) { sink.push(f); };
-    quic_transport_t listener(std::uint16_t{0}, g_cert, g_key, &tr::mem::heap_backend(), kCap);
+    quic_transport_t listener(std::uint16_t{0}, g_cert, g_key, {.max_frame = kCap});
     listener.set_receiver(rx);
-    quic_transport_t dialer("127.0.0.1", listener.local_port(), dev_tls(), &tr::mem::heap_backend(),
-                            kCap);
+    quic_transport_t dialer("127.0.0.1", listener.local_port(), dev_tls(), {.max_frame = kCap});
     check(dialer.ok(), "both ends are up at a 64 KiB configured cap");
 
     // A frame the link really carries, so the shed below cannot be confused with a link that

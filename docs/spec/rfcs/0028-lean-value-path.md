@@ -740,6 +740,46 @@ breaking release is one. **Gate:** `producer-own` 2 → 1 allocation; `graph_t`'
 was unverified; `main` holds ~103) — the count is of what ships, since nothing old is kept.
 **Risk: medium** — the widest API change, the least behaviour change.
 
+**As landed in slice 10** (erratum: the gates are met, and this list records only where the text
+above, §4.9, §4.12, §5.5 or §5.6 proved wrong against the shipped surface; host API only, no wire
+change):
+
+- **Gate figures.** `producer-own` drops from 2 allocations to 1. Each allocation is 8 B
+  larger (16 B: 56 → 64 B), because the header is padded to the block's alignment so the
+  payload behind it keeps `max_align_t`. `graph_t` goes from **91 to 82** public members
+  (doxygen `memberdef`s; 80 → 72 distinct names), and core/CHANGELOG.md records the count.
+- **§5.6 `reader_guard` is a lock object, not the drafted spelling.**
+  `std::is_trivially_destructible_v<G> || requires { G{}; }` admits any type and checks
+  nothing the slot or the pool relies on. The landed concept requires noexcept `lock()` /
+  `unlock()`, a `static G& for_address(const void*)` (address striping is the guard's own
+  business), and the `is_isr_safe` / `is_nonblocking` / `may_spin` / `name` traits.
+  `guard_scope_t<G>` is its RAII scope. `lkv_slot` and `block_source` landed as drafted.
+- **§5.5 folds the other way.** The pool's `pool_sync_policy` does not survive with
+  `reader_guard_t` satisfying it. `pool_sync_policy`, `spin_sync_t`, the `sync_pool_t` alias
+  and `guard_for_t` are **removed**, and `synchronized_pool_t<Sync = reader_guard_t>` takes a
+  `reader_guard`. The ESP `portmux_sync_t` is gone; `critical_pool_t` is
+  `synchronized_pool_t<critical_guard_t>`. The `!kSpinWaitSafe` refusal is on the guard's
+  `may_spin`.
+- **§4.12 `graph_hooks_t` is also settable after construction.** The five slots can be passed
+  to `graph_t`'s constructor, as drafted. `set_hooks` / `hooks()` also exist, because
+  `fwd_router_t` is constructed over an existing graph and installs three of the slots
+  (`remote_delivery`, `wire_target`, `stats_sampler`) by read-modify-write. A router cannot
+  exist before its graph.
+- **§4.12 `vertex_policy_t` carries `depth`, and `set_policy` states the policy whole.**
+  `retention` is optional (unset means the role's default), and `depth` is the `retention_t::N`
+  ring depth. A `set_policy` call resets every member it leaves at the default, so two partial
+  calls do not compose. The policy is taken by value, so an owning `app_fields` table is moved
+  into the vertex, not copied. `set_vertex_ceiling` is graph-wide, not per-vertex as §4.12
+  lists it, and it stays.
+- **§4.9 "every injection point takes a `block_source_t&`" is true of `graph_t` only.**
+  `router_planes_t` and each link's `link_memory_t{rx, io}` keep the pointers of the
+  positional parameters they replace. Their defaults are unchanged, and `rx` is a
+  `mem_backend_t` (the derived seam). `socketcan_transport_t` and `esp_ws_client_link_t` take no `link_memory_t`:
+  neither draws its buffers from an injected seam.
+- **#1606 asks 1–2** landed on `esp_ws_client_link_t::stats_t` (`dial_attempts`,
+  `dial_failures`, and a WARN limited to one a minute). The failed dial's handle pair is now
+  released on the failure path. Ask 3 (lazy construction) is not in this slice.
+
 ## 7. Measurements
 
 ### 7.1 Before (today's tree)

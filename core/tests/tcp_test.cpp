@@ -231,7 +231,7 @@ void test_settings_max_frame() {
     std::printf("TCP transport — a :settings max_frame tightens the receive cap:\n");
     std::atomic<int> delivered{0};
     auto rx = [&](std::span<const std::byte>) { delivered.fetch_add(1); };
-    tcp_transport_t listener(std::uint16_t{0}, &tr::mem::heap_backend(), /*max_frame=*/64);
+    tcp_transport_t listener(std::uint16_t{0}, {.max_frame = 64});
     listener.set_receiver(rx);
 
     raw_client_t client(listener.local_port());
@@ -259,8 +259,7 @@ void test_settings_max_frame_cannot_raise_the_cap() {
     std::printf("TCP transport — a :settings max_frame above the default is clamped:\n");
     std::atomic<int> delivered{0};
     auto rx = [&](std::span<const std::byte>) { delivered.fetch_add(1); };
-    tcp_transport_t listener(std::uint16_t{0}, &tr::mem::heap_backend(),
-                             /*max_frame=*/2 * tcp_transport_t::kMaxFrame);
+    tcp_transport_t listener(std::uint16_t{0}, {.max_frame = 2 * tcp_transport_t::kMaxFrame});
     listener.set_receiver(rx);
 
     raw_client_t client(listener.local_port());
@@ -346,7 +345,7 @@ void test_settings_max_frame_boundary() {
     frame_sink_t sink;
     auto rx = [&](std::span<const std::byte> f) { sink.push(f); };
     alloc_watch_backend_t watch;
-    tcp_transport_t listener(std::uint16_t{0}, &watch, /*max_frame=*/kCap);
+    tcp_transport_t listener(std::uint16_t{0}, {.memory = {.rx = &watch}, .max_frame = kCap});
     check(listener.ok(), "listener bound with a 4 KiB max_frame");
     listener.set_receiver(rx);
 
@@ -445,7 +444,7 @@ void test_view_delivery_segment_identity() {
         f = tr::view::rope_t{};           // -1: the rope's link is gone before the wake
         got.set_value(std::move(v));      // hand the sole reference to the waiter
     };
-    tcp_transport_t listener(std::uint16_t{0}, &rec);
+    tcp_transport_t listener(std::uint16_t{0}, {.memory = {.rx = &rec}});
     check(listener.delivers_ropes(), "tcp_transport_t::delivers_ropes() is true");
     tcp_transport_t dialer("127.0.0.1", listener.local_port());
 
@@ -482,7 +481,7 @@ void test_backpressure_drain() {
     recording_backend_t rec(2);  // the first two allocations fail
     frame_sink_t sink;
     auto rope_rx = [&](tr::view::rope_t f) { sink.push(f.links()[0].bytes()); };
-    tcp_transport_t listener(std::uint16_t{0}, &rec);
+    tcp_transport_t listener(std::uint16_t{0}, {.memory = {.rx = &rec}});
     listener.set_rope_receiver(rope_rx);
     tcp_transport_t dialer("127.0.0.1", listener.local_port());
 
@@ -732,8 +731,7 @@ void test_server_multi_peer_bus() {
     auto a_rx = [&](std::span<const std::byte> f) { at_a.push(f); };
     auto b_rx = [&](std::span<const std::byte> f) { at_b.push(f); };
 
-    tr::net::transport_tcp_server server(0, &tr::mem::heap_backend(), 0, /*max_peers=*/0,
-                                         /*peer_named=*/true);
+    tr::net::transport_tcp_server server(0, {.peer_named = true});
     check(server.ok(), "listen socket bound");
     const std::uint16_t port = server.local_port();
     check(server.bus() != nullptr, "peer_named server exposes the bus_link_t facet (ADR-0044)");
@@ -851,7 +849,7 @@ void test_server_max_peers_cap() {
 
     frame_sink_t srv_rx_sink;
     auto srv_rx = [&](std::span<const std::byte> f) { srv_rx_sink.push(f); };
-    tr::net::transport_tcp_server server(0, &tr::mem::heap_backend(), 0, /*max_peers=*/1);
+    tr::net::transport_tcp_server server(0, {.max_peers = 1});
     check(server.ok(), "capped server bound");
     check(server.bus() == nullptr, "flat server exposes no bus facet");
     server.set_receiver(srv_rx);
@@ -928,7 +926,7 @@ void test_flat_server_down_only_on_last_session() {
     auto srv_rx = [&](std::span<const std::byte> f) { srv_rx_sink.push(f); };
     std::atomic<int> downs{0};
 
-    tr::net::transport_tcp_server server(0, &tr::mem::heap_backend(), 0, /*max_peers=*/0);
+    tr::net::transport_tcp_server server(0);
     check(server.ok(), "flat server bound");
     check(server.bus() == nullptr, "flat server exposes no bus facet (peer_named=false)");
     server.set_receiver(srv_rx);
@@ -1051,7 +1049,7 @@ void test_flat_server_rejects_peer_receiver() {
     auto flat_rx = [&](std::span<const std::byte> f) { flat_sink.push(f); };
     peer_sink_t peer_sink;
 
-    tr::net::transport_tcp_server server(0, &tr::mem::heap_backend(), 0, /*max_peers=*/0);
+    tr::net::transport_tcp_server server(0);
     check(server.ok(), "flat server bound");
     check(server.bus() == nullptr, "flat server exposes no bus facet");
     static_assert(std::is_base_of_v<tr::net::bus_link_t, tr::net::transport_tcp_server> == kBus,
@@ -1096,8 +1094,7 @@ void test_peer_named_server_does_not_downgrade_to_flat() {
     auto flat_rx = [&](std::span<const std::byte> f) { flat_sink.push(f); };
     peer_sink_t peer_sink;
 
-    tr::net::transport_tcp_server server(0, &tr::mem::heap_backend(), 0, /*max_peers=*/0,
-                                         /*peer_named=*/true);
+    tr::net::transport_tcp_server server(0, {.peer_named = true});
     check(server.ok(), "peer-named server bound");
     check(server.bus() != nullptr, "peer-named server exposes the bus facet");
     // The WRONG tier for this mode, and the only one wired.
@@ -1301,8 +1298,7 @@ void test_push_on_connect_waits_for_start_receiving() {
     frame_sink_t sink;
     auto rx = [&](std::span<const std::byte> f) { sink.push(f); };
     {
-        tcp_transport_t dialer("127.0.0.1", peer_listener.port, &tr::mem::heap_backend(),
-                               /*max_frame=*/0, /*recv_stack=*/0, /*defer_recv=*/true);
+        tcp_transport_t dialer("127.0.0.1", peer_listener.port, {.defer_recv = true});
         check(dialer.ok(), "the deferred dialer's connect still happened in the constructor");
         // Installed BEFORE the window: what holds the frame back below is the un-armed link,
         // and nothing else.
@@ -1399,8 +1395,7 @@ void test_start_receiving_is_idempotent() {
     std::atomic<int> delivered{0};
     auto rx = [&](std::span<const std::byte>) { delivered.fetch_add(1); };
     {
-        tcp_transport_t bad("127.0.0.1", dead_port, &tr::mem::heap_backend(), /*max_frame=*/0,
-                            /*recv_stack=*/0, /*defer_recv=*/true);
+        tcp_transport_t bad("127.0.0.1", dead_port, {.defer_recv = true});
         check(!bad.ok(), "the dial to a closed port failed");
         bad.set_receiver(rx);
         bad.start_receiving();
@@ -1423,9 +1418,9 @@ void test_recv_stack_sized() {
     constexpr std::size_t kStack = 512 * 1024;
     frame_sink_t at_listener;
     auto listener_rx = [&](std::span<const std::byte> f) { at_listener.push(f); };
-    tcp_transport_t listener(std::uint16_t{0}, &tr::mem::heap_backend(), 0, kStack);
+    tcp_transport_t listener(std::uint16_t{0}, {.recv_stack = kStack});
     check(listener.ok(), "listener bound with a sized recv stack");
-    tcp_transport_t dialer("127.0.0.1", listener.local_port(), &tr::mem::heap_backend(), 0, kStack);
+    tcp_transport_t dialer("127.0.0.1", listener.local_port(), {.recv_stack = kStack});
     check(dialer.ok(), "dialer connected with a sized recv stack");
 
     listener.set_receiver(listener_rx);

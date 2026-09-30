@@ -39,15 +39,16 @@ it — a `DEVICE`-space backend plugs in by **registering a transfer hook** ([be
 `mem_pool` is the bounded "custom allocator": it carves a **caller-owned** slab
 into fixed slots with the free list threaded *through the slab* (no auxiliary
 heap), and returns `nullptr` when full — the BACKPRESSURE signal. `pool_t` is not
-synchronized; `synchronized_pool_t<Sync>` (`core/include/libtracer/mem_pool.hpp:194`)
-composes over it and guards the free list with a **compile-time synchronisation policy**,
-which is what any shared seam needs — a segment self-routes its reclaim on whatever thread
-drops the last reference, concurrent with a writer's `alloc`. Two policies ship: the
-spinlock `spin_sync_t` for a multi-core host (`sync_pool_t` is the alias for that pairing)
-and the interrupt-disable `tr::esp::portmux_sync_t` for a single-core, priority-preemptive
-MCU (`integrations/esp-idf/libtracer/include/libtracer_esp/critical_pool.hpp`, aliased
-`tr::esp::critical_pool_t` — it needs FreeRTOS headers, so it ships with the ESP-IDF
-component rather than in `core/`). The target picks; nothing defaults to either.
+synchronized; `synchronized_pool_t<Sync>` (`core/include/libtracer/mem_pool.hpp:160`)
+composes over it and guards the free list with a **compile-time reader guard**, which is
+what any shared seam needs — a segment self-routes its reclaim on whatever thread drops the
+last reference, concurrent with a writer's `alloc`. Since RFC-0028 slice 10 the guard is the
+SAME `reader_guard` trait the last-known-value slot uses, and `synchronized_pool_t<>` binds
+the build's one `tr::graph::reader_guard_t`: the host `mutex_guard_t` (a bounded spin, then a
+nap) or, on ESP-IDF, the interrupt-masked `tr::esp::critical_guard_t`
+(`integrations/esp-idf/libtracer/include/libtracer_esp/critical_guard.hpp`; the pool spelling
+is `tr::esp::critical_pool_t` — it needs FreeRTOS headers, so it ships with the ESP-IDF
+component rather than in `core/`). The pool is opt-in; no seam defaults to it.
 
 Each concrete backend also carries four compile-time traits the module set reads
 without a virtual call — `needs_cache_ops`, `is_isr_safe`, `is_nonblocking`, `owns_bytes`
@@ -61,7 +62,7 @@ sanctioned L0↔L1 boundary type, and the only `tr::view` symbol the L0 interfac
 permitted to name
 ([ADR-0016 — substrate, zero-copy, layer namespaces](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0016-substrate-zero-copy-layer-namespaces-no-templates-through-seam.md) §2).
 `alloc` returns a **raw** `segment_t*` with a refcount of 1; the caller adopts it
-with `tr::view::segment_ptr_t::adopt` (`core/include/libtracer/segment.hpp:129`).
+with `tr::view::segment_ptr_t::adopt` (`core/include/libtracer/segment.hpp:130`).
 The handle-producing conveniences `heap_alloc` / `borrow` / `borrow_const`
 therefore live in `tr::view`, not here.
 
@@ -214,12 +215,13 @@ The bounded reference backend:
 
 ### Shared pools and their synchronization policy
 
-A pool shared by more than one thread needs a synchronization policy, and the
-policy is a compile-time parameter rather than a runtime flag so a single-threaded
-target pays nothing for it. `spin_sync_t` is the multi-core host policy;
-`sync_none_t` is the unsynchronized one; a bare-metal target supplies an
-interrupt-disable critical section of its own. `sync_pool_t` is the spelling for
-the common host case.
+A pool shared by more than one thread needs a guard, and the guard is a compile-time
+parameter rather than a runtime flag so a single-threaded target pays nothing for it.
+`synchronized_pool_t<Sync>` takes any `tr::graph::reader_guard` (the one trait the LKV slot
+reads too, RFC-0028 §5.6) and defaults to the build's `reader_guard_t`, so
+`synchronized_pool_t<>` is the spelling for the common case on every target. A guard that
+declares `may_spin` is refused at the instantiation on a build that sets
+`kSpinWaitSafe = false`.
 
 The `pool_source_t` seam has its own policy question, and one deliberate
 non-answer: `sync_mutex_t` lives in a separate header because the L0 seam is
@@ -229,22 +231,13 @@ frequency. It is not a way to make a per-frame source thread-safe — see
 [failable allocation and backpressure](../design/allocation-and-backpressure.md)
 for what a shared free list costs under contention.
 
-```{doxygenconcept} tr::mem::pool_sync_policy
+```{doxygenconcept} tr::graph::reader_guard
 :project: libtracer
-```
-
-```{doxygenstruct} tr::mem::spin_sync_t
-:project: libtracer
-:members:
 ```
 
 ```{doxygenclass} tr::mem::synchronized_pool_t
 :project: libtracer
 :members:
-```
-
-```{doxygentypedef} tr::mem::sync_pool_t
-:project: libtracer
 ```
 
 ```{doxygenclass} tr::mem::sync_mutex_t

@@ -36,7 +36,7 @@ policy, as for any reply.
 router's counters are per-`fwd_router_t`, not per-graph, so L4 cannot reach them and
 Amendment 1 stopped the census at the graph; Amendment 2 inverts the DIRECTION instead of
 the dependency, and the router registers a sampler UP into the graph
-(`graph_t::configure_stats_sampler`) beside the five `{fn, ctx}` seams its constructor
+(`graph_hooks_t::stats_sampler`) beside the five `{fn, ctx}` seams its constructor
 already installs. The wire shape therefore stays one encoder and one block, and L4 still
 names nothing below it.
 

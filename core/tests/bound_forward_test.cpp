@@ -235,8 +235,11 @@ int main() {
     transport_vertex_t net_cli(g_cli, r_cli);
 
     graph_t g_a;
-    g_a.configure_subject_resolver(caller_is_subject,
-                                   nullptr);  // A gates its own relays by inbound link
+    {
+        auto hooks = g_a.hooks();
+        hooks.subject_resolver = {caller_is_subject, nullptr};
+        g_a.set_hooks(hooks);
+    }  // A gates its own relays by inbound link
     fwd_router_t r_a(g_a);
     transport_vertex_t net_a(g_a, r_a);
 

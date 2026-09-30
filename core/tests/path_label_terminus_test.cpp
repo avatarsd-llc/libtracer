@@ -370,7 +370,11 @@ int main() {
     std::printf("\n4) §8.1: a denied operation answers denied and nothing else\n");
     {
         node_t n(/*mint=*/true);
-        n.g.configure_subject_resolver(caller_is_subject, nullptr);
+        {
+            auto hooks = n.g.hooks();
+            hooks.subject_resolver = {caller_is_subject, nullptr};
+            n.g.set_hooks(hooks);
+        }
         // The subject IS the caller context, so a frame arriving on `cli` is subject `cli`.
         // WRITE and nothing else, so the READ below is refused AT THE VERTEX.
         (void)n.g.write(
@@ -501,7 +505,11 @@ int main() {
             const auto gate = [&](node_t& n) {
                 // WRITE always, so both arms can MINT through a granted operation; READ only
                 // on the allow arm, so the read under test is refused AT THE VERTEX.
-                n.g.configure_subject_resolver(caller_is_subject, nullptr);
+                {
+                    auto hooks = n.g.hooks();
+                    hooks.subject_resolver = {caller_is_subject, nullptr};
+                    n.g.set_hooks(hooks);
+                }
                 const std::uint32_t mask =
                     static_cast<std::uint32_t>(tr::graph::acl_right_t::WRITE) |
                     (allow ? static_cast<std::uint32_t>(tr::graph::acl_right_t::READ) : 0u);

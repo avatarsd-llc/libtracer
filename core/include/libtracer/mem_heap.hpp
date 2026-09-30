@@ -326,27 +326,40 @@ class heap_backend_t final : public mem_backend_t {
    public:
     heap_backend_t() noexcept : mem_backend_t("mem_heap") {}
 
-    view::segment_t* alloc(std::size_t size, alloc_hint_t /*hint*/) override {
-        constexpr std::size_t kPayloadAlign = alignof(std::max_align_t);
-        void* raw = size ? heap_source_t::acquire(size, kPayloadAlign) : nullptr;
-        if (size && raw == nullptr) return nullptr;
-        void* const cb = heap_source_t::acquire(sizeof(view::segment_t), alignof(view::segment_t));
-        if (cb == nullptr) {
-            if (raw) heap_source_t::reclaim(raw, size, kPayloadAlign);
-            return nullptr;
-        }
-        return new (cb)
-            view::segment_t(this, std::span<std::byte>(static_cast<std::byte*>(raw), size));
+    /** @brief The block alignment a heap segment is drawn at (payload and header alike). */
+    static constexpr std::size_t kBlockAlign = view::segment_block_align(alignof(std::max_align_t));
+
+    /** @brief One platform-heap block (@ref heap_source_t::acquire) — nothrow. */
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        return heap_source_t::acquire(bytes, align);
+    }
+    /** @brief Return a block @ref try_alloc drew, sized. */
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        heap_source_t::reclaim(p, bytes, align);
     }
 
-    void destroy(view::segment_t* seg) noexcept override {
-        const std::span<std::byte> bytes = seg->bytes;
-        seg->~segment_t();
-        heap_source_t::reclaim(seg, sizeof(view::segment_t), alignof(view::segment_t));
-        if (!bytes.empty()) {
-            heap_source_t::reclaim(bytes.data(), bytes.size(), alignof(std::max_align_t));
-        }
+    /**
+     * @brief ONE heap block per segment: the header and the payload together (RFC-0028 §4.9).
+     *
+     * Two blocks before slice 10 (the bytes, then the control block) — the `producer-own` row
+     * of `bench_lean_value_path`. Draws straight from @ref heap_source_t::acquire rather than
+     * through the virtual @ref try_alloc, so the hot path pays no virtual call.
+     */
+    view::segment_t* alloc(std::size_t size, alloc_hint_t /*hint*/) override {
+        void* const block =
+            heap_source_t::acquire(view::segment_block_bytes(size, kBlockAlign), kBlockAlign);
+        return block != nullptr ? view::place_segment(this, block, size, kBlockAlign) : nullptr;
     }
+
+    /** @brief Return the one block @ref alloc drew. */
+    void destroy(view::segment_t* seg) noexcept override {
+        const std::size_t size = seg->bytes.size();
+        seg->~segment_t();
+        heap_source_t::reclaim(seg, view::segment_block_bytes(size, kBlockAlign), kBlockAlign);
+    }
+
+    /** @brief The payload follows a header padded to @ref kBlockAlign. */
+    [[nodiscard]] std::size_t alignment() const noexcept override { return kBlockAlign; }
 
     [[nodiscard]] backend_tag tag() const noexcept override { return backend_tag::HEAP; }
 

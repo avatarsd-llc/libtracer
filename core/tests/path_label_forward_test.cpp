@@ -495,7 +495,11 @@ int main() {
                 // connection vertex the label dereferences to; the DENY arm grants READ there
                 // and nothing else, so a WRITE is refused at the vertex rather than at the
                 // door — which is exactly the §8.2 re-check under assertion.
-                h.g.configure_subject_resolver(caller_is_subject, nullptr);
+                {
+                    auto hooks = h.g.hooks();
+                    hooks.subject_resolver = {caller_is_subject, nullptr};
+                    h.g.set_hooks(hooks);
+                }
                 (void)h.g.write(
                     path_t("/net/uplink/b:acl"),
                     owned(allow_acl(kInLink, static_cast<std::uint32_t>(

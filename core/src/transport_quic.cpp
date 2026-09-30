@@ -131,13 +131,12 @@ struct quic_transport_t::impl_t : msquic_endpoint_t {
 };
 
 quic_transport_t::quic_transport_t(const std::string& peer_host, std::uint16_t peer_port,
-                                   quic_dial_tls_t tls, mem::mem_backend_t* backend,
-                                   std::size_t max_frame)
+                                   quic_dial_tls_t tls, const quic_config_t& config)
     : impl_(std::make_unique<impl_t>()) {
     impl_t& i = *impl_;
     i.rx = &rx_;  // the delivery-tier slot lives in the transport_t base
-    i.backend = backend;
-    i.max_frame = length_prefix_framer::configured_cap(max_frame);  // tighten-only (#1035)
+    i.backend = config.memory.rx;
+    i.max_frame = length_prefix_framer::configured_cap(config.max_frame);  // tighten-only (#1035)
     // Departure seam (RFC-0009 §D extended to peer departure): wire the base's
     // connection-down / one-peer replacement harvest to this transport_t's flat
     // link-down notifier. quic is point-to-point — one peer at a time — so a
@@ -174,13 +173,12 @@ quic_transport_t::quic_transport_t(const std::string& peer_host, std::uint16_t p
 }
 
 quic_transport_t::quic_transport_t(std::uint16_t bind_port, const std::string& cert_file,
-                                   const std::string& key_file, mem::mem_backend_t* backend,
-                                   std::size_t max_frame)
+                                   const std::string& key_file, const quic_config_t& config)
     : impl_(std::make_unique<impl_t>()) {
     impl_t& i = *impl_;
     i.rx = &rx_;  // the delivery-tier slot lives in the transport_t base
-    i.backend = backend;
-    i.max_frame = length_prefix_framer::configured_cap(max_frame);  // tighten-only (#1035)
+    i.backend = config.memory.rx;
+    i.max_frame = length_prefix_framer::configured_cap(config.max_frame);  // tighten-only (#1035)
     // Departure seam (RFC-0009 §D extended to peer departure): wire the base's
     // connection-down / one-peer replacement harvest to this transport_t's flat
     // link-down notifier. quic is point-to-point — one peer at a time — so a
@@ -285,7 +283,7 @@ transport_vertex_t::transport_factory_t quic_transport_factory(mem::mem_backend_
             t = std::make_unique<quic_transport_t>(
                 s.addr, s.port,
                 quic_dial_tls_t{.ca_file = priv.ca, .insecure_no_verify = priv.insecure},
-                rx_backend, s.max_frame);
+                quic_config_t{.memory = {.rx = rx_backend}, .max_frame = s.max_frame});
             // A refused handshake is TRANSIENT, not a bad address (#929).
             if (!t->ok()) return std::unexpected(graph::status_t::TRANSPORT_DOWN);
             return t;
@@ -294,8 +292,9 @@ transport_vertex_t::transport_factory_t quic_transport_factory(mem::mem_backend_
         // OS picks and `local_port()` reports it. Only an ABSENT key is the config error.
         if (!s.port_set || priv.cert.empty() || priv.key.empty())
             return std::unexpected(graph::status_t::TYPE_MISMATCH);
-        t = std::make_unique<quic_transport_t>(s.port, priv.cert, priv.key, rx_backend,
-                                               s.max_frame);
+        t = std::make_unique<quic_transport_t>(
+            s.port, priv.cert, priv.key,
+            quic_config_t{.memory = {.rx = rx_backend}, .max_frame = s.max_frame});
         // bind/cred failed — the listener did not come up (#929).
         if (!t->ok()) return std::unexpected(graph::status_t::TRANSPORT_DOWN);
         return t;

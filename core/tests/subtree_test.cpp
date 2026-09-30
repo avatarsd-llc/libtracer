@@ -314,11 +314,15 @@ void test_write_creates_acl_gate() {
     (void)g.register_vertex(path_t("/p"), role_t::STORED_VALUE);
     // Enforcement is on for the ATTRIBUTED caller "peer"; the empty (local) context stays
     // trusted without consulting the resolver (#905), which is what the setup writes use.
-    g.configure_subject_resolver(
-        [](void*, std::string_view) -> std::expected<subject_token_t, tr::wire::err_t> {
-            return subject_token_t{std::byte{'u'}};
-        },
-        nullptr);
+    {
+        auto hooks = g.hooks();
+        hooks.subject_resolver = {
+            [](void*, std::string_view) -> std::expected<subject_token_t, tr::wire::err_t> {
+                return subject_token_t{std::byte{'u'}};
+            },
+            nullptr};
+        g.set_hooks(hooks);
+    }
 
     // /p grants WRITE (with INHERIT) but NOT CREATE — creating below /p is denied.
     // Built via the typed ADR-0050 surface (encode_acl) — no hand-rolled ACE bytes.
@@ -352,11 +356,15 @@ void test_branch_write_acl_admission() {
     vertex_handle_t s = g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
     vertex_handle_t st = g.register_vertex(path_t("/s/t"), role_t::STORED_VALUE);
     vertex_handle_t su = g.register_vertex(path_t("/s/u"), role_t::STORED_VALUE);
-    g.configure_subject_resolver(
-        [](void*, std::string_view) -> std::expected<subject_token_t, tr::wire::err_t> {
-            return subject_token_t{std::byte{'u'}};
-        },
-        nullptr);
+    {
+        auto hooks = g.hooks();
+        hooks.subject_resolver = {
+            [](void*, std::string_view) -> std::expected<subject_token_t, tr::wire::err_t> {
+                return subject_token_t{std::byte{'u'}};
+            },
+            nullptr};
+        g.set_hooks(hooks);
+    }
     // Close /s/u to writes (an ACL granting only READ — any present ACE closes it),
     // built via the typed ADR-0050 surface (encode_acl).
     std::vector<std::byte> everyone;

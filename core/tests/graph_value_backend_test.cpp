@@ -131,7 +131,7 @@ int main() {
         std::vector<tr::graph::app_field_t> table;
         table.push_back(
             tr::graph::app_field_t{.name = "kp", .access = tr::graph::app_access_t::RW});
-        g.set_app_fields(v, std::move(table));
+        (void)g.set_policy(v, {.app_fields = std::move(table)});
         return v;
     };
 
@@ -153,7 +153,7 @@ int main() {
         // isolates the flatten is `block_bytes(tlv.size())`. Watching `tlv.size()` would
         // watch a draw the backend no longer makes.
         src.watch(tr::mem::source_backend_t::block_bytes(tlv.size()));
-        graph_t g(&src);
+        graph_t g(src);
         const auto v = with_field(g);
         const auto w = g.write(v, fp->field(), multilink(tlv));
         check(w.has_value(), "multi-link field write through a source-backed graph succeeds");
@@ -181,7 +181,7 @@ int main() {
     {
         // Refuses the flatten's one block (see the watch above), serves all else.
         value_probe_source_t refusing(tr::mem::source_backend_t::block_bytes(tlv.size()));
-        graph_t g(&refusing);
+        graph_t g(refusing);
         const auto v = with_field(g);
         const auto w = g.write(v, fp->field(), multilink(tlv));
         check(refusing.refused() > 0, "the refusing source WAS consulted by the flatten");

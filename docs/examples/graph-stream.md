@@ -9,7 +9,7 @@ the previous flush, not a coalesced last-writer-wins flush
 ## What to notice
 
 - **The depth has no wire surface at all.** It is a *retention intent* only the application
-  can supply, so it is declared owner-side with `set_retention` — not a `:settings` knob.
+  can supply, so it is declared owner-side with `vertex_policy_t::retention` — not a `:settings` knob.
   The withdrawn `history_keep_last` answers `SCHEMA_NOT_FOUND` on read and on write,
   caller-independently
   ([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md)

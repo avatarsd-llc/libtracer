@@ -190,7 +190,7 @@ void test_handle() {
 void test_one_block_per_publish() {
     std::printf("one block per publish:\n");
     value_meter_t src;
-    graph_t g(&src);
+    graph_t g(src);
     const auto v = g.register_vertex(path_t("/v/a"), role_t::STORED_VALUE);
 
     src.watch(1);
@@ -242,7 +242,7 @@ void test_one_block_per_publish() {
 void test_handler_sees_value_without_a_draw() {
     std::printf("handler delivery:\n");
     value_meter_t src;
-    graph_t g(&src);
+    graph_t g(src);
     const auto producer = g.register_vertex(path_t("/h/src"), role_t::STORED_VALUE);
     struct seen_t {
         int calls = 0;
@@ -270,7 +270,7 @@ void test_handler_sees_value_without_a_draw() {
 void test_refusal_is_backpressure() {
     std::printf("refusal:\n");
     value_meter_t src;
-    graph_t g(&src);
+    graph_t g(src);
     const auto v = g.register_vertex(path_t("/r/a"), role_t::STORED_VALUE);
     src.watch(1);
     rope_t first;

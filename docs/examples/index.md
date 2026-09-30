@@ -44,7 +44,7 @@ verbatim from that file, so it cannot drift from what actually compiles.
 | [`subrope` and the iovec egress](view-rope-subrope.md) | L1 views | a sub-range starting mid-link; `walk()`; `try_to_iovec` vs `to_iovec` |
 | [A bounded backend](view-pool-backend.md) | L0/L1 substrate | a caller-owned slab; exhaustion by value; `NO_MEMORY` is transient |
 | [A `DEVICE` link](view-device-rope.md) | L0/L1 substrate | a heterogeneous rope; `NOT_HOST` is permanent; `mem::transfer` declines |
-| [A shared seam needs a thread-safe backend](view-sync-pool.md) | L0/L1 substrate | ADR-0060 §2 `sync_pool_t`; the `kSpinWaitSafe` run-time skip |
+| [A shared seam needs a thread-safe backend](view-sync-pool.md) | L0/L1 substrate | ADR-0060 §2 `synchronized_pool_t<>` over the build's one `reader_guard_t` |
 | [The failable block seam](mem-block-source.md) | L0 substrate | nothrow `try_alloc`, sized `release`, `nullptr` on exhaustion; writing one |
 | [Two L0 seams, and the question that picks](mem-source-vs-backend.md) | L0 substrate | refcounted `segment_t` vs single-owner block — the owner count decides |
 | [A bump source](mem-bump-source.md) | L0 substrate | a cursor over a caller buffer; `release` is a no-op, `reset()` is not |
@@ -135,18 +135,19 @@ minimal module set (`-DLIBTRACER_NET_PLANE=OFF` plus all four transports off) ru
 just listed. Both numbers are written down here so that a *further* disappearance is visible
 rather than indistinguishable from a clean run — which no ctest output distinguishes on its own.
 
-Three targets are conditional at **run** time rather than build time, which is a different hazard
-with the same ending — and two of them still have it while the third does not.
+Two targets are conditional at **run** time rather than build time, which is a different hazard
+with the same ending — and one of them still has it while the other does not.
 [`sub_unsubscribe_from_dispatch`](sub-unsubscribe-from-dispatch) demonstrates
-unsubscribing from inside a delivery — a shape `reclaim_strict_t` forbids — and
-[`view_sync_pool`](view-sync-pool) binds a spin-waiting critical section, which a target that sets
-`tr::mem::kSpinWaitSafe = false` may not instantiate at all. Both are always built; under a
-binding an example does not apply to, it prints `skipped:` and exits `0`, so `ctest` records a
-**pass for an example that demonstrated nothing**. Both knobs are bound as plain C++ rather than CMake
-options, so neither CMake nor ctest can label that case; each binary announces the bound value on
-its first line, and that line is the only place the distinction is visible.
+unsubscribing from inside a delivery — a shape `reclaim_strict_t` forbids. It is always built;
+under a binding it does not apply to, it prints `skipped:` and exits `0`, so `ctest` records a
+**pass for an example that demonstrated nothing**. The knob is bound as plain C++ rather than a
+CMake option, so neither CMake nor ctest can label that case; the binary announces the bound
+value on its first line, and that line is the only place the distinction is visible.
+([`view_sync_pool`](view-sync-pool) used to be a third: it bound a spin-waiting critical section
+that a `kSpinWaitSafe = false` target could not instantiate. Since RFC-0028 slice 10 it binds the
+build's one `reader_guard_t`, which never pure-spins, so it runs unconditionally.)
 
-[`net_multi_peer_listener`](net-multi-peer-listener) is the third, and it is the one that fixes
+[`net_multi_peer_listener`](net-multi-peer-listener) is the other, and it is the one that fixes
 that. Its subject is the ADR-0044 peer-named tier, closed out by `kBusLinks = false` — again a
 C++ binding CMake cannot see — so it too has to follow the binding at run time. But instead of
 exiting `0` it states the skip and exits **77**, and its `add_test` carries `SKIP_RETURN_CODE 77`,

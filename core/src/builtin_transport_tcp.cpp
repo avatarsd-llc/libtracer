@@ -88,14 +88,20 @@ void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
                     // thread running inside it would decode it into an empty sink and drop it
                     // with no counter moving. The vertex calls `start_receiving()` once the link
                     // is fully wired.
-                    return make_checked<tcp_transport_t>(s.addr, s.port, rx_backend, s.max_frame,
-                                                         /*recv_stack=*/std::size_t{0},
-                                                         /*defer_recv=*/true, liveness_window);
+                    return make_checked<tcp_transport_t>(
+                        s.addr, s.port,
+                        tcp_config_t{.memory = {.rx = rx_backend},
+                                     .max_frame = s.max_frame,
+                                     .defer_recv = true,
+                                     .liveness_window_ms = liveness_window});
                 },
                 [&] {
                     return make_checked<transport_tcp_server>(
-                        s.port, rx_backend, s.max_frame, max_peers, peer_named,
-                        /*recv_stack=*/std::size_t{0}, liveness_window);
+                        s.port, tcp_server_config_t{.memory = {.rx = rx_backend},
+                                                    .max_frame = s.max_frame,
+                                                    .max_peers = max_peers,
+                                                    .peer_named = peer_named,
+                                                    .liveness_window_ms = liveness_window});
                 });
             // The ADR-0079 egress store, wired before the link is handed to the router (#873).
             return with_egress_source(std::move(link), egress_src);

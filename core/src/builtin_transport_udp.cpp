@@ -49,12 +49,14 @@ void register_udp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
             auto link = dial_or_listen(
                 s,
                 [&] {
-                    return make_checked<udp_transport_t>(0, s.addr, s.port, rx_backend,
-                                                         s.max_frame);
+                    return make_checked<udp_transport_t>(
+                        0, s.addr, s.port,
+                        udp_config_t{.memory = {.rx = rx_backend}, .max_frame = s.max_frame});
                 },
                 [&] {
-                    return make_checked<udp_transport_t>(s.port, s.addr, 0, rx_backend,
-                                                         s.max_frame);
+                    return make_checked<udp_transport_t>(
+                        s.port, s.addr, 0,
+                        udp_config_t{.memory = {.rx = rx_backend}, .max_frame = s.max_frame});
                 });
             // The ADR-0079 egress store, wired before the link is handed to the router
             // (#873).

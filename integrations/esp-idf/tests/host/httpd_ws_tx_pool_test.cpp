@@ -87,7 +87,8 @@ void drain() {
 
 /** @brief A link that adopts the fake server. */
 std::unique_ptr<httpd_ws_link_t> make_link() {
-    return std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    return std::make_unique<httpd_ws_link_t>(handle(), "/ws",
+                                             tr::net::httpd_ws_config_t{.peer_named = true});
 }
 
 /** @brief Admit @p fd and claim it as a peer (the lazy first-data-frame claim). */
@@ -344,7 +345,11 @@ void test_the_ctor_sizes_bind() {
     constexpr std::size_t kRx = 512;
     constexpr std::size_t kInline = 256;
     auto link =
-        std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true, 0, 0, kRx, kSlots, kInline);
+        std::make_unique<httpd_ws_link_t>(handle(), "/ws",
+                                          tr::net::httpd_ws_config_t{.peer_named = true,
+                                                                     .rx_scratch_bytes = kRx,
+                                                                     .tx_pool_slots = kSlots,
+                                                                     .tx_inline_bytes = kInline});
     check(link->ok(), "the sized link registered its URI");
     check_eq(link->rx_scratch_bytes(), kRx, "it reports the RX scratch it was given");
     check_eq(link->tx_slot_capacity(), kSlots, "it reports the pool depth it was given");

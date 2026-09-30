@@ -46,8 +46,8 @@ bool platform_is_device();
  * and makes the critical section a compile-time policy, because the target — not the
  * library — knows its concurrency model: chip targets get the interrupt-disable
  * `tr::esp::critical_pool_t` (a spinlock would invert priorities on a single-core
- * preemptive scheduler), the linux host target gets the spinlock `tr::mem::sync_pool_t`.
- * Both draw from the SAME caller-owned slab, so the one-slab bound is unchanged.
+ * preemptive scheduler), the linux host target gets `tr::mem::synchronized_pool_t<>` over the host
+ * mutex guard. Both draw from the SAME caller-owned slab, so the one-slab bound is unchanged.
  *
  * The returned backend is a function-local static: it outlives the node and is
  * constructed once, on the first call, from the caller's @p slab.

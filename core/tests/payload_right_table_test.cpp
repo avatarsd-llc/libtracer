@@ -116,7 +116,11 @@ bool denied(const tr::graph::result_t<void>& r) {
 void test_declared_table_selects_the_right() {
     std::printf("Amendment 2: a handler's declared payload type takes its declared right:\n");
     graph_t g;
-    g.configure_subject_resolver(caller_is_subject, nullptr);
+    {
+        auto hooks = g.hooks();
+        hooks.subject_resolver = {caller_is_subject, nullptr};
+        g.set_hooks(hooks);
+    }
 
     // The handler counts what reached it, so a check can tell "the gate refused" from
     // "the gate passed and the handler declined".
@@ -133,7 +137,8 @@ void test_declared_table_selects_the_right() {
         payload_right_t{type_t::SPEC, acl_right_t::CREATE},
         payload_right_t{type_t::NAME, acl_right_t::WRITE},
     };
-    const vertex_handle_t v = g.register_vertex(path_t("/ctl"), role_t::HANDLER, handlers, rights);
+    const vertex_handle_t v =
+        g.register_vertex(path_t("/ctl"), role_t::HANDLER, handlers, {}, rights);
     check(g.write(path_t("/ctl:acl"), make_value(allow({{"peer-c", acl_right_t::CREATE},
                                                         {"peer-w", acl_right_t::WRITE}})))
               .has_value(),
@@ -166,7 +171,11 @@ void test_declared_table_selects_the_right() {
 void test_undeclared_handler_is_unchanged() {
     std::printf("\nablation — a handler that declares no table gates every type on WRITE:\n");
     graph_t g;
-    g.configure_subject_resolver(caller_is_subject, nullptr);
+    {
+        auto hooks = g.hooks();
+        hooks.subject_resolver = {caller_is_subject, nullptr};
+        g.set_hooks(hooks);
+    }
     tr::graph::handlers_t handlers;
     auto handlers_on_write2 = [](const tr::graph::value_t&,
                                  const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {
@@ -215,7 +224,11 @@ tr::view::view_t fake_spec(std::string_view name) {
 void test_creator_endpoint_splits_create_from_remove() {
     std::printf("\n§5: the creator endpoint declares SPEC=>CREATE, NAME=>WRITE:\n");
     graph_t node;
-    node.configure_subject_resolver(caller_is_subject, nullptr);
+    {
+        auto hooks = node.hooks();
+        hooks.subject_resolver = {caller_is_subject, nullptr};
+        node.set_hooks(hooks);
+    }
     fwd_router_t router(node);
     transport_vertex_t net(node, router);
     declare_fake_module(net);

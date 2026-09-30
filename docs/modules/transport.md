@@ -50,7 +50,7 @@ A transport that can hand up *owning* frames implements the rope-receiver seam
 view delivery](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md),
 generalized to ropes by [ADR-0053 — lazy rope-backed decode, view partial-path
 routing](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0053-lazy-rope-backed-decode-view-partial-path-routing.md)):
-it overrides `delivers_ropes()` (`core/include/libtracer/transport.hpp:707`) and
+it overrides `delivers_ropes()` (`core/include/libtracer/transport.hpp:736`) and
 delivers each inbound frame as a `rope_t` of refcounted links over segments drawn
 from a host-injected `mem_backend_t`. A contiguous frame is the single-link case; a
 scattered one — a CAN reassembly group, a fragmented WebSocket message — crosses the
@@ -65,10 +65,10 @@ the rope form for an owning link, the span form otherwise (`fwd_router.cpp:1198,
 `fwd_router.cpp:1136,1143` for the peer-named bus equivalent).
 
 Every socket transport in the tree declares the owning tier: UDP
-(`transport_udp.hpp:111`), TCP client and server (`transport_tcp.hpp:236,427`),
-WebSocket server and client (`transport_ws.hpp:280,507`), CAN
-(`transport_can.hpp:606`), QUIC (`transport_quic.hpp:153`) and WebTransport
-(`transport_webtransport.hpp:235`). The borrowed-span path is the base-class default
+(`transport_udp.hpp:117`), TCP client and server (`transport_tcp.hpp:278,429`),
+WebSocket server and client (`transport_ws.hpp:309,491`), CAN
+(`transport_can.hpp:606`), QUIC (`transport_quic.hpp:162`) and WebTransport
+(`transport_webtransport.hpp:237`). The borrowed-span path is the base-class default
 and the tier an out-of-tree transport gets for free.
 
 ## Point-to-point links and bus links
@@ -130,7 +130,7 @@ edges along with the departed one's.
 ## Closing the bus module out at build time
 
 The peer-named tier is a **module**, and a node whose links are all point-to-point does not
-have to carry it. `tr::graph::default_config_t::kBusLinks` (`core/include/libtracer/config.hpp:518`)
+have to carry it. `tr::graph::default_config_t::kBusLinks` (`core/include/libtracer/config.hpp:516`)
 is the knob; bound `false` by an
 [ADR-0068](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0068-build-configuration-is-plain-cpp-config-header.md)
 override fragment, not a `-D`:
@@ -146,7 +146,7 @@ using config_t = flat_node_config_t;
 ```
 
 The routing plane reaches the facet through exactly one door, `tr::net::bus_of`
-(`core/include/libtracer/transport.hpp:869`), and every consumer asks there: the registry's
+(`core/include/libtracer/transport.hpp:898`), and every consumer asks there: the registry's
 mount-shape stamp and its two peer-resolution paths, `fwd_router_t::add_child`'s peer wiring,
 and the connection vertex's synthesized peer listing. `transport_t::bus()` itself is
 untouched — still a virtual, still `nullptr` by default — so a transport may still *be* a
@@ -352,7 +352,7 @@ flowchart LR
   and a callable destroyed early dangles exactly like a stale `ctx`.
 - **Overriding `send(iov)` is not optional for a scatter-gather wire.** The base
   implementation gathers into a temporary buffer and, when that allocation fails,
-  **drops the frame** rather than aborting (`transport.hpp:494`). A transport with a
+  **drops the frame** rather than aborting (`transport.hpp:523`). A transport with a
   native `sendmsg`/`writev` that does not override it silently pays a copy per
   forward hop and inherits a drop path it did not intend.
 - **The egress gather draws from the link's own injected store.** That temporary — and
@@ -489,12 +489,32 @@ counted and closed rather than blocked on forever (#838):
 
 ### Datagram and stream transports
 
+```{doxygenstruct} tr::net::link_memory_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::net::udp_config_t
+:project: libtracer
+:members:
+```
+
 ```{doxygenclass} tr::net::udp_transport_t
 :project: libtracer
 :members:
 ```
 
+```{doxygenstruct} tr::net::tcp_config_t
+:project: libtracer
+:members:
+```
+
 ```{doxygenclass} tr::net::tcp_transport_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::net::tcp_server_config_t
 :project: libtracer
 :members:
 ```
@@ -506,7 +526,17 @@ counted and closed rather than blocked on forever (#838):
 
 ### WebSocket
 
+```{doxygenstruct} tr::net::ws_client_config_t
+:project: libtracer
+:members:
+```
+
 ```{doxygenclass} tr::net::transport_ws_client
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::net::ws_server_config_t
 :project: libtracer
 :members:
 ```
@@ -574,12 +604,22 @@ computation — is pure and lives in `tr::net::ws`:
 
 ### QUIC and WebTransport (the optional module)
 
+```{doxygenstruct} tr::net::quic_config_t
+:project: libtracer
+:members:
+```
+
 ```{doxygenclass} tr::net::quic_transport_t
 :project: libtracer
 :members:
 ```
 
 ```{doxygenstruct} tr::net::quic_dial_tls_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::net::webtransport_config_t
 :project: libtracer
 :members:
 ```

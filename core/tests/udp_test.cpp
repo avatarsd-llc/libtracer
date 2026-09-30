@@ -275,7 +275,7 @@ void test_view_pool_exhaustion() {
 
     std::atomic<int> delivered{0};
     auto rope_rx = [&](tr::view::rope_t) { delivered.fetch_add(1); };
-    tr::net::udp_transport_t b(0, "", 0, &pool);
+    tr::net::udp_transport_t b(0, "", 0, {.memory = {.rx = &pool}});
     tr::net::udp_transport_t a(0, "127.0.0.1", b.local_port());
     check(a.ok() && b.ok(), "both UDP sockets bound");
 
@@ -321,9 +321,9 @@ void test_settings_max_frame() {
     {
         const tr::net::udp_transport_t plain(0, "127.0.0.1", 1);
         check(plain.effective_max_frame() == kMax, "unset max_frame keeps the kMaxDatagram cap");
-        const tr::net::udp_transport_t tight(0, "127.0.0.1", 1, &tr::mem::heap_backend(), kCap);
+        const tr::net::udp_transport_t tight(0, "127.0.0.1", 1, {.max_frame = kCap});
         check(tight.effective_max_frame() == kCap, "a configured max_frame IS the honored cap");
-        const tr::net::udp_transport_t wide(0, "127.0.0.1", 1, &tr::mem::heap_backend(), 8 * kMax);
+        const tr::net::udp_transport_t wide(0, "127.0.0.1", 1, {.max_frame = 8 * kMax});
         check(wide.effective_max_frame() == kMax,
               "a max_frame above the datagram ceiling is inert (it cannot raise the bound)");
     }
@@ -338,7 +338,7 @@ void test_settings_max_frame() {
         lens.push_back(v.bytes().size());
         seg_lens.push_back(v.owner ? v.owner->bytes.size() : 0);
     };
-    tr::net::udp_transport_t b(0, "", 0, &tr::mem::heap_backend(), kCap);
+    tr::net::udp_transport_t b(0, "", 0, {.max_frame = kCap});
     tr::net::udp_transport_t a(0, "127.0.0.1", b.local_port());
     check(a.ok() && b.ok(), "both UDP sockets bound");
     b.set_rope_receiver(rope_rx);
@@ -406,7 +406,7 @@ void test_settings_max_frame() {
         last_span_len.store(f.size(), std::memory_order_relaxed);
         spans.fetch_add(1);
     };
-    tr::net::udp_transport_t d(0, "", 0, &tr::mem::heap_backend(), kCap);
+    tr::net::udp_transport_t d(0, "", 0, {.max_frame = kCap});
     tr::net::udp_transport_t c(0, "127.0.0.1", d.local_port());
     check(c.ok() && d.ok(), "the borrowed-path socket pair bound");
     d.set_receiver(span_rx);
@@ -458,14 +458,14 @@ void test_two_nodes_zero_copy_store() {
     graph_t node_a, node_b;
     tr::net::fwd_router_t router_a(node_a);
     tr::net::fwd_router_t router_b(node_b);
-    tr::net::udp_transport_t tb(0, "", 0, &rec);
+    tr::net::udp_transport_t tb(0, "", 0, {.memory = {.rx = &rec}});
     tr::net::udp_transport_t ta(0, "127.0.0.1", tb.local_port());
 
     // B's target vertex carries its share threshold as an OWNER-side declaration (never a
     // remote write): 68 >= 64 => shared.
     tr::graph::vertex_handle_t v =
         node_b.register_vertex(path_t("/sensor/blob"), role_t::STORED_VALUE);
-    node_b.set_share_threshold_bytes(v, 64);
+    (void)node_b.set_policy(v, {.share_threshold_bytes = 64});
     (void)router_a.add_child("b", ta);
     (void)router_b.add_child("a", tb);  // tb delivers views => the owning receiver is installed
 
