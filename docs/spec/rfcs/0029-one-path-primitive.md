@@ -9,19 +9,19 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0029 |
 | **Title** | One path primitive: the owner-issued `(index, generation)` pair, carried per hop, local = forwarded |
-| **Status** | **draft** (2026-09-29). The design of §§4–11 was **ruled** by the maintainer on 2026-09-29 in [#1631](https://github.com/avatarsd-llc/libtracer/issues/1631) (the issue body and its feasibility comment, rulings 1–4); this document transcribes those rulings in normative form and resolves the one fact the comment left open (§8.2). The first-fire learn of §7.2, which closes ruling 7's two gaps, was **confirmed by the maintainer on 2026-09-29** and is adopted, not proposed. It proposes nothing that was not ruled, except where a section says so in so many words (§14). |
+| **Status** | **accepted** (2026-09-30; proposed 2026-09-29), maintainer-ratified on [PR #1634](https://github.com/avatarsd-llc/libtracer/pull/1634) with all recommendations; comment window waived by default per [GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window" (solo-maintainer clause) and not invoked. The design of §§4–11 was **ruled** by the maintainer on 2026-09-29 in [#1631](https://github.com/avatarsd-llc/libtracer/issues/1631) (the issue body and its feasibility comment, rulings 1–4); this document is its transcription in normative form, not a proposal seeking a direction. The first-fire learn of §7.2 was confirmed on 2026-09-29, and **§8.2's rule — a same-named re-add MUST bump the generation — stands as written.** **All five §16 questions are RULED at acceptance (2026-09-30)**: `PATH_REF_REVERSE` is spelled as a `PATH` of PAIR/NAME elements (§7.1), the first-fire learn answers to **one node-local endpoint per node** with the edge named in the reply's `dst` tail (§7.2), a **per-boot epoch** complements §8.2 rule 2 on transports that cannot report a session boundary (§8.2 rule 4), `kind = 0x16` is reused with `len = 8` (§5.1), and `vertex_handle_t` is `(u32, u32)` by value with any ISR pointer fast door left to S7's bench as a compile-time option (§4.3). **S3 deletes the RFC-0027 table**, superseding [#1668](https://github.com/avatarsd-llc/libtracer/issues/1668), [#1669](https://github.com/avatarsd-llc/libtracer/issues/1669) and [#1647](https://github.com/avatarsd-llc/libtracer/issues/1647); the RFC ships as **v0.18.0** (§13.3). Spec, reference, `CONTEXT.md` and code edits land slice by slice (§13); S0 is this document plus §12's text. |
 | **Author(s)** | AvatarSD (maintainer), with AI drafting |
 | **Created** | 2026-09-29 |
 | **Comment window** | waived by default while solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"); invoke explicitly if outside input is wanted. Verified at drafting: `docs/implementations.md` still lists no registered implementation, so the waiver's revert trigger has not fired. |
 | **Instrument** | **Amendment.** This retires a type code's meaning (`0x14`), widens an escape record's payload (`kind = 0x16`), withdraws a flag bit's meaning (`FWD` `op` bit 7), changes what a relayed `REPLY` carries in `src`, and deletes a per-hop table that was normative. Every one of those is a wire-surface change; GOVERNANCE.md names a new or altered frame shape as amendment territory. **No backward compatibility is owed** — the project takes none (the RFC-0028 ruling, restated as ruling 10 in §3). |
 | **Tracking issue** | [#1631](https://github.com/avatarsd-llc/libtracer/issues/1631) |
 | **Target spec version** | v1 itself. `docs/spec/v1.md` still reads "(DRAFT)" and "The wire format is not yet stable". Same route RFC-0018, RFC-0023, RFC-0024, RFC-0026 and RFC-0027 took. |
-| **Scope** | **v-NEXT.** Gates no release. Runs beside RFC-0028 (the lean value path, [#1627](https://github.com/avatarsd-llc/libtracer/pull/1627)) and blocks none of its slices (§13.3). |
-| **Supersedes** | [RFC-0027](0027-label-switched-path-compression.md) as a *form* (the 16/16 path label and its per-hop table — §12.3); [RFC-0024](0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §7.1 (request flag, reply trailing list, strip-whole-list), §7.5 (`op` bit 7) and the `0x14` spelling of §4.1 (§12.2); RFC-0027 §9 ("local IO is out of scope" — withdrawn by ruling 2). |
+| **Scope** | **v0.18.0** (ruled 2026-09-30: v0.17.0 is cut after [#1670](https://github.com/avatarsd-llc/libtracer/issues/1670) without it). Runs beside RFC-0028 (the lean value path, [#1627](https://github.com/avatarsd-llc/libtracer/pull/1627)) and blocks none of its slices (§13.3). |
+| **Supersedes** | [RFC-0027](0027-label-switched-path-compression.md) as a *form* (the 16/16 path label and its per-hop table — §12.3); [RFC-0024](0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §7.1 (request flag, reply trailing list, strip-whole-list, and amendments 1–2's bare-array body for `0x15`), §7.5 (`op` bit 7) and the `0x14` spelling of §4.1 (§12.2); RFC-0027 §9 ("local IO is out of scope" — withdrawn by ruling 2). |
 | **Descends from** | [RFC-0024](0024-bound-paths-node-scoped-vertex-ref-source-routing.md) (the element — kept verbatim), [RFC-0027](0027-label-switched-path-compression.md) (the distribution rules — kept; §15 clause 5 is the falsifier this RFC fires), [RFC-0004](0004-remote-operation-addressing.md) §A/§B (path-as-route — unchanged model), [#830](https://github.com/avatarsd-llc/libtracer/issues/830) (the local edge binding), the [#1629](https://github.com/avatarsd-llc/libtracer/pull/1629) ruling (no per-request state at a hop) |
 
-> **Numbering note.** 0028 is taken by the open draft [#1627](https://github.com/avatarsd-llc/libtracer/pull/1627)
-> (`0028-lean-value-path.md`, not yet on `main`); 0012 and 0015 are dead gaps that are not reusable
+> **Numbering note.** 0028 is [RFC-0028](0028-lean-value-path.md) (the lean value path,
+> [#1627](https://github.com/avatarsd-llc/libtracer/pull/1627)); 0012 and 0015 are dead gaps that are not reusable
 > ([RFC-0016](0016-composed-branch-read.md) §ghost history). 0029 is the next unused number.
 
 ---
@@ -200,7 +200,7 @@ NAME or a PAIR, in any order. A node that cannot issue a PAIR for its part — a
 a saturated slot, a connection vertex that does not exist yet — leaves that part as NAMEs and every
 other node's part still compacts. Because every element self-describes by its kind and is read by
 exactly one node, **skipping is not expressible**; RFC-0024 §7.1 erratum 1's strip-whole-list rule
-exists only for the positional `PATH_REF` array and is retired with it (§5.3).
+exists only for positional arrays and is retired with both of them (§5.3, §7.1).
 
 ### 4.3 `vertex_handle_t` is the pair (ruling 2)
 
@@ -208,7 +208,11 @@ exists only for the positional `PATH_REF` array and is retired with it (§5.3).
 — the same two `u32` a wire element carries — and every host-API entry (`read`, `write`, `await`,
 `subscribe`, `retire`, the `:`-field doors) takes it. Dereference is `deref_vertex_slot`'s three
 tests. RFC-0027 §9's boundary ("a label never appears in a host-API call") is withdrawn: there is
-no longer a second thing that could appear there.
+no longer a second thing that could appear there. **Representation, ruled 2026-09-30 (§16 Q5):**
+`(u32 index, u32 generation)` **by value** — 8 B on both targets. Whether the ISR publisher
+(`docs/reference/00-overview.md` claim 6) keeps a pointer-returning fast door is decided by S7's
+bench; if it is kept, it is a **compile-time option** (the compile-time-by-default doctrine), never
+a second runtime handle type.
 
 *What this costs, stated.* The pointer handle of ADR-0056 has "identical codegen" to `vertex_t*`
 (`core/include/libtracer/graph.hpp:73-91`), and RFC-0027 §3.2 measured `deref_vertex_slot` at a
@@ -224,7 +228,9 @@ handle". §13's slice for it is bench-gated (§13.2 S7) and §15 clause 3 is its
 **Normative.** The `PATH` body grammar of RFC-0018 §5 with RFC-0027 amendment 5's escape arm, one
 change: the escape record of `kind = 0x16` carries **`len = 8`**, a `u32 index` then a `u32
 generation`, little-endian. A `kind = 0x16` record of any other length is malformed and refuses the
-address (`INVALID_PATH`), never the frame. A hop that does not implement this kind steps over it by
+address (`INVALID_PATH`), never the frame. **Reusing `kind = 0x16` rather than minting a fresh kind
+is ruled (2026-09-30, §16 Q4)**: a retired 7-byte RFC-0027 record is simply "malformed", and no
+diagnostic distinguishes it. A hop that does not implement this kind steps over it by
 its declared length and relays it (RFC-0018 §5.4 amendment 1), as today.
 
 `docs/spec/v1.md` §3.1's path-handle conformance is untouched: a **canonical key** — a path handle,
@@ -260,8 +266,10 @@ replaces both the descent and the terminus walk.
 - **The `kind = 0x16`, `len = 4` label element** of RFC-0027 amendment 5, with its `(u16, u16)`
   payload, `kPathLabelMaxGeneration` retirement and owner check.
 
-**Kept, unchanged:** `0x15` `PATH_REF_REVERSE` (§7.1), with RFC-0024 §7.1 amendments 1–2's body
-grammar and erratum 3's empty-`PATH` re-heading; RFC-0004 §E.1's `ADVERTISE`/`COMPACT`/`HANDLE_NACK`
+**Kept, with its body re-spelled:** `0x15` `PATH_REF_REVERSE` (§7.1) keeps its type code, its
+role and erratum 3's empty-`PATH` re-heading; its body becomes the `PATH` element grammar of §4
+(ruled 2026-09-30), which retires RFC-0024 §7.1 amendments 1–2's bare-array grammar and erratum 1's
+strip rule with it. **Kept, unchanged:** RFC-0004 §E.1's `ADVERTISE`/`COMPACT`/`HANDLE_NACK`
 (§9.2); every `FWD`/`FIELD`/`REPLY` layout of RFC-0004 §B–§D.
 
 ## 6. The per-hop algorithm
@@ -376,10 +384,17 @@ places the learning on the **subscribe request's** forward legs.
 connection vertex point-to-point, the accepted session's anchor for a bus arrival
 (`reverse_hop_ref`, `core/src/fwd_router.cpp:1352`) — to the request's trailing `PATH_REF_REVERSE`
 (`0x15`) child, creating the child if the request carries none. No flag gates this (bit 7 is gone,
-§5.3). A hop that cannot contribute **strips** the child (RFC-0024 §7.1 erratum 1 stays in force for
-this one positional list, because a `0x15` body is a bare array). The responder completes the list
-with element 0 — its own PAIR for the egress toward the writer — and stores it beside the canonical
-return route (`subscriber_remote_t::reverse_route` / `return_route`,
+§5.3).
+
+**The `0x15` body is a `PATH` of path elements** (§4.1–§4.2; ruled 2026-09-30, §16 Q1), not a
+positional array. A hop that cannot issue a PAIR for its arrival contributes its inbound mount run
+as **NAMEs** — never nothing, the §6.2 rule on the request leg — so the list is never stripped and
+never skips a hop. RFC-0024 §7.1 erratum 1's strip-whole-list rule and amendments 1–2's bare-array
+grammar are **retired** with the last positional list. The price is **+3 B per element, on the
+subscribe request leg only**: deliveries spell the learned chain in `dst` exactly as §4.2 does, so
+the steady-state delivery frame does not grow. The responder completes the list
+with element 0 — its own PAIR (or NAME run) for the egress toward the writer — and stores it beside
+the canonical return route (`subscriber_remote_t::reverse_route` / `return_route`,
 `core/include/libtracer/subscriber.hpp:217-233`), exactly as amendment 1 already specifies.
 
 Each delivery then spells `dst` as the stored chain: element 0 is consumed locally (§6 step 3, the
@@ -399,14 +414,23 @@ host-local dual every board→peer wire uses, installs an edge with a string res
 nothing on the wire at subscribe time, so there is no request leg to learn from.
 
 **Normative — the first-fire learn (ruled 2026-09-29).** An edge whose target is reached through a link and that
-holds **no chain** sends its **first** delivery with a non-empty `src` — a node-local reply endpoint
-the edge owns — so that the terminus answers a `REPLY` whose `src` carries the forward chain per
-§6.2. The edge adopts that chain; every later delivery is `src`-empty as today. A chain the edge
+holds **no chain** sends its **first** delivery with a non-empty `src` — the node's learn endpoint
+followed by a tail that names the edge — so that the terminus answers a `REPLY` whose `src` carries
+the forward chain per §6.2. The edge adopts that chain; every later delivery is `src`-empty as today. A chain the edge
 holds is spent until a refusal or a departure clears it (§8), at which point the next fire is again
 a learning fire. One reply per learn is the whole cost; no new frame and no new field. This is
 RFC-0027 §6.2's "each subscription's first fire triggers minting" applied to the edges that have
 no request leg, and it closes both gaps with one rule: the mount-routed edge and the
 `subscribe_toward` edge both start with no chain and both learn on their first fire.
+
+**Normative — the reply endpoint (ruled 2026-09-30, §16 Q2).** A node has **one** node-local learn
+endpoint, shared by every edge on it. The learning fire's `src` is that endpoint's route with the
+**edge identified in the tail**; the reply's `dst` is consumed back to the endpoint (§6.1) and the
+residual tail selects the edge. There is **no per-edge endpoint segment**: that would cost RAM ×
+edges, and the cost lands on the narrow targets that hold the most edges per byte. A reply whose
+tail names no live edge (the edge was removed while the learn was in flight) is dropped; the next
+fire of a surviving edge learns again. The tail's spelling is S5's; it is node-local and no other
+host reads it.
 
 ### 7.3 The durable entry (lt#1623's shape)
 
@@ -491,6 +515,13 @@ form; a pair issued against the previous tenancy MUST NOT resolve to it. Normati
    **generation-only door** on `graph_t` (working name `restamp(vertex_handle_t)`): the same
    saturating CAS as `revert_to_placeholder`'s, under the map lock, and nothing else. A vertex the
    embedder then retires bumps twice; on a saturating `u32` that is free.
+4. **Per-boot epoch, for transports that cannot report a session boundary** (ruled 2026-09-30,
+   §16 Q3). Rule 2 fires on `link_down`; a connectionless transport (UDP, CAN) never reports one,
+   so a far node can reboot behind a kept tenancy unseen. Such a link carries the far node's
+   **per-boot epoch** — a value that changes on every boot — **once per session or advertise, never
+   per frame**; a host that observes a changed epoch treats it as a session boundary and applies
+   rule 2's bump. The epoch is **not** part of the pair: generations still only move forward within
+   a boot and the element stays `(u32, u32)`. Its wire spelling lands with S4.
 
 **Rejected: "same-named re-add is the same identity, old pairs may resolve to it."** It is
 consistent with ruling 4 for the hop's own element and inconsistent with it for every element after
@@ -576,12 +607,13 @@ element rather than deleted — it is the origin-side cache §6.2 fills.
 
 - The `0x06` bullet: `kind = 0x16` carries `len = 8`, `(u32 index, u32 generation)` LE; the
   "reserved for the label element of RFC-0027" clause becomes "the path element of RFC-0029".
-- The `0x14` bullet is **deleted**; `0x15` is kept with its body grammar, its role restated as §7.1.
+- The `0x14` bullet is **deleted**; `0x15` is kept as a type code, its body re-spelled as a `PATH`
+  of path elements and its role restated as §7.1.
 - The routing-semantics passage: delete the `op` bit 7 mint request, the "hop forwarding a reply
   that carries a mint answer MUST either prepend or strip" clause, and the multi-element
   silent-drop scope of §5.3 erratum 4; add §6 (per-hop algorithm), §6.2 (reply `src` carries the
   forward route, NAME or PAIR, never nothing), §6.3 (`NOT_FOUND` on every arm), §6.4
-  (spelling-independent authorization), §8.2 (tenancy/session bump).
+  (spelling-independent authorization), §8.2 (tenancy/session bump, and rule 4's per-boot epoch).
 - The "§`0x06` §path label element" incorporation paragraph is replaced by one incorporating this
   RFC's §§4–10: one element kind, node-scoped, address-never-capability, passive learning on the
   reply `src`, `NOT_FOUND` fallback, saturate-never-wrap, no withdraw/lease/TTL.
@@ -590,8 +622,9 @@ element rather than deleted — it is the origin-side cache §6.2 fills.
 ### 12.2 RFC-0024
 
 Kept as normative and cited from here: §4.4 (the element), §5 (validation), §6 (ACL), §6.4 (the
-index), §7.1 amendments 1–2 and erratum 3 (`PATH_REF_REVERSE`). **Superseded**: §4.1's `0x14` type
-as an address form, §7.1 steps 1–4 and erratum 1 for the forward list, §7.5 (bit 7 and the
+index), §7.1 erratum 3 (`PATH_REF_REVERSE`'s re-heading) and amendment 2's `0x15` type code.
+**Superseded**: §4.1's `0x14` type as an address form, §7.1 steps 1–4, erratum 1 (for both lists),
+amendments 1–2's bare-array body for `0x15` (now a `PATH`, §7.1), §7.5 (bit 7 and the
 forward-list ledger), §5.3 erratum 4's silent-drop arm, §9.3's flag clause (the mask stays). §2.1's
 "no hop holds anything" is **restored as the property of the one form**. A status-row note on
 RFC-0024 records this at acceptance.
@@ -651,11 +684,11 @@ their number.
 | **S0** | spec | this RFC accepted; §12's text lands (`v1.md`, the reference pages, `CONTEXT.md`, status rows on 0024/0027) | doc gates |
 | **S1** | element + hop arm | `kind = 0x16, len = 8` encoder/decoder; §6's PAIR arm in `route_fwd_ingress` for a `PATH`-spelled `dst` (deref → egress / terminus / refuse); terminus applies `apply_op`; `NOT_FOUND` on every refusal; `0x14` refused as a `dst` | conformance vectors (§13.4); `bench_hop_chain` and `bench_forward_*` level |
 | **S2** | learning | §6.2 reply-`src` accumulation (PAIR or NAME run, never nothing) at hop, terminus and origin; origin adoption into `path_t` (generalised `cache_path_label`), string fallback on `NOT_FOUND`; delete bit 7, `mint_request`, the trailing reply list, `route_bound_forward` | `reply-spread` four-link arm inside the A/A null band (RFC-0024 §8.2 clause 3); round-trip test replacing `path_label_origin_test` |
-| **S3** | delete the table | every §11 row for RFC-0027; `label_peer` and `next_label_peer_bits` | ratchet shows the §11 deltas; `bench_path_label` retired |
-| **S4** | the bump (§8.2) | `graph_t::restamp`; `remove_child` and point-to-point `link_down` call it; tests: remove + same-name re-add refuses the old pair; link loss + re-up refuses the old pair; the RFC-0014 teardown still works with the double bump | `bound_forward_test` extended; no hot-path change |
-| **S5** | subscriptions (§7) | `PATH_REF_REVERSE` unconditional (no flag); first-fire learn for mount-routed (`graph.cpp:3480`) and `subscribe_toward` edges; the edge's owned reply endpoint; `deliver_remote` unconditional chain-first | `fwd_two_mount_test`, `bound_forward_test` delivery arms; `bench_compact_delivery` level |
+| **S3** | delete the table | every §11 row for RFC-0027; `label_peer` and `next_label_peer_bits`; supersedes #1668, #1669, #1647 (§13.3) | ratchet shows the §11 deltas; `bench_path_label` retired |
+| **S4** | the bump (§8.2) | `graph_t::restamp`; `remove_child` and point-to-point `link_down` call it; rule 4's per-boot epoch on UDP/CAN links (once per session or advertise); tests: remove + same-name re-add refuses the old pair; link loss + re-up refuses the old pair; the RFC-0014 teardown still works with the double bump | `bound_forward_test` extended; no hot-path change |
+| **S5** | subscriptions (§7) | `PATH_REF_REVERSE` unconditional (no flag) and spelled as a `PATH`; first-fire learn for mount-routed (`graph.cpp:3480`) and `subscribe_toward` edges; the node's one learn endpoint, edge named in the tail; lands after #1533; `deliver_remote` unconditional chain-first | `fwd_two_mount_test`, `bound_forward_test` delivery arms; `bench_compact_delivery` level |
 | **S6** | one lookup, one gate (ruling 9) | a NAME-spelled prefix resolves by the tree walk to the connection vertex and `ctx_by_conn_slot` yields the egress; the registry keeps egress state only; **one `allows` site** for both arms of §6 step 3 | `bench_mount_resolve` A/B: the tree walk must not lose to `longest_prefix`'s 25 ns/pass at W = 12, N = 64, or S6 keeps the registry index as an *accelerator* of the same lookup |
-| **S7** | host API (ruling 2) | `vertex_handle_t` = pair by value; `target_binding_t` folds into it; `graph_t` entries take the pair | local read/write/await A/B against the pointer handle — the 11 ns/op is the priced cost; a regression beyond it re-opens ruling 2 (§15 clause 3) |
+| **S7** | host API (ruling 2) | `vertex_handle_t` = `(u32, u32)` by value; `target_binding_t` folds into it; `graph_t` entries take the pair; the bench decides the ISR pointer fast door (compile-time option if kept) | local read/write/await A/B against the pointer handle — the 11 ns/op is the priced cost; a regression beyond it re-opens ruling 2 (§15 clause 3) |
 | **S8** | shared mounts (§10, ruling 8) | egress **through** a session anchor: a directed per-peer send keyed on the anchor's slot; `bound_egress` admits an anchor; `reverse_hop_ref`'s anchor becomes bidirectional | ws-server multi-peer test; `bench_forward_demux` level |
 
 S1→S2→S3 are ordered; S4 and S5 depend on S1 only; S6, S7, S8 are independent of each other and
@@ -664,7 +697,23 @@ until it opts into spelling chains.
 
 ### 13.3 Ordering against other work
 
-- **RFC-0028** ([#1627](https://github.com/avatarsd-llc/libtracer/pull/1627); slices [#1628](https://github.com/avatarsd-llc/libtracer/pull/1628),
+**Ruled 2026-09-30 (acceptance):**
+
+- **Release.** v0.17.0 is cut after [#1670](https://github.com/avatarsd-llc/libtracer/issues/1670)
+  and does not carry this RFC; **RFC-0029 ships as v0.18.0**.
+- **Superseded by S3.** [#1668](https://github.com/avatarsd-llc/libtracer/issues/1668) (label plane
+  compile-time), [#1669](https://github.com/avatarsd-llc/libtracer/issues/1669) (`label_resolves_`
+  counter) and [#1647](https://github.com/avatarsd-llc/libtracer/issues/1647) (unbounded label
+  default) are closed as superseded: S3 deletes the table they tune.
+- **RFC-0028 slice 8** ([#1621](https://github.com/avatarsd-llc/libtracer/issues/1621),
+  [#1622](https://github.com/avatarsd-llc/libtracer/issues/1622)) is **unheld** and proceeds
+  independently. The 32-bit write sequence on narrow targets is decided there, with modular
+  (serial-number) comparison for wrap; nothing in this RFC constrains it.
+- **[#1533](https://github.com/avatarsd-llc/libtracer/issues/1533) lands before S5** (below).
+
+**Contacts:**
+
+- **RFC-0028** ([#1627](https://github.com/avatarsd-llc/libtracer/pull/1627), merged; slices [#1628](https://github.com/avatarsd-llc/libtracer/pull/1628),
   [#1629](https://github.com/avatarsd-llc/libtracer/pull/1629) merged; [#1630](https://github.com/avatarsd-llc/libtracer/issues/1630) open)
   is the value path — LKV slot, fan-out blocks, tx handoff — and is wire-neutral. **No slice here
   blocks or is blocked by one there.** Two contacts, both constraints rather than dependencies:
@@ -672,8 +721,8 @@ until it opts into spelling chains.
   (§9.1); and RFC-0028's per-vertex retention does not touch `subscriber_remote_t`, so §7.3's entry
   shape does not collide.
 - **lt#1533** (subscriber-list efficiency: enable bits or partitioning of disabled subscribers)
-  touches the fan-out over the same `subscriber_t` records S5 and S7 change. **Land #1533 first**
-  or rebase S5 onto it; S5 must not re-derive the edge layout #1533 settles.
+  touches the fan-out over the same `subscriber_t` records S5 and S7 change. **#1533 lands before
+  S5** (ruled); S5 must not re-derive the edge layout #1533 settles.
 - **lt#1623** (durable, enable-able subscriptions) **waits for S5**: its entry is §7.3's — string
   plus enable state persisted, chain never — and its re-arm is §7.2's first-fire learn.
 - **RFC-0024 / RFC-0027 acceptance trains** ([#809](https://github.com/avatarsd-llc/libtracer/issues/809),
@@ -685,7 +734,7 @@ New under `tests/vectors/` (names indicative): `path/element-pair-encode`, `path
 (refuses the address, not the frame), `fwd/pair-hop-egress`, `fwd/pair-terminus`,
 `fwd/pair-stale-generation-not-found`, `fwd/pair-last-element-connection-vertex-is-facet`,
 `fwd/reply-src-accumulates-forward-route` (PAIR arm and NAME-fallback arm),
-`fwd/subscribe-reverse-list-unflagged`, `fwd/delivery-first-fire-requests-reply`,
+`fwd/subscribe-reverse-list-unflagged`, `fwd/subscribe-reverse-path-name-fallback`, `fwd/delivery-first-fire-requests-reply`,
 `fwd/bus-mount-refuses-pair`. **Retired**: every `PATH_REF`-as-`dst` vector, the bit-7 mint vectors,
 the trailing-reply-list vectors, RFC-0027 §12.5's label vectors. The `fwd/fwd-reply-*` vectors keep
 their `dst` bytes and gain the §6.2 `src`.
@@ -703,13 +752,19 @@ their `dst` bytes and gain the §6.2 `src`.
   Leaves the origin a route that skips a hop; the origin would need to detect the skip and stay
   canonical, which is a second rule for one case. Rejected in favour of "NAME run, never nothing".
 - **Same-named re-add keeps the identity** (§8.2, rejected there).
-- **A per-boot epoch in the generation** (seed each node's generations from a boot counter) as an
-  alternative to §8.2 rule 2's bump on link loss. It protects against the far-end reboot without a
+- **A per-boot epoch *in the generation*** (seed each node's generations from a boot counter) as an
+  *alternative* to §8.2 rule 2's bump on link loss. It protects against the far-end reboot without a
   round trip, but it costs a persisted counter or a random seed with a collision story, and it
-  weakens "generations only move forward" across boots to a probabilistic claim. Held as an open
-  question (§16 Q3), not adopted.
+  weakens "generations only move forward" across boots to a probabilistic claim. **Rejected in that
+  form.** What is **adopted** (§16 Q3, ruled 2026-09-30) is the epoch as a *complement* to rule 2,
+  outside the pair: §8.2 rule 4 carries it once per session or advertise on transports that cannot
+  report a session boundary (UDP, CAN), and a changed epoch triggers rule 2's bump.
+- **A per-edge reply endpoint for the first-fire learn** (one segment per edge). Simpler
+  correlation, but RAM × edges on the targets least able to pay it. Rejected (§7.2, §16 Q2).
 - **Pointer `vertex_handle_t` kept, pair only on the wire** (the inventory's recommendation).
   Ruled otherwise (ruling 2); the cost is priced and gated in S7.
+- **A fresh escape kind for the 8-byte pair** so a retired 7-byte record reads as "retired" rather
+  than "malformed". Rejected (§16 Q4): ruling 10 owes the retired form no diagnostic.
 
 ## 15. What would falsify this RFC
 
@@ -728,23 +783,25 @@ their `dst` bytes and gain the §6.2 `src`.
    once — one reply per edge per reconnect. That would be a measurement on the HIL, and the answer
    would be a batched learn, not a table.
 
-## 16. Open questions
+## 16. Questions ruled at acceptance
 
-1. **`PATH_REF_REVERSE` as a `PATH` too?** §7.1 keeps `0x15`'s bare array (positional, with
-   erratum 1's strip). Spelling it as a `PATH` of PAIR/NAME elements would remove the last positional
-   list and the last strip rule at +3 B per element. Proposed for S5's review, not ruled.
-2. **The edge's reply endpoint for the first-fire learn** (§7.2 — the learn itself is adopted; only
-   its endpoint shape is open): one node-local endpoint per edge, or one per node with the edge
-   identified in the reply's `dst` tail? A per-edge endpoint is the simpler correlation; the byte
-   cost is one segment.
-3. **Per-boot epoch** (§14) as a complement to §8.2 rule 2, for links whose transport cannot report
-   a session boundary.
-4. **`kind = 0x16` or a fresh kind for the 8-byte payload?** Reusing the code with a new length
-   is simplest under ruling 10; a fresh kind would let a 7-byte record be rejected as "retired
-   RFC-0027" rather than "malformed". Editorial; S1's call.
-5. **`vertex_handle_t` representation** (S7): `(u32, u32)` by value is 8 B on both targets; whether
-   the graph API also keeps a pointer-returning fast door for the ISR publisher (claim 6) is for the
-   S7 bench to decide.
+All five questions the draft left open were **ruled by the maintainer on 2026-09-30** on
+[PR #1634](https://github.com/avatarsd-llc/libtracer/pull/1634), each as the draft recommended.
+
+1. **`PATH_REF_REVERSE` as a `PATH` too? — RULED yes.** `0x15`'s body is a `PATH` of PAIR/NAME
+   elements. It costs +3 B per element on the subscribe request leg only, and it removes the last
+   positional list and the last strip rule. Incorporated in §5.3, §7.1 and §12.1–§12.2.
+2. **The edge's reply endpoint for the first-fire learn — RULED one per node.** One node-local
+   endpoint per node, the edge identified in the reply's `dst` tail; no per-edge segment, because its
+   RAM × edges cost lands on narrow targets. Incorporated in §7.2 and §13.2 S5.
+3. **Per-boot epoch — RULED adopted as a complement** to §8.2 rule 2, for transports that cannot
+   report a session boundary (UDP, CAN). Carried once per session or advertise, never per frame; not
+   part of the pair. Incorporated as §8.2 rule 4, §13.2 S4 and §14.
+4. **`kind = 0x16` or a fresh kind — RULED reuse `kind = 0x16` with `len = 8`.** Incorporated in
+   §5.1 and §14.
+5. **`vertex_handle_t` representation — RULED `(u32, u32)` by value.** The S7 bench decides the ISR
+   pointer fast door; if it is kept, it is a compile-time option (compile-time-by-default doctrine).
+   Incorporated in §4.3 and §13.2 S7.
 
 ## 17. Discussion
 
