@@ -614,7 +614,7 @@ class stream_endpoint_t : protected posix_endpoint_t {
      * counts as a shed record and never as a desync. The caller holds @ref write_m_.
      *
      * @param fd       The destination fd.
-     * @param rec      The record, as @ref tx_handoff_t::next handed it out.
+     * @param rec      The record, as `%tx_handoff_t::next` handed it out.
      * @param bound_ms The record's send bound (see @ref write_all).
      * @return How the write ended.
      */

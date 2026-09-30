@@ -200,6 +200,18 @@ reports a failed allocation as a successful write of nothing.
 :project: libtracer
 ```
 
+A transport's receive block comes from `alloc_rx`, which adds the ingress-loan
+reserve (RFC-0028 §6.9) in front of a frame large enough to be shared:
+
+```{doxygenstruct} tr::view::rx_block_t
+:project: libtracer
+:members:
+```
+
+```{doxygenfunction} tr::view::alloc_rx
+:project: libtracer
+```
+
 The CAN splitter is the other L1 view producer; it lives with the rest of the CAN
 stack on [can](can.md). The lazy, rope-backed *decode* view — what a rope-delivered
 frame becomes on the read side — is L2 and lives on

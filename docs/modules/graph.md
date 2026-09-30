@@ -786,6 +786,11 @@ a reply already being assembled.
 :members:
 ```
 
+```{doxygenclass} tr::graph::rx_loan_source_t
+:project: libtracer
+:members:
+```
+
 ```{doxygenclass} tr::graph::inline_value_backend_t
 :project: libtracer
 :members:

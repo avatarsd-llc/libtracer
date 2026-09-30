@@ -59,6 +59,15 @@ with it (`core/tests/CMakeLists.txt:1902,1917-1918`).
 :members:
 ```
 
+The ingress-loan reserve (RFC-0028 §6.9): a receive block at or above the share
+threshold carries this many bytes in front of the frame, and the value stored from
+that frame is placed in them. `view::alloc_rx` (below, with the other
+handle-producing conveniences) sets the segment's `rx_loan` bit.
+
+```{doxygenvariable} tr::view::kRxLoanBytes
+:project: libtracer
+```
+
 The handle-producing conveniences live in `tr::view` rather than with the
 backends, because what they produce is an L1 handle:
 
