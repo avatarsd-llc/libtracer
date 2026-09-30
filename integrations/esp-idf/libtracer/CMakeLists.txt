@@ -219,6 +219,17 @@ if(NOT IDF_TARGET STREQUAL "linux")
     # the bus tier, and one that does not keeps the lean default.
     if(CONFIG_LIBTRACER_WS_SERVER)
         list(APPEND LIBTRACER_SRCS "httpd_ws_link.cpp")
+    elseif(CONFIG_LIBTRACER_TRANSPORT_WS AND CONFIG_HTTPD_WS_SUPPORT)
+        # The pre-v0.17.0 shape: TRANSPORT_WS=y used to select HTTPD_WS_SUPPORT and compile
+        # the server with it, so an sdkconfig carried over from then has both and no
+        # WS_SERVER. Say so at configure time rather than leaving a bare undefined reference
+        # to httpd_ws_link_t at link time naming no cause (the #963 lesson, re-applied).
+        message(WARNING
+            "libtracer: CONFIG_LIBTRACER_TRANSPORT_WS=y and CONFIG_HTTPD_WS_SUPPORT=y, but "
+            "CONFIG_LIBTRACER_WS_SERVER is off, so httpd_ws_link_t (the WebSocket SERVER link) "
+            "is NOT compiled. Since v0.17.0 (#1670) the server is its own option: set "
+            "CONFIG_LIBTRACER_WS_SERVER=y (it selects CONFIG_LIBTRACER_BUS_LINKS) if this node "
+            "serves WebSocket. Ignore this if CONFIG_HTTPD_WS_SUPPORT is on for another reason.")
     endif()
     # Chip targets: the esp_transport_ws-backed WS *client* link (esp_ws_client_link_t) — the
     # embedded-native replacement for core's raw-socket transport_ws_client (which fails the

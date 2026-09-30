@@ -224,12 +224,12 @@ is a knob the fragment does not state at all (#1244).
 
 | knob | kind | default | ESP-IDF |
 | --- | --- | --- | --- |
-| `kVertexLockStripes` (`config.hpp:95`) | count | 16 | menuconfig `CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES` (`integrations/esp-idf/libtracer/CMakeLists.txt:293`) |
-| `kCacheLineBytes` (`:119`) | padding width | 64 | derived from `CONFIG_FREERTOS_UNICORE`, not exposed (`integrations/esp-idf/libtracer/CMakeLists.txt:311`) |
+| `kVertexLockStripes` (`config.hpp:95`) | count | 16 | menuconfig `CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES` (`integrations/esp-idf/libtracer/CMakeLists.txt:304`) |
+| `kCacheLineBytes` (`:119`) | padding width | 64 | derived from `CONFIG_FREERTOS_UNICORE`, not exposed (`integrations/esp-idf/libtracer/CMakeLists.txt:322`) |
 | `kHazardReaderSlots` (`:147`) | count | 64 | inherited — unused on a chip, which binds the single-writer slot and never builds the domain |
-| `kEdgePinSlots` (`:160`) | count | 32 | set to 8 (`integrations/esp-idf/libtracer/CMakeLists.txt:306`) |
+| `kEdgePinSlots` (`:160`) | count | 32 | set to 8 (`integrations/esp-idf/libtracer/CMakeLists.txt:317`) |
 | `kMaxVertexBytes64` / `kMaxVertexBytes32` (`:198` / `:216`) | RAM ratchet | 96 / 72 | the preset — deliberately not overridable |
-| `kShareThresholdBytes` (`:253`) | size | 4,096 — RFC-0028 §11 ruling 2 | `SIZE_MAX`, copy always (`integrations/esp-idf/libtracer/CMakeLists.txt:398`) |
+| `kShareThresholdBytes` (`:253`) | size | 4,096 — RFC-0028 §11 ruling 2 | `SIZE_MAX`, copy always (`integrations/esp-idf/libtracer/CMakeLists.txt:409`) |
 | `acl_policy_t` (`:262`) | policy type | `allow_only_policy_t` | inherited — the full policy is not selectable |
 | `lkv_slot_t` (`:312`) | policy type | `single_writer_slot_t` | `single_writer_slot_t` on every chip, with `kSingleWriter = true` and `reader_guard_t = tr::esp::critical_guard_t`; inherited on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:347`) |
 | `kSpinWaitSafe` (`:746`) | target fact | `true` | derived from `IDF_TARGET` — `false` on every chip, `true` on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:336`) |
