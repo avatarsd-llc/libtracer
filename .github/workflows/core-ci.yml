@@ -450,6 +450,10 @@ jobs:
   # compiles by default). Bound with an ORDINARY override fragment rather than a `-D`, per
   # ADR-0068: a new configuration member does not get a CMake variable.
   #
+  # `-DLIBTRACER_TEST_ESP_WS_SERVER=OFF` is mandatory for the same reason as CAN below:
+  # `httpd_ws_link.cpp` static_asserts `kBusLinks` since #1670 (the WS server is a bus by
+  # construction), so its host suites cannot exist on this build.
+  #
   # `-DLIBTRACER_TRANSPORT_CAN=OFF` is MANDATORY, not tidiness — `transport_can.cpp` carries a
   # `static_assert(kBusLinks)` because a CAN link is peer-named by construction, so a
   # bus-less CAN build is broken rather than smaller, and this leg would not compile with it on.
@@ -534,6 +538,7 @@ jobs:
           FRAGMENT
           cmake -S core -B core/build-bus-closed -DBUILD_TESTING=ON \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo -DLIBTRACER_TRANSPORT_CAN=OFF \
+            -DLIBTRACER_TEST_ESP_WS_SERVER=OFF \
             -DCMAKE_CXX_FLAGS="-I$PWD/bus-closed"
           cmake --build core/build-bus-closed --parallel "$BUILD_JOBS"
           ctest --test-dir core/build-bus-closed -LE bus --output-on-failure

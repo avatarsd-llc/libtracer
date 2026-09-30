@@ -43,8 +43,12 @@ CONFIG_HTTPD_WS_SUPPORT=y
 # target, CAN/TWAI and the WS server included — and its self-proof dials a config-created
 # udp connection that the S5 engine mints DORMANT and wakes on first use. So it opts in to
 # both, explicitly:
-#   * the bus tier (peer-named links). Needed by CAN (a bus by construction; the CAN
-#     option is only offered with it) and by the IDF-native WS server httpd_ws_link_t.
+#   * the WebSocket SERVER link httpd_ws_link_t. It is a bus by construction, so this
+#     option SELECTS the bus tier; it is also the CI compile coverage for httpd_ws_link.cpp
+#     (tools/check_esp_ws_plane.py asserts the TU was built).
+#   * the bus tier (peer-named links), stated explicitly too: CAN, a bus by construction,
+#     is only offered with it.
 #   * the link-liveness engine (self_heal_link.cpp + kSelfHealLinks = true).
+CONFIG_LIBTRACER_WS_SERVER=y
 CONFIG_LIBTRACER_BUS_LINKS=y
 CONFIG_LIBTRACER_SELF_HEAL_LINKS=y

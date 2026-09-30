@@ -31,21 +31,40 @@ menu "libtracer"
     config LIBTRACER_TRANSPORT_WS
         bool "Build the WebSocket transport"
         default y
+        help
+            Compile the WebSocket plane: the IDF-native CLIENT link
+            (esp_ws_client_link_t) on chip targets, the portable pair on the
+            `linux` target. ON by default. Turn OFF on a node that neither serves
+            nor dials a WebSocket link. The SERVER link is its own option,
+            LIBTRACER_WS_SERVER, below.
+
+    config LIBTRACER_WS_SERVER
+        bool "Build the WebSocket SERVER link (httpd_ws_link_t; needs the bus tier)"
+        depends on LIBTRACER_TRANSPORT_WS
+        default n
+        select LIBTRACER_BUS_LINKS
         select HTTPD_WS_SUPPORT
         select HTTPD_WS_PRE_HANDSHAKE_CB_SUPPORT if HTTPD_WS_SUPPORT
         help
-            Compile the WebSocket plane. ON by default. Turn OFF on a node that
-            neither serves nor dials a WebSocket link.
+            Compile httpd_ws_link_t, the esp_http_server-backed WebSocket SERVER
+            link (e.g. the SPA at /tracer-ws). It serves many inbound sessions
+            and names each one, so it is a BUS by construction: this option
+            SELECTS LIBTRACER_BUS_LINKS (#1670), and an image that serves
+            WebSocket can never be built without the bus tier.
+            httpd_ws_link.cpp also static_asserts kBusLinks, so a hand-made
+            configuration that got around the select fails at BUILD time.
+
+            OFF by default since v0.17.0 (the lean default): a node that only
+            dials, or does not speak WebSocket, carries neither the server TU
+            nor the ~2 KB bus tier.
 
             HTTPD_WS_SUPPORT is SELECTED, not merely depended on (#963). It
-            defaults n in ESP-IDF, and httpd_ws_link.cpp is gated on it in
-            CMakeLists.txt — so before this select, a stock project that left
-            this option at its default y got the WS client link, no WS SERVER
-            link, and a bare `undefined reference to
+            defaults n in ESP-IDF, and httpd_ws_link.cpp needs its native WS
+            API — without the select a project that asked for the server would
+            get a bare `undefined reference to
             tr::net::httpd_ws_link_t::httpd_ws_link_t(...)` at link time naming
             no cause. The public header stays includable either way (it only
-            names httpd_handle_t / httpd_req_t), so nothing fails earlier. This
-            option's help promised the server link; now it delivers it.
+            names httpd_handle_t / httpd_req_t).
 
             The `select` is what makes httpd_ws_link_t's admission predicate
             (set_admission_cb) reachable: esp_http_server answers the opening
@@ -64,7 +83,7 @@ menu "libtracer"
             WHICH plane you get is decided by the TARGET, not by this bool (#947):
 
               * chip targets get the IDF-NATIVE links only — esp_ws_client_link_t
-                (on esp_transport_ws) and, with CONFIG_HTTPD_WS_SUPPORT=y,
+                (on esp_transport_ws) and, with LIBTRACER_WS_SERVER=y,
                 httpd_ws_link_t (adopts your running esp_http_server). ESP-IDF
                 WebSocket never uses POSIX sockets: core's portable
                 transport_ws_server / transport_ws_client are the HOST
@@ -189,13 +208,11 @@ menu "libtracer"
 
             OFF by default since v0.17.0, the lean choice: a point-to-point node
             does not pay for it (measured on rv32: 2,078 B of flash across
-            fwd_router.cpp and transport_vertex.cpp, 0 B of .bss). Turn it ON for
-            the WS server (httpd_ws_link_t) or for CAN — both are buses by
-            construction; CAN is only offered below when this is on. With it off,
-            asking for a peer-named listener is REFUSED rather than quietly served
-            as a flat one — and httpd_ws_link_t, the IDF-native WS server, which is
-            peer-named by construction, reports ok() == false. So a node that
-            serves WebSocket sessions (the SPA at /tracer-ws) opts in here.
+            fwd_router.cpp and transport_vertex.cpp, 0 B of .bss). The WS server
+            (LIBTRACER_WS_SERVER) SELECTS it, because httpd_ws_link_t is a bus by
+            construction; CAN, the other bus by construction, is only offered
+            below when this is on. With it off, a peer-named SPEC is refused
+            rather than quietly served as a flat link.
 
     config LIBTRACER_TRANSPORT_CAN
         bool "Build the CAN transport"

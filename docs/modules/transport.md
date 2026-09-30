@@ -175,7 +175,7 @@ Asking for a bus on such a build is **refused**, never quietly served as a flat 
 | `LIBTRACER_TRANSPORT_CAN=ON` | a `static_assert` in `transport_can.cpp` — CAN is a bus by construction, so a bus-less CAN build is broken, not smaller |
 | `SPEC{name, config{kind=tcp\|ws, peer_named=1}}` to a LISTEN module's `conn` | the factory answers `TYPE_MISMATCH` — permanent, because no retry grows this build a bus facet — and creates no connection |
 | a directly constructed peer-named `slot_server_t` | `ok()` is false, the came-up predicate every caller already checks |
-| `httpd_ws_link_t` (ESP-IDF) | `ok()` is false — it is peer-named by construction and has no flat mode |
+| `httpd_ws_link_t` (ESP-IDF) | a `static_assert` in `httpd_ws_link.cpp` — it is peer-named by construction; the component's `CONFIG_LIBTRACER_WS_SERVER` selects `CONFIG_LIBTRACER_BUS_LINKS`, so the component never reaches it |
 
 A quiet demotion would be the worse outcome, and specifically so: the listener's own
 per-frame tier select reads its constructed mode, so a demoted-at-the-router-only server

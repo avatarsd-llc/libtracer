@@ -508,8 +508,8 @@ struct default_config_t {
      * **Who opts in.** A node that runs a peer-named listener (`peer_named=true` tcp/ws), the
      * ESP-IDF WS server `httpd_ws_link_t`, or ANY CAN link — the last two are buses by
      * construction. Override fragment: `static constexpr bool kBusLinks = true;` — the core
-     * test build, the `bench/` build and the ESP-IDF `CONFIG_LIBTRACER_BUS_LINKS` do exactly
-     * that.
+     * test build, the `bench/` build and the ESP-IDF `CONFIG_LIBTRACER_BUS_LINKS` (which
+     * `CONFIG_LIBTRACER_WS_SERVER` selects) do exactly that.
      *
      * **It is a REFUSAL, never a silent downgrade.** A build that binds it `false` and then
      * asks for a bus is rejected, loudly and at the earliest door that can speak: compiling

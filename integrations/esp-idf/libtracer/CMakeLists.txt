@@ -212,22 +212,13 @@ if(NOT IDF_TARGET STREQUAL "linux")
     # true replacement, not a coexistence: transport_ws.cpp is NOT compiled here at all
     # (LIBTRACER_PORTABLE_WS is FALSE on chips), so nothing relies on --gc-sections to
     # drop it — the registration in the built-in catalog kept it reachable and it never
-    # got dropped. Gated on BOTH the WS module (#393) and CONFIG_HTTPD_WS_SUPPORT (the TU
-    # rides esp_http_server's native WS API, which the component ships only when that
-    # config is on) — so an application that wants the native WS SERVER must set
-    # CONFIG_HTTPD_WS_SUPPORT=y; there is no portable fallback behind it any more.
-    if(CONFIG_LIBTRACER_TRANSPORT_WS AND CONFIG_HTTPD_WS_SUPPORT)
+    # got dropped. Gated on CONFIG_LIBTRACER_WS_SERVER (#1670), which depends on the WS
+    # module (#393) and SELECTS both CONFIG_HTTPD_WS_SUPPORT (the TU rides esp_http_server's
+    # native WS API) and CONFIG_LIBTRACER_BUS_LINKS (the link is a bus by construction, and
+    # the TU static_asserts kBusLinks) — so an image that serves WebSocket always carries
+    # the bus tier, and one that does not keeps the lean default.
+    if(CONFIG_LIBTRACER_WS_SERVER)
         list(APPEND LIBTRACER_SRCS "httpd_ws_link.cpp")
-    elseif(CONFIG_LIBTRACER_TRANSPORT_WS)
-        # Reachable only when an existing sdkconfig pins CONFIG_HTTPD_WS_SUPPORT=n
-        # explicitly — the Kconfig now SELECTs it, so a fresh configure cannot land here.
-        # Say so rather than letting the build go green and fail at link with an
-        # undefined httpd_ws_link_t constructor naming no cause (#963).
-        message(WARNING
-            "libtracer: CONFIG_LIBTRACER_TRANSPORT_WS=y but CONFIG_HTTPD_WS_SUPPORT=n — "
-            "httpd_ws_link_t (the WebSocket SERVER link) is NOT being compiled. The client "
-            "link is unaffected. Set CONFIG_HTTPD_WS_SUPPORT=y, or turn off "
-            "CONFIG_LIBTRACER_TRANSPORT_WS if this node neither serves nor dials WebSocket.")
     endif()
     # Chip targets: the esp_transport_ws-backed WS *client* link (esp_ws_client_link_t) — the
     # embedded-native replacement for core's raw-socket transport_ws_client (which fails the

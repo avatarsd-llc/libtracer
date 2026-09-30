@@ -41,14 +41,17 @@ namespace tr::net {
 
 // `httpd_ws_link_t` derives from `bus_link_t` unconditionally — it serves many inbound
 // browser sessions and names each one — so it is exactly the module a `kBusLinks = false`
-// target declared it does not carry, and it has no flat mode to be demoted to. The refusal
-// is `httpd_ws_link_t::ok()` (see its doc): a came-up predicate that answers false, which is
-// the same door `slot_server_t` refuses a peer-named listener through and the one every
-// caller already checks. It is deliberately NOT a `static_assert` the way `transport_can.cpp`
-// carries one: CAN's TU is selected by a CMake module option, so an assert there is
-// actionable (turn the module off), while this TU is compiled unconditionally by the
-// component and by core's host fakes, where a hard error would break builds that never
-// construct the link (#375 deliverable 3).
+// target declared it does not carry, and it has no flat mode to be demoted to. Refused at
+// BUILD time, the way `transport_can.cpp` refuses CAN (#1670, compile-time-by-default): the
+// component compiles this TU only under CONFIG_LIBTRACER_WS_SERVER, which SELECTS
+// CONFIG_LIBTRACER_BUS_LINKS, and core's host suites compile it only in a build that binds the
+// bus tier (LIBTRACER_TEST_ESP_WS_SERVER). So the assert is actionable wherever it can fire.
+static_assert(kBusLinks,
+              "httpd_ws_link.cpp is the WebSocket SERVER link, a bus by construction, and this "
+              "build binds kBusLinks = false (the default since v0.17.0). ESP-IDF: enable "
+              "CONFIG_LIBTRACER_WS_SERVER, which selects CONFIG_LIBTRACER_BUS_LINKS. Otherwise "
+              "bind `static constexpr bool kBusLinks = true;` in libtracer/config_override.hpp, "
+              "or do not compile this TU.");
 
 namespace {
 

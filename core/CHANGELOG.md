@@ -62,8 +62,8 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `register_transport_type`. **Migration — opt in explicitly:** add
   `static constexpr bool kBusLinks = true;` and/or `static constexpr bool kSelfHealLinks = true;`
   to your `libtracer/config_override.hpp` fragment, and pass `-DLIBTRACER_TRANSPORT_CAN=ON` /
-  `-DLIBTRACER_SELF_HEAL_LINKS=ON` for the TUs (ESP-IDF: `CONFIG_LIBTRACER_BUS_LINKS=y` /
-  `CONFIG_LIBTRACER_SELF_HEAL_LINKS=y`; PlatformIO: `custom_libtracer_bus_links = yes` /
+  `-DLIBTRACER_SELF_HEAL_LINKS=ON` for the TUs (ESP-IDF: `CONFIG_LIBTRACER_BUS_LINKS=y`, which
+  the new `CONFIG_LIBTRACER_WS_SERVER` selects, / `CONFIG_LIBTRACER_SELF_HEAL_LINKS=y`; PlatformIO: `custom_libtracer_bus_links = yes` /
   `custom_libtracer_self_heal_links = yes`). A half opt-in is loud: `transport_can.cpp` and
   `self_heal_link.cpp` `static_assert` their member, and a member without its TU is a link error.
 
