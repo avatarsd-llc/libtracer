@@ -39,7 +39,7 @@ on:
       - "core/include/libtracer/frame.hpp"  # quic/webtransport TUs decode through it
       - "core/include/libtracer/grammar.hpp"  # the one wire grammar frame decoding walks
       - "core/include/libtracer/length_prefix_framer.hpp"  # quic/webtransport RX reassembler
-      - "core/include/libtracer/config_reader.hpp"  # the quic factory parses cert/key through it
+      - "core/include/libtracer/config_reader.hpp"  # the quic factory parses its TLS keys through it
       - "core/include/libtracer/config.hpp"  # kAllowInsecureTls gates the SPEC `insecure` key
       - "core/tests/insecure-tls/**"  # the dev preset the second (honoured-arm) run binds
       - "core/include/libtracer/transport.hpp"  # the receiver seam both transports implement

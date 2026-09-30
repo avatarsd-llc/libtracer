@@ -46,7 +46,7 @@ namespace {
  * like every other unknown pair, never obeyed.
  *
  * ONLY the universal
- * keys land here (ADR-0043 §5 leanness): kind-private pairs (e.g. quic's `cert`/`key`)
+ * keys land here (ADR-0043 §5 leanness): kind-private pairs (e.g. quic's `tls`/`insecure`)
  * are the kind's factory's business — it parses them from the raw config TLV it
  * receives. Unknown pairs are ignored (forward-compat). `keepalive` is one of them since
  * #1666: it had no consumer, so it is accepted and dropped rather than stored.

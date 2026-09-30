@@ -5,7 +5,7 @@
  * config_reader — typed accessors over a positional NAME-key / typed-value PAIR container.
  * The pair walk was copied verbatim by all SIX transport-side consumers of a connection
  * config — transport_vertex's universal keys, the tcp / ws / can factories, and the quic
- * and webtransport factories' cert/key — and this is their one home. Each factory still
+ * and webtransport factories' TLS keys — and this is their one home. Each factory still
  * reads ONLY its own keys from the raw config TLV it receives (ADR-0043 §5 leanness:
  * kind-private keys never land in the shared conn_settings_t) — what is shared is the
  * walk, not the vocabulary.

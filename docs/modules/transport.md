@@ -67,8 +67,8 @@ the rope form for an owning link, the span form otherwise (`fwd_router.cpp:1198,
 Every socket transport in the tree declares the owning tier: UDP
 (`transport_udp.hpp:117`), TCP client and server (`transport_tcp.hpp:278,429`),
 WebSocket server and client (`transport_ws.hpp:309,491`), CAN
-(`transport_can.hpp:606`), QUIC (`transport_quic.hpp:162`) and WebTransport
-(`transport_webtransport.hpp:237`). The borrowed-span path is the base-class default
+(`transport_can.hpp:606`), QUIC (`transport_quic.hpp:164`) and WebTransport
+(`transport_webtransport.hpp:239`). The borrowed-span path is the base-class default
 and the tier an out-of-tree transport gets for free.
 
 ## Point-to-point links and bus links
@@ -205,10 +205,11 @@ under kind `webtransport`.
 One msquic dependency serves both, because QUIC is the substrate WebTransport
 requires.
 
-Both kinds read four kind-private config keys off a creator-endpoint creation SPEC —
-`cert`/`key` on the LISTEN side and the DIAL-side trust pair `ca`/`insecure`. A
-SPEC-created dialer **verifies its peer's certificate by default**, so reaching a
-self-signed peer takes one of those two keys explicitly; the key-by-key reference is
+Their TLS material is **app-owned**: the certificate, key and CA bundle come from the
+table of `tr::net::tls_profile_t` the application hands the factory at registration,
+never from a creation SPEC. A SPEC can at most name one of those profiles (the
+kind-private `tls` key) and set the DIAL-side dev opt-out `insecure`. A SPEC-created
+dialer **verifies its peer's certificate by default**; the key-by-key reference is
 [connection config](connection-config.md).
 
 ## Interface

@@ -234,18 +234,18 @@ namespace {
 /**
  * @brief The quic kind's PRIVATE config keys, parsed module-side from the raw
  *        SPEC config SETTINGS TLV (ADR-0043 §5 leanness: the shared
- *        conn_settings_t carries only the universal keys, so the TLS material
+ *        conn_settings_t carries only the universal keys, so the TLS selection
  *        never touches it).
  *
- * Two of the four are LISTEN-side (the served credential), two are DIAL-side
- * (how the server certificate is trusted, #918).
+ * Neither key carries a filesystem path: the files a link trusts and serves are
+ * app-owned (@ref tls_profile_t), and the SPEC can at most name which of the
+ * app's profiles applies.
  */
 struct quic_private_cfg_t {
-    std::string cert;      /**< @brief PEM server-certificate path (LISTEN). */
-    std::string key;       /**< @brief PEM private-key path matching cert (LISTEN). */
-    std::string ca;        /**< @brief PEM CA-bundle path the DIAL side verifies the
-                                       server certificate against; empty = the system
-                                       trust store (DIAL). */
+    std::string_view tls;  /**< @brief The app profile this link uses (@ref
+                                       tls_profile_t::name); empty = the default
+                                       profile. A view into the raw config, valid
+                                       for the factory call only. */
     bool insecure = false; /**< @brief DEV ONLY: skip server-certificate validation on
                                        the DIAL side entirely. Must be asked for
                                        explicitly — the default is to verify (DIAL). */
@@ -256,25 +256,23 @@ struct quic_private_cfg_t {
  *         @ref quic_insecure_refusals. Touched only on the refusal, never on a dial. */
 std::atomic<std::uint64_t> g_insecure_refusals{0};
 
-/** @brief The shared config_reader_t walk over the quic-private keys: NAME
- *         "cert" NAME <path>, NAME "key" NAME <path>, NAME "ca" NAME <path>,
- *         NAME "insecure" VALUE <u8>; unknown pairs ignored (forward-compat).
- *         Pair-consuming (#927) — a forward-compat pair whose string value
- *         reads `"key"` must not bind the FOLLOWING child as a path. */
+/** @brief The shared config_reader_t walk over the quic-private keys: NAME "tls"
+ *         NAME <profile>, NAME "insecure" VALUE <u8>; unknown pairs ignored
+ *         (forward-compat) — including the retired `ca`/`cert`/`key`, which no
+ *         longer mean anything here. Pair-consuming (#927). */
 [[nodiscard]] quic_private_cfg_t parse_quic_config(const wire::tlv_t* raw_config) {
     quic_private_cfg_t out;
     const config_reader_t cfg(raw_config);
-    if (const auto v = cfg.name("cert")) out.cert = std::string(*v);
-    if (const auto v = cfg.name("key")) out.key = std::string(*v);
-    if (const auto v = cfg.name("ca")) out.ca = std::string(*v);
+    if (const auto v = cfg.name("tls")) out.tls = *v;
     if (const auto v = cfg.flag("insecure")) out.insecure = *v;
     return out;
 }
 
 }  // namespace
 
-transport_vertex_t::transport_factory_t quic_transport_factory(mem::mem_backend_t* rx_backend) {
-    return [rx_backend](
+transport_vertex_t::transport_factory_t quic_transport_factory(
+    std::span<const tls_profile_t> profiles, mem::mem_backend_t* rx_backend) {
+    return [profiles, rx_backend](
                const conn_settings_t& s,
                const wire::tlv_t* raw_config) -> graph::result_t<std::unique_ptr<transport_t>> {
         // BOTH roles carry kind-private keys, so the parse precedes the role split:
@@ -291,27 +289,35 @@ transport_vertex_t::transport_factory_t quic_transport_factory(mem::mem_backend_
                 return std::unexpected(graph::status_t::PERMISSION_DENIED);
             }
         }
+        // The SPEC names a profile; the app's table decides what that name means. A
+        // name the app never registered is a config error, answered before any file
+        // is opened — the status says nothing about the filesystem.
+        const tls_profile_t* const prof = find_tls_profile(profiles, priv.tls);
+        if (prof == nullptr && !priv.tls.empty())
+            return std::unexpected(graph::status_t::TYPE_MISMATCH);
         std::unique_ptr<quic_transport_t> t;
         if (s.role == conn_role_t::DIAL) {
             if (s.addr.empty() || s.port == 0)
                 return std::unexpected(graph::status_t::TYPE_MISMATCH);
-            // Secure by default (#918): absent both keys this verifies the server
-            // certificate against the system trust store. `insecure = 1` is the
-            // explicit dev opt-out; `ca` names a bundle to verify against instead.
+            // Secure by default (#918): with no profile, or a profile with no anchor,
+            // this verifies the server certificate against the system trust store.
+            // `insecure = 1` is the explicit dev opt-out.
             t = std::make_unique<quic_transport_t>(
                 s.addr, s.port,
-                quic_dial_tls_t{.ca_file = priv.ca, .insecure_no_verify = priv.insecure},
+                quic_dial_tls_t{.ca_file = std::string(prof != nullptr ? prof->ca_file : ""),
+                                .insecure_no_verify = priv.insecure},
                 quic_config_t{.memory = {.rx = rx_backend}, .max_frame = s.max_frame});
             // A refused handshake is TRANSIENT, not a bad address (#929).
             if (!t->ok()) return std::unexpected(graph::status_t::TRANSPORT_DOWN);
             return t;
         }
         // `port = 0` on a LISTEN is the EPHEMERAL request (#1362), not a missing key: the
-        // OS picks and `local_port()` reports it. Only an ABSENT key is the config error.
-        if (!s.port_set || priv.cert.empty() || priv.key.empty())
+        // OS picks and `local_port()` reports it. Only an ABSENT key is the config error,
+        // and so is a profile that carries no credential to serve.
+        if (!s.port_set || prof == nullptr || prof->cert_file.empty() || prof->key_file.empty())
             return std::unexpected(graph::status_t::TYPE_MISMATCH);
         t = std::make_unique<quic_transport_t>(
-            s.port, priv.cert, priv.key,
+            s.port, std::string(prof->cert_file), std::string(prof->key_file),
             quic_config_t{.memory = {.rx = rx_backend}, .max_frame = s.max_frame});
         // bind/cred failed — the listener did not come up (#929).
         if (!t->ok()) return std::unexpected(graph::status_t::TRANSPORT_DOWN);

@@ -36,7 +36,7 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_ba
     // here would be the synthetic limit the doctrine forbids.
     //
     // The two LISTEN-side ws-private keys are parsed HERE from the raw config TLV — the
-    // ADR-0043 §5 leanness ruling (as `quic` does for cert/key and `can` for ifname/node):
+    // ADR-0043 §5 leanness ruling (as `quic` does for tls/insecure and `can` for ifname/node):
     // neither lands in the shared conn_settings_t, because neither is universal across
     // kinds. Both are ignored on a DIAL (a client has exactly one peer, itself):
     //  - `peer_named` (VALUE u8, nonzero = true; default false) exposes the bus_link_t

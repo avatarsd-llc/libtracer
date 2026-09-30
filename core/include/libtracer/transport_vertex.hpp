@@ -132,7 +132,7 @@ enum class link_state_t : std::uint8_t {
  * link only.
  *
  * This record carries ONLY the universal keys every transport kind shares (the ADR-0043
- * §5 leanness ruling): a kind's PRIVATE config (e.g. quic's `cert`/`key` PEM paths) never
+ * §5 leanness ruling): a kind's PRIVATE config (e.g. quic's `tls` profile name) never
  * lands here — the kind's own factory parses it from the raw config SETTINGS TLV it
  * receives alongside these settings. A universal key with no consumer is not kept here either:
  * the `keepalive` key is still ACCEPTED on the wire (existing configs parse) but is ignored and
@@ -288,7 +288,7 @@ class transport_vertex_t {
      * The shared @ref conn_settings_t carries ONLY the universal keys (the ADR-0043 §5
      * leanness ruling); @p raw_config is the SPEC's config SETTINGS TLV as written (may
      * be null when the SPEC carried none), from which a kind's factory parses its own
-     * kind-private keys (e.g. quic's `cert`/`key`) — the factory's business, module-side.
+     * kind-private keys (e.g. quic's `tls`/`insecure`) — the factory's business, module-side.
      *
      * Returns the live transport, or a status: `TYPE_MISMATCH` for a config missing
      * the fields the kind requires (e.g. a DIAL without `addr`/`port`),

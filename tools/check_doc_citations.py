@@ -628,7 +628,7 @@ ANCHORS = [
     ('core/include/libtracer/transport_can.hpp:606',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }'),
     # core/include/libtracer/transport_quic.hpp
-    ('core/include/libtracer/transport_quic.hpp:162',
+    ('core/include/libtracer/transport_quic.hpp:164',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }'),
     # core/include/libtracer/transport_tcp.hpp
     ('core/include/libtracer/transport_tcp.hpp:278',
@@ -645,13 +645,13 @@ ANCHORS = [
     ('core/include/libtracer/transport_vertex.hpp:88',
      'enum class conn_role_t : std::uint8_t { DIAL = 0, LISTEN = 1 };'),
     ('core/include/libtracer/transport_vertex.hpp:135',
-     "* §5 leanness ruling): a kind's PRIVATE config (e.g. quic's `cert`/`key` PEM paths) never"),
+     "* §5 leanness ruling): a kind's PRIVATE config (e.g. quic's `tls` profile name) never"),
     ('core/include/libtracer/transport_vertex.hpp:166',
      'std::uint32_t backoff_ms = 0;         /**< @brief DIAL self-heal retry interval (RFC-0014 §4);'),
     ('core/include/libtracer/transport_vertex.hpp:170',
      'std::uint32_t connect_timeout_ms = 0; /**< @brief DIAL connect-attempt deadline (RFC-0014 §4):'),
     # core/include/libtracer/transport_webtransport.hpp
-    ('core/include/libtracer/transport_webtransport.hpp:237',
+    ('core/include/libtracer/transport_webtransport.hpp:239',
      '[[nodiscard]] bool delivers_ropes() const override { return true; }'),
     # core/include/libtracer/transport_ws.hpp
     ('core/include/libtracer/transport_ws.hpp:309',

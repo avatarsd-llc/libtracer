@@ -26,10 +26,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 
 #include "libtracer/length_prefix_framer.hpp"
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/tls_profile.hpp"
 #include "libtracer/transport.hpp"
 #include "libtracer/transport_vertex.hpp"
 
@@ -347,12 +349,12 @@ class webtransport_transport_t : public transport_t {
  *        register_transport_type extension seam; no core builtin).
  *
  * Register at setup:
- * `net.register_transport_type("webtransport", webtransport_transport_factory())`.
+ * `net.register_transport_type("webtransport", webtransport_transport_factory(profiles))`.
  * A `:children[]` SPEC whose config carries `kind = webtransport` then
  * constructs a @ref webtransport_transport_t — DIAL: `addr` + `port` plus the
- * OPTIONAL `path` and trust keys below; LISTEN: `port` plus the REQUIRED
- * `cert`/`key` PEM-path config keys. Both roles additionally read the OPTIONAL
- * `max_handshake` budget (#1408). All six are kind-PRIVATE config keys
+ * OPTIONAL `path` and trust keys below; LISTEN: `port` plus a profile that
+ * carries the served credential. Both roles additionally read the OPTIONAL
+ * `tls` profile name and `max_handshake` budget (#1408). All four are kind-PRIVATE config keys
  * parsed by this factory from the raw SPEC config TLV — they never appear on
  * the shared `conn_settings_t` (the ADR-0043 §5 leanness ruling). Missing
  * fields fail with `TYPE_MISMATCH`; a session that failed to come up fails with
@@ -375,24 +377,34 @@ class webtransport_transport_t : public transport_t {
  * injected spelling of a bound that used to be a file-local literal, so the
  * deployment sets the ceiling rather than the compiler.
  *
- * **A SPEC-created dialer verifies the server certificate (#918)** — the trust
- * mode is whatever @ref webtransport_dial_tls_t defaults to, so with neither
- * DIAL key present a certificate that does not chain to the system trust store
- * is REFUSED (creation answers `TRANSPORT_DOWN`). The same two DIAL-side keys as
- * the `quic` kind move it: `ca` (NAME, a PEM CA-bundle path) verifies against that
- * bundle instead, and `insecure` (VALUE u8, default 0) set to `1` skips
- * validation entirely — DEV ONLY, and it requires the build capability
+ * **TLS material is app-owned**, exactly as for the `quic` kind: a SPEC never
+ * carries a file path. The certificate, key and CA bundle come from @p profiles,
+ * and the SPEC's `tls` key (NAME) can at most select one by name — absent selects
+ * the profile named `""`, and a name the table does not hold is refused with
+ * `TYPE_MISMATCH` before any file is opened. A LISTEN serves its profile's
+ * `cert_file`/`key_file` and is refused without them.
+ *
+ * **A SPEC-created dialer verifies the server certificate (#918)** — against its
+ * profile's `ca_file`, or, with no profile or no anchor in it, against the system
+ * trust store; a certificate that does not chain is REFUSED (creation answers
+ * `TRANSPORT_DOWN`). `insecure` (VALUE u8, default 0) set to `1` skips validation
+ * entirely — DEV ONLY, and it requires the build capability
  * @ref tr::graph::default_config_t::kAllowInsecureTls (default `false`): without it
  * a SPEC carrying `insecure` = nonzero is REFUSED at creation with
  * `PERMISSION_DENIED` and counted in `%webtransport_insecure_refusals()` (below), on either
  * role. `insecure = 0` is accepted on every build.
  *
+ * @param profiles   The app's TLS profiles (default: none — dials verify against
+ *                   the system trust store, listens are refused). The factory keeps
+ *                   the span, not a copy: the table and the strings it views must
+ *                   outlive the factory and every transport it constructs.
  * @param rx_backend The ADR-0042 §2 receive-segment seam every constructed
  *                   endpoint draws inbound frame segments from (default: the
  *                   process heap). Must outlive the constructed transports.
  * @return The factory functor for @ref transport_vertex_t::register_transport_type.
  */
 [[nodiscard]] transport_vertex_t::transport_factory_t webtransport_transport_factory(
+    std::span<const tls_profile_t> profiles = {},
     mem::mem_backend_t* rx_backend = &mem::heap_backend());
 
 /**
