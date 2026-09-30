@@ -84,6 +84,8 @@
 #include <msquic.h>
 
 #include <algorithm>
+#include <atomic>
+#include <cstdint>
 #include <cstring>
 #include <memory>
 #include <new>
@@ -94,6 +96,7 @@
 #include <vector>
 
 #include "libtracer/byteorder.hpp"
+#include "libtracer/config.hpp"
 #include "libtracer/config_reader.hpp"
 #include "libtracer/frame.hpp"
 #include "libtracer/mem_heap.hpp"
@@ -1136,6 +1139,11 @@ struct wt_private_cfg_t {
                                                against it (both roles, #1408). */
 };
 
+/** @brief Process-wide count of `webtransport` SPECs refused for carrying `insecure` = nonzero on a
+ *         build without @ref tr::graph::default_config_t::kAllowInsecureTls — see
+ *         @ref webtransport_insecure_refusals. Touched only on the refusal, never on a dial. */
+std::atomic<std::uint64_t> g_insecure_refusals{0};
+
 /** @brief The shared config_reader_t walk over the webtransport-private keys: NAME
  *         "cert" NAME <file>, NAME "key" NAME <file>, NAME "ca" NAME <file>, NAME
  *         "insecure" VALUE <u8>, NAME "path" NAME <resource>, NAME "max_handshake"
@@ -1165,6 +1173,16 @@ transport_vertex_t::transport_factory_t webtransport_transport_factory(
         // the DIAL branch used to return before parse_wt_config ever ran, which is
         // why no SPEC could reach the dial-side trust knobs at all (#918).
         const wt_private_cfg_t priv = parse_wt_config(raw_config);
+        // The `insecure` key disables peer authentication, and a SPEC can come from any peer
+        // the ACL lets write (every peer, on a default build). Honouring it is a BUILD
+        // capability: without kAllowInsecureTls the SPEC is refused and counted — never
+        // silently downgraded to a verifying dial, never honoured. `insecure = 0` passes.
+        if constexpr (!kAllowInsecureTls) {
+            if (priv.insecure) {
+                g_insecure_refusals.fetch_add(1, std::memory_order_relaxed);
+                return std::unexpected(graph::status_t::PERMISSION_DENIED);
+            }
+        }
         std::unique_ptr<webtransport_transport_t> t;
         if (s.role == conn_role_t::DIAL) {
             // #1039: an `https` request's `:path` is non-empty and, in origin-form,
@@ -1213,6 +1231,10 @@ transport_vertex_t::transport_factory_t webtransport_transport_factory(
         if (!t->ok()) return std::unexpected(graph::status_t::TRANSPORT_DOWN);
         return t;
     };
+}
+
+std::uint64_t webtransport_insecure_refusals() noexcept {
+    return g_insecure_refusals.load(std::memory_order_relaxed);
 }
 
 }  // namespace tr::net

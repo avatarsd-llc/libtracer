@@ -260,7 +260,7 @@ decision.
 | `cert` | `NAME` utf-8 | LISTEN | — (required) | PEM server-certificate path. Absent answers `TYPE_MISMATCH`; a path msquic will not load answers `TRANSPORT_DOWN` (the listener did not come up). |
 | `key` | `NAME` utf-8 | LISTEN | — (required) | PEM private-key path matching `cert`. Same two failures. |
 | `ca` | `NAME` utf-8 | DIAL | empty ⇒ the system trust store | PEM CA-bundle the peer's certificate is verified against, *instead of* the system trust store. |
-| `insecure` | `VALUE` u8 (flag) | DIAL | `0` | **DEV ONLY.** Non-zero skips server-certificate validation entirely. |
+| `insecure` | `VALUE` u8 (flag) | DIAL | `0` | **DEV ONLY, and requires the build capability `config_t::kAllowInsecureTls`** (default `false`). With it, non-zero skips server-certificate validation entirely. Without it, non-zero is refused at creation with `PERMISSION_DENIED` on either role and counted in `quic_insecure_refusals()`; `0` is accepted. |
 
 <!-- config-keys:end -->
 
@@ -275,7 +275,7 @@ one with a resource to name and the only one with an H3 handshake to bound:
 | `cert` | `NAME` utf-8 | LISTEN | — (required) | PEM server-certificate path. |
 | `key` | `NAME` utf-8 | LISTEN | — (required) | PEM private-key path matching `cert`. |
 | `ca` | `NAME` utf-8 | DIAL | empty ⇒ the system trust store | PEM CA-bundle to verify the peer against. |
-| `insecure` | `VALUE` u8 (flag) | DIAL | `0` | **DEV ONLY.** Skips server-certificate validation. |
+| `insecure` | `VALUE` u8 (flag) | DIAL | `0` | **DEV ONLY, and requires `config_t::kAllowInsecureTls`.** With it, skips server-certificate validation; without it, non-zero is refused with `PERMISSION_DENIED` and counted in `webtransport_insecure_refusals()`. |
 | `max_handshake` | `VALUE` u32 | DIAL + LISTEN | `0` | Bytes. The **pre-auth** HTTP/3 handshake budget (#1408): the most a peer that has completed a QUIC handshake and nothing else — no session, no ACL, no subscription, no router — may make this node accumulate before its H3 material is refused. `0` = the 16 KiB `webtransport_transport_t::kMaxHandshakeBytes` default, and the key is **tighten-only**: a larger value is clamped to that default (`webtransport_transport_t::handshake_cap`), because a config-writable key must never *raise* a pre-auth bound. On a **LISTEN** it bounds per-stream classification / HEADERS accumulation *and* the **declared** length of a HEADERS or unknown/GREASE frame, so an over-declaration is refused before one body byte is buffered; on a **DIAL** it bounds the CONNECT response's field section the same way. Over budget is a statement about the *peer*, so the connection is shut down with the bad-request code — distinct from the two exhaustion dispositions, which are stream-scoped (#919) or count-then-close (`refused_sessions()`, #934) and are unchanged by this key. It does not bound frame-channel bytes; those are under `max_frame`. |
 | `path` | `NAME` utf-8 | DIAL | `/` | The extended CONNECT `:path` — which resource the WebTransport session is opened on (`new WebTransport("https://host:port/here")`). Empty is normalised to `/`. **This is an HTTP URL path, not a libtracer graph path**, and it is *not* the `can` kind's `path` key (an advertised group path): kind-private namespaces do not collide, but the two spellings are identical, so read the section heading before copying a row. The LISTEN side of this kind serves every path — it validates `:method`/`:protocol` only — so the key matters when dialing someone else's server (#1023). The accepted shape is **origin-form**: absent, empty (⇒ `/`), or `/`-prefixed. A non-empty value that does not begin with `/` answers `TYPE_MISMATCH` at creation, before any socket or TLS work, because an `https` request's `:path` is `/`-prefixed in origin-form (RFC 9114 §4.3.1 / RFC 9113 §8.3.1) — nothing beyond that leading `/` is judged (#1039). |
 
@@ -296,13 +296,13 @@ accepted CONNECT named — an observation, never an admission decision.
 
 ## Certificate trust on a SPEC-created dialer
 
-Four points, in the order an integrator meets them.
+Five points, in the order an integrator meets them.
 
 **The default is verify.** A `quic` or `webtransport` dialer created from a SPEC
 with *neither* trust key validates the peer's certificate against the system trust
 store, and a certificate that does not chain to it is refused: the handshake fails
 and creation answers `TRANSPORT_DOWN`. Anything dialing a self-signed peer must say so,
-with `ca` or with `insecure = 1`. This is a change of behaviour, not a restatement
+with `ca` or (on a build with `kAllowInsecureTls`) with `insecure = 1`. This is a change of behaviour, not a restatement
 of one: before [#918] the DIAL branch hard-coded no-verify and returned *before*
 the kind-private parse ran at all, so every SPEC-created dialer skipped validation
 and no config key existed that could change it. `core/tests/quic_test.cpp` and
@@ -326,6 +326,20 @@ is no spelling of a broken `insecure` that turns validation off.
 
 **`insecure = 0` is not a weaker opt-out.** It is the explicit spelling of the
 default, and it verifies.
+
+**`insecure` = non-zero requires a build capability.** A SPEC is a wire write, and a
+node without an ACL policy accepts one from any connected peer, so whether the key is
+honoured at all is decided by the build: `config_t::kAllowInsecureTls`, default
+`false`. On a default build a SPEC carrying `insecure` = non-zero is refused at
+creation with `PERMISSION_DENIED`, on either role, and counted
+(`tr::net::quic_insecure_refusals()` / `tr::net::webtransport_insecure_refusals()`).
+It is never downgraded to a verifying dial and never honoured. `ca` is the way to
+reach a self-signed peer on such a build. A development build that needs the key binds
+`static constexpr bool kAllowInsecureTls = true;` in its `config_override.hpp`; the
+checked-in preset `core/tests/insecure-tls/` does exactly that, and the `quic` CI
+workflow runs the QUIC and WebTransport tests under it as well as under the default.
+Only the SPEC is gated: an application that constructs a transport itself with
+`quic_dial_tls_t{.insecure_no_verify = true}` has made that choice in its own code.
 
 ## Why these are not `conn_settings_t` fields
 

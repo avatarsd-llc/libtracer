@@ -227,8 +227,11 @@ class quic_transport_t : public transport_t {
  *   system trust store; the way to reach a privately-issued or self-signed peer while
  *   still authenticating it.
  * - `insecure` (VALUE, u8; default 0) — `1` skips server-certificate validation
- *   entirely. DEV ONLY, and deliberately explicit: a deployment that wants an
- *   unauthenticated dialer has to write it down. Never set it outside dev.
+ *   entirely. DEV ONLY, and it requires the build capability
+ *   @ref tr::graph::default_config_t::kAllowInsecureTls (default `false`): without it a
+ *   SPEC carrying `insecure` = nonzero is REFUSED at creation with `PERMISSION_DENIED`
+ *   and counted in `%quic_insecure_refusals()` (below), on either role. `insecure = 0` is
+ *   accepted on every build.
  *
  * @param rx_backend The ADR-0042 §2 receive-segment seam every constructed socket
  *                   draws its inbound frame segments from (default: the process
@@ -237,5 +240,14 @@ class quic_transport_t : public transport_t {
  */
 [[nodiscard]] transport_vertex_t::transport_factory_t quic_transport_factory(
     mem::mem_backend_t* rx_backend = &mem::heap_backend());
+
+/**
+ * @brief How many `quic` SPECs this process refused for carrying `insecure` = nonzero on a
+ *        build without @ref tr::graph::default_config_t::kAllowInsecureTls.
+ *
+ * Process-wide and monotonic (a relaxed atomic, touched only on the refusal). Always `0` on
+ * a build that binds the capability, where the key is honoured instead.
+ */
+[[nodiscard]] std::uint64_t quic_insecure_refusals() noexcept;
 
 }  // namespace tr::net

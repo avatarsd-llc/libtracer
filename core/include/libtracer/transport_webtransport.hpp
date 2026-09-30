@@ -381,7 +381,11 @@ class webtransport_transport_t : public transport_t {
  * is REFUSED (creation answers `TRANSPORT_DOWN`). The same two DIAL-side keys as
  * the `quic` kind move it: `ca` (NAME, a PEM CA-bundle path) verifies against that
  * bundle instead, and `insecure` (VALUE u8, default 0) set to `1` skips
- * validation entirely — DEV ONLY, and explicit on purpose.
+ * validation entirely — DEV ONLY, and it requires the build capability
+ * @ref tr::graph::default_config_t::kAllowInsecureTls (default `false`): without it
+ * a SPEC carrying `insecure` = nonzero is REFUSED at creation with
+ * `PERMISSION_DENIED` and counted in `%webtransport_insecure_refusals()` (below), on either
+ * role. `insecure = 0` is accepted on every build.
  *
  * @param rx_backend The ADR-0042 §2 receive-segment seam every constructed
  *                   endpoint draws inbound frame segments from (default: the
@@ -390,5 +394,14 @@ class webtransport_transport_t : public transport_t {
  */
 [[nodiscard]] transport_vertex_t::transport_factory_t webtransport_transport_factory(
     mem::mem_backend_t* rx_backend = &mem::heap_backend());
+
+/**
+ * @brief How many `webtransport` SPECs this process refused for carrying `insecure` =
+ *        nonzero on a build without @ref tr::graph::default_config_t::kAllowInsecureTls.
+ *
+ * Process-wide and monotonic (a relaxed atomic, touched only on the refusal). Always `0` on
+ * a build that binds the capability, where the key is honoured instead.
+ */
+[[nodiscard]] std::uint64_t webtransport_insecure_refusals() noexcept;
 
 }  // namespace tr::net

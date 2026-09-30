@@ -40,6 +40,8 @@ on:
       - "core/include/libtracer/grammar.hpp"  # the one wire grammar frame decoding walks
       - "core/include/libtracer/length_prefix_framer.hpp"  # quic/webtransport RX reassembler
       - "core/include/libtracer/config_reader.hpp"  # the quic factory parses cert/key through it
+      - "core/include/libtracer/config.hpp"  # kAllowInsecureTls gates the SPEC `insecure` key
+      - "core/tests/insecure-tls/**"  # the dev preset the second (honoured-arm) run binds
       - "core/include/libtracer/transport.hpp"  # the receiver seam both transports implement
       - "core/include/libtracer/receiver_slot.hpp"  # the delivery-tier slot transport.hpp embeds
       - "core/src/transport_vertex.cpp"
@@ -145,3 +147,19 @@ jobs:
           export LD_LIBRARY_PATH="$HOME/msquic-install/lib:${LD_LIBRARY_PATH:-}"
           setarch "$(uname -m)" -R ctest --test-dir core/build-quic-${{ matrix.name }} \
             --output-on-failure
+
+      - name: QUIC + WebTransport tests under kAllowInsecureTls (release only)
+        # The run above is the DEFAULT build, where a SPEC carrying `insecure` = non-zero is
+        # refused. This one binds the checked-in dev preset so the honoured arm of the same
+        # two tests runs too. Only the two test targets (and what they link) are built.
+        if: matrix.name == 'release'
+        run: |
+          cmake -S core -B core/build-quic-insecure-tls -DBUILD_TESTING=ON \
+            -DLIBTRACER_WITH_QUIC=ON -DCMAKE_PREFIX_PATH="$HOME/msquic-install" \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CXX_FLAGS="-I$PWD/core/tests/insecure-tls"
+          cmake --build core/build-quic-insecure-tls --parallel "$BUILD_JOBS" \
+            --target quic_test webtransport_test
+          export LD_LIBRARY_PATH="$HOME/msquic-install/lib:${LD_LIBRARY_PATH:-}"
+          setarch "$(uname -m)" -R ctest --test-dir core/build-quic-insecure-tls \
+            -R '^(quic|webtransport)$' --output-on-failure
