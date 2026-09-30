@@ -119,12 +119,11 @@ jobs:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ubuntu:24.04
-      # Container jobs run in Docker's own cgroup, not the runner's systemd unit, so the
-      # host-side runners.slice quota never reaches them: this cap is the ONLY thing that
-      # bounds a container job on the self-hosted host (#1637). 6 CPUs matches BUILD_JOBS,
-      # 10g the per-unit memory budget. Harmless on the hosted fallback: ubuntu-24.04
-      # runners have 4 cores / 16 GB, both under the cap.
-      options: --cpus 6 --memory 10g
+      # CPU is bounded host-side: dockerd's cgroup-parent puts every container under
+      # runners.slice (11 cores for all runners + containers together), so no per-container
+      # `--cpus` (#1691). 10g is the per-job memory budget; harmless on the hosted fallback
+      # (ubuntu-24.04 runners have 16 GB).
+      options: --memory 10g
     # Measured max 0.87 min, p50 0.65, min 0.48. 15 = the short-job floor (~17x): it runs
     # in a bare ubuntu container with the apt step below, and it is routed to the
     # self-hosted ci-local pool where queue-before-start reached 3.20 min (queue time does
