@@ -365,8 +365,8 @@ itself, described via `:schema` like any other data
 ```
 
 The backpressure counters come from `graph_t::delivery_drops()`
-(`core/include/libtracer/graph.hpp:2425`), which snapshots four per-cause totals —
-`no_target`, `denied`, `out_of_memory`, `fan_out_truncated` (`graph.hpp:2425-2463`). Each
+(`core/include/libtracer/graph.hpp:2426`), which snapshots four per-cause totals —
+`no_target`, `denied`, `out_of_memory`, `fan_out_truncated` (`graph.hpp:2426-2464`). Each
 counts shed **deliveries**, not events, so a fan-out shed whole under memory pressure moves
 them by its width. `denied` counts an `:acl` refusal on every plane — a local API write, a
 `FWD{WRITE}` terminus, a `COMPACT` terminus and a subscription edge alike (#1068) — so on a
@@ -391,7 +391,7 @@ JTAG session.
   link while host builds stay green.
 - **Platform TU selection is a build-system concern, not an `#ifdef`.** Chip targets
   compile `twai_link.cpp` plus a SocketCAN stub; the `linux` target compiles real
-  SocketCAN and no TWAI (`integrations/esp-idf/libtracer/CMakeLists.txt:189-190`).
+  SocketCAN and no TWAI (`integrations/esp-idf/libtracer/CMakeLists.txt:190-191`).
   Extend that pattern rather than adding macros.
 - Build with `-fno-exceptions -fno-rtti` and treat any throwing construct on the
   delivery path as a defect (§1).

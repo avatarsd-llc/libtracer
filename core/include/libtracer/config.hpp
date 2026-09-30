@@ -179,11 +179,12 @@ struct default_config_t {
      * won after #380 §1 were invisible to the build and free to be spent again by anyone.
      * Pinned to the measurement, every byte reclaimed is kept by construction.
      *
-     * History, newest first: 88 (RFC-0028 slice 3 — the LKV slot is one `value_t*` word, where
-     * the `std::shared_ptr<const rope_t>` it replaced was two; both `lkv_slot_t` bindings
-     * agree), 96 (measured across all three CI legs — `acl_full` OFF/ON and both `lkv_slot_t`
-     * bindings agree), 112 post-#380 §1, 144 post-packing, 168 post-§3, 160 post-§2, 248
-     * post-§1, 536 pre-split.
+     * History, newest first: 88 unchanged by RFC-0028 slice 8 (the 32-bit write sequence frees
+     * 4 B that the member order's tail padding absorbs on a 64-bit host), 88 (RFC-0028 slice 3 —
+     * the LKV slot is one `value_t*` word, where the `std::shared_ptr<const rope_t>` it replaced
+     * was two; both `lkv_slot_t` bindings agree), 96 (measured across all three CI legs —
+     * `acl_full` OFF/ON and both `lkv_slot_t` bindings agree), 112 post-#380 §1, 144 post-packing,
+     * 168 post-§3, 160 post-§2, 248 post-§1, 536 pre-split.
      *
      * It lives HERE, in the configuration, because it is a per-target budget — and it is
      * enforced in `%vertex.hpp` beside the type it constrains, so **every** build on **every**
@@ -201,8 +202,13 @@ struct default_config_t {
      * @brief The RAM-diet RATCHET on `sizeof(vertex_t)`, 32-bit (MCU) targets.
      *
      * Pointer-halved, and pinned to the measurement on the same terms as
-     * @ref kMaxVertexBytes64 — measured 72 B on rv32 (`-Os -fno-exceptions -fno-rtti`,
-     * `rv32imac_zicsr_zifencei`/`ilp32`), identical across all three configuration legs.
+     * @ref kMaxVertexBytes64 — measured 64 B on rv32 (`-Os -fno-exceptions -fno-rtti`,
+     * `rv32imac_zicsr_zifencei`/`ilp32`).
+     *
+     * Lowered 72 -> 64 by RFC-0028 slice 8 (#1621): `write_seq_` became a 32-bit atomic. The
+     * 64-bit one was 8 B wide AND 8-aligned on rv32, so it cost its own 4 extra bytes plus 4 of
+     * alignment padding — and a libatomic call (`__atomic_fetch_add_8`, which masks interrupts
+     * on ESP-IDF) on every publish.
      *
      * This number was 80 with a note claiming rv32 was "exactly 80" and had zero headroom.
      * It was 72 by then: the struct had shrunk and the prose had not, which is exactly the
@@ -213,7 +219,7 @@ struct default_config_t {
      * struct bytes on 32-bit but deletes a ~32 B heap block per named vertex — and on this
      * target the heap is what is actually scarce.
      */
-    static constexpr std::size_t kMaxVertexBytes32 = 72;
+    static constexpr std::size_t kMaxVertexBytes32 = 64;
 
     /**
      * @brief The copy-or-share threshold (RFC-0028 §5.3, D3): a written value of AT LEAST this

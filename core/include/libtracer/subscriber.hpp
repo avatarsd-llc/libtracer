@@ -21,6 +21,7 @@
 #include <cstdint>
 #include <memory>
 #include <new>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -31,6 +32,7 @@
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/segment.hpp"
+#include "libtracer/subject_table.hpp"
 #include "libtracer/value.hpp"
 #include "libtracer/view.hpp"
 
@@ -185,19 +187,6 @@ using subscriber_fn_t = void (*)(void* ctx, const value_t& value);
  */
 struct subscriber_remote_t {
     /**
-     * @brief This node's NAME for the link the subscribe arrived on.
-     *
-     * FIRST, and the member ORDER below is the retired `pub_remote_t`'s, not this record's
-     * historical one. That is deliberate and load-bearing: unifying the two halves means the
-     * DELIVERY path (`graph_t::dispatch_edge_remote` since #1448; `vertex_t`'s published-entry
-     * copy before it) reads this record instead of a published copy, and keeping the offsets
-     * it reads at exactly where they were is what kept that loop's instruction stream
-     * identical across #1442. The slot-side readers (`edge_view_of`, `evict_link_edges`,
-     * `evict_route_edges`) move their displacements instead — control-plane paths, none of
-     * them pinned.
-     */
-    std::string link;
-    /**
      * @brief The consumer's accumulated return route (a complete PATH TLV's bytes — the FWD
      *        `src` the subscribe arrived with).
      *
@@ -205,7 +194,7 @@ struct subscriber_remote_t {
      * injected remote-delivery sink, which emits the `FWD{WRITE}` (or auto-promoted COMPACT)
      * back over the link (RFC-0004 §D/§E.1, ADR-0035 slice 4 / #136).
      *
-     * @ref link is the discriminator, not this field: `graph_t::dispatch_edge` takes its
+     * @ref has_link is the discriminator, not this field: `graph_t::dispatch_edge` takes its
      * remote leg on a non-empty link and reads this route without testing it. The two agree
      * because the admitting door enforces it — `graph_t::subscribe_wire` refuses an empty
      * route as `INVALID_PATH` (#1055), and the `:subscribers[]` field-write arm, which binds
@@ -234,38 +223,32 @@ struct subscriber_remote_t {
      * subscribe, refcount clones per delivery snapshot.
      */
     view_t reverse_route{};
+
+   private:
+    /** @brief `delivery_compact` rides bit 31 of `ident_`, which a @ref subject_id_t
+     *         never sets. */
+    static constexpr std::uint32_t kCompactBit = std::uint32_t{1} << 31;
+
     /**
-     * @brief The caller context this edge was created under (#81, ADR-0026 fan-in gate).
+     * @brief The interned (delivery link, caller subject) pair plus the COMPACT opt-in, in
+     *        one word (RFC-0028 D8, slice 8).
      *
-     * The inbound link NAME for a remote subscribe, empty for a locally-wired edge. A
-     * fan-out re-dispatch into a LOCAL target vertex is gated by the TARGET's `:acl` WRITE
-     * right under this context — the subscription's creator is the "writer" the target
-     * authorizes. A REMOTE subscriber's fan-in gate runs on the peer instead (its
-     * `FWD{WRITE}` terminus checks the same right).
+     * Two `std::string`s (64 B, plus a heap block each past 15 characters) until slice 8. The
+     * pair is interned process-wide (`%subject_table.hpp`) and this record holds ONE
+     * reference on it, dropped by the destructor — so every edge a peer admits under the
+     * same names shares one entry, and the record is 56 B on a 64-bit host (32 B on rv32).
      */
-    std::string caller;
-    /**
-     * @brief Route-handle opt-in (`SUBSCRIBER.qos_settings.delivery_compact`, RFC-0004
-     *        §E.1 / ADR-0035 slice 4).
-     *
-     * When true the consumer requests label-compacted deliveries: the producer MAY
-     * advertise a per-link label aliasing this subscriber's return route and thereafter
-     * stream lean COMPACT frames instead of full-route `FWD{WRITE}` deliveries. Default
-     * false ⇒ stateless full-route delivery, so a cold/one-shot flow allocates no label
-     * state.
-     */
-    bool delivery_compact = false;
+    std::uint32_t ident_ = 0;
+
+   public:
     /**
      * @brief Intrusive refcount (#1442): how many holders name this record — the slot, plus
      *        one per PUBLISHED edge array whose entry points at it.
      *
-     * **Rides the record's existing TAIL PADDING and therefore costs zero bytes.**
-     * @ref delivery_compact ends at offset 113 and the record is 8-aligned, so a 4-byte
-     * counter lands at 116 and `sizeof` stays the pinned 120 B. That is why the shape is an
-     * intrusive count and not a `std::shared_ptr`: a 16-byte handle would have widened
+     * An intrusive count and not a `std::shared_ptr`: a 16-byte handle would widen
      * @ref subscriber_t (pinned at 80 B) AND @ref pub_edge_t, whose width was measured at
-     * **+23 %** on the fan-out-1024 publish the last time it grew — the fix would have been
-     * paid for out of the delivery path.
+     * **+23 %** on the fan-out-1024 publish the last time it grew — paid for out of the
+     * delivery path.
      *
      * Not a synchronization primitive for the PAYLOAD. The payload is written once, before
      * the record is ever named by a published array, and the seq_cst exchange that publishes
@@ -281,6 +264,68 @@ struct subscriber_remote_t {
      * already uses, `LIBTRACER_NO_ATOMIC` fallback included.
      */
     view::detail::ref_count_t refs{1};
+
+    /** @brief An empty record: no routes, no subject, no COMPACT opt-in, one reference. */
+    subscriber_remote_t() noexcept = default;
+    /** @brief Drops this record's reference on its interned subject. */
+    ~subscriber_remote_t() { release_subject(subject()); }
+    subscriber_remote_t(const subscriber_remote_t&) = delete;
+    subscriber_remote_t& operator=(const subscriber_remote_t&) = delete;
+
+    /**
+     * @brief Bind this edge's delivery @p link and fan-in @p caller — the admission door's
+     *        build step, interning the pair (RFC-0028 D8).
+     *
+     * @param link   This node's NAME for the link deliveries go out over; empty for an edge
+     *               with no remote leg (the `:subscribers[]` field-write arm).
+     * @param caller The context this edge was created under (#81, ADR-0026 fan-in gate): the
+     *               inbound link NAME or the writer's subject for a remote subscribe, empty for
+     *               a locally-wired edge. A fan-out re-dispatch into a LOCAL target vertex is
+     *               gated by the TARGET's `:acl` WRITE right under this context.
+     * @return false when the subject table is exhausted — the record is unchanged and the
+     *         door refuses the edge (exhaustion is a value).
+     */
+    [[nodiscard]] bool set_subject(std::string_view link, std::string_view caller) noexcept {
+        const std::optional<subject_id_t> id = intern_subject(link, caller);
+        if (!id) return false;
+        release_subject(subject());
+        ident_ = id->bits | (ident_ & kCompactBit);
+        return true;
+    }
+
+    /** @brief Set the route-handle opt-in (`SUBSCRIBER.qos_settings.delivery_compact`). */
+    void set_delivery_compact(bool on) noexcept {
+        ident_ = on ? (ident_ | kCompactBit) : (ident_ & ~kCompactBit);
+    }
+
+    /** @brief The interned (link, caller) pair; a default id when neither is bound. */
+    [[nodiscard]] subject_id_t subject() const noexcept { return {ident_ & ~kCompactBit}; }
+
+    /** @brief True iff this edge has a delivery link — the remote-leg test, one bit, no
+     *         table read. */
+    [[nodiscard]] bool has_link() const noexcept { return (ident_ & subject_id_t::kLinkBit) != 0; }
+
+    /** @brief This node's NAME for the link the subscribe arrived on (the delivery link);
+     *         empty ⇒ no remote leg. Borrowed from the interned entry this record holds. */
+    [[nodiscard]] std::string_view link() const noexcept { return subject_names(subject()).link; }
+
+    /** @brief The caller context this edge was created under (#81, ADR-0026 fan-in gate);
+     *         empty for a locally-wired edge. Borrowed from the interned entry. */
+    [[nodiscard]] std::string_view caller() const noexcept {
+        return subject_names(subject()).caller;
+    }
+
+    /**
+     * @brief Route-handle opt-in (`SUBSCRIBER.qos_settings.delivery_compact`, RFC-0004
+     *        §E.1 / ADR-0035 slice 4).
+     *
+     * When true the consumer requests label-compacted deliveries: the producer MAY
+     * advertise a per-link label aliasing this subscriber's return route and thereafter
+     * stream lean COMPACT frames instead of full-route `FWD{WRITE}` deliveries. Default
+     * false ⇒ stateless full-route delivery, so a cold/one-shot flow allocates no label
+     * state.
+     */
+    [[nodiscard]] bool delivery_compact() const noexcept { return (ident_ & kCompactBit) != 0; }
 };
 
 /**
@@ -528,10 +573,11 @@ struct subscriber_t {
  * differs and a `sizeof` pin there would be a false alarm rather than a guard.
  *
  * #1442 moved the cold half from owned-per-holder to refcount-shared and **both numbers are
- * unchanged**: the handle is one pointer, as the `std::unique_ptr` was, and the intrusive
- * count fits the cold record's pre-existing tail padding. A future member that pushes
- * @ref subscriber_remote_t past 120 B evicts the counter into a word of its own and costs 8,
- * not 4 — that is the growth this pin is here to price.
+ * unchanged**: the handle is one pointer, as the `std::unique_ptr` was. RFC-0028 slice 8 took
+ * the cold half from 120 B to **56 B** (32 B on rv32): the link and caller `std::string`s
+ * became one interned 4-byte subject, and the COMPACT opt-in rides that word's spare bit, so
+ * the two routes, the subject and the counter fill the record with no padding at all. Any
+ * added member now costs a full 8 B on a 64-bit host — that is the growth this pin prices.
  */
 static_assert(sizeof(void*) != 8 || sizeof(subscriber_t) == 80,
               "the HOT edge record is 80 B — see #380 §3; move new members to the cold half");
@@ -540,8 +586,11 @@ static_assert(sizeof(void*) != 8 || alignof(subscriber_t) == 8,
 static_assert(std::is_nothrow_move_constructible_v<subscriber_t>,
               "the slot vector grows by MOVE; a throwing move would copy — and the copy is "
               "deleted");
-static_assert(sizeof(void*) != 8 || sizeof(subscriber_remote_t) == 120,
-              "the COLD edge half is 120 B — price any growth against the per-edge RAM");
+static_assert(sizeof(void*) != 8 || sizeof(subscriber_remote_t) == 56,
+              "the COLD edge half is 56 B (RFC-0028 §6.8) — price any growth against the "
+              "per-edge RAM");
+static_assert(sizeof(void*) != 4 || sizeof(subscriber_remote_t) == 32,
+              "the COLD edge half is 32 B on a 32-bit target (RFC-0028 §6.8)");
 static_assert(sizeof(void*) != 8 || alignof(subscriber_remote_t) == 8,
               "the COLD edge half is 8-aligned; it is refcount-owned off to the side, so its "
               "address is stable across a slot-vector reallocation");
@@ -606,13 +655,13 @@ struct edge_view_t {
      */
     [[nodiscard]] std::string_view link() const noexcept {
         const subscriber_remote_t* r = remote.get();
-        return r != nullptr ? std::string_view(r->link) : std::string_view{};
+        return r != nullptr ? r->link() : std::string_view{};
     }
     /** @brief The edge's stored ACL fan-in context (#81), borrowed from the held record;
      *         empty for a locally-wired edge. */
     [[nodiscard]] std::string_view caller() const noexcept {
         const subscriber_remote_t* r = remote.get();
-        return r != nullptr ? std::string_view(r->caller) : std::string_view{};
+        return r != nullptr ? r->caller() : std::string_view{};
     }
     /**
      * @brief Does this edge have a REMOTE-delivery leg — i.e. a non-empty @ref link?
@@ -624,7 +673,7 @@ struct edge_view_t {
      */
     [[nodiscard]] bool has_remote_leg() const noexcept {
         const subscriber_remote_t* r = remote.get();
-        return r != nullptr && !r->link.empty();
+        return r != nullptr && r->has_link();
     }
 };
 

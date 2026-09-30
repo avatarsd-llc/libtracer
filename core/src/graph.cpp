@@ -2105,13 +2105,13 @@ result_t<value_ref_t> graph_t::read(vertex_handle_t vh, std::string_view caller)
     // gated by the TARGET's :acl WRITE right under the edge's stored caller context.
     // Denial drops this delivery.
     //
-    // Read TWICE, deliberately (#1448). The context is borrowed from the shared cold half
-    // now, so each read is a handle load, a null test and a select — and `acl_allows` may
-    // write through the graph, so the compiler cannot CSE the two. Hoisting it into a local
-    // that stays live across the ACL call and the clone was MEASURED: 148 -> 145 instructions
-    // here, at +36 B of spill, which is the wrong side of the trade for a leg whose byte pin
-    // is otherwise unmoved by this change.
-    if (!acl_allows(target, e.caller(), acl_right_t::WRITE)) {
+    // Read ONCE since RFC-0028 slice 8. #1448 read it twice, because a read was then a handle
+    // load, a null test and a select, and hoisting it cost +36 B of spill for 3 instructions.
+    // A read now resolves the record's interned subject (a bit scan and a directory load), so
+    // a second resolution costs more than the spill. The view stays valid across the ACL call
+    // and the store: the snapshot holds the record, and the record holds its subject.
+    const std::string_view caller = e.caller();
+    if (!acl_allows(target, caller, acl_right_t::WRITE)) {
         count_drop(drop_reason_t::DENIED, 1);
         return;
     }
@@ -2147,7 +2147,7 @@ result_t<value_ref_t> graph_t::read(vertex_handle_t vh, std::string_view caller)
     // bumps, not K allocations. The admission filter, the ring admission and the handler
     // reaction all still run, inside the adopting `store_value`, on the shared block.
     vertex_t::store_drops_t store_drops;
-    if (const auto stored = store_value(target, value, store_drops, e.caller()); !stored) {
+    if (const auto stored = store_value(target, value, store_drops, caller); !stored) {
         // The cause is now read off the status rather than assumed. Every refusal this leg
         // could see used to be a resource one (`BACKPRESSURE` — a declined slot publish, a
         // declined ring admission, or the rope arm's clone or block), so counting it as
@@ -2185,12 +2185,15 @@ result_t<value_ref_t> graph_t::read(vertex_handle_t vh, std::string_view caller)
     // the handle is non-null here; assert it rather than re-testing on the hot path.
     const subscriber_remote_t* r = e.remote.get();
     assert(r != nullptr && "dispatch_edge gates the remote leg on a populated cold half");
+    // The two names resolve through the record's ONE interned subject (RFC-0028 D8): a
+    // lock-free directory load, valid for as long as the snapshot holds the record.
+    const subject_names_t names = subject_names(r->subject());
     sink.fn(sink.ctx,
-            remote_delivery_t{.link = r->link,
+            remote_delivery_t{.link = names.link,
                               .return_route = r->return_route,
                               .reverse_route = r->reverse_route,
-                              .caller = r->caller,
-                              .delivery_compact = r->delivery_compact},
+                              .caller = names.caller,
+                              .delivery_compact = r->delivery_compact()},
             value);
 }
 
@@ -3190,7 +3193,7 @@ result_t<value_ref_t> graph_t::await(vertex_handle_t vh, std::chrono::nanosecond
     // denied caller cannot camp on the condvar.
     if (!acl_allows(v, caller, acl_right_t::READ))
         return std::unexpected(status_t::PERMISSION_DENIED);
-    const std::uint64_t seq0 = v->current_seq();
+    const write_seq_t seq0 = v->current_seq();
     if (!v->wait_for_change(seq0, timeout)) return std::unexpected(status_t::TIMEOUT);
     // Serve the woken value through the SAME ROLE DISPATCH `read` runs (RFC-0008 Amendment 2).
     // A HANDLER vertex answers `read` from its `on_read` seam and stores nothing, so the old
@@ -3267,7 +3270,7 @@ void parse_subscriber_tlv(const tlv_t& sub, subscriber_t& s) {
         } else if (child.type == type_t::SETTINGS) {
             const wire::config_reader_t qos(&child);
             if (qos.flag("delivery_compact").value_or(false))
-                s.ensure_remote().delivery_compact = true;  // cold half only when opted in
+                s.ensure_remote().set_delivery_compact(true);  // cold half only when opted in
             if (const std::optional<std::uint16_t> word = qos.u16("delivery_policy"))
                 s.policy.bits = *word;
         }
@@ -3376,7 +3379,7 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
     // exactly the ones the name compare inside rejects, so neither can silently un-index the
     // edges #943 and #1071 fixed.
     if (s.remote)
-        index_link_vertex(s.remote->link.empty() ? s.remote->caller : s.remote->link, link_token,
+        index_link_vertex(s.remote->has_link() ? s.remote->link() : s.remote->caller(), link_token,
                           v);
     note_subscriber_added(v);  // RFC-0005: descendants' writes now bubble here
     if (slot) {
@@ -3683,15 +3686,17 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view_t source_view, v
     // The fan-in gate context this edge's deliveries run under (#81) — the WRITER's subject
     // since #375 Part 2, and the link's own name for every caller that supplied none, which
     // is byte for byte what this door stored before the two claims were separated (ADR-0082).
-    r.caller = caller.empty() ? std::move(link) : std::move(caller);
+    // Interned together with the delivery link as ONE subject (RFC-0028 D8); an exhausted
+    // subject table refuses the edge as backpressure, before anything is admitted.
+    const std::string_view fan_in = caller.empty() ? std::string_view(link) : caller;
+    if (!r.set_subject(delivery_link, fan_in)) return std::unexpected(status_t::BACKPRESSURE);
     r.return_route = std::move(return_route);
     // The completed reverse bound route (RFC-0024 §7.1 amendment 1) — empty for every
     // canonical-only subscribe, and stored WITHOUT validation beyond what the resolver
     // already did: element 0 is this node's own mint, re-validated on every delivery.
     r.reverse_route = std::move(reverse_route);
-    r.link = std::move(delivery_link);
-    const std::string gate_ctx = r.caller;  // the SUBSCRIBE gate runs under the WRITER's subject
-                                            // (#81/ADR-0026), not the delivery one
+    const std::string gate_ctx(fan_in);  // the SUBSCRIBE gate runs under the WRITER's subject
+                                         // (#81/ADR-0026), not the delivery one
     // A wire subscribe carries no host handle back — discard the slot (unsubscribe is the
     // wire :subscribers[N] clear, not this door's return).
     if (const auto r2 = admit_subscriber(v, std::move(s), gate_ctx, std::nullopt, link_token); !r2)
@@ -3758,7 +3763,8 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
             // reached only through the public `graph_t::write(v, field, value, caller)`,
             // which an embedder may drive with an inbound link name. The `[N]` arm below has
             // no such diversion and IS reached from the wire.
-            if (!caller.empty()) s.ensure_remote().caller.assign(caller);
+            if (!caller.empty() && !s.ensure_remote().set_subject({}, caller))
+                return std::unexpected(status_t::BACKPRESSURE);  // subject table exhausted
             // The single admission step (ADR-0049): SUBSCRIBE gate → append → latch.
             // A field-write subscribe returns no host handle — discard the slot.
             if (const auto r = admit_subscriber(v, std::move(s), caller); !r)
@@ -3818,7 +3824,8 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field, cons
             // As in the append arm: the stored context is also the link this edge was
             // admitted over, which is what `vertex_t::evict_link_edges` falls back to when
             // the cold half carries no delivery link (#943).
-            if (!caller.empty()) s.ensure_remote().caller.assign(caller);
+            if (!caller.empty() && !s.ensure_remote().set_subject({}, caller))
+                return std::unexpected(status_t::BACKPRESSURE);  // subject table exhausted
             // Through the SAME admission door as an append, so a replace passes the
             // SUBSCRIBE gate — §D.1's "admitted through the same admission door".
             if (const auto r = admit_subscriber(v, std::move(s), caller, step0.index); !r)

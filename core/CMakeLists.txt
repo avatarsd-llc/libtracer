@@ -99,6 +99,7 @@ add_library(libtracer STATIC
     src/tlv_view.cpp
     src/path.cpp
     src/graph.cpp
+    src/subject_table.cpp
     src/loopback.cpp
 )
 

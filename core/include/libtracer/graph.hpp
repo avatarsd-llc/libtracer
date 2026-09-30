@@ -899,7 +899,8 @@ class graph_t {
      * of the same address
      * inherits **nothing** of the retired owner — in particular the revived path inherits
      * its live ancestor's ACL policy, never the retired one's (the §Discussion-7 ruling:
-     * an ACL does not survive churn). `write_seq_` survives (monotonic per address).
+     * an ACL does not survive churn). `write_seq_` survives (it only moves forward per address,
+     * modulo 2^32).
      *
      * Delivers nothing and wakes no `await` (§B.5). Idempotent (§B.4): retiring an
      * already-retired or unregistered vertex succeeds and does nothing. The root cannot be

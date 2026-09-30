@@ -1272,6 +1272,13 @@ target_link_libraries(vertex_test PRIVATE libtracer)
 libtracer_test_warnings(vertex_test)
 add_test(NAME vertex COMMAND vertex_test)
 
+# RFC-0028 slice 8 (#1621, #1622): the 32-bit write sequence's modular compare across the wrap,
+# and the interned (link, caller) subject a remote edge's cold half holds.
+add_executable(interned_identity_test interned_identity_test.cpp)
+target_link_libraries(interned_identity_test PRIVATE libtracer)
+libtracer_test_warnings(interned_identity_test)
+add_test(NAME interned_identity COMMAND interned_identity_test)
+
 # M3 — L4 graph-runtime harness (single-threaded checks + multithreaded stress).
 # The vertex RAM-diet regression gate (#361): compile-time sizeof(vertex_t) ceilings
 # plus runtime probes of the lazy cold-extension allocation. static_asserts fire at

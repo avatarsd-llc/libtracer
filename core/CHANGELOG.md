@@ -32,6 +32,37 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Breaking
 
+- **The write sequence is 32-bit, and a remote edge holds one interned subject instead of two
+  strings (RFC 0028 slice 8, D6 + D8; [#1621](https://github.com/avatarsd-llc/libtracer/issues/1621),
+  L6 of [#1622](https://github.com/avatarsd-llc/libtracer/issues/1622)).**
+  - `vertex_t::current_seq()` returns the new `tr::graph::write_seq_t` (`std::uint32_t`, was
+    `std::uint64_t`) and `wait_for_change` takes one. The sequence wraps. Compare it only with the
+    new `write_seq_distance(from, to)` / `write_seq_advanced(seq0, now)` (modular, RFC 1982
+    style); `await` does, so a wrap between snapshot and check is still a change. It aliases only
+    at exactly 2^32 publishes inside one await window. On rv32 a publish now bumps the sequence
+    with one `amoadd.w`; before, it called `__atomic_fetch_add_8`, which masks interrupts on
+    ESP-IDF. `sizeof(vertex_t)` on rv32 is 72 → **64 B** (`config_t::kMaxVertexBytes32` lowered
+    to match). On 64-bit hosts it stays 88 B, because padding absorbs the 4 bytes.
+  - `subscriber_remote_t`'s `link`, `caller` (`std::string`) and `delivery_compact` (`bool`)
+    members are gone. The record holds one interned (link, caller) **subject** id. It is bound
+    with `set_subject(link, caller)` (returns `false` when the table is exhausted) and
+    `set_delivery_compact(bool)`, and read through `link()`, `caller()`, `has_link()`,
+    `delivery_compact()` and `subject()`. The record is non-copyable and **120 → 56 B** on a
+    64-bit host (80 → 32 B on rv32). Every edge a peer admits under the same names shares one
+    table entry, and no name costs a heap block per edge any more. `edge_view_t::link()` /
+    `caller()` / `has_remote_leg()` and `remote_delivery_t` keep their shapes.
+  - New header `libtracer/subject_table.hpp`: `subject_id_t`, `intern_subject`,
+    `release_subject`, `subject_names` (lock-free) and `live_subject_count`. The table is
+    process-wide and refcounted. Each entry is one 64-byte line with the spellings inline when
+    they fit. Only admission touches its mutex; resolution never does.
+  - An admission that cannot intern its subject is refused as `BACKPRESSURE` (out of memory,
+    or 2^30 − 1 live subjects). Before, the equivalent `std::string` copy aborted under
+    `-fno-exceptions`.
+  - Cost, measured: resolving the subject on the remote leg adds about 3–4 ns per remote edge
+    per publish on `bench_libtracer fan-remote` (host, advisory under load). Symbol pins:
+    `dispatch_edge_remote` +80 B, `dispatch_edge_target` +40 B, `fan_out` −40 B,
+    `snapshot_edges` −48 B.
+
 - **`graph_t`'s two instrumentation counters are compiled out by default:
   `config_t::kInstrumentCounters` ([#1664](https://github.com/avatarsd-llc/libtracer/issues/1664)).**
   `ancestor_walks()` (RFC-0005) and `target_canonical_resolves()` (#830) were a relaxed 64-bit

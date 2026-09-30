@@ -690,6 +690,36 @@ API-wide; mechanical.
 
 **Gate:** `sizeof(subscriber_remote_t)` ≤ 56; `vertex_t` ratchets lowered. **Risk: low.**
 
+**As landed in slice 8** (erratum: both gates are met; host API only, no wire change). The list
+records where §4.6 or §4.8 proved wrong:
+
+- **§4.8: one subject id, not two ids.** Two 4-byte ids do not reach 56 B. The record keeps its
+  two 24-byte routes and its 4-byte refcount, so two ids plus the `delivery_compact` flag round
+  up to 64 B. The landed record interns the (link, caller) **pair** as one `subject_id_t`, which
+  is D8's own definition of a subject: a link plus an optional per-writer suffix. The COMPACT
+  flag rides the id word's spare bit. The two routes, the id and the count fill exactly
+  **56 B** on a 64-bit host (32 B on rv32).
+- **§4.8: its own table, not `graph_t::intern_link`.** A `link_id_t` is an 8-byte
+  (slot, generation) token. Its slot is released when the link's edges are evicted, while an
+  edge record can outlive that eviction in a retire list or an in-flight dispatch snapshot. The
+  index is also a reallocating vector read under `link_index_mutex_`, so a delivery could not
+  resolve a name from it without a lock. The subject lives in a process-wide, refcounted table
+  (`subject_table.hpp`). Each record holds one reference. The chunks never move, so resolution
+  is lock-free: a bit scan, a directory load and one 64-byte entry with the spellings inline.
+- **§4.8: `remote_delivery_t` still carries names.** The sink receives the link and caller
+  resolved from the id, so `fwd_router_t` still finds the transport by name. Resolving ids on the
+  router side, which would delete that per-delivery scan, is not in this slice. It stays with
+  #1622, whose L7 half (one subscriber table) waits for RFC-0029 S5/S7. Resolving the id costs
+  about 3–4 ns per remote edge per publish on the host (`bench_libtracer fan-remote`).
+- **§4.6: 8 B per vertex on rv32, 0 B on the host.** On rv32 the 64-bit atomic was 8 bytes wide
+  and 8-aligned, so dropping it saves 8 B there: `sizeof(vertex_t)` 72 → 64 B, and
+  `kMaxVertexBytes32` is lowered to match. On a 64-bit host the freed 4 bytes land in the
+  member order's tail padding, so the size stays 88 B. The sequence is 32-bit on every target
+  rather than chosen at compile time, because one representation costs the host nothing. It is
+  compared only through the modular `write_seq_distance` / `write_seq_advanced`. `await` is its
+  only consumer: the propagate sweep's IF_NEWER test uses the sweep's pending set and never
+  compares sequences, and the wire does not carry the sequence.
+
 ### 6.9 Slice 9 — scatter-gather egress and the ingress loan (L4, L8; closes #1620's egress half, #1626)
 
 Span-form emitters for the delivery header; queued links retain the `value_t` instead of
