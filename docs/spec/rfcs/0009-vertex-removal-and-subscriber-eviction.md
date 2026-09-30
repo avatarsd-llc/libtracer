@@ -337,8 +337,11 @@ carries: as if `fill` had never run. It MUST clear, at retire time:
   retired one's sweep participation.
 
 **B.6.2** — Exactly one piece of per-vertex state MUST **survive**: the **write
-sequence** (`write_seq_`). It is monotonic per address for the graph's lifetime;
-resetting it would break the readiness cursors that assume it never regresses. It is
+sequence** (`write_seq_`). It is a per-address change counter, compared for equality
+only; resetting it could let a waiter whose `await` began before the retire read a revived
+vertex's counter as equal to the value it sampled, hiding a real change (corrected
+2026-09-30 by erratum, below — this sentence first called it "monotonic per address" and cited
+readiness cursors that assume it never regresses; none exists). It is
 **not** wire-observable (it feeds only the local `await` predicate), so keeping it
 does not re-distinguish a retired path from a never-built one on the wire — §C.4's
 collapse is preserved. The vertex's allocation, its extension block, its name, and
@@ -759,3 +762,29 @@ load-bearing half, and it is the half the rejection rests on.
 corrects descriptive text that contradicts shipped behaviour, touches no normative clause, mints no
 registry code, and changes no wire surface. §C.2 still pins a retired path's answer to
 `tr::path::not_found` (0x0020) — retirement is not a link failure — and `0x0023` still stays free.
+
+## Erratum (2026-09-30) — §B.6.2 calls the write sequence "monotonic per address" and cites readiness cursors that assume it never regresses; it is an equality-only change counter ([#1683](https://github.com/avatarsd-llc/libtracer/issues/1683))
+
+**What the text said.** §B.6.2 kept the write sequence across retire because *"it is monotonic per
+address for the graph's lifetime; resetting it would break the readiness cursors that assume it
+never regresses."*
+
+**What was wrong.** Only the **reason**. The shipped code has no cursor that orders two sequence
+values: the one consumer is the local `await` predicate, which tests the current value for
+**inequality** with the value sampled when the wait began (`current != seq0`). The sequence is a
+change counter compared for equality only, and it is free to wrap at its storage width
+([RFC-0008](0008-vertex-operations-assign-propagate.md) §Erratum 2026-09-30 states the same
+correction for §B there).
+
+**The correction.** The ruling stands: the write sequence **survives** retire, exactly as §B.6.2
+says, and it stays off the wire so §C.4's collapse is preserved. Read the justification as (the §B.6.2 sentence now reads to the same effect):
+
+> It is a per-address change counter, compared for equality only. Resetting it at retire could
+> hand a waiter whose `await` began before the retire a counter value equal to its sampled one
+> after a revival's writes, hiding a real change; keeping it means every write on the address,
+> across retire and revival, is a change to any waiter.
+
+**Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). **No
+wire surface moves** — the sequence is not wire-observable, and no behaviour changes: the state
+that survives and the state that resets are exactly §B.6.1/§B.6.2's lists. The wording is
+width-agnostic, so it holds before and after [#1682](https://github.com/avatarsd-llc/libtracer/pull/1682).

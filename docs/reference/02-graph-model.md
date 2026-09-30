@@ -404,7 +404,7 @@ A `write` is not a primitive. It is the composition of the **two irreducible ope
 
 | Operation | Plane | Effect |
 | --- | --- | --- |
-| **assign** | state | Replace the vertex's value (last-writer-wins), advance its monotonic **write sequence**, append to the history ring if the vertex is a stream, wake any `await` waiter, and mark the vertex for the next covering sweep. Reads no edge; sends nothing. |
+| **assign** | state | Replace the vertex's value (last-writer-wins), advance its **write sequence**, append to the history ring if the vertex is a stream, wake any `await` waiter, and mark the vertex for the next covering sweep. Reads no edge; sends nothing. |
 | **propagate** | edges | Deliver, along subscription edges, the vertex's **current stored value** and the qualifying descendants of its subtree. Takes no value argument — the last-known-value is the single source of truth. Mutates nothing. |
 
 `write(v, value)` is exactly `assign(v, value)` followed by `propagate(v)`. `read` and `await` live wholly in the state plane; `await` observes assigns at its own vertex and is independent of propagation.
@@ -416,11 +416,11 @@ A `write` is not a primitive. It is the composition of the **two irreducible ope
 
 ### The write sequence and pending vertices
 
-Every vertex carries a monotonic **write sequence**, incremented by every assign — never a hash or a comparison of the value's bytes. A sweep records, per vertex it includes, the sequence value at that inclusion. A vertex is **pending** exactly when its write sequence has advanced past the value the last covering sweep recorded.
+Every vertex carries a **write sequence**: a change counter advanced by every assign — never a hash or a comparison of the value's bytes. It is compared **for equality only** (`await` wakes when it differs from the value sampled when the wait began); nothing orders two of its values, so it may wrap at its storage width. Separately, an assign marks the vertex **pending** — assigned since a sweep last covered it — by entering it in the graph's pending set ([RFC-0008](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0008-vertex-operations-assign-propagate.md) §B, as corrected by its 2026-09-30 erratum).
 
-`propagate(root)` sweeps the subtree rooted at `root`, delivers each vertex it selects, and then advances that vertex's recorded sweep sequence. Two rules keep this consistent:
+`propagate(root)` sweeps the subtree rooted at `root`, delivers each vertex it selects, and then drains that vertex's pending mark. Two rules keep this consistent:
 
-1. **The `root` argument selects which vertices flush, not who receives them.** When a sweep selects a descendant `u`, `u` is delivered to *every* subscriber that observes it — `u`'s own edges and every ancestor carrying a subtree subscription, including ancestors **above** `root`. One sweep that covers `u` therefore satisfies both observers at once and clears `u`'s pending state, so an overlapping second sweep neither double-sends nor misses an observer. Capping delivery at `root` was rejected: it would force per-`(vertex, root)` bookkeeping instead of one counter per vertex.
+1. **The `root` argument selects which vertices flush, not who receives them.** When a sweep selects a descendant `u`, `u` is delivered to *every* subscriber that observes it — `u`'s own edges and every ancestor carrying a subtree subscription, including ancestors **above** `root`. One sweep that covers `u` therefore satisfies both observers at once and drains `u`'s pending mark, so an overlapping second sweep neither double-sends nor misses an observer. Capping delivery at `root` was rejected: it would force per-`(vertex, root)` bookkeeping instead of one mark per vertex.
 2. **Coalescing is free.** Assign overwrites the value and advances the sequence; it does not enqueue. *k* assigns to the same vertex between two sweeps flush **once**, with the latest value. A producer may assign at any rate and propagate on a timer at a lower rate; the timer rate is the delivery rate, and only touched vertices ride it.
 
 A default sweep costs *O(pending-in-subtree)*, not *O(subtree-size)*: pending vertices are held in an ordered set of canonical PATH keys, and a subtree is a contiguous prefix range of that order (a parent's key is a byte-prefix of every descendant's). A large, mostly-quiet subtree with three pending leaves flushes those three and touches nothing else.

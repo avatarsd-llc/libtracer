@@ -9,7 +9,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0008 |
 | **Title** | Vertex operations: `assign` and `propagate`; structural selective propagation; value-agnostic per-vertex `delivery_mode` |
-| **Status** | **accepted** (2026-07-06, maintainer-ratified design discussion; amended 2026-07-06b, and 2026-08-22 — Amendment 2, below) |
+| **Status** | **accepted** (2026-07-06, maintainer-ratified design discussion; amended 2026-07-06b, and 2026-08-22 — Amendment 2, below; §B corrected 2026-09-30 by erratum, below) |
 | **Author(s)** | AvatarSD (maintainer) |
 | **Created** | 2026-07-06 |
 | **Comment window** | waived by the maintainer (solo-maintainer project, GOVERNANCE.md window dead ceremony) |
@@ -37,7 +37,7 @@ call) splits into the **two irreducible operations** it was always hiding:
 - **`assign`** — the vertex-local state transition: replace the vertex's value. Reads
   no edge and sends nothing. (In graph terms, relabel a vertex; in C++ terms, the
   `operator=` — and with rope-valued vertices ([ADR-0053](../../adr/0053-lazy-rope-backed-decode-view-partial-path-routing.md) §6) it is literally an atomic
-  last-known-value swap.) It also bumps the vertex's monotonic **write sequence** (§B).
+  last-known-value swap.) It also advances the vertex's **write sequence** (§B) and marks it pending.
 - **`propagate`** — the edge transition: deliver a vertex's value along its
   subscription edges to other vertices (and remote subscribers). Sends; does not
   mutate.
@@ -124,17 +124,20 @@ a terminus *is* an `assign` followed by a `propagate` of that vertex.
 
 ### B. Structural selective propagation: the write sequence
 
-Every vertex carries a monotonic **write sequence** `write_seq` (a counter, never the
-value's bytes), incremented by every `assign`. A sweep records, per vertex it
-includes, the `write_seq` value at that inclusion (`swept_seq`). A vertex is **pending**
-— it was assigned since a sweep last covered it — exactly when `write_seq > swept_seq`.
-This is the structural, value-agnostic replacement for a "dirty bit"; a counter (rather
-than a bit) is chosen so inclusion is well-defined under overlapping sweeps and leaves
-room for future per-observer sequencing.
+> **Corrected 2026-09-30 by the write-sequence erratum ([#1683](https://github.com/avatarsd-llc/libtracer/issues/1683)) — see §Erratum at the end of this document.**
+> This section first defined pending as `write_seq > swept_seq` over a *monotonic* sequence.
+> No `swept_seq` exists and nothing orders two sequence values: pending is a **mark** that an
+> `assign` sets and a covering sweep drains, and the write sequence is an **equality-only
+> change counter**. Rules 1 and 2 below stand verbatim.
+
+Every vertex carries a **write sequence** `write_seq`: a change counter (never the value's
+bytes), advanced by every `assign` and compared **for equality only** — no reader orders two
+of its values, and its width is an implementation choice (it MAY wrap). An `assign` also
+marks the vertex **pending** — it was assigned since a sweep last covered it. This is the
+structural, value-agnostic replacement for a "dirty bit".
 
 `propagate(root)` **sweeps the subtree rooted at `root`** and delivers each vertex it
-selects to that vertex's observers, then advances the vertex's `swept_seq` to its
-current `write_seq`. Selection is governed per vertex by its `delivery_mode` (§C); in
+selects to that vertex's observers, then **drains** the vertex's pending mark. Selection is governed per vertex by its `delivery_mode` (§C); in
 the **default** mode (`IF_NEWER`) a descendant is selected exactly when it is pending —
 so a vertex not assigned since the last covering sweep is **skipped**, not because its
 bytes match anything, but because the runtime holds no record that it was operated on.
@@ -148,12 +151,13 @@ Two rules keep this minimal and consistent:
    bubbling), including ancestors **above** `root`. The `root` argument selects
    *which* vertices flush; it does **not** cap *who* receives them. Consequence: if `u`
    is observed from two different ancestors, the first sweep that covers `u` delivers it
-   to *both* (bubbling reaches both) and advances its `swept_seq`, so a second
+   to *both* (bubbling reaches both) and drains its pending mark, so a second
    overlapping sweep correctly finds `u` no longer pending — no double-send, no missed
    observer, one counter of state. (Capping delivery at `root` was considered and
    rejected; it would force per-`(vertex, root)` bookkeeping — see Alternatives.)
 2. **Coalescing is free.** `assign` overwrites the last-known-value (last-writer-wins)
-   and advances the sequence; it does not enqueue. So *k* assigns to the same vertex
+   and advances the sequence; it does not enqueue — a second mark on a marked vertex is
+   the same mark. So *k* assigns to the same vertex
    between two sweeps flush **once**, with the latest value. A producer may `assign` at
    any rate and `propagate` on a timer at a lower rate; the timer rate is the delivery
    rate, and only touched vertices ride it.
@@ -191,7 +195,7 @@ governs **whether an ancestor's `propagate` sweep includes this vertex**. Three 
 | Mode | An ancestor sweep includes this vertex… |
 | ---- | ---- |
 | `UNCONDITIONAL` | **always** — deliver its current value on every covering sweep (a sweep-driven keepalive; the producer's timer sets the rate). |
-| `IF_NEWER` *(default)* | **only if pending** (`write_seq > swept_seq`, §B) — the structural coalescing flush. |
+| `IF_NEWER` *(default)* | **only if pending** (marked since the last covering sweep, §B) — the structural coalescing flush. |
 | `EXPLICIT` | **never** — an ancestor sweep skips it entirely; it is deliverable only by a **direct `propagate` on the vertex itself**. |
 
 Two invariants make the modes coherent with §A:
@@ -256,7 +260,7 @@ and a stream's flush delivers each ring entry appended since the previous flush.
   the caller; nothing fans out implicitly. `assign(A); assign(B); propagate(v)`
   deterministically propagates `B` (last-writer-wins).
 - **One effect each.** `assign` touches only state (value + write sequence);
-  `propagate` touches only edges (delivery + advancing `swept_seq`). Neither leaks into
+  `propagate` touches only edges (delivery + draining the pending mark). Neither leaks into
   the other's plane.
 - **Suppression is the application's, by construction.** To not deliver, do not
   `propagate` — or set the vertex `EXPLICIT`, or `read`, compare in application terms,
@@ -463,3 +467,54 @@ and never invokes descendant handlers mid-walk ([RFC-0016](0016-composed-branch-
 — unbounded user code under a subtree walk is the anti-feature); and the ADR-0049 durability
 latch stays **LKV-only**, with no `on_read` synthesis at subscribe time, "null ⇒ no latch"
 being the specified degradation.
+
+## Erratum (2026-09-30) — §B's write sequence is an equality-only change counter; "pending" is a mark, not a `write_seq > swept_seq` comparison ([#1683](https://github.com/avatarsd-llc/libtracer/issues/1683))
+
+**What the text said.** §B defined a monotonic per-vertex `write_seq`, a per-vertex `swept_seq`
+recorded at each sweep inclusion, and **pending** as exactly `write_seq > swept_seq`. §A's
+summary, §C's `IF_NEWER` row and §F's "one effect each" bullet restated that comparison, and §B
+justified a counter over a bit by overlapping sweeps and "future per-observer sequencing".
+
+**What was wrong.** The shipped reference implementation has never had a `swept_seq`, and no
+code orders two write-sequence values:
+
+- **Pending is a mark.** `assign` at an `IF_NEWER` vertex that someone observes inserts the vertex
+  into the graph's ordered **pending set** (canonical PATH keys, §B's prefix-range sweep). A
+  covering sweep **drains** the vertex's mark as it delivers it; an eager `write` that already
+  delivered it clears the mark, so a later covering sweep does not re-deliver. Membership in that
+  set *is* "assigned since a sweep last covered it" — nothing compares sequences to decide it.
+- **The sequence is a change counter, compared for equality only.** Every `assign` advances it.
+  Its one consumer is the local `await` predicate, which asks whether the current value
+  **differs** from the value sampled when the wait began (`current != seq0`). No reader asks
+  whether one value is *greater* than another. Because the only test is inequality, the counter
+  is free to wrap at its storage width: a wrap is still a change, and the only alias — exactly
+  2^width advances inside one await window — is bounded by that await's timeout (a spurious
+  timeout, never a lost value).
+
+The rules §B states on top of the comparison all **stand unchanged**, because the mark delivers
+them exactly as the comparison was meant to: the first covering sweep delivers `u` to its full
+observer set and drains the mark, so an overlapping second sweep finds `u` not pending (rule 1);
+*k* assigns between sweeps leave one mark and flush once with the latest value (rule 2); a
+default sweep costs *O(pending-in-subtree)*.
+
+**The correction.** §B's first paragraph now reads:
+
+> Every vertex carries a **write sequence**: a change counter (never the value's bytes),
+> advanced by every `assign` and compared **for equality only** — no reader orders two of its values (the bump's `seq_cst` memory ordering is a separate, unchanged property), and its
+> width is an implementation choice (it MAY wrap). An `assign` also marks the vertex **pending**
+> — it was assigned since a sweep last covered it. A sweep that includes a vertex **drains** its
+> pending mark.
+
+and the other sites (§Summary, §B rule 1, §C, §F) were rewritten inline to match: "pending (`write_seq > swept_seq`)" means **pending (marked
+since the last covering sweep)**; "advances the vertex's `swept_seq` to its current `write_seq`" /
+"advancing `swept_seq`" means **drains the vertex's pending mark**; "monotonic write sequence"
+means **write sequence (an equality-only change counter)**. The counter-over-a-bit rationale is
+withdrawn: overlapping sweeps are made consistent by the drained mark, and no per-observer
+sequencing is committed to.
+
+**Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). **No
+wire surface moves.** The write sequence was never wire-observable — it feeds only the local
+`await` predicate — and no frame, type code, error identity or conformance vector changes. The
+wording is width-agnostic on purpose, so it holds for the 64-bit counter shipped at the time of
+this erratum and for the 32-bit one [#1682](https://github.com/avatarsd-llc/libtracer/pull/1682)
+proposes.
