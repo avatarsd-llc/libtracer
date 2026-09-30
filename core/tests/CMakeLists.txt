@@ -2414,3 +2414,15 @@ add_test(NAME spin_slot_guard COMMAND ${CMAKE_COMMAND}
          -DLT_FIXTURES=${CMAKE_CURRENT_SOURCE_DIR}/spin_slot_guard
          -DLT_PROBE=${CMAKE_CURRENT_SOURCE_DIR}/spin_slot_guard_probe.cpp
          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/spin_slot_guard.cmake)
+
+# #830's ablation reads a counter a lean build compiles out (#1664): under a CI leg's own
+# fragment it exits 77, reported SKIPPED rather than passed.
+set_property(TEST target_binding_ablation PROPERTY SKIP_RETURN_CODE 77)
+
+# #1664 — graph_t's instrumentation counters are config_t::kInstrumentCounters, lean by default.
+# The core test build binds the instrumented preset (core/tests/instrumented); a leg with its own
+# fragment runs the lean arm of the same executable.
+add_executable(instrument_counters_test instrument_counters_test.cpp)
+target_link_libraries(instrument_counters_test PRIVATE libtracer)
+libtracer_test_warnings(instrument_counters_test)
+add_test(NAME instrument_counters COMMAND instrument_counters_test)

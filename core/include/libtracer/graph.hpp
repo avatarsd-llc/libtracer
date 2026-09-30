@@ -2337,6 +2337,9 @@ class graph_t {
      * The near-free-when-idle observable (RFC-0005): stays 0 while no subscriber
      * exists above any written vertex, so tests and benches can assert a write
      * never walks ancestors unless someone is listening. Relaxed monotonic counter.
+     *
+     * Compiled in only when @ref default_config_t::kInstrumentCounters is bound `true`; on a
+     * lean build (the default) the counter does not exist and this answers `0` (#1664).
      */
     [[nodiscard]] std::uint64_t ancestor_walks() const noexcept;
 
@@ -2350,6 +2353,9 @@ class graph_t {
      * against a placeholder / saturated generation, so no mint was possible), or the binding
      * went stale and `deref_vertex_slot` refused it. Relaxed monotonic counter, and the
      * observable an ablation uses to prove the bound leg is the one actually running.
+     *
+     * Compiled in only when @ref default_config_t::kInstrumentCounters is bound `true`; on a
+     * lean build (the default) the counter does not exist and this answers `0` (#1664).
      */
     [[nodiscard]] std::uint64_t target_canonical_resolves() const noexcept;
 
@@ -3033,11 +3039,49 @@ class graph_t {
     // the allocation site.
     mutable std::shared_mutex identity_mutex_;
     std::vector<std::byte> identity_record_;
-    // Bubbling-walk instrumentation (RFC-0005) — see ancestor_walks().
-    mutable std::atomic<std::uint64_t> ancestor_walks_{0};
-    // Canonical-fallback instrumentation (#830) — see target_canonical_resolves(). Touched
-    // only when a target edge has no usable binding, so the bound leg pays nothing.
-    mutable std::atomic<std::uint64_t> target_canonical_resolves_{0};
+    /**
+     * @brief The two test/bench instrumentation counters, present only when
+     *        @ref default_config_t::kInstrumentCounters is bound `true` (#1664).
+     *
+     * Both this and `no_instrument_counters_t` expose the same four members, so the two
+     * increment sites and the two accessors are written once and the lean build's calls
+     * inline to nothing.
+     */
+    struct instrument_counters_t {
+        /** @brief Bubbling-walk instrumentation (RFC-0005) — see ancestor_walks(). */
+        std::atomic<std::uint64_t> walks{0};
+        /** @brief Canonical-fallback instrumentation (#830) — see target_canonical_resolves().
+         *         Touched only when a target edge has no usable binding, so the bound leg
+         *         pays nothing. */
+        std::atomic<std::uint64_t> resolves{0};
+        /** @brief Count one ancestor walk. */
+        void tick_walk() noexcept { walks.fetch_add(1, std::memory_order_relaxed); }
+        /** @brief Count one canonical-fallback resolve. */
+        void tick_resolve() noexcept { resolves.fetch_add(1, std::memory_order_relaxed); }
+        /** @brief Ancestor walks so far. */
+        [[nodiscard]] std::uint64_t walk_count() const noexcept {
+            return walks.load(std::memory_order_relaxed);
+        }
+        /** @brief Canonical-fallback resolves so far. */
+        [[nodiscard]] std::uint64_t resolve_count() const noexcept {
+            return resolves.load(std::memory_order_relaxed);
+        }
+    };
+    /** @brief The closed-out stand-in: empty, so `[[no_unique_address]]` costs no bytes, and
+     *         every member is a no-op that answers `0`. */
+    struct no_instrument_counters_t {
+        /** @brief Nothing to count. */
+        void tick_walk() noexcept {}
+        /** @brief Nothing to count. */
+        void tick_resolve() noexcept {}
+        /** @brief Always `0`: the counter is compiled out. */
+        [[nodiscard]] static constexpr std::uint64_t walk_count() noexcept { return 0; }
+        /** @brief Always `0`: the counter is compiled out. */
+        [[nodiscard]] static constexpr std::uint64_t resolve_count() noexcept { return 0; }
+    };
+    /** @brief This build's counters — zero bytes and zero increments on a lean build. */
+    [[no_unique_address]] mutable std::conditional_t<kInstrumentCounters, instrument_counters_t,
+                                                     no_instrument_counters_t> instrument_;
     // Per-cause delivery-drop instrumentation — see delivery_drops(). Touched only on the
     // drop path, so the delivering path is byte-identical while nothing drops.
     mutable std::atomic<std::uint64_t> drops_no_target_{0};

@@ -395,6 +395,12 @@ endif()
 
 if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
     enable_testing()
+    # The instrumented preset (#1664): the test build binds config_t::kInstrumentCounters so the
+    # ancestor-walk / canonical-fallback ablations can read their counters. Listed FIRST, so it
+    # also sits ahead of a fragment the build supplies — and yields to that one by
+    # `#include_next` (see the fragment), never shadowing the configuration a CI leg tests.
+    target_include_directories(libtracer BEFORE PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/tests/instrumented>)
     add_subdirectory(tests)
 endif()
 

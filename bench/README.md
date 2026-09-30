@@ -1293,8 +1293,11 @@ reports their spread for exactly this reason: a delta smaller than that spread i
 ### `bench_target_binding` — what `target_binding_t` buys, and why both arms are shipped code (#830)
 
 ```sh
-cmake --build bench/build --target bench_target_binding -j
-python3 bench/host_guard.py wait && taskset -c 24-30 ./bench/build/bench_target_binding
+# The ablation reads graph_t::target_canonical_resolves(), compiled out of a default build
+# (config_t::kInstrumentCounters, #1664): the target exists only in an instrumented bench build.
+cmake -S bench -B bench/build-instr -DCMAKE_BUILD_TYPE=Release -DLIBTRACER_INSTRUMENT_COUNTERS=ON
+cmake --build bench/build-instr --target bench_target_binding -j
+python3 bench/host_guard.py wait && taskset -c 24-30 ./bench/build-instr/bench_target_binding
 ```
 
 #1174 landed `graph::target_binding_t` and #830 stayed open because nothing measured it: the
@@ -1316,7 +1319,7 @@ assumed. A point whose count disagrees with its own name prints `ablation=FAIL` 
 from every summary line.
 
 **The one asymmetry is priced, not waved away.** The canonical arm pays the relaxed `fetch_add`
-on `target_canonical_resolves_`, which the pre-#1174 code did not have, so it INFLATES the
+on `target_canonical_resolves()`, which the pre-#1174 code did not have, so it INFLATES the
 canonical arm and the raw delta overstates the win. The `tgt-bind-ctr` / `tgt-bind-noctr` legs
 measure that atomic in the same binary — **4.70 ns** on this host — and the summary prints the
 corrected delta beside the raw one. Only the corrected figure is a claim.
@@ -1716,7 +1719,7 @@ craft libtracer":
 > `export_vertex` and `run_routers` survive in `core/` and `bench/` only inside comments
 > and `core/CHANGELOG.md`'s record of their removal — not one declaration, definition or
 > call of any of them is left (`grep -rn` over both trees, 2026-08-08), and the
-> two-process `bench_libtracer_net` was retired with them (`bench/CMakeLists.txt:30`). FWD
+> two-process `bench_libtracer_net` was retired with them (`bench/CMakeLists.txt:43`). FWD
 > forward cost is now measured by `bench_forward_heap` + `bench_transport_iov` + the `fwd_*`
 > tests; multi-hop end-to-end delivery is the `net` harness.
 

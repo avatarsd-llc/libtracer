@@ -30,6 +30,8 @@
  *   local-cb       graph_t::write to a STORED_VALUE with K callback subscribers, the value
  *                  built OUTSIDE the window (a rope over a persistent segment) — isolates the
  *                  library's own per-publish cost from the producer's.
+ *   local-ancestor the local-cb write with the K callback subscribers on the PARENT: the
+ *                  RFC-0005 ancestor walk runs on every publish (#1664 prices its instrument).
  *   local-target   the same write with K TARGET subscribers (subscribe(src, target)), each
  *                  target a distinct STORED_VALUE vertex.
  *   local-handler  the same write with K HANDLER targets (subscribe(src, target), each target a
@@ -204,6 +206,28 @@ void run_local_cb(std::size_t size, std::size_t k) {
     const value_t fx{size};
     measure("local-cb", size, k, 0, [&] { (void)g.write(v, fx.make()); });
     if (recv.load() != (kWarm + kOps) * k) std::fprintf(stderr, "local-cb: fan-out not wired\n");
+}
+
+/**
+ * @brief The `local-cb` write with its K callback subscribers one level ABOVE the written
+ *        vertex: every publish takes the RFC-0005 ancestor (bubbling) walk.
+ *
+ * The row #1664 prices: the walk's entry used to pay one relaxed 64-bit `fetch_add` on the
+ * node-wide `ancestor_walks` instrument, now compiled out unless
+ * `config_t::kInstrumentCounters` is bound.
+ */
+void run_local_ancestor(std::size_t size, std::size_t k) {
+    graph_t g;
+    const path_t parent = *path_t::parse("/bench");
+    const path_t src = *path_t::parse("/bench/src");
+    (void)g.register_vertex(parent, role_t::STORED_VALUE);
+    const vertex_handle_t v = g.register_vertex(src, role_t::STORED_VALUE);
+    std::atomic<std::uint64_t> recv{0};
+    for (std::size_t i = 0; i < k; ++i) (void)g.subscribe(parent, &callback_sink, &recv);
+    const value_t fx{size};
+    measure("local-ancestor", size, k, 0, [&] { (void)g.write(v, fx.make()); });
+    if (recv.load() != (kWarm + kOps) * k)
+        std::fprintf(stderr, "local-ancestor: bubbling not wired\n");
 }
 
 void run_local_none(std::size_t size, std::size_t k) {
@@ -439,6 +463,7 @@ void run_proto(std::size_t size, std::size_t k) {
 int main() {
     for (const std::size_t size : kSizes) {
         for (const std::size_t k : kFans) run_local_cb(size, k);
+        for (const std::size_t k : kFans) run_local_ancestor(size, k);
         for (const std::size_t k : kFans) run_local_none(size, k);
         for (const std::size_t k : kFans) run_local_target(size, k);
         for (const std::size_t k : kFans) run_local_handler(size, k);

@@ -409,7 +409,7 @@ class fwd_router_t {
     /**
      * @brief Labelled `dst` elements this node refused and answered `NOT_FOUND` for (§7.2).
      *
-     * The counter `dispatch_edge_target`'s `target_canonical_resolves_` is one seam out
+     * The counter `dispatch_edge_target`'s `target_canonical_resolves()` is one seam out
      * (`core/src/graph.cpp`): a refused deref is *"this answer is no longer trustworthy"*, and
      * the discipline that precedent fixes is that the event is COUNTED rather than merely
      * handled. Non-zero means peers are presenting labels this node cannot validate — stale

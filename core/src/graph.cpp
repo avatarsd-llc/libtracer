@@ -1684,12 +1684,10 @@ result_t<vertex_t*> graph_t::ensure_vertex_ptr(std::span<const std::byte> key,
 }
 
 std::uint64_t graph_t::target_canonical_resolves() const noexcept {
-    return target_canonical_resolves_.load(std::memory_order_relaxed);
+    return instrument_.resolve_count();
 }
 
-std::uint64_t graph_t::ancestor_walks() const noexcept {
-    return ancestor_walks_.load(std::memory_order_relaxed);
-}
+std::uint64_t graph_t::ancestor_walks() const noexcept { return instrument_.walk_count(); }
 
 graph_t::delivery_drops_t graph_t::delivery_drops() const noexcept {
     return {.no_target = drops_no_target_.load(std::memory_order_relaxed),
@@ -2092,7 +2090,7 @@ result_t<value_ref_t> graph_t::read(vertex_handle_t vh, std::string_view caller)
             target = bound->get();
     }
     if (target == nullptr) {
-        target_canonical_resolves_.fetch_add(1, std::memory_order_relaxed);
+        instrument_.tick_resolve();  // compiled out unless kInstrumentCounters (#1664)
         target = find_ptr(*e.target_key);
     }
     // Each of the three drops below is counted before returning (delivery_drops()). The
@@ -2549,8 +2547,9 @@ void graph_t::deliver_unstored(vertex_t* v, const rope_t& value,
 void graph_t::bubble_up(vertex_t* v, const value_t& value) {
     // Entered only when v->listeners_above() says an ancestor subscriber exists —
     // the idle write path never walks (RFC-0005 §near-free-when-idle; the counter
-    // below is what tests/benches assert on via ancestor_walks()).
-    ancestor_walks_.fetch_add(1, std::memory_order_relaxed);
+    // below is what tests/benches assert on via ancestor_walks(); compiled in only when
+    // config_t::kInstrumentCounters is bound, #1664).
+    instrument_.tick_walk();
     // Parent pointers are immutable once linked (ADR-0057), so the walk takes NO lock —
     // the old per-ancestor find_ptr (a shared-lock + hash lookup per level) is gone. A
     // placeholder ancestor holds no edges, so its fan_out is the no-op the old walk's
