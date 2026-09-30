@@ -2870,10 +2870,17 @@ bool httpd_ws_link_t::any_open_session() const {
 }
 
 void httpd_ws_link_t::note_rx_message(session_t* slot, std::size_t bytes) {
+#ifdef CONFIG_LIBTRACER_LINK_TRAFFIC_STATS
     const std::lock_guard lock(peers_m_);
     ++slot->st.rx_frames;
     slot->st.rx_bytes += static_cast<std::uint32_t>(bytes);
     slot->st.last_rx_us = esp_timer_get_time();
+#else
+    // Traffic counters are the application's choice and it did not make one (#1663): a
+    // delivered message takes neither the link-wide lock nor a timer read.
+    static_cast<void>(slot);
+    static_cast<void>(bytes);
+#endif
 }
 
 void httpd_ws_link_t::note_rx_drop(session_t* slot) {
@@ -3368,8 +3375,10 @@ void httpd_ws_link_t::note_tx_result(const session_ref_t& to, bool sent, std::si
         if (!slot->open) return;          // departed between the snapshot and now
         if (slot->dead) return;           // already condemned — no further evidence is wanted
         if (sent) {
+#ifdef CONFIG_LIBTRACER_LINK_TRAFFIC_STATS
             ++slot->st.tx_frames;
             slot->st.tx_bytes += static_cast<std::uint32_t>(bytes);
+#endif
             slot->tx_drops = 0;  // a failure streak is CONSECUTIVE — any success resets it
             return;
         }

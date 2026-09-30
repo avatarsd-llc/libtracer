@@ -407,6 +407,81 @@ void test_directed_handle_projects_link_drop_stats() {
     fake_httpd::instance().close_all();
 }
 
+// ---------------------------------------------------------------------------
+// 10 — #1663: the per-message traffic half exists only when the image asked for it.
+// ---------------------------------------------------------------------------
+/**
+ * @brief Does @p counters_t carry the per-message traffic half (#1663)?
+ */
+template <class counters_t>
+concept has_traffic_counters = requires(counters_t c) {
+    c.rx_frames;
+    c.rx_bytes;
+    c.tx_frames;
+    c.tx_bytes;
+    c.last_rx_us;
+};
+
+/**
+ * @brief Does @p counters_t carry the half every image keeps — the drops, and the connect
+ *        stamp the auth deadline is computed from?
+ */
+template <class counters_t>
+concept has_kept_counters = requires(counters_t c) {
+    c.tx_drops;
+    c.rx_drops;
+    c.connected_at_us;
+};
+
+static_assert(has_traffic_counters<tr::net::link_counters_t> == tr::net::kLinkTrafficStats,
+              "#1663: link_counters_t carries the traffic half iff "
+              "CONFIG_LIBTRACER_LINK_TRAFFIC_STATS");
+static_assert(has_kept_counters<tr::net::link_counters_t>,
+              "#1663: the drop half and connected_at_us are kept in every image");
+
+/**
+ * @brief #1663 — a peer's messages move the traffic half only in an image that keeps it,
+ *        and the kept half answers either way.
+ *
+ * This suite is built twice (core/tests/CMakeLists.txt): the default image, where the
+ * traffic fields do not exist and the case checks only what is kept, and
+ * `httpd_ws_counters_traffic_stats`, where the two delivered messages and the one sent
+ * frame must be counted exactly.
+ */
+void test_traffic_half_is_opt_in() {
+    std::printf("#1663 the traffic half is per-image opt-in (%s):\n",
+                tr::net::kLinkTrafficStats ? "traffic stats ON" : "traffic stats OFF");
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
+                                                  tr::net::httpd_ws_config_t{.peer_named = true});
+    claim(780);  // the claiming frame is the first delivered message
+    (void)fake_httpd::instance().deliver_frame(780, kBody);
+    drain();
+    tr::net::transport_t* const to = link->peer_link("p0");
+    check(to != nullptr, "the directed endpoint resolved");
+    if (to == nullptr) return;
+    to->send(std::span<const std::byte>(kBody));
+    drain();
+
+    tr::net::link_counters_t c;
+    int seen = 0;
+    link->enumerate_peer_stats([&](const httpd_ws_link_t::peer_stats_t& p) {
+        c = p.c;
+        ++seen;
+    });
+    check(seen == 1, "one session is enumerated");
+    check(c.connected_at_us >= 0, "connected_at_us is stamped in every image");
+    check(c.tx_drops == 0 && c.rx_drops == 0, "and nothing was dropped");
+#ifdef CONFIG_LIBTRACER_LINK_TRAFFIC_STATS
+    check(c.rx_frames == 2, "both delivered messages are counted");
+    check(c.rx_bytes == 2 * sizeof(kBody), "with their payload bytes");
+    check(c.last_rx_us >= c.connected_at_us, "and dated");
+    check(c.tx_frames == 1 && c.tx_bytes == sizeof(kBody), "the sent frame is counted");
+#endif
+
+    link.reset();
+    fake_httpd::instance().close_all();
+}
+
 }  // namespace
 
 int main() {
@@ -420,6 +495,7 @@ int main() {
     test_condemned_peer_leaves_the_facet();
     test_stats_snapshot_tracks();
     test_directed_handle_projects_link_drop_stats();
+    test_traffic_half_is_opt_in();
     if (g_failures != 0) {
         std::printf("FAILED: %d check(s)\n", g_failures);
         return 1;

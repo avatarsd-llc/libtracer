@@ -735,6 +735,26 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     # case here constructs an adopting link.
     set_tests_properties(httpd_ws_counters
         PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+    # #1663 — the same suite with CONFIG_LIBTRACER_LINK_TRAFFIC_STATS on. The option changes
+    # link_counters_t's layout and the success paths, so it needs its own build of the chip
+    # TU. The target above is the default (off) image.
+    add_executable(httpd_ws_counters_traffic_stats_test
+        "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_counters_test.cpp"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
+        "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
+    target_include_directories(httpd_ws_counters_traffic_stats_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        "${LIBTRACER_ESP_DIR}/libtracer/include")
+    target_compile_definitions(httpd_ws_counters_traffic_stats_test PRIVATE
+        CONFIG_LIBTRACER_LINK_TRAFFIC_STATS=1)
+    target_link_libraries(httpd_ws_counters_traffic_stats_test PRIVATE libtracer)
+    target_link_options(httpd_ws_counters_traffic_stats_test PRIVATE
+        "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+    libtracer_test_warnings(httpd_ws_counters_traffic_stats_test)
+    add_test(NAME httpd_ws_counters_traffic_stats COMMAND httpd_ws_counters_traffic_stats_test)
+    set_tests_properties(httpd_ws_counters_traffic_stats
+        PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
 
     # #955 — what the link owes an ADOPTED server. The facts none of the suites above can
     # see are server-level: the `httpd_config_t` a `httpd_start` was given (the real server
@@ -880,6 +900,23 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     libtracer_test_warnings(esp_ws_client_dial_stats_test)
     add_test(NAME esp_ws_client_dial_stats COMMAND esp_ws_client_dial_stats_test)
     set_tests_properties(esp_ws_client_dial_stats PROPERTIES TIMEOUT 60)
+    # #1663 — and once more with CONFIG_LIBTRACER_LINK_TRAFFIC_STATS on, which brings back
+    # the client's counter mutex and the per-frame tx/rx bumps.
+    add_executable(esp_ws_client_traffic_stats_test
+        "${LIBTRACER_ESP_DIR}/tests/host/esp_ws_client_dial_test.cpp"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_esp_transport.cpp"
+        "${LIBTRACER_ESP_DIR}/libtracer/esp_ws_client_link.cpp")
+    target_include_directories(esp_ws_client_traffic_stats_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        "${LIBTRACER_ESP_DIR}/libtracer"
+        "${LIBTRACER_ESP_DIR}/libtracer/include")
+    target_compile_definitions(esp_ws_client_traffic_stats_test PRIVATE
+        CONFIG_LIBTRACER_LINK_TRAFFIC_STATS=1)
+    target_link_libraries(esp_ws_client_traffic_stats_test PRIVATE libtracer)
+    libtracer_test_warnings(esp_ws_client_traffic_stats_test)
+    add_test(NAME esp_ws_client_traffic_stats COMMAND esp_ws_client_traffic_stats_test)
+    set_tests_properties(esp_ws_client_traffic_stats PROPERTIES TIMEOUT 60)
 
     # #962 — the TWAI link's TX BACKPRESSURE window, on the same construction: the chip
     # TU (integrations/esp-idf/libtracer/twai_link.cpp) compiled against a host fake of
