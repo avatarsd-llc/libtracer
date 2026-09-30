@@ -544,7 +544,7 @@ policy is a conforming sender. Only `durability_request` is honoured today (§th
 latch, [05 §`0x04`](05-protocol-tlvs.md)); `priority` is carried and read back, awaiting the
 transport work that honours it — the honest shape RFC-0022 chose over moving dead per-vertex
 fields into a new home. `reliability` is carried and read back **awaiting nothing**: the §4.4
-pressure arm is declared owner-side at the *receiving* vertex (`set_ring_source`), so bits 0–1 are
+pressure arm is declared owner-side at the *receiving* vertex (`vertex_policy_t::ring_source`), so bits 0–1 are
 carried verbatim and read by nothing
 ([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md)
 §Erratum 2026-08-24). Bits 6–7 are **decoded but not yet honoured**: their default
@@ -588,18 +588,18 @@ parameters** ([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/doc
 
 | what | who supplies it | how |
 | ---- | ---- | ---- |
-| STREAM ring depth | the application — a retention *intent* no peer and no injected resource can supply | `graph_t::set_retention(v, retention_t::N, depth)` |
+| STREAM ring depth | the application — a retention *intent* no peer and no injected resource can supply | `graph_t::set_policy(v, {.retention = retention_t::N, .depth = depth})` |
 | the ring's *capacity* | the vertex's **own** injected `mem::block_source_t` — the intent above is bounded in **bytes** by it, and a shortfall surfaces as a shed-with-gap or as backpressure, never as a silent shrink | the source injected at that vertex, never a shared pool |
-| copy-or-share threshold (bytes) | the deployment — a copy/share trade ([ADR-0042](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md) §3, [RFC-0028](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0028-lean-value-path.md) §5.3); defaults to `config_t::kShareThresholdBytes` | `graph_t::set_share_threshold_bytes(v, bytes)` |
+| copy-or-share threshold (bytes) | the deployment — a copy/share trade ([ADR-0042](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0042-refcounted-receiver-seam-view-delivery.md) §3, [RFC-0028](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0028-lean-value-path.md) §5.3); defaults to `config_t::kShareThresholdBytes` | `graph_t::set_policy(v, {.share_threshold_bytes = bytes})` |
 
-`set_retention` is a **host-only intent** and stays one: it is declared on the vertex that
+`vertex_policy_t::retention` is a **host-only intent** and stays one: it is declared on the vertex that
 **holds** the ring — which, since [RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md)
 §4.6.1, is the **receiving** vertex of the party that wants depth, not a producer's fan-out edge.
 A subscriber that wants a queue makes its own target vertex a STREAM and sizes it with its own
 injected source; it does not ask a producer to retain on its behalf, and no `stream_depth` request
 travels on the wire.
 
-Both are owner-side wiring calls in the shape of `set_delivery_mode` and `set_app_fields` —
+Both are owner-side wiring calls in the shape of `vertex_policy_t::delivery_mode` and `vertex_policy_t::app_fields` —
 declarations the owner makes host-side after registration — and **neither has any wire surface**:
 no peer can read one and none can write one. What was withdrawn is the *remote write surface*, not
 owner-side configuration.

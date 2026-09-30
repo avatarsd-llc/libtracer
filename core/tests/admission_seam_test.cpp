@@ -451,7 +451,7 @@ void test_field_admission_accepts() {
     const vertex_handle_t v = g.register_vertex(path_t("/dev"), role_t::STORED_VALUE, std::move(h));
     std::vector<app_field_t> table;
     table.push_back(app_field_t{.name = "mode", .access = app_access_t::RW});
-    g.set_app_fields(v, std::move(table));
+    (void)g.set_policy(v, {.app_fields = std::move(table)});
 
     const std::vector<std::byte> eco = value_tlv("eco");
     check(g.write(path_t("/dev:settings.app.mode"), make_value(eco)).has_value(),
@@ -486,7 +486,7 @@ void test_field_admission_normalises() {
     const vertex_handle_t v = g.register_vertex(path_t("/dev"), role_t::STORED_VALUE, std::move(h));
     std::vector<app_field_t> table;
     table.push_back(app_field_t{.name = "mode", .access = app_access_t::RW});
-    g.set_app_fields(v, std::move(table));
+    (void)g.set_policy(v, {.app_fields = std::move(table)});
 
     check(g.write(path_t("/dev:settings.app.mode"), make_value(value_tlv("eco"))).has_value(),
           "the normalised field write lands");
@@ -522,7 +522,7 @@ void test_field_admission_refuses() {
     const vertex_handle_t v = g.register_vertex(path_t("/dev"), role_t::STORED_VALUE, std::move(h));
     std::vector<app_field_t> table;
     table.push_back(app_field_t{.name = "mode", .access = app_access_t::RW});
-    g.set_app_fields(v, std::move(table));
+    (void)g.set_policy(v, {.app_fields = std::move(table)});
 
     const std::vector<std::byte> eco = value_tlv("eco");
     check(g.write(path_t("/dev:settings.app.mode"), make_value(eco)).has_value(),

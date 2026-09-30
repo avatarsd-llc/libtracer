@@ -35,20 +35,11 @@ struct allow_only_policy_t;  // security_acl.hpp — the ALLOW-only MCU profile 
 struct full_acl_policy_t;    // security_acl.hpp — ordered first-match-per-bit with DENY
 class hazard_slot_t;         // lkv_slot.hpp — lock-free atomic<node*>; hazard-pointer reclamation
 class single_writer_slot_t;  // lkv_slot.hpp — one value_t* swapped inside reader_guard_t; no spin
-struct mutex_guard_t;        // lkv_slot.hpp — the host reader guard: address-striped locks
+struct mutex_guard_t;        // reader_guard.hpp — the host guard: address-striped locks
+struct no_guard_t;           // reader_guard.hpp — guards nothing; single-threaded builds only
 struct reclaim_strict_t;     // reclaim.hpp — grace point: `unsubscribe()` returns
 struct reclaim_local_t;      // reclaim.hpp — grace point: this thread's dispatch stack unwinds
 struct reclaim_qsbr_t;  // reclaim.hpp — grace point: EVERY thread has passed a quiescent state
-
-/**
- * @brief The reader guard that guards nothing — for a build whose slot policy needs no guard.
- *
- * A build that binds `hazard_slot_t` never opens a guard, so this is never constructed there.
- * A build that binds `single_writer_slot_t` with this guard is asserting
- * that no other thread ever touches a vertex's value concurrently — true of a single-threaded
- * program and of nothing else.
- */
-struct no_guard_t {};
 
 /**
  * @brief The target's build configuration, as ONE named type (ADR-0070).
@@ -228,8 +219,8 @@ struct default_config_t {
      * @brief The copy-or-share threshold (RFC-0028 §5.3, D3): a written value of AT LEAST this
      *        many bytes is SHARED, one below it is COPIED into the value's own block.
      *
-     * The default every vertex answers until `graph_t::set_share_threshold_bytes` gives it its
-     * own. At ingress, "shared" means the stored value links the inbound receive segment
+     * The default every vertex answers until its `vertex_policy_t::share_threshold_bytes` gives it
+     * its own. At ingress, "shared" means the stored value links the inbound receive segment
      * (refcount, zero copy) and "copied" means the bytes land inline in the one `value_t` block
      * the publish costs (`value_t::make_inline`: one allocation, one `memcpy`). A payload whose
      * TLV carries a CRC/TS trailer is always copied — a shared frame's opt byte cannot be
@@ -285,16 +276,23 @@ struct default_config_t {
     static constexpr bool kSingleWriter = false;
 
     /**
-     * @brief The RAII guard `single_writer_slot_t` opens around its pointer swap and its
-     *        handle copy (RFC 0028 §5.5).
+     * @brief The target's ONE critical-section type (RFC 0028 §5.5): the guard
+     *        `single_writer_slot_t` opens around its pointer swap and its handle copy, AND the
+     *        default `Sync` policy of `tr::mem::synchronized_pool_t`.
+     *
+     * One trait, not two: before slice 10 the pool had its own `pool_sync_policy` vocabulary
+     * (`spin_sync_t` / `portmux_sync_t`), bound separately from this one. It must model
+     * `tr::graph::reader_guard` (`%reader_guard.hpp`): `lock()` / `unlock()`, a static
+     * `for_address(const void*)` the slot takes, and the `is_isr_safe` / `is_nonblocking` /
+     * `may_spin` / `name` traits.
      *
      * `mutex_guard_t` by default: a table of address-striped one-word locks — one RMW to take,
      * a release store to give back — whose contender re-reads briefly and then sleeps instead
      * of spinning on a descheduled holder; unrelated vertices rarely share one. A single-core
      * RTOS build binds an interrupt-masked critical section (the ESP-IDF component:
-     * `tr::esp::critical_guard_t`). A guard that takes a `const void*` is handed the slot's
-     * address. The guard must never spin-wait where @ref kSpinWaitSafe is `false` — that is the
-     * whole of #1618.
+     * `tr::esp::critical_guard_t`). The guard must never spin-wait where @ref kSpinWaitSafe is
+     * `false` — that is the whole of #1618 — and a guard that declares `may_spin` is refused
+     * there by both the slot and the pool.
      */
     using reader_guard_t = mutex_guard_t;
 

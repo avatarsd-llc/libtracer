@@ -164,7 +164,11 @@ void test_revive_is_fresh() {
 void test_confused_deputy() {
     std::printf("§B.6: revived path inherits the PARENT ACL, not the retired owner's:\n");
     graph_t g;
-    g.configure_subject_resolver(caller_is_subject, nullptr);
+    {
+        auto hooks = g.hooks();
+        hooks.subject_resolver = {caller_is_subject, nullptr};
+        g.set_hooks(hooks);
+    }
     (void)g.register_vertex(path_t("/net"), role_t::STORED_VALUE);
     vertex_handle_t b = g.register_vertex(path_t("/net/b"), role_t::STORED_VALUE);
 

@@ -180,7 +180,11 @@ void test_compact_denied_on_the_cold_arm() {
           "the target holds a seeded value (trusted local write, before any ACL)");
     check(install_acl(g, "/sink:acl", acl_allowing("peer-z", acl_right_t::WRITE)),
           "an ACL granting WRITE to `peer-z` ALONE is installed");
-    g.configure_subject_resolver(caller_is_subject, nullptr);  // enforcement on
+    {
+        auto hooks = g.hooks();
+        hooks.subject_resolver = {caller_is_subject, nullptr};
+        g.set_hooks(hooks);
+    }  // enforcement on
 
     fwd_router_t router(g);
     rec_link_t hostile;  // NOT `peer-z`
@@ -228,7 +232,11 @@ void test_compact_denied_on_the_warm_arm() {
     check(g.write(sink, make_value(b_value_u32(kSeed))).has_value(), "the target is seeded");
     check(install_acl(g, "/sink:acl", acl_allowing("peer-z", acl_right_t::WRITE)),
           "an ACL granting WRITE to `peer-z` is installed");
-    g.configure_subject_resolver(caller_is_subject, nullptr);
+    {
+        auto hooks = g.hooks();
+        hooks.subject_resolver = {caller_is_subject, nullptr};
+        g.set_hooks(hooks);
+    }
 
     fwd_router_t router(g);
     rec_link_t z;
@@ -318,7 +326,11 @@ void test_denied_compact_is_counted() {
     check(g.write(sink, make_value(b_value_u32(kSeed))).has_value(), "the target is seeded");
     check(install_acl(g, "/sink:acl", acl_allowing("peer-z", acl_right_t::WRITE)),
           "an ACL granting WRITE to `peer-z` ALONE is installed");
-    g.configure_subject_resolver(caller_is_subject, nullptr);
+    {
+        auto hooks = g.hooks();
+        hooks.subject_resolver = {caller_is_subject, nullptr};
+        g.set_hooks(hooks);
+    }
 
     fwd_router_t router(g);
     rec_link_t hostile;  // NOT `peer-z`

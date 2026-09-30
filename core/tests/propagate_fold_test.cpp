@@ -272,8 +272,9 @@ void test_selected_stream_is_refused() {
     graph_t g;
     vertex_handle_t s = g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
     vertex_handle_t st = g.register_vertex(path_t("/s/st"), role_t::STREAM);
-    (void)g.set_retention(st, tr::graph::retention_t::N,
-                          4);  // else the ring keeps one entry and there is no LIST to refuse
+    (void)g.set_policy(
+        st, {.retention = tr::graph::retention_t::N,
+             .depth = 4});  // else the ring keeps one entry and there is no LIST to refuse
     check(g.subscribe(path_t("/s"), on_root).has_value(), "subtree subscriber at /s");
     check(g.assign(st, make_value(value_tlv({0x01}))).has_value(), "append one stream entry");
     check(g.assign(st, make_value(value_tlv({0x02}))).has_value(), "append a second stream entry");

@@ -304,8 +304,8 @@ void test_tcp_link_sheds_and_drops_a_stalled_peer() {
     // A SHORT liveness window, injected exactly as a deployment would: the number is the
     // app's, not the library's, which is the whole point of the provenance ruling.
     const std::uint32_t window = 400;
-    tr::net::tcp_transport_t link("127.0.0.1", ntohs(local.sin_port), &tr::mem::heap_backend(),
-                                  /*max_frame=*/0, /*recv_stack=*/0, /*defer_recv=*/false, window);
+    tr::net::tcp_transport_t link("127.0.0.1", ntohs(local.sin_port),
+                                  {.liveness_window_ms = window});
     check(link.ok(), "the dial succeeded");
     check(link.liveness_window_ms() == window, "and the injected window is the one in force");
 
@@ -358,8 +358,8 @@ void test_concurrent_directed_sends_share_one_window() {
     // per-record bound is a real quotient rather than the floor.
     const std::uint32_t window = 1600;
     const std::size_t peers = 4;
-    tr::net::transport_tcp_server server(0, &tr::mem::heap_backend(), /*max_frame=*/0, peers,
-                                         /*peer_named=*/true, /*recv_stack=*/0, window);
+    tr::net::transport_tcp_server server(
+        0, {.max_peers = peers, .peer_named = true, .liveness_window_ms = window});
     check(server.ok(), "the peer-named listener is up");
     check(server.max_peers() == peers, "the injected cap is the one enforced");
     check(server.directed_send_bound_ms() == window / peers,
@@ -471,8 +471,8 @@ void test_second_publisher_never_waits_on_a_stalled_write() {
 
     // A LONG window, so "the rest of the first write" is unmistakable against the bound below.
     const std::uint32_t window = 3000;
-    tr::net::tcp_transport_t link("127.0.0.1", ntohs(local.sin_port), &tr::mem::heap_backend(),
-                                  /*max_frame=*/0, /*recv_stack=*/0, /*defer_recv=*/false, window);
+    tr::net::tcp_transport_t link("127.0.0.1", ntohs(local.sin_port),
+                                  {.liveness_window_ms = window});
     check(link.ok(), "the dial succeeded");
     const int peer = ::accept(listener, nullptr, nullptr);
     check(peer >= 0, "the peer accepted the connection — and now never reads a byte");
@@ -529,8 +529,8 @@ struct parked_peer_t {
         socklen_t llen = sizeof(local);
         (void)::getsockname(listener, reinterpret_cast<sockaddr*>(&local), &llen);
         link = std::make_unique<tr::net::tcp_transport_t>(
-            "127.0.0.1", ntohs(local.sin_port), &tr::mem::heap_backend(), /*max_frame=*/0,
-            /*recv_stack=*/0, /*defer_recv=*/false, window);
+            "127.0.0.1", ntohs(local.sin_port),
+            tr::net::tcp_config_t{.liveness_window_ms = window});
         peer = ::accept(listener, nullptr, nullptr);
         const timeval tv{.tv_sec = 5, .tv_usec = 0};
         ::setsockopt(peer, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));

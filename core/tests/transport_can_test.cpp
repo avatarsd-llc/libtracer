@@ -760,7 +760,7 @@ void test_u16_slice_count_wrap_cannot_advertise_a_hello() {
  * quietly shortened the result. A byte-wrong, SHORT frame was delivered upstream as
  * valid data.
  *
- * The refusal here comes from a REAL injected backend, not a stub: a `mem::sync_pool_t`
+ * The refusal here comes from a REAL injected backend, not a stub: a `mem::synchronized_pool_t<>`
  * over a caller-owned slab, drained to exactly as many free slots as the group needs
  * minus one. That is the production backpressure shape (`alloc` answering `nullptr` on a
  * bounded node), reached through the config seam an embedder actually sets.
@@ -771,7 +771,7 @@ void test_rx_slice_refusal_drops_the_group_and_counts() {
     // The injected byte seam. Slots are one CLASSIC data field wide — the exact size an
     // inbound slice copy asks for.
     alignas(std::max_align_t) std::array<std::byte, 8192> slab{};
-    tr::mem::sync_pool_t pool(slab, tr::view::kCanClassicMaxData);
+    tr::mem::synchronized_pool_t<> pool(slab, tr::view::kCanClassicMaxData);
 
     // Drain to a KNOWN free-slot count so the refusing slice index is exact rather than
     // whatever the slab arithmetic happened to yield. The 3-window group below gets two

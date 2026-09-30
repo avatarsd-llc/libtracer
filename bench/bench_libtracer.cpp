@@ -161,7 +161,7 @@ void run_inproc(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc, bool
     // LKV (make_shared) exactly as before #873 phase 1; an injected source routes the
     // per-write LKV allocate_shared through the graph's internal pmr adapter over it — the
     // only difference between `inproc` and `inproc-pool`.
-    graph_t g{src};
+    graph_t g{src != nullptr ? *src : tr::mem::heap_source()};
     std::vector<vertex_handle_t> verts;
     std::vector<path_t> paths;
     verts.reserve(E);
@@ -475,13 +475,17 @@ void run_inproc_remote(std::size_t S, std::size_t F, const char* mode,
         std::size_t link_bytes;
     };
     sink_ctx_t sink_ctx{&recv, 0};
-    g.configure_remote_delivery_sink(
-        [](void* ctx, const tr::graph::remote_delivery_t& d, const tr::graph::value_t&) {
-            auto* s = static_cast<sink_ctx_t*>(ctx);
-            s->n->fetch_add(1, std::memory_order_relaxed);
-            s->link_bytes += d.link.size();  // READ the borrowed spelling, don't just count
-        },
-        &sink_ctx);
+    {
+        auto hooks = g.hooks();
+        hooks.remote_delivery = {
+            [](void* ctx, const tr::graph::remote_delivery_t& d, const tr::graph::value_t&) {
+                auto* s = static_cast<sink_ctx_t*>(ctx);
+                s->n->fetch_add(1, std::memory_order_relaxed);
+                s->link_bytes += d.link.size();  // READ the borrowed spelling, don't just count
+            },
+            &sink_ctx};
+        g.set_hooks(hooks);
+    }
 
     const path_t src_path = *path_t::parse("/bench/remote-src");
     const vertex_handle_t src = g.register_vertex(src_path, role_t::STORED_VALUE);
@@ -796,8 +800,8 @@ void run_eptype_stream() {
     graph_t g;
     const path_t path = *path_t::parse("/bench/stream");
     auto v = g.register_vertex(path, role_t::STREAM);
-    (void)g.set_retention(v, tr::graph::retention_t::N,
-                          16);  // a real bounded ring: retention work on every write
+    (void)g.set_policy(v, {.retention = tr::graph::retention_t::N,
+                           .depth = 16});  // a real bounded ring: retention work on every write
     std::atomic<std::uint64_t> recv{0};
     auto cb = [&](const tr::graph::value_t&) { recv.fetch_add(1, std::memory_order_relaxed); };
     (void)g.subscribe(path, cb);
@@ -933,16 +937,20 @@ namespace acl_bench {
 
 /** @brief Install a subject resolver mapping a non-empty caller to its own bytes. */
 void install_resolver(graph_t& g) {
-    g.configure_subject_resolver(
-        [](void*,
-           std::string_view caller) -> std::expected<std::vector<std::byte>, tr::wire::err_t> {
-            // The empty (local) context is settled as trusted before the resolver runs (#905),
-            // so the setup writes never arrive here.
-            std::vector<std::byte> token(caller.size());
-            std::memcpy(token.data(), caller.data(), caller.size());
-            return token;
-        },
-        nullptr);
+    {
+        auto hooks = g.hooks();
+        hooks.subject_resolver = {
+            [](void*,
+               std::string_view caller) -> std::expected<std::vector<std::byte>, tr::wire::err_t> {
+                // The empty (local) context is settled as trusted before the resolver runs (#905),
+                // so the setup writes never arrive here.
+                std::vector<std::byte> token(caller.size());
+                std::memcpy(token.data(), caller.data(), caller.size());
+                return token;
+            },
+            nullptr};
+        g.set_hooks(hooks);
+    }
 }
 
 /** @brief Write a single INHERIT ALLOW ACE for subject "peer" onto `path`:acl. */
@@ -1244,7 +1252,7 @@ void run_syncpool_gate() {
     std::vector<std::byte> slab(64 * (64 + sizeof(tr::view::segment_t) + 64));
     for (std::size_t T : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}}) {
         if (T > hw) continue;
-        tr::mem::sync_pool_t pool(slab, 64);  // fresh free-list per T
+        tr::mem::synchronized_pool_t<> pool(slab, 64);  // fresh free-list per T
         run_syncpool_mt(T, pool, "poolalloc-mt");
         run_syncpool_mt(T, tr::mem::heap_backend(), "heapalloc-mt");
     }

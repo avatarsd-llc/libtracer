@@ -333,11 +333,15 @@ void test_acl_prune() {
 
     // Enforcement on for the attributed caller "peer"; the empty (local) context is settled
     // as trusted before the resolver runs (#905), which is what the setup writes above use.
-    g.configure_subject_resolver(
-        [](void*, std::string_view) -> std::expected<subject_token_t, tr::wire::err_t> {
-            return subject_token_t{std::byte{'u'}};
-        },
-        nullptr);
+    {
+        auto hooks = g.hooks();
+        hooks.subject_resolver = {
+            [](void*, std::string_view) -> std::expected<subject_token_t, tr::wire::err_t> {
+                return subject_token_t{std::byte{'u'}};
+            },
+            nullptr};
+        g.set_hooks(hooks);
+    }
     std::vector<std::byte> everyone;
     for (const char c : std::string_view("EVERYONE@")) everyone.push_back(std::byte(c));
     // Deny READ on /p/mid (a WRITE-only ACE closes READ; no INHERIT — the denial is
@@ -422,11 +426,15 @@ void test_acl_prune_zero_children() {
     (void)g.write(path_t("/q/a"), make_value(value_tlv({0x01})));
     (void)g.write(path_t("/q/b"), make_value(value_tlv({0x02})));
 
-    g.configure_subject_resolver(
-        [](void*, std::string_view) -> std::expected<subject_token_t, tr::wire::err_t> {
-            return subject_token_t{std::byte{'u'}};
-        },
-        nullptr);
+    {
+        auto hooks = g.hooks();
+        hooks.subject_resolver = {
+            [](void*, std::string_view) -> std::expected<subject_token_t, tr::wire::err_t> {
+                return subject_token_t{std::byte{'u'}};
+            },
+            nullptr};
+        g.set_hooks(hooks);
+    }
     std::vector<std::byte> everyone;
     for (const char c : std::string_view("EVERYONE@")) everyone.push_back(std::byte(c));
     // A WRITE-only ACE closes READ on BOTH children; the branch itself stays open (no ACL

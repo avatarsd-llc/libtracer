@@ -36,7 +36,7 @@ execute_process(
     ERROR_VARIABLE _allowed_err)
 if(NOT _allowed_rc EQUAL 0)
     message(FATAL_ERROR
-            "ALLOWED arm (kSpinWaitSafe = true) did not compile — sync_pool_t must stay usable "
+            "ALLOWED arm (kSpinWaitSafe = true) did not compile — a spinning guard must stay usable "
             "on a target where spin-waiting is safe.\n${_allowed_out}${_allowed_err}")
 endif()
 
@@ -49,7 +49,7 @@ execute_process(
 if(_forbidden_rc EQUAL 0)
     message(FATAL_ERROR
             "FORBIDDEN arm (kSpinWaitSafe = false) COMPILED. The guard in mem_pool.hpp is "
-            "inert: a chip build can still instantiate synchronized_pool_t<spin_sync_t>.")
+            "inert: a chip build can still instantiate a synchronized_pool_t over a may_spin guard.")
 endif()
 if(NOT "${_forbidden_out}${_forbidden_err}" MATCHES "critical_pool_t")
     message(FATAL_ERROR

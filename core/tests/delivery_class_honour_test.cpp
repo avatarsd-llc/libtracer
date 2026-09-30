@@ -150,7 +150,7 @@ void test_stream_class_no_conflate_at_a_stream_receiver() {
 
     const path_t deep("/c/deep");
     const vertex_handle_t rx = g.register_vertex(deep, role_t::STREAM);
-    (void)g.set_retention(rx, tr::graph::retention_t::N, 8);
+    (void)g.set_policy(rx, {.retention = tr::graph::retention_t::N, .depth = 8});
     const path_t flat("/c/flat");
     const vertex_handle_t flat_rx = g.register_vertex(flat, role_t::STORED_VALUE);
 
@@ -204,7 +204,7 @@ void test_flush_emission_follows_the_source_role() {
 
     const path_t stream("/s/stream");
     const vertex_handle_t sv = g.register_vertex(stream, role_t::STREAM);
-    (void)g.set_retention(sv, tr::graph::retention_t::N, 8);
+    (void)g.set_policy(sv, {.retention = tr::graph::retention_t::N, .depth = 8});
     check(g.subscribe(stream, stream_sink).has_value(), "a subscriber on the STREAM source");
 
     for (std::uint8_t b = 1; b <= 4; ++b) {
@@ -265,10 +265,10 @@ void test_attach_forward_never_backfills_the_ring() {
 
     const path_t forward("/c/forward");
     const vertex_handle_t rx = g.register_vertex(forward, role_t::STREAM);
-    (void)g.set_retention(rx, tr::graph::retention_t::N, 8);
+    (void)g.set_policy(rx, {.retention = tr::graph::retention_t::N, .depth = 8});
     const path_t latched("/c/latched");
     const vertex_handle_t rx_latched = g.register_vertex(latched, role_t::STREAM);
-    (void)g.set_retention(rx_latched, tr::graph::retention_t::N, 8);
+    (void)g.set_policy(rx_latched, {.retention = tr::graph::retention_t::N, .depth = 8});
 
     constexpr delivery_policy_t kStream = policy_of(delivery_class_t::STREAM);
     constexpr delivery_policy_t kStreamDurable{

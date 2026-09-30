@@ -43,6 +43,7 @@
 #include "libtracer/backend.hpp"
 #include "libtracer/mem_borrowed.hpp"
 #include "libtracer/mem_pool.hpp"
+#include "libtracer/reader_guard.hpp"
 #include "libtracer/segment.hpp"
 #include "test_support.hpp"
 
@@ -52,7 +53,6 @@ using tr::mem::alloc_hint_t;
 using tr::mem::backend_tag;
 using tr::mem::mem_backend_t;
 using tr::mem::pool_t;
-using tr::mem::spin_sync_t;
 using tr::mem::synchronized_pool_t;
 using tr::view::segment_ptr_t;
 using tr::view::segment_t;
@@ -60,15 +60,16 @@ using tr::view::segment_t;
 using tr::testing::check_quiet;
 
 /**
- * @brief A sync policy that COUNTS acquisitions of the real host critical section.
+ * @brief A reader guard that COUNTS acquisitions of the real host critical section.
  *
  * The instrument for check 2: the count is how we see that reclaim went through
  * `synchronized_pool_t::destroy` (virtual, locked) and not the reinterpreted
  * `pool_t::destroy` beside it.
  */
 struct counting_sync_t {
-    static constexpr bool is_isr_safe = false;   /**< @brief Spin => not ISR. */
-    static constexpr bool is_nonblocking = true; /**< @brief Spin => no syscall, no OS wait. */
+    static constexpr bool is_isr_safe = false;    /**< @brief Host mutex => not ISR. */
+    static constexpr bool is_nonblocking = false; /**< @brief May nap in the OS. */
+    static constexpr bool may_spin = false;       /**< @brief Bounded wait, no pure spin. */
     static constexpr const char* name = "pool_only_count_sync"; /**< @brief Backend name. */
     static inline std::atomic<std::size_t> acquisitions{0};     /**< @brief Lock count. */
 
@@ -79,12 +80,17 @@ struct counting_sync_t {
     }
     /** @brief Leave it. */
     void unlock() noexcept { inner_.unlock(); }
+    /** @brief The `reader_guard` lookup: one shared instance (the pool holds its own). */
+    static counting_sync_t& for_address(const void*) noexcept {
+        static counting_sync_t shared;
+        return shared;
+    }
 
    private:
-    spin_sync_t inner_{};
+    tr::graph::mutex_guard_t inner_{};
 };
 
-static_assert(tr::mem::pool_sync_policy<counting_sync_t>, "the counting policy models the seam");
+static_assert(tr::graph::reader_guard<counting_sync_t>, "the counting guard models the trait");
 
 /**
  * @brief A user backend outside the fast set: `UNKNOWN`-tagged, counts its reclaims.

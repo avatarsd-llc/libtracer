@@ -108,7 +108,8 @@ void claim(int fd) {
 void test_admission_arms_keepalive() {
     std::printf("#957 admission arms keepalive on the peer's socket:\n");
     reset_opts();
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
+                                                  tr::net::httpd_ws_config_t{.peer_named = true});
     check(link->ok(), "the adopting link registered its URI");
     constexpr int kFd = 410;
     check(opt_value(kFd, SOL_SOCKET, SO_KEEPALIVE) == -1,
@@ -130,7 +131,8 @@ void test_admission_arms_keepalive() {
 void test_every_admitted_peer_gets_it() {
     std::printf("#957 a second peer gets its own keepalive:\n");
     reset_opts();
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
+                                                  tr::net::httpd_ws_config_t{.peer_named = true});
     check(link->ok(), "the adopting link registered its URI");
     claim(420);
     claim(421);

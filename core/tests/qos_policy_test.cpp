@@ -26,8 +26,8 @@
  *                                               knobs: `SETTINGS{ [NAME "app" SETTINGS{...}] }`,
  *                                               empty when no app fields are declared.
  *   6. `settings/schema-enumerates-nothing`   — `:schema` carries no protocol-knob entries.
- *   7. `stream/history-depth-host-only`       — `set_retention` (`retention_t::N`) changes the
- * retained ring depth, and no wire operation reaches it.
+ *   7. `stream/history-depth-host-only`       — `vertex_policy_t::retention` (`retention_t::N`)
+ * changes the retained ring depth, and no wire operation reaches it.
  *
  * §5.8 `store/pin-ratio` is covered at the decision site (`op_resolve_test`, `udp_test`), not
  * here; RFC-0028 D3 replaced the ratio with an absolute copy-or-share threshold. What this file
@@ -297,7 +297,7 @@ void test_removed_knobs_are_schema_not_found() {
     // reserved `app` subkey beside it must still take a write and serve it back.
     std::vector<tr::graph::app_field_t> table;
     table.push_back(tr::graph::app_field_t{.name = "kp", .access = tr::graph::app_access_t::RW});
-    g.set_app_fields(v, std::move(table));
+    (void)g.set_policy(v, {.app_fields = std::move(table)});
     check(g.write(path_t("/s/knobs:settings.app.kp"), value_le(7, 4)).has_value(),
           "ablation: `:settings.app.kp` still writes (the door is alive, not deleted)");
     check(g.read(path_t("/s/knobs:settings.app.kp")).has_value(), "ablation: ... and reads back");
@@ -319,7 +319,7 @@ void test_settings_container_keeps_its_shape() {
     const vertex_handle_t v = g.register_vertex(path_t("/s/shape"), role_t::STORED_VALUE);
     std::vector<tr::graph::app_field_t> table;
     table.push_back(tr::graph::app_field_t{.name = "kp", .access = tr::graph::app_access_t::RW});
-    g.set_app_fields(v, std::move(table));
+    (void)g.set_policy(v, {.app_fields = std::move(table)});
     check(g.write(path_t("/s/shape:settings.app.kp"), value_le(7, 4)).has_value(),
           "the owner's app field takes a value");
 
@@ -351,7 +351,7 @@ void test_schema_enumerates_nothing() {
     const vertex_handle_t v = g.register_vertex(path_t("/s/sch2"), role_t::STORED_VALUE);
     std::vector<tr::graph::app_field_t> table;
     table.push_back(tr::graph::app_field_t{.name = "kp", .access = tr::graph::app_access_t::RW});
-    g.set_app_fields(v, std::move(table));
+    (void)g.set_policy(v, {.app_fields = std::move(table)});
     const std::optional<decoded_t> owned = decode_read(g.read(path_t("/s/sch2:schema")));
     check(owned.has_value() && owned->tlv.children.size() == 4 && name_at(owned->tlv, 2, "app"),
           "ablation: the OWNER part still follows it (POINT{ NAME, SETTINGS, NAME \"app\", "
@@ -362,8 +362,8 @@ void test_schema_enumerates_nothing() {
 // §5.7 — the ring depth is owner-side, and nothing is inherited (§3.F).
 
 /**
- * @brief `set_retention` (`retention_t::N`) drives the RECEIVER's ring; no wire operation reaches
- * it.
+ * @brief `vertex_policy_t::retention` (`retention_t::N`) drives the RECEIVER's ring; no wire
+ * operation reaches it.
  *
  * RETARGETED to the receiver side for RFC-0025 §4.6.1 Amendment 2. A producer never queues:
  * the ring belongs to whoever consumes it, so the depth declaration is exercised on the vertex
@@ -392,11 +392,11 @@ void test_history_depth_is_host_only() {
 
     // The owner declares a depth; the ADMISSION path must read the new value, not merely
     // report it.
-    (void)g.set_retention(stream, tr::graph::retention_t::N, 3);
+    (void)g.set_policy(stream, {.retention = tr::graph::retention_t::N, .depth = 3});
     for (std::uint8_t i = 1; i <= 5; ++i) (void)g.write(producer, byte_value(i));
     const auto deep = tr::testing::history_of(g, stream);
     check(deep.has_value() && deep->size() == 3,
-          "set_retention(N, 3) => the receiver ring TRIMS to three (the admission read it)");
+          "retention N at depth 3 => the receiver ring TRIMS to three (the admission read it)");
 
     // And no wire operation reaches it — write or read, whatever the caller.
     check(fails_with(g.write(path_t("/h/s:settings.history_keep_last"), value_le(9, 4)),
@@ -414,8 +414,8 @@ void test_nothing_is_inherited() {
     std::printf("§3.F — no inheritance, and no registration-forced extension block:\n");
     graph_t g;
     const vertex_handle_t parent = g.register_vertex(path_t("/i/root"), role_t::STORED_VALUE);
-    g.set_share_threshold_bytes(parent, 256);
-    check(!g.set_retention(parent, tr::graph::retention_t::N, 4).has_value(),
+    (void)g.set_policy(parent, {.share_threshold_bytes = 256});
+    check(!g.set_policy(parent, {.retention = tr::graph::retention_t::N, .depth = 4}).has_value(),
           "a STORED_VALUE has no ring to give a depth to (RFC-0028 §5.4) — refused, by value");
     check(g.share_threshold_bytes(parent) == 256, "the parent holds its own declared threshold");
 
@@ -426,7 +426,7 @@ void test_nothing_is_inherited() {
     check(!has_ext(child), "... and pays no extension block for the parent's declaration");
 
     // A child registered LATER, and one under a fresh intermediate placeholder, likewise.
-    g.set_share_threshold_bytes(parent, 512);
+    (void)g.set_policy(parent, {.share_threshold_bytes = 512});
     const vertex_handle_t later = g.register_vertex(path_t("/i/root/b"), role_t::STORED_VALUE);
     const vertex_handle_t deep =
         g.register_vertex(path_t("/i/root/mid/deep"), role_t::STORED_VALUE);
@@ -444,7 +444,7 @@ void test_nothing_is_inherited() {
     check(has_ext(stream),
           "ablation: a STREAM identity still allocates one (has_ext is not stuck)");
     // A declaration is what materialises it — the owner pays only when the owner asks.
-    g.set_share_threshold_bytes(plain, 8);
+    (void)g.set_policy(plain, {.share_threshold_bytes = 8});
     check(has_ext(plain) && g.share_threshold_bytes(plain) == 8,
           "an owner-side declaration materialises the block, and takes effect");
 }
@@ -630,7 +630,7 @@ void test_conformance_vectors() {
         std::vector<tr::graph::app_field_t> table;
         table.push_back(
             tr::graph::app_field_t{.name = "kp", .access = tr::graph::app_access_t::RW});
-        g.set_app_fields(v, std::move(table));
+        (void)g.set_policy(v, {.app_fields = std::move(table)});
         (void)g.write(path_t("/cs:settings.app.kp"), value_le(7, 4));
         const std::optional<decoded_t> got = decode_read(g.read(path_t("/cs:settings")));
         const std::vector<std::byte> want = vector_bytes("settings/read-container-shape");
@@ -649,7 +649,7 @@ void test_conformance_vectors() {
         tr::wire::emit_name(desc, "f32");
         table.push_back(tr::graph::app_field_t{
             .name = "kp", .access = tr::graph::app_access_t::RW, .descriptor = std::move(desc)});
-        g.set_app_fields(v, std::move(table));
+        (void)g.set_policy(v, {.app_fields = std::move(table)});
         const std::optional<decoded_t> got = decode_read(g.read(path_t("/temp:schema")));
         const std::vector<std::byte> want = vector_bytes("tlv-types/point-schema-app");
         check(got.has_value() && got->bytes == want,
@@ -669,7 +669,7 @@ void test_conformance_vectors() {
         check(fails_with(g.write(path_t("/hd:settings.history_keep_last"), value_le(4, 4)),
                          status_t::SCHEMA_NOT_FOUND),
               "... which is the status the ring-depth write returns");
-        (void)g.set_retention(s, tr::graph::retention_t::N, 2);
+        (void)g.set_policy(s, {.retention = tr::graph::retention_t::N, .depth = 2});
         for (std::uint8_t i = 1; i <= 3; ++i) (void)g.write(s, byte_value(i));
         const auto hist = tr::testing::history_of(g, s);
         check(hist.has_value() && hist->size() == 2,
@@ -743,7 +743,7 @@ void test_conformance_vectors() {
         std::vector<tr::graph::app_field_t> table;
         table.push_back(
             tr::graph::app_field_t{.name = "kp", .access = tr::graph::app_access_t::RW});
-        g.set_app_fields(v, std::move(table));
+        (void)g.set_policy(v, {.app_fields = std::move(table)});
         const std::vector<std::byte> sel = vector_bytes("field/field-nested");
         check(
             error_child_bytes(resolver, b_fwd_to_reply_ep(fwd_op_t::READ, b_path({"fn"}), sel, {}))

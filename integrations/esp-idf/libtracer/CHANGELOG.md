@@ -12,12 +12,35 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **BREAKING — link construction takes one config aggregate (RFC-0028 slice 10,
+  [#1593](https://github.com/avatarsd-llc/libtracer/issues/1593)).** Both link constructors
+  change, and there are no shims:
+  - `httpd_ws_link_t(bind_port, const httpd_ws_config_t& = {})` and `httpd_ws_link_t(server,
+    uri, const httpd_ws_config_t& = {})` take `httpd_ws_config_t{max_peers, peer_named,
+    send_timeout_ms, auth_deadline_ms, rx_scratch_bytes, tx_pool_slots, tx_inline_bytes,
+    tx_large{bytes, slots}, memory{rx, io}}`.
+  - `esp_ws_client_link_t(host, port, const esp_ws_client_config_t& = {})` takes
+    `esp_ws_client_config_t{ws_path, handshake_headers, rx_bytes, tx_bytes, recv_stack,
+    defer_recv}`.
+
+  **Migration:** each positional argument moves to the member of the same name.
+- **BREAKING (inherited from core) — `tr::esp::portmux_sync_t` is removed.** Core unified the
+  pool's sync policy with the LKV slot's `reader_guard`. `tr::esp::critical_pool_t` is now
+  `synchronized_pool_t<critical_guard_t>`, over the same interrupt-masked guard the chip's LKV
+  slot uses. **Migration:** a direct `synchronized_pool_t<portmux_sync_t>` becomes
+  `tr::esp::critical_pool_t`.
+- **`esp_ws_client_link_t::stats_t` gains `dial_attempts` and `dial_failures`
+  ([#1606](https://github.com/avatarsd-llc/libtracer/issues/1606) asks 1–2).** A failed dial
+  now destroys its client and transport handles before the backoff sleep, instead of holding
+  them until the next attempt. Each failure is counted and logged, with the warning limited to
+  one a minute.
+
 - **BREAKING (inherited from core) — the pin ratio is gone; chip targets copy always.** Core
   replaced `set_pin_payload_ratio` / `kPinPayloadRatio` with an absolute copy-or-share threshold
   (RFC-0028 slice 5). The generated `config_override.hpp` now sets
   `kShareThresholdBytes = SIZE_MAX` — copy every written value, never borrow an RX pool slot —
   which is exactly the never-pin posture chip builds shipped before. An application that wants a
-  zero-copy store on one vertex declares it with `graph_t::set_share_threshold_bytes`. The copy
+  zero-copy store on one vertex declares it with `vertex_policy_t::share_threshold_bytes`. The copy
   itself is now ONE block (header + bytes) from the graph's source instead of three. The
   `pin_bench` example's arms are thresholds (`A-copy`, `T64`, `T512`, `C-share`).
 

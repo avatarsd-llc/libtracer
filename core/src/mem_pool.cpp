@@ -65,22 +65,33 @@ std::size_t pool_t::load_next(std::size_t slot) const noexcept {
     return next;
 }
 
-segment_t* pool_t::alloc(std::size_t size, alloc_hint_t /*hint*/) {
-    if (size > slot_payload_ || free_head_ == kNil) return nullptr;
+void* pool_t::try_alloc(std::size_t bytes, std::size_t align) noexcept {
+    if (bytes > header_ + slot_payload_ || align > view::segment_block_align(align_) ||
+        free_head_ == kNil)
+        return nullptr;
     const std::size_t idx = free_head_;
     free_head_ = load_next(idx);
     --free_count_;
-    std::byte* payload = slot_at(idx) + header_;
-    return new (slot_at(idx)) segment_t(this, std::span<std::byte>(payload, size));
+    return slot_at(idx);
 }
 
-void pool_t::destroy(segment_t* seg) noexcept {
+void pool_t::release(void* p, std::size_t /*bytes*/, std::size_t /*align*/) noexcept {
     const std::size_t idx =
-        static_cast<std::size_t>(reinterpret_cast<std::byte*>(seg) - slab_.data()) / stride_;
-    seg->~segment_t();
+        static_cast<std::size_t>(static_cast<std::byte*>(p) - slab_.data()) / stride_;
     store_next(idx, free_head_);
     free_head_ = idx;
     ++free_count_;
+}
+
+segment_t* pool_t::alloc(std::size_t size, alloc_hint_t /*hint*/) {
+    if (size > slot_payload_) return nullptr;
+    void* const block = pool_t::try_alloc(header_ + size, align_);
+    return block != nullptr ? view::place_segment(this, block, size, align_) : nullptr;
+}
+
+void pool_t::destroy(segment_t* seg) noexcept {
+    seg->~segment_t();
+    pool_t::release(seg, 0, 0);
 }
 
 }  // namespace tr::mem

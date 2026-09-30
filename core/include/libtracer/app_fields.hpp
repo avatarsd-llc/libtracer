@@ -14,12 +14,15 @@
  */
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <memory>
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "libtracer/hook.hpp"
@@ -123,7 +126,7 @@ struct app_field_t {
  *
  * Unlike @ref app_field_t this owns NOTHING: `name` and `descriptor` are VIEWS. For an
  * OWNING install they point into @ref app_field_table_t::backing; for a BORROWED install
- * (@ref graph_t::set_app_fields_static) they point at the caller's own storage, and the
+ * (@ref vertex_policy_t::app_fields) they point at the caller's own storage, and the
  * caller guarantees the pointed-to bytes — **and the array holding these entries** —
  * outlive the vertex. Pass static storage (flash / `.rodata`), never a stack array or a
  * soon-freed heap block. Either way the storage is immutable for the table's lifetime, so
@@ -154,8 +157,8 @@ struct app_field_slot_t {
 };
 
 /** @brief The install-time spelling of @ref app_field_slot_t — the same type. Kept as a name
- *         because it reads better at an owner's `set_app_fields_static` call site, and because
- *         it is the spelling already in the wild (docs, integrations, firmware tables). */
+ *         because it reads better at an owner's borrowed `vertex_policy_t::app_fields` declaration,
+ * and because it is the spelling already in the wild (docs, integrations, firmware tables). */
 using app_field_static_t = app_field_slot_t;
 
 /**
@@ -233,15 +236,69 @@ class borrowed_fields_t {
 };
 
 /**
+ * @brief One application-field DECLARATION as `vertex_policy_t::app_fields` carries it
+ *        (RFC-0028 §4.12, slice 10): either an OWNING table or a BORROWED one (ADR-0058), or
+ *        nothing.
+ *
+ * Replaces the two install verbs (`set_app_fields` / `set_app_fields_static`) with one value.
+ * It converts implicitly from each spelling a caller already writes:
+ * - a braced list or a `std::vector<app_field_t>` — OWNING: names, descriptors and initial
+ *   values are copied onto the vertex;
+ * - a `borrowed_fields_t`, or the static array spellings it accepts — BORROWED: the vertex
+ *   views the caller's array and bytes in place (zero declaration RAM), so both MUST outlive
+ *   the vertex.
+ *
+ * A `std::vector` never converts to the borrowed form (ADR-0058 erratum 2 still holds).
+ */
+class app_fields_decl_t {
+   public:
+    /** @brief No fields. */
+    app_fields_decl_t() = default;
+    /** @brief An OWNING table from a braced list of fields. */
+    app_fields_decl_t(std::initializer_list<app_field_t> owned)  // NOLINT(google-explicit-*)
+        : owned_(owned) {}
+    /** @brief An OWNING table. */
+    app_fields_decl_t(std::vector<app_field_t> owned) noexcept  // NOLINT(google-explicit-*)
+        : owned_(std::move(owned)) {}
+    /** @brief A BORROWED table (ADR-0058): viewed in place, never copied. */
+    constexpr app_fields_decl_t(borrowed_fields_t borrowed) noexcept  // NOLINT
+        : borrowed_(borrowed) {}
+    /** @brief A BORROWED table from a static array. */
+    template <std::size_t N>
+    constexpr app_fields_decl_t(const app_field_static_t (&table)[N]) noexcept  // NOLINT
+        : borrowed_(table) {}
+    /** @brief A BORROWED table from a static `std::array`. */
+    template <std::size_t N>
+    constexpr app_fields_decl_t(  // NOLINT(google-explicit-constructor)
+        const std::array<app_field_static_t, N>& table) noexcept
+        : borrowed_(table) {}
+
+    /** @brief True when this declares no field at all. */
+    [[nodiscard]] bool empty() const noexcept { return owned_.empty() && borrowed_.empty(); }
+    /** @brief True when this is a BORROWED declaration. */
+    [[nodiscard]] bool is_borrowed() const noexcept { return !borrowed_.empty(); }
+    /** @brief The owning table (empty for a borrowed or empty declaration). */
+    [[nodiscard]] const std::vector<app_field_t>& owned() const& noexcept { return owned_; }
+    /** @brief The owning table, moved out of an expiring declaration (no copy). */
+    [[nodiscard]] std::vector<app_field_t> owned() && noexcept { return std::move(owned_); }
+    /** @brief The borrowed table (empty for an owning or empty declaration). */
+    [[nodiscard]] borrowed_fields_t borrowed() const noexcept { return borrowed_; }
+
+   private:
+    std::vector<app_field_t> owned_{}; /**< @brief The owning spelling's fields. */
+    borrowed_fields_t borrowed_{};     /**< @brief The borrowed spelling's view. */
+};
+
+/**
  * @brief A vertex's RFC-0010 field descriptor table (ADR-0058): the immutable declaration
  *        (class ②) split from the per-vertex mutable values (class ③).
  *
- * Both install overloads converge here. `set_app_fields_static` leaves `backing` empty and
+ * Both install overloads converge here. A borrowed declaration leaves `backing` empty and
  * points @ref slots straight at the caller's array — the declaration costs zero RAM, neither
  * bytes nor slots (measured host-side: 392 B / 10 allocs per leaf versus 695 B / 17 for the
  * owning install, against a 136 B bare leaf — the `vertex_app5_static` and `vertex_app5` gate
  * rows). Erratum 1 is what removed the slot copy; an earlier revision of this comment still
- * described it (592 B / 11) after the code had stopped doing it. The owning `set_app_fields`
+ * described it (592 B / 11) after the code had stopped doing it. The owning declaration
  * packs the runtime table's name+descriptor bytes into `backing` — ONE allocation for the
  * whole table — and points the slots into it. `backing` is never mutated or reallocated
  * while `slots` reference it (a re-install replaces the whole table under the vertex mutex).
@@ -287,8 +344,8 @@ using app_field_write_hook_t = hook_t<void(std::string_view name, const view_t& 
  * with the vertex's value seam — so it lives here, not in
  * @ref value_handlers_t. A vertex with no app fields and no apply seam keeps this group
  * null and pays neither the table nor the 16 B hook. Allocated on the first of
- * either `set_app_fields*` (the table) or an `on_app_field_write` at registration; guarded
- * by the vertex mutex, insert-only (never freed before the vertex).
+ * either `vertex_policy_t::app_fields` (the table) or an `on_app_field_write` at registration;
+ * guarded by the vertex mutex, insert-only (never freed before the vertex).
  */
 struct app_field_group_t {
     app_field_table_t table; /**< @brief The view-slot descriptor table + lazy value store. */

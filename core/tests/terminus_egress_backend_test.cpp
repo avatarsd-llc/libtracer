@@ -148,7 +148,11 @@ using tr::testing::check;
 class arming_backend_t final : public tr::mem::mem_backend_t {
    public:
     explicit arming_backend_t(tr::mem::mem_backend_t& upstream = tr::mem::heap_backend()) noexcept
-        : mem_backend_t("test_egress"), up_(upstream) {}
+        : mem_backend_t("test_egress"), up_(upstream) {
+        // Reserved up front: the size log is the test's own instrument, and a push_back that
+        // grows it inside the counted window would be charged to the arm under test.
+        sizes_.reserve(256);
+    }
 
     [[nodiscard]] tr::view::segment_t* alloc(
         std::size_t size, tr::mem::alloc_hint_t hint = tr::mem::alloc_hint_t::NONE) override {
@@ -347,8 +351,7 @@ void test_span_tier_reply_head_draws_from_egress() {
         (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x2A2A2A2Au))));
         // egress is the 6th ctor arg; flat/rx keep their heap defaults so the ONLY injected
         // backend under test here is the reply-egress one.
-        fwd_router_t router(n.g, &tr::mem::heap_source(), &tr::mem::heap_source(),
-                            &tr::mem::heap_backend(), 0, &egress);
+        fwd_router_t router(n.g, {.egress = &egress});
         (void)router.add_child("in", n.in);
         g_allocs = 0;
         g_arm = true;
@@ -405,8 +408,7 @@ void test_mint_site_draws_from_egress() {
     node_t n;
     (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x5A5A5A5Au))));
     arming_backend_t egress;
-    fwd_router_t router(n.g, &tr::mem::heap_source(), &tr::mem::heap_source(),
-                        &tr::mem::heap_backend(), 0, &egress);
+    fwd_router_t router(n.g, {.egress = &egress});
     (void)router.add_child("in", n.in);
 
     router.on_frame("in",
@@ -440,8 +442,7 @@ void test_egress_refusal_is_answered_by_value() {
     node_t n;
     (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x33333333u))));
     arming_backend_t egress;
-    fwd_router_t router(n.g, &tr::mem::heap_source(), &tr::mem::heap_source(),
-                        &tr::mem::heap_backend(), 0, &egress);
+    fwd_router_t router(n.g, {.egress = &egress});
     (void)router.add_child("in", n.in);
 
     egress.arm();
@@ -489,8 +490,7 @@ void test_saturated_reply_degrades_to_addressed_backpressure() {
     node_t n;
     (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x44444444u))));
     arming_backend_t egress;
-    fwd_router_t router(n.g, &tr::mem::heap_source(), &tr::mem::heap_source(),
-                        &tr::mem::heap_backend(), 0, &egress);
+    fwd_router_t router(n.g, {.egress = &egress});
     (void)router.add_child("in", n.in);
 
     // Refuse ONLY the RESULT head (the first egress draw): the rope is empty, `or_backpressure`

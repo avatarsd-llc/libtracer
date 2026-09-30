@@ -390,7 +390,7 @@ enum class app_sel_t : std::uint8_t {
  * its own `graph_t` (Amendment 1 §D.4): the two injected `block_source_t` seams and the
  * graph's own delivery-drop door. The `router` / `labels` / `link` classes are the net
  * plane's (Amendment 2), and L4 still learns nothing about that plane to serve them: the
- * router registers a sampler UP through `graph_t::configure_stats_sampler`, and @ref NET is
+ * router registers a sampler UP through `graph_hooks_t::stats_sampler`, and @ref NET is
  * "a spelling only that sampler can recognise or refuse".
  */
 enum class stats_seam_t : std::uint8_t {
@@ -749,32 +749,46 @@ struct branch_node_t {
     return src == nullptr || src == &mem::heap_source();
 }
 
-/** @brief The constructor's `nullptr`-means-the-process-default normalization, as a
- *         reference — so the adapters can be initialized before `ctl_` exists. */
-[[nodiscard]] mem::block_source_t& source_or_default(mem::block_source_t* src) noexcept {
-    return src != nullptr ? *src : mem::heap_source();
+/** @brief The retention a role holds when its policy names none (RFC-0028 §5.4). */
+[[nodiscard]] constexpr retention_t default_retention(role_t role) noexcept {
+    return role == role_t::HANDLER  ? retention_t::NONE
+           : role == role_t::STREAM ? retention_t::N
+                                    : retention_t::LAST;
+}
+
+/** @brief The legal (role, retention) pairings: `STORED_VALUE` `NONE`|`LAST`, `STREAM`
+ *         `NONE`|`N`, `HANDLER` `NONE`. */
+[[nodiscard]] constexpr bool retention_legal(role_t role, retention_t r) noexcept {
+    return r == retention_t::NONE || (r == retention_t::LAST && role == role_t::STORED_VALUE) ||
+           (r == retention_t::N && role == role_t::STREAM);
+}
+
+/** @brief Whether @p policy's retention is legal for @p role (unset is always legal). */
+[[nodiscard]] bool policy_legal(role_t role, const vertex_policy_t& policy) noexcept {
+    return retention_legal(role, policy.retention.value_or(default_retention(role)));
 }
 
 }  // namespace
 
-graph_t::graph_t(mem::block_source_t* src)
-    : src_backend_(source_or_default(src)),
-      src_mr_(source_or_default(src)),
+graph_t::graph_t(mem::block_source_t& src, graph_hooks_t hooks)
+    : src_backend_(src),
+      src_mr_(src),
       root_(std::make_unique<vertex_t>(role_t::STORED_VALUE, path_key_t{}, handlers_t{})),
       // The anchors' private structural root (#1223). It takes NO vertex slot: it is never
       // an anchor itself and no element can name it, and giving it one would put a second
       // unaddressable hole in an index whose only documented hole is slot 0.
       anchor_root_(std::make_unique<vertex_t>(role_t::STORED_VALUE, path_key_t{}, handlers_t{})),
-      ctl_(&source_or_default(src)),
+      ctl_(&src),
       ring_(ctl_) {
     // The process-default FOLD. Resolved in the BODY rather than in the member-initializer
     // list: `&src_mr_` there would convert a pointer to an object whose lifetime has not
     // started into a pointer to its base, which is undefined even though the adapters are now
     // declared first. Two stores at construction, never read again.
-    if (!is_default_source(src)) {
+    if (!is_default_source(&src)) {
         mr_ = &src_mr_;
         value_backend_ = &src_backend_;
     }
+    set_hooks(hooks);
     // Slot 0 is the structural root (RFC-0024 §6.4): the index is seeded here so it stays
     // allocation-ordered from the first vertex_t this graph owns. The root is not a
     // registrable address, so no bound path ever names slot 0 — it is in the vector because
@@ -803,8 +817,10 @@ void graph_t::register_child_type(std::string type, child_factory_t factory) {
 }
 
 vertex_handle_t graph_t::register_vertex(const path_t& path, role_t role, handlers_t handlers,
+                                         vertex_policy_t policy,
                                          std::span<const payload_right_t> rights) {
-    result_t<vertex_handle_t> h = try_register_vertex(path, role, handlers, rights);
+    result_t<vertex_handle_t> h =
+        try_register_vertex(path, role, handlers, std::move(policy), rights);
     // PATH_IN_USE on a compile-site literal is a source bug, not a runtime outcome — fail loud
     // (ADR-0056, mirroring path_t(std::string_view)) rather than hand back a result the caller
     // would only `*`-deref unchecked. A genuine runtime path uses try_register_vertex.
@@ -813,20 +829,36 @@ vertex_handle_t graph_t::register_vertex(const path_t& path, role_t role, handle
 }
 
 result_t<vertex_handle_t> graph_t::try_register_vertex(const path_t& path, role_t role,
-                                                       handlers_t handlers,
+                                                       handlers_t handlers, vertex_policy_t policy,
                                                        std::span<const payload_right_t> rights) {
-    return register_vertex_key_span(path.key(), role, handlers, rights);
+    return register_with_policy(path.key(), role, handlers, std::move(policy), rights);
 }
 
 result_t<vertex_handle_t> graph_t::register_vertex_key(std::vector<std::byte> key, role_t role,
-                                                       handlers_t handlers,
+                                                       handlers_t handlers, vertex_policy_t policy,
                                                        std::span<const payload_right_t> rights) {
     // The owning-vector spelling is the public door and nothing more: the descent below
     // never retains the argument — every record it keeps is copied into the vertex's own
     // `path_key_t` — so the vector is pure convenience for a caller that already has one,
     // and callers that hold borrowed bytes take the span door instead of allocating a copy
     // to satisfy this signature (#1139).
-    return register_vertex_key_span(key, role, handlers, rights);
+    return register_with_policy(key, role, handlers, std::move(policy), rights);
+}
+
+result_t<vertex_handle_t> graph_t::register_with_policy(std::span<const std::byte> key, role_t role,
+                                                        const handlers_t& handlers,
+                                                        vertex_policy_t&& policy,
+                                                        std::span<const payload_right_t> rights) {
+    // Refused BEFORE the descent, so an illegal policy registers nothing — not even the
+    // placeholder levels a descent would create.
+    if (!policy_legal(role, policy)) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+    result_t<vertex_handle_t> h = register_vertex_key_span(key, role, handlers, rights);
+    if (!h) return h;
+    // Applied after the map lock is released: the delivery-mode arm takes the sweep lock and
+    // rebuilds the key, and nothing in a policy needs the map lock. The window between the
+    // two is the "configure before frames flow" contract every wiring verb carries.
+    apply_policy(h->get(), std::move(policy));
+    return h;
 }
 
 result_t<vertex_handle_t> graph_t::register_vertex_key_span(
@@ -1709,7 +1741,16 @@ void graph_t::count_snapshot_drops(const vertex_t::snapshot_drops_t& drops) noex
     if (drops.truncated != 0) count_drop(drop_reason_t::FAN_OUT_TRUNCATED, drops.truncated);
 }
 
-void graph_t::count_store_drops(vertex_t* v, const vertex_t::store_drops_t& drops) noexcept {
+/**
+ * @brief Record a store's sheds as delivery drops — out of line ON PURPOSE.
+ *
+ * `noinline` keeps `dispatch_edge_target` at its pinned shape: RFC-0028 slice 10 moved
+ * graph.cpp's inline budget and GCC began inlining this whole body (the own-subs-wide
+ * multiply) into the per-target leg, +43 B on a symbol the ratchet holds flat. As a call it
+ * is the one-test early return on a clean write, exactly as before.
+ */
+[[gnu::noinline]] void graph_t::count_store_drops(vertex_t* v,
+                                                  const vertex_t::store_drops_t& drops) noexcept {
     if (!drops.any()) return;  // the clean write pays exactly this test
     // Two sheds now, both at the RECEIVER's ring and both under RFC-0025 §4.4's best-effort
     // arm. `ring_shed` is drop-oldest: the admission was funded by evicting queued entries,
@@ -1830,37 +1871,51 @@ std::size_t graph_t::share_threshold_bytes(vertex_handle_t v) const noexcept {
     return v.get()->share_threshold_bytes();
 }
 
-/**
- * @brief Declare what a vertex retains (RFC-0028 §5.4): validate the retention against the
- *        role, then let the vertex record it.
- *
- * The role/retention table lives here, in one place: a `HANDLER` retains nothing by role, a
- * `STORED_VALUE` holds at most its last value, and a `STREAM`'s retention IS its ring. A
- * pairing outside the table changes nothing and answers `SCHEMA_NOT_FOUND`.
- */
-result_t<void> graph_t::set_retention(vertex_handle_t v, retention_t r, std::uint32_t depth) {
+retention_t graph_t::retention(vertex_handle_t v) const noexcept { return v.get()->retention(); }
+
+result_t<void> graph_t::set_policy(vertex_handle_t v, vertex_policy_t policy) {
     vertex_t* const vx = v.get();
-    const role_t role = vx->role();
-    const bool legal = r == retention_t::NONE ||
-                       (r == retention_t::LAST && role == role_t::STORED_VALUE) ||
-                       (r == retention_t::N && role == role_t::STREAM);
-    if (!legal) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
-    if (role == role_t::HANDLER) return {};  // already NONE, and no bit to carry it
-    vx->set_retention(r, depth);
+    if (!policy_legal(vx->role(), policy)) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+    apply_policy(vx, std::move(policy));
     return {};
 }
 
-retention_t graph_t::retention(vertex_handle_t v) const noexcept { return v.get()->retention(); }
-
 /**
- * @brief Bind a receiving vertex's own ring source and §4.4 arm (RFC-0025 §4.6.1 clause 3).
+ * @brief Apply a (legal) policy member by member, skipping every member that already holds —
+ *        so a default policy on a fresh vertex touches nothing and allocates nothing.
  *
- * Sited beside `set_retention` because the two compose — intent in entries, bound in bytes
- * — and both are owner-side wiring with no wire surface. The vertex verb drains the ring on a
- * rebind so every reservation returns to the source that served it.
+ * Order matters in one place: the ring source is bound BEFORE the retention, because binding
+ * drains the ring and a depth set first would be applied to a ring about to be emptied anyway;
+ * either order is correct, this one does the drain once.
  */
-void graph_t::set_ring_source(vertex_handle_t v, mem::block_source_t* src, bool reliable) {
-    v.get()->set_ring_source(src, reliable);
+void graph_t::apply_policy(vertex_t* vx, vertex_policy_t&& policy) {
+    const role_t role = vx->role();
+    if (vx->ring_source() != policy.ring_source || vx->ring_reliable() != policy.ring_reliable)
+        vx->set_ring_source(policy.ring_source, policy.ring_reliable);
+    // A HANDLER is NONE by role and carries no bit for it.
+    if (role != role_t::HANDLER) {
+        const retention_t r = policy.retention.value_or(default_retention(role));
+        const bool depth_moves = r == retention_t::N && vx->retention_depth() != policy.depth;
+        if (r != vx->retention() || depth_moves) vx->set_retention(r, policy.depth);
+    }
+    const std::size_t threshold =
+        policy.share_threshold_bytes >= UINT32_MAX ? SIZE_MAX : policy.share_threshold_bytes;
+    if (vx->share_threshold_bytes() != threshold)
+        vx->set_share_threshold_bytes(policy.share_threshold_bytes);
+    if (vx->delivery_mode() != policy.delivery_mode) apply_delivery_mode(vx, policy.delivery_mode);
+    // Owner-facing declaration (RFC-0010 §A.2) — a local host API, so no ACL gate. A borrowed
+    // table already installed is the same declaration and keeps its stored values.
+    const app_fields_decl_t& fields = policy.app_fields;
+    if (fields.is_borrowed()) {
+        const std::span<const app_field_slot_t> want = fields.borrowed().slots();
+        const std::span<const app_field_slot_t> have = vx->app_field_slots();
+        if (have.data() != want.data() || have.size() != want.size())
+            vx->set_app_fields_static(fields.borrowed());
+    } else if (!fields.owned().empty()) {
+        vx->set_app_fields(std::move(policy.app_fields).owned());  // moved, never copied
+    } else if (!vx->app_field_slots().empty()) {
+        vx->set_app_fields({});  // uninstall: back to the closed ENOTTY surface
+    }
 }
 
 /** @brief Bytes the receiver ring currently holds reserved — the byte bound's observable. */
@@ -1875,14 +1930,6 @@ result_t<std::uint64_t> graph_t::stream_gaps(vertex_handle_t v) const {
     vertex_t* const vx = v.get();
     if (vx->role() != role_t::STREAM) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
     return vx->ring_gap_count();
-}
-
-void graph_t::set_share_threshold_bytes(vertex_handle_t v, std::size_t bytes) {
-    v.get()->set_share_threshold_bytes(bytes);
-}
-
-void graph_t::configure_subject_resolver(subject_resolver_fn_t fn, void* ctx) noexcept {
-    subject_resolver_.set(fn, ctx);
 }
 
 bool graph_t::acl_allows(vertex_t* v, std::string_view caller, acl_right_t right) const {
@@ -3069,8 +3116,7 @@ void graph_t::clear_pending(vertex_t* v, const value_t* delivered) {
     if (pending_.erase(key) != 0) pending_count_.fetch_sub(1, std::memory_order_relaxed);
 }
 
-void graph_t::set_delivery_mode(vertex_handle_t vh, delivery_mode_t mode) {
-    vertex_t* v = vh.get();
+void graph_t::apply_delivery_mode(vertex_t* v, delivery_mode_t mode) {
     const std::vector<std::byte> key = build_key(v);
     const std::lock_guard lock(sweep_mutex_);
     v->set_delivery_mode(mode);
@@ -3383,10 +3429,6 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
     return subscription_t{v, idx};
 }
 
-void graph_t::configure_subscription_observer(sub_observer_fn_t fn, void* ctx) noexcept {
-    subscription_observer_.set(fn, ctx);
-}
-
 void graph_t::notify_subscription(sub_event_t::kind_t kind, const vertex_t* v,
                                   std::string_view caller, const view_t& sub_tlv,
                                   std::size_t slot) const {
@@ -3524,29 +3566,25 @@ std::uint64_t graph_t::deferred_release_drops() noexcept {
     return g_deferred_release_drops.load(std::memory_order_relaxed) + qsbr_drops();
 }
 
-void graph_t::set_app_fields(vertex_handle_t v, std::vector<app_field_t> table) {
-    // Owner-facing declaration (RFC-0010 §A.2) — a local host API like register_vertex,
-    // so no ACL gate: the owner is updating its own projection. The vertex verb replaces
-    // the table atomically with respect to concurrent field operations.
-    v.get()->set_app_fields(std::move(table));
+void graph_t::set_hooks(const graph_hooks_t& hooks) noexcept {
+    subject_resolver_.set(hooks.subject_resolver.fn, hooks.subject_resolver.ctx);
+    subscription_observer_.set(hooks.subscription_observer.fn, hooks.subscription_observer.ctx);
+    remote_sink_.set(hooks.remote_delivery.fn, hooks.remote_delivery.ctx);
+    wire_target_.set(hooks.wire_target.fn, hooks.wire_target.ctx);
+    stats_sampler_.set(hooks.stats_sampler.fn, hooks.stats_sampler.ctx);
 }
 
-void graph_t::set_app_fields_static(vertex_handle_t v, borrowed_fields_t table) {
-    // Borrowed-declaration install (ADR-0058): same owner-facing, no-ACL-gate semantics as
-    // set_app_fields; the vertex verb stores views into the caller's static storage.
-    v.get()->set_app_fields_static(table);
-}
-
-void graph_t::configure_remote_delivery_sink(remote_delivery_fn_t fn, void* ctx) noexcept {
-    remote_sink_.set(fn, ctx);
-}
-
-void graph_t::configure_wire_target_resolver(wire_target_fn_t fn, void* ctx) noexcept {
-    wire_target_.set(fn, ctx);
-}
-
-void graph_t::configure_stats_sampler(stats_sampler_fn_t fn, void* ctx) noexcept {
-    stats_sampler_.set(fn, ctx);
+graph_hooks_t graph_t::hooks() const noexcept {
+    const auto sr = subject_resolver_.get();
+    const auto so = subscription_observer_.get();
+    const auto rd = remote_sink_.get();
+    const auto wt = wire_target_.get();
+    const auto ss = stats_sampler_.get();
+    return graph_hooks_t{.subject_resolver = {sr.fn, sr.ctx},
+                         .subscription_observer = {so.fn, so.ctx},
+                         .remote_delivery = {rd.fn, rd.ctx},
+                         .wire_target = {wt.fn, wt.ctx},
+                         .stats_sampler = {ss.fn, ss.ctx}};
 }
 
 bool graph_t::sample_stats(std::string_view seam_class, std::string_view seam_name,

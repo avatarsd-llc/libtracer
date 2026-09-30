@@ -1205,22 +1205,20 @@ struct httpd_ws_link_t::close_req_t {
     session_ref_t to;       /**< @brief The session to close, identified as (slot, gen). */
 };
 
-httpd_ws_link_t::httpd_ws_link_t(std::uint16_t bind_port, std::size_t max_peers, bool peer_named,
-                                 std::uint32_t send_timeout_ms, std::uint32_t auth_deadline_ms,
-                                 std::size_t rx_scratch_bytes, std::size_t tx_pool_slots,
-                                 std::size_t tx_inline_bytes, std::size_t tx_large_bytes,
-                                 std::size_t tx_large_slots, mem::mem_backend_t* rx_backend)
+httpd_ws_link_t::httpd_ws_link_t(std::uint16_t bind_port, const httpd_ws_config_t& config)
     : port_(bind_port),
-      max_peers_(max_peers),
-      auth_deadline_us_(resolve_auth_deadline_us(auth_deadline_ms)),
-      peer_named_(peer_named),
-      rx_backend_(rx_backend),
-      rx_scratch_bytes_(resolve_size(rx_scratch_bytes, kDefaultRxScratchBytes)),
-      tx_inline_bytes_(resolve_size(tx_inline_bytes, kDefaultTxInlineBytes)),
-      tx_pool_slots_(resolve_size(tx_pool_slots, kDefaultTxPoolSlots)),
+      max_peers_(config.max_peers),
+      auth_deadline_us_(resolve_auth_deadline_us(config.auth_deadline_ms)),
+      peer_named_(config.peer_named),
+      rx_backend_(config.memory.rx),
+      rx_scratch_bytes_(resolve_size(config.rx_scratch_bytes, kDefaultRxScratchBytes)),
+      tx_inline_bytes_(resolve_size(config.tx_inline_bytes, kDefaultTxInlineBytes)),
+      tx_pool_slots_(resolve_size(config.tx_pool_slots, kDefaultTxPoolSlots)),
       tx_slots_total_(tx_pool_slots_ + kTxReplySlots),
-      tx_large_bytes_(tx_large_bytes),
-      tx_large_slots_(tx_large_slots) {
+      tx_large_bytes_(config.tx_large.bytes),
+      tx_large_slots_(config.tx_large.slots) {
+    const std::size_t max_peers = config.max_peers;
+    const std::uint32_t send_timeout_ms = config.send_timeout_ms;
     if (!open_gate()) return;  // ok() stays false; nothing was registered
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port = bind_port;
@@ -1278,21 +1276,19 @@ httpd_ws_link_t::httpd_ws_link_t(std::uint16_t bind_port, std::size_t max_peers,
 }
 
 httpd_ws_link_t::httpd_ws_link_t(httpd_handle_t external, const char* uri_pattern,
-                                 std::size_t max_peers, bool peer_named,
-                                 std::uint32_t send_timeout_ms, std::uint32_t auth_deadline_ms,
-                                 std::size_t rx_scratch_bytes, std::size_t tx_pool_slots,
-                                 std::size_t tx_inline_bytes, std::size_t tx_large_bytes,
-                                 std::size_t tx_large_slots, mem::mem_backend_t* rx_backend)
-    : max_peers_(max_peers),
-      auth_deadline_us_(resolve_auth_deadline_us(auth_deadline_ms)),
-      peer_named_(peer_named),
-      rx_backend_(rx_backend),
-      rx_scratch_bytes_(resolve_size(rx_scratch_bytes, kDefaultRxScratchBytes)),
-      tx_inline_bytes_(resolve_size(tx_inline_bytes, kDefaultTxInlineBytes)),
-      tx_pool_slots_(resolve_size(tx_pool_slots, kDefaultTxPoolSlots)),
+                                 const httpd_ws_config_t& config)
+    : max_peers_(config.max_peers),
+      auth_deadline_us_(resolve_auth_deadline_us(config.auth_deadline_ms)),
+      peer_named_(config.peer_named),
+      rx_backend_(config.memory.rx),
+      rx_scratch_bytes_(resolve_size(config.rx_scratch_bytes, kDefaultRxScratchBytes)),
+      tx_inline_bytes_(resolve_size(config.tx_inline_bytes, kDefaultTxInlineBytes)),
+      tx_pool_slots_(resolve_size(config.tx_pool_slots, kDefaultTxPoolSlots)),
       tx_slots_total_(tx_pool_slots_ + kTxReplySlots),
-      tx_large_bytes_(tx_large_bytes),
-      tx_large_slots_(tx_large_slots) {
+      tx_large_bytes_(config.tx_large.bytes),
+      tx_large_slots_(config.tx_large.slots) {
+    const std::size_t max_peers = config.max_peers;
+    const std::uint32_t send_timeout_ms = config.send_timeout_ms;
     if (!open_gate()) return;  // ok() stays false; nothing was registered
     // The adopted server's httpd_config_t belongs to the caller and esp_http_server
     // exposes no reader for it, so the clamp uses IDF's default send_wait_timeout — the

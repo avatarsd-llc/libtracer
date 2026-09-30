@@ -226,7 +226,11 @@ bool denied(const tr::graph::result_t<T>& r) {
 void test_cache_invalidation() {
     std::printf("cached merge — a :acl write re-marks the WRITTEN vertex's subtree:\n");
     graph_t g;
-    g.configure_subject_resolver(caller_is_subject, nullptr);
+    {
+        auto hooks = g.hooks();
+        hooks.subject_resolver = {caller_is_subject, nullptr};
+        g.set_hooks(hooks);
+    }
     (void)g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
     (void)g.register_vertex(path_t("/dev/temp"), role_t::STORED_VALUE);
     vertex_handle_t leaf = g.register_vertex(path_t("/dev/temp/raw"), role_t::STORED_VALUE);
@@ -269,7 +273,11 @@ void test_cache_invalidation() {
 void test_placeholder_and_new_vertices() {
     std::printf("cached merge — placeholders contribute nothing; newborns start stale:\n");
     graph_t g;
-    g.configure_subject_resolver(caller_is_subject, nullptr);
+    {
+        auto hooks = g.hooks();
+        hooks.subject_resolver = {caller_is_subject, nullptr};
+        g.set_hooks(hooks);
+    }
     (void)g.register_vertex(path_t("/a"), role_t::STORED_VALUE);
     // /a/b is a PLACEHOLDER (never registered); /a/b/c is real.
     vertex_handle_t c = g.register_vertex(path_t("/a/b/c"), role_t::STORED_VALUE);
@@ -294,7 +302,11 @@ void test_placeholder_and_new_vertices() {
 void test_concurrent_rewrite_race() {
     std::printf("cache-coherence protocol — concurrent :acl rewrites vs gated reads:\n");
     graph_t g;
-    g.configure_subject_resolver(caller_is_subject, nullptr);
+    {
+        auto hooks = g.hooks();
+        hooks.subject_resolver = {caller_is_subject, nullptr};
+        g.set_hooks(hooks);
+    }
     (void)g.register_vertex(path_t("/r"), role_t::STORED_VALUE);
     (void)g.register_vertex(path_t("/r/m"), role_t::STORED_VALUE);
     vertex_handle_t leaf = g.register_vertex(path_t("/r/m/leaf"), role_t::STORED_VALUE);
@@ -362,7 +374,11 @@ void test_concurrent_rewrite_stale_publish() {
     std::uint64_t bad = 0;
     for (int round = 0; round < kRounds; ++round) {
         graph_t g;
-        g.configure_subject_resolver(caller_is_subject, nullptr);
+        {
+            auto hooks = g.hooks();
+            hooks.subject_resolver = {caller_is_subject, nullptr};
+            g.set_hooks(hooks);
+        }
         (void)g.register_vertex(path_t("/r"), role_t::STORED_VALUE);
         (void)g.register_vertex(path_t("/r/m"), role_t::STORED_VALUE);
         vertex_handle_t leaf = g.register_vertex(path_t("/r/m/leaf"), role_t::STORED_VALUE);

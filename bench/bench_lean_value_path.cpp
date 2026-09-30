@@ -210,7 +210,7 @@ void run_local_none(std::size_t size, std::size_t k) {
     graph_t g;
     const path_t src = *path_t::parse("/bench/src");
     const vertex_handle_t v = g.register_vertex(src, role_t::STORED_VALUE);
-    if (!g.set_retention(v, tr::graph::retention_t::NONE))
+    if (!g.set_policy(v, {.retention = tr::graph::retention_t::NONE}))
         std::fprintf(stderr, "local-none: NONE refused\n");
     std::atomic<std::uint64_t> recv{0};
     for (std::size_t i = 0; i < k; ++i) (void)g.subscribe(src, &callback_sink, &recv);

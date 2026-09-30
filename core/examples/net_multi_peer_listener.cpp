@@ -188,8 +188,8 @@ int main() {
     // request of 0 takes the liveness window's own ceiling), so the value the server ENFORCES
     // is read back rather than assumed to be what was asked for.
     constexpr std::size_t kRequestedPeers = 4;
-    tr::net::transport_tcp_server server(std::uint16_t{0}, &tr::mem::heap_backend(),
-                                         /*max_frame=*/0, kRequestedPeers, /*peer_named=*/true);
+    tr::net::transport_tcp_server server(std::uint16_t{0},
+                                         {.max_peers = kRequestedPeers, .peer_named = true});
     check(ok, server.ok(), "the multi-peer listener bound an ephemeral port");
     check(ok, server.max_peers() == kRequestedPeers, "the admission cap is the one requested");
     check(ok, server.bus() != nullptr, "peer_named=true exposes the bus facet");

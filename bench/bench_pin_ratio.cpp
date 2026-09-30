@@ -9,7 +9,7 @@
  *
  * RFC-0022 §6 measured §3.D's pin ratio here and Amendment 2 kept it off by default; RFC-0028
  * D3 then replaced the ratio with an absolute copy-or-share threshold
- * (`graph_t::set_share_threshold_bytes`, default `config_t::kShareThresholdBytes`), because the
+ * (`vertex_policy_t::share_threshold_bytes`, default `config_t::kShareThresholdBytes`), because the
  * variable this grid showed to matter is the absolute payload size. The arms are now
  * thresholds. This is the host half's store-leg microbench; `bench_pin_net` is the two-process
  * delivery-counted half.
@@ -51,7 +51,7 @@
  *
  * Arms B (copy-always), C (share-always, threshold 0) and T<n> (the threshold sweep) therefore
  * all live in this one process and rotate per round. The threshold reaches the decision site
- * through the owner-declared per-vertex `graph_t::set_share_threshold_bytes`.
+ * through the owner-declared per-vertex `vertex_policy_t::share_threshold_bytes`.
  *
  * Usage:
  *   bench_pin_ratio --rounds=N [--arms=B,C,T64,T256,T1024,T4096] [--calibrate] [--round0=i]
@@ -193,7 +193,8 @@ cell_result_t run_cell(std::size_t payload_bytes, std::size_t segment_bytes, std
     op_resolver_t resolver(g);
     const tr::graph::vertex_handle_t v =
         g.register_vertex(path_t("/sensor/blob"), role_t::STORED_VALUE);
-    g.set_share_threshold_bytes(v, threshold);  // the arm's threshold, owner-declared
+    (void)g.set_policy(
+        v, {.share_threshold_bytes = threshold});  // the arm's threshold, owner-declared
 
     const std::vector<std::byte> frame = b_fwd_write(b_value(payload_bytes, crc));
     const std::size_t seg_bytes = std::max(segment_bytes, frame.size());

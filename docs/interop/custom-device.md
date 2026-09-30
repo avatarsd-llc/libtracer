@@ -90,7 +90,7 @@ static constexpr std::array<tr::graph::app_field_static_t, 1> kLevelFields{{
     {"ramp_ms",                 tr::graph::app_access_t::RW,  tr::graph::retention_t::LAST,  kRampDesc},
 }};
 
-graph.set_app_fields_static(level_vertex, kLevelFields);
+(void)graph.set_policy(level_vertex, {.app_fields = kLevelFields});
 ```
 
 A descriptor is a structured TLV the runtime never parses. Its vocabulary —
@@ -110,7 +110,7 @@ takes and rejects a `std::vector`, so the usual way to get this wrong is a compi
 error rather than a use-after-free. A table whose size is only known at run time
 needs storage you keep alive yourself, installed via
 `tr::graph::borrowed_fields_t::unchecked(...)`; if you would rather the runtime own
-a copy, use the owning `set_app_fields` instead.
+a copy, use the owning `vertex_policy_t::app_fields` instead.
 
 ---
 
@@ -139,12 +139,12 @@ none — and remains a conforming node that any forwarder routes and any peer re
 
 Creation is not a new verb. It is an **append of a `SPEC` TLV to a parent's
 `:children[]` field**, gated by that parent's `CREATE` right
-(`core/src/graph.cpp:3853-3857`;
+(`core/src/graph.cpp:3891-3895`;
 [ADR-0020 — NFSv4-style ACEs with inheritance](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0020-acl-nfsv4-style-aces-with-inheritance.md)).
 The SPEC's `type` member names one of the device's registered child types and its
 optional `config` SETTINGS carries the instantiation parameters; an unregistered
 `type` answers `SCHEMA_NOT_FOUND`, the `ENOTTY` of an unsupported field
-(`graph_t::create_child`, `core/src/graph.cpp:3927-3954`). Reading `:children[]`
+(`graph_t::create_child`, `core/src/graph.cpp:3965-3992`). Reading `:children[]`
 returns the parent's **members**, never SPECs.
 
 **The `/net` plane is the exception, and it is now a different door.** A connection is
@@ -172,7 +172,7 @@ registered types, and `:children[]` as an enumeration is untouched on every plan
 
 Removal has no wire spelling on the `:children[]` surface: a `[N]` clear of `:children[]` is
 not implemented, and `graph_t::retire` is an owner-side call with no wire operation
-behind it (`core/include/libtracer/graph.hpp:727-731`). A connection is the exception:
+behind it (`core/include/libtracer/graph.hpp:905-909`). A connection is the exception:
 `NAME{<name>}` to its module's `conn` endpoint retires it, the other half of that one
 control. Retirement empties the
 vertex in place rather than freeing it — the handle stays dereferenceable and a

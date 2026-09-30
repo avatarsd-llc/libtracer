@@ -115,6 +115,154 @@ struct router_stats_t {
 };
 
 /**
+ * @brief The router's allocation planes as ONE aggregate (RFC-0028 §8.2, slice 10) — what
+ *        `fwd_router_t`'s constructor takes in place of six positional, defaulted seams.
+ *
+ * Every member defaults to what an un-injected router always used (the process heap), so
+ * `router_planes_t{}` is the unbounded host router and a bounded node names only the planes
+ * it points at its own slab:
+ *
+ * @code
+ * tr::net::fwd_router_t router{graph, {.label_src = &labels, .rx = &rx_pool,
+ *                                      .flat = &flat_pool, .egress = &flat_pool}};
+ * @endcode
+ *
+ * Every plane must outlive the router, and every injected one must be thread-safe (several
+ * transport receive threads reach them concurrently). Since slice 10 a `mem_backend_t` IS a
+ * `block_source_t`, so one synchronized pool can serve a source plane and a backend plane.
+ */
+struct router_planes_t {
+    /**
+     * @brief The nothrow source the `route_handle` LABEL TABLES draw from (#603 defect 1 / #873
+     * family 3, ADR-0065 / ADR-0079 §Decision 4) — the library holds no buffer of its own. A
+     * bounded node injects a @ref mem::pool_source_t over its static slab (one slab, whole stack —
+     * ADR-0039 §2); the default is the process-wide nothrow platform heap. Must outlive the router,
+     * and must be thread-safe: the label tables are written from `on_advertise`, which runs on a
+     * transport RECEIVE thread and is driven entirely by a remote peer.
+     *
+     * This plane used to be a `%std::pmr::memory_resource*`. It could not stay one: a pmr
+     * resource cannot report exhaustion by value, so on the shipping `-fno-exceptions` profile a
+     * peer's ADVERTISE storm against an aborting `heap_resource_t` rebooted the node. A call site
+     * that passed its OWN resource — a node whose graph and router historically shared one pmr
+     * arena — migrates by pointing @ref mem::pool_source_t's SPAN CONSTRUCTOR at the same storage
+     * that resource was partitioning (#1493). It must NOT reach for the adapter that shape invites,
+     * a `block_source_t` wrapping the pmr resource: that wrapper's `try_alloc` cannot answer
+     * `nullptr`, so it reinstates the very abort this parameter change removed. @ref
+     * mem::block_source_t's warning carries the full reasoning, including why a budget-tracking
+     * variant is declined too. Split from @p rx deliberately (ADR-0079's per-plane default): @p rx
+     * is per-frame decode scratch and may legitimately be a `bump_source_t`, while label state is
+     * LONG-LIVED and would monotonically fill one.
+     */
+    mem::block_source_t* label_src = &mem::heap_source();
+
+    /**
+     * @brief The nothrow source the TERMINUS ARENA draws from (#588). Split from @p label_src
+     * because the arena is built from a peer's frame, on the RX path, behind no ACL: a
+     * `std::pmr::memory_resource` cannot report exhaustion by value, so on `-fno-exceptions` its
+     * only failure mode is `abort()`. Drawing the arena from a @ref mem::block_source_t instead
+     * makes an over-large frame a `TLV_NESTING_TOO_DEEP` refusal, counted as `arena_dropped` and
+     * answered with an addressed `STATUS{BACKPRESSURE}` that draws from no source at all (#1612).
+     * A bounded node points
+     * this at the same slab as @p label_src. Must outlive the router.
+     */
+    mem::block_source_t* rx = &mem::heap_source();
+
+    /**
+     * @brief The byte backend EVERY rope flatten on the router's forward AND terminus paths draws
+     * its owned `segment` from — the router's own four (#730): the ingress control-frame sub-rope
+     * flattens (`ADVERTISE` route, `COMPACT` payload), the cold bus-name rejection flatten, and
+     * the per-delivery `COMPACT` egress flatten; PLUS the terminus resolver's rope-tier flattens
+     * one call below `resolve_terminus_rope` (#766) — `view_node::ensure_cache` (the per-node
+     * contiguous span every `wire()`/`body()` read of a multi-link TLV materializes) and
+     * `view_node::own_wire` (the ADR-0053 ⑤ ownership flatten) — which the router reaches by
+     * passing this pointer straight to its @ref graph::op_resolver_t. Until #766 the terminus half
+     * drew from the global heap, so a fragmented request from a peer escaped the bound; the honest
+     * sentence now is that all rope flattens on the forward and terminus paths draw from the
+     * injected seam. Since #801 that sentence covers the SPAN-tier terminus too:
+     * `arena_node::own_wire`, the ADR-0041 §2 ownership copy a span-delivered request takes, is
+     * this backend's as well — so the MCU terminus (a synchronous CAN/UART child delivers spans,
+     * not ropes) no longer escapes the bound on its ordinary WRITE. Still NOT every allocation the
+     * router path makes: the reply head segment and the arena are their own injections (@p egress
+     * and @p rx) — the head drew from `view::heap_alloc`'s global heap until #795 gave it @p
+     * egress below, which is the reading #730 was filed about. Split from @p rx because these are
+     * BYTE buffers with cache hooks and an owning refcount (a @ref mem::mem_backend_t), not the
+     * arena's raw blocks — the same split `graph_t` makes between its `ctl` and its
+     * `value_backend` (ADR-0060). Until #730 all of them took @ref mem::heap_backend by default,
+     * so a bounded node's memory bound did NOT cover them; now a node that points this at its own
+     * slab bounds them all, and every flatten failure is answered by value — the forward-path
+     * frame is dropped (never stored empty), and a refused terminus flatten answers an addressed
+     * `kind=ERROR STATUS{BACKPRESSURE}` reply (or, when the refusal hit the reply's own route
+     * bytes, a drop).
+     *
+     * An injected @p flat MUST be thread-safe, with the same force `graph_t` requires of its
+     * `value_backend` (ADR-0060 §2) — and for the same two reasons, both of which hold here. Three
+     * of the four sites run on a transport child's RECEIVE thread and several children receive
+     * concurrently; the fourth runs on the WRITER thread inside the remote-delivery fan-out. And
+     * the `segment` this backend hands out self-routes its reclaim on whichever thread drops the
+     * last reference, which is not in general the thread that allocated it. The default
+     * `heap_backend()` already is thread-safe. A bare @ref mem::pool_t is NOT — its free list is a
+     * plain `std::size_t` head and count with no lock and no atomic, so two receive threads can be
+     * handed the same slot — and must be composed with the target's arch-selected synchronisation
+     * before injection: `mem::synchronized_pool_t<>` guards it with the build's one reader
+     * guard — the host `mutex_guard_t`, or `tr::esp::critical_pool_t`'s interrupt-masked
+     * `critical_guard_t` on an MCU. A bounded node points this at the same slab as @p label_src /
+     * @p rx only through such a composition. Must outlive the router.
+     */
+    mem::mem_backend_t* flat = &mem::heap_backend();
+
+    /**
+     * @brief Ceiling on one link's ingress table and, separately, its egress table (#603). `0` ⇒
+     * unbounded, the default and the prior behavior. Without it the tables are peer-driven and
+     * grow to the whole 16-bit label space — megabytes per link on a 16 KB node. A full table
+     * refuses NEW flows, which then deliver over the full-route `FWD{WRITE}` form; established
+     * flows are untouched. See @ref route_handle_t::refused_bindings for the counter.
+     */
+    std::size_t max_label_bindings_per_link = 0;
+
+    /**
+     * @brief The byte backend the terminus REPLY's egress-construction segments draw from (#795,
+     * ADR-0074): the reply head (peer-driven size — the swapped route bytes plus the inline tail)
+     * and, on a mint, the trailing 12-byte `PATH_REF`. It is the last *reply-egress* byte source
+     * that escaped a bounded node's slab (both folded READs' POINT headers — the composed root's
+     * and the `":children"` listing's — are payload framing and draw from the graph's own
+     * `value_backend` seam instead: #831, closed) — the head was hard-wired to
+     * `view::heap_alloc`'s global heap, one allocation on every reply, peer-drivable and pre-auth
+     * reachable (the denied path builds a head too). A DEDICATED injection, deliberately NOT
+     * folded into @p flat: @p flat is documented and sized against FLATTEN (payload) bytes, and a
+     * reply head is egress construction sized against ROUTE bytes, so widening @p flat's contract
+     * would silently re-scope a slab deployments already set for flattens (a node could begin
+     * refusing replies it used to send). Passed straight to the @ref graph::op_resolver_t.
+     * The default is the global heap; only a bounded node that points it at its slab gets the
+     * bound. A refusal degrades
+     * through the same empty-rope → `or_backpressure` → addressed `STATUS{BACKPRESSURE}` path OOM
+     * already takes — answered by value, never an abort. MUST be thread-safe on the same terms as
+     * @p flat. Must outlive the router.
+     */
+    mem::mem_backend_t* egress = &mem::heap_backend();
+
+    /**
+     * @brief The backend for the two allocations a REMOTE SUBSCRIBE keeps for the LIFE OF THE
+     * SUBSCRIPTION — the source `SUBSCRIBER` TLV and "the ONE route copy of the subscription's
+     * life" (ADR-0041 §2). A DEDICATED injection for the reason @p egress is one: @p flat is
+     * documented and sized against per-operation FLATTEN bytes, and these are neither per-
+     * operation nor flattens. Their live set is the SUBSCRIPTION POPULATION, so a host that size-
+     * classes @p flat finds the classes filled by a set that never returns and has nothing left
+     * for the churn they were cut for — the classes stop working exactly when a client is
+     * attached, which is the only time they are needed.
+     *
+     * DEFAULTS TO NULL, meaning "@p flat" — where both have always been taken. An un-injected
+     * router is byte-for-byte unchanged, so this costs nothing to ignore. A host that injects it
+     * can send these to a plain heap arm: one alloc and one free per subscription is not churn and
+     * wants no class.
+     *
+     * Sized against the subscription population, NOT a concurrency factor. Exhaustion is answered
+     * by value — a `BACKPRESSURE` on the subscribe, which simply does not bind. MUST be thread-
+     * safe on the same terms as @p flat. Must outlive the router.
+     */
+    mem::mem_backend_t* retained = nullptr;
+};
+
+/**
  * @brief A stateless hop-by-hop FWD forwarder (RFC-0004 §A/§B, ADR-0035 slice 3).
  *
  * Wires a local @ref graph::graph_t (terminus op resolution, via an internal
@@ -134,177 +282,31 @@ class fwd_router_t {
      * use — the same lifetime the held `graph_` reference already requires.
      *
      * @param graph The node's local graph.
-     * @param label_src
-     *              The nothrow source the `route_handle` LABEL TABLES draw from (#603
-     *              defect 1 / #873 family 3, ADR-0065 / ADR-0079 §Decision 4) — the library
-     *              holds no buffer of its own. A bounded node injects a
-     *              @ref mem::pool_source_t over its static slab (one slab, whole stack —
-     *              ADR-0039 §2); the default is the process-wide nothrow platform heap.
-     *              Must outlive the router, and must be thread-safe: the label tables are
-     *              written from `on_advertise`, which runs on a transport RECEIVE thread and
-     *              is driven entirely by a remote peer.
-     *
-     *              This parameter used to be a `%std::pmr::memory_resource*`. It could not
-     *              stay one: a pmr resource cannot report exhaustion by value, so on the
-     *              shipping `-fno-exceptions` profile a peer's ADVERTISE storm against an
-     *              aborting `heap_resource_t` rebooted the node. Kept in the SAME position
-     *              rather than appended, because feeding the label tables was its only job —
-     *              a call site that passed `%std::pmr::get_default_resource()` now passes
-     *              nothing (or its own source) and gets a compile error rather than a silent
-     *              re-route. A call site that passed its OWN resource — a node whose graph
-     *              and router historically shared one pmr arena — migrates by pointing
-     *              @ref mem::pool_source_t's SPAN CONSTRUCTOR at the same storage that
-     *              resource was partitioning (#1493). It must NOT reach for the adapter
-     *              that shape invites, a `block_source_t` wrapping the pmr resource: that
-     *              wrapper's `try_alloc` cannot answer `nullptr`, so it reinstates the very
-     *              abort this parameter change removed. @ref mem::block_source_t's warning
-     *              carries the full reasoning, including why a budget-tracking variant is
-     *              declined too. Split from @p rx deliberately (ADR-0079's per-plane default):
-     *              @p rx is per-frame decode scratch and may legitimately be a
-     *              `bump_source_t`, while label state is LONG-LIVED and would monotonically
-     *              fill one.
-     * @param rx    The nothrow source the TERMINUS ARENA draws from (#588). Split from
-     *              @p label_src because the arena is built from a peer's frame, on the RX
-     *              path, behind no ACL: a `std::pmr::memory_resource` cannot report
-     *              exhaustion by value, so on `-fno-exceptions` its only failure mode
-     *              is `abort()`. Drawing the arena from a @ref mem::block_source_t
-     *              instead makes an over-large frame a `TLV_NESTING_TOO_DEEP` refusal, counted
-     *              as `arena_dropped` and answered with an addressed `STATUS{BACKPRESSURE}`
-     *              that draws from no source at all (#1612).
-     *              Appended with a default, so every existing call site is unchanged;
-     *              a bounded node points this at the same slab as @p label_src. Must outlive
-     *              the router.
-     * @param flat  The byte backend EVERY rope flatten on the router's forward AND terminus
-     *              paths draws its owned `segment` from — the router's own four (#730): the
-     *              ingress control-frame sub-rope flattens (`ADVERTISE` route, `COMPACT`
-     *              payload), the cold bus-name rejection flatten, and the per-delivery
-     *              `COMPACT` egress flatten; PLUS the terminus resolver's rope-tier flattens
-     *              one call below `resolve_terminus_rope` (#766) — `view_node::ensure_cache`
-     *              (the per-node contiguous span every `wire()`/`body()` read of a multi-link
-     *              TLV materializes) and `view_node::own_wire` (the ADR-0053 ⑤ ownership
-     *              flatten) — which the router reaches by passing this pointer straight to
-     *              its @ref graph::op_resolver_t. Until #766 the terminus half drew from the
-     *              global heap, so a fragmented request from a peer escaped the bound; the
-     *              honest sentence now is that all rope flattens on the forward and terminus
-     *              paths draw from the injected seam. Since #801 that sentence covers the
-     *              SPAN-tier terminus too: `arena_node::own_wire`, the ADR-0041 §2 ownership
-     *              copy a span-delivered request takes, is this backend's as well — so the
-     *              MCU terminus (a synchronous CAN/UART child delivers spans, not ropes) no
-     *              longer escapes the bound on its ordinary WRITE. Still NOT every
-     *              allocation the router path makes: the reply head segment and the arena
-     *              are their own injections (@p egress and @p rx) — the head drew from
-     *              `view::heap_alloc`'s global heap until #795 gave it @p egress below, which
-     *              is the reading #730 was filed about.
-     *              Split from
-     *              @p rx because these are BYTE buffers with cache hooks and an owning
-     *              refcount (a @ref mem::mem_backend_t), not the arena's raw blocks —
-     *              the same split `graph_t` makes between its `ctl` and its
-     *              `value_backend` (ADR-0060). Until #730 all of them took
-     *              @ref mem::heap_backend by default, so a bounded node's memory bound
-     *              did NOT cover them; now a node that points this at its own slab
-     *              bounds them all, and every flatten failure is answered by value — the
-     *              forward-path frame is dropped (never stored empty), and a refused
-     *              terminus flatten answers an addressed `kind=ERROR STATUS{BACKPRESSURE}`
-     *              reply (or, when the refusal hit the reply's own route bytes, a drop).
-     *
-     *              An injected @p flat MUST be thread-safe, with the same force `graph_t`
-     *              requires of its `value_backend` (ADR-0060 §2) — and for the same two
-     *              reasons, both of which hold here. Three of the four sites run on a
-     *              transport child's RECEIVE thread and several children receive
-     *              concurrently; the fourth runs on the WRITER thread inside the
-     *              remote-delivery fan-out. And the `segment` this backend hands out
-     *              self-routes its reclaim on whichever thread drops the last reference,
-     *              which is not in general the thread that allocated it. The default
-     *              `heap_backend()` already is thread-safe. A bare @ref mem::pool_t is
-     *              NOT — its free list is a plain `std::size_t` head and count with no
-     *              lock and no atomic, so two receive threads can be handed the same slot
-     *              — and must be composed with the target's arch-selected
-     *              synchronisation before injection: `mem::synchronized_pool_t` takes it
-     *              as a compile-time policy — @ref mem::sync_pool_t is the multi-core
-     *              spinlock, `tr::esp::critical_pool_t` the MCU interrupt-disable one.
-     *              A bounded node points this at the same slab as @p label_src / @p rx only
-     *              through such a composition. Must outlive the router.
-     * @param max_label_bindings_per_link
-     *              Ceiling on one link's ingress table and, separately, its egress table
-     *              (#603). `0` ⇒ unbounded, the default and the prior behavior. Without it
-     *              the tables are peer-driven and grow to the whole 16-bit label space —
-     *              megabytes per link on a 16 KB node. A full table refuses NEW flows, which
-     *              then deliver over the full-route `FWD{WRITE}` form; established flows are
-     *              untouched. See @ref route_handle_t::refused_bindings for the counter.
-     * @param egress
-     *              The byte backend the terminus REPLY's egress-construction segments draw
-     *              from (#795, ADR-0074): the reply head (peer-driven size — the swapped route
-     *              bytes plus the inline tail) and, on a mint, the trailing 12-byte `PATH_REF`.
-     *              It is the last *reply-egress* byte source that escaped a bounded node's
-     *              slab (both folded READs' POINT headers — the composed root's and the
-     *              `":children"` listing's — are payload framing and draw from the graph's own
-     *              `value_backend` seam instead: #831, closed) — the
-     *              head was hard-wired to `view::heap_alloc`'s global heap, one allocation on
-     *              every reply, peer-drivable and pre-auth reachable (the denied path builds a
-     *              head too). A DEDICATED injection, deliberately NOT folded into @p flat: @p
-     *              flat is documented and sized against FLATTEN (payload) bytes, and a reply
-     *              head is egress construction sized against ROUTE bytes, so widening @p flat's
-     *              contract would silently re-scope a slab deployments already set for flattens
-     *              (a node could begin refusing replies it used to send). Passed straight to the
-     *              @ref graph::op_resolver_t. Appended with a default of the global heap, so
-     *              every existing call site is byte-unchanged and only a bounded node that points
-     *              it at its slab gets the bound. A refusal degrades through the same
-     *              empty-rope → `or_backpressure` → addressed `STATUS{BACKPRESSURE}` path OOM
-     *              already takes — answered by value, never an abort. MUST be thread-safe on the
-     *              same terms as @p flat. Must outlive the router.
-     * @param retained  The backend for the two allocations a REMOTE SUBSCRIBE keeps for the
-     *              LIFE OF THE SUBSCRIPTION — the source `SUBSCRIBER` TLV and "the ONE route
-     *              copy of the subscription's life" (ADR-0041 §2). A DEDICATED injection for
-     *              the reason @p egress is one: @p flat is documented and sized against
-     *              per-operation FLATTEN bytes, and these are neither per-operation nor
-     *              flattens. Their live set is the SUBSCRIPTION POPULATION, so a host that
-     *              size-classes @p flat finds the classes filled by a set that never returns
-     *              and has nothing left for the churn they were cut for — the classes stop
-     *              working exactly when a client is attached, which is the only time they
-     *              are needed.
-     *
-     *              DEFAULTS TO NULL, meaning "@p flat" — where both have always been taken.
-     *              An un-injected router is byte-for-byte unchanged, so this costs nothing
-     *              to ignore. A host that injects it can send these to a plain heap arm:
-     *              one alloc and one free per subscription is not churn and wants no class.
-     *
-     *              Sized against the subscription population, NOT a concurrency factor.
-     *              Exhaustion is answered by value — a `BACKPRESSURE` on the subscribe, which
-     *              simply does not bind. MUST be thread-safe on the same terms as @p flat.
-     *              Must outlive the router.
+     * @param planes The router's allocation planes (@ref router_planes_t); every member
+     *               defaults to the process heap. Each must outlive the router.
      */
-    explicit fwd_router_t(graph::graph_t& graph,
-                          mem::block_source_t* label_src = &mem::heap_source(),
-                          mem::block_source_t* rx = &mem::heap_source(),
-                          mem::mem_backend_t* flat = &mem::heap_backend(),
-                          std::size_t max_label_bindings_per_link = 0,
-                          mem::mem_backend_t* egress = &mem::heap_backend(),
-                          mem::mem_backend_t* retained = nullptr)
+    explicit fwd_router_t(graph::graph_t& graph, const router_planes_t& planes = {})
         : graph_(graph),
-          resolver_(graph, flat, egress, retained),  // the terminus tier draws flatten from
-                                                     // the SAME seam (#766), reply egress from
-                                                     // `egress` (#795), and subscription-scoped
-                                                     // retention from `retained` (#1610)
-          label_src_(label_src),
-          rx_(rx),
-          flat_(flat),
-          egress_(egress),
+          resolver_(graph, planes.flat, planes.egress,
+                    planes.retained),  // the terminus tier draws flatten from
+                                       // the SAME seam (#766), reply egress from
+                                       // `egress` (#795), and subscription-scoped
+                                       // retention from `retained` (#1610)
+          label_src_(planes.label_src),
+          rx_(planes.rx),
+          flat_(planes.flat),
+          egress_(planes.egress),
           // The NAME->link demux table's chunks are long-lived control state whose high-water
           // mark is the count of DISTINCT link names ever registered, so they take the LABEL
           // store rather than the per-frame `rx` one — which a `bump_source_t` may legitimately
           // be, and which would fill monotonically under them (#873 phase 1).
-          registry_(label_src != nullptr ? *label_src : mem::heap_source()),
-          handles_(label_src, max_label_bindings_per_link) {
+          registry_(planes.label_src != nullptr ? *planes.label_src : mem::heap_source()),
+          handles_(planes.label_src, planes.max_label_bindings_per_link) {
         // The captureless {fn, ctx} pair the ADR-0047 doctrine prescribes (#1049) — the same
         // shape as `on_reverse_ref` below. The graph publishes it through a `sink_slot_t`,
         // so `this` must outlive every write that can still reach the producer fan-out;
         // constructing a router against a graph that is ALREADY serving frames is
         // unsupported, which is what `configure_` in the verb's name says.
-        graph_.configure_remote_delivery_sink(
-            [](void* ctx, const graph::remote_delivery_t& sub, const graph::value_t& value) {
-                static_cast<fwd_router_t*>(ctx)->deliver_remote(sub, value);
-            },
-            this);
         // The responder's reverse-mint seam (RFC-0024 §7.1 amendment 1): the resolver's
         // remote-subscribe arm asks for THIS node's reference to the connection vertex a
         // mint-flagged subscribe arrived on — the transport plane's mapping, so it is
@@ -332,21 +334,33 @@ class fwd_router_t {
         // node is a mount question — the transport plane's, which L4 cannot name. Installed
         // here, through the same captureless {fn, ctx} pair, so a node that HAS a transport
         // plane resolves mount-path targets and one that does not cannot.
-        graph_.configure_wire_target_resolver(
+        // The graph's three TRANSPORT-PLANE seams, installed in one `set_hooks` (RFC-0028 §4.12)
+        // that keeps the application's two (subject resolver, subscription observer) as they
+        // were. Each is the captureless {fn, ctx} pair the ADR-0047 doctrine prescribes (#1049),
+        // published through a `sink_slot_t`, so `this` must outlive every write, wire subscribe
+        // and `:stats` read the graph can still serve; constructing a router against a graph
+        // that is ALREADY serving frames is unsupported.
+        //  - remote_delivery (#136): a write to a vertex with a remote subscriber fans out
+        //    over the subscriber's link.
+        //  - wire_target (RFC-0021, #491): a SUBSCRIBER's PATH child is an address in THIS
+        //    node's frame, so deciding whether it leaves the node is a mount question — the
+        //    transport plane's, which L4 cannot name.
+        //  - stats_sampler (RFC-0010 Amendment 2, #1503): the router / label-table / per-link
+        //    counters live on this side of the L4<->net-plane seam, so the router registers a
+        //    sampler UP rather than L4 reaching DOWN.
+        graph::graph_hooks_t hooks = graph_.hooks();
+        hooks.remote_delivery = {
+            [](void* ctx, const graph::remote_delivery_t& sub, const graph::value_t& value) {
+                static_cast<fwd_router_t*>(ctx)->deliver_remote(sub, value);
+            },
+            this};
+        hooks.wire_target = {
             [](void* ctx, std::span<const std::byte> key) -> graph::wire_target_split_t {
                 return static_cast<fwd_router_t*>(ctx)->split_subscriber_target(key);
             },
-            this);
-        // The `:stats` NET-PLANE seam sampler (RFC-0010 Amendment 2, #1503 residual) — the
-        // SIXTH {fn, ctx} pair installed here, and the one that points the other way: the
-        // graph answers the node-scoped census, but the router / label-table / per-link
-        // counters live on THIS side of the L4↔net-plane seam, so the router registers a
-        // sampler UP rather than L4 reaching DOWN. Same lifetime contract as the five above
-        // (`this` must outlive every read the graph can still serve), and same
-        // configure-before-frames-flow doctrine; a node with no router publishes no
-        // net-plane seam and answers `SCHEMA_NOT_FOUND`, which is what those spellings
-        // already answered before the amendment.
-        graph_.configure_stats_sampler(&fwd_router_t::stats_sampler_thunk, this);
+            this};
+        hooks.stats_sampler = {&fwd_router_t::stats_sampler_thunk, this};
+        graph_.set_hooks(hooks);
     }
 
     fwd_router_t(const fwd_router_t&) = delete;

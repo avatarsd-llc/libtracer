@@ -191,12 +191,8 @@ set(LIBTRACER_WIRE_EXAMPLES
 )
 
 # The view / ownership domain (#1383) — the L0/L1 substrate every other example stands on.
-# `view_sync_pool` is the ONE target here a build configuration can forbid: a target that sets
-# `tr::mem::kSpinWaitSafe = false` may not instantiate `sync_pool_t` at all. That is a C++ type
-# knob in `config_override.hpp` (ADR-0068), invisible to CMake, so there is deliberately no
-# exclusion for it here — the example puts its body in a template, follows the binding with
-# `if constexpr`, and SKIPS at run time. An example a binding does not apply to must never
-# break the build.
+# `view_sync_pool` binds `synchronized_pool_t<>` over the build's one reader guard, which never
+# pure-spins (RFC-0028 slice 10), so unlike before it is unconditional on every build.
 set(LIBTRACER_VIEW_EXAMPLES
     view_segment_refcount  # the refcounted segment; copy == clone; reclaim at the last drop
     view_subview           # the {owner, offset, length} window, narrowed without a copy

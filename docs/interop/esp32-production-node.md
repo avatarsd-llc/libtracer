@@ -82,7 +82,7 @@ one link carrying one compact flow — so the sizing above is a number to check 
 your own node rather than one to copy.
 
 Those all reach the ONE injection point of `graph_t`'s constructor
-(`core/include/libtracer/graph.hpp:609`): since
+(`core/include/libtracer/graph.hpp:792`): since
 [#873](https://github.com/avatarsd-llc/libtracer/issues/873) phase 1 the graph takes a single
 `tr::mem::block_source_t` and builds the pmr resource and the value backend over it internally,
 so a device recipe sizes one slab where it used to wire four arguments. Beside it are the
@@ -91,7 +91,7 @@ so a device recipe sizes one slab where it used to wire four arguments. Beside i
 failable `rx` source, the `flat` byte backend its rope flattens draw from, the
 `egress` byte backend the terminus reply head draws from, and the `retained`
 backend a remote SUBSCRIBE's two life-of-the-subscription allocations draw from
-(`core/include/libtracer/fwd_router.hpp:276-282`; `egress` is #795 / ADR-0074,
+(`core/include/libtracer/fwd_router.hpp:134-230`, the `router_planes_t` aggregate; `egress` is #795 / ADR-0074,
 `retained` is #1610 and defaults to `flat` when un-injected, and the
 `max_label_bindings_per_link` bound sits between `flat` and `egress`).
 Each is its own injection because each one's live set is governed by a different
@@ -119,14 +119,14 @@ and count with no lock and no atomic, so two threads can be handed the same slot
 stored value aliases onto an outbound frame.
 
 The synchronised pool this target needs **is built**:
-`synchronized_pool_t<Sync>` (`core/include/libtracer/mem_pool.hpp:194`) keeps `pool_t`'s
+`synchronized_pool_t<Sync>` (`core/include/libtracer/mem_pool.hpp:160`) keeps `pool_t`'s
 bounded slab and makes the critical section a compile-time policy, chosen as an
 [ADR-0047 — build-time closed module sets](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0047-build-time-closed-module-sets-compile-time-seams.md)
 §2 module-set trait, because the target knows its concurrency model at build time
 ([ADR-0068](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0068-build-configuration-is-plain-cpp-config-header.md)).
-`tr::mem::sync_pool_t` is the **spinlock** pairing — the multi-core host one, wrong here,
-where a lower-priority task holding the lock cannot run while a higher-priority task
-spins. **`tr::esp::critical_pool_t`** (`libtracer_esp/critical_pool.hpp`, shipped by the
+`tr::mem::synchronized_pool_t<>` over the HOST guard is the multi-core host pairing — wrong
+here, where a lower-priority task holding the lock cannot run while a higher-priority task
+waits on it. **`tr::esp::critical_pool_t`** (`libtracer_esp/critical_pool.hpp`, shipped by the
 ESP-IDF component because it needs FreeRTOS headers) is the interrupt-disable pairing
 ADR-0060 §2 names, and it is what a C6 injects — at the receive seam above, and at
 `value_backend` / `flat` if you want those bytes in the slab too. It is opt-in
@@ -138,7 +138,7 @@ handed unchanged to every endpoint, each endpoint allocates on its own receive t
 a delivered segment reclaims on whichever thread drops the last reference — a bare
 `pool_t` there is the identical race the two byte seams have. The bundled `full_node`
 example wires the synchronised pool through a per-target platform TU
-(`main/platform.hpp`'s `rx_backend()`: `critical_pool_t` on a chip, `sync_pool_t` on the
+(`main/platform.hpp`'s `rx_backend()`: `critical_pool_t` on a chip, `synchronized_pool_t<>` on the
 `linux` host target), which is the same recipe in the form an example that builds for two
 targets can take.
 :::
@@ -167,7 +167,7 @@ then refuses every frame. An 8 KiB bump source wired as a router's `rx`, decodin
 53-byte FWD, served **six frames and rejected the next 194**
 ([ADR-0067 — bounded recycling source](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0067-bounded-recycling-source-and-per-owner-topology.md)
 §1; the same figure is carried on the type at
-`core/include/libtracer/mem_source.hpp:353-354`). A frames-served count without the
+`core/include/libtracer/mem_source.hpp:362-363`). A frames-served count without the
 payload size is not a measurement — 194 rejected 53-byte frames is a different fact
 from 194 rejected 1 KiB frames.
 
@@ -175,7 +175,7 @@ Use `tr::mem::pool_source_t`, which recycles.
 :::
 
 `pool_source_t` takes the slab **and** a caller-owned span of `size_class_t` slots
-(`core/include/libtracer/mem_source.hpp:558`), so both bounds belong to the caller
+(`core/include/libtracer/mem_source.hpp:567`), so both bounds belong to the caller
 rather than to the library
 ([RFC-0006 — resource-bounded nesting depth](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0006-resource-bounded-nesting-depth.md)):
 
@@ -214,7 +214,7 @@ to `sync_none_t`, which compiles to nothing.
 :::
 
 After a soak run, `classes_used()` says how many slots the node really needed and
-`overflowed()` must read zero (`core/include/libtracer/mem_source.hpp:620,631`) — a
+`overflowed()` must read zero (`core/include/libtracer/mem_source.hpp:629,640`) — a
 non-zero count means the class span is too small and blocks are being lost to the
 slab.
 
@@ -235,8 +235,8 @@ Rules that follow:
   [failable allocation and backpressure](../design/allocation-and-backpressure.md).
 - **Size the pool from the transport, not from hope.** `udp_transport_t` sizes RX
   segments to `min(64 KiB, backend->max_segment_size())`
-  (`core/src/transport_udp.cpp:145`; `kMaxDatagram = 65536` at
-  `core/include/libtracer/transport_udp.hpp:66`). Give the pool MTU-sized slots and
+  (`core/src/transport_udp.cpp:146`; `kMaxDatagram = 65536` at
+  `core/include/libtracer/transport_udp.hpp:89`). Give the pool MTU-sized slots and
   datagrams arrive without a 64 KiB scratch buffer on a small thread stack.
 
 ## 2. Role composition and the transport RAM lever
@@ -294,8 +294,8 @@ replaces, not by shaving the core.
   mutable buffer libtracer links: `N * sizeof(vertex_stripe_t)` bytes of `.bss`
   reserved at link time, plus the same for the condvar table. Sixteen stripes suit a
   multi-core host — that is the default (`kVertexLockStripes = 16`,
-  `core/include/libtracer/config.hpp:104`) — while a single-core chip reclaims RAM at
-  **4–8** (`config.hpp:94`). A stripe's platform mutex is lazy: on FreeRTOS it
+  `core/include/libtracer/config.hpp:95`) — while a single-core chip reclaims RAM at
+  **4–8** (`config.hpp:85`). A stripe's platform mutex is lazy: on FreeRTOS it
   costs ~90 B of heap on its first lock, so an untouched stripe costs its struct and
   no heap.
 - **Pin task priorities deliberately**: transport RX threads just below the
@@ -365,8 +365,8 @@ itself, described via `:schema` like any other data
 ```
 
 The backpressure counters come from `graph_t::delivery_drops()`
-(`core/include/libtracer/graph.hpp:2480`), which snapshots four per-cause totals —
-`no_target`, `denied`, `out_of_memory`, `fan_out_truncated` (`graph.hpp:2480-2502`). Each
+(`core/include/libtracer/graph.hpp:2419`), which snapshots four per-cause totals —
+`no_target`, `denied`, `out_of_memory`, `fan_out_truncated` (`graph.hpp:2419-2457`). Each
 counts shed **deliveries**, not events, so a fan-out shed whole under memory pressure moves
 them by its width. `denied` counts an `:acl` refusal on every plane — a local API write, a
 `FWD{WRITE}` terminus, a `COMPACT` terminus and a subscription edge alike (#1068) — so on a

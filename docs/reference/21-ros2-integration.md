@@ -154,13 +154,13 @@ target lives on the *consumer's* node
 [CONTEXT.md](../../CONTEXT.md) §SUBSCRIBER direction). Fan-in resolves by the **target's** role —
 overwrite for a stored value, **append for a stream** — so a consumer that declares its target
 STREAM gets its own bounded history ring, trimmed to a depth its own application declares through
-its own `graph_t::set_retention`: *"Role 2: the CONSUMER's bounded history ring"*
-(`core/include/libtracer/vertex.hpp:252`). Each reader does get its own queue, sized by the reader
-— in BYTES, against the source that reader injects through `graph_t::set_ring_source`
+its own `vertex_policy_t::retention`: *"Role 2: the CONSUMER's bounded history ring"*
+(`core/include/libtracer/vertex.hpp:255`). Each reader does get its own queue, sized by the reader
+— in BYTES, against the source that reader injects through `vertex_policy_t::ring_source`
 ([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.6.1).
 That ring is what `rmw_take` pops.
 
-What has no analogue is **negotiation**. `set_retention` has no wire surface and nothing is
+What has no analogue is **negotiation**. `vertex_policy_t::retention` has no wire surface and nothing is
 inherited
 ([RFC-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md)
 §3.C/§3.F), so each end declares its own retention and neither can read or constrain the other's.

@@ -423,7 +423,7 @@ void test_view_delivery_and_backpressure() {
     auto rope_rx = [&](tr::view::rope_t f) {
         if (f.link_count() == 1) got.set_value(f.links()[0]);  // single-link: the trivial rope
     };
-    webtransport_transport_t listener(std::uint16_t{0}, g_cert, g_key, &rec);
+    webtransport_transport_t listener(std::uint16_t{0}, g_cert, g_key, {.memory = {.rx = &rec}});
     check(listener.delivers_ropes(), "webtransport_transport_t::delivers_ropes() is true");
     webtransport_transport_t dialer("127.0.0.1", listener.local_port(), "/", dev_tls());
 
@@ -452,7 +452,8 @@ void test_view_delivery_and_backpressure() {
     recording_backend_t starved(2);
     frame_sink_t sink;
     auto rope_rx2 = [&](tr::view::rope_t f) { sink.push(f.links()[0].bytes()); };
-    webtransport_transport_t listener2(std::uint16_t{0}, g_cert, g_key, &starved);
+    webtransport_transport_t listener2(std::uint16_t{0}, g_cert, g_key,
+                                       {.memory = {.rx = &starved}});
     listener2.set_rope_receiver(rope_rx2);
     webtransport_transport_t dialer2("127.0.0.1", listener2.local_port(), "/", dev_tls());
     const auto d1 = test_frame(8192, 0x01);
@@ -1158,8 +1159,7 @@ void test_the_handshake_budget_is_the_configured_one() {
     // default, over a 2048-byte budget. Only the two varints are written, so nothing but the
     // declared length can decide this.
     {
-        webtransport_transport_t tight(std::uint16_t{0}, g_cert, g_key, &tr::mem::heap_backend(),
-                                       /*max_frame=*/0, kTight);
+        webtransport_transport_t tight(std::uint16_t{0}, g_cert, g_key, {.max_handshake = kTight});
         check(tight.ok(), "leg 1: the 2048-byte-budget listener is up");
         raw_wt_client_t cli(tight.local_port());
         auto* s = cli.open_bidi();
@@ -1192,8 +1192,7 @@ void test_the_handshake_budget_is_the_configured_one() {
     // bytes on the wire, so `accumulate` passes the budget while the declared-length check
     // does not. That is the byte-copy bound rather than the announcement bound.
     {
-        webtransport_transport_t tight(std::uint16_t{0}, g_cert, g_key, &tr::mem::heap_backend(),
-                                       /*max_frame=*/0, kTight);
+        webtransport_transport_t tight(std::uint16_t{0}, g_cert, g_key, {.max_handshake = kTight});
         raw_wt_client_t cli(tight.local_port());
         auto* s = cli.open_bidi();
         cli.write(s, grease_frame(5, kTight));
@@ -1217,12 +1216,10 @@ void test_the_handshake_budget_is_the_configured_one() {
 
     // Leg 3: the readback, and that the key is TIGHTEN-ONLY.
     {
-        webtransport_transport_t tight(std::uint16_t{0}, g_cert, g_key, &tr::mem::heap_backend(),
-                                       /*max_frame=*/0, kTight);
+        webtransport_transport_t tight(std::uint16_t{0}, g_cert, g_key, {.max_handshake = kTight});
         check(tight.effective_max_handshake() == kTight,
               "leg 3: a tightened budget is honored verbatim");
-        webtransport_transport_t wide(std::uint16_t{0}, g_cert, g_key, &tr::mem::heap_backend(),
-                                      /*max_frame=*/0, 1u << 20);
+        webtransport_transport_t wide(std::uint16_t{0}, g_cert, g_key, {.max_handshake = 1u << 20});
         check(wide.effective_max_handshake() == webtransport_transport_t::kMaxHandshakeBytes,
               "leg 3: a 1 MiB request is CLAMPED — a config key never raises a pre-auth bound");
         webtransport_transport_t unset(std::uint16_t{0}, g_cert, g_key);
@@ -1352,8 +1349,7 @@ void test_push_on_session_waits_for_start_receiving() {
     listener.set_receiver(server_rx);
     {
         webtransport_transport_t dialer("127.0.0.1", listener.local_port(), "/", dev_tls(),
-                                        &tr::mem::heap_backend(), /*max_frame=*/0,
-                                        /*defer_rx=*/true);
+                                        {.defer_rx = true});
         check(dialer.ok(), "the deferred dialer still completed CONNECT + 200 in its constructor");
         check(dialer.session_up(),
               "the H3 handshake ran to completion while delivery was held (the gate is on "

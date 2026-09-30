@@ -350,10 +350,7 @@ void test_the_budget_is_the_configured_one() {
     const std::string request = padded_request(4096);
 
     {
-        tr::net::transport_ws_server tight(0, &tr::mem::heap_backend(), /*max_frame=*/0,
-                                           /*max_peers=*/0, /*peer_named=*/false,
-                                           /*recv_stack=*/std::size_t{0},
-                                           /*liveness_window_ms=*/0, /*max_handshake=*/1024);
+        tr::net::transport_ws_server tight(0, {.max_handshake = 1024});
         check(tight.effective_max_handshake() == 1024, "the tight server honors 1024");
         const int cfd = tcp_connect(tight.local_port());
         check(cfd >= 0, "raw client connected (1 KiB budget)");
@@ -382,25 +379,17 @@ void test_the_budget_is_the_configured_one() {
 
     // Tighten-only: a request ABOVE the default cannot widen the pre-auth bound. Non-vacuous —
     // without the clamp the accessor would read back the 64 KiB that was asked for.
-    const tr::net::transport_ws_server raised(0, &tr::mem::heap_backend(), /*max_frame=*/0,
-                                              /*max_peers=*/0, /*peer_named=*/false,
-                                              /*recv_stack=*/std::size_t{0},
-                                              /*liveness_window_ms=*/0,
-                                              /*max_handshake=*/64u * 1024u);
+    const tr::net::transport_ws_server raised(0, {.max_handshake = 64u * 1024u});
     check(raised.effective_max_handshake() == tr::net::transport_ws_server::kMaxHandshakeBytes,
           "a max_handshake ABOVE the default is clamped — tighten-only, never raise");
 
     // The DIAL half resolves through the SAME `handshake_cap` home. Port 1 refuses the
     // connect, so this asserts the resolution alone, with no listener to stand up.
-    const tr::net::transport_ws_client dial_tight("127.0.0.1", 1, &tr::mem::heap_backend(),
-                                                  /*max_frame=*/0, /*recv_stack=*/std::size_t{0},
-                                                  /*defer_recv=*/true, /*liveness_window_ms=*/0,
-                                                  &tr::mem::heap_source(), /*max_handshake=*/2048);
+    const tr::net::transport_ws_client dial_tight("127.0.0.1", 1,
+                                                  {.defer_recv = true, .max_handshake = 2048});
     check(dial_tight.effective_max_handshake() == 2048, "the dial half honors its own budget");
-    const tr::net::transport_ws_client dial_raised(
-        "127.0.0.1", 1, &tr::mem::heap_backend(), /*max_frame=*/0, /*recv_stack=*/std::size_t{0},
-        /*defer_recv=*/true, /*liveness_window_ms=*/0, &tr::mem::heap_source(),
-        /*max_handshake=*/1u << 20);
+    const tr::net::transport_ws_client dial_raised("127.0.0.1", 1,
+                                                   {.defer_recv = true, .max_handshake = 1u << 20});
     check(dial_raised.effective_max_handshake() == tr::net::transport_ws_server::kMaxHandshakeBytes,
           "and clamps a raised one to the same ceiling the accept side does");
 }
@@ -423,10 +412,7 @@ void test_a_dribbled_request_is_judged_on_its_total() {
     check(kUpgradeRequest.size() > 128 && kUpgradeRequest.size() < 512,
           "the legal request sits between the two budgets this case uses");
     {
-        tr::net::transport_ws_server ample(0, &tr::mem::heap_backend(), /*max_frame=*/0,
-                                           /*max_peers=*/0, /*peer_named=*/false,
-                                           /*recv_stack=*/std::size_t{0},
-                                           /*liveness_window_ms=*/0, /*max_handshake=*/512);
+        tr::net::transport_ws_server ample(0, {.max_handshake = 512});
         const int cfd = tcp_connect(ample.local_port());
         check(cfd >= 0, "raw client connected (512-byte budget)");
         check(dribble(cfd, kUpgradeRequest, 64),
@@ -440,10 +426,7 @@ void test_a_dribbled_request_is_judged_on_its_total() {
         ::close(cfd);
     }
     {
-        tr::net::transport_ws_server tiny(0, &tr::mem::heap_backend(), /*max_frame=*/0,
-                                          /*max_peers=*/0, /*peer_named=*/false,
-                                          /*recv_stack=*/std::size_t{0},
-                                          /*liveness_window_ms=*/0, /*max_handshake=*/128);
+        tr::net::transport_ws_server tiny(0, {.max_handshake = 128});
         const int cfd = tcp_connect(tiny.local_port());
         check(cfd >= 0, "raw client connected (128-byte budget)");
         (void)dribble(cfd, kUpgradeRequest, 64);  // refused partway; the writes then fail

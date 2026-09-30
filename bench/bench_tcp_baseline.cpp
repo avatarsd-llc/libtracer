@@ -226,8 +226,7 @@ struct result_t {
     double span = 0.0;
     std::size_t seen = 0;
     {
-        tr::net::transport_tcp_server server(0, &tr::mem::heap_backend(), 0, /*max_peers=*/0,
-                                             /*peer_named=*/true);
+        tr::net::transport_tcp_server server(0, {.peer_named = true});
         if (!server.ok() || server.bus() == nullptr) return r;
         server.bus()->set_peer_receiver(sink);
         const std::uint16_t port = server.local_port();

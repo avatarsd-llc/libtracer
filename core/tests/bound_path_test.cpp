@@ -509,7 +509,11 @@ void test_residual_length_drops() {
 void test_mint_denied_by_acl() {
     std::printf("a denied operation mints NOTHING (§6.1 anti-enumeration):\n");
     graph_t g;
-    g.configure_subject_resolver(caller_is_subject, nullptr);
+    {
+        auto hooks = g.hooks();
+        hooks.subject_resolver = {caller_is_subject, nullptr};
+        g.set_hooks(hooks);
+    }
     op_resolver_t resolver(g);
     const vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
     (void)g.write(v, make_value(b_value({0x05})));
@@ -544,7 +548,11 @@ void test_mint_denied_by_acl() {
 void test_revocation_is_immediate() {
     std::printf("a revoked right takes effect on the next op over an existing binding (§6.2):\n");
     graph_t g;
-    g.configure_subject_resolver(caller_is_subject, nullptr);
+    {
+        auto hooks = g.hooks();
+        hooks.subject_resolver = {caller_is_subject, nullptr};
+        g.set_hooks(hooks);
+    }
     op_resolver_t resolver(g);
     const vertex_handle_t v = g.register_vertex(path_t("/x"), role_t::STORED_VALUE);
     (void)g.write(v, make_value(b_value({0x05})));
@@ -729,7 +737,11 @@ void test_conformance_vectors() {
 
     // The §6.3 pair, deny half: the same request, denied, IS the vector's frame.
     graph_t gd;
-    gd.configure_subject_resolver(caller_is_subject, nullptr);
+    {
+        auto hooks = gd.hooks();
+        hooks.subject_resolver = {caller_is_subject, nullptr};
+        gd.set_hooks(hooks);
+    }
     op_resolver_t rd(gd);
     const vertex_handle_t vd = gd.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
     (void)vd;

@@ -188,8 +188,11 @@ void drain() {
 /** @brief A link that adopts the fake server, declaring the given large size class (0/0 =
  *         no class at all, which is every link that shipped before #1566). */
 std::unique_ptr<httpd_ws_link_t> make_link(std::size_t large_bytes, std::size_t large_slots) {
-    return std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true, kSendBoundMs, 0, 0, 0, 0,
-                                             large_bytes, large_slots);
+    return std::make_unique<httpd_ws_link_t>(
+        handle(), "/ws",
+        tr::net::httpd_ws_config_t{.peer_named = true,
+                                   .send_timeout_ms = kSendBoundMs,
+                                   .tx_large = {.bytes = large_bytes, .slots = large_slots}});
 }
 
 /** @brief Admit @p fd and claim it as a peer (the lazy first-data-frame claim). */

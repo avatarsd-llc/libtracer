@@ -101,7 +101,8 @@ std::size_t peer_count(const httpd_ws_link_t& link) {
 void test_refusal_stops_the_upgrade() {
     std::printf("#958 a refused peer never becomes a peer:\n");
     int ctx_object = 0;
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
+                                                  tr::net::httpd_ws_config_t{.peer_named = true});
     check(link->ok(), "the adopting link registered its URI");
     link->set_admission_cb(&recording_hook, &ctx_object);
     reset_hook(false);
@@ -129,7 +130,8 @@ void test_refusal_stops_the_upgrade() {
 void test_admission_still_works() {
     std::printf("#958 an admitted peer is unaffected:\n");
     int ctx_object = 0;
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
+                                                  tr::net::httpd_ws_config_t{.peer_named = true});
     check(link->ok(), "the adopting link registered its URI");
     link->set_admission_cb(&recording_hook, &ctx_object);
     reset_hook(true);
@@ -146,7 +148,8 @@ void test_admission_still_works() {
 /** @brief No predicate registered admits every peer — the historical open graph. */
 void test_no_hook_admits() {
     std::printf("#958 an unset predicate admits every peer:\n");
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
+                                                  tr::net::httpd_ws_config_t{.peer_named = true});
     check(link->ok(), "the adopting link registered its URI");
     reset_hook(false);  // the verdict is irrelevant: nothing is installed
     constexpr int kFd = 530;
@@ -162,7 +165,8 @@ void test_no_hook_admits() {
 void test_owning_ctor_gates_too() {
     std::printf("#958 the own-server constructor gates its handshake too:\n");
     int ctx_object = 0;
-    auto link = std::make_unique<httpd_ws_link_t>(static_cast<std::uint16_t>(8090), 0, true);
+    auto link = std::make_unique<httpd_ws_link_t>(static_cast<std::uint16_t>(8090),
+                                                  tr::net::httpd_ws_config_t{.peer_named = true});
     check(link->ok(), "the port-binding link started its server and registered its URI");
     link->set_admission_cb(&recording_hook, &ctx_object);
     reset_hook(false);

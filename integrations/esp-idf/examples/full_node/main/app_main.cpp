@@ -288,9 +288,9 @@ struct device_node_t {
      *
      * `sync_mutex_t`, not the interrupt-disable policy the RX pool uses, and the
      * difference is the frequency and the context. The RX pool is touched from an ISR and
-     * on every datagram, so it needs `tr::esp::portmux_sync_t` on a chip. This source is
-     * touched only when a FLOW IS SET UP — `on_advertise` learning a binding on a receive
-     * thread, `ensure_egress` MINTING a label on the writer thread; the per-delivery reuse
+     * on every datagram, so it needs `tr::esp::critical_guard_t` (`critical_pool_t`) on a chip.
+     * This source is touched only when a FLOW IS SET UP — `on_advertise` learning a binding on a
+     * receive thread, `ensure_egress` MINTING a label on the writer thread; the per-delivery reuse
      * path finds the label already bound and reaches no allocator at all. That is exactly
      * the "wiring frequency" case `sync_mutex_t` documents itself for, and it is portable
      * across both of this example's targets, so it needs no platform seam of its own.
@@ -312,7 +312,7 @@ struct device_node_t {
     std::pmr::synchronized_pool_resource mr{&arena};
 
     graph_t graph;
-    fwd_router_t router{graph, &label_src};
+    fwd_router_t router{graph, {.label_src = &label_src}};
     /**
      * @brief Owns the config-created sockets; declared LAST so its recv
      *        threads stop before the router/graph they feed are torn down.

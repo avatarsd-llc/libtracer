@@ -673,8 +673,7 @@ void test_multi_peer_bus() {
     frame_sink_t a_sink;
     frame_sink_t b_sink;
 
-    tr::net::transport_ws_server server(0, &tr::mem::heap_backend(), /*max_frame=*/0,
-                                        /*max_peers=*/0, /*peer_named=*/true);
+    tr::net::transport_ws_server server(0, {.peer_named = true});
     check(server.ok(), "listen socket bound");
     const std::uint16_t port = server.local_port();
     check(server.bus() != nullptr, "peer_named server exposes the bus_link_t facet (ADR-0044)");
@@ -781,8 +780,7 @@ void test_multi_peer_bus() {
 void test_max_peers_cap() {
     std::printf("transport_ws server — max_peers admission cap (#362):\n");
 
-    tr::net::transport_ws_server server(0, &tr::mem::heap_backend(), /*max_frame=*/0,
-                                        /*max_peers=*/1);
+    tr::net::transport_ws_server server(0, {.max_peers = 1});
     check(server.ok(), "capped server bound");
     const std::uint16_t port = server.local_port();
 
@@ -814,8 +812,7 @@ void test_close_peer() {
     frame_sink_t a_sink;
     frame_sink_t b_sink;
 
-    tr::net::transport_ws_server server(0, &tr::mem::heap_backend(), /*max_frame=*/0,
-                                        /*max_peers=*/2, /*peer_named=*/true);
+    tr::net::transport_ws_server server(0, {.max_peers = 2, .peer_named = true});
     check(server.ok(), "listen socket bound");
     const std::uint16_t port = server.local_port();
     srv_sink.bus = server.bus();
@@ -955,8 +952,7 @@ void test_peer_named_server_does_not_downgrade_to_flat() {
     frame_sink_t flat_sink;
     peer_sink_t peer_sink;
 
-    tr::net::transport_ws_server server(0, &tr::mem::heap_backend(), /*max_frame=*/0,
-                                        /*max_peers=*/0, /*peer_named=*/true);
+    tr::net::transport_ws_server server(0, {.peer_named = true});
     check(server.ok(), "peer-named server bound");
     check(server.bus() != nullptr, "peer-named server exposes the bus facet");
     // The WRONG tier for this mode, and the only one wired.
@@ -1265,8 +1261,7 @@ void test_push_on_connect_waits_for_start_receiving() {
     frame_sink_t sink;
     {
         tr::net::transport_ws_client client("127.0.0.1", ntohs(bound.sin_port),
-                                            &tr::mem::heap_backend(), /*max_frame=*/0,
-                                            /*recv_stack=*/0, /*defer_recv=*/true);
+                                            {.defer_recv = true});
         check(client.ok(), "the deferred client completed its opening handshake");
         check(one_write_fut.wait_for(3s) == std::future_status::ready && one_write_fut.get(),
               "the peer put the 101 and a COMPLETE pushed message in ONE write");
@@ -1492,9 +1487,7 @@ control_breach_outcome_t drive_control_breach(std::span<const std::byte> breach)
     down_latch_t latch;
     frame_sink_t sink;
     {
-        tr::net::transport_ws_client client("127.0.0.1", port, &tr::mem::heap_backend(),
-                                            /*max_frame=*/0, /*recv_stack=*/0,
-                                            /*defer_recv=*/true);
+        tr::net::transport_ws_client client("127.0.0.1", port, {.defer_recv = true});
         out.handshaken = client.ok();
         out.link_up_before = client.link_up();
         out.malformed_before = client.malformed_rx();
@@ -1593,9 +1586,7 @@ void test_client_answers_a_control_frame_at_the_bound_masked() {
     down_latch_t latch;
     frame_sink_t sink;
     {
-        tr::net::transport_ws_client client("127.0.0.1", port, &tr::mem::heap_backend(),
-                                            /*max_frame=*/0, /*recv_stack=*/0,
-                                            /*defer_recv=*/true);
+        tr::net::transport_ws_client client("127.0.0.1", port, {.defer_recv = true});
         check(client.ok(), "the client completed its opening handshake");
         client.set_receiver(sink);
         client.set_down_notifier(&down_latch_t::notify, &latch);

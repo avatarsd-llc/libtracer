@@ -296,7 +296,11 @@ void test_net_seams_are_node_scoped() {
 void test_unserved_net_names_are_caller_independent() {
     std::printf("RFC-0010 Am.2 §D.2: an unserved net-plane NAME is caller-INDEPENDENT:\n");
     graph_t g;
-    g.configure_subject_resolver(caller_is_subject, nullptr);
+    {
+        auto hooks = g.hooks();
+        hooks.subject_resolver = {caller_is_subject, nullptr};
+        g.set_hooks(hooks);
+    }
     (void)g.register_vertex(*path_t::parse("/dev"), role_t::STORED_VALUE);
     fwd_router_t router(g);
     counting_link_t up;

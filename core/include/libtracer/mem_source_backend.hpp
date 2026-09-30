@@ -98,6 +98,17 @@ class source_backend_t final : public mem_backend_t {
     /** @brief The source the bytes come from — for census and for sizing its slab. */
     [[nodiscard]] block_source_t& source() const noexcept { return *src_; }
 
+    /** @brief A raw block, straight from the wrapped source (the @ref block_source_t half). */
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        return src_->try_alloc(bytes, align);
+    }
+    /** @brief Return a raw block to the wrapped source, sized. */
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        src_->release(p, bytes, align);
+    }
+    /** @brief The wrapped source's census: this backend keeps no bytes of its own. */
+    [[nodiscard]] source_stats_t stats() const noexcept override { return src_->stats(); }
+
     /**
      * @brief Allocate a @p size-byte segment (refcount 1) from the source, in ONE block.
      *
@@ -119,16 +130,13 @@ class source_backend_t final : public mem_backend_t {
      * @brief The block alignment one segment is drawn at — the stricter of the payload's
      *        fundamental alignment and the control block's own.
      */
-    static constexpr std::size_t kBlockAlign = alignof(std::max_align_t) > alignof(view::segment_t)
-                                                   ? alignof(std::max_align_t)
-                                                   : alignof(view::segment_t);
+    static constexpr std::size_t kBlockAlign = view::segment_block_align(alignof(std::max_align_t));
 
     /**
      * @brief Bytes the control block occupies at the head of the block, padded so the payload
      *        that follows it starts at @ref kBlockAlign.
      */
-    static constexpr std::size_t kHeaderBytes =
-        (sizeof(view::segment_t) + kBlockAlign - 1) / kBlockAlign * kBlockAlign;
+    static constexpr std::size_t kHeaderBytes = view::segment_header_bytes(kBlockAlign);
 
     /** @brief The single block @ref alloc draws for a @p size-byte segment. */
     [[nodiscard]] static constexpr std::size_t block_bytes(std::size_t size) noexcept {

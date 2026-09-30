@@ -196,7 +196,11 @@ using tr::testing::check;
 class arming_backend_t final : public tr::mem::mem_backend_t {
    public:
     explicit arming_backend_t(tr::mem::mem_backend_t& upstream = tr::mem::heap_backend()) noexcept
-        : mem_backend_t("test_arming"), up_(upstream) {}
+        : mem_backend_t("test_arming"), up_(upstream) {
+        // Reserved up front: the size log is the test's own instrument, and a push_back that
+        // grows it inside the counted window would be charged to the arm under test.
+        sizes_.reserve(256);
+    }
 
     [[nodiscard]] tr::view::segment_t* alloc(
         std::size_t size, tr::mem::alloc_hint_t hint = tr::mem::alloc_hint_t::NONE) override {
@@ -455,7 +459,7 @@ void test_terminus_read_draws_from_the_injected_seam() {
     {
         node_t n;
         (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x2A2A2A2Au))));
-        fwd_router_t router(n.g, &tr::mem::heap_source(), &tr::mem::heap_source(), &seam);
+        fwd_router_t router(n.g, {.flat = &seam});
         (void)router.add_child("in", n.in);
         tr::view::rope_t rope = as_rope(frame, 4);  // built OUTSIDE the window
         g_allocs = 0;
@@ -510,7 +514,7 @@ void test_terminus_read_refusal_is_answered() {
     node_t n;
     (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x33333333u))));
     arming_backend_t seam;
-    fwd_router_t router(n.g, &tr::mem::heap_source(), &tr::mem::heap_source(), &seam);
+    fwd_router_t router(n.g, {.flat = &seam});
     (void)router.add_child("in", n.in);
 
     seam.arm();
@@ -554,7 +558,7 @@ void test_terminus_write_refusal_stores_nothing() {
     constexpr std::uint32_t kSecond = 0x55555555u;
     (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(kFirst))));
     arming_backend_t seam;
-    fwd_router_t router(n.g, &tr::mem::heap_source(), &tr::mem::heap_source(), &seam);
+    fwd_router_t router(n.g, {.flat = &seam});
     (void)router.add_child("in", n.in);
 
     const std::vector<std::byte> write = b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}),
@@ -600,7 +604,7 @@ void test_terminus_refusal_sweep() {
     {
         node_t n;
         arming_backend_t seam;
-        fwd_router_t router(n.g, &tr::mem::heap_source(), &tr::mem::heap_source(), &seam);
+        fwd_router_t router(n.g, {.flat = &seam});
         (void)router.add_child("in", n.in);
         (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x66666666u))));
         n.in.inject(as_rope(frame, 4));
@@ -614,7 +618,7 @@ void test_terminus_refusal_sweep() {
     for (int k = 0; k < total; ++k) {
         node_t n;
         arming_backend_t seam;
-        fwd_router_t router(n.g, &tr::mem::heap_source(), &tr::mem::heap_source(), &seam);
+        fwd_router_t router(n.g, {.flat = &seam});
         (void)router.add_child("in", n.in);
         (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x66666666u))));
         seam.refuse_after(k);
@@ -723,7 +727,7 @@ class arming_source_t final : public tr::mem::block_source_t {
 /** @brief @ref node_t over an injected graph source — the seam the copy now draws from. */
 struct src_node_t {
     arming_source_t& src;
-    graph_t g{&src};
+    graph_t g{src};
     vertex_handle_t temp = g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
     rec_link_t in{/*ropes=*/true};
     explicit src_node_t(arming_source_t& s) : src(s) {}
@@ -968,7 +972,7 @@ void test_span_tier_asks_flat_for_nothing() {
     std::printf("the span tier asks the router's flat seam for nothing, READ or WRITE:\n");
     arming_backend_t seam;
     node_t n;
-    fwd_router_t router(n.g, &tr::mem::heap_source(), &tr::mem::heap_source(), &seam);
+    fwd_router_t router(n.g, {.flat = &seam});
     (void)router.add_child("in", n.in);
     (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x88888888u))));
     router.on_frame("in", read_frame());

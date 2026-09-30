@@ -84,7 +84,8 @@ const std::byte kBody[] = {std::byte{0x01}, std::byte{0x02}, std::byte{0x03}};
 
 /** @brief A link that adopts the fake server. */
 std::unique_ptr<httpd_ws_link_t> make_link() {
-    return std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true);
+    return std::make_unique<httpd_ws_link_t>(handle(), "/ws",
+                                             tr::net::httpd_ws_config_t{.peer_named = true});
 }
 
 /** @brief Drain the control queue to quiescence, as the httpd task does. */

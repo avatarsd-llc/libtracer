@@ -329,7 +329,7 @@ void test_arena_refusal_is_answered_without_allocating() {
     graph_t g;
     (void)g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
     arming_source_t rx;
-    fwd_router_t router(g, &tr::mem::heap_source(), &rx);
+    fwd_router_t router(g, {.rx = &rx});
     fixed_link_t client;
     (void)router.add_child("client", client);
 
@@ -382,7 +382,7 @@ void test_bounded_pool_source_exhaustion_is_answered() {
     std::array<tr::mem::size_class_t, 4> classes{};
     tr::mem::pool_source_t<> rx{std::span<std::byte>(slab),
                                 std::span<tr::mem::size_class_t>(classes)};
-    fwd_router_t router(g, &tr::mem::heap_source(), &rx);
+    fwd_router_t router(g, {.rx = &rx});
     fixed_link_t client;
     (void)router.add_child("client", client);
 
@@ -407,8 +407,7 @@ void test_egress_refusal_is_answered() {
     graph_t g;
     (void)g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
     arming_backend_t egress;
-    fwd_router_t router(g, &tr::mem::heap_source(), &tr::mem::heap_source(),
-                        &tr::mem::heap_backend(), 0, &egress);
+    fwd_router_t router(g, {.egress = &egress});
     fixed_link_t client;
     (void)router.add_child("client", client);
 
@@ -440,7 +439,7 @@ void test_rope_tier_refusal_is_answered() {
     graph_t g;
     (void)g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
     arming_source_t rx;
-    fwd_router_t router(g, &tr::mem::heap_source(), &rx);
+    fwd_router_t router(g, {.rx = &rx});
     fixed_link_t client(/*ropes=*/true);
     (void)router.add_child("client", client);
 
@@ -472,7 +471,7 @@ void test_refusal_echoes_the_wire_time_stamp() {
     graph_t g;
     (void)g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
     arming_source_t rx;
-    fwd_router_t router(g, &tr::mem::heap_source(), &rx);
+    fwd_router_t router(g, {.rx = &rx});
     fixed_link_t client;
     (void)router.add_child("client", client);
 
@@ -500,7 +499,7 @@ void test_frame_without_src_is_not_answered() {
     graph_t g;
     (void)g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
     arming_source_t rx;
-    fwd_router_t router(g, &tr::mem::heap_source(), &rx);
+    fwd_router_t router(g, {.rx = &rx});
     fixed_link_t client;
     (void)router.add_child("client", client);
 

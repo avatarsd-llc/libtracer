@@ -23,7 +23,7 @@ deterministic MCU choice: a node's memory ceiling is a `std::array` a reader can
   [refcount](view-segment-refcount.md) rule, seen from the allocator's side.
 - **This pool is not internally synchronized.** Each backend declares its own concurrency
   contract, and this one's is "single-threaded reclamation". A shared seam wants
-  [`sync_pool_t`](view-sync-pool.md).
+  [`synchronized_pool_t<>`](view-sync-pool.md).
 - **Nothing here is conditional** — the target builds and runs under every CI leg.
 
 ## Source

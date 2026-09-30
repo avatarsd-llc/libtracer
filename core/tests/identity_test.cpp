@@ -183,7 +183,11 @@ void test_every_vertex_answers_identically() {
 void test_read_is_pre_auth() {
     std::printf("RFC-0011 §C.2: :identity is served through a CLOSED acl (pre-auth):\n");
     graph_t g;
-    g.configure_subject_resolver(caller_is_subject, nullptr);
+    {
+        auto hooks = g.hooks();
+        hooks.subject_resolver = {caller_is_subject, nullptr};
+        g.set_hooks(hooks);
+    }
     check(g.set_identity(0x01, demo_key()).has_value(), "identity installed");
     const auto v = g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
     (void)g.write(v, make_value(demo_key()));
@@ -294,7 +298,11 @@ void test_no_write_surface() {
 void test_record_has_no_sub_addressing() {
     std::printf("RFC-0011 §C.4: served whole — no member or indexed addressing:\n");
     graph_t g;
-    g.configure_subject_resolver(caller_is_subject, nullptr);
+    {
+        auto hooks = g.hooks();
+        hooks.subject_resolver = {caller_is_subject, nullptr};
+        g.set_hooks(hooks);
+    }
     check(g.set_identity(0x01, demo_key()).has_value(), "identity installed");
     (void)g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
 

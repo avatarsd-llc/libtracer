@@ -111,7 +111,11 @@ int main() {
     link_directory_t directory;
 
     graph_t g;
-    g.configure_subject_resolver(resolve_link_owner, &directory);
+    {
+        auto hooks = g.hooks();
+        hooks.subject_resolver = {resolve_link_owner, &directory};
+        g.set_hooks(hooks);
+    }
     const vertex_handle_t v = g.register_vertex(path_t("/dev/temp"), role_t::STORED_VALUE);
     (void)g.write(v, some_value());  // the trusted local caller seeds a value…
     (void)g.write(path_t("/dev/temp:acl"), one_grant("alice", acl_right_t::READ));  // …and the ACL

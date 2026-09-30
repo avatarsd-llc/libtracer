@@ -139,7 +139,7 @@ void test_history_allocates_nothing() {
     std::printf("D11 — history fills caller storage with no allocation:\n");
     graph_t g;
     const vertex_handle_t s = g.register_vertex(path_t("/h/s"), role_t::STREAM);
-    (void)g.set_retention(s, tr::graph::retention_t::N, 4);
+    (void)g.set_policy(s, {.retention = tr::graph::retention_t::N, .depth = 4});
     for (std::uint8_t i = 1; i <= 6; ++i) (void)g.write(s, make_value({i}));
 
     std::array<value_ref_t, 4> ring;

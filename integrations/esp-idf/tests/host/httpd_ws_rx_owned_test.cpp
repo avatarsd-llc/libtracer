@@ -191,8 +191,10 @@ void drain() {
 /** @brief A link that adopts the fake server; @p rx is the injected owning-RX source (null =
  *         the default, borrowed delivery). */
 std::unique_ptr<httpd_ws_link_t> make_link(tr::mem::mem_backend_t* rx) {
-    return std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, true, kSendBoundMs, 0, 0, 0, 0, 0,
-                                             0, rx);
+    return std::make_unique<httpd_ws_link_t>(
+        handle(), "/ws",
+        tr::net::httpd_ws_config_t{
+            .peer_named = true, .send_timeout_ms = kSendBoundMs, .memory = {.rx = rx}});
 }
 
 /** @brief Retire the link, the fake's sessions and its queue settings between cases. */

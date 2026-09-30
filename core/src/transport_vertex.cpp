@@ -412,7 +412,7 @@ result_t<void> transport_vertex_t::mint_module_locked(const std::string& module)
         graph::payload_right_t{wire::type_t::NAME, graph::acl_right_t::WRITE},
     };
     auto endpoint = graph_.register_vertex_key(std::move(endpoint_key), graph::role_t::HANDLER,
-                                               handlers, kRights);
+                                               handlers, {}, kRights);
     if (!endpoint) return std::unexpected(endpoint.error());
     // RFC-0014 §3 (S4): `conn` is HIDDEN from `<net_root>/<module>:children[]`, which returns
     // the module's member CONNECTIONS. The endpoint is the control that creates them, not one

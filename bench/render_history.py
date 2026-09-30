@@ -352,7 +352,7 @@ FAMILIES: list[dict] = [
          key=lambda m: f"{m.group(1)}-{int(m.group(2)):05d}", log=True,),
     dict(id="pool-payload", section="dispatch",
          title="Pooled value backend — by payload size",
-         cond="inproc-pool · fan-out 1 · 1 topic — the value backend is a `sync_pool_t` "
+         cond="inproc-pool · fan-out 1 · 1 topic — the value backend is a `synchronized_pool_t<>` "
               "(ADR-0060) instead of the default heap",
          pat=r"^inproc-pool (\d+)B/fan1/1ep",
          label=lambda m: f"pool {m.group(1)} B", key=_num, log=False,

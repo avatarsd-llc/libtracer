@@ -19,7 +19,7 @@ way to tell the two names apart.
 
 **Behavioural expectations pinned by this vector** (§3.C):
 
-- `graph_t::set_retention(vertex, retention_t::N, depth)` changes how many entries the STREAM ring
+- `graph_t::set_policy(vertex, {.retention = retention_t::N, .depth = depth})` changes how many entries the STREAM ring
   retains — the next append trims to the new depth;
 - **no wire operation can read or write it.** A `:settings.history_keep_last` write answers
   the ERROR above; the same read answers the same code; and a bare `:settings` read does not
@@ -31,12 +31,12 @@ way to tell the two names apart.
 This is the distinction the RFC-0022 removal rests on: what is withdrawn is the **remote
 write surface**, not owner-side configuration. The ring depth encodes an application's
 retention intent, which no peer and no injected resource can supply — so it is declared
-host-side, in the shape of `set_delivery_mode` and `set_app_fields`, and it costs a STREAM
+host-side, in the shape of `vertex_policy_t::delivery_mode` and `vertex_policy_t::app_fields`, and it costs a STREAM
 vertex zero additional bytes because a STREAM identity already allocates the extension block.
 
 **Behavioural binding** (see [`../../../HARNESS.md`](../../../HARNESS.md) § *What a vector
 gates*): `core/tests/qos_policy_test.cpp` — `test_history_depth_is_host_only` drives
-`set_retention` and both wire halves, and `test_removed_knob_reply_bytes` byte-compares the
+`vertex_policy_t::retention` and both wire halves, and `test_removed_knob_reply_bytes` byte-compares the
 reply the resolver builds for this name against these bytes.
 
 ```

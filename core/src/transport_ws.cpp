@@ -222,16 +222,13 @@ struct transport_ws_server::session_t : slot_server_t::session_base_t {
     peer_endpoint_t endpoint;   /**< @brief The directed facade `peer_link` returns. */
 };
 
-transport_ws_server::transport_ws_server(std::uint16_t bind_port, mem::mem_backend_t* backend,
-                                         std::size_t max_frame, std::size_t max_peers,
-                                         bool peer_named, std::size_t recv_stack,
-                                         std::uint32_t liveness_window_ms,
-                                         std::size_t max_handshake)
-    : stream_server_base_t(max_peers, peer_named, liveness_window_ms), backend_(backend) {
-    max_frame_ = length_prefix_framer::configured_cap(max_frame);  // tighten-only (#1035)
-    max_handshake_ = handshake_cap(max_handshake);                 // tighten-only (#934)
+transport_ws_server::transport_ws_server(std::uint16_t bind_port, const ws_server_config_t& config)
+    : stream_server_base_t(config.max_peers, config.peer_named, config.liveness_window_ms),
+      backend_(config.memory.rx) {
+    max_frame_ = length_prefix_framer::configured_cap(config.max_frame);  // tighten-only (#1035)
+    max_handshake_ = handshake_cap(config.max_handshake);                 // tighten-only (#934)
     if (!bind_listen(bind_port)) return;
-    start([this] { run(); }, recv_stack);
+    start([this] { run(); }, config.recv_stack);
 }
 
 transport_ws_server::~transport_ws_server() {
@@ -543,16 +540,18 @@ bool transport_ws_server::drain_frames(session_t& s) {
 // ---------------------------------------------------------------------------
 
 transport_ws_client::transport_ws_client(const std::string& host, std::uint16_t port,
-                                         mem::mem_backend_t* backend, std::size_t max_frame,
-                                         std::size_t recv_stack, bool defer_recv,
-                                         std::uint32_t liveness_window_ms,
-                                         mem::block_source_t* egress_src, std::size_t max_handshake)
-    : backend_(backend),
+                                         const ws_client_config_t& config)
+    : backend_(config.memory.rx),
       // `block_array_t` binds its source ONCE, here (#873): a post-construction
       // set_egress_source can never re-seat this member, which is why the store is a
       // constructor argument on this class and not only a base-class setter.
-      tx_buf_(egress_src != nullptr ? *egress_src : mem::heap_source()),
-      recv_stack_(recv_stack) {
+      tx_buf_(config.memory.io != nullptr ? *config.memory.io : mem::heap_source()),
+      recv_stack_(config.recv_stack) {
+    mem::block_source_t* const egress_src = config.memory.io;
+    const std::size_t max_frame = config.max_frame;
+    const bool defer_recv = config.defer_recv;
+    const std::uint32_t liveness_window_ms = config.liveness_window_ms;
+    const std::size_t max_handshake = config.max_handshake;
     // Wire the BASE's egress store to the same one, before anything can send: the gather
     // temporary of `transport_t::send(iov)` and this class's `tx_buf_` are then one store,
     // not two. First statement on purpose — `start_receiving()` at the end of this body

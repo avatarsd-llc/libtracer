@@ -189,7 +189,7 @@ void test_graph_write_stores_loaned() {
     std::printf("a graph write of a loaned frame stores a loaned value:\n");
     constexpr std::size_t kPayload = 5000;
     counting_source_t src;
-    graph_t g(&src);
+    graph_t g(src);
     const auto p = path_t::parse("/rx/blob");
     const auto v = g.register_vertex(*p, role_t::STORED_VALUE);
 

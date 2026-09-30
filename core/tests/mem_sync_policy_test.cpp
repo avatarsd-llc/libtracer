@@ -10,7 +10,7 @@
  * Host threads stand in for the single-core MCU's priority preemption: what an
  * interrupt-disable critical section serialises on an ESP32-C6, a lock serialises here,
  * and the free-list invariant under test is the same either way. The ESP-IDF policy
- * (`tr::esp::portmux_sync_t`) cannot run on a host, so the seam — not that one adapter —
+ * (`tr::esp::critical_guard_t`) cannot run on a host, so the seam — not that one adapter —
  * is what a host test can prove; the adapter is compile-gated by the IDF component build.
  *
  * Three checks, none of them needing a sanitizer to fire:
@@ -38,12 +38,13 @@
 #include <vector>
 
 #include "libtracer/mem_pool.hpp"
+#include "libtracer/reader_guard.hpp"
 #include "libtracer/segment.hpp"
 #include "test_support.hpp"
 
 namespace {
 
-using tr::mem::spin_sync_t;
+using tr::graph::mutex_guard_t;
 using tr::mem::synchronized_pool_t;
 using tr::view::segment_ptr_t;
 using tr::view::segment_t;
@@ -51,16 +52,17 @@ using tr::view::segment_t;
 using tr::testing::check_quiet;
 
 /**
- * @brief A host sync policy that COUNTS its acquisitions — the instrument for check 1.
+ * @brief A host reader guard that COUNTS its acquisitions — the instrument for check 1.
  *
- * Wraps the shipped host policy (@ref tr::mem::spin_sync_t) so the counted section is the
+ * Wraps the shipped host guard (@ref tr::graph::mutex_guard_t) so the counted section is the
  * real one. Under `LIBTRACER_ABLATE_POOL_SYNC` the wrapped section is dropped and only
  * the counter remains: the pool is then a bare, unsynchronised `pool_t` behind the same
  * type, which is exactly the defect #770 reports at the receive seam.
  */
 struct counting_sync_t {
-    static constexpr bool is_isr_safe = false;   /**< @brief Spin => not ISR-safe. */
-    static constexpr bool is_nonblocking = true; /**< @brief Spin => no syscall, no OS wait. */
+    static constexpr bool is_isr_safe = false;    /**< @brief Host mutex => not ISR-safe. */
+    static constexpr bool is_nonblocking = false; /**< @brief May nap in the OS. */
+    static constexpr bool may_spin = false;       /**< @brief Bounded wait, no pure spin. */
     static constexpr const char* name = "test_count_sync";  /**< @brief Backend name. */
     static inline std::atomic<std::size_t> acquisitions{0}; /**< @brief Lock count, all pools. */
 
@@ -78,15 +80,21 @@ struct counting_sync_t {
 #endif
     }
 
+    /** @brief The `reader_guard` lookup: one shared instance (each pool holds its own). */
+    static counting_sync_t& for_address(const void*) noexcept {
+        static counting_sync_t shared;
+        return shared;
+    }
+
    private:
-    spin_sync_t inner_{};
+    mutex_guard_t inner_{};
 };
 
-static_assert(tr::mem::pool_sync_policy<spin_sync_t>, "the shipped host policy models the seam");
-static_assert(tr::mem::pool_sync_policy<counting_sync_t>, "a user policy models the seam");
-/** The ISR-safety trait is the POLICY's fact, forwarded by the pool (ADR-0047 §2). */
-static_assert(synchronized_pool_t<spin_sync_t>::is_isr_safe == spin_sync_t::is_isr_safe,
-              "the pool must publish its policy's ISR-safety, not its own guess");
+static_assert(tr::graph::reader_guard<mutex_guard_t>, "the shipped host guard models the trait");
+static_assert(tr::graph::reader_guard<counting_sync_t>, "a user guard models the trait");
+/** The ISR-safety trait is the GUARD's fact, forwarded by the pool (ADR-0047 §2). */
+static_assert(synchronized_pool_t<mutex_guard_t>::is_isr_safe == mutex_guard_t::is_isr_safe,
+              "the pool must publish its guard's ISR-safety, not its own guess");
 
 using counted_pool_t = synchronized_pool_t<counting_sync_t>;
 
@@ -166,7 +174,7 @@ void wrapper_forwards_the_whole_census() {
     std::printf("\nwrapper census forwarding (#1503):\n");
     constexpr std::size_t kSlotPayload = 32;
     std::vector<std::byte> slab(8 * (kSlotPayload + sizeof(segment_t) + 64));
-    synchronized_pool_t<spin_sync_t> pool(slab, kSlotPayload);
+    synchronized_pool_t<mutex_guard_t> pool(slab, kSlotPayload);
 
     const std::size_t cap = pool.capacity();
     check_quiet(cap > 0, "census: the wrapped pool carved some slots");

@@ -122,7 +122,7 @@ int main() {
         for (int i = 0; i < kPer; ++i) {
             const std::string p = "/stream/v" + std::to_string(i);
             const vertex_handle_t v = g.register_vertex(path_t(p), role_t::STREAM);
-            (void)g.set_retention(v, tr::graph::retention_t::N, 8);
+            (void)g.set_policy(v, {.retention = tr::graph::retention_t::N, .depth = 8});
             classify(v, c);
         }
         report("STREAM, depth 8", c, "the STREAM role (the depth is free)", total);
@@ -136,7 +136,7 @@ int main() {
         for (int i = 0; i < kPer; ++i) {
             const std::string p = "/policy/v" + std::to_string(i);
             const vertex_handle_t v = g.register_vertex(path_t(p), role_t::STORED_VALUE);
-            g.set_share_threshold_bytes(v, 256);
+            (void)g.set_policy(v, {.share_threshold_bytes = 256});
             classify(v, c);
         }
         report("owner-declared threshold", c, "the declaration itself", total);
@@ -150,7 +150,7 @@ int main() {
         graph_t g;
         census_t c;
         const vertex_handle_t root = g.register_vertex(path_t("/inh"), role_t::STORED_VALUE);
-        g.set_share_threshold_bytes(root, 256);
+        (void)g.set_policy(root, {.share_threshold_bytes = 256});
         for (int i = 0; i < kPer; ++i) {
             const std::string p = "/inh/v" + std::to_string(i);
             classify(g.register_vertex(path_t(p), role_t::STORED_VALUE), c);

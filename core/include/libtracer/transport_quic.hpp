@@ -48,6 +48,22 @@ struct quic_dial_tls_t {
 };
 
 /**
+ * @brief `quic_transport_t`'s knobs as one aggregate (#1593), after the address (and, on a
+ *        dial, the TLS trust).
+ */
+struct quic_config_t {
+    /**
+     * @brief The link's memory (@ref link_memory_t). `rx`: each inbound frame is reassembled
+     *        into a fresh exactly-`len`-byte segment from it (ADR-0042 §2); exhaustion is
+     *        backpressure — the frame is drained, dropped, and `dropped_rx()` ticks.
+     */
+    link_memory_t memory{};
+    /** @brief Receive cap (`:settings max_frame`); 0 → `quic_transport_t::kMaxFrame`.
+     *         Tighten-only (#1035). */
+    std::size_t max_frame = 0;
+};
+
+/**
  * @brief The msquic QUIC transport_t (ADR-0043 Phase A) — length-prefix framing
  *        over ONE bidirectional stream on one connection.
  *
@@ -84,16 +100,10 @@ class quic_transport_t : public transport_t {
      * @param peer_port Peer UDP port (host byte order).
      * @param tls       Server-certificate trust: a CA bundle, or the DEV-ONLY
      *                  no-verify flag (see @ref quic_dial_tls_t).
-     * @param backend   The host-injected RX memory seam (ADR-0042 §2): each
-     *                  inbound frame is reassembled into a fresh
-     *                  exactly-`len`-byte segment from it (default: the process
-     *                  heap). Exhaustion is backpressure — the frame is drained
-     *                  off the stream, dropped, and dropped_rx() ticks; never
-     *                  an OOM. Must outlive the transport.
+     * @param config    The link's knobs (@ref quic_config_t): memory, receive cap.
      */
     quic_transport_t(const std::string& peer_host, std::uint16_t peer_port,
-                     quic_dial_tls_t tls = {}, mem::mem_backend_t* backend = &mem::heap_backend(),
-                     std::size_t max_frame = 0);
+                     quic_dial_tls_t tls = {}, const quic_config_t& config = {});
 
     /**
      * @brief LISTEN mode: serve QUIC on @p bind_port with the PEM certificate
@@ -109,11 +119,10 @@ class quic_transport_t : public transport_t {
      * @param cert_file PEM server-certificate path (tools/gen-dev-cert.sh
      *                  emits a self-signed dev pair).
      * @param key_file  PEM private-key path matching @p cert_file.
-     * @param backend   The RX memory seam — see the DIAL constructor.
+     * @param config    The link's knobs (@ref quic_config_t) — see the DIAL constructor.
      */
     quic_transport_t(std::uint16_t bind_port, const std::string& cert_file,
-                     const std::string& key_file,
-                     mem::mem_backend_t* backend = &mem::heap_backend(), std::size_t max_frame = 0);
+                     const std::string& key_file, const quic_config_t& config = {});
 
     /** @brief Shut the connection down, drain msquic callbacks, and release the
      *         msquic API (listener → stream → connection → registration order). */

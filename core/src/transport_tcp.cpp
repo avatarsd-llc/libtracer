@@ -102,10 +102,11 @@ struct prefixed_iov_t {
 }  // namespace
 
 tcp_transport_t::tcp_transport_t(const std::string& peer_host, std::uint16_t peer_port,
-                                 mem::mem_backend_t* backend, std::size_t max_frame,
-                                 std::size_t recv_stack, bool defer_recv,
-                                 std::uint32_t liveness_window_ms)
-    : backend_(backend), recv_stack_(recv_stack) {
+                                 const tcp_config_t& config)
+    : backend_(config.memory.rx), recv_stack_(config.recv_stack) {
+    const std::size_t max_frame = config.max_frame;
+    const bool defer_recv = config.defer_recv;
+    const std::uint32_t liveness_window_ms = config.liveness_window_ms;
     liveness_window_ms_ = liveness_window_ms;                      // the #838 send bound's source
     max_frame_ = length_prefix_framer::configured_cap(max_frame);  // tighten-only (#1035)
     const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -165,10 +166,11 @@ void tcp_transport_t::start_receiving() {
         recv_stack_);
 }
 
-tcp_transport_t::tcp_transport_t(std::uint16_t bind_port, mem::mem_backend_t* backend,
-                                 std::size_t max_frame, std::size_t recv_stack,
-                                 std::uint32_t liveness_window_ms)
-    : listen_(true), backend_(backend) {
+tcp_transport_t::tcp_transport_t(std::uint16_t bind_port, const tcp_config_t& config)
+    : listen_(true), backend_(config.memory.rx) {
+    const std::size_t max_frame = config.max_frame;
+    const std::size_t recv_stack = config.recv_stack;
+    const std::uint32_t liveness_window_ms = config.liveness_window_ms;
     liveness_window_ms_ = liveness_window_ms;                      // the #838 send bound's source
     max_frame_ = length_prefix_framer::configured_cap(max_frame);  // tighten-only (#1035)
     listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -403,14 +405,13 @@ struct transport_tcp_server::session_t : slot_server_t::session_base_t {
     peer_endpoint_t endpoint;    /**< @brief The directed facade `peer_link` returns. */
 };
 
-transport_tcp_server::transport_tcp_server(std::uint16_t bind_port, mem::mem_backend_t* backend,
-                                           std::size_t max_frame, std::size_t max_peers,
-                                           bool peer_named, std::size_t recv_stack,
-                                           std::uint32_t liveness_window_ms)
-    : stream_server_base_t(max_peers, peer_named, liveness_window_ms), backend_(backend) {
-    max_frame_ = length_prefix_framer::configured_cap(max_frame);  // tighten-only (#1035)
+transport_tcp_server::transport_tcp_server(std::uint16_t bind_port,
+                                           const tcp_server_config_t& config)
+    : stream_server_base_t(config.max_peers, config.peer_named, config.liveness_window_ms),
+      backend_(config.memory.rx) {
+    max_frame_ = length_prefix_framer::configured_cap(config.max_frame);  // tighten-only (#1035)
     if (!bind_listen(bind_port)) return;
-    start([this] { run(); }, recv_stack);
+    start([this] { run(); }, config.recv_stack);
 }
 
 transport_tcp_server::~transport_tcp_server() {

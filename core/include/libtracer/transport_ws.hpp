@@ -110,6 +110,90 @@ inline constexpr std::string_view kWsClientSuggestedModule = "ws-client";
 inline constexpr std::string_view kWsServerSuggestedModule = "ws-server";
 
 /**
+ * @brief `transport_ws_server`'s knobs as one aggregate (#1593), after the bind port.
+ *
+ * Every member defaults to the historical default, so `ws_server_config_t{}` is the
+ * unconfigured server and a caller names only what it sets.
+ */
+struct ws_server_config_t {
+    /**
+     * @brief The link's memory (@ref link_memory_t). `rx`: every inbound message fragment is
+     *        copied into a fresh segment drawn from it (ADR-0042 §2); exhaustion is
+     *        backpressure — the message is shed and `dropped_rx()` ticks; never an OOM.
+     */
+    link_memory_t memory{};
+    /**
+     * @brief Per-connection receive cap (0 → `transport_ws_server::kMaxFrame`). TIGHTEN-ONLY
+     *        (`length_prefix_framer::configured_cap`, #1035), and bounded by the backend's real
+     *        capacity. Checked against the DECLARED length in the WS frame header, so an
+     *        oversize announcement is refused before one body byte is buffered.
+     */
+    std::size_t max_frame = 0;
+    /**
+     * @brief Concurrent-peer admission cap (RFC-0006) — a connection beyond it is accepted and
+     *        immediately closed. `0` takes the liveness window's own ceiling
+     *        (`window / kBoundedWaitMs`, #1295), and a larger request is clamped to it.
+     */
+    std::size_t max_peers = 0;
+    /** @brief Expose the @ref bus_link_t facet (see @ref transport_t::bus): the browser-tabs
+     *         server sets it so each tab gets its own return route. */
+    bool peer_named = false;
+    /** @brief Poll-thread stack size in bytes, 0 = platform default. One thread multiplexes
+     *         the listener and every peer. */
+    std::size_t recv_stack = 0;
+    /**
+     * @brief The PEER LIVENESS WINDOW in ms, `0` = `kDefaultLivenessWindowMs` (#838). One
+     *        fan-out round is bounded by it and a DIRECTED send by window ÷ @ref max_peers
+     *        (#1295), so a tab that stops reading cannot freeze the sending thread; a session
+     *        that stalls `kMaxConsecutiveStalls` records in a row, or once mid-record, is
+     *        closed. It also SIZES the peer cap.
+     */
+    std::uint32_t liveness_window_ms = 0;
+    /**
+     * @brief PRE-AUTH request-size budget for the opening handshake in bytes (0 →
+     *        `transport_ws_server::kMaxHandshakeBytes`). TIGHTEN-ONLY (`handshake_cap`):
+     *        enforced BEFORE the append, so the byte that would exceed it is never copied;
+     *        over budget ⇒ `malformed_rx` ticks and the link is closed (#934).
+     */
+    std::size_t max_handshake = 0;
+};
+
+/**
+ * @brief `transport_ws_client`'s knobs as one aggregate (#1593), after the peer address.
+ */
+struct ws_client_config_t {
+    /**
+     * @brief The link's memory (@ref link_memory_t). `rx`: the receive seam, as the server's.
+     *        `io`: the ADR-0079 EGRESS store (#873) the masked-frame buffer AND the base
+     *        class's gather temporary draw from — one egress store per link. Both bound once,
+     *        at construction.
+     */
+    link_memory_t memory{};
+    /** @brief Receive cap (0 → `transport_ws_server::kMaxFrame`); tighten-only — see
+     *         @ref ws_server_config_t::max_frame. */
+    std::size_t max_frame = 0;
+    /** @brief Recv-thread stack size in bytes, 0 = platform default. */
+    std::size_t recv_stack = 0;
+    /**
+     * @brief Two-phase bring-up (#1025): the handshake still runs in the constructor (so
+     *        `ok()` answers on return) but the recv thread is NOT spawned until
+     *        `start_receiving`, so a server that pushes the instant the handshake completes
+     *        cannot land a message before the receiver is installed.
+     */
+    bool defer_recv = false;
+    /** @brief The PEER LIVENESS WINDOW in ms, `0` = `kDefaultLivenessWindowMs` (#838): it
+     *         bounds every send, and `kMaxConsecutiveStalls` stalled records in a row close
+     *         the connection. */
+    std::uint32_t liveness_window_ms = 0;
+    /**
+     * @brief The DIAL half of the pre-auth handshake budget (#934), resolved through
+     *        `transport_ws_server::handshake_cap` (0 → the default; tighten-only). It bounds
+     *        the RESPONSE header block the dialled server may make this node accumulate.
+     */
+    std::size_t max_handshake = 0;
+};
+
+/**
  * @brief A WebSocket (RFC 6455) server transport_t — accepts many inbound peers
  *        and exposes them through the @ref bus_link_t facet (ADR-0044).
  *
@@ -177,66 +261,11 @@ class transport_ws_server : public stream_server_base_t {
      * socket bound. The bound port is observable via local_port().
      *
      * @param bind_port TCP port to listen on (host byte order; 0 → ephemeral).
-     * @param backend   The host-injected RX memory seam (ADR-0042 §2), the same
-     *                  parameter tcp/quic/webtransport take in the same position:
-     *                  every inbound message fragment is copied into a fresh
-     *                  segment drawn from it (default: the process heap; a
-     *                  bounded host passes its pool). Exhaustion is
-     *                  backpressure — the message is shed and dropped_rx()
-     *                  ticks; never an OOM. Must outlive the transport.
-     * @param max_frame Per-connection receive cap (0 → @ref kMaxFrame).
-     *                  TIGHTEN-ONLY: a value above kMaxFrame is clamped to it
-     *                  (`length_prefix_framer::configured_cap`, #1035) — a
-     *                  config-writable key must not raise the ingress
-     *                  buffering bound; the effective cap also honors the
-     *                  backend's real capacity
-     *                  (`length_prefix_framer::effective_cap` — the
-     *                  no-synthetic-limits doctrine). It is checked against the
-     *                  DECLARED length in the WS frame header, so an oversize
-     *                  announcement is refused before one body byte is buffered.
-     * @param max_peers Concurrent-peer admission cap. A deployment-injected
-     *                  bound (RFC-0006) — a connection beyond it is accepted
-     *                  and immediately closed (a clean refusal, not a hung
-     *                  SYN). `0` no longer means UNBOUNDED (#1295): it takes
-     *                  the liveness window's own ceiling
-     *                  (`window / kBoundedWaitMs`), and a larger request is
-     *                  clamped to that ceiling, because the cap is the
-     *                  denominator every send bound divides by. Read the
-     *                  enforced value back from `slot_server_t::max_peers`.
-     * @param peer_named Expose the @ref bus_link_t facet (see @ref transport_t::bus). A
-     *                   wiring-time deployment choice: the browser-SPA/tabs
-     *                   server sets it so each tab gets its own return route;
-     *                   a point-to-point link keeps the default (its registered
-     *                   child NAME stays the hop name, as tcp/quic).
-     * @param recv_stack Poll-thread stack size in bytes, 0 = platform default
-     *                   (`posix_endpoint_t::start`). One thread multiplexes
-     *                   the listener and every peer, so this is the whole
-     *                   server's recv-stack knob.
-     * @param liveness_window_ms The app-provided PEER LIVENESS WINDOW in ms, `0` =
-     *                   `kDefaultLivenessWindowMs` (#838). One fan-out round is bounded
-     *                   by it (each peer gets window ÷ peers-in-the-round) and a DIRECTED
-     *                   send by window ÷ @p max_peers (#1295), so a browser tab that stops
-     *                   reading — a throttled background tab is the shipped case — can no
-     *                   longer freeze the sending thread or the other tabs' frames behind
-     *                   it, on either path; a session that stalls `kMaxConsecutiveStalls`
-     *                   records in a row, or once mid-record, is closed. It also SIZES the
-     *                   peer cap: see @p max_peers.
-     * @param max_handshake PRE-AUTH request-size budget for the opening handshake in
-     *                   bytes (0 → @ref kMaxHandshakeBytes, today's behaviour).
-     *                   TIGHTEN-ONLY: a value above the default is clamped to it
-     *                   (@ref handshake_cap) — the peer on this path has authenticated
-     *                   nothing, so a config-writable key may narrow what it may cost the
-     *                   node and never widen it. The budget is a TOTAL-REQUEST one, not a
-     *                   per-read one, and it is enforced BEFORE the append: the byte that
-     *                   would exceed it is never copied into the slot. Over budget ⇒
-     *                   @ref malformed_rx ticks and the link is closed (#934).
+     * @param config    The server's knobs (@ref ws_server_config_t): memory, receive cap,
+     *                  peer cap, bus facet, poll-thread stack, liveness window, handshake
+     *                  budget.
      */
-    explicit transport_ws_server(std::uint16_t bind_port,
-                                 mem::mem_backend_t* backend = &mem::heap_backend(),
-                                 std::size_t max_frame = 0, std::size_t max_peers = 0,
-                                 bool peer_named = false, std::size_t recv_stack = 0,
-                                 std::uint32_t liveness_window_ms = 0,
-                                 std::size_t max_handshake = 0);
+    explicit transport_ws_server(std::uint16_t bind_port, const ws_server_config_t& config = {});
 
     /** @brief Stop the recv thread and close all sockets. */
     ~transport_ws_server() override;
@@ -415,57 +444,12 @@ class transport_ws_client : public transport_t, private stream_endpoint_t {
      *
      * @param host Dotted-quad IPv4 address of the peer (e.g. "127.0.0.1").
      * @param port TCP port of the peer (host byte order).
-     * @param backend The host-injected RX memory seam — see
-     *             transport_ws_server's constructor; a DIALLED peer is no more
-     *             trusted than an accepted one, so the client takes the same
-     *             seam in the same position as `tcp_transport_t`'s DIAL form.
-     * @param max_frame Per-connection receive cap (0 → @ref
-     *             transport_ws_server::kMaxFrame; a value above it is clamped —
-     *             tighten-only, `length_prefix_framer::configured_cap`, #1035),
-     *             bounded by the backend's real capacity — see
-     *             transport_ws_server's constructor.
-     * @param recv_stack Recv-thread stack size in bytes, 0 = platform default
-     *             (`posix_endpoint_t::start`).
-     * @param defer_recv Two-phase bring-up (#1025): with `true` the handshake still runs
-     *             HERE (so ok() answers on return) but the recv thread is NOT spawned —
-     *             nothing can be decoded, let alone delivered, until @ref start_receiving
-     *             is called. That is the only ordering in which
-     *             `%transport_t::set_receiver`'s "must be set before frames flow" is
-     *             satisfiable on a DIAL socket: a server that pushes its state the instant
-     *             the handshake completes has its first message in flight before this
-     *             constructor returns, and the default (`false`, the historical shape)
-     *             decodes it on the recv thread into whatever sink is installed by then —
-     *             possibly none, in which case it is dropped with no counter moving.
-     * @param liveness_window_ms The app-provided PEER LIVENESS WINDOW in ms, `0` =
-     *             `kDefaultLivenessWindowMs` (#838): it bounds every send (and the
-     *             write-mutex hold it takes), so a server that stops reading cannot freeze
-     *             the sending thread; `kMaxConsecutiveStalls` stalled records in a row,
-     *             or one that half-reached the wire, close the connection.
-     * @param egress_src The ADR-0079 EGRESS store (#873) this link's masked-frame buffer
-     *             (`%tx_buf_`) is drawn from. It is passed to the CONSTRUCTOR rather than
-     *             wired afterwards because `mem::block_array_t` binds its source once, at
-     *             construction: a later @ref transport_t::set_egress_source moves the
-     *             base's gather temporary but can no longer reach this member. This
-     *             constructor applies @p egress_src to both, so a link built here has ONE
-     *             egress store. `nullptr` (and the default) means the process heap —
-     *             today's behaviour unchanged. Must outlive this transport.
-     * @param max_handshake The DIAL half of the pre-auth handshake budget (#934), resolved
-     *             through `transport_ws_server::handshake_cap` so both roles read one home
-     *             (0 → `transport_ws_server::kMaxHandshakeBytes`; above it is clamped —
-     *             tighten-only). It bounds the RESPONSE header block the dialled server may
-     *             make this node accumulate: the recv is sized by what is left of the
-     *             budget, so the accumulation never passes it, and a budget exhausted with
-     *             no CRLFCRLF in hand ticks @ref malformed_rx and fails the dial. It does
-     *             NOT bound what the server pipelines BEHIND its `101` — those are frame
-     *             bytes, bounded by @p max_frame, and whatever does not fit the budget is
-     *             simply left on the socket for the recv loop.
+     * @param config The link's knobs (@ref ws_client_config_t): memory (receive seam and
+     *             egress store), receive cap, recv-thread stack, deferred receive, liveness
+     *             window, handshake budget.
      */
     transport_ws_client(const std::string& host, std::uint16_t port,
-                        mem::mem_backend_t* backend = &mem::heap_backend(),
-                        std::size_t max_frame = 0, std::size_t recv_stack = 0,
-                        bool defer_recv = false, std::uint32_t liveness_window_ms = 0,
-                        mem::block_source_t* egress_src = &mem::heap_source(),
-                        std::size_t max_handshake = 0);
+                        const ws_client_config_t& config = {});
 
     /** @brief Stop the recv thread and close the socket. */
     ~transport_ws_client() override;

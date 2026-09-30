@@ -664,7 +664,7 @@ class node_t {
      * where it belongs — by injecting `heap_source()`, which the graph folds straight back onto
      * `new_delete_resource()`. Same composition, one knob instead of two. */
     void build_graph() {
-        g_ = std::make_unique<graph_t>(ctl_src_);
+        g_ = std::make_unique<graph_t>(*ctl_src_);
         // `label_src` and the DEFAULT `rx` both take the net-plane store, per ADR-0079's
         // composition table. NARROW has no node-wide net store — every child overrides `rx`
         // through `add_child` — so its label table takes the GRAPH store rather than the heap:
@@ -674,7 +674,8 @@ class node_t {
         // channel's per-frame draw count.
         tr::mem::block_source_t* const label_src = rx_src_ != nullptr ? rx_src_ : plane_fallback_;
         tr::mem::block_source_t* const rx_default = label_src;
-        router_ = std::make_unique<fwd_router_t>(*g_, label_src, rx_default);
+        router_ = std::make_unique<fwd_router_t>(
+            *g_, tr::net::router_planes_t{.label_src = label_src, .rx = rx_default});
     }
 
     /** @brief Build each lane's links, frame, vertices and — in NARROW — its own two stores. */

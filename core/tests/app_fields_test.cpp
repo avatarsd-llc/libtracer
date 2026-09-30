@@ -168,7 +168,7 @@ void test_declare_read_write() {
                                 .access = app_access_t::RW,
                                 .descriptor = dtype_desc("f32"),
                                 .value = initial});
-    g.set_app_fields(v, std::move(table));
+    (void)g.set_policy(v, {.app_fields = std::move(table)});
 
     check(reads_back(g.read(path_t("/ctrl/pid:settings.app.kp")), initial),
           "initial value reads back verbatim");
@@ -201,7 +201,7 @@ void test_undeclared_enotty() {
 
     std::vector<app_field_t> table;
     table.push_back(app_field_t{.name = "kp", .access = app_access_t::RW});
-    g.set_app_fields(v, std::move(table));
+    (void)g.set_policy(v, {.app_fields = std::move(table)});
 
     check(fails_with(g.write(path_t("/dev/x:settings.app.undeclared"), make_value(val)),
                      status_t::SCHEMA_NOT_FOUND),
@@ -283,14 +283,18 @@ void test_field_set_is_closed() {
 void test_gating() {
     std::printf("access gating (RFC-0010 sketch 3):\n");
     graph_t g;
-    g.configure_subject_resolver(caller_is_subject, nullptr);
+    {
+        auto hooks = g.hooks();
+        hooks.subject_resolver = {caller_is_subject, nullptr};
+        g.set_hooks(hooks);
+    }
     const vertex_handle_t v = g.register_vertex(path_t("/dev/y"), role_t::STORED_VALUE);
 
     std::vector<app_field_t> table;
     table.push_back(app_field_t{.name = "label", .access = app_access_t::RO});
     table.push_back(app_field_t{.name = "kp", .access = app_access_t::RW});
     table.push_back(app_field_t{.name = "secret", .access = app_access_t::WO});
-    g.set_app_fields(v, std::move(table));
+    (void)g.set_policy(v, {.app_fields = std::move(table)});
 
     const path_t p_label("/dev/y:settings.app.label");
     const path_t p_kp("/dev/y:settings.app.kp");
@@ -347,7 +351,7 @@ void test_schema_merge() {
     table.push_back(
         app_field_t{.name = "kp", .access = app_access_t::RW, .descriptor = dtype_desc("f32")});
     table.push_back(app_field_t{.name = "secret", .access = app_access_t::WO});
-    g.set_app_fields(v, std::move(table));
+    (void)g.set_policy(v, {.app_fields = std::move(table)});
 
     const std::optional<decoded_t> after = decode_read(g.read(path_t("/dev/z:schema")));
     check(after.has_value() && after->tlv.children.size() == 4,
@@ -378,7 +382,7 @@ void test_schema_merge() {
           "wo field is DESCRIBED in :schema (only its value has no read surface)");
 
     // Uninstall (empty table) restores today's shape byte-for-byte.
-    g.set_app_fields(v, {});
+    (void)g.set_policy(v, {.app_fields = {}});
     const std::optional<decoded_t> cleared = decode_read(g.read(path_t("/dev/z:schema")));
     check(cleared.has_value() && tr::wire::encode(cleared->tlv) == tr::wire::encode(before->tlv),
           "empty table uninstalls: schema byte-identical to the pre-install read");
@@ -395,7 +399,7 @@ void test_announce_flow() {
 
     std::vector<app_field_t> table;
     table.push_back(app_field_t{.name = "offset", .access = app_access_t::RW});
-    g.set_app_fields(temp, std::move(table));
+    (void)g.set_policy(temp, {.app_fields = std::move(table)});
 
     int deliveries = 0;
     check(g.subscribe(
@@ -433,7 +437,7 @@ void test_storage_shape() {
         table.push_back(app_field_t{.name = "f" + std::to_string(i),
                                     .access = app_access_t::RW,
                                     .descriptor = dtype_desc("u32")});
-    g.set_app_fields(v, std::move(table));
+    (void)g.set_policy(v, {.app_fields = std::move(table)});
     bool all_writes_ok = true;
     for (int i = 0; i < 16; ++i) {
         const path_t p("/dev/n:settings.app.f" + std::to_string(i));
@@ -475,7 +479,7 @@ void test_container_reads() {
     table.push_back(app_field_t{.name = "unwritten", .access = app_access_t::RW});
     table.push_back(
         app_field_t{.name = "secret", .access = app_access_t::WO, .value = value_tlv("s")});
-    g.set_app_fields(v, std::move(table));
+    (void)g.set_policy(v, {.app_fields = std::move(table)});
 
     const std::optional<decoded_t> app = decode_read(g.read(path_t("/dev/c:settings.app")));
     check(app.has_value() && app->tlv.type == type_t::SETTINGS && app->tlv.children.size() == 2 &&
@@ -517,7 +521,7 @@ void test_apply_seam() {
 
     std::vector<app_field_t> table;
     table.push_back(app_field_t{.name = "mode", .access = app_access_t::RW});
-    g.set_app_fields(v, std::move(table));
+    (void)g.set_policy(v, {.app_fields = std::move(table)});
 
     const std::vector<std::byte> val = value_tlv("eco");
     check(g.write(path_t("/dev/h:settings.app.mode"), make_value(val)).has_value(),
@@ -547,13 +551,13 @@ void test_table_replace() {
 
     std::vector<app_field_t> t1;
     t1.push_back(app_field_t{.name = "old", .access = app_access_t::RW});
-    g.set_app_fields(v, std::move(t1));
+    (void)g.set_policy(v, {.app_fields = std::move(t1)});
     check(g.write(path_t("/dev/r:settings.app.old"), make_value(value_tlv("1"))).has_value(),
           "field of the first table is writable");
 
     std::vector<app_field_t> t2;
     t2.push_back(app_field_t{.name = "new", .access = app_access_t::RW});
-    g.set_app_fields(v, std::move(t2));
+    (void)g.set_policy(v, {.app_fields = std::move(t2)});
     check(fails_with(g.write(path_t("/dev/r:settings.app.old"), make_value(value_tlv("2"))),
                      status_t::SCHEMA_NOT_FOUND),
           "a replaced-away name reverts to SCHEMA_NOT_FOUND");
@@ -610,13 +614,13 @@ void test_borrowed_static_install() {
     std::vector<app_field_t> owned;
     owned.push_back(app_field_t{.name = "kp", .access = app_access_t::RW, .descriptor = kp_desc});
     owned.push_back(app_field_t{.name = "secret", .access = app_access_t::WO});
-    g.set_app_fields(owning, std::move(owned));
+    (void)g.set_policy(owning, {.app_fields = std::move(owned)});
 
-    g.set_app_fields_static(borrow, borrowed);
+    (void)g.set_policy(borrow, {.app_fields = borrowed});
 
     // The escape hatch a runtime-sized binding uses (the C shim's .bss slot array): same
     // install, lifetime asserted by the caller instead of checked by the argument's shape.
-    g.set_app_fields_static(escape, guard_t::unchecked(borrowed));
+    (void)g.set_policy(escape, {.app_fields = guard_t::unchecked(borrowed)});
 
     // :schema is byte-identical across the two install paths (the ADR's wire-invariance).
     const std::optional<decoded_t> da = decode_read(g.read(path_t("/x/pid:schema")));
@@ -641,7 +645,7 @@ void test_borrowed_static_install() {
           "borrowed: undeclared sibling stays SCHEMA_NOT_FOUND");
 
     // Empty table uninstalls, reverting to the closed pre-RFC surface.
-    g.set_app_fields_static(borrow, {});
+    (void)g.set_policy(borrow, {.app_fields = {}});
     check(fails_with(g.read(path_t("/y/pid:settings.app.kp")), status_t::SCHEMA_NOT_FOUND),
           "borrowed: empty table uninstalls (back to SCHEMA_NOT_FOUND)");
 }
@@ -679,7 +683,7 @@ void test_shape_gates_no_test_defended() {
     std::vector<app_field_t> table;
     table.push_back(app_field_t{
         .name = "kp", .access = app_access_t::RW, .descriptor = dtype_desc("f32"), .value = good});
-    g.set_app_fields(v, std::move(table));
+    (void)g.set_policy(v, {.app_fields = std::move(table)});
     check(reads_back(g.read(path_t("/ctrl/pid:settings.app.kp")), good),
           "the declared field is readable to begin with");
 

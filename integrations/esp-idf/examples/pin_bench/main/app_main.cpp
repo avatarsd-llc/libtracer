@@ -29,7 +29,7 @@
  *
  * @section pinb_arms Arms, and why they interleave inside one boot
  *
- * The threshold is declared per vertex through `graph_t::set_share_threshold_bytes` rather
+ * The threshold is declared per vertex through `vertex_policy_t::share_threshold_bytes` rather
  * than through `config_t::kShareThresholdBytes`, exactly as in the host bench, so every arm
  * rotates inside ONE image and ONE boot. Building one flash image per threshold and running
  * them back to back would reintroduce the sequential-run confound at the worst possible place
@@ -227,7 +227,8 @@ cell_t run_cell(rx_pool_t& pool, std::size_t threshold, std::size_t vertices, st
     for (std::size_t i = 0; i < vertices; ++i) {
         handles.push_back(
             g.register_vertex(path_t("/s/b" + std::to_string(i)), role_t::STORED_VALUE));
-        g.set_share_threshold_bytes(handles.back(), threshold);  // the arm's threshold
+        (void)g.set_policy(handles.back(),
+                           {.share_threshold_bytes = threshold});  // the arm's threshold
     }
 
     std::vector<std::vector<std::byte>> frames;

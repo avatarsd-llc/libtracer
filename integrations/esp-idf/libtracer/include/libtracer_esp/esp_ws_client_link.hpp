@@ -200,6 +200,52 @@
 namespace tr::net {
 
 /**
+ * @brief `esp_ws_client_link_t`'s knobs as one aggregate (#1593, RFC-0028 §8.2), after the
+ *        peer address.
+ *
+ * Every member defaults to the historical default, so `esp_ws_client_config_t{}` is the
+ * unconfigured link. There is no @ref link_memory_t member: this kind's receive and send
+ * buffers are its own fixed `rx_bytes`/`tx_bytes` allocations, and it delivers borrowed
+ * spans, so it has no RX seam to inject (the same position as `socketcan_link_t`).
+ */
+struct esp_ws_client_config_t {
+    /** @brief The WS URI requested in the handshake (default "/ws", matching the
+     *         `httpd_ws_link_t` server mount). */
+    std::string ws_path = "/ws";
+    /**
+     * @brief Extra HTTP header lines appended to the opening-handshake request, each
+     *        `Name: value\r\n`-terminated (`esp_transport_ws` emits them verbatim); empty
+     *        leaves the field null, so the handshake is byte-for-byte the historical one. The
+     *        client counterpart to `httpd_ws_link_t::set_admission_cb`: a board-to-board dial
+     *        carries no browser session cookie, so a token header here is how a dialing node
+     *        authenticates itself. A CONSTRUCTOR knob, not a setter, because the recv thread
+     *        dials as soon as it exists (#959). Applied to the first dial and every re-dial.
+     */
+    std::string handshake_headers{};
+    /** @brief Reusable receive-buffer size (one inbound message must fit); our control TLVs
+     *         are small, so the default is modest. */
+    std::size_t rx_bytes = 2048;
+    /**
+     * @brief Reusable send-scratch size (one outbound frame must fit). A larger outbound frame
+     *        is DROPPED whole — counted on `stats().c.tx_drops` and LOGGED with both sizes
+     *        (#959), since the same counter also moves when the peer is down.
+     */
+    std::size_t tx_bytes = 2048;
+    /** @brief Recv-thread stack in bytes, HONORED (#900): the recv thread runs in-call
+     *         delivery through the graph's on_write seam, the deep path. 0 = the platform
+     *         pthread default. */
+    std::size_t recv_stack = 0;
+    /**
+     * @brief Hold the FIRST dial until `start_receiving` (ADR-0081's defer-the-dial arm,
+     *        #1102): the recv thread is spawned but parks before its first connect, so a
+     *        peer's push-on-connect cannot land before the receiver sink is installed. An
+     *        unarmed link never dials, so `ok()` stays false until armed. Default false, the
+     *        historical dial-at-once contract.
+     */
+    bool defer_recv = false;
+};
+
+/**
  * @brief A WebSocket (RFC 6455) *client* `transport_t` on ESP-IDF `esp_transport_ws`
  *        — dials one peer and exposes it through the point-to-point `transport_t` seam.
  *
@@ -220,49 +266,11 @@ class esp_ws_client_link_t : public transport_t {
      *
      * @param host     The peer's IPv4 dotted-quad or hostname (the graph plane's WS host).
      * @param port     The peer's TCP port (its :80 esp_http_server, for the /ws mount).
-     * @param ws_path  The WS URI to request in the handshake (default "/ws", matching
-     *                 the httpd_ws_link_t server mount).
-     * @param handshake_headers Extra HTTP header lines appended to the opening-handshake
-     *                 request, each `Name: value\r\n`-terminated (`esp_transport_ws` emits
-     *                 them verbatim); empty leaves the field null, so the handshake is
-     *                 byte-for-byte the historical one. The client counterpart to
-     *                 @ref httpd_ws_link_t::set_admission_cb: a board-to-board dial carries
-     *                 no browser session cookie, so a token header here is how a dialing
-     *                 node authenticates itself to a peer whose graph WS gates admission.
-     *                 It is a CONSTRUCTOR argument and not a setter because the recv thread
-     *                 dials as soon as it exists — see the threading note (#959). Applied
-     *                 to the first dial and to every re-dial.
-     * @param rx_bytes Reusable receive-buffer size (one inbound message must fit); our
-     *                 control TLVs are small, so the default is modest.
-     * @param tx_bytes Reusable send-scratch size (one outbound frame must fit). An
-     *                 outbound frame larger than this is DROPPED whole — counted on
-     *                 `stats().c.tx_drops` and LOGGED with both sizes (#959). The log is
-     *                 what makes the ceiling nameable: the same `tx_drops` is bumped when
-     *                 the peer is down and on a short write, so the counter alone does not
-     *                 say which drop happened, let alone which knob was too small.
-     * @param recv_stack Recv-thread stack in bytes, HONORED (#900): the recv thread runs
-     *                   in-call delivery through the graph's on_write seam, which is the
-     *                   deep path, so a node that knows its delivery depth sizes it here.
-     *                   0 = the platform pthread default.
-     * @param defer_recv Hold the FIRST dial until @ref start_receiving (ADR-0081's
-     *                   defer-the-dial arm, #1102). The recv thread is spawned but parks
-     *                   before its first connect, so a peer's push-on-connect cannot land
-     *                   before the owner has installed the receiver sink — the recipe is
-     *                   construct with this set, `provide_link`, issue the creating write
-     *                   (whose `make_connection` installs the sink and then arms every
-     *                   link unconditionally). The COST is deliberate and documented: an
-     *                   unarmed link never dials, so @ref ok stays false and the
-     *                   reconnect/keepalive/departure machinery is all off until armed —
-     *                   an embedder that sets this and never arms the link has a link
-     *                   that never connects. Default false, the historical dial-at-once
-     *                   contract: there is no `ws` factory on a chip target to pass this
-     *                   flag (the `tcp`/core-`ws` factories pass their `defer_recv`
-     *                   themselves), so opting in is the embedder's move.
+     * @param config   The link's knobs (@ref esp_ws_client_config_t): URI, handshake headers,
+     *                 buffer sizes, recv-thread stack, deferred first dial.
      */
-    explicit esp_ws_client_link_t(std::string host, std::uint16_t port, std::string ws_path = "/ws",
-                                  std::string handshake_headers = {}, std::size_t rx_bytes = 2048,
-                                  std::size_t tx_bytes = 2048, std::size_t recv_stack = 0,
-                                  bool defer_recv = false);
+    explicit esp_ws_client_link_t(std::string host, std::uint16_t port,
+                                  const esp_ws_client_config_t& config = {});
 
     /**
      * @brief Stop the recv thread, then close + destroy the esp_transport handles.
@@ -416,10 +424,20 @@ class esp_ws_client_link_t : public transport_t {
      *
      * `c.rx_drops` is NOT a second tally: it is read straight from @ref dropped_rx, so
      * this link has exactly one inbound-drop truth and both spellings always agree.
+     *
+     * `dial_attempts` / `dial_failures` make the failure arm visible (#1606 ask 1): a
+     * failed dial also logs a WARN, rate-limited to one per `kDialWarnIntervalUs`, naming
+     * the peer and the running failure count.
      */
     struct stats_t {
         link_counters_t c;            /**< @brief Traffic counters (see link_stats.hpp). */
         std::uint32_t reconnects = 0; /**< @brief Completed handshakes since construction. */
+        /** @brief Dial attempts since construction, successful or not (#1606). */
+        std::uint32_t dial_attempts = 0;
+        /** @brief Dial attempts that did NOT complete a handshake (#1606) — together with
+         *         @ref dial_attempts, what tells "hammering an unreachable peer" apart from
+         *         "never tried". */
+        std::uint32_t dial_failures = 0;
         std::uint32_t connect_ms = 0; /**< @brief Last handshake duration, ms (0 = never). */
         bool up = false; /**< @brief @ref link_up at the instant of the snapshot — LIVENESS,
                           *          which is what this field always meant (#1203). */
@@ -624,6 +642,13 @@ class esp_ws_client_link_t : public transport_t {
     link_counters_t st_;
     /** @brief Completed handshakes since construction — st_m_. */
     std::uint32_t reconnects_ = 0;
+    /** @brief Dial attempts since construction — st_m_ (#1606). */
+    std::uint32_t dial_attempts_ = 0;
+    /** @brief Dial attempts that completed no handshake — st_m_ (#1606). */
+    std::uint32_t dial_failures_ = 0;
+    /** @brief `esp_timer_get_time()` of the last failed-dial WARN, for its rate limit; recv
+     *         thread only. */
+    std::int64_t last_dial_warn_us_ = 0;
     /** @brief Last successful dial's handshake duration in ms — st_m_. */
     std::uint32_t connect_ms_ = 0;
     /** @brief Liveness — what @ref link_up reports, and the handles' publication flag.

@@ -32,11 +32,11 @@
  *
  *   - (a) `served() == node_count` and every served size is exactly the 4-byte header — revert
  *     the redirect and `served()` is 0, reddening both;
- *   - (a2) a strict global-`new` differential: a POOL-backed graph makes exactly `2 * node_count`
+ *   - (a2) a strict global-`new` differential: a POOL-backed graph makes at least `node_count`
  *     FEWER global allocations across the identical folded read than a heap-backed one (the heap
- *     backend spends one global `new` on the bytes and one on the `segment_t` per header, where
- *     the pool carves both from its slab). On the old code the two arms are equal and this
- *     reddens;
+ *     backend spends one global `new` per header — the one-block segment since RFC-0028 slice
+ *     10 — where the pool carves it from its slab). On the old code the two arms are equal and
+ *     this reddens;
  *   - (b) exhaustion answered BY VALUE — a fully refusing backend yields `BACKPRESSURE` (not an
  *     abort, not a partial rope), and refusing only the LAST header still rejects the whole
  *     read. On the old code the refusing backend is never consulted and the read SUCCEEDS,
@@ -321,7 +321,7 @@ int main() {
     // `view::heap_alloc` code the backend is asked for nothing and served() is 0.
     {
         arming_source_t be;
-        graph_t g(&be);
+        graph_t g(be);
         const vertex_handle_t root = build_subtree(g, payload);
         const int before = be.served();
         check(before == 0, "no write in the fixture touches the value seam (single-link stores)");
@@ -340,7 +340,7 @@ int main() {
         graph_t heap_g;
         const vertex_handle_t heap_root = build_subtree(heap_g, payload);
         scratch_pool_t sp;
-        graph_t pool_g(&sp.pool);
+        graph_t pool_g(sp.pool);
         const vertex_handle_t pool_root = build_subtree(pool_g, payload);
         // Warm both paths once outside the count so no first-touch lazily-built state is
         // attributed to either arm.
@@ -358,23 +358,23 @@ int main() {
 
         std::printf("    (global new: heap arm %zu, pool arm %zu)\n", heap_arm, pool_arm);
         check(pool_arm < heap_arm, "a pool-backed folded read hits the global heap LESS");
-        // `heap_backend_t::alloc` makes TWO global-new calls per segment — the bytes and the
-        // `segment_t` control object — where the pool carves both from its slab, so the exact
-        // expected delta is 2 per node.
+        // `heap_backend_t::alloc` makes ONE global-new call per segment (the one-block layout,
+        // RFC-0028 slice 10: header and bytes in one block) where the pool carves it from its
+        // slab, so the expected delta is 1 per node.
         // AT LEAST, not exactly, since #873 phase 1: the pool arm's ONE injected source now
         // also serves the composed read's collect stack and any pmr block the read touches,
         // where before those stayed on the global heap in both arms and the delta was exactly
         // the header count. The floor is still the header count, and on the old code the two
         // arms are equal, so the row is non-vacuous in the same way.
-        check(heap_arm - pool_arm >= 2u * static_cast<std::size_t>(kNodeCount),
-              "the difference covers at least the per-node header count (2 global news each)");
+        check(heap_arm - pool_arm >= static_cast<std::size_t>(kNodeCount),
+              "the difference covers at least the per-node header count (1 global new each)");
     }
 
     // (b) EXHAUSTION answered BY VALUE. A fully refusing backend makes the FIRST header
     // allocation fail: BACKPRESSURE, by value, never an abort and never a partial rope.
     {
         arming_source_t be;
-        graph_t g(&be);
+        graph_t g(be);
         const vertex_handle_t root = build_subtree(g, payload);
         be.arm();
         const auto r = g.read_subtree_folded(root, "peer");
@@ -387,7 +387,7 @@ int main() {
     // whole read still rejects rather than returning a short subtree.
     {
         arming_source_t be;
-        graph_t g(&be);
+        graph_t g(be);
         const vertex_handle_t root = build_subtree(g, payload);
         be.serve_first(kNodeCount - 1);
         const auto r = g.read_subtree_folded(root, "peer");
@@ -403,7 +403,7 @@ int main() {
         graph_t heap_g;
         const vertex_handle_t heap_root = build_subtree(heap_g, payload);
         scratch_pool_t sp;
-        graph_t pool_g(&sp.pool);
+        graph_t pool_g(sp.pool);
         const vertex_handle_t pool_root = build_subtree(pool_g, payload);
         const std::vector<std::byte> a = folded_bytes(heap_g, heap_root);
         const std::vector<std::byte> b = folded_bytes(pool_g, pool_root);
@@ -417,7 +417,7 @@ int main() {
     // first, and on the old `view::over_bytes` code served() is 0.
     {
         arming_source_t be;
-        graph_t g(&be);
+        graph_t g(be);
         const vertex_handle_t root = build_subtree(g, payload);
         check(be.served() == 0, "no write in the fixture touches the value seam (:children arm)");
         const auto r = g.read_children_folded(root);
@@ -434,7 +434,7 @@ int main() {
     // actually reaches this code by. Without this the fix could be proven only on a direct call.
     {
         arming_source_t be;
-        graph_t g(&be);
+        graph_t g(be);
         (void)build_subtree(g, payload);
         const auto r = g.read(path_t("/s:children"));
         check(r.has_value(), "the production :children field read succeeds");
@@ -443,14 +443,14 @@ int main() {
     }
 
     // ...and NOT the global heap, by the same strict differential as (a2): the identical
-    // ":children" fold over a POOL-backed graph makes exactly 2 fewer global allocations per
-    // framed header (the heap backend spends one global `new` on the bytes and one on the
-    // `segment_t`, where the pool carves both from its slab). On the old code the arms are equal.
+    // ":children" fold over a POOL-backed graph makes at least 1 fewer global allocation per
+    // framed header (the heap backend spends one global `new` on the one-block segment, where
+    // the pool carves it from its slab). On the old code the arms are equal.
     {
         graph_t heap_g;
         const vertex_handle_t heap_root = build_subtree(heap_g, payload);
         scratch_pool_t sp;
-        graph_t pool_g(&sp.pool);
+        graph_t pool_g(sp.pool);
         const vertex_handle_t pool_root = build_subtree(pool_g, payload);
         (void)children_bytes(heap_g, heap_root);  // warm both arms outside the count
         (void)children_bytes(pool_g, pool_root);
@@ -466,8 +466,8 @@ int main() {
 
         std::printf("    (:children global new: heap arm %zu, pool arm %zu)\n", heap_arm, pool_arm);
         check(pool_arm < heap_arm, "a pool-backed :children fold hits the global heap LESS");
-        check(heap_arm - pool_arm >= 2u * static_cast<std::size_t>(kDirectChildCount + 1),
-              "the difference covers at least the member+outer header count (2 news each)");
+        check(heap_arm - pool_arm >= static_cast<std::size_t>(kDirectChildCount + 1),
+              "the difference covers at least the member+outer header count (1 new each)");
     }
 
     // (e) EXHAUSTION on the :children fold, answered BY VALUE. Fully refusing first, then a LATE
@@ -475,7 +475,7 @@ int main() {
     // never be returned under an OK status.
     {
         arming_source_t be;
-        graph_t g(&be);
+        graph_t g(be);
         const vertex_handle_t root = build_subtree(g, payload);
         be.arm();
         const auto r = g.read_children_folded(root);
@@ -485,7 +485,7 @@ int main() {
     }
     {
         arming_source_t be;
-        graph_t g(&be);
+        graph_t g(be);
         const vertex_handle_t root = build_subtree(g, payload);
         be.serve_first(kDirectChildCount);  // every member header, then refuse the outer one
         const auto r = g.read_children_folded(root);
@@ -501,7 +501,7 @@ int main() {
         graph_t heap_g;
         const vertex_handle_t heap_root = build_subtree(heap_g, payload);
         scratch_pool_t sp;
-        graph_t pool_g(&sp.pool);
+        graph_t pool_g(sp.pool);
         const vertex_handle_t pool_root = build_subtree(pool_g, payload);
         const std::vector<std::byte> a = children_bytes(heap_g, heap_root);
         const std::vector<std::byte> b = children_bytes(pool_g, pool_root);

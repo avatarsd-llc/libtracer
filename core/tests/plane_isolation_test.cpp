@@ -146,8 +146,8 @@ struct node_t {
     explicit node_t(bool folded)
         : net_src(net_slab, tr::mem::null_source()),
           graph_src(graph_slab, tr::mem::null_source()),
-          g(folded ? &net_src : &graph_src),
-          router(g, &net_src, &net_src) {}
+          g(folded ? static_cast<tr::mem::block_source_t&>(net_src) : graph_src),
+          router(g, {.label_src = &net_src, .rx = &net_src}) {}
 
     /** @brief The NET plane's slab. */
     alignas(std::max_align_t) std::array<std::byte, kSlabBytes> net_slab{};

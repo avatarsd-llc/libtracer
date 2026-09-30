@@ -291,7 +291,7 @@ endif()
 # Amendment 2 measured a 29-slot C6 pool collapsing once the live shared set crossed the slot
 # count. It is exactly the posture this component shipped before the knob (the retired pin
 # ratio's never-pin sentinel); an app that wants zero-copy on a vertex declares it per vertex
-# with `graph_t::set_share_threshold_bytes`.
+# with `vertex_policy_t::share_threshold_bytes`.
 # What this component deliberately does NOT state, because core's default is already the right
 # answer here: the ACL profile (`allow_only_policy_t`, the MCU profile — no full-ACL Kconfig
 # yet) and the hazard reader slots (unused on a chip, which binds the single-writer slot below).
@@ -327,8 +327,8 @@ endif()
 # on every chip target, because the hazard is priority-preemptive scheduling and not core
 # count: a spinner that outranks the lock holder never yields the CPU the holder needs, so on
 # an SMP chip whose spinner and holder happen to share a core the wedge is identical to a C6's.
-# With this false, mem_pool.hpp refuses to instantiate synchronized_pool_t<spin_sync_t> (the
-# `tr::mem::sync_pool_t` alias) and points at tr::esp::critical_pool_t instead — the mistake
+# With this false, mem_pool.hpp refuses to instantiate a synchronized_pool_t over any guard
+# declaring `may_spin` and points at tr::esp::critical_pool_t instead — the mistake
 # becomes a compile error rather than a task_wdt reset found under load. TRUE on the `linux`
 # host target, which has a real preemptive multi-core scheduler. Read from IDF_TARGET, which
 # unlike CONFIG_* is defined in BOTH CMake passes, so the early expansion pass renders the same

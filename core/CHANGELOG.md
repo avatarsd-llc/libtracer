@@ -32,6 +32,89 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Breaking
 
+- **One surface for memory, per-vertex policy, graph-wide seams and link construction (RFC 0028
+  slice 10; [#1593](https://github.com/avatarsd-llc/libtracer/issues/1593),
+  [#1606](https://github.com/avatarsd-llc/libtracer/issues/1606) asks 1–2).** This is the
+  v0.17.0 breaking bump. No compatibility shims are left behind. `graph_t`'s public surface goes
+  from **91 to 82 members** (doxygen `memberdef`s; 80 → 72 distinct names): eleven setters are
+  removed, and `set_policy`, `set_hooks` and `hooks` are added. Names used by earlier entries in
+  this section (`set_share_threshold_bytes`, `set_retention`, `set_ring_source`) are the
+  slice-10 spellings listed below. Producer-own at 16 B now costs **1 allocation** (was 2),
+  and each allocation is 8 B larger because the header is padded to the block alignment.
+  - **`mem::mem_backend_t` IS a `mem::block_source_t`.** It gains `try_alloc`/`release`/`name`
+    from the substrate. `alloc(size, hint)` and `destroy(seg)` now have defaults that place the
+    `segment_t` header and the payload in **one** block drawn through `try_alloc`. `destroy`
+    is no longer pure virtual. `heap_backend_t` makes one `heap_source_t::acquire` per segment
+    (was two). **Migration:** a backend that implements `alloc`/`destroy` itself keeps working.
+    A new backend can implement only `try_alloc`/`release` and inherit the one-block layout. Code
+    that passed a backend where a `block_source_t&` is wanted now compiles directly.
+  - **`graph_t(mem::block_source_t& src = mem::heap_source(), graph_hooks_t hooks = {})` is the
+    one constructor.** The pointer form `graph_t(block_source_t*)` is removed.
+    **Migration:** `graph_t g{&pool};` → `graph_t g{pool};`, and
+    `graph_t g{nullptr};` → `graph_t g;`.
+  - **`graph_hooks_t` replaces the five `configure_*` verbs.** It has five
+    `graph_hook_t<Fn>{fn, ctx}` members: `subject_resolver`, `subscription_observer`,
+    `remote_delivery`, `wire_target` and `stats_sampler`. Pass them at construction or install
+    them later with `set_hooks(const graph_hooks_t&)`; `hooks()` reads them back.
+    `configure_subject_resolver`, `configure_subscription_observer`,
+    `configure_remote_delivery_sink`, `configure_wire_target_resolver` and
+    `configure_stats_sampler` are removed. `fwd_router_t` installs its three hooks by
+    read-modify-write, so an application's resolver survives the router's construction.
+    **Migration:** `g.configure_subject_resolver(fn, ctx);` →
+    `graph_t g{src, {.subject_resolver = {fn, ctx}}};`. After construction, use
+    `auto h = g.hooks(); h.subject_resolver = {fn, ctx}; g.set_hooks(h);`.
+  - **`vertex_policy_t` replaces six per-vertex setters.** Its members are `retention`
+    (optional), `depth`, `share_threshold_bytes`, `ring_source`, `ring_reliable`,
+    `delivery_mode` and `app_fields` (an `app_fields_decl_t`, owning or borrowed).
+    `register_vertex`, `try_register_vertex` and `register_vertex_key` take it by value, as
+    the parameter before `rights`. `set_policy(v, vertex_policy_t)` re-declares it. The policy is
+    applied **whole**: a member left at its default resets that property. An illegal policy
+    returns `SCHEMA_NOT_FOUND` before anything registers, and an owning field table is moved
+    in, not copied. `set_retention`, `set_ring_source`, `set_share_threshold_bytes`,
+    `set_delivery_mode`, `set_app_fields` and `set_app_fields_static` are removed. The getters
+    (`retention`, `share_threshold_bytes`, `ring_reserved_bytes`, `stream_gaps`) stay.
+    **Migration:** `v = g.register_vertex(p, role_t::STREAM); g.set_retention(v, retention_t::N,
+    8); g.set_ring_source(v, &pool, true);` → `v = g.register_vertex(p, role_t::STREAM, {},
+    {.retention = retention_t::N, .depth = 8, .ring_source = &pool, .ring_reliable = true});`.
+    `g.set_app_fields(v, std::move(tbl));` → `(void)g.set_policy(v, {.app_fields =
+    std::move(tbl)});`. Rights passed positionally move one slot right:
+    `register_vertex(p, role, h, rights)` → `register_vertex(p, role, h, {}, rights)`. Several
+    sequential setters on one vertex become ONE policy. Two separate `set_policy` calls would
+    reset each other.
+  - **One reader-guard trait for the LKV slot and the synchronised pool (§5.6).** The new
+    `libtracer/reader_guard.hpp` holds the `graph::reader_guard` concept: noexcept
+    `lock`/`unlock`, `static G& for_address(const void*)`, and the `is_isr_safe`,
+    `is_nonblocking`, `may_spin` and `name` traits. It also holds `guard_scope_t<G>`,
+    `mutex_guard_t` and `no_guard_t`. `mem::synchronized_pool_t<Sync = graph::reader_guard_t>`
+    takes any `reader_guard`, and it refuses a `may_spin` guard when `kSpinWaitSafe` is false.
+    `lkv_slot` is now a concept, and `locked_slot_t<G>` requires a `reader_guard`.
+    `mem::pool_sync_policy`, `mem::spin_sync_t`, the `mem::sync_pool_t` alias and
+    `graph::guard_for_t` are removed. **Migration:** `mem::sync_pool_t pool{...};` →
+    `mem::synchronized_pool_t<> pool{...};`. A custom policy with `lock()`/`unlock()` members
+    becomes a `reader_guard`: add a `static G& for_address(const void*)` returning the shared
+    instance, plus the four traits.
+  - **`fwd_router_t(graph_t&, const router_planes_t& = {})`.** The six trailing positional
+    parameters become one aggregate `router_planes_t{label_src, rx, flat,
+    max_label_bindings_per_link, egress, retained}`, with the same defaults. **Migration:**
+    `fwd_router_t r{g, &lbl, &rx, &flat};` → `fwd_router_t r{g, {.label_src = &lbl, .rx =
+    &rx, .flat = &flat}};`.
+  - **Link config aggregates.** Every built-in link takes `(address…, const X_config_t& = {})`
+    in place of its positional tail. Link memory is one `link_memory_t{rx, io}`: `rx` is the
+    receive backend and `io` is the egress store. The config types are:
+    - `udp_config_t{memory, max_frame, recv_stack}`
+    - `tcp_config_t{memory, max_frame, recv_stack, defer_recv, …}`
+    - `tcp_server_config_t{memory, max_frame, max_peers, peer_named, recv_stack, …}`
+    - `ws_client_config_t{memory, max_frame, recv_stack, defer_recv, liveness_window_ms,
+      max_handshake}`
+    - `ws_server_config_t{memory, max_frame, max_peers, peer_named, recv_stack,
+      liveness_window_ms, max_handshake}`
+    - `quic_config_t` and `webtransport_config_t`, whose TLS struct stays its own parameter.
+
+    `socketcan_transport_t` keeps its signature. **Migration:** a positional argument moves to
+    the member of the same name. `backend` → `.memory.rx`, and `egress_src` → `.memory.io`.
+    Example: `transport_ws_server s(port, &pool, 0, 0, true);` → `transport_ws_server s(port,
+    {.memory = {.rx = &pool}, .peer_named = true});`.
+
 - **Scatter-gather egress and the ingress loan (RFC 0028 slice 9, L4 + L8; closes the egress
   half of [#1620](https://github.com/avatarsd-llc/libtracer/issues/1620) and
   [#1626](https://github.com/avatarsd-llc/libtracer/issues/1626)).** A link that queues a frame

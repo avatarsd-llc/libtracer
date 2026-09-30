@@ -362,7 +362,7 @@ void arm_tcp_pool_backend() {
     // caller-owned and outlives the transport, so nothing here is a per-frame allocation.
     static std::vector<std::byte> slab(64u * 1024u * 128u);
     tr::mem::pool_t pool(slab, 8192);
-    tr::net::tcp_transport_t server(0, &pool);
+    tr::net::tcp_transport_t server(0, {.memory = {.rx = &pool}});
     if (!server.ok()) return;
     rx_probe_t probe;
     server.set_rope_receiver(&rx_probe_t::on_rope, &probe);

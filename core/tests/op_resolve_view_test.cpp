@@ -287,7 +287,7 @@ int main() {
             g.register_vertex(path_t("/sensor/blob"), role_t::STORED_VALUE);
         // Declare a threshold the 36 B TLV clears, OWNER-side (there is no wire knob),
         // matching the arena test.
-        g.set_share_threshold_bytes(v, 32);
+        (void)g.set_policy(v, {.share_threshold_bytes = 32});
 
         std::vector<std::byte> big(32);
         for (std::size_t i = 0; i < big.size(); ++i) big[i] = static_cast<std::byte>(i);

@@ -1051,8 +1051,12 @@ class driver_t {
 
     /** @brief Stand up a fresh live graph and its vertices — the untimed half of @ref reset. */
     void build_live_graph() {
-        graph_ = std::make_unique<graph_t>(&mr_->as_source());
-        graph_->configure_remote_delivery_sink(&null_remote_sink, nullptr);
+        graph_ = std::make_unique<graph_t>(mr_->as_source());
+        {
+            auto hooks = graph_->hooks();
+            hooks.remote_delivery = {&null_remote_sink, nullptr};
+            graph_->set_hooks(hooks);
+        }
         vertices_.reserve(verts_);
         for (std::size_t i = 0; i < verts_; ++i) {
             char buf[32];

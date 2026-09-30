@@ -152,7 +152,8 @@ std::vector<std::byte> payload() {
  *         would otherwise bury the report. */
 std::unique_ptr<esp_ws_client_link_t> quiet_link() {
     return std::make_unique<esp_ws_client_link_t>(
-        "127.0.0.1", 8080, "/ws", /*handshake_headers=*/std::string{}, kBufBytes, kBufBytes, 0);
+        "127.0.0.1", 8080,
+        tr::net::esp_ws_client_config_t{.rx_bytes = kBufBytes, .tx_bytes = kBufBytes});
 }
 
 /** @brief Build a link on the fake and wait for its first dial. */

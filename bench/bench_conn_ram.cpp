@@ -368,22 +368,14 @@ sample_t run_stream_arm(std::size_t k, std::size_t big, Make make, Dial dial, Pu
 
 sample_t arm_tcp(std::size_t k, std::size_t big) {
     return run_stream_arm<tr::net::transport_tcp_server>(
-        k, big,
-        [] {
-            return new tr::net::transport_tcp_server(0, &tr::mem::heap_backend(), 0, 0, true, 0);
-        },
+        k, big, [] { return new tr::net::transport_tcp_server(0, {.peer_named = true}); },
         [](std::uint16_t p) { return dial_tcp(p); },
         [](int fd, std::size_t n) { (void)send_tcp_frame(fd, n); });
 }
 
 sample_t arm_ws(std::size_t k, std::size_t big) {
     return run_stream_arm<tr::net::transport_ws_server>(
-        k, big,
-        [] {
-            return new tr::net::transport_ws_server(0, &tr::mem::heap_backend(),
-                                                    /*max_frame=*/0, /*max_peers=*/0,
-                                                    /*peer_named=*/true);
-        },
+        k, big, [] { return new tr::net::transport_ws_server(0, {.peer_named = true}); },
         [](std::uint16_t p) {
             const int fd = dial_tcp(p);
             if (fd < 0) return -1;
@@ -422,9 +414,8 @@ sample_t arm_udp(std::size_t big, udp_mode_t mode) {
                                           ? static_cast<tr::mem::mem_backend_t*>(&pool)
                                           : &tr::mem::heap_backend();
     const long long pre = live();
-    auto srv = std::make_unique<tr::net::udp_transport_t>(0, std::string{}, 0, backend,
-                                                          /*max_frame=*/std::size_t{0},
-                                                          /*recv_stack=*/std::size_t{0});
+    auto srv = std::make_unique<tr::net::udp_transport_t>(
+        0, std::string{}, 0, tr::net::udp_config_t{.memory = {.rx = backend}});
     if (mode != udp_mode_t::SPAN) srv->set_rope_receiver(&drop_rope, nullptr);
     quiesce();
     const long long t0 = live();

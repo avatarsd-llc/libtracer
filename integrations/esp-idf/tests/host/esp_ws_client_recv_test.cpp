@@ -159,8 +159,8 @@ void test_recv_stack_reaches_the_thread() {
     {
         // 12288 is the depth the sibling SERVER link already sizes this workload at
         // (httpd_ws_link_t's recv stack) — the in-call graph delivery is the same one.
-        tr::net::esp_ws_client_link_t link("127.0.0.1", 8080, "/ws", /*handshake_headers=*/{},
-                                           kRxBytes, kRxBytes, 12288);
+        tr::net::esp_ws_client_link_t link(
+            "127.0.0.1", 8080, {.rx_bytes = kRxBytes, .tx_bytes = kRxBytes, .recv_stack = 12288});
         check(fake_ws::armed_stack() == 12288, "the requested stack size was armed");
         check(fake_ws::armed_name() == "ws_cli_rx", "the recv thread was named");
         check(fake_ws::cfg_restored(), "the surrounding pthread config was restored");
@@ -174,8 +174,8 @@ void test_zero_recv_stack_arms_nothing() {
     std::printf("#900 recv_stack=0 is the platform default:\n");
     fake_ws::reset();
     {
-        tr::net::esp_ws_client_link_t link("127.0.0.1", 8080, "/ws", /*handshake_headers=*/{},
-                                           kRxBytes, kRxBytes, 0);
+        tr::net::esp_ws_client_link_t link("127.0.0.1", 8080,
+                                           {.rx_bytes = kRxBytes, .tx_bytes = kRxBytes});
         check(fake_ws::armed_stack() == 0, "no pthread config was armed");
         check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s), "the link dialed");
     }
@@ -192,7 +192,8 @@ void test_zero_recv_stack_arms_nothing() {
  */
 std::unique_ptr<tr::net::esp_ws_client_link_t> dialed_link(sink_t& sink) {
     auto link = std::make_unique<tr::net::esp_ws_client_link_t>(
-        "127.0.0.1", 8080, "/ws", /*handshake_headers=*/std::string{}, kRxBytes, kRxBytes, 0);
+        "127.0.0.1", 8080,
+        tr::net::esp_ws_client_config_t{.rx_bytes = kRxBytes, .tx_bytes = kRxBytes});
     check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s), "the link dialed");
     link->set_receiver(sink);
     return link;
@@ -326,9 +327,8 @@ void test_defer_recv_holds_the_dial_until_armed() {
     // The link lives in a scope of its own so it is DESTROYED before the drain below,
     // rather than at process exit under the fake's dying static state (#1456).
     {
-        tr::net::esp_ws_client_link_t link("127.0.0.1", 8080, "/ws", /*handshake_headers=*/{},
-                                           kRxBytes, kRxBytes, /*recv_stack=*/0,
-                                           /*defer_recv=*/true);
+        tr::net::esp_ws_client_link_t link(
+            "127.0.0.1", 8080, {.rx_bytes = kRxBytes, .tx_bytes = kRxBytes, .defer_recv = true});
         // The peer's push-on-connect, queued while the link is UNARMED and the sink absent.
         const fake_ws::frame_t good = good_message();
         fake_ws::push_frames({good});

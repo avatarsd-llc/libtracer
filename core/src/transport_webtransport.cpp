@@ -953,13 +953,14 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
 webtransport_transport_t::webtransport_transport_t(const std::string& peer_host,
                                                    std::uint16_t peer_port, const std::string& path,
                                                    webtransport_dial_tls_t tls,
-                                                   mem::mem_backend_t* backend,
-                                                   std::size_t max_frame, bool defer_rx,
-                                                   std::size_t max_handshake)
+                                                   const webtransport_config_t& config)
     : impl_(std::make_unique<impl_t>()) {
+    const std::size_t max_frame = config.max_frame;
+    const bool defer_rx = config.defer_rx;
+    const std::size_t max_handshake = config.max_handshake;
     impl_t& i = *impl_;
     i.rx = &rx_;  // the delivery-tier slot lives in the transport_t base
-    i.backend = backend;
+    i.backend = config.memory.rx;
     i.max_frame = length_prefix_framer::configured_cap(max_frame);  // tighten-only (#1035)
     // Resolved BEFORE the dial below, so a link that never comes up still reads its own
     // budget back through effective_max_handshake() (#1408).
@@ -1025,12 +1026,13 @@ webtransport_transport_t::webtransport_transport_t(const std::string& peer_host,
 webtransport_transport_t::webtransport_transport_t(std::uint16_t bind_port,
                                                    const std::string& cert_file,
                                                    const std::string& key_file,
-                                                   mem::mem_backend_t* backend,
-                                                   std::size_t max_frame, std::size_t max_handshake)
+                                                   const webtransport_config_t& config)
     : impl_(std::make_unique<impl_t>()) {
+    const std::size_t max_frame = config.max_frame;
+    const std::size_t max_handshake = config.max_handshake;
     impl_t& i = *impl_;
     i.rx = &rx_;  // the delivery-tier slot lives in the transport_t base
-    i.backend = backend;
+    i.backend = config.memory.rx;
     i.max_frame = length_prefix_framer::configured_cap(max_frame);  // tighten-only (#1035)
     // Resolved BEFORE listen_start, so the first peer's very first classification chunk is
     // already measured against the configured budget (#1408).
@@ -1190,7 +1192,10 @@ transport_vertex_t::transport_factory_t webtransport_transport_factory(
             t = std::make_unique<webtransport_transport_t>(
                 s.addr, s.port, priv.path,
                 webtransport_dial_tls_t{.ca_file = priv.ca, .insecure_no_verify = priv.insecure},
-                rx_backend, s.max_frame, /*defer_rx=*/true, priv.max_handshake);
+                webtransport_config_t{.memory = {.rx = rx_backend},
+                                      .max_frame = s.max_frame,
+                                      .defer_rx = true,
+                                      .max_handshake = priv.max_handshake});
             // A refused session is TRANSIENT, not a bad address (#929).
             if (!t->ok()) return std::unexpected(graph::status_t::TRANSPORT_DOWN);
             return t;
@@ -1199,8 +1204,11 @@ transport_vertex_t::transport_factory_t webtransport_transport_factory(
         // OS picks and `local_port()` reports it. Only an ABSENT key is the config error.
         if (!s.port_set || priv.cert.empty() || priv.key.empty())
             return std::unexpected(graph::status_t::TYPE_MISMATCH);
-        t = std::make_unique<webtransport_transport_t>(s.port, priv.cert, priv.key, rx_backend,
-                                                       s.max_frame, priv.max_handshake);
+        t = std::make_unique<webtransport_transport_t>(
+            s.port, priv.cert, priv.key,
+            webtransport_config_t{.memory = {.rx = rx_backend},
+                                  .max_frame = s.max_frame,
+                                  .max_handshake = priv.max_handshake});
         // bind/cred failed — the listener did not come up (#929).
         if (!t->ok()) return std::unexpected(graph::status_t::TRANSPORT_DOWN);
         return t;

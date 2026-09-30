@@ -129,7 +129,8 @@ void reset(std::unique_ptr<httpd_ws_link_t>& link) {
 
 /** @brief An adopting, peer-named link with the departure seam wired, as a node builds it. */
 std::unique_ptr<httpd_ws_link_t> make_link(bool peer_named = true) {
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws", 0, peer_named);
+    auto link = std::make_unique<httpd_ws_link_t>(
+        handle(), "/ws", tr::net::httpd_ws_config_t{.peer_named = peer_named});
     if (link->bus() != nullptr) link->bus()->set_peer_down_notifier(&note_departed, nullptr);
     return link;
 }

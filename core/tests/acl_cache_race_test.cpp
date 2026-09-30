@@ -395,7 +395,11 @@ void test_ancestor_rewrite_vs_descendant_eval(std::size_t rewritten_level, std::
         " (#880, ADR-0078, #1043):\n",
         static_cast<int>(shape.size()), shape.data());
     graph_t g;
-    g.configure_subject_resolver(caller_is_subject, nullptr);
+    {
+        auto hooks = g.hooks();
+        hooks.subject_resolver = {caller_is_subject, nullptr};
+        g.set_hooks(hooks);
+    }
     (void)g.register_vertex(path_t("/anc"), role_t::STORED_VALUE);
     for (std::size_t d = 1; d <= kChainDepth; ++d)
         (void)g.register_vertex(path_t(chain_path(d)), role_t::STORED_VALUE);

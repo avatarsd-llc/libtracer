@@ -152,7 +152,7 @@ void pin_read_family(std::string_view what, setup_t setup, read_t read) {
     std::size_t width = 0;
     {
         probe_source_t src;
-        graph_t g(&src);
+        graph_t g(src);
         const vertex_handle_t v = setup(g);
         const result_t<std::size_t> r = read(g, v);
         check(r.has_value(), std::string(what) + " — the read answers at all (the fixture holds)");
@@ -163,7 +163,7 @@ void pin_read_family(std::string_view what, setup_t setup, read_t read) {
 
     {
         probe_source_t src;
-        graph_t g(&src);
+        graph_t g(src);
         const vertex_handle_t v = setup(g);
         src.watch(block);
         const result_t<std::size_t> r = read(g, v);
@@ -172,7 +172,7 @@ void pin_read_family(std::string_view what, setup_t setup, read_t read) {
     }
     {
         probe_source_t src;
-        graph_t g(&src);
+        graph_t g(src);
         const vertex_handle_t v = setup(g);
         src.refuse(block);
         const result_t<std::size_t> r = read(g, v);
@@ -195,7 +195,7 @@ void pin_op_family(std::string_view what, std::size_t width, setup_t setup, op_t
     const std::size_t block = block_for(width);
     {
         probe_source_t src;
-        graph_t g(&src);
+        graph_t g(src);
         setup(g);
         src.watch(block);
         const result_t<void> r = op(g);
@@ -204,7 +204,7 @@ void pin_op_family(std::string_view what, std::size_t width, setup_t setup, op_t
     }
     {
         probe_source_t src;
-        graph_t g(&src);
+        graph_t g(src);
         setup(g);
         src.refuse(block);
         const result_t<void> r = op(g);
@@ -250,7 +250,7 @@ vertex_handle_t vertex_with_app_field(graph_t& g) {
     const vertex_handle_t v = g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
     std::vector<app_field_t> table;
     table.push_back(app_field_t{.name = "kp", .access = app_access_t::RW});
-    g.set_app_fields(v, std::move(table));
+    (void)g.set_policy(v, {.app_fields = std::move(table)});
     const std::array<std::byte, 2> le{std::byte{0x88}, std::byte{0x13}};  // 5000
     const tr::wire::tlv_t value{.type = tr::wire::type_t::VALUE, .payload = le};
     const std::vector<std::byte> bytes = tr::wire::encode(value);
@@ -284,7 +284,7 @@ constexpr std::array<std::byte, 5> kResidual{std::byte{0x04}, std::byte{'l'}, st
  * @brief The stub mount resolver — every target routes through the mount `mnt`.
  *
  * It stands in for the transport plane's ADR-0061 strip-K descent, which is what
- * `configure_wire_target_resolver` exists to accept: the encoder under test is `graph_t`'s, so
+ * `graph_hooks_t::wire_target` exists to accept: the encoder under test is `graph_t`'s, so
  * pinning it needs no net plane and no live link.
  */
 wire_target_split_t stub_split(void* ctx, std::span<const std::byte> key) {
@@ -394,7 +394,11 @@ int main() {
             "subscribe_wire / the owned mount-route PATH", width,
             [](graph_t& g) {
                 (void)g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
-                g.configure_wire_target_resolver(stub_split, nullptr);
+                {
+                    auto hooks = g.hooks();
+                    hooks.wire_target = {stub_split, nullptr};
+                    g.set_hooks(hooks);
+                }
             },
             [&](graph_t& g) {
                 const std::optional<vertex_handle_t> v = g.find(path_t("/s").key());
