@@ -122,7 +122,7 @@ void test_seq_cursor_and_empty_lkv() {
     std::printf("note_write / read_stored — the seq cursor moves, the LKV does not:\n");
     vertex_t v{role_t::STORED_VALUE, key_of({0x01}), {}};
     check(v.read_stored() == nullptr, "a never-assigned vertex holds no LKV");
-    const std::uint64_t seq0 = v.current_seq();
+    const tr::graph::write_seq_t seq0 = v.current_seq();
     v.note_write();
     check(v.current_seq() == seq0 + 1, "note_write bumps the write sequence exactly once");
     check(v.read_stored() == nullptr, "a seq bump publishes nothing");
@@ -137,7 +137,7 @@ void test_await_wake_and_timeout() {
     vertex_t v{role_t::STORED_VALUE, key_of({0x03}), {}};
     check(!v.wait_for_change(v.current_seq(), 20ms), "no writer => timeout (returns false)");
 
-    const std::uint64_t seq0 = v.current_seq();
+    const tr::graph::write_seq_t seq0 = v.current_seq();
     std::atomic<bool> woke{false};
     std::thread waiter([&] {
         if (v.wait_for_change(seq0, 2s)) woke.store(true);

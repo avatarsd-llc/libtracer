@@ -67,10 +67,10 @@ sizes and censuses ONE store.
 
 | Channel | Reaches the source through | What it allocates | Exhaustion |
 | --- | --- | --- | --- |
-| `mr_` (`graph.hpp:2952`) | `tr::mem::source_resource_t` (`src_mr_`, `graph.hpp:2927`) | the small control *objects* of a stored write: the `shared_ptr` control block and the `rope_t` wrapping the value's links | throws — `std::pmr` structurally cannot report by value, so the adapter translates `nullptr` to `bad_alloc` at its own boundary |
-| `value_backend_` (`graph.hpp:2968`) | `tr::mem::source_backend_t` (`src_backend_`, `graph.hpp:2916`) | the graph's **payload** byte `segment`s: the durable buffer holding a vertex's last-known value when the write path must own its bytes, and (since #831) **both** folded READs' POINT headers — the composed root's per-node header and the `":children"` listing's per-member + outer header | `nullptr` → the operation answers `BACKPRESSURE` |
-| `ctl_` (`graph.hpp:3132`) | directly — it IS the injected source | every allocation a peer can provoke | `nullptr` → the operation answers a status |
-| `ring_` (`graph.hpp:3147`) | directly | the graph-level DEFAULT for a receiving STREAM vertex's ring ADMISSIONS — the reservation each queued entry holds until it retires ([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.6.1). A vertex that declares its own through `vertex_policy_t::ring_source` never touches this one. It bounds admission, NOT placement | `nullptr` → best-effort sheds the oldest with a gap; reliable answers `BACKPRESSURE` |
+| `mr_` (`graph.hpp:2953`) | `tr::mem::source_resource_t` (`src_mr_`, `graph.hpp:2928`) | the small control *objects* of a stored write: the `shared_ptr` control block and the `rope_t` wrapping the value's links | throws — `std::pmr` structurally cannot report by value, so the adapter translates `nullptr` to `bad_alloc` at its own boundary |
+| `value_backend_` (`graph.hpp:2969`) | `tr::mem::source_backend_t` (`src_backend_`, `graph.hpp:2917`) | the graph's **payload** byte `segment`s: the durable buffer holding a vertex's last-known value when the write path must own its bytes, and (since #831) **both** folded READs' POINT headers — the composed root's per-node header and the `":children"` listing's per-member + outer header | `nullptr` → the operation answers `BACKPRESSURE` |
+| `ctl_` (`graph.hpp:3133`) | directly — it IS the injected source | every allocation a peer can provoke | `nullptr` → the operation answers a status |
+| `ring_` (`graph.hpp:3148`) | directly | the graph-level DEFAULT for a receiving STREAM vertex's ring ADMISSIONS — the reservation each queued entry holds until it retires ([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.6.1). A vertex that declares its own through `vertex_policy_t::ring_source` never touches this one. It bounds admission, NOT placement | `nullptr` → best-effort sheds the oldest with a gap; reliable answers `BACKPRESSURE` |
 
 **The failure convention does not leak.** The substrate speaks raw `nullptr`; nothing wraps a
 refusal in a `result_t`, and no channel falls back to the global heap. Only the two adapters
@@ -83,7 +83,7 @@ arm — so a default-built graph gains no indirection anywhere on the write path
 constructed either way (they are three and two words) and used only when a host injected
 something. `ctl_` and the two adapters are declared last in the object on purpose: no hot path
 reads them, so placing them there leaves every other member at the byte offset it had before the
-seam existed, which keeps the forward-hop bench measuring the same layout (`graph.hpp:3118`).
+seam existed, which keeps the forward-hop bench measuring the same layout (`graph.hpp:3119`).
 
 **What still bypasses the injection, at #873's close.** Two channels, both settled rather than
 pending. The LKV hazard-slot nodes (`lkv_slot.hpp`) stay `new (std::nothrow)` on the global heap:
@@ -333,8 +333,8 @@ one value under heap exhaustion is valid delivery behaviour where failing the wr
 per-delivery allocation on that writer-thread leg is nothrow, and a failed flatten or frame build
 drops that one delivery (`core/src/fwd_router.cpp:3603-3604`). Dropping *invisibly* is the part that
 needs an answer, which is why `graph_t::delivery_drops()` exists
-(`core/include/libtracer/graph.hpp:2425`): four relaxed monotonic counters — `no_target`, `denied`,
-`out_of_memory`, `fan_out_truncated` (`graph.hpp:2393-2415`) — incremented only on a drop, so the
+(`core/include/libtracer/graph.hpp:2426`): four relaxed monotonic counters — `no_target`, `denied`,
+`out_of_memory`, `fan_out_truncated` (`graph.hpp:2394-2416`) — incremented only on a drop, so the
 delivering path is byte-identical while nothing drops. The net plane adds to the same four
 through one public door, `count_external_drop` (#1068), so a `COMPACT` delivery shed for want of
 memory is as visible as a local one; `denied` is not among that door's causes because a refusal

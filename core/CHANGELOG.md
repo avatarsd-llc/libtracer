@@ -14,6 +14,27 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Changed
+
+- **The write sequence is 32-bit on every target: `vertex_t::current_seq()` returns
+  `tr::graph::write_seq_t` and `wait_for_change` takes one
+  ([#1621](https://github.com/avatarsd-llc/libtracer/issues/1621), RFC-0028 D6).**
+  `write_seq_t` is `std::uint32_t` (was `std::uint64_t`); there is no configuration trait. The
+  sequence wraps, and `await` compares it for equality only (`current != seq0`), so a wrap is
+  still a change; the one alias is exactly 2^32 publishes to one vertex inside one await window,
+  which the await's timeout bounds. The bump keeps its `seq_cst` ordering. On a core with
+  atomic RMW (rv32imac such as the ESP32-C6, Cortex-M3/M4/M7, Xtensa, every host) a publish
+  now bumps the sequence with one hardware add (`amoadd.w` on rv32) instead of calling
+  `__atomic_fetch_add_8`, which masks interrupts on ESP-IDF; on a core without one (rv32imc
+  such as the ESP32-C3, Cortex-M0/M0+) it is a load and a store inside one section of
+  `config_t::reader_guard_t`, the build's critical-section guard, with no call. New header
+  `libtracer/rmw_counter.hpp` (`tr::graph::rmw_counter_t<T, G>`) is that choice, made at
+  compile time from `std::atomic<T>::is_always_lock_free`. `sizeof(vertex_t)` drops 72 → **64 B**
+  (`config_t::kMaxVertexBytes32` lowered to match). On 64-bit hosts it stays 88 B: the tail
+  padding absorbs the 4 bytes. **Migration:** spell a sequence snapshot `write_seq_t` (or
+  `auto`) instead of `std::uint64_t`, and compare two snapshots with `==` / `!=` only, never
+  `<` / `>`.
+
 ## [0.17.0] — 2026-10-01
 
 ### Changed

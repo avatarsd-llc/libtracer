@@ -130,7 +130,7 @@ edges along with the departed one's.
 ## Closing the bus module out at build time
 
 The peer-named tier is a **module**, and a node whose links are all point-to-point does not
-have to carry it. `tr::graph::default_config_t::kBusLinks` (`core/include/libtracer/config.hpp:522`)
+have to carry it. `tr::graph::default_config_t::kBusLinks` (`core/include/libtracer/config.hpp:528`)
 is the knob, and since v0.17.0 its default is **`false`** — the lean choice
 ([#1670](https://github.com/avatarsd-llc/libtracer/issues/1670)). A node that needs the tier —
 a `peer_named` listener, CAN, the ESP-IDF WS server — opts in with an

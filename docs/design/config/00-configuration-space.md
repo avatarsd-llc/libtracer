@@ -32,7 +32,7 @@ rather than a silent behavioural fork between translation units.
 
 The sizes and policies are members of **one named type**, `default_config_t`
 (`core/include/libtracer/config.hpp:81`), bound once by `using config_t = default_config_t;`
-(`:697`). An application declares its own by inheriting and overriding what differs (`:65-77`):
+(`:703`). An application declares its own by inheriting and overriding what differs (`:65-77`):
 
 ```cpp
 struct my_node_config_t : tr::graph::default_config_t {
@@ -43,7 +43,7 @@ using config_t = my_node_config_t;
 
 Inheriting means a knob added later does not break the preset — it inherits the new default
 rather than failing to compile. The rest of the library names the derived spellings re-exported
-below the traits type (`:696-719`), each of which is exactly its traits member, so introducing
+below the traits type (`:702-725`), each of which is exactly its traits member, so introducing
 `config_t` moved no call site.
 
 It is **bound once, not threaded as a template parameter**, and
@@ -228,17 +228,17 @@ is a knob the fragment does not state at all (#1244).
 | `kCacheLineBytes` (`:119`) | padding width | 64 | derived from `CONFIG_FREERTOS_UNICORE`, not exposed (`integrations/esp-idf/libtracer/CMakeLists.txt:322`) |
 | `kHazardReaderSlots` (`:147`) | count | 64 | inherited — unused on a chip, which binds the single-writer slot and never builds the domain |
 | `kEdgePinSlots` (`:160`) | count | 32 | set to 8 (`integrations/esp-idf/libtracer/CMakeLists.txt:317`) |
-| `kMaxVertexBytes64` / `kMaxVertexBytes32` (`:198` / `:216`) | RAM ratchet | 96 / 72 | the preset — deliberately not overridable |
-| `kShareThresholdBytes` (`:253`) | size | 4,096 — RFC-0028 §11 ruling 2 | `SIZE_MAX`, copy always (`integrations/esp-idf/libtracer/CMakeLists.txt:409`) |
-| `acl_policy_t` (`:262`) | policy type | `allow_only_policy_t` | inherited — the full policy is not selectable |
-| `lkv_slot_t` (`:312`) | policy type | `single_writer_slot_t` | `single_writer_slot_t` on every chip, with `kSingleWriter = true` and `reader_guard_t = tr::esp::critical_guard_t`; inherited on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:349`) |
-| `kSpinWaitSafe` (`:755`) | target fact | `true` | derived from `IDF_TARGET` — `false` on every chip, `true` on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:338`) |
-| `kWeaklyOrdered` (`:474`) | target fact | `true` | inherited — every ESP chip is weakly ordered, which is the default |
-| `kBusLinks` (`:522`) | module presence | `false` — opt-in since v0.17.0 (#1670) | menuconfig `CONFIG_LIBTRACER_BUS_LINKS`, default `n`; CAN is offered only with it |
-| `kSelfHealLinks` (`:577`) | module presence | `false` — opt-in since v0.17.0 (#1670) | menuconfig `CONFIG_LIBTRACER_SELF_HEAL_LINKS`, default `n` (`integrations/esp-idf/libtracer/CMakeLists.txt:368`) |
-| `kSelfHealWorkerStackBytes` (`:604`) | size | `0` — the platform default | menuconfig `CONFIG_LIBTRACER_SELF_HEAL_WORKER_STACK` (`integrations/esp-idf/libtracer/CMakeLists.txt:378`) |
-| `kInstrumentCounters` (`:631`) | instrumentation | `false` — compiled out | inherited — only the core test build and `bench/`'s `LIBTRACER_INSTRUMENT_COUNTERS` bind it (#1664) |
-| `kAllowInsecureTls` (`:664`) | capability | `false` — a SPEC `insecure` key is refused | inherited — only the `quic` workflow's second run binds it, through `core/tests/insecure-tls/` |
+| `kMaxVertexBytes64` / `kMaxVertexBytes32` (`:199` / `:222`) | RAM ratchet | 88 / 64 | the preset — deliberately not overridable |
+| `kShareThresholdBytes` (`:259`) | size | 4,096 — RFC-0028 §11 ruling 2 | `SIZE_MAX`, copy always (`integrations/esp-idf/libtracer/CMakeLists.txt:409`) |
+| `acl_policy_t` (`:268`) | policy type | `allow_only_policy_t` | inherited — the full policy is not selectable |
+| `lkv_slot_t` (`:318`) | policy type | `single_writer_slot_t` | `single_writer_slot_t` on every chip, with `kSingleWriter = true` and `reader_guard_t = tr::esp::critical_guard_t`; inherited on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:349`) |
+| `kSpinWaitSafe` (`:761`) | target fact | `true` | derived from `IDF_TARGET` — `false` on every chip, `true` on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:338`) |
+| `kWeaklyOrdered` (`:480`) | target fact | `true` | inherited — every ESP chip is weakly ordered, which is the default |
+| `kBusLinks` (`:528`) | module presence | `false` — opt-in since v0.17.0 (#1670) | menuconfig `CONFIG_LIBTRACER_BUS_LINKS`, default `n`; CAN is offered only with it |
+| `kSelfHealLinks` (`:583`) | module presence | `false` — opt-in since v0.17.0 (#1670) | menuconfig `CONFIG_LIBTRACER_SELF_HEAL_LINKS`, default `n` (`integrations/esp-idf/libtracer/CMakeLists.txt:368`) |
+| `kSelfHealWorkerStackBytes` (`:610`) | size | `0` — the platform default | menuconfig `CONFIG_LIBTRACER_SELF_HEAL_WORKER_STACK` (`integrations/esp-idf/libtracer/CMakeLists.txt:378`) |
+| `kInstrumentCounters` (`:637`) | instrumentation | `false` — compiled out | inherited — only the core test build and `bench/`'s `LIBTRACER_INSTRUMENT_COUNTERS` bind it (#1664) |
+| `kAllowInsecureTls` (`:670`) | capability | `false` — a SPEC `insecure` key is refused | inherited — only the `quic` workflow's second run binds it, through `core/tests/insecure-tls/` |
 
 Two CMake variables survive for one transition release, `-DLIBTRACER_ACL_FULL` and
 `-DLIBTRACER_LKV_SLOT`; `core/CMakeLists.txt` writes a fragment on their behalf. The five other
@@ -333,7 +333,7 @@ an integrator should be asked.
 
 `lkv_slot_t` is the one knob whose value is a **name the integrator supplies**, so it is the one
 knob with a contract attached. The declaration instructs that the named type must satisfy the
-policy contract in `lkv_slot.hpp` (`config.hpp:312`, and the instruction itself at `:307-308`) —
+policy contract in `lkv_slot.hpp` (`config.hpp:318`, and the instruction itself at `:313-314`) —
 a header that is absent from `core/Doxyfile`'s `INPUT` list, so the generated API site does not
 serve the page that instruction points at. The contract, stated here, is three operations over
 `value_ptr_t = std::shared_ptr<const view::rope_t>` and one declaration:
@@ -346,7 +346,7 @@ serve the page that instruction points at. The contract, stated here, is three o
 | spin | `static constexpr bool may_spin` | Mandatory. `true` if any operation can spin-wait on another thread. `vertex.hpp` refuses a policy without it, and refuses `true` where `kSpinWaitSafe` is `false` (#1618). |
 
 Owning is not negotiable. The composed branch read `graph_t::read_subtree_folded`
-(`core/include/libtracer/graph.hpp:1924`) stashes one LKV per node into a vector that outlives
+(`core/include/libtracer/graph.hpp:1925`) stashes one LKV per node into a vector that outlives
 the map lock and spans three passes, so **N values are held simultaneously**. A reclamation
 scheme that can protect only one value per reader at a time — hazard pointers, as classically
 stated — therefore cannot hand back a pinned pointer; it must promote the pin to a counted
@@ -381,12 +381,12 @@ Four differences that surprise people, each a property of the target rather than
   `atomic::wait` back-end `.bss` beyond the registry itself.
 - **`sizeof(vertex_t)` is gated in the header, not in a test.** The ceilings are `config_t`
   members and the assertions sit in `vertex.hpp` beside the type they constrain
-  (`core/include/libtracer/vertex.hpp:3289,3294`), so every build on every target checks its
+  (`core/include/libtracer/vertex.hpp:3326,3331`), so every build on every target checks its
   own binding, for free. A test-resident gate covers only the configurations CI actually
   builds: one, in practice, and never the 32-bit arm, because no CI leg cross-compiles that
   test while the ESP-IDF legs compile `vertex_t` itself on every change. That distinction has
   teeth here — both arms are **ratchets pinned to the measured size, so neither has headroom by
-  construction** (`config.hpp:216`): 96 B on 64-bit, 72 B on rv32, and the next added member
+  construction** (`config.hpp:222`): 88 B on 64-bit, 64 B on rv32, and the next added member
   is a build failure on both. They were ceilings held above the measurement until 2026-08-10,
   which is why 16 B reclaimed on the 64-bit arm and 8 B on the 32-bit one went unnoticed — a
   ceiling answers "did you regress past a fixed point", never "did this get leaner". The stripe carries a companion

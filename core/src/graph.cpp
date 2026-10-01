@@ -3193,7 +3193,7 @@ result_t<value_ref_t> graph_t::await(vertex_handle_t vh, std::chrono::nanosecond
     // denied caller cannot camp on the condvar.
     if (!acl_allows(v, caller, acl_right_t::READ))
         return std::unexpected(status_t::PERMISSION_DENIED);
-    const std::uint64_t seq0 = v->current_seq();
+    const write_seq_t seq0 = v->current_seq();
     if (!v->wait_for_change(seq0, timeout)) return std::unexpected(status_t::TIMEOUT);
     // Serve the woken value through the SAME ROLE DISPATCH `read` runs (RFC-0008 Amendment 2).
     // A HANDLER vertex answers `read` from its `on_read` seam and stores nothing, so the old
