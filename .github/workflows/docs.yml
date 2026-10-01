@@ -211,12 +211,42 @@ jobs:
       # the two Breathe-generated reference classes that are deliberately not nitpicked.
       - name: Build (sphinx-build, config in docs/, source = repo root)
         run: sphinx-build -n -W --keep-going -b html -c docs . docs/_build/html
+      # Released-version subtree cache (#1603). Each vX.Y.Z subtree is a pure function
+      # of (tag, docs toolchain, assembler script), yet rebuilding all of them was ~13 of
+      # this job's ~35 minutes on every PR. The key is
+      #   release-docs-<toolchain fingerprint>-<hash of the ordered release-tag list>
+      # where the fingerprint covers the RESOLVED toolchain (pip freeze, not the ranges
+      # in docs/requirements.txt), the python and doxygen versions, and the assembler's
+      # own hash. An exact hit copies every subtree and builds none. A new tag misses
+      # the exact key, restores the newest entry with the same fingerprint by prefix,
+      # and builds only the new tag. A toolchain or assembler change matches no prefix
+      # and rebuilds everything, which is the same work as before this cache existed.
+      # The cache lives outside the checkout, since the checkout is the Sphinx source root.
+      - name: Fingerprint the released-docs toolchain
+        id: release-docs-key
+        run: |
+          fp="$( { python3 --version; pip freeze; doxygen --version; sha256sum tools/assemble_release_docs.sh; } | sha256sum | cut -c1-16)"
+          tags="$(git tag --list | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sha256sum | cut -c1-16)"
+          echo "prefix=release-docs-${fp}-" >> "$GITHUB_OUTPUT"
+          echo "key=release-docs-${fp}-${tags}" >> "$GITHUB_OUTPUT"
+          echo "release-docs cache key: release-docs-${fp}-${tags}"
+      - name: Restore the released-version subtree cache
+        uses: actions/cache@v4
+        # Same reasoning as the install step's ceiling: a healthy restore takes seconds,
+        # so a stalled cache download fails here and names itself.
+        timeout-minutes: 10
+        with:
+          path: ~/.cache/libtracer-release-docs
+          key: ${{ steps.release-docs-key.outputs.key }}
+          restore-keys: ${{ steps.release-docs-key.outputs.prefix }}
       # Rebuild each released version's docs from its vX.Y.Z tag into a subtree of
       # the site (deploy-pages replaces the WHOLE site every push, so released
       # subtrees must be re-assembled on every deploy, not once at release time).
+      # Tags already in the cache are copied instead of rebuilt.
       # A tag whose docs fail to build is skipped — the manifest stays honest.
       - name: Assemble released-version doc subtrees
-        run: bash tools/assemble_release_docs.sh docs/_build/html
+        # `~` is expanded by actions/cache but not in an `env:` value, hence $HOME here.
+        run: RELEASE_DOCS_CACHE="$HOME/.cache/libtracer-release-docs" bash tools/assemble_release_docs.sh docs/_build/html
       # Emit the version manifest the sidebar switcher reads. It scans the built
       # site for the vX.Y.Z/ subtrees assembled above; "latest" (the main build,
       # at the site root) is always first.
