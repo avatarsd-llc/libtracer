@@ -56,6 +56,9 @@
 
 namespace {
 
+static_assert(!tr::graph::default_config_t::kAllowInsecureTls,
+              "the shipped default must refuse the SPEC `insecure` key");
+
 using namespace std::chrono_literals;
 using tr::graph::graph_t;
 using tr::graph::path_t;
@@ -691,11 +694,34 @@ void test_spec_dial_trust_keys() {
     check(router_a.registry().by_name("net/webtransport-client/verify") == nullptr,
           "A: the refused dial leaves no endpoint behind");
 
-    // 2. `insecure = 1` — the explicit DEV-ONLY opt-out reaches the dialer.
+    // 2. `insecure = 1` — the DEV-ONLY opt-out. Honoured only on a build that binds
+    //    config_t::kAllowInsecureTls; on the default build the SPEC is refused at creation
+    //    with PERMISSION_DENIED and counted, never silently turned into a verifying dial.
+    const std::uint64_t refused_before = tr::net::webtransport_insecure_refusals();
     const auto insec =
         node_a.write(path_t("/net/webtransport-client/conn"),
                      wt_conn_spec("insec", ports["l2"], "127.0.0.1", {}, {}, {}, {}, true));
-    check(insec.has_value(), "A: `insecure = 1` connects to that same unvalidatable peer");
+    if constexpr (tr::net::kAllowInsecureTls) {
+        check(insec.has_value(), "A: `insecure = 1` connects to that same unvalidatable peer");
+        check(tr::net::webtransport_insecure_refusals() == refused_before,
+              "A: a build with kAllowInsecureTls counts no refusal");
+    } else {
+        check(!insec.has_value() && insec.error() == tr::graph::status_t::PERMISSION_DENIED,
+              "A: `insecure = 1` is REFUSED (PERMISSION_DENIED) without kAllowInsecureTls");
+        check(router_a.registry().by_name("net/webtransport-client/insec") == nullptr,
+              "A: the refused SPEC leaves no endpoint behind");
+        check(tr::net::webtransport_insecure_refusals() == refused_before + 1,
+              "A: the refusal is counted");
+        // The key is refused on the LISTEN role too — it is never silently ignored.
+        const auto listen_insec =
+            node_b.write(path_t("/net/webtransport-server/conn"),
+                         wt_conn_spec("linsec", 0, {}, g_cert, g_key, {}, {}, true));
+        check(!listen_insec.has_value() &&
+                  listen_insec.error() == tr::graph::status_t::PERMISSION_DENIED,
+              "B: a LISTEN SPEC carrying `insecure = 1` is REFUSED as well");
+        check(tr::net::webtransport_insecure_refusals() == refused_before + 2,
+              "B: that refusal is counted too");
+    }
 
     // 3. `ca = <the peer's own cert>` — verification stays ON, against a private bundle.
     const auto with_ca =
@@ -707,7 +733,8 @@ void test_spec_dial_trust_keys() {
     const auto zero =
         node_a.write(path_t("/net/webtransport-client/conn"),
                      wt_conn_spec("zero", ports["l4"], "127.0.0.1", {}, {}, {}, {}, false));
-    check(!zero.has_value(), "A: `insecure = 0` still verifies — the dial is REFUSED");
+    check(!zero.has_value() && zero.error() == tr::graph::status_t::TRANSPORT_DOWN,
+          "A: `insecure = 0` passes the capability gate and still verifies — REFUSED");
 
     // 5. `ca = <an UNRELATED bundle>` — the bundle is genuinely consulted, not
     //    merely accepted: one that does not certify this peer still refuses.

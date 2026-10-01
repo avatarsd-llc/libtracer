@@ -32,6 +32,19 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Breaking
 
+- **The `insecure` key now requires `config_t::kAllowInsecureTls`.** The `quic` and
+  `webtransport` kinds' connection-SPEC key `insecure` (skip server-certificate verification on
+  the dial) is honoured only on a build that binds the new compile-time capability
+  `default_config_t::kAllowInsecureTls` (default `false`, derived spelling
+  `tr::net::kAllowInsecureTls`). On a default build a SPEC carrying `insecure` = non-zero is
+  refused at creation with `graph::status_t::PERMISSION_DENIED`, on either role, and counted by
+  the new `tr::net::quic_insecure_refusals()` / `tr::net::webtransport_insecure_refusals()`;
+  `insecure = 0` is accepted as before. The key is never silently ignored. **Migration:** reach a
+  self-signed peer with `ca` (verification stays on), or, in a development build only, add
+  `static constexpr bool kAllowInsecureTls = true;` to its `config_override.hpp` — the checked-in
+  preset `core/tests/insecure-tls/libtracer/config_override.hpp` does that. Direct construction
+  with `quic_dial_tls_t` / `webtransport_dial_tls_t` `.insecure_no_verify` is unchanged.
+
 - **`graph_t`'s two instrumentation counters are compiled out by default:
   `config_t::kInstrumentCounters` ([#1664](https://github.com/avatarsd-llc/libtracer/issues/1664)).**
   `ancestor_walks()` (RFC-0005) and `target_canonical_resolves()` (#830) were a relaxed 64-bit

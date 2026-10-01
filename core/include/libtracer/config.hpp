@@ -621,6 +621,38 @@ struct default_config_t {
      * `static constexpr bool kInstrumentCounters = true;`
      */
     static constexpr bool kInstrumentCounters = false;
+
+    /**
+     * @brief Whether a connection SPEC may carry the `insecure` key of the `quic` and
+     *        `webtransport` kinds — the dial-side switch that skips server-certificate
+     *        verification.
+     *
+     * `insecure` is a DEV-ONLY convenience for reaching a self-signed peer. A SPEC is a
+     * wire write, and on a build without an ACL policy any connected peer may write one, so
+     * honouring the key unconditionally would let a peer make this node dial with peer
+     * authentication switched off. Whether that key is honoured at all is therefore a
+     * decision the BUILD states, not the SPEC.
+     *
+     * **Default `false` — the lean and safe choice.** Closed out, a SPEC whose config carries
+     * `insecure` = nonzero is REFUSED at creation: the factory answers
+     * `graph::status_t::PERMISSION_DENIED` and counts the refusal
+     * (`%tr::net::quic_insecure_refusals()` / `%tr::net::webtransport_insecure_refusals()`, in
+     * the respective module header). It is never silently ignored — a dial that asked for no
+     * verification and quietly got verification would fail later for a reason nobody wrote
+     * down — and never honoured. `insecure` = `0` is the explicit "verify" spelling and is
+     * accepted either way. The `ca` key (verify against a named PEM bundle) is the way to
+     * reach a privately-issued or self-signed peer on a closed-out build.
+     *
+     * Only the SPEC path is gated. An application that constructs a transport itself with
+     * `quic_dial_tls_t{.insecure_no_verify = true}` has made that choice in its own C++; no
+     * peer can reach that field.
+     *
+     * **Who sets it.** A development or test build that dials self-signed peers through a
+     * SPEC. The `quic` CI workflow runs the QUIC and WebTransport tests a second time under
+     * the checked-in fragment `core/tests/insecure-tls/libtracer/config_override.hpp`.
+     * Override fragment: `static constexpr bool kAllowInsecureTls = true;`
+     */
+    static constexpr bool kAllowInsecureTls = false;
 };
 
 }  // namespace tr::graph
@@ -752,6 +784,16 @@ inline constexpr bool kBusLinks = tr::graph::config_t::kBusLinks;
  * the one place every knob is set.
  */
 inline constexpr bool kSelfHealLinks = tr::graph::config_t::kSelfHealLinks;
+
+/**
+ * @brief Whether a connection SPEC may carry the dial-side `insecure` key.
+ *
+ * The transport plane's spelling of @ref tr::graph::default_config_t::kAllowInsecureTls, which
+ * carries the rationale. Derived from @ref tr::graph::config_t exactly as @ref kBusLinks is,
+ * so an override fragment sets it in the one place every knob is set. Its consumers are the
+ * `quic` and `webtransport` factories.
+ */
+inline constexpr bool kAllowInsecureTls = tr::graph::config_t::kAllowInsecureTls;
 
 /**
  * @brief Stack bytes for the link-liveness engine's worker thread; `0` = platform default.

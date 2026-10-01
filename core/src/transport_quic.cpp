@@ -24,6 +24,8 @@
 
 #include <msquic.h>
 
+#include <atomic>
+#include <cstdint>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -32,6 +34,7 @@
 #include <vector>
 
 #include "libtracer/byteorder.hpp"
+#include "libtracer/config.hpp"
 #include "libtracer/config_reader.hpp"
 #include "libtracer/frame.hpp"
 #include "msquic_endpoint.hpp"
@@ -248,6 +251,11 @@ struct quic_private_cfg_t {
                                        explicitly — the default is to verify (DIAL). */
 };
 
+/** @brief Process-wide count of `quic` SPECs refused for carrying `insecure` = nonzero on a
+ *         build without @ref tr::graph::default_config_t::kAllowInsecureTls — see
+ *         @ref quic_insecure_refusals. Touched only on the refusal, never on a dial. */
+std::atomic<std::uint64_t> g_insecure_refusals{0};
+
 /** @brief The shared config_reader_t walk over the quic-private keys: NAME
  *         "cert" NAME <path>, NAME "key" NAME <path>, NAME "ca" NAME <path>,
  *         NAME "insecure" VALUE <u8>; unknown pairs ignored (forward-compat).
@@ -273,6 +281,16 @@ transport_vertex_t::transport_factory_t quic_transport_factory(mem::mem_backend_
         // the DIAL branch used to return before parse_quic_config ever ran, which is
         // why no SPEC could reach the dial-side trust knobs at all (#918).
         const quic_private_cfg_t priv = parse_quic_config(raw_config);
+        // The `insecure` key disables peer authentication, and a SPEC can come from any peer
+        // the ACL lets write (every peer, on a default build). Honouring it is a BUILD
+        // capability: without kAllowInsecureTls the SPEC is refused and counted — never
+        // silently downgraded to a verifying dial, never honoured. `insecure = 0` passes.
+        if constexpr (!kAllowInsecureTls) {
+            if (priv.insecure) {
+                g_insecure_refusals.fetch_add(1, std::memory_order_relaxed);
+                return std::unexpected(graph::status_t::PERMISSION_DENIED);
+            }
+        }
         std::unique_ptr<quic_transport_t> t;
         if (s.role == conn_role_t::DIAL) {
             if (s.addr.empty() || s.port == 0)
@@ -299,6 +317,10 @@ transport_vertex_t::transport_factory_t quic_transport_factory(mem::mem_backend_
         if (!t->ok()) return std::unexpected(graph::status_t::TRANSPORT_DOWN);
         return t;
     };
+}
+
+std::uint64_t quic_insecure_refusals() noexcept {
+    return g_insecure_refusals.load(std::memory_order_relaxed);
 }
 
 }  // namespace tr::net

@@ -207,6 +207,10 @@ plane read their own spellings, so that neither L0 nor `tr::net` has to name an 
 :project: libtracer
 ```
 
+```{doxygenvariable} tr::net::kAllowInsecureTls
+:project: libtracer
+```
+
 ```{doxygenvariable} tr::net::kSelfHealWorkerStackBytes
 :project: libtracer
 ```

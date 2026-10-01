@@ -92,7 +92,10 @@ deployment needs it, layer signed payloads at the application level.
 
 The QUIC dialer exposes `quic_dial_tls_t::insecure_no_verify`, which **skips server-certificate
 validation entirely**. It exists to reach a self-signed development certificate and is named to
-be greppable. It must never be set in a deployed build.
+be greppable. It must never be set in a deployed build. The matching connection-SPEC key,
+`insecure`, is refused (`PERMISSION_DENIED`, counted) unless the build binds
+`config_t::kAllowInsecureTls`, which defaults to `false`; see
+[connection config](docs/modules/connection-config.md).
 
 For plaintext MCU links the intended answer is a Noise-pattern channel (the module catalog's
 `security_noise` slot) rather than dragging X.509 and a CA store onto a 16 KB-class device.
@@ -149,7 +152,7 @@ A short checklist that follows from the above:
 - Do not let the resolver pass caller-supplied identity through unfiltered.
 - Terminate untrusted links on TLS-carrying transports (QUIC / WebTransport), or accept that
   the ACL on a plaintext link is advisory.
-- Never ship `insecure_no_verify`.
+- Never ship `insecure_no_verify`, and never ship a build that binds `kAllowInsecureTls`.
 - Check that every stored ACE names a subject your resolver can return — an ACE that matches
   nobody locks the vertex.
 - Do not attribute a multi-hop `FWD` to its origin. It carries the last hop's subject.
