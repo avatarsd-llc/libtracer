@@ -100,41 +100,23 @@ option(LIBTRACER_SELF_HEAL_LINKS
        "Build the RFC-0014 S5 link-liveness engine (self_heal_link_t); needs kSelfHealLinks = true"
        ${_libtracer_link_modules_default})
 
+# The core source list lives in ONE file (#1702), shared with the ESP-IDF component and
+# checked against the PlatformIO deny-list by tools/check_source_list.py. This file only
+# SELECTS groups from it; it never names a core/src source itself.
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/libtracer_sources.cmake)
+
 # The required core (always compiled): L2/L3 wire codec + L0/L1 substrate + path + L4
 # graph runtime, plus the in-process loopback transport (dev/test, no dependencies; a
 # tracer.hpp umbrella member).
-add_library(libtracer STATIC
-    src/frame.cpp
-    src/tlv_arena.cpp
-    src/backend_set.cpp
-    src/device_backend.cpp
-    src/mem_heap.cpp
-    src/mem_source.cpp
-    src/mem_source_backend.cpp
-    src/mem_pool.cpp
-    src/rope.cpp
-    src/rope_decode.cpp
-    src/tlv_view.cpp
-    src/path.cpp
-    src/graph.cpp
-    src/loopback.cpp
-)
+add_library(libtracer STATIC ${LIBTRACER_SOURCES_REQUIRED})
 
 # The net/routing plane (LIBTRACER_NET_PLANE). The graph runtime above works without it
 # for a pure in-process node.
 if(LIBTRACER_NET_PLANE)
-    target_sources(libtracer PRIVATE
-        src/fwd_reply.cpp
-        src/op_resolve.cpp
-        src/op_resolve_view.cpp
-        src/route_handle.cpp
-        src/path_label_table.cpp
-        src/fwd_router.cpp
-        src/transport_vertex.cpp
-    )
+    target_sources(libtracer PRIVATE ${LIBTRACER_SOURCES_NET_PLANE})
     # The S5 liveness engine (#1470) — see the option's own comment above.
     if(LIBTRACER_SELF_HEAL_LINKS)
-        target_sources(libtracer PRIVATE src/self_heal_link.cpp)
+        target_sources(libtracer PRIVATE ${LIBTRACER_SOURCES_SELF_HEAL_LINKS})
     endif()
     # The built-in transport-factory registrations transport_vertex_t wires up. One glue
     # TU per enabled builtin (udp/tcp/ws), plus a dispatcher (register_builtin_transports)
@@ -145,23 +127,23 @@ if(LIBTRACER_NET_PLANE)
     # references a dropped transport (the decoupling that lets a transport TU be omitted).
     set(_libtracer_builtin_calls "")
     if(LIBTRACER_TRANSPORT_UDP)
-        target_sources(libtracer PRIVATE src/builtin_transport_udp.cpp)
+        target_sources(libtracer PRIVATE ${LIBTRACER_SOURCES_BUILTIN_UDP})
         string(APPEND _libtracer_builtin_calls "    register_udp_transport(vertex, rx_backend, egress_src);\n")
     endif()
     if(LIBTRACER_TRANSPORT_TCP)
-        target_sources(libtracer PRIVATE src/builtin_transport_tcp.cpp)
+        target_sources(libtracer PRIVATE ${LIBTRACER_SOURCES_BUILTIN_TCP})
         string(APPEND _libtracer_builtin_calls "    register_tcp_transport(vertex, rx_backend, egress_src);\n")
     endif()
     if(LIBTRACER_TRANSPORT_WS)
-        target_sources(libtracer PRIVATE src/builtin_transport_ws.cpp)
+        target_sources(libtracer PRIVATE ${LIBTRACER_SOURCES_BUILTIN_WS})
         string(APPEND _libtracer_builtin_calls "    register_ws_transport(vertex, rx_backend, egress_src);\n")
     endif()
     if(LIBTRACER_TRANSPORT_UDP AND LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_WS)
-        target_sources(libtracer PRIVATE src/builtin_transports.cpp)
+        target_sources(libtracer PRIVATE ${LIBTRACER_SOURCES_BUILTIN_DISPATCHER})
     else()
         set(LIBTRACER_BUILTIN_TRANSPORT_CALLS "${_libtracer_builtin_calls}")
         configure_file(
-            ${CMAKE_CURRENT_SOURCE_DIR}/src/builtin_transports.cpp.in
+            ${LIBTRACER_BUILTIN_DISPATCHER_TEMPLATE}
             ${CMAKE_CURRENT_BINARY_DIR}/generated/builtin_transports.cpp
             @ONLY)
         target_sources(libtracer PRIVATE
@@ -172,16 +154,16 @@ endif()
 # Socket transports — tcp/udp/ws share posix_endpoint_t (the recv-thread/endpoint
 # scaffold), compiled when ANY of them is on.
 if(LIBTRACER_TRANSPORT_TCP OR LIBTRACER_TRANSPORT_UDP OR LIBTRACER_TRANSPORT_WS)
-    target_sources(libtracer PRIVATE src/posix_endpoint.cpp)
+    target_sources(libtracer PRIVATE ${LIBTRACER_SOURCES_POSIX_ENDPOINT})
 endif()
 if(LIBTRACER_TRANSPORT_TCP)
-    target_sources(libtracer PRIVATE src/transport_tcp.cpp)
+    target_sources(libtracer PRIVATE ${LIBTRACER_SOURCES_TRANSPORT_TCP})
 endif()
 if(LIBTRACER_TRANSPORT_UDP)
-    target_sources(libtracer PRIVATE src/transport_udp.cpp)
+    target_sources(libtracer PRIVATE ${LIBTRACER_SOURCES_TRANSPORT_UDP})
 endif()
 if(LIBTRACER_TRANSPORT_WS)
-    target_sources(libtracer PRIVATE src/transport_ws.cpp)
+    target_sources(libtracer PRIVATE ${LIBTRACER_SOURCES_TRANSPORT_WS})
 endif()
 
 # CAN transport (portable framing/reassembly) + its can_link_t platform binding.
@@ -189,11 +171,11 @@ endif()
 # implementation on Linux, the always-off stub everywhere else. Platform ports (e.g.
 # the ESP-IDF component's twai_link_t) implement the same can_link_t seam in their tree.
 if(LIBTRACER_TRANSPORT_CAN)
-    target_sources(libtracer PRIVATE src/transport_can.cpp)
+    target_sources(libtracer PRIVATE ${LIBTRACER_SOURCES_TRANSPORT_CAN})
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-        target_sources(libtracer PRIVATE src/socketcan_link.cpp)
+        target_sources(libtracer PRIVATE ${LIBTRACER_SOURCES_SOCKETCAN_LINUX})
     else()
-        target_sources(libtracer PRIVATE src/socketcan_link_stub.cpp)
+        target_sources(libtracer PRIVATE ${LIBTRACER_SOURCES_SOCKETCAN_STUB})
     endif()
 endif()
 # Namespaced alias so a build-tree consumer (add_subdirectory / FetchContent) links
@@ -345,10 +327,7 @@ if(LIBTRACER_WITH_QUIC)
     if(NOT MSQUIC_INCLUDE_DIR)
         message(FATAL_ERROR "msquic.h not found — set CMAKE_PREFIX_PATH to the msquic install prefix.")
     endif()
-    add_library(libtracer_quic STATIC
-        src/transport_quic.cpp
-        src/transport_webtransport.cpp
-    )
+    add_library(libtracer_quic STATIC ${LIBTRACER_SOURCES_QUIC})
     target_include_directories(libtracer_quic PUBLIC "${MSQUIC_INCLUDE_DIR}")
     target_link_libraries(libtracer_quic PUBLIC libtracer msquic)
     if(MSVC)

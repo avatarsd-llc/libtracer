@@ -43,14 +43,36 @@ Import("env", "pio_lib_builder")  # noqa: F821  (injected by PlatformIO/SCons at
 # libwebtransport) or Linux kernel headers (SocketCAN; its stub stays in). The GPU
 # backend needs no entry since #1381 — it is a `backends/` tier module and this
 # package only exports `core/`, so there is nothing to filter out.
-env.Replace(  # noqa: F821
-    SRC_FILTER=[
-        "+<*>",
-        "-<transport_quic.cpp>",
-        "-<transport_webtransport.cpp>",
-        "-<socketcan_link.cpp>",
-    ]
-)
+#
+# The DENY_* lists below are held to core's one source list
+# (core/cmake/libtracer_sources.cmake, #1702) by tools/check_source_list.py: each one must
+# name exactly the files of the source groups it stands for, so a core source added,
+# removed or regrouped there without the matching edit here fails CI. Keep them literal
+# lists of file names; the check reads them without running this script.
+DENY_BASELINE = [  # LIBTRACER_SOURCES_QUIC + LIBTRACER_SOURCES_SOCKETCAN_LINUX
+    "transport_quic.cpp",
+    "transport_webtransport.cpp",
+    "socketcan_link.cpp",
+]
+DENY_WITHOUT_BUS_LINKS = [  # LIBTRACER_SOURCES_TRANSPORT_CAN + LIBTRACER_SOURCES_SOCKETCAN_STUB
+    "transport_can.cpp",
+    "socketcan_link_stub.cpp",
+]
+DENY_WITHOUT_SELF_HEAL_LINKS = [  # LIBTRACER_SOURCES_SELF_HEAL_LINKS
+    "self_heal_link.cpp",
+]
+DENY_ESPRESSIF32 = [  # TRANSPORT_WS + BUILTIN_WS + BUILTIN_DISPATCHER (see #984 below)
+    "transport_ws.cpp",
+    "builtin_transport_ws.cpp",
+    "builtin_transports.cpp",
+]
+
+
+def _deny(names):
+    return [f"-<{name}>" for name in names]
+
+
+env.Replace(SRC_FILTER=["+<*>"] + _deny(DENY_BASELINE))  # noqa: F821
 
 # The two LINK MODULES (#1670): the ADR-0044 bus tier and the RFC-0014 S5 liveness engine.
 # Both are OFF by default since v0.17.0 — `default_config_t::kBusLinks` and `kSelfHealLinks`
@@ -76,11 +98,9 @@ def _libtracer_opt_in(name):
 _bus_links = _libtracer_opt_in("custom_libtracer_bus_links")
 _self_heal_links = _libtracer_opt_in("custom_libtracer_self_heal_links")
 if not _bus_links:
-    env.Append(  # noqa: F821
-        SRC_FILTER=["-<transport_can.cpp>", "-<socketcan_link_stub.cpp>"]
-    )
+    env.Append(SRC_FILTER=_deny(DENY_WITHOUT_BUS_LINKS))  # noqa: F821
 if not _self_heal_links:
-    env.Append(SRC_FILTER=["-<self_heal_link.cpp>"])  # noqa: F821
+    env.Append(SRC_FILTER=_deny(DENY_WITHOUT_SELF_HEAL_LINKS))  # noqa: F821
 
 _cfg_dir = env.subst(os.path.join("$BUILD_DIR", "libtracer_config"))  # noqa: F821
 _cfg_path = os.path.join(_cfg_dir, "libtracer", "config_override.hpp")
@@ -149,13 +169,7 @@ if env.get("PIOPLATFORM", "") == "espressif32":
     # packaged here — see #984 for the follow-up that could add them). Gated by the
     # `pio-esp32-can` workflow via tools/check_esp_ws_plane.py --ws-plane none on the
     # linked fixture image.
-    env.Append(  # noqa: F821
-        SRC_FILTER=[
-            "-<transport_ws.cpp>",
-            "-<builtin_transport_ws.cpp>",
-            "-<builtin_transports.cpp>",
-        ]
-    )
+    env.Append(SRC_FILTER=_deny(DENY_ESPRESSIF32))  # noqa: F821
     # PlatformIO exec()s a library extraScript as an SCons SConscript, and SCons
     # runs it against SConscript globals where `__file__` is NOT defined — deriving
     # the package root from it raises NameError and fails the whole build. The

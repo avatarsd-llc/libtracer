@@ -279,7 +279,9 @@ jobs:
         if: ${{ env.IDF_COMPONENT_API_TOKEN != '' }}
         run: |
           mkdir -p integrations/esp-idf/libtracer/core
-          cp -r core/include core/src integrations/esp-idf/libtracer/core/
+          # core/cmake carries the shared source list the component's CMakeLists
+          # includes (#1702), and its presence is how that CMakeLists detects this copy.
+          cp -r core/include core/src core/cmake integrations/esp-idf/libtracer/core/
       - name: Upload to the ESP Component Registry
         if: ${{ env.IDF_COMPONENT_API_TOKEN != '' }}
         working-directory: integrations/esp-idf/libtracer

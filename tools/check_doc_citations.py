@@ -912,10 +912,10 @@ ANCHORS = [
     # The GPU backend's build moved out of core into its own tier project (#1381), so what
     # docs/modules/backends.md cites is the tier's target, not a core option.
     ('backends/cuda/CMakeLists.txt:36', 'add_library(libtracer_cuda STATIC src/mem_cuda.cpp)'),
-    ('core/CMakeLists.txt:328', 'option(LIBTRACER_WITH_QUIC "Configure the libtracer_quic transport module'),
-    ('core/CMakeLists.txt:413', 'write_basic_package_version_file('),
-    ('core/CMakeLists.txt:424', 'if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND EXISTS'),
-    ('core/CMakeLists.txt:438', 'option(LIBTRACER_BUILD_EXAMPLES "Build the core examples"'),
+    ('core/CMakeLists.txt:310', 'option(LIBTRACER_WITH_QUIC "Configure the libtracer_quic transport module'),
+    ('core/CMakeLists.txt:392', 'write_basic_package_version_file('),
+    ('core/CMakeLists.txt:403', 'if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND EXISTS'),
+    ('core/CMakeLists.txt:417', 'option(LIBTRACER_BUILD_EXAMPLES "Build the core examples"'),
     # `docs/examples/index.md` cited the two `if(LIBTRACER_NET_PLANE)` lines (58, 73). That
     # text appears THREE times in this file and the scope filter cannot separate 58 from 73
     # — a scope must sit ABOVE its candidate, and everything above 58 is also above 73. The
@@ -925,28 +925,27 @@ ANCHORS = [
     ('core/examples/CMakeLists.txt:74', 'add_executable(tree_of_ropes tree_of_ropes.cpp)'),
     ('core/examples/CMakeLists.txt:87', 'if(BUILD_TESTING)'),
     ('core/examples/CMakeLists.txt:92', 'add_test(NAME example_wire_codec COMMAND wire_codec)'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:44', 'set(LIBTRACER_SRCS'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:189', 'if(CONFIG_LIBTRACER_TRANSPORT_CAN)'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:338', 'if(IDF_TARGET STREQUAL "linux")',
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:169', 'if(CONFIG_LIBTRACER_TRANSPORT_CAN)'),
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:316', 'if(IDF_TARGET STREQUAL "linux")',
      'unlike CONFIG_* is defined in BOTH CMake passes'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:317', 'set(LIBTRACER_EDGE_PIN_SLOTS 8)'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:409',
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:295', 'set(LIBTRACER_EDGE_PIN_SLOTS 8)'),
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:387',
      'static constexpr std::size_t kShareThresholdBytes = ~std::size_t{0};'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:349', 'if(LIBTRACER_SPIN_WAIT_SAFE)'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:304',
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:327', 'if(LIBTRACER_SPIN_WAIT_SAFE)'),
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:282',
      'set(LIBTRACER_VERTEX_LOCK_STRIPES ${CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES})'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:322', 'if(CONFIG_FREERTOS_UNICORE)'),
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:300', 'if(CONFIG_FREERTOS_UNICORE)'),
     # #1470: the S5 liveness-engine knobs the config-space table points at.
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:368', 'set(LIBTRACER_SELF_HEAL_LINKS true)'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:378',
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:346', 'set(LIBTRACER_SELF_HEAL_LINKS true)'),
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:356',
      'if(CONFIG_LIBTRACER_SELF_HEAL_WORKER_STACK)'),
     ('core/include/libtracer/config.hpp:583', 'static constexpr bool kSelfHealLinks = false;'),
     ('core/include/libtracer/config.hpp:610',
      'static constexpr std::size_t kSelfHealWorkerStackBytes = 0;'),
     ('core/include/libtracer/config.hpp:637', 'static constexpr bool kInstrumentCounters = false;'),
     ('core/include/libtracer/config.hpp:670', 'static constexpr bool kAllowInsecureTls = false;'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:190',
-     'list(APPEND LIBTRACER_SRCS "${LIBTRACER_ROOT}/core/src/transport_can.cpp")'),
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:170',
+     'list(APPEND LIBTRACER_SRCS ${LIBTRACER_SOURCES_TRANSPORT_CAN})'),
 
     # --- #1243: the backfill that made the pin list a COVERAGE list.
     #

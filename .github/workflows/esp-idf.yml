@@ -41,7 +41,9 @@ on:
       - "integrations/esp-idf/**"
       - "core/src/**"
       - "core/include/**"
-      - "tools/check_esp_srcs.py"
+      - "tools/check_source_list.py"
+      - "core/cmake/**"
+      - "integrations/platformio/pio_esp32_can.py"
       - "tools/check_esp_ws_plane.py"
       - "tools/check_esp_thread_id.py"
       - ".github/workflows/esp-idf.yml"
@@ -50,7 +52,9 @@ on:
       - "integrations/esp-idf/**"
       - "core/src/**"
       - "core/include/**"
-      - "tools/check_esp_srcs.py"
+      - "tools/check_source_list.py"
+      - "core/cmake/**"
+      - "integrations/platformio/pio_esp32_can.py"
       - "tools/check_esp_ws_plane.py"
       - "tools/check_esp_thread_id.py"
       - "tools/rv32_footprint.py"
@@ -81,11 +85,11 @@ on:
 # whole app image.
 
 jobs:
-  # Fast fail-first guard: every core/src/*.cpp is either in the component's
-  # hand-maintained LIBTRACER_SRCS or explicitly opted out. Catches the "new core
-  # source forgotten in the ESP list" drift at lint time instead of as a much later
-  # full-node LINK error (the two lists legitimately differ — core assembles
-  # conditionally, the ESP list is a flat subset — so they can't share a fragment).
+  # Fast fail-first guard (#1702): core's ONE source list
+  # (core/cmake/libtracer_sources.cmake) covers every core/src/*.cpp, the component and
+  # core/CMakeLists.txt select its groups without naming a source themselves, and the
+  # PlatformIO deny-lists name exactly the groups they stand for. A list mistake fails
+  # here in seconds instead of as a much later full-node LINK error.
   srcs-drift:
     runs-on: ubuntu-24.04
     # Measured max 0.13 min (8 seconds), p50 0.08 — a pure file-list comparison with no
@@ -94,8 +98,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - name: Guard ESP-IDF LIBTRACER_SRCS against core/src drift
-        run: python3 tools/check_esp_srcs.py
+      - name: Hold the component, core CMake and PlatformIO to the one core source list
+        run: python3 tools/check_source_list.py
 
   # rv32 required-modules flash CENSUS (#1479) — ADVISORY, and advisory is the whole
   # design, not a first step toward a gate.
