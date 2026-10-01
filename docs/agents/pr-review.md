@@ -80,13 +80,19 @@ through or buries a docs typo in process.
 
 | Domain | Paths | Bar |
 |---|---|---|
-| **Protocol — the spec** | `docs/spec/` | **High.** Affects every implementation and every deployed device. RFC required (below). |
+| **Protocol — the spec** | `docs/spec/`, plus every reference page [`docs/spec/v1.md` §3](../spec/v1.md) incorporates as a normative annex | **High.** Affects every implementation and every deployed device. RFC required (below). |
 | **Reference implementation** | `core/`, `bindings/`, `integrations/` | **Normal.** Cannot break a spec-conforming peer. Maintainer review, no RFC unless it implies a spec change. |
 | **Tooling, docs, examples** | everything else | **Low.** PRs welcome. |
 
+**Classify by the spec's annex list, never by directory.** `v1.md` §3 is the
+single source of which pages are normative (restated at
+[`docs/spec/index.md`](../spec/index.md) §What is normative). A page under
+`docs/reference/` that the list names is the top row, and one it does not name
+is informative, whatever its own banner says.
+
 Say which domain the diff is in, in the first line of the review. A diff that
 straddles two is reviewed at the **higher** bar, and "it is only a docs change"
-about a file under `docs/spec/` is not true — that is the top row.
+about a file under `docs/spec/` or an annex is not true — that is the top row.
 
 ## Axis 1 — Spec and governance
 
@@ -434,8 +440,12 @@ yourself**; CI already did.
 | Conformance suite | `cmake --build core/build --target conformance_runner -j && python3 tests/conformance/run-all.py` | no |
 | Differential fuzz against the corpus | `python3 tests/conformance/diff_fuzz.py -n 2000` | no |
 | Rust bindings | `cargo test` in `bindings/rust/` | no |
-| Formatting | `clang-format` with the repo `.clang-format` | no |
+| Formatting | `clang-format-18 --dry-run --Werror` over the paths `core-ci.yml`'s format step lists — **version 18** (CI runs 18.1.3); another major version reformats untouched files | no |
 | Public-header docs gate | Doxygen with `core/Doxyfile` (`WARN_AS_ERROR=YES`) | no |
+| Doc citations (`doc-citations`) | `python3 tools/check_doc_citations.py`; after a source edit moves cited lines, `--repin --from-rev origin/main --apply`, then re-run | no |
+| Symbol-size ratchet (`symbol-ratchet`) | `cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release && cmake --build bench/build --target bench_libtracer bench_compact_delivery -j && python3 bench/symbol_ratchet.py --build bench/build --pins bench/symbol_ratchet.json` — toolchain-bound, so a local number is not CI's | no |
+| Perf gate (`perf`, path-filtered to `core/`, `bench/`, `docs/methodology.md`) | `gate-pr` in `.github/workflows/perf.yml`: a same-runner interleaved A/B against `main` via `bench/perf_gate.py`; a contributor does not reproduce it locally | no |
+| Docs build (`docs`) | `sphinx-build -n -W --keep-going -b html -c docs . docs/_build/html` after `doxygen core/Doxyfile`; a Doxygen autolink inside backticks breaks `-n -W` — escape it with `%` | no |
 | Cortex-M0 footprint sentinel | the `sentinel` job in `.github/workflows/footprint-cortexm0.yml` (needs `arm-none-eabi`) | no |
 | ESP32-C6 hardware arms | `.github/workflows/hil-esp32c6.yml` | **yes** |
 
@@ -443,6 +453,17 @@ yourself**; CI already did.
 (`LIBTRACER_ACL_FULL`, `LIBTRACER_LKV_SLOT`), a minimal module set, a
 reclaim-strict binding, and a bus-closed build. A change that passes the default
 and breaks a matrix cell is still broken; name the cell.
+
+**Before you push**, run what your diff can break:
+
+1. `clang-format-18 -i` on every C/C++ file you touched.
+2. `python3 tools/check_doc_citations.py`, and repin if it fails (format first, then repin, then verify).
+3. Build and `ctest` the core if you touched `core/`.
+4. The conformance suite if you touched the wire codec or `tests/conformance/`.
+5. `cargo test` / the TypeScript tests if you touched a binding.
+6. A `CHANGELOG.md` entry if you changed a public API.
+7. An erratum or RFC if you touched `docs/spec/` or an annex (Step 0).
+8. `git commit -s`, and no `Co-Authored-By` trailer.
 
 Hardware access is a maintainer's to grant. A contributor who cannot run the last
 row should **say which arms they could not run** rather than claiming the suite

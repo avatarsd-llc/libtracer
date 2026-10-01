@@ -7,18 +7,26 @@ libtracer is a spec-first protocol project. See [GOVERNANCE.md](.github/GOVERNAN
 - **Every change lands via a pull request.** No direct pushes to `main` — branch, push, open a PR, merge through GitHub.
 - **Sign commits** with `-s` (DCO required per [CONTRIBUTING.md](.github/CONTRIBUTING.md)). Unsigned commits will be asked to be amended.
 - **Do not add `Co-Authored-By` trailers** to commit messages.
-- **C/C++ changes** must pass `clang-format` (config at `.clang-format`).
+- **C/C++ changes** must pass `clang-format-18` (config at `.clang-format`). CI runs 18.1.3; a bare `clang-format` of another major version reports unrelated files as dirty. Every CI gate and a before-you-push list are in [the runbook](docs/agents/pr-review.md#the-runbook-to-hand-the-contributor).
 - **C++ naming & comments** (full rules in [core/STYLE.md](core/STYLE.md)): types are `snake_case` with a `_t` suffix (`mem_backend_t`, `view_t`) — **never PascalCase**; enums are `enum class` with `SCREAMING_SNAKE` scoped values (`io_dir_t::DEVICE_TO_CPU`); namespaces mirror the layer model and never reuse an error-concept word — `tr::mem` (L0), `tr::view` (L1), `tr::wire` (L2/L3 codec), `tr::graph` (L4), `tr::net` (transport plane). Dependencies point up the layers only; `decode(view_t)` (the L1↔L2 cast) lives at L2 (`tr::wire`) because it produces a `tlv_t`. Doxygen-capable comments **everywhere, not just public headers**: every entity-attached comment (file headers, functions, types, members, section blocks — **including `.cpp` implementation files and the Rust/TS bindings**) uses **`/** … */` block form with `@brief`** (never `///` in any language; trailing docs use `/**< … */`; Rust = rustdoc `/** */`, TS = JSDoc). Statement-level comments inside function bodies stay `//` (orphan doc blocks trip the gate). Public headers are CI-gated by `core/Doxyfile` (`WARN_AS_ERROR`).
-- **Spec changes** (anything under [docs/spec/](docs/spec/)) require an RFC under [docs/spec/rfcs/](docs/spec/) per [GOVERNANCE.md](.github/GOVERNANCE.md). Pick the right instrument: an **erratum** (the text contradicts shipped, already-agreed behaviour — ordinary PR, no window, must not change the wire surface) or an **amendment** (the normative surface itself changes — RFC + maintainer approval, 14-day window **waived by default** while solo-maintained, invoked explicitly when outside input is wanted). Do not defer a correction for a window that is waived.
+- **Spec changes** — anything under [docs/spec/](docs/spec/), **plus every reference page that [docs/spec/v1.md §3](docs/spec/v1.md) incorporates as a normative annex** (that list is the only source; it is restated at [docs/spec/index.md §What is normative](docs/spec/index.md)) — require an RFC under [docs/spec/rfcs/](docs/spec/rfcs/) per [GOVERNANCE.md](.github/GOVERNANCE.md). Pick the right instrument: an **erratum** (the text contradicts shipped, already-agreed behaviour — ordinary PR, no window, must not change the wire surface) or an **amendment** (the normative surface itself changes — RFC + maintainer approval, 14-day window **waived by default** while solo-maintained, invoked explicitly when outside input is wanted). Do not defer a correction for a window that is waived.
 - **Public API changes** require a note in the relevant `CHANGELOG.md`.
 
-## Where the canonical material lives
+## Where to look
 
-- **Normative spec:** [docs/spec/v1.md](docs/spec/v1.md) — the wire protocol; immutable once released.
-- **Reference (descriptive):** [docs/reference/](docs/reference/) — start at [00-overview.md](docs/reference/00-overview.md). The "what it is" alongside the normative spec. When reference and planning docs disagree, reference wins.
-- **Design rationale and history:** [docs/adr/](docs/adr/) (ADRs) and git history — explains "why it looks the way it does."
-- **Glossary (canonical domain vocabulary):** [CONTEXT.md](CONTEXT.md) — the root context glossary; read this before naming any domain concept (vertex, edge, path, view, segment, TLV, bridge, address-shift slicing, etc.).
-- **Decisions & RFCs:** [docs/adr/](docs/adr/) records architecture decisions; [docs/spec/rfcs/](docs/spec/rfcs/) holds spec-change proposals. (The earlier `docs/analisys/` reviews were consolidated into these and removed.)
+| You need | Read |
+| --- | --- |
+| Domain vocabulary — before naming any concept | [CONTEXT.md](CONTEXT.md) |
+| The wire protocol (normative) | [docs/spec/v1.md](docs/spec/v1.md) and the annexes its §3 incorporates |
+| Which pages are normative | [docs/spec/v1.md §3](docs/spec/v1.md), restated at [docs/spec/index.md](docs/spec/index.md) |
+| What the system is: layers, load-bearing claims | [docs/reference/00-overview.md](docs/reference/00-overview.md), then [docs/reference/](docs/reference/) |
+| Why it looks the way it does | [docs/adr/](docs/adr/) and git history |
+| Spec-change proposals and their history | [docs/spec/rfcs/](docs/spec/rfcs/) |
+| C++ naming, comments, layers | [core/STYLE.md](core/STYLE.md) |
+| Decision domains, erratum vs amendment | [.github/GOVERNANCE.md](.github/GOVERNANCE.md) |
+| Review criteria, CI gates, before-you-push list | [docs/agents/pr-review.md](docs/agents/pr-review.md) |
+
+**Precedence:** the spec (`v1.md` and its annexes) wins over every other doc, `docs/reference/` wins over planning docs, and ADRs carry the rationale, not the rule. If your output contradicts an ADR or a load-bearing reference page, say so explicitly rather than overriding it silently.
 
 ## Agent skills
 
@@ -26,7 +34,7 @@ This repo is set up for use with Matt Pocock's engineering skills (`triage`, `to
 
 ### PR review
 
-Every push to an open pull request gets an automated first-pass review from a cloud routine on the maintainer's Claude account, judged against [docs/agents/pr-review.md](docs/agents/pr-review.md) — the same rubric a maintainer should use by hand, and the one a contributor can run on themselves by naming it (`Review my branch against docs/agents/pr-review.md`). The routine reads that file from the checkout, so **the review criteria are edited there, in git, and not in the routine's prompt.**
+An automated first-pass review runs from a cloud routine on the maintainer's Claude account when a pull request gets the `reviewable` label, as [docs/agents/pr-review.md](docs/agents/pr-review.md) defines; a push alone does not trigger it. The review is judged against that file: the same rubric a maintainer should use by hand, and the one a contributor can run on themselves by naming it (`Review my branch against docs/agents/pr-review.md`). The routine reads that file from the checkout, so **the review criteria are edited there, in git, and not in the routine's prompt.**
 
 Its approval is the floor of review, not the ceiling. Two things it will not do: it never comments on an issue (the tracker is human-owned, and its surface is the pull request), and it never puts a suspected vulnerability in a public comment — that goes to a private advisory per [SECURITY.md](SECURITY.md).
 
@@ -79,11 +87,4 @@ When a skill mentions a triage role, apply the matching label string. Labels wil
 
 **Multi-context layout.** A root [CONTEXT.md](CONTEXT.md) holds the canonical project-wide vocabulary. No `CONTEXT-MAP.md` exists yet — per-binding / per-integration context files will be created lazily by `/grill-with-docs` if and when their vocabulary diverges from the root.
 
-Until then, when exploring or producing output:
-
-1. Read **[CONTEXT.md](CONTEXT.md)** first — the canonical root glossary. Use its vocabulary; don't drift to synonyms.
-2. Read **[docs/reference/00-overview.md](docs/reference/00-overview.md)** for the six-layer model and load-bearing architectural commitments.
-3. Read **[docs/spec/v1.md](docs/spec/v1.md)** for normative behavior. When the spec and any other doc disagree, the spec wins.
-4. ADRs live under [docs/adr/](docs/adr/) — read them; `0001`–`0007` record the extraction from the originating production firmware (an ESP32-C6 smart-agriculture node) and the protocol-v1 wire/API commitments (versioning, retire-LIST, trailer-CRC, fixed-width length, read/write/await, normative-by-incorporation). They also carry the design *rationale* (the "why").
-
-If your output contradicts an existing ADR or a load-bearing reference doc, surface the contradiction explicitly rather than silently overriding.
+When exploring or producing output, read the glossary first, then the overview, then the spec ([Where to look](#where-to-look)).

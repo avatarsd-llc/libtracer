@@ -1,5 +1,6 @@
 # Reference 03 — Addressing
 
+> **Status**: §Path syntax is normative, v1 (incorporated by [docs/spec/v1.md](../spec/v1.md) §3 per RFC-0001 §A.2). Its MUST/SHOULD/MAY clauses are clauses of the specification. The rest of this page is informative.
 > Defines how vertices and fields are named, how a subscription observes a subtree, and how application-level slicing replaces wire-level fragmentation.
 > **See also**: [04-communication-flows.md](04-communication-flows.md) for API rationale; [02-graph-model.md](02-graph-model.md) for the schema discipline that gives field names meaning.
 
