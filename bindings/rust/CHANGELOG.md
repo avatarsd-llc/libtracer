@@ -8,6 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-10-01
+
+No Rust-binding changes. The Rust crate is a native implementation and does not link the C++ core, so 0.17.0's breaking changes (RFC 0028's one-surface API, app-owned TLS profiles, opt-in link modules and instrumentation counters) do not reach it. It is released in lockstep with core, and its wire behaviour is unchanged.
+
 ## [0.16.1] — 2026-09-29
 
 No changes to this package. Its version moves in lockstep with core; see the core section of these release notes.

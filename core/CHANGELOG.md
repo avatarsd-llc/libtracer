@@ -14,6 +14,8 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-10-01
+
 ### Changed
 
 - **A subscription's target leg ADOPTS the published value (RFC 0028 slice 4, D2; part of
