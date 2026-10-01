@@ -2,8 +2,9 @@
 //
 /**
  * @file
- * @brief #1582 — the router's four peer-reachable `view::over_bytes` copies draw from its
- *        injected `flat` seam, never from the global heap.
+ * @brief #1582 — the router's peer-reachable `view::over_bytes` copies draw from its injected
+ *        `flat` seam, never from the global heap; #1714 — the WARM COMPACT delivery makes no
+ *        such copy at all, and draws ONE block from the graph's own source.
  *
  * ## What is being defended
  *
@@ -22,10 +23,16 @@
  * The first two are reachable by any peer holding a bound label, behind no ACL, at any
  * payload size the frame admits — an unbounded heap draw on a receive thread.
  *
+ * #1714 then retired copy 1: the warm arm stores the payload the way the full-route terminus's
+ * copy arm does, as ONE inline `value_t` drawn from the graph's injected source and adopted by
+ * the store — one block where the `flat` segment plus the store's `value_t` were two. It is
+ * still bounded (an injected, nothrow source) and still answered by value on exhaustion.
+ *
  * ## What the tests assert
  *
- * - Each path charges `flat` for exactly the copies it makes, and lands.
- * - A refusing `flat` makes each path answer BY VALUE — a counted drop
+ * - Each `flat` path charges `flat` for exactly the copies it makes, and lands.
+ * - The warm COMPACT draws exactly ONE block in all — from the graph's source, none from `flat`.
+ * - A refusing seam makes each path answer BY VALUE — a counted drop
  *   (`graph_t::delivery_drops().out_of_memory`) for the two deliveries, `BACKPRESSURE` for the
  *   subscribe — and nothing lands, which is the proof there is no heap fallback: a fallback
  *   would have delivered.
@@ -79,6 +86,31 @@ class counting_backend_t final : public tr::mem::mem_backend_t {
 
     bool refuse = false; /**< @brief When set, every draw is refused (the exhaustion stand-in). */
     int allocs = 0;      /**< @brief Draws served. */
+    int refused = 0;     /**< @brief Draws refused. */
+};
+
+/**
+ * @brief A pass-through block source that counts what it served and can be told to refuse —
+ *        injected as the GRAPH's source, so it sees every block the store draws.
+ */
+class counting_source_t final : public tr::mem::block_source_t {
+   public:
+    counting_source_t() noexcept : block_source_t("test_counting_src") {}
+
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        if (refuse) {
+            ++refused;
+            return nullptr;
+        }
+        ++draws;
+        return tr::mem::heap_source().try_alloc(bytes, align);
+    }
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        tr::mem::heap_source().release(p, bytes, align);
+    }
+
+    bool refuse = false; /**< @brief When set, every draw is refused (the exhaustion stand-in). */
+    int draws = 0;       /**< @brief Draws served. */
     int refused = 0;     /**< @brief Draws refused. */
 };
 
@@ -136,9 +168,10 @@ tr::view::view_t owned(std::initializer_list<std::uint8_t> bytes) {
 
 // --- COMPACT deliveries: cold (`deliver_local`) then warm (`on_compact`) ------------------
 
-void compact_deliveries_charge_flat() {
-    std::printf("COMPACT: the cold and the warm payload copies both charge `flat`:\n");
-    graph_t g;
+void compact_deliveries_charge_their_seams() {
+    std::printf("COMPACT: the cold copy charges `flat`; the warm delivery is ONE graph block:\n");
+    counting_source_t src;
+    graph_t g(src);
     (void)g.register_vertex(*path_t::parse("/sink"), role_t::STORED_VALUE);
     counting_backend_t flat("flat");
     fwd_router_t router(g, {.flat = &flat});
@@ -152,16 +185,21 @@ void compact_deliveries_charge_flat() {
     check(stored_byte(g, "/sink") == 1, "the cold COMPACT landed");
     check(flat.allocs == 1, "…and its ONE payload copy was drawn from `flat`");
 
-    // WARM: the memoized handle is written through; the payload copy is `on_compact`'s own.
+    // WARM: the memoized handle is written through, and the payload is stored the way the
+    // full-route terminus's copy arm stores it — one inline value the store adopts (#1714).
+    const int graph_before = src.draws;
     router.on_frame("net/ws-client/up", tr::net::encode_compact(5, value_tlv(2)));
     check(stored_byte(g, "/sink") == 2, "the warm COMPACT landed");
-    check(flat.allocs == 2, "…and its ONE payload copy was drawn from `flat` too");
-    check(flat.refused == 0, "nothing was refused on the positive control");
+    check(flat.allocs == 1, "…drawing NOTHING from `flat` (no separate payload segment)");
+    check(src.draws - graph_before == 1,
+          "…and exactly ONE block from the graph's injected source — the stored value itself");
+    check(flat.refused == 0 && src.refused == 0, "nothing was refused on the positive control");
 }
 
 void a_refused_warm_compact_is_a_counted_drop() {
-    std::printf("COMPACT warm: a refusing `flat` is a counted drop, no heap fallback:\n");
-    graph_t g;
+    std::printf("COMPACT warm: a refusing graph source is a counted drop, no heap fallback:\n");
+    counting_source_t src;
+    graph_t g(src);
     (void)g.register_vertex(*path_t::parse("/sink"), role_t::STORED_VALUE);
     counting_backend_t flat("flat");
     fwd_router_t router(g, {.flat = &flat});
@@ -172,19 +210,19 @@ void a_refused_warm_compact_is_a_counted_drop() {
     check(stored_byte(g, "/sink") == 1, "precondition: the binding is warm");
     const std::uint64_t before = g.delivery_drops().out_of_memory;
 
-    flat.refuse = true;
+    src.refuse = true;
     router.on_frame("net/ws-client/up", tr::net::encode_compact(5, value_tlv(9)));
+    src.refuse = false;
     check(stored_byte(g, "/sink") == 1,
           "the refused delivery did NOT land — a heap fallback would have delivered 9");
-    check(flat.refused == 1, "the refusal was seen at the seam");
+    check(src.refused == 1, "the refusal was seen at the seam, on the ONE draw the arm makes");
     check(g.delivery_drops().out_of_memory == before + 1,
           "…and counted as ONE out-of-memory delivery drop");
     check(up.sent() == 0, "no NACK travelled back — the binding is intact, only the copy failed");
 
     // The seam serving again is enough: no state was poisoned by the refusal.
-    flat.refuse = false;
     router.on_frame("net/ws-client/up", tr::net::encode_compact(5, value_tlv(3)));
-    check(stored_byte(g, "/sink") == 3, "the next COMPACT lands once `flat` serves again");
+    check(stored_byte(g, "/sink") == 3, "the next COMPACT lands once the source serves again");
 }
 
 void a_refused_cold_compact_is_a_counted_drop() {
@@ -251,7 +289,7 @@ void a_refused_subscribe_toward_answers_backpressure() {
 }  // namespace
 
 int main() {
-    compact_deliveries_charge_flat();
+    compact_deliveries_charge_their_seams();
     a_refused_warm_compact_is_a_counted_drop();
     a_refused_cold_compact_is_a_counted_drop();
     subscribe_toward_charges_flat();

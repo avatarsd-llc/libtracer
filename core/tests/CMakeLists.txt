@@ -2451,6 +2451,7 @@ endif()
 # #1582 — the router's four peer-reachable `view::over_bytes` ownership copies (the cold and
 # warm COMPACT payload, the host-local subscribe door's route + SUBSCRIBER TLVs) draw from the
 # injected `flat` seam; a refusal is a counted drop / BACKPRESSURE, never a heap fallback.
+# #1714 — the warm COMPACT arm no longer copies through `flat`: it draws ONE block in all.
 if(LIBTRACER_NET_PLANE)
     add_executable(router_flat_seam_test router_flat_seam_test.cpp)
     target_link_libraries(router_flat_seam_test PRIVATE libtracer)
