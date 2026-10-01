@@ -55,6 +55,10 @@ streams only, and it is recoverable by construction.
 
 ## 2. Motivation
 
+> **Corrected 2026-10-02 by the citation erratum ([#1701](https://github.com/avatarsd-llc/libtracer/issues/1701)) — see §Erratum at the end of this
+> document.** Every code citation in this RFC names a symbol and its file; the `file:line`
+> spellings it was drafted with did not resolve to the code they described.
+
 ### 2.1 Four spellings of one thing
 
 The inventory (#1631, feasibility comment, and its §1) lists the shapes that hold the same pair
@@ -63,11 +67,11 @@ under different names at head:
 | type | where | what it is |
 | --- | --- | --- |
 | `vertex_slot_t` | `core/include/libtracer/graph.hpp` | the pair, node-local |
-| `path_ref_element_t` | `core/include/libtracer/path_ref.hpp:68` | the pair, on the wire (RFC-0024) |
+| `path_ref_element_t` | `core/include/libtracer/path_ref.hpp` | the pair, on the wire (RFC-0024) |
 | `path_label_target_t` | `core/include/libtracer/path_label_table.hpp` | `using` of the same struct — what a label *aliases* |
 | `target_binding_t` | `core/include/libtracer/subscriber.hpp` | the pair, cached per local subscriber edge (#830) |
 | `peer_handle_t` | `core/include/libtracer/peer_handle.hpp` | the pair, for a bus peer's slot |
-| `vertex_handle_t` | `core/include/libtracer/graph.hpp:73` | a pointer that converts to the pair in O(1) both ways (`graph_t::vertex_slot` / `deref_vertex_slot`) |
+| `vertex_handle_t` | `core/include/libtracer/graph.hpp` | a pointer that converts to the pair in O(1) both ways (`graph_t::vertex_slot` / `deref_vertex_slot`) |
 
 Three of them cross the wire or a cache boundary; all six validate the same way (`bounds`,
 `generation`, `registered`), and the one that does not carry a generation (`vertex_handle_t`) is
@@ -86,20 +90,20 @@ doors. What it found essential — and what this RFC keeps — is short:
 
 Everything else that differs is accidental, and this RFC removes it (ruling 9):
 
-- **two name lookups for one tree** — `graph_t::find_ptr` (`core/src/graph.cpp:1755`, the ADR-0057
+- **two name lookups for one tree** — `graph_t::find_ptr` (`core/src/graph.cpp`, the ADR-0057
   child walk) for a local target versus `child_registry_t::longest_prefix`
-  (`core/include/libtracer/child_registry.hpp:516`, the strip-K registry scan) for a target below a
-  mount, although a connection vertex is a graph vertex too (`conn_slot`,
-  `core/src/fwd_router.cpp:998`);
+  (`core/include/libtracer/child_registry.hpp`, the strip-K registry scan) for a target below a
+  mount, although a connection vertex is a graph vertex too (the ctx's `conn_slot`,
+  resolved in `fwd_router_t::add_child`, `core/src/fwd_router.cpp`);
 - **two reply-leg carriers for one learned chain** — RFC-0024 appends a trailing `PATH_REF` to the
-  reply (`mint_fn`, `core/src/fwd_router.cpp:2478-2500`) while RFC-0027 rewrites the hop's part of
-  the reply's `src` in place (`label_src_prefix`, `core/src/fwd_router.cpp:2388`);
+  reply (`mint_fn` in `fwd_router_t::route_fwd_forward`, `core/src/fwd_router.cpp`) while RFC-0027 rewrites the hop's part of
+  the reply's `src` in place (`fwd_router_t::label_src_prefix`, `core/src/fwd_router.cpp`);
 - **eager versus post-auth mint** — an RFC-0024 mint *reads* a slot and is attached to the success
   arms for free, while an RFC-0027 mint *spends* a slot and therefore had to be a post-auth lambda
   (RFC-0027 §8.1). Once the element is the pair there is nothing to spend and the distinction
   vanishes;
 - **a second stamp for one departure** — RFC-0027 needed a per-tenancy `label_peer` stamp
-  (`next_label_peer_bits`, `core/src/fwd_router.cpp:1202-1250`) beside the vertex generation,
+  (`fwd_router_t::next_label_peer_bits`, stamped in `fwd_router_t::acquire_ctx`, `core/src/fwd_router.cpp`) beside the vertex generation,
   because a label's meaning lived in the table's owner check rather than in the vertex. §8 gives the
   vertex generation that job outright.
 
@@ -145,8 +149,8 @@ cite them:
    recoverable (`HANDLE_NACK` and re-advertise), never a wrong delivery.
 7. **Subscriptions learn their chain on the request leg** (`PATH_REF_REVERSE` at subscribe),
    because deliveries have no reply leg. Two gaps close: the mount-routed subscribe that drops the
-   reverse list (`core/src/graph.cpp:3480-3483`), and `subscribe_toward`
-   (`core/src/fwd_router.cpp:3318`), which requests no chain at all.
+   reverse list (`graph_t::subscribe_wire`, `core/src/graph.cpp`), and `subscribe_toward`
+   (`fwd_router_t::subscribe_toward`, `core/src/fwd_router.cpp`), which requests no chain at all.
 8. **Shared (multi-peer / bus) mounts** refuse the pair form until a session anchor can be egressed
    through (#741's ruling). That anchor is in scope as a later slice (§13); until it lands, such
    mounts keep strings.
@@ -171,11 +175,11 @@ caller and the right, never of how the element was spelled** (§6.4).
 
 The PAIR's two fields are RFC-0024 §4.4's, unchanged and with its derivation standing: the index is
 a slot in the owner's dense, append-only, pointer-stable vertex index (RFC-0024 §6.4; the
-`std::deque` at `core/src/graph.cpp:1027-1060`), bounds-checkable and unreachable on both targets
+`std::deque` `graph_t::vertex_slots_`, `core/include/libtracer/graph.hpp`), bounds-checkable and unreachable on both targets
 at `u32`; the generation is the vertex's retirement stamp, **saturating and never wrapping**
-(`kGenerationSaturated`, `core/include/libtracer/vertex.hpp:147`), refused at the ceiling on both the
-issuing side (`vertex_slot_at`, `core/src/graph.cpp:1138`) and the honouring side
-(`deref_vertex_slot`, `core/src/graph.cpp:1163`).
+(`kGenerationSaturated`, `core/include/libtracer/vertex.hpp`), refused at the ceiling on both the
+issuing side (`graph_t::vertex_slot_at`, `core/src/graph.cpp`) and the honouring side
+(`graph_t::deref_vertex_slot`, `core/src/graph.cpp`).
 
 A PAIR is **node-scoped**: it means something only on the node whose index it names. It is
 **minted, never hashed** (ruling 3): the owner issues the index at registration, so two vertices
@@ -215,7 +219,7 @@ bench; if it is kept, it is a **compile-time option** (the compile-time-by-defau
 a second runtime handle type.
 
 *What this costs, stated.* The pointer handle of ADR-0056 has "identical codegen" to `vertex_t*`
-(`core/include/libtracer/graph.hpp:73-91`), and RFC-0027 §3.2 measured `deref_vertex_slot` at a
+(`vertex_handle_t`'s class doc, `core/include/libtracer/graph.hpp`), and RFC-0027 §3.2 measured `deref_vertex_slot` at a
 flat **11 ns** (shared lock, bounds, compare). Ruling 2 spends that on every local hot-path call in
 exchange for one identity across the host API, the cache records and the wire, so that a handle
 cached anywhere validates itself and #830's per-edge `target_binding_t` becomes simply "the
@@ -319,7 +323,7 @@ part of the forward route**, spelled as a PAIR when it can issue one and as the 
 when it cannot — **never nothing**:
 
 - a **forwarding hop** contributes its PAIR for the connection vertex the reply **arrived over**,
-  which is the one it egressed the request through (`hop_mint`, `core/src/fwd_router.cpp:1333`,
+  which is the one it egressed the request through (`fwd_router_t::hop_mint`, `core/src/fwd_router.cpp`,
   reads it off the frame's own arrival, never from a table); a hop that cannot — a shared mount, a
   child with no connection vertex, a saturated slot — contributes the inbound child's mount run as
   NAMEs instead;
@@ -327,7 +331,7 @@ when it cannot — **never nothing**:
   (the last element of the forward route), or the residual NAMEs it resolved if it cannot;
 - the **origin** receives a `src` that is the **complete forward route from its first link onward**
   in head-first order, prepends its own element for hop 0 — its PAIR for the connection vertex of
-  the link the request left by (`connection_ref`, `core/src/fwd_router.cpp:1319`), or the target's
+  the link the request left by (`fwd_router_t::connection_ref`, `core/src/fwd_router.cpp`), or the target's
   PAIR for a local call — and caches the result in its `path_t` beside the canonical bytes, which are
   **never discarded**. Subsequent requests spell the cached chain as `dst`.
 
@@ -382,7 +386,7 @@ places the learning on the **subscribe request's** forward legs.
 **Normative.** A forwarding hop relaying a **subscribe** request (a `SUBSCRIBER` write) prepends its
 **reverse-direction element** — its PAIR for the identity the request **arrived** on: the inbound
 connection vertex point-to-point, the accepted session's anchor for a bus arrival
-(`reverse_hop_ref`, `core/src/fwd_router.cpp:1352`) — to the request's trailing `PATH_REF_REVERSE`
+(`fwd_router_t::reverse_hop_ref`, `core/src/fwd_router.cpp`) — to the request's trailing `PATH_REF_REVERSE`
 (`0x15`) child, creating the child if the request carries none. No flag gates this (bit 7 is gone,
 §5.3).
 
@@ -395,7 +399,7 @@ subscribe request leg only**: deliveries spell the learned chain in `dst` exactl
 the steady-state delivery frame does not grow. The responder completes the list
 with element 0 — its own PAIR (or NAME run) for the egress toward the writer — and stores it beside
 the canonical return route (`subscriber_remote_t::reverse_route` / `return_route`,
-`core/include/libtracer/subscriber.hpp:217-233`), exactly as amendment 1 already specifies.
+`core/include/libtracer/subscriber.hpp`), exactly as amendment 1 already specifies.
 
 Each delivery then spells `dst` as the stored chain: element 0 is consumed locally (§6 step 3, the
 egress), elements 1.. ride the wire, `src` empty. A refusal at any hop is a **drop** — there is no
@@ -406,10 +410,10 @@ delivery and re-learns per §7.3. This is the shipped `deliver_remote` behaviour
 ### 7.2 The two gaps ruling 7 closes
 
 **Gap 1 — the mount-routed target.** `subscribe_wire` splits a `PATH` target that names a local
-mount into link + string residual and **drops the reverse list** (`core/src/graph.cpp:3480-3483`:
+mount into link + string residual and **drops the reverse list** (`graph_t::subscribe_wire`, `core/src/graph.cpp`:
 "the mount route is canonical-only"). The drop is *correct* — that list spells the way back to the
 **writer**, and a mount-routed edge delivers to a third party (RFC-0021) — but the edge is then
-left with no chain forever. **Gap 2 — `subscribe_toward`** (`core/src/fwd_router.cpp:3318`), the
+left with no chain forever. **Gap 2 — `subscribe_toward`** (`fwd_router_t::subscribe_toward`, `core/src/fwd_router.cpp`), the
 host-local dual every board→peer wire uses, installs an edge with a string residual and puts
 nothing on the wire at subscribe time, so there is no request leg to learn from.
 
@@ -450,7 +454,7 @@ takes its shape from here rather than the other way round (§13.3).
 ### 8.1 The generation is the entire mechanism
 
 **Normative.** A PAIR stops validating when its vertex's generation moves. The generation moves on
-**retirement** (`revert_to_placeholder`, `core/include/libtracer/vertex.hpp:2086`, bump-before-teardown
+**retirement** (`vertex_t::revert_to_placeholder`, `core/include/libtracer/vertex.hpp`, bump-before-teardown
 per ADR-0062) and on the **tenancy and session events of §8.2**. It saturates and never wraps; a
 saturated vertex is permanently unbindable and every mint for it falls back to the string
 (RFC-0024 §4.4 rule 3, RFC-0027 §4.3.1 — one rule now, over one field). There is **no other**
@@ -458,33 +462,33 @@ invalidation axis: no owner check (there is no table to own a label), no per-pee
 (`label_peer` is deleted), no TTL. "Peer departure" is caught by three guards the inventory's §3
 lists, all already shipped for the pair: the connection vertex's generation, the child tombstone
 (`conn_slot = kNoConnSlot` on `remove_child`; `ctx_by_conn_slot` then answers null and the egress
-drops), and the session anchor's retire for bus sessions (`core/src/fwd_router.cpp:1142`).
+drops), and the session anchor's retire for bus sessions (`fwd_router_t::bus_peer_down`, `core/src/fwd_router.cpp`).
 
 ### 8.2 The open fact, verified: a same-named re-add does NOT bump today, and MUST
 
 **What the code does at head (`d390c680`).**
 
-- `fwd_router_t::remove_child` (`core/src/fwd_router.cpp:1036`) tombstones the child's registry
+- `fwd_router_t::remove_child` (`core/src/fwd_router.cpp`) tombstones the child's registry
   slot and its receive ctx, releases the RFC-0027 label slot (`release_child_label`), clears the
   interned link token and evicts the link's subscription edges (`link_down` →
-  `graph_t::evict_link_edges`, `core/src/graph.cpp:1505`). **It does not retire, and does not
+  `graph_t::evict_link_edges`, `core/src/graph.cpp`). **It does not retire, and does not
   otherwise touch, the connection vertex.** The vertex `/net/<module>/<name>` is owned by whoever
-  registered it; the router only *finds* it (`graph_.find(ctx.mount_tlv)`,
-  `core/src/fwd_router.cpp:998`).
-- `fwd_router_t::add_child` of the same name reuses the tombstoned ctx (`acquire_ctx`,
-  `core/src/fwd_router.cpp:1202`), rewinds `conn_slot` to `kNoConnSlot`, and **re-resolves it against
+  registered it; the router only *finds* it (`graph_.find(ctx.mount_tlv)` in
+  `fwd_router_t::add_child`, `core/src/fwd_router.cpp`).
+- `fwd_router_t::add_child` of the same name reuses the tombstoned ctx (`fwd_router_t::acquire_ctx`,
+  `core/src/fwd_router.cpp`), rewinds `conn_slot` to `kNoConnSlot`, and **re-resolves it against
   the same vertex** — same index, and, since nothing retired it, **the same generation**.
 - The only thing that advances a vertex's generation is `revert_to_placeholder`, reached through
-  `graph_t::retire` (`core/src/graph.cpp:1197`). The RFC-0014 transport-vertex lifecycle *does*
+  `graph_t::retire` (`core/src/graph.cpp`). The RFC-0014 transport-vertex lifecycle *does*
   retire the connection vertex — after `remove_child`, in the same teardown transaction
-  (`transport_vertex_t::ctl_txn_t::discharge`, `core/src/transport_vertex.cpp:150-185`) — so a
+  (`transport_vertex_t::ctl_txn_t::discharge`, `core/src/transport_vertex.cpp`) — so a
   hard `NAME` write that destroys and recreates a connection gets a bump **from the embedder's
   transaction, not from the router**. A `remove_child`/`add_child` pair through the router's own
   door (tests, SDK hosts, an embedder that keeps its connection vertices and rewires transports
   under them) gets none.
 - RFC-0027 covered this window with a **second stamp**: `acquire_ctx` advances `label_peer` per
   registration so a label minted for the previous tenancy fails the table's owner check
-  (`core/src/fwd_router.cpp:1230-1250`, "a departed tenancy and a departed vertex are different
+  (`fwd_router_t::acquire_ctx`, `core/src/fwd_router.cpp`: "a departed tenancy and a departed vertex are different
   departures and each gets its own stamp"). That stamp is deleted with the table (§12.3).
 
 **Why it matters more for a chain than for a single element.** The hop's element names its own
@@ -510,9 +514,9 @@ form; a pair issued against the previous tenancy MUST NOT resolve to it. Normati
    The cost is one re-learn round trip per reconnect, which ruling 4 already prices in ("re-learned
    after … departure"). `bus_peer_down` already does exactly this for a session anchor — "Retire
    BEFORE the eviction. Retirement is what bumps the saturating generation"
-   (`core/src/fwd_router.cpp:1131-1145`) — so the point-to-point arm adopts the bus arm's rule.
+   (`fwd_router_t::bus_peer_down`, `core/src/fwd_router.cpp`) — so the point-to-point arm adopts the bus arm's rule.
 3. The bump MUST NOT re-virginize the vertex. `revert_to_placeholder` empties `:acl`, `:settings`
-   and the app fields (`core/include/libtracer/vertex.hpp:2064-2086`), which is right for retirement
+   and the app fields (`vertex_t::revert_to_placeholder`, `core/include/libtracer/vertex.hpp`), which is right for retirement
    and wrong for a connection vertex whose owner keeps it. The reference implementation adds a
    **generation-only door** on `graph_t` (working name `restamp(vertex_handle_t)`): the same
    saturating CAS as `revert_to_placeholder`'s, under the map lock, and nothing else. A vertex the
@@ -574,12 +578,12 @@ full route, exactly as §E.1 already says. Nothing in this RFC changes §E.1's f
 ## 10. Shared (multi-peer / bus) mounts
 
 **Normative, until §13.2 S8 lands.** A PAIR MUST NOT dereference to a shared-mount vertex as an
-egress (`bound_egress`'s `multi_peer` refusal, `core/src/fwd_router.cpp:1377`; RFC-0020 §3: a bus
+egress (`bound_egress`'s `multi_peer` refusal, `fwd_router_t::bound_egress`, `core/src/fwd_router.cpp`; RFC-0020 §3: a bus
 link's own NAME is not a routable next-hop, and its `send()` broadcasts). A hop relaying a **reply**
 that arrived from a bus peer contributes its **string** part per §6.2 — the mount run plus the peer
 segment — so the origin's chain toward anything behind a shared mount is mixed: PAIRs up to the
 bus, NAMEs across it. This is the second essential divergence of §2.2 and it stays until an
-**accepted session's anchor vertex** (`register_session_anchor`, `core/src/graph.cpp:1027`; the
+**accepted session's anchor vertex** (`graph_t::register_session_anchor`, `core/src/graph.cpp`; the
 #1254 anchor `reverse_hop_ref` already uses in the other direction) can be egressed **through** — a
 directed per-peer send keyed by the anchor's slot, which is [#741](https://github.com/avatarsd-llc/libtracer/issues/741)'s
 ruled boundary ("reject, never broadcast") given a door. That slice (S8) is in this RFC's scope.
@@ -587,15 +591,24 @@ Announce-census peers (CAN) create no vertex (ADR-0044 amendment) and stay NAMEs
 
 ## 11. What is deleted
 
+> **Corrected 2026-10-02 by the citation erratum ([#1701](https://github.com/avatarsd-llc/libtracer/issues/1701)) — see §Erratum at the end of this
+> document.** The third row no longer lists `on_stale_label`: it is the delivery-compaction
+> (RFC-0004 §E.1 `COMPACT`) stale-label observer, which §9.2 keeps.
+
 | item | where | measured cost recovered |
 | --- | --- | --- |
 | `path_label_table_t` and its slot store, ceilings, census | `core/include/libtracer/path_label_table.hpp`, `core/src/path_label_table.cpp` | **24 B/slot** RAM (60 B rv32 default, 304 B peak at 8 mints); **+3 388 B flash** rv32 for the TU (RFC-0027 §12.4 clause 5, §14) |
 | `path_label_t` (16/16), `kPathLabelMaxGeneration`, the `len = 4` escape encoder/decoder | `core/include/libtracer/path_label.hpp` | in the TU figure above |
-| `route_label_forward`, `label_src_prefix`, `child_label_record`, `terminus_label_record`, `release_child_label`, `configure_path_labels`, `on_stale_label` | `core/src/fwd_router.cpp:1638`, `:2388`, and the ctx fields `path_label`, `path_label_for`, `terminus_label`, `label_peer`, `next_label_peer_bits` | the origin car's **+2 276 B `.text`** in `fwd_router.cpp` (RFC-0027 §12.4), plus the forwarder car's share (unmeasured; the symbol ratchet prices it in S3) |
+| `route_label_forward`, `label_src_prefix`, `child_label_record`, `terminus_label_record`, `release_child_label`, `configure_path_labels` (**not** `on_stale_label` — see the note below the table) | `fwd_router_t` members in `core/include/libtracer/fwd_router.hpp` / `core/src/fwd_router.cpp`; the `child_rx_ctx_t` fields `path_label`, `path_label_for`, `terminus_label`, `label_peer`; and `fwd_router_t::next_label_peer_bits` | the origin car's **+2 276 B `.text`** in `fwd_router.cpp` (RFC-0027 §12.4), plus the forwarder car's share (unmeasured; the symbol ratchet prices it in S3) |
 | `adopt_path_label`, `label_dispatch`, `fall_back_on_label_refusal` | `core/include/libtracer/fwd_router.hpp` | in the origin-car figure |
-| `op` bit 7 (`kFwdOpFlagMintRequest`, `parsed_fwd_t::mint_request`), the trailing reply `PATH_REF` (`mint_fn`) and erratum 1's strip logic in `rebuild_fwd_forward` | `core/src/op_resolve_walk.hpp:248-313`, `core/src/fwd_router.cpp:2478-2500` | unmeasured; small |
-| `0x14` `PATH_REF` as a `dst` type: `route_bound_forward`'s type dispatch, `dst_bound` | `core/src/fwd_router.cpp:1773`, `core/src/op_resolve_walk.hpp:250` | unmeasured; the element parser is kept for `0x15` |
-| the pointer `vertex_handle_t` and `target_binding_t` as a separate cache record | `core/include/libtracer/graph.hpp:73`, `core/include/libtracer/subscriber.hpp` | none — a substitution (ruling 2), bench-gated |
+| `op` bit 7 (`kFwdOpFlagMintRequest`, `parsed_fwd_t::mint_request`), the trailing reply `PATH_REF` (`mint_fn`) and erratum 1's strip logic in `rebuild_fwd_forward` | `kFwdOpFlagMintRequest` in `core/include/libtracer/op_resolve.hpp`; `parsed_fwd_t` / `parse_fwd` in `core/src/op_resolve_walk.hpp`; `mint_fn` in `fwd_router_t::route_fwd_forward`, `core/src/fwd_router.cpp`; `rebuild_fwd_forward` in `core/include/libtracer/fwd_frame_view.hpp` | unmeasured; small |
+| `0x14` `PATH_REF` as a `dst` type: `route_bound_forward`'s type dispatch, `dst_bound` | `fwd_router_t::route_bound_forward`, `core/src/fwd_router.cpp`; `parsed_fwd_t::dst_bound`, `core/src/op_resolve_walk.hpp` | unmeasured; the element parser is kept for `0x15` |
+| the pointer `vertex_handle_t` and `target_binding_t` as a separate cache record | `core/include/libtracer/graph.hpp`, `core/include/libtracer/subscriber.hpp` | none — a substitution (ruling 2), bench-gated |
+
+**Not deleted: `fwd_router_t::on_stale_label`.** Despite its name it is not part of RFC-0027's
+label plane. It is the observer for a dropped stale or unknown **delivery-compaction** handle — a
+`COMPACT` frame whose RFC-0004 §E.1 route handle has no ingress binding on its link, answered with
+`HANDLE_NACK`. §9.2 keeps that mechanism as the single named exception, so its observer stays.
 
 **Total flash on rv32, from the measured parts alone: about −5.6 KB** (3 388 + 2 276), and
 **zero table RAM**. The pair form adds no RAM: the vertex index it needs already exists. Bytes on
@@ -697,9 +710,9 @@ their number.
 | **S0** | spec | this RFC accepted; §12's text lands (`v1.md`, the reference pages, `CONTEXT.md`, status rows on 0024/0027) | doc gates |
 | **S1** | element + hop arm | `kind = 0x16, len = 8` encoder/decoder; §6's PAIR arm in `route_fwd_ingress` for a `PATH`-spelled `dst` (deref → egress / terminus / refuse); terminus applies `apply_op`; `NOT_FOUND` on every refusal; `0x14` refused as a `dst` | conformance vectors (§13.4); `bench_hop_chain` and `bench_forward_*` level |
 | **S2** | learning | §6.2 reply-`src` accumulation (PAIR or NAME run, never nothing) at hop, terminus and origin; origin adoption into `path_t` (generalised `cache_path_label`), string fallback on `NOT_FOUND`; delete bit 7, `mint_request`, the trailing reply list, `route_bound_forward` | `reply-spread` four-link arm inside the A/A null band (RFC-0024 §8.2 clause 3); round-trip test replacing `path_label_origin_test` |
-| **S3** | delete the table | every §11 row for RFC-0027; `label_peer` and `next_label_peer_bits`; supersedes #1668, #1669, #1647 (§13.3) | ratchet shows the §11 deltas; `bench_path_label` retired |
+| **S3** | delete the table | every §11 row for RFC-0027; `label_peer` and `next_label_peer_bits`; **not** `on_stale_label`, the delivery-compaction observer §9.2 keeps; supersedes #1668, #1669, #1647 (§13.3) | ratchet shows the §11 deltas; `bench_path_label` retired |
 | **S4** | the bump (§8.2) | `graph_t::restamp`; `remove_child` and point-to-point `link_down` call it; rule 4's per-boot epoch on UDP/CAN links (once per session or advertise); tests: remove + same-name re-add refuses the old pair; link loss + re-up refuses the old pair; the RFC-0014 teardown still works with the double bump | `bound_forward_test` extended; no hot-path change |
-| **S5** | subscriptions (§7) | `PATH_REF_REVERSE` unconditional (no flag) and spelled as a `PATH`; first-fire learn for mount-routed (`graph.cpp:3480`) and `subscribe_toward` edges; the node's one learn endpoint, edge named in the tail; lands after #1533; `deliver_remote` unconditional chain-first | `fwd_two_mount_test`, `bound_forward_test` delivery arms; `bench_compact_delivery` level |
+| **S5** | subscriptions (§7) | `PATH_REF_REVERSE` unconditional (no flag) and spelled as a `PATH`; first-fire learn for mount-routed (`graph_t::subscribe_wire`) and `subscribe_toward` edges; the node's one learn endpoint, edge named in the tail; lands after #1533; `deliver_remote` unconditional chain-first | `fwd_two_mount_test`, `bound_forward_test` delivery arms; `bench_compact_delivery` level |
 | **S6** | one lookup, one gate (ruling 9) | a NAME-spelled prefix resolves by the tree walk to the connection vertex and `ctx_by_conn_slot` yields the egress; the registry keeps egress state only; **one `allows` site** for both arms of §6 step 3 | `bench_mount_resolve` A/B: the tree walk must not lose to `longest_prefix`'s 25 ns/pass at W = 12, N = 64, or S6 keeps the registry index as an *accelerator* of the same lookup |
 | **S7** | host API (ruling 2) | `vertex_handle_t` = `(u32, u32)` by value; `target_binding_t` folds into it; `graph_t` entries take the pair; the bench decides the ISR pointer fast door (compile-time option if kept) | local read/write/await A/B against the pointer handle — the 11 ns/op is the priced cost; a regression beyond it re-opens ruling 2 (§15 clause 3) |
 | **S8** | shared mounts (§10, ruling 8) | egress **through** a session anchor: a directed per-peer send keyed on the anchor's slot; `bound_egress` admits an anchor; `reverse_hop_ref`'s anchor becomes bidirectional | ws-server multi-peer test; `bench_forward_demux` level |
@@ -821,3 +834,42 @@ All five questions the draft left open were **ruled by the maintainer on 2026-09
 Per [GOVERNANCE.md](../../../.github/GOVERNANCE.md), the comment window is waived by default while
 the project is solo-maintained and is not invoked here. Sustained objections and their resolution
 are recorded in this section as they arrive.
+
+## Erratum (2026-10-02) — the code citations name symbols, and §11's third row keeps the delivery-compaction stale-label observer ([#1701](https://github.com/avatarsd-llc/libtracer/issues/1701))
+
+**What the text said.** Two things, both about the reference implementation rather than the wire:
+
+- **Every `file:line` code citation** across §§2–13 — for example `graph_t::find_ptr` at
+  `core/src/graph.cpp:1755`, `hop_mint` at `core/src/fwd_router.cpp:1333`, the vertex index
+  `std::deque` at `core/src/graph.cpp:1027-1060`, and §11's `core/src/fwd_router.cpp:1638`, `:2388`.
+- **§11's third deletion row** — which S3 (§13.2) deletes in full — listed `on_stale_label` beside
+  the RFC-0027 label-plane members.
+
+**What was wrong.**
+
+- The citations did not resolve to the code they described, and not because the tree moved after
+  acceptance: they were already wrong at the authoring commit. Several named the wrong file as well
+  as the wrong line — the vertex index is the `graph_t::vertex_slots_` member in
+  `core/include/libtracer/graph.hpp`, not code in `graph.cpp`; the bit-7 flag constant lives in
+  `core/include/libtracer/op_resolve.hpp`; and `rebuild_fwd_forward`'s strip logic lives in
+  `core/include/libtracer/fwd_frame_view.hpp`. A "valid as of SHA" note cannot repair a citation
+  that was never valid, and `docs/spec/` is deliberately outside the citation gate
+  (`tools/check_doc_citations.py`), so line numbers here rot unchecked.
+- `on_stale_label` is not an RFC-0027 member. It is the observer for a `COMPACT` frame whose
+  RFC-0004 §E.1 route handle has no ingress binding on its link — the delivery-compaction
+  mechanism that §9.2 keeps as the single named exception. Deleting it with the table would
+  contradict §9.2.
+
+**The correction.**
+
+| | corrected reading |
+| --- | --- |
+| **code citations** | every citation names the **symbol** and its **file** (`fwd_router_t::hop_mint`, `core/src/fwd_router.cpp`), with no line number. Each was re-checked against `main` on 2026-10-02 to name the code its sentence describes; the wrong-file ones above now name the right file. The prose around them is unchanged. |
+| **§11, third row** | lists `route_label_forward`, `label_src_prefix`, `child_label_record`, `terminus_label_record`, `release_child_label` and `configure_path_labels`, the `child_rx_ctx_t` fields `path_label`, `path_label_for`, `terminus_label` and `label_peer`, and `fwd_router_t::next_label_peer_bits`. **`on_stale_label` is removed** and a note under the table says why. |
+| **§13.2 S3** | states that `on_stale_label` is **not** deleted. |
+
+**Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). **No
+wire surface moves.** No frame, TLV type, escape kind, flag bit, grammar, error identity or
+conformance vector changes, and no normative statement of §§4–10 changes. The citations are
+informative pointers into the reference implementation. Removing `on_stale_label` from §11 makes
+the deletion list agree with §9.2's normative text, which already kept the mechanism.
