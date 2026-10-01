@@ -43,6 +43,24 @@ Issues live in **GitHub Issues at [`avatarsd-llc/libtracer`](https://github.com/
 
 When a skill says "publish to the issue tracker," create a GitHub issue. When it says "fetch the relevant ticket," run `gh issue view <number> --comments`. Spec-change discussions use issues tagged `rfc` per [GOVERNANCE.md](.github/GOVERNANCE.md).
 
+### Project board
+
+All open issues are tracked on the org project **[libtracer roadmap](https://github.com/orgs/avatarsd-llc/projects/4)**, which auto-adds every new issue. Keep it current as part of the work, not as a separate chore:
+
+- **Milestone = release.** Each planned issue carries the milestone of the release it ships in (`v0.18.0`, `v0.19.0`, …). No milestone means unscheduled (horizon/roadmap items).
+- **Status** (project field):
+  - `Backlog`: not startable: it has an open blocker, or is labelled `needs-triage` / `needs-info` / `needs-rfc` / `blocked`.
+  - `Ready`: `ready-for-agent` or `ready-for-human`, with every blocker closed.
+  - `In progress`: someone (or an agent) is working on it.
+  - `In review`: an open PR addresses it.
+  - `Done`: closed.
+  When an issue closes, re-check the issues it blocked and move any that are now unblocked from `Backlog` to `Ready`.
+- **Priority** is an org issue field (`Urgent` = blocks the release or the train in flight; `High` = planned for the next release; `Medium` = the release after; `Low` = unscheduled). Set it with `gh api -X POST repos/avatarsd-llc/libtracer/issues/<n>/issue-field-values` and a body of `{"issue_field_values":[{"field_id":20337321,"value":"High"}]}`.
+- **Size** (project field, `XS`–`XL`): set it when filing.
+- The **Iteration** field is unused.
+
+Every new issue gets a milestone (or deliberately none), a priority, and a status when it is filed.
+
 ### Triage labels
 
 The five canonical triage roles map 1:1 to label strings in this repo (no remapping):
