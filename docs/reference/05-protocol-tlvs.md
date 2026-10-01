@@ -23,7 +23,7 @@ Several core type codes are **structured** — they carry `opt.PL=1` and their p
 
 There is no generic container type: every structured container declares its purpose via its type code. User-range type codes (`0x80–0xFF`) MAY also be structured (set `opt.PL=1`) for application-defined records.
 
-**No address form is structured.** `0x14` PATH_REF and `0x15` PATH_REF_REVERSE carry a fixed-stride record array and `0x06` PATH carries a packed run of self-delimiting `[u8 len][utf8]` segment records ([RFC-0018](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0018-packed-path-segments.md)); all three set `opt.PL` = 0 (§`0x06`, §`0x14`, §`0x15`). A `PATH` was a `NAME`-child container before RFC-0018.
+**No address form is structured.** `0x06` PATH carries a packed run of self-delimiting records — `[u8 len][utf8]` segment records and escape records ([RFC-0018](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0018-packed-path-segments.md)) — and `0x15` PATH_REF_REVERSE carries the same body ([RFC-0029](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0029-one-path-primitive.md) §7.1); both set `opt.PL` = 0 (§`0x06`, §`0x15`). `0x14` is retired as an address form (§`0x14`). A `PATH` was a `NAME`-child container before RFC-0018.
 
 ---
 
@@ -347,16 +347,16 @@ Distinct from an ordinary opaque TLV in that the constraints below are *enforced
 conventional — see [enforcement](#enforcement-of-the-path-constraints).
 
 **Two layers, one sentence.** A `PATH` is a list of **path elements**; an element's kind is
-**NAME** or **LABEL**; a NAME element is encoded as a **segment record**, a LABEL element as an
+**NAME** or **PAIR**; a NAME element is encoded as a **segment record**, a PAIR element as an
 **escape record**. "Path element" is the model-layer word — what an address is *made of* — and the
 two record words are the encoding-layer ones, naming the differently-framed byte patterns that
 spell the two kinds. Both layers are canonical and neither replaces the other
 ([#1347](https://github.com/avatarsd-llc/libtracer/issues/1347), ruled 2026-08-16): an escape is
 precisely *not* a segment, so the grammar below needs the record words, and an address is not a
 list of byte patterns, so the model needs the element word. An element **self-describes by its
-kind, never by its position** ([RFC-0027](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0027-label-switched-path-compression.md)
-§5.1). A `PATH` whose elements are all NAME — the canonical form — is byte-identical to the
-pre-RFC-0027 encoding.
+kind, never by its position** ([RFC-0029](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0029-one-path-primitive.md)
+§4, carrying RFC-0027 §5.1). A `PATH` whose elements are all NAME — the canonical form — is
+byte-identical to the pre-RFC-0027 encoding.
 
 > **Amended.** Until RFC-0018 the body was a child sequence (`opt.PL=1`) of `NAME` TLVs, one per
 > segment, and "each child MUST be a `NAME`" was the invariant. `NAME` (`0x02`) is **not**
@@ -377,8 +377,8 @@ PATH (PL=0) {
 The walk is `p += 1 + body[p]` — one byte load and one add, with no option decode and no header
 construction. An **empty** body is valid: it is the graph root (`/`), zero elements.
 
-A **LABEL** element occupies the same list and is encoded as an **escape record** — `00 <u8 kind>
-<u8 len> <len bytes>`, `kind = 0x16`, `len = 4` — so the walk over it is `p += 3 + body[p+2]`
+A **PAIR** element occupies the same list and is encoded as an **escape record** — `00 <u8 kind>
+<u8 len> <len bytes>`, `kind = 0x16`, `len = 8` — so the walk over it is `p += 3 + body[p+2]`
 instead. That is the next bullet's rule, and the reason the two encodings need two names: the
 records are framed differently, while the elements they spell sit in one list.
 
@@ -394,8 +394,8 @@ records are framed differently, while the elements they spell sit in one list.
   bytes ([RFC-0018](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0018-packed-path-segments.md) §8, made
   normative by its §5.4 amendment 1). It is **admissible in a frame path** and **rejected in
   canonical / key context** — see [enforcement](#enforcement-of-the-path-constraints).
-  `kind = 0x16` is reserved for the **LABEL** element of
-  [RFC-0027](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0027-label-switched-path-compression.md)
+  `kind = 0x16` is the **PAIR** element of
+  [RFC-0029](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0029-one-path-primitive.md)
   — the escape record is that element's encoding, not a third kind of thing; no other `kind` is
   assigned, and a host that does not own the `kind` it meets steps over the record by its declared
   length rather than reading it.
@@ -434,7 +434,7 @@ Enforcement sits at the resolver, not at the codec. Three rules, in the order a 
 relaying — a forwarder that does not implement an escape record's `kind` MUST step over it by
 its declared length rather than drop a frame it is only relaying; that is the whole reason the
 escape is self-delimiting. In **canonical / key context** — a vertex-map lookup key, an
-`ADVERTISE` route, a pre-encoded path handle — an escape record is rejected, because a label is
+`ADVERTISE` route, a pre-encoded path handle — an escape record is rejected, because a PAIR is
 not canonical bytes and the key must stay pure-string for the byte-prefix-implies-ancestor
 property [02-graph-model.md](02-graph-model.md) depends on.
 
@@ -444,152 +444,144 @@ the body. Both are `input.bin` cases, not `reject.bin` ones: decode must succeed
 is not where the rule lives. They replace `path/path-value-children-illegal`, retired with
 RFC-0018 — a packed record has no type byte, so a mistyped child is unrepresentable.
 
-### Path label element (escape `kind = 0x16`) — routing semantics
+### Path element PAIR (escape `kind = 0x16`) — routing semantics
 
-The layout above is what a **LABEL** element *is*; this is what a host does with one
-([RFC-0027](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0027-label-switched-path-compression.md)
-§§4–8, accepted 2026-08-15, implemented). It is a compression of **one hop's own local part** of
-an address, never a new address form: a `PATH` carrying a label element is still a `0x06`, and the
-canonical spelling of the same address is what minted it and what a failure falls back to.
+> **Status.** This section states the form of
+> [RFC-0029](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0029-one-path-primitive.md)
+> (accepted 2026-09-30, ships as v0.18.0), which replaces RFC-0027's 16/16 path label and RFC-0024's
+> bare `PATH_REF` address with **one** element. The reference implementation reaches it slice by
+> slice (RFC-0029 §13.2): until S1–S3 land it still emits and honours the RFC-0027 `len = 4` label,
+> the `0x14` `PATH_REF` address and the `op` bit 7 mint request, and the conformance vectors
+> `path-label/*`, `path-ref/ref-*`, `fwd/fwd-label-*`, `fwd/fwd-bound-*` and `fwd/fwd-reverse-mint`
+> still describe that form. They retire, and the RFC-0029 §13.4 vectors replace them, in S1–S3.
 
-**There is no `PATH_LABEL` type code.** The element is the escape record of §Constraints above —
-`00 <u8 kind = 0x16> <u8 len = 4> <u32 LE>`, 7 bytes — and `0x16`–`0x1F` stay **unassigned** in the
-type-code registry (§reserved range). The escape `kind` space and the TLV type space are different
-namespaces that happen to share a number; RFC-0027's candidate 8-byte TLV-child spelling was ruled
-and then never built (its amendments 4 and 5).
+The layout above is what a **PAIR** element *is*; this is what a host does with one (RFC-0029 §§4–10).
+A `PATH` carrying PAIR elements is still a `0x06`: a chain is a *frame* path, the canonical string
+of the same address is the **durable truth**, and the chain is a learned cache of it — re-learned
+after a reboot, a departure, a retirement or a refusal.
 
-**The value.** `u32` little-endian, `(u16 slot index, u16 generation)` — bits 0–15 the index, bits
-16–31 the generation. The index is a **slot in the minting host's own label table**, handed out at
-mint time and bounds-checkable against the table's cardinality; it is **never a content hash**,
-because a hash collision is a mis-delivery and this doc set closes that class by construction
-rather than by digest width. A generation of `0` means *no label*: it is never carried by a minted
-element, and an element carrying it is a well-formed LABEL whose value is invalid — refused at
-deref, not at decode.
+**There is no separate type code.** The element is the escape record of §Constraints above —
+`00 <u8 kind = 0x16> <u8 len = 8> <u32 LE index> <u32 LE generation>`, 11 bytes — and `0x16`–`0x1F`
+stay **unassigned** in the type-code registry (§reserved range). The escape `kind` space and the
+TLV type space are different namespaces that happen to share a number. A `kind = 0x16` record of any
+other length (including RFC-0027's retired 7-byte label) is malformed and refuses the **address**
+(`tr::path::invalid`), never the frame.
 
-**Node-scoped, and an address rather than a capability.** A label means something **only on the
-host that minted it**. A host MUST NOT interpret a label it did not mint, and MUST NOT relay a
-label of its own into a part of the path another host reads.
+**The value.** The vertex's owner-issued `(u32 index, u32 generation)`: the index is a slot in the
+owner's dense, append-only, pointer-stable vertex index, handed out at registration and
+bounds-checkable; the generation is the vertex's retirement stamp. It is **minted, never hashed** —
+two vertices cannot share an index, so a false match is not constructible.
 
-**One label covers a whole local part.** A hop's local part is its entire mount run
-(`net/<module>/<name>`, however many segments), and one label stands for all of it — never one
-label per segment. Granularity is per hop, so mixed granularity across a route is legal.
+**Node-scoped, and an address rather than a capability.** A PAIR means something **only on the
+node whose index it names**. Element *k* of a chain is read by the *k*-th node of the route and by
+no other; a hop consumes exactly its own head element and forwards the tail, the same monotone
+shrink the canonical `dst` performs.
 
-**Mixed paths are legal and expected.** A `PATH` MAY carry any mixture of NAME and LABEL elements,
-in any order; there is no "fully minted" state a path must reach. A hop that does not implement
-this mechanism, or that declines to mint, leaves its own part spelled in names and every other
-hop's part still compacts.
+**One element per node's whole local part; mixed paths are legal and expected.** A node's local
+part is its entire mount run (`net/<module>/<name>`, however many segments) and one PAIR stands for
+all of it. A `PATH` MAY carry any mixture of NAME and PAIR elements, in any order: a node that cannot
+issue a PAIR for its part — a shared (bus) mount, a saturated slot, a connection vertex that does not
+exist yet — leaves that part as NAMEs and every other node's part still compacts. Because each
+element self-describes by its kind and is read by exactly one node, **skipping is not expressible**.
 
-#### Minting — passive, on the reply, and never load-bearing
+#### The per-hop algorithm
 
-There is **no advertise, no request flag, no setup exchange and no control frame of any kind**. A
-minting host emits exactly the frames it emits today, with some path elements spelled differently:
+A host receiving `FWD{op, dst, src, …}` reads the head element of `dst`:
 
-- Each forwarding hop resolves its local part canonically on the way out, exactly as today.
-- On the way **back**, a minting hop relaying a reply prepends its own local part to that reply's
-  `src`, spelled as one label element. The reply's `src` is the only region that survives to the
-  origin — the reply's `dst` is consumed hop by hop, and appending a trailing accumulation is
-  refused by the "replaces, never appends" rule. RFC-0004 §B's *"a reply accumulates no return
-  route"* is therefore narrowed to **non-minting** hops, which is every host that does not inject a
-  table (RFC-0027 §6.1 erratum 2).
-- A **terminus** does the same for the residual it resolved: at a terminus the reply's `src` region
-  *is* that residual, so the rewrite is a literal substitution and the frame gets **shorter**.
-- The rewrite **replaces** string bytes and never appends, measured against the string spelling of
-  the same part — 7 bytes against the 13 of the shipped `net/<module>/<name>` mount run.
+1. **NAME head** — resolve as for any canonical path (the mount descent, else the local tree walk).
+2. **PAIR head** — bounds-check the index, compare the generation (a saturated element never
+   matches), check the vertex is registered. Any refusal is **`tr::path::not_found`**, answered to
+   the request's `src` when it is non-empty; the host **MUST NOT** forward, **MUST NOT** apply the
+   operation and **MUST NOT** attempt any repair — no re-resolution, no nearest match, no retry.
+3. **What the vertex is decides what happens next**, and nothing else does:
+   - a **point-to-point connection vertex** with a non-empty residual — **egress** over that link,
+     `dst` shrunk by exactly the consumed element, `src` grown canonically by the inbound mount run;
+     the same vertex as the **last** element is a local terminus that addresses its own `:`-facets;
+   - a **shared-mount (bus) vertex** — refused, `tr::path::not_found`: a bus link's `send()`
+     broadcasts, so no element names an egress through it until RFC-0029 §10's session-anchor egress
+     (slice S8) lands. Across a bus the chain stays NAMEs;
+   - **any other vertex**, as the last element — the **terminus**: apply the operation exactly as the
+     NAME spelling does; a PAIR terminus never write-creates;
+   - any other vertex **not** last — `tr::path::invalid`: a descent below a non-mount vertex names
+     nothing.
+4. **Authorization**, at the dereferenced vertex, before any egress or operation (below).
 
-**The trigger is a fact already in hand, never a prediction.** A forwarding hop mints on the first
-reply it relays over a child; a terminus mints on the first terminated operation per child. **No
-use counters, no hit thresholds, no hotness estimate, no timers, no aging.** Minting is
-**post-auth only**: a host MUST NOT mint for a part of a path the requesting peer could not have
-reached canonically in the same operation, so probing the labelled spelling yields what probing the
-string spelling yields — *exists + denied*, never *exists + here is a handle to it*.
+A `REPLY` is routed by the same steps against its `dst`. The forwarding hop is zero-heap and holds
+nothing across frames. The hop that consumes the **final** element and still has a frame to put on
+the wire re-heads its egress `dst` as a canonical **empty `PATH`**, so a client that never speaks a
+PAIR is never answered in one (RFC-0024 §7.1 erratum 3, kept).
 
-**A mint is never load-bearing.** A host MUST behave correctly when no label is ever minted
-anywhere on a route. A refusal to mint, a retired slot, an exhausted table and a hop that does not
-implement the mechanism at all are **one case** — the string path — and none of them is an error, a
-NACK, or observable on the wire.
+**Authorization is spelling-independent.** RFC-0004 §F's two gates — the forward right at each
+intermediate connection vertex, the operation's right at the target — are evaluated at the
+dereferenced vertex, for the caller's subject and the operation's right, and the verdict is a
+function of those three alone: a host **MUST** reach the same verdict whether a hop's element
+arrived as a NAME or a PAIR, and **MUST** evaluate the check on every hop of every spelling. A
+generation match **authorizes nothing**; a peer may present any pair exactly as it may spell any
+string. Conformance carries the paired `acl/label-vs-string-*` and `acl/bound-vs-canonical-*`
+vectors, which RFC-0029 §13.4 re-spells in PAIRs.
 
-#### Dereference and failure — `NOT_FOUND`, then the string the sender still holds
+#### Learning — passive, on the reply `src`, never load-bearing
 
-On receipt of a labelled element a host bounds-checks the index against its own table, compares the
-generation, and authorizes at the dereferenced vertex — the same three steps, in the same order, a
-`PATH_REF` element takes (§`0x14` §routing semantics). Every labelled operation **MUST** evaluate
-the access check at the dereferenced vertex for that operation's own right, **exactly as the string
-form does**: a generation match says the vertex is the same one, never that the caller may still
-act on it, and a label holds no authorization state, so a revoked right takes effect on the very
-next operation over an already-minted label. Conformance carries the paired
-[`acl/label-vs-string-allow`](https://github.com/avatarsd-llc/libtracer/tree/main/tests/conformance/vectors/v1/acl/label-vs-string-allow)
-and [`acl/label-vs-string-deny`](https://github.com/avatarsd-llc/libtracer/tree/main/tests/conformance/vectors/v1/acl/label-vs-string-deny)
-asserting the two spellings agree byte for byte, allowed and denied alike.
+There is **no advertise, no request flag, no setup exchange and no control frame**. The `FWD` `op`
+byte keeps its `op & 0x3F` masking rule with bits 7–6 **reserved, MUST be zero**; RFC-0024's bit-7
+mint request is retired.
 
-A host that receives a label it cannot validate — out of range, generation mismatch, unminted slot,
-a label it did not mint — **MUST NOT** forward it, **MUST NOT** apply the operation, and **MUST
-NOT** attempt any repair of its own: no re-resolution against a nearest match, no retry against a
-different slot, no guessing. It **MUST** answer a `NOT_FOUND`-class error (`tr::path::not_found`):
-an unresolvable address is exactly what that error already means, and a label is an address. No new
-frame is needed and none is defined.
+- A **forwarding hop** grows the request's `src` by the **NAME** run of its inbound link, never by a
+  PAIR: the holder of a return route holds no other original, so a return route must stay
+  canonical.
+- A host relaying or issuing a `REPLY` **prepends to that reply's `src` its own part of the forward
+  route** — as a PAIR when it can issue one, as the canonical NAME run when it cannot, **never
+  nothing**. A forwarding hop contributes the PAIR of the connection vertex the reply arrived over
+  (the one it egressed the request through, read off the frame's own arrival, never from a table);
+  the **terminus** seeds the reply's `src` with the PAIR of the vertex it applied the operation to.
+  RFC-0004 §B's "a reply accumulates no return route" is amended accordingly: a reply's `src` is the
+  responder's address from the origin's vantage.
+- The **origin** receives the complete forward route from its first link onward, prepends its own
+  element for hop 0, and caches the chain beside the canonical bytes, which it **never discards**.
+  Subsequent requests spell the cached chain as `dst`.
 
-**There is no fall-through to the canonical walk**, and this is where a labelled element differs
-from a bound subscriber edge, which does fall through: the label **replaced** the string bytes, so
-there is nothing left to walk and a fall-through would amount to inventing an address. The sender's
-recovery is the full-string path it still holds, re-minted from the next reply — one failed
-operation is the entire cost.
+Learning is post-auth by construction: the reply it rides exists only after the terminus's gates
+passed. **A PAIR is never load-bearing**: a host MUST behave correctly when no PAIR is ever issued
+anywhere on a route, and a hop that issues none is simply a NAME run in the chain.
 
-**Staleness is the generation, and nothing else.** When the vertex a label resolves to departs —
-retirement, connection-vertex removal, link teardown — the minting host bumps that slot's
-generation, and the label the peer holds compares unequal. Generations only move forward, so a
-stale label never becomes valid by waiting. A generation **MUST NOT** wrap: on saturation it stops
-advancing and the slot is **retired permanently**, removed from the mintable set for the lifetime
-of the table and never minted into again. The rule is invisible on the wire — it is a constraint on
-what a minting host may do with its own table — and it is what closes the mis-delivery class a
-wrapped generation would reopen, identically to §`0x14`'s rule for a vertex ref.
+**Refusal and fallback.** On `tr::path::not_found` for a chain-spelled request the origin **clears
+its cached chain and re-sends the canonical string it still holds**; the reply to that request
+re-teaches the chain. One failed operation is the entire cost. There is **no withdraw frame, no
+unbind, no lease and no TTL**, and a multi-element forward refusal answers `NOT_FOUND` like every
+other arm rather than dropping silently.
 
-**No withdraw protocol, no aging.** There is no withdraw frame, no unbind, no lease and no TTL. A
-label is not retired by its holder and not expired by its minter; it simply stops validating, and
-the next frame discovers that.
+#### Invalidation — the generation, and nothing else
 
-#### The table — injected, ceilinged, refuse-new, and off by default
+A PAIR stops validating when its vertex's generation moves. Generations only move forward, so a
+stale PAIR never becomes valid by waiting. A generation **MUST saturate, never wrap**: a saturated
+vertex is permanently unbindable and every element for it stays a NAME. The generation moves on:
 
-The label table is the **per-hop state** this mechanism knowingly buys, and it is bounded by an
-injected resource rather than a library-chosen capacity: it draws from the embedder's net-plane
-store ([ADR-0079](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md)),
-carries a **per-peer ceiling** so one peer cannot consume it, and on exhaustion **refuses new
-mints** — it does not evict, does not grow, and does not fail the operation. **Live labels are
-never evicted by pressure**: an established label is not a cache entry, and reclaiming one would
-turn a bounded-resource problem into a stream of avoidable `NOT_FOUND` round trips on flows that
-were working.
+- **retirement** of the vertex;
+- a **point-to-point child's tenancy change** — a same-named re-add is a **new identity**, and a pair
+  issued against the previous tenancy MUST NOT resolve to it, because the elements behind it were
+  issued by the node that used to be there;
+- the child's **link going down while the tenancy is kept** — the far node may have rebooted behind
+  the same socket and re-issue the same small pairs;
+- on a transport that cannot report a session boundary (UDP, CAN), a changed **per-boot epoch**,
+  which such a link carries **once per session or advertise, never per frame**, and which counts as
+  a session boundary. The epoch is not part of the pair.
 
-**Minting is opt-in and off by default.** A node with no injected table never enters the label
-branch: it mints nothing, its parts travel as the strings they travel as today, and a peer that
-presents it a label gets the `NOT_FOUND` above. That default is deliberate and measured — the
-per-hop saving is a **wide-node** property (it arrives with registry width and is not claimed at
-all on a narrow node), while the terminus-residual saving is what the mechanism banks; RFC-0027
-§3.4 carries both figures and the scope limit.
+The tenancy and link bumps advance the generation **only** — they do not empty the vertex's `:acl`,
+`:settings` or app fields the way retirement does.
 
-**One compression per address.** A host SHOULD NOT mint a path label into an address already
-spelled as a `PATH_REF` (§`0x14`), and SHOULD NOT bind a `PATH_REF` over an already-labelled path.
-Two compressions of one address buy one address's worth of saving and two staleness surfaces.
+**Statelessness.** A forwarding hop holds **no hard state** — nothing whose loss changes an answer —
+and no per-request state, ever. The origin's cached chain and a subscription edge's learned chain
+are soft: a miss falls through to the canonical string with the same result. There is no per-hop
+table, no ceiling and no refuse-on-full. The **single named exception** is RFC-0004 §E.1's
+`COMPACT` route handle (§route-handle frames): streams only, recoverable through `HANDLE_NACK` and
+re-advertise, and never a wrong delivery.
 
-**Optionality.** Emitting and accepting labelled elements are both optional. A host that implements
-neither still relays a frame carrying one, by stepping over the escape record by its declared
-length (§Enforcement above) — which is why the element is self-delimiting and why the node least
-likely to mint pays only the skip.
-
-Conformance vectors:
-[`path-label/label-roundtrip`](https://github.com/avatarsd-llc/libtracer/tree/main/tests/conformance/vectors/v1/path-label/label-roundtrip),
-`label-mixed`, `label-multi-segment`, `label-foreign-kind` and the negative `label-wrong-length`
-(a declared length that is not 4 makes the address unspellable ⇒ `tr::path::invalid`, the resolver's
-answer, since the packed body is codec-opaque); `fwd/fwd-label-mint-reply`,
-`fwd/fwd-label-terminus-reply`, `fwd/fwd-label-terminus-deref` and the negatives `fwd/fwd-label-stale`,
-`fwd/fwd-label-terminus-stale`; and the ACL pair above. Every existing vector is byte-unchanged: a
-`PATH` with no label element is byte-identical to today's.
+**Optionality.** Issuing and honouring PAIR elements are both optional. A host that implements
+neither still relays a frame carrying one, by stepping over the escape record by its declared length
+(§Enforcement above).
 
 **On the wire, in a capture.** The [Wireshark dissector](https://github.com/avatarsd-llc/libtracer/tree/main/tools/wireshark)
-renders a label in place inside the address — `/<label:3@7>/sensor/temp`, index before generation —
-and exposes `libtracer.path.label.index` / `.generation` as display filters. The three
-distinguishable cases an operator meets are the three this section defines: a well-formed label, a
-generation-`0` label (flagged, and refused where it is dereferenced rather than where it is
-decoded), and a `0x16` record whose length is not 4, which is shown as a malformed address and
-never read as a label.
+renders an escape element in place inside the address; its PAIR rendering follows slice S1.
 
 ### Where it appears
 
@@ -1098,7 +1090,7 @@ And the NET-PLANE seams ([RFC-0010](https://github.com/avatarsd-llc/libtracer/bl
 | spelling | the seam | nouns |
 | ---- | ---- | ---- |
 | `:stats.router.drops` | the node's forwarder's counted cold-path drops | `flatten_dropped`, `forward_iov_dropped`, `arena_dropped`, `assemble_dropped`, `reply_iov_dropped`, `delivery_iov_dropped`, `malformed_rx` |
-| `:stats.labels.table` | the RFC-0027 label plane — mint refusals beside dereference tallies | `labels_exhausted`, `refused_bindings`, `label_not_found`, `label_resolves` |
+| `:stats.labels.table` | the RFC-0027 label plane — mint refusals beside dereference tallies (deleted with the table by [RFC-0029](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0029-one-path-primitive.md) slice S3, as is `labels_used` below) | `labels_exhausted`, `refused_bindings`, `label_not_found`, `label_resolves` |
 | `:stats.link.<child>` | ONE registered transport child, by the NAME its `/net/<module>/<name>` connection vertex carries | `dropped_rx`, `malformed_rx`, `dropped_tx`, and `labels_used` where the node mints labels |
 
 A node that constructed no router publishes none of the three, and a `link` sub-key naming no registered child — or a removed one — is not a seam: all of these answer `ERROR{tr::schema::not_found}` (`0x0031`), which a monitor reads as "not published here". A link's `rx_capacity` / `tx_capacity` ceilings are deliberately absent: they are per-kind and in per-kind units (buffer bytes on a WebSocket link, TX-pool slots on CAN), so there is no unit-safe ceiling to publish at the interface.
@@ -1256,17 +1248,18 @@ tolerance coexist with positional pairing.
 Allocated on a fast-track basis during v1. Assigned so far:
 
 - `0x0F` **FWD** and `0x10` **FIELD** — the remote-operation frames ([RFC-0004](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0004-remote-operation-addressing.md) §B/§C, ADR-0035).
-  - A `FWD`'s `dst` (and `src`) **MAY** be a `PATH_REF` (§`0x14`) instead of a `PATH`; the two forms are interchangeable as addresses, and a peer that does not accept the bound one falls back per §`0x14` §routing semantics.
-  - The `op` byte's **opcode is `op & 0x3F`**; bits 7–6 are flags, of which **bit 7 is the bound-path mint request** (§`0x14` §routing semantics). A forwarder MUST mask rather than switch on the raw byte ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §7.5/§9.3).
-  - A request whose **`src` is a zero-length `PATH`** is **unacknowledged**: it carries no return route, and the terminus emits **no** frame for it ([RFC-0004](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0004-remote-operation-addressing.md) Amendment 2). A `WRITE` is applied and answered with silence — success, refusal and ACL denial alike, the same drop a denied `COMPACT` delivery takes (§route-handle below). A `READ`, an `AWAIT`, a mint-flagged frame or a `:subscribers[]` subscribe with an empty `src` is **malformed** and dropped at the terminus (no route can carry a NACK). The child is **empty, never omitted** — the child run is positional and a `WRITE` payload may itself be `PATH`-typed, so omission is ambiguous; the grammar is unchanged. Forwarders still accumulate into `src` unconditionally, so the marker reaches a terminus only from a **directly attached** origin or on the **delivery leg**, where the producer emits `src=<empty PATH>` itself. The standing plane — a `SUBSCRIBER` plus `delivery_compact` (§`0x04`, §route-handle) — remains the first answer for streaming wherever the topology admits a consumer-initiated subscription; the unacknowledged write is for **push-ingest**, where the producer is the client and subscription would invert who initiates.
-  - A mint-flagged **request** MAY additionally carry a trailing **`PATH_REF_REVERSE`** (§`0x15`) child after RFC-0004 §B's closed child list — the reverse-direction list, contributed by **forwarding hops only**, never by the origin ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §7.1 amendments 1 and 2). It is identified by its **type code**, never by its position; it is nonetheless last, so a positional reader of an ordinary request is untouched, mirroring the reply's mint answer.
+  - A `FWD`'s `dst` and `src` are `PATH`s; a `dst` MAY spell any node's part as a PAIR element (§`0x06` §path element PAIR), and a `src` on the request leg stays canonical NAMEs. A `dst` presented as `0x14` is refused ([RFC-0029](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0029-one-path-primitive.md) §5.3).
+  - The `op` byte's **opcode is `op & 0x3F`**; bits 7–6 are **reserved, MUST be zero** — RFC-0024's bit-7 mint request is retired ([RFC-0029](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0029-one-path-primitive.md) §5.3). A forwarder MUST mask rather than switch on the raw byte ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §9.3).
+  - A request whose **`src` is a zero-length `PATH`** is **unacknowledged**: it carries no return route, and the terminus emits **no** frame for it ([RFC-0004](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0004-remote-operation-addressing.md) Amendment 2). A `WRITE` is applied and answered with silence — success, refusal and ACL denial alike, the same drop a denied `COMPACT` delivery takes (§route-handle below). A `READ`, an `AWAIT` or a `:subscribers[]` subscribe with an empty `src` is **malformed** and dropped at the terminus (no route can carry a NACK). The child is **empty, never omitted** — the child run is positional and a `WRITE` payload may itself be `PATH`-typed, so omission is ambiguous; the grammar is unchanged. Forwarders still accumulate into `src` unconditionally, so the marker reaches a terminus only from a **directly attached** origin or on the **delivery leg**, where the producer emits `src=<empty PATH>` itself. The standing plane — a `SUBSCRIBER` plus `delivery_compact` (§`0x04`, §route-handle) — remains the first answer for streaming wherever the topology admits a consumer-initiated subscription; the unacknowledged write is for **push-ingest**, where the producer is the client and subscription would invert who initiates.
+  - A forwarded **subscribe request** MAY additionally carry a trailing **`PATH_REF_REVERSE`** (§`0x15`) child after RFC-0004 §B's closed child list — the reverse-direction chain, contributed by **forwarding hops only**, never by the origin ([RFC-0029](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0029-one-path-primitive.md) §7.1). It is identified by its **type code**, never by its position; it is nonetheless last, so a positional reader of an ordinary request is untouched.
+  - A `REPLY`'s `src` accumulates the forward route head-first on the way back, each host prepending its part as a PAIR or as its NAME run, never nothing ([RFC-0029](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0029-one-path-primitive.md) §6.2, amending RFC-0004 §B).
 - `0x11`–`0x13` — the **route-handle transport-plane control frames** (below).
-- `0x14` **PATH_REF** — the **bound path**, the second normative address form ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §4, below).
-- `0x15` **PATH_REF_REVERSE** — the **reverse-direction bound-path list** a mint-flagged request accumulates ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §7.1 amendment 2, below). `0x14`'s body grammar exactly; a different role.
+- `0x14` — **retired** (was PATH_REF, RFC-0024's bound path; [RFC-0029](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0029-one-path-primitive.md) §5.3, below). Not reassigned.
+- `0x15` **PATH_REF_REVERSE** — the **reverse-direction chain** a subscribe request accumulates ([RFC-0029](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0029-one-path-primitive.md) §7.1, below). A `PATH` body; a different role.
 
 Unassigned: `0x16`–`0x1F`. **`0x16` is unassigned as a *type code* and taken as an *escape kind***
-— RFC-0027's path-label element is `kind = 0x16` inside a packed `PATH` body (§`0x06` §path label
-element), which is a different namespace that happens to share the number. Assigning TLV `0x16`
+— RFC-0029's PAIR element is `kind = 0x16` inside a packed `PATH` body (§`0x06` §path element
+PAIR), which is a different namespace that happens to share the number. Assigning TLV `0x16`
 would not collide, but a reader meeting `16` in a `PATH` body is meeting the escape kind, not this
 registry. Candidate uses: `CAPABILITY` (opaque token, lighter than full ACL), `HEARTBEAT` (an explicit liveness ping; the intended alternative is writes to the `:liveness.last_seen_ns` field, [04-communication-flows.md](04-communication-flows.md) — ⚠️ which is itself unimplemented, so *neither* spelling exists today, [#586](https://github.com/avatarsd-llc/libtracer/issues/586)). Receivers MUST handle unknown codes in this range per the forward-compatibility rules of [01-data-format.md](01-data-format.md) §forward / backward compatibility.
 
@@ -1348,120 +1341,68 @@ That drop covers the bindings a node already holds; it says nothing about the on
 
 A node holds label state **only** for the compact flows crossing it (bounded by the number of such subscriptions); one-shot / cold / non-compact traffic allocates none, which preserves the stateless-forwarder property. Per-hop multiplexing of a reply to a specific request remains the transport's concern (RFC-0004 §D), so no end-to-end handle exists.
 
-### Bound path — `0x14` PATH_REF
+### `0x14` — retired (was PATH_REF)
 
-The **second normative address form** ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §4). The canonical `PATH` (`0x06`, packed segment records) is untouched and stays the only form a cold peer can use; a `PATH_REF` spells the same route in **resolutions** rather than names — one element per **host**, each element that host's own reference to its next-hop connection vertex, the last element the terminus host's reference to the **target vertex itself**.
+**Retired as an address form** by [RFC-0029](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0029-one-path-primitive.md)
+§5.3 (accepted 2026-09-30). RFC-0024's bound path — a bare array of 8-byte `(u32 index, u32
+generation)` elements — survives as the **PAIR** element inside `PATH` (§`0x06` §path element PAIR),
+which spells the same pair with per-element mixing and one grammar for every address. The type code
+carries no meaning: a host **MUST** refuse a frame that presents it as a `dst` (`tr::path::invalid`).
+With it go the `FWD` `op` bit 7 mint request, the reply's trailing `PATH_REF` mint answer and
+RFC-0024 §7.1 erratum 1's strip-whole-list rule. The code is not reassigned.
 
+*Implementation status:* the reference implementation still emits and honours `0x14` until RFC-0029
+slices S1–S2 land; the `path-ref/ref-*`, `fwd/fwd-bound-*` and bit-7 mint vectors retire with them.
 
-#### Payload layout
+### Reverse path — `0x15` PATH_REF_REVERSE
 
-```
-PATH_REF (0x14, PL=0, LL=0) {
-  ; body: H bare 8-byte elements, in route order, no per-element framing
-  ; element i, little-endian:
-  ;   u32 index       — the minting host's vertex-map index
-  ;   u32 generation  — that vertex's retirement generation at mint time
-}
-```
-
-The encoder's invariants:
-
-- **Outer header** (4 bytes): `14 00 LL_lo LL_hi`. `opt` is `0x00` — see the two MUSTs below.
-- **`opt.PL` MUST be 0.** `PL=1` asserts the payload is concatenated child TLVs, and this payload is a fixed-stride record array. A generic `PL=1` walker reads the first four body bytes as a TLV header (`type` = the low byte of an index, `opt` = the next) and mis-frames the whole body, so a set `PL` is `tr::frame::invalid`, not a tolerated redundancy.
-- **`opt.LL` MUST be 0.** `LL=1` buys a u32 length for bodies above 65 535 bytes, and the element-count bound below puts the maximum body at 2040 bytes. There is no reachable `PATH_REF` for which `LL=1` is anything but two wasted bytes, so it is forbidden rather than merely unused. A set `LL` is `tr::frame::invalid`.
-- **`length` MUST be a multiple of 8.** There is **no element-count field**: the count *is* `length / 8`, so a length not divisible by 8 describes no body and is `tr::frame::invalid`.
-- **Element count MUST be ≤ 255**, i.e. `length` ≤ **2040**. Over that is `tr::frame::invalid`.
-- **Both element fields are little-endian** u32, per [01-data-format.md](01-data-format.md) §frame layout.
-- **No inner trailers**, and no per-element header: element *i* is `body[8i .. 8i+8)`, computed rather than parsed. `opt.TS` / `opt.CR` remain the enclosing frame's business, exactly as for `PATH`.
-
-`PATH_REF` carries no segment records, so [03-addressing.md](03-addressing.md)'s segment, name-length and 1024-byte path caps do not apply to it and continue to govern the canonical form alone.
-
-#### The 255-element bound
-
-255 is the largest count for which every per-element quantity — the count itself, the largest index (254), a receiver's per-element table dimension — fits a `u8`, the same discipline [RFC-0023](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0023-path-segment-cap-repriced-32-to-255.md) applies to the canonical segment cap. It sits *above* both reachable ceilings: a bound path is minted from a canonical route, a canonical body caps at 1024 bytes, and a hop costs at least one 3-segment mount run, so at most 69 hosts are reachable under today's NAME encoding and 171 under packed segments. The bound is therefore encoding-independent rather than an artifact of whichever body grammar `PATH` currently uses.
-
-#### Byte literal — a two-host bound path
-
-```
-14 00 10 00     ← outer: type=PATH_REF(0x14), opt=0x00 (PL=0, LL=0), length=16 (u16 LE)
-   07 00 00 00 03 00 00 00      ← element 0: index=7,  generation=3
-   2A 00 00 00 01 00 00 00      ← element 1: index=42, generation=1
-```
-
-**20 bytes total** — the `4 + 8H` a bound path costs at `H = 2`. Conformance vectors: `path-ref/ref-empty` (`H = 0`, the envelope alone), `ref-1host`, `ref-2host`, `ref-3host`, `ref-255-elements`, and the negative `ref-len-not-multiple-of-8`, `ref-256-elements`, `ref-pl-set`, `ref-ll-set`. The four structural rules above each get their own reject case, since a core that drops one of them still satisfies the other three.
-
-An element is **node-scoped**: it means nothing anywhere but on the host that minted it, so no receiver can validate another host's element and no codec can validate any of them. A `PATH_REF` is an **address, never a capability** — an operation arriving on one is authorized by the same per-operation `acl_allows` check at the target vertex that the canonical form performs.
-
-#### Routing semantics
-
-The wire form above is what a bound path *is*; this is what a host does with one ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §5–§7).
-
-**Validation — the check.** On receipt of a `PATH_REF`-addressed operation a host reads element 0 and, in order:
-
-1. **Bounds-checks** the `index` against its own vertex cardinality. An in-range index names a live allocation, because the vertex map is pinned, pointer-stable and insert-only; an out-of-range one is refused.
-2. **Compares** the `generation` against the vertex's current retirement generation. A mismatch means the vertex was retired — and possibly re-created for a **different owner** — since the mint, so the reference names an address rather than the thing that was there.
-3. **Authorizes**, per operation, at the dereferenced vertex (below). A generation match says the vertex is the same one; it never says the caller may still act on it.
-4. Forwards on the remainder, or — at the terminus, where exactly one element is left — applies the operation.
-
-Generations only ever move **forward**, so a stale element can only ever compare lower and never becomes valid again by waiting. A host **MUST NOT** wrap a generation: on saturation the counter stops, the vertex becomes permanently unbindable, and every mint for it declines. A wrapped generation would let a stale reference validate falsely and deliver the operation into the vertex's successor, which is a mis-route rather than a drop.
-
-Each hop **consumes element 0 and forwards the remainder**, the same monotone shrink the canonical `dst` performs — so a bound path is loop-free by construction, for the identical reason, and needs no visited set. The residual that reaches a terminus is therefore exactly one element.
-
-**What a forwarding hop does, in full.** A host that reads a residual longer than one element is a **forwarder** for that frame. It runs the same four steps on element 0, and then:
-
-- it **egresses through the link the dereferenced vertex names** — a connection vertex, never a bus mount and never a bus peer. A bus link's `send()` broadcasts and a peer has no vertex at all, so no element can name either; such a frame is dropped exactly as the canonical spelling refuses a bus link's own NAME as a next hop;
-- the `dst` **shrinks by exactly one element** and nothing else about it changes. The `PATH_REF` re-heads with `opt = 0x00` — `PL` stays clear on the way out for the reason it was clear on the way in;
-- the `src` **grows canonically**, by the full mount run for the link the frame arrived on, exactly as it grows on a canonical forward. A bound path changes how the *forward* address is spelled and — with one licensed exception — nothing about the return route: the reply still routes home through the ordinary descent, and every hop on the way back may be a peer that does not implement the bound form at all. The exception is the reverse mint (RFC-0024 §7.1 amendment 1): on a **mint-flagged request**, a contributing hop also **prepends its own element** — its arrival identity's vertex ref — to the request's trailing reverse `PATH_REF` child, in lockstep with the canonical growth of `src`; a hop that cannot contribute **MUST strip that child entirely** rather than relay a list that skips a hop. `src` itself is never touched by this and stays canonical and complete.
-
-**The last hop of a reverse-list delivery.** A hop that consumes the **final** element of a bound `dst` and still has a frame to put on the wire — the delivery direction's last hop, which egresses to the session or connection that element names ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §7.1 erratum 3) — re-heads the `dst` as a **canonical empty `PATH`** (`0x06`, `PL=0`, length 0), **never** as a zero-element `PATH_REF`. The address is exhausted, and the party at the far end is an ordinary client that may not read the bound form at all: its frame is byte-identical to the canonical delivery it would have received before any binding existed. This is the delivery-direction half of the mint's "the origin's frame is bit-identical" property — a peer that never *speaks* the bound form is never *answered* in it either.
-
-A host that implements only the terminus case remains **conformant**: it answers a one-element `PATH_REF` and drops any longer residual, which is the failure rule below and which the origin recovers from by falling back to the canonical form it still holds. Nothing about a route is lost by that choice — a route is only ever bound end to end by hosts that each chose to mint, so a host that does not forward simply never appears in a multi-element binding. Conformance vectors: [`fwd/fwd-bound-forward`](https://github.com/avatarsd-llc/libtracer/tree/main/tests/conformance/vectors/v1/fwd/fwd-bound-forward) and [`fwd/fwd-bound-forwarded`](https://github.com/avatarsd-llc/libtracer/tree/main/tests/conformance/vectors/v1/fwd/fwd-bound-forwarded) are the same operation one hop apart.
-
-**Failure is a drop, never a mis-route.** A host that cannot validate element 0 **MUST NOT** forward, **MUST NOT** apply the operation, and **MUST NOT** attempt any repair of its own — no re-resolution, no nearest match, no retry against a different vertex. It drops the frame. A refusal **MAY** additionally be echoed back to the sender as an addressed refusal, and today exactly one arm does: the **one-element bound delivery** ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §5.3 erratum 4), where the echo also lets the producer retire the stale subscriber edge. A hop refusing a **multi-element** residual it was asked to forward drops **silently**. The asymmetry is intended, not an omission: the drop is what conformance requires, the echo is a latency optimisation on the arm that has a second use for it, and RFC-0024 §5.3's hop-index NACK — a separate, richer refusal — is ratified but has no wire spelling yet (§9.2). The origin's recovery is the one that already exists: fall back to the canonical form, which it still holds, and re-mint. This is why canonical support stays mandatory and why no address is ever reachable only in bound form — every bound path is minted from a canonical one.
-
-**Authorization.** Every operation arriving on a bound path **MUST** evaluate the same access check at the dereferenced vertex, for the operation's own right, exactly as the canonical form does. A bound path holds no authorization state of any kind, so a revoked right takes effect on the very next operation over an already-minted binding. Conformance carries a paired vector set — `acl/bound-vs-canonical-allow` and `acl/bound-vs-canonical-deny` — asserting that the two spellings of one operation agree, in the allowed case and the denied one alike.
-
-**Minting.** A binding is minted **in-band**, on an ordinary canonical operation, and costs **zero added origin bytes** — the origin's frame is bit-identical to the unflagged operation; the reverse direction's bytes ride the *forwarded* legs, which the origin never emits (RFC-0024 §7.1 amendment 1):
-
-- The `FWD` `op` byte carries **flags in bits 7–6**; the opcode is `op & 0x3F`. A forwarder **MUST** mask before switching on it, so an unrecognised flag degrades to the plain opcode instead of an unknown-opcode reject.
-- **Bit 7 is the mint request.** An origin sets it on an ordinary operation; each host that participates answers with its own vertex ref, and the terminus answers with its reference to the **target vertex itself**.
-- The answer rides the **reply**, as its **last** child: a `PATH_REF` of `4 + 8H` bytes. Last, so a positional reader of an ordinary reply is untouched and only an origin that asked reads past it.
-- **Both directions bind in one round trip** ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §7.1 amendment 1; its erratum 2 records why the reverse arm needed an amendment — until 2026-08-14 this bullet read "one direction is bound, and only one"). The **forward** list rides the reply, below. The **reverse** list rides the *forwarded request* as a trailing **`PATH_REF_REVERSE`** (§`0x15`) child — identified by that type code and never by its position ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §7.1 amendment 2): each forwarding host **prepends** its own element for the identity the request arrived on — its connection vertex for a point-to-point link, or the accepted session's identity vertex for a bus session, budgeted by the accepting listener's `max_peers`. The origin never emits the child, so the origin's leg carries none. The responder receives the list one element short, completes it with its own reference to the connection vertex the request arrived on, and **consumes that element locally** on every delivery — the exact mirror of the origin's handling of the forward list below. A hop that cannot contribute its reverse element **MUST strip the whole reverse list** (the strip rule below, direction-reversed: a list that skips a hop is a wrong route, not a shorter one).
-- **The list accumulates on the reply's way back.** The terminus writes the first element. Each hop that forwards a reply whose last child is already a `PATH_REF` **prepends** its own element for the link that reply arrived on — which is the link the request left through — so the list stays in route order, origin-first. That presence is the only signal a hop reads: a forwarder holds no per-flow state and has nothing else to read it from. The mint answer therefore comes back **one element short of the route**: the hop out of the origin is the one hop no peer ever sees, so the origin completes the list with its own reference to its first-hop connection vertex, and **consumes that element locally** on every subsequent operation rather than putting it on the wire.
-- **A hop that cannot contribute MUST strip the mint answer** rather than relay it — no connection vertex, a saturated generation, a full list. This is a safety rule, not tidiness: a list that skips a hop is not a shorter route but a **wrong** one. The origin consumes its own element, the frame reaches the hop that contributed nothing with exactly one element left, and that hop — believing itself the terminus — dereferences an element minted on a *different* host against its own vertex map, where the same index and generation name an ordinary live vertex. That is a mis-route. A hop that cannot mint therefore refuses the whole exchange: the origin sees an ordinary reply, stays canonical, and loses only the optimisation.
-- A mint is gated by the **full existing check**: a host **MUST NOT** mint a vref for a vertex the requesting caller could not have reached canonically in the same operation. Since a mint rides that operation, this is automatic — a denial happens before any vref is produced. So probing the bound form yields exactly what probing the canonical form yields, *exists + denied*, and never *exists + here is a handle to it*. A bound path cannot be used to discover a namespace its holder cannot already walk.
-- The request is a **hint, never an obligation**. A host that will not or cannot mint — a saturated generation, or simply no implementation — answers the ordinary reply, and the origin stays canonical.
-
-**Optionality.** `PATH_REF` is optional to *emit* and optional to *accept*. A peer that does not accept it answers such a frame per the forward-compatibility rules of [01-data-format.md](01-data-format.md) §handling unknown type codes, and the origin falls back to the canonical form.
-
-### Reverse bound path — `0x15` PATH_REF_REVERSE
-
-The **reverse-direction** list a mint-flagged request accumulates on its way to the responder ([RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §7.1 amendments 1 and 2). Same body, different role.
+The **reverse-direction** chain a **subscribe** request accumulates on its way to the responder
+([RFC-0029](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0029-one-path-primitive.md)
+§7.1; the type code is [RFC-0024](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md)
+§7.1 amendment 2's). A subscription edge delivers with no reply leg, so it learns its chain on the
+**request** leg instead.
 
 #### Payload layout
 
-Byte-for-byte §`0x14`'s, and every structural rule stated there binds here **identically**:
+The body is a **`PATH` body** (§`0x06`): `opt.PL` MUST be 0, and the body is a self-delimiting run
+of NAME segment records and PAIR escape records, head-first in delivery order (responder-first),
+under every §`0x06` constraint. RFC-0024's bare-array grammar for this code is retired with the last
+positional list.
 
-```
-PATH_REF_REVERSE (0x15, PL=0, LL=0) {
-  ; body: H bare 8-byte elements, in route order (responder-first), no per-element framing
-  ;   u32 index       little-endian
-  ;   u32 generation  little-endian
-}
-```
+#### Hop behaviour
 
-- **`opt.PL` MUST be 0** and **`opt.LL` MUST be 0**; **`length` MUST be a multiple of 8**; the element count **MUST be ≤ 255** (`length` ≤ 2040). A header that fails any of these is `tr::frame::invalid`, exactly as for `0x14`. A core that applies the shape check to `0x14` alone is **not conformant**: conformance vector [`path-ref/reverse-len-not-multiple-of-8`](https://github.com/avatarsd-llc/libtracer/tree/main/tests/conformance/vectors/v1/path-ref/reverse-len-not-multiple-of-8).
-- An element means the same thing and is equally **node-scoped**: it is a reference on the host that minted it, and an address rather than a capability.
+- A forwarding hop relaying a subscribe request (a `SUBSCRIBER` write) **prepends** its
+  reverse-direction element to the request's trailing `0x15` child, creating the child if the
+  request carries none: its PAIR for the identity the request **arrived** on — the inbound
+  connection vertex point-to-point, the accepted session's anchor for a bus arrival — or, when it
+  cannot issue one, its inbound mount run as **NAMEs**. **Never nothing**, so the chain is never
+  stripped and never skips a hop. **No flag gates this.**
+- The responder completes the chain with element 0 — its own element for the egress toward the
+  writer — and stores it beside the canonical return route. Each delivery spells `dst` as that
+  chain: element 0 is consumed locally, the rest ride the wire, `src` empty.
+- A refusal at any hop of a delivery is a **drop** (there is no `src` to answer); the edge falls
+  through to its canonical return route on the next delivery and re-learns.
+- The child is identified by its **type code**, never by its position, and appears only on a
+  forwarded subscribe request — never on a reply and never on the origin's own frame.
 
-#### Where it appears, and why it is its own code
+The price is +3 B per element over RFC-0024's bare array, on the subscribe request leg only: the
+steady-state delivery frame spells the learned chain in `dst` and does not grow.
 
-It appears in exactly one place: as the **last child of a forwarded `FWD` request whose `op` bit 7 is set**. It never appears on a reply (the forward mint answer there is a `0x14` `PATH_REF`), never on an unflagged request, and never on the origin's own frame — the origin emits no reverse child, which is what keeps a mint request at **zero added origin bytes**. Conformance vector: [`fwd/fwd-reverse-mint`](https://github.com/avatarsd-llc/libtracer/tree/main/tests/conformance/vectors/v1/fwd/fwd-reverse-mint).
+**Edges with no request leg.** A mount-routed subscription (whose reverse chain spells the way back
+to the *writer*, not to the third-party consumer) and a host-local `subscribe_toward` edge both start
+with no chain. Such an edge learns on its **first fire**: it sends that delivery with a non-empty
+`src` — its node's **one** learn endpoint, the edge identified in the tail — so the terminus answers
+a `REPLY` whose `src` carries the forward chain (§`0x06` §learning). There is one endpoint per node,
+never one per edge. One reply per learn is the whole cost; later deliveries are `src`-empty.
 
-The alternative was to identify it as "the only trailing child of a mint-flagged request", which decodes the same frames. It is not used, for three reasons: a positional rule mis-reads a mint-flagged `WRITE` whose stored value is itself a raw `PATH_REF`; it breaks the moment any later extension adds a second trailing child; and every other element of this grammar self-describes by type. The type byte is free to read — a hop already compares each tail child's type — so the role is spelled where the grammar spells every other role.
+*Implementation status:* until RFC-0029 slice S5 lands, the reference implementation still spells
+`0x15` as RFC-0024's bare 8-byte array, accumulates it only on an `op` bit 7 request and strips it
+when a hop cannot contribute; `path-ref/reverse-len-not-multiple-of-8` and `fwd/fwd-reverse-mint`
+describe that form.
 
-Hop behaviour — prepend or strip, the responder's completion and local consumption — is §`0x14` §routing semantics §Minting, which describes the list wherever it says "the reverse list".
-
-**Optionality.** As for `0x14`: optional to emit, optional to accept. A peer that does not accept it treats the child per the forward-compatibility rules of [01-data-format.md](01-data-format.md) §handling unknown type codes; the reverse binding is an optimisation plus a liveness check, and a responder that never receives one keeps a canonical return route.
+**Optionality.** Optional to emit, optional to accept. A peer that does not accept it treats the
+child per the forward-compatibility rules of [01-data-format.md](01-data-format.md) §handling
+unknown type codes, and a responder that never receives one keeps a canonical return route.
 
 ---
 
