@@ -7,6 +7,10 @@ versioning/publish strategy.
 
 ## [Unreleased]
 
+## [0.17.0] — 2026-10-01
+
+No TypeScript-binding changes. The `@avatarsd-llc/*` packages are a native implementation and do not link the C++ core, so 0.17.0's breaking changes (RFC 0028's one-surface API, app-owned TLS profiles, opt-in link modules and instrumentation counters) do not reach them. They are released in lockstep with core, and their wire behaviour is unchanged.
+
 ## [0.16.1] — 2026-09-29
 
 No changes to this package. Its version moves in lockstep with core; see the core section of these release notes.
