@@ -28,10 +28,10 @@ named in its row above.
 | --- | --- | --- |
 | [`bench/bench_contention`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/bench_contention.cpp) | the **machine** — what one shared cache line costs, libtracer absent | yes |
 | [`bench/bench_lkv_slot`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/bench_lkv_slot.cpp) | model slot policies (`slot` mode) and the real `graph_t::read`/`write` shapes (`graph` mode) | yes |
-| the `has_registered_child` ablation | the ceiling a lock removal could reach | not committed; it short-circuits the fork check (`vertex_t::has_registered_child`, `core/include/libtracer/vertex.hpp:1150`, called from `core/src/graph.cpp:2066`), which breaks the composed branch read |
+| the `has_registered_child` ablation | the ceiling a lock removal could reach | not committed; it short-circuits the fork check (`vertex_t::has_registered_child`, `core/include/libtracer/vertex.hpp:vertex_t::has_registered_child`, called from `core/src/graph.cpp:if (v->has_registered_child())`), which breaks the composed branch read |
 
 A `slot`-mode arm models a slot policy in isolation and is not the cost of any code path. The
-arms are named `model_*` in the source (`bench/bench_lkv_slot.cpp:193,342,456`) so that a model
+arms are named `model_*` in the source (`bench/bench_lkv_slot.cpp:model_sp_atomic_t`, `bench/bench_lkv_slot.cpp:model_hazard_t`, `bench/bench_lkv_slot.cpp:model_hazard_ref_t`) so that a model
 policy and a real library type cannot be confused. Never quote a `slot`-mode number as a forecast
 for a real path.
 

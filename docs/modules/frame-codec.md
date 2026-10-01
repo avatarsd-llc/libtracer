@@ -24,7 +24,7 @@ programmatically built tree therefore cannot serialize a length truncated to
 `size & 0xFFFF`; bodies at or under `0xFFFF` are unchanged and `opt.ll` is never
 cleared. Decode failure is one of `FRAME_TRUNCATED`, `FRAME_INVALID`, `FRAME_CRC_FAIL`
 or `TLV_NESTING_TOO_DEEP` — the RFC-0002 registry codes, not a decode-only error
-vocabulary (`core/include/libtracer/frame.hpp:26-31`).
+vocabulary (`core/include/libtracer/frame.hpp:Decode failures reuse`).
 
 ```{mermaid}
 flowchart TD
@@ -50,7 +50,7 @@ the frame invalid (`opt_t::kReservedMask`, `core/include/libtracer/tlv.hpp`).
 Trailer CRCs are **CRC-32C** (Castagnoli, reflected poly `0x82F63B78`, the default)
 or **CRC-16-CCITT (FALSE)** (poly `0x1021`, init `0xFFFF`, no final xor) when
 `opt.CW=1`. Both tables are `constexpr` and built at compile time — `crc32c_table`
-and `crc16_table`, `core/include/libtracer/crc.hpp:38,51` — so a constant-evaluated
+and `crc16_table`, `core/include/libtracer/crc.hpp:crc32c_table`, `core/include/libtracer/crc.hpp:crc16_table` — so a constant-evaluated
 CRC needs no runtime table build.
 
 Compile-time tables are not the whole runtime story. CRC-32C dispatches once, on
@@ -58,10 +58,10 @@ first use, to the SSE4.2 `_mm_crc32_*` or ARMv8 `__crc32c*` instruction where th
 CPU carries it, and folds through a portable slice-by-8 table otherwise; all three
 paths — hardware, slice-by-8, byte-at-a-time — produce byte-identical checksums,
 which is what lets frozen test vectors hold across targets
-(`crc32c_update_runtime`, `crc.hpp:168-180`). The intrinsics are confined to a
+(`crc32c_update_runtime`, `crc.hpp:crc32c_update_runtime`). The intrinsics are confined to a
 `target`-attributed function so the translation unit stays runnable on a CPU
 without the extension. The slice-by-8 tables are 8 × 256 × `u32` = 8 KiB of rodata
-that a hardware-CRC CPU never touches (`crc32c_slice_tables`, `crc.hpp:71-83`) —
+that a hardware-CRC CPU never touches (`crc32c_slice_tables`, `crc.hpp:crc32c_slice_tables`) —
 the one footprint line a constrained target should know about here.
 
 `crc32c` and `crc16_ccitt` each take one span or two, and a `crc32c_state` /
@@ -98,20 +98,20 @@ call stack, so the walk keeps one open-node record per open level in a
 `walk_stack_t`. That stack starts in a caller-supplied inline span and, once those
 slots are used, relocates into geometrically grown blocks drawn from a spill
 source. **The inline span is a tuning knob, not a limit — overflowing it changes
-cost, not behaviour** (`grammar.hpp:363-369`). Exhausting the spill source rejects
+cost, not behaviour** (`grammar.hpp:receiver-resource depth bound`). Exhausting the spill source rejects
 the frame with `TLV_NESTING_TOO_DEEP`, which means exactly "exceeds this receiver's
-decode resources" (`grammar.hpp:461-465`).
+decode resources" (`grammar.hpp:Cursor`).
 
 The two decoders differ only in what they spill to, and therefore in what bounds
 them:
 
 | decoder | inline slots | spill source | the depth bound is |
 | --- | --- | --- | --- |
-| `decode` → owning `tlv_t` | 8 (`core/src/frame.cpp:126`) | the nothrow heap source (`frame.cpp:127`) | the heap — an owning-tree decode allocates there regardless |
-| `decode_into` → `tlv_arena_t` | 8 (`core/src/tlv_arena.cpp:134`) | the caller's `mem::block_source_t` (`tlv_arena.cpp:135`) | whatever resource the caller injected |
+| `decode` → owning `tlv_t` | 8 (`core/src/frame.cpp:span_cursor>, 8> slots`) | the nothrow heap source (`frame.cpp:stack(slots, &spill)`) | the heap — an owning-tree decode allocates there regardless |
+| `decode_into` → `tlv_arena_t` | 8 (`core/src/tlv_arena.cpp:span_cursor>, 8> slots`) | the caller's `mem::block_source_t` (`tlv_arena.cpp:stack(slots, &src)`) | whatever resource the caller injected |
 
 The 8 is the typical FWD nesting (three to four levels) with headroom, not a
-ceiling: the arena test decodes a frame nested 100 deep (`core/tests/tlv_arena_test.cpp:324`).
+ceiling: the arena test decodes a frame nested 100 deep (`core/tests/tlv_arena_test.cpp:encode(nested(100))`).
 A receiver that wants a hard bound gets one by injecting a small source: a
 stack-buffer `mem::bump_source_t` makes that buffer the whole decode budget
 (`mem_source.hpp`), and exhaustion is then a returned `err_t` rather than an
@@ -290,7 +290,7 @@ Every draw `decode_into` makes is nothrow and guarded, because it runs on the wi
 RX path behind no ACL and a peer chooses both the nesting depth and the node count.
 Exhaustion answers `TLV_NESTING_TOO_DEEP`, never `std::bad_alloc` — which on a
 `-fno-exceptions` node is a link-wrapped `abort()`
-(`core/include/libtracer/tlv_arena.hpp:130-134`).
+(`core/include/libtracer/tlv_arena.hpp:decode_into(std::span<const std::byte> input,`).
 
 ## Consequences
 
