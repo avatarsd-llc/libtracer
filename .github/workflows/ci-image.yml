@@ -1,0 +1,89 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# Builds and publishes the CI base image (.github/ci-image/Dockerfile) to
+# ghcr.io/avatarsd-llc/libtracer-ci. Why the image exists and how its tag is derived: the
+# header of that Dockerfile.
+#
+# SELF-HOSTED ONLY. The build runs on the `ci-local` runners and only for trusted runs (the
+# same guard core-ci.yml documents under RUNNER ROUTING). A fork PR never reaches this
+# machine, so for a fork PR the job is skipped, not rerouted to a hosted runner. The image
+# is pushed to the registry because the hosted fallback of core-ci's fork-PR route still
+# pulls it from there.
+#
+# CACHING, two levels:
+#   1. The tag is a content hash, so an unchanged Dockerfile means the tag already exists
+#      in the registry — the job checks that first and skips the build entirely.
+#   2. When the Dockerfile did change, the build reuses the host Docker daemon's own layer
+#      cache: these runners are persistent, so unchanged layers (the `ubuntu:24.04` base
+#      and any step above the edit) are not rebuilt or re-downloaded.
+name: ci-image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/ci-image/**"
+      - ".github/workflows/ci-image.yml"
+  pull_request:
+    paths:
+      - ".github/ci-image/**"
+      - ".github/workflows/ci-image.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ci-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-push:
+    # Trusted runs only — the core-ci RUNNER ROUTING guard, as an `if:` instead of a
+    # fallback: there is no hosted route for this job.
+    if: github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, ci-local]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Derive the content-hash tag
+        id: tag
+        run: |
+          tag="noble-$(sha256sum .github/ci-image/Dockerfile | cut -c1-12)"
+          echo "ref=ghcr.io/avatarsd-llc/libtracer-ci:$tag" >> "$GITHUB_OUTPUT"
+          echo "image: ghcr.io/avatarsd-llc/libtracer-ci:$tag"
+      - name: Every CI image reference matches this Dockerfile
+        # A Dockerfile edit must bump every `image:` reference in the same PR.
+        run: python3 tools/check_ci_image_tag.py
+      - name: Log in to ghcr.io
+        # Credentials go to a per-job DOCKER_CONFIG under $RUNNER_TEMP, never the runner
+        # user's ~/.docker: the runners are persistent and shared by other repositories.
+        run: |
+          echo "DOCKER_CONFIG=$RUNNER_TEMP/docker-config" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/docker-config"
+          echo "${{ secrets.GITHUB_TOKEN }}" | DOCKER_CONFIG="$RUNNER_TEMP/docker-config" \
+            docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Already published?
+        id: exists
+        run: |
+          if docker manifest inspect "${{ steps.tag.outputs.ref }}" > /dev/null 2>&1; then
+            echo "hit=true" >> "$GITHUB_OUTPUT"
+            echo "Tag already in the registry — nothing to build."
+          else
+            echo "hit=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Build + push
+        if: steps.exists.outputs.hit != 'true'
+        run: |
+          docker build --pull \
+            --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+            --label "org.opencontainers.image.description=libtracer CI base image (see .github/ci-image/Dockerfile)" \
+            -t "${{ steps.tag.outputs.ref }}" .github/ci-image
+          docker push "${{ steps.tag.outputs.ref }}"
+      - name: Log out of ghcr.io
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/docker-config"

@@ -118,26 +118,18 @@ jobs:
   check:
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
-      image: ubuntu:24.04
+      image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
       # CPU is bounded host-side: dockerd's cgroup-parent puts every container under
       # runners.slice (11 cores for all runners + containers together), so no per-container
       # `--cpus` (#1691). 10g is the per-job memory budget; harmless on the hosted fallback
       # (ubuntu-24.04 runners have 16 GB).
       options: --memory 10g
     # Measured max 0.87 min, p50 0.65, min 0.48. 15 = the short-job floor (~17x): it runs
-    # in a bare ubuntu container with the apt step below, and it is routed to the
+    # in the CI base image (see core-ci.yml's CONTAINER header), and it is routed to the
     # self-hosted ci-local pool where queue-before-start reached 3.20 min (queue time does
     # NOT count against timeout-minutes). See core-ci.yml's header for the policy.
     timeout-minutes: 15
     steps:
-      # Runs as root inside the container — never `sudo`. `git` + `ca-certificates`
-      # come first because checkout falls back to a REST tarball without them.
-      - name: python3 + git (container has no preinstalled tool set)
-        # Measured p50 0.22 min, max 0.45. 8 = the install-step floor.
-        timeout-minutes: 8
-        run: |
-          apt-get update -qq
-          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends python3 git ca-certificates
       - uses: actions/checkout@v4
         with:
           # See the WORKSPACE OWNERSHIP header: without this, checkout's post step
@@ -165,6 +157,8 @@ jobs:
         run: python3 -m unittest discover -s tools/tests -p "test_check_ci_workspace_cleanup.py" -v
       - name: Every self-hosted container job restores workspace ownership
         run: python3 tools/check_ci_workspace_cleanup.py
+      - name: Every CI image reference matches the Dockerfile hash
+        run: python3 tools/check_ci_image_tag.py
       - name: Restore workspace ownership for the host runner
         # Hands the container's root-owned tree back to the host runner user. WHY, and
         # why it is duplicated inline rather than factored into a composite action: the
