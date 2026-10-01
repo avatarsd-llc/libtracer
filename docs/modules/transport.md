@@ -638,6 +638,15 @@ computation — is pure and lives in `tr::net::ws`:
 :members:
 ```
 
+```{doxygenstruct} tr::net::tls_profile_t
+:project: libtracer
+:members:
+```
+
+```{doxygenfunction} tr::net::find_tls_profile
+:project: libtracer
+```
+
 ```{doxygenfunction} tr::net::quic_transport_factory
 :project: libtracer
 ```
