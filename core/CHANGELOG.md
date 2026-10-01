@@ -35,6 +35,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `auto`) instead of `std::uint64_t`, and compare two snapshots with `==` / `!=` only, never
   `<` / `>`.
 
+- **A warm COMPACT delivery stores its payload in ONE block, drawn from the graph's source
+  ([#1714](https://github.com/avatarsd-llc/libtracer/issues/1714)).** The memoized terminus
+  arm of `fwd_router_t` used to copy the payload into a segment from the router's `flat`
+  backend and then publish a second `value_t` block linking to it; it now copies into one
+  inline value from `graph_t::control_source()` that the store adopts, exactly as the
+  full-route terminus's copy arm does. No signature changes. **Migration:** a deployer who
+  sized `router_planes_t::flat` for warm COMPACT payloads can shrink it; that traffic is now
+  charged to the graph's injected source (which already held the value block). The cold arm
+  (first frame on a label) still draws its copy from `flat`. Exhaustion is still one counted
+  `delivery_drops().out_of_memory` drop.
+
 ## [0.17.0] — 2026-10-01
 
 ### Changed

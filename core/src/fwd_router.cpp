@@ -3304,8 +3304,15 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
             // `graph_.write` counts it at the gate that produces it, so this arm must not
             // add a second count for the same refusal. Nothing is counted on success — the
             // steady-state warm path is exactly the instructions it was before.
-            const auto payload_view = view::over_bytes(payload_bytes, *flat_);
-            if (!payload_view) {  // alloc failure ⇒ drop (one audited locus)
+            //
+            // ONE block (#1714), the full-route terminus's copy arm (`copy_tlv`): the payload
+            // is copied into an inline `value_t` drawn from the graph's own source, and the
+            // store ADOPTS that value through the one-link rope below rather than drawing a
+            // second block that links to a separate segment. The reference is held across the
+            // write because the rope pins the block, not the value (`stored_tlv_t`).
+            const graph::value_ref_t copy = graph::value_ref_t::adopt(
+                graph::value_t::make_copy(payload_bytes, graph_.control_source()));
+            if (!copy) {  // alloc failure ⇒ drop (one audited locus)
                 graph_.count_external_drop(graph::graph_t::external_drop_t::OUT_OF_MEMORY, 1);
                 return;
             }
@@ -3318,7 +3325,7 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
                 graph_.count_external_drop(graph::graph_t::external_drop_t::OUT_OF_MEMORY, 1);
                 return;
             }
-            value.append(*payload_view);
+            value.append(copy->only());
             if (graph_.write(*rb.target, std::move(value), caller).has_value()) {
                 if (const auto sink = delivery_.get(); sink.fn != nullptr)
                     observe_compact_delivery(handles_, label_src_, sink.fn, sink.ctx, inbound_name,
