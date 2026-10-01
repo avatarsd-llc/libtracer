@@ -6,11 +6,14 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * `vertex_t::write_seq_` is `std::atomic<std::uint32_t>` on every target. Its only consumer is
+ * `vertex_t::write_seq_` is a 32-bit `rmw_counter_t` on every target. Its only consumer is
  * `await`, which tests `current != seq0`, an equality test, so the counter wrapping at 2^32 is
  * not an event. This test pins:
  *
- *  - the WIDTH: `write_seq_t` is 4 bytes and a lock-free atomic (no libatomic call on rv32);
+ *  - the WIDTH: `write_seq_t` is 4 bytes, and a host build bumps it with one hardware RMW;
+ *  - BOTH `rmw_counter_t` bindings count every bump exactly under concurrent bumpers: the
+ *    native `fetch_add`, and the guarded load + store a core with no atomic RMW (ESP32-C3,
+ *    Cortex-M0) compiles to, driven here on the host by naming that binding;
  *  - the WRAP: a test-only door presets a real vertex's atomic to 0xFFFFFFFE, two bumps wrap it
  *    through 0, and `wait_for_change` (blocked or not) and `graph_t::await` see every bump;
  *  - the WAKE on all three shapes a publish can take, each of which bumps the sequence: a
@@ -28,7 +31,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <thread>
+#include <vector>
 
+#include "libtracer/rmw_counter.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/vertex.hpp"
 #include "test_support.hpp"
@@ -39,9 +44,7 @@ namespace tr::graph {
 /** @brief The test-only door `vertex.hpp` declares (#1621): presets the write sequence. */
 struct vertex_seq_test_door_t {
     /** @brief Store @p seq into @p v's write sequence (seq_cst, like the bump). */
-    static void preset(vertex_t& v, write_seq_t seq) {
-        v.write_seq_.store(seq, std::memory_order_seq_cst);
-    }
+    static void preset(vertex_t& v, write_seq_t seq) { v.write_seq_.preset(seq); }
 };
 
 }  // namespace tr::graph
@@ -60,8 +63,47 @@ using tr::testing::check;
 using tr::testing::make_value;
 
 static_assert(sizeof(write_seq_t) == 4, "the write sequence is 32-bit on every target (#1621)");
-static_assert(std::atomic<write_seq_t>::is_always_lock_free,
-              "a lock-free 32-bit atomic: no libatomic call per publish on rv32");
+static_assert(tr::graph::rmw_counter_t<write_seq_t, tr::graph::reader_guard_t>::is_native,
+              "a host build bumps the write sequence with one hardware RMW, never a guard");
+
+/** @brief The guarded binding, named on a host that has atomic RMW so CI can drive it. */
+using guarded_counter_t = tr::graph::rmw_counter_t<write_seq_t, tr::graph::mutex_guard_t, false>;
+/** @brief The native binding, named explicitly so the pair below reads side by side. */
+using native_counter_t = tr::graph::rmw_counter_t<write_seq_t, tr::graph::mutex_guard_t, true>;
+static_assert(!guarded_counter_t::is_native && native_counter_t::is_native);
+
+/**
+ * @brief Four threads bump one counter 100,000 times each; the count must come out exact.
+ *
+ * A lost update is what a guarded bump without its guard would produce (a preempted writer
+ * stores a stale `n + 1`), so an exact total is the property, on either binding. Starting two
+ * bumps short of the wrap also drives the guarded store's arithmetic through 0.
+ */
+template <class Counter>
+void bump_concurrently(const char* binding) {
+    constexpr unsigned kThreads = 4;
+    constexpr unsigned kBumps = 100'000;
+    Counter c;
+    c.preset(0xFFFFFFFEu);
+    std::vector<std::thread> bumpers;
+    for (unsigned t = 0; t < kThreads; ++t) {
+        bumpers.emplace_back([&c] {
+            for (unsigned i = 0; i < kBumps; ++i) c.bump();
+        });
+    }
+    for (auto& b : bumpers) b.join();
+    const write_seq_t want = static_cast<write_seq_t>(0xFFFFFFFEu + kThreads * kBumps);
+    std::printf("  %s binding: got %u, want %u\n", binding, static_cast<unsigned>(c.load()),
+                static_cast<unsigned>(want));
+    check(c.load() == want, "every bump counted exactly once, across the wrap");
+}
+
+/** @brief Both `rmw_counter_t` bindings lose no bump under contention. */
+void test_both_bindings_count_exactly() {
+    std::printf("rmw_counter_t: concurrent bumps on both bindings:\n");
+    bump_concurrently<native_counter_t>("native");
+    bump_concurrently<guarded_counter_t>("guarded");
+}
 
 /** @brief The equality compare across the wrap, and the one documented alias. */
 void test_wrap_arithmetic() {
@@ -213,6 +255,7 @@ void test_await_wakes_every_role() {
 
 int main() {
     test_wrap_arithmetic();
+    test_both_bindings_count_exactly();
     test_wait_across_wrap();
     test_graph_await_across_wrap();
     test_await_wakes_every_role();

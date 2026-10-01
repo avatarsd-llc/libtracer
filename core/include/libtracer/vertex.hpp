@@ -60,6 +60,7 @@
 #include "libtracer/mem_source.hpp"
 #include "libtracer/path.hpp"
 #include "libtracer/path_ref.hpp"
+#include "libtracer/rmw_counter.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/status.hpp"
 #include "libtracer/subscriber.hpp"
@@ -819,7 +820,9 @@ struct vertex_ext_t {
  * `lock xadd` cost the same and `vertex_t`'s tail padding absorbs the 4 bytes, so the wide
  * form bought nothing there; on rv32 it was 8 B wide and 8-aligned (4 B of padding) and every
  * publish called `__atomic_fetch_add_8`, which masks interrupts on ESP-IDF. The 32-bit bump
- * is one `amoadd.w`.
+ * is one `amoadd.w` where the core has atomic RMW, and one section of `reader_guard_t` where
+ * it has none (rv32imc, Cortex-M0): `vertex_t::write_seq_` is an @ref rmw_counter_t, which
+ * picks the binding at compile time.
  *
  * It is compared for EQUALITY only (`await` waits for `current != seq0`), never ordered, so a
  * wrap is not an event. The one alias is exactly 2^32 publishes to one vertex inside one
@@ -827,10 +830,6 @@ struct vertex_ext_t {
  * waiter's timeout fires: a spurious timeout, never a lost value.
  */
 using write_seq_t = std::uint32_t;
-
-static_assert(std::atomic<write_seq_t>::is_always_lock_free,
-              "the write sequence must be a lock-free atomic on every target (RFC-0028 D6): "
-              "no libatomic call per publish");
 
 /** @brief Declared here so @ref vertex_t can befriend the #1285 member-offset gate; defined
  *         just after the type it measures. */
@@ -1372,7 +1371,7 @@ class vertex_t {
         // collision `vertex_stripe_t` already documents (a spurious wake plus a re-check,
         // never a correctness change).
         vertex_stripe_t& st = vertex_stripe_of(this);  // one lookup per verb (#370)
-        write_seq_.fetch_add(1, std::memory_order_seq_cst);
+        write_seq_.bump();
         if (st.waiters.load(std::memory_order_seq_cst) == 0) return true;
         const std::lock_guard lock(st.m);
         vertex_stripe_cv(vertex_stripe_index(this)).notify_all();
@@ -1500,7 +1499,7 @@ class vertex_t {
      */
     void note_write() {
         vertex_stripe_t& st = vertex_stripe_of(this);  // one lookup per verb (#370)
-        write_seq_.fetch_add(1, std::memory_order_seq_cst);
+        write_seq_.bump();
         if (st.waiters.load(std::memory_order_seq_cst) == 0) return;  // waiterless (#555)
         const std::lock_guard lock(st.m);
         vertex_stripe_cv(vertex_stripe_index(this)).notify_all();
@@ -1534,8 +1533,8 @@ class vertex_t {
             }
             ~waiter_scope_t() { n.fetch_sub(1, std::memory_order_seq_cst); }
         } scope(st.waiters);
-        return vertex_stripe_cv(idx).wait_for(
-            lock, timeout, [&] { return write_seq_.load(std::memory_order_seq_cst) != seq0; });
+        return vertex_stripe_cv(idx).wait_for(lock, timeout,
+                                              [&] { return write_seq_.load() != seq0; });
     }
 
     /** @brief The current write sequence (bumped per assign — the await predicate base).
@@ -1543,7 +1542,7 @@ class vertex_t {
     [[nodiscard]] write_seq_t current_seq() const {
         // Lock-free (#555): the sequence is atomic, and a publish no longer holds the stripe
         // mutex while bumping it — so taking the lock here would synchronize against nothing.
-        return write_seq_.load(std::memory_order_seq_cst);
+        return write_seq_.load();
     }
 
     /**
@@ -3146,10 +3145,11 @@ class vertex_t {
     std::atomic<vertex_ext_t*> ext_{nullptr};
     // Bumped per assign (seq_cst: the writer half of the lost-wakeup pair in `store`); await
     // waits for it to differ from its snapshot. 32-bit since #1621 (see write_seq_t): one
-    // `amoadd.w` on rv32 where the 64-bit form was a libatomic call. Nothing else reads it:
-    // the propagate sweep's IF_NEWER test is its pending set (RFC-0008 §B), not a sequence,
-    // and the wire never carries it.
-    std::atomic<write_seq_t> write_seq_{0};
+    // `amoadd.w` on rv32imac where the 64-bit form was a libatomic call, and a guarded store
+    // on a core with no atomic RMW (rmw_counter_t). Nothing else reads it: the propagate
+    // sweep's IF_NEWER test is its pending set (RFC-0008 §B), not a sequence, and the wire
+    // never carries it.
+    rmw_counter_t<write_seq_t, reader_guard_t> write_seq_;
 
     // Subtree-subscription bookkeeping (RFC-0005): every subscription observes its
     // vertex AND all descendants, so a write must fan out to ancestor subscribers
