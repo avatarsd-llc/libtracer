@@ -668,6 +668,11 @@ jobs:
       # also mounts the persistent compiler cache — see COMPILER CACHE in the header; the
       # guard is the `runs-on` one verbatim, so hosted and fork runs get no mount.
       options: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && '--memory 10g -v /home/github-runner/ccache:/ccache' || '--memory 10g' }}
+    # Healthy runs measured 176-556 s over the ten green runs before #1692 — the same band
+    # as build-test and -reclaim-strict — so it takes their ceiling of 20. It was the one
+    # compiling job WITHOUT a ceiling, which is how a host-memory-pressure stall held the
+    # queue for 2601 s instead of going red (#1692).
+    timeout-minutes: 20
     steps:
       # Build parallelism (#1637, #1691): 4 on the self-hosted runners (11-core slice shared
       # by up to ~3 concurrent jobs), `nproc` on hosted runners. RUNNER_ENVIRONMENT comes
@@ -692,9 +697,11 @@ jobs:
             echo "ccache: ON (/ccache)"
           fi
       - name: Toolchain (container has no preinstalled tool set)
+        # Same step, ceiling and flags as the siblings' (p50 0.67 min, max 1.32).
+        timeout-minutes: 8
         run: |
           apt-get update -qq
-          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
             build-essential cmake ccache git ca-certificates
       - uses: actions/checkout@v4
         with:
@@ -702,6 +709,10 @@ jobs:
           # re-roots `.git/config` after the cleanup step has already run.
           persist-credentials: false
       - name: Bind reclaim_qsbr_t, build + ctest
+        # The `-I` MUST name the directory the fragment is written to. Until #1692 it named
+        # `reclaim-strict` (absent in this job), `__has_include` found no override, and the
+        # leg silently rebuilt the DEFAULT config under a qsbr name. The static_assert probe
+        # (the SAME `$fixture` flag, syntax-only, ~1 s) fails the leg if the binding ever drifts again.
         run: |
           mkdir -p "$PWD/reclaim-qsbr/libtracer"
           cat > "$PWD/reclaim-qsbr/libtracer/config_override.hpp" <<'FRAGMENT'
@@ -722,8 +733,13 @@ jobs:
 
           }  // namespace tr::graph
           FRAGMENT
+          fixture="-I$PWD/reclaim-qsbr"
           cmake -S core -B core/build-qsbr -DBUILD_TESTING=ON \
-            -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS="-I$PWD/reclaim-strict"
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS="$fixture"
+          printf '%s\n' '#include <libtracer/config.hpp>' '#include <type_traits>' \
+            'static_assert(std::is_same_v<tr::graph::config_t::reclaim_policy_t, tr::graph::reclaim_qsbr_t>, "reclaim_qsbr_t is not bound");' \
+            > "$RUNNER_TEMP/qsbr_bound.cpp"
+          g++ -std=c++23 "$fixture" -Icore/include -fsyntax-only "$RUNNER_TEMP/qsbr_bound.cpp"
           cmake --build core/build-qsbr --parallel "$BUILD_JOBS"
           ctest --test-dir core/build-qsbr --output-on-failure
       - name: Compiler cache statistics (this job)
