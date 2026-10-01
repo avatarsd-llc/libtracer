@@ -1,8 +1,17 @@
 # Reference 15 — Concurrency and scaling
 
-> **Scope.** §1–§5 are part of the standard: obligations any conforming implementation must
-> meet, and properties of shared-memory hardware that constrain every one of them. §6 is a
-> pointer. Numbers appear here only as *evidence for a general claim*, always with the host
+> **Status**: informative. This page is not one of the annexes [docs/spec/v1.md](../spec/v1.md)
+> §3 incorporates. §2's obligations restate what the incorporated operation semantics already
+> require of an implementation once it is concurrent; where they paraphrase, the cited page and
+> the spec win. §1 and §3–§5 describe properties of shared-memory hardware that constrain every
+> such implementation. §6 is a pointer.
+>
+> **Erratum (2026-10-02, [#1704](https://github.com/avatarsd-llc/libtracer/issues/1704)).**
+> This banner used to say "§1–§5 are part of the standard". No version of `v1.md` incorporates
+> this page, so the claim contradicted the spec's own annex list. It is corrected to
+> informative. No obligation, wire surface or conformance rule changes: §2's obligations were
+> always derived from the incorporated pages they cite.
+> Numbers appear here only as *evidence for a general claim*, always with the host
 > named, and never as a specification — see ["What this suite is NOT"](README.md).
 > Measurements of the C++23 reference implementation live in
 > [`../design/concurrency/`](../design/concurrency/README.md), which is design material, not

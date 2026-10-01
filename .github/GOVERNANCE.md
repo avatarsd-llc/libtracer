@@ -24,7 +24,7 @@ If the project moves to a foundation or independent steering body in the future,
 
 There are three distinct decision domains, each with different rules:
 
-1. **Protocol (the spec)** — wire format, framing, identifiers, conformance rules. Lives in `docs/spec/`. Changes here affect every implementation and every deployed device. **High bar.**
+1. **Protocol (the spec)** — wire format, framing, identifiers, conformance rules. Lives in `docs/spec/` **and in every reference page that [`docs/spec/v1.md` §3](../docs/spec/v1.md) incorporates as a normative annex**. That list is the single source of which pages are normative (restated at [`docs/spec/index.md`](../docs/spec/index.md) §What is normative); a page's directory does not decide it. Changes here affect every implementation and every deployed device. **High bar.**
 2. **Reference implementation** — code in `core/`, `bindings/`, `integrations/`. Changes here affect users of the reference impl but cannot break compatibility with implementations that follow the spec. **Normal bar.**
 3. **Tooling, docs, examples** — everything else. **Low bar — PRs welcome.**
 
