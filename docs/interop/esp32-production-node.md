@@ -278,8 +278,8 @@ replaced was retired at S7, so a node built against this release writes
 `/net/<module>/conn`.
 
 Role composition is therefore deployment configuration, not a firmware fork — but the
-*type set* compiled in is the flash and RAM commitment, so trim `LIBTRACER_SRCS` to
-the kinds the product ships (§7).
+*type set* compiled in is the flash and RAM commitment, so turn the component's
+`CONFIG_LIBTRACER_TRANSPORT_*` modules down to the kinds the product ships (§7).
 
 Budget for the plane itself: a full graph plane (codec, graph, router, one socket
 transport) adds **tens of KB of idle heap** over a bare-metal firmware. That figure
@@ -386,12 +386,14 @@ JTAG session.
 - **A `CONFIG_*`-gated `PRIV_REQUIRES` never propagates** — component requirements
   resolve before Kconfig runs. Gate **SRCS** on `CONFIG_*`, keep REQUIRES
   unconditional, and keep a CI job building each Kconfig-gated TU.
-- **Every new core source is also appended to the component's `LIBTRACER_SRCS`**
-  (`integrations/esp-idf/libtracer/CMakeLists.txt:44`) or the chip build fails to
-  link while host builds stay green.
+- **A new core source goes into its group in core's one source list**
+  (`core/cmake/libtracer_sources.cmake`), which `core/CMakeLists.txt` and the component
+  both include, so the chip build cannot fall behind the host build.
+  `tools/check_source_list.py` fails CI when a source is in no group, a build names a
+  source directly, or the PlatformIO deny-list disagrees with the groups.
 - **Platform TU selection is a build-system concern, not an `#ifdef`.** Chip targets
   compile `twai_link.cpp` plus a SocketCAN stub; the `linux` target compiles real
-  SocketCAN and no TWAI (`integrations/esp-idf/libtracer/CMakeLists.txt:189-190`).
+  SocketCAN and no TWAI (`integrations/esp-idf/libtracer/CMakeLists.txt:169-170`).
   Extend that pattern rather than adding macros.
 - Build with `-fno-exceptions -fno-rtti` and treat any throwing construct on the
   delivery path as a defect (§1).

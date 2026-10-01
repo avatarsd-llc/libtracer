@@ -57,6 +57,8 @@ on:
       - "core/src/**"
       - "tests/packaging/pio_esp32_can/**"
       - "tools/check_esp_ws_plane.py"
+      - "tools/check_source_list.py"
+      - "core/cmake/libtracer_sources.cmake"
       - ".github/workflows/pio-esp32-can.yml"
   pull_request:
     paths:
@@ -70,6 +72,8 @@ on:
       - "core/src/**"
       - "tests/packaging/pio_esp32_can/**"
       - "tools/check_esp_ws_plane.py"
+      - "tools/check_source_list.py"
+      - "core/cmake/libtracer_sources.cmake"
       - ".github/workflows/pio-esp32-can.yml"
   workflow_dispatch:
 
@@ -84,6 +88,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      # The source filter this job builds with is a deny-list over core/src; hold it to
+      # core's one source list first (#1702), so a drifted list fails in seconds and
+      # names the file, before a multi-minute toolchain download.
+      - name: PlatformIO deny-lists match the core source list
+        run: python3 tools/check_source_list.py
 
       # PINNED on purpose. The hook reads `pio_lib_builder.path` — a PlatformIO
       # builder internal, and the handle this hook uses to reach the package root

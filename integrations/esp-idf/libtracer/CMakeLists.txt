@@ -35,39 +35,25 @@
 #     directory so the archive is self-contained (a consumer only gets the
 #     component, not the whole repo). When that vendored copy is present, prefer
 #     it. This keeps one CMakeLists correct in both modes.
-if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/core/src/frame.cpp")
+if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/core/cmake/libtracer_sources.cmake")
     set(LIBTRACER_ROOT "${CMAKE_CURRENT_LIST_DIR}")
 else()
     set(LIBTRACER_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../..")
 endif()
 
+# The core source list is the ONE shared file core/CMakeLists.txt also includes (#1702):
+# this component selects groups from it and never names a core/src source itself, so
+# adding or removing a core source cannot leave the chip build behind.
+include("${LIBTRACER_ROOT}/core/cmake/libtracer_sources.cmake")
+
 set(LIBTRACER_SRCS
-    # L2/L3 wire codec + L0/L1 substrate + L4 graph runtime (the P0 profile)
-    "${LIBTRACER_ROOT}/core/src/frame.cpp"
-    "${LIBTRACER_ROOT}/core/src/tlv_arena.cpp"
-    "${LIBTRACER_ROOT}/core/src/backend_set.cpp"
-    # The DEVICE-space backend registry backend_set.cpp's multi-member transfer dispatches
-    # through (#1381). An ESP node registers nothing, so the table stays empty — but the
-    # multi-member fold is what this component builds, so the TU has to be here.
-    "${LIBTRACER_ROOT}/core/src/device_backend.cpp"
-    "${LIBTRACER_ROOT}/core/src/mem_heap.cpp"
-    "${LIBTRACER_ROOT}/core/src/mem_source.cpp"
-    "${LIBTRACER_ROOT}/core/src/mem_source_backend.cpp"
-    "${LIBTRACER_ROOT}/core/src/mem_pool.cpp"
-    "${LIBTRACER_ROOT}/core/src/rope.cpp"
-    "${LIBTRACER_ROOT}/core/src/rope_decode.cpp"
-    "${LIBTRACER_ROOT}/core/src/tlv_view.cpp"
-    "${LIBTRACER_ROOT}/core/src/path.cpp"
-    "${LIBTRACER_ROOT}/core/src/graph.cpp"
+    # L2/L3 wire codec + L0/L1 substrate + L4 graph runtime + loopback (the P0 profile).
+    # It includes device_backend.cpp, the DEVICE-space backend registry backend_set.cpp's
+    # multi-member transfer dispatches through (#1381): an ESP node registers nothing, so
+    # the table stays empty, but the multi-member fold is what this component builds.
+    ${LIBTRACER_SOURCES_REQUIRED}
     # net plane (ADR-0038/0040): FWD routing + transport/connection vertices
-    "${LIBTRACER_ROOT}/core/src/fwd_reply.cpp"
-    "${LIBTRACER_ROOT}/core/src/op_resolve.cpp"
-    "${LIBTRACER_ROOT}/core/src/op_resolve_view.cpp"
-    "${LIBTRACER_ROOT}/core/src/route_handle.cpp"
-    "${LIBTRACER_ROOT}/core/src/path_label_table.cpp"
-    "${LIBTRACER_ROOT}/core/src/fwd_router.cpp"
-    "${LIBTRACER_ROOT}/core/src/transport_vertex.cpp"
-    "${LIBTRACER_ROOT}/core/src/loopback.cpp"
+    ${LIBTRACER_SOURCES_NET_PLANE}
 )
 
 # The RFC-0014 S5 link-liveness engine (#1470) — its own TU, so its own Kconfig bool, and the
@@ -78,7 +64,7 @@ set(LIBTRACER_SRCS
 # udp/tcp/ws DIALs dial eagerly. A node staging its links with provide_link never reaches the
 # engine either way — that path bypasses the factory catalog.
 if(CONFIG_LIBTRACER_SELF_HEAL_LINKS)
-    list(APPEND LIBTRACER_SRCS "${LIBTRACER_ROOT}/core/src/self_heal_link.cpp")
+    list(APPEND LIBTRACER_SRCS ${LIBTRACER_SOURCES_SELF_HEAL_LINKS})
 endif()
 
 # --- Built-in transport modules (#393) — per-module gating, mirroring the core CMake
@@ -124,25 +110,19 @@ endif()
 
 set(LIBTRACER_BUILTIN_TRANSPORT_CALLS "")
 if(CONFIG_LIBTRACER_TRANSPORT_UDP)
-    list(APPEND LIBTRACER_SRCS
-        "${LIBTRACER_ROOT}/core/src/builtin_transport_udp.cpp"
-        "${LIBTRACER_ROOT}/core/src/transport_udp.cpp")
+    list(APPEND LIBTRACER_SRCS ${LIBTRACER_SOURCES_BUILTIN_UDP} ${LIBTRACER_SOURCES_TRANSPORT_UDP})
     string(APPEND LIBTRACER_BUILTIN_TRANSPORT_CALLS
         "    register_udp_transport(vertex, rx_backend);\n")
 endif()
 if(CONFIG_LIBTRACER_TRANSPORT_TCP)
-    list(APPEND LIBTRACER_SRCS
-        "${LIBTRACER_ROOT}/core/src/builtin_transport_tcp.cpp"
-        "${LIBTRACER_ROOT}/core/src/transport_tcp.cpp")
+    list(APPEND LIBTRACER_SRCS ${LIBTRACER_SOURCES_BUILTIN_TCP} ${LIBTRACER_SOURCES_TRANSPORT_TCP})
     string(APPEND LIBTRACER_BUILTIN_TRANSPORT_CALLS
         "    register_tcp_transport(vertex, rx_backend);\n")
 endif()
 # The portable WS pair rides LIBTRACER_PORTABLE_WS on top of its module bool (see above):
 # ON only where POSIX sockets are the right answer, i.e. the `linux` target.
 if(CONFIG_LIBTRACER_TRANSPORT_WS AND LIBTRACER_PORTABLE_WS)
-    list(APPEND LIBTRACER_SRCS
-        "${LIBTRACER_ROOT}/core/src/builtin_transport_ws.cpp"
-        "${LIBTRACER_ROOT}/core/src/transport_ws.cpp")
+    list(APPEND LIBTRACER_SRCS ${LIBTRACER_SOURCES_BUILTIN_WS} ${LIBTRACER_SOURCES_TRANSPORT_WS})
     string(APPEND LIBTRACER_BUILTIN_TRANSPORT_CALLS
         "    register_ws_transport(vertex, rx_backend);\n")
 endif()
@@ -152,7 +132,7 @@ endif()
 # IDF-native links never touch posix_endpoint_t.
 if(CONFIG_LIBTRACER_TRANSPORT_UDP OR CONFIG_LIBTRACER_TRANSPORT_TCP
    OR (CONFIG_LIBTRACER_TRANSPORT_WS AND LIBTRACER_PORTABLE_WS))
-    list(APPEND LIBTRACER_SRCS "${LIBTRACER_ROOT}/core/src/posix_endpoint.cpp")
+    list(APPEND LIBTRACER_SRCS ${LIBTRACER_SOURCES_POSIX_ENDPOINT})
 endif()
 
 # register_builtin_transports dispatcher: the hand-written full-node form (udp+tcp+ws)
@@ -165,10 +145,10 @@ endif()
 # WS objects back into the image.
 if(CONFIG_LIBTRACER_TRANSPORT_UDP AND CONFIG_LIBTRACER_TRANSPORT_TCP
    AND CONFIG_LIBTRACER_TRANSPORT_WS AND LIBTRACER_PORTABLE_WS)
-    list(APPEND LIBTRACER_SRCS "${LIBTRACER_ROOT}/core/src/builtin_transports.cpp")
+    list(APPEND LIBTRACER_SRCS ${LIBTRACER_SOURCES_BUILTIN_DISPATCHER})
 else()
     configure_file(
-        "${LIBTRACER_ROOT}/core/src/builtin_transports.cpp.in"
+        "${LIBTRACER_BUILTIN_DISPATCHER_TEMPLATE}"
         "${CMAKE_CURRENT_BINARY_DIR}/generated/builtin_transports.cpp"
         @ONLY)
     list(APPEND LIBTRACER_SRCS "${CMAKE_CURRENT_BINARY_DIR}/generated/builtin_transports.cpp")
@@ -187,13 +167,11 @@ set(LIBTRACER_PRIV_INCLUDE_DIRS "")
 # targets. Which link compiles is a TU choice, never an in-source #ifdef. Off => the
 # whole CAN plane (and the TWAI driver glue) is dropped from the archive.
 if(CONFIG_LIBTRACER_TRANSPORT_CAN)
-    list(APPEND LIBTRACER_SRCS "${LIBTRACER_ROOT}/core/src/transport_can.cpp")
+    list(APPEND LIBTRACER_SRCS ${LIBTRACER_SOURCES_TRANSPORT_CAN})
     if(IDF_TARGET STREQUAL "linux")
-        list(APPEND LIBTRACER_SRCS "${LIBTRACER_ROOT}/core/src/socketcan_link.cpp")
+        list(APPEND LIBTRACER_SRCS ${LIBTRACER_SOURCES_SOCKETCAN_LINUX})
     else()
-        list(APPEND LIBTRACER_SRCS
-            "${LIBTRACER_ROOT}/core/src/socketcan_link_stub.cpp"
-            "twai_link.cpp")
+        list(APPEND LIBTRACER_SRCS ${LIBTRACER_SOURCES_SOCKETCAN_STUB} "twai_link.cpp")
     endif()
 endif()
 

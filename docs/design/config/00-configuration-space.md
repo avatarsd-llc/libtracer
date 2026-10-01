@@ -224,19 +224,19 @@ is a knob the fragment does not state at all (#1244).
 
 | knob | kind | default | ESP-IDF |
 | --- | --- | --- | --- |
-| `kVertexLockStripes` (`config.hpp:95`) | count | 16 | menuconfig `CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES` (`integrations/esp-idf/libtracer/CMakeLists.txt:304`) |
-| `kCacheLineBytes` (`:119`) | padding width | 64 | derived from `CONFIG_FREERTOS_UNICORE`, not exposed (`integrations/esp-idf/libtracer/CMakeLists.txt:322`) |
+| `kVertexLockStripes` (`config.hpp:95`) | count | 16 | menuconfig `CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES` (`integrations/esp-idf/libtracer/CMakeLists.txt:282`) |
+| `kCacheLineBytes` (`:119`) | padding width | 64 | derived from `CONFIG_FREERTOS_UNICORE`, not exposed (`integrations/esp-idf/libtracer/CMakeLists.txt:300`) |
 | `kHazardReaderSlots` (`:147`) | count | 64 | inherited — unused on a chip, which binds the single-writer slot and never builds the domain |
-| `kEdgePinSlots` (`:160`) | count | 32 | set to 8 (`integrations/esp-idf/libtracer/CMakeLists.txt:317`) |
+| `kEdgePinSlots` (`:160`) | count | 32 | set to 8 (`integrations/esp-idf/libtracer/CMakeLists.txt:295`) |
 | `kMaxVertexBytes64` / `kMaxVertexBytes32` (`:199` / `:222`) | RAM ratchet | 88 / 64 | the preset — deliberately not overridable |
-| `kShareThresholdBytes` (`:259`) | size | 4,096 — RFC-0028 §11 ruling 2 | `SIZE_MAX`, copy always (`integrations/esp-idf/libtracer/CMakeLists.txt:409`) |
+| `kShareThresholdBytes` (`:259`) | size | 4,096 — RFC-0028 §11 ruling 2 | `SIZE_MAX`, copy always (`integrations/esp-idf/libtracer/CMakeLists.txt:387`) |
 | `acl_policy_t` (`:268`) | policy type | `allow_only_policy_t` | inherited — the full policy is not selectable |
-| `lkv_slot_t` (`:318`) | policy type | `single_writer_slot_t` | `single_writer_slot_t` on every chip, with `kSingleWriter = true` and `reader_guard_t = tr::esp::critical_guard_t`; inherited on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:349`) |
-| `kSpinWaitSafe` (`:761`) | target fact | `true` | derived from `IDF_TARGET` — `false` on every chip, `true` on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:338`) |
+| `lkv_slot_t` (`:318`) | policy type | `single_writer_slot_t` | `single_writer_slot_t` on every chip, with `kSingleWriter = true` and `reader_guard_t = tr::esp::critical_guard_t`; inherited on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:327`) |
+| `kSpinWaitSafe` (`:761`) | target fact | `true` | derived from `IDF_TARGET` — `false` on every chip, `true` on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:316`) |
 | `kWeaklyOrdered` (`:480`) | target fact | `true` | inherited — every ESP chip is weakly ordered, which is the default |
 | `kBusLinks` (`:528`) | module presence | `false` — opt-in since v0.17.0 (#1670) | menuconfig `CONFIG_LIBTRACER_BUS_LINKS`, default `n`; CAN is offered only with it |
-| `kSelfHealLinks` (`:583`) | module presence | `false` — opt-in since v0.17.0 (#1670) | menuconfig `CONFIG_LIBTRACER_SELF_HEAL_LINKS`, default `n` (`integrations/esp-idf/libtracer/CMakeLists.txt:368`) |
-| `kSelfHealWorkerStackBytes` (`:610`) | size | `0` — the platform default | menuconfig `CONFIG_LIBTRACER_SELF_HEAL_WORKER_STACK` (`integrations/esp-idf/libtracer/CMakeLists.txt:378`) |
+| `kSelfHealLinks` (`:583`) | module presence | `false` — opt-in since v0.17.0 (#1670) | menuconfig `CONFIG_LIBTRACER_SELF_HEAL_LINKS`, default `n` (`integrations/esp-idf/libtracer/CMakeLists.txt:346`) |
+| `kSelfHealWorkerStackBytes` (`:610`) | size | `0` — the platform default | menuconfig `CONFIG_LIBTRACER_SELF_HEAL_WORKER_STACK` (`integrations/esp-idf/libtracer/CMakeLists.txt:356`) |
 | `kInstrumentCounters` (`:637`) | instrumentation | `false` — compiled out | inherited — only the core test build and `bench/`'s `LIBTRACER_INSTRUMENT_COUNTERS` bind it (#1664) |
 | `kAllowInsecureTls` (`:670`) | capability | `false` — a SPEC `insecure` key is refused | inherited — only the `quic` workflow's second run binds it, through `core/tests/insecure-tls/` |
 
