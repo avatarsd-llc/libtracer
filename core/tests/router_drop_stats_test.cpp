@@ -55,6 +55,7 @@ using tr::graph::path_t;
 using tr::graph::role_t;
 using tr::graph::vertex_handle_t;
 using tr::net::fwd_router_t;
+using tr::net::kBusLinks;
 using tr::net::router_stats_t;
 using tr::net::transport_t;
 using tr::wire::opt_t;
@@ -322,6 +323,10 @@ void test_seam_accessors_report_the_injected_objects() {
  * The site `fwd_flatten_backend_test` proves is REACHED; here it must also be counted. The
  * frame is well-formed and its rejection is the ADR-0073 §3 answer, so nothing else on the
  * path has any reason to move — which makes the cross-check meaningful.
+ *
+ * @note Needs the bus module PRESENT. Under `kBusLinks = false` the router is told
+ *       `tr::net::bus_of` is nullptr and mounts the bus as a point-to-point child, so there is
+ *       no bus name to reject and the flatten seam is never asked. Its caller in `main` gates it.
  */
 void test_flatten_refusal_is_counted() {
     std::printf("a refused bus-name-rejection flatten is counted as flatten_dropped:\n");
@@ -590,7 +595,14 @@ int main() {
 
     test_seam_accessors_report_the_injected_objects();
     std::printf("\n");
-    test_flatten_refusal_is_counted();
+    if constexpr (kBusLinks) {
+        test_flatten_refusal_is_counted();
+    } else {
+        // The bus-name rejection exists only with the bus module; a bus-closed build has no
+        // such flatten site. Skipped and said so, rather than `bus`-labelling the whole target
+        // and losing the five tier-blind cases from the configuration that ships without one.
+        std::printf("bus-name rejection flatten: SKIPPED (kBusLinks = false)\n");
+    }
     std::printf("\n");
     test_arena_refusal_counts_apart_from_malformed();
     std::printf("\n");
