@@ -467,20 +467,20 @@ ANCHORS = [
     ('core/include/libtracer/config.hpp:262', 'using acl_policy_t = allow_only_policy_t;'),
     ('core/include/libtracer/config.hpp:216', 'static constexpr std::size_t kMaxVertexBytes32 = 72;'),
     ('core/include/libtracer/config.hpp:312', 'using lkv_slot_t = single_writer_slot_t;'),
-    ('core/include/libtracer/config.hpp:696', 'using config_t = default_config_t;'),
+    ('core/include/libtracer/config.hpp:697', 'using config_t = default_config_t;'),
     ('core/include/libtracer/config.hpp:95',
      'static constexpr std::size_t kVertexLockStripes = 16;'),
     ('core/include/libtracer/config.hpp:119',
      'static constexpr std::size_t kCacheLineBytes = 64;'),
     ('core/include/libtracer/config.hpp:307',
      '* contend across many cores. Override fragment: `using lkv_slot_t = hazard_slot_t;`. The'),
-    ('core/include/libtracer/config.hpp:754',
+    ('core/include/libtracer/config.hpp:755',
      'inline constexpr bool kSpinWaitSafe = tr::graph::config_t::kSpinWaitSafe;'),
     ('core/include/libtracer/config.hpp:474', 'static constexpr bool kWeaklyOrdered = true;'),
     # Was pinned to the :316 banner rule, one of three IDENTICAL comment rules in this header —
     # an anchor no scope could ever separate. Re-pinned inside the SAME cited span
     # (the derived-spelling block the table cites) to the first derived spelling, which is unique.
-    ('core/include/libtracer/config.hpp:705',
+    ('core/include/libtracer/config.hpp:706',
      'inline constexpr std::size_t kVertexLockStripes = config_t::kVertexLockStripes;'),
     # core/include/libtracer/crc.hpp
     ('core/include/libtracer/crc.hpp:38', 'constexpr std::array<std::uint32_t, 256> crc32c_table() noexcept {'),
@@ -944,7 +944,7 @@ ANCHORS = [
     ('core/include/libtracer/config.hpp:604',
      'static constexpr std::size_t kSelfHealWorkerStackBytes = 0;'),
     ('core/include/libtracer/config.hpp:631', 'static constexpr bool kInstrumentCounters = false;'),
-    ('core/include/libtracer/config.hpp:663', 'static constexpr bool kAllowInsecureTls = false;'),
+    ('core/include/libtracer/config.hpp:664', 'static constexpr bool kAllowInsecureTls = false;'),
     ('integrations/esp-idf/libtracer/CMakeLists.txt:190',
      'list(APPEND LIBTRACER_SRCS "${LIBTRACER_ROOT}/core/src/transport_can.cpp")'),
 
