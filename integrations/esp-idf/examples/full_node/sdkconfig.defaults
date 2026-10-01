@@ -37,3 +37,18 @@ CONFIG_PTHREAD_TASK_STACK_SIZE_DEFAULT=12288
 # before this, no CI job built that TU, because the portable server it replaces
 # was quietly standing in for it.
 CONFIG_HTTPD_WS_SUPPORT=y
+
+# The two link modules are OFF by default since v0.17.0 (#1670, the lean default). This is
+# the FULL-node example — its CI job proves the whole component compiles and links on every
+# target, CAN/TWAI and the WS server included — and its self-proof dials a config-created
+# udp connection that the S5 engine mints DORMANT and wakes on first use. So it opts in to
+# both, explicitly:
+#   * the WebSocket SERVER link httpd_ws_link_t. It is a bus by construction, so this
+#     option SELECTS the bus tier; it is also the CI compile coverage for httpd_ws_link.cpp
+#     (tools/check_esp_ws_plane.py asserts the TU was built).
+#   * the bus tier (peer-named links), stated explicitly too: CAN, a bus by construction,
+#     is only offered with it.
+#   * the link-liveness engine (self_heal_link.cpp + kSelfHealLinks = true).
+CONFIG_LIBTRACER_WS_SERVER=y
+CONFIG_LIBTRACER_BUS_LINKS=y
+CONFIG_LIBTRACER_SELF_HEAL_LINKS=y

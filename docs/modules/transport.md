@@ -130,18 +130,21 @@ edges along with the departed one's.
 ## Closing the bus module out at build time
 
 The peer-named tier is a **module**, and a node whose links are all point-to-point does not
-have to carry it. `tr::graph::default_config_t::kBusLinks` (`core/include/libtracer/config.hpp:516`)
-is the knob; bound `false` by an
+have to carry it. `tr::graph::default_config_t::kBusLinks` (`core/include/libtracer/config.hpp:522`)
+is the knob, and since v0.17.0 its default is **`false`** — the lean choice
+([#1670](https://github.com/avatarsd-llc/libtracer/issues/1670)). A node that needs the tier —
+a `peer_named` listener, CAN, the ESP-IDF WS server — opts in with an
 [ADR-0068](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0068-build-configuration-is-plain-cpp-config-header.md)
-override fragment, not a `-D`:
+override fragment, not a `-D` (ESP-IDF: `CONFIG_LIBTRACER_BUS_LINKS=y`; PlatformIO:
+`custom_libtracer_bus_links = yes`):
 
 ```cpp
 // libtracer/config_override.hpp
 namespace tr::graph {
-struct flat_node_config_t : default_config_t {
-    static constexpr bool kBusLinks = false;
+struct bus_node_config_t : default_config_t {
+    static constexpr bool kBusLinks = true;
 };
-using config_t = flat_node_config_t;
+using config_t = bus_node_config_t;
 }  // namespace tr::graph
 ```
 
@@ -161,7 +164,7 @@ The PROVIDER side of the same fold is the base-class selection described above
 than only the routing plane's code: measured on the esp32c6 full-node profile
 (`-Os -fno-exceptions -fno-rtti`, `riscv32-esp-elf` 14.2.0), a bus-closed build's
 `transport_tcp_server` shrinks **208 B → 168 B at rest, −40 B per listener**, with a further
-**−568 B** of image `.text` and **±0 B of `.bss`**. At the default binding the listener's
+**−568 B** of image `.text` and **±0 B of `.bss`**. With the module carried the listener's
 size does not move and the seam costs **+80 B `.text` / +96 B `.rodata`** once, for the
 forwarding overrides and the two peer-lifecycle hooks.
 
@@ -172,7 +175,7 @@ Asking for a bus on such a build is **refused**, never quietly served as a flat 
 | `LIBTRACER_TRANSPORT_CAN=ON` | a `static_assert` in `transport_can.cpp` — CAN is a bus by construction, so a bus-less CAN build is broken, not smaller |
 | `SPEC{name, config{kind=tcp\|ws, peer_named=1}}` to a LISTEN module's `conn` | the factory answers `TYPE_MISMATCH` — permanent, because no retry grows this build a bus facet — and creates no connection |
 | a directly constructed peer-named `slot_server_t` | `ok()` is false, the came-up predicate every caller already checks |
-| `httpd_ws_link_t` (ESP-IDF) | `ok()` is false — it is peer-named by construction and has no flat mode |
+| `httpd_ws_link_t` (ESP-IDF) | a `static_assert` in `httpd_ws_link.cpp` — it is peer-named by construction; the component's `CONFIG_LIBTRACER_WS_SERVER` selects `CONFIG_LIBTRACER_BUS_LINKS`, so the component never reaches it |
 
 A quiet demotion would be the worse outcome, and specifically so: the listener's own
 per-frame tier select reads its constructed mode, so a demoted-at-the-router-only server
@@ -181,7 +184,7 @@ would keep delivering peer-named into a sink the router never installed.
 ## QUIC and WebTransport
 
 Both live in the separate `libtracer_quic` target, configured by
-`LIBTRACER_WITH_QUIC` (`core/CMakeLists.txt:300`, default `OFF` because msquic must
+`LIBTRACER_WITH_QUIC` (`core/CMakeLists.txt:328`, default `OFF` because msquic must
 be installed). Core itself contains no `#ifdef` and no msquic reference: the module
 extends the transport catalog through `register_transport_type`, registering
 `quic_transport_factory()` under kind `quic` and `webtransport_transport_factory()`

@@ -467,20 +467,20 @@ ANCHORS = [
     ('core/include/libtracer/config.hpp:262', 'using acl_policy_t = allow_only_policy_t;'),
     ('core/include/libtracer/config.hpp:216', 'static constexpr std::size_t kMaxVertexBytes32 = 72;'),
     ('core/include/libtracer/config.hpp:312', 'using lkv_slot_t = single_writer_slot_t;'),
-    ('core/include/libtracer/config.hpp:688', 'using config_t = default_config_t;'),
+    ('core/include/libtracer/config.hpp:696', 'using config_t = default_config_t;'),
     ('core/include/libtracer/config.hpp:95',
      'static constexpr std::size_t kVertexLockStripes = 16;'),
     ('core/include/libtracer/config.hpp:119',
      'static constexpr std::size_t kCacheLineBytes = 64;'),
     ('core/include/libtracer/config.hpp:307',
      '* contend across many cores. Override fragment: `using lkv_slot_t = hazard_slot_t;`. The'),
-    ('core/include/libtracer/config.hpp:746',
+    ('core/include/libtracer/config.hpp:754',
      'inline constexpr bool kSpinWaitSafe = tr::graph::config_t::kSpinWaitSafe;'),
     ('core/include/libtracer/config.hpp:474', 'static constexpr bool kWeaklyOrdered = true;'),
     # Was pinned to the :316 banner rule, one of three IDENTICAL comment rules in this header —
     # an anchor no scope could ever separate. Re-pinned inside the SAME cited span
     # (the derived-spelling block the table cites) to the first derived spelling, which is unique.
-    ('core/include/libtracer/config.hpp:697',
+    ('core/include/libtracer/config.hpp:705',
      'inline constexpr std::size_t kVertexLockStripes = config_t::kVertexLockStripes;'),
     # core/include/libtracer/crc.hpp
     ('core/include/libtracer/crc.hpp:38', 'constexpr std::array<std::uint32_t, 256> crc32c_table() noexcept {'),
@@ -824,12 +824,12 @@ ANCHORS = [
     # core/tests/tlv_arena_test.cpp
     ('core/tests/tlv_arena_test.cpp:324', 'const std::vector<std::byte> deep_bytes = encode(nested(100));'),
     # integrations/esp-idf/libtracer/httpd_ws_link.cpp
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:132',
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:135',
      '* (F2b, 2026-07-09): the /unit batch apply overflowed 8 KB and needed ~12 KB. It is named'),
     ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:282',
      'static constexpr std::size_t kRequiredHttpdStack = 12288;'),
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:632', 'if (chunk.empty()) return true;'),
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:638',
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:635', 'if (chunk.empty()) return true;'),
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:641',
      'if (len_ != 0) std::memcpy(grown.get(), bytes_.get(), len_);'),
     # integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp
     ('integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:52',
@@ -848,7 +848,7 @@ ANCHORS = [
      'flat_slot_server_t>;'),
     # The #375-deliverable-3 bus-module seam: the knob, and the ONE door the routing plane
     # asks the facet through.
-    ('core/include/libtracer/config.hpp:516', 'static constexpr bool kBusLinks = true;'),
+    ('core/include/libtracer/config.hpp:522', 'static constexpr bool kBusLinks = false;'),
     ('core/include/libtracer/transport.hpp:898',
      '[[nodiscard]] inline bus_link_t* bus_of(transport_t& link) {'),
     ('core/include/libtracer/edge_pin.hpp:153', 'class pin_t {'),
@@ -876,9 +876,9 @@ ANCHORS = [
     ('tools/cortexm0_footprint.py:151', 'cxx_flags = ['),
     ('tools/cortexm0_footprint.py:158', '"-DLIBTRACER_NO_ATOMIC",'),
     ('tools/cortexm0_footprint.py:172', '"--specs=nano.specs",'),
-    ('core/tests/CMakeLists.txt:1965', 'add_executable(substrate_test_no_atomic'),
-    ('core/tests/CMakeLists.txt:1980', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
-    ('core/tests/CMakeLists.txt:1981', '    LIBTRACER_NO_ATOMIC'),
+    ('core/tests/CMakeLists.txt:1976', 'add_executable(substrate_test_no_atomic'),
+    ('core/tests/CMakeLists.txt:1991', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
+    ('core/tests/CMakeLists.txt:1992', '    LIBTRACER_NO_ATOMIC'),
     # The leading indent is load-bearing: the bare token also appears in the comment
     # three lines above the executable, and an anchor that matches both is not an anchor.
 
@@ -899,23 +899,23 @@ ANCHORS = [
     # TSan job (`tsan-reclaim-qsbr`) with an identical `matrix:` block, which made the old
     # anchor ambiguous inside its own `  tsan:` scope — the scope runs to EOF, not to the
     # next job. A rendered job name is unique by construction and needs no scope at all.
-    ('.github/workflows/core-ci.yml:953', 'name: tsan (slot=${{ matrix.lkv_slot }})'),
+    ('.github/workflows/core-ci.yml:976', 'name: tsan (slot=${{ matrix.lkv_slot }})'),
     # The flag the prose QUOTES verbatim ("-fsanitize=thread -g -O1"). #1376's qsbr leg
     # quotes the same flags with a trailing `-I`, so this anchor is the EXACT full line,
     # which the qsbr leg's is not — no scope needed.
-    ('.github/workflows/core-ci.yml:982', '-DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1"'),
+    ('.github/workflows/core-ci.yml:1005', '-DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1"'),
     ('.github/workflows/footprint-cortexm0.yml:13', '`--mode warn` governs the BUDGET VERDICT only'),
-    ('bench/CMakeLists.txt:43', 'bench_libtracer_net (two-process ROUTER-flood bench) was retired'),
+    ('bench/CMakeLists.txt:54', 'bench_libtracer_net (two-process ROUTER-flood bench) was retired'),
     ('bindings/typescript/packages/client/test/mesh-testbed.test.mjs:25',
      "ADDRESSING: a connection's routing key IS its vertex path"),
-    ('core/CMakeLists.txt:63', 'option(LIBTRACER_NET_PLANE'),
+    ('core/CMakeLists.txt:67', 'option(LIBTRACER_NET_PLANE'),
     # The GPU backend's build moved out of core into its own tier project (#1381), so what
     # docs/modules/backends.md cites is the tier's target, not a core option.
     ('backends/cuda/CMakeLists.txt:36', 'add_library(libtracer_cuda STATIC src/mem_cuda.cpp)'),
-    ('core/CMakeLists.txt:300', 'option(LIBTRACER_WITH_QUIC "Configure the libtracer_quic transport module'),
-    ('core/CMakeLists.txt:385', 'write_basic_package_version_file('),
-    ('core/CMakeLists.txt:396', 'if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND EXISTS'),
-    ('core/CMakeLists.txt:409', 'option(LIBTRACER_BUILD_EXAMPLES "Build the core examples"'),
+    ('core/CMakeLists.txt:328', 'option(LIBTRACER_WITH_QUIC "Configure the libtracer_quic transport module'),
+    ('core/CMakeLists.txt:413', 'write_basic_package_version_file('),
+    ('core/CMakeLists.txt:424', 'if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND EXISTS'),
+    ('core/CMakeLists.txt:438', 'option(LIBTRACER_BUILD_EXAMPLES "Build the core examples"'),
     # `docs/examples/index.md` cited the two `if(LIBTRACER_NET_PLANE)` lines (58, 73). That
     # text appears THREE times in this file and the scope filter cannot separate 58 from 73
     # — a scope must sit ABOVE its candidate, and everything above 58 is also above 73. The
@@ -927,25 +927,24 @@ ANCHORS = [
     ('core/examples/CMakeLists.txt:92', 'add_test(NAME example_wire_codec COMMAND wire_codec)'),
     ('integrations/esp-idf/libtracer/CMakeLists.txt:44', 'set(LIBTRACER_SRCS'),
     ('integrations/esp-idf/libtracer/CMakeLists.txt:189', 'if(CONFIG_LIBTRACER_TRANSPORT_CAN)'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:336', 'if(IDF_TARGET STREQUAL "linux")',
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:338', 'if(IDF_TARGET STREQUAL "linux")',
      'unlike CONFIG_* is defined in BOTH CMake passes'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:315', 'set(LIBTRACER_EDGE_PIN_SLOTS 8)'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:400',
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:317', 'set(LIBTRACER_EDGE_PIN_SLOTS 8)'),
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:409',
      'static constexpr std::size_t kShareThresholdBytes = ~std::size_t{0};'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:347', 'if(LIBTRACER_SPIN_WAIT_SAFE)'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:302',
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:349', 'if(LIBTRACER_SPIN_WAIT_SAFE)'),
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:304',
      'set(LIBTRACER_VERTEX_LOCK_STRIPES ${CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES})'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:320', 'if(CONFIG_FREERTOS_UNICORE)'),
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:322', 'if(CONFIG_FREERTOS_UNICORE)'),
     # #1470: the S5 liveness-engine knobs the config-space table points at.
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:364',
-     'if(DEFINED CONFIG_LIBTRACER_SELF_HEAL_LINKS AND NOT CONFIG_LIBTRACER_SELF_HEAL_LINKS)'),
-    ('integrations/esp-idf/libtracer/CMakeLists.txt:370',
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:368', 'set(LIBTRACER_SELF_HEAL_LINKS true)'),
+    ('integrations/esp-idf/libtracer/CMakeLists.txt:378',
      'if(CONFIG_LIBTRACER_SELF_HEAL_WORKER_STACK)'),
-    ('core/include/libtracer/config.hpp:569', 'static constexpr bool kSelfHealLinks = true;'),
-    ('core/include/libtracer/config.hpp:596',
+    ('core/include/libtracer/config.hpp:577', 'static constexpr bool kSelfHealLinks = false;'),
+    ('core/include/libtracer/config.hpp:604',
      'static constexpr std::size_t kSelfHealWorkerStackBytes = 0;'),
-    ('core/include/libtracer/config.hpp:623', 'static constexpr bool kInstrumentCounters = false;'),
-    ('core/include/libtracer/config.hpp:655', 'static constexpr bool kAllowInsecureTls = false;'),
+    ('core/include/libtracer/config.hpp:631', 'static constexpr bool kInstrumentCounters = false;'),
+    ('core/include/libtracer/config.hpp:663', 'static constexpr bool kAllowInsecureTls = false;'),
     ('integrations/esp-idf/libtracer/CMakeLists.txt:190',
      'list(APPEND LIBTRACER_SRCS "${LIBTRACER_ROOT}/core/src/transport_can.cpp")'),
 
@@ -1176,9 +1175,9 @@ ANCHORS = [
     ('core/include/libtracer/transport.hpp:506',
      '[[nodiscard]] virtual transport_drop_stats_t drop_stats() const noexcept { return {}; }'),
     # integrations/esp-idf/libtracer/httpd_ws_link.cpp
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:3248',
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:3251',
      'std::size_t httpd_ws_link_t::tx_slot_capacity() const noexcept { return tx_pool_slots_; }'),
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:3090',
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:3093',
      'void httpd_ws_link_t::send_in_call(const session_ref_t& to,'),
 ]
 

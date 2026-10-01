@@ -32,7 +32,7 @@ rather than a silent behavioural fork between translation units.
 
 The sizes and policies are members of **one named type**, `default_config_t`
 (`core/include/libtracer/config.hpp:81`), bound once by `using config_t = default_config_t;`
-(`:688`). An application declares its own by inheriting and overriding what differs (`:65-77`):
+(`:696`). An application declares its own by inheriting and overriding what differs (`:65-77`):
 
 ```cpp
 struct my_node_config_t : tr::graph::default_config_t {
@@ -43,7 +43,7 @@ using config_t = my_node_config_t;
 
 Inheriting means a knob added later does not break the preset — it inherits the new default
 rather than failing to compile. The rest of the library names the derived spellings re-exported
-below the traits type (`:687-710`), each of which is exactly its traits member, so introducing
+below the traits type (`:695-718`), each of which is exactly its traits member, so introducing
 `config_t` moved no call site.
 
 It is **bound once, not threaded as a template parameter**, and
@@ -143,7 +143,9 @@ a configuration member, `kBusLinks`, and reached through one gate, `tr::net::bus
 closure is a compile-time fold at every consumer rather than a run-time branch. Measured on rv32
 (`-Os -fno-exceptions -fno-rtti`, GCC 15.2, per-TU `.text`), binding it `false` removes 1,400 B
 from `fwd_router.cpp` and 678 B from `transport_vertex.cpp` — 2,078 B of flash, 0 B of `.bss`, because
-the tier is code and per-instance state rather than a static table.
+the tier is code and per-instance state rather than a static table. **`false` is the default since
+v0.17.0** ([#1670](https://github.com/avatarsd-llc/libtracer/issues/1670)): the lean choice, so a
+node that needs the tier opts in (`kBusLinks = true`; ESP-IDF `CONFIG_LIBTRACER_BUS_LINKS`).
 
 Closing it is a **refusal, never a silent downgrade**. A `peer_named=true` listener SPEC is
 answered `TYPE_MISMATCH` (permanent — no retry grows a build a bus facet), a directly-constructed
@@ -169,7 +171,10 @@ ESP-IDF component drives both from the one Kconfig symbol, so they cannot disagr
 build pairs them by hand, and `self_heal_link.cpp` opens with a `static_assert(kSelfHealLinks, …)`
 that catches the mismatch in the direction a link error would not explain. The saving is the
 reporter's C6 measurement: **4,336 B** of reachable `self_heal_link_t` symbols, **0 B** of
-`.dram0.bss`.
+`.dram0.bss`. Both halves default OFF since v0.17.0
+([#1670](https://github.com/avatarsd-llc/libtracer/issues/1670), re-ruling #1548's default): an
+opt-in turns the switch on AND binds `kSelfHealLinks = true`, which the core test build and
+`bench/` do and the Kconfig symbol does in one step.
 
 Closing it is a **refusal, never a silent downgrade**, on the same principle as the bus tier:
 `register_transport_type` does not catalogue a `self_heal_dial` kind on such a build (so a `SPEC`
@@ -219,21 +224,21 @@ is a knob the fragment does not state at all (#1244).
 
 | knob | kind | default | ESP-IDF |
 | --- | --- | --- | --- |
-| `kVertexLockStripes` (`config.hpp:95`) | count | 16 | menuconfig `CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES` (`integrations/esp-idf/libtracer/CMakeLists.txt:302`) |
-| `kCacheLineBytes` (`:119`) | padding width | 64 | derived from `CONFIG_FREERTOS_UNICORE`, not exposed (`integrations/esp-idf/libtracer/CMakeLists.txt:320`) |
+| `kVertexLockStripes` (`config.hpp:95`) | count | 16 | menuconfig `CONFIG_LIBTRACER_VERTEX_LOCK_STRIPES` (`integrations/esp-idf/libtracer/CMakeLists.txt:304`) |
+| `kCacheLineBytes` (`:119`) | padding width | 64 | derived from `CONFIG_FREERTOS_UNICORE`, not exposed (`integrations/esp-idf/libtracer/CMakeLists.txt:322`) |
 | `kHazardReaderSlots` (`:147`) | count | 64 | inherited — unused on a chip, which binds the single-writer slot and never builds the domain |
-| `kEdgePinSlots` (`:160`) | count | 32 | set to 8 (`integrations/esp-idf/libtracer/CMakeLists.txt:315`) |
+| `kEdgePinSlots` (`:160`) | count | 32 | set to 8 (`integrations/esp-idf/libtracer/CMakeLists.txt:317`) |
 | `kMaxVertexBytes64` / `kMaxVertexBytes32` (`:198` / `:216`) | RAM ratchet | 96 / 72 | the preset — deliberately not overridable |
-| `kShareThresholdBytes` (`:253`) | size | 4,096 — RFC-0028 §11 ruling 2 | `SIZE_MAX`, copy always (`integrations/esp-idf/libtracer/CMakeLists.txt:400`) |
+| `kShareThresholdBytes` (`:253`) | size | 4,096 — RFC-0028 §11 ruling 2 | `SIZE_MAX`, copy always (`integrations/esp-idf/libtracer/CMakeLists.txt:409`) |
 | `acl_policy_t` (`:262`) | policy type | `allow_only_policy_t` | inherited — the full policy is not selectable |
-| `lkv_slot_t` (`:312`) | policy type | `single_writer_slot_t` | `single_writer_slot_t` on every chip, with `kSingleWriter = true` and `reader_guard_t = tr::esp::critical_guard_t`; inherited on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:347`) |
-| `kSpinWaitSafe` (`:746`) | target fact | `true` | derived from `IDF_TARGET` — `false` on every chip, `true` on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:336`) |
+| `lkv_slot_t` (`:312`) | policy type | `single_writer_slot_t` | `single_writer_slot_t` on every chip, with `kSingleWriter = true` and `reader_guard_t = tr::esp::critical_guard_t`; inherited on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:349`) |
+| `kSpinWaitSafe` (`:754`) | target fact | `true` | derived from `IDF_TARGET` — `false` on every chip, `true` on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:338`) |
 | `kWeaklyOrdered` (`:474`) | target fact | `true` | inherited — every ESP chip is weakly ordered, which is the default |
-| `kBusLinks` (`:697`) | module presence | `true` | inherited — the component builds the full peer-named tier |
-| `kSelfHealLinks` (`:569`) | module presence | `true` | menuconfig `CONFIG_LIBTRACER_SELF_HEAL_LINKS` (`integrations/esp-idf/libtracer/CMakeLists.txt:364`) |
-| `kSelfHealWorkerStackBytes` (`:596`) | size | `0` — the platform default | menuconfig `CONFIG_LIBTRACER_SELF_HEAL_WORKER_STACK` (`integrations/esp-idf/libtracer/CMakeLists.txt:370`) |
-| `kInstrumentCounters` (`:623`) | instrumentation | `false` — compiled out | inherited — only the core test build and `bench/`'s `LIBTRACER_INSTRUMENT_COUNTERS` bind it (#1664) |
-| `kAllowInsecureTls` (`:655`) | capability | `false` — a SPEC `insecure` key is refused | inherited — only the `quic` workflow's second run binds it, through `core/tests/insecure-tls/` |
+| `kBusLinks` (`:522`) | module presence | `false` — opt-in since v0.17.0 (#1670) | menuconfig `CONFIG_LIBTRACER_BUS_LINKS`, default `n`; CAN is offered only with it |
+| `kSelfHealLinks` (`:577`) | module presence | `false` — opt-in since v0.17.0 (#1670) | menuconfig `CONFIG_LIBTRACER_SELF_HEAL_LINKS`, default `n` (`integrations/esp-idf/libtracer/CMakeLists.txt:368`) |
+| `kSelfHealWorkerStackBytes` (`:604`) | size | `0` — the platform default | menuconfig `CONFIG_LIBTRACER_SELF_HEAL_WORKER_STACK` (`integrations/esp-idf/libtracer/CMakeLists.txt:378`) |
+| `kInstrumentCounters` (`:631`) | instrumentation | `false` — compiled out | inherited — only the core test build and `bench/`'s `LIBTRACER_INSTRUMENT_COUNTERS` bind it (#1664) |
+| `kAllowInsecureTls` (`:663`) | capability | `false` — a SPEC `insecure` key is refused | inherited — only the `quic` workflow's second run binds it, through `core/tests/insecure-tls/` |
 
 Two CMake variables survive for one transition release, `-DLIBTRACER_ACL_FULL` and
 `-DLIBTRACER_LKV_SLOT`; `core/CMakeLists.txt` writes a fragment on their behalf. The five other

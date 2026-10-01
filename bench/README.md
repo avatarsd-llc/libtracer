@@ -1719,7 +1719,7 @@ craft libtracer":
 > `export_vertex` and `run_routers` survive in `core/` and `bench/` only inside comments
 > and `core/CHANGELOG.md`'s record of their removal — not one declaration, definition or
 > call of any of them is left (`grep -rn` over both trees, 2026-08-08), and the
-> two-process `bench_libtracer_net` was retired with them (`bench/CMakeLists.txt:43`). FWD
+> two-process `bench_libtracer_net` was retired with them (`bench/CMakeLists.txt:54`). FWD
 > forward cost is now measured by `bench_forward_heap` + `bench_transport_iov` + the `fwd_*`
 > tests; multi-hop end-to-end delivery is the `net` harness.
 

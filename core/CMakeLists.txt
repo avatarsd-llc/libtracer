@@ -48,8 +48,12 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # design. Each option toggles whether its module's translation unit(s) are COMPILED
 # into libtracer; it is NOT a compile-definition, so a dropped module leaves neither
 # code nor a symbol behind. Selection is by which TUs compile (the no-feature-macro
-# doctrine, cf. socketcan_link.cpp vs. its stub, picked by CMAKE_SYSTEM_NAME). All
-# default ON, so the default build is the full node — modularity is opt-OUT.
+# doctrine, cf. socketcan_link.cpp vs. its stub, picked by CMAKE_SYSTEM_NAME). The
+# transports and the net plane default ON. The two LINK MODULES — CAN (a bus by
+# construction) and the S5 liveness engine — follow the lean-default ruling (#1670,
+# v0.17.0): OFF for a consumer, ON for this project's own test build, which exercises
+# them and binds the matching config members through its preset fragment
+# (tests/instrumented).
 #
 #   * The required core (below) ALWAYS compiles: the L2/L3 wire codec (frame +
 #     tlv_arena), the L0/L1 substrate (backends + view/rope), path, and the L4 graph
@@ -66,21 +70,35 @@ option(LIBTRACER_NET_PLANE
 option(LIBTRACER_TRANSPORT_TCP "Build the TCP stream transport (tcp_transport_t)" ON)
 option(LIBTRACER_TRANSPORT_UDP "Build the UDP datagram transport (udp_transport_t)" ON)
 option(LIBTRACER_TRANSPORT_WS "Build the WebSocket transport (transport_ws_*)" ON)
-option(LIBTRACER_TRANSPORT_CAN "Build the CAN transport (transport_can + socketcan_link)" ON)
+# The link-module default (#1670): ON only for this project's top-level test build. A CAN link
+# is peer-named by construction, so it needs `kBusLinks = true` — and `transport_can.cpp`
+# refuses to compile without it — which the lean default no longer binds. The test build's
+# preset fragment binds it, so the default follows the same condition that installs that
+# fragment (below, at add_subdirectory(tests)).
+if(BUILD_TESTING AND PROJECT_IS_TOP_LEVEL AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
+    set(_libtracer_link_modules_default ON)
+else()
+    set(_libtracer_link_modules_default OFF)
+endif()
+option(LIBTRACER_TRANSPORT_CAN
+       "Build the CAN transport (transport_can + socketcan_link); needs kBusLinks = true"
+       ${_libtracer_link_modules_default})
 # The RFC-0014 §4 S5 link-liveness engine (self_heal_link_t) — #1470. Its own TU, so its
-# own switch, and OFF gives a flash-constrained target back the 4,336 B of reachable
-# `self_heal_link_t` symbols the reporter measured on an ESP32-C6 image (`nm` on the linked
-# ELF; ±0 B of .bss — the engine is code, not a static table).
+# own switch. OFF by default since v0.17.0 (#1670, the lean default), which keeps the 4,336 B
+# of reachable `self_heal_link_t` symbols the reporter measured on an ESP32-C6 image out of a
+# node that does not ask for them (`nm` on the linked ELF; ±0 B of .bss — the engine is code,
+# not a static table). ON for this project's own test build, like CAN above.
 #
 # PAIR IT WITH THE CONFIG MEMBER. This switch decides which TUs compile; whether the engine
 # is REACHABLE is `tr::graph::default_config_t::kSelfHealLinks`, bound by an override
-# fragment (ADR-0068), exactly as `kBusLinks` governs the ADR-0044 bus tier. Turning this
-# OFF without also binding `kSelfHealLinks = false` is a LINK error naming `self_heal_link_t`
-# — deliberately, because the mint site would still be compiled in with no implementation
-# behind it. The converse mistake is caught earlier and more clearly: `self_heal_link.cpp`
-# opens with a `static_assert(kSelfHealLinks, …)`.
+# fragment (ADR-0068), exactly as `kBusLinks` governs the ADR-0044 bus tier. To opt in, turn
+# this ON AND bind `kSelfHealLinks = true`. Binding the member without the TU is a LINK error
+# naming `self_heal_link_t` — deliberately, because the mint site would be compiled in with
+# no implementation behind it. The converse mistake is caught earlier and more clearly:
+# `self_heal_link.cpp` opens with a `static_assert(kSelfHealLinks, …)`.
 option(LIBTRACER_SELF_HEAL_LINKS
-       "Build the RFC-0014 S5 link-liveness engine (self_heal_link_t)" ON)
+       "Build the RFC-0014 S5 link-liveness engine (self_heal_link_t); needs kSelfHealLinks = true"
+       ${_libtracer_link_modules_default})
 
 # The required core (always compiled): L2/L3 wire codec + L0/L1 substrate + path + L4
 # graph runtime, plus the in-process loopback transport (dev/test, no dependencies; a
@@ -249,6 +267,16 @@ if(LIBTRACER_LKV_SLOT STREQUAL "hazard_slot_t")
     string(APPEND _lt_cfg_binding "    using lkv_slot_t = hazard_slot_t;\n")
 endif()
 if(NOT _lt_cfg_binding STREQUAL "")
+    # This fragment owns `config_t`, so neither the test build's preset nor an embedder can bind
+    # the two link modules beside it (#1670). Bind them from the TU switches they must agree with:
+    # the engine member follows its own TU, and the bus tier is carried whenever CAN compiles
+    # (a CAN link is a bus by construction) or this is the project's own test build.
+    if(LIBTRACER_SELF_HEAL_LINKS)
+        string(APPEND _lt_cfg_binding "    static constexpr bool kSelfHealLinks = true;\n")
+    endif()
+    if(LIBTRACER_TRANSPORT_CAN OR _libtracer_link_modules_default)
+        string(APPEND _lt_cfg_binding "    static constexpr bool kBusLinks = true;\n")
+    endif()
     message(STATUS "libtracer: writing a config_override.hpp for the deprecated -D knobs "
                    "(LIBTRACER_ACL_FULL / LIBTRACER_LKV_SLOT) — prefer supplying the fragment")
     file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/generated/include/libtracer/config_override.hpp
@@ -395,8 +423,9 @@ endif()
 
 if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
     enable_testing()
-    # The instrumented preset (#1664): the test build binds config_t::kInstrumentCounters so the
-    # ancestor-walk / canonical-fallback ablations can read their counters. Listed FIRST, so it
+    # The test preset (#1664, #1670): the test build binds config_t::kInstrumentCounters so the
+    # ancestor-walk / canonical-fallback ablations can read their counters, and opts in to the two
+    # link modules (kBusLinks, kSelfHealLinks) whose TUs the options above compile. Listed FIRST, so it
     # also sits ahead of a fragment the build supplies — and yields to that one by
     # `#include_next` (see the fragment), never shadowing the configuration a CI leg tests.
     target_include_directories(libtracer BEFORE PUBLIC

@@ -45,6 +45,28 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   preset `core/tests/insecure-tls/libtracer/config_override.hpp` does that. Direct construction
   with `quic_dial_tls_t` / `webtransport_dial_tls_t` `.insecure_no_verify` is unchanged.
 
+- **The two link modules are opt-in: `kBusLinks` and `kSelfHealLinks` default to `false`
+  ([#1670](https://github.com/avatarsd-llc/libtracer/issues/1670); re-rules
+  [#1548](https://github.com/avatarsd-llc/libtracer/issues/1548)'s default).** The lean choice
+  is now the default. `default_config_t::kBusLinks` (the ADR-0044 peer-named tier, ~2,078 B of
+  rv32 flash) and `default_config_t::kSelfHealLinks` (the RFC-0014 §4 S5 liveness engine,
+  ~4,336 B on an ESP32-C6 image) are both `false`, and the CMake switches that compile their
+  translation units follow: `LIBTRACER_TRANSPORT_CAN` (CAN is a bus by construction) and
+  `LIBTRACER_SELF_HEAL_LINKS` now default **OFF**, except in this project's own top-level test
+  build (`-DBUILD_TESTING=ON`), which compiles them and opts in through its preset fragment
+  `core/tests/instrumented/libtracer/config_override.hpp`. `bench/` opts in through
+  `bench/preset/`. **Observable on a stock build:** a `peer_named=true` tcp/ws listener SPEC is
+  answered `TYPE_MISMATCH` and a directly constructed one reports `ok() == false`; the built-in
+  `udp`/`tcp`/`ws` DIAL kinds dial eagerly at creation (no `DORMANT`, no redial or backoff —
+  the pre-#1548 behaviour); a custom `self_heal_dial` kind is refused at
+  `register_transport_type`. **Migration — opt in explicitly:** add
+  `static constexpr bool kBusLinks = true;` and/or `static constexpr bool kSelfHealLinks = true;`
+  to your `libtracer/config_override.hpp` fragment, and pass `-DLIBTRACER_TRANSPORT_CAN=ON` /
+  `-DLIBTRACER_SELF_HEAL_LINKS=ON` for the TUs (ESP-IDF: `CONFIG_LIBTRACER_BUS_LINKS=y`, which
+  the new `CONFIG_LIBTRACER_WS_SERVER` selects, / `CONFIG_LIBTRACER_SELF_HEAL_LINKS=y`; PlatformIO: `custom_libtracer_bus_links = yes` /
+  `custom_libtracer_self_heal_links = yes`). A half opt-in is loud: `transport_can.cpp` and
+  `self_heal_link.cpp` `static_assert` their member, and a member without its TU is a link error.
+
 - **`graph_t`'s two instrumentation counters are compiled out by default:
   `config_t::kInstrumentCounters` ([#1664](https://github.com/avatarsd-llc/libtracer/issues/1664)).**
   `ancestor_walks()` (RFC-0005) and `target_canonical_resolves()` (#830) were a relaxed 64-bit

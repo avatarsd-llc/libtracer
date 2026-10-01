@@ -339,8 +339,16 @@ add_test(NAME can_tx_pool COMMAND can_tx_pool_test)
 # their presence: core/ must still configure as a standalone tree (the mesh-testbed image
 # copies core/ and nothing else, and any consumer may do the same). Without the guard the
 # file list resolves to nothing and CMake aborts with "No SOURCES given to target".
+#
+# The httpd_ws family additionally needs the BUS TIER in this build: `httpd_ws_link.cpp`
+# static_asserts `kBusLinks`, because the link is a bus by construction (#1670). CMake cannot
+# read that C++ binding, so a build that binds `kBusLinks = false` (the bus-closed CI leg)
+# turns the family off with this switch — the same pairing `LIBTRACER_TRANSPORT_CAN=OFF` is
+# for `transport_can.cpp`. The WS client and TWAI suites further down are flat and always build.
 set(LIBTRACER_ESP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../integrations/esp-idf")
-if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
+option(LIBTRACER_TEST_ESP_WS_SERVER
+       "Build the httpd_ws_link host suites (needs kBusLinks = true in this build)" ON)
+if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     add_executable(httpd_ws_teardown_test
         "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_teardown_test.cpp"
         "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
@@ -779,7 +787,10 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     # cases here construct an adopting link — same exemption as the suites above.
     set_tests_properties(httpd_ws_adopted_host
         PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+endif()
 
+# The flat ESP host suites (WS client, TWAI): no bus tier needed, so only the tree guard.
+if(EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
     # #900 + #901 — the WS *CLIENT* link's receive path, on the same construction: the
     # chip TU (integrations/esp-idf/libtracer/esp_ws_client_link.cpp) compiled against a
     # host fake of esp_transport_ws's frame stream and esp_pthread's stack-sizing seam.
@@ -2219,7 +2230,10 @@ set(LIBTRACER_BUS_TESTS
     httpd_ws_session_identity
     httpd_ws_teardown
     httpd_ws_tx_large_class
-    httpd_ws_tx_pool)
+    httpd_ws_tx_pool
+    # Was the one exemption below until #1670: `httpd_ws_link.cpp` now static_asserts
+    # `kBusLinks`, so no httpd_ws suite can exist on a bus-less build at all.
+    httpd_ws_counters)
 foreach(_libtracer_bus_test IN LISTS LIBTRACER_BUS_TESTS)
     if(TEST ${_libtracer_bus_test})
         set_property(TEST ${_libtracer_bus_test} APPEND PROPERTY LABELS bus)
@@ -2234,21 +2248,15 @@ endforeach()
 # which cost Car M exactly that.
 #
 # It is a CONFIGURE-time assertion rather than a derivation because the label is a claim
-# about the SUITE, and the exceptions are real: `httpd_ws_counters` drives the #1503
-# introspection counters, which a bus-less build still has. Deriving the label would
-# silently enrol it and deselect a suite that passes; asserting makes the author of the
-# next one state which it is, in one diffable place, and the assertion fires at
-# `cmake` time rather than in CI.
+# about the SUITE, and asserting makes the author of the next one state which it is, in one
+# diffable place, at `cmake` time rather than in CI. (Since #1670 the whole family is also
+# gated on LIBTRACER_TEST_ESP_WS_SERVER, because `httpd_ws_link.cpp` static_asserts
+# `kBusLinks`; the label stays so a full-configuration run can still deselect them.)
 #
 # `LIBTRACER_BUS_TESTS_EXEMPT` is the opt-out and takes the same shape as the
 # `link_token_carry` note above: not on the list, and the reason written down.
-set(LIBTRACER_BUS_TESTS_EXEMPT
-    # Reads the link's published counters (#1503 vocabulary: capacity/in_use/peak/
-    # refused/dropped). Nothing in it needs a peer-named listener or a multi-peer link,
-    # and it passes on a `kBusLinks = false` build — labelling it would deselect a suite
-    # from the configuration that ships without a bus, which is where the counters matter
-    # most.
-    httpd_ws_counters)
+# Empty since #1670 (httpd_ws_counters moved into the list above); kept as the mechanism.
+set(LIBTRACER_BUS_TESTS_EXEMPT "")
 if(EXISTS "${LIBTRACER_ESP_DIR}/tests/host")
     file(GLOB _libtracer_ws_host_sources
         "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_*_test.cpp")
@@ -2273,7 +2281,7 @@ if(EXISTS "${LIBTRACER_ESP_DIR}/tests/host")
             "A suite over a link that is a bus by construction must carry the `bus` label, or "
             "`ctest -LE bus` runs it on a kBusLinks=false build and it fails there (#1592). "
             "Add it to LIBTRACER_BUS_TESTS in this file — or, if it really is tier-blind, to "
-            "LIBTRACER_BUS_TESTS_EXEMPT with the reason, beside httpd_ws_counters.")
+            "LIBTRACER_BUS_TESTS_EXEMPT with the reason.")
     endif()
 endif()
 
@@ -2315,7 +2323,9 @@ endforeach()
 # drives the compiler over the REAL TU under both bindings, exactly as the #1158 spin-pool guard
 # does. Gated on the CAN module because that is the option whose combination with `kBusLinks =
 # false` is the contradiction; the bus-closed CI leg turns CAN off and so never reaches it, which
-# is precisely why this guard has to exist separately.
+# is precisely why this guard has to exist separately. The ALLOWED arm binds the test preset
+# (tests/instrumented, `kBusLinks = true`), the FORBIDDEN arm the fragment written here — both
+# explicit, because the stock default has been `false` since #1670.
 if(LIBTRACER_TRANSPORT_CAN)
     file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/bus-closed/libtracer/config_override.hpp
 "/**
@@ -2338,6 +2348,7 @@ using config_t = bus_closed_config_t;
     add_test(NAME bus_can_guard COMMAND ${CMAKE_COMMAND}
              -DLT_CXX=${CMAKE_CXX_COMPILER}
              -DLT_CORE_INCLUDE=${CMAKE_CURRENT_SOURCE_DIR}/../include
+             -DLT_BUS_OPEN_INCLUDE=${CMAKE_CURRENT_SOURCE_DIR}/instrumented
              -DLT_BUS_CLOSED_INCLUDE=${CMAKE_CURRENT_BINARY_DIR}/bus-closed
              -DLT_PROBE=${CMAKE_CURRENT_SOURCE_DIR}/../src/transport_can.cpp
              -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/bus_can_guard.cmake)
@@ -2471,3 +2482,10 @@ add_executable(instrument_counters_test instrument_counters_test.cpp)
 target_link_libraries(instrument_counters_test PRIVATE libtracer)
 libtracer_test_warnings(instrument_counters_test)
 add_test(NAME instrument_counters COMMAND instrument_counters_test)
+
+# #1670 — kBusLinks / kSelfHealLinks are lean by default; the test build opts in through its
+# preset, and this pins the default itself (it fails on any build whose default carries either).
+add_executable(lean_link_defaults_test lean_link_defaults_test.cpp)
+target_link_libraries(lean_link_defaults_test PRIVATE libtracer)
+libtracer_test_warnings(lean_link_defaults_test)
+add_test(NAME lean_link_defaults COMMAND lean_link_defaults_test)

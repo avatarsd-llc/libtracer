@@ -494,16 +494,22 @@ struct default_config_t {
      * whether a tcp/ws listener is peer-named is a WIRING-time choice inside a TU that a
      * bus-less target still compiles for its point-to-point half.
      *
-     * **What it costs to keep (the default) and what closing it buys.** Measured on rv32
+     * **What it costs to carry and what the default saves.** Measured on rv32
      * (`-Os -fno-exceptions -fno-rtti`, `rv32imac_zicsr_zifencei`/`ilp32`, GCC 15.2, per-TU
      * `.text`), closing it removes **1,400 B** of flash from `%fwd_router.cpp` and **678 B**
      * from `%transport_vertex.cpp` — 2,078 B — and **0 B** of `.bss`, because the tier is code
      * and per-instance state, not a static table. A `LIBTRACER_NET_PLANE=OFF` build gains
      * nothing: it never compiled those TUs in the first place.
      *
-     * **Who should set it.** A node whose links are point-to-point — one dial upstream, or a
-     * listener that serves its peers as one broadcast link (ADR-0001's originating firmware
-     * shape). Override fragment: `static constexpr bool kBusLinks = false;`
+     * **Default `false` — the lean choice (#1670, v0.17.0).** A node whose links are
+     * point-to-point — one dial upstream, or a listener that serves its peers as one broadcast
+     * link (ADR-0001's originating firmware shape) — pays nothing for a tier it never uses.
+     *
+     * **Who opts in.** A node that runs a peer-named listener (`peer_named=true` tcp/ws), the
+     * ESP-IDF WS server `httpd_ws_link_t`, or ANY CAN link — the last two are buses by
+     * construction. Override fragment: `static constexpr bool kBusLinks = true;` — the core
+     * test build, the `bench/` build and the ESP-IDF `CONFIG_LIBTRACER_BUS_LINKS` (which
+     * `CONFIG_LIBTRACER_WS_SERVER` selects) do exactly that.
      *
      * **It is a REFUSAL, never a silent downgrade.** A build that binds it `false` and then
      * asks for a bus is rejected, loudly and at the earliest door that can speak: compiling
@@ -513,7 +519,7 @@ struct default_config_t {
      * configuration as FLAT would be worse than either: the listener's own per-frame tier
      * select would keep delivering peer-named into a sink the router never installed.
      */
-    static constexpr bool kBusLinks = true;
+    static constexpr bool kBusLinks = false;
 
     /**
      * @brief Whether this target carries the RFC-0014 §4 S5 LINK-LIVENESS ENGINE at all —
@@ -533,21 +539,23 @@ struct default_config_t {
      * (`LIBTRACER_SELF_HEAL_LINKS` in `core/CMakeLists.txt`,
      * `CONFIG_LIBTRACER_SELF_HEAL_LINKS` in the ESP-IDF component).
      *
-     * **What it costs to keep and what closing it buys.** Measured by the reporter on an
+     * **What it costs to carry and what the default saves.** Measured by the reporter on an
      * ESP32-C6 image (riscv32, `-Os -fno-exceptions -fno-rtti`, same sdkconfig) across the
      * release that made the TU unconditional: `nm` on the linked ELF finds **4,336 B** of
      * reachable `self_heal_link_t` symbols (`worker_main`, `attempt_locked`, `reap_locked`,
      * …) out of a +6,224 B image bump, and **0 B** of `.dram0.bss` — the engine is code and
      * per-instance state, not a static table.
      *
-     * **Who should set it.** Any node that does not use an engine-managed DIAL. Since #1548
-     * the built-in `udp`/`tcp`/`ws` factories DO register `self_heal_dial`, so a stock host
-     * node that creates connections from config is using the engine and should leave this
-     * `true`. The targets that can still close it out are the ones whose DIAL connections
-     * never come from the factory catalog — an ESP-IDF node staging its links with
-     * `provide_link`, a `%slim_net_t` node registering only its own kinds, a listen-only or
-     * bus-only node. Override fragment:
-     * `static constexpr bool kSelfHealLinks = false;`
+     * **Default `false` — the lean choice (#1670, v0.17.0; re-rules #1548's default).** The
+     * built-in `udp`/`tcp`/`ws` DIAL kinds then dial EAGERLY, exactly as they did before
+     * #1548 made them engine-managed: the connection comes up at creation, with no redial,
+     * no backoff and no liveness publishing beyond `UP`.
+     *
+     * **Who opts in.** A node that wants its config-created DIAL connections minted
+     * `DORMANT` and self-healing, or that registers its own `self_heal_dial` kind. Override
+     * fragment: `static constexpr bool kSelfHealLinks = true;` — AND compile the TU
+     * (`-DLIBTRACER_SELF_HEAL_LINKS=ON`; the ESP-IDF `CONFIG_LIBTRACER_SELF_HEAL_LINKS` does
+     * both from one symbol). The core test build and the `bench/` build opt in.
      *
      * **It is a REFUSAL, never a silent downgrade.** A build that binds it `false` and then
      * registers a `self_heal_dial` kind is rejected at `register_transport_type`: the kind
@@ -563,10 +571,10 @@ struct default_config_t {
      * `self_heal_dial = false` on a closed-out build, keeping the eager dial they always
      * had. The refusal above targets a kind that CLAIMS an engine the image does not carry;
      * a build-conditioned declaration claims nothing it cannot have. Making the refusal fire
-     * for the built-ins instead would drop `udp`/`tcp`/`ws` out of the catalog and turn a
-     * default-on feature into a default-broken build.
+     * for the built-ins instead would drop `udp`/`tcp`/`ws` out of the catalog and turn the
+     * lean default into a broken build.
      */
-    static constexpr bool kSelfHealLinks = true;
+    static constexpr bool kSelfHealLinks = false;
 
     /**
      * @brief Stack bytes for the link-liveness engine's worker thread; `0` = the platform

@@ -12,6 +12,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **BREAKING — the two link modules are opt-in
+  ([#1670](https://github.com/avatarsd-llc/libtracer/issues/1670)).** New
+  `CONFIG_LIBTRACER_BUS_LINKS` (default `n`) binds `kBusLinks`, and
+  `CONFIG_LIBTRACER_SELF_HEAL_LINKS` now defaults to `n`. `CONFIG_LIBTRACER_TRANSPORT_CAN`
+  `depends on` the bus symbol, so a stock image carries no CAN/TWAI plane. The WebSocket
+  SERVER link is split out of `CONFIG_LIBTRACER_TRANSPORT_WS` into its own
+  `CONFIG_LIBTRACER_WS_SERVER` (default `n`), which SELECTS `CONFIG_LIBTRACER_BUS_LINKS` and
+  `CONFIG_HTTPD_WS_SUPPORT`: `httpd_ws_link_t` is a bus by construction, so an image that serves
+  WebSocket can never be built without the bus tier, and `httpd_ws_link.cpp` `static_assert`s
+  `kBusLinks` for any build that got around the select. `httpd_ws_link_t::ok()` no longer has a
+  bus-less arm. `CONFIG_LIBTRACER_TRANSPORT_WS` alone now builds only the client link.
+  **Observable:** a stock image has no `httpd_ws_link_t` (naming it is a link error), and
+  config-created udp/tcp/ws DIALs dial eagerly. **Migration:** a node that serves WebSocket
+  sets `CONFIG_LIBTRACER_WS_SERVER=y`; a node that uses CAN sets `CONFIG_LIBTRACER_BUS_LINKS=y`;
+  a node that wants self-healing DIALs sets `CONFIG_LIBTRACER_SELF_HEAL_LINKS=y`. The
+  `full_node` example sets all three in its `sdkconfig.defaults`.
 - **BREAKING — link construction takes one config aggregate (RFC-0028 slice 10,
   [#1593](https://github.com/avatarsd-llc/libtracer/issues/1593)).** Both link constructors
   change, and there are no shims:

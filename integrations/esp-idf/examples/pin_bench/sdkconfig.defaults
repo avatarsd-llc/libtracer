@@ -13,15 +13,12 @@
 # containers (unordered_map / vector) during register/write.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 
-# CI compile-coverage for the esp_http_server-backed WS link. This example does
-# not USE httpd_ws_link_t (it is an in-process/loopback smoke app), but enabling
-# WS support makes the component CMakeLists compile httpd_ws_link.cpp here — the
-# ONLY CI build that exercises the WS-on path (full_node keeps it off so its
-# footprint sentinel is not charged for a TU it does not bind). Without this,
-# httpd_ws_link.cpp compiles nowhere in CI and a break in it (or in the
-# esp_http_server requirement wiring) is only caught by a downstream firmware
-# build. inprocess_mirror has no footprint gate, so the extra TU costs nothing here.
-CONFIG_HTTPD_WS_SUPPORT=y
+# No WebSocket server here (#1670). httpd_ws_link.cpp is compiled only under
+# CONFIG_LIBTRACER_WS_SERVER, which SELECTS the bus tier, so turning it on in this in-process
+# smoke app would cost it the lean default for a link it never uses. Its CI compile coverage
+# is the full_node job instead: that example serves WebSocket, opts in to
+# CONFIG_LIBTRACER_WS_SERVER, builds for all four targets, and tools/check_esp_ws_plane.py
+# asserts the httpd_ws_link TU was actually compiled there.
 
 # RFC-0022 §6 measures the SHIPPED profile. The ESP-IDF default is -Og, which inflates the
 # absolute store leg by roughly an order of magnitude and — worse for this bench — does not

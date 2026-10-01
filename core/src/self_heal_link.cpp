@@ -22,12 +22,14 @@ namespace tr::net {
 // The module gate (#1470), the same shape `transport_can.cpp` states for `kBusLinks`: this
 // TU IS the link-liveness engine, so a build that bound the module out and then compiled it
 // anyway has its two selectors disagreeing. Say so here rather than shipping 4.3 KB of
-// unreachable flash — drop `LIBTRACER_SELF_HEAL_LINKS` / `CONFIG_LIBTRACER_SELF_HEAL_LINKS`
-// from the build list to match the fragment.
+// unreachable flash. `false` is the default since v0.17.0 (#1670), so the likelier mistake is
+// now an opt-in that set only the TU switch: the message names both halves.
 static_assert(kSelfHealLinks,
-              "self_heal_link.cpp is compiled on a build whose config fragment binds "
-              "kSelfHealLinks = false. Turn LIBTRACER_SELF_HEAL_LINKS (CMake) or "
-              "CONFIG_LIBTRACER_SELF_HEAL_LINKS (ESP-IDF) OFF so the TU is dropped too.");
+              "self_heal_link.cpp is compiled on a build whose config binds "
+              "kSelfHealLinks = false (the default since v0.17.0). To opt in, bind "
+              "`static constexpr bool kSelfHealLinks = true;` in libtracer/config_override.hpp; "
+              "otherwise turn LIBTRACER_SELF_HEAL_LINKS (CMake) OFF so the TU is dropped too. "
+              "The ESP-IDF CONFIG_LIBTRACER_SELF_HEAL_LINKS sets both.");
 
 using wire::tlv_t;
 

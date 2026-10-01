@@ -72,11 +72,11 @@ set(LIBTRACER_SRCS
 
 # The RFC-0014 S5 link-liveness engine (#1470) — its own TU, so its own Kconfig bool, and the
 # TU list and the config member below are driven by the SAME symbol, so the two can never
-# disagree on this component the way a hand-paired core build can. OFF gives a
-# flash-constrained node back 4,336 B of reachable self_heal_link_t symbols (measured on a
-# C6 image; 0 B of .dram0.bss). NO built-in kind asks for the engine today: the udp/tcp/ws
-# factories construct eagerly and an ESP node stages its links with provide_link, which
-# bypasses the factory catalog entirely — so on a stock image it is unreachable code.
+# disagree on this component the way a hand-paired core build can. OFF by default since
+# v0.17.0 (#1670): a node that does not opt in keeps 4,336 B of reachable self_heal_link_t
+# symbols out of its image (measured on a C6 image; 0 B of .dram0.bss), and its config-created
+# udp/tcp/ws DIALs dial eagerly. A node staging its links with provide_link never reaches the
+# engine either way — that path bypasses the factory catalog.
 if(CONFIG_LIBTRACER_SELF_HEAL_LINKS)
     list(APPEND LIBTRACER_SRCS "${LIBTRACER_ROOT}/core/src/self_heal_link.cpp")
 endif()
@@ -212,22 +212,24 @@ if(NOT IDF_TARGET STREQUAL "linux")
     # true replacement, not a coexistence: transport_ws.cpp is NOT compiled here at all
     # (LIBTRACER_PORTABLE_WS is FALSE on chips), so nothing relies on --gc-sections to
     # drop it — the registration in the built-in catalog kept it reachable and it never
-    # got dropped. Gated on BOTH the WS module (#393) and CONFIG_HTTPD_WS_SUPPORT (the TU
-    # rides esp_http_server's native WS API, which the component ships only when that
-    # config is on) — so an application that wants the native WS SERVER must set
-    # CONFIG_HTTPD_WS_SUPPORT=y; there is no portable fallback behind it any more.
-    if(CONFIG_LIBTRACER_TRANSPORT_WS AND CONFIG_HTTPD_WS_SUPPORT)
+    # got dropped. Gated on CONFIG_LIBTRACER_WS_SERVER (#1670), which depends on the WS
+    # module (#393) and SELECTS both CONFIG_HTTPD_WS_SUPPORT (the TU rides esp_http_server's
+    # native WS API) and CONFIG_LIBTRACER_BUS_LINKS (the link is a bus by construction, and
+    # the TU static_asserts kBusLinks) — so an image that serves WebSocket always carries
+    # the bus tier, and one that does not keeps the lean default.
+    if(CONFIG_LIBTRACER_WS_SERVER)
         list(APPEND LIBTRACER_SRCS "httpd_ws_link.cpp")
-    elseif(CONFIG_LIBTRACER_TRANSPORT_WS)
-        # Reachable only when an existing sdkconfig pins CONFIG_HTTPD_WS_SUPPORT=n
-        # explicitly — the Kconfig now SELECTs it, so a fresh configure cannot land here.
-        # Say so rather than letting the build go green and fail at link with an
-        # undefined httpd_ws_link_t constructor naming no cause (#963).
+    elseif(CONFIG_LIBTRACER_TRANSPORT_WS AND CONFIG_HTTPD_WS_SUPPORT)
+        # The pre-v0.17.0 shape: TRANSPORT_WS=y used to select HTTPD_WS_SUPPORT and compile
+        # the server with it, so an sdkconfig carried over from then has both and no
+        # WS_SERVER. Say so at configure time rather than leaving a bare undefined reference
+        # to httpd_ws_link_t at link time naming no cause (the #963 lesson, re-applied).
         message(WARNING
-            "libtracer: CONFIG_LIBTRACER_TRANSPORT_WS=y but CONFIG_HTTPD_WS_SUPPORT=n — "
-            "httpd_ws_link_t (the WebSocket SERVER link) is NOT being compiled. The client "
-            "link is unaffected. Set CONFIG_HTTPD_WS_SUPPORT=y, or turn off "
-            "CONFIG_LIBTRACER_TRANSPORT_WS if this node neither serves nor dials WebSocket.")
+            "libtracer: CONFIG_LIBTRACER_TRANSPORT_WS=y and CONFIG_HTTPD_WS_SUPPORT=y, but "
+            "CONFIG_LIBTRACER_WS_SERVER is off, so httpd_ws_link_t (the WebSocket SERVER link) "
+            "is NOT compiled. Since v0.17.0 (#1670) the server is its own option: set "
+            "CONFIG_LIBTRACER_WS_SERVER=y (it selects CONFIG_LIBTRACER_BUS_LINKS) if this node "
+            "serves WebSocket. Ignore this if CONFIG_HTTPD_WS_SUPPORT is on for another reason.")
     endif()
     # Chip targets: the esp_transport_ws-backed WS *client* link (esp_ws_client_link_t) — the
     # embedded-native replacement for core's raw-socket transport_ws_client (which fails the
@@ -355,16 +357,22 @@ else()
     using lkv_slot_t = single_writer_slot_t;
 ")
 endif()
-# The S5 liveness engine (#1470). CONFIG_* is undefined in the early requirement-expansion
-# pass, so the fallback is the Kconfig DEFAULT (y) rather than off — the second pass then
-# writes the real value before anything compiles. Getting this backwards would render a
-# fragment that closes the engine out while the TU list (also CONFIG_-gated, and also read
-# only in the second pass) compiles it, which `self_heal_link.cpp`'s own static_assert would
-# then reject.
-if(DEFINED CONFIG_LIBTRACER_SELF_HEAL_LINKS AND NOT CONFIG_LIBTRACER_SELF_HEAL_LINKS)
-    set(LIBTRACER_SELF_HEAL_LINKS false)
-else()
+# The two link modules (#1470, #1670). CONFIG_* is undefined in the early requirement-expansion
+# pass, so each fallback is its Kconfig DEFAULT — `n` for both since v0.17.0 — and the second
+# pass then writes the real value before anything compiles. The TU lists that pair with them
+# (self_heal_link.cpp; transport_can.cpp, which `depends on` the bus bool in Kconfig) are
+# CONFIG_-gated and read only in that second pass too, so the fragment and the TU list agree
+# whenever anything is compiled; `self_heal_link.cpp` and `transport_can.cpp` each
+# static_assert their member if they ever did not.
+if(CONFIG_LIBTRACER_SELF_HEAL_LINKS)
     set(LIBTRACER_SELF_HEAL_LINKS true)
+else()
+    set(LIBTRACER_SELF_HEAL_LINKS false)
+endif()
+if(CONFIG_LIBTRACER_BUS_LINKS)
+    set(LIBTRACER_BUS_LINKS true)
+else()
+    set(LIBTRACER_BUS_LINKS false)
 endif()
 # Worker stack bytes; 0 = the IDF pthread default. Same early-pass fallback reasoning.
 if(CONFIG_LIBTRACER_SELF_HEAL_WORKER_STACK)
@@ -395,6 +403,7 @@ struct esp_config_t : default_config_t {
     static constexpr std::size_t kCacheLineBytes = ${LIBTRACER_CACHE_LINE_BYTES};
     static constexpr std::size_t kEdgePinSlots = ${LIBTRACER_EDGE_PIN_SLOTS};
     static constexpr bool kSpinWaitSafe = ${LIBTRACER_SPIN_WAIT_SAFE};
+    static constexpr bool kBusLinks = ${LIBTRACER_BUS_LINKS};
     static constexpr bool kSelfHealLinks = ${LIBTRACER_SELF_HEAL_LINKS};
     static constexpr std::size_t kSelfHealWorkerStackBytes = ${LIBTRACER_SELF_HEAL_WORKER_STACK};
     static constexpr std::size_t kShareThresholdBytes = ~std::size_t{0};

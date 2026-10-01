@@ -114,7 +114,7 @@ Ten targets need the FWD routing plane and exist only when
 `if(LIBTRACER_NET_PLANE)` blocks (`core/examples/CMakeLists.txt:59,74`), and so are
 their test registrations (`core/examples/CMakeLists.txt:87-96`); the eight `route_*` targets sit
 inside a third such block at the end of the file. The option defaults to
-`ON` (`core/CMakeLists.txt:63-65`), so the recipe above builds every example. Configured with
+`ON` (`core/CMakeLists.txt:67-69`), so the recipe above builds every example. Configured with
 `-DLIBTRACER_NET_PLANE=OFF`, those ten binaries are never produced. For the
 `route_*` group that absence is not a choice: `fwd_router_t`, `route_handle_t` and `op_resolve`
 are the net plane, so at `-DLIBTRACER_NET_PLANE=OFF` the types those examples name do not exist
@@ -148,7 +148,8 @@ that a `kSpinWaitSafe = false` target could not instantiate. Since RFC-0028 slic
 build's one `reader_guard_t`, which never pure-spins, so it runs unconditionally.)
 
 [`net_multi_peer_listener`](net-multi-peer-listener) is the other, and it is the one that fixes
-that. Its subject is the ADR-0044 peer-named tier, closed out by `kBusLinks = false` — again a
+that. Its subject is the ADR-0044 peer-named tier, which `kBusLinks` carries only on a build
+that opts in (the default is `false` since v0.17.0, #1670) — again a
 C++ binding CMake cannot see — so it too has to follow the binding at run time. But instead of
 exiting `0` it states the skip and exits **77**, and its `add_test` carries `SKIP_RETURN_CODE 77`,
 so ctest reports **`Skipped`** rather than a pass. Verified in a `kBusLinks = false` build:
