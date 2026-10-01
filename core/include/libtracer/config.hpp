@@ -648,8 +648,9 @@ struct default_config_t {
      * the respective module header). It is never silently ignored — a dial that asked for no
      * verification and quietly got verification would fail later for a reason nobody wrote
      * down — and never honoured. `insecure` = `0` is the explicit "verify" spelling and is
-     * accepted either way. The `ca` key (verify against a named PEM bundle) is the way to
-     * reach a privately-issued or self-signed peer on a closed-out build.
+     * accepted either way. An app TLS profile whose `ca_file` certifies the peer (selected
+     * by the SPEC's `tls` key, see `%tr::net::tls_profile_t`) is the way to reach a
+     * privately-issued or self-signed peer on a closed-out build.
      *
      * Only the SPEC path is gated. An application that constructs a transport itself with
      * `quic_dial_tls_t{.insecure_no_verify = true}` has made that choice in its own C++; no

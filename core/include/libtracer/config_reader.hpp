@@ -5,7 +5,7 @@
  * config_reader — typed accessors over a positional NAME-key / typed-value PAIR container.
  * The pair walk was copied verbatim by all SIX transport-side consumers of a connection
  * config — transport_vertex's universal keys, the tcp / ws / can factories, and the quic
- * and webtransport factories' cert/key — and this is their one home. Each factory still
+ * and webtransport factories' TLS keys — and this is their one home. Each factory still
  * reads ONLY its own keys from the raw config TLV it receives (ADR-0043 §5 leanness:
  * kind-private keys never land in the shared conn_settings_t) — what is shared is the
  * walk, not the vocabulary.
@@ -79,6 +79,25 @@ class config_reader_t {
         const tlv_t* val = find(key, type_t::NAME);
         if (val == nullptr) return std::nullopt;
         return detail::as_string_view(val->payload);
+    }
+
+    /**
+     * @brief Whether @p key appears as a key in any well-paired position, whatever
+     *        its value's type or width.
+     *
+     * The presence test for a key a reader must REFUSE rather than skip (a retired
+     * key whose silent omission would change behaviour): unlike the typed
+     * accessors, a value of the wrong type still counts. Same pair-consuming walk
+     * as find(), so a value child spelling @p key is never mistaken for it.
+     */
+    [[nodiscard]] bool has(std::string_view key) const noexcept {
+        if (config_ == nullptr) return false;
+        const std::vector<tlv_t>& ch = config_->children;
+        for (std::size_t i = 0; i + 1 < ch.size(); i += 2) {
+            if (ch[i].type != type_t::NAME) break;
+            if (detail::as_string_view(ch[i].payload) == key) return true;
+        }
+        return false;
     }
 
     /**

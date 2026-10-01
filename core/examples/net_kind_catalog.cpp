@@ -124,7 +124,7 @@ int main() {
         [](const tr::net::conn_settings_t& settings, const tr::wire::tlv_t* raw_config)
             -> tr::graph::result_t<std::unique_ptr<tr::net::transport_t>> {
             // A real factory parses its kind-PRIVATE keys out of `raw_config` here (quic's
-            // cert/key PEM paths are the shipped example); the universal keys are already
+            // `tls` profile name is the shipped example); the universal keys are already
             // parsed into `settings`. This one needs neither, and says so.
             (void)settings;
             (void)raw_config;

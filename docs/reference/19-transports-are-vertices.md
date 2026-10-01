@@ -287,15 +287,20 @@ The mechanism is the factory signature: a factory is
 registered at runtime through `transport_vertex_t::register_transport_type`
 (`core/src/transport_vertex.cpp:258`). The central parse reads the universal keys and nothing
 else (`core/src/transport_vertex.cpp:54`, `:57`); unknown pairs are ignored, so a newer peer
-may send keys this node has never heard of. `quic` reads its own `cert` / `key` / `ca` /
-`insecure`, `ws` and `tcp` read `peer_named` / `max_peers`, `can` reads its bus identity —
-and none of them can see another's vocabulary
-([connection-config](../modules/connection-config.md)).
+may send keys this node has never heard of. `quic` reads its own `tls` / `insecure`, `ws`
+and `tcp` read `peer_named` / `max_peers`, `can` reads its bus identity — and none of them
+can see another's vocabulary ([connection-config](../modules/connection-config.md)).
+
+A kind-private key never names a file. A creation SPEC can come from any writer, a remote
+one included, so the TLS kinds take their certificate, key and CA bundle from the
+application: it registers a table of named `tls_profile_t` with the factory, and `tls`
+can only select one of those by name. An unregistered name is refused with
+`TYPE_MISMATCH` before any file is opened.
 
 ### Why the rule exists
 
 - **Optionality.** QUIC is a separate link target that the core never references; a device
-  without the module contains zero QUIC schema (ADR-0043 §1, §5). A `cert` field on the
+  without the module contains zero QUIC schema (ADR-0043 §1, §5). A `tls` field on the
   shared record would put that vocabulary — and its bytes — on every node, including the
   16 KB class that cannot carry TLS at all.
 - **Open/closed.** `transport_vertex.cpp` never learns what msquic is. Adding a transport

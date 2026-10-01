@@ -37,7 +37,7 @@ nobody registered and gets `SCHEMA_NOT_FOUND`.
 - **The factory parses its own private keys.** Universal keys (`addr`, `port`, `kind`,
   `max_frame`, …) arrive already parsed in `conn_settings_t` — with `role` filled in from the
   module's declaration rather than from the wire; a kind's private config (quic's
-  `cert`/`key` PEM paths) is the factory's business, read out of the raw config TLV. That split
+  `tls` profile name) is the factory's business, read out of the raw config TLV. That split
   is what keeps `conn_settings_t` lean (ADR-0043 §5) — no kind-specific field ever lands in the
   shared record.
 - **This target needs the net plane** (`LIBTRACER_NET_PLANE`, the default) for

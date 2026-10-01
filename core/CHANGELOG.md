@@ -32,6 +32,31 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Breaking
 
+- **TLS trust material is app-owned; a creation SPEC no longer takes file paths
+  (`quic`, `webtransport`).** The kind-private config keys `ca`, `cert` and `key` are
+  gone: a SPEC can arrive from any writer, so no value it carries becomes a filesystem
+  path. The application now owns the files: `quic_transport_factory(profiles, rx_backend)`
+  and `webtransport_transport_factory(profiles, rx_backend)` take a
+  `std::span<const tls_profile_t>` (new header `libtracer/tls_profile.hpp`: `name`,
+  `ca_file`, `cert_file`, `key_file`, plus the `find_tls_profile` lookup), and a SPEC can
+  at most name one of those profiles with the new `tls` key. An absent `tls` selects the
+  profile named `""`; a name the table does not hold is refused with `TYPE_MISMATCH`
+  before any file is opened. A LISTEN needs a profile with a credential; a DIAL with no
+  profile anchor verifies against the system trust store, as before. The factory keeps
+  the span, not a copy (no library-held buffer): the table must outlive the factory and
+  its transports. `rx_backend` moves to the second parameter. No compatibility shim: a
+  SPEC still carrying `ca`, `cert` or `key` (any value type) is now **refused** with
+  `TYPE_MISMATCH`, the same code as an unknown profile and before any file is opened,
+  so a stale config that pinned a private CA cannot silently fall back to the system
+  trust store. New `config_reader_t::has(key)` is the type-blind presence test the
+  refusal uses. `insecure` keeps the `kAllowInsecureTls` gate of the entry below, which
+  this change composes with: that entry's "reach a self-signed peer with `ca`" now means
+  a profile's `ca_file`. The direct `quic_transport_t` / `webtransport_transport_t` constructors
+  still take paths, since only the application calls them.
+  **Migration:** move `ca`/`cert`/`key` into the app's link config — build a
+  `tls_profile_t` table, pass it to the factory, and name a non-default profile from
+  the SPEC with `tls`.
+
 - **The `insecure` key now requires `config_t::kAllowInsecureTls`.** The `quic` and
   `webtransport` kinds' connection-SPEC key `insecure` (skip server-certificate verification on
   the dial) is honoured only on a build that binds the new compile-time capability

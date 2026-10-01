@@ -67,7 +67,7 @@ namespace tr::net {
  *
  * **Universal vs kind-private keys.** The named setters cover exactly the universal keys
  * `transport_vertex_t` parses into @ref conn_settings_t. A transport kind's PRIVATE keys
- * (quic's `cert`/`key`/`ca`/`insecure`, the tcp/ws servers' `peer_named`/`max_peers`, can's
+ * (quic's `tls`/`insecure`, the tcp/ws servers' `peer_named`/`max_peers`, can's
  * bus identity) never land on that shared record — they are the kind factory's business — so
  * they are spelled through the generic @ref text / @ref u8 / @ref u16 / @ref u32 / @ref flag
  * pairs, whose names mirror @ref tr::wire::config_reader_t's accessors so the encode and decode

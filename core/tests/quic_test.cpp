@@ -79,6 +79,13 @@ std::string g_key;
  *         The wrong-CA-bundle vector that proves the `ca` config key is genuinely
  *         consulted rather than merely accepted and ignored (#918). */
 std::string g_other_cert;
+/**
+ * @brief The app's TLS profile table the SPEC-driven tests register their factory with:
+ *        `dev` trusts and serves the dev pair, `wrongca` trusts only the unrelated
+ *        certificate. Filled in main() once the files exist; the views point into the
+ *        path globals above, which outlive every transport.
+ */
+std::array<tr::net::tls_profile_t, 2> g_profiles{};
 
 quic_dial_tls_t dev_tls() { return quic_dial_tls_t{.ca_file = {}, .insecure_no_verify = true}; }
 
@@ -625,23 +632,22 @@ view_t owned(std::span<const std::byte> bytes) {
 
 /**
  * @brief SPEC{ NAME "name" <name>, SETTINGS "config"{ port, kind=quic [, addr]
- *        [, cert, key] [, ca] [, insecure] } }, written to a module's creator endpoint.
+ *        [, tls] [, insecure] } }, written to a module's creator endpoint.
  *
- * `kind = "quic"` bound into the library's public SPEC builder (#902), plus the four
- * TLS-carrying quic-private config keys: `cert`/`key` the LISTEN factory requires, and the
- * DIAL-side trust pair `ca`/`insecure` (#918). The role no longer travels in the SPEC —
- * the `/net/<module>/conn` segment the write addresses carries both kind and role.
+ * `kind = "quic"` bound into the library's public SPEC builder (#902), plus the two
+ * quic-private config keys: `tls`, which names one of the app's profiles (the SPEC
+ * never carries a file path), and the DIAL-side `insecure` (#918). The role no longer
+ * travels in the SPEC — the `/net/<module>/conn` segment the write addresses carries
+ * both kind and role.
  */
 view_t quic_conn_spec(std::string_view name, std::uint16_t port, std::string_view addr = {},
-                      std::string_view cert = {}, std::string_view key = {},
-                      std::string_view ca = {}, std::optional<bool> insecure = std::nullopt) {
+                      std::string_view tls = {}, std::optional<bool> insecure = std::nullopt) {
     tr::net::conn_spec_t spec(name);
     spec.port(port).kind("quic");
     if (!addr.empty()) spec.addr(addr);
-    // The four quic-private keys go through the generic pair setters: a kind's private
+    // The quic-private keys go through the generic pair setters: a kind's private
     // vocabulary is its factory's business, never the shared builder's (ADR-0043 §5).
-    if (!cert.empty()) spec.text("cert", cert).text("key", key);
-    if (!ca.empty()) spec.text("ca", ca);
+    if (!tls.empty()) spec.text("tls", tls);
     if (insecure) spec.flag("insecure", *insecure);
     return spec.view();
 }
@@ -666,8 +672,8 @@ void test_config_constructed_quic() {
     tr::net::transport_vertex_t net_b(node_b, router_b);
     // The module plugs into the catalog through the extension seam — the core has
     // no `quic` builtin; a host that talks QUIC registers the factory at setup.
-    net_a.register_transport_type("quic", tr::net::quic_transport_factory());
-    net_b.register_transport_type("quic", tr::net::quic_transport_factory());
+    net_a.register_transport_type("quic", tr::net::quic_transport_factory(g_profiles));
+    net_b.register_transport_type("quic", tr::net::quic_transport_factory(g_profiles));
     // ADR-0073 §4 (declared-only): the module names are minted HERE, by the application —
     // an external kind no longer inherits a library-derived "<kind>-client" name.
     (void)net_a.register_module("quic-client", "quic", tr::net::conn_role_t::DIAL);
@@ -696,7 +702,7 @@ void test_config_constructed_quic() {
     tr::wire::emit_tlv(tv, type_t::VALUE, opt_t{}, std::span<const std::byte>(&tb, 1));
     (void)node_b.write(path_t("/temp"), owned(tv));
     const auto wb =
-        node_b.write(path_t("/net/quic-server/conn"), quic_conn_spec("a", 0, {}, g_cert, g_key));
+        node_b.write(path_t("/net/quic-server/conn"), quic_conn_spec("a", 0, {}, "dev"));
     check(wb.has_value(), "B: SPEC{kind=quic, port, cert, key} constructs the listener");
     check(router_b.registry().by_name("net/quic-server/a") != nullptr,
           "B: the socket is wired into the router");
@@ -718,7 +724,7 @@ void test_config_constructed_quic() {
     // file as its `ca` bundle. Without a trust key the handshake would be refused —
     // which is the point of the fix, and is asserted in test_spec_dial_trust_keys.
     const auto wa = node_a.write(path_t("/net/quic-client/conn"),
-                                 quic_conn_spec("b", srv_port, "127.0.0.1", {}, {}, g_cert));
+                                 quic_conn_spec("b", srv_port, "127.0.0.1", "dev"));
     check(wa.has_value(), "A: SPEC{kind=quic, addr, port, ca} constructs the dialing socket");
     const auto* s = net_a.settings_of("net/quic-client/b");
     check(s != nullptr && s->kind == "quic" && s->addr == "127.0.0.1" && s->port == srv_port,
@@ -759,8 +765,8 @@ void test_spec_dial_trust_keys() {
     tr::net::fwd_router_t router_b(node_b);
     tr::net::transport_vertex_t net_a(node_a, router_a);
     tr::net::transport_vertex_t net_b(node_b, router_b);
-    net_a.register_transport_type("quic", tr::net::quic_transport_factory());
-    net_b.register_transport_type("quic", tr::net::quic_transport_factory());
+    net_a.register_transport_type("quic", tr::net::quic_transport_factory(g_profiles));
+    net_b.register_transport_type("quic", tr::net::quic_transport_factory(g_profiles));
     (void)net_a.register_module("quic-client", "quic", tr::net::conn_role_t::DIAL);
     (void)net_b.register_module("quic-server", "quic", tr::net::conn_role_t::LISTEN);
 
@@ -771,7 +777,7 @@ void test_spec_dial_trust_keys() {
     std::map<std::string_view, std::uint16_t> ports;
     for (const std::string_view nm : {"l1", "l2", "l3", "l4", "l5"}) {
         const auto w =
-            node_b.write(path_t("/net/quic-server/conn"), quic_conn_spec(nm, 0, {}, g_cert, g_key));
+            node_b.write(path_t("/net/quic-server/conn"), quic_conn_spec(nm, 0, {}, "dev"));
         auto* const link = dynamic_cast<quic_transport_t*>(
             net_b.link_of(std::string("net/quic-server/").append(nm)));
         ports[nm] = (link != nullptr) ? link->local_port() : std::uint16_t{0};
@@ -794,9 +800,8 @@ void test_spec_dial_trust_keys() {
     //    config_t::kAllowInsecureTls; on the default build the SPEC is refused at creation
     //    with PERMISSION_DENIED and counted, never silently turned into a verifying dial.
     const std::uint64_t refused_before = tr::net::quic_insecure_refusals();
-    const auto insec =
-        node_a.write(path_t("/net/quic-client/conn"),
-                     quic_conn_spec("insec", ports["l2"], "127.0.0.1", {}, {}, {}, true));
+    const auto insec = node_a.write(path_t("/net/quic-client/conn"),
+                                    quic_conn_spec("insec", ports["l2"], "127.0.0.1", {}, true));
     if constexpr (tr::net::kAllowInsecureTls) {
         check(insec.has_value(), "A: `insecure = 1` connects to that same unvalidatable peer");
         check(tr::net::quic_insecure_refusals() == refused_before,
@@ -808,9 +813,8 @@ void test_spec_dial_trust_keys() {
               "A: the refused SPEC leaves no connection behind");
         check(tr::net::quic_insecure_refusals() == refused_before + 1, "A: the refusal is counted");
         // The key is refused on the LISTEN role too — it is never silently ignored.
-        const auto listen_insec =
-            node_b.write(path_t("/net/quic-server/conn"),
-                         quic_conn_spec("linsec", 0, {}, g_cert, g_key, {}, true));
+        const auto listen_insec = node_b.write(path_t("/net/quic-server/conn"),
+                                               quic_conn_spec("linsec", 0, {}, "dev", true));
         check(!listen_insec.has_value() &&
                   listen_insec.error() == tr::graph::status_t::PERMISSION_DENIED,
               "B: a LISTEN SPEC carrying `insecure = 1` is REFUSED as well");
@@ -821,16 +825,14 @@ void test_spec_dial_trust_keys() {
     // 3. `ca = <the peer's own cert>` — verification stays ON, against a private
     //    bundle rather than the system trust store. The secure way to reach a
     //    self-signed or privately-issued peer.
-    const auto with_ca =
-        node_a.write(path_t("/net/quic-client/conn"),
-                     quic_conn_spec("ca", ports["l3"], "127.0.0.1", {}, {}, g_cert));
+    const auto with_ca = node_a.write(path_t("/net/quic-client/conn"),
+                                      quic_conn_spec("ca", ports["l3"], "127.0.0.1", "dev"));
     check(with_ca.has_value(), "A: `ca = <the peer's cert>` connects with verification ON");
 
     // 4. `insecure = 0` is the explicit "verify" spelling, not a weaker opt-out —
     //    a stale key left at zero must not disable validation by accident.
-    const auto zero =
-        node_a.write(path_t("/net/quic-client/conn"),
-                     quic_conn_spec("zero", ports["l4"], "127.0.0.1", {}, {}, {}, false));
+    const auto zero = node_a.write(path_t("/net/quic-client/conn"),
+                                   quic_conn_spec("zero", ports["l4"], "127.0.0.1", {}, false));
     check(!zero.has_value() && zero.error() == tr::graph::status_t::TRANSPORT_DOWN,
           "A: `insecure = 0` passes the capability gate and still verifies — REFUSED");
 
@@ -839,8 +841,112 @@ void test_spec_dial_trust_keys() {
     //    is what keeps leg 3 from passing for the wrong reason.
     const auto wrong_ca =
         node_a.write(path_t("/net/quic-client/conn"),
-                     quic_conn_spec("wrongca", ports["l5"], "127.0.0.1", {}, {}, g_other_cert));
+                     quic_conn_spec("wrongca", ports["l5"], "127.0.0.1", "wrongca"));
     check(!wrong_ca.has_value(), "A: `ca = <an unrelated CA>` is REFUSED — the bundle is applied");
+}
+
+/**
+ * @brief A creation SPEC cannot name the node's TLS files: `ca`, `cert` and `key`
+ *        are not config keys of this kind.
+ *
+ * A SPEC reaches the creator endpoint from any writer, a remote one included, so
+ * a value it carries must never become a filesystem path. The dial leg aims a
+ * `ca` at the self-signed certificate an app-constructed listener serves: were
+ * the key honoured, it would become the trust anchor and the handshake would
+ * succeed. The listen leg hands over a `cert`/`key` pair the node can read: were
+ * it honoured, the node would serve TLS under it. Both must be refused, and
+ * neither may leave a connection behind.
+ */
+void test_spec_cannot_name_tls_files() {
+    std::printf("SPEC cannot name TLS files (ca/cert/key are not config keys):\n");
+    graph_t node;
+    tr::net::fwd_router_t router(node);
+    tr::net::transport_vertex_t net(node, router);
+    net.register_transport_type("quic", tr::net::quic_transport_factory(g_profiles));
+    (void)net.register_module("quic-client", "quic", tr::net::conn_role_t::DIAL);
+    (void)net.register_module("quic-server", "quic", tr::net::conn_role_t::LISTEN);
+
+    quic_transport_t served(std::uint16_t{0}, g_cert, g_key);
+    check(served.ok(), "an app-constructed listener serves the self-signed dev cert");
+
+    tr::net::conn_spec_t dial("dial");
+    dial.port(served.local_port()).kind("quic").addr("127.0.0.1").text("ca", g_cert);
+    const auto d = node.write(path_t("/net/quic-client/conn"), dial.view());
+    check(!d.has_value() && d.error() == tr::graph::status_t::TYPE_MISMATCH,
+          "a SPEC `ca` path is REFUSED with TYPE_MISMATCH, never a trust anchor");
+    check(router.registry().by_name("net/quic-client/dial") == nullptr,
+          "the refused dial leaves no connection behind");
+
+    tr::net::conn_spec_t listen("listen");
+    listen.port(0).kind("quic").text("cert", g_cert).text("key", g_key);
+    const auto l = node.write(path_t("/net/quic-server/conn"), listen.view());
+    check(!l.has_value() && l.error() == tr::graph::status_t::TYPE_MISMATCH,
+          "a SPEC `cert`/`key` pair is REFUSED with TYPE_MISMATCH, never a credential");
+    check(router.registry().by_name("net/quic-server/listen") == nullptr,
+          "the refused listen leaves no listener behind");
+
+    // A SPEC can NAME a profile, and only one the app registered. An unknown name is a
+    // config error on both roles, answered before any file is opened.
+    const auto ud =
+        node.write(path_t("/net/quic-client/conn"),
+                   quic_conn_spec("unknown-d", served.local_port(), "127.0.0.1", "nope"));
+    check(!ud.has_value() && ud.error() == tr::graph::status_t::TYPE_MISMATCH,
+          "a DIAL naming an unregistered profile is refused with TYPE_MISMATCH");
+    const auto ul =
+        node.write(path_t("/net/quic-server/conn"), quic_conn_spec("unknown-l", 0, {}, "nope"));
+    check(!ul.has_value() && ul.error() == tr::graph::status_t::TYPE_MISMATCH,
+          "a LISTEN naming an unregistered profile is refused with TYPE_MISMATCH");
+    check(router.registry().by_name("net/quic-client/unknown-d") == nullptr &&
+              router.registry().by_name("net/quic-server/unknown-l") == nullptr,
+          "neither refusal leaves a connection behind");
+}
+
+/**
+ * @brief The app's default profile (the one named `""`) applies to a SPEC that names none.
+ *
+ * The app-supplied path still works end to end: a listener created from a SPEC with no
+ * `tls` key serves the default profile's credential, and a dialer created the same way
+ * verifies the peer against the default profile's CA bundle — with verification ON.
+ */
+void test_app_default_profile() {
+    std::printf("App default TLS profile (no `tls` key):\n");
+    const std::array<tr::net::tls_profile_t, 1> defaults{tr::net::tls_profile_t{
+        .name = "", .ca_file = g_cert, .cert_file = g_cert, .key_file = g_key}};
+    graph_t node;
+    tr::net::fwd_router_t router(node);
+    tr::net::transport_vertex_t net(node, router);
+    net.register_transport_type("quic", tr::net::quic_transport_factory(defaults));
+    (void)net.register_module("quic-client", "quic", tr::net::conn_role_t::DIAL);
+    (void)net.register_module("quic-server", "quic", tr::net::conn_role_t::LISTEN);
+
+    const auto l = node.write(path_t("/net/quic-server/conn"), quic_conn_spec("srv", 0));
+    check(l.has_value(), "a LISTEN with no `tls` key serves the app's default credential");
+    auto* const srv = dynamic_cast<quic_transport_t*>(net.link_of("net/quic-server/srv"));
+    const std::uint16_t port = (srv != nullptr) ? srv->local_port() : std::uint16_t{0};
+    check(port != 0, "the default-profile listener is up on an OS-granted port");
+
+    const auto d =
+        node.write(path_t("/net/quic-client/conn"), quic_conn_spec("cli", port, "127.0.0.1"));
+    check(d.has_value(), "a DIAL with no `tls` key verifies against the default profile's CA");
+
+    // A stale config still carrying a retired key is REFUSED even where a usable
+    // default profile exists: skipping `ca` would silently re-anchor the dial. Any
+    // value type counts, and the value is never opened (it names no real file).
+    for (const std::string_view retired : {"ca", "cert", "key"}) {
+        tr::net::conn_spec_t stale("stale");
+        stale.port(port).kind("quic").addr("127.0.0.1").text(retired, "/nonexistent.pem");
+        const auto s = node.write(path_t("/net/quic-client/conn"), stale.view());
+        check(!s.has_value() && s.error() == tr::graph::status_t::TYPE_MISMATCH,
+              "a DIAL SPEC carrying a retired TLS path key is REFUSED with TYPE_MISMATCH");
+    }
+    tr::net::conn_spec_t stale_u8("stale-u8");
+    stale_u8.port(0).kind("quic").u8("cert", 1);
+    const auto su = node.write(path_t("/net/quic-server/conn"), stale_u8.view());
+    check(!su.has_value() && su.error() == tr::graph::status_t::TYPE_MISMATCH,
+          "a LISTEN SPEC carrying a retired key under any value type is REFUSED");
+    check(router.registry().by_name("net/quic-client/stale") == nullptr &&
+              router.registry().by_name("net/quic-server/stale-u8") == nullptr,
+          "no stale-key refusal leaves a connection behind");
 }
 
 }  // namespace
@@ -869,6 +975,10 @@ int main() {
         return 1;
     }
     g_other_cert = other_dir + "/cert.pem";
+    g_profiles = {tr::net::tls_profile_t{
+                      .name = "dev", .ca_file = g_cert, .cert_file = g_cert, .key_file = g_key},
+                  tr::net::tls_profile_t{
+                      .name = "wrongca", .ca_file = g_other_cert, .cert_file = {}, .key_file = {}}};
 
     test_raw_frame_duplex();
     test_split_and_coalesced();
@@ -882,5 +992,7 @@ int main() {
     test_two_nodes_over_quic();
     test_config_constructed_quic();
     test_spec_dial_trust_keys();
+    test_spec_cannot_name_tls_files();
+    test_app_default_profile();
     return tr::testing::summary("quic");
 }

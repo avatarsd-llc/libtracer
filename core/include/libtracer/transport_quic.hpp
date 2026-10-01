@@ -20,10 +20,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <string>
 
 #include "libtracer/length_prefix_framer.hpp"
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/tls_profile.hpp"
 #include "libtracer/transport.hpp"
 #include "libtracer/transport_vertex.hpp"
 
@@ -205,27 +207,23 @@ class quic_transport_t : public transport_t {
  *        into the transport catalog (the register_transport_type extension seam;
  *        the core has no `quic` builtin).
  *
- * Register at setup: `net.register_transport_type("quic", quic_transport_factory())`.
+ * Register at setup: `net.register_transport_type("quic", quic_transport_factory(profiles))`.
  * A subsequent `:children[]` SPEC whose config carries `kind = quic` then constructs
- * a @ref quic_transport_t from the parsed settings — DIAL: `addr` + `port` plus the
- * OPTIONAL trust keys below; LISTEN: `port` plus the REQUIRED `cert`/`key` PEM-path
- * config keys (QUIC is TLS 1.3 by construction; tools/gen-dev-cert.sh emits a dev
- * pair). All four are quic-PRIVATE config keys: the factory parses them itself from
- * the raw config SETTINGS TLV it receives — they never appear in the shared
- * `conn_settings_t`, which stays lean with only the universal keys (the ADR-0043 §5
- * leanness ruling). Missing fields fail creation with `TYPE_MISMATCH`; a socket that
- * failed to come up fails with `TRANSPORT_DOWN` — the TRANSIENT status, because the
- * address resolved and it was the link that did not come up (#929). `keepalive` is
- * ignored (#66 owns link lifecycle).
+ * a @ref quic_transport_t from the parsed settings — DIAL: `addr` + `port`; LISTEN:
+ * `port`. Both read two quic-PRIVATE config keys, parsed by the factory itself from the
+ * raw config SETTINGS TLV so the shared `conn_settings_t` stays lean with only the
+ * universal keys (the ADR-0043 §5 leanness ruling). Missing fields fail creation with
+ * `TYPE_MISMATCH`; a socket that failed to come up fails with `TRANSPORT_DOWN` — the
+ * TRANSIENT status, because the address resolved and it was the link that did not come
+ * up (#929). `keepalive` is ignored (#66 owns link lifecycle).
  *
- * **A SPEC-created dialer verifies the server certificate (#918).** The trust mode is
- * whatever @ref quic_dial_tls_t defaults to, so with neither DIAL key present the
- * handshake validates against the system trust store and a certificate that does not
- * chain to it is REFUSED (creation answers `TRANSPORT_DOWN`). Two DIAL-side keys move it:
+ * **TLS material is app-owned.** A SPEC can arrive from any writer, so it never carries
+ * a file path: the certificate, key and CA bundle come from @p profiles, the app's table
+ * of @ref tls_profile_t. The SPEC can at most select one by name:
  *
- * - `ca` (NAME, a filesystem path) — verify against this PEM CA bundle instead of the
- *   system trust store; the way to reach a privately-issued or self-signed peer while
- *   still authenticating it.
+ * - `tls` (NAME) — the profile this link uses. Absent selects the profile named `""`
+ *   (the app's default), if the table has one. A name the table does not hold is
+ *   refused with `TYPE_MISMATCH` before any file is opened.
  * - `insecure` (VALUE, u8; default 0) — `1` skips server-certificate validation
  *   entirely. DEV ONLY, and it requires the build capability
  *   @ref tr::graph::default_config_t::kAllowInsecureTls (default `false`): without it a
@@ -233,12 +231,23 @@ class quic_transport_t : public transport_t {
  *   and counted in `%quic_insecure_refusals()` (below), on either role. `insecure = 0` is
  *   accepted on every build.
  *
+ * A LISTEN serves its profile's `cert_file`/`key_file`; with no profile, or one that
+ * leaves either empty, creation answers `TYPE_MISMATCH`. **A SPEC-created dialer
+ * verifies the server certificate (#918)**: against its profile's `ca_file`, or, when
+ * there is no profile or it names no anchor, against the system trust store, and a
+ * certificate that does not chain is REFUSED (creation answers `TRANSPORT_DOWN`).
+ *
+ * @param profiles   The app's TLS profiles (default: none — dials verify against the
+ *                   system trust store, listens are refused). The factory keeps the
+ *                   span, not a copy: the table and the strings it views must outlive
+ *                   the factory and every transport it constructs.
  * @param rx_backend The ADR-0042 §2 receive-segment seam every constructed socket
  *                   draws its inbound frame segments from (default: the process
  *                   heap). Must outlive the constructed transports.
  * @return The factory functor for @ref transport_vertex_t::register_transport_type.
  */
 [[nodiscard]] transport_vertex_t::transport_factory_t quic_transport_factory(
+    std::span<const tls_profile_t> profiles = {},
     mem::mem_backend_t* rx_backend = &mem::heap_backend());
 
 /**

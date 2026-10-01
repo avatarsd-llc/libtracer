@@ -73,7 +73,7 @@ view_t spec(std::string_view type, std::string_view name) {
  * slot, where the scan re-read it as a key and bound the FOLLOWING child as the child's
  * name. The vertex was then created at an address the sender never asked for, and the same
  * shape re-binds `type` (wrong factory) or `config` (a different SETTINGS reaches the
- * transport module — the `cert`/`key` blob among them).
+ * transport module — the `tls` profile selection among them).
  */
 view_t spec_hijack(std::string_view type, std::string_view name, std::string_view hijacked_key,
                    std::string_view follower) {

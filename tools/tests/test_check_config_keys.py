@@ -167,11 +167,11 @@ class LivePage(unittest.TestCase):
     def test_gate_is_green_on_main(self):
         self.assertEqual(cck.check(), [])
 
-    def test_the_gate_sees_the_quic_trust_pair(self):
+    def test_the_gate_sees_the_quic_tls_keys(self):
         # The keys #1012 was filed about. If the extractor ever stops seeing them,
         # the whole page could be deleted and the gate would still pass.
         quic = cck.derive_keys((cck.ROOT / "core" / "src" / "transport_quic.cpp").read_text())
-        self.assertEqual(quic.get("ca"), "name")
+        self.assertEqual(quic.get("tls"), "name")
         self.assertEqual(quic.get("insecure"), "flag")
 
 

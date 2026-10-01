@@ -15,10 +15,11 @@ Its keys come in two families. The **universal** ones (`kind`, `addr`, `port`,
 `max_frame`, …) are parsed centrally into `tr::net::conn_settings_t`, which every
 transport kind shares. The **kind-private** ones are parsed by the selected kind's
 own factory, module-side, and never land on that shared record — so `quic` reads
-`cert`/`key`/`ca`/`insecure`, `ws` and `tcp` read `peer_named`/`max_peers`, `can`
-reads its bus identity and ingress bounds, and none of them can see each other's
-vocabulary. This page is the key-by-key reference for both families, and the two
-keys most worth reading before you ship are `ca` and `insecure`: a SPEC-created
+`tls`/`insecure`, `ws` and `tcp` read `peer_named`/`max_peers`, `can` reads its bus
+identity and ingress bounds, and none of them can see each other's vocabulary. This
+page is the key-by-key reference for both families. Two facts are worth reading
+before you ship: no key ever carries a file path — `quic`/`webtransport` TLS material
+is app-owned and a SPEC can only name one of the app's profiles — and a SPEC-created
 `quic`/`webtransport` dialer **verifies its peer's certificate by default**.
 ```
 
@@ -250,21 +251,27 @@ the byte-level story is on [can](can.md).
 ### `quic` and `webtransport` — the TLS material
 
 Two modules, one identical key set, both in the separate `libtracer_quic` target.
-Two keys are the LISTEN-side served credential; two are the DIAL-side trust
-decision.
+
+**TLS material is app-owned; the SPEC never carries a file path.** A creation SPEC
+can arrive from any writer, a remote one included, so the certificate, the private
+key and the CA bundle come from the application: it builds a table of named
+`tr::net::tls_profile_t` (`name`, `ca_file`, `cert_file`, `key_file`) and hands it to
+the factory at registration —
+`net.register_transport_type("quic", tr::net::quic_transport_factory(profiles))`. The
+factory keeps the span, not a copy, so the table and the strings it views must
+outlive the factory and every transport it builds; a `constexpr` table of string
+literals costs no RAM at all. The SPEC can at most *name* one of those profiles:
 
 <!-- config-keys:begin core/src/transport_quic.cpp -->
 
 | key | value | applies to | default | meaning |
 | --- | --- | --- | --- | --- |
-| `cert` | `NAME` utf-8 | LISTEN | — (required) | PEM server-certificate path. Absent answers `TYPE_MISMATCH`; a path msquic will not load answers `TRANSPORT_DOWN` (the listener did not come up). |
-| `key` | `NAME` utf-8 | LISTEN | — (required) | PEM private-key path matching `cert`. Same two failures. |
-| `ca` | `NAME` utf-8 | DIAL | empty ⇒ the system trust store | PEM CA-bundle the peer's certificate is verified against, *instead of* the system trust store. |
+| `tls` | `NAME` utf-8 | DIAL + LISTEN | empty ⇒ the profile named `""` | The app profile this link uses. A name the app's table does not hold answers `TYPE_MISMATCH` before any file is opened. A LISTEN serves the profile's `cert_file`/`key_file`, and with no profile — or one that leaves either empty — answers `TYPE_MISMATCH`; files msquic will not load answer `TRANSPORT_DOWN` (the listener did not come up). A DIAL verifies the peer against the profile's `ca_file`, or the system trust store when there is no profile or it names no bundle. |
 | `insecure` | `VALUE` u8 (flag) | DIAL | `0` | **DEV ONLY, and requires the build capability `config_t::kAllowInsecureTls`** (default `false`). With it, non-zero skips server-certificate validation entirely. Without it, non-zero is refused at creation with `PERMISSION_DENIED` on either role and counted in `quic_insecure_refusals()`; `0` is accepted. |
 
 <!-- config-keys:end -->
 
-`webtransport` reads the same four, with the same meanings, plus two keys `quic`
+`webtransport` reads the same two, with the same meanings, plus two keys `quic`
 has no use for — it is the only kind here with an HTTP layer, so it is the only
 one with a resource to name and the only one with an H3 handshake to bound:
 
@@ -272,16 +279,23 @@ one with a resource to name and the only one with an H3 handshake to bound:
 
 | key | value | applies to | default | meaning |
 | --- | --- | --- | --- | --- |
-| `cert` | `NAME` utf-8 | LISTEN | — (required) | PEM server-certificate path. |
-| `key` | `NAME` utf-8 | LISTEN | — (required) | PEM private-key path matching `cert`. |
-| `ca` | `NAME` utf-8 | DIAL | empty ⇒ the system trust store | PEM CA-bundle to verify the peer against. |
+| `tls` | `NAME` utf-8 | DIAL + LISTEN | empty ⇒ the profile named `""` | The app profile this link uses; the same rules as `quic`. |
 | `insecure` | `VALUE` u8 (flag) | DIAL | `0` | **DEV ONLY, and requires `config_t::kAllowInsecureTls`.** With it, skips server-certificate validation; without it, non-zero is refused with `PERMISSION_DENIED` and counted in `webtransport_insecure_refusals()`. |
 | `max_handshake` | `VALUE` u32 | DIAL + LISTEN | `0` | Bytes. The **pre-auth** HTTP/3 handshake budget (#1408): the most a peer that has completed a QUIC handshake and nothing else — no session, no ACL, no subscription, no router — may make this node accumulate before its H3 material is refused. `0` = the 16 KiB `webtransport_transport_t::kMaxHandshakeBytes` default, and the key is **tighten-only**: a larger value is clamped to that default (`webtransport_transport_t::handshake_cap`), because a config-writable key must never *raise* a pre-auth bound. On a **LISTEN** it bounds per-stream classification / HEADERS accumulation *and* the **declared** length of a HEADERS or unknown/GREASE frame, so an over-declaration is refused before one body byte is buffered; on a **DIAL** it bounds the CONNECT response's field section the same way. Over budget is a statement about the *peer*, so the connection is shut down with the bad-request code — distinct from the two exhaustion dispositions, which are stream-scoped (#919) or count-then-close (`refused_sessions()`, #934) and are unchanged by this key. It does not bound frame-channel bytes; those are under `max_frame`. |
 | `path` | `NAME` utf-8 | DIAL | `/` | The extended CONNECT `:path` — which resource the WebTransport session is opened on (`new WebTransport("https://host:port/here")`). Empty is normalised to `/`. **This is an HTTP URL path, not a libtracer graph path**, and it is *not* the `can` kind's `path` key (an advertised group path): kind-private namespaces do not collide, but the two spellings are identical, so read the section heading before copying a row. The LISTEN side of this kind serves every path — it validates `:method`/`:protocol` only — so the key matters when dialing someone else's server (#1023). The accepted shape is **origin-form**: absent, empty (⇒ `/`), or `/`-prefixed. A non-empty value that does not begin with `/` answers `TYPE_MISMATCH` at creation, before any socket or TLS work, because an `https` request's `:path` is `/`-prefixed in origin-form (RFC 9114 §4.3.1 / RFC 9113 §8.3.1) — nothing beyond that leading `/` is judged (#1039). |
 
 <!-- config-keys:end -->
 
-`tools/gen-dev-cert.sh` emits a self-signed pair for the LISTEN side.
+`tools/gen-dev-cert.sh` emits a self-signed pair for a profile's LISTEN side.
+
+The keys `ca`, `cert` and `key` no longer exist. Through v0.16 they carried
+filesystem paths straight from the SPEC. A SPEC that still carries any of them is
+now **refused** with `TYPE_MISMATCH` — the same answer as an unknown profile, before
+any file is opened — rather than skipped like an unknown pair: skipping would move a
+stale dial that pinned a private CA onto the system trust store without a word.
+Migration: move
+`ca`/`cert`/`key` into the app's link config — a `tls_profile_t` table passed to the
+factory — and, if more than one is needed, select it with `tls`.
 
 A dial to the wrong resource is not a distinguishable failure: the server refuses
 the CONNECT, the session never establishes, and creation answers `TRANSPORT_DOWN` — the
@@ -299,20 +313,21 @@ accepted CONNECT named — an observation, never an admission decision.
 Five points, in the order an integrator meets them.
 
 **The default is verify.** A `quic` or `webtransport` dialer created from a SPEC
-with *neither* trust key validates the peer's certificate against the system trust
+with no profile anchor validates the peer's certificate against the system trust
 store, and a certificate that does not chain to it is refused: the handshake fails
 and creation answers `TRANSPORT_DOWN`. Anything dialing a self-signed peer must say so,
-with `ca` or (on a build with `kAllowInsecureTls`) with `insecure = 1`. This is a change of behaviour, not a restatement
-of one: before [#918] the DIAL branch hard-coded no-verify and returned *before*
-the kind-private parse ran at all, so every SPEC-created dialer skipped validation
-and no config key existed that could change it. `core/tests/quic_test.cpp` and
-`core/tests/webtransport_test.cpp` drive all five legs — no key, `insecure = 1`,
-`ca` = the peer's own cert, `insecure = 0`, and an unrelated `ca` bundle that is
-genuinely consulted and still refuses.
+with a profile whose `ca_file` certifies it or (on a build with `kAllowInsecureTls`) with
+`insecure = 1`. This is a change of
+behaviour, not a restatement of one: before [#918] the DIAL branch hard-coded no-verify
+and returned *before* the kind-private parse ran at all, so every SPEC-created dialer
+skipped validation and no config key existed that could change it.
+`core/tests/quic_test.cpp` and `core/tests/webtransport_test.cpp` drive all five legs —
+no key, `insecure = 1`, a profile whose anchor is the peer's own cert, `insecure = 0`,
+and a profile with an unrelated bundle that is genuinely consulted and still refuses.
 
 **`insecure` wins when both are set.** The credential is built with a single
-`if (insecure) … else if (!ca.empty()) …`, so `insecure = 1` together with a `ca`
-path is a no-verify dial and the bundle is not consulted. That is deliberate: it
+`if (insecure) … else if (!ca.empty()) …`, so `insecure = 1` together with a profile
+anchor is a no-verify dial and the bundle is not consulted. That is deliberate: it
 matches the `quic_dial_tls_t` contract the direct-construction path already had, and
 it errs toward the mode the operator wrote down explicitly rather than toward a
 silently half-applied one.
@@ -349,7 +364,7 @@ is parsed by that kind's own factory, inside its own module.
 
 The reason is the module boundary. `quic` lives in a separate link target; a device
 that does not link it contains zero QUIC schema, no msquic reference and no feature
-macro. Putting `cert`/`key`/`ca`/`insecure` on the shared record would put TLS
+macro. Putting `tls`/`insecure` on the shared record would put TLS
 vocabulary into the connection settings of a 16 KB MCU that will never speak TLS —
 and it would grow once per kind, forever, for keys no other kind can use.
 
