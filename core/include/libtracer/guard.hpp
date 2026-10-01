@@ -30,7 +30,7 @@ namespace tr {
  * @brief The lock-object half of the contract: `lock()` and `unlock()`, both `noexcept`.
  *
  * What a pool that owns its one lock asks of it (`tr::mem::pool_source_t<Sync>`, ADR-0067: the
- * seam "asks only for `lock()`/`unlock()`"). A @ref guard is always one.
+ * seam "asks only for `lock()`/`unlock()`"). A `tr::guard` is always one.
  */
 template <class L>
 concept lockable = requires(L& l) {
@@ -47,7 +47,7 @@ concept lockable = requires(L& l) {
  * - the single-writer LKV slot takes the guard that covers the slot's address,
  *   `G::for_address(slot)`, around its pointer swap and its handle copy;
  * - `tr::mem::synchronized_pool_t<G>` owns one `G` and takes it around its free-list edit;
- * - @ref rmw_counter_t takes it around its bump on a core with no atomic read-modify-write.
+ * - `tr::rmw_counter_t` takes it around its bump on a core with no atomic read-modify-write.
  *
  * The build binds it once, as `tr::graph::config_t::guard_t`. It was spelled `reader_guard_t`
  * until #1703, a name that undersold it: the guard serializes writers, the pool and the
@@ -99,7 +99,7 @@ struct no_guard_t {
 
 /**
  * @brief One section of the guard @p G that covers @p at, for the scope's lifetime — how the
- *        LKV slot and @ref rmw_counter_t open their guard.
+ *        LKV slot and `tr::rmw_counter_t` open their guard.
  */
 template <class G>
 class guard_scope_t {
@@ -141,7 +141,7 @@ class guard_scope_t {
  * one and wraps at `T`'s width, so it is for EQUALITY tests (`now != then`), never `<`.
  *
  * @tparam T       An unsigned integer, at most a machine word wide.
- * @tparam G       The build's critical-section guard (a @ref guard), taken only by the guarded
+ * @tparam G       The build's critical-section guard (a `tr::guard`), taken only by the guarded
  *                 binding.
  * @tparam kNative Which binding. Defaults to what the target supports; a test names it to
  *                 drive the guarded binding on a host that has atomic RMW.

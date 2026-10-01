@@ -19,7 +19,7 @@
 namespace tr::graph {
 
 /**
- * @brief Deprecated alias of @ref tr::guard (#1703); removed after one release.
+ * @brief Deprecated alias of `tr::guard` (#1703); removed after one release.
  * @deprecated Name `tr::guard`.
  */
 template <class G>
