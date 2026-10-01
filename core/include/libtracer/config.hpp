@@ -40,13 +40,13 @@ namespace tr::graph {
 
 /**
  * @brief Deprecated alias of @ref tr::mutex_guard_t, kept for one release (#1703).
- * @deprecated The guard vocabulary moved to the layer-neutral `tr` namespace; name
+ * Deprecated: The guard vocabulary moved to the layer-neutral `tr` namespace; name
  *             `tr::mutex_guard_t`.
  */
 using mutex_guard_t = ::tr::mutex_guard_t;
 /**
  * @brief Deprecated alias of @ref tr::no_guard_t, kept for one release (#1703).
- * @deprecated Name `tr::no_guard_t`.
+ * Deprecated: Name `tr::no_guard_t`.
  */
 using no_guard_t = ::tr::no_guard_t;
 
@@ -773,7 +773,7 @@ inline constexpr bool kInstrumentCounters = config_t::kInstrumentCounters;
 using guard_t = config_t::guard_t;
 /**
  * @brief Deprecated alias of @ref guard_t, kept for one release (#1703).
- * @deprecated Name `tr::graph::guard_t`. (The config MEMBER of that name is not aliased: a
+ * Deprecated: Name `tr::graph::guard_t`. (The config MEMBER of that name is not aliased: a
  *             fragment that defines it is refused, above.)
  */
 using reader_guard_t = guard_t;

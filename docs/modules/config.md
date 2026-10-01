@@ -237,12 +237,12 @@ plane read their own spellings, so that neither L0 nor `tr::net` has to name an 
 :members:
 ```
 
-```{doxygenstruct} tr::graph::mutex_guard_t
+```{doxygenstruct} tr::mutex_guard_t
 :project: libtracer
 :members:
 ```
 
-```{doxygenstruct} tr::graph::no_guard_t
+```{doxygenstruct} tr::no_guard_t
 :project: libtracer
 :members:
 ```

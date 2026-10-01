@@ -477,7 +477,7 @@ class bump_source_t final : public block_source_t {
  * `%mem_source_sync.hpp` on a host). This header stays freestanding-clean, so it pulls in no
  * threading facility of its own.
  *
- * @deprecated Kept as an alias for one release (#1703); name `tr::no_guard_t`.
+ * Deprecated: Kept as an alias for one release (#1703); name `tr::no_guard_t`.
  */
 using sync_none_t = ::tr::no_guard_t;
 

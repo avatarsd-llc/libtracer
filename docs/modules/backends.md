@@ -244,16 +244,6 @@ for what a shared free list costs under contention.
 :project: libtracer
 ```
 
-```{doxygenstruct} tr::no_guard_t
-:project: libtracer
-:members:
-```
-
-```{doxygenstruct} tr::mutex_guard_t
-:project: libtracer
-:members:
-```
-
 ```{doxygenclass} tr::rmw_counter_t
 :project: libtracer
 :members:

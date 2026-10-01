@@ -20,14 +20,14 @@ namespace tr::graph {
 
 /**
  * @brief Deprecated alias of `tr::guard` (#1703); removed after one release.
- * @deprecated Name `tr::guard`.
+ * Deprecated: Name `tr::guard`.
  */
 template <class G>
 concept reader_guard = ::tr::guard<G>;
 
 /**
  * @brief Deprecated alias of @ref tr::guard_scope_t (#1703); removed after one release.
- * @deprecated Name `tr::guard_scope_t`.
+ * Deprecated: Name `tr::guard_scope_t`.
  */
 template <class G>
 using guard_scope_t = ::tr::guard_scope_t<G>;
