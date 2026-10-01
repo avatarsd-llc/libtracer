@@ -55,6 +55,7 @@ using tr::graph::path_t;
 using tr::graph::role_t;
 using tr::graph::vertex_handle_t;
 using tr::net::fwd_router_t;
+using tr::net::kBusLinks;
 using tr::net::router_stats_t;
 using tr::net::transport_t;
 using tr::wire::opt_t;
@@ -113,6 +114,7 @@ class arming_source_t final : public tr::mem::block_source_t {
             ++refusals_;
             return nullptr;
         }
+        ++draws_;
         return tr::mem::heap_source().try_alloc(bytes, align);
     }
     void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
@@ -125,10 +127,13 @@ class arming_source_t final : public tr::mem::block_source_t {
     void disarm() noexcept { armed_ = false; }
     /** @brief How many draws were REFUSED — the instrument check. */
     [[nodiscard]] int refusals() const noexcept { return refusals_; }
+    /** @brief How many draws were SERVED — what a leg that allocates nothing leaves unmoved. */
+    [[nodiscard]] int draws() const noexcept { return draws_; }
 
    private:
     bool armed_ = false;
     int refusals_ = 0;
+    int draws_ = 0;
 };
 
 /** @brief A point-to-point endpoint that counts what it was handed (a bus peer's slot). */
@@ -318,6 +323,10 @@ void test_seam_accessors_report_the_injected_objects() {
  * The site `fwd_flatten_backend_test` proves is REACHED; here it must also be counted. The
  * frame is well-formed and its rejection is the ADR-0073 §3 answer, so nothing else on the
  * path has any reason to move — which makes the cross-check meaningful.
+ *
+ * @note Needs the bus module PRESENT. Under `kBusLinks = false` the router is told
+ *       `tr::net::bus_of` is nullptr and mounts the bus as a point-to-point child, so there is
+ *       no bus name to reject and the flatten seam is never asked. Its caller in `main` gates it.
  */
 void test_flatten_refusal_is_counted() {
     std::printf("a refused bus-name-rejection flatten is counted as flatten_dropped:\n");
@@ -456,16 +465,26 @@ void test_malformed_frames_land_in_one_bucket() {
 // --- delivery: the remote fan-out iov table -------------------------------------------
 
 /**
- * @brief A delivery whose iov table the CONTROL source refuses counts
- *        `delivery_iov_dropped`.
+ * @brief The remote fan-out leg draws NOTHING from the graph's source, so
+ *        `delivery_iov_dropped` has no refusal left to count.
  *
- * `deliver_remote`'s span table is drawn from `graph_t::control_source()` (#981). Its
- * exhaustion drops the delivery — the write itself still succeeds, because a fan-out leg is
- * a separate obligation — and before this counter existed that loss was invisible to
- * everything except the subscriber's silence.
+ * This case used to arm the control source and watch `deliver_remote`'s iov table (#981) be
+ * refused while the write itself succeeded. Two maintainer-ruled changes retired that
+ * premise, and the case went red from the first of them — invisibly, because `main()`
+ * returned 0 until #1636:
+ *
+ *   - #873 phase 1 (09feda62) put the value channel on the ONE injected source, so an armed
+ *     source now refuses the WRITE itself, by value, before any fan-out runs;
+ *   - RFC-0028 slice 9 (2d5b10e0) deleted the per-delivery iov table: `deliver_remote` now
+ *     hands the link three stack head spans plus the value (`transport_t::send(head, value)`).
+ *
+ * `delivery_iov_dropped` survives only on the unreachable head-overflow arm. What this case
+ * pins instead is the property slice 9 bought: a subscribed write draws exactly as many
+ * blocks as an unsubscribed one, and a write the source refuses delivers nothing and moves
+ * no router counter — the refusal is the graph's, answered by value.
  */
-void test_delivery_iov_refusal_is_counted() {
-    std::printf("a delivery whose iov table is refused counts delivery_iov_dropped:\n");
+void test_delivery_draws_nothing_from_the_source() {
+    std::printf("the fan-out leg draws nothing from the graph source (RFC-0028 slice 9):\n");
     arming_source_t ctl;
     graph_t g(ctl);
     fwd_router_t router(g);
@@ -474,16 +493,29 @@ void test_delivery_iov_refusal_is_counted() {
 
     const vertex_handle_t feed =
         g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
+    const vertex_handle_t quiet =
+        g.register_vertex(*path_t::parse("/sensor/quiet"), role_t::STORED_VALUE);
     router.on_frame("client",
                     b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}), b_path({"client"}),
                           b_field_subscribers_append(), b_subscriber(b_path({"client"}), false)));
-    client.sent.clear();  // discard the subscribe REPLY
+    // Warm both vertices so a first-write setup draw cannot skew the comparison below.
+    (void)g.write(feed, as_rope(b_value_u32(0x01010101u), 1));
+    (void)g.write(quiet, as_rope(b_value_u32(0x01010101u), 1));
+    client.sent.clear();  // discard the subscribe REPLY and the warm-up delivery
 
-    // Baseline: one delivery goes out with the source serving. If this fails the armed run
-    // below would be measuring a subscription that never existed.
+    // The unsubscribed twin is the yardstick: what a write costs with no fan-out at all.
     const router_stats_t start = router.drop_stats();
-    check(g.write(feed, as_rope(b_value_u32(0xA1A1A1A1u), 1)).has_value(), "the write succeeds");
+    const int quiet_from = ctl.draws();
+    check(g.write(quiet, as_rope(b_value_u32(0xA1A1A1A1u), 1)).has_value(),
+          "yardstick: the unsubscribed write succeeds");
+    const int unsubscribed = ctl.draws() - quiet_from;
+    const int feed_from = ctl.draws();
+    check(g.write(feed, as_rope(b_value_u32(0xA1A1A1A1u), 1)).has_value(),
+          "the subscribed write succeeds");
+    const int subscribed = ctl.draws() - feed_from;
     check(client.sent.size() == 1, "instrument: the subscription really delivers");
+    check(subscribed == unsubscribed,
+          "the delivery drew nothing from the source beyond the write's own blocks");
     check(only_moved(start, router.drop_stats(), &router_stats_t::delivery_iov_dropped, 0),
           "control: a delivered fan-out counts nothing");
 
@@ -491,17 +523,15 @@ void test_delivery_iov_refusal_is_counted() {
     const int refusals_before = ctl.refusals();
     client.sent.clear();
     ctl.arm();
-    check(g.write(feed, as_rope(b_value_u32(0xB2B2B2B2u), 1)).has_value(),
-          "the write still SUCCEEDS — the fan-out leg is a separate obligation");
+    check(!g.write(feed, as_rope(b_value_u32(0xB2B2B2B2u), 1)).has_value(),
+          "an armed source refuses the WRITE itself, by value (#873 phase 1)");
     const router_stats_t after = router.drop_stats();
     ctl.disarm();
 
-    check(ctl.refusals() > refusals_before,
-          "instrument: the control source was ASKED and "
-          "refused");
+    check(ctl.refusals() > refusals_before, "instrument: the source was ASKED and refused");
     check(client.sent.empty(), "and nothing went on the wire");
-    check(only_moved(before, after, &router_stats_t::delivery_iov_dropped, 1),
-          "exactly one delivery_iov_dropped, and no other counter moved");
+    check(only_moved(before, after, &router_stats_t::delivery_iov_dropped, 0),
+          "no router counter moved — the refusal is the graph's, not the fan-out leg's");
 
     // The positive control: deliveries resume, still counting nothing.
     check(g.write(feed, as_rope(b_value_u32(0xC3C3C3C3u), 1)).has_value(), "the next write lands");
@@ -565,16 +595,22 @@ int main() {
 
     test_seam_accessors_report_the_injected_objects();
     std::printf("\n");
-    test_flatten_refusal_is_counted();
+    if constexpr (kBusLinks) {
+        test_flatten_refusal_is_counted();
+    } else {
+        // The bus-name rejection exists only with the bus module; a bus-closed build has no
+        // such flatten site. Skipped and said so, rather than `bus`-labelling the whole target
+        // and losing the five tier-blind cases from the configuration that ships without one.
+        std::printf("bus-name rejection flatten: SKIPPED (kBusLinks = false)\n");
+    }
     std::printf("\n");
     test_arena_refusal_counts_apart_from_malformed();
     std::printf("\n");
     test_malformed_frames_land_in_one_bucket();
     std::printf("\n");
-    test_delivery_iov_refusal_is_counted();
+    test_delivery_draws_nothing_from_the_source();
     std::printf("\n");
     test_label_space_occupancy_and_exhaustion();
 
-    std::printf("\nall router drop-stat checks passed\n");
-    return 0;
+    return tr::testing::summary("router_drop_stats");
 }
