@@ -14,7 +14,7 @@
  * bounded answer: one `pool_t` whose O(1) free-list ops run inside a critical section, with
  * the MECHANISM as a compile-time guard — because only the target knows its concurrency
  * model. Since RFC-0028 slice 10 the guard is the SAME trait the last-known-value slot uses
- * (`tr::graph::reader_guard_t`), so `synchronized_pool_t<>` binds the build's one guard: the
+ * (`tr::graph::guard_t`), so `synchronized_pool_t<>` binds the build's one guard: the
  * host `mutex_guard_t` (a short bounded spin, then a nap — never a pure spin, so it is safe on
  * every scheduler), or an ESP-IDF build's interrupt-masked `critical_guard_t`.
  *
@@ -46,7 +46,7 @@ bool run_sync_pool() {
     alignas(std::max_align_t) std::array<std::byte, 4096> slab{};
     tr::mem::synchronized_pool_t<> pool{slab, 32};  // the build's one guard
     std::printf("synchronized_pool_t<%s> over a %zu-byte slab: %zu slots, two threads\n",
-                tr::graph::reader_guard_t::name, slab.size(), pool.capacity());
+                tr::graph::guard_t::name, slab.size(), pool.capacity());
 
     std::atomic<int> served{0};
     const auto churn = [&pool, &served] {
@@ -73,7 +73,7 @@ bool run_sync_pool() {
     check(ok, served.load() == 2 * kRounds, "every request was served — the slab never leaked");
     check(ok, drained.size() == pool.capacity(),
           "and the free list is whole: no slot was lost to a race");
-    check(ok, tr::mem::synchronized_pool_t<>::is_isr_safe == tr::graph::reader_guard_t::is_isr_safe,
+    check(ok, tr::mem::synchronized_pool_t<>::is_isr_safe == tr::graph::guard_t::is_isr_safe,
           "the pool forwards its guard's guarantees rather than inventing them");
     return ok;
 }

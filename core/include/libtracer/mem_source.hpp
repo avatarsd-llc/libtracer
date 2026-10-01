@@ -15,6 +15,8 @@
 #include <span>
 #include <type_traits>
 
+#include "libtracer/guard.hpp"
+
 /**
  * @file
  * @brief The nothrow failable-block seam (`tr::mem::block_source_t`), the
@@ -468,17 +470,16 @@ class bump_source_t final : public block_source_t {
  * instead of guarding it. See @ref pool_source_t's threading note for why this matters
  * more than the choice of free-list algorithm.
  *
- * A policy is anything with `lock()`/`unlock()`; a target supplies its own where it needs
- * one (an interrupt-disable critical section on single-core FreeRTOS,
- * `tr::mem::sync_mutex_t` from `%mem_source_sync.hpp` on a host). This header stays
- * freestanding-clean, so it pulls in no threading facility of its own.
+ * Since #1703 this is the layer-neutral `tr::no_guard_t` (`%guard.hpp`), so the memory layer
+ * keeps one lock vocabulary, not two. A policy is any `tr::lockable` (`lock()`/`unlock()`,
+ * both `noexcept`); a target supplies its own where it needs one (an interrupt-disable
+ * critical section on single-core FreeRTOS, `tr::mem::sync_mutex_t` from
+ * `%mem_source_sync.hpp` on a host). This header stays freestanding-clean, so it pulls in no
+ * threading facility of its own.
+ *
+ * @deprecated Kept as an alias for one release (#1703); name `tr::no_guard_t`.
  */
-struct sync_none_t {
-    /** @brief No-op — this policy exists to compile to nothing. */
-    static void lock() noexcept {}
-    /** @brief No-op. */
-    static void unlock() noexcept {}
-};
+using sync_none_t = ::tr::no_guard_t;
 
 /**
  * @brief One recycling free-list, keyed by the exact `(bytes, align)` pair it serves.
@@ -543,10 +544,10 @@ struct size_class_t {
  *          one. Reach for a locking @p Sync only where the seam is wiring-frequency (a
  *          graph's control source), never per-frame.
  *
- * @tparam Sync Synchronization policy (`lock()`/`unlock()`); @ref sync_none_t by default,
- *              which compiles to nothing.
+ * @tparam Sync Synchronization policy, a `tr::lockable`; `tr::no_guard_t` by default, which
+ *              compiles to nothing.
  */
-template <class Sync = sync_none_t>
+template <::tr::lockable Sync = ::tr::no_guard_t>
 class pool_source_t final : public block_source_t {
    public:
     /**
@@ -671,7 +672,7 @@ class pool_source_t final : public block_source_t {
     }
 
    private:
-    /** @brief RAII lock over the policy; empty and free when @p Sync is @ref sync_none_t. */
+    /** @brief RAII lock over the policy; empty and free when @p Sync is `tr::no_guard_t`. */
     struct guard_t {
         explicit guard_t(Sync& s) noexcept : s_(s) { s_.lock(); }
         ~guard_t() { s_.unlock(); }

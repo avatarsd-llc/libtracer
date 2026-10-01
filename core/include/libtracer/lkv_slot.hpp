@@ -54,7 +54,7 @@
  * ## The two policies
  *
  *   - @ref tr::graph::single_writer_slot_t — the default, and the only one an RTOS target can
- *     bind: its one wait is `config_t::reader_guard_t`, an interrupt-masked critical section
+ *     bind: its one wait is `config_t::guard_t`, an interrupt-masked critical section
  *     there and an address-striped one-word lock on a host, whose contender sleeps rather than
  *     spins on a descheduled holder (#1618).
  *   - @ref tr::graph::hazard_slot_t — the lock-free opt-in for a host whose reads of one shared
@@ -101,7 +101,9 @@
 #include <type_traits>
 
 #include "libtracer/config.hpp"
-#include "libtracer/reader_guard.hpp"
+#include "libtracer/guard.hpp"
+#include "libtracer/guard_mutex.hpp"
+#include "libtracer/reader_guard.hpp"  // the deprecated tr::graph guard aliases (#1703), one release
 #include "libtracer/value.hpp"
 
 namespace tr::graph {
@@ -122,7 +124,7 @@ concept lkv_slot = requires(S s, value_t* v) {
 
 /**
  * @brief The slot for a single-writer build (RFC 0028 §5.5): one `value_t*`, exchanged and
- *        retained inside the reader guard @p guard_t, which never spins.
+ *        retained inside the guard @p G, which never spins.
  *
  * Why it exists (#1618). The refcount slot this replaced, `std::atomic<std::shared_ptr>`, is
  * spin-locked in libstdc++: `load` and `store` take a pointer-lock bit and a contender spins on
@@ -159,15 +161,15 @@ concept lkv_slot = requires(S s, value_t* v) {
  * when this is tried: with the writer's guard removed, a reader reads a value after its free
  * (ASan: heap-use-after-free).
  *
- * @tparam guard_t A `reader_guard`; the slot takes `guard_t::for_address(this)`.
- *                 The bound slot uses `config_t::reader_guard_t`; tests instantiate this
- *                 template directly with a guard of their own.
+ * @tparam G A `tr::guard`; the slot takes `G::for_address(this)`. The bound slot uses
+ *           `config_t::guard_t`; tests instantiate this template directly with a guard of
+ *           their own.
  */
-template <reader_guard guard_t>
+template <::tr::guard G>
 class basic_single_writer_slot_t {
    public:
     /** @brief This policy's only wait is its guard, so it spins exactly when the guard does. */
-    static constexpr bool may_spin = guard_t::may_spin;
+    static constexpr bool may_spin = G::may_spin;
 
     basic_single_writer_slot_t() = default;
     basic_single_writer_slot_t(const basic_single_writer_slot_t&) = delete;
@@ -187,7 +189,7 @@ class basic_single_writer_slot_t {
      */
     [[nodiscard]] bool store(value_t* v, std::memory_order = std::memory_order_seq_cst) noexcept {
         {
-            const guard_scope_t<guard_t> g{this};
+            const ::tr::guard_scope_t<G> g{this};
             std::swap(v_, v);
         }
         value_t::release(v);  // `v` is now the displaced value, released here, unguarded
@@ -198,7 +200,7 @@ class basic_single_writer_slot_t {
     void clear(std::memory_order = std::memory_order_seq_cst) noexcept {
         value_t* old = nullptr;
         {
-            const guard_scope_t<guard_t> g{this};
+            const ::tr::guard_scope_t<G> g{this};
             std::swap(v_, old);
         }
         value_t::release(old);
@@ -211,7 +213,7 @@ class basic_single_writer_slot_t {
      * only work inside it.
      */
     [[nodiscard]] value_ref_t load() const noexcept {
-        const guard_scope_t<guard_t> g{this};
+        const ::tr::guard_scope_t<G> g{this};
         return value_ref_t::share(v_);
     }
 
@@ -223,14 +225,14 @@ class basic_single_writer_slot_t {
 };
 
 /**
- * @brief @ref basic_single_writer_slot_t over this build's `config_t::reader_guard_t` — the
+ * @brief @ref basic_single_writer_slot_t over this build's `config_t::guard_t` — the
  *        name an override fragment binds.
  *
  * A class rather than an alias so `%config.hpp` can forward-declare it: the fragment names the
  * slot before this header has been seen, and the guard it will use is a member of the very
  * traits type the fragment is defining.
  */
-class single_writer_slot_t : public basic_single_writer_slot_t<config_t::reader_guard_t> {};
+class single_writer_slot_t : public basic_single_writer_slot_t<config_t::guard_t> {};
 
 /**
  * @brief The process-wide hazard-pointer domain behind @ref hazard_slot_t (ADR-0069 §2/§5).

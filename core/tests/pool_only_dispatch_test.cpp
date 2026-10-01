@@ -41,9 +41,10 @@
 #include <vector>
 
 #include "libtracer/backend.hpp"
+#include "libtracer/guard.hpp"
+#include "libtracer/guard_mutex.hpp"
 #include "libtracer/mem_borrowed.hpp"
 #include "libtracer/mem_pool.hpp"
-#include "libtracer/reader_guard.hpp"
 #include "libtracer/segment.hpp"
 #include "test_support.hpp"
 
@@ -60,7 +61,7 @@ using tr::view::segment_t;
 using tr::testing::check_quiet;
 
 /**
- * @brief A reader guard that COUNTS acquisitions of the real host critical section.
+ * @brief A guard that COUNTS acquisitions of the real host critical section.
  *
  * The instrument for check 2: the count is how we see that reclaim went through
  * `synchronized_pool_t::destroy` (virtual, locked) and not the reinterpreted
@@ -80,17 +81,17 @@ struct counting_sync_t {
     }
     /** @brief Leave it. */
     void unlock() noexcept { inner_.unlock(); }
-    /** @brief The `reader_guard` lookup: one shared instance (the pool holds its own). */
+    /** @brief The `tr::guard` lookup: one shared instance (the pool holds its own). */
     static counting_sync_t& for_address(const void*) noexcept {
         static counting_sync_t shared;
         return shared;
     }
 
    private:
-    tr::graph::mutex_guard_t inner_{};
+    tr::mutex_guard_t inner_{};
 };
 
-static_assert(tr::graph::reader_guard<counting_sync_t>, "the counting guard models the trait");
+static_assert(tr::guard<counting_sync_t>, "the counting guard models the trait");
 
 /**
  * @brief A user backend outside the fast set: `UNKNOWN`-tagged, counts its reclaims.

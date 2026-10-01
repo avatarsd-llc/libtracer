@@ -76,7 +76,7 @@ struct test_mutex_guard_t {
     void lock() noexcept { m_.lock(); }
     /** @brief Leave it. */
     void unlock() noexcept { m_.unlock(); }
-    /** @brief The `reader_guard` lookup: one mutex every slot in this binary shares. */
+    /** @brief The `tr::guard` lookup: one mutex every slot in this binary shares. */
     static test_mutex_guard_t& for_address(const void*) noexcept {
         static test_mutex_guard_t g;
         return g;

@@ -11,9 +11,9 @@ whose O(1) free-list operations run inside a critical section.
 ## What to notice
 
 - **The mechanism is a compile-time guard, because only the target knows its concurrency
-  model.** Since RFC-0028 slice 10 the pool's guard is the same `reader_guard` trait the
+  model.** Since RFC-0028 slice 10 the pool's guard is the same `tr::guard` trait the
   last-known-value slot uses, and `synchronized_pool_t<>` binds the build's one
-  `tr::graph::reader_guard_t`: on a host the `mutex_guard_t` (a short bounded spin, then a
+  `tr::graph::guard_t`: on a host the `tr::mutex_guard_t` (a short bounded spin, then a
   nap — never a pure spin, so it cannot hang a priority-preemptive scheduler), on ESP-IDF the
   interrupt-masked `critical_guard_t` (`tr::esp::critical_pool_t`). The choice is a template
   argument — no branch, no vtable, no per-alloc indirection.

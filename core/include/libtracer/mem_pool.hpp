@@ -23,7 +23,8 @@
 
 #include "libtracer/backend.hpp"
 #include "libtracer/config.hpp"
-#include "libtracer/reader_guard.hpp"
+#include "libtracer/guard.hpp"
+#include "libtracer/guard_mutex.hpp"  // the host default graph::guard_t names its type
 #include "libtracer/segment.hpp"
 
 /**
@@ -136,9 +137,9 @@ class pool_t final : public mem_backend_t {
  * `flat`, and `transport_vertex_t`'s `rx_backend`). A single thread-safe pool (never
  * per-stripe sharding, which removes no race and adds partition imbalance) is the answer.
  *
- * The policy is a `graph::reader_guard` — the SAME critical-section trait the LKV slot
- * binds (RFC-0028 §5.5, slice 10), so a target states its concurrency model once:
- * @ref graph::reader_guard_t is the default, which is `mutex_guard_t` on a host (one RMW to
+ * The policy is a `tr::guard` — the SAME critical-section trait the LKV slot binds
+ * (RFC-0028 §5.5, slice 10), so a target states its concurrency model once:
+ * @ref graph::guard_t is the default, which is `tr::mutex_guard_t` on a host (one RMW to
  * take; a contender naps rather than spins) and the interrupt-masked `tr::esp::critical_guard_t`
  * on an ESP-IDF chip (`tr::esp::critical_pool_t`). The target knows its concurrency model at
  * BUILD time, so the choice is a template argument, not a runtime knob: no branch, no vtable,
@@ -156,7 +157,7 @@ class pool_t final : public mem_backend_t {
  * re-point is invisible to the inner pool. The re-point touches only the just-allocated
  * segment, which no other thread can observe until the caller publishes it.
  */
-template <graph::reader_guard Sync = graph::reader_guard_t>
+template <::tr::guard Sync = graph::guard_t>
 class synchronized_pool_t final : public mem_backend_t {
     // On a target that says spin-waiting is unsafe (`kSpinWaitSafe`), a guard that spin-waits
     // is not "slower" — it is a hang, and only the build knows which target this is. Checked

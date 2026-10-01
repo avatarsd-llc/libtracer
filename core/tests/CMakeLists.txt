@@ -2478,6 +2478,22 @@ add_test(NAME spin_slot_guard COMMAND ${CMAKE_COMMAND}
          -DLT_PROBE=${CMAKE_CURRENT_SOURCE_DIR}/spin_slot_guard_probe.cpp
          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/spin_slot_guard.cmake)
 
+# #1703 — the guard_t rename tripwire. A fragment that still binds the pre-rename member
+# `reader_guard_t` must fail to compile, by the tripwire's own message, instead of silently
+# keeping the host mutex guard. Same harness shape as spin_slot_guard (one fixture dir per arm).
+add_test(NAME guard_rename COMMAND ${CMAKE_COMMAND}
+         -DLT_CXX=${CMAKE_CXX_COMPILER}
+         -DLT_CORE_INCLUDE=${CMAKE_CURRENT_SOURCE_DIR}/../include
+         -DLT_FIXTURES=${CMAKE_CURRENT_SOURCE_DIR}/guard_rename
+         -DLT_PROBE=${CMAKE_CURRENT_SOURCE_DIR}/spin_slot_guard_probe.cpp
+         -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/guard_rename.cmake)
+
+# #1703 — the one-release alias window: every pre-move guard spelling still names its new type.
+add_executable(guard_alias_test guard_alias_test.cpp)
+target_link_libraries(guard_alias_test PRIVATE libtracer)
+libtracer_test_warnings(guard_alias_test)
+add_test(NAME guard_alias COMMAND guard_alias_test)
+
 # #830's ablation reads a counter a lean build compiles out (#1664): under a CI leg's own
 # fragment it exits 77, reported SKIPPED rather than passed.
 set_property(TEST target_binding_ablation PROPERTY SKIP_RETURN_CODE 77)

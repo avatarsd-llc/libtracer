@@ -10,6 +10,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- **The generated config fragment binds `guard_t`, not `reader_guard_t`
+  ([#1703](https://github.com/avatarsd-llc/libtracer/issues/1703)).** Core renamed the config
+  member and now refuses a fragment that still defines the old name. On every chip target the
+  component's fragment binds `using guard_t = tr::esp::critical_guard_t;`, so the interrupt-masked
+  guard stays the one the LKV slot, the pools and the write-sequence bump open. Nothing changes
+  for an application that uses the generated fragment. **Migration:** an application that
+  replaces the fragment with its own renames `reader_guard_t` to `guard_t` there.
+
 ## [0.17.0] — 2026-10-01
 
 ### Changed

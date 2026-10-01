@@ -8,6 +8,8 @@
 
 #include <mutex>
 
+#include "libtracer/guard.hpp"
+
 /**
  * @file
  * @brief A `std::mutex`-backed synchronization policy for @ref tr::mem::pool_source_t.
@@ -30,11 +32,15 @@ namespace tr::mem {
  *          erratum 1 measured a shared free-list pool collapsing to ~1/15 of its
  *          single-thread rate on a 12-core host while the platform heap scaled; guarding
  *          the shared list is the problem, not the guard's flavour. Give each receiver its
- *          own @ref pool_source_t with the default @ref sync_none_t instead.
+ *          own @ref pool_source_t with the default `tr::no_guard_t` instead.
  * @note Also not for a single-core FreeRTOS target's per-frame path: a blocking mutex
  *       there invites the priority inversion ADR-0063 erratum 1 records. Such a target
  *       supplies an interrupt-disable policy of its own; the seam only asks for
- *       `lock()`/`unlock()`.
+ *       `lock()`/`unlock()` (`tr::lockable`, `%guard.hpp`).
+ *
+ * It stays a `std::mutex` rather than becoming an alias of the host guard `tr::mutex_guard_t`
+ * (#1703): a contender here parks in the kernel instead of napping, and the shared-pool arms of
+ * the store-topology benches measure exactly this type.
  */
 class sync_mutex_t {
    public:
@@ -46,5 +52,7 @@ class sync_mutex_t {
    private:
     std::mutex m_; /**< @brief The lock itself; uncontended at wiring frequency. */
 };
+
+static_assert(::tr::lockable<sync_mutex_t>, "the hosted pool policy models tr::lockable");
 
 }  // namespace tr::mem

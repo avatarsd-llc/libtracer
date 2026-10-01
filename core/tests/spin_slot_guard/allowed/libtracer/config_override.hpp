@@ -13,7 +13,7 @@
 
 namespace tr::graph {
 
-/** @brief A stand-in for an interrupt-masked critical section: a @ref reader_guard that opens
+/** @brief A stand-in for an interrupt-masked critical section: a `tr::guard` that opens
  *         nothing and never waits. */
 struct fixture_guard_t {
     static constexpr bool is_isr_safe = true;      /**< @brief As a masked section is. */
@@ -35,7 +35,7 @@ struct fixture_guard_t {
 struct spin_slot_allowed_config_t : default_config_t {
     static constexpr bool kSpinWaitSafe = false;
     static constexpr bool kSingleWriter = true;
-    using reader_guard_t = fixture_guard_t;
+    using guard_t = fixture_guard_t;
     using lkv_slot_t = single_writer_slot_t;
 };
 

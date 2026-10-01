@@ -33,7 +33,8 @@
 #include <thread>
 #include <vector>
 
-#include "libtracer/rmw_counter.hpp"
+#include "libtracer/guard.hpp"
+#include "libtracer/guard_mutex.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/vertex.hpp"
 #include "test_support.hpp"
@@ -63,13 +64,13 @@ using tr::testing::check;
 using tr::testing::make_value;
 
 static_assert(sizeof(write_seq_t) == 4, "the write sequence is 32-bit on every target (#1621)");
-static_assert(tr::graph::rmw_counter_t<write_seq_t, tr::graph::reader_guard_t>::is_native,
+static_assert(tr::rmw_counter_t<write_seq_t, tr::graph::guard_t>::is_native,
               "a host build bumps the write sequence with one hardware RMW, never a guard");
 
 /** @brief The guarded binding, named on a host that has atomic RMW so CI can drive it. */
-using guarded_counter_t = tr::graph::rmw_counter_t<write_seq_t, tr::graph::mutex_guard_t, false>;
+using guarded_counter_t = tr::rmw_counter_t<write_seq_t, tr::mutex_guard_t, false>;
 /** @brief The native binding, named explicitly so the pair below reads side by side. */
-using native_counter_t = tr::graph::rmw_counter_t<write_seq_t, tr::graph::mutex_guard_t, true>;
+using native_counter_t = tr::rmw_counter_t<write_seq_t, tr::mutex_guard_t, true>;
 static_assert(!guarded_counter_t::is_native && native_counter_t::is_native);
 
 /**

@@ -55,12 +55,12 @@
 #include "libtracer/app_fields.hpp"
 #include "libtracer/config.hpp"
 #include "libtracer/edge_pin.hpp"
+#include "libtracer/guard.hpp"
 #include "libtracer/hook.hpp"
 #include "libtracer/lkv_slot.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/path.hpp"
 #include "libtracer/path_ref.hpp"
-#include "libtracer/rmw_counter.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/status.hpp"
 #include "libtracer/subscriber.hpp"
@@ -94,19 +94,19 @@ static_assert(!std::is_same_v<lkv_slot_t, hazard_slot_t> || detail_hp::kClaimWor
               "atomics of pointer width");
 
 /**
- * @brief The host reader guard is a one-word lock-free flag, or it is not the host guard (#1628).
+ * @brief The host guard is a one-word lock-free flag, or it is not the host guard (#1628).
  *
  * `mutex_guard_t`'s whole point is one RMW to take a stripe; on a target whose `atomic<bool>` is
  * not lock-free that RMW is a libatomic lock, and the target should bind an interrupt-masked
- * `reader_guard_t` instead (every ESP chip target does). Asserted here, beside the binding, for
+ * `guard_t` instead (every ESP chip target does). Asserted here, beside the binding, for
  * the reason the hazard assertion above is: `%lkv_slot.hpp` is included on targets that never
  * bind the guard, and esp32c3 (rv32imc) has no lock-free atomic of any width.
  */
-static_assert(!std::is_same_v<reader_guard_t, mutex_guard_t> ||
+static_assert(!std::is_same_v<guard_t, ::tr::mutex_guard_t> ||
                   std::atomic<bool>::is_always_lock_free,
-              "this target binds mutex_guard_t, the host reader guard, but has no lock-free bool "
+              "this target binds mutex_guard_t, the host guard, but has no lock-free bool "
               "atomic — its one-word lock would take a libatomic lock; bind an interrupt-masked "
-              "reader_guard_t here (the ESP-IDF component's tr::esp::critical_guard_t)");
+              "guard_t here (the ESP-IDF component's tr::esp::critical_guard_t)");
 
 /**
  * @brief The bound slot models `lkv_slot` (RFC 0028 §5.6), whose `may_spin` declaration is
@@ -119,12 +119,12 @@ static_assert(lkv_slot<lkv_slot_t>,
               "lkv_slot.hpp)");
 
 /**
- * @brief The bound reader guard models `reader_guard` — the one critical-section trait the
- *        slot and the pool share (RFC 0028 §5.5).
+ * @brief The bound guard models `tr::guard` — the one critical-section trait the slot, the
+ *        pool and the write-sequence bump share (RFC 0028 §5.5).
  */
-static_assert(reader_guard<reader_guard_t>,
-              "the bound reader_guard_t does not model tr::graph::reader_guard (lock()/unlock(), "
-              "for_address(), is_isr_safe, is_nonblocking, may_spin, name; see reader_guard.hpp)");
+static_assert(::tr::guard<guard_t>,
+              "the bound guard_t does not model tr::guard (lock()/unlock(), for_address(), "
+              "is_isr_safe, is_nonblocking, may_spin, name; see guard.hpp)");
 
 /**
  * @brief No slot policy that can spin-wait may be bound where spin-waiting hangs (#1618).
@@ -137,7 +137,7 @@ static_assert(config_t::kSpinWaitSafe || !lkv_slot_t::may_spin,
               "this target sets kSpinWaitSafe = false, and the bound lkv_slot_t declares "
               "may_spin = true: a high-priority reader could spin on a window a preempted "
               "writer never leaves, and the target hangs in the watchdog — bind "
-              "single_writer_slot_t with an interrupt-masked reader_guard_t");
+              "single_writer_slot_t with an interrupt-masked guard_t");
 
 /**
  * @brief The memory order of the DELIVERY-SKIP Dekker pair (#635, #1140) — the one order in
@@ -820,8 +820,8 @@ struct vertex_ext_t {
  * `lock xadd` cost the same and `vertex_t`'s tail padding absorbs the 4 bytes, so the wide
  * form bought nothing there; on rv32 it was 8 B wide and 8-aligned (4 B of padding) and every
  * publish called `__atomic_fetch_add_8`, which masks interrupts on ESP-IDF. The 32-bit bump
- * is one `amoadd.w` where the core has atomic RMW, and one section of `reader_guard_t` where
- * it has none (rv32imc, Cortex-M0): `vertex_t::write_seq_` is an @ref rmw_counter_t, which
+ * is one `amoadd.w` where the core has atomic RMW, and one section of `guard_t` where
+ * it has none (rv32imc, Cortex-M0): `vertex_t::write_seq_` is a `tr::rmw_counter_t`, which
  * picks the binding at compile time.
  *
  * It is compared for EQUALITY only (`await` waits for `current != seq0`), never ordered, so a
@@ -3149,7 +3149,7 @@ class vertex_t {
     // on a core with no atomic RMW (rmw_counter_t). Nothing else reads it: the propagate
     // sweep's IF_NEWER test is its pending set (RFC-0008 §B), not a sequence, and the wire
     // never carries it.
-    rmw_counter_t<write_seq_t, reader_guard_t> write_seq_;
+    ::tr::rmw_counter_t<write_seq_t, guard_t> write_seq_;
 
     // Subtree-subscription bookkeeping (RFC-0005): every subscription observes its
     // vertex AND all descendants, so a write must fan out to ancestor subscribers

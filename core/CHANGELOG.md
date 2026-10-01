@@ -14,6 +14,41 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Breaking
+
+- **The config member `reader_guard_t` is renamed `guard_t`, and a fragment that still defines
+  the old name no longer compiles
+  ([#1703](https://github.com/avatarsd-llc/libtracer/issues/1703)).** The guard serializes
+  writers, the pools and the write-sequence bump, not only readers, so the old name was wrong.
+  `default_config_t::guard_t` replaces `default_config_t::reader_guard_t`. `config.hpp` now
+  carries a tripwire: a `config_t` that defines a member `reader_guard_t` fails with a
+  `static_assert` naming `guard_t`. Without it, a stale fragment's binding would be ignored and
+  the build would silently keep the host `mutex_guard_t`, which on a dual-core chip with a
+  lock-free bool no other assertion catches. The ESP-IDF component's generated fragment binds
+  `guard_t`. **Migration:** in your `libtracer/config_override.hpp`, rename
+  `using reader_guard_t = ...;` to `using guard_t = ...;`.
+- **The guard vocabulary moves from `tr::graph` to the layer-neutral `tr` namespace
+  ([#1703](https://github.com/avatarsd-llc/libtracer/issues/1703)).** The memory layer bound a
+  graph-layer concept for its own pool lock; the vocabulary now has two layer-neutral leaves.
+  The freestanding `libtracer/guard.hpp` (no `<thread>`, no `<chrono>`) holds the `tr::guard`
+  concept (was `tr::graph::reader_guard`), a new `tr::lockable` concept (`lock()` / `unlock()`,
+  both `noexcept`), `tr::no_guard_t`, `tr::guard_scope_t` and `tr::rmw_counter_t`. The hosted
+  `libtracer/guard_mutex.hpp` holds `tr::mutex_guard_t`. `tr::mem::pool_source_t<Sync>` now
+  requires a `tr::lockable` and defaults to `tr::no_guard_t`. `tr::mem::sync_mutex_t` stays a
+  `std::mutex` policy and models `tr::lockable`. `libtracer/rmw_counter.hpp` is removed; it was
+  unreleased. **Alias window (kept for one release):**
+  `tr::graph::reader_guard` (concept), `tr::graph::guard_scope_t`, `tr::graph::mutex_guard_t`,
+  `tr::graph::no_guard_t`, the namespace-scope `tr::graph::reader_guard_t` (now naming
+  `tr::graph::guard_t`), `tr::mem::sync_none_t` (now naming `tr::no_guard_t`), and the
+  `libtracer/reader_guard.hpp` header, which forwards to the two leaves. Code that only names
+  these keeps compiling. Two things do break: an out-of-tree forward declaration such as
+  `namespace tr::graph { struct no_guard_t; }` conflicts with the alias, and a `pool_source_t`
+  policy whose `lock()` / `unlock()` are not `noexcept` no longer satisfies the constraint.
+  **Migration:** include `libtracer/guard.hpp` (and `libtracer/guard_mutex.hpp` for the host
+  guard) and spell `tr::guard`, `tr::guard_scope_t`, `tr::mutex_guard_t`, `tr::no_guard_t` and
+  `tr::graph::guard_t`; drop a forward declaration of the guard types, or move it to
+  `namespace tr`; mark a custom pool policy's `lock()` / `unlock()` `noexcept`.
+
 ### Changed
 
 - **The write sequence is 32-bit on every target: `vertex_t::current_seq()` returns
@@ -27,8 +62,8 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   now bumps the sequence with one hardware add (`amoadd.w` on rv32) instead of calling
   `__atomic_fetch_add_8`, which masks interrupts on ESP-IDF; on a core without one (rv32imc
   such as the ESP32-C3, Cortex-M0/M0+) it is a load and a store inside one section of
-  `config_t::reader_guard_t`, the build's critical-section guard, with no call. New header
-  `libtracer/rmw_counter.hpp` (`tr::graph::rmw_counter_t<T, G>`) is that choice, made at
+  `config_t::guard_t`, the build's critical-section guard, with no call.
+  `tr::rmw_counter_t<T, G>` (in `libtracer/guard.hpp`, see the guard move below) is that choice, made at
   compile time from `std::atomic<T>::is_always_lock_free`. `sizeof(vertex_t)` drops 72 → **64 B**
   (`config_t::kMaxVertexBytes32` lowered to match). On 64-bit hosts it stays 88 B: the tail
   padding absorbs the 4 bytes. **Migration:** spell a sequence snapshot `write_seq_t` (or

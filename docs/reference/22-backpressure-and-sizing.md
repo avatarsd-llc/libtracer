@@ -399,9 +399,9 @@ staging run with the C++ accessors in reach (see §6 for the remote arm and its 
    the traffic, not to survive it.
 2. **Run representative traffic.** Representative means the real payload-size *distribution*,
    not the mean — see step 4.
-3. **Read `peak` per seam.** `block_source_t::stats()` (`core/include/libtracer/mem_source.hpp:226`)
+3. **Read `peak` per seam.** `block_source_t::stats()` (`core/include/libtracer/mem_source.hpp:228`)
    returns `source_stats_t{capacity, in_use, peak, refused, largest_refused}`
-   (`core/include/libtracer/mem_source.hpp:75`), all used-polarity. Free is derived, never
+   (`core/include/libtracer/mem_source.hpp:77`), all used-polarity. Free is derived, never
    reported as the primary.
 4. **Set `capacity = peak + margin`, and take the margin from `largest_refused`, not from the
    mean.** The tail is what refuses. A seam that refused once, for a 9 KB request, against a

@@ -231,7 +231,7 @@ is a knob the fragment does not state at all (#1244).
 | `kMaxVertexBytes64` / `kMaxVertexBytes32` (`config.hpp:default_config_t::kMaxVertexBytes64` / `config.hpp:default_config_t::kMaxVertexBytes32`) | RAM ratchet | 88 / 64 | the preset — deliberately not overridable |
 | `kShareThresholdBytes` (`config.hpp:default_config_t::kShareThresholdBytes`) | size | 4,096 — RFC-0028 §11 ruling 2 | `SIZE_MAX`, copy always (`integrations/esp-idf/libtracer/CMakeLists.txt:static constexpr std::size_t kShareThresholdBytes = ~std::size_t{0}`) |
 | `acl_policy_t` (`config.hpp:default_config_t::acl_policy_t`) | policy type | `allow_only_policy_t` | inherited — the full policy is not selectable |
-| `lkv_slot_t` (`config.hpp:default_config_t::lkv_slot_t`) | policy type | `single_writer_slot_t` | `single_writer_slot_t` on every chip, with `kSingleWriter = true` and `reader_guard_t = tr::esp::critical_guard_t`; inherited on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:if(LIBTRACER_SPIN_WAIT_SAFE)`) |
+| `lkv_slot_t` (`config.hpp:default_config_t::lkv_slot_t`) | policy type | `single_writer_slot_t` | `single_writer_slot_t` on every chip, with `kSingleWriter = true` and `guard_t = tr::esp::critical_guard_t`; inherited on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:if(LIBTRACER_SPIN_WAIT_SAFE)`) |
 | `kSpinWaitSafe` (`config.hpp:inline constexpr bool kSpinWaitSafe`) | target fact | `true` | derived from `IDF_TARGET` — `false` on every chip, `true` on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:set(LIBTRACER_SPIN_WAIT_SAFE true)`) |
 | `kWeaklyOrdered` (`config.hpp:default_config_t::kWeaklyOrdered`) | target fact | `true` | inherited — every ESP chip is weakly ordered, which is the default |
 | `kBusLinks` (`config.hpp:default_config_t::kBusLinks`) | module presence | `false` — opt-in since v0.17.0 (#1670) | menuconfig `CONFIG_LIBTRACER_BUS_LINKS`, default `n`; CAN is offered only with it |
@@ -357,7 +357,7 @@ numbers and their conditions are in
 which is where they belong rather than repeated here.
 
 The default is `single_writer_slot_t`, whose reclamation is the refcount, so there is no scheme
-to implement and no registry to size. Its one wait is `reader_guard_t`, which on a chip is an
+to implement and no registry to size. Its one wait is `guard_t`, which on a chip is an
 interrupt-masked critical section and on a host one of 64 address-striped mutexes. A host can
 bind `hazard_slot_t` instead, the lock-free slot, at a heap node per published value. The refcount
 slot that used to be the default, `std::atomic<std::shared_ptr<T>>`, was removed because
