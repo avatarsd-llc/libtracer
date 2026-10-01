@@ -45,7 +45,7 @@ single-threaded and Cortex-M0/M0+ targets that have no LDREX/STREX
 (`core/include/libtracer/segment.hpp:23,46`). It is a compile definition, not a
 CMake option: the constrained-target footprint build sets it
 (`tools/cortexm0_footprint.py:158`) and the substrate test is built a second time
-with it (`core/tests/CMakeLists.txt:1965,1980-1981`).
+with it (`core/tests/CMakeLists.txt:1976,1991-1992`).
 
 ## API reference
 

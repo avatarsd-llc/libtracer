@@ -467,20 +467,20 @@ ANCHORS = [
     ('core/include/libtracer/config.hpp:262', 'using acl_policy_t = allow_only_policy_t;'),
     ('core/include/libtracer/config.hpp:216', 'static constexpr std::size_t kMaxVertexBytes32 = 72;'),
     ('core/include/libtracer/config.hpp:312', 'using lkv_slot_t = single_writer_slot_t;'),
-    ('core/include/libtracer/config.hpp:688', 'using config_t = default_config_t;'),
+    ('core/include/libtracer/config.hpp:696', 'using config_t = default_config_t;'),
     ('core/include/libtracer/config.hpp:95',
      'static constexpr std::size_t kVertexLockStripes = 16;'),
     ('core/include/libtracer/config.hpp:119',
      'static constexpr std::size_t kCacheLineBytes = 64;'),
     ('core/include/libtracer/config.hpp:307',
      '* contend across many cores. Override fragment: `using lkv_slot_t = hazard_slot_t;`. The'),
-    ('core/include/libtracer/config.hpp:746',
+    ('core/include/libtracer/config.hpp:754',
      'inline constexpr bool kSpinWaitSafe = tr::graph::config_t::kSpinWaitSafe;'),
     ('core/include/libtracer/config.hpp:474', 'static constexpr bool kWeaklyOrdered = true;'),
     # Was pinned to the :316 banner rule, one of three IDENTICAL comment rules in this header —
     # an anchor no scope could ever separate. Re-pinned inside the SAME cited span
     # (the derived-spelling block the table cites) to the first derived spelling, which is unique.
-    ('core/include/libtracer/config.hpp:697',
+    ('core/include/libtracer/config.hpp:705',
      'inline constexpr std::size_t kVertexLockStripes = config_t::kVertexLockStripes;'),
     # core/include/libtracer/crc.hpp
     ('core/include/libtracer/crc.hpp:38', 'constexpr std::array<std::uint32_t, 256> crc32c_table() noexcept {'),
@@ -876,9 +876,9 @@ ANCHORS = [
     ('tools/cortexm0_footprint.py:151', 'cxx_flags = ['),
     ('tools/cortexm0_footprint.py:158', '"-DLIBTRACER_NO_ATOMIC",'),
     ('tools/cortexm0_footprint.py:172', '"--specs=nano.specs",'),
-    ('core/tests/CMakeLists.txt:1965', 'add_executable(substrate_test_no_atomic'),
-    ('core/tests/CMakeLists.txt:1980', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
-    ('core/tests/CMakeLists.txt:1981', '    LIBTRACER_NO_ATOMIC'),
+    ('core/tests/CMakeLists.txt:1976', 'add_executable(substrate_test_no_atomic'),
+    ('core/tests/CMakeLists.txt:1991', 'target_compile_definitions(substrate_test_no_atomic PRIVATE'),
+    ('core/tests/CMakeLists.txt:1992', '    LIBTRACER_NO_ATOMIC'),
     # The leading indent is load-bearing: the bare token also appears in the comment
     # three lines above the executable, and an anchor that matches both is not an anchor.
 
@@ -899,11 +899,11 @@ ANCHORS = [
     # TSan job (`tsan-reclaim-qsbr`) with an identical `matrix:` block, which made the old
     # anchor ambiguous inside its own `  tsan:` scope — the scope runs to EOF, not to the
     # next job. A rendered job name is unique by construction and needs no scope at all.
-    ('.github/workflows/core-ci.yml:953', 'name: tsan (slot=${{ matrix.lkv_slot }})'),
+    ('.github/workflows/core-ci.yml:976', 'name: tsan (slot=${{ matrix.lkv_slot }})'),
     # The flag the prose QUOTES verbatim ("-fsanitize=thread -g -O1"). #1376's qsbr leg
     # quotes the same flags with a trailing `-I`, so this anchor is the EXACT full line,
     # which the qsbr leg's is not — no scope needed.
-    ('.github/workflows/core-ci.yml:982', '-DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1"'),
+    ('.github/workflows/core-ci.yml:1005', '-DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1"'),
     ('.github/workflows/footprint-cortexm0.yml:13', '`--mode warn` governs the BUDGET VERDICT only'),
     ('bench/CMakeLists.txt:54', 'bench_libtracer_net (two-process ROUTER-flood bench) was retired'),
     ('bindings/typescript/packages/client/test/mesh-testbed.test.mjs:25',
@@ -943,8 +943,8 @@ ANCHORS = [
     ('core/include/libtracer/config.hpp:577', 'static constexpr bool kSelfHealLinks = false;'),
     ('core/include/libtracer/config.hpp:604',
      'static constexpr std::size_t kSelfHealWorkerStackBytes = 0;'),
-    ('core/include/libtracer/config.hpp:623', 'static constexpr bool kInstrumentCounters = false;'),
-    ('core/include/libtracer/config.hpp:655', 'static constexpr bool kAllowInsecureTls = false;'),
+    ('core/include/libtracer/config.hpp:631', 'static constexpr bool kInstrumentCounters = false;'),
+    ('core/include/libtracer/config.hpp:663', 'static constexpr bool kAllowInsecureTls = false;'),
     ('integrations/esp-idf/libtracer/CMakeLists.txt:190',
      'list(APPEND LIBTRACER_SRCS "${LIBTRACER_ROOT}/core/src/transport_can.cpp")'),
 
@@ -1175,9 +1175,9 @@ ANCHORS = [
     ('core/include/libtracer/transport.hpp:506',
      '[[nodiscard]] virtual transport_drop_stats_t drop_stats() const noexcept { return {}; }'),
     # integrations/esp-idf/libtracer/httpd_ws_link.cpp
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:3248',
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:3251',
      'std::size_t httpd_ws_link_t::tx_slot_capacity() const noexcept { return tx_pool_slots_; }'),
-    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:3090',
+    ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:3093',
      'void httpd_ws_link_t::send_in_call(const session_ref_t& to,'),
 ]
 

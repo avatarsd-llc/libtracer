@@ -54,10 +54,10 @@ namespace tr::net {
  * **`self_heal_dial` is BUILD-CONDITIONED** on @ref tr::net::kSelfHealLinks (#1470,
  * maintainer ruling 2026-08-25, option (a)). On a build without the engine — the lean
  * DEFAULT since v0.17.0 (#1670) — the built-ins declare `false` at this, their own
- * registration site, and dial eagerly. That is not the silent downgrade `register_transport_type`'s loud refusal exists
- * to prevent: the refusal targets a kind that *claims* `self_heal_dial` and would not get
- * it, whereas the declaration here is itself build-conditioned — the built-ins never claim
- * an engine this image does not contain. Making the refusal fire for the built-ins instead
+ * registration site, and dial eagerly. That is not the silent downgrade `register_transport_type`'s
+ * loud refusal exists to prevent: the refusal targets a kind that *claims* `self_heal_dial` and
+ * would not get it, whereas the declaration here is itself build-conditioned — the built-ins never
+ * claim an engine this image does not contain. Making the refusal fire for the built-ins instead
  * would turn the lean default into a broken build: every stock `udp`/`tcp`/`ws` kind would
  * drop out of the catalog and every `SPEC` naming one would answer `SCHEMA_NOT_FOUND`.
  *
