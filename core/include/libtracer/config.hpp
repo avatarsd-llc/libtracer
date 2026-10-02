@@ -716,8 +716,9 @@ struct default_config_t {
      * leaves this `false`; arming one there simply changes nothing.
      *
      * **Who sets it.** The core test build, through its checked-in preset fragment
-     * `core/tests/instrumented/libtracer/config_override.hpp`, and every CI leg that binds a
-     * fragment of its own and runs the fault-injection tests. Override fragment:
+     * `core/tests/instrumented/libtracer/config_override.hpp`, the fragment `core/CMakeLists.txt`
+     * writes for the deprecated `-D` knobs when that same test build passes them, and every CI
+     * leg that binds a fragment of its own and runs the fault-injection tests. Override fragment:
      * `static constexpr bool kFaultInjection = true;`
      */
     static constexpr bool kFaultInjection = false;
