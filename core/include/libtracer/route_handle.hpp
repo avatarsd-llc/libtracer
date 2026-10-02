@@ -40,8 +40,8 @@
 #include <utility>
 #include <vector>
 
-#include "libtracer/graph.hpp"
 #include "libtracer/mem_source.hpp"
+#include "libtracer/vertex_handle.hpp"
 
 namespace tr::net {
 

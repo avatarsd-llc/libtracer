@@ -51,13 +51,18 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **`vertex_handle_t`, `vertex_slot_t`, `kGenerationSaturated`, `saturating_next_generation` and
+  `bound_generation_matches` move to the new leaf header `libtracer/vertex_handle.hpp`
+  ([#1707](https://github.com/avatarsd-llc/libtracer/issues/1707)).** The leaf includes no graph
+  or vertex header. `graph.hpp` and `vertex.hpp` include it, so existing code compiles unchanged.
+  `route_handle.hpp` includes the leaf instead of `graph.hpp`, which cuts its standalone parse
+  time from about 1.15 s to about 0.21 s.
 - **An observed eager write no longer takes the graph-wide sweep lock because some OTHER
   vertex holds an `assign` mark ([#1712](https://github.com/avatarsd-llc/libtracer/issues/1712)).**
   While any mark was pending, every observed write rendered its key (one heap block) and took
   the sweep lock to retire a mark it almost never had. A per-vertex hint bit in `vertex_t`'s
   existing flag byte now skips that path for unmarked vertices. No API change;
   `sizeof(vertex_t)` is unchanged. Covering sweeps deliver exactly as before.
-
 - **On the guarded write-sequence binding, a publish opens one guard section, not two
   ([#1715](https://github.com/avatarsd-llc/libtracer/issues/1715)).** Where the 32-bit write
   sequence has no native atomic RMW (ESP32-C3, Cortex-M0), `vertex_t` now bumps it inside the
