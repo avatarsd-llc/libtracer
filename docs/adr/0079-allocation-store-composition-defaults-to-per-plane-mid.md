@@ -390,3 +390,14 @@ than partial.
   whose container type is fixed by the signatures they cross. The router's and transports'
   own seams are outside the ledger on purpose — receiver-pays, per ADR-0060 erratum 1's
   shared-pool measurement — not by omission.
+
+## Amendment (2026-10-03): one injected root by default, with library-derived sub-pools; the hazard-node carve-out ends
+
+*(Maintainer-ratified 2026-10-03; recorded in [ADR-0083](0083-one-allocation-seam.md).)* The body and the amendments above stay as the record. Four things change.
+
+- **There is a default again, and it is one root (ADR-0083 Decisions 3 and 4).** A graph takes one injected root source, and the library derives per-purpose sub-pools (values, tables, net) from it so it can keep accounts and enforce caps per purpose. Per-plane and per-thread become opt-in sub-pool layouts the library derives from that root. This reverses the 2026-08-20 amendment's §1 ("no composition is the default") on purpose. Its §4 recipe "un-wired → all-heap" gives way to the per-target defaults: on a host, a size-classed slab pool over the system heap; on an MCU, a compile-time static arena.
+- **Router and transport sources stay separately injectable (Decision 3, Q21).** The 2026-08-27 §Final state kept the router's and the transports' own seams outside the ledger on purpose (receiver-pays, per ADR-0060 Erratum 1), and that still holds. A source injected at one of those seams is used as it is. The root's derived net sub-pool is only their default when nothing is injected.
+- **The phase-2 carve-out ends (Decision 8).** `lkv_slot.hpp:acquire_node` stops using global `new`. LKV nodes get their own fixed-size class and a per-thread free list, accepted within ±3 % of global `new` on bench-local. The +22.7 % measured in the 2026-08-27 §Final state priced the naive move, not this one.
+- **The signature carve-out ends (Decision 11).** The `std::vector<std::byte>` sites whose type was fixed by the signatures they cross go, because no owning std type crosses core's public API.
+
+Still standing: the renamed triad (folded / per-plane / per-thread), and need C (segments) re-expressed on top of the substrate as the 2026-08-27 amendment put it.

@@ -289,12 +289,20 @@ Every limit is an injected resource or per-target configuration, never a magic c
 _Avoid_: "nesting depth cap 32"; "a hardcoded max frame size"; "the runtime protects users from bad designs".
 
 **Block source / failable allocation**:
-The L0 seam for raw single-owner blocks that reports exhaustion by value; peer-provoked allocations draw from it. [Detail](docs/reference/09-memory-substrate.md#the-second-l0-seam-block_source_t-failable-blocks).
-_Avoid_: "control-plane allocation seam"; "the allocator" as if there were one; "exhaustion throws".
+The single seam every core allocation draws from: raw single-owner blocks, with exhaustion reported by value. [Detail](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0083-one-allocation-seam.md).
+_Avoid_: "control-plane allocation seam"; "only peer-provoked allocations use it"; "init allocates from the heap"; `std::pmr` or a throwing std allocator as the seam; "exhaustion throws".
+
+**Placement module**:
+The one owner of a block's header, padding and the choice between one block and a split, decided against the configured size-class table. [Detail](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0083-one-allocation-seam.md#decision).
+_Avoid_: "each backend lays out its own header"; "the header always shares the payload's block".
 
 **Store composition (folded / per-plane / per-thread)**:
-How many block sources a node wires: one, one per plane, or one per thread; none is the default. [Detail](docs/reference/22-backpressure-and-sizing.md#3-deployment-archetypes).
-_Avoid_: "NARROW / MID / WIDE composition"; "per-plane is the default"; "per-plane avoids contention".
+One injected root per graph by default; per-plane and per-thread are opt-in sub-pool layouts the library derives from it. [Detail](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0083-one-allocation-seam.md#decision).
+_Avoid_: "NARROW / MID / WIDE composition"; "no composition is the default"; "per-plane is the default"; "the deployer wires one source per plane"; "per-plane avoids contention".
+
+**Sub-pool**:
+A per-purpose share of the graph's root (values, tables, net) that the library derives so it can account and cap per purpose. [Detail](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0083-one-allocation-seam.md#decision).
+_Avoid_: "a separately injected source"; "a sub-pool is a buffer the library owns".
 
 **Reclamation domain (hazard domain)**:
 Freeing a block a lock-free reader may still hold; the general domain was refuted, and each tenant answers it alone. [Detail](docs/reference/17-reclamation-policy.md#why-there-is-no-single-answer).

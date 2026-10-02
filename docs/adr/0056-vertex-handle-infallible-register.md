@@ -22,3 +22,7 @@ Both footguns die at zero runtime cost; the `*` disappears from the ~77 register
 ## Alternatives rejected
 
 `shared_ptr` (control block + atomic per hold — violates the ~16 KB Cortex-M0 zero-overhead ethos, ADR-0042; no shared ownership needed); `unique_ptr` (owning — graph already holds it); `observer_ptr` (non-standard; a typed handle we control is stronger); pmr (orthogonal — governs where vertex bytes live, not handle safety; a pmr-backed `vertices_` is a worthwhile separate change).
+
+## Amendment (2026-10-03): an abort in `register_vertex` on exhaustion is a sizing diagnostic
+
+*(Maintainer-ratified 2026-10-03; recorded in [ADR-0083](0083-one-allocation-seam.md) Decision 7.)* Under ADR-0083, registration draws from the graph's one injected root rather than the global heap, so the root can run out during init. Decision 2 is unchanged: `register_vertex` stays infallible. When the root cannot satisfy it, the abort is a **sizing bug** and its message names the sub-pool that refused and the bytes it needed. `try_register_vertex` stays the failable spelling, by value, for runtime registration. The body above stays as the record.

@@ -1042,3 +1042,34 @@ census** `:stats.<class>.<name>` is implemented and readable, while the **per-co
 content differs per connection — remains not implemented and is what those pages were right
 to warn against. Text-only, no wire surface moves, so this is an erratum and not a third
 amendment.
+
+## Amendment 3 (2026-10-03) — three `:stats.mem` seam names for the graph's sub-pools
+
+**Status:** accepted (maintainer ruling 2026-10-03, Q17 of the one-allocation-seam grilling;
+the 14-day window is waived per [GOVERNANCE.md](../../../.github/GOVERNANCE.md), as on
+Amendments 1 and 2). The design it serves is
+[ADR-0083](../../adr/0083-one-allocation-seam.md).
+
+**Scope.** This amendment extends **§D.4's table only**, in the way Amendment 2 did. §D.1,
+§D.2, §D.3, §D.5 and §D.6 are untouched and govern the new names verbatim. The field stays
+node-scoped, NAME validity still resolves above the READ gate and the VALUE below it, one
+READ is still one seam is one whole counter block, and the surface is readable, never
+writable, never awaitable. **No frame shape, type code, grammar rule or error identity
+changes.** This is introspection naming only.
+
+**Why.** Under ADR-0083 a graph takes one injected root source and derives per-purpose
+sub-pools from it for accounting and caps. Each sub-pool's counters need a name a monitor
+can poll.
+
+### D.4 (extended) — the sub-pool seams
+
+| spelling | the seam | nouns |
+| --- | --- | --- |
+| `:stats.mem.values` | the value sub-pool derived from the graph's root (published values and LKV nodes) | `capacity`, `in_use`, `peak`, `refused`, `largest_refused` |
+| `:stats.mem.tables` | the table sub-pool derived from the graph's root (registration, child and label tables, core containers) | the same five |
+| `:stats.mem.net` | the net sub-pool derived from the graph's root, the default for router and transport sources when none is injected | the same five |
+
+`:stats.mem.control` and `:stats.mem.ring` keep their Amendment 1 meaning. A node that does
+not derive a given sub-pool answers that name with `SCHEMA_NOT_FOUND`, and a monitor reads
+that as "this node does not publish that seam", exactly as Amendment 1 §Compatibility already
+requires. Per-size-class detail is not in this surface.

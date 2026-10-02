@@ -1,6 +1,6 @@
 # Transparent PMR: the node draws every non-hot-path allocation from an injected `std::pmr::memory_resource`, unifying with the L0 `mem_backend_t` seam — and "zero-heap" means the *steady-state forward hop*, not init
 
-<!-- status: accepted; superseded-in-part-by: ADR-0065 -->
+<!-- status: accepted; superseded-in-part-by: ADR-0065, ADR-0083 -->
 
 Status: accepted. **Refines [ADR-0038](0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md)** (sharpens what invariants #2/#5 mean) and **generalizes [ADR-0016](0016-substrate-zero-copy-layer-namespaces-no-templates-through-seam.md)** (the `mem_backend_t` injection seam) to the container/tree layer. Brick 0 of the #83 Stage-2 flip: the memory-ownership contract the forward-path rewrite builds against.
 
@@ -245,3 +245,10 @@ non-vacuously (orphans are asserted present before the scan that drains them).
 composition; on the process-lifetime heap a host build actually uses, a missed orphan is a deferral
 and nothing more. `sp_atomic_slot_t` — still the default — has no orphan path at all, so a target
 that cannot satisfy (3) has a policy that does not ask it to.
+
+## Amendment (2026-10-03): the container seam is the block source, not `std::pmr`; superseded in part by ADR-0083
+
+*(Maintainer-ratified 2026-10-03; recorded in [ADR-0083](0083-one-allocation-seam.md).)* The body above stays as the record of what was decided in July 2026. Read it through this list.
+
+- **Superseded.** §1 (the node takes a `std::pmr::memory_resource*`). §2's claim that `std::pmr` is the L2+ container seam: core uses its own failable containers over `block_source_t` instead (ADR-0083 Decision 2). §3's clause that `wire::tlv_t` stays a heap-defaulted `std::vector` spine: that spine is a core allocation and draws from the seam (Decisions 1 and 11). §Context 1's "init / setup allocate freely": they still may allocate, but only from the seam, and exhaustion at init aborts with a sizing message (Decision 7). The considered option that rejected extending the L0 seam in favour of `std::pmr`. Erratum 6's reservation that object construction stays `std::pmr`'s job for allocations that cannot fail at runtime.
+- **Stands.** §4: the steady-state forward hop allocates nothing, from anywhere, and `bench_forward_heap` is its gate. The "one slab, whole stack" aim, which ADR-0083's link check now makes verifiable. Erratum 8's lifetime rule, which now applies to the graph's one injected root.
