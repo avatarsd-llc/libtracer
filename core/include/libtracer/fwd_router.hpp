@@ -431,6 +431,22 @@ class fwd_router_t {
     }
 
     /**
+     * @brief Terminus replies whose egress link was found by NAME rather than taken from the
+     *        receive context the request arrived on (#1709).
+     *
+     * A request that arrives through a point-to-point child's receiver is answered through
+     * that child's link directly, and never moves this counter. It moves only where a name is
+     * all the router has: a BUS frame, whose inbound name is the sending peer's and resolves
+     * through ADR-0044's peer fallback, and a frame pushed through the public by-name
+     * @ref on_frame door, which carries no receive context. A count that grows on a
+     * deployment with no bus children and no by-name ingress is a defect, never a correctness
+     * one. Monotonic and relaxed (`core/STYLE.md` §Introspection).
+     */
+    [[nodiscard]] std::size_t reply_name_lookups() const noexcept {
+        return reply_name_lookups_.load(std::memory_order_relaxed);
+    }
+
+    /**
      * @brief One snapshot of this router's counted cold-path drops (#1503 step 3).
      *
      * See @ref router_stats_t for what each field means and why the drops are counted HERE
@@ -1585,12 +1601,25 @@ class fwd_router_t {
      * (verify-all-then-apply, ADR-0053 §4) before the op mutates state, matching the
      * arena terminus's `decode_into(VERIFY)`. The ADR-0042 §3 referenced store needs
      * a contiguous frame view, so the rope tier stores its one ownership copy (no
-     * `frame_view`). Reply routes back over @p inbound_name exactly as the arena path.
+     * `frame_view`). Reply routes back over the inbound link (`reply_link`) exactly as the
+     * arena path.
      */
     void resolve_terminus_rope(std::string_view inbound_name, view::rope_t frame,
                                const wire::path_ref_element_t* dst_label_target = nullptr,
                                const child_rx_ctx_t* inbound_ctx = nullptr,
                                peer_handle_t peer = {});
+    /**
+     * @brief The link a terminus reply to a frame from @p inbound_name leaves on (#1709).
+     *
+     * A point-to-point child's frame carries its receive context, and the context holds the
+     * link: the reply goes back through it, with no scan of the registry. A bus context (the
+     * inbound name is a PEER's), a tombstoned one, or none at all falls back to
+     * `child_registry_t::by_name` — the peer resolution ADR-0044 rules for a bus — and counts
+     * the lookup in @ref reply_name_lookups.
+     * @retval nullptr No link answers to @p inbound_name any more; the reply is dropped.
+     */
+    [[nodiscard]] transport_t* reply_link(std::string_view inbound_name,
+                                          const child_rx_ctx_t* inbound_ctx) noexcept;
     /**
      * @brief Classify ONE inbound FWD frame and dispatch it — the ingress driver, once.
      *
@@ -2131,6 +2160,9 @@ class fwd_router_t {
     std::atomic<std::size_t> delivery_iov_dropped_{0};
     std::atomic<std::size_t> malformed_rx_{0};
     /** @} */
+    /** @brief @ref reply_name_lookups's counter: cold state, so it sits with the drops. Bumped
+     *         only on the by-name arm of `reply_link`, never on a point-to-point reply. */
+    std::atomic<std::size_t> reply_name_lookups_{0};
 };
 
 }  // namespace tr::net

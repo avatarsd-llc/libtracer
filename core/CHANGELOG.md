@@ -119,6 +119,14 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   whichever of the two headers it reached the names through; both go in the next release. **Migration:** include `libtracer/can_framing.hpp` in place of
   `libtracer/view_can.hpp`, and spell `tr::view::can_frame_mode_t` as
   `tr::net::can::can_frame_mode_t` (and likewise for the other six names).
+- **A terminus reply leaves through the link the request arrived on, with no by-name lookup
+  ([#1709](https://github.com/avatarsd-llc/libtracer/issues/1709)).** `fwd_router_t` used to
+  find a reply's egress link by scanning its child registry for the inbound name, although a
+  frame from a registered child's receiver already carries that child's link. A point-to-point
+  child's reply (and its memory-refusal answer) now goes back through that link directly. A bus
+  child keeps its peer resolution by name (ADR-0044), and so does a frame pushed through the
+  public by-name `on_frame` door. New API: `fwd_router_t::reply_name_lookups()` counts the
+  replies that still resolved their link by name, so a deployment can confirm the scan is gone.
 - **An observed eager write no longer takes the graph-wide sweep lock because some OTHER
   vertex holds an `assign` mark ([#1712](https://github.com/avatarsd-llc/libtracer/issues/1712)).**
   While any mark was pending, every observed write rendered its key (one heap block) and took
