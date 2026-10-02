@@ -224,6 +224,8 @@ Within a single implementation the ABI *should* be declared semver-stable: an ex
 
 Executor, security and discovery modules are opt-in; none is linked into a P0 build. A node loads them only when it needs vertex-side compute, transport confidentiality or authentication, or peer announcement.
 
+The reference implementation chooses the mechanism per seam: the L0 backend seam is a compile-time contract (a `concept` shape plus `constexpr` traits, dispatched through the target's module set), while the net plane's `transport_t` keeps a runtime virtual surface, because its calls run at wiring frequency and its kinds arrive as data.
+
 ### L0 ↔ L1 — the memory-backend contract
 
 A backend owns real bytes; the refcounted segment it hands out is an L1 object because it carries the refcount. The backend interface itself is L0 and must not depend on L1, which is why allocation yields a raw segment the caller adopts rather than an already-owning handle. (The corresponding L0 discussion is [09-memory-substrate.md](09-memory-substrate.md) §the backend abstraction.)

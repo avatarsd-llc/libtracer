@@ -87,6 +87,8 @@ On a field step:
 
 Field indexing is resolved at **L4 from the field schema**, not from the storage layout: a **fixed-stride** array (uniform element size) resolves `[N]` by direct offset (O(1)) on contiguous backing; otherwise the children are walked ([ADR-0008](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0008-schema-driven-array-indexing.md)).
 
+Array-ness is a schema (L4) property, never a wire bit: there is no array type code or `opt` array flag, and on the wire an array is a `PL=1` TLV with homogeneous children. An array whose in-memory rope scatters its elements across segments resolves by walking children (O(n)), like a variable-size one.
+
 ### The index form on the wire
 
 The text spelling above is the human form. A remote operation carries the field
@@ -116,6 +118,8 @@ Two consequences:
   below still forbids `*` inside a NAME, and there is still no textual wildcard
   grammar.
 
+`WILDCARD` is part of the v1 encoding, and the resolver rejects `[*]` with `INVALID_PATH` on any field other than `subscribers` and on any write. Nothing consumes the flag beyond that: the `:children` and `:subscribers[N]` read arms require it absent, and a `[*]` read falls through to `SCHEMA_NOT_FOUND`. `[*]` names a shape the wire can express and no operation performs.
+
 ### Reserved characters
 
 The five characters `/ : . [ ]` plus `*` and `?` cannot appear inside a NAME segment. Implementations MUST reject any NAME containing them with `ERROR{tr::path::invalid}`.
@@ -123,6 +127,8 @@ The five characters `/ : . [ ]` plus `*` and `?` cannot appear inside a NAME seg
 (`*` and `?` are not path characters in v1; they are reserved to keep the door open for a possible future per-segment wildcard grammar — see [§per-segment wildcards](#per-segment-wildcards-unratified).)
 
 All three tiers enforce the full seven-character set through one predicate each — C++ `tr::graph::valid_segment`, Rust `validate_segment`, TS `RESERVED_SEGMENT_CHARS` — and the set is pinned cross-tier by the `path/path-reserved-brackets` conformance vector plus each tier's own host test (see `tests/conformance/HARNESS.md`). Until [#996](https://github.com/avatarsd-llc/libtracer/issues/996) the C++ core admitted `[` and `]` on the theory that an address index travels inside the NAME bytes; the ruling went the other way — the grammar's `index` sits outside `name`, and an address-index encoding, if one ever lands, stays outside the NAME bytes (§index forms above).
+
+**A name that enters the graph must be expressible in this grammar** — enumerable implies addressable. Every minting boundary (a wire `SPEC` carrying a child name, a transport naming an accepted session, a module registration, the local string parser) enforces it through one shared segment-validity predicate, never through per-site copies.
 
 ---
 

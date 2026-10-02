@@ -290,6 +290,8 @@ composing onto the vertex the sweep visits — which is step 1 above.
 - **Sizing the batch** is your byte budget against the receiver's ring bound: one batch must fit,
   because a batch is one value.
 
+The block sources a node wires compose in one of three ways. **Folded**: one source for every seam, one cap, the tightest RAM, contention-free only because the target has one thread. **Per-plane**: one source for the graph plane and one for the net plane, which buys blast-radius isolation (a peer-provoked flood is fenced in the net-plane store) but not scaling, since it collapses like folded under fan-out. **Per-thread**: one source per receive thread, the only composition that survives fan-out. Composition decides which seams share a cap; the store's size is what bounds the node.
+
 ---
 
 ## 4. Do you need the last-known-value?
@@ -570,6 +572,8 @@ The standing rulings this guide must not be read as licence to violate.
   drop arm and nowhere else. If observing a stage would cost the hot path an instruction, the
   observation is designed differently — `bench_forward_heap == 0` and the rv32 text figure are the
   standing referees, measured per PR (`core/STYLE.md` §Introspection, the counting doctrine).
+
+A knob whose overflow changes only cost, such as the rope's inline link count or the walk stack's inline slots, is an optimization, not a limit. A transport's maximum frame size is per-connection configuration.
 
 ---
 

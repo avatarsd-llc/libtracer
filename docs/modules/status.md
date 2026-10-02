@@ -61,6 +61,8 @@ constexpr err_disposition_t   err_disposition(err_t) noexcept;
 `tr::<concept>::<error>` string the reference suite and the Wireshark dissector
 use, so a log line and a spec section can be matched by eye.
 
+The severity and disposition of each error, `err_t::FLOW_ADDRESS_SHIFT_GAP` included, live once in the registry (`error.hpp`); call sites do not re-derive them.
+
 ## Checksums
 
 The frame trailer's integrity codes live beside the taxonomy because they are the

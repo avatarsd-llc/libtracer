@@ -106,6 +106,8 @@ Consequences:
 
 `dst`-monotonicity of `FWD` routes is a separate property of a separate plane: it bounds how far a **remote operation** travels between nodes ([07-host-embedding.md](07-host-embedding.md) §loop safety), whereas terminal delivery bounds how far a **subscription** propagates within a graph. Neither implies the other, and an implementation needs both.
 
+Each edge carries exactly one `target`, and the target is **subscription-unaware**: a delivery looks like a direct write, and the target cannot tell which subscription, or that any subscription, produced it. Several subscriptions may fan into one target; they resolve by the target's role (overwrite for a stored value, append for a stream), not by the target arbitrating. The target's own write `:acl`, plus any firmware arity, gates fan-in, so a single-input sink refuses a second writer with no orchestrator present. The target grows no source machinery, yet its data can span a scalar to a rope or stream.
+
 ---
 
 ## Await: block for the next write

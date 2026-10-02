@@ -29,6 +29,8 @@ But notice what the first three have in common: **they are all paying to solve a
 
 The bug lives in the **thread configuration**, not in the code. And libtracer already chooses its thread configuration per target. So reclamation is chosen per target too.
 
+In the reference implementation each tenant has its own answer: the value seam is freed by the explicit collector `graph_t::collect()`, the `mount_tlv` rebind is immutable by construction (the replaced bytes are a pure function of the slot key, so nothing is ever replaced), and the last-known-value slot keeps its own private hazard policy (`lkv_slot.hpp`). No single generalized reclamation domain exists.
+
 ## The model: a grace point, closed at build time
 
 A **grace point** is the moment at which a retired `{fn, ctx}` pair is provably named by no live snapshot, and is therefore safe to free. Each policy is a different grace point, selected the same way every other per-target knob is — a `using` in the build's configuration ([ADR-0068](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0068-build-configuration-is-plain-cxx.md)), never a runtime flag:

@@ -44,6 +44,8 @@ vertex writes, the cables it patches outlive the hand that plugged them — and 
 nothing privileged holds the graph together, a rebooted or reconnected peer re-forms
 its own bindings (§*Self-healing without a coordinator*) with no coordinator present.
 
+A **peer** is anything that speaks the wire format: an MCU, a host process, a container, a browser tab. Peers are symmetric, and the transport does not change a peer's standing: the same graph forms over CAN, WebSocket, TCP or UDP. A co-processor relationship (one MCU front-ending another on the same board) is a property of a product's board layout, not of the protocol; the two parts are still ordinary peers on their shared bus.
+
 ## The formation flow
 
 ```{mermaid}
@@ -289,6 +291,8 @@ deliver through (the mount exactly, or a bus link's own NAME — RFC-0020) is re
 **Two devices keep talking with no third party present**; the patch cable stays. A
 rebooted leaf re-establishes its links and subscriptions by re-issuing the same
 client-writes from firmware or NVS config.
+
+The orchestrator never carries the data. It issues create and bind writes and leaves, and the devices deliver to each other directly; proxying the data through the orchestrator is the browser relay this model exists to retire.
 
 ## Link liveness
 

@@ -62,6 +62,8 @@ Because the choice is per-target configuration and the check runs on the data
 plane, it is made at compile time — a runtime branch on every access would be a
 cost paid by the target that does not need the feature.
 
+The **owner peer** is the provisioned root that bootstraps a device's ACL and delegates `WRITE_ACL` (admin) to orchestrators, which is what makes third-party binding possible.
+
 ## The wire side
 
 An ACL lives on the wire as the `:acl` ACL TLV described in

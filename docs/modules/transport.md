@@ -71,6 +71,8 @@ WebSocket server and client (`transport_ws.hpp:transport_ws_server::delivers_rop
 (`transport_webtransport.hpp:webtransport_transport_t::delivers_ropes`). The borrowed-span path is the base-class default
 and the tier an out-of-tree transport gets for free.
 
+A scattered frame crosses the owning seam as the rope it already is; trailing transport padding is trimmed by shortening the last link, never by flattening.
+
 ## Point-to-point links and bus links
 
 A point-to-point link carries one peer, so the child NAME the router registers it
@@ -126,6 +128,8 @@ carries — the registered child NAME — so its only seam is the whole link
 (`transport_t::notify_down`), and it therefore waits until the **last** open session departs
 (`posix_endpoint.cpp:slot_server_t::any_open_session`). Firing it on a mid-life close would evict the surviving peers'
 edges along with the departed one's.
+
+The library invents no path text. The one name it mints itself is the creatorless-session fallback `p<slot>`, which identifies a **session**, not a device; a device-stable identity is a named link.
 
 ## Closing the bus module out at build time
 
@@ -403,6 +407,7 @@ they are the reason a new binding is small.
   compiled only when that transport is enabled, so a build that drops a transport
   leaves neither a compiled factory nor a dangling call to it. No preprocessor
   macro selects a transport: selection is which translation units get compiled.
+- **`tx_handoff_t`** is enqueue-then-write for a link that must put one record on the wire at a time. The link's lock guards a small bounded queue and a writer-in-flight flag, never the write itself. The first sender becomes the writer and writes its own record; a sender that finds a write in flight copies its record into a queue slot and returns; a sender that finds every slot taken drops the record and the link counts it. The writer drains the queue in admission order. It still waits on I/O, bounded per record by the link's write budget, and a stream link gives the peer up after three stalled writes in a row; there is no transmit task, so the queue does not make the write asynchronous.
 
 ## API reference
 
@@ -699,6 +704,8 @@ computation — is pure and lives in `tr::net::ws`:
 
 CAN is a stack of its own — the ID codec, the advertise stream, the splitter and
 the reassembler as well as the binding — and has [its own page](can.md).
+
+The transport set closes at **link time**: it is the sources a target compiles and the factories it registers, with ordinary runtime dispatch inside, and adding a platform transport appends to that set without editing core. Kinds are fixed at build time, but connections stay runtime: a creator-endpoint `SPEC` write names the kind as data.
 
 See: [can](can.md), [fwd-router](fwd-router.md), [interface map](interface-map.md),
 [reference §communication flows](../reference/04-communication-flows.md),

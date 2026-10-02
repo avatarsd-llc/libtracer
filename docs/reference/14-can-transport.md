@@ -219,6 +219,8 @@ same `dropped_groups` counter an eviction does: one counter for "a group's buffe
 slices were reclaimed before delivery", whatever forced it.
 ```
 
+A reassembled group stays zero-copy only when the transport hands it up through the owning rope seam; delivery through a flat span copies each slice. Advertise plus id-match and the rope seam therefore compose; neither replaces the other.
+
 ## The in-band advertise frame and the dynamic map
 
 The `identity↔path` map is **dynamic config held inside `transport_can`** — not
@@ -297,6 +299,8 @@ difference is policy, not mechanism: CAN always labels (no route fits in 8 bytes
 ws labels **only** flows whose `SUBSCRIBER.qos_settings.delivery_compact` is set, so
 a ws node forwarding one-shot/cold traffic holds zero label state. The ws table
 lives in `tr::net::route_handle_t`, owned by `fwd_router_t`.
+
+This is one of two framing modes, chosen per transport and mixable per frame. **Full-TLV** frames are self-describing: they carry the whole path and control surface, and they are used on IP and WebSocket links, where a 4-byte header is negligible, and for occasional control frames on any transport. **Header-elided** frames key on the transport's native identity through the map above. An occasional full-TLV control frame is what establishes an elided binding.
 
 ## The SocketCAN binding (`transport_can`)
 
@@ -389,6 +393,8 @@ re-driven when the manifest lands.
   (which a single producer gets on CAN); the pending-data buffer covers control/data
   cross-ID reordering.
 ```
+
+A large elided payload stays zero-copy only if the transport delivers it through the owning rope seam; a small sample costs one small copy when its header is synthesized.
 
 ### Ingress is bounded in count and in age
 

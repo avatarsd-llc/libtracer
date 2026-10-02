@@ -391,6 +391,8 @@ out of the raw config `SETTINGS` TLV handed to it alongside these settings.
 Both families — the universal keys and every kind's private ones — are tabulated key by key on
 [connection config](connection-config.md).
 
+Inside the process a link is addressed by its connection vertex's handle (the router's connection-slot index), never by its name, and a bus peer by its `peer_handle_t`. There is no separate "link token": the connection vertex's handle is the link's only identity.
+
 ## Pitfalls
 
 - **`add_child` returning `false` is not advisory.** A mount name of **any** width registers and
