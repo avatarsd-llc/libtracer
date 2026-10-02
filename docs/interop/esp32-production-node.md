@@ -227,7 +227,7 @@ Rules that follow:
   alloc-or-backpressure — drop the sample, count it, publish the counter (§6) — but the
   rule is **not yet met everywhere**: `try_reserve`'s throwing second step under
   concurrency (#850) still aborts on exhaustion. (It is the last of three. The CAN egress
-  window table went in #1110 — `view_can.hpp`'s `can_frame_at` now derives each window and
+  window table went in #1110 — `can_framing.hpp`'s `can_frame_at` now derives each window and
   allocates nothing — and the peer-driven label-table binds of #603 defect 1 went when
   `route_handle_t` moved onto the injected `mem::block_source_t`, which answers exhaustion by
   value.) Price that one before shipping a `-fno-exceptions` image, and audit any

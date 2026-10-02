@@ -50,8 +50,8 @@
 #include <thread>
 #include <vector>
 
+#include "libtracer/can_framing.hpp"
 #include "libtracer/transport_can.hpp"
-#include "libtracer/view_can.hpp"
 #include "test_support.hpp"
 
 namespace {
@@ -205,9 +205,9 @@ int main() {
     auto rx_a = [&](std::span<const std::byte> f) { sink_a.on(f); };
     auto rx_b = [&](std::span<const std::byte> f) { sink_b.on(f); };
     tr::net::transport_can tx_a(std::move(link_a),
-                                {0, 1, tr::view::can_frame_mode_t::CLASSIC, "a/p"});
+                                {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "a/p"});
     tr::net::transport_can tx_b(std::move(link_b),
-                                {0, 2, tr::view::can_frame_mode_t::CLASSIC, "b/q"});
+                                {0, 2, tr::net::can::can_frame_mode_t::CLASSIC, "b/q"});
 
     tx_a.set_receiver(rx_a);
     tx_b.set_receiver(rx_b);
@@ -243,7 +243,7 @@ int main() {
     sink_t sink_c;
     auto rx_c = [&](std::span<const std::byte> f) { sink_c.on(f); };
     tr::net::transport_can tx_c(std::move(link_c),
-                                {0, 3, tr::view::can_frame_mode_t::CLASSIC, "c/r"});
+                                {0, 3, tr::net::can::can_frame_mode_t::CLASSIC, "c/r"});
     tx_c.set_receiver(rx_c);
 
     tr::net::transport_t* const to_b = tx_a.peer_link("n2");
@@ -358,7 +358,7 @@ int main() {
     auto link_d = std::make_unique<tr::net::socketcan_link_t>("vcan0");
     check(link_d->ok(), "fourth CAN_RAW socket bound to vcan0");
     tr::net::transport_can tx_d(std::move(link_d),
-                                {0, 4, tr::view::can_frame_mode_t::CLASSIC, "d/s"});
+                                {0, 4, tr::net::can::can_frame_mode_t::CLASSIC, "d/s"});
     // No set_receiver on D: this IS the window. A's broadcast group completes on
     // D's receive thread and delivery finds both receiver slots empty.
     tx_a.send(payload(26, 0x2A));

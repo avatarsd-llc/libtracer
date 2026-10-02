@@ -6,7 +6,7 @@ CAN gets a whole layer of its own because the bus is too narrow for a TLV header
 classic CAN carries eight data bytes per frame. libtracer elides the header
 instead of shrinking it — **the 29-bit extended CAN ID *is* the address** — so a
 data frame on the bus is payload and nothing else. A dynamic identity↔path map
-inside the transport self-establishes through in-band `advertise` frames, an L1
+inside the transport self-establishes through in-band `advertise` frames, a
 splitter cuts one logical payload into id-matched frame windows with no copy, and
 a reassembler chains the windows back into a rope on the far side.
 ```
@@ -31,9 +31,11 @@ bytes. Endpoint slot `0` is reserved for the advertise stream, data groups start
 at the next slot, and a peer that has been silent past the liveness window leaves
 the enumeration on its own — there is no orchestrator to tell it to.
 
-**The splitter** (`tr::view::can_frame_count` / `can_frame_at`) is L1, not
-transport: it cuts a view into per-frame windows, each a subview over the same
-segment, never a memcpy. It is a pair of free functions, not an object — a window
+**The splitter** (`tr::net::can::can_frame_count` / `can_frame_at`, in
+`can_framing.hpp`) is transport framing, so it lives in the net plane beside the ID
+codec (#1725 moved it out of the view layer; `view_can.hpp` keeps the old `tr::view`
+names as aliases for one release). It cuts a view into per-frame windows, each a
+subview over the same segment, never a memcpy. It is a pair of free functions, not an object — a window
 is a pure function of the payload length, the mode and the index, so there is no
 table to hold and nothing to allocate. `can_frame_mode_t` selects the classic 8-byte or CAN-FD 64-byte data
 field, and `can_fd_dlc_round_up` handles CAN-FD's non-contiguous length ladder.
@@ -159,33 +161,33 @@ with its platform's blocking primitive.
 :project: libtracer
 ```
 
-### The L1 splitter
+### The splitter
 
-```{doxygenenum} tr::view::can_frame_mode_t
+```{doxygenenum} tr::net::can::can_frame_mode_t
 :project: libtracer
 ```
 
-```{doxygenfunction} tr::view::can_frame_count
+```{doxygenfunction} tr::net::can::can_frame_count
 :project: libtracer
 ```
 
-```{doxygenfunction} tr::view::can_frame_at
+```{doxygenfunction} tr::net::can::can_frame_at
 :project: libtracer
 ```
 
-```{doxygenfunction} tr::view::can_max_data
+```{doxygenfunction} tr::net::can::can_max_data
 :project: libtracer
 ```
 
-```{doxygenfunction} tr::view::can_fd_dlc_round_up
+```{doxygenfunction} tr::net::can::can_fd_dlc_round_up
 :project: libtracer
 ```
 
-```{doxygenvariable} tr::view::kCanClassicMaxData
+```{doxygenvariable} tr::net::can::kCanClassicMaxData
 :project: libtracer
 ```
 
-```{doxygenvariable} tr::view::kCanFdMaxData
+```{doxygenvariable} tr::net::can::kCanFdMaxData
 :project: libtracer
 ```
 

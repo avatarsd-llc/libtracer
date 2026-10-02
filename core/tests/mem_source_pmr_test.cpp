@@ -43,11 +43,11 @@
 #include <type_traits>
 #include <vector>
 
+#include "libtracer/can_framing.hpp"
 #include "libtracer/can_reassembly.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/view.hpp"
-#include "libtracer/view_can.hpp"
 #include "test_support.hpp"
 
 namespace {
@@ -258,7 +258,7 @@ int main() {
         const std::vector<std::byte> payload = ramp(20);
         const tr::view::view_t pv = view_over(payload);
         const auto slice = [&](std::size_t i) {
-            return tr::view::can_frame_at(pv, tr::view::can_frame_mode_t::CLASSIC, i);
+            return tr::net::can::can_frame_at(pv, tr::net::can::can_frame_mode_t::CLASSIC, i);
         };
         const auto key_ts = [](std::uint64_t ts) {
             tr::net::reassembly_key_t k;
@@ -267,7 +267,8 @@ int main() {
         };
 
         tr::net::can_reassembly_t reasm{under_test(adapter), /*max_groups=*/2};
-        const std::size_t n = tr::view::can_frame_count(pv, tr::view::can_frame_mode_t::CLASSIC);
+        const std::size_t n =
+            tr::net::can::can_frame_count(pv, tr::net::can::can_frame_mode_t::CLASSIC);
         check(n == 3, "a 20-byte payload splits into 3 classic CAN data fields");
 
         // Out-of-order arrival, then the advertise's slice count, then assembly.

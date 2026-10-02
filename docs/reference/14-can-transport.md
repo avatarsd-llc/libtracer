@@ -32,7 +32,7 @@ The reference-implementation symbols are:
 | Concern | Symbol | Header | Layer |
 | --- | --- | --- | --- |
 | 29-bit ID + advertise codec | `tr::net::can` | `can.hpp` | transport plane |
-| header-elided framing | `tr::view::can_frame_count` / `can_frame_at` | `view_can.hpp` | L1 |
+| header-elided framing | `tr::net::can::can_frame_count` / `can_frame_at` | `can_framing.hpp` | transport plane |
 | multi-frame reassembly | `tr::net::can_reassembly_t` | `can_reassembly.hpp` | transport plane |
 | SocketCAN binding + raw-frame seam | `tr::net::transport_can`, `can_link_t`, `socketcan_link_t` | `transport_can.hpp` | transport plane |
 

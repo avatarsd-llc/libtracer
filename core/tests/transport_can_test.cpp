@@ -44,9 +44,9 @@
 #include <vector>
 
 #include "libtracer/can.hpp"
+#include "libtracer/can_framing.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_pool.hpp"
-#include "libtracer/view_can.hpp"
 #include "test_support.hpp"
 
 namespace {
@@ -280,7 +280,7 @@ tr::net::transport_can_config_t rx_test_config() {
     tr::net::transport_can_config_t cfg;
     cfg.version = 0;
     cfg.node = 2;
-    cfg.mode = tr::view::can_frame_mode_t::CLASSIC;
+    cfg.mode = tr::net::can::can_frame_mode_t::CLASSIC;
     cfg.path = "q";
     return cfg;
 }
@@ -289,7 +289,8 @@ tr::net::transport_can_config_t rx_test_config() {
 // Tests.
 // ---------------------------------------------------------------------------
 
-void test_roundtrip(tr::view::can_frame_mode_t mode, std::size_t payload_len, const char* label) {
+void test_roundtrip(tr::net::can::can_frame_mode_t mode, std::size_t payload_len,
+                    const char* label) {
     std::printf("transport_can round trip (%s, %zu bytes):\n", label, payload_len);
 
     fake_can_bus_t bus;
@@ -333,8 +334,8 @@ void test_fd_dlc_padding() {
     auto link_b = std::make_unique<fake_link_t>(bus);
     frame_tap_t tap(bus);  // records every frame on the bus
 
-    tr::net::transport_can tx_a(std::move(link_a), {0, 1, tr::view::can_frame_mode_t::FD, "p"});
-    tr::net::transport_can tx_b(std::move(link_b), {0, 2, tr::view::can_frame_mode_t::FD, "q"});
+    tr::net::transport_can tx_a(std::move(link_a), {0, 1, tr::net::can::can_frame_mode_t::FD, "p"});
+    tr::net::transport_can tx_b(std::move(link_b), {0, 2, tr::net::can::can_frame_mode_t::FD, "q"});
 
     tx_b.set_receiver(rx);
 
@@ -383,7 +384,7 @@ void test_control_stream_resync() {
     // behind). Without resynchronization this wedges B's decoder for node 1
     // permanently and A's later traffic is never delivered.
     tr::net::transport_can tx_b(std::move(link_b),
-                                {0, 2, tr::view::can_frame_mode_t::CLASSIC, "q"});
+                                {0, 2, tr::net::can::can_frame_mode_t::CLASSIC, "q"});
     tx_b.set_receiver(rx);
 
     tr::net::can_frame_data_t fragment;
@@ -396,7 +397,7 @@ void test_control_stream_resync() {
 
     auto link_a = std::make_unique<fake_link_t>(bus);
     tr::net::transport_can tx_a(std::move(link_a),
-                                {0, 1, tr::view::can_frame_mode_t::CLASSIC, "sensor/temp"});
+                                {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "sensor/temp"});
     const std::vector<std::byte> payload = make_payload(24);
     tx_a.send(payload);
 
@@ -414,9 +415,9 @@ void test_lifecycle() {
         auto link_a = std::make_unique<fake_link_t>(bus);
         auto link_b = std::make_unique<fake_link_t>(bus);
         tr::net::transport_can tx_a(std::move(link_a),
-                                    {0, 1, tr::view::can_frame_mode_t::CLASSIC, "a"});
+                                    {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "a"});
         tr::net::transport_can tx_b(std::move(link_b),
-                                    {0, 2, tr::view::can_frame_mode_t::CLASSIC, "b"});
+                                    {0, 2, tr::net::can::can_frame_mode_t::CLASSIC, "b"});
         tx_b.set_receiver(rx);
         tx_a.send(make_payload(30));
         sink.wait_for_count(1, 1s);
@@ -433,9 +434,9 @@ void test_single_value() {
     auto link_a = std::make_unique<fake_link_t>(bus);
     auto link_b = std::make_unique<fake_link_t>(bus);
     tr::net::transport_can tx_a(std::move(link_a),
-                                {0, 1, tr::view::can_frame_mode_t::CLASSIC, "p"});
+                                {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "p"});
     tr::net::transport_can tx_b(std::move(link_b),
-                                {0, 2, tr::view::can_frame_mode_t::CLASSIC, "q"});
+                                {0, 2, tr::net::can::can_frame_mode_t::CLASSIC, "q"});
     tx_b.set_receiver(rx);
     const std::vector<std::byte> payload = make_payload(5);
     tx_a.send(payload);
@@ -683,7 +684,7 @@ void test_oversized_group_is_refused_before_advertising() {
     tr::net::transport_can_config_t cfg_b = rx_test_config();
     cfg_b.rx_ttl = 30ms;  // short, so any pinned group is provably sweepable below
     tr::net::transport_can tx_a(std::move(link_a),
-                                {0, 1, tr::view::can_frame_mode_t::CLASSIC, "sensor/temp"});
+                                {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "sensor/temp"});
     tr::net::transport_can tx_b(std::move(link_b), cfg_b);
     tx_b.set_receiver(rx);
 
@@ -691,7 +692,7 @@ void test_oversized_group_is_refused_before_advertising() {
     // constants, not from 32768: the bound is the CAN ID's, and if kEndpointBits ever
     // widens this test must follow it rather than silently stop testing the boundary.
     const std::vector<std::byte> huge =
-        make_payload((tr::net::kCanMaxGroupSlices + 1) * tr::view::kCanClassicMaxData);
+        make_payload((tr::net::kCanMaxGroupSlices + 1) * tr::net::can::kCanClassicMaxData);
     tx_a.send(huge);
 
     check(wait_until([&] { return tx_a.dropped_tx() >= 1; }, 2s),
@@ -733,12 +734,12 @@ void test_u16_slice_count_wrap_cannot_advertise_a_hello() {
     auto link_a = std::make_unique<fake_link_t>(bus);
     auto link_b = std::make_unique<fake_link_t>(bus);
     tr::net::transport_can tx_a(std::move(link_a),
-                                {0, 1, tr::view::can_frame_mode_t::CLASSIC, "sensor/temp"});
+                                {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "sensor/temp"});
     tr::net::transport_can tx_b(std::move(link_b), rx_test_config());
 
     // One slice past the u16 range — the count that used to narrow to zero.
     const std::size_t slices = std::size_t{0xFFFF} + 1;
-    const std::vector<std::byte> huge = make_payload(slices * tr::view::kCanClassicMaxData);
+    const std::vector<std::byte> huge = make_payload(slices * tr::net::can::kCanClassicMaxData);
     tx_a.send(huge);
 
     check(wait_until([&] { return tx_a.dropped_tx() >= 1; }, 2s),
@@ -771,7 +772,7 @@ void test_rx_slice_refusal_drops_the_group_and_counts() {
     // The injected byte seam. Slots are one CLASSIC data field wide — the exact size an
     // inbound slice copy asks for.
     alignas(std::max_align_t) std::array<std::byte, 8192> slab{};
-    tr::mem::synchronized_pool_t<> pool(slab, tr::view::kCanClassicMaxData);
+    tr::mem::synchronized_pool_t<> pool(slab, tr::net::can::kCanClassicMaxData);
 
     // Drain to a KNOWN free-slot count so the refusing slice index is exact rather than
     // whatever the slab arithmetic happened to yield. The 3-window group below gets two
@@ -779,7 +780,7 @@ void test_rx_slice_refusal_drops_the_group_and_counts() {
     constexpr std::size_t kKeepFree = 2;
     std::vector<tr::view::segment_ptr_t> held;
     while (tr::view::segment_ptr_t s =
-               tr::view::segment_alloc(pool, tr::view::kCanClassicMaxData)) {
+               tr::view::segment_alloc(pool, tr::net::can::kCanClassicMaxData)) {
         held.push_back(std::move(s));
     }
     check(held.size() > kKeepFree, "the injected pool holds more slots than the group needs");
@@ -794,7 +795,7 @@ void test_rx_slice_refusal_drops_the_group_and_counts() {
     tr::net::transport_can_config_t cfg_b = rx_test_config();
     cfg_b.rx_backend = &pool;
     tr::net::transport_can tx_a(std::move(link_a),
-                                {0, 1, tr::view::can_frame_mode_t::CLASSIC, "sensor/temp"});
+                                {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "sensor/temp"});
     tr::net::transport_can tx_b(std::move(link_b), cfg_b);
     tx_b.set_receiver(rx);
 
@@ -813,7 +814,7 @@ void test_rx_slice_refusal_drops_the_group_and_counts() {
     // byte pattern on purpose: make_payload is index-derived, so a 16-byte prefix of the
     // refused group's payload would be indistinguishable from a legitimate 16-byte frame
     // and the liveness check could pass on the very corruption it is meant to exclude.
-    const std::vector<std::byte> two_windows(2 * tr::view::kCanClassicMaxData, std::byte{0xC3});
+    const std::vector<std::byte> two_windows(2 * tr::net::can::kCanClassicMaxData, std::byte{0xC3});
     tx_a.send(two_windows);
     check(sink.wait_for_count(1, 2s), "the node is LIVE: the next group is delivered");
     check(equal_bytes(sink.last(), two_windows), "and its bytes are byte-exact");
@@ -877,8 +878,8 @@ void test_rx_zero_length_slice_drops_the_group_and_counts() {
     const std::size_t before = sink.count();
     auto link_a = std::make_unique<fake_link_t>(bus);
     tr::net::transport_can tx_a(std::move(link_a),
-                                {0, 3, tr::view::can_frame_mode_t::CLASSIC, "sensor/other"});
-    const std::vector<std::byte> live(2 * tr::view::kCanClassicMaxData, std::byte{0xA7});
+                                {0, 3, tr::net::can::can_frame_mode_t::CLASSIC, "sensor/other"});
+    const std::vector<std::byte> live(2 * tr::net::can::kCanClassicMaxData, std::byte{0xA7});
     tx_a.send(live);
     check(sink.wait_for_count(before + 1, 2s), "the node is LIVE: a later group is delivered");
     check(equal_bytes(sink.last(), live), "and its bytes are byte-exact");
@@ -934,11 +935,11 @@ void test_endpoint_wraparound_does_not_alias_stale_state() {
     tr::net::transport_can_config_t cfg_b = rx_test_config();
     cfg_b.rx_ttl = 60s;  // far out of reach: the age-out must NOT be what reclaims the trap
     tr::net::transport_can tx_a(std::move(link_a),
-                                {0, 1, tr::view::can_frame_mode_t::CLASSIC, "sensor/temp"});
+                                {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "sensor/temp"});
     tr::net::transport_can tx_b(std::move(link_b), cfg_b);
     tx_b.set_receiver(rx);
 
-    constexpr std::size_t kWin = tr::view::kCanClassicMaxData;
+    constexpr std::size_t kWin = tr::net::can::kCanClassicMaxData;
     // Every slot count below is derived from the CAN-ID field widths, never chosen: widen
     // kEndpointBits and this test follows the wire instead of silently stopping at a
     // boundary that moved.
@@ -1016,9 +1017,9 @@ void test_clean_run_counters_are_zero() {
     auto link_a = std::make_unique<fake_link_t>(bus);
     auto link_b = std::make_unique<fake_link_t>(bus);
     tr::net::transport_can tx_a(std::move(link_a),
-                                {0, 1, tr::view::can_frame_mode_t::CLASSIC, "sensor/temp"});
+                                {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "sensor/temp"});
     tr::net::transport_can tx_b(std::move(link_b),
-                                {0, 2, tr::view::can_frame_mode_t::CLASSIC, "q"});
+                                {0, 2, tr::net::can::can_frame_mode_t::CLASSIC, "q"});
     tx_b.set_receiver(rx);
     const std::vector<std::byte> payload = make_payload(40);
     tx_a.send(payload);
@@ -1051,9 +1052,9 @@ void test_presink_window_drop_is_named() {
     auto link_a = std::make_unique<fake_link_t>(bus);
     auto link_b = std::make_unique<fake_link_t>(bus);
     tr::net::transport_can tx_a(std::move(link_a),
-                                {0, 1, tr::view::can_frame_mode_t::CLASSIC, "sensor/temp"});
+                                {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "sensor/temp"});
     tr::net::transport_can tx_b(std::move(link_b),
-                                {0, 2, tr::view::can_frame_mode_t::CLASSIC, "q"});
+                                {0, 2, tr::net::can::can_frame_mode_t::CLASSIC, "q"});
 
     // NO receiver on B — this IS the window.
     const std::vector<std::byte> payload = make_payload(20);
@@ -1127,11 +1128,11 @@ void test_stale_lap_binding_is_refused_not_welded() {
     tr::net::transport_can_config_t cfg_b = rx_test_config();
     cfg_b.rx_ttl = 60s;  // far out of reach: the age-out must not be what refuses anything
     tr::net::transport_can tx_a(std::move(link_a),
-                                {0, 1, tr::view::can_frame_mode_t::CLASSIC, "sensor/temp"});
+                                {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "sensor/temp"});
     tr::net::transport_can tx_b(std::move(link_b), cfg_b);
     tx_b.set_receiver(rx);
 
-    constexpr std::size_t kWin = tr::view::kCanClassicMaxData;
+    constexpr std::size_t kWin = tr::net::can::kCanClassicMaxData;
     // Derived from the CAN-ID field widths, never chosen: widen kEndpointBits and the
     // geometry follows the wire instead of stopping at a boundary that moved.
     constexpr std::uint16_t kFirst = tr::net::kCanFirstDataEndpoint;
@@ -1233,8 +1234,8 @@ void test_rope_delivery() {
     auto link_a = std::make_unique<fake_link_t>(bus);
     auto link_b = std::make_unique<fake_link_t>(bus);
 
-    tr::net::transport_can tx_a(std::move(link_a), {0, 1, tr::view::can_frame_mode_t::FD, "p"});
-    tr::net::transport_can tx_b(std::move(link_b), {0, 2, tr::view::can_frame_mode_t::FD, "q"});
+    tr::net::transport_can tx_a(std::move(link_a), {0, 1, tr::net::can::can_frame_mode_t::FD, "p"});
+    tr::net::transport_can tx_b(std::move(link_b), {0, 2, tr::net::can::can_frame_mode_t::FD, "q"});
 
     check(tx_b.delivers_ropes(), "transport_can::delivers_ropes() is true");
 
@@ -1266,8 +1267,8 @@ void test_rope_delivery() {
 }
 
 int main() {
-    test_roundtrip(tr::view::can_frame_mode_t::CLASSIC, 20, "classic, multi-frame");
-    test_roundtrip(tr::view::can_frame_mode_t::FD, 150, "CAN-FD, multi-frame");
+    test_roundtrip(tr::net::can::can_frame_mode_t::CLASSIC, 20, "classic, multi-frame");
+    test_roundtrip(tr::net::can::can_frame_mode_t::FD, 150, "CAN-FD, multi-frame");
     test_single_value();
     test_fd_dlc_padding();
     test_rope_delivery();

@@ -40,7 +40,7 @@ SUITES = {
     "frame":                ("Codec (L2/L3)", "TLV encode/decode, CRC, trailer round-trip"),
     "ws":                   ("Codec (L2/L3)", "WebSocket RFC 6455 frame codec (mask/unmask, fragments)"),
     "conformance":          ("Codec (L2/L3)", "the shared cross-core vector suite (input.bin → expected)"),
-    "can_frames":           ("Codec (L2/L3)", "CAN 29-bit ID + view_can_frames split/reassemble"),
+    "can_frames":           ("Codec (L2/L3)", "CAN 29-bit ID + can_framing split/reassemble"),
     "path":                 ("Substrate (L0/L1)", "path parse/canonicalize, PathKey, field-path"),
     "substrate":            ("Substrate (L0/L1)", "segment/view/rope, refcount, backends"),
     "substrate_no_atomic":  ("Substrate (L0/L1)", "the NO_ATOMIC single-core refcount build"),

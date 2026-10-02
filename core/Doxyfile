@@ -37,7 +37,7 @@ INPUT                  = core/include/libtracer/config.hpp \
                          core/include/libtracer/mem_borrowed.hpp \
                          backends/cuda/include/libtracer/mem_cuda.hpp \
                          core/include/libtracer/can_reassembly.hpp \
-                         core/include/libtracer/view_can.hpp \
+                         core/include/libtracer/can_framing.hpp \
                          core/include/libtracer/can.hpp \
                          core/include/libtracer/packed_path.hpp \
                          core/include/libtracer/key_view.hpp \

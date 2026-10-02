@@ -308,14 +308,14 @@ void transport_can::emit_advertise(const can::advertise_t& adv) {
         std::size_t n = 0;
         // Fill one window from as many sources as it takes — the header/path join is not
         // a frame boundary, so the wire is byte-for-byte what a contiguous encode gives.
-        while (n < tr::view::kCanClassicMaxData && part < 2) {
+        while (n < tr::net::can::kCanClassicMaxData && part < 2) {
             if (off == parts[part].size()) {
                 ++part;
                 off = 0;
                 continue;
             }
-            const std::size_t take =
-                std::min<std::size_t>(tr::view::kCanClassicMaxData - n, parts[part].size() - off);
+            const std::size_t take = std::min<std::size_t>(tr::net::can::kCanClassicMaxData - n,
+                                                           parts[part].size() - off);
             std::memcpy(frame.data.data() + n, parts[part].data() + off, take);
             n += take;
             off += take;
@@ -355,7 +355,7 @@ void transport_can::send_impl(std::span<const std::byte> frame, std::uint16_t ta
         dropped_tx_.fetch_add(1, std::memory_order_relaxed);  // alloc failure => backpressure drop
         return;
     }
-    const std::size_t count = tr::view::can_frame_count(*payload, cfg_.mode);
+    const std::size_t count = tr::net::can::can_frame_count(*payload, cfg_.mode);
     if (count == 0) {
         dropped_tx_.fetch_add(1, std::memory_order_relaxed);
         return;
@@ -391,9 +391,9 @@ void transport_can::send_impl(std::span<const std::byte> frame, std::uint16_t ta
     // would put a std::string allocation back on EVERY send — the very thing #848 removes.
     emit_advertise(adv);
 
-    const bool fd = cfg_.mode == tr::view::can_frame_mode_t::FD;
+    const bool fd = cfg_.mode == tr::net::can::can_frame_mode_t::FD;
     for (std::size_t i = 0; i < count; ++i) {
-        const tr::view::view_t window = tr::view::can_frame_at(*payload, cfg_.mode, i);
+        const tr::view::view_t window = tr::net::can::can_frame_at(*payload, cfg_.mode, i);
         const std::span<const std::byte> wb = window.bytes();
         const auto slice_id = can::slice_can_id(base_fields, i);
         if (!slice_id) {
@@ -411,7 +411,7 @@ void transport_can::send_impl(std::span<const std::byte> frame, std::uint16_t ta
         out.fd = fd;
         const std::size_t logical = wb.size();
         const std::size_t on_wire =
-            fd ? tr::view::can_fd_dlc_round_up(logical) : logical;  // DLC pad (FD only)
+            fd ? tr::net::can::can_fd_dlc_round_up(logical) : logical;  // DLC pad (FD only)
         out.len = static_cast<std::uint8_t>(on_wire);
         std::memcpy(out.data.data(), wb.data(), logical);
         // Pad bytes already zero (data{} is value-initialized); the peer trims to
@@ -838,7 +838,8 @@ transport_factory_t can_transport_factory(std::pmr::memory_resource* reasm_mr,
         }
         if (const auto v = reader.u8("version")) cfg.version = *v;
         if (const auto v = reader.flag("fd"))
-            cfg.mode = *v ? tr::view::can_frame_mode_t::FD : tr::view::can_frame_mode_t::CLASSIC;
+            cfg.mode =
+                *v ? tr::net::can::can_frame_mode_t::FD : tr::net::can::can_frame_mode_t::CLASSIC;
         if (const auto v = reader.u32("peer_ttl_ms")) cfg.peer_ttl = std::chrono::milliseconds(*v);
         // The ingress bounds (#912). Without these keys the reassembly buffer's
         // evict-oldest seam was unreachable from production config at all — the

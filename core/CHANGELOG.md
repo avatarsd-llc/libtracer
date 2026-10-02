@@ -88,6 +88,18 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `transport_vertex.hpp`. **Migration:** code that used `transport_vertex_t`, `graph_t` or
   another graph name while including only one of those four headers must include
   `libtracer/transport_vertex.hpp` (or `libtracer/graph.hpp`) itself.
+- **CAN framing moves from the view layer to the net plane: `libtracer/view_can.hpp` →
+  `libtracer/can_framing.hpp`, `tr::view::` → `tr::net::can::`
+  ([#1725](https://github.com/avatarsd-llc/libtracer/issues/1725)).** Splitting a payload into
+  CAN data-field windows is transport framing, so it now lives beside the CAN ID and advertise
+  codecs, and the view layer holds no transport-specific code. The names and behaviour are
+  unchanged: `can_frame_mode_t`, `can_frame_count`, `can_frame_at`, `can_max_data`,
+  `can_fd_dlc_round_up`, `kCanClassicMaxData` and `kCanFdMaxData`. **Alias window (kept
+  for one release):** `libtracer/view_can.hpp` still exists and re-exports all seven names into
+  `tr::view`, and `transport_can.hpp` still includes it, so existing code compiles unchanged
+  whichever of the two headers it reached the names through; both go in the next release. **Migration:** include `libtracer/can_framing.hpp` in place of
+  `libtracer/view_can.hpp`, and spell `tr::view::can_frame_mode_t` as
+  `tr::net::can::can_frame_mode_t` (and likewise for the other six names).
 - **An observed eager write no longer takes the graph-wide sweep lock because some OTHER
   vertex holds an `assign` mark ([#1712](https://github.com/avatarsd-llc/libtracer/issues/1712)).**
   While any mark was pending, every observed write rendered its key (one heap block) and took
