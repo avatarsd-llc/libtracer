@@ -164,6 +164,28 @@ struct default_config_t {
     static constexpr std::size_t kHazardReaderSlots = 64;
 
     /**
+     * @brief Subscribers a publish snapshots into its stack buffer before it falls back to the
+     *        overflow vector (#1708) — a TUNING knob, never a limit.
+     *
+     * A publish copies the vertex's live edges into a fixed buffer of `edge_view_t` on its own
+     * stack, so a fan-out up to this width reaches no allocator. A wider fan-out snapshots into
+     * the publishing thread's reusable overflow vector instead (zero-alloc once warm) and
+     * delivers to every subscriber exactly as before: the width selects a strategy, it refuses
+     * nothing and reports nothing.
+     *
+     * The buffer is reserved on EVERY publish frame whether the vertex has one subscriber or
+     * eight, at `kInlineFanout * sizeof(edge_view_t)` bytes: 384 B on a 64-bit host (48 B a
+     * view) and 224 B on rv32 (28 B). The host default keeps the allocation-free fast path for
+     * the widths the benches gate; a NARROW node whose vertices carry one or two subscribers
+     * spends that stack on every task that publishes. Measured on rv32 (`-Os`, GCC 15.2, real
+     * `core/src/graph.cpp`, `-fstack-usage`): `graph_t::fan_out`'s frame is 304 B at 8 and
+     * 128 B at 2 — the 168 B of six views plus 8 B of 16-byte frame rounding. Override
+     * fragment: `static constexpr std::size_t kInlineFanout = 2;` — the ESP-IDF component
+     * sets 2 on a chip target. At least 1.
+     */
+    static constexpr std::size_t kInlineFanout = 8;
+
+    /**
      * @brief How many threads may hold an EDGE PIN at once (#635) — the per-participant
      *        announcement the fan-out snapshot claims while it copies a vertex's published
      *        edge array out.
@@ -788,6 +810,11 @@ inline constexpr std::size_t kVertexLockStripes = config_t::kVertexLockStripes;
 inline constexpr std::size_t kCacheLineBytes = config_t::kCacheLineBytes;
 /** @brief @ref default_config_t::kHazardReaderSlots for this build. */
 inline constexpr std::size_t kHazardReaderSlots = config_t::kHazardReaderSlots;
+/** @brief @ref default_config_t::kInlineFanout for this build. */
+inline constexpr std::size_t kInlineFanout = config_t::kInlineFanout;
+static_assert(kInlineFanout >= 1,
+              "kInlineFanout is at least 1: the inline snapshot buffer is "
+              "an array of that many edge views");
 /** @brief @ref default_config_t::kEdgePinSlots for this build. */
 inline constexpr std::size_t kEdgePinSlots = config_t::kEdgePinSlots;
 /** @brief @ref default_config_t::kShareThresholdBytes for this build. */
