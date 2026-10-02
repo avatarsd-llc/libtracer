@@ -12,6 +12,12 @@ libtracer is a spec-first protocol project. See [GOVERNANCE.md](.github/GOVERNAN
 - **Spec changes** — anything under [docs/spec/](docs/spec/), **plus every reference page that [docs/spec/v1.md §3](docs/spec/v1.md) incorporates as a normative annex** (that list is the only source; it is restated at [docs/spec/index.md §What is normative](docs/spec/index.md)) — require an RFC under [docs/spec/rfcs/](docs/spec/rfcs/) per [GOVERNANCE.md](.github/GOVERNANCE.md). Pick the right instrument: an **erratum** (the text contradicts shipped, already-agreed behaviour — ordinary PR, no window, must not change the wire surface) or an **amendment** (the normative surface itself changes — RFC + maintainer approval, 14-day window **waived by default** while solo-maintained, invoked explicitly when outside input is wanted). Do not defer a correction for a window that is waived.
 - **Public API changes** require a note in the relevant `CHANGELOG.md`.
 
+## Design rules (standing)
+
+- **No timers or clock reads in libtracer; add none.** A deadline is driven by the application through a seam that takes `now` from the app's own clock; without it, an operation resolves on its other events (change, link down, teardown). Timers and clock reads that already exist in transports, self-heal and ACL expiry are being removed, not copied.
+- **Lower complexity by deleting, normalizing or merging branches, never by splitting a function into helpers**, which only moves them. Judge a refactor by the total cyclomatic complexity of the file or path, not by one function's score.
+- **Compile-time by default, receiver pays, no library-internal buffers:** what a build can decide is a compile-time policy, and a peer-provoked cost is drawn from the receiving link's own source.
+
 ## Where to look
 
 | You need | Read |
