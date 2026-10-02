@@ -33,6 +33,13 @@ target_link_libraries(byteorder_test PRIVATE libtracer)
 libtracer_test_warnings(byteorder_test)
 add_test(NAME byteorder COMMAND byteorder_test)
 
+# The RFC-0002 protocol error registry (error.hpp) — every code's path, severity and
+# disposition against the reference registry table, row by row.
+add_executable(error_registry_test error_registry_test.cpp)
+target_link_libraries(error_registry_test PRIVATE libtracer)
+libtracer_test_warnings(error_registry_test)
+add_test(NAME error_registry COMMAND error_registry_test)
+
 # The nothrow control-plane block seam (mem_source.hpp, #551) — its contract, the
 # structural "not a memory_resource" assertions the ruling rests on, and the
 # appended graph_t parameter's zero-diff promise.

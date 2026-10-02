@@ -39,12 +39,6 @@
 
 namespace tr::net {
 
-/**
- * @brief A 16-byte node/peer identity — the ROUTER `origin_peer_id` (docs/reference/05
- *        §0x0D ROUTER).
- */
-using peer_id_t = std::array<std::byte, 16>;
-
 class transport_t;
 
 /**

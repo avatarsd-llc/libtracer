@@ -290,6 +290,58 @@ void a_readers_refusal_is_not_the_codecs() {
           "0x81 is not BATCH — one code is assigned, and it is 0x80");
 }
 
+/**
+ * @brief The container form of the offset child: @ref tr::wire::emit_batch_offsets APPENDS the
+ *        same bytes the in-place store writes, and the same bytes the fold heads its record with.
+ */
+void emit_batch_offsets_appends_the_packed_child() {
+    std::printf("§4.2.1 emit_batch_offsets — the packed offset child, appended:\n");
+    constexpr std::array<std::int32_t, 3> kOffsets{0, 1500, -250};
+
+    // A non-empty prefix: the emitter must append after it, never overwrite from 0.
+    const std::vector<std::byte> prefix{std::byte{0xAA}, std::byte{0xBB}};
+    std::vector<std::byte> out = prefix;
+    tr::wire::emit_batch_offsets(out, kOffsets);
+    check(out.size() == prefix.size() + 4 + kOffsets.size() * tr::wire::kBatchOffsetBytes,
+          "it grows the buffer by one header plus 4 bytes per offset");
+    check(same(std::span<const std::byte>(out).first(prefix.size()), prefix),
+          "and leaves the bytes already in the buffer untouched");
+
+    const std::span<const std::byte> child = std::span<const std::byte>(out).subspan(prefix.size());
+    std::vector<std::byte> stored(child.size());
+    tr::wire::store_batch_offsets(stored, kOffsets);
+    check(same(child, stored), "the appended child is byte-identical to the in-place store");
+
+    std::vector<std::byte> folded;
+    tr::wire::emit_batch(folded, kBase, three_samples().spans, kOffsets);
+    check(same(std::span<const std::byte>(folded).subspan(4 + tr::wire::kBatchTimeChildBytes,
+                                                          child.size()),
+               child),
+          "... and to the offset child the fold writes after its TIME base");
+
+    const auto tlv = decode_all(child);
+    check(tlv.has_value() && tlv->type == type_t::VALUE &&
+              tlv->payload.size() == kOffsets.size() * tr::wire::kBatchOffsetBytes,
+          "it decodes as ONE VALUE carrying the whole run");
+    if (tlv) {
+        bool le = true;
+        for (std::size_t i = 0; i < kOffsets.size(); ++i) {
+            std::uint32_t v = 0;
+            for (std::size_t b = 0; b < tr::wire::kBatchOffsetBytes; ++b)
+                v |= std::to_integer<std::uint32_t>(tlv->payload[i * 4 + b]) << (8 * b);
+            le = le && static_cast<std::int32_t>(v) == kOffsets[i];
+        }
+        check(le, "each offset is a signed i32 LE, in frame order, the negative one included");
+    }
+
+    std::vector<std::byte> none;
+    tr::wire::emit_batch_offsets(none, {});
+    const auto empty = decode_all(none);
+    check(none.size() == 4 && empty.has_value() && empty->type == type_t::VALUE &&
+              empty->payload.empty(),
+          "an empty run still appends a well-formed, zero-length VALUE");
+}
+
 /** @brief RFC-0025 §4.1: the class field, and what an absent word still means. */
 void delivery_class_bits() {
     std::printf("§4.1 delivery_class — bits 6-7 of the packed word:\n");
@@ -393,6 +445,7 @@ int main() {
     a_uniform_derivation_survives_a_negative_base();
     a_readers_refusal_is_not_the_codecs();
     composition_references_rather_than_copies();
+    emit_batch_offsets_appends_the_packed_child();
     delivery_class_bits();
     return tr::testing::summary("batch");
 }

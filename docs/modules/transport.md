@@ -219,8 +219,6 @@ dialer **verifies its peer's certificate by default**; the key-by-key reference 
 ## Interface
 
 ```cpp
-using peer_id_t = std::array<std::byte, 16>;        // the node identity
-
 class transport_t {
     virtual void send(std::span<const std::byte> frame) = 0;
     // Scatter-gather: ship a rope's to_iovec() as one frame, no flatten copy.
@@ -446,10 +444,6 @@ they are the reason a new binding is small.
 ```{doxygenclass} tr::net::self_heal_link_t
 :project: libtracer
 :members:
-```
-
-```{doxygentypedef} tr::net::peer_id_t
-:project: libtracer
 ```
 
 ### The POSIX scaffold
