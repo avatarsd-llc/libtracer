@@ -2830,6 +2830,11 @@ result_t<value_ref_t> graph_t::await(vertex_handle_t vh, std::chrono::nanosecond
         return std::unexpected(status_t::PERMISSION_DENIED);
     const write_seq_t seq0 = v->current_seq();
     if (!v->wait_for_change(seq0, timeout)) return std::unexpected(status_t::TIMEOUT);
+    return await_value(vh);
+}
+
+result_t<value_ref_t> graph_t::await_value(vertex_handle_t vh) const {
+    vertex_t* v = vh.get();
     // Serve the woken value through the SAME ROLE DISPATCH `read` runs (RFC-0008 Amendment 2).
     // A HANDLER vertex answers `read` from its `on_read` seam and stores nothing, so the old
     // `read_stored()` here answered NOT_FOUND *after* the awaited write landed — await
@@ -2846,6 +2851,17 @@ result_t<value_ref_t> graph_t::await(vertex_handle_t vh, std::chrono::nanosecond
     if (!sp) return std::unexpected(status_t::NOT_FOUND);  // never assigned
     return sp;
 }
+
+result_t<void> graph_t::arm_await(vertex_handle_t vh, await_waiter_t& w, std::string_view caller) {
+    vertex_t* v = vh.get();
+    // The same up-front gate `await` runs: a denied caller cannot park a waiter either.
+    if (!acl_allows(v, caller, acl_right_t::READ))
+        return std::unexpected(status_t::PERMISSION_DENIED);
+    v->arm_waiter(w);
+    return {};
+}
+
+bool graph_t::disarm_await(await_waiter_t& w) noexcept { return vertex_t::disarm_waiter(w); }
 
 result_t<std::size_t> graph_t::history(vertex_handle_t vh, std::span<value_ref_t> out) const {
     vertex_t* v = vh.get();

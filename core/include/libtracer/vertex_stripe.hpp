@@ -48,6 +48,37 @@ namespace tr::graph {
 inline constexpr std::size_t kStripeAlign =
     std::max({kCacheLineBytes, alignof(std::mutex), alignof(std::atomic<int>)});
 
+struct await_waiter_t;
+
+/**
+ * @brief The fire callback of a one-shot @ref await_waiter_t, called once, on the WRITER's
+ *        thread, after the stripe lock is released, with the waiter already unlinked.
+ *
+ * The `{fn, ctx}` shape of every graph seam (ADR-0047). The callee owns the waiter from the
+ * moment it is called: the graph never touches it again, so the callee may release it.
+ */
+using await_fire_fn_t = void (*)(void* ctx, await_waiter_t& waiter) noexcept;
+
+/**
+ * @brief A one-shot, receiver-side change waiter (ADR-0084): the non-blocking form of
+ *        `vertex_t::wait_for_change`.
+ *
+ * Intrusive and caller-owned: the graph links it into the stripe of the vertex it watches and
+ * allocates nothing. A remote AWAIT's waiter is drawn by the router from the receiving link's
+ * own rx source, so the receiver pays for the wait it serves and no library-internal buffer
+ * holds it. While armed it is counted in the stripe's @ref vertex_stripe_t::waiters, so a
+ * publish on a stripe with no waiter of either kind keeps the lock-free path (#555).
+ *
+ * Every field but @ref fire / @ref ctx is the graph's, written under the stripe mutex.
+ */
+struct await_waiter_t {
+    await_fire_fn_t fire = nullptr; /**< @brief Called once on change; never on disarm. */
+    void* ctx = nullptr;            /**< @brief Opaque to the graph; handed back to @ref fire. */
+    const void* vertex = nullptr;   /**< @brief The watched vertex (its pinned address). */
+    await_waiter_t* next = nullptr; /**< @brief Stripe list link (graph-owned). */
+    bool armed = false;             /**< @brief Linked into a stripe list (graph-owned). */
+};
+
 /**
  * @brief One shared lock stripe: the mutex + condvar a SET of vertices ride
  *        (#361 §2), replacing a per-vertex `std::mutex` + `std::condition_variable`.
@@ -72,6 +103,9 @@ struct alignas(kStripeAlign) vertex_stripe_t {  // one cache line per stripe whe
      *         that #370 skipped. See `%vertex_t::store` for the ordering argument that
      *         makes the lock-free read safe against a lost wakeup. */
     std::atomic<int> waiters{0};
+    /** @brief The armed one-shot waiters of this stripe's vertices (ADR-0084), guarded by
+     *         @ref m. Each one is also counted in @ref waiters. */
+    await_waiter_t* armed{nullptr};
 };
 
 static_assert(alignof(vertex_stripe_t) == kStripeAlign,

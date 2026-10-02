@@ -644,7 +644,8 @@ template <class N>
     const field_path_t& field, bool has_field,
     op_resolver_t::reverse_ref_fn_t reverse_ref_fn = nullptr, void* reverse_ref_ctx = nullptr,
     op_resolver_t::path_label_fn_t path_label_fn = nullptr, void* path_label_ctx = nullptr,
-    bool dst_labelled = false, link_token_seam_t link_token = {}) {
+    bool dst_labelled = false, link_token_seam_t link_token = {},
+    await_defer_seam_t await_defer = {}) {
     // The mint answer (RFC-0024 §7.5): this node's own reference to the target vertex, as a
     // one-element `PATH_REF` the origin stacks under whatever it already holds for the hops
     // in front of it. 4 + 8 bytes, on the reply only, and only when asked — the request side
@@ -951,6 +952,29 @@ template <class N>
             const std::chrono::nanoseconds timeout =
                 req.has_await_timeout ? std::chrono::nanoseconds(req.await_timeout)
                                       : kDefaultAwaitTimeout;
+            // ADR-0084: with a deferral sink and a caller that can send a later reply, the
+            // wait leaves this thread. Blocking here for `timeout` held the receive context of
+            // the link the request arrived on, and every frame queued behind it. The READ gate
+            // answers first, and only then may §6.1's label mint spend a slot (§8.1), exactly
+            // as on the synchronous arm below.
+            if (await_defer.fn != nullptr && await_defer.deferred != nullptr) {
+                if (!graph.allows(v, subject, acl_right_t::READ))
+                    return assemble_error_reply(route, status_t::PERMISSION_DENIED, egress);
+                const reply_route_t ok = labelled_route();
+                const deferred_await_t d{.vertex = v,
+                                         .timeout = timeout,
+                                         .subject = subject,
+                                         .inbound = link_token.inbound,
+                                         .dst = route.dst_wire,
+                                         .src = route.src_wire,
+                                         .ok_src = ok.src_wire,
+                                         .echo_ts = route.echo_ts,
+                                         .mint = mint};
+                const result_t<void> taken = await_defer.fn(await_defer.ctx, d);
+                if (!taken) return assemble_error_reply(route, taken.error(), egress);
+                *await_defer.deferred = true;
+                return rope_t{};
+            }
             result_t<value_ref_t> r = graph.await(v, timeout, subject);
             if (!r)
                 return assemble_error_reply(route, r.error(),
@@ -980,7 +1004,7 @@ template <class N>
     mem::mem_backend_t& retained, op_resolver_t::reverse_ref_fn_t reverse_ref_fn = nullptr,
     void* reverse_ref_ctx = nullptr, op_resolver_t::path_label_fn_t path_label_fn = nullptr,
     void* path_label_ctx = nullptr, const wire::path_ref_element_t* dst_label_target = nullptr,
-    link_token_seam_t link_token = {}) {
+    link_token_seam_t link_token = {}, await_defer_seam_t await_defer = {}) {
     result_t<parsed_fwd_t<N>> parsed = parse_fwd(root);
     if (!parsed) return std::unexpected(parsed.error());
     parsed_fwd_t<N>& req = *parsed;
@@ -1135,7 +1159,7 @@ template <class N>
         return apply_op(graph, req, *bound, inbound_link, subject, frame_view, flat, egress,
                         retained, route, field, has_field, reverse_ref_fn, reverse_ref_ctx,
                         path_label_fn, path_label_ctx,
-                        /*dst_labelled=*/true, link_token);
+                        /*dst_labelled=*/true, link_token, await_defer);
     }
 
     if (req.dst_bound) {
@@ -1156,7 +1180,8 @@ template <class N>
         // "it is not there any more" is exactly the stale case the deref just refused.
         return apply_op(graph, req, *bound, inbound_link, subject, frame_view, flat, egress,
                         retained, route, field, has_field, reverse_ref_fn, reverse_ref_ctx,
-                        path_label_fn, path_label_ctx, /*dst_labelled=*/false, link_token);
+                        path_label_fn, path_label_ctx, /*dst_labelled=*/false, link_token,
+                        await_defer);
     }
 
     // dst resolution is the router's PATH-keyed dispatch — span-aliased for a
@@ -1201,7 +1226,7 @@ template <class N>
     if (!found) return reply_error(status_t::NOT_FOUND);
     return apply_op(graph, req, *found, inbound_link, subject, frame_view, flat, egress, retained,
                     route, field, has_field, reverse_ref_fn, reverse_ref_ctx, path_label_fn,
-                    path_label_ctx, /*dst_labelled=*/false, link_token);
+                    path_label_ctx, /*dst_labelled=*/false, link_token, await_defer);
 }
 
 }  // namespace

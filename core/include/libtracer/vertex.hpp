@@ -1458,8 +1458,7 @@ class vertex_t {
         vertex_stripe_t& st = vertex_stripe_of(this);          // one lookup per verb (#370)
         if constexpr (!kFusedPublish) write_seq_.bump(&lkv_);  // anchored like the fused bump
         if (st.waiters.load(std::memory_order_seq_cst) == 0) return true;
-        const std::lock_guard lock(st.m);
-        vertex_stripe_cv(vertex_stripe_index(this)).notify_all();
+        wake_waiters(st);
         return true;
     }
 
@@ -1652,8 +1651,53 @@ class vertex_t {
         // so this one serializes against the fused bump in `store` (#1715).
         write_seq_.bump(&lkv_);
         if (st.waiters.load(std::memory_order_seq_cst) == 0) return;  // waiterless (#555)
+        wake_waiters(st);
+    }
+
+    /**
+     * @brief Arm the one-shot waiter @p w on this vertex (ADR-0084): it fires on the next
+     *        change, on the writer's thread, instead of blocking the caller.
+     *
+     * The non-blocking twin of @ref wait_for_change, and the same half of the Dekker pair
+     * documented on `store`. The waiter count is raised (seq_cst) under the stripe mutex
+     * before this returns, so a publish ordered after the arm takes the slow path and finds
+     * @p w, and a publish ordered before it is a change that preceded the wait — exactly what
+     * @ref wait_for_change's snapshot treats as "before".
+     * @param w An unarmed waiter whose `fire` is set; it must stay alive until it fires or
+     *          @ref disarm_waiter returns true for it.
+     */
+    void arm_waiter(await_waiter_t& w) noexcept {
+        vertex_stripe_t& st = vertex_stripe_of(this);
         const std::lock_guard lock(st.m);
-        vertex_stripe_cv(vertex_stripe_index(this)).notify_all();
+        w.vertex = this;
+        w.next = st.armed;
+        w.armed = true;
+        st.armed = &w;
+        st.waiters.fetch_add(1, std::memory_order_seq_cst);
+    }
+
+    /**
+     * @brief Unlink @p w if it has not fired yet (a timeout or a cancel).
+     *
+     * Needs no live vertex: the stripe is derived from the address @p w recorded.
+     * @retval true  @p w was still armed and is now the caller's; @ref await_waiter_t::fire
+     *               will never be called for it.
+     * @retval false A publish already took it: its fire runs (or ran) on the writer's thread.
+     */
+    [[nodiscard]] static bool disarm_waiter(await_waiter_t& w) noexcept {
+        vertex_stripe_t& st = vertex_stripe_of(w.vertex);
+        const std::lock_guard lock(st.m);
+        if (!w.armed) return false;
+        for (await_waiter_t** p = &st.armed; *p != nullptr; p = &(*p)->next) {
+            if (*p == &w) {
+                *p = w.next;
+                break;
+            }
+        }
+        w.armed = false;
+        w.next = nullptr;
+        st.waiters.fetch_sub(1, std::memory_order_seq_cst);
+        return true;
     }
 
     /** @brief The stored last-known-value (lock-free; null ⇒ never assigned / Handler role). */
@@ -3351,6 +3395,41 @@ class vertex_t {
     // sweep's IF_NEWER test is its pending set (RFC-0008 §B), not a sequence, and the wire
     // never carries it.
     write_seq_counter_t write_seq_;
+
+    /**
+     * @brief The slow half of a publish that saw `waiters != 0`: wake the blocking awaiters
+     *        and fire this vertex's armed one-shot waiters (ADR-0084).
+     *
+     * The fired waiters are unlinked under the stripe mutex and called AFTER it is released,
+     * so a fire that sends a reply, or arms a fresh waiter on this very stripe, cannot
+     * deadlock against it. `next` is read before each call because the callee owns its
+     * waiter and may release it.
+     */
+    void wake_waiters(vertex_stripe_t& st) noexcept {
+        await_waiter_t* fired = nullptr;
+        {
+            const std::lock_guard lock(st.m);
+            vertex_stripe_cv(vertex_stripe_index(this)).notify_all();
+            for (await_waiter_t** p = &st.armed; *p != nullptr;) {
+                await_waiter_t* const w = *p;
+                if (w->vertex != this) {
+                    p = &w->next;
+                    continue;
+                }
+                *p = w->next;
+                w->armed = false;
+                w->next = fired;
+                fired = w;
+                st.waiters.fetch_sub(1, std::memory_order_seq_cst);
+            }
+        }
+        while (fired != nullptr) {
+            await_waiter_t* const next = fired->next;
+            fired->next = nullptr;
+            fired->fire(fired->ctx, *fired);
+            fired = next;
+        }
+    }
 
     /**
      * @brief The fused publish: swap @p v into @p slot and bump @p seq inside the slot's one

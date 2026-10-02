@@ -36,8 +36,11 @@
  */
 #pragma once
 
+#include <pthread.h>
+
 #include <array>
 #include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -334,6 +337,7 @@ class fwd_router_t {
         // lazily, at a remote subscribe and nowhere else, so an ordinary read/write/await
         // frame never touches it.
         resolver_.on_link_id(&fwd_router_t::link_id_thunk, this);
+        resolver_.on_await_defer(&fwd_router_t::defer_await_thunk, this);
         // The wire `:subscribers[]` door's target descent (RFC-0021, #491): a SUBSCRIBER's
         // PATH child is an address in THIS node's frame, so deciding whether it leaves the
         // node is a mount question — the transport plane's, which L4 cannot name. Installed
@@ -368,10 +372,24 @@ class fwd_router_t {
         graph_.set_hooks(hooks);
     }
 
-    /** @brief Disarms every @ref origin_t still armed on this router (#1645). */
+    /**
+     * @brief Answer nothing more: cancel every deferred AWAIT (ADR-0084), wait for any reply
+     *        already being sent, and join the await timer thread if it ever started. Then
+     *        disarm every @ref origin_t still armed on this router (#1645).
+     */
     ~fwd_router_t();
+
     fwd_router_t(const fwd_router_t&) = delete;
     fwd_router_t& operator=(const fwd_router_t&) = delete;
+
+    /**
+     * @brief How many remote AWAITs this router holds right now (ADR-0084): armed waiters
+     *        plus any whose reply is being sent.
+     *
+     * Each one is charged to the rx source of the link it arrived on, so this is also the
+     * count of waiter blocks those sources have lent out.
+     */
+    [[nodiscard]] std::size_t pending_awaits() const;
 
     /**
      * @brief Inject the RFC-0027 PATH-LABEL mint table, turning label switching ON for this
@@ -2226,6 +2244,46 @@ class fwd_router_t {
         return own != nullptr ? *own : *rx_;
     }
 
+    /** @brief One deferred remote AWAIT, drawn from its link's rx source (ADR-0084).
+     *         Defined in `fwd_router.cpp`. */
+    struct pending_await_t;
+
+    /**
+     * @brief The router's deferred-AWAIT state (ADR-0084): the list of pending waiters and
+     *        the one timer thread that answers the ones whose deadline passes.
+     *
+     * Holds no buffer: every waiter is a block of the receiving link's own rx source. The
+     * thread starts on the first deferred AWAIT and never on a node that serves none.
+     * Lock order: `m` before a vertex stripe (the timer disarms under it); a writer fires
+     * a waiter with no stripe lock held, so it may take `m`.
+     */
+    struct await_plane_t {
+        mutable std::mutex m;            /**< @brief Guards every field below. */
+        std::condition_variable cv;      /**< @brief Timer wake-up and teardown drain. */
+        pending_await_t* head = nullptr; /**< @brief Pending waiters, doubly linked. */
+        std::size_t count = 0;           /**< @brief Length of the `head` list. */
+        bool stop = false;               /**< @brief Set by the destructor. */
+        bool timer_started = false;      /**< @brief `timer` is joinable. */
+        pthread_t timer{};               /**< @brief The deadline thread. */
+    };
+
+    /** @brief The resolver's deferral sink: take over a remote AWAIT (ADR-0084). */
+    static graph::result_t<void> defer_await_thunk(void* ctx, const graph::deferred_await_t& req);
+    /** @brief A waiter's change callback, on the writer's thread. */
+    static void await_fired_thunk(void* ctx, graph::await_waiter_t& w) noexcept;
+    /** @brief `pthread_create` trampoline into `await_timer_main`. */
+    static void* await_timer_entry(void* self);
+    /** @brief The timer thread: answer `TIMEOUT` to each waiter whose deadline passed. */
+    void await_timer_main();
+    /** @brief Member body of `defer_await_thunk`. */
+    graph::result_t<void> defer_await(const graph::deferred_await_t& req);
+    /** @brief Build and send the reply of @p p: its value when @p changed, else `TIMEOUT`. */
+    void answer_await(pending_await_t& p, bool changed);
+    /** @brief Unlink and release @p p; `await_plane_t::m` held. */
+    void retire_await_locked(pending_await_t* p) noexcept;
+    /** @brief Cancel the waiters of @p link_name (all when empty); `await_plane_t::m` held. */
+    void cancel_awaits_locked(std::string_view link_name, bool all) noexcept;
+
     graph::graph_t& graph_;
     graph::op_resolver_t resolver_;
     /** @brief The RFC-0027 §8.3 mint table, or null ⇒ this node never mints (§6.3). Injected,
@@ -2272,6 +2330,7 @@ class fwd_router_t {
     /** @brief Interned `(kind, role)` records (#1650), under `ctl_m_`. A `std::deque` so a
      *         record never moves once a ctx points at it; never shrunk before the router. */
     std::deque<kind_rec_t> kinds_;
+    await_plane_t awaits_;  // deferred remote AWAITs (ADR-0084)
     /** @brief Head of the LOCK-FREE published chain through `child_rx_` — the only spelling a
      *         frame-path reader may use (see `child_rx_ctx_t::next`). */
     std::atomic<child_rx_ctx_t*> rx_head_{nullptr};
