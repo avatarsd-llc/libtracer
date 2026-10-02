@@ -15,7 +15,7 @@
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/tlv.hpp"
 #include "libtracer/tlv_emit.hpp"
-#include "libtracer/vertex.hpp"
+#include "libtracer/vertex_handle.hpp"
 
 namespace tr::net {
 

@@ -51,6 +51,7 @@
 #include "libtracer/sink_slot.hpp"
 #include "libtracer/status.hpp"
 #include "libtracer/vertex.hpp"
+#include "libtracer/vertex_handle.hpp"
 #include "libtracer/view.hpp"
 
 namespace tr::wire {
@@ -59,38 +60,7 @@ struct tlv_t;  // fwd-decl: the child factory takes a `const tlv_t*` config (no 
 
 namespace tr::graph {
 
-class graph_t;  // fwd-decl: vertex_handle_t names it as its sole constructing friend.
-
-/**
- * @brief A non-owning, non-null, opaque handle to a graph vertex (ADR-0056).
- *
- * The caller-held result of @ref graph_t::register_vertex / @ref graph_t::find and the
- * token handed back into every `graph_t` data op (read / write / await / assign /
- * propagate / subscribe / history / field-write). Pointer-sized and trivially copyable,
- * so it loads and passes exactly like the `vertex_t*` it replaces — identical codegen —
- * but it exposes no `operator*` or raw-pointer accessor: a `vertex_t` is opaque L4 state,
- * never dereferenced by callers. Constructed ONLY by @ref graph_t (the `friend`), which
- * owns the pinned, pointer-stable, insert-only vertex map — so a handle always names a
- * live vertex for the graph's lifetime. There is no invalid/null state; "no such vertex"
- * is modelled by the `std::optional<vertex_handle_t>` @ref graph_t::find returns.
- */
-class vertex_handle_t {
-   public:
-    /** @brief Two handles compare equal iff they name the same vertex. (`!=` is synthesized.) */
-    [[nodiscard]] friend bool operator==(vertex_handle_t a, vertex_handle_t b) noexcept {
-        return a.ptr_ == b.ptr_;
-    }
-
-   private:
-    friend class graph_t;  // sole constructor + the only code that unwraps to `vertex_t*`.
-    explicit vertex_handle_t(vertex_t* ptr) noexcept : ptr_(ptr) {}
-    [[nodiscard]] vertex_t* get() const noexcept { return ptr_; }
-    vertex_t* ptr_;
-};
-
-// The ADR-0056 zero-overhead claim, enforced: a handle is exactly a pointer.
-static_assert(std::is_trivially_copyable_v<vertex_handle_t>);
-static_assert(sizeof(vertex_handle_t) == sizeof(vertex_t*));
+class graph_t;
 
 // There is no in-process dispatch-depth cap: a SUBSCRIBER delivery TERMINATES at its
 // target (ADR-0051 / RFC-0007) — store + notify, never a re-dispatch to the target's
@@ -233,24 +203,6 @@ class subscription_t {
 
 // Pass-by-value, as the doc comment above promises: privatizing the pair costs no wrapper.
 static_assert(std::is_trivially_copyable_v<subscription_t>);
-
-/**
- * @brief One node-scoped vertex reference — a slot index AND the generation stamping it
- *        (RFC-0024 §4.4 / §6.4).
- *
- * The pair is the unit a mint hands out, never two separately-read numbers: an index without
- * the generation that was current when it was read is not a reference to a vertex, it is a
- * reference to whatever the slot holds later. Retirement moves the generation and takes the
- * graph's map lock uniquely, so reading both under one hold is what makes the pair name a
- * single tenancy of the slot.
- */
-struct vertex_slot_t {
-    std::uint32_t index = 0;      /**< @brief Position in the node-scoped vertex index. */
-    std::uint32_t generation = 0; /**< @brief The slot's retirement generation at that moment. */
-
-    /** @brief Value equality — both fields, since either alone is not a reference. */
-    [[nodiscard]] friend constexpr bool operator==(vertex_slot_t, vertex_slot_t) = default;
-};
 
 /**
  * @brief An operation's subject token — opaque bytes matched against ACE subjects (ADR-0018).

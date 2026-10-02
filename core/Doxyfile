@@ -51,6 +51,7 @@ INPUT                  = core/include/libtracer/config.hpp \
                          core/include/libtracer/hook.hpp \
                          core/include/libtracer/value.hpp \
                          core/include/libtracer/vertex.hpp \
+                         core/include/libtracer/vertex_handle.hpp \
                          core/include/libtracer/app_fields.hpp \
                          core/include/libtracer/subscriber.hpp \
                          core/include/libtracer/vertex_stripe.hpp \
