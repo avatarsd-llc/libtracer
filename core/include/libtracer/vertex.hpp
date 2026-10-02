@@ -1,4 +1,8 @@
-/*
+/**
+ * @file
+ * @brief An L4 graph vertex: a named, addressable position holding a value, a bounded history
+ *        or a handler.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *

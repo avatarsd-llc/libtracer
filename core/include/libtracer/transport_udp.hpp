@@ -1,4 +1,7 @@
-/*
+/**
+ * @file
+ * @brief A UDP socket transport: one datagram carries one whole frame.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *

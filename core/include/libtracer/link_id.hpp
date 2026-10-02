@@ -1,4 +1,7 @@
-/*
+/**
+ * @file
+ * @brief The node-scoped interned link identity that keys the subscriber index.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *

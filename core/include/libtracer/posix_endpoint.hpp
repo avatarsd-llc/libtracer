@@ -1,4 +1,7 @@
-/*
+/**
+ * @file
+ * @brief The receive-thread and endpoint scaffold every POSIX socket transport shares.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *

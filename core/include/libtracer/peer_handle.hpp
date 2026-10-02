@@ -1,4 +1,8 @@
-/*
+/**
+ * @file
+ * @brief The interned per-peer link identity and its constants, without the transport seam
+ *        that mints it.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *

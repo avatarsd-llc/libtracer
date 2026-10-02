@@ -1,4 +1,8 @@
-/*
+/**
+ * @file
+ * @brief The terminus arena decoder: a frame parsed into a flat pre-order node array, bytes
+ *        left in place.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *

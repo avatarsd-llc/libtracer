@@ -1,4 +1,8 @@
-/*
+/**
+ * @file
+ * @brief Multi-hop `FWD` forwarding and zero-copy `src` accumulation across transports
+ *        (RFC-0004).
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *

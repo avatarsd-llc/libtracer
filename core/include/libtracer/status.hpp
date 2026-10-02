@@ -1,4 +1,7 @@
-/*
+/**
+ * @file
+ * @brief The L4 graph result and status types the read / write / await surface returns.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *

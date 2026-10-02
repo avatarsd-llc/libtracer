@@ -1,4 +1,8 @@
-/*
+/**
+ * @file
+ * @brief The `trailer_t` frame checks: CRC-32C by default and CRC-16-CCITT for `opt.CW=1`,
+ *        header-only.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *

@@ -40,7 +40,7 @@ differences are load-bearing:
 | Position | What it is | Role | Value |
 | --- | --- | --- | --- |
 | `/net` | The net root the constructor registers, and the position every module hangs under; `:children[]` on it **enumerates** the modules. Conventionally `/net`; the name is the constructor's default, overridable per node, never a library rule. | `role_t::STORED_VALUE` | none (a structural position) |
-| `/net/<module>` | One **module** — a *(transport kind, role)* pair, declared by the application (`register_module`, `core/include/libtracer/transport_vertex.hpp:494`). Minted eagerly when the module is declared (`core/src/transport_vertex.cpp:364`) and lazily on first creation (`:643`). | `role_t::STORED_VALUE` | none (a structural position) |
+| `/net/<module>` | One **module** — a *(transport kind, role)* pair, declared by the application (`register_module`, `core/include/libtracer/transport_vertex.hpp:498`). Minted eagerly when the module is declared (`core/src/transport_vertex.cpp:364`) and lazily on first creation (`:643`). | `role_t::STORED_VALUE` | none (a structural position) |
 | `/net/<module>/conn` | The module's **creator endpoint**. A write is *executed*, never assigned: the payload's TLV type selects create (`SPEC`) from remove (`NAME`) — `core/src/transport_vertex.cpp:430`. | `role_t::HANDLER` | none — write-only and valueless |
 | `/net/<module>/<name>` | The **connection vertex**: one link's identity, its config, and (when config-constructed) the socket it owns. | `role_t::STORED_VALUE` | the 1-byte link-liveness state |
 
@@ -139,7 +139,7 @@ flowchart TD
 ### Uniform introspection
 
 **The connection vertex's value is its liveness state** — a 1-byte `link_state_t`
-(`core/include/libtracer/transport_vertex.hpp:111-118`) emitted as an ordinary `VALUE` TLV
+(`core/include/libtracer/transport_vertex.hpp:115-122`) emitted as an ordinary `VALUE` TLV
 (`core/src/transport_vertex.cpp:84`). Because it is a vertex value and not a side-channel
 callback, all three primitives already work on it: `read` it, `await` it, or **subscribe** to
 `/net/<module>/<name>` and receive every transition without polling (assign-then-deliver,
@@ -280,7 +280,7 @@ does not yet reach.
 **Standing requirement.** `tr::net::conn_settings_t` carries only the keys **every** transport
 kind means the same thing by. A kind's private configuration never lands there — the kind's
 own factory parses it from the raw config `SETTINGS` TLV it receives alongside the parsed
-universal settings (`core/include/libtracer/transport_vertex.hpp:135`, ADR-0043 §3, §5).
+universal settings (`core/include/libtracer/transport_vertex.hpp:139`, ADR-0043 §3, §5).
 
 The mechanism is the factory signature: a factory is
 `(const conn_settings_t&, const wire::tlv_t* raw_config) -> result_t<unique_ptr<transport_t>>`,
@@ -310,7 +310,7 @@ can only select one of those by name. An unregistered name is refused with
 - **A shared key that only one kind reads is a dead key.** The failure mode is already
   visible *inside* the universal set: `keepalive_ms` was parsed and no consumer anywhere in
   the tree read it, until #1666 deleted the field and left the key accepted-and-ignored (`backoff_ms` / `connect_timeout_ms` escaped that condition when the
-  S5 liveness engine landed — `core/include/libtracer/transport_vertex.hpp:166`, `:170`;
+  S5 liveness engine landed — `core/include/libtracer/transport_vertex.hpp:170`, `:174`;
   [13](13-network-formation.md)). One record carrying N kinds' private vocabulary would be
   that condition by construction rather than by accident — and a mistyped or misplaced key is
   silently ignored, so nothing would report it.
@@ -377,7 +377,7 @@ wiring that makes subscriptions/awaits drive the refcount seam automatically (S6
 (S3); the `CREATE`/`WRITE` gating split
 (S2c). RFC-0014's byte-level clauses — the liveness encoding among them — become normative on
 its conformance-vector merge; until then the values in
-`core/include/libtracer/transport_vertex.hpp:111-118` are the reference encoding.
+`core/include/libtracer/transport_vertex.hpp:115-122` are the reference encoding.
 ```
 
 ## Pitfalls

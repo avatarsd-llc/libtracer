@@ -1,4 +1,8 @@
-/*
+/**
+ * @file
+ * @brief The L4 in-process graph runtime: the composite vertex tree and the read / write /
+ *        await API.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *

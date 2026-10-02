@@ -1,4 +1,8 @@
-/*
+/**
+ * @file
+ * @brief The WebSocket server transport: many inbound connections multiplexed on one poll
+ *        thread.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
@@ -51,7 +55,7 @@
  * MSG_NOSIGNAL, a flag lwIP defines but lwip_sendmsg rejects with EOPNOTSUPP, and the
  * failure is read as peer-gone, so on lwIP every data frame is silently dropped while
  * the opening handshake and PING/PONG keep working (#948). Nothing here needs a
- * platform #ifdef: the ESP-IDF component simply does not list this TU on a chip
+ * platform \#ifdef: the ESP-IDF component simply does not list this TU on a chip
  * target, exactly as socketcan_link.cpp is swapped for its stub.
  */
 #pragma once

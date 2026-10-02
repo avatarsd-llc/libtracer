@@ -82,7 +82,7 @@ one link carrying one compact flow — so the sizing above is a number to check 
 your own node rather than one to copy.
 
 Those all reach the ONE injection point of `graph_t`'s constructor
-(`core/include/libtracer/graph.hpp:792`): since
+(`core/include/libtracer/graph.hpp:796`): since
 [#873](https://github.com/avatarsd-llc/libtracer/issues/873) phase 1 the graph takes a single
 `tr::mem::block_source_t` and builds the pmr resource and the value backend over it internally,
 so a device recipe sizes one slab where it used to wire four arguments. Beside it are the
@@ -91,7 +91,7 @@ so a device recipe sizes one slab where it used to wire four arguments. Beside i
 failable `rx` source, the `flat` byte backend its rope flattens draw from, the
 `egress` byte backend the terminus reply head draws from, and the `retained`
 backend a remote SUBSCRIBE's two life-of-the-subscription allocations draw from
-(`core/include/libtracer/fwd_router.hpp:134-230`, the `router_planes_t` aggregate; `egress` is #795 / ADR-0074,
+(`core/include/libtracer/fwd_router.hpp:138-234`, the `router_planes_t` aggregate; `egress` is #795 / ADR-0074,
 `retained` is #1610 and defaults to `flat` when un-injected, and the
 `max_label_bindings_per_link` bound sits between `flat` and `egress`).
 Each is its own injection because each one's live set is governed by a different
@@ -236,7 +236,7 @@ Rules that follow:
 - **Size the pool from the transport, not from hope.** `udp_transport_t` sizes RX
   segments to `min(64 KiB, backend->max_segment_size())`
   (`core/src/transport_udp.cpp:146`; `kMaxDatagram = 65536` at
-  `core/include/libtracer/transport_udp.hpp:89`). Give the pool MTU-sized slots and
+  `core/include/libtracer/transport_udp.hpp:92`). Give the pool MTU-sized slots and
   datagrams arrive without a 64 KiB scratch buffer on a small thread stack.
 
 ## 2. Role composition and the transport RAM lever
@@ -365,8 +365,8 @@ itself, described via `:schema` like any other data
 ```
 
 The backpressure counters come from `graph_t::delivery_drops()`
-(`core/include/libtracer/graph.hpp:2426`), which snapshots four per-cause totals —
-`no_target`, `denied`, `out_of_memory`, `fan_out_truncated` (`graph.hpp:2426-2464`). Each
+(`core/include/libtracer/graph.hpp:2430`), which snapshots four per-cause totals —
+`no_target`, `denied`, `out_of_memory`, `fan_out_truncated` (`graph.hpp:2430-2468`). Each
 counts shed **deliveries**, not events, so a fan-out shed whole under memory pressure moves
 them by its width. `denied` counts an `:acl` refusal on every plane — a local API write, a
 `FWD{WRITE}` terminus, a `COMPACT` terminus and a subscription edge alike (#1068) — so on a

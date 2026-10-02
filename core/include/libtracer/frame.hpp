@@ -1,4 +1,8 @@
-/*
+/**
+ * @file
+ * @brief The frame codec: decode wire bytes into a borrowed, zero-copy TLV tree and encode one
+ *        back.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
