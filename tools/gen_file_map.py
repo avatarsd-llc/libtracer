@@ -24,7 +24,9 @@ BLOB = "https://github.com/avatarsd-llc/libtracer/blob/main/"
 # appears exactly once; a new header fails --check until it is placed here.
 PAGES = {
     "index.md": ["tracer.hpp"],
-    "config.md": ["config.hpp", "reclaim.hpp", "reader_guard.hpp"],
+    "config.md": [
+        "config.hpp", "reclaim.hpp", "guard.hpp", "guard_mutex.hpp", "reader_guard.hpp",
+    ],
     "status.md": ["status.hpp", "error.hpp"],
     "instrumentation.md": ["pin_instrument.hpp"],
     "segment.md": ["segment.hpp"],
@@ -44,7 +46,7 @@ PAGES = {
     "graph.md": [
         "graph.hpp", "vertex.hpp", "value.hpp", "hook.hpp", "app_fields.hpp", "subscriber.hpp",
         "vertex_stripe.hpp", "lkv_slot.hpp", "edge_pin.hpp", "qsbr.hpp", "link_id.hpp",
-        "rmw_counter.hpp", "thread_id.hpp",
+        "thread_id.hpp",
     ],
     "security-acl.md": ["security_acl.hpp", "acl_ace.hpp"],
     "fwd-router.md": [
@@ -72,7 +74,9 @@ def brief_of(path):
     m = BRIEF_RE.search(path.read_text(encoding="utf-8"))
     if not m:
         raise ValueError(f"{path.relative_to(ROOT)}: no /** @file @brief */ block")
-    return " ".join(line.lstrip(" *") for line in m.group(1).splitlines()).replace("|", "\\|")
+    text = " ".join(line.lstrip(" *") for line in m.group(1).splitlines())
+    # `%word` is Doxygen's autolink escape; it is not part of the text.
+    return re.sub(r"%(?=\w)", "", text).replace("|", "\\|")
 
 
 def render():
