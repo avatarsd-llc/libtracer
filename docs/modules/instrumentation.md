@@ -41,8 +41,9 @@ thread that ticked it.
 
 ## Pitfalls
 
-- **It is off unless a build asks for it.** The hooks are macros that expand to
-  nothing by default; do not write code whose behaviour depends on them.
+- **It is off unless a build asks for it.** The hooks are `tick_*()` functions
+  whose bodies compile to nothing unless the build binds `kInstrumentCounters`;
+  do not write code whose behaviour depends on them.
 - **Read on the ticking thread.** A different thread reads its own zeros, not a
   total.
 - **Reset between interleaved arms.** Counters accumulate for the life of the
@@ -50,15 +51,15 @@ thread that ticked it.
 
 ## API reference
 
-```{doxygendefine} LIBTRACER_TICK_PIN
+```{doxygenfunction} tr::graph::instrument::tick_pin
 :project: libtracer
 ```
 
-```{doxygendefine} LIBTRACER_TICK_COPY
+```{doxygenfunction} tr::graph::instrument::tick_copy
 :project: libtracer
 ```
 
-```{doxygendefine} LIBTRACER_TICK_PIN_REFUSED
+```{doxygenfunction} tr::graph::instrument::tick_refused
 :project: libtracer
 ```
 
