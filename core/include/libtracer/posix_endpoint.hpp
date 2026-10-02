@@ -64,8 +64,9 @@ namespace tr::detail {
  * namespace deliberately: `tr::net::detail` would SHADOW this one for every unqualified
  * `detail::` lookup inside `tr::net`, of which `transport.hpp` and `transport_tcp.cpp`
  * already have several): install it before the write that should trip it, and clear it
- * before the test returns. Production never sets it — the cost is one predictable,
- * never-taken branch immediately ahead of a syscall.
+ * before the test returns. Consulted only when the build binds
+ * `%tr::graph::default_config_t::kFaultInjection` (#1719); a default build carries no
+ * branch for it and emits no definition of it.
  */
 inline int (*write_fault_inject_hook)() noexcept = nullptr;
 

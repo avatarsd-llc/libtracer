@@ -2668,3 +2668,10 @@ target_link_libraries(stream_admit_one_lock_test PRIVATE libtracer)
 target_link_options(stream_admit_one_lock_test PRIVATE "-Wl,--wrap=pthread_mutex_lock")
 libtracer_test_warnings(stream_admit_one_lock_test)
 add_test(NAME stream_admit_one_lock COMMAND stream_admit_one_lock_test)
+# #1719 — the test-only fault-injection hooks are config_t::kFaultInjection, lean by default; the
+# test build opts in through its preset, and this exercises whichever arm the build binds. It also
+# pins rmw_counter_t's preset behind its test door.
+add_executable(fault_injection_trait_test fault_injection_trait_test.cpp)
+target_link_libraries(fault_injection_trait_test PRIVATE libtracer)
+libtracer_test_warnings(fault_injection_trait_test)
+add_test(NAME fault_injection_trait COMMAND fault_injection_trait_test)

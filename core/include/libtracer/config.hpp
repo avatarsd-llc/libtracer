@@ -698,6 +698,31 @@ struct default_config_t {
     static constexpr bool kInstrumentCounters = false;
 
     /**
+     * @brief Whether the TEST-ONLY fault-injection hooks are compiled in (#1719):
+     *        `%tr::detail::probe_fail_hook`, `%tr::detail::write_fault_inject_hook`,
+     *        `%tr::net::detail::ws_peer_published_hook` and
+     *        `%tr::net::detail::tcp_peer_publishing_hook`.
+     *
+     * Each hook is a process-wide function pointer that a test arms to drive a path a healthy
+     * host never takes: a nothrow draw the heap refuses, a write errno glibc never returns, a
+     * handshake instant held open. Nothing in a shipped node ever arms one, yet each check it
+     * guards was a load and a branch on that node — the `probe_fail_hook` one on EVERY draw
+     * from the process-default block source and every nothrow growth.
+     *
+     * **Default `false` — the lean choice.** Closed out, every check is an `if constexpr`
+     * branch that compiles to nothing: the default allocation path carries no hook load, and
+     * no hook variable is odr-used, so none is emitted into the library. The declarations stay
+     * visible either way, so a test that arms a hook still compiles under a fragment that
+     * leaves this `false`; arming one there simply changes nothing.
+     *
+     * **Who sets it.** The core test build, through its checked-in preset fragment
+     * `core/tests/instrumented/libtracer/config_override.hpp`, and every CI leg that binds a
+     * fragment of its own and runs the fault-injection tests. Override fragment:
+     * `static constexpr bool kFaultInjection = true;`
+     */
+    static constexpr bool kFaultInjection = false;
+
+    /**
      * @brief Whether a connection SPEC may carry the `insecure` key of the `quic` and
      *        `webtransport` kinds — the dial-side switch that skips server-certificate
      *        verification.
@@ -849,6 +874,8 @@ inline constexpr std::size_t kQsbrParticipants = config_t::kQsbrParticipants;
 using acl_policy_t = config_t::acl_policy_t;
 /** @brief @ref default_config_t::kInstrumentCounters for this build. */
 inline constexpr bool kInstrumentCounters = config_t::kInstrumentCounters;
+/** @brief @ref default_config_t::kFaultInjection for this build. */
+inline constexpr bool kFaultInjection = config_t::kFaultInjection;
 /** @brief @ref default_config_t::kForceGuardedRmw for this build. */
 inline constexpr bool kForceGuardedRmw = config_t::kForceGuardedRmw;
 

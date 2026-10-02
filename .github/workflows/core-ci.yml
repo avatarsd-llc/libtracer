@@ -466,6 +466,8 @@ jobs:
               // elsewhere, so it keeps the full test build's modules on.
               static constexpr bool kBusLinks = true;
               static constexpr bool kSelfHealLinks = true;
+              // The fault-injection tests run here too, so the hooks are compiled in (#1719).
+              static constexpr bool kFaultInjection = true;
           };
 
           using config_t = reclaim_strict_config_t;
@@ -575,6 +577,8 @@ jobs:
               static constexpr bool kBusLinks = false;
               // Only the bus module is under test: the engine stays opted in (#1670).
               static constexpr bool kSelfHealLinks = true;
+              // The fault-injection tests run here too, so the hooks are compiled in (#1719).
+              static constexpr bool kFaultInjection = true;
           };
 
           using config_t = bus_closed_config_t;
@@ -676,6 +680,8 @@ jobs:
               // Only the engine is under test: the bus tier stays opted in (#1670).
               static constexpr bool kBusLinks = true;
               static constexpr bool kSelfHealLinks = false;
+              // The fault-injection tests run here too, so the hooks are compiled in (#1719).
+              static constexpr bool kFaultInjection = true;
           };
 
           using config_t = self_heal_closed_config_t;
@@ -786,6 +792,8 @@ jobs:
               // elsewhere, so it keeps the full test build's modules on.
               static constexpr bool kBusLinks = true;
               static constexpr bool kSelfHealLinks = true;
+              // The fault-injection tests run here too, so the hooks are compiled in (#1719).
+              static constexpr bool kFaultInjection = true;
           };
 
           using config_t = reclaim_qsbr_config_t;
@@ -1106,6 +1114,8 @@ jobs:
               // elsewhere, so it keeps the full test build's modules on.
               static constexpr bool kBusLinks = true;
               static constexpr bool kSelfHealLinks = true;
+              // The fault-injection tests run here too, so the hooks are compiled in (#1719).
+              static constexpr bool kFaultInjection = true;
           };
 
           using config_t = reclaim_qsbr_config_t;
@@ -1173,6 +1183,18 @@ jobs:
           cmake -S core -B core/build-install -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=Release
           cmake --build core/build-install --parallel "$BUILD_JOBS"
           cmake --install core/build-install --prefix "${RUNNER_TEMP}/prefix"
+      # This is the one job that builds the library with NO fragment, so it is where the
+      # default's claim is checked on the real archive (#1719): the test-only fault-injection
+      # hooks are config_t::kFaultInjection, false by default, and a closed-out build odr-uses
+      # none of them, so none is emitted.
+      - name: The fault-injection hooks are absent from the default archive
+        run: |
+          if nm -C core/build-install/libtracer.a \
+               | grep -E 'probe_fail_hook|write_fault_inject_hook|ws_peer_published_hook|tcp_peer_publishing_hook'; then
+            echo "ERROR: a fault-injection hook is still in the default libtracer.a" >&2
+            exit 1
+          fi
+          echo "ok: no fault-injection hook in the default libtracer.a"
       - name: Consume via find_package(libtracer)
         run: |
           cmake -S tests/packaging -B "${RUNNER_TEMP}/consumer" \

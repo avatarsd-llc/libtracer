@@ -116,6 +116,15 @@ class guard_scope_t {
 };
 
 /**
+ * @brief TEST-ONLY door that presets an @ref rmw_counter_t, so a test can drive the counter
+ *        through its wrap without 2^32 bumps (#1719).
+ *
+ * Declared here and never defined by the library: only the test suite defines it. It is not
+ * part of the API; code outside the test suite must not define it.
+ */
+struct rmw_counter_test_door_t;
+
+/**
  * @brief A wrapping counter, bumped by many writers and read without a lock, whose bump is
  *        chosen at compile time from what the target's hardware can do (#1621, RFC-0028 D6).
  *
@@ -197,13 +206,16 @@ class rmw_counter_t {
     /** @brief The current count, `seq_cst`. Lock-free on both bindings. */
     [[nodiscard]] T load() const noexcept { return value_.load(std::memory_order_seq_cst); }
 
+   private:
+    friend struct rmw_counter_test_door_t;  // test-only: presets the count to reach the wrap.
+
     /**
      * @brief Set the count outright. For a test that must reach the wrap without 2^32 bumps,
-     *        and for nothing else: a store races every bump.
+     *        and for nothing else: a store races every bump. Reached only through
+     *        @ref rmw_counter_test_door_t (#1719).
      */
     void preset(T value) noexcept { value_.store(value, std::memory_order_seq_cst); }
 
-   private:
     std::atomic<T> value_{0}; /**< @brief The count; stores and loads are whole words. */
 };
 
