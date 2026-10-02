@@ -36,8 +36,6 @@
  */
 #pragma once
 
-#include <pthread.h>
-
 #include <array>
 #include <atomic>
 #include <condition_variable>
@@ -374,8 +372,8 @@ class fwd_router_t {
 
     /**
      * @brief Answer nothing more: cancel every deferred AWAIT (ADR-0084), wait for any reply
-     *        already being sent, and join the await timer thread if it ever started. Then
-     *        disarm every @ref origin_t still armed on this router (#1645).
+     *        already being sent. Then disarm every @ref origin_t still armed on this router
+     *        (#1645).
      */
     ~fwd_router_t();
 
@@ -2249,36 +2247,30 @@ class fwd_router_t {
     struct pending_await_t;
 
     /**
-     * @brief The router's deferred-AWAIT state (ADR-0084): the list of pending waiters and
-     *        the one timer thread that answers the ones whose deadline passes.
+     * @brief The router's deferred-AWAIT state (ADR-0084): the list of pending waiters.
      *
-     * Holds no buffer: every waiter is a block of the receiving link's own rx source. The
-     * thread starts on the first deferred AWAIT and never on a node that serves none.
-     * Lock order: `m` before a vertex stripe (the timer disarms under it); a writer fires
-     * a waiter with no stripe lock held, so it may take `m`.
+     * Holds no buffer: every waiter is a block of the receiving link's own rx source. It
+     * holds no thread and reads no clock either: libtracer has no timers. A pending waiter
+     * resolves on change, on `link_down` / `remove_child`, or when the router is destroyed.
+     * Lock order: `m` before a vertex stripe (a cancel disarms under it); a writer fires a
+     * waiter with no stripe lock held, so it may take `m`.
      */
     struct await_plane_t {
         mutable std::mutex m;            /**< @brief Guards every field below. */
-        std::condition_variable cv;      /**< @brief Timer wake-up and teardown drain. */
+        std::condition_variable cv;      /**< @brief Teardown drain. */
         pending_await_t* head = nullptr; /**< @brief Pending waiters, doubly linked. */
         std::size_t count = 0;           /**< @brief Length of the `head` list. */
         bool stop = false;               /**< @brief Set by the destructor. */
-        bool timer_started = false;      /**< @brief `timer` is joinable. */
-        pthread_t timer{};               /**< @brief The deadline thread. */
     };
 
     /** @brief The resolver's deferral sink: take over a remote AWAIT (ADR-0084). */
     static graph::result_t<void> defer_await_thunk(void* ctx, const graph::deferred_await_t& req);
     /** @brief A waiter's change callback, on the writer's thread. */
     static void await_fired_thunk(void* ctx, graph::await_waiter_t& w) noexcept;
-    /** @brief `pthread_create` trampoline into `await_timer_main`. */
-    static void* await_timer_entry(void* self);
-    /** @brief The timer thread: answer `TIMEOUT` to each waiter whose deadline passed. */
-    void await_timer_main();
     /** @brief Member body of `defer_await_thunk`. */
     graph::result_t<void> defer_await(const graph::deferred_await_t& req);
-    /** @brief Build and send the reply of @p p: its value when @p changed, else `TIMEOUT`. */
-    void answer_await(pending_await_t& p, bool changed);
+    /** @brief Build and send the reply of @p p: the awaited vertex's value. */
+    void answer_await(pending_await_t& p);
     /** @brief Unlink and release @p p; `await_plane_t::m` held. */
     void retire_await_locked(pending_await_t* p) noexcept;
     /** @brief Cancel the waiters of @p link_name (all when empty); `await_plane_t::m` held. */

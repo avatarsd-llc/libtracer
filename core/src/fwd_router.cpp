@@ -1342,7 +1342,7 @@ void fwd_router_t::link_down(std::string_view link_name) {
     graph_.evict_link_edges(link_name);
     clear_link(link_name);
     // A deferred AWAIT's reply has nowhere to go once its link is down: release its waiter
-    // now rather than at its deadline (ADR-0084).
+    // (ADR-0084). With no receiver-side deadline, this is how an unanswered one ends.
     const std::lock_guard lock(awaits_.m);
     cancel_awaits_locked(link_name, false);
 }
@@ -2947,7 +2947,7 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<con
                                        terminus_kind(inbound_ctx)};
     // ADR-0084: a remote AWAIT is deferred, never waited for here — this is the receive
     // context of `inbound_name`, and holding it for the await's deadline stalled every frame
-    // behind it. A deferred resolve answers later, from the writer or the timer thread.
+    // behind it. A deferred resolve answers later, from the writer's thread.
     bool deferred = false;
     auto reply = resolver_.resolve(*arena, inbound, frame_view, dst_label_target, &deferred);
     if (deferred) return;
@@ -3824,22 +3824,20 @@ void fwd_router_t::deliver_remote(const graph::remote_delivery_t& sub, const gra
  * receive context returns.
  */
 struct fwd_router_t::pending_await_t {
-    graph::await_waiter_t waiter;          /**< @brief Armed on the vertex; its ctx is this. */
-    fwd_router_t* router = nullptr;        /**< @brief The owner the fire thunk calls back. */
-    mem::block_source_t* source = nullptr; /**< @brief The rx source this block came from. */
-    std::size_t block_bytes = 0;           /**< @brief The block's size, for its release. */
-    const child_rx_ctx_t* ctx = nullptr;   /**< @brief Receive ctx (iov table source). */
-    graph::vertex_handle_t vertex;         /**< @brief The awaited vertex. */
-    std::chrono::steady_clock::time_point deadline; /**< @brief When TIMEOUT is answered. */
-    pending_await_t* prev = nullptr;                /**< @brief Plane list link. */
-    pending_await_t* next = nullptr;                /**< @brief Plane list link. */
-    pending_await_t* expired = nullptr;             /**< @brief Timer's local batch link. */
-    std::optional<wire::timestamp_t> echo_ts;       /**< @brief The request's TF=0 stamp. */
-    std::size_t name_len = 0;                       /**< @brief Link name bytes. */
-    std::size_t dst_len = 0;                        /**< @brief Reply `dst` bytes. */
-    std::size_t src_len = 0;                        /**< @brief Reply `src` bytes (error form). */
-    std::size_t ok_src_len = 0;                     /**< @brief Reply `src` bytes (result form). */
-    std::size_t mint_len = 0;                       /**< @brief RFC-0024 mint bytes. */
+    graph::await_waiter_t waiter;             /**< @brief Armed on the vertex; its ctx is this. */
+    fwd_router_t* router = nullptr;           /**< @brief The owner the fire thunk calls back. */
+    mem::block_source_t* source = nullptr;    /**< @brief The rx source this block came from. */
+    std::size_t block_bytes = 0;              /**< @brief The block's size, for its release. */
+    const child_rx_ctx_t* ctx = nullptr;      /**< @brief Receive ctx (iov table source). */
+    graph::vertex_handle_t vertex;            /**< @brief The awaited vertex. */
+    pending_await_t* prev = nullptr;          /**< @brief Plane list link. */
+    pending_await_t* next = nullptr;          /**< @brief Plane list link. */
+    std::optional<wire::timestamp_t> echo_ts; /**< @brief The request's TF=0 stamp. */
+    std::size_t name_len = 0;                 /**< @brief Link name bytes. */
+    std::size_t dst_len = 0;                  /**< @brief Reply `dst` bytes. */
+    std::size_t src_len = 0;                  /**< @brief Reply `src` bytes (error form). */
+    std::size_t ok_src_len = 0;               /**< @brief Reply `src` bytes (result form). */
+    std::size_t mint_len = 0;                 /**< @brief RFC-0024 mint bytes. */
     bool sending = false; /**< @brief A reply is being built outside the lock. */
     bool orphan = false;  /**< @brief Cancelled while firing: send nothing. */
 
@@ -3874,11 +3872,8 @@ fwd_router_t::~fwd_router_t() {
     cancel_awaits_locked({}, true);
     // A waiter a writer already took, or one whose reply is being sent, still calls back
     // into this router: wait for each of them to retire itself.
-    awaits_.cv.notify_all();
     awaits_.cv.wait(lock, [&] { return awaits_.head == nullptr; });
-    const bool join = awaits_.timer_started;
     lock.unlock();
-    if (join) (void)::pthread_join(awaits_.timer, nullptr);
     // A record outliving its router must not keep a dangling owner: disarm every one still
     // linked, so its destructor finds nothing to cancel (#1645).
     const std::lock_guard origin_lock(origin_m_);
@@ -3908,7 +3903,7 @@ void fwd_router_t::await_fired_thunk(void* ctx, graph::await_waiter_t& /*w*/) no
         const std::lock_guard lock(r.awaits_.m);
         p->sending = true;
     }
-    r.answer_await(*p, true);
+    r.answer_await(*p);
     const std::lock_guard lock(r.awaits_.m);
     r.retire_await_locked(p);
 }
@@ -3934,14 +3929,10 @@ graph::result_t<void> fwd_router_t::defer_await(const graph::deferred_await_t& r
     p->source = &source;
     p->block_bytes = bytes;
     p->ctx = ctx;
-    // A peer may ask for any deadline; one past the clock's range waits "forever", which is
-    // still bounded by the link's own budget and by its teardown.
-    const auto now = std::chrono::steady_clock::now();
-    const auto room = std::chrono::steady_clock::time_point::max() - now;
-    p->deadline =
-        req.timeout >= room
-            ? std::chrono::steady_clock::time_point::max()
-            : now + std::chrono::duration_cast<std::chrono::steady_clock::duration>(req.timeout);
+    // TODO(ADR-0084): the deadline. The request's `await_timeout` (req.timeout) is not
+    // enforced on the receiver: libtracer has no timers, and whether the receiver holds a
+    // deadline at all, or the requester alone owns the timeout, awaits a maintainer ruling.
+    // Until then the waiter resolves on change, on link_down / remove_child, or at teardown.
     p->echo_ts = req.echo_ts;
     p->name_len = name.size();
     p->dst_len = req.dst.size();
@@ -3963,13 +3954,6 @@ graph::result_t<void> fwd_router_t::defer_await(const graph::deferred_await_t& r
         return std::unexpected(st);
     };
     if (awaits_.stop) return refuse(graph::status_t::BACKPRESSURE);
-    if (!awaits_.timer_started) {
-        // Error-code spawn, not `std::thread`: a failed spawn must refuse this one await,
-        // not abort the node under -fno-exceptions (the self_heal_link_t precedent, #1470).
-        awaits_.timer_started =
-            ::pthread_create(&awaits_.timer, nullptr, &fwd_router_t::await_timer_entry, this) == 0;
-        if (!awaits_.timer_started) return refuse(graph::status_t::BACKPRESSURE);
-    }
     // Armed UNDER the plane lock (plane → stripe is the lock order). A writer that fires it
     // the instant it is armed blocks on this lock in its fire thunk until it is listed.
     const graph::result_t<void> armed = graph_.arm_await(req.vertex, p->waiter, req.subject);
@@ -3978,8 +3962,6 @@ graph::result_t<void> fwd_router_t::defer_await(const graph::deferred_await_t& r
     if (awaits_.head != nullptr) awaits_.head->prev = p;
     awaits_.head = p;
     ++awaits_.count;
-    lock.unlock();
-    awaits_.cv.notify_all();  // the timer re-reads its earliest deadline
     return {};
 }
 
@@ -4011,50 +3993,7 @@ void fwd_router_t::cancel_awaits_locked(std::string_view link_name, bool all) no
     }
 }
 
-void* fwd_router_t::await_timer_entry(void* self) {
-    static_cast<fwd_router_t*>(self)->await_timer_main();
-    return nullptr;
-}
-
-void fwd_router_t::await_timer_main() {
-    std::unique_lock lock(awaits_.m);
-    while (!awaits_.stop) {
-        const auto now = std::chrono::steady_clock::now();
-        auto earliest = std::chrono::steady_clock::time_point::max();
-        pending_await_t* batch = nullptr;
-        for (pending_await_t* p = awaits_.head; p != nullptr; p = p->next) {
-            if (p->sending) continue;
-            if (p->deadline > now) {
-                earliest = std::min(earliest, p->deadline);
-                continue;
-            }
-            // Expired. Disarm decides the race with a writer: false means a write already
-            // took it and its fire thunk (blocked on this lock) answers with the value.
-            if (!graph::graph_t::disarm_await(p->waiter)) continue;
-            p->sending = true;
-            p->expired = batch;
-            batch = p;
-        }
-        if (batch != nullptr) {
-            lock.unlock();
-            for (pending_await_t* p = batch; p != nullptr; p = p->expired) answer_await(*p, false);
-            lock.lock();
-            for (pending_await_t* p = batch; p != nullptr;) {
-                pending_await_t* const next = p->expired;
-                retire_await_locked(p);
-                p = next;
-            }
-            continue;  // re-scan: time moved while the replies went out
-        }
-        if (earliest == std::chrono::steady_clock::time_point::max()) {
-            awaits_.cv.wait(lock);
-        } else {
-            awaits_.cv.wait_until(lock, earliest);
-        }
-    }
-}
-
-void fwd_router_t::answer_await(pending_await_t& p, bool changed) {
+void fwd_router_t::answer_await(pending_await_t& p) {
     // `orphan` is written under the plane lock; read it there too. The reply may still race
     // a teardown that lands after this read — it then goes to a link `by_name` no longer
     // resolves, which is the same window `deliver_remote` has.
@@ -4067,22 +4006,17 @@ void fwd_router_t::answer_await(pending_await_t& p, bool changed) {
     const graph::reply_route_t err_route{
         .dst_wire = p.dst(), .src_wire = p.src(), .echo_ts = p.echo_ts};
     view::rope_t reply;
-    if (changed) {
-        const graph::result_t<graph::value_ref_t> v = graph_.await_value(p.vertex);
-        if (v) {
-            const graph::reply_route_t ok{
-                .dst_wire = p.dst(), .src_wire = p.ok_src(), .echo_ts = p.echo_ts};
-            const graph::value_t& val = **v;
-            reply = graph::assemble_reply(ok, graph::reply_kind_t::RESULT, {}, val.links(),
-                                          val.total_length(), *egress_, p.mint());
-            if (reply.link_count() == 0)
-                reply =
-                    graph::assemble_error_reply(err_route, graph::status_t::BACKPRESSURE, *egress_);
-        } else {
-            reply = graph::assemble_error_reply(err_route, v.error(), *egress_);
-        }
+    const graph::result_t<graph::value_ref_t> v = graph_.await_value(p.vertex);
+    if (v) {
+        const graph::reply_route_t ok{
+            .dst_wire = p.dst(), .src_wire = p.ok_src(), .echo_ts = p.echo_ts};
+        const graph::value_t& val = **v;
+        reply = graph::assemble_reply(ok, graph::reply_kind_t::RESULT, {}, val.links(),
+                                      val.total_length(), *egress_, p.mint());
+        if (reply.link_count() == 0)
+            reply = graph::assemble_error_reply(err_route, graph::status_t::BACKPRESSURE, *egress_);
     } else {
-        reply = graph::assemble_error_reply(err_route, graph::status_t::TIMEOUT, *egress_);
+        reply = graph::assemble_error_reply(err_route, v.error(), *egress_);
     }
     if (reply.link_count() == 0) {
         count_drop(assemble_dropped_);

@@ -137,9 +137,10 @@ Or on timeout:
 A **remote** `await` (an `FWD{AWAIT}` arriving over a link) is answered the same way, but the
 waiting happens at the vertex and not on the link: the terminus parks a one-shot waiter, drawn
 from the receiving link's own rx source, and returns that link's receive context at once. The
-reply goes out on the next write (from the writer's thread) or at the deadline (from the
-router's timer thread). Later requests on the same link are not held behind it, so their
-replies may arrive first, as the reply-ordering invariant below already allows
+reply goes out on the next write, from the writer's thread. The receiver runs no timer: the
+request's `await_timeout` is not yet enforced there, and the waiter is released when the link
+goes down. Later requests on the same link are not held behind it, so their replies may arrive
+first, as the reply-ordering invariant below already allows
 ([ADR-0084](../adr/0084-remote-await-completes-from-a-receiver-side-waiter.md)).
 
 `await` is logically equivalent to `subscribe + receive-one + unsubscribe`. An implementation MAY make it cheaper than the literal sequence, for instance by not creating a persistent SUBSCRIBER record.

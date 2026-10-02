@@ -12,13 +12,15 @@
  * - **the receive context returns.** The receive call for an AWAIT returns at once, sends nothing,
  *   and a READ sent after it on the SAME link is answered while the AWAIT is still pending;
  * - **on change.** A write to the awaited vertex sends the AWAIT's RESULT, carrying the value;
- * - **on timeout.** With no write, the AWAIT's addressed `tr::flow::timeout` arrives after its
- *   deadline;
+ * - **no receiver deadline (TODO).** With no write, the waiter stays pending until its link goes
+ *   down or the router is destroyed: libtracer has no timers, and the deadline path awaits a
+ *   maintainer ruling (ADR-0084);
  * - **the receiver pays.** The waiter is a block of the receiving link's own rx source, held
  *   while the AWAIT is pending and given back once it is answered, cancelled or torn down.
  */
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -33,7 +35,6 @@
 
 #include "fwd_frame_builder.hpp"
 #include "libtracer/byteorder.hpp"
-#include "libtracer/error.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/tlv_emit.hpp"
@@ -194,7 +195,6 @@ std::optional<reply_t> parse_reply(std::span<const std::byte> frame) {
 constexpr std::uint32_t kSeed = 0x11111111u;
 constexpr std::uint32_t kOther = 0x22222222u;
 constexpr std::uint32_t kChanged = 0x33333333u;
-constexpr std::uint16_t kTimeoutCode = std::to_underlying(tr::wire::err_t::FLOW_TIMEOUT);
 
 /** @brief One node: `/sink` and `/other`, one fake link `cli` on its own counting source. */
 struct node_t {
@@ -250,52 +250,49 @@ void read_after_pending_await_is_answered_first() {
     check(n.rx.live() == base, "  and the waiter's block went back to the link's source");
 }
 
-/** @brief With no write, the AWAIT is answered `tr::flow::timeout` after its deadline. */
-void await_times_out() {
-    std::printf("an AWAIT with no write is answered TIMEOUT at its deadline:\n");
+/**
+ * @brief TODO(ADR-0084), pinned as it stands: the receiver enforces no deadline. A 20 ms AWAIT
+ *        with no write stays pending and answers nothing; its link going down releases it.
+ *
+ * When the deadline ruling lands, this case becomes the timeout case.
+ */
+void no_receiver_deadline_yet() {
+    std::printf("TODO(ADR-0084): no receiver-side deadline — the waiter waits for a write:\n");
     node_t n;
     const long base = n.rx.live();
-    const auto t0 = std::chrono::steady_clock::now();
-    n.link.inject(b_await("sink", 50ms));
-    check(std::chrono::steady_clock::now() - t0 < 500ms,
-          "  the receive context returned without waiting");
-    check(n.link.wait_for(1, 5s), "  a reply arrives");
-    const auto waited = std::chrono::steady_clock::now() - t0;
-    check(waited >= 50ms, "  no earlier than the deadline");
-    const auto r = parse_reply(n.link.frames().at(0));
-    check(r && r->kind == reply_kind_t::ERROR && r->code == kTimeoutCode &&
-              r->src == b_path({"sink"}),
-          "  and it is the addressed tr::flow::timeout");
-    // The timer retires the waiter just after the send returns: allow it that moment.
-    for (int i = 0; i < 1000 && n.router->pending_awaits() != 0; ++i)
-        std::this_thread::sleep_for(1ms);
-    check(n.router->pending_awaits() == 0, "  nothing is pending afterwards");
-    check(n.rx.live() == base, "  and the waiter's block went back to the link's source");
+    n.link.inject(b_await("sink", 20ms));
+    std::this_thread::sleep_for(100ms);
+    check(n.link.count() == 0, "  past its 20 ms await_timeout, nothing was sent");
+    check(n.router->pending_awaits() == 1, "  and the waiter is still pending");
+    (void)n.router->remove_child("cli");
+    check(n.router->pending_awaits() == 0, "  remove_child releases it");
+    check(n.rx.live() == base, "  and its block went back to the link's source");
 }
 
-/** @brief Many AWAITs on one link each answer once, with a value or a timeout. */
+/** @brief Many AWAITs on one link each answer exactly once, from the write to their vertex. */
 void many_awaits_each_answer_once() {
     std::printf("many pending AWAITs each answer exactly once:\n");
     node_t n;
     const long base = n.rx.live();
-    constexpr int kChangeWaiters = 8;
-    constexpr int kTimeoutWaiters = 8;
-    for (int i = 0; i < kChangeWaiters; ++i) n.link.inject(b_await("sink", 10s));
-    for (int i = 0; i < kTimeoutWaiters; ++i) n.link.inject(b_await("other", 20ms));
-    check(n.router->pending_awaits() == kChangeWaiters + kTimeoutWaiters, "  all are pending");
+    constexpr int kSinkWaiters = 8;
+    constexpr int kOtherWaiters = 8;
+    for (int i = 0; i < kSinkWaiters; ++i) n.link.inject(b_await("sink", 10s));
+    for (int i = 0; i < kOtherWaiters; ++i) n.link.inject(b_await("other", 10s));
+    check(n.router->pending_awaits() == kSinkWaiters + kOtherWaiters, "  all are pending");
     (void)n.graph.write(n.sink, make_value(b_value_u32(kChanged)));
-    check(n.link.wait_for(kChangeWaiters + kTimeoutWaiters, 5s), "  every one is answered");
-    std::this_thread::sleep_for(50ms);
-    int results = 0;
-    int timeouts = 0;
+    check(n.link.count() == kSinkWaiters, "  a write to /sink answers exactly the /sink waiters");
+    (void)n.graph.write(n.other, make_value(b_value_u32(kOther + 1)));
+    check(n.link.count() == kSinkWaiters + kOtherWaiters, "  a write to /other answers the rest");
+    int sink_results = 0;
+    int other_results = 0;
     for (const auto& f : n.link.frames()) {
         const auto r = parse_reply(f);
-        if (r && r->kind == reply_kind_t::RESULT && r->value == kChanged) ++results;
-        if (r && r->kind == reply_kind_t::ERROR && r->code == kTimeoutCode) ++timeouts;
+        if (r && r->kind == reply_kind_t::RESULT && r->value == kChanged) ++sink_results;
+        if (r && r->kind == reply_kind_t::RESULT && r->value == kOther + 1) ++other_results;
     }
-    check(results == kChangeWaiters, "  one RESULT per /sink waiter");
-    check(timeouts == kTimeoutWaiters, "  one TIMEOUT per /other waiter");
-    check(n.link.count() == kChangeWaiters + kTimeoutWaiters, "  and nothing more");
+    check(sink_results == kSinkWaiters, "  one RESULT per /sink waiter, carrying its value");
+    check(other_results == kOtherWaiters, "  one RESULT per /other waiter, carrying its value");
+    check(n.router->pending_awaits() == 0, "  nothing is pending afterwards");
     check(n.rx.live() == base, "  every waiter's block went back to the link's source");
 }
 
@@ -329,24 +326,23 @@ void teardown_with_pending_awaits() {
     check(n.link.count() == 0, "  a write after teardown answers nothing");
 }
 
-/** @brief Writers on other threads race the timer; every AWAIT still answers exactly once. */
-void concurrent_writes_race_the_timer() {
-    std::printf("writers racing the timer — exactly one answer per AWAIT:\n");
+/** @brief A writer thread races the receive thread arming waiters; each AWAIT still answers
+ *         exactly once. */
+void concurrent_writes_race_arming() {
+    std::printf("a writer racing the arming receive thread — exactly one answer per AWAIT:\n");
     node_t n;
-    constexpr int kRounds = 200;
+    constexpr std::size_t kRounds = 200;
+    std::atomic<bool> armed_all{false};
     std::thread writer([&] {
-        for (int i = 0; i < kRounds * 4; ++i) {
+        // Keep writing until every AWAIT has been answered: a waiter armed after the last
+        // write would otherwise wait forever (there is no receiver deadline yet).
+        while (!armed_all.load() || n.link.count() < kRounds)
             (void)n.graph.write(n.sink, make_value(b_value_u32(kChanged)));
-            std::this_thread::sleep_for(100us);
-        }
     });
-    for (int i = 0; i < kRounds; ++i) n.link.inject(b_await("sink", 1ms));
+    for (std::size_t i = 0; i < kRounds; ++i) n.link.inject(b_await("sink", 10s));
+    armed_all.store(true);
     writer.join();
-    check(n.link.wait_for(kRounds, 5s), "  every AWAIT was answered");
-    std::this_thread::sleep_for(20ms);
-    check(n.link.count() == kRounds, "  exactly once each");
-    for (int i = 0; i < 1000 && n.router->pending_awaits() != 0; ++i)
-        std::this_thread::sleep_for(1ms);
+    check(n.link.count() == kRounds, "  exactly one answer per AWAIT");
     check(n.router->pending_awaits() == 0, "  nothing is left pending");
 }
 
@@ -354,10 +350,10 @@ void concurrent_writes_race_the_timer() {
 
 int main() {
     read_after_pending_await_is_answered_first();
-    await_times_out();
+    no_receiver_deadline_yet();
     many_awaits_each_answer_once();
     link_down_releases_waiters();
     teardown_with_pending_awaits();
-    concurrent_writes_race_the_timer();
+    concurrent_writes_race_arming();
     return tr::testing::summary("fwd_await_defer");
 }
