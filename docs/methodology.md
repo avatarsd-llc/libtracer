@@ -294,6 +294,20 @@ Details that make these trustworthy:
   so they add no wall-clock. Note the name: `lkv-store-*` measures the **copy-store
   allocation**, not the last-known-value slot.
 
+  Beside those rows sits one **ratio** check, the ADR-0060 pool/heap floor: the pooled
+  alloc/free (`lkv-alloc-pool`) must clear **2.0x** the heap's (`lkv-alloc-heap`), which is
+  what proves the pool routing is live. A heap fallback reads about 1.0x. The ratio moves
+  with the runner's allocator at a fixed code point: on
+  [#1739](https://github.com/avatarsd-llc/libtracer/pull/1739) one candidate read 1.5x on
+  some runners and 3.2x on others, with byte-identical binaries. So the per-PR form is
+  paired ([#1745](https://github.com/avatarsd-llc/libtracer/issues/1745)): main's binary and
+  the candidate's run the sweep interleaved, three pairs with alternating starts, and each arm
+  keeps its best observation of each row. The candidate fails the floor only when it is under
+  2.0x **and** under main's ratio from the same session by more than the 12% throughput
+  tolerance. Under **1.25x** it fails whatever main reads, because no runner variance
+  explains a pool that costs what the heap costs. `bench/test_perf_gate.py` holds the
+  doctored-input cases for all three outcomes.
+
   The `inproc-target-*` pair is gated at **fan-out 8** and nowhere else, for two measured
   reasons ([#1077](https://github.com/avatarsd-llc/libtracer/issues/1077)). Fan 8 sits
   exactly on `vertex_t::kInlineFanout`, the no-heap small-fan-out boundary, so it is the
