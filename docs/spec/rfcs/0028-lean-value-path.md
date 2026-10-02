@@ -11,7 +11,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0028 |
 | **Title** | The lean value path: one block per publish, copy-or-share by size, retention per vertex, sync as a trait |
-| **Status** | **accepted** (Corrected 2026-10-02, see the erratum at the end; drafted 2026-09-28), **reviewed 2026-09-29** on [PR #1627](https://github.com/avatarsd-llc/libtracer/pull/1627) against `main` 641eff22: direction accepted, the five §11 questions ruled (recorded in §11), and the review's seven text/scope corrections applied in this revision; accepted on that merge. Every number in §2 and §7 is measured on the host build at the commit this RFC was drafted against and is reproducible with `bench_lean_value_path` (§7.3). |
+| **Status** | **accepted** (Corrected 2026-10-02, see the erratum at the end; amended 2026-10-03 for §4.9 and §5.6, see the amendment after it; drafted 2026-09-28), **reviewed 2026-09-29** on [PR #1627](https://github.com/avatarsd-llc/libtracer/pull/1627) against `main` 641eff22: direction accepted, the five §11 questions ruled (recorded in §11), and the review's seven text/scope corrections applied in this revision; accepted on that merge. Every number in §2 and §7 is measured on the host build at the commit this RFC was drafted against and is reproducible with `bench_lean_value_path` (§7.3). |
 | **Author(s)** | AvatarSD (maintainer), with AI drafting |
 | **Created** | 2026-09-28 |
 | **Comment window** | waived by default while solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"); invoke explicitly if outside input is wanted. |
@@ -971,3 +971,53 @@ slice-10 surface fold, which v0.17.0 released. So the RFC is accepted. The heade
 status key that `tools/gen_record_index.py` reads.
 
 **What did not change.** No normative statement, wire surface, or number in §§2–11.
+
+## Amendment (2026-10-03): §4.9 and §5.6, one placement module and a block-source contract that covers every core allocation
+
+**Status:** accepted (maintainer ruling 2026-10-03; the 14-day window is waived per
+[GOVERNANCE.md](../../../.github/GOVERNANCE.md), as on the erratum above). The design is
+recorded in [ADR-0083](../../adr/0083-one-allocation-seam.md).
+
+**Instrument.** Amendment, not erratum: §4.9 and §5.6 state the reference implementation's
+allocation contract, and this changes that contract rather than correcting text that
+contradicted it. No wire surface moves. Every frame that is valid before this amendment is
+valid after it, byte for byte, and `docs/spec/v1.md` is untouched (§8.1 stands).
+
+**Why.** Slice 10 ([#1660](https://github.com/avatarsd-llc/libtracer/pull/1660)) applied
+§4.9's "places the `segment_t` header **in the same block**" unconditionally. For a 1,024 B
+value the heap adapter then asks for `malloc(1072)`, past glibc's 1,032 B tcache ceiling,
+and bench-local shows 2x on the 1 KiB heap rows. [#1768](https://github.com/avatarsd-llc/libtracer/issues/1768)
+is the minimal fix, a split above a threshold. The cause is that the one-block-vs-split
+choice is made in five places (`mem_backend_t::alloc_in_block`, `heap_backend_t::alloc`,
+`source_backend_t`, `pool_t`, `value_t::make_inline`), with three spellings of the padding
+rule. A size-class boundary in one allocator changes the right answer for all of them.
+
+### §4.9 (amended) — placement has one owner
+
+§4.9's **Instead** stands with this change: the header goes in the same block **when the
+placement module says so**. One placement module owns the header, the padding and the
+choice between one block and a split, for every allocator. It decides against a size-class
+table that is a `config_t` trait with a default table. Above a class boundary where one
+block would cross into a slower class, it splits. No other type keeps its own header size,
+stride or padding recipe, and no receive-loan offset is spelled outside it.
+
+§4.9's final paragraph is amended in one sentence: the two constructor roots (the root
+vertex, and the graph's own bookkeeping allocated before any source is bound) **no longer
+stay on the global heap**. They draw from the graph's one injected root, like every other
+core allocation, so the MCU `libtracer.a` references no `malloc`, `free`, `operator new` or
+`operator delete` (ADR-0083 Decision 1). `register_vertex` keeps its contract-violation
+meaning; root exhaustion at init aborts with a message naming the sub-pool and the bytes
+needed (ADR-0083 Decision 7, ADR-0056 amendment).
+
+### §5.6 (amended) — the block-source contract widens
+
+The `block_source` concept's spelling is unchanged. What it names widens: it was the
+contract of every **injection point**; it is now the contract of **every core
+allocation**. Values, structural mints, tables, LKV nodes and container growth all
+draw from a `block_source_t` the graph derives from its one injected root, as
+a per-purpose sub-pool. Core containers (a vector, a name/string store and a sorted-vector
+map) are built over it and report refusal by value. They are not std containers with a
+throwing allocator and not `std::pmr`.
+
+**What did not change.** The wire surface; §5.1–§5.5; the slice order and gates of §6 for
+what has shipped; §7's numbers as measured at the drafting commit.
