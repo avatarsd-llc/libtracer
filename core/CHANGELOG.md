@@ -143,6 +143,32 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   (first frame on a label) still draws its copy from `flat`. Exhaustion is still one counted
   `delivery_drops().out_of_memory` drop.
 
+### Added
+
+- **`default_config_t::kHeapSmallBlockBytes` (and its derived `tr::graph::kHeapSmallBlockBytes`),
+  the largest block the process-default heap backend draws for one segment
+  ([#1768](https://github.com/avatarsd-llc/libtracer/issues/1768)).** Default 1,032 B, glibc's
+  64-bit tcache ceiling. `heap_backend_t` also publishes `kHeaderBytes`, `kSmallBlockBytes` and
+  `is_one_block(size)`. See **Fixed** below for why it exists.
+
+### Fixed
+
+- **A heap value of about 1 KiB is back on the host allocator's fast path
+  ([#1768](https://github.com/avatarsd-llc/libtracer/issues/1768)).** v0.17.0 regressed it.
+  RFC-0028 slice 10 made `heap_backend_t` draw the segment header and the payload as one block,
+  so a 1024 B value asked `malloc` for 1072 B, past glibc tcache's 1032 B ceiling:
+  `lkv-store-heap 1024B` went from 27 to 54 ns, `lkv-alloc-heap 1024B` from 17.6 to 47 ns, and
+  the 1 KiB / 8 KiB `inproc` rows were 16–20% slower. A segment whose padded header plus payload
+  exceeds `kHeapSmallBlockBytes` is now drawn as two blocks: the payload, then the bare
+  `segment_t`. A smaller one stays one block, so the 64 B gain is kept. `destroy` takes the
+  layout from the payload size and returns each block sized as drawn. Only `heap_backend_t`
+  changes; `source_backend_t`, the pools and the borrowed backends keep their one-block layout.
+  No signature changes. The perf gate now also gates `lkv-store-heap` and `lkv-alloc-heap` at
+  1024 B, and `mem_heap_request_size_test` pins the bytes requested on either side of the
+  boundary. **Migration:** none; to keep one block always (an allocator with no small-block
+  cliff), bind `kHeapSmallBlockBytes = SIZE_MAX` in your fragment, as the ESP-IDF component
+  does.
+
 ## [0.17.0] — 2026-10-01
 
 ### Changed

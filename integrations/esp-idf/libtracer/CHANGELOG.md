@@ -19,6 +19,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   guard stays the one the LKV slot, the pools and the write-sequence bump open. Nothing changes
   for an application that uses the generated fragment. **Migration:** an application that
   replaces the fragment with its own renames `reader_guard_t` to `guard_t` there.
+- **The generated config fragment binds `kHeapSmallBlockBytes = SIZE_MAX`
+  ([#1768](https://github.com/avatarsd-llc/libtracer/issues/1768)).** Core's heap backend now
+  splits a segment larger than this threshold into two blocks, to keep a 1 KiB value on glibc's
+  tcache fast path. `multi_heap` has no such fast path, so the component keeps one block per
+  heap segment, the layout v0.17.0 shipped. Nothing changes on a chip.
 
 ## [0.17.0] — 2026-10-01
 

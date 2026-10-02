@@ -107,8 +107,12 @@ int main() {
         tr::view::segment_t* const seg = be.alloc(kSize);
         check(seg != nullptr, "a segment is served");
         check(src.allocs().size() == 1, "EXACTLY one draw per segment (phase 1 made two)");
-        check(src.allocs()[0].bytes == source_backend_t::block_bytes(kSize),
-              "the draw is block_bytes(size) — header plus payload in one block");
+        // The expected size is computed here, not read back from block_bytes(): comparing
+        // block_bytes() with itself could not see a header that grew (#1768).
+        constexpr std::size_t kA = source_backend_t::kBlockAlign;
+        constexpr std::size_t kPadded = (sizeof(tr::view::segment_t) + kA - 1) / kA * kA;
+        check(src.allocs()[0].bytes == kPadded + kSize,
+              "the draw is sizeof(segment_t) padded to the block alignment, plus the payload");
         check(src.allocs()[0].align == source_backend_t::kBlockAlign,
               "the draw is at the block alignment");
         check(seg->bytes.size() == kSize, "the segment reports the requested payload size");

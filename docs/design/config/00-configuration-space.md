@@ -230,6 +230,7 @@ is a knob the fragment does not state at all (#1244).
 | `kEdgePinSlots` (`config.hpp:default_config_t::kEdgePinSlots`) | count | 32 | set to 8 (`integrations/esp-idf/libtracer/CMakeLists.txt:set(LIBTRACER_EDGE_PIN_SLOTS 8)`) |
 | `kMaxVertexBytes64` / `kMaxVertexBytes32` (`config.hpp:default_config_t::kMaxVertexBytes64` / `config.hpp:default_config_t::kMaxVertexBytes32`) | RAM ratchet | 88 / 64 | the preset — deliberately not overridable |
 | `kShareThresholdBytes` (`config.hpp:default_config_t::kShareThresholdBytes`) | size | 4,096 — RFC-0028 §11 ruling 2 | `SIZE_MAX`, copy always (`integrations/esp-idf/libtracer/CMakeLists.txt:static constexpr std::size_t kShareThresholdBytes = ~std::size_t{0}`) |
+| `kHeapSmallBlockBytes` (`config.hpp:default_config_t::kHeapSmallBlockBytes`) | size | 1,032 — glibc's 64-bit tcache ceiling (#1768) | `SIZE_MAX`, one heap block always (`integrations/esp-idf/libtracer/CMakeLists.txt:static constexpr std::size_t kHeapSmallBlockBytes = ~std::size_t{0}`) |
 | `acl_policy_t` (`config.hpp:default_config_t::acl_policy_t`) | policy type | `allow_only_policy_t` | inherited — the full policy is not selectable |
 | `lkv_slot_t` (`config.hpp:default_config_t::lkv_slot_t`) | policy type | `single_writer_slot_t` | `single_writer_slot_t` on every chip, with `kSingleWriter = true` and `guard_t = tr::esp::critical_guard_t`; inherited on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:if(LIBTRACER_SPIN_WAIT_SAFE)`) |
 | `kSpinWaitSafe` (`config.hpp:inline constexpr bool kSpinWaitSafe`) | target fact | `true` | derived from `IDF_TARGET` — `false` on every chip, `true` on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:set(LIBTRACER_SPIN_WAIT_SAFE true)`) |
@@ -244,10 +245,11 @@ Two CMake variables survive for one transition release, `-DLIBTRACER_ACL_FULL` a
 cache variables this table used to list were deleted with the template (#1142).
 
 Each is documented at its declaration with what it costs and when to move it; that header is
-the reference, not this table. What matters here is the shape: **fourteen knobs, all named, all
+the reference, not this table. What matters here is the shape: **fifteen knobs, all named, all
 finite.** Three are counts (`kVertexLockStripes`, `kHazardReaderSlots`, `kEdgePinSlots`), one is a
-padding width, one is a per-target RAM ceiling, two are sizes (`kShareThresholdBytes` and the
-thread stack size `kSelfHealWorkerStackBytes`), two are type bindings, one is a
+padding width, one is a per-target RAM ceiling, three are sizes (`kShareThresholdBytes`, the
+heap backend's split point `kHeapSmallBlockBytes` and the thread stack size
+`kSelfHealWorkerStackBytes`), two are type bindings, one is a
 target fact rather than a preference, and two — `kBusLinks`, below, and `kSelfHealLinks` (the
 RFC-0014 S5 link-liveness engine, #1470) — state whether a *module* is present at all. `kSpinWaitSafe` says whether a task on this target may spin
 for a lock another task holds, and the guard in `mem_pool.hpp` reads it to refuse
@@ -263,8 +265,8 @@ on a node-wide line. The shipped default compiles them out; the core test build 
 the checked-in preset fragment `core/tests/instrumented/`, which yields to any fragment a CI leg
 supplies (#1664).
 
-Two of the fourteen carry no build-system variable at all. `kMaxVertexBytes64` / `kMaxVertexBytes32`
-and `kShareThresholdBytes` are preset members: an application moves them by declaring its own
+Three of the sixteen carry no build-system variable at all. `kMaxVertexBytes64` / `kMaxVertexBytes32`,
+`kShareThresholdBytes` and `kHeapSmallBlockBytes` are preset members: an application moves them by declaring its own
 traits type, not by passing `-D`. `kShareThresholdBytes` is the copy-or-share threshold of
 [RFC-0028](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0028-lean-value-path.md)
 §5.3 — a trailer-less written value of at least that many bytes is stored as a subview of the
