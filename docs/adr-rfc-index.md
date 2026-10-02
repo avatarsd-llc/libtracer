@@ -122,7 +122,7 @@ Statuses: `draft`, `proposed`, `in-comment`, `accepted`, `superseded`, `rejected
 | [RFC-0025](spec/rfcs/0025-stream-class-values.md) | Stream-class values: delivery classes over the rope primitive | accepted |  |  |
 | [RFC-0026](spec/rfcs/0026-ace-access-mask-canonical-u32.md) | The ACE `access_mask` canonical wire width is u32 | accepted |  |  |
 | [RFC-0027](spec/rfcs/0027-label-switched-path-compression.md) | Label-switched path compression: minting a per-host path label across the wire | superseded | [RFC-0029](spec/rfcs/0029-one-path-primitive.md) |  |
-| [RFC-0028](spec/rfcs/0028-lean-value-path.md) | The lean value path: one block per publish, copy-or-share by size, retention per vertex, sync as a trait | draft |  |  |
+| [RFC-0028](spec/rfcs/0028-lean-value-path.md) | The lean value path: one block per publish, copy-or-share by size, retention per vertex, sync as a trait | accepted |  |  |
 | [RFC-0029](spec/rfcs/0029-one-path-primitive.md) | One path primitive: the owner-issued `(index, generation)` pair, carried per hop, local = forwarded | accepted |  | [RFC-0004](spec/rfcs/0004-remote-operation-addressing.md) (part), [RFC-0024](spec/rfcs/0024-bound-paths-node-scoped-vertex-ref-source-routing.md) (part), [RFC-0027](spec/rfcs/0027-label-switched-path-compression.md) |
 
 ## Numbering gaps
