@@ -499,7 +499,7 @@ struct stored_tlv_t {
 template <class N>
 [[nodiscard]] stored_tlv_t copy_tlv(const N& node, mem::block_source_t& source,
                                     mem::mem_backend_t& flat) {
-    LIBTRACER_TICK_COPY();
+    instrument::tick_copy();
     const std::size_t n = node.wire_size();
     value_ref_t v = value_ref_t::adopt(value_t::make_inline(n, source));
     if (!v) return {};
@@ -535,10 +535,10 @@ template <class N>
                                              mem::mem_backend_t& flat) {
     if (node.wire_size() >= threshold && trailer_less(node)) {
         if (std::optional<view::rope_t> shared = node.pin_wire(frame_view)) {
-            LIBTRACER_TICK_PIN();
+            instrument::tick_pin();
             return {std::move(*shared), value_ref_t{}};
         }
-        LIBTRACER_TICK_PIN_REFUSED();
+        instrument::tick_refused();
     }
     return copy_tlv(node, source, flat);
 }

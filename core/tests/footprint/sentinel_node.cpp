@@ -12,7 +12,8 @@
  * docs/spec/v1.md §3.1 guarantees an MCU can carry.
  *
  * This is a *fixture*, not a demo: it is cross-compiled bare-metal
- * (arm-none-eabi, -Os -fno-exceptions -fno-rtti, LIBTRACER_NO_ATOMIC), linked,
+ * (arm-none-eabi, -Os -fno-exceptions -fno-rtti, the single-threaded node fragment
+ * in core/tests/footprint/config), linked,
  * stripped, and its flash footprint gated at <= 16 KiB by
  * tools/cortexm0_footprint.py (ADR-0047 §5). Keep it stable: because the same
  * workload re-measures on every change, a size delta reflects a change in the

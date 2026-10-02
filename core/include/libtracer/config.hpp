@@ -29,6 +29,18 @@
 #include <cstddef>
 #include <cstdint>
 
+// Removed build switches (#1722). Each one duplicated a trait of the one configuration type
+// (ADR-0068), so a build that still defines it would otherwise compile on with the switch
+// silently ignored. Refuse it, and name the trait that replaced it.
+#if defined(LIBTRACER_NO_ATOMIC)
+#error \
+    "LIBTRACER_NO_ATOMIC was removed (#1722). The segment refcount picks its binding from the target: one atomic read-modify-write where the core has one, else a load and a store inside config_t::guard_t. A single-threaded build binds `using guard_t = tr::no_guard_t;` in libtracer/config_override.hpp."
+#endif
+#if defined(LIBTRACER_PIN_INSTRUMENT)
+#error \
+    "LIBTRACER_PIN_INSTRUMENT was removed (#1722). The RFC-0022 pin/copy counters follow config_t::kInstrumentCounters: bind `static constexpr bool kInstrumentCounters = true;` in libtracer/config_override.hpp (a bench/ build: -DLIBTRACER_INSTRUMENT_COUNTERS=ON)."
+#endif
+
 namespace tr {
 
 struct mutex_guard_t;  // guard_mutex.hpp — the host guard: address-striped locks (hosted)
@@ -314,9 +326,11 @@ struct default_config_t {
     /**
      * @brief The target's selected ACL policy (ADR-0047 §1 build-time module set).
      *
-     * Default: the ALLOW-only MCU profile. The CMake option `LIBTRACER_ACL_FULL=ON` rebinds
-     * this to the full `security_acl` host policy (ordered first-match-per-bit with DENY) — a
-     * target-configuration change, never an edit to `graph.cpp`.
+     * Default: the ALLOW-only MCU profile. A host binds the full `security_acl` policy
+     * (ordered first-match-per-bit with DENY) in its override fragment — a
+     * target-configuration change, never an edit to `graph.cpp`. Override fragment:
+     * `using acl_policy_t = full_acl_policy_t;`. (The `-DLIBTRACER_ACL_FULL` CMake option that
+     * used to write that line was removed in #1722; configuring with it is an error.)
      */
     using acl_policy_t = allow_only_policy_t;
 
@@ -661,9 +675,11 @@ struct default_config_t {
      *
      * **Default `false` — the lean choice.** Closed out, the two members occupy no bytes of
      * `graph_t` (`[[no_unique_address]]` over an empty type), the two increment sites compile
-     * to nothing, and the accessors answer `0`. It is a compile-time member rather than the
-     * `LIBTRACER_PIN_INSTRUMENT` macro `%pin_instrument.hpp` uses, for ADR-0068's reason: a
-     * macro can differ per TU, and these counters change `graph_t`'s layout.
+     * to nothing, and the accessors answer `0`. It also arms the RFC-0022 §6 pin/copy branch
+     * counters of `%pin_instrument.hpp`, which were the `LIBTRACER_PIN_INSTRUMENT` macro until
+     * #1722; that macro is now refused at compile time. A compile-time member rather than a
+     * macro for ADR-0068's reason: a macro can differ per TU, and these counters change
+     * `graph_t`'s layout.
      *
      * **Who sets it.** The core test build and the `bench/` build's
      * `LIBTRACER_INSTRUMENT_COUNTERS` option opt in through the checked-in preset fragment

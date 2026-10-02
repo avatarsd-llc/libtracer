@@ -150,13 +150,14 @@ def _census(cxx: str, size_tool: str, march: str, mabi: str, root: pathlib.Path)
         "-fno-rtti",
         f"-march={march}",
         f"-mabi={mabi}",
-        "-DLIBTRACER_NO_ATOMIC",
         "-DNDEBUG",
         "-DLIBTRACER_BACKEND_SET_POOL_ONLY",
         "-ffunction-sections",
         "-fdata-sections",
         "-Wall",
         "-Wextra",
+        # The single-threaded node configuration (#1722) — ahead of core/include.
+        f"-I{root / 'core' / 'tests' / 'footprint' / 'config'}",
         f"-I{root / 'core' / 'include'}",
     ]
     link_flags = [
@@ -253,8 +254,9 @@ def main() -> int:
     lines = [
         f"## libtracer rv32 flash census — required modules (`{args.march}`/`{args.mabi}`)",
         "",
-        "Profile: `-std=c++23 -Os -fno-exceptions -fno-rtti -DLIBTRACER_NO_ATOMIC "
-        "-DNDEBUG -DLIBTRACER_BACKEND_SET_POOL_ONLY` + `--gc-sections`, stripped.",
+        "Profile: `-std=c++23 -Os -fno-exceptions -fno-rtti -DNDEBUG "
+        "-DLIBTRACER_BACKEND_SET_POOL_ONLY` + the single-threaded node fragment "
+        "(`core/tests/footprint/config`, `guard_t = tr::no_guard_t`) + `--gc-sections`, stripped.",
         f"Required modules: {modules} + the `sentinel_node` fixture.",
         f"Toolchain: `{toolchain}` — compare numbers ONLY within one toolchain.",
         "",

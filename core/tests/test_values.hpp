@@ -20,8 +20,8 @@
  * exercise the production seam under test, not the helper that happens to sit beside it.
  *
  * Split from @ref test_support.hpp because this header needs a libtracer type and that one
- * needs nothing but the standard library — `substrate_test_no_atomic` and
- * `pool_only_dispatch_test` compile a restricted source set and include only the runner.
+ * needs nothing but the standard library — `pool_only_dispatch_test` compiles a restricted
+ * source set and includes only the runner.
  *
  * `tr::testing` is a tests-only namespace — it is not a layer in the L0..L5 model and nothing
  * under `core/src` or `core/include` may name it.

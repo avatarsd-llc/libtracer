@@ -13,10 +13,12 @@
  * a gate leg whose reachability was never checked reported failures against inert code).
  * So the decision site ticks a counter per branch and every published cell carries it.
  *
- * **Off unless asked for.** Without `LIBTRACER_PIN_INSTRUMENT` the counters do not exist and
- * the calls compile to nothing, so the measured binaries the library ships are unchanged.
- * The bench target defines it for the library and for itself, which is why it lives in a
- * public header rather than beside the decision site in `core/src`.
+ * **Off unless asked for.** The ticks are armed by `config_t::kInstrumentCounters`, the same
+ * trait that compiles in `graph_t`'s instrumentation counters (#1722 folded the old
+ * `LIBTRACER_PIN_INSTRUMENT` macro into it). With the trait `false` — the shipped default —
+ * every tick compiles to nothing and the counters are never touched, so the measured binaries
+ * the library ships are unchanged. The bench reads the counters from its own TU, which is why
+ * they live in a public header rather than beside the decision site in `core/src`.
  *
  * @section pin_instr_tls Why these are thread_local and NOT atomic
  *
@@ -35,9 +37,9 @@
  */
 #pragma once
 
-#ifdef LIBTRACER_PIN_INSTRUMENT
-
 #include <cstdint>
+
+#include "libtracer/config.hpp"
 
 namespace tr::graph::instrument {
 
@@ -54,12 +56,19 @@ inline thread_local std::uint64_t g_copy_hits = 0;
  */
 inline thread_local std::uint64_t g_pin_refused = 0;
 
-/** @brief Count one store that took the pinned-subview branch. */
-inline void tick_pin() noexcept { ++g_pin_hits; }
-/** @brief Count one store that took the one-copy branch. */
-inline void tick_copy() noexcept { ++g_copy_hits; }
-/** @brief Count one store whose predicate said PIN but whose reader could not pin. */
-inline void tick_refused() noexcept { ++g_pin_refused; }
+/** @brief Count one store that took the pinned-subview branch; nothing unless instrumented. */
+inline void tick_pin() noexcept {
+    if constexpr (kInstrumentCounters) ++g_pin_hits;
+}
+/** @brief Count one store that took the one-copy branch; nothing unless instrumented. */
+inline void tick_copy() noexcept {
+    if constexpr (kInstrumentCounters) ++g_copy_hits;
+}
+/** @brief Count one store whose predicate said PIN but whose reader could not pin; nothing
+ *         unless instrumented. */
+inline void tick_refused() noexcept {
+    if constexpr (kInstrumentCounters) ++g_pin_refused;
+}
 
 /** @brief Zero this thread's three counters — call between interleaved arms. */
 inline void reset() noexcept {
@@ -69,27 +78,3 @@ inline void reset() noexcept {
 }
 
 }  // namespace tr::graph::instrument
-
-/** @brief Decision-site hook for the pinned-subview branch; compiles to nothing when the
- *         instrument is off. */
-#define LIBTRACER_TICK_PIN() ::tr::graph::instrument::tick_pin()
-/** @brief Decision-site hook for the one-copy branch; compiles to nothing when the
- *         instrument is off. */
-#define LIBTRACER_TICK_COPY() ::tr::graph::instrument::tick_copy()
-/** @brief Decision-site hook for a refused pin (no owning segment to subview); compiles to
- *         nothing when the instrument is off. */
-#define LIBTRACER_TICK_PIN_REFUSED() ::tr::graph::instrument::tick_refused()
-
-#else
-
-/** @brief Decision-site hook for the pinned-subview branch; expands to nothing here because
- *         the instrument is off. */
-#define LIBTRACER_TICK_PIN() ((void)0)
-/** @brief Decision-site hook for the one-copy branch; expands to nothing here because the
- *         instrument is off. */
-#define LIBTRACER_TICK_COPY() ((void)0)
-/** @brief Decision-site hook for a refused pin (no owning segment to subview); expands to
- *         nothing here because the instrument is off. */
-#define LIBTRACER_TICK_PIN_REFUSED() ((void)0)
-
-#endif
