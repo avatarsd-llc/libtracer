@@ -27,25 +27,25 @@ handle drops, `segment_ptr_t::reset` calls `tr::mem::destroy_dispatch`, which
 switches on that tag to a direct call for a linked backend and falls back to the
 backend's virtual `destroy` for any other — the result is identical to
 `seg->backend->destroy(seg)` for every backend
-(`core/include/libtracer/backend.hpp:287-296`;
+(`core/include/libtracer/backend.hpp:destroy_dispatch`;
 [ADR-0047 — build-time-closed module sets, compile-time seams](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0047-build-time-closed-module-sets-compile-time-seams.md) §2).
 There is no separate `release()` step.
 
 The atomic orderings are the canonical intrusive_ptr pattern, specified once in
 [reference/02](../reference/02-graph-model.md) §required atomic operations:
-increment `relaxed` (`core/include/libtracer/segment.hpp:54` — the caller already
+increment `relaxed` (`core/include/libtracer/segment.hpp:void inc_relaxed() noexcept { count_.fetch_add(1` — the caller already
 holds a reference, so the data dependency travels through it), decrement
-`acq_rel` (`:55-57` — release the writes before another thread observes the count
-drop, acquire on observing the drop to zero), inspect `acquire` (`:58-60`). The
+`acq_rel` (`core/include/libtracer/segment.hpp:return count_.fetch_sub(1, std::memory_order_acq_rel)` — release the writes before another thread observes the count
+drop, acquire on observing the drop to zero), inspect `acquire` (`core/include/libtracer/segment.hpp:return count_.load(std::memory_order_acquire)`). The
 decrement returns the value *before* it, so a return of `1` identifies the caller
 that dropped the last reference.
 
 `LIBTRACER_NO_ATOMIC` replaces the atomic with a plain `uint_least32_t` for
 single-threaded and Cortex-M0/M0+ targets that have no LDREX/STREX
-(`core/include/libtracer/segment.hpp:23,46`). It is a compile definition, not a
+(`core/include/libtracer/segment.hpp:#ifndef LIBTRACER_NO_ATOMIC`, `core/include/libtracer/segment.hpp:void inc_relaxed() noexcept { ++count_; }`). It is a compile definition, not a
 CMake option: the constrained-target footprint build sets it
-(`tools/cortexm0_footprint.py:158`) and the substrate test is built a second time
-with it (`core/tests/CMakeLists.txt:1982,1997-1998`).
+(`tools/cortexm0_footprint.py:"-DLIBTRACER_NO_ATOMIC"`) and the substrate test is built a second time
+with it (`core/tests/CMakeLists.txt:add_executable(substrate_test_no_atomic`, `core/tests/CMakeLists.txt:target_compile_definitions(substrate_test_no_atomic PRIVATE`).
 
 ## API reference
 
@@ -129,11 +129,11 @@ sequenceDiagram
 - **`adopt` and `retain` are not interchangeable.** `adopt` takes over an
   existing reference without bumping — the shape `mem_backend_t::alloc` returns
   (a raw `segment_t*` at refcount 1); `retain` adds a new reference to an
-  already-live segment (`segment.hpp:130,134`). Adopting a segment twice
+  already-live segment (`segment.hpp:segment_ptr_t::adopt`, `segment.hpp:segment_ptr_t::retain`). Adopting a segment twice
   double-frees it; retaining an `alloc` result leaks it, because the reference
   `alloc` already created is never dropped.
 - **`use_count` is not a synchronization primitive.** It is an acquire load for
-  debug and metrics (`segment.hpp:168-171`). A count of 1 does not mean no other
+  debug and metrics (`segment.hpp:segment_ptr_t::use_count`). A count of 1 does not mean no other
   thread is about to clone the handle, and branching on it reintroduces the race
   the refcount exists to remove.
 - **`LIBTRACER_NO_ATOMIC` is an application promise, not a portability switch.**
@@ -142,11 +142,11 @@ sequenceDiagram
   all access to segments.
 - **`bytes` is writable at the type level; legality is the backend's contract.**
   A borrow over ROM or a caller's `const` buffer hands out a mutable
-  `std::span<std::byte>` all the same (`segment.hpp:75-78,83`); writing through
+  `std::span<std::byte>` all the same (`segment.hpp:segment_t`, `segment.hpp:segment_t::bytes`); writing through
   it is undefined even though it compiles.
 - **A `DEVICE` segment must not be CPU-dereferenced.** The span looks ordinary,
   but `space` records that the bytes are not CPU-addressable
-  (`segment.hpp:84`, `backend.hpp:59-70`); such a segment may back only an opaque
+  (`segment.hpp:segment_t::space`, `backend.hpp:mem_space_t`); such a segment may back only an opaque
   VALUE payload, with header and trailer kept in `HOST` segments
   ([ADR-0024 — mem_cuda GPU backend, heterogeneous rope](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0024-mem-cuda-gpu-backend-heterogeneous-rope.md)).
 

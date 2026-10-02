@@ -449,6 +449,16 @@ yourself**; CI already did.
 | Cortex-M0 footprint sentinel | the `sentinel` job in `.github/workflows/footprint-cortexm0.yml` (needs `arm-none-eabi`) | no |
 | ESP32-C6 hardware arms | `.github/workflows/hil-esp32c6.yml` | **yes** |
 
+**Writing a doc citation.** Cite code by **symbol**, not by line number:
+`` `core/src/graph.cpp:graph_t::write_impl` `` or `` `graph.hpp:graph_t::delivery_drops_t` ``.
+The gate finds the symbol by search, so an edit elsewhere in the file never forces a
+re-pin; it fails when the symbol is renamed or removed, or names more than one place. An
+overload takes the start of its parameter list (`` `graph.hpp:graph_t::unsubscribe(const
+subscription_t& sub)` ``), and a statement inside a function takes a substring that occurs
+once (`` `fwd_router.cpp:if (frame.link_count() == 1)` ``). Line citations (`file:123`) still
+pass in the pages not yet migrated, but each needs an anchor in the gate's table; the design
+and module pages use symbols only.
+
 `build-test` runs a **matrix**, not one configuration — ACL policy variants
 (`LIBTRACER_ACL_FULL`, `LIBTRACER_LKV_SLOT`), a minimal module set, a
 reclaim-strict binding, and a bus-closed build. A change that passes the default

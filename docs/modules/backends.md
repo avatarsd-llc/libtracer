@@ -32,14 +32,14 @@ because many substrates — MMIO, hardware FIFOs — cannot allocate at all.
 
 A fourth, `mem_cuda`, is **not part of core at all**: it is a tier module under
 [`backends/cuda/`](https://github.com/avatarsd-llc/libtracer/blob/main/backends/cuda/README.md),
-its own CMake project that consumes core (`backends/cuda/CMakeLists.txt:36`). It needs the CUDA
+its own CMake project that consumes core (`backends/cuda/CMakeLists.txt:add_library(libtracer_cuda STATIC src/mem_cuda.cpp)`). It needs the CUDA
 toolkit and a GPU, so it is never built in CI. Core carries no vendor name and no `#ifdef` for
 it — a `DEVICE`-space backend plugs in by **registering a transfer hook** ([below](#the-device-backend-seam)).
 
 `mem_pool` is the bounded "custom allocator": it carves a **caller-owned** slab
 into fixed slots with the free list threaded *through the slab* (no auxiliary
 heap), and returns `nullptr` when full — the BACKPRESSURE signal. `pool_t` is not
-synchronized; `synchronized_pool_t<Sync>` (`core/include/libtracer/mem_pool.hpp:160`)
+synchronized; `synchronized_pool_t<Sync>` (`core/include/libtracer/mem_pool.hpp:synchronized_pool_t`)
 composes over it and guards the free list with a **compile-time reader guard**, which is
 what any shared seam needs — a segment self-routes its reclaim on whatever thread drops the
 last reference, concurrent with a writer's `alloc`. Since RFC-0028 slice 10 the guard is the
@@ -62,7 +62,7 @@ sanctioned L0↔L1 boundary type, and the only `tr::view` symbol the L0 interfac
 permitted to name
 ([ADR-0016 — substrate, zero-copy, layer namespaces](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0016-substrate-zero-copy-layer-namespaces-no-templates-through-seam.md) §2).
 `alloc` returns a **raw** `segment_t*` with a refcount of 1; the caller adopts it
-with `tr::view::segment_ptr_t::adopt` (`core/include/libtracer/segment.hpp:130`).
+with `tr::view::segment_ptr_t::adopt` (`core/include/libtracer/segment.hpp:segment_ptr_t::adopt`).
 The handle-producing conveniences `heap_alloc` / `borrow` / `borrow_const`
 therefore live in `tr::view`, not here.
 
@@ -318,7 +318,7 @@ classDiagram
   `segment_ptr_t::adopt` owns it. The `tr::view` helpers (`heap_alloc`, `borrow`,
   `borrow_const`) exist so that the common paths cannot get this wrong.
 - **Borrowed bytes must outlive every segment over them.** `borrowed_backend_t::destroy`
-  deletes the control block and nothing else (`core/include/libtracer/mem_borrowed.hpp:39`),
+  deletes the control block and nothing else (`core/include/libtracer/mem_borrowed.hpp:borrowed_backend_t::destroy`),
   so a borrow over a stack buffer or a scratch frame becomes a dangling read the moment
   that storage goes away. Durable storage of a value wants an owning backend.
 - **`bump_source_t` is scope-lifetime only.** Blocks carved from its buffer are never

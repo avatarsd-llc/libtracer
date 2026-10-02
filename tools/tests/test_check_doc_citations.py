@@ -834,7 +834,22 @@ class EnrolledPathsArePinnedTest(unittest.TestCase):
         self.assertEqual(unpinned, [], "an enrolled non-source citation with no pin")
 
     def test_every_enrolled_path_carries_at_least_one_pin(self):
+        # Or a SYMBOL citation (#1705): a page that names `core-ci.yml`'s TSan job by its
+        # `name:` line needs no pin, but the path stays enrolled so the gate still fires on
+        # an edit to that file and the citation is still searched.
         pinned_paths = {entry[0].rsplit(":", 1)[0] for entry in cdc.ANCHORS}
+        key = tuple((k, tuple(v)) for k, v in sorted(cdc.source_map().items()))
+        for doc in cdc.all_docs():
+            rel = os.path.relpath(str(doc), REPO).replace(os.sep, "/")
+            if cdc.is_historical(rel):
+                continue
+            try:
+                text = doc.read_text()
+            except (OSError, UnicodeDecodeError):
+                continue
+            for m in cdc.CITATION_RE.finditer(text):
+                if m.group("sympath"):
+                    pinned_paths.add(cdc._symbol_target(m.group("sympath"), key)[0])
         for path in cdc.CITABLE_NON_SOURCE_PATHS:
             self.assertIn(path, pinned_paths)
 
@@ -1387,6 +1402,157 @@ class AmbiguousAnchorGateTest(unittest.TestCase):
         with self._gate_over(unique) as out:
             self.assertNotIn("AMBIGUOUS", out)
             self.assertNotIn("DRIFT", out)
+
+
+# A stand-in header for the symbol resolver (#1705): a declared-once member that is USED
+# many times, two overloads, a constructor sharing its class's name, a parameter sharing a
+# member's name, a stale comment naming a renamed symbol, and an out-of-line definition.
+SYMBOL_HEADER = """\
+#pragma once
+namespace tr::graph {
+// legacy_name used to live here; the comment outlived the rename.
+class graph_t {
+   public:
+    explicit graph_t(int slots);
+    graph_t(int slots, bool peer_named);
+    [[nodiscard]] int unsubscribe(const sub_t& sub);
+    [[nodiscard]] int unsubscribe(const sub_t& sub,
+                                  release_fn_t release);
+    int size() const { return slots_; }
+    int twice() const { return slots_ * 2; }
+
+   private:
+    int slots_ = 0;
+};
+struct alignas(8) edge_pub_t {
+    edge_pub_t* next = nullptr;
+};
+inline int graph_t::helper(int x) { return x; }
+}  // namespace tr::graph
+""".split("\n")
+
+
+class SymbolHitsTest(unittest.TestCase):
+    """`symbol_hits` — the search that replaces a line number with a name (#1705).
+
+    One hit resolves, none is a GONE symbol, more than one is ambiguous. Each case below is a
+    shape the design and module pages actually cite.
+    """
+
+    def hits(self, needle):
+        return cdc.symbol_hits(SYMBOL_HEADER, needle)
+
+    def line_of(self, text):
+        return [i + 1 for i, ln in enumerate(SYMBOL_HEADER) if text in ln]
+
+    def test_a_member_used_many_times_resolves_to_its_declaration(self):
+        self.assertEqual(self.hits("graph_t::slots_"), self.line_of("int slots_ = 0;"))
+        self.assertEqual(self.hits("slots_"), self.line_of("int slots_ = 0;"))
+
+    def test_a_type_name_means_the_type_not_its_constructors(self):
+        self.assertEqual(self.hits("graph_t"), self.line_of("class graph_t {"))
+        self.assertEqual(self.hits("edge_pub_t"), self.line_of("struct alignas(8) edge_pub_t {"))
+
+    def test_a_constructor_is_named_by_qualifying_the_type_with_itself(self):
+        self.assertEqual(len(self.hits("graph_t::graph_t")), 2)
+        self.assertEqual(self.hits("graph_t::graph_t(int slots)"),
+                         self.line_of("explicit graph_t(int slots);"))
+
+    def test_overloads_are_ambiguous_until_the_parameters_single_one_out(self):
+        self.assertEqual(len(self.hits("graph_t::unsubscribe")), 2)
+        one = self.line_of("unsubscribe(const sub_t& sub);")
+        self.assertEqual(self.hits("graph_t::unsubscribe(const sub_t& sub)"), one)
+        # A parameter list that wraps onto the next line still counts.
+        two = self.line_of("unsubscribe(const sub_t& sub,")
+        self.assertEqual(self.hits("graph_t::unsubscribe(const sub_t& sub, release_fn_t"), two)
+
+    def test_a_parameter_is_not_a_declaration_of_the_member_it_shadows(self):
+        self.assertEqual(self.hits("peer_named"), self.line_of("bool peer_named);"))
+        self.assertEqual(self.hits("graph_t::peer_named"), [])
+
+    def test_a_renamed_symbol_is_gone_even_while_a_comment_still_names_it(self):
+        self.assertEqual(self.hits("legacy_name"), [])
+
+    def test_an_out_of_line_definition_resolves_by_its_qualified_name(self):
+        self.assertEqual(self.hits("graph_t::helper"), self.line_of("graph_t::helper(int x)"))
+
+    def test_a_substring_must_sit_on_exactly_one_line(self):
+        self.assertEqual(self.hits("return slots_ * 2"), self.line_of("slots_ * 2"))
+        self.assertEqual(len(self.hits("return slots_")), 2)
+        # A substring that looks like `name(args` but declares nothing is matched literally.
+        self.assertEqual(self.hits("size() const { return"), self.line_of("int size() const"))
+
+
+class SymbolCitationScanTest(unittest.TestCase):
+    """The scanner reads a symbol citation and keeps the inheritance rule for bare `:N`."""
+
+    def test_a_symbol_citation_pins_no_line(self):
+        self.assertEqual(locs("see `graph.cpp:graph_t::propagate`"), set())
+
+    def test_a_symbol_citation_moves_the_running_file(self):
+        # A bare `:N` after it means a line of the file the symbol citation NAMED, not of the
+        # file cited before that.
+        text = "`graph.hpp:12` then `graph.cpp:graph_t::propagate` and `:99`"
+        self.assertEqual(locs(text), {"core/include/libtracer/graph.hpp:12", f"{GRAPH}:99"})
+
+    def test_prose_after_a_colon_is_not_a_citation(self):
+        # A compiler message in a CHANGELOG: a space follows the colon, so no symbol branch.
+        m = [x for x in cdc.CITATION_RE.finditer("`esp_http_server.h: No such file`")
+             if x.group("sympath")]
+        self.assertEqual(m, [])
+
+
+class SymbolCitationGateTest(unittest.TestCase):
+    """That `main` checks symbol citations against the REAL tree, and names the citing page."""
+
+    @contextlib.contextmanager
+    def _gate_over(self, body):
+        directory = os.path.join(REPO, "docs/design")
+        doc = os.path.join(directory, "zz-1705-probe.md")
+        with open(doc, "w") as fh:
+            fh.write(body)
+        real_all_docs, buf = cdc.all_docs, io.StringIO()
+        try:
+            cdc.all_docs = lambda: [pathlib.Path(doc)]
+            with contextlib.redirect_stdout(buf):
+                cdc.main([])
+            yield buf.getvalue()
+        finally:
+            cdc.all_docs = real_all_docs
+            os.remove(doc)
+
+    def test_a_live_symbol_passes(self):
+        with self._gate_over(f"the write path, `{GRAPH}:graph_t::write_impl`\n") as out:
+            self.assertNotIn("zz-1705-probe.md", out)
+
+    def test_a_renamed_symbol_fails_and_names_the_citation(self):
+        with self._gate_over(f"`{GRAPH}:graph_t::write_impl_renamed_away`\n") as out:
+            self.assertIn("zz-1705-probe.md", out)
+            self.assertIn("GONE", out)
+            self.assertIn("graph_t::write_impl_renamed_away", out)
+
+    def test_an_ambiguous_substring_fails(self):
+        with self._gate_over(f"`{GRAPH}:return std::unexpected(status_t::SCHEMA_NOT_FOUND);`\n") as out:
+            self.assertIn("AMBIGUOUS", out)
+
+    def test_a_source_spelling_naming_no_file_fails(self):
+        with self._gate_over("`no_such_file_1705.cpp:graph_t::write_impl`\n") as out:
+            self.assertIn("names no source file", out)
+
+    def test_a_dated_record_is_not_checked(self):
+        directory = os.path.join(REPO, "docs/adr")
+        doc = os.path.join(directory, "zz-1705-probe.md")
+        with open(doc, "w") as fh:
+            fh.write(f"`{GRAPH}:graph_t::write_impl_renamed_away`\n")
+        real_all_docs, buf = cdc.all_docs, io.StringIO()
+        try:
+            cdc.all_docs = lambda: [pathlib.Path(doc)]
+            with contextlib.redirect_stdout(buf):
+                cdc.main([])
+        finally:
+            cdc.all_docs = real_all_docs
+            os.remove(doc)
+        self.assertNotIn("zz-1705-probe.md", buf.getvalue())
 
 
 if __name__ == "__main__":

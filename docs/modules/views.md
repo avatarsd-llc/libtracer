@@ -28,12 +28,12 @@ decode-into-a-struct step: the wire bytes **are** the in-memory value.
 Ownership is an intrusive refcount on the segment, not on the view: cloning a
 `segment_ptr_t` increments **relaxed**, dropping one decrements **acq_rel** and fires
 the backend's `destroy` when the pre-decrement value was 1 (`tr::view::detail::ref_count_t`,
-`core/include/libtracer/segment.hpp:54-56`; the clone and release sites are
-`segment_ptr_t`'s copy constructor and `reset`, `segment.hpp:140` and `:153`). Relaxed
+`core/include/libtracer/segment.hpp:return count_.fetch_sub(1, std::memory_order_acq_rel)`; the clone and release sites are
+`segment_ptr_t`'s copy constructor and `reset`, `segment.hpp:if (seg_) seg_->refcount.inc_relaxed()` and `segment.hpp:segment_ptr_t::reset`). Relaxed
 on the increment is sound because a clone is always made from a reference the caller
 already holds; the acq_rel decrement is what orders the last writer's stores before the
 destructor reads them. A `LIBTRACER_NO_ATOMIC` build substitutes a plain counter with
-the same call shape (`segment.hpp:46-49`).
+the same call shape (`segment.hpp:void inc_relaxed() noexcept { ++count_; }`).
 
 ## Interface
 
@@ -48,7 +48,7 @@ struct view_t {                                          // view.hpp
 };
 
 /** Own a copy of borrowed bytes as a view_t; nullopt == allocation failure. */
-std::optional<view_t> over_bytes(std::span<const std::byte>) noexcept;  // mem_heap.hpp:472
+std::optional<view_t> over_bytes(std::span<const std::byte>) noexcept;  // mem_heap.hpp
 std::optional<view_t> over_bytes(std::span<const std::byte>, mem::mem_backend_t&) noexcept; // :375
 
 class rope_t {                                           // rope.hpp — ordered chain of views
@@ -69,7 +69,7 @@ class rope_t {                                           // rope.hpp — ordered
 }  // namespace tr::view
 
 std::expected<tlv_t, err_t> tr::wire::decode(const view_t&, block_source_t& = heap_source());
-                                                               // the L1 → L2 cast  frame.hpp:221
+                                                               // the L1 → L2 cast  frame.hpp
 ```
 
 ## Rope = one message, many buffers
@@ -86,16 +86,16 @@ flowchart LR
 ```
 
 A rope holds its first two links in small-buffer storage (`kInline = 2`,
-`core/include/libtracer/rope.hpp:439`); the third link spills the whole chain to the
-heap, which is the chain's only allocation (`rope_t::append`, `rope.hpp:76-91`).
+`core/include/libtracer/rope.hpp:rope_t::kInline`); the third link spills the whole chain to the
+heap, which is the chain's only allocation (`rope_t::append`, `rope.hpp:rope_t::append`).
 
 ## Owning a copy of borrowed bytes
 
 Bytes handed up by a transport are borrowed: they live in a connection buffer that is
 reused as soon as the callback returns. Keeping them means owning a copy, and the
 canonical way to take one is `tr::view::over_bytes`
-(`core/include/libtracer/mem_heap.hpp:472`) — one call in place of the
-`heap_alloc` + `memcpy` + `view_t::over` triplet. A second overload (`:509`) takes the
+(`core/include/libtracer/mem_heap.hpp:over_bytes(std::span<const std::byte> bytes)`) — one call in place of the
+`heap_alloc` + `memcpy` + `view_t::over` triplet. A second overload (`core/include/libtracer/mem_heap.hpp:over_bytes(std::span<const std::byte> bytes,`) takes the
 backend to draw from, which is what a peer-driven ownership copy uses so the copy lands in
 the node's injected seam rather than the global heap.
 
@@ -119,7 +119,7 @@ The `std::optional` return exists to separate two outcomes that a bare `view_t` 
 The same call — in its seam-taking overload, drawing from the transport's injected
 backend rather than the global heap — is what the RFC 6455 fragment assembler uses to turn
 each borrowed fragment into an owning link before chaining it (`ws_assembler_t::on_data`,
-`core/src/transport_ws.cpp:118`), so the copy out of the connection buffer is the one
+`core/src/transport_ws.cpp:ws_assembler_t::on_data`), so the copy out of the connection buffer is the one
 legitimate substrate-boundary copy and the chaining that follows is pointer-linking.
 
 ## Consequences
@@ -144,25 +144,25 @@ legitimate substrate-boundary copy and the chaining that follows is pointer-link
 ## Pitfalls
 
 **`only()` is valid only on a single-link rope.** The precondition is `link_count() == 1`
-and it is *debug-asserted* (`rope_t::only`, `core/include/libtracer/rope.hpp:210-216`).
+and it is *debug-asserted* (`rope_t::only`, `core/include/libtracer/rope.hpp:rope_t::only`).
 With `NDEBUG` the assert is compiled out and `only()` returns the first link, so a
 multi-link value is read as if the first buffer were the whole message — a silent
 truncation, not a diagnostic. This is invisible on a purely local graph, where every
 value is one segment, and appears the moment a real transport is attached: every
 transport whose `transport_t::delivers_ropes()` returns true
-(`core/include/libtracer/transport.hpp:736`; TCP, UDP, WS, QUIC, WebTransport and CAN
+(`core/include/libtracer/transport.hpp:transport_t::delivers_ropes`; TCP, UDP, WS, QUIC, WebTransport and CAN
 all override it) can hand up a chain. A CAN reassembly group chains one link per slice
-(`can_reassembly_t::assemble`, `core/include/libtracer/can_reassembly.hpp:191-199`), and
+(`can_reassembly_t::assemble`, `core/include/libtracer/can_reassembly.hpp:can_reassembly_t::assemble`), and
 a fragmented WebSocket message chains one link per fragment
-(`ws_assembler_t::on_data`, `core/src/transport_ws.cpp:86-129`). A consumer that cannot
-promise contiguity calls `materialize()` (`rope.hpp:231`) instead — zero copy when the
+(`ws_assembler_t::on_data`, `core/src/transport_ws.cpp:ws_assembler_t::on_data`). A consumer that cannot
+promise contiguity calls `materialize()` (`rope.hpp:rope_t::materialize`) instead — zero copy when the
 rope happens to be single-link, one `flatten` copy otherwise. `only()` is the right call
 only where the surrounding code has already established that the rope is one link.
 
 **`to_iovec()` allocates and can throw.** It `reserve`s a span table per call, which
 under `-fno-exceptions` turns an out-of-memory into `abort()`. Egress paths that build
 this table per send use `try_to_iovec(out)`, which probes the exact allocation first and
-returns `false` instead, leaving `out` empty (`rope.hpp:313-346`). ⚠️ The probe is not a hard
+returns `false` instead, leaving `out` empty (`rope.hpp:rope_t::to_iovec`). ⚠️ The probe is not a hard
 nothrow guarantee: `tr::detail::try_reserve` frees its probe block and *then* runs the
 throwing `reserve`, so on a multi-threaded node a racing allocation between the two can still
 abort ([#850](https://github.com/avatarsd-llc/libtracer/issues/850)); the header qualifies its
