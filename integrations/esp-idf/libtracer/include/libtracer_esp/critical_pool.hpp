@@ -8,7 +8,7 @@
  *
  * ADR-0060 §2 names two synchronisation mechanisms for a shared `mem_backend_t`: a
  * spinlock for a multi-core host, an interrupt-disable critical section for a single-core
- * priority-preemptive target. The host `tr::graph::mutex_guard_t` is the first; this is the
+ * priority-preemptive target. The host `tr::mutex_guard_t` is the first; this is the
  * second.
  * On a single-core MCU the spinlock is the WRONG one — a lower-priority task holding it
  * cannot run while a higher-priority task spins on it (unbounded priority inversion),

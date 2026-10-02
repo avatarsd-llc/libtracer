@@ -19,7 +19,7 @@
  *   rx=pool-shared      ONE `pool_source_t<sync_mutex_t>` behind every child — the shape
  *                       §3 forbids. If the erratum's signature reproduces here, the ADR
  *                       owns its evidence instead of borrowing it.
- *   rx=pool-per-child   what #623 ships: one `pool_source_t<sync_none_t>` per child, so
+ *   rx=pool-per-child   what #623 ships: one `pool_source_t<tr::no_guard_t>` per child, so
  *                       no two receive threads touch the same allocator cacheline.
  *
  * Total slab bytes are held EQUAL across the two pool configurations (the shared pool gets
@@ -218,7 +218,7 @@ struct lane_t {
     tr::view::rope_t frame;
     std::vector<std::byte> slab;
     std::vector<tr::mem::size_class_t> classes;
-    std::unique_ptr<tr::mem::pool_source_t<tr::mem::sync_none_t>> pool;
+    std::unique_ptr<tr::mem::pool_source_t<tr::no_guard_t>> pool;
 };
 
 std::atomic<std::uint64_t> g_sink{0};
@@ -259,8 +259,8 @@ bool run_point(topo_t topo, std::size_t T) {
         if (topo == topo_t::POOL_PER_CHILD) {
             lane->slab.resize(kSlabPerChild);
             lane->classes.resize(kClassSlots);
-            lane->pool = std::make_unique<tr::mem::pool_source_t<tr::mem::sync_none_t>>(
-                lane->slab, lane->classes);
+            lane->pool =
+                std::make_unique<tr::mem::pool_source_t<tr::no_guard_t>>(lane->slab, lane->classes);
             rx = lane->pool.get();
         }
         router.add_child(in_name, lane->in, rx);

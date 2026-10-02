@@ -44,7 +44,7 @@ verbatim from that file, so it cannot drift from what actually compiles.
 | [`subrope` and the iovec egress](view-rope-subrope.md) | L1 views | a sub-range starting mid-link; `walk()`; `try_to_iovec` vs `to_iovec` |
 | [A bounded backend](view-pool-backend.md) | L0/L1 substrate | a caller-owned slab; exhaustion by value; `NO_MEMORY` is transient |
 | [A `DEVICE` link](view-device-rope.md) | L0/L1 substrate | a heterogeneous rope; `NOT_HOST` is permanent; `mem::transfer` declines |
-| [A shared seam needs a thread-safe backend](view-sync-pool.md) | L0/L1 substrate | ADR-0060 §2 `synchronized_pool_t<>` over the build's one `reader_guard_t` |
+| [A shared seam needs a thread-safe backend](view-sync-pool.md) | L0/L1 substrate | ADR-0060 §2 `synchronized_pool_t<>` over the build's one `guard_t` |
 | [The failable block seam](mem-block-source.md) | L0 substrate | nothrow `try_alloc`, sized `release`, `nullptr` on exhaustion; writing one |
 | [Two L0 seams, and the question that picks](mem-source-vs-backend.md) | L0 substrate | refcounted `segment_t` vs single-owner block — the owner count decides |
 | [A bump source](mem-bump-source.md) | L0 substrate | a cursor over a caller buffer; `release` is a no-op, `reset()` is not |
@@ -145,7 +145,7 @@ CMake option, so neither CMake nor ctest can label that case; the binary announc
 value on its first line, and that line is the only place the distinction is visible.
 ([`view_sync_pool`](view-sync-pool) used to be a third: it bound a spin-waiting critical section
 that a `kSpinWaitSafe = false` target could not instantiate. Since RFC-0028 slice 10 it binds the
-build's one `reader_guard_t`, which never pure-spins, so it runs unconditionally.)
+build's one `guard_t`, which never pure-spins, so it runs unconditionally.)
 
 [`net_multi_peer_listener`](net-multi-peer-listener) is the other, and it is the one that fixes
 that. Its subject is the ADR-0044 peer-named tier, which `kBusLinks` carries only on a build

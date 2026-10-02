@@ -121,7 +121,7 @@ Two bindings ship:
 
 | binding | mechanism | regime (reference §3) |
 | --- | --- | --- |
-| `single_writer_slot_t` (default) | a `shared_ptr` swapped and copied inside `reader_guard_t` | **(a)** on a single core (an interrupt-masked section); one of 64 address-striped mutexes on a host |
+| `single_writer_slot_t` (default) | a `shared_ptr` swapped and copied inside `guard_t` | **(a)** on a single core (an interrupt-masked section); one of 64 address-striped mutexes on a host |
 | `hazard_slot_t` (host opt-in) | lock-free `atomic<node*>` + a hazard-pointer domain | **(b)** — one contended RMW for the promotion |
 
 The refcount slot `sp_atomic_slot_t` (`std::atomic<std::shared_ptr<const rope_t>>`, regime

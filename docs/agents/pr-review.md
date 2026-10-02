@@ -239,6 +239,9 @@ one). That is the only legitimate `tr::view` hit inside `tr::mem`.
 `segment_ptr_t` is **not** a boundary type, which is why the handle-producing
 helpers (`heap_alloc`, `borrow`, `borrow_const`) live in `tr::view`. A new
 handle-returning function placed in `tr::mem` is this rule's failure mode.
+The layer-neutral bare-`tr` primitives (`sink_slot_t`, and the guard vocabulary
+in `guard.hpp` / `guard_mutex.hpp`) and the `tr::mem` knobs derived from
+`tr::graph::config_t` (ADR-0070) are not violations; `core/STYLE.md` lists them.
 
 **Hard rule 2 — a code sub-namespace never uses an error-concept word.** The
 eight words `frame`, `tlv`, `path`, `schema`, `flow`, `access`, `transport` and

@@ -29,14 +29,31 @@
 #include <cstddef>
 #include <cstdint>
 
+namespace tr {
+
+struct mutex_guard_t;  // guard_mutex.hpp — the host guard: address-striped locks (hosted)
+struct no_guard_t;     // guard.hpp — guards nothing; single-threaded builds only
+
+}  // namespace tr
+
 namespace tr::graph {
+
+/**
+ * @brief Deprecated alias of @ref tr::mutex_guard_t, kept for one release (#1703).
+ * Deprecated: The guard vocabulary moved to the layer-neutral `tr` namespace; name
+ *             `tr::mutex_guard_t`.
+ */
+using mutex_guard_t = ::tr::mutex_guard_t;
+/**
+ * @brief Deprecated alias of @ref tr::no_guard_t, kept for one release (#1703).
+ * Deprecated: Name `tr::no_guard_t`.
+ */
+using no_guard_t = ::tr::no_guard_t;
 
 struct allow_only_policy_t;  // security_acl.hpp — the ALLOW-only MCU profile (ADR-0020 subset)
 struct full_acl_policy_t;    // security_acl.hpp — ordered first-match-per-bit with DENY
 class hazard_slot_t;         // lkv_slot.hpp — lock-free atomic<node*>; hazard-pointer reclamation
-class single_writer_slot_t;  // lkv_slot.hpp — one value_t* swapped inside reader_guard_t; no spin
-struct mutex_guard_t;        // reader_guard.hpp — the host guard: address-striped locks
-struct no_guard_t;           // reader_guard.hpp — guards nothing; single-threaded builds only
+class single_writer_slot_t;  // lkv_slot.hpp — one value_t* swapped inside guard_t; no spin
 struct reclaim_strict_t;     // reclaim.hpp — grace point: `unsubscribe()` returns
 struct reclaim_local_t;      // reclaim.hpp — grace point: this thread's dispatch stack unwinds
 struct reclaim_qsbr_t;  // reclaim.hpp — grace point: EVERY thread has passed a quiescent state
@@ -68,7 +85,7 @@ struct reclaim_qsbr_t;  // reclaim.hpp — grace point: EVERY thread has passed 
  * struct my_node_config_t : default_config_t {
  *     static constexpr std::size_t kCacheLineBytes = 0;  // single-core: no false sharing
  *     static constexpr bool kSingleWriter = true;
- *     using reader_guard_t = my_rtos_critical_section_t;
+ *     using guard_t = my_rtos_critical_section_t;
  * };
  * using config_t = my_node_config_t;
  * }  // namespace tr::graph
@@ -288,9 +305,14 @@ struct default_config_t {
      *
      * One trait, not two: before slice 10 the pool had its own `pool_sync_policy` vocabulary
      * (`spin_sync_t` / `portmux_sync_t`), bound separately from this one. It must model
-     * `tr::graph::reader_guard` (`%reader_guard.hpp`): `lock()` / `unlock()`, a static
-     * `for_address(const void*)` the slot takes, and the `is_isr_safe` / `is_nonblocking` /
-     * `may_spin` / `name` traits.
+     * `tr::guard` (`%guard.hpp`): `lock()` / `unlock()`, a static `for_address(const void*)`
+     * the slot takes, and the `is_isr_safe` / `is_nonblocking` / `may_spin` / `name` traits.
+     * It also serializes the write-sequence bump on a core with no atomic read-modify-write
+     * (`tr::rmw_counter_t`).
+     *
+     * Spelled `reader_guard_t` until #1703. A fragment that still defines that name is refused
+     * at compile time (see the tripwire after @ref config_t), because a fragment whose binding
+     * the library no longer reads would fall back to `mutex_guard_t` without a word.
      *
      * `mutex_guard_t` by default: a table of address-striped one-word locks — one RMW to take,
      * a release store to give back — whose contender re-reads briefly and then sleeps instead
@@ -300,13 +322,13 @@ struct default_config_t {
      * `false` — that is the whole of #1618 — and a guard that declares `may_spin` is refused
      * there by both the slot and the pool.
      */
-    using reader_guard_t = mutex_guard_t;
+    using guard_t = ::tr::mutex_guard_t;
 
     /**
      * @brief The target's selected LKV slot policy (ADR-0069 §1).
      *
      * How a vertex publishes and reads its last-known value. Default: `single_writer_slot_t`,
-     * one `value_t*` swapped and retained inside @ref reader_guard_t. It has no registry, no
+     * one `value_t*` swapped and retained inside @ref guard_t. It has no registry, no
      * deferred reclamation and a publish that cannot fail, and its one wait is the guard (#1618).
      *
      * `hazard_slot_t` is the lock-free alternative for a host whose reads of one shared vertex
@@ -703,6 +725,23 @@ namespace tr::graph {
 using config_t = default_config_t;
 #endif
 
+/**
+ * @brief Whether the configuration @p C still defines the pre-#1703 member `reader_guard_t`.
+ *
+ * The tripwire's predicate. `default_config_t` no longer defines it, so only a stale override
+ * fragment can.
+ */
+template <class C>
+concept defines_reader_guard_member = requires { typename C::reader_guard_t; };
+
+// The rename tripwire (#1703). A fragment written before the rename binds `reader_guard_t`,
+// which nothing reads any more, so the build would silently keep the host `mutex_guard_t` —
+// and on a dual-core chip with a lock-free bool no other assertion catches that. Refuse it.
+static_assert(!defines_reader_guard_member<config_t>,
+              "config_t defines reader_guard_t, which libtracer no longer reads: the member was "
+              "renamed to guard_t (#1703). In your libtracer/config_override.hpp, rename "
+              "`using reader_guard_t = ...;` to `using guard_t = ...;`.");
+
 // ---------------------------------------------------------------------------------------------
 // Derived spellings. These are what the rest of the library and its consumers actually name;
 // they exist so that introducing @ref config_t moved no call site. Each is exactly its traits
@@ -730,8 +769,14 @@ using acl_policy_t = config_t::acl_policy_t;
 inline constexpr bool kSingleWriter = config_t::kSingleWriter;
 /** @brief @ref default_config_t::kInstrumentCounters for this build. */
 inline constexpr bool kInstrumentCounters = config_t::kInstrumentCounters;
-/** @brief @ref default_config_t::reader_guard_t for this build. */
-using reader_guard_t = config_t::reader_guard_t;
+/** @brief @ref default_config_t::guard_t for this build. */
+using guard_t = config_t::guard_t;
+/**
+ * @brief Deprecated alias of @ref guard_t, kept for one release (#1703).
+ * Deprecated: Name `tr::graph::guard_t`. (The config MEMBER of that name is not aliased: a
+ *             fragment that defines it is refused, above.)
+ */
+using reader_guard_t = guard_t;
 /** @brief @ref default_config_t::lkv_slot_t for this build. */
 using lkv_slot_t = config_t::lkv_slot_t;
 /** @brief @ref default_config_t::reclaim_policy_t for this build. */

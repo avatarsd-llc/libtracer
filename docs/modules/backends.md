@@ -40,11 +40,11 @@ it — a `DEVICE`-space backend plugs in by **registering a transfer hook** ([be
 into fixed slots with the free list threaded *through the slab* (no auxiliary
 heap), and returns `nullptr` when full — the BACKPRESSURE signal. `pool_t` is not
 synchronized; `synchronized_pool_t<Sync>` (`core/include/libtracer/mem_pool.hpp:synchronized_pool_t`)
-composes over it and guards the free list with a **compile-time reader guard**, which is
+composes over it and guards the free list with a **compile-time guard**, which is
 what any shared seam needs — a segment self-routes its reclaim on whatever thread drops the
 last reference, concurrent with a writer's `alloc`. Since RFC-0028 slice 10 the guard is the
-SAME `reader_guard` trait the last-known-value slot uses, and `synchronized_pool_t<>` binds
-the build's one `tr::graph::reader_guard_t`: the host `mutex_guard_t` (a bounded spin, then a
+SAME `tr::guard` trait the last-known-value slot uses, and `synchronized_pool_t<>` binds
+the build's one `tr::graph::guard_t`: the host `tr::mutex_guard_t` (a bounded spin, then a
 nap) or, on ESP-IDF, the interrupt-masked `tr::esp::critical_guard_t`
 (`integrations/esp-idf/libtracer/include/libtracer_esp/critical_guard.hpp`; the pool spelling
 is `tr::esp::critical_pool_t` — it needs FreeRTOS headers, so it ships with the ESP-IDF
@@ -171,8 +171,7 @@ signal — so it delivers **placement and bounding**, and the by-value refusal c
 :members:
 ```
 
-```{doxygenstruct} tr::mem::sync_none_t
-:members:
+```{doxygentypedef} tr::mem::sync_none_t
 ```
 
 ```{doxygenclass} tr::mem::block_array_t
@@ -217,22 +216,37 @@ The bounded reference backend:
 
 A pool shared by more than one thread needs a guard, and the guard is a compile-time
 parameter rather than a runtime flag so a single-threaded target pays nothing for it.
-`synchronized_pool_t<Sync>` takes any `tr::graph::reader_guard` (the one trait the LKV slot
-reads too, RFC-0028 §5.6) and defaults to the build's `reader_guard_t`, so
+`synchronized_pool_t<Sync>` takes any `tr::guard` (the one trait the LKV slot
+reads too, RFC-0028 §5.6) and defaults to the build's `guard_t`, so
 `synchronized_pool_t<>` is the spelling for the common case on every target. A guard that
 declares `may_spin` is refused at the instantiation on a build that sets
 `kSpinWaitSafe = false`.
 
-The `pool_source_t` seam has its own policy question, and one deliberate
-non-answer: `sync_mutex_t` lives in a separate header because the L0 seam is
+The guard vocabulary lives in the layer-neutral `tr` namespace (#1703), because the memory
+layer and the graph layer both bind it: `libtracer/guard.hpp` is freestanding (the
+`tr::lockable` and `tr::guard` concepts, `tr::no_guard_t`, `tr::guard_scope_t` and
+`tr::rmw_counter_t`), and `libtracer/guard_mutex.hpp` holds the hosted `tr::mutex_guard_t`.
+The `tr::graph` spellings and `tr::mem::sync_none_t` are aliases for one release.
+
+The `pool_source_t` seam takes any `tr::lockable`, defaulting to `tr::no_guard_t`, and has one
+deliberate non-answer: `sync_mutex_t` lives in a separate header because the L0 seam is
 compiled into a freestanding footprint sentinel where `<mutex>` does not exist,
 and because a mutex is the right instrument only for a source shared at *wiring*
 frequency. It is not a way to make a per-frame source thread-safe — see
 [failable allocation and backpressure](../design/allocation-and-backpressure.md)
 for what a shared free list costs under contention.
 
-```{doxygenconcept} tr::graph::reader_guard
+```{doxygenconcept} tr::guard
 :project: libtracer
+```
+
+```{doxygenconcept} tr::lockable
+:project: libtracer
+```
+
+```{doxygenclass} tr::rmw_counter_t
+:project: libtracer
+:members:
 ```
 
 ```{doxygenclass} tr::mem::synchronized_pool_t

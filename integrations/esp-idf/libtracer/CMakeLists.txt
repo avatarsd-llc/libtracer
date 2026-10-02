@@ -331,7 +331,7 @@ else()
     set(LIBTRACER_SLOT_INCLUDE "#include \"libtracer_esp/critical_guard.hpp\"\n")
     set(LIBTRACER_SLOT_BINDING
 "    static constexpr bool kSingleWriter = true;
-    using reader_guard_t = tr::esp::critical_guard_t;
+    using guard_t = tr::esp::critical_guard_t;
     using lkv_slot_t = single_writer_slot_t;
 ")
 endif()

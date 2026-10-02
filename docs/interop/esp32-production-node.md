@@ -119,7 +119,7 @@ and count with no lock and no atomic, so two threads can be handed the same slot
 stored value aliases onto an outbound frame.
 
 The synchronised pool this target needs **is built**:
-`synchronized_pool_t<Sync>` (`core/include/libtracer/mem_pool.hpp:160`) keeps `pool_t`'s
+`synchronized_pool_t<Sync>` (`core/include/libtracer/mem_pool.hpp:161`) keeps `pool_t`'s
 bounded slab and makes the critical section a compile-time policy, chosen as an
 [ADR-0047 — build-time closed module sets](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0047-build-time-closed-module-sets-compile-time-seams.md)
 §2 module-set trait, because the target knows its concurrency model at build time
@@ -167,7 +167,7 @@ then refuses every frame. An 8 KiB bump source wired as a router's `rx`, decodin
 53-byte FWD, served **six frames and rejected the next 194**
 ([ADR-0067 — bounded recycling source](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0067-bounded-recycling-source-and-per-owner-topology.md)
 §1; the same figure is carried on the type at
-`core/include/libtracer/mem_source.hpp:362-363`). A frames-served count without the
+`core/include/libtracer/mem_source.hpp:364-365`). A frames-served count without the
 payload size is not a measurement — 194 rejected 53-byte frames is a different fact
 from 194 rejected 1 KiB frames.
 
@@ -175,7 +175,7 @@ Use `tr::mem::pool_source_t`, which recycles.
 :::
 
 `pool_source_t` takes the slab **and** a caller-owned span of `size_class_t` slots
-(`core/include/libtracer/mem_source.hpp:567`), so both bounds belong to the caller
+(`core/include/libtracer/mem_source.hpp:568`), so both bounds belong to the caller
 rather than to the library
 ([RFC-0006 — resource-bounded nesting depth](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0006-resource-bounded-nesting-depth.md)):
 
@@ -210,11 +210,11 @@ A source shared at **wiring** frequency — a graph's `ctl`, or the router's
 qualifies on its own terms rather than by analogy: it allocates only when a flow is
 set up, and the per-delivery `COMPACT` leg finds the label already bound and reaches
 no allocator. The policy is the `pool_source_t<Sync>` template parameter, defaulting
-to `sync_none_t`, which compiles to nothing.
+to `tr::no_guard_t`, which compiles to nothing.
 :::
 
 After a soak run, `classes_used()` says how many slots the node really needed and
-`overflowed()` must read zero (`core/include/libtracer/mem_source.hpp:629,640`) — a
+`overflowed()` must read zero (`core/include/libtracer/mem_source.hpp:630,641`) — a
 non-zero count means the class span is too small and blocks are being lost to the
 slab.
 
@@ -294,8 +294,8 @@ replaces, not by shaving the core.
   mutable buffer libtracer links: `N * sizeof(vertex_stripe_t)` bytes of `.bss`
   reserved at link time, plus the same for the condvar table. Sixteen stripes suit a
   multi-core host — that is the default (`kVertexLockStripes = 16`,
-  `core/include/libtracer/config.hpp:95`) — while a single-core chip reclaims RAM at
-  **4–8** (`config.hpp:85`). A stripe's platform mutex is lazy: on FreeRTOS it
+  `core/include/libtracer/config.hpp:112`) — while a single-core chip reclaims RAM at
+  **4–8** (`config.hpp:102`). A stripe's platform mutex is lazy: on FreeRTOS it
   costs ~90 B of heap on its first lock, so an untouched stripe costs its struct and
   no heap.
 - **Pin task priorities deliberately**: transport RX threads just below the

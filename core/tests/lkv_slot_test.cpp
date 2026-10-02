@@ -114,7 +114,7 @@ struct counting_guard_t {
         --t_guard_depth;
         m_.unlock();
     }
-    /** @brief The `reader_guard` lookup: the one mutex every test slot shares. */
+    /** @brief The `tr::guard` lookup: the one mutex every test slot shares. */
     static counting_guard_t& for_address(const void*) noexcept {
         static counting_guard_t g;
         return g;
@@ -769,7 +769,7 @@ void host_guard_excludes(std::size_t threads, std::size_t sections) {
     for (std::size_t t = 0; t < threads; ++t) {
         pool.emplace_back([&] {
             for (std::size_t i = 0; i < sections; ++i) {
-                const tr::graph::guard_scope_t<tr::graph::mutex_guard_t> g{&anchor};
+                const tr::guard_scope_t<tr::mutex_guard_t> g{&anchor};
                 if (inside.fetch_add(1, std::memory_order_acq_rel) != 0)
                     overlaps.fetch_add(1, relaxed_);
                 ++total;

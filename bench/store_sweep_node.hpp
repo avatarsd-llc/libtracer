@@ -379,10 +379,10 @@ struct stores_t {
     std::unique_ptr<tr::mem::pool_source_t<tr::mem::sync_mutex_t>> graph;
     /** @brief MID's net-plane store, shared by every child's rx and every link's egress. */
     std::unique_ptr<tr::mem::pool_source_t<tr::mem::sync_mutex_t>> net;
-    /** @brief NARROW's per-child rx stores — one thread each, so `sync_none_t`. */
-    std::vector<std::unique_ptr<tr::mem::pool_source_t<tr::mem::sync_none_t>>> lane_rx;
-    /** @brief NARROW's per-link egress stores — one sending thread each, so `sync_none_t`. */
-    std::vector<std::unique_ptr<tr::mem::pool_source_t<tr::mem::sync_none_t>>> lane_tx;
+    /** @brief NARROW's per-child rx stores — one thread each, so `tr::no_guard_t`. */
+    std::vector<std::unique_ptr<tr::mem::pool_source_t<tr::no_guard_t>>> lane_rx;
+    /** @brief NARROW's per-link egress stores — one sending thread each, so `tr::no_guard_t`. */
+    std::vector<std::unique_ptr<tr::mem::pool_source_t<tr::no_guard_t>>> lane_tx;
 
     /** @brief Optional counting decorators, one per channel — `hwm` and `calibrate` only.
      *
@@ -610,12 +610,10 @@ class node_t {
                 st_.lane_tx_slab[i].resize(budget_t::kNetPerLane);
                 st_.lane_rx_cls[i].resize(budget_t::kLaneClasses);
                 st_.lane_tx_cls[i].resize(budget_t::kLaneClasses);
-                st_.lane_rx.push_back(
-                    std::make_unique<tr::mem::pool_source_t<tr::mem::sync_none_t>>(
-                        st_.lane_rx_slab[i], st_.lane_rx_cls[i]));
-                st_.lane_tx.push_back(
-                    std::make_unique<tr::mem::pool_source_t<tr::mem::sync_none_t>>(
-                        st_.lane_tx_slab[i], st_.lane_tx_cls[i]));
+                st_.lane_rx.push_back(std::make_unique<tr::mem::pool_source_t<tr::no_guard_t>>(
+                    st_.lane_rx_slab[i], st_.lane_rx_cls[i]));
+                st_.lane_tx.push_back(std::make_unique<tr::mem::pool_source_t<tr::no_guard_t>>(
+                    st_.lane_tx_slab[i], st_.lane_tx_cls[i]));
             }
         }
 

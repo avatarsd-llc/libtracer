@@ -1,13 +1,13 @@
 /**
  * @file
- * @brief `tr::esp::critical_guard_t` — the interrupt-masked reader guard the single-writer LKV
+ * @brief `tr::esp::critical_guard_t` — the interrupt-masked guard the single-writer LKV
  *        slot opens on an ESP-IDF chip (#1618, RFC 0028 §5.5).
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
  * `tr::graph::single_writer_slot_t` swaps its `value_t*` on publish and retains it on read
- * inside `config_t::reader_guard_t`, and `tr::mem::synchronized_pool_t` edits its free list
+ * inside `config_t::guard_t`, and `tr::mem::synchronized_pool_t` edits its free list
  * inside the same type. This component's generated override fragment binds that
  * guard to this type on every chip target. A critical section cannot be preempted, so a
  * high-priority reader can never catch a low-priority writer half-way through the swap and wait
@@ -31,7 +31,7 @@ namespace tr::esp {
  * @brief The interrupt-masked critical section — the ONE guard an ESP-IDF chip binds for both
  *        the LKV slot and the fixed-slot pool (RFC 0028 §5.5, slice 10).
  *
- * A lock object over its own portMUX, modelling `tr::graph::reader_guard`. Every LKV slot
+ * A lock object over its own portMUX, modelling `tr::guard`. Every LKV slot
  * shares the one instance @ref for_address returns; a `tr::mem::synchronized_pool_t` owns its
  * own (`tr::esp::critical_pool_t`). On a single-core chip the mux is only the critical-section
  * token; on a dual-core chip it is also the cross-core spinlock, taken with interrupts off on

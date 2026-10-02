@@ -25,7 +25,7 @@
 
 namespace {
 
-/** @brief A deliberately spinning guard: the `reader_guard` shape with `may_spin = true`. */
+/** @brief A deliberately spinning guard: the `tr::guard` shape with `may_spin = true`. */
 struct spinning_guard_t {
     static constexpr bool is_isr_safe = false;           /**< @brief Not an ISR section. */
     static constexpr bool is_nonblocking = true;         /**< @brief Spins, never sleeps. */
@@ -35,7 +35,7 @@ struct spinning_guard_t {
     void lock() noexcept {}
     /** @brief Spin out. */
     void unlock() noexcept {}
-    /** @brief The `reader_guard` lookup. */
+    /** @brief The `tr::guard` lookup. */
     static spinning_guard_t& for_address(const void*) noexcept {
         static spinning_guard_t g;
         return g;

@@ -37,14 +37,15 @@
 #include <thread>
 #include <vector>
 
+#include "libtracer/guard.hpp"
+#include "libtracer/guard_mutex.hpp"
 #include "libtracer/mem_pool.hpp"
-#include "libtracer/reader_guard.hpp"
 #include "libtracer/segment.hpp"
 #include "test_support.hpp"
 
 namespace {
 
-using tr::graph::mutex_guard_t;
+using tr::mutex_guard_t;
 using tr::mem::synchronized_pool_t;
 using tr::view::segment_ptr_t;
 using tr::view::segment_t;
@@ -52,9 +53,9 @@ using tr::view::segment_t;
 using tr::testing::check_quiet;
 
 /**
- * @brief A host reader guard that COUNTS its acquisitions — the instrument for check 1.
+ * @brief A host guard that COUNTS its acquisitions — the instrument for check 1.
  *
- * Wraps the shipped host guard (@ref tr::graph::mutex_guard_t) so the counted section is the
+ * Wraps the shipped host guard (@ref tr::mutex_guard_t) so the counted section is the
  * real one. Under `LIBTRACER_ABLATE_POOL_SYNC` the wrapped section is dropped and only
  * the counter remains: the pool is then a bare, unsynchronised `pool_t` behind the same
  * type, which is exactly the defect #770 reports at the receive seam.
@@ -80,7 +81,7 @@ struct counting_sync_t {
 #endif
     }
 
-    /** @brief The `reader_guard` lookup: one shared instance (each pool holds its own). */
+    /** @brief The `tr::guard` lookup: one shared instance (each pool holds its own). */
     static counting_sync_t& for_address(const void*) noexcept {
         static counting_sync_t shared;
         return shared;
@@ -90,8 +91,8 @@ struct counting_sync_t {
     mutex_guard_t inner_{};
 };
 
-static_assert(tr::graph::reader_guard<mutex_guard_t>, "the shipped host guard models the trait");
-static_assert(tr::graph::reader_guard<counting_sync_t>, "a user guard models the trait");
+static_assert(tr::guard<mutex_guard_t>, "the shipped host guard models the trait");
+static_assert(tr::guard<counting_sync_t>, "a user guard models the trait");
 /** The ISR-safety trait is the GUARD's fact, forwarded by the pool (ADR-0047 §2). */
 static_assert(synchronized_pool_t<mutex_guard_t>::is_isr_safe == mutex_guard_t::is_isr_safe,
               "the pool must publish its guard's ISR-safety, not its own guess");
