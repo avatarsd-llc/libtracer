@@ -100,7 +100,7 @@ is what `via('b', 'c')` builds in the driver.
 >
 > It also claimed *"the driver pins the implementation and asserts the documented form does
 > not resolve, so the docs cannot quietly become true without this going red."* The driver
-> does pin the implementation — `mesh-testbed.test.mjs:25-25` states the qualified rule and
+> does pin the implementation — `mesh-testbed.test.mjs:ADDRESSING: a connection's routing key IS its vertex path` states the qualified rule and
 > `:222` tests `/net/ws-client/b/node/name`. It pinned the **new** form while this file kept
 > describing the old one, so the guard was green and the doc was wrong at the same time. A
 > guard only protects the claim it actually checks.
@@ -159,15 +159,15 @@ client-side projection and dedup is the client's job, keyed by the identity face
 the architecture working as intended; it does not belong in a register of gaps.
 
 > One phantom outlives #406: `reference/07` describes a 128-bit `peer_id_t` with generation
-> rules, while `transport.hpp:46` declares `using peer_id_t = std::array<std::byte, 16>`
+> rules, while `transport.hpp:peer_id_t` declares `using peer_id_t = std::array<std::byte, 16>`
 > with no generation rules. #406 closed without reconciling it, and it is covered by neither
 > #599 nor #586 — tracked in [#606].
 
 ### 2. Teardown and link lifecycle — #407 / #66 (narrowed)
 
 - ~~**No reconnect anywhere.**~~ **Landed.** RFC-0014 §4 gave `transport_vertex.hpp` a
-  six-state `link_state_t` (`transport_vertex.hpp:115`) including `RECONNECTING`, plus
-  `backoff_ms` (`transport_vertex.hpp:170`) and `connect_timeout_ms` (`transport_vertex.hpp:174`).
+  six-state `link_state_t` (`transport_vertex.hpp:link_state_t`) including `RECONNECTING`, plus
+  `backoff_ms` (`transport_vertex.hpp:conn_settings_t::backoff_ms`) and `connect_timeout_ms` (`transport_vertex.hpp:conn_settings_t::connect_timeout_ms`).
 - **No child removal**, so a link cannot be recreated under the same name after a failure
   (`PATH_IN_USE`). Recovery needs a **new name** — a hard blocker for stable-identity
   reconnection, and the sharpest argument for #407.

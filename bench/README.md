@@ -79,7 +79,7 @@ stack header buffers + a stack `iov` array (no `std::vector`), views straight in
 untouched inbound frame.
 
 **What the gate does NOT cover.** It drives `capture_transport_t`, a stub link that only sums
-the span sizes it is handed (`bench_forward_heap.cpp:8-14`). Two terms sit outside the armed
+the span sizes it is handed (`bench_forward_heap.cpp:What this gate does NOT cover`). Two terms sit outside the armed
 window, so **"the forward hop is heap-free by construction" is false as stated**:
 
 - **The shipping transports' `::iovec` table.** `transport_udp.cpp` (`kMaxInlineIov = 16`) and
@@ -87,10 +87,10 @@ window, so **"the forward hop is heap-free by construction" is false as stated**
   spill to the heap above a fixed inline width. `bench_transport_iov` measures the boundary at
   **17 caller spans / ~288 B**; headroom from the structural `kFwdMaxIov` (9) is 8 regions, and
   a rope source may split any region further. The stub never runs that code, so `allocs=0` says
-  nothing about it (`core/src/transport_tcp.cpp:52-56`).
+  nothing about it (`core/src/transport_tcp.cpp:prefixed_iov_t`).
 - **The multi-link rope arm.** A rope source's sub-span count is the sender's choice and is
   known only at run time, so that arm gathers into a `mem::block_array_t` drawn from the
-  injected receive source (`core/src/fwd_router.cpp:2759`). Nothrow (ADR-0065 — exhaustion
+  injected receive source (`core/src/fwd_router.cpp:fwd_router_t::route_fwd_forward`). Nothrow (ADR-0065 — exhaustion
   drops the frame rather than aborting), but **not** allocation-free.
 
 Read `bench_forward_heap` and `bench_transport_iov` together; neither is sufficient alone.
@@ -1715,11 +1715,11 @@ craft libtracer":
 > `bridge_t` envelope, deleted with the bridge itself in
 > [ADR-0040](../docs/adr/0040-net-plane-is-explicit-source-routed-only.md) — the net plane is
 > explicit-source-routed `FWD` only. Neither mode is emitted today
-> (`bench_libtracer.cpp:16`, `:1504`); `bridge_t`, `router_wrap`, `router_unwrap`, `kMaxHops`,
+> (`bench_libtracer.cpp:inproc is the zero-copy graph dispatch`, `bench_libtracer.cpp:benchmarked the ROUTER-flood`); `bridge_t`, `router_wrap`, `router_unwrap`, `kMaxHops`,
 > `export_vertex` and `run_routers` survive in `core/` and `bench/` only inside comments
 > and `core/CHANGELOG.md`'s record of their removal — not one declaration, definition or
 > call of any of them is left (`grep -rn` over both trees, 2026-08-08), and the
-> two-process `bench_libtracer_net` was retired with them (`bench/CMakeLists.txt:54`). FWD
+> two-process `bench_libtracer_net` was retired with them (`bench/CMakeLists.txt:# bench_libtracer_net (two-process`). FWD
 > forward cost is now measured by `bench_forward_heap` + `bench_transport_iov` + the `fwd_*`
 > tests; multi-hop end-to-end delivery is the `net` harness.
 

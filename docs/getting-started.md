@@ -43,14 +43,14 @@ first build; the rest of the module set is enumerated in
 
 | option | default | what it selects |
 | --- | --- | --- |
-| `BUILD_TESTING` | unset (off) | compiles `core/tests` and registers the example programs as `example_*` smoke tests (`core/CMakeLists.txt:403`) |
-| `LIBTRACER_BUILD_EXAMPLES` | on when libtracer is the top-level project | compiles the seven programs under `core/examples/` (`core/CMakeLists.txt:417`) |
-| `LIBTRACER_NET_PLANE` | `ON` | the FWD routing plane — `op_resolve`, `route_handle`, `fwd_router_t`, `transport_vertex` (`core/CMakeLists.txt:67`) |
-| `LIBTRACER_WITH_QUIC` | `OFF` | configures the separate `libtracer_quic` target (QUIC and WebTransport); needs msquic installed (`core/CMakeLists.txt:310`) |
+| `BUILD_TESTING` | unset (off) | compiles `core/tests` and registers the example programs as `example_*` smoke tests (`core/CMakeLists.txt:if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING AND EXISTS`) |
+| `LIBTRACER_BUILD_EXAMPLES` | on when libtracer is the top-level project | compiles the seven programs under `core/examples/` (`core/CMakeLists.txt:option(LIBTRACER_BUILD_EXAMPLES`) |
+| `LIBTRACER_NET_PLANE` | `ON` | the FWD routing plane — `op_resolve`, `route_handle`, `fwd_router_t`, `transport_vertex` (`core/CMakeLists.txt:option(LIBTRACER_NET_PLANE`) |
+| `LIBTRACER_WITH_QUIC` | `OFF` | configures the separate `libtracer_quic` target (QUIC and WebTransport); needs msquic installed (`core/CMakeLists.txt:option(LIBTRACER_WITH_QUIC`) |
 
 Two of the seven examples — `two_node_fwd` and `tree_of_ropes` — are built and
 registered only under `LIBTRACER_NET_PLANE`, so `ctest -R example_` runs five of seven
-when the net plane is off (`core/examples/CMakeLists.txt:87-96`).
+when the net plane is off (`core/examples/CMakeLists.txt:if(BUILD_TESTING)`).
 
 Sizes and policy types — the axes that decide a node's static RAM — are a separate
 kind of knob from the module set, and they are not visible from the integrator's CMake
@@ -77,7 +77,7 @@ target_link_libraries(app PRIVATE libtracer::libtracer)
 ```
 
 The package version file is written with `COMPATIBILITY SameMinorVersion`
-(`core/CMakeLists.txt:392-395`): pre-1.0, a minor bump may break the C++ API, so a
+(`core/CMakeLists.txt:write_basic_package_version_file(`): pre-1.0, a minor bump may break the C++ API, so a
 request for one minor never silently accepts another. The repository version is
 `0.6.0`; asking for `0.3` against it fails to configure.
 
@@ -143,23 +143,23 @@ a runtime string uses the fallible `path_t::parse`. The infallible-register rule
 [ADR-0056](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0056-vertex-handle-infallible-register.md);
 a path whose collision is a genuine runtime outcome uses `try_register_vertex` instead.
 
-`tr::view::over_bytes` (`core/include/libtracer/mem_heap.hpp:472`) is the one audited
+`tr::view::over_bytes` (`core/include/libtracer/mem_heap.hpp:over_bytes(std::span<const std::byte> bytes)`) is the one audited
 place that turns a byte span into an owned `view_t`. A hand-rolled
 `heap_alloc` + `memcpy` + `view_t::over` triplet is the pattern it replaces, and it
 loses the allocation-failure signal that `std::optional` carries.
 
 **`read` returns a reference, not a copy.** `graph_t::read` and `graph_t::await` return
-`result_t<value_ref_t>` (`core/include/libtracer/graph.hpp:1632,1770`), so `(*got)` is a
+`result_t<value_ref_t>` (`core/include/libtracer/graph.hpp:graph_t::read(vertex_handle_t v, std::string_view caller`, `core/include/libtracer/graph.hpp:graph_t::await(vertex_handle_t v, std::chrono::nanoseconds`), so `(*got)` is a
 `value_ref_t` and `(*got)->…` reaches the referenced `rope_t`. The rule: *a read of a
 published value returns a reference to it; a read that composes a new value returns the
 value* — which is why `read_children_folded` and its siblings still return a `rope_t`.
 Under an injected `std::pmr::memory_resource` an outstanding `value_ref_t` **pins** the
-value it names (`core/include/libtracer/value.hpp:633-636`), so a long-lived reference
+value it names (`core/include/libtracer/value.hpp:value_ref_t`), so a long-lived reference
 holds the graph's memory; take the bytes and drop it.
 
 ```{note}
 `rope_t::only()` has a precondition — `link_count() == 1`, debug-asserted
-(`core/include/libtracer/rope.hpp:207-216`). It is the consumer's explicit "this value
+(`core/include/libtracer/rope.hpp:rope_t::only`). It is the consumer's explicit "this value
 is one segment", correct for a scalar written as above. A consumer that cannot promise
 contiguity calls `materialize()` instead, which returns the single link when there is
 one and pays a single flatten copy otherwise.
@@ -188,8 +188,8 @@ auto r = g.await(temp, std::chrono::seconds{2});
 The callback form is sugar over the primitive
 `subscribe(const path_t&, subscriber_fn_t fn, void* ctx)` with
 `subscriber_fn_t = void (*)(void*, const rope_t&)`
-(`core/include/libtracer/subscriber.hpp:160`). The sugar takes the callable as `F&`
-(`core/include/libtracer/graph.hpp:1994-1997`), so a temporary lambda written inline at
+(`core/include/libtracer/subscriber.hpp:subscriber_fn_t`). The sugar takes the callable as `F&`
+(`core/include/libtracer/graph.hpp:graph_t::subscribe(const path_t& src, F&`), so a temporary lambda written inline at
 the call site does not compile — and would dangle if it did. **Lifetime obligation:**
 the bound callable is the `ctx`, and `ctx` must outlive every possible delivery;
 `unsubscribe` only deactivates the edge slot, and a delivery already in flight

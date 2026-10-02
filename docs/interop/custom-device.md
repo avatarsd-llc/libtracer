@@ -139,12 +139,12 @@ none — and remains a conforming node that any forwarder routes and any peer re
 
 Creation is not a new verb. It is an **append of a `SPEC` TLV to a parent's
 `:children[]` field**, gated by that parent's `CREATE` right
-(`core/src/graph.cpp:3893-3897`;
+(`core/src/graph.cpp:if (field_selector(field) != field_sel_t::APPEND)`;
 [ADR-0020 — NFSv4-style ACEs with inheritance](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0020-acl-nfsv4-style-aces-with-inheritance.md)).
 The SPEC's `type` member names one of the device's registered child types and its
 optional `config` SETTINGS carries the instantiation parameters; an unregistered
 `type` answers `SCHEMA_NOT_FOUND`, the `ENOTTY` of an unsupported field
-(`graph_t::create_child`, `core/src/graph.cpp:3967-3994`). Reading `:children[]`
+(`graph_t::create_child`, `core/src/graph.cpp:graph_t::create_child`). Reading `:children[]`
 returns the parent's **members**, never SPECs.
 
 **The `/net` plane is the exception, and it is now a different door.** A connection is
@@ -155,12 +155,12 @@ returns the parent's **members**, never SPECs.
 the SPEC carries no `type` and no `role`
 ([RFC-0014 — creator endpoint: connection lifecycle and link liveness](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)).
 The `config` member `kind` selects which transport factory builds the link
-(`core/src/transport_vertex.cpp:57`, factories registered through
-`register_transport_type` at `:258`, catalogued at `:282`) and cross-checks the module's declaration. The
+(`core/src/transport_vertex.cpp:if (const auto v = cfg.name("kind"))`, factories registered through
+`register_transport_type` at `core/src/transport_vertex.cpp:transport_vertex_t::register_transport_type(std::string kind, transport_factory_t factory)`, catalogued at `core/src/transport_vertex.cpp:transport_types_.insert_or_assign(std::move(kind),`) and cross-checks the module's declaration. The
 created connection is mounted and routed at **`/net/<module>/<name>`**, where `module`
 is **declared by the application** through `register_module` — modules are declared-only
 (ADR-0073 §4); an undeclared `(kind, role)` pair fails creation with `SCHEMA_NOT_FOUND`
-(`core/src/transport_vertex.cpp:285`, refused at `:337`). One *(kind, role)*
+(`core/src/transport_vertex.cpp:transport_vertex_t::register_module`, refused at `core/src/transport_vertex.cpp:transport_vertex_t::module_for`). One *(kind, role)*
 pair is declared once: a second module claiming a pair another module already declared
 is refused `PATH_IN_USE` rather than silently renaming the first.
 
@@ -172,7 +172,7 @@ registered types, and `:children[]` as an enumeration is untouched on every plan
 
 Removal has no wire spelling on the `:children[]` surface: a `[N]` clear of `:children[]` is
 not implemented, and `graph_t::retire` is an owner-side call with no wire operation
-behind it (`core/include/libtracer/graph.hpp:910-914`). A connection is the exception:
+behind it (`core/include/libtracer/graph.hpp:graph_t::retire`). A connection is the exception:
 `NAME{<name>}` to its module's `conn` endpoint retires it, the other half of that one
 control. Retirement empties the
 vertex in place rather than freeing it — the handle stays dereferenceable and a

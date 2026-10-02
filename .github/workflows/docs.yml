@@ -107,17 +107,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: API docs gate (Doxygen, strict — undocumented public symbol fails)
         run: doxygen core/Doxyfile
-      # Doc-citation gate: every anchored `file:line` citation in the docs must still
-      # land on the line it names. Hand-maintained pointers rot silently — a stale
-      # citation still RESOLVES, reads authoritative, and sends the reader somewhere
-      # else, so nothing fails without this check.
+      # Doc-citation gate: every symbol citation in the docs must still name exactly one
+      # place in its file, and no living doc may cite by line number (#1705, #1706).
+      # Hand-maintained pointers rot silently — a stale citation still reads
+      # authoritative and sends the reader somewhere else, so nothing fails without this.
       #
       # The AUTHORITATIVE run is `doc-citations.yml`, whose path filter covers every tree
-      # an anchor can name — `core/src/**` and `integrations/**` are absent from THIS
-      # workflow's filter, so for most of the anchors this step never fires (#803). It is
+      # a citation can name — `core/src/**` and `integrations/**` are absent from THIS
+      # workflow's filter, so for most citations this step never fires (#803). It is
       # kept because it costs ~0.3 s inside a job that already runs for minutes, and it
       # fails the docs build itself rather than only a sibling check.
-      - name: Doc-citation gate (anchored file:line citations still resolve)
+      - name: Doc-citation gate (symbol citations resolve; no line-number citations)
         run: python3 tools/check_doc_citations.py
       # Auto-generate the Performance & Conformance page from the LIVE harnesses
       # (cross-core matrix + perf bench + coverage), replacing the static snapshot

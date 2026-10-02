@@ -82,7 +82,7 @@ one link carrying one compact flow — so the sizing above is a number to check 
 your own node rather than one to copy.
 
 Those all reach the ONE injection point of `graph_t`'s constructor
-(`core/include/libtracer/graph.hpp:796`): since
+(`core/include/libtracer/graph.hpp:graph_t::graph_t(mem::block_source_t&`): since
 [#873](https://github.com/avatarsd-llc/libtracer/issues/873) phase 1 the graph takes a single
 `tr::mem::block_source_t` and builds the pmr resource and the value backend over it internally,
 so a device recipe sizes one slab where it used to wire four arguments. Beside it are the
@@ -91,7 +91,7 @@ so a device recipe sizes one slab where it used to wire four arguments. Beside i
 failable `rx` source, the `flat` byte backend its rope flattens draw from, the
 `egress` byte backend the terminus reply head draws from, and the `retained`
 backend a remote SUBSCRIBE's two life-of-the-subscription allocations draw from
-(`core/include/libtracer/fwd_router.hpp:138-234`, the `router_planes_t` aggregate; `egress` is #795 / ADR-0074,
+(`core/include/libtracer/fwd_router.hpp:router_planes_t`, the `router_planes_t` aggregate; `egress` is #795 / ADR-0074,
 `retained` is #1610 and defaults to `flat` when un-injected, and the
 `max_label_bindings_per_link` bound sits between `flat` and `egress`).
 Each is its own injection because each one's live set is governed by a different
@@ -119,7 +119,7 @@ and count with no lock and no atomic, so two threads can be handed the same slot
 stored value aliases onto an outbound frame.
 
 The synchronised pool this target needs **is built**:
-`synchronized_pool_t<Sync>` (`core/include/libtracer/mem_pool.hpp:161`) keeps `pool_t`'s
+`synchronized_pool_t<Sync>` (`core/include/libtracer/mem_pool.hpp:synchronized_pool_t`) keeps `pool_t`'s
 bounded slab and makes the critical section a compile-time policy, chosen as an
 [ADR-0047 — build-time closed module sets](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0047-build-time-closed-module-sets-compile-time-seams.md)
 §2 module-set trait, because the target knows its concurrency model at build time
@@ -167,7 +167,7 @@ then refuses every frame. An 8 KiB bump source wired as a router's `rx`, decodin
 53-byte FWD, served **six frames and rejected the next 194**
 ([ADR-0067 — bounded recycling source](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0067-bounded-recycling-source-and-per-owner-topology.md)
 §1; the same figure is carried on the type at
-`core/include/libtracer/mem_source.hpp:364-365`). A frames-served count without the
+`core/include/libtracer/mem_source.hpp:bump_source_t`). A frames-served count without the
 payload size is not a measurement — 194 rejected 53-byte frames is a different fact
 from 194 rejected 1 KiB frames.
 
@@ -175,7 +175,7 @@ Use `tr::mem::pool_source_t`, which recycles.
 :::
 
 `pool_source_t` takes the slab **and** a caller-owned span of `size_class_t` slots
-(`core/include/libtracer/mem_source.hpp:568`), so both bounds belong to the caller
+(`core/include/libtracer/mem_source.hpp:pool_source_t::pool_source_t(std::span<std::byte>`), so both bounds belong to the caller
 rather than to the library
 ([RFC-0006 — resource-bounded nesting depth](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0006-resource-bounded-nesting-depth.md)):
 
@@ -214,7 +214,7 @@ to `tr::no_guard_t`, which compiles to nothing.
 :::
 
 After a soak run, `classes_used()` says how many slots the node really needed and
-`overflowed()` must read zero (`core/include/libtracer/mem_source.hpp:630,641`) — a
+`overflowed()` must read zero (`core/include/libtracer/mem_source.hpp:pool_source_t::classes_used`, `core/include/libtracer/mem_source.hpp:pool_source_t::overflowed`) — a
 non-zero count means the class span is too small and blocks are being lost to the
 slab.
 
@@ -235,8 +235,8 @@ Rules that follow:
   [failable allocation and backpressure](../design/allocation-and-backpressure.md).
 - **Size the pool from the transport, not from hope.** `udp_transport_t` sizes RX
   segments to `min(64 KiB, backend->max_segment_size())`
-  (`core/src/transport_udp.cpp:146`; `kMaxDatagram = 65536` at
-  `core/include/libtracer/transport_udp.hpp:92`). Give the pool MTU-sized slots and
+  (`core/src/transport_udp.cpp:const std::size_t rx_cap =`; `kMaxDatagram = 65536` at
+  `core/include/libtracer/transport_udp.hpp:udp_transport_t::kMaxDatagram`). Give the pool MTU-sized slots and
   datagrams arrive without a 64 KiB scratch buffer on a small thread stack.
 
 ## 2. Role composition and the transport RAM lever
@@ -266,12 +266,12 @@ So compose per deployment role, and load nothing else:
 
 Listeners are **config-created in-band**: a `SPEC{name, config}` write to the module's
 creator endpoint `/net/<module>/conn` creates a connection. The universal keys are
-`addr`, `kind`, `port`, `max_frame`, `backoff`, `connect_timeout` (`core/src/transport_vertex.cpp:54`, read at `:57`);
+`addr`, `kind`, `port`, `max_frame`, `backoff`, `connect_timeout` (`core/src/transport_vertex.cpp:parse_config`, read at `core/src/transport_vertex.cpp:if (const auto v = cfg.name("kind"))`);
 there is no `type` pair and no `role` key, because the module segment in the path fixes
 both the transport and the role. The created connection mounts and routes at
 `/net/<module>/<name>`, the module **declared by the application** via `register_module`
-(`:285`) — declared-only per ADR-0073 §4, so an undeclared `(kind, role)` pair fails
-creation with `SCHEMA_NOT_FOUND` (`:337`). This is the surface
+(`core/src/transport_vertex.cpp:transport_vertex_t::register_module`) — declared-only per ADR-0073 §4, so an undeclared `(kind, role)` pair fails
+creation with `SCHEMA_NOT_FOUND` (`core/src/transport_vertex.cpp:transport_vertex_t::module_for`). This is the surface
 [RFC-0014 — creator endpoint, connection lifecycle and link liveness](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)
 specifies, and it is the only one: the single global `/net:children[]` catalog it
 replaced was retired at S7, so a node built against this release writes
@@ -294,8 +294,8 @@ replaces, not by shaving the core.
   mutable buffer libtracer links: `N * sizeof(vertex_stripe_t)` bytes of `.bss`
   reserved at link time, plus the same for the condvar table. Sixteen stripes suit a
   multi-core host — that is the default (`kVertexLockStripes = 16`,
-  `core/include/libtracer/config.hpp:112`) — while a single-core chip reclaims RAM at
-  **4–8** (`config.hpp:102`). A stripe's platform mutex is lazy: on FreeRTOS it
+  `core/include/libtracer/config.hpp:default_config_t::kVertexLockStripes`) — while a single-core chip reclaims RAM at
+  **4–8** (`config.hpp:default_config_t::kVertexLockStripes`). A stripe's platform mutex is lazy: on FreeRTOS it
   costs ~90 B of heap on its first lock, so an untouched stripe costs its struct and
   no heap.
 - **Pin task priorities deliberately**: transport RX threads just below the
@@ -342,8 +342,8 @@ without the project-side symbol, the line is inert.
   fan-out payload did not fit. A session drop turns one slow subscriber into a
   reconnect storm.
 - **Egress is gather, not copy.** The rope-to-wire path lowers to an iovec `sendmsg`
-  (`core/src/posix_endpoint.cpp:294,181`; the TCP assembly is at
-  `core/src/transport_tcp.cpp:60-82`), and lwIP provides `sendmsg` unmodified. Do not
+  (`core/src/posix_endpoint.cpp:stream_endpoint_t::write_all_iov`, `core/src/posix_endpoint.cpp:return ::sendmsg(fd, msg, MSG_NOSIGNAL);`; the TCP assembly is at
+  `core/src/transport_tcp.cpp:prefixed_iov_t`), and lwIP provides `sendmsg` unmodified. Do not
   flatten payloads before send; the only legitimate flatten is a substrate boundary
   DMA cannot span.
 - **Backpressure beats buffering.** Where a node buffers for a slow subscriber, the
@@ -365,8 +365,8 @@ itself, described via `:schema` like any other data
 ```
 
 The backpressure counters come from `graph_t::delivery_drops()`
-(`core/include/libtracer/graph.hpp:2430`), which snapshots four per-cause totals —
-`no_target`, `denied`, `out_of_memory`, `fan_out_truncated` (`graph.hpp:2430-2468`). Each
+(`core/include/libtracer/graph.hpp:graph_t::delivery_drops`), which snapshots four per-cause totals —
+`no_target`, `denied`, `out_of_memory`, `fan_out_truncated` (`graph.hpp:graph_t::delivery_drops`). Each
 counts shed **deliveries**, not events, so a fan-out shed whole under memory pressure moves
 them by its width. `denied` counts an `:acl` refusal on every plane — a local API write, a
 `FWD{WRITE}` terminus, a `COMPACT` terminus and a subscription edge alike (#1068) — so on a
@@ -393,7 +393,7 @@ JTAG session.
   source directly, or the PlatformIO deny-list disagrees with the groups.
 - **Platform TU selection is a build-system concern, not an `#ifdef`.** Chip targets
   compile `twai_link.cpp` plus a SocketCAN stub; the `linux` target compiles real
-  SocketCAN and no TWAI (`integrations/esp-idf/libtracer/CMakeLists.txt:169-170`).
+  SocketCAN and no TWAI (`integrations/esp-idf/libtracer/CMakeLists.txt:if(CONFIG_LIBTRACER_TRANSPORT_CAN)`).
   Extend that pattern rather than adding macros.
 - Build with `-fno-exceptions -fno-rtti` and treat any throwing construct on the
   delivery path as a defect (§1).

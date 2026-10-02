@@ -2121,9 +2121,7 @@ endif()
 
 # #874 — the shared runner (test_support.hpp), under test by itself. Every other harness
 # here reports its verdict THROUGH that header, so a runner that stopped counting would
-# turn the whole suite green at once and no other target could see it. Registered last on
-# purpose: this file's line numbers are cited by docs/modules/segment.md and pinned in
-# tools/check_doc_citations.py, so new targets append rather than insert.
+# turn the whole suite green at once and no other target could see it.
 add_executable(test_support_test test_support_test.cpp)
 target_link_libraries(test_support_test PRIVATE libtracer Threads::Threads)
 libtracer_test_warnings(test_support_test)
@@ -2174,10 +2172,7 @@ endif()
 # resolve spellings a local target edge took. The bound and canonical legs deliver identically
 # by design, so a delivery assertion measures nothing here — the counter, together with the two
 # control arms that make it MOVE (an edge admitted before its target existed; a retired-then-
-# revived target), is the whole instrument. Appended at the END of this file deliberately: the
-# citation pins at core/tests/CMakeLists.txt:1575,1588-1589 are enrolled non-source anchors that
-# `check_doc_citations.py --repin` cannot move, so an insertion above them costs a hand re-pin
-# of docs/modules/segment.md and of the anchor table for nothing.
+# revived target), is the whole instrument.
 add_executable(target_binding_ablation_test target_binding_ablation_test.cpp)
 target_link_libraries(target_binding_ablation_test PRIVATE libtracer)
 libtracer_test_warnings(target_binding_ablation_test)

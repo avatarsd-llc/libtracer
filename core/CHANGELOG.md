@@ -6106,7 +6106,7 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   **Behaviour change in that twin:** a path longer than `kAdvertiseMaxPathLen` now yields an
   empty vector — nothing to emit — where it previously cast the length to `std::uint16_t`
   unchecked, encoding a frame every decoder rejects (`decode_advertise` bounds `path_len` at
-  `kAdvertiseMaxPathLen`, `core/include/libtracer/can.hpp:361`) — or, past 65535, one whose
+  `kAdvertiseMaxPathLen`, `core/include/libtracer/can.hpp:if (path_len > kAdvertiseMaxPathLen) return std::nullopt;`) — or, past 65535, one whose
   length field silently truncates. Its bytes are unchanged for every path within the bound.
   **Scope:** this removes the advertise's allocations only. A CAN `send` still allocates for
   the owning payload block (`view::over_bytes`, which soft-fails and DROPS) and for

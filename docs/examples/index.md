@@ -111,10 +111,10 @@ mismatch: `ctest --test-dir build -R example_`.
 
 Ten targets need the FWD routing plane and exist only when
 `LIBTRACER_NET_PLANE` is on: `two_node_fwd` and `tree_of_ropes` are declared inside
-`if(LIBTRACER_NET_PLANE)` blocks (`core/examples/CMakeLists.txt:59,74`), and so are
-their test registrations (`core/examples/CMakeLists.txt:87-96`); the eight `route_*` targets sit
+`if(LIBTRACER_NET_PLANE)` blocks (`core/examples/CMakeLists.txt:add_executable(two_node_fwd two_node_fwd.cpp)`, `core/examples/CMakeLists.txt:add_executable(tree_of_ropes tree_of_ropes.cpp)`), and so are
+their test registrations (`core/examples/CMakeLists.txt:if(BUILD_TESTING)`); the eight `route_*` targets sit
 inside a third such block at the end of the file. The option defaults to
-`ON` (`core/CMakeLists.txt:67-69`), so the recipe above builds every example. Configured with
+`ON` (`core/CMakeLists.txt:option(LIBTRACER_NET_PLANE`), so the recipe above builds every example. Configured with
 `-DLIBTRACER_NET_PLANE=OFF`, those ten binaries are never produced. For the
 `route_*` group that absence is not a choice: `fwd_router_t`, `route_handle_t` and `op_resolve`
 are the net plane, so at `-DLIBTRACER_NET_PLANE=OFF` the types those examples name do not exist
