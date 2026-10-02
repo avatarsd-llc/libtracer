@@ -245,6 +245,11 @@ jobs:
           # the SAME topology for both engines. Best-effort; never fails the build (a chart
           # is simply omitted if a transport doesn't come up).
           bash bench/run_net.sh >>"$out" 2>/dev/null || true
+      # The trend charts' source rules (#1769): the page opens on bench-local, the hosted
+      # store is the portability envelope, and the zenoh ratio is same-pass only. Tested
+      # here because this job is the one that renders the charts; it needs no build.
+      - name: Trend-chart source-selection tests
+        run: python3 bench/test_render_history.py
       - name: Generate live performance + conformance page
         env:
           LIBTRACER_CXX_HARNESS: ${{ github.workspace }}/core/build/tests/conformance_runner
