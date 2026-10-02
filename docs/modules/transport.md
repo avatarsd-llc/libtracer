@@ -685,6 +685,18 @@ computation — is pure and lives in `tr::net::ws`:
 :project: libtracer
 ```
 
+```{doxygenfunction} tr::net::with_egress_source
+:project: libtracer
+```
+
+```{doxygenfunction} tr::net::bus_of
+:project: libtracer
+```
+
+```{doxygenfunction} tr::net::write_fault_stats
+:project: libtracer
+```
+
 CAN is a stack of its own — the ID codec, the advertise stream, the splitter and
 the reassembler as well as the binding — and has [its own page](can.md).
 

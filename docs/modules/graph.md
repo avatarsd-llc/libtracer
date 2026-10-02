@@ -624,6 +624,10 @@ followed by the owner's own announce write.
 :members:
 ```
 
+```{doxygenenum} tr::graph::emission_mode_t
+:project: libtracer
+```
+
 ```{doxygenstruct} tr::graph::edge_block_t
 :project: libtracer
 :members:
