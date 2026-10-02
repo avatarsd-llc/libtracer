@@ -1,4 +1,8 @@
-/*
+/**
+ * @file
+ * @brief The `type_t` codes and the `opt` options bitfield: the L2/L3 surface of the wire
+ *        format.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *

@@ -357,7 +357,7 @@ write-only, non-propagating creator endpoint.
 `dormant` takes `0` so a resting link is the falsy default. **The byte encoding becomes
 normative on the merge of RFC-0014's conformance vectors** — the RFC defers it, so these
 values are the reference encoding until then (`link_state_t`,
-`core/include/libtracer/transport_vertex.hpp:111-118`). A `LISTEN` vertex's liveness
+`core/include/libtracer/transport_vertex.hpp:115-122`). A `LISTEN` vertex's liveness
 reports **listen-socket reachability**, not per-accepted-peer connectivity; accepted-peer
 count and identity are exposed through the connection vertex's **synthesized
 `:children[]`**, built per read from the transport's own live-peer table
@@ -385,7 +385,7 @@ framing modes. The bounds to design within:
   every hop and is consumed monotonically, so a delivery travels exactly as far as its explicit
   source route — segment count ≤ 255 ([03 — Addressing](03-addressing.md);
   [RFC-0023](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0023-path-segment-cap-repriced-32-to-255.md); `kMaxSegments`,
-  `core/include/libtracer/path.hpp:38`). For realistically named mounts the **1024-byte PATH
+  `core/include/libtracer/path.hpp:42`). For realistically named mounts the **1024-byte PATH
   budget binds first**, not the segment count: a 3-segment mount run (ADR-0061) costs its NAME
   headers plus its bytes — 20 B/hop for `/net/can/c0`, 32 B/hop for
   `/net/ws-client/board-01` — so the diameter is ≈ **30–50 hops** at 3-segment mount runs, and
@@ -474,7 +474,7 @@ automatic**:
   and `port` are **creation-time config** (§Creation): they travel in the `SPEC`'s
   `config` and are parsed into the transport-private `tr::net::conn_settings_t`, whose
   only accessor hands out a **const** view
-  (`transport_vertex_t::settings_of`, `core/include/libtracer/transport_vertex.hpp:630`).
+  (`transport_vertex_t::settings_of`, `core/include/libtracer/transport_vertex.hpp:634`).
   The vertex `:settings` core namespace holds nothing to write — RFC-0022 §3.B deleted
   `settings_t`, so every flat knob name under it answers `SCHEMA_NOT_FOUND`
   caller-independently (`core/src/graph.cpp:3977`), leaving only the read container and

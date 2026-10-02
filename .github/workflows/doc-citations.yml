@@ -75,6 +75,7 @@ on:
       - "tools/check_ci_workspace_cleanup.py"
       - "tools/tests/test_check_ci_workspace_cleanup.py"
       - "tools/gen_record_index.py"
+      - "tools/gen_file_map.py"
       - ".github/workflows/doc-citations.yml"
       # #1095 enrolled seven more non-source paths. Four sit under `core/**`, `bench/**`
       # or `integrations/**` and are already covered above; these three are not, and an
@@ -103,6 +104,7 @@ on:
       - "tools/check_ci_workspace_cleanup.py"
       - "tools/tests/test_check_ci_workspace_cleanup.py"
       - "tools/gen_record_index.py"
+      - "tools/gen_file_map.py"
       - ".github/workflows/doc-citations.yml"
       - ".github/workflows/core-ci.yml"
       - ".github/workflows/footprint-cortexm0.yml"
@@ -164,6 +166,11 @@ jobs:
       # `docs/**` already fires this job, so it rides here instead of in a workflow of its own.
       - name: ADR/RFC index matches the records' status keys
         run: python3 tools/gen_record_index.py --check
+      # The header-to-module-page map (#1728), generated from each public header's
+      # `@file` `@brief`. It fails when a header has no row, so a new header cannot
+      # land undocumented. `core/**` and `backends/**` already fire this job.
+      - name: Every public header has a row in the file map
+        run: python3 tools/gen_file_map.py --check
       - name: Every CI image reference matches the Dockerfile hash
         run: python3 tools/check_ci_image_tag.py
       - name: Restore workspace ownership for the host runner

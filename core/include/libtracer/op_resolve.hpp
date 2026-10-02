@@ -1,4 +1,8 @@
-/*
+/**
+ * @file
+ * @brief Local operation resolution and the zero-copy `FWD{REPLY}` builder over the terminus
+ *        arena.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *

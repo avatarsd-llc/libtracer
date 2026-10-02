@@ -1,4 +1,8 @@
-/*
+/**
+ * @file
+ * @brief The msquic-based QUIC transport (ADR-0043 Phase A), in the separate `libtracer_quic`
+ *        module.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *

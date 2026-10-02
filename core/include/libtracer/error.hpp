@@ -1,4 +1,8 @@
-/*
+/**
+ * @file
+ * @brief The RFC-0002 protocol error registry: the frozen `tr::<concept>::<error>` codes with
+ *        severity and disposition.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *

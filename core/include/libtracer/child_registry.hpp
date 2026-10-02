@@ -1,4 +1,8 @@
-/*
+/**
+ * @file
+ * @brief The connection registry: this node's `NAME` to transport-link table (the ADR-0037
+ *        compositor demux).
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *

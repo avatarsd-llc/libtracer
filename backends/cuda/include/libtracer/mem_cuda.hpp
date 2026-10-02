@@ -1,4 +1,8 @@
-/*
+/**
+ * @file
+ * @brief An L0 backend over CUDA device memory: device-space segments for opaque VALUE
+ *        payloads (ADR-0024).
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *

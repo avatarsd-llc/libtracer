@@ -1,4 +1,8 @@
-/*
+/**
+ * @file
+ * @brief The RFC-0014 link-liveness engine for an owned dial connection: dormant, dial on
+ *        demand, self-heal, close.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *

@@ -202,8 +202,8 @@ def anchor_hits(lines: list, anchor: str, scope: str = None) -> list:
             if any(needle in x for x in lines[max(0, h - SCOPE_LINES):h]) != negated]
 
 ANCHORS = [
-    ("core/include/libtracer/tlv.hpp:118", "struct opt_t"),
-    ("core/include/libtracer/tlv.hpp:37", "enum class type_t"),
+    ("core/include/libtracer/tlv.hpp:122", "struct opt_t"),
+    ("core/include/libtracer/tlv.hpp:41", "enum class type_t"),
     ("core/src/graph.cpp:4103",
      "result_t<void> graph_t::set_identity(std::uint8_t kind, std::span<const std::byte> key) {"),
     ("core/src/graph.cpp:4143", "result_t<view_t> graph_t::read_identity() const {"),
@@ -261,13 +261,13 @@ ANCHORS = [
     # exists to keep a LIVE doc citation from rotting; this text has no live citer left.
     ("core/src/transport_vertex.cpp:813", "return std::unexpected(status_t::BACKPRESSURE);",
      "if (!router_.add_child(qualified, *link))"),
-    ("core/include/libtracer/transport_vertex.hpp:494", "result_t<void> register_module"),
-    ("core/include/libtracer/transport_vertex.hpp:111", "enum class link_state_t"),
+    ("core/include/libtracer/transport_vertex.hpp:498", "result_t<void> register_module"),
+    ("core/include/libtracer/transport_vertex.hpp:115", "enum class link_state_t"),
     # The #1392 erratum's two pins for "a connection's config is creation-time and const":
     # the record itself, and its ONLY accessor — whose `const conn_settings_t*` return is the
     # whole no-reconfiguration-door argument, so the anchor keeps the `const` in it.
-    ("core/include/libtracer/transport_vertex.hpp:141", "struct conn_settings_t {"),
-    ("core/include/libtracer/transport_vertex.hpp:630",
+    ("core/include/libtracer/transport_vertex.hpp:145", "struct conn_settings_t {"),
+    ("core/include/libtracer/transport_vertex.hpp:634",
      "const conn_settings_t* settings_of(std::string_view name) const;"),
     # The synthesized `:children[]` a bus connection answers accepted-peer enumeration from —
     # the fact that replaced reference/13's stale "`:children[]` / `:settings`".
@@ -284,15 +284,15 @@ ANCHORS = [
      "[[nodiscard]] inline bool try_assign(std::vector<std::byte>& dst,"),
     ('core/include/libtracer/mem_heap.hpp:150', '[[nodiscard]] inline bool try_grow(std::size_t bytes, F&& grow) noexcept {'),
     ("core/include/libtracer/view.hpp:26", "namespace tr::view {"),
-    ("core/include/libtracer/frame.hpp:24", "namespace tr::wire {"),
-    ("core/include/libtracer/graph.hpp:56", "namespace tr::graph {"),
-    ('core/include/libtracer/graph.hpp:1990', 'template <typename F>'),
-    ('core/include/libtracer/graph.hpp:2394', 'struct delivery_drops_t {'),
-    ('core/include/libtracer/graph.hpp:2426', '[[nodiscard]] delivery_drops_t delivery_drops() const noexcept;'),
+    ("core/include/libtracer/frame.hpp:28", "namespace tr::wire {"),
+    ("core/include/libtracer/graph.hpp:60", "namespace tr::graph {"),
+    ('core/include/libtracer/graph.hpp:1994', 'template <typename F>'),
+    ('core/include/libtracer/graph.hpp:2398', 'struct delivery_drops_t {'),
+    ('core/include/libtracer/graph.hpp:2430', '[[nodiscard]] delivery_drops_t delivery_drops() const noexcept;'),
     # The graph-level DEFAULT receiver-ring source (#1462, RFC-0025 §4.6.1) — cited by
     # docs/design/allocation-and-backpressure.md's seam table beside the other three.
-    ("core/include/libtracer/transport.hpp:37", "namespace tr::net {"),
-    ('core/include/libtracer/transport.hpp:41', 'using peer_id_t = std::array<std::byte, 16>;'),
+    ("core/include/libtracer/transport.hpp:40", "namespace tr::net {"),
+    ('core/include/libtracer/transport.hpp:46', 'using peer_id_t = std::array<std::byte, 16>;'),
     ("core/include/libtracer/backend.hpp:42", "enum class io_dir_t"),
     ("core/include/libtracer/backend.hpp:120", "class mem_backend_t"),
     ("core/include/libtracer/backend.hpp:179",
@@ -356,16 +356,16 @@ ANCHORS = [
     # an anchor no scope could ever separate. Re-pinned inside the SAME cited span
     # (the derived-spelling block the table cites) to the first derived spelling, which is unique.
     # core/include/libtracer/fwd_router.hpp
-    ('core/include/libtracer/fwd_router.hpp:134',
+    ('core/include/libtracer/fwd_router.hpp:138',
      'struct router_planes_t {'),
     # core/include/libtracer/graph.hpp
-    ('core/include/libtracer/graph.hpp:792',
+    ('core/include/libtracer/graph.hpp:796',
      'explicit graph_t(mem::block_source_t& src = mem::heap_source(), graph_hooks_t hooks = {});'),
-    ('core/include/libtracer/graph.hpp:906',
+    ('core/include/libtracer/graph.hpp:910',
      '* already-retired or unregistered vertex succeeds and does nothing. The root cannot be'),
-    ('core/include/libtracer/graph.hpp:1628',
+    ('core/include/libtracer/graph.hpp:1632',
      '[[nodiscard]] result_t<value_ref_t> read(vertex_handle_t v, std::string_view caller = {}) const;'),
-('core/include/libtracer/graph.hpp:1766',
+('core/include/libtracer/graph.hpp:1770',
      '[[nodiscard]] result_t<value_ref_t> await(vertex_handle_t v, std::chrono::nanoseconds timeout,'),
     # core/include/libtracer/mem_heap.hpp
     ('core/include/libtracer/mem_heap.hpp:472',
@@ -384,10 +384,10 @@ ANCHORS = [
     ('core/include/libtracer/mem_source.hpp:641',
      '[[nodiscard]] std::size_t overflowed() const noexcept { return overflow_; }'),
     # core/include/libtracer/path.hpp
-    ('core/include/libtracer/path.hpp:34', 'inline constexpr std::size_t kMaxSegmentBytes = 64;'),
-    ('core/include/libtracer/path.hpp:36', 'inline constexpr std::size_t kMaxPathBytes = 1024;'),
-    ('core/include/libtracer/path.hpp:38', 'inline constexpr std::size_t kMaxSegments = 255;'),
-    ('core/include/libtracer/path.hpp:40', 'inline constexpr std::size_t kMaxFieldDepth = 8;'),
+    ('core/include/libtracer/path.hpp:38', 'inline constexpr std::size_t kMaxSegmentBytes = 64;'),
+    ('core/include/libtracer/path.hpp:40', 'inline constexpr std::size_t kMaxPathBytes = 1024;'),
+    ('core/include/libtracer/path.hpp:42', 'inline constexpr std::size_t kMaxSegments = 255;'),
+    ('core/include/libtracer/path.hpp:44', 'inline constexpr std::size_t kMaxFieldDepth = 8;'),
     # core/include/libtracer/rope.hpp
     ('core/include/libtracer/rope.hpp:208',
      '* @brief The single contiguous link — the consumer\'s explicit "this value is'),
@@ -397,16 +397,16 @@ ANCHORS = [
     ('core/include/libtracer/segment.hpp:54',
      'void inc_relaxed() noexcept { count_.fetch_add(1, std::memory_order_relaxed); }'),
     # core/include/libtracer/transport.hpp
-    ('core/include/libtracer/transport.hpp:523',
+    ('core/include/libtracer/transport.hpp:528',
      'virtual void send(std::span<const std::span<const std::byte>> iov) {'),
     # core/include/libtracer/transport_udp.hpp
-    ('core/include/libtracer/transport_udp.hpp:89', 'static constexpr std::size_t kMaxDatagram = 65536;'),
+    ('core/include/libtracer/transport_udp.hpp:92', 'static constexpr std::size_t kMaxDatagram = 65536;'),
     # core/include/libtracer/transport_vertex.hpp
-    ('core/include/libtracer/transport_vertex.hpp:135',
+    ('core/include/libtracer/transport_vertex.hpp:139',
      "* §5 leanness ruling): a kind's PRIVATE config (e.g. quic's `tls` profile name) never"),
-    ('core/include/libtracer/transport_vertex.hpp:166',
-     'std::uint32_t backoff_ms = 0;         /**< @brief DIAL self-heal retry interval (RFC-0014 §4);'),
     ('core/include/libtracer/transport_vertex.hpp:170',
+     'std::uint32_t backoff_ms = 0;         /**< @brief DIAL self-heal retry interval (RFC-0014 §4);'),
+    ('core/include/libtracer/transport_vertex.hpp:174',
      'std::uint32_t connect_timeout_ms = 0; /**< @brief DIAL connect-attempt deadline (RFC-0014 §4):'),
     # RE-HOMED (#1461/#1462). The enumerator's docstring was REWRITTEN by RFC-0025 §4.6.1
     # Amendment 2 — the ring is the CONSUMER's, not a producer-side one — so the line the old
@@ -414,7 +414,7 @@ ANCHORS = [
     # still says what every citing doc claims of it: role 2 is a bounded history ring whose
     # retained depth is declared owner-side. Derived by grepping the merged file, never by
     # adding a shift to the old number.
-    ('core/include/libtracer/vertex.hpp:256',
+    ('core/include/libtracer/vertex.hpp:260',
      "STREAM,       /**< @brief Role 2: the CONSUMER's bounded history ring"),
     ('core/include/libtracer/value.hpp:633',
      "* Holding one keeps the value's block alive — and under an injected `block_source_t` that is a"),
@@ -535,19 +535,19 @@ ANCHORS = [
      '* @warning **What this gate does NOT cover.** It drives `capture_transport_t`, a stub link that'),
     ('core/include/libtracer/can.hpp:361',
      'if (path_len > kAdvertiseMaxPathLen) return std::nullopt;  // wedge bound (see constant)'),
-    ('core/include/libtracer/graph.hpp:1630',
+    ('core/include/libtracer/graph.hpp:1634',
      "* @brief Write a resolved vertex's value: `assign` then deliver (RFC-0008 §D)."),
-    ('core/include/libtracer/graph.hpp:1638',
+    ('core/include/libtracer/graph.hpp:1642',
      '* @brief Field-write by handle: resolve the @ref vertex_handle_t and @ref field_path_t'),
-    ('core/include/libtracer/graph.hpp:2453',
+    ('core/include/libtracer/graph.hpp:2457',
      'void count_external_drop(external_drop_t why, std::uint64_t n) noexcept;'),
-    ('core/include/libtracer/path.hpp:53',
+    ('core/include/libtracer/path.hpp:57',
      "* separates field levels, `[` / `]` delimit the grammar's index suffix (which sits"),
-    ('core/include/libtracer/tlv.hpp:67', 'PATH_REF = 0x14,'),
+    ('core/include/libtracer/tlv.hpp:71', 'PATH_REF = 0x14,'),
     ('core/include/libtracer/subscriber.hpp:109', 'struct delivery_policy_t {'),
-    ('core/include/libtracer/vertex.hpp:495', 'enum class delivery_mode_t : std::uint8_t {'),
-    ('core/include/libtracer/vertex.hpp:3027', 'const std::size_t doff = off;'),
-    ('core/include/libtracer/vertex.hpp:3106',
+    ('core/include/libtracer/vertex.hpp:499', 'enum class delivery_mode_t : std::uint8_t {'),
+    ('core/include/libtracer/vertex.hpp:3031', 'const std::size_t doff = off;'),
+    ('core/include/libtracer/vertex.hpp:3110',
      '// padding — 8-byte, then 4-byte, then flag bytes), with everything the write hot'),
     # Three lines now spell this table: the FORWARD hop's rope arm (this one) and the two
     # TERMINUS reply gathers #1570 migrated onto the same seam. The forward arm is the only
@@ -620,44 +620,44 @@ ANCHORS = [
     ('core/src/graph.cpp:4505',
      'n.lkv = w.v->read_stored();  // ONE atomic load per node'),
     # core/include/libtracer/graph.hpp
-    ('core/include/libtracer/graph.hpp:638',
-     '* source until it retires. Per-injection-point, never a shared pool: one receiver running'),
     ('core/include/libtracer/graph.hpp:642',
+     '* source until it retires. Per-injection-point, never a shared pool: one receiver running'),
+    ('core/include/libtracer/graph.hpp:646',
      'mem::block_source_t* ring_source = nullptr;'),
-    ('core/include/libtracer/graph.hpp:1743',
+    ('core/include/libtracer/graph.hpp:1747',
      '[[nodiscard]] result_t<std::size_t> ring_reserved_bytes(vertex_handle_t v) const;'),
-    ('core/include/libtracer/graph.hpp:626',
+    ('core/include/libtracer/graph.hpp:630',
      '* copies always. What sharing costs on a POOLED RX backend: the shared value BORROWS a'),
     # core/include/libtracer/vertex.hpp
-    ('core/include/libtracer/vertex.hpp:1402',
+    ('core/include/libtracer/vertex.hpp:1406',
      '* - **reliable** — the admission is refused, NOTHING is shed and the ring does not grow'),
-    ('core/include/libtracer/vertex.hpp:1416',
+    ('core/include/libtracer/vertex.hpp:1420',
      'bool ring_admit(const value_ref_t& sp, std::size_t bytes,'),
-    ('core/include/libtracer/vertex.hpp:1430',
+    ('core/include/libtracer/vertex.hpp:1434',
      '// The DEPTH intent retires BEFORE the byte bound charges. Order matters: a ring already'),
-    ('core/include/libtracer/vertex.hpp:1668',
+    ('core/include/libtracer/vertex.hpp:1672',
      '* durability (`policy.durability_request()`, RFC-0022 §3.A) and the vertex already'),
     # core/include/libtracer/mem_source.hpp
     ('core/include/libtracer/mem_source.hpp:77', 'struct source_stats_t {'),
     ('core/include/libtracer/mem_source.hpp:228',
      '[[nodiscard]] virtual source_stats_t stats() const noexcept { return {}; }'),
     # core/include/libtracer/fwd_router.hpp
-    ('core/include/libtracer/fwd_router.hpp:83', 'struct router_stats_t {'),
-    ('core/include/libtracer/fwd_router.hpp:437',
+    ('core/include/libtracer/fwd_router.hpp:87', 'struct router_stats_t {'),
+    ('core/include/libtracer/fwd_router.hpp:441',
      '[[nodiscard]] router_stats_t drop_stats() const noexcept {'),
-    ('core/include/libtracer/fwd_router.hpp:460',
+    ('core/include/libtracer/fwd_router.hpp:464',
      '[[nodiscard]] mem::block_source_t& label_source() const noexcept { return *label_src_; }'),
-    ('core/include/libtracer/fwd_router.hpp:463',
+    ('core/include/libtracer/fwd_router.hpp:467',
      '[[nodiscard]] mem::block_source_t& rx_source() const noexcept { return *rx_; }'),
-    ('core/include/libtracer/fwd_router.hpp:465',
+    ('core/include/libtracer/fwd_router.hpp:469',
      '[[nodiscard]] mem::mem_backend_t& flatten_backend() const noexcept { return *flat_; }'),
     # core/include/libtracer/route_handle.hpp
-    ('core/include/libtracer/route_handle.hpp:243',
+    ('core/include/libtracer/route_handle.hpp:246',
      'std::size_t max_bindings_per_link = 0)'),
-    ('core/include/libtracer/route_handle.hpp:622',
+    ('core/include/libtracer/route_handle.hpp:625',
      '[[nodiscard]] std::size_t labels_used(std::string_view link) const;'),
     # core/include/libtracer/transport.hpp
-    ('core/include/libtracer/transport.hpp:506',
+    ('core/include/libtracer/transport.hpp:511',
      '[[nodiscard]] virtual transport_drop_stats_t drop_stats() const noexcept { return {}; }'),
     # integrations/esp-idf/libtracer/httpd_ws_link.cpp
     ('integrations/esp-idf/libtracer/httpd_ws_link.cpp:3251',

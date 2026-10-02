@@ -3,8 +3,9 @@
 The per-layer API reference for the **reference C++ implementation** (`core/`).
 Each page pairs a usage narrative — what the module is for, how it is used, and
 what goes wrong — with the declarations rendered from the headers themselves.
-For the cross-cutting view see the **[interface map](interface-map.md)**; for the
-bytes on the wire see the **[bit-level walkthrough](wire-format-bits.md)**.
+For the cross-cutting view see the **[interface map](interface-map.md)**; for the page
+that documents a given header, the **[file map](file-map.md)**; for the bytes on the
+wire, the **[bit-level walkthrough](wire-format-bits.md)**.
 
 Pages are ordered by dependency, which is also the layer order: the cross-cutting
 taxonomy and configuration first, then L0 up to the transport plane. Namespaces
@@ -115,6 +116,7 @@ sees it and cannot drift from `core/`. When the two disagree, the generated bloc
 :maxdepth: 1
 
 Interface map <interface-map>
+File map — header to page <file-map>
 status & errors — result taxonomy <status>
 config — the build's traits type <config>
 instrumentation — reachability counters <instrumentation>

@@ -1,4 +1,8 @@
-/*
+/**
+ * @file
+ * @brief The one home of the "one observer pair, set from anywhere, read on every frame"
+ *        shape.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *

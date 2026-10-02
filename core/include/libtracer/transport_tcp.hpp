@@ -1,4 +1,7 @@
-/*
+/**
+ * @file
+ * @brief A reliable TCP stream transport with a 4-byte little-endian length prefix per frame.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *

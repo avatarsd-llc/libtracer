@@ -159,15 +159,15 @@ client-side projection and dedup is the client's job, keyed by the identity face
 the architecture working as intended; it does not belong in a register of gaps.
 
 > One phantom outlives #406: `reference/07` describes a 128-bit `peer_id_t` with generation
-> rules, while `transport.hpp:41` declares `using peer_id_t = std::array<std::byte, 16>`
+> rules, while `transport.hpp:46` declares `using peer_id_t = std::array<std::byte, 16>`
 > with no generation rules. #406 closed without reconciling it, and it is covered by neither
 > #599 nor #586 — tracked in [#606].
 
 ### 2. Teardown and link lifecycle — #407 / #66 (narrowed)
 
 - ~~**No reconnect anywhere.**~~ **Landed.** RFC-0014 §4 gave `transport_vertex.hpp` a
-  six-state `link_state_t` (`transport_vertex.hpp:111`) including `RECONNECTING`, plus
-  `backoff_ms` (`transport_vertex.hpp:166`) and `connect_timeout_ms` (`transport_vertex.hpp:170`).
+  six-state `link_state_t` (`transport_vertex.hpp:115`) including `RECONNECTING`, plus
+  `backoff_ms` (`transport_vertex.hpp:170`) and `connect_timeout_ms` (`transport_vertex.hpp:174`).
 - **No child removal**, so a link cannot be recreated under the same name after a failure
   (`PATH_IN_USE`). Recovery needs a **new name** — a hard blocker for stable-identity
   reconnection, and the sharpest argument for #407.

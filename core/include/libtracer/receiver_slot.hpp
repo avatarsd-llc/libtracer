@@ -1,4 +1,8 @@
-/*
+/**
+ * @file
+ * @brief The one home of the transport delivery-tier mechanism: receiver storage, snapshot and
+ *        tier select.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *

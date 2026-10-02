@@ -1,4 +1,8 @@
-/*
+/**
+ * @file
+ * @brief Internal glue: the built-in socket transport-factory registrations, one per selected
+ *        transport.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *

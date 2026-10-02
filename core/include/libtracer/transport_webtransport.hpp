@@ -1,4 +1,8 @@
-/*
+/**
+ * @file
+ * @brief The WebTransport-over-HTTP/3 endpoint (ADR-0043 Phase B), in the separate
+ *        `libtracer_quic` module.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *

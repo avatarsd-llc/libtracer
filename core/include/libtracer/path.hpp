@@ -1,4 +1,8 @@
-/*
+/**
+ * @file
+ * @brief L4 addressing: `path_t`, the canonical PATH-payload bytes that key a vertex, and the
+ *        field-path tail.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *

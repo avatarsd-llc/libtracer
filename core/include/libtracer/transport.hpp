@@ -1,4 +1,7 @@
-/*
+/**
+ * @file
+ * @brief The transport seam: one wire technology behind a uniform send / receive interface.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
@@ -36,8 +39,10 @@
 
 namespace tr::net {
 
-// A 16-byte node/peer identity — the ROUTER `origin_peer_id` (docs/reference/05
-// §0x0D ROUTER).
+/**
+ * @brief A 16-byte node/peer identity — the ROUTER `origin_peer_id` (docs/reference/05
+ *        §0x0D ROUTER).
+ */
 using peer_id_t = std::array<std::byte, 16>;
 
 class transport_t;

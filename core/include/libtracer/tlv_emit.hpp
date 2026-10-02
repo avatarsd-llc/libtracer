@@ -1,4 +1,7 @@
-/*
+/**
+ * @file
+ * @brief Emit one TLV as raw wire bytes without building a `tlv_t` model object.
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *

@@ -1,4 +1,7 @@
-/*
+/**
+ * @file
+ * @brief The route handle: WebSocket delivery compaction (RFC-0004, ADR-0035 slice 4).
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *

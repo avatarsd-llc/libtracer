@@ -1,4 +1,7 @@
-/*
+/**
+ * @file
+ * @brief A transport and each connection inside it as a first-class `/net` vertex (ADR-0027).
+ *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
@@ -10,10 +13,10 @@
  *
  * The production path is CONFIG-CONSTRUCTED sockets: the SPEC's `config` names a
  * transport `kind` (`udp`, `ws`, or any kind registered via
- * @ref transport_vertex_t::register_transport_type), and the connection vertex
+ * @ref tr::net::transport_vertex_t::register_transport_type), and the connection vertex
  * constructs and OWNS the real socket transport from its parsed
- * @ref conn_settings_t, wiring it into the router exactly as a hand-supplied link.
- * @ref transport_vertex_t::provide_link remains the test/manual seam (loopback
+ * @ref tr::net::conn_settings_t, wiring it into the router exactly as a hand-supplied link.
+ * @ref tr::net::transport_vertex_t::provide_link remains the test/manual seam (loopback
  * channels, exotic transports) and takes precedence when staged.
  *
  * SOLID / layering: the graph owns the *addressing* and the generic write gate; this
@@ -77,6 +80,7 @@ class self_heal_link_t;
 struct slim_net_t {
     explicit slim_net_t() = default;
 };
+/** @brief The `slim_net_t` tag value a slim node passes to opt out of the builtins. */
 inline constexpr slim_net_t slim_net{};
 
 /**
