@@ -700,11 +700,6 @@ class child_registry_t {
         return hit;
     }
 
-    /** @brief The link whose NAME equals the raw segment bytes @p seg (nullptr if none). */
-    [[nodiscard]] transport_t* by_segment(std::span<const std::byte> seg) const {
-        return by_name(detail::as_string_view(seg));
-    }
-
     /**
      * @brief Qualified name @p name pre-encoded as a run of NAME TLVs — the mount run.
      *

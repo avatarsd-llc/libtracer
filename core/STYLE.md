@@ -13,7 +13,7 @@ The root namespace is `tr::`. Sub-namespaces mirror the [six-layer model](../doc
 | `tr::wire` | L2/L3 — frame + TLV codec | `tlv_t`, `opt_t`, `type_t`, `err_t`, `trailer_t`, `crc_t`, `decode`/`encode` (`decode(view_t)` is the L1↔L2 cast), `grammar::parse_header` |
 | `tr::graph` | L4 — graph runtime | `graph_t`, `vertex_t`, `path_t`, `status_t`, `result_t`, `delivery_policy_t`, `handlers_t`, `role_t`, `subscriber_t` |
 | `tr` (bare) | layer-neutral | primitives every layer may name and that name no layer: `sink_slot_t` (#1049); the guard vocabulary — `guard`, `lockable`, `no_guard_t`, `guard_scope_t`, `rmw_counter_t` (`guard.hpp`, freestanding) and `basic_mutex_guard_t` / `mutex_guard_t` (`guard_mutex.hpp`, hosted) (#1703, #1716) |
-| `tr::net` | transport plane | `transport_t`, `peer_id_t`, `conn_settings_t`, `fwd_router_t`, `child_registry_t`, `route_handle_t`, `transport_vertex_t`, `udp_transport_t`/`tcp_transport_t`, `loopback_channel_t`/`loopback_endpoint_t`; per-transport sub-namespaces such as `tr::net::can` (ID and advertise codecs, header-elided framing) |
+| `tr::net` | transport plane | `transport_t`, `conn_settings_t`, `fwd_router_t`, `child_registry_t`, `route_handle_t`, `transport_vertex_t`, `udp_transport_t`/`tcp_transport_t`, `loopback_channel_t`/`loopback_endpoint_t`; per-transport sub-namespaces such as `tr::net::can` (ID and advertise codecs, header-elided framing) |
 | `tr::detail` | none | implementation helpers that are not part of any layer's interface |
 | `tr::testing` | none | test support; used by tests only |
 
