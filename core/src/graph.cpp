@@ -2986,6 +2986,7 @@ void graph_t::propagate_impl(vertex_t* v) {
         return k.size() >= lo.size() && std::equal(lo.begin(), lo.end(), k.begin());
     };
     std::vector<std::vector<std::byte>> to_deliver;
+    bool own_drained = false;  // v's own mark went with the drain (v was delivered above)
     // Nothrow copy of one sweep key into the delivery snapshot; false stops the sweep.
     // #981 residual: both helpers below keep the `-fno-exceptions` probe window (an abort()
     // if a racer takes the freed probe block, #850). Neither can migrate — the snapshot's
@@ -3002,6 +3003,7 @@ void graph_t::propagate_impl(vertex_t* v) {
             // Collect BEFORE the drain: an OOM leaves this and later marks for the next
             // covering sweep instead of silently losing them.
             if (it->size() != lo.size() && !collect(*it)) break;  // strict descendant
+            if (it->size() == lo.size()) own_drained = true;
             it = pending_.erase(it);  // drain (v itself, if present, was delivered above)
             pending_count_.fetch_sub(1, std::memory_order_relaxed);
         }
@@ -3011,8 +3013,45 @@ void graph_t::propagate_impl(vertex_t* v) {
             if (it->size() != lo.size() && !collect(*it)) break;
         }
     }
+    // Drop the pending-mark hint (#1712) of every vertex this sweep drained — but only where
+    // the key is STILL absent, checked under the sweep lock, so the hint invariant holds
+    // exactly: a key in `pending_` always has its vertex's hint up. Without the re-check, a
+    // mark landing between the drain and the drop (another thread's assign, or a callback
+    // of an EARLIER vertex in this very sweep) would keep its key and lose its hint; the
+    // eager write that followed would skip retiring it, and the next covering sweep would
+    // re-deliver what that write already delivered (RFC-0008 §B, 2026-09-30 erratum: an
+    // eager write's clear means "a later covering sweep does not re-deliver").
+    //
+    // Two phases because resolving a key takes the map lock, which never nests under the
+    // sweep lock: resolve outside it, then ONE more sweep-lock section for the whole batch —
+    // a sweep cost, never an eager-write one. The resolved pointers are the delivery list
+    // too, so no key is resolved twice. On OOM for that list the hints stay up (a stale-up
+    // hint costs one slow-path probe, never a delivery) and delivery resolves per key.
+    std::vector<vertex_t*> targets;
+    if (!detail::try_reserve(targets, to_deliver.size())) {
+        for (const std::vector<std::byte>& k : to_deliver) {
+            if (vertex_t* u = find_ptr(k)) deliver_current(u);
+        }
+        return;
+    }
+    bool any_hint = own_drained && v->has_pending_mark();
     for (const std::vector<std::byte>& k : to_deliver) {
-        if (vertex_t* u = find_ptr(k)) deliver_current(u);
+        vertex_t* const u = find_ptr(k);
+        targets.push_back(u);  // reserved: cannot allocate; nullptr = vanished mid-sweep
+        any_hint = any_hint || (u != nullptr && u->has_pending_mark());
+    }
+    if (any_hint) {  // an UNCONDITIONAL-only sweep is never hinted and takes no second lock
+        const std::lock_guard lock(sweep_mutex_);
+        if (own_drained && v->has_pending_mark() && !pending_.contains(lo))
+            v->set_pending_mark(false);
+        for (std::size_t i = 0; i < targets.size(); ++i) {
+            vertex_t* const u = targets[i];
+            if (u != nullptr && u->has_pending_mark() && !pending_.contains(to_deliver[i]))
+                u->set_pending_mark(false);
+        }
+    }
+    for (vertex_t* const u : targets) {
+        if (u != nullptr) deliver_current(u);
     }
 }
 
@@ -3079,8 +3118,12 @@ void graph_t::mark_pending(vertex_t* v) {
     // finds the key already present sheds nothing either — the mark is there and the next
     // covering sweep will deliver. Still single-exit, so `key`'s cleanup keeps the shape the
     // paragraph above paid for; the two locals are registers on the marking path.
+    // The pending-mark hint (#1712) is raised here, under the lock, on every mark that leaves
+    // a key in the set — a fresh insert or one already present. Every drop is also taken
+    // under this lock and only over an absent key, so a set member's hint is always up.
     const bool if_newer = v->delivery_mode() == delivery_mode_t::IF_NEWER;
     const bool room = if_newer && detail::probe_bytes(kSetNodeProbe);
+    if (room) v->set_pending_mark(true);
     if (room && pending_.insert(std::move(key)).second)
         pending_count_.fetch_add(1, std::memory_order_relaxed);
     else if (if_newer && !room)
@@ -3090,6 +3133,11 @@ void graph_t::mark_pending(vertex_t* v) {
 void graph_t::clear_pending(vertex_t* v, const value_t* delivered) {
     // Same idle fast path as mark_pending: an unobserved vertex was never marked.
     if (v->own_subs() == 0 && v->listeners_above() == 0) return;
+    // Unmarked-vertex fast path (#1712): this vertex holds no mark, so there is nothing to
+    // retire — no key render, no allocation, no graph-wide sweep lock, however many OTHER
+    // vertices are marked. Racing a concurrent mark_pending is the same safe direction as the
+    // count gate below: the mark stays for the next covering sweep.
+    if (!v->has_pending_mark()) return;
     // Empty-set fast path (the per-eager-write case when nobody uses assign+propagate):
     // no key render, no sweep lock. Racing a concurrent mark_pending here leaves the mark
     // for the next covering sweep — the always-safe direction (one duplicate delivery of
@@ -3115,6 +3163,9 @@ void graph_t::clear_pending(vertex_t* v, const value_t* delivered) {
     // erases as before — a handler sweep delivers nothing anyway, deliver_current on a
     // null LKV.)
     if (v->read_stored().get() != delivered) return;
+    // The hint drops with the mark — or alone, when it was stale over an absent key. Under
+    // the lock, so no racing mark can raise it between the erase and the drop.
+    v->set_pending_mark(false);
     if (pending_.erase(key) != 0) pending_count_.fetch_sub(1, std::memory_order_relaxed);
 }
 
@@ -3122,6 +3173,8 @@ void graph_t::apply_delivery_mode(vertex_t* v, delivery_mode_t mode) {
     const std::vector<std::byte> key = build_key(v);
     const std::lock_guard lock(sweep_mutex_);
     v->set_delivery_mode(mode);
+    // Leaving IF_NEWER retires any mark below, and the pending-mark hint (#1712) with it.
+    if (mode != delivery_mode_t::IF_NEWER) v->set_pending_mark(false);
     if (mode == delivery_mode_t::UNCONDITIONAL) {
         unconditional_.insert(key);
         // Swept via unconditional_ now — avoid double membership.

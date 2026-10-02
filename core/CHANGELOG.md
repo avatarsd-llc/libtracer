@@ -51,6 +51,13 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **An observed eager write no longer takes the graph-wide sweep lock because some OTHER
+  vertex holds an `assign` mark ([#1712](https://github.com/avatarsd-llc/libtracer/issues/1712)).**
+  While any mark was pending, every observed write rendered its key (one heap block) and took
+  the sweep lock to retire a mark it almost never had. A per-vertex hint bit in `vertex_t`'s
+  existing flag byte now skips that path for unmarked vertices. No API change;
+  `sizeof(vertex_t)` is unchanged. Covering sweeps deliver exactly as before.
+
 - **On the guarded write-sequence binding, a publish opens one guard section, not two
   ([#1715](https://github.com/avatarsd-llc/libtracer/issues/1715)).** Where the 32-bit write
   sequence has no native atomic RMW (ESP32-C3, Cortex-M0), `vertex_t` now bumps it inside the
@@ -69,6 +76,7 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   - `default_config_t::kForceGuardedRmw` (default `false`) forces the guarded binding on a host
     whose atomics are native. It is a test knob: the core test build uses it to run the guarded
     path, and a shipped node leaves it off.
+
 - **The write sequence is 32-bit on every target: `vertex_t::current_seq()` returns
   `tr::graph::write_seq_t` and `wait_for_change` takes one
   ([#1621](https://github.com/avatarsd-llc/libtracer/issues/1621), RFC-0028 D6).**

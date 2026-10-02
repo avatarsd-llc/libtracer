@@ -117,6 +117,22 @@ same class of bug as the route_handle `clear_link` dangling ref fixed in #220.
   the per-eager-write `clear_pending` skip the key render + sweep lock while nothing is pending,
   and `dispatch_edge`'s target/remote legs are split into helpers so its per-edge body keeps
   inlining into the fan-out loop.
+- **Note (2026-10-02, #1712): a per-vertex pending-mark hint, a partial step toward
+  tree-marking.** The `pending_count_` guard above is graph-wide: one outstanding `assign`
+  anywhere put a key render, a heap block and the graph-wide sweep lock on every observed eager
+  write, to retire a mark that write's vertex almost never had. A spare `vertex_t` flag bit
+  (`PENDING_MARK`, +0 B) now gates `core/src/graph.cpp:graph_t::clear_pending` per vertex. It
+  is raised under the sweep lock in `core/src/graph.cpp:graph_t::mark_pending` and dropped
+  only under that lock once the key is gone: when an eager write retires the mark, and when a
+  covering sweep in `core/src/graph.cpp:graph_t::propagate_impl` re-checks its drained keys.
+  That re-check is a second sweep-lock section per sweep, taken after the keys are resolved,
+  because resolving a key takes the map lock, which must not nest under the sweep lock. So a
+  key in the sweep set always has its hint up, and an eager write never skips a mark it should
+  retire. The one remaining race is the unlocked hint read against a concurrent `assign`,
+  which is the same relaxed race the `pending_count_` gate already had. The sweep sets stay the
+  truth, and the covering sweep's selection is unchanged (RFC-0008 §B). Full tree-marking, a `pending_below` count per vertex, stays
+  parked: it costs O(depth) ancestor RMWs per mark and per clear, which contend at the root on
+  WIDE targets, and is revisited only if a deep-tree bench shows this step falls short.
 - **Bubbling cheaper** — per-ancestor cost drops from shared-lock + hash lookup to one pointer
   chase, and the walk takes no lock at all.
 - **Resolution O(depth · log fanout) at wiring frequency** — `write(path)` / FWD resolve / edge
