@@ -1,5 +1,7 @@
 # 66. An element write is a single-attempt CAS that answers `BACKPRESSURE`, never a retry loop and never a silent overwrite
 
+<!-- status: accepted -->
+
 Status: accepted (maintainer-ratified 2026-07-28 across a grill-with-docs walk of [RFC-0017](../spec/rfcs/0017-element-addressing-value-plane-index.md)). Implements the concurrency half of RFC-0017 §C. Upholds [ADR-0064](0064-lkv-publish-is-waiterless-and-the-slot-becomes-lock-free.md) (the publish path stays waiterless), [ADR-0039](0039-pmr-memory-model-host-aligned-allocation.md) §2 (exhaustion is backpressure), and [RFC-0006](../spec/rfcs/0006-resource-bounded-nesting-depth.md) (bounds are injected resources, never magic constants).
 
 ## Context

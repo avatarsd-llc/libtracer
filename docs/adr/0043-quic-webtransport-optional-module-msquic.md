@@ -1,5 +1,7 @@
 # QUIC + WebTransport arrive as an OPTIONAL module (`LIBTRACER_WITH_QUIC`, msquic) — the core stays dependency-free; browsers reach the graph over WebTransport
 
+<!-- status: accepted -->
+
 Status: accepted (maintainer-ratified 2026-07-03: "go ahead with quic + webtransport track after tcp lands"). Builds on the `transport_t` seam + [ADR-0042](0042-refcounted-receiver-seam-view-delivery.md) view delivery; the substrate for [#92](https://github.com/avatarsd-llc/libtracer/issues/92) / [ADR-0031](0031-direct-browser-to-robot-binding-and-webtransport.md) (browser ↔ robot).
 
 ## Context

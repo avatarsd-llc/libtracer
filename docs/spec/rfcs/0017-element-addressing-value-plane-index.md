@@ -5,6 +5,8 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 # RFC 0017 — Element addressing: `[n]` on the value plane, and per-element delivery
 
+<!-- status: draft -->
+
 | Field | Value |
 | ---- | ---- |
 | **RFC** | 0017 |
@@ -16,9 +18,8 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | **Tracking issue** | to be filed with this document |
 | **Target spec version** | v1 (draft refinement — `docs/spec/v1.md` is DRAFT and §3 is a stub; **amends** [RFC-0004](0004-remote-operation-addressing.md) §C) |
 
-> **Numbering note.** 0012 and 0015 remain skipped for the ghost history
-> [RFC-0016](0016-composed-branch-read.md) records; 0014 was subsequently issued as a real
-> document, so this RFC takes **0017**, the next unused number.
+> **Numbering note.** Numbering gaps and why they are not reused are recorded in the
+> [ADR and RFC index](../../adr-rfc-index.md#numbering-gaps).
 
 ## Summary
 

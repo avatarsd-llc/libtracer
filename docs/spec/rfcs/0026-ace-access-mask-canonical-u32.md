@@ -5,6 +5,8 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 # RFC 0026 — The ACE `access_mask` canonical wire width is u32
 
+<!-- status: accepted -->
+
 | Field | Value |
 | ---- | ---- |
 | **RFC** | 0026 |

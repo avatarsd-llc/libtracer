@@ -1,5 +1,7 @@
 # Build configuration is plain C++: one config header, no macros
 
+<!-- status: accepted; superseded-in-part-by: ADR-0070 -->
+
 Status: **accepted.** Extends [ADR-0047](0047-build-time-closed-module-sets-compile-time-seams.md) on the *binding* axis: §1's appropriateness rule already says **which** seams dispatch at compile time; this ADR fixes **how** a per-target choice is spelled — as generated, type-checked C++, never as a preprocessor definition. Reaffirms ADR-0047's rejection of `std::function` on per-frame paths (applied to `fwd_router_t` in the companion change). Grounded in the 2026-07-29 metaprogramming survey (below) and the maintainer rulings of the same date: the project is pre-production ([dev stage — the API may move freely](../../.github/GOVERNANCE.md)), must fully serve **both** the single-core MCU and the many-core host, and its C++23 surface should not carry 20th-century configuration mechanics.
 
 ## Context

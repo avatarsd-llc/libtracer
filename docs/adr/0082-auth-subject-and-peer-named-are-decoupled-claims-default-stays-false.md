@@ -1,5 +1,7 @@
 # The auth subject and `peer_named` are two different claims — who wrote this, versus where the peer appears in the graph — and the `peer_named` default stays `false`
 
+<!-- status: accepted -->
+
 Status: **accepted** (maintainer-ratified 2026-08-16, ruling on [#1278](https://github.com/avatarsd-llc/libtracer/issues/1278), the policy residual split out of [#375](https://github.com/avatarsd-llc/libtracer/issues/375)). Closes the deliverable [#375](https://github.com/avatarsd-llc/libtracer/issues/375) listed as *"an ADR recording the decouple + the addressing-only role of `peer_named`"*. Composes with [ADR-0018](0018-access-control-authorization-pluggable-subject-token.md) (authorization over a pluggable subject token), [ADR-0044](0044-stateless-transport-peer-enumeration-separate-paths-client-side-identity.md) (peer enumeration, and its 2026-08-13 amendment admitting an accepted session as an ordinary vertex) and [ADR-0045](0045-in-graph-authentication-per-hop-ed25519-tofu-noise.md) (the identity roadmap that eventually mints the subject). Feeds the ACL **subject table** the `write_ctx_t` doc comment names as its integration point (`core/include/libtracer/vertex.hpp:275`).
 
 **This ADR changes no code.** It records why the shipped default is the right one and does not flip, and gives integrators the reasoning the reference docs did not carry.

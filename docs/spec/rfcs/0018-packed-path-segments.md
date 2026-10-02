@@ -5,6 +5,8 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 # RFC 0018 — Packed path segments: a `PATH` body becomes length-prefixed records
 
+<!-- status: accepted -->
+
 | Field | Value |
 | ---- | ---- |
 | **RFC** | 0018 |
@@ -16,9 +18,8 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | **Tracking issue** | [#680](https://github.com/avatarsd-llc/libtracer/issues/680) (scope changes with this revision) |
 | **Target spec version** | v1 (DRAFT — no stable release, so the "immutable once released" clause has never triggered). **Amends** `docs/spec/v1.md` §3.1.1 and §3.1.2, `docs/reference/05-protocol-tlvs.md` §`0x06`, and **reverses** [RFC-0004](0004-remote-operation-addressing.md) §"Considered options" line 211 and its §133 "PATH is untouched" statement. |
 
-> **Numbering note.** 0012 and 0015 remain skipped for the ghost history
-> [RFC-0016](0016-composed-branch-read.md) records. This RFC takes **0018**, the next unused
-> number after [RFC-0017](0017-element-addressing-value-plane-index.md).
+> **Numbering note.** Numbering gaps and why they are not reused are recorded in the
+> [ADR and RFC index](../../adr-rfc-index.md#numbering-gaps).
 
 ---
 

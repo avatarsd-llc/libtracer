@@ -1,5 +1,7 @@
 # Rope-native reply and control egress: retire the `on_frame_rope` flatten
 
+<!-- status: accepted -->
+
 Status: **accepted** (2026-07-06 — maintainer-directed in the ADR-0053 ⑥ review). This
 is the terminal slice of the [ADR-0053](0053-lazy-rope-backed-decode-view-partial-path-routing.md)
 migration order ("⑥ — flatten sweep: remove remaining owning-path flatten call-sites;

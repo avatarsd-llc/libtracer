@@ -5,6 +5,8 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 # RFC 0011 — Node identity facet: a wire-readable, pre-auth `:identity` field serving the ADR-0045 ed25519 TOFU public key at every vertex
 
+<!-- status: accepted -->
+
 | Field | Value |
 | ---- | ---- |
 | **RFC** | 0011 |

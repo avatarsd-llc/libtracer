@@ -5,6 +5,8 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 # RFC 0006 — Nesting depth is receiver-resource-bounded: the fixed cap of 32 is removed
 
+<!-- status: accepted -->
+
 | Field | Value |
 | ---- | ---- |
 | **RFC** | 0006 |

@@ -1,5 +1,7 @@
 # Lazy rope-backed decode view: `tlv_view_t` and partial-path routing
 
+<!-- status: accepted -->
+
 Status: **accepted** (2026-07-06 — maintainer-ratified in design review; this is the
 architecture that realizes the direction ratified in
 [ADR-0052](0052-rope-aware-decode-sink-node-type.md): steady-state zero-copy rope decode

@@ -1,5 +1,7 @@
 # npm: ship the TypeScript side as a workspace monorepo — one cross-validated core package, per-transport subpackages, and per-layer slicing via subpath exports (not many packages)
 
+<!-- status: accepted -->
+
 Status: accepted (the npm packaging architecture; **tooling** domain per
 [GOVERNANCE.md](../../.github/GOVERNANCE.md), so an ADR — not an RFC — governs it). The
 conservative foundation (workspace + core `exports` map + a transport scaffold)

@@ -1,5 +1,7 @@
 # ACL-cache coherence is a published-generation stamp, not a dirty flag
 
+<!-- status: accepted -->
+
 Status: **accepted; implemented** (2026-08-06, for [#880](https://github.com/avatarsd-llc/libtracer/issues/880)). `acl_cache_dirty` is gone and validity is derived from the invalidation counter, as decided — but the counter and the published stamp share ONE word rather than two, because two words cost a second load on the gate's fast path and the bench said so; see **Erratum 1** below, which is the shipped encoding. The acceptance instrument is `core/tests/acl_cache_race_test.cpp`: it reddens on the `{gen, dirty}` implementation (30/30 runs, ~4–5 k stale verdicts per run, both signs — fail-open and fail-closed) and greens on the shipped form (40/40 runs), with TSan clean on the same interleaving. That redden evidence covers the PREDECESSOR only; **Erratum 2** records what it took to cover the shipped CAS as well.
 
 The per-vertex effective-ACE cache is invalidated **lock-free** from an ancestor `:acl` write (`mark_acl_cache_dirty`, `core/include/libtracer/vertex.hpp:1854-1864`, fanned out by `graph_t::mark_subtree_acl_dirty` under only `shared_lock(map_mutex_)`), while it is rebuilt under the vertex stripe lock. We decide that cache validity is expressed as a single published-generation stamp compared against the invalidation counter — `acl_published_gen == acl_gen` — and **not** as a separate `acl_cache_dirty` boolean that the rebuilder clears. The boolean is removed.

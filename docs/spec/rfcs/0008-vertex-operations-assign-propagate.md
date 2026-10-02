@@ -5,6 +5,8 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 # RFC 0008 — Vertex operations: `assign` and `propagate`; structural selective propagation; value-agnostic per-vertex `delivery_mode`
 
+<!-- status: accepted -->
+
 | Field | Value |
 | ---- | ---- |
 | **RFC** | 0008 |

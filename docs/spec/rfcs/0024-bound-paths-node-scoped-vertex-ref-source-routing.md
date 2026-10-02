@@ -5,6 +5,8 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 # RFC 0024 — Bound paths: node-scoped vertex-ref source routing
 
+<!-- status: accepted; superseded-in-part-by: RFC-0029 -->
+
 | Field | Value |
 | ---- | ---- |
 | **RFC** | 0024 |
@@ -19,9 +21,8 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | **Scope** | **v-NEXT. This RFC explicitly does not gate v0.7.0.** |
 | **Descends from** | [#504](https://github.com/avatarsd-llc/libtracer/issues/504) (client-originated binding — closed on the bench-gated ruling), [#788](https://github.com/avatarsd-llc/libtracer/issues/788) (the five questions, made normative here in §8) |
 
-> **Numbering note.** 0012 was closed unmerged, 0015 was withdrawn (PR #446); neither gap is
-> reusable — see [RFC-0016](0016-composed-branch-read.md) §ghost history and RFC-0023's numbering
-> note. 0014 is a real document. 0024 is the next unused number.
+> **Numbering note.** Numbering gaps and why they are not reused are recorded in the
+> [ADR and RFC index](../../adr-rfc-index.md#numbering-gaps).
 
 ---
 

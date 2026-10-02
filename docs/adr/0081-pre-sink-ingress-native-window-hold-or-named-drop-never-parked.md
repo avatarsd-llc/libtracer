@@ -1,5 +1,7 @@
 # Pre-sink ingress is held in the transport's native flow-control window or dropped with a named counter — never parked inside the library
 
+<!-- status: accepted -->
+
 Status: **accepted** (maintainer-ratified 2026-08-12, grilling session for [#1114](https://github.com/avatarsd-llc/libtracer/issues/1114)). This is the once-for-all hold/drop ruling that issue's definition-of-done demanded — recorded here exactly once and cited by the siblings [#1101](https://github.com/avatarsd-llc/libtracer/issues/1101), [#1102](https://github.com/avatarsd-llc/libtracer/issues/1102) and [#1103](https://github.com/avatarsd-llc/libtracer/issues/1103). Composes with [ADR-0042](0042-refcounted-receiver-seam-view-delivery.md) (the receiver seam and its no-library-buffer commitment) and [ADR-0041](0041-terminus-arena-decode-span-contract.md) §5 (memory policy lives at the injection seams).
 
 ## Context

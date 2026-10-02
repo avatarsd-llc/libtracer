@@ -1,5 +1,7 @@
 # Compile-time dispatch where identity is per-target and the path is hot; runtime dispatch where identity is dynamic or the call is wiring-frequency
 
+<!-- status: accepted -->
+
 Status: accepted. Supersedes [ADR-0016](0016-substrate-zero-copy-layer-namespaces-no-templates-through-seam.md) §Decision 3 (the runtime-polymorphic `mem_backend_t` vtable and the "templates never cross the seam" rule); supersedes the receiver-signature spelling of [ADR-0042](0042-refcounted-receiver-seam-view-delivery.md) §1 and fulfills its §4 (the rope overload, now that rope-aware decode is committed); maintainer-ratified 2026-07-04 (revised same day: the net-plane control structures stay runtime-dispatched — see §4). **Amended 2026-07-05: §3's fn-ptr receiver conversion is DEFERRED — `std::function` is retained on the delivery path pending a measured need (see [§Amendment](#amendment-2026-07-05-fn-ptr-receiver-conversion-deferred)).**
 
 ## Context

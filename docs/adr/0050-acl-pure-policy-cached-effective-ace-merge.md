@@ -1,5 +1,7 @@
 # ACL evaluation is a pure per-target policy over typed ACEs, with the effective-ACE merge cached graph-side and invalidated by generation
 
+<!-- status: accepted -->
+
 Status: accepted. Gives the ALLOW-only-MCU vs full-DENY-host split of [ADR-0020](0020-acl-nfsv4-style-aces-with-inheritance.md) its implementation seam (the `security_acl` module the code comments have promised); selected per target under the [ADR-0047](0047-build-time-closed-module-sets-compile-time-seams.md) appropriateness rule; maintainer-ratified 2026-07-04.
 
 > **Amendment (2026-07-08): the cached effective merge is implemented, subtree-precise via the [ADR-0057](0057-graph-composite-vertex-tree.md) child links.** §2's cache landed as `effective_acl_t` (`security_acl.hpp` — the pure merge semantics: own ACEs first, ancestors nearest-first filtered to `INHERIT`, open-by-default over an empty merge, any-present-ACE-closes) plus a per-vertex cached merged-ACE list behind `vertex_t::with_effective_aces`. Invalidation is **subtree-precise** rather than the generation counter sketched here: a `:acl` write re-marks the written vertex's subtree dirty by walking its Composite child links (wiring-frequency), and a dirty vertex rebuilds lazily on its next check — no graph-global generation exists. The correctness note stands: only the merge is cached, never a verdict.

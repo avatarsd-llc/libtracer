@@ -1,5 +1,7 @@
 # The CAN advertise carries a producer generation, and reassembly is keyed by it — not by the recurring base endpoint
 
+<!-- status: accepted -->
+
 Status: **partially implemented** (2026-08-06, for [#909](https://github.com/avatarsd-llc/libtracer/issues/909); residue 2 closed 2026-08-14 for [#1011](https://github.com/avatarsd-llc/libtracer/issues/1011)). Decision 3 shipped; decisions 1 and 2 are **declined** — the wire change was re-decided and refused, and residue 2 was closed instead by a receiver-local lap test. See *Implementation status*.
 
 The CAN transport shifts a libtracer path onto a scarce 12-bit endpoint space (`can::kEndpointBits = 12`, `kEndpointMax = 4095`), allocating a run of `slice_count` slots per send and **wrapping** the base back to `kCanFirstDataEndpoint` when the space is exhausted (`transport_can::alloc_base`, `core/src/transport_can.cpp:214-231`). Base endpoints therefore recur after ~4094 consumed slots — this is routine, not exceptional. We decide that a producer-monotonic **generation** rides every `advertise_t`, and that the receive-side reassembly group is identified by `(origin, generation)`, so a reused base can never be confused with a live or stale binding of the same base.

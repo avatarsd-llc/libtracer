@@ -1,5 +1,7 @@
 # External subscription mutations are observable, at the admission door
 
+<!-- status: accepted -->
+
 Status: **ACCEPTED (2026-08-06).** Adds `graph_t::set_subscription_observer` and `sub_event_t` to the L4 host API. No wire change and no new wire operation — the events describe `:subscribers[]` writes the protocol already carries, and the observer is a *local, owner-facing* API in the [RFC-0009](../spec/rfcs/0009-vertex-removal-and-subscriber-eviction.md) §A.1 sense. Rests on [ADR-0049](0049-field-write-single-subscriber-admission-door.md)'s single admission door and [ADR-0018](0018-access-control-authorization-pluggable-subject-token.md)'s caller context; a `core/CHANGELOG.md` note covers the API addition.
 
 ## Context

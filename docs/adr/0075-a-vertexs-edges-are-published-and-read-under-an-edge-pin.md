@@ -1,5 +1,7 @@
 # A vertex's edges are published, and the fan-out reads them under an edge pin
 
+<!-- status: accepted -->
+
 Status: **ACCEPTED (2026-08-03).** Implements the fan-1 half of [#635](https://github.com/avatarsd-llc/libtracer/issues/635) — the half [PR #708](https://github.com/avatarsd-llc/libtracer/pull/708) left open when it closed the fan-0 half with the `own_subs_ordered() == 0` gate. Corrects [ADR-0064](0064-lkv-publish-is-waiterless-and-the-slot-becomes-lock-free.md)'s "the `snapshot_edges` lock is free where it sits", which was measured at one thread. Answers the reclamation question [ADR-0072](0072-one-reclamation-domain-graph-owned-and-backend-injected.md)'s supersession explicitly left open for this issue, **without** rebuilding the generalized domain that supersession rejected. No wire change; a `core/CHANGELOG.md` note covers `vertex_t::add_edge`'s new failure answer.
 
 ## Context

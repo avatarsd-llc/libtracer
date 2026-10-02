@@ -1,5 +1,7 @@
 # The refcounted receiver seam: transports MAY hand up owning frames (`view_t`), buffers come from a host-injected `mem_backend_t`, and big WRITE payloads may store as frame subviews
 
+<!-- status: accepted; superseded-in-part-by: ADR-0047 -->
+
 Status: accepted. **Implements [ADR-0038](0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md) §4** (the receiver buffer-lifetime seam) and the M5+ staged follow-on pinned in [ADR-0041](0041-terminus-arena-decode-span-contract.md) §2. Resolves [#173](https://github.com/avatarsd-llc/libtracer/issues/173) (maintainer-ratified 2026-07-03).
 
 ## Context

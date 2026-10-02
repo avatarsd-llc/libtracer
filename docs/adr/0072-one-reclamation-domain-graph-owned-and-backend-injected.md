@@ -1,5 +1,7 @@
 # One reclamation domain: graph-owned, backend-injected, type-erased
 
+<!-- status: superseded -->
+
 Status: **SUPERSEDED (2026-08-01) by the [#576](https://github.com/avatarsd-llc/libtracer/issues/576) direction-3 maintainer ruling — an explicit public collector.** §4's `#684` half (immutability by construction) **shipped and stands**; the domain itself is not built and will not be built for #576. [#635](https://github.com/avatarsd-llc/libtracer/issues/635) **keeps the open reclamation question** — see §Supersession, which is normative over everything below it. The ADR is kept as the record of a design that was tried, measured, and rejected on numbers. This was the reuse [ADR-0069](0069-lkv-slot-is-a-compile-time-policy-hazard-reclamation.md) §4 anticipated: *"the hazard machinery landed here is expected to be reusable there, and that is a reason to land this first."* It landed; that reuse is what was refuted.
 
 ## Supersession (2026-08-01) — why the domain died, and what replaced it for #576

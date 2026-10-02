@@ -6,9 +6,15 @@ Copy this file to docs/spec/rfcs/NNNN-short-title.md (NNNN = the RFC number,
 sequential and zero-padded; record the tracking issue in the table below).
 See GOVERNANCE.md §"Spec changes" for the process:
 open an `rfc`-labelled issue first, then PR the document; it stays open ≥14 days.
+
+Keep the status key under the title in step with the Status row; it feeds
+docs/adr-rfc-index.md (run `python3 tools/gen_record_index.py`). Values and the
+supersession keys are documented at the top of that script.
 -->
 
 # RFC NNNN — {Short title}
+
+<!-- status: draft -->
 
 | Field | Value |
 | ---- | ---- |

@@ -1,5 +1,7 @@
 # Allocation-store composition defaults to per-plane (MID), injected per target
 
+<!-- status: accepted -->
+
 Status: **accepted** (2026-08-15; drafted 2026-08-06 and merged 2026-08-06 as [PR #940](https://github.com/avatarsd-llc/libtracer/pull/940), for [#873](https://github.com/avatarsd-llc/libtracer/issues/873)), **amended 2026-08-20** — the title's "defaults to per-plane (MID)" is **withdrawn**, and the `NARROW` / `MID` / `WIDE` spelling used for composition throughout the body is **retired** in favour of **folded / per-plane / per-thread**. Read the whole document below through §Amendment (2026-08-20), at the end; the filename and the body text stand as the record of what was decided in August 2026.
 
 > **The status line lagged the facts.** This ADR read `proposed` from its merge until 2026-08-15

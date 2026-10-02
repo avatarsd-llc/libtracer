@@ -1,5 +1,7 @@
 # Configuration is a named traits type, bound once — not a template parameter
 
+<!-- status: accepted -->
+
 Status: **accepted.** Supersedes [ADR-0068](0068-build-configuration-is-plain-cpp-config-header.md) §2 (the "`basic_graph_t<config_t>` follow-on"), which is hereby **withdrawn as a plan** on measurement. Keeps everything else ADR-0068 decided: configuration stays generated, type-checked plain C++, delivered through one header, never a preprocessor definition.
 
 ## Context

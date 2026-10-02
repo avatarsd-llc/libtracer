@@ -1,5 +1,7 @@
 # Implementing RFC-0004 (remote operation addressing): `FWD`/`FIELD` in `tr::wire`, hop-by-hop forwarding in the router, zero-copy `src` accumulation, the route-handle inside the transport
 
+<!-- status: accepted -->
+
 Status: accepted. Records *how* the reference cores (C++/TS/Rust) implement the now-accepted
 [RFC-0004](../spec/rfcs/0004-remote-operation-addressing.md) (path-as-route, `FWD` `0x0F` /
 `FIELD` `0x10`, accumulated return-route, the route-handle). RFC-0004 fixes the *wire* (the

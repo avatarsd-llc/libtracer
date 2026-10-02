@@ -1,5 +1,7 @@
 # ADR-0057 — Graph-as-Composite: a parent/children vertex tree replaces the flat full-key map
 
+<!-- status: accepted -->
+
 Status: accepted (maintainer ratified 2026-07-08 grill)
 
 ## Context

@@ -1,5 +1,7 @@
 # The host transport is a separate translation unit with a shared-nothing epoll model
 
+<!-- status: accepted -->
+
 Status: **accepted (design); not implemented.** Records two decisions that were previously unrecorded: *why the shipped TCP server multiplexes on one `poll()` thread* (a choice that has lived only as a code comment citing [#362](https://github.com/avatarsd-llc/libtracer/issues/362)), and *what a many-core host does instead*. Binds through [ADR-0047](0047-build-time-closed-module-sets-compile-time-seams.md)'s build-time module sets; upholds [ADR-0065](0065-failable-allocation-gets-its-own-seam-block-source.md) (allocation reports failure by value). **Bounded by its own erratum: the prerequisite bench now measures the threshold — limits 2 and 3 bind above ~4 000 concurrent peers, and below that width this decision is not yet paid for. See §Consequences.**
 
 ## Context

@@ -5,6 +5,8 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 # RFC 0016 — Composed branch read: a plain READ of a branch serves the folded POINT tree of its registered subtree
 
+<!-- status: accepted -->
+
 | Field | Value |
 | ---- | ---- |
 | **RFC** | 0016 |
@@ -16,10 +18,8 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | **Tracking issue** | none — design ruled in-session 2026-07-20; implementation landed first via [PR #451](https://github.com/avatarsd-llc/libtracer/pull/451) |
 | **Target spec version** | v1 (draft refinement — occupies behavior RFC-0005 §C explicitly left open) |
 
-> **Numbering note.** 0012, 0014 and 0015 are skipped deliberately — each carries ghost
-> history (0012: the dtype/direction draft of PR #416, closed unmerged; 0014: a phantom
-> mislabel, never a file; 0015: PR #446, withdrawn under the type-agnosticism gate) — so
-> this RFC takes **0016**, the lowest number with no prior use.
+> **Numbering note.** Numbering gaps and why they are not reused are recorded in the
+> [ADR and RFC index](../../adr-rfc-index.md#numbering-gaps).
 
 ## Summary
 
