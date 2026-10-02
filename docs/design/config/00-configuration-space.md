@@ -233,7 +233,6 @@ is a knob the fragment does not state at all (#1244).
 | `acl_policy_t` (`config.hpp:default_config_t::acl_policy_t`) | policy type | `allow_only_policy_t` | inherited — the full policy is not selectable |
 | `lkv_slot_t` (`config.hpp:default_config_t::lkv_slot_t`) | policy type | `single_writer_slot_t` | `single_writer_slot_t` on every chip, with `kSingleWriter = true` and `guard_t = tr::esp::critical_guard_t`; inherited on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:if(LIBTRACER_SPIN_WAIT_SAFE)`) |
 | `kSpinWaitSafe` (`config.hpp:inline constexpr bool kSpinWaitSafe`) | target fact | `true` | derived from `IDF_TARGET` — `false` on every chip, `true` on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:set(LIBTRACER_SPIN_WAIT_SAFE true)`) |
-| `kWeaklyOrdered` (`config.hpp:default_config_t::kWeaklyOrdered`) | target fact | `true` | inherited — every ESP chip is weakly ordered, which is the default |
 | `kBusLinks` (`config.hpp:default_config_t::kBusLinks`) | module presence | `false` — opt-in since v0.17.0 (#1670) | menuconfig `CONFIG_LIBTRACER_BUS_LINKS`, default `n`; CAN is offered only with it |
 | `kSelfHealLinks` (`config.hpp:default_config_t::kSelfHealLinks`) | module presence | `false` — opt-in since v0.17.0 (#1670) | menuconfig `CONFIG_LIBTRACER_SELF_HEAL_LINKS`, default `n` (`integrations/esp-idf/libtracer/CMakeLists.txt:set(LIBTRACER_SELF_HEAL_LINKS true)`) |
 | `kSelfHealWorkerStackBytes` (`config.hpp:default_config_t::kSelfHealWorkerStackBytes`) | size | `0` — the platform default | menuconfig `CONFIG_LIBTRACER_SELF_HEAL_WORKER_STACK` (`integrations/esp-idf/libtracer/CMakeLists.txt:if(CONFIG_LIBTRACER_SELF_HEAL_WORKER_STACK)`) |
@@ -248,17 +247,14 @@ Each is documented at its declaration with what it costs and when to move it; th
 the reference, not this table. What matters here is the shape: **fourteen knobs, all named, all
 finite.** Three are counts (`kVertexLockStripes`, `kHazardReaderSlots`, `kEdgePinSlots`), one is a
 padding width, one is a per-target RAM ceiling, two are sizes (`kShareThresholdBytes` and the
-thread stack size `kSelfHealWorkerStackBytes`), two are type bindings, two are
-target facts rather than preferences, and two — `kBusLinks`, below, and `kSelfHealLinks` (the
+thread stack size `kSelfHealWorkerStackBytes`), two are type bindings, one is a
+target fact rather than a preference, and two — `kBusLinks`, below, and `kSelfHealLinks` (the
 RFC-0014 S5 link-liveness engine, #1470) — state whether a *module* is present at all. `kSpinWaitSafe` says whether a task on this target may spin
 for a lock another task holds, and the guard in `mem_pool.hpp` reads it to refuse
-`synchronized_pool_t<spin_sync_t>` where the answer is no (#1158). `kWeaklyOrdered` says whether
-the target's memory model may reorder a later relaxed load ahead of an earlier `seq_cst` store,
-and the guard in `vertex.hpp` reads it to refuse a `kDeliverySkipOrder` weaker than `seq_cst`
-(#1143) — the compile-time half of the ordering question whose evidence half is the
-`ubuntu-24.04-arm` CI leg (#1140). Both default to the value that is safe to inherit in silence,
-which for the ordering fact is the STRICT one: asserting on a TSO host costs nothing, while a
-target that wrongly claims TSO disarms the check on the one class it exists for.
+`synchronized_pool_t<spin_sync_t>` where the answer is no (#1158). The memory-ordering fact
+that used to sit beside it, `kWeaklyOrdered`, was removed (#1717): the guard in `vertex.hpp`
+now refuses a `kDeliverySkipOrder` weaker than `seq_cst` on every target (#1143), with the
+`ubuntu-24.04-arm` CI leg (#1140) as the evidence half, so no build can waive it.
 
 `kInstrumentCounters` is the one knob that selects no behaviour at all: it decides whether
 `graph_t` carries the two counters that only tests and benches read (`ancestor_walks()`,

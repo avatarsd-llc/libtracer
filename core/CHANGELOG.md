@@ -16,6 +16,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Breaking
 
+- **`kWeaklyOrdered` is removed, the delivery-skip order assertion is unconditional, and a
+  fragment that still sets the trait no longer compiles
+  ([#1717](https://github.com/avatarsd-llc/libtracer/issues/1717)).** The trait's only effect
+  was to let a build that declared itself TSO (`kWeaklyOrdered = false`) waive the
+  `static_assert` that `kDeliverySkipOrder` is `seq_cst`. Nothing in-tree set it, and the order
+  is `seq_cst` on every target, so the waiver bought nothing. `default_config_t::kWeaklyOrdered`
+  and the derived `tr::graph::kWeaklyOrdered` are gone. `vertex.hpp` now asserts
+  `kDeliverySkipOrder == std::memory_order_seq_cst` on every build. `config.hpp` carries a
+  tripwire: a `config_t` that defines a member `kWeaklyOrdered` fails with a `static_assert`
+  saying it was removed. Nothing changes at run time. **Migration:** delete
+  `static constexpr bool kWeaklyOrdered = ...;` from your `libtracer/config_override.hpp`.
 - **The config member `reader_guard_t` is renamed `guard_t`, and a fragment that still defines
   the old name no longer compiles
   ([#1703](https://github.com/avatarsd-llc/libtracer/issues/1703)).** The guard serializes
