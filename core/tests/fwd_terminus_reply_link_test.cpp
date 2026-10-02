@@ -23,7 +23,8 @@
  *   exactly one reply, on that link, addressed to the request's `src` — and zero name lookups.
  * - The memory-refusal answer (#1612) takes the same inbound link, also with zero lookups.
  * - A BUS link keeps its peer resolution: the reply reaches the directed PEER endpoint, never
- *   the bus's own broadcasting `send`, and it is one by-name lookup.
+ *   the bus's own broadcasting `send`, and it is one by-name lookup. Run only when the build
+ *   binds `tr::net::kBusLinks`; a bus-closed build prints a SKIP for that one case.
  */
 #include <algorithm>
 #include <cstddef>
@@ -225,6 +226,15 @@ int main() {
     test_flat_span_reply_leaves_on_inbound_link();
     test_flat_rope_reply_leaves_on_inbound_link();
     test_refusal_answer_leaves_on_inbound_link();
-    test_bus_reply_keeps_peer_resolution();
+    if constexpr (tr::net::kBusLinks) {
+        test_bus_reply_keeps_peer_resolution();
+    } else {
+        // The one case here that needs the ADR-0044 bus module PRESENT: under
+        // `kBusLinks = false` the router is told `bus_of` is nullptr and mounts the bus as a
+        // point-to-point child, so there is no peer endpoint for the reply to reach. The other
+        // cases are tier-blind and the point-to-point tier is exactly what a bus-closed node
+        // runs, so the target is not `bus`-labelled (the link_token_carry_test precedent).
+        std::printf("bus reply SKIPPED: this build closed the ADR-0044 bus module out\n");
+    }
     return tr::testing::summary("fwd_terminus_reply_link");
 }
