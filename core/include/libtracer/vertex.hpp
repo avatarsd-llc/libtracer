@@ -836,7 +836,7 @@ struct vertex_ext_t {
 using write_seq_t = std::uint32_t;
 
 /**
- * @brief The counter that carries @ref write_seq_t: native where the width is lock-free,
+ * @brief The counter that carries `write_seq_t` — native where the width is lock-free,
  *        otherwise the guarded binding over @ref guard_t (#1715).
  *
  * @ref kForceGuardedRmw selects the guarded binding on a host whose atomics are native, so the
