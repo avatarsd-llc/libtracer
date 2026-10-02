@@ -87,7 +87,6 @@ struct reclaim_qsbr_t;  // reclaim.hpp — grace point: EVERY thread has passed 
  * namespace tr::graph {
  * struct my_node_config_t : default_config_t {
  *     static constexpr std::size_t kCacheLineBytes = 0;  // single-core: no false sharing
- *     static constexpr bool kSingleWriter = true;
  *     using guard_t = my_rtos_critical_section_t;
  * };
  * using config_t = my_node_config_t;
@@ -344,20 +343,6 @@ struct default_config_t {
      * target-configuration change, never an edit to `graph.cpp`.
      */
     using acl_policy_t = allow_only_policy_t;
-
-    /**
-     * @brief Whether every vertex has at most ONE publishing thread, by contract (RFC 0028 §5.5).
-     *
-     * A per-build trait, not a per-vertex bit: the per-build form is the only one that can take
-     * a synchronization primitive out of the binary. It is a PROMISE the integrator makes — the
-     * library cannot detect two tasks publishing one vertex in a release build.
-     *
-     * No slot depends on it for memory safety today: `single_writer_slot_t`'s guard serializes
-     * writers as well as readers, which is why the host default binds that slot with this
-     * trait `false`. Later work on the value path may rely on it. Override fragment:
-     * `static constexpr bool kSingleWriter = true;`.
-     */
-    static constexpr bool kSingleWriter = false;
 
     /**
      * @brief The target's ONE critical-section type (RFC 0028 §5.5): the guard
@@ -815,6 +800,25 @@ static_assert(!defines_weakly_ordered_member<config_t>,
               "so there is nothing left to waive. Delete `static constexpr bool kWeaklyOrdered = "
               "...;` from your libtracer/config_override.hpp.");
 
+/**
+ * @brief Whether the configuration @p C still defines `kSingleWriter`, removed by #1718.
+ *
+ * The removal tripwire's predicate. `default_config_t` no longer defines it, so only a stale
+ * override fragment can.
+ */
+template <class C>
+concept defines_single_writer_member = requires { C::kSingleWriter; };
+
+// The removal tripwire (#1718). `kSingleWriter` was an unchecked promise of one publisher per
+// vertex that no code read; the fused guarded publish (#1715) left it nothing to unlock. A
+// fragment that still sets it would compile on believing it states a contract the library
+// honours. Refuse it, so the line is deleted rather than left to mislead.
+static_assert(!defines_single_writer_member<config_t>,
+              "config_t defines kSingleWriter, which libtracer no longer reads: kSingleWriter was "
+              "removed (#1718). Every LKV slot's guard serializes writers as well as readers, so "
+              "the trait unlocked nothing. Delete `static constexpr bool kSingleWriter = ...;` "
+              "from your libtracer/config_override.hpp.");
+
 // ---------------------------------------------------------------------------------------------
 // Derived spellings. These are what the rest of the library and its consumers actually name;
 // they exist so that introducing @ref config_t moved no call site. Each is exactly its traits
@@ -843,8 +847,6 @@ inline constexpr std::size_t kDeferredReleaseSlots = config_t::kDeferredReleaseS
 inline constexpr std::size_t kQsbrParticipants = config_t::kQsbrParticipants;
 /** @brief @ref default_config_t::acl_policy_t for this build. */
 using acl_policy_t = config_t::acl_policy_t;
-/** @brief @ref default_config_t::kSingleWriter for this build. */
-inline constexpr bool kSingleWriter = config_t::kSingleWriter;
 /** @brief @ref default_config_t::kInstrumentCounters for this build. */
 inline constexpr bool kInstrumentCounters = config_t::kInstrumentCounters;
 /** @brief @ref default_config_t::kForceGuardedRmw for this build. */

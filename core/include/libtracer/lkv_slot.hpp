@@ -153,11 +153,11 @@ concept publishes_under =
  * of instructions and call nothing that can block.
  *
  * **Writers are serialized too.** Nothing here relies on a single publisher: two writers
- * serialize on the guard like a writer and a reader do, which is why the host default binds this
- * slot with `config_t::kSingleWriter` false. The name comes from RFC 0028 §5.5, where the
+ * serialize on the guard like a writer and a reader do, so a build that publishes one vertex
+ * from two threads is still memory-safe. The name comes from RFC 0028 §5.5, where the
  * single-writer build is the one that must bind it.
  *
- * **Why `kSingleWriter` does not let the writer skip the guard, even now the slot is one
+ * **Why one publisher would not let the writer skip the guard, even now the slot is one
  * word.** It is tempting: one publisher, so nothing to exclude on the write side, publish with
  * a single atomic `exchange` and let readers `acquire`. The slot IS one word since RFC 0028
  * slice 3 (an intrusive `value_t*`), so the torn two-word swap the `shared_ptr` slot had is
@@ -166,12 +166,12 @@ concept publishes_under =
  * `release` the displaced value, and if that was the last reference the block is freed under
  * the reader's `retain`. The reader's guard excludes the writer only if the writer's exchange
  * is inside a guard too: exclusion is pairwise, and the single-writer contract says nothing
- * about readers. So the writer keeps the guard on every target, and `kSingleWriter` stays a
- * contract, not a code path. (RFC 0028 §5.5's sentence that a reader's `retain` inside its
- * guard "cannot interleave with the writer's release" once the slot is one word is the claim
- * this paragraph corrects.) `lkv_slot_test`'s one-writer / N-reader run is the test that bites
- * when this is tried: with the writer's guard removed, a reader reads a value after its free
- * (ASan: heap-use-after-free).
+ * about readers. So the writer keeps the guard on every target, which is why the per-build
+ * `kSingleWriter` promise was removed (#1718): it had nothing left to unlock. (RFC 0028 §5.5's
+ * sentence that a reader's `retain` inside its guard "cannot interleave with the writer's release"
+ * once the slot is one word is the claim this paragraph corrects.) `lkv_slot_test`'s one-writer /
+ * N-reader run is the test that bites when this is tried: with the writer's guard removed, a reader
+ * reads a value after its free (ASan: heap-use-after-free).
  *
  * @tparam G A `tr::guard`; the slot takes `G::for_address(this)`. The bound slot uses
  *           `config_t::guard_t`; tests instantiate this template directly with a guard of

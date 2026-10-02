@@ -321,7 +321,7 @@ endif()
 # The LKV slot (#1618, RFC 0028 §5.5) — DERIVED with the spin-wait fact above, because it is
 # the same fact. core refuses any slot that can spin where kSpinWaitSafe is false, so every chip
 # target binds `single_writer_slot_t`, whose one wait is an interrupt-masked critical section
-# (`tr::esp::critical_guard_t`), and states the single-writer contract that slot is named for.
+# (`tr::esp::critical_guard_t`). The single-writer trait it used to state was removed (#1718).
 # The `linux` host target keeps core's default (the same slot over the host mutex guard). The
 # guard header includes only FreeRTOS, so including it from the fragment is not a cycle.
 if(LIBTRACER_SPIN_WAIT_SAFE)
@@ -330,8 +330,7 @@ if(LIBTRACER_SPIN_WAIT_SAFE)
 else()
     set(LIBTRACER_SLOT_INCLUDE "#include \"libtracer_esp/critical_guard.hpp\"\n")
     set(LIBTRACER_SLOT_BINDING
-"    static constexpr bool kSingleWriter = true;
-    using guard_t = tr::esp::critical_guard_t;
+"    using guard_t = tr::esp::critical_guard_t;
     using lkv_slot_t = single_writer_slot_t;
 ")
 endif()

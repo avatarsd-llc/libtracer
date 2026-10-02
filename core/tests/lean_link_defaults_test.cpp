@@ -67,7 +67,7 @@ void test_opt_in_is_one_line_each() {
     check(opted_in_config_t::kBusLinks, "binding kBusLinks = true opts in to the bus tier");
     check(opted_in_config_t::kSelfHealLinks,
           "binding kSelfHealLinks = true opts in to the liveness engine");
-    check(opted_in_config_t::kSingleWriter == default_config_t::kSingleWriter,
+    check(opted_in_config_t::kShareThresholdBytes == default_config_t::kShareThresholdBytes,
           "and every other knob keeps its default");
 }
 
