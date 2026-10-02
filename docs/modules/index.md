@@ -8,10 +8,9 @@ that documents a given header, the **[file map](file-map.md)**; for the bytes on
 wire, the **[bit-level walkthrough](wire-format-bits.md)**.
 
 Pages are ordered by dependency, which is also the layer order: the cross-cutting
-taxonomy and configuration first, then L0 up to the transport plane. Namespaces
-mirror that model — `tr::mem` is L0, `tr::view` is L1, `tr::wire` is the L2/L3
-codec, `tr::graph` is L4, and `tr::net` is the transport plane. Dependencies point
-*up* the layers only.
+taxonomy and configuration first, then L0 up to the transport plane. Which namespace
+holds each layer, and which way dependencies may point, is stated once in
+[`core/STYLE.md` §Namespaces](https://github.com/avatarsd-llc/libtracer/blob/main/core/STYLE.md#namespaces--mirror-the-layer-model).
 
 This reference describes the C++ implementation. What an implementation in any
 language must do is [the specification](../spec/index.md); the

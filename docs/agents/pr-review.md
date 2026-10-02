@@ -216,45 +216,13 @@ that makes `dst` not shrink silently reintroduces routing loops).
 
 ### 2b. The layer model, and the two hard rules
 
-Six layers, bottom-up, and a concept belongs to **exactly one**:
-
-| Layer | Namespace | Concern |
-|---|---|---|
-| L0 — memory substrate | `tr::mem` | buffers, MMIO, pools, DMA, lifetime |
-| L1 — views and ownership | `tr::view` | refcounted segments, ropes, the TLV-as-cast |
-| L2 — frame envelope | `tr::wire` | framing, integrity, wire-time |
-| L3 — TLV semantics | `tr::wire` | the type code, `opt.PL` recursion |
-| L4 — graph endpoint logic | `tr::graph` | vertices, edges, paths, subscriptions, QoS, ACL, FWD |
-| L5 — application semantics | — | what the bytes inside `VALUE` mean |
-
-plus `tr::net` for the transport plane, and the two non-layer namespaces
-`tr::detail` and the tests-only `tr::testing`.
-
-**Hard rule 1 — dependencies point up the layers only** (`core/STYLE.md`). A
-`tr::view` symbol may name a `tr::mem` symbol; **a `tr::mem` symbol naming a
-`tr::view` symbol is a layering violation — grep for it.** There is exactly
-**one sanctioned exception**: `view::segment_t`, the boundary type mutually
-defined with `mem_backend_t` (`alloc` returns `segment_t*`, `destroy` takes
-one). That is the only legitimate `tr::view` hit inside `tr::mem`.
-`segment_ptr_t` is **not** a boundary type, which is why the handle-producing
-helpers (`heap_alloc`, `borrow`, `borrow_const`) live in `tr::view`. A new
-handle-returning function placed in `tr::mem` is this rule's failure mode.
-The layer-neutral bare-`tr` primitives (`sink_slot_t`, and the guard vocabulary
-in `guard.hpp` / `guard_mutex.hpp`) and the `tr::mem` knobs derived from
-`tr::graph::config_t` (ADR-0070) are not violations; `core/STYLE.md` lists them.
-
-**Hard rule 2 — a code sub-namespace never uses an error-concept word.** The
-eight words `frame`, `tlv`, `path`, `schema`, `flow`, `access`, `transport` and
-`version` are reserved by the `tr::` error-identity register (ADR-0009):
-`tr::frame::*` is always an error identity, never a C++ namespace. `tr::` has two
-disjoint registers — concept-keyed means an error on the wire, layer-keyed means
-a namespace in the implementation — and a namespace named after an error concept
-collapses them.
-
-**Where a cast lives is decided by what it produces, not by convenience.**
-`decode(view_t)`, the L1↔L2 cast, lives at **L2** (`tr::wire`) because it
-produces a `tlv_t`. A new cast placed by where it is called from is the same
-defect.
+The namespace for each layer, the two hard rules and where a cast lives are stated
+once, in [`core/STYLE.md` §Namespaces](../../core/STYLE.md#namespaces--mirror-the-layer-model). The
+layers themselves are described in
+[`00-overview.md`](../reference/00-overview.md#the-six-layer-model). Check every new or
+moved symbol against that section; a breach of either hard rule is a finding, not a
+preference. The quickest check for hard rule 1 is to grep the diff for a `tr::view`
+name inside `tr::mem`.
 
 ### 2c. Evidence discipline
 
@@ -284,38 +252,13 @@ defect.
 
 ### 2d. Introspection vocabulary and the counting doctrine
 
-`core/STYLE.md` unified this after #1503, so it is mechanically checkable and a
-new accessor that disagrees is a defect rather than a preference.
-
-| Noun | Meaning |
-|---|---|
-| `capacity` | the **effective** ceiling that actually produced the refusal — never the compile-time default |
-| `in_use` | occupancy, **always used-polarity**; free is derived, never primary |
-| `peak` | high-water mark of `in_use` since construction |
-| `refused` | requests answered **by value** — the caller was told |
-| `dropped` | work **lost** — nobody was told, which is why it must be counted |
-| `largest_refused` | the biggest refused variable-sized request; the tail refuses, so a median tells a sizing operator nothing |
-
-**Used-polarity is not negotiable**, and `refused` and `dropped` are separate
-counters, never one total — the degrade/loss axis is what tells an operator
-whether a number is a sizing problem or a correctness problem.
-`pool_t::available()` is the one shipped free-polarity accessor, kept for
-compatibility and **not** the spelling new code adds.
-
-The counting doctrine, all six worth checking against a diff that adds a counter:
-**failure path only** (the success arm of a hot allocation, delivery or send must
-not gain a single instruction); **counted, never enforced** (nothing in the
-library reads its own counters); **per-seam, never aggregated** (no node-wide
-census — ADR-0067 measured the cacheline storm); **one event, one counter**, with
-cross-plane double counting a defect; **storage, not synchronization** (prefer a
-plain counter under the discipline the resource already has — on rv32 a 64-bit
-atomic takes a hidden libatomic lock per access); and **tuning knobs are not
-limits** (`kMaxInlineIov` and friends select a strategy and report nothing).
-
-A new multi-field snapshot **cites** the snapshot-coherence clause
-(`core/STYLE.md` §Introspection) rather than paraphrasing it a fourth way:
-counters are monotonic and sampled without synchronization, so the intended use
-is the **difference between two snapshots**, never the instant.
+The introspection nouns, the snapshot-coherence clause and the six-rule counting
+doctrine are stated once, in
+[`core/STYLE.md` §Introspection](../../core/STYLE.md#introspection--one-vocabulary-for-every-bounded-resource).
+They are mechanically checkable, so a new accessor, stats field or counter that
+disagrees with them is a defect, not a preference. Check every diff that adds a
+counter against all six doctrine rules. A new multi-field snapshot cites the
+coherence clause by name rather than paraphrasing it.
 
 ### 2e. Term hygiene
 
@@ -367,25 +310,14 @@ them.
 - **SPDX headers**: `SPDX-License-Identifier: Apache-2.0` on code. The spec is
   CC BY 4.0 — a new normative document under `docs/spec/` carries the spec
   licence, not the code one.
-- **Naming** (`core/STYLE.md`): types `snake_case` + `_t` and **never
-  PascalCase**; enum values `SCREAMING_SNAKE`, scoped (`enum class`); functions
-  `snake_case`; members `snake_case_` trailing underscore; constants
-  `kCamelCase`; build-config macros `LIBTRACER_SCREAMING`.
-- **Doxygen `/** … */` block form with `@brief`, everywhere an entity is
-  attached** — not only CI-gated public headers, but `.cpp` files, file-local
-  helpers, static tables, and the Rust (rustdoc `/** */`) and TypeScript (JSDoc)
-  bindings. **Never `///` in any language**; trailing member docs are
-  `/**< … */`. The one exception: statement-level comments **inside function
-  bodies stay `//`**, because an orphan doc block attaches to nothing and trips
-  `WARN_AS_ERROR`. `@param`/`@return` appear **only when informative** —
-  `@param size The size.` is forbidden boilerplate; `@retval nullptr …` is
-  required.
-- **Language profile**: C++23 is the floor on every target. C++26 is
-  opportunistic only, behind `__cpp_*` feature tests with a C++23 fallback.
-  Templating is zero-cost or erased **above** the seam; the ownership seam stays
-  virtual and monomorphic. The MCU profile is `-fno-exceptions -fno-rtti -Os`
-  with `std::expected`-based results and `LIBTRACER_NO_ATOMIC` for single core —
-  a diff that assumes exceptions or RTTI in `core/` is a finding.
+- **Naming, Doxygen comments and the language profile** are stated once, in
+  [`core/STYLE.md`](../../core/STYLE.md):
+  [§Type and value naming](../../core/STYLE.md#type-and-value-naming),
+  [§Documentation](../../core/STYLE.md#documentation--doxygen-ci-enforced) and
+  [§Language profile](../../core/STYLE.md#language-profile). Check a diff against
+  those sections where the `Doxyfile` and `clang-format` gates do not already. A
+  PascalCase type, a `///` comment, or a diff that assumes exceptions or RTTI in
+  `core/` is a finding.
 
 ### 2g. Design questions, subordinate to the two constraints above
 
