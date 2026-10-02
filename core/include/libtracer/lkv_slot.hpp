@@ -277,14 +277,14 @@ class basic_single_writer_slot_t {
 };
 
 /**
- * @brief @ref basic_single_writer_slot_t over this build's `config_t::guard_t` — the
+ * @brief @ref basic_single_writer_slot_t over this build's @ref guard_t — the
  *        name an override fragment binds.
  *
  * A class rather than an alias so `%config.hpp` can forward-declare it: the fragment names the
  * slot before this header has been seen, and the guard it will use is a member of the very
  * traits type the fragment is defining.
  */
-class single_writer_slot_t : public basic_single_writer_slot_t<config_t::guard_t> {};
+class single_writer_slot_t : public basic_single_writer_slot_t<guard_t> {};
 
 /**
  * @brief The process-wide hazard-pointer domain behind @ref hazard_slot_t (ADR-0069 §2/§5).
