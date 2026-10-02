@@ -89,11 +89,11 @@ namespace detail {
  * same `write_m_` critical section as the response write. That is not observable from the
  * outside by racing: the window is a few instructions wide. This hook is where a test HOLDS
  * that instant open, sends into it, and checks the frame arrives; with the store moved back
- * out of the lock the identical test reads an empty socket. Null in production — the cost is
- * one predictable null-check, once per accepted peer, on the (cold) handshake path.
+ * out of the lock the identical test reads an empty socket.
  *
  * Same shape and same rules as `tr::detail::probe_fail_hook`: install it before the peer that
- * should trip it connects, and clear it before the test returns.
+ * should trip it connects, and clear it before the test returns; consulted only when the build
+ * binds `%tr::graph::default_config_t::kFaultInjection` (#1719).
  */
 inline void (*ws_peer_published_hook)() = nullptr;
 

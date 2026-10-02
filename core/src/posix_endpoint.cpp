@@ -159,8 +159,13 @@ bool retry_malformed_call(bool& spent) {
 
 /** @brief The errno the #948 injection seam wants this attempt to fail with, or 0. */
 int injected_write_errno() {
-    return tr::detail::write_fault_inject_hook == nullptr ? 0
-                                                          : tr::detail::write_fault_inject_hook();
+    if constexpr (tr::graph::kFaultInjection) {
+        return tr::detail::write_fault_inject_hook == nullptr
+                   ? 0
+                   : tr::detail::write_fault_inject_hook();
+    } else {
+        return 0;  // the seam is compiled out (#1719): the real syscall always runs
+    }
 }
 
 /** @brief One `send(2)` attempt through the #948 injection seam. */

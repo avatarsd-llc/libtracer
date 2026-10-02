@@ -238,6 +238,7 @@ is a knob the fragment does not state at all (#1244).
 | `kSelfHealLinks` (`config.hpp:default_config_t::kSelfHealLinks`) | module presence | `false` — opt-in since v0.17.0 (#1670) | menuconfig `CONFIG_LIBTRACER_SELF_HEAL_LINKS`, default `n` (`integrations/esp-idf/libtracer/CMakeLists.txt:set(LIBTRACER_SELF_HEAL_LINKS true)`) |
 | `kSelfHealWorkerStackBytes` (`config.hpp:default_config_t::kSelfHealWorkerStackBytes`) | size | `0` — the platform default | menuconfig `CONFIG_LIBTRACER_SELF_HEAL_WORKER_STACK` (`integrations/esp-idf/libtracer/CMakeLists.txt:if(CONFIG_LIBTRACER_SELF_HEAL_WORKER_STACK)`) |
 | `kInstrumentCounters` (`config.hpp:default_config_t::kInstrumentCounters`) | instrumentation | `false` — compiled out | inherited — only the core test build and `bench/`'s `LIBTRACER_INSTRUMENT_COUNTERS` bind it (#1664) |
+| `kFaultInjection` (`config.hpp:default_config_t::kFaultInjection`) | instrumentation | `false` — compiled out | inherited — only the core test build binds it, through `core/tests/instrumented/` (#1719) |
 | `kAllowInsecureTls` (`config.hpp:default_config_t::kAllowInsecureTls`) | capability | `false` — a SPEC `insecure` key is refused | inherited — only the `quic` workflow's second run binds it, through `core/tests/insecure-tls/` |
 
 Two CMake variables survive for one transition release, `-DLIBTRACER_ACL_FULL` and
@@ -263,7 +264,9 @@ now refuses a `kDeliverySkipOrder` weaker than `seq_cst` on every target (#1143)
 `target_canonical_resolves()`), each a relaxed 64-bit `fetch_add` — a libatomic call on rv32 —
 on a node-wide line. The shipped default compiles them out; the core test build opts in through
 the checked-in preset fragment `core/tests/instrumented/`, which yields to any fragment a CI leg
-supplies (#1664).
+supplies (#1664). `kFaultInjection` is its twin for the test-only fault-injection hooks
+(`probe_fail_hook` and three transport seams): closed out, the default allocation path carries
+no hook branch and no hook variable reaches the archive (#1719).
 
 Three of the sixteen carry no build-system variable at all. `kMaxVertexBytes64` / `kMaxVertexBytes32`,
 `kShareThresholdBytes` and `kHeapSmallBlockBytes` are preset members: an application moves them by declaring its own

@@ -61,11 +61,11 @@ namespace detail {
  * closed descriptor. That is not observable from the outside by racing: the window is two
  * instructions wide. This hook is where a test HOLDS the mid-publish instant open, broadcasts
  * into it, and checks the frame arrives at the peer being accepted; with the stores unlocked
- * and reordered the identical test reads an empty socket. Null in production — the cost is
- * one predictable null-check, once per accepted connection, on the (cold) accept path.
+ * and reordered the identical test reads an empty socket.
  *
  * Same shape and same rules as `ws_peer_published_hook`: install it before the peer that
- * should trip it connects, and clear it before the test returns.
+ * should trip it connects, and clear it before the test returns; consulted only when the build
+ * binds `%tr::graph::default_config_t::kFaultInjection` (#1719).
  */
 inline void (*tcp_peer_publishing_hook)() = nullptr;
 
@@ -498,7 +498,8 @@ class transport_tcp_server : public stream_server_base_t {
     void on_slot_reset(session_base_t& s) override;
 
     /** @brief Fire `detail::tcp_peer_publishing_hook` inside the accept-side `write_m_`
-     *         hold — the mid-publish instant a test holds open (#891). */
+     *         hold — the mid-publish instant a test holds open (#891). Empty unless the
+     *         build binds `kFaultInjection` (#1719). */
     void on_slot_publishing() override;
 
     // The slot vector, the listen socket, the accept/poll/teardown machinery and the

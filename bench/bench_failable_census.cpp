@@ -124,7 +124,8 @@ std::size_t g_bytes = 0;
  *
  * The `guard` mode's injection point. It sits in the real `operator new` because that is
  * what an UNGUARDED `std::vector::reserve` actually calls — `tr::detail::probe_fail_hook`
- * is consulted only from inside the `try_*` seams, so a harness built on it would pass
+ * is consulted only from inside the `try_*` seams (and only in a build that binds
+ * `kFaultInjection`, which the bench preset does not), so a harness built on it would pass
  * vacuously at exactly the sites this gate exists to catch.
  *
  * @par Why a size threshold and not "fail the k-th allocation"

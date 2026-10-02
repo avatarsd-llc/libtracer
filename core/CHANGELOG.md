@@ -78,6 +78,20 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   guard) and spell `tr::guard`, `tr::guard_scope_t`, `tr::mutex_guard_t`, `tr::no_guard_t` and
   `tr::graph::guard_t`; drop a forward declaration of the guard types, or move it to
   `namespace tr`; mark a custom pool policy's `lock()` / `unlock()` `noexcept`.
+- **The test-only fault-injection hooks are compiled in only when the build binds
+  `config_t::kFaultInjection`, which defaults to `false`
+  ([#1719](https://github.com/avatarsd-llc/libtracer/issues/1719)).** The four hooks are
+  `tr::detail::probe_fail_hook` (and its gate `tr::detail::probe_hook_ok`),
+  `tr::detail::write_fault_inject_hook`, `tr::net::detail::ws_peer_published_hook` and
+  `tr::net::detail::tcp_peer_publishing_hook`. Before, a shipped node paid a load and a branch
+  for them, and the `probe_fail_hook` check sat on every draw from the process-default block
+  source and on every nothrow growth. Closed out, each check is an `if constexpr` that compiles
+  to nothing, `probe_hook_ok` is the constant `true`, and no hook variable is emitted into
+  `libtracer.a`. The declarations stay, so code that arms a hook still compiles; on a default
+  build arming one does nothing. The core test build opts in through its preset fragment
+  (`core/tests/instrumented`). `mem_source.hpp` now includes `config.hpp`. **Migration:** a
+  build of your own that arms any of these hooks adds
+  `static constexpr bool kFaultInjection = true;` to its `libtracer/config_override.hpp`.
 
 ### Changed
 
@@ -119,6 +133,11 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   whichever of the two headers it reached the names through; both go in the next release. **Migration:** include `libtracer/can_framing.hpp` in place of
   `libtracer/view_can.hpp`, and spell `tr::view::can_frame_mode_t` as
   `tr::net::can::can_frame_mode_t` (and likewise for the other six names).
+- **`tr::rmw_counter_t::preset` is private**
+  ([#1719](https://github.com/avatarsd-llc/libtracer/issues/1719)). A store that races every
+  bump is a test tool, not API. A test reaches it through `tr::rmw_counter_test_door_t`, which
+  `guard.hpp` declares and the library never defines, the same pattern as
+  `tr::graph::vertex_seq_test_door_t`. The type is unreleased, so no shipped code is affected.
 - **An observed eager write no longer takes the graph-wide sweep lock because some OTHER
   vertex holds an `assign` mark ([#1712](https://github.com/avatarsd-llc/libtracer/issues/1712)).**
   While any mark was pending, every observed write rendered its key (one heap block) and took

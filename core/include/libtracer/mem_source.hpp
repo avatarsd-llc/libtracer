@@ -15,6 +15,7 @@
 #include <span>
 #include <type_traits>
 
+#include "libtracer/config.hpp"
 #include "libtracer/guard.hpp"
 
 /**
@@ -33,10 +34,14 @@ namespace tr::detail {
  *
  * The nothrow soft-fail paths cannot be exercised by really exhausting the host heap, so
  * this is their failure-injection tool — the global-heap twin of the failing `mem_backend_t`
- * the `graph_value_backend_test` precedent injects (ADR-0060 §3). Production never sets it;
- * the cost is one predictable null-check on the growth/probe paths and on the
- * process-default @ref tr::mem::heap_source_t draw (the one a `value_t` block takes when no
- * source is injected). It lives here, at L0, so that source can see it.
+ * the `graph_value_backend_test` precedent injects (ADR-0060 §3). It lives here, at L0, so
+ * the process-default @ref tr::mem::heap_source_t draw (the one a `value_t` block takes when
+ * no source is injected) can see it.
+ *
+ * Consulted only when the build binds `%tr::graph::default_config_t::kFaultInjection` (#1719):
+ * the test build does, a shipped node does not. Closed out, @ref probe_hook_ok is the
+ * constant `true`, the growth/probe paths and the default-source draw carry no load or branch
+ * for it, and this variable is never odr-used, so no definition of it is emitted.
  */
 inline bool (*probe_fail_hook)(std::size_t bytes) noexcept = nullptr;
 
@@ -45,10 +50,16 @@ inline bool (*probe_fail_hook)(std::size_t bytes) noexcept = nullptr;
  *        the hook admits @p bytes.
  *
  * For soft-fail sites whose failure leg is not the probe itself (e.g. a host-profile
- * `catch (bad_alloc)`) but that must still honor the test seam.
+ * `catch (bad_alloc)`) but that must still honor the test seam. The constant `true` unless
+ * the build binds `kFaultInjection`.
  */
 [[nodiscard]] inline bool probe_hook_ok(std::size_t bytes) noexcept {
-    return probe_fail_hook == nullptr || probe_fail_hook(bytes);
+    if constexpr (::tr::graph::kFaultInjection) {
+        return probe_fail_hook == nullptr || probe_fail_hook(bytes);
+    } else {
+        (void)bytes;
+        return true;
+    }
 }
 
 }  // namespace tr::detail
