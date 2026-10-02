@@ -212,7 +212,7 @@ class rmw_counter_t {
     /**
      * @brief Set the count outright. For a test that must reach the wrap without 2^32 bumps,
      *        and for nothing else: a store races every bump. Reached only through
-     *        @ref rmw_counter_test_door_t (#1719).
+     *        `%tr::rmw_counter_test_door_t` (#1719).
      */
     void preset(T value) noexcept { value_.store(value, std::memory_order_seq_cst); }
 
