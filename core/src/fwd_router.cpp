@@ -1342,7 +1342,7 @@ void fwd_router_t::link_down(std::string_view link_name) {
     graph_.evict_link_edges(link_name);
     clear_link(link_name);
     // A deferred AWAIT's reply has nowhere to go once its link is down: release its waiter
-    // (ADR-0084). With no receiver-side deadline, this is how an unanswered one ends.
+    // (ADR-0084). The receiver holds no deadline, so this is how an unanswered one ends.
     const std::lock_guard lock(awaits_.m);
     cancel_awaits_locked(link_name, false);
 }
@@ -3929,10 +3929,9 @@ graph::result_t<void> fwd_router_t::defer_await(const graph::deferred_await_t& r
     p->source = &source;
     p->block_bytes = bytes;
     p->ctx = ctx;
-    // TODO(ADR-0084): the deadline. The request's `await_timeout` (req.timeout) is not
-    // enforced on the receiver: libtracer has no timers, and whether the receiver holds a
-    // deadline at all, or the requester alone owns the timeout, awaits a maintainer ruling.
-    // Until then the waiter resolves on change, on link_down / remove_child, or at teardown.
+    // No deadline is stored: the requester owns the timeout (RFC-0004 Amendment 3, ADR-0084),
+    // so `req.timeout` is ignored here. A waiter whose vertex never changes ends on link_down /
+    // remove_child or at teardown, and it costs only this block of its own link's source.
     p->echo_ts = req.echo_ts;
     p->name_len = name.size();
     p->dst_len = req.dst.size();

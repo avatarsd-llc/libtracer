@@ -425,8 +425,9 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   ([ADR-0084](../docs/adr/0084-remote-await-completes-from-a-receiver-side-waiter.md)).** The
   router answers it later, from the writer's thread, when the awaited vertex changes. Its waiter
   is one block of the receiving link's rx source, released when the link goes down or the router
-  is destroyed. The router adds no thread and reads no clock; the request's `await_timeout` is
-  not yet enforced on the receiver (open in ADR-0084). Replies on one link may now arrive in a
+  is destroyed. The router adds no thread and reads no clock. The request's `await_timeout` is
+  ignored on the receiver: the requester owns the deadline (RFC-0004 Amendment 3), so a
+  requester that relied on a terminus `TIMEOUT` reply ends its wait at its own deadline. Replies on one link may now arrive in a
   different order than their requests, which `reference/04` already allows. New public API:
   `graph::await_waiter_t`, `graph_t::arm_await` / `disarm_await` / `await_value`,
   `vertex_t::arm_waiter` / `disarm_waiter`, `op_resolver_t::on_await_defer` with

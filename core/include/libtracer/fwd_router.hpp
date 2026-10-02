@@ -2251,7 +2251,9 @@ class fwd_router_t {
      *
      * Holds no buffer: every waiter is a block of the receiving link's own rx source. It
      * holds no thread and reads no clock either: libtracer has no timers. A pending waiter
-     * resolves on change, on `link_down` / `remove_child`, or when the router is destroyed.
+     * resolves on change, on `link_down` / `remove_child`, or when the router is destroyed. The
+     * request's `await_timeout` is ignored: the requester owns the deadline (RFC-0004
+     * Amendment 3).
      * Lock order: `m` before a vertex stripe (a cancel disarms under it); a writer fires a
      * waiter with no stripe lock held, so it may take `m`.
      */

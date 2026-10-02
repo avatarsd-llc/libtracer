@@ -12,9 +12,9 @@
  * - **the receive context returns.** The receive call for an AWAIT returns at once, sends nothing,
  *   and a READ sent after it on the SAME link is answered while the AWAIT is still pending;
  * - **on change.** A write to the awaited vertex sends the AWAIT's RESULT, carrying the value;
- * - **no receiver deadline (TODO).** With no write, the waiter stays pending until its link goes
- *   down or the router is destroyed: libtracer has no timers, and the deadline path awaits a
- *   maintainer ruling (ADR-0084);
+ * - **no receiver deadline.** The requester owns the timeout (RFC-0004 Amendment 3): with no
+ *   write, the waiter stays pending past its `await_timeout` and answers nothing, until its link
+ *   goes down or the router is destroyed;
  * - **the receiver pays.** The waiter is a block of the receiving link's own rx source, held
  *   while the AWAIT is pending and given back once it is answered, cancelled or torn down.
  */
@@ -251,13 +251,12 @@ void read_after_pending_await_is_answered_first() {
 }
 
 /**
- * @brief TODO(ADR-0084), pinned as it stands: the receiver enforces no deadline. A 20 ms AWAIT
- *        with no write stays pending and answers nothing; its link going down releases it.
- *
- * When the deadline ruling lands, this case becomes the timeout case.
+ * @brief The receiver enforces no deadline (RFC-0004 Amendment 3): a 20 ms AWAIT with no write
+ *        stays pending past its `await_timeout` and answers nothing; its link going down
+ *        releases it, and its block goes back to the link's source.
  */
-void no_receiver_deadline_yet() {
-    std::printf("TODO(ADR-0084): no receiver-side deadline — the waiter waits for a write:\n");
+void receiver_ignores_await_timeout() {
+    std::printf("the receiver ignores await_timeout — the requester owns the deadline:\n");
     node_t n;
     const long base = n.rx.live();
     n.link.inject(b_await("sink", 20ms));
@@ -335,7 +334,7 @@ void concurrent_writes_race_arming() {
     std::atomic<bool> armed_all{false};
     std::thread writer([&] {
         // Keep writing until every AWAIT has been answered: a waiter armed after the last
-        // write would otherwise wait forever (there is no receiver deadline yet).
+        // write would otherwise wait forever (the receiver holds no deadline).
         while (!armed_all.load() || n.link.count() < kRounds)
             (void)n.graph.write(n.sink, make_value(b_value_u32(kChanged)));
     });
@@ -350,7 +349,7 @@ void concurrent_writes_race_arming() {
 
 int main() {
     read_after_pending_await_is_answered_first();
-    no_receiver_deadline_yet();
+    receiver_ignores_await_timeout();
     many_awaits_each_answer_once();
     link_down_releases_waiters();
     teardown_with_pending_awaits();

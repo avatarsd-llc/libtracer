@@ -228,8 +228,10 @@ struct link_token_seam_t {
  * stack, so a sink that keeps the wait copies them before it returns.
  */
 struct deferred_await_t {
-    vertex_handle_t vertex;            /**< @brief The awaited vertex. */
-    std::chrono::nanoseconds timeout;  /**< @brief The request's deadline (or the default). */
+    vertex_handle_t vertex; /**< @brief The awaited vertex. */
+    /** @brief The request's `await_timeout` (or the default): the requester's own deadline,
+     *         which a sink MAY ignore (RFC-0004 Amendment 3). */
+    std::chrono::nanoseconds timeout;
     std::string_view subject;          /**< @brief The ACL subject the gate passed. */
     const inbound_ref_t* inbound;      /**< @brief Where it arrived and who sent it. */
     std::span<const std::byte> dst;    /**< @brief Reply `dst` (the request's `src`). */

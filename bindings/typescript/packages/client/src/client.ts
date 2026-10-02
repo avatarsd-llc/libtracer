@@ -36,6 +36,7 @@ import type { ValueOptions, SubscriberOptions } from './tlv.js';
 import {
   FWD_OP,
   FWD_KIND,
+  FWD_ERROR,
   encodeFwd,
   parseFwdTlv,
   replyErrorCode,
@@ -181,6 +182,24 @@ interface Pending {
   dst: string[] | null;
 }
 
+/** @brief The request deadline used when `requestTimeoutMs` is not given. */
+const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+
+/**
+ * @brief A remote await's local deadline in ms (RFC-0004 Amendment 3: the requester
+ * owns it). The shorter of the request deadline and the await timeout; the request
+ * deadline falls back to its 10 s default when disabled, so an await always ends.
+ */
+export function awaitDeadlineMs(requestTimeoutMs: number, timeoutNs?: bigint): number {
+  const request =
+    requestTimeoutMs > 0 && Number.isFinite(requestTimeoutMs)
+      ? requestTimeoutMs
+      : DEFAULT_REQUEST_TIMEOUT_MS;
+  if (timeoutNs === undefined) return request;
+  const own = Math.max(1, Math.ceil(Number(timeoutNs) / 1e6));
+  return Math.min(request, own);
+}
+
 /** @brief Settle a pending entry: clear its deadline and mark it consumed. */
 function settle(p: Pending): void {
   p.settled = true;
@@ -217,7 +236,7 @@ export class LibtracerClient {
   constructor(transport: ClientTransport, options: ClientOptions = {}) {
     this.transport = transport;
     this.replyEndpoint = [...(options.replyEndpoint ?? ['client'])];
-    this.requestTimeoutMs = options.requestTimeoutMs ?? 10_000;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     transport.onFrame((bytes) => this.dispatch(bytes));
     transport.onClose?.((cause) => this.handleClose(cause));
   }
@@ -367,21 +386,30 @@ export class LibtracerClient {
    * @param frame the encoded request frame
    * @param dst   the request's destination segments — the key its reply's `src`
    *              echoes (see {@link correlate})
+   * @param deadlineMs this request's own deadline in ms, overriding
+   *              `requestTimeoutMs` (used by {@link await_})
+   * @param onDeadline the rejection raised when the deadline elapses
    */
-  private request(frame: Uint8Array, dst: string[]): Promise<ParsedFwd> {
+  private request(
+    frame: Uint8Array,
+    dst: string[],
+    deadlineMs: number = this.requestTimeoutMs,
+    onDeadline: () => Error = () =>
+      new Error(`request timed out after ${deadlineMs}ms (no FWD reply)`),
+  ): Promise<ParsedFwd> {
     return new Promise<ParsedFwd>((resolve, reject) => {
       if (this.closed) {
         reject(this.closed);
         return;
       }
       const entry: Pending = { resolve, reject, settled: false, timer: null, dst };
-      if (this.requestTimeoutMs > 0 && Number.isFinite(this.requestTimeoutMs)) {
+      if (deadlineMs > 0 && Number.isFinite(deadlineMs)) {
         entry.timer = setTimeout(() => {
           // Leave the settled entry in the FIFO (see Pending) — its slot is
           // consumed by the late reply, if one ever arrives.
           settle(entry);
-          entry.reject(new Error(`request timed out after ${this.requestTimeoutMs}ms (no FWD reply)`));
-        }, this.requestTimeoutMs);
+          entry.reject(onDeadline());
+        }, deadlineMs);
         // Don't hold a Node event loop open for a pending deadline (no-op in browsers).
         (entry.timer as { unref?: () => void }).unref?.();
       }
@@ -519,10 +547,19 @@ export class LibtracerClient {
    * Named `await_` because `await` is reserved; an `await` alias is installed
    * on the prototype for the RFC-0004-spelled call site.
    *
+   * The deadline is this client's own (RFC-0004 Amendment 3): a responder is not
+   * required to answer `TIMEOUT`, so the wait always ends locally, at the shorter
+   * of `requestTimeoutMs` (10 s by default; the default is used even when the
+   * option disables other requests' deadlines) and `timeoutNs`.
+   *
+   * Replies name no request op, so do not keep an `await_` and a `read` to the
+   * same vertex outstanding at once: their RESULTs cannot be told apart.
+   *
    * @param path        the destination path (string or segments)
-   * @param timeoutNs   the await timeout in ns (absent ⇒ the responder's 1 s default)
+   * @param timeoutNs   the await timeout in ns, sent as `await_timeout` and used as
+   *                    this call's local deadline when shorter than `requestTimeoutMs`
    * @returns the next write's value TLV
-   * @throws {FwdError} with code TIMEOUT when the responder's deadline elapses
+   * @throws {FwdError} with code TIMEOUT when the local deadline elapses first
    */
   async await_(path: string | string[], timeoutNs?: bigint): Promise<Tlv> {
     const dst = splitPath(path);
@@ -534,6 +571,8 @@ export class LibtracerClient {
         awaitTimeoutNs: timeoutNs,
       }),
       dst,
+      awaitDeadlineMs(this.requestTimeoutMs, timeoutNs),
+      () => new FwdError(FWD_ERROR.TIMEOUT),
     );
     const value = this.result(reply);
     if (!value) throw new FwdError(0);

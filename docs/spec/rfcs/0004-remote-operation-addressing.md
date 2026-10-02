@@ -11,7 +11,7 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | ---- | ---- |
 | **RFC** | 0004 |
 | **Title** | Remote operation addressing: path-as-route + the `FWD`/`FIELD` frames |
-| **Status** | **accepted** (2026-06-28). **Amended by [RFC-0029](0029-one-path-primitive.md)** (accepted 2026-09-30, §12.4): §B's "a reply does not accumulate `src`" is amended — a reply's `src` is the responder's address from the origin's vantage, accumulated head-first by every host on the way back, as a PAIR where one can be issued and as NAMEs where not; §F is reaffirmed and made spelling-independent. §A/§B remain the model; §D, §E and §E.1 are untouched, and §E.1's `COMPACT` is named RFC-0029 §9.2's single exception to stateless forwarding. |
+| **Status** | **accepted** (2026-06-28). **Amended by [RFC-0029](0029-one-path-primitive.md)** (accepted 2026-09-30, §12.4): §B's "a reply does not accumulate `src`" is amended — a reply's `src` is the responder's address from the origin's vantage, accumulated head-first by every host on the way back, as a PAIR where one can be issued and as NAMEs where not; §F is reaffirmed and made spelling-independent. §A/§B remain the model; §D, §E and §E.1 are untouched, and §E.1's `COMPACT` is named RFC-0029 §9.2's single exception to stateless forwarding. **Amendment 3 (2026-10-03, §B)**: a remote `AWAIT`'s deadline is the requester's; `await_timeout` is a hint the terminus MAY ignore. |
 | **Author(s)** | AvatarSD (maintainer) |
 | **Created** | 2026-06-28 |
 | **Accepted** | 2026-06-28 — maintainer/BDFL; no registered second-implementer to object, so the 14-day window is nominal (GOVERNANCE.md §Roles). Implementation tracked by ADR-0035. |
@@ -103,7 +103,8 @@ FWD (0x0F, PL=1) {
   VALUE   kind          ; REPLY only — u8: RESULT=0, ERROR=1
   <payload TLV>         ; WRITE: value/SUBSCRIBER/SETTINGS/… to write. READ/AWAIT: absent.
                         ; REPLY: the result (VALUE for a READ result; STATUS for WRITE-ack/ERROR).
-  VALUE   await_timeout ; optional, AWAIT only — u64 ns; absent ⇒ 1 s default (reference impl)
+  VALUE   await_timeout ; optional, AWAIT only — u64 ns; the requester's own deadline, a hint
+                        ; the terminus MAY ignore (Amendment 3)
 }
 ```
 
@@ -150,7 +151,7 @@ where each level =
 | ---- | ---- | ---- |
 | `READ=0` | none | `kind=RESULT` + the value TLV, or `kind=ERROR` + `STATUS=ERROR(NOT_FOUND)` |
 | `WRITE=1` | the TLV to write | `kind=RESULT` (empty/OK) or `kind=ERROR` + `STATUS=ERROR(...)` |
-| `AWAIT=2` | none (+ optional `await_timeout`) | `kind=RESULT` + the next write's TLV, or `kind=ERROR` + `STATUS=ERROR(TIMEOUT)` |
+| `AWAIT=2` | none (+ optional `await_timeout`) | `kind=RESULT` + the next write's TLV, or `kind=ERROR` + `STATUS=ERROR(...)`; the requester ends its own wait (Amendment 3) |
 
 `subscribe` is a `WRITE` of a `SUBSCRIBER` to a `:subscribers[]` field — **no new op** ([ADR-0006](../../adr/0006-read-write-await-api-no-connect.md)). QoS is a `WRITE` of `SETTINGS` to `:settings…`.
 
@@ -255,7 +256,7 @@ Add to `tests/conformance/vectors/v1/`, so the 3-core machine (C++/TS/Rust) vali
 
 ## Open questions (for the comment window)
 
-1. **`await_timeout` cap** — the *default* is pinned (1 s, reference impl) when no child is present; whether a *normative upper bound* should exist is still open.
+1. **`await_timeout` cap** — *resolved by Amendment 3*: the deadline is the requester's, the terminus is not required to enforce one, so no default or cap is normative.
 2. **Forward-right delegation** — does an intermediate hop forward under the *original* `origin_peer_id` (end-to-end identity) or re-originate as itself at each hop? (Affects §F's first ACL check; leaning end-to-end identity preserved, each hop authorizes by it — note `src` already records the per-hop forwarder chain.)
 3. **`src` exposure / privacy** — the accumulated return route reveals the topology to the destination (and the full source route to the consumer — usually desirable as provenance). Is a redacted/opaque-segment mode ever needed for an untrusted intermediate, or is per-hop ACL sufficient?
 4. **Stream-tag interop** — each transport defines its own request↔reply matching tag; do we want a *recommended* (non-normative) tag shape so independent transport implementations converge?
@@ -468,3 +469,47 @@ with the client sending empty-`src` writes, expecting a large drop in the ~4.86 
 per-batch term and a shift of the depth-4 knee — is **not a merge gate** and is **not done**:
 no C6 was attached when this landed. It is recorded as a pending HIL item on #1502 alongside
 [#1479](https://github.com/avatarsd-llc/libtracer/issues/1479).
+
+---
+
+## Amendment 3 (2026-10-03): §B — the requester owns an `AWAIT`'s deadline
+
+Records the maintainer ruling of 2026-10-03, recorded with its rationale in
+[ADR-0084](../../adr/0084-remote-await-completes-from-a-receiver-side-waiter.md). The 14-day
+comment window is **waived by default** while the project is solo-maintained
+([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §Roles), and it was not invoked.
+
+**Status: accepted.** This is an **amendment and not an erratum**: it changes what
+`await_timeout` means and what a conforming terminus must send. **No wire byte changes**: the
+child keeps its position, type and encoding, and every shipped frame still parses.
+
+### What changes
+
+§B gave `await_timeout` the meaning "the terminus waits this long, then answers
+`ERROR(TIMEOUT)`", with a 1 s default when the child is absent. That made the terminus hold the
+request for the requester's chosen time. In the reference implementation it held the receive
+context of the link the request arrived on, so every later frame on that link waited too.
+
+> §B is amended: a remote `AWAIT`'s **deadline belongs to the requester**. `await_timeout`,
+> when present, is the requester's own deadline. A terminus **MAY** use it as a hint and
+> **is not required to enforce it**. A terminus **MUST NOT** hold the receive context of the
+> link the request arrived on while the `AWAIT` is pending. It answers `kind=RESULT` with the
+> vertex's value on the next change, or `kind=ERROR` at once when the request is refused. It
+> MAY end a pending `AWAIT` without a reply when the link goes down or the node tears down.
+
+1. **The requester needs its own deadline anyway.** A lost reply is already silence
+   ([reference/18](../../reference/18-composition-over-the-network.md) §failure modes): there is
+   no correlation id and no per-hop request state (§D). So every requester must end its own
+   wait. A terminus-side timeout only duplicated that, and the terminus paid for it.
+2. **`ERROR(TIMEOUT)` is no longer a promised answer.** A requester that relied on it gets
+   silence instead, and ends the wait at its own deadline, which is the same outcome.
+3. **Reply order.** A terminus that answers later lets the replies to later requests on the
+   same link arrive first, which §D already allows. Replies name no request op, so a requester
+   SHOULD NOT have an `AWAIT` and a `READ` outstanding to the same vertex on one link: the two
+   RESULTs are indistinguishable by `src` suffix.
+
+### Conformance vectors
+
+`fwd-await-timeout` keeps its bytes. Its description now reads the `await_timeout` child as the
+requester's deadline hint, not as a terminus-enforced timeout.
+
