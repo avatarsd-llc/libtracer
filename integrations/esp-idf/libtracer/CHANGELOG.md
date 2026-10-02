@@ -12,6 +12,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **The generated config fragment no longer sets `kSingleWriter`
+  ([#1718](https://github.com/avatarsd-llc/libtracer/issues/1718)).** Core removed the trait,
+  which no code read, and now refuses a fragment that still sets it. The chip targets keep
+  `guard_t = tr::esp::critical_guard_t` and `lkv_slot_t = single_writer_slot_t`, so nothing
+  changes at run time. **Migration:** an application that replaces the fragment with its own
+  deletes its `kSingleWriter` line.
 - **The generated config fragment binds `guard_t`, not `reader_guard_t`
   ([#1703](https://github.com/avatarsd-llc/libtracer/issues/1703)).** Core renamed the config
   member and now refuses a fragment that still defines the old name. On every chip target the
