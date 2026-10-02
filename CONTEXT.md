@@ -2,14 +2,14 @@
 
 The canonical vocabulary of libtracer, tracking the [reference suite](docs/reference/00-overview.md) and the normative [spec](docs/spec/v1.md); where another page disagrees, that page is fixed. Each entry gives the term, a short definition, a **Detail** link for mechanics (C++ headers: [file map](docs/modules/file-map.md); ADR/RFC status: [index](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr-rfc-index.md)), and _Avoid_: phrases naming something the protocol lacks or confuses.
 
-### Versioning
+## Versioning
 
 - **Protocol version**: The integer version of the wire format and its specification — **v1** — frozen on release and learned at the discovery layer, never per frame. [Detail](docs/reference/01-data-format.md#versioning-and-compatibility). _Avoid_: "`VR` bit", "wire format v0.1", per-frame version, `VR` / version bit.; `opt` bit 7 is reserved, never a version bit
 - **Release version**: An implementation's semantic version, **decoupled** from the protocol version; it never signals a wire change. [Detail](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0002-versioning-protocol-vs-release-no-per-frame-version.md). _Avoid_: calling this "the protocol version"; reading wire compatibility out of a release number.
 - **Discovery-layer versioning**: The mechanism that keeps incompatible protocol versions apart — a distinct service name / port / CAN-ID prefix per protocol version — used **instead of** a per-frame version field.
 - **Capability negotiation**: Does not exist: receivers MUST accept every `LL`/`CW`/`TF` variant. [Detail](docs/reference/01-data-format.md#interop-minimal-vs-feature-rich-implementations). _Avoid_: "per-peer capability discovery", "feature negotiation handshake".
 
-### Wire format
+## Wire format
 
 Canonical per reference `01` and `05`.
 - **`opt` byte**: The 1-byte options bitfield of every TLV, bits 7→0 `R│PL│TS│CR│LL│CW│TF│R`. [Detail](docs/reference/01-data-format.md#options-bitfield). _Avoid_: any `VR` (version) or `FP` (finite-pool) bit.
@@ -20,7 +20,7 @@ Canonical per reference `01` and `05`.
 - **Structured TLV**: A TLV with `opt.PL=1` whose payload is only child TLVs; its type code says what they mean. [Detail](docs/reference/05-protocol-tlvs.md#structured-tlvs). _Avoid_: "LIST", "type `0x05`".
 - **Validation timing (lazy, per-level)**: Validity is checked where a level is consumed; ingress checks only the CRC and the top header. [Detail](docs/reference/08-views-and-ownership.md#rope-aware-decode). _Avoid_: "ingress rejects malformed frames"; "depth cap / `kMaxDepth`"; "validation is a separate pass".
 
-### Graph, addressing & API
+## Graph, addressing & API
 
 - **read / write / await**: The entire data API — three calls, plus refcount management. There is **no** `connect` / `disconnect` / `subscribe` primitive. _Avoid_: "connect", "disconnect", "subscribe()" as API verbs.
 - **Field-write (the `:` control plane — the vertex's `ioctl`)**: The control surface: subscriptions, ACLs and settings are optional `:` fields of one vertex, its `ioctl`, beside the `read`/`write` data plane and the `await` readiness plane. [Detail](docs/reference/02-graph-model.md#schema-and-field-discipline). _Avoid_: "control plane" for anything but the `:` plane; "control facets are sub-vertices" (control facet ⇒ `:`, distinct identity ⇒ `/`); "every vertex must implement the control fields".
@@ -68,7 +68,7 @@ _Avoid_: "returns a LIST", "write a single LIST TLV".
 - **Framing modes: full-TLV (full caps) vs header-elided (non-interactive bindings)**: Self-describing full-TLV frames, or frames keyed on the transport's native id with the header elided; they coexist. [Detail](docs/reference/14-can-transport.md#the-in-band-advertise-frame-and-the-dynamic-map). _Avoid_: "an either/or"; "the forwarder maps CAN IDs"; "the TLV header rides the CAN bus".
 - **Advertise + id-match → dynamic rope groups**: An advertised manifest whose id-matched slices chain into one rope. [Detail](docs/reference/14-can-transport.md#the-in-band-advertise-frame-and-the-dynamic-map). _Avoid_: "it obviates the rope delivery seam".
 
-### Errors
+## Errors
 
 - **`tr::` error namespace (two registers)**: Protocol error identities on the wire, `tr::<concept>::<error>`, keyed by the eight protocol concepts; the C++ namespaces of the reference implementation are a separate, layer-keyed register. [Detail](docs/reference/05-protocol-tlvs.md#error-registry-trconcepterror). _Avoid_: a flat byte registry; `tr::<layer>::<module>` for errors; a user-error range; a C++ namespace named for an error concept.
 - **Registered code / string identity**: An error's on-wire identity is either a compact **registered code** (a `u16` the frozen registry assigns to a built-in `tr::…` path) or the literal **string** path (for unbounded third-party stack extensions). Optional structured detail may attach to either. The split *is* the built-in-vs-extensible split.
@@ -78,7 +78,7 @@ _Avoid_: "returns a LIST", "write a single LIST TLV".
 - **Flow gap (`tr::flow::address_shift_gap` — a discontinuity in an ordered flow)**: The one signal that in-order elements did not arrive, always accounted. [Detail](docs/reference/22-backpressure-and-sizing.md#2-the-two-pressure-arms-stated-once). _Avoid_: a new gap code per producer; "silent drop-oldest"; confusing it with `tr::flow::backpressure`.
 - **`tr::version::mismatch`**: A discovery/link-level error — "peer advertised an incompatible protocol version". Not a frame-parse outcome, because there is no per-frame version field to read. It replaces a byte code (`VERSION_MISMATCH 0x06`) in a flat registry. _Avoid_: "`opt.VR` set higher than receiver supports"; the `0x06` byte code as an identity.
 
-### Modules & memory substrate
+## Modules & memory substrate
 
 - **Required modules**: The modules every conforming node links (frame codec, path resolver, view/refcount machinery, FWD forwarder/dispatcher when ≥2 transports) — equivalently conformance profile **P0**. They are not architecturally privileged. _Avoid_: "Core" as a privileged unit or build; "Core" as a noun for a fixed privileged build (the `core/` *directory* and "core type codes `0x01–0x1F`" are unaffected).
 - **`io_dir_t`**: The cache-coherency direction enum: `DEVICE_TO_CPU` (invalidate) and `CPU_TO_DEVICE` (clean). [Detail](docs/reference/09-memory-substrate.md#cache-coherency). _Avoid_: `IO_DIR_READ`/`IO_DIR_WRITE`, or the unscoped form.
