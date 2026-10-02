@@ -1389,6 +1389,29 @@ target_link_libraries(write_seq_test PRIVATE libtracer)
 libtracer_test_warnings(write_seq_test)
 add_test(NAME write_seq COMMAND write_seq_test)
 
+# #1715: the fused guarded publish. A second copy of the required core, built over
+# tests/guarded_seq (a section-counting tr::mutex_guard_t, kForceGuardedRmw = true), so the
+# write sequence is the guarded rmw_counter_t binding a core without atomic RMW compiles to.
+# One configuration per library: only the two tests below link it, never `libtracer`.
+add_library(libtracer_guarded_seq STATIC ${LIBTRACER_SOURCES_REQUIRED})
+target_include_directories(libtracer_guarded_seq BEFORE PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/guarded_seq)
+target_include_directories(libtracer_guarded_seq PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_link_libraries(libtracer_guarded_seq PUBLIC Threads::Threads)
+target_compile_features(libtracer_guarded_seq PUBLIC cxx_std_23)
+
+add_executable(fused_publish_test fused_publish_test.cpp)
+target_link_libraries(fused_publish_test PRIVATE libtracer_guarded_seq)
+libtracer_test_warnings(fused_publish_test)
+add_test(NAME fused_publish COMMAND fused_publish_test)
+
+# The #1621 write-sequence suite (width, wrap, await on every role) again, on the guarded binding.
+add_executable(write_seq_guarded_test write_seq_test.cpp)
+target_link_libraries(write_seq_guarded_test PRIVATE libtracer_guarded_seq)
+libtracer_test_warnings(write_seq_guarded_test)
+add_test(NAME write_seq_guarded COMMAND write_seq_guarded_test)
+
 # #361 §5 / ADR-0039 §1 — graph_t's injected memory_resource: per-write LKV
 # allocations route through it (counting pass-through), released in full at
 # graph destruction; a default graph never touches a foreign resource.

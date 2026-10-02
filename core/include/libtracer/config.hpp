@@ -340,6 +340,17 @@ struct default_config_t {
     using lkv_slot_t = single_writer_slot_t;
 
     /**
+     * @brief Force the guarded binding of every `rmw_counter_t` a vertex owns, even where the
+     *        counter's width is natively lock-free (#1715).
+     *
+     * A test knob: it lets a host build exercise the path a target without a native atomic RMW
+     * takes, where the write-sequence bump runs under @ref guard_t and is fused into the LKV
+     * publish section. Production code leaves it `false`; the native binding is then selected
+     * exactly as before and its generated code is unchanged.
+     */
+    static constexpr bool kForceGuardedRmw = false;
+
+    /**
      * @brief The target's selected RECLAMATION policy (ADR-0080) — WHEN the library may free
      *        the memory behind a retired subscription's `{fn, ctx}` pair.
      *
@@ -769,6 +780,8 @@ using acl_policy_t = config_t::acl_policy_t;
 inline constexpr bool kSingleWriter = config_t::kSingleWriter;
 /** @brief @ref default_config_t::kInstrumentCounters for this build. */
 inline constexpr bool kInstrumentCounters = config_t::kInstrumentCounters;
+/** @brief @ref default_config_t::kForceGuardedRmw for this build. */
+inline constexpr bool kForceGuardedRmw = config_t::kForceGuardedRmw;
 /** @brief @ref default_config_t::guard_t for this build. */
 using guard_t = config_t::guard_t;
 /**

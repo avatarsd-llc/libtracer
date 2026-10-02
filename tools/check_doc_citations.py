@@ -509,8 +509,8 @@ ANCHORS = [
     ('core/include/libtracer/tlv.hpp:71', 'PATH_REF = 0x14,'),
     ('core/include/libtracer/subscriber.hpp:109', 'struct delivery_policy_t {'),
     ('core/include/libtracer/vertex.hpp:499', 'enum class delivery_mode_t : std::uint8_t {'),
-    ('core/include/libtracer/vertex.hpp:3031', 'const std::size_t doff = off;'),
-    ('core/include/libtracer/vertex.hpp:3110',
+    ('core/include/libtracer/vertex.hpp:3055', 'const std::size_t doff = off;'),
+    ('core/include/libtracer/vertex.hpp:3134',
      '// padding — 8-byte, then 4-byte, then flag bytes), with everything the write hot'),
     # Three lines now spell this table: the FORWARD hop's rope arm (this one) and the two
     # TERMINUS reply gathers #1570 migrated onto the same seam. The forward arm is the only
@@ -592,13 +592,13 @@ ANCHORS = [
     ('core/include/libtracer/graph.hpp:630',
      '* copies always. What sharing costs on a POOLED RX backend: the shared value BORROWS a'),
     # core/include/libtracer/vertex.hpp
-    ('core/include/libtracer/vertex.hpp:1406',
+    ('core/include/libtracer/vertex.hpp:1428',
      '* - **reliable** — the admission is refused, NOTHING is shed and the ring does not grow'),
-    ('core/include/libtracer/vertex.hpp:1420',
+    ('core/include/libtracer/vertex.hpp:1442',
      'bool ring_admit(const value_ref_t& sp, std::size_t bytes,'),
-    ('core/include/libtracer/vertex.hpp:1434',
+    ('core/include/libtracer/vertex.hpp:1456',
      '// The DEPTH intent retires BEFORE the byte bound charges. Order matters: a ring already'),
-    ('core/include/libtracer/vertex.hpp:1672',
+    ('core/include/libtracer/vertex.hpp:1696',
      '* durability (`policy.durability_request()`, RFC-0022 §3.A) and the vertex already'),
     # core/include/libtracer/mem_source.hpp
     ('core/include/libtracer/mem_source.hpp:77', 'struct source_stats_t {'),
