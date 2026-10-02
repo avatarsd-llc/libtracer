@@ -3013,19 +3013,45 @@ void graph_t::propagate_impl(vertex_t* v) {
             if (it->size() != lo.size() && !collect(*it)) break;
         }
     }
-    // Drop the pending-mark hint (#1712) HERE, outside the sweep lock: resolving a key to its
-    // vertex takes the map lock, and map-under-sweep is a nesting nothing else takes. The
-    // window this opens is the safe one — a mark landing between the drain above and the drop
-    // below keeps its key but loses its hint, so the eager writes that follow skip retiring it
-    // and the next covering sweep delivers it once more: a duplicate, never a loss. Dropped
-    // BEFORE the delivery, so a mark the delivery itself causes (a callback that assigns)
-    // keeps its hint. Tested first so an UNCONDITIONAL member, never hinted, pays no RMW.
-    if (own_drained && v->has_pending_mark()) v->set_pending_mark(false);
+    // Drop the pending-mark hint (#1712) of every vertex this sweep drained — but only where
+    // the key is STILL absent, checked under the sweep lock, so the hint invariant holds
+    // exactly: a key in `pending_` always has its vertex's hint up. Without the re-check, a
+    // mark landing between the drain and the drop (another thread's assign, or a callback
+    // of an EARLIER vertex in this very sweep) would keep its key and lose its hint; the
+    // eager write that followed would skip retiring it, and the next covering sweep would
+    // re-deliver what that write already delivered (RFC-0008 §B, 2026-09-30 erratum: an
+    // eager write's clear means "a later covering sweep does not re-deliver").
+    //
+    // Two phases because resolving a key takes the map lock, which never nests under the
+    // sweep lock: resolve outside it, then ONE more sweep-lock section for the whole batch —
+    // a sweep cost, never an eager-write one. The resolved pointers are the delivery list
+    // too, so no key is resolved twice. On OOM for that list the hints stay up (a stale-up
+    // hint costs one slow-path probe, never a delivery) and delivery resolves per key.
+    std::vector<vertex_t*> targets;
+    if (!detail::try_reserve(targets, to_deliver.size())) {
+        for (const std::vector<std::byte>& k : to_deliver) {
+            if (vertex_t* u = find_ptr(k)) deliver_current(u);
+        }
+        return;
+    }
+    bool any_hint = own_drained && v->has_pending_mark();
     for (const std::vector<std::byte>& k : to_deliver) {
         vertex_t* const u = find_ptr(k);
-        if (u == nullptr) continue;
-        if (u->has_pending_mark()) u->set_pending_mark(false);
-        deliver_current(u);
+        targets.push_back(u);  // reserved: cannot allocate; nullptr = vanished mid-sweep
+        any_hint = any_hint || (u != nullptr && u->has_pending_mark());
+    }
+    if (any_hint) {  // an UNCONDITIONAL-only sweep is never hinted and takes no second lock
+        const std::lock_guard lock(sweep_mutex_);
+        if (own_drained && v->has_pending_mark() && !pending_.contains(lo))
+            v->set_pending_mark(false);
+        for (std::size_t i = 0; i < targets.size(); ++i) {
+            vertex_t* const u = targets[i];
+            if (u != nullptr && u->has_pending_mark() && !pending_.contains(to_deliver[i]))
+                u->set_pending_mark(false);
+        }
+    }
+    for (vertex_t* const u : targets) {
+        if (u != nullptr) deliver_current(u);
     }
 }
 
@@ -3093,8 +3119,8 @@ void graph_t::mark_pending(vertex_t* v) {
     // covering sweep will deliver. Still single-exit, so `key`'s cleanup keeps the shape the
     // paragraph above paid for; the two locals are registers on the marking path.
     // The pending-mark hint (#1712) is raised here, under the lock, on every mark that leaves
-    // a key in the set — a fresh insert or one already present — so a set member's hint is
-    // down only inside a covering sweep's post-lock window (see propagate_impl).
+    // a key in the set — a fresh insert or one already present. Every drop is also taken
+    // under this lock and only over an absent key, so a set member's hint is always up.
     const bool if_newer = v->delivery_mode() == delivery_mode_t::IF_NEWER;
     const bool room = if_newer && detail::probe_bytes(kSetNodeProbe);
     if (room) v->set_pending_mark(true);

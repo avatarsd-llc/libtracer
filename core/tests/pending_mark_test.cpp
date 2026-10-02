@@ -195,6 +195,44 @@ void test_unmarked_write_skips_the_sweep_path() {
     check(a_written - a_idle < kBand, "an eager write drops the hint with the mark it retires");
 }
 
+/**
+ * @brief A mark landing between a sweep's drain and its hint drop keeps its hint, so the eager
+ *        write that follows retires it and the next sweep does not re-deliver.
+ *
+ * The window is driven deterministically: the sweep delivers `/s/a` before `/s/b` (key order),
+ * and `/s/a`'s callback re-marks `/s/b` — AFTER the drain took `/s/b`'s first mark, BEFORE
+ * `/s/b` is delivered. A drop that does not re-check the set clears the re-marked hint; the
+ * write to `/s/b` then skips its retire and the closing sweep delivers that write's value a
+ * second time.
+ */
+void test_remark_inside_the_sweep_window() {
+    std::printf("re-mark inside a sweep's drain-to-drop window (#1712):\n");
+    graph_t g;
+    auto s = g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
+    auto a = g.register_vertex(path_t("/s/a"), role_t::STORED_VALUE);
+    auto b = g.register_vertex(path_t("/s/b"), role_t::STORED_VALUE);
+    int hits_b = 0;
+    bool armed = true;
+    auto on_a = [&g, b, &armed](const tr::graph::value_t&) {
+        if (!armed) return;
+        armed = false;
+        (void)g.assign(b, make_value({0x22}));  // re-marks /s/b inside the window
+    };
+    auto on_b = [&hits_b](const tr::graph::value_t&) { ++hits_b; };
+    (void)g.subscribe(path_t("/s/a"), on_a);
+    (void)g.subscribe(path_t("/s/b"), on_b);
+
+    (void)g.assign(a, make_value({0x11}));
+    (void)g.assign(b, make_value({0x21}));
+    (void)g.propagate(s);
+    check(!armed, "the earlier vertex's callback ran inside the sweep (the window was driven)");
+    check(hits_b == 1, "the sweep delivers /s/b once, with its current value");
+    (void)g.write(b, make_value({0x23}));
+    check(hits_b == 2, "the eager write delivers its own value");
+    (void)g.propagate(s);
+    check(hits_b == 2, "the closing sweep does not re-deliver what the write delivered");
+}
+
 /** @brief Leaves the race runs on — several, so the sweep has more than one key to drain. */
 constexpr std::size_t kLeaves = 4;
 /** @brief Operations per racing thread. */
@@ -298,6 +336,7 @@ void test_mark_clear_race() {
 
 int main() {
     test_unmarked_write_skips_the_sweep_path();
+    test_remark_inside_the_sweep_window();
     test_mark_clear_race();
     return tr::testing::summary("pending_mark_test");
 }

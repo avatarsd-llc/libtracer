@@ -2825,11 +2825,12 @@ class vertex_t {
     /**
      * @brief Raise or drop the pending-mark hint (#1712) — `graph_t` only.
      *
-     * Raised under the sweep lock by the mark that inserts the vertex's key; dropped where a
-     * mark is retired with the vertex in hand. Both directions may race a concurrent mark,
-     * and both races are in the safe direction: a raised bit over an absent key costs one
-     * slow-path probe that erases nothing, and a dropped bit over a present key leaves that
-     * mark for the next covering sweep — one duplicate delivery at worst, never a lost one.
+     * Raised under the sweep lock by the mark that inserts the vertex's key; dropped under
+     * the same lock, and only once the key is gone (an eager write's retire, a covering
+     * sweep's re-check, a mode flip). So a key in the sweep set always has its hint up; the
+     * converse may lag — a raised hint over an absent key costs one slow-path probe that
+     * erases nothing. Retirement drops it under the map lock instead, just before the retire
+     * erases the key itself.
      */
     void set_pending_mark(bool on) noexcept { set_flag(flag_t::PENDING_MARK, on); }
 
@@ -3267,8 +3268,7 @@ class vertex_t {
     // gate's own failure message says to put a new member behind vertex_ext_t rather than
     // inline it, and a bit costs less than either. (`ENUM_HIDDEN`, the RFC-0014 §3 hide seam,
     // is the third: it went here rather than beside `registered_` for exactly that reason.)
-    // Written under a lock (a different one per bit; `PENDING_MARK`'s sweep-side drop is the
-    // one unlocked writer, which a hint tolerates), read lock-free off hot paths, so the
+    // Written under a lock (a different one per bit), read lock-free off hot paths, so the
     // writes are RMWs and compose.
     std::atomic<std::uint8_t> flags_{0};
     bool registered_ = false;  // false => placeholder intermediate (invisible to find)
