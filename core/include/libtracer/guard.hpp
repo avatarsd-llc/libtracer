@@ -155,15 +155,43 @@ class rmw_counter_t {
     static constexpr bool is_native = kNative;
 
     /** @brief Move the counter on by one, `seq_cst`, wrapping at `T`'s width. */
-    void bump() noexcept {
+    void bump() noexcept { bump(this); }
+
+    /**
+     * @brief Move the counter on by one; the guarded binding takes the guard covering
+     *        @p anchor rather than the one covering the counter.
+     *
+     * For a counter whose bump is sometimes made inside a section another object already
+     * opened (@ref bump_in_section): every guarded bump of ONE counter must take the SAME
+     * guard, so the caller names that object's address here too. Two anchors on one counter
+     * are two locks, and the writers would no longer exclude each other. The native binding
+     * ignores @p anchor.
+     */
+    void bump(const void* anchor) noexcept {
         if constexpr (kNative) {
+            (void)anchor;
             value_.fetch_add(1, std::memory_order_seq_cst);
         } else {
             static_assert(guard<G>, "the guarded bump needs the build's guard (tr::guard)");
-            const guard_scope_t<G> section(this);
-            value_.store(static_cast<T>(value_.load(std::memory_order_relaxed) + 1u),
-                         std::memory_order_seq_cst);
+            const guard_scope_t<G> section(anchor);
+            bump_in_section();
         }
+    }
+
+    /**
+     * @brief The guarded bump's body, for a caller that ALREADY holds the guard every other
+     *        bump of this counter takes (#1715): a load and a `seq_cst` store, no section.
+     *
+     * The precondition is the whole of its soundness: the load + store is atomic against other
+     * bumpers only because they all serialize on that one guard. The LKV slot's fused publish
+     * calls it from inside its own section, which covers the anchor the vertex names on its
+     * other bumps. Guarded binding only: a native counter has no section to share.
+     */
+    void bump_in_section() noexcept
+        requires(!kNative)
+    {
+        value_.store(static_cast<T>(value_.load(std::memory_order_relaxed) + 1u),
+                     std::memory_order_seq_cst);
     }
 
     /** @brief The current count, `seq_cst`. Lock-free on both bindings. */

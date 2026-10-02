@@ -51,6 +51,24 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **On the guarded write-sequence binding, a publish opens one guard section, not two
+  ([#1715](https://github.com/avatarsd-llc/libtracer/issues/1715)).** Where the 32-bit write
+  sequence has no native atomic RMW (ESP32-C3, Cortex-M0), `vertex_t` now bumps it inside the
+  LKV slot's section, after the swap, instead of taking a second section of its own. Both bump
+  sites, the stored publish and the HANDLER `note_write`, take the guard anchored at the vertex's
+  LKV slot, so they exclude each other. The native binding is unchanged; a host build's code is
+  byte-identical. `hazard_slot_t` keeps the separate bump. New API this rests on:
+  - `tr::rmw_counter_t::bump(anchor)` bumps under the guard for `anchor`, and
+    `bump_in_section()` bumps when the caller already holds that guard (guarded binding only).
+    Every guarded bump of one counter must take the same guard.
+  - `basic_single_writer_slot_t::store(v, in_section)` publishes `v` and runs `in_section`
+    inside the same guard section. The slot now names its guard as `guard_type`.
+  - The concept `tr::graph::publishes_under<S, G>` holds when slot policy `S` takes its sections
+    on guard `G`.
+  - `tr::graph::write_seq_counter_t` names the counter type behind `write_seq_t`.
+  - `default_config_t::kForceGuardedRmw` (default `false`) forces the guarded binding on a host
+    whose atomics are native. It is a test knob: the core test build uses it to run the guarded
+    path, and a shipped node leaves it off.
 - **The write sequence is 32-bit on every target: `vertex_t::current_seq()` returns
   `tr::graph::write_seq_t` and `wait_for_change` takes one
   ([#1621](https://github.com/avatarsd-llc/libtracer/issues/1621), RFC-0028 D6).**

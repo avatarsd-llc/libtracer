@@ -835,6 +835,19 @@ struct vertex_ext_t {
  */
 using write_seq_t = std::uint32_t;
 
+/**
+ * @brief The counter that carries @ref write_seq_t: native where the width is lock-free,
+ *        otherwise the guarded binding over @ref guard_t (#1715).
+ *
+ * @ref kForceGuardedRmw selects the guarded binding on a host whose atomics are native, so the
+ * path a target without atomic RMW takes is testable there. Every guarded bump of a vertex's
+ * counter takes the guard anchored at that vertex's LKV slot, so the bump fuses into the
+ * publish section (see `vertex_t::store`).
+ */
+using write_seq_counter_t =
+    ::tr::rmw_counter_t<write_seq_t, guard_t,
+                        !kForceGuardedRmw && std::atomic<write_seq_t>::is_always_lock_free>;
+
 /** @brief Declared here so @ref vertex_t can befriend the #1285 member-offset gate; defined
  *         just after the type it measures. */
 struct vertex_layout_gate_t;
@@ -1349,9 +1362,18 @@ class vertex_t {
         // vertex is not actually holding.
         auto* v = const_cast<value_t*>(value.get());
         v->retain();
-        if (!lkv_.store(v)) {  // #477 soft-fail — the graph maps it to BACKPRESSURE
-            value_t::release(v);
-            return false;
+        if constexpr (kFusedPublish) {
+            // FUSED PUBLISH (#1715): the counter is guarded and the slot publishes under that
+            // same guard, so the bump runs inside the slot's section — one guard section per
+            // publish instead of two. The publication argument for the fused form is restated
+            // on the slot's `store(v, in_section)` in lkv_slot.hpp; the bump stays a seq_cst
+            // store, so the waiterless pair below is unchanged.
+            (void)publish_fused(lkv_, write_seq_, v);
+        } else {
+            if (!lkv_.store(v)) {  // #477 soft-fail — the graph maps it to BACKPRESSURE
+                value_t::release(v);
+                return false;
+            }
         }
 
         // WAITERLESS PUBLISH: no ring to append and nobody in `await` ⇒ take no lock at all
@@ -1374,8 +1396,8 @@ class vertex_t {
         // awaiter makes this publish take the lock and notify needlessly. That is the same
         // collision `vertex_stripe_t` already documents (a spurious wake plus a re-check,
         // never a correctness change).
-        vertex_stripe_t& st = vertex_stripe_of(this);  // one lookup per verb (#370)
-        write_seq_.bump();
+        vertex_stripe_t& st = vertex_stripe_of(this);          // one lookup per verb (#370)
+        if constexpr (!kFusedPublish) write_seq_.bump(&lkv_);  // anchored like the fused bump
         if (st.waiters.load(std::memory_order_seq_cst) == 0) return true;
         const std::lock_guard lock(st.m);
         vertex_stripe_cv(vertex_stripe_index(this)).notify_all();
@@ -1503,7 +1525,9 @@ class vertex_t {
      */
     void note_write() {
         vertex_stripe_t& st = vertex_stripe_of(this);  // one lookup per verb (#370)
-        write_seq_.bump();
+        // Anchored at the LKV slot: every guarded bump of one counter takes the same guard,
+        // so this one serializes against the fused bump in `store` (#1715).
+        write_seq_.bump(&lkv_);
         if (st.waiters.load(std::memory_order_seq_cst) == 0) return;  // waiterless (#555)
         const std::lock_guard lock(st.m);
         vertex_stripe_cv(vertex_stripe_index(this)).notify_all();
@@ -3153,7 +3177,32 @@ class vertex_t {
     // on a core with no atomic RMW (rmw_counter_t). Nothing else reads it: the propagate
     // sweep's IF_NEWER test is its pending set (RFC-0008 §B), not a sequence, and the wire
     // never carries it.
-    ::tr::rmw_counter_t<write_seq_t, guard_t> write_seq_;
+    write_seq_counter_t write_seq_;
+
+    /**
+     * @brief The fused publish: swap @p v into @p slot and bump @p seq inside the slot's one
+     *        guard section (#1715).
+     *
+     * A template so its fused arm is only instantiated where it applies: `vertex_t` is not a
+     * template, so an `if constexpr` in `store` alone would still check the arm a native or
+     * `hazard_slot_t` build cannot compile. The other arm is the separated form, kept valid
+     * for that reason and never called.
+     */
+    template <class Slot, class Seq>
+    [[nodiscard]] static bool publish_fused(Slot& slot, Seq& seq, value_t* v) noexcept {
+        if constexpr (publishes_under<Slot, guard_t> && !Seq::is_native) {
+            return slot.store(v, [&seq]() noexcept { seq.bump_in_section(); });
+        } else {
+            const bool stored = slot.store(v);
+            if (stored) seq.bump(&slot);
+            return stored;
+        }
+    }
+
+    /** @brief Whether `store` bumps `write_seq_` inside the LKV slot's guard section (#1715):
+     *         the counter is guarded and the bound slot publishes under that same guard. */
+    static constexpr bool kFusedPublish =
+        !write_seq_counter_t::is_native && publishes_under<lkv_slot_t, guard_t>;
 
     // Subtree-subscription bookkeeping (RFC-0005): every subscription observes its
     // vertex AND all descendants, so a write must fan out to ancestor subscribers

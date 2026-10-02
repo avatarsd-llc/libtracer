@@ -21,7 +21,8 @@
  *    `retention_t::NONE` value vertex (stores nothing). The last two are why the sequence
  *    cannot be replaced by the published value's identity.
  *
- * The CI TSan matrix runs this binary under both `lkv_slot_t` bindings.
+ * The CI TSan matrix runs this binary under both `lkv_slot_t` bindings, and the test build links
+ * it a second time as `write_seq_guarded_test`, over the guarded write-sequence binding (#1715).
  */
 
 #include <atomic>
@@ -64,8 +65,9 @@ using tr::testing::check;
 using tr::testing::make_value;
 
 static_assert(sizeof(write_seq_t) == 4, "the write sequence is 32-bit on every target (#1621)");
-static_assert(tr::rmw_counter_t<write_seq_t, tr::graph::guard_t>::is_native,
-              "a host build bumps the write sequence with one hardware RMW, never a guard");
+static_assert(tr::graph::write_seq_counter_t::is_native != tr::graph::kForceGuardedRmw,
+              "a host build bumps the write sequence with one hardware RMW, never a guard — "
+              "unless the build forces the guarded binding (the write_seq_guarded leg, #1715)");
 
 /** @brief The guarded binding, named on a host that has atomic RMW so CI can drive it. */
 using guarded_counter_t = tr::rmw_counter_t<write_seq_t, tr::mutex_guard_t, false>;
