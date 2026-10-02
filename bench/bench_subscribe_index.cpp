@@ -222,24 +222,24 @@ struct link_id_t {
     std::uint32_t v = 0; /**< @brief Dense slot in the token-keyed index. */
 };
 
-/** @brief One link's candidate list — transcribed from `graph_t::link_entry_t`. */
+/** @brief One link's candidate list — transcribed from `link_index_t::link_entry_t`. */
 struct link_entry_t {
     std::pmr::vector<cand_t> vs; /**< @brief `[0, compacted)` sorted and unique, then an
                                   *          unsorted tail. */
     std::size_t compacted = 0;   /**< @brief Where the sorted prefix ends. */
 };
 
-/** @brief Transcribed from `graph_t::kLinkIndexCompactFloor`. */
+/** @brief Transcribed from `link_index_t::kCompactFloor`. */
 constexpr std::size_t kLinkIndexCompactFloor = 8;
 
-/** @brief Transcribed from `compact_candidates` (`core/src/graph.cpp`). */
+/** @brief Transcribed from `compact_candidates` (`core/src/link_index.cpp`). */
 void compact_candidates(std::pmr::vector<cand_t>& vs) {
     std::sort(vs.begin(), vs.end());
     vs.erase(std::unique(vs.begin(), vs.end()), vs.end());
 }
 
 /**
- * @brief Transcribed from `candidates_contain` (`core/src/graph.cpp`).
+ * @brief Transcribed from `candidates_contain` (`core/src/link_index.cpp`).
  *
  * Written out rather than composed from `std::binary_search` + `std::find`, exactly as the
  * original is and for the reason the original records: the two extra `<algorithm>`
