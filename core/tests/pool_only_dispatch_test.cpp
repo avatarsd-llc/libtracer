@@ -30,7 +30,7 @@
  *
  * The target links `backend_set.cpp` + `mem_pool.cpp` directly rather than `libtracer`,
  * because the library's own `backend_set.o` carries the multi-member dispatch — the same
- * shape `substrate_test_no_atomic` uses for its ABI-changing define.
+ * shape the old `substrate_no_atomic` build used for its define (removed in #1722).
  */
 #include <array>
 #include <atomic>

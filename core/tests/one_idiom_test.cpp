@@ -21,7 +21,7 @@
  *
  * Allocation counts are taken RELATIVE to a baseline publish on the same graph shape, never
  * as absolute numbers, and no assertion reads a reference count: the hazard-slot binding
- * (`LIBTRACER_LKV_SLOT=hazard_slot_t`) allocates a node per publish and defers reclamation,
+ * (`lkv_slot_t = hazard_slot_t`) allocates a node per publish and defers reclamation,
  * so both would differ by slot policy while the properties under test do not.
  */
 

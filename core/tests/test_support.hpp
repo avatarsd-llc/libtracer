@@ -32,7 +32,7 @@
  * `tr::testing` is a tests-only namespace — it is not a layer in the L0..L5 model and nothing
  * under `core/src` or `core/include` may name it. The header deliberately depends on the
  * standard library ONLY, so the translation units that compile a restricted source set
- * (`substrate_test_no_atomic`, `pool_only_dispatch_test`) can include it as-is; the one helper
+ * (`pool_only_dispatch_test`) can include it as-is; the one helper
  * that needs a libtracer type, `make_value`, lives in the companion `test_values.hpp`.
  */
 #pragma once

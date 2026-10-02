@@ -6,12 +6,13 @@
  * plus the intrusive segment_ptr_t handle that threads a segment's lifetime
  * through view fan-out. The refcount uses the canonical intrusive_ptr orderings
  * required by docs/reference/02-graph-model.md §required atomic operations
- * (increment = relaxed, decrement = acq_rel, inspect = acquire). Define
- * LIBTRACER_NO_ATOMIC for single-threaded / Cortex-M0 builds (no cross-thread
- * segment sharing).
+ * (increment = relaxed, decrement = acq_rel, inspect = acquire). On a core with
+ * no atomic read-modify-write the count is a load and a store inside one section of
+ * the build's guard (`config_t::guard_t`) instead (#1722).
  */
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <new>
@@ -19,10 +20,9 @@
 #include <utility>
 
 #include "libtracer/backend.hpp"
-
-#ifndef LIBTRACER_NO_ATOMIC
-#include <atomic>
-#endif
+#include "libtracer/config.hpp"
+#include "libtracer/guard.hpp"
+#include "libtracer/guard_mutex.hpp"  // the host default graph::guard_t names its type
 
 /**
  * @file
@@ -33,36 +33,91 @@ namespace tr::view {
 
 namespace detail {
 
-// Intrusive refcount with the spec's orderings. dec_acq_rel returns the value
-// *before* the decrement, so a return of 1 means "this caller dropped the last
-// reference" — the canonical Boost intrusive_ptr release test.
-class ref_count_t {
+/**
+ * @brief Whether this build counts segment references with one hardware RMW (`true`) or with a
+ *        load and a store inside one section of `config_t::guard_t` (`false`, #1722).
+ *
+ * The same choice `tr::rmw_counter_t` makes for a vertex's write sequence: whether the target's
+ * 32-bit atomic is always lock-free (`amoadd.w` on rv32imac, `ldrex`/`strex` on Cortex-M3 and
+ * up, `lock xadd` on x86-64). A Cortex-M0 or rv32imc core takes the guarded binding; a
+ * single-threaded build makes that guard free by binding `tr::no_guard_t`. A host test drives
+ * the guarded binding by naming @ref basic_ref_count_t's `kNative` parameter itself.
+ */
+inline constexpr bool kNativeRefCount = std::atomic<std::uint_least32_t>::is_always_lock_free;
+
+/**
+ * @brief Intrusive refcount with the spec's orderings; @p kNative picks the binding.
+ *
+ * `dec_acq_rel` returns the value *before* the decrement, so a return of 1 means "this caller
+ * dropped the last reference" — the canonical Boost intrusive_ptr release test.
+ *
+ * The guarded binding gives the same guarantees: every update is a load and a store inside
+ * the guard covering this count, so no two updates interleave, and the guard's lock / unlock
+ * order each update after the ones before it — the acquire / release pair the last dropper
+ * needs to see every write made through the segment before it is reclaimed. Its loads and
+ * stores stay single aligned-word instructions, with no library call.
+ *
+ * @tparam G       The build's critical-section guard (a `tr::guard`), taken only by the
+ *                 guarded binding.
+ * @tparam kNative Which binding. The bound @ref ref_count_t takes what the target supports; a
+ *                 test names it to drive the guarded binding on a host that has atomic RMW.
+ */
+template <class G, bool kNative>
+class basic_ref_count_t {
    public:
-    explicit ref_count_t(std::uint_least32_t initial) noexcept : count_(initial) {}
+    /** @brief Whether the count is one hardware RMW (`true`) or a guarded load + store. */
+    static constexpr bool is_native = kNative;
 
-    ref_count_t(const ref_count_t&) = delete;
-    ref_count_t& operator=(const ref_count_t&) = delete;
+    /** @brief Start at @p initial references. */
+    explicit basic_ref_count_t(std::uint_least32_t initial) noexcept : count_(initial) {}
 
-#ifdef LIBTRACER_NO_ATOMIC
-    void inc_relaxed() noexcept { ++count_; }
-    [[nodiscard]] std::uint_least32_t dec_acq_rel() noexcept { return count_--; }
-    [[nodiscard]] std::uint_least32_t load_acquire() const noexcept { return count_; }
+    basic_ref_count_t(const basic_ref_count_t&) = delete;
+    basic_ref_count_t& operator=(const basic_ref_count_t&) = delete;
 
-   private:
-    std::uint_least32_t count_;
-#else
-    void inc_relaxed() noexcept { count_.fetch_add(1, std::memory_order_relaxed); }
-    [[nodiscard]] std::uint_least32_t dec_acq_rel() noexcept {
-        return count_.fetch_sub(1, std::memory_order_acq_rel);
+    /** @brief Add one reference (relaxed: a new reference orders nothing). */
+    void inc_relaxed() noexcept {
+        if constexpr (kNative) {
+            count_.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            const guard_scope_t<G> section = open();
+            count_.store(count_.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+        }
     }
+
+    /** @brief Drop one reference; returns the count BEFORE the drop. */
+    [[nodiscard]] std::uint_least32_t dec_acq_rel() noexcept {
+        if constexpr (kNative) {
+            return count_.fetch_sub(1, std::memory_order_acq_rel);
+        } else {
+            const guard_scope_t<G> section = open();
+            // Relaxed inside the section: its lock / unlock are the acquire / release.
+            const std::uint_least32_t before = count_.load(std::memory_order_relaxed);
+            count_.store(before - 1, std::memory_order_relaxed);
+            return before;
+        }
+    }
+
+    /** @brief The current count, acquire. Lock-free on both bindings. */
     [[nodiscard]] std::uint_least32_t load_acquire() const noexcept {
         return count_.load(std::memory_order_acquire);
     }
 
    private:
-    std::atomic<std::uint_least32_t> count_;
-#endif
+    /** @brief Open the guard section covering this count (guarded binding only). */
+    [[nodiscard]] guard_scope_t<G> open() const noexcept {
+        static_assert(guard<G>,
+                      "this target has no atomic read-modify-write for the segment refcount, "
+                      "so it counts under config_t::guard_t, which must be a complete tr::guard "
+                      "here: bind an interrupt-masked section, or tr::no_guard_t for a "
+                      "single-threaded build, in libtracer/config_override.hpp (#1722)");
+        return guard_scope_t<G>(this);
+    }
+
+    std::atomic<std::uint_least32_t> count_; /**< @brief The count; whole-word loads/stores. */
 };
+
+/** @brief The refcount as this build binds it. */
+using ref_count_t = basic_ref_count_t<::tr::graph::guard_t, kNativeRefCount>;
 
 }  // namespace detail
 
@@ -185,11 +240,36 @@ class segment_ptr_t {
  * finds the word taken and falls back to allocating its record, exactly as a block with no
  * reserve does.
  */
-#ifdef LIBTRACER_NO_ATOMIC
-using rx_loan_word_t = std::uint32_t;
-#else
 using rx_loan_word_t = std::atomic<std::uint32_t>;
-#endif
+
+namespace detail {
+
+/**
+ * @brief Set @p word from 0 to 1, once; the binding follows the refcount's (#1722).
+ *
+ * A template so that only the binding the build selects is instantiated: the guarded one needs
+ * a complete guard, which a host build whose guard header is not included here never has.
+ *
+ * @param word   The claim word.
+ * @param anchor The address whose guard the guarded binding takes (the segment).
+ */
+template <class G, bool kNative>
+[[nodiscard]] bool claim_word(rx_loan_word_t* word, const void* anchor) noexcept {
+    if constexpr (kNative) {
+        (void)anchor;
+        std::uint32_t expected = 0;
+        return word->compare_exchange_strong(expected, 1, std::memory_order_acquire,
+                                             std::memory_order_relaxed);
+    } else {
+        static_assert(guard<G>, "config_t::guard_t must be a complete tr::guard here (#1722)");
+        const guard_scope_t<G> section(anchor);
+        if (word->load(std::memory_order_relaxed) != 0) return false;
+        word->store(1, std::memory_order_relaxed);
+        return true;
+    }
+}
+
+}  // namespace detail
 
 /**
  * @brief Claim @p seg's ingress-loan reserve for one value, once.
@@ -201,15 +281,7 @@ using rx_loan_word_t = std::atomic<std::uint32_t>;
 [[nodiscard]] inline bool claim_rx_loan(segment_t* seg) noexcept {
     if (seg == nullptr || seg->rx_loan == 0) return false;
     auto* const word = reinterpret_cast<rx_loan_word_t*>(seg->bytes.data());
-#ifdef LIBTRACER_NO_ATOMIC
-    if (*word != 0) return false;
-    *word = 1;
-    return true;
-#else
-    std::uint32_t expected = 0;
-    return word->compare_exchange_strong(expected, 1, std::memory_order_acquire,
-                                         std::memory_order_relaxed);
-#endif
+    return detail::claim_word<::tr::graph::guard_t, detail::kNativeRefCount>(word, seg);
 }
 
 }  // namespace tr::view
