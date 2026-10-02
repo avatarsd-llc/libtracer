@@ -735,6 +735,8 @@ POINT (PL=1) {
 
 Precedence is by position, with zero merge logic: the two parts describe disjoint namespaces (flat protocol knobs vs the reserved `app` subtree, §`0x0B`), so a name collision cannot occur by construction. A vertex without a table serves the protocol part alone, byte-for-byte the record a runtime without owner fields serves.
 
+`:schema` addresses the whole vertex or nothing. It describes that vertex's own structure and never its children's: a child's schema is read from the child (`<parent>/<child>:schema`). There is no schema below a field, and `:children[]` lists members while `:schema` describes the vertex.
+
 ### Branch write — decomposition
 
 A write whose payload TLV is a POINT is a **branch write** ([RFC-0005](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0005-subtree-subscriptions.md)): the written tree is rooted **at the target vertex** — the root POINT's `NAME` MUST equal the target's leaf segment (mismatch ⇒ `ERROR{tr::path::invalid}`) — and it **decomposes**:
@@ -828,6 +830,8 @@ no registry entry, no RFC. `tr::frame::invalid` covers reserved-bit-set /
 `type=0x00` / oversize length; `tr::version::mismatch` is a discovery/link-level
 outcome, not a frame-parse result. The namespace is prefix-filterable
 (`tr::flow::*`). Additions to the registered set are RFC-gated.
+
+`tr::flow::address_shift_gap` (`0x0042`) is the single ordered-flow discontinuity code: it is raised both for a missing interior slice of a slicing group and for a best-effort ring-overflow shed, so a receiver has one gap-handling path. The "address-shift" in its name is historical.
 
 ### Where it appears
 
@@ -939,6 +943,8 @@ ACL (PL=1) {                                ; outer = ACE collection
 ### Constraints
 
 - A vertex without an `:acl` field defaults to "no restrictions" (when `security_acl` is not loaded) or "deny by default" (when `security_acl` is loaded with strict mode).
+
+The protocol does **authorization, not authentication**: identity authenticity is the transport's or a security module's job. The subject token is pluggable. v1 uses the transport-authenticated `origin_peer_id`, which is advisory on an unauthenticated bus; a security module may supply a stronger token (raw-key ed25519 with trust-on-first-use, the public key being the identity; CA-based X.509 is rejected) without changing the ACL model. ACL lists and capabilities are therefore one `subject → rights` authorization over a weaker or stronger token.
 
 ---
 

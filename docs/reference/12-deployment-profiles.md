@@ -49,6 +49,8 @@ Rung 0  +  forwarder (P2)
 - **The forwarder stays uniform.** It joins CAN ↔ WS ↔ in-process without holding per-link state; the framing difference lives entirely in the two transport adapters, so the router sees one addressing scheme regardless of which bus a frame arrived on ([ADR-0022](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0022-transport-framing-modes-elided-full-tlv-advertise.md)).
 - **Delivery policy is structural, never value-based.** Whether a subtree sweep selects a vertex is decided by that vertex's `delivery_mode`, which never inspects the value bytes ([RFC-0008](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0008-vertex-operations-assign-propagate.md)).
 
+The transport adapter, not the forwarder, synthesizes the TLV header on ingress and drops it on egress. The adapter is the stateless translation point between an elided leaf and a full-TLV backbone, so the forwarder is uniform across both modes and never maps a native identity to a path.
+
 ## Rung 3 — RTSP source (P2+)
 
 A camera as a **lazy / on-demand** vertex ([CONTEXT.md](../../CONTEXT.md)): subscribing to `/cam/0` starts the RTSP pull, and the last unsubscribe stops it.

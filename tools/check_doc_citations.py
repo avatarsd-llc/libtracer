@@ -202,12 +202,6 @@ def anchor_hits(lines: list, anchor: str, scope: str = None) -> list:
             if any(needle in x for x in lines[max(0, h - SCOPE_LINES):h]) != negated]
 
 ANCHORS = [
-    ("core/include/libtracer/tlv.hpp:122", "struct opt_t"),
-    ("core/include/libtracer/tlv.hpp:41", "enum class type_t"),
-    ("core/src/graph.cpp:4103",
-     "result_t<void> graph_t::set_identity(std::uint8_t kind, std::span<const std::byte> key) {"),
-    ("core/src/graph.cpp:4143", "result_t<view_t> graph_t::read_identity() const {"),
-    ("core/src/graph.cpp:4908", 'field.steps[0].name == "identity"'),
     # The RFC-0022 §3.B pair, cited by the #1392 erratum: the WRITE arm's terminal fall-through
     # (every flat `:settings.<knob>` name ⇒ SCHEMA_NOT_FOUND, caller-independently) and the READ
     # container that survives it. The write arm is pinned on its EXPLANATORY COMMENT, not on the
@@ -266,43 +260,20 @@ ANCHORS = [
     # The #1392 erratum's two pins for "a connection's config is creation-time and const":
     # the record itself, and its ONLY accessor — whose `const conn_settings_t*` return is the
     # whole no-reconfiguration-door argument, so the anchor keeps the `const` in it.
-    ("core/include/libtracer/transport_vertex.hpp:145", "struct conn_settings_t {"),
     ("core/include/libtracer/transport_vertex.hpp:634",
      "const conn_settings_t* settings_of(std::string_view name) const;"),
     # The synthesized `:children[]` a bus connection answers accepted-peer enumeration from —
     # the fact that replaced reference/13's stale "`:children[]` / `:settings`".
     ("core/src/transport_vertex.cpp:742", "handlers.on_children = {"),
-    ("core/src/graph.cpp:3733", "sel == field_sel_t::TAIL", 'step0.name == "subscribers"'),
-    ("core/src/graph.cpp:3853", "!whole_field(field)", 'step0.name == "acl"'),
     ("core/src/graph.cpp:3893", "field_selector(field) != field_sel_t::APPEND"),
-    ("core/src/graph.cpp:3787", "sel == field_sel_t::WILDCARD"),
-    ("core/src/graph.cpp:4842", "sel == field_sel_t::WHOLE || sel == field_sel_t::APPEND"),
-    ("core/src/graph.cpp:5016", "field_selector(field) == field_sel_t::SLOT"),
-    ("core/src/op_resolve_walk.hpp:364", "enum class index_mode_t"),
-    ("core/src/op_resolve_walk.hpp:1084", 'field.steps[0].name != "subscribers"'),
-    ("core/include/libtracer/mem_heap.hpp:267",
-     "[[nodiscard]] inline bool try_assign(std::vector<std::byte>& dst,"),
     ('core/include/libtracer/mem_heap.hpp:150', '[[nodiscard]] inline bool try_grow(std::size_t bytes, F&& grow) noexcept {'),
-    ("core/include/libtracer/view.hpp:26", "namespace tr::view {"),
-    ("core/include/libtracer/frame.hpp:28", "namespace tr::wire {"),
     ("core/include/libtracer/graph.hpp:60", "namespace tr::graph {"),
     ('core/include/libtracer/graph.hpp:1994', 'template <typename F>'),
     ('core/include/libtracer/graph.hpp:2398', 'struct delivery_drops_t {'),
     ('core/include/libtracer/graph.hpp:2430', '[[nodiscard]] delivery_drops_t delivery_drops() const noexcept;'),
     # The graph-level DEFAULT receiver-ring source (#1462, RFC-0025 §4.6.1) — cited by
     # docs/design/allocation-and-backpressure.md's seam table beside the other three.
-    ("core/include/libtracer/transport.hpp:40", "namespace tr::net {"),
     ('core/include/libtracer/transport.hpp:46', 'using peer_id_t = std::array<std::byte, 16>;'),
-    ("core/include/libtracer/backend.hpp:42", "enum class io_dir_t"),
-    ("core/include/libtracer/backend.hpp:120", "class mem_backend_t"),
-    ("core/include/libtracer/backend.hpp:179",
-     "virtual void before_io(view::segment_t* /*seg*/, io_dir_t /*dir*/) noexcept {}"),
-    # CONTEXT.md quotes the AMENDED meaning of `nesting_too_deep` twice. Its citation was
-    # `:210-216` — right until `24ea6d5` inserted the PATH_REF codec above and shifted the
-    # whole block +10, after which it landed on `walk_frame_t` and no doc pinned it.
-    ('core/include/libtracer/grammar.hpp:373',
-     '`TLV_NESTING_TOO_DEEP` ("exceeds this receiver'),
-    ("core/src/graph.cpp:2783", "!arena"),
     ("core/include/libtracer/segment.hpp:80", "struct segment_t"),
     # --- the design + module pages (#728). Every one of these had drifted. ---
     ("core/src/graph.cpp:2779", "std::array<std::byte, 4096> stack;"),
@@ -342,9 +313,6 @@ ANCHORS = [
     # core/examples/wire_codec.cpp
     ('core/examples/wire_codec.cpp:71', 'std::printf("encoded POINT{VALUE,VALUE}+CRC: %zu bytes\\n", wire.size());'),
     ('core/examples/wire_codec.cpp:94', 'constexpr int kIters = 50000;'),
-    # core/include/libtracer/backend.hpp
-    ('core/include/libtracer/backend.hpp:187',
-     'virtual void after_io(view::segment_t* /*seg*/, io_dir_t /*dir*/) noexcept {}'),
     # core/include/libtracer/config.hpp
     ('core/include/libtracer/config.hpp:102', '* Override fragment: `static constexpr std::size_t kVertexLockStripes = 8;`; ESP-IDF:'),
     ('core/include/libtracer/config.hpp:112', 'static constexpr std::size_t kVertexLockStripes = 16;'),
@@ -384,10 +352,7 @@ ANCHORS = [
     ('core/include/libtracer/mem_source.hpp:641',
      '[[nodiscard]] std::size_t overflowed() const noexcept { return overflow_; }'),
     # core/include/libtracer/path.hpp
-    ('core/include/libtracer/path.hpp:38', 'inline constexpr std::size_t kMaxSegmentBytes = 64;'),
-    ('core/include/libtracer/path.hpp:40', 'inline constexpr std::size_t kMaxPathBytes = 1024;'),
     ('core/include/libtracer/path.hpp:42', 'inline constexpr std::size_t kMaxSegments = 255;'),
-    ('core/include/libtracer/path.hpp:44', 'inline constexpr std::size_t kMaxFieldDepth = 8;'),
     # core/include/libtracer/rope.hpp
     ('core/include/libtracer/rope.hpp:208',
      '* @brief The single contiguous link — the consumer\'s explicit "this value is'),
@@ -449,8 +414,6 @@ ANCHORS = [
     # core/src/transport_vertex.cpp
     ('core/src/transport_vertex.cpp:54',
      'void parse_config(const tlv_t* config, conn_settings_t& s) {'),
-    ('core/src/transport_vertex.cpp:322',
-     'result_t<std::string> transport_vertex_t::module_for(std::string_view kind,'),
 
     # --- re-added from the v0.7.1 docs sweep (absent from main's table) ---
     ('core/include/libtracer/fwd_frame_view.hpp:1053', 'inline constexpr std::size_t kFwdMaxIov = 10;'),

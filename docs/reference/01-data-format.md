@@ -279,6 +279,8 @@ This is the **forward extension path**: new core type codes are added in the una
 
 Reserved bits in `opt` non-zero MUST be rejected as INVALID — reserved-bit-non-zero is a hard error to prevent silent semantic drift.
 
+Protocol-defined TLV shapes nest at most five deep by construction, so conformance needs no minimum depth; deeper user data is bounded only by the receiver's decode resources, a capability like frame size.
+
 ---
 
 ## Iterative parsing requirement
@@ -300,6 +302,8 @@ The same iterative pattern applies in two distinct contexts; implementations nee
 | **In-memory walk** | Rope of views (a chain of refcounted segments) | May step across view boundaries; payload of a single TLV may live in one or several adjacent views |
 
 The wire-receive context applies when a transport module reconstitutes a TLV from a stream. The in-memory walk applies when the router, a subscriber, or a recorder traverses a TLV that was assembled in memory (possibly via mix/split/concat operations) and is no longer flat. See [02-graph-model.md](02-graph-model.md) §Structured TLV as abstraction, memory as rope.
+
+A MUST-reject rule binds on **observation** of the violation, at whichever consumer opens that level; it does not require an eager scan at ingress, which checks only the trailer CRC and the top-level header. The only whole-tree walks are the termini that materialize or apply transactionally (arena decode, branch-write admission).
 
 ---
 

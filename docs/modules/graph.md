@@ -53,6 +53,8 @@ depth cap to tune (`core/include/libtracer/graph.hpp:There is no in-process`;
 Propagation past a target is exclusively the target's own logic — a controller
 re-emitting on its execution. `:schema` reads return a `POINT` descriptor.
 
+Retention is vertex state. A subscription's latch (`durability_request`) and its `enabled` bit are edge state, separate from retention.
+
 ## Interface
 
 ```cpp
@@ -314,6 +316,8 @@ A reader that parks a `value_ref_t` in long-lived state holds a bounded pool's b
 that long.
 ```
 
+A published `value_t` is one block holding a refcount and the written rope's **links**, not the bytes they point into: it is neither a `rope_t` nor a segment. The value is the storage form and a rope stays the write and egress form; a sink that needs a rope clones the links with `value_t::rope`.
+
 ## Assign and propagate
 
 `write` is not irreducible. It is `assign` — the **state** transition — followed by
@@ -475,6 +479,8 @@ gate, so an unauthenticated peer can fetch it — a narrow, named exemption for 
 field
 ([RFC-0011 — node identity facet](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0011-node-identity-facet.md)).
 
+A subscriber's `const value_t&` is valid for the call only, and it may be an on-stack `value_storage_t` that a branch write built over a slice it never stored.
+
 ## Delivery drops
 
 A delivery can be lost after the write succeeded. `delivery_drops()` returns the only
@@ -581,6 +587,9 @@ followed by the owner's own announce write.
 | `retire` parks a value seam; only `collect()` frees it | the seam is read lock-free, so `retire` cannot free it — it parks it on the graph. A vertex bears a seam iff a handler was installed (presence, not role: `STORED_VALUE` + `on_children` parks, `HANDLER` + empty `handlers_t` does not). Nothing frees the park until the embedder calls `collect()` at a point it knows no reader holds a seam. Connection teardown retires the `/net/<module>/<name>` identity vertex, which is seam-bearing only over a **bus** link (`link->bus() != nullptr`: CAN, or a tcp/ws server wired `peer_named = true`) — so a bus node with peer churn that never collects grows the park forever, while a point-to-point deployment parks nothing; `parked_seam_count()` is how that shows up before it matters ([#576](https://github.com/avatarsd-llc/libtracer/issues/576)) |
 | No subject resolver means no enforcement | writing `:acl` bytes on vertices and never installing a resolver yields a node that looks protected and is fully open |
 | No remote-delivery sink means no remote delivery | remote subscribes are accepted and stored; the `delivery_drops()` counters stay at zero because nothing was dropped — nothing was attempted |
+| `:acl`, `:subscribers`, `:children` and `:schema` are addressed whole | `:<field>.<anything>`, and `:<field>[N]` on a non-array field, name nothing and answer `ERROR{tr::schema::not_found}`. One shared `field_selector` / `whole_field` classification enforces it; without it a trailing step would fall through to the branch's action (`:children[].bogus` would create a child) and report success. |
+| `collect()` is not reclamation | it neither waits for nor detects readers: it frees parked seams at a moment the embedder names, on the caller's thread, after releasing the map lock, so a seam destructor may re-enter the graph. Call it only where no lock-free reader holds a seam; it is not the pattern for the subscriber edge array a `fan_out` reader holds across dispatch. |
+| Teardown is only a backstop for parked seams | the park destructs last, after the map lock and the root, so a seam whose destructor re-enters the graph would re-enter a half-destroyed object. Call `collect()` before destroying the graph for any such seam. |
 
 ## Consequences
 

@@ -66,6 +66,8 @@ with `tr::view::segment_ptr_t::adopt` (`core/include/libtracer/segment.hpp:segme
 The handle-producing conveniences `heap_alloc` / `borrow` / `borrow_const`
 therefore live in `tr::view`, not here.
 
+The **backend module set** is a per-target compile-time type list with tag dispatch: a single-member set folds to direct calls, and a multi-member set keeps mixed backends coexisting in one rope (for example heap and GPU).
+
 ## Interface
 
 ```{doxygenclass} tr::mem::mem_backend_t
