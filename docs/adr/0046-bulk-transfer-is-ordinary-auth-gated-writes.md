@@ -1,5 +1,7 @@
 # Firmware/OTA-class bulk transfer is ordinary auth-gated chunked writes to an app-defined vertex — no raw transport side-channels
 
+<!-- status: accepted -->
+
 Status: accepted (maintainer-ratified 2026-07-03, migration design grilling for the originating production firmware — an ESP32-C6 smart-agriculture node). Builds on [ADR-0041](0041-terminus-arena-decode-span-contract.md) (terminus span contract) and [ADR-0042](0042-refcounted-receiver-seam-view-delivery.md) (injected-backend receiver seam); auth-gating per [ADR-0045](0045-in-graph-authentication-per-hop-ed25519-tofu-noise.md) over the [ADR-0018](0018-access-control-authorization-pluggable-subject-token.md)/[ADR-0020](0020-acl-nfsv4-style-aces-with-inheritance.md) ACL model. Companion to [ADR-0044](0044-stateless-transport-peer-enumeration-separate-paths-client-side-identity.md) and [ADR-0045](0045-in-graph-authentication-per-hop-ed25519-tofu-noise.md).
 
 ## Context

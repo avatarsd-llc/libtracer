@@ -1,5 +1,7 @@
 # Direct browser-to-robot binding (rmw_tracer + browser node) is a target use case; WebTransport is its low-latency browser-facing stream transport
 
+<!-- status: accepted -->
+
 Status: accepted (the use case as an architectural driver, and the WebTransport direction it
 implies). **Implementation is roadmap, not now**: rmw_tracer is parked ([ADR-0023](0023-ros2-binding-via-rmw-tracer.md),
 [ADR-0025](0025-rmw-tracer-end-to-end-zero-copy-rcl-over-rdma.md)) under the origin-firmware-first

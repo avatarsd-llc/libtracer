@@ -1,5 +1,7 @@
 # 1. Extract the reference implementation from the origin firmware's `io_layer`
 
+<!-- status: accepted -->
+
 - **Date:** 2026-06-24
 - **Status:** Accepted
 - **Deciders:** avatarsd LLC (spec + reference-impl domains, see [GOVERNANCE.md](../../.github/GOVERNANCE.md))

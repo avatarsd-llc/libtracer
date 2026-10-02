@@ -5,6 +5,8 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 # RFC 0027 — Label-switched path compression: minting a per-host path label across the wire
 
+<!-- status: superseded; superseded-by: RFC-0029 -->
+
 | Field | Value |
 | ---- | ---- |
 | **RFC** | 0027 |
@@ -19,9 +21,8 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | **Scope** | **v-NEXT.** This RFC gates no release. |
 | **Descends from** | [#830](https://github.com/avatarsd-llc/libtracer/issues/830) (the local edge binding, merged — the mechanism this generalizes), [RFC-0024](0024-bound-paths-node-scoped-vertex-ref-source-routing.md) (the node-scoped `(slot, generation)` reference, accepted), [RFC-0004](0004-remote-operation-addressing.md) §E.1 (the per-link label plane, shipped) |
 
-> **Numbering note.** 0012 was closed unmerged, 0015 was withdrawn (PR #446); neither gap is
-> reusable — see [RFC-0016](0016-composed-branch-read.md) §ghost history. 0027 is the next unused
-> number.
+> **Numbering note.** Numbering gaps and why they are not reused are recorded in the
+> [ADR and RFC index](../../adr-rfc-index.md#numbering-gaps).
 
 ---
 

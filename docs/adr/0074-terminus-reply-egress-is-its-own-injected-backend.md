@@ -1,5 +1,7 @@
 # The terminus reply egress is its own injected backend
 
+<!-- status: accepted -->
+
 Status: **ACCEPTED (2026-08-03).** Implements [#795](https://github.com/avatarsd-llc/libtracer/issues/795). No wire change (the reply bytes are byte-for-byte identical); this is a *source-of-bytes* decision, recorded here plus a `core/CHANGELOG.md` note for the constructor signature change. Extends the bounded-seam programme of [ADR-0067](0067-bounded-recycling-source-and-per-owner-topology.md); reuses the by-value degrade of [ADR-0065](0065-failable-allocation-gets-its-own-seam-block-source.md).
 
 ## Context

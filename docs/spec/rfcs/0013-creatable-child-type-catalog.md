@@ -5,6 +5,8 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 # RFC 0013 — Readable creatable-child-type catalog: the `:children.schema` read
 
+<!-- status: superseded; superseded-by: ADR-0059 -->
+
 | Field | Value |
 | ---- | ---- |
 | **RFC** | 0013 |

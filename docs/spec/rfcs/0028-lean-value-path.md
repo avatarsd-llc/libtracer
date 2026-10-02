@@ -5,6 +5,8 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 # RFC 0028 — The lean value path: one block per publish, copy-or-share by size, retention per vertex, sync as a trait
 
+<!-- status: draft -->
+
 | Field | Value |
 | ---- | ---- |
 | **RFC** | 0028 |
@@ -19,8 +21,8 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | **Scope** | **v-NEXT.** Gates no release. Slices 1 (§6.1) and 2 (§6.2) landed ahead of acceptance as ordinary fixes per §11 ruling 5 ([PR #1628](https://github.com/avatarsd-llc/libtracer/pull/1628), [PR #1629](https://github.com/avatarsd-llc/libtracer/pull/1629)). |
 | **Amends / extends** | [RFC-0022](0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md) §3.D (the pin RATIO becomes an absolute SIZE threshold, §4.3 — the amendment RFC-0022 Amendment 2 itself measured the case for); [RFC-0025](0025-stream-class-values.md) §4.6.1 (the receiver ring becomes the `N` arm of one retention policy, §4.4; the byte charge is unchanged); [ADR-0060](../../adr/0060-lkv-copy-store-injected-value-backend.md) §1 (its stated, unimplemented end-state — "one allocation per write packing wrapper + value into one segment, retiring `mr_`" — is §4.1 of this RFC); [ADR-0064](../../adr/0064-lkv-publish-is-waiterless-and-the-slot-becomes-lock-free.md), [ADR-0069](../../adr/0069-lkv-slot-is-a-compile-time-policy-hazard-reclamation.md), [ADR-0080](../../adr/0080-reclamation-policy-is-a-build-time-closed-per-target-seam.md) (the slot and reclamation policies stay traits; §4.5 adds the single-writer one and deletes the default that hangs); [ADR-0079](../../adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md) Decision 3 (the throwing `std::pmr` channel is removed from the LKV path, as it ruled). |
 
-> **Numbering note.** 0012 was closed unmerged and 0015 was withdrawn; neither gap is reusable
-> (see [RFC-0016](0016-composed-branch-read.md) §ghost history). 0028 is the next unused number.
+> **Numbering note.** Numbering gaps and why they are not reused are recorded in the
+> [ADR and RFC index](../../adr-rfc-index.md#numbering-gaps).
 
 ---
 

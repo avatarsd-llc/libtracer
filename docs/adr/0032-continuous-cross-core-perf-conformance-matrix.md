@@ -1,5 +1,7 @@
 # Continuous cross-core performance + conformance matrix: ranged over many axes, on vector data, baseline-tracked, auto-published
 
+<!-- status: accepted -->
+
 Status: accepted (the testing/benchmarking strategy). Extends [ADR-0028](0028-native-cores-kept-consistent-by-conformance-vectors.md)
 (native cores kept consistent by conformance vectors) from *correctness-only* to
 *correctness + performance*, and from *curated points* to a *ranged response surface*.

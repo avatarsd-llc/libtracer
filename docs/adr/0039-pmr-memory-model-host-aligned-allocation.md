@@ -1,5 +1,7 @@
 # Transparent PMR: the node draws every non-hot-path allocation from an injected `std::pmr::memory_resource`, unifying with the L0 `mem_backend_t` seam — and "zero-heap" means the *steady-state forward hop*, not init
 
+<!-- status: accepted; superseded-in-part-by: ADR-0065 -->
+
 Status: accepted. **Refines [ADR-0038](0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md)** (sharpens what invariants #2/#5 mean) and **generalizes [ADR-0016](0016-substrate-zero-copy-layer-namespaces-no-templates-through-seam.md)** (the `mem_backend_t` injection seam) to the container/tree layer. Brick 0 of the #83 Stage-2 flip: the memory-ownership contract the forward-path rewrite builds against.
 
 ## Context

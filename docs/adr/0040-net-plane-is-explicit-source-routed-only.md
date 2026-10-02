@@ -1,5 +1,7 @@
 # The net plane is explicit-source-routed only: `bridge_t` and the ROUTER-flood mechanism are retired; `0x0D ROUTER` stays a reserved-but-unimplemented wire code
 
+<!-- status: accepted -->
+
 Status: accepted. **Supersedes the `bridge_t`-relocation framing of [ADR-0037](0037-net-side-channels-dissolve-into-vertex-tree-compositor.md)/[ADR-0038](0038-net-plane-performance-model-two-plane-forwarding-and-buffer-lifetime.md)** (which imagined the ROUTER guard being *absorbed* into the connection-vertex). It is not absorbed — it is **retired**. The Brick-3b decision of the #83 Stage-2 flip.
 
 ## Context

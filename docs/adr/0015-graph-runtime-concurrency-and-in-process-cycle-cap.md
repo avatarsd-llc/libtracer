@@ -1,5 +1,7 @@
 # The reference graph runtime reads/writes the last-known-value lock-free and bounds in-process dispatch cycles with a depth cap
 
+<!-- status: accepted; superseded-in-part-by: ADR-0051 -->
+
 Status: accepted
 
 > **Superseded in part by [RFC-0007](../spec/rfcs/0007-delivery-terminates-at-target.md) / [ADR-0051](0051-delivery-terminates-at-target-no-dispatch-limits.md)** (2026-07-04): the in-process dispatch-depth cap is deleted — SUBSCRIBER delivery now terminates at its target (no re-dispatch to the target's subscribers), so dispatch-level cycles are impossible by construction and no cap or termination machinery exists. This ADR's concurrency model (lock-free LKV, per-vertex atomicity, await) remains in force.

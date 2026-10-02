@@ -5,6 +5,8 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 # RFC 0019 — Path depth is bounded by bytes: the 32-segment `PATH` cap is deleted
 
+<!-- status: superseded; superseded-by: RFC-0023 -->
+
 | Field | Value |
 | ---- | ---- |
 | **RFC** | 0019 |
@@ -17,9 +19,8 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | **Tracking issue** | _(to be filed, `rfc`-labelled)_ |
 | **Target spec version** | v1 itself. The immutability clause has never triggered: `docs/spec/v1.md:1` reads "(DRAFT)", `:3` reads "The wire format is not yet stable", and all three Changelog entries read `_unreleased_`. Same route [RFC-0006](0006-resource-bounded-nesting-depth.md) and [RFC-0018](0018-packed-path-segments.md) took. |
 
-> **Numbering note.** 0012 was used and withdrawn; 0015 never existed. Neither gap is reusable —
-> see [RFC-0016](0016-composed-branch-read.md) §ghost history and RFC-0018's numbering note. 0019
-> is the next unused number.
+> **Numbering note.** Numbering gaps and why they are not reused are recorded in the
+> [ADR and RFC index](../../adr-rfc-index.md#numbering-gaps).
 
 ---
 

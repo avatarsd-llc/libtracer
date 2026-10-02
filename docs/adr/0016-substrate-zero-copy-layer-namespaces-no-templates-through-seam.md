@@ -1,5 +1,7 @@
 # The L0/L1 memory substrate is a CPU-mediated zero-copy scatter-gather router: namespaces mirror the layer model and templates never cross the seam
 
+<!-- status: accepted; superseded-in-part-by: ADR-0047 -->
+
 Status: accepted
 
 > **Superseded in part by [ADR-0047](0047-build-time-closed-module-sets-compile-time-seams.md)** (2026-07-04): §Decision 3's runtime-vtable dispatch and "templates never cross the seam" rule are replaced by build-time-closed module sets with tag dispatch. §Decisions 1–2 (CPU-mediated scatter-gather; namespaces mirror the layer model), the uniform-boundary-type rule, and the backend-private `alloc_hint_t` shape remain in force.

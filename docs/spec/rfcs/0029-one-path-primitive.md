@@ -5,6 +5,8 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 # RFC 0029 — One path primitive: the owner-issued `(index, generation)` pair, carried per hop, local = forwarded
 
+<!-- status: accepted -->
+
 | Field | Value |
 | ---- | ---- |
 | **RFC** | 0029 |
@@ -20,9 +22,8 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | **Supersedes** | [RFC-0027](0027-label-switched-path-compression.md) as a *form* (the 16/16 path label and its per-hop table — §12.3); [RFC-0024](0024-bound-paths-node-scoped-vertex-ref-source-routing.md) §7.1 (request flag, reply trailing list, strip-whole-list, and amendments 1–2's bare-array body for `0x15`), §7.5 (`op` bit 7) and the `0x14` spelling of §4.1 (§12.2); RFC-0027 §9 ("local IO is out of scope" — withdrawn by ruling 2). |
 | **Descends from** | [RFC-0024](0024-bound-paths-node-scoped-vertex-ref-source-routing.md) (the element — kept verbatim), [RFC-0027](0027-label-switched-path-compression.md) (the distribution rules — kept; §15 clause 5 is the falsifier this RFC fires), [RFC-0004](0004-remote-operation-addressing.md) §A/§B (path-as-route — unchanged model), [#830](https://github.com/avatarsd-llc/libtracer/issues/830) (the local edge binding), the [#1629](https://github.com/avatarsd-llc/libtracer/pull/1629) ruling (no per-request state at a hop) |
 
-> **Numbering note.** 0028 is [RFC-0028](0028-lean-value-path.md) (the lean value path,
-> [#1627](https://github.com/avatarsd-llc/libtracer/pull/1627)); 0012 and 0015 are dead gaps that are not reusable
-> ([RFC-0016](0016-composed-branch-read.md) §ghost history). 0029 is the next unused number.
+> **Numbering note.** Numbering gaps and why they are not reused are recorded in the
+> [ADR and RFC index](../../adr-rfc-index.md#numbering-gaps).
 
 ---
 

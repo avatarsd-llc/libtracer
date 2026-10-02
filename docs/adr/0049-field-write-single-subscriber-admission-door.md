@@ -1,5 +1,7 @@
 # `field_write` is the single SUBSCRIBER admission door: sugar, wire, and firmware subscriptions take one code path with uniform gate and latch
 
+<!-- status: accepted -->
+
 Status: accepted. Resolves [#59](https://github.com/avatarsd-llc/libtracer/issues/59); makes load-bearing claim 2 ("subscribing IS writing a SUBSCRIBER into `:subscribers[]`") true in code, completing [ADR-0026](0026-consumer-initiated-subscription-client-write.md)'s single-primitive claim at the implementation level; maintainer-ratified 2026-07-04.
 
 ## Context

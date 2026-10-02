@@ -1,5 +1,7 @@
 # Materializing a rope-delivered frame: the decode sink node type
 
+<!-- status: accepted -->
+
 Status: **accepted** (ratified 2026-07-06 in maintainer design review — **not** as this
 document originally recommended; see *Ratification outcome* below. This is the
 design-decision half of the [ADR-0048](0048-one-wire-grammar-chunk-cursor-rope-aware-decode.md)

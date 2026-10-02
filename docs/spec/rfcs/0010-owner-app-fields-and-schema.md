@@ -5,6 +5,8 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 # RFC 0010 — Owner-writable application property fields: the field descriptor table, the reserved `settings.app` namespace, and owner-defined `:schema`
 
+<!-- status: accepted -->
+
 | Field | Value |
 | ---- | ---- |
 | **RFC** | 0010 |

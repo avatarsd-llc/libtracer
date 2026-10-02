@@ -74,6 +74,7 @@ on:
       # to either must fire it — same rule as the two checks above.
       - "tools/check_ci_workspace_cleanup.py"
       - "tools/tests/test_check_ci_workspace_cleanup.py"
+      - "tools/gen_record_index.py"
       - ".github/workflows/doc-citations.yml"
       # #1095 enrolled seven more non-source paths. Four sit under `core/**`, `bench/**`
       # or `integrations/**` and are already covered above; these three are not, and an
@@ -101,6 +102,7 @@ on:
       - "tools/tests/test_check_config_keys.py"
       - "tools/check_ci_workspace_cleanup.py"
       - "tools/tests/test_check_ci_workspace_cleanup.py"
+      - "tools/gen_record_index.py"
       - ".github/workflows/doc-citations.yml"
       - ".github/workflows/core-ci.yml"
       - ".github/workflows/footprint-cortexm0.yml"
@@ -157,6 +159,11 @@ jobs:
         run: python3 -m unittest discover -s tools/tests -p "test_check_ci_workspace_cleanup.py" -v
       - name: Every self-hosted container job restores workspace ownership
         run: python3 tools/check_ci_workspace_cleanup.py
+      # The ADR/RFC index (#1727) is generated from the status key under each record's
+      # title. Same genre as the gates above, a derived page that rots silently, and
+      # `docs/**` already fires this job, so it rides here instead of in a workflow of its own.
+      - name: ADR/RFC index matches the records' status keys
+        run: python3 tools/gen_record_index.py --check
       - name: Every CI image reference matches the Dockerfile hash
         run: python3 tools/check_ci_image_tag.py
       - name: Restore workspace ownership for the host runner

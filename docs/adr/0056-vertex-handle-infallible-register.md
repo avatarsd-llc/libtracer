@@ -1,5 +1,7 @@
 # ADR-0056 — Opaque `vertex_handle_t` and an infallible `register_vertex`: retire the raw-pointer graph API
 
+<!-- status: accepted -->
+
 Status: accepted
 
 ## Context

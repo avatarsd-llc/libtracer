@@ -1,5 +1,7 @@
 # A transport — and each connection within it — is a first-class `/` vertex, created and configured through the same in-band API as any other vertex
 
+<!-- status: accepted; superseded-in-part-by: ADR-0059 -->
+
 Status: accepted. **Refined by [ADR-0059](0059-creator-endpoint-creation-and-removal-are-writes-to-a-vertex.md)** on one narrow point: the **`:children[]` spelling** of the §Decision worked example (`write /B/net/quic:children[] += SPEC{type=client, …}`, and "*its catalog is `{client, listener}`*") is superseded — creation is a write to a **creator endpoint vertex** (`write /net/export SPEC{type,name,config}`), and the catalog is that endpoint's own `:schema`. **This ADR's substance is untouched and is what ADR-0059 leans on**: transports and connections are `/` vertices, and distinct identity ⇒ `/`. Only the *spelling* of the creation write changes; what gets created, and that it is a vertex, does not.
 
 > **Erratum (2026-07-30), [#583](https://github.com/avatarsd-llc/libtracer/issues/583):** the §Decision worked example shows

@@ -1,5 +1,7 @@
 # Protocol-v1 scope boundaries: no in-band capability negotiation; the module ABI is implementation-defined
 
+<!-- status: accepted -->
+
 Status: accepted
 
 Two things sit deliberately **outside** the protocol-v1 standard, because the standard is the wire format and addressing alone ([00-overview.md](../reference/00-overview.md) §the standard, [01-data-format.md](../reference/01-data-format.md), [03-addressing.md](../reference/03-addressing.md)):

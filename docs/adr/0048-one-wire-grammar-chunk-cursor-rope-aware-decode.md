@@ -1,5 +1,7 @@
 # One wire-grammar core behind a chunk-cursor: decode is rope-aware, sinks stay distinct, and the cast contract is the validating decode
 
+<!-- status: accepted -->
+
 Status: accepted. Concentrates the L2/L3 grammar that [ADR-0041](0041-terminus-arena-decode-span-contract.md) §5 deliberately forked (the fork's *targets* survive; its duplicated *grammar* does not); implements the rope-aware / link-walking decode CONTEXT.md §Two-compositions has promised since it was written; amends `docs/reference/08` §"Casting a view to a TLV" (the non-validating lazy accessor is dropped from the standard); maintainer-ratified 2026-07-04.
 
 ## Context

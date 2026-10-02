@@ -5,6 +5,8 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 # RFC 0023 — The path segment cap is repriced: 32 → 255, derived from the wire's own widths
 
+<!-- status: accepted -->
+
 | Field | Value |
 | ---- | ---- |
 | **RFC** | 0023 |
@@ -17,11 +19,8 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 | **Tracking issue** | [#767](https://github.com/avatarsd-llc/libtracer/issues/767) |
 | **Target spec version** | v1 itself. The immutability clause has never triggered: `docs/spec/v1.md:1` reads "(DRAFT)", `:3` reads "The wire format is not yet stable", and every Changelog entry reads `_unreleased_`. Same route RFC-0006, RFC-0018 and RFC-0019 took. |
 
-> **Numbering note.** 0012 was closed unmerged and 0015 was withdrawn (PR #446); neither gap is
-> reusable — see [RFC-0016](0016-composed-branch-read.md) §ghost history and RFC-0018's numbering
-> note. 0014 was a phantom mislabel when RFC-0016 wrote that note, but it was **subsequently issued
-> as a real document** ([RFC-0014](0014-creator-endpoint-connection-lifecycle-and-link-liveness.md),
-> accepted 2026-07-24), so it is not a gap at all. 0023 is the next unused number.
+> **Numbering note.** Numbering gaps and why they are not reused are recorded in the
+> [ADR and RFC index](../../adr-rfc-index.md#numbering-gaps).
 
 > **Relationship to [RFC-0019](0019-path-depth-bounded-by-bytes.md).** RFC-0019 (draft,
 > 2026-07-31) proposed deleting the segment cap outright, leaving the byte budget as the only

@@ -5,6 +5,8 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 # RFC 0004 — Remote operation addressing: path-as-route + the `FWD`/`FIELD` frames
 
+<!-- status: accepted; superseded-in-part-by: RFC-0029 -->
+
 | Field | Value |
 | ---- | ---- |
 | **RFC** | 0004 |

@@ -1,5 +1,7 @@
 # A parse-once `path_t` constructor: retire the `*path_t::parse(...)` deref idiom
 
+<!-- status: accepted -->
+
 Status: **accepted** (2026-07-06 — maintainer-directed). Reverses the earlier working
 assumption (tracked as issue #31, "keep the unchecked `*`-deref of `result_t`, no
 repo-wide idiom change"): the idiom **is** changed here.

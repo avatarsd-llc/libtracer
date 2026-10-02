@@ -1,5 +1,7 @@
 # The last write-path heap allocation becomes poolable: the LKV copy-store draws its owned `segment` from a graph-injected `value_backend_` (`mem_backend_t`)
 
+<!-- status: accepted -->
+
 Status: accepted (maintainer-ratified 2026-07-21 in a grill-with-docs session). **Refines [ADR-0042](0042-refcounted-receiver-seam-view-delivery.md) §2–§3** (the owning-delivery subview store and its injected receive backend) — it pools the copy leg [ADR-0041](0041-terminus-arena-decode-span-contract.md) §2 left on the default heap. Upholds [ADR-0039](0039-pmr-memory-model-host-aligned-allocation.md) §2/§4 (one slab, exhaustion-is-backpressure), [ADR-0012](0012-modular-memory-binding-transparent-router.md)/[ADR-0047](0047-build-time-closed-module-sets-compile-time-seams.md) (`mem_backend_t` is the L0 byte-buffer seam), and [ADR-0051](0051-delivery-terminates-at-target-no-dispatch-limits.md)/[RFC-0006](../spec/rfcs/0006-resource-bounded-nesting-depth.md) (bounds are injected resources, never magic constants).
 
 ## Context

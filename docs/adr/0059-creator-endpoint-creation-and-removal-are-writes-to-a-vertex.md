@@ -1,5 +1,7 @@
 # ADR-0059 — Creation and removal are writes to a *creator endpoint vertex*, not fields on the parent
 
+<!-- status: accepted -->
+
 Status: accepted (maintainer ratified 2026-07-17 grill).
 
 **Supersedes the *spelling* of [ADR-0017](0017-in-band-vertex-creation-controller-orchestration.md)

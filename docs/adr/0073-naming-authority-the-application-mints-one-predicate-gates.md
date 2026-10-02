@@ -1,5 +1,7 @@
 # Naming authority: the application mints, one predicate gates every boundary
 
+<!-- status: accepted -->
+
 Status: **accepted; §1–§4 implemented** — §1 is `graph::valid_segment` (`core/include/libtracer/path.hpp:56`), called at both minting boundaries (`core/src/graph.cpp:1866`, `core/src/transport_vertex.cpp:137`); §2 is the `p<slot>` bus-session naming (`core/include/libtracer/transport_ws.hpp:64`); §3 is the bus-NAME-with-residual rejection in the mount descent (`core/src/fwd_router.cpp:149-154`); §4 is declared-only modules answering `SCHEMA_NOT_FOUND` (`core/src/transport_vertex.cpp:155-157`). [#426](https://github.com/avatarsd-llc/libtracer/issues/426), [#688](https://github.com/avatarsd-llc/libtracer/issues/688) and [#621](https://github.com/avatarsd-llc/libtracer/issues/621) are closed; [#491](https://github.com/avatarsd-llc/libtracer/issues/491) is still OPEN — see the §Consequences erratum, which refuted the recipe this ADR predicted for it. §5 stays declined: [#622](https://github.com/avatarsd-llc/libtracer/issues/622). Grill ruling of 2026-08-01 over the five-issue naming cluster.
 
 ## Context

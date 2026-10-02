@@ -1,5 +1,7 @@
 # Transport-peer enumeration is stateless and synthesized from live traffic; separate paths stay separate paths; matching device identities across paths is client-side logic, never core
 
+<!-- status: accepted -->
+
 Status: accepted (maintainer-ratified 2026-07-03, migration design grilling for the originating production firmware — an ESP32-C6 smart-agriculture node). Extends [ADR-0040](0040-net-plane-is-explicit-source-routed-only.md) (explicit-source-routed only) to the discovery/enumeration question; builds on [ADR-0027](0027-transport-and-connections-are-vertices.md) (path-as-route) and [ADR-0030](0030-can-transport-dynamic-in-transport-map-advertise-reassembly.md) (in-transport advertise map). Companion to [ADR-0045](0045-in-graph-authentication-per-hop-ed25519-tofu-noise.md) and [ADR-0046](0046-bulk-transfer-is-ordinary-auth-gated-writes.md) — the three ADRs of the origin-firmware network-rulings set. **Amended 2026-08-13: §Decision 1's "no vertices for peers" is NARROWED to *announce-census* peers — an ACCEPTED ws/tcp session on a `slot_server_t` listener MAY be an ordinary vertex (see [§Amendment](#amendment-2026-08-13-decision-1-is-scoped-to-announce-census-peers-1223)).**
 
 ## Context

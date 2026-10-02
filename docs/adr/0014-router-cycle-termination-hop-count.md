@@ -1,5 +1,7 @@
 # ROUTER cycle termination is guaranteed by `hop_count`; the dedup recent-set is a bounded best-effort optimization
 
+<!-- status: superseded; superseded-by: ADR-0040, ADR-0051 -->
+
 Status: accepted — **superseded by [ADR-0040](0040-net-plane-is-explicit-source-routed-only.md) / [ADR-0051](0051-delivery-terminates-at-target-no-dispatch-limits.md)**
 
 > **Erratum (2026-08-02) — this decision's mechanism no longer exists; read [ADR-0040](0040-net-plane-is-explicit-source-routed-only.md) instead.**

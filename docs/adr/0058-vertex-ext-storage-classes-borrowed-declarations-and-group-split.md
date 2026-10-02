@@ -1,5 +1,7 @@
 # ADR-0058 — Vertex-extension storage classes: borrowed app-field declarations and a co-occurrence group-split of `vertex_ext_t`
 
+<!-- status: accepted -->
+
 Status: accepted
 
 ## Context

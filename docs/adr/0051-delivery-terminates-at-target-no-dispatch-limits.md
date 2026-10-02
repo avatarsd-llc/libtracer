@@ -1,5 +1,7 @@
 # Delivery terminates at the target: no re-dispatch, no dispatch-depth cap, no termination machinery — propagation past a target is the target's logic
 
+<!-- status: accepted -->
+
 Status: accepted. Supersedes the in-process dispatch-depth cap of [ADR-0015](0015-graph-runtime-concurrency-and-in-process-cycle-cap.md) (its concurrency model is untouched); implementation-side of [RFC-0007](../spec/rfcs/0007-delivery-terminates-at-target.md); applies the no-synthetic-limits principle of [RFC-0006](../spec/rfcs/0006-resource-bounded-nesting-depth.md) to the graph runtime; maintainer-ratified 2026-07-04.
 
 ## Context

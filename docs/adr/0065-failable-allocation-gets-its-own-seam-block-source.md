@@ -1,5 +1,7 @@
 # Failable allocation gets its own seam: `tr::mem::block_source_t`, because `std::pmr` cannot carry a failure signal on the profile that ships
 
+<!-- status: accepted -->
+
 Status: accepted (maintainer-ratified 2026-07-27 across three grill-with-docs questions on [#551](https://github.com/avatarsd-llc/libtracer/issues/551)). **Supersedes the "route it through `mr_`" reading of [ADR-0039](0039-pmr-memory-model-host-aligned-allocation.md) errata 4–5**, which named the hole but assumed the existing `std::pmr` seam could close it. Refines [ADR-0060](0060-lkv-copy-store-injected-value-backend.md) §1 (which chose `mem_backend_t` over `std::pmr` for *byte buffers*, on adjacent grounds) and upholds [ADR-0016](0016-substrate-zero-copy-layer-namespaces-no-templates-through-seam.md) §2 (`tr::mem` is where L0 allocation seams live), [ADR-0039](0039-pmr-memory-model-host-aligned-allocation.md) §2/§4 (one slab, exhaustion-is-backpressure), and [RFC-0006](../spec/rfcs/0006-resource-bounded-nesting-depth.md) (bounds are injected resources, never magic constants).
 
 ## Context
