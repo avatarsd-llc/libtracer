@@ -26,7 +26,10 @@
  *    precedent, armed only around the measured writes. The graph's value blocks and the ring's
  *    reservations come from INJECTED sources that are malloc-backed, so the one allocation a
  *    publish legitimately costs (RFC-0028 §5.1) is counted at its own seam and never hides in,
- *    or pads, the heap count. Positive control: an armed `new` must count.
+ *    or pads, the heap count. Positive control: an armed `new` must count. The warm-up runs
+ *    past one hazard retire batch: under `hazard_slot_t` the LKV publish draws its reclamation
+ *    node from the global heap until the thread's first scan stocks its free list (the #873
+ *    carve-out in `lkv_slot.hpp`), which is a one-time per-thread cost, not the write's.
  *
  * The concurrent arm is the TSan half: four writers on one STREAM vertex, every value
  * delivered exactly once — the fused take must neither lose nor duplicate an entry.
@@ -236,9 +239,17 @@ void test_stream_write_one_lock_no_heap() {
 
     // Warm-up: the first append creates the ring state and fills it to its depth, after which
     // every admission is funded by the retiring entry's reservation (carried, not re-asked).
-    for (std::uint8_t i = 0; i < 4; ++i)
-        check(g.write(v, make_value({i})).has_value(), "warm-up write");
-    check(seen.n == 4, "warm-up delivered every write once");
+    // It runs past TWO hazard retire batches (`kRetireBatch` is `kHazardReaderSlots`): under
+    // `hazard_slot_t` each LKV publish displaces a reclamation node, and the thread's free list
+    // is stocked only by its first scan — until then a publish allocates its node on the global
+    // heap ON PURPOSE (the #873 carve-out). A no-op under the other slot bindings.
+    constexpr std::size_t kWarmup = 2 * tr::graph::kHazardReaderSlots + 4;
+    bool warm_ok = true;
+    for (std::size_t i = 0; i < kWarmup; ++i)
+        warm_ok = g.write(v, make_value({static_cast<std::uint8_t>(i)})).has_value() && warm_ok;
+    check(warm_ok, "every warm-up write succeeds");
+    check(seen.n == kWarmup, "warm-up delivered every write once");
+    seen = seen_t{};  // the measured log starts empty, so its fixed capacity covers kWrites
 
     // The payloads are minted BEFORE arming: `make_value` heap-allocates the test's segment,
     // which is the caller's cost, not the write's.
