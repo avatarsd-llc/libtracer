@@ -663,7 +663,7 @@ struct edge_latch_t {
  */
 class edge_snapshot_t {
    public:
-    /** @brief The snapshot width: the build's @ref kInlineFanout (mirrored as
+    /** @brief The snapshot width: the build's `%tr::graph::kInlineFanout` (mirrored as
      *         `vertex_t::kInlineFanout`). */
     static constexpr std::size_t kCapacity = kInlineFanout;
 
