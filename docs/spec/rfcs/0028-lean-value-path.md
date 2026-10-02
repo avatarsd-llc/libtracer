@@ -1001,6 +1001,15 @@ table that is a `config_t` trait with a default table. Above a class boundary wh
 block would cross into a slower class, it splits. No other type keeps its own header size,
 stride or padding recipe, and no receive-loan offset is spelled outside it.
 
+**Note: the interim split ([#1768](https://github.com/avatarsd-llc/libtracer/issues/1768), in
+flight).** Until the placement module lands, #1768 has the heap adapter split a segment above
+`config_t::kHeapSmallBlockBytes`. The default is 1,032 B, glibc's tcache ceiling; ESP-IDF sets
+it to `SIZE_MAX`, so there a segment stays one block. On the host, then, a heap segment
+carrying more than about 984 B of payload is **two blocks**, header and payload. §6.10's
+producer-own gate (2 → 1 allocations) still holds for small values, the rows it was written
+for. ADR-0083's placement module turns this threshold into a size-class rule, a row in the
+`config_t` table rather than a constant in one adapter.
+
 §4.9's final paragraph is amended in one sentence: the two constructor roots (the root
 vertex, and the graph's own bookkeeping allocated before any source is bound) **no longer
 stay on the global heap**. They draw from the graph's one injected root, like every other
