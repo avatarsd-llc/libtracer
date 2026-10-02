@@ -32,7 +32,7 @@ rather than a silent behavioural fork between translation units.
 
 The sizes and policies are members of **one named type**, `default_config_t`
 (`core/include/libtracer/config.hpp:default_config_t`), bound once by `using config_t = default_config_t;`
-(`core/include/libtracer/config.hpp:config_t`). An application declares its own by inheriting and overriding what differs (`core/include/libtracer/config.hpp:65-77`):
+(`core/include/libtracer/config.hpp:config_t`). An application declares its own by inheriting and overriding what differs (`core/include/libtracer/config.hpp:struct my_node_config_t : default_config_t {`):
 
 ```cpp
 struct my_node_config_t : tr::graph::default_config_t {

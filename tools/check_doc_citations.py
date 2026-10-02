@@ -346,12 +346,11 @@ ANCHORS = [
     ('core/include/libtracer/backend.hpp:187',
      'virtual void after_io(view::segment_t* /*seg*/, io_dir_t /*dir*/) noexcept {}'),
     # core/include/libtracer/config.hpp
-    ('core/include/libtracer/config.hpp:85', '* Override fragment: `static constexpr std::size_t kVertexLockStripes = 8;`; ESP-IDF:'),
-    ('core/include/libtracer/config.hpp:95', 'static constexpr std::size_t kVertexLockStripes = 16;'),
+    ('core/include/libtracer/config.hpp:102', '* Override fragment: `static constexpr std::size_t kVertexLockStripes = 8;`; ESP-IDF:'),
+    ('core/include/libtracer/config.hpp:112', 'static constexpr std::size_t kVertexLockStripes = 16;'),
     # core/include/libtracer/config.hpp
-    ('core/include/libtracer/config.hpp:68', '* struct my_node_config_t : default_config_t {'),
-    ('core/include/libtracer/config.hpp:268', 'using acl_policy_t = allow_only_policy_t;'),
-    ('core/include/libtracer/config.hpp:95',
+    ('core/include/libtracer/config.hpp:285', 'using acl_policy_t = allow_only_policy_t;'),
+    ('core/include/libtracer/config.hpp:112',
      'static constexpr std::size_t kVertexLockStripes = 16;'),
     # Was pinned to the :316 banner rule, one of three IDENTICAL comment rules in this header —
     # an anchor no scope could ever separate. Re-pinned inside the SAME cited span
@@ -372,17 +371,17 @@ ANCHORS = [
     ('core/include/libtracer/mem_heap.hpp:472',
      '[[nodiscard]] inline std::optional<view_t> over_bytes(std::span<const std::byte> bytes) noexcept {'),
     # core/include/libtracer/mem_pool.hpp
-    ('core/include/libtracer/mem_pool.hpp:160', 'class synchronized_pool_t final : public mem_backend_t {'),
+    ('core/include/libtracer/mem_pool.hpp:161', 'class synchronized_pool_t final : public mem_backend_t {'),
     # core/include/libtracer/mem_source.hpp
-    ('core/include/libtracer/mem_source.hpp:362',
+    ('core/include/libtracer/mem_source.hpp:364',
      '*          between operations. It is NOT a long-lived seam: an 8 KiB bump source wired as'),
-    ('core/include/libtracer/mem_source.hpp:363',
+    ('core/include/libtracer/mem_source.hpp:365',
      "*          a router's `rx` decoded 6 frames and rejected the next 194 — measured. A"),
-    ('core/include/libtracer/mem_source.hpp:567',
+    ('core/include/libtracer/mem_source.hpp:568',
      'pool_source_t(std::span<std::byte> slab, std::span<size_class_t> classes) noexcept'),
-    ('core/include/libtracer/mem_source.hpp:629',
+    ('core/include/libtracer/mem_source.hpp:630',
      '[[nodiscard]] std::size_t classes_used() const noexcept { return n_; }'),
-    ('core/include/libtracer/mem_source.hpp:640',
+    ('core/include/libtracer/mem_source.hpp:641',
      '[[nodiscard]] std::size_t overflowed() const noexcept { return overflow_; }'),
     # core/include/libtracer/path.hpp
     ('core/include/libtracer/path.hpp:34', 'inline constexpr std::size_t kMaxSegmentBytes = 64;'),
@@ -639,8 +638,8 @@ ANCHORS = [
     ('core/include/libtracer/vertex.hpp:1668',
      '* durability (`policy.durability_request()`, RFC-0022 §3.A) and the vertex already'),
     # core/include/libtracer/mem_source.hpp
-    ('core/include/libtracer/mem_source.hpp:75', 'struct source_stats_t {'),
-    ('core/include/libtracer/mem_source.hpp:226',
+    ('core/include/libtracer/mem_source.hpp:77', 'struct source_stats_t {'),
+    ('core/include/libtracer/mem_source.hpp:228',
      '[[nodiscard]] virtual source_stats_t stats() const noexcept { return {}; }'),
     # core/include/libtracer/fwd_router.hpp
     ('core/include/libtracer/fwd_router.hpp:83', 'struct router_stats_t {'),

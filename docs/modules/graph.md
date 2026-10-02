@@ -36,7 +36,7 @@ and draws no block at all. App fields carry the same enum: a `wo` field is `NONE
 write reaches `on_app_field_write` and is stored nowhere.
 
 The slot is a build-time policy. By default it is `single_writer_slot_t`, whose one wait
-is a reader guard that never spins (#1618): a striped mutex on a host, an interrupt-masked
+is a guard that never spins (#1618): a striped mutex on a host, an interrupt-masked
 section on a chip. A host can opt into `hazard_slot_t`, which is lock-free but still pays
 one contended increment to promote a read into an owning handle. The claim the code supports is the mutex one, not an absence of
 contention; the costs are in [design/concurrency](../design/concurrency/README.md).
