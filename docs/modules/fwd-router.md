@@ -687,6 +687,10 @@ at the terminus, which is what makes a per-writer subject reachable at `peer_nam
 :members:
 ```
 
+```{doxygentypedef} tr::net::transport_factory_t
+:project: libtracer
+```
+
 ```{doxygenenum} tr::net::conn_role_t
 :project: libtracer
 ```
