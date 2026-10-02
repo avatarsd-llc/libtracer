@@ -714,7 +714,9 @@ void reject_bus_name_hop(const child_registry_t& registry, std::string_view inbo
     if (reply.link_count() == 0) return;
     // `by_name` includes the bus-peer fallback, so a frame that arrived FROM a peer (whose
     // inbound_name is the peer's own name) answers back over that peer's directed endpoint —
-    // the same lookup resolve_terminus uses for its replies.
+    // the same lookup `reply_link` falls back to for a bus peer's terminus reply. This cold
+    // refusal keeps the by-name form for every inbound link; the terminus's point-to-point
+    // replies leave through the ctx's link instead (#1709).
     if (transport_t* const up = registry.by_name(inbound_name)) {
         if (reply.link_count() == 1) {
             up->send(reply.links()[0].bytes());
@@ -2802,6 +2804,25 @@ namespace {
 
 }  // namespace
 
+/** @brief The terminus reply's egress: the inbound ctx's own link, or a counted name lookup. */
+transport_t* fwd_router_t::reply_link(std::string_view inbound_name,
+                                      const child_rx_ctx_t* inbound_ctx) noexcept {
+    // The point-to-point arm: the frame came up this child's own receiver, whose ctx already
+    // holds the link — the reply goes back the way the request came, with no registry scan.
+    // A BUS ctx is excluded on purpose: its frames arrive under a PEER's name, and the reply
+    // must reach that peer's directed endpoint, never the bus's broadcasting `send`
+    // (ADR-0073 §3) — the peer resolution below is the one ADR-0044 rules. A tombstoned ctx
+    // (#884) falls through too, so a child removed mid-frame is answered exactly as before:
+    // by a name the registry no longer holds, i.e. not at all.
+    if (inbound_ctx != nullptr && inbound_ctx->bus.load(std::memory_order_relaxed) == nullptr &&
+        !inbound_ctx->retired.load(std::memory_order_acquire)) {
+        if (transport_t* const link = inbound_ctx->link.load(std::memory_order_relaxed))
+            return link;
+    }
+    reply_name_lookups_.fetch_add(1, std::memory_order_relaxed);
+    return registry_.by_name(inbound_name);
+}
+
 void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<const std::byte> frame,
                                     const view_t* frame_view, const child_rx_ctx_t* inbound_ctx,
                                     const wire::path_ref_element_t* dst_label_target,
@@ -2830,7 +2851,7 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<con
         // receiver instead of inferring a lost frame from its own timeout. The reply is built
         // from the request's bytes on the stack — it cannot draw from the source that just
         // refused, and it does not draw from anything else either (`emit_refusal_reply`).
-        if (transport_t* const in = registry_.by_name(inbound_name))
+        if (transport_t* const in = reply_link(inbound_name, inbound_ctx))
             emit_refusal_reply(wire::grammar::span_cursor{frame}, *in,
                                graph::status_t::BACKPRESSURE);
         return;
@@ -2852,12 +2873,12 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<con
         // The resolver's own `or_backpressure` already tried to answer this by value and the
         // egress backend refused THAT head too; the stack emitter needs neither (#1612).
         count_drop(assemble_dropped_);
-        if (transport_t* const in = registry_.by_name(inbound_name))
+        if (transport_t* const in = reply_link(inbound_name, inbound_ctx))
             emit_refusal_reply(wire::grammar::span_cursor{frame}, *in,
                                graph::status_t::BACKPRESSURE);
         return;
     }
-    if (transport_t* in = registry_.by_name(inbound_name)) {
+    if (transport_t* const in = reply_link(inbound_name, inbound_ctx)) {
         // Nothrow scatter-gather egress on the failable seam (#1570, see `gather_reply_iov`),
         // drawn from the SAME source this frame's own decode drew from two calls up: the
         // per-owner receive source (ADR-0067 §3), not the graph's control budget. The table
@@ -2916,12 +2937,12 @@ void fwd_router_t::resolve_terminus_rope(std::string_view inbound_name, view::ro
         // Answered from the request's own links (#1612), as at the arena terminus: the rope
         // cursor hands the emitter the same offsets the contiguous one does.
         count_drop(assemble_dropped_);
-        if (transport_t* const in = registry_.by_name(inbound_name))
+        if (transport_t* const in = reply_link(inbound_name, inbound_ctx))
             emit_refusal_reply(wire::grammar::rope_cursor{view->wire()}, *in,
                                graph::status_t::BACKPRESSURE);
         return;
     }
-    if (transport_t* in = registry_.by_name(inbound_name)) {
+    if (transport_t* const in = reply_link(inbound_name, inbound_ctx)) {
         // Nothrow scatter-gather egress (see `resolve_terminus`): the same failable-seam
         // table, from the same per-owner receive source, dropping rather than aborting on a
         // growth failure. This tier is where the unbounded case actually lives — a rope-tier
