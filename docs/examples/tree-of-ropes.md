@@ -25,7 +25,7 @@ example asserts they never merge.
   exactly one addressable vertex at `/net/<module>/<name>` — here `/net/can/link0`,
   under the `can` module the example declares with `register_module`, whose staged link
   the creation then picks up (`transport_vertex_t::provide_link`,
-  `core/src/transport_vertex.cpp:598`). The module declaration also fixes the role, which
+  `core/src/transport_vertex.cpp:transport_vertex_t::provide_link`). The module declaration also fixes the role, which
   is why the SPEC carries no `type` and no `role`. The transport's real bytes live *outside*
   the graph, in the FWD router's demux; no per-peer vertex or memory is added
   (ADR-0044). Attaching a bus does not "grow the rope."
@@ -44,7 +44,7 @@ example asserts they never merge.
   value at all: the read returns `NOT_FOUND`. Only once the link reports state does
   the vertex hold a value, and that value is a **single-link** rope carrying a
   one-byte link-state VALUE TLV (`link_state_value`,
-  `core/src/transport_vertex.cpp:84`) — categorically not a chained payload. The live
+  `core/src/transport_vertex.cpp:link_state_value`) — categorically not a chained payload. The live
   transport is found in `router.registry().by_name("net/can/link0")`, outside the
   graph.
 

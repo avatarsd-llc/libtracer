@@ -277,7 +277,7 @@ remain in the devices — RAM, or NVS where the device persists them.
 target routes through a mount.** A `SUBSCRIBER` whose `PATH` names a path *through* a
 transport mount, spelled in the **producer's** frame
 (`/net/<module>/<link>/<consumer-path>`), binds the edge to that mount's link and the
-residual below it (`graph_t::subscribe_wire`, `core/src/graph.cpp:3663`), so
+residual below it (`graph_t::subscribe_wire`, `core/src/graph.cpp:delivery_link.assign(split.link);`), so
 `fwd_router_t::link_down` → `graph_t::evict_link_edges` on the orchestrator's session no
 longer matches it and the producer keeps delivering. That is RFC-0021 §4.B.1/§4.C, and
 it is what makes the departure above real for a third-party wire.
@@ -361,11 +361,11 @@ write-only, non-propagating creator endpoint.
 `dormant` takes `0` so a resting link is the falsy default. **The byte encoding becomes
 normative on the merge of RFC-0014's conformance vectors** — the RFC defers it, so these
 values are the reference encoding until then (`link_state_t`,
-`core/include/libtracer/transport_vertex.hpp:115-122`). A `LISTEN` vertex's liveness
+`core/include/libtracer/transport_vertex.hpp:link_state_t`). A `LISTEN` vertex's liveness
 reports **listen-socket reachability**, not per-accepted-peer connectivity; accepted-peer
 count and identity are exposed through the connection vertex's **synthesized
 `:children[]`**, built per read from the transport's own live-peer table
-(`core/src/transport_vertex.cpp:742`) — never through `:settings`, whose core namespace
+(`core/src/transport_vertex.cpp:handlers.on_children = {`) — never through `:settings`, whose core namespace
 is empty. Once up, a link is bidirectional regardless of who dialed — `role` says only *who initiates*. The liveness
 engine that drives these transitions automatically is not implemented; the value is set
 by the caller.
@@ -389,7 +389,7 @@ framing modes. The bounds to design within:
   every hop and is consumed monotonically, so a delivery travels exactly as far as its explicit
   source route — segment count ≤ 255 ([03 — Addressing](03-addressing.md);
   [RFC-0023](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0023-path-segment-cap-repriced-32-to-255.md); `kMaxSegments`,
-  `core/include/libtracer/path.hpp:42`). For realistically named mounts the **1024-byte PATH
+  `core/include/libtracer/path.hpp:kMaxSegments`). For realistically named mounts the **1024-byte PATH
   budget binds first**, not the segment count: a 3-segment mount run (ADR-0061) costs its NAME
   headers plus its bytes — 20 B/hop for `/net/can/c0`, 32 B/hop for
   `/net/ws-client/board-01` — so the diameter is ≈ **30–50 hops** at 3-segment mount runs, and
@@ -478,11 +478,11 @@ automatic**:
   and `port` are **creation-time config** (§Creation): they travel in the `SPEC`'s
   `config` and are parsed into the transport-private `tr::net::conn_settings_t`, whose
   only accessor hands out a **const** view
-  (`transport_vertex_t::settings_of`, `core/include/libtracer/transport_vertex.hpp:634`).
+  (`transport_vertex_t::settings_of`, `core/include/libtracer/transport_vertex.hpp:transport_vertex_t::settings_of`).
   The vertex `:settings` core namespace holds nothing to write — RFC-0022 §3.B deleted
   `settings_t`, so every flat knob name under it answers `SCHEMA_NOT_FOUND`
-  caller-independently (`core/src/graph.cpp:3977`), leaving only the read container and
-  its reserved `app` subkey (`core/src/graph.cpp:4176`). Moving a peer therefore means
+  caller-independently (`core/src/graph.cpp:graph_t::field_write`), leaving only the read container and
+  its reserved `app` subkey (`core/src/graph.cpp:graph_t::read_settings`). Moving a peer therefore means
   retiring the connection (`NAME`) and re-creating it (`SPEC`), which un-routes the link
   and cascade-evicts the subscriptions routed through it (§Boundaries of the formation
   model, *hard* teardown).

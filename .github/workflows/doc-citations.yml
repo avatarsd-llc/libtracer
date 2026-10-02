@@ -1,20 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 #
-# The doc-citation gate, on every change that can move a cited line.
+# The doc-citation gate, on every change that can rename or remove cited code.
 #
-# `tools/check_doc_citations.py` pins each `file:line` citation in the docs to a
-# substring the cited line must contain. It ran in ONE place — `docs.yml` — whose path
-# filter is a documentation filter: `docs/**`, `*.md`, `core/include/**`, `tools/**`.
-# `core/src/**` is not in it, and neither is `integrations/**`. Over half the anchors
-# point into exactly those two trees, so the commits most able to shift a citation were
-# the commits that ran no check at all (#803). This job closes that: its filter is the
-# UNION of every tree an anchor can name plus every tree a citation can live in.
+# `tools/check_doc_citations.py` checks each SYMBOL citation in the docs
+# (`` `core/src/graph.cpp:graph_t::write_impl` ``) by searching the cited file: it fails
+# when the symbol is gone or names more than one place, and it refuses any line-number
+# citation outright (#1705, #1706 — the anchor table and the re-pin tool are gone). It ran
+# in ONE place — `docs.yml` — whose path filter is a documentation filter: `docs/**`,
+# `*.md`, `core/include/**`, `tools/**`. `core/src/**` is not in it, and neither is
+# `integrations/**`, so the commits most able to rename cited code were the commits that
+# ran no check at all (#803). This job closes that: its filter is the UNION of every tree a
+# citation can name plus every tree a citation can live in.
 #
-# `backends/**` joined that union with the GPU backend's move out of core (#1381): the
-# tier's CMake project is an enrolled non-source path, so a commit that shifts a line in
-# it must be a commit this gate fires on — the same rule `EnrolledPathsArePinnedTest`
-# enforces for every other enrolled path.
+# `backends/**` joined that union with the GPU backend's move out of core (#1381).
 #
 # It is deliberately its own workflow rather than a step inside core-ci: the check needs
 # no build, no toolchain and ~0.3 s, and hanging it off a 3-way build matrix would make a
@@ -62,11 +61,9 @@ on:
       - "examples/**"
       - "tools/check_doc_citations.py"
       - "tools/tests/test_check_doc_citations.py"
-      # An anchor may now name a tooling script (#1052). `tools/**` is deliberately NOT
-      # the entry — most of this tree cannot move a cited line — so every enrolled path
-      # UNDER `tools/` is listed one by one, and `EnrolledPathsArePinnedTest` fails if one
-      # is missed. The other enrolled build path, `core/tests/CMakeLists.txt`, needs no
-      # entry of its own: the `core/**` filter above already covers it.
+      # A citation may name a tooling script (#1052). `tools/**` is deliberately NOT the
+      # entry — most of this tree is never cited — so the cited and gate-carried paths
+      # UNDER `tools/` are listed one by one.
       - "tools/cortexm0_footprint.py"
       - "tools/check_config_keys.py"
       - "tools/tests/test_check_config_keys.py"
@@ -77,11 +74,9 @@ on:
       - "tools/gen_record_index.py"
       - "tools/gen_file_map.py"
       - ".github/workflows/doc-citations.yml"
-      # #1095 enrolled seven more non-source paths. Four sit under `core/**`, `bench/**`
-      # or `integrations/**` and are already covered above; these three are not, and an
-      # anchor that no job fires on is not a gate. Listed exactly rather than as
-      # `.github/workflows/**` and `bindings/**`, for the same reason `tools/**` is not
-      # the entry: most of those trees cannot move a cited line.
+      # Non-source files a doc may cite outside the trees above (#1095). Listed exactly
+      # rather than as `.github/workflows/**` and `bindings/**`, for the same reason
+      # `tools/**` is not the entry: most of those trees are never cited.
       - ".github/workflows/core-ci.yml"
       - ".github/workflows/footprint-cortexm0.yml"
       - "bindings/typescript/packages/client/test/mesh-testbed.test.mjs"
@@ -139,12 +134,12 @@ jobs:
           # See the WORKSPACE OWNERSHIP header: without this, checkout's post step
           # re-roots `.git/config` after the cleanup step has already run.
           persist-credentials: false
-      # The resolver reads three citation spellings (full path, basename shorthand,
-      # bare `:N` continuation) and must not guess; its unit tests run FIRST so a
-      # resolver bug reports as a resolver bug rather than as 300 phantom drifts.
+      # The resolver reads the citation spellings (full path, basename shorthand, symbol,
+      # and the refused line-number forms) and must not guess; its unit tests run FIRST so
+      # a resolver bug reports as a resolver bug rather than as hundreds of phantom FAILs.
       - name: Resolver unit tests
         run: python3 -m unittest discover -s tools/tests -p "test_check_doc_citations.py" -v
-      - name: Doc-citation gate (anchored file:line citations still resolve)
+      - name: Doc-citation gate (symbol citations resolve; no line-number citations)
         run: python3 tools/check_doc_citations.py
       # Same reasoning one artifact over: the key extractor is a derivation, and a
       # derivation that under-reads makes the gate pass over an incomplete page.

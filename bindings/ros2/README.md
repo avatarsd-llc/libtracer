@@ -25,7 +25,7 @@ code changes. Architecture and rationale: **[ADR-0023](../../docs/adr/0023-ros2-
 | message type name | `:schema` POINT (introspection only) |
 | `rmw_qos_profile_t` | **no single carrier** — see [QoS](#qos-there-is-no-settings-to-map-onto) below |
 | publisher | a writer handle on the topic path |
-| subscription | `subscribe(path)` — an edge appended to the *producer* vertex; delivery is a push, and the retained history is that **vertex's** STREAM ring (owner-sized and with no wire surface at all — `core/include/libtracer/graph.hpp:1634-1642`), never a per-subscriber queue |
+| subscription | `subscribe(path)` — an edge appended to the *producer* vertex; delivery is a push, and the retained history is that **vertex's** STREAM ring (owner-sized and with no wire surface at all — `core/include/libtracer/graph.hpp:graph_t::write(vertex_handle_t v, rope_t`), never a per-subscriber queue |
 | service / client | a `…/_request` + `…/_response` path pair |
 
 ## RMW entry points → graph operations (the implementation checklist)
@@ -61,9 +61,9 @@ per-vertex `:settings` container — `:settings.reliability`, `:settings.durabil
 [RFC-0022](../../docs/spec/rfcs/0022-delivery-policy-is-per-subscription-vertex-keeps-storage.md)
 (with its Amendment 1) deleted `settings_t` outright and removed the whole
 `:settings.<knob>` **write** surface: a write to any of the seven names now answers
-`SCHEMA_NOT_FOUND`, caller-independently (`core/src/graph.cpp:3795-3801`). The `:settings`
+`SCHEMA_NOT_FOUND`, caller-independently (`core/src/graph.cpp:if (!tlv) return std::unexpected(status_t::TYPE_MISMATCH);`). The `:settings`
 **read** container survives with its shape and none
-of its knobs — `SETTINGS{ [NAME "app" SETTINGS{…}] }`, `core/src/graph.cpp:4176` — so
+of its knobs — `SETTINGS{ [NAME "app" SETTINGS{…}] }`, `core/src/graph.cpp:graph_t::read_settings` — so
 there is nothing left for QoS to round-trip through, and no wire surface a namespaced
 extension could ride. See [ADR-0023](../../docs/adr/0023-ros2-binding-via-rmw-tracer.md)'s
 two errata. Nothing shipped against the old mapping: this package has one real TU
@@ -73,8 +73,8 @@ What `qos.c` maps onto instead — **three carriers, not one**:
 
 | `rmw_qos_profile_t` field | libtracer carrier | where |
 | --- | --- | --- |
-| `reliability`, `durability` (libtracer packs a third bit-field, `priority`, that ROS has no profile member for) | the **subscription's** packed 16-bit `delivery_policy`, set at `rmw_create_subscription` time and carried in the `SUBSCRIBER`'s existing `SETTINGS` child as `NAME "delivery_policy" VALUE u16`. **`reliability` is a carrier only** — it is carried verbatim and read by nothing in the reference implementation (RFC-0025's 2026-08-24 §4.4 selector erratum, [#1204](https://github.com/avatarsd-llc/libtracer/issues/1204)): the pressure arm is the *receiving* vertex's own declaration, so an rmw subscription asking for `RELIABLE` gets whatever arm its target vertex declares, not what the profile says. `durability` **is** honoured (the join latch). | `core/include/libtracer/subscriber.hpp:109`, decoded at `core/src/graph.cpp:3093`, RFC-0022 §3.A |
-| `history` + `depth` | **owner-side** ring depth, declared independently at each end — the subscription's own target vertex is a STREAM whose depth `rmw_tracer` sets locally (that ring is what `rmw_take` pops); what a subscriber cannot set is the *producer's* depth, which has no wire surface | `core/include/libtracer/graph.hpp:1642`, `core/include/libtracer/vertex.hpp:260` |
+| `reliability`, `durability` (libtracer packs a third bit-field, `priority`, that ROS has no profile member for) | the **subscription's** packed 16-bit `delivery_policy`, set at `rmw_create_subscription` time and carried in the `SUBSCRIBER`'s existing `SETTINGS` child as `NAME "delivery_policy" VALUE u16`. **`reliability` is a carrier only** — it is carried verbatim and read by nothing in the reference implementation (RFC-0025's 2026-08-24 §4.4 selector erratum, [#1204](https://github.com/avatarsd-llc/libtracer/issues/1204)): the pressure arm is the *receiving* vertex's own declaration, so an rmw subscription asking for `RELIABLE` gets whatever arm its target vertex declares, not what the profile says. `durability` **is** honoured (the join latch). | `core/include/libtracer/subscriber.hpp:delivery_policy_t`, decoded at `core/src/graph.cpp:graph_t::clear_pending`, RFC-0022 §3.A |
+| `history` + `depth` | **owner-side** ring depth, declared independently at each end — the subscription's own target vertex is a STREAM whose depth `rmw_tracer` sets locally (that ring is what `rmw_take` pops); what a subscriber cannot set is the *producer's* depth, which has no wire surface | `core/include/libtracer/graph.hpp:graph_t::write(vertex_handle_t v, const field_path_t&`, `core/include/libtracer/vertex.hpp:role_t::STREAM` |
 | `deadline`, `liveliness`, `lifespan` | **no mapping at all** | — |
 
 This is *closer* to DDS than the retracted shape, not further: DDS puts reliability and
@@ -93,9 +93,9 @@ Two consequences `qos.c` has to live with:
   for a DDS-style QoS-compatibility check, and what `rmw_get_subscriptions_info_by_topic`
   should report about a remote publisher's depth is still open.
 - **A libtracer-only delivery mode is `rmw_tracer`-local, not a QoS extension.**
-  `delivery_mode_t` (`vertex.hpp:499` — `IF_NEWER` / `UNCONDITIONAL` / `EXPLICIT`; there is
+  `delivery_mode_t` (`vertex.hpp:delivery_mode_t` — `IF_NEWER` / `UNCONDITIONAL` / `EXPLICIT`; there is
   no `ON_CHANGE` member) is owner-side and wiring-time via `vertex_policy_t::delivery_mode`
-  (`core/src/graph.cpp:2996`) with no wire spelling. `rmw_tracer` may set it on vertices it
+  (`core/src/graph.cpp:if (!detail::try_assign(copy, k)) return false;`) with no wire spelling. `rmw_tracer` may set it on vertices it
   owns; it cannot round-trip it to a remote peer.
 
 ## Transports & the differentiators

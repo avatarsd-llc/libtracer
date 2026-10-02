@@ -445,7 +445,7 @@ yourself**; CI already did.
 | Rust bindings | `cargo test` in `bindings/rust/` | no |
 | Formatting | `clang-format-18 --dry-run --Werror` over the paths `core-ci.yml`'s format step lists — **version 18** (CI runs 18.1.3); another major version reformats untouched files | no |
 | Public-header docs gate | Doxygen with `core/Doxyfile` (`WARN_AS_ERROR=YES`) | no |
-| Doc citations (`doc-citations`) | `python3 tools/check_doc_citations.py`; after a source edit moves cited lines, `--repin --from-rev origin/main --apply`, then re-run | no |
+| Doc citations (`doc-citations`) | `python3 tools/check_doc_citations.py` — fails on a symbol citation that is gone or ambiguous, and on any line-number citation in a living doc | no |
 | Symbol-size ratchet (`symbol-ratchet`) | `cmake -S bench -B bench/build -DCMAKE_BUILD_TYPE=Release && cmake --build bench/build --target bench_libtracer bench_compact_delivery -j && python3 bench/symbol_ratchet.py --build bench/build --pins bench/symbol_ratchet.json` — toolchain-bound, so a local number is not CI's | no |
 | Perf gate (`perf`, path-filtered to `core/`, `bench/`, `docs/methodology.md`) | `gate-pr` in `.github/workflows/perf.yml`: a same-runner interleaved A/B against `main` via `bench/perf_gate.py`; a contributor does not reproduce it locally | no |
 | Docs build (`docs`) | `sphinx-build -n -W --keep-going -b html -c docs . docs/_build/html` after `doxygen core/Doxyfile`; a Doxygen autolink inside backticks breaks `-n -W` — escape it with `%` | no |
@@ -454,13 +454,13 @@ yourself**; CI already did.
 
 **Writing a doc citation.** Cite code by **symbol**, not by line number:
 `` `core/src/graph.cpp:graph_t::write_impl` `` or `` `graph.hpp:graph_t::delivery_drops_t` ``.
-The gate finds the symbol by search, so an edit elsewhere in the file never forces a
-re-pin; it fails when the symbol is renamed or removed, or names more than one place. An
+The gate finds the symbol by search, so an edit elsewhere in the file never touches the
+citation; it fails when the symbol is renamed or removed, or names more than one place. An
 overload takes the start of its parameter list (`` `graph.hpp:graph_t::unsubscribe(const
 subscription_t& sub)` ``), and a statement inside a function takes a substring that occurs
-once (`` `fwd_router.cpp:if (frame.link_count() == 1)` ``). Line citations (`file:123`) still
-pass in the pages not yet migrated, but each needs an anchor in the gate's table; the design
-and module pages use symbols only.
+once (`` `fwd_router.cpp:if (frame.link_count() == 1)` ``). The gate refuses a line citation
+(`file:123`, a range, or a bare colon-and-number continuation) in every living doc; only the dated ADRs, RFCs and
+research notes keep theirs, unchecked, as the record of the tree they described.
 
 `build-test` runs a **matrix**, not one configuration — ACL policy variants
 (`LIBTRACER_ACL_FULL`, `LIBTRACER_LKV_SLOT`), a minimal module set, a
@@ -470,7 +470,7 @@ and breaks a matrix cell is still broken; name the cell.
 **Before you push**, run what your diff can break:
 
 1. `clang-format-18 -i` on every C/C++ file you touched.
-2. `python3 tools/check_doc_citations.py`, and repin if it fails (format first, then repin, then verify).
+2. `python3 tools/check_doc_citations.py`; if a symbol you renamed or removed is cited, re-point the citation at what the sentence now describes.
 3. Build and `ctest` the core if you touched `core/`.
 4. The conformance suite if you touched the wire codec or `tests/conformance/`.
 5. `cargo test` / the TypeScript tests if you touched a binding.

@@ -60,15 +60,15 @@ flowchart LR
 
 | Stage | The bound | Where the capacity comes from | Refusal | Observed by |
 | --- | --- | --- | --- | --- |
-| **transport RX** | the link's own scratch and its peer-agreed max frame — or, on a link put into OWNING delivery, the bounded source the integrator injected (#1565: `httpd_ws_link_t`'s `rx_backend`, `tcp_transport_t`'s `backend`) | per-connection `:settings`, the link's ctor | counted drop (`dropped_rx`) or a malformed reject (`malformed_rx`) — the peer is not told. An injected source that refuses is the same counted drop, never a heap fallback | `transport_t::drop_stats()` (`core/include/libtracer/transport.hpp:511`), one shape for every link kind (#932) |
-| **rx arena** | the injected failable source the terminus decode carves its node table from | `fwd_router_t`'s `rx` seam — reachable as `rx_source()` (`core/include/libtracer/fwd_router.hpp:467`) | refused **by value**: `TLV_NESTING_TOO_DEEP`, spelled by RFC-0006 as "exceeds this receiver's decode resources" | `router_stats_t::arena_dropped` (`core/include/libtracer/fwd_router.hpp:87`) |
-| **graph write** | the ACL gate, plus the value backend the store draws its durable bytes from | `graph_t`'s four injected seams (see the design companion) | `PERMISSION_DENIED` by value; an exhausted value store answers `BACKPRESSURE` | `graph_t::delivery_drops()` — `denied`, `out_of_memory` (`core/include/libtracer/graph.hpp:2398`) |
-| **ring admission** | a **byte** budget: `try_alloc(retained_bytes)` against the receiving vertex's own source | `vertex_policy_t::ring_source` (`core/include/libtracer/graph.hpp:646`), per vertex, never a shared pool | **arm-dependent** — see §2 | `ring_reserved_bytes()` / `stream_gaps()` (`core/include/libtracer/graph.hpp:1747`) |
+| **transport RX** | the link's own scratch and its peer-agreed max frame — or, on a link put into OWNING delivery, the bounded source the integrator injected (#1565: `httpd_ws_link_t`'s `rx_backend`, `tcp_transport_t`'s `backend`) | per-connection `:settings`, the link's ctor | counted drop (`dropped_rx`) or a malformed reject (`malformed_rx`) — the peer is not told. An injected source that refuses is the same counted drop, never a heap fallback | `transport_t::drop_stats()` (`core/include/libtracer/transport.hpp:transport_t::drop_stats`), one shape for every link kind (#932) |
+| **rx arena** | the injected failable source the terminus decode carves its node table from | `fwd_router_t`'s `rx` seam — reachable as `rx_source()` (`core/include/libtracer/fwd_router.hpp:fwd_router_t::rx_source`) | refused **by value**: `TLV_NESTING_TOO_DEEP`, spelled by RFC-0006 as "exceeds this receiver's decode resources" | `router_stats_t::arena_dropped` (`core/include/libtracer/fwd_router.hpp:router_stats_t`) |
+| **graph write** | the ACL gate, plus the value backend the store draws its durable bytes from | `graph_t`'s four injected seams (see the design companion) | `PERMISSION_DENIED` by value; an exhausted value store answers `BACKPRESSURE` | `graph_t::delivery_drops()` — `denied`, `out_of_memory` (`core/include/libtracer/graph.hpp:graph_t::delivery_drops_t`) |
+| **ring admission** | a **byte** budget: `try_alloc(retained_bytes)` against the receiving vertex's own source | `vertex_policy_t::ring_source` (`core/include/libtracer/graph.hpp:vertex_policy_t::ring_source`), per vertex, never a shared pool | **arm-dependent** — see §2 | `ring_reserved_bytes()` / `stream_gaps()` (`core/include/libtracer/graph.hpp:graph_t::ring_reserved_bytes`) |
 | **fan-out** | the subscriber snapshot's inline prefix, then a heap widen | `kInlineFanout`, then the allocator | counted shed of the whole delivery (`fan_out_truncated`, `out_of_memory`) | `graph_t::delivery_drops()` |
-| **flat / egress seams** | the reply-flatten and egress span tables | `fwd_router_t`'s `flat` / `egress` seams — `flatten_backend()`, `egress_backend()` (`core/include/libtracer/fwd_router.hpp:469`) | counted drop of the reply or the forward hop — **drop, never truncate** | `router_stats_t::flatten_dropped`, `reply_iov_dropped`, `forward_iov_dropped`, `delivery_iov_dropped` |
-| **TX pool** | outstanding sends in flight, plus a reserve slots deep held back for replies | the link's ctor (`tx_slot_capacity()` + `tx_reply_reserve()` on the ESP httpd link, `integrations/esp-idf/libtracer/httpd_ws_link.cpp:3251`) | counted `dropped_tx`; a refused enqueue names the queue it could not enter | `transport_t::drop_stats()`; the link's own richer `stats()` where it has one |
+| **flat / egress seams** | the reply-flatten and egress span tables | `fwd_router_t`'s `flat` / `egress` seams — `flatten_backend()`, `egress_backend()` (`core/include/libtracer/fwd_router.hpp:fwd_router_t::flatten_backend`) | counted drop of the reply or the forward hop — **drop, never truncate** | `router_stats_t::flatten_dropped`, `reply_iov_dropped`, `forward_iov_dropped`, `delivery_iov_dropped` |
+| **TX pool** | outstanding sends in flight, plus a reserve slots deep held back for replies | the link's ctor (`tx_slot_capacity()` + `tx_reply_reserve()` on the ESP httpd link, `integrations/esp-idf/libtracer/httpd_ws_link.cpp:httpd_ws_link_t::tx_slot_capacity`) | counted `dropped_tx`; a refused enqueue names the queue it could not enter | `transport_t::drop_stats()`; the link's own richer `stats()` where it has one |
 | **TX payload size classes** (ESP httpd link) | which storage a gathered frame is copied into: the work slot's inline buffer, an optional bounded LARGE class, or the exceptional-tail heap arm | the link's ctor — `tx_inline_bytes()`, and `tx_large_bytes()` × `tx_large_slot_capacity()` where an integrator declared the second class (#1566, `integrations/esp-idf/libtracer/httpd_ws_link.cpp`) | an exhausted large class is a counted `dropped` — fail-closed, never a heap fallback | `stats().tx_large_dropped` and `stats().tx_large_peak`, against `tx_large_in_use()` |
-| **label space** (forwarders) | 65535 wire labels per link, and the per-link binding table | `route_handle_t`'s ctor `max_bindings_per_link` (`core/include/libtracer/route_handle.hpp:246`) | a **silent degrade**, not a loss: the flow falls back to full-route `FWD{WRITE}` | `labels_used(link)` / `labels_exhausted()` (`core/include/libtracer/route_handle.hpp:625`) |
+| **label space** (forwarders) | 65535 wire labels per link, and the per-link binding table | `route_handle_t`'s ctor `max_bindings_per_link` (`core/include/libtracer/route_handle.hpp:route_handle_t::max_bindings_per_link`) | a **silent degrade**, not a loss: the flow falls back to full-route `FWD{WRITE}` | `labels_used(link)` / `labels_exhausted()` (`core/include/libtracer/route_handle.hpp:route_handle_t::labels_used`) |
 
 Two reading rules for this table:
 
@@ -114,8 +114,8 @@ beats completeness: the newest frame of a camera or an IMU is worth more than th
 displaced.
 
 The canonical instance of the pair is the receiving STREAM vertex's ring, whose arm is declared
-at wiring time and read at admission (`core/include/libtracer/vertex.hpp:1428`,
-`core/include/libtracer/vertex.hpp:1442`):
+at wiring time and read at admission (`core/include/libtracer/vertex.hpp:vertex_t::ring_admit`,
+`core/include/libtracer/vertex.hpp:vertex_t::ring_admit`):
 
 | | reliable | best-effort (the default) |
 | --- | --- | --- |
@@ -137,7 +137,7 @@ Three properties of this pair that a deployment must design around:
 3. **Depth and bytes compose.** The declared depth intent retires *before* the byte bound charges,
    so a ring at its declared depth funds the new admission out of the entry it was going to drop
    anyway — and a source sized for exactly N entries does not spuriously shed on the N+1th
-   (`core/include/libtracer/vertex.hpp:1456`).
+   (`core/include/libtracer/vertex.hpp:vertex_t::ring_admit`).
 
 ---
 
@@ -161,7 +161,7 @@ queue or shed — and what every other stage does instead.
 - Note the one cost a pooled RX backend adds: a **shared** value borrows its whole inbound
   segment — receive capacity — until it is displaced, not merely for the delivery window. Size
   against `live shared values × segment_bytes`; no per-value knob bounds the number of values
-  (`core/include/libtracer/graph.hpp:630`). A low copy-or-share threshold on a long-held vertex
+  (`core/include/libtracer/graph.hpp:vertex_policy_t::share_threshold_bytes`). A low copy-or-share threshold on a long-held vertex
   (a config vertex, a rarely-updated setpoint) is exactly the shape that starves a small pool —
   which is why a NARROW build copies always.
 
@@ -175,7 +175,7 @@ queue or shed — and what every other stage does instead.
   egress. A forwarder that appears to be under memory pressure in the middle is a forwarder with
   a mis-sized edge, not a slow router.
 - **Naming the seams**: `label_source()`, `rx_source()`, `flatten_backend()` and
-  `egress_backend()` (`core/include/libtracer/fwd_router.hpp:464`) reach the four injected
+  `egress_backend()` (`core/include/libtracer/fwd_router.hpp:fwd_router_t::label_source`) reach the four injected
   objects even when the host took the defaults — which is what makes the §5 loop runnable on a
   gateway at all.
 - **Watch the silent degrade**: label exhaustion. `labels_used(link)` against the wire constant
@@ -214,7 +214,7 @@ The #1491/#1494 topology: one producer streaming into one node as fast as the no
 - On the ESP httpd link the reply leg does not compete for the pool at all (#1494): a reply
   serviced **in-call**, on the httpd task, is written straight to the socket and claims neither a
   TX slot nor a control-queue message
-  (`integrations/esp-idf/libtracer/httpd_ws_link.cpp:3093`). So a fan-out sweep of any width, a
+  (`integrations/esp-idf/libtracer/httpd_ws_link.cpp:httpd_ws_link_t::send_in_call`). So a fan-out sweep of any width, a
   full pool and a full control mbox all cost throughput and never the answer.
 - Behind that, `tx_reply_reserve()` slots are still held back **past** `tx_slot_capacity()`
   (#1218), so a fan-out sweep cannot reach into them however wide it is, and a publish sweep that
@@ -226,7 +226,7 @@ The #1491/#1494 topology: one producer streaming into one node as fast as the no
   chosen its bottleneck by accident.
 - Run the two flows on **different vertices with different sources**. Per-injection-point, never
   a shared pool: one flow running its source dry must not affect another
-  (`core/include/libtracer/graph.hpp:642`).
+  (`core/include/libtracer/graph.hpp:vertex_policy_t::ring_source`).
 
 ### 3.5 High-rate acquisition — Recipe C: compose → swap → push
 
@@ -309,15 +309,15 @@ role and schema).
 
 | Plane | Needs the LKV because |
 | --- | --- |
-| Local + remote `READ` | a leaf read serves the stored pointer (`core/src/graph.cpp:2074`; the `FWD{READ}` terminus is the same call) — null ⇒ `NOT_FOUND`, unless the vertex composes an answer from its `on_read` seam (`core/src/graph.cpp:2040`) |
-| `await`'s return value | the wake rides the write sequence and the stripe condvar (retention-free), but the value handed back is served through the **same role dispatch** `read` runs (`core/src/graph.cpp:3211`) |
-| `assign` / `propagate` sweep | **the hard dependency** — RFC-0008 §C: `propagate` takes no value argument, "the last-known-value is the single source of truth" (`core/src/graph.cpp:2929`) |
-| Composed subtree reads | RFC-0016 serves **landed** LKVs only, one atomic load per node (`core/src/graph.cpp:4505`); a non-retaining child contributes nothing |
-| Late-joiner replay | the durability latch snapshots the LKV at edge-add (RFC-0022 §3.A bit 5, `core/include/libtracer/vertex.hpp:1696`) |
+| Local + remote `READ` | a leaf read serves the stored pointer (`core/src/graph.cpp:graph_t::read(vertex_handle_t vh, std::string_view caller)`; the `FWD{READ}` terminus is the same call) — null ⇒ `NOT_FOUND`, unless the vertex composes an answer from its `on_read` seam (`core/src/graph.cpp:graph_t::read_handler_gated`) |
+| `await`'s return value | the wake rides the write sequence and the stripe condvar (retention-free), but the value handed back is served through the **same role dispatch** `read` runs (`core/src/graph.cpp:graph_t::await(vertex_handle_t vh, std::chrono::nanoseconds`) |
+| `assign` / `propagate` sweep | **the hard dependency** — RFC-0008 §C: `propagate` takes no value argument, "the last-known-value is the single source of truth" (`core/src/graph.cpp:graph_t::deliver_current`) |
+| Composed subtree reads | RFC-0016 serves **landed** LKVs only, one atomic load per node (`core/src/graph.cpp:n.lkv = w.v->read_stored();`); a non-retaining child contributes nothing |
+| Late-joiner replay | the durability latch snapshots the LKV at edge-add (RFC-0022 §3.A bit 5, `core/include/libtracer/vertex.hpp:vertex_t::add_edge`) |
 
 **Not on the list: the whole callback / delivery plane.** Fan-out never reads the slot. A
-storing role delivers the just-published pointer (`core/src/graph.cpp:2662`); a HANDLER delivers
-from the incoming value (`core/src/graph.cpp:2368`). If subscribers are all a vertex has, it does
+storing role delivers the just-published pointer (`core/src/graph.cpp:graph_t::write_impl`); a HANDLER delivers
+from the incoming value (`core/src/graph.cpp:graph_t::handler_write_deliver`). If subscribers are all a vertex has, it does
 not need to retain.
 
 ### What shipped in RFC-0008 Amendment 2
@@ -330,7 +330,7 @@ preceded it:
   plus the `VALUE`. The degradation that remains is the *read contract's* — a handler with no
   `on_read` still answers `NOT_FOUND`, exactly as `read` does.
 - **`assign` and `propagate` refuse a non-retaining vertex with `SCHEMA_NOT_FOUND`**
-  (`core/src/graph.cpp:2733`, `core/src/graph.cpp:2946-2952`) — the taxonomy's contract-mismatch
+  (`core/src/graph.cpp:if (!retains(v, role)) return`, `core/src/graph.cpp:graph_t::propagate(vertex_handle_t v)`) — the taxonomy's contract-mismatch
   status, deliberately **not** `BACKPRESSURE`: nothing is under pressure and a retry will never
   succeed. At a handler vertex the call is **`write`**, which dispatches the seam and delivers
   eagerly; the accumulate-then-flush pair needs retention. `propagate(v)` is
@@ -367,7 +367,7 @@ preceded it:
    The handler leg used to take a nothrow rope clone before storing, because it publishes no LKV
    and so has no stored pointer to deliver. It does not now: the write builds one value on its
    own frame from the writer's moved links, hands it to `on_write` by reference and delivers the
-   same value (`core/src/graph.cpp:2368`). Measured x86-64 `-O3`, p50 ns per write:
+   same value (`core/src/graph.cpp:graph_t::handler_write_deliver`). Measured x86-64 `-O3`, p50 ns per write:
 
    | links | fan-out | `STORED_VALUE` | `HANDLER` |
    | ---: | ---: | ---: | ---: |
@@ -401,9 +401,9 @@ staging run with the C++ accessors in reach (see §6 for the remote arm and its 
    the traffic, not to survive it.
 2. **Run representative traffic.** Representative means the real payload-size *distribution*,
    not the mean — see step 4.
-3. **Read `peak` per seam.** `block_source_t::stats()` (`core/include/libtracer/mem_source.hpp:228`)
+3. **Read `peak` per seam.** `block_source_t::stats()` (`core/include/libtracer/mem_source.hpp:block_source_t::stats`)
    returns `source_stats_t{capacity, in_use, peak, refused, largest_refused}`
-   (`core/include/libtracer/mem_source.hpp:77`), all used-polarity. Free is derived, never
+   (`core/include/libtracer/mem_source.hpp:source_stats_t`), all used-polarity. Free is derived, never
    reported as the primary.
 4. **Set `capacity = peak + margin`, and take the margin from `largest_refused`, not from the
    mean.** The tail is what refuses. A seam that refused once, for a 9 KB request, against a
@@ -412,7 +412,7 @@ staging run with the C++ accessors in reach (see §6 for the remote arm and its 
    tail is chosen by the peer, so this is the only figure that generalises.
 5. **Re-run with the bounds armed and assert `refused == 0` on every stage except the designated
    pressure point.** For a forwarder, `router_stats_t::arena_dropped`
-   (`core/include/libtracer/fwd_router.hpp:441`) is the one to assert zero against when sizing
+   (`core/include/libtracer/fwd_router.hpp:fwd_router_t::drop_stats`) is the one to assert zero against when sizing
    `rx`. A non-zero `refused` anywhere else means the bottleneck is still being discovered rather
    than chosen.
 
