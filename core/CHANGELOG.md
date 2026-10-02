@@ -137,6 +137,16 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   child keeps its peer resolution by name (ADR-0044), and so does a frame pushed through the
   public by-name `on_frame` door. New API: `fwd_router_t::reply_name_lookups()` counts the
   replies that still resolved their link by name, so a deployment can confirm the scan is gone.
+- **The inline fan-out width is a compile-time trait, `default_config_t::kInlineFanout`
+  ([#1708](https://github.com/avatarsd-llc/libtracer/issues/1708)).** A publish snapshots up to
+  this many subscribers into a stack buffer and delivers to wider fan-outs through the
+  overflow vector, as before. The default stays 8, so a host build is unchanged (identical
+  `graph.cpp` code). A NARROW target shrinks the buffer every publish frame carries:
+  `kInlineFanout * sizeof(edge_view_t)`, 48 B a view on a 64-bit host and 28 B on rv32. At 2,
+  `graph_t::fan_out`'s rv32 frame drops from 304 B to 128 B. `edge_snapshot_t::kCapacity` and
+  `vertex_t::kInlineFanout` now mirror the trait; the derived spelling is
+  `tr::graph::kInlineFanout`. The ESP-IDF component sets 2 on chip targets.
+
 - **An observed eager write no longer takes the graph-wide sweep lock because some OTHER
   vertex holds an `assign` mark ([#1712](https://github.com/avatarsd-llc/libtracer/issues/1712)).**
   While any mark was pending, every observed write rendered its key (one heap block) and took
