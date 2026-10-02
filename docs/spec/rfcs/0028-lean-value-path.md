@@ -5,13 +5,13 @@ SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 
 # RFC 0028 — The lean value path: one block per publish, copy-or-share by size, retention per vertex, sync as a trait
 
-<!-- status: draft -->
+<!-- status: accepted -->
 
 | Field | Value |
 | ---- | ---- |
 | **RFC** | 0028 |
 | **Title** | The lean value path: one block per publish, copy-or-share by size, retention per vertex, sync as a trait |
-| **Status** | **draft** (2026-09-28), **reviewed 2026-09-29** on [PR #1627](https://github.com/avatarsd-llc/libtracer/pull/1627) against `main` 641eff22: direction accepted, the five §11 questions ruled (recorded in §11), and the review's seven text/scope corrections applied in this revision; **acceptance is pending merge**. Every number in §2 and §7 is measured on the host build at the commit this RFC was drafted against and is reproducible with `bench_lean_value_path` (§7.3). |
+| **Status** | **accepted** (Corrected 2026-10-02, see the erratum at the end; drafted 2026-09-28), **reviewed 2026-09-29** on [PR #1627](https://github.com/avatarsd-llc/libtracer/pull/1627) against `main` 641eff22: direction accepted, the five §11 questions ruled (recorded in §11), and the review's seven text/scope corrections applied in this revision; accepted on that merge. Every number in §2 and §7 is measured on the host build at the commit this RFC was drafted against and is reproducible with `bench_lean_value_path` (§7.3). |
 | **Author(s)** | AvatarSD (maintainer), with AI drafting |
 | **Created** | 2026-09-28 |
 | **Comment window** | waived by default while solo-maintained ([GOVERNANCE.md](../../../.github/GOVERNANCE.md) §"Errata, amendments, and the comment window"); invoke explicitly if outside input is wanted. |
@@ -959,3 +959,15 @@ The questions as posed, kept for the record:
    with nothing kept.)
 5. §6 — whether slices 1 and 2 land ahead of this RFC's acceptance as ordinary fixes, since
    neither depends on §5.
+
+## Erratum (2026-10-02): the status is accepted
+
+**What the text said.** The header table gave the status as **draft** and said acceptance
+was "pending merge".
+
+**What is true.** [PR #1627](https://github.com/avatarsd-llc/libtracer/pull/1627) merged this
+RFC after the review it records, and slices 1–10 shipped on top of it. The last of them is the
+slice-10 surface fold, which v0.17.0 released. So the RFC is accepted. The header now says so, as does the
+status key that `tools/gen_record_index.py` reads.
+
+**What did not change.** No normative statement, wire surface, or number in §§2–11.
