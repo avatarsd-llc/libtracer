@@ -789,24 +789,30 @@ void test_shed_pending_mark_is_counted() {
           "and is not confused with another cause");
 }
 
-/** @brief A stream drain under OOM DEFERS (cursor kept) and catches up afterwards. */
+/**
+ * @brief A stream drain under OOM DEFERS (cursor kept) and catches up afterwards.
+ *
+ * The backlog is WIDER than the drain's in-frame slots (`vertex_t::ring_take_t::kInline`,
+ * #1713): a window that fits them needs no allocation at all, so OOM cannot touch it. Only the
+ * spill can fail, and that is the arm whose deferral this pins.
+ */
 void test_stream_drain_defer() {
     std::printf("stream drain — an OOM propagate defers the batch, never loses it:\n");
+    constexpr int kBacklog = static_cast<int>(tr::graph::vertex_t::ring_take_t::kInline) + 2;
     graph_t g;
     auto v = g.register_vertex(path_t("/s/tail"), role_t::STREAM);
     (void)g.set_policy(v, {.retention = tr::graph::retention_t::N, .depth = 8});
     int count = 0;
     (void)g.subscribe(path_t("/s/tail"), count_cb, &count);
-    (void)g.assign(v, make_value({0x01}));
-    (void)g.assign(v, make_value({0x02}));
-    (void)g.assign(v, make_value({0x03}));
+    for (int i = 0; i < kBacklog; ++i)
+        (void)g.assign(v, make_value({static_cast<std::uint8_t>(0x01 + i)}));
     {
         const hook_guard_t oom(fail_all);
         (void)g.propagate(v);
         check(count == 0, "the OOM propagate delivered nothing (dropped, not aborted)");
     }
     (void)g.propagate(v);
-    check(count == 3, "the deferred ring entries all deliver on the next sweep");
+    check(count == kBacklog, "the deferred ring entries all deliver on the next sweep");
 }
 
 /**
