@@ -57,3 +57,7 @@ This is a fresh-project foundational commitment: **explicit-source-routed-only, 
 - **`0x0D ROUTER` remains a reserved, decodable, unimplemented wire code.** reference/05 §0x0D and reference/04 §Bridge-republish get a final "retired mechanism; reserved codepoint" annotation (folding into the #86/#155 sweep).
 - **ADR-0037/0038's "the two side-channels dissolve" resolves cleanly:** `fwd_router_t::children_` dissolved into `child_registry_t` (Brick 3a, #163); `bridge_t` is *retired*, not relocated (this ADR). Both side-channels are gone.
 - **The `#77` bridge hop-limit status** (`STATUS=ERROR(NESTING_TOO_DEEP)` on `hop_count` cap) is retired with `bridge_t` — it guarded the ROUTER flood, which no longer exists. If a future flooding profile returns, it returns with its cap and its status.
+
+## Amendment (2026-10-03): `peer_id_t` does not stay; node identity is the `:identity` facet
+
+*(Ruled 2026-10-03.)* §Consequences' line "`peer_id_t` (the ROUTER origin identity) stays — it is the node identity, still meaningful" is **superseded** by [#1721](https://github.com/avatarsd-llc/libtracer/issues/1721) ([PR #1763](https://github.com/avatarsd-llc/libtracer/pull/1763), in flight). No v1 frame carries a peer id; ROUTER (`0x0D`) is a reserved type code. A node's identity is [RFC-0011](../spec/rfcs/0011-node-identity-facet.md)'s `:identity` facet, not a C++ id type. The body above stays as the record.

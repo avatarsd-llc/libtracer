@@ -1030,3 +1030,19 @@ throwing allocator and not `std::pmr`.
 
 **What did not change.** The wire surface; §5.1–§5.5; the slice order and gates of §6 for
 what has shipped; §7's numbers as measured at the drafting commit.
+
+## Erratum (2026-10-03): `kSingleWriter` is removed, not a per-build trait
+
+*(Ruled 2026-10-03.)*
+
+**What the text says.** §5.5's `default_config_t` sketch lists `kSingleWriter` as a per-build
+trait, and §5.5's prose describes what a build that sets it gets. §11 ruling 1 rules that
+`kSingleWriter` is a per-build trait. §4.13, §6.1 and §9 risk 2 mention it in the same sense.
+
+**What is true.** `kSingleWriter` is removed by [#1718](https://github.com/avatarsd-llc/libtracer/issues/1718)
+([PR #1759](https://github.com/avatarsd-llc/libtracer/pull/1759), in flight). A configuration
+fragment that still sets it fails to compile, with a message saying it was removed. Read every mention of `kSingleWriter` above as the record of a
+setting that no longer exists. §11's ruling 1 stays as the record of what was ruled on
+2026-09-29.
+
+**What did not change.** No wire surface, no other normative statement, and no number in §§2–11.
