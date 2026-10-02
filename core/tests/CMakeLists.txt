@@ -1021,6 +1021,13 @@ target_link_libraries(delivery_mode_race_test PRIVATE libtracer Threads::Threads
 libtracer_test_warnings(delivery_mode_race_test)
 add_test(NAME delivery_mode_race COMMAND delivery_mode_race_test)
 
+# #1712: the per-vertex pending-mark hint — an unmarked observed write skips the key render and
+# the sweep lock (global-new counter difference), plus the mark/clear race the tsan lane runs.
+add_executable(pending_mark_test pending_mark_test.cpp)
+target_link_libraries(pending_mark_test PRIVATE libtracer Threads::Threads)
+libtracer_test_warnings(pending_mark_test)
+add_test(NAME pending_mark COMMAND pending_mark_test)
+
 if(LIBTRACER_NET_PLANE)
     # #81-A — per-endpoint :acl structural storage (store/serve raw ACL TLV; no enforcement).
     add_executable(acl_test acl_test.cpp)

@@ -2200,6 +2200,9 @@ class vertex_t {
         // And the retention declaration (RFC-0028 §5.4): the next occupant retains by its own
         // role's default until it declares otherwise.
         set_flag(flag_t::RETAIN_NONE, false);
+        // And the pending-mark hint (#1712): the retire erases the occupant's key from the
+        // sweep set right after the map lock drops, so the next occupant starts unmarked.
+        set_flag(flag_t::PENDING_MARK, false);
         lkv_.clear(std::memory_order_release);  // a mid-read reader holds its own
                                                 // reference — safe under either policy.
         own_subs_.store(0, std::memory_order_relaxed);
@@ -2795,6 +2798,13 @@ class vertex_t {
                                      *          is delivered and released, and `read` answers
                                      *          `NOT_FOUND`. A bit, not a member, so the
                                      *          policy costs `%vertex_t` zero bytes. */
+        PENDING_MARK = 1U << 6,     /**< @brief This vertex MAY hold an IF_NEWER mark in the
+                                     *          graph's sweep set (RFC-0008 §B, #1712). A
+                                     *          hint, not the truth — the set is. Set under
+                                     *          the sweep lock when a mark is inserted; a
+                                     *          clear bit lets an eager write skip the key
+                                     *          render and the graph-wide sweep lock its
+                                     *          mark retirement would otherwise take. */
     };
 
     /** @brief Set or clear @p f. An RMW, because the bits have different writers. */
@@ -2810,6 +2820,22 @@ class vertex_t {
     /** @brief Read @p f under @p order. */
     [[nodiscard]] bool test_flag(flag_t f, std::memory_order order) const noexcept {
         return (flags_.load(order) & static_cast<std::uint8_t>(f)) != 0;
+    }
+
+    /**
+     * @brief Raise or drop the pending-mark hint (#1712) — `graph_t` only.
+     *
+     * Raised under the sweep lock by the mark that inserts the vertex's key; dropped where a
+     * mark is retired with the vertex in hand. Both directions may race a concurrent mark,
+     * and both races are in the safe direction: a raised bit over an absent key costs one
+     * slow-path probe that erases nothing, and a dropped bit over a present key leaves that
+     * mark for the next covering sweep — one duplicate delivery at worst, never a lost one.
+     */
+    void set_pending_mark(bool on) noexcept { set_flag(flag_t::PENDING_MARK, on); }
+
+    /** @brief The pending-mark hint, relaxed — the eager write's skip gate (#1712). */
+    [[nodiscard]] bool has_pending_mark() const noexcept {
+        return test_flag(flag_t::PENDING_MARK, std::memory_order_relaxed);
     }
 
     // The dispatch view of one slot; call with m_ held. Every field is a pointer copy or a
@@ -3235,13 +3261,14 @@ class vertex_t {
     // writes it under the graph's sweep lock, so a plain byte here was a data race — UB,
     // not a benign torn read. Byte-wide as an atomic too, so the group stays four bytes.
     std::atomic<delivery_mode_t> delivery_mode_{delivery_mode_t::IF_NEWER};
-    // Three lock-free predicates, packed into ONE byte so the flag group stays exactly four
+    // Lock-free predicates (see flag_t), packed into ONE byte so the flag group stays exactly four
     // bytes wide and `sizeof(vertex_t)` stays at the size the ratchets pin (88 B on x86-64,
     // 72 B on rv32 — the #361 diet's measurement as re-taken by the #1487 census) — the size
     // gate's own failure message says to put a new member behind vertex_ext_t rather than
     // inline it, and a bit costs less than either. (`ENUM_HIDDEN`, the RFC-0014 §3 hide seam,
     // is the third: it went here rather than beside `registered_` for exactly that reason.)
-    // Written under a lock (a different one per bit), read lock-free off hot paths, so the
+    // Written under a lock (a different one per bit; `PENDING_MARK`'s sweep-side drop is the
+    // one unlocked writer, which a hint tolerates), read lock-free off hot paths, so the
     // writes are RMWs and compose.
     std::atomic<std::uint8_t> flags_{0};
     bool registered_ = false;  // false => placeholder intermediate (invisible to find)

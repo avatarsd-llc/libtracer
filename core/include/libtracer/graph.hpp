@@ -3110,6 +3110,8 @@ class graph_t {
     // (clear_pending on every eager delivery) skips the key render + sweep lock while no
     // assign has marked anything — losing a race with a concurrent mark_pending leaves the
     // mark for the next sweep, an ordering the locked erase already permitted (ADR-0057).
+    // The per-vertex pending-mark hint (`vertex_t` flag, #1712) is the finer gate in front of
+    // it: an unmarked vertex skips the path even while OTHER vertices hold marks.
     std::atomic<std::size_t> pending_count_{0};
     /** @brief The #551 nothrow failable-block seam — and, since #873 phase 1, THE source:
      *         the one the constructor was handed, from which every other channel is built.
