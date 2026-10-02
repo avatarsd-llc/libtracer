@@ -24,7 +24,7 @@ lock each stage takes, where the buffers come from, and what the delivery legs c
 | --- | --- |
 | ACL gate | `acl_allows(v, caller, WRITE)`; a denial returns `PERMISSION_DENIED` and stores nothing |
 | branch fork | a POINT payload with the branch bit set decomposes through `write_branch` (`graph.cpp:graph_t::write_branch`) |
-| store | `store_value` (`graph.cpp:graph_t::store_value(vertex_t* v, rope_t&& value`) — LKV or history per role, sequence bump, `await` wake |
+| store | `store_value` (`graph.cpp:graph_t::store_value(vertex_t* v, view::rope_t&& value`) — LKV or history per role, sequence bump, `await` wake |
 | deliver | `deliver_vertex` for a leaf value, `deliver_current` for a `STREAM` (`graph.cpp:graph_t::write_impl`) |
 
 The handle overload is the whole of `write(vertex_handle_t, rope_t, caller)`

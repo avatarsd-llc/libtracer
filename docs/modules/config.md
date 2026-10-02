@@ -56,7 +56,7 @@ This page is the walk; that page is the vocabulary.
 `config_reader_t` is the one home for the pair walk itself, everywhere it is read
 tolerantly. It lives in `tr::wire`
 ([#985](https://github.com/avatarsd-llc/libtracer/issues/985)) — the layer that owns
-the grammar — with `tr::net::config_reader_t` kept as the transport plane's alias, so
+the grammar — and the transport plane names it there too, so
 `graph_t::create_child` (the creation SPEC) and the SUBSCRIBER QoS `SETTINGS` parse at
 L4 read through the same type rather than carrying hand-written copies of the rule.
 The one deliberate exception is `graph::parse_acl`

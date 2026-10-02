@@ -52,7 +52,7 @@ namespace {
  * #1666: it had no consumer, so it is accepted and dropped rather than stored.
  */
 void parse_config(const tlv_t* config, conn_settings_t& s) {
-    const config_reader_t cfg(config);
+    const wire::config_reader_t cfg(config);
     if (const auto v = cfg.name("addr")) s.addr = std::string(*v);
     if (const auto v = cfg.name("kind")) s.kind = std::string(*v);
     if (const auto v = cfg.u16("port")) {

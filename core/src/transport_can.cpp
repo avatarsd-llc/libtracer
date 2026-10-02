@@ -829,7 +829,7 @@ transport_factory_t can_transport_factory(std::pmr::memory_resource* reasm_mr,
         std::string ifname;
         transport_can_config_t cfg;
         bool have_node = false;
-        const config_reader_t reader(raw_config);
+        const wire::config_reader_t reader(raw_config);
         if (const auto v = reader.name("ifname")) ifname = std::string(*v);
         if (const auto v = reader.name("path")) cfg.path = std::string(*v);
         if (const auto v = reader.u16("node")) {

@@ -11,9 +11,9 @@
 
 namespace tr::graph {
 
-result_t<rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, const inbound_ref_t& inbound,
-                                        const view_t* frame_view,
-                                        const wire::path_ref_element_t* dst_label_target) {
+result_t<view::rope_t> op_resolver_t::resolve(const tlv_arena_t& fwd, const inbound_ref_t& inbound,
+                                              const view::view_t* frame_view,
+                                              const wire::path_ref_element_t* dst_label_target) {
     // The ACL SUBJECT, derived HERE — at the terminus, from the frame's peer handle — and
     // never carried down the routing path as a string (#375 Part 2 ruling). The scratch
     // outlives the whole walk, which is what lets the supplier format into it and hand back

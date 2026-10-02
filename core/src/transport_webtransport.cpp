@@ -1156,7 +1156,7 @@ std::atomic<std::uint64_t> g_insecure_refusals{0};
  *         value reads `"tls"` must not bind the FOLLOWING child as the profile name. */
 [[nodiscard]] wt_private_cfg_t parse_wt_config(const wire::tlv_t* raw_config) {
     wt_private_cfg_t out;
-    const config_reader_t cfg(raw_config);
+    const wire::config_reader_t cfg(raw_config);
     if (const auto v = cfg.name("tls")) out.tls = *v;
     if (const auto v = cfg.flag("insecure")) out.insecure = *v;
     if (const auto v = cfg.name("path")) out.path = std::string(*v);

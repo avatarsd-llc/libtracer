@@ -145,7 +145,7 @@ correspondingly smaller; that figure has not been compiled here and is not asser
 grammar read fields off a scatter-gather rope by stitching straddling headers a byte at a time and
 feeding the CRC link by link, satisfying the same `Cursor` concept as `span_cursor`. But
 `decode_into` does not only read bytes — it stores structure: a random-accessible `arena_tlv_t`
-array that `parse_branch_node` (`core/src/graph.cpp:const view_t& frame_view, std::vector<std::byte> key`) walks via `end` / `first_child`. That
+array that `parse_branch_node` (`core/src/graph.cpp:parse_branch_node`) walks via `end` / `first_child`. That
 node array is byte-source-independent. Swapping `span_cursor` for `rope_cursor` changes where field
 bytes come from, not the fact that a node array and walk stacks must exist.
 

@@ -83,12 +83,12 @@ class graph_t;
  * egress frame, and it stays alive across a concurrent unsubscribe.
  */
 struct remote_delivery_t {
-    std::string_view link; /**< @brief This node's NAME for the consumer link. */
-    view_t return_route;   /**< @brief Consumer return route (PATH TLV view, refcount clone). */
+    std::string_view link;     /**< @brief This node's NAME for the consumer link. */
+    view::view_t return_route; /**< @brief Consumer return route (PATH TLV view, refcount clone). */
     /** @brief Completed reverse bound route (`PATH_REF` view, refcount clone; empty ⇒
      *         canonical-only). Element 0 is this node's own reference, consumed locally by
      *         the sink per delivery — RFC-0024 §7.1 amendment 1. */
-    view_t reverse_route;
+    view::view_t reverse_route;
     /** @brief The edge's stored ACL fan-in context (#81) — the subject the sink's local
      *         element-0 consumption re-checks §6.2 under. */
     std::string_view caller;
@@ -1588,7 +1588,7 @@ class graph_t {
      * Takes a rope; an existing `view_t` caller compiles unchanged via the implicit
      * `view_t`→`rope_t`. @p caller is the ACL caller context (see @ref read).
      */
-    [[nodiscard]] result_t<void> write(vertex_handle_t v, rope_t value,
+    [[nodiscard]] result_t<void> write(vertex_handle_t v, view::rope_t value,
                                        std::string_view caller = {});
     /**
      * @brief Field-write by handle: resolve the @ref vertex_handle_t and @ref field_path_t
@@ -1598,8 +1598,8 @@ class graph_t {
      * selector. A field write targets a contiguous control TLV, so a multi-link value is
      * materialized first.
      */
-    [[nodiscard]] result_t<void> write(vertex_handle_t v, const field_path_t& field, rope_t value,
-                                       std::string_view caller = {});
+    [[nodiscard]] result_t<void> write(vertex_handle_t v, const field_path_t& field,
+                                       view::rope_t value, std::string_view caller = {});
     /**
      * @brief Assign a vertex's value — the STATE transition only, sends NOTHING (RFC-0008).
      *
@@ -1616,7 +1616,7 @@ class graph_t {
      *         after the WRITE gate. Use @ref write instead: it dispatches the `on_write` seam
      *         and delivers eagerly, which is what a non-retaining vertex can actually do.
      */
-    [[nodiscard]] result_t<void> assign(vertex_handle_t v, rope_t value,
+    [[nodiscard]] result_t<void> assign(vertex_handle_t v, view::rope_t value,
                                         std::string_view caller = {});
     /**
      * @brief Propagate along subscription edges — the EDGE transition only (RFC-0008 §B/§C).
@@ -1741,7 +1741,7 @@ class graph_t {
      * Each is a zero-copy refcount clone of the stored source view. The FWD resolver ropes
      * these under a fresh PL=1 wrapper into the REPLY (RFC-0004 §D, no byte copy).
      */
-    [[nodiscard]] result_t<std::vector<view_t>> read_subscribers(
+    [[nodiscard]] result_t<std::vector<view::view_t>> read_subscribers(
         vertex_handle_t v, std::string_view caller = {}) const;
     /**
      * @brief Stream history into caller storage, oldest first (Stream role only) — RFC-0028 D11.
@@ -1828,7 +1828,7 @@ class graph_t {
      * (zero copy, @ref view::borrow_const) over the pinned child vertex — only the tiny
      * POINT headers are emitted — so the listing is never copied whole.
      */
-    [[nodiscard]] result_t<rope_t> read_children_folded(vertex_handle_t v) const;
+    [[nodiscard]] result_t<view::rope_t> read_children_folded(vertex_handle_t v) const;
 
     /**
      * @brief MATERIALIZED `:children` listing — the flat single-link serialize of the same
@@ -1839,7 +1839,7 @@ class graph_t {
      * flatten() over many graph shapes) — without it the differential would be
      * tautological.
      */
-    [[nodiscard]] result_t<rope_t> read_children_materialized(vertex_handle_t v) const;
+    [[nodiscard]] result_t<view::rope_t> read_children_materialized(vertex_handle_t v) const;
 
     /**
      * @brief COMPOSED BRANCH READ (RFC-0005 §C follow-on): the POINT tree of @p v's
@@ -1878,8 +1878,8 @@ class graph_t {
      * the resolver callback — runs O(nodes) times per composed read **under the shared
      * `map_mutex_`**; a resolver MUST NOT re-enter graph mutation APIs (self-deadlock).
      */
-    [[nodiscard]] result_t<rope_t> read_subtree_folded(vertex_handle_t v,
-                                                       std::string_view caller = {}) const;
+    [[nodiscard]] result_t<view::rope_t> read_subtree_folded(vertex_handle_t v,
+                                                             std::string_view caller = {}) const;
 
     /**
      * @brief Subscribe @p src to a @p target vertex — a write to src re-dispatches the
@@ -2196,10 +2196,10 @@ class graph_t {
      * #943), and a token silently indexing under the wrong link is exactly the leaked
      * subscriber edge #1071 exists to prevent.
      */
-    [[nodiscard]] result_t<void> subscribe_wire(vertex_handle_t v, view_t source_view,
-                                                view_t return_route, std::string link,
-                                                view_t reverse_route = {}, std::string caller = {},
-                                                link_id_t link_token = {});
+    [[nodiscard]] result_t<void> subscribe_wire(vertex_handle_t v, view::view_t source_view,
+                                                view::view_t return_route, std::string link,
+                                                view::view_t reverse_route = {},
+                                                std::string caller = {}, link_id_t link_token = {});
 
     /**
      * @brief Read by path — resolve the path key once (guarded map lookup), then the hot path.
@@ -2210,7 +2210,7 @@ class graph_t {
     [[nodiscard]] result_t<value_ref_t> read(const path_t& path) const;
     /** @brief Write by path — resolve the key once, then @ref write(vertex_handle_t, rope_t,
      * std::string_view). */
-    [[nodiscard]] result_t<void> write(const path_t& path, rope_t value);
+    [[nodiscard]] result_t<void> write(const path_t& path, view::rope_t value);
     /** @brief Await by path — resolve the key once, then @ref await(vertex_handle_t,
      * std::chrono::nanoseconds, std::string_view). */
     [[nodiscard]] result_t<value_ref_t> await(const path_t& path, std::chrono::nanoseconds timeout);
@@ -2442,10 +2442,12 @@ class graph_t {
     // `caller` is the ACL caller context gating the WRITE right (the API caller's
     // for a direct write; a delivered subscription's stored context terminates at
     // its target instead — see dispatch_edge_target, ADR-0051).
-    [[nodiscard]] result_t<void> write_impl(vertex_t* v, rope_t value, std::string_view caller);
+    [[nodiscard]] result_t<void> write_impl(vertex_t* v, view::rope_t value,
+                                            std::string_view caller);
     // write_impl's `retention_t::NONE` arm (RFC-0028 §5.4): admit, bump the sequence, and
     // deliver from the stack — no block, nothing retained.
-    [[nodiscard]] result_t<void> relay_write(vertex_t* v, rope_t value, std::string_view caller);
+    [[nodiscard]] result_t<void> relay_write(vertex_t* v, view::rope_t value,
+                                             std::string_view caller);
     // The store half of a write (LKV/history/handler + seq bump + await wake),
     // WITHOUT fan-out — shared by write_impl and the branch-write apply (RFC-0005).
     // Hands back the exact published LKV pointer (null for a Handler-role write —
@@ -2474,7 +2476,7 @@ class graph_t {
     // the owner's own. It is also `write_ctx_t::subject` for the retaining roles' ADMISSION
     // filter (`handlers_t::on_admit`), which runs here — above the storing tail, so a refusal
     // never becomes state and a normalisation is the only value any reader can reach.
-    [[nodiscard]] result_t<value_ref_t> store_value(vertex_t* v, rope_t&& value,
+    [[nodiscard]] result_t<value_ref_t> store_value(vertex_t* v, view::rope_t&& value,
                                                     vertex_t::store_drops_t& drops,
                                                     std::string_view caller);
     /**
@@ -2517,14 +2519,14 @@ class graph_t {
      * @brief The rope arm's HANDLER leg: move a local write's links into stack storage (or,
      *        past `kUnstoredInline` links, one block) and run %handler_write over it.
      */
-    [[nodiscard]] result_t<value_ref_t> handler_write_rope(vertex_t* v, rope_t&& value,
+    [[nodiscard]] result_t<value_ref_t> handler_write_rope(vertex_t* v, view::rope_t&& value,
                                                            std::string_view caller);
     /**
      * @brief `write_impl`'s HANDLER arm: build ONE value from @p value (moved onto this frame,
      *        or one block past `kUnstoredInline` links), hand it to `on_write`, then deliver the
      *        same value to the vertex's own subscribers (#1505: no clone).
      */
-    [[nodiscard]] result_t<void> handler_write_deliver(vertex_t* v, rope_t&& value,
+    [[nodiscard]] result_t<void> handler_write_deliver(vertex_t* v, view::rope_t&& value,
                                                        std::string_view caller);
     /**
      * @brief The storing tail every non-HANDLER store shares: publish @p sp to @p v's slot,
@@ -2548,12 +2550,12 @@ class graph_t {
     // value-carrying node at the corresponding descendant vertex. `notify` picks the
     // half: true (the `write` path) delivers each covered site + bubbles; false (the
     // `assign` path) marks each landed vertex for the next sweep and delivers nothing.
-    [[nodiscard]] result_t<void> write_branch(vertex_t* v, const rope_t& value,
+    [[nodiscard]] result_t<void> write_branch(vertex_t* v, const view::rope_t& value,
                                               std::string_view caller, bool notify);
     void fan_out(vertex_t* v, const value_t& value);
     // The same fan-out over a SLICE no vertex stored (a branch write's per-site cut): the view
     // is wrapped in stack storage for the duration of the dispatch.
-    void fan_out_slice(vertex_t* v, const view_t& slice);
+    void fan_out_slice(vertex_t* v, const view::view_t& slice);
     // The ONE dispatch of a subscription edge's three legs (in-process callback, local
     // target re-dispatch, remote sink) — shared by fan_out and the admission durability
     // latch (ADR-0049), always called OUTSIDE the vertex lock. The target/remote legs
@@ -2596,7 +2598,7 @@ class graph_t {
     // kUnstoredInline links (the #1505 no-clone property, kept), else one block from the
     // graph's source whose refusal sheds the delivery — counted OUT_OF_MEMORY at `width`.
     static constexpr std::size_t kUnstoredInline = 8;
-    void deliver_unstored(vertex_t* v, const rope_t& value,
+    void deliver_unstored(vertex_t* v, const view::rope_t& value,
                           void (graph_t::*fn)(vertex_t*, const value_t&), std::size_t width);
     // Deliver `value` as `v`'s value to v's full observer set: v's own edges (fan_out)
     // + every ancestor subtree subscriber (bubble_up, gated on listeners_above_). The
@@ -2684,7 +2686,7 @@ class graph_t {
     // NO graph lock held, after the mutation has landed — see sub_observer_fn_t's re-entrancy
     // warning.
     void notify_subscription(sub_event_t::kind_t kind, const vertex_t* v, std::string_view caller,
-                             const view_t& sub_tlv, std::size_t slot) const;
+                             const view::view_t& sub_tlv, std::size_t slot) const;
     // True iff a subscription event is worth building at all — an installed observer AND an
     // external (non-empty) caller context. Guards the pre-reads the observer needs (the
     // displaced slot's stored SUBSCRIBER on a replace/clear) so an app that installs nothing
@@ -2697,7 +2699,7 @@ class graph_t {
     // Field surface: ":settings.<f>", ":settings.app.<name…>" (RFC-0010),
     // ":subscribers[]" / "[N]", ":children[]".
     [[nodiscard]] result_t<void> field_write(vertex_t* v, const field_path_t& field,
-                                             const view_t& value, std::string_view caller);
+                                             const view::view_t& value, std::string_view caller);
     // The ACL gate (#81, ADR-0018/0020): true iff `caller` may exercise `right` on
     // `v`. True with no resolver installed (one null check — enforcement off), for the
     // trusted EMPTY (local) caller — settled before the resolver runs, #905 — or when
@@ -2718,7 +2720,7 @@ class graph_t {
     // ":children[]" append: instantiate a child from a SPEC via the type catalog (#82,
     // ADR-0017). Composes the child key (parent key + the SPEC `name` NAME), dispatches
     // on the SPEC `type`. Unknown type => SCHEMA_NOT_FOUND; duplicate name => PATH_IN_USE.
-    [[nodiscard]] result_t<void> create_child(vertex_t* parent, const view_t& spec_value);
+    [[nodiscard]] result_t<void> create_child(vertex_t* parent, const view::view_t& spec_value);
     // The HANDLER-role arm of the read contract (compose from `on_read`, else NOT_FOUND),
     // shared by BOTH read doors — `read` and, per RFC-0008 Amendment 2, `await` — so the
     // readiness form cannot drift from the form it names. ALREADY-GATED: each door checks
@@ -2727,35 +2729,36 @@ class graph_t {
     [[nodiscard]] result_t<value_ref_t> read_handler_gated(vertex_t* v) const;
     // A COMPOSED read's value (a handler's, a folded subtree's) given a published value's
     // shape: one heap block, whose refusal is BACKPRESSURE by value (#477), never a throw.
-    [[nodiscard]] static result_t<value_ref_t> composed_or_backpressure(rope_t&& r) noexcept;
+    [[nodiscard]] static result_t<value_ref_t> composed_or_backpressure(view::rope_t&& r) noexcept;
     // The field read's composing arms — every `:field` shape but the empty one — as the rope
     // they build; the public field `read` wraps it once (RFC-0028 D11).
-    [[nodiscard]] result_t<rope_t> read_field_rope(vertex_handle_t v, const field_path_t& field,
-                                                   std::string_view caller) const;
+    [[nodiscard]] result_t<view::rope_t> read_field_rope(vertex_handle_t v,
+                                                         const field_path_t& field,
+                                                         std::string_view caller) const;
     // ":schema" read => a POINT descriptor (name + settings).
-    [[nodiscard]] result_t<view_t> read_schema(vertex_t* v) const;
+    [[nodiscard]] result_t<view::view_t> read_schema(vertex_t* v) const;
     // ":identity" read => the node-scoped SETTINGS{kind,key} record (RFC-0011 §B), or
     // SCHEMA_NOT_FOUND when no keypair is installed. Takes no vertex: the identity is
     // the NODE's, and every vertex serves the identical bytes.
-    [[nodiscard]] result_t<view_t> read_identity() const;
+    [[nodiscard]] result_t<view::view_t> read_identity() const;
     // ":children[]" read => member enumeration (write-spec / read-members asymmetry,
     // reference 05 §SPEC): a POINT whose children are POINT{NAME} member descriptors.
     // A vertex carrying handlers.on_children serves that synthesized listing instead
     // (ADR-0044 — a transport vertex lists live bus peers, no vertices created);
     // otherwise the direct child vertices registered under v's key are enumerated.
-    [[nodiscard]] result_t<view_t> read_children(vertex_t* v) const;
+    [[nodiscard]] result_t<view::view_t> read_children(vertex_t* v) const;
     // ":acl" read => the stored ACEs RE-ENCODED (#81-A, ADR-0018/0020, #907) — a projection
     // of the list acl_allows walks. The READ_ACL gate runs in read(v, field, caller).
-    [[nodiscard]] result_t<view_t> read_acl(vertex_t* v) const;
+    [[nodiscard]] result_t<view::view_t> read_acl(vertex_t* v) const;
     // Bare ":settings" read (RFC-0010 §A.4 as amended by RFC-0022 §4) => the settings
     // container: the reserved `app` record iff a descriptor table is installed, and
     // NOTHING else — the core knob namespace is empty. An empty SETTINGS{} is the honest
     // answer for a vertex that declares no app fields.
-    [[nodiscard]] result_t<view_t> read_settings(vertex_t* v) const;
+    [[nodiscard]] result_t<view::view_t> read_settings(vertex_t* v) const;
     // ":settings.app" read (RFC-0010 §A.4) => the app container alone: declared,
     // non-`wo` fields that hold a value, in table order, values verbatim.
     // SCHEMA_NOT_FOUND when no table is installed (the closed default).
-    [[nodiscard]] result_t<view_t> read_settings_app(vertex_t* v) const;
+    [[nodiscard]] result_t<view::view_t> read_settings_app(vertex_t* v) const;
 
     // The full canonical key of `v` — its ancestors' NAME records concatenated root-down
     // (ADR-0057 render-on-demand: vertices store one segment, not the full key). Walks

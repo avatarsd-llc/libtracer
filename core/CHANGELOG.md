@@ -27,6 +27,25 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   tripwire: a `config_t` that defines a member `kWeaklyOrdered` fails with a `static_assert`
   saying it was removed. Nothing changes at run time. **Migration:** delete
   `static constexpr bool kWeaklyOrdered = ...;` from your `libtracer/config_override.hpp`.
+- **Second names created by namespace-scope re-exports are removed, so each concept has one
+  public name ([#1724](https://github.com/avatarsd-llc/libtracer/issues/1724)).** Five
+  using-declarations and aliases are gone:
+  - `tr::graph::rope_t`, `tr::graph::view_t` and `tr::graph::segment_ptr_t`. The using-declarations
+    in `vertex.hpp`, `value.hpp`, `subscriber.hpp` and `app_fields.hpp` exported them. The
+    `tr::graph` headers and sources now spell `view::rope_t` / `view::view_t` /
+    `view::segment_ptr_t`.
+  - `tr::net::config_reader_t`, the historical alias of `tr::wire::config_reader_t` (#985). The
+    transport sources now spell `wire::config_reader_t`.
+  - `tr::net::sink_slot_t`, the historical alias of `tr::sink_slot_t` (#1049). Code inside
+    `tr::net` that names `sink_slot_t` unqualified still compiles, because it finds
+    `tr::sink_slot_t` through the enclosing namespace.
+
+  The time-boxed `tr::graph` guard aliases from #1703 stay for their one release. **Migration:**
+  `tr::graph::rope_t` → `tr::view::rope_t`; `tr::graph::view_t` → `tr::view::view_t`;
+  `tr::graph::segment_ptr_t` → `tr::view::segment_ptr_t`; `tr::net::config_reader_t` →
+  `tr::wire::config_reader_t`; `tr::net::sink_slot_t<Fn>` → `tr::sink_slot_t<Fn>`. Code inside
+  `namespace tr::graph` that named the view types unqualified must now qualify them as `view::`
+  or add a using-declaration in its own `.cpp`.
 - **The config member `reader_guard_t` is renamed `guard_t`, and a fragment that still defines
   the old name no longer compiles
   ([#1703](https://github.com/avatarsd-llc/libtracer/issues/1703)).** The guard serializes

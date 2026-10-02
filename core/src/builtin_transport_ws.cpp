@@ -91,7 +91,7 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_ba
     vertex.register_transport_type(
         "ws",
         [rx_backend, egress_src](const conn_settings_t& s, const wire::tlv_t* raw_config) {
-            const config_reader_t cfg(raw_config);
+            const wire::config_reader_t cfg(raw_config);
             const bool peer_named = cfg.flag("peer_named").value_or(false);
             // The bus-module refusal (#375 deliverable 3). TYPE_MISMATCH, the status this
             // factory family already answers an unhonourable `:settings` with — a PERMANENT

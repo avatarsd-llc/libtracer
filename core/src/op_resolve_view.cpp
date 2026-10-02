@@ -130,16 +130,16 @@ class view_node {
      * was the one that escaped the node's memory bound. A whole terminus WRITE whose payload
      * TLV lands inside one RX segment is exactly that case, and it is the common one.
      */
-    [[nodiscard]] view_t own_wire(mem::mem_backend_t& flat) const {
-        const rope_t sub = v_->wire().subrope(0, wire_size());  // trailer excluded
-        if (sub.link_count() > 1) {                             // one flatten, adopt (no 2nd copy)
+    [[nodiscard]] view::view_t own_wire(mem::mem_backend_t& flat) const {
+        const view::rope_t sub = v_->wire().subrope(0, wire_size());  // trailer excluded
+        if (sub.link_count() > 1) {  // one flatten, adopt (no 2nd copy)
             // Through the injected seam (#766): the ADR-0053 ⑤ ownership flatten of a
             // fragmented WRITE payload is peer-provoked and must stay inside the node's
             // memory bound. An empty result is already the walk's BACKPRESSURE signal
             // (`own_tlv` → the empty-value guards in `resolve_node`), so the refusal needs
             // no second channel here — but it is recorded so a LATER span read on the same
             // walk cannot be believed either.
-            view_t owned = sub.flatten(flat);
+            view::view_t owned = sub.flatten(flat);
             if (owned.empty()) note_refusal();
             return owned;
         }
@@ -149,10 +149,10 @@ class view_node {
         // the empty view the walk's empty-value guards already read as BACKPRESSURE. It is
         // recorded for the same reason the flatten branch records its own: a LATER span read
         // on this walk must not be believed either.
-        std::optional<view_t> owned = view::over_bytes(sub.only().bytes(), flat);
+        std::optional<view::view_t> owned = view::over_bytes(sub.only().bytes(), flat);
         if (!owned) {
             note_refusal();
-            return view_t{};
+            return view::view_t{};
         }
         return std::move(*owned);
     }
@@ -172,7 +172,7 @@ class view_node {
      * the owning delivery here). Eligibility (opt-in / size / trailer-less) is the
      * caller's; this always CAN pin.
      */
-    [[nodiscard]] std::optional<rope_t> pin_wire(const view_t*) const {
+    [[nodiscard]] std::optional<view::rope_t> pin_wire(const view::view_t*) const {
         return v_->wire().subrope(0, wire_size());
     }
 
@@ -184,10 +184,10 @@ class view_node {
      *         `own_wire` flatten, which moves device bytes through the backend's transfer.
      */
     [[nodiscard]] bool copy_wire_into(std::span<std::byte> out) const {
-        const rope_t sub = v_->wire().subrope(0, wire_size());
+        const view::rope_t sub = v_->wire().subrope(0, wire_size());
         if (!sub.all_host()) return false;
         std::size_t at = 0;
-        for (const view_t& l : sub.links()) {
+        for (const view::view_t& l : sub.links()) {
             const std::span<const std::byte> b = l.bytes();
             std::memcpy(out.data() + at, b.data(), b.size());
             at += b.size();
@@ -269,15 +269,16 @@ class view_node {
 
     std::optional<wire::tlv_view_t> v_{};
     flatten_seam_t* seam_ = nullptr;
-    mutable view_t cache_{};
+    mutable view::view_t cache_{};
     mutable bool cached_ = false;
 };
 
 }  // namespace
 
-result_t<rope_t> op_resolver_t::resolve(const wire::tlv_view_t& fwd, const inbound_ref_t& inbound,
-                                        const view_t* frame_view,
-                                        const wire::path_ref_element_t* dst_label_target) {
+result_t<view::rope_t> op_resolver_t::resolve(const wire::tlv_view_t& fwd,
+                                              const inbound_ref_t& inbound,
+                                              const view::view_t* frame_view,
+                                              const wire::path_ref_element_t* dst_label_target) {
     // The terminus subject derivation, identical to the arena tier's — one helper, so the
     // two tiers cannot answer one logical request under two different principals.
     std::array<char, net::kPeerNameChars> subject_scratch{};

@@ -38,8 +38,8 @@
  * (#1049). It is a pure publication primitive over `<atomic>` with no libtracer
  * dependency at all, and L4 (`tr::graph`) now holds its three configuration sinks
  * in one — so leaving it spelled `tr::net::` would have pointed an L4 member at
- * the transport plane, which sits ABOVE L4 and depends on it. `tr::net::sink_slot_t`
- * remains a working alias so the router and its docs keep their spelling.
+ * the transport plane, which sits ABOVE L4 and depends on it. Code in `tr::net` names it
+ * unqualified, which finds `tr::sink_slot_t` through the enclosing namespace.
  */
 #pragma once
 
@@ -181,17 +181,3 @@ class sink_slot_t {
 };
 
 }  // namespace tr
-
-namespace tr::net {
-
-/**
- * @brief The transport plane's spelling of @ref tr::sink_slot_t.
- *
- * The class moved to the layer-neutral `tr` namespace when L4 took a dependency on it
- * (#1049); this alias keeps `fwd_router_t` and every downstream `tr::net::sink_slot_t`
- * compiling unchanged.
- */
-template <typename Fn>
-using sink_slot_t = tr::sink_slot_t<Fn>;
-
-}  // namespace tr::net
