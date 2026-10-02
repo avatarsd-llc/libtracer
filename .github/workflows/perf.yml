@@ -80,22 +80,34 @@ jobs:
   # --- PR gate: same-runner baseline against main --------------------------------
   gate-pr:
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-24.04
+    # The pinned bench host, not a hosted VM. On `ubuntu-24.04` the gate shared its 4 vCPUs
+    # with unknown neighbours: about half of its verdicts on 2026-10-02 came back
+    # INCONCLUSIVE (host psi 8–17 > 5), and each one cost a full rerun. The `bench-local`
+    # runner lives in `bench.slice`, whose CPUs no other job, runner or container can use,
+    # and it runs one job at a time. So the gate, perf-local and nothing else take turns on
+    # those CPUs, and every timed execution is pinned to BENCH_CPU.
+    # Same guard as core-ci's self-hosted jobs: a fork PR never reaches this host (its
+    # runner user has passwordless sudo); it falls back to the hosted VM.
+    runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","bench-local"]') || 'ubuntu-24.04' }}
+    env:
+      BENCH_CPU: "2" # the one pinned logical CPU — every measured process runs here (as perf-local)
     # Measured healthy max 8.27 min, p50 8.12, min 7.15 (9.37 on the incident day), of
     # which the blocking interleaved A/B step alone is 5.7 min of TIMED measurement that
     # must not be clipped. 30 = ~3.2x. This is the BLOCKING perf tier, so the ceiling is
     # set where it can never trip on a slow-but-honest sample. See core-ci.yml's header.
     timeout-minutes: 30
     steps:
-      # Build parallelism (#1637): 6 on the self-hosted runners (their systemd units carry
-      # CPUQuota=600%; more compilers than that only thrash), `nproc` on hosted runners.
-      # RUNNER_ENVIRONMENT comes from the runner, so this follows the runtime `runs-on`
-      # routing. POSIX sh on purpose: `container:` jobs may resolve the shell to dash.
+      # Build parallelism (#1637): every CPU the job can see. On the bench host that is
+      # bench.slice's 4, all idle until timing starts; on a hosted runner, all of its own.
       - name: Set build parallelism (BUILD_JOBS)
         run: |
-          if [ "$RUNNER_ENVIRONMENT" = "self-hosted" ]; then jobs=6; else jobs="$(nproc)"; fi
+          jobs="$(nproc)"
           echo "BUILD_JOBS=$jobs" >> "$GITHUB_ENV"
           echo "BUILD_JOBS=$jobs"
+      # Same self-heal as perf-local (#1538): this job shares the host's `_work` tree with
+      # root-run `container:` jobs. `|| true`: checkout names a workspace this cannot repair.
+      - name: Reclaim any root-owned leftovers from a container job
+        run: sudo -n chown -R "$(id -un):$(id -gn)" "$GITHUB_WORKSPACE" "$RUNNER_TEMP" || true
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0  # need origin/main history to build the same-runner baseline
@@ -114,6 +126,9 @@ jobs:
       - name: Build main's benchmark on this runner (baseline)
         run: |
           git fetch --no-tags origin main
+          # The bench host is persistent, unlike a hosted VM: drop the last run's baseline tree.
+          git worktree remove --force ../main-baseline 2>/dev/null || true
+          rm -rf ../main-baseline; git worktree prune
           git worktree add --detach ../main-baseline origin/main
           cmake -S ../main-baseline/bench -B ../main-baseline/bench/build -DCMAKE_BUILD_TYPE=Release
           cmake --build ../main-baseline/bench/build --target bench_libtracer bench_forward_heap \
