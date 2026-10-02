@@ -337,7 +337,7 @@ ANCHORS = [
     # the same silence #725/#726 found in the module pages, in a file the gate could read
     # all along but had no pin for.
     ('bench/bench_libtracer.cpp:16', '(The `loopback` /'),
-    ('bench/bench_libtracer.cpp:1497',
+    ('bench/bench_libtracer.cpp:1504',
      '// (The `loopback` and n-routers `routers-hN` modes benchmarked the ROUTER-flood'),
     # core/examples/wire_codec.cpp
     ('core/examples/wire_codec.cpp:71', 'std::printf("encoded POINT{VALUE,VALUE}+CRC: %zu bytes\\n", wire.size());'),

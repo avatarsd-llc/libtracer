@@ -1167,9 +1167,16 @@ void run_lkv_store_gate() {
     // A caller-owned slab carved into equal 2 KB slots. The loop keeps at most one
     // segment live, so a handful of slots suffice; 64 gives headroom and lets the
     // zero-exhaustion invariant (no fragmentation growth) be asserted directly.
+    //
+    // The slab's alignment is stated, not inherited (#1745). As a `std::vector` it was a
+    // ~134 KiB heap block that glibc maps, so its base sat at page + 16, and the reused slot's
+    // payload landed on a 64-byte line only because `pool_t`'s 48-byte header made it add up.
+    // A static with an explicit `alignas(64)` makes the slot layout the same on every run and
+    // every runner, whatever the heap did first.
     constexpr std::size_t kSlot = 2048, kSlots = 64;
-    std::vector<std::byte> slab(kSlots * (sizeof(tr::view::segment_t) + kSlot + 64));
-    tr::mem::pool_t pool(slab, kSlot);
+    constexpr std::size_t kSlabBytes = kSlots * (sizeof(tr::view::segment_t) + kSlot + 64);
+    alignas(64) static std::byte slab[kSlabBytes];
+    tr::mem::pool_t pool(std::span<std::byte>(slab, kSlabBytes), kSlot, 64);
     for (std::size_t S : {std::size_t{64}, std::size_t{1024}}) {
         const lkv_result_t ha = run_lkv_store_alloc(S, false, heap, "lkv-alloc-heap");
         const lkv_result_t pa = run_lkv_store_alloc(S, false, pool, "lkv-alloc-pool");

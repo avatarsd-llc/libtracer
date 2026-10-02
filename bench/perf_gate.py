@@ -459,41 +459,124 @@ _MEM_RE = re.compile(r"^RESULT zeroheap (\w+) allocs=(\d+) frees=\d+ bytes=(\d+)
 # byte of a tolerance. The next priced step declares its own.
 MEM_CHARGED: dict[str, tuple[int, str]] = {}
 
-# --- ADR-0060 LKV copy-store gate (same-run pool-vs-heap ratio, NOT vs-baseline) --
-# The pooled value_backend vs the default heap on the write-path alloc/free op. A
-# same-run ratio cancels absolute machine speed, so it needs no baseline: it proves
-# the pool routing is live (a heap fallback would collapse the ratio toward 1x) and
-# stays deterministically cheaper. The multiple is host-allocator-dependent (glibc's
-# tcache serves a hot same-size malloc/free in ~15 ns → ~2.5x here; ESP-IDF
-# multi_heap is hundreds of ns → the ADR's ≳10x, validated on-device), so the floor
-# is conservative. Skips cleanly when the rows are absent (an older bench binary),
-# keeping the gate backward-compatible with a main baseline that predates the rows.
+# --- ADR-0060 LKV copy-store gate (pool-vs-heap ratio) --------------------------------
+# The pooled value_backend vs the default heap on the write-path alloc/free op. A ratio
+# within one run cancels absolute machine speed: it proves the pool routing is live (a heap
+# fallback collapses the ratio toward 1x) and stays deterministically cheaper. The multiple
+# is host-allocator-dependent (glibc's tcache serves a hot same-size malloc/free in ~15 ns
+# -> ~2.5-3x on a quiet runner; ESP-IDF multi_heap is hundreds of ns -> the ADR's >=10x,
+# validated on-device), so the floor is conservative.
+#
+# It is ALSO host-dependent at a fixed code point, and that is why the per-PR form is now
+# PAIRED (#1745). The single-arm form compared the candidate's ratio with a constant: on
+# #1739 it failed 3 runs in 5 at 1.5-1.6x and passed the other 2 at 3.0-3.2x, with both
+# arms' `bench_libtracer` byte-identical in `.text` and in every data address. A runner
+# whose heap is cheap relative to the pool reads low on main too, so the constant floor was
+# measuring the runner. The paired form runs main's binary and the candidate's interleaved,
+# alternating which starts (A B / B A / ...), keeps each arm's BEST observation of each row
+# across the pairs (best-of-rounds: contamination is one-sided, docs/methodology.md), and
+# fails the floor only when the candidate is below it AND below main's ratio from the same
+# session by more than the throughput tolerance. A heap fallback still fails unconditionally:
+# under LKV_FALLBACK_RATIO no runner variance explains it, whatever main reads.
+#
+# The legacy (no-baseline) form keeps the constant floor. Rows absent from a binary (an
+# older main) leave that arm out, so the comparison degrades to the floor rather than
+# passing silently.
 LKV_MIN_RATIO = 2.0
+LKV_FALLBACK_RATIO = 1.25  # a pool routed back to the heap reads ~1.0x; nothing healthy is near it
+LKV_ROUNDS = 3             # legacy best-of rounds, and the paired form's pair count
+LKV_ROWS = ("lkv-alloc-heap", "lkv-alloc-pool")
+
+
+def lkv_parse(out: str) -> dict[int, dict[str, float]]:
+    """@brief The lkv-alloc rows of one `bench_libtracer lkv` run: {size: {row: ops/s}}."""
+    rows: dict[int, dict[str, float]] = {}
+    for line in out.splitlines():
+        f = line.split("\t")
+        if len(f) == 12 and f[0] == "RESULT" and f[2] in LKV_ROWS:
+            rows.setdefault(int(f[3]), {})[f[2]] = float(f[6])  # f[6] = deliveries/s (ops/s)
+    return rows
+
+
+def lkv_best(runs: list[dict[int, dict[str, float]]]) -> dict[int, float]:
+    """@brief Best-of-rounds per row (max ops/s), then the pool/heap ratio per size.
+
+    Each row keeps its own best: the heap and the pool rows are separate executions, and a
+    neighbour that slowed one of them in a round says nothing about the other."""
+    best: dict[int, dict[str, float]] = {}
+    for run in runs:
+        for size, r in run.items():
+            b = best.setdefault(size, {})
+            for row, ops in r.items():
+                b[row] = max(b.get(row, 0.0), ops)
+    out = {}
+    for size, b in best.items():
+        h, p = b.get("lkv-alloc-heap"), b.get("lkv-alloc-pool")
+        if h and p:
+            out[size] = p / h
+    return out
+
+
+def lkv_verdict(size: int, cand: float, base: float | None) -> tuple[str, str | None]:
+    """@brief One size's report line and its failure (or None).
+
+    @param cand The candidate's best-of-pairs pool/heap ratio.
+    @param base Main's ratio from the SAME interleaved session, or None (legacy form, or a
+                main binary without the rows).
+    """
+    line = f"  lkv-alloc S={size:<6} pool/heap alloc/free = {cand:>4.1f}x"
+    if base is not None:
+        line += f"  (main {base:.1f}x, same session)"
+    if cand < LKV_FALLBACK_RATIO:
+        return (line + f"  << under {LKV_FALLBACK_RATIO}x: heap fallback",
+                f"lkv-alloc S={size} pool only {cand:.1f}x heap alloc/free (< "
+                f"{LKV_FALLBACK_RATIO}x — the ADR-0060 value_backend routing has fallen back "
+                f"to the heap)")
+    if cand >= LKV_MIN_RATIO:
+        return line, None
+    if base is None:
+        return (line + f"  << under {LKV_MIN_RATIO}x floor",
+                f"lkv-alloc S={size} pool only {cand:.1f}x heap alloc/free (< {LKV_MIN_RATIO}x "
+                f"— the ADR-0060 value_backend routing may have broken / fallen back to the "
+                f"heap)")
+    if cand < base * TPUT_REGRESS:
+        return (line + f"  << under {LKV_MIN_RATIO}x floor AND under main",
+                f"lkv-alloc S={size} pool only {cand:.1f}x heap alloc/free, under the "
+                f"{LKV_MIN_RATIO}x floor and under main's {base:.1f}x from the same session "
+                f"by more than {(1 - TPUT_REGRESS) * 100:.0f}% — the pool path regressed")
+    return (line + f"  (under {LKV_MIN_RATIO}x, but so is main on this runner: not gated)", None)
 
 
 def lkv_ratio_gate(bench: pathlib.Path) -> list[str]:
-    """Fail if the pooled alloc/free is not >= LKV_MIN_RATIO x the default heap. Runs
-    the bench's isolated `lkv` sweep (fast); best-of-3 max ops/s per size."""
-    best: dict[int, dict[str, float]] = {}
-    for _ in range(3):
-        out = timed([str(bench), "lkv"], timeout=120)
-        for line in out.splitlines():
-            f = line.split("\t")
-            if len(f) == 12 and f[0] == "RESULT" and f[2] in ("lkv-alloc-heap", "lkv-alloc-pool"):
-                s = best.setdefault(int(f[3]), {})
-                s[f[2]] = max(s.get(f[2], 0.0), float(f[6]))  # f[6] = deliveries/s (ops/s)
+    """@brief The legacy form: the candidate alone, best of LKV_ROUNDS, against the floor."""
+    cand = lkv_best([lkv_parse(timed([str(bench), "lkv"], timeout=120))
+                     for _ in range(LKV_ROUNDS)])
     fails = []
-    for size, s in sorted(best.items()):
-        h, p = s.get("lkv-alloc-heap"), s.get("lkv-alloc-pool")
-        if not h or not p:
-            continue
-        ratio = p / h
-        print(f"  lkv-alloc S={size:<6} pool/heap alloc/free = {ratio:>4.1f}x"
-              + ("" if ratio >= LKV_MIN_RATIO else f"  << under {LKV_MIN_RATIO}x floor"))
-        if ratio < LKV_MIN_RATIO:
-            fails.append(f"lkv-alloc S={size} pool only {ratio:.1f}x heap alloc/free "
-                         f"(< {LKV_MIN_RATIO}x — the ADR-0060 value_backend routing may have "
-                         f"broken / fallen back to the heap)")
+    for size in sorted(cand):
+        line, fail = lkv_verdict(size, cand[size], None)
+        print(line)
+        if fail:
+            fails.append(fail)
+    return fails
+
+
+def lkv_ratio_gate_paired(bench: pathlib.Path, base_bench: pathlib.Path,
+                          pairs: int = LKV_ROUNDS) -> list[str]:
+    """@brief The per-PR form (#1745): main and the candidate interleaved, best-of-pairs."""
+    runs: dict[str, list] = {"cand": [], "base": []}
+    for i in range(max(1, pairs)):
+        order = [("base", base_bench), ("cand", bench)]
+        if i % 2:
+            order.reverse()
+        for arm, path in order:
+            runs[arm].append(lkv_parse(timed([str(path), "lkv"], timeout=120)))
+    cand, base = lkv_best(runs["cand"]), lkv_best(runs["base"])
+    fails = []
+    for size in sorted(cand):
+        line, fail = lkv_verdict(size, cand[size], base.get(size))
+        print(line)
+        if fail:
+            fails.append(fail)
     return fails
 
 
@@ -990,7 +1073,7 @@ def main() -> int:
               f"deliv -{(1 - TPUT_REGRESS) * 100:.0f}%):")
         fails = gate_paired(cand_bins, base_bins, pairs)
         fails += mem_ratchet(bench_fwd, base_fwd)
-        fails += lkv_ratio_gate(bench)  # ADR-0060 same-run ratio (no baseline needed)
+        fails += lkv_ratio_gate_paired(bench, base_bench)  # ADR-0060 ratio, paired (#1745)
         print_conditions()
         return render_verdict(fails, [], tier, sample_note, LEDGER)
 

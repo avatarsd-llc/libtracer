@@ -413,6 +413,90 @@ class PointsAreDocumented(unittest.TestCase):
                         f"and the published instrument table has rotted (#1041)")
 
 
+def lkv_out(heap64, pool64, heap1k=None, pool1k=None):
+    """@brief A doctored `bench_libtracer lkv` stdout: the two lkv-alloc rows per size."""
+    def row(mode, size, ops):
+        return "\t".join(["RESULT", "libtracer", mode, str(size), "1", "1", str(ops),
+                           str(ops), "0", "0", "0", "0"])
+    lines = [row("lkv-alloc-heap", 64, heap64), row("lkv-alloc-pool", 64, pool64)]
+    if heap1k is not None:
+        lines += [row("lkv-alloc-heap", 1024, heap1k), row("lkv-alloc-pool", 1024, pool1k)]
+    return "\n".join(lines + ["noise line", "RESULT\ttoo\tshort"]) + "\n"
+
+
+class LkvRatioGate(unittest.TestCase):
+    """@brief The ADR-0060 pool/heap floor (#1745): runner variance passes, a heap
+    fallback fails.
+
+    The doctored shapes are #1739's: the candidate read 1.5x on a runner where the same
+    code read 3.0-3.2x on others, with byte-identical binaries. Paired against main from the
+    same session, that shape passes when main reads low too and fails when it does not; a
+    pool that routes to the heap (ratio ~1.0x) fails whatever main reads."""
+
+    def run_paired(self, cand_out, base_out, pairs=3):
+        """@brief The paired gate over doctored outputs, keyed by which binary ran."""
+        def fake_timed(argv, timeout):
+            return cand_out(argv) if argv[0] == "cand" else base_out(argv)
+        with unittest.mock.patch.object(pg, "timed", fake_timed), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            fails = pg.lkv_ratio_gate_paired(pathlib.Path("cand"), pathlib.Path("base"), pairs)
+        return fails, out.getvalue()
+
+    def test_heap_fallback_fails_even_when_main_is_low(self):
+        """A real fallback: the pool row costs what the heap row costs."""
+        fails, _ = self.run_paired(lambda a: lkv_out(100, 102), lambda a: lkv_out(100, 150))
+        self.assertEqual(len(fails), 1)
+        self.assertIn("fallen back to the heap", fails[0])
+
+    def test_heap_fallback_fails_when_main_is_healthy(self):
+        fails, _ = self.run_paired(lambda a: lkv_out(100, 98), lambda a: lkv_out(100, 320))
+        self.assertTrue(fails and "fallen back" in fails[0])
+
+    def test_1739_low_runner_passes_when_main_reads_low_too(self):
+        """Both arms 1.5-1.6x on one runner: the runner, not the code."""
+        fails, out = self.run_paired(lambda a: lkv_out(100, 155), lambda a: lkv_out(100, 160))
+        self.assertEqual(fails, [])
+        self.assertIn("so is main on this runner", out)
+
+    def test_real_regression_under_main_fails(self):
+        """Candidate 1.5x against main 3.2x in the same session: the pool path regressed."""
+        fails, _ = self.run_paired(lambda a: lkv_out(100, 150), lambda a: lkv_out(100, 320))
+        self.assertEqual(len(fails), 1)
+        self.assertIn("under main", fails[0])
+
+    def test_healthy_candidate_passes(self):
+        fails, _ = self.run_paired(lambda a: lkv_out(100, 300, 100, 470),
+                                   lambda a: lkv_out(100, 310, 100, 480))
+        self.assertEqual(fails, [])
+
+    def test_best_of_pairs_not_one_round(self):
+        """One contaminated pool round must not decide it: the best observation wins."""
+        rounds = iter([lkv_out(100, 140), lkv_out(100, 300), lkv_out(100, 290)])
+        fails, out = self.run_paired(lambda a: next(rounds), lambda a: lkv_out(100, 300))
+        self.assertEqual(fails, [])
+        self.assertIn("3.0x", out)
+
+    def test_interleaved_alternating_start(self):
+        """Pairs alternate which arm runs first (A B / B A / A B)."""
+        seen = []
+        def rec(a):
+            seen.append(a[0])
+            return lkv_out(100, 300)
+        self.run_paired(rec, rec, pairs=3)
+        self.assertEqual(seen, ["base", "cand", "cand", "base", "base", "cand"])
+
+    def test_main_without_rows_falls_back_to_the_floor(self):
+        """An older main without the rows: the candidate faces the constant floor."""
+        fails, _ = self.run_paired(lambda a: lkv_out(100, 150), lambda a: "no rows\n")
+        self.assertTrue(fails and f"< {pg.LKV_MIN_RATIO}x" in fails[0])
+
+    def test_legacy_form_keeps_the_floor(self):
+        with unittest.mock.patch.object(pg, "timed", lambda argv, timeout: lkv_out(100, 150)), \
+                contextlib.redirect_stdout(io.StringIO()):
+            fails = pg.lkv_ratio_gate(pathlib.Path("cand"))
+        self.assertEqual(len(fails), 1)
+
+
 class VerdictTier(unittest.TestCase):
     """@brief #1251: the two-tier policy, as a rule the gate can actually apply.
 
