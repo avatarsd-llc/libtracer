@@ -231,10 +231,13 @@ jobs:
       - name: Move the runner's own processes off the bench CPUs
         if: runner.environment == 'self-hosted'
         run: |
+          # Only THIS runner's processes: the other runners share the user but live in
+          # runners.slice, where CPU 2 is not allowed (taskset fails EINVAL there).
+          cg="/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)"
+          own="$(cat "$cg/cgroup.procs" "$cg"/*/cgroup.procs 2>/dev/null || true)"
           for pid in $(pgrep -u "$(id -u)" -f 'Runner\.(Listener|Worker)'); do
-            taskset -a -p -c 2 "$pid" >/dev/null || true
+            if grep -qx "$pid" <<<"$own"; then taskset -a -p -c 2 "$pid"; fi
           done
-          pgrep -u "$(id -u)" -f 'Runner\.(Listener|Worker)' | xargs -r -n1 taskset -p
       - name: Performance gate (INTERLEAVED same-runner A/B vs main) — BLOCKING tier
         run: |
           python3 bench/perf_gate.py --tier blocking \
