@@ -2385,6 +2385,15 @@ using config_t = bus_closed_config_t;
              -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/bus_can_guard.cmake)
 endif()
 
+# #1720 — the transport headers (CAN, QUIC, WebTransport, the self-heal engine) name their
+# factory through the transport_factory.hpp leaf and must not parse graph.hpp or vertex.hpp.
+# Header-only, so it runs whether or not those modules are built here.
+add_test(NAME transport_include_guard COMMAND ${CMAKE_COMMAND}
+         -DLT_CXX=${CMAKE_CXX_COMPILER}
+         -DLT_CORE_INCLUDE=${CMAKE_CURRENT_SOURCE_DIR}/../include
+         -DLT_WORK_DIR=${CMAKE_CURRENT_BINARY_DIR}/transport-include-guard
+         -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/transport_include_guard.cmake)
+
 # #1460 phase (b) / RFC-0025 §7 vector 12 `stream/receiver-ring-flood` — the PLANE-ISOLATION
 # arm: a flood that exhausts the net-plane store (the #603 / fe6adcd6 injected block_source_t
 # seam) must leave the graph plane still allocating. Carries its own ablation as a control arm

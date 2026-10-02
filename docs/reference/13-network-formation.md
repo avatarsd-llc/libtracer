@@ -363,7 +363,7 @@ write-only, non-propagating creator endpoint.
 `dormant` takes `0` so a resting link is the falsy default. **The byte encoding becomes
 normative on the merge of RFC-0014's conformance vectors** — the RFC defers it, so these
 values are the reference encoding until then (`link_state_t`,
-`core/include/libtracer/transport_vertex.hpp:link_state_t`). A `LISTEN` vertex's liveness
+`core/include/libtracer/transport_factory.hpp:link_state_t`). A `LISTEN` vertex's liveness
 reports **listen-socket reachability**, not per-accepted-peer connectivity; accepted-peer
 count and identity are exposed through the connection vertex's **synthesized
 `:children[]`**, built per read from the transport's own live-peer table

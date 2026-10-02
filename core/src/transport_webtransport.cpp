@@ -1167,8 +1167,8 @@ std::atomic<std::uint64_t> g_insecure_refusals{0};
 
 }  // namespace
 
-transport_vertex_t::transport_factory_t webtransport_transport_factory(
-    std::span<const tls_profile_t> profiles, mem::mem_backend_t* rx_backend) {
+transport_factory_t webtransport_transport_factory(std::span<const tls_profile_t> profiles,
+                                                   mem::mem_backend_t* rx_backend) {
     return [profiles, rx_backend](
                const conn_settings_t& s,
                const wire::tlv_t* raw_config) -> graph::result_t<std::unique_ptr<transport_t>> {

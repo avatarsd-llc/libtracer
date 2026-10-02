@@ -76,6 +76,18 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   or vertex header. `graph.hpp` and `vertex.hpp` include it, so existing code compiles unchanged.
   `route_handle.hpp` includes the leaf instead of `graph.hpp`, which cuts its standalone parse
   time from about 1.15 s to about 0.21 s.
+- **`conn_role_t`, `link_state_t`, `conn_settings_t` and `transport_kind_traits_t` move to the
+  new leaf header `libtracer/transport_factory.hpp`, which also adds the namespace-scope
+  `tr::net::transport_factory_t`
+  ([#1720](https://github.com/avatarsd-llc/libtracer/issues/1720)).** The leaf includes no
+  graph or vertex header. `transport_vertex.hpp` includes it, and
+  `transport_vertex_t::transport_factory_t` stays as an alias, so existing code that includes
+  `transport_vertex.hpp` compiles unchanged. `transport_can.hpp`, `transport_quic.hpp`,
+  `transport_webtransport.hpp` and `self_heal_link.hpp` include the leaf instead of
+  `transport_vertex.hpp`, so they no longer bring in `graph.hpp`, `vertex.hpp` or
+  `transport_vertex.hpp`. **Migration:** code that used `transport_vertex_t`, `graph_t` or
+  another graph name while including only one of those four headers must include
+  `libtracer/transport_vertex.hpp` (or `libtracer/graph.hpp`) itself.
 - **An observed eager write no longer takes the graph-wide sweep lock because some OTHER
   vertex holds an `assign` mark ([#1712](https://github.com/avatarsd-llc/libtracer/issues/1712)).**
   While any mark was pending, every observed write rendered its key (one heap block) and took

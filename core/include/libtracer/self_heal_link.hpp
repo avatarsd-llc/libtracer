@@ -33,7 +33,7 @@
 #include "libtracer/config.hpp"
 #include "libtracer/thread_id.hpp"
 #include "libtracer/transport.hpp"
-#include "libtracer/transport_vertex.hpp"
+#include "libtracer/transport_factory.hpp"
 
 namespace tr::net {
 
@@ -126,7 +126,7 @@ class self_heal_link_t final : public transport_t {
      *                       `fwd_router_t::add_child` installs the matching receiver on
      *                       the ENGINE exactly once, at registration.
      */
-    self_heal_link_t(transport_vertex_t::transport_factory_t factory, conn_settings_t settings,
+    self_heal_link_t(transport_factory_t factory, conn_settings_t settings,
                      std::vector<std::byte> raw_config, bool inner_delivers_ropes);
 
     /** @brief Stops the engine (see @ref stop) and destroys any remaining socket. */
@@ -251,7 +251,7 @@ class self_heal_link_t final : public transport_t {
     mutable std::mutex m_;
     std::condition_variable cv_; /**< @brief Worker wake + op-waiter rendezvous. */
 
-    const transport_vertex_t::transport_factory_t factory_; /**< @brief Re-run per dial. */
+    const transport_factory_t factory_;       /**< @brief Re-run per dial. */
     const conn_settings_t settings_;          /**< @brief Universal keys, defaults resolved. */
     const std::vector<std::byte> raw_config_; /**< @brief The SPEC's config TLV bytes. */
     const bool inner_ropes_;                  /**< @brief The kind's delivery capability. */
