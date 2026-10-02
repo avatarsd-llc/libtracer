@@ -2208,7 +2208,7 @@ class graph_t {
      * `:schema`) is routed to the field surface.
      */
     [[nodiscard]] result_t<value_ref_t> read(const path_t& path) const;
-    /** @brief Write by path — resolve the key once, then @ref write(vertex_handle_t, rope_t,
+    /** @brief Write by path — resolve the key once, then @ref write(vertex_handle_t, view::rope_t,
      * std::string_view). */
     [[nodiscard]] result_t<void> write(const path_t& path, view::rope_t value);
     /** @brief Await by path — resolve the key once, then @ref await(vertex_handle_t,
