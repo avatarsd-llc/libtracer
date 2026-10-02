@@ -86,7 +86,9 @@ jobs:
     # runner lives in `bench.slice`, whose CPUs no other job, runner or container can use,
     # and it runs one job at a time. So the gate, perf-local and nothing else take turns on
     # those CPUs, and every timed execution is pinned to BENCH_CPU.
-    runs-on: [self-hosted, bench-local]
+    # Same guard as core-ci's self-hosted jobs: a fork PR never reaches this host (its
+    # runner user has passwordless sudo); it falls back to the hosted VM.
+    runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","bench-local"]') || 'ubuntu-24.04' }}
     env:
       BENCH_CPU: "2" # the one pinned logical CPU — every measured process runs here (as perf-local)
     # Measured healthy max 8.27 min, p50 8.12, min 7.15 (9.37 on the incident day), of
