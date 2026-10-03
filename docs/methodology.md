@@ -91,14 +91,23 @@ This is the surface that carries the microsecond thesis — the zero-copy substr
 delivering values as loaned `view_t`s — and the one the per-PR gate watches most
 closely.
 
+**Process shape.** Each family of the sweep (the fan-out ladder, the payload ladder,
+`lkv`, …) runs in its **own fresh process**, under one fixed set of allocator settings
+(`GLIBC_TUNABLES`: mmap and trim thresholds, arena count). Rows used to share one process
+heap, aged by every row ahead of them, so a row's value partly depended on its position in
+the sweep. A heap state that matters is now a named row instead: `lkv-*-heap` runs on a
+fresh heap and `lkv-*-heap-aged` on a deliberately fragmented one
+([#1803](https://github.com/avatarsd-llc/libtracer/issues/1803)).
+
 ### 3 · Memory footprint (allocations counted, not sampled)
 
 A different instrument entirely. `bench_forward_heap` replaces the global allocator
 with a counting wrapper and **arms it around exactly one operation**, so these are
 *exact* allocation counts and byte totals — not statistics, not sampling. Bytes are
 read from `malloc_usable_size`, so a resident figure is what the allocator really
-holds rather than what the caller asked for; whole-run max RSS comes from
-`/usr/bin/time -v` and is the coarse process-level number beside them.
+holds rather than what the caller asked for; max RSS comes from
+`/usr/bin/time -v` and is the coarse process-level number beside them (since the sweep
+runs one process per family, it is the largest single family's peak).
 
 Two invariants sit on this surface, and **the scope of the armed window is part of the
 first one**. The steady-state forward hop's *own* work must touch no heap — the two-plane

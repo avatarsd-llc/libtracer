@@ -54,6 +54,7 @@
 #include <vector>
 
 #include "bench_common.hpp"
+#include "bench_process.hpp"
 #include "libtracer/fwd_frame_view.hpp"
 #include "libtracer/graph.hpp"
 #include "libtracer/tlv_emit.hpp"
@@ -443,8 +444,13 @@ std::uint64_t run_point(std::size_t links, std::size_t target_pos, const char* m
 
     // Sample until the budget is spent — the sample COUNT falls out of the host's speed
     // rather than being declared. Each sample is one amortized batch.
-    bench::Latency lat;
     const std::uint64_t deadline_ns = static_cast<std::uint64_t>(budget_seconds() * 1e9);
+    bench::Latency lat;
+    lat.reserve(bench::samples_for_budget(
+        [&] {
+            for (std::size_t i = 0; i < batch; ++i) hop();
+        },
+        deadline_ns));
     const std::uint64_t t0 = bench::now_ns();
     std::size_t batches = 0;
     std::uint64_t total = 0;
@@ -544,8 +550,13 @@ std::uint64_t run_point(std::size_t links, std::size_t target_pos, const char* m
     };
 
     const std::size_t batch = calibrate_batch(leg);
-    bench::Latency lat;
     const std::uint64_t deadline_ns = static_cast<std::uint64_t>(budget_seconds() * 1e9);
+    bench::Latency lat;
+    lat.reserve(bench::samples_for_budget(
+        [&] {
+            for (std::size_t i = 0; i < batch; ++i) leg();
+        },
+        deadline_ns));
     const std::uint64_t t0 = bench::now_ns();
     std::size_t batches = 0;
     std::uint64_t total = 0;
@@ -564,7 +575,8 @@ std::uint64_t run_point(std::size_t links, std::size_t target_pos, const char* m
 
 }  // namespace
 
-int main() {
+int main(int /*argc*/, char** argv) {
+    bench::pin_allocator_state(argv);  // fixed allocator state (#1803)
     std::vector<std::uint64_t> fixed;
     std::vector<std::uint64_t> scan;
 

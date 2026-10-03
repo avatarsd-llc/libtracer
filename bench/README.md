@@ -1678,6 +1678,30 @@ baseline ran every axis for minutes, both emitting well-formed rows under the sa
 `(mode, size, fan, ep)` keys for the harness to join on. A typo (`taget`) did the same.
 `bench/test_bench_cli.py` pins it.
 
+#### Process shape: one fresh process per family, fixed allocator state (#1803)
+
+The default sweep is no longer one process. It is a list of **families** (`kFamilies` in
+`bench_libtracer.cpp` — `inproc-fan`, `inproc-size`, …, `lkv`, `lkv-aged`), and the no-argument
+run starts each one as its own child process, `bench_libtracer --family <name>`, in the
+historical order, so the transcript keeps every row, ordinal and line shape. Every bench
+process — the driver, each family, an isolated mode such as the `lkv` ratio gate's, and
+`bench_compact_delivery` / `bench_forward_demux` — first re-executes itself under one fixed
+`GLIBC_TUNABLES` string (`bench_process.hpp`: mmap threshold 128 KiB, trim threshold 32 MiB,
+8 arenas), because glibc otherwise slides those thresholds while a run is in progress.
+
+Why: every row used to share one process heap, aged by every row ahead of it in a fixed order,
+so a row's value partly reflected its POSITION in the sweep. The 1 KiB regression appeared in
+the full sweep and not in isolation for exactly that reason. Now each family starts from the
+same empty heap whatever ran before it. A heap state that is wanted is built on purpose and
+named: the `lkv-*-heap` rows are the **fresh** variant and `lkv-*-heap-aged` the **aged** one.
+Every latency collector is also reserved and touched before its timed loop, so neither a
+vector growth nor its page faults land inside a sample.
+
+`LIBTRACER_BENCH_FAMILY_SEED=<n>` runs the families in a seeded shuffled order (printed on
+stderr as `FAMILY-ORDER`). It exists to check the isolation: a shuffled run must leave every row
+inside its A/A spread. `/usr/bin/time -v`'s max RSS is now the largest single family's peak, not
+the whole sweep's.
+
 What each in-process row publishes as its delivery figure is pinned the same way, by
 `bench/test_delivery_count` (`cmake --build build --target test_delivery_count`). It drives
 `delivery_count.hpp` against a path-target topology with one edge naming a vertex that was
@@ -1704,6 +1728,7 @@ craft libtracer":
 | `acl-inherit-d4` / `acl-inherit-d4-mt4` | ACL-gated reads with inheritance (ADR-0050 cached effective-ACE merge) at depth 4 — the uncontended gate cost, and the shared-ancestor contended case at 4 threads. |
 | `lkv-alloc-heap` / `lkv-alloc-pool` | **the segment allocation alone** — `backend.alloc` + `backend.destroy`, no payload moved. The ADR-0060 pooled-vs-heap ratio the `lkv` gate asserts, and a *null control* for the pair below: it shares their loop and their binary but never flattens, so an arm that moves while these stay at 1.00x is the flatten and not the host. |
 | `lkv-store-heap` / `lkv-store-pool` | **the rope-to-contiguous copy** — `rope_t::materialize` over a 2-link rope (backend alloc + payload `memcpy`), pooled backend vs the default heap. Gated points since [#1250](https://github.com/avatarsd-llc/libtracer/issues/1250). **The name is misleading and is kept anyway:** the "store" is the *copy-store allocation*, NOT the LKV slot — there is no `graph_t`, no vertex and no last-known-value publish in this loop. A rename would end the `gh-pages` history series keyed on these names (the `fold-n*` → `fold-b*` precedent below), so the meaning is documented instead. Read it as "`materialize` got slower", never as "the LKV store got slower" — #1250 was triaged the wrong way round for exactly that reason. |
+| `lkv-alloc-heap-aged` / `lkv-store-heap-aged` | the two `lkv-*-heap` operations again, on an **aged heap**: the `lkv-aged` family first fragments its process heap from a fixed seed (16384 blocks of 16–2063 B, every other one freed, the rest held live), then runs the same loops. The un-suffixed `lkv-*-heap` rows are the **fresh-heap** variant — they run first thing in their own process. Both heap states are chosen, not inherited from sweep order ([#1803](https://github.com/avatarsd-llc/libtracer/issues/1803)). No pool twin: the pool carves a static slab and never touches the heap. |
 | `mixed` | 128 topics, varied fan-out + payloads. |
 | `net` | two processes over real UDP (`run_net.sh`). |
 | `eptype-lean` | ep-type axis: minimal sink (see below). |

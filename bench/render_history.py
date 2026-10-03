@@ -404,8 +404,9 @@ FAMILIES: list[dict] = [
     dict(id="lkv", section="memory",
          title="LKV publish — pooled vs heap value backend",
          cond="lkv-{alloc,store}-{heap,pool} · fan-out 1 · 1 topic — `alloc` isolates the "
-              "value allocation, `store` the full publish",
-         pat=r"^lkv-(alloc|store)-(heap|pool) (\d+)B/fan1/1ep",
+              "value allocation, `store` the full publish; `heap` runs on a fresh heap, "
+              "`heap-aged` on a deliberately fragmented one (#1803)",
+         pat=r"^lkv-(alloc|store)-(heap-aged|heap|pool) (\d+)B/fan1/1ep",
          label=lambda m: f"{m.group(1)} {m.group(2)} {m.group(3)} B",
          key=lambda m: f"{m.group(1)} {m.group(2)} {int(m.group(3)):06d}", log=False,),
     dict(id="alloc-mt", section="memory",
