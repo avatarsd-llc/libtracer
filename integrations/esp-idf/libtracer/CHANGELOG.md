@@ -24,6 +24,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   splits a segment larger than this threshold into two blocks, to keep a 1 KiB value on glibc's
   tcache fast path. `multi_heap` has no such fast path, so the component keeps one block per
   heap segment, the layout v0.17.0 shipped. Nothing changes on a chip.
+- **The generated config fragment binds `kSizeClasses[] = {SIZE_MAX}` in place of
+  `kHeapSmallBlockBytes = SIZE_MAX`
+  ([#1775](https://github.com/avatarsd-llc/libtracer/issues/1775)).** Core replaced the split
+  threshold with a size-class table that its placement module reads; the table's last row is the
+  split point. One row of `SIZE_MAX` keeps one block per heap segment, as before. Nothing changes
+  on a chip. **Migration:** an application that replaces the fragment with its own renames
+  `kHeapSmallBlockBytes = N` to `kSizeClasses[] = {N}` there.
 
 ## [0.17.0] — 2026-10-01
 

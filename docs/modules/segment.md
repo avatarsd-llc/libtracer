@@ -64,7 +64,7 @@ threshold carries this many bytes in front of the frame, and the value stored fr
 that frame is placed in them. `view::alloc_rx` (below, with the other
 handle-producing conveniences) sets the segment's `rx_loan` bit.
 
-```{doxygenvariable} tr::view::kRxLoanBytes
+```{doxygenvariable} tr::mem::kRxLoanBytes
 :project: libtracer
 ```
 

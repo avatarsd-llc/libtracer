@@ -98,9 +98,9 @@ void test_alloc_rx_shape() {
     check(small.seg && small.off == 0 && small.seg->rx_loan == 0,
           "below the threshold: a plain block, the frame at offset 0");
     const tr::view::rx_block_t big = tr::view::alloc_rx(tr::mem::heap_backend(), kBig, kBig);
-    check(big.seg && big.off == tr::view::kRxLoanBytes && big.seg->rx_loan == 1,
+    check(big.seg && big.off == tr::mem::kRxLoanBytes && big.seg->rx_loan == 1,
           "at the threshold: the reserve in front, the block marked");
-    check(big.seg && big.seg->bytes.size() >= kBig + tr::view::kRxLoanBytes,
+    check(big.seg && big.seg->bytes.size() >= kBig + tr::mem::kRxLoanBytes,
           "the block holds the reserve plus the whole frame");
     const tr::view::rx_block_t never = tr::view::alloc_rx(tr::mem::heap_backend(), kBig, SIZE_MAX);
     check(never.seg && never.off == 0 && never.seg->rx_loan == 0,
@@ -123,7 +123,7 @@ void test_make_in_reserve() {
     check(v && v->is_loaned(), "the value is loaned");
     check(src.served() == 0, "the graph's source was not asked for the header");
     check(v && reinterpret_cast<const std::byte*>(v.get()) ==
-                   seg->bytes.data() + tr::view::kRxLoanValueOffset,
+                   seg->bytes.data() + tr::mem::kRxLoanValueOffset,
           "the header sits at the reserve's value offset");
     check(v && pattern_ok(*v, kLen), "the value reads the frame byte-exact");
     check(r.link_count() == 0, "the offered rope was consumed");

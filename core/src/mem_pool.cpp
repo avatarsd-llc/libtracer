@@ -6,7 +6,8 @@
 #include "libtracer/mem_pool.hpp"
 
 #include <cstring>
-#include <new>
+
+#include "libtracer/placement.hpp"
 
 namespace tr::mem {
 
@@ -17,10 +18,6 @@ namespace tr::mem {
 using view::segment_t;
 
 namespace {
-
-constexpr std::size_t align_up(std::size_t n, std::size_t a) noexcept {
-    return (n + a - 1) & ~(a - 1);
-}
 
 std::byte* align_ptr_up(std::byte* p, std::size_t a) noexcept {
     const auto v = reinterpret_cast<std::uintptr_t>(p);
@@ -36,15 +33,15 @@ pool_t::pool_t(std::span<std::byte> slab, std::size_t slot_payload, std::size_t 
     align_ = align;
 
     // The slot start must satisfy both the payload alignment and segment_t's own
-    // alignment (a segment_t is placement-constructed at each slot start).
-    const std::size_t a = align < alignof(segment_t) ? alignof(segment_t) : align;
-    std::byte* base = align_ptr_up(slab.data(), a);
+    // alignment (a segment_t is placement-constructed at each slot start). The header and the
+    // stride are the placement module's (`%placement.hpp`), like every backend's.
+    std::byte* base = align_ptr_up(slab.data(), segment_block_align(align));
     const std::size_t lost = static_cast<std::size_t>(base - slab.data());
     slab_ = (lost < slab.size()) ? std::span<std::byte>(base, slab.size() - lost)
                                  : std::span<std::byte>{};
 
-    header_ = align_up(sizeof(segment_t), a);
-    stride_ = align_up(header_ + slot_payload, a);
+    header_ = segment_header_bytes(align);
+    stride_ = segment_slot_bytes(slot_payload, align);
     slot_count_ = stride_ ? slab_.size() / stride_ : 0;
     free_count_ = slot_count_;
     free_head_ = slot_count_ ? 0 : kNil;
@@ -66,7 +63,7 @@ std::size_t pool_t::load_next(std::size_t slot) const noexcept {
 }
 
 void* pool_t::try_alloc(std::size_t bytes, std::size_t align) noexcept {
-    if (bytes > header_ + slot_payload_ || align > view::segment_block_align(align_) ||
+    if (bytes > header_ + slot_payload_ || align > segment_block_align(align_) ||
         free_head_ == kNil)
         return nullptr;
     const std::size_t idx = free_head_;
@@ -86,7 +83,7 @@ void pool_t::release(void* p, std::size_t /*bytes*/, std::size_t /*align*/) noex
 segment_t* pool_t::alloc(std::size_t size, alloc_hint_t /*hint*/) {
     if (size > slot_payload_) return nullptr;
     void* const block = pool_t::try_alloc(header_ + size, align_);
-    return block != nullptr ? view::place_segment(this, block, size, align_) : nullptr;
+    return block != nullptr ? place_segment(this, block, size, align_) : nullptr;
 }
 
 void pool_t::destroy(segment_t* seg) noexcept {

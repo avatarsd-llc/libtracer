@@ -31,8 +31,8 @@ PAGES = {
     "instrumentation.md": ["pin_instrument.hpp"],
     "segment.md": ["segment.hpp"],
     "backends.md": [
-        "backend.hpp", "mem_heap.hpp", "mem_borrowed.hpp", "mem_pool.hpp", "mem_source.hpp",
-        "mem_source_alloc.hpp", "mem_source_backend.hpp", "mem_source_pmr.hpp",
+        "backend.hpp", "placement.hpp", "mem_heap.hpp", "mem_borrowed.hpp", "mem_pool.hpp",
+        "mem_source.hpp", "mem_source_alloc.hpp", "mem_source_backend.hpp", "mem_source_pmr.hpp",
         "mem_source_sync.hpp", "mem_cuda.hpp",
     ],
     "views.md": ["view.hpp", "rope.hpp"],

@@ -1328,12 +1328,12 @@ target_link_libraries(mem_source_backend_test PRIVATE libtracer)
 libtracer_test_warnings(mem_source_backend_test)
 add_test(NAME mem_source_backend COMMAND mem_source_backend_test)
 
-# The process-default heap backend's request sizes (#1768): a counting allocator pins the
-# bytes each segment asks the host allocator for, either side of the small-block threshold.
-add_executable(mem_heap_request_size_test mem_heap_request_size_test.cpp)
-target_link_libraries(mem_heap_request_size_test PRIVATE libtracer)
-libtracer_test_warnings(mem_heap_request_size_test)
-add_test(NAME mem_heap_request_size COMMAND mem_heap_request_size_test)
+# The placement module's request sizes (#1768, #1775): a counting allocator and a counting
+# source pin the bytes each segment asks for, either side of every size-class boundary.
+add_executable(placement_request_size_test placement_request_size_test.cpp)
+target_link_libraries(placement_request_size_test PRIVATE libtracer)
+libtracer_test_warnings(placement_request_size_test)
+add_test(NAME placement_request_size COMMAND placement_request_size_test)
 
 # vertex_t verb interface — a BARE vertex (no graph_t): store/LKV, STREAM ring trim +
 # drain cursor, await wake, edge snapshot under concurrent add, ACL verbs.
