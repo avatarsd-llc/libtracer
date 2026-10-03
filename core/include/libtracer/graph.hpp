@@ -3094,12 +3094,16 @@ class graph_t {
      *         a STREAM vertex charges its ring admissions against when it has declared none of
      *         its own through @ref vertex_policy_t::ring_source.
      *
-     *         A default, not a shared pool by stealth. ADR-0079's amendment measured a FOLDED
-     *         source collapsing to 0.01x of its own single-thread rate at T=24, which is why
-     *         composition stays multiple knobs varied per target and why per-vertex isolation
-     *         is a tested property: a receiver that runs its own source dry must not affect a
-     *         receiver on another. This member exists so a vertex that declared nothing still
-     *         has somewhere to charge, and it defaults to the platform heap.
+     *         It IS the injected source: the constructor binds it to `ctl_`, so every
+     *         graph-level byte, ring admissions included, draws from the one store the host
+     *         passed (or the platform heap when it passed none). This fold is deliberate, per
+     *         the one-source ruling (#1581, 2026-09-29): there is no graph-level ring seam.
+     *         Divergence is per vertex, through @ref vertex_policy_t::ring_source (bound by
+     *         `vertex_t::set_ring_source`) — receiver-pays, so a receiver that must not be
+     *         affected by another's exhaustion brings its own source, and per-vertex
+     *         isolation stays a tested property. Separating whole planes is a
+     *         deployment-profile concern, not a constructor argument. The member exists so a
+     *         vertex that declared nothing still has somewhere to charge.
      *
      *         Declared beside `ctl_` for the reason that member documents — a cold pointer
      *         inserted mid-object shifts `root_` and every hot member after it. */
