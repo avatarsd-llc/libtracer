@@ -84,7 +84,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   producer task is never held behind it, and a peer that provokes a send per frame buys no
   ingress with it. A drain also ends when its in-call replies reach a quarter of lwIP's send
   buffer, and a session whose drain shows the flood shape (half the lwIP segment queue in
-  frames, back to back) is switched from `TCP_NODELAY` to Nagle for the flood, so its burst of
+  frames, back to back) is switched from `TCP_NODELAY` to Nagle until its next light drain, so its burst of
   replies cannot fill the segment queue while the unread ingress holds the peer's ACKs back; an
   interactive session never reaches that shape and keeps the no-delay path. New
   `stats_t::tx_send_failed` (also summed into `drop_stats().dropped_tx`)

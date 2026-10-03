@@ -365,9 +365,12 @@ constexpr std::uint32_t kIdfWsWriteLegs = 2;
  * one unsent segment until it fills or an ACK arrives, so a drain's replies cost one or two
  * segments, never the queue. It is wrong for the interactive case (a lone reply's payload
  * leg would wait a delayed-ACK behind its header leg), so it is applied only once a drain
- * has shown the flood shape, this many frames without the core idling, and lifted again
- * when a drain ends by idle before reaching it. The threshold is half the queue in frames:
- * what the drain wrote under TCP_NODELAY before switching can never fill it.
+ * has shown the flood shape, this many frames without the core idling, and held until the
+ * peer's next LIGHT drain, one that ends by idle before reaching it. A peer that flooded
+ * once and then only receives never produces that drain and keeps paying one delayed ACK
+ * per push burst until it sends lightly again or reconnects. The threshold is half the
+ * queue in frames: what the drain wrote under TCP_NODELAY before switching can never fill
+ * it.
  */
 constexpr std::size_t kRxDrainNagleFrames = kTcpSndQueueLen / (2 * kIdfWsWriteLegs);
 
@@ -381,6 +384,12 @@ constexpr std::size_t kRxDrainNagleFrames = kTcpSndQueueLen / (2 * kIdfWsWriteLe
  * of @ref kTcpSndBuf keeps that total under half of it, and a reply write never waits for
  * send-buffer space the writer itself is withholding. Frames with small replies never
  * reach it; a drain of large replies ends sooner and parks more often: the receiver pays.
+ *
+ * In-call replies only. Pushes posted by other tasks and sent from inside the park
+ * (@ref send_posted_in_park) are outside this bound: one pool depth of them can go out
+ * while the peer's ACKs are withheld, and four pushes of 1.5 KiB or more exceed
+ * @ref kTcpSndBuf, which ends in a counted `tx_send_failed` or a condemned session. A
+ * single in-call reply larger than the send buffer has the same caveat (pre-existing).
  */
 constexpr std::size_t kRxDrainTxBytes = kTcpSndBuf / 4;
 

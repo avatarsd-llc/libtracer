@@ -1422,7 +1422,7 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *
      * The drain also ends when the in-call replies it wrote reach a quarter of lwIP's send
      * buffer, and once it has read `kRxDrainNagleFrames` frames back to back the session's
-     * socket @p fd is switched to Nagle for the rest of the flood (ADR-0085 §7): while
+     * socket @p fd is switched to Nagle until its next light drain (ADR-0085 §7): while
      * this task holds unread ingress, lwIP drops the peer's data-bearing segments and the
      * ACKs they carry, so a burst of two-segment replies under TCP_NODELAY would fill the
      * segment queue and the reply write would wait for an ACK only this task can release.

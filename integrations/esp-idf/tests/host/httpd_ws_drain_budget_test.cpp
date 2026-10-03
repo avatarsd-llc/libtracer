@@ -454,6 +454,33 @@ void test_flood_shape_switches_the_session_to_nagle() {
     (void)fake_httpd::instance().deliver_frame(808, std::span<const std::byte>(body));
     check(nodelay_changes(808) == std::vector<int>{1, 0, 1},
           "once a drain ends light, the next one gives the session TCP_NODELAY back");
+
+    // Flood once more, then close and re-accept on the same descriptor while it is on Nagle:
+    // the Nagle socket is gone with its session, the new session starts on TCP_NODELAY from
+    // bound_socket, and the forgotten socket never flips the new one back.
+    ingress_t in3(808, kBudget + 1, 8);
+    check(wait_until([&] {
+              return fake_httpd::semaphore_waiters() == 1 &&
+                     nodelay_changes(808) == std::vector<int>{1, 0, 1, 0};
+          }),
+          "the third flood parked with the session on Nagle again");
+    (void)fake_httpd::run_idle_hooks();
+    check(wait_until([&] { return in3.delivered() == kBudget + 1; }), "the third flood finished");
+    fake_httpd::instance().close_session(808);
+    (void)fake_httpd::instance().run_pending();
+    check(fake_httpd::instance().open_session(808), "re-accepted on the reused descriptor");
+    check(nodelay_changes(808) == std::vector<int>{1, 0, 1, 0},
+          "nothing is set before the new session is claimed");
+    // Without an auth hook the claim edge is the first frame (on_data_frame), and
+    // bound_socket runs there, once per session.
+    (void)fake_httpd::run_idle_hooks();
+    (void)fake_httpd::instance().deliver_frame(808, std::span<const std::byte>(body));
+    check(nodelay_changes(808) == std::vector<int>{1, 0, 1, 0, 1},
+          "the new session on the reused fd starts with TCP_NODELAY at its claim");
+    (void)fake_httpd::run_idle_hooks();
+    (void)fake_httpd::instance().deliver_frame(808, std::span<const std::byte>(body));
+    check(nodelay_changes(808) == std::vector<int>{1, 0, 1, 0, 1},
+          "and a light drain after it changes nothing: the closed Nagle socket was forgotten");
     finish(std::move(link));
 }
 
