@@ -574,6 +574,40 @@ void test_each_routed_subscription_is_one_hold() {
 }
 
 /**
+ * @brief #1816 — retiring the PRODUCER drops its routed edges, and each gives its hold back:
+ *        the link re-dormants (RFC-0014 §4.1 MUST 3) and nothing dials again.
+ */
+void test_retiring_the_producer_releases_its_holds() {
+    std::printf("#1816: retiring the producer gives its routed subscriptions' holds back:\n");
+    dial_script_t script;  // outlives `net`: the engine's factory copy holds its address
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    declare_fake_engine_module(net, script);
+    const script_guard_t guard{script};  // bounded teardown even on a failing test
+    (void)node.write(path_t("/net/fake-client/conn"), fake_spec("a", /*backoff_ms=*/1));
+    (void)node.register_vertex(path_t("/sensor"), tr::graph::role_t::STORED_VALUE);
+    const auto sensor = node.find(path_t::parse("/sensor")->key());
+    check(sensor.has_value(), "the producer registers");
+
+    check(router.subscribe_toward(path_t("/sensor"), path_t("/net/fake-client/a/x")).has_value(),
+          "first routed subscription");
+    check(router.subscribe_toward(path_t("/sensor"), path_t("/net/fake-client/a/y")).has_value(),
+          "second routed subscription");
+    check(script.await_attempts(1), "the subscriptions kicked the dial");
+    script.script(true);
+    check(await_state(node, "/net/fake-client/a", link_state_t::UP), "the link comes UP");
+
+    check(sensor.has_value() && node.retire(*sensor).has_value(), "the producer retires");
+    check(await_state(node, "/net/fake-client/a", link_state_t::DORMANT),
+          "both dropped edges gave their holds back — the link re-dormants");
+    {
+        const std::lock_guard l(script.m);
+        check(script.attempts == 1, "nothing dials after the producer is gone");
+    }
+}
+
+/**
  * @brief The FLIP itself (#1548): the BUILT-IN `tcp` kind, end to end through the engine —
  *        a real socket, a real listener, a real remote hangup, a real heal.
  *
@@ -803,6 +837,7 @@ int main() {
     test_remove_while_healing_tears_down();
     test_routed_subscription_holds_the_link();
     test_each_routed_subscription_is_one_hold();
+    test_retiring_the_producer_releases_its_holds();
     test_builtin_tcp_kind_runs_through_the_engine();
     test_conformance_vectors();
     return tr::testing::summary("link_liveness");

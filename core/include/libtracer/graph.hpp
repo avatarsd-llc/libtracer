@@ -2738,7 +2738,11 @@ class graph_t {
     // Report @p n routed edges over `link` established or torn down through the
     // `link_hold` seam (#1816). An empty `link` — a local edge, a field-write edge, or no
     // edge at all — reports nothing. Called with NO graph lock held.
-    void hold_link(std::string_view link, bool held, std::size_t n = 1) const;
+    // Out of line and cold on purpose: it runs on subscribe and teardown only, and letting it
+    // inline at its six call sites re-partitioned this TU's budget onto the fan-out copy
+    // loop (`vertex_t::copy_published` +277 B on the symbol ratchet).
+    [[gnu::noinline, gnu::cold]] void hold_link(std::string_view link, bool held,
+                                                std::size_t n = 1) const;
     // True iff a subscription event is worth building at all — an installed observer AND an
     // external (non-empty) caller context. Guards the pre-reads the observer needs (the
     // displaced slot's stored SUBSCRIBER on a replace/clear) so an app that installs nothing
@@ -2834,7 +2838,8 @@ class graph_t {
     // @p keys for the caller's sweep-set cleanup, and parks each detached value-seam block
     // into @ref retired_seams_. Call with map_mutex_ held UNIQUE (it flips registered_ and
     // appends to retired_seams_, both map-lock-guarded).
-    void retire_subtree(vertex_t* v, std::vector<std::vector<std::byte>>& keys);
+    void retire_subtree(vertex_t* v, std::vector<std::vector<std::byte>>& keys,
+                        std::vector<remote_ptr_t>& routed);
 
     // Value-seam blocks detached by retirement (RFC-0009 §B.6). A seam is read lock-free,
     // so a swapped-out block cannot be freed while a reader might still hold the old

@@ -2266,9 +2266,12 @@ class vertex_t {
      *       the old pointer, so the graph parks it and the embedder frees the park through
      *       `graph_t::collect()` (#576). The per-vertex stripe lock is taken internally.
      *
+     * @param routed Receives the cold half of every active edge ROUTED through a link (a
+     *        non-empty delivery link) that the clear drops, so the graph can give each one's
+     *        link hold back once its locks are released (#1816).
      * @return the detached seam block to park, or nullptr if this vertex had none.
      */
-    [[nodiscard]] value_handlers_t* revert_to_placeholder() {
+    [[nodiscard]] value_handlers_t* revert_to_placeholder(std::vector<remote_ptr_t>& routed) {
         // Atomics first — no lock needed, and clearing own ACEs before anything else is
         // fail-closed: the graph's bearing-ancestor walk (the OWN_ACES bit) skips this vertex
         // immediately, so a concurrent gated op on a descendant stops seeing the retired
@@ -2346,16 +2349,22 @@ class vertex_t {
         // the ext block may be absent). The graph has already adjusted descendant
         // listeners_above_ for these edges before calling us. Publishing the EMPTY array
         // allocates nothing, so retirement can never fail to stop delivering.
+        // The slots are SWAPPED out rather than cleared in place, so the routed ones can be
+        // sorted from the rest after the stripe lock is down — nothing allocates under it.
         edge_block_t* b = nullptr;
+        std::vector<subscriber_t> gone;
         {
             const std::lock_guard lock(vertex_stripe_of(this).m);
             b = edges_locked();
             if (b != nullptr) {
-                b->slots.clear();
+                gone.swap(b->slots);
                 (void)try_publish_edges(*b);  // slots are empty ⇒ publishes null, cannot fail
             }
         }
         if (b != nullptr) scan_retired_edges(*b);
+        for (subscriber_t& e : gone)
+            if (e.active && e.remote != nullptr && !e.remote->link.empty())
+                routed.push_back(std::move(e.remote));
         return detached;
     }
 

@@ -1200,7 +1200,9 @@ bool fwd_router_t::remove_child(std::string_view name) {
     // The eviction runs with `ctl_m_` RELEASED, as it does from every other door (a
     // transport's down-notifier calls `link_down` holding nothing). It gives back each
     // evicted edge's link hold, and that call takes `transport_vertex_t`'s control lock,
-    // which the declared order puts ABOVE this one (#1816).
+    // which the declared order puts ABOVE this one (#1816). The cost: a direct embedder that
+    // races `add_child(name)` against this call can see the departing eviction reach the
+    // re-added child's edges. `transport_vertex_t` serializes both under its `ops_m_`.
     {
         const std::lock_guard ctl(ctl_m_);  // pairs with add_child (ADR-0063 §3)
         if (!registry_.erase(name)) return false;

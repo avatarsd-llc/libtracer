@@ -218,9 +218,12 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   and an `await` takes no standing hold. **New public surface:** `graph::link_hold_fn_t` and
   `graph_hooks_t::link_hold`, the seam the `transport_vertex_t` constructor installs (it is
   not installed when `kSelfHealLinks = false`); `transport_vertex_t` gains a destructor that
-  uninstalls it. `fwd_router_t::remove_child` now runs its departure eviction after releasing
-  the router's control lock, because that eviction gives the holds back through
-  `transport_vertex_t`, whose lock sits above the router's. **Migration:** an embedder that
+  uninstalls it. `vertex_t::evict_link_edges` takes a second argument, a `std::size_t&` it
+  adds the evicted routed-edge count to, so a direct caller of the one-argument form must
+  pass one. Retiring a producer gives back the holds of the routed edges it drops.
+  `fwd_router_t::remove_child` now runs its departure eviction after releasing the router's
+  control lock, because that eviction gives the holds back through `transport_vertex_t`,
+  whose lock sits above the router's. **Migration:** an embedder that
   drove `acquire_link` / `release_link` by hand for its own subscriptions should stop, or the
   link is held twice and stays up after its subscriptions are gone. A binding the graph does
   not see can still drive the seam directly.

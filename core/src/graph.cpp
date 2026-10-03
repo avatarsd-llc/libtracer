@@ -1015,7 +1015,8 @@ std::span<const std::byte> graph_t::declared_catalog(const vertex_t* v) const no
     return {};
 }
 
-void graph_t::retire_subtree(vertex_t* v, std::vector<std::vector<std::byte>>& keys) {
+void graph_t::retire_subtree(vertex_t* v, std::vector<std::vector<std::byte>>& keys,
+                             std::vector<remote_ptr_t>& routed) {
     // Pre-order, under the UNIQUE map lock. Order within a vertex matters:
     //  (1) read its active-edge count and unwind exactly that contribution from every
     //      descendant's listeners_above_ BEFORE revert zeroes own_subs_ — the mirror of
@@ -1036,7 +1037,7 @@ void graph_t::retire_subtree(vertex_t* v, std::vector<std::vector<std::byte>>& k
     // tree's SHAPE, so it honours for_each_descendant's no-structural-mutation contract -- the
     // walk re-reads the sibling list on each ascent and an insert or erase mid-walk would move
     // the position it resumes from.
-    const auto retire_one = [this, &keys](vertex_t& x) {
+    const auto retire_one = [this, &keys, &routed](vertex_t& x) {
         const std::uint32_t k = x.own_subs();
         if (k > 0) bump_subtree_listeners(&x, -static_cast<std::int32_t>(k));
         keys.push_back(build_key(&x));
@@ -1046,7 +1047,8 @@ void graph_t::retire_subtree(vertex_t* v, std::vector<std::vector<std::byte>>& k
         // which the embedder calls at a moment it knows no reader holds a seam (#576); the
         // graph's own teardown is a growth backstop only — retired_seams_ destructs LAST, so
         // a seam that re-enters the graph must be collected explicitly. Under map_mutex_.
-        if (value_handlers_t* seam = x.revert_to_placeholder()) retired_seams_.emplace_back(seam);
+        if (value_handlers_t* seam = x.revert_to_placeholder(routed))
+            retired_seams_.emplace_back(seam);
         x.mark_unregistered();
     };
     retire_one(*v);
@@ -1267,12 +1269,16 @@ result_t<void> graph_t::retire(vertex_handle_t vh) {
         return std::unexpected(status_t::INVALID_PATH);
 
     std::vector<std::vector<std::byte>> retired_keys;
+    std::vector<remote_ptr_t> routed;  // the routed edges the retirement dropped (#1816)
     {
         const std::unique_lock lock(map_mutex_);
         // Idempotent (§B.4): an already-retired / never-filled placeholder is a no-op.
         if (!root->registered()) return {};
-        retire_subtree(root, retired_keys);
+        retire_subtree(root, retired_keys, routed);
     }
+    // Each dropped routed edge gives its link hold back, outside every graph lock: an edge
+    // is reported exactly twice over its life, and retirement is one of its ends (#1816).
+    for (const remote_ptr_t& r : routed) hold_link(delivery_link(r), false);
     // Drop the retired vertices from the sweep sets — AFTER releasing the map lock, so no
     // map⊃sweep nesting is introduced. A stale entry would otherwise (a) leak, and worse
     // (b) silently re-enroll a revived vertex into UNCONDITIONAL sweeping through the
@@ -3262,6 +3268,10 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
         link_index_.index_vertex(s.remote->link.empty() ? s.remote->caller : s.remote->link,
                                  link_token, v);
     note_subscriber_added(v);  // RFC-0005: descendants' writes now bubble here
+    // The hold is taken BEFORE the edge can be seen, for the reason the index entry above is:
+    // a departure that evicts the edge the instant it lands gives the hold back, and must
+    // find one to give. The failure returns below hand it back themselves (#1816).
+    hold_link(delivery_link(admitted), true);
     if (slot) {
         // RFC-0009 §D.1 replace: the SAME door, so the SUBSCRIBE gate above and the latch
         // below apply identically to a replace and to an append (ADR-0049). An index no
@@ -3274,8 +3284,10 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
         // the right side to pay on: over-counting only ever buys a snapshot that finds
         // nothing, while under-counting drops a delivery.
         if (r != vertex_t::edge_replace_t::FILLED_EMPTY) note_subscriber_removed(v);
-        if (r == vertex_t::edge_replace_t::OUT_OF_RANGE)
+        if (r == vertex_t::edge_replace_t::OUT_OF_RANGE) {
+            hold_link(delivery_link(admitted), false);
             return std::unexpected(status_t::INVALID_PATH);
+        }
         // A replace that displaced a LIVE edge is two events, in causal order: the old
         // subscription ended and a new one began. Reporting only the ADDED would leave an
         // observer's inventory holding an edge that no longer exists.
@@ -3291,6 +3303,7 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
         // status (ADR-0060 §3), the same one the store leg answers on exhaustion.
         if (idx == vertex_t::kNoSlot) {
             note_subscriber_removed(v);
+            hold_link(delivery_link(admitted), false);
             return std::unexpected(status_t::BACKPRESSURE);
         }
     }
@@ -3308,9 +3321,8 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
     // note_subscriber_added released the map lock — and the durability latch has already been
     // dispatched, so the observer never runs interleaved with this subscription's own replay.
     notify_subscription(sub_event_t::kind_t::ADDED, v, caller, admitted_tlv, idx);
-    // Taken before the displaced edge's hold is given back, so a replace over the same link
-    // never lets the count touch zero between the two (#1816).
-    hold_link(delivery_link(admitted), true);
+    // The admitted edge's hold was taken before the slot verb, so a replace over the same
+    // link never lets the count touch zero between the two (#1816).
     hold_link(delivery_link(displaced), false);
     return subscription_t{v, idx};
 }
