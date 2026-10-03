@@ -1046,3 +1046,18 @@ setting that no longer exists. §11's ruling 1 stays as the record of what was r
 2026-09-29.
 
 **What did not change.** No wire surface, no other normative statement, and no number in §§2–11.
+
+## Erratum (2026-10-03): the WebSocket client links take `link_memory_t`
+
+**What the text says.** §6.10's "As landed" notes say `socketcan_transport_t` and
+`esp_ws_client_link_t` take no `link_memory_t`, because neither draws its buffers from an
+injected seam.
+
+**What is true.** [#1661](https://github.com/avatarsd-llc/libtracer/issues/1661) gives
+`esp_ws_client_config_t` a `link_memory_t` member in the server link's shape. A named `rx`
+source makes delivery owning, drawn through `alloc_rx` with the §6.9 reserve. `io` backs the
+send side: the masked-frame scratch and the queue slots. The host `transport_ws_client` already
+took `link_memory_t`, and its queue slots now draw from `io` too. `socketcan_transport_t` still
+takes none, because its frames are fixed-size.
+
+**What did not change.** No wire surface, no other normative statement, and no number in §§2–11.

@@ -89,6 +89,16 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   through `vertex_policy_t::ring_source`. The member doc no longer claims a separate
   platform-heap default.
 
+- **`transport_ws_client`'s enqueue-then-write queue draws its slots from `memory.io`
+  ([#1661](https://github.com/avatarsd-llc/libtracer/issues/1661)).** A client frame is masked
+  in place, so every queued record is the link's own copy. Those slots used to come from the
+  process heap whatever the application injected; they now come from the same egress store as
+  the masked-frame scratch and the gather temporary (`ws_client_config_t::memory.io`, null
+  meaning the process heap). A bounded store therefore bounds the queue too: a record the
+  store cannot hold is refused and counted on `dropped_tx()`, never taken from the heap.
+  `stream_endpoint_t` gains a constructor that takes the slot source. **Migration:** an
+  application that injects a tight `memory.io` sizes it for the queue as well, up to eight
+  records behind the one in flight.
 - **`vertex_handle_t`, `vertex_slot_t`, `kGenerationSaturated`, `saturating_next_generation` and
   `bound_generation_matches` move to the new leaf header `libtracer/vertex_handle.hpp`
   ([#1707](https://github.com/avatarsd-llc/libtracer/issues/1707)).** The leaf includes no graph
