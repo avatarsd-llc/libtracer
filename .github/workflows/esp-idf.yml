@@ -152,7 +152,11 @@ jobs:
           path: rv32-footprint.json
           if-no-files-found: ignore
 
-  build:
+  # Job id is `esp-build`, not `build` (#1614): the required check `build` must have
+  # exactly ONE producer (docs.yml's aggregator), and a skipped matrix job reports
+  # under its bare job name — a `build` here, skipped on a srcs-drift failure, would be
+  # a "passing" required check that built nothing.
+  esp-build:
     needs: srcs-drift
     runs-on: ubuntu-24.04
     # Measured worst leg 6.07 min (esp32c6, p50 5.83); the other three targets 3.5-3.7.

@@ -48,8 +48,9 @@ can run on yourself before asking for review.
 Three things about that label are not guessable from its name:
 
 - **It does not mean your PR is mergeable.** The branch ruleset decides that
-  from named required checks, and some of those are path-filtered and never
-  report on a docs-only diff. The label says "CI finished and nothing is red",
+  from named required checks, and a required check served only by a
+  path-filtered workflow never reports on a diff outside its paths. The label
+  says "CI finished and nothing is red",
   which is a question worth answering separately.
 - **Removing it and adding it back is the re-review button.** That is the
   supported way to ask for another pass against your current head. It is not

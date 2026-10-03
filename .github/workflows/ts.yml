@@ -13,6 +13,13 @@
 # esp-idf.yml): the required core gates (build-test / sanitizers / tsan / format /
 # doxygen) must never depend on a Node toolchain. It is path-filtered to the
 # TypeScript workspace, so it only runs when those packages (or this file) change.
+#
+# The job is `ts-build-test`, NOT `build-test` (#1614). The required check named
+# `build-test` is core-ci's always-reporting aggregator; while this job shared the
+# name, one required check meant different things depending on which workflow fired,
+# and on a pull request that fired neither it never reported at all. Being
+# path-filtered, this job must stay out of the required set — a required check that
+# is never queued blocks the pull request forever.
 name: ts
 
 on:
@@ -28,7 +35,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-test:
+  ts-build-test:
     runs-on: ubuntu-24.04
     # Measured max 0.50 min, p50 0.40. 15 = the short-job floor (30x observed): the job
     # runs `npm ci` TWICE — the workspace install plus a clean throwaway install in the

@@ -140,34 +140,98 @@
 # into any number below.
 name: core-ci
 
+# ── ALWAYS TRIGGERED, GATED BY A `changes` JOB (#1614) ──────────────────────────────
+# core-ci owns the REQUIRED check `build-test`. It used to be path-filtered at the
+# trigger (`on: paths:`), and a required check from a workflow that is never queued
+# never REPORTS: a docs-only pull request matched no pattern, `build-test` stayed
+# pending forever and the pull request was BLOCKED with nothing to fix. A skipped job
+# counts as passing; a check that never reports does not.
+#
+# So the workflow triggers on every change, and the path decision moved one level
+# down: the `changes` job matches the diff against CORE_CI_PATHS (derived by
+# tools/gen_ci_paths.py, checked by the `ci-paths` job — the same list the trigger
+# used to carry) and every job below runs only when something matched. The final
+# `build-test-required` job, NAMED `build-test`, is the required check: it always runs
+# and turns the `needs` results into one verdict (see that job). Run and skip come
+# from the one derived list, so there is no hand-kept complement that could drift into
+# a green check on a diff that should have been built.
 on:
   push:
     branches: [main]
-    # DERIVED by tools/gen_ci_paths.py -- do not hand-edit: this list is what
-    # core-ci's jobs configure and compile. `gen_ci_paths.py --apply` rewrites it.
-    paths:
-      - "bench/**"
-      - "core/**"
-      - "integrations/esp-idf/libtracer/**"
-      - "integrations/esp-idf/tests/host/**"
-      - "tests/conformance/vectors/v1/**"
-      - "tests/packaging/**"
-      - ".github/workflows/core-ci.yml"
   pull_request:
-    # DERIVED by tools/gen_ci_paths.py -- do not hand-edit: this list is what
-    # core-ci's jobs configure and compile. `gen_ci_paths.py --apply` rewrites it.
-    paths:
-      - "bench/**"
-      - "core/**"
-      - "integrations/esp-idf/libtracer/**"
-      - "integrations/esp-idf/tests/host/**"
-      - "tests/conformance/vectors/v1/**"
-      - "tests/packaging/**"
-      - ".github/workflows/core-ci.yml"
   workflow_dispatch:
 
 jobs:
+  # Decides whether this change can affect anything core-ci builds. GitHub-hosted on
+  # purpose: it executes no build and must never wait on the self-hosted pool, and a
+  # fork PR running it touches nothing but a throwaway VM.
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      # DERIVED by tools/gen_ci_paths.py -- do not hand-edit: this list is what
+      # core-ci's jobs read and build. `gen_ci_paths.py --apply` rewrites it.
+      CORE_CI_PATHS: |
+        bench/**
+        core/**
+        integrations/esp-idf/libtracer/**
+        integrations/esp-idf/tests/host/**
+        tests/conformance/vectors/v1/**
+        tests/packaging/**
+        .github/workflows/core-ci.yml
+    outputs:
+      relevant: ${{ steps.decide.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # A pull_request checkout is the merge commit: HEAD^1 is the base tip it was
+          # merged onto, so HEAD^1..HEAD is exactly what the PR changes.
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Match the diff against CORE_CI_PATHS
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        # Every uncertain branch answers `true` (run everything): a needless build costs
+        # minutes, a wrong skip is a green required check on code nobody built. The
+        # patterns are only `<dir>/**` and exact paths, and bash's `[[ == ]]` lets `*`
+        # cross `/`, so a match here is never narrower than GitHub's own glob.
+        run: |
+          set -euo pipefail
+          relevant=true
+          changed="$RUNNER_TEMP/changed"
+          if [ "$EVENT" = "pull_request" ] && git rev-parse -q --verify HEAD^2 >/dev/null; then
+            git diff --name-only -z HEAD^1 HEAD > "$changed"
+            relevant=false
+          elif [ "$EVENT" = "push" ] && [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] \
+              && git fetch -q --no-tags --depth=1 "$REPO_URL" "$BEFORE"; then
+            git diff --name-only -z "$BEFORE" HEAD > "$changed"
+            relevant=false
+          fi
+          if [ "$relevant" = false ]; then
+            mapfile -t patterns <<< "$CORE_CI_PATHS"
+            while IFS= read -r -d '' file; do
+              for pat in "${patterns[@]}"; do
+                [ -n "$pat" ] || continue
+                # shellcheck disable=SC2053  # $pat is a glob on purpose
+                if [[ "$file" == $pat ]]; then
+                  echo "match: $file  (pattern $pat)"
+                  relevant=true
+                  break 2
+                fi
+              done
+            done < "$changed"
+            [ "$relevant" = true ] || echo "no changed path matches CORE_CI_PATHS; core-ci's jobs are skipped"
+          else
+            echo "event '$EVENT' has no comparable base; running everything"
+          fi
+          echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
+          echo "relevant=$relevant"
   build-test:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -263,6 +327,8 @@ jobs:
   # unconditional while the library sources were gated. This leg is the evidence: same
   # sources, the minimal option set, BUILD_TESTING=ON, and the reduced ctest suite run.
   build-test-minimal-set:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -335,6 +401,8 @@ jobs:
   # configuration member does not get a CMake variable, it is set in `config_override.hpp` as
   # plain C++. Three lines that inherit the defaults, so it cannot drift from them.
   build-test-reclaim-strict:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -444,6 +512,8 @@ jobs:
   # follows the binding by `if constexpr` and runs in BOTH legs, asserting here that the tier
   # is absent AND that every door which could ask for it refuses rather than degrading.
   build-test-bus-closed:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -543,6 +613,8 @@ jobs:
   # of the FULL test configuration rather than a second lean build. Without this leg the OFF
   # path is never compiled under the test suite and the knob rots.
   build-test-self-heal-closed:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -642,6 +714,8 @@ jobs:
         run: chown -R "$(stat -c '%u:%g' ..)" . "$RUNNER_TEMP"
 
   build-test-reclaim-qsbr:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -750,6 +824,8 @@ jobs:
   # precisely to run somewhere x86-64's TSO model does not hide the defect. Hosted,
   # permanently.
   build-test-arm64:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-24.04-arm
     # Measured healthy max 4.92 min. 20 = ~4x. No container and no apt step here, but the
     # number is kept equal to the rest of the build-test group so one review covers them.
@@ -790,6 +866,8 @@ jobs:
   # FNV-1a 64-bit-constant overflow on 32-bit size_t GCC 15 newly -Werror's).
   # GCC 15 is not in ubuntu-24.04's default repos; the toolchain test PPA carries it.
   build-test-gcc15:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -878,6 +956,8 @@ jobs:
   # job would assume a host toolchain these runners are not asserted to carry. Routing
   # it needs a runner-side `--security-opt seccomp=unconfined` decision first.
   sanitizers:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-24.04
     # Measured healthy max 7.98 min, p50 7.4-7.6, min 7.33 — a very tight distribution.
     # 25 = ~3.1x the observed max; ASan/UBSan runtime here is stable.
@@ -921,6 +1001,8 @@ jobs:
 
   # NOT routed to `ci-local` (phase 2) — same `setarch -R` seccomp bar as `sanitizers`.
   tsan:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-24.04
     # The longest core-ci jobs and legitimately the most variable: measured healthy max
     # 12.27 min (sp_atomic) / 8.22 (hazard) against a p50 of 6.5, and 15.67 on the
@@ -969,6 +1051,8 @@ jobs:
   # announce paired against the retiring thread's epoch RMW — a Dekker shape), and it must run at
   # BOTH lkv_slot bindings because `hazard_slot_t` is the leg that exercises #897's self-drain.
   tsan-reclaim-qsbr:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-24.04
     strategy:
       matrix:
@@ -1036,6 +1120,8 @@ jobs:
   # Catches broken install rules, a malformed package config, or a missing exported
   # target before they reach a consumer.
   install-consume:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -1111,6 +1197,8 @@ jobs:
   # is a COMPILE gate, so it costs one build and cannot be confounded by a runner's
   # load. Ablate it by reverting any bench to a deleted API — the job goes red.
   bench-compile:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -1185,6 +1273,8 @@ jobs:
   # `counting_source_t::try_alloc` back at `tr::mem::heap_source()`: the job goes red on
   # `census_canary_seam_only ... verdict=FAIL`.
   census-gate:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -1255,7 +1345,8 @@ jobs:
         if: always()
         run: chown -R "$(stat -c '%u:%g' ..)" . "$RUNNER_TEMP"
 
-  # This workflow's own `paths:` trigger, gated against what its jobs actually build
+  # This workflow's own CORE_CI_PATHS gate (the `changes` job; it was the `paths:` trigger
+  # until #1614), checked against what its jobs actually build
   # (#1082). The list used to be hand-written — `core/**`, `bench/**`,
   # `tests/packaging/**` — while ctest targets defined in core/tests/CMakeLists.txt
   # compile ESP-IDF sources out of `integrations/esp-idf/` and read the conformance
@@ -1265,10 +1356,12 @@ jobs:
   # core project (CMake file-api: target sources, include directories, path-valued
   # compile definitions, ctest properties) plus every `cmake -S <dir>` this file runs,
   # and fails here on any drift. Making a suite compile a new tree means editing a
-  # CMakeLists under `core/**`, which is always in the trigger, so this check runs on
-  # exactly the changes that can invalidate it. Ablate it by deleting a `paths:` entry
+  # CMakeLists under `core/**`, which is always in the list, so this check runs on
+  # exactly the changes that can invalidate it. Ablate it by deleting a CORE_CI_PATHS entry
   # — the job goes red naming that entry.
   ci-paths:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -1285,7 +1378,7 @@ jobs:
           # See the WORKSPACE OWNERSHIP header: without this, checkout's post step
           # re-roots `.git/config` after the cleanup step has already run.
           persist-credentials: false
-      - name: core-ci's paths trigger covers everything core-ci builds
+      - name: core-ci's CORE_CI_PATHS gate covers everything core-ci builds
         run: python3 tools/gen_ci_paths.py --check
       # An unverified gate is not a gate: the parser runs over synthetic workflows in
       # both arms first, so a parser bug reports as a parser bug rather than as a
@@ -1315,6 +1408,8 @@ jobs:
         run: chown -R "$(stat -c '%u:%g' ..)" . "$RUNNER_TEMP"
 
   format:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -1354,6 +1449,8 @@ jobs:
         run: chown -R "$(stat -c '%u:%g' ..)" . "$RUNNER_TEMP"
 
   doxygen-gate:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","ci-local"]') || 'ubuntu-24.04' }}
     container:
       image: ghcr.io/avatarsd-llc/libtracer-ci:noble-7ca1b7c862e8
@@ -1384,3 +1481,37 @@ jobs:
         # END with this exact step.
         if: always()
         run: chown -R "$(stat -c '%u:%g' ..)" . "$RUNNER_TEMP"
+
+  # THE REQUIRED CHECK (#1614). Branch protection requires a check named `build-test`,
+  # and this is the one job that always reports it. It needs every job in this file:
+  #   * `changes` must have succeeded — no verdict without a decision;
+  #   * relevant change: every job must be `success` (a skip here is a bug, not a pass);
+  #   * no relevant change: every job must be `skipped`.
+  # Anything else (failure, cancelled, an unexpected skip or run) is red. Hosted, like
+  # `changes`: it builds nothing and reads only the `needs` context.
+  build-test-required:
+    name: build-test
+    if: always()
+    needs: [changes, build-test, build-test-minimal-set, build-test-reclaim-strict, build-test-bus-closed, build-test-self-heal-closed, build-test-reclaim-qsbr, build-test-arm64, build-test-gcc15, sanitizers, tsan, tsan-reclaim-qsbr, install-consume, bench-compile, census-gate, ci-paths, format, doxygen-gate]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Combine the core-ci job results into one verdict
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          RELEVANT: ${{ needs.changes.outputs.relevant }}
+        run: |
+          set -euo pipefail
+          changes="$(jq -r '.changes.result' <<< "$NEEDS")"
+          if [ "$changes" != "success" ]; then
+            echo "::error::the changes job ended '$changes'; there is no decision to report"
+            exit 1
+          fi
+          if [ "$RELEVANT" = "true" ]; then want=success; else want=skipped; fi
+          echo "relevant=$RELEVANT, so every job must be '$want'"
+          bad="$(jq -r --arg want "$want" 'to_entries[] | select(.key != "changes" and .value.result != $want) | "\(.key)=\(.value.result)"' <<< "$NEEDS")"
+          if [ -n "$bad" ]; then
+            echo "::error::core-ci jobs not '$want': $(tr '\n' ' ' <<< "$bad")"
+            exit 1
+          fi
+          echo "ok"
