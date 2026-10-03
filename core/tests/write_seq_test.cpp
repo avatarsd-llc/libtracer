@@ -237,7 +237,7 @@ void test_await_wakes_every_role() {
     tr::graph::handlers_t h;
     auto on_write = [](const tr::graph::value_t&,
                        const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> { return {}; };
-    auto on_read = [] { return make_value({0x42}); };
+    auto on_read = [] { return tr::graph::value_ref_t::composed(make_value({0x42})); };
     h.on_write = tr::graph::thunk(on_write);
     h.on_read = tr::graph::thunk(on_read);
     const vertex_handle_t handler =

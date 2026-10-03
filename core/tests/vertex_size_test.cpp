@@ -92,7 +92,7 @@ void registration_cannot_force_the_ext() {
     const auto stream = g.register_vertex(path_t("/diet/stream"), role_t::STREAM);
     require(has_ext(stream), "a STREAM identity still allocates one");
     handlers_t h;
-    auto h_on_read = []() -> tr::graph::result_t<tr::view::rope_t> {
+    auto h_on_read = []() -> tr::graph::result_t<tr::graph::value_ref_t> {
         return std::unexpected(tr::graph::status_t::NOT_FOUND);
     };
     h.on_read = tr::graph::thunk(h_on_read);

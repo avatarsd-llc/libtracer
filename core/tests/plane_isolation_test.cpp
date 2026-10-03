@@ -292,10 +292,10 @@ void test_graph_plane_survives_a_net_plane_flood() {
     // `block_array_t` over `ctl_`, so this is the one step above that the fold can starve — and
     // therefore the one that makes the ablation red. See the file header.
     hold_the_flood(n, "graph: the net store is exhausted as the composed read is attempted");
-    const tr::graph::result_t<rope_t> folded = n.g.read_subtree_folded(tree);
+    const tr::graph::result_t<tr::graph::value_ref_t> folded = n.g.read_subtree_folded(tree);
     check(folded.has_value(),
           "graph: the graph's own failable seam still serves a composed subtree read");
-    check(folded.has_value() && folded->total_length() > 0,
+    check(folded.has_value() && (*folded)->total_length() > 0,
           "graph: and the composed value is non-empty");
 
     check(net_store_is_exhausted(n),
@@ -325,7 +325,7 @@ void test_folded_sources_let_the_flood_starve_the_graph() {
     flood_net_plane_to_exhaustion(n);
     hold_the_flood(n, "ablation: the shared store is exhausted as the composed read is attempted");
 
-    const tr::graph::result_t<rope_t> folded = n.g.read_subtree_folded(tree);
+    const tr::graph::result_t<tr::graph::value_ref_t> folded = n.g.read_subtree_folded(tree);
     check(!folded.has_value(), "ablation: the graph plane is STARVED by the net plane's flood");
     check(!folded.has_value() && folded.error() == status_t::BACKPRESSURE,
           "ablation: and it says so as BACKPRESSURE — the injected store's exhaustion status");
