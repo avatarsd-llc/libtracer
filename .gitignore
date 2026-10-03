@@ -159,3 +159,5 @@ tests/packaging/pio_esp32_can/CMakeLists.txt
 tests/packaging/pio_esp32_can/src/CMakeLists.txt
 tests/packaging/pio_esp32_can/sdkconfig.*
 .merge_file_*
+# Local configure/build logs (the build*/ rule covers directories only).
+core/build-*.log
