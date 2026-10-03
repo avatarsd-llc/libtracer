@@ -283,8 +283,9 @@ void run_inproc_pool(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc,
     std::vector<tr::mem::size_class_t> classes(64);
     tr::mem::pool_source_t<> pool{slab, classes};
     // No `-batch` twin (#553): what these rows are FOR is the pooled-vs-heap LKV
-    // comparison, and that is gated by the `lkv` same-run throughput ratio
-    // (perf_gate.py lkv_ratio_gate), not by a latency percentile. A batch twin here
+    // comparison: the pool's no-heap claim is gated by LKV-ROUTE (bench_forward_heap) and
+    // the `lkv` ratio is only reported (perf_gate.py lkv_ratio_report), never a latency
+    // percentile. A batch twin here
     // would be ten more series with no chart reading them.
     run_inproc(S, F, E, alloc, by_path, mode, budget, latbudget, &pool, false);
     if (pool.stats().refused != 0) {
