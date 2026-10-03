@@ -16,6 +16,34 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Breaking
 
+- **One placement module owns segment layout, against a `config_t` size-class table
+  ([#1775](https://github.com/avatarsd-llc/libtracer/issues/1775), ADR-0083 Decision 5).** The
+  new header `libtracer/placement.hpp` (`tr::mem`, reached through `segment.hpp` as before) is
+  the one owner of the segment header's size, the padding rule, a pool slot's stride, the
+  one-block-or-split choice, the inline value's layout and the receive-loan reserve. The heap,
+  source and pool backends, `value_t::make_inline` and `view::alloc_rx` ask it, so the three
+  spellings of the padding rule are one. No request size changes on any backend.
+  - `default_config_t::kHeapSmallBlockBytes` and its alias `tr::graph::kHeapSmallBlockBytes`
+    are replaced by the size-class table `default_config_t::kSizeClasses` (default `{1032}`,
+    glibc's 64-bit tcache ceiling). `tr::mem::is_one_block(size, align, classes)` splits a heap
+    segment whose padded header plus payload exceeds the table's last row, exactly where #1768
+    split it. `heap_backend_t::kHeaderBytes`, `kSmallBlockBytes` and `is_one_block(size)` are
+    removed in favour of the module's functions.
+  - `tr::view::segment_block_align`, `segment_header_bytes`, `segment_block_bytes`,
+    `place_segment`, `kRxLoanBytes` and `kRxLoanValueOffset` move to `tr::mem`, in the new
+    header; the receive-loan fit test is `tr::mem::rx_loan_fits`.
+  - `mem_heap_request_size_test` becomes `placement_request_size_test`. It sweeps payloads
+    either side of every row of the build's table through both the heap backend (a counting
+    global allocator) and the source backend (a counting source), and it carries the source
+    backend's request-size check that `mem_source_backend_test` used to.
+
+  **Migration:** in a config fragment, replace `static constexpr std::size_t
+  kHeapSmallBlockBytes = N;` with `static constexpr std::size_t kSizeClasses[] = {N};`
+  (`{SIZE_MAX}` keeps one block always). Replace `tr::view::kRxLoanBytes` and the other names
+  above with their `tr::mem::` spellings. Replace `heap_backend_t::is_one_block(size)` with
+  `tr::mem::is_one_block(size, heap_backend_t::kBlockAlign, tr::graph::config_t::kSizeClasses)`
+  and `heap_backend_t::kHeaderBytes` with `tr::mem::segment_header_bytes(heap_backend_t::kBlockAlign)`.
+
 - **`kWeaklyOrdered` is removed, the delivery-skip order assertion is unconditional, and a
   fragment that still sets the trait no longer compiles
   ([#1717](https://github.com/avatarsd-llc/libtracer/issues/1717)).** The trait's only effect

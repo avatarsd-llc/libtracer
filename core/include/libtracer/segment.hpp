@@ -84,8 +84,8 @@ struct segment_t {
     mem::mem_space_t space; /**< @brief Address space (HOST/DEVICE), inherited from @ref backend. */
     mem::backend_tag btag; /**< @brief Module-set tag, inherited from @ref backend (ADR-0047 §2). */
     /**
-     * @brief Nonzero iff the first @ref kRxLoanBytes of @ref bytes are an INGRESS-LOAN reserve
-     *        (RFC-0028 §6.9, #1626), not payload.
+     * @brief Nonzero iff the first @ref tr::mem::kRxLoanBytes of @ref bytes are an INGRESS-LOAN
+     * reserve (RFC-0028 §6.9, #1626), not payload.
      *
      * Set only by @ref alloc_rx, on a receive block a transport allocated with room for the
      * record the graph will need, so the terminus that stores a value shared out of this
@@ -178,20 +178,6 @@ class segment_ptr_t {
 };
 
 /**
- * @brief Bytes a loaned receive block reserves in front of its frame (RFC-0028 §6.9, #1626):
- *        the claim word, then room for a one-link `tr::graph::value_t` header.
- *
- * Sized for the value's header and its one link — 16 + 24 B on a 64-bit host, 12 + 12 B on
- * rv32 — after an aligned claim word. `value.hpp` asserts the fit, so a change to either side
- * fails the build rather than overrunning a frame.
- */
-inline constexpr std::size_t kRxLoanBytes = sizeof(void*) >= 8 ? 48 : 32;
-
-/** @brief Offset of the value header inside the reserve: one pointer-aligned word past its
- *         start, which is where the claim word sits. */
-inline constexpr std::size_t kRxLoanValueOffset = sizeof(void*);
-
-/**
  * @brief The reserve's claim word: `0` = unclaimed, `1` = a value lives in the reserve.
  *
  * One claim per block, ever. A receive block carries one frame, and a frame stores at most one
@@ -209,7 +195,7 @@ using rx_loan_word_t = std::atomic<std::uint32_t>;
  * @brief Claim @p seg's ingress-loan reserve for one value, once.
  *
  * @retval true  This caller owns the reserve: the value header may be placed at
- *               `bytes.data() + kRxLoanValueOffset`.
+ *               `bytes.data() + tr::mem::kRxLoanValueOffset`.
  * @retval false No reserve, or it is already claimed.
  */
 [[nodiscard]] inline bool claim_rx_loan(segment_t* seg) noexcept {
@@ -228,69 +214,7 @@ using rx_loan_word_t = std::atomic<std::uint32_t>;
 
 }  // namespace tr::view
 
-namespace tr::view {
-
-/**
- * @brief The alignment a one-block segment is drawn at for a backend that guarantees
- *        @p align: the stricter of @p align and the header's own (RFC-0028 §4.9).
- */
-[[nodiscard]] constexpr std::size_t segment_block_align(std::size_t align) noexcept {
-    return align < alignof(segment_t) ? alignof(segment_t) : align;
-}
-
-/**
- * @brief Bytes the @ref segment_t header occupies at the head of a one-block segment, padded
- *        so the payload after it starts at `segment_block_align()`.
- */
-[[nodiscard]] constexpr std::size_t segment_header_bytes(std::size_t align) noexcept {
-    const std::size_t a = segment_block_align(align);
-    return (sizeof(segment_t) + a - 1) / a * a;
-}
-
-/** @brief The whole block a one-block segment of @p size payload bytes draws at @p align. */
-[[nodiscard]] constexpr std::size_t segment_block_bytes(std::size_t size,
-                                                        std::size_t align) noexcept {
-    return segment_header_bytes(align) + size;
-}
-
-/**
- * @brief Place a @ref segment_t over the one block @p block, reclaimed by @p backend: the
- *        header at the head, @p size payload bytes after it (a null, empty span for 0).
- */
-[[nodiscard]] inline segment_t* place_segment(mem::mem_backend_t* backend, void* block,
-                                              std::size_t size, std::size_t align) noexcept {
-    auto* const base = static_cast<std::byte*>(block);
-    std::byte* const payload = size != 0 ? base + segment_header_bytes(align) : nullptr;
-    return new (base) segment_t(backend, std::span<std::byte>(payload, size));
-}
-
-}  // namespace tr::view
-
-namespace tr::mem {
-
-/** @brief The one-block layout (see the declaration in `%backend.hpp`). */
-inline view::segment_t* mem_backend_t::alloc_in_block(std::size_t size,
-                                                      std::size_t align) noexcept {
-    void* const block =
-        try_alloc(view::segment_block_bytes(size, align), view::segment_block_align(align));
-    return block != nullptr ? view::place_segment(this, block, size, align) : nullptr;
-}
-
-/** @brief The mirror of @ref mem_backend_t::alloc_in_block. */
-inline void mem_backend_t::destroy_in_block(view::segment_t* seg, std::size_t align) noexcept {
-    const std::size_t size = seg->bytes.size();
-    seg->~segment_t();
-    release(seg, view::segment_block_bytes(size, align), view::segment_block_align(align));
-}
-
-/** @brief The default segment: one block through @ref mem_backend_t::try_alloc. */
-inline view::segment_t* mem_backend_t::alloc(std::size_t size, alloc_hint_t /*hint*/) {
-    return alloc_in_block(size, alignment());
-}
-
-/** @brief The default reclaim: one sized release of the block @ref mem_backend_t::alloc drew. */
-inline void mem_backend_t::destroy(view::segment_t* seg) noexcept {
-    destroy_in_block(seg, alignment());
-}
-
-}  // namespace tr::mem
+// The placement module: segment header, padding, the one-block-or-split rule and the receive-loan
+// layout, plus the inline bodies of `mem_backend_t`'s one-block defaults. Included LAST because it
+// needs the complete `segment_t`.
+#include "libtracer/placement.hpp"

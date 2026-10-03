@@ -398,7 +398,7 @@ struct esp_config_t : default_config_t {
     static constexpr bool kSelfHealLinks = ${LIBTRACER_SELF_HEAL_LINKS};
     static constexpr std::size_t kSelfHealWorkerStackBytes = ${LIBTRACER_SELF_HEAL_WORKER_STACK};
     static constexpr std::size_t kShareThresholdBytes = ~std::size_t{0};
-    static constexpr std::size_t kHeapSmallBlockBytes = ~std::size_t{0};
+    static constexpr std::size_t kSizeClasses[] = {~std::size_t{0}};
 ${LIBTRACER_SLOT_BINDING}};
 
 using config_t = esp_config_t;

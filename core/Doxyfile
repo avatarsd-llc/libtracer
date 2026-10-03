@@ -29,6 +29,7 @@ INPUT                  = core/include/libtracer/config.hpp \
                          core/include/libtracer/reclaim.hpp \
                          core/include/libtracer/backend.hpp \
                          core/include/libtracer/segment.hpp \
+                         core/include/libtracer/placement.hpp \
                          core/include/libtracer/view.hpp \
                          core/include/libtracer/rope.hpp \
                          core/include/libtracer/mem_heap.hpp \
