@@ -165,6 +165,61 @@ queue or shed — and what every other stage does instead.
   (a config vertex, a rarely-updated setpoint) is exactly the shape that starves a small pool —
   which is why a NARROW build copies always.
 
+**Measured on silicon.** The wiring above, run on the hardware it describes: an ESP32-C6
+(RISC-V, one application core) on the adopted `esp_http_server` WebSocket link, library at
+v0.15.0, two nodes with 7 and 10 vertices. Every figure below is one board class and one
+firmware. It shows the shape of an ESP32-class node; it is not a constant to copy. Each figure
+was read from a fresh boot with the node idle, and counters were differenced within that one boot
+(§5).
+
+| | idle | control arm, 1 session × 4 subs | control arm, 3 sessions × 4 subs | bulk ingest into a `HANDLER` vertex |
+| --- | ---: | ---: | ---: | ---: |
+| free heap (node A) | 79,848 B | −20,076 B vs idle | −16,872 B vs idle | **23,936 B** at the trough |
+| flat-seam peak / 24,576 B budget | 0 | 244 B (1.0 %) | 732 B (3.0 %) | 1,026 B (**4.2 %**) |
+| `tx_pool_waits` / `tx_pool_misses` | 0 / 0 | 0 / 0 | 24 / **358** | — |
+| `enqueue_drops` | 0 | 0 | **358** | — |
+| refusals at any other stage | 0 | 0 | **0** | 0 inside the vertex cap |
+
+In the 3-session run, all 358 enqueue drops were the same 358 pool misses, so no event was
+counted twice. Not one refusal reached a neighbouring seam. Above the vertex's cap, the ingest
+arm was refused by value (`BACKPRESSURE`) when the write asked for a reply and dropped silently
+when it did not. Both were counted at the flat seam as oversize.
+
+Three sizing rules follow. §3.1 is where an embedder should apply them:
+
+1. **Size the TX pool for widest publisher pass × concurrent subscribed sessions.** The pool is
+   `tx_slot_capacity()` slots, with the in-call `tx_reply_reserve()` slot held ON TOP of it
+   (`integrations/esp-idf/libtracer/httpd_ws_link.cpp:httpd_ws_link_t::tx_reply_reserve`). The
+   per-link knob is `httpd_ws_config_t::tx_pool_slots`, which defaults to
+   `httpd_ws_link_t::kDefaultTxPoolSlots`. Demand is multiplied by sessions, and pass width
+   alone hides that. In the run above, a pass 4 posts wide fit 5 slots for one session (demand
+   4). With three sessions, demand was 12 and the pool missed. The arm the fan-out runs on
+   decides how an undersized pool fails. A fan-out issued ON the httpd task (a push provoked by
+   an inbound frame) hits the depth as a hard same-pass limit, while an off-task fan-out waits
+   for the drain and shows up first as `stats_t::tx_pool_waits` (added latency). It becomes
+   `tx_pool_misses` only when the drain has fallen behind
+   (`integrations/esp-idf/libtracer/include/libtracer_esp/httpd_ws_link.hpp:httpd_ws_link_t::stats_t`).
+   Read the two counters as a pair. Waits without misses mean the bound is doing its job;
+   misses mean the pool is too small or the drain has stalled.
+2. **The seam budgets are not the bound; the heap and the task stacks are.** The flat seam never
+   went past 4.2 % of a 24 KiB reservation. Applying §5 literally (`capacity = peak + margin`)
+   would size it near 2 KiB and give about 22 KiB back to a heap whose whole idle surplus is
+   about 80 KiB. On this class of node a generous seam is not free. It is the largest single
+   thing competing with the flow it protects. Budget the stacks beside it. The tightest platform
+   task stacks idled at 0.8–2.3 KiB free, so stacks, not seams, are what a careless slab
+   widening actually eats. The link reports its own static cost as
+   `httpd_ws_link_t::buffer_bytes()`: RX scratch, plus
+   (`tx_slot_capacity()` + `tx_reply_reserve()`) × `tx_inline_bytes()`, plus any large class.
+3. **Budget the transient heap, not the idle heap.** Steady-state RAM was never the constraint.
+   The constraint was a working-set dip of about 56 KiB under saturating ingest, against about
+   80 KiB free. A deployment sized from idle free heap passes every static audit and still fails
+   under its own designed load. Under §5, the run that sets `capacity` must be the saturating
+   one, and the heap's low-water mark goes in the same snapshot pair as the seam counters.
+
+For the same budget, an earlier pass on this target measured about 700 B per WebSocket session
+on the server task, plus about 465 B of TCP/IP socket state, and about 430 B per subscription
+edge.
+
 ### 3.2 Hosted gateway / forwarder
 
 - **Composition**: per-thread on a multi-RX host — the only point that survives a fan-out. Size
