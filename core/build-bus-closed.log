@@ -1,0 +1,685 @@
+[  1%] Built target pool_only_dispatch_test
+[  1%] Building CXX object tests/CMakeFiles/substrate_test_no_atomic.dir/substrate_test.cpp.o
+[  2%] Building CXX object tests/CMakeFiles/libtracer_guarded_seq.dir/__/src/graph.cpp.o
+[  2%] Building CXX object CMakeFiles/libtracer.dir/src/graph.cpp.o
+[  2%] Building CXX object CMakeFiles/libtracer.dir/src/fwd_reply.cpp.o
+[  2%] Building CXX object CMakeFiles/libtracer.dir/src/fwd_router.cpp.o
+[  2%] Building CXX object CMakeFiles/libtracer.dir/src/transport_vertex.cpp.o
+[  2%] Building CXX object CMakeFiles/libtracer.dir/src/op_resolve.cpp.o
+[  3%] Building CXX object CMakeFiles/libtracer.dir/src/op_resolve_view.cpp.o
+[  3%] Linking CXX static library liblibtracer_guarded_seq.a
+[  4%] Building CXX object CMakeFiles/libtracer.dir/src/self_heal_link.cpp.o
+[  5%] Building CXX object CMakeFiles/libtracer.dir/src/builtin_transport_udp.cpp.o
+[  6%] Built target libtracer_guarded_seq
+[  6%] Building CXX object tests/CMakeFiles/fused_publish_test.dir/fused_publish_test.cpp.o
+[  6%] Building CXX object CMakeFiles/libtracer.dir/src/builtin_transport_tcp.cpp.o
+[  6%] Building CXX object CMakeFiles/libtracer.dir/src/builtin_transport_ws.cpp.o
+[  6%] Building CXX object CMakeFiles/libtracer.dir/src/builtin_transports.cpp.o
+[  6%] Building CXX object tests/CMakeFiles/write_seq_guarded_test.dir/write_seq_test.cpp.o
+[  6%] Linking CXX executable substrate_test_no_atomic
+[  7%] Built target substrate_test_no_atomic
+[  7%] Linking CXX executable fused_publish_test
+[  7%] Built target fused_publish_test
+[  8%] Linking CXX executable write_seq_guarded_test
+[  8%] Built target write_seq_guarded_test
+[  8%] Linking CXX static library libtracer.a
+[ 11%] Built target libtracer
+[ 11%] Linking CXX executable byteorder_test
+[ 11%] Linking CXX executable config_reader_test
+[ 11%] Linking CXX executable mem_pool_source_test
+[ 11%] Building CXX object tests/CMakeFiles/mem_source_test.dir/mem_source_test.cpp.o
+[ 12%] Linking CXX executable length_prefix_framer_test
+[ 12%] Building CXX object tests/CMakeFiles/fwd_frame_view_test.dir/fwd_frame_view_test.cpp.o
+[ 12%] Linking CXX executable mem_source_pmr_test
+[ 12%] Linking CXX executable key_view_test
+[ 12%] Built target byteorder_test
+[ 13%] Built target key_view_test
+[ 13%] Built target length_prefix_framer_test
+[ 13%] Built target config_reader_test
+[ 14%] Built target mem_pool_source_test
+[ 15%] Built target mem_source_pmr_test
+[ 15%] Building CXX object tests/CMakeFiles/bound_path_test.dir/bound_path_test.cpp.o
+[ 15%] Building CXX object tests/CMakeFiles/path_test.dir/path_test.cpp.o
+[ 16%] Building CXX object tests/CMakeFiles/bound_forward_test.dir/bound_forward_test.cpp.o
+[ 16%] Linking CXX executable path_ref_test
+[ 17%] Linking CXX executable path_label_test
+[ 17%] Linking CXX executable path_label_codec_test
+[ 18%] Linking CXX executable mem_source_test
+[ 18%] Built target path_ref_test
+[ 18%] Building CXX object tests/CMakeFiles/path_label_forward_test.dir/path_label_forward_test.cpp.o
+[ 18%] Built target path_label_codec_test
+[ 18%] Built target path_label_test
+[ 19%] Building CXX object tests/CMakeFiles/path_label_origin_test.dir/path_label_origin_test.cpp.o
+[ 19%] Building CXX object tests/CMakeFiles/path_label_terminus_test.dir/path_label_terminus_test.cpp.o
+[ 19%] Built target mem_source_test
+[ 19%] Linking CXX executable grammar_bounds_test
+[ 20%] Built target grammar_bounds_test
+[ 20%] Linking CXX executable frame_test
+[ 20%] Built target frame_test
+[ 20%] Linking CXX executable rope_test
+[ 20%] Built target rope_test
+[ 20%] Linking CXX executable rope_cursor_assert_test
+[ 20%] Built target rope_cursor_assert_test
+[ 20%] Linking CXX executable rope_cursor_release_guard_test
+[ 20%] Built target rope_cursor_release_guard_test
+[ 20%] Linking CXX executable rope_decode_test
+[ 20%] Built target rope_decode_test
+[ 20%] Linking CXX executable tlv_view_test
+[ 20%] Built target tlv_view_test
+[ 20%] Linking CXX executable rope_decode_fuzz_test
+[ 21%] Built target rope_decode_fuzz_test
+[ 21%] Linking CXX executable ws_test
+[ 21%] Built target ws_test
+[ 21%] Linking CXX executable can_frames_test
+[ 21%] Built target can_frames_test
+[ 22%] Linking CXX executable can_tx_pool_test
+[ 22%] Built target can_tx_pool_test
+[ 22%] Linking CXX executable esp_ws_client_recv_test
+[ 23%] Built target esp_ws_client_recv_test
+[ 23%] Linking CXX executable esp_ws_client_teardown_test
+[ 24%] Built target esp_ws_client_teardown_test
+[ 24%] Linking CXX executable esp_ws_client_liveness_test
+[ 24%] Built target esp_ws_client_liveness_test
+[ 25%] Linking CXX executable esp_ws_client_dial_test
+[ 25%] Built target esp_ws_client_dial_test
+[ 25%] Linking CXX executable esp_ws_client_dial_stats_test
+[ 26%] Built target esp_ws_client_dial_stats_test
+[ 27%] Linking CXX executable esp_ws_client_traffic_stats_test
+[ 27%] Built target esp_ws_client_traffic_stats_test
+[ 27%] Building CXX object tests/CMakeFiles/twai_backpressure_test.dir/home/sd/scratch/claude-libtracer/wt-1650/integrations/esp-idf/tests/host/twai_backpressure_test.cpp.o
+[ 28%] Building CXX object tests/CMakeFiles/twai_backpressure_test.dir/home/sd/scratch/claude-libtracer/wt-1650/integrations/esp-idf/libtracer/twai_link.cpp.o
+[ 28%] Linking CXX executable twai_backpressure_test
+[ 28%] Built target twai_backpressure_test
+[ 28%] Building CXX object tests/CMakeFiles/twai_rx_ingress_test.dir/home/sd/scratch/claude-libtracer/wt-1650/integrations/esp-idf/tests/host/twai_rx_ingress_test.cpp.o
+[ 28%] Building CXX object tests/CMakeFiles/twai_rx_ingress_test.dir/home/sd/scratch/claude-libtracer/wt-1650/integrations/esp-idf/libtracer/twai_link.cpp.o
+[ 29%] Linking CXX executable twai_rx_ingress_test
+[ 29%] Built target twai_rx_ingress_test
+[ 29%] Linking CXX executable security_acl_test
+[ 30%] Built target security_acl_test
+[ 31%] Building CXX object tests/CMakeFiles/effective_acl_test.dir/effective_acl_test.cpp.o
+[ 31%] Linking CXX executable path_test
+[ 31%] Built target path_test
+[ 31%] Building CXX object tests/CMakeFiles/acl_cache_race_test.dir/acl_cache_race_test.cpp.o
+[ 32%] Linking CXX executable fwd_frame_view_test
+[ 32%] Linking CXX executable path_label_origin_test
+[ 32%] Built target fwd_frame_view_test
+[ 32%] Building CXX object tests/CMakeFiles/delivery_mode_race_test.dir/delivery_mode_race_test.cpp.o
+[ 32%] Built target path_label_origin_test
+[ 32%] Building CXX object tests/CMakeFiles/pending_mark_test.dir/pending_mark_test.cpp.o
+/home/sd/scratch/claude-libtracer/wt-1650/core/tests/bound_path_test.cpp: In function ‘void {anonymous}::test_reverse_list_is_typed_not_positional()’:
+/home/sd/scratch/claude-libtracer/wt-1650/core/tests/bound_path_test.cpp:613:27: warning: variable ‘v’ set but not used [-Wunused-but-set-variable]
+  613 |     const vertex_handle_t v = g.register_vertex(path_t("/sensor/temp"), role_t::STORED_VALUE);
+      |                           ^
+[ 32%] Linking CXX executable bound_path_test
+[ 32%] Linking CXX executable path_label_forward_test
+[ 32%] Built target bound_path_test
+[ 32%] Building CXX object tests/CMakeFiles/acl_test.dir/acl_test.cpp.o
+[ 32%] Built target path_label_forward_test
+[ 32%] Linking CXX executable path_label_terminus_test
+[ 32%] Building CXX object tests/CMakeFiles/acl_clock_read_test.dir/acl_clock_read_test.cpp.o
+[ 32%] Built target path_label_terminus_test
+[ 33%] Building CXX object tests/CMakeFiles/mount_routing_test.dir/mount_routing_test.cpp.o
+[ 33%] Linking CXX executable bound_forward_test
+[ 33%] Built target bound_forward_test
+[ 33%] Building CXX object tests/CMakeFiles/mount_shape_flip_test.dir/mount_shape_flip_test.cpp.o
+[ 33%] Linking CXX executable acl_cache_race_test
+[ 33%] Built target acl_cache_race_test
+[ 33%] Building CXX object tests/CMakeFiles/mount_add_oom_test.dir/mount_add_oom_test.cpp.o
+[ 33%] Linking CXX executable effective_acl_test
+[ 33%] Built target effective_acl_test
+[ 33%] Building CXX object tests/CMakeFiles/conn_add_oom_test.dir/conn_add_oom_test.cpp.o
+[ 33%] Linking CXX executable delivery_mode_race_test
+[ 33%] Built target delivery_mode_race_test
+[ 33%] Linking CXX executable pending_mark_test
+[ 33%] Building CXX object tests/CMakeFiles/mount_width_test.dir/mount_width_test.cpp.o
+[ 33%] Built target pending_mark_test
+[ 33%] Building CXX object tests/CMakeFiles/compact_cache_test.dir/compact_cache_test.cpp.o
+[ 33%] Linking CXX executable acl_clock_read_test
+[ 33%] Built target acl_clock_read_test
+[ 33%] Building CXX object tests/CMakeFiles/net_control_plane_race_test.dir/net_control_plane_race_test.cpp.o
+[ 33%] Linking CXX executable mount_shape_flip_test
+[ 33%] Built target mount_shape_flip_test
+[ 33%] Building CXX object tests/CMakeFiles/edge_publish_test.dir/edge_publish_test.cpp.o
+[ 34%] Linking CXX executable acl_test
+[ 34%] Built target acl_test
+[ 34%] Linking CXX executable thread_id_test
+[ 34%] Built target thread_id_test
+[ 34%] Linking CXX executable batch_compose_alloc_test
+[ 34%] Built target batch_compose_alloc_test
+[ 34%] Building CXX object tests/CMakeFiles/handler_write_alloc_test.dir/handler_write_alloc_test.cpp.o
+[ 34%] Linking CXX executable mount_routing_test
+[ 34%] Built target mount_routing_test
+[ 34%] Building CXX object tests/CMakeFiles/one_idiom_test.dir/one_idiom_test.cpp.o
+[ 34%] Linking CXX executable conn_add_oom_test
+[ 34%] Linking CXX executable mount_add_oom_test
+[ 34%] Built target conn_add_oom_test
+[ 35%] Building CXX object tests/CMakeFiles/edge_cold_half_share_test.dir/edge_cold_half_share_test.cpp.o
+[ 35%] Built target mount_add_oom_test
+[ 36%] Building CXX object tests/CMakeFiles/registry_teardown_test.dir/registry_teardown_test.cpp.o
+[ 36%] Linking CXX executable compact_cache_test
+[ 36%] Built target compact_cache_test
+[ 36%] Building CXX object tests/CMakeFiles/child_rx_churn_test.dir/child_rx_churn_test.cpp.o
+[ 37%] Linking CXX executable mount_width_test
+/home/sd/scratch/claude-libtracer/wt-1650/core/tests/net_control_plane_race_test.cpp:88:6: warning: ‘void {anonymous}::emit_path(std::vector<std::byte>&, std::span<const std::basic_string_view<char> >)’ defined but not used [-Wunused-function]
+   88 | void emit_path(std::vector<std::byte>& out, std::span<const std::string_view> segs) {
+      |      ^~~~~~~~~
+[ 37%] Linking CXX executable net_control_plane_race_test
+[ 37%] Built target mount_width_test
+[ 37%] Building CXX object tests/CMakeFiles/retire_test.dir/retire_test.cpp.o
+[ 37%] Built target net_control_plane_race_test
+[ 38%] Building CXX object tests/CMakeFiles/collect_test.dir/collect_test.cpp.o
+[ 38%] Linking CXX executable edge_publish_test
+[ 38%] Built target edge_publish_test
+[ 38%] Building CXX object tests/CMakeFiles/children_test.dir/children_test.cpp.o
+[ 39%] Linking CXX executable one_idiom_test
+[ 39%] Built target one_idiom_test
+[ 39%] Building CXX object tests/CMakeFiles/folded_children_test.dir/folded_children_test.cpp.o
+[ 39%] Linking CXX executable edge_cold_half_share_test
+[ 39%] Built target edge_cold_half_share_test
+[ 39%] Building CXX object tests/CMakeFiles/subtree_test.dir/subtree_test.cpp.o
+[ 39%] Linking CXX executable handler_write_alloc_test
+[ 39%] Built target handler_write_alloc_test
+[ 39%] Building CXX object tests/CMakeFiles/subtree_read_test.dir/subtree_read_test.cpp.o
+[ 39%] Linking CXX executable child_rx_churn_test
+[ 39%] Built target child_rx_churn_test
+[ 39%] Linking CXX executable registry_teardown_test
+[ 39%] Building CXX object tests/CMakeFiles/propagate_fold_test.dir/propagate_fold_test.cpp.o
+[ 39%] Built target registry_teardown_test
+[ 39%] Linking CXX executable tlv_arena_test
+[ 40%] Built target tlv_arena_test
+[ 40%] Linking CXX executable route_handle_test
+[ 40%] Built target route_handle_test
+[ 40%] Building CXX object tests/CMakeFiles/subscribe_toward_test.dir/subscribe_toward_test.cpp.o
+[ 40%] Linking CXX executable retire_test
+[ 40%] Built target retire_test
+[ 40%] Building CXX object tests/CMakeFiles/registry_rebind_race_test.dir/registry_rebind_race_test.cpp.o
+[ 40%] Linking CXX executable collect_test
+[ 40%] Built target collect_test
+[ 40%] Building CXX object tests/CMakeFiles/fwd_sink_race_test.dir/fwd_sink_race_test.cpp.o
+[ 40%] Linking CXX executable children_test
+[ 40%] Built target children_test
+[ 40%] Linking CXX executable subtree_test
+[ 40%] Built target subtree_test
+[ 40%] Linking CXX executable folded_children_test
+[ 41%] Building CXX object tests/CMakeFiles/graph_config_race_test.dir/graph_config_race_test.cpp.o
+[ 41%] Building CXX object tests/CMakeFiles/fwd_two_mount_test.dir/fwd_two_mount_test.cpp.o
+[ 41%] Built target folded_children_test
+[ 41%] Linking CXX executable propagate_fold_test
+[ 41%] Linking CXX executable registry_rebind_race_test
+[ 41%] Built target propagate_fold_test
+[ 41%] Built target registry_rebind_race_test
+[ 42%] Linking CXX executable subtree_read_test
+[ 42%] Building CXX object tests/CMakeFiles/admission_link_kind_test.dir/admission_link_kind_test.cpp.o
+[ 43%] Building CXX object tests/CMakeFiles/conformance_runner.dir/conformance_runner.cpp.o
+[ 43%] Building CXX object tests/CMakeFiles/substrate_test.dir/substrate_test.cpp.o
+[ 43%] Built target subtree_read_test
+[ 43%] Linking CXX executable mem_source_backend_test
+[ 43%] Linking CXX executable subscribe_toward_test
+[ 43%] Linking CXX executable fwd_sink_race_test
+[ 43%] Built target mem_source_backend_test
+[ 43%] Building CXX object tests/CMakeFiles/vertex_test.dir/vertex_test.cpp.o
+[ 43%] Built target fwd_sink_race_test
+[ 43%] Building CXX object tests/CMakeFiles/vertex_size_test.dir/vertex_size_test.cpp.o
+[ 43%] Built target subscribe_toward_test
+[ 44%] Building CXX object tests/CMakeFiles/read_fork_test.dir/read_fork_test.cpp.o
+[ 44%] Linking CXX executable vertex_test
+[ 44%] Built target vertex_test
+[ 44%] Linking CXX executable lkv_slot_test
+[ 44%] Built target lkv_slot_test
+[ 44%] Building CXX object tests/CMakeFiles/value_test.dir/value_test.cpp.o
+[ 45%] Linking CXX executable value_test
+[ 45%] Built target value_test
+[ 45%] Building CXX object tests/CMakeFiles/target_adopt_test.dir/target_adopt_test.cpp.o
+[ 45%] Linking CXX executable target_adopt_test
+[ 45%] Built target target_adopt_test
+[ 45%] Building CXX object tests/CMakeFiles/retention_test.dir/retention_test.cpp.o
+[ 46%] Linking CXX executable substrate_test
+[ 46%] Built target substrate_test
+[ 46%] Building CXX object tests/CMakeFiles/write_seq_test.dir/write_seq_test.cpp.o
+[ 46%] Linking CXX executable vertex_size_test
+[ 46%] Linking CXX executable graph_config_race_test
+[ 46%] Built target vertex_size_test
+[ 46%] Linking CXX executable fwd_two_mount_test
+[ 46%] Building CXX object tests/CMakeFiles/graph_pmr_test.dir/graph_pmr_test.cpp.o
+[ 46%] Linking CXX executable read_fork_test
+[ 46%] Built target graph_config_race_test
+[ 46%] Building CXX object tests/CMakeFiles/graph_value_backend_test.dir/graph_value_backend_test.cpp.o
+[ 46%] Linking CXX executable admission_link_kind_test
+[ 46%] Built target fwd_two_mount_test
+[ 46%] Built target admission_link_kind_test
+[ 46%] Built target read_fork_test
+[ 46%] Linking CXX executable conformance_runner
+[ 46%] Building CXX object tests/CMakeFiles/try_probe_window_test.dir/try_probe_window_test.cpp.o
+[ 46%] Building CXX object tests/CMakeFiles/graph_oom_softfail_test.dir/graph_oom_softfail_test.cpp.o
+[ 47%] Building CXX object tests/CMakeFiles/folded_read_backend_test.dir/folded_read_backend_test.cpp.o
+[ 47%] Built target conformance_runner
+[ 48%] Linking CXX executable mem_sync_pool_test
+[ 48%] Built target mem_sync_pool_test
+[ 48%] Linking CXX executable mem_sync_policy_test
+[ 48%] Built target mem_sync_policy_test
+[ 48%] Building CXX object tests/CMakeFiles/admission_seam_test.dir/admission_seam_test.cpp.o
+In function ‘void operator delete(void*, std::size_t)’,
+    inlined from ‘constexpr std::__detail::__unique_ptr_t<_Tp> std::make_unique(_Args&& ...) [with _Tp = vector<vector<byte> >; _Args = {long unsigned int}]’ at /usr/include/c++/13/bits/unique_ptr.h:1070:30,
+    inlined from ‘bool tr::graph::vertex_t::app_field_store(std::string_view, std::span<const std::byte>)’ at /home/sd/scratch/claude-libtracer/wt-1650/core/include/libtracer/vertex.hpp:2458:77:
+/home/sd/scratch/claude-libtracer/wt-1650/core/tests/retention_test.cpp:98:64: warning: ‘void free(void*)’ called on pointer returned from a mismatched allocation function [-Wmismatched-new-delete]
+   98 | void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+      |                                                       ~~~~~~~~~^~~
+In file included from /usr/include/c++/13/memory:78,
+                 from /home/sd/scratch/claude-libtracer/wt-1650/core/include/libtracer/transport_vertex.hpp:36,
+                 from /home/sd/scratch/claude-libtracer/wt-1650/core/include/libtracer/conn_spec.hpp:29,
+                 from /home/sd/scratch/claude-libtracer/wt-1650/core/include/libtracer/tracer.hpp:20,
+                 from /home/sd/scratch/claude-libtracer/wt-1650/core/tests/retention_test.cpp:44:
+In function ‘constexpr std::__detail::__unique_ptr_t<_Tp> std::make_unique(_Args&& ...) [with _Tp = vector<vector<byte> >; _Args = {long unsigned int}]’,
+    inlined from ‘bool tr::graph::vertex_t::app_field_store(std::string_view, std::span<const std::byte>)’ at /home/sd/scratch/claude-libtracer/wt-1650/core/include/libtracer/vertex.hpp:2458:77:
+/usr/include/c++/13/bits/unique_ptr.h:1070:30: note: returned from ‘void* operator new(std::size_t)’
+ 1070 |     { return unique_ptr<_Tp>(new _Tp(std::forward<_Args>(__args)...)); }
+      |                              ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+[ 48%] Linking CXX executable retention_test
+[ 48%] Linking CXX executable write_seq_test
+[ 48%] Built target retention_test
+[ 48%] Building CXX object tests/CMakeFiles/nonretaining_contract_test.dir/nonretaining_contract_test.cpp.o
+[ 48%] Built target write_seq_test
+[ 48%] Linking CXX executable graph_pmr_test
+[ 48%] Built target graph_pmr_test
+[ 48%] Linking CXX executable graph_value_backend_test
+[ 48%] Building CXX object tests/CMakeFiles/rx_loan_test.dir/rx_loan_test.cpp.o
+[ 49%] Building CXX object tests/CMakeFiles/graph_test.dir/graph_test.cpp.o
+[ 49%] Built target graph_value_backend_test
+[ 49%] Building CXX object tests/CMakeFiles/identity_test.dir/identity_test.cpp.o
+[ 49%] Linking CXX executable folded_read_backend_test
+[ 49%] Built target folded_read_backend_test
+[ 50%] Building CXX object tests/CMakeFiles/stats_field_test.dir/stats_field_test.cpp.o
+[ 50%] Linking CXX executable try_probe_window_test
+[ 50%] Built target try_probe_window_test
+[ 50%] Building CXX object tests/CMakeFiles/app_fields_test.dir/app_fields_test.cpp.o
+[ 50%] Linking CXX executable admission_seam_test
+[ 50%] Built target admission_seam_test
+[ 51%] Linking CXX executable graph_oom_softfail_test
+[ 51%] Building CXX object tests/CMakeFiles/field_dispatch_test.dir/field_dispatch_test.cpp.o
+[ 51%] Built target graph_oom_softfail_test
+[ 51%] Linking CXX executable nonretaining_contract_test
+[ 51%] Building CXX object tests/CMakeFiles/qos_policy_test.dir/qos_policy_test.cpp.o
+[ 51%] Built target nonretaining_contract_test
+[ 51%] Building CXX object tests/CMakeFiles/op_resolve_test.dir/op_resolve_test.cpp.o
+[ 51%] Linking CXX executable rx_loan_test
+[ 51%] Built target rx_loan_test
+[ 51%] Building CXX object tests/CMakeFiles/op_resolve_view_test.dir/op_resolve_view_test.cpp.o
+[ 52%] Linking CXX executable identity_test
+[ 52%] Built target identity_test
+[ 52%] Building CXX object tests/CMakeFiles/fwd_multihop_test.dir/fwd_multihop_test.cpp.o
+[ 52%] Linking CXX executable stats_field_test
+[ 52%] Built target stats_field_test
+[ 53%] Building CXX object tests/CMakeFiles/orchestrate_depart_test.dir/orchestrate_depart_test.cpp.o
+[ 53%] Linking CXX executable field_dispatch_test
+[ 53%] Built target field_dispatch_test
+[ 53%] Building CXX object tests/CMakeFiles/fwd_compact_test.dir/fwd_compact_test.cpp.o
+[ 53%] Linking CXX executable graph_test
+[ 53%] Built target graph_test
+[ 53%] Building CXX object tests/CMakeFiles/fwd_compact_acl_test.dir/fwd_compact_acl_test.cpp.o
+[ 53%] Linking CXX executable op_resolve_view_test
+[ 53%] Built target op_resolve_view_test
+[ 54%] Linking CXX executable app_fields_test
+[ 55%] Building CXX object tests/CMakeFiles/write_ctx_test.dir/write_ctx_test.cpp.o
+[ 55%] Built target app_fields_test
+[ 55%] Building CXX object tests/CMakeFiles/fwd_reconnect_selfheal_test.dir/fwd_reconnect_selfheal_test.cpp.o
+[ 55%] Linking CXX executable qos_policy_test
+[ 55%] Built target qos_policy_test
+[ 55%] Linking CXX executable fwd_multihop_test
+[ 55%] Built target fwd_multihop_test
+[ 55%] Building CXX object tests/CMakeFiles/fwd_readvertise_reuse_test.dir/fwd_readvertise_reuse_test.cpp.o
+[ 56%] Building CXX object tests/CMakeFiles/fwd_bind_refusal_unwind_test.dir/fwd_bind_refusal_unwind_test.cpp.o
+[ 56%] Linking CXX executable orchestrate_depart_test
+[ 56%] Built target orchestrate_depart_test
+[ 56%] Linking CXX executable op_resolve_test
+[ 56%] Built target op_resolve_test
+[ 56%] Building CXX object tests/CMakeFiles/delivery_drops_test.dir/delivery_drops_test.cpp.o
+[ 56%] Building CXX object tests/CMakeFiles/fwd_fanout_test.dir/fwd_fanout_test.cpp.o
+[ 57%] Linking CXX executable fwd_compact_test
+[ 58%] Linking CXX executable fwd_reconnect_selfheal_test
+[ 58%] Linking CXX executable fwd_compact_acl_test
+[ 58%] Linking CXX executable write_ctx_test
+[ 58%] Built target fwd_compact_test
+[ 58%] Built target fwd_reconnect_selfheal_test
+[ 58%] Built target fwd_compact_acl_test
+[ 58%] Built target write_ctx_test
+[ 58%] Building CXX object tests/CMakeFiles/edge_eviction_test.dir/edge_eviction_test.cpp.o
+[ 58%] Building CXX object tests/CMakeFiles/fwd_terminus_reject_test.dir/fwd_terminus_reject_test.cpp.o
+[ 58%] Building CXX object tests/CMakeFiles/fwd_malformed_control_test.dir/fwd_malformed_control_test.cpp.o
+[ 59%] Building CXX object tests/CMakeFiles/link_token_carry_test.dir/link_token_carry_test.cpp.o
+[ 59%] Linking CXX executable fwd_bind_refusal_unwind_test
+[ 59%] Linking CXX executable fwd_readvertise_reuse_test
+[ 59%] Built target fwd_bind_refusal_unwind_test
+[ 59%] Built target fwd_readvertise_reuse_test
+[ 59%] Building CXX object tests/CMakeFiles/fwd_flatten_backend_test.dir/fwd_flatten_backend_test.cpp.o
+[ 59%] Building CXX object tests/CMakeFiles/router_drop_stats_test.dir/router_drop_stats_test.cpp.o
+[ 59%] Linking CXX executable delivery_drops_test
+[ 59%] Built target delivery_drops_test
+[ 59%] Building CXX object tests/CMakeFiles/fwd_terminus_refusal_reply_test.dir/fwd_terminus_refusal_reply_test.cpp.o
+[ 59%] Linking CXX executable fwd_fanout_test
+[ 59%] Built target fwd_fanout_test
+[ 59%] Building CXX object tests/CMakeFiles/stats_net_seam_test.dir/stats_net_seam_test.cpp.o
+[ 59%] Linking CXX executable link_token_carry_test
+[ 59%] Linking CXX executable fwd_terminus_reject_test
+[ 59%] Built target link_token_carry_test
+[ 59%] Built target fwd_terminus_reject_test
+[ 59%] Linking CXX executable fwd_malformed_control_test
+[ 60%] Building CXX object tests/CMakeFiles/terminus_flatten_backend_test.dir/terminus_flatten_backend_test.cpp.o
+[ 60%] Building CXX object tests/CMakeFiles/terminus_egress_backend_test.dir/terminus_egress_backend_test.cpp.o
+[ 60%] Built target fwd_malformed_control_test
+[ 60%] Building CXX object tests/CMakeFiles/fwd_rope_forward_test.dir/fwd_rope_forward_test.cpp.o
+[ 61%] Linking CXX executable router_drop_stats_test
+[ 61%] Built target router_drop_stats_test
+[ 61%] Linking CXX executable fwd_flatten_backend_test
+[ 61%] Building CXX object tests/CMakeFiles/link_liveness_test.dir/link_liveness_test.cpp.o
+[ 61%] Built target fwd_flatten_backend_test
+[ 61%] Building CXX object tests/CMakeFiles/net_lock_order_test.dir/net_lock_order_test.cpp.o
+[ 61%] Linking CXX executable edge_eviction_test
+[ 61%] Built target edge_eviction_test
+[ 61%] Building CXX object tests/CMakeFiles/payload_right_table_test.dir/payload_right_table_test.cpp.o
+[ 62%] Linking CXX executable fwd_terminus_refusal_reply_test
+[ 62%] Built target fwd_terminus_refusal_reply_test
+[ 62%] Building CXX object tests/CMakeFiles/transport_vertex_test.dir/transport_vertex_test.cpp.o
+[ 62%] Linking CXX executable stats_net_seam_test
+[ 62%] Built target stats_net_seam_test
+[ 62%] Building CXX object tests/CMakeFiles/udp_test.dir/udp_test.cpp.o
+[ 62%] Linking CXX executable terminus_egress_backend_test
+[ 62%] Built target terminus_egress_backend_test
+[ 62%] Building CXX object tests/CMakeFiles/tcp_test.dir/tcp_test.cpp.o
+[ 62%] Linking CXX executable terminus_flatten_backend_test
+[ 62%] Built target terminus_flatten_backend_test
+[ 62%] Building CXX object tests/CMakeFiles/retained_send_test.dir/retained_send_test.cpp.o
+[ 62%] Linking CXX executable net_lock_order_test
+[ 62%] Built target net_lock_order_test
+[ 62%] Linking CXX executable peer_handle_seam_test
+[ 63%] Linking CXX executable payload_right_table_test
+[ 63%] Built target peer_handle_seam_test
+[ 63%] Linking CXX executable send_stall_test
+[ 63%] Built target send_stall_test
+[ 63%] Linking CXX executable write_all_eintr_test
+[ 63%] Built target payload_right_table_test
+[ 63%] Built target write_all_eintr_test
+[ 63%] Linking CXX executable write_fault_class_test
+[ 64%] Linking CXX executable ws_transport_test
+[ 64%] Built target ws_transport_test
+[ 64%] Built target write_fault_class_test
+[ 64%] Linking CXX executable ws_rx_bound_test
+[ 64%] Linking CXX executable ws_frame_race_test
+[ 65%] Built target ws_rx_bound_test
+[ 65%] Built target ws_frame_race_test
+[ 65%] Linking CXX executable link_liveness_test
+[ 66%] Linking CXX executable transport_conformance_test
+[ 66%] Linking CXX executable ws_handshake_bound_test
+[ 66%] Built target ws_handshake_bound_test
+[ 66%] Linking CXX executable ws_interop_server
+[ 66%] Built target transport_conformance_test
+[ 67%] Building CXX object tests/CMakeFiles/fwd_node_server.dir/fwd_node_server.cpp.o
+[ 67%] Built target ws_interop_server
+[ 67%] Built target link_liveness_test
+[ 67%] Building CXX object tests/CMakeFiles/mesh_node.dir/mesh_node.cpp.o
+[ 68%] Linking CXX executable ws_fuzz_harness
+[ 68%] Built target ws_fuzz_harness
+[ 68%] Linking CXX executable try_grow_race_test
+[ 69%] Built target try_grow_race_test
+[ 69%] Linking CXX executable test_support_test
+/home/sd/scratch/claude-libtracer/wt-1650/core/tests/fwd_rope_forward_test.cpp:60:24: warning: ‘std::vector<std::byte> {anonymous}::b_name(std::string_view)’ defined but not used [-Wunused-function]
+   60 | std::vector<std::byte> b_name(std::string_view s) {
+      |                        ^~~~~~
+[ 69%] Linking CXX executable fwd_rope_forward_test
+[ 69%] Built target test_support_test
+[ 69%] Building CXX object tests/CMakeFiles/session_anchor_test.dir/session_anchor_test.cpp.o
+[ 69%] Built target fwd_rope_forward_test
+[ 69%] Building CXX object tests/CMakeFiles/target_binding_ablation_test.dir/target_binding_ablation_test.cpp.o
+[ 69%] Linking CXX executable udp_test
+[ 69%] Linking CXX executable tcp_test
+[ 69%] Built target tcp_test
+[ 69%] Building CXX object tests/CMakeFiles/reclaim_test.dir/reclaim_test.cpp.o
+[ 69%] Built target udp_test
+[ 69%] Building CXX object tests/CMakeFiles/bus_module_test.dir/bus_module_test.cpp.o
+[ 69%] Linking CXX executable retained_send_test
+[ 69%] Built target retained_send_test
+[ 70%] Building CXX object tests/CMakeFiles/plane_isolation_test.dir/plane_isolation_test.cpp.o
+[ 71%] Linking CXX executable target_binding_ablation_test
+[ 71%] Linking CXX executable session_anchor_test
+[ 71%] Built target target_binding_ablation_test
+[ 71%] Building CXX object tests/CMakeFiles/ring_pressure_test.dir/ring_pressure_test.cpp.o
+[ 71%] Built target session_anchor_test
+[ 71%] Building CXX object tests/CMakeFiles/delivery_class_honour_test.dir/delivery_class_honour_test.cpp.o
+[ 71%] Linking CXX executable fwd_node_server
+[ 71%] Built target fwd_node_server
+[ 71%] Linking CXX executable batch_test
+[ 71%] Built target batch_test
+[ 71%] Linking CXX executable playout_test
+[ 71%] Built target playout_test
+[ 71%] Building CXX object tests/CMakeFiles/read_back_backend_test.dir/read_back_backend_test.cpp.o
+[ 71%] Linking CXX executable mesh_node
+[ 71%] Built target mesh_node
+[ 71%] Building CXX object tests/CMakeFiles/empty_src_unacked_test.dir/empty_src_unacked_test.cpp.o
+[ 71%] Linking CXX executable reclaim_test
+[ 71%] Built target reclaim_test
+[ 71%] Building CXX object tests/CMakeFiles/retained_subscription_seam_test.dir/retained_subscription_seam_test.cpp.o
+[ 72%] Linking CXX executable bus_module_test
+[ 72%] Linking CXX executable transport_vertex_test
+[ 72%] Linking CXX executable plane_isolation_test
+[ 72%] Built target bus_module_test
+[ 72%] Building CXX object tests/CMakeFiles/router_flat_seam_test.dir/router_flat_seam_test.cpp.o
+[ 72%] Built target plane_isolation_test
+[ 72%] Linking CXX executable lkv_slot_inversion_test
+[ 72%] Built target transport_vertex_test
+[ 72%] Built target lkv_slot_inversion_test
+[ 72%] Building CXX object tests/CMakeFiles/guard_alias_test.dir/guard_alias_test.cpp.o
+[ 72%] Building CXX object tests/CMakeFiles/instrument_counters_test.dir/instrument_counters_test.cpp.o
+[ 72%] Linking CXX executable guard_alias_test
+[ 72%] Built target guard_alias_test
+[ 72%] Linking CXX executable lean_link_defaults_test
+[ 72%] Built target lean_link_defaults_test
+[ 72%] Building CXX object examples/CMakeFiles/in_process_pubsub.dir/in_process_pubsub.cpp.o
+[ 73%] Linking CXX executable ring_pressure_test
+[ 73%] Built target ring_pressure_test
+[ 73%] Building CXX object examples/CMakeFiles/wire_roundtrip.dir/wire_roundtrip.cpp.o
+/home/sd/scratch/claude-libtracer/wt-1650/core/tests/delivery_class_honour_test.cpp:39:25: warning: "/*" within comment [-Wcomment]
+   39 |  * and the three `stream/*` composition vectors; the FOLD emission mode is
+      |                          
+[ 74%] Linking CXX executable delivery_class_honour_test
+[ 74%] Built target delivery_class_honour_test
+[ 74%] Building CXX object examples/CMakeFiles/rope_scatter.dir/rope_scatter.cpp.o
+[ 74%] Linking CXX executable read_back_backend_test
+[ 74%] Built target read_back_backend_test
+[ 74%] Building CXX object examples/CMakeFiles/pubsub_fanout.dir/pubsub_fanout.cpp.o
+[ 74%] Linking CXX executable empty_src_unacked_test
+[ 75%] Linking CXX executable retained_subscription_seam_test
+[ 75%] Built target retained_subscription_seam_test
+[ 75%] Built target empty_src_unacked_test
+[ 75%] Building CXX object examples/CMakeFiles/wire_codec.dir/wire_codec.cpp.o
+[ 75%] Building CXX object examples/CMakeFiles/two_node_fwd.dir/two_node_fwd.cpp.o
+/home/sd/scratch/claude-libtracer/wt-1650/core/examples/wire_roundtrip.cpp:43:7: warning: ‘tr::wire::tlv_t {anonymous}::name_tlv(const std::string&)’ defined but not used [-Wunused-function]
+   43 | tlv_t name_tlv(const std::string& name) {
+      |       ^~~~~~~~
+[ 75%] Linking CXX executable wire_roundtrip
+[ 75%] Linking CXX executable instrument_counters_test
+[ 75%] Built target wire_roundtrip
+[ 75%] Building CXX object examples/CMakeFiles/tree_of_ropes.dir/tree_of_ropes.cpp.o
+[ 75%] Built target instrument_counters_test
+[ 76%] Building CXX object examples/CMakeFiles/graph_register.dir/graph_register.cpp.o
+[ 76%] Linking CXX executable in_process_pubsub
+[ 77%] Linking CXX executable rope_scatter
+[ 77%] Built target rope_scatter
+[ 77%] Built target in_process_pubsub
+[ 77%] Building CXX object examples/CMakeFiles/graph_read_write.dir/graph_read_write.cpp.o
+[ 77%] Building CXX object examples/CMakeFiles/graph_await.dir/graph_await.cpp.o
+[ 77%] Linking CXX executable router_flat_seam_test
+[ 77%] Built target router_flat_seam_test
+[ 77%] Building CXX object examples/CMakeFiles/graph_write_creates.dir/graph_write_creates.cpp.o
+[ 78%] Linking CXX executable pubsub_fanout
+[ 78%] Built target pubsub_fanout
+[ 78%] Building CXX object examples/CMakeFiles/graph_children.dir/graph_children.cpp.o
+[ 78%] Linking CXX executable wire_codec
+[ 78%] Built target wire_codec
+[ 78%] Building CXX object examples/CMakeFiles/graph_retire.dir/graph_retire.cpp.o
+[ 78%] Linking CXX executable two_node_fwd
+[ 78%] Built target two_node_fwd
+[ 78%] Building CXX object examples/CMakeFiles/graph_handler_vertex.dir/graph_handler_vertex.cpp.o
+[ 78%] Linking CXX executable graph_register
+[ 78%] Built target graph_register
+[ 78%] Building CXX object examples/CMakeFiles/graph_stream.dir/graph_stream.cpp.o
+[ 78%] Linking CXX executable graph_await
+[ 78%] Linking CXX executable graph_read_write
+[ 78%] Built target graph_await
+[ 78%] Building CXX object examples/CMakeFiles/sub_callback.dir/sub_callback.cpp.o
+[ 78%] Built target graph_read_write
+[ 78%] Building CXX object examples/CMakeFiles/sub_subtree.dir/sub_subtree.cpp.o
+[ 78%] Linking CXX executable tree_of_ropes
+[ 79%] Linking CXX executable graph_write_creates
+[ 79%] Built target graph_write_creates
+[ 79%] Building CXX object examples/CMakeFiles/sub_terminal_delivery.dir/sub_terminal_delivery.cpp.o
+[ 79%] Built target tree_of_ropes
+[ 79%] Building CXX object examples/CMakeFiles/sub_durability_latch.dir/sub_durability_latch.cpp.o
+[ 79%] Linking CXX executable graph_children
+[ 79%] Built target graph_children
+[ 79%] Linking CXX executable graph_retire
+[ 79%] Building CXX object examples/CMakeFiles/sub_unsubscribe.dir/sub_unsubscribe.cpp.o
+[ 79%] Built target graph_retire
+[ 80%] Building CXX object examples/CMakeFiles/sub_unsubscribe_from_dispatch.dir/sub_unsubscribe_from_dispatch.cpp.o
+[ 80%] Linking CXX executable graph_handler_vertex
+[ 80%] Built target graph_handler_vertex
+[ 80%] Building CXX object examples/CMakeFiles/sub_retire.dir/sub_retire.cpp.o
+[ 80%] Linking CXX executable graph_stream
+[ 80%] Built target graph_stream
+[ 81%] Building CXX object examples/CMakeFiles/wire_tlv_header.dir/wire_tlv_header.cpp.o
+[ 82%] Linking CXX executable sub_callback
+[ 83%] Linking CXX executable sub_subtree
+[ 83%] Built target sub_callback
+[ 83%] Built target sub_subtree
+[ 83%] Building CXX object examples/CMakeFiles/wire_structured_vs_opaque.dir/wire_structured_vs_opaque.cpp.o
+[ 83%] Building CXX object examples/CMakeFiles/wire_packed_path.dir/wire_packed_path.cpp.o
+[ 83%] Linking CXX executable sub_durability_latch
+[ 83%] Linking CXX executable sub_terminal_delivery
+[ 83%] Built target sub_durability_latch
+[ 83%] Building CXX object examples/CMakeFiles/wire_path_escape.dir/wire_path_escape.cpp.o
+[ 83%] Built target sub_terminal_delivery
+[ 83%] Building CXX object examples/CMakeFiles/wire_trailer.dir/wire_trailer.cpp.o
+[ 83%] Linking CXX executable sub_unsubscribe
+[ 83%] Built target sub_unsubscribe
+[ 83%] Building CXX object examples/CMakeFiles/wire_decode_refusals.dir/wire_decode_refusals.cpp.o
+[ 83%] Linking CXX executable sub_unsubscribe_from_dispatch
+[ 83%] Built target sub_unsubscribe_from_dispatch
+[ 84%] Building CXX object examples/CMakeFiles/wire_arena_decode.dir/wire_arena_decode.cpp.o
+[ 84%] Linking CXX executable wire_tlv_header
+[ 84%] Built target wire_tlv_header
+[ 85%] Building CXX object examples/CMakeFiles/wire_lazy_view.dir/wire_lazy_view.cpp.o
+[ 85%] Linking CXX executable sub_retire
+[ 85%] Linking CXX executable wire_structured_vs_opaque
+[ 85%] Built target sub_retire
+[ 85%] Building CXX object examples/CMakeFiles/view_segment_refcount.dir/view_segment_refcount.cpp.o
+[ 85%] Built target wire_structured_vs_opaque
+[ 85%] Building CXX object examples/CMakeFiles/view_subview.dir/view_subview.cpp.o
+[ 85%] Linking CXX executable wire_packed_path
+[ 85%] Built target wire_packed_path
+[ 86%] Building CXX object examples/CMakeFiles/view_borrow.dir/view_borrow.cpp.o
+[ 87%] Linking CXX executable wire_path_escape
+[ 87%] Linking CXX executable wire_trailer
+[ 87%] Built target wire_path_escape
+[ 87%] Building CXX object examples/CMakeFiles/view_rope_compose.dir/view_rope_compose.cpp.o
+[ 87%] Built target wire_trailer
+[ 87%] Building CXX object examples/CMakeFiles/view_rope_subrope.dir/view_rope_subrope.cpp.o
+[ 87%] Linking CXX executable wire_decode_refusals
+[ 87%] Built target wire_decode_refusals
+[ 87%] Building CXX object examples/CMakeFiles/view_pool_backend.dir/view_pool_backend.cpp.o
+[ 87%] Linking CXX executable wire_arena_decode
+[ 87%] Built target wire_arena_decode
+[ 87%] Building CXX object examples/CMakeFiles/view_device_rope.dir/view_device_rope.cpp.o
+[ 87%] Linking CXX executable wire_lazy_view
+[ 87%] Built target wire_lazy_view
+[ 88%] Linking CXX executable view_segment_refcount
+[ 88%] Building CXX object examples/CMakeFiles/view_sync_pool.dir/view_sync_pool.cpp.o
+[ 88%] Linking CXX executable view_subview
+[ 88%] Built target view_segment_refcount
+[ 88%] Linking CXX executable mem_block_source
+[ 88%] Built target view_subview
+[ 88%] Linking CXX executable mem_source_vs_backend
+[ 88%] Built target mem_block_source
+[ 89%] Linking CXX executable mem_bump_source
+[ 89%] Linking CXX executable view_borrow
+[ 89%] Built target mem_source_vs_backend
+[ 89%] Linking CXX executable mem_bump_upstream
+[ 89%] Built target mem_bump_source
+[ 89%] Linking CXX executable mem_pool_source
+[ 89%] Built target view_borrow
+[ 89%] Linking CXX executable mem_size_classes
+[ 89%] Built target mem_bump_upstream
+[ 89%] Linking CXX executable mem_block_array
+[ 89%] Built target mem_pool_source
+[ 89%] Built target mem_size_classes
+[ 89%] Linking CXX executable mem_source_resource
+[ 90%] Building CXX object examples/CMakeFiles/acl_open_by_default.dir/acl_open_by_default.cpp.o
+[ 91%] Built target mem_block_array
+[ 91%] Building CXX object examples/CMakeFiles/acl_subject_resolver.dir/acl_subject_resolver.cpp.o
+[ 91%] Built target mem_source_resource
+[ 92%] Building CXX object examples/CMakeFiles/acl_right_bits.dir/acl_right_bits.cpp.o
+[ 92%] Linking CXX executable acl_subject_resolver
+[ 92%] Linking CXX executable acl_open_by_default
+[ 92%] Linking CXX executable acl_right_bits
+[ 92%] Linking CXX executable view_rope_compose
+[ 92%] Built target acl_subject_resolver
+[ 92%] Built target acl_open_by_default
+[ 92%] Built target view_rope_compose
+[ 92%] Building CXX object examples/CMakeFiles/acl_inherit.dir/acl_inherit.cpp.o
+[ 92%] Linking CXX executable view_rope_subrope
+[ 92%] Building CXX object examples/CMakeFiles/acl_everyone_reserved.dir/acl_everyone_reserved.cpp.o
+[ 92%] Building CXX object examples/CMakeFiles/acl_expiry.dir/acl_expiry.cpp.o
+[ 92%] Built target acl_right_bits
+[ 92%] Linking CXX executable acl_policy_profiles
+[ 92%] Built target view_rope_subrope
+[ 92%] Linking CXX executable acl_parse_strict
+[ 92%] Linking CXX executable acl_inherit
+[ 92%] Built target acl_policy_profiles
+[ 93%] Linking CXX executable acl_expiry
+[ 93%] Linking CXX executable acl_everyone_reserved
+[ 93%] Building CXX object examples/CMakeFiles/route_dst_is_source_route.dir/route_dst_is_source_route.cpp.o
+[ 93%] Built target acl_parse_strict
+[ 93%] Building CXX object examples/CMakeFiles/route_terminus_or_forward.dir/route_terminus_or_forward.cpp.o
+[ 93%] Built target acl_inherit
+[ 93%] Built target acl_everyone_reserved
+[ 93%] Building CXX object examples/CMakeFiles/route_child_table.dir/route_child_table.cpp.o
+[ 93%] Built target acl_expiry
+[ 93%] Building CXX object examples/CMakeFiles/route_qualified_mount.dir/route_qualified_mount.cpp.o
+[ 93%] Building CXX object examples/CMakeFiles/route_multi_hop.dir/route_multi_hop.cpp.o
+[ 94%] Linking CXX executable view_pool_backend
+[ 94%] Built target view_pool_backend
+[ 95%] Building CXX object examples/CMakeFiles/route_reply_home.dir/route_reply_home.cpp.o
+[ 95%] Linking CXX executable view_device_rope
+[ 95%] Built target view_device_rope
+[ 95%] Building CXX object examples/CMakeFiles/route_label_compact.dir/route_label_compact.cpp.o
+[ 95%] Linking CXX executable view_sync_pool
+[ 95%] Built target view_sync_pool
+[ 96%] Building CXX object examples/CMakeFiles/route_label_stale.dir/route_label_stale.cpp.o
+[ 97%] Linking CXX executable route_child_table
+[ 97%] Linking CXX executable route_dst_is_source_route
+[ 97%] Linking CXX executable route_qualified_mount
+[ 97%] Built target route_dst_is_source_route
+[ 97%] Built target route_qualified_mount
+[ 97%] Linking CXX executable net_transport_seam
+[ 97%] Built target route_child_table
+[ 97%] Building CXX object examples/CMakeFiles/net_kind_catalog.dir/net_kind_catalog.cpp.o
+[ 97%] Linking CXX executable net_udp_datagram
+[ 97%] Linking CXX executable route_terminus_or_forward
+[ 97%] Linking CXX executable route_multi_hop
+[ 97%] Built target net_transport_seam
+[ 97%] Linking CXX executable net_dial_and_listen
+[ 97%] Built target net_udp_datagram
+[ 97%] Linking CXX executable net_tcp_stream_framing
+[ 97%] Built target route_multi_hop
+[ 97%] Built target net_dial_and_listen
+[ 97%] Linking CXX executable net_multi_peer_listener
+[ 98%] Built target route_terminus_or_forward
+[ 98%] Built target net_tcp_stream_framing
+[ 98%] Linking CXX executable net_ws_upgrade
+[ 98%] Built target net_multi_peer_listener
+[ 99%] Built target net_ws_upgrade
+[ 99%] Linking CXX executable route_reply_home
+[ 99%] Linking CXX executable route_label_compact
+[ 99%] Built target route_reply_home
+[ 99%] Built target route_label_compact
+[ 99%] Linking CXX executable route_label_stale
+[ 99%] Built target route_label_stale
+[100%] Linking CXX executable net_kind_catalog
+[100%] Built target net_kind_catalog

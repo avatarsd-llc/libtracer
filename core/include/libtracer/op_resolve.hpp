@@ -202,6 +202,9 @@ struct link_token_seam_t {
     link_id_fn_t fn = nullptr;              /**< @brief The supplier, or null. */
     void* ctx = nullptr;                    /**< @brief Its caller-owned context. */
     const inbound_ref_t* inbound = nullptr; /**< @brief What to resolve; null ⇒ no token. */
+    /** @brief The arrival link's catalog `(kind, role)` (#1650), copied out of @ref inbound
+     *         when the seam is built so the WRITE arm reads it unconditionally; null ⇒ none. */
+    const net::link_kind_t* link_kind = nullptr;
 
     /**
      * @brief Ask for the token — the ONE place the seam is consulted.
@@ -578,7 +581,10 @@ class op_resolver_t {
     /** @brief The token seam as the walk carries it — the pair plus the identity it
      *         resolves, bundled so `resolve_node` grows ONE parameter and not three. */
     [[nodiscard]] link_token_seam_t link_token_seam(const inbound_ref_t& inbound) const noexcept {
-        return link_token_seam_t{.fn = link_id_fn_, .ctx = link_id_ctx_, .inbound = &inbound};
+        return link_token_seam_t{.fn = link_id_fn_,
+                                 .ctx = link_id_ctx_,
+                                 .inbound = &inbound,
+                                 .link_kind = inbound.link_kind};
     }
 
     /**
