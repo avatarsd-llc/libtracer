@@ -2473,6 +2473,13 @@ if(LIBTRACER_NET_PLANE)
     target_link_libraries(empty_src_unacked_test PRIVATE libtracer)
     libtracer_test_warnings(empty_src_unacked_test)
     add_test(NAME empty_src_unacked COMMAND empty_src_unacked_test)
+
+    # #1645 — a node originates READ / WRITE / append through `fwd_router_t::originate`: no
+    # caller-built wire bytes, no fake inbound link, the reply paired to a caller-owned record.
+    add_executable(fwd_originate_test fwd_originate_test.cpp)
+    target_link_libraries(fwd_originate_test PRIVATE libtracer)
+    libtracer_test_warnings(fwd_originate_test)
+    add_test(NAME fwd_originate COMMAND fwd_originate_test)
 endif()
 
 # The SUBSCRIPTION-RETAINED seam (#1610): a remote SUBSCRIBE's two life-of-the-subscription

@@ -1245,6 +1245,70 @@ bool fwd_router_t::remove_child(std::string_view name) {
     return true;
 }
 
+// --- origination (#1645): the reply half — the request half is fwd_originate.cpp --------
+
+namespace {
+
+/**
+ * @brief The `[off, len)` of a FWD frame's `dst` PATH body — on a REPLY, the return route that
+ *        is left once every hop has stripped its own part. `nullopt` for anything else.
+ */
+template <class Cursor>
+[[nodiscard]] std::optional<std::pair<std::size_t, std::size_t>> peek_reply_route(
+    const Cursor& cur) {
+    const auto fwd_h = read_fwd_header(cur, 0);
+    if (!fwd_h || fwd_h->type != wire::type_t::FWD || !fwd_h->opt.pl) return std::nullopt;
+    const auto op_h = read_fwd_header(cur, fwd_h->body_off);
+    if (!op_h || op_h->type != wire::type_t::VALUE) return std::nullopt;
+    const std::size_t dst_pos = fwd_h->body_off + op_h->total;
+    if (dst_pos >= fwd_h->body_off + fwd_h->body_len) return std::nullopt;
+    const auto dst_h = read_fwd_header(cur, dst_pos);
+    if (!dst_h || dst_h->type != wire::type_t::PATH || dst_h->opt.pl) return std::nullopt;
+    return std::pair{dst_h->body_off, dst_h->body_len};
+}
+
+}  // namespace
+
+template <class Cursor>
+sink_slot_t<fwd_router_t::reply_fn_t>::snapshot_t fwd_router_t::reply_target(const Cursor& cur) {
+    // No armed record ⇒ the shipped path exactly: one relaxed load, no lock, no peek.
+    if (origins_.load(std::memory_order_acquire) != nullptr) {
+        if (const auto route = peek_reply_route(cur)) {
+            const auto [off, len] = *route;
+            const auto same_route = [&](std::span<const std::byte> r) {
+                if (r.size() != len) return false;
+                for (std::size_t i = 0; i < len; ++i)
+                    if (static_cast<std::uint8_t>(cur.byte_at(off + i)) !=
+                        std::to_integer<std::uint8_t>(r[i]))
+                        return false;
+                return true;
+            };
+            const std::lock_guard lock(origin_m_);
+            // Newest-first list, so the LAST match is the oldest outstanding request.
+            origin_t* match_prev = nullptr;
+            origin_t* match = nullptr;
+            for (origin_t *prev = nullptr, *o = origins_.load(std::memory_order_relaxed);
+                 o != nullptr; prev = o, o = o->next_) {
+                if (same_route(o->route_)) {
+                    match_prev = prev;
+                    match = o;
+                }
+            }
+            if (match != nullptr) {
+                if (match_prev != nullptr)
+                    match_prev->next_ = match->next_;
+                else
+                    origins_.store(match->next_, std::memory_order_release);
+                const sink_slot_t<reply_fn_t>::snapshot_t s{match->fn_, match->ctx_};
+                match->next_ = nullptr;
+                match->owner_.store(nullptr, std::memory_order_release);
+                return s;
+            }
+        }
+    }
+    return reply_.get();
+}
+
 // The five sink setters. `sink_m_` serializes SETTERS against each other — the slot
 // publishes for racing readers but does not arbitrate two concurrent publishes (#914).
 // No reader ever takes it, so the frame path stays lock-free.
@@ -2366,7 +2430,7 @@ void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_
                     // A REPLY that reaches its originator here is handed to the sink
                     // rope-native (ADR-0055): NO flatten — the sink materializes on demand.
                     // Absent sink ⇒ dropped (as the flatten path would, into a no-op decode).
-                    if (const auto sink = reply_.get(); sink.fn != nullptr)
+                    if (const auto sink = reply_target(cur); sink.fn != nullptr)
                         sink.fn(sink.ctx, frame);
                 }))
             return;
@@ -2418,7 +2482,7 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
                 // view-delivered frame ropes zero-copy off its owning view; a borrowed span is
                 // copied once into an owned segment (the copy the old decode-then-consumer-
                 // encode round-trip already paid).
-                if (const auto sink = reply_.get(); sink.fn != nullptr) {
+                if (const auto sink = reply_target(cur); sink.fn != nullptr) {
                     if (frame_view != nullptr) {
                         sink.fn(sink.ctx, view::rope_t(*frame_view));
                     } else if (view_t owned = view::over_bytes(frame).value_or(view_t{});
@@ -2875,6 +2939,11 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<con
             return;
         }
         in->send(std::span<const std::span<const std::byte>>(iov.data(), iov.size()));
+    } else if (inbound_name.empty()) {
+        // This node originated the request (`originate`) and terminates it: there is no link
+        // to send the reply over, so it goes where a reply arriving home would — the record.
+        if (const auto sink = reply_target(wire::grammar::rope_cursor{*reply}); sink.fn != nullptr)
+            sink.fn(sink.ctx, *reply);
     }
 }
 

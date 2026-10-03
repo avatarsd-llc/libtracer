@@ -36,6 +36,7 @@
  */
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -367,6 +368,8 @@ class fwd_router_t {
         graph_.set_hooks(hooks);
     }
 
+    /** @brief Disarms every @ref origin_t still armed on this router (#1645). */
+    ~fwd_router_t();
     fwd_router_t(const fwd_router_t&) = delete;
     fwd_router_t& operator=(const fwd_router_t&) = delete;
 
@@ -1007,6 +1010,112 @@ class fwd_router_t {
      *                     before this call returns — sends happen inline).
      */
     void on_frame(std::string_view inbound_name, std::span<const std::byte> frame);
+
+    // -- origination (#1645) ------------------------------------------------------------
+
+    /**
+     * @brief The caller-owned record of ONE request this node originated with @ref originate.
+     *
+     * The requester owns correlation and deadline (RFC-0004 §B: forwarders are stateless), so
+     * the state an outstanding request needs lives HERE, in storage the caller provides, and
+     * not in the router. The router threads outstanding records through an intrusive list it
+     * only borrows; it allocates nothing per request and keeps nothing once a record leaves.
+     *
+     * A record is armed by @ref originate and disarmed exactly once, by whichever comes
+     * first: the matching `FWD{REPLY}` (the sink runs, then the record is free again), or
+     * @ref cancel — which is how the caller's own deadline ends a request. There is no timer
+     * and no clock anywhere in the router; "how long to wait" is the caller's decision.
+     * Destroying an armed record cancels it.
+     *
+     * Not copyable and not movable: the router holds its address while it is armed.
+     */
+    class origin_t {
+       public:
+        /**
+         * @brief A record whose reply goes to @p fn with @p ctx.
+         * @param fn  Called once with @p ctx and the matching `FWD{REPLY}` frame, rope-native
+         *            and with the same contract as the @ref on_reply sink. Runs on the thread
+         *            that delivered the reply — a transport receive thread, or the caller's
+         *            own thread inside @ref originate when the reply is produced
+         *            synchronously (a local terminus, a synchronous link). The record is
+         *            already disarmed when it runs, so it may re-originate on the same record.
+         * @param ctx Opaque pointer handed back as @p fn's first argument. It must outlive
+         *            every dispatch: when @ref cancel returns `false` a reply was, or is being,
+         *            delivered, and the caller synchronizes with its own @p fn.
+         */
+        origin_t(reply_fn_t fn, void* ctx) noexcept : fn_(fn), ctx_(ctx) {}
+        /** @brief Cancels the record if it is still armed. */
+        ~origin_t();
+        origin_t(const origin_t&) = delete;
+        origin_t& operator=(const origin_t&) = delete;
+
+        /** @brief True from a successful @ref originate until its reply or @ref cancel. */
+        [[nodiscard]] bool armed() const noexcept {
+            return owner_.load(std::memory_order_acquire) != nullptr;
+        }
+
+       private:
+        friend class fwd_router_t;
+        /** @brief The router this record is armed on, or null. Written under its lock. */
+        std::atomic<fwd_router_t*> owner_{nullptr};
+        origin_t* next_ = nullptr; /**< @brief Next-newer-to-older link, under the lock. */
+        reply_fn_t fn_;            /**< @brief Reply sink. */
+        void* ctx_;                /**< @brief Reply sink context. */
+        /** @brief The return route's packed `PATH` body: `token_` or a caller's key. */
+        std::span<const std::byte> route_{};
+        /** @brief Storage for the generated one-record return route (see `originate`). */
+        std::array<std::byte, 16> token_{};
+    };
+
+    /**
+     * @brief Originate a `READ` or `WRITE` from inside this node, through the SAME ingress
+     *        a frame arriving on a link takes — without building wire bytes and without
+     *        feeding @ref on_frame under a made-up child name.
+     *
+     * Builds `FWD{ op, dst, FIELD?, src, payload? }` (RFC-0004 §B) into ONE exactly-sized
+     * segment from the injected egress backend (@ref router_planes_t::egress), arms @p slot,
+     * and routes the frame with no inbound link: a forward hop strips the mount from `dst`
+     * and grows `src` by nothing (this node is the origin), and a `dst` that names no mount
+     * is resolved here, its reply handed straight to @p slot. The segment is released before
+     * this returns; the router keeps no buffer and no per-request state.
+     *
+     * An **append** is a `WRITE` whose @p dst carries an append selector —
+     * `/…/vertex:subscribers[]` — and so needs no opcode of its own: @p dst's `:field` tail
+     * rides as the `FIELD` selector. `AWAIT` is not originated here.
+     *
+     * The reply is paired by its return route. Without @p reply_to the router spells a fresh
+     * one-segment route per request (a reserved `~o<hex>` NAME, valid as a segment and never a
+     * mount), so pairing is exact. With @p reply_to the request's `src` is that local path —
+     * which a subscribe needs, because the producer delivers to its `src` — and requests
+     * sharing one route pair oldest-first, the arrival-order fallback the reference states
+     * for replies their route cannot tell apart. A reply no armed record matches goes to the
+     * @ref on_reply sink, as before.
+     *
+     * @param slot     The caller's record; must not already be armed.
+     * @param op       `READ` or `WRITE`.
+     * @param dst      The target, spelled from THIS node's root (`/net/<module>/<name>/…`),
+     *                 optionally with a `:field` tail.
+     * @param payload  A `WRITE`'s value — ONE complete TLV, copied into the frame. Empty for
+     *                 a `READ`.
+     * @param reply_to Optional local return route; must not route through a mount. When
+     *                 given, its bytes are borrowed and it must outlive the armed record.
+     * @return Success once the frame has been routed (a reply may already have been
+     *         delivered); `TYPE_MISMATCH` for any other @p op, or a `WRITE` without a
+     *         payload; `INVALID_PATH` for an empty @p dst or an unusable @p reply_to;
+     *         `BACKPRESSURE` when @p slot is already armed or the egress backend refuses the
+     *         frame.
+     */
+    [[nodiscard]] graph::result_t<void> originate(origin_t& slot, graph::fwd_op_t op,
+                                                  const graph::path_t& dst,
+                                                  std::span<const std::byte> payload = {},
+                                                  const graph::path_t* reply_to = nullptr);
+
+    /**
+     * @brief Disarm @p slot — the caller's deadline expired, or it no longer wants the reply.
+     * @return `true` iff @p slot was armed: its sink will not run for this request.
+     *         `false` if it was not armed — its reply was, or is being, delivered.
+     */
+    bool cancel(origin_t& slot) noexcept;
 
     /** @brief The connection registry (test introspection — the shared demux table). */
     [[nodiscard]] const child_registry_t& registry() const noexcept { return registry_; }
@@ -2130,6 +2239,28 @@ class fwd_router_t {
     std::atomic<std::size_t> reply_iov_dropped_{0};
     std::atomic<std::size_t> delivery_iov_dropped_{0};
     std::atomic<std::size_t> malformed_rx_{0};
+    /** @} */
+
+    /**
+     * @brief Where a terminating `FWD{REPLY}` goes: the oldest armed @ref origin_t whose return
+     *        route the reply's `dst` spells (disarmed as it is taken), else the @ref on_reply
+     *        sink (#1645). With nothing armed it is that sink's snapshot and nothing more.
+     */
+    template <class Cursor>
+    [[nodiscard]] sink_slot_t<reply_fn_t>::snapshot_t reply_target(const Cursor& cur);
+
+    /**
+     * @name The armed-origin list (#1645)
+     *
+     * Cold, so behind the drop counters for the reason they sit behind the hot state. The
+     * records are the CALLER's storage; the router holds only this head, newest first.
+     * `origins_` is written under `origin_m_` and read lock-free only as the "anything
+     * armed?" hint that keeps the reply terminus lock-free when nothing is.
+     * @{
+     */
+    mutable std::mutex origin_m_;
+    std::atomic<origin_t*> origins_{nullptr};
+    std::atomic<std::uint32_t> origin_seq_{0};
     /** @} */
 };
 
