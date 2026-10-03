@@ -153,7 +153,7 @@ class fwd_router_t {
     // Per-frame sinks: function pointer + opaque context, never std::function (ADR-0047).
     using reply_fn_t            = void (*)(void* ctx, const view::rope_t& reply);
     using inbound_fn_t          = void (*)(void* ctx, std::string_view inbound,
-                                           const wire::tlv_t& fwd);
+                                           const wire::tlv_node_t& fwd);  // read in place
     using raw_fn_t              = void (*)(void* ctx, std::string_view inbound,
                                            std::span<const std::byte> frame);
     using compact_delivery_fn_t = void (*)(void* ctx, std::span<const std::byte> route,

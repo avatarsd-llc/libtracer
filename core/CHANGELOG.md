@@ -46,6 +46,18 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `tr::wire::config_reader_t`; `tr::net::sink_slot_t<Fn>` → `tr::sink_slot_t<Fn>`. Code inside
   `namespace tr::graph` that named the view types unqualified must now qualify them as `view::`
   or add a using-declaration in its own `.cpp`.
+- **`fwd_router_t::inbound_fn_t` now receives a `const wire::tlv_node_t&` instead of a decoded
+  `const wire::tlv_t&` ([#1648](https://github.com/avatarsd-llc/libtracer/issues/1648)).**
+  Router ingress used to build an owning `tlv_t` tree for every inbound FWD while an observer was
+  installed: 4 heap allocations and 768 bytes for a typical four-child FWD. The observer now gets
+  the frame read in place, validated exactly as `wire::decode` would and with nothing built, so
+  observing costs zero allocations. `bench_forward_heap` gates the observed hop at zero beside the
+  bare one. The node borrows the inbound bytes and is valid only during the call.
+  **Migration:** read `fwd.type()`, `fwd.opt()` and `fwd.trailer()` instead of the fields, and walk
+  `for (const wire::tlv_node_t c : fwd.children())` instead of indexing `fwd.children[i]`. A
+  child's `bytes()` is its wire encoding, so `wire::encode(fwd.children[i])` becomes
+  `c.bytes()`. An observer that needs an owning tree can still call `wire::decode(fwd.bytes())`.
+
 - **The config member `reader_guard_t` is renamed `guard_t`, and a fragment that still defines
   the old name no longer compiles
   ([#1703](https://github.com/avatarsd-llc/libtracer/issues/1703)).** The guard serializes
@@ -78,6 +90,16 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   guard) and spell `tr::guard`, `tr::guard_scope_t`, `tr::mutex_guard_t`, `tr::no_guard_t` and
   `tr::graph::guard_t`; drop a forward declaration of the guard types, or move it to
   `namespace tr`; mark a custom pool policy's `lock()` / `unlock()` `noexcept`.
+
+### Added
+
+- **`wire::tlv_node_t` and `wire::tlv_children_t`: a non-owning TLV child walker in `frame.hpp`
+  ([#1648](https://github.com/avatarsd-llc/libtracer/issues/1648)).** `tlv_node_t::over(span)`
+  validates one frame with the same grammar walk as `decode` and returns its root as a borrowed
+  span plus the header facts (32 bytes, against 96 for a `tlv_t`). `children()` is a forward range
+  over the direct children that reads one header per step and allocates nothing. Every vector in
+  the conformance corpus reads identically through the walker and through `decode`. `decode`
+  remains for callers that keep a tree or pass one to a `tlv_t` API.
 
 ### Changed
 
