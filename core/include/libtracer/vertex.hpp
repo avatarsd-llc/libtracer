@@ -807,11 +807,14 @@ using write_seq_t = std::uint32_t;
  * Cortex-M0/M0+), and never a libatomic call. @ref kForceGuardedRmw selects the guarded
  * binding on a host whose atomics are native, so that path is testable there.
  *
- * @tparam T An unsigned integer, at most a machine word wide.
+ * @tparam T      An unsigned integer, at most a machine word wide.
+ * @tparam kOrder The memory order of every access: `seq_cst` by default (the write sequence's
+ *                Dekker pair needs it), `relaxed` for a tally that orders nothing.
  */
-template <class T>
+template <class T, std::memory_order kOrder = std::memory_order_seq_cst>
 using bound_rmw_counter_t =
-    ::tr::rmw_counter_t<T, guard_t, !kForceGuardedRmw && std::atomic<T>::is_always_lock_free>;
+    ::tr::rmw_counter_t<T, guard_t, !kForceGuardedRmw && std::atomic<T>::is_always_lock_free,
+                        kOrder>;
 
 /**
  * @brief The counter that carries `write_seq_t` — native where the width is lock-free,

@@ -2126,14 +2126,16 @@ class fwd_router_t {
                                                             label_not_found. */
     /**
      * @brief Labelled hops taken — the one counter the label plane bumps on a SUCCESS arm, so
-     *        the build's `rmw_counter_t` (#1697).
+     *        the build's `rmw_counter_t` (#1697), relaxed.
      *
-     * Every labelled hop pays this bump, so it must not be a libatomic call on any target:
-     * native it is the `amoadd.w` / `lock xadd` the plain atomic was, and on a core with no
-     * atomic RMW (ESP32-C3, Cortex-M0) it is one section of `guard_t` instead of
-     * `__atomic_fetch_add_4`. Word-wide, so the native binding holds on rv32imac.
+     * Every labelled hop pays this bump, so it must not be a libatomic call on any target.
+     * It orders nothing, so it is `relaxed` (`core/STYLE.md` §Introspection, rule 5): native it
+     * is the plain AMO the relaxed atomic was (`amoadd.w` on rv32imac, `lock add` on x86-64,
+     * `ldadd` on aarch64), with no acquire-release fence. On a core with no atomic RMW
+     * (ESP32-C3, Cortex-M0) it is one section of `guard_t` instead of `__atomic_fetch_add_4`.
+     * Word-wide, so the native binding holds on rv32imac.
      */
-    graph::bound_rmw_counter_t<std::size_t> label_resolves_;
+    graph::bound_rmw_counter_t<std::size_t, std::memory_order_relaxed> label_resolves_;
     // The label plane's substrate (#603 defect 1 / #873 family 3): the route-handle tables
     // draw from it, and so do the ADVERTISE arm's route re-encodes and the two over-wide
     // route reads on the COMPACT/NACK arms — every one of which was a throwing allocation on
