@@ -709,6 +709,31 @@ class GateTimesBothFamilySets(unittest.TestCase):
             if not a[0].endswith("bench_libtracer"):
                 self.assertEqual((a[1:], psi), ([], True), "compact/demux: one scored run")
 
+    def run_best_of(self, runs: int) -> list[tuple[list[str], bool]]:
+        seen: list[tuple[list[str], bool]] = []
+
+        def fake_timed(argv, timeout, score_pressure=True):
+            seen.append((argv, score_pressure))
+            return ""
+        with tempfile.TemporaryDirectory() as d, \
+                unittest.mock.patch.object(pg, "has_family_sets", lambda p: True), \
+                unittest.mock.patch.object(pg, "timed", fake_timed), \
+                contextlib.redirect_stdout(io.StringIO()):
+            pg.best_of(self.bins(pathlib.Path(d), "c"), runs)
+        return seen
+
+    def test_best_of_runs_every_single_set_run_before_any_multi_run(self):
+        # The legacy/ratchet path (no baseline binary) takes the same order as the paired one.
+        seen = self.run_best_of(runs=3)
+        mains = [(a[1:], psi) for a, psi in seen if a[0].endswith("bench_libtracer")]
+        self.assertEqual(mains, [(list(pg.GATE_FAMILY_SET), True)] * 3
+                         + [(list(pg.GATE_FAMILY_SET_MULTI), False)] * 3)
+        last_scored = max(i for i, (_a, psi) in enumerate(seen) if psi)
+        first_multi = min(i for i, (a, _p) in enumerate(seen) if a[1:] ==
+                          list(pg.GATE_FAMILY_SET_MULTI))
+        self.assertLess(last_scored, first_multi,
+                        "a pressure-scored run launched after a MULTI run's residue")
+
     def test_a_baseline_without_sets_keeps_the_old_single_invocation(self):
         seen = self.run_paired(sets=False)
         self.assertTrue(seen)

@@ -617,8 +617,9 @@ def lkv_ratio_gate_paired(bench: pathlib.Path, base_bench: pathlib.Path,
 #   - `--family-set multi`, judged on foreign time ONLY. Its own threads' pressure is
 #     recorded, not scored. A real intruder still shows as foreign CPU time on the bench
 #     CPUs, so it still makes the verdict INCONCLUSIVE.
-# Every SINGLE invocation runs before every MULTI one (`paired_samples` takes all pairs of
-# the single set first), so no pressure-scored launch follows a MULTI run's residue.
+# Every SINGLE invocation runs before every MULTI one (`paired_samples` takes all pairs and
+# `best_of` all runs of the single set first, and the pressure-scored lkv ratio gate runs
+# ahead of both), so no pressure-scored launch follows a MULTI run's residue.
 #
 # Both arms must speak it or neither uses it: a baseline built before family sets refuses
 # `--families` (exit 2), and then both arms sweep everything in one invocation, pressure
@@ -690,30 +691,33 @@ def best_of(binaries: dict[str, pathlib.Path], runs: int) -> dict[str, dict]:
     Each BINARY is executed once per run and its rows are matched only against the points
     that declare it, so adding a point from a new binary costs one extra process per run
     rather than one per point.
+
+    The pass loop is outermost, as in @ref paired_samples: every run of the pressure-scored
+    SINGLE pass launches before any MULTI run, so none starts into a MULTI run's residue.
+    The fold is a per-point min/max, so the order does not change the result.
     """
     cur: dict[str, dict] = {}
-    passes = _passes(gate_sweep_args(binaries))
-    for _ in range(max(1, runs)):
-        rows_by_bin: dict[str, list] = {}
-        for args, siblings, psi in passes:
+    for args, siblings, psi in _passes(gate_sweep_args(binaries)):
+        for _ in range(max(1, runs)):
+            rows_by_bin: dict[str, list] = {}
             for b, path in binaries.items():
                 if b == "main":
-                    rows_by_bin.setdefault(b, []).extend(run_bench_once(path, args, psi))
+                    rows_by_bin[b] = run_bench_once(path, args, psi)
                 elif siblings:
                     rows_by_bin[b] = run_bench_once(path)
-        for (b, m, s, f, e) in POINTS:
-            if b not in rows_by_bin:
-                continue
-            v = metric(rows_by_bin[b], m, s, f, e)
-            if not v:
-                continue
-            k = f"{m}/{s}/{f}/{e}"
-            if k not in cur:
-                cur[k] = v
-            else:
-                cur[k]["p50_ns"] = min(cur[k]["p50_ns"], v["p50_ns"])
-                cur[k]["deliv_s"] = max(cur[k]["deliv_s"], v["deliv_s"])
-                cur[k]["mean_ns"] = min(cur[k]["mean_ns"], v["mean_ns"])
+            for (b, m, s, f, e) in POINTS:
+                if b not in rows_by_bin:
+                    continue
+                v = metric(rows_by_bin[b], m, s, f, e)
+                if not v:
+                    continue
+                k = f"{m}/{s}/{f}/{e}"
+                if k not in cur:
+                    cur[k] = v
+                else:
+                    cur[k]["p50_ns"] = min(cur[k]["p50_ns"], v["p50_ns"])
+                    cur[k]["deliv_s"] = max(cur[k]["deliv_s"], v["deliv_s"])
+                    cur[k]["mean_ns"] = min(cur[k]["mean_ns"], v["mean_ns"])
     return cur
 
 
@@ -1174,6 +1178,9 @@ def main() -> int:
         return render_verdict(fails, [], tier, sample_note, LEDGER)
 
     runs = int(args[args.index("--runs") + 1]) if "--runs" in args else DEFAULT_RUNS
+    # The lkv ratio runs FIRST here too: it is pressure-scored, and best_of's last pass is
+    # the MULTI family set, whose own-pressure residue it must not inherit.
+    lkv_fails = lkv_ratio_gate(bench)  # ADR-0060 same-run ratio (no baseline; skips if absent)
     cur = best_of(cand_bins, runs)
     cur.update(mem_probe(bench_fwd))  # fold the mem:* points into the same baseline dict
     base = json.loads(BASELINE.read_text()) if BASELINE.exists() else None
@@ -1228,7 +1235,7 @@ def main() -> int:
             if v["deliv_s"] > 0 and v["deliv_s"] < FLOOR_DELIV:
                 fails.append(f"{k} deliv {v['deliv_s']:,.0f} under floor {FLOOR_DELIV:,}")
         print(line)
-    fails += lkv_ratio_gate(bench)  # ADR-0060 same-run ratio (no baseline; skips if absent)
+    fails += lkv_fails
     print_conditions()
     if not LEDGER.clean:
         # A contended sample must not become the recorded baseline either.
