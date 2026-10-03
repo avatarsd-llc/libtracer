@@ -92,6 +92,9 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   (`NAME <key> SETTINGS{NAME "dtype" NAME <tag>, [NAME "required" VALUE 01], <descriptor>}`).
   A `SPEC` whose config omits a `required` key, or carries a catalogued key in another type or
   width, is refused `TYPE_MISMATCH` at the write, before any factory runs or socket is built.
+  The spec names this code: RFC-0014 §2 maps a *malformed* config to
+  `ERROR{tr::schema::type_mismatch}` (`0x0030`). `SCHEMA_NOT_FOUND` stays reserved for an
+  unknown config type (an unregistered kind).
   Uncatalogued keys stay ignored. A module that declares nothing is unchanged: the empty
   `SETTINGS`, no validation. The catalog is fixed per endpoint, so a later `register_module`
   under the same module that names a different table answers `PATH_IN_USE`. Kind-private keys
