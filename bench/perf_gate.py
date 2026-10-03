@@ -211,7 +211,7 @@ DEFAULT_TIER = "advisory"
 # and field writes, `op_resolve` reads, FWD COMPACT emission, the RX span sink — and not
 # one of the then-ten points is downstream of that call, so every gate stayed green
 # through a release. They cost NOTHING extra to run: `bench_libtracer`'s default sweep
-# already emits these rows (`run_lkv_store_gate`), so this is two more keys read out of
+# already emits these rows (`run_lkv_store_rows`), so this is two more keys read out of
 # output the gate was already collecting, not two more measurements — the added
 # wall-clock is zero. They were taken at 64 B only, on the argument that the sweep's
 # 1024 B twins move with them (measured, #1250) and a second size would buy correlated
@@ -219,8 +219,8 @@ DEFAULT_TIER = "advisory"
 # and payload in one block, which made 64 B ~30% faster and 1024 B ~2x slower (a 1072 B
 # request misses glibc's 1032 B tcache), and v0.17.0 shipped with the gate green because both
 # directions met on one size. So the heap backend is also gated at 1024 B, on both rows:
-# `lkv-store-heap` (alloc + copy) and `lkv-alloc-heap` (the alloc/free alone, which the
-# ADR-0060 pool/heap RATIO below cannot gate — a slower heap only raises that ratio). The pool
+# `lkv-store-heap` (alloc + copy) and `lkv-alloc-heap` (the alloc/free alone; the ADR-0060
+# pool/heap ratio below is report-only, so this row is its only gate). The pool
 # rows stay at 64 B: a pool slot's layout does not depend on the payload size. These two
 # rows also come from output the default sweep already emits, so they too add no wall-clock.
 # Both run in the sub-100 ns band, so `LAT_TICK_NS` tick-guards their latency legs and the
@@ -583,7 +583,7 @@ def lkv_ratio_report_paired(bench: pathlib.Path, base_bench: pathlib.Path,
 #     recorded, not scored. A real intruder still shows as foreign CPU time on the bench
 #     CPUs, so it still makes the verdict INCONCLUSIVE.
 # Every SINGLE invocation runs before every MULTI one (`paired_samples` takes all pairs and
-# `best_of` all runs of the single set first, and the pressure-scored lkv ratio gate runs
+# `best_of` all runs of the single set first, and the lkv ratio report runs
 # ahead of both), so no pressure-scored launch follows a MULTI run's residue.
 #
 # Both arms must speak it or neither uses it: a baseline built before family sets refuses
