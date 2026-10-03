@@ -1522,13 +1522,15 @@ class vertex_t {
             ++shed;
             token = source.try_alloc(bytes, ring_entry_t::kAlign);
         }
+        // The shed is accounted on BOTH outcomes, so once, here. Under the reliable arm `shed`
+        // is always zero (only best-effort sheds), so this is a no-op there.
+        if (drops != nullptr) drops->ring_shed += shed;
+        r.gaps += shed;
         if (token == nullptr) {
             // Nothing admitted. Under the reliable arm nothing was shed either, and the caller
             // turns our `false` into BACKPRESSURE. Under best-effort the ring was already
             // emptied above, so the loss is real and is accounted rather than silent.
             if (drops != nullptr && !arm_reliable) drops->ring_append = true;
-            if (drops != nullptr) drops->ring_shed += shed;
-            r.gaps += shed;
             return !arm_reliable;
         }
         // Placed at the front of its own reservation: the queue's bookkeeping is charged to the
@@ -1537,8 +1539,6 @@ class vertex_t {
                                              .bytes = bytes,
                                              .gap_before = shed != 0});
         ++e->appended_since_flush;  // the drain counts APPENDS, not seq (#925)
-        if (drops != nullptr) drops->ring_shed += shed;
-        r.gaps += shed;
         return true;
     }
 
