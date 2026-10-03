@@ -8,28 +8,23 @@
 # Source = "GitHub Actions".
 name: docs
 
+# ── ALWAYS TRIGGERED, GATED BY A `changes` JOB (#1614) ──────────────────────────────
+# `build` is a REQUIRED check, and a required check from a path-filtered workflow
+# never reports on a diff outside its paths, so such a pull request is BLOCKED with
+# nothing to fix. The workflow therefore triggers on every change; the `changes` job
+# matches a pull request's diff against DOCS_PATHS (derived by tools/gen_ci_paths.py,
+# checked by core-ci's `ci-paths` job), `docs-build` runs only when something matched,
+# and the `build-required` job — NAMED `build`, the only producer of that check name —
+# always reports the verdict.
+#
+# A push to main always builds and deploys, exactly as a matching push did before.
+# Skipping there would be unsafe with the shared `pages` group below: GitHub keeps one
+# PENDING run per group, so a later push that touched no docs input could replace a
+# pending push that did, and its skipped build would leave that content undeployed.
 on:
   push:
     branches: [main]
-    paths:
-      - "docs/**"
-      - "*.md"
-      - "bench/**"
-      - "tests/conformance/**"
-      - "core/include/**" # public headers feed the Doxygen source refs
-      - "core/Doxyfile"
-      - "tools/**" # the citation gate, the release-subtree assembler, the version manifest
-      - ".github/workflows/docs.yml"
   pull_request:
-    paths:
-      - "docs/**"
-      - "*.md"
-      - "bench/**"
-      - "tests/conformance/**"
-      - "core/include/**"
-      - "core/Doxyfile"
-      - "tools/**"
-      - ".github/workflows/docs.yml"
   workflow_dispatch:
 
 permissions:
@@ -58,10 +53,88 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  build:
+  # Decides whether a pull request can affect the docs build. Hosted, read-only, and
+  # it executes nothing from the diff beyond `git diff`.
+  changes:
     runs-on: ubuntu-latest
-    # `build` is a REQUIRED status check, so a hung step here does not fail a PR — it
-    # blocks every merge behind it for GitHub's 6-hour default. That is not theoretical:
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      # DERIVED by tools/gen_ci_paths.py -- do not hand-edit: this list is what
+      # docs's jobs read and build. `gen_ci_paths.py --apply` rewrites it.
+      DOCS_PATHS: |
+        CONTEXT.md
+        bench/**
+        bindings/rust/examples/fwd_read_stats.rs
+        bindings/rust/examples/fwd_subscribe.rs
+        bindings/rust/examples/fwd_write.rs
+        bindings/rust/examples/path_tlv.rs
+        bindings/rust/examples/value_crc.rs
+        bindings/typescript/examples/remote-error.mjs
+        bindings/typescript/examples/subscribe.mjs
+        bindings/typescript/examples/value-crc.mjs
+        bindings/typescript/examples/write-read.mjs
+        bindings/typescript/examples/ws-dial.mjs
+        core/**
+        docs/**
+        index.md
+        integrations/esp-idf/libtracer/**
+        integrations/esp-idf/tests/host/**
+        tests/conformance/**
+        tools/**
+        .github/workflows/docs.yml
+    outputs:
+      relevant: ${{ steps.decide.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # A pull_request checkout is the merge commit: HEAD^1 is the base tip it was
+          # merged onto, so HEAD^1..HEAD is exactly what the PR changes.
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Match the diff against DOCS_PATHS
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+        # Every uncertain branch answers `true` (build): a needless build costs minutes,
+        # a wrong skip is a green required check on docs nobody built. The patterns are
+        # `<dir>/**` and exact paths, and bash's `[[ == ]]` lets `*` cross `/`, so a
+        # match here is never narrower than GitHub's own glob. Pushes always build (see
+        # the header).
+        run: |
+          set -euo pipefail
+          relevant=true
+          if [ "$EVENT" = "pull_request" ] && git rev-parse -q --verify HEAD^2 >/dev/null; then
+            changed="$RUNNER_TEMP/changed"
+            git diff --name-only -z HEAD^1 HEAD > "$changed"
+            relevant=false
+            mapfile -t patterns <<< "$DOCS_PATHS"
+            while IFS= read -r -d '' file; do
+              for pat in "${patterns[@]}"; do
+                [ -n "$pat" ] || continue
+                # shellcheck disable=SC2053  # $pat is a glob on purpose
+                if [[ "$file" == $pat ]]; then
+                  echo "match: $file  (pattern $pat)"
+                  relevant=true
+                  break 2
+                fi
+              done
+            done < "$changed"
+            [ "$relevant" = true ] || echo "no changed path matches DOCS_PATHS; the docs build is skipped"
+          else
+            echo "event '$EVENT': building unconditionally"
+          fi
+          echo "relevant=$relevant" >> "$GITHUB_OUTPUT"
+          echo "relevant=$relevant"
+
+  docs-build:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    # Its verdict is the REQUIRED status check `build` (through `build-required`), so a
+    # hung step here does not fail a PR — it blocks every merge behind it for GitHub's
+    # 6-hour default. That is not theoretical:
     # on 2026-08-19 the `Install dependencies` step below wedged twice in one afternoon,
     # sitting `in_progress` for 56 and 36 minutes with no step progress, while the rest of
     # the matrix sat green. Both times cancel+rerun cleared it and the rerun passed in ~17
@@ -105,6 +178,12 @@ jobs:
       # cross-core matrix in gen_results_page.py; without a toolchain that row would
       # degrade to an "unavailable" note on the live page (ADR-0032 §auto-published).
       - uses: dtolnay/rust-toolchain@stable
+      # DOCS_PATHS is derived from inputs that mostly live in this job's own gate
+      # (docs/conf.py's include_patterns, the pages' literalincludes, this file's
+      # commands), so it is re-checked here, in a run already gated on it; core-ci's
+      # `ci-paths` job checks it too. A configure of the core, no build.
+      - name: The changes job's DOCS_PATHS covers everything this build reads
+        run: python3 tools/gen_ci_paths.py --check
       - name: API docs gate (Doxygen, strict — undocumented public symbol fails)
         run: doxygen core/Doxyfile
       # Doc-citation gate: every symbol citation in the docs must still name exactly one
@@ -283,11 +362,41 @@ jobs:
         with:
           path: docs/_build/html
 
+  # THE REQUIRED CHECK `build` (#1614). Always runs: green when `docs-build` passed, or
+  # when `changes` decided it had nothing to build and it was skipped; red otherwise
+  # (failure, cancellation, or a skip the decision did not ask for).
+  build-required:
+    name: build
+    if: always()
+    needs: [changes, docs-build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Combine the docs job results into one verdict
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          RELEVANT: ${{ needs.changes.outputs.relevant }}
+          BUILD: ${{ needs.docs-build.result }}
+        run: |
+          set -euo pipefail
+          if [ "$CHANGES" != "success" ]; then
+            echo "::error::the changes job ended '$CHANGES'; there is no decision to report"
+            exit 1
+          fi
+          if [ "$RELEVANT" = "true" ]; then want=success; else want=skipped; fi
+          if [ "$BUILD" != "$want" ]; then
+            echo "::error::docs-build ended '$BUILD', expected '$want' (relevant=$RELEVANT)"
+            exit 1
+          fi
+          echo "ok: docs-build $BUILD (relevant=$RELEVANT)"
+
   deploy:
-    needs: build
+    needs: docs-build
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    # #1403 bounded `build` above and left this job unbounded — it is a single
+    # #1403 bounded the build job above and left this job unbounded — it is a single
     # actions/deploy-pages@v4 call against a GitHub service and can hang the same way.
     # Measured max 1.05 min over the 10 deploy runs (healthy max 0.38, p50 0.23);
     # 10 = ~9.5x the worst observed.

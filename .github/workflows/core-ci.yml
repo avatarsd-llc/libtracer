@@ -170,7 +170,7 @@ jobs:
     timeout-minutes: 10
     env:
       # DERIVED by tools/gen_ci_paths.py -- do not hand-edit: this list is what
-      # core-ci's jobs configure and compile. `gen_ci_paths.py --apply` rewrites it.
+      # core-ci's jobs read and build. `gen_ci_paths.py --apply` rewrites it.
       CORE_CI_PATHS: |
         bench/**
         core/**

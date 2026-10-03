@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
-"""Derive core-ci.yml's ``CORE_CI_PATHS`` job gate from what core-ci actually builds.
+"""Derive the path gates of core-ci.yml and docs.yml from what their jobs actually read.
 
 ``core-ci`` is the one workflow that owns the whole host ``ctest`` suite, and its
 trigger was a HAND-WRITTEN allowlist: ``core/**``, ``bench/**``,
@@ -46,18 +46,28 @@ editing a ``CMakeLists.txt`` under ``core/``, and ``core/**`` is a root, so
 core-ci's jobs run and this check runs with them. The derived list can go stale
 only in a run that is already gated on it.
 
-Scope: this derives ONE workflow's gate, core-ci.yml. The four other workflows
-that build or run ctest were audited for the same hole while fixing #1082; the
-result is recorded here so the audit is not repeated. None of them is the gate for
-the host suites, and none is changed by this script.
+docs.yml (#1614). It owns the other path-dependent required check, ``build``, and
+gets the same shape: an always-triggered workflow, a ``changes`` job reading the
+``DOCS_PATHS`` block, and an aggregator named ``build``. Its list is derived from:
 
-  * ``docs.yml`` -- runs a ctest sweep (``bench/gen_test_report.py``) and its trigger
-    names neither ``core/src/**`` nor ``integrations/**``, so the sweep is skipped for
-    a change to either. NOT a gate hole: ``gen_test_report.py`` calls ``ctest``
-    through ``subprocess.run`` with no ``check=`` and discards the exit code -- it
-    renders the outcome into ``docs/test-report.md``. A failing suite there is a red
-    row on a published page, not a red check. Residual, unfixed: the published report
-    can describe a tree the sweep never re-ran on.
+  * every ``cmake -S <dir>`` it runs, plus the core configure's references above
+    (it configures the core with ``-DBUILD_TESTING=ON`` for the test report);
+  * the Sphinx config directory (``sphinx-build -c``) and every source that
+    ``docs/conf.py``'s literal ``include_patterns`` admits;
+  * every file a published page pulls in by ``{literalinclude}`` or ``{include}``
+    (the binding examples live outside ``docs/``);
+  * the directory of every script a ``run:`` step executes, and the Doxyfile;
+  * ``DOCS_DECLARED``: inputs that only script code names, each with its reason.
+
+This also closes the old residual that docs.yml's hand-written trigger named
+neither ``core/src/**`` nor ``integrations/**``, so its test-report sweep could
+describe a tree it never re-ran on.
+
+Scope beyond those two. The other workflows that build or run ctest were audited
+for the same hole while fixing #1082; the result is recorded here so the audit is
+not repeated. None of them is the gate for the host suites or owns a required
+check, and none is changed by this script.
+
   * ``capability-matrix.yml`` -- NEGATIVE, and the premise is wrong:
     ``tools/gen_capability_matrix.py`` imports no ``subprocess`` and invokes no
     ctest. It cites ctest NAMES as evidence and checks the named artifacts exist.
@@ -88,6 +98,7 @@ the core project, not a parse of the CMake text.
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import pathlib
 import re
@@ -96,8 +107,7 @@ import sys
 import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-WORKFLOW = ROOT / ".github" / "workflows" / "core-ci.yml"
-WORKFLOW_REL = ".github/workflows/core-ci.yml"
+WORKFLOWS_REL = ".github/workflows"
 
 # The core project is the one whose test targets reach outside their own root, so it
 # is the one that gets configured. `-DBUILD_TESTING=ON` is what registers the tests;
@@ -110,10 +120,24 @@ CONFIGURE_ARGS = ["-DBUILD_TESTING=ON"]
 # Every generated note line carries MARKER, which is how `--apply` recognises its own
 # previous output and replaces it instead of stacking a second copy above the key.
 MARKER = "gen_ci_paths.py"
-GENERATED_NOTE = [
-    "# DERIVED by tools/gen_ci_paths.py -- do not hand-edit: this list is what",
-    "# core-ci's jobs configure and compile. `gen_ci_paths.py --apply` rewrites it.",
-]
+
+
+def generated_note(workflow: str) -> list[str]:
+    """@brief The comment lines written above a generated block."""
+    return [
+        "# DERIVED by tools/gen_ci_paths.py -- do not hand-edit: this list is what",
+        f"# {workflow}'s jobs read and build. `gen_ci_paths.py --apply` rewrites it.",
+    ]
+
+
+# Inputs of the docs build that only SCRIPT CODE names, so no configure, Sphinx config
+# or workflow command can report them. Each is declared here with its reason and is
+# part of the checked list like any derived entry; keep this list short.
+DOCS_DECLARED = {
+    # bench/gen_results_page.py runs tests/conformance/run-all.py for the published
+    # conformance matrix; the harness and its vectors live under this tree.
+    "tests/conformance": "conformance harness run by bench/gen_results_page.py",
+}
 
 
 # --- workflow parsing -------------------------------------------------------
@@ -132,15 +156,12 @@ def source_roots(text: str) -> set[str]:
     return roots
 
 
-KEY = "CORE_CI_PATHS"
+def pattern_blocks(lines: list[str], key: str) -> list[tuple[int, int, str, list[str]]]:
+    """@brief Locate every ``<key>: |`` block scalar in a workflow.
 
-
-def pattern_blocks(lines: list[str]) -> list[tuple[int, int, str, list[str]]]:
-    """@brief Locate every ``CORE_CI_PATHS: |`` block scalar in the workflow.
-
-    The list is not a trigger filter any more (#1614): core-ci triggers on every
-    change, and its ``changes`` job reads this block to decide whether the heavy jobs
-    run. One pattern per line, no quotes.
+    The list is not a trigger filter (#1614): the workflow triggers on every change,
+    and its ``changes`` job reads this block to decide whether the heavy jobs run.
+    One pattern per line, no quotes.
 
     Returns ``(start, end, indent, patterns)`` per block, where ``[start, end)`` is
     the line span to replace -- generated comment lines immediately above the key are
@@ -148,7 +169,7 @@ def pattern_blocks(lines: list[str]) -> list[tuple[int, int, str, list[str]]]:
     """
     out: list[tuple[int, int, str, list[str]]] = []
     for i, line in enumerate(lines):
-        m = re.match(rf"^(?P<indent>\s*){KEY}:\s*\|\s*$", line)
+        m = re.match(rf"^(?P<indent>\s*){key}:\s*\|\s*$", line)
         if not m:
             continue
         indent = m.group("indent")
@@ -168,10 +189,10 @@ def pattern_blocks(lines: list[str]) -> list[tuple[int, int, str, list[str]]]:
     return out
 
 
-def render(indent: str, patterns: list[str]) -> list[str]:
-    """@brief The generated replacement lines for one ``CORE_CI_PATHS`` block."""
-    lines = [indent + note for note in GENERATED_NOTE]
-    lines.append(f"{indent}{KEY}: |")
+def render(indent: str, key: str, workflow: str, patterns: list[str]) -> list[str]:
+    """@brief The generated replacement lines for one ``<key>`` block."""
+    lines = [indent + note for note in generated_note(workflow)]
+    lines.append(f"{indent}{key}: |")
     lines.extend(f"{indent}  {p}" for p in patterns)
     return lines
 
@@ -274,15 +295,102 @@ def minimal_patterns(roots: set[str], refs: set[pathlib.Path]) -> list[str]:
     return sorted([f"{d}/**" for d in kept_dirs] + [str(f) for f in kept_files])
 
 
-def derive() -> list[str]:
-    """@brief The full derived pattern list, workflow self-reference last."""
-    text = WORKFLOW.read_text("utf-8")
+# --- docs.yml: Sphinx, Doxygen and the scripts its steps run ---------------------
+
+
+def _sphinx_dirs(text: str) -> tuple[str, str]:
+    """@brief ``(confdir, srcdir)`` of the workflow's ``sphinx-build -c <conf> <src>``."""
+    m = re.search(r"sphinx-build\b[^\n]*?\s-c\s+(\S+)\s+(\S+)", text)
+    if not m:
+        raise SystemExit("error: docs.yml has no `sphinx-build ... -c <conf> <src>` "
+                         "line; update tools/gen_ci_paths.py")
+    return m.group(1), m.group(2)
+
+
+def _include_patterns(conf: pathlib.Path) -> list[str]:
+    """@brief The literal ``include_patterns`` list of a Sphinx ``conf.py``."""
+    tree = ast.parse(conf.read_text("utf-8"))
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(
+                getattr(t, "id", None) == "include_patterns" for t in node.targets):
+            return list(ast.literal_eval(node.value))
+    raise SystemExit(f"error: no literal include_patterns in {conf}")
+
+
+INCLUDE_DIRECTIVE = re.compile(r"\{(?:literalinclude|include)\}\s+(\S+)")
+
+
+def docs_inputs(text: str) -> tuple[set[str], set[pathlib.Path]]:
+    """@brief Directories and files the docs build reads, beyond the core configure.
+
+    * the Sphinx config directory (``-c``) whole, and every source its
+      ``include_patterns`` admits;
+    * every file a published page pulls in by ``{literalinclude}``/``{include}``;
+    * the directory of every script a ``run:`` step executes (a script imports its
+      neighbours, so its directory is the honest unit);
+    * DOCS_DECLARED.
+    """
+    confdir, srcdir = _sphinx_dirs(text)
+    src = (ROOT / srcdir).resolve()
+    dirs = {confdir.strip("/")} | set(DOCS_DECLARED)
+    files: set[pathlib.Path] = set()
+    for pattern in _include_patterns(ROOT / confdir / "conf.py"):
+        if pattern.endswith("/**") and not any(c in pattern[:-3] for c in "*?["):
+            dirs.add((src / pattern[:-3]).relative_to(ROOT).as_posix())
+            pages = (src / pattern[:-3]).rglob("*.md")
+        else:
+            pages = src.glob(pattern)
+        for page in pages:
+            if page.is_file():
+                files.add(page.relative_to(ROOT))
+    for page in list(files):
+        for target in INCLUDE_DIRECTIVE.findall((ROOT / page).read_text("utf-8")):
+            base = src if target.startswith("/") else (ROOT / page).parent
+            ref = (base / target.lstrip("/")).resolve()
+            if ref.is_file() and ROOT in ref.parents:
+                files.add(ref.relative_to(ROOT))
+    for script in re.findall(r"\b(?:python3|bash|sh)\s+([\w./-]+\.(?:py|sh))\b", text):
+        parent = (ROOT / script).resolve().parent
+        if (ROOT / script).is_file() and parent != ROOT and ROOT in parent.parents:
+            dirs.add(parent.relative_to(ROOT).as_posix())
+    for doxyfile in re.findall(r"\bdoxygen\s+(\S+)", text):
+        if (ROOT / doxyfile).is_file():
+            files.add(pathlib.Path(doxyfile))
+    return dirs, files
+
+
+# --- the gated workflows --------------------------------------------------------
+
+# workflow file -> the env key of its `changes` job's pattern block.
+GATES = {
+    "core-ci.yml": "CORE_CI_PATHS",
+    "docs.yml": "DOCS_PATHS",
+}
+
+
+def derive_all() -> dict[str, list[str]]:
+    """@brief The derived list of every gated workflow, self-reference last.
+
+    One configure of the core project serves both: each workflow that runs
+    ``cmake -S core`` with ``-DBUILD_TESTING=ON`` consumes everything it references.
+    """
     with tempfile.TemporaryDirectory(prefix="libtracer-ci-paths-") as tmp:
         build_dir = pathlib.Path(tmp) / "build"
         configure(build_dir)
         refs = referenced_paths(build_dir)
-    patterns = minimal_patterns(source_roots(text), refs)
-    return [p for p in patterns if p != WORKFLOW_REL] + [WORKFLOW_REL]
+    out: dict[str, list[str]] = {}
+    for name in GATES:
+        rel = f"{WORKFLOWS_REL}/{name}"
+        text = (ROOT / rel).read_text("utf-8")
+        roots = source_roots(text)
+        files = set(refs) if CORE_PROJECT in roots else set()
+        if name == "docs.yml":
+            more_dirs, more_files = docs_inputs(text)
+            roots |= more_dirs
+            files |= more_files
+        patterns = minimal_patterns(roots, files)
+        out[rel] = [p for p in patterns if p != rel] + [rel]
+    return out
 
 
 # --- entry point ------------------------------------------------------------
@@ -292,58 +400,60 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--check", action="store_true",
-                      help=f"fail if the committed {KEY} list is not the derived one")
+                      help="fail if a committed list is not the derived one")
     mode.add_argument("--apply", action="store_true",
-                      help=f"rewrite the {KEY} block with the derived list")
+                      help="rewrite every gated workflow's block with its derived list")
     args = ap.parse_args()
 
-    if not WORKFLOW.is_file():
-        print(f"error: {WORKFLOW_REL} not found", file=sys.stderr)
-        return 2
-
-    expected = derive()
-    lines = WORKFLOW.read_text("utf-8").splitlines()
-    blocks = pattern_blocks(lines)
-    if not blocks:
-        print(f"error: no `{KEY}: |` block found in {WORKFLOW_REL} — the "
-              "workflow shape changed; update tools/gen_ci_paths.py", file=sys.stderr)
-        return 2
-
-    if args.apply:
-        for start, end, indent, _ in reversed(blocks):
-            lines[start:end] = render(indent, expected)
-        WORKFLOW.write_text("\n".join(lines) + "\n", "utf-8")
-        print(f"applied: {len(blocks)} {KEY} block(s) in {WORKFLOW_REL} "
-              f"set to {len(expected)} derived pattern(s).")
-        return 0
-
-    if not args.check:
-        for pattern in expected:
-            print(pattern)
-        return 0
-
+    expected_all = derive_all()
     ok = True
-    for _, _, _, committed in blocks:
-        missing = [p for p in expected if p not in committed]
-        extra = [p for p in committed if p not in expected]
-        if not missing and not extra:
+    for name, key in GATES.items():
+        rel = f"{WORKFLOWS_REL}/{name}"
+        path = ROOT / rel
+        expected = expected_all[rel]
+        lines = path.read_text("utf-8").splitlines()
+        blocks = pattern_blocks(lines, key)
+        if not blocks:
+            print(f"error: no `{key}: |` block found in {rel} — the workflow shape "
+                  "changed; update tools/gen_ci_paths.py", file=sys.stderr)
+            return 2
+
+        if args.apply:
+            for start, end, indent, _ in reversed(blocks):
+                lines[start:end] = render(indent, key, name.removesuffix(".yml"),
+                                          expected)
+            path.write_text("\n".join(lines) + "\n", "utf-8")
+            print(f"applied: {len(blocks)} {key} block(s) in {rel} "
+                  f"set to {len(expected)} derived pattern(s).")
             continue
-        ok = False
-        for p in missing:
-            print(f"ERROR: {WORKFLOW_REL} {KEY} is MISSING {p!r} — core-ci skips its "
-                  "jobs for a pull request confined to it, yet its jobs build from it.",
-                  file=sys.stderr)
-        for p in extra:
-            print(f"ERROR: {WORKFLOW_REL} {KEY} carries {p!r}, which nothing core-ci "
-                  "builds refers to (or a broader pattern already covers it).",
-                  file=sys.stderr)
+
+        if not args.check:
+            print(f"{rel} {key}:")
+            for pattern in expected:
+                print(f"  {pattern}")
+            continue
+
+        for _, _, _, committed in blocks:
+            missing = [p for p in expected if p not in committed]
+            extra = [p for p in committed if p not in expected]
+            if not missing and not extra:
+                continue
+            ok = False
+            for p in missing:
+                print(f"ERROR: {rel} {key} is MISSING {p!r} — the workflow skips its "
+                      "jobs for a pull request confined to it, yet its jobs read it.",
+                      file=sys.stderr)
+            for p in extra:
+                print(f"ERROR: {rel} {key} carries {p!r}, which nothing the workflow "
+                      "reads refers to (or a broader pattern already covers it).",
+                      file=sys.stderr)
+        if ok:
+            print(f"ok: {rel} gates its jobs on all {len(expected)} derived path(s) "
+                  f"({len(blocks)} block(s) checked).")
     if not ok:
         print("\nRegenerate with: python3 tools/gen_ci_paths.py --apply",
               file=sys.stderr)
         return 1
-
-    print(f"ok: {WORKFLOW_REL} gates its jobs on all {len(expected)} derived path(s) "
-          f"({len(blocks)} block(s) checked).")
     return 0
 
 
