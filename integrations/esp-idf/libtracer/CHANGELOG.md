@@ -36,6 +36,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   returns six views on every publishing frame: `graph_t::fan_out` measures 304 B at 8 and
   128 B at 2 (rv32 `-Os`, GCC 15.2, `-fstack-usage`). A vertex with more than two subscribers
   still delivers to all of them, through the overflow vector.
+- **`twai_link_t::on_receive` takes the heap-free `rx_fn_t`
+  ([#1671](https://github.com/avatarsd-llc/libtracer/issues/1671)).** Core's
+  `can_link_t::rx_fn_t` is now a `tr::inline_fn_t` with two pointers of inline storage, so the
+  dispatch task's per-frame callback snapshot is a three-word copy and never allocates.
+  **Migration:** an application that registers its own receive callback on a `twai_link_t`
+  captures at most two pointers (or one pointer to a struct); a larger or owning capture fails
+  to compile.
 - **The generated config fragment binds `guard_t`, not `reader_guard_t`
   ([#1703](https://github.com/avatarsd-llc/libtracer/issues/1703)).** Core renamed the config
   member and now refuses a fragment that still defines the old name. On every chip target the

@@ -30,7 +30,6 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <map>
 #include <memory>
 #include <memory_resource>
@@ -45,6 +44,7 @@
 #include "libtracer/can.hpp"
 #include "libtracer/can_framing.hpp"
 #include "libtracer/can_reassembly.hpp"
+#include "libtracer/inline_fn.hpp"
 #include "libtracer/transport.hpp"
 #include "libtracer/transport_factory.hpp"
 // The one-release alias window (#1725): code that reached the old `tr::view::can_*` names
@@ -203,8 +203,15 @@ struct can_frame_data_t {
  */
 class can_link_t {
    public:
-    /** @brief Callback invoked once per inbound raw CAN frame (may run off-thread). */
-    using rx_fn_t = std::function<void(const can_frame_data_t&)>;
+    /**
+     * @brief Callback invoked once per inbound raw CAN frame (may run off-thread).
+     *
+     * A heap-free `%tr::inline_fn_t` with two pointers of inline storage
+     * (ADR-0083 §9, #1671): it holds a lambda capturing `this` or a couple of
+     * references, or a plain function pointer. A larger or resource-owning
+     * callable fails to compile; capture a pointer to its owner instead.
+     */
+    using rx_fn_t = tr::inline_fn_t<void(const can_frame_data_t&)>;
 
     virtual ~can_link_t() = default;
 
