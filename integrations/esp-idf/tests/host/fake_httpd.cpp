@@ -8,6 +8,8 @@
 
 #include "fake_httpd.hpp"
 
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 
 #include <array>
@@ -17,6 +19,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <utility>
 #include <vector>
 

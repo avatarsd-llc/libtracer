@@ -811,7 +811,8 @@ if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd
         "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
         "${LIBTRACER_ESP_DIR}/libtracer/include")
     target_link_libraries(httpd_ws_drain_budget_test PRIVATE libtracer)
-    target_link_options(httpd_ws_drain_budget_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+    target_link_options(httpd_ws_drain_budget_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=shutdown"
+                        "-Wl,--wrap=setsockopt")
     libtracer_test_warnings(httpd_ws_drain_budget_test)
     add_test(NAME httpd_ws_drain_budget COMMAND httpd_ws_drain_budget_test)
     # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent).

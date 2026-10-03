@@ -180,6 +180,26 @@ constexpr std::size_t kMaxFrameBytes = 32768;
 constexpr bool kRxDrainPaced = kRxDrainFrames != 0 || kRxDrainBytes != 0;
 
 /**
+ * @brief lwIP's per-connection segment queue and send buffer, the two limits a drain's
+ *        in-call replies run into (ADR-0085 §7).
+ *
+ * Both are the board's lwIP configuration (`lwipopts.h`, from `CONFIG_LWIP_TCP_SND_BUF_DEFAULT`
+ * and lwIP's own `TCP_SND_QUEUELEN` formula), reached through the socket headers this file
+ * includes. The host build has no lwIP; it binds lwIP's values at IDF's defaults so the
+ * host test exercises the same arithmetic.
+ */
+#if defined(TCP_SND_QUEUELEN)
+constexpr std::size_t kTcpSndQueueLen = TCP_SND_QUEUELEN;
+#else
+constexpr std::size_t kTcpSndQueueLen = 16;  // (4 * 5760 + 1439) / 1440
+#endif
+#if defined(TCP_SND_BUF)
+constexpr std::size_t kTcpSndBuf = TCP_SND_BUF;
+#else
+constexpr std::size_t kTcpSndBuf = 5760;
+#endif
+
+/**
  * @brief One core's IDLE GATE: how many times its idle task has run, and the semaphore a
  *        link whose drain budget is spent waits on until it runs again (ADR-0085).
  *
@@ -323,6 +343,46 @@ constexpr std::uint8_t kMaxConsecutiveTxDrops = 3;
  * and the frame-atomicity work point at); it is a fact about the API in use, not a policy.
  */
 constexpr std::uint32_t kIdfWsWriteLegs = 2;
+
+/**
+ * @brief Frames a drain reads back to back before the session's socket is switched from
+ *        TCP_NODELAY to Nagle, so the drain's remaining replies coalesce (ADR-0085 §7).
+ *
+ * Why the socket must change under a flood, and only then. The receive context is the
+ * task that writes the in-call replies, and while it holds unread ingress lwIP holds the
+ * peer's data segments as REFUSED (the socket's recv mbox is full) and drops every further
+ * data-bearing segment from that peer before processing it, ACK numbers included
+ * (`tcp_in.c`, the `refused_data` test at the top of `tcp_input`'s per-pcb path). The
+ * peer keeps piggybacking its ACKs on data for as long as it has data to send, so the
+ * board's own reply segments stay unacknowledged until the board READS. Under
+ * TCP_NODELAY every reply is two segments (header and payload, @ref kIdfWsWriteLegs), so
+ * a drain of @ref kRxDrainFrames small replies queues 2x that many against
+ * @ref kTcpSndQueueLen; the write that finds the queue full waits for an ACK only the
+ * waiting task can release, spends the send bound, and fails: one reply refused, or a
+ * header on the wire with its payload lost, and three in a row condemn a healthy session.
+ *
+ * Nagle is TCP's own answer: with unacknowledged data outstanding, small writes gather in
+ * one unsent segment until it fills or an ACK arrives, so a drain's replies cost one or two
+ * segments, never the queue. It is wrong for the interactive case (a lone reply's payload
+ * leg would wait a delayed-ACK behind its header leg), so it is applied only once a drain
+ * has shown the flood shape, this many frames without the core idling, and lifted again
+ * when a drain ends by idle before reaching it. The threshold is half the queue in frames:
+ * what the drain wrote under TCP_NODELAY before switching can never fill it.
+ */
+constexpr std::size_t kRxDrainNagleFrames = kTcpSndQueueLen / (2 * kIdfWsWriteLegs);
+
+/**
+ * @brief In-call reply bytes a drain may write before it ends, whatever its frame count:
+ *        a quarter of lwIP's send buffer (ADR-0085 §7).
+ *
+ * The byte half of @ref kRxDrainNagleFrames. Coalesced or not, the replies of a drain stay
+ * unacknowledged until the next drain's reads let the peer's ACKs through, so the replies
+ * of about two drains are outstanding at once. Bounding a drain's reply bytes to a quarter
+ * of @ref kTcpSndBuf keeps that total under half of it, and a reply write never waits for
+ * send-buffer space the writer itself is withholding. Frames with small replies never
+ * reach it; a drain of large replies ends sooner and parks more often: the receiver pays.
+ */
+constexpr std::size_t kRxDrainTxBytes = kTcpSndBuf / 4;
 
 /**
  * @brief The task-watchdog period, seconds — the numerator of the send bound.
@@ -2395,7 +2455,15 @@ httpd_ws_link_t::session_t* httpd_ws_link_t::claim_session(int fd, bool authenti
     return slot;
 }
 
-void httpd_ws_link_t::pace_rx(std::size_t frame_bytes) {
+void httpd_ws_link_t::set_nodelay(int fd, bool on) {
+    const int value = on ? 1 : 0;
+    // Best-effort like bound_socket: a socket that cannot take the option keeps what it
+    // had, which is the pre-ADR-0085 behaviour for that one peer.
+    if (::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &value, sizeof(value)) != 0)
+        ESP_LOGD(kTag, "TCP_NODELAY=%d not applied fd=%d", value, fd);
+}
+
+void httpd_ws_link_t::pace_rx(int fd, std::size_t frame_bytes) {
     if constexpr (!kRxDrainPaced) return;
     const auto core = static_cast<std::size_t>(xPortGetCoreID());
     idle_gate_t& gate = g_idle_gates[core];
@@ -2422,8 +2490,12 @@ void httpd_ws_link_t::pace_rx(std::size_t frame_bytes) {
     // consumed the frame's first header byte before this handler is called
     // (httpd_parse.c httpd_req_new -> httpd_ws_get_frame_type), so a handler that returns
     // without the payload desynchronises the stream.
+    // The third way a drain ends is on its own EGRESS: the in-call reply bytes it wrote
+    // (kRxDrainTxBytes), so that what is unacknowledged never outgrows the send buffer
+    // while this task is the one holding the ACKs back (see kRxDrainNagleFrames).
     const bool spent = (kRxDrainFrames != 0 && rx_drain_frames_ >= kRxDrainFrames) ||
-                       (kRxDrainBytes != 0 && rx_drain_bytes_ >= kRxDrainBytes);
+                       (kRxDrainBytes != 0 && rx_drain_bytes_ >= kRxDrainBytes) ||
+                       rx_drain_tx_bytes_ >= kRxDrainTxBytes;
     if (epoch == rx_drain_epoch_ && spent) {
         rx_drain_waits_.fetch_add(1, std::memory_order_relaxed);
         gate.waiters.fetch_add(1, std::memory_order_seq_cst);
@@ -2436,12 +2508,29 @@ void httpd_ws_link_t::pace_rx(std::size_t frame_bytes) {
         epoch = gate.epoch.load(std::memory_order_seq_cst);
     }
     if (epoch != rx_drain_epoch_) {
+        // A drain that ended by idle BEFORE the flood shape showed is a light load: the
+        // session that was put on Nagle gets TCP_NODELAY back. One that reached the shape
+        // keeps Nagle through the next drain, since its coalesced segments may still be
+        // unacknowledged and the next drain's first replies would otherwise queue behind
+        // them under TCP_NODELAY. Interactive peers never reach the shape and never flip.
+        if (rx_nagle_fd_ >= 0 && rx_drain_frames_ < kRxDrainNagleFrames) {
+            set_nodelay(rx_nagle_fd_, true);
+            rx_nagle_fd_ = -1;
+        }
         rx_drain_epoch_ = epoch;
         rx_drain_frames_ = 0;
         rx_drain_bytes_ = 0;
+        rx_drain_tx_bytes_ = 0;
     }
     ++rx_drain_frames_;
     rx_drain_bytes_ += frame_bytes;
+    // The flood shape: this many frames without the core idling. From here the drain's
+    // replies coalesce. Switched on the session being drained, before its reply is written.
+    if (rx_drain_frames_ >= kRxDrainNagleFrames && rx_nagle_fd_ != fd) {
+        if (rx_nagle_fd_ >= 0) set_nodelay(rx_nagle_fd_, true);
+        set_nodelay(fd, false);
+        rx_nagle_fd_ = fd;
+    }
 }
 
 void httpd_ws_link_t::egress_posted() noexcept {
@@ -2518,7 +2607,7 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
     // The drain budget (ADR-0085). After the header, so the frame's size is known and is
     // charged whole; before the payload, so a spent budget leaves every byte of it — and
     // of whatever follows — in the socket while this task waits for its core to idle.
-    pace_rx(frame.len);
+    pace_rx(httpd_req_to_sockfd(req), frame.len);
 
     // Pass 2: ALWAYS drain the payload — even a frame type we ignore must be consumed,
     // or its bytes stay in the stream and the next recv reads them as a frame header
@@ -3087,6 +3176,9 @@ void httpd_ws_link_t::on_session_closed(void* ctx) {
         const std::lock_guard lock(gate->m);
         owner = gate->link;
         if (owner == nullptr) return;
+        // The socket on Nagle is gone with its session; a recycled descriptor starts on
+        // TCP_NODELAY from bound_socket like every other.
+        if (owner->rx_nagle_fd_ == slot->fd) owner->rx_nagle_fd_ = -1;
         departed = owner->reclaim_slot(slot, departed_handle);
         if (departed.empty()) return;  // nothing owed to the routing plane
         // A departure IS owed, and it is fired below with `m` RELEASED (#960). The mutex
@@ -3590,6 +3682,9 @@ void httpd_ws_link_t::send_in_call(const session_ref_t& to,
     if (err != ESP_OK && on_wire == 0)
         ESP_LOGW(kTag, "ws reply failed (%s) fd=%d len=%u - frame dropped", esp_err_to_name(err),
                  fd, (unsigned)total);
+    // Charged to the current drain (ADR-0085 §7): an in-call reply is written by the
+    // receive context, on the httpd task, so this is the one writer the drain accounts.
+    if (err == ESP_OK) rx_drain_tx_bytes_ += total;
     note_tx_result(to, err == ESP_OK, total);
 }
 

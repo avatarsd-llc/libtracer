@@ -82,7 +82,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `stats_t::rx_drain_waits` counts the waits. A send queued from another task while the drain is
   parked is sent from inside the park, on the httpd task, and the park goes on: a push from a
   producer task is never held behind it, and a peer that provokes a send per frame buys no
-  ingress with it. New `stats_t::tx_send_failed` (also summed into `drop_stats().dropped_tx`)
+  ingress with it. A drain also ends when its in-call replies reach a quarter of lwIP's send
+  buffer, and a session whose drain shows the flood shape (half the lwIP segment queue in
+  frames, back to back) is switched from `TCP_NODELAY` to Nagle for the flood, so its burst of
+  replies cannot fill the segment queue while the unread ingress holds the peer's ACKs back; an
+  interactive session never reaches that shape and keeps the no-delay path. New
+  `stats_t::tx_send_failed` (also summed into `drop_stats().dropped_tx`)
   counts frames the socket write itself refused, which until now left only a WARN line.
   **Observable:** under a sustained inbound flood the
   httpd task, and every session on it, now pauses each budget until the core idles, which

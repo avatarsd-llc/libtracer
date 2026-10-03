@@ -1420,13 +1420,22 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * (ping, close) included: each costs the same handler pass. A drain belongs to the core
      * it started on; a task that migrated starts a new one (see ADR-0085, dual core).
      *
+     * The drain also ends when the in-call replies it wrote reach a quarter of lwIP's send
+     * buffer, and once it has read `kRxDrainNagleFrames` frames back to back the session's
+     * socket @p fd is switched to Nagle for the rest of the flood (ADR-0085 §7): while
+     * this task holds unread ingress, lwIP drops the peer's data-bearing segments and the
+     * ACKs they carry, so a burst of two-segment replies under TCP_NODELAY would fill the
+     * segment queue and the reply write would wait for an ACK only this task can release.
+     *
      * The wait is also where this link's queued sends go out while it lasts. The parked
      * task is the httpd task, the one that runs them, so a send posted by another task
      * (@ref egress_pending_) is sent from inside the wait (@ref send_posted_in_park) and
      * the wait goes on: egress wakes the park, ingress waits for idle, and no peer can buy
      * ingress by provoking egress. The frame is not read before the core idles.
      */
-    void pace_rx(std::size_t frame_bytes);
+    void pace_rx(int fd, std::size_t frame_bytes);
+    /** @brief Set or clear TCP_NODELAY on @p fd (best-effort; see `kRxDrainNagleFrames`). */
+    static void set_nodelay(int fd, bool on);
     /** @brief Wake a drain parked for idle so it sends the item just posted (any task; the
      *         producer's side of the idle-gate handshake, after the count and the mark). */
     void egress_posted() noexcept;
@@ -2188,6 +2197,12 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     std::size_t rx_drain_frames_ = 0;
     /** @brief Payload bytes consumed in the current drain (see @ref pace_rx). */
     std::size_t rx_drain_bytes_ = 0;
+    /** @brief In-call reply bytes written in the current drain; the drain ends when they
+     *         reach a quarter of lwIP's send buffer (ADR-0085 §7). httpd task only. */
+    std::size_t rx_drain_tx_bytes_ = 0;
+    /** @brief The session socket currently switched from TCP_NODELAY to Nagle because a
+     *         drain showed the flood shape, or -1 (ADR-0085 §7). httpd task only. */
+    int rx_nagle_fd_ = -1;
     /**
      * @brief Sends this link posted to the httpd task that have not been sent yet. Raised
      *        by the posting task before it marks the item (see `tx_work_t::state`), lowered

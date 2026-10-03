@@ -31,16 +31,23 @@
  * ADR-0085.
  */
 
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <sys/socket.h>
+
 #include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "esp_freertos_hooks.h"
@@ -51,6 +58,7 @@
 namespace {
 
 using tr::net::httpd_ws_link_t;
+using tr::net::peer_handle_t;
 
 int g_failures = 0;
 void check(bool ok, std::string_view what) {
@@ -63,6 +71,19 @@ httpd_handle_t handle() { return static_cast<httpd_handle_t>(&fake_httpd::instan
 
 /** @brief Payload passes the link has made: the bytes it actually took off the socket. */
 std::atomic<std::size_t> g_payload_reads{0};
+
+/** @brief Every TCP_NODELAY value set per fd, in order, as `__wrap_setsockopt` saw them
+ *         (1 = no delay, 0 = Nagle; ADR-0085 §7). */
+std::mutex g_nodelay_m;
+std::vector<std::pair<int, int>> g_nodelay_log;
+
+std::vector<int> nodelay_changes(int fd) {
+    const std::lock_guard lock(g_nodelay_m);
+    std::vector<int> out;
+    for (const auto& [changed_fd, value] : g_nodelay_log)
+        if (changed_fd == fd) out.push_back(value);
+    return out;
+}
 
 /**
  * @brief Wait (test-side; the library reads no clock) until @p done holds, or 5 s pass.
@@ -386,6 +407,120 @@ void test_park_sends_in_post_order_not_slot_order() {
 }
 
 // ---------------------------------------------------------------------------
+// 8 — the flood shape puts the session on Nagle; a light load never does, and gets
+//     TCP_NODELAY back (ADR-0085 §7).
+// ---------------------------------------------------------------------------
+void test_flood_shape_switches_the_session_to_nagle() {
+    constexpr std::size_t kBudget = tr::net::kRxDrainFrames;
+    std::printf("a drain that shows the flood shape switches its session to Nagle:\n");
+    auto link = fresh_link(808);
+    (void)fake_httpd::instance().run_pending();
+    // A light load first: bursts of two frames with the core idling between them. Two is
+    // under any flood threshold the link could derive (half the segment queue, in frames).
+    const std::byte body[8] = {};
+    for (int burst = 0; burst < 3; ++burst) {
+        for (int i = 0; i < 2; ++i)
+            (void)fake_httpd::instance().deliver_frame(808, std::span<const std::byte>(body));
+        (void)fake_httpd::run_idle_hooks();
+    }
+    auto changes = nodelay_changes(808);
+    check(changes == std::vector<int>{1},
+          "a light load leaves the socket on TCP_NODELAY from bound_socket");
+
+    // The flood: a budget and one; the drain shows the shape well before it parks.
+    g_payload_reads.store(0);  // the light bursts above are not part of the flood's count
+    ingress_t in(808, kBudget + 1, 8);
+    check(wait_until([&] { return parked_after(kBudget); }), "the drain is parked");
+    changes = nodelay_changes(808);
+    check(changes == std::vector<int>{1, 0},
+          "and the session was switched to Nagle during the drain, once");
+
+    // The next drain reaches the shape again: Nagle stays, no flip back and forth.
+    (void)fake_httpd::run_idle_hooks();
+    check(wait_until([&] { return in.delivered() == kBudget + 1; }), "the parked frame finished");
+    // The frame the first park released was read as the first frame of this drain, so the
+    // second park comes one frame of `in2` short of a budget.
+    ingress_t in2(808, kBudget + 1, 8);
+    check(wait_until([&] { return parked_after(2 * kBudget); }), "the second drain parked");
+    check(nodelay_changes(808) == std::vector<int>{1, 0},
+          "a drain that reaches the shape keeps the socket on Nagle");
+    (void)fake_httpd::run_idle_hooks();
+    check(wait_until([&] { return in2.delivered() == kBudget + 1; }),
+          "the second parked frame finished");
+
+    // Light again: a drain of one frame ends by idle; the drain after it restores TCP_NODELAY.
+    (void)fake_httpd::instance().deliver_frame(808, std::span<const std::byte>(body));
+    (void)fake_httpd::run_idle_hooks();
+    (void)fake_httpd::instance().deliver_frame(808, std::span<const std::byte>(body));
+    check(nodelay_changes(808) == std::vector<int>{1, 0, 1},
+          "once a drain ends light, the next one gives the session TCP_NODELAY back");
+    finish(std::move(link));
+}
+
+// ---------------------------------------------------------------------------
+// 9 — a drain also ends on its own egress: in-call replies worth a quarter of lwIP's send
+//     buffer end it before the frame budget would (ADR-0085 §7).
+// ---------------------------------------------------------------------------
+/** @brief An application that answers every frame in-call with a fixed reply. */
+class replier_t {
+   public:
+    void arm(tr::net::transport_t* to, std::span<const std::byte> reply) {
+        to_ = to;
+        reply_ = reply;
+    }
+    void operator()(peer_handle_t, std::span<const std::byte>) {
+        if (to_ != nullptr) to_->send(reply_);
+    }
+
+   private:
+    tr::net::transport_t* to_ = nullptr;
+    std::span<const std::byte> reply_;
+};
+
+void test_in_call_reply_bytes_end_a_drain() {
+    // The host binds lwIP's defaults: TCP_SND_BUF 5760, so a drain ends once its in-call
+    // replies reach 1440 B. Two 1 KiB replies cross it; the third frame parks.
+    constexpr std::size_t kReply = 1024;
+    constexpr std::size_t kFramesPerDrain = 2;
+    std::printf(
+        "in-call replies of %zu B end a drain after %zu frames (a quarter of the send buffer):\n",
+        kReply, kFramesPerDrain);
+    auto link = fresh_link(809);
+    (void)fake_httpd::instance().run_pending();
+    replier_t app;
+    link->set_peer_receiver(app);
+    const std::byte probe[1] = {std::byte{0}};
+    (void)fake_httpd::instance().deliver_frame(809, std::span<const std::byte>(probe));
+    (void)fake_httpd::run_idle_hooks();
+    tr::net::transport_t* const peer = only_peer(*link);
+    check(peer != nullptr, "the peer resolved to a directed endpoint");
+    if (peer == nullptr) {
+        finish(std::move(link));
+        return;
+    }
+    const std::vector<std::byte> reply(kReply, std::byte{0x7E});
+    app.arm(peer, std::span<const std::byte>(reply));
+    fake_httpd::instance().clear_sent_frames();
+    g_payload_reads.store(0);
+
+    ingress_t in(809, 2 * kFramesPerDrain + 1, 8);
+    check(wait_until([&] { return parked_after(kFramesPerDrain); }),
+          "the drain parks after two frames: its replies reached the egress bound");
+    check(fake_httpd::instance().sent_frames().size() == kFramesPerDrain,
+          "both replies were written in-call before the park");
+    check(link->stats().rx_drain_waits == 1, "one wait, counted like any other");
+    (void)fake_httpd::run_idle_hooks();
+    check(wait_until([&] { return parked_after(2 * kFramesPerDrain); }),
+          "the next drain ends on its egress again");
+    (void)fake_httpd::run_idle_hooks();
+    check(wait_until([&] { return in.delivered() == 2 * kFramesPerDrain + 1; }),
+          "the last frame finished");
+    check(fake_httpd::instance().sent_frames().size() == 2 * kFramesPerDrain + 1,
+          "every frame was answered; nothing was dropped");
+    finish(std::move(link));
+}
+
+// ---------------------------------------------------------------------------
 // 5 — the hook could not be installed: the link must NOT pace (it would wait forever).
 // ---------------------------------------------------------------------------
 /** @brief A hook that only occupies a slot. */
@@ -412,6 +547,23 @@ void test_full_hook_table_leaves_the_link_unpaced() {
 
 }  // namespace
 
+// This suite links with --wrap=setsockopt (the keepalive suite does the same, with its own
+// recorder): the fake's descriptors are not sockets, so the link's options are recorded and
+// answered with success instead of failing with a WARN line each.
+extern "C" int __real_setsockopt(int fd, int level, int optname, const void* val, socklen_t len);
+extern "C" int __wrap_setsockopt(int fd, int level, int optname, const void* val, socklen_t len) {
+    if (!fake_httpd::instance().owns_socket(fd))
+        return __real_setsockopt(fd, level, optname, val, len);
+    if (level == IPPROTO_TCP && optname == TCP_NODELAY && val != nullptr &&
+        len >= static_cast<socklen_t>(sizeof(int))) {
+        int value = 0;
+        std::memcpy(&value, val, sizeof(int));
+        const std::lock_guard lock(g_nodelay_m);
+        g_nodelay_log.emplace_back(fd, value);
+    }
+    return 0;
+}
+
 int main(int argc, char** argv) {
     std::printf("httpd_ws_link ingress drain budget (ADR-0085):\n");
     if constexpr (tr::net::kRxDrainFrames == 0 || tr::net::kRxDrainBytes == 0) {
@@ -429,6 +581,8 @@ int main(int argc, char** argv) {
         test_teardown_while_parked_joins_after_idle();
         test_egress_work_is_sent_from_inside_the_park();
         test_park_sends_in_post_order_not_slot_order();
+        test_flood_shape_switches_the_session_to_nagle();
+        test_in_call_reply_bytes_end_a_drain();
     }
     if (g_failures != 0) {
         std::printf("FAILED: %d check(s)\n", g_failures);
