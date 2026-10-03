@@ -159,7 +159,7 @@
     },
     "tr::net::reject_bus_name_hop": {
       "ccn": [
-        26
+        22
       ],
       "file": "core/src/fwd_router.cpp"
     },
