@@ -78,9 +78,14 @@ This unblocks the transport-link half of
 > refcount / dormancy / self-heal existed. Per the clause-kind rule (see Discussion) the byte-level
 > clauses here were **proposed pending** code + conformance vectors.
 >
-> **As of Amendment 4 (S7) all of it is SHIPPED and every byte clause is normative.** The
-> `:children[]` creation target is gone, the per-module endpoint is the only creation door, and the
-> clause-by-clause instrument table is in Amendment 4.
+> **As of Amendment 4 (S7) every byte clause is normative, and all of it is SHIPPED except two
+> residuals** (see the 2026-10-03 erratum): no module yet *declares* a `conn:schema` catalog, so
+> every endpoint answers Amendment 3's conforming empty `SETTINGS` and no `SPEC` is validated
+> against a catalog (the S3 module-side half); and no routing-plane caller drives §4's standing-binding
+> refcount from a subscription or `await` — the seam exists, but only an embedder drives it today.
+> The `:children[]` creation target is gone, the per-module endpoint is the only creation door, the
+> `CREATE`/`WRITE` split of §5 is in (Amendment 2), and the clause-by-clause instrument table is in
+> Amendment 4.
 
 ### 1. A per-module creator endpoint, designated by the transport module
 
@@ -784,3 +789,42 @@ mis-spelled enumerator, in text that landed the same day as this erratum.
 **Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). No wire
 surface moves: no state is added or removed, the reference encoding is untouched, and a conforming
 implementation cannot have implemented `healing` because no clause ever defined one.
+
+## Erratum (2026-10-03) — "all of it is SHIPPED" overstates two residuals ([#1585](https://github.com/avatarsd-llc/libtracer/issues/1585))
+
+**What the text said.** The §Proposed change status blockquote: *"As of Amendment 4 (S7) all of it
+is SHIPPED and every byte clause is normative."*
+
+**What the behaviour is.** The second half is right; the first is not. Two pieces of the mechanism
+this RFC describes are not in the reference implementation:
+
+1. **The S3 module-side catalog.** Amendment 3 pinned the catalog's *envelope* — the ordinary
+   `:schema` record, with an empty `SETTINGS` for a module that declares no catalog — and that is
+   what every creator endpoint answers, conformingly. But no module declares a catalog, and nothing
+   validates a `SPEC`'s kind-private keys against one at creation: the endpoint is registered with
+   no catalog of its own (`core/src/transport_vertex.cpp`, the `register_vertex_key` call that mints
+   `conn`), and the self-heal creation path says so in place — *"what is still open here is the
+   module-side declaration and the validation it would license, never the reply shape"*. A creator
+   still learns a kind's keys out of band.
+2. **The routing-plane callers of §4's refcount.** §4 counts a standing subscription or `await`
+   routed through a link as a hold on it. The seam is shipped — `transport_vertex_t::acquire_link`
+   / `release_link` (`core/include/libtracer/transport_vertex.hpp`), made re-entrant-safe by S6's
+   two-phase control plane — but no library code calls it: its only callers are host tests. A
+   subscription routed through a dormant link does not, by itself, bring the link up and keep it
+   self-healing; an embedder that wants that drives the seam directly, as the header says.
+
+The `CREATE`/`WRITE` split of §5 **is** shipped (Amendment 2; the endpoint declares `SPEC`⇒`CREATE`,
+`NAME`⇒`WRITE` beside the same `register_vertex_key` call, pinned by
+`core/tests/payload_right_table_test.cpp`) and is not a residual.
+
+**The correction.** The blockquote reads "every byte clause is normative, and all of it is SHIPPED
+except two residuals", and names both. Neither residual is a byte clause: the catalog reply shape is
+Amendment 3's, already met by the empty `SETTINGS`, and the refcount is §4's declaring behaviour,
+whose three wire-silent MUSTs are pinned by `conn/refcount-0-dormant` against the seam itself.
+
+**Instrument: erratum, not amendment** ([GOVERNANCE.md](../../../.github/GOVERNANCE.md)). No wire
+surface moves: no clause is added, removed or reworded, Amendment 4's promotion and instrument
+table stand unchanged, and a status sentence that overstated the implementation is brought back to
+what the code does. The residuals are tracked as
+[#1815](https://github.com/avatarsd-llc/libtracer/issues/1815) (module-declared catalog) and
+[#1816](https://github.com/avatarsd-llc/libtracer/issues/1816) (routing-plane refcount callers).

@@ -245,11 +245,10 @@ tree, and one is not:
   could be driven to publish connections that no `dst` resolves and no removal can take down.
 - `SPEC` naming an existing name answers `PATH_IN_USE`, and the reserved `conn` name is
   refused in both directions, so the endpoint cannot be made to destroy itself.
-- **Not yet true:** the `CREATE`(0x08)-for-create / `WRITE`(0x02)-for-remove gating split of
-  RFC-0014 (S2c) is not implemented. Today the endpoint is admitted by the ordinary write
-  gate — `graph_t::store_value` runs a handler's `on_write` only after `acl_allows` admitted
-  the write, and hands it the identical subject — so create and remove are one right, not two
-  ([13](13-network-formation.md) §Realisation status).
+- Create and remove are two rights, not one: the endpoint declares RFC-0014 §5's mapping
+  through the Amendment 2 payload-right table — `SPEC` demands `CREATE`(0x08), `NAME` demands
+  `WRITE`(0x02) — so the one write gate demands a different right per payload type, and a peer
+  may hold either without the other (S2c, pinned by `core/tests/payload_right_table_test.cpp`).
 
 ### 6. No reconfiguration door
 
@@ -264,11 +263,12 @@ creation.
 ### 7. The config vocabulary is not yet self-describing
 
 Uniform introspection covers the liveness value and the children, but not the *creation
-catalog*: `:schema`-as-catalog on the creator endpoint is RFC-0014 S3 and is not implemented.
+catalog*: RFC-0014 Amendment 3 pinned the catalog's envelope (the endpoint's ordinary `:schema`
+record), but no module declares a catalog into it yet — the S3 module-side half is open.
 Worse than absent — the endpoint is hidden from the module's `:children[]` (S4), so §6's
 `read <module>/conn:schema` probe is the *only* sanctioned way to find it, and that probe
-currently answers the generic whole-vertex `:schema` (an EMPTY `SETTINGS`) rather than the
-module's catalog. So a creator today must know a kind's config keys out of band, from the
+currently answers the generic whole-vertex `:schema` (an EMPTY `SETTINGS`, Amendment 3's
+conforming no-catalog answer) rather than a declared catalog. So a creator today must know a kind's config keys out of band, from the
 [connection-config module page](../modules/connection-config.md), rather than by reading the
 endpoint. Stated plainly because it is the one place the "everything is in the graph" claim
 does not yet reach.
@@ -371,13 +371,16 @@ unchanged. And
 so the creator endpoint is the sole door and the role is positional in fact, not only on
 paper.
 
-**Not implemented.** The routing-plane
-wiring that makes subscriptions/awaits drive the refcount seam automatically (S6);
-`:schema`-as-catalog on the endpoint
-(S3); the `CREATE`/`WRITE` gating split
-(S2c). RFC-0014's byte-level clauses — the liveness encoding among them — become normative on
-its conformance-vector merge; until then the values in
-`core/include/libtracer/transport_vertex.hpp:link_state_t` are the reference encoding.
+**Implemented** too: the `CREATE`/`WRITE` gating split (S2c, RFC-0014 Amendment 2), and the
+catalog envelope (S3, Amendment 3 — an empty `SETTINGS` for a module that declares none).
+RFC-0014's byte-level clauses — the liveness encoding among them — are normative since
+Amendment 4, with the values in `core/include/libtracer/transport_vertex.hpp:link_state_t`
+as the reference encoding.
+
+**Not implemented.** Routing-plane callers that make subscriptions/awaits drive the refcount
+seam automatically — `acquire_link`/`release_link` are re-entrant-safe since S6 but only an
+embedder calls them; and the S3 module-side half: no module declares a `conn:schema`
+catalog, so none validates a `SPEC` against one (RFC-0014 erratum 2026-10-03).
 ```
 
 ## Pitfalls
@@ -388,14 +391,14 @@ its conformance-vector merge; until then the values in
 - **Treating the connection vertex as a config record.** Its value is liveness; its config is
   creation-time and const thereafter. There is no `:settings` edit that moves a peer's
   address, and a re-`SPEC` answers `PATH_IN_USE`.
-- **Assuming a delegated create right exists today.** The `CREATE`/`WRITE` split is specified
-  and unimplemented; a peer that may write the endpoint may both create and remove.
+- **Granting `WRITE` on the endpoint and expecting it to create.** Since the `CREATE`/`WRITE`
+  split (S2c), `WRITE` admits only removal; creating needs `CREATE` on the endpoint.
 - **Inferring structural-ness from path shape.** "Two segments under the root" claims every
   application `/zone/<child>` as well. Ask the object that minted the vertex.
 - **Adding a kind's key to `conn_settings_t` "just for now".** The record is shared by every
   kind and by every node that links the core; a key only one factory reads is a key the other
-  kinds carry and no one can be told about (the `:schema` catalog that would advertise it is
-  S3, unimplemented).
+  kinds carry and no one can be told about (no module declares the `:schema` catalog that
+  would advertise it yet — S3's module-side half).
 - **Expecting a per-transport statistics FACET.** A connection vertex has no `:stats` of its
   own. The counters are reached through the node-scoped census instead —
   `<any-vertex>:stats.link.<child>` — and only on a node that has a router to sample them;
