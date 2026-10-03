@@ -21,7 +21,9 @@
  *     the next frame's payload unread (the bytes stay in the socket for TCP to push back);
  *   - it resumes only after the core idles, and does it again one budget later;
  *   - the byte budget ends a drain of large frames before the frame budget would;
- *   - a core that idles on its own between bursts never makes the link wait.
+ *   - a core that idles on its own between bursts never makes the link wait;
+ *   - a send queued from another task wakes a parked drain for exactly one frame, so the
+ *     httpd task (the one drain of its own control queue) never holds the link's egress.
  *
  * What it cannot show is the silicon half: that the idle task really runs once the httpd
  * task parks, and what the pacing costs in throughput. That is the on-silicon plan in
@@ -85,9 +87,16 @@ bool parked_after(std::size_t reads) {
  */
 class ingress_t {
    public:
-    ingress_t(int fd, std::size_t frames, std::size_t bytes)
-        : body_(bytes, std::byte{0x5A}), thread_([this, fd, frames] {
+    /**
+     * @param between What httpd's loop does between two readable frames; the real server
+     *                drains its control socket there (one queued item per pass), which is
+     *                where a queued send reaches the wire. Default: nothing.
+     */
+    ingress_t(
+        int fd, std::size_t frames, std::size_t bytes, std::function<void()> between = [] {})
+        : body_(bytes, std::byte{0x5A}), thread_([this, fd, frames, between] {
               for (std::size_t i = 0; i < frames; ++i) {
+                  between();
                   (void)fake_httpd::instance().deliver_frame(fd, std::span<const std::byte>(body_));
                   delivered_.fetch_add(1);
               }
@@ -234,6 +243,65 @@ void test_teardown_while_parked_joins_after_idle() {
 }
 
 // ---------------------------------------------------------------------------
+// 6 — egress work posted from another task wakes a parked drain: the httpd task is the one
+//     drain of its own control queue, so a park for idle must not hold the link's sends.
+// ---------------------------------------------------------------------------
+/** @brief The directed endpoint of the single peer currently open (see tx_pool_test). */
+tr::net::transport_t* only_peer(httpd_ws_link_t& link) {
+    std::string name;
+    link.enumerate_peers([&name](std::string_view p) { name = std::string(p); });
+    return name.empty() ? nullptr : link.peer_link(name);
+}
+
+void test_egress_work_wakes_a_parked_drain() {
+    constexpr std::size_t kBudget = tr::net::kRxDrainFrames;
+    std::printf("a push queued from another task wakes a parked drain without an idle step:\n");
+    auto link = fresh_link(806);
+    fake_httpd::instance().clear_sent_frames();
+    // The httpd loop, as the real one runs: drain the control socket, then the next frame.
+    const std::size_t total = 2 * kBudget;
+    ingress_t in(806, total, 8, [] { (void)fake_httpd::instance().run_pending(); });
+    check(wait_until([&] { return parked_after(kBudget); }), "the drain is parked");
+    tr::net::transport_t* const peer = only_peer(*link);
+    check(peer != nullptr, "the flooding peer resolved to a directed endpoint");
+    if (peer == nullptr) {
+        (void)fake_httpd::run_idle_hooks();
+        finish(std::move(link));
+        return;
+    }
+
+    // One push, from this thread (a producer task, never the httpd one): it must reach the
+    // wire while the core has NOT idled.
+    const std::byte body[4] = {std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
+    peer->send(std::span<const std::byte>(body));
+    check(wait_until([&] { return fake_httpd::instance().sent_frames().size() == 1; }),
+          "the push is on the wire with no idle step");
+    check(wait_until([&] { return parked_after(kBudget + 1); }),
+          "the wake cost exactly one frame of ingress, then the drain parked again");
+    check(link->stats().rx_drain_waits == 2, "two waits: the one woken by egress and the next");
+    check(link->stats().enqueue_drops == 0 && link->stats().tx_pool_misses == 0,
+          "nothing was dropped or missed on the way");
+
+    // A burst of pushes while parked: each posted item buys the ingress one frame, no more.
+    for (int i = 0; i < 3; ++i) peer->send(std::span<const std::byte>(body));
+    check(wait_until([&] { return fake_httpd::instance().sent_frames().size() == 4; }),
+          "three more pushes land without an idle step");
+    check(wait_until([&] { return fake_httpd::semaphore_waiters() == 1; }),
+          "and the drain is parked again");
+    const std::size_t extra = g_payload_reads.load() - (kBudget + 1);
+    check(extra >= 1 && extra <= 3, "the burst bought the ingress between one and three frames");
+
+    // Nothing else moves until the core idles: the budget was never reset by a wake.
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    check(g_payload_reads.load() == kBudget + 1 + extra, "no frame is read on a quiet gate");
+    (void)fake_httpd::run_idle_hooks();
+    check(wait_until([&] { return in.delivered() == total; }),
+          "after the core idles the second budget is read to the end");
+    check(fake_httpd::instance().sent_frames().size() == 4, "and no push was duplicated");
+    finish(std::move(link));
+}
+
+// ---------------------------------------------------------------------------
 // 5 — the hook could not be installed: the link must NOT pace (it would wait forever).
 // ---------------------------------------------------------------------------
 /** @brief A hook that only occupies a slot. */
@@ -275,6 +343,7 @@ int main(int argc, char** argv) {
         test_byte_budget_ends_a_drain_of_large_frames();
         test_an_idle_core_resets_the_drain();
         test_teardown_while_parked_joins_after_idle();
+        test_egress_work_wakes_a_parked_drain();
     }
     if (g_failures != 0) {
         std::printf("FAILED: %d check(s)\n", g_failures);

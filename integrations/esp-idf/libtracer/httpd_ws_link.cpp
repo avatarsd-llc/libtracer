@@ -199,6 +199,12 @@ constexpr bool kRxDrainPaced = kRxDrainFrames != 0 || kRxDrainBytes != 0;
  * Two links (or two servers) parked on one core share the binary semaphore: one give wakes
  * one of them, and the other wakes on the next idle pass, which comes once the first has
  * read its budget and parked again. Liveness holds; fairness is one drain late.
+ *
+ * The idle hook is not the only giver. A producer that has just posted egress work to the
+ * httpd task (@ref httpd_ws_link_t::egress_posted) gives the same semaphore, with the same
+ * handshake against `waiters`: the httpd task is the one drain of its own control queue, so
+ * a drain parked for idle must not hold the sends and closes it alone can run. That wake
+ * reads one frame and parks again (see @ref httpd_ws_link_t::pace_rx).
  */
 struct idle_gate_t {
     std::atomic<std::uint32_t> epoch{0};   /**< @brief Idle-task iterations, mod 2^32. */
@@ -2378,18 +2384,27 @@ void httpd_ws_link_t::pace_rx(std::size_t frame_bytes) {
     }
     // The drain is the run of frames since this core last idled; an epoch that moved since
     // the previous frame starts a new one. Otherwise a spent budget waits for the idle
-    // task: the waiter counts itself in, THEN re-reads the epoch (the handshake on
-    // idle_gate_t), so a hook that ran in between is seen and never slept through.
+    // task, OR for egress work this link posted to the httpd task that has not run yet
+    // (egress_pending_): this task is the one drain of its own control queue, so a park
+    // must not hold the sends and closes behind it. The waiter counts itself in, THEN
+    // re-reads both (the handshake on idle_gate_t, which egress_posted joins from the
+    // producer's side), so neither an idle pass nor a post in between is slept through.
     const bool spent = (kRxDrainFrames != 0 && rx_drain_frames_ >= kRxDrainFrames) ||
                        (kRxDrainBytes != 0 && rx_drain_bytes_ >= kRxDrainBytes);
-    if (epoch == rx_drain_epoch_ && spent) {
+    if (epoch == rx_drain_epoch_ && spent && egress_pending_.load(std::memory_order_seq_cst) == 0) {
         rx_drain_waits_.fetch_add(1, std::memory_order_relaxed);
         gate.waiters.fetch_add(1, std::memory_order_seq_cst);
-        while (gate.epoch.load(std::memory_order_seq_cst) == epoch)
+        while (gate.epoch.load(std::memory_order_seq_cst) == epoch &&
+               egress_pending_.load(std::memory_order_seq_cst) == 0)
             (void)xSemaphoreTake(gate.sem, portMAX_DELAY);
         gate.waiters.fetch_sub(1, std::memory_order_seq_cst);
         epoch = gate.epoch.load(std::memory_order_seq_cst);
     }
+    // A wake on egress work leaves the epoch, and with it the spent budget, as they were:
+    // this ONE frame is read so the handler returns and the httpd task drains its control
+    // socket (one item per server pass), and the next frame parks again unless more items
+    // are pending. The receiver pays one frame of ingress per item of its own egress; it
+    // never reads a second budget without the core idling.
     if (epoch != rx_drain_epoch_) {
         rx_drain_epoch_ = epoch;
         rx_drain_frames_ = 0;
@@ -2397,6 +2412,24 @@ void httpd_ws_link_t::pace_rx(std::size_t frame_bytes) {
     }
     ++rx_drain_frames_;
     rx_drain_bytes_ += frame_bytes;
+}
+
+void httpd_ws_link_t::egress_posted() noexcept {
+    if constexpr (!kRxDrainPaced) return;
+    // Count first, then look for a parked drain: the producer's side of the idle_gate_t
+    // handshake. A drain that counted itself in before this store sees `waiters` here and
+    // is given the semaphore; one that counts itself in after it re-reads the count and
+    // never parks. A give nobody takes saturates the binary semaphore and costs the next
+    // waiter one extra pass. Every core's gate is tested, because a producer does not know
+    // which core the httpd task is parked on; a gate with no waiter costs one load.
+    egress_pending_.fetch_add(1, std::memory_order_seq_cst);
+    for (idle_gate_t& gate : g_idle_gates)
+        if (gate.waiters.load(std::memory_order_seq_cst) != 0) (void)xSemaphoreGive(gate.sem);
+}
+
+void httpd_ws_link_t::egress_drained() noexcept {
+    if constexpr (!kRxDrainPaced) return;
+    egress_pending_.fetch_sub(1, std::memory_order_seq_cst);
 }
 
 esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
@@ -3331,8 +3364,12 @@ void httpd_ws_link_t::queue_send(const session_ref_t& to,
         queued = httpd_queue_work(h, &httpd_ws_link_t::tx_work, work) == ESP_OK;
         // A refused enqueue is the only enqueue failure that exists above the ESP-IDF floor
         // this component requires, and it hands the slot straight back: the item was never
-        // posted, so nothing else can be reading it (see tx_slot_t).
-        if (!queued) release_tx_work(work);
+        // posted, so nothing else can be reading it (see tx_slot_t). A posted one wakes a
+        // drain parked for idle, which would otherwise hold it (ADR-0085).
+        if (queued)
+            egress_posted();
+        else
+            release_tx_work(work);
     }
     // A frame that never reached the queue is charged to the LINK, not to this peer: a
     // refused enqueue is evidence about the shared control queue, and under #835's shape
@@ -3482,6 +3519,7 @@ httpd_ws_link_t::stats_t httpd_ws_link_t::stats() const noexcept {
     s.tx_large_dropped = tx_large_dropped_.load(std::memory_order_relaxed);
     s.tx_large_peak = tx_large_peak_.load(std::memory_order_relaxed);
     s.tx_to_dead_peer = tx_to_dead_peer_.load(std::memory_order_relaxed);
+    s.tx_send_failed = tx_send_failed_.load(std::memory_order_relaxed);
     s.peers_refused = peers_refused_.load(std::memory_order_relaxed);
     s.sessions_condemned = sessions_condemned_.load(std::memory_order_relaxed);
     s.rx_dropped_oversize = rx_dropped_oversize_.load(std::memory_order_relaxed);
@@ -3615,6 +3653,10 @@ void httpd_ws_link_t::note_tx_skip(const session_ref_t& to) {
 }
 
 void httpd_ws_link_t::note_tx_result(const session_ref_t& to, bool sent, std::size_t bytes) {
+    // The link-wide tally first, before any test of the destination: a frame the socket
+    // write refused is a frame the peer never got whether or not its session is still here
+    // to carry the streak. Until this counter existed the only trace was the WARN line.
+    if (!sent) tx_send_failed_.fetch_add(1, std::memory_order_relaxed);
     bool close_now = false;
     std::string peer;
     char addr[kEndpointChars] = {};
@@ -3889,6 +3931,7 @@ void httpd_ws_link_t::tx_work(void* arg) {
     if (work->gate != nullptr) {
         const std::lock_guard lock(work->gate->m);
         if (httpd_ws_link_t* const owner = work->gate->link; owner != nullptr) {
+            owner->egress_drained();  // the item egress_posted counted is running
             fd = owner->live_fd(work->to);
             // Adopted mode only. In owning mode the purge this defends against is off by
             // construction (the ctor sets lru_purge_enable = false on the cfg it starts
@@ -4108,7 +4151,9 @@ void httpd_ws_link_t::queue_send_retained(const session_ref_t& to,
     if (httpd_queue_work(h, &httpd_ws_link_t::tx_work, work) != ESP_OK) {
         release_tx_work(work);
         note_enqueue_drop(fd, payload_len);
+        return;
     }
+    egress_posted();  // a drain parked for idle must not hold this item (ADR-0085)
 }
 
 void httpd_ws_link_t::send(std::span<const std::span<const std::byte>> head,
@@ -4470,6 +4515,7 @@ bool httpd_ws_link_t::close_peer(std::string_view peer) {
         delete req;
         return false;  // refused: nothing was initiated, and the caller may retry
     }
+    egress_posted();  // a close is egress too: wake a drain parked for idle (ADR-0085)
     return true;
 }
 
@@ -4492,6 +4538,7 @@ void httpd_ws_link_t::close_work(void* req_arg) {
         const std::lock_guard lock(req->gate->m);
         owner = req->gate->link;
         if (owner == nullptr) return;  // the link is gone; the session is not ours to close
+        owner->egress_drained();       // the item condemn counted is running
         ++req->gate->depth;
     }
     owner->close_ref(req->to);

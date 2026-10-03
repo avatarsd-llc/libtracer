@@ -761,6 +761,19 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
          * count means the producer is pushing to sessions long dead.
          */
         std::uint32_t tx_to_dead_peer = 0;
+        /**
+         * @brief Frames the socket write itself refused: `httpd_ws_send_frame_async` returned
+         *        an error on a session the link had just vouched for, queued or in-call.
+         *
+         * The send bound (`send_timeout_ms`) is what usually spends it: the peer's TCP window
+         * stayed shut for the whole bound, so the frame was dropped and the session kept (the
+         * #481 shape; three in a row condemn it, see `sessions_condemned`). Each one is also
+         * charged to the session's own `tx_drops`. Before this field the only trace was the
+         * `ws send failed` / `ws reply failed` WARN line, so a listener reading counters
+         * could see a reply go missing and count no drop. A frame that was cut off mid-write
+         * (#951) is condemned, not counted here.
+         */
+        std::uint32_t tx_send_failed = 0;
         /** @brief Opening handshakes turned away — by the admission predicate (either
          *         refusal verdict, before or after the upgrade), by `max_peers`, or (#1247)
          *         by a FULL pending-handshake ledger, which is what a link with an auth hook
@@ -853,15 +866,15 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * Projected from this link's own richer counters: an ingress frame refused at the
      * abuse cap is the `malformed_rx` class (the peer broke the agreed bound and is
      * dropped with it), an ingress allocation failure — the global heap's, or the injected
-     * @ref rx_backend's — is `dropped_rx` (backpressure), and both egress classes — an
-     * enqueue that found no slot/queue/heap, and a send to a peer that had already departed
-     * — sum into `dropped_tx`.
+     * @ref rx_backend's — is `dropped_rx` (backpressure), and the three egress classes — an
+     * enqueue that found no slot/queue/heap, a send to a peer that had already departed, and
+     * a frame the socket write refused — sum into `dropped_tx`.
      */
     [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
         const stats_t s = stats();
         return {static_cast<std::uint64_t>(s.rx_dropped_alloc) + s.rx_dropped_pool,
                 s.rx_dropped_oversize,
-                static_cast<std::uint64_t>(s.enqueue_drops) + s.tx_to_dead_peer};
+                static_cast<std::uint64_t>(s.enqueue_drops) + s.tx_to_dead_peer + s.tx_send_failed};
     }
 
     /** @brief TX work slots claimed RIGHT NOW (filling, queued, or sending) — across the
@@ -1401,8 +1414,19 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * Compiled to nothing when both budgets are zero. Every frame is charged, control frames
      * (ping, close) included: each costs the same handler pass. A drain belongs to the core
      * it started on; a task that migrated starts a new one (see ADR-0085, dual core).
+     *
+     * The wait also ends when this link has egress work pending on the httpd task
+     * (@ref egress_pending_): the task that is parked is the one that runs the link's
+     * queued sends and closes, so holding it would hold them. Such a wake reads one frame,
+     * lets the handler return so the control socket drains, and parks again; the budget
+     * is not reset, so no second budget is read without the core idling.
      */
     void pace_rx(std::size_t frame_bytes);
+    /** @brief One egress item was posted to the httpd task: count it and wake a drain parked
+     *         for idle (any task; the producer's side of the idle-gate handshake). */
+    void egress_posted() noexcept;
+    /** @brief One posted egress item has started running on the httpd task. */
+    void egress_drained() noexcept;
     /**
      * @brief Turn @p fd into a peer slot: enforce `max_peers`, take a free or fresh slot,
      *        name it, stamp its identity and its authentication state (httpd task only;
@@ -2048,6 +2072,8 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      */
     std::atomic<std::int64_t> tx_wait_futile_until_us_{0};
     std::atomic<std::uint32_t> tx_to_dead_peer_{0};
+    /** @brief See @ref stats_t::tx_send_failed. Bumped where the send result is judged. */
+    std::atomic<std::uint32_t> tx_send_failed_{0};
     std::atomic<std::uint32_t> peers_refused_{0};
     std::atomic<std::uint32_t> sessions_condemned_{0};
     std::atomic<std::uint32_t> rx_dropped_oversize_{0};
@@ -2151,6 +2177,14 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     std::size_t rx_drain_frames_ = 0;
     /** @brief Payload bytes consumed in the current drain (see @ref pace_rx). */
     std::size_t rx_drain_bytes_ = 0;
+    /**
+     * @brief Egress items this link posted to the httpd task that have not run yet: sends
+     *        (@ref tx_work) and closes (@ref close_work). Raised by any task after a
+     *        successful `httpd_queue_work`, lowered by the item as it starts. Non-zero means
+     *        a drain must not park for idle (see @ref pace_rx). `seq_cst` on both sides: it
+     *        is one half of the idle-gate handshake.
+     */
+    std::atomic<std::uint32_t> egress_pending_{0};
     /** @brief Once-allocated TX work-slot pool: claimed lock-free by sending tasks,
      *         released by the httpd task as each send drains. */
     std::unique_ptr<tx_slot_t[]> tx_pool_;
