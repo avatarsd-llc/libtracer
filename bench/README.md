@@ -1697,6 +1697,14 @@ named: the `lkv-*-heap` rows are the **fresh** variant and `lkv-*-heap-aged` the
 Every latency collector is also reserved and touched before its timed loop, so neither a
 vector growth nor its page faults land inside a sample.
 
+Each family is also tagged SINGLE- or MULTI-threaded (`bench_libtracer --families`).
+`perf_gate.py` times `--family-set single` only, when both arms support it: a MULTI family
+(`inproc-mt*`, `acl-inherit-d4-mt4`, `*alloc-mt*`) queues the bench's own threads on the
+pinned CPUs. The own-cgroup CPU pressure that leaves behind was read at the next launch as
+contention and turned gates INCONCLUSIVE with 0% foreign load. No gated point is a MULTI
+row. Foreign CPU time, which is how a real intruder shows, and pressure are still scored on
+every invocation the gate makes.
+
 `LIBTRACER_BENCH_FAMILY_SEED=<n>` runs the families in a seeded shuffled order (printed on
 stderr as `FAMILY-ORDER`). It exists to check the isolation: a shuffled run must leave every row
 inside its A/A spread. `/usr/bin/time -v`'s max RSS is now the largest single family's peak, not

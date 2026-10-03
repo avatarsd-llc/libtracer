@@ -1599,10 +1599,17 @@ void family_inproc_fan_mid() {
         run_inproc(kRefSize, F, kRefEndpoints, alloc_t::HEAP, false, "inproc");
 }
 
-/** @brief One family of the default sweep: its `--family` spelling and its runner. */
+/** @brief Which family set a family belongs to — see @ref kFamilies. */
+enum class family_set_t {
+    SINGLE, /**< One thread does the timed work: no row waits on another of the bench's own. */
+    MULTI,  /**< Starts worker threads (plus a coordinating main thread that spins). */
+};
+
+/** @brief One family of the default sweep: its `--family` spelling, its runner, its set. */
 struct bench_family_t {
     std::string_view name; /**< What `--family` must equal to select this family. */
     void (*run)();         /**< The rows this family emits, and nothing else. */
+    family_set_t set;      /**< SINGLE- or MULTI-threaded — what `--family-set` selects on. */
 };
 
 /**
@@ -1624,28 +1631,36 @@ struct bench_family_t {
  *     gated).
  *   - `target` is the PATH-TARGET fan-out (#619), the leg a wire `SUBSCRIBER` takes.
  *   - `lkv-aged` (#1803) is new and appended last: the `lkv-*-heap` rows on an aged heap.
+ *
+ * The SET column splits the sweep for the perf gate's measurement-condition check. A MULTI
+ * family runs T workers on the pinned CPUs while its main thread spins waiting for them, so
+ * the bench's OWN threads queue behind each other and raise its own cgroup's CPU pressure.
+ * The condition check reads that pressure at the NEXT invocation's launch and used to mark
+ * the gate INCONCLUSIVE for it. No gated point is a MULTI row, so the gate runs
+ * `--family-set single` only, and its pressure reading is about the host again. Foreign
+ * CPU time on the bench CPUs, which is how a real intruder shows, is scored as before.
  *   - There is no `loopback` or `routers-hN` family: those modes benchmarked the ROUTER-flood
  *     bridge, retired in ADR-0040 — the net plane is explicit-source-routed FWD only, and its
  *     forward cost is measured by bench_forward_heap and the fwd_* tests.
  */
 constexpr bench_family_t kFamilies[] = {
-    {"inproc-fan", family_inproc_fan},
-    {"inproc-size", family_inproc_size},
-    {"inproc-borrow", family_inproc_borrow},
-    {"inproc-path", family_inproc_path},
-    {"mixed", run_mixed},
-    {"path-parse", run_path_parse},
-    {"inproc-mt", family_inproc_mt},
-    {"eptype", run_eptype},
-    {"acl", family_acl},
-    {"fold", family_fold},
-    {"deliver", run_mode_deliver},
-    {"lkv", run_lkv_store_gate},
-    {"inproc-pool", family_inproc_pool},
-    {"syncpool", run_syncpool_gate},
-    {"target", run_mode_target},
-    {"inproc-fan-mid", family_inproc_fan_mid},
-    {"lkv-aged", run_lkv_aged},
+    {"inproc-fan", family_inproc_fan, family_set_t::SINGLE},
+    {"inproc-size", family_inproc_size, family_set_t::SINGLE},
+    {"inproc-borrow", family_inproc_borrow, family_set_t::SINGLE},
+    {"inproc-path", family_inproc_path, family_set_t::SINGLE},
+    {"mixed", run_mixed, family_set_t::SINGLE},
+    {"path-parse", run_path_parse, family_set_t::SINGLE},
+    {"inproc-mt", family_inproc_mt, family_set_t::MULTI},
+    {"eptype", run_eptype, family_set_t::SINGLE},
+    {"acl", family_acl, family_set_t::MULTI},
+    {"fold", family_fold, family_set_t::SINGLE},
+    {"deliver", run_mode_deliver, family_set_t::SINGLE},
+    {"lkv", run_lkv_store_gate, family_set_t::SINGLE},
+    {"inproc-pool", family_inproc_pool, family_set_t::SINGLE},
+    {"syncpool", run_syncpool_gate, family_set_t::MULTI},
+    {"target", run_mode_target, family_set_t::SINGLE},
+    {"inproc-fan-mid", family_inproc_fan_mid, family_set_t::SINGLE},
+    {"lkv-aged", run_lkv_aged, family_set_t::SINGLE},
 };
 
 /**
@@ -1674,11 +1689,13 @@ std::vector<const bench_family_t*> family_order() {
 /**
  * @brief The default sweep: every family, each in a fresh child process (#1803).
  *
+ * With @p only set, runs just the families of that set (`--family-set`), in the same order.
  * Stops at the first family that fails and returns non-zero, so a crash in one family is a
  * failed run rather than a transcript silently missing that family's rows.
  */
-int run_default_sweep(const char* argv0) {
+int run_default_sweep(const char* argv0, const family_set_t* only = nullptr) {
     for (const bench_family_t* f : family_order()) {
+        if (only != nullptr && f->set != *only) continue;
         if constexpr (!kFamilyProcesses) {
             f->run();  // no child processes on this platform: the old in-process sweep
             continue;
@@ -1706,6 +1723,8 @@ void print_usage(const char* argv0) {
     std::fprintf(stderr,
                  "  (one isolated sweep each, for A/B runs)\n"
                  "  --family NAME: one family of the default sweep, in this process\n"
+                 "  --family-set single|multi: the default sweep, one set of families\n"
+                 "  --families: list every family and its set (no rows)\n"
                  "  families: ");
     for (const bench_family_t& f : kFamilies)
         std::fprintf(stderr, "%s%.*s", &f == &kFamilies[0] ? "" : " | ",
@@ -1729,6 +1748,24 @@ int main(int argc, char** argv) {
             return 0;
         }
         std::fprintf(stderr, "error: unknown family '%s'\n", argv[2]);
+        print_usage(argv[0]);
+        return 2;
+    }
+    if (argc == 2 && std::string_view{argv[1]} == "--families") {
+        // The capability probe perf_gate.py runs before it asks for `--family-set`: a binary
+        // without family sets refuses this as an unknown mode, exits 2, and is swept whole.
+        for (const bench_family_t& f : kFamilies)
+            std::printf("%.*s\t%s\n", static_cast<int>(f.name.size()), f.name.data(),
+                        f.set == family_set_t::MULTI ? "multi" : "single");
+        return 0;
+    }
+    if (argc > 2 && std::string_view{argv[1]} == "--family-set") {
+        const std::string_view want{argv[2]};
+        if (want == "single" || want == "multi") {
+            const family_set_t only = want == "multi" ? family_set_t::MULTI : family_set_t::SINGLE;
+            return run_default_sweep(argv[0], &only);
+        }
+        std::fprintf(stderr, "error: unknown family set '%s'\n", argv[2]);
         print_usage(argv[0]);
         return 2;
     }

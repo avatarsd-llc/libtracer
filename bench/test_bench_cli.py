@@ -181,6 +181,32 @@ class FamiliesAreSelectableAndRefused(unittest.TestCase):
         self.assertEqual(printed, source_families())
 
 
+class FamilySetsForTheGate(unittest.TestCase):
+    """@brief `--families` / `--family-set` (#1803): the split perf_gate.py times on.
+
+    The gate probes `--families` and then times `--family-set single`, so the probe must list
+    every family with its set, and a bad set name must refuse like a bad mode.
+    """
+
+    def test_families_lists_every_family_with_its_set(self):
+        out = subprocess.run([str(bench_binary()), "--families"], capture_output=True,
+                             text=True, timeout=REFUSE_S)
+        self.assertEqual(out.returncode, 0, out.stderr[-400:])
+        listed = [ln.split("\t") for ln in out.stdout.splitlines()]
+        self.assertEqual([n for n, _ in listed], source_families())
+        self.assertTrue(all(s in ("single", "multi") for _, s in listed))
+        self.assertIn(["inproc-mt", "multi"], listed)
+        self.assertEqual(result_rows(out.stdout), [])
+
+    def test_unknown_family_set_is_refused(self):
+        for arg in ["bogus", "", "SINGLE"]:
+            with self.subTest(arg=arg):
+                out = subprocess.run([str(bench_binary()), "--family-set", arg],
+                                     capture_output=True, text=True, timeout=REFUSE_S)
+                self.assertEqual(result_rows(out.stdout), [])
+                self.assertNotEqual(out.returncode, 0)
+
+
 def source_families() -> list:
     """@brief The family names in `bench_libtracer.cpp`'s `kFamilies` table, in order."""
     text = SOURCE.read_text(encoding="utf-8")

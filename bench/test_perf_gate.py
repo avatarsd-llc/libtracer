@@ -641,6 +641,88 @@ class VerdictTier(unittest.TestCase):
         self.assertEqual(cm.exception.code, 2)
 
 
+class GateTimesTheSingleThreadedFamilySet(unittest.TestCase):
+    """@brief The gate times `--family-set single` only, and a real intruder still shows (#1803).
+
+    The MULTI families (bench threads queueing behind each other on the pinned CPUs) left
+    own-cgroup CPU pressure behind them, which the condition check read at the NEXT launch
+    and called contention: INCONCLUSIVE with 0% foreign load. The fix is to stop running
+    them in the gate (no gated point is a MULTI row), not to stop looking. These pin both
+    halves: the argv the gate sends, and that a foreign intruder and genuine pressure on a
+    SINGLE-set invocation still make the verdict INCONCLUSIVE.
+    """
+
+    def bins(self, root: pathlib.Path, tag: str) -> dict:
+        out = {}
+        for key, name in pg.BENCH_BY_KEY.items():
+            p = root / tag / name
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("")
+            out[key] = p
+        return out
+
+    def test_both_arms_with_family_sets_time_the_single_set(self):
+        with tempfile.TemporaryDirectory() as d:
+            cand, base = self.bins(pathlib.Path(d), "c"), self.bins(pathlib.Path(d), "b")
+            self.assertEqual(pg.gate_sweep_args(cand, base, probe=lambda p: True),
+                             pg.GATE_FAMILY_SET)
+
+    def test_an_arm_without_family_sets_makes_both_sweep_everything(self):
+        with tempfile.TemporaryDirectory() as d:
+            cand, base = self.bins(pathlib.Path(d), "c"), self.bins(pathlib.Path(d), "b")
+            only_cand = lambda p: "/c/" in str(p)  # noqa: E731 — the baseline predates sets
+            self.assertEqual(pg.gate_sweep_args(cand, base, probe=only_cand), ())
+
+    def test_paired_samples_send_the_set_to_bench_libtracer_only(self):
+        seen: list[list[str]] = []
+        with tempfile.TemporaryDirectory() as d, \
+                unittest.mock.patch.object(pg, "has_family_sets", lambda p: True), \
+                unittest.mock.patch.object(pg, "timed",
+                                           lambda argv, timeout: seen.append(argv) or ""), \
+                contextlib.redirect_stdout(io.StringIO()):
+            cand, base = self.bins(pathlib.Path(d), "c"), self.bins(pathlib.Path(d), "b")
+            pg.paired_samples(cand, base, pairs=1)
+        mains = [a for a in seen if a[0].endswith("bench_libtracer")]
+        others = [a for a in seen if not a[0].endswith("bench_libtracer")]
+        self.assertEqual(len(mains), 2)
+        for a in mains:
+            self.assertEqual(tuple(a[1:]), pg.GATE_FAMILY_SET)
+        self.assertTrue(others)
+        for a in others:
+            self.assertEqual(a[1:], [], "compact/demux take no family-set argv")
+
+    def verdict_for(self, cond: "pg.bc.Conditions") -> tuple[int, str]:
+        led = pg.bc.Ledger()
+        led.add(pg.bc.measure(["./bench_libtracer", *pg.GATE_FAMILY_SET],
+                              run=lambda *a: ("", "", 0, cond)))
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = pg.render_verdict([], [], "blocking", None, led)
+        return rc, buf.getvalue()
+
+    def single_set_run(self, own_cpu_s: float, cg_psi: float) -> "pg.bc.Conditions":
+        before = pg.bc.Sample(0, 0, 0, None, cg_psi)
+        after = pg.bc.Sample(10_000_000_000, 1000, 1000, None, cg_psi)
+        return pg.bc.classify(before, after, own_cpu_s=own_cpu_s, nivcsw=0, cpus=[3, 4, 5, 6],
+                              pinned=True, clk_tck=100)
+
+    def test_a_foreign_intruder_is_still_inconclusive(self):
+        # 12% of the window was someone else's CPU time; our own cgroup psi reads 0.
+        rc, out = self.verdict_for(self.single_set_run(own_cpu_s=8.8, cg_psi=0.0))
+        self.assertEqual(rc, pg.EXIT_INCONCLUSIVE)
+        self.assertIn("foreign", out)
+
+    def test_pressure_is_still_scored_on_the_single_set(self):
+        rc, out = self.verdict_for(self.single_set_run(own_cpu_s=10.0, cg_psi=84.4))
+        self.assertEqual(rc, pg.EXIT_INCONCLUSIVE)
+        self.assertIn("psi", out)
+
+    def test_a_quiet_single_set_run_is_clean(self):
+        rc, out = self.verdict_for(self.single_set_run(own_cpu_s=10.0, cg_psi=0.0))
+        self.assertEqual(rc, 0)
+        self.assertIn("PERF: PASS", out)
+
+
 class WorkflowsDeclareTheirTier(unittest.TestCase):
     """@brief Every CI invocation of the gate must name its tier on the command line.
 

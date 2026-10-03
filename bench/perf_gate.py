@@ -65,6 +65,7 @@ import re
 import statistics
 import subprocess
 import sys
+from typing import Callable
 
 HERE = pathlib.Path(__file__).resolve().parent
 BENCH = HERE / "build" / "bench_libtracer"
@@ -594,12 +595,57 @@ def lkv_ratio_gate_paired(bench: pathlib.Path, base_bench: pathlib.Path,
     return fails
 
 
-def run_bench_once(bench: pathlib.Path) -> list[tuple]:
+# --- WHICH FAMILIES THE GATE TIMES (#1803) --------------------------------------------
+# `bench_libtracer`'s default sweep is a list of families, each tagged SINGLE- or MULTI-
+# threaded (`bench_libtracer --families`). A MULTI family (inproc-mt*, acl-…-mt4, the
+# alloc-mt rows) runs T workers on the pinned CPUs while its main thread spins waiting for
+# them, so the bench's OWN threads queue behind each other and its own cgroup's CPU
+# pressure climbs. The condition check samples that pressure at the NEXT invocation's
+# launch (bench_conditions.py), so the residue read as contention: roughly one gate in three
+# came back INCONCLUSIVE with 0% foreign load and own-cgroup psi 84 -> 23 -> 5.7 across
+# its re-runs.
+#
+# No POINTS row comes from a MULTI family, so the gate times `--family-set single` only and
+# does not run the MULTI rows at all. That keeps BOTH contamination signals live for what is
+# gated: pressure is scored on every invocation exactly as before, and now reflects the host
+# rather than our own previous run; foreign CPU time on the bench CPUs, which is how a real
+# intruder shows, is untouched. (Judging the MULTI rows on foreign time alone would also have
+# worked for them, but their residue would still have landed on the next SINGLE launch.)
+#
+# Both arms must speak it or neither uses it: a baseline built before family sets refuses
+# `--families` (exit 2), and then both arms run the whole default sweep, so the two arms
+# always time the same row set in the same process shape.
+GATE_FAMILY_SET = ("--family-set", "single")
+
+
+def has_family_sets(bench: pathlib.Path) -> bool:
+    """@brief Whether @p bench understands `--family-set` (its `--families` probe exits 0)."""
+    try:
+        p = subprocess.run([str(bench), "--families"], capture_output=True, text=True,
+                           timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return p.returncode == 0 and "\tsingle" in p.stdout
+
+
+def gate_sweep_args(*binary_sets: dict[str, pathlib.Path],
+                    probe: Callable[[pathlib.Path], bool] | None = None) -> tuple[str, ...]:
+    """@brief The extra argv the gate passes to every `main` binary: the SINGLE family set
+    when every arm's `bench_libtracer` supports it, otherwise nothing (the whole sweep).
+    @p probe defaults to @ref has_family_sets, looked up at call time so tests can patch it."""
+    probe = probe or has_family_sets
+    mains = [bins["main"] for bins in binary_sets if bins and "main" in bins]
+    if mains and all(probe(m) for m in mains):
+        return GATE_FAMILY_SET
+    return ()
+
+
+def run_bench_once(bench: pathlib.Path, extra: tuple[str, ...] = ()) -> list[tuple]:
     if not bench.exists():
         print(f"perf_gate: {bench} not built — run: cmake -S {HERE} -B {HERE}/build "
               f"-DCMAKE_BUILD_TYPE=Release && cmake --build {HERE}/build -j", file=sys.stderr)
         sys.exit(2)
-    out = timed([str(bench)], timeout=180)
+    out = timed([str(bench), *extra], timeout=180)
     rows = []
     for line in out.splitlines():
         f = line.split("\t")
@@ -628,8 +674,10 @@ def best_of(binaries: dict[str, pathlib.Path], runs: int) -> dict[str, dict]:
     rather than one per point.
     """
     cur: dict[str, dict] = {}
+    extra = gate_sweep_args(binaries)
     for _ in range(max(1, runs)):
-        rows_by_bin = {b: run_bench_once(path) for b, path in binaries.items()}
+        rows_by_bin = {b: run_bench_once(path, extra if b == "main" else ())
+                       for b, path in binaries.items()}
         for (b, m, s, f, e) in POINTS:
             if b not in rows_by_bin:
                 continue
@@ -687,12 +735,15 @@ def paired_samples(cand: dict[str, pathlib.Path], base: dict[str, pathlib.Path],
     both arms drawn from the SAME pair, so the lists can be compared element-wise.
     """
     out: dict[str, dict[str, list[dict]]] = {"cand": {}, "base": {}}
+    extra = gate_sweep_args(cand, base)
+    print(f"  bench_libtracer sweep: {' '.join(extra) if extra else 'all families'}")
     for i in range(max(1, pairs)):
         order = [("base", base), ("cand", cand)]
         if i % 2:
             order.reverse()
         for arm, binaries in order:
-            rows_by_bin = {b: run_bench_once(path) for b, path in binaries.items()}
+            rows_by_bin = {b: run_bench_once(path, extra if b == "main" else ())
+                           for b, path in binaries.items()}
             for (b, m, s, f, e) in POINTS:
                 if b not in rows_by_bin:
                     continue
