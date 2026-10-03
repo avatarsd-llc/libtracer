@@ -800,13 +800,21 @@ class block_array_t {
 
     /**
      * @brief Append a copy of @p v.
+     *
+     * @warning For a trivially copyable `T`, @p v must not refer to an element of this
+     *          array: growth releases the old block before the copy is read. Use
+     *          @ref emplace_back, which builds in the fresh block first, when it might.
+     *
      * @retval false The source is exhausted — the array is unchanged (BACKPRESSURE).
      */
     [[nodiscard]] bool push_back(const T& v) noexcept {
-        if (end_ == cap_) return grow_emplace(size(), v) != nullptr;
         if constexpr (kTrivial) {
+            // The shape every trivially copyable caller compiled against before #1776, kept
+            // byte for byte: the symbol ratchet pins hot functions that inline it.
+            if (end_ == cap_ && !grow()) return false;
             *end_++ = v;
         } else {
+            if (end_ == cap_) return grow_emplace(size(), v) != nullptr;
             ::new (static_cast<void*>(end_)) T(v);
             ++end_;
         }
@@ -815,10 +823,18 @@ class block_array_t {
 
     /**
      * @brief Append @p v by move.
+     *
+     * Offered only for a `T` that is not trivially copyable: for one that is, a move is a
+     * copy, and an rvalue keeps binding to the copying overload and its pre-#1776 code.
+     *
      * @retval false The source is exhausted — the array is unchanged and @p v is not moved
      *               from.
      */
-    [[nodiscard]] bool push_back(T&& v) noexcept { return emplace_back(std::move(v)) != nullptr; }
+    [[nodiscard]] bool push_back(T&& v) noexcept
+        requires(!kTrivial)
+    {
+        return emplace_back(std::move(v)) != nullptr;
+    }
 
     /**
      * @brief Construct one element at the end from @p args and return it.
