@@ -818,8 +818,8 @@ void transport_can::deliver(std::uint16_t src_node, tr::view::rope_t frame) {
 
 // --- the `can` catalog factory (ADR-0027 / ADR-0043 §5 / ADR-0044) -----------
 
-transport_vertex_t::transport_factory_t can_transport_factory(std::pmr::memory_resource* reasm_mr,
-                                                              mem::mem_backend_t* rx_backend) {
+transport_factory_t can_transport_factory(std::pmr::memory_resource* reasm_mr,
+                                          mem::mem_backend_t* rx_backend) {
     return [reasm_mr, rx_backend](
                const conn_settings_t& /*settings*/,
                const wire::tlv_t* raw_config) -> graph::result_t<std::unique_ptr<transport_t>> {

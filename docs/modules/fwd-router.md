@@ -349,7 +349,7 @@ registry slab exhausted. A `provide_link` staging is consumed only once the wiri
 
 **Liveness is the connection vertex's value.** `link_state_t` is six states —
 `DORMANT`, `DIALING`, `RECONNECTING`, `UP`, `LISTENING`, `BIND_FAILED`
-(`core/include/libtracer/transport_vertex.hpp:link_state_t`). `DIAL` links use the first four; `LISTEN`
+(`core/include/libtracer/transport_factory.hpp:link_state_t`). `DIAL` links use the first four; `LISTEN`
 links report listen-socket reachability with the last two, never a per-accepted-peer state. The
 value is a 1-byte `VALUE` on the vertex, so it is `await`-able and subscribable: `subscribe
 /net/<module>/<name>` streams every transition. The liveness *engine* that would drive these
@@ -375,7 +375,7 @@ originate the **wires** ([#491]).
 
 ### Connection settings are transport-private
 
-`conn_settings_t` (`core/include/libtracer/transport_vertex.hpp:conn_settings_t`) and `conn_role_t` (`core/include/libtracer/transport_vertex.hpp:conn_role_t`) are
+`conn_settings_t` (`core/include/libtracer/transport_factory.hpp:conn_settings_t`) and `conn_role_t` (`core/include/libtracer/transport_factory.hpp:conn_role_t`) are
 a **device-private `:settings` facet** of a connection vertex
 ([ADR-0021 — the colon-field plane is the vertex ioctl](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0021-colon-field-plane-is-the-vertex-ioctl.md)
 draws the standard / device-private line). They live on the `tr::net` leaf record and are **never**
@@ -685,6 +685,10 @@ at the terminus, which is what makes a per-writer subject reachable at `peer_nam
 ```{doxygenstruct} tr::net::conn_settings_t
 :project: libtracer
 :members:
+```
+
+```{doxygentypedef} tr::net::transport_factory_t
+:project: libtracer
 ```
 
 ```{doxygenenum} tr::net::conn_role_t

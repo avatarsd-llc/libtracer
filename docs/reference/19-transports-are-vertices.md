@@ -139,7 +139,7 @@ flowchart TD
 ### Uniform introspection
 
 **The connection vertex's value is its liveness state** — a 1-byte `link_state_t`
-(`core/include/libtracer/transport_vertex.hpp:link_state_t`) emitted as an ordinary `VALUE` TLV
+(`core/include/libtracer/transport_factory.hpp:link_state_t`) emitted as an ordinary `VALUE` TLV
 (`core/src/transport_vertex.cpp:link_state_value`). Because it is a vertex value and not a side-channel
 callback, all three primitives already work on it: `read` it, `await` it, or **subscribe** to
 `/net/<module>/<name>` and receive every transition without polling (assign-then-deliver,
@@ -280,7 +280,7 @@ does not yet reach.
 **Standing requirement.** `tr::net::conn_settings_t` carries only the keys **every** transport
 kind means the same thing by. A kind's private configuration never lands there — the kind's
 own factory parses it from the raw config `SETTINGS` TLV it receives alongside the parsed
-universal settings (`core/include/libtracer/transport_vertex.hpp:conn_settings_t`, ADR-0043 §3, §5).
+universal settings (`core/include/libtracer/transport_factory.hpp:conn_settings_t`, ADR-0043 §3, §5).
 
 The mechanism is the factory signature: a factory is
 `(const conn_settings_t&, const wire::tlv_t* raw_config) -> result_t<unique_ptr<transport_t>>`,
@@ -310,7 +310,7 @@ can only select one of those by name. An unregistered name is refused with
 - **A shared key that only one kind reads is a dead key.** The failure mode is already
   visible *inside* the universal set: `keepalive_ms` was parsed and no consumer anywhere in
   the tree read it, until #1666 deleted the field and left the key accepted-and-ignored (`backoff_ms` / `connect_timeout_ms` escaped that condition when the
-  S5 liveness engine landed — `core/include/libtracer/transport_vertex.hpp:conn_settings_t::backoff_ms`, `core/include/libtracer/transport_vertex.hpp:conn_settings_t::connect_timeout_ms`;
+  S5 liveness engine landed — `core/include/libtracer/transport_factory.hpp:conn_settings_t::backoff_ms`, `core/include/libtracer/transport_factory.hpp:conn_settings_t::connect_timeout_ms`;
   [13](13-network-formation.md)). One record carrying N kinds' private vocabulary would be
   that condition by construction rather than by accident — and a mistyped or misplaced key is
   silently ignored, so nothing would report it.
@@ -374,7 +374,7 @@ paper.
 **Implemented** too: the `CREATE`/`WRITE` gating split (S2c, RFC-0014 Amendment 2), and the
 catalog envelope (S3, Amendment 3 — an empty `SETTINGS` for a module that declares none).
 RFC-0014's byte-level clauses — the liveness encoding among them — are normative since
-Amendment 4, with the values in `core/include/libtracer/transport_vertex.hpp:link_state_t`
+Amendment 4, with the values in `core/include/libtracer/transport_factory.hpp:link_state_t`
 as the reference encoding.
 
 **Not implemented.** Routing-plane callers that make subscriptions/awaits drive the refcount

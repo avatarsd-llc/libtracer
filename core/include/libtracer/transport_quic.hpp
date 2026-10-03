@@ -31,7 +31,7 @@
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/tls_profile.hpp"
 #include "libtracer/transport.hpp"
-#include "libtracer/transport_vertex.hpp"
+#include "libtracer/transport_factory.hpp"
 
 namespace tr::net {
 
@@ -250,7 +250,7 @@ class quic_transport_t : public transport_t {
  *                   heap). Must outlive the constructed transports.
  * @return The factory functor for @ref transport_vertex_t::register_transport_type.
  */
-[[nodiscard]] transport_vertex_t::transport_factory_t quic_transport_factory(
+[[nodiscard]] transport_factory_t quic_transport_factory(
     std::span<const tls_profile_t> profiles = {},
     mem::mem_backend_t* rx_backend = &mem::heap_backend());
 

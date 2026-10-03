@@ -45,7 +45,7 @@
 #include "libtracer/can.hpp"
 #include "libtracer/can_reassembly.hpp"
 #include "libtracer/transport.hpp"
-#include "libtracer/transport_vertex.hpp"
+#include "libtracer/transport_factory.hpp"
 #include "libtracer/view_can.hpp"
 
 /**
@@ -814,7 +814,7 @@ class transport_can : public transport_t, public bus_link_t {
  *                 outlive every transport built here.
  * @return The factory functor for @ref transport_vertex_t::register_transport_type.
  */
-[[nodiscard]] transport_vertex_t::transport_factory_t can_transport_factory(
+[[nodiscard]] transport_factory_t can_transport_factory(
     std::pmr::memory_resource* reasm_mr = std::pmr::new_delete_resource(),
     mem::mem_backend_t* rx_backend = nullptr);
 

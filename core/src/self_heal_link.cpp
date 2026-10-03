@@ -33,9 +33,8 @@ static_assert(kSelfHealLinks,
 
 using wire::tlv_t;
 
-self_heal_link_t::self_heal_link_t(transport_vertex_t::transport_factory_t factory,
-                                   conn_settings_t settings, std::vector<std::byte> raw_config,
-                                   bool inner_delivers_ropes)
+self_heal_link_t::self_heal_link_t(transport_factory_t factory, conn_settings_t settings,
+                                   std::vector<std::byte> raw_config, bool inner_delivers_ropes)
     : factory_(std::move(factory)),
       // Defaults resolved ONCE, at bind time, so the factory and every wait in this file
       // read the same effective values (RFC-0014 §4: config overrides the engine's own
