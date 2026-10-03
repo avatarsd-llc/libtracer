@@ -502,11 +502,24 @@ MEM_CHARGED: dict[str, tuple[int, str]] = {}
 # session by more than the throughput tolerance. A heap fallback still fails unconditionally:
 # under LKV_FALLBACK_RATIO no runner variance explains it, whatever main reads.
 #
-# The legacy (no-baseline) form keeps the constant floor. Rows absent from a binary (an
-# older main) leave that arm out, so the comparison degrades to the floor rather than
-# passing silently.
-LKV_MIN_RATIO = 2.0
-LKV_FALLBACK_RATIO = 1.25  # a pool routed back to the heap reads ~1.0x; nothing healthy is near it
+# #1695 measured the pairing too, and it was not enough. Over 254 per-arm best-of-3 readings
+# on the CI runners (2026-09-29..10-03, healthy code throughout), S=64 ran 1.4x-6.5x, median
+# 3.0x, and 43 of them under 2.0x; the floor reddened two PRs after #1745 with main
+# and the candidate at 2.1x/1.6x and 1.9x/1.6x in the SAME session. The two arms land in
+# different modes of a bimodal distribution, so no pairing rule separates them.
+#
+# So the routing claim is no longer timed. `bench_forward_heap`'s LKV-ROUTE gate runs the
+# same alloc/free loop under the global operator-new counter and requires the pool arm to
+# reach the heap ZERO times, with the heap arm as its control; CI also runs it with
+# LKV_ROUTE_BREAK=1 and requires it to fail. That is exact and blocking. What stays here:
+#   * LKV_FALLBACK_RATIO still FAILS, in both forms. The lowest healthy reading in the #1695
+#     sample is 1.4x and a fallback reads ~1.0x, so 1.25x has never fired on healthy code; it
+#     is the timed backstop for `bench_libtracer`'s own pool arm.
+#   * the 2.0x floor and the same-session comparison against main are REPORTED, not gated:
+#     they sit inside the runner's own spread. A slower pool path is still gated, as a row:
+#     `lkv-store-pool/64/1/1` is in POINTS under the interleaved majority-of-pairs rule.
+LKV_MIN_RATIO = 2.0        # reported reference only since #1695 (glibc tcache: ~2.5-3x quiet)
+LKV_FALLBACK_RATIO = 1.25  # GATED: a pool routed back to the heap reads ~1.0x; healthy min 1.4x
 LKV_ROUNDS = 3             # legacy best-of rounds, and the paired form's pair count
 LKV_ROWS = ("lkv-alloc-heap", "lkv-alloc-pool")
 
@@ -557,21 +570,14 @@ def lkv_verdict(size: int, cand: float, base: float | None) -> tuple[str, str | 
                 f"to the heap)")
     if cand >= LKV_MIN_RATIO:
         return line, None
-    if base is None:
-        return (line + f"  << under {LKV_MIN_RATIO}x floor",
-                f"lkv-alloc S={size} pool only {cand:.1f}x heap alloc/free (< {LKV_MIN_RATIO}x "
-                f"— the ADR-0060 value_backend routing may have broken / fallen back to the "
-                f"heap)")
-    if cand < base * TPUT_REGRESS:
-        return (line + f"  << under {LKV_MIN_RATIO}x floor AND under main",
-                f"lkv-alloc S={size} pool only {cand:.1f}x heap alloc/free, under the "
-                f"{LKV_MIN_RATIO}x floor and under main's {base:.1f}x from the same session "
-                f"by more than {(1 - TPUT_REGRESS) * 100:.0f}% — the pool path regressed")
-    return (line + f"  (under {LKV_MIN_RATIO}x, but so is main on this runner: not gated)", None)
+    if base is not None and cand < base * TPUT_REGRESS:
+        return (line + f"  (under {LKV_MIN_RATIO}x and under main: reported, not gated — "
+                f"#1695; LKV-ROUTE is the routing gate)", None)
+    return (line + f"  (under {LKV_MIN_RATIO}x: reported, not gated — #1695)", None)
 
 
 def lkv_ratio_gate(bench: pathlib.Path) -> list[str]:
-    """@brief The legacy form: the candidate alone, best of LKV_ROUNDS, against the floor."""
+    """@brief The legacy form: the candidate alone, best of LKV_ROUNDS, against the fallback."""
     cand = lkv_best([lkv_parse(timed([str(bench), "lkv"], timeout=120))
                      for _ in range(LKV_ROUNDS)])
     fails = []
