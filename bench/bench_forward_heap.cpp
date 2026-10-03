@@ -510,7 +510,7 @@ lkv_route_t lkv_route_window(tr::mem::mem_backend_t& backend, std::size_t size, 
  * proxy for: "the pool routing is live, it has not fallen back to the heap". The ratio
  * moves with the runner (#1695 measured 1.4x-6.5x on healthy builds); a count does not.
  *
- * The pool is the shape `bench_libtracer`'s `run_lkv_store_gate` builds: 2 KiB slots over a
+ * The pool is the shape `bench_libtracer`'s `run_lkv_store_rows` builds: 2 KiB slots over a
  * caller-owned slab with an explicit 64-byte alignment. Its rows lead with `S=`, not
  * `allocs=`, so neither `perf_emit_benchmark.py` nor `perf_gate.py` reads them as a series:
  * like the canaries, this is a verdict, not a number with a history.
