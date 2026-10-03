@@ -1,0 +1,252 @@
+{
+  "_comment": "Cyclomatic-complexity ratchet pins (#1790): every core/ function above the ceiling of 15, at its MEASURED lizard CCN, keyed by qualified name (overloads share a key; their values are compared largest to largest). A pin may only go down. Lower or remove pins with: python3 tools/check_ccn.py --repin. Never raise a pin to pass the gate: lower the function by deleting, normalizing or merging branches, not by splitting it into helpers.",
+  "functions": {
+    "tr::graph::apply_op": {
+      "ccn": [
+        49
+      ],
+      "file": "core/src/op_resolve_walk.hpp"
+    },
+    "tr::graph::graph_t::admit_subscriber": {
+      "ccn": [
+        16
+      ],
+      "file": "core/src/graph.cpp"
+    },
+    "tr::graph::graph_t::field_write": {
+      "ccn": [
+        45
+      ],
+      "file": "core/src/graph.cpp"
+    },
+    "tr::graph::graph_t::propagate_folded_impl": {
+      "ccn": [
+        42
+      ],
+      "file": "core/src/graph.cpp"
+    },
+    "tr::graph::graph_t::propagate_impl": {
+      "ccn": [
+        30
+      ],
+      "file": "core/src/graph.cpp"
+    },
+    "tr::graph::graph_t::read_field_rope": {
+      "ccn": [
+        45
+      ],
+      "file": "core/src/graph.cpp"
+    },
+    "tr::graph::graph_t::read_subtree_folded": {
+      "ccn": [
+        24
+      ],
+      "file": "core/src/graph.cpp"
+    },
+    "tr::graph::graph_t::write_branch": {
+      "ccn": [
+        33
+      ],
+      "file": "core/src/graph.cpp"
+    },
+    "tr::graph::parse_acl": {
+      "ccn": [
+        33
+      ],
+      "file": "core/include/libtracer/security_acl.hpp"
+    },
+    "tr::graph::parse_branch_node": {
+      "ccn": [
+        23
+      ],
+      "file": "core/src/graph.cpp"
+    },
+    "tr::graph::parse_fwd": {
+      "ccn": [
+        21
+      ],
+      "file": "core/src/op_resolve_walk.hpp"
+    },
+    "tr::graph::path_t::parse": {
+      "ccn": [
+        24
+      ],
+      "file": "core/src/path.cpp"
+    },
+    "tr::graph::resolve_node": {
+      "ccn": [
+        29
+      ],
+      "file": "core/src/op_resolve_walk.hpp"
+    },
+    "tr::graph::selector_to_field": {
+      "ccn": [
+        17
+      ],
+      "file": "core/src/op_resolve_walk.hpp"
+    },
+    "tr::graph::vertex_t::evict_route_edges": {
+      "ccn": [
+        18
+      ],
+      "file": "core/include/libtracer/vertex.hpp"
+    },
+    "tr::graph::vertex_t::ring_admit": {
+      "ccn": [
+        17
+      ],
+      "file": "core/include/libtracer/vertex.hpp"
+    },
+    "tr::net::can_transport_factory": {
+      "ccn": [
+        17
+      ],
+      "file": "core/src/transport_can.cpp"
+    },
+    "tr::net::classify_write_fault": {
+      "ccn": [
+        19
+      ],
+      "file": "core/src/posix_endpoint.cpp"
+    },
+    "tr::net::emit_refusal_reply": {
+      "ccn": [
+        31
+      ],
+      "file": "core/src/fwd_router.cpp"
+    },
+    "tr::net::fwd_router_t::label_dispatch": {
+      "ccn": [
+        16
+      ],
+      "file": "core/src/fwd_router.cpp"
+    },
+    "tr::net::fwd_router_t::on_compact": {
+      "ccn": [
+        29
+      ],
+      "file": "core/src/fwd_router.cpp"
+    },
+    "tr::net::fwd_router_t::route_fwd_forward": {
+      "ccn": [
+        19
+      ],
+      "file": "core/src/fwd_router.cpp"
+    },
+    "tr::net::fwd_router_t::route_label_forward": {
+      "ccn": [
+        16
+      ],
+      "file": "core/src/fwd_router.cpp"
+    },
+    "tr::net::peek_fwd_dst_any": {
+      "ccn": [
+        17
+      ],
+      "file": "core/include/libtracer/fwd_frame_view.hpp"
+    },
+    "tr::net::peek_refused_route": {
+      "ccn": [
+        32
+      ],
+      "file": "core/src/fwd_router.cpp"
+    },
+    "tr::net::quic_transport_factory": {
+      "ccn": [
+        16
+      ],
+      "file": "core/src/transport_quic.cpp"
+    },
+    "tr::net::rebuild_fwd_forward": {
+      "ccn": [
+        47
+      ],
+      "file": "core/include/libtracer/fwd_frame_view.hpp"
+    },
+    "tr::net::reject_bus_name_hop": {
+      "ccn": [
+        26
+      ],
+      "file": "core/src/fwd_router.cpp"
+    },
+    "tr::net::self_heal_link_t::worker_main": {
+      "ccn": [
+        19
+      ],
+      "file": "core/src/self_heal_link.cpp"
+    },
+    "tr::net::transport_vertex_t::make_connection_locked": {
+      "ccn": [
+        26
+      ],
+      "file": "core/src/transport_vertex.cpp"
+    },
+    "tr::net::transport_ws_client::serve": {
+      "ccn": [
+        21
+      ],
+      "file": "core/src/transport_ws.cpp"
+    },
+    "tr::net::transport_ws_server::drain_frames": {
+      "ccn": [
+        18
+      ],
+      "file": "core/src/transport_ws.cpp"
+    },
+    "tr::net::udp_transport_t::run": {
+      "ccn": [
+        17
+      ],
+      "file": "core/src/transport_udp.cpp"
+    },
+    "tr::net::webtransport_transport_factory": {
+      "ccn": [
+        18
+      ],
+      "file": "core/src/transport_webtransport.cpp"
+    },
+    "tr::net::webtransport_transport_t::impl_t::classify_bidi": {
+      "ccn": [
+        33
+      ],
+      "file": "core/src/transport_webtransport.cpp"
+    },
+    "tr::net::ws::detail::decode_one": {
+      "ccn": [
+        20
+      ],
+      "file": "core/include/libtracer/ws.hpp"
+    },
+    "tr::net::wt_h3::decode_field_section": {
+      "ccn": [
+        25
+      ],
+      "file": "core/src/wt_h3.hpp"
+    },
+    "tr::wire::err_disposition": {
+      "ccn": [
+        16
+      ],
+      "file": "core/include/libtracer/error.hpp"
+    },
+    "tr::wire::err_path": {
+      "ccn": [
+        16
+      ],
+      "file": "core/include/libtracer/error.hpp"
+    },
+    "tr::wire::err_severity": {
+      "ccn": [
+        16
+      ],
+      "file": "core/include/libtracer/error.hpp"
+    },
+    "tr::wire::grammar::parse_header": {
+      "ccn": [
+        20
+      ],
+      "file": "core/include/libtracer/grammar.hpp"
+    }
+  },
+  "lizard": "1.24.0"
+}
