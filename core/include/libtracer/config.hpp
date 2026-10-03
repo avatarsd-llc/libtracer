@@ -482,37 +482,6 @@ struct default_config_t {
     static constexpr bool kSpinWaitSafe = true;
 
     /**
-     * @brief Whether this target's memory model may REORDER a later relaxed load ahead of an
-     *        earlier `seq_cst` store — i.e. whether it is anything WEAKER than x86-64's TSO
-     *        (#1143).
-     *
-     * The one knob here that is not a size, a policy or a preference: it states what the
-     * hardware does, so that an ordering precondition can be a `static_assert` instead of a
-     * paragraph. The precondition it carries today is the delivery-skip Dekker pair (#635,
-     * #1140) — `vertex_t::own_subs_ordered` against ADR-0049's subscribe latch — whose
-     * `seq_cst` halves are argued from the code rather than from coverage, because a relaxed
-     * ablation leaves the whole suite green wherever CI happens to run.
-     * `kDeliverySkipOrder` (`vertex.hpp`) is the constant this refuses to see weakened.
-     *
-     * **Default `true`: assume weak unless a target says otherwise.** The two directions are
-     * not symmetric. Saying `true` on a TSO host costs exactly nothing — the orders this gates
-     * are already `seq_cst` on every target, so the assertion is satisfied as shipped and no
-     * instruction changes. Saying `false` on a target that is actually weak silently disarms
-     * the check on the one class of target it exists for, and the shipped set is mostly that
-     * class: rv32 (esp32c6/c3), Cortex-M0, and the `ubuntu-24.04-arm` CI leg (#1140) are all
-     * weakly ordered, and a raw `-I` consumer — a vendored source drop, the footprint gate —
-     * states nothing at all. The value that is safe to inherit in silence is therefore the
-     * strict one.
-     *
-     * It never SELECTS a weaker order: nothing reads this to relax an access, so a target that
-     * sets it `false` gets the same instructions, only a check that stops firing. Override
-     * fragment: `static constexpr bool kWeaklyOrdered = false;` — worth setting only for an
-     * x86-64-only build that wants the freedom to relax those loads, which is a decision to
-     * take deliberately rather than by omission.
-     */
-    static constexpr bool kWeaklyOrdered = true;
-
-    /**
      * @brief Whether this target carries the ADR-0044 BUS facet at all — peer-named links,
      *        per-peer addressing, in-band peer enumeration (#375 deliverable 3).
      *
@@ -753,6 +722,25 @@ static_assert(!defines_reader_guard_member<config_t>,
               "renamed to guard_t (#1703). In your libtracer/config_override.hpp, rename "
               "`using reader_guard_t = ...;` to `using guard_t = ...;`.");
 
+/**
+ * @brief Whether the configuration @p C still defines `kWeaklyOrdered`, removed by #1717.
+ *
+ * The removal tripwire's predicate. `default_config_t` no longer defines it, so only a stale
+ * override fragment can.
+ */
+template <class C>
+concept defines_weakly_ordered_member = requires { C::kWeaklyOrdered; };
+
+// The removal tripwire (#1717). `kWeaklyOrdered = false` let a build that declared itself TSO
+// waive the delivery-skip order assertion in vertex.hpp; nothing in-tree set it, and that
+// assertion is now unconditional. A fragment that still sets it would compile on believing it
+// holds a waiver that no longer exists. Refuse it, so the line is deleted.
+static_assert(!defines_weakly_ordered_member<config_t>,
+              "config_t defines kWeaklyOrdered, which libtracer no longer reads: kWeaklyOrdered "
+              "was removed (#1717). The delivery-skip order is asserted seq_cst on every target, "
+              "so there is nothing left to waive. Delete `static constexpr bool kWeaklyOrdered = "
+              "...;` from your libtracer/config_override.hpp.");
+
 // ---------------------------------------------------------------------------------------------
 // Derived spellings. These are what the rest of the library and its consumers actually name;
 // they exist so that introducing @ref config_t moved no call site. Each is exactly its traits
@@ -772,8 +760,6 @@ inline constexpr std::size_t kShareThresholdBytes = config_t::kShareThresholdByt
 inline constexpr std::size_t kDeferredReleaseSlots = config_t::kDeferredReleaseSlots;
 /** @brief @ref default_config_t::kQsbrParticipants for this build. */
 inline constexpr std::size_t kQsbrParticipants = config_t::kQsbrParticipants;
-/** @brief @ref default_config_t::kWeaklyOrdered for this build. */
-inline constexpr bool kWeaklyOrdered = config_t::kWeaklyOrdered;
 /** @brief @ref default_config_t::acl_policy_t for this build. */
 using acl_policy_t = config_t::acl_policy_t;
 /** @brief @ref default_config_t::kSingleWriter for this build. */

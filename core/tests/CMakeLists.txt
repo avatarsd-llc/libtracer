@@ -2513,6 +2513,16 @@ add_test(NAME guard_rename COMMAND ${CMAKE_COMMAND}
          -DLT_PROBE=${CMAKE_CURRENT_SOURCE_DIR}/spin_slot_guard_probe.cpp
          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/guard_rename.cmake)
 
+# #1717 — kWeaklyOrdered was removed. A fragment that still sets it must fail to compile, by
+# the tripwire's own message, instead of compiling on as if it still waived the delivery-skip
+# order assertion. Same harness shape as guard_rename (one fixture dir per arm).
+add_test(NAME weakly_ordered_removed COMMAND ${CMAKE_COMMAND}
+         -DLT_CXX=${CMAKE_CXX_COMPILER}
+         -DLT_CORE_INCLUDE=${CMAKE_CURRENT_SOURCE_DIR}/../include
+         -DLT_FIXTURES=${CMAKE_CURRENT_SOURCE_DIR}/weakly_ordered_removed
+         -DLT_PROBE=${CMAKE_CURRENT_SOURCE_DIR}/spin_slot_guard_probe.cpp
+         -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/weakly_ordered_removed.cmake)
+
 # #1703 — the one-release alias window: every pre-move guard spelling still names its new type.
 add_executable(guard_alias_test guard_alias_test.cpp)
 target_link_libraries(guard_alias_test PRIVATE libtracer)

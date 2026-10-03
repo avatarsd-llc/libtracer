@@ -160,32 +160,30 @@ static_assert(config_t::kSpinWaitSafe || !lkv_slot_t::may_spin,
  * mostly runs: on x86-64 the `seq_cst` LKV store lowers to a locked `xchg`, so even a relaxed
  * load of zero cannot observe the pre-store world and the suite stays green through the
  * ablation. The `ubuntu-24.04-arm` leg (#1140) is the coverage half of that answer; this
- * constant and @ref tr::graph::kWeaklyOrdered are the refusal half.
+ * constant and the assertion below are the refusal half.
  */
 inline constexpr std::memory_order kDeliverySkipOrder = std::memory_order_seq_cst;
 
 /**
- * @brief A weakly-ordered target may not weaken the delivery-skip pair (#1143).
+ * @brief No target may weaken the delivery-skip pair (#1143, #1717).
  *
  * The precondition #1140 could previously only state in prose, now compiler-checked: on a
  * target that reorders a later relaxed load ahead of an earlier `seq_cst` store — every
  * shipped MCU target, and any many-core aarch64 host — the skip gate's two halves must share
  * one total order, which nothing weaker than `seq_cst` gives them. Ablating
- * `kDeliverySkipOrder` now fails the BUILD on those targets instead of passing the suite
- * on a TSO host and shipping a lost delivery to the ones CI cannot run.
+ * `kDeliverySkipOrder` fails the BUILD instead of passing the suite on a TSO host and shipping
+ * a lost delivery to the targets CI cannot run.
  *
- * A build that sets @ref tr::graph::kWeaklyOrdered to `false` states that its target orders
- * that pair in hardware and takes the ablation's consequences on itself; nothing here selects
- * a weaker order on its behalf.
+ * The assertion is unconditional. Until #1717 a build could set `kWeaklyOrdered = false` to
+ * claim a TSO target and waive it; nothing in-tree did, and the order is `seq_cst` everywhere,
+ * so the waiver bought nothing a build could use and the trait was removed.
  */
-static_assert(!kWeaklyOrdered || kDeliverySkipOrder == std::memory_order_seq_cst,
-              "this target is weakly ordered (tr::graph::kWeaklyOrdered), so the delivery-skip "
-              "gate vertex_t::own_subs_ordered and its subscriber-side bump must both be "
-              "seq_cst: anything weaker leaves a publisher's skip and a concurrent "
-              "subscriber's ADR-0049 latch load out of one total order, and the racing publish "
-              "reaches nobody (#635, #1140). Restore kDeliverySkipOrder, or -- only for a "
-              "target whose hardware really does order it -- set kWeaklyOrdered = false in the "
-              "libtracer/config_override.hpp fragment.");
+static_assert(kDeliverySkipOrder == std::memory_order_seq_cst,
+              "the delivery-skip gate vertex_t::own_subs_ordered and its subscriber-side bump "
+              "must both be seq_cst: anything weaker leaves a publisher's skip and a concurrent "
+              "subscriber's ADR-0049 latch load out of one total order on a weakly-ordered "
+              "target, and the racing publish reaches nobody (#635, #1140). Restore "
+              "kDeliverySkipOrder to std::memory_order_seq_cst.");
 
 // L1 types this layer consumes (upward dependency on tr::view, docs/adr/0016 §2).
 using view::rope_t;
@@ -2679,9 +2677,9 @@ class vertex_t {
      * The other interleaving (count already bumped, slot not yet appended) costs one
      * pointless lock acquisition that snapshots nothing, never a lost delivery.
      *
-     * Both halves take `kDeliverySkipOrder`, which a weakly-ordered target
-     * (@ref tr::graph::kWeaklyOrdered) `static_assert`s is still `seq_cst` — so the argument
-     * above is a build failure when it stops holding, not only a paragraph (#1143).
+     * Both halves take `kDeliverySkipOrder`, which every build `static_assert`s is still
+     * `seq_cst` — so the argument above is a build failure when it stops holding, not only a
+     * paragraph (#1143).
      */
     [[nodiscard]] std::uint32_t own_subs_ordered() const noexcept {
         return own_subs_.load(kDeliverySkipOrder);
