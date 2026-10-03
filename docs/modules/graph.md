@@ -803,6 +803,21 @@ a reply already being assembled.
 :project: libtracer
 ```
 
+A hook is a STORED callback whose context the caller keeps alive. A callback that is only
+called before the function taking it returns takes the non-owning `function_ref_t` instead
+([ADR-0083](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0083-one-allocation-seam.md) Decision 9,
+[#1776](https://github.com/avatarsd-llc/libtracer/issues/1776)): two words, no allocation, and
+it binds to a temporary lambda.
+
+```{doxygenclass} tr::function_ref_t
+:project: libtracer
+```
+
+```{doxygenclass} tr::function_ref_t< R(Args...)>
+:project: libtracer
+:members:
+```
+
 ```{doxygenstruct} tr::graph::handlers_t
 :project: libtracer
 :members:

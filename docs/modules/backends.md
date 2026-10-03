@@ -161,7 +161,8 @@ raw `nullptr` translated at this adapter's own boundary and nowhere else.
 ```
 
 The standard-`Allocator` face, for the containers neither of the two above can serve. A
-`block_array_t` needs trivially copyable and trivially destructible elements; a store holding
+`block_array_t` needed trivially copyable and trivially destructible elements until
+[#1776](https://github.com/avatarsd-llc/libtracer/issues/1776); a store holding
 `std::shared_ptr`s or `std::vector` keys has neither, and before
 [#873](https://github.com/avatarsd-llc/libtracer/issues/873) phase 1 those sites were stranded
 on the global heap. This changes only where the vector's block comes from and leaves the
@@ -177,6 +178,20 @@ signal — so it delivers **placement and bounding**, and the by-value refusal c
 ```
 
 ```{doxygenclass} tr::mem::block_array_t
+:members:
+```
+
+The core container set ([ADR-0083](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0083-one-allocation-seam.md) Decision 2,
+[#1776](https://github.com/avatarsd-llc/libtracer/issues/1776)): `block_array_t` above is the
+vector, and the name/string store and the sorted map below complete it. All three draw every
+byte from a `block_source_t`, report a refused growth by value, and leave the container (and
+any argument passed by rvalue) unchanged when they do. Nothing has migrated onto them yet.
+
+```{doxygenclass} tr::mem::string_t
+:members:
+```
+
+```{doxygenclass} tr::mem::sorted_map_t
 :members:
 ```
 
