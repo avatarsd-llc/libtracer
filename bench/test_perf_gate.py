@@ -382,7 +382,8 @@ class PointsAreDocumented(unittest.TestCase):
     GEN = pathlib.Path(__file__).resolve().parent / "gen_results_page.py"
     WORDS = {2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven",
              8: "eight", 9: "nine", 10: "ten", 11: "eleven", 12: "twelve",
-             13: "thirteen", 14: "fourteen", 15: "fifteen", 16: "sixteen"}
+             13: "thirteen", 14: "fourteen", 15: "fifteen", 16: "sixteen",
+             17: "seventeen", 18: "eighteen"}
 
     def test_methodology_names_every_point(self):
         if not self.DOC.exists():          # bench/ checked out alone
@@ -411,6 +412,37 @@ class PointsAreDocumented(unittest.TestCase):
                         f"{self.GEN}'s instrument registry does not say "
                         f"'{self.WORDS[n]} canonical points' — POINTS now has {n} entries "
                         f"and the published instrument table has rotted (#1041)")
+
+
+class HeapLkvGatedAt1KiB(unittest.TestCase):
+    """@brief The heap LKV rows are gated at 1024 B too, and the #1768 step fails them.
+
+    v0.17.0 shipped a 2x slowdown on `lkv-store-heap` / `lkv-alloc-heap` at 1024 B with every
+    gate green: the only heap point was 64 B, where the same change was ~30% FASTER. These pin
+    that the 1024 B rows are POINTS, and that the recorded shapes reach the verdict they must."""
+
+    def test_both_heap_rows_are_points_at_1024(self):
+        keys = {(mode, size) for (_b, mode, size, _f, _e) in pg.POINTS}
+        self.assertIn(("lkv-store-heap", 1024), keys)
+        self.assertIn(("lkv-alloc-heap", 1024), keys)
+        self.assertIn(("lkv-store-heap", 64), keys)  # the 64 B point stays
+
+    def test_1768_alloc_step_fails_on_throughput(self):
+        """`lkv-alloc-heap 1024B` 17.6 -> 47 ns, as ops/s (M). Throughput is its live leg."""
+        self.assertTrue(tput([21.3, 21.1, 21.4, 21.2], [56.8, 56.5, 57.0, 56.6])["fail"])
+
+    def test_1768_store_step_fails_on_latency_despite_the_tick_guard(self):
+        """`lkv-store-heap 1024B` 27 -> 54 ns: sub-100 ns, but 27 ns is over LAT_TICK_NS."""
+        self.assertTrue(lat([54, 54, 55, 54], [27, 27, 27, 28])["fail"])
+
+    def test_the_64b_gain_direction_never_fails(self):
+        """The other half of slice 10: 64 B got faster. A speed-up is never a pullback."""
+        self.assertFalse(tput([34.0, 34.2, 33.9, 34.1], [26.0, 26.1, 25.9, 26.0])["fail"])
+        self.assertFalse(lat([29, 29, 30, 29], [41, 41, 42, 41])["fail"])
+
+    def test_a_one_tick_wobble_at_1024_passes(self):
+        """A 1-2 tick move on a ~27 ns row is clock grain, not a regression."""
+        self.assertFalse(lat([29, 28, 29, 28], [27, 27, 27, 27])["fail"])
 
 
 def lkv_out(heap64, pool64, heap1k=None, pool1k=None):

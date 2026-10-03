@@ -151,6 +151,7 @@ DEFAULT_TIER = "advisory"
 #   mixed                   — the composed realistic topology
 #   fold-b4                 — the L0 inline-fold codec tier (batch-amortized)
 #   lkv-store-{heap,pool}   — the L1 rope->contiguous copy (`rope_t::materialize`)
+#   lkv-{store,alloc}-heap @ 1024 B — the heap backend's large-segment layout (#1768)
 #   inproc-target-{handler,stored} @ fan 8 — the path-target dispatch legs
 #   eptype-stream           — the STREAM role's bounded-history retention leg
 #
@@ -209,8 +210,19 @@ DEFAULT_TIER = "advisory"
 # through a release. They cost NOTHING extra to run: `bench_libtracer`'s default sweep
 # already emits these rows (`run_lkv_store_gate`), so this is two more keys read out of
 # output the gate was already collecting, not two more measurements — the added
-# wall-clock is zero. Both are taken at 64 B: the sweep's 1024 B twins move with them
-# (measured, #1250) and a second size would buy correlated evidence, not new coverage.
+# wall-clock is zero. They were taken at 64 B only, on the argument that the sweep's
+# 1024 B twins move with them (measured, #1250) and a second size would buy correlated
+# evidence. #1768 disproved that for the HEAP rows: RFC-0028 slice 10 put the segment header
+# and payload in one block, which made 64 B ~30% faster and 1024 B ~2x slower (a 1072 B
+# request misses glibc's 1032 B tcache), and v0.17.0 shipped with the gate green because both
+# directions met on one size. So the heap backend is also gated at 1024 B, on both rows:
+# `lkv-store-heap` (alloc + copy) and `lkv-alloc-heap` (the alloc/free alone, which the
+# ADR-0060 pool/heap RATIO below cannot gate — a slower heap only raises that ratio). The pool
+# rows stay at 64 B: a pool slot's layout does not depend on the payload size. These two
+# rows also come from output the default sweep already emits, so they too add no wall-clock.
+# Both run in the sub-100 ns band, so `LAT_TICK_NS` tick-guards their latency legs and the
+# throughput leg (bulk-timed) carries them; the #1768 step (17.6 -> 47 ns, 27 -> 54 ns)
+# clears every leg.
 #
 # EDITORS: this list is the answer to "how many points does the per-PR gate watch?",
 # and `docs/methodology.md` (§What actually stops a regression) states that count and
@@ -232,6 +244,8 @@ POINTS = [
     ("main", "fold-b4", 512, 1, 1),
     ("main", "lkv-store-heap", 64, 1, 1),
     ("main", "lkv-store-pool", 64, 1, 1),
+    ("main", "lkv-store-heap", 1024, 1, 1),
+    ("main", "lkv-alloc-heap", 1024, 1, 1),
     ("main", "inproc-target-handler", 64, 8, 1),
     ("main", "inproc-target-stored", 64, 8, 1),
     ("main", "eptype-stream", 64, 1, 1),

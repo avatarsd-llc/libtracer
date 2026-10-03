@@ -261,7 +261,7 @@ Details that make these trustworthy:
   set, and the interleaved A/B remains their primary defence. The allocation-count
   instruments (the zero-alloc gate, the memory probes, the RAM censuses) are exempt —
   load cannot move a count.
-- The per-PR gate watches **fifteen canonical points** — a representative slice of the
+- The per-PR gate watches **seventeen canonical points** — a representative slice of the
   fan-out / payload / topic sweeps plus a fold-width point, one per *gated* family
   (`inproc` and `inproc-borrow` share one), so a pullback on any of those legs is caught and
   not just the 1:1 write. They are **not** the whole dispatch surface, and this page should
@@ -280,7 +280,10 @@ Details that make these trustworthy:
   fold walk, 512 bytes held constant across four rope links and timed over a batch; and
   `lkv-store-heap/64/1/1` + `lkv-store-pool/64/1/1` — the L1 **rope-to-contiguous copy**
   (`rope_t::materialize`: one segment allocated from the backend plus the payload
-  `memcpy`), against the default heap and against a pooled backend; and
+  `memcpy`), against the default heap and against a pooled backend;
+  `lkv-store-heap/1024/1/1` + `lkv-alloc-heap/1024/1/1` — the same copy and the bare
+  alloc/free on the default heap at 1 KiB, where the heap backend's segment layout
+  changes; and
   `inproc-target-handler/64/8/1` + `inproc-target-stored/64/8/1` — the **path-target**
   dispatch legs at fan-out 8, edges carrying a target key rather than a callback, which
   is the leg a wire `SUBSCRIBER` actually takes.
@@ -291,7 +294,11 @@ Details that make these trustworthy:
   branch and field writes, `op_resolve` reads, FWD COMPACT emission, the RX span sink —
   and no gated point at the time was downstream of that call, so the loss shipped with
   every gate green. They are read out of `RESULT` rows the default sweep already emits,
-  so they add no wall-clock. Note the name: `lkv-store-*` measures the **copy-store
+  so they add no wall-clock. The two 1 KiB heap rows joined them after the same kind of
+  miss ([#1768](https://github.com/avatarsd-llc/libtracer/issues/1768)): putting a
+  segment's header and payload in one block made the 64 B heap rows ~30% faster and the
+  1 KiB ones ~2x slower, because a 1072 B request misses glibc's 1032 B per-thread cache,
+  and with only the 64 B row gated the release went out green. Note the name: `lkv-store-*` measures the **copy-store
   allocation**, not the last-known-value slot.
 
   Beside those rows sits one **ratio** check, the ADR-0060 pool/heap floor: the pooled
@@ -327,7 +334,7 @@ Details that make these trustworthy:
   tick guard would demand an extra +25 ns absolute and blunt them the way it blunts
   `fold-b4`.
 
-  `eptype-stream/64/1/1` is the fifteenth, and the reason it is gated while its two
+  `eptype-stream/64/1/1` is on the list too, and the reason it is gated while its two
   siblings are not is the whole point of adding it. `eptype-lean` and `eptype-lean-cached`
   are the `inproc` and `inproc-borrow` code paths *re-emitted* under an endpoint-type
   name — already gated, twice over, so gating them again would buy correlated evidence
@@ -369,7 +376,7 @@ Details that make these trustworthy:
   `try_alloc` fires on every write — **does not exist**, and neither does one for the ring's
   resident bytes. Both are gaps in this page, not numbers it is withholding.
 
-  Four of the fifteen come from OTHER bench binaries, and they are here because of what
+  Four of the seventeen come from OTHER bench binaries, and they are here because of what
   happened without them (#1173): `compact-forward` moved **+41%** across the v0.8.0 →
   v0.9.0 window while every gated point stayed flat, so the gate had nothing to object to.
   They are `compact-forward/64/1/1` and `compact-terminus/64/1/1` — the compact-delivery

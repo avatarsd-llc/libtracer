@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "libtracer/backend.hpp"
+#include "libtracer/config.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/segment.hpp"
 #include "libtracer/view.hpp"
@@ -292,6 +293,24 @@ template <class T, class Alloc>
 
 namespace tr::mem {
 
+class heap_backend_t;
+
+namespace detail {
+
+/**
+ * @brief `heap_backend_t`'s two-block layout above its small-block threshold (#1768): the
+ *        payload at @p align, then a bare `segment_t` reclaimed by @p owner. Out of line, so
+ *        the small-segment path every call site inlines stays as short as it was.
+ * @retval nullptr Either draw failed; a payload already drawn is returned first.
+ */
+[[nodiscard]] view::segment_t* heap_alloc_split(heap_backend_t* owner, std::size_t size,
+                                                std::size_t align) noexcept;
+
+/** @brief The mirror of @ref heap_alloc_split: both blocks back, each at the size it was drawn. */
+void heap_destroy_split(view::segment_t* seg, std::size_t align) noexcept;
+
+}  // namespace detail
+
 /**
  * @brief The host allocator backend: owns platform-heap bytes, frees them and the
  *        `segment_t` control block on destroy.
@@ -319,8 +338,17 @@ namespace tr::mem {
  *       `align <= __STDCPP_DEFAULT_NEW_ALIGNMENT__` — which is the *definition* of the
  *       guarantee plain `operator new` gives, so nothing loses an alignment it had — and the
  *       reclaim becomes the SIZED `operator delete(p, bytes)`. Both are the arms every other
- *       #873 channel already takes; the allocation COUNT is unchanged (two draws per segment,
- *       which is what `bench_forward_heap`'s `allocs=` pins count).
+ *       #873 channel already takes.
+ *
+ * @par How many draws a segment costs (RFC-0028 §4.9, #1768)
+ * ONE, for a segment whose padded header plus payload fits
+ * @ref tr::graph::default_config_t::kHeapSmallBlockBytes, the header and the payload
+ * share a block (RFC-0028 slice 10). TWO above it — the payload, then the bare `segment_t` —
+ * because one block that misses the host allocator's small-block fast path costs more than
+ * two that hit it (glibc's tcache ceiling is 1,032 B, so a 1024 B value's 1072 B block
+ * doubled `lkv-store-heap 1024B`). Which layout a segment has is a function of its payload
+ * size alone, so @ref destroy recomputes it from `bytes.size()` and returns exactly what
+ * @ref alloc drew, sized. `bench_forward_heap`'s `allocs=` pins count the small-value case.
  */
 class heap_backend_t final : public mem_backend_t {
    public:
@@ -328,6 +356,24 @@ class heap_backend_t final : public mem_backend_t {
 
     /** @brief The block alignment a heap segment is drawn at (payload and header alike). */
     static constexpr std::size_t kBlockAlign = view::segment_block_align(alignof(std::max_align_t));
+
+    /** @brief The padded header at the head of a one-block segment; the payload follows it. */
+    static constexpr std::size_t kHeaderBytes = view::segment_header_bytes(kBlockAlign);
+
+    /**
+     * @brief The largest single block one segment draws; a larger segment is split (#1768).
+     *        This build's @ref tr::graph::default_config_t::kHeapSmallBlockBytes.
+     */
+    static constexpr std::size_t kSmallBlockBytes = graph::config_t::kHeapSmallBlockBytes;
+
+    /**
+     * @brief Whether a @p size-byte segment is ONE block (header + payload within
+     *        @ref kSmallBlockBytes) rather than two. A function of the size alone, so the
+     *        @ref alloc / @ref destroy pair always agrees on it.
+     */
+    [[nodiscard]] static constexpr bool is_one_block(std::size_t size) noexcept {
+        return kSmallBlockBytes >= kHeaderBytes && size <= kSmallBlockBytes - kHeaderBytes;
+    }
 
     /** @brief One platform-heap block (@ref heap_source_t::acquire) — nothrow. */
     [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
@@ -339,26 +385,36 @@ class heap_backend_t final : public mem_backend_t {
     }
 
     /**
-     * @brief ONE heap block per segment: the header and the payload together (RFC-0028 §4.9).
+     * @brief A small segment is ONE heap block, the header and the payload together (RFC-0028
+     *        §4.9); a larger one is two (#1768).
      *
-     * Two blocks before slice 10 (the bytes, then the control block) — the `producer-own` row
-     * of `bench_lean_value_path`. Draws straight from @ref heap_source_t::acquire rather than
-     * through the virtual @ref try_alloc, so the hot path pays no virtual call.
+     * One block is the `producer-own` row of `bench_lean_value_path` (slice 10). Above
+     * @ref kSmallBlockBytes the draw goes to the out-of-line `detail::heap_alloc_split` instead, so
+     * no block exceeds the host allocator's small-block ceiling unless the payload alone does.
+     * Draws straight from @ref heap_source_t::acquire rather than through the virtual @ref
+     * try_alloc, so the hot path pays no virtual call.
      */
     view::segment_t* alloc(std::size_t size, alloc_hint_t /*hint*/) override {
-        void* const block =
-            heap_source_t::acquire(view::segment_block_bytes(size, kBlockAlign), kBlockAlign);
+        if (!is_one_block(size)) return detail::heap_alloc_split(this, size, kBlockAlign);
+        void* const block = heap_source_t::acquire(kHeaderBytes + size, kBlockAlign);
         return block != nullptr ? view::place_segment(this, block, size, kBlockAlign) : nullptr;
     }
 
-    /** @brief Return the one block @ref alloc drew. */
+    /** @brief Return the block, or the two blocks, @ref alloc drew — sized, as drawn. */
     void destroy(view::segment_t* seg) noexcept override {
         const std::size_t size = seg->bytes.size();
+        if (!is_one_block(size)) {
+            detail::heap_destroy_split(seg, kBlockAlign);
+            return;
+        }
         seg->~segment_t();
-        heap_source_t::reclaim(seg, view::segment_block_bytes(size, kBlockAlign), kBlockAlign);
+        heap_source_t::reclaim(seg, kHeaderBytes + size, kBlockAlign);
     }
 
-    /** @brief The payload follows a header padded to @ref kBlockAlign. */
+    /**
+     * @brief @ref kBlockAlign, in both layouts: one block's payload follows a header padded to
+     *        it, and a split payload is drawn at it.
+     */
     [[nodiscard]] std::size_t alignment() const noexcept override { return kBlockAlign; }
 
     [[nodiscard]] backend_tag tag() const noexcept override { return backend_tag::HEAP; }

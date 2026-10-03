@@ -5,7 +5,9 @@
 
 #include "libtracer/mem_heap.hpp"
 
+#include <cstddef>
 #include <new>
+#include <span>
 
 namespace tr::mem {
 
@@ -17,6 +19,43 @@ mem_backend_t& heap_backend() noexcept {
     static heap_backend_t backend;
     return backend;
 }
+
+namespace detail {
+
+/**
+ * @brief Draw a large heap segment as two blocks, payload first (#1768).
+ *
+ * The header is drawn at its own size and alignment, not padded to the block alignment:
+ * nothing follows it in its block, so the padding would buy nothing and could only push a
+ * header-sized draw into a larger size class.
+ */
+view::segment_t* heap_alloc_split(heap_backend_t* owner, std::size_t size,
+                                  std::size_t align) noexcept {
+    void* const payload = heap_source_t::acquire(size, align);
+    if (payload == nullptr) return nullptr;
+    void* const header = heap_source_t::acquire(sizeof(view::segment_t), alignof(view::segment_t));
+    if (header == nullptr) {
+        heap_source_t::reclaim(payload, size, align);
+        return nullptr;
+    }
+    return new (header)
+        view::segment_t(owner, std::span<std::byte>(static_cast<std::byte*>(payload), size));
+}
+
+/**
+ * @brief Return both blocks of a split segment, sized as `heap_alloc_split` drew them.
+ *        `bytes` is read before the header is destroyed, since it is the only record of where
+ *        the payload block is.
+ */
+void heap_destroy_split(view::segment_t* seg, std::size_t align) noexcept {
+    std::byte* const payload = seg->bytes.data();
+    const std::size_t size = seg->bytes.size();
+    seg->~segment_t();
+    heap_source_t::reclaim(payload, size, align);
+    heap_source_t::reclaim(seg, sizeof(view::segment_t), alignof(view::segment_t));
+}
+
+}  // namespace detail
 
 }  // namespace tr::mem
 
