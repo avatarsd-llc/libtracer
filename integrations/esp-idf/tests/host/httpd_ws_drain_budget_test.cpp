@@ -324,6 +324,68 @@ void test_egress_work_is_sent_from_inside_the_park() {
 }
 
 // ---------------------------------------------------------------------------
+// 7 — the park sends in POST order, not slot order: a later post that landed in a lower slot
+//     (because an earlier item's slot had been released) still goes out after the earlier
+//     ones, as the FIFO control queue would have sent it.
+// ---------------------------------------------------------------------------
+void test_park_sends_in_post_order_not_slot_order() {
+    constexpr std::size_t kBudget = tr::net::kRxDrainFrames;
+    constexpr std::size_t kPool = httpd_ws_link_t::kDefaultTxPoolSlots;
+    std::printf("a parked drain sends posted items in post order, whatever slot they sit in:\n");
+    auto link = fresh_link(807);
+    // The previous case's link queued its teardown detach and did not wait for it (adopted
+    // mode); run whatever is left so the queue below holds this case's items alone.
+    (void)fake_httpd::instance().run_pending();
+    fake_httpd::instance().clear_sent_frames();
+    // Claim the peer with one frame (no park yet), then post a pool's worth of pushes with
+    // the loop NOT running: they fill slots 0..pool-1 in post order and sit in the queue.
+    const std::byte probe[1] = {std::byte{0}};
+    (void)fake_httpd::instance().deliver_frame(807, std::span<const std::byte>(probe));
+    tr::net::transport_t* const peer = only_peer(*link);
+    check(peer != nullptr, "the peer resolved to a directed endpoint");
+    if (peer == nullptr) {
+        finish(std::move(link));
+        return;
+    }
+    std::vector<std::byte> tag(1);
+    for (std::size_t i = 0; i < kPool; ++i) {
+        tag[0] = static_cast<std::byte>(0x10 + i);
+        peer->send(std::span<const std::byte>(tag));
+    }
+    // The loop runs exactly ONE item: the first post, which frees slot 0 and nothing else.
+    check(fake_httpd::instance().run_one(), "the loop sent the first item");
+    check(fake_httpd::instance().sent_frames().size() == 1, "and only that one");
+    // The next post is LATER than everything still queued, yet it lands in slot 0, the
+    // lowest. Slot order would send it first; post order sends it last.
+    tag[0] = std::byte{0xA0};
+    peer->send(std::span<const std::byte>(tag));
+    check(link->tx_slots_busy() == kPool,
+          "the pool is full again, the late post in the freed slot");
+
+    // Now the flood arrives and the drain parks past one budget; the park finds all four
+    // items kQueued at once and must send them 0x11, 0x12, 0x13, then 0xA0.
+    ingress_t in(807, kBudget + 1, 8);
+    check(wait_until([&] { return fake_httpd::instance().sent_frames().size() == 1 + kPool; }),
+          "every queued item went out from inside the park");
+    check(fake_httpd::semaphore_waiters() == 1, "which is still parked");
+    const auto sent = fake_httpd::instance().sent_frames();
+    bool in_order = sent.size() == 1 + kPool;
+    for (std::size_t i = 1; in_order && i < kPool; ++i)
+        in_order =
+            sent[i].payload.size() == 1 && sent[i].payload[0] == static_cast<std::byte>(0x10 + i);
+    in_order =
+        in_order && sent.back().payload.size() == 1 && sent.back().payload[0] == std::byte{0xA0};
+    check(in_order, "and in post order: the late post in the lowest slot went out last");
+
+    (void)fake_httpd::run_idle_hooks();
+    check(wait_until([&] { return in.delivered() == kBudget + 1; }), "the parked frame finished");
+    (void)fake_httpd::instance().run_pending();
+    check(fake_httpd::instance().sent_frames().size() == 1 + kPool, "no item went out twice");
+    check(link->tx_slots_busy() == 0, "and every slot came back");
+    finish(std::move(link));
+}
+
+// ---------------------------------------------------------------------------
 // 5 — the hook could not be installed: the link must NOT pace (it would wait forever).
 // ---------------------------------------------------------------------------
 /** @brief A hook that only occupies a slot. */
@@ -366,6 +428,7 @@ int main(int argc, char** argv) {
         test_an_idle_core_resets_the_drain();
         test_teardown_while_parked_joins_after_idle();
         test_egress_work_is_sent_from_inside_the_park();
+        test_park_sends_in_post_order_not_slot_order();
     }
     if (g_failures != 0) {
         std::printf("FAILED: %d check(s)\n", g_failures);

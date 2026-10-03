@@ -1229,6 +1229,14 @@ struct httpd_ws_link_t::tx_work_t {
      * will ever come and the park releases. Zero outside that window.
      */
     std::atomic<std::uint8_t> state{0};
+    /**
+     * @brief This item's place in the link's post order: drawn from `egress_ticket_` before
+     *        the @ref kQueued store publishes it. The control queue is FIFO in post order,
+     *        and a parked drain sends the lowest ticket first (@ref send_posted_in_park), so
+     *        two items from one producer reach the wire in the order they were posted
+     *        whichever party sends them. Compared modulo 2^32.
+     */
+    std::uint32_t ticket = 0;
     static constexpr std::uint8_t kQueued = 1; /**< @brief Complete; posted or being posted. */
     static constexpr std::uint8_t kTaken = 2;  /**< @brief A sender has it. */
     static constexpr std::uint8_t kSentInPark =
@@ -2463,22 +2471,35 @@ bool httpd_ws_link_t::send_posted_in_park() {
     // after this scan took the item leaves kRefused in place of kTaken, and then no copy
     // is coming and the slot is released here. The pending count is lowered by the send
     // itself (send_posted), so a loop that finds nothing to send goes back to sleep.
+    //
+    // In POST order, never slot order: the control queue is FIFO, and a session's frames
+    // (an LKV update behind the RETAINED value it supersedes) must reach the wire in the
+    // order they were posted. Each pass finds the kQueued item with the lowest ticket and
+    // sends it, then looks again, so an item posted while one was going out takes its turn
+    // after it. The slot index says nothing about order: a producer takes the lowest FREE
+    // slot, so a later post lands in a lower slot whenever an earlier one was released.
     bool ran = false;
     if (tx_pool_ == nullptr) return ran;
-    for (std::size_t i = 0; i < tx_slots_total_; ++i) {
-        tx_work_t& work = tx_pool_[i].work;
+    for (;;) {
+        tx_work_t* next = nullptr;
+        for (std::size_t i = 0; i < tx_slots_total_; ++i) {
+            tx_work_t& work = tx_pool_[i].work;
+            if (work.state.load(std::memory_order_seq_cst) != tx_work_t::kQueued) continue;
+            if (next == nullptr || static_cast<std::int32_t>(work.ticket - next->ticket) < 0)
+                next = &work;
+        }
+        if (next == nullptr) return ran;
         std::uint8_t expected = tx_work_t::kQueued;
-        if (!work.state.compare_exchange_strong(expected, tx_work_t::kTaken,
-                                                std::memory_order_seq_cst))
-            continue;
-        send_posted(&work, false);
+        if (!next->state.compare_exchange_strong(expected, tx_work_t::kTaken,
+                                                 std::memory_order_seq_cst))
+            continue;  // its producer withdrew it (kRefused) between the scan and the take
+        send_posted(next, false);
         expected = tx_work_t::kTaken;
-        if (!work.state.compare_exchange_strong(expected, tx_work_t::kSentInPark,
-                                                std::memory_order_seq_cst))
-            release_tx_work(&work);  // kRefused: the enqueue failed; no copy will release it
+        if (!next->state.compare_exchange_strong(expected, tx_work_t::kSentInPark,
+                                                 std::memory_order_seq_cst))
+            release_tx_work(next);  // kRefused: the enqueue failed; no copy will release it
         ran = true;
     }
-    return ran;
 }
 
 esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
@@ -3415,6 +3436,7 @@ void httpd_ws_link_t::queue_send(const session_ref_t& to,
         // never find one whose count is not yet raised, nor one the httpd loop's copy may
         // already have started.
         egress_pending_.fetch_add(1, std::memory_order_seq_cst);
+        work->ticket = egress_ticket_.fetch_add(1, std::memory_order_relaxed);
         work->state.store(tx_work_t::kQueued, std::memory_order_seq_cst);
         queued = httpd_queue_work(h, &httpd_ws_link_t::tx_work, work) == ESP_OK;
         if (queued) {
@@ -4012,7 +4034,10 @@ void httpd_ws_link_t::send_posted(tx_work_t* work, bool release_slot) {
     if (work->gate != nullptr) {
         const std::lock_guard lock(work->gate->m);
         if (httpd_ws_link_t* const owner = work->gate->link; owner != nullptr) {
-            owner->egress_drained();  // the item egress_posted counted is running
+            // The item egress_posted counted is running. A null `link` is a link whose
+            // destructor has completed: its counter is gone with it, and nothing can be
+            // parked on it any more, so there is nothing to lower and no one to wake.
+            owner->egress_drained();
             fd = owner->live_fd(work->to);
             // Adopted mode only. In owning mode the purge this defends against is off by
             // construction (the ctor sets lru_purge_enable = false on the cfg it starts
@@ -4233,6 +4258,7 @@ void httpd_ws_link_t::queue_send_retained(const session_ref_t& to,
     }
     // The same count-mark-enqueue order as queue_send, for the same parked drain.
     egress_pending_.fetch_add(1, std::memory_order_seq_cst);
+    work->ticket = egress_ticket_.fetch_add(1, std::memory_order_relaxed);
     work->state.store(tx_work_t::kQueued, std::memory_order_seq_cst);
     if (httpd_queue_work(h, &httpd_ws_link_t::tx_work, work) == ESP_OK) {
         egress_posted();

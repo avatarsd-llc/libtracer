@@ -770,8 +770,10 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
          * #481 shape; three in a row condemn it, see `sessions_condemned`). Each one is also
          * charged to the session's own `tx_drops`. Before this field the only trace was the
          * `ws send failed` / `ws reply failed` WARN line, so a listener reading counters
-         * could see a reply go missing and count no drop. A frame that was cut off mid-write
-         * (#951) is condemned, not counted here.
+         * could see a reply go missing and count no drop. A frame cut off mid-write (#951)
+         * is counted here as well — the peer did not get it either — and its session is
+         * condemned on top (`sessions_condemned`); the two counters answer different
+         * questions and one event may feed both.
          */
         std::uint32_t tx_send_failed = 0;
         /** @brief Opening handshakes turned away — by the admission predicate (either
@@ -2195,6 +2197,9 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *        both sides: it is one half of the idle-gate handshake.
      */
     std::atomic<std::uint32_t> egress_pending_{0};
+    /** @brief The next post ticket (`tx_work_t::ticket`): the link's post order, which a
+     *         parked drain sends in. Relaxed: the kQueued store publishes the value. */
+    std::atomic<std::uint32_t> egress_ticket_{0};
     /** @brief Once-allocated TX work-slot pool: claimed lock-free by sending tasks,
      *         released by the httpd task as each send drains. */
     std::unique_ptr<tx_slot_t[]> tx_pool_;
