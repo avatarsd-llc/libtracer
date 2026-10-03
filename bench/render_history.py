@@ -39,6 +39,7 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 # renderer and the workflow can never disagree about what "contaminated" means.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import host_guard  # noqa: E402
+import step_detect  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # family specs
@@ -721,7 +722,8 @@ def _host_meta(entries: list[dict]) -> dict:
     return {"hosts": per_entry}
 
 
-def build(data: dict, colors: dict[str, int] | None = None, same_pass: bool = True) -> dict:
+def build(data: dict, colors: dict[str, int] | None = None, same_pass: bool = True,
+          steps: bool = False) -> dict:
     """@brief Assemble the chart payload perf_history.js draws.
 
     Returns {"suites": {key: {shas, msgs, releases}}, "charts": [...]} — each
@@ -739,9 +741,17 @@ def build(data: dict, colors: dict[str, int] | None = None, same_pass: bool = Tr
     machine. Only then is the zenoh ÷ libtracer quotient a comparison, so only then does a
     paired family carry its `ratio` view. bench-local is same-pass; the hosted store (best of
     three runners per series) is not, and is built with `same_pass=False` (#1769).
+
+    `steps` attaches each series' sustained steps (`step_detect.find_steps`) as
+    `"steps": [[entry_idx, before, after], ...]`, which the trend view marks. The detector
+    reads the row's EVERY point, contaminated ones included (see `step_detect` for why),
+    so it is fed from the unfiltered store rather than the drawn points. Only bench-local
+    is built with it: on the hosted store consecutive points swing by up to ~50%, so a
+    per-row threshold there would sit above every step worth reporting (#1770).
     """
     suites: dict[str, dict] = {}
     suite_series: dict[str, dict[str, list[list[float]]]] = {}
+    suite_rows: dict[str, dict[str, dict]] = {}  # unfiltered rows, for the step detector
     for suite_name, entries in data.get("entries", {}).items():
         if not entries:
             continue
@@ -766,13 +776,15 @@ def build(data: dict, colors: dict[str, int] | None = None, same_pass: bool = Tr
             **_host_meta(entries),
         }
         suite_series[k] = _series_by_name(entries, contaminated)
+        if steps:
+            suite_rows[k] = step_detect.rows_of(entries)
 
     if colors is None:
         colors = {}
     charts: list[dict] = []
     seen: list[str] = []  # one real series name per family, for source resolution
 
-    def collect(fam: dict, names: dict, pat: str | None) -> list[dict]:
+    def collect(fam: dict, names: dict, pat: str | None, suite: str) -> list[dict]:
         """@brief The family's series within one metric's suite, or [] if it has none there.
 
         Returns fewer than two entries as [] on purpose: a single line is not a
@@ -780,12 +792,12 @@ def build(data: dict, colors: dict[str, int] | None = None, same_pass: bool = Tr
         card that does not offer it.
         """
         rat = fam.get("ratio")
-        picked: list[tuple] = []  # (sort_key, label, pv, pts, ratio_meta)
+        picked: list[tuple] = []  # (sort_key, label, pv, pts, ratio_meta, name)
         if "names" in fam:  # explicit fixed list (heap/memory probes, not point-swept)
             for i, (name, label) in enumerate(fam["names"]):
                 if name in names:
                     seen.append(name)
-                    picked.append((i, label, None, names[name], None))
+                    picked.append((i, label, None, names[name], None, name))
         else:
             for name in names:
                 m = re.match(pat, name)
@@ -798,12 +810,13 @@ def build(data: dict, colors: dict[str, int] | None = None, same_pass: bool = Tr
                 # the shape it pairs on, and the numeric parameter the ratio view sweeps.
                 rm = (dict(arm=rat["arm"](m), rk=rat["shape"](m), rpv=rat["pv"](m))
                       if rat else None)
-                picked.append((key, fam["label"](m), pv, names[name], rm))
+                picked.append((key, fam["label"](m), pv, names[name], rm, name))
         picked.sort(key=lambda t: (t[0],) if not isinstance(t[0], str) else (float("inf"), t[0]))
         if len(picked) < fam.get("min_series", 2):
             return []
         out = []
-        for _, label, pv, pts, rm in picked:
+        rows = suite_rows.get(suite, {})
+        for _, label, pv, pts, rm, name in picked:
             # Color is global BY LABEL across every chart and every metric, so "fan 8"
             # is one color everywhere — switching metric must not reshuffle the legend.
             ci = colors.setdefault(label, len(colors))
@@ -812,6 +825,10 @@ def build(data: dict, colors: dict[str, int] | None = None, same_pass: bool = Tr
                 s["pv"] = pv
             if rm is not None:
                 s.update(rm)
+            if name in rows:
+                found = step_detect.find_steps(rows[name]["pts"])
+                if found:
+                    s["steps"] = [[st["i"], st["before"], st["after"]] for st in found]
             out.append(s)
         return out
 
@@ -821,14 +838,14 @@ def build(data: dict, colors: dict[str, int] | None = None, same_pass: bool = Tr
         if "names" in fam:
             # A fixed-name probe family names whole series itself, so there is no metric
             # suffix to vary — it carries exactly the one it declares.
-            series = collect(fam, suite_series.get(fam["suite"], {}), None)
+            series = collect(fam, suite_series.get(fam["suite"], {}), None, fam["suite"])
             if series:
                 variants.append({"name": fam.get("metric", fam["ylabel"]), "suite": fam["suite"],
                                  "fmt": fam["fmt"], "ylabel": fam["ylabel"], "series": series})
         else:
             for met in METRICS:
                 series = collect(fam, suite_series.get(met["suite"], {}),
-                                 fam["pat"] + " " + met["name"] + "$")
+                                 fam["pat"] + " " + met["name"] + "$", met["suite"])
                 if series:
                     variants.append({"name": met["name"], "suite": met["suite"],
                                      "fmt": met["fmt"], "ylabel": met["ylabel"],
@@ -961,7 +978,7 @@ def html_blocks(data: dict, local: dict | None = None) -> dict[str, str]:
     colors: dict[str, int] = {}
     # bench-local is built FIRST so the shared color map is assigned in the default view's
     # order; the hosted store is built without the ratio view (not same-pass).
-    lpayload = build(local, colors, same_pass=True) if local else None
+    lpayload = build(local, colors, same_pass=True, steps=True) if local else None
     payload = build(data, colors, same_pass=False) if data else {"suites": {}, "charts": []}
     if not payload["charts"] and not (lpayload and lpayload["charts"]):
         return {}
@@ -995,7 +1012,7 @@ def html_blocks(data: dict, local: dict | None = None) -> dict[str, str]:
   <code>main</code> commits (oldest \u2192 newest) \u00b7 \U0001f3f7 dashed verticals mark release
   tags (<b>\u2248</b> = tag commit itself is not a recorded point; marker sits at the nearest
   following recorded commit) \u00b7 \U0001f527 dotted verticals mark commits where the BENCH
-  changed \u2014 points either side of one are not comparable. Each card carries every METRIC that point\n  recorded \u2014 <b>p50</b> / <b>p99</b> / <b>ns per delivery</b> / <b>throughput</b> \u2014 pick one under the title. Families with a numeric parameter\n  axis also offer <b>trend</b> / <b>sweep</b> / <b>heatmap</b> / <b>3D</b> views \u2014 same data,\n  three axes (commit \u00d7 parameter \u00d7 value), over a selectable <b>commit range</b>. The paired\n  libtracer-vs-Zenoh cards add a <b>ratio</b> toggle on <b>bench-local</b>: both engines run in the\n  same pass on one pinned CPU, so their per-commit quotient cancels runner speed and is the\n  comparison to read across a long history. The hosted store keeps the best runner per series,\n  so its two arms need not share a pass and its cards carry no ratio. Hover any chart for exact per-commit values.</p>
+  changed \u2014 points either side of one are not comparable. Each card carries every METRIC that point\n  recorded \u2014 <b>p50</b> / <b>p99</b> / <b>ns per delivery</b> / <b>throughput</b> \u2014 pick one under the title. Families with a numeric parameter\n  axis also offer <b>trend</b> / <b>sweep</b> / <b>heatmap</b> / <b>3D</b> views \u2014 same data,\n  three axes (commit \u00d7 parameter \u00d7 value), over a selectable <b>commit range</b>. The paired\n  libtracer-vs-Zenoh cards add a <b>ratio</b> toggle on <b>bench-local</b>: both engines run in the\n  same pass on one pinned CPU, so their per-commit quotient cancels runner speed and is the\n  comparison to read across a long history. The hosted store keeps the best runner per series,\n  so its two arms need not share a pass and its cards carry no ratio. On <b>bench-local</b>, a\n  <b>\u25b2</b> / <b>\u25bc</b> on a trend line marks a sustained <b>step</b> (the row moved past its own\n  noise threshold and held for {step_detect.HOLD_POINTS} points), at the first commit that measured the new level.\n  Hover any chart for exact per-commit values.</p>
   <div class="ph-grid ph-charts"></div>
   <script type="application/json" class="ph-data">{blob}</script>
   <script type="application/json" class="ph-data-local">{lblob}</script>
