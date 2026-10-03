@@ -624,11 +624,12 @@ inline void inline_value_backend_t::destroy(view::segment_t* seg) noexcept {
  *        @ref graph_t::await hand back, and what every slot policy's `load()` returns.
  *
  * A read of a PUBLISHED value returns a reference to it; a read that COMPOSES a new value
- * returns the value (the rule @ref graph_t::read_children_folded and its siblings follow,
- * still answering `rope_t`). Measured when the rule was drawn, both arms alternating inside
- * one binary on a 24-thread host: median 1.37x aggregate for the reference over a rope copy,
- * and p50 improving most where it hurts most — 2,104 ns to 1,193 ns at sixteen readers on one
- * shared vertex.
+ * (@ref graph_t::read_children_folded and its siblings, a field read) returns a reference to
+ * a fresh composed block (@ref tr::graph::value_ref_t::composed) — every value read answers this
+ * one type (RFC-0028 D11), a HANDLER's `on_read` included. Measured when the rule was drawn, both
+ * arms alternating inside one binary on a 24-thread host: median 1.37x aggregate for the reference
+ * over a rope copy, and p50 improving most where it hurts most — 2,104 ns to 1,193 ns at sixteen
+ * readers on one shared vertex.
  *
  * Holding one keeps the value's block alive — and under an injected `block_source_t` that is a
  * real obligation: the block was drawn from the graph's source, so an outstanding reference
@@ -661,6 +662,22 @@ class value_ref_t {
      */
     [[nodiscard]] static value_ref_t composed(view::rope_t&& r) noexcept {
         return value_ref_t{value_t::make(std::move(r), mem::heap_source())};
+    }
+
+    /**
+     * @brief Mint a value over a COPY of @p bytes — the INLINE arm (@ref value_t::make_copy):
+     *        one block from @p source, the bytes in it, no segment of their own.
+     *
+     * The spelling a HANDLER's `on_read` uses for a value it computes (RFC-0028 D11): a scalar
+     * reading costs exactly this one block, where the rope it used to answer cost a segment for
+     * the bytes and a block to wrap it.
+     *
+     * @return The reference, or an EMPTY one when @p source refused the block (#477).
+     */
+    [[nodiscard]] static value_ref_t copy(
+        std::span<const std::byte> bytes,
+        mem::block_source_t& source = mem::heap_source()) noexcept {
+        return value_ref_t{value_t::make_copy(bytes, source)};
     }
 
     /**

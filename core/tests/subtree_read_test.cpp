@@ -475,7 +475,7 @@ void test_leaf_and_handler_regression() {
 
     // A HANDLER target's on_read keeps precedence over the snapshot even with children.
     tr::graph::handlers_t h;
-    auto h_on_read = [] { return rope_t{make_value({0x2A})}; };
+    auto h_on_read = [] { return tr::graph::value_ref_t::composed(make_value({0x2A})); };
     h.on_read = tr::graph::thunk(h_on_read);
     vertex_handle_t hv = g.register_vertex(path_t("/hnd"), role_t::HANDLER, std::move(h));
     (void)g.register_vertex(path_t("/hnd/child"), role_t::STORED_VALUE);

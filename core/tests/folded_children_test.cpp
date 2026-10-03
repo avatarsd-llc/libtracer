@@ -92,27 +92,27 @@ void assert_parent(graph_t& g, std::string_view parent) {
     const auto production = g.read(path_t(field));
     check(production.has_value(), "production :children read succeeds");
     if (production) {
-        check((*production)->link_count() == folded->link_count(),
-              "production :children read IS the folded rope (link count)");
-        check(same_bytes((*production)->flatten(), folded->flatten()),
+        check((*production)->link_count() == (*folded)->link_count(),
+              "production :children read IS the folded value (link count)");
+        check(same_bytes((*production)->flatten(), (*folded)->flatten()),
               "production :children read matches the fold byte-for-byte");
     }
 
-    const view_t mv = materialized->flatten();
-    const view_t fv = folded->flatten();
+    const view_t mv = (*materialized)->flatten();
+    const view_t fv = (*folded)->flatten();
     check(same_bytes(mv, fv), "folded.flatten() is byte-identical to materialized read_children");
 
     // Genuine scatter-gather: outer POINT header link + one link per member. The child
     // count is taken from the materialized bytes (the oracle), so this holds regardless
     // of how many children are registered vs. placeholder.
-    const long n_children = walk_point_children(*materialized);
+    const long n_children = walk_point_children((*materialized)->rope());
     check(n_children >= 0, "materialized listing walks as a POINT of POINT children");
     if (n_children >= 0)
-        check(folded->link_count() == 2 * static_cast<std::size_t>(n_children) + 1,
+        check((*folded)->link_count() == 2 * static_cast<std::size_t>(n_children) + 1,
               "folded rope is 2N+1 links (outer header + per-child header + borrowed name)");
 
     // The lazy cursor walks the FOLDED ROPE itself (not a flattened copy) to the same shape.
-    const long n_folded = walk_point_children(*folded);
+    const long n_folded = walk_point_children((*folded)->rope());
     check(n_folded == n_children, "tlv_view cursor walks the folded rope to the same child count");
 }
 
@@ -185,12 +185,13 @@ void test_hidden_child_is_not_a_member() {
     (void)g.register_vertex(path_t("/h/also"), role_t::STORED_VALUE);
 
     const auto before = g.read_children_materialized(*g.find(path_t("/h").key()));
-    check(before.has_value() && walk_point_children(*before) == 3, "three members before hiding");
+    check(before.has_value() && walk_point_children((*before)->rope()) == 3,
+          "three members before hiding");
 
     check(g.hide_from_enumeration(secret).has_value(), "the child is hidden");
     assert_parent(g, "/h");  // the differential: both doors, same bytes
     const auto after = g.read_children_materialized(*g.find(path_t("/h").key()));
-    check(after.has_value() && walk_point_children(*after) == 2,
+    check(after.has_value() && walk_point_children((*after)->rope()) == 2,
           "the hidden child is gone from the listing — two members remain");
 
     // Hidden is a LISTING property only: the vertex still resolves and still takes a write at
@@ -214,7 +215,7 @@ void test_retire_clears_the_hide_bit() {
     check(g.find(path_t("/r/c").key()).has_value() && g.hide_from_enumeration(hidden).has_value(),
           "a child is registered and hidden");
     const auto empty = g.read_children_materialized(*g.find(path_t("/r").key()));
-    check(empty.has_value() && walk_point_children(*empty) == 0,
+    check(empty.has_value() && walk_point_children((*empty)->rope()) == 0,
           "the parent lists no members while its only child is hidden");
 
     check(g.retire(hidden).has_value(), "the hidden child is retired");
@@ -226,7 +227,7 @@ void test_retire_clears_the_hide_bit() {
     (void)g.register_vertex(path_t("/r/c"), role_t::STORED_VALUE);
     check(g.find(path_t("/r/c").key()).has_value(), "the key is registered again — a NEW occupant");
     const auto listed = g.read_children_materialized(*g.find(path_t("/r").key()));
-    check(listed.has_value() && walk_point_children(*listed) == 1,
+    check(listed.has_value() && walk_point_children((*listed)->rope()) == 1,
           "the new occupant is LISTED: the hide bit belonged to the retired one");
 }
 

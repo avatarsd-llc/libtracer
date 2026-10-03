@@ -100,8 +100,8 @@ void test_await_at_a_handler_serves_the_read_contract() {
         return {};
     };
     h.on_write = tr::graph::thunk(h_on_write);
-    auto h_on_read = [last]() -> tr::graph::result_t<rope_t> {
-        return rope_t{make_value({*last})};
+    auto h_on_read = [last]() -> tr::graph::result_t<tr::graph::value_ref_t> {
+        return tr::graph::value_ref_t::composed(make_value({*last}));
     };
     h.on_read = tr::graph::thunk(h_on_read);
     vertex_handle_t v = g.register_vertex(path_t("/h/seam"), role_t::HANDLER, std::move(h));
@@ -235,7 +235,9 @@ void test_propagate_at_a_non_retaining_vertex_refuses() {
     std::printf("vector 5 — propagate at a HANDLER refuses by value:\n");
     graph_t g;
     handlers_t h;
-    auto h_on_read2 = []() -> tr::graph::result_t<rope_t> { return rope_t{make_value({0x09})}; };
+    auto h_on_read2 = []() -> tr::graph::result_t<tr::graph::value_ref_t> {
+        return tr::graph::value_ref_t::composed(make_value({0x09}));
+    };
     h.on_read = tr::graph::thunk(h_on_read2);
     vertex_handle_t root = g.register_vertex(path_t("/p"), role_t::STORED_VALUE);
     vertex_handle_t hv = g.register_vertex(path_t("/p/h"), role_t::HANDLER, std::move(h));

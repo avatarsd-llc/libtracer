@@ -254,7 +254,7 @@ void test_handler() {
     const auto path = path_t::parse("/compute/answer");
     auto written = std::make_shared<std::vector<std::byte>>();
     tr::graph::handlers_t h;
-    auto h_on_read = [] { return make_value({0x2A}); };
+    auto h_on_read = [] { return tr::graph::value_ref_t::composed(make_value({0x2A})); };
     h.on_read = tr::graph::thunk(h_on_read);  // always 42
     auto h_on_write2 = [written](const tr::graph::value_t& in,
                                  const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> {

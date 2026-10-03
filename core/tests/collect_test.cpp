@@ -65,7 +65,9 @@ using tr::net::transport_vertex_t;
 using tr::testing::check;
 
 /** @brief An inert `on_read` seam — enough to make a vertex allocate a `value_handlers_t`. */
-tr::graph::result_t<tr::view::rope_t> inert_read() { return std::unexpected(status_t::NOT_FOUND); }
+tr::graph::result_t<tr::graph::value_ref_t> inert_read() {
+    return std::unexpected(status_t::NOT_FOUND);
+}
 
 /** @brief Register `/dev/h<i>` as a HANDLER bearing an inert value seam. */
 vertex_handle_t make_handler_vertex(graph_t& g, const std::string& path) {
@@ -156,7 +158,7 @@ void test_free_runs_no_user_code() {
     graph_t g;
     (void)g.register_vertex(path_t("/dev"), role_t::STORED_VALUE);
     handlers_t h;
-    h.on_read = {[](void* c) -> tr::graph::result_t<tr::view::rope_t> {
+    h.on_read = {[](void* c) -> tr::graph::result_t<tr::graph::value_ref_t> {
                      ++static_cast<ctx_t*>(c)->reads;
                      return inert_read();
                  },
