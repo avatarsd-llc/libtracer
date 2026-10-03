@@ -67,7 +67,19 @@ rules from the shared reader apply to every key on this page:
 The consequence that bites: *there is no error return for a misspelled or
 mistyped key.* `insecrue = 1` and `insecure = "1"` (a `NAME` value where a `VALUE`
 belongs) both create a connection that silently took the default. The gate against
-that is reading the table below, not a status code.
+that is reading the table below, not a status code — unless the module declares a
+catalog.
+
+A module may declare its `conn:schema` catalog when the application registers it
+(`register_module`'s optional `tr::net::conn_catalog_t`, RFC-0014 §2 / Amendment 3,
+[#1815](https://github.com/avatarsd-llc/libtracer/issues/1815)): a `static constexpr`
+table of `tr::net::conn_key_t`, each naming a key, its value shape (`utf8`, `bool`,
+`u8`, `u16`, `u32`) and whether it is required. Against such a module, a `SPEC` that
+omits a required key, or carries a catalogued key in any other type or width, is
+refused `TYPE_MISMATCH` before a factory runs, and `read /net/<module>/conn:schema`
+advertises the same table. The catalog does not catch a *misspelled* key: a key it
+does not name is still an unknown pair and is ignored. With no catalog declared,
+the rules above are the whole story.
 
 ## Writing one — `tr::net::conn_spec_t`
 

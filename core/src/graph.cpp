@@ -838,23 +838,26 @@ result_t<vertex_handle_t> graph_t::try_register_vertex(const path_t& path, role_
 
 result_t<vertex_handle_t> graph_t::register_vertex_key(std::vector<std::byte> key, role_t role,
                                                        handlers_t handlers, vertex_policy_t policy,
-                                                       std::span<const payload_right_t> rights) {
+                                                       std::span<const payload_right_t> rights,
+                                                       std::span<const std::byte> schema_catalog) {
     // The owning-vector spelling is the public door and nothing more: the descent below
     // never retains the argument — every record it keeps is copied into the vertex's own
     // `path_key_t` — so the vector is pure convenience for a caller that already has one,
     // and callers that hold borrowed bytes take the span door instead of allocating a copy
     // to satisfy this signature (#1139).
-    return register_with_policy(key, role, handlers, std::move(policy), rights);
+    return register_with_policy(key, role, handlers, std::move(policy), rights, schema_catalog);
 }
 
 result_t<vertex_handle_t> graph_t::register_with_policy(std::span<const std::byte> key, role_t role,
                                                         const handlers_t& handlers,
                                                         vertex_policy_t&& policy,
-                                                        std::span<const payload_right_t> rights) {
+                                                        std::span<const payload_right_t> rights,
+                                                        std::span<const std::byte> schema_catalog) {
     // Refused BEFORE the descent, so an illegal policy registers nothing — not even the
     // placeholder levels a descent would create.
     if (!policy_legal(role, policy)) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
-    result_t<vertex_handle_t> h = register_vertex_key_span(key, role, handlers, rights);
+    result_t<vertex_handle_t> h =
+        register_vertex_key_span(key, role, handlers, rights, schema_catalog);
     if (!h) return h;
     // Applied after the map lock is released: the delivery-mode arm takes the sweep lock and
     // rebuilds the key, and nothing in a policy needs the map lock. The window between the
@@ -865,7 +868,7 @@ result_t<vertex_handle_t> graph_t::register_with_policy(std::span<const std::byt
 
 result_t<vertex_handle_t> graph_t::register_vertex_key_span(
     std::span<const std::byte> key, role_t role, const handlers_t& handlers,
-    std::span<const payload_right_t> rights) {
+    std::span<const payload_right_t> rights, std::span<const std::byte> schema_catalog) {
     const std::unique_lock lock(map_mutex_);
     // Descend the Composite tree (ADR-0057), creating unregistered PLACEHOLDER nodes for
     // missing intermediate levels — invisible to find/read_children until a registration
@@ -921,8 +924,9 @@ result_t<vertex_handle_t> graph_t::register_vertex_key_span(
     // The RFC-0014 Amendment 2 declaration is copied in here, before `fill` adopts the
     // handlers: the rows are the graph's (one immortal node per declaring registration), the
     // vertex keeps only the flag bit that says they exist. We are under the unique map lock,
-    // which is exactly the hold `declare_payload_rights` requires.
-    declare_payload_rights(node, rights);
+    // which is exactly the hold `declare_payload_rights` requires. The RFC-0014 Amendment 3
+    // `:schema` catalog rides the same node, for the same reason and under the same hold.
+    declare_payload_rights(node, rights, schema_catalog);
     // Same treatment, same hold, and for the same reason (see `graph_t::admissions_`): the two
     // ADMISSION filters are taken here, before `fill` adopts the rest, so the seam block
     // `adopt_identity` may allocate is byte-for-byte the one it allocated before this feature.
@@ -931,13 +935,16 @@ result_t<vertex_handle_t> graph_t::register_vertex_key_span(
     return vertex_handle_t{node};
 }
 
-void graph_t::declare_payload_rights(vertex_t* v, std::span<const payload_right_t> rows) {
-    if (rows.empty()) return;  // the overwhelming majority: no node, no flag, no cost
+void graph_t::declare_payload_rights(vertex_t* v, std::span<const payload_right_t> rows,
+                                     std::span<const std::byte> catalog) {
+    // The overwhelming majority: no node, no flag, no cost.
+    if (rows.empty() && catalog.empty()) return;
     // PREPEND, so a re-registration at the same address publishes rows the walk finds before
     // any the previous occupant left behind (the list is never unlinked — see the member's
     // doc for why that is what makes the gate's walk lock-free).
     payload_right_store_.push_back(std::make_unique<payload_right_node_t>(
-        payload_right_node_t{v, std::vector<payload_right_t>(rows.begin(), rows.end()), nullptr}));
+        payload_right_node_t{v, std::vector<payload_right_t>(rows.begin(), rows.end()),
+                             std::vector<std::byte>(catalog.begin(), catalog.end()), nullptr}));
     payload_right_node_t* node = payload_right_store_.back().get();
     node->next = payload_rights_.load(std::memory_order_relaxed);
     payload_rights_.store(node, std::memory_order_release);
@@ -985,6 +992,16 @@ acl_right_t graph_t::declared_write_right(const vertex_t* v, wire::type_t type) 
         return acl_right_t::WRITE;
     }
     return acl_right_t::WRITE;
+}
+
+std::span<const std::byte> graph_t::declared_catalog(const vertex_t* v) const noexcept {
+    // The same walk `declared_write_right` makes, for the same reasons: only a flagged vertex
+    // gets here, nodes are immortal, and the FIRST match is the vertex's own newest
+    // declaration — an older node left by a previous occupant of this address never answers.
+    for (const payload_right_node_t* n = payload_rights_.load(std::memory_order_acquire);
+         n != nullptr; n = n->next)
+        if (n->v == v) return n->catalog;
+    return {};
 }
 
 void graph_t::retire_subtree(vertex_t* v, std::vector<std::vector<std::byte>>& keys) {
@@ -4101,7 +4118,14 @@ result_t<view::view_t> graph_t::read_schema(vertex_t* v) const {
     // extending the view. The empty SETTINGS is emitted rather than omitted so the record
     // keeps its shape: a renderer walks `POINT{ NAME, SETTINGS, [NAME "app" SETTINGS] }`
     // whatever the vertex declares.
-    const std::vector<std::byte> settings_children;
+    //
+    // The one exception is a CONTROL vertex that declared a catalog at registration
+    // (RFC-0014 Amendment 3 — a transport module's creator endpoint): its catalog IS the
+    // content of this `SETTINGS`, served verbatim. The graph owns the frame, the declarer owns
+    // what is inside it. Behind the same flag bit as the payload-right rows, so a vertex that
+    // declared neither does not walk.
+    const std::span<const std::byte> settings_children =
+        v->has_payload_rights() ? declared_catalog(v) : std::span<const std::byte>{};
 
     std::vector<std::byte> point_body;
     wire::emit_name(point_body, key_view_t{v->name().bytes()}.last_segment());

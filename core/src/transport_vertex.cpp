@@ -80,6 +80,75 @@ void reemit_tlv(std::vector<std::byte>& out, const tlv_t& tlv) {
     wire::emit_tlv(out, tlv.type, tlv.opt, tlv.payload);
 }
 
+/**
+ * @brief Encode a module's creation catalog as the content of its endpoint's `:schema`
+ *        `SETTINGS` (RFC-0014 Amendment 3) — one RFC-0013 §B per-key record per key.
+ *
+ * `NAME <key> SETTINGS{ NAME "dtype" NAME <tag>, [NAME "required" VALUE 01], <descriptor> }`:
+ * the `dtype` and `required` members are PROJECTED from the declaration the endpoint
+ * validates against, so the advertised catalog cannot contradict the refusal, and the
+ * module's descriptor bytes follow verbatim. Runs once, when the endpoint is minted; the
+ * result is handed to the graph, which keeps its own copy, so nothing here outlives the call.
+ */
+[[nodiscard]] std::vector<std::byte> encode_catalog(conn_catalog_t catalog) {
+    std::vector<std::byte> out;
+    for (const conn_key_t& key : catalog.keys()) {
+        std::vector<std::byte> record;
+        wire::emit_name(record, "dtype");
+        wire::emit_name(record, to_string(key.dtype));
+        if (key.required) {
+            const std::byte yes{1};
+            wire::emit_name(record, "required");
+            wire::emit_tlv(record, type_t::VALUE, wire::opt_t{},
+                           std::span<const std::byte>(&yes, 1));
+        }
+        record.insert(record.end(), key.descriptor.begin(), key.descriptor.end());
+        wire::emit_name(out, key.name);
+        wire::emit_tlv(out, type_t::SETTINGS, wire::opt_t{.pl = true}, record);
+    }
+    return out;
+}
+
+/**
+ * @brief Does a `SPEC`'s @p config conform to the module's declared @p catalog (RFC-0014 §2)?
+ *
+ * Read through the SAME pair walk every factory reads its keys through, so "conforms" means
+ * exactly "the factory will see this key": a catalogued key that appears anywhere in the
+ * config must have a well-formed reading in its declared shape — the right value type and,
+ * for a `VALUE`, the exact width — and a `required` key must appear. A catalogued key the
+ * walk would silently read as absent (a `NAME` where a `u16` belongs, a 4-byte `port`) is
+ * the very silent default the catalog exists to turn into a refusal. Keys the catalog does
+ * not name are not looked at: they stay forward-compatible unknown pairs (RFC-0014
+ * Amendment 4), and an empty catalog therefore accepts every config.
+ */
+[[nodiscard]] bool conforms(conn_catalog_t catalog, const tlv_t* config) noexcept {
+    const config_reader_t cfg(config);
+    for (const conn_key_t& key : catalog.keys()) {
+        if (!cfg.has(key.name)) {
+            if (key.required) return false;
+            continue;
+        }
+        bool readable = false;
+        switch (key.dtype) {
+            case conn_dtype_t::UTF8:
+                readable = cfg.name(key.name).has_value();
+                break;
+            case conn_dtype_t::BOOL:
+            case conn_dtype_t::U8:
+                readable = cfg.u8(key.name).has_value();
+                break;
+            case conn_dtype_t::U16:
+                readable = cfg.u16(key.name).has_value();
+                break;
+            case conn_dtype_t::U32:
+                readable = cfg.u32(key.name).has_value();
+                break;
+        }
+        if (!readable) return false;
+    }
+    return true;
+}
+
 /** @brief A 1-byte link-liveness VALUE TLV (link_state_t) as an owned view. */
 [[nodiscard]] view_t link_state_value(link_state_t state) {
     std::vector<std::byte> out;
@@ -283,7 +352,7 @@ void transport_vertex_t::register_transport_type(std::string kind, transport_fac
 }
 
 result_t<void> transport_vertex_t::register_module(std::string module, std::string kind,
-                                                   conn_role_t role) {
+                                                   conn_role_t role, conn_catalog_t catalog) {
     // Registration is a minting boundary (ADR-0073 §1): the ONE shared segment-validity
     // predicate gates the name here, exactly as path_t::parse gates the local string tier.
     if (!graph::valid_segment(module)) return std::unexpected(status_t::INVALID_PATH);
@@ -314,7 +383,7 @@ result_t<void> transport_vertex_t::register_module(std::string module, std::stri
     // the declaration is recorded, so a refusal leaves nothing half-declared: a module whose
     // endpoint could not be registered would advertise a (kind, role) the wire has no door to.
     // Idempotent, so the re-declaration path above runs it again and mints nothing.
-    if (auto minted = mint_module_locked(module); !minted) return minted;
+    if (auto minted = mint_module_locked(module, catalog); !minted) return minted;
     if (!declared) modules_.push_back({std::move(module), std::move(kind), role});
     return {};
 }
@@ -361,7 +430,8 @@ result_t<transport_vertex_t::module_decl_t> transport_vertex_t::declaration_for_
     return *found;
 }
 
-result_t<void> transport_vertex_t::mint_module_locked(const std::string& module) {
+result_t<void> transport_vertex_t::mint_module_locked(const std::string& module,
+                                                      conn_catalog_t catalog) {
     // The `<net_root>/<module>` grouping vertex. graph_.find IS the dedupe — the same rule
     // `make_connection_locked`'s lazy mint follows, and for the same reason: a separate
     // seen-set would be a second source of truth for something the graph already knows.
@@ -375,7 +445,23 @@ result_t<void> transport_vertex_t::mint_module_locked(const std::string& module)
 
     std::vector<std::byte> endpoint_key = mod_key;
     (void)wire::emit_path_segment(endpoint_key, kConnEndpointName);
-    if (graph_.find(endpoint_key)) return {};  // a second kind under the same module
+    if (graph_.find(endpoint_key)) {
+        // A second declaration under the same module (a second kind, or the same triple
+        // again). The catalog is the ENDPOINT's — there is one `:schema` to serve it from —
+        // so it was fixed when the endpoint was minted. Naming no catalog makes no claim;
+        // naming that same table is idempotent; naming any OTHER one would leave a
+        // declaration whose keys the endpoint neither advertises nor enforces, so it is
+        // refused by value, on the "already taken" convention `register_module` uses.
+        if (catalog.empty()) return {};
+        for (const auto& e : endpoints_) {
+            if (e->module == module)
+                return e->catalog.same_table(catalog) ? result_t<void>{}
+                                                      : std::unexpected(status_t::PATH_IN_USE);
+        }
+        // An endpoint this plane did not mint (another plane over the same graph and root).
+        // It serves no catalog of ours, so a catalog cannot be attached to it here.
+        return std::unexpected(status_t::PATH_IN_USE);
+    }
 
     // `role_t::HANDLER` is what makes the endpoint WRITE-ONLY AND VALUELESS (RFC-0014 §2):
     // the graph runs `on_write` and stores no last-known-value, so the write is EXECUTED,
@@ -384,7 +470,9 @@ result_t<void> transport_vertex_t::mint_module_locked(const std::string& module)
     // field door already serves as the RFC-0014 Amendment 3 catalog envelope:
     // `POINT{NAME "conn", SETTINGS{…}}`, with an EMPTY `SETTINGS` for a module that declares
     // no catalog. That empty answer is conforming, not a stub — the probe of §6 asks whether
-    // the endpoint EXISTS, and `SCHEMA_NOT_FOUND` would answer a question nobody asked.
+    // the endpoint EXISTS, and `SCHEMA_NOT_FOUND` would answer a question nobody asked. A
+    // module that DOES declare one has it encoded here, once, and handed to the graph with
+    // the registration below: the graph owns the frame, the module what is inside it.
     //
     // The seam's context holds the module by VALUE. The path is the module, so the dispatch
     // never re-derives it from a payload the peer wrote — a creator cannot address one module's
@@ -392,13 +480,13 @@ result_t<void> transport_vertex_t::mint_module_locked(const std::string& module)
     // (RFC-0028 D10), so it must outlive the vertex: it lives in `endpoints_`, one heap node
     // per minted module that never moves, for as long as this object — the lifetime every
     // seam here has.
-    endpoints_.push_back(std::make_unique<endpoint_ctx_t>(endpoint_ctx_t{this, module}));
+    endpoints_.push_back(std::make_unique<endpoint_ctx_t>(endpoint_ctx_t{this, module, catalog}));
     endpoint_ctx_t& ctx = *endpoints_.back();
     graph::handlers_t handlers;
     handlers.on_write = {
         [](void* c, const graph::value_t& value, const graph::write_ctx_t&) -> result_t<void> {
             auto* e = static_cast<endpoint_ctx_t*>(c);
-            return e->self->endpoint_write(e->module, value);
+            return e->self->endpoint_write(e->module, e->catalog, value);
         },
         &ctx};
     // RFC-0014 §5, discharged by the Amendment 2 general contract: the two control payloads
@@ -412,9 +500,16 @@ result_t<void> transport_vertex_t::mint_module_locked(const std::string& module)
         graph::payload_right_t{wire::type_t::SPEC, graph::acl_right_t::CREATE},
         graph::payload_right_t{wire::type_t::NAME, graph::acl_right_t::WRITE},
     };
+    // Empty for a catalog-less module, which then costs the graph nothing beyond the rows.
+    const std::vector<std::byte> encoded = encode_catalog(catalog);
     auto endpoint = graph_.register_vertex_key(std::move(endpoint_key), graph::role_t::HANDLER,
-                                               handlers, {}, kRights);
-    if (!endpoint) return std::unexpected(endpoint.error());
+                                               handlers, {}, kRights, encoded);
+    if (!endpoint) {
+        // Nothing may answer for a module whose endpoint does not exist: the context pushed
+        // above would otherwise let a retried declaration's catalog check find it.
+        endpoints_.pop_back();
+        return std::unexpected(endpoint.error());
+    }
     // RFC-0014 §3 (S4): `conn` is HIDDEN from `<net_root>/<module>:children[]`, which returns
     // the module's member CONNECTIONS. The endpoint is the control that creates them, not one
     // of them, so a peer walking the listing as a topology of links would descend into a
@@ -427,7 +522,7 @@ result_t<void> transport_vertex_t::mint_module_locked(const std::string& module)
     return {};
 }
 
-result_t<void> transport_vertex_t::endpoint_write(const std::string& module,
+result_t<void> transport_vertex_t::endpoint_write(const std::string& module, conn_catalog_t catalog,
                                                   const graph::value_t& value) {
     // A DEVICE-link payload is permanently un-parsable on the CPU (ADR-0024), so it is a
     // malformed control write rather than a transient one — the same classification
@@ -451,7 +546,7 @@ result_t<void> transport_vertex_t::endpoint_write(const std::string& module,
     ctl_txn_t txn(*this, ctl_scope_t::OPERATION);  // ADR-0063 §3 serialization
     switch (payload->type) {
         case type_t::SPEC: {
-            const result_t<void> made = endpoint_create_locked(txn, module, *payload);
+            const result_t<void> made = endpoint_create_locked(txn, module, catalog, *payload);
             // A creation's BIRTH-liveness publish is not the creation's verdict — the
             // connection exists either way — so its status is dropped here exactly as it
             // was dropped at the `(void) set_link_state_locked` site it moved from.
@@ -474,6 +569,7 @@ result_t<void> transport_vertex_t::endpoint_write(const std::string& module,
 }
 
 result_t<void> transport_vertex_t::endpoint_create_locked(ctl_txn_t& txn, const std::string& module,
+                                                          conn_catalog_t catalog,
                                                           const tlv_t& spec) {
     // SPEC{ NAME "name" NAME <seg>, NAME "config" SETTINGS{ pairs }? } — no `type` and no
     // `role`: the module in the path already says both (RFC-0014 §1). Read through the ONE
@@ -507,6 +603,13 @@ result_t<void> transport_vertex_t::endpoint_create_locked(ctl_txn_t& txn, const 
     if (name == kConnEndpointName) return std::unexpected(status_t::PATH_IN_USE);
 
     const tlv_t* config = pairs.settings("config");
+    // The module's declared catalog (RFC-0014 §2: the device validates "the `config` against
+    // its `conn:schema` catalog"). A config that omits a required key, or carries a
+    // catalogued key in another shape, is MALFORMED — §2's `tr::schema::type_mismatch` —
+    // and is refused here, before a declaration is resolved or a socket built.
+    // `SCHEMA_NOT_FOUND` is not this answer: §Compatibility and Amendment 3 reserve it for
+    // "endpoint present, config TYPE unknown", the unregistered-kind refusal below.
+    if (!conforms(catalog, config)) return std::unexpected(status_t::TYPE_MISMATCH);
     conn_settings_t settings;
     parse_config(config, settings);
 
@@ -680,12 +783,10 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(ctl_txn_t& 
                 // it would have validated are gated NOW (the same predicate `dial_or_listen`
                 // applies): creation must refuse a misconfigured SPEC at the write, never
                 // defer it to a first dial that answers success today and failure later.
-                // Kind-PRIVATE config stays the factory's to refuse, at dial time — the §2
-                // catalog validation proper is S3's. Its ENVELOPE is ruled (RFC-0014
-                // Amendment 3): the catalog is the `SETTINGS` of the endpoint's ordinary
-                // `:schema` record, empty until a module declares one, so what is still open
-                // here is the module-side declaration and the validation it would license,
-                // never the reply shape.
+                // Kind-PRIVATE config that the module's declared catalog describes was
+                // already checked at the write (`conforms`, RFC-0014 §2 / Amendment 3); what
+                // a catalog cannot express — a value's range, a key's meaning — stays the
+                // factory's to refuse, at dial time.
                 if (settings.addr.empty() || settings.port == 0)
                     return std::unexpected(status_t::TYPE_MISMATCH);
                 // The engine owns a byte COPY of the raw config: the decoded TLV borrows the

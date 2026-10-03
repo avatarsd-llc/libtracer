@@ -260,18 +260,27 @@ subscriptions routed through it. That is the cost of "the vertex is the identity
 is creation-time": there is no in-place edit of a thing whose whole existence is defined at
 creation.
 
-### 7. The config vocabulary is not yet self-describing
+### 7. The config vocabulary is self-describing only where a module declares it
 
-Uniform introspection covers the liveness value and the children, but not the *creation
-catalog*: RFC-0014 Amendment 3 pinned the catalog's envelope (the endpoint's ordinary `:schema`
-record), but no module declares a catalog into it yet — the S3 module-side half is open.
-Worse than absent — the endpoint is hidden from the module's `:children[]` (S4), so §6's
-`read <module>/conn:schema` probe is the *only* sanctioned way to find it, and that probe
-currently answers the generic whole-vertex `:schema` (an EMPTY `SETTINGS`, Amendment 3's
-conforming no-catalog answer) rather than a declared catalog. So a creator today must know a kind's config keys out of band, from the
-[connection-config module page](../modules/connection-config.md), rather than by reading the
-endpoint. Stated plainly because it is the one place the "everything is in the graph" claim
-does not yet reach.
+Uniform introspection reaches the *creation catalog* too, but only as far as a module opts in.
+RFC-0014 Amendment 3 pinned the catalog's envelope (the endpoint's ordinary `:schema` record),
+and since [#1815](https://github.com/avatarsd-llc/libtracer/issues/1815) a module can declare a
+catalog into it: `register_module` takes a borrowed `static constexpr` table of
+`tr::net::conn_key_t`, and `read <module>/conn:schema` then answers
+`POINT{NAME "conn", SETTINGS{…}}` with one RFC-0013 §B per-key record per key
+(`NAME <key> SETTINGS{NAME "dtype" NAME <tag>, [NAME "required" VALUE 01], …}`). The same
+table is what the endpoint validates a `SPEC` against: a missing required key, or a catalogued
+key in another type or width, is refused `tr::schema::type_mismatch` at the write (§2), before
+any factory runs. Kind-private keys are described there, on the module's registration, and
+never on the shared record — the lean rule below holds.
+
+The cost is the opt-in. A module that declares nothing still answers the generic whole-vertex
+`:schema` (an EMPTY `SETTINGS`, Amendment 3's conforming no-catalog answer) and validates
+nothing, and the endpoint is hidden from the module's `:children[]` (S4), so that probe is the
+only way to learn anything about it. Every module name is application-declared, so the library
+cannot declare a catalog on the application's behalf; until a module does, a creator learns its
+kind's config keys out of band, from the
+[connection-config module page](../modules/connection-config.md).
 
 ---
 
@@ -371,16 +380,18 @@ unchanged. And
 so the creator endpoint is the sole door and the role is positional in fact, not only on
 paper.
 
-**Implemented** too: the `CREATE`/`WRITE` gating split (S2c, RFC-0014 Amendment 2), and the
-catalog envelope (S3, Amendment 3 — an empty `SETTINGS` for a module that declares none).
+**Implemented** too: the `CREATE`/`WRITE` gating split (S2c, RFC-0014 Amendment 2), the
+catalog envelope (S3, Amendment 3 — an empty `SETTINGS` for a module that declares none), and
+the S3 module-side half: a module-declared `conn:schema` catalog, served in that envelope and
+validated against at creation ([#1815](https://github.com/avatarsd-llc/libtracer/issues/1815)).
 RFC-0014's byte-level clauses — the liveness encoding among them — are normative since
 Amendment 4, with the values in `core/include/libtracer/transport_factory.hpp:link_state_t`
 as the reference encoding.
 
 **Not implemented.** Routing-plane callers that make subscriptions/awaits drive the refcount
 seam automatically — `acquire_link`/`release_link` are re-entrant-safe since S6 but only an
-embedder calls them; and the S3 module-side half: no module declares a `conn:schema`
-catalog, so none validates a `SPEC` against one (RFC-0014 erratum 2026-10-03).
+embedder calls them (RFC-0014 erratum 2026-10-03,
+[#1816](https://github.com/avatarsd-llc/libtracer/issues/1816)).
 ```
 
 ## Pitfalls
@@ -397,8 +408,9 @@ catalog, so none validates a `SPEC` against one (RFC-0014 erratum 2026-10-03).
   application `/zone/<child>` as well. Ask the object that minted the vertex.
 - **Adding a kind's key to `conn_settings_t` "just for now".** The record is shared by every
   kind and by every node that links the core; a key only one factory reads is a key the other
-  kinds carry and no one can be told about (no module declares the `:schema` catalog that
-  would advertise it yet — S3's module-side half).
+  kinds carry. The place to describe a kind-private key is the module's `conn:schema`
+  catalog, declared at `register_module` (§7), which advertises it and validates it without
+  touching the shared record.
 - **Expecting a per-transport statistics FACET.** A connection vertex has no `:stats` of its
   own. The counters are reached through the node-scoped census instead —
   `<any-vertex>:stats.link.<child>` — and only on a node that has a router to sample them;

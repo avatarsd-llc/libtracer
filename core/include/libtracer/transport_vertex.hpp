@@ -29,7 +29,9 @@
  */
 #pragma once
 
+#include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -37,6 +39,7 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -83,6 +86,107 @@ struct slim_net_t {
 };
 /** @brief The `slim_net_t` tag value a slim node passes to opt out of the builtins. */
 inline constexpr slim_net_t slim_net{};
+
+/**
+ * @brief The value shape of one catalogued config key — the `dtype` of its `conn:schema`
+ *        record, and the one fact the creator endpoint validates a `SPEC` against.
+ *
+ * Each enumerator names a value spelling the shared config walk (@ref tr::wire::config_reader_t)
+ * already reads, so the catalog can describe exactly what a factory will accept and nothing
+ * the walk cannot check: a `NAME` text value, or a little-endian unsigned `VALUE` of an
+ * EXACT width (the walk ignores any other width, #928). The `:schema` spelling of each is
+ * @ref to_string — the RFC-0013 §B `dtype` vocabulary.
+ */
+enum class conn_dtype_t : std::uint8_t {
+    UTF8 = 0, /**< @brief A `NAME` value child (text). `"utf8"`. */
+    BOOL = 1, /**< @brief A 1-byte `VALUE`, nonzero ⇒ true (the walk's `flag`). `"bool"`. */
+    U8 = 2,   /**< @brief A 1-byte `VALUE`. `"u8"`. */
+    U16 = 3,  /**< @brief A 2-byte little-endian `VALUE`. `"u16"`. */
+    U32 = 4,  /**< @brief A 4-byte little-endian `VALUE`. `"u32"`. */
+};
+
+/** @brief The `conn:schema` `dtype` spelling of a @ref conn_dtype_t (RFC-0013 §B). */
+[[nodiscard]] constexpr std::string_view to_string(conn_dtype_t d) noexcept {
+    switch (d) {
+        case conn_dtype_t::UTF8:
+            return "utf8";
+        case conn_dtype_t::BOOL:
+            return "bool";
+        case conn_dtype_t::U8:
+            return "u8";
+        case conn_dtype_t::U16:
+            return "u16";
+        case conn_dtype_t::U32:
+            return "u32";
+    }
+    return "utf8";
+}
+
+/**
+ * @brief One key of a module's creation CATALOG (RFC-0014 §2 / Amendment 3): a config key a
+ *        `SPEC` written to the module's creator endpoint may carry, and what it must look like.
+ *
+ * View-shaped and owning nothing, like @ref tr::graph::app_field_slot_t — a catalog is a
+ * `static constexpr` table in the module's own code, and the plane borrows it for its
+ * lifetime. That is how kind-PRIVATE keys get described without landing on the shared
+ * @ref conn_settings_t (ADR-0043 §5): the vocabulary lives with the module's registration.
+ *
+ * Served as one RFC-0013 §B per-key record inside the endpoint's `:schema` `SETTINGS` —
+ * `NAME <name> SETTINGS{ NAME "dtype" NAME <to_string(dtype)>, [NAME "required" VALUE 01],
+ * <descriptor> }` — whose `dtype` and `required` members are PROJECTED from this entry, so the
+ * advertised catalog cannot contradict what the endpoint refuses.
+ */
+struct conn_key_t {
+    std::string_view name; /**< @brief The config key, byte-verbatim as a `SPEC` spells it. */
+    conn_dtype_t dtype = conn_dtype_t::UTF8; /**< @brief The value shape the key must take. */
+    bool required = false;                   /**< @brief Must a `SPEC` carry the key at all? */
+    /** @brief Further RFC-0013 §B record members (`label`, `default`, `enum`, owner extras),
+     *         as encoded TLVs appended VERBATIM after the projected ones. Never parsed; must
+     *         not repeat `dtype` or `required`. Borrowed, like @ref name. */
+    std::span<const std::byte> descriptor{};
+};
+
+/**
+ * @brief A module's creation catalog, BORROWED: the table of @ref conn_key_t a module declares
+ *        through @ref transport_vertex_t::register_module.
+ *
+ * Converts implicitly from a `const conn_key_t[N]` or a `std::array` — the two spellings a
+ * `static constexpr` table takes — and deliberately NOT from a `std::vector`, for the reason
+ * @ref tr::graph::borrowed_fields_t gives: the table and the bytes its entries point at must
+ * outlive the transport plane, and a vector filled at a call site is the classic way not to.
+ * Default-constructed it is the EMPTY catalog: the module declares none, its endpoint answers
+ * Amendment 3's empty `SETTINGS`, and its `SPEC`s are validated against nothing.
+ */
+class conn_catalog_t {
+   public:
+    /** @brief The empty catalog — the module declares none. */
+    constexpr conn_catalog_t() noexcept = default;
+
+    /** @brief Borrow a C array of keys; it and the bytes it points at MUST outlive the plane. */
+    template <std::size_t N>
+    constexpr conn_catalog_t(const conn_key_t (&table)[N]) noexcept  // NOLINT
+        : keys_(table, N) {}
+
+    /** @brief Borrow a `std::array` of keys — same contract as the C-array form. */
+    template <std::size_t N>
+    constexpr conn_catalog_t(const std::array<conn_key_t, N>& table) noexcept  // NOLINT
+        : keys_(table.data(), N) {}
+
+    /** @brief The catalogued keys, in declaration (and `:schema`) order. */
+    [[nodiscard]] constexpr std::span<const conn_key_t> keys() const noexcept { return keys_; }
+
+    /** @brief True when the module declares no catalog. */
+    [[nodiscard]] constexpr bool empty() const noexcept { return keys_.empty(); }
+
+    /** @brief The SAME borrowed table — identity, not content: two declarations of one module
+     *         agree on its catalog only by naming the one table. */
+    [[nodiscard]] constexpr bool same_table(const conn_catalog_t& other) const noexcept {
+        return keys_.data() == other.keys_.data() && keys_.size() == other.keys_.size();
+    }
+
+   private:
+    std::span<const conn_key_t> keys_{}; /**< @brief The borrowed table. */
+};
 
 /**
  * @brief The RESERVED, protocol-owned leaf NAME of a module's CREATOR ENDPOINT —
@@ -326,6 +430,19 @@ class transport_vertex_t {
      * kinds) finds them and mints nothing. The endpoint is minted HIDDEN from the module's
      * `:children[]` (RFC-0014 §3, S4) — see `%kConnEndpointName`.
      *
+     * **The module may declare its creation CATALOG here** (@p catalog, RFC-0014 §2 /
+     * Amendment 3) — the config keys a `SPEC` to its endpoint may carry, kind-private ones
+     * included, and the shape each must take. It is what `read <net_root>/<module>/conn:schema`
+     * answers inside its `SETTINGS`, and the endpoint REFUSES, `TYPE_MISMATCH` and before
+     * anything is built, a `SPEC` whose config omits a `required` key or carries a catalogued
+     * key in any other shape than the declared one (the config "malformed" of §2). Keys the
+     * catalog does not name stay the forward-compatible unknown pairs they always were —
+     * ignored, never refused. With no catalog (the default) nothing changes: the endpoint
+     * answers Amendment 3's empty `SETTINGS` and validates nothing, and the graph stores
+     * nothing for it. The catalog is the MODULE's — one per endpoint — so it is fixed by the
+     * declaration that mints the endpoint: a later declaration under the same module may pass
+     * the same table again or none, and any other one is refused `PATH_IN_USE`.
+     *
      * **A *(kind, role)* pair is declared exactly once.** The declaration is KEYED on that
      * pair — @ref module_for resolves through it — so re-declaring an already-declared pair
      * under a DIFFERENT @p module answers `PATH_IN_USE` and changes nothing. It used to
@@ -339,14 +456,17 @@ class transport_vertex_t {
      *               `tr::graph::valid_segment`.
      * @param kind   The config `kind` this module constructs (e.g. `"ws"`).
      * @param role   The role this module fixes positionally.
+     * @param catalog The module's creation catalog, BORROWED for this object's lifetime;
+     *                empty (the default) declares none.
      * @return `INVALID_PATH` if @p module is not a valid path segment; `PATH_IN_USE` if
-     *         *(@p kind, @p role)* is already declared under another module (nothing is
-     *         minted and nothing is recorded); the graph's own refusal (e.g. `BACKPRESSURE`)
-     *         if the endpoint could not be registered — in which case nothing is declared
-     *         either.
+     *         *(@p kind, @p role)* is already declared under another module, or @p catalog
+     *         contradicts the one @p module's endpoint was minted with (nothing is minted and
+     *         nothing is recorded); the graph's own refusal (e.g. `BACKPRESSURE`) if the
+     *         endpoint could not be registered — in which case nothing is declared either.
      */
     [[nodiscard]] graph::result_t<void> register_module(std::string module, std::string kind,
-                                                        conn_role_t role);
+                                                        conn_role_t role,
+                                                        conn_catalog_t catalog = {});
 
     /**
      * @brief The module a connection of @p kind and @p role mounts under (RFC-0014 §1).
@@ -679,9 +799,12 @@ class transport_vertex_t {
      *
      * Called from @ref register_module under `ctl_m_`. The endpoint is a `role_t::HANDLER`
      * vertex: its `on_write` seam is the RFC-0014 §2 dispatch, so a write is EXECUTED rather
-     * than assigned and the vertex stores no value.
+     * than assigned and the vertex stores no value. @p catalog is declared on the endpoint
+     * when this call mints it; when the endpoint already exists, a non-empty @p catalog other
+     * than the one it was minted with answers `PATH_IN_USE`.
      */
-    [[nodiscard]] graph::result_t<void> mint_module_locked(const std::string& module);
+    [[nodiscard]] graph::result_t<void> mint_module_locked(const std::string& module,
+                                                           conn_catalog_t catalog);
 
     /**
      * @brief The creator endpoint's `on_write` body (RFC-0014 §2) — the payload TLV type
@@ -691,16 +814,20 @@ class transport_vertex_t {
      * payload) ⇒ `TYPE_MISMATCH`. The endpoint never falls through to an ordinary assign.
      * Takes `ctl_m_` itself, so the whole dispatch — parse, module lookup, socket
      * construction, routing — is one control-plane critical section.
-     * @param module The module this endpoint creates into (captured at mint time; the path
-     *               IS the module, so it is never re-derived from the payload).
-     * @param value  The written value, exactly as the graph handed it over (borrowed).
+     * @param module  The module this endpoint creates into (captured at mint time; the path
+     *                IS the module, so it is never re-derived from the payload).
+     * @param catalog The module's creation catalog, captured at mint time beside @p module.
+     * @param value   The written value, exactly as the graph handed it over (borrowed).
      */
     [[nodiscard]] graph::result_t<void> endpoint_write(const std::string& module,
+                                                       conn_catalog_t catalog,
                                                        const graph::value_t& value);
 
-    /** @brief The `SPEC` ⇒ create leg of `%endpoint_write`; runs in @p txn's phase 1. */
+    /** @brief The `SPEC` ⇒ create leg of `%endpoint_write`; runs in @p txn's phase 1, and
+     *         refuses a config that does not conform to @p catalog before anything is built. */
     [[nodiscard]] graph::result_t<void> endpoint_create_locked(ctl_txn_t& txn,
                                                                const std::string& module,
+                                                               conn_catalog_t catalog,
                                                                const wire::tlv_t& spec);
 
     /** @brief The `NAME` ⇒ remove leg of `%endpoint_write`; runs in @p txn's phase 1. */
@@ -846,6 +973,8 @@ class transport_vertex_t {
     struct endpoint_ctx_t {
         transport_vertex_t* self; /**< @brief The owning transport vertex. */
         std::string module;       /**< @brief The module the endpoint creates under. */
+        conn_catalog_t catalog;   /**< @brief The module's creation catalog (borrowed; empty ⇒
+                                   *          none declared, nothing validated). */
     };
     /** @brief One context per minted creator endpoint, each a heap node that never moves, so a
      *         hook's `ctx` stays valid for this object's lifetime. Appended under `ctl_m_`. */
