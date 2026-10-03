@@ -1254,7 +1254,7 @@ void run_syncpool_mt(std::size_t T, tr::mem::mem_backend_t& backend, const char*
 
 /** @brief The sync-pool vs heap MT contention sweep (charted to gh-pages, not gated). */
 void run_syncpool_gate() {
-    const std::size_t hw = std::max<std::size_t>(1, std::thread::hardware_concurrency());
+    const std::size_t hw = bench::usable_cpus();
     // A slab comfortably larger than the max concurrent live set (each thread holds <=1).
     std::vector<std::byte> slab(64 * (64 + sizeof(tr::view::segment_t) + 64));
     for (std::size_t T : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}}) {
@@ -1491,8 +1491,8 @@ int main(int argc, char** argv) {
         run_inproc(kRefSize, kRefFanout, E, alloc_t::HEAP, true, "inproc-path");
     run_mixed();
     run_path_parse();
-    // n-cores (parallel-dispatch) axis: thread counts clamped to the host CPU.
-    const std::size_t hw = std::max<std::size_t>(1, std::thread::hardware_concurrency());
+    // n-cores (parallel-dispatch) axis: thread counts clamped to the CPUs the bench may use.
+    const std::size_t hw = bench::usable_cpus();
     for (std::size_t T : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}})
         if (T <= hw) run_inproc_mt(T);
     // ep-type (endpoint-dispatch-class) axis: lean / lean-cached / stream.

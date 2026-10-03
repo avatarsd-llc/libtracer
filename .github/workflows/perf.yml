@@ -85,16 +85,20 @@ jobs:
     # INCONCLUSIVE (host psi 8–17 > 5), and each one cost a full rerun. The `bench-local`
     # runner lives in `bench.slice`, whose CPUs no other job, runner or container can use,
     # and it runs one job at a time. So the gate, perf-local and nothing else take turns on
-    # those CPUs, and every timed execution is pinned to BENCH_CPU. The gate pins to all
-    # four of them, not to one like perf-local: its multi-threaded rows (fan-out, target
+    # those CPUs, and every timed execution is pinned to BENCH_CPU. The gate pins to
+    # several of them, not to one like perf-local: its multi-threaded rows (fan-out, target
     # handlers) put several threads on the pin, and on a single CPU they queue behind each
     # other, which shows up as own-cgroup pressure 15–18 with 0% foreign load, so every
-    # verdict came back INCONCLUSIVE.
+    # verdict came back INCONCLUSIVE. The runner's own processes (Runner.Listener,
+    # Runner.Worker, which streams the log) were then the remaining foreign load, about 2%
+    # against a 2% limit, so the gate step first moves them onto CPU 2 and measures on the
+    # rest. Three CPUs still left own-cgroup pressure at 8.2, so bench.slice is 2-6 (five
+    # CPUs) and the gate measures on 3-6.
     # Same guard as core-ci's self-hosted jobs: a fork PR never reaches this host (its
     # runner user has passwordless sudo); it falls back to the hosted VM.
     runs-on: ${{ (github.repository == 'avatarsd-llc/libtracer' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)) && fromJSON('["self-hosted","bench-local"]') || 'ubuntu-24.04' }}
     env:
-      BENCH_CPU: "2-5" # all of bench.slice — every measured process runs on these four CPUs
+      BENCH_CPU: "3-6" # bench.slice minus CPU 2, which the runner's own processes are moved to
     # Measured healthy max 8.27 min, p50 8.12, min 7.15 (9.37 on the incident day), of
     # which the blocking interleaved A/B step alone is 5.7 min of TIMED measurement that
     # must not be clipped. 30 = ~3.2x. This is the BLOCKING perf tier, so the ceiling is
@@ -224,6 +228,18 @@ jobs:
       # It stays blocking until a pinned-host comparison leg exists to take the role over;
       # demoting it before then would leave the repo with no enforced perf gate anywhere,
       # which is not what "the runners are warn-only" was ruled to mean.
+      # Builds are done; from here the runner's own processes only stream the log. Move them
+      # (and only them, so the build steps above kept every bench CPU) off the bench CPUs.
+      - name: Move the runner's own processes off the bench CPUs
+        if: runner.environment == 'self-hosted'
+        run: |
+          # Only THIS runner's processes: the other runners share the user but live in
+          # runners.slice, where CPU 2 is not allowed (taskset fails EINVAL there).
+          cg="/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)"
+          own="$(cat "$cg/cgroup.procs" "$cg"/*/cgroup.procs 2>/dev/null || true)"
+          for pid in $(pgrep -u "$(id -u)" -f 'Runner\.(Listener|Worker)'); do
+            if grep -qx "$pid" <<<"$own"; then taskset -a -p -c 2 "$pid"; fi
+          done
       - name: Performance gate (INTERLEAVED same-runner A/B vs main) — BLOCKING tier
         run: |
           python3 bench/perf_gate.py --tier blocking \
