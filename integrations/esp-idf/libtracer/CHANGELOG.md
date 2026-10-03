@@ -10,6 +10,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- **`esp_ws_client_config_t::memory` — the WebSocket client link takes `link_memory_t`
+  ([#1661](https://github.com/avatarsd-llc/libtracer/issues/1661)).** The shape is the server
+  link's (`httpd_ws_config_t::memory`). `rx` opts in to owning delivery: each complete message
+  is copied once out of the read scratch into a block from that source, through `alloc_rx`, so
+  a message at the share threshold carries the RFC-0028 §6.9 ingress-loan reserve. It is then
+  delivered as a rope (`delivers_ropes()` is true), and a refusing source is a drop counted on
+  `dropped_rx()`. `nullptr`, the default, keeps borrowed delivery with no per-message
+  allocation. `io` backs the masked-frame scratch (`tx_bytes`), the queue slots and the base
+  gather temporary; null means the process heap, and a store that refuses the scratch leaves
+  `tx_bytes()` at 0. New accessor `rx_backend()`. Not covered, because IDF exposes no allocator
+  hook: the read scratch (`rx_bytes`), the transport pair each dial builds, the
+  `CONFIG_WS_BUFFER_SIZE` handshake buffer (set `CONFIG_WS_DYNAMIC_BUFFER` to free it after
+  each handshake), and the transport's own buffer for each PING or CLOSE payload. Existing code
+  compiles unchanged and behaves as before; the member is last in the aggregate.
+
 ### Changed
 
 - **The generated config fragment binds `guard_t`, not `reader_guard_t`

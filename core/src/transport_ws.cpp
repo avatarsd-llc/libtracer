@@ -541,7 +541,10 @@ bool transport_ws_server::drain_frames(session_t& s) {
 
 transport_ws_client::transport_ws_client(const std::string& host, std::uint16_t port,
                                          const ws_client_config_t& config)
-    : backend_(config.memory.rx),
+    // The queue's slots hold this link's own masked copies, so they are egress store too
+    // (#1661): drawn from `memory.io` like `tx_buf_`, not from the process heap.
+    : stream_endpoint_t(config.memory.io != nullptr ? *config.memory.io : mem::heap_source()),
+      backend_(config.memory.rx),
       // `block_array_t` binds its source ONCE, here (#873): a post-construction
       // set_egress_source can never re-seat this member, which is why the store is a
       // constructor argument on this class and not only a base-class setter.
