@@ -602,18 +602,22 @@ void emit_handle_nack(transport_t& link, std::uint16_t label) {
  * only it knows: which frame earns a rejection, and where the two route TLVs come from.
  *
  * The read side allocates nothing for a frame nested no deeper than the walk's inline
- * slots; the only draw left is the reply head, from @p egress, which reports refusal by value.
+ * slots; a deeper frame spills its walk stack into @p rx, the receiving link's own source
+ * (receiver pays), so a source that refuses drops the frame as malformed. The only other
+ * draw is the reply head, from @p egress, which reports refusal by value.
  *
  * @param registry     The child registry the answer is routed back through.
  * @param inbound_name This node's name for the link the refused frame arrived on.
  * @param frame        The refused frame's bytes.
+ * @param rx           The receiving link's source (`rx_for(inbound_ctx)`): the walk's spill
+ *                     for a frame nested deeper than its inline slots.
  * @param egress       The byte backend the reply head draws from (#795, ADR-0074) — the
  *                     router's own egress seam, so a bounded node bounds this reply too.
  */
 void reject_bus_name_hop(const child_registry_t& registry, std::string_view inbound_name,
-                         std::span<const std::byte> frame, mem::mem_backend_t& egress,
-                         graph::status_t status) {
-    const auto dec = wire::tlv_node_t::over(frame);
+                         std::span<const std::byte> frame, mem::block_source_t& rx,
+                         mem::mem_backend_t& egress, graph::status_t status) {
+    const auto dec = wire::tlv_node_t::over(frame, rx);
     if (!dec) return;  // malformed ⇒ drop by value
     std::optional<wire::tlv_node_t> op;
     std::optional<wire::tlv_node_t> dst;
@@ -2310,7 +2314,8 @@ void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_
                         count_drop(flatten_dropped_);
                         return;
                     }
-                    reject_bus_name_hop(registry_, inbound_name, flat->bytes(), *egress_, status);
+                    reject_bus_name_hop(registry_, inbound_name, flat->bytes(), rx_for(inbound_ctx),
+                                        *egress_, status);
                 },
                 /* terminus */
                 [&](const wire::path_ref_element_t* label_target) {
@@ -2361,14 +2366,18 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
             /* observe */
             [&] {
                 if (const auto sink = inbound_.get(); sink.fn != nullptr) {
-                    // Read in place (#1648): validated as `decode` would, nothing built.
-                    if (const auto dec = wire::tlv_node_t::over(frame); dec && dec->opt().pl)
+                    // Read in place (#1648): validated as `decode` would, nothing built. A
+                    // frame deeper than the walk's inline slots spills into the receiving
+                    // link's own source, never the process heap (receiver pays).
+                    if (const auto dec = wire::tlv_node_t::over(frame, rx_for(inbound_ctx));
+                        dec && dec->opt().pl)
                         sink.fn(sink.ctx, inbound_name, *dec);
                 }
             },
             /* reject */
             [&](graph::status_t status) {
-                reject_bus_name_hop(registry_, inbound_name, frame, *egress_, status);
+                reject_bus_name_hop(registry_, inbound_name, frame, rx_for(inbound_ctx), *egress_,
+                                    status);
             },
             /* terminus */
             [&](const wire::path_ref_element_t* label_target) {
