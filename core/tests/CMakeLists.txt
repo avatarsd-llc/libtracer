@@ -817,6 +817,11 @@ if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd
     # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent).
     set_tests_properties(httpd_ws_drain_budget
         PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+    # The install-failure fallback: a full idle-hook table must leave the link UNPACED, never
+    # parked on a hook that will not run. Its own process, because the hook installs once.
+    add_test(NAME httpd_ws_drain_budget_unhooked COMMAND httpd_ws_drain_budget_test unhooked)
+    set_tests_properties(httpd_ws_drain_budget_unhooked
+        PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
 
     # #955 — what the link owes an ADOPTED server. The facts none of the suites above can
     # see are server-level: the `httpd_config_t` a `httpd_start` was given (the real server
@@ -2353,6 +2358,7 @@ set(LIBTRACER_BUS_TESTS
     httpd_ws_close_peer
     httpd_ws_departure_cost
     httpd_ws_drain_budget
+    httpd_ws_drain_budget_unhooked
     httpd_ws_eviction_lock
     httpd_ws_fanout_alloc
     httpd_ws_fanout_wait

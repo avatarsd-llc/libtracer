@@ -74,12 +74,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   ([ADR-0085](../../../docs/adr/0085-ingress-drain-budget-waits-for-the-idle-task-not-a-clock.md)).**
   The link reads at most `CONFIG_LIBTRACER_WS_SERVER_RX_DRAIN_FRAMES` frames (default 32) or
   `CONFIG_LIBTRACER_WS_SERVER_RX_DRAIN_BYTES` payload bytes (default 32,768) back to back while
-  its core never goes idle. Then it stops reading until that core's idle task has run once. The
+  its core never goes idle. Both default to `0` (no pacing) in a build whose task watchdog does
+  not watch the idle task of every core, because a non-zero budget needs a core that idles. Then it stops reading until that core's idle task has run once. The
   unread bytes stay in the socket and TCP flow control holds the peer, so nothing is dropped. The
   link adds no timer and reads no clock: it installs one FreeRTOS idle hook per core, once per
   process. A link whose peers leave the core idle now and then never waits. New
   `stats_t::rx_drain_waits` counts the waits. **Observable:** under a sustained inbound flood the
-  httpd task, and every session on it, now pauses each budget until the core idles. **Migration:**
+  httpd task, and every session on it, now pauses each budget until the core idles, which
+  includes waiting for lower-priority ready tasks on that core to block. **Migration:**
   none; set either option to `0` to remove that budget.
 - **The generated config fragment binds `guard_t`, not `reader_guard_t`
   ([#1703](https://github.com/avatarsd-llc/libtracer/issues/1703)).** Core renamed the config

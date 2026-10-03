@@ -709,11 +709,22 @@ struct default_config_t {
      * **Default 32 — sized against the watchdog, not against throughput.** The longest
      * stretch the idle task can now be kept out is one budget of frames plus whatever
      * higher-priority work follows it. At the ~7.3 ms of board time per small request
-     * measured on an ESP32-C6, 32 frames is about 0.25 s, a quarter of the shortest task
+     * measured on an ESP32-C6, 32 frames is about 0.23 s, under a quarter of the shortest task
      * watchdog IDF offers (1 s) and a twentieth of its default (5 s). Each wait costs the
      * time until the core idles, which on a link that is the only load is the time the
      * Wi-Fi and TCP/IP tasks need to settle; per 32 frames that is a small share of the
-     * burst. A target whose frames are much dearer than that lowers it. Override fragment:
+     * burst. A target whose frames are much dearer than that lowers it.
+     *
+     * **A non-zero budget requires that the core idles.** The wait ends only when the idle
+     * task runs, and the idle task runs only once every other task on the core has blocked.
+     * So after one budget of back-to-back frames the receive context yields to EVERY
+     * lower-priority ready task on its core until all of them block: a priority inversion
+     * that bounds the link's read rate under sustained load by the longest run of
+     * lower-priority work. A build whose core may never idle (one that runs a low-priority
+     * task that never blocks, and has turned the idle-task watchdog check off for it) must
+     * bind `0` here and in @ref kRxDrainBytes, or the link stops reading for good after one
+     * budget. The ESP-IDF component defaults both to `0` unless the task watchdog watches the
+     * idle task of every core. Override fragment:
      * `static constexpr std::size_t kRxDrainFrames = 16;`
      */
     static constexpr std::size_t kRxDrainFrames = 32;
@@ -726,7 +737,8 @@ struct default_config_t {
      * reset. Frames are what a small-write flood costs; bytes are what a large-frame flood
      * costs, where every frame is copied and decoded. A drain ends when EITHER budget is
      * spent. The frame that crosses the line is read whole (a frame is never split), so one
-     * drain consumes at most this many bytes plus one frame.
+     * drain consumes at most this many bytes plus one frame. The same requirement holds: a
+     * non-zero value needs a core that idles (see @ref kRxDrainFrames).
      *
      * **Default 32,768** — the ESP-IDF link's own per-frame cap, so one maximum-size frame
      * is one drain, and about six default lwIP receive windows. Override fragment:

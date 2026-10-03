@@ -383,6 +383,17 @@ if(DEFINED CONFIG_LIBTRACER_WS_SERVER_RX_DRAIN_BYTES)
 else()
     set(LIBTRACER_RX_DRAIN_BYTES 32768)
 endif()
+# A non-zero budget waits for the idle task, so it must not be bound in a build that does not
+# watch the idle task: there a never-blocking low-priority task may keep it from ever running,
+# and the link would stop for good after one budget (ADR-0085). Kconfig defaults both to 0 in
+# that case; this names an explicit override that undid it.
+if(CONFIG_LIBTRACER_WS_SERVER AND NOT CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0
+   AND (LIBTRACER_RX_DRAIN_FRAMES OR LIBTRACER_RX_DRAIN_BYTES))
+    message(WARNING "libtracer: CONFIG_LIBTRACER_WS_SERVER_RX_DRAIN_FRAMES/_BYTES are non-zero but "
+                    "CONFIG_ESP_TASK_WDT_CHECK_IDLE_TASK_CPU0 is off. The drain waits for the idle "
+                    "task; if a low-priority task never blocks, httpd_ws_link_t stops reading for "
+                    "good after one budget. Set both to 0 unless the idle task is known to run.")
+endif()
 set(LIBTRACER_CONFIG_OVERRIDE_PATH
     "${CMAKE_CURRENT_BINARY_DIR}/generated/include/libtracer/config_override.hpp")
 set(LIBTRACER_CONFIG_OVERRIDE_TEXT

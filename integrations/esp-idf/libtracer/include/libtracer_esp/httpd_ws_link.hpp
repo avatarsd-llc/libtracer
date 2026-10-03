@@ -832,6 +832,10 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
          * means a peer is sending faster than this node can serve and the TCP window is
          * doing the pacing — the budget (`tr::net::kRxDrainFrames` /
          * `tr::net::kRxDrainBytes`) is working, not failing.
+         *
+         * Zero is ambiguous: it also reads zero when the link is not pacing at all — both
+         * budgets bound to 0, or the idle hook could not be installed (IDF's per-core hook
+         * table was full; logged once at construction as "ingress unpaced").
          */
         std::uint32_t rx_drain_waits = 0;
     };
@@ -1394,7 +1398,9 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * one spent ends the drain. The wait blocks the httpd task on a semaphore the core's
      * idle hook gives, so the frame's payload, and everything queued behind it, stays in
      * the socket until then, and TCP flow control holds the peer. No timer, no clock read.
-     * Compiled to nothing when both budgets are zero.
+     * Compiled to nothing when both budgets are zero. Every frame is charged, control frames
+     * (ping, close) included: each costs the same handler pass. A drain belongs to the core
+     * it started on; a task that migrated starts a new one (see ADR-0085, dual core).
      */
     void pace_rx(std::size_t frame_bytes);
     /**
@@ -2139,6 +2145,8 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     /** @brief The idle-gate epoch the current drain began in (see @ref pace_rx). httpd
      *         task only, like @ref rx_scratch_. */
     std::uint32_t rx_drain_epoch_ = 0;
+    /** @brief The core the current drain began on; its idle gate is the one compared. */
+    std::size_t rx_drain_core_ = 0;
     /** @brief Frames consumed in the current drain (see @ref pace_rx). */
     std::size_t rx_drain_frames_ = 0;
     /** @brief Payload bytes consumed in the current drain (see @ref pace_rx). */

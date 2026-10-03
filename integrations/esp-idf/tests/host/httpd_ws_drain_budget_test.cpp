@@ -35,10 +35,12 @@
 #include <functional>
 #include <memory>
 #include <span>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
 
+#include "esp_freertos_hooks.h"
 #include "fake_httpd.hpp"
 #include "libtracer/config.hpp"
 #include "libtracer_esp/httpd_ws_link.hpp"
@@ -231,9 +233,34 @@ void test_teardown_while_parked_joins_after_idle() {
     fake_httpd::instance().close_all();
 }
 
+// ---------------------------------------------------------------------------
+// 5 — the hook could not be installed: the link must NOT pace (it would wait forever).
+// ---------------------------------------------------------------------------
+/** @brief A hook that only occupies a slot. */
+bool occupying_hook() { return true; }
+
+void test_full_hook_table_leaves_the_link_unpaced() {
+    constexpr std::size_t kBudget = tr::net::kRxDrainFrames;
+    std::printf("with core 0's idle-hook table full, the link reads without pausing:\n");
+    // Fill IDF's eight per-core slots BEFORE the first link installs its hook (once per
+    // process, so this case runs in its own process: `httpd_ws_drain_budget_test unhooked`).
+    int filled = 0;
+    while (esp_register_freertos_idle_hook_for_cpu(&occupying_hook, 0) == ESP_OK) ++filled;
+    check(filled == 8, "the fake's per-core hook table holds eight, as IDF's does");
+    auto link = fresh_link(805);
+    const std::size_t total = 2 * kBudget + 1;
+    ingress_t in(805, total, 8);
+    check(wait_until([&] { return in.delivered() == total; }),
+          "a sustained ingress past two budgets is read to the end, never parked");
+    check(fake_httpd::semaphore_waiters() == 0, "nothing waits on the idle gate");
+    check(link->stats().rx_drain_waits == 0,
+          "and rx_drain_waits reads 0 — indistinguishable from an unsaturated link");
+    finish(std::move(link));
+}
+
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
     std::printf("httpd_ws_link ingress drain budget (ADR-0085):\n");
     if constexpr (tr::net::kRxDrainFrames == 0 || tr::net::kRxDrainBytes == 0) {
         std::printf("SKIP: this build binds a zero drain budget; the cases assume both are set\n");
@@ -241,10 +268,14 @@ int main() {
     }
     fake_httpd::instance().set_frame_hook([] { g_payload_reads.fetch_add(1); });
     fake_httpd::instance().set_sustained_ingress(true);  // the core idles only when told
-    test_sustained_ingress_yields_after_frame_budget();
-    test_byte_budget_ends_a_drain_of_large_frames();
-    test_an_idle_core_resets_the_drain();
-    test_teardown_while_parked_joins_after_idle();
+    if (argc > 1 && std::string(argv[1]) == "unhooked") {
+        test_full_hook_table_leaves_the_link_unpaced();
+    } else {
+        test_sustained_ingress_yields_after_frame_budget();
+        test_byte_budget_ends_a_drain_of_large_frames();
+        test_an_idle_core_resets_the_drain();
+        test_teardown_while_parked_joins_after_idle();
+    }
     if (g_failures != 0) {
         std::printf("FAILED: %d check(s)\n", g_failures);
         return 1;

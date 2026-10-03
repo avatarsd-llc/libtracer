@@ -12,6 +12,7 @@
 
 #include <array>
 #include <atomic>
+#include <cassert>
 #include <cerrno>
 #include <condition_variable>
 #include <cstdint>
@@ -813,9 +814,10 @@ SemaphoreHandle_t xSemaphoreCreateBinaryStatic(StaticSemaphore_t* /*storage*/) {
 BaseType_t xSemaphoreTake(SemaphoreHandle_t semaphore, TickType_t ticks_to_wait) {
     std::unique_lock lock(semaphore->m);
     fake_httpd::g_sem_waiters.fetch_add(1, std::memory_order_seq_cst);
-    // Only the block-forever form is modelled: it is the only one the idle gate uses.
-    if (ticks_to_wait == portMAX_DELAY)
-        semaphore->cv.wait(lock, [semaphore] { return semaphore->count > 0; });
+    // Only the block-forever form is modelled: it is the only one the idle gate uses. A
+    // future caller with a finite wait would silently get a non-blocking take; refuse it.
+    assert(ticks_to_wait == portMAX_DELAY);
+    semaphore->cv.wait(lock, [semaphore] { return semaphore->count > 0; });
     fake_httpd::g_sem_waiters.fetch_sub(1, std::memory_order_seq_cst);
     if (semaphore->count == 0) return pdFALSE;
     --semaphore->count;

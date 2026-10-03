@@ -195,6 +195,10 @@ constexpr bool kRxDrainPaced = kRxDrainFrames != 0 || kRxDrainBytes != 0;
  * sees the other, so a waiter either finds the epoch already moved or is given the
  * semaphore. A give nobody takes saturates the binary semaphore at one, and the waiter's
  * loop re-tests the epoch, so a stale give costs one extra pass and never a missed wake.
+ *
+ * Two links (or two servers) parked on one core share the binary semaphore: one give wakes
+ * one of them, and the other wakes on the next idle pass, which comes once the first has
+ * read its budget and parked again. Liveness holds; fairness is one drain late.
  */
 struct idle_gate_t {
     std::atomic<std::uint32_t> epoch{0};   /**< @brief Idle-task iterations, mod 2^32. */
@@ -2361,9 +2365,17 @@ httpd_ws_link_t::session_t* httpd_ws_link_t::claim_session(int fd, bool authenti
 
 void httpd_ws_link_t::pace_rx(std::size_t frame_bytes) {
     if constexpr (!kRxDrainPaced) return;
-    idle_gate_t& gate = g_idle_gates[static_cast<std::size_t>(xPortGetCoreID())];
+    const auto core = static_cast<std::size_t>(xPortGetCoreID());
+    idle_gate_t& gate = g_idle_gates[core];
     if (!gate.hooked.load(std::memory_order_acquire)) return;
     std::uint32_t epoch = gate.epoch.load(std::memory_order_seq_cst);
+    // An unpinned httpd task that migrated compares against a different core's epoch, which
+    // means nothing; it starts a new drain on the core it is now on. The budget is therefore
+    // approximate for such a task (ADR-0085), never a hang: it waits on the gate it is on.
+    if (core != rx_drain_core_) {
+        rx_drain_core_ = core;
+        rx_drain_epoch_ = epoch - 1;  // any value but `epoch`: forces the reset below
+    }
     // The drain is the run of frames since this core last idled; an epoch that moved since
     // the previous frame starts a new one. Otherwise a spent budget waits for the idle
     // task: the waiter counts itself in, THEN re-reads the epoch (the handshake on
