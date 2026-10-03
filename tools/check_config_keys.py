@@ -12,10 +12,10 @@ one: it carries marker-delimited blocks, and this tool derives the truth from th
 source and fails when the two disagree.
 
 Derivation. A connection config is read through `config_reader_t` (the pair walk
-now lives in `tr::wire`, #985; `tr::net::config_reader_t` is its transport-plane
-alias), whose typed accessors take the key as a string literal:
+lives in `tr::wire`, #985; the transport plane spells it `wire::config_reader_t`),
+whose typed accessors take the key as a string literal:
 
-    const config_reader_t cfg(raw_config);
+    const wire::config_reader_t cfg(raw_config);
     if (const auto v = cfg.name("ca")) ...      -> key "ca",  value spelling `NAME`
     if (const auto v = cfg.flag("insecure")) ...-> key "insecure", `VALUE` u8 (flag)
 

@@ -185,11 +185,6 @@ static_assert(kDeliverySkipOrder == std::memory_order_seq_cst,
               "target, and the racing publish reaches nobody (#635, #1140). Restore "
               "kDeliverySkipOrder to std::memory_order_seq_cst.");
 
-// L1 types this layer consumes (upward dependency on tr::view, docs/adr/0016 §2).
-using view::rope_t;
-using view::segment_ptr_t;
-using view::view_t;
-
 /** @brief A vertex's behavioral role (docs/reference/11 §roles). Byte-wide: it packs
  *         into `vertex_t`'s flag byte group (#361 diet — 3 values need no int). */
 enum class role_t : std::uint8_t {
@@ -285,12 +280,13 @@ struct payload_right_t {
  *   `on_write` refusal does (`TYPE_MISMATCH` for a value the vertex cannot represent,
  *   `PERMISSION_DENIED` for a policy the ACL cannot express, etc.).
  */
-using admission_t = result_t<std::optional<rope_t>>;
+using admission_t = result_t<std::optional<view::rope_t>>;
 
 /** @brief The @ref hook_t shape of `handlers_t::on_admit` (RFC-0028 D10). */
 using admit_hook_t = hook_t<admission_t(const value_t& value, const write_ctx_t& ctx)>;
 /** @brief The @ref hook_t shape of `handlers_t::on_app_field_admit` (RFC-0028 D10). */
-using app_field_admit_hook_t = hook_t<result_t<view_t>(std::string_view name, const view_t& value)>;
+using app_field_admit_hook_t =
+    hook_t<result_t<view::view_t>(std::string_view name, const view::view_t& value)>;
 
 /**
  * @brief User behavior for a Handler-role vertex — six @ref hook_t seams, 96 B on the host
@@ -313,7 +309,7 @@ using app_field_admit_hook_t = hook_t<result_t<view_t>(std::string_view name, co
  */
 struct handlers_t {
     /** @brief Supplies the vertex value on read. */
-    hook_t<result_t<rope_t>()> on_read;
+    hook_t<result_t<view::rope_t>()> on_read;
     /**
      * @brief Receives the written value and the writer's @ref write_ctx_t (#375).
      *
@@ -327,7 +323,7 @@ struct handlers_t {
      */
     hook_t<result_t<void>(const value_t& value, const write_ctx_t& ctx)> on_write;
     /** @brief Synthesized `:children[]` listing. */
-    hook_t<result_t<view_t>()> on_children;
+    hook_t<result_t<view::view_t>()> on_children;
     /**
      * @brief The ADMISSION seam of a RETAINING vertex: runs BEFORE the write becomes state,
      *        and decides whether — and in what form — it does (`admission_t`).
@@ -416,11 +412,11 @@ struct handlers_t {
  * Set once at registration (`vertex_t::adopt_identity`), read lock-free thereafter.
  */
 struct value_handlers_t {
-    hook_t<result_t<rope_t>()> on_read; /**< @brief Supplies the vertex value on read. */
+    hook_t<result_t<view::rope_t>()> on_read; /**< @brief Supplies the vertex value on read. */
     /** @brief Receives the written value and the writer's @ref write_ctx_t (#375) — the
      *         @ref handlers_t::on_write contract, verbatim. */
     hook_t<result_t<void>(const value_t& value, const write_ctx_t& ctx)> on_write;
-    hook_t<result_t<view_t>()> on_children; /**< @brief Synthesized `:children[]` listing. */
+    hook_t<result_t<view::view_t>()> on_children; /**< @brief Synthesized `:children[]` listing. */
 };
 
 /**
@@ -2046,7 +2042,7 @@ class vertex_t {
      *        read) — a refcount clone, no byte copy; `nullopt` for a missing / inactive /
      *        TLV-less (in-process sugar) slot.
      */
-    [[nodiscard]] std::optional<view_t> edge_source(std::size_t idx) {
+    [[nodiscard]] std::optional<view::view_t> edge_source(std::size_t idx) {
         const std::lock_guard lock(vertex_stripe_of(this).m);
         const edge_block_t* b = edges_locked();
         if (b == nullptr) return std::nullopt;
@@ -2058,9 +2054,9 @@ class vertex_t {
 
     /** @brief Every active slot's stored SUBSCRIBER view, in slot order (the
      *         `:subscribers[]` array read) — each a refcount clone. */
-    [[nodiscard]] std::vector<view_t> edge_sources() {
+    [[nodiscard]] std::vector<view::view_t> edge_sources() {
         const std::lock_guard lock(vertex_stripe_of(this).m);
-        std::vector<view_t> out;
+        std::vector<view::view_t> out;
         const edge_block_t* b = edges_locked();
         if (b == nullptr) return out;
         out.reserve(b->slots.size());

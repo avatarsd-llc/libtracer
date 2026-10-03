@@ -102,9 +102,6 @@
 
 namespace tr::graph {
 
-using tr::view::rope_t;
-using tr::view::view_t;
-
 /**
  * @brief The reclaimer of an inline value's embedded segment (RFC-0028 §5.1, slice 5).
  *
@@ -182,8 +179,9 @@ class rx_loan_source_t final : public mem::block_source_t {
 class value_t {
    public:
     /** @brief Alignment every block is drawn and released at — the links' own. */
-    static constexpr std::size_t kAlign = alignof(view_t) > alignof(void*) ? alignof(view_t)
-                                                                           : alignof(void*);
+    static constexpr std::size_t kAlign = alignof(view::view_t) > alignof(void*)
+                                              ? alignof(view::view_t)
+                                              : alignof(void*);
 
     value_t(const value_t&) = delete;
     value_t& operator=(const value_t&) = delete;
@@ -194,7 +192,7 @@ class value_t {
      * This is what a publish costs in bytes and what @ref release hands back to the source.
      */
     [[nodiscard]] static constexpr std::size_t bytes_for(std::size_t links) noexcept {
-        return sizeof(value_t) + links * sizeof(view_t);
+        return sizeof(value_t) + links * sizeof(view::view_t);
     }
 
     /**
@@ -211,13 +209,13 @@ class value_t {
      * @return The value, holding ONE reference (the caller's), or `nullptr` when @p source
      *         refused the block.
      */
-    [[nodiscard]] static value_t* make(rope_t&& links, mem::block_source_t& source) noexcept {
+    [[nodiscard]] static value_t* make(view::rope_t&& links, mem::block_source_t& source) noexcept {
         // A rope that is exactly one live inline value's bytes IS that value: adopt it (one
         // reference) rather than drawing a second block that links to the first.
         if (links.link_count() == 1) {
             value_t* const inl = inline_owner(links.links()[0]);
             if (inl != nullptr && inl->try_retain()) {
-                links = rope_t{};
+                links = view::rope_t{};
                 return inl;
             }
             // A loaned receive block (RFC-0028 §6.9): the record goes IN the block. One byte
@@ -227,12 +225,12 @@ class value_t {
                 if (value_t* const loaned = make_loaned(links)) return loaned;
             }
         }
-        const std::span<view_t> in = links.links();
+        const std::span<view::view_t> in = links.links();
         value_t* v = place(in.size(), source);
         if (v == nullptr) return nullptr;
-        view_t* out = v->slots();
-        for (std::size_t i = 0; i < in.size(); ++i) new (out + i) view_t(std::move(in[i]));
-        links = rope_t{};  // the moved-from chain: drop it so the rope is empty, not a husk
+        view::view_t* out = v->slots();
+        for (std::size_t i = 0; i < in.size(); ++i) new (out + i) view::view_t(std::move(in[i]));
+        links = view::rope_t{};  // the moved-from chain: drop it so the rope is empty, not a husk
         return v;
     }
 
@@ -242,12 +240,12 @@ class value_t {
      * The spelling for a chain the caller does not own — a subview of an inbound frame, another
      * value's links. Same one-`try_alloc`, nothrow contract as the rope form.
      */
-    [[nodiscard]] static value_t* make(std::span<const view_t> links,
+    [[nodiscard]] static value_t* make(std::span<const view::view_t> links,
                                        mem::block_source_t& source) noexcept {
         value_t* v = place(links.size(), source);
         if (v == nullptr) return nullptr;
-        view_t* out = v->slots();
-        for (std::size_t i = 0; i < links.size(); ++i) new (out + i) view_t(links[i]);
+        view::view_t* out = v->slots();
+        for (std::size_t i = 0; i < links.size(); ++i) new (out + i) view::view_t(links[i]);
         return v;
     }
 
@@ -282,7 +280,7 @@ class value_t {
         auto* seg = new (raw + bytes_for(1)) view::segment_t(
             &inline_value_backend(),
             std::span<std::byte>(raw + bytes_for(1) + sizeof(view::segment_t), len));
-        new (v->slots()) view_t{view::segment_ptr_t::adopt(seg), 0, len};
+        new (v->slots()) view::view_t{view::segment_ptr_t::adopt(seg), 0, len};
         return v;
     }
 
@@ -302,7 +300,7 @@ class value_t {
      * says the link is the value's bytes and not a subview of them (a subview is a different
      * value, and publishes as a link to this one).
      */
-    [[nodiscard]] static value_t* inline_owner(const view_t& link) noexcept {
+    [[nodiscard]] static value_t* inline_owner(const view::view_t& link) noexcept {
         view::segment_t* const seg = link.owner.get();
         if (seg == nullptr || seg->backend != &inline_value_backend()) return nullptr;
         if (link.offset != 0 || link.length != seg->bytes.size()) return nullptr;
@@ -361,15 +359,15 @@ class value_t {
     // ---- the read surface: `rope_t`'s read-only half ------------------------------------
 
     /** @brief The link chain, in order. */
-    [[nodiscard]] std::span<const view_t> links() const noexcept {
-        return std::span<const view_t>(slots(), n_);
+    [[nodiscard]] std::span<const view::view_t> links() const noexcept {
+        return std::span<const view::view_t>(slots(), n_);
     }
 
     /** @brief Number of links in the chain. */
     [[nodiscard]] std::size_t link_count() const noexcept { return n_; }
 
     /** @brief The single link of a one-link value. Precondition: `link_count() == 1`. */
-    [[nodiscard]] const view_t& only() const noexcept {
+    [[nodiscard]] const view::view_t& only() const noexcept {
         assert(n_ == 1);
         return slots()[0];
     }
@@ -377,13 +375,13 @@ class value_t {
     /** @brief Total payload bytes across the chain. */
     [[nodiscard]] std::size_t total_length() const noexcept {
         std::size_t n = 0;
-        for (const view_t& l : links()) n += l.length;
+        for (const view::view_t& l : links()) n += l.length;
         return n;
     }
 
     /** @brief True iff every link is in HOST space (CPU-readable). */
     [[nodiscard]] bool all_host() const noexcept {
-        for (const view_t& l : links()) {
+        for (const view::view_t& l : links()) {
             if (l.is_device()) return false;
         }
         return true;
@@ -392,32 +390,33 @@ class value_t {
     /** @brief Visit each link's byte span in order. */
     template <class Fn>
     void walk(Fn&& fn) const {
-        for (const view_t& l : links()) fn(l.bytes());
+        for (const view::view_t& l : links()) fn(l.bytes());
     }
 
     /**
      * @brief One contiguous view of the value: the link itself when there is one, else a
      *        flattened copy through @p backend.
      */
-    [[nodiscard]] view_t materialize(mem::mem_backend_t& backend = mem::heap_backend()) const {
+    [[nodiscard]] view::view_t materialize(
+        mem::mem_backend_t& backend = mem::heap_backend()) const {
         if (n_ == 1) return slots()[0];
         return rope().flatten(backend);
     }
 
     /** @brief The nothrow twin of @ref materialize — the flatten's refusal comes back by value. */
-    [[nodiscard]] std::expected<view_t, view::flatten_err_t> try_materialize(
+    [[nodiscard]] std::expected<view::view_t, view::flatten_err_t> try_materialize(
         mem::mem_backend_t& backend = mem::heap_backend()) const {
         if (n_ == 1) return slots()[0];
         return rope().try_flatten(backend);
     }
 
     /** @brief One contiguous copy of the whole payload through @p backend (`rope_t::flatten`). */
-    [[nodiscard]] view_t flatten(mem::mem_backend_t& backend = mem::heap_backend()) const {
+    [[nodiscard]] view::view_t flatten(mem::mem_backend_t& backend = mem::heap_backend()) const {
         return rope().flatten(backend);
     }
 
     /** @brief The nothrow twin of @ref flatten — the refusal comes back by value. */
-    [[nodiscard]] std::expected<view_t, view::flatten_err_t> try_flatten(
+    [[nodiscard]] std::expected<view::view_t, view::flatten_err_t> try_flatten(
         mem::mem_backend_t& backend = mem::heap_backend()) const {
         return rope().try_flatten(backend);
     }
@@ -427,7 +426,7 @@ class value_t {
     [[nodiscard]] std::vector<std::span<const std::byte>> to_iovec() const {
         std::vector<std::span<const std::byte>> iov;
         iov.reserve(n_);
-        for (const view_t& l : links()) iov.push_back(l.bytes());
+        for (const view::view_t& l : links()) iov.push_back(l.bytes());
         return iov;
     }
 
@@ -436,7 +435,8 @@ class value_t {
     [[nodiscard]] bool try_to_iovec(std::vector<std::span<const std::byte>>& out) const noexcept {
         out.clear();
         if (!tr::detail::try_reserve(out, n_)) return false;
-        for (const view_t& l : links()) out.push_back(l.bytes());  // reserved — no reallocation
+        for (const view::view_t& l : links())
+            out.push_back(l.bytes());  // reserved — no reallocation
         return true;
     }
 
@@ -447,9 +447,9 @@ class value_t {
      * value past the call). A chain longer than the rope's inline buffer allocates the rope's
      * spill; @ref try_rope is the nothrow spelling for a hot leg.
      */
-    [[nodiscard]] rope_t rope() const {
-        rope_t r;
-        for (const view_t& l : links()) r.append(l);
+    [[nodiscard]] view::rope_t rope() const {
+        view::rope_t r;
+        for (const view::view_t& l : links()) r.append(l);
         return r;
     }
 
@@ -465,9 +465,9 @@ class value_t {
      * each of those bodies' shape; the loop itself is the same either way.
      * @retval false The chain could not be reserved — @p out is left as it was.
      */
-    [[gnu::noinline]] [[nodiscard]] bool try_rope(rope_t& out) const noexcept {
+    [[gnu::noinline]] [[nodiscard]] bool try_rope(view::rope_t& out) const noexcept {
         if (!out.try_reserve(n_)) return false;
-        for (const view_t& l : links()) out.append(l);
+        for (const view::view_t& l : links()) out.append(l);
         return true;
     }
 
@@ -547,14 +547,14 @@ class value_t {
      * block outlives the header by construction; the last value reference's teardown
      * (`destroy()`) moves that link out before dropping it.
      */
-    [[gnu::noinline, gnu::cold]] static value_t* make_loaned(rope_t& links) noexcept {
-        view_t& link = links.links()[0];
+    [[gnu::noinline, gnu::cold]] static value_t* make_loaned(view::rope_t& links) noexcept {
+        view::view_t& link = links.links()[0];
         view::segment_t* const seg = link.owner.get();
         if (link.offset < view::kRxLoanBytes || !view::claim_rx_loan(seg)) return nullptr;
         auto* const v =
             new (seg->bytes.data() + view::kRxLoanValueOffset) value_t(1, &rx_loan_source());
-        new (v->slots()) view_t(std::move(link));
-        links = rope_t{};
+        new (v->slots()) view::view_t(std::move(link));
+        links = view::rope_t{};
         return v;
     }
 
@@ -564,7 +564,7 @@ class value_t {
 
     /** @brief Destroy the links. The block itself is the caller's (see @ref release). */
     ~value_t() {
-        view_t* s = slots();
+        view::view_t* s = slots();
         for (std::size_t i = 0; i < n_; ++i) s[i].~view_t();
     }
 
@@ -579,13 +579,14 @@ class value_t {
     }
 
     /** @brief The link slots, which start right after the header. */
-    [[nodiscard]] view_t* slots() noexcept {
-        return reinterpret_cast<view_t*>(reinterpret_cast<std::byte*>(this) + sizeof(value_t));
+    [[nodiscard]] view::view_t* slots() noexcept {
+        return reinterpret_cast<view::view_t*>(reinterpret_cast<std::byte*>(this) +
+                                               sizeof(value_t));
     }
     /** @brief The link slots, read-only. */
-    [[nodiscard]] const view_t* slots() const noexcept {
-        return reinterpret_cast<const view_t*>(reinterpret_cast<const std::byte*>(this) +
-                                               sizeof(value_t));
+    [[nodiscard]] const view::view_t* slots() const noexcept {
+        return reinterpret_cast<const view::view_t*>(reinterpret_cast<const std::byte*>(this) +
+                                                     sizeof(value_t));
     }
 
     mutable std::atomic<std::uint32_t> refs_; /**< @brief Outstanding references. */
@@ -593,7 +594,7 @@ class value_t {
     mem::block_source_t* source_;             /**< @brief Where the block is released to. */
 };
 
-static_assert(sizeof(value_t) % alignof(view_t) == 0,
+static_assert(sizeof(value_t) % alignof(view::view_t) == 0,
               "the links follow the header in the same block, so the header must end on a "
               "link boundary — pad the header explicitly if a member is added");
 static_assert(value_t::bytes_for(1) % alignof(view::segment_t) == 0,
@@ -659,7 +660,7 @@ class value_ref_t {
      *
      * @return The reference, or an EMPTY one when the heap refused the block (#477).
      */
-    [[nodiscard]] static value_ref_t composed(rope_t&& r) noexcept {
+    [[nodiscard]] static value_ref_t composed(view::rope_t&& r) noexcept {
         return value_ref_t{value_t::make(std::move(r), mem::heap_source())};
     }
 
@@ -741,26 +742,26 @@ class value_storage_t {
    public:
     /** @brief Build over a copy of @p links (one refcount clone per link). Precondition:
      *         `links.size() <= N`. */
-    explicit value_storage_t(std::span<const view_t> links) noexcept {
+    explicit value_storage_t(std::span<const view::view_t> links) noexcept {
         assert(links.size() <= N);
         auto* v = new (buf_) value_t(static_cast<std::uint32_t>(links.size()), nullptr);
-        view_t* out = v->slots();
-        for (std::size_t i = 0; i < links.size(); ++i) new (out + i) view_t(links[i]);
+        view::view_t* out = v->slots();
+        for (std::size_t i = 0; i < links.size(); ++i) new (out + i) view::view_t(links[i]);
     }
     /** @brief Build over one link. */
-    explicit value_storage_t(const view_t& link) noexcept
-        : value_storage_t(std::span<const view_t>(&link, 1)) {}
+    explicit value_storage_t(const view::view_t& link) noexcept
+        : value_storage_t(std::span<const view::view_t>(&link, 1)) {}
     /** @brief Build over a rope's chain. Precondition: `r.link_count() <= N`. */
-    explicit value_storage_t(const rope_t& r) noexcept : value_storage_t(r.links()) {}
+    explicit value_storage_t(const view::rope_t& r) noexcept : value_storage_t(r.links()) {}
     /** @brief Build over a rope's chain by MOVING its links in — no refcount traffic; @p r is
      *         left empty. Precondition: `r.link_count() <= N`. */
-    explicit value_storage_t(rope_t&& r) noexcept {
-        const std::span<view_t> in = r.links();
+    explicit value_storage_t(view::rope_t&& r) noexcept {
+        const std::span<view::view_t> in = r.links();
         assert(in.size() <= N);
         auto* v = new (buf_) value_t(static_cast<std::uint32_t>(in.size()), nullptr);
-        view_t* out = v->slots();
-        for (std::size_t i = 0; i < in.size(); ++i) new (out + i) view_t(std::move(in[i]));
-        r = rope_t{};
+        view::view_t* out = v->slots();
+        for (std::size_t i = 0; i < in.size(); ++i) new (out + i) view::view_t(std::move(in[i]));
+        r = view::rope_t{};
     }
 
     value_storage_t(const value_storage_t&) = delete;

@@ -35,9 +35,6 @@
 
 namespace tr::graph {
 
-// L1 types this layer consumes (upward dependency on tr::view, docs/adr/0016 §2).
-using view::view_t;
-
 /**
  * @brief What a vertex — or one of its application fields — RETAINS after a write is
  *        delivered (RFC-0028 §5.4, D4): one property with one spelling, where there used to
@@ -334,7 +331,7 @@ struct app_field_table_t {
 
 /** @brief The owner apply seam's @ref hook_t shape (RFC-0010 §A.3): the field's key below
  *         `settings.app.` and the written TLV, both borrowed for the call. */
-using app_field_write_hook_t = hook_t<void(std::string_view name, const view_t& value)>;
+using app_field_write_hook_t = hook_t<void(std::string_view name, const view::view_t& value)>;
 
 /**
  * @brief The lazily-allocated APP-FIELD group of the extension block (ADR-0058 Step 2):

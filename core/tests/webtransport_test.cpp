@@ -628,7 +628,7 @@ void test_config_constructed_webtransport() {
 
     // #927 against the REAL parse_wt_config, over the REAL wire path (a creator-endpoint
     // SPEC → the module's factory). `parse_wt_config` kept a hand-rolled every-offset copy
-    // of the SETTINGS walk after the other parsers moved to net::config_reader_t. The
+    // of the SETTINGS walk after the other parsers moved to wire::config_reader_t. The
     // hijack target names no registered profile, so a listener that adopted it would be
     // refused; the observable is that the listener still comes up on the REAL profile.
     const auto hj = node_b.write(path_t("/net/webtransport-server/conn"),

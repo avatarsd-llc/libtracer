@@ -42,10 +42,6 @@
 
 namespace tr::graph {
 
-// L1 types this layer consumes (upward dependency on tr::view, docs/adr/0016 §2).
-using view::rope_t;
-using view::view_t;
-
 /**
  * @brief The per-subscription DELIVERY CLASS — bits 6–7 of the packed `delivery_policy` word
  *        (RFC-0025 §4.1, as amended).
@@ -217,7 +213,7 @@ struct subscriber_remote_t {
      * O(1) copies over the subscription's life, and an in-flight delivery keeps the route
      * alive across a concurrent unsubscribe. An opaque view, so L4 never depends on tr::net.
      */
-    view_t return_route{};
+    view::view_t return_route{};
     /**
      * @brief The COMPLETED reverse-direction bound route (RFC-0024 §7.1 amendment 1) — a
      *        `PATH_REF` TLV whose element 0 is THIS node's own reference to the connection
@@ -233,7 +229,7 @@ struct subscriber_remote_t {
      * the only route. Same ownership shape as @ref return_route — one refcounted copy at
      * subscribe, refcount clones per delivery snapshot.
      */
-    view_t reverse_route{};
+    view::view_t reverse_route{};
     /**
      * @brief The caller context this edge was created under (#81, ADR-0026 fan-in gate).
      *
@@ -463,7 +459,7 @@ struct subscriber_t {
      * ADR-0035 slice 2 zero-copy reply rule). Stays HOT (outside @ref remote) precisely
      * because local field-write-door edges carry it.
      */
-    view_t source_view{};
+    view::view_t source_view{};
     /** @brief The cold wire/gate half (#380 §3) — null for the plain in-process edge;
      *         allocated by @ref ensure_remote when a route/link/caller/compact-flag is
      *         stored (pay-for-what-you-use, ADR-0021). SHARED with every published entry

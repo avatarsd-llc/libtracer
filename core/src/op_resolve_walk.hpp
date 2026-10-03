@@ -161,8 +161,8 @@ struct arena_node {
      * The rope tier keeps its seam POINTER regardless: it needs the sticky `refused` flag,
      * and its `ensure_cache` is reached from `wire()`/`body()`, which take no arguments.
      */
-    [[nodiscard]] view_t own_wire(mem::mem_backend_t& flat) const {
-        return view::over_bytes(wire(), flat).value_or(view_t{});
+    [[nodiscard]] view::view_t own_wire(mem::mem_backend_t& flat) const {
+        return view::over_bytes(wire(), flat).value_or(view::view_t{});
     }
 
     /**
@@ -180,13 +180,13 @@ struct arena_node {
      * The eligibility test
      * (size, trailer-less) is `share_or_copy_tlv`'s — this only produces the rope.
      */
-    [[nodiscard]] std::optional<rope_t> pin_wire(const view_t* frame_view) const {
+    [[nodiscard]] std::optional<view::rope_t> pin_wire(const view::view_t* frame_view) const {
         // No OWNING segment — a borrowed, span-delivered frame — means nothing to share: a
         // subview of an owner-less view would store bytes whose lifetime nobody holds.
         if (frame_view == nullptr || !frame_view->owner) return std::nullopt;
         const std::span<const std::byte> w = node().wire;
         const std::size_t off = static_cast<std::size_t>(w.data() - frame_view->bytes().data());
-        return rope_t(frame_view->subview(off, w.size()));
+        return view::rope_t(frame_view->subview(off, w.size()));
     }
 
     /**
@@ -455,8 +455,8 @@ template <class N>
  * The opt patch lives here, ONE locus for both readers.
  */
 template <class N>
-[[nodiscard]] view_t own_tlv(const N& node, mem::mem_backend_t& flat) {
-    view_t v = node.own_wire(flat);  // owned, trailer-excluded; empty view on alloc failure
+[[nodiscard]] view::view_t own_tlv(const N& node, mem::mem_backend_t& flat) {
+    view::view_t v = node.own_wire(flat);  // owned, trailer-excluded; empty view on alloc failure
     if (!v.empty()) v.owner->bytes[1] = struct_opt(v.owner->bytes[1]);
     return v;
 }
@@ -483,7 +483,7 @@ template <class N>
  * terminus holds one across the write. On the share arm @ref inline_value is empty.
  */
 struct stored_tlv_t {
-    rope_t rope;              /**< @brief What `graph_t::write` stores (empty ⇒ BACKPRESSURE). */
+    view::rope_t rope;        /**< @brief What `graph_t::write` stores (empty ⇒ BACKPRESSURE). */
     value_ref_t inline_value; /**< @brief The copy arm's value, held across the write. */
 };
 
@@ -504,9 +504,9 @@ template <class N>
     value_ref_t v = value_ref_t::adopt(value_t::make_inline(n, source));
     if (!v) return {};
     const std::span<std::byte> out = const_cast<value_t*>(v.get())->inline_bytes();
-    if (!node.copy_wire_into(out)) return {rope_t(own_tlv(node, flat)), value_ref_t{}};
+    if (!node.copy_wire_into(out)) return {view::rope_t(own_tlv(node, flat)), value_ref_t{}};
     out[1] = struct_opt(out[1]);
-    rope_t r;
+    view::rope_t r;
     r.append(v->only());  // a segment reference: the store adopts `v` itself through it
     return {std::move(r), std::move(v)};
 }
@@ -530,11 +530,11 @@ template <class N>
  * its copy. Returns a rope so a multi-link shared payload keeps its segments.
  */
 template <class N>
-[[nodiscard]] stored_tlv_t share_or_copy_tlv(const N& node, const view_t* frame_view,
+[[nodiscard]] stored_tlv_t share_or_copy_tlv(const N& node, const view::view_t* frame_view,
                                              std::size_t threshold, mem::block_source_t& source,
                                              mem::mem_backend_t& flat) {
     if (node.wire_size() >= threshold && trailer_less(node)) {
-        if (std::optional<rope_t> shared = node.pin_wire(frame_view)) {
+        if (std::optional<view::rope_t> shared = node.pin_wire(frame_view)) {
             LIBTRACER_TICK_PIN();
             return {std::move(*shared), value_ref_t{}};
         }
@@ -549,9 +549,9 @@ template <class N>
  *        read); a multi-link stored value ropes ALL its links into the reply zero-copy — no
  *        flatten.
  */
-[[nodiscard]] rope_t assemble_result_rope(const reply_route_t& route, const value_t& payload,
-                                          mem::mem_backend_t& egress,
-                                          std::span<const std::byte> trailing = {}) {
+[[nodiscard]] view::rope_t assemble_result_rope(const reply_route_t& route, const value_t& payload,
+                                                mem::mem_backend_t& egress,
+                                                std::span<const std::byte> trailing = {}) {
     // The links span feeds assemble directly — no heap copy of the link table. The
     // old std::vector staging copy was a per-reply transient that scaled with the
     // stored value's link count and ABORTED on heap exhaustion under -fno-exceptions
@@ -576,8 +576,8 @@ template <class N>
  * is the inline fast path), so it succeeds on exactly the fragmented heap that could not
  * reserve the large snapshot's link table.
  */
-[[nodiscard]] rope_t or_backpressure(rope_t reply, const reply_route_t& route,
-                                     mem::mem_backend_t& egress) {
+[[nodiscard]] view::rope_t or_backpressure(view::rope_t reply, const reply_route_t& route,
+                                           mem::mem_backend_t& egress) {
     if (reply.link_count() == 0) return assemble_error_reply(route, status_t::BACKPRESSURE, egress);
     return reply;
 }
@@ -637,9 +637,9 @@ template <class N>
  * exactly what probing the canonical form yields (§6.1's anti-enumeration property).
  */
 template <class N>
-[[nodiscard]] result_t<rope_t> apply_op(
+[[nodiscard]] result_t<view::rope_t> apply_op(
     graph_t& graph, const parsed_fwd_t<N>& req, vertex_handle_t v, std::string_view inbound_link,
-    std::string_view subject, const view_t* frame_view, mem::mem_backend_t& flat,
+    std::string_view subject, const view::view_t* frame_view, mem::mem_backend_t& flat,
     mem::mem_backend_t& egress, mem::mem_backend_t& retained, const reply_route_t& route,
     const field_path_t& field, bool has_field,
     op_resolver_t::reverse_ref_fn_t reverse_ref_fn = nullptr, void* reverse_ref_ctx = nullptr,
@@ -750,10 +750,10 @@ template <class N>
     switch (req.op) {
         case fwd_op_t::READ: {
             if (has_field && is_subscribers_array(field)) {
-                result_t<std::vector<view_t>> subs = graph.read_subscribers(v, subject);
+                result_t<std::vector<view::view_t>> subs = graph.read_subscribers(v, subject);
                 if (!subs) return assemble_error_reply(route, subs.error(), egress);
                 std::size_t sub_len = 0;
-                for (const view_t& s : *subs) sub_len += s.length;
+                for (const view::view_t& s : *subs) sub_len += s.length;
                 // PL=1 wrapper (POINT) whose children are the slot SUBSCRIBER views,
                 // roped on zero-copy. POINT is the structured introspection-result
                 // container already used for :schema and vertex enumeration.
@@ -791,7 +791,7 @@ template <class N>
              * once here so no arm below can be added that answers a route that is not there.
              */
             const auto write_error = [&](status_t s) -> rope_t {
-                if (req.no_reply) return rope_t{};
+                if (req.no_reply) return view::rope_t{};
                 return assemble_error_reply(route, s, egress);
             };
             if (!req.payload.has_value()) return write_error(status_t::TYPE_MISMATCH);
@@ -823,12 +823,12 @@ template <class N>
                 // MALFORMED for the same reason an empty-src READ is (RFC-0004 Amendment 2),
                 // and takes the same terminus drop.
                 if (req.no_reply) return std::unexpected(status_t::INVALID_PATH);
-                const view_t sub_value = own_tlv(payload_node, retained);
+                const view::view_t sub_value = own_tlv(payload_node, retained);
                 if (sub_value.empty())
                     return assemble_error_reply(route, status_t::BACKPRESSURE, egress);
                 // The ONE route copy of the subscription's life (ADR-0041 §2), into a
                 // refcounted segment — every later delivery clones the refcount.
-                const view_t return_route = own_tlv(req.src, retained);
+                const view::view_t return_route = own_tlv(req.src, retained);
                 if (return_route.empty())
                     return assemble_error_reply(route, status_t::BACKPRESSURE, egress);
                 // The responder's COMPLETION of the reverse-direction list (RFC-0024 §7.1
@@ -839,7 +839,7 @@ template <class N>
                 // canonical-only subscription (an EMPTY reverse view), never to an error:
                 // the reverse binding is an optimisation plus a liveness check, and a
                 // subscribe that cannot bind it still subscribes exactly as before.
-                view_t reverse_route{};
+                view::view_t reverse_route{};
                 if (req.reverse && reverse_ref_fn != nullptr) {
                     const std::span<const std::byte> rbody = req.reverse->body();
                     const std::size_t n = wire::path_ref_element_count(rbody.size());
@@ -872,7 +872,7 @@ template <class N>
                                     out[3] = static_cast<std::byte>((body_len >> 8) & 0xFFu);
                                     std::memcpy(out.data() + 4 + wire::kPathRefElementBytes,
                                                 rbody.data(), rbody.size());
-                                    reverse_route = view_t::over(std::move(seg));
+                                    reverse_route = view::view_t::over(std::move(seg));
                                 }
                             }
                         }
@@ -920,7 +920,7 @@ template <class N>
             // origin loses per-write backpressure feedback — `or_backpressure` never runs on
             // this path — which is inherent to an unacknowledged flow and opt-in by wiring an
             // empty `src`; the application's own sequence counter is its loss detector.
-            if (req.no_reply) return rope_t{};
+            if (req.no_reply) return view::rope_t{};
             if (!w) return assemble_error_reply(route, w.error(), egress);
             const reply_route_t ok = labelled_route();
             return or_backpressure(
@@ -972,9 +972,9 @@ template <class N>
  * names a specific decode representation.
  */
 template <class N>
-[[nodiscard]] result_t<rope_t> resolve_node(
+[[nodiscard]] result_t<view::rope_t> resolve_node(
     graph_t& graph, const N& root, std::string_view inbound_link, std::string_view subject,
-    const view_t* frame_view, mem::mem_backend_t& flat, mem::mem_backend_t& egress,
+    const view::view_t* frame_view, mem::mem_backend_t& flat, mem::mem_backend_t& egress,
     mem::mem_backend_t& retained, op_resolver_t::reverse_ref_fn_t reverse_ref_fn = nullptr,
     void* reverse_ref_ctx = nullptr, op_resolver_t::path_label_fn_t path_label_fn = nullptr,
     void* path_label_ctx = nullptr, const wire::path_ref_element_t* dst_label_target = nullptr,
@@ -1043,7 +1043,7 @@ template <class N>
     // `COMPACT` delivery already runs under, and the alternative — an addressed error on a
     // zero-length route — is precisely the garbage frame the amendment exists to stop.
     const auto reply_error = [&](status_t s) -> rope_t {
-        if (req.no_reply) return rope_t{};
+        if (req.no_reply) return view::rope_t{};
         return assemble_error_reply(route, req.dst.spans_intact() ? s : status_t::BACKPRESSURE,
                                     egress);
     };

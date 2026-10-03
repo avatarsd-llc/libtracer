@@ -22,7 +22,7 @@
 # `tools/check_config_keys.py` rides along (#1012). It is the same GENRE of check — a
 # hand-maintained doc pointer that rots silently — over a different artifact: the
 # connection-config key tables in `docs/modules/connection-config.md`, derived from the
-# `tr::net::config_reader_t` accessor calls that actually read those keys. It needs the
+# `tr::wire::config_reader_t` accessor calls that actually read those keys. It needs the
 # same two trees (`docs/**`, `core/**`), the same zero build, and the same ~0.1 s, so a
 # second workflow would only duplicate this one's checkout.
 #

@@ -67,7 +67,7 @@ void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
     vertex.register_transport_type(
         "tcp",
         [rx_backend, egress_src](const conn_settings_t& s, const wire::tlv_t* raw_config) {
-            const config_reader_t cfg(raw_config);
+            const wire::config_reader_t cfg(raw_config);
             const bool peer_named = cfg.flag("peer_named").value_or(false);
             // The bus-module refusal — the ws factory's twin; see its comment for why
             // TYPE_MISMATCH rather than TRANSPORT_DOWN (#375 deliverable 3).

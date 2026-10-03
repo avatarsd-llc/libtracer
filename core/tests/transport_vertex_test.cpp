@@ -2305,7 +2305,7 @@ void test_conn_spec_round_trips_through_the_reader() {
             for (const tr::wire::tlv_t& child : decoded->children) {
                 if (child.type == type_t::SETTINGS) config = &child;
             }
-            const tr::net::config_reader_t cfg(config);
+            const tr::wire::config_reader_t cfg(config);
             const bool ok = config != nullptr && !cfg.u8("role") && cfg.u16("port") &&
                             *cfg.u16("port") == 47000 &&
                             cfg.name("kind").value_or(std::string_view{}) == kind &&

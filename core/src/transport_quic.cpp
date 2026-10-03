@@ -266,7 +266,7 @@ std::atomic<std::uint64_t> g_insecure_refusals{0};
  *         Pair-consuming (#927). */
 [[nodiscard]] quic_private_cfg_t parse_quic_config(const wire::tlv_t* raw_config) {
     quic_private_cfg_t out;
-    const config_reader_t cfg(raw_config);
+    const wire::config_reader_t cfg(raw_config);
     if (const auto v = cfg.name("tls")) out.tls = *v;
     if (const auto v = cfg.flag("insecure")) out.insecure = *v;
     out.retired = cfg.has("ca") || cfg.has("cert") || cfg.has("key");

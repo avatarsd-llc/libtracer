@@ -466,7 +466,7 @@ tested against hand-built frames with no live transport.
   same logic serves a contiguous frame and a link-walking rope and the caller
   re-slices from its own cursor.
 - **`sink_slot_t`** (`tr::sink_slot_t` — layer-neutral since #1049, when L4 took its
-  three configuration seams into one; `tr::net::sink_slot_t` remains an alias)
+  three configuration seams into one; it has no `tr::net` spelling)
   holds each of the router's five observability/terminus sinks —
   reply, inbound-FWD, raw-frame, compact-delivery, stale-label. A sink is a
   `{function pointer, context}` pair set from a control thread and read on every

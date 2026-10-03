@@ -2,7 +2,7 @@
  * @file
  * @brief #927 / #985 — `tr::wire::config_reader_t`: the PAIR-CONSUMING SETTINGS walk
  *        every transport config parser AND both L4 readers (the creation SPEC, the
- *        SUBSCRIBER QoS SETTINGS) share. `tr::net::config_reader_t` is its alias.
+ *        SUBSCRIBER QoS SETTINGS) share, under that one name (#1724).
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -42,7 +42,6 @@
 #include <optional>
 #include <span>
 #include <string_view>
-#include <type_traits>
 #include <vector>
 
 #include "libtracer/byteorder.hpp"
@@ -51,14 +50,6 @@
 #include "test_support.hpp"
 
 namespace {
-
-/*
- * The canonical home is tr::wire (#985); the transport plane's historical spelling
- * must stay a literal alias of it — one type, not two lookalikes. Compile-time so a
- * re-fork of the type cannot pass the suite.
- */
-static_assert(std::is_same_v<tr::net::config_reader_t, tr::wire::config_reader_t>,
-              "tr::net::config_reader_t must alias the tr::wire type (#985)");
 
 using tr::wire::config_reader_t;
 using tr::wire::opt_t;

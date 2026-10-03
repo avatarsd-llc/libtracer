@@ -16,11 +16,10 @@
  * (dependencies point up the layers only). Before the hoist those two carried the
  * pair-consuming RULE (#927) as hand-written copies with a comment pointing here, which is
  * exactly the duplication that let #927 survive in six places and then in a seventh. The
- * `tr::net::config_reader_t` spelling remains as an alias so the transport call sites and
- * the public API did not move. `graph::parse_acl` still carries its own walk on purpose,
- * as of #906, under the OPPOSITE unknown-key ruling (reject, not ignore): same mechanics,
- * different disposition, because an ACL is a security document and a connection config is
- * not (#995: security readers reject duplicates; plain NAME-field readers are
+ * transport plane names it `wire::config_reader_t`; it has no second spelling. `graph::parse_acl`
+ * still carries its own walk on purpose, as of #906, under the OPPOSITE unknown-key ruling (reject,
+ * not ignore): same mechanics, different disposition, because an ACL is a security document and a
+ * connection config is not (#995: security readers reject duplicates; plain NAME-field readers are
  * pair-consuming + last-wins).
  */
 #pragma once
@@ -35,8 +34,7 @@
 
 /**
  * @file
- * @brief The pair-consuming NAME-key / typed-value walk: `wire::config_reader_t`
- *        (aliased as `tr::net::config_reader_t` for the transport plane).
+ * @brief The pair-consuming NAME-key / typed-value walk: `wire::config_reader_t`.
  */
 
 namespace tr::wire {
@@ -211,16 +209,3 @@ class config_reader_t {
 };
 
 }  // namespace tr::wire
-
-namespace tr::net {
-
-/**
- * @brief The transport plane's historical spelling of @ref tr::wire::config_reader_t.
- *
- * The type moved down to `tr::wire` (#985) so the L4 readers of the same grammar could
- * share it without depending on the transport plane; the six transport-side call sites
- * and the public API keep this name.
- */
-using config_reader_t = wire::config_reader_t;
-
-}  // namespace tr::net
