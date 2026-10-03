@@ -79,10 +79,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   unread bytes stay in the socket and TCP flow control holds the peer, so nothing is dropped. The
   link adds no timer and reads no clock: it installs one FreeRTOS idle hook per core, once per
   process. A link whose peers leave the core idle now and then never waits. New
-  `stats_t::rx_drain_waits` counts the waits. The wait also ends when the link posts egress work
-  to the httpd task (a queued send or a close): the parked drain reads one more frame so the
-  server loop can run that item, then parks again, so a push from a producer task is never held
-  behind a park. New `stats_t::tx_send_failed` (also summed into `drop_stats().dropped_tx`)
+  `stats_t::rx_drain_waits` counts the waits. A send queued from another task while the drain is
+  parked is sent from inside the park, on the httpd task, and the park goes on: a push from a
+  producer task is never held behind it, and a peer that provokes a send per frame buys no
+  ingress with it. New `stats_t::tx_send_failed` (also summed into `drop_stats().dropped_tx`)
   counts frames the socket write itself refused, which until now left only a WARN line.
   **Observable:** under a sustained inbound flood the
   httpd task, and every session on it, now pauses each budget until the core idles, which

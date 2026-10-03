@@ -1393,6 +1393,9 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     void refuse_upgraded(int fd);
     static void on_session_closed(void* slot_ctx);  // free_ctx_fn: a peer departed
     static void tx_work(void* work_arg);            // httpd_queue_work fn: one queued send
+    /** @brief Send one posted item on the httpd task: @ref tx_work's body, also run by a
+     *         drain parked inside @ref pace_rx, which leaves the slot to the loop's copy. */
+    static void send_posted(tx_work_t* work, bool release_slot);
     /** @brief Write a RETAINED item's frame (RFC-0028 §6.9): its slot bytes, then its value's
      *         links, each through the session's send override inside @ref tx_work's bracket. */
     static esp_err_t send_retained(httpd_handle_t handle, int fd, const tx_work_t& work);
@@ -1415,18 +1418,24 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * (ping, close) included: each costs the same handler pass. A drain belongs to the core
      * it started on; a task that migrated starts a new one (see ADR-0085, dual core).
      *
-     * The wait also ends when this link has egress work pending on the httpd task
-     * (@ref egress_pending_): the task that is parked is the one that runs the link's
-     * queued sends and closes, so holding it would hold them. Such a wake reads one frame,
-     * lets the handler return so the control socket drains, and parks again; the budget
-     * is not reset, so no second budget is read without the core idling.
+     * The wait is also where this link's queued sends go out while it lasts. The parked
+     * task is the httpd task, the one that runs them, so a send posted by another task
+     * (@ref egress_pending_) is sent from inside the wait (@ref send_posted_in_park) and
+     * the wait goes on: egress wakes the park, ingress waits for idle, and no peer can buy
+     * ingress by provoking egress. The frame is not read before the core idles.
      */
     void pace_rx(std::size_t frame_bytes);
-    /** @brief One egress item was posted to the httpd task: count it and wake a drain parked
-     *         for idle (any task; the producer's side of the idle-gate handshake). */
+    /** @brief Wake a drain parked for idle so it sends the item just posted (any task; the
+     *         producer's side of the idle-gate handshake, after the count and the mark). */
     void egress_posted() noexcept;
-    /** @brief One posted egress item has started running on the httpd task. */
+    /** @brief One posted egress item has been sent (or refused before any sender took it). */
     void egress_drained() noexcept;
+    /**
+     * @brief Send every item posted to the httpd task from inside a parked drain
+     *        (httpd task only, inside @ref pace_rx's wait).
+     * @return Whether anything was sent.
+     */
+    bool send_posted_in_park();
     /**
      * @brief Turn @p fd into a peer slot: enforce `max_peers`, take a free or fresh slot,
      *        name it, stamp its identity and its authentication state (httpd task only;
@@ -2178,11 +2187,12 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     /** @brief Payload bytes consumed in the current drain (see @ref pace_rx). */
     std::size_t rx_drain_bytes_ = 0;
     /**
-     * @brief Egress items this link posted to the httpd task that have not run yet: sends
-     *        (@ref tx_work) and closes (@ref close_work). Raised by any task after a
-     *        successful `httpd_queue_work`, lowered by the item as it starts. Non-zero means
-     *        a drain must not park for idle (see @ref pace_rx). `seq_cst` on both sides: it
-     *        is one half of the idle-gate handshake.
+     * @brief Sends this link posted to the httpd task that have not been sent yet. Raised
+     *        by the posting task before it marks the item (see `tx_work_t::state`), lowered
+     *        by whichever sender sends it, the loop's copy (@ref tx_work) or a parked drain
+     *        (@ref send_posted_in_park), or by the poster when the enqueue was refused
+     *        untouched. Non-zero tells a parked drain there is egress to run. `seq_cst` on
+     *        both sides: it is one half of the idle-gate handshake.
      */
     std::atomic<std::uint32_t> egress_pending_{0};
     /** @brief Once-allocated TX work-slot pool: claimed lock-free by sending tasks,
