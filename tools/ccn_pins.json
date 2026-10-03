@@ -49,12 +49,6 @@
       ],
       "file": "core/src/graph.cpp"
     },
-    "tr::graph::parse_acl": {
-      "ccn": [
-        33
-      ],
-      "file": "core/include/libtracer/security_acl.hpp"
-    },
     "tr::graph::parse_branch_node": {
       "ccn": [
         23
