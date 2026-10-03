@@ -162,6 +162,7 @@ body[data-theme="dark"] .ph-hist, :root[data-theme="dark"] .ph-hist {
    instrument changed, and points either side are not comparable. */
 .ph-hist .ph-instr { stroke: var(--ph-instr); stroke-width: 1.2; stroke-dasharray: 1 3; }
 .ph-hist .ph-instrlab { fill: var(--ph-instr); font-family: var(--ph-mono); font-size: 11px; }
+.ph-hist .ph-step { stroke: var(--ph-ink); stroke-width: 1; stroke-linejoin: round; }
 
 /* sweep view: commit recency ramp */
 .ph-hist .ph-swold { stroke: var(--ph-sweep); stroke-width: 1.3; }
