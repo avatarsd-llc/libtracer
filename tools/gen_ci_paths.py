@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
-"""Derive core-ci.yml's ``paths:`` trigger from what core-ci actually builds.
+"""Derive core-ci.yml's ``CORE_CI_PATHS`` job gate from what core-ci actually builds.
 
 ``core-ci`` is the one workflow that owns the whole host ``ctest`` suite, and its
 trigger was a HAND-WRITTEN allowlist: ``core/**``, ``bench/**``,
@@ -29,12 +29,24 @@ that reaches outside ``core/``. So the list is DERIVED instead:
 The workflow file itself is appended -- it is an input to its own runs and no
 configure can report it.
 
-Why this cannot silently rot: making a ctest target compile or read a new tree means
-editing a ``CMakeLists.txt`` under ``core/``, and ``core/**`` is a root, so core-ci
-fires and this check runs. The derived list can go stale only in a run that is
-already gated on it.
+Where the list lives (#1614). It was core-ci's ``on: paths:`` trigger filter. That
+made the required check ``build-test`` path-filtered: a diff outside the list (any
+docs-only pull request) never queued core-ci at all, so the check never REPORTED
+and the pull request stayed blocked on a result that could not arrive. core-ci now
+triggers on every change; its ``changes`` job matches the diff against this list,
+held as the ``CORE_CI_PATHS: |`` block scalar in that job's ``env:``, and every
+build job runs only when something matched. The ``build-test`` aggregator then
+reports on every pull request: green when the jobs ran and passed, green when they
+were legitimately skipped, red otherwise. Because both halves -- "run" and "skip" --
+come from this ONE derived list, they are exhaustive and disjoint by construction;
+there is no hand-written complement to drift.
 
-Scope: this derives ONE workflow's trigger, core-ci.yml. The four other workflows
+Why this cannot silently rot: making a ctest target compile or read a new tree means
+editing a ``CMakeLists.txt`` under ``core/``, and ``core/**`` is a root, so
+core-ci's jobs run and this check runs with them. The derived list can go stale
+only in a run that is already gated on it.
+
+Scope: this derives ONE workflow's gate, core-ci.yml. The four other workflows
 that build or run ctest were audited for the same hole while fixing #1082; the
 result is recorded here so the audit is not repeated. None of them is the gate for
 the host suites, and none is changed by this script.
@@ -67,7 +79,7 @@ the host suites, and none is changed by this script.
 Usage::
 
     python3 tools/gen_ci_paths.py --check   # exit 1 if the committed list drifted
-    python3 tools/gen_ci_paths.py --apply   # rewrite the paths: blocks in place
+    python3 tools/gen_ci_paths.py --apply   # rewrite the CORE_CI_PATHS block in place
     python3 tools/gen_ci_paths.py           # print the derived list, change nothing
 
 Requires ``cmake`` and a working C++ compiler: the derivation is a real configure of
@@ -120,66 +132,47 @@ def source_roots(text: str) -> set[str]:
     return roots
 
 
-def _clean_item(value: str) -> str:
-    """@brief Strip a trailing YAML comment and surrounding quotes from a list item."""
-    value = value.strip()
-    if value and value[0] in "\"'":
-        quote = value[0]
-        end = value.find(quote, 1)
-        if end != -1:
-            return value[1:end]
-    return value.split("#", 1)[0].strip()
+KEY = "CORE_CI_PATHS"
 
 
-def _split_flow(rest: str) -> list[str]:
-    """@brief Items of an inline ``paths: ["a", "b"]`` flow sequence."""
-    inner = rest.strip()[1:-1] if rest.strip().endswith("]") else rest.strip()[1:]
-    return [_clean_item(part) for part in inner.split(",") if _clean_item(part)]
+def pattern_blocks(lines: list[str]) -> list[tuple[int, int, str, list[str]]]:
+    """@brief Locate every ``CORE_CI_PATHS: |`` block scalar in the workflow.
 
-
-def paths_blocks(lines: list[str]) -> list[tuple[int, int, str, list[str]]]:
-    """@brief Locate every ``paths:`` list under ``on:``.
+    The list is not a trigger filter any more (#1614): core-ci triggers on every
+    change, and its ``changes`` job reads this block to decide whether the heavy jobs
+    run. One pattern per line, no quotes.
 
     Returns ``(start, end, indent, patterns)`` per block, where ``[start, end)`` is
-    the line span to replace -- generated comment lines immediately above the
-    ``paths:`` key are folded into the span so repeated ``--apply`` runs do not stack
-    them up.
+    the line span to replace -- generated comment lines immediately above the key are
+    folded into the span so repeated ``--apply`` runs do not stack them up.
     """
     out: list[tuple[int, int, str, list[str]]] = []
-    in_on = False
     for i, line in enumerate(lines):
-        if not line[:1].isspace() and line.strip():
-            in_on = line.startswith("on:")
-            continue
-        if not in_on:
-            continue
-        m = re.match(r"^(?P<indent>\s*)paths:(?P<rest>.*)$", line)
+        m = re.match(rf"^(?P<indent>\s*){KEY}:\s*\|\s*$", line)
         if not m:
             continue
-        indent, rest = m.group("indent"), m.group("rest").strip()
+        indent = m.group("indent")
         start = i
         while start > 0 and lines[start - 1].lstrip().startswith("#") \
                 and MARKER in lines[start - 1]:
             start -= 1
-        if rest.startswith("["):
-            out.append((start, i + 1, indent, _split_flow(rest)))
-            continue
         j, items = i + 1, []
         while j < len(lines):
-            item = re.match(r"^(?P<pad>\s*)-\s*(?P<val>.+?)\s*$", lines[j])
-            if not item or len(item.group("pad")) <= len(indent):
+            body = lines[j]
+            pad = len(body) - len(body.lstrip())
+            if not body.strip() or pad <= len(indent):
                 break
-            items.append(_clean_item(item.group("val")))
+            items.append(body.strip())
             j += 1
         out.append((start, j, indent, items))
     return out
 
 
 def render(indent: str, patterns: list[str]) -> list[str]:
-    """@brief The generated replacement lines for one ``paths:`` block."""
+    """@brief The generated replacement lines for one ``CORE_CI_PATHS`` block."""
     lines = [indent + note for note in GENERATED_NOTE]
-    lines.append(indent + "paths:")
-    lines.extend(f'{indent}  - "{p}"' for p in patterns)
+    lines.append(f"{indent}{KEY}: |")
+    lines.extend(f"{indent}  {p}" for p in patterns)
     return lines
 
 
@@ -253,7 +246,7 @@ def referenced_paths(build_dir: pathlib.Path) -> set[pathlib.Path]:
             p = p.resolve()
         except OSError:
             continue
-        # A reference that resolves to nothing on disk is not an input a `paths:` filter
+        # A reference that resolves to nothing on disk is not an input a path pattern
         # could ever match, so it is dropped rather than turned into a dead pattern.
         if ROOT not in p.parents or not p.exists():
             continue
@@ -282,7 +275,7 @@ def minimal_patterns(roots: set[str], refs: set[pathlib.Path]) -> list[str]:
 
 
 def derive() -> list[str]:
-    """@brief The full derived ``paths:`` list, workflow self-reference last."""
+    """@brief The full derived pattern list, workflow self-reference last."""
     text = WORKFLOW.read_text("utf-8")
     with tempfile.TemporaryDirectory(prefix="libtracer-ci-paths-") as tmp:
         build_dir = pathlib.Path(tmp) / "build"
@@ -299,9 +292,9 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--check", action="store_true",
-                      help="fail if the committed paths: list is not the derived one")
+                      help=f"fail if the committed {KEY} list is not the derived one")
     mode.add_argument("--apply", action="store_true",
-                      help="rewrite the paths: blocks with the derived list")
+                      help=f"rewrite the {KEY} block with the derived list")
     args = ap.parse_args()
 
     if not WORKFLOW.is_file():
@@ -310,17 +303,17 @@ def main() -> int:
 
     expected = derive()
     lines = WORKFLOW.read_text("utf-8").splitlines()
-    blocks = paths_blocks(lines)
+    blocks = pattern_blocks(lines)
     if not blocks:
-        print(f"error: no paths: list found under `on:` in {WORKFLOW_REL} — the "
-              "trigger shape changed; update tools/gen_ci_paths.py", file=sys.stderr)
+        print(f"error: no `{KEY}: |` block found in {WORKFLOW_REL} — the "
+              "workflow shape changed; update tools/gen_ci_paths.py", file=sys.stderr)
         return 2
 
     if args.apply:
         for start, end, indent, _ in reversed(blocks):
             lines[start:end] = render(indent, expected)
         WORKFLOW.write_text("\n".join(lines) + "\n", "utf-8")
-        print(f"applied: {len(blocks)} paths: block(s) in {WORKFLOW_REL} "
+        print(f"applied: {len(blocks)} {KEY} block(s) in {WORKFLOW_REL} "
               f"set to {len(expected)} derived pattern(s).")
         return 0
 
@@ -337,11 +330,11 @@ def main() -> int:
             continue
         ok = False
         for p in missing:
-            print(f"ERROR: {WORKFLOW_REL} paths: is MISSING {p!r} — core-ci does not "
-                  "run for a pull request confined to it, yet its jobs build from it.",
+            print(f"ERROR: {WORKFLOW_REL} {KEY} is MISSING {p!r} — core-ci skips its "
+                  "jobs for a pull request confined to it, yet its jobs build from it.",
                   file=sys.stderr)
         for p in extra:
-            print(f"ERROR: {WORKFLOW_REL} paths: carries {p!r}, which nothing core-ci "
+            print(f"ERROR: {WORKFLOW_REL} {KEY} carries {p!r}, which nothing core-ci "
                   "builds refers to (or a broader pattern already covers it).",
                   file=sys.stderr)
     if not ok:
@@ -349,7 +342,7 @@ def main() -> int:
               file=sys.stderr)
         return 1
 
-    print(f"ok: {WORKFLOW_REL} triggers on all {len(expected)} derived path(s) "
+    print(f"ok: {WORKFLOW_REL} gates its jobs on all {len(expected)} derived path(s) "
           f"({len(blocks)} block(s) checked).")
     return 0
 

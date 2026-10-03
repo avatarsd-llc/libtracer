@@ -24,15 +24,14 @@
 # looks, because of the next paragraph.
 #
 # WHY IT IS DELIBERATELY NOT "the required checks are green". The default branch
-# ruleset requires `build`, `build-test` and `check`. Eight workflows in this
-# repository define a job by one of those three names, and the two that define
-# `build-test` -- core-ci.yml and ts.yml -- are BOTH path-filtered. A docs-only
-# diff matches neither, so `build-test` is never queued, never reports, and is
-# therefore never "green". Gating the label on required checks would leave every
-# documentation PR unreviewable forever, which is exactly the class of trap that
-# already blocks those PRs from MERGING (see the issue linked in the label's own
-# description). The merge gate is the ruleset's business; the review gate should
-# not inherit its defect.
+# ruleset requires checks by NAME, and a required check from a path-filtered
+# workflow is never queued on a diff outside its paths, so it never reports and is
+# never "green". `build-test` was exactly that until #1614 (core-ci now always
+# reports it through an aggregator job), and other required names can still be
+# served only by path-filtered workflows. Gating the label on required checks would
+# leave such PRs unreviewable forever -- the same trap that blocks them from
+# MERGING. The merge gate is the ruleset's business; the review gate should not
+# inherit its defects.
 #
 # So SUCCESS, SKIPPED and NEUTRAL all count as "not red". A path-filtered job
 # that reported SKIPPED has said its piece.
