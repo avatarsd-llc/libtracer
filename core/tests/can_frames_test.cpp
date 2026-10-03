@@ -8,7 +8,7 @@
  * Host-testable, no SocketCAN, no
  * real socket. Asserts:
  *   - the 29-bit structured CAN-ID codec against an explicit bit-layout vector,
- *   - header-elided view_can_frames split + reassembly (classic 8B + CAN-FD 64B),
+ *   - header-elided can_framing split + reassembly (classic 8B + CAN-FD 64B),
  *   - can_reassembly out-of-order + missing-interior + totality handling,
  *   - the in-band advertise frame codec (explicit bytes, round-trip, need-more).
  */
@@ -20,19 +20,28 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <vector>
 
 #include "libtracer/can.hpp"
+#include "libtracer/can_framing.hpp"
 #include "libtracer/can_reassembly.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/view.hpp"
-#include "libtracer/view_can.hpp"
+#include "libtracer/view_can.hpp"  // the one-release alias header (#1725)
 #include "test_support.hpp"
 
 namespace {
 
 using tr::testing::check;
+
+// #1725: the old `tr::view` spellings must name the very same entities as the net-plane
+// framing for the alias window, not copies of them.
+static_assert(std::is_same_v<tr::view::can_frame_mode_t, tr::net::can::can_frame_mode_t>);
+static_assert(tr::view::kCanClassicMaxData == tr::net::can::kCanClassicMaxData);
+static_assert(tr::view::kCanFdMaxData == tr::net::can::kCanFdMaxData);
+static_assert(tr::view::can_max_data(tr::view::can_frame_mode_t::FD) == 64);
 
 std::vector<std::byte> bytes_of(std::initializer_list<std::uint8_t> vals) {
     std::vector<std::byte> v;
@@ -65,10 +74,10 @@ std::vector<std::byte> rope_bytes(const tr::view::rope_t& r) {
  * path (the real far side is `tr::net::can_reassembly_t`, exercised in section 3), so it
  * lives here as the two-line test convenience it always was rather than as a shipped API.
  */
-tr::view::rope_t can_rope(const tr::view::view_t& payload, tr::view::can_frame_mode_t mode) {
+tr::view::rope_t can_rope(const tr::view::view_t& payload, tr::net::can::can_frame_mode_t mode) {
     tr::view::rope_t r;
-    const std::size_t n = tr::view::can_frame_count(payload, mode);
-    for (std::size_t i = 0; i < n; ++i) r.append(tr::view::can_frame_at(payload, mode, i));
+    const std::size_t n = tr::net::can::can_frame_count(payload, mode);
+    for (std::size_t i = 0; i < n; ++i) r.append(tr::net::can::can_frame_at(payload, mode, i));
     return r;
 }
 
@@ -112,11 +121,11 @@ int main() {
               "slice_can_id overflowing the endpoint field returns nullopt");
     }
 
-    // --- 2. view_can framing: header-elided split + zero-copy reassembly. ---
+    // --- 2. can_framing: header-elided split + zero-copy reassembly. ---
     {
-        using tr::view::can_frame_at;
-        using tr::view::can_frame_count;
-        using tr::view::can_frame_mode_t;
+        using tr::net::can::can_frame_at;
+        using tr::net::can::can_frame_count;
+        using tr::net::can::can_frame_mode_t;
 
         // Zero frames for an empty payload — the boundary the count's ceiling division owns.
         check(can_frame_count(tr::view::view_t{}, can_frame_mode_t::CLASSIC) == 0,
@@ -155,13 +164,13 @@ int main() {
                   "  multi CAN-FD frame round-trips");
         }
         // CAN-FD DLC lattice helper.
-        check(tr::view::can_fd_dlc_round_up(36) == 48, "can_fd_dlc_round_up(36) == 48");
-        check(tr::view::can_fd_dlc_round_up(8) == 8, "can_fd_dlc_round_up(8) == 8");
+        check(tr::net::can::can_fd_dlc_round_up(36) == 48, "can_fd_dlc_round_up(36) == 48");
+        check(tr::net::can::can_fd_dlc_round_up(8) == 8, "can_fd_dlc_round_up(8) == 8");
     }
 
     // --- 3. can_reassembly: out-of-order, missing-interior, totality. ---
     {
-        using tr::view::can_frame_mode_t;
+        using tr::net::can::can_frame_mode_t;
         tr::net::reassembly_key_t key;
         key.origin = {1, 2, 3};  // rest zero
         key.ts = 0xCAFE;
@@ -170,7 +179,7 @@ int main() {
         const auto pv = view_over(payload);
         // The windows are derived per call now (#932); this binds the two fixed arguments.
         const auto slice = [&](std::size_t i) {
-            return tr::view::can_frame_at(pv, can_frame_mode_t::CLASSIC, i);
+            return tr::net::can::can_frame_at(pv, can_frame_mode_t::CLASSIC, i);
         };
 
         // Feed slices OUT OF ORDER: 2, 0, 1.
@@ -204,12 +213,12 @@ int main() {
 
     // --- 3b. can_reassembly bounding: evict-oldest + dropped_groups counter. ---
     {
-        using tr::view::can_frame_mode_t;
+        using tr::net::can::can_frame_mode_t;
         const std::vector<std::byte> payload = ramp(20);
         const auto pv = view_over(payload);
         // The windows are derived per call now (#932); this binds the two fixed arguments.
         const auto slice = [&](std::size_t i) {
-            return tr::view::can_frame_at(pv, can_frame_mode_t::CLASSIC, i);
+            return tr::net::can::can_frame_at(pv, can_frame_mode_t::CLASSIC, i);
         };
         const auto key_ts = [](std::uint64_t ts) {
             tr::net::reassembly_key_t k;
@@ -236,12 +245,12 @@ int main() {
     // without this the group's slices are pinned for the process's life. The buffer
     // holds NO clock — the caller stamps it, so this is fully deterministic.
     {
-        using tr::view::can_frame_mode_t;
+        using tr::net::can::can_frame_mode_t;
         const std::vector<std::byte> payload = ramp(20);
         const auto pv = view_over(payload);
         // The windows are derived per call now (#932); this binds the two fixed arguments.
         const auto slice = [&](std::size_t i) {
-            return tr::view::can_frame_at(pv, can_frame_mode_t::CLASSIC, i);
+            return tr::net::can::can_frame_at(pv, can_frame_mode_t::CLASSIC, i);
         };
         const auto key_ts = [](std::uint64_t ts) {
             tr::net::reassembly_key_t k;

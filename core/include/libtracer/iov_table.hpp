@@ -66,7 +66,7 @@ inline constexpr std::size_t kMaxInlineIov = 16;
  * This closes the gather tables of the three socket transports named above. It is not the
  * whole forward path: `transport_can` overrides only `send(span)`, so a forward reaching it
  * lands on the base `transport_t::send(iov)` gather and then on
- * `tr::view::can_frame_at` (`%view_can.hpp`). That window table used to grow with
+ * `tr::net::can::can_frame_at` (`%can_framing.hpp`). That window table used to grow with
  * a THROWING `push_back`; #1110 closed it by DELETING the table — the windows are derivable
  * from the payload length and the mode, so the framing now allocates nothing and cannot
  * fail (#932 finished the job, replacing the leftover wrapper class with free functions).

@@ -56,9 +56,9 @@
 #include <utility>
 #include <vector>
 
+#include "libtracer/can_framing.hpp"
 #include "libtracer/peer_handle.hpp"
 #include "libtracer/transport_can.hpp"
-#include "libtracer/view_can.hpp"
 
 namespace {
 
@@ -277,7 +277,7 @@ std::unique_ptr<tr::net::transport_can> make_node(fake_bus_t& bus, std::uint16_t
                                                   std::string path) {
     tr::net::transport_can_config_t cfg;
     cfg.node = node;
-    cfg.mode = tr::view::can_frame_mode_t::CLASSIC;
+    cfg.mode = tr::net::can::can_frame_mode_t::CLASSIC;
     cfg.path = std::move(path);
     return std::make_unique<tr::net::transport_can>(std::make_unique<fake_link_t>(bus), cfg);
 }

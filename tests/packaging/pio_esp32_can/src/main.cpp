@@ -65,7 +65,7 @@ void build_can_stack() {
     // TWAI is classic-only, so the transport above it must be CLASSIC framing.
     tr::net::transport_can_config_t can_cfg{};
     can_cfg.node = 1;
-    can_cfg.mode = tr::view::can_frame_mode_t::CLASSIC;
+    can_cfg.mode = tr::net::can::can_frame_mode_t::CLASSIC;
     tr::net::transport_can can{std::move(link), can_cfg};
 
     // The ADR-0027 catalog entry a deployed node registers.

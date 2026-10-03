@@ -280,7 +280,7 @@ bool twai_link_t::on_rx_done_isr(twai_node_handle_t node, const twai_rx_done_eve
 
     // Copy the frame out of the driver inside the ISR window (required by the
     // node API), then queue it for the dispatch thread — no user code here.
-    std::uint8_t buf[tr::view::kCanClassicMaxData] = {};
+    std::uint8_t buf[tr::net::can::kCanClassicMaxData] = {};
     twai_frame_t rx = {};
     rx.buffer = buf;
     rx.buffer_len = sizeof(buf);

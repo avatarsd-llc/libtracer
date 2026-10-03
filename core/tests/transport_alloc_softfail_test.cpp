@@ -92,6 +92,7 @@
 #include <vector>
 
 #include "libtracer/can.hpp"
+#include "libtracer/can_framing.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/graph.hpp"
 #include "libtracer/iov_table.hpp"
@@ -103,7 +104,6 @@
 #include "libtracer/transport_udp.hpp"
 #include "libtracer/transport_ws.hpp"
 #include "libtracer/view.hpp"
-#include "libtracer/view_can.hpp"
 #include "libtracer/ws.hpp"
 #include "test_support.hpp"
 
@@ -1245,7 +1245,7 @@ void test_can_send_advertise_allocates_nothing() {
     // very allocation being counted.
     std::optional<tr::view::view_t> owned;
     const std::size_t budget = count_allocs([&] { owned = tr::view::over_bytes(payload); });
-    check(owned.has_value() && tr::view::can_frame_count(*owned, cfg.mode) == 3,
+    check(owned.has_value() && tr::net::can::can_frame_count(*owned, cfg.mode) == 3,
           "the budget's one step ran, over a 3-window payload");
 
     // #1110/#932 — the framing itself allocates NOTHING, asserted directly. The derived
@@ -1262,15 +1262,15 @@ void test_can_send_advertise_allocates_nothing() {
     std::size_t wide_count = 0;
     std::size_t wide_bytes = 0;
     const std::size_t split_allocs = count_allocs([&] {
-        wide_count = tr::view::can_frame_count(*wide_owned, cfg.mode);
+        wide_count = tr::net::can::can_frame_count(*wide_owned, cfg.mode);
         for (std::size_t i = 0; i < wide_count; ++i)
-            wide_bytes += tr::view::can_frame_at(*wide_owned, cfg.mode, i).length;
+            wide_bytes += tr::net::can::can_frame_at(*wide_owned, cfg.mode, i).length;
     });
     check(split_allocs == 0, "the CAN framing allocates NOTHING, at any frame count");
     check(wide_count == 512, "  ...and still derives all 512 CLASSIC windows");
     check(wide_bytes == wide_payload.size(), "  ...which tile the payload exactly, no gaps");
-    check(tr::view::can_frame_at(*wide_owned, cfg.mode, 511).length == 8 &&
-              tr::view::can_frame_at(*wide_owned, cfg.mode, 0).length == 8,
+    check(tr::net::can::can_frame_at(*wide_owned, cfg.mode, 511).length == 8 &&
+              tr::net::can::can_frame_at(*wide_owned, cfg.mode, 0).length == 8,
           "  ...whose first and last windows are the right size");
 
     raw->reset();  // forget the join hello — measure one send

@@ -3,7 +3,7 @@
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
  * transport_can (increment 2 of #55) — the SocketCAN binding that drives the
- * pure framing layer (can.hpp / view_can.hpp / can_reassembly.hpp) over a
+ * pure framing layer (can.hpp / can_framing.hpp / can_reassembly.hpp) over a
  * real Linux CAN bus. It is a `tr::net::transport_t`: a bridge hands it a complete
  * libtracer frame via send(), the transport address-shift-fragments that frame
  * across CAN data fields (header-elided — the 29-bit CAN ID is the path, ADR-0022),
@@ -43,9 +43,12 @@
 #include <vector>
 
 #include "libtracer/can.hpp"
+#include "libtracer/can_framing.hpp"
 #include "libtracer/can_reassembly.hpp"
 #include "libtracer/transport.hpp"
 #include "libtracer/transport_factory.hpp"
+// The one-release alias window (#1725): code that reached the old `tr::view::can_*` names
+// through this header keeps compiling. Removed with view_can.hpp in the next release.
 #include "libtracer/view_can.hpp"
 
 /**
@@ -110,7 +113,7 @@ struct can_frame_data_t {
     std::uint32_t id = 0; /**< @brief The 29-bit extended CAN identifier. */
     bool fd = false;      /**< @brief True ⇒ a CAN-FD frame; false ⇒ classic CAN 2.0. */
     std::uint8_t len = 0; /**< @brief Data-field length on the wire (post-DLC-pad for FD). */
-    std::array<std::byte, tr::view::kCanFdMaxData>
+    std::array<std::byte, tr::net::can::kCanFdMaxData>
         data{}; /**< @brief The data field; only the first @ref len bytes are live. */
 
     /** @brief The live data-field bytes as a read-only span. */
@@ -123,15 +126,15 @@ struct can_frame_data_t {
  * @brief The largest data field a frame of this mode may declare, as a @ref
  *        can_frame_data_t::len.
  *
- * The widths themselves are the L1 framing layer's (@ref tr::view::can_max_data —
+ * The widths themselves are the framing layer's (@ref tr::net::can::can_max_data —
  * 8 classic, 64 FD, facts of the wire rather than chosen bounds). This is only the
  * seam's adapter to them: the carrier spells its mode as a `bool` and its length as
  * a `std::uint8_t`, so the bound arrives in the same width as the field it bounds and
  * no second copy of the numbers lives here.
  */
 [[nodiscard]] constexpr std::uint8_t can_max_len(bool fd) noexcept {
-    return static_cast<std::uint8_t>(tr::view::can_max_data(
-        fd ? tr::view::can_frame_mode_t::FD : tr::view::can_frame_mode_t::CLASSIC));
+    return static_cast<std::uint8_t>(tr::net::can::can_max_data(
+        fd ? tr::net::can::can_frame_mode_t::FD : tr::net::can::can_frame_mode_t::CLASSIC));
 }
 
 /**
@@ -317,8 +320,9 @@ class socketcan_link_t : public can_link_t {
 struct transport_can_config_t {
     std::uint8_t version = 0; /**< @brief Protocol-version prefix (discovery-layer versioning). */
     std::uint16_t node = 0;   /**< @brief This node's id (the CAN-ID `node` band). */
-    tr::view::can_frame_mode_t mode =
-        tr::view::can_frame_mode_t::CLASSIC; /**< @brief Classic (≤8B) or CAN-FD (≤64B) framing. */
+    tr::net::can::can_frame_mode_t mode =
+        tr::net::can::can_frame_mode_t::CLASSIC; /**< @brief Classic (≤8B) or CAN-FD (≤64B) framing.
+                                                  */
     std::string path; /**< @brief The path advertised for this node's groups. */
     std::chrono::milliseconds peer_ttl =
         kCanDefaultPeerTtl; /**< @brief Peer liveness window (ADR-0044): a peer silent
@@ -371,7 +375,7 @@ struct transport_can_config_t {
  * @brief A `transport_t` over Linux SocketCAN — header-elided, self-establishing.
  *
  * Wires the increment-1 framing to a live bus. **Egress** (@ref send): the frame
- * is address-shift-fragmented by @ref tr::view::can_frame_at into CAN data
+ * is address-shift-fragmented by @ref tr::net::can::can_frame_at into CAN data
  * fields, an in-band @ref tr::net::can::advertise_t manifest (carrying the slice
  * count and exact total length) is emitted on the control ID, then the lean
  * id-matched data frames follow — CAN-FD windows DLC-padded up to a legal size.
