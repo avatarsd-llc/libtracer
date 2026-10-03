@@ -1743,6 +1743,13 @@ if(LIBTRACER_NET_PLANE)
     target_link_libraries(fwd_flatten_backend_test PRIVATE libtracer)
     libtracer_test_warnings(fwd_flatten_backend_test)
     add_test(NAME fwd_flatten_backend COMMAND fwd_flatten_backend_test)
+
+    # #1648 review: the in-place ingress reads (observer, bus-name rejection) spill a deep walk
+    # into the receiving link's own source, never the process heap (receiver pays).
+    add_executable(fwd_ingress_walk_source_test fwd_ingress_walk_source_test.cpp)
+    target_link_libraries(fwd_ingress_walk_source_test PRIVATE libtracer)
+    libtracer_test_warnings(fwd_ingress_walk_source_test)
+    add_test(NAME fwd_ingress_walk_source COMMAND fwd_ingress_walk_source_test)
 endif()
 
 if(LIBTRACER_NET_PLANE)
