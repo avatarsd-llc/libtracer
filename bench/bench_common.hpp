@@ -18,7 +18,12 @@
 #include <cstdint>
 #include <cstdio>
 #include <numeric>
+#include <thread>
 #include <vector>
+
+#if defined(__linux__)
+#include <sched.h>
+#endif
 
 namespace bench {
 
@@ -28,6 +33,25 @@ using Clock = std::chrono::steady_clock;
     return static_cast<std::uint64_t>(
         std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now().time_since_epoch())
             .count());
+}
+
+/**
+ * @brief CPUs this process may run on: its affinity mask, not the host's CPU count.
+ *
+ * A multi-threaded row sized from `hardware_concurrency()` puts its threads on however few
+ * CPUs the bench is pinned to. They then queue behind each other, and the run reads as
+ * CONTENDED (own-cgroup pressure) instead of measuring contention between real cores.
+ */
+[[nodiscard]] inline std::size_t usable_cpus() {
+#if defined(__linux__)
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    if (sched_getaffinity(0, sizeof(set), &set) == 0) {
+        const int n = CPU_COUNT(&set);
+        if (n > 0) return static_cast<std::size_t>(n);
+    }
+#endif
+    return std::max<std::size_t>(1, std::thread::hardware_concurrency());
 }
 
 /**
