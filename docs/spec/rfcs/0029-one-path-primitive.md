@@ -836,6 +836,8 @@ Per [GOVERNANCE.md](../../../.github/GOVERNANCE.md), the comment window is waive
 the project is solo-maintained and is not invoked here. Sustained objections and their resolution
 are recorded in this section as they arrive.
 
+- **Open, for the S2 review (non-normative note):** the reference implementation's local origination ([#1645](https://github.com/avatarsd-llc/libtracer/issues/1645), `fwd_router_t::originate`) spells each request's return route as one `~o<hex>` NAME, so that prefix is taken on the origin side; origin learning (§6.2) must not assume it is free.
+
 ## Erratum (2026-10-02) — the code citations name symbols, and §11's third row keeps the delivery-compaction stale-label observer ([#1701](https://github.com/avatarsd-llc/libtracer/issues/1701))
 
 **What the text said.** Two things, both about the reference implementation rather than the wire:
