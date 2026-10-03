@@ -141,6 +141,81 @@ class RecognisedModeStillRuns(unittest.TestCase):
                       "an isolated mode must announce itself on stderr before its first row")
 
 
+class FamiliesAreSelectableAndRefused(unittest.TestCase):
+    """@brief `--family NAME` (#1803): one family of the default sweep, in its own process.
+
+    The default sweep runs each family as `--family NAME` in a fresh child, so this argv
+    shape is what every gated row now comes from. It must obey the same contract as a mode:
+    an unknown family refuses with no row, a known one announces itself and emits rows, and
+    the printed family list is the dispatch table.
+    """
+
+    def test_unknown_family_exits_nonzero_with_no_result_row(self):
+        bench = bench_binary()
+        for arg in ["no-such-family", "", "LKV"]:
+            with self.subTest(arg=arg):
+                out = subprocess.run([str(bench), "--family", arg], capture_output=True,
+                                     text=True, timeout=REFUSE_S)
+                self.assertEqual(result_rows(out.stdout), [])
+                self.assertNotEqual(out.returncode, 0)
+
+    def test_known_family_announces_itself_and_emits_rows(self):
+        bench = bench_binary()
+        out = subprocess.run([str(bench), "--family", "lkv-aged"], capture_output=True,
+                             text=True, timeout=RUN_S)
+        self.assertEqual(out.returncode, 0, out.stderr[-400:])
+        modes = {ln.split("\t")[2] for ln in result_rows(out.stdout)}
+        self.assertEqual(modes, {"lkv-alloc-heap-aged", "lkv-store-heap-aged"})
+        self.assertIn("FAMILY lkv-aged", out.stderr.splitlines()[0] if out.stderr else "")
+        self.assertNotIn("WARN allocator tunables", out.stderr,
+                         "the family ran without the pinned allocator tunables")
+
+    def test_printed_family_list_equals_the_source_table(self):
+        bench = bench_binary()
+        out = subprocess.run([str(bench), "no-such-mode"], capture_output=True, text=True,
+                             timeout=REFUSE_S)
+        printed = []
+        for line in out.stderr.splitlines():
+            if line.lstrip().startswith("families:"):
+                printed = [n.strip() for n in line.split(":", 1)[1].split("|") if n.strip()]
+        self.assertEqual(printed, source_families())
+
+
+class FamilySetsForTheGate(unittest.TestCase):
+    """@brief `--families` / `--family-set` (#1803): the split perf_gate.py times on.
+
+    The gate probes `--families` and then times `--family-set single`, so the probe must list
+    every family with its set, and a bad set name must refuse like a bad mode.
+    """
+
+    def test_families_lists_every_family_with_its_set(self):
+        out = subprocess.run([str(bench_binary()), "--families"], capture_output=True,
+                             text=True, timeout=REFUSE_S)
+        self.assertEqual(out.returncode, 0, out.stderr[-400:])
+        listed = [ln.split("\t") for ln in out.stdout.splitlines()]
+        self.assertEqual([n for n, _ in listed], source_families())
+        self.assertTrue(all(s in ("single", "multi") for _, s in listed))
+        self.assertIn(["inproc-mt", "multi"], listed)
+        self.assertEqual(result_rows(out.stdout), [])
+
+    def test_unknown_family_set_is_refused(self):
+        for arg in ["bogus", "", "SINGLE"]:
+            with self.subTest(arg=arg):
+                out = subprocess.run([str(bench_binary()), "--family-set", arg],
+                                     capture_output=True, text=True, timeout=REFUSE_S)
+                self.assertEqual(result_rows(out.stdout), [])
+                self.assertNotEqual(out.returncode, 0)
+
+
+def source_families() -> list:
+    """@brief The family names in `bench_libtracer.cpp`'s `kFamilies` table, in order."""
+    text = SOURCE.read_text(encoding="utf-8")
+    table = re.search(r"constexpr bench_family_t kFamilies\[\] = \{(.*?)\n\};", text, re.S)
+    if table is None:
+        raise AssertionError(f"no kFamilies table found in {SOURCE} — this test has rotted")
+    return re.findall(r'\{"([^"]+)",', table.group(1))
+
+
 def source_modes() -> set:
     """@brief The mode names in `bench_libtracer.cpp`'s `kModes` table."""
     text = SOURCE.read_text(encoding="utf-8")

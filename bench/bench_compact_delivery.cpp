@@ -40,6 +40,7 @@
 #include <vector>
 
 #include "bench_common.hpp"
+#include "bench_process.hpp"
 #include "libtracer/route_handle.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
@@ -215,9 +216,14 @@ void run_point(std::size_t payload, bool terminus) {
     const std::size_t bytes = g_bytes;
 
     const std::size_t batch = calibrate_batch(deliver);
-    bench::Latency lat;
-    const std::uint64_t t0 = bench::now_ns();
     const auto deadline_ns = static_cast<std::uint64_t>(budget_seconds() * 1e9);
+    bench::Latency lat;
+    lat.reserve(bench::samples_for_budget(
+        [&] {
+            for (std::size_t i = 0; i < batch; ++i) deliver();
+        },
+        deadline_ns));
+    const std::uint64_t t0 = bench::now_ns();
     std::size_t batches = 0;
     std::uint64_t total = 0;
     while (total < deadline_ns) {
@@ -241,7 +247,8 @@ void run_point(std::size_t payload, bool terminus) {
 
 }  // namespace
 
-int main() {
+int main(int /*argc*/, char** argv) {
+    bench::pin_allocator_state(argv);  // fixed allocator state (#1803)
     std::printf("# Steady-state compacted delivery on a WARM binding (RFC-0004 §E.1 / ADR-0062)\n");
     for (const std::size_t p : kPayloadSizes) {
         run_point(p, /*terminus=*/true);

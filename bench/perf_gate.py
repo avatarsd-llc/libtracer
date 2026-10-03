@@ -65,6 +65,7 @@ import re
 import statistics
 import subprocess
 import sys
+from typing import Callable
 
 HERE = pathlib.Path(__file__).resolve().parent
 BENCH = HERE / "build" / "bench_libtracer"
@@ -106,9 +107,11 @@ CPUS = bc.cpus_from_env()
 EXIT_INCONCLUSIVE = 3
 
 
-def timed(argv: list[str], timeout: float) -> str:
-    """@brief Run one timed bench execution under the classifier; its kept stdout."""
-    return LEDGER.add(bc.measure(argv, cpus=CPUS, timeout=timeout, log=print)).stdout
+def timed(argv: list[str], timeout: float, score_pressure: bool = True) -> str:
+    """@brief Run one timed bench execution under the classifier; its kept stdout.
+    @p score_pressure False judges it on foreign time only (a MULTI family set, #1803)."""
+    return LEDGER.add(bc.measure(argv, cpus=CPUS, timeout=timeout, log=print,
+                                 score_pressure=score_pressure)).stdout
 
 # --- VERDICT TIERS (#1251): who a breached ratchet is allowed to stop --------------
 # The two-tier policy used to live in a `perf.yml` comment, which meant the gate could
@@ -253,6 +256,12 @@ POINTS = [
     ("compact", "compact-terminus", 64, 1, 1),
     ("demux", "fwd-demux-fixed", 79, 1, 1),
     ("demux", "fwd-demux-scan", 79, 64, 64),
+    # MULTI-threaded rows (#1803): timed in their own `--family-set multi` invocation and
+    # judged on foreign CPU time only (see GATE_FAMILY_SET_MULTI). T=4 because the gate's
+    # bench CPU set is four CPUs; a host with fewer reports them absent, not failed.
+    ("main", "inproc-mt4", 64, 1, 4),
+    ("main", "acl-inherit-d4-mt4", 64, 1, 4),
+    ("main", "poolalloc-mt4", 64, 1, 1),
 ]
 # No-baseline absolute-floor backstop, per point: a fan-1024 write's p50 is the
 # WHOLE 1024-subscriber fan-out (~13 µs), so the 1 µs 1:1 floor cannot apply.
@@ -594,12 +603,68 @@ def lkv_ratio_gate_paired(bench: pathlib.Path, base_bench: pathlib.Path,
     return fails
 
 
-def run_bench_once(bench: pathlib.Path) -> list[tuple]:
+# --- HOW THE GATE TIMES THE FAMILIES (#1803) ------------------------------------------
+# `bench_libtracer`'s default sweep is a list of families, each tagged SINGLE- or MULTI-
+# threaded (`bench_libtracer --families`). A MULTI family (inproc-mt*, acl-…-mt4, the
+# *alloc-mt* rows) runs T workers on the pinned CPUs while its main thread spins waiting for
+# them, so the bench's OWN threads queue behind each other and its own cgroup's CPU
+# pressure climbs. The condition check scored that pressure and, sampled at the next
+# launch, the residue too: about one gate in three came back INCONCLUSIVE with 0% foreign
+# load and own-cgroup psi 84 -> 23 -> 5.7 across its re-runs.
+#
+# So the gate times the two sets as SEPARATE invocations, and both stay compared A/B:
+#   - `--family-set single`, judged on foreign time AND own-cgroup pressure, as before;
+#   - `--family-set multi`, judged on foreign time ONLY. Its own threads' pressure is
+#     recorded, not scored. A real intruder still shows as foreign CPU time on the bench
+#     CPUs, so it still makes the verdict INCONCLUSIVE.
+# Every SINGLE invocation runs before every MULTI one (`paired_samples` takes all pairs and
+# `best_of` all runs of the single set first, and the pressure-scored lkv ratio gate runs
+# ahead of both), so no pressure-scored launch follows a MULTI run's residue.
+#
+# Both arms must speak it or neither uses it: a baseline built before family sets refuses
+# `--families` (exit 2), and then both arms sweep everything in one invocation, pressure
+# scored, exactly as before this change.
+GATE_FAMILY_SET = ("--family-set", "single")
+GATE_FAMILY_SET_MULTI = ("--family-set", "multi")
+
+
+def has_family_sets(bench: pathlib.Path) -> bool:
+    """@brief Whether @p bench understands `--family-set` (its `--families` probe exits 0)."""
+    try:
+        p = subprocess.run([str(bench), "--families"], capture_output=True, text=True,
+                           timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return p.returncode == 0 and "\tsingle" in p.stdout
+
+
+def gate_sweep_args(*binary_sets: dict[str, pathlib.Path],
+                    probe: Callable[[pathlib.Path], bool] | None = None) -> tuple[str, ...]:
+    """@brief The extra argv the gate passes to every `main` binary for its FIRST pass: the
+    SINGLE family set when every arm's `bench_libtracer` supports family sets (a second,
+    foreign-only pass then times the MULTI set), otherwise nothing (one whole sweep).
+    @p probe defaults to @ref has_family_sets, looked up at call time so tests can patch it."""
+    probe = probe or has_family_sets
+    mains = [bins["main"] for bins in binary_sets if bins and "main" in bins]
+    if mains and all(probe(m) for m in mains):
+        return GATE_FAMILY_SET
+    return ()
+
+
+def _passes(extra: tuple[str, ...]) -> list[tuple[tuple[str, ...], bool, bool]]:
+    """@brief The gate's timing passes: (main argv, run the sibling binaries?, score psi?)."""
+    if not extra:
+        return [((), True, True)]
+    return [(extra, True, True), (GATE_FAMILY_SET_MULTI, False, False)]
+
+
+def run_bench_once(bench: pathlib.Path, extra: tuple[str, ...] = (),
+                   score_pressure: bool = True) -> list[tuple]:
     if not bench.exists():
         print(f"perf_gate: {bench} not built — run: cmake -S {HERE} -B {HERE}/build "
               f"-DCMAKE_BUILD_TYPE=Release && cmake --build {HERE}/build -j", file=sys.stderr)
         sys.exit(2)
-    out = timed([str(bench)], timeout=180)
+    out = timed([str(bench), *extra], timeout=180, score_pressure=score_pressure)
     rows = []
     for line in out.splitlines():
         f = line.split("\t")
@@ -626,23 +691,33 @@ def best_of(binaries: dict[str, pathlib.Path], runs: int) -> dict[str, dict]:
     Each BINARY is executed once per run and its rows are matched only against the points
     that declare it, so adding a point from a new binary costs one extra process per run
     rather than one per point.
+
+    The pass loop is outermost, as in @ref paired_samples: every run of the pressure-scored
+    SINGLE pass launches before any MULTI run, so none starts into a MULTI run's residue.
+    The fold is a per-point min/max, so the order does not change the result.
     """
     cur: dict[str, dict] = {}
-    for _ in range(max(1, runs)):
-        rows_by_bin = {b: run_bench_once(path) for b, path in binaries.items()}
-        for (b, m, s, f, e) in POINTS:
-            if b not in rows_by_bin:
-                continue
-            v = metric(rows_by_bin[b], m, s, f, e)
-            if not v:
-                continue
-            k = f"{m}/{s}/{f}/{e}"
-            if k not in cur:
-                cur[k] = v
-            else:
-                cur[k]["p50_ns"] = min(cur[k]["p50_ns"], v["p50_ns"])
-                cur[k]["deliv_s"] = max(cur[k]["deliv_s"], v["deliv_s"])
-                cur[k]["mean_ns"] = min(cur[k]["mean_ns"], v["mean_ns"])
+    for args, siblings, psi in _passes(gate_sweep_args(binaries)):
+        for _ in range(max(1, runs)):
+            rows_by_bin: dict[str, list] = {}
+            for b, path in binaries.items():
+                if b == "main":
+                    rows_by_bin[b] = run_bench_once(path, args, psi)
+                elif siblings:
+                    rows_by_bin[b] = run_bench_once(path)
+            for (b, m, s, f, e) in POINTS:
+                if b not in rows_by_bin:
+                    continue
+                v = metric(rows_by_bin[b], m, s, f, e)
+                if not v:
+                    continue
+                k = f"{m}/{s}/{f}/{e}"
+                if k not in cur:
+                    cur[k] = v
+                else:
+                    cur[k]["p50_ns"] = min(cur[k]["p50_ns"], v["p50_ns"])
+                    cur[k]["deliv_s"] = max(cur[k]["deliv_s"], v["deliv_s"])
+                    cur[k]["mean_ns"] = min(cur[k]["mean_ns"], v["mean_ns"])
     return cur
 
 
@@ -687,18 +762,27 @@ def paired_samples(cand: dict[str, pathlib.Path], base: dict[str, pathlib.Path],
     both arms drawn from the SAME pair, so the lists can be compared element-wise.
     """
     out: dict[str, dict[str, list[dict]]] = {"cand": {}, "base": {}}
-    for i in range(max(1, pairs)):
-        order = [("base", base), ("cand", cand)]
-        if i % 2:
-            order.reverse()
-        for arm, binaries in order:
-            rows_by_bin = {b: run_bench_once(path) for b, path in binaries.items()}
-            for (b, m, s, f, e) in POINTS:
-                if b not in rows_by_bin:
-                    continue
-                v = metric(rows_by_bin[b], m, s, f, e)
-                if v:
-                    out[arm].setdefault(f"{m}/{s}/{f}/{e}", []).append(v)
+    passes = _passes(gate_sweep_args(cand, base))
+    print("  bench_libtracer sweep: " + (
+        "all families, one invocation" if len(passes) == 1 else
+        "single set (foreign + pressure), then multi set (foreign only)"))
+    # Pass by pass, each one interleaved over every pair: all pressure-scored SINGLE
+    # invocations run before any MULTI one, so none launches into a MULTI run's residue.
+    for args, siblings, psi in passes:
+        for i in range(max(1, pairs)):
+            order = [("base", base), ("cand", cand)]
+            if i % 2:
+                order.reverse()
+            for arm, binaries in order:
+                rows_by_bin = {b: (run_bench_once(path, args, psi) if b == "main"
+                                   else run_bench_once(path))
+                               for b, path in binaries.items() if b == "main" or siblings}
+                for (b, m, s, f, e) in POINTS:
+                    if b not in rows_by_bin:
+                        continue
+                    v = metric(rows_by_bin[b], m, s, f, e)
+                    if v:
+                        out[arm].setdefault(f"{m}/{s}/{f}/{e}", []).append(v)
     return out
 
 
@@ -1085,13 +1169,18 @@ def main() -> int:
               f"fail: p50 +{(LAT_REGRESS - 1) * 100:.0f}% / "
               f"mean +{(MEAN_REGRESS - 1) * 100:.0f}% / "
               f"deliv -{(1 - TPUT_REGRESS) * 100:.0f}%):")
-        fails = gate_paired(cand_bins, base_bins, pairs)
+        # The lkv ratio runs FIRST: it is single-threaded and pressure-scored, and the gate's
+        # last pass is the MULTI family set, whose own-pressure residue it must not inherit.
+        fails = lkv_ratio_gate_paired(bench, base_bench)  # ADR-0060 ratio, paired (#1745)
+        fails += gate_paired(cand_bins, base_bins, pairs)
         fails += mem_ratchet(bench_fwd, base_fwd)
-        fails += lkv_ratio_gate_paired(bench, base_bench)  # ADR-0060 ratio, paired (#1745)
         print_conditions()
         return render_verdict(fails, [], tier, sample_note, LEDGER)
 
     runs = int(args[args.index("--runs") + 1]) if "--runs" in args else DEFAULT_RUNS
+    # The lkv ratio runs FIRST here too: it is pressure-scored, and best_of's last pass is
+    # the MULTI family set, whose own-pressure residue it must not inherit.
+    lkv_fails = lkv_ratio_gate(bench)  # ADR-0060 same-run ratio (no baseline; skips if absent)
     cur = best_of(cand_bins, runs)
     cur.update(mem_probe(bench_fwd))  # fold the mem:* points into the same baseline dict
     base = json.loads(BASELINE.read_text()) if BASELINE.exists() else None
@@ -1146,7 +1235,7 @@ def main() -> int:
             if v["deliv_s"] > 0 and v["deliv_s"] < FLOOR_DELIV:
                 fails.append(f"{k} deliv {v['deliv_s']:,.0f} under floor {FLOOR_DELIV:,}")
         print(line)
-    fails += lkv_ratio_gate(bench)  # ADR-0060 same-run ratio (no baseline; skips if absent)
+    fails += lkv_fails
     print_conditions()
     if not LEDGER.clean:
         # A contended sample must not become the recorded baseline either.

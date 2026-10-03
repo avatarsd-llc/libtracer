@@ -19,6 +19,7 @@
  */
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <expected>
 #include <iterator>
@@ -26,6 +27,7 @@
 #include <memory_resource>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <span>
 #include <string>
 #include <string_view>
@@ -33,6 +35,7 @@
 #include <vector>
 
 #include "bench_common.hpp"
+#include "bench_process.hpp"
 #include "delivery_count.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_pool.hpp"
@@ -128,6 +131,7 @@ void emit_batch_row(const char* mode, std::size_t S, std::size_t F, std::size_t 
     const std::size_t rounds = std::max<std::size_t>(1, lat_n / batch);
 
     Latency lat;
+    lat.reserve(rounds);
     for (std::size_t r = 0; r < rounds; ++r) {
         const auto a = now_ns();
         for (std::size_t b = 0; b < batch; ++b) op(i++);
@@ -229,6 +233,7 @@ void run_inproc(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc, bool
     // every historical point incomparable to every later one. So the quantized series
     // continues unbroken and the honest measurement is published ALONGSIDE it, below.
     Latency lat;
+    lat.reserve(LATN);
     for (std::size_t i = 0; i < LATN; ++i) {
         const auto a = now_ns();
         put(i);
@@ -424,6 +429,7 @@ void run_inproc_target(std::size_t S, std::size_t F, target_kind_t kind, const c
     const double mb_s = deliv_s * static_cast<double>(S) / 1e6;
 
     Latency lat;
+    lat.reserve(LATN);
     for (std::size_t i = 0; i < LATN; ++i) {
         const auto a = now_ns();
         put(i);
@@ -542,6 +548,7 @@ void run_inproc_remote(std::size_t S, std::size_t F, const char* mode,
     const double mb_s = deliv_s * static_cast<double>(S) / 1e6;
 
     Latency lat;
+    lat.reserve(LATN);
     for (std::size_t i = 0; i < LATN; ++i) {
         const auto a = now_ns();
         put(i);
@@ -596,6 +603,7 @@ void run_inproc_deliver(std::size_t S, std::size_t F, std::uint64_t budget = kDe
     const double mb_s = deliv_s * static_cast<double>(S) / 1e6;
 
     Latency lat;
+    lat.reserve(LATN);
     for (std::size_t i = 0; i < LATN; ++i) {
         const auto a = now_ns();
         put();
@@ -661,8 +669,10 @@ void run_mixed() {
     }
     const double secs = (now_ns() - t0) / 1e9;
 
+    constexpr std::size_t kMixedLatN = 20000;
     Latency lat;
-    for (std::size_t i = 0; i < 20000; ++i) {
+    lat.reserve(kMixedLatN);
+    for (std::size_t i = 0; i < kMixedLatN; ++i) {
         const std::size_t e = i % E;
         const auto a = now_ns();
         (void)g.write(verts[e], owned_view(tlvs[e]));
@@ -749,7 +759,8 @@ void run_inproc_mt(std::size_t T) {
     for (std::size_t t = 0; t < T; ++t) {
         worker_t* w = ws[t].get();
         lthreads.emplace_back([w, &ready2, &go2]() {
-            w->lat.reserve(LATN);
+            w->lat.resize(LATN);  // reserve AND touch (#1803): no page fault mid-sample
+            w->lat.clear();
             ready2.fetch_add(1, std::memory_order_acq_rel);
             while (!go2.load(std::memory_order_acquire)) { /* spin */
             }
@@ -766,6 +777,7 @@ void run_inproc_mt(std::size_t T) {
     for (auto& th : lthreads) th.join();
 
     Latency lat;
+    lat.reserve(T * LATN);
     for (auto& w : ws)
         for (std::uint64_t ns : w->lat) lat.add(ns);
 
@@ -822,6 +834,7 @@ void run_eptype_stream() {
     const double mb_s = deliv_s * static_cast<double>(S) / 1e6;
 
     Latency lat;
+    lat.reserve(LATN);
     for (std::size_t i = 0; i < LATN; ++i) {
         const auto a = now_ns();
         put();
@@ -902,8 +915,10 @@ void run_fold(std::size_t N) {
     // LAT_REGRESS=1.15 needs 34.5, i.e. one 10 ns tick, so a real ~11 ns op had to more than
     // DOUBLE before the gate could fire. See #553 for the same defect in the other rows.
     constexpr std::size_t kBatch = 256;
+    constexpr std::size_t kFoldRounds = 800;
     Latency lat;
-    for (std::size_t r = 0; r < 800; ++r) {
+    lat.reserve(kFoldRounds);
+    for (std::size_t r = 0; r < kFoldRounds; ++r) {
         const auto a = now_ns();
         for (std::size_t i = 0; i < kBatch; ++i) sink += serialize();
         lat.add((now_ns() - a) / kBatch);
@@ -1008,6 +1023,7 @@ void run_acl_gated() {
     const double ops_s = MSGS / ((now_ns() - t0) / 1e9);
 
     Latency lat;
+    lat.reserve(LATN);
     for (std::size_t i = 0; i < LATN; ++i) {
         const auto a = now_ns();
         get();
@@ -1042,11 +1058,14 @@ void run_acl_gated_mt(std::size_t T) {
             volatile std::size_t sink = 0;
             const auto get = [&]() { sink += g.read(leaf, "peer").has_value() ? 1u : 0u; };
             for (std::size_t i = 0; i < 1000; ++i) get();  // warmup
+            // Reserve AND touch before the release (#1803): this used to reserve after the
+            // timed MSGS phase had started, inside the throughput window.
+            lats[t].resize(LATN);
+            lats[t].clear();
             ready.fetch_add(1, std::memory_order_acq_rel);
             while (!go.load(std::memory_order_acquire)) { /* spin until released */
             }
             for (std::size_t i = 0; i < MSGS; ++i) get();
-            lats[t].reserve(LATN);
             for (std::size_t i = 0; i < LATN; ++i) {
                 const auto a = now_ns();
                 get();
@@ -1065,6 +1084,7 @@ void run_acl_gated_mt(std::size_t T) {
     const double ops_s = static_cast<double>(T) * (MSGS + LATN) / secs;
 
     Latency lat;
+    lat.reserve(T * LATN);
     for (const std::vector<std::uint64_t>& per : lats)
         for (std::uint64_t ns : per) lat.add(ns);
     const std::string mode = "acl-inherit-d4-mt" + std::to_string(T);
@@ -1193,6 +1213,51 @@ void run_lkv_store_gate() {
     }
 }
 
+/**
+ * @brief Put this process's heap into one fixed, reproducible AGED state (#1803).
+ *
+ * A long-running node does not allocate from an empty heap: its free lists hold whatever
+ * earlier work left behind. That state used to reach the heap rows only by accident — as the
+ * residue of every row ahead of them in the sweep — so it changed whenever a row was added or
+ * moved. Here it is built on purpose, from a fixed seed: 16384 blocks of 16..2063 bytes
+ * (spanning the 64 B and 1 KiB bins the `lkv-*-heap` rows use), every other one freed, the
+ * rest held live until exit. The same binary therefore always measures the same aged heap.
+ */
+void age_heap() {
+    constexpr std::size_t kBlocks = 16384;
+    static std::vector<void*> survivors;  // held to exit: the fragmentation IS the state
+    std::vector<void*> blocks(kBlocks);
+    survivors.reserve(kBlocks / 2);
+    std::minstd_rand rng(0x1803);  // fixed seed: one aged state, not a different one per run
+    for (void*& b : blocks) b = std::malloc(16 + rng() % 2048);
+    for (std::size_t i = 0; i < kBlocks; ++i) {
+        if (i % 2 == 0)
+            survivors.push_back(blocks[i]);
+        else
+            std::free(blocks[i]);
+    }
+}
+
+/**
+ * @brief The `lkv-*-heap` rows again, on an AGED heap (#1803): `lkv-alloc-heap-aged` and
+ *        `lkv-store-heap-aged`.
+ *
+ * The un-suffixed `lkv-*-heap` rows run first thing in a fresh process (@ref
+ * run_lkv_store_gate in the `lkv` family), so they are the FRESH-heap variant; their names are
+ * kept because they are gated keys and history series. This family ages the heap first
+ * (@ref age_heap) and reports the same two operations under `-aged` names, so a change that
+ * only hurts on a fragmented heap — the shape of the 1 KiB regression — has a row of its own.
+ * The pool rows have no aged twin: the pool carves a static slab and never touches the heap.
+ */
+void run_lkv_aged() {
+    age_heap();
+    tr::mem::mem_backend_t& heap = tr::mem::heap_backend();
+    for (std::size_t S : {std::size_t{64}, std::size_t{1024}}) {
+        run_lkv_store_alloc(S, false, heap, "lkv-alloc-heap-aged");
+        run_lkv_store_alloc(S, true, heap, "lkv-store-heap-aged");
+    }
+}
+
 }  // namespace
 
 /**
@@ -1214,10 +1279,16 @@ void run_syncpool_mt(std::size_t T, tr::mem::mem_backend_t& backend, const char*
     // per op) than the one whose latency was published — two different workloads in one
     // row, with the throughput inflated ~1.4-1.7x relative to the latency's conditions.
     std::mutex lat_m;
+    // One collector per thread, reserved and touched BEFORE t0 (#1803), so neither the
+    // reservation nor its page faults land inside the timed window.
+    std::vector<Latency> mines(T);
+    for (Latency& m : mines) m.reserve(kOpsPerThread);
+    lat0.reserve(T * kOpsPerThread);
+    ts.reserve(T);
     const auto t0 = now_ns();
     for (std::size_t t = 0; t < T; ++t) {
-        ts.emplace_back([&] {
-            Latency mine;
+        ts.emplace_back([&, t] {
+            Latency& mine = mines[t];
             for (std::size_t i = 0; i < kOpsPerThread; ++i) {
                 const std::uint64_t a = now_ns();
                 tr::view::segment_t* raw = backend.alloc(S);
@@ -1295,16 +1366,21 @@ void run_path_parse() {
         // Batch-amortized for the same reason the net-plane benches are: one parse is close
         // enough to `clock_gettime` that per-op timing would measure the clock.
         constexpr std::size_t kBatch = 256;
-        Latency lat;
+        constexpr std::uint64_t kBudgetNs = 300000000ULL;
         std::size_t sink = 0;
-        const std::uint64_t t0 = now_ns();
-        std::size_t iters = 0;
-        while (now_ns() - t0 < 300000000ULL) {
-            const std::uint64_t s0 = now_ns();
+        const auto batch = [&] {
             for (std::size_t i = 0; i < kBatch; ++i) {
                 const auto p = tr::graph::path_t::parse(a);
                 sink += p.has_value() ? p->segment_count() : 0;
             }
+        };
+        Latency lat;
+        lat.reserve(samples_for_budget(batch, kBudgetNs));
+        const std::uint64_t t0 = now_ns();
+        std::size_t iters = 0;
+        while (now_ns() - t0 < kBudgetNs) {
+            const std::uint64_t s0 = now_ns();
+            batch();
             lat.add((now_ns() - s0) / kBatch);
             ++iters;
         }
@@ -1444,7 +1520,198 @@ constexpr bench_mode_t kModes[] = {
     {"topics-rev", run_mode_topics_rev},
 };
 
-/** @brief The usage text, on stderr, listing every entry of @ref kModes. */
+/*
+ * The default sweep, as FAMILIES (#1803). Each family below is one block of what used to be
+ * `main`'s single in-process sweep, unchanged in content and in row order, so the transcript
+ * keeps every row, every ordinal and every line shape it had. What changed is the process: the
+ * default run starts each family as its own child process (`--family <name>`), under the
+ * pinned allocator tunables, so no family inherits the heap another one aged.
+ */
+
+/** @brief `inproc` fan-out sweep at the reference payload (gated `inproc/64/1024/1`). */
+void family_inproc_fan() {
+    for (std::size_t F : kFanouts)
+        run_inproc(kRefSize, F, kRefEndpoints, alloc_t::HEAP, false, "inproc");
+}
+
+/** @brief `inproc` payload sweep at the reference fan-out (gated `inproc/64/1/1`). */
+void family_inproc_size() {
+    for (std::size_t S : kSizes)
+        run_inproc(S, kRefFanout, kRefEndpoints, alloc_t::HEAP, false, "inproc");
+}
+
+/** @brief `inproc-borrow` payload sweep (gated `inproc-borrow/64/1/1`). */
+void family_inproc_borrow() {
+    for (std::size_t S : kSizes)
+        run_inproc(S, kRefFanout, kRefEndpoints, alloc_t::BORROW, false, "inproc-borrow");
+}
+
+/** @brief `inproc-path` topic-count sweep, write by path (gated `inproc-path/64/1/8192`). */
+void family_inproc_path() {
+    for (std::size_t E : kEndpoints)
+        run_inproc(kRefSize, kRefFanout, E, alloc_t::HEAP, true, "inproc-path");
+}
+
+/** @brief n-cores (parallel-dispatch) axis: thread counts clamped to the CPUs the bench may use. */
+void family_inproc_mt() {
+    const std::size_t hw = bench::usable_cpus();
+    for (std::size_t T : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}})
+        if (T <= hw) run_inproc_mt(T);
+}
+
+/**
+ * @brief ACL-gated reads with inheritance (ADR-0050 cached effective-ACE merge): the
+ *        uncontended gate cost, then the shared-ancestor contended case where 4 usable CPUs
+ *        exist.
+ */
+void family_acl() {
+    run_acl_gated();
+    if (bench::usable_cpus() >= 4) run_acl_gated_mt(4);
+}
+
+/**
+ * @brief n-layer-folded (fold-depth) axis: the same total bytes folded across N segments
+ *        (N=1 flat .. N=8 rope); cost rises with the view-chain walk.
+ */
+void family_fold() {
+    for (std::size_t N : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}})
+        run_fold(N);
+}
+
+/**
+ * @brief The full 1:1 write THROUGH an injected pool `mr_` vs the default global-heap
+ *        `inproc` / `inproc-borrow` (see @ref run_inproc_pool for the reading).
+ */
+void family_inproc_pool() {
+    for (std::size_t S : kSizes)
+        run_inproc_pool(S, kRefFanout, kRefEndpoints, alloc_t::HEAP, false, "inproc-pool");
+    for (std::size_t S : kSizes)
+        run_inproc_pool(S, kRefFanout, kRefEndpoints, alloc_t::BORROW, false, "inproc-pool-borrow");
+}
+
+/**
+ * @brief MID fan-out arms (#844): 16 / 32 / 64 / 256 / 512 on the `inproc` mode — the two
+ *        gaps in `kFanouts` where the cost model kinks. Same `mode` string as the coarse
+ *        ladder, so they land on the SAME charted series (a denser curve, not a new one).
+ */
+void family_inproc_fan_mid() {
+    for (std::size_t F : kFanoutsMid)
+        run_inproc(kRefSize, F, kRefEndpoints, alloc_t::HEAP, false, "inproc");
+}
+
+/** @brief Which family set a family belongs to — see @ref kFamilies. */
+enum class family_set_t {
+    SINGLE, /**< One thread does the timed work: no row waits on another of the bench's own. */
+    MULTI,  /**< Starts worker threads (plus a coordinating main thread that spins). */
+};
+
+/** @brief One family of the default sweep: its `--family` spelling, its runner, its set. */
+struct bench_family_t {
+    std::string_view name; /**< What `--family` must equal to select this family. */
+    void (*run)();         /**< The rows this family emits, and nothing else. */
+    family_set_t set;      /**< SINGLE- or MULTI-threaded — what `--family-set` selects on. */
+};
+
+/**
+ * @brief The default sweep, family by family, in its historical row order.
+ *
+ * ORDER IS LOAD-BEARING for the transcript, not for the numbers: every consumer joins rows by
+ * `(mode, size, fan, ep)`, but the default run's ordinals were kept stable for years and new
+ * families append at the END, never ahead of a gated row. Since each family now runs in its
+ * own process, the order no longer changes any row's VALUE — which is what
+ * `LIBTRACER_BENCH_FAMILY_SEED` (a shuffled order) exists to check.
+ *
+ * Notes carried over from the in-process sweep:
+ *   - `deliver` (the store-free counterpart of the inproc fan sweep) was deliberately last
+ *     among the original rows; everything after it is appended in the order it was added.
+ *   - `lkv` is the ADR-0060 copy-store gate on a FRESH heap; its two 64 B `lkv-store-*` rows
+ *     are perf_gate.py POINTS (#1250), and `perf_gate.py` runs the same function through the
+ *     `lkv` mode, i.e. in the same process shape, for the pool/heap ratio check.
+ *   - `syncpool` is ADR-0060 §2's sync-pool vs heap under T-thread contention (charted, not
+ *     gated).
+ *   - `target` is the PATH-TARGET fan-out (#619), the leg a wire `SUBSCRIBER` takes.
+ *   - `lkv-aged` (#1803) is new and appended last: the `lkv-*-heap` rows on an aged heap.
+ *
+ * The SET column splits the sweep for the perf gate's measurement-condition check. A MULTI
+ * family runs T workers on the pinned CPUs while its main thread spins waiting for them, so
+ * the bench's OWN threads queue behind each other and raise its own cgroup's CPU pressure.
+ * The condition check reads that pressure at the NEXT invocation's launch and used to mark
+ * the gate INCONCLUSIVE for it. So perf_gate.py times the two sets as separate invocations,
+ * both compared A/B: `--family-set single` judged on foreign time and pressure, then
+ * `--family-set multi` judged on foreign time only. Foreign CPU time on the bench CPUs, which
+ * is how a real intruder shows, is scored on both.
+ *   - There is no `loopback` or `routers-hN` family: those modes benchmarked the ROUTER-flood
+ *     bridge, retired in ADR-0040 — the net plane is explicit-source-routed FWD only, and its
+ *     forward cost is measured by bench_forward_heap and the fwd_* tests.
+ */
+constexpr bench_family_t kFamilies[] = {
+    {"inproc-fan", family_inproc_fan, family_set_t::SINGLE},
+    {"inproc-size", family_inproc_size, family_set_t::SINGLE},
+    {"inproc-borrow", family_inproc_borrow, family_set_t::SINGLE},
+    {"inproc-path", family_inproc_path, family_set_t::SINGLE},
+    {"mixed", run_mixed, family_set_t::SINGLE},
+    {"path-parse", run_path_parse, family_set_t::SINGLE},
+    {"inproc-mt", family_inproc_mt, family_set_t::MULTI},
+    {"eptype", run_eptype, family_set_t::SINGLE},
+    {"acl", family_acl, family_set_t::MULTI},
+    {"fold", family_fold, family_set_t::SINGLE},
+    {"deliver", run_mode_deliver, family_set_t::SINGLE},
+    {"lkv", run_lkv_store_gate, family_set_t::SINGLE},
+    {"inproc-pool", family_inproc_pool, family_set_t::SINGLE},
+    {"syncpool", run_syncpool_gate, family_set_t::MULTI},
+    {"target", run_mode_target, family_set_t::SINGLE},
+    {"inproc-fan-mid", family_inproc_fan_mid, family_set_t::SINGLE},
+    {"lkv-aged", run_lkv_aged, family_set_t::SINGLE},
+};
+
+/**
+ * @brief The family run order: declared order, or a seeded shuffle of it.
+ *
+ * `LIBTRACER_BENCH_FAMILY_SEED=<n>` shuffles the order deterministically from @p n and prints
+ * it on stderr. It exists to TEST the isolation (#1803): with every family in its own process,
+ * a shuffled run must leave every row inside its A/A spread.
+ */
+std::vector<const bench_family_t*> family_order() {
+    std::vector<const bench_family_t*> order;
+    order.reserve(std::size(kFamilies));
+    for (const bench_family_t& f : kFamilies) order.push_back(&f);
+    const char* seed = std::getenv("LIBTRACER_BENCH_FAMILY_SEED");
+    if (seed != nullptr && *seed != '\0') {
+        std::mt19937 rng(static_cast<std::mt19937::result_type>(std::strtoul(seed, nullptr, 10)));
+        std::shuffle(order.begin(), order.end(), rng);
+        std::fprintf(stderr, "FAMILY-ORDER seed=%s:", seed);
+        for (const bench_family_t* f : order)
+            std::fprintf(stderr, " %.*s", static_cast<int>(f->name.size()), f->name.data());
+        std::fprintf(stderr, "\n");
+    }
+    return order;
+}
+
+/**
+ * @brief The default sweep: every family, each in a fresh child process (#1803).
+ *
+ * With @p only set, runs just the families of that set (`--family-set`), in the same order.
+ * Stops at the first family that fails and returns non-zero, so a crash in one family is a
+ * failed run rather than a transcript silently missing that family's rows.
+ */
+int run_default_sweep(const char* argv0, const family_set_t* only = nullptr) {
+    for (const bench_family_t* f : family_order()) {
+        if (only != nullptr && f->set != *only) continue;
+        if constexpr (!kFamilyProcesses) {
+            f->run();  // no child processes on this platform: the old in-process sweep
+            continue;
+        }
+        const int rc = run_family_process(argv0, f->name);
+        if (rc != 0) {
+            std::fprintf(stderr, "error: family '%.*s' failed (status %d)\n",
+                         static_cast<int>(f->name.size()), f->name.data(), rc);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/** @brief The usage text, on stderr, listing every entry of @ref kModes and @ref kFamilies. */
 void print_usage(const char* argv0) {
     std::fprintf(stderr,
                  "usage: %s [mode]\n"
@@ -1454,12 +1721,55 @@ void print_usage(const char* argv0) {
     for (const bench_mode_t& m : kModes)
         std::fprintf(stderr, "%s%.*s", &m == &kModes[0] ? "" : " | ",
                      static_cast<int>(m.name.size()), m.name.data());
-    std::fprintf(stderr, "  (one isolated sweep each, for A/B runs)\n");
+    std::fprintf(stderr,
+                 "  (one isolated sweep each, for A/B runs)\n"
+                 "  --family NAME: one family of the default sweep, in this process\n"
+                 "  --family-set single|multi: the default sweep, one set of families\n"
+                 "  --families: list every family and its set (no rows)\n"
+                 "  families: ");
+    for (const bench_family_t& f : kFamilies)
+        std::fprintf(stderr, "%s%.*s", &f == &kFamilies[0] ? "" : " | ",
+                     static_cast<int>(f.name.size()), f.name.data());
+    std::fprintf(stderr, "\n");
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
+    // Fixed allocator state (#1803): re-exec under the pinned GLIBC_TUNABLES, before any
+    // output. Every family child inherits them from here.
+    pin_allocator_state(argv);
+    if (argc > 2 && std::string_view{argv[1]} == "--family") {
+        const std::string_view want{argv[2]};
+        for (const bench_family_t& f : kFamilies) {
+            if (f.name != want) continue;
+            // stderr, like the MODE marker: stdout stays the RESULT stream.
+            std::fprintf(stderr, "FAMILY %.*s\n", static_cast<int>(f.name.size()), f.name.data());
+            f.run();
+            return 0;
+        }
+        std::fprintf(stderr, "error: unknown family '%s'\n", argv[2]);
+        print_usage(argv[0]);
+        return 2;
+    }
+    if (argc == 2 && std::string_view{argv[1]} == "--families") {
+        // The capability probe perf_gate.py runs before it asks for `--family-set`: a binary
+        // without family sets refuses this as an unknown mode, exits 2, and is swept whole.
+        for (const bench_family_t& f : kFamilies)
+            std::printf("%.*s\t%s\n", static_cast<int>(f.name.size()), f.name.data(),
+                        f.set == family_set_t::MULTI ? "multi" : "single");
+        return 0;
+    }
+    if (argc > 2 && std::string_view{argv[1]} == "--family-set") {
+        const std::string_view want{argv[2]};
+        if (want == "single" || want == "multi") {
+            const family_set_t only = want == "multi" ? family_set_t::MULTI : family_set_t::SINGLE;
+            return run_default_sweep(argv[0], &only);
+        }
+        std::fprintf(stderr, "error: unknown family set '%s'\n", argv[2]);
+        print_usage(argv[0]);
+        return 2;
+    }
     if (argc > 1) {
         const std::string_view want{argv[1]};
         for (const bench_mode_t& m : kModes) {
@@ -1481,88 +1791,6 @@ int main(int argc, char** argv) {
         print_usage(argv[0]);
         return 2;
     }
-    for (std::size_t F : kFanouts)
-        run_inproc(kRefSize, F, kRefEndpoints, alloc_t::HEAP, false, "inproc");
-    for (std::size_t S : kSizes)
-        run_inproc(S, kRefFanout, kRefEndpoints, alloc_t::HEAP, false, "inproc");
-    for (std::size_t S : kSizes)
-        run_inproc(S, kRefFanout, kRefEndpoints, alloc_t::BORROW, false, "inproc-borrow");
-    for (std::size_t E : kEndpoints)
-        run_inproc(kRefSize, kRefFanout, E, alloc_t::HEAP, true, "inproc-path");
-    run_mixed();
-    run_path_parse();
-    // n-cores (parallel-dispatch) axis: thread counts clamped to the CPUs the bench may use.
-    const std::size_t hw = bench::usable_cpus();
-    for (std::size_t T : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}})
-        if (T <= hw) run_inproc_mt(T);
-    // ep-type (endpoint-dispatch-class) axis: lean / lean-cached / stream.
-    run_eptype();
-    // ACL-gated reads with inheritance (ADR-0050 cached effective-ACE merge):
-    // the uncontended gate cost + the shared-ancestor contended case.
-    run_acl_gated();
-    if (hw >= 4) run_acl_gated_mt(4);
-    // (The `loopback` and n-routers `routers-hN` modes benchmarked the ROUTER-flood
-    // bridge, retired in ADR-0040 — the net plane is explicit-source-routed FWD only.
-    // FWD forward cost is measured by bench_forward_heap + the fwd_* tests.)
-    // n-layer-folded (fold-depth) axis — same total bytes folded across N
-    // segments (N=1 flat .. N=8 rope); cost rises with the view-chain walk.
-    for (std::size_t N : {std::size_t{1}, std::size_t{2}, std::size_t{4}, std::size_t{8}})
-        run_fold(N);
-    // Deliver-only (propagate) fan sweep — the store-free counterpart of the
-    // inproc fan sweep. Deliberately LAST: perf_gate.py medians duplicate row
-    // instances from this default run, and inserting a new sweep ahead of the
-    // gated rows shifts their thermal/turbo position on small shared runners
-    // (a deterministic ~+100 ns on 2-vCPU CI — observed on PR #353's gate).
-    // New sweeps append here, after every pre-existing row, for the same reason.
-    for (std::size_t F : kFanouts) run_inproc_deliver(kRefSize, F);
-    // ADR-0060: the write-path copy-store alloc gate — pooled value_backend vs the
-    // default heap on the branch/field-write flatten. Charted series (lkv-store-heap /
-    // lkv-store-pool) + a same-run ratio gate (bench/perf_gate.py). The two 64 B
-    // `lkv-store-*` rows are ALSO perf_gate.py POINTS since #1250 — they are the only
-    // gated legs downstream of `rope_t::materialize`, and a 25-48% loss on it shipped
-    // past all ten of the points that predate them. Position is unchanged by that: the
-    // rows stay exactly where they were emitted, so no pre-existing gated row moved.
-    run_lkv_store_gate();
-    // The full 1:1 write THROUGH an injected pool `mr_` (unsynchronized_pool_resource) vs the
-    // default global-heap `inproc` / `inproc-borrow`. Isolates what the pool actually does to
-    // the per-write persist — which, measured, is make it ~19 ns SLOWER on this host (~104 vs
-    // ~85 ns/op): the pool is a determinism/bounded-ceiling lever, not a latency one. See the
-    // note on `run_inproc_pool` for the full reading and for the two claims this comment used
-    // to make that measurement refuted. Two charted series to gh-pages (inproc-pool /
-    // inproc-pool-borrow),
-    // sweeping payload at fan=1 (where the per-publish alloc is un-amortised). Appended
-    // LAST per the row-ordering note above: never ahead of a gated row.
-    for (std::size_t S : kSizes)
-        run_inproc_pool(S, kRefFanout, kRefEndpoints, alloc_t::HEAP, false, "inproc-pool");
-    for (std::size_t S : kSizes)
-        run_inproc_pool(S, kRefFanout, kRefEndpoints, alloc_t::BORROW, false, "inproc-pool-borrow");
-    // ADR-0060 §2: thread-safe (spinlock) sync-pool vs the thread-safe heap under
-    // T-thread contention (syncpool-mtT / heap-mtT). Tracks where the single spinlock
-    // bottlenecks — the signal for the lock-free CAS upgrade. Appended LAST (never ahead
-    // of a gated row); tracked to gh-pages, not gated.
-    run_syncpool_gate();
-    // PATH-TARGET fan-out (#619): the same 1/8/128/1024/8192 fan sweep the `inproc` rows
-    // run, but with edges that carry a `target_key` instead of a callback — the leg a wire
-    // `SUBSCRIBER` actually takes. Two charted series (inproc-target-stored /
-    // inproc-target-handler) so the two dispatch legs are separable in the results.
-    // Appended LAST per the row-ordering note above: never ahead of a gated row.
-    for (std::size_t F : kFanouts)
-        run_inproc_target(kRefSize, F, target_kind_t::STORED, "inproc-target-stored");
-    for (std::size_t F : kFanouts)
-        run_inproc_target(kRefSize, F, target_kind_t::HANDLER, "inproc-target-handler");
-    // MID fan-out arms (#844): 16 / 32 / 64 / 256 / 512 on the `inproc` mode, filling the
-    // two gaps in `kFanouts` where the cost model kinks — the first widths past
-    // `vertex_t::kInlineFanout` (8), and the 128 -> 1024 octave the edge array crosses L1
-    // in. See `kFanoutsMid` in bench_common.hpp for why those two bands and no others.
-    // Same `mode` string, so they land on the SAME charted series as the coarse ladder
-    // (`collate.py`'s fan-out table and `render_history.py`'s `fan` / `batch-fan` families
-    // derive their arm list from the data) — a denser curve, not a new one.
-    // Appended LAST per the row-ordering note above: never ahead of a gated row. That is
-    // load-bearing here and not just convention — a paired gate run compares a candidate
-    // binary against a `main` binary that does NOT emit these rows, and inserting them
-    // into the first fan sweep would move the gated `inproc/64/1024/1` row to a different
-    // thermal/turbo position in one arm only.
-    for (std::size_t F : kFanoutsMid)
-        run_inproc(kRefSize, F, kRefEndpoints, alloc_t::HEAP, false, "inproc");
-    return 0;
+    // The default sweep: every family of @ref kFamilies, each in its own fresh process.
+    return run_default_sweep(argv[0]);
 }

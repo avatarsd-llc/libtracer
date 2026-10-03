@@ -302,7 +302,16 @@ class Latency {
      * thread and shows up as a latency spike the transport did not cause. Reserving the
      * worst-case sample count up front removes that artefact.
      */
-    void reserve(std::size_t n) { samples_.reserve(n); }
+    void reserve(std::size_t n) {
+        // Every timed loop reserves before its first sample (#1803), and the reservation is
+        // TOUCHED here, not just requested: a reserved-but-untouched vector still page-faults
+        // on first write, which would move the faults into the timed window instead of
+        // removing them.
+        const std::size_t had = samples_.size();
+        samples_.reserve(had + n);
+        samples_.resize(had + n);
+        samples_.resize(had);
+    }
 
     /** @brief Absorb another collector's samples — for pooling per-thread collectors.
      *
@@ -349,6 +358,34 @@ class Latency {
    private:
     std::vector<std::uint64_t> samples_;
 };
+
+/** @brief Upper bound on a deadline loop's reservation: 32 MiB of samples. */
+inline constexpr std::size_t kMaxReservedSamples = std::size_t{1} << 22;
+
+/**
+ * @brief How many samples a deadline-bounded loop will take, for @ref Latency::reserve.
+ *
+ * A loop that samples until a time budget runs out has no declared count, so it is
+ * estimated: the fastest of three untimed probes of one sample's work, divided into the
+ * budget, doubled for slack and capped at @ref kMaxReservedSamples. The probes double as
+ * warm-up. An under-estimate costs one vector growth inside the loop, which is what every
+ * such loop paid before this existed (#1803).
+ *
+ * @param sample One sample's work (one batch).
+ * @param budget_ns The loop's time budget.
+ * @return The sample count to reserve.
+ */
+template <class Sample>
+[[nodiscard]] std::size_t samples_for_budget(Sample&& sample, std::uint64_t budget_ns) {
+    std::uint64_t best = ~std::uint64_t{0};
+    for (int i = 0; i < 3; ++i) {
+        const std::uint64_t a = now_ns();
+        sample();
+        best = std::min(best, now_ns() - a);
+    }
+    const std::uint64_t est = 2 * budget_ns / std::max<std::uint64_t>(1, best) + 64;
+    return static_cast<std::size_t>(std::min<std::uint64_t>(est, kMaxReservedSamples));
+}
 
 /*
  * One comparable measurement. `mode` distinguishes the path / module composition
