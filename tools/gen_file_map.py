@@ -65,7 +65,7 @@ PAGES = {
     "connection-config.md": ["conn_spec.hpp", "config_reader.hpp", "tls_profile.hpp"],
     "can.md": [
         "can.hpp", "can_framing.hpp", "can_reassembly.hpp", "can_tx_pool.hpp", "view_can.hpp",
-        "transport_can.hpp",
+        "transport_can.hpp", "inline_fn.hpp",
     ],
 }
 

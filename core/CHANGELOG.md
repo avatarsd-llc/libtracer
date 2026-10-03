@@ -46,6 +46,20 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `tr::wire::config_reader_t`; `tr::net::sink_slot_t<Fn>` → `tr::sink_slot_t<Fn>`. Code inside
   `namespace tr::graph` that named the view types unqualified must now qualify them as `view::`
   or add a using-declaration in its own `.cpp`.
+- **`can_link_t::rx_fn_t` is a heap-free `tr::inline_fn_t`, not a `std::function`
+  ([#1671](https://github.com/avatarsd-llc/libtracer/issues/1671)).** It was the last
+  `std::function` on a per-frame receive path. The new freestanding `libtracer/inline_fn.hpp`
+  adds `tr::inline_fn_t<R(Args...), Capacity>`, an owning stored callable whose storage is fixed
+  at compile time (ADR-0083 §9, rulings Q10 and Q18); `rx_fn_t` holds two pointers inline. A
+  callable that is larger, more strictly aligned, or not trivially copyable and destructible
+  fails a `static_assert` at the `on_receive` call; nothing falls back to the heap. Measured on
+  the receive seam: `sizeof(rx_fn_t)` drops from 32 to 24 B on x86-64 and from 16 to 12 B on
+  Cortex-M0 and esp32c6; seam `.text` drops from 270 to 78 B on Cortex-M0 and from 254 to 134 B
+  on esp32c6; a host copy-and-call per frame drops from about 6.5 to 2.0 ns.
+  **Migration:** a custom `can_link_t` keeps its `on_receive(rx_fn_t)` override and its
+  copy-then-call dispatch unchanged. A caller that registers its own callback with a lambda
+  capturing more than two pointers, or an owning object such as a `std::shared_ptr`, captures
+  one pointer to a struct (or to the owner) instead.
 - **The config member `reader_guard_t` is renamed `guard_t`, and a fragment that still defines
   the old name no longer compiles
   ([#1703](https://github.com/avatarsd-llc/libtracer/issues/1703)).** The guard serializes
