@@ -17,6 +17,7 @@
 #include <fstream>
 #include <iterator>
 #include <span>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -129,6 +130,37 @@ std::vector<ace_t> parsed_aces(std::span<const std::byte> wire) {
     const auto out = parse_acl<Policy>(*acl);
     if (!out.has_value()) return {};
     return *out;
+}
+
+/** @brief One `(NAME key, value)` pair of an ACE body, held before it is emitted. */
+struct pair_t {
+    std::string_view key;           /**< @brief The `NAME` key spelling. */
+    tr::wire::type_t vt;            /**< @brief The value TLV type. */
+    std::vector<std::byte> payload; /**< @brief The value payload. */
+};
+
+/** @brief The canonical, accepted ACE body: every key once, each at its full width. */
+std::vector<pair_t> canonical_pairs() {
+    using tr::wire::type_t;
+    return {{"type", type_t::VALUE, le(0, 1)},
+            {"flags", type_t::VALUE, le(kAceInherit, 1)},
+            {"subject", type_t::VALUE, as_bytes("alice")},
+            {"access_mask", type_t::VALUE, le(0x0000'0003, 4)},
+            {"expires_ns", type_t::VALUE, le(42, 8)}};
+}
+
+/** @brief Emit @p pairs as the `ACL{ ACL{…} }` blob of a single ACE. */
+std::vector<std::byte> one_ace_of(const std::vector<pair_t>& pairs) {
+    std::vector<std::byte> e;
+    for (const pair_t& p : pairs) add_pair(e, p.key, p.vt, p.payload);
+    return one_ace(e);
+}
+
+/** @brief True iff @p wire parses (any result) under `Policy`. */
+template <class Policy>
+bool accepts(std::span<const std::byte> wire) {
+    const auto acl = tr::wire::decode(wire);
+    return acl.has_value() && parse_acl<Policy>(*acl).has_value();
 }
 
 }  // namespace
@@ -486,8 +518,8 @@ int main() {
             rejects<allow_only_policy_t>(one_ace(e), "a `flags` paired with a NAME is rejected");
         }
 
-        // 8q. Duplicate detection for the three keys 8j/8k do not cover. Each `has_*`
-        //     flag is its own guard, so pinning two of five leaves three ablatable.
+        // 8q. Duplicate detection for the three keys 8j/8k do not cover, so every key's
+        //     seen-mask bit is pinned, not two of five.
         {
             std::vector<std::byte> e;
             add_pair(e, "type", type_t::VALUE, le(0, 1));
@@ -577,6 +609,99 @@ int main() {
         };
         check(encode_acl(aces) == vector_bytes("acl/acl-aces"),
               "encode_acl reproduces the acl/acl-aces vector byte-for-byte (u32 mask)");
+    }
+
+    // 11. Key-table sweep (#1799). The parser is one `{key, width}` table plus a seen
+    //     bitmask, so every row is driven through the SAME edges here, against this
+    //     test's own copy of the table: an accepted canonical body, then per key its
+    //     absence, every payload width 0..width+1, a non-VALUE value type and a repeat.
+    //     A row that drifts (a width, a required bit, the opaque-subject rule) fails
+    //     by name rather than through one hand-built blob.
+    {
+        using tr::wire::type_t;
+        /** @brief The oracle row: key index in canonical_pairs(), width, required. */
+        struct row_t {
+            std::size_t idx;   /**< @brief Index into canonical_pairs(). */
+            std::size_t width; /**< @brief Max payload bytes; 0 = opaque subject. */
+            bool required;     /**< @brief Absence rejects the ACE. */
+        };
+        constexpr row_t kRows[] = {
+            {0, 1, true}, {1, 1, false}, {2, 0, true}, {3, 4, true}, {4, 8, false}};
+
+        {
+            const std::vector<ace_t> got =
+                parsed_aces<allow_only_policy_t>(one_ace_of(canonical_pairs()));
+            check(got.size() == 1 && got[0].type == ace_type_t::ALLOW &&
+                      got[0].flags == kAceInherit && got[0].subject == as_bytes("alice") &&
+                      got[0].access_mask == 3 && got[0].expires_ns == 42,
+                  "11: the canonical body parses to the fields written");
+        }
+        for (const row_t& r : kRows) {
+            const std::string key{canonical_pairs()[r.idx].key};
+            {
+                std::vector<pair_t> b = canonical_pairs();
+                b.erase(b.begin() + static_cast<std::ptrdiff_t>(r.idx));
+                check(accepts<allow_only_policy_t>(one_ace_of(b)) == !r.required,
+                      "11: absence of `" + key + "` matches its required bit");
+            }
+            {
+                std::vector<pair_t> b = canonical_pairs();
+                b.push_back(b[r.idx]);
+                check(!accepts<allow_only_policy_t>(one_ace_of(b)),
+                      "11: a repeated `" + key + "` is rejected");
+            }
+            if (r.width == 0) {
+                // The opaque subject: any value type, any non-empty length.
+                for (const type_t vt : {type_t::VALUE, type_t::NAME}) {
+                    std::vector<pair_t> b = canonical_pairs();
+                    b[r.idx].vt = vt;
+                    b[r.idx].payload = as_bytes("a-subject-token-longer-than-eight-bytes");
+                    check(accepts<allow_only_policy_t>(one_ace_of(b)),
+                          "11: an opaque `subject` of any type and length parses");
+                    b[r.idx].payload.clear();
+                    check(!accepts<allow_only_policy_t>(one_ace_of(b)),
+                          "11: an empty `subject` is rejected under every type");
+                }
+                continue;
+            }
+            for (std::size_t w = 0; w <= r.width + 1; ++w) {
+                std::vector<pair_t> b = canonical_pairs();
+                b[r.idx].payload = le(0, w > 8 ? 8 : w);
+                if (w > 8) b[r.idx].payload.push_back(std::byte{0});
+                const bool ok = w >= 1 && w <= r.width;
+                check(accepts<allow_only_policy_t>(one_ace_of(b)) == ok,
+                      "11: `" + key + "` at width " + std::to_string(w) +
+                          (ok ? " parses" : " is rejected"));
+            }
+            {
+                std::vector<pair_t> b = canonical_pairs();
+                b[r.idx].vt = type_t::NAME;
+                check(!accepts<allow_only_policy_t>(one_ace_of(b)),
+                      "11: `" + key + "` paired with a NAME is rejected");
+            }
+        }
+        // Value gates on the two u8 keys, under each policy.
+        for (std::uint64_t t = 0; t <= 3; ++t) {
+            std::vector<pair_t> b = canonical_pairs();
+            b[0].payload = le(t, 1);
+            check(accepts<allow_only_policy_t>(one_ace_of(b)) == (t == 0),
+                  "11: allow_only accepts `type` " + std::to_string(t) + " iff ALLOW");
+            check(accepts<full_acl_policy_t>(one_ace_of(b)) == (t <= 1),
+                  "11: full accepts `type` " + std::to_string(t) + " iff ALLOW/DENY");
+        }
+        for (const std::uint64_t f : {0x00ull, 0x01ull, 0x02ull, 0x03ull, 0x80ull, 0xFFull}) {
+            std::vector<pair_t> b = canonical_pairs();
+            b[1].payload = le(f, 1);
+            check(accepts<full_acl_policy_t>(one_ace_of(b)) == (f <= kAceInherit),
+                  "11: `flags` " + std::to_string(f) + " parses iff within INHERIT");
+        }
+        // Near-miss spellings are unknown keys, never a table hit.
+        for (const std::string_view k : {"Type", "type ", "access", "subjects", ""}) {
+            std::vector<pair_t> b = canonical_pairs();
+            b.push_back({k, type_t::VALUE, le(0, 1)});
+            check(!accepts<allow_only_policy_t>(one_ace_of(b)),
+                  "11: the unknown key '" + std::string{k} + "' is rejected");
+        }
     }
 
     return tr::testing::summary("security_acl");
