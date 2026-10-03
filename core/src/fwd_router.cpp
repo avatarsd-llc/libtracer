@@ -1916,7 +1916,7 @@ fwd_router_t::label_dst_t fwd_router_t::route_label_forward(std::string_view inb
         // identical place. A second `allows` here would be a second implementation of one
         // normative sentence, which is exactly what §8.2's "exactly as the string form does"
         // forbids; the hop arm reuses `bound_egress` for the same reason one line below.
-        label_resolves_.fetch_add(1, std::memory_order_relaxed);
+        label_resolves_.bump();
         out_target = *target;
         return label_dst_t::TERMINUS;
     }
@@ -1940,7 +1940,7 @@ fwd_router_t::label_dst_t fwd_router_t::route_label_forward(std::string_view inb
     fwd_pre_t label_pre = pre;
     label_pre.strip_at = pre.dst_body_off + el.bytes;
     label_pre.valid = true;
-    label_resolves_.fetch_add(1, std::memory_order_relaxed);
+    label_resolves_.bump();
     // No mint on this leg, and it is not an omission: a labelled `dst` on a REPLY was already
     // refused by the opcode switch above, and §6.1 mints on the reply and only the reply. A
     // reply's `dst` is the request's ACCUMULATED `src`, which grows in mount runs on request

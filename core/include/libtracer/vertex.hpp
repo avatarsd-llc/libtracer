@@ -798,6 +798,22 @@ struct vertex_ext_t {
 using write_seq_t = std::uint32_t;
 
 /**
+ * @brief This build's `tr::rmw_counter_t` over @p T — native where `T` is lock-free on the
+ *        target, otherwise the guarded binding over @ref guard_t (#1697).
+ *
+ * The one place the binding rule is spelled, so every hot counter the library owns picks it the
+ * same way: one hardware RMW where the core has one (`amoadd.w` on rv32imac, `lock xadd` on
+ * x86-64), one section of the build's guard where it has none (rv32imc such as the ESP32-C3,
+ * Cortex-M0/M0+), and never a libatomic call. @ref kForceGuardedRmw selects the guarded
+ * binding on a host whose atomics are native, so that path is testable there.
+ *
+ * @tparam T An unsigned integer, at most a machine word wide.
+ */
+template <class T>
+using bound_rmw_counter_t =
+    ::tr::rmw_counter_t<T, guard_t, !kForceGuardedRmw && std::atomic<T>::is_always_lock_free>;
+
+/**
  * @brief The counter that carries `write_seq_t` — native where the width is lock-free,
  *        otherwise the guarded binding over @ref guard_t (#1715).
  *
@@ -806,9 +822,7 @@ using write_seq_t = std::uint32_t;
  * counter takes the guard anchored at that vertex's LKV slot, so the bump fuses into the
  * publish section (see `vertex_t::store`).
  */
-using write_seq_counter_t =
-    ::tr::rmw_counter_t<write_seq_t, guard_t,
-                        !kForceGuardedRmw && std::atomic<write_seq_t>::is_always_lock_free>;
+using write_seq_counter_t = bound_rmw_counter_t<write_seq_t>;
 
 /** @brief Declared here so @ref vertex_t can befriend the #1285 member-offset gate; defined
  *         just after the type it measures. */

@@ -274,6 +274,25 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `stream_endpoint_t` gains a constructor that takes the slot source. **Migration:** an
   application that injects a tight `memory.io` sizes it for the queue as well, up to eight
   records behind the one in flight.
+- **Diagnostic drop counters are word-wide atomics, so a 32-bit target links no libatomic
+  call for them ([#1697](https://github.com/avatarsd-llc/libtracer/issues/1697)).** On rv32,
+  the ESP32-C6 included, a 64-bit atomic is an `__atomic_*_8` call, which masks interrupts on
+  ESP-IDF. The storage behind `graph_t::delivery_drops`, `vertex_ceiling_refusals`,
+  `deferred_release_drops`, the TCP, UDP, WebSocket and CAN `drop_stats`, the stalled-send
+  count and the self-healing link's fail-fast drops is now `std::size_t`, per `core/STYLE.md`
+  §Introspection clause 5. The accessors still return `std::uint64_t`, so callers compile
+  unchanged. On a 64-bit host nothing changes. On a 32-bit target each counter wraps after
+  2^32 events instead of 2^64. The ESP32-C6 `full_node` image loses 600 B of flash and 8 B of
+  `.bss`, and its libtracer archive goes from 92 libatomic calls to 34; the 34 left are listed,
+  with their reasons, at their declarations.
+- **The router's labelled-hop count is the build's `rmw_counter_t`
+  ([#1697](https://github.com/avatarsd-llc/libtracer/issues/1697)).** It is the one counter the
+  label plane bumps on a success arm. The new alias `tr::graph::bound_rmw_counter_t<T>` spells
+  the binding rule once: native where `T` is lock-free, otherwise guarded by `guard_t`, and
+  forced to guarded by `kForceGuardedRmw`. `write_seq_counter_t` is now
+  `bound_rmw_counter_t<write_seq_t>`, which is the same type it was before. On x86-64 the bump
+  is the same `lock add`. On a core with no atomic RMW (ESP32-C3, Cortex-M0) it is one guard
+  section in place of `__atomic_fetch_add_4`.
 - **`vertex_handle_t`, `vertex_slot_t`, `kGenerationSaturated`, `saturating_next_generation` and
   `bound_generation_matches` move to the new leaf header `libtracer/vertex_handle.hpp`
   ([#1707](https://github.com/avatarsd-llc/libtracer/issues/1707)).** The leaf includes no graph
