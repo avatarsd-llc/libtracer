@@ -15,10 +15,11 @@
  *
  * Four armed windows: (1) one FWD *forward hop* — offset-dispatch + stack heads +
  * stack iov (ADR-0038 invariants #1/#2), hard-gated at ZERO allocations by CI
- * (`ZEROHEAP_MAX=0`); (2) one *terminus* resolve (ADR-0041) — REPORT-ONLY, since a
- * terminus may allocate (ADR-0039): the arena draws from the router's injected
- * memory seams (the default heap here, so every draw is counted and visible; since #588
- * the terminus ARENA draws from the router's nothrow `rx` block source, not from `mr_`);
+ * (`ZEROHEAP_MAX=0`), measured bare and again with an inbound observer installed (the
+ * in-place `wire::tlv_node_t` read, #1648) under the same gate; (2) one *terminus* resolve
+ * (ADR-0041) — REPORT-ONLY, since a terminus may allocate (ADR-0039): the arena draws from the
+ * router's injected memory seams (the default heap here, so every draw is counted and visible;
+ * since #588 the terminus ARENA draws from the router's nothrow `rx` block source, not from `mr_`);
  * (3) the *per-vertex steady-heap* probe (#361 §8) — REPORT-ONLY, LIVE usable-size
  * bytes a default STORED_VALUE leaf holds at steady state, and the increment one
  * small LKV write adds — the diet trend the gh-pages history tracks; (4) the
@@ -604,6 +605,29 @@ int main() {
         return 2;
     }
 
+    // --- observed forward hop (#1648), gated with the forward hop -------------
+    // The same hop with an inbound observer installed: ingress now hands the observer the
+    // FWD read in place (`wire::tlv_node_t`), validated as `decode` would and walked without
+    // building a tree. Before #1648 this window paid an owning `wire::decode` per frame.
+    std::size_t observed_bytes = 0;
+    router.on_inbound(
+        [](void* ctx, std::string_view, const tr::wire::tlv_node_t& fwd) {
+            for (const tr::wire::tlv_node_t child : fwd.children())
+                *static_cast<std::size_t*>(ctx) += child.bytes().size();
+        },
+        &observed_bytes);
+    router.on_frame("in", frame);  // warm outside the window
+    probe::window_t owin;
+    router.on_frame("in", frame);
+    const probe::counts_t oc = owin.result();
+    router.on_inbound(nullptr);
+    std::printf("RESULT zeroheap observed allocs=%zu frees=%zu bytes=%zu walked=%zu\n", oc.allocs,
+                oc.frees, oc.bytes, observed_bytes);
+    if (observed_bytes == 0) {
+        std::printf("FAIL: the observer never walked the frame — fixture broken\n");
+        return 2;
+    }
+
     // --- terminus mode (ADR-0041, REPORT-ONLY) --------------------------------
     // A terminus is ALLOWED to allocate (ADR-0039 §context-1); this window makes
     // the cost visible and bounded, not zero-gated: arena decode draws from the
@@ -1019,17 +1043,21 @@ int main() {
         return 1;
     }
 
-    // Optional hard gate: `ZEROHEAP_MAX=N` fails the run if the FORWARD hop allocs>N (the
+    // Optional hard gate: `ZEROHEAP_MAX=N` fails the run if the FORWARD hop — bare or with an
+    // inbound observer (#1648) — allocs>N (the
     // terminus + fanout_wide windows above are byte-gated / report-only). CI runs
     // `ZEROHEAP_MAX=0` — the forward splice is zero-alloc.
     if (const char* cap = std::getenv("ZEROHEAP_MAX")) {
         const auto max_allocs = static_cast<std::size_t>(std::strtoul(cap, nullptr, 10));
-        if (c.allocs > max_allocs) {
-            std::printf("ZEROHEAP: FAIL (forward allocs=%zu > max=%zu)\n", c.allocs, max_allocs);
+        if (c.allocs > max_allocs || oc.allocs > max_allocs) {
+            std::printf("ZEROHEAP: FAIL (forward allocs=%zu observed allocs=%zu > max=%zu)\n",
+                        c.allocs, oc.allocs, max_allocs);
             return 1;
         }
-        std::printf("ZEROHEAP: PASS (forward allocs=%zu <= max=%zu; fanout_wide bytes=%zu)\n",
-                    c.allocs, max_allocs, fanout_bytes);
+        std::printf(
+            "ZEROHEAP: PASS (forward allocs=%zu observed allocs=%zu <= max=%zu; fanout_wide "
+            "bytes=%zu)\n",
+            c.allocs, oc.allocs, max_allocs, fanout_bytes);
     }
     (void)term_allocs;
     return 0;

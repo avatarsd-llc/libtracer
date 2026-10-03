@@ -31,6 +31,46 @@ void write_le(std::vector<std::byte>& out, std::uint64_t v, std::size_t n) {
 }
 
 /**
+ * @brief Read a validated TLV's trailer values (timestamp, CRC) out of its bytes: the ONE reader
+ *        both the owning tree (`model`) and the in-place node (`tlv_node_t::trailer`) use.
+ *
+ * @param opt        The TLV's opt bits (which trailer fields exist, and their widths).
+ * @param bytes      The TLV's own bytes.
+ * @param trailer_at Offset of the first trailer byte: header + body length.
+ */
+std::optional<trailer_t> read_trailer(opt_t opt, std::span<const std::byte> bytes,
+                                      std::size_t trailer_at) noexcept {
+    if (!opt.ts && !opt.cr) return std::nullopt;
+    trailer_t trailer;
+    std::size_t at = trailer_at;
+    if (opt.ts) {
+        timestamp_t t;
+        t.relative = opt.tf;
+        if (opt.tf) {
+            t.value = static_cast<std::int32_t>(static_cast<std::uint32_t>(read_le(bytes, at, 4)));
+            at += 4;
+        } else {
+            t.value = static_cast<std::int64_t>(read_le(bytes, at, 8));
+            at += 8;
+        }
+        trailer.ts = t;
+    }
+    if (opt.cr) {
+        // CRC already verified by the grammar; the stored value is read only to model it.
+        crc_t c;
+        if (opt.cw) {
+            c.width = crc_t::width_t::CRC16_CCITT;
+            c.value = static_cast<std::uint32_t>(read_le(bytes, at, 2));
+        } else {
+            c.width = crc_t::width_t::CRC32C;
+            c.value = static_cast<std::uint32_t>(read_le(bytes, at, 4));
+        }
+        trailer.crc = c;
+    }
+    return trailer;
+}
+
+/**
  * @brief Model one validated header (grammar::parse_header, ADR-0048 §1) as a tlv_t: extract the
  *        payload span for an opaque node and read the (already-verified) trailer values into the
  *        owning tree.
@@ -41,39 +81,29 @@ tlv_t model(const grammar::header_t& h, std::span<const std::byte> bytes) {
     tlv_t tlv;
     tlv.type = h.type;
     tlv.opt = h.opt;
-
-    if (h.opt.ts || h.opt.cr) {
-        trailer_t trailer;
-        if (h.opt.ts) {
-            timestamp_t t;
-            t.relative = h.opt.tf;
-            if (h.opt.tf) {
-                t.value = static_cast<std::int32_t>(
-                    static_cast<std::uint32_t>(read_le(bytes, h.header + h.length, 4)));
-            } else {
-                t.value = static_cast<std::int64_t>(read_le(bytes, h.header + h.length, 8));
-            }
-            trailer.ts = t;
-        }
-        if (h.opt.cr) {
-            // CRC already verified in parse_header; read the stored value to model it.
-            const std::size_t crc_off = h.header + h.length + h.ts_size;
-            crc_t c;
-            if (h.opt.cw) {
-                c.width = crc_t::width_t::CRC16_CCITT;
-                c.value = static_cast<std::uint32_t>(read_le(bytes, crc_off, 2));
-            } else {
-                c.width = crc_t::width_t::CRC32C;
-                c.value = static_cast<std::uint32_t>(read_le(bytes, crc_off, 4));
-            }
-            trailer.crc = c;
-        }
-        tlv.trailer = trailer;
-    }
-
+    tlv.trailer = read_trailer(h.opt, bytes, h.header + h.length);
     if (!h.opt.pl) tlv.payload = bytes.subspan(h.header, h.length);
     return tlv;
 }
+
+/**
+ * @brief The validate-only sink for grammar::walk: `tlv_node_t::over` builds nothing, so the
+ *        walk's own inline stack is the whole cost of validating a frame (#1648). It keeps the
+ *        root's header, which the walk always visits first.
+ */
+struct validate_sink {
+    grammar::header_t root_{}; /**< @brief The root header, once visited. */
+    bool seen_ = false;        /**< @brief Set by the first (root) visit. */
+
+    void keep(const grammar::header_t& h) noexcept {
+        if (seen_) return;
+        root_ = h;
+        seen_ = true;
+    }
+    void on_leaf(const grammar::header_t& h, const grammar::span_cursor&) noexcept { keep(h); }
+    void on_open(const grammar::header_t& h, const grammar::span_cursor&) noexcept { keep(h); }
+    void on_close() noexcept {}
+};
 
 /**
  * @brief The owning-tree sink for grammar::walk (ADR-0048 §1): builds the `tlv_t` tree as the
@@ -107,27 +137,50 @@ struct owning_sink {
     }
 };
 
+/**
+ * @brief The one walk both span decoders run: `decode` (owning tree) and `tlv_node_t::over`
+ *        (nothing built) differ only in @p sink, so their acceptance cannot drift.
+ *
+ * The one structural descent lives in grammar::walk (ADR-0048 §1). The walk stack starts in
+ * these inline slots (a tuning knob sized for the typical FWD nesting, ~3-4 levels) and spills
+ * to `spill` for deeper frames — the INJECTED source since #873, defaulted to the process heap
+ * at both public doors. The RFC-0006 depth bound is therefore the caller's to set:
+ * `mem::null_source()` refuses the first spill and the walk answers TLV_NESTING_TOO_DEEP.
+ * (#588: the spill used to be a throwing pmr allocate.)
+ */
+template <class Sink>
+std::expected<void, err_t> walk_span(std::span<const std::byte> input, Sink& sink,
+                                     mem::block_source_t& spill) {
+    std::array<grammar::walk_frame_t<grammar::span_cursor>, 8> slots;
+    grammar::walk_stack_t<grammar::span_cursor> stack(slots, &spill);
+    return grammar::walk(grammar::span_cursor{input}, sink, stack);
+}
+
 }  // namespace
 
 std::expected<tlv_t, err_t> decode(std::span<const std::byte> input, mem::block_source_t& spill) {
-    // The one structural descent lives in grammar::walk (ADR-0048 §1); this sink
-    // only builds the owning tree. The walk stack starts in these inline slots
-    // (a tuning knob sized for the typical FWD nesting, ~3-4 levels) and spills
-    // to `spill` for deeper frames — the INJECTED source since #873, defaulted to
-    // the process heap so every existing caller is unchanged. The RFC-0006 depth
-    // bound is therefore the caller's to set: `mem::null_source()` refuses the
-    // first spill and the walk answers TLV_NESTING_TOO_DEEP.
-    // (#588: the spill used to be a throwing pmr allocate.)
-    //
-    // Only the STACK moves onto the seam. The owning tlv_t tree this sink builds
-    // holds std::vector children, which allocate on the global heap by construction
-    // — a caller that needs the whole decode bounded wants decode_into's arena.
+    // Only the walk STACK moves onto the seam. The owning tlv_t tree this sink builds holds
+    // std::vector children, which allocate on the global heap by construction — a caller
+    // that only reads wants `tlv_node_t::over`, and one that needs a bounded tree wants
+    // decode_into's arena.
     owning_sink sink;
-    std::array<grammar::walk_frame_t<grammar::span_cursor>, 8> slots;
-    grammar::walk_stack_t<grammar::span_cursor> stack(slots, &spill);
-    const auto r = grammar::walk(grammar::span_cursor{input}, sink, stack);
+    const auto r = walk_span(input, sink, spill);
     if (!r) return std::unexpected(r.error());
     return std::move(sink.result_);
+}
+
+std::expected<tlv_node_t, err_t> tlv_node_t::over(std::span<const std::byte> input,
+                                                  mem::block_source_t& spill) {
+    // `decode`'s walk with a sink that keeps only the root header: the conformance runner
+    // holds the two equal over the whole vector corpus.
+    validate_sink sink;
+    const auto r = walk_span(input, sink, spill);
+    if (!r) return std::unexpected(r.error());
+    return tlv_node_t(sink.root_, input);
+}
+
+std::optional<trailer_t> tlv_node_t::trailer() const noexcept {
+    return read_trailer(opt_, bytes_, header_ + length_);
 }
 
 std::vector<std::byte> encode(const tlv_t& tlv) {

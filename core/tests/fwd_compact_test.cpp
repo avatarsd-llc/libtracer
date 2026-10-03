@@ -148,11 +148,16 @@ int main() {
         std::vector<std::byte> subscribe_src;  // the accumulated return route = the delivery route
     } b_obs;
     router_b.on_inbound(
-        [](void* ctx, std::string_view in, const tlv_t& fwd) {
-            if (in == "down" && fwd.children.size() >= 3 && fwd.children[2].type == type_t::PATH) {
+        [](void* ctx, std::string_view in, const tr::wire::tlv_node_t& fwd) {
+            if (in != "down") return;
+            std::size_t i = 0;
+            for (const tr::wire::tlv_node_t c : fwd.children()) {
+                if (i++ != 2) continue;
+                if (c.type() != type_t::PATH) return;
                 auto* o = static_cast<b_obs_t*>(ctx);
                 const std::lock_guard lock(o->m);
-                o->subscribe_src = tr::wire::encode(fwd.children[2]);
+                o->subscribe_src.assign(c.bytes().begin(), c.bytes().end());
+                return;
             }
         },
         &b_obs);

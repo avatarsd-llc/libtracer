@@ -1255,6 +1255,13 @@ target_compile_definitions(tlv_arena_test PRIVATE
     LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
 add_test(NAME tlv_arena COMMAND tlv_arena_test)
 
+# #1648 — the in-place TLV walker (tlv_node_t / tlv_children_t): its surface and the
+# zero-allocation property, measured by this binary's own global operator-new counter.
+add_executable(tlv_children_test tlv_children_test.cpp)
+target_link_libraries(tlv_children_test PRIVATE libtracer)
+libtracer_test_warnings(tlv_children_test)
+add_test(NAME tlv_children COMMAND tlv_children_test)
+
 if(LIBTRACER_NET_PLANE)
     # Brick 4 (ADR-0038 §3 / ADR-0039) — per-connection pmr label tables incl. a
     # zero-global-heap lifecycle over a slab resource with a null upstream.

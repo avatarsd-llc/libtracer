@@ -811,8 +811,9 @@ class fwd_router_t {
 
     /** @brief Reply-terminus sink (@ref on_reply): @p ctx, then the FWD{REPLY} frame. */
     using reply_fn_t = void (*)(void* ctx, const view::rope_t& reply);
-    /** @brief Inbound-FWD observer (@ref on_inbound): @p ctx, inbound child, decoded FWD. */
-    using inbound_fn_t = void (*)(void* ctx, std::string_view inbound, const wire::tlv_t& fwd);
+    /** @brief Inbound-FWD observer (@ref on_inbound): @p ctx, inbound child, the FWD read in
+     *         place (a validated, non-owning @ref wire::tlv_node_t). */
+    using inbound_fn_t = void (*)(void* ctx, std::string_view inbound, const wire::tlv_node_t& fwd);
     /** @brief Raw-frame observer (@ref on_raw): @p ctx, inbound child, the whole frame. */
     using raw_fn_t = void (*)(void* ctx, std::string_view inbound,
                               std::span<const std::byte> frame);
@@ -848,10 +849,15 @@ class fwd_router_t {
     /**
      * @brief Set a read-only observer of every inbound FWD (observability/tests).
      *
-     * Invoked after decode with the inbound child name and the decoded FWD, before
-     * routing. Carries no routing semantics; used to assert the per-hop `dst`-shrink
-     * / `src`-grow invariant and as the seam where a per-hop `:acl` forward-right
-     * check (RFC-0004 §F) will later hang.
+     * Invoked with the inbound child name and the FWD, before routing. Carries no routing
+     * semantics; used to assert the per-hop `dst`-shrink / `src`-grow invariant and as the
+     * seam where a per-hop `:acl` forward-right check (RFC-0004 §F) will later hang.
+     *
+     * The FWD is handed over as a @ref wire::tlv_node_t (#1648): the whole frame validated
+     * exactly as `wire::decode` would, then read in place — observing allocates nothing for a
+     * frame nested no deeper than the walk's inline slots. The node borrows the inbound bytes,
+     * so it is valid only for the duration of the call; an observer that keeps anything
+     * copies it (`fwd.bytes()`, or `wire::decode` of those bytes for an owning tree).
      *
      * @param fn  Callback invoked on a transport receive thread.
      * @param ctx Opaque pointer handed back as @p fn's first argument.
