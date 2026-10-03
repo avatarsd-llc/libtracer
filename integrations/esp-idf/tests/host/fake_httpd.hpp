@@ -18,6 +18,7 @@
  */
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -188,6 +189,18 @@ class server_t {
     esp_err_t deliver_frame(int fd, std::span<const std::byte> body, bool final = true,
                             httpd_ws_type_t type = HTTPD_WS_TYPE_BINARY);
 
+    /**
+     * @brief Whether each @ref deliver_frame is part of a SUSTAINED ingress (ADR-0085).
+     *
+     * Off (the default), every delivery is an isolated event: once the handler returns,
+     * httpd would go back to `select()` with nothing readable and the core would idle, so
+     * the fake runs the idle hooks (@ref run_idle_hooks) after each frame. That is what a
+     * suite delivering frames one at a time models, and it keeps the link's drain budget
+     * out of every suite that is not about it. On, the hooks run only when a test calls
+     * @ref run_idle_hooks — a peer that never lets the socket run dry.
+     */
+    void set_sustained_ingress(bool sustained);
+
     /** @brief How many frames the link has successfully sent through the fake. */
     [[nodiscard]] std::size_t frames_sent() const;
 
@@ -330,10 +343,24 @@ class server_t {
     std::map<int, std::size_t> writes_;
     std::map<int, std::vector<std::byte>> wire_; /**< @brief See @ref wire. */
     bool queue_refusing_ = false;
+    std::atomic<bool> sustained_ingress_{false}; /**< @brief See set_sustained_ingress. */
     std::size_t queue_cap_ = 0;   /**< @brief 0 = unbounded; see set_queue_capacity. */
     std::size_t queue_drops_ = 0; /**< @brief Enqueues a full mbox refused. */
     std::uint64_t lru_clock_ = 0; /**< @brief httpd's `httpd_data::lru_counter`. */
 };
+
+/**
+ * @brief Run every idle hook installed on @p core once, as that core's idle task does on
+ *        each pass through its loop.
+ *
+ * The host has no idle task, so "the core has gone idle" happens exactly when a test says
+ * so. A link whose drain budget is spent stays parked until this is called (ADR-0085).
+ * @return How many hooks ran.
+ */
+std::size_t run_idle_hooks(unsigned core = 0);
+
+/** @brief Callers parked in the fake `xSemaphoreTake` right now — a link waiting for idle. */
+[[nodiscard]] std::size_t semaphore_waiters();
 
 /** @brief The one fake server; its address IS the `httpd_handle_t` the link adopts. */
 server_t& instance();

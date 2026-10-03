@@ -25,6 +25,9 @@ typedef int esp_err_t;
 #ifndef ESP_FAIL
 #define ESP_FAIL (-1) /**< @brief Generic failure. */
 #endif
+#ifndef ESP_ERR_NO_MEM
+#define ESP_ERR_NO_MEM 0x101 /**< @brief Out of memory, or a fixed table is full. */
+#endif
 #ifndef ESP_ERR_INVALID_ARG
 #define ESP_ERR_INVALID_ARG 0x102 /**< @brief An argument was not acceptable. */
 #endif

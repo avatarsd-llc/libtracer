@@ -575,6 +575,12 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Added
 
+- **`default_config_t::kRxDrainFrames` and `default_config_t::kRxDrainBytes` (with the derived
+  `tr::net::kRxDrainFrames` / `tr::net::kRxDrainBytes`), the ingress drain budget
+  ([ADR-0085](../docs/adr/0085-ingress-drain-budget-waits-for-the-idle-task-not-a-clock.md)).**
+  Defaults 32 frames and 32,768 bytes; `0` removes that budget. They bound how much a link's
+  receive context reads back to back before it waits for its core to go idle. The one reader is
+  the ESP-IDF `httpd_ws_link_t`; no core link reads them, so nothing changes on a host.
 - **`default_config_t::kHeapSmallBlockBytes` (and its derived `tr::graph::kHeapSmallBlockBytes`),
   the largest block the process-default heap backend draws for one segment
   ([#1768](https://github.com/avatarsd-llc/libtracer/issues/1768)).** Default 1,032 B, glibc's

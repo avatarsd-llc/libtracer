@@ -94,6 +94,7 @@ Statuses: `draft`, `proposed`, `in-comment`, `accepted`, `superseded`, `rejected
 | [ADR-0082](adr/0082-auth-subject-and-peer-named-are-decoupled-claims-default-stays-false.md) | The auth subject and `peer_named` are two different claims — who wrote this, versus where the peer appears in the graph — and the `peer_named` default stays `false` | accepted |  |  |
 | [ADR-0083](adr/0083-one-allocation-seam.md) | One allocation seam: every core allocation draws from one injected block source, placed by one module | accepted |  | [ADR-0039](adr/0039-pmr-memory-model-host-aligned-allocation.md) (part) |
 | [ADR-0084](adr/0084-remote-await-completes-from-a-receiver-side-waiter.md) | A remote AWAIT completes from a one-shot receiver-side waiter charged to the receiving link, and never holds that link's receive context | accepted |  |  |
+| [ADR-0085](adr/0085-ingress-drain-budget-waits-for-the-idle-task-not-a-clock.md) | A link's ingress drain is bounded by a compile-time budget, and a spent budget waits for the core's idle task, never for a clock | accepted |  |  |
 
 ## RFCs
 

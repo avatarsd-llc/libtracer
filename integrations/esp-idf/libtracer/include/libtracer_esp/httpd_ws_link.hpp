@@ -823,6 +823,17 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
          * the exposure the deadline exists for.
          */
         std::uint32_t auth_expired = 0;
+        /**
+         * @brief Times the receive path stopped reading because its drain budget was spent
+         *        and waited for its core's idle task to run (ADR-0085).
+         *
+         * Not a drop: the unread bytes stayed in the socket and were read after the wait.
+         * Zero on a link that never saturates its core. A count that tracks inbound traffic
+         * means a peer is sending faster than this node can serve and the TCP window is
+         * doing the pacing — the budget (`tr::net::kRxDrainFrames` /
+         * `tr::net::kRxDrainBytes`) is working, not failing.
+         */
+        std::uint32_t rx_drain_waits = 0;
     };
 
     /**
@@ -1374,6 +1385,19 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     // --- instance handlers (run on the httpd task) ---
     esp_err_t on_data_frame(httpd_req_t* req);  // recv one WS frame, (reassemble,) deliver
     /**
+     * @brief Charge one inbound frame of @p frame_bytes to the current DRAIN, first waiting
+     *        for this core's idle task to run if the drain's budget is already spent
+     *        (ADR-0085; httpd task only).
+     *
+     * A drain is the run of frames this link consumes while its core never idles. The
+     * budget is the build's `tr::net::kRxDrainFrames` / `tr::net::kRxDrainBytes`; either
+     * one spent ends the drain. The wait blocks the httpd task on a semaphore the core's
+     * idle hook gives, so the frame's payload, and everything queued behind it, stays in
+     * the socket until then, and TCP flow control holds the peer. No timer, no clock read.
+     * Compiled to nothing when both budgets are zero.
+     */
+    void pace_rx(std::size_t frame_bytes);
+    /**
      * @brief Turn @p fd into a peer slot: enforce `max_peers`, take a free or fresh slot,
      *        name it, stamp its identity and its authentication state (httpd task only;
      *        @ref peers_m_ must ALREADY be held).
@@ -1853,6 +1877,8 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     std::int64_t auth_deadline_us_ = 0;
     std::atomic<std::uint32_t> auth_rejected_{0};
     std::atomic<std::uint32_t> auth_expired_{0};
+    /** @brief See @ref stats_t::rx_drain_waits. Bumped on the httpd task. */
+    std::atomic<std::uint32_t> rx_drain_waits_{0};
     /**
      * @brief The periodic `esp_timer` that fires the deadline sweep, as an opaque pointer so
      *        this header names no `esp_timer` type; null when auth is not configured.
@@ -2110,6 +2136,13 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *         against @ref kDefaultRxScratchBytes, and zeroed if the allocation failed so
      *         the size and the pointer can never disagree. */
     std::size_t rx_scratch_bytes_ = 0;
+    /** @brief The idle-gate epoch the current drain began in (see @ref pace_rx). httpd
+     *         task only, like @ref rx_scratch_. */
+    std::uint32_t rx_drain_epoch_ = 0;
+    /** @brief Frames consumed in the current drain (see @ref pace_rx). */
+    std::size_t rx_drain_frames_ = 0;
+    /** @brief Payload bytes consumed in the current drain (see @ref pace_rx). */
+    std::size_t rx_drain_bytes_ = 0;
     /** @brief Once-allocated TX work-slot pool: claimed lock-free by sending tasks,
      *         released by the httpd task as each send drains. */
     std::unique_ptr<tx_slot_t[]> tx_pool_;

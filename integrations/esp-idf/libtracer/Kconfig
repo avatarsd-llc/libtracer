@@ -102,6 +102,39 @@ menu "libtracer"
             on silicon by constructing an IDF-native link and handing it to
             transport_vertex_t::provide_link.
 
+    config LIBTRACER_WS_SERVER_RX_DRAIN_FRAMES
+        int "WebSocket server: frames read per drain before waiting for idle (0 = no limit)"
+        depends on LIBTRACER_WS_SERVER
+        range 0 4096
+        default 32
+        help
+            How many inbound frames httpd_ws_link_t reads back to back, while its
+            core never goes idle, before it stops reading and waits until that
+            core's idle task has run once (ADR-0085). The unread bytes stay in
+            the socket, the TCP window closes and the peer is throttled by its
+            own stack: nothing is dropped, nothing is buffered, and no timer or
+            clock is involved. A link that is not saturating its core never
+            waits, because the count restarts each time the core idles.
+
+            Binds tr::graph::config_t::kRxDrainFrames. The default keeps the
+            longest idle-free stretch near 0.25 s at the ~7 ms per small request
+            measured on an ESP32-C6, well inside the 1 s minimum task watchdog.
+            0 removes the frame budget; with the byte budget also 0 the link
+            reads without pause, which on a core shared with the idle task lets
+            a peer that never stops sending starve it.
+
+    config LIBTRACER_WS_SERVER_RX_DRAIN_BYTES
+        int "WebSocket server: payload bytes read per drain before waiting for idle (0 = no limit)"
+        depends on LIBTRACER_WS_SERVER
+        range 0 1048576
+        default 32768
+        help
+            The byte half of LIBTRACER_WS_SERVER_RX_DRAIN_FRAMES: a drain ends when
+            either budget is spent. Frames bound a flood of small writes; bytes
+            bound a flood of large frames. The frame that crosses the line is
+            read whole. Binds tr::graph::config_t::kRxDrainBytes. The default is
+            the link's own per-frame cap, so one maximum-size frame is one drain.
+
     # WebSocket CLIENT timing (#1160). These three are the esp_ws_client_link_t recv
     # loop's cadence and its re-dial policy: POLICY, not derivations, and with no
     # per-link RAM behind them — so they are per-IMAGE Kconfig rather than constructor

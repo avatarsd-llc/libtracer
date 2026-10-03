@@ -19,6 +19,7 @@
 #include <sys/time.h>
 
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
@@ -32,9 +33,11 @@
 #include <utility>
 #include <vector>
 
+#include "esp_freertos_hooks.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 namespace tr::net {
@@ -172,6 +175,87 @@ constexpr std::size_t kStackHeadroomFloor =
  * a knob turn.
  */
 constexpr std::size_t kMaxFrameBytes = 32768;
+
+/** @brief Whether this build bounds a drain at all: either budget non-zero (ADR-0085). */
+constexpr bool kRxDrainPaced = kRxDrainFrames != 0 || kRxDrainBytes != 0;
+
+/**
+ * @brief One core's IDLE GATE: how many times its idle task has run, and the semaphore a
+ *        link whose drain budget is spent waits on until it runs again (ADR-0085).
+ *
+ * The idle task is the one task that runs only when nothing else on its core wants to, so
+ * "it has run" is the event a starved core is missing — no clock, no timer, no tick
+ * arithmetic. `epoch` has ONE writer, that core's idle hook, which is why it advances by a
+ * load and a store rather than an RMW (a libatomic call on a core without one, every idle
+ * iteration). `waiters` is the hook's test for "is anybody parked", so a gate nobody waits
+ * on costs the idle loop one store and one load.
+ *
+ * The pair is a Dekker handshake, both sides `seq_cst`: a waiter counts itself in, then
+ * re-reads `epoch`; the hook advances `epoch`, then reads `waiters`. Whichever goes second
+ * sees the other, so a waiter either finds the epoch already moved or is given the
+ * semaphore. A give nobody takes saturates the binary semaphore at one, and the waiter's
+ * loop re-tests the epoch, so a stale give costs one extra pass and never a missed wake.
+ */
+struct idle_gate_t {
+    std::atomic<std::uint32_t> epoch{0};   /**< @brief Idle-task iterations, mod 2^32. */
+    std::atomic<std::uint32_t> waiters{0}; /**< @brief Links parked on @ref sem right now. */
+    std::atomic<bool> hooked{false};       /**< @brief The idle hook is installed. */
+    StaticSemaphore_t sem_storage{};       /**< @brief @ref sem's storage: no heap, no failure. */
+    SemaphoreHandle_t sem = nullptr;       /**< @brief Given by the hook while a link waits. */
+};
+
+/** @brief One gate per core: a starved core is a per-core fact (portNUM_PROCESSORS). */
+std::array<idle_gate_t, portNUM_PROCESSORS> g_idle_gates;
+
+/**
+ * @brief Core @p Core's idle hook: advance its epoch and wake a parked link.
+ *
+ * Runs ON the idle task, which must never block: `xSemaphoreGive` does not. Answers true,
+ * so it never holds the core out of its low-power wait.
+ */
+template <std::size_t Core>
+bool on_core_idle() {
+    idle_gate_t& gate = g_idle_gates[Core];
+    gate.epoch.store(gate.epoch.load(std::memory_order_relaxed) + 1, std::memory_order_seq_cst);
+    if (gate.waiters.load(std::memory_order_seq_cst) != 0) (void)xSemaphoreGive(gate.sem);
+    return true;
+}
+
+/** @brief The hook of every core, indexed by core (the IDF hook takes no context). */
+template <std::size_t... Core>
+constexpr std::array<esp_freertos_idle_cb_t, sizeof...(Core)> idle_hooks(
+    std::index_sequence<Core...> /*cores*/) {
+    return {&on_core_idle<Core>...};
+}
+
+/**
+ * @brief Install every core's idle hook, once per process.
+ *
+ * Called from each link constructor; the first one installs, the rest find it done. The
+ * hooks are never removed: one store and one load per idle iteration is what a process
+ * that once served a link keeps paying, and removing them would race a link being torn
+ * down on one core against a hook running on another. A core whose hook table is full
+ * (IDF holds eight per core) is reported once and left UNPACED — a link must never wait
+ * on an idle hook that will not run.
+ */
+void install_idle_hooks() {
+    if constexpr (!kRxDrainPaced) return;
+    static const bool installed = [] {
+        constexpr auto hooks = idle_hooks(std::make_index_sequence<portNUM_PROCESSORS>{});
+        for (std::size_t core = 0; core < hooks.size(); ++core) {
+            idle_gate_t& gate = g_idle_gates[core];
+            gate.sem = xSemaphoreCreateBinaryStatic(&gate.sem_storage);
+            const bool ok = esp_register_freertos_idle_hook_for_cpu(
+                                hooks[core], static_cast<UBaseType_t>(core)) == ESP_OK;
+            if (!ok)
+                ESP_LOGE(kTag, "idle hook not installed on core %u: ingress unpaced",
+                         (unsigned)core);
+            gate.hooked.store(ok, std::memory_order_release);
+        }
+        return true;
+    }();
+    (void)installed;
+}
 
 /**
  * @brief Sockets reserved beyond the peer cap: httpd's internal working sockets
@@ -1260,6 +1344,7 @@ httpd_ws_link_t::httpd_ws_link_t(std::uint16_t bind_port, const httpd_ws_config_
       tx_large_slots_(config.tx_large.slots) {
     const std::size_t max_peers = config.max_peers;
     const std::uint32_t send_timeout_ms = config.send_timeout_ms;
+    install_idle_hooks();      // before any handler can run (ADR-0085)
     if (!open_gate()) return;  // ok() stays false; nothing was registered
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port = bind_port;
@@ -1333,6 +1418,7 @@ httpd_ws_link_t::httpd_ws_link_t(httpd_handle_t external, const char* uri_patter
       tx_large_slots_(config.tx_large.slots) {
     const std::size_t max_peers = config.max_peers;
     const std::uint32_t send_timeout_ms = config.send_timeout_ms;
+    install_idle_hooks();      // before any handler can run (ADR-0085)
     if (!open_gate()) return;  // ok() stays false; nothing was registered
     // The adopted server's httpd_config_t belongs to the caller and esp_http_server
     // exposes no reader for it, so the clamp uses IDF's default send_wait_timeout — the
@@ -2273,6 +2359,34 @@ httpd_ws_link_t::session_t* httpd_ws_link_t::claim_session(int fd, bool authenti
     return slot;
 }
 
+void httpd_ws_link_t::pace_rx(std::size_t frame_bytes) {
+    if constexpr (!kRxDrainPaced) return;
+    idle_gate_t& gate = g_idle_gates[static_cast<std::size_t>(xPortGetCoreID())];
+    if (!gate.hooked.load(std::memory_order_acquire)) return;
+    std::uint32_t epoch = gate.epoch.load(std::memory_order_seq_cst);
+    // The drain is the run of frames since this core last idled; an epoch that moved since
+    // the previous frame starts a new one. Otherwise a spent budget waits for the idle
+    // task: the waiter counts itself in, THEN re-reads the epoch (the handshake on
+    // idle_gate_t), so a hook that ran in between is seen and never slept through.
+    const bool spent = (kRxDrainFrames != 0 && rx_drain_frames_ >= kRxDrainFrames) ||
+                       (kRxDrainBytes != 0 && rx_drain_bytes_ >= kRxDrainBytes);
+    if (epoch == rx_drain_epoch_ && spent) {
+        rx_drain_waits_.fetch_add(1, std::memory_order_relaxed);
+        gate.waiters.fetch_add(1, std::memory_order_seq_cst);
+        while (gate.epoch.load(std::memory_order_seq_cst) == epoch)
+            (void)xSemaphoreTake(gate.sem, portMAX_DELAY);
+        gate.waiters.fetch_sub(1, std::memory_order_seq_cst);
+        epoch = gate.epoch.load(std::memory_order_seq_cst);
+    }
+    if (epoch != rx_drain_epoch_) {
+        rx_drain_epoch_ = epoch;
+        rx_drain_frames_ = 0;
+        rx_drain_bytes_ = 0;
+    }
+    ++rx_drain_frames_;
+    rx_drain_bytes_ += frame_bytes;
+}
+
 esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
     httpd_ws_frame_t frame = {};
     // Pass 1 (max_len 0): read the header only — fills frame.len / frame.type. The
@@ -2286,6 +2400,10 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
         note_rx_oversize(frame.len);
         return ESP_FAIL;  // abusive frame => drop the peer
     }
+    // The drain budget (ADR-0085). After the header, so the frame's size is known and is
+    // charged whole; before the payload, so a spent budget leaves every byte of it — and
+    // of whatever follows — in the socket while this task waits for its core to idle.
+    pace_rx(frame.len);
 
     // Pass 2: ALWAYS drain the payload — even a frame type we ignore must be consumed,
     // or its bytes stay in the stream and the next recv reads them as a frame header
@@ -3359,6 +3477,7 @@ httpd_ws_link_t::stats_t httpd_ws_link_t::stats() const noexcept {
     s.rx_dropped_pool = rx_dropped_pool_.load(std::memory_order_relaxed);
     s.auth_rejected = auth_rejected_.load(std::memory_order_relaxed);
     s.auth_expired = auth_expired_.load(std::memory_order_relaxed);
+    s.rx_drain_waits = rx_drain_waits_.load(std::memory_order_relaxed);
     return s;
 }
 

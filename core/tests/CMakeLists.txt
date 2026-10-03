@@ -798,6 +798,26 @@ if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd
     set_tests_properties(httpd_ws_counters_traffic_stats
         PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
 
+    # ADR-0085 — the ingress DRAIN BUDGET. A sustained ingress is read for one budget, then
+    # the httpd thread parks on the idle gate with the next payload unread until the fake's
+    # idle hooks run; the test steps "the core idled" by hand, so the bound is counted, not
+    # timed.
+    add_executable(httpd_ws_drain_budget_test
+        "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_drain_budget_test.cpp"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
+        "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
+    target_include_directories(httpd_ws_drain_budget_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        "${LIBTRACER_ESP_DIR}/libtracer/include")
+    target_link_libraries(httpd_ws_drain_budget_test PRIVATE libtracer)
+    target_link_options(httpd_ws_drain_budget_test PRIVATE "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+    libtracer_test_warnings(httpd_ws_drain_budget_test)
+    add_test(NAME httpd_ws_drain_budget COMMAND httpd_ws_drain_budget_test)
+    # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent).
+    set_tests_properties(httpd_ws_drain_budget
+        PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+
     # #955 — what the link owes an ADOPTED server. The facts none of the suites above can
     # see are server-level: the `httpd_config_t` a `httpd_start` was given (the real server
     # keeps it private, which is precisely why the adopting ctor cannot check it) and each
@@ -2332,6 +2352,7 @@ set(LIBTRACER_BUS_TESTS
     httpd_ws_auth
     httpd_ws_close_peer
     httpd_ws_departure_cost
+    httpd_ws_drain_budget
     httpd_ws_eviction_lock
     httpd_ws_fanout_alloc
     httpd_ws_fanout_wait

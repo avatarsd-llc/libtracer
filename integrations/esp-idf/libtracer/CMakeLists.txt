@@ -370,6 +370,19 @@ if(CONFIG_LIBTRACER_SELF_HEAL_WORKER_STACK)
 else()
     set(LIBTRACER_SELF_HEAL_WORKER_STACK 0)
 endif()
+# Ingress drain budget (ADR-0085). DEFINED, not truthy: 0 is a legal value (no budget) and
+# must not fall back to the default. Absent — the early pass, or a build without the WS
+# server — binds the core defaults, which only httpd_ws_link_t reads.
+if(DEFINED CONFIG_LIBTRACER_WS_SERVER_RX_DRAIN_FRAMES)
+    set(LIBTRACER_RX_DRAIN_FRAMES ${CONFIG_LIBTRACER_WS_SERVER_RX_DRAIN_FRAMES})
+else()
+    set(LIBTRACER_RX_DRAIN_FRAMES 32)
+endif()
+if(DEFINED CONFIG_LIBTRACER_WS_SERVER_RX_DRAIN_BYTES)
+    set(LIBTRACER_RX_DRAIN_BYTES ${CONFIG_LIBTRACER_WS_SERVER_RX_DRAIN_BYTES})
+else()
+    set(LIBTRACER_RX_DRAIN_BYTES 32768)
+endif()
 set(LIBTRACER_CONFIG_OVERRIDE_PATH
     "${CMAKE_CURRENT_BINARY_DIR}/generated/include/libtracer/config_override.hpp")
 set(LIBTRACER_CONFIG_OVERRIDE_TEXT
@@ -397,6 +410,8 @@ struct esp_config_t : default_config_t {
     static constexpr bool kBusLinks = ${LIBTRACER_BUS_LINKS};
     static constexpr bool kSelfHealLinks = ${LIBTRACER_SELF_HEAL_LINKS};
     static constexpr std::size_t kSelfHealWorkerStackBytes = ${LIBTRACER_SELF_HEAL_WORKER_STACK};
+    static constexpr std::size_t kRxDrainFrames = ${LIBTRACER_RX_DRAIN_FRAMES};
+    static constexpr std::size_t kRxDrainBytes = ${LIBTRACER_RX_DRAIN_BYTES};
     static constexpr std::size_t kShareThresholdBytes = ~std::size_t{0};
     static constexpr std::size_t kSizeClasses[] = {~std::size_t{0}};
 ${LIBTRACER_SLOT_BINDING}};

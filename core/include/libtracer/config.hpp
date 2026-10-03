@@ -689,6 +689,52 @@ struct default_config_t {
     static constexpr std::size_t kSelfHealWorkerStackBytes = 0;
 
     /**
+     * @brief Frames a link's receive context may consume back to back before it waits for
+     *        its core to go idle once; `0` = no frame budget (ADR-0085).
+     *
+     * A receive context that always finds more bytes waiting never blocks, so on a core it
+     * shares with the idle task a peer that keeps sending keeps that core busy for as long
+     * as it likes. On ESP-IDF that is the IDLE task's watchdog: the board resets. The budget
+     * bounds one DRAIN, which is the run of frames a receive context consumes without its
+     * core going idle in between. When it is spent, the link stops reading and waits until
+     * the core's idle task has run. The unread bytes stay in the socket, the TCP window
+     * closes and the peer's own stack throttles it (ADR-0081 §2): no frame is dropped, none
+     * is buffered by the library, and nothing measures time. The drain counter restarts
+     * whenever the core idles on its own, so a link that is not saturated never waits.
+     *
+     * Its one reader is the ESP-IDF `httpd_ws_link_t`, whose receive context is the
+     * `esp_http_server` task. Hosted links read the socket from their own thread under a
+     * preemptive OS scheduler and do not consult it.
+     *
+     * **Default 32 — sized against the watchdog, not against throughput.** The longest
+     * stretch the idle task can now be kept out is one budget of frames plus whatever
+     * higher-priority work follows it. At the ~7.3 ms of board time per small request
+     * measured on an ESP32-C6, 32 frames is about 0.25 s, a quarter of the shortest task
+     * watchdog IDF offers (1 s) and a twentieth of its default (5 s). Each wait costs the
+     * time until the core idles, which on a link that is the only load is the time the
+     * Wi-Fi and TCP/IP tasks need to settle; per 32 frames that is a small share of the
+     * burst. A target whose frames are much dearer than that lowers it. Override fragment:
+     * `static constexpr std::size_t kRxDrainFrames = 16;`
+     */
+    static constexpr std::size_t kRxDrainFrames = 32;
+
+    /**
+     * @brief Payload bytes a link's receive context may consume back to back before it waits
+     *        for its core to go idle once; `0` = no byte budget (ADR-0085).
+     *
+     * The byte half of @ref kRxDrainFrames, with the same reader, the same wait and the same
+     * reset. Frames are what a small-write flood costs; bytes are what a large-frame flood
+     * costs, where every frame is copied and decoded. A drain ends when EITHER budget is
+     * spent. The frame that crosses the line is read whole (a frame is never split), so one
+     * drain consumes at most this many bytes plus one frame.
+     *
+     * **Default 32,768** — the ESP-IDF link's own per-frame cap, so one maximum-size frame
+     * is one drain, and about six default lwIP receive windows. Override fragment:
+     * `static constexpr std::size_t kRxDrainBytes = 16384;`
+     */
+    static constexpr std::size_t kRxDrainBytes = 32768;
+
+    /**
      * @brief Whether @ref tr::graph::graph_t carries its two INSTRUMENTATION counters —
      *        `ancestor_walks()` and `target_canonical_resolves()` (#1664).
      *
@@ -1022,5 +1068,23 @@ inline constexpr bool kAllowInsecureTls = tr::graph::config_t::kAllowInsecureTls
  */
 inline constexpr std::size_t kSelfHealWorkerStackBytes =
     tr::graph::config_t::kSelfHealWorkerStackBytes;
+
+/**
+ * @brief Frames a receive context consumes back to back before it waits for its core to
+ *        idle; `0` = no frame budget.
+ *
+ * The transport plane's spelling of @ref tr::graph::default_config_t::kRxDrainFrames, which
+ * carries the rationale. Its one consumer is the ESP-IDF `httpd_ws_link_t`.
+ */
+inline constexpr std::size_t kRxDrainFrames = tr::graph::config_t::kRxDrainFrames;
+
+/**
+ * @brief Payload bytes a receive context consumes back to back before it waits for its core
+ *        to idle; `0` = no byte budget.
+ *
+ * The transport plane's spelling of @ref tr::graph::default_config_t::kRxDrainBytes, which
+ * carries the rationale. Its one consumer is the ESP-IDF `httpd_ws_link_t`.
+ */
+inline constexpr std::size_t kRxDrainBytes = tr::graph::config_t::kRxDrainBytes;
 
 }  // namespace tr::net
