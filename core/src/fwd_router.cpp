@@ -1021,7 +1021,8 @@ void fwd_router_t::reclaim_refused_route(std::string_view inbound_name,
     (void)graph_.evict_route_edges(inbound_name, frame.subspan(ref->off, ref->len));
 }
 
-bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_source_t* rx) {
+bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_source_t* rx,
+                             link_kind_t kind) {
     // ADR-0063 §3: serialize control-plane writers. The registry's scan-then-append and the
     // child_rx_ deque's emplace_back are both non-atomic, and two creates arriving on two
     // different transports' receive threads are genuinely concurrent. Readers take nothing.
@@ -1049,6 +1050,11 @@ bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_sou
     // tell the caller so. Refusing HERE — before `set_receiver` — is what keeps the failure
     // total: nothing is wired, so there is no ghost child audible on its transport but
     // resolvable by no `dst` and removable by no `remove_child`.
+    //
+    // The link's catalog identity (#1650) is interned FIRST, so its one control-plane append
+    // happens before anything is registered. Interned once here, every write the child carries
+    // hands the graph a pointer and nothing else; stored on both arms below, before publication.
+    const link_kind_t* const interned_kind = intern_kind(kind);
     if (!registry_.add(name, link)) return false;
     // Capability-matched receiver (ADR-0042 §1 / ADR-0044): a BUS link delivers
     // frames tagged with the SENDING peer's name, which becomes the hop's inbound
@@ -1101,6 +1107,7 @@ bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_sou
         // registration and not only the bus one, because ADR-0082 rules the subject a
         // separate claim from addressing: it has to be askable of a FLAT child too.
         bctx.link.store(&link, std::memory_order_relaxed);
+        bctx.kind.store(interned_kind, std::memory_order_relaxed);
         // The BUS tier's per-peer LINK-TOKEN cache (#1417). Allocated on this name's first
         // bus registration and REUSED — never replaced — on every later one, so a lock-free
         // reader on the receive thread can hold its address across a re-add. `acquire_ctx`
@@ -1163,6 +1170,7 @@ bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_sou
     // a second one a reader might still be standing on.
     ctx.peer_tokens.store(nullptr, std::memory_order_relaxed);
     ctx.link.store(&link, std::memory_order_relaxed);  // the subject seam's door (#375 Part 2)
+    ctx.kind.store(interned_kind, std::memory_order_relaxed);  // the link-kind claim (#1650)
     // The bound-path join (RFC-0024 §5.1), resolved ONCE per registration: the child's mount
     // run IS the canonical key of its connection vertex, so this is one map lookup of bytes
     // already in hand. A child whose vertex does not exist yet keeps `kNoConnSlot` and is
@@ -1442,6 +1450,19 @@ std::uint64_t fwd_router_t::next_label_peer_bits() noexcept {
     // re-added child's predecessor cannot be impersonated.
     const std::uint32_t gen = label_peer_seq_++;
     return (static_cast<std::uint64_t>(gen) << 32);
+}
+
+const link_kind_t* fwd_router_t::intern_kind(link_kind_t kind) {
+    if (kind.kind.empty()) return nullptr;
+    for (const kind_rec_t& r : kinds_) {
+        if (r.view.is(kind.kind, kind.role)) return &r.view;
+    }
+    // A miss appends, at most once per distinct pair — the same control-plane allocation
+    // `acquire_ctx` makes for a fresh name, and bounded by the catalog, not by traffic.
+    kind_rec_t& r = kinds_.emplace_back();
+    r.bytes.assign(kind.kind);
+    r.view = link_kind_t{.kind = r.bytes, .role = kind.role};
+    return &r.view;
 }
 
 void fwd_router_t::publish_ctx(child_rx_ctx_t& ctx) noexcept {
@@ -2842,7 +2863,8 @@ void fwd_router_t::resolve_terminus(std::string_view inbound_name, std::span<con
     // The handle is the bus seam's when there is one and the FLAT link's in-flight peer
     // otherwise, so a per-writer subject is reachable at either setting of `peer_named`; the
     // ctx rides along as the opaque token the router's own subject supplier reads back.
-    const graph::inbound_ref_t inbound{inbound_name, terminus_peer(inbound_ctx, peer), inbound_ctx};
+    const graph::inbound_ref_t inbound{inbound_name, terminus_peer(inbound_ctx, peer), inbound_ctx,
+                                       terminus_kind(inbound_ctx)};
     auto reply = resolver_.resolve(*arena, inbound, frame_view, dst_label_target);
     if (!reply) {  // structurally non-request / malformed ⇒ drop
         count_drop(malformed_rx_);
@@ -2906,7 +2928,8 @@ void fwd_router_t::resolve_terminus_rope(std::string_view inbound_name, view::ro
     // the reverse, and that misreading nearly justified deleting the tier.) Reply routes
     // back over the inbound link, its dst the request's accumulated src, as at the arena
     // terminus.
-    const graph::inbound_ref_t inbound{inbound_name, terminus_peer(inbound_ctx, peer), inbound_ctx};
+    const graph::inbound_ref_t inbound{inbound_name, terminus_peer(inbound_ctx, peer), inbound_ctx,
+                                       terminus_kind(inbound_ctx)};
     auto reply = resolver_.resolve(*view, inbound, nullptr, dst_label_target);
     if (!reply) {  // structurally non-request / malformed ⇒ drop
         count_drop(malformed_rx_);
@@ -3326,7 +3349,8 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
                 return;
             }
             value.append(copy->only());
-            if (graph_.write(*rb.target, std::move(value), caller).has_value()) {
+            if (graph_.write(*rb.target, std::move(value), caller, terminus_kind(inbound_ctx))
+                    .has_value()) {
                 if (const auto sink = delivery_.get(); sink.fn != nullptr)
                     observe_compact_delivery(handles_, label_src_, sink.fn, sink.ctx, inbound_name,
                                              label, payload_bytes);
@@ -3365,7 +3389,7 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
         }
         // Same caller context as the warm arm above (#974): the cold and warm halves of one
         // flow must not disagree about who is writing.
-        if (deliver_local(binding.local_route, payload_bytes, caller)) {
+        if (deliver_local(binding.local_route, payload_bytes, caller, terminus_kind(inbound_ctx))) {
             if (const auto v = resolve_route_vertex(binding.local_route)) {
                 resolved_binding_t fill = rb;
                 fill.warm = true;
@@ -3453,7 +3477,8 @@ std::optional<graph::vertex_handle_t> fwd_router_t::resolve_route_vertex(
 }
 
 bool fwd_router_t::deliver_local(std::span<const std::byte> route_path,
-                                 std::span<const std::byte> payload, std::string_view caller) {
+                                 std::span<const std::byte> payload, std::string_view caller,
+                                 const link_kind_t* link) {
     // Through the SAME helper the memoized handle is resolved by — so the cold path and the
     // cached path cannot disagree about which vertex a label names. Two decode+find copies
     // would be two sources of truth, which is the shape #516 turned out to be.
@@ -3482,7 +3507,7 @@ bool fwd_router_t::deliver_local(std::span<const std::byte> route_path,
     // @p caller is the ACL subject context (#974) — the inbound link's NAME on the COMPACT
     // path, matching what the full-route FWD{WRITE} presents. It is a required parameter
     // precisely so a future delivery path cannot land here unattributed by omission.
-    return graph_.write(*v, *payload_view, caller).has_value();
+    return graph_.write(*v, *payload_view, caller, link).has_value();
 }
 
 graph::wire_target_split_t fwd_router_t::split_subscriber_target(

@@ -375,7 +375,7 @@ originate the **wires** ([#491]).
 
 ### Connection settings are transport-private
 
-`conn_settings_t` (`core/include/libtracer/transport_factory.hpp:conn_settings_t`) and `conn_role_t` (`core/include/libtracer/transport_factory.hpp:conn_role_t`) are
+`conn_settings_t` (`core/include/libtracer/transport_factory.hpp:conn_settings_t`) and `conn_role_t` (`core/include/libtracer/link_kind.hpp:enum class conn_role_t`) are
 a **device-private `:settings` facet** of a connection vertex
 ([ADR-0021 — the colon-field plane is the vertex ioctl](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0021-colon-field-plane-is-the-vertex-ioctl.md)
 draws the standard / device-private line). They live on the `tr::net` leaf record and are **never**

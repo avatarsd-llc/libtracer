@@ -1303,6 +1303,14 @@ if(LIBTRACER_NET_PLANE)
     target_link_libraries(fwd_two_mount_test PRIVATE libtracer)
     libtracer_test_warnings(fwd_two_mount_test)
     add_test(NAME fwd_two_mount COMMAND fwd_two_mount_test)
+
+    # #1650: the admission context's LINK claim — a filter sees the transport-catalog
+    # (kind, role) of the link a write arrived on, so the same FWD{WRITE} can be admitted from
+    # a dialled peer link and refused from a session a ws listener accepted.
+    add_executable(admission_link_kind_test admission_link_kind_test.cpp)
+    target_link_libraries(admission_link_kind_test PRIVATE libtracer)
+    libtracer_test_warnings(admission_link_kind_test)
+    add_test(NAME admission_link_kind COMMAND admission_link_kind_test)
 endif()
 
 # M1 — conformance harness (links the built library).

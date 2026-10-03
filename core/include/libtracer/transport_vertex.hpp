@@ -43,6 +43,7 @@
 
 #include "libtracer/graph.hpp"
 #include "libtracer/key_view.hpp"
+#include "libtracer/link_kind.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/thread_id.hpp"

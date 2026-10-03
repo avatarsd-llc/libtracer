@@ -43,6 +43,7 @@ INPUT                  = core/include/libtracer/config.hpp \
                          core/include/libtracer/key_view.hpp \
                          core/include/libtracer/path.hpp \
                          core/include/libtracer/peer_handle.hpp \
+                         core/include/libtracer/link_kind.hpp \
                          core/include/libtracer/link_id.hpp \
                          core/include/libtracer/thread_id.hpp \
                          core/include/libtracer/transport.hpp \
