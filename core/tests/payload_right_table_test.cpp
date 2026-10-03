@@ -18,6 +18,11 @@
  *
  * Every refusal is also counted: the gate did not move, so the single-sited
  * `delivery_drops_t::denied` is what tallies a right-table denial too.
+ *
+ * The same registration carries the endpoint's other control declaration, its RFC-0014
+ * Amendment 3 `conn:schema` catalog (#1815): a module with none answers the empty `SETTINGS`;
+ * a module that declares one has it served inside that `SETTINGS`, byte-exact, and refuses a
+ * `SPEC` whose config does not conform — each with its ablation on a catalog-less module.
  */
 
 #include <cstddef>
@@ -302,6 +307,200 @@ void test_catalog_envelope_is_an_empty_settings() {
           "the second is an EMPTY SETTINGS — the conforming degenerate catalog");
 }
 
+/** @brief How many times the catalog tests' factory ran — a refusal must leave it unmoved. */
+int g_catalog_factory_runs = 0;
+
+/** @brief A `label` record member, as a module's verbatim descriptor bytes. */
+constexpr std::byte kTlsLabel[] = {
+    std::byte{0x02}, std::byte{0x00}, std::byte{0x05}, std::byte{0x00},  // NAME, len 5
+    std::byte{'l'},  std::byte{'a'},  std::byte{'b'},  std::byte{'e'},  std::byte{'l'},
+    std::byte{0x02}, std::byte{0x00}, std::byte{0x03}, std::byte{0x00},  // NAME, len 3
+    std::byte{'T'},  std::byte{'L'},  std::byte{'S'},
+};
+
+/** @brief A module's static catalog: two universal keys and one kind-private key. */
+constexpr tr::net::conn_key_t kCatalog[] = {
+    {.name = "addr", .dtype = tr::net::conn_dtype_t::UTF8, .required = true},
+    {.name = "port", .dtype = tr::net::conn_dtype_t::U16, .required = true},
+    {.name = "tls", .dtype = tr::net::conn_dtype_t::UTF8, .descriptor = kTlsLabel},
+};
+
+/** @brief A second, different catalog — for the one-catalog-per-endpoint refusal. */
+constexpr tr::net::conn_key_t kOtherCatalog[] = {
+    {.name = "addr", .dtype = tr::net::conn_dtype_t::UTF8},
+};
+
+/** @brief Register the counting `cat` kind and declare `cat-client` with @p catalog. */
+tr::graph::result_t<void> declare_catalog_module(transport_vertex_t& net,
+                                                 tr::net::conn_catalog_t catalog) {
+    net.register_transport_type(
+        "cat",
+        [](const tr::net::conn_settings_t&,
+           const tr::wire::tlv_t*) -> tr::graph::result_t<std::unique_ptr<tr::net::transport_t>> {
+            ++g_catalog_factory_runs;
+            return std::make_unique<dead_sock_t>();
+        },
+        tr::net::transport_kind_traits_t{.self_heal_dial = false, .delivers_ropes = false});
+    return net.register_module("cat-client", "cat", conn_role_t::DIAL, catalog);
+}
+
+/** @brief The flattened bytes of a successful read, or empty. */
+std::vector<std::byte> read_bytes(graph_t& node, const char* path) {
+    const auto r = node.read(path_t(path));
+    if (!r) return {};
+    const tr::view::view_t flat = (**r).flatten();
+    const std::span<const std::byte> b = flat.bytes();
+    return {b.begin(), b.end()};
+}
+
+/** @brief Whether a write was refused with exactly @p want. */
+bool refused(const tr::graph::result_t<void>& r, status_t want) {
+    return !r.has_value() && r.error() == want;
+}
+
+/**
+ * @brief #1815: a declared catalog is served inside the Amendment 3 envelope, byte-exact, as
+ *        one RFC-0013 §B per-key record per key.
+ */
+void test_declared_catalog_is_served() {
+    std::printf("\nAmendment 3: a declared catalog is the content of the SETTINGS:\n");
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    check(declare_catalog_module(net, kCatalog).has_value(), "the module declares its catalog");
+
+    // Built independently of the encoder under test, from the RFC-0013 §B record shape.
+    const auto record = [](std::vector<std::byte>& out, std::string_view key,
+                           std::string_view dtype, bool required,
+                           std::span<const std::byte> extra) {
+        std::vector<std::byte> body;
+        tr::wire::emit_name(body, "dtype");
+        tr::wire::emit_name(body, dtype);
+        if (required) {
+            tr::wire::emit_name(body, "required");
+            const std::byte one{1};
+            tr::wire::emit_tlv(body, type_t::VALUE, opt_t{}, std::span<const std::byte>(&one, 1));
+        }
+        body.insert(body.end(), extra.begin(), extra.end());
+        tr::wire::emit_name(out, key);
+        tr::wire::emit_tlv(out, type_t::SETTINGS, opt_t{.pl = true}, body);
+    };
+    std::vector<std::byte> catalog;
+    record(catalog, "addr", "utf8", true, {});
+    record(catalog, "port", "u16", true, {});
+    record(catalog, "tls", "utf8", false, kTlsLabel);
+    std::vector<std::byte> point_body;
+    tr::wire::emit_name(point_body, "conn");
+    tr::wire::emit_tlv(point_body, type_t::SETTINGS, opt_t{.pl = true}, catalog);
+    std::vector<std::byte> expected;
+    tr::wire::emit_tlv(expected, type_t::POINT, opt_t{.pl = true}, point_body);
+
+    check(read_bytes(node, "/net/cat-client/conn:schema") == expected,
+          "read conn:schema = POINT{NAME \"conn\", SETTINGS{addr, port, tls records}}");
+}
+
+/**
+ * @brief #1815: a `SPEC` whose config fails the declared catalog is refused `TYPE_MISMATCH`
+ *        at the write, before any factory runs; a conforming one creates.
+ */
+void test_declared_catalog_validates_the_spec() {
+    std::printf("\nRFC-0014 §2: a SPEC is validated against the declared catalog:\n");
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    (void)declare_catalog_module(net, kCatalog);
+    const auto endpoint = node.find(path_t::parse("/net/cat-client/conn")->key());
+    check(endpoint.has_value(), "the endpoint exists");
+    if (!endpoint) return;
+    g_catalog_factory_runs = 0;
+
+    const auto write = [&](tr::net::conn_spec_t& spec) {
+        return node.write(*endpoint, spec.view());
+    };
+
+    {
+        tr::net::conn_spec_t spec("missing");
+        spec.kind("cat").addr("203.0.113.1");
+        check(refused(write(spec), status_t::TYPE_MISMATCH),
+              "a required key absent (port) => TYPE_MISMATCH");
+    }
+    {
+        tr::net::conn_spec_t spec("wide");
+        spec.kind("cat").addr("203.0.113.1").u32("port", 9);
+        check(refused(write(spec), status_t::TYPE_MISMATCH),
+              "a catalogued key in the wrong width (u32 port) => TYPE_MISMATCH");
+    }
+    {
+        tr::net::conn_spec_t spec("private");
+        spec.kind("cat").addr("203.0.113.1").port(9).u8("tls", 1);
+        check(refused(write(spec), status_t::TYPE_MISMATCH),
+              "a kind-private catalogued key in the wrong type (VALUE tls) => TYPE_MISMATCH");
+    }
+    check(g_catalog_factory_runs == 0, "no refused SPEC reached the factory");
+    check(!node.find(path_t::parse("/net/cat-client/missing")->key()).has_value() &&
+              !node.find(path_t::parse("/net/cat-client/wide")->key()).has_value() &&
+              !node.find(path_t::parse("/net/cat-client/private")->key()).has_value(),
+          "and none of them mounted a connection");
+
+    {
+        tr::net::conn_spec_t spec("ok");
+        spec.kind("cat").addr("203.0.113.1").port(9).text("tls", "lab").u32("future", 7);
+        check(write(spec).has_value(),
+              "a conforming SPEC creates — an uncatalogued key (future) stays ignored");
+    }
+    check(g_catalog_factory_runs == 1 &&
+              node.find(path_t::parse("/net/cat-client/ok")->key()).has_value(),
+          "and /net/cat-client/ok was built by the factory");
+}
+
+/**
+ * @brief The ablation: the same malformed configs on a catalog-less module are NOT refused —
+ *        undeclared means unvalidated, exactly as before #1815.
+ */
+void test_undeclared_catalog_validates_nothing() {
+    std::printf("\nablation: a catalog-less module validates nothing:\n");
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    (void)declare_catalog_module(net, {});
+    const auto endpoint = node.find(path_t::parse("/net/cat-client/conn")->key());
+    if (!endpoint) return;
+    tr::net::conn_spec_t spec("wide");
+    spec.kind("cat").addr("203.0.113.1").u32("port", 9).u8("tls", 1);
+    check(node.write(*endpoint, spec.view()).has_value(),
+          "the u32 port and VALUE tls create anyway (the walk reads them as absent)");
+
+    const std::vector<std::byte> b = read_bytes(node, "/net/cat-client/conn:schema");
+    const auto decoded = tr::wire::decode(b);
+    check(decoded.has_value() && decoded->children.size() == 2 &&
+              decoded->children[1].type == type_t::SETTINGS && decoded->children[1].payload.empty(),
+          "and its conn:schema is still the empty SETTINGS");
+}
+
+/**
+ * @brief One catalog per endpoint: re-declaring the module with the same table or none is
+ *        idempotent; a different table is refused and changes nothing.
+ */
+void test_catalog_is_fixed_per_endpoint() {
+    std::printf("\nthe catalog is the endpoint's, fixed when it is minted:\n");
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    (void)declare_catalog_module(net, kCatalog);
+    const std::vector<std::byte> before = read_bytes(node, "/net/cat-client/conn:schema");
+    check(net.register_module("cat-client", "cat", conn_role_t::DIAL, kCatalog).has_value(),
+          "the same triple and the same table again is idempotent");
+    check(net.register_module("cat-client", "cat2", conn_role_t::DIAL).has_value(),
+          "a second kind naming no catalog makes no claim");
+    check(refused(net.register_module("cat-client", "cat3", conn_role_t::DIAL, kOtherCatalog),
+                  status_t::PATH_IN_USE),
+          "a different table under the same module => PATH_IN_USE");
+    check(!net.module_for("cat3", conn_role_t::DIAL).has_value(),
+          "and the refused declaration was not recorded");
+    check(read_bytes(node, "/net/cat-client/conn:schema") == before,
+          "the served catalog is unchanged");
+}
+
 }  // namespace
 
 int main() {
@@ -309,5 +508,9 @@ int main() {
     test_undeclared_handler_is_unchanged();
     test_creator_endpoint_splits_create_from_remove();
     test_catalog_envelope_is_an_empty_settings();
+    test_declared_catalog_is_served();
+    test_declared_catalog_validates_the_spec();
+    test_undeclared_catalog_validates_nothing();
+    test_catalog_is_fixed_per_endpoint();
     return tr::testing::summary("payload_right_table");
 }

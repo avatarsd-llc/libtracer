@@ -833,12 +833,21 @@ class graph_t {
      *
      * The key is a composed parent-key + `NAME(child)`, not parsed from a string. This is the
      * genuine runtime path (a `:children[]` write can race a duplicate name), so it stays
-     * fallible.
+     * fallible. @p handlers, @p policy and @p rights are exactly @ref try_register_vertex's.
+     * @param schema_catalog OPTIONAL content of the vertex's `:schema` `SETTINGS` — the catalog
+     *        a CONTROL vertex declares for what its writes accept (RFC-0014 Amendment 3: the
+     *        creator endpoint's `POINT{NAME, SETTINGS{…catalog…}}`). The bytes are a sequence of
+     *        encoded TLVs, served VERBATIM and never parsed here; the declaring caller owns their
+     *        vocabulary and validates writes against it itself. BORROWED for the call: copied
+     *        onto the graph beside @p rights, under the same lock and in the same immortal node,
+     *        so it is in force before the vertex is reachable. Empty (the default) ⇒ the
+     *        ordinary empty `SETTINGS`, and a vertex that declares no catalog carries nothing.
      * @return The pinned @ref vertex_handle_t, or `PATH_IN_USE` if the key is already registered.
      */
     [[nodiscard]] result_t<vertex_handle_t> register_vertex_key(
         std::vector<std::byte> key, role_t role, handlers_t handlers = {},
-        vertex_policy_t policy = {}, std::span<const payload_right_t> rights = {});
+        vertex_policy_t policy = {}, std::span<const payload_right_t> rights = {},
+        std::span<const std::byte> schema_catalog = {});
 
     /**
      * @brief Retire a vertex and its whole subtree — the owner-facing mirror of
@@ -2415,7 +2424,8 @@ class graph_t {
      */
     [[nodiscard]] result_t<vertex_handle_t> register_with_policy(
         std::span<const std::byte> key, role_t role, const handlers_t& handlers,
-        vertex_policy_t&& policy, std::span<const payload_right_t> rights);
+        vertex_policy_t&& policy, std::span<const payload_right_t> rights,
+        std::span<const std::byte> schema_catalog = {});
 
     /** @brief Apply a legal @ref vertex_policy_t to @p vx, skipping every member that holds;
      *         an owning field table is MOVED into the vertex, never copied. */
@@ -2437,7 +2447,8 @@ class graph_t {
     // heap copy just to spell the call (#1139/#873).
     [[nodiscard]] result_t<vertex_handle_t> register_vertex_key_span(
         std::span<const std::byte> key, role_t role, const handlers_t& handlers,
-        std::span<const payload_right_t> rights = {});
+        std::span<const payload_right_t> rights = {},
+        std::span<const std::byte> schema_catalog = {});
     // Update the vertex value (LKV/history/handler), then fan out to subscribers.
     // `caller` is the ACL caller context gating the WRITE right (the API caller's
     // for a direct write; a delivered subscription's stored context terminates at
@@ -3310,8 +3321,13 @@ class graph_t {
      *        as a node of the graph's insert-only, immortal declaration list.
      */
     struct payload_right_node_t {
-        const vertex_t* v = nullptr;          /**< @brief The declaring vertex. */
-        std::vector<payload_right_t> rows;    /**< @brief Its table, in declaration order. */
+        const vertex_t* v = nullptr;       /**< @brief The declaring vertex. */
+        std::vector<payload_right_t> rows; /**< @brief Its table, in declaration order. */
+        /** @brief Its declared `:schema` catalog (RFC-0014 Amendment 3) — the encoded content
+         *         of the schema's `SETTINGS`, served verbatim; empty when it declared none. It
+         *         rides this node because it is the same kind of declaration (what a CONTROL
+         *         vertex's writes accept), made at the same moment by the same caller. */
+        std::vector<std::byte> catalog;
         payload_right_node_t* next = nullptr; /**< @brief The previously declared node. */
     };
 
@@ -3351,9 +3367,15 @@ class graph_t {
      *         ratchet.) Appended under the unique map lock, never erased. */
     std::vector<std::unique_ptr<payload_right_node_t>> payload_right_store_;
 
-    /** @brief Publish @p rows as @p v's declaration and set its flag. Call with `map_mutex_`
-     *         held UNIQUE (the registration hold). Silently ignores an empty table. */
-    void declare_payload_rights(vertex_t* v, std::span<const payload_right_t> rows);
+    /** @brief Publish @p rows and @p catalog as @p v's declaration and set its flag. Call with
+     *         `map_mutex_` held UNIQUE (the registration hold). Silently ignores a declaration
+     *         with neither. */
+    void declare_payload_rights(vertex_t* v, std::span<const payload_right_t> rows,
+                                std::span<const std::byte> catalog);
+
+    /** @brief @p v's declared `:schema` catalog bytes — empty unless it declared one.
+     *         Lock-free; the caller has already tested the flag. */
+    [[nodiscard]] std::span<const std::byte> declared_catalog(const vertex_t* v) const noexcept;
 
     /** @brief The right @p v demands for a written TLV of @p type — `WRITE` unless @p v
      *         declared a row for it. Lock-free; the caller has already tested the flag. */
