@@ -363,8 +363,8 @@ module mints it, a `SPEC{name, config}` written there creates `/net/<module>/<na
 `NAME{<name>}` removes it, with transport and role positional. `conn` is hidden from
 `/net/<module>:children[]` (S4) while staying addressable for the creatability probe, and the old
 catalog is **gone** (S7 — see above), so there is one door rather than two. What is **not**
-implemented is the rest of the surface around it — the `conn:schema` catalog read (S3) and the
-`CREATE`/`WRITE` gating split (S2c); the link-liveness engine (S5, `self_heal_link_t`) runs for
+implemented is a module-declared `conn:schema` catalog (S3's module-side half; the read answers
+the empty `SETTINGS` envelope) — the `CREATE`/`WRITE` gating split (S2c) is in; the link-liveness engine (S5, `self_heal_link_t`) runs for
 kinds registered `self_heal_dial`, which since
 [#1548](https://github.com/avatarsd-llc/libtracer/issues/1548) includes the built-in
 point-to-point DIAL kinds. One further
