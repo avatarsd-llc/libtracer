@@ -3008,6 +3008,8 @@ class graph_t {
      * inline to nothing.
      */
     struct instrument_counters_t {
+        // 64-bit on purpose (#1697): only a test or bench build binds this, never an MCU
+        // image, so the rv32 libatomic call these would be is never linked.
         /** @brief Bubbling-walk instrumentation (RFC-0005) — see ancestor_walks(). */
         std::atomic<std::uint64_t> walks{0};
         /** @brief Canonical-fallback instrumentation (#830) — see target_canonical_resolves().
@@ -3043,11 +3045,15 @@ class graph_t {
     [[no_unique_address]] mutable std::conditional_t<kInstrumentCounters, instrument_counters_t,
                                                      no_instrument_counters_t> instrument_;
     // Per-cause delivery-drop instrumentation — see delivery_drops(). Touched only on the
-    // drop path, so the delivering path is byte-identical while nothing drops.
-    mutable std::atomic<std::uint64_t> drops_no_target_{0};
-    mutable std::atomic<std::uint64_t> drops_denied_{0};
-    mutable std::atomic<std::uint64_t> drops_oom_{0};
-    mutable std::atomic<std::uint64_t> drops_truncated_{0};
+    // drop path, so the delivering path is byte-identical while nothing drops. Word-wide
+    // storage behind the 64-bit snapshot (core/STYLE.md §Introspection clause 5, #1697): a
+    // 64-bit atomic is a libatomic call on every rv32, the ESP32-C6 included, and costs 4 B of
+    // alignment there. A 32-bit target wraps a cause after 2^32 drops; a 64-bit host is
+    // unchanged.
+    mutable std::atomic<std::size_t> drops_no_target_{0};
+    mutable std::atomic<std::size_t> drops_denied_{0};
+    mutable std::atomic<std::size_t> drops_oom_{0};
+    mutable std::atomic<std::size_t> drops_truncated_{0};
 
     // The propagate-sweep selection sets (RFC-0008 §B), keyed on canonical PATH-payload
     // bytes and ORDERED so a subtree is a contiguous prefix range (a parent's key is a
@@ -3067,6 +3073,11 @@ class graph_t {
     // mark for the next sweep, an ordering the locked erase already permitted (ADR-0057).
     // The per-vertex pending-mark hint (`vertex_t` flag, #1712) is the finer gate in front of
     // it: an unmarked vertex skips the path even while OTHER vertices hold marks.
+    // Word-wide, so its RMW is one `amoadd.w` on rv32imac (#1697). Every writer holds
+    // sweep_mutex_, so on a core with no atomic RMW (ESP32-C3) a load + store would do in
+    // place of the libatomic call. It stays an RMW: that spelling re-partitions graph.cpp's
+    // inline budget (`snapshot_edges` +39 B on the symbol ratchet), and on the C3 the call
+    // runs inside a section that already takes a mutex.
     std::atomic<std::size_t> pending_count_{0};
     /** @brief The #551 nothrow failable-block seam — and, since #873 phase 1, THE source:
      *         the one the constructor was handed, from which every other channel is built.
@@ -3120,8 +3131,8 @@ class graph_t {
      * `root_` and every hot member after it. */
     std::atomic<std::size_t> vertex_ceiling_{kNoVertexCeiling};
     /** @brief Creations the ceiling refused — the evidence the bound bit (#838's count-then-act).
-     */
-    mutable std::atomic<std::uint64_t> vertex_ceiling_refusals_{0};
+     *         Word-wide for the reason the delivery-drop counters are (#1697). */
+    mutable std::atomic<std::size_t> vertex_ceiling_refusals_{0};
 
     // ---- #1071: the per-link departure index. LAST, beside `ctl_`, and for the same
     // reason that member documents: no hot path reads these, so declaring them here

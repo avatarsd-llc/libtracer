@@ -426,9 +426,7 @@ class fwd_router_t {
 
     /** @brief Labelled `dst` elements this node dereferenced and forwarded on (§7.2's other
      *         side) — the numerator to @ref label_not_found's denominator. */
-    [[nodiscard]] std::size_t label_resolves() const noexcept {
-        return label_resolves_.load(std::memory_order_relaxed);
-    }
+    [[nodiscard]] std::size_t label_resolves() const noexcept { return label_resolves_.load(); }
 
     /**
      * @brief One snapshot of this router's counted cold-path drops (#1503 step 3).
@@ -1100,7 +1098,9 @@ class fwd_router_t {
         static constexpr std::size_t kWays = 16;
         /** @brief Occupancy tag: the peer index PLUS ONE, so `0` reads as empty. */
         std::atomic<std::uint32_t> key[kWays] = {};
-        /** @brief `link_id_t::bits()` for the peer `key` names. */
+        /** @brief `link_id_t::bits()` for the peer `key` names. 64-bit because the id is an
+         *         `(index, generation)` pair read whole — stored and loaded, never an RMW; on
+         *         rv32 each access is an `__atomic_*_8` call (#1697). */
         std::atomic<std::uint64_t> val[kWays] = {};
 
         /**
@@ -1143,6 +1143,18 @@ class fwd_router_t {
         }
     };
 
+    /**
+     * @brief One registered child's receive context: what the frame path reads per inbound
+     *        frame without taking `ctl_m_`.
+     *
+     * **The 64-bit words here are IDENTITIES, not counters (#1697).** `link_token`,
+     * `label_peer`, `path_label_for`, `terminus_label_for` and `terminus_label_target` each pack
+     * an `(index, generation)` pair that one relaxed load must read whole, and none is ever an
+     * RMW: the control plane stores, the frame path loads. On rv32 such a load is an
+     * `__atomic_load_8` call, and the labelled-hop and flat-carry loads are on the frame path,
+     * so they stay a known per-frame cost on the ESP32-C6 until the pair is split or
+     * seqlocked. `rmw_counter_t` does not apply to a value that is stored, not bumped.
+     */
     struct child_rx_ctx_t {
         fwd_router_t* self;
         std::string name;
@@ -2034,7 +2046,16 @@ class fwd_router_t {
     std::uint32_t label_peer_seq_ = 1;
     std::atomic<std::size_t> label_not_found_{0}; /**< @brief §7.2 refusals — see @ref
                                                             label_not_found. */
-    std::atomic<std::size_t> label_resolves_{0};  /**< @brief Labelled hops taken. */
+    /**
+     * @brief Labelled hops taken — the one counter the label plane bumps on a SUCCESS arm, so
+     *        the build's `rmw_counter_t` (#1697).
+     *
+     * Every labelled hop pays this bump, so it must not be a libatomic call on any target:
+     * native it is the `amoadd.w` / `lock xadd` the plain atomic was, and on a core with no
+     * atomic RMW (ESP32-C3, Cortex-M0) it is one section of `guard_t` instead of
+     * `__atomic_fetch_add_4`. Word-wide, so the native binding holds on rv32imac.
+     */
+    graph::bound_rmw_counter_t<std::size_t> label_resolves_;
     // The label plane's substrate (#603 defect 1 / #873 family 3): the route-handle tables
     // draw from it, and so do the ADVERTISE arm's route re-encodes and the two over-wide
     // route reads on the COMPACT/NACK arms — every one of which was a throwing allocation on

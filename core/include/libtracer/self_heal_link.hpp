@@ -282,8 +282,15 @@ class self_heal_link_t final : public transport_t {
     detail::thread_id_t worker_id_{}; /**< @brief Re-entrancy guard: the worker's own
                                                   publish fan-out must not block on the
                                                   worker (see `ready_socket`). */
-    std::atomic<std::uint64_t> gen_ctr_{0};           /**< @brief Dial-generation mint. */
-    std::atomic<std::uint64_t> engine_dropped_tx_{0}; /**< @brief Fail-fast drops. */
+    /**
+     * @brief Dial-generation mint. 64-bit ON PURPOSE (#1697): a generation is an identity a
+     *        stale socket is compared against, so it must never alias, and the one bump per
+     *        DIAL is cold — the rv32 libatomic call it costs is paid once per reconnect.
+     */
+    std::atomic<std::uint64_t> gen_ctr_{0};
+    /** @brief Fail-fast drops. Word-wide, as every drop counter is (core/STYLE.md
+     *         §Introspection clause 5, #1697): a 64-bit atomic is a libatomic call on rv32. */
+    std::atomic<std::size_t> engine_dropped_tx_{0};
 };
 
 }  // namespace tr::net

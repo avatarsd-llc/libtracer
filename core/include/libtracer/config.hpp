@@ -376,8 +376,9 @@ struct default_config_t {
     using lkv_slot_t = single_writer_slot_t;
 
     /**
-     * @brief Force the guarded binding of every `rmw_counter_t` a vertex owns, even where the
-     *        counter's width is natively lock-free (#1715).
+     * @brief Force the guarded binding of every `%tr::graph::bound_rmw_counter_t` the library
+     *        owns — the write sequence and the router's labelled-hop count — even where the
+     *        counter's width is natively lock-free (#1715, #1697).
      *
      * A test knob: it lets a host build exercise the path a target without a native atomic RMW
      * takes, where the write-sequence bump runs under @ref guard_t and is fused into the LKV

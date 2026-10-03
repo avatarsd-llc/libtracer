@@ -352,9 +352,12 @@ class tcp_transport_t : public transport_t, private stream_endpoint_t {
     // RX segment source for frame reassembly (ADR-0042 §2) + drop counters.
     mem::mem_backend_t* backend_;
     std::size_t max_frame_ = kMaxFrame;  // per-connection receive cap (:settings; 0 => kMaxFrame)
-    std::atomic<std::uint64_t> dropped_rx_{0};
-    std::atomic<std::uint64_t> malformed_rx_{0};
-    std::atomic<std::uint64_t> dropped_tx_{0};
+    // Drop counters: word-wide, not 64-bit (core/STYLE.md §Introspection clause 5, #1697) —
+    // a 64-bit atomic is a libatomic call on every rv32, the ESP32-C6 included. The 64-bit
+    // accessors widen on read; a 32-bit target wraps after 2^32.
+    std::atomic<std::size_t> dropped_rx_{0};
+    std::atomic<std::size_t> malformed_rx_{0};
+    std::atomic<std::size_t> dropped_tx_{0};
     std::size_t recv_stack_ = 0; /**< @brief The stack hint, held for @ref start_receiving. */
     /** @brief One-shot latch making @ref start_receiving idempotent — `start()` may be
      *         called at most once per endpoint. DIAL only; a LISTEN link spends its one
@@ -507,9 +510,12 @@ class transport_tcp_server : public stream_server_base_t {
     // framing and its ingress bound.
     mem::mem_backend_t* backend_;
     std::size_t max_frame_ = tcp_transport_t::kMaxFrame;
-    std::atomic<std::uint64_t> dropped_rx_{0};
-    std::atomic<std::uint64_t> malformed_rx_{0};
-    std::atomic<std::uint64_t> dropped_tx_{0};
+    // Drop counters: word-wide, not 64-bit (core/STYLE.md §Introspection clause 5, #1697) —
+    // a 64-bit atomic is a libatomic call on every rv32, the ESP32-C6 included. The 64-bit
+    // accessors widen on read; a 32-bit target wraps after 2^32.
+    std::atomic<std::size_t> dropped_rx_{0};
+    std::atomic<std::size_t> malformed_rx_{0};
+    std::atomic<std::size_t> dropped_tx_{0};
 };
 
 }  // namespace tr::net
