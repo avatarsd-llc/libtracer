@@ -241,7 +241,7 @@ tree, and one is not:
 
 - The registry's refusal is the whole creation's verdict: when `add_child` cannot grow, the
   creation rolls back — retire the vertex, drop the entry, destroy the socket — and answers
-  `BACKPRESSURE` (`core/src/transport_vertex.cpp:if (pl != pending_links_.end()) pending_links_.erase(pl);`, `core/src/transport_vertex.cpp:if (!router_.add_child(qualified, *link)) {`). Without that, a bounded node
+  `BACKPRESSURE` (`core/src/transport_vertex.cpp:if (pl != pending_links_.end()) pending_links_.erase(pl);`, `core/src/transport_vertex.cpp:if (!router_.add_child(qualified, *link, nullptr,`). Without that, a bounded node
   could be driven to publish connections that no `dst` resolves and no removal can take down.
 - `SPEC` naming an existing name answers `PATH_IN_USE`, and the reserved `conn` name is
   refused in both directions, so the endpoint cannot be made to destroy itself.

@@ -62,6 +62,7 @@
 #include "libtracer/guard.hpp"
 #include "libtracer/guard_mutex.hpp"
 #include "libtracer/hook.hpp"
+#include "libtracer/link_kind.hpp"
 #include "libtracer/lkv_slot.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/path.hpp"
@@ -250,6 +251,33 @@ struct write_ctx_t {
     /** @brief True iff this write came from the LOCAL HOST (the owner's own API call) —
      *         i.e. @ref subject is the empty owner token. */
     [[nodiscard]] constexpr bool is_local_owner() const noexcept { return subject.empty(); }
+
+    /**
+     * @brief The transport-catalog `(kind, role)` of the LINK this write arrived on (#1650);
+     *        null when it arrived over none.
+     *
+     * @ref subject says WHO wrote; this says over WHAT. A policy that must treat a session a
+     * `ws` listener accepted differently from a peer link this node dialled — the same write,
+     * the same vertex — tests `link->is("ws", net::conn_role_t::LISTEN)` rather than inferring
+     * the kind from a link name. It is fixed once per link at registration and costs a frame
+     * one pointer, read from the router's per-link context the subject is derived from.
+     *
+     * NULL means no catalogued link carried THIS write, which is three cases a filter tells
+     * apart through the subject (@ref subject):
+     * - the owner's own API write (@ref is_local_owner);
+     * - a delivery landing here from a SUBSCRIPTION EDGE (a fan-in write). Such a write runs
+     *   under the edge's stored subject, which was gated when the edge was admitted; the edge
+     *   does not carry its creator's link kind (the edge record does not grow for it);
+     * - a write over a link registered without a catalog identity (a link added to the router
+     *   directly rather than through `transport_vertex_t`).
+     *
+     * A filter whose policy depends on the link kind therefore decides the null case
+     * explicitly for a non-owner subject, rather than reading null as either kind.
+     *
+     * @warning BORROWED for the call, like the subject — copy the pair out if the decision
+     *          must be remembered past the return.
+     */
+    const net::link_kind_t* link = nullptr;
 };
 
 /**

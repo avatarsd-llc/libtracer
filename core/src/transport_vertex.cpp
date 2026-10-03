@@ -903,7 +903,13 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(ctl_txn_t& 
     // exhausted-resource status the rest of the failable seam answers with (ADR-0065), so a
     // wiring refusal surfaces as an error the peer can retry rather than as a live-looking
     // dead connection.
-    if (!router_.add_child(qualified, *link)) {
+    //
+    // The connection's catalog `(kind, role)` rides along (#1650): the router interns it once,
+    // so every write this link carries tells the target's admission filter which kind of
+    // session it came from. The pair is the module's own declaration, held nowhere new.
+    const conn_settings_t& wired = inserted.first->second.settings;
+    if (!router_.add_child(qualified, *link, nullptr,
+                           link_kind_t{.kind = wired.kind, .role = effective_role})) {
         (void)graph_.retire(*v);
         // The config-constructed socket's destructor JOINS its receive thread, so it is
         // handed to phase 2 like every other join (S6, #492) instead of running here under

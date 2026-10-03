@@ -74,6 +74,7 @@ struct delivery_policy_t {  // ONE subscription's delivery policy (RFC-0022 §3.
 struct write_ctx_t {         // the per-call context a write carries into on_write (#375)
     std::string_view subject;  // the writer's resolved subject token; EMPTY = the local host
     bool is_local_owner() const noexcept;  // subject.empty()
+    const net::link_kind_t* link;  // the arrival link's catalog (kind, role); null = none (#1650)
 };                           // BORROWED for the call, like the value beside it — copy if retained
 
 template <class R, class... A>
@@ -141,7 +142,8 @@ class graph_t {
 
     // value plane
     result_t<value_ref_t> read (vertex_handle_t, std::string_view caller = {}) const;
-    result_t<void>        write(vertex_handle_t, rope_t, std::string_view caller = {});
+    result_t<void>        write(vertex_handle_t, rope_t, std::string_view caller = {},
+                                const net::link_kind_t* link = nullptr);  // #1650
     result_t<value_ref_t> await(vertex_handle_t, std::chrono::nanoseconds,
                                 std::string_view caller = {});
     result_t<void>        assign(vertex_handle_t, rope_t, std::string_view caller = {});
