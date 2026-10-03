@@ -646,6 +646,16 @@ jobs:
                exit 1 ;;
           esac
 
+      # Sustained steps (#1770). The drift leg sees only the NEWEST point, so a step
+      # that landed a few points ago and held is no longer news to it; this lists every row
+      # that moved past its own noise threshold and held for three points, over the recent
+      # window, into the job summary — the per-wave perf report reads it from there. Soft,
+      # like the drift leg: it reports and never fails the bench.
+      - name: Sustained steps over the recent window (soft)
+        if: steps.guard.outputs.bank == 'true'
+        continue-on-error: true
+        run: python3 bench/step_detect.py --data "$RUNNER_TEMP/data.js" --recent 5 --markdown
+
       - name: Publish host.txt next to the store
         run: |
           git fetch --no-tags --depth=1 origin gh-pages

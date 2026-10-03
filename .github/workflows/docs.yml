@@ -250,6 +250,10 @@ jobs:
       # here because this job is the one that renders the charts; it needs no build.
       - name: Trend-chart source-selection tests
         run: python3 bench/test_render_history.py
+      # The sustained-step detector's decision rule (#1770): the page's "Recent steps"
+      # table and the step markers on the trend charts are both drawn from it.
+      - name: Sustained-step detector tests
+        run: python3 bench/test_step_detect.py
       - name: Generate live performance + conformance page
         env:
           LIBTRACER_CXX_HARNESS: ${{ github.workspace }}/core/build/tests/conformance_runner

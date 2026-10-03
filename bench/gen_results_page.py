@@ -32,6 +32,7 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import render_compare  # noqa: E402  (sibling module in bench/)
 import render_history  # noqa: E402  (sibling module in bench/)
+import step_detect  # noqa: E402  (sibling module in bench/)
 
 REPO = pathlib.Path(__file__).resolve().parent.parent
 OUT = REPO / "docs" / "performance.md"
@@ -1280,6 +1281,10 @@ every harness in `bench/` drives and reports.
 {head("gates")}
 
 {mprose(M, "What actually stops a regression")}
+
+### Recent steps on bench-local
+
+{step_detect.page_block(history_local)}
 
 {head("noise")}
 
