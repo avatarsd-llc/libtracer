@@ -62,6 +62,14 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **`graph_t::default_ring_source()` is documented as the injected source itself
+  ([#1581](https://github.com/avatarsd-llc/libtracer/issues/1581)).** Documentation only; no
+  signature or behaviour changes. The graph-level default ring source has resolved to the one
+  injected source since the one-source constructor, and that fold is now stated as deliberate:
+  there is no graph-level ring seam, and a vertex that needs its own ring store declares it
+  through `vertex_policy_t::ring_source`. The member doc no longer claims a separate
+  platform-heap default.
+
 - **`vertex_handle_t`, `vertex_slot_t`, `kGenerationSaturated`, `saturating_next_generation` and
   `bound_generation_matches` move to the new leaf header `libtracer/vertex_handle.hpp`
   ([#1707](https://github.com/avatarsd-llc/libtracer/issues/1707)).** The leaf includes no graph

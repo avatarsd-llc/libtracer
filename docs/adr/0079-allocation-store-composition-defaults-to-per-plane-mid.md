@@ -351,6 +351,12 @@ Consequences for the text above:
 - **Ring and control are one default, not one pool by stealth.** The graph-level default ring
   source now resolves to the same injected source, and per-vertex isolation stays where the
   amendment's own measurement put it — at `set_ring_source`, which is untouched.
+  *(Ruled 2026-09-29, [#1581](https://github.com/avatarsd-llc/libtracer/issues/1581).)* The fold
+  is the intended reading of this amendment, not an oversight: no graph-level ring seam is
+  restored. Divergence is expressed per vertex through `vertex_policy_t::ring_source`, which the
+  vertex binds with `set_ring_source` (receiver-pays). Separating whole planes, where a
+  deployment wants it, belongs to the deployment profile (a per-plane source the target owns),
+  not to a constructor argument.
 
 Two channels the decision names are still open and are explicitly phased, not forgotten:
 `lkv_slot.hpp`'s hazard-slot nodes are **phase 2** (gated on a hazard-slot acquisition A/B,
