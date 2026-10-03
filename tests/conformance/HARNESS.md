@@ -23,6 +23,30 @@ the same stable names as the `--roundtrip` `ERR:<name>` strings (e.g.
 `FRAME_INVALID`). The distinct filename keeps every `input.bin` consumer (benches,
 arena tests, the coverage audit) on valid frames only.
 
+An `input.bin` is also a **legal** frame by default, not merely a decodable one. The C++
+reference checks this as a pre-pass beside the round-trip (`conformance_runner`, #1587),
+because the round-trip alone accepts bytes no conformant origin emits. One such vector
+was banked and scored `ok` on every core. The pre-pass covers three things:
+
+- every packed `PATH` body tiles into records (RFC-0018);
+- every `kind = 0x16` label element is well-formed (RFC-0027);
+- every `FWD` spells RFC-0004 §B's head: a defined `op`, `dst`, an optional `FIELD`,
+  `src`, and the `kind` that a `REPLY` requires.
+
+Some vectors bank such bytes on purpose. These are an address that a hop MUST refuse
+but can still carry, so a codec has nothing to reject and they are not `reject.bin`
+cases. Such a vector declares it in its manifest with a top-level boolean:
+
+```json
+"malformed_input": true
+```
+
+The flag is checked in both directions. An illegal `input.bin` without the flag fails,
+and the message names the flag. A flag on a legal `input.bin` also fails, because a
+stale flag would excuse the next real defect. The flag is absent (never `false`) on
+every other vector, and it is the only manifest key the pre-pass reads. Other cores
+may ignore it: their round-trip contract below is unchanged.
+
 The **C++ reference is golden**: when the wire changes, it blesses new/updated
 vectors and every other core must match them.
 

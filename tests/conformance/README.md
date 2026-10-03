@@ -28,7 +28,9 @@ tests/conformance/
 
 Negative cases (bytes every core MUST refuse — e.g. a reserved opt bit set) carry
 `reject.bin` **instead of** `input.bin`, and their `expected.json` names the
-required decode error in a top-level `"reject"` field. See [HARNESS.md](HARNESS.md).
+required decode error in a top-level `"reject"` field. An `input.bin` that is deliberately
+an illegal (but decodable) frame declares `"malformed_input": true` in its `expected.json`;
+every other `input.bin` must be a legal frame. See [HARNESS.md](HARNESS.md).
 
 > **The directory is the source of truth for which categories exist** — the tree above is a reading aid, and a category is whatever `vectors/v1/` holds. The v1 partition itself (per r1 Q5.1) is canonical: It supersedes the earlier `encode/decode/roundtrip/` sketch and the `path_canonical/` mention in `docs/reference/02-graph-model.md`; those are reconciled by the v0.1 consolidation RFC. A driver in each implementation walks `input.bin` → decode → compare against `expected.json`, and re-encodes `expected.json` → compare against `input.bin` (round-trip).
 

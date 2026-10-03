@@ -10,7 +10,9 @@
  *   (2) golden builders     — encode(built) == input.bin && decode(input.bin) == built;
  *   (3) targeted asserts     — the CRC value, the PATH child count, reserved-bit rejection;
  *   (4) negative vectors    — decode(reject.bin) MUST fail with the error named by
- *       expected.json's "reject" field (extracted by a tiny scan, no JSON parser).
+ *       expected.json's "reject" field (extracted by a tiny scan, no JSON parser);
+ *   (5) input legality       — every input.bin is a legal frame (packed PATH bodies, label
+ *       elements, the FWD head) unless expected.json declares "malformed_input": true (#1587).
  * expected.json stays as the human-readable / cross-language spec.
  */
 
@@ -30,7 +32,9 @@
 #include <utility>
 #include <vector>
 
+#include "libtracer/op_resolve.hpp"
 #include "libtracer/packed_path.hpp"
+#include "libtracer/path_label.hpp"
 #include "libtracer/path_ref.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
@@ -154,6 +158,135 @@ bool check_reject(const fs::path& reject_bin, std::span<const std::byte> bytes) 
     if (!want) return false;  // a reject.bin without a "reject" expectation is malformed
     const auto dec = tr::wire::decode(bytes);
     return !dec.has_value() && *want == error_name(dec.error());
+}
+
+// --- input.bin legality pre-pass (#1587) ------------------------------------
+
+/**
+ * @brief The `expected.json` manifest key a deliberately-illegal `input.bin` declares.
+ *
+ * The round-trip contract is satisfied by ANY well-formed TLV, so a vector can bank a frame
+ * no conformant origin emits and still score `ok` on every core (`fwd/fwd-label-mint-reply`
+ * did, until a99d362f). The legality pre-pass closes that: every `input.bin` must also be a
+ * frame the reference would accept as legal, unless its manifest says `"malformed_input":
+ * true` — the vectors whose whole point is an address a hop MUST refuse but can still carry.
+ */
+constexpr std::string_view kMalformedInputKey = "malformed_input";
+
+/**
+ * @brief Whether @p case_dir's `expected.json` declares `"malformed_input": true` (tiny scan,
+ *        the same no-JSON-parser shape as @ref reject_expectation).
+ */
+bool malformed_input_declared(const fs::path& case_dir) {
+    std::ifstream f(case_dir / "expected.json");
+    if (!f) return false;
+    const std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    const std::string quoted = "\"" + std::string(kMalformedInputKey) + "\"";
+    const std::size_t key = text.find(quoted);
+    if (key == std::string::npos) return false;
+    std::size_t at = text.find(':', key + quoted.size());
+    if (at == std::string::npos) return false;
+    at = text.find_first_not_of(" \t\r\n", at + 1);
+    return at != std::string::npos && text.compare(at, 4, "true") == 0;
+}
+
+/**
+ * @brief Why a packed `PATH` body is not a legal frame-path address, or `nullopt` if it is.
+ *
+ * Frame-path context (RFC-0018 §5.4 Amendment 1), the permissive one: escape records are
+ * admissible and a foreign `kind` is stepped over by its declared length. What is NOT
+ * admissible anywhere is a body that does not tile into records, and a `kind = 0x16` label
+ * element outside RFC-0027 §5.3.2's two structural clauses or carrying the reserved
+ * generation `0` (§4.1).
+ */
+std::optional<std::string> packed_path_illegal(std::span<const std::byte> body) {
+    std::size_t at = 0;
+    while (at < body.size()) {
+        const std::size_t span = tr::wire::packed_record_span(body, at);
+        if (span == 0) return "PATH body does not tile into packed records (RFC-0018)";
+        const auto kind = tr::wire::packed_escape_kind(body, at);
+        if (kind == tr::wire::kPackedEscapeKindLabel && !tr::wire::path_label_at(body, at))
+            return "PATH carries a malformed label element (RFC-0027 §5.3.2 / §4.1)";
+        at += span;
+    }
+    return std::nullopt;
+}
+
+/**
+ * @brief Why a `FWD` is not a legal frame, or `nullopt` if it is — RFC-0004 §B's child order
+ *        `{ op, dst, [FIELD], src, [kind] … }`, with a defined opcode and `kind ∈ {RESULT,
+ *        ERROR}` REQUIRED on a `REPLY`.
+ *
+ * Deliberately the HEAD only: what follows `src` (payload, `await_timeout`, the reverse list)
+ * is op- and flag-dependent and already parsed by the terminus; the head is what every
+ * conformant origin must spell, and the slot the a99d362f defect dropped.
+ */
+std::optional<std::string> fwd_illegal(const tlv_t& t) {
+    if (!t.opt.pl) return "FWD is not structured (RFC-0004 §B: opt.PL = 1)";
+    const auto& ch = t.children;
+    const auto is_u8_value = [](const tlv_t& c) {
+        return c.type == type_t::VALUE && !c.opt.pl && c.payload.size() == 1;
+    };
+    if (ch.empty() || !is_u8_value(ch[0])) return "FWD's first child is not a u8 VALUE op";
+    const auto opcode = static_cast<std::uint8_t>(std::to_integer<std::uint8_t>(ch[0].payload[0]) &
+                                                  tr::graph::kFwdOpcodeMask);
+    if (opcode > static_cast<std::uint8_t>(tr::graph::fwd_op_t::REPLY))
+        return "FWD op names no defined operation (RFC-0004 §B)";
+    // `dst` and `src` MAY each be a `PATH_REF` (RFC-0024 §9.1's amendment of RFC-0004 §B).
+    const auto is_address = [](const tlv_t& c) {
+        return c.type == type_t::PATH || c.type == type_t::PATH_REF;
+    };
+    std::size_t i = 1;
+    if (i >= ch.size() || !is_address(ch[i])) return "FWD dst is missing or not a PATH / PATH_REF";
+    ++i;
+    if (i < ch.size() && ch[i].type == type_t::FIELD) ++i;
+    if (i >= ch.size() || !is_address(ch[i])) return "FWD src is missing or not a PATH / PATH_REF";
+    ++i;
+    if (opcode != static_cast<std::uint8_t>(tr::graph::fwd_op_t::REPLY)) return std::nullopt;
+    if (i >= ch.size() || !is_u8_value(ch[i]))
+        return "FWD{REPLY} has no u8 VALUE kind after src (RFC-0004 §B)";
+    const auto kind = std::to_integer<std::uint8_t>(ch[i].payload[0]);
+    if (kind != static_cast<std::uint8_t>(tr::graph::reply_kind_t::RESULT) &&
+        kind != static_cast<std::uint8_t>(tr::graph::reply_kind_t::ERROR))
+        return "FWD{REPLY} kind is neither RESULT nor ERROR (RFC-0004 §B)";
+    return std::nullopt;
+}
+
+/** @brief Why a decoded tree is not a legal frame, or `nullopt` if every node in it is. */
+std::optional<std::string> frame_illegal(const tlv_t& t) {
+    if (t.type == type_t::PATH) {
+        if (t.opt.pl) return "PATH is structured (RFC-0018: a packed body is opt.PL = 0)";
+        if (auto why = packed_path_illegal(t.payload)) return why;
+    }
+    if (t.type == type_t::FWD) {
+        if (auto why = fwd_illegal(t)) return why;
+    }
+    for (const tlv_t& c : t.children) {
+        if (auto why = frame_illegal(c)) return why;
+    }
+    return std::nullopt;
+}
+
+/**
+ * @brief The legality verdict for one `input.bin`: `nullopt` when it passes, else the failure
+ *        message.
+ *
+ * Both directions fail: an illegal frame without the flag (the bug class), and a flag on a
+ * legal frame (a stale declaration, which would otherwise excuse the next real defect).
+ * @param bytes    The vector's `input.bin`.
+ * @param declared Whether its manifest declares `"malformed_input": true`.
+ */
+std::optional<std::string> legality_failure(std::span<const std::byte> bytes, bool declared) {
+    const auto dec = tr::wire::decode(bytes);
+    if (!dec) return std::string("input.bin does not decode");
+    const auto why = frame_illegal(*dec);
+    if (why && !declared)
+        return "input.bin is not a legal frame (" + *why + ") — a deliberately-illegal vector " +
+               "must declare \"" + std::string(kMalformedInputKey) + "\": true in expected.json";
+    if (!why && declared)
+        return "expected.json declares \"" + std::string(kMalformedInputKey) +
+               "\": true but input.bin is a legal frame — drop the flag";
+    return std::nullopt;
 }
 
 std::vector<std::byte> read_file(const fs::path& p) {
@@ -304,6 +437,33 @@ int main(int argc, char** argv) {
             continue;
         }
         check(tr::wire::encode(*dec) == bytes, label);
+    }
+
+    std::printf("Input legality (input.bin is a legal frame, or declares %s):\n",
+                std::string(kMalformedInputKey).c_str());
+    for (const auto& e : fs::recursive_directory_iterator(vroot)) {
+        if (e.path().filename() != "input.bin") continue;
+        const fs::path dir = e.path().parent_path();
+        const std::string label = fs::relative(dir, vroot).generic_string();
+        const auto fail = legality_failure(read_file(e.path()), malformed_input_declared(dir));
+        check(!fail, label + (fail ? ": " + *fail : std::string()));
+    }
+    {
+        // The gate itself, against a known-bad frame: a FWD{REPLY} with no `kind` — the exact
+        // shape fwd/fwd-label-mint-reply banked before a99d362f. Undeclared it must fail and
+        // the message must name the flag; declared it must pass.
+        static constexpr std::array no_kind_reply{
+            std::byte{0x0F}, std::byte{0x40}, std::byte{0x0D}, std::byte{0x00},  // FWD, PL=1
+            std::byte{0x01}, std::byte{0x00}, std::byte{0x01}, std::byte{0x00},
+            std::byte{0x03},                                                     // op = REPLY
+            std::byte{0x06}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},  // dst = /
+            std::byte{0x06}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00},  // src = /
+        };
+        const auto undeclared = legality_failure(no_kind_reply, /*declared=*/false);
+        check(undeclared && undeclared->find(kMalformedInputKey) != std::string::npos,
+              "an undeclared illegal input.bin fails, naming the malformed_input flag");
+        check(!legality_failure(no_kind_reply, /*declared=*/true),
+              "the same frame passes once it declares malformed_input");
     }
 
     std::printf("Negative vectors (decode(reject.bin) fails with expected.json's error):\n");

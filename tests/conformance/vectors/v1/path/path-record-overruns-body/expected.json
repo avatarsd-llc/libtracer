@@ -3,6 +3,7 @@
   "category": "path",
   "hex": "06000C000673656E736F720974656D70",
   "total_bytes": 16,
+  "malformed_input": true,
   "decoded": {
     "type": "0x06 PATH",
     "opt": {
