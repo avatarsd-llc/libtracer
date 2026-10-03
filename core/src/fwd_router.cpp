@@ -1192,33 +1192,40 @@ bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_sou
 }
 
 bool fwd_router_t::remove_child(std::string_view name) {
-    const std::lock_guard ctl(ctl_m_);  // pairs with add_child (ADR-0063 §3)
     // Stop resolving FIRST: once the entry is tombstoned no forward can reach the link,
     // so the caller is free to destroy the transport as soon as this returns. Then the
     // ordinary departure eviction reclaims the graph edges and label state — the same
     // work link_down does, reused rather than duplicated.
-    if (!registry_.erase(name)) return false;
-    // TOMBSTONE the receiver ctx (#884) — it stays on the published chain, because a lock-free
-    // reader may be standing on it right now and the transport still holds its address, but it
-    // stops answering `ctx_by_name`/`ctx_by_conn_slot`. Leaving it RESOLVING was the defect:
-    // `add_child` of the same name appended a second ctx, and the name-keyed lookups answer
-    // with the FIRST match, so every `connection_ref`/`hop_mint`/`adopt_binding` after a
-    // re-add resolved the DEAD context — bound routes for the re-created child were minted
-    // against the retired tenancy and never validated. A `release` store, paired with the
-    // acquire each walk performs, so a reader either skips this node or has already passed it.
-    if (child_rx_ctx_t* const ctx = ctl_ctx_by_name(name)) {
-        ctx->retired.store(true, std::memory_order_release);
-        // RFC-0027 §7.1's departure bump. The vertex this child's path label resolved to is
-        // gone, so the label the peer still holds must stop validating — and the whole
-        // mechanism for that is the slot's generation, which `release` advances (retiring the
-        // slot permanently when it saturates, §4.3.1). No withdraw frame, no unbind, no lease
-        // and no TTL (§7.3): the peer's next frame answers `NOT_FOUND` and it falls back to the
-        // full-string path it still holds, re-minting from the reply after that.
-        release_child_label(*ctx);
-        // The interned link token goes with the tenancy too (#1417): `link_down` below
-        // releases the index slot it names, so a copy left here would outlive its stamp.
-        ctx->link_token.store(0, std::memory_order_relaxed);
-        if (ctx->peer_tokens_own != nullptr) ctx->peer_tokens_own->clear();
+    //
+    // The eviction runs with `ctl_m_` RELEASED, as it does from every other door (a
+    // transport's down-notifier calls `link_down` holding nothing). It gives back each
+    // evicted edge's link hold, and that call takes `transport_vertex_t`'s control lock,
+    // which the declared order puts ABOVE this one (#1816).
+    {
+        const std::lock_guard ctl(ctl_m_);  // pairs with add_child (ADR-0063 §3)
+        if (!registry_.erase(name)) return false;
+        // TOMBSTONE the receiver ctx (#884) — it stays on the published chain, because a lock-free
+        // reader may be standing on it right now and the transport still holds its address, but it
+        // stops answering `ctx_by_name`/`ctx_by_conn_slot`. Leaving it RESOLVING was the defect:
+        // `add_child` of the same name appended a second ctx, and the name-keyed lookups answer
+        // with the FIRST match, so every `connection_ref`/`hop_mint`/`adopt_binding` after a
+        // re-add resolved the DEAD context — bound routes for the re-created child were minted
+        // against the retired tenancy and never validated. A `release` store, paired with the
+        // acquire each walk performs, so a reader either skips this node or has already passed it.
+        if (child_rx_ctx_t* const ctx = ctl_ctx_by_name(name)) {
+            ctx->retired.store(true, std::memory_order_release);
+            // RFC-0027 §7.1's departure bump. The vertex this child's path label resolved to is
+            // gone, so the label the peer still holds must stop validating — and the whole
+            // mechanism for that is the slot's generation, which `release` advances (retiring the
+            // slot permanently when it saturates, §4.3.1). No withdraw frame, no unbind, no lease
+            // and no TTL (§7.3): the peer's next frame answers `NOT_FOUND` and it falls back to the
+            // full-string path it still holds, re-minting from the reply after that.
+            release_child_label(*ctx);
+            // The interned link token goes with the tenancy too (#1417): `link_down` below
+            // releases the index slot it names, so a copy left here would outlive its stamp.
+            ctx->link_token.store(0, std::memory_order_relaxed);
+            if (ctx->peer_tokens_own != nullptr) ctx->peer_tokens_own->clear();
+        }
     }
     link_down(name);
     return true;

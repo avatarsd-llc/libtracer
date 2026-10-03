@@ -388,10 +388,13 @@ RFC-0014's byte-level clauses — the liveness encoding among them — are norma
 Amendment 4, with the values in `core/include/libtracer/transport_factory.hpp:link_state_t`
 as the reference encoding.
 
-**Not implemented.** Routing-plane callers that make subscriptions/awaits drive the refcount
-seam automatically — `acquire_link`/`release_link` are re-entrant-safe since S6 but only an
-embedder calls them (RFC-0014 erratum 2026-10-03,
-[#1816](https://github.com/avatarsd-llc/libtracer/issues/1816)).
+**Implemented** since [#1816](https://github.com/avatarsd-llc/libtracer/issues/1816): the
+routing-plane caller of the refcount seam. On a build with the engine, every remote
+subscription edge that delivers over a connection calls `acquire_link` when it is admitted
+and `release_link` when it is cleared, replaced or evicted, through the graph's `link_hold`
+seam. The engine's count is the only state, so a subscription over a dormant link dials it
+and keeps it self-healing, and its teardown is the last standing release. An `await` takes
+no standing hold.
 ```
 
 ## Pitfalls

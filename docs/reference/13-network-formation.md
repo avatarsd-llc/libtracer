@@ -218,8 +218,9 @@ eager by design. The module-side half of S3 is in too
 ([#1815](https://github.com/avatarsd-llc/libtracer/issues/1815)): a module may declare a
 `conn:schema` catalog at `register_module`, which its endpoint serves inside Amendment 3's
 `SETTINGS` and validates each `SPEC` against; a module that declares none answers the
-conforming empty `SETTINGS`. What is **not** implemented is the routing-plane callers that
-would make a subscription hold a link's refcount; the `CREATE`/`WRITE` gating split (S2c) is in. The addressing half was already there — a created connection mounts and routes at
+conforming empty `SETTINGS`. A routed subscription holds its link's refcount since
+[#1816](https://github.com/avatarsd-llc/libtracer/issues/1816), and the `CREATE`/`WRITE`
+gating split (S2c) is in. The addressing half was already there — a created connection mounts and routes at
 `/net/<module>/<name>`, with the module name declared by the application (never
 library-derived — ADR-0073 §4) — and the `:children[]` creation spelling RFC-0014
 supersedes is **gone**: S7 unregistered the `client` and `listener` child types, so the
