@@ -325,18 +325,29 @@ Details that make these trustworthy:
   allocation**, not the last-known-value slot.
 
   Beside those rows sits one **ratio** check, the ADR-0060 pool/heap floor: the pooled
-  alloc/free (`lkv-alloc-pool`) must clear **2.0x** the heap's (`lkv-alloc-heap`), which is
-  what proves the pool routing is live. A heap fallback reads about 1.0x. The ratio moves
+  alloc/free (`lkv-alloc-pool`) was required to clear **2.0x** the heap's (`lkv-alloc-heap`),
+  as the proof that the pool routing is live. A heap fallback reads about 1.0x. The ratio moves
   with the runner's allocator at a fixed code point: on
   [#1739](https://github.com/avatarsd-llc/libtracer/pull/1739) one candidate read 1.5x on
   some runners and 3.2x on others, with byte-identical binaries. So the per-PR form is
   paired ([#1745](https://github.com/avatarsd-llc/libtracer/issues/1745)): main's binary and
   the candidate's run the sweep interleaved, three pairs with alternating starts, and each arm
-  keeps its best observation of each row. The candidate fails the floor only when it is under
-  2.0x **and** under main's ratio from the same session by more than the 12% throughput
-  tolerance. Under **1.25x** it fails whatever main reads, because no runner variance
-  explains a pool that costs what the heap costs. `bench/test_perf_gate.py` holds the
-  doctored-input cases for all three outcomes.
+  keeps its best observation of each row.
+
+  Pairing was not enough either
+  ([#1695](https://github.com/avatarsd-llc/libtracer/issues/1695)). Across 254 best-of-3
+  readings on the CI runners with healthy code, the 64 B ratio ran **1.4x–6.5x** (median
+  3.0x, 43 readings under 2.0x), and main and an identical candidate read 2.1x and 1.6x in
+  the same session. So the routing claim is no longer timed: the **LKV-ROUTE** gate in
+  `bench_forward_heap` runs the same alloc/free loop under the global operator-new counter
+  and requires the pool arm to reach the heap **zero** times at 64 B and 1 KiB, with the
+  heap arm as its control (it must reach the heap on every cycle, or the probe is blind).
+  CI also runs it with `LKV_ROUTE_BREAK=1`, which routes the pool arm to the heap on
+  purpose, and requires it to fail. The timed ratio still **fails under 1.25x**, in both
+  forms, because no runner variance explains a pool that costs what the heap costs; the
+  lowest healthy reading was 1.4x. Between 1.25x and 2.0x it is reported, not gated, and a
+  slower pool path is caught as the `lkv-store-pool/64/1/1` row above.
+  `bench/test_perf_gate.py` holds the doctored-input cases.
 
   The `inproc-target-*` pair is gated at **fan-out 8** and nowhere else, for two measured
   reasons ([#1077](https://github.com/avatarsd-llc/libtracer/issues/1077)). Fan 8 sits
