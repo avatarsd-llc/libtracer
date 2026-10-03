@@ -195,6 +195,7 @@ class Conditions:
     reason: str
     pressure_source: str = "host"  # "cgroup" when pinned, "host" when unpinned
     host_pressure: float | None = None  # host-wide avg10 at launch — information only
+    pressure_scored: bool = True  # False: a multi-threaded run, judged on foreign time only
 
     @property
     def clean(self) -> bool:
@@ -204,6 +205,8 @@ class Conditions:
     def line(self) -> str:
         """@brief One human-auditable line: the numbers and the verdict path."""
         psi = "n/a" if self.pressure is None else f"{self.pressure:.1f}"
+        if not self.pressure_scored:
+            psi += " (not scored: multi-threaded)"
         host = ("" if self.pressure_source == "host" or self.host_pressure is None
                 else f" (host {self.host_pressure:.1f}, info)")
         return (f"{_cpuset(self.cpus)}{'' if self.pinned else ' (unpinned)'}: "
@@ -231,8 +234,14 @@ def _cpuset(cpus: Iterable[int]) -> str:
 def classify(before: Sample, after: Sample, own_cpu_s: float, nivcsw: int,
              cpus: Iterable[int], pinned: bool = True,
              foreign_max_pct: float = FOREIGN_MAX_PCT,
-             pressure_max: float = PRESSURE_MAX, clk_tck: int = CLK_TCK) -> Conditions:
+             pressure_max: float = PRESSURE_MAX, clk_tck: int = CLK_TCK,
+             score_pressure: bool = True) -> Conditions:
     """@brief The decision rule: CLEAN, or CONTENDED with the reason spoken.
+
+    @p score_pressure False judges the run on foreign time alone (#1803). That is for a
+    MULTI-threaded bench invocation, whose own threads queue behind each other on the
+    pinned CPUs and so raise its own cgroup's pressure without anything foreign present.
+    Foreign time still catches a real intruder; the pressure is recorded, not scored.
 
     Pinned runs gate on foreign time and the job's OWN cgroup pressure only; host-wide
     pressure is recorded beside them and never decides. Unpinned runs, which have no
@@ -252,14 +261,15 @@ def classify(before: Sample, after: Sample, own_cpu_s: float, nivcsw: int,
     source = "cgroup" if pinned else "host"
     psi0 = before.cg_avg10 if pinned else before.psi_avg10
     psi1 = after.cg_avg10 if pinned else after.psi_avg10
-    if psi0 is not None and psi0 > pressure_max:
+    if score_pressure and psi0 is not None and psi0 > pressure_max:
         reasons.append(f"{source} psi {psi0:.1f} > {pressure_max:g}")
     return Conditions(cpus=cpus, pinned=pinned,
                       wall_s=max(0, after.wall_ns - before.wall_ns) / 1e9,
                       foreign_pct=foreign_pct, own_cpu_s=own_cpu_s, nivcsw=nivcsw,
                       pressure=psi0, pressure_exit=psi1,
                       verdict=CONTENDED if reasons else CLEAN, reason="; ".join(reasons),
-                      pressure_source=source, host_pressure=before.psi_avg10)
+                      pressure_source=source, host_pressure=before.psi_avg10,
+                      pressure_scored=score_pressure)
 
 
 @dataclasses.dataclass
@@ -297,7 +307,7 @@ def cpus_from_env() -> tuple[int, ...] | None:
 
 
 def _run_once(argv: list[str], cpus: tuple[int, ...] | None, timeout: float | None,
-              env: dict | None) -> tuple[str, str, int, Conditions]:
+              env: dict | None, score_pressure: bool = True) -> tuple[str, str, int, Conditions]:
     """@brief Run @p argv once, pinned to @p cpus when given, and classify the window."""
     pinned = cpus is not None
     measured = cpus if pinned else tuple(sorted(os.sched_getaffinity(0)))
@@ -309,25 +319,28 @@ def _run_once(argv: list[str], cpus: tuple[int, ...] | None, timeout: float | No
     after = snapshot(measured)
     ru1 = resource.getrusage(resource.RUSAGE_CHILDREN)
     own = (ru1.ru_utime - ru0.ru_utime) + (ru1.ru_stime - ru0.ru_stime)
-    cond = classify(before, after, own, ru1.ru_nivcsw - ru0.ru_nivcsw, measured, pinned)
+    cond = classify(before, after, own, ru1.ru_nivcsw - ru0.ru_nivcsw, measured, pinned,
+                    score_pressure=score_pressure)
     return p.stdout, p.stderr, p.returncode, cond
 
 
 def measure(argv: list[str], cpus: tuple[int, ...] | None = None,
             attempts: int = DEFAULT_ATTEMPTS, timeout: float | None = None,
             env: dict | None = None, log: Callable[[str], None] | None = None,
-            run: Callable = _run_once) -> Measurement:
+            run: Callable = _run_once, score_pressure: bool = True) -> Measurement:
     """@brief Run one timed bench invocation until it runs clean, at most @p attempts times.
 
     Returns the first clean attempt, or the last one with its CONTENDED conditions — the
     caller never has to decide what "clean" means. @p run is injected for tests (a
     scripted contended-then-clean sequence) and defaults to a real, sampled run.
+    @p score_pressure False judges every attempt on foreign time only (see `classify`).
     """
     tried: list[Conditions] = []
     out = err = ""
     rc = 0
     for i in range(max(1, attempts)):
-        out, err, rc, cond = run(argv, cpus, timeout, env)
+        out, err, rc, cond = (run(argv, cpus, timeout, env) if score_pressure
+                              else run(argv, cpus, timeout, env, score_pressure=False))
         tried.append(cond)
         if cond.clean:
             break

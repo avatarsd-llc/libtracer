@@ -383,7 +383,7 @@ class PointsAreDocumented(unittest.TestCase):
     WORDS = {2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven",
              8: "eight", 9: "nine", 10: "ten", 11: "eleven", 12: "twelve",
              13: "thirteen", 14: "fourteen", 15: "fifteen", 16: "sixteen",
-             17: "seventeen", 18: "eighteen"}
+             17: "seventeen", 18: "eighteen", 19: "nineteen", 20: "twenty"}
 
     def test_methodology_names_every_point(self):
         if not self.DOC.exists():          # bench/ checked out alone
@@ -641,16 +641,19 @@ class VerdictTier(unittest.TestCase):
         self.assertEqual(cm.exception.code, 2)
 
 
-class GateTimesTheSingleThreadedFamilySet(unittest.TestCase):
-    """@brief The gate times `--family-set single` only, and a real intruder still shows (#1803).
+class GateTimesBothFamilySets(unittest.TestCase):
+    """@brief The gate times the SINGLE and the MULTI family sets apart (#1803).
 
-    The MULTI families (bench threads queueing behind each other on the pinned CPUs) left
-    own-cgroup CPU pressure behind them, which the condition check read at the NEXT launch
-    and called contention: INCONCLUSIVE with 0% foreign load. The fix is to stop running
-    them in the gate (no gated point is a MULTI row), not to stop looking. These pin both
-    halves: the argv the gate sends, and that a foreign intruder and genuine pressure on a
-    SINGLE-set invocation still make the verdict INCONCLUSIVE.
+    The MULTI families (bench threads queueing behind each other on the pinned CPUs) raised
+    the bench's own-cgroup CPU pressure, and the condition check called it contention:
+    INCONCLUSIVE with 0% foreign load. Under the fix the MULTI rows stay gated (timed in
+    both arms and compared A/B) in their own invocation, judged on foreign time only, after
+    every pressure-scored SINGLE invocation. These pin the argv and its order, that the MULTI
+    points are gated, and that a foreign intruder still makes either set INCONCLUSIVE while
+    pressure is still scored on the SINGLE set.
     """
+
+    MULTI_POINTS = {"inproc-mt4/64/1/4", "acl-inherit-d4-mt4/64/1/4", "poolalloc-mt4/64/1/1"}
 
     def bins(self, root: pathlib.Path, tag: str) -> dict:
         out = {}
@@ -661,7 +664,11 @@ class GateTimesTheSingleThreadedFamilySet(unittest.TestCase):
             out[key] = p
         return out
 
-    def test_both_arms_with_family_sets_time_the_single_set(self):
+    def test_the_multi_threaded_rows_are_gated_points(self):
+        keys = {f"{m}/{s}/{f}/{e}" for (_b, m, s, f, e) in pg.POINTS}
+        self.assertLessEqual(self.MULTI_POINTS, keys)
+
+    def test_both_arms_with_family_sets_split_the_sweep(self):
         with tempfile.TemporaryDirectory() as d:
             cand, base = self.bins(pathlib.Path(d), "c"), self.bins(pathlib.Path(d), "b")
             self.assertEqual(pg.gate_sweep_args(cand, base, probe=lambda p: True),
@@ -673,53 +680,69 @@ class GateTimesTheSingleThreadedFamilySet(unittest.TestCase):
             only_cand = lambda p: "/c/" in str(p)  # noqa: E731 — the baseline predates sets
             self.assertEqual(pg.gate_sweep_args(cand, base, probe=only_cand), ())
 
-    def test_paired_samples_send_the_set_to_bench_libtracer_only(self):
-        seen: list[list[str]] = []
+    def run_paired(self, sets: bool) -> list[tuple[list[str], bool]]:
+        seen: list[tuple[list[str], bool]] = []
+
+        def fake_timed(argv, timeout, score_pressure=True):
+            seen.append((argv, score_pressure))
+            return ""
         with tempfile.TemporaryDirectory() as d, \
-                unittest.mock.patch.object(pg, "has_family_sets", lambda p: True), \
-                unittest.mock.patch.object(pg, "timed",
-                                           lambda argv, timeout: seen.append(argv) or ""), \
+                unittest.mock.patch.object(pg, "has_family_sets", lambda p: sets), \
+                unittest.mock.patch.object(pg, "timed", fake_timed), \
                 contextlib.redirect_stdout(io.StringIO()):
             cand, base = self.bins(pathlib.Path(d), "c"), self.bins(pathlib.Path(d), "b")
-            pg.paired_samples(cand, base, pairs=1)
-        mains = [a for a in seen if a[0].endswith("bench_libtracer")]
-        others = [a for a in seen if not a[0].endswith("bench_libtracer")]
-        self.assertEqual(len(mains), 2)
-        for a in mains:
-            self.assertEqual(tuple(a[1:]), pg.GATE_FAMILY_SET)
-        self.assertTrue(others)
-        for a in others:
-            self.assertEqual(a[1:], [], "compact/demux take no family-set argv")
+            pg.paired_samples(cand, base, pairs=2)
+        return seen
+
+    def test_single_set_scored_first_then_multi_set_foreign_only(self):
+        seen = self.run_paired(sets=True)
+        mains = [(a[1:], psi) for a, psi in seen if a[0].endswith("bench_libtracer")]
+        # 2 pairs x 2 arms of the single set, THEN 2 pairs x 2 arms of the multi set.
+        self.assertEqual(mains, [(list(pg.GATE_FAMILY_SET), True)] * 4
+                         + [(list(pg.GATE_FAMILY_SET_MULTI), False)] * 4)
+        last_scored = max(i for i, (_a, psi) in enumerate(seen) if psi)
+        first_multi = min(i for i, (a, _p) in enumerate(seen) if a[1:] ==
+                          list(pg.GATE_FAMILY_SET_MULTI))
+        self.assertLess(last_scored, first_multi,
+                        "a pressure-scored run launched after a MULTI run's residue")
+        for a, psi in seen:
+            if not a[0].endswith("bench_libtracer"):
+                self.assertEqual((a[1:], psi), ([], True), "compact/demux: one scored run")
+
+    def test_a_baseline_without_sets_keeps_the_old_single_invocation(self):
+        seen = self.run_paired(sets=False)
+        self.assertTrue(seen)
+        for a, psi in seen:
+            self.assertEqual((a[1:], psi), ([], True))
 
     def verdict_for(self, cond: "pg.bc.Conditions") -> tuple[int, str]:
         led = pg.bc.Ledger()
-        led.add(pg.bc.measure(["./bench_libtracer", *pg.GATE_FAMILY_SET],
-                              run=lambda *a: ("", "", 0, cond)))
+        led.add(pg.bc.measure(["./bench_libtracer"], run=lambda *a, **k: ("", "", 0, cond)))
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             rc = pg.render_verdict([], [], "blocking", None, led)
         return rc, buf.getvalue()
 
-    def single_set_run(self, own_cpu_s: float, cg_psi: float) -> "pg.bc.Conditions":
+    def run_cond(self, own_cpu_s: float, cg_psi: float, multi: bool) -> "pg.bc.Conditions":
         before = pg.bc.Sample(0, 0, 0, None, cg_psi)
         after = pg.bc.Sample(10_000_000_000, 1000, 1000, None, cg_psi)
         return pg.bc.classify(before, after, own_cpu_s=own_cpu_s, nivcsw=0, cpus=[3, 4, 5, 6],
-                              pinned=True, clk_tck=100)
+                              pinned=True, clk_tck=100, score_pressure=not multi)
 
-    def test_a_foreign_intruder_is_still_inconclusive(self):
+    def test_a_foreign_intruder_is_inconclusive_on_either_set(self):
         # 12% of the window was someone else's CPU time; our own cgroup psi reads 0.
-        rc, out = self.verdict_for(self.single_set_run(own_cpu_s=8.8, cg_psi=0.0))
-        self.assertEqual(rc, pg.EXIT_INCONCLUSIVE)
-        self.assertIn("foreign", out)
+        for multi in (False, True):
+            with self.subTest(multi=multi):
+                rc, out = self.verdict_for(self.run_cond(8.8, 0.0, multi))
+                self.assertEqual(rc, pg.EXIT_INCONCLUSIVE)
+                self.assertIn("foreign", out)
 
-    def test_pressure_is_still_scored_on_the_single_set(self):
-        rc, out = self.verdict_for(self.single_set_run(own_cpu_s=10.0, cg_psi=84.4))
+    def test_own_pressure_is_scored_on_single_and_not_on_multi(self):
+        rc, out = self.verdict_for(self.run_cond(10.0, 84.4, multi=False))
         self.assertEqual(rc, pg.EXIT_INCONCLUSIVE)
         self.assertIn("psi", out)
-
-    def test_a_quiet_single_set_run_is_clean(self):
-        rc, out = self.verdict_for(self.single_set_run(own_cpu_s=10.0, cg_psi=0.0))
-        self.assertEqual(rc, 0)
+        rc, out = self.verdict_for(self.run_cond(10.0, 84.4, multi=True))
+        self.assertEqual(rc, 0, out)
         self.assertIn("PERF: PASS", out)
 
 

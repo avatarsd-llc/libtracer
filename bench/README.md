@@ -1698,12 +1698,14 @@ Every latency collector is also reserved and touched before its timed loop, so n
 vector growth nor its page faults land inside a sample.
 
 Each family is also tagged SINGLE- or MULTI-threaded (`bench_libtracer --families`).
-`perf_gate.py` times `--family-set single` only, when both arms support it: a MULTI family
-(`inproc-mt*`, `acl-inherit-d4-mt4`, `*alloc-mt*`) queues the bench's own threads on the
-pinned CPUs. The own-cgroup CPU pressure that leaves behind was read at the next launch as
-contention and turned gates INCONCLUSIVE with 0% foreign load. No gated point is a MULTI
-row. Foreign CPU time, which is how a real intruder shows, and pressure are still scored on
-every invocation the gate makes.
+When both arms support it, `perf_gate.py` times the two sets as separate invocations and
+compares both A/B: every `--family-set single` run first, judged on foreign CPU time and
+own-cgroup pressure, then every `--family-set multi` run, judged on foreign CPU time only. A
+MULTI family (`inproc-mt*`, `acl-inherit-d4-mt4`, `*alloc-mt*`) queues the bench's own
+threads on the pinned CPUs, and the own-cgroup pressure that raised turned gates INCONCLUSIVE
+with 0% foreign load. A real intruder still shows as foreign CPU time on either set. The
+gated MULTI points are `inproc-mt4/64/1/4`, `acl-inherit-d4-mt4/64/1/4` and
+`poolalloc-mt4/64/1/1`.
 
 `LIBTRACER_BENCH_FAMILY_SEED=<n>` runs the families in a seeded shuffled order (printed on
 stderr as `FAMILY-ORDER`). It exists to check the isolation: a shuffled run must leave every row

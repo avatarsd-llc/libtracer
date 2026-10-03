@@ -1636,9 +1636,10 @@ struct bench_family_t {
  * family runs T workers on the pinned CPUs while its main thread spins waiting for them, so
  * the bench's OWN threads queue behind each other and raise its own cgroup's CPU pressure.
  * The condition check reads that pressure at the NEXT invocation's launch and used to mark
- * the gate INCONCLUSIVE for it. No gated point is a MULTI row, so the gate runs
- * `--family-set single` only, and its pressure reading is about the host again. Foreign
- * CPU time on the bench CPUs, which is how a real intruder shows, is scored as before.
+ * the gate INCONCLUSIVE for it. So perf_gate.py times the two sets as separate invocations,
+ * both compared A/B: `--family-set single` judged on foreign time and pressure, then
+ * `--family-set multi` judged on foreign time only. Foreign CPU time on the bench CPUs, which
+ * is how a real intruder shows, is scored on both.
  *   - There is no `loopback` or `routers-hN` family: those modes benchmarked the ROUTER-flood
  *     bridge, retired in ADR-0040 — the net plane is explicit-source-routed FWD only, and its
  *     forward cost is measured by bench_forward_heap and the fwd_* tests.

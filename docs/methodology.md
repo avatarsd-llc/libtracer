@@ -270,7 +270,7 @@ Details that make these trustworthy:
   set, and the interleaved A/B remains their primary defence. The allocation-count
   instruments (the zero-alloc gate, the memory probes, the RAM censuses) are exempt —
   load cannot move a count.
-- The per-PR gate watches **seventeen canonical points** — a representative slice of the
+- The per-PR gate watches **twenty canonical points** — a representative slice of the
   fan-out / payload / topic sweeps plus a fold-width point, one per *gated* family
   (`inproc` and `inproc-borrow` share one), so a pullback on any of those legs is caught and
   not just the 1:1 write. They are **not** the whole dispatch surface, and this page should
@@ -295,7 +295,18 @@ Details that make these trustworthy:
   changes; and
   `inproc-target-handler/64/8/1` + `inproc-target-stored/64/8/1` — the **path-target**
   dispatch legs at fan-out 8, edges carrying a target key rather than a callback, which
-  is the leg a wire `SUBSCRIBER` actually takes.
+  is the leg a wire `SUBSCRIBER` actually takes; and three **multi-threaded** rows at four
+  threads, `inproc-mt4/64/1/4` (parallel dispatch, one graph per thread),
+  `acl-inherit-d4-mt4/64/1/4` (ACL-gated reads under a shared ancestor) and
+  `poolalloc-mt4/64/1/1` (the thread-safe pool's alloc/free under contention).
+
+  The multi-threaded rows are timed in their own invocation (`--family-set multi`), after
+  every single-threaded one, and that invocation is judged on **foreign CPU time only**
+  ([#1803](https://github.com/avatarsd-llc/libtracer/issues/1803)). Their own threads queue
+  behind each other on the pinned CPUs, which raises the bench's own CPU pressure with
+  nothing foreign present; scoring that pressure turned about one gate in three
+  INCONCLUSIVE. A real intruder still shows as foreign CPU time and still makes the verdict
+  INCONCLUSIVE. Every other invocation is judged on foreign time and pressure, as before.
 
   Those last two are here because of what happened without them
   ([#1250](https://github.com/avatarsd-llc/libtracer/issues/1250)): reshaping
@@ -385,7 +396,7 @@ Details that make these trustworthy:
   `try_alloc` fires on every write — **does not exist**, and neither does one for the ring's
   resident bytes. Both are gaps in this page, not numbers it is withholding.
 
-  Four of the seventeen come from OTHER bench binaries, and they are here because of what
+  Four of the twenty come from OTHER bench binaries, and they are here because of what
   happened without them (#1173): `compact-forward` moved **+41%** across the v0.8.0 →
   v0.9.0 window while every gated point stayed flat, so the gate had nothing to object to.
   They are `compact-forward/64/1/1` and `compact-terminus/64/1/1` — the compact-delivery
