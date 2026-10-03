@@ -1697,10 +1697,14 @@ class vertex_t {
      *        reclamation seam needs it back to hand to a release hook. Read UNDER the lock,
      *        before the shell displaces the slot, because after that the pair is gone. Written
      *        only on the `true` return; left untouched when nothing was cleared.
+     * @param retired_remote Optional out-parameter receiving the cleared edge's cold `remote`
+     *        half (#1816) — moved out under the lock, so the caller can name the link the
+     *        edge was routed through after releasing it. Same write rule as @p retired_ctx.
      * @return true iff the slot existed and was active (the caller then adjusts the
      *         RFC-0005 listener bookkeeping).
      */
-    bool clear_edge(std::size_t idx, void** retired_ctx = nullptr) {
+    bool clear_edge(std::size_t idx, void** retired_ctx = nullptr,
+                    remote_ptr_t* retired_remote = nullptr) {
         edge_block_t* b = nullptr;
         {
             const std::lock_guard lock(vertex_stripe_of(this).m);
@@ -1709,6 +1713,7 @@ class vertex_t {
             std::vector<subscriber_t>& subs = b->slots;
             if (idx >= subs.size() || !subs[idx].active) return false;
             if (retired_ctx != nullptr) *retired_ctx = subs[idx].callback_ctx;
+            if (retired_remote != nullptr) *retired_remote = std::move(subs[idx].remote);
             // RECLAIM in place, not merely deactivate. Flipping `active` alone left the slot's
             // `target_key` buffer, its `source_view` segment pin and the whole cold `remote`
             // half resident until an unrelated `add_edge` happened to land on this index — so
@@ -1767,9 +1772,13 @@ class vertex_t {
      * @param s     The replacing edge.
      * @param latch Optional durability latch; snapshotted iff the REPLACING subscriber
      *              requested durability (RFC-0022 §3.A) and the vertex holds an LKV.
+     * @param displaced_remote Optional out-parameter receiving the displaced edge's cold
+     *              `remote` half (#1816), moved out under the lock. A cleared slot holds none,
+     *              so it stays empty unless a live remote edge was displaced.
      * @return Which case applied — see @ref edge_replace_t.
      */
-    edge_replace_t replace_edge(std::size_t idx, subscriber_t s, edge_latch_t* latch = nullptr) {
+    edge_replace_t replace_edge(std::size_t idx, subscriber_t s, edge_latch_t* latch = nullptr,
+                                remote_ptr_t* displaced_remote = nullptr) {
         edge_block_t* b = nullptr;
         edge_replace_t result = edge_replace_t::OUT_OF_RANGE;
         {
@@ -1779,6 +1788,7 @@ class vertex_t {
             std::vector<subscriber_t>& subs = b->slots;
             if (idx >= subs.size()) return edge_replace_t::OUT_OF_RANGE;
             const bool was_active = subs[idx].active;
+            if (displaced_remote != nullptr) *displaced_remote = std::move(subs[idx].remote);
             subs[idx] = std::move(s);  // reclaims the displaced edge's pins in place
             // The OLD edge must stop receiving before the new one starts, and that half is
             // infallible; the republish that installs the REPLACEMENT may soft-fail on OOM, in
@@ -1830,10 +1840,13 @@ class vertex_t {
      * @ref edge_view_t snapshot HOLDS the target key and the whole `subscriber_remote_t`
      * by refcount (ADR-0041 §2, #1448), so releasing the slot's pin here never dangles a
      * dispatch — the record it reads outlives this eviction by construction.
+     * @param routed Incremented once per evicted edge that was ROUTED through @p link —
+     *        stored it as its delivery link rather than only as the gate context — which
+     *        is the count of link holds the eviction gives back (#1816).
      * @return The number of edges evicted (the caller unwinds exactly this many
      *         from the RFC-0005 listener bookkeeping).
      */
-    std::size_t evict_link_edges(std::string_view link) {
+    std::size_t evict_link_edges(std::string_view link, std::size_t& routed) {
         // The EMPTY key matches NOTHING (#1056). Every local door leaves both spellings empty,
         // so without this an empty parameter compared EQUAL to a local edge's admitting link
         // and reclaimed it — reachable for the `delivery_compact` opt-in, the one local shape
@@ -1857,6 +1870,7 @@ class vertex_t {
                 const std::string& admitted_over =
                     s.remote->link.empty() ? s.remote->caller : s.remote->link;
                 if (admitted_over != link) continue;
+                routed += static_cast<std::size_t>(!s.remote->link.empty());
                 subscriber_t reclaimed;       // an inert shell: no view, no route, no cold half
                 reclaimed.active = false;     // the slot is free for add_edge reuse
                 s = std::move(reclaimed);     // frees the old slot's retained state in place

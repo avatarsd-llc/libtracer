@@ -229,6 +229,13 @@ class transport_vertex_t {
                        mem::mem_backend_t* rx_backend, slim_net_t,
                        mem::block_source_t* egress_src = &mem::heap_source());
 
+    /**
+     * @brief Uninstall the routed-subscription hold seam (#1816) before any connection is
+     *        torn down, so a departure eviction during member destruction never calls back
+     *        into a half-destroyed plane.
+     */
+    ~transport_vertex_t();
+
     transport_vertex_t(const transport_vertex_t&) = delete;
     transport_vertex_t& operator=(const transport_vertex_t&) = delete;
 
@@ -266,9 +273,14 @@ class transport_vertex_t {
     /**
      * @brief A STANDING binding takes its hold on connection @p name's link (RFC-0014 §4).
      *
-     * The S5 refcount seam: a standing subscription or `await` routed through the link
-     * holds it acquired for its lifetime (the routing-plane callers are S6's wiring; an
-     * embedder may drive it directly). While the count is above zero the engine keeps the
+     * The S5 refcount seam: a standing subscription routed through the link holds it
+     * acquired for its lifetime. The routing plane drives this itself (#1816): on a build
+     * with the engine, the constructor installs @ref tr::graph::graph_hooks_t::link_hold, so
+     * every remote subscription edge that delivers over a connection — one a peer made
+     * over it, or one bound toward a target through its mount — calls this when it is
+     * admitted and @ref release_link when it is cleared, replaced or evicted. An embedder
+     * may still drive it directly for a binding the graph does not see. An `await` takes no
+     * standing hold. While the count is above zero the engine keeps the
      * link's steady-state target `UP` — self-healing on loss with `backoff`, forever —
      * and the last @ref release_link closes the socket back to `DORMANT`. Non-blocking;
      * "bring it up and wait" is `await` on the connection vertex.
@@ -721,6 +733,14 @@ class transport_vertex_t {
      */
     [[nodiscard]] graph::result_t<module_decl_t> declaration_for_locked(
         std::string_view module, std::string_view kind) const;
+
+    /**
+     * @brief The `graph::graph_hooks_t::link_hold` thunk (#1816): a routed subscription
+     *        edge was established (@ref acquire_link) or torn down (@ref release_link).
+     *        A link that names no connection (a bus peer, a provided child) answers
+     *        `NOT_FOUND`, which is dropped: only a connection has a count to hold.
+     */
+    static void link_hold_thunk(void* ctx, std::string_view link, bool held);
 
     /**
      * @brief `set_link_state`'s body, for a caller that ALREADY holds `ctl_m_`.
