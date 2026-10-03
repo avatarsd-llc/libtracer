@@ -318,6 +318,10 @@ them.
   those sections where the `Doxyfile` and `clang-format` gates do not already. A
   PascalCase type, a `///` comment, or a diff that assumes exceptions or RTTI in
   `core/` is a finding.
+- **Complexity ratchet** (`tools/check_ccn.py`): flag a function that grows past
+  CCN 15, or a pin in `tools/ccn_pins.json` that rises, and flag a lowered CCN
+  that came from splitting into helpers (the per-file total in the job summary
+  did not drop) rather than from deleting or merging branches.
 
 ### 2g. Design questions, subordinate to the two constraints above
 

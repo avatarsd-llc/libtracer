@@ -1,0 +1,86 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+#
+# Cyclomatic-complexity ratchet on core/ and the agent-doc length cap (#1790).
+#
+# `tools/check_ccn.py` measures every function in core/include and core/src with a
+# pinned lizard: an unpinned function above CCN 15 fails, a pinned one may only go
+# down (tools/ccn_pins.json), and CLAUDE.md / CONTEXT.md must stay at 100 lines or
+# fewer. The job summary carries the CCN distribution and, report only, each file's
+# CCN above 10 against the base commit — the number a helper split cannot move.
+#
+# Its own workflow, not a core-ci job: it needs no build, and core-ci's trigger is
+# DERIVED from what core-ci compiles (tools/gen_ci_paths.py). Adding CLAUDE.md and
+# CONTEXT.md there would fire the whole build matrix on a doc edit; leaving them out
+# would let a doc-only PR break the cap unseen. This filter is exactly the gate's
+# inputs instead. Same reasoning as doc-citations.yml.
+#
+# RUNNER: hosted `ubuntu-24.04` on every route, no container and no self-hosted
+# routing — it builds nothing, so there is nothing to gain from the ci-local pool and
+# no fork guard or workspace-ownership step to carry.
+name: complexity
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "core/include/**"
+      - "core/src/**"
+      - "CLAUDE.md"
+      - "CONTEXT.md"
+      - "tools/check_ccn.py"
+      - "tools/ccn_pins.json"
+      - "tools/tests/test_check_ccn.py"
+      - ".github/workflows/complexity.yml"
+  pull_request:
+    # Duplicated rather than a YAML anchor: GitHub Actions does not expand aliases.
+    paths:
+      - "core/include/**"
+      - "core/src/**"
+      - "CLAUDE.md"
+      - "CONTEXT.md"
+      - "tools/check_ccn.py"
+      - "tools/ccn_pins.json"
+      - "tools/tests/test_check_ccn.py"
+      - ".github/workflows/complexity.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: complexity-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  ccn:
+    runs-on: ubuntu-24.04
+    # lizard over ~125 files takes ~10 s, twice with the base; the only network steps
+    # are setup-python and one pip install. 10 = the short-job floor (see core-ci.yml).
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install lizard (pinned; must match LIZARD_VERSION in tools/check_ccn.py)
+        timeout-minutes: 5
+        run: pip install --quiet "lizard==1.24.0"
+      # The gate's own logic first, so a tool bug reports as a tool bug.
+      - name: Ratchet unit tests
+        run: python3 -m unittest discover -s tools/tests -p "test_check_ccn.py" -v
+      - name: Fetch the base commit for the per-file report
+        id: base
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -n "$BASE" ] && [ "$BASE" != "0000000000000000000000000000000000000000" ] \
+             && git fetch --quiet --no-tags --depth=1 origin "$BASE"; then
+            echo "sha=$BASE" >> "$GITHUB_OUTPUT"
+          fi
+      - name: CCN ratchet + agent-doc cap (distribution in the job summary)
+        env:
+          BASE: ${{ steps.base.outputs.sha }}
+        run: python3 tools/check_ccn.py ${BASE:+--base "$BASE"}
