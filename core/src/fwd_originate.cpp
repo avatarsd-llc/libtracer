@@ -11,6 +11,7 @@
  * GCC's inline budget and grew the ratchet-pinned `route_fwd_forward<rope_cursor>` by 319 B
  * without touching it.
  */
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -117,8 +118,10 @@ fwd_router_t::~fwd_router_t() {
 graph::result_t<void> fwd_router_t::originate(origin_t& slot, fwd_op_t op, const graph::path_t& dst,
                                               std::span<const std::byte> payload,
                                               const graph::path_t* reply_to) {
-    // READ carries no payload and WRITE carries exactly one TLV; AWAIT is not originated here.
-    if (op == fwd_op_t::READ ? !payload.empty() : op != fwd_op_t::WRITE || payload.empty())
+    // One rule for both opcodes: only a WRITE carries a payload, so "READ or WRITE" and "the
+    // payload matches the opcode" are the same compare. AWAIT and REPLY sit above WRITE.
+    if (std::to_underlying(op) > std::to_underlying(fwd_op_t::WRITE) ||
+        payload.empty() == (op == fwd_op_t::WRITE))
         return std::unexpected(graph::status_t::TYPE_MISMATCH);
     if (dst.key().empty()) return std::unexpected(graph::status_t::INVALID_PATH);
     if (reply_to != nullptr) {
@@ -176,7 +179,7 @@ graph::result_t<void> fwd_router_t::originate(origin_t& slot, fwd_op_t op, const
         p += put_field_body(p, dst.field());
     }
     p = put_leaf(p, wire::type_t::PATH, slot.route_);
-    if (!payload.empty()) std::memcpy(p, payload.data(), payload.size());
+    std::copy(payload.begin(), payload.end(), p);  // empty for a READ
 
     // The ONE ingress every frame takes, with no inbound link: an empty name is the node's own
     // origin, so a forward hop grows `src` by nothing and a local terminus hands its reply to
