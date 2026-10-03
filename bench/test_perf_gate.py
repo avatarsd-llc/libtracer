@@ -456,66 +456,57 @@ def lkv_out(heap64, pool64, heap1k=None, pool1k=None):
     return "\n".join(lines + ["noise line", "RESULT\ttoo\tshort"]) + "\n"
 
 
-class LkvRatioGate(unittest.TestCase):
-    """@brief The ADR-0060 pool/heap ratio (#1745, #1695): runner variance passes, a heap
-    fallback fails.
+class LkvRatioReport(unittest.TestCase):
+    """@brief The ADR-0060 pool/heap ratio (#1745, #1695) is reported and NEVER fails.
 
-    The doctored shapes are #1739's and #1695's: the candidate read 1.5-1.6x on runners where
-    the same code read 2.1-3.2x, with byte-identical binaries, including against main in the
-    same session. Under the 2.0x reference and over LKV_FALLBACK_RATIO is REPORTED, never
-    gated (the structural LKV-ROUTE gate in `bench_forward_heap` owns the routing claim); a
-    pool that routes to the heap (ratio ~1.0x) fails whatever main reads."""
+    The pool's acceptance is not a speed ratio: its only goal is never to take an
+    allocation from the system heap, which `bench_forward_heap`'s LKV-ROUTE count gates
+    structurally. So no ratio, not even a pool that costs what the heap costs, may reach
+    the fail list. The doctored shapes are #1739's and #1695's (1.5-1.6x on runners where
+    identical code read 2.1-3.2x) and a ~1.0x fallback."""
+
+    SHAPES = [(102, 150), (98, 320), (155, 160), (160, 210), (140, 300), (300, 310)]
 
     def run_paired(self, cand_out, base_out, pairs=3):
-        """@brief The paired gate over doctored outputs, keyed by which binary ran."""
+        """@brief The paired report over doctored outputs, keyed by which binary ran."""
         def fake_timed(argv, timeout):
             return cand_out(argv) if argv[0] == "cand" else base_out(argv)
         with unittest.mock.patch.object(pg, "timed", fake_timed), \
                 contextlib.redirect_stdout(io.StringIO()) as out:
-            fails = pg.lkv_ratio_gate_paired(pathlib.Path("cand"), pathlib.Path("base"), pairs)
-        return fails, out.getvalue()
+            ret = pg.lkv_ratio_report_paired(pathlib.Path("cand"), pathlib.Path("base"), pairs)
+        return ret, out.getvalue()
 
-    def test_heap_fallback_fails_even_when_main_is_low(self):
-        """A real fallback: the pool row costs what the heap row costs."""
-        fails, _ = self.run_paired(lambda a: lkv_out(100, 102), lambda a: lkv_out(100, 150))
-        self.assertEqual(len(fails), 1)
-        self.assertIn("fallen back to the heap", fails[0])
+    def test_ratio_never_fails_paired(self):
+        """Every shape, a heap-cost pool included, returns no fail and says so."""
+        for cand, base in self.SHAPES:
+            ret, out = self.run_paired(lambda a: lkv_out(100, cand), lambda a: lkv_out(100, base))
+            self.assertIsNone(ret)
+            self.assertIn("reported, not gated", out)
+            self.assertIn(f"main {base / 100:.1f}x, same session", out)
 
-    def test_heap_fallback_fails_when_main_is_healthy(self):
-        fails, _ = self.run_paired(lambda a: lkv_out(100, 98), lambda a: lkv_out(100, 320))
-        self.assertTrue(fails and "fallen back" in fails[0])
+    def test_ratio_never_fails_legacy(self):
+        for pool in (98, 102, 150, 300):
+            with unittest.mock.patch.object(pg, "timed", lambda argv, timeout: lkv_out(100, pool)), \
+                    contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertIsNone(pg.lkv_ratio_report(pathlib.Path("cand")))
+            self.assertIn("reported, not gated", out.getvalue())
 
-    def test_1739_low_runner_passes_when_main_reads_low_too(self):
-        """Both arms 1.5-1.6x on one runner: the runner, not the code."""
-        fails, out = self.run_paired(lambda a: lkv_out(100, 155), lambda a: lkv_out(100, 160))
-        self.assertEqual(fails, [])
-        self.assertIn("reported, not gated", out)
+    def test_no_ratio_threshold_survives(self):
+        """The thresholds were deleted, not parked: nothing for a later edit to re-arm."""
+        for name in ("LKV_MIN_RATIO", "LKV_FALLBACK_RATIO", "lkv_verdict", "lkv_ratio_gate",
+                     "lkv_ratio_gate_paired"):
+            self.assertFalse(hasattr(pg, name), name)
 
-    def test_1695_split_session_is_reported_not_gated(self):
-        """#1695's red runs: candidate 1.6x against main 2.1x in the SAME session, identical
-        code. The arms landed in different modes of the runner's distribution."""
-        fails, out = self.run_paired(lambda a: lkv_out(100, 160), lambda a: lkv_out(100, 210))
-        self.assertEqual(fails, [])
-        self.assertIn("under main: reported, not gated", out)
-
-    def test_fallback_threshold_sits_under_the_healthy_minimum(self):
-        """The gated threshold must stay below the lowest healthy reading #1695 measured
-        (1.4x over 254 runner readings) and above a fallback's ~1.0x."""
-        self.assertLess(pg.LKV_FALLBACK_RATIO, 1.4)
-        self.assertGreater(pg.LKV_FALLBACK_RATIO, 1.1)
-        fails, _ = self.run_paired(lambda a: lkv_out(100, 140), lambda a: lkv_out(100, 300))
-        self.assertEqual(fails, [])
-
-    def test_healthy_candidate_passes(self):
-        fails, _ = self.run_paired(lambda a: lkv_out(100, 300, 100, 470),
-                                   lambda a: lkv_out(100, 310, 100, 480))
-        self.assertEqual(fails, [])
+    def test_both_sizes_reported(self):
+        _, out = self.run_paired(lambda a: lkv_out(100, 300, 100, 470),
+                                 lambda a: lkv_out(100, 310, 100, 480))
+        self.assertIn("S=64", out)
+        self.assertIn("S=1024", out)
 
     def test_best_of_pairs_not_one_round(self):
-        """One contaminated pool round must not decide it: the best observation wins."""
+        """One contaminated pool round must not decide the report: the best observation wins."""
         rounds = iter([lkv_out(100, 140), lkv_out(100, 300), lkv_out(100, 290)])
-        fails, out = self.run_paired(lambda a: next(rounds), lambda a: lkv_out(100, 300))
-        self.assertEqual(fails, [])
+        _, out = self.run_paired(lambda a: next(rounds), lambda a: lkv_out(100, 300))
         self.assertIn("3.0x", out)
 
     def test_interleaved_alternating_start(self):
@@ -527,20 +518,10 @@ class LkvRatioGate(unittest.TestCase):
         self.run_paired(rec, rec, pairs=3)
         self.assertEqual(seen, ["base", "cand", "cand", "base", "base", "cand"])
 
-    def test_main_without_rows_still_gates_a_fallback(self):
-        """An older main without the rows: a fallback still fails, a low runner does not."""
-        fails, _ = self.run_paired(lambda a: lkv_out(100, 105), lambda a: "no rows\n")
-        self.assertTrue(fails and f"< {pg.LKV_FALLBACK_RATIO}x" in fails[0])
-        fails, _ = self.run_paired(lambda a: lkv_out(100, 150), lambda a: "no rows\n")
-        self.assertEqual(fails, [])
-
-    def test_legacy_form_gates_the_fallback_only(self):
-        def legacy(pool):
-            with unittest.mock.patch.object(pg, "timed", lambda argv, timeout: lkv_out(100, pool)), \
-                    contextlib.redirect_stdout(io.StringIO()):
-                return pg.lkv_ratio_gate(pathlib.Path("cand"))
-        self.assertEqual(len(legacy(100)), 1)
-        self.assertEqual(legacy(150), [])
+    def test_main_without_rows_reports_the_candidate_alone(self):
+        _, out = self.run_paired(lambda a: lkv_out(100, 105), lambda a: "no rows\n")
+        self.assertIn("1.1x", out)
+        self.assertNotIn("same session", out)
 
 
 class VerdictTier(unittest.TestCase):
