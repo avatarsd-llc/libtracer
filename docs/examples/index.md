@@ -1,8 +1,11 @@
 # Examples
 
-Worked, **compile-tested** examples of the C++ reference implementation. Every example
-on these pages is a real source file under [`core/examples/`](https://github.com/avatarsd-llc/libtracer/tree/main/core/examples)
-that CI **builds and runs as a smoke test** on every change — the code shown is included
+Worked, **compile-tested** examples of the C++ reference implementation and of the Rust and
+TypeScript bindings. Every example on these pages is a real source file — under
+[`core/examples/`](https://github.com/avatarsd-llc/libtracer/tree/main/core/examples),
+[`bindings/rust/examples/`](https://github.com/avatarsd-llc/libtracer/tree/main/bindings/rust/examples)
+or [`bindings/typescript/examples/`](https://github.com/avatarsd-llc/libtracer/tree/main/bindings/typescript/examples)
+— that CI **builds and runs as a smoke test** on every change. The code shown is included
 verbatim from that file, so it cannot drift from what actually compiles.
 
 | Example | Layer | What it shows |
@@ -77,6 +80,16 @@ verbatim from that file, so it cannot drift from what actually compiles.
 | [No frame crosses until the Upgrade completes](net-ws-upgrade.md) | transport plane, `ws` | the `101` computed from the client's nonce; the tighten-only pre-auth budget |
 | [The one BUS kind](net-can-bus-peers.md) | transport plane, `can` | ADR-0044 peers synthesized from traffic; `n<node-id>` is an identity |
 | [One listener, many slots](net-multi-peer-listener.md) | transport plane, `tcp`/`ws` | `p<slot>` is a POSITION — resolve per use; the printed skip ctest can SEE |
+| [A VALUE frame and its CRC trailer](rust-value-crc.md) | Rust binding | `encode` / `decode`; the opt-in trailer catches a flipped bit, its absence does not |
+| [An address is packed segment records](rust-path-tlv.md) | Rust binding | `path_to_tlv`: `[6]sensor[4]temp`; one canonical spelling; `NotRooted` |
+| [A remote write is one FWD frame](rust-fwd-write.md) | Rust binding | `FWD{WRITE}`: `op`, `dst`, `src`, VALUE — and no correlation id |
+| [Subscribing is a write](rust-fwd-subscribe.md) | Rust binding | a SUBSCRIBER into `:subscribers[]`; a delivery is a `FWD{WRITE}` to the target |
+| [Reading a node's `:stats`](rust-fwd-read-stats.md) | Rust binding | one READ, one seam, one SETTINGS block; counters looked up by NAME |
+| [A VALUE frame and its CRC trailer](ts-value-crc.md) | TypeScript binding | the core package alone; the same bytes as the Rust example |
+| [Write a remote vertex, then read it](ts-write-read.md) | TypeScript binding | `LibtracerClient` over an injected transport; last writer wins |
+| [Subscribe to a remote producer](ts-subscribe.md) | TypeScript binding | `subscribe(path, handler)`; deliveries in write order; `unsubscribe()` is local |
+| [A remote failure is a typed error](ts-remote-error.md) | TypeScript binding | `FWD{REPLY, kind=ERROR}` surfaces as `FwdError` with the wire code |
+| [Dial a WebSocket link](ts-ws-dial.md) | TypeScript binding, `ws` | `TransportWs` dials a loopback listener; one frame per BINARY message |
 
 The toctree below is the order of record; this table adds the layer and the summary.
 Each example's layer column names the module that owns the types it uses — the
@@ -208,6 +221,29 @@ both arms, and therefore took the last rung — but took it with `SKIP_RETURN_CO
 skip is a thing ctest *reports* rather than a pass nobody can tell apart. The ranking now reads:
 **name the arms** → **absent by build, per target, with the count recorded** → **skip at run
 time, exiting 77 so ctest says `Skipped`** → never a bare `return 0`.
+`bindings` is the fifth case, and the first row built by a **job** rather than a target. The ten
+binding examples are not CMake targets, so they are absent from every ctest run above — absent
+by build, with the count recorded here: **70** C++ examples under ctest, plus **5** Rust and
+**5** TypeScript, **80** in all. Each binding's own toolchain job builds and runs its five:
+
+- **Rust** — `conformance.yml`. Its `cargo test` step compiles every file under
+  `bindings/rust/examples/` (that is cargo's default), and the step after it runs the five by
+  name with `cargo run --example`. Each one asserts what it prints, so a mismatch exits
+  non-zero and fails the job. `perf.rs` and `conformance.rs` in the same directory are
+  harnesses that other steps drive, and they are not counted.
+- **TypeScript** — `ts.yml`. After `npm run build`, `npm run examples` runs the five in
+  sequence with `node`; each asserts with `node:assert`, so the first failure stops the run.
+  The four client examples talk to `examples/stand-in-node.mjs`, an in-memory stand-in for a
+  remote node (the TypeScript packages have none), which is support code and not counted.
+
+Neither list has a conditional entry: no build option removes one and none skips at run time,
+so a green job is a pass for five examples that all ran. Both lists are explicit — the
+`cargo run` loop in `conformance.yml` and the `examples` script in
+`bindings/typescript/package.json` — so a sixth file that nobody adds to its list is not run,
+and the count above is what to check it against. The ros2 binding has no example yet: its one
+translation unit is the `rmw_tracer` identity, which has nothing to demonstrate on its own.
+The ranking reads unchanged for the C++ rows, and adds one rung for a binding: **built and run
+by its own toolchain job, with the list explicit and the count recorded here**.
 :::
 
 ```{toctree}
@@ -285,4 +321,14 @@ A stream has none, so the kind supplies them <net-tcp-stream-framing>
 No frame crosses until the Upgrade completes <net-ws-upgrade>
 The one BUS kind <net-can-bus-peers>
 One listener, many slots <net-multi-peer-listener>
+Rust: a VALUE frame and its CRC trailer <rust-value-crc>
+Rust: an address is packed segment records <rust-path-tlv>
+Rust: a remote write is one FWD frame <rust-fwd-write>
+Rust: subscribing is a write <rust-fwd-subscribe>
+Rust: reading a node's :stats <rust-fwd-read-stats>
+TypeScript: a VALUE frame and its CRC trailer <ts-value-crc>
+TypeScript: write a remote vertex, then read it <ts-write-read>
+TypeScript: subscribe to a remote producer <ts-subscribe>
+TypeScript: a remote failure is a typed error <ts-remote-error>
+TypeScript: dial a WebSocket link <ts-ws-dial>
 ```

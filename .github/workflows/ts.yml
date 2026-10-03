@@ -57,6 +57,12 @@ jobs:
       - name: Run the package test suites (core conformance TAP + transport-ws)
         run: npm test
 
+      # The five one-concept binding examples (docs/examples/ts-*.md, #1785). Each asserts
+      # what it prints, so a mismatch fails here; the list is explicit in package.json's
+      # `examples` script and its count is recorded in docs/examples/index.md.
+      - name: Run the binding examples (one concept each)
+        run: npm run examples
+
       # Published-package smoke: pack the core tarball exactly as `npm publish`
       # would, install it into a clean throwaway project, and import it. This runs
       # against the SHIPPED artifact — proving `dist/` is included and the `exports`

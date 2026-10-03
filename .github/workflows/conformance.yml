@@ -68,3 +68,15 @@ jobs:
       - name: Rust binding in-crate tests (typed codec + structural vectors)
         working-directory: bindings/rust
         run: cargo test
+      # The five one-concept binding examples (docs/examples/rust-*.md, #1785). `cargo test`
+      # above already compiled them; this runs each one, and each asserts what it prints.
+      # The list is explicit and its count is recorded in docs/examples/index.md.
+      - name: Rust binding examples (one concept each)
+        working-directory: bindings/rust
+        run: |
+          set -e
+          for e in value_crc path_tlv fwd_write fwd_subscribe fwd_read_stats; do
+            echo "::group::$e"
+            cargo run --quiet --example "$e"
+            echo "::endgroup::"
+          done

@@ -25,6 +25,7 @@
     "conformance": "npm run conformance --workspace @avatarsd-llc/libtracer",
     "bench": "npm run bench --workspace @avatarsd-llc/libtracer",
     "test": "npm run test --workspaces --if-present",
+    "examples": "node examples/value-crc.mjs && node examples/write-read.mjs && node examples/subscribe.mjs && node examples/remote-error.mjs && node examples/ws-dial.mjs",
     "docs": "typedoc"
   },
   "devDependencies": {
