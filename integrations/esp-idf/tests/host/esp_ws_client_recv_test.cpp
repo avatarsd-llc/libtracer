@@ -529,7 +529,7 @@ void test_named_rx_source_delivers_owning_ropes() {
                 fake_ws::make_frame(WS_TRANSPORT_OPCODES_BINARY, true, kLoanMsg, 0x33);
             fake_ws::push_frames({big});
             check(wait_until([&] { return ropes.count() >= 2; }, 5s), "a large message delivered");
-            check(ropes.offset(1) == tr::view::kRxLoanBytes,
+            check(ropes.offset(1) == tr::mem::kRxLoanBytes,
                   "at the share threshold the block carries the ingress-loan reserve");
             check(ropes.bytes(1) == big.payload, "with its bytes intact");
         }
