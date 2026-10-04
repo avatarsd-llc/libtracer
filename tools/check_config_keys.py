@@ -33,7 +33,7 @@ Three ways the page can fail, all of them the ways it would go stale:
 
 Scope, stated because an unreached completeness claim is itself a defect: this
 gate covers CONNECTION config only. Since #985 hoisted the walk to `tr::wire`,
-`graph_t::create_child` and the SUBSCRIBER QoS walk (`core/src/graph.cpp`) read
+`graph_t::create_child` and the SUBSCRIBER QoS walk (`core/src/graph_fields.cpp`) read
 their grammar through the SAME `config_reader_t` type — but a creation-SPEC
 envelope and a per-subscription QoS block are not connection config, so that file
 is excluded below rather than documented on this page. The ACL walk still carries
@@ -56,11 +56,11 @@ SOURCE_DIRS = (ROOT / "core" / "src", ROOT / "core" / "include")
 SOURCE_SUFFIXES = (".cpp", ".hpp")
 
 # The reader's own header declares the accessors; it reads no keys of its own.
-# `graph.cpp` constructs readers too (#985), but over the creation-SPEC envelope and
+# `graph_fields.cpp` constructs readers too (#985, #1711), but over the creation-SPEC envelope and
 # the SUBSCRIBER QoS SETTINGS — not connection config, hence not this page's subject.
 EXCLUDED = {
     ROOT / "core" / "include" / "libtracer" / "config_reader.hpp",
-    ROOT / "core" / "src" / "graph.cpp",
+    ROOT / "core" / "src" / "graph_fields.cpp",
 }
 
 # `const config_reader_t cfg(raw_config);` -> the variable every accessor hangs off.

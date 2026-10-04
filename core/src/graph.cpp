@@ -22,7 +22,6 @@
 
 #include "graph_fields.hpp"
 #include "libtracer/byteorder.hpp"
-#include "libtracer/config_reader.hpp"
 #include "libtracer/frame.hpp"
 #include "libtracer/key_view.hpp"
 #include "libtracer/mem_borrowed.hpp"
@@ -1331,6 +1330,28 @@ void graph_t::note_subscriber_removed(vertex_t* v) {
     const std::shared_lock lock(map_mutex_);
     v->bump_own_subs(-1);
     bump_subtree_listeners(v, -1);
+}
+
+bool graph_t::clear_subscriber_slot(vertex_t* v, std::size_t slot, std::string_view caller,
+                                    void** retired_ctx) {
+    // ONE out-of-line clear for both doors, so `vertex_t::clear_edge` is compiled once rather
+    // than inlined here and again out of line in graph_fields.cpp (#1711, rv32 flash).
+    //
+    // The observer's view of the departing edge must be taken BEFORE the clear — clear_edge
+    // RECLAIMS the slot's stored SUBSCRIBER, so afterwards there is nothing left to name the
+    // target with. Skipped entirely on a local clear (`unsubscribe` passes the empty caller)
+    // or with no observer installed (observing_subscriptions).
+    const view::view_t cleared_tlv = observing_subscriptions(caller)
+                                         ? v->edge_source(slot).value_or(view::view_t{})
+                                         : view::view_t{};
+    remote_ptr_t retired_remote;
+    if (!v->clear_edge(slot, retired_ctx, &retired_remote)) return false;
+    note_subscriber_removed(v);                       // RFC-0005 counter bookkeeping
+    hold_link(delivery_link(retired_remote), false);  // the link hold this clear gives back (#1816)
+    // Only a slot that WAS active is an unsubscribe; clearing an already-empty one changed
+    // nothing and must not be reported as a removal. A no-op for the empty caller.
+    notify_subscription(sub_event_t::kind_t::REMOVED, v, caller, cleared_tlv, slot);
+    return true;
 }
 
 vertex_t* graph_t::find_ptr(std::span<const std::byte> key) const {
@@ -2854,73 +2875,6 @@ result_t<void> graph_t::mark_flushed(vertex_handle_t vh) {
     return {};
 }
 
-namespace {
-
-/**
- * @brief Parse a SUBSCRIBER TLV into slot fields — the ONE parse every admission door shares
- *        (ADR-0049; the resolver's parallel subscriber_compact() parse is retired).
- *
- * Extracts the first PATH child's target key (may stay empty — the wire door ignores it) and,
- * from the SETTINGS child, the `delivery_compact` opt-in (NAME "delivery_compact" VALUE u8,
- * RFC-0004 §E.1 / docs/reference/05) and the packed `delivery_policy` (NAME "delivery_policy"
- * VALUE u16, RFC-0022 §3.A) — the SAME child, so the per-subscription policy introduced no new
- * wire structure. Back-compat: a SUBSCRIBER carrying neither (or an older parser) keeps the
- * full-route delivery path and the all-zero default policy — conformance vectors unaffected.
- * The SETTINGS walk IS `wire::config_reader_t` (#927, hoisted to L2/L3 by #985 so this file no
- * longer carries a hand-written copy of the rule): pair-consuming — a forward-compat pair whose
- * value reads `"delivery_policy"` must not bind the FOLLOWING child as the policy — and
- * last-well-formed-occurrence-wins, the plain NAME-field family semantics (#995).
- *
- * The policy's reserved bits (6–15) are stored VERBATIM and never interpreted: §3.A says a
- * sender MUST write 0 and a receiver MUST ignore them — an ignore, not a reject — so a future
- * sender's bits round-trip through `:subscribers[]` rather than being refused by an older node.
- */
-void parse_subscriber_tlv(const tlv_t& sub, subscriber_t& s) {
-    for (const tlv_t& child : sub.children) {
-        if (child.type == type_t::PATH && !s.target_key) {
-            // An illegally-spelled target leaves target_key unset, which falls back to the
-            // full-route delivery path exactly as an older parser would (#681).
-            if (auto k = wire::path_key(child)) s.target_key = try_make_target_key(*std::move(k));
-        } else if (child.type == type_t::SETTINGS) {
-            const wire::config_reader_t qos(&child);
-            if (qos.flag("delivery_compact").value_or(false))
-                s.ensure_remote().delivery_compact = true;  // cold half only when opted in
-            if (const std::optional<std::uint16_t> word = qos.u16("delivery_policy"))
-                s.policy.bits = *word;
-        }
-    }
-}
-
-}  // namespace
-
-/**
- * @brief The wire→`subscriber_t` admission parse, hand-rolled at three doors before #869:
- *        type-check the decoded record, then parse it ONCE (ADR-0049).
- *
- * The three doors are `graph_t::subscribe_wire` and the `:subscribers[]` append and
- * `:subscribers[N]` replace of the field surface (graph_fields.cpp). What is deliberately NOT
- * in here is everything the doors disagree about: the `[N]` arm's `acl_allows(WRITE)` gate and
- * its empty-STATUS eviction sentinel (both of which must run before this), the field-write
- * door's `require a PATH child` rule, and `subscribe_wire`'s inverse — it CLEARS `target_key`,
- * because a PATH child there names the consumer at ITS origin and delivery rides the return route.
- *
- * The zero-copy `source_view` retain stays at each door on purpose. Taking the record by
- * value here so the retain could be shared too measured **+1980 bytes** of graph.cpp `.text`
- * at -O3 — a `view_t` move plus its destructor and landing pad, duplicated at each of the
- * two field-write inline sites of the time — for one assignment saved.
- *
- * @param tlv The decoded record. Not re-decoded here: the `[N]` arm must inspect the decode
- *            before this, to discriminate the eviction sentinel.
- * @param s   Filled on success; untouched on the type refusal.
- * @return False iff @p tlv is not a SUBSCRIBER — the doors' one shared TYPE_MISMATCH. A
- *         `bool` rather than a `result_t<void>` because there is exactly one failure.
- */
-[[nodiscard]] bool parse_wire_subscriber(const tlv_t& tlv, subscriber_t& s) {
-    if (tlv.type != type_t::SUBSCRIBER) return false;
-    parse_subscriber_tlv(tlv, s);
-    return true;
-}
-
 result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
                                                    std::string_view caller,
                                                    std::optional<std::size_t> slot,
@@ -3175,11 +3129,8 @@ result_t<void> graph_t::unsubscribe(const subscription_t& sub, subscriber_releas
     // caller may hand the same hook to several handles, and a signal for an edge that was
     // never cleared would free a context another live subscription is still delivering to.
     void* retired_ctx = nullptr;
-    remote_ptr_t retired_remote;
-    if (!sub.vertex_->clear_edge(sub.slot_, &retired_ctx, &retired_remote))
+    if (!clear_subscriber_slot(sub.vertex_, sub.slot_, {}, &retired_ctx))
         return std::unexpected(status_t::NOT_FOUND);
-    note_subscriber_removed(sub.vertex_);
-    hold_link(delivery_link(retired_remote), false);  // #1816
 
     // The grace point (ADR-0080). Reached HERE — synchronously, before returning — whenever
     // nothing can still be holding the pair: this thread holds no dispatch under the two
