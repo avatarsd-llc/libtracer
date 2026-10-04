@@ -81,6 +81,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   copy-then-call dispatch unchanged. A caller that registers its own callback with a lambda
   capturing more than two pointers, or an owning object such as a `std::shared_ptr`, captures
   one pointer to a struct (or to the owner) instead.
+- **`kSingleWriter` is removed, and a fragment that still sets it no longer compiles
+  ([#1718](https://github.com/avatarsd-llc/libtracer/issues/1718)).** It was an unchecked
+  promise of one publisher per vertex that no code read: every LKV slot's guard serializes
+  writers as well as readers, and after the fused guarded publish
+  ([#1715](https://github.com/avatarsd-llc/libtracer/issues/1715)) it had no saving left to
+  unlock. `default_config_t::kSingleWriter` and the derived `tr::graph::kSingleWriter` are gone.
+  `config.hpp` carries a tripwire: a `config_t` that defines a member `kSingleWriter` fails with
+  a `static_assert` saying it was removed, so the line is deleted rather than left to suggest a
+  contract the library honours. The ESP-IDF component's generated fragment no longer sets it.
+  Nothing changes at run time. **Migration:** delete
+  `static constexpr bool kSingleWriter = ...;` from your `libtracer/config_override.hpp`.
 - **The config member `reader_guard_t` is renamed `guard_t`, and a fragment that still defines
   the old name no longer compiles
   ([#1703](https://github.com/avatarsd-llc/libtracer/issues/1703)).** The guard serializes
