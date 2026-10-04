@@ -448,6 +448,30 @@ using stats_sampler_fn_t = bool (*)(void* ctx, std::string_view seam_class,
                                     std::string_view seam_name, stats_block_t* out);
 
 /**
+ * @brief Report that ONE remote subscription edge routed through link @p link was
+ *        established (@p held true) or torn down (@p held false) — RFC-0014 §4's standing
+ *        binding, as the routing plane sees it (#1816).
+ *
+ * "Routed through" means the edge DELIVERS over the link: its stored delivery link, which
+ * is the link the subscribe arrived on, or the mount a `SUBSCRIBER`'s `PATH` target routes
+ * through (RFC-0021). A `:subscribers[]` field-write edge, which delivers to a LOCAL target,
+ * is not routed through any link and is never reported. Each edge is reported exactly
+ * twice over its life — once `true` when it is admitted, once `false` when it is cleared,
+ * replaced, or evicted — so the receiver can keep a plain reference count and nothing else.
+ *
+ * @param ctx  The caller-owned context installed beside the function.
+ * @param link This node's NAME for the link — the router's registry name. Borrowed for the
+ *             call only.
+ * @param held `true` on establishment, `false` on teardown.
+ *
+ * @note Called on the subscribing or unsubscribing thread, OUTSIDE every graph lock, after
+ *       the mutation has landed. Never called on the write or delivery path. It may block
+ *       briefly on the receiver's own control-plane lock; it MUST NOT re-enter `graph_t`.
+ *       @p ctx must outlive every subscribe the graph can still admit.
+ */
+using link_hold_fn_t = void (*)(void* ctx, std::string_view link, bool held);
+
+/**
  * @brief One `{fn, ctx}` graph seam: a captureless function pointer and the context handed
  *        back as its first argument (ADR-0047, #1049).
  *
@@ -530,6 +554,16 @@ struct graph_hooks_t {
      * spelling answers `SCHEMA_NOT_FOUND`.
      */
     graph_hook_t<stats_sampler_fn_t> stats_sampler{};
+
+    /**
+     * @brief The routed-subscription hold seam (RFC-0014 §4, #1816) — the net plane's
+     *        standing-binding refcount; `tr::net::transport_vertex_t`'s constructor installs
+     *        it on a build that carries the liveness engine.
+     *
+     * Null ⇒ subscriptions hold no link, which is every node without that engine. See
+     * `%link_hold_fn_t` for when it fires.
+     */
+    graph_hook_t<link_hold_fn_t> link_hold{};
 };
 
 /**
@@ -2701,6 +2735,14 @@ class graph_t {
     // warning.
     void notify_subscription(sub_event_t::kind_t kind, const vertex_t* v, std::string_view caller,
                              const view::view_t& sub_tlv, std::size_t slot) const;
+    // Report @p n routed edges over `link` established or torn down through the
+    // `link_hold` seam (#1816). An empty `link` — a local edge, a field-write edge, or no
+    // edge at all — reports nothing. Called with NO graph lock held.
+    // Out of line and cold on purpose: it runs on subscribe and teardown only, and letting it
+    // inline at its six call sites re-partitioned this TU's budget onto the fan-out copy
+    // loop (`vertex_t::copy_published` +277 B on the symbol ratchet).
+    [[gnu::noinline, gnu::cold]] void hold_link(std::string_view link, bool held,
+                                                std::size_t n = 1) const;
     // True iff a subscription event is worth building at all — an installed observer AND an
     // external (non-empty) caller context. Guards the pre-reads the observer needs (the
     // displaced slot's stored SUBSCRIBER on a replace/clear) so an app that installs nothing
@@ -2796,7 +2838,8 @@ class graph_t {
     // @p keys for the caller's sweep-set cleanup, and parks each detached value-seam block
     // into @ref retired_seams_. Call with map_mutex_ held UNIQUE (it flips registered_ and
     // appends to retired_seams_, both map-lock-guarded).
-    void retire_subtree(vertex_t* v, std::vector<std::vector<std::byte>>& keys);
+    void retire_subtree(vertex_t* v, std::vector<std::vector<std::byte>>& keys,
+                        std::vector<remote_ptr_t>& routed);
 
     // Value-seam blocks detached by retirement (RFC-0009 §B.6). A seam is read lock-free,
     // so a swapped-out block cannot be freed while a reader might still hold the old
@@ -2991,6 +3034,9 @@ class graph_t {
     // already-cold `:stats` field-read path, so it is off every hot path by construction —
     // its cost to a node that never reads the census is the three words it occupies.
     tr::sink_slot_t<stats_sampler_fn_t> stats_sampler_;  // read on a `:stats` read only
+    // The routed-subscription hold (#1816): read only where a remote edge is admitted or
+    // reclaimed, never on the write or delivery path.
+    tr::sink_slot_t<link_hold_fn_t> link_hold_;
     // The NODE's identity record, pre-serialized (#406, RFC-0011 §B): the complete
     // SETTINGS{kind,key} TLV, built once at install so every `:identity` read is a copy
     // of settled bytes rather than a re-emit — the "all vertices return byte-identical

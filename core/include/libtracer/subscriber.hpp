@@ -319,9 +319,19 @@ class remote_ptr_t {
     /** @brief Release this reference; the last one out frees the record. */
     ~remote_ptr_t() { reset(); }
 
-    /** @brief Drop this reference (acq_rel) and empty the handle; frees the record at zero. */
-    void reset() noexcept {
-        if (p_ != nullptr && p_->refs.dec_acq_rel() == 1) delete p_;
+    /**
+     * @brief Drop this reference (acq_rel) and empty the handle; frees the record at zero.
+     *
+     * Always inlined, and small enough for that to be free: the null test and the decrement
+     * only, with the record's destructor out of line in `%free_record`. Every `edge_view_t`
+     * the fan-out copies and destroys runs this once per edge per DELIVERY, mostly on an
+     * empty handle (a local edge, or a moved-from temporary). Left to the inliner, with the
+     * `delete` inline, GCC outlined `reset()` whenever graph.cpp's inline budget moved, and
+     * that put a call on every edge of the copy and teardown loops (+78 % p50 at fan-out
+     * 1024 on `inproc/64/1024/1`, #1816).
+     */
+    [[gnu::always_inline]] void reset() noexcept {
+        if (p_ != nullptr && p_->refs.dec_acq_rel() == 1) free_record(p_);
         p_ = nullptr;
     }
 
@@ -354,6 +364,13 @@ class remote_ptr_t {
     [[nodiscard]] subscriber_remote_t* mutable_get() const noexcept { return p_; }
 
    private:
+    /** @brief The last holder's free, out of line and cold: it runs once per record
+     *         lifetime (an unsubscribe), never per delivery, so its body stays off the
+     *         per-edge path that inlines @ref reset. */
+    [[gnu::noinline, gnu::cold]] static void free_record(subscriber_remote_t* p) noexcept {
+        delete p;
+    }
+
     subscriber_remote_t* p_ = nullptr; /**< @brief The shared record, or null. */
 };
 

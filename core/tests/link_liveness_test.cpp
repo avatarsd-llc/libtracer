@@ -30,6 +30,7 @@
 #include <memory>
 #include <mutex>
 #include <span>
+#include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
@@ -39,6 +40,7 @@
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport_tcp.hpp"
 #include "test_support.hpp"
+#include "test_values.hpp"
 
 namespace {
 
@@ -451,6 +453,160 @@ void test_remove_while_healing_tears_down() {
     check(g_socks_alive.load() == 0, "no socket survives the removal");
 }
 
+/** @brief The `:subscribers[N]` eviction sentinel — an empty `STATUS` (RFC-0009 §D.1). */
+tr::view::view_t evict_sentinel() {
+    std::vector<std::byte> out;
+    tr::wire::emit_tlv(out, tr::wire::type_t::STATUS, tr::wire::opt_t{},
+                       std::span<const std::byte>{});
+    return tr::testing::make_value(out);
+}
+
+/** @brief Clear `:subscribers[slot]` of @p producer, the way an unsubscribing peer does. */
+[[nodiscard]] bool clear_slot(graph_t& g, std::string_view producer, std::size_t slot) {
+    std::string spelled(producer);
+    spelled += ":subscribers[" + std::to_string(slot) + "]";
+    const auto field = path_t::parse(spelled);
+    const auto v = g.find(path_t::parse(producer)->key());
+    return field.has_value() && v.has_value() &&
+           g.write(*v, field->field(), evict_sentinel()).has_value();
+}
+
+/**
+ * @brief #1816 — the routing plane drives the refcount: a subscription routed through a
+ *        dormant engine link brings it up, keeps it self-healing, and its teardown is the
+ *        last standing release. No `acquire_link` / `release_link` call appears here.
+ */
+void test_routed_subscription_holds_the_link() {
+    std::printf("#1816: a routed subscription holds the link through the refcount alone:\n");
+    dial_script_t script;  // outlives `net`: the engine's factory copy holds its address
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    declare_fake_engine_module(net, script);
+    const script_guard_t guard{script};  // bounded teardown even on a failing test
+    (void)node.write(path_t("/net/fake-client/conn"), fake_spec("a", /*backoff_ms=*/1));
+    (void)node.register_vertex(path_t("/sensor"), tr::graph::role_t::STORED_VALUE);
+
+    check(router.subscribe_toward(path_t("/sensor"), path_t("/net/fake-client/a/display/val"))
+              .has_value(),
+          "subscribe_toward binds an edge through the dormant mount");
+    check(script.await_attempts(1), "establishing the subscription kicked a dial");
+    script.script(true);
+    check(await_state(node, "/net/fake-client/a", link_state_t::UP), "the link comes UP");
+
+    // The subscription is the standing binding: loss self-heals instead of re-dormanting.
+    // Guarded so a regression fails the checks below instead of crashing the suite.
+    if (!script.built.empty()) script.built[0]->die();
+    check(await_state(node, "/net/fake-client/a", link_state_t::RECONNECTING),
+          "loss under a routed subscription publishes RECONNECTING");
+    check(script.await_attempts(2), "the self-heal loop dialed again");
+    script.script(true);
+    check(await_state(node, "/net/fake-client/a", link_state_t::UP),
+          "the subscription's link heals back to UP");
+
+    // Tearing the subscription down is the last standing release (§4.1 MUST 3).
+    check(clear_slot(node, "/sensor", 0), "the `:subscribers[0]` clear lands");
+    check(await_state(node, "/net/fake-client/a", link_state_t::DORMANT),
+          "the subscription's teardown re-dormants the link");
+    const auto reap_deadline = std::chrono::steady_clock::now() + 10s;
+    while (g_socks_alive.load() != 0 && std::chrono::steady_clock::now() < reap_deadline) {
+        std::this_thread::yield();  // the worker reaps off-thread; bounded backstop
+    }
+    check(g_socks_alive.load() == 0, "the closed socket was destroyed");
+    {
+        const std::lock_guard l(script.m);
+        check(script.attempts == 2, "nothing dials once the subscription is gone");
+    }
+}
+
+/**
+ * @brief #1816 — one hold per subscription, counted by the engine's existing refcount: the
+ *        link stays up until the LAST routed subscription goes, and a connection removed
+ *        under live subscriptions tears down without a stray hold or a hang.
+ */
+void test_each_routed_subscription_is_one_hold() {
+    std::printf("#1816: each routed subscription is one hold; removal under them is clean:\n");
+    dial_script_t script;  // outlives `net`: the engine's factory copy holds its address
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    declare_fake_engine_module(net, script);
+    const script_guard_t guard{script};  // bounded teardown even on a failing test
+    (void)node.write(path_t("/net/fake-client/conn"), fake_spec("a", /*backoff_ms=*/1));
+    (void)node.register_vertex(path_t("/sensor"), tr::graph::role_t::STORED_VALUE);
+
+    check(router.subscribe_toward(path_t("/sensor"), path_t("/net/fake-client/a/x")).has_value(),
+          "first routed subscription");
+    check(script.await_attempts(1), "the first subscription kicked the dial");
+    script.script(true);
+    check(await_state(node, "/net/fake-client/a", link_state_t::UP), "the link comes UP");
+    check(router.subscribe_toward(path_t("/sensor"), path_t("/net/fake-client/a/y")).has_value(),
+          "second routed subscription over the same link");
+
+    check(clear_slot(node, "/sensor", 0), "the first subscription is torn down");
+    check(state_byte(node, "/net/fake-client/a") == static_cast<std::uint8_t>(link_state_t::UP),
+          "the second subscription still holds the link UP");
+    check(clear_slot(node, "/sensor", 1), "the second subscription is torn down");
+    check(await_state(node, "/net/fake-client/a", link_state_t::DORMANT),
+          "the last routed subscription's teardown re-dormants the link");
+
+    // Bring it back under two holds, then remove the connection out from under them: the
+    // departure eviction gives both holds back to a connection that is already gone.
+    check(router.subscribe_toward(path_t("/sensor"), path_t("/net/fake-client/a/x")).has_value(),
+          "re-subscribe wakes the dormant link");
+    check(router.subscribe_toward(path_t("/sensor"), path_t("/net/fake-client/a/y")).has_value(),
+          "and a second hold");
+    check(script.await_attempts(2), "the re-subscription dialed");
+    script.script(true);
+    check(await_state(node, "/net/fake-client/a", link_state_t::UP), "UP again");
+    {
+        const std::lock_guard l(script.m);
+        script.auto_fail = true;  // bound the teardown join, as in the removal case above
+        script.cv.notify_all();
+    }
+    const auto rm = node.write(path_t("/net/fake-client/conn"), tr::net::conn_remove("a"));
+    check(rm.has_value(), "NAME{a} removes the connection while subscriptions route through it");
+    check(!node.find(path_t::parse("/net/fake-client/a")->key()).has_value(),
+          "the connection vertex is retired");
+    check(node.link_edge_candidates("net/fake-client/a") == 0,
+          "the departure evicted the routed edges with it");
+    check(g_socks_alive.load() == 0, "no socket survives the removal");
+}
+
+/**
+ * @brief #1816 — retiring the PRODUCER drops its routed edges, and each gives its hold back:
+ *        the link re-dormants (RFC-0014 §4.1 MUST 3) and nothing dials again.
+ */
+void test_retiring_the_producer_releases_its_holds() {
+    std::printf("#1816: retiring the producer gives its routed subscriptions' holds back:\n");
+    dial_script_t script;  // outlives `net`: the engine's factory copy holds its address
+    graph_t node;
+    fwd_router_t router(node);
+    transport_vertex_t net(node, router);
+    declare_fake_engine_module(net, script);
+    const script_guard_t guard{script};  // bounded teardown even on a failing test
+    (void)node.write(path_t("/net/fake-client/conn"), fake_spec("a", /*backoff_ms=*/1));
+    (void)node.register_vertex(path_t("/sensor"), tr::graph::role_t::STORED_VALUE);
+    const auto sensor = node.find(path_t::parse("/sensor")->key());
+    check(sensor.has_value(), "the producer registers");
+
+    check(router.subscribe_toward(path_t("/sensor"), path_t("/net/fake-client/a/x")).has_value(),
+          "first routed subscription");
+    check(router.subscribe_toward(path_t("/sensor"), path_t("/net/fake-client/a/y")).has_value(),
+          "second routed subscription");
+    check(script.await_attempts(1), "the subscriptions kicked the dial");
+    script.script(true);
+    check(await_state(node, "/net/fake-client/a", link_state_t::UP), "the link comes UP");
+
+    check(sensor.has_value() && node.retire(*sensor).has_value(), "the producer retires");
+    check(await_state(node, "/net/fake-client/a", link_state_t::DORMANT),
+          "both dropped edges gave their holds back — the link re-dormants");
+    {
+        const std::lock_guard l(script.m);
+        check(script.attempts == 1, "nothing dials after the producer is gone");
+    }
+}
+
 /**
  * @brief The FLIP itself (#1548): the BUILT-IN `tcp` kind, end to end through the engine —
  *        a real socket, a real listener, a real remote hangup, a real heal.
@@ -679,6 +835,9 @@ int main() {
     test_standing_binding_selfheals();
     test_release_during_heal_stops_retry();
     test_remove_while_healing_tears_down();
+    test_routed_subscription_holds_the_link();
+    test_each_routed_subscription_is_one_hold();
+    test_retiring_the_producer_releases_its_holds();
     test_builtin_tcp_kind_runs_through_the_engine();
     test_conformance_vectors();
     return tr::testing::summary("link_liveness");

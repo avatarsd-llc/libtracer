@@ -46,6 +46,14 @@ namespace {
 /** @brief A canonical `NAME` TLV header: type, `opt = 0`, `u16` length. */
 inline constexpr std::size_t kNameHeaderBytes = 4;
 
+/**
+ * @brief The link an edge's cold half DELIVERS over — the one it holds (#1816); empty for an
+ *        edge with no cold half or a `:subscribers[]` field-write edge, which delivers locally.
+ */
+std::string_view delivery_link(const remote_ptr_t& remote) noexcept {
+    return remote ? std::string_view(remote->link) : std::string_view{};
+}
+
 // ---------------------------------------------------------------------------------------------
 // ADR-0080 — the reclamation seam's machinery, for all three policies.
 //
@@ -1007,7 +1015,8 @@ std::span<const std::byte> graph_t::declared_catalog(const vertex_t* v) const no
     return {};
 }
 
-void graph_t::retire_subtree(vertex_t* v, std::vector<std::vector<std::byte>>& keys) {
+void graph_t::retire_subtree(vertex_t* v, std::vector<std::vector<std::byte>>& keys,
+                             std::vector<remote_ptr_t>& routed) {
     // Pre-order, under the UNIQUE map lock. Order within a vertex matters:
     //  (1) read its active-edge count and unwind exactly that contribution from every
     //      descendant's listeners_above_ BEFORE revert zeroes own_subs_ — the mirror of
@@ -1028,7 +1037,7 @@ void graph_t::retire_subtree(vertex_t* v, std::vector<std::vector<std::byte>>& k
     // tree's SHAPE, so it honours for_each_descendant's no-structural-mutation contract -- the
     // walk re-reads the sibling list on each ascent and an insert or erase mid-walk would move
     // the position it resumes from.
-    const auto retire_one = [this, &keys](vertex_t& x) {
+    const auto retire_one = [this, &keys, &routed](vertex_t& x) {
         const std::uint32_t k = x.own_subs();
         if (k > 0) bump_subtree_listeners(&x, -static_cast<std::int32_t>(k));
         keys.push_back(build_key(&x));
@@ -1038,7 +1047,8 @@ void graph_t::retire_subtree(vertex_t* v, std::vector<std::vector<std::byte>>& k
         // which the embedder calls at a moment it knows no reader holds a seam (#576); the
         // graph's own teardown is a growth backstop only — retired_seams_ destructs LAST, so
         // a seam that re-enters the graph must be collected explicitly. Under map_mutex_.
-        if (value_handlers_t* seam = x.revert_to_placeholder()) retired_seams_.emplace_back(seam);
+        if (value_handlers_t* seam = x.revert_to_placeholder(routed))
+            retired_seams_.emplace_back(seam);
         x.mark_unregistered();
     };
     retire_one(*v);
@@ -1259,12 +1269,16 @@ result_t<void> graph_t::retire(vertex_handle_t vh) {
         return std::unexpected(status_t::INVALID_PATH);
 
     std::vector<std::vector<std::byte>> retired_keys;
+    std::vector<remote_ptr_t> routed;  // the routed edges the retirement dropped (#1816)
     {
         const std::unique_lock lock(map_mutex_);
         // Idempotent (§B.4): an already-retired / never-filled placeholder is a no-op.
         if (!root->registered()) return {};
-        retire_subtree(root, retired_keys);
+        retire_subtree(root, retired_keys, routed);
     }
+    // Each dropped routed edge gives its link hold back, outside every graph lock: an edge
+    // is reported exactly twice over its life, and retirement is one of its ends (#1816).
+    for (const remote_ptr_t& r : routed) hold_link(delivery_link(r), false);
     // Drop the retired vertices from the sweep sets — AFTER releasing the map lock, so no
     // map⊃sweep nesting is introduced. A stale entry would otherwise (a) leak, and worse
     // (b) silently re-enroll a revived vertex into UNCONDITIONAL sweeping through the
@@ -1348,9 +1362,10 @@ std::size_t graph_t::evict_link_edges(std::string_view link_name) {
     if (link_name.empty()) return 0;
     const std::pmr::vector<vertex_t*> candidates = link_index_.candidates(link_name, /*take=*/true);
     std::size_t total = 0;
+    std::size_t routed = 0;  // the edges that held `link_name` (#1816), given back below
     for (vertex_t* v : candidates) {
         const std::shared_lock lock(map_mutex_);
-        const std::size_t k = v->evict_link_edges(link_name);
+        const std::size_t k = v->evict_link_edges(link_name, routed);
         if (k == 0) continue;  // a stale index entry: the vertex's edges went individually
         // The k-fold mirror of note_subscriber_removed, under the same shared hold as
         // the clear (RFC-0005 bookkeeping: descendants' writes stop bubbling here).
@@ -1358,6 +1373,8 @@ std::size_t graph_t::evict_link_edges(std::string_view link_name) {
         bump_subtree_listeners(v, -static_cast<std::int32_t>(k));
         total += k;
     }
+    // Outside every graph lock: the receiver takes its own control-plane lock (#1816).
+    hold_link(link_name, false, routed);
     return total;
 }
 
@@ -1388,6 +1405,8 @@ std::size_t graph_t::evict_route_edges(std::string_view link_name,
         bump_subtree_listeners(v, -static_cast<std::int32_t>(k));
         total += k;
     }
+    // Every match was keyed on its delivery link, so every one held `link_name` (#1816).
+    hold_link(link_name, false, total);
     return total;
 }
 
@@ -3214,6 +3233,10 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
     const view::view_t admitted_tlv = observe ? s.source_view : view::view_t{};
     const view::view_t displaced_tlv =
         (observe && slot) ? v->edge_source(*slot).value_or(view::view_t{}) : view::view_t{};
+    // The link hold (#1816): a clone of the admitted edge's cold half, so its delivery link
+    // can be named after `s` is moved into the slot, and the cold half a replace displaces.
+    const remote_ptr_t admitted = s.remote;
+    remote_ptr_t displaced;
 
     edge_latch_t latch;
     std::size_t idx = 0;
@@ -3245,20 +3268,26 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
         link_index_.index_vertex(s.remote->link.empty() ? s.remote->caller : s.remote->link,
                                  link_token, v);
     note_subscriber_added(v);  // RFC-0005: descendants' writes now bubble here
+    // The hold is taken BEFORE the edge can be seen, for the reason the index entry above is:
+    // a departure that evicts the edge the instant it lands gives the hold back, and must
+    // find one to give. The failure returns below hand it back themselves (#1816).
+    hold_link(delivery_link(admitted), true);
     if (slot) {
         // RFC-0009 §D.1 replace: the SAME door, so the SUBSCRIBE gate above and the latch
         // below apply identically to a replace and to an append (ADR-0049). An index no
         // slot answers to is a malformed address, not a silent no-op — and refusing it is
         // what stops a wire-supplied `:subscribers[65535]` from growing the slot vector.
-        const vertex_t::edge_replace_t r = v->replace_edge(*slot, std::move(s), &latch);
+        const vertex_t::edge_replace_t r = v->replace_edge(*slot, std::move(s), &latch, &displaced);
         // Only filling a CLEARED slot is genuinely a new listener; swapping a live one leaves
         // the count be, and a refused index adds nothing — both give the speculative bump
         // back. The unwind costs a second subtree walk on a control-plane-COLD path, which is
         // the right side to pay on: over-counting only ever buys a snapshot that finds
         // nothing, while under-counting drops a delivery.
         if (r != vertex_t::edge_replace_t::FILLED_EMPTY) note_subscriber_removed(v);
-        if (r == vertex_t::edge_replace_t::OUT_OF_RANGE)
+        if (r == vertex_t::edge_replace_t::OUT_OF_RANGE) {
+            hold_link(delivery_link(admitted), false);
             return std::unexpected(status_t::INVALID_PATH);
+        }
         // A replace that displaced a LIVE edge is two events, in causal order: the old
         // subscription ended and a new one began. Reporting only the ADDED would leave an
         // observer's inventory holding an edge that no longer exists.
@@ -3274,6 +3303,7 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
         // status (ADR-0060 §3), the same one the store leg answers on exhaustion.
         if (idx == vertex_t::kNoSlot) {
             note_subscriber_removed(v);
+            hold_link(delivery_link(admitted), false);
             return std::unexpected(status_t::BACKPRESSURE);
         }
     }
@@ -3291,6 +3321,9 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
     // note_subscriber_added released the map lock — and the durability latch has already been
     // dispatched, so the observer never runs interleaved with this subscription's own replay.
     notify_subscription(sub_event_t::kind_t::ADDED, v, caller, admitted_tlv, idx);
+    // The admitted edge's hold was taken before the slot verb, so a replace over the same
+    // link never lets the count touch zero between the two (#1816).
+    hold_link(delivery_link(displaced), false);
     return subscription_t{v, idx};
 }
 
@@ -3410,9 +3443,11 @@ result_t<void> graph_t::unsubscribe(const subscription_t& sub, subscriber_releas
     // caller may hand the same hook to several handles, and a signal for an edge that was
     // never cleared would free a context another live subscription is still delivering to.
     void* retired_ctx = nullptr;
-    if (!sub.vertex_->clear_edge(sub.slot_, &retired_ctx))
+    remote_ptr_t retired_remote;
+    if (!sub.vertex_->clear_edge(sub.slot_, &retired_ctx, &retired_remote))
         return std::unexpected(status_t::NOT_FOUND);
     note_subscriber_removed(sub.vertex_);
+    hold_link(delivery_link(retired_remote), false);  // #1816
 
     // The grace point (ADR-0080). Reached HERE — synchronously, before returning — whenever
     // nothing can still be holding the pair: this thread holds no dispatch under the two
@@ -3437,6 +3472,7 @@ void graph_t::set_hooks(const graph_hooks_t& hooks) noexcept {
     remote_sink_.set(hooks.remote_delivery.fn, hooks.remote_delivery.ctx);
     wire_target_.set(hooks.wire_target.fn, hooks.wire_target.ctx);
     stats_sampler_.set(hooks.stats_sampler.fn, hooks.stats_sampler.ctx);
+    link_hold_.set(hooks.link_hold.fn, hooks.link_hold.ctx);
 }
 
 graph_hooks_t graph_t::hooks() const noexcept {
@@ -3445,11 +3481,22 @@ graph_hooks_t graph_t::hooks() const noexcept {
     const auto rd = remote_sink_.get();
     const auto wt = wire_target_.get();
     const auto ss = stats_sampler_.get();
+    const auto lh = link_hold_.get();
     return graph_hooks_t{.subject_resolver = {sr.fn, sr.ctx},
                          .subscription_observer = {so.fn, so.ctx},
                          .remote_delivery = {rd.fn, rd.ctx},
                          .wire_target = {wt.fn, wt.ctx},
-                         .stats_sampler = {ss.fn, ss.ctx}};
+                         .stats_sampler = {ss.fn, ss.ctx},
+                         .link_hold = {lh.fn, lh.ctx}};
+}
+
+void graph_t::hold_link(std::string_view link, bool held, std::size_t n) const {
+    // One call per edge, never a batched delta: the receiver's reference count is the whole
+    // of the hold (#1816), so it is told exactly what an edge-by-edge walk would tell it.
+    if (link.empty()) return;
+    const auto hook = link_hold_.get();
+    if (hook.fn == nullptr) return;
+    for (std::size_t i = 0; i < n; ++i) hook.fn(hook.ctx, link, held);
 }
 
 bool graph_t::sample_stats(std::string_view seam_class, std::string_view seam_name,
@@ -3667,8 +3714,10 @@ result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field,
                     observing_subscriptions(caller)
                         ? v->edge_source(step0.index).value_or(view::view_t{})
                         : view::view_t{};
-                if (v->clear_edge(step0.index)) {
+                remote_ptr_t retired_remote;  // the link hold this clear gives back (#1816)
+                if (v->clear_edge(step0.index, nullptr, &retired_remote)) {
                     note_subscriber_removed(v);  // RFC-0005 counter bookkeeping
+                    hold_link(delivery_link(retired_remote), false);
                     // Only a slot that WAS active is an unsubscribe; clearing an already-empty
                     // one changed nothing and must not be reported as a removal.
                     notify_subscription(sub_event_t::kind_t::REMOVED, v, caller, cleared_tlv,

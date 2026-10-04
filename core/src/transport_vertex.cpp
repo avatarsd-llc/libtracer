@@ -303,6 +303,37 @@ transport_vertex_t::transport_vertex_t(graph::graph_t& graph, fwd_router_t& rout
     // module (ADR-0043), which extends this catalog through register_transport_type
     // (quic_transport_factory) — this file never learns about msquic (open/closed).
     // A slim node likewise registers whatever factories it wants after construction.
+    //
+    // RFC-0014 §4's routing-plane caller (#1816): every remote subscription edge routed
+    // through a connection holds that connection's link through the refcount seam, and
+    // nothing else does — no timer, no clock, no per-subscription liveness. Installed only
+    // where an engine can exist to hold (#1470): on a `kSelfHealLinks = false` build every
+    // acquire would be the documented no-op, so the graph is left with nothing to call.
+    if constexpr (kSelfHealLinks) {
+        graph::graph_hooks_t hooks = graph_.hooks();
+        hooks.link_hold = {&transport_vertex_t::link_hold_thunk, this};
+        graph_.set_hooks(hooks);
+    }
+}
+
+transport_vertex_t::~transport_vertex_t() {
+    // FIRST, before `conns_` destructs: destroying an owned socket can fire its departure
+    // eviction, which gives back each evicted edge's hold through this seam. Cleared only if
+    // it is still this plane's, so a plane wired later onto the same graph keeps its own.
+    if constexpr (kSelfHealLinks) {
+        graph::graph_hooks_t hooks = graph_.hooks();
+        if (hooks.link_hold.ctx != this) return;
+        hooks.link_hold = {};
+        graph_.set_hooks(hooks);
+    }
+}
+
+void transport_vertex_t::link_hold_thunk(void* ctx, std::string_view link, bool held) {
+    auto* const self = static_cast<transport_vertex_t*>(ctx);
+    // Phase 1 only (a `LOOKUP` transaction), so this is safe from inside a fan-out and from
+    // a teardown's phase 2. NOT_FOUND — a bus peer, a provided child, a connection whose
+    // removal is evicting this very edge — has no count to move.
+    (void)(held ? self->acquire_link(link) : self->release_link(link));
 }
 
 // FULL (default) ctor: the slim wiring PLUS the built-in transport-factory catalog

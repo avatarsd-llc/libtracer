@@ -204,6 +204,30 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Changed
 
+- **A routed subscription now holds its link up through the RFC-0014 §4 refcount
+  ([#1816](https://github.com/avatarsd-llc/libtracer/issues/1816)).** On a build with the
+  liveness engine (`kSelfHealLinks = true`), every remote subscription edge that delivers over
+  a connection calls `transport_vertex_t::acquire_link` when it is admitted and
+  `release_link` when it is cleared, replaced or evicted. That covers an edge a peer made over
+  the link and an edge bound toward a target through the link's mount (`subscribe_toward`, or
+  a wire `SUBSCRIBER` whose `PATH` routes through a mount). So a subscription over a `DORMANT`
+  engine link dials it, keeps it self-healing on loss, and its teardown is the last standing
+  release. The engine's existing count is the only state: no timer, no clock read, and no
+  per-subscription liveness. Reconnect and backoff stay the engine's and the application's,
+  as before. A `:subscribers[]` field-write edge delivers to a local target and holds nothing,
+  and an `await` takes no standing hold. **New public surface:** `graph::link_hold_fn_t` and
+  `graph_hooks_t::link_hold`, the seam the `transport_vertex_t` constructor installs (it is
+  not installed when `kSelfHealLinks = false`); `transport_vertex_t` gains a destructor that
+  uninstalls it. `vertex_t::evict_link_edges` takes a second argument, a `std::size_t&` it
+  adds the evicted routed-edge count to, so a direct caller of the one-argument form must
+  pass one. Retiring a producer gives back the holds of the routed edges it drops.
+  `fwd_router_t::remove_child` now runs its departure eviction after releasing the router's
+  control lock, because that eviction gives the holds back through `transport_vertex_t`,
+  whose lock sits above the router's. **Migration:** an embedder that
+  drove `acquire_link` / `release_link` by hand for its own subscriptions should stop, or the
+  link is held twice and stays up after its subscriptions are gone. A binding the graph does
+  not see can still drive the seam directly.
+
 - **`graph_t::default_ring_source()` is documented as the injected source itself
   ([#1581](https://github.com/avatarsd-llc/libtracer/issues/1581)).** Documentation only; no
   signature or behaviour changes. The graph-level default ring source has resolved to the one
