@@ -14,6 +14,7 @@
 #include <new>
 #include <span>
 #include <type_traits>
+#include <utility>
 
 #include "libtracer/guard.hpp"
 
@@ -720,30 +721,51 @@ class pool_source_t final : public block_source_t {
 };
 
 /**
- * @brief A nothrow growable array of trivially-copyable @p T drawn from a @ref block_source_t.
+ * @brief The core's failable vector: a nothrow growable array of @p T drawn from a
+ *        @ref block_source_t (ADR-0083 Decision 2, #1776).
  *
- * The container a failable path uses where a `std::pmr::vector` would otherwise sit
- * (#551 Q2, #588). Two differences carry the whole point:
+ * The container a failable path uses where a `std::vector` or `std::pmr::vector` would
+ * otherwise sit (#551 Q2, #588). Three properties carry the whole point:
  *
- * 1. **Growth returns `false` instead of throwing.** `std::pmr::vector::push_back` on an
- *    exhausted resource throws, which on ESP-IDF reaches the link-wrapped `__cxa_throw`
+ * 1. **Growth reports refusal by value and never throws.** `std::pmr::vector::push_back` on
+ *    an exhausted resource throws, which on ESP-IDF reaches the link-wrapped `__cxa_throw`
  *    `abort()` stub — a peer-reachable reboot when the container sits on the RX decode path.
- * 2. **Relocation is a `memcpy`.** `T` is required trivially copyable, so growth needs no
- *    move loop and the vacated block needs no destruction. Both current users
- *    (`wire::arena_tlv_t`, the walk's open-node record) are span/enum aggregates.
+ *    Here every growing call answers `false` or `nullptr`, and a refused call leaves the
+ *    array exactly as it was: same elements, same block, and an argument passed by rvalue
+ *    is not consumed.
+ * 2. **Every byte comes from the injected source.** Nothing reaches the global heap, so the
+ *    array is usable on a static-arena node with no heap at all.
+ * 3. **Relocation is a `memcpy` for a trivially copyable `T`.** That case needs no move
+ *    loop and no destruction, and it is the shape the hot users have (`wire::arena_tlv_t`,
+ *    the walk's open-node record). Any other `T` is relocated by move construction, which
+ *    must be `noexcept`, and destroyed in place; that branch is compiled only for such a `T`,
+ *    so a trivially copyable array generates the same code it always did.
  *
  * Same footprint as `std::pmr::vector` (four words), one virtual call per growth instead of
- * the allocator's two.
+ * the allocator's two. Non-copyable: a copy is a failable allocation, so it is not hidden in
+ * a constructor.
  */
 template <class T>
 class block_array_t {
-    static_assert(std::is_trivially_copyable_v<T>, "block_array_t relocates by memcpy");
-    static_assert(std::is_trivially_destructible_v<T>, "block_array_t never runs destructors");
+    static_assert(std::is_nothrow_move_constructible_v<T>,
+                  "block_array_t relocates by move construction, which must be noexcept");
+    static_assert(std::is_nothrow_destructible_v<T>, "block_array_t: ~T must be noexcept");
+
+    /** @brief True when growth relocates by `memcpy` and leaves nothing to destroy. */
+    static constexpr bool kTrivial =
+        std::is_trivially_copyable_v<T> && std::is_trivially_destructible_v<T>;
 
    public:
+    /** @brief The element type. */
+    using value_type = T;
+    /** @brief A mutable element iterator (a plain pointer: the storage is contiguous). */
+    using iterator = T*;
+    /** @brief A read-only element iterator. */
+    using const_iterator = const T*;
+
     /** @brief An empty array that will draw its storage from @p src. */
     explicit block_array_t(block_source_t& src) noexcept : src_(&src) {}
-    /** @brief Returns the block, if one was taken. */
+    /** @brief Destroys the elements and returns the block, if one was taken. */
     ~block_array_t() { give_back(); }
 
     /** @brief Non-copyable — one array, one block. */
@@ -755,7 +777,7 @@ class block_array_t {
         : src_(o.src_), data_(o.data_), end_(o.end_), cap_(o.cap_) {
         o.data_ = o.end_ = o.cap_ = nullptr;
     }
-    /** @brief Move-assignable (releases this array's block first). */
+    /** @brief Move-assignable (destroys and releases this array's contents first). */
     block_array_t& operator=(block_array_t&& o) noexcept {
         if (this != &o) {
             give_back();
@@ -777,13 +799,86 @@ class block_array_t {
     }
 
     /**
-     * @brief Append @p v.
+     * @brief Append a copy of @p v.
+     *
+     * @warning For a trivially copyable `T`, @p v must not refer to an element of this
+     *          array: growth releases the old block before the copy is read. Use
+     *          @ref emplace_back, which builds in the fresh block first, when it might.
+     *
      * @retval false The source is exhausted — the array is unchanged (BACKPRESSURE).
      */
     [[nodiscard]] bool push_back(const T& v) noexcept {
-        if (end_ == cap_ && !grow()) return false;
-        *end_++ = v;
+        if constexpr (kTrivial) {
+            // The shape every trivially copyable caller compiled against before #1776, kept
+            // byte for byte: the symbol ratchet pins hot functions that inline it.
+            if (end_ == cap_ && !grow()) return false;
+            *end_++ = v;
+        } else {
+            if (end_ == cap_) return grow_emplace(size(), v) != nullptr;
+            ::new (static_cast<void*>(end_)) T(v);
+            ++end_;
+        }
         return true;
+    }
+
+    /**
+     * @brief Append @p v by move.
+     *
+     * Offered only for a `T` that is not trivially copyable: for one that is, a move is a
+     * copy, and an rvalue keeps binding to the copying overload and its pre-#1776 code.
+     *
+     * @retval false The source is exhausted — the array is unchanged and @p v is not moved
+     *               from.
+     */
+    [[nodiscard]] bool push_back(T&& v) noexcept
+        requires(!kTrivial)
+    {
+        return emplace_back(std::move(v)) != nullptr;
+    }
+
+    /**
+     * @brief Construct one element at the end from @p args and return it.
+     *
+     * An argument may refer to an element of this array: on growth the new element is
+     * built in the fresh block before the old one is released.
+     *
+     * @retval nullptr The source is exhausted — the array is unchanged and no argument is
+     *                 moved from (BACKPRESSURE).
+     */
+    template <class... Args>
+    [[nodiscard]] T* emplace_back(Args&&... args) noexcept {
+        if (end_ == cap_) return grow_emplace(size(), std::forward<Args>(args)...);
+        T* slot = ::new (static_cast<void*>(end_)) T(std::forward<Args>(args)...);
+        ++end_;
+        return slot;
+    }
+
+    /**
+     * @brief Construct one element at index @p i from @p args, shifting the tail up by one.
+     *
+     * The insertion the sorted map is built on. Precondition: `i <= size()`.
+     *
+     * @retval nullptr The source is exhausted — the array is unchanged and no argument is
+     *                 moved from (BACKPRESSURE).
+     */
+    template <class... Args>
+    [[nodiscard]] T* emplace_at(std::size_t i, Args&&... args) noexcept {
+        if (end_ == cap_) return grow_emplace(i, std::forward<Args>(args)...);
+        if (data_ + i == end_) return emplace_back(std::forward<Args>(args)...);
+        // Build first: an argument may alias an element the shift is about to move.
+        T made(std::forward<Args>(args)...);
+        if constexpr (kTrivial) {
+            std::memmove(data_ + i + 1, data_ + i,
+                         static_cast<std::size_t>(end_ - (data_ + i)) * sizeof(T));
+            ++end_;
+            std::memcpy(static_cast<void*>(data_ + i), &made, sizeof(T));
+        } else {
+            ::new (static_cast<void*>(end_)) T(std::move(end_[-1]));
+            for (T* p = end_ - 1; p != data_ + i; --p) *p = std::move(p[-1]);
+            ++end_;
+            data_[i] = std::move(made);
+        }
+        return data_ + i;
     }
 
     /**
@@ -794,18 +889,44 @@ class block_array_t {
      * the stack and copy it in, and for a 48-byte `T` written field-by-field then read back
      * as wide loads that is a store-forwarding stall on every element: measured on the
      * terminus decode, ~45 % slower with FEWER instructions executed. Writing through this
-     * slot removes the temporary entirely.
+     * slot removes the temporary entirely. Offered only for a trivially copyable `T`, whose
+     * lifetime the caller's stores begin; any other `T` uses @ref emplace_back.
      */
-    [[nodiscard]] T* push_slot() noexcept {
+    [[nodiscard]] T* push_slot() noexcept
+        requires kTrivial
+    {
         if (end_ == cap_ && !grow()) return nullptr;
         return end_++;
     }
 
     /** @brief Drop the last element. Precondition: not empty. */
-    void pop_back() noexcept { --end_; }
+    void pop_back() noexcept {
+        --end_;
+        if constexpr (!kTrivial) end_->~T();
+    }
+    /** @brief Remove element @p i, shifting the tail down by one. Precondition: `i < size()`. */
+    void erase_at(std::size_t i) noexcept {
+        if constexpr (kTrivial) {
+            std::memmove(data_ + i, data_ + i + 1,
+                         static_cast<std::size_t>(end_ - (data_ + i + 1)) * sizeof(T));
+            --end_;
+        } else {
+            for (T* p = data_ + i; p + 1 != end_; ++p) *p = std::move(p[1]);
+            pop_back();
+        }
+    }
+    /** @brief Destroy every element; the block is kept for reuse. */
+    void clear() noexcept {
+        destroy_all();
+        end_ = data_;
+    }
     /** @brief The last element. Precondition: not empty. */
     [[nodiscard]] T& back() noexcept { return end_[-1]; }
+    /** @brief The last element (const). Precondition: not empty. */
+    [[nodiscard]] const T& back() const noexcept { return end_[-1]; }
     /** @brief The first element. Precondition: not empty. */
+    [[nodiscard]] T& front() noexcept { return *data_; }
+    /** @brief The first element (const). Precondition: not empty. */
     [[nodiscard]] const T& front() const noexcept { return *data_; }
     /** @brief Element @p i, unchecked. */
     [[nodiscard]] T& operator[](std::size_t i) noexcept { return data_[i]; }
@@ -814,6 +935,10 @@ class block_array_t {
     /** @brief Element count. */
     [[nodiscard]] std::size_t size() const noexcept {
         return static_cast<std::size_t>(end_ - data_);
+    }
+    /** @brief Elements the current block holds before the next growth. */
+    [[nodiscard]] std::size_t capacity() const noexcept {
+        return static_cast<std::size_t>(cap_ - data_);
     }
     /** @brief True when no elements are held. */
     [[nodiscard]] bool empty() const noexcept { return end_ == data_; }
@@ -826,38 +951,107 @@ class block_array_t {
     [[nodiscard]] T* data() noexcept { return data_; }
     /** @brief First element (const), or `nullptr` when empty. */
     [[nodiscard]] const T* data() const noexcept { return data_; }
+    /** @brief Iterator to the first element; invalidated by any growth. */
+    [[nodiscard]] iterator begin() noexcept { return data_; }
+    /** @brief Iterator past the last element. */
+    [[nodiscard]] iterator end() noexcept { return end_; }
+    /** @brief Read-only iterator to the first element. */
+    [[nodiscard]] const_iterator begin() const noexcept { return data_; }
+    /** @brief Read-only iterator past the last element. */
+    [[nodiscard]] const_iterator end() const noexcept { return end_; }
+    /** @brief The source this array draws from. */
+    [[nodiscard]] block_source_t& source() const noexcept { return *src_; }
 
    private:
+    /** @brief Destroy every element in place (nothing to do for a trivial `T`). */
+    void destroy_all() noexcept {
+        if constexpr (!kTrivial) {
+            for (T* p = data_; p != end_; ++p) p->~T();
+        }
+    }
+
+    /** @brief Destroy the elements and return the block to the source. */
     void give_back() noexcept {
+        destroy_all();
+        release_block();
+    }
+
+    /** @brief Return the block alone; the elements are already gone or relocated. */
+    void release_block() noexcept {
         if (data_ != nullptr)
             src_->release(data_, static_cast<std::size_t>(cap_ - data_) * sizeof(T), alignof(T));
     }
 
-    // The cold half of push_back, kept OUT OF LINE: growth happens once or twice per
-    // terminus decode, and inlining it into the caller doubles the hot loop's live range.
-    [[gnu::noinline]] [[nodiscard]] bool grow() noexcept {
-        const std::size_t have = static_cast<std::size_t>(cap_ - data_);
-        return regrow(have < 4 ? 8 : have * 2);
+    /** @brief The doubling policy: 8 elements first, then twice the current block. */
+    [[nodiscard]] std::size_t next_capacity() const noexcept {
+        const std::size_t have = capacity();
+        return have < 4 ? 8 : have * 2;
     }
 
-    // Relocate into a block of `want` elements. `false` leaves the array untouched, which
-    // is what lets every caller treat exhaustion as a clean reject.
+    // The cold half of push_slot, kept OUT OF LINE: growth happens once or twice per
+    // terminus decode, and inlining it into the caller doubles the hot loop's live range.
+    /** @brief Grow by the doubling policy. */
+    [[gnu::noinline]] [[nodiscard]] bool grow() noexcept { return regrow(next_capacity()); }
+
+    /** @brief Move elements `[first, last)` into the uninitialized @p to and end their lives. */
+    static void relocate(T* first, T* last, T* to) noexcept {
+        if constexpr (kTrivial) {
+            if (first != last)
+                std::memcpy(static_cast<void*>(to), first,
+                            static_cast<std::size_t>(last - first) * sizeof(T));
+        } else {
+            for (; first != last; ++first, ++to) {
+                ::new (static_cast<void*>(to)) T(std::move(*first));
+                first->~T();
+            }
+        }
+    }
+
+    /** @brief Adopt @p fresh (room for @p want elements, @p n of them live) as the block. */
+    void adopt(T* fresh, std::size_t want, std::size_t n) noexcept {
+        release_block();
+        data_ = fresh;
+        end_ = fresh + n;
+        cap_ = fresh + want;
+    }
+
+    /**
+     * @brief Relocate into a block of @p want elements.
+     * @retval false The source refused — the array is untouched, which is what lets every
+     *               caller treat exhaustion as a clean reject.
+     */
     [[gnu::noinline]] [[nodiscard]] bool regrow(std::size_t want) noexcept {
-        void* fresh = src_->try_alloc(want * sizeof(T), alignof(T));
+        T* fresh = static_cast<T*>(src_->try_alloc(want * sizeof(T), alignof(T)));
         if (fresh == nullptr) return false;
-        const std::size_t n = static_cast<std::size_t>(end_ - data_);
-        if (n > 0) std::memcpy(fresh, data_, n * sizeof(T));
-        give_back();
-        data_ = static_cast<T*>(fresh);
-        end_ = data_ + n;
-        cap_ = data_ + want;
+        const std::size_t n = size();
+        relocate(data_, end_, fresh);
+        adopt(fresh, want, n);
         return true;
     }
 
-    block_source_t* src_;
-    T* data_ = nullptr;
-    T* end_ = nullptr;
-    T* cap_ = nullptr;
+    /**
+     * @brief The growing half of `emplace_at`: take a bigger block, build the new element
+     *        at @p i in it FIRST (an argument may alias an old element), then relocate the
+     *        old elements around it and release the old block.
+     * @retval nullptr The source refused — the array and the arguments are untouched.
+     */
+    template <class... Args>
+    [[gnu::noinline]] [[nodiscard]] T* grow_emplace(std::size_t i, Args&&... args) noexcept {
+        const std::size_t want = next_capacity();
+        T* fresh = static_cast<T*>(src_->try_alloc(want * sizeof(T), alignof(T)));
+        if (fresh == nullptr) return nullptr;
+        const std::size_t n = size();
+        T* slot = ::new (static_cast<void*>(fresh + i)) T(std::forward<Args>(args)...);
+        relocate(data_, data_ + i, fresh);
+        relocate(data_ + i, end_, fresh + i + 1);
+        adopt(fresh, want, n + 1);
+        return slot;
+    }
+
+    block_source_t* src_; /**< @brief Where every block comes from; never null. */
+    T* data_ = nullptr;   /**< @brief The block, or null before the first growth. */
+    T* end_ = nullptr;    /**< @brief One past the last live element. */
+    T* cap_ = nullptr;    /**< @brief One past the block's last slot. */
 };
 
 }  // namespace tr::mem

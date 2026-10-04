@@ -41,6 +41,15 @@ target_link_libraries(mem_source_test PRIVATE libtracer)
 libtracer_test_warnings(mem_source_test)
 add_test(NAME mem_source COMMAND mem_source_test)
 
+# The core container set (#1776, ADR-0083 Decisions 2 and 9): block_array_t, string_t,
+# sorted_map_t and function_ref_t, each grown against a source that refuses its Nth request.
+# Built WITHOUT exceptions: a refusal must come back as a value, never need a throw.
+add_executable(core_containers_test core_containers_test.cpp)
+target_link_libraries(core_containers_test PRIVATE libtracer)
+target_compile_options(core_containers_test PRIVATE $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-fno-exceptions>)
+libtracer_test_warnings(core_containers_test)
+add_test(NAME core_containers COMMAND core_containers_test)
+
 # The std::pmr ADAPTER over the block seam (mem_source_pmr.hpp, #873) — the one direction
 # ADR-0079 leaves std::pmr alive in: block_source_t -> std::pmr::memory_resource. Pins the
 # pass-through, the sized+aligned release round-trip that makes a pool_source_t RECYCLE

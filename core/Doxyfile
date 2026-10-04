@@ -33,6 +33,8 @@ INPUT                  = core/include/libtracer/config.hpp \
                          core/include/libtracer/rope.hpp \
                          core/include/libtracer/mem_heap.hpp \
                          core/include/libtracer/mem_source.hpp \
+                         core/include/libtracer/mem_string.hpp \
+                         core/include/libtracer/mem_sorted_map.hpp \
                          core/include/libtracer/mem_pool.hpp \
                          core/include/libtracer/mem_borrowed.hpp \
                          backends/cuda/include/libtracer/mem_cuda.hpp \
@@ -49,6 +51,7 @@ INPUT                  = core/include/libtracer/config.hpp \
                          core/include/libtracer/frame.hpp \
                          core/include/libtracer/graph.hpp \
                          core/include/libtracer/hook.hpp \
+                         core/include/libtracer/function_ref.hpp \
                          core/include/libtracer/value.hpp \
                          core/include/libtracer/vertex.hpp \
                          core/include/libtracer/vertex_handle.hpp \
