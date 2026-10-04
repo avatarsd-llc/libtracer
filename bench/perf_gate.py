@@ -177,9 +177,11 @@ DEFAULT_TIER = "advisory"
 # and the standing rule is that every perf report tracks values above 1 KiB. One size per
 # family, and 16 KiB rather than 4 KiB: 4 KiB is the ingress share threshold
 # (`kShareThresholdBytes`), where a received value switches from copied to shared by design,
-# so a gated row there would sit on a designed step; 16 KiB is clearly past it on every path. The other ladder sizes (984, 985, 1 KiB, 4 KiB,
-# 64 KiB) are charted and not gated. Like the other `main` rows these cost no extra process:
-# the default sweep emits them. The compact and demux rows run at a quarter of their
+# so a gated row there would sit on a designed step; 16 KiB is clearly past it on every path.
+# Every ladder size, the 16 KiB one included, has a line on a size-axis chart of the
+# Performance page (`render_history.FAMILIES`: payload, borrow-payload, eptype-stream-payload,
+# lkv, compact-forward, demux-value); only the 16 KiB row is gated. Like the other `main`
+# rows these cost no extra process: the default sweep emits them. The compact and demux rows run at a quarter of their
 # binary's budget, as all their ladder rows do.
 #
 # `eptype-stream` is gated and its two siblings are NOT, and the asymmetry is the whole

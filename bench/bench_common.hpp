@@ -97,7 +97,7 @@ inline constexpr std::size_t kPayloadLadder[] = {64, 984, 985, 1024, 4096, 16384
 [[nodiscard]] inline std::vector<std::size_t> cliff_sizes(std::size_t header) {
     constexpr std::size_t kGlibcTcacheMax = 1032;  // glibc's largest per-thread-cache request
     std::vector<std::size_t> out;
-    for (std::size_t s = 960; s <= 1100; s += 8) out.push_back(s);
+    for (std::size_t s = 960; s <= 1096; s += 8) out.push_back(s);
     out.push_back(kGlibcTcacheMax - header + 1);
     for (std::size_t p = 64; p <= 65536; p *= 2) {
         out.push_back(p - header);

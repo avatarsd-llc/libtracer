@@ -249,6 +249,13 @@ FAMILIES: list[dict] = [
          # rather than as the same type measured with a different instrument (#553).
          pat=r"^eptype-([\w-]+)(?<!-batch) 64B/fan1/1ep",
          label=lambda m: f"eptype-{m.group(1)}", key=lambda m: m.group(1), log=False,),
+    dict(id="eptype-stream-payload", section="dispatch",
+         title="STREAM-role write — by payload size",
+         cond="eptype-stream · fan-out 1 · 1 topic — the bounded-history retention leg over the "
+              "payload ladder (#1806); the 64 B line is the one above",
+         pat=r"^eptype-stream (\d+)B/fan1/1ep",
+         label=lambda m: f"stream {m.group(1)} B", key=_num, log=False,
+         px=dict(label="payload size", log=True, fmt="bytes")),
     # Re-pointed from `fold-n*` to `fold-b*`: the old rows timed ONE ~11 ns op between two
     # clock reads, so every width published p50=30 and this chart was four identical flat
     # lines. The batch-amortized `fold-b*` rows resolve the widths (~1/2/3/6 ns), so the
@@ -398,6 +405,15 @@ FAMILIES: list[dict] = [
          pat=r"^compact-forward (\d+)B/fan1/1ep",
          label=lambda m: f"forward {m.group(1)} B", key=_num, log=False,
          px=dict(label="payload size", log=True, fmt="bytes")),
+    # The payload ladder (#1806): rows at 64 B .. 64 KiB, one line per size, so the 1/4/16/64 KiB
+    # rows (and the gated 16 KiB point) each have a chart line.
+    dict(id="demux-value", section="routing",
+         title="Forward demux — by VALUE payload size",
+         cond="fwd-demux-value · one link, target first · keyed by the VALUE payload, not the "
+              "frame (#1806) — the sinks copy nothing, so a rise with payload is the hop's own",
+         pat=r"^fwd-demux-value (\d+)B/fan1/1ep",
+         label=lambda m: f"value {m.group(1)} B", key=_num, log=False,
+         px=dict(label="payload size", log=True, fmt="bytes")),
     dict(id="path-parse", section="routing",
          title="`path_t::parse` — by segment count",
          cond="path-parse · one line per segment count — the address parse every by-path "
@@ -413,6 +429,22 @@ FAMILIES: list[dict] = [
          pat=r"^lkv-(alloc|store)-(heap-aged|heap|pool) (\d+)B/fan1/1ep",
          label=lambda m: f"{m.group(1)} {m.group(2)} {m.group(3)} B",
          key=lambda m: f"{m.group(1)} {m.group(2)} {int(m.group(3)):06d}", log=False,),
+    # The allocator-cliff family (#1806): one segment alloc/free at every cliff-ladder size,
+    # heap and pool in separate families. A step between neighbouring sizes is the cliff.
+    dict(id="cliff-heap", section="memory",
+         title="Allocator cliff — heap segment alloc/free by size",
+         cond="cliff-alloc-heap · fresh process · batch-timed · 960–1096 B in steps of 8, "
+              "985 B, and 2^k ± 48 B to 64 KiB (#1806)",
+         pat=r"^cliff-alloc-heap (\d+)B/fan1/1ep",
+         label=lambda m: f"heap {m.group(1)} B", key=_num, log=False,
+         px=dict(label="segment size", log=True, fmt="bytes")),
+    dict(id="cliff-pool", section="memory",
+         title="Allocator cliff — pool segment alloc/free by size",
+         cond="cliff-alloc-pool · one 64 KiB slot fits every size, so the line should be flat "
+              "(#1806)",
+         pat=r"^cliff-alloc-pool (\d+)B/fan1/1ep",
+         label=lambda m: f"pool {m.group(1)} B", key=_num, log=False,
+         px=dict(label="segment size", log=True, fmt="bytes")),
     dict(id="alloc-mt", section="memory",
          title="Allocator under contention — pooled vs heap, by thread count",
          cond="{pool,heap}alloc-mt* · 64 B — alloc+free of one value block per op, every "
@@ -483,7 +515,7 @@ INSTRUMENT_SOURCES: list[tuple[str, list[str]]] = [
     (r"^(inproc|inproc-borrow|inproc-path|inproc-deliver|inproc-pool|inproc-pool-borrow"
      r"|inproc-target-\w+"
      r"|inproc-mt\d+|eptype-[\w-]+|fold-b\d+|acl-\S+|mixed|path-parse|lkv-\S+"
-     r"|poolalloc-mt\d+|heapalloc-mt\d+)\b", ["bench/bench_libtracer.cpp"]),
+     r"|poolalloc-mt\d+|heapalloc-mt\d+|cliff-alloc-\w+)\b", ["bench/bench_libtracer.cpp"]),
     (r"^zenoh ", ["bench/bench_zenoh.cpp"]),
     (r"^fwd-demux-", ["bench/bench_forward_demux.cpp"]),
     (r"^compact-", ["bench/bench_compact_delivery.cpp"]),
