@@ -2469,6 +2469,13 @@ class graph_t {
 
    private:
     /**
+     * @brief The `:`-field surface (#1711): one constant row per colon field, defined in
+     *        `core/src/graph_fields.cpp` beside the two doors (`read_field_composed`,
+     *        `field_write`) that dispatch on it. A nested type rather than a friend, so no
+     *        class outside `graph_t` can claim its access.
+     */
+    struct field_surface_t;
+    /**
      * @brief The one registration door that takes a policy: refuse an illegal one before the
      *        descent, register, then apply it outside the map lock.
      */

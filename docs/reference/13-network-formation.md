@@ -485,8 +485,8 @@ automatic**:
   (`transport_vertex_t::settings_of`, `core/include/libtracer/transport_vertex.hpp:transport_vertex_t::settings_of`).
   The vertex `:settings` core namespace holds nothing to write — RFC-0022 §3.B deleted
   `settings_t`, so every flat knob name under it answers `SCHEMA_NOT_FOUND`
-  caller-independently (`core/src/graph.cpp:graph_t::field_write`), leaving only the read container and
-  its reserved `app` subkey (`core/src/graph.cpp:graph_t::read_settings`). Moving a peer therefore means
+  caller-independently (`core/src/graph_fields.cpp:field_surface_t::write_settings`), leaving only the read container and
+  its reserved `app` subkey (`core/src/graph_fields.cpp:graph_t::read_settings`). Moving a peer therefore means
   retiring the connection (`NAME`) and re-creating it (`SPEC`), which un-routes the link
   and cascade-evicts the subscriptions routed through it (§Boundaries of the formation
   model, *hard* teardown).
