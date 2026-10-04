@@ -47,7 +47,7 @@ PAGES = {
         "graph.hpp", "vertex.hpp", "vertex_handle.hpp", "value.hpp", "hook.hpp", "app_fields.hpp",
         "function_ref.hpp", "subscriber.hpp",
         "vertex_stripe.hpp", "lkv_slot.hpp", "edge_pin.hpp", "qsbr.hpp", "link_id.hpp",
-        "thread_id.hpp",
+        "link_index.hpp", "thread_id.hpp",
     ],
     "security-acl.md": ["security_acl.hpp", "acl_ace.hpp"],
     "fwd-router.md": [

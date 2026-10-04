@@ -315,6 +315,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   charged to the graph's injected source (which already held the value block). The cold arm
   (first frame on a label) still draws its copy from `flat`. Exhaustion is still one counted
   `delivery_drops().out_of_memory` drop.
+- **The per-link departure index moves out of `graph_t` into its own header,
+  `libtracer/link_index.hpp` ([#1710](https://github.com/avatarsd-llc/libtracer/issues/1710)).**
+  `tr::graph::link_index_t` is an implementation type that `graph.hpp` includes because
+  `graph_t` holds it by value; applications keep using `graph_t`'s link doors
+  (`intern_link`, `intern_link_hinted`, `release_link`, `link_edge_candidates`,
+  `link_index_name_lookups`), whose signatures and answers are unchanged. No behaviour change:
+  the slots, the token carry, the name scan and the lock are the same code, now compiled in
+  `link_index.cpp`. `sizeof(graph_t)` grows by one pointer (8 B on a 64-bit host), the index's
+  own record of the resource its per-link lists draw from.
 
 ### Added
 
