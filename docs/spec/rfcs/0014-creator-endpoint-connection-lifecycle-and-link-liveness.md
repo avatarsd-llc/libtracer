@@ -78,11 +78,16 @@ This unblocks the transport-link half of
 > refcount / dormancy / self-heal existed. Per the clause-kind rule (see Discussion) the byte-level
 > clauses here were **proposed pending** code + conformance vectors.
 >
-> **As of Amendment 4 (S7) every byte clause is normative, and all of it is SHIPPED except two
-> residuals** (see the 2026-10-03 erratum): no module yet *declares* a `conn:schema` catalog, so
-> every endpoint answers Amendment 3's conforming empty `SETTINGS` and no `SPEC` is validated
-> against a catalog (the S3 module-side half); and no routing-plane caller drives §4's standing-binding
-> refcount from a subscription or `await` — the seam exists, but only an embedder drives it today.
+> **As of Amendment 4 (S7) every byte clause is normative, and all of it is SHIPPED except one
+> residual** (see the 2026-10-03 erratum, which named two): no routing-plane caller drives §4's
+> standing-binding refcount from a subscription or `await` — the seam exists, but only an
+> embedder drives it today ([#1816](https://github.com/avatarsd-llc/libtracer/issues/1816)). The
+> erratum's other residual, the S3 module-side half, is shipped
+> ([#1815](https://github.com/avatarsd-llc/libtracer/issues/1815)): a module may declare its
+> `conn:schema` catalog at `register_module`, the endpoint serves it inside Amendment 3's
+> `SETTINGS` as RFC-0013 §B per-key records, and a `SPEC` whose config omits a required key or
+> carries a catalogued key in another shape is refused `tr::schema::type_mismatch` per §2. A
+> module that declares none still answers the empty `SETTINGS` and validates nothing.
 > The `:children[]` creation target is gone, the per-module endpoint is the only creation door, the
 > `CREATE`/`WRITE` split of §5 is in (Amendment 2), and the clause-by-clause instrument table is in
 > Amendment 4.
