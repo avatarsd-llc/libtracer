@@ -752,10 +752,13 @@ class transport_can : public transport_t, public bus_link_t {
     mem::mem_backend_t* rx_backend_ = nullptr;
 
     // Drop counters (#912, #1103, #1011). Written on the RX/TX threads, read by anyone.
-    std::atomic<std::uint64_t> dropped_rx_{0};
-    std::atomic<std::uint64_t> dropped_tx_{0};
-    std::atomic<std::uint64_t> dropped_presink_{0};
-    std::atomic<std::uint64_t> dropped_stale_binding_{0};
+    // Word-wide, not 64-bit (core/STYLE.md §Introspection clause 5, #1697): a 64-bit atomic
+    // is a libatomic call on every rv32, the ESP32-C6 included. The 64-bit accessors widen
+    // on read; a 32-bit target wraps after 2^32.
+    std::atomic<std::size_t> dropped_rx_{0};
+    std::atomic<std::size_t> dropped_tx_{0};
+    std::atomic<std::size_t> dropped_presink_{0};
+    std::atomic<std::size_t> dropped_stale_binding_{0};
 
     // the last-heard peer table (ADR-0044) — node id -> entry, insert-only
     mutable std::mutex peers_m_;

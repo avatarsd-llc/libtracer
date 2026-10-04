@@ -661,8 +661,10 @@ class stream_endpoint_t : protected posix_endpoint_t {
     std::uint32_t liveness_window_ms_ = 0;
     /** @brief Records shed because their send bound expired (#838) — the "how many frames
      *         did a stalled peer cost us" counter, distinct from the other `dropped_tx_`
-     *         causes. Relaxed: a diagnostic tally, not a synchronizer. */
-    std::atomic<std::uint64_t> stalled_tx_{0};
+     *         causes. Relaxed: a diagnostic tally, not a synchronizer. Word-wide, not
+     *         64-bit (core/STYLE.md §Introspection clause 5, #1697): a 64-bit atomic is a
+     *         libatomic call on every rv32; a 32-bit target wraps after 2^32. */
+    std::atomic<std::size_t> stalled_tx_{0};
     /** @brief The ONE peer's consecutive-stall streak (guarded by @ref write_m_) — the
      *         multi-peer servers keep one per slot instead. */
     std::uint8_t tx_stall_streak_ = 0;
