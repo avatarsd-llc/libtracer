@@ -26,6 +26,13 @@ RATCHET, NOT CEILING (the standing rule): pins are the MEASURED values. Growth f
 also fails, with a re-pin instruction — a pin left above the truth is how 24 B and 8 B of drift
 went unnoticed here before, and prose beside a passing gate rots.
 
+DECLARED BAND, the one exception (#1849). A pin may carry `"band": [lo, hi]` for a symbol whose
+size is KNOWN to flip with its TU's inline budget while its source stays unchanged
+(`snapshot_edges`: 1099 <-> 1115 B on unrelated graph.cpp edits). A measurement inside the band
+passes and prints `in band`; above it fails as growth, below it fails as a shrink to re-pin. A
+band is added only beside a note naming the cause and the evidence (identical call set), so
+real growth is still caught.
+
     ./symbol_ratchet.py --build bench/build --pins bench/symbol_ratchet.json
     ./symbol_ratchet.py --build bench/build --pins bench/symbol_ratchet.json --emit
 """
@@ -89,6 +96,23 @@ def measure(build, pins):
     return measured
 
 
+def judge(row):
+    """@brief Verdict on one measured row: (mark, failure line or None).
+
+    `bytes` is the exact pin; an optional `band` [lo, hi] widens what passes to lo..hi
+    inclusive (#1849). Outside the window, above fails as growth and below as a shrink.
+    """
+    got, want = row["measured"], row["bytes"]
+    if got is None:
+        return "MISSING", f"{row['symbol']} — {row['why']}"
+    lo, hi = row.get("band", (want, want))
+    if got > hi:
+        return "GREW", f"{row['symbol']} grew {got - hi} B ({hi} -> {got})"
+    if got < lo:
+        return "SHRANK", f"{row['symbol']} shrank {lo - got} B ({lo} -> {got}) — RE-PIN to {got}"
+    return ("ok" if got == want else f"in band [{lo}, {hi}]"), None
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--build", required=True, help="the bench build directory")
@@ -104,7 +128,7 @@ def main():
     if args.emit:
         print(json.dumps({**pins, "toolchain": tc,
                           "symbols": [{k: v for k, v in r.items()
-                                       if k in ("binary", "symbol", "bytes")}
+                                       if k in ("binary", "symbol", "bytes", "band")}
                                       | ({"bytes": r["measured"]} if r["measured"] else {})
                                       for r in rows]}, indent=2))
         for r in rows:
@@ -124,17 +148,13 @@ def main():
     bad, table = [], []
     for r in rows:
         got, want = r["measured"], r["bytes"]
+        mark, failure = judge(r)
+        if failure:
+            bad.append(failure)
         if got is None:
-            bad.append(f"{r['symbol']} — {r['why']}")
             table.append(f"  {r['symbol']}\tMISSING\t(pinned {want})")
-            continue
-        delta = got - want
-        mark = "ok" if delta == 0 else ("GREW" if delta > 0 else "SHRANK")
-        table.append(f"  {r['symbol']}\t{got} B\tpinned {want} B\t{delta:+d}\t{mark}")
-        if delta > 0:
-            bad.append(f"{r['symbol']} grew {delta} B ({want} -> {got})")
-        elif delta < 0:
-            bad.append(f"{r['symbol']} shrank {-delta} B ({want} -> {got}) — RE-PIN to {got}")
+        else:
+            table.append(f"  {r['symbol']}\t{got} B\tpinned {want} B\t{got - want:+d}\t{mark}")
     print("\n".join(table))
 
     if bad:

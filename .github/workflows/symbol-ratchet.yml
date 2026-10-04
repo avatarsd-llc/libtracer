@@ -65,6 +65,11 @@ jobs:
           else
             echo "run=false" >> "$GITHUB_OUTPUT"; echo "nothing under core/ or bench/ changed; no pinned symbol can move"
           fi
+      # The gate's own verdict rules (#1849: exact pin, declared band, above/below band),
+      # tested before anything is built. They need no build and measure nothing.
+      - name: Symbol-ratchet decision-rule tests
+        if: steps.scope.outputs.run == 'true'
+        run: python3 bench/test_symbol_ratchet.py
       - name: Build the bench targets carrying the pinned symbols (Release = -O3 -DNDEBUG)
         if: steps.scope.outputs.run == 'true'
         run: |
