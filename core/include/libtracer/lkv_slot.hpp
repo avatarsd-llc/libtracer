@@ -143,7 +143,8 @@ concept publishes_under =
  * only to equal or higher priority, so a high-priority reader that preempts a low-priority
  * writer inside that window spins until the task watchdog fires. Here the window is a guard
  * that cannot be spun on: an interrupt-masked critical section cannot be preempted at all, and
- * the host's @ref mutex_guard_t puts a contender to sleep once it has spun out.
+ * the host's @ref tr::basic_mutex_guard_t "mutex_guard_t" puts a contender to sleep once it has
+ * spun out.
  *
  * **What the guard covers, and what it does not.** `store` swaps the pointer inside the guard
  * and releases the displaced value AFTER leaving it, so a value's link destructors and its
@@ -277,14 +278,14 @@ class basic_single_writer_slot_t {
 };
 
 /**
- * @brief @ref basic_single_writer_slot_t over this build's `config_t::guard_t` — the
+ * @brief @ref basic_single_writer_slot_t over this build's `tr::graph::guard_t` — the
  *        name an override fragment binds.
  *
  * A class rather than an alias so `%config.hpp` can forward-declare it: the fragment names the
  * slot before this header has been seen, and the guard it will use is a member of the very
  * traits type the fragment is defining.
  */
-class single_writer_slot_t : public basic_single_writer_slot_t<config_t::guard_t> {};
+class single_writer_slot_t : public basic_single_writer_slot_t<guard_t> {};
 
 /**
  * @brief The process-wide hazard-pointer domain behind @ref hazard_slot_t (ADR-0069 §2/§5).

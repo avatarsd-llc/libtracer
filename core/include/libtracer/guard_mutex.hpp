@@ -6,7 +6,9 @@
  */
 #pragma once
 
+#include <algorithm>
 #include <atomic>
+#include <bit>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -16,7 +18,8 @@
 
 /**
  * @file
- * @brief `tr::mutex_guard_t`, the host's address-striped guard — the HOSTED half of the guard
+ * @brief `tr::basic_mutex_guard_t` and its default sizing `tr::mutex_guard_t`, the host's
+ *        address-striped guard — the HOSTED half of the guard
  *        vocabulary, apart from `%guard.hpp` because its contender sleeps (`<thread>`).
  *
  * A config override fragment must never include this header: `%config.hpp` includes the
@@ -59,13 +62,31 @@ namespace tr {
  * ## Striped, by address
  *
  * A lock per LKV slot would put bytes in every vertex, and `sizeof(vertex_t)` is ratcheted, so
- * the slot takes @ref for_address — a static table of padded locks costing `kStripes * 64`
- * bytes once; two vertices share a lock only when their addresses hash to the same stripe. A
- * pool owns its own instance instead.
+ * the slot takes @ref for_address — a static table of padded locks costing
+ * `kStripes * kAlign` bytes once; two vertices share a lock only when their addresses hash to
+ * the same stripe. A pool owns its own instance instead.
+ *
+ * ## Sized by the target (#1716)
+ *
+ * @p LineBytes is the padding each lock is aligned to, so two stripes never share a cache line;
+ * the build passes `kCacheLineBytes`, and 0 (no second core to false-share with) packs the locks
+ * at the flag's own alignment. @p Stripes is the table's length, a power of two. The default
+ * host build is `basic_mutex_guard_t<64, 64>` — 4 KB of `.bss` — which `mutex_guard_t` names;
+ * a smaller target shrinks either term (`default_config_t::kGuardStripes`).
+ *
+ * @tparam LineBytes The cache-line size to pad each lock to, or 0 for none.
+ * @tparam Stripes   Locks in the process-wide table; a power of two, at least 1.
  */
-struct alignas(64) mutex_guard_t {
+template <std::size_t LineBytes, std::size_t Stripes>
+struct alignas(std::max(LineBytes, alignof(std::atomic<bool>))) basic_mutex_guard_t {
+    static_assert(Stripes >= 1 && std::has_single_bit(Stripes),
+                  "the stripe count is a power of two, so the hash takes its top bits");
+
+    /** @brief Each lock's alignment: @p LineBytes, raised to the flag's natural alignment. */
+    static constexpr std::size_t kAlign = std::max(LineBytes, alignof(std::atomic<bool>));
+
     /** @brief Stripes in the process-wide table @ref for_address draws from. */
-    static constexpr std::size_t kStripes = 64;
+    static constexpr std::size_t kStripes = Stripes;
 
     /** @brief Re-reads of a held flag before a contender sleeps; covers a cross-core release. */
     static constexpr unsigned kSpinsBeforeNap = 128;
@@ -86,9 +107,9 @@ struct alignas(64) mutex_guard_t {
     static constexpr bool may_spin = false;
     static constexpr const char* name = "mutex_guard"; /**< @brief Census name. */
 
-    mutex_guard_t() noexcept = default;
-    mutex_guard_t(const mutex_guard_t&) = delete;
-    mutex_guard_t& operator=(const mutex_guard_t&) = delete;
+    basic_mutex_guard_t() noexcept = default;
+    basic_mutex_guard_t(const basic_mutex_guard_t&) = delete;
+    basic_mutex_guard_t& operator=(const basic_mutex_guard_t&) = delete;
 
     /** @brief Take the lock: one RMW, and the out-of-line wait only when it was held. */
     void lock() noexcept {
@@ -99,16 +120,29 @@ struct alignas(64) mutex_guard_t {
     /** @brief Give the lock back: a release store, and nobody to notify (see the class). */
     void unlock() noexcept { taken_.store(false, std::memory_order_release); }
 
-    /** @brief The stripe the address @p at hashes to: a Fibonacci hash of the address. */
-    static mutex_guard_t& for_address(const void* at) noexcept {
-        static mutex_guard_t table[kStripes];
-        auto a = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(at));
-        a ^= a >> 17;
-        a *= 0x9E3779B97F4A7C15ull;
-        return table[(a >> 58) % kStripes];
+    /** @brief The stripe the address @p at hashes to: the top bits of a Fibonacci hash. */
+    static basic_mutex_guard_t& for_address(const void* at) noexcept {
+        // Each padded type checks it got the alignment it asked for (see kCacheLineBytes); the
+        // size then follows, so the table is exactly `kStripes * kAlign` bytes of .bss.
+        static_assert(
+            alignof(basic_mutex_guard_t) == kAlign && sizeof(basic_mutex_guard_t) == kAlign,
+            "one host-guard stripe is one padded line");
+        static basic_mutex_guard_t table[kStripes];
+        if constexpr (kStripes == 1) {
+            (void)at;
+            return table[0];
+        } else {
+            auto a = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(at));
+            a ^= a >> 17;
+            a *= 0x9E3779B97F4A7C15ull;
+            return table[a >> kHashShift];
+        }
     }
 
    private:
+    /** @brief Right shift that leaves the hash's top `log2(kStripes)` bits (58 at 64 stripes). */
+    static constexpr unsigned kHashShift = 64u - static_cast<unsigned>(std::countr_zero(kStripes));
+
     // The flag must be a lock-free atomic, or the "one RMW" above is a libatomic lock. That is
     // asserted in `vertex.hpp` beside the BINDING, not here: this header is included by every
     // consumer of a vertex, esp32c3 (rv32imc, no atomics at all) included, and a class-scope
@@ -135,5 +169,20 @@ struct alignas(64) mutex_guard_t {
 
     std::atomic<bool> taken_{false}; /**< @brief Whether some thread is inside the window. */
 };
+
+/**
+ * @brief The host guard at its default sizing: 64 stripes, each padded to a 64-byte line.
+ *
+ * `default_config_t::guard_t` names it; a build that inherits that binding gets the guard
+ * re-sized from its own `kCacheLineBytes` and `kGuardStripes` (see `%config.hpp`).
+ */
+using mutex_guard_t = basic_mutex_guard_t<64, 64>;
+
+/** @brief Whether @p G is a sizing of the host guard, `basic_mutex_guard_t`. */
+template <class G>
+inline constexpr bool is_mutex_guard_v = false;
+/** @brief Every `basic_mutex_guard_t` is the host guard, whatever its sizing. */
+template <std::size_t LineBytes, std::size_t Stripes>
+inline constexpr bool is_mutex_guard_v<basic_mutex_guard_t<LineBytes, Stripes>> = true;
 
 }  // namespace tr

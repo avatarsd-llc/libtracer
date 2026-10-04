@@ -143,6 +143,18 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   - `default_config_t::kForceGuardedRmw` (default `false`) forces the guarded binding on a host
     whose atomics are native. It is a test knob: the core test build uses it to run the guarded
     path, and a shipped node leaves it off.
+- **The host guard is sized by the target: `tr::basic_mutex_guard_t<LineBytes, Stripes>`
+  ([#1716](https://github.com/avatarsd-llc/libtracer/issues/1716)).** The address-striped host
+  guard hard-coded 64-byte alignment and 64 stripes, a 4 KB `.bss` table on every build. It is
+  now a template, and `tr::mutex_guard_t` names its default sizing,
+  `basic_mutex_guard_t<64, 64>`. A build that keeps the default `guard_t` gets the guard sized
+  from its own `kCacheLineBytes` and the new `default_config_t::kGuardStripes` (default 64, a
+  power of two). For example, `kCacheLineBytes = 0` with `kGuardStripes = 16` costs 16 bytes,
+  not 4 KB. A fragment that names its guard itself gets exactly that guard. The default host
+  build is unchanged: same type, same 4 KB table, same code. New: `tr::is_mutex_guard_v<G>`,
+  the derived `tr::graph::kGuardStripes`. **Migration:** `tr::mutex_guard_t` is now an alias, so
+  a forward declaration `struct tr::mutex_guard_t;` no longer compiles; include
+  `libtracer/guard_mutex.hpp` instead.
 
 - **The write sequence is 32-bit on every target: `vertex_t::current_seq()` returns
   `tr::graph::write_seq_t` and `wait_for_change` takes one

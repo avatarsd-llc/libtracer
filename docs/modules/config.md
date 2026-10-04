@@ -144,6 +144,10 @@ refcount slot `sp_atomic_slot_t` was removed because libstdc++ spin-locks it
 :project: libtracer
 ```
 
+```{doxygenvariable} tr::graph::kGuardStripes
+:project: libtracer
+```
+
 ```{doxygenvariable} tr::graph::kHazardReaderSlots
 :project: libtracer
 ```
@@ -237,9 +241,13 @@ plane read their own spellings, so that neither L0 nor `tr::net` has to name an 
 :members:
 ```
 
-```{doxygenstruct} tr::mutex_guard_t
+```{doxygenstruct} tr::basic_mutex_guard_t
 :project: libtracer
 :members:
+```
+
+```{doxygentypedef} tr::mutex_guard_t
+:project: libtracer
 ```
 
 ```{doxygenstruct} tr::no_guard_t
