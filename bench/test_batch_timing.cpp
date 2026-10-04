@@ -8,7 +8,8 @@
  *
  * The estimator's outputs are timings, so most of what can be asserted is a property rather
  * than a value: every window cleared the floor, the sample count respects its own bounds, and
- * the work was not deleted. The one exact check is the arithmetic: a per-op figure is
+ * the work was not deleted, and a stall that misleads the calibration is recovered from
+ * rather than aborting the run. The one exact check is the arithmetic: a per-op figure is
  * `window * 1000 / batch` in picoseconds, kept fractional — the integer division it replaced
  * turned a 3.906 ns operation into 3 ns.
  *
@@ -39,6 +40,22 @@ void expect(bool ok, const char* what) {
 volatile std::uint64_t g_sink = 0;
 void tiny_op() { g_sink = g_sink + 1; }
 
+/** @brief Calls of @ref stall_once_op so far. */
+std::size_t g_calls = 0;
+
+/**
+ * @brief A tiny operation whose FIRST call stalls for 60 µs — a preemption inside the
+ *        calibration's batch-1 window, which makes batch 1 look long enough.
+ */
+void stall_once_op() {
+    if (g_calls++ == 0) {
+        const std::uint64_t until = bench::now_ns() + 60'000;
+        while (bench::now_ns() < until) {
+        }
+    }
+    g_sink = g_sink + 1;
+}
+
 }  // namespace
 
 int main() {
@@ -66,6 +83,15 @@ int main() {
     // A time budget runs past the floor when there is time for it.
     const bench::batch_timing_t c = bench::time_batches(tiny_op, 20'000'000ULL);
     expect(c.samples > bench::kMinBatchSamples, "a 20 ms budget takes more than the floor");
+
+    // A stall that misleads the calibration must not abort the run (review of #1845): the
+    // first timed window comes in short, the batch doubles until the windows clear the floor,
+    // and the samples restart at that batch.
+    const bench::batch_timing_t s = bench::time_batches(stall_once_op, 0);
+    expect(s.recalibrations > 0, "a misled calibration is re-calibrated upward");
+    expect(s.batch > 1, "the recovered batch is larger than the misled one");
+    expect(s.min_window_ns >= bench::kMinBatchWindowNs, "every kept window clears the floor");
+    expect(s.samples == bench::kMinBatchSamples, "samples restart at the recovered batch");
 
     const bench::clock_floor_t f = bench::measure_clock_floor();
     expect(f.res_ns > 0.0, "clock_getres reports a resolution");

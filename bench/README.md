@@ -1818,9 +1818,10 @@ Every batch row — `fold-b*`, the `-batch` twins, `path-parse`, `compact-*` and
 times through one loop, `bench::time_batches` in `bench_common.hpp`:
 
 - the batch is sized by **window** (`calibrate_batch_for_window`, aimed at 40 µs), never by
-  the plateau rule, and **every** timed window is asserted to be at least 20 µs — a shorter
-  one aborts the run, because the clock is then back in the figure (or the compiler deleted
-  the work);
+  the plateau rule, and **every** kept window is at least 20 µs. A shorter one means a stall
+  misled the calibration into too small a batch, so the batch doubles and the samples restart
+  (the NOTE line counts these as `recalibrations`). Only a short window at the largest batch
+  aborts the run, because then the compiler deleted the work or the harness is broken;
 - each sample is `window / batch` kept as a `double` in **picoseconds**, never integer-divided,
   and the RESULT row prints p50 and mean in ns with three decimals. The integer division it
   replaces stepped a 3–20 ns row in whole nanoseconds, a 5–30 % grain;

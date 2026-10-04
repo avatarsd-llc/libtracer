@@ -422,6 +422,7 @@ struct batch_timing_t {
     std::size_t batch = 0;           /**< @brief Operations per timed window. */
     std::size_t samples = 0;         /**< @brief Timed windows behind the figures. */
     std::uint64_t min_window_ns = 0; /**< @brief Shortest timed window (>= the floor). */
+    std::size_t recalibrations = 0;  /**< @brief Times a short window doubled the batch. */
 };
 
 /**
@@ -436,11 +437,12 @@ struct batch_timing_t {
 inline constexpr std::size_t kMinBatchSamples = 16;
 
 /**
- * @brief Abort the run: a batch window came in under @ref kMinBatchWindowNs.
+ * @brief Abort the run: a batch window came in under @ref kMinBatchWindowNs at @ref kMaxBatch.
  *
- * A short window means the clock's own cost is back in the figure, so the row would be
- * wrong. That is a harness defect (or work the compiler deleted), never noise to average
- * over, so the bench stops rather than publish it.
+ * A short window at a smaller batch is a misled calibration, and @ref time_batches recovers
+ * from it by doubling the batch. At @ref kMaxBatch there is nothing left to double: the
+ * operation costs almost nothing, which means the compiler deleted the work or the harness is
+ * broken, so the bench stops rather than publish a figure the clock dominates.
  *
  * @param window_ns The window that was too short.
  * @param batch     The batch it timed.
@@ -460,9 +462,11 @@ inline constexpr std::size_t kMinBatchSamples = 16;
  *
  * The one timing loop every batch row uses. The batch comes from @ref
  * calibrate_batch_for_window aimed at @ref kBatchWindowTargetNs (the calibration doubles as
- * warm-up), and every timed window is asserted to be at least @ref kMinBatchWindowNs.
- * Sampling stops once @p budget_ns is spent or @p max_ops operations have run, whichever
- * comes first, but never before @ref kMinBatchSamples windows.
+ * warm-up), and every kept window is at least @ref kMinBatchWindowNs. A window under it
+ * means a stall misled the calibration into too small a batch: the batch is doubled and the
+ * samples restart, and only a short window at @ref kMaxBatch aborts the run. Sampling stops once @p
+ * budget_ns is spent or @p max_ops operations have run, whichever comes first, but never before
+ * @ref kMinBatchSamples windows.
  *
  * @param op        The operation; called many times, so it must be repeatable.
  * @param budget_ns Time budget for the timed loop.
@@ -473,7 +477,7 @@ template <typename Op>
 [[nodiscard]] batch_timing_t time_batches(
     Op&& op, std::uint64_t budget_ns,
     std::size_t max_ops = std::numeric_limits<std::size_t>::max()) {
-    const std::size_t batch = calibrate_batch_for_window(op, kBatchWindowTargetNs);
+    std::size_t batch = calibrate_batch_for_window(op, kBatchWindowTargetNs);
     const auto window = [&] {
         for (std::size_t i = 0; i < batch; ++i) op();
     };
@@ -487,12 +491,27 @@ template <typename Op>
     std::uint64_t min_window = std::numeric_limits<std::uint64_t>::max();
     std::size_t ops = 0;
     std::uint64_t total = 0;
-    const std::uint64_t t0 = now_ns();
+    std::size_t recalibrations = 0;
+    std::uint64_t t0 = now_ns();
     while (ps.size() < kMinBatchSamples || (total < budget_ns && ops < max_ops)) {
         const std::uint64_t a = now_ns();
         window();
         const std::uint64_t w = now_ns() - a;
-        if (w < kMinBatchWindowNs) window_floor_breached(w, batch);
+        if (w < kMinBatchWindowNs) {
+            // The calibration was misled — one stall inside a short calibration window makes
+            // a small batch look long enough. Re-calibrate upward and start the samples over,
+            // so every kept window clears the floor at ONE batch size. Only a batch that has
+            // reached kMaxBatch and still runs short is a harness defect (or deleted work).
+            if (batch >= kMaxBatch) window_floor_breached(w, batch);
+            batch *= 2;
+            ++recalibrations;
+            ps.clear();
+            min_window = std::numeric_limits<std::uint64_t>::max();
+            ops = 0;
+            total = 0;
+            t0 = now_ns();
+            continue;
+        }
         min_window = std::min(min_window, w);
         ps.push_back(per_op_ps(w, batch));
         ops += batch;
@@ -501,6 +520,7 @@ template <typename Op>
 
     batch_timing_t t;
     t.batch = batch;
+    t.recalibrations = recalibrations;
     t.samples = ps.size();
     t.min_window_ns = min_window;
     t.ops_per_s = total > 0 ? static_cast<double>(ops) * 1e9 / static_cast<double>(total) : 0.0;
@@ -593,9 +613,11 @@ inline void emit_batch(const char* system, const char* mode, std::size_t size_by
     std::printf("RESULT\t%s\t%s\t%zu\t%zu\t%zu\t%.0f\t%.0f\t%.1f\t%.3f\t0\t%.3f\n", system, mode,
                 size_bytes, fanout, endpoints, pub_per_s, deliv_per_s, mb_per_s, t.p50_ps / 1e3,
                 t.mean_ps / 1e3);
-    std::printf("NOTE mode=%s size=%zu fan=%zu ep=%zu batch=%zu samples=%zu min_window_ns=%llu\n",
-                mode, size_bytes, fanout, endpoints, t.batch, t.samples,
-                static_cast<unsigned long long>(t.min_window_ns));
+    std::printf(
+        "NOTE mode=%s size=%zu fan=%zu ep=%zu batch=%zu samples=%zu min_window_ns=%llu "
+        "recalibrations=%zu\n",
+        mode, size_bytes, fanout, endpoints, t.batch, t.samples,
+        static_cast<unsigned long long>(t.min_window_ns), t.recalibrations);
     std::fflush(stdout);
 }
 
