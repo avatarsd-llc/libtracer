@@ -27,6 +27,7 @@
 #include <utility>
 #include <vector>
 
+#include "libtracer/config.hpp"
 #include "libtracer/edge_pin.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/rope.hpp"
@@ -662,8 +663,9 @@ struct edge_latch_t {
  */
 class edge_snapshot_t {
    public:
-    /** @brief The snapshot width (mirrored as `vertex_t::kInlineFanout`). */
-    static constexpr std::size_t kCapacity = 8;
+    /** @brief The snapshot width: the build's `%tr::graph::kInlineFanout` (mirrored as
+     *         `vertex_t::kInlineFanout`). */
+    static constexpr std::size_t kCapacity = kInlineFanout;
 
     /** @brief An empty snapshot; the element storage stays uninitialized (the point). */
     edge_snapshot_t() noexcept = default;

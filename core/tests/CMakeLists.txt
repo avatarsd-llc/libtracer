@@ -1426,6 +1426,30 @@ target_link_libraries(write_seq_guarded_test PRIVATE libtracer_guarded_seq)
 libtracer_test_warnings(write_seq_guarded_test)
 add_test(NAME write_seq_guarded COMMAND write_seq_guarded_test)
 
+# #1708: kInlineFanout. The same graph-API test at the host default (8, the test build's
+# libtracer) and at the ESP chip value (2, a second copy of the required core over
+# tests/narrow_fanout): fan-out below, at and past the inline width all deliver, and the
+# overflow path truncates nothing.
+add_executable(inline_fanout_test inline_fanout_test.cpp)
+target_link_libraries(inline_fanout_test PRIVATE libtracer)
+target_compile_definitions(inline_fanout_test PRIVATE EXPECT_INLINE_FANOUT=8)
+libtracer_test_warnings(inline_fanout_test)
+add_test(NAME inline_fanout COMMAND inline_fanout_test)
+
+add_library(libtracer_narrow_fanout STATIC ${LIBTRACER_SOURCES_REQUIRED})
+target_include_directories(libtracer_narrow_fanout BEFORE PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/narrow_fanout)
+target_include_directories(libtracer_narrow_fanout PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+target_link_libraries(libtracer_narrow_fanout PUBLIC Threads::Threads)
+target_compile_features(libtracer_narrow_fanout PUBLIC cxx_std_23)
+
+add_executable(inline_fanout_narrow_test inline_fanout_test.cpp)
+target_link_libraries(inline_fanout_narrow_test PRIVATE libtracer_narrow_fanout)
+target_compile_definitions(inline_fanout_narrow_test PRIVATE EXPECT_INLINE_FANOUT=2)
+libtracer_test_warnings(inline_fanout_narrow_test)
+add_test(NAME inline_fanout_narrow COMMAND inline_fanout_narrow_test)
+
 # #361 §5 / ADR-0039 §1 — graph_t's injected memory_resource: per-write LKV
 # allocations route through it (counting pass-through), released in full at
 # graph destruction; a default graph never touches a foreign resource.
