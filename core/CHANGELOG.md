@@ -79,6 +79,25 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `tr::graph::guard_t`; drop a forward declaration of the guard types, or move it to
   `namespace tr`; mark a custom pool policy's `lock()` / `unlock()` `noexcept`.
 
+### Added
+
+- **An admission filter can now see what kind of link a write arrived on
+  ([#1650](https://github.com/avatarsd-llc/libtracer/issues/1650)).** `write_ctx_t` gains
+  `link`, a pointer to the new `tr::net::link_kind_t`: the transport-catalog `(kind, role)` of the
+  connection that carried the write. `handlers_t::on_admit` and `handlers_t::on_write` both
+  receive it. Before this, a filter decided on the value and the writer's subject only, so it
+  could not admit a write from a dialled peer link and refuse the same write from a session a
+  `ws` listener accepted, except by parsing link names. A filter tests
+  `ctx.link->is("ws", tr::net::conn_role_t::LISTEN)`. `link` is null when no catalogued link
+  carried the write: the owner's own API write, a delivery from a subscription edge, or a link
+  added to the router without a catalog identity. The pair is fixed once per link:
+  `fwd_router_t::add_child` takes it as a new defaulted `link_kind_t` argument and interns it,
+  and `transport_vertex_t` passes each connection's declared pair. A frame then carries one
+  pointer and does no lookup, and `edge_view_t` does not grow. `graph_t::write` (both handle
+  overloads) and `graph::inbound_ref_t` gain a defaulted `link` / `link_kind` argument that
+  carries it. `tr::net::conn_role_t` moves to the new `libtracer/link_kind.hpp`;
+  `transport_vertex.hpp` includes it, so existing spellings compile unchanged.
+
 ### Changed
 
 - **`graph_t::default_ring_source()` is documented as the injected source itself

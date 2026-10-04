@@ -513,6 +513,13 @@ class fwd_router_t {
      * @param rx   Optional per-child failable-block source; null uses the router's. Give
      *             each child its OWN when injecting a bounded one — see ADR-0067 3
      *             for why sharing one across receive threads is the wrong shape.
+     * @param kind The link's transport-catalog `(kind, role)` (#1650), which every write this
+     *             child carries presents to the target's admission filter and handler as
+     *             `graph::write_ctx_t::link`. Copied and interned here, ONCE per
+     *             registration, so a frame carries a pointer and pays no lookup; an empty
+     *             `kind.kind` (the default) registers a link with no catalog identity, whose
+     *             writes present a null `link`. `transport_vertex_t` passes its connection's
+     *             declared pair.
      * @return false ⇔ @p name is unaddressable, or the registry could not grow — either way
      *         NOTHING was registered.
      *
@@ -530,7 +537,7 @@ class fwd_router_t {
      * a deliberate, greppable act instead of the default.
      */
     [[nodiscard]] bool add_child(std::string name, transport_t& link,
-                                 mem::block_source_t* rx = nullptr);
+                                 mem::block_source_t* rx = nullptr, link_kind_t kind = {});
 
     /**
      * @brief Un-register child @p name — it stops resolving, and its routing state goes.
@@ -1196,6 +1203,20 @@ class fwd_router_t {
          */
         std::atomic<transport_t*> link{nullptr};
         /**
+         * @brief This child's interned transport-catalog `(kind, role)` — null when it was
+         *        registered without one (#1650).
+         *
+         * The admission context's LINK claim, resolved once per registration beside `link`:
+         * the terminus hands this pointer on with each write it carries, so a filter can tell a
+         * session a `ws` listener accepted from a link this node dialled at the cost of one
+         * relaxed load per frame. It points into `kinds_`, which never frees a record before
+         * the router, so a reader holding it across a re-add reads a live record.
+         *
+         * Atomic and relaxed for the reason `rx`, `bus` and `link` are: a re-add REBINDS this
+         * ctx (#884), and `retired` carries the ordering edge for the rebind as a whole.
+         */
+        std::atomic<const link_kind_t*> kind{nullptr};
+        /**
          * @brief The FLAT tier's resolved-once LINK TOKEN, as `link_id_t::bits()`; `0` ⇒ not
          *        minted yet (#1266 / #1417).
          *
@@ -1487,6 +1508,16 @@ class fwd_router_t {
      */
     [[nodiscard]] static peer_handle_t terminus_peer(const child_rx_ctx_t* ctx,
                                                      peer_handle_t peer) noexcept;
+    /**
+     * @brief The OVER-WHAT half of the ingress identity (#1650): the catalog `(kind, role)`
+     *        @p ctx was registered with, or null when it has none or there is no @p ctx.
+     *
+     * One relaxed load of what `add_child` resolved once — called where a locally-terminating
+     * write is handed to the graph, never on a forwarding hop.
+     */
+    [[nodiscard]] static const link_kind_t* terminus_kind(const child_rx_ctx_t* ctx) noexcept {
+        return ctx != nullptr ? ctx->kind.load(std::memory_order_relaxed) : nullptr;
+    }
     /**
      * @brief Derive the SUBJECT a locally-terminating write is gated under, from the peer
      *        handle — the router's own use of the seam the resolver reaches through
@@ -1907,6 +1938,15 @@ class fwd_router_t {
      * release-store either way, so a reader that reaches the node sees every field it needs.
      */
     void publish_ctx(child_rx_ctx_t& ctx) noexcept;
+    /**
+     * @brief The interned record for @p kind, or null for an empty one (#1650). Control
+     *        plane, under `ctl_m_`.
+     *
+     * One record per distinct `(kind, role)` this router has ever registered — a handful on
+     * any node — found by a linear scan and appended on a miss, never freed before the router.
+     * @return The record, or null when @p kind is empty (a link with no catalog identity).
+     */
+    [[nodiscard]] const link_kind_t* intern_kind(link_kind_t kind);
     /** @brief The LIVE receiver ctx of child @p link_name, or nullptr — the name → ctx
      *         direction. Tombstoned nodes are skipped: a removed child resolves to nothing,
      *         and a re-added one resolves to its CURRENT tenancy (#884). */
@@ -1974,9 +2014,12 @@ class fwd_router_t {
      *               Required, not defaulted: an empty caller is the local-trusted
      *               short-circuit in `graph_t::acl_allows`, and #974 was exactly a delivery
      *               path inheriting it by omission.
+     * @param link   The inbound link's catalog `(kind, role)` (#1650), as the full-route
+     *               `FWD{WRITE}` presents it — required for the same reason @p caller is.
      */
     [[nodiscard]] bool deliver_local(std::span<const std::byte> route_path,
-                                     std::span<const std::byte> payload, std::string_view caller);
+                                     std::span<const std::byte> payload, std::string_view caller,
+                                     const link_kind_t* link);
     /**
      * @brief The graph remote-delivery sink (#136): emit one producer delivery to @p sub.
      *
@@ -2051,6 +2094,14 @@ class fwd_router_t {
                                            // its chunks draw from `label_src` (#873 phase 1)
     route_handle_t handles_;               // per-link label tables (compact flows only)
     std::deque<child_rx_ctx_t> child_rx_;  // stable receiver contexts, one per child
+    /** @brief One interned link-kind record: the owned `kind` bytes and the view over them. */
+    struct kind_rec_t {
+        std::string bytes; /**< @brief The owned copy of the catalog `kind`. */
+        link_kind_t view;  /**< @brief The record a `child_rx_ctx_t::kind` points at. */
+    };
+    /** @brief Interned `(kind, role)` records (#1650), under `ctl_m_`. A `std::deque` so a
+     *         record never moves once a ctx points at it; never shrunk before the router. */
+    std::deque<kind_rec_t> kinds_;
     /** @brief Head of the LOCK-FREE published chain through `child_rx_` — the only spelling a
      *         frame-path reader may use (see `child_rx_ctx_t::next`). */
     std::atomic<child_rx_ctx_t*> rx_head_{nullptr};

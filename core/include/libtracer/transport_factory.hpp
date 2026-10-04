@@ -21,6 +21,7 @@
 #include <memory>
 #include <string>
 
+#include "libtracer/link_kind.hpp"
 #include "libtracer/status.hpp"
 #include "libtracer/transport.hpp"
 
@@ -29,14 +30,6 @@ struct tlv_t;  // fwd-decl: the factory takes a `const tlv_t*` raw config (no L2
 }
 
 namespace tr::net {
-
-/**
- * @brief The connection's transport-private role (ADR-0027 §default link direction).
- *
- * `DIAL` = this node opens the link (the consumer-dials default); `LISTEN` = this node
- * accepts. A config-constructed socket transport acts on it (bind vs. connect).
- */
-enum class conn_role_t : std::uint8_t { DIAL = 0, LISTEN = 1 };
 
 /**
  * @brief The connection vertex's link-liveness value (RFC-0014 §4).

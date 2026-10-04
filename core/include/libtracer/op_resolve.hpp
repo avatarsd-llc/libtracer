@@ -130,6 +130,15 @@ struct inbound_ref_t {
      * (core/STYLE.md — dependencies point up the layers only).
      */
     const void* origin = nullptr;
+    /**
+     * @brief The transport-catalog `(kind, role)` of the link the request arrived on, or null
+     *        when it has none (#1650).
+     *
+     * Resolved ONCE per link, at registration, and carried here as the pointer the router
+     * interned — a request pays no lookup for it. A WRITE hands it to the target's admission
+     * filter and handler as `write_ctx_t::link`; no other operation reads it.
+     */
+    const net::link_kind_t* link_kind = nullptr;
 
     /** @brief A resolve with no peer identity: the subject is the link name itself. */
     constexpr inbound_ref_t() noexcept = default;
@@ -150,8 +159,12 @@ struct inbound_ref_t {
     /** @brief The full form the router builds: a link name, its frame's peer, and the
      *         opaque token its subject supplier resolves that peer against. */
     constexpr inbound_ref_t(std::string_view inbound_link, net::peer_handle_t inbound_peer,
-                            const void* supplier_origin) noexcept
-        : link(inbound_link), peer(inbound_peer), origin(supplier_origin) {}
+                            const void* supplier_origin,
+                            const net::link_kind_t* inbound_kind = nullptr) noexcept
+        : link(inbound_link),
+          peer(inbound_peer),
+          origin(supplier_origin),
+          link_kind(inbound_kind) {}
 };
 
 /**
@@ -189,6 +202,9 @@ struct link_token_seam_t {
     link_id_fn_t fn = nullptr;              /**< @brief The supplier, or null. */
     void* ctx = nullptr;                    /**< @brief Its caller-owned context. */
     const inbound_ref_t* inbound = nullptr; /**< @brief What to resolve; null ⇒ no token. */
+    /** @brief The arrival link's catalog `(kind, role)` (#1650), copied out of @ref inbound
+     *         when the seam is built so the WRITE arm reads it unconditionally; null ⇒ none. */
+    const net::link_kind_t* link_kind = nullptr;
 
     /**
      * @brief Ask for the token — the ONE place the seam is consulted.
@@ -565,7 +581,10 @@ class op_resolver_t {
     /** @brief The token seam as the walk carries it — the pair plus the identity it
      *         resolves, bundled so `resolve_node` grows ONE parameter and not three. */
     [[nodiscard]] link_token_seam_t link_token_seam(const inbound_ref_t& inbound) const noexcept {
-        return link_token_seam_t{.fn = link_id_fn_, .ctx = link_id_ctx_, .inbound = &inbound};
+        return link_token_seam_t{.fn = link_id_fn_,
+                                 .ctx = link_id_ctx_,
+                                 .inbound = &inbound,
+                                 .link_kind = inbound.link_kind};
     }
 
     /**
