@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief The frame codec: validate wire bytes and read them in place (@ref tr::wire::tlv_node_t),
+ * @brief The frame codec: validate wire bytes and read them in place (tr::wire::tlv_node_t),
  *        and encode a TLV tree back to bytes.
  *
  * SPDX-License-Identifier: Apache-2.0
