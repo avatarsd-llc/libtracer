@@ -28,6 +28,12 @@
  * operation cost, so it reads both counters at once: global blocks that escaped, and
  * blocks the resource served.
  *
+ * @par The ADR-0060 LKV-ROUTE gate (#1695)
+ * One more hard gate rides here because it needs this counter: the pooled copy-store
+ * alloc/free must reach the global heap ZERO times, against a heap-backend control that must
+ * reach it every cycle. It replaced the blocking half of the timed pool/heap ratio in
+ * `perf_gate.py`, which moved with the runner. `LKV_ROUTE_BREAK=1` is its negative check.
+ *
  * @par The disjointness invariant, and the two canaries that defend it (#1420)
  * Window (4) rests on its two columns being DISJOINT — a block counted at the seam must not
  * also be counted as an escape — and every OTHER window rests on the escape counter being
@@ -462,6 +468,98 @@ std::vector<std::byte> make_fwd(std::initializer_list<std::string_view> dst,
     std::vector<std::byte> frame;
     tr::wire::emit_tlv(frame, type_t::FWD, opt_t{.pl = true}, body);
     return frame;
+}
+
+/** @brief One ADR-0060 copy-store routing window's outcome. */
+struct lkv_route_t {
+    probe::counts_t heap;      /**< @brief Global operator-new/delete calls while armed. */
+    std::size_t exhausted = 0; /**< @brief `alloc` returned nullptr (backpressure). */
+};
+
+/**
+ * @brief The `lkv-alloc-*` loop of `bench_libtracer lkv`, counted instead of timed (#1695).
+ *
+ * The same op the ADR-0060 ratio times: `backend.alloc(S)`, adopted by a `segment_ptr_t`
+ * that drops at once, so `destroy` runs through the release path too. A warm cycle runs
+ * outside the window. A pooled backend must reach the global heap ZERO times in either
+ * direction; the heap backend, the control, must reach it at least once per iteration.
+ */
+lkv_route_t lkv_route_window(tr::mem::mem_backend_t& backend, std::size_t size, std::size_t iters) {
+    lkv_route_t out;
+    if (tr::view::segment_t* warm = backend.alloc(size)) {
+        const tr::view::segment_ptr_t p = tr::view::segment_ptr_t::adopt(warm);
+    }
+    probe::window_t win;
+    for (std::size_t i = 0; i < iters; ++i) {
+        tr::view::segment_t* seg = backend.alloc(size);
+        if (seg == nullptr) {
+            ++out.exhausted;
+        } else {
+            const tr::view::segment_ptr_t p = tr::view::segment_ptr_t::adopt(seg);
+        }
+    }
+    out.heap = win.result();
+    return out;
+}
+
+/**
+ * @brief The ADR-0060 pool-routing gate, structural (#1695): 0 if the pool path never touched
+ *        the heap, 1 if it did, 2 if the heap control did not register (a blind instrument).
+ *
+ * This is the property the `lkv-alloc` pool/heap THROUGHPUT ratio in `perf_gate.py` was a
+ * proxy for: "the pool routing is live, it has not fallen back to the heap". The ratio
+ * moves with the runner (#1695 measured 1.4x-6.5x on healthy builds); a count does not.
+ *
+ * The pool is the shape `bench_libtracer`'s `run_lkv_store_rows` builds: 2 KiB slots over a
+ * caller-owned slab with an explicit 64-byte alignment. Its rows lead with `S=`, not
+ * `allocs=`, so neither `perf_emit_benchmark.py` nor `perf_gate.py` reads them as a series:
+ * like the canaries, this is a verdict, not a number with a history.
+ */
+int lkv_route_gate() {
+    constexpr std::size_t kSlot = 2048, kSlots = 64, kIters = 1024;
+    constexpr std::size_t kSlabBytes = kSlots * (sizeof(tr::view::segment_t) + kSlot + 64);
+    alignas(64) static std::byte slab[kSlabBytes];
+    tr::mem::pool_t pool(std::span<std::byte>(slab, kSlabBytes), kSlot, 64);
+    // `LKV_ROUTE_BREAK=1` routes the pool arm to the heap on purpose: the negative check CI
+    // runs beside the gate, proving this verdict goes red on a heap fallback (#1695).
+    const char* brk = std::getenv("LKV_ROUTE_BREAK");
+    const bool broken = brk != nullptr && std::string_view(brk) == "1";
+    tr::mem::mem_backend_t& pooled = broken ? tr::mem::heap_backend() : pool;
+    int rc = 0;
+    for (const std::size_t size : {std::size_t{64}, std::size_t{1024}}) {
+        const lkv_route_t h = lkv_route_window(tr::mem::heap_backend(), size, kIters);
+        const lkv_route_t p = lkv_route_window(pooled, size, kIters);
+        const bool control_ok = h.heap.allocs >= kIters && h.heap.frees >= kIters;
+        const bool pool_ok = p.heap.allocs == 0 && p.heap.frees == 0 && p.exhausted == 0;
+        std::printf(
+            "RESULT lkv_route S=%zu backend=heap heap_allocs=%zu heap_frees=%zu iters=%zu "
+            "expect=>=iters %s\n",
+            size, h.heap.allocs, h.heap.frees, kIters, control_ok ? "ok" : "MISS");
+        std::printf(
+            "RESULT lkv_route S=%zu backend=pool heap_allocs=%zu heap_frees=%zu iters=%zu "
+            "exhausted=%zu expect=0 %s\n",
+            size, p.heap.allocs, p.heap.frees, kIters, p.exhausted, pool_ok ? "ok" : "MISS");
+        if (!control_ok) {
+            rc = 2;
+        } else if (!pool_ok && rc == 0) {
+            rc = 1;
+        }
+    }
+    if (rc == 2) {
+        std::printf(
+            "LKV-ROUTE: FAIL (the heap control did not reach the counter — the "
+            "instrument is blind, the pool verdict means nothing)\n");
+    } else if (rc == 1) {
+        std::printf(
+            "LKV-ROUTE: FAIL (the ADR-0060 pool path reached the global heap — the "
+            "value_backend routing has fallen back to the heap)\n");
+    } else {
+        std::printf(
+            "LKV-ROUTE: PASS (pool alloc/free reached the heap 0 times in %zu cycles at "
+            "64 B and 1 KiB; the heap control reached it every cycle)\n",
+            kIters);
+    }
+    return rc;
 }
 
 }  // namespace
@@ -902,6 +1000,11 @@ int main() {
             return 2;
         }
     }
+
+    // Hard gate (always on): the ADR-0060 pool path must not touch the global heap (#1695).
+    // It replaces the blocking half of `perf_gate.py`'s pool/heap throughput ratio, which
+    // read the runner as much as the code. Returns 1 on a heap fallback, 2 on a blind probe.
+    if (const int rc = lkv_route_gate(); rc != 0) return rc;
 
     // Hard gate (always on): the warm WIDE FAN-OUT must not re-open the >kInlineFanout
     // overflow-vector cliff — a ~2 KB per-publish `reserve` that the thread-local reusable
