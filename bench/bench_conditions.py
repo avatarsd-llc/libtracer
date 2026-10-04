@@ -27,7 +27,9 @@ What is sampled, around each invocation:
     /proc/<pid>/status prints as `nonvoluntary_ctxt_switches`. Recorded, not gated: a
     multi-threaded bench pinned to one CPU preempts itself, so the count alone cannot
     tell a neighbour from the bench's own threads.
-  * CPU PRESSURE — `some avg10`, sampled as the run starts, from one of two sources:
+  * CPU PRESSURE over the run itself — the growth of the PSI `some total=` stall
+    counter (microseconds) between the two snapshots, as a percent of the wall time,
+    from one of two sources:
       - PINNED (a CPU named by BENCH_CPU — the bench host): the bench job's OWN cgroup,
         `<cgroupfs>/<path from /proc/self/cgroup>/cpu.pressure`. The bench CPUs there are
         cgroup-isolated for the bench runner, so host-wide pressure (40-68 on the
@@ -35,13 +37,15 @@ What is sampled, around each invocation:
         about the bench CPU and would flag every point. Host-wide pressure is still
         RECORDED, for information only.
       - UNPINNED (hosted runners — nothing to isolate): host-wide /proc/pressure/cpu.
-    The reading is taken at launch, not at exit, on purpose: several bench modes run N
-    threads on one pinned CPU, and PSI cannot tell our own runnable threads from a
-    neighbour's, so a post-run reading would charge the bench for its own threads.
-    Foreign time is what covers the window itself. The exit reading is recorded.
+    The window is the run's own, not `avg10`: avg10 is a 10 s moving average, so a
+    0.0 s execution read the pressure the PREVIOUS (multi-threaded) execution left
+    behind and every re-run of it read the same stale value (#1839). A run shorter than
+    `PSI_MIN_WINDOW_S` is too short to measure a share on, and is judged on foreign
+    time alone. Multi-threaded runs raise their own cgroup's pressure, so for them the
+    pressure is recorded and not scored (#1803).
 
 The rule (`classify`): a run is CONTENDED when foreign time exceeds `FOREIGN_MAX_PCT`
-(2%) of the window, or the launch pressure from the source above exceeds
+(2%) of the window, or the in-window pressure from the source above exceeds
 `PRESSURE_MAX` (5). Otherwise CLEAN.
 `measure()` re-runs a contended invocation up to `attempts` times and keeps the first
 clean one; if none is clean it keeps the last and says so. A `Ledger` over a job's
@@ -88,8 +92,13 @@ CONTENDED = "CONTENDED"
 # right after the host fix, so this is tight on purpose and meant to be re-read against
 # the recorded values rather than loosened by guesswork.
 FOREIGN_MAX_PCT = 2.0
-# /proc/pressure/cpu `some avg10` at launch, percent (#1676's starting bar).
+# CPU pressure over the execution: `some total=` stall growth as a percent of the wall
+# time, the same unit as avg10 (#1676's starting bar, measured in-window since #1839).
 PRESSURE_MAX = 5.0
+# Shortest execution whose in-window pressure is scored. Below it the 5% bar is a few
+# milliseconds of stall, the order of one scheduler tick, so the share is noise and the
+# run is judged on foreign time alone (#1839).
+PSI_MIN_WINDOW_S = 0.5
 # /proc/stat counts in USER_HZ ticks (10 ms) while rusage is microsecond-precise, so a
 # short run can show a tick or two of "foreign" time that is only rounding between the
 # two clocks. Foreign time at or under this many ticks is never contention on its own.
@@ -119,8 +128,8 @@ class Sample:
     wall_ns: int                 # monotonic clock, ns
     busy: int                    # busy ticks summed over the set (incl. irq + steal)
     total: int                   # all ticks summed over the set
-    psi_avg10: float | None      # host-wide /proc/pressure/cpu `some avg10`, None if absent
-    cg_avg10: float | None = None  # this job's own cgroup `cpu.pressure` `some avg10`
+    psi_us: int | None           # host-wide /proc/pressure/cpu `some total=` µs, None if absent
+    cg_us: int | None = None     # this job's own cgroup `cpu.pressure` `some total=` µs
 
 
 def parse_proc_stat(text: str, cpus: Iterable[int]) -> tuple[int, int]:
@@ -143,15 +152,16 @@ def parse_proc_stat(text: str, cpus: Iterable[int]) -> tuple[int, int]:
     return busy, total
 
 
-def parse_psi_avg10(text: str | None) -> float | None:
-    """@brief The `some avg10` value of a PSI file, or None when absent or unparsable."""
+def parse_psi_total(text: str | None) -> int | None:
+    """@brief The `some total=` stall counter (µs) of a PSI file, or None when absent or
+    unparsable."""
     for line in (text or "").splitlines():
         if line.startswith("some "):
             for kv in line.split()[1:]:
                 k, _, v = kv.partition("=")
-                if k == "avg10":
+                if k == "total":
                     try:
-                        return float(v)
+                        return int(v)
                     except ValueError:
                         return None
     return None
@@ -175,8 +185,8 @@ def snapshot(cpus: Iterable[int], read: Callable[[str], str | None] = _read,
     """@brief Sample the measured CPU set. @p read and @p now are injected for tests."""
     busy, total = parse_proc_stat(read(PROC_STAT) or "", cpus)
     cg = cgroup_pressure_path(read(PROC_SELF_CGROUP))
-    return Sample(now(), busy, total, parse_psi_avg10(read(PROC_PSI)),
-                  parse_psi_avg10(read(cg)) if cg else None)
+    return Sample(now(), busy, total, parse_psi_total(read(PROC_PSI)),
+                  parse_psi_total(read(cg)) if cg else None)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -189,12 +199,12 @@ class Conditions:
     foreign_pct: float
     own_cpu_s: float
     nivcsw: int
-    pressure: float | None       # `some avg10` at launch from `pressure_source` — gated
-    pressure_exit: float | None  # the same source at exit — recorded only (self-polluted)
+    pressure: float | None       # in-window `some` share, percent, from `pressure_source`;
+                                 # None when absent or the run was too short to measure
     verdict: str
     reason: str
     pressure_source: str = "host"  # "cgroup" when pinned, "host" when unpinned
-    host_pressure: float | None = None  # host-wide avg10 at launch — information only
+    host_pressure: float | None = None  # host-wide in-window share — information only
     pressure_scored: bool = True  # False: a multi-threaded run, judged on foreign time only
 
     @property
@@ -207,6 +217,8 @@ class Conditions:
         psi = "n/a" if self.pressure is None else f"{self.pressure:.1f}"
         if not self.pressure_scored:
             psi += " (not scored: multi-threaded)"
+        elif self.wall_s < PSI_MIN_WINDOW_S:
+            psi += " (not scored: window too short)"
         host = ("" if self.pressure_source == "host" or self.host_pressure is None
                 else f" (host {self.host_pressure:.1f}, info)")
         return (f"{_cpuset(self.cpus)}{'' if self.pinned else ' (unpinned)'}: "
@@ -231,6 +243,14 @@ def _cpuset(cpus: Iterable[int]) -> str:
     return "cpus " + ",".join(runs)
 
 
+def _window_pct(us0: int | None, us1: int | None, wall_s: float) -> float | None:
+    """@brief Stall microseconds gained over the window as a percent of its wall time;
+    None when either reading is absent or the window has no length."""
+    if us0 is None or us1 is None or wall_s <= 0:
+        return None
+    return max(0, us1 - us0) / (wall_s * 1e6) * 100.0
+
+
 def classify(before: Sample, after: Sample, own_cpu_s: float, nivcsw: int,
              cpus: Iterable[int], pinned: bool = True,
              foreign_max_pct: float = FOREIGN_MAX_PCT,
@@ -242,6 +262,10 @@ def classify(before: Sample, after: Sample, own_cpu_s: float, nivcsw: int,
     MULTI-threaded bench invocation, whose own threads queue behind each other on the
     pinned CPUs and so raise its own cgroup's pressure without anything foreign present.
     Foreign time still catches a real intruder; the pressure is recorded, not scored.
+
+    Pressure is the run's own: the growth of the PSI `some total=` counter over the
+    window as a share of its wall time. A run shorter than `PSI_MIN_WINDOW_S` has no
+    measurable share and is judged on foreign time alone (#1839).
 
     Pinned runs gate on foreign time and the job's OWN cgroup pressure only; host-wide
     pressure is recorded beside them and never decides. Unpinned runs, which have no
@@ -259,16 +283,18 @@ def classify(before: Sample, after: Sample, own_cpu_s: float, nivcsw: int,
     if foreign_ticks > QUANTUM_TICKS and foreign_pct > foreign_max_pct:
         reasons.append(f"foreign {foreign_pct:.1f}% > {foreign_max_pct:g}%")
     source = "cgroup" if pinned else "host"
-    psi0 = before.cg_avg10 if pinned else before.psi_avg10
-    psi1 = after.cg_avg10 if pinned else after.psi_avg10
-    if score_pressure and psi0 is not None and psi0 > pressure_max:
-        reasons.append(f"{source} psi {psi0:.1f} > {pressure_max:g}")
-    return Conditions(cpus=cpus, pinned=pinned,
-                      wall_s=max(0, after.wall_ns - before.wall_ns) / 1e9,
+    wall_s = max(0, after.wall_ns - before.wall_ns) / 1e9
+    psi = _window_pct(before.cg_us, after.cg_us, wall_s) if pinned else \
+        _window_pct(before.psi_us, after.psi_us, wall_s)
+    if (score_pressure and wall_s >= PSI_MIN_WINDOW_S and psi is not None
+            and psi > pressure_max):
+        reasons.append(f"{source} psi {psi:.1f} > {pressure_max:g}")
+    return Conditions(cpus=cpus, pinned=pinned, wall_s=wall_s,
                       foreign_pct=foreign_pct, own_cpu_s=own_cpu_s, nivcsw=nivcsw,
-                      pressure=psi0, pressure_exit=psi1,
+                      pressure=psi,
                       verdict=CONTENDED if reasons else CLEAN, reason="; ".join(reasons),
-                      pressure_source=source, host_pressure=before.psi_avg10,
+                      pressure_source=source,
+                      host_pressure=_window_pct(before.psi_us, after.psi_us, wall_s),
                       pressure_scored=score_pressure)
 
 

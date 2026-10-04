@@ -47,34 +47,45 @@ def proc_stat(cpu: int, user: int, system: int, idle: int, steal: int = 0,
             f"intr 12345\n")
 
 
-def psi(avg10: float) -> str:
-    """@brief A /proc/pressure/cpu body."""
-    return (f"some avg10={avg10:.2f} avg60=0.00 avg300=0.00 total=123\n"
+def psi(total_us: int, avg10: float = 0.0) -> str:
+    """@brief A /proc/pressure/cpu body with `some total=` @p total_us.
+
+    @p avg10 is decoration the rule must ignore: a stale moving average is what #1839
+    removed from the decision.
+    """
+    return (f"some avg10={avg10:.2f} avg60=0.00 avg300=0.00 total={total_us}\n"
             f"full avg10=0.00 avg60=0.00 avg300=0.00 total=0\n")
+
+
+def us(pct: float, wall_s: float = 10.0) -> int:
+    """@brief The stall microseconds that are @p pct percent of a @p wall_s window."""
+    return round(pct / 100.0 * wall_s * 1e6)
 
 
 CG = "/runners.slice/actions.runner.studio-bench.service"
 
 
-def sample(stat: str, pressure: float | None, wall_ns: int, cpu: int = 7,
-           cgroup: float | None = None) -> bc.Sample:
+def sample(stat: str, pressure: int | None, wall_ns: int, cpu: int = 7,
+           cgroup: int | None = None, avg10: float = 0.0) -> bc.Sample:
     """@brief One snapshot built from synthetic /proc text through the real reader.
 
-    @p pressure is host-wide PSI; @p cgroup, when given, is this job's own cgroup PSI,
-    reached the way the real reader reaches it — through /proc/self/cgroup.
+    @p pressure is the host-wide PSI `some total=` (µs); @p cgroup, when given, is this
+    job's own cgroup counter, reached the way the real reader reaches it — through
+    /proc/self/cgroup. @p avg10 decorates both files and must never decide.
     """
-    files = {bc.PROC_STAT: stat, bc.PROC_PSI: None if pressure is None else psi(pressure)}
+    files = {bc.PROC_STAT: stat,
+             bc.PROC_PSI: None if pressure is None else psi(pressure, avg10)}
     if cgroup is not None:
         files[bc.PROC_SELF_CGROUP] = f"0::{CG}\n"
-        files[f"{bc.CGROUP_FS}{CG}/cpu.pressure"] = psi(cgroup)
+        files[f"{bc.CGROUP_FS}{CG}/cpu.pressure"] = psi(cgroup, avg10)
     return bc.snapshot((cpu,), read=files.get, now=lambda: wall_ns)
 
 
 # A 10 s window on one CPU at USER_HZ=100 is 1000 ticks.
-T0 = sample(proc_stat(7, user=1000, system=500, idle=8000), 0.0, 0)
+T0 = sample(proc_stat(7, user=1000, system=500, idle=8000), 0, 0)
 
 
-def after(extra_busy: int, extra_idle: int, pressure: float | None = 0.0,
+def after(extra_busy: int, extra_idle: int, pressure: int | None = 0,
           steal: int = 0) -> bc.Sample:
     """@brief The snapshot 10 s after T0 with @p extra_busy busy ticks in the window."""
     return sample(proc_stat(7, user=1000 + extra_busy, system=500, idle=8000 + extra_idle,
@@ -93,9 +104,9 @@ class ProcParsing(unittest.TestCase):
         busy, _ = bc.parse_proc_stat("cpu3 0 0 0 100 900 0 0 0 0 0\n", [3])
         self.assertEqual(busy, 0)
 
-    def test_psi_avg10(self):
-        self.assertEqual(bc.parse_psi_avg10(psi(12.5)), 12.5)
-        self.assertIsNone(bc.parse_psi_avg10(None))    # a kernel without PSI
+    def test_psi_total(self):
+        self.assertEqual(bc.parse_psi_total(psi(1_250_000, avg10=99.0)), 1_250_000)
+        self.assertIsNone(bc.parse_psi_total(None))    # a kernel without PSI
 
     def test_cpuset_spelling(self):
         self.assertEqual(bc._cpuset([2]), "cpu2")
@@ -103,7 +114,7 @@ class ProcParsing(unittest.TestCase):
 
 
 class Classify(unittest.TestCase):
-    """@brief The rule: foreign time over the bar, or launch pressure over the bar."""
+    """@brief The rule: foreign time over the bar, or in-window pressure over the bar."""
 
     def test_a_clean_run(self):
         # 1000 ticks, all of them the bench's own 10 s of CPU.
@@ -133,15 +144,14 @@ class Classify(unittest.TestCase):
     def test_clock_rounding_is_not_contention(self):
         # A 0.1 s run: 10 ticks, 2 of them "foreign" only because /proc/stat counts in
         # 10 ms ticks and rusage in microseconds. 20% of a tiny window, still clean.
-        t1 = sample(proc_stat(7, user=1010, system=500, idle=8000), 0.0, 100_000_000)
+        t1 = sample(proc_stat(7, user=1010, system=500, idle=8000), 0, 100_000_000)
         c = bc.classify(T0, t1, own_cpu_s=0.08, nivcsw=0, cpus=[7])
         self.assertTrue(c.clean, c.line())
 
-    def test_unpinned_host_pressure_at_launch_contends(self):
+    def test_unpinned_host_pressure_in_window_contends(self):
         """Hosted runners have nothing to isolate: host-wide pressure decides there."""
-        t0 = sample(proc_stat(7, 1000, 500, 8000), 41.4, 0)
-        c = bc.classify(t0, after(1000, 0), own_cpu_s=10.0, nivcsw=0, cpus=[7],
-                        pinned=False)
+        c = bc.classify(T0, after(1000, 0, pressure=us(41.4)), own_cpu_s=10.0, nivcsw=0,
+                        cpus=[7], pinned=False)
         self.assertEqual(c.verdict, bc.CONTENDED)
         self.assertIn("host psi 41.4 > 5", c.reason)
 
@@ -149,19 +159,19 @@ class Classify(unittest.TestCase):
         """The pinned host's bench CPUs are cgroup-isolated: host-wide pressure of 40-68
         says nothing about them. Own cgroup ~0 and a clean CPU must read CLEAN, with the
         host figure recorded for information."""
-        t0 = sample(proc_stat(7, 1000, 500, 8000), 55.2, 0, cgroup=0.0)
-        t1 = sample(proc_stat(7, 2000, 500, 8000), 61.0, 10_000_000_000, cgroup=0.1)
+        t0 = sample(proc_stat(7, 1000, 500, 8000), 0, 0, cgroup=0)
+        t1 = sample(proc_stat(7, 2000, 500, 8000), us(55.2), 10_000_000_000, cgroup=us(0.1))
         c = bc.classify(t0, t1, own_cpu_s=10.0, nivcsw=0, cpus=[7], pinned=True)
         self.assertEqual(c.verdict, bc.CLEAN, c.line())
         self.assertEqual(c.pressure_source, "cgroup")
-        self.assertEqual(c.pressure, 0.0)
-        self.assertEqual(c.host_pressure, 55.2)
+        self.assertAlmostEqual(c.pressure, 0.1)
+        self.assertAlmostEqual(c.host_pressure, 55.2)
         self.assertIn("host 55.2, info", c.line())
 
     def test_pinned_own_cgroup_pressure_contends(self):
-        t0 = sample(proc_stat(7, 1000, 500, 8000), 0.0, 0, cgroup=12.5)
-        c = bc.classify(t0, after(1000, 0), own_cpu_s=10.0, nivcsw=0, cpus=[7],
-                        pinned=True)
+        t0 = sample(proc_stat(7, 1000, 500, 8000), 0, 0, cgroup=0)
+        t1 = sample(proc_stat(7, 2000, 500, 8000), 0, 10_000_000_000, cgroup=us(12.5))
+        c = bc.classify(t0, t1, own_cpu_s=10.0, nivcsw=0, cpus=[7], pinned=True)
         self.assertEqual(c.verdict, bc.CONTENDED)
         self.assertIn("cgroup psi 12.5 > 5", c.reason)
 
@@ -170,13 +180,52 @@ class Classify(unittest.TestCase):
                          f"{bc.CGROUP_FS}{CG}/cpu.pressure")
         self.assertIsNone(bc.cgroup_pressure_path("12:cpu,cpuacct:/foo\n"))  # v1-only
 
-    def test_pressure_at_exit_is_recorded_not_gated(self):
-        """A bench that runs N threads on one pinned CPU raises PSI itself; charging it
-        for its own threads would make every such run INCONCLUSIVE."""
-        c = bc.classify(T0, after(1000, 0, pressure=80.0), own_cpu_s=10.0, nivcsw=0,
-                        cpus=[7], pinned=False)
+    def test_stale_avg10_from_a_previous_run_is_not_contention(self):
+        """#1839: a short execution right after a multi-threaded one reads avg10 ~50
+        left over from the previous run. Only the stall gained in its own window counts:
+        none was gained, so a quiet window is CLEAN however high avg10 reads."""
+        t0 = sample(proc_stat(7, 1000, 500, 8000), 0, 0, cgroup=9_000_000, avg10=50.8)
+        t1 = sample(proc_stat(7, 2000, 500, 8000), 0, 10_000_000_000, cgroup=9_000_000,
+                    avg10=50.8)
+        c = bc.classify(t0, t1, own_cpu_s=10.0, nivcsw=0, cpus=[7], pinned=True)
         self.assertTrue(c.clean, c.line())
-        self.assertEqual(c.pressure_exit, 80.0)
+        self.assertEqual(c.pressure, 0.0)
+
+    def test_the_pressure_bar_is_five_percent_of_the_window(self):
+        def run(pct):
+            t0 = sample(proc_stat(7, 1000, 500, 8000), 0, 0, cgroup=1_000_000)
+            t1 = sample(proc_stat(7, 2000, 500, 8000), 0, 10_000_000_000,
+                        cgroup=1_000_000 + us(pct))
+            return bc.classify(t0, t1, own_cpu_s=10.0, nivcsw=0, cpus=[7], pinned=True)
+        self.assertTrue(run(4.9).clean)
+        self.assertFalse(run(5.1).clean)
+
+    def test_too_short_to_measure_is_judged_on_foreign_time_alone(self):
+        """A 10 ms execution: the stall share of so short a window is noise, so even a
+        large one is recorded and not scored. A foreign intruder still contends."""
+        t0 = sample(proc_stat(7, 1000, 500, 8000), 0, 0, cgroup=0)
+        t1 = sample(proc_stat(7, 1001, 500, 8000), 0, 10_000_000, cgroup=5_000)  # 50%
+        quiet = bc.classify(t0, t1, own_cpu_s=0.01, nivcsw=0, cpus=[7], pinned=True)
+        self.assertTrue(quiet.clean, quiet.line())
+        self.assertAlmostEqual(quiet.pressure, 50.0)
+        self.assertIn("not scored: window too short", quiet.line())
+        t2 = sample(proc_stat(7, 2000, 500, 8000), 0, 10_000_000_000 + 10_000_000,
+                    cgroup=5_000)
+        busy = bc.classify(T0, t2, own_cpu_s=7.0, nivcsw=0, cpus=[7], pinned=True)
+        self.assertFalse(busy.clean)
+        self.assertIn("foreign", busy.reason)
+        self.assertNotIn("psi", busy.reason)
+
+    def test_multi_threaded_own_pressure_is_recorded_not_scored(self):
+        """#1803: a multi-threaded run queues behind its own threads; its in-window
+        pressure is recorded and never decides."""
+        t0 = sample(proc_stat(7, 1000, 500, 8000), 0, 0, cgroup=0)
+        t1 = sample(proc_stat(7, 2000, 500, 8000), 0, 10_000_000_000, cgroup=us(80.0))
+        c = bc.classify(t0, t1, own_cpu_s=10.0, nivcsw=0, cpus=[7], pinned=True,
+                        score_pressure=False)
+        self.assertTrue(c.clean, c.line())
+        self.assertAlmostEqual(c.pressure, 80.0)
+        self.assertIn("not scored: multi-threaded", c.line())
 
     def test_no_psi_is_not_contention(self):
         t0 = sample(proc_stat(7, 1000, 500, 8000), None, 0)
@@ -195,7 +244,7 @@ def scripted(verdicts: list[str]):
         calls.append(v)
         foreign = 0.0 if v == bc.CLEAN else 30.0
         cond = bc.Conditions(cpus=(7,), pinned=True, wall_s=1.0, foreign_pct=foreign,
-                             own_cpu_s=1.0, nivcsw=0, pressure=0.0, pressure_exit=0.0,
+                             own_cpu_s=1.0, nivcsw=0, pressure=0.0,
                              verdict=v, reason="" if v == bc.CLEAN else "foreign 30.0% > 2%")
         return f"attempt {len(calls)}\n", "", 0, cond
     return run, calls

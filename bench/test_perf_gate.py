@@ -749,8 +749,9 @@ class GateTimesBothFamilySets(unittest.TestCase):
         return rc, buf.getvalue()
 
     def run_cond(self, own_cpu_s: float, cg_psi: float, multi: bool) -> "pg.bc.Conditions":
-        before = pg.bc.Sample(0, 0, 0, None, cg_psi)
-        after = pg.bc.Sample(10_000_000_000, 1000, 1000, None, cg_psi)
+        # cg_psi percent of the 10 s window as `some total=` stall microseconds.
+        before = pg.bc.Sample(0, 0, 0, None, 0)
+        after = pg.bc.Sample(10_000_000_000, 1000, 1000, None, round(cg_psi * 100_000))
         return pg.bc.classify(before, after, own_cpu_s=own_cpu_s, nivcsw=0, cpus=[3, 4, 5, 6],
                               pinned=True, clk_tck=100, score_pressure=not multi)
 
