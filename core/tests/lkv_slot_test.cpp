@@ -800,8 +800,8 @@ int main() {
     check(g_live.load() == 0, "single_writer_slot_t: the concurrent run freed every value");
     // The host lock on its own, then the same run on the slot AS BOUND — over the real host
     // guard, not this file's counting one. That run is the one that reads a value after its free
-    // (ASan: heap-use-after-free) if the writer's guard is ever dropped on the strength of
-    // `kSingleWriter`; see lkv_slot.hpp for why a single publisher does not make that safe.
+    // (ASan: heap-use-after-free) if the writer's guard is ever dropped on the strength of a
+    // single publisher; see lkv_slot.hpp for why one publisher does not make that safe.
     host_guard_excludes(std::max<std::size_t>(hw, 4), 5000);
     concurrent<tr::graph::single_writer_slot_t>("single_writer_slot_t (bound guard)", 1, readers,
                                                 10000);

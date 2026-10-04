@@ -2539,6 +2539,16 @@ add_test(NAME weakly_ordered_removed COMMAND ${CMAKE_COMMAND}
          -DLT_PROBE=${CMAKE_CURRENT_SOURCE_DIR}/spin_slot_guard_probe.cpp
          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/weakly_ordered_removed.cmake)
 
+# #1718 — kSingleWriter was removed. A fragment that still sets it must fail to compile, by the
+# tripwire's own message, instead of compiling on as if the library read it. Same harness shape
+# as guard_rename (one fixture dir per arm, the spin_slot_guard probe).
+add_test(NAME single_writer_removed COMMAND ${CMAKE_COMMAND}
+         -DLT_CXX=${CMAKE_CXX_COMPILER}
+         -DLT_CORE_INCLUDE=${CMAKE_CURRENT_SOURCE_DIR}/../include
+         -DLT_FIXTURES=${CMAKE_CURRENT_SOURCE_DIR}/single_writer_removed
+         -DLT_PROBE=${CMAKE_CURRENT_SOURCE_DIR}/spin_slot_guard_probe.cpp
+         -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/single_writer_removed.cmake)
+
 # #1703 — the one-release alias window: every pre-move guard spelling still names its new type.
 add_executable(guard_alias_test guard_alias_test.cpp)
 target_link_libraries(guard_alias_test PRIVATE libtracer)

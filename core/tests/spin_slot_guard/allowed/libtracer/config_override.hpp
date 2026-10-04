@@ -34,7 +34,6 @@ struct fixture_guard_t {
 /** @brief The defaults as a single-core RTOS target overrides them. */
 struct spin_slot_allowed_config_t : default_config_t {
     static constexpr bool kSpinWaitSafe = false;
-    static constexpr bool kSingleWriter = true;
     using guard_t = fixture_guard_t;
     using lkv_slot_t = single_writer_slot_t;
 };

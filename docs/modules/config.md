@@ -74,7 +74,6 @@ ahead of `libtracer/config.hpp` on the include path:
 ```cpp
 struct my_node_config_t : tr::graph::default_config_t {
     static constexpr std::size_t kCacheLineBytes = 0;   // single-core: no false sharing
-    static constexpr bool kSingleWriter = true;         // one publisher per vertex
     using guard_t = my_rtos_critical_section_t;         // interrupt-masked, never spins
     using lkv_slot_t = tr::graph::single_writer_slot_t;
 };
@@ -99,7 +98,9 @@ what the entries mean.
 last-known value. `single_writer_slot_t` is the default: a plain `shared_ptr`
 swapped and copied inside `guard_t` (an interrupt-masked critical section
 on a chip, the address-striped `mutex_guard_t` on a host), with no registry and a
-publish that cannot fail. An RTOS build also sets `kSingleWriter`.
+publish that cannot fail. (`kSingleWriter`, the one-publisher-per-vertex promise
+an RTOS build used to state, was removed in
+[#1718](https://github.com/avatarsd-llc/libtracer/issues/1718): no code read it.)
 `hazard_slot_t` is the lock-free host opt-in: an `atomic<node_t*>` reclaimed
 with hazard pointers, which costs a fixed registry sized by `kHazardReaderSlots`,
 a heap node per published value, and a publish that can fail under memory
@@ -165,10 +166,6 @@ refcount slot `sp_atomic_slot_t` was removed because libstdc++ spin-locks it
 ```
 
 ```{doxygentypedef} tr::graph::lkv_slot_t
-:project: libtracer
-```
-
-```{doxygenvariable} tr::graph::kSingleWriter
 :project: libtracer
 ```
 
