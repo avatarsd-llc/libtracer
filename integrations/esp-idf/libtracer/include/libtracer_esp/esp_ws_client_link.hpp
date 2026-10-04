@@ -33,7 +33,8 @@
  * inbound BINARY WebSocket message is one libtracer TLV, delivered borrowed
  * in-call to the router; `send()` emits one masked BINARY frame per libtracer
  * frame. Point-to-point (one dialed peer), so it is NOT a bus link
- * (`bus() == nullptr`) and delivers borrowed spans (`delivers_ropes() == false`).
+ * (`bus() == nullptr`) and delivers borrowed spans (`delivers_ropes() == false`)
+ * unless the application names an owning receive source (#1661).
  * It drops into the node's construction site behind the request-plane admission
  * gate with the same `provide_link("ws-client", name, link)` + DIAL creator-endpoint
  * SPEC wiring `httpd_ws_link_t` uses for the listener.
@@ -179,8 +180,10 @@
  *     counter lock.
  *
  * NO per-frame heap: the rx/tx buffers are allocated ONCE at construction (bounded,
- * tunable); steady-state send/recv touch neither the global heap nor a per-frame
- * allocation. One recv thread per dialed peer (each blocks on its own connection),
+ * tunable; the tx scratch and queue slots from the application's `memory.io`, #1661);
+ * steady-state send/recv touch neither the global heap nor a per-frame allocation. The
+ * one per-message draw is opt-in: a link given `memory.rx` takes each receive block from
+ * that application source. One recv thread per dialed peer (each blocks on its own connection),
  * mirroring `transport_ws_client`.
  */
 #pragma once
@@ -212,9 +215,9 @@ namespace tr::net {
  *        peer address.
  *
  * Every member defaults to the historical default, so `esp_ws_client_config_t{}` is the
- * unconfigured link. There is no @ref link_memory_t member: this kind's receive and send
- * buffers are its own fixed `rx_bytes`/`tx_bytes` allocations, and it delivers borrowed
- * spans, so it has no RX seam to inject (the same position as `socketcan_link_t`).
+ * unconfigured link. Its @ref link_memory_t (#1661) is the server sibling's shape
+ * (`httpd_ws_config_t::memory`): `rx` opts in to OWNING delivery from an application
+ * source, and `io` is where the send side draws its storage.
  */
 struct esp_ws_client_config_t {
     /** @brief The WS URI requested in the handshake (default "/ws", matching the
@@ -251,6 +254,34 @@ struct esp_ws_client_config_t {
      *        historical dial-at-once contract.
      */
     bool defer_recv = false;
+    /**
+     * @brief The link's memory (@ref link_memory_t, #1661), as `httpd_ws_link_t` takes it.
+     *
+     * `rx` opts in to OWNING RX delivery: each complete inbound message is copied once out of
+     * the read scratch into a receive block drawn from this source — with the RFC-0028 §6.9
+     * ingress-loan reserve when the message is at least `kShareThresholdBytes`, so a terminus
+     * that stores it builds its record in the block — and is delivered as a rope the sink may
+     * keep. An exhausted source is backpressure: the message is dropped and counted on
+     * @ref esp_ws_client_link_t::dropped_rx, never satisfied from the heap. `nullptr` (THIS
+     * kind's default) keeps borrowed delivery straight out of the scratch, with no per-message
+     * allocation — the sibling server link's default and the reason for it.
+     *
+     * `io` is the send side's store: the writer's masked-frame scratch (`tx_bytes`), the
+     * enqueue-then-write queue's slots and the base class's gather temporary all draw from
+     * it. `nullptr` means the process heap (`mem::heap_source()`).
+     *
+     * What stays outside both, because IDF offers no allocator hook for it:
+     * - the read scratch (`rx_bytes`), which the transport reads into. `esp_transport_ws`
+     *   reports a frame's length only after a read has already put payload bytes in the
+     *   buffer it was offered, so the receive block cannot be sized before the first read;
+     * - the transport pair each dial builds (`esp_transport_tcp_init`/`esp_transport_ws_init`)
+     *   and the WS transport's handshake buffer, `CONFIG_WS_BUFFER_SIZE` bytes. The
+     *   application sizes that buffer through Kconfig, and `CONFIG_WS_DYNAMIC_BUFFER` frees
+     *   it after each handshake instead of holding it for the link's life;
+     * - the payload of a PING or CLOSE the transport answers itself, which it `malloc`s per
+     *   control frame (at most 125 bytes, RFC 6455 §5.5).
+     */
+    link_memory_t memory{.rx = nullptr};
 };
 
 /**
@@ -258,9 +289,10 @@ struct esp_ws_client_config_t {
  *        — dials one peer and exposes it through the point-to-point `transport_t` seam.
  *
  * Public surface mirrors `transport_ws_client`: a chip node substitutes this type at
- * its dial construction site with no other change. Span delivery (not ropes): each
+ * its dial construction site with no other change. Span delivery by default: each
  * frame is delivered borrowed and the router services it in-call, so nothing outlives
- * the callback (@ref delivers_ropes is false); point-to-point, so @ref bus is nullptr.
+ * the callback (@ref delivers_ropes is false). Naming `memory.rx` switches it to owning
+ * rope delivery from that source (#1661). Point-to-point, so @ref bus is nullptr.
  */
 class esp_ws_client_link_t : public transport_t {
    public:
@@ -293,8 +325,8 @@ class esp_ws_client_link_t : public transport_t {
      *
      * @param host     The peer's IPv4 dotted-quad or hostname (the graph plane's WS host).
      * @param port     The peer's TCP port (its :80 esp_http_server, for the /ws mount).
-     * @param config   The link's knobs (@ref esp_ws_client_config_t): URI, handshake headers,
-     *                 buffer sizes, recv-thread stack, deferred first dial.
+     * @param config   The link's knobs (@ref esp_ws_client_config_t): memory, URI, handshake
+     *                 headers, buffer sizes, recv-thread stack, deferred first dial.
      */
     explicit esp_ws_client_link_t(std::string host, std::uint16_t port,
                                   const esp_ws_client_config_t& config = {});
@@ -377,9 +409,10 @@ class esp_ws_client_link_t : public transport_t {
      */
     void start_receiving() override;
 
-    /** @brief Span delivery: the router services each inbound frame in-call, so no
-     *         frame outlives its callback. */
-    [[nodiscard]] bool delivers_ropes() const override { return false; }
+    /** @brief Span delivery by default: the router services each inbound frame in-call,
+     *         so no frame outlives its callback. True when `memory.rx` named a source: each
+     *         message is then an owning rope drawn from it (#1661). */
+    [[nodiscard]] bool delivers_ropes() const override { return rx_backend_ != nullptr; }
 
     /** @brief Point-to-point link — no bus/peer-enumeration facet. */
     [[nodiscard]] bus_link_t* bus() override { return nullptr; }
@@ -495,7 +528,10 @@ class esp_ws_client_link_t : public transport_t {
     /** @brief Effective reusable TX scratch capacity, bytes — the ctor's `tx_bytes`. An
      *         outbound frame past it is dropped whole and charged to `stats().c.tx_drops`
      *         (#1160). */
-    [[nodiscard]] std::size_t tx_bytes() const noexcept { return tx_buf_.size(); }
+    [[nodiscard]] std::size_t tx_bytes() const noexcept { return tx_bytes_; }
+
+    /** @brief The injected owning-RX source (`memory.rx`), or null for borrowed delivery. */
+    [[nodiscard]] mem::mem_backend_t* rx_backend() const noexcept { return rx_backend_; }
 
     /**
      * @brief The interface-level shed-frame snapshot (#932) — the subset of @ref stats_t a
@@ -608,6 +644,17 @@ class esp_ws_client_link_t : public transport_t {
      *             shared, frame); empty when @p wire is already a private queued copy.
      */
     void write_locked(std::span<std::byte> wire, std::span<const std::span<const std::byte>> src);
+    /**
+     * @brief Copy the first @p len bytes of the read scratch into a receive block from
+     *        @ref rx_backend_ and deliver it owning; count and drop if the source refuses.
+     *
+     * Recv thread only, and reached only when `memory.rx` was named (#1661). The block is
+     * drawn through `view::alloc_rx`, so a message of at least `kShareThresholdBytes` carries
+     * the RFC-0028 §6.9 ingress-loan reserve.
+     *
+     * @param len The complete message's length in the scratch.
+     */
+    void deliver_owned(std::size_t len);
     /** @brief Copy the spans of @p iov, in order, to @p dst (sized by the caller). */
     static void gather_into(std::byte* dst,
                             std::span<const std::span<const std::byte>> iov) noexcept;
@@ -637,7 +684,15 @@ class esp_ws_client_link_t : public transport_t {
     esp_transport_handle_t ws_ = nullptr;   // WS transport over tcp_ (owned)
 
     std::vector<std::byte> rx_buf_;  // reusable RX fill (zero-copy read target)
-    std::vector<std::byte> tx_buf_;  // reusable TX scratch (masked in-place by the writer)
+    /** @brief The owning-RX source (`memory.rx`, #1661), or null for borrowed delivery.
+     *         Written once by the constructor, before the recv thread exists. */
+    mem::mem_backend_t* const rx_backend_;
+    /** @brief The reusable TX scratch the writer gathers into and the transport masks in
+     *         place, reserved once from `memory.io` (#1661). */
+    mem::block_array_t<std::byte> tx_buf_;
+    /** @brief The scratch's effective capacity: the ctor's `tx_bytes`, or 0 when the source
+     *         refused it, so the size and the storage can never disagree. */
+    std::size_t tx_bytes_ = 0;
     /** @brief Enqueue-then-write (RFC 0028 §4.7, #1619): frames other senders queued while
      *         a write was in flight, drained by the sender holding the writer role. */
     tr::net::tx_handoff_t tx_;

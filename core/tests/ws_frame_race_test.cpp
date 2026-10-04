@@ -47,6 +47,7 @@
 #include <cstdio>
 #include <cstring>
 #include <mutex>
+#include <new>
 #include <span>
 #include <string>
 #include <thread>
@@ -54,6 +55,7 @@
 #include <vector>
 
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_source.hpp"
 #include "libtracer/transport_ws.hpp"
 #include "test_support.hpp"
 
@@ -251,15 +253,40 @@ void check_round(race_sink_t& sink, std::uint64_t dropped, const char* arm) {
 }
 
 /**
+ * @brief The application's egress store for the client arm: a heap pass-through that counts
+ *        the blocks it currently has out (#1661).
+ *
+ * The client's masked-frame scratch is ONE block from it. Every queued record is a copy in a
+ * queue slot, and a slot keeps its block once it has grown, so a link whose slots draw from
+ * the injected store holds more than one block after a round that queued anything.
+ */
+class live_count_source_t final : public tr::mem::block_source_t {
+   public:
+    live_count_source_t() noexcept : tr::mem::block_source_t("race-egress") {}
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        void* const p = ::operator new(bytes, std::align_val_t{align}, std::nothrow);
+        if (p != nullptr) live.fetch_add(1, std::memory_order_relaxed);
+        return p;
+    }
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        live.fetch_sub(1, std::memory_order_relaxed);
+        ::operator delete(p, bytes, std::align_val_t{align});
+    }
+    std::atomic<int> live{0}; /**< @brief Blocks handed out and not yet released. */
+};
+
+/**
  * @brief Arm 1 — client → server through the enqueue-then-write queue.
  */
 void test_client_queue_race() {
     std::printf("client -> server: two publishers, one queued link, frames stay whole:\n");
+    live_count_source_t egress;  // outlives the client, which returns its blocks on the way out
     race_sink_t sink;  // before the transports: they join their recv threads before it dies
     tr::net::transport_ws_server server(0);
     check(server.ok(), "server listening");
     server.set_receiver(sink);
-    tr::net::transport_ws_client client("127.0.0.1", server.local_port());
+    tr::net::transport_ws_client client("127.0.0.1", server.local_port(),
+                                        {.memory = {.io = &egress}});
     check(client.ok(), "client connected");
     if (!server.ok() || !client.ok()) return;
 
@@ -277,6 +304,11 @@ void test_client_queue_race() {
     std::printf("  sends queued or refused behind a write in flight: %zu\n", nested);
     check(nested > 0, "the race was exercised: a send was queued behind another's write");
     check(client.link_up(), "the connection survived every round");
+    // A send nested in another's write was queued in a slot, or refused because every slot
+    // was full: either way a slot holds a block. Only the scratch would be here if the
+    // slots still drew from the process heap (#1661).
+    check(egress.live.load(std::memory_order_relaxed) > 1,
+          "the queue's slots drew from the injected egress store, beside the scratch");
 }
 
 /**

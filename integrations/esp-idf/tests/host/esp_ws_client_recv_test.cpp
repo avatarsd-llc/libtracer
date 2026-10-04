@@ -41,6 +41,11 @@
  *      delivering with no re-arm (pinning the triage refutation that a reconnect
  *      re-opens the window).
  *
+ *   5. #1661 — the link takes `link_memory_t`. The default stays borrowed; a named `rx`
+ *      source makes each message an OWNING rope drawn from it (with the RFC-0028 §6.9
+ *      ingress-loan reserve at the share threshold), a refusing source is a counted drop
+ *      the next message survives, and the TX scratch is reserved from the named `io`.
+ *
  * Each drop case also proves RECOVERY — a well-formed message sent right after parses
  * correctly — and that is what makes the assertions ordering-based rather than
  * sleep-based: a bogus tail would reach the receiver BEFORE the good message, so
@@ -59,12 +64,17 @@
 #include <cstdio>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <span>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "fake_esp_transport.hpp"
+#include "libtracer/config.hpp"
+#include "libtracer/mem_source.hpp"
+#include "libtracer/mem_source_backend.hpp"
+#include "libtracer/segment.hpp"
 #include "libtracer_esp/esp_ws_client_link.hpp"
 
 namespace {
@@ -417,6 +427,158 @@ void test_drop_stats_projects_through_the_base_interface() {
     check_drained();
 }
 
+/**
+ * @brief The application's memory for the #1661 cases: a heap pass-through that counts what
+ *        it served and can be told to refuse, as an exhausted bounded pool does.
+ */
+class app_source_t final : public tr::mem::block_source_t {
+   public:
+    app_source_t() noexcept : tr::mem::block_source_t("esp-ws-client-app") {}
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        if (refuse.load(std::memory_order_relaxed)) return nullptr;
+        served.fetch_add(1, std::memory_order_relaxed);
+        return ::operator new(bytes, std::align_val_t{align}, std::nothrow);
+    }
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        ::operator delete(p, bytes, std::align_val_t{align});
+    }
+    std::atomic<bool> refuse{false}; /**< @brief Answer every request with `nullptr`. */
+    std::atomic<int> served{0};      /**< @brief Blocks handed out since construction. */
+};
+
+/** @brief An OWNING sink: keeps every rope past the callback, which is the point of it. */
+class rope_sink_t {
+   public:
+    /** @brief The rope tier's callable. */
+    void operator()(tr::view::rope_t r) {
+        const std::lock_guard<std::mutex> lk(m_);
+        kept_.push_back(std::move(r));
+    }
+    /** @brief Ropes delivered so far. */
+    [[nodiscard]] std::size_t count() const {
+        const std::lock_guard<std::mutex> lk(m_);
+        return kept_.size();
+    }
+    /** @brief The bytes of kept rope @p i, read back now — after the link moved on. */
+    [[nodiscard]] std::vector<std::byte> bytes(std::size_t i) const {
+        const std::lock_guard<std::mutex> lk(m_);
+        std::vector<std::byte> out;
+        for (const tr::view::view_t& v : kept_[i].links()) {
+            const std::span<const std::byte> b = v.bytes();
+            out.insert(out.end(), b.begin(), b.end());
+        }
+        return out;
+    }
+    /** @brief Where kept rope @p i's single link starts in its block. */
+    [[nodiscard]] std::size_t offset(std::size_t i) const {
+        const std::lock_guard<std::mutex> lk(m_);
+        return kept_[i].links()[0].offset;
+    }
+
+   private:
+    mutable std::mutex m_;
+    std::vector<tr::view::rope_t> kept_;
+};
+
+/** @brief #1661 — the default named no memory: borrowed delivery, exactly as before. */
+void test_default_memory_is_borrowed() {
+    std::printf("#1661 the default link delivers borrowed:\n");
+    fake_ws::reset();
+    sink_t sink;
+    auto link = dialed_link(sink);
+    check(!link->delivers_ropes(), "delivers_ropes() is false without memory.rx");
+    check(link->rx_backend() == nullptr, "and no receive source is reported");
+    check(link->tx_bytes() == kRxBytes, "the TX scratch has its configured size");
+    link.reset();
+    check_drained();
+}
+
+/**
+ * @brief #1661 — a named `rx` source: owning ropes from it, the loan reserve at the share
+ *        threshold, and a refusal that is a counted drop the next message survives.
+ */
+void test_named_rx_source_delivers_owning_ropes() {
+    std::printf("#1661 memory.rx makes delivery owning, from the application's source:\n");
+    fake_ws::reset();
+    app_source_t src;
+    tr::mem::source_backend_t backend(src);
+    // Big enough to hold a message at the share threshold, so the loan arm is exercised on
+    // a build whose threshold is finite (the host default); a SIZE_MAX build never reserves.
+    constexpr std::size_t kLoanMsg = tr::graph::kShareThresholdBytes;
+    constexpr bool kCanLoan = kLoanMsg < 65536;
+    rope_sink_t ropes;
+    {
+        tr::net::esp_ws_client_link_t link("127.0.0.1", 8080,
+                                           tr::net::esp_ws_client_config_t{
+                                               .rx_bytes = kCanLoan ? kLoanMsg + 64 : 2048,
+                                               .memory = {.rx = &backend},
+                                           });
+        check(link.delivers_ropes(), "delivers_ropes() is true with memory.rx named");
+        check(link.rx_backend() == &backend, "and rx_backend() names that source");
+        check(wait_until([] { return fake_ws::connect_count() >= 1; }, 2s), "the link dialed");
+        link.set_rope_receiver(ropes);
+
+        const fake_ws::frame_t small = good_message();
+        fake_ws::push_frames({small});
+        check(wait_until([&] { return ropes.count() >= 1; }, 5s), "a small message delivered");
+        check(src.served.load() >= 1, "its block came from the APPLICATION's source");
+        check(ropes.offset(0) == 0, "below the share threshold the block carries no reserve");
+
+        if (kCanLoan) {
+            const fake_ws::frame_t big =
+                fake_ws::make_frame(WS_TRANSPORT_OPCODES_BINARY, true, kLoanMsg, 0x33);
+            fake_ws::push_frames({big});
+            check(wait_until([&] { return ropes.count() >= 2; }, 5s), "a large message delivered");
+            check(ropes.offset(1) == tr::view::kRxLoanBytes,
+                  "at the share threshold the block carries the ingress-loan reserve");
+            check(ropes.bytes(1) == big.payload, "with its bytes intact");
+        }
+        const std::size_t before = ropes.count();
+
+        src.refuse.store(true);
+        fake_ws::push_frames({good_message()});
+        check(wait_until([&] { return link.dropped_rx() == 1; }, 5s),
+              "a refusing source is a COUNTED drop, never a heap fallback");
+        check(ropes.count() == before, "and nothing was delivered for it");
+
+        src.refuse.store(false);
+        fake_ws::push_frames({small});
+        check(wait_until([&] { return ropes.count() == before + 1; }, 5s),
+              "the next message is served once the source has room again");
+        check(ropes.bytes(0) == small.payload,
+              "and the first rope's bytes are still right — the sink OWNS them");
+    }
+    check_drained();
+}
+
+/** @brief #1661 — the TX scratch is reserved from `memory.io`, and a refusal sizes it 0. */
+void test_named_io_store_backs_the_tx_scratch() {
+    std::printf("#1661 memory.io backs the TX scratch:\n");
+    fake_ws::reset();
+    app_source_t roomy;
+    {
+        tr::net::esp_ws_client_link_t link(
+            "127.0.0.1", 8080,
+            tr::net::esp_ws_client_config_t{.tx_bytes = 512,
+                                            .memory = {.rx = nullptr, .io = &roomy}});
+        check(roomy.served.load() >= 1, "the scratch was drawn from the injected store");
+        check(link.tx_bytes() == 512, "at its configured size");
+    }
+    check_drained();
+    fake_ws::reset();
+    app_source_t refusing;
+    refusing.refuse.store(true);
+    {
+        tr::net::esp_ws_client_link_t link(
+            "127.0.0.1", 8080,
+            tr::net::esp_ws_client_config_t{.tx_bytes = 512,
+                                            .memory = {.rx = nullptr, .io = &refusing}});
+        check(link.tx_bytes() == 0,
+              "a refused scratch reports 0, so every send takes the logged oversize drop");
+    }
+    check_drained();
+}
+
 int main() {
     std::printf("esp_ws_client_link receive-path host suite (#900, #901, #1102):\n");
     test_recv_stack_reaches_the_thread();
@@ -428,6 +590,9 @@ int main() {
     test_fragmented_fitting_message_reassembles();
     test_defer_recv_holds_the_dial_until_armed();
     test_drop_stats_projects_through_the_base_interface();
+    test_default_memory_is_borrowed();
+    test_named_rx_source_delivers_owning_ropes();
+    test_named_io_store_backs_the_tx_scratch();
     // Defensive: `main` must never return under a detached orphan still inside the fake,
     // whose static state is destroyed on the way out (#1456).
     check_drained();

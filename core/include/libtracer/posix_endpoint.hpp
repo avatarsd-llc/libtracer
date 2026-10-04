@@ -439,8 +439,20 @@ class posix_endpoint_t {
  */
 class stream_endpoint_t : protected posix_endpoint_t {
    protected:
-    /** @brief Constructs with no peer connected (@ref conn_fd_ = -1). */
+    /** @brief Constructs with no peer connected (@ref conn_fd_ = -1); the queue's slots
+     *         draw from the process heap. */
     stream_endpoint_t() = default;
+
+    /**
+     * @brief Constructs with no peer connected, the queue's slots drawing from @p tx_src.
+     *
+     * For a link whose queued records are its own copies rather than retained references
+     * (the WebSocket client, whose frames are masked in place, #1661): the slots are then
+     * part of the link's egress store, which the application names.
+     *
+     * @param tx_src Where the enqueue-then-write queue's slot storage comes from.
+     */
+    explicit stream_endpoint_t(mem::block_source_t& tx_src) : tx_{kTxQueueDepth, tx_src} {}
 
     /**
      * @brief Closes a leftover peer fd (one the recv thread never tore down).
