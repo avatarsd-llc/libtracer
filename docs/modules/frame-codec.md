@@ -107,8 +107,9 @@ them:
 
 | decoder | inline slots | spill source | the depth bound is |
 | --- | --- | --- | --- |
-| `decode` → owning `tlv_t` | 8 (`core/src/frame.cpp:span_cursor>, 8> slots`) | the nothrow heap source (`frame.cpp:stack(slots, &spill)`) | the heap — an owning-tree decode allocates there regardless |
+| `decode` → owning `tlv_t` | 8 (`core/src/frame.cpp:span_cursor>, 8> slots`) | the caller's spill source, the nothrow heap by default (`frame.cpp:stack(slots, &spill)`) | the heap — an owning-tree decode allocates there regardless |
 | `decode_into` → `tlv_arena_t` | 8 (`core/src/tlv_arena.cpp:span_cursor>, 8> slots`) | the caller's `mem::block_source_t` (`tlv_arena.cpp:stack(slots, &src)`) | whatever resource the caller injected |
+| `tlv_node_t::over` → in-place node | 8 (the same walk as `decode`) | the caller's `mem::block_source_t`, the heap by default | the spill source only — nothing else is drawn |
 
 The 8 is the typical FWD nesting (three to four levels) with headroom, not a
 ceiling: the arena test decodes a frame nested 100 deep (`core/tests/tlv_arena_test.cpp:encode(nested(100))`).
@@ -149,6 +150,19 @@ void emit_header(std::vector<std::byte>&, type_t, opt_t, std::size_t body_len);
 void emit_tlv   (std::vector<std::byte>&, type_t, opt_t, std::span<const std::byte> body);
 void emit_name  (std::vector<std::byte>&, std::span<const std::byte>);
 void emit_name  (std::vector<std::byte>&, std::string_view);
+
+// frame.hpp — the in-place walker (#1648): validated like decode, nothing built
+class tlv_node_t {                                     // borrowed span + header facts
+    static std::expected<tlv_node_t, err_t> over(std::span<const std::byte>,
+                                                 mem::block_source_t& = mem::heap_source());
+    type_t type() const;  opt_t opt() const;
+    std::span<const std::byte> bytes() const;          // header + body + trailer
+    std::span<const std::byte> wire() const;           // trailer excluded
+    std::span<const std::byte> body() const;           // payload or children region
+    std::span<const std::byte> payload() const;        // empty when structured
+    tlv_children_t children() const;                   // forward range of tlv_node_t
+    std::optional<trailer_t> trailer() const;
+};
 
 // tlv_arena.hpp — the terminus decoder
 std::expected<tlv_arena_t, err_t> decode_into(std::span<const std::byte>,
@@ -255,6 +269,23 @@ refusals are as load-bearing as the capabilities:
   expectation** — and skips not one sample of the batch behind it.
 - **It holds nothing.** The only state is a `playout_cursor_t` — two scalars the *caller*
   declares and owns. The helper allocates nothing at all.
+
+## The in-place walker
+
+A reader that only walks a frame's children needs no tree. **`wire::tlv_node_t::over(span)`**
+validates the whole frame with the same `grammar::walk` and inline slots as `decode`, so it
+accepts and refuses exactly the frames `decode` does, with the same `err_t`. Its sink keeps
+nothing, so a frame nested no deeper than the inline slots validates with zero allocations.
+The result is a node: a borrowed span plus the header facts. `children()` is a forward range
+that reads one header per step and yields each child as another node; a reader descends by
+walking a child's own `children()`. Because every node comes from a validated frame, the
+walk has no error channel and never fails.
+
+`decode` stays for callers that keep a tree or hand one to a `tlv_t` API (`encode`,
+`config_reader_t`, `parse_acl`). Router ingress uses the walker: the inbound observer receives
+a `tlv_node_t`, and a refused bus-NAME hop reads its routes in place. The conformance runner
+checks every vector through both and requires the same verdict, the same error and the same
+tree (`core/tests/conformance_runner.cpp:same_tree`).
 
 ## The terminus arena decoder
 
@@ -395,6 +426,16 @@ lives in [fwd-router.md](fwd-router.md) §the bound hop.
 
 ```{doxygenfunction} tr::wire::emit_name(std::vector<std::byte>&, std::string_view)
 :project: libtracer
+```
+
+```{doxygenclass} tr::wire::tlv_node_t
+:project: libtracer
+:members:
+```
+
+```{doxygenclass} tr::wire::tlv_children_t
+:project: libtracer
+:members:
 ```
 
 ```{doxygenstruct} tr::wire::arena_tlv_t

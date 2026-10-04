@@ -16,11 +16,13 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <iterator>
 #include <optional>
 #include <span>
 #include <vector>
 
 #include "libtracer/error.hpp"
+#include "libtracer/grammar.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/tlv.hpp"
 #include "libtracer/view.hpp"
@@ -81,6 +83,174 @@ struct tlv_t {
 
 /** @brief Structural + byte-content equality (spans compared by content, recursively). */
 [[nodiscard]] bool equal(const tlv_t& a, const tlv_t& b) noexcept;
+
+class tlv_children_t;
+
+/**
+ * @brief One TLV of a validated frame, read in place: the non-owning counterpart of @ref tlv_t
+ *        (#1648).
+ *
+ * A node is two words of borrowed bytes plus the header facts, never a tree. It is minted by
+ * @ref over (which validates the WHOLE frame once, exactly as `decode` does) or by walking a
+ * validated node's @ref children, so every node a caller can hold has already passed the
+ * grammar, CRC trailers included. That is what lets the walk itself be free: stepping to the
+ * next sibling re-reads one header and never fails.
+ *
+ * A node copies by value and allocates nothing. It borrows the bytes handed to @ref over, which
+ * must outlive it and every node walked from it.
+ */
+class tlv_node_t {
+   public:
+    /**
+     * @brief Validate @p input as exactly one TLV and return its root node.
+     *
+     * The acceptance is `decode`'s, by construction: the same @ref grammar::walk with the same
+     * inline walk slots, so the same frames are refused with the same `err_t`
+     * (`FRAME_TRUNCATED` / `FRAME_INVALID` / `FRAME_CRC_FAIL` / `TLV_NESTING_TOO_DEEP`). What
+     * differs is the sink: nothing is built, so a frame nested no deeper than the inline slots
+     * (the typical FWD) validates with zero allocations, and a deeper one draws only its walk
+     * stack from @p spill. `over(input, mem::null_source())` refuses the deeper frame instead.
+     *
+     * @param input The bytes to validate — exactly one TLV; trailing bytes ⇒ `FRAME_INVALID`.
+     * @param spill The block source the walk stack spills into past its inline slots.
+     * @return The root node (borrowing @p input), or the grammar's `err_t`.
+     */
+    [[nodiscard]] static std::expected<tlv_node_t, err_t> over(
+        std::span<const std::byte> input, mem::block_source_t& spill = mem::heap_source());
+
+    /** @brief The L1↔L2 cast in non-owning form: @ref over on @p v's bytes. */
+    [[nodiscard]] static std::expected<tlv_node_t, err_t> over(
+        const view::view_t& v, mem::block_source_t& spill = mem::heap_source()) {
+        return over(v.bytes(), spill);
+    }
+
+    /** @brief The TLV type code. */
+    [[nodiscard]] type_t type() const noexcept { return type_; }
+    /** @brief The decoded `opt` bits, trailer bits as on the wire. */
+    [[nodiscard]] opt_t opt() const noexcept { return opt_; }
+    /** @brief The whole TLV: header, body and trailer. */
+    [[nodiscard]] std::span<const std::byte> bytes() const noexcept { return bytes_; }
+    /**
+     * @brief Header plus body, trailer excluded: the ADR-0041 §4 whole-TLV-copy span, the same
+     *        shape as @ref arena_tlv_t::wire (a copier clears the trailer bits of the opt byte).
+     */
+    [[nodiscard]] std::span<const std::byte> wire() const noexcept {
+        return bytes_.first(header_ + length_);
+    }
+    /** @brief The body: payload bytes when opaque, the packed children region when structured. */
+    [[nodiscard]] std::span<const std::byte> body() const noexcept {
+        return bytes_.subspan(header_, length_);
+    }
+    /** @brief The opaque payload, as in @ref tlv_t::payload — the body, or empty when structured.
+     */
+    [[nodiscard]] std::span<const std::byte> payload() const noexcept {
+        return opt_.pl ? std::span<const std::byte>{} : body();
+    }
+    /** @brief The direct children, in wire order; an empty range for an opaque node. */
+    [[nodiscard]] tlv_children_t children() const noexcept;
+    /** @brief The trailer's timestamp and CRC values, read from the bytes; `nullopt` if none. */
+    [[nodiscard]] std::optional<trailer_t> trailer() const noexcept;
+
+   private:
+    friend class tlv_children_t;
+    /** @brief The empty node an exhausted walk iterator holds; never handed to a caller. */
+    tlv_node_t() = default;
+    /** @brief A node over @p bytes, whose header @p h the grammar has already accepted. */
+    tlv_node_t(const grammar::header_t& h, std::span<const std::byte> bytes) noexcept
+        : bytes_(bytes.first(h.total)),
+          type_(h.type),
+          opt_(h.opt),
+          header_(static_cast<std::uint8_t>(h.header)),
+          length_(h.length) {}
+
+    std::span<const std::byte> bytes_; /**< @brief The whole TLV (header + body + trailer). */
+    type_t type_{};                    /**< @brief The TLV type code. */
+    opt_t opt_{};                      /**< @brief The decoded `opt` bits. */
+    std::uint8_t header_ = 0;          /**< @brief Header length: 4, or 6 with `LL`. */
+    std::size_t length_ = 0;           /**< @brief Body length. */
+};
+
+/**
+ * @brief The direct children of a validated @ref tlv_node_t, walked in place (#1648).
+ *
+ * A forward range over the parent's children region: each step reads ONE header (CRC deferred,
+ * since @ref tlv_node_t::over already verified every trailer) and yields that child as a
+ * @ref tlv_node_t. No allocation, no error channel — the region was validated before any node
+ * over it could exist. Descend by walking a child's own @ref tlv_node_t::children.
+ */
+class tlv_children_t {
+   public:
+    /** @brief The forward iterator: the unread rest of the region, its front child cached. */
+    class iterator {
+       public:
+        using value_type = tlv_node_t;          /**< @brief What a step yields. */
+        using difference_type = std::ptrdiff_t; /**< @brief Iterator distance type. */
+        /** @brief A C++20 forward iterator (multi-pass; it yields its node by value). */
+        using iterator_concept = std::forward_iterator_tag;
+        /** @brief Legacy category: by-value deref makes it a Cpp17 input iterator only. */
+        using iterator_category = std::input_iterator_tag;
+
+        iterator() = default;
+        /** @brief The front child of the unread region. */
+        [[nodiscard]] tlv_node_t operator*() const noexcept { return front_; }
+        /** @brief Step past the front child. */
+        iterator& operator++() noexcept {
+            rest_ = rest_.subspan(front_.bytes_.size());
+            load();
+            return *this;
+        }
+        /** @brief Post-increment. */
+        iterator operator++(int) noexcept {
+            iterator was = *this;
+            ++*this;
+            return was;
+        }
+        /** @brief True once the region is consumed. */
+        [[nodiscard]] bool operator==(std::default_sentinel_t) const noexcept {
+            return rest_.empty();
+        }
+        /** @brief Positional equality: two iterators over the same unread rest. */
+        [[nodiscard]] bool operator==(const iterator& o) const noexcept {
+            return rest_.data() == o.rest_.data() && rest_.size() == o.rest_.size();
+        }
+
+       private:
+        friend class tlv_children_t;
+        explicit iterator(std::span<const std::byte> region) noexcept : rest_(region) { load(); }
+        /** @brief Parse the front header of `rest_` (already validated, so it cannot fail). */
+        void load() noexcept {
+            if (rest_.empty()) return;
+            const auto h =
+                grammar::parse_header(grammar::span_cursor{rest_}, grammar::crc_check_t::DEFER);
+            // Unreachable for a region `tlv_node_t::over` accepted; ending the walk keeps a
+            // broken invariant from reading past the region.
+            if (!h) {
+                rest_ = {};
+                return;
+            }
+            front_ = tlv_node_t(*h, rest_);
+        }
+
+        std::span<const std::byte> rest_{}; /**< @brief Unread region, front child first. */
+        tlv_node_t front_{};                /**< @brief The cached front child. */
+    };
+
+    /** @brief The first child. */
+    [[nodiscard]] iterator begin() const noexcept { return iterator(region_); }
+    /** @brief The end sentinel. */
+    [[nodiscard]] static std::default_sentinel_t end() noexcept { return {}; }
+    /** @brief True for an opaque parent or an empty children region. */
+    [[nodiscard]] bool empty() const noexcept { return region_.empty(); }
+
+   private:
+    friend class tlv_node_t;
+    explicit tlv_children_t(std::span<const std::byte> region) noexcept : region_(region) {}
+    std::span<const std::byte> region_; /**< @brief The parent's children region. */
+};
+
+inline tlv_children_t tlv_node_t::children() const noexcept {
+    return tlv_children_t(opt_.pl ? body() : std::span<const std::byte>{});
+}
 
 /**
  * @brief The INJECTED wire-time clock seam (#1109): where a stamping producer's trailer-TS

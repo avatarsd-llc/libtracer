@@ -289,6 +289,21 @@ std::optional<std::string> legality_failure(std::span<const std::byte> bytes, bo
     return std::nullopt;
 }
 
+/**
+ * @brief True when the in-place node @p n reads exactly as the owning tree @p t: type, opt,
+ *        payload bytes, trailer values and every child, recursively (#1648).
+ */
+bool same_tree(const tr::wire::tlv_node_t& n, const tlv_t& t) {
+    if (n.type() != t.type || n.opt() != t.opt || n.trailer() != t.trailer) return false;
+    if (!std::ranges::equal(n.payload(), t.payload)) return false;
+    std::size_t i = 0;
+    for (const tr::wire::tlv_node_t c : n.children()) {
+        if (i >= t.children.size() || !same_tree(c, t.children[i])) return false;
+        ++i;
+    }
+    return i == t.children.size();
+}
+
 std::vector<std::byte> read_file(const fs::path& p) {
     std::ifstream f(p, std::ios::binary);
     const std::vector<char> raw((std::istreambuf_iterator<char>(f)),
@@ -471,6 +486,24 @@ int main(int argc, char** argv) {
         if (e.path().filename() != "reject.bin") continue;
         const std::string label = e.path().parent_path().filename().string();
         check(check_reject(e.path(), read_file(e.path())), label);
+    }
+
+    // The in-place walker must accept, refuse and read the corpus exactly as `decode` does
+    // (#1648): same verdict, same error, same tree.
+    std::printf("Walker equivalence (tlv_node_t::over + children() == decode, every vector):\n");
+    for (const auto& e : fs::recursive_directory_iterator(vroot)) {
+        const auto fname = e.path().filename();
+        if (fname != "input.bin" && fname != "reject.bin") continue;
+        const std::string label = e.path().parent_path().filename().string();
+        const std::vector<std::byte> bytes = read_file(e.path());
+        const auto dec = tr::wire::decode(bytes);
+        const auto node = tr::wire::tlv_node_t::over(bytes);
+        if (!dec) {
+            check(!node && node.error() == dec.error(), label + " (refused alike)");
+            continue;
+        }
+        check(node && same_tree(*node, *dec) && std::ranges::equal(node->bytes(), bytes),
+              label + " (read alike)");
     }
 
     std::printf("Golden builders (encode == input.bin && decode == built):\n");
