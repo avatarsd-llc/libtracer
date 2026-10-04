@@ -21,6 +21,7 @@
 
 #include <cstddef>
 #include <cstdio>
+#include <iterator>
 
 #include "libtracer/tracer.hpp"
 
@@ -35,8 +36,10 @@ std::size_t members(tr::graph::graph_t& g, const char* where) {
     if (!r) return static_cast<std::size_t>(-1);
     // A composed reply is a rope, not one contiguous view: materialize before decoding
     // (single-link ⇒ a refcount bump, multi-link ⇒ the one flatten copy, ADR-0053 §6).
-    const auto tlv = tr::wire::decode((*r)->materialize());
-    return tlv ? tlv->children.size() : static_cast<std::size_t>(-1);
+    const auto flat = (*r)->materialize();
+    const auto tlv = tr::wire::tlv_node_t::over(flat);
+    return tlv ? static_cast<std::size_t>(std::ranges::distance(tlv->children()))
+               : static_cast<std::size_t>(-1);
 }
 
 /** @brief Report expectation @p what and record a failure on @p ok. */

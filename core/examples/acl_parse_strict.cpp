@@ -82,7 +82,7 @@ std::vector<std::byte> acl_of(std::span<const std::byte> entry) {
 
 /** @brief Decode @p bytes and parse them as an ACL under the target's bound policy. */
 tr::graph::result_t<std::vector<ace_t>> parse(std::span<const std::byte> bytes) {
-    const auto decoded = tr::wire::decode(bytes);
+    const auto decoded = tr::wire::tlv_node_t::over(bytes);
     if (!decoded) return std::unexpected(status_t::TYPE_MISMATCH);
     return tr::graph::parse_acl(*decoded);
 }

@@ -220,13 +220,13 @@ The publisher and the transport never wait for subscribers; back-pressure surfac
 
 ## Casting a view to a TLV
 
-Given a view whose bytes hold an L2 TLV, the cast decodes and **validates** it. Because it produces a `tlv_t`, the cast itself lives at L2 (`tr::wire`, not `tr::view`) — L1 never depends upward:
+Given a view whose bytes hold an L2 TLV, the cast **validates** it in place. Because it produces a `tlv_node_t`, the cast itself lives at L2 (`tr::wire`, not `tr::view`) — L1 never depends upward:
 
 ```cpp
-std::expected<tlv_t, tr::wire::err_t> tlv = tr::wire::decode(v);
+std::expected<tr::wire::tlv_node_t, tr::wire::err_t> tlv = tr::wire::tlv_node_t::over(v);
 ```
 
-The cast is a `decode` overload over the view — `decode(v)` is exactly `decode(v.bytes())` (`decode`, [core/include/libtracer/frame.hpp](https://github.com/avatarsd-llc/libtracer/blob/main/core/include/libtracer/frame.hpp)): it **validates** the framing (minimum size, reserved-bit and type-`0x00` rejects, the `LL` length width, trailer sizing, CRC verification, and the receiver's decode-resource bound on nesting depth) and, on success, materializes an owning `tlv_t` tree. The decoded payload spans (and every child's) **borrow** `v`'s bytes, so the view — and thus its refcounted segment (§refcount semantics) — must outlive the returned `tlv_t`. On malformed input it yields the `err_t` the grammar rejected with (`FRAME_TRUNCATED` / `FRAME_INVALID` / `FRAME_CRC_FAIL` / `TLV_NESTING_TOO_DEEP`).
+The cast is a `tlv_node_t::over` overload over the view — `over(v)` is exactly `over(v.bytes())` (`tlv_node_t::over`, [core/include/libtracer/frame.hpp](https://github.com/avatarsd-llc/libtracer/blob/main/core/include/libtracer/frame.hpp)): it **validates** the framing (minimum size, reserved-bit and type-`0x00` rejects, the `LL` length width, trailer sizing, CRC verification, and the receiver's decode-resource bound on nesting depth) and, on success, returns a node: the input span plus the root's header facts, with nothing built. The node, and every child its `children()` walk yields, **borrow** `v`'s bytes, so the view — and thus its refcounted segment (§refcount semantics) — must outlive the returned node. On malformed input it yields the `err_t` the grammar rejected with (`FRAME_TRUNCATED` / `FRAME_INVALID` / `FRAME_CRC_FAIL` / `TLV_NESTING_TOO_DEEP`).
 
 Nesting depth has no constant: `TLV_NESTING_TOO_DEEP` means "exceeds *this* receiver's decode resources", and a receiver's open-node budget is the bound (RFC-0006). An implementation that hardcodes a depth number will reject frames a conforming peer may legitimately send.
 
@@ -243,7 +243,7 @@ Two rope entry points exist, matching the two validation timings:
 | Ingress check | Root header, the total-size anchor, and — when `opt.CR` is set — the whole-frame trailer CRC, in one linear link-by-link scan. No descent. | Everything ingress is allowed to verify; a malformed child surfaces where that child is consumed. |
 | Strict whole-tree walk | The full grammar over every level of the rope, iteratively, without flattening. Rejects with the same `err_t` a flattened decode would. | Opt-in: a verify-all-then-apply consumer, or a differential test. |
 
-What rope-aware decode does *not* do is materialize a rope frame directly into an eager owning `tlv_t` or into a terminus arena node. Both of those sink node types hold a borrowed contiguous span, which cannot name a payload that straddles a link boundary ([ADR-0041 — terminus arena decode span contract](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0041-terminus-arena-decode-span-contract.md) §2). Producing those sinks from a rope therefore costs one explicit copy: either flatten the rope and cast the resulting contiguous view, or materialize from the lazy rope-backed node. The lazy node — one TLV holding its parsed header facts plus a refcounted sub-rope of the frame, materializing children one header at a time and never decoding what is not accessed — is the decode-side representation of a rope-delivered frame, and it may outlive the transport's read loop because each sub-rope keeps exactly its own links' segments alive ([ADR-0053 — lazy rope-backed decode view and partial-path routing](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0053-lazy-rope-backed-decode-view-partial-path-routing.md)).
+What rope-aware decode does *not* do is materialize a rope frame directly into an in-place `tlv_node_t` or into a terminus arena node. Both of those sink node types hold a borrowed contiguous span, which cannot name a payload that straddles a link boundary ([ADR-0041 — terminus arena decode span contract](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0041-terminus-arena-decode-span-contract.md) §2). Producing those sinks from a rope therefore costs one explicit copy: either flatten the rope and cast the resulting contiguous view, or materialize from the lazy rope-backed node. The lazy node — one TLV holding its parsed header facts plus a refcounted sub-rope of the frame, materializing children one header at a time and never decoding what is not accessed — is the decode-side representation of a rope-delivered frame, and it may outlive the transport's read loop because each sub-rope keeps exactly its own links' segments alive ([ADR-0053 — lazy rope-backed decode view and partial-path routing](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0053-lazy-rope-backed-decode-view-partial-path-routing.md)).
 
 ---
 
@@ -279,8 +279,8 @@ while (link_idx < rope.link_count()) {
     const view_t& link  = rope.links()[link_idx];
     auto          bytes = link.bytes();
     while (in_link < bytes.size()) {
-        auto         maybe = decode(link.subview(in_link, bytes.size() - in_link));
-        const tlv_t& t     = *maybe;   // std::expected<tlv_t, err_t>; borrows the link's bytes
+        auto             maybe = tlv_node_t::over(link.subview(in_link, bytes.size() - in_link));
+        const tlv_node_t t     = *maybe;  // std::expected<tlv_node_t, err_t>; borrows the link's bytes
         std::size_t  total = tlv_total_size(t);
         if (in_link + total <= bytes.size()) {
             /* TLV fits in this link; process and advance within link */

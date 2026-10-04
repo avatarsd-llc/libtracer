@@ -7,13 +7,13 @@
  * @file
  * @brief L2/L3 wire codec round-trip — build a TLV, encode to bytes, decode back.
  *
- * The wire codec is the one place bytes become a `tlv_t` tree and back
- * (`docs/modules/frame-codec.md`). This example builds a structured PATH TLV
- * (`/sensor/temp` — two NAME children) with a CRC trailer, `encode`s it to wire
- * bytes, `decode`s those bytes into a fresh tree, and checks that re-encoding
+ * The wire codec is where a `tlv_t` model becomes bytes and bytes become a validated
+ * `tlv_node_t` read in place (`docs/modules/frame-codec.md`). This example builds a packed
+ * PATH TLV (`/sensor/temp`, RFC-0018) with a CRC trailer, `encode`s it to wire bytes, reads
+ * those bytes back with `tlv_node_t::over`, and checks that re-encoding what it read
  * reproduces the exact wire bytes.
- * It also shows the zero-copy nature of decode: the decoded payloads are
- * `std::span`s that BORROW the encoded buffer, so no payload bytes are copied.
+ * It also shows the zero-copy nature of the read: the node's payload is a `std::span`
+ * that BORROWS the encoded buffer, so no payload bytes are copied.
  *
  * Runs under ctest as `example_wire_roundtrip`: it checks structure, byte-identity,
  * and the verified CRC trailer, returning non-zero on any mismatch.
@@ -77,25 +77,27 @@ int main() {
     const std::vector<std::byte> wire = tr::wire::encode(path);
     std::printf("encoded /sensor/temp PATH TLV: %zu bytes\n", wire.size());
 
-    const std::expected<tlv_t, tr::wire::err_t> decoded =
-        tr::wire::decode(std::span<const std::byte>(wire));
+    const std::expected<tr::wire::tlv_node_t, tr::wire::err_t> decoded =
+        tr::wire::tlv_node_t::over(std::span<const std::byte>(wire));
 
     bool ok = true;
     check(ok, decoded.has_value(), "decode succeeds (CRC trailer verifies)");
     if (decoded) {
-        std::printf("decoded: type=0x%02X, %zu children, trailer.crc=%s\n",
-                    static_cast<unsigned>(decoded->type), decoded->children.size(),
-                    (decoded->trailer && decoded->trailer->crc) ? "present" : "absent");
-        check(ok, decoded->type == type_t::PATH, "decoded root is a PATH");
-        check(ok, !decoded->opt.pl, "a packed PATH is NOT structured (opt.PL = 0, RFC-0018)");
-        check(ok, decoded->children.empty(), "a packed PATH has no child TLVs");
-        check(ok, decoded->payload.size() == 1 + seg0.size() + 1 + seg1.size(),
+        const auto trailer = decoded->trailer();
+        std::printf("decoded: type=0x%02X, %s children, trailer.crc=%s\n",
+                    static_cast<unsigned>(decoded->type()),
+                    decoded->children().empty() ? "no" : "has",
+                    (trailer && trailer->crc) ? "present" : "absent");
+        check(ok, decoded->type() == type_t::PATH, "decoded root is a PATH");
+        check(ok, !decoded->opt().pl, "a packed PATH is NOT structured (opt.PL = 0, RFC-0018)");
+        check(ok, decoded->children().empty(), "a packed PATH has no child TLVs");
+        check(ok, decoded->payload().size() == 1 + seg0.size() + 1 + seg1.size(),
               "the body is one length byte per segment plus the segment text");
-        check(ok, decoded->trailer && decoded->trailer->crc.has_value(),
+        check(ok, trailer && trailer->crc.has_value(),
               "decoded PATH carries the verified CRC trailer");
         // The decoded payload borrows the encoded buffer — zero copy.
         {
-            const auto body = decoded->payload;
+            const auto body = decoded->payload();
             check(ok, body.data() >= wire.data() && body.data() < wire.data() + wire.size(),
                   "the packed body is a span INTO the encoded buffer (zero copy)");
             const auto want = bytes_of(seg0);
@@ -105,9 +107,13 @@ int main() {
                 std::equal(want.begin(), want.end(), body.begin() + 1);
             check(ok, same, "the first packed record round-trips to \"sensor\"");
         }
-        // The strongest round-trip invariant: re-encoding the decoded tree
-        // reproduces the exact wire bytes (byte-identical, CRC and all).
-        check(ok, tr::wire::encode(*decoded) == wire, "encode(decode(bytes)) == bytes");
+        // The strongest round-trip invariant: re-encoding what was read reproduces the
+        // exact wire bytes (byte-identical, CRC recomputed and all).
+        tlv_t again;
+        again.type = decoded->type();
+        again.opt = decoded->opt();
+        again.payload = decoded->payload();
+        check(ok, tr::wire::encode(again) == wire, "encode(decode(bytes)) == bytes");
     }
 
     std::printf("%s\n", ok ? "round-trip OK" : "round-trip FAILED");

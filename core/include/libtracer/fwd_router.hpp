@@ -678,7 +678,8 @@ class fwd_router_t {
      * @brief Install the bound form on @p path from the mint answer on a reply (RFC-0024 §7.4).
      *
      * The origin's side of the exchange, and the reason `path_t::bind` had no production
-     * caller until now. @p reply is a decoded `FWD{REPLY}`; its LAST child is the accumulated
+     * caller until now. @p reply is a validated `FWD{REPLY}` node (read in place, #1829); its
+     * LAST child is the accumulated
      * `PATH_REF` — the terminus's element, with one prepended by every hop that forwarded the
      * reply. This prepends THIS node's own element for @p link_name (§4.1: element 0 is the
      * origin's reference to its first-hop connection vertex) and records the whole stack.
@@ -691,7 +692,8 @@ class fwd_router_t {
      *
      * @return true iff @p path came out bound.
      */
-    bool adopt_binding(graph::path_t& path, std::string_view link_name, const wire::tlv_t& reply);
+    bool adopt_binding(graph::path_t& path, std::string_view link_name,
+                       const wire::tlv_node_t& reply);
 
     /** @brief What the origin sends a bound operation as: the link, and the `dst` on the wire. */
     struct bound_dispatch_t {
@@ -734,11 +736,11 @@ class fwd_router_t {
      * @brief Cache the minted `src` of @p reply as @p path's labelled spelling (§6.1 point 4).
      *
      * The analogue of @ref adopt_binding, and the seam erratum 2 named and left unruled. @p reply
-     * is a decoded `FWD{REPLY}`; its `src` is the address as the route spelled it on the way back
-     * — a label element for every hop that minted, the literal mount run for every hop that did
-     * not (§5.2, §6.3). Those bytes are cached **verbatim**, with the origin's own first-hop local
-     * part (the mount run of @p link_name, spelled as literal segments) prepended, so the cached
-     * body is this node's spelling of the same address the canonical bytes spell.
+     * is a validated `FWD{REPLY}` node; its `src` is the address as the route spelled it on the way
+     * back — a label element for every hop that minted, the literal mount run for every hop that
+     * did not (§5.2, §6.3). Those bytes are cached **verbatim**, with the origin's own first-hop
+     * local part (the mount run of @p link_name, spelled as literal segments) prepended, so the
+     * cached body is this node's spelling of the same address the canonical bytes spell.
      *
      * There is **no normalization and no completion pass**: a mixed spelling is the expected
      * steady state, not a degraded one, and improving it is not this seam's job — carrying it is.
@@ -750,11 +752,11 @@ class fwd_router_t {
      *
      * @param path      The path the operation addressed, still holding its canonical bytes.
      * @param link_name This node's registry NAME for the child the request left over.
-     * @param reply     The decoded `FWD{REPLY}` that came back.
+     * @param reply     The validated `FWD{REPLY}` node that came back.
      * @return true iff @p path came out carrying a labelled spelling.
      */
     bool adopt_path_label(graph::path_t& path, std::string_view link_name,
-                          const wire::tlv_t& reply);
+                          const wire::tlv_node_t& reply);
 
     /** @brief What the origin sends a labelled operation as: the link, and the `dst` on the wire.
      */
@@ -803,7 +805,7 @@ class fwd_router_t {
      * @return true iff @p reply was a `tr::path::not_found` refusal and a cached spelling was
      *         dropped — i.e. the caller should re-send canonically.
      */
-    static bool fall_back_on_label_refusal(graph::path_t& path, const wire::tlv_t& reply);
+    static bool fall_back_on_label_refusal(graph::path_t& path, const wire::tlv_node_t& reply);
 
     // -- observability / terminus sinks (fn-ptr + context, ADR-0047/ADR-0068 §3) -------
     // Not std::function: these fire on the per-frame RX path, where the erasure
@@ -844,8 +846,8 @@ class fwd_router_t {
      * NO flatten — a rope-delivered reply reaches the sink zero-copy. A sink that wants
      * contiguous bytes holds `const view_t m = reply.materialize()` and reads `m.bytes()`
      * — a single-link reply (the common case) is returned zero-copy, no alloc, no copy;
-     * only a multi-link reply pays one flatten, on demand. A sink that wants the eager
-     * tree decodes those bytes (`wire::decode(m.bytes())`). The materialize escape hatch
+     * only a multi-link reply pays one flatten, on demand. A sink that reads the frame walks
+     * those bytes in place (`wire::tlv_node_t::over(m.bytes())`). The materialize escape hatch
      * (ADR-0052) now lives at the consumer, not the router; keep `m` alive while reading
      * its span.
      *
@@ -862,10 +864,10 @@ class fwd_router_t {
      * seam where a per-hop `:acl` forward-right check (RFC-0004 §F) will later hang.
      *
      * The FWD is handed over as a @ref wire::tlv_node_t (#1648): the whole frame validated
-     * exactly as `wire::decode` would, then read in place — observing allocates nothing for a
+     * once, CRC trailers included, then read in place — observing allocates nothing for a
      * frame nested no deeper than the walk's inline slots. The node borrows the inbound bytes,
      * so it is valid only for the duration of the call; an observer that keeps anything
-     * copies it (`fwd.bytes()`, or `wire::decode` of those bytes for an owning tree).
+     * copies it (`fwd.bytes()`).
      *
      * @param fn  Callback invoked on a transport receive thread.
      * @param ctx Opaque pointer handed back as @p fn's first argument.
@@ -2149,7 +2151,8 @@ class fwd_router_t {
     void on_control_rope(std::string_view inbound_name, view::rope_t frame,
                          const child_rx_ctx_t* inbound_ctx = nullptr, peer_handle_t peer = {});
     /** @brief Learn (or re-advertise downstream) a `label ↔ route` binding (RFC-0004 §E.1). */
-    void on_advertise(std::string_view inbound_name, std::uint16_t label, const wire::tlv_t& route);
+    void on_advertise(std::string_view inbound_name, std::uint16_t label,
+                      const wire::tlv_node_t& route);
     /** @brief Forward (swap label) or locally deliver a label-compacted COMPACT payload. */
     void on_compact(std::string_view inbound_name, std::uint16_t label,
                     std::span<const std::byte> payload_bytes,

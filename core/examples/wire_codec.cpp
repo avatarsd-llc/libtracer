@@ -12,18 +12,21 @@
  * anatomy companion (`docs/modules/frame-codec.md`, `docs/modules/wire-format-bits.md`).
  * It builds a POINT TLV carrying two VALUE children with a CRC trailer, prints the
  * encoded size and the raw header bytes, then times three things over many
- * iterations: `encode` (model → bytes), `decode` (bytes → borrowed tree), and the
- * full round-trip. It also confirms the decode is zero-copy (payload spans borrow
- * the encoded buffer) and that re-encoding is byte-identical.
+ * iterations: `encode` (model → bytes), `tlv_node_t::over` (bytes → a validated, borrowed
+ * node whose children are walked in place), and the full round-trip. It also confirms the
+ * read is zero-copy (payload spans borrow the encoded buffer) and that the node spans the
+ * whole frame byte for byte.
  *
  * RESULT perf lines are informational (CI never flakes on timing); the self-checks
  * guard correctness. Runs under ctest as `example_wire_codec`.
  */
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <iterator>
 #include <span>
 #include <vector>
 
@@ -75,19 +78,20 @@ int main() {
     std::printf("  (type, opt, length, …)\n");
 
     bool ok = true;
-    auto decoded = tr::wire::decode(std::span<const std::byte>(wire));
+    auto decoded = tr::wire::tlv_node_t::over(std::span<const std::byte>(wire));
     check(ok, decoded.has_value(), "decode succeeds (CRC verifies)");
     if (decoded) {
-        check(ok, decoded->type == type_t::POINT, "root is a POINT");
-        check(ok, decoded->children.size() == 2, "POINT has two VALUE children");
-        check(ok, decoded->trailer && decoded->trailer->crc.has_value(),
-              "CRC trailer present and verified");
-        if (decoded->children.size() == 2) {
-            const auto c0 = decoded->children[0].payload;
+        const tr::wire::tlv_children_t kids = decoded->children();
+        check(ok, decoded->type() == type_t::POINT, "root is a POINT");
+        check(ok, std::ranges::distance(kids) == 2, "POINT has two VALUE children");
+        const auto trailer = decoded->trailer();
+        check(ok, trailer && trailer->crc.has_value(), "CRC trailer present and verified");
+        if (!kids.empty()) {
+            const auto c0 = (*kids.begin()).payload();
             check(ok, c0.data() >= wire.data() && c0.data() < wire.data() + wire.size(),
                   "decoded payload borrows the encoded buffer (zero copy)");
         }
-        check(ok, tr::wire::encode(*decoded) == wire, "encode(decode(bytes)) == bytes");
+        check(ok, std::ranges::equal(decoded->bytes(), wire), "the node spans the whole frame");
     }
 
     // --- perf: encode / decode / round-trip over the same frame ---
@@ -98,8 +102,8 @@ int main() {
     for (int i = 0; i < kIters; ++i) sink += tr::wire::encode(point).size();
     auto t1 = clock_t_::now();
     for (int i = 0; i < kIters; ++i) {
-        auto d = tr::wire::decode(std::span<const std::byte>(wire));
-        sink += d ? d->children.size() : 0;
+        auto d = tr::wire::tlv_node_t::over(std::span<const std::byte>(wire));
+        sink += d ? static_cast<std::size_t>(std::ranges::distance(d->children())) : 0;
     }
     auto t2 = clock_t_::now();
 

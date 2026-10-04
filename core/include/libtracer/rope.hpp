@@ -349,7 +349,7 @@ class rope_t {
      * @brief Materialize the rope into one contiguous segment from @p backend (one copy).
      *
      * The single bridge-boundary copy — taken only when a flat-buffer consumer
-     * demands it. The flattened view can then be cast with `decode(view_t)`
+     * demands it. The flattened view can then be cast with `tlv_node_t::over(view_t)`
      * (`%frame.hpp`, `tr::wire`).
      * @note Lossy convenience (#917): both refusals collapse into the empty view,
      *       which a zero-length rope also returns on SUCCESS. A caller that must

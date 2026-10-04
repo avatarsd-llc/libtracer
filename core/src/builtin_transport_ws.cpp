@@ -90,7 +90,7 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_ba
     // only on the listener.
     vertex.register_transport_type(
         "ws",
-        [rx_backend, egress_src](const conn_settings_t& s, const wire::tlv_t* raw_config) {
+        [rx_backend, egress_src](const conn_settings_t& s, const wire::tlv_node_t* raw_config) {
             const wire::config_reader_t cfg(raw_config);
             const bool peer_named = cfg.flag("peer_named").value_or(false);
             // The bus-module refusal (#375 deliverable 3). TYPE_MISMATCH, the status this

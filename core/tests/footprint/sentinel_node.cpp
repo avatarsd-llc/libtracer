@@ -2,8 +2,8 @@
  * @file
  * @brief The Cortex-M0 footprint sentinel's fixed workload — the "required modules" a minimum-
  *        feature (P0) libtracer node links: the L0/L1 substrate (bounded pool backend +
- *        segment/view/rope), the L2/L3 wire codec (frame encode/decode plus the ADR-0041 terminus
- *        arena decode), and L4 addressing (canonical PATH validation).
+ *        segment/view/rope), the L2/L3 wire codec (frame encode, the in-place reader, the ADR-0041
+ * terminus arena decode), and L4 addressing (canonical PATH validation).
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -82,16 +82,15 @@ int main() {
     root.payload = std::span<const std::byte>(packed_path);
     const std::vector<std::byte> bytes = wire::encode(root);
     acc = fold(acc, bytes);
-    if (const auto key = wire::path_key(root); key) {
-        acc = fold(acc, *key);
-    }
 
-    // Wire: owning decode (the vector tree) and the terminus arena decode (a flat
-    // pre-order array over borrowed spans, drawn from a fixed bump_source_t over a
-    // stack buffer (#588 — nothrow, so exhaustion rejects instead of throwing) —
-    // no per-node heap; ADR-0041 / ADR-0039 §3).
-    if (const auto dec = wire::decode(bytes); dec) {
-        acc += static_cast<std::uint32_t>(dec->children.size());
+    // Wire: the in-place reader (validate once, walk the children — no tree, no heap; #1829
+    // retired the owning vector-tree decode) and the terminus arena decode (a flat pre-order
+    // array over borrowed spans, drawn from a fixed bump_source_t over a stack buffer (#588 —
+    // nothrow, so exhaustion rejects instead of throwing) — no per-node heap; ADR-0041 /
+    // ADR-0039 §3).
+    if (const auto node = wire::tlv_node_t::over(bytes, mem::null_source()); node) {
+        for (const wire::tlv_node_t child : node->children()) acc = fold(acc, child.bytes());
+        if (const auto key = wire::path_key(*node); key) acc = fold(acc, *key);
     }
     alignas(std::max_align_t) std::array<std::byte, 512> arena_buf{};
     mem::bump_source_t mr(arena_buf);

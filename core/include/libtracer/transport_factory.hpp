@@ -26,7 +26,8 @@
 #include "libtracer/transport.hpp"
 
 namespace tr::wire {
-struct tlv_t;  // fwd-decl: the factory takes a `const tlv_t*` raw config (no L2 pull-in).
+class tlv_node_t;  // fwd-decl: the factory takes a `const tlv_node_t*` raw config (no L2
+                   // pull-in).
 }
 
 namespace tr::net {
@@ -178,6 +179,6 @@ struct transport_kind_traits_t {
  * the TRANSIENT disposition the condition actually has.
  */
 using transport_factory_t = std::function<graph::result_t<std::unique_ptr<transport_t>>(
-    const conn_settings_t&, const wire::tlv_t* raw_config)>;
+    const conn_settings_t&, const wire::tlv_node_t* raw_config)>;
 
 }  // namespace tr::net

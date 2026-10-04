@@ -23,6 +23,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <iterator>
 #include <span>
 #include <vector>
 
@@ -57,20 +58,21 @@ int main() {
     std::printf("POINT{VALUE,VALUE} is %zu bytes: 4 header + 2 x (4 header + 2 body)\n",
                 frame.size());
 
-    const auto structured = tr::wire::decode(frame);
+    const auto structured = tr::wire::tlv_node_t::over(frame);
     check(ok, structured.has_value(), "the structured frame decodes");
-    check(ok, structured && structured->children.size() == 2, "PL = 1 gives two children");
-    check(ok, structured && structured->payload.empty(), "and no opaque payload at all");
+    check(ok, structured && std::ranges::distance(structured->children()) == 2,
+          "PL = 1 gives two children");
+    check(ok, structured && structured->payload().empty(), "and no opaque payload at all");
 
     // The SAME body bytes, read with PL cleared. Byte 1 is the root's opt (see
     // wire_tlv_header): clearing bit 6 tells the decoder "this body is payload".
     std::vector<std::byte> as_opaque = frame;
     as_opaque[1] = static_cast<std::byte>(static_cast<std::uint8_t>(as_opaque[1]) & 0xBFu);
 
-    const auto opaque = tr::wire::decode(as_opaque);
+    const auto opaque = tr::wire::tlv_node_t::over(as_opaque);
     check(ok, opaque.has_value(), "the same bytes with PL = 0 also decode");
-    check(ok, opaque && opaque->children.empty(), "PL = 0 gives no children");
-    check(ok, opaque && opaque->payload.size() == frame.size() - 4,
+    check(ok, opaque && opaque->children().empty(), "PL = 0 gives no children");
+    check(ok, opaque && opaque->payload().size() == frame.size() - 4,
           "the payload IS the children region, byte for byte");
     return ok ? 0 : 1;
 }

@@ -25,6 +25,7 @@
 #include "libtracer/mem_borrowed.hpp"
 #include "libtracer/view.hpp"
 #include "test_support.hpp"
+#include "tlv_tree.hpp"  // host-only owning tree (#1829)
 
 namespace {
 

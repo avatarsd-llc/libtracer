@@ -80,7 +80,7 @@ int main() {
     check(ok, !tr::wire::packed_path_valid_key(view), "an escape-bearing body is not a valid key");
     std::vector<std::byte> frame;
     tr::wire::emit_tlv(frame, type_t::PATH, opt_t{}, body);
-    const auto decoded = tr::wire::decode(frame);
+    const auto decoded = tr::wire::tlv_node_t::over(frame);
     check(ok, decoded.has_value(), "the frame itself is well-formed and decodes");
     check(ok, decoded && tr::wire::path_key(*decoded) == std::nullopt,
           "yet path_key refuses it — canonical context rejects the escape");

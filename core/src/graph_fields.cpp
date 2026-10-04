@@ -39,7 +39,7 @@ namespace tr::graph {
 
 using wire::key_view_t;
 using wire::opt_t;
-using wire::tlv_t;
+using wire::tlv_node_t;
 using wire::type_t;
 
 namespace {
@@ -326,13 +326,13 @@ namespace {
  * sender MUST write 0 and a receiver MUST ignore them — an ignore, not a reject — so a future
  * sender's bits round-trip through `:subscribers[]` rather than being refused by an older node.
  */
-void parse_subscriber_tlv(const tlv_t& sub, subscriber_t& s) {
-    for (const tlv_t& child : sub.children) {
-        if (child.type == type_t::PATH && !s.target_key) {
+void parse_subscriber_tlv(const tlv_node_t& sub, subscriber_t& s) {
+    for (const tlv_node_t child : sub.children()) {
+        if (child.type() == type_t::PATH && !s.target_key) {
             // An illegally-spelled target leaves target_key unset, which falls back to the
             // full-route delivery path exactly as an older parser would (#681).
             if (auto k = wire::path_key(child)) s.target_key = try_make_target_key(*std::move(k));
-        } else if (child.type == type_t::SETTINGS) {
+        } else if (child.type() == type_t::SETTINGS) {
             const wire::config_reader_t qos(&child);
             if (qos.flag("delivery_compact").value_or(false))
                 s.ensure_remote().delivery_compact = true;  // cold half only when opted in
@@ -360,14 +360,14 @@ void parse_subscriber_tlv(const tlv_t& sub, subscriber_t& s) {
  * at -O3 — a `view_t` move plus its destructor and landing pad, duplicated at each of the
  * two field-write inline sites of the time — for one assignment saved.
  *
- * @param tlv The decoded record. Not re-decoded here: the `[N]` arm must inspect the decode
- *            before this, to discriminate the eviction sentinel.
+ * @param tlv The validated record, read in place. Not re-validated here: the `[N]` arm must
+ *            inspect it before this, to discriminate the eviction sentinel.
  * @param s   Filled on success; untouched on the type refusal.
  * @return False iff @p tlv is not a SUBSCRIBER — the doors' one shared TYPE_MISMATCH. A
  *         `bool` rather than a `result_t<void>` because there is exactly one failure.
  */
-[[nodiscard]] bool parse_wire_subscriber(const tlv_t& tlv, subscriber_t& s) {
-    if (tlv.type != type_t::SUBSCRIBER) return false;
+[[nodiscard]] bool parse_wire_subscriber(const tlv_node_t& tlv, subscriber_t& s) {
+    if (tlv.type() != type_t::SUBSCRIBER) return false;
     parse_subscriber_tlv(tlv, s);
     return true;
 }
@@ -498,13 +498,12 @@ struct graph_t::field_surface_t {
         // §D.1 is payload-DISCRIMINATING. Before it, every indexed write cleared the slot
         // payload-blind, so a peer writing a SUBSCRIBER to slot N — plainly meaning to replace
         // that edge — silently destroyed it and was told RESULT.
-        const auto tlv = wire::decode(value);
+        const auto tlv = wire::tlv_node_t::over(value);
         if (!tlv) return std::unexpected(status_t::TYPE_MISMATCH);
         // The eviction sentinel, `[N]` only: an empty STATUS — no payload bytes and no children
         // (`09 00 00 00`, the smallest valid TLV). On an append it is no SUBSCRIBER, so the
         // parse below refuses it.
-        if (slot && tlv->type == type_t::STATUS &&
-            tlv->payload.size() + tlv->children.size() == 0) {
+        if (slot && tlv->type() == type_t::STATUS && tlv->body().empty()) {
             // Clear-and-report through the ONE slot-clear door `unsubscribe` also runs: the
             // observer's view is taken before the clear, the RFC-0005 counters unwind, and only
             // a slot that WAS active is reported as a removal.
@@ -594,8 +593,8 @@ struct graph_t::field_surface_t {
         if (!whole_field(field)) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
         if (!g.acl_allows(v, caller, acl_right_t::WRITE_ACL))
             return std::unexpected(status_t::PERMISSION_DENIED);
-        const auto acl = wire::decode(value);
-        if (!acl || acl->type != type_t::ACL || !acl->opt.pl)
+        const auto acl = wire::tlv_node_t::over(value);
+        if (!acl || acl->type() != type_t::ACL || !acl->opt().pl)
             return std::unexpected(status_t::TYPE_MISMATCH);
         result_t<std::vector<ace_t>> aces = parse_acl(*acl);
         if (!aces) return std::unexpected(aces.error());
@@ -923,14 +922,14 @@ result_t<void> graph_t::create_child(vertex_t* parent, const view::view_t& spec_
     // (NAME key, NAME/SETTINGS value), read through the ONE pair-consuming walk,
     // wire::config_reader_t (#927 — hoisted to L2/L3 by #985 so this file no longer
     // carries a hand-written copy of the rule).
-    const auto spec = wire::decode(spec_value);
-    if (!spec || spec->type != type_t::SPEC) return std::unexpected(status_t::TYPE_MISMATCH);
+    const auto spec = wire::tlv_node_t::over(spec_value);
+    if (!spec || spec->type() != type_t::SPEC) return std::unexpected(status_t::TYPE_MISMATCH);
 
     const wire::config_reader_t spec_pairs(&*spec);
     const std::string_view type_sel = spec_pairs.name("type").value_or(std::string_view{});
     const std::span<const std::byte> child_name =
         spec_pairs.name_bytes("name").value_or(std::span<const std::byte>{});
-    const tlv_t* config = spec_pairs.settings("config");
+    const std::optional<tlv_node_t> config = spec_pairs.settings("config");
     // The wire boundary runs THE segment predicate (ADR-0073 §1, #688): a peer-supplied
     // name must be expressible in the addressing grammar, or the vertex it creates is
     // enumerable but unaddressable — and a `/` inside one NAME breaks the injectivity of
@@ -961,7 +960,8 @@ result_t<void> graph_t::create_child(vertex_t* parent, const view::view_t& spec_
     if (!wire::emit_path_segment(child_key, child_name))
         return std::unexpected(status_t::INVALID_PATH);
 
-    result_t<vertex_handle_t> made = factory(*this, std::move(child_key), config);
+    result_t<vertex_handle_t> made =
+        factory(*this, std::move(child_key), config ? &*config : nullptr);
     if (!made) return std::unexpected(made.error());  // PATH_IN_USE on a duplicate name
     return {};
 }

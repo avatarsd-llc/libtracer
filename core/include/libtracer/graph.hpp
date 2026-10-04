@@ -56,7 +56,8 @@
 #include "libtracer/view.hpp"
 
 namespace tr::wire {
-struct tlv_t;  // fwd-decl: the child factory takes a `const tlv_t*` config (no L2 pull-in).
+class tlv_node_t;  // fwd-decl: the child factory takes a `const tlv_node_t*` config (no L2
+                   // pull-in).
 }
 
 namespace tr::graph {
@@ -1583,13 +1584,14 @@ class graph_t {
      * @brief A child-vertex factory: the device-catalog entry ADR-0017 makes concrete.
      *
      * Given the composed child key (parent key + the SPEC's `name` NAME) and the optional
-     * SPEC `config` SETTINGS, it registers the child vertex(es) and returns the primary
+     * SPEC `config` SETTINGS (a node read in place over the SPEC's bytes, valid for the call
+     * only — #1829), it registers the child vertex(es) and returns the primary
      * handle (or a status — e.g. `PATH_IN_USE`). The graph owns the *addressing* (the key
      * is composed for it); the factory owns the *catalog* (what a `type` instantiates).
      * A @ref hook_t (RFC-0028 D10): its `ctx` must outlive the graph.
      */
     using child_factory_t = hook_t<result_t<vertex_handle_t>(
-        graph_t&, std::vector<std::byte> child_key, const wire::tlv_t* config)>;
+        graph_t&, std::vector<std::byte> child_key, const wire::tlv_node_t* config)>;
 
     /**
      * @brief Populate the device creation catalog (ADR-0017): map a SPEC `type` selector

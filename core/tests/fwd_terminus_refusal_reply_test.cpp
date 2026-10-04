@@ -49,6 +49,7 @@
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "test_support.hpp"
+#include "tlv_tree.hpp"  // host-only owning tree (#1829)
 
 namespace {
 

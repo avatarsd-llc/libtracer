@@ -820,50 +820,53 @@ void transport_can::deliver(std::uint16_t src_node, tr::view::rope_t frame) {
 
 transport_factory_t can_transport_factory(std::pmr::memory_resource* reasm_mr,
                                           mem::mem_backend_t* rx_backend) {
-    return [reasm_mr, rx_backend](
-               const conn_settings_t& /*settings*/,
-               const wire::tlv_t* raw_config) -> graph::result_t<std::unique_ptr<transport_t>> {
-        // Every CAN-private key is parsed HERE from the raw config TLV (the
-        // ADR-0043 §5 leanness ruling): nothing CAN-shaped lands in the shared
-        // conn_settings_t. The shared config_reader_t walk, CAN's own keys.
-        std::string ifname;
-        transport_can_config_t cfg;
-        bool have_node = false;
-        const wire::config_reader_t reader(raw_config);
-        if (const auto v = reader.name("ifname")) ifname = std::string(*v);
-        if (const auto v = reader.name("path")) cfg.path = std::string(*v);
-        if (const auto v = reader.u16("node")) {
-            cfg.node = *v;
-            have_node = true;
-        }
-        if (const auto v = reader.u8("version")) cfg.version = *v;
-        if (const auto v = reader.flag("fd"))
-            cfg.mode =
-                *v ? tr::net::can::can_frame_mode_t::FD : tr::net::can::can_frame_mode_t::CLASSIC;
-        if (const auto v = reader.u32("peer_ttl_ms")) cfg.peer_ttl = std::chrono::milliseconds(*v);
-        // The ingress bounds (#912). Without these keys the reassembly buffer's
-        // evict-oldest seam was unreachable from production config at all — the
-        // buffer was default-constructed with max_groups == 0. The pmr resource
-        // cannot ride a config TLV (it is a pointer, not a wire value), so it is
-        // injected at factory-registration time instead.
-        cfg.reasm_mr = reasm_mr != nullptr ? reasm_mr : std::pmr::new_delete_resource();
-        // Same reasoning one seam over (#911): the slice-byte backend is a pointer, so
-        // it rides the factory registration, not the config TLV. nullptr = process heap.
-        cfg.rx_backend = rx_backend;
-        if (const auto v = reader.u32("max_groups")) cfg.max_groups = static_cast<std::size_t>(*v);
-        if (const auto v = reader.u32("max_pending"))
-            cfg.max_pending = static_cast<std::size_t>(*v);
-        if (const auto v = reader.u32("rx_ttl_ms")) cfg.rx_ttl = std::chrono::milliseconds(*v);
-        if (ifname.empty() || !have_node || cfg.node > can::kNodeMax ||
-            cfg.version > can::kVersionMax) {
-            return std::unexpected(graph::status_t::TYPE_MISMATCH);
-        }
-        auto link = std::make_unique<socketcan_link_t>(ifname);
-        // The kernel would not open the interface — the link is down, not the address
-        // wrong (#929).
-        if (!link->ok()) return std::unexpected(graph::status_t::TRANSPORT_DOWN);
-        return std::make_unique<transport_can>(std::move(link), std::move(cfg));
-    };
+    return
+        [reasm_mr, rx_backend](
+            const conn_settings_t& /*settings*/,
+            const wire::tlv_node_t* raw_config) -> graph::result_t<std::unique_ptr<transport_t>> {
+            // Every CAN-private key is parsed HERE from the raw config TLV (the
+            // ADR-0043 §5 leanness ruling): nothing CAN-shaped lands in the shared
+            // conn_settings_t. The shared config_reader_t walk, CAN's own keys.
+            std::string ifname;
+            transport_can_config_t cfg;
+            bool have_node = false;
+            const wire::config_reader_t reader(raw_config);
+            if (const auto v = reader.name("ifname")) ifname = std::string(*v);
+            if (const auto v = reader.name("path")) cfg.path = std::string(*v);
+            if (const auto v = reader.u16("node")) {
+                cfg.node = *v;
+                have_node = true;
+            }
+            if (const auto v = reader.u8("version")) cfg.version = *v;
+            if (const auto v = reader.flag("fd"))
+                cfg.mode = *v ? tr::net::can::can_frame_mode_t::FD
+                              : tr::net::can::can_frame_mode_t::CLASSIC;
+            if (const auto v = reader.u32("peer_ttl_ms"))
+                cfg.peer_ttl = std::chrono::milliseconds(*v);
+            // The ingress bounds (#912). Without these keys the reassembly buffer's
+            // evict-oldest seam was unreachable from production config at all — the
+            // buffer was default-constructed with max_groups == 0. The pmr resource
+            // cannot ride a config TLV (it is a pointer, not a wire value), so it is
+            // injected at factory-registration time instead.
+            cfg.reasm_mr = reasm_mr != nullptr ? reasm_mr : std::pmr::new_delete_resource();
+            // Same reasoning one seam over (#911): the slice-byte backend is a pointer, so
+            // it rides the factory registration, not the config TLV. nullptr = process heap.
+            cfg.rx_backend = rx_backend;
+            if (const auto v = reader.u32("max_groups"))
+                cfg.max_groups = static_cast<std::size_t>(*v);
+            if (const auto v = reader.u32("max_pending"))
+                cfg.max_pending = static_cast<std::size_t>(*v);
+            if (const auto v = reader.u32("rx_ttl_ms")) cfg.rx_ttl = std::chrono::milliseconds(*v);
+            if (ifname.empty() || !have_node || cfg.node > can::kNodeMax ||
+                cfg.version > can::kVersionMax) {
+                return std::unexpected(graph::status_t::TYPE_MISMATCH);
+            }
+            auto link = std::make_unique<socketcan_link_t>(ifname);
+            // The kernel would not open the interface — the link is down, not the address
+            // wrong (#929).
+            if (!link->ok()) return std::unexpected(graph::status_t::TRANSPORT_DOWN);
+            return std::make_unique<transport_can>(std::move(link), std::move(cfg));
+        };
 }
 
 }  // namespace tr::net

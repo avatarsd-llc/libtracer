@@ -66,7 +66,7 @@ void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
     // `make_connection` closed it. The LISTEN arm never reaches the engine.
     vertex.register_transport_type(
         "tcp",
-        [rx_backend, egress_src](const conn_settings_t& s, const wire::tlv_t* raw_config) {
+        [rx_backend, egress_src](const conn_settings_t& s, const wire::tlv_node_t* raw_config) {
             const wire::config_reader_t cfg(raw_config);
             const bool peer_named = cfg.flag("peer_named").value_or(false);
             // The bus-module refusal — the ws factory's twin; see its comment for why

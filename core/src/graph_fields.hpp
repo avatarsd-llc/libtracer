@@ -26,6 +26,6 @@ namespace tr::graph {
  *
  * @return False iff @p tlv is not a SUBSCRIBER — the doors' one shared TYPE_MISMATCH.
  */
-[[nodiscard]] bool parse_wire_subscriber(const wire::tlv_t& tlv, subscriber_t& s);
+[[nodiscard]] bool parse_wire_subscriber(const wire::tlv_node_t& tlv, subscriber_t& s);
 
 }  // namespace tr::graph

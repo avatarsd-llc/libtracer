@@ -52,6 +52,7 @@
 #include "libtracer/subscriber.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "test_support.hpp"
+#include "tlv_tree.hpp"  // host-only owning tree (#1829)
 
 namespace {
 
@@ -105,11 +106,11 @@ samples_t three_samples() {
     return s;
 }
 
-/** @brief Decode a whole buffer as one TLV — the codec tier, unaware of any convention. */
-std::optional<tr::wire::tlv_t> decode_all(std::span<const std::byte> bytes) {
-    auto got = tr::wire::decode(bytes, tr::mem::heap_source());
+/** @brief Validate a whole buffer as one TLV — the codec tier, unaware of any convention. */
+std::optional<tr::wire::tlv_node_t> decode_all(std::span<const std::byte> bytes) {
+    auto got = tr::wire::tlv_node_t::over(bytes, tr::mem::heap_source());
     if (!got) return std::nullopt;
-    return std::move(*got);
+    return *got;
 }
 
 /**
@@ -188,7 +189,8 @@ void the_descriptor_decides_the_shape() {
     const auto tlv = decode_all(bytes);
     check(tlv.has_value(), "the non-uniform record decodes");
     if (!tlv) return;
-    check(tlv->children.size() == 5, "TIME + one packed offset child + three sample frames");
+    check(std::ranges::distance(tlv->children()) == 5,
+          "TIME + one packed offset child + three sample frames");
 
     const auto b = tr::wire::read_batch(*tlv, /*dt_ns=*/0);
     check(b.has_value(), "and reads as the convention against dt_ns = 0");
@@ -218,13 +220,12 @@ void the_descriptor_decides_the_shape() {
  */
 void a_uniform_derivation_survives_a_negative_base() {
     std::printf("§4.2.1 uniform — a negative base derives, it does not overflow (#1600):\n");
-    std::array<tr::wire::tlv_t, 3> frames{};
-    const std::span<const tr::wire::tlv_t> samples{frames};
+    constexpr std::size_t samples = 3;  // the derivation reads the count, never the frames
 
     batch_view_t v{};
     v.base_ns = -5000;
     v.dt_ns = 1000;
-    v.samples = samples;
+    v.count = samples;
     check(v.uniform() && v.sample_time_ns(0) == -5000 && v.sample_time_ns(1) == -4000 &&
               v.sample_time_ns(2) == -3000,
           "t(i) = base + i × dt_ns holds below the epoch origin, with no UB on the headroom");
@@ -234,7 +235,7 @@ void a_uniform_derivation_survives_a_negative_base() {
     batch_view_t deepest{};
     deepest.base_ns = std::numeric_limits<std::int64_t>::min();
     deepest.dt_ns = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) + 1u;
-    deepest.samples = samples;
+    deepest.count = samples;
     check(deepest.sample_time_ns(0) == std::numeric_limits<std::int64_t>::min() &&
               deepest.sample_time_ns(1) == 0 && !deepest.sample_time_ns(2).has_value(),
           "... and a dt past int64max is answerable once, then past the epoch — never wrapped");
@@ -243,7 +244,7 @@ void a_uniform_derivation_survives_a_negative_base() {
     batch_view_t high{};
     high.base_ns = std::numeric_limits<std::int64_t>::max() - 500;
     high.dt_ns = 1000;
-    high.samples = samples;
+    high.count = samples;
     check(high.sample_time_ns(0) == std::numeric_limits<std::int64_t>::max() - 500 &&
               !high.sample_time_ns(1).has_value(),
           "a derivation past the representable epoch is still reported, never wrapped");
@@ -265,7 +266,7 @@ void a_readers_refusal_is_not_the_codecs() {
     check(stray_tlv && !tr::wire::read_batch(*stray_tlv, kDt).has_value(),
           "... and the reader declines it — a refusal by the reader, never by the codec");
     if (stray_tlv) {
-        check(same(tr::wire::encode(*stray_tlv), stray),
+        check(same(tr::wire::encode(tr::wire::to_tree(*stray_tlv)), stray),
               "... while the same bytes round-trip byte-for-byte (the user range stands)");
     }
 
@@ -320,15 +321,15 @@ void emit_batch_offsets_appends_the_packed_child() {
           "... and to the offset child the fold writes after its TIME base");
 
     const auto tlv = decode_all(child);
-    check(tlv.has_value() && tlv->type == type_t::VALUE &&
-              tlv->payload.size() == kOffsets.size() * tr::wire::kBatchOffsetBytes,
+    check(tlv.has_value() && tlv->type() == type_t::VALUE &&
+              tlv->payload().size() == kOffsets.size() * tr::wire::kBatchOffsetBytes,
           "it decodes as ONE VALUE carrying the whole run");
     if (tlv) {
         bool le = true;
         for (std::size_t i = 0; i < kOffsets.size(); ++i) {
             std::uint32_t v = 0;
             for (std::size_t b = 0; b < tr::wire::kBatchOffsetBytes; ++b)
-                v |= std::to_integer<std::uint32_t>(tlv->payload[i * 4 + b]) << (8 * b);
+                v |= std::to_integer<std::uint32_t>(tlv->payload()[i * 4 + b]) << (8 * b);
             le = le && static_cast<std::int32_t>(v) == kOffsets[i];
         }
         check(le, "each offset is a signed i32 LE, in frame order, the negative one included");
@@ -337,8 +338,8 @@ void emit_batch_offsets_appends_the_packed_child() {
     std::vector<std::byte> none;
     tr::wire::emit_batch_offsets(none, {});
     const auto empty = decode_all(none);
-    check(none.size() == 4 && empty.has_value() && empty->type == type_t::VALUE &&
-              empty->payload.empty(),
+    check(none.size() == 4 && empty.has_value() && empty->type() == type_t::VALUE &&
+              empty->payload().empty(),
           "an empty run still appends a well-formed, zero-length VALUE");
 }
 

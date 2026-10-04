@@ -35,7 +35,6 @@ using graph::fwd_op_t;
 using view::segment_ptr_t;
 using view::view_t;
 using wire::opt_t;
-using wire::tlv_t;
 using wire::type_t;
 
 namespace {
@@ -525,26 +524,28 @@ void emit_advertise(transport_t& link, std::uint16_t label, std::span<const std:
  * form. A trailer is refused on the same terms — a stamped route is not an address form, and
  * carrying the trailer here would be a second copy of `frame.cpp`'s trailer rule.
  *
- * @param out Destination, drawn from the caller's injected source.
- * @param t   The TLV to re-encode.
+ * @param out     Destination, drawn from the caller's injected source.
+ * @param t       The route node whose type and opt bits are re-encoded.
+ * @param payload The body to emit: @p t's own, or a stripped tail of it.
  * @retval false Not the flat trailer-free shape, or the source is exhausted. @p out is unusable
  *               and the caller binds nothing.
  */
-[[nodiscard]] bool encode_flat_into(mem::block_array_t<std::byte>& out, const tlv_t& t) noexcept {
-    if (t.opt.pl || !t.children.empty() || t.opt.ts || t.opt.cr) return false;
-    wire::opt_t opt = t.opt;
+[[nodiscard]] bool encode_flat_into(mem::block_array_t<std::byte>& out, const wire::tlv_node_t& t,
+                                    std::span<const std::byte> payload) noexcept {
+    wire::opt_t opt = t.opt();
+    if (opt.pl || opt.ts || opt.cr) return false;
     // The same `> 0xFFFF` widen rule `wire::emit_tlv` and `stack_writer::header` each carry.
-    if (t.payload.size() > 0xFFFFu) opt.ll = true;
+    if (payload.size() > 0xFFFFu) opt.ll = true;
     const std::size_t len_bytes = opt.ll ? 4u : 2u;
     std::array<std::byte, 6> head{};
-    head[0] = static_cast<std::byte>(std::to_underlying(t.type));
+    head[0] = static_cast<std::byte>(std::to_underlying(t.type()));
     head[1] = static_cast<std::byte>(opt.encode());
     detail::store_le<std::uint32_t>(std::span<std::byte>(head).subspan(2, len_bytes),
-                                    static_cast<std::uint32_t>(t.payload.size()), len_bytes);
-    if (!out.reserve(2u + len_bytes + t.payload.size())) return false;
+                                    static_cast<std::uint32_t>(payload.size()), len_bytes);
+    if (!out.reserve(2u + len_bytes + payload.size())) return false;
     for (std::size_t i = 0; i < 2u + len_bytes; ++i)
         if (!out.push_back(head[i])) return false;
-    for (const std::byte b : t.payload)
+    for (const std::byte b : payload)
         if (!out.push_back(b)) return false;
     return true;
 }
@@ -592,7 +593,7 @@ void emit_handle_nack(transport_t& link, std::uint16_t label) {
  * was refused instead of seeing a silent timeout. This frame is well-formed — its dst simply
  * names a hop the ruling forbids — so it answers. A `REPLY` is never answered with a reply
  * (the resolver's own rule). The frame is read in place through `wire::tlv_node_t` (#1648):
- * the whole frame is validated exactly as `wire::decode` would, and nothing is built.
+ * the whole frame is validated once by `tlv_node_t::over`, and nothing is built.
  *
  * The reply bytes are not mirrored from the resolver's grammar — they ARE the resolver's
  * grammar (#887): @ref tr::graph::assemble_error_reply is the one definition of
@@ -1641,13 +1642,14 @@ transport_t* fwd_router_t::bound_egress(wire::path_ref_element_t e, std::string_
 }
 
 bool fwd_router_t::adopt_binding(graph::path_t& path, std::string_view link_name,
-                                 const wire::tlv_t& reply) {
+                                 const wire::tlv_node_t& reply) {
     // The mint answer is the reply's LAST child (RFC-0024 §7.1), so a reply that carries none
     // ends here and the path stays canonical — a request is a hint, never an obligation.
-    if (reply.children.empty()) return false;
-    const tlv_t& last = reply.children.back();
-    if (last.type != type_t::PATH_REF) return false;
-    const std::size_t n = wire::path_ref_element_count(last.payload.size());
+    std::optional<wire::tlv_node_t> last;
+    for (const wire::tlv_node_t c : reply.children()) last = c;
+    if (!last || last->type() != type_t::PATH_REF) return false;
+    const std::span<const std::byte> refs = last->payload();
+    const std::size_t n = wire::path_ref_element_count(refs.size());
     if (n == 0) return false;
     // Element 0 is this node's own, and nobody else could have written it: the hop out of the
     // origin is the one hop no peer ever sees (§4.1).
@@ -1656,8 +1658,7 @@ bool fwd_router_t::adopt_binding(graph::path_t& path, std::string_view link_name
     std::vector<wire::path_ref_element_t> elements;
     elements.reserve(n + 1);
     elements.push_back(*own);
-    for (std::size_t i = 0; i < n; ++i)
-        elements.push_back(wire::path_ref_element_at(last.payload, i));
+    for (std::size_t i = 0; i < n; ++i) elements.push_back(wire::path_ref_element_at(refs, i));
     return path.bind(elements);
 }
 
@@ -1681,21 +1682,21 @@ std::optional<fwd_router_t::bound_dispatch_t> fwd_router_t::bound_dispatch(
 namespace {
 
 /**
- * @brief The `src` PATH body of a decoded `FWD` — the ONE region a hop ever labels (erratum 4).
+ * @brief The `src` PATH body of a validated `FWD` — the ONE region a hop ever labels (erratum 4).
  *
  * A `FWD`'s two `PATH` children are `dst` then `src` (RFC-0004 §B), so the second one is the
  * answer and there is no third to confuse it with. Read positionally rather than by type alone,
  * because "the first PATH" is the return route and caching THAT would cache the reply endpoint.
  */
-[[nodiscard]] std::span<const std::byte> fwd_src_body(const wire::tlv_t& fwd) noexcept {
-    const wire::tlv_t* first = nullptr;
-    for (const wire::tlv_t& c : fwd.children) {
-        if (c.type != wire::type_t::PATH) continue;
-        if (first == nullptr) {
-            first = &c;
+[[nodiscard]] std::span<const std::byte> fwd_src_body(const wire::tlv_node_t& fwd) noexcept {
+    bool seen_dst = false;
+    for (const wire::tlv_node_t c : fwd.children()) {
+        if (c.type() != wire::type_t::PATH) continue;
+        if (!seen_dst) {
+            seen_dst = true;
             continue;
         }
-        return {c.payload.data(), c.payload.size()};
+        return c.payload();
     }
     return {};
 }
@@ -1729,14 +1730,15 @@ namespace {
  * that shape — not a recursive scan for any 2-byte VALUE, which would read a two-byte PAYLOAD as
  * an error identity and clear a live cache on a successful reply.
  */
-[[nodiscard]] std::optional<wire::err_t> reply_error_identity(const wire::tlv_t& fwd) noexcept {
-    for (const wire::tlv_t& status : fwd.children) {
-        if (status.type != wire::type_t::STATUS || status.children.empty()) continue;
-        const wire::tlv_t& err = status.children.front();
-        if (err.type != wire::type_t::ERROR || err.children.empty()) continue;
-        const wire::tlv_t& id = err.children.front();
-        if (id.type != wire::type_t::VALUE || id.payload.size() != 2) continue;
-        return static_cast<wire::err_t>(detail::load_le<std::uint16_t>(id.payload));
+[[nodiscard]] std::optional<wire::err_t> reply_error_identity(
+    const wire::tlv_node_t& fwd) noexcept {
+    for (const wire::tlv_node_t status : fwd.children()) {
+        if (status.type() != wire::type_t::STATUS || status.children().empty()) continue;
+        const wire::tlv_node_t err = *status.children().begin();
+        if (err.type() != wire::type_t::ERROR || err.children().empty()) continue;
+        const wire::tlv_node_t id = *err.children().begin();
+        if (id.type() != wire::type_t::VALUE || id.payload().size() != 2) continue;
+        return static_cast<wire::err_t>(detail::load_le<std::uint16_t>(id.payload()));
     }
     return std::nullopt;
 }
@@ -1744,7 +1746,7 @@ namespace {
 }  // namespace
 
 [[gnu::cold]] bool fwd_router_t::adopt_path_label(graph::path_t& path, std::string_view link_name,
-                                                  const wire::tlv_t& reply) {
+                                                  const wire::tlv_node_t& reply) {
     const std::span<const std::byte> src = fwd_src_body(reply);
     // A reply whose `src` carries no label is every conformant reply this codebase shipped before
     // RFC-0027 and every reply from a route that mints nothing (§6.3). It ends here, and the path
@@ -1815,7 +1817,7 @@ namespace {
 }
 
 [[gnu::cold]] bool fwd_router_t::fall_back_on_label_refusal(graph::path_t& path,
-                                                            const wire::tlv_t& reply) {
+                                                            const wire::tlv_node_t& reply) {
     if (!path.path_label().cached) return false;
     const std::optional<wire::err_t> id = reply_error_identity(reply);
     // §7.2 names ONE identity, and narrowly: an unresolvable address is what a stale label is.
@@ -2398,7 +2400,7 @@ void fwd_router_t::on_frame_rope_impl(std::string_view inbound_name, view::rope_
                     // so the refusal is the OOM — named by the error channel now rather than
                     // inferred from an empty view a zero-byte success could fake (#917). Still
                     // the early-out the ADVERTISE arm also takes: `reject_bus_name_hop` opens
-                    // with a `wire::decode`, an empty span does not decode, and it returns
+                    // with a `tlv_node_t::over`, an empty span does not validate, and it returns
                     // without replying — so the FRAME's fate does not depend on this line.
                     // What does depend on it is the COUNT (#1503 step 3): the OOM is named
                     // here rather than left to the codec's leniency, so an operator sees a
@@ -2460,7 +2462,7 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
             /* observe */
             [&] {
                 if (const auto sink = inbound_.get(); sink.fn != nullptr) {
-                    // Read in place (#1648): validated as `decode` would, nothing built. A
+                    // Read in place (#1648): validated once by `over`, nothing built. A
                     // frame deeper than the walk's inline slots spills into the receiving
                     // link's own source, never the process heap (receiver pays).
                     if (const auto dec = wire::tlv_node_t::over(frame, rx_for(inbound_ctx));
@@ -3048,8 +3050,8 @@ void fwd_router_t::dispatch_control(std::string_view inbound_name, const Cursor&
     // intact (CONTEXT.md §Frame integrity, ADR-0041 §1). `peek_control` defaults to DEFER
     // because every forward-hop caller wants that — a hop relays bytes it never interprets —
     // so the default is right and the explicit argument is what carries the policy. On the
-    // span tier the owning `wire::decode` this replaced verified every node's CRC, so
-    // deferring here would silently start ACCEPTING a COMPACT whose root trailer says its
+    // span tier the owning `wire::decode` this replaced (deleted in #1829) verified every node's
+    // CRC, so deferring here would silently start ACCEPTING a COMPACT whose root trailer says its
     // payload is corrupt. The cost is zero allocations and, on our own traffic, zero cycles:
     // `emit_compact` emits no CR bit. A peer may legally set one, which is exactly why the
     // check must be explicit. Fragmenting a frame must not change whether it is applied.
@@ -3061,21 +3063,21 @@ void fwd_router_t::dispatch_control(std::string_view inbound_name, const Cursor&
             return;
         case type_t::ADVERTISE: {
             if (head->child1_off == 0) return;
-            // The route is the one child that genuinely needs a tree: on_advertise walks its
-            // NAME segments and re-encodes a stripped copy. Make ONLY that child contiguous —
+            // The route is the one child that is read as a whole: on_advertise walks its
+            // packed records and re-encodes a stripped copy. Make ONLY that child contiguous —
             // never the whole frame. A span source subspans it; a rope source materializes
             // the sub-rope through the injected byte backend (#730), since an ingress flatten
             // is peer-provoked and a bounded node's bound must cover it (ADR-0052 legitimate
             // flatten).
             const std::span<const std::byte> route = contig(head->child1_off, head->child1_total);
             // Flatten OOM ⇒ bind NOTHING. This is a REDUNDANT EARLY-OUT, not a guard: the
-            // `wire::decode` on the next line is what actually answers an OOM'd flatten (an
-            // empty span does not decode), and deleting this line changes no observable
+            // `tlv_node_t::over` on the next line is what actually answers an OOM'd flatten (an
+            // empty span does not validate), and deleting this line changes no observable
             // behaviour — verified by ablation, twice. It is kept only so the REASON the
             // binding failed is the flatten and not the codec's leniency. Nothing may cite
             // it as a proven guard; the SEAM above is what the test pins.
             if (route.empty() && head->child1_total != 0) return;
-            const auto dec = wire::decode(route);
+            const auto dec = wire::tlv_node_t::over(route);
             if (!dec) return;
             on_advertise(inbound_name, head->label, *dec);
             return;
@@ -3128,7 +3130,7 @@ void fwd_router_t::on_control_rope(std::string_view inbound_name, view::rope_t f
 }
 
 void fwd_router_t::on_advertise(std::string_view inbound_name, std::uint16_t label,
-                                const tlv_t& route) {
+                                const wire::tlv_node_t& route) {
     // A route is an ADDRESS, and this is canonical / key context: it must be a packed `PATH`
     // (`opt.PL = 0`) whose body tiles exactly into LITERAL records — no ragged length, no
     // RFC-0018 §5.4 escape. Refusing here rather than at the bind is what keeps the label
@@ -3136,7 +3138,8 @@ void fwd_router_t::on_advertise(std::string_view inbound_name, std::uint16_t lab
     // frame decode itself, because a `PATH` was a child run and garbage children failed the
     // grammar. A packed body is opaque to the grammar, so the address rule has to be checked
     // by the one tier that owns it — here and in `resolve_route_vertex`'s `path_key`.
-    if (route.type != type_t::PATH || route.opt.pl || !wire::packed_path_valid_key(route.payload))
+    const std::span<const std::byte> route_body = route.payload();
+    if (route.type() != type_t::PATH || route.opt().pl || !wire::packed_path_valid_key(route_body))
         return;
 
     // The mount-shape stamp (#765), read BEFORE the descent, never after. Read after, a
@@ -3163,7 +3166,7 @@ void fwd_router_t::on_advertise(std::string_view inbound_name, std::uint16_t lab
     // settles the escape: `key_view_t` is canonical/key context and reports a `len == 0`
     // record as ragged, so a route carrying a label binds NOTHING rather than binding a
     // truncation — the §5.4 rejection, arriving for free through the one locus that owns it.
-    wire::key_view_t::record_cursor_t adv_walk{wire::key_view_t{route.payload}};
+    wire::key_view_t::record_cursor_t adv_walk{wire::key_view_t{route_body}};
     const auto adv_at = [&adv_walk](std::size_t i) -> std::optional<std::string_view> {
         const std::optional<wire::key_view_t::record_t> rec = adv_walk.at(i);
         if (!rec) return std::nullopt;
@@ -3200,14 +3203,13 @@ void fwd_router_t::on_advertise(std::string_view inbound_name, std::uint16_t lab
         // Strip the K consumed records off the PACKED body — a byte slice, where it used to
         // be a child-vector erase (RFC-0018). `end_of` is the same cursor the descent walked,
         // so the split cannot disagree with the resolution that produced `strip_k`.
-        tlv_t stripped = route;
-        stripped.payload =
-            route.payload.subspan(std::min(adv_walk.end_of(hit.strip_k), route.payload.size()));
+        const std::span<const std::byte> stripped =
+            route_body.subspan(std::min(adv_walk.end_of(hit.strip_k), route_body.size()));
         // Drawn from the injected label source, nothrow. This was `wire::encode`'s owning
         // vector on the throwing global heap — see `encode_flat_into` for why the flat shape
         // is the only one this plane can bind and why refusing the rest changes nothing.
         mem::block_array_t<std::byte> stripped_block(*label_src_);
-        if (!encode_flat_into(stripped_block, stripped)) return;
+        if (!encode_flat_into(stripped_block, route, stripped)) return;
         const std::span<const std::byte> stripped_bytes = block_span(stripped_block);
 
         // Sample the downstream link's clear epoch BEFORE minting anything against it (#827).
@@ -3268,7 +3270,7 @@ void fwd_router_t::on_advertise(std::string_view inbound_name, std::uint16_t lab
     // refusal (full ingress table) leaves the label unbound, so the peer's COMPACT draws the
     // same HANDLE_NACK a stale label draws and the flow stays on the full-route form.
     mem::block_array_t<std::byte> local_block(*label_src_);
-    if (!encode_flat_into(local_block, route)) return;
+    if (!encode_flat_into(local_block, route, route_body)) return;
     handle_binding_t term;
     term.terminus = true;
     term.local_route = block_span(local_block);

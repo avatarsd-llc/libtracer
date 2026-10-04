@@ -24,6 +24,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <iterator>
 #include <thread>
 
 #include "libtracer/tracer.hpp"
@@ -122,8 +123,8 @@ int main() {
     auto schema = g.read(path_t("/sensor/temp:schema"));
     std::size_t schema_children = 0;
     if (schema) {
-        if (auto point = tr::wire::decode((*schema)->only()))
-            schema_children = point->children.size();
+        if (auto point = tr::wire::tlv_node_t::over((*schema)->only()))
+            schema_children = static_cast<std::size_t>(std::ranges::distance(point->children()));
     }
     std::printf(":schema is a POINT with %zu children\n", schema_children);
 

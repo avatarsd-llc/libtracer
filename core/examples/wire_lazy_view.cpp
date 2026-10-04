@@ -24,6 +24,7 @@
 
 #include <cstddef>
 #include <cstdio>
+#include <iterator>
 #include <span>
 #include <vector>
 
@@ -84,7 +85,7 @@ int main() {
 
     const auto flat = lazy->materialize();
     check(ok, flat.has_value(), "materialize() is the one explicit copy point");
-    check(ok, flat && flat->root.children.size() == 2,
-          "and it yields the same eager tree an ordinary decode would");
+    check(ok, flat && std::ranges::distance(flat->root.children()) == 2,
+          "and it yields the same validated node `tlv_node_t::over` would");
     return ok ? 0 : 1;
 }

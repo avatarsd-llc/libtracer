@@ -5,8 +5,8 @@
 A **`view_t`** is a `(segment, offset, length)` window onto real bytes; copying it is
 a refcount clone, not a byte copy. A **`rope_t`** is a chain of views, so one logical
 message can span several buffers (a static header + a live DMA payload) without
-copying. **`decode(view_t)`** realizes L1's load-bearing claim — *a TLV is a cast from
-a view* — by running the M1 decoder over a view's bytes in place.
+copying. **`tlv_node_t::over(view_t)`** realizes L1's load-bearing claim — *a TLV is a
+cast from a view* — by validating a view's bytes in place and building nothing.
 ```
 
 ## What it does
@@ -21,8 +21,8 @@ demands it (the single transport-boundary copy). Assembling a multi-buffer messa
 **chaining views into a `rope_t`, never a memcpy** — a contiguous copy happens only
 when `flatten()` runs at a substrate boundary that cannot scatter-gather.
 
-`decode(v)` is just `decode(v.bytes())` — the decoded `tlv_t`'s payload spans
-point *into* the view's segment, and the view's `segment_ptr_t` keeps them alive. No
+`tlv_node_t::over(v)` is just `tlv_node_t::over(v.bytes())` — the node and every child it
+walks point *into* the view's segment, and the view's `segment_ptr_t` keeps them alive. No
 decode-into-a-struct step: the wire bytes **are** the in-memory value.
 
 Ownership is an intrusive refcount on the segment, not on the view: cloning a
@@ -69,7 +69,8 @@ class rope_t {                                           // rope.hpp — ordered
 
 }  // namespace tr::view
 
-std::expected<tlv_t, err_t> tr::wire::decode(const view_t&, block_source_t& = heap_source());
+std::expected<tlv_node_t, err_t> tr::wire::tlv_node_t::over(const view_t&,
+                                                           block_source_t& = heap_source());
                                                                // the L1 → L2 cast  frame.hpp
 ```
 

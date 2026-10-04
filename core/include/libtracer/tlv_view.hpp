@@ -7,7 +7,7 @@
  * rope — it holds the parsed header facts plus a refcounted subrope of the
  * frame, and NOTHING that is not accessed is ever decoded: children are
  * materialized one header at a time (children_t::next), a payload handed
- * onward stays the subrope it already is, and materialize() -> tlv_t is the
+ * onward stays the subrope it already is, and materialize() -> a flat copy + tlv_node_t is the
  * single explicit copy point.
  *
  * Validation is fully lazy (ADR-0053 §4): over() anchors the bounds (root
@@ -52,8 +52,8 @@ namespace tr::wire {
  * transport read loop: this is the owning delivery tier, the scoped revision
  * of the ADR-0041 §2 span-arena contract (which itself is untouched).
  *
- * `tlv_t` remains the eager encode-side / materialized representation;
- * @ref materialize is the one explicit copy from this tier into it.
+ * `tlv_t` remains the eager encode-side representation; @ref materialize is the
+ * one explicit copy from this tier into contiguous bytes, read as a @ref tlv_node_t.
  */
 class tlv_view_t {
    public:
@@ -170,26 +170,27 @@ class tlv_view_t {
     [[nodiscard]] std::optional<timestamp_t> timestamp() const;
 
     /**
-     * @brief A materialized view: the flat copy plus the eager tree borrowing it.
+     * @brief A materialized view: the flat copy plus the validated root node over it.
      *
      * `root` borrows `flat`'s segment bytes (stable across moves — the segment
-     * is refcounted heap memory), so keep the pair together, exactly like
-     * `decode(view_t)`'s "keep the view alive" contract.
+     * is refcounted heap memory), so keep the pair together: the node is valid while
+     * `flat` is alive. Since #1829 the root is a @ref tlv_node_t read in place, not an
+     * owning tree.
      */
     struct materialized_t {
         view::view_t flat; /**< @brief The single contiguous copy of the wire bytes. */
-        tlv_t root;        /**< @brief The eager tree; borrows @ref flat's bytes. */
+        tlv_node_t root;   /**< @brief The validated root; borrows @ref flat's bytes. */
     };
 
     /**
-     * @brief The single explicit copy point (ADR-0053 §1): flatten + eager decode.
+     * @brief The single explicit copy point (ADR-0053 §1): flatten + validate.
      *
      * Everything lazy access deferred is paid here, once, by the consumer that
      * asked for it: one contiguous copy and the full grammar walk INCLUDING
-     * every CRC trailer — byte-identical to `decode(flatten(wire()))`.
+     * every CRC trailer — the same acceptance as `tlv_node_t::over(flatten(wire()))`.
      *
      * @param backend Where the flat segment is allocated.
-     * @return The flat copy + eager tree, or the grammar's `err_t`.
+     * @return The flat copy + validated root node, or the grammar's `err_t`.
      * @retval err_t::FLOW_BACKPRESSURE @p backend could not allocate the segment.
      *         A LOCAL, transient failure of this node — retrying the same frame may
      *         succeed. Until #917 it was reported as `FRAME_INVALID`, i.e. as a

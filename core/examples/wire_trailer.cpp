@@ -21,6 +21,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -52,14 +53,14 @@ int main() {
     std::vector<std::byte> frame = tr::wire::encode(v);
     std::printf("VALUE with a CRC trailer: %zu bytes (4 header + 4 body + 4 CRC-32C)\n",
                 frame.size());
-    const auto good = tr::wire::decode(frame);
+    const auto good = tr::wire::tlv_node_t::over(frame);
     check(ok, good.has_value(), "the frame decodes");
-    check(ok, good && good->trailer && good->trailer->crc.has_value(), "and carries a CRC");
+    check(ok, good && good->trailer() && good->trailer()->crc.has_value(), "and carries a CRC");
 
     // One flipped payload byte. The CRC is what makes that a verdict rather than a guess.
     std::vector<std::byte> corrupt = frame;
     corrupt[4] ^= std::byte{0x01};
-    const auto bad = tr::wire::decode(corrupt);
+    const auto bad = tr::wire::tlv_node_t::over(corrupt);
     check(ok, !bad && bad.error() == tr::wire::err_t::FRAME_CRC_FAIL,
           "a single flipped body byte is FRAME_CRC_FAIL");
 
@@ -68,9 +69,12 @@ int main() {
     stamped.type = type_t::VALUE;
     stamped.payload = std::span(body);
     tr::wire::stamp_ts(stamped, 1'700'000'000'000'000'000);
-    const auto rt = tr::wire::decode(tr::wire::encode(stamped));
-    check(ok, rt && rt->trailer && rt->trailer->ts, "a stamped TLV round-trips its timestamp");
-    check(ok, rt && rt->trailer->ts->value == 1'700'000'000'000'000'000, "with the value intact");
+    const std::vector<std::byte> stamped_frame = tr::wire::encode(stamped);
+    const auto rt = tr::wire::tlv_node_t::over(stamped_frame);
+    const auto rt_trailer = rt ? rt->trailer() : std::nullopt;
+    check(ok, rt_trailer && rt_trailer->ts, "a stamped TLV round-trips its timestamp");
+    check(ok, rt_trailer && rt_trailer->ts && rt_trailer->ts->value == 1'700'000'000'000'000'000,
+          "with the value intact");
 
     // The loud refusal: the bit without the value is never emitted as a silent zero.
     tlv_t claims_ts;

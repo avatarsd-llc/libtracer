@@ -31,8 +31,8 @@ void write_le(std::vector<std::byte>& out, std::uint64_t v, std::size_t n) {
 }
 
 /**
- * @brief Read a validated TLV's trailer values (timestamp, CRC) out of its bytes: the ONE reader
- *        both the owning tree (`model`) and the in-place node (`tlv_node_t::trailer`) use.
+ * @brief Read a validated TLV's trailer values (timestamp, CRC) out of its bytes: the one
+ *        reader, behind `tlv_node_t::trailer`.
  *
  * @param opt        The TLV's opt bits (which trailer fields exist, and their widths).
  * @param bytes      The TLV's own bytes.
@@ -56,7 +56,7 @@ std::optional<trailer_t> read_trailer(opt_t opt, std::span<const std::byte> byte
         trailer.ts = t;
     }
     if (opt.cr) {
-        // CRC already verified by the grammar; the stored value is read only to model it.
+        // CRC already verified by the grammar; the stored value is read only to report it.
         crc_t c;
         if (opt.cw) {
             c.width = crc_t::width_t::CRC16_CCITT;
@@ -68,22 +68,6 @@ std::optional<trailer_t> read_trailer(opt_t opt, std::span<const std::byte> byte
         trailer.crc = c;
     }
     return trailer;
-}
-
-/**
- * @brief Model one validated header (grammar::parse_header, ADR-0048 §1) as a tlv_t: extract the
- *        payload span for an opaque node and read the (already-verified) trailer values into the
- *        owning tree.
- *
- * `bytes` is the TLV's own bytes.
- */
-tlv_t model(const grammar::header_t& h, std::span<const std::byte> bytes) {
-    tlv_t tlv;
-    tlv.type = h.type;
-    tlv.opt = h.opt;
-    tlv.trailer = read_trailer(h.opt, bytes, h.header + h.length);
-    if (!h.opt.pl) tlv.payload = bytes.subspan(h.header, h.length);
-    return tlv;
 }
 
 /**
@@ -105,76 +89,22 @@ struct validate_sink {
     void on_close() noexcept {}
 };
 
-/**
- * @brief The owning-tree sink for grammar::walk (ADR-0048 §1): builds the `tlv_t` tree as the
- *        shared descent visits it.
- *
- * Opaque nodes are grafted into their parent
- * (or become the root); a structured node is held open on `open_` while its
- * children graft in, then grafted itself on close. The descent logic — pos/total
- * accounting, depth cap, when to descend — lives in the walk, not here.
- */
-struct owning_sink {
-    std::vector<tlv_t> open_; /**< the open structured nodes (innermost last) */
-    tlv_t result_;            /**< set once, when the root node finalizes */
-
-    void place(tlv_t node) {
-        if (open_.empty())
-            result_ = std::move(node);  // the root
-        else
-            open_.back().children.push_back(std::move(node));
-    }
-    void on_leaf(const grammar::header_t& h, const grammar::span_cursor& node) {
-        place(model(h, node.buf));
-    }
-    void on_open(const grammar::header_t& h, const grammar::span_cursor& node) {
-        open_.push_back(model(h, node.buf));
-    }
-    void on_close() {
-        tlv_t done = std::move(open_.back());
-        open_.pop_back();
-        place(std::move(done));
-    }
-};
-
-/**
- * @brief The one walk both span decoders run: `decode` (owning tree) and `tlv_node_t::over`
- *        (nothing built) differ only in @p sink, so their acceptance cannot drift.
- *
- * The one structural descent lives in grammar::walk (ADR-0048 §1). The walk stack starts in
- * these inline slots (a tuning knob sized for the typical FWD nesting, ~3-4 levels) and spills
- * to `spill` for deeper frames — the INJECTED source since #873, defaulted to the process heap
- * at both public doors. The RFC-0006 depth bound is therefore the caller's to set:
- * `mem::null_source()` refuses the first spill and the walk answers TLV_NESTING_TOO_DEEP.
- * (#588: the spill used to be a throwing pmr allocate.)
- */
-template <class Sink>
-std::expected<void, err_t> walk_span(std::span<const std::byte> input, Sink& sink,
-                                     mem::block_source_t& spill) {
-    std::array<grammar::walk_frame_t<grammar::span_cursor>, 8> slots;
-    grammar::walk_stack_t<grammar::span_cursor> stack(slots, &spill);
-    return grammar::walk(grammar::span_cursor{input}, sink, stack);
-}
-
 }  // namespace
-
-std::expected<tlv_t, err_t> decode(std::span<const std::byte> input, mem::block_source_t& spill) {
-    // Only the walk STACK moves onto the seam. The owning tlv_t tree this sink builds holds
-    // std::vector children, which allocate on the global heap by construction — a caller
-    // that only reads wants `tlv_node_t::over`, and one that needs a bounded tree wants
-    // decode_into's arena.
-    owning_sink sink;
-    const auto r = walk_span(input, sink, spill);
-    if (!r) return std::unexpected(r.error());
-    return std::move(sink.result_);
-}
 
 std::expected<tlv_node_t, err_t> tlv_node_t::over(std::span<const std::byte> input,
                                                   mem::block_source_t& spill) {
-    // `decode`'s walk with a sink that keeps only the root header: the conformance runner
-    // holds the two equal over the whole vector corpus.
+    // The grammar's walk with a sink that keeps only the root header; the conformance runner
+    // reads the whole vector corpus through this door.
+    //
+    // The one structural descent lives in grammar::walk (ADR-0048 §1). The walk stack starts in
+    // these inline slots (a tuning knob sized for the typical FWD nesting, ~3-4 levels) and
+    // spills to `spill` for deeper frames — the INJECTED source since #873, defaulted to the
+    // process heap. The RFC-0006 depth bound is therefore the caller's to set:
+    // `mem::null_source()` refuses the first spill and the walk answers TLV_NESTING_TOO_DEEP.
     validate_sink sink;
-    const auto r = walk_span(input, sink, spill);
+    std::array<grammar::walk_frame_t<grammar::span_cursor>, 8> slots;
+    grammar::walk_stack_t<grammar::span_cursor> stack(slots, &spill);
+    const auto r = grammar::walk(grammar::span_cursor{input}, sink, stack);
     if (!r) return std::unexpected(r.error());
     return tlv_node_t(sink.root_, input);
 }
@@ -196,7 +126,7 @@ std::optional<trailer_t> tlv_node_t::trailer() const noexcept {
 }
 
 std::vector<std::byte> encode(const tlv_t& tlv) {
-    // Symmetry with decode (#886). `path_ref_body_valid` is the ONE home of the grammar's only
+    // Symmetry with the reader (#886). `path_ref_body_valid` is the ONE home of the grammar's only
     // per-type structural rule (RFC-0024 §4.2/§4.3) and `grammar::parse_header` has always
     // consulted it; this door did not, so a caller-built PATH_REF with `opt.pl`, `opt.ll`, or a
     // body that is not a whole number of 8-byte elements serialized to bytes this very library
@@ -275,10 +205,10 @@ std::vector<std::byte> encode(const tlv_t& tlv) {
     return out;
 }
 
-std::optional<std::vector<std::byte>> path_key(const tlv_t& path) {
+std::optional<std::vector<std::byte>> path_key(const tlv_node_t& path) {
     // The canonical PATH-payload key IS the PATH body (RFC-0018): a packed sequence of
-    // `[u8 len][bytes]` records with `opt.PL = 0`, so a decoded PATH carries it in
-    // `payload` and there is nothing to re-assemble from children. One copy, no
+    // `[u8 len][bytes]` records with `opt.PL = 0`, so a PATH node carries it in
+    // `payload()` and there is nothing to re-assemble from children. One copy, no
     // per-segment append, and byte-identical to what `path_t::parse` / `register_vertex`
     // store — the vertex-map key round-trips exactly.
     //
@@ -290,9 +220,10 @@ std::optional<std::vector<std::byte>> path_key(const tlv_t& path) {
     // key context** (this function's callers are the ADVERTISE route resolve and the
     // SUBSCRIBER target), where RFC-0018 §5.4 rejects the escape. Refusing here means a
     // malformed route still produces no key at all rather than a partial one.
-    if (path.opt.pl || !path.children.empty()) return std::nullopt;
-    if (!wire::packed_path_valid_key(path.payload)) return std::nullopt;
-    return std::vector<std::byte>(path.payload.begin(), path.payload.end());
+    if (path.opt().pl) return std::nullopt;
+    const std::span<const std::byte> body = path.payload();
+    if (!wire::packed_path_valid_key(body)) return std::nullopt;
+    return std::vector<std::byte>(body.begin(), body.end());
 }
 
 bool equal(const tlv_t& a, const tlv_t& b) noexcept {

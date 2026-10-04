@@ -45,6 +45,7 @@
 #include "libtracer/tracer.hpp"
 #include "test_support.hpp"
 #include "test_values.hpp"
+#include "tlv_tree.hpp"  // host-only owning tree (#1829)
 
 namespace {
 
@@ -406,7 +407,7 @@ void test_outer_acl_shape() {
         check(back == canonical, ":acl reads back CANONICAL — the parsed ACEs re-encoded");
         bool reparses = false;
         if (back) {
-            if (const auto dec = tr::wire::decode(*back); dec) {
+            if (const auto dec = tr::wire::tlv_node_t::over(*back); dec) {
                 const auto aces = tr::graph::parse_acl(*dec);
                 reparses = aces && aces->size() == 1 && (*aces)[0].access_mask == mask;
             }

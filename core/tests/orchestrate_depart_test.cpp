@@ -60,6 +60,7 @@
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport_vertex.hpp"
 #include "libtracer/transport_ws.hpp"
+#include "tlv_tree.hpp"  // host-only owning tree (#1829)
 
 namespace {
 

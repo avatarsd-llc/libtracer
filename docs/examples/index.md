@@ -12,7 +12,7 @@ verbatim from that file, so it cannot drift from what actually compiles.
 | ------- | ----- | ------------- |
 | [In-process pub/sub](in-process-pubsub.md) | L4 graph | `read`/`write`/`await`, three delivery styles, zero-copy fan-out |
 | [Pub/sub fan-out & dispatch cost](pubsub-fanout.md) | L4 graph | per-delivery latency as fan-out scales 1 → 8 → 64; `:schema` discovery |
-| [Wire codec round-trip](wire-roundtrip.md) | L2/L3 codec | `encode` / `decode`, the CRC trailer, and zero-copy borrowed payloads |
+| [Wire codec round-trip](wire-roundtrip.md) | L2/L3 codec | `encode` / `tlv_node_t::over`, the CRC trailer, and zero-copy borrowed payloads |
 | [Wire codec deep-dive & throughput](wire-codec.md) | L2/L3 codec | frame anatomy + encode/decode/round-trip throughput |
 | [Rope scatter-gather](rope-scatter.md) | L1 views | compose a multi-link `rope_t`; `to_iovec` (zero copy) vs `flatten` (one copy) |
 | [Two nodes over a wire — FWD delivery](two-node-fwd.md) | L4 + transport | `fwd_router_t` source-routing across a channel; cross-wire latency |
@@ -37,7 +37,7 @@ verbatim from that file, so it cannot drift from what actually compiles.
 | [A `PATH` body is packed segment records](wire-packed-path.md) | L2/L3 codec | RFC-0018: one spelling per address, and the body IS the vertex-map key |
 | [The escape record](wire-path-escape.md) | L2/L3 codec | RFC-0018 §5.4: stepped over by an unknowing hop, refused in canonical context |
 | [The trailer: CRC and timestamp](wire-trailer.md) | L2/L3 codec | opt-in integrity at the end; `FRAME_CRC_FAIL`; the loud `opt.ts` refusal |
-| [What `decode` refuses](wire-decode-refusals.md) | L2/L3 codec | the four verdicts; RFC-0006 nesting bounded by the caller's injected source |
+| [What the frame reader refuses](wire-decode-refusals.md) | L2/L3 codec | the four verdicts; RFC-0006 nesting bounded by the caller's injected source |
 | [`decode_into`: a flat arena](wire-arena-decode.md) | L2/L3 codec | a pre-order node array over a stack bump source — zero heap, borrowed spans |
 | [`tlv_view_t`: a scattered frame](wire-lazy-view.md) | L1 + L2/L3 | ADR-0053 lazy decode over a rope split mid-header; `verify` and `materialize` |
 | [The segment, and its refcount](view-segment-refcount.md) | L1 views | copy == clone; the last drop reclaims; what every other example's first line means |
@@ -278,7 +278,7 @@ Structured or opaque — one bit decides <wire-structured-vs-opaque>
 A PATH body is packed segment records <wire-packed-path>
 The escape record <wire-path-escape>
 The trailer: CRC and timestamp <wire-trailer>
-What decode refuses <wire-decode-refusals>
+What the frame reader refuses <wire-decode-refusals>
 decode_into: a flat arena <wire-arena-decode>
 tlv_view_t: a scattered frame <wire-lazy-view>
 The segment, and its refcount <view-segment-refcount>

@@ -39,7 +39,7 @@ namespace tr::graph {
 using wire::encode;
 using wire::key_view_t;
 using wire::opt_t;
-using wire::tlv_t;
+using wire::tlv_node_t;
 using wire::type_t;
 namespace {
 
@@ -546,7 +546,7 @@ graph_t::graph_t(mem::block_source_t& src, graph_hooks_t hooks)
     // beyond the standard `:settings` field, written separately). Devices add richer
     // types (controllers, transport connections — #83) via register_child_type.
     register_child_type("stored_value", {[](void*, graph_t& g, std::vector<std::byte> child_key,
-                                            const tlv_t*) -> result_t<vertex_handle_t> {
+                                            const tlv_node_t*) -> result_t<vertex_handle_t> {
                                              return g.register_vertex_key(std::move(child_key),
                                                                           role_t::STORED_VALUE);
                                          },
@@ -3032,9 +3032,10 @@ void graph_t::notify_subscription(sub_event_t::kind_t kind, const vertex_t* v,
     // suppressing the event — the mutation happened either way.
     std::vector<std::byte> target;
     if (!sub_tlv.empty()) {
-        if (const auto tlv = wire::decode(sub_tlv); tlv && tlv->type == type_t::SUBSCRIBER) {
-            for (const tlv_t& child : tlv->children) {
-                if (child.type != type_t::PATH) continue;
+        if (const auto tlv = wire::tlv_node_t::over(sub_tlv);
+            tlv && tlv->type() == type_t::SUBSCRIBER) {
+            for (const wire::tlv_node_t child : tlv->children()) {
+                if (child.type() != type_t::PATH) continue;
                 if (auto k = wire::path_key(child)) target = *std::move(k);
                 break;
             }
@@ -3208,9 +3209,9 @@ result_t<void> graph_t::subscribe_wire(vertex_handle_t vh, view::view_t source_v
     // empty residual it refuses to build a route from.
     if (return_route.empty()) return std::unexpected(status_t::INVALID_PATH);
     // Parse the owned SUBSCRIBER copy ONCE (ADR-0049) — delivery_compact comes from this
-    // parse (the resolver's parallel subscriber_compact() is retired); the tlv_t borrows
+    // parse (the resolver's parallel subscriber_compact() is retired); the node borrows
     // source_view's bytes, which the slot then retains zero-copy.
-    const auto sub = wire::decode(source_view);
+    const auto sub = wire::tlv_node_t::over(source_view);
     if (!sub) return std::unexpected(status_t::TYPE_MISMATCH);
     subscriber_t s;
     // The shared door parse (ADR-0049, #869) — type check + parse. The retain stays here;

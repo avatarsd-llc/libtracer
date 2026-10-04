@@ -49,6 +49,7 @@
 #include "libtracer/path_label_table.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "test_support.hpp"
+#include "tlv_tree.hpp"  // host-only owning tree (#1829)
 
 namespace {
 
@@ -276,7 +277,7 @@ int main() {
 
         origin_t o;
         path_t target = origin_target();
-        const auto dec = tr::wire::decode(*minted);
+        const auto dec = tr::wire::tlv_node_t::over(*minted);
         check(dec.has_value() && o.r.adopt_path_label(target, kOriginLink, *dec),
               "the origin adopts the minted `src` (the analogue of adopt_binding, erratum 2)");
         check(target.path_label().cached, "…and the path came out carrying a labelled spelling");
@@ -313,7 +314,7 @@ int main() {
         check(unminted.has_value(), "an un-injected hop still relays the reply");
         origin_t o;
         path_t target = origin_target();
-        const auto dec = tr::wire::decode(*unminted);
+        const auto dec = tr::wire::tlv_node_t::over(*unminted);
         check(dec.has_value() && !o.r.adopt_path_label(target, kOriginLink, *dec),
               "a reply with NO label element is not adopted — a pure-string spelling is key()");
         check(!target.path_label().cached && key_intact(target),
@@ -326,13 +327,13 @@ int main() {
         const tr::wire::path_ref_element_t e{.index = 1, .generation = 1};
         check(bound.bind(std::span<const tr::wire::path_ref_element_t>(&e, 1)),
               "a path bound to a PATH_REF route");
-        const auto mdec = tr::wire::decode(*minted);
+        const auto mdec = tr::wire::tlv_node_t::over(*minted);
         check(mdec.has_value() && !o.r.adopt_path_label(bound, kOriginLink, *mdec),
               "a PATH_REF-bound path refuses the label spelling (§11.2)");
 
         // A reply that is not a routed FWD at all carries no `src` to adopt.
         const bytes_t no_src = b_fwd_raw_op(kRead, b_path({"x"}), {}, {}, b_value_u32(1));
-        const auto ndec = tr::wire::decode(no_src);
+        const auto ndec = tr::wire::tlv_node_t::over(no_src);
         path_t p2 = origin_target();
         check(ndec.has_value() && !o.r.adopt_path_label(p2, kOriginLink, *ndec),
               "a frame with no `src` PATH is not adopted");
@@ -348,7 +349,7 @@ int main() {
 
         origin_t o;
         path_t target = origin_target();
-        const auto dec = tr::wire::decode(*minted);
+        const auto dec = tr::wire::tlv_node_t::over(*minted);
         check(dec.has_value() && o.r.adopt_path_label(target, kOriginLink, *dec), "adopted");
 
         const auto dispatch = o.r.label_dispatch(target);
@@ -393,7 +394,7 @@ int main() {
         const std::optional<bytes_t> minted = hop_round_trip(h);
         origin_t o;
         path_t target = origin_target();
-        const auto dec = tr::wire::decode(*minted);
+        const auto dec = tr::wire::tlv_node_t::over(*minted);
         check(dec.has_value() && o.r.adopt_path_label(target, kOriginLink, *dec), "adopted");
         const auto dispatch = o.r.label_dispatch(target);
         check(dispatch.has_value(), "and spendable");
@@ -409,7 +410,7 @@ int main() {
         check(!h.cli.sent.empty(), "…and the origin is ANSWERED, not left waiting");
 
         // The refusal, as the production hop really spells it.
-        const auto refusal = tr::wire::decode(h.cli.sent.back());
+        const auto refusal = tr::wire::tlv_node_t::over(h.cli.sent.back());
         check(refusal.has_value(), "the refusal is a well-formed frame");
         check(refusal.has_value() && o.r.fall_back_on_label_refusal(target, *refusal),
               "tr::path::not_found drops the cached spelling — the whole recovery (§7.2)");
@@ -426,7 +427,7 @@ int main() {
         // adopts the new spelling — the fallback is complete, not a one-way downgrade.
         (void)h.r.add_child(std::string(kOutLink), h.up);
         const std::optional<bytes_t> reminted = hop_round_trip(h);
-        const auto rdec = tr::wire::decode(*reminted);
+        const auto rdec = tr::wire::tlv_node_t::over(*reminted);
         check(rdec.has_value() && o.r.adopt_path_label(target, kOriginLink, *rdec),
               "the next reply re-mints and the origin adopts it (§6.1)");
         check(o.r.label_dispatch(target).has_value(), "…and the path is spendable again");
@@ -439,7 +440,7 @@ int main() {
         const std::optional<bytes_t> minted = hop_round_trip(h);
         origin_t o;
         path_t target = origin_target();
-        const auto dec = tr::wire::decode(*minted);
+        const auto dec = tr::wire::tlv_node_t::over(*minted);
         check(dec.has_value() && o.r.adopt_path_label(target, kOriginLink, *dec), "adopted");
 
         // A denial, an invalid address, backpressure: each is a real refusal and none of them
@@ -449,7 +450,7 @@ int main() {
              {tr::wire::err_t::ACCESS_DENIED, tr::wire::err_t::PATH_INVALID}) {
             const bytes_t reply = b_fwd_reply(tr::graph::reply_kind_t::ERROR, b_path({"reply-ep"}),
                                               b_path({"x"}), b_error_status(other));
-            const auto rdec = tr::wire::decode(reply);
+            const auto rdec = tr::wire::tlv_node_t::over(reply);
             check(rdec.has_value() && !o.r.fall_back_on_label_refusal(target, *rdec),
                   "a non-NOT_FOUND error leaves the cached spelling alone");
         }
@@ -462,7 +463,7 @@ int main() {
         tr::wire::emit_tlv(two_byte, tr::wire::type_t::VALUE, tr::wire::opt_t{}, raw);
         const bytes_t ok_reply = b_fwd_reply(tr::graph::reply_kind_t::RESULT, b_path({"reply-ep"}),
                                              b_path({"x"}), two_byte);
-        const auto odec = tr::wire::decode(ok_reply);
+        const auto odec = tr::wire::tlv_node_t::over(ok_reply);
         check(odec.has_value() && !o.r.fall_back_on_label_refusal(target, *odec),
               "a RESULT whose payload happens to be two bytes is not a NOT_FOUND refusal");
         check(target.path_label().cached, "…and the spelling is still there");

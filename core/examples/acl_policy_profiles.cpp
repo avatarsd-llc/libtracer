@@ -90,7 +90,7 @@ int main() {
     // Which is exactly why that list may not be stored under the ALLOW-only profile. `parse_acl`
     // is where the refusal happens — the write door, not the evaluator (see acl_parse_strict).
     const auto encoded = tr::graph::encode_acl(deny_then_allow);
-    const auto decoded = tr::wire::decode(encoded);
+    const auto decoded = tr::wire::tlv_node_t::over(encoded);
     check(ok, decoded.has_value(), "the ACL TLV itself is well-formed either way");
     check(ok, tr::graph::parse_acl<full_acl_policy_t>(*decoded).has_value(),
           "the full profile parses it: it can evaluate what it is about to store");

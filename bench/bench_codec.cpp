@@ -26,6 +26,11 @@
  * (warmup, ~100ms throughput phase, individually-timed latency samples) mirrors
  * the TS / Rust benches so the three cores are directly comparable.
  *
+ * The decode half builds the owning `tlv_t` tree the TS / Rust benches also build, through the
+ * host-only test support in core/tests/tlv_tree.hpp (`tlv_node_t::over` plus a recursive copy):
+ * the core library's own owning `decode` was deleted in #1829, and the row keeps measuring the
+ * same work so it stays comparable across cores and across releases.
+ *
  *   bench_codec [vectors_dir]
  * The vectors dir is taken from argv[1], else the compiled-in repo default.
  */
@@ -42,6 +47,7 @@
 #include <utility>
 #include <vector>
 
+#include "../core/tests/tlv_tree.hpp"  // host-only owning tree (#1829)
 #include "bench_common.hpp"
 #include "libtracer/tracer.hpp"
 

@@ -1154,7 +1154,7 @@ std::atomic<std::uint64_t> g_insecure_refusals{0};
  *         type) so the factory refuses the SPEC. Pair-consuming
  *         (#927), like every other config parse: a forward-compat pair whose string
  *         value reads `"tls"` must not bind the FOLLOWING child as the profile name. */
-[[nodiscard]] wt_private_cfg_t parse_wt_config(const wire::tlv_t* raw_config) {
+[[nodiscard]] wt_private_cfg_t parse_wt_config(const wire::tlv_node_t* raw_config) {
     wt_private_cfg_t out;
     const wire::config_reader_t cfg(raw_config);
     if (const auto v = cfg.name("tls")) out.tls = *v;
@@ -1169,9 +1169,8 @@ std::atomic<std::uint64_t> g_insecure_refusals{0};
 
 transport_factory_t webtransport_transport_factory(std::span<const tls_profile_t> profiles,
                                                    mem::mem_backend_t* rx_backend) {
-    return [profiles, rx_backend](
-               const conn_settings_t& s,
-               const wire::tlv_t* raw_config) -> graph::result_t<std::unique_ptr<transport_t>> {
+    return [profiles, rx_backend](const conn_settings_t& s, const wire::tlv_node_t* raw_config)
+               -> graph::result_t<std::unique_ptr<transport_t>> {
         // BOTH roles carry kind-private keys, so the parse precedes the role split:
         // the DIAL branch used to return before parse_wt_config ever ran, which is
         // why no SPEC could reach the dial-side trust knobs at all (#918).
