@@ -2325,8 +2325,8 @@ void graph_t::fan_out(vertex_t* v, const value_t& value) {
 }
 
 result_t<value_ref_t> graph_t::store_value(vertex_t* v, view::rope_t&& value,
-                                           vertex_t::store_drops_t& drops,
-                                           std::string_view caller) {
+                                           vertex_t::store_drops_t& drops, std::string_view caller,
+                                           vertex_t::ring_take_t* take) {
     drops = vertex_t::store_drops_t{};
     if (v->role() == role_t::HANDLER) return handler_write_rope(v, std::move(value), caller);
     // ADMISSION (the retaining roles' pre-store seam). It sits HERE — inside the one function
@@ -2365,7 +2365,7 @@ result_t<value_ref_t> graph_t::store_value(vertex_t* v, view::rope_t&& value,
         // the point: nothing downstream can reach the spelling the filter rejected.
         if (*decided) block = value_ref_t::adopt(value_t::make(std::move(**decided), *ctl_));
     }
-    return publish_value(v, std::move(block), drops);
+    return publish_value(v, std::move(block), drops, take);
 }
 
 [[gnu::noinline]] result_t<value_ref_t> graph_t::handler_write(vertex_t* v, const value_t& value,
@@ -2494,7 +2494,8 @@ admission_t graph_t::admit(vertex_t* v, const value_t& value, std::string_view c
 }
 
 result_t<value_ref_t> graph_t::publish_value(vertex_t* v, value_ref_t sp,
-                                             vertex_t::store_drops_t& drops) {
+                                             vertex_t::store_drops_t& drops,
+                                             vertex_t::ring_take_t* take) {
     // The storage verb has ONE tail for every role now (RFC-0025 §4.6.1 clause 1): publish the
     // LKV lock-free, bump the sequence, wake awaiters. A PRODUCER NEVER QUEUES — the ring the
     // STREAM arm used to append here moved to the RECEIVING vertex, below.
@@ -2533,23 +2534,18 @@ result_t<value_ref_t> graph_t::publish_value(vertex_t* v, value_ref_t sp,
     // the drain cursor only advances over entries that are IN the ring, so the late arrival is
     // taken by the next covering flush. Charging BEFORE the publish would instead have to
     // un-charge on an LKV soft-fail, which is a leak waiting for its first early return.
-    if (receives && !v->ring_admit(sp, retained, ring_source_for(v), &drops))
+    //
+    // A write hands `take` in, and the admission takes the unflushed window into it under the
+    // SAME stripe section (#1713): admit-then-drain used to be two sections and a heap vector.
+    //
+    // The source is resolved INSIDE that section too. The graph hands only its DEFAULT; a vertex
+    // that declared its own (or has already charged) has it bound in its ring state, and
+    // `vertex_t::ring_admit` charges the bound source first — "per-injection-point, never a
+    // shared pool" (RFC-0025 §4.6.1 clause 3), spelled once, under the lock. Reading the bound
+    // source here, unlocked, raced the first admission that creates the ring state.
+    if (receives && !v->ring_admit(sp, retained, *ring_, &drops, take))
         return std::unexpected(status_t::BACKPRESSURE);  // the RELIABLE arm of §4.4
     return sp;
-}
-
-/**
- * @brief The source a receiving vertex charges its ring admissions against: its OWN if it
- *        declared one, else this graph's default (RFC-0025 §4.6.1 clause 3).
- *
- * The whole resolution, in one place, so "per-injection-point, never a shared pool" has a
- * single spelling. The default is a DEFAULT — it exists so a vertex that declared nothing
- * still has somewhere to charge — and `vertex_t::ring_admit` binds whatever it is handed on
- * first use, because a sized reclaim must reach the source that served the block.
- */
-mem::block_source_t& graph_t::ring_source_for(vertex_t* v) const noexcept {
-    mem::block_source_t* const own = v->ring_source();
-    return own != nullptr ? *own : *ring_;
 }
 
 void graph_t::deliver_unstored(vertex_t* v, const view::rope_t& value,
@@ -2664,7 +2660,11 @@ result_t<void> graph_t::write_impl(vertex_t* v, view::rope_t value, std::string_
     // not mint one to share). One relaxed test of the flag byte the admission check reads.
     if (v->retains_none()) return relay_write(v, std::move(value), caller);
     vertex_t::store_drops_t store_drops;
-    const result_t<value_ref_t> stored = store_value(v, std::move(value), store_drops, caller);
+    // The STREAM arm's drain buffer, filled by the ring admission itself (#1713): stack-first,
+    // so the common write — whose window is its own entry — allocates nothing for it.
+    vertex_t::ring_take_t taken;
+    const result_t<value_ref_t> stored = store_value(v, std::move(value), store_drops, caller,
+                                                     role == role_t::STREAM ? &taken : nullptr);
     if (!stored) return std::unexpected(stored.error());
     if (role == role_t::STREAM) {
         // Drain this RECEIVER's ring and advance its cursor, so a later propagate over the
@@ -2676,8 +2676,16 @@ result_t<void> graph_t::write_impl(vertex_t* v, view::rope_t value, std::string_
         // counting sites (#1003). The write still succeeds; the tally is what makes the loss
         // something an operator can see, and the drain's gap out-param is what makes it
         // something the CONSUMER can see, in order, at the shed point.
+        //
+        // The drain already HAPPENED, inside the admission's own lock section (#1713). Only a
+        // store that never reached the ring (its role moved under a racing retire) left the
+        // take disengaged, and that one falls back to the separate drain it always had.
         count_store_drops(v, store_drops);
-        deliver_current(v);
+        if (!taken.engaged()) {
+            deliver_current(v);
+        } else {
+            for (const value_ref_t& sp : taken.entries()) deliver_vertex(v, *sp);
+        }
     } else {
         // Deliver exactly what was stored (RFC-0008 §D): the published LKV pointer —
         // no notify reclone of the rope on the hot write path.
@@ -2950,10 +2958,11 @@ void graph_t::deliver_current(vertex_t* v) {
     if (v->role() == role_t::STREAM) {
         // A stream is a queue (RFC-0008 §E): drain the RECEIVER's ring entries appended since
         // the last flush, in order — NOT a coalesce. Snapshot under the lock
-        // (vertex_t::drain_unflushed), deliver outside.
-        std::vector<value_ref_t> batch;
-        if (v->drain_unflushed(batch) == 0) return;  // nothing appended since the last flush
-        for (const value_ref_t& sp : batch) deliver_vertex(v, *sp);
+        // (vertex_t::take_unflushed), deliver outside — into a stack-first buffer, so a sweep
+        // over a short window allocates nothing for it (#1713).
+        vertex_t::ring_take_t batch;
+        if (v->take_unflushed(batch) == 0) return;  // nothing appended since the last flush
+        for (const value_ref_t& sp : batch.entries()) deliver_vertex(v, *sp);
         return;
     }
     // STORED_VALUE: the last-known-value, once. HANDLER / never-assigned: null LKV, nothing.

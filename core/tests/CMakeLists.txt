@@ -2640,3 +2640,12 @@ add_executable(lean_link_defaults_test lean_link_defaults_test.cpp)
 target_link_libraries(lean_link_defaults_test PRIVATE libtracer)
 libtracer_test_warnings(lean_link_defaults_test)
 add_test(NAME lean_link_defaults COMMAND lean_link_defaults_test)
+
+# #1713 — a STREAM write is ONE stripe-lock section and zero heap allocations in the common
+# case. `--wrap=pthread_mutex_lock` is the lock counter (the httpd suites' `--wrap=send`
+# precedent); the test counts only the watched stripe's acquisitions.
+add_executable(stream_admit_one_lock_test stream_admit_one_lock_test.cpp)
+target_link_libraries(stream_admit_one_lock_test PRIVATE libtracer)
+target_link_options(stream_admit_one_lock_test PRIVATE "-Wl,--wrap=pthread_mutex_lock")
+libtracer_test_warnings(stream_admit_one_lock_test)
+add_test(NAME stream_admit_one_lock COMMAND stream_admit_one_lock_test)

@@ -85,12 +85,6 @@
       ],
       "file": "core/include/libtracer/vertex.hpp"
     },
-    "tr::graph::vertex_t::ring_admit": {
-      "ccn": [
-        17
-      ],
-      "file": "core/include/libtracer/vertex.hpp"
-    },
     "tr::net::can_transport_factory": {
       "ccn": [
         17

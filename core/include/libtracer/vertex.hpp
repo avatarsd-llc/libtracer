@@ -1241,6 +1241,76 @@ class vertex_t {
         [[nodiscard]] bool any() const noexcept { return ring_append || ring_shed != 0; }
     };
 
+    /**
+     * @brief The STACK-FIRST buffer a STREAM ring's unflushed window is taken into (#1713):
+     *        the first @ref kInline entries live in the caller's frame, a wider window spills
+     *        once to the heap.
+     *
+     * The write path fills it in the SAME stripe-lock section that admits the entry
+     * (`%ring_admit`'s take out-param), and the sweep path through %take_unflushed, so a
+     * STREAM write is one lock section and — in the common case, where the window is the
+     * write's own entry — no allocation at all. The heap `std::vector` it replaces cost a
+     * malloc/free per write on a host, and two pairs on a `-fno-exceptions` target, where the
+     * nothrow reserve probes before it commits.
+     *
+     * It is transient caller storage, never a library-held buffer: it lives for one delivery and
+     * holds refcount shares of entries the ring already owns. The spill keeps the old drain's
+     * contract exactly — a window that cannot be snapshotted is NOT taken, so the cursor stays
+     * put and the next covering flush re-takes it (deferred, never lost, #477).
+     */
+    class ring_take_t {
+       public:
+        /**
+         * @brief The in-frame width: 4 entries — 32 B on a 64-bit host, 16 B on rv32.
+         *
+         * A STREAM write's window is its OWN entry (the fused take empties the cursor every
+         * write, so a concurrent writer takes its own entries too); a wider window only comes
+         * from `assign`s queued without a flush. Four covers a write behind a short burst of
+         * those, and the slots cost less than one `%edge_view_t` of frame. A strategy knob, not
+         * a limit: a wider window spills and is delivered whole (STYLE.md, counting doctrine 6).
+         */
+        static constexpr std::size_t kInline = 4;
+
+        /** @brief An empty take; nothing allocated. */
+        ring_take_t() noexcept = default;
+        /** @brief Non-copyable — transient delivery storage, never a value. */
+        ring_take_t(const ring_take_t&) = delete;
+        /** @brief Non-assignable — transient delivery storage, never a value. */
+        ring_take_t& operator=(const ring_take_t&) = delete;
+
+        /** @brief The taken entries, oldest first. */
+        [[nodiscard]] std::span<const value_ref_t> entries() const noexcept {
+            return spill_.empty() ? std::span<const value_ref_t>(inline_.data(), n_)
+                                  : std::span<const value_ref_t>(spill_);
+        }
+        /** @brief Did a ring admission run the take at all? False only when the store never
+         *         reached a STREAM ring (a role that changed under a racing retire), which
+         *         is the one case the caller falls back to a separate drain for. */
+        [[nodiscard]] bool engaged() const noexcept { return engaged_; }
+
+       private:
+        friend class vertex_t;
+        /**
+         * @brief Make room for @p n entries: in-frame when they fit, else ONE nothrow spill.
+         * @return false iff the spill could not be allocated (nothing taken; retry later).
+         */
+        [[nodiscard]] bool reserve(std::size_t n) noexcept {
+            return n <= kInline || tr::detail::try_reserve(spill_, n);
+        }
+        /** @brief Append one refcount share; %reserve has made room. */
+        void push_back(const value_ref_t& v) {
+            if (spill_.capacity() != 0)
+                spill_.push_back(v);  // within capacity — no allocation
+            else
+                inline_[n_++] = v;
+        }
+
+        std::array<value_ref_t, kInline> inline_{}; /**< @brief The in-frame slots. */
+        std::vector<value_ref_t> spill_;            /**< @brief The overflow; empty ⇒ unused. */
+        std::size_t n_ = 0;                         /**< @brief In-frame entries taken. */
+        bool engaged_ = false;                      /**< @brief See @ref engaged. */
+    };
+
    private:
     // #1300: the storage funnel is graph_t's, for the same reason the map-lock mutators above
     // are — `store()` is reachable ONLY through `graph_t::store_value`, the one seam that
@@ -1366,18 +1436,39 @@ class vertex_t {
      *
      * @param sp       The published value to queue (refcount share; the caller keeps its own).
      * @param bytes    The retained width to reserve — payload plus %kRingEntryOverhead.
-     * @param src      The graph-resolved effective source; BOUND into `ring_state_t::source`
-     *                 on first use so every later release reaches the source that served it.
+     * @param src      The graph's DEFAULT source. A source already bound in
+     *                 `%ring_state_t::source` (declared through `%graph_t::set_ring_source`, or
+     *                 bound by an earlier admission) wins; otherwise @p src is BOUND on first
+     *                 use, so every later release reaches the source that served it. Resolved
+     *                 here, under the lock, because the bound source lives in ring state the
+     *                 first admission creates.
      * @param drops    Out: what this admission SHED — set, never cleared, so the caller owns
      *                 the zeroing. `graph_t::count_store_drops` is the seam that must not forget.
+     * @param take     Optional out (#1713): when non-null, the unflushed window is taken into
+     *                 it IN THE SAME lock section — exactly what %take_unflushed would take
+     *                 right after — so the write path pays one stripe section, not two. Not
+     *                 filled on the reliable refusal, which delivers nothing.
      * @return true iff the entry was queued. False is the RELIABLE refusal — and only that, so
      *         a caller can map it straight to `BACKPRESSURE` without re-deriving the arm.
      */
     bool ring_admit(const value_ref_t& sp, std::size_t bytes, tr::mem::block_source_t& src,
-                    store_drops_t* drops) {
+                    store_drops_t* drops, ring_take_t* take = nullptr) {
         const std::lock_guard lock(vertex_stripe_of(this).m);
         vertex_ext_t* e = ext_.load(std::memory_order_acquire);
+        if (take != nullptr) take->engaged_ = true;
         if (e == nullptr) return true;  // no ext, no ring — nothing to admit into, nothing shed
+        const bool admitted = admit_locked(e, sp, bytes, src, drops);
+        if (admitted && take != nullptr) take_locked(*e, *take);
+        return admitted;
+    }
+
+    /**
+     * @brief The body of %ring_admit, under the stripe lock the caller holds, on the
+     *        vertex's non-null extension @p e.
+     * @return As %ring_admit.
+     */
+    bool admit_locked(vertex_ext_t* e, const value_ref_t& sp, std::size_t bytes,
+                      tr::mem::block_source_t& src, store_drops_t* drops) {
         if (!e->ring) e->ring = std::make_unique<ring_state_t>();  // first append (#388 lazy)
         ring_state_t& r = *e->ring;
         // Bind the source ONCE. A release must reach the source that served the block (sized
@@ -1432,13 +1523,15 @@ class vertex_t {
             ++shed;
             token = source.try_alloc(bytes, ring_entry_t::kAlign);
         }
+        // The shed is accounted on BOTH outcomes, so once, here. Under the reliable arm `shed`
+        // is always zero (only best-effort sheds), so this is a no-op there.
+        if (drops != nullptr) drops->ring_shed += shed;
+        r.gaps += shed;
         if (token == nullptr) {
             // Nothing admitted. Under the reliable arm nothing was shed either, and the caller
             // turns our `false` into BACKPRESSURE. Under best-effort the ring was already
             // emptied above, so the loss is real and is accounted rather than silent.
             if (drops != nullptr && !arm_reliable) drops->ring_append = true;
-            if (drops != nullptr) drops->ring_shed += shed;
-            r.gaps += shed;
             return !arm_reliable;
         }
         // Placed at the front of its own reservation: the queue's bookkeeping is charged to the
@@ -1447,9 +1540,50 @@ class vertex_t {
                                              .bytes = bytes,
                                              .gap_before = shed != 0});
         ++e->appended_since_flush;  // the drain counts APPENDS, not seq (#925)
-        if (drops != nullptr) drops->ring_shed += shed;
-        r.gaps += shed;
         return true;
+    }
+
+    /**
+     * @brief Take @p e's unflushed window into @p out and advance the cursor, under the stripe
+     *        lock the caller holds — the one body %ring_admit's fused take and
+     *        %take_unflushed share.
+     *
+     * The window is the newest `min(appended_since_flush, count)` entries: APPENDS, never a
+     * write-sequence delta (#925), and never more than the ring still holds (entries trimmed
+     * before the take are bounded history). The cursor advances only once @p out has room, so
+     * a refused spill defers the window to the next flush instead of losing it (#477).
+     * @return The number of entries taken.
+     */
+    static std::size_t take_locked(vertex_ext_t& e, ring_take_t& out) {
+        if (e.appended_since_flush == 0 || !e.ring) return 0;
+        const ring_state_t& r = *e.ring;
+        const auto take =
+            static_cast<std::size_t>(std::min<std::uint64_t>(e.appended_since_flush, r.count));
+        if (!out.reserve(take)) return 0;  // deferred, never lost — the cursor stays
+        e.appended_since_flush = 0;
+        if (take == 0) return 0;
+        // The newest `take` entries: step back from the tail, then walk forward in order.
+        const ring_entry_t* it = r.tail;
+        for (std::size_t i = 1; i < take; ++i) it = it->prev;
+        for (; it != nullptr; it = it->next) out.push_back(it->value);  // refcount shares
+        return take;
+    }
+
+    /**
+     * @brief Take the unflushed window into @p out (stack-first, #1713) and
+     *        advance the cursor — the sweep path's drain, one stripe section.
+     *
+     * The same window and the same cursor rule as @ref drain_unflushed, which keeps the
+     * caller-vector shape for the public `%graph_t::drain_unflushed`. A window @p out cannot
+     * hold (its spill refused) is NOT taken: the cursor stays and the next flush re-takes it.
+     * The gap census is left alone, exactly as a drain without a gap out-param leaves it.
+     * @return The number of entries taken.
+     */
+    std::size_t take_unflushed(ring_take_t& out) {
+        const std::lock_guard lock(vertex_stripe_of(this).m);
+        vertex_ext_t* e = ext_.load(std::memory_order_acquire);
+        out.engaged_ = true;
+        return e != nullptr ? take_locked(*e, out) : 0;
     }
 
    public:
