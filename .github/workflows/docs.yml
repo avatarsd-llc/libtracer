@@ -248,8 +248,15 @@ jobs:
       # The trend charts' source rules (#1769): the page opens on bench-local, the hosted
       # store is the portability envelope, and the zenoh ratio is same-pass only. Tested
       # here because this job is the one that renders the charts; it needs no build.
-      - name: Trend-chart source-selection tests
-        run: python3 bench/test_render_history.py
+      # Any change to bench/render_*.py, bench/gen_results_page.py or
+      # docs/_static/perf_history.* reaches this step through DOCS_PATHS (bench/**,
+      # docs/**) (#1853). The band tests execute docs/_static/perf_history.js under node
+      # and SKIP without it, so node is asserted first: a missing node fails here
+      # instead of passing with those tests skipped. `-v` names every test and skip.
+      - name: Trend-chart renderer and page-script tests
+        run: |
+          node --version
+          python3 bench/test_render_history.py -v
       # The sustained-step detector's decision rule (#1770): the page's "Recent steps"
       # table and the step markers on the trend charts are both drawn from it.
       - name: Sustained-step detector tests
