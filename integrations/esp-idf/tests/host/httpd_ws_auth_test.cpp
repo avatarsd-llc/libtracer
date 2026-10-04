@@ -728,6 +728,116 @@ void test_full_ledger_refuses_the_handshake() {
     run_server();
 }
 
+/** @brief True when @p f is a CLOSE carrying @p code and then @p reason (RFC 6455 §5.5.1). */
+bool is_close(const fake_httpd::server_t::sent_frame_t& f, std::uint16_t code,
+              std::string_view reason) {
+    if (f.type != HTTPD_WS_TYPE_CLOSE || f.payload.size() != 2 + reason.size()) return false;
+    const auto got = static_cast<std::uint16_t>((std::to_integer<unsigned>(f.payload[0]) << 8) |
+                                                std::to_integer<unsigned>(f.payload[1]));
+    return got == code && std::memcmp(f.payload.data() + 2, reason.data(), reason.size()) == 0;
+}
+
+/**
+ * @brief #1857 — REFUSE_AFTER_UPGRADE completes the upgrade, then closes with 1013 and the
+ *        reason, and leaves the link holding nothing for that socket.
+ *
+ * The auth hook is installed and `max_peers` is 1 so that every piece of state a refusal must
+ * NOT take exists to be taken: a peer slot, a pending-handshake row, a deadline.
+ */
+void test_refusal_after_upgrade_closes_with_a_code() {
+    std::printf("#1857 REFUSE_AFTER_UPGRADE answers the 101, then closes 1013:\n");
+    reset_server();
+    auto link = std::make_unique<httpd_ws_link_t>(
+        handle(), "/ws",
+        tr::net::httpd_ws_config_t{.max_peers = 1,
+                                   .peer_named = true,
+                                   .auth_deadline_ms = 200,
+                                   .refusal_close_reason = "busy"});
+    link->set_admission_verdict_cb(&preauth_admission, nullptr);
+    link->set_auth_cb(&recording_auth, nullptr);
+    reset_hook({httpd_ws_link_t::auth_verdict_t::ACCEPT});
+    g_admission_verdict = httpd_ws_link_t::admission_verdict_t::REFUSE_AFTER_UPGRADE;
+    constexpr int kBusy = 750;
+
+    check(fake_httpd::instance().open_session(kBusy), "the handshake was answered with a 101");
+    check(httpd_ws_get_fd_info(handle(), kBusy) == HTTPD_WS_CLIENT_WEBSOCKET,
+          "and the socket is upgraded");
+    check(frames_for(kBusy).empty(), "nothing was written before the upgrade completed");
+    check(peer_count(*link) == 0, "no peer slot was claimed");
+    check(link->stats().peers_refused == 1, "the refusal was counted");
+    run_server();
+    const auto frames = frames_for(kBusy);
+    check(frames.size() == 1 && is_close(frames[0], httpd_ws_link_t::kCloseTryAgainLater, "busy"),
+          "then the queued close went out: code 1013, reason \"busy\"");
+    check(!fake_httpd::instance().has_session(kBusy), "and the socket was shut and reaped");
+
+    // A peer that speaks before its close is written gets the same close, and its frame is
+    // handled no further: neither the auth hook nor the graph sees it.
+    constexpr int kEager = 751;
+    check(fake_httpd::instance().open_session(kEager), "an eager peer's 101 was answered");
+    check(fake_httpd::instance().deliver_frame(kEager, kCredential) == ESP_OK,
+          "its first frame was drained");
+    check(g_seen.empty(), "and handed to nobody");
+    check(frames_for(kEager).size() == 1 &&
+              is_close(frames_for(kEager)[0], httpd_ws_link_t::kCloseTryAgainLater, "busy"),
+          "it was closed 1013 on that frame");
+    run_server();
+    check(frames_for(kEager).size() == 1, "and the queued close found nothing left to do");
+    check(!fake_httpd::instance().has_session(kEager), "the socket was reaped");
+
+    // No ledger row: fill more than the whole ledger with refusals that have not been closed
+    // yet, and an ordinary handshake still finds room.
+    constexpr int kBase = 760;
+    for (std::size_t i = 0; i <= httpd_ws_link_t::kMaxPendingHandshakes; ++i)
+        (void)fake_httpd::instance().open_session(kBase + static_cast<int>(i));
+    g_admission_verdict = httpd_ws_link_t::admission_verdict_t::ADMIT;
+    constexpr int kPlain = 790;
+    check(fake_httpd::instance().open_session(kPlain),
+          "past a ledger's worth of refusals a plain handshake is admitted — they took no row");
+    run_server();
+    // No slot: the only `max_peers` slot is still free for the plain peer's claim.
+    check(fake_httpd::instance().deliver_frame(kPlain, kCredential) == ESP_OK,
+          "its credential frame dispatched");
+    check(peer_count(*link) == 1, "and it claimed the only max_peers slot");
+    // No deadline: past it, the sweep expires nothing.
+    advance_ms(250);
+    check(fake_esp_timer_fire() == 1, "the sweep timer fires past the deadline");
+    run_server();
+    check(link->stats().auth_expired == 0, "and expires nothing — no refusal armed a deadline");
+
+    // REFUSE on the same link still turns the upgrade away.
+    g_admission_verdict = httpd_ws_link_t::admission_verdict_t::REFUSE;
+    constexpr int kRefused = 795;
+    check(!fake_httpd::instance().open_session(kRefused), "REFUSE still abandons the upgrade");
+    check(!fake_httpd::instance().has_session(kRefused), "with no session admitted");
+    check(frames_for(kRefused).empty(), "and no close frame, since there was no upgrade");
+    fake_httpd::instance().close_session(kPlain);
+    run_server();
+}
+
+/** @brief #1857 — the embedder's own close code, and a reason longer than a close frame. */
+void test_refusal_after_upgrade_custom_code_and_long_reason() {
+    std::printf("#1857 the refusal sends the configured code and a cut reason:\n");
+    reset_server();
+    const std::string long_reason(200, 'x');
+    auto link = std::make_unique<httpd_ws_link_t>(
+        handle(), "/ws",
+        tr::net::httpd_ws_config_t{.refusal_close_code = 4503,
+                                   .refusal_close_reason = long_reason});
+    link->set_admission_verdict_cb(&preauth_admission, nullptr);
+    g_admission_verdict = httpd_ws_link_t::admission_verdict_t::REFUSE_AFTER_UPGRADE;
+    constexpr int kFd = 800;
+    check(fake_httpd::instance().open_session(kFd), "the 101 was answered");
+    run_server();
+    const auto frames = frames_for(kFd);
+    check(frames.size() == 1 &&
+              is_close(
+                  frames[0], 4503,
+                  std::string_view(long_reason).substr(0, httpd_ws_link_t::kMaxCloseReasonBytes)),
+          "the close carried code 4503 and the reason cut to 123 bytes");
+    check(!fake_httpd::instance().has_session(kFd), "and the socket was reaped");
+}
+
 /** @brief The destructor retires the sweep timer. */
 void test_teardown_retires_the_timer() {
     std::printf("#1184 teardown retires the sweep:\n");
@@ -764,6 +874,8 @@ int main() {
     test_silent_upgrade_is_closed_at_the_deadline();
     test_no_hook_leaves_a_silent_socket_alone();
     test_full_ledger_refuses_the_handshake();
+    test_refusal_after_upgrade_closes_with_a_code();
+    test_refusal_after_upgrade_custom_code_and_long_reason();
     if (g_failures != 0) {
         std::printf("FAILED: %d check(s)\n", g_failures);
         return 1;

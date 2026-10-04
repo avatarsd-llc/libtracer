@@ -242,6 +242,23 @@ struct httpd_ws_config_t {
      *        unused by this kind (its TX buffers are the pre-allocated slot pool).
      */
     link_memory_t memory{.rx = nullptr};
+    /**
+     * @brief Close code an `admission_verdict_t::REFUSE_AFTER_UPGRADE` refusal sends after its
+     *        101; 0 = `httpd_ws_link_t::kCloseTryAgainLater` (1013, RFC 6455 §7.4.1).
+     *
+     * Sent as given, so it must be one RFC 6455 §7.4 lets an endpoint send: 1000–1003,
+     * 1007–1014, or 3000–4999.
+     */
+    std::uint16_t refusal_close_code = 0;
+    /**
+     * @brief Optional reason text sent with that close code; empty (the default) sends the
+     *        code alone. Copied at construction, so it need not outlive the call.
+     *
+     * A close frame's payload is at most 125 bytes, two of them the code, so a longer
+     * reason is cut to `httpd_ws_link_t::kMaxCloseReasonBytes`, backed off to a UTF-8
+     * character boundary.
+     */
+    std::string_view refusal_close_reason{};
 };
 
 /**
@@ -744,10 +761,11 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
          * count means the producer is pushing to sessions long dead.
          */
         std::uint32_t tx_to_dead_peer = 0;
-        /** @brief Opening handshakes turned away — by the admission predicate, by `max_peers`,
-         *         or (#1247) by a FULL pending-handshake ledger, which is what a link with an
-         *         auth hook answers instead of aborting; see @ref kMaxPendingHandshakes. These
-         *         never reach a slot, so no session can carry them. */
+        /** @brief Opening handshakes turned away — by the admission predicate (either
+         *         refusal verdict, before or after the upgrade), by `max_peers`, or (#1247)
+         *         by a FULL pending-handshake ledger, which is what a link with an auth hook
+         *         answers instead of aborting; see @ref kMaxPendingHandshakes. These never
+         *         reach a slot, so no session can carry them. */
         std::uint32_t peers_refused = 0;
         /** @brief Sessions this link KILLED — a three-strike streak, a rejected short
          *         write, an auth verdict (@ref auth_rejected / @ref auth_expired name the
@@ -995,6 +1013,21 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
          *         its first data frame even though an auth hook is installed. Identical to
          *         @ref ADMIT on a link with no auth hook. */
         ADMIT_AUTHENTICATED,
+        /**
+         * @brief Refuse the peer AFTER completing the upgrade: the 101 goes out, then a close
+         *        frame with `httpd_ws_config_t::refusal_close_code` (default @ref
+         *        kCloseTryAgainLater) and `refusal_close_reason` (#1857).
+         *
+         * A browser's `WebSocket` API hides the HTTP status of a failed upgrade, so a peer
+         * turned away by @ref REFUSE sees a bare close 1006, the same as a network loss. This
+         * verdict gives it a code it can read, such as "busy, retry later". It is a refusal
+         * in every other respect: no peer slot is claimed, no pending-handshake row is
+         * written, no deadline is armed, no frame from the socket is handled, and it is
+         * counted in @ref stats_t::peers_refused. The close is queued onto the httpd task at
+         * the handshake and written there once the 101 is out. If that queue refuses the
+         * item, the verdict falls back to a plain @ref REFUSE.
+         */
+        REFUSE_AFTER_UPGRADE,
     };
 
     /**
@@ -1211,6 +1244,12 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * will reconnect forever.
      */
     static constexpr std::uint16_t kCloseRevoked = 4403;
+    /** @brief RFC 6455 §7.4.1 "Try Again Later": the default close code of an
+     *         @ref admission_verdict_t::REFUSE_AFTER_UPGRADE refusal (#1857). */
+    static constexpr std::uint16_t kCloseTryAgainLater = 1013;
+    /** @brief Longest `httpd_ws_config_t::refusal_close_reason` sent, bytes: a close frame's
+     *         125-byte payload less its 2-byte code (RFC 6455 §5.5). */
+    static constexpr std::size_t kMaxCloseReasonBytes = 123;
     /** @brief Default `auth_deadline_ms`: long enough for a multi-round-trip handshake over
      *         a slow link, short enough that a squatting session is not a resource. */
     static constexpr std::uint32_t kDefaultAuthDeadlineMs = 10000;
@@ -1267,6 +1306,7 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     struct tx_slot_t;         // one pre-allocated TX work slot (defined in the .cpp)
     struct detach_req_t;      // the teardown session-detach work item (defined in the .cpp)
     struct close_req_t;       // the close_peer work item (defined in the .cpp)
+    struct refusal_req_t;     // a refusal-after-upgrade work item (defined in the .cpp)
     class peer_resolution_t;  // one RESOLUTION's directed endpoint (defined in the .cpp)
 
     /**
@@ -1302,6 +1342,27 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * the members it reads.
      */
     static esp_err_t ws_pre_handshake(httpd_req_t* req);
+    /**
+     * @brief Turn @p req's handshake into a refusal AFTER the upgrade (#1857): queue the
+     *        close onto the httpd task and mark the socket with the gate as its session ctx.
+     *
+     * The mark is how the queued close and @ref on_data_frame recognise the socket without
+     * any state of this link's: no slot, no ledger row, no deadline. Called on the httpd
+     * task from @ref ws_pre_handshake, before the 101 is written.
+     *
+     * @return False when the item could not be allocated or queued; the caller then refuses
+     *         the handshake outright instead, as @ref admission_verdict_t::REFUSE does.
+     */
+    static bool queue_refusal(gate_t* gate, httpd_req_t* req);
+    /** @brief `httpd_queue_work` fn: write one queued refusal's close (see @ref
+     *         queue_refusal). */
+    static void refusal_work(void* req_arg);
+    /**
+     * @brief Write the refusal close on @p fd and shut it down, if @p fd is still an upgraded
+     *        socket carrying this link's refusal mark; clears the mark so a second call does
+     *        nothing (httpd task only).
+     */
+    void refuse_upgraded(int fd);
     static void on_session_closed(void* slot_ctx);  // free_ctx_fn: a peer departed
     static void tx_work(void* work_arg);            // httpd_queue_work fn: one queued send
     /** @brief Write a RETAINED item's frame (RFC-0028 §6.9): its slot bytes, then its value's
@@ -1728,6 +1789,11 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *         non-null (@ref set_admission_cb clears the other). */
     admission_verdict_fn_t admission_verdict_fn_ = nullptr;
     void* admission_ctx_ = nullptr;
+    /** @brief The close code an @ref admission_verdict_t::REFUSE_AFTER_UPGRADE refusal sends,
+     *         resolved from the config at construction. */
+    std::uint16_t refusal_code_ = kCloseTryAgainLater;
+    /** @brief Its reason text, copied and cut to @ref kMaxCloseReasonBytes at construction. */
+    std::string refusal_reason_;
     /**
      * @brief One socket that passed admission, whose entitlement is NOT YET KNOWN, and which
      *        has not yet claimed a session — the row of the pending-handshake ledger.

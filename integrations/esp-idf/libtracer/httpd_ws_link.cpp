@@ -453,6 +453,27 @@ constexpr std::int64_t kMinAuthSweepUs = 100000;
 }
 
 /**
+ * @brief Cut @p reason to @ref httpd_ws_link_t::kMaxCloseReasonBytes, backed off to a UTF-8
+ *        character boundary so the close frame never carries half a character (#1857).
+ */
+[[nodiscard]] std::string resolve_close_reason(std::string_view reason) {
+    std::size_t n = reason.size();
+    if (n > httpd_ws_link_t::kMaxCloseReasonBytes) {
+        n = httpd_ws_link_t::kMaxCloseReasonBytes;
+        // A continuation byte (10xxxxxx) at the cut means the character starts earlier.
+        while (n > 0 && (static_cast<unsigned char>(reason[n]) & 0xC0U) == 0x80U) --n;
+    }
+    return std::string(reason.substr(0, n));
+}
+
+/**
+ * @brief The session destructor a refused-after-upgrade socket carries (#1857). Its ctx is
+ *        the link's gate, which the session does not own, so there is nothing to free — and a
+ *        null destructor would not do, because httpd answers a null one with `free(ctx)`.
+ */
+void keep_refusal_mark(void* /*gate*/) {}
+
+/**
  * @brief Resolve one of the three buffer-sizing constructor arguments (#1160): @p want,
  *        or @p fallback when the caller left it 0.
  *
@@ -1208,9 +1229,26 @@ struct httpd_ws_link_t::close_req_t {
     session_ref_t to;       /**< @brief The session to close, identified as (slot, gen). */
 };
 
+/**
+ * @brief One @ref httpd_ws_link_t::queue_refusal work item: the socket to close and the gate
+ *        to reach the link through.
+ *
+ * Heap-allocated per refusal and freed by @ref httpd_ws_link_t::refusal_work, like @ref
+ * close_req_t and for the same reasons: it is not a frame-path allocation, and the gate is
+ * the one object that outlives the link. It lives from the handshake until the close is
+ * written, and it is the only thing the refusal costs that is not the httpd session itself.
+ */
+struct httpd_ws_link_t::refusal_req_t {
+    gate_t* gate = nullptr; /**< @brief The owning link's gate. */
+    int fd = -1;            /**< @brief The refused socket. */
+};
+
 httpd_ws_link_t::httpd_ws_link_t(std::uint16_t bind_port, const httpd_ws_config_t& config)
     : port_(bind_port),
       max_peers_(config.max_peers),
+      refusal_code_(config.refusal_close_code != 0 ? config.refusal_close_code
+                                                   : kCloseTryAgainLater),
+      refusal_reason_(resolve_close_reason(config.refusal_close_reason)),
       auth_deadline_us_(resolve_auth_deadline_us(config.auth_deadline_ms)),
       peer_named_(config.peer_named),
       rx_backend_(config.memory.rx),
@@ -1281,6 +1319,9 @@ httpd_ws_link_t::httpd_ws_link_t(std::uint16_t bind_port, const httpd_ws_config_
 httpd_ws_link_t::httpd_ws_link_t(httpd_handle_t external, const char* uri_pattern,
                                  const httpd_ws_config_t& config)
     : max_peers_(config.max_peers),
+      refusal_code_(config.refusal_close_code != 0 ? config.refusal_close_code
+                                                   : kCloseTryAgainLater),
+      refusal_reason_(resolve_close_reason(config.refusal_close_reason)),
       auth_deadline_us_(resolve_auth_deadline_us(config.auth_deadline_ms)),
       peer_named_(config.peer_named),
       rx_backend_(config.memory.rx),
@@ -1954,9 +1995,17 @@ esp_err_t httpd_ws_link_t::ws_pre_handshake(httpd_req_t* req) {
         verdict_fn != nullptr ? verdict_fn(ctx, req)
         : fn != nullptr ? (fn(ctx, req) ? admission_verdict_t::ADMIT : admission_verdict_t::REFUSE)
                         : admission_verdict_t::ADMIT;
-    bool admit = verdict != admission_verdict_t::REFUSE;
+    bool admit = verdict == admission_verdict_t::ADMIT ||
+                 verdict == admission_verdict_t::ADMIT_AUTHENTICATED;
     const int fd = httpd_req_to_sockfd(req);
     if (!admit) ESP_LOGW(kTag, "peer refused by admission hook (fd=%d)", fd);
+    // A refusal that still lets the upgrade complete (#1857), so the peer reads a close code
+    // instead of the bare 1006 a refused upgrade shows a browser. Nothing below runs for it:
+    // `admit` is false, so it claims no slot and writes no ledger row, and it is counted with
+    // every other refusal at the end. What it does get is a queued close and a mark on its
+    // session; if either cannot be had, it is refused before the upgrade like REFUSE.
+    const bool upgrade_refused =
+        verdict == admission_verdict_t::REFUSE_AFTER_UPGRADE && queue_refusal(gate, req);
     // TWO SHAPES OF ADMISSION, and which one this is was decided by the predicate above.
     //
     // (a) ADMIT_AUTHENTICATED — CLAIM THE SESSION HERE (#1334). The ledger below exists to
@@ -2075,7 +2124,68 @@ esp_err_t httpd_ws_link_t::ws_pre_handshake(httpd_req_t* req) {
         --gate->depth;
     }
     gate->cv.notify_all();
-    return admit ? ESP_OK : ESP_FAIL;
+    return admit || upgrade_refused ? ESP_OK : ESP_FAIL;
+}
+
+bool httpd_ws_link_t::queue_refusal(gate_t* gate, httpd_req_t* req) {
+    const int fd = httpd_req_to_sockfd(req);
+    auto* const item = new (std::nothrow) refusal_req_t{gate, fd};
+    if (item == nullptr) return false;
+    // Queued from the httpd task, so it cannot run before this handshake returns and the
+    // server writes the 101: the close always follows the upgrade on the wire.
+    if (httpd_queue_work(req->handle, &httpd_ws_link_t::refusal_work, item) != ESP_OK) {
+        delete item;
+        return false;
+    }
+    // The mark: the gate as the session ctx. The session exists already (httpd seats it at
+    // accept), and this is a request-scoped set that httpd copies into the session when the
+    // handshake request completes, as the #1334 claim above relies on. The gate is compared,
+    // never freed through this session — see keep_refusal_mark.
+    httpd_sess_set_ctx(req->handle, fd, gate, &keep_refusal_mark);
+    return true;
+}
+
+void httpd_ws_link_t::refusal_work(void* req_arg) {
+    const std::unique_ptr<refusal_req_t> req(static_cast<refusal_req_t*>(req_arg));
+    httpd_ws_link_t* owner = nullptr;
+    {
+        // Resolved through the gate and held by `depth`, exactly as close_work does. A link
+        // already gone leaves the socket to its server: its latched handler finds the gate
+        // shut and fails the next frame, which closes it.
+        const std::lock_guard lock(req->gate->m);
+        owner = req->gate->link;
+        if (owner == nullptr) return;
+        ++req->gate->depth;
+    }
+    owner->refuse_upgraded(req->fd);
+    {
+        const std::lock_guard lock(req->gate->m);
+        --req->gate->depth;
+    }
+    req->gate->cv.notify_all();
+}
+
+void httpd_ws_link_t::refuse_upgraded(int fd) {
+    const httpd_handle_t h = handle_.load(std::memory_order_relaxed);
+    // The identity test. The item was queued at the handshake and runs a select round or more
+    // later; by then the peer may have hung up and its descriptor been reused. Only a socket
+    // that is upgraded AND still carries this link's mark is the one refused: a stranger on
+    // the reused number has another ctx, and a socket this already closed has none.
+    if (h == nullptr || httpd_ws_get_fd_info(h, fd) != HTTPD_WS_CLIENT_WEBSOCKET ||
+        httpd_sess_get_ctx(h, fd) != gate_.load(std::memory_order_relaxed))
+        return;
+    // Clear the mark first, so the other caller (a queued item after a frame-path refusal, or
+    // the reverse) finds nothing to do.
+    httpd_sess_set_ctx(h, fd, nullptr, &keep_refusal_mark);
+    // RFC 6455 §5.5.1: the 2-byte code in network order, then the UTF-8 reason. Then the
+    // shutdown, in that order for close_session's reason: after it no write gets out.
+    std::array<std::byte, 2 + kMaxCloseReasonBytes> payload{};
+    payload[0] = static_cast<std::byte>((refusal_code_ >> 8) & 0xFF);
+    payload[1] = static_cast<std::byte>(refusal_code_ & 0xFF);
+    std::memcpy(payload.data() + 2, refusal_reason_.data(), refusal_reason_.size());
+    (void)send_now(nullptr, fd, HTTPD_WS_TYPE_CLOSE,
+                   std::span<const std::byte>(payload.data(), 2 + refusal_reason_.size()));
+    condemn(fd);
 }
 
 httpd_ws_link_t::session_t* httpd_ws_link_t::claim_session(int fd, bool authenticated) {
@@ -2265,6 +2375,7 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
     peer_handle_t handle;
     bool newly_claimed = false;
     bool pending = false;  // this session has not authenticated yet — see session_t::auth_pending
+    bool refused = false;  // refused after its upgrade (#1857) — see queue_refusal
     // Reap expired unauthenticated sessions BEFORE the cap is tested below. The periodic
     // sweep is what bounds a squatter's lifetime, but it must not be what decides whether a
     // real peer gets in: a tick that has not fired yet would otherwise let a session which is
@@ -2280,7 +2391,12 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
                 slot = s.get();
                 break;
             }
-        if (slot == nullptr) {
+        // A socket refused after its upgrade (#1857) that spoke before its queued close went
+        // out. It has no slot, so this costs served sessions nothing; it gets the close here
+        // instead, and its frame, already drained, is handled no further.
+        refused = slot == nullptr &&
+                  httpd_sess_get_ctx(req->handle, fd) == gate_.load(std::memory_order_relaxed);
+        if (slot == nullptr && !refused) {
             // Consume the pending-handshake row HERE, ahead of the cap test, because this
             // socket has now spoken and the ledger only ever bounded silent ones (#1247).
             // Consuming it also HANDS THE BOUND OVER: past this point the connection is either
@@ -2305,9 +2421,15 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
             }
             newly_claimed = true;
         }
-        peer = slot->name;
-        handle = slot->handle;
-        pending = slot->auth_pending;
+        if (!refused) {
+            peer = slot->name;
+            handle = slot->handle;
+            pending = slot->auth_pending;
+        }
+    }
+    if (refused) {
+        refuse_upgraded(fd);
+        return ESP_OK;  // the shutdown above closes it, as an auth REJECT does
     }
     // Reclaim the slot on close — armed once, when first claimed (the free_ctx fires on the
     // httpd task at close). Outside peers_m_ so no httpd lock nests under ours.
