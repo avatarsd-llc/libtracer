@@ -382,8 +382,8 @@ void test_await_at_a_handler_replies_with_the_composed_value() {
         return {};
     };
     h.on_write = tr::graph::thunk(h_on_write);
-    auto h_on_read = [last]() -> tr::graph::result_t<tr::view::rope_t> {
-        return tr::view::rope_t{make_value(b_value({*last}))};
+    auto h_on_read = [last]() -> tr::graph::result_t<tr::graph::value_ref_t> {
+        return tr::graph::value_ref_t::composed(make_value(b_value({*last})));
     };
     h.on_read = tr::graph::thunk(h_on_read);
     const auto path = path_t::parse("/dev/seam");
@@ -897,7 +897,7 @@ void test_transport_down_reaches_the_wire() {
     op_resolver_t resolver(g);
 
     tr::graph::handlers_t down;
-    auto down_on_read = []() -> tr::graph::result_t<tr::view::rope_t> {
+    auto down_on_read = []() -> tr::graph::result_t<tr::graph::value_ref_t> {
         return std::unexpected(status_t::TRANSPORT_DOWN);
     };
     down.on_read = tr::graph::thunk(down_on_read);

@@ -150,7 +150,7 @@ struct gen_regression_t {
 bytes_t children_bytes(const graph_t& g, vertex_handle_t mount) {
     const auto r = g.read_children_materialized(mount);
     check(r.has_value(), "the mount answers :children[]");
-    const tr::view::view_t flat = r->flatten();
+    const tr::view::view_t flat = (*r)->flatten();
     const std::span<const std::byte> b = flat.bytes();
     return bytes_t(b.begin(), b.end());
 }

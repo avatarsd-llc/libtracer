@@ -84,7 +84,7 @@ struct hook_t<R(A...)> {     // THE callback idiom (RFC-0028 D10): {fn, ctx}, 16
 thunk(f);                    // hook over a callable you keep alive (a stateless one: any lifetime)
 
 struct handlers_t {                                       // six hooks, 96 B on the host
-    hook_t<result_t<rope_t>()>                                    on_read;
+    hook_t<result_t<value_ref_t>()>                               on_read;    // one read type
     hook_t<result_t<void>(const value_t&, const write_ctx_t&)>    on_write;   // BY REFERENCE
     hook_t<result_t<view_t>()>                                    on_children;
     hook_t<admission_t(const value_t&, const write_ctx_t&)>       on_admit;
@@ -167,13 +167,13 @@ class graph_t {
     void          set_hooks(const graph_hooks_t&) noexcept;
     graph_hooks_t hooks() const noexcept;
 
-    // composed reads — they build a value, so they return one
-    result_t<rope_t> read_children_folded(vertex_handle_t) const;
-    result_t<rope_t> read_children_materialized(vertex_handle_t) const;
-    result_t<rope_t> read_subtree_folded(vertex_handle_t, ...) const;
+    // composed reads — they build a value, so they return a reference to a fresh block
+    result_t<value_ref_t> read_children_folded(vertex_handle_t) const;
+    result_t<value_ref_t> read_children_materialized(vertex_handle_t) const;
+    result_t<value_ref_t> read_subtree_folded(vertex_handle_t, ...) const;
 
     // field plane (`:`-addressed)
-    result_t<rope_t> read (vertex_handle_t, const field_path_t&, ...) const;
+    result_t<value_ref_t> read (vertex_handle_t, const field_path_t&, ...) const;
     result_t<void>   write(vertex_handle_t, const field_path_t&, rope_t,
                            std::string_view caller = {});
     result_t<value_ref_t> read (const path_t&) const;               // field tail → :schema, …

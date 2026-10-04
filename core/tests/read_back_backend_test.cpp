@@ -86,7 +86,6 @@ using tr::graph::role_t;
 using tr::graph::status_t;
 using tr::graph::vertex_handle_t;
 using tr::graph::wire_target_split_t;
-using tr::view::rope_t;
 using tr::view::view_t;
 
 using tr::testing::check;
@@ -221,13 +220,8 @@ std::vector<std::byte> subject_bytes(std::string_view s) {
     return out;
 }
 
-/** @brief The record count a field read answers, or the status it failed with. */
-result_t<std::size_t> record_width(result_t<rope_t> r) {
-    if (!r) return std::unexpected(r.error());
-    return r->flatten().bytes().size();
-}
-
-/** @brief The same count off a field read, which answers a `value_ref_t` (RFC-0028 D11). */
+/** @brief The record count a field or listing read answers (a `value_ref_t`, RFC-0028 D11),
+ *         or the status it failed with. */
 result_t<std::size_t> record_width(result_t<tr::graph::value_ref_t> r) {
     if (!r) return std::unexpected(r.error());
     return (*r)->flatten().bytes().size();

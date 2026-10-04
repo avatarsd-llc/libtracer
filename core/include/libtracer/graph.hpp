@@ -1568,9 +1568,11 @@ class graph_t {
     /**
      * @brief Read a resolved vertex's stored value (the hot path — lock-free in the LKV slot).
      *
-     * Returns the last-known-value as a rope (ADR-0053 §6): a scalar is the single-link
-     * case; a consumer needing contiguous bytes calls `rope_t::only()` (single-link, zero
-     * copy) or `rope_t::materialize()`. The trailing @p caller is the ACL caller context
+     * Returns the last-known-value as a @ref value_ref_t (RFC-0028 D11, one read type): a
+     * reference to the published block, not a copy. A scalar is the single-link case; a
+     * consumer needing contiguous bytes calls `value_t::only()` (single-link, zero copy) or
+     * `value_t::materialize()`, and one that needs a `rope_t` clones it with `value_t::rope()`. The
+     * trailing @p caller is the ACL caller context
      * (#81): empty for a local API call (the default — zero churn), the inbound link NAME
      * when the FWD resolver drives the op. With no subject resolver installed it costs one
      * null check.
@@ -1815,36 +1817,39 @@ class graph_t {
     /**
      * @brief FOLDED projection of the `:children` listing (L4 fold, Slice 0) — the SAME
      *        `POINT{ POINT{NAME}… }` that the materialized `read_children` serializes, but
-     *        produced as a scatter-gather **rope** (an outer POINT header link plus one
-     *        link per registered child) instead of one flat buffer.
+     *        produced as a scatter-gather link chain (an outer POINT header link plus the
+     *        member links) instead of one flat buffer, answered as a @ref value_ref_t
+     *        (RFC-0028 D11: every value read answers one type).
      *
      * A read-only projection over the materialized tree — the tree stays the source of
      * truth; this walks it and gathers rather than copying the whole listing into a
-     * single allocation. `read_children_folded(v).flatten()` is **byte-identical** to the
+     * single allocation. `read_children_folded(v)->flatten()` is **byte-identical** to the
      * materialized `read_children` serialize, which `folded_children_test` gates over many
-     * graph shapes. The rope is valid while the graph (and its insert-only, pointer-stable
+     * graph shapes. The value is valid while the graph (and its insert-only, pointer-stable
      * vertices) outlive it. The synthesized-listing case (ADR-0044) has nothing to gather
-     * and crosses as a single-link rope. Each member's NAME bytes are borrowed IN PLACE
-     * (zero copy, @ref view::borrow_const) over the pinned child vertex — only the tiny
-     * POINT headers are emitted — so the listing is never copied whole.
+     * and crosses as a single-link value. The composed value is one block from the global
+     * heap (`value_ref_t::composed`), whose refusal is `BACKPRESSURE`. Each member's NAME bytes are
+     * borrowed IN PLACE (zero copy, @ref view::borrow_const) over the pinned child vertex — only
+     * the tiny POINT headers are emitted — so the listing is never copied whole.
      */
-    [[nodiscard]] result_t<view::rope_t> read_children_folded(vertex_handle_t v) const;
+    [[nodiscard]] result_t<value_ref_t> read_children_folded(vertex_handle_t v) const;
 
     /**
      * @brief MATERIALIZED `:children` listing — the flat single-link serialize of the same
      *        `POINT{ POINT{NAME}… }` the fold gathers.
      *
-     * The production field read serves the FOLDED rope; this flat form exists as the
+     * The production field read serves the FOLDED value; this flat form exists as the
      * independent oracle `folded_children_test` diffs the fold against (byte identity on
      * flatten() over many graph shapes) — without it the differential would be
      * tautological.
      */
-    [[nodiscard]] result_t<view::rope_t> read_children_materialized(vertex_handle_t v) const;
+    [[nodiscard]] result_t<value_ref_t> read_children_materialized(vertex_handle_t v) const;
 
     /**
      * @brief COMPOSED BRANCH READ (RFC-0005 §C follow-on): the POINT tree of @p v's
-     *        registered subtree, folded as a scatter-gather **rope** of views over the
-     *        live last-known-value ropes (zero flatten, zero byte copies).
+     *        registered subtree, folded as a scatter-gather link chain of views over the
+     *        live last-known values (zero flatten, zero byte copies), answered as one
+     *        composed @ref value_ref_t (RFC-0028 D11).
      *
      * `composed(target) = POINT{ [stored TLV of target]?, child_node* }` and
      * `child_node(c) = POINT{ NAME(c), [stored TLV of c]?, child_node(grandchild)* }` —
@@ -1878,8 +1883,8 @@ class graph_t {
      * the resolver callback — runs O(nodes) times per composed read **under the shared
      * `map_mutex_`**; a resolver MUST NOT re-enter graph mutation APIs (self-deadlock).
      */
-    [[nodiscard]] result_t<view::rope_t> read_subtree_folded(vertex_handle_t v,
-                                                             std::string_view caller = {}) const;
+    [[nodiscard]] result_t<value_ref_t> read_subtree_folded(vertex_handle_t v,
+                                                            std::string_view caller = {}) const;
 
     /**
      * @brief Subscribe @p src to a @p target vertex — a write to src re-dispatches the
@@ -2727,14 +2732,15 @@ class graph_t {
     // acl_right_t::READ up front and this arm does not re-check. Out of line so the
     // retaining arm of either door keeps its `read_stored()` fast path unencumbered.
     [[nodiscard]] result_t<value_ref_t> read_handler_gated(vertex_t* v) const;
-    // A COMPOSED read's value (a handler's, a folded subtree's) given a published value's
-    // shape: one heap block, whose refusal is BACKPRESSURE by value (#477), never a throw.
+    // A COMPOSED read's value (a folded listing, a folded subtree, a field TLV) given a
+    // published value's shape: one heap block, whose refusal is BACKPRESSURE by value (#477),
+    // never a throw.
     [[nodiscard]] static result_t<value_ref_t> composed_or_backpressure(view::rope_t&& r) noexcept;
-    // The field read's composing arms — every `:field` shape but the empty one — as the rope
-    // they build; the public field `read` wraps it once (RFC-0028 D11).
-    [[nodiscard]] result_t<view::rope_t> read_field_rope(vertex_handle_t v,
-                                                         const field_path_t& field,
-                                                         std::string_view caller) const;
+    // The field read's composing arms — every `:field` shape but the empty one — each
+    // answering the one read type (RFC-0028 D11); the public field `read` forwards to it.
+    [[nodiscard]] result_t<value_ref_t> read_field_composed(vertex_handle_t v,
+                                                            const field_path_t& field,
+                                                            std::string_view caller) const;
     // ":schema" read => a POINT descriptor (name + settings).
     [[nodiscard]] result_t<view::view_t> read_schema(vertex_t* v) const;
     // ":identity" read => the node-scoped SETTINGS{kind,key} record (RFC-0011 §B), or

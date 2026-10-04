@@ -2016,8 +2016,8 @@ void graph_t::mark_subtree_acl_dirty(vertex_t* v) {
 }
 
 /**
- * @brief The HANDLER-role arm of the read contract: compose the value from the `on_read`
- *        seam, or `NOT_FOUND` when the vertex exposes none.
+ * @brief The HANDLER-role arm of the read contract: answer the value the `on_read` seam
+ *        hands back, or `NOT_FOUND` when the vertex exposes none.
  *
  * ONE spelling, called from BOTH read doors — @ref graph_t::read and, since RFC-0008
  * Amendment 2, @ref graph_t::await. `await` is the readiness form of a data READ, so the
@@ -2045,13 +2045,14 @@ result_t<value_ref_t> graph_t::composed_or_backpressure(view::rope_t&& r) noexce
     // second load could see the cleared seam and throw bad_function_call. The parked
     // block keeps this reference valid even if the swap fires right after the load.
     const value_handlers_t& h = v->handlers();
-    // The handler seam is rope-valued (ADR-0053 section 6), so a handler read COMPOSES:
-    // it costs one control block that the published path does not pay. Converting the
-    // seam itself is a separate, lateral change.
+    // The handler seam answers the one read type itself (RFC-0028 D11), so its reference
+    // goes back as it came: a handler that holds a value already costs no allocation here,
+    // and one that computes a value minted the block (one, for a scalar) in the hook. An
+    // empty reference on success is the hook's refused allocation, answered as such.
     if (h.on_read) {
-        auto produced = h.on_read();
-        if (!produced) return std::unexpected(produced.error());
-        return composed_or_backpressure(std::move(*produced));
+        result_t<value_ref_t> produced = h.on_read();
+        if (produced && !*produced) return std::unexpected(status_t::BACKPRESSURE);
+        return produced;
     }
     return std::unexpected(status_t::NOT_FOUND);
 }
@@ -2069,9 +2070,7 @@ result_t<value_ref_t> graph_t::read(vertex_handle_t vh, std::string_view caller)
         // The composed branch read BUILDS a value, so it wraps rather than shares. Measured
         // 1.00x against the old copy-out (30 paired samples): the subtree walk dominates the
         // one control block this costs.
-        auto folded = read_subtree_folded(vh, caller);
-        if (!folded) return std::unexpected(folded.error());
-        return composed_or_backpressure(std::move(*folded));
+        return read_subtree_folded(vh, caller);
     }
     value_ref_t sp = v->read_stored();  // lock-free
     if (!sp) return std::unexpected(status_t::NOT_FOUND);
@@ -4331,10 +4330,10 @@ result_t<view::view_t> graph_t::read_children(vertex_t* v) const {
     return *res;
 }
 
-result_t<view::rope_t> graph_t::read_children_materialized(vertex_handle_t vh) const {
+result_t<value_ref_t> graph_t::read_children_materialized(vertex_handle_t vh) const {
     const result_t<view::view_t> mv = read_children(vh.get());
     if (!mv) return std::unexpected(mv.error());
-    return view::rope_t{*mv};
+    return composed_or_backpressure(view::rope_t{*mv});
 }
 
 namespace {
@@ -4420,15 +4419,15 @@ namespace {
 
 }  // namespace
 
-result_t<view::rope_t> graph_t::read_children_folded(vertex_handle_t vh) const {
+result_t<value_ref_t> graph_t::read_children_folded(vertex_handle_t vh) const {
     vertex_t* v = vh.get();
     // Synthesized listing (ADR-0044): a live bus-peer snapshot, already one contiguous
-    // view — a fold has nothing to gather, so it crosses as a single-link rope,
+    // view — a fold has nothing to gather, so it crosses as a single-link value,
     // byte-identical to the read_children path.
     if (const value_handlers_t& h = v->handlers(); h.on_children) {
         const result_t<view::view_t> sv = h.on_children();
         if (!sv) return std::unexpected(sv.error());
-        return view::rope_t{*sv};
+        return composed_or_backpressure(view::rope_t{*sv});
     }
     // The folded projection of read_children: instead of concatenating every member into
     // one buffer and copying the whole listing (twice — into `out`, then into a segment),
@@ -4487,11 +4486,11 @@ result_t<view::rope_t> graph_t::read_children_folded(vertex_handle_t vh) const {
     // refcounted, so the chain cannot take `block_array_t`'s memcpy relocation (#873).
     static_cast<void>(out.try_reserve(members.link_count()));
     out.concat(members);  // empty members (no children) => header-only rope, len 0
-    return out;
+    return composed_or_backpressure(std::move(out));
 }
 
-result_t<view::rope_t> graph_t::read_subtree_folded(vertex_handle_t vh,
-                                                    std::string_view caller) const {
+result_t<value_ref_t> graph_t::read_subtree_folded(vertex_handle_t vh,
+                                                   std::string_view caller) const {
     vertex_t* root = vh.get();
     if (!acl_allows(root, caller, acl_right_t::READ))
         return std::unexpected(status_t::PERMISSION_DENIED);
@@ -4652,7 +4651,7 @@ result_t<view::rope_t> graph_t::read_subtree_folded(vertex_handle_t vh,
             for (const view::view_t& l : n.lkv->links()) out.append(l);
         }
     }
-    return out;
+    return composed_or_backpressure(std::move(out));
 }
 
 namespace {
@@ -4878,13 +4877,11 @@ result_t<value_ref_t> graph_t::read(vertex_handle_t vh, const field_path_t& fiel
     // value read, so it hands back the published reference itself; every other arm composes a
     // value nothing published and wraps it once, at the bottom.
     if (field.empty()) return read(vh, caller);
-    auto composed = read_field_rope(vh, field, caller);
-    if (!composed) return std::unexpected(composed.error());
-    return composed_or_backpressure(std::move(*composed));
+    return read_field_composed(vh, field, caller);
 }
 
-result_t<view::rope_t> graph_t::read_field_rope(vertex_handle_t vh, const field_path_t& field,
-                                                std::string_view caller) const {
+result_t<value_ref_t> graph_t::read_field_composed(vertex_handle_t vh, const field_path_t& field,
+                                                   std::string_view caller) const {
     vertex_t* v = vh.get();
     // ":children[]" (or bare ":children") — member enumeration, the read dual of the
     // SPEC-creating append — is served FOLDED (L4 fold, Slice 0): a scatter-gather rope
@@ -4905,8 +4902,8 @@ result_t<view::rope_t> graph_t::read_field_rope(vertex_handle_t vh, const field_
         }
     }
     // A field read serves a contiguous control TLV; it crosses back as a single-link
-    // rope (ADR-0053 §6 — the data API returns ropes). Compute the control view, then
-    // wrap once. Field reads are gated like data reads (#81): READ for the control
+    // value (RFC-0028 D11 — every value read answers `value_ref_t`). Compute the control
+    // view, then wrap once. Field reads are gated like data reads (#81): READ for the control
     // surface, READ_ACL — its own right, distinct from acting on the vertex — for ":acl".
     const result_t<view::view_t> fv = [&]() -> result_t<view::view_t> {
         // PROTOCOL-OWNED NAME VALIDITY RESOLVES ABOVE THE READ GATE (#435, RFC-0010 §A
@@ -5063,7 +5060,7 @@ result_t<view::rope_t> graph_t::read_field_rope(vertex_handle_t vh, const field_
                 return *out;
             }
         }
-        // ":children" is handled above the lambda (folded rope — see read_children_folded).
+        // ":children" is handled above the lambda (folded value — see read_children_folded).
         // A single slot ":subscribers[N]" — serve the stored SUBSCRIBER view (clone). The
         // shape is the shared `field_selector` classification (#869), replacing the
         // `indexed && !append && !wildcard` conjunction that restated path.hpp's `[N]`
@@ -5080,7 +5077,7 @@ result_t<view::rope_t> graph_t::read_field_rope(vertex_handle_t vh, const field_
         return std::unexpected(status_t::SCHEMA_NOT_FOUND);
     }();
     if (!fv) return std::unexpected(fv.error());
-    return view::rope_t{*fv};
+    return composed_or_backpressure(view::rope_t{*fv});
 }
 
 result_t<std::vector<view::view_t>> graph_t::read_subscribers(vertex_handle_t vh,

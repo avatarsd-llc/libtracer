@@ -287,7 +287,7 @@ vertex_handle_t build_subtree(graph_t& g, std::span<const std::byte> payload) {
 std::vector<std::byte> folded_bytes(graph_t& g, vertex_handle_t root) {
     const auto r = g.read_subtree_folded(root, "peer");
     if (!r) return {};
-    const view_t flat = r->flatten();
+    const view_t flat = (*r)->flatten();
     const std::span<const std::byte> b = flat.bytes();
     return std::vector<std::byte>(b.begin(), b.end());
 }
@@ -303,7 +303,7 @@ constexpr int kDirectChildCount = 2;
 std::vector<std::byte> children_bytes(graph_t& g, vertex_handle_t parent) {
     const auto r = g.read_children_folded(parent);
     if (!r) return {};
-    const view_t flat = r->flatten();
+    const view_t flat = (*r)->flatten();
     const std::span<const std::byte> b = flat.bytes();
     return std::vector<std::byte>(b.begin(), b.end());
 }

@@ -150,9 +150,10 @@ loses the allocation-failure signal that `std::optional` carries.
 
 **`read` returns a reference, not a copy.** `graph_t::read` and `graph_t::await` return
 `result_t<value_ref_t>` (`core/include/libtracer/graph.hpp:graph_t::read(vertex_handle_t v, std::string_view caller`, `core/include/libtracer/graph.hpp:graph_t::await(vertex_handle_t v, std::chrono::nanoseconds`), so `(*got)` is a
-`value_ref_t` and `(*got)->…` reaches the referenced `rope_t`. The rule: *a read of a
-published value returns a reference to it; a read that composes a new value returns the
-value* — which is why `read_children_folded` and its siblings still return a `rope_t`.
+`value_ref_t` and `(*got)->…` reaches the referenced `value_t`. The rule: *a read of a
+published value returns a reference to it; a read that composes a new value returns a
+reference to a fresh block* — so `read_children_folded`, its siblings and a handler's
+`on_read` answer the same `value_ref_t` (RFC-0028 D11: one read type).
 Under an injected `std::pmr::memory_resource` an outstanding `value_ref_t` **pins** the
 value it names (`core/include/libtracer/value.hpp:value_ref_t`), so a long-lived reference
 holds the graph's memory; take the bytes and drop it.

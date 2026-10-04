@@ -1,6 +1,7 @@
 /**
  * @file
- * @brief RFC-0008 Amendment 2 (#1506) — the non-retaining-vertex contract, five vectors.
+ * @brief RFC-0008 Amendment 2 (#1506) — the non-retaining-vertex contract, plus the HANDLER read
+ * seam (RFC-0028 D11).
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -25,7 +26,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <memory>
+#include <span>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -100,8 +103,8 @@ void test_await_at_a_handler_serves_the_read_contract() {
         return {};
     };
     h.on_write = tr::graph::thunk(h_on_write);
-    auto h_on_read = [last]() -> tr::graph::result_t<rope_t> {
-        return rope_t{make_value({*last})};
+    auto h_on_read = [last]() -> tr::graph::result_t<tr::graph::value_ref_t> {
+        return tr::graph::value_ref_t::composed(make_value({*last}));
     };
     h.on_read = tr::graph::thunk(h_on_read);
     vertex_handle_t v = g.register_vertex(path_t("/h/seam"), role_t::HANDLER, std::move(h));
@@ -235,7 +238,9 @@ void test_propagate_at_a_non_retaining_vertex_refuses() {
     std::printf("vector 5 — propagate at a HANDLER refuses by value:\n");
     graph_t g;
     handlers_t h;
-    auto h_on_read2 = []() -> tr::graph::result_t<rope_t> { return rope_t{make_value({0x09})}; };
+    auto h_on_read2 = []() -> tr::graph::result_t<tr::graph::value_ref_t> {
+        return tr::graph::value_ref_t::composed(make_value({0x09}));
+    };
     h.on_read = tr::graph::thunk(h_on_read2);
     vertex_handle_t root = g.register_vertex(path_t("/p"), role_t::STORED_VALUE);
     vertex_handle_t hv = g.register_vertex(path_t("/p/h"), role_t::HANDLER, std::move(h));
@@ -265,6 +270,107 @@ void test_propagate_at_a_non_retaining_vertex_refuses() {
     check(*at_h == 0, "the non-retaining child rides no sweep — it carries no mark");
 }
 
+/** @brief A `block_source_t` that refuses every block — the OOM injector for `value_ref_t::copy`.
+ */
+class refusing_source_t final : public tr::mem::block_source_t {
+   public:
+    /** @brief Named for the census, like every other source. */
+    refusing_source_t() noexcept : block_source_t("test-refusing") {}
+    /** @brief Refuse: no block is ever served. */
+    [[nodiscard]] void* try_alloc(std::size_t, std::size_t) noexcept override { return nullptr; }
+    /** @brief Never reached — nothing was served. */
+    void release(void*, std::size_t, std::size_t) noexcept override {}
+};
+
+/**
+ * @brief Vector 6 — an `on_read` that answers an EMPTY reference on success reads as
+ *        `BACKPRESSURE`, through both doors (RFC-0028 D11, `handlers_t::on_read`).
+ *
+ * An empty `value_ref_t` is what `value_ref_t::copy` / `composed` hand back when the source
+ * refused the block, so the graph reads it as a refused allocation rather than handing the
+ * caller a reference it would dereference. The positive control is the same graph's sibling
+ * handler answering a real value through the same doors.
+ */
+void test_empty_on_read_answers_backpressure() {
+    std::printf("vector 6 — an empty on_read reference answers BACKPRESSURE:\n");
+    graph_t g;
+    handlers_t h;
+    auto h_on_write = [](const tr::graph::value_t&,
+                         const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> { return {}; };
+    h.on_write = tr::graph::thunk(h_on_write);
+    auto h_on_read = []() -> tr::graph::result_t<tr::graph::value_ref_t> {
+        return tr::graph::value_ref_t{};
+    };
+    h.on_read = tr::graph::thunk(h_on_read);
+    vertex_handle_t v = g.register_vertex(path_t("/e/h"), role_t::HANDLER, std::move(h));
+
+    const auto rd = g.read(v);
+    check(!rd && rd.error() == status_t::BACKPRESSURE, "`read` answers BACKPRESSURE");
+    const auto got = await_while_writing(g, v, 0x11);
+    check(!got && got.error() == status_t::BACKPRESSURE,
+          "AWAIT, after the awaited write lands, answers BACKPRESSURE too");
+
+    // POSITIVE CONTROL: a handler whose on_read answers a value reads it back.
+    handlers_t c;
+    auto c_on_read = []() -> tr::graph::result_t<tr::graph::value_ref_t> {
+        return tr::graph::value_ref_t::composed(make_value({0x21}));
+    };
+    c.on_read = tr::graph::thunk(c_on_read);
+    vertex_handle_t cv = g.register_vertex(path_t("/e/c"), role_t::HANDLER, std::move(c));
+    const auto ok = g.read(cv);
+    check(ok.has_value() && only_byte(**ok) == 0x21, "control — a non-empty answer reads back");
+}
+
+/**
+ * @brief Vector 7 — `value_ref_t::copy` answers the bytes it was handed, and a refusing
+ *        source makes the handler's read answer `BACKPRESSURE`.
+ *
+ * `copy` is the spelling the migration recipe points `on_read` authors at; the bytes are read
+ * back byte-for-byte through `read` and `await`, and the source argument is forwarded (a source
+ * that refuses every block yields the empty reference vector 6 pins).
+ */
+void test_value_ref_copy_through_on_read() {
+    std::printf("vector 7 — value_ref_t::copy through on_read:\n");
+    static constexpr std::byte k_bytes[] = {std::byte{0xDE}, std::byte{0xAD}, std::byte{0xBE},
+                                            std::byte{0xEF}, std::byte{0x01}};
+    const auto same_bytes = [](const tr::graph::value_t& value) {
+        std::vector<std::byte> flat;
+        for (const auto& link : value.links()) {
+            const auto b = link.bytes();
+            flat.insert(flat.end(), b.begin(), b.end());
+        }
+        return flat.size() == sizeof(k_bytes) &&
+               std::memcmp(flat.data(), k_bytes, sizeof(k_bytes)) == 0;
+    };
+
+    graph_t g;
+    handlers_t h;
+    auto h_on_write = [](const tr::graph::value_t&,
+                         const tr::graph::write_ctx_t&) -> tr::graph::result_t<void> { return {}; };
+    h.on_write = tr::graph::thunk(h_on_write);
+    auto h_on_read = []() -> tr::graph::result_t<tr::graph::value_ref_t> {
+        return tr::graph::value_ref_t::copy(std::span<const std::byte>(k_bytes));
+    };
+    h.on_read = tr::graph::thunk(h_on_read);
+    vertex_handle_t v = g.register_vertex(path_t("/k/h"), role_t::HANDLER, std::move(h));
+
+    const auto rd = g.read(v);
+    check(rd.has_value() && *rd && same_bytes(**rd), "`read` returns the copied bytes exactly");
+    const auto got = await_while_writing(g, v, 0x11);
+    check(got.has_value() && *got && same_bytes(**got), "AWAIT returns the copied bytes exactly");
+
+    auto refusing = std::make_shared<refusing_source_t>();
+    handlers_t r;
+    auto r_on_read = [refusing]() -> tr::graph::result_t<tr::graph::value_ref_t> {
+        return tr::graph::value_ref_t::copy(std::span<const std::byte>(k_bytes), *refusing);
+    };
+    r.on_read = tr::graph::thunk(r_on_read);
+    vertex_handle_t rv = g.register_vertex(path_t("/k/r"), role_t::HANDLER, std::move(r));
+    const auto refused = g.read(rv);
+    check(!refused && refused.error() == status_t::BACKPRESSURE,
+          "a copy from a refusing source makes the read answer BACKPRESSURE");
+}
+
 }  // namespace
 
 int main() {
@@ -273,5 +379,7 @@ int main() {
     test_await_at_a_retaining_vertex_is_unchanged();
     test_assign_at_a_non_retaining_vertex_refuses();
     test_propagate_at_a_non_retaining_vertex_refuses();
+    test_empty_on_read_answers_backpressure();
+    test_value_ref_copy_through_on_read();
     return tr::testing::summary("nonretaining_contract");
 }
