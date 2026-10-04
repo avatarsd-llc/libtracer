@@ -119,6 +119,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   whichever of the two headers it reached the names through; both go in the next release. **Migration:** include `libtracer/can_framing.hpp` in place of
   `libtracer/view_can.hpp`, and spell `tr::view::can_frame_mode_t` as
   `tr::net::can::can_frame_mode_t` (and likewise for the other six names).
+- **A STREAM write takes its vertex stripe lock once and allocates nothing for its drain
+  ([#1713](https://github.com/avatarsd-llc/libtracer/issues/1713)).** The receiver ring's
+  admission and the write's drain were two lock sections, and the drain snapshot was a heap
+  `std::vector` per write. The admission now takes the unflushed window in the same section, into
+  the new stack-first `tr::graph::vertex_t::ring_take_t` (four in-frame entries, one heap spill
+  past that); `propagate` drains into the same buffer. Delivery order, the shed and gap accounting
+  and the public `graph_t::drain_unflushed` are unchanged. The admission also resolves a vertex's
+  own ring source under that lock now, which removes an unlocked read that raced the first
+  admission on a vertex written from several threads.
 - **An observed eager write no longer takes the graph-wide sweep lock because some OTHER
   vertex holds an `assign` mark ([#1712](https://github.com/avatarsd-llc/libtracer/issues/1712)).**
   While any mark was pending, every observed write rendered its key (one heap block) and took

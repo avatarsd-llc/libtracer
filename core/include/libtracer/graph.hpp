@@ -2476,9 +2476,12 @@ class graph_t {
     // the owner's own. It is also `write_ctx_t::subject` for the retaining roles' ADMISSION
     // filter (`handlers_t::on_admit`), which runs here — above the storing tail, so a refusal
     // never becomes state and a normalisation is the only value any reader can reach.
+    // `take` is the write path's fused drain (#1713), forwarded to publish_value: non-null only
+    // from write_impl's STREAM arm, which delivers what the admitting section took.
     [[nodiscard]] result_t<value_ref_t> store_value(vertex_t* v, view::rope_t&& value,
                                                     vertex_t::store_drops_t& drops,
-                                                    std::string_view caller);
+                                                    std::string_view caller,
+                                                    vertex_t::ring_take_t* take = nullptr);
     /**
      * @brief The ADOPTING store (RFC-0028 D2, slice 4): publish a value some other vertex
      *        already published by taking one more reference on its block — no clone, no
@@ -2533,13 +2536,12 @@ class graph_t {
      *        then admit it into @p v's ring when @p v is a STREAM.
      * @param sp The value to publish; EMPTY means the block could not be minted, and is
      *           answered as BACKPRESSURE like a declined slot.
+     * @param take Optional (#1713): the stack-first buffer the ring admission takes the
+     *           unflushed window into, in the SAME stripe section — the write path's one lock.
      */
     [[nodiscard]] result_t<value_ref_t> publish_value(vertex_t* v, value_ref_t sp,
-                                                      vertex_t::store_drops_t& drops);
-    // The source a receiving vertex charges its ring admissions against — its own injected
-    // one, else the graph-level default. One spelling, so "per-injection-point, never a
-    // shared pool" cannot drift between call sites.
-    [[nodiscard]] mem::block_source_t& ring_source_for(vertex_t* v) const noexcept;
+                                                      vertex_t::store_drops_t& drops,
+                                                      vertex_t::ring_take_t* take = nullptr);
     // Branch-write decomposition (RFC-0005): a POINT payload written to `v` lands
     // each value-carrying node at the corresponding descendant vertex as a
     // refcount SUBVIEW of the written frame (creating missing vertices, CREATE-
