@@ -259,6 +259,12 @@ if(NOT _lt_cfg_binding STREQUAL "")
     if(LIBTRACER_TRANSPORT_CAN OR _libtracer_link_modules_default)
         string(APPEND _lt_cfg_binding "    static constexpr bool kBusLinks = true;\n")
     endif()
+    # The project's own test build arms the fault-injection hooks (#1719). The preset that would
+    # opt it in yields to this fragment, so the fragment opts in for it, on the same condition
+    # that installs the preset; an embedder's build keeps the lean `false`.
+    if(_libtracer_link_modules_default)
+        string(APPEND _lt_cfg_binding "    static constexpr bool kFaultInjection = true;\n")
+    endif()
     message(STATUS "libtracer: writing a config_override.hpp for the deprecated -D knobs "
                    "(LIBTRACER_ACL_FULL / LIBTRACER_LKV_SLOT) — prefer supplying the fragment")
     file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/generated/include/libtracer/config_override.hpp

@@ -41,12 +41,27 @@
 #include "test_support.hpp"
 #include "test_values.hpp"
 
+namespace tr {
+
+/** @brief The test-only door `guard.hpp` declares (#1719): presets an `rmw_counter_t`. */
+struct rmw_counter_test_door_t {
+    /** @brief Store @p value into @p c outright (`seq_cst`, like the bump). */
+    template <class T, class G, bool kNative>
+    static void preset(rmw_counter_t<T, G, kNative>& c, T value) noexcept {
+        c.preset(value);
+    }
+};
+
+}  // namespace tr
+
 namespace tr::graph {
 
 /** @brief The test-only door `vertex.hpp` declares (#1621): presets the write sequence. */
 struct vertex_seq_test_door_t {
     /** @brief Store @p seq into @p v's write sequence (seq_cst, like the bump). */
-    static void preset(vertex_t& v, write_seq_t seq) { v.write_seq_.preset(seq); }
+    static void preset(vertex_t& v, write_seq_t seq) {
+        ::tr::rmw_counter_test_door_t::preset(v.write_seq_, seq);
+    }
 };
 
 }  // namespace tr::graph
@@ -87,7 +102,7 @@ void bump_concurrently(const char* binding) {
     constexpr unsigned kThreads = 4;
     constexpr unsigned kBumps = 100'000;
     Counter c;
-    c.preset(0xFFFFFFFEu);
+    tr::rmw_counter_test_door_t::preset(c, write_seq_t{0xFFFFFFFEu});
     std::vector<std::thread> bumpers;
     for (unsigned t = 0; t < kThreads; ++t) {
         bumpers.emplace_back([&c] {

@@ -437,7 +437,9 @@ bool transport_tcp_server::on_accept(session_base_t& s, int fd) {
 }
 
 void transport_tcp_server::on_slot_publishing() {
-    if (detail::tcp_peer_publishing_hook != nullptr) detail::tcp_peer_publishing_hook();
+    if constexpr (graph::kFaultInjection) {
+        if (detail::tcp_peer_publishing_hook != nullptr) detail::tcp_peer_publishing_hook();
+    }
 }
 
 void transport_tcp_server::on_slot_reset(session_base_t& s) {
