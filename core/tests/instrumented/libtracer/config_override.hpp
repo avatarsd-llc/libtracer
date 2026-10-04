@@ -1,7 +1,8 @@
 /**
  * @file
  * @brief The instrumented preset — the defaults with `graph_t`'s test/bench instrumentation
- *        counters compiled in (#1664) and the two link modules opted in (#1670).
+ *        counters compiled in (#1664), the two link modules opted in (#1670) and the
+ *        test-only fault-injection hooks compiled in (#1719).
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -18,6 +19,11 @@
  * (`LIBTRACER_TRANSPORT_CAN`, `LIBTRACER_SELF_HEAL_LINKS`) by default for the same build. A
  * `bench/` build that binds this preset turns `LIBTRACER_SELF_HEAL_LINKS` on for the same
  * reason.
+ *
+ * **The fault-injection hooks.** `kFaultInjection` defaults to `false` (#1719): a shipped node
+ * carries no `probe_fail_hook` check on its allocation path. The test build is the one build
+ * that arms those hooks, so it opts in here. The `bench/` preset does not: a bench measures
+ * the path a node ships.
  *
  * **It yields to a fragment the build already supplies.** A CI leg that binds its own
  * configuration (a reclamation policy, the bus module closed, ...) lists its fragment later on
@@ -40,11 +46,13 @@
 
 namespace tr::graph {
 
-/** @brief The defaults, with the instrumentation counters and both link modules compiled in. */
+/** @brief The defaults, with the instrumentation counters, both link modules and the
+ *         fault-injection hooks compiled in. */
 struct instrumented_config_t : default_config_t {
     static constexpr bool kInstrumentCounters = true;
     static constexpr bool kBusLinks = true;
     static constexpr bool kSelfHealLinks = true;
+    static constexpr bool kFaultInjection = true;
 };
 
 using config_t = instrumented_config_t;
