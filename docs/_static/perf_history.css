@@ -178,6 +178,7 @@ body[data-theme="dark"] .ph-hist, :root[data-theme="dark"] .ph-hist {
 .ph-hist .ph-tip { position: absolute; top: 44px; right: 12px; max-width: 46%; background: var(--ph-panel); backdrop-filter: blur(3px); border: 1px solid var(--ph-line); border-radius: 8px; padding: 8px 10px; font-size: 11.5px; color: var(--ph-ink); pointer-events: none; z-index: 3; }
 .ph-hist .ph-tip .sha { font-weight: 700; margin-bottom: 2px; }
 .ph-hist .ph-tip .sha .rel { color: var(--ph-rel); }
+.ph-hist .ph-tip .sha .date { color: var(--ph-muted); font-weight: 400; font-family: var(--ph-mono); font-size: 10.5px; }
 .ph-hist .ph-tip .msg { color: var(--ph-muted); font-size: 10.5px; margin-bottom: 4px; }
 /* Per-point host descriptor (bench-local store only — the hosted store records none). */
 .ph-hist .ph-tip .host { color: var(--ph-muted); font-family: var(--ph-mono); font-size: 9.5px; line-height: 1.35; margin-bottom: 5px; padding-bottom: 4px; border-bottom: 1px solid var(--ph-line); }

@@ -108,6 +108,67 @@ class BenchLocalIsTheDefault(_NoGit):
         self.assertIn('catch (e) { return "local"; }', body)
 
 
+class OneCommitAxisPerStore(_NoGit):
+    """@brief Every trend chart of a store shares one x-axis: one slot per commit (#1801).
+
+    The renderer derives tick spacing from the axis length alone, so one shared `shas`
+    list per store is what makes the domain and the ticks identical on every card.
+    """
+
+    @staticmethod
+    def _drifted() -> dict:
+        """@brief Suites that drifted apart: a re-run commit, and a run missing one suite."""
+        def entry(c: str, run: int, metric: str) -> dict:
+            benches = [{"name": f"{eng}inproc {size}B/fan1/1ep {metric}", "value": 100.0 + run}
+                       for size in SIZES for eng in ("", "zenoh ")]
+            return {"commit": {"id": c * 40, "message": f"commit {c}",
+                               "timestamp": f"2026-10-0{'abc'.index(c) + 1}T00:00:00Z"},
+                    "date": run, "benches": benches}
+        lat = [entry("a", 0, "p50 latency"), entry("b", 1, "p50 latency"),
+               entry("b", 2, "p50 latency"), entry("c", 3, "p50 latency")]
+        thr = [entry("a", 0, "throughput"), entry("c", 3, "throughput")]
+        return {"entries": {"hosted latency": lat, "hosted throughput": thr}}
+
+    def _payloads(self) -> list[dict]:
+        block = rh.html_blocks(self._drifted(), self._drifted())["dispatch"]
+        return [json.loads(re.search(rf'class="{cls}">(.*?)</script>', block).group(1))
+                for cls in ("ph-data", "ph-data-local")]
+
+    def test_every_suite_shares_the_axis(self):
+        for payload in self._payloads():
+            axes = {tuple(s["shas"]) for s in payload["suites"].values()}
+            self.assertEqual(axes, {("a" * 7, "b" * 7, "c" * 7)})
+            for c in payload["charts"]:
+                for v in c["metrics"]:
+                    for se in v["series"]:
+                        self.assertTrue(all(0 <= p[0] < 3 for p in se["pts"]))
+
+    def test_missing_commit_is_a_gap_and_a_rerun_one_slot(self):
+        payload = self._payloads()[0]
+        chart = next(c for c in payload["charts"] if c["id"] == "vs-zenoh-payload")
+        by = {v["name"]: v["series"][0]["pts"] for v in chart["metrics"]}
+        self.assertEqual([p[0] for p in by["throughput"]], [0, 2])
+        # The re-run of `b` keeps its last measurement in its one slot.
+        self.assertEqual(by["p50 latency"][1], [1, 102.0])
+
+    def test_points_carry_their_commit_date(self):
+        suite = self._payloads()[0]["suites"]["latency"]
+        self.assertEqual(suite["dates"], ["2026-10-01", "2026-10-02", "2026-10-03"])
+
+    def test_sweeps_are_log2_with_a_tick_per_size(self):
+        for fam in rh.FAMILIES:
+            if "px" in fam:
+                self.assertTrue(fam["px"]["log"], fam["id"])
+        js = JS.read_text()
+        for fn in ("renderSweep", "renderParam"):
+            body = re.search(rf"function {fn}\(.*?\n  \}}\n", js, re.S).group(0)
+            self.assertIn("Math.log2", body)
+            self.assertNotIn("Math.log10(v) - Math.log10(xmin)", body)
+
+    def test_trend_cards_have_a_recent_window_zoom(self):
+        self.assertIn("ph-rlast", JS.read_text())
+
+
 class RowsAboveOneKibAreVisible(_NoGit):
     """@brief Payload sizes above 1 KiB reach the default (bench-local) payload."""
 
