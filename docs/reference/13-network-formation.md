@@ -216,9 +216,10 @@ no socket and dials on first use, so creation no longer fails when the peer is d
 connections still bind eagerly and report `LISTENING` at creation, and bus kinds (`can`) stay
 eager by design. What is
 **not** implemented is the module-side half of S3 — no module declares a `conn:schema`
-catalog, so every endpoint answers the conforming empty `SETTINGS` (Amendment 3) — and the
-routing-plane callers that would make a subscription hold a link's refcount; the
-`CREATE`/`WRITE` gating split (S2c) is in. The addressing half was already there — a created connection mounts and routes at
+catalog, so every endpoint answers the conforming empty `SETTINGS` (Amendment 3). A routed
+subscription does hold its link's refcount since
+[#1816](https://github.com/avatarsd-llc/libtracer/issues/1816), and the `CREATE`/`WRITE`
+gating split (S2c) is in. The addressing half was already there — a created connection mounts and routes at
 `/net/<module>/<name>`, with the module name declared by the application (never
 library-derived — ADR-0073 §4) — and the `:children[]` creation spelling RFC-0014
 supersedes is **gone**: S7 unregistered the `client` and `listener` child types, so the

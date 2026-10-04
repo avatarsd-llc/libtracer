@@ -78,11 +78,12 @@ This unblocks the transport-link half of
 > refcount / dormancy / self-heal existed. Per the clause-kind rule (see Discussion) the byte-level
 > clauses here were **proposed pending** code + conformance vectors.
 >
-> **As of Amendment 4 (S7) every byte clause is normative, and all of it is SHIPPED except two
-> residuals** (see the 2026-10-03 erratum): no module yet *declares* a `conn:schema` catalog, so
+> **As of Amendment 4 (S7) every byte clause is normative, and all of it is SHIPPED except the
+> residuals the 2026-10-03 errata name**: no module yet *declares* a `conn:schema` catalog, so
 > every endpoint answers Amendment 3's conforming empty `SETTINGS` and no `SPEC` is validated
-> against a catalog (the S3 module-side half); and no routing-plane caller drives §4's standing-binding
-> refcount from a subscription or `await` — the seam exists, but only an embedder drives it today.
+> against a catalog (the S3 module-side half); and a routed `await` takes no standing hold. A
+> routed **subscription** does drive §4's standing-binding refcount, since
+> [#1816](https://github.com/avatarsd-llc/libtracer/issues/1816).
 > The `:children[]` creation target is gone, the per-module endpoint is the only creation door, the
 > `CREATE`/`WRITE` split of §5 is in (Amendment 2), and the clause-by-clause instrument table is in
 > Amendment 4.
@@ -828,3 +829,19 @@ table stand unchanged, and a status sentence that overstated the implementation 
 what the code does. The residuals are tracked as
 [#1815](https://github.com/avatarsd-llc/libtracer/issues/1815) (module-declared catalog) and
 [#1816](https://github.com/avatarsd-llc/libtracer/issues/1816) (routing-plane refcount callers).
+
+## Erratum (2026-10-03) — the subscription half of the refcount residual is shipped ([#1816](https://github.com/avatarsd-llc/libtracer/issues/1816))
+
+**What the text said.** The erratum above, item 2: no library code calls the refcount seam, so a
+subscription routed through a dormant link does not bring it up by itself.
+
+**What the behaviour is.** On a build that carries the liveness engine, every remote subscription
+edge that delivers over a connection takes one standing hold when it is admitted and gives it back
+when it is cleared, replaced or evicted. The hold is the engine's existing count, driven through
+`transport_vertex_t::acquire_link` / `release_link`; there is no timer and no clock read, and
+liveness stays per link, never per subscription. It is per hop and local, as §4 says: the edge is
+on this node and holds this node's link. A routed `await` still takes no standing hold, so that
+half of item 2 remains open.
+
+**Instrument: erratum, not amendment.** No wire surface moves: §4 already counted a routed
+subscription as a binding, and the status blockquote is brought back to what the code does.
