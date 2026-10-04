@@ -28,11 +28,14 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 
 namespace tr {
 
-struct mutex_guard_t;  // guard_mutex.hpp — the host guard: address-striped locks (hosted)
-struct no_guard_t;     // guard.hpp — guards nothing; single-threaded builds only
+template <std::size_t LineBytes, std::size_t Stripes>
+struct basic_mutex_guard_t;  // guard_mutex.hpp — the host guard: address-striped locks (hosted)
+using mutex_guard_t = basic_mutex_guard_t<64, 64>;  // its default sizing (guard_mutex.hpp)
+struct no_guard_t;  // guard.hpp — guards nothing; single-threaded builds only
 
 }  // namespace tr
 
@@ -359,6 +362,19 @@ struct default_config_t {
      * there by both the slot and the pool.
      */
     using guard_t = ::tr::mutex_guard_t;
+
+    /**
+     * @brief Locks in the host guard's process-wide stripe table (#1716); a power of two.
+     *
+     * Applies when the build keeps the default @ref guard_t, and then the library then binds
+     * `tr::basic_mutex_guard_t<kCacheLineBytes, kGuardStripes>`, so the table costs
+     * `kGuardStripes * max(kCacheLineBytes, 1)` bytes of `.bss` — 4 KB at the defaults. Two
+     * vertices share a lock only when their addresses hash to one stripe, and a shared stripe
+     * costs a contended section, never correctness. Override fragment:
+     * `static constexpr std::size_t kGuardStripes = 16;`. Ignored when @ref guard_t is bound to
+     * anything else (an interrupt-masked guard has no table).
+     */
+    static constexpr std::size_t kGuardStripes = 64;
 
     /**
      * @brief The target's selected LKV slot policy (ADR-0069 §1).
@@ -806,8 +822,38 @@ inline constexpr bool kSingleWriter = config_t::kSingleWriter;
 inline constexpr bool kInstrumentCounters = config_t::kInstrumentCounters;
 /** @brief @ref default_config_t::kForceGuardedRmw for this build. */
 inline constexpr bool kForceGuardedRmw = config_t::kForceGuardedRmw;
-/** @brief @ref default_config_t::guard_t for this build. */
-using guard_t = config_t::guard_t;
+
+namespace detail_guard {
+
+/**
+ * @brief The guard @p C binds, with the inherited host guard re-sized from @p C's own knobs.
+ *
+ * `default_config_t::guard_t` is spelled at the defaults (`mutex_guard_t`, 64 x 64), and a
+ * member of a base cannot read a knob the derived fragment overrides. So a fragment that keeps
+ * that binding but changes `kCacheLineBytes` or `kGuardStripes` gets the guard sized from ITS
+ * values here (#1716). A fragment that names a guard itself gets exactly that guard.
+ */
+template <class C>
+struct sized_guard {
+    using type = typename C::guard_t; /**< @brief A guard the fragment bound itself. */
+};
+/** @brief The inherited default: the host guard at @p C's line size and stripe count. */
+template <class C>
+    requires std::is_same_v<typename C::guard_t, default_config_t::guard_t>
+struct sized_guard<C> {
+    /** @brief `basic_mutex_guard_t` at @p C's `kCacheLineBytes` and `kGuardStripes`. */
+    using type = ::tr::basic_mutex_guard_t<C::kCacheLineBytes, C::kGuardStripes>;
+};
+
+}  // namespace detail_guard
+
+/**
+ * @brief The critical-section guard for this build: @ref default_config_t::guard_t, with the
+ *        inherited host guard sized by `kCacheLineBytes` and `kGuardStripes` (#1716).
+ */
+using guard_t = detail_guard::sized_guard<config_t>::type;
+/** @brief @ref default_config_t::kGuardStripes for this build. */
+inline constexpr std::size_t kGuardStripes = config_t::kGuardStripes;
 /**
  * @brief Deprecated alias of @ref guard_t, kept for one release (#1703).
  * Deprecated: Name `tr::graph::guard_t`. (The config MEMBER of that name is not aliased: a

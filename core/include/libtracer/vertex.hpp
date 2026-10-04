@@ -60,6 +60,7 @@
 #include "libtracer/config.hpp"
 #include "libtracer/edge_pin.hpp"
 #include "libtracer/guard.hpp"
+#include "libtracer/guard_mutex.hpp"
 #include "libtracer/hook.hpp"
 #include "libtracer/lkv_slot.hpp"
 #include "libtracer/mem_source.hpp"
@@ -101,15 +102,15 @@ static_assert(!std::is_same_v<lkv_slot_t, hazard_slot_t> || detail_hp::kClaimWor
 /**
  * @brief The host guard is a one-word lock-free flag, or it is not the host guard (#1628).
  *
- * `mutex_guard_t`'s whole point is one RMW to take a stripe; on a target whose `atomic<bool>` is
- * not lock-free that RMW is a libatomic lock, and the target should bind an interrupt-masked
- * `guard_t` instead (every ESP chip target does). Asserted here, beside the binding, for
- * the reason the hazard assertion above is: `%lkv_slot.hpp` is included on targets that never
- * bind the guard, and esp32c3 (rv32imc) has no lock-free atomic of any width.
+ * The host guard's whole point (`basic_mutex_guard_t`, at any sizing) is one RMW to take a
+ * stripe; on a target whose `atomic<bool>` is not lock-free that RMW is a libatomic lock, and the
+ * target should bind an interrupt-masked `guard_t` instead (every ESP chip target does). Asserted
+ * here, beside the binding, for the reason the hazard assertion above is: `%lkv_slot.hpp` is
+ * included on targets that never bind the guard, and esp32c3 (rv32imc) has no lock-free atomic of
+ * any width.
  */
-static_assert(!std::is_same_v<guard_t, ::tr::mutex_guard_t> ||
-                  std::atomic<bool>::is_always_lock_free,
-              "this target binds mutex_guard_t, the host guard, but has no lock-free bool "
+static_assert(!::tr::is_mutex_guard_v<guard_t> || std::atomic<bool>::is_always_lock_free,
+              "this target binds basic_mutex_guard_t, the host guard, but has no lock-free bool "
               "atomic — its one-word lock would take a libatomic lock; bind an interrupt-masked "
               "guard_t here (the ESP-IDF component's tr::esp::critical_guard_t)");
 

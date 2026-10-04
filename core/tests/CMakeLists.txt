@@ -2545,6 +2545,13 @@ target_link_libraries(guard_alias_test PRIVATE libtracer)
 libtracer_test_warnings(guard_alias_test)
 add_test(NAME guard_alias COMMAND guard_alias_test)
 
+# #1716: the host guard sized from kCacheLineBytes and kGuardStripes — the default keeps the
+# 4 KB table, a smaller config shrinks it, and packed stripes still exclude under contention.
+add_executable(guard_sizing_test guard_sizing_test.cpp)
+target_link_libraries(guard_sizing_test PRIVATE libtracer)
+libtracer_test_warnings(guard_sizing_test)
+add_test(NAME guard_sizing COMMAND guard_sizing_test)
+
 # #830's ablation reads a counter a lean build compiles out (#1664): under a CI leg's own
 # fragment it exits 77, reported SKIPPED rather than passed.
 set_property(TEST target_binding_ablation PROPERTY SKIP_RETURN_CODE 77)
