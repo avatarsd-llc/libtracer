@@ -413,7 +413,7 @@ Details that make these trustworthy:
   v0.9.0 window while every gated point stayed flat, so the gate had nothing to object to.
   They are `compact-forward/64/1/1` and `compact-terminus/64/1/1` — the compact-delivery
   tier's forward hop and its terminus, from `bench_compact_delivery`; and
-  `fwd-demux-fixed/79/1/1` and `fwd-demux-scan/79/64/64` — the fixed-slot and scanning
+  `fwd-demux-fixed/61/1/1` and `fwd-demux-scan/61/64/64` — the fixed-slot and scanning
   arms of the FWD demux, from `bench_forward_demux`. Each `POINTS` entry names the binary
   that produces it; every one of them emits the same 12-column `RESULT` format, so this
   costs two extra processes per arm per pair and no new parsing.

@@ -488,6 +488,7 @@ class PicosecondBatchRows(unittest.TestCase):
         with unittest.mock.patch.object(pg, "paired_samples", lambda *a: fake), \
                 contextlib.redirect_stdout(out):
             fails = pg.gate_paired({}, {}, 4)
+        fails = [x for x in fails if x.startswith(key)]  # the other points are missing (#1847)
         self.assertEqual(len(fails), 1)
         self.assertIn("deliv/s", fails[0])  # the one leg the row has still gates
         self.assertNotIn("p50 ", out.getvalue().split(key)[1].split("run drift")[0])
@@ -814,6 +815,165 @@ class GateTimesBothFamilySets(unittest.TestCase):
         rc, out = self.verdict_for(self.run_cond(10.0, 84.4, multi=True))
         self.assertEqual(rc, 0, out)
         self.assertIn("PERF: PASS", out)
+
+
+def _row(mode: str, size: int, fan: int, ep: int) -> str:
+    """@brief One 12-column RESULT line for @p mode at the given key."""
+    return "\t".join(["RESULT", "libtracer", mode, str(size), str(fan), str(ep),
+                      "1000000", "1000000", "0", "200", "300", "210"])
+
+
+class MissingGatedKeysFail(unittest.TestCase):
+    """@brief #1847: a gated key nobody emits must FAIL, never read as "not gated".
+
+    The two demux points were keyed `/79/` after RFC-0018 shrank the frame to 61 B, so for
+    seven weeks neither arm emitted them and every run printed "absent from one arm — not
+    gated" over a PASS. These pin the re-key against the bench source and make an absent
+    key fail in both the paired and the legacy path."""
+
+    def sample(self):
+        return {"p50_ns": 200.0, "mean_ns": 210.0, "deliv_s": 1.0e6}
+
+    def gate(self, cand_keys, base_keys):
+        fake = {"cand": {k: [self.sample() for _ in range(4)] for k in cand_keys},
+                "base": {k: [self.sample() for _ in range(4)] for k in base_keys}}
+        out = io.StringIO()
+        with unittest.mock.patch.object(pg, "paired_samples", lambda *a: fake), \
+                contextlib.redirect_stdout(out):
+            fails = pg.gate_paired({}, {}, 4)
+        return fails, out.getvalue()
+
+    def keys(self):
+        return [f"{m}/{s}/{f}/{e}" for (_b, m, s, f, e) in pg.POINTS]
+
+    def test_demux_points_match_the_frame_the_bench_emits(self):
+        """The bench reports `frame.size()`, 61 B for the packed-PATH FWD frame since
+        1fe92124 (main's history records `fwd-demux-fixed 61B/...`); pin both the size and
+        the mode names the bench source emits."""
+        demux = [(m, s) for (b, m, s, _f, _e) in pg.POINTS if b == "demux"]
+        self.assertEqual(demux, [("fwd-demux-fixed", 61), ("fwd-demux-scan", 61)])
+        src = (pg.HERE / "bench_forward_demux.cpp").read_text()
+        self.assertIn('run_point(n, 1, "fwd-demux-fixed")', src)
+        self.assertIn('run_point(n, n, "fwd-demux-scan")', src)
+
+    def test_every_point_present_passes(self):
+        fails, _ = self.gate(self.keys(), self.keys())
+        self.assertEqual(fails, [])
+
+    def test_a_key_absent_from_both_arms_fails_loudly(self):
+        k = "fwd-demux-fixed/61/1/1"
+        present = [x for x in self.keys() if x != k]
+        fails, out = self.gate(present, present)
+        self.assertEqual(len(fails), 1)
+        self.assertTrue(fails[0].startswith(k))
+        self.assertIn("::error::", out)
+        self.assertNotIn("not gated", out)
+
+    def test_a_key_absent_from_the_candidate_only_fails(self):
+        k = "fwd-demux-scan/61/64/64"
+        fails, _ = self.gate([x for x in self.keys() if x != k], self.keys())
+        self.assertEqual([f.split()[0] for f in fails], [k])
+
+    def test_a_key_absent_from_the_baseline_only_is_not_gated(self):
+        k = "eptype-stream/64/1/1"  # a point the baseline build predates
+        fails, out = self.gate(self.keys(), [x for x in self.keys() if x != k])
+        self.assertEqual(fails, [])
+        self.assertIn("not gated", out)
+
+    def test_multi_rows_on_a_small_host_are_not_failed(self):
+        present = [x for x in self.keys() if x not in pg.MAY_BE_ABSENT]
+        fails, _ = self.gate(present, present)
+        self.assertEqual(fails, [])
+
+    def test_a_multi_row_the_baseline_has_but_the_candidate_dropped_fails(self):
+        k = sorted(pg.MAY_BE_ABSENT)[0]
+        fails, _ = self.gate([x for x in self.keys() if x != k], self.keys())
+        self.assertEqual([f.split()[0] for f in fails], [k])
+
+    def test_the_old_79_byte_rows_do_not_satisfy_the_gate(self):
+        """The exact input of the seven-week gap: the bench emits 61 B rows only."""
+        transcript = "\n".join([_row("fwd-demux-fixed", 61, 1, 1),
+                                 _row("fwd-demux-scan", 61, 64, 64)]) + "\n"
+        with tempfile.TemporaryDirectory() as d:
+            p = pathlib.Path(d) / "bench_forward_demux"
+            p.write_text("")
+            with unittest.mock.patch.object(pg, "timed", lambda *a, **k: transcript):
+                rows = pg.run_bench_once(p)
+        for (b, m, s, f, e) in pg.POINTS:
+            if b == "demux":
+                self.assertIsNotNone(pg.metric(rows, m, s, f, e), m)
+        self.assertIsNone(pg.metric(rows, "fwd-demux-fixed", 79, 1, 1))
+
+    def test_the_legacy_path_fails_a_missing_key(self):
+        """No baseline binary: `best_of` is the only arm, and a key it did not emit fails."""
+        with tempfile.TemporaryDirectory() as d:
+            bench = pathlib.Path(d) / "bench_libtracer"
+            bench.write_text("")
+            out = io.StringIO()
+            argv = ["perf_gate.py", "--tier", "blocking", "--bench", str(bench),
+                    "--bench-fwd", str(pathlib.Path(d) / "absent_fwd")]
+            cur = {k: self.sample() for k in self.keys() if k != "inproc/64/1/1"}
+            with unittest.mock.patch.object(sys, "argv", argv), \
+                    unittest.mock.patch.object(pg, "best_of", lambda *a: dict(cur)), \
+                    unittest.mock.patch.object(pg, "lkv_ratio_report", lambda *a: None), \
+                    unittest.mock.patch.object(pg, "mem_probe", lambda *a: {}), \
+                    unittest.mock.patch.object(pg, "BASELINE", pathlib.Path(d) / "b.json"), \
+                    unittest.mock.patch.object(pg, "LEDGER", pg.bc.Ledger()), \
+                    unittest.mock.patch.object(pg, "BENCH_ERRORS", []), \
+                    contextlib.redirect_stdout(out):
+                rc = pg.main()
+        self.assertEqual(rc, 1, out.getvalue())
+        self.assertIn("inproc/64/1/1 not measured", out.getvalue())
+
+
+class NonZeroBenchExitIsInconclusive(unittest.TestCase):
+    """@brief #1847: a bench that exited non-zero makes the verdict INCONCLUSIVE.
+
+    Its partial transcript used to drop rows into "not gated" and the gate printed PASS
+    over a crash. A non-zero exit is not a verdict on the code, so it is neither PASS nor
+    FAIL: the blocking tier exits `EXIT_INCONCLUSIVE`, the advisory tier 0."""
+
+    def timed_with_rc(self, rc: int) -> list[str]:
+        errors: list[str] = []
+        fake = pg.bc.Measurement(["./bench_forward_demux"], "", "boom", rc, [])
+        with unittest.mock.patch.object(pg.bc, "measure", lambda *a, **k: fake), \
+                unittest.mock.patch.object(pg, "LEDGER", unittest.mock.Mock(add=lambda m: m)), \
+                unittest.mock.patch.object(pg, "BENCH_ERRORS", errors), \
+                contextlib.redirect_stdout(io.StringIO()):
+            pg.timed(["./bench_forward_demux"], timeout=1)
+        return errors
+
+    def test_timed_records_a_non_zero_exit(self):
+        self.assertEqual(self.timed_with_rc(134), ["bench_forward_demux exited 134"])
+
+    def test_timed_records_nothing_on_success(self):
+        self.assertEqual(self.timed_with_rc(0), [])
+
+    def verdict(self, tier: str, fails: list[str]) -> tuple[int, str]:
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = pg.render_verdict(fails, [], tier, None, pg.bc.Ledger(),
+                                   ["bench_forward_demux exited 134"])
+        return rc, out.getvalue()
+
+    def test_blocking_tier_is_inconclusive_not_pass(self):
+        rc, out = self.verdict("blocking", [])
+        self.assertEqual(rc, pg.EXIT_INCONCLUSIVE)
+        self.assertIn("PERF: INCONCLUSIVE", out)
+        self.assertNotIn("PERF: PASS", out)
+        self.assertIn("exited 134", out)
+
+    def test_inconclusive_overrides_the_missing_key_fails(self):
+        rc, out = self.verdict("blocking", ["fwd-demux-fixed/61/1/1 not measured: ..."])
+        self.assertEqual(rc, pg.EXIT_INCONCLUSIVE)
+        self.assertIn("  ? fwd-demux-fixed/61/1/1", out)
+        self.assertNotIn("  ! ", out)
+
+    def test_advisory_tier_reports_and_exits_zero(self):
+        rc, out = self.verdict("advisory", [])
+        self.assertEqual(rc, 0)
+        self.assertIn("PERF: INCONCLUSIVE", out)
+        self.assertIn("::warning::", out)
 
 
 class WorkflowsDeclareTheirTier(unittest.TestCase):
