@@ -185,6 +185,10 @@
       for (var k2 in se) if (Object.prototype.hasOwnProperty.call(se, k2)) s2[k2] = se[k2];
       s2.pts = se.pts.filter(function (p) { return p[0] >= a && p[0] <= b; })
         .map(function (p) { return [p[0] - a, p[1]]; });
+      if (se.steps) {
+        s2.steps = se.steps.filter(function (t) { return t[0] >= a && t[0] <= b; })
+          .map(function (t) { return [t[0] - a, t[1], t[2]]; });
+      }
       return s2;
     });
     return {
@@ -213,6 +217,22 @@
     return '<line class="ph-instr" x1="' + x.toFixed(1) + '" y1="' + y0 + '" x2="' + x.toFixed(1) + '" y2="' + y1 + '"/>' +
       '<text class="ph-instrlab" x="' + (x + 4).toFixed(1) + '" y="' + (y1 - 4) + '">⚙</text>' +
       '<title>' + r.label + ' — the benchmark itself changed here; points either side are not directly comparable</title>';
+  }
+
+  /** @brief A sustained-step marker (#1770): a triangle in the series' colour at the first
+   * commit that measured the new level, pointing the way the row moved.
+   *
+   * Drawn at the NEW level, not on the line: the step's first point may be a contaminated
+   * sample the line omits, and the level is what the step is about. The detector and its
+   * rule live in bench/step_detect.py; this only draws what the payload carries.
+   */
+  function stepMark(x, y, cc, se, t, yf) {
+    var up = t[2] > t[1], d = up ? -1 : 1, r = 6;
+    var pct = ((t[2] / t[1] - 1) * 100).toFixed(0);
+    var pts = x.toFixed(1) + "," + (y + d * r).toFixed(1) + " " + (x - r).toFixed(1) + "," + (y - d * r * 0.6).toFixed(1) +
+      " " + (x + r).toFixed(1) + "," + (y - d * r * 0.6).toFixed(1);
+    return '<polygon class="ph-step" points="' + pts + '" fill="' + cc + '"><title>sustained step · ' + se.label + ": " +
+      yf(t[1]) + " → " + yf(t[2]) + " (" + (up ? "+" : "") + pct + "%)</title></polygon>";
   }
 
   // ---------------------------------------------------------------- trend --
@@ -269,6 +289,10 @@
       se.pts.forEach(function (p, i3) {
         s += '<circle cx="' + X(p[0]).toFixed(1) + '" cy="' + Y(p[1]).toFixed(1) + '" r="' + (i3 === se.pts.length - 1 ? 3.4 : 2.2) + '" fill="' + cc + '"/>';
       });
+    });
+    // Step markers go on top of every line, so a marker is never hidden under a neighbour.
+    c.series.forEach(function (se) {
+      (se.steps || []).forEach(function (t) { if (t[0] < N) s += stepMark(X(t[0]), Y(t[2]), col(se.ci), se, t, yf); });
     });
     s += '<line class="ph-cross" x1="0" y1="' + m.t + '" x2="0" y2="' + (m.t + ph) + '" style="display:none"/>';
     s += "</svg>";
