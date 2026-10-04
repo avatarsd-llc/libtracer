@@ -81,6 +81,12 @@ add_executable(test_delivery_count test_delivery_count.cpp)
 target_link_libraries(test_delivery_count PRIVATE libtracer)
 target_compile_options(test_delivery_count PRIVATE -Wall -Wextra)
 
+# The BATCH-ROW estimator's self-test (#1804): `bench_common.hpp`'s `time_batches` keeps
+# picoseconds, clears the 20 µs window floor on every sample and records the clock floor. No
+# libtracer, no network. Not named bench_* for the reason test_compose_record gives.
+add_executable(test_batch_timing test_batch_timing.cpp)
+target_compile_options(test_batch_timing PRIVATE -Wall -Wextra)
+
 # NETWORK transport comparison (UDP/TCP/WS over the loopback kernel path) — the
 # libtracer side of the transport matrix vs Zenoh (bench_zenoh_net). Two PROCESSES
 # (pub|sub role arg), same topology as the Zenoh bench; emits mode `net-<proto>`.

@@ -91,7 +91,7 @@ def main() -> int:
             if float(f[i]) > float(cur[i]):
                 cur[i] = f[i]
         for i in MIN_COLS:
-            if int(f[i]) < int(cur[i]):
+            if float(f[i]) < float(cur[i]):  # ns, possibly fractional (#1804)
                 cur[i] = f[i]
 
     for tag, k in order:

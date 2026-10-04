@@ -17,6 +17,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
+#include <ctime>
+#include <limits>
 #include <numeric>
 #include <thread>
 #include <vector>
@@ -163,6 +166,10 @@ inline constexpr std::size_t kMaxBatch = 1U << 20;
  * Hoisted here from bench_compact_delivery.cpp (#553) so the in-process bench can use
  * the same calibrator the net-plane benches already do, and so there is ONE definition of
  * "large enough" across the harness.
+ *
+ * No gated row uses it any more (#1804): every batch row of `bench_libtracer`,
+ * `bench_compact_delivery` and `bench_forward_demux` times through @ref time_batches, which
+ * sizes its batch by window. It stays for the ungated benches that still call it.
  *
  * @param op The operation to time; called (many) times, so it must be repeatable.
  * @return The calibrated batch size, clamped to @ref kMaxBatch.
@@ -387,6 +394,194 @@ template <class Sample>
     return static_cast<std::size_t>(std::min<std::uint64_t>(est, kMaxReservedSamples));
 }
 
+/**
+ * @brief Window the batch calibrator aims for in @ref time_batches: twice the floor.
+ *
+ * @ref calibrate_batch_for_window stops at the first power-of-two batch whose window reaches
+ * its target, so a target equal to the floor leaves the timed windows a few percent above it,
+ * and one fast window could dip under. Aiming at twice the floor puts every timed window at
+ * 40–80 µs, so the floor assertion in @ref time_batches holds unless the operation gets twice
+ * as fast between calibration and timing.
+ */
+inline constexpr std::uint64_t kBatchWindowTargetNs = 2 * kMinBatchWindowNs;
+static_assert(kMinBatchWindowNs >= 20'000, "a batch window under 20 us lets the clock back in");
+
+/**
+ * @brief One batch row's per-operation figures, in picoseconds (#1804).
+ *
+ * Each sample is one timed window divided by its batch, kept as a `double` in picoseconds.
+ * The integer `window_ns / batch` it replaces truncated a 3.9 ns operation to 3 ns and moved
+ * in whole-nanosecond steps, which on a 3–20 ns row is a 5–30 % grain. There is no p99 here
+ * on purpose: a percentile of batch means measures interference between batches, not the
+ * tail of one operation.
+ */
+struct batch_timing_t {
+    double p50_ps = 0;               /**< @brief Median per-op time over the samples. */
+    double mean_ps = 0;              /**< @brief Mean per-op time over the samples. */
+    double ops_per_s = 0;            /**< @brief Operations over the whole timed loop. */
+    std::size_t batch = 0;           /**< @brief Operations per timed window. */
+    std::size_t samples = 0;         /**< @brief Timed windows behind the figures. */
+    std::uint64_t min_window_ns = 0; /**< @brief Shortest timed window (>= the floor). */
+    std::size_t recalibrations = 0;  /**< @brief Times a short window doubled the batch. */
+};
+
+/**
+ * @brief One window's per-operation time in picoseconds: `window_ns * 1000 / batch`, kept
+ *        fractional (#1804).
+ */
+[[nodiscard]] constexpr double per_op_ps(std::uint64_t window_ns, std::size_t batch) {
+    return static_cast<double>(window_ns) * 1000.0 / static_cast<double>(batch);
+}
+
+/** @brief Fewest windows a batch row takes, whatever its budget, so its p50 is a median. */
+inline constexpr std::size_t kMinBatchSamples = 16;
+
+/**
+ * @brief Abort the run: a batch window came in under @ref kMinBatchWindowNs at @ref kMaxBatch.
+ *
+ * A short window at a smaller batch is a misled calibration, and @ref time_batches recovers
+ * from it by doubling the batch. At @ref kMaxBatch there is nothing left to double: the
+ * operation costs almost nothing, which means the compiler deleted the work or the harness is
+ * broken, so the bench stops rather than publish a figure the clock dominates.
+ *
+ * @param window_ns The window that was too short.
+ * @param batch     The batch it timed.
+ */
+[[noreturn]] inline void window_floor_breached(std::uint64_t window_ns, std::size_t batch) {
+    std::fprintf(stderr,
+                 "FATAL batch window %llu ns < floor %llu ns (batch %zu): the clock is back in "
+                 "the figure\n",
+                 static_cast<unsigned long long>(window_ns),
+                 static_cast<unsigned long long>(kMinBatchWindowNs), batch);
+    std::fflush(stdout);
+    std::abort();
+}
+
+/**
+ * @brief Time @p op in window-calibrated batches and report per-op picoseconds (#1804).
+ *
+ * The one timing loop every batch row uses. The batch comes from @ref
+ * calibrate_batch_for_window aimed at @ref kBatchWindowTargetNs (the calibration doubles as
+ * warm-up), and every kept window is at least @ref kMinBatchWindowNs. A window under it
+ * means a stall misled the calibration into too small a batch: the batch is doubled and the
+ * samples restart, and only a short window at @ref kMaxBatch aborts the run. Sampling stops once @p
+ * budget_ns is spent or @p max_ops operations have run, whichever comes first, but never before
+ * @ref kMinBatchSamples windows.
+ *
+ * @param op        The operation; called many times, so it must be repeatable.
+ * @param budget_ns Time budget for the timed loop.
+ * @param max_ops   Operation budget for the timed loop.
+ * @return The per-op figures; see @ref batch_timing_t.
+ */
+template <typename Op>
+[[nodiscard]] batch_timing_t time_batches(
+    Op&& op, std::uint64_t budget_ns,
+    std::size_t max_ops = std::numeric_limits<std::size_t>::max()) {
+    std::size_t batch = calibrate_batch_for_window(op, kBatchWindowTargetNs);
+    const auto window = [&] {
+        for (std::size_t i = 0; i < batch; ++i) op();
+    };
+    // Reserved and touched before timing, like Latency::reserve (#1803).
+    const std::size_t want =
+        std::max(kMinBatchSamples, std::min(samples_for_budget(window, budget_ns),
+                                            max_ops / std::max<std::size_t>(1, batch) + 1));
+    std::vector<double> ps(want);
+    ps.clear();
+
+    std::uint64_t min_window = std::numeric_limits<std::uint64_t>::max();
+    std::size_t ops = 0;
+    std::uint64_t total = 0;
+    std::size_t recalibrations = 0;
+    std::uint64_t t0 = now_ns();
+    while (ps.size() < kMinBatchSamples || (total < budget_ns && ops < max_ops)) {
+        const std::uint64_t a = now_ns();
+        window();
+        const std::uint64_t w = now_ns() - a;
+        if (w < kMinBatchWindowNs) {
+            // The calibration was misled — one stall inside a short calibration window makes
+            // a small batch look long enough. Re-calibrate upward and start the samples over,
+            // so every kept window clears the floor at ONE batch size. Only a batch that has
+            // reached kMaxBatch and still runs short is a harness defect (or deleted work).
+            if (batch >= kMaxBatch) window_floor_breached(w, batch);
+            batch *= 2;
+            ++recalibrations;
+            ps.clear();
+            min_window = std::numeric_limits<std::uint64_t>::max();
+            ops = 0;
+            total = 0;
+            t0 = now_ns();
+            continue;
+        }
+        min_window = std::min(min_window, w);
+        ps.push_back(per_op_ps(w, batch));
+        ops += batch;
+        total = now_ns() - t0;
+    }
+
+    batch_timing_t t;
+    t.batch = batch;
+    t.recalibrations = recalibrations;
+    t.samples = ps.size();
+    t.min_window_ns = min_window;
+    t.ops_per_s = total > 0 ? static_cast<double>(ops) * 1e9 / static_cast<double>(total) : 0.0;
+    t.mean_ps = std::accumulate(ps.begin(), ps.end(), 0.0) / static_cast<double>(ps.size());
+    // Same order statistic as Latency::summarize (index floor(0.5 * n)), so a batch row's p50
+    // keeps the convention its history was recorded under.
+    std::sort(ps.begin(), ps.end());
+    t.p50_ps = ps[std::min(ps.size() - 1, ps.size() / 2)];
+    return t;
+}
+
+/**
+ * @brief The clock floor of this host: the clock's resolution and what one sample costs.
+ *
+ * Recorded with every run (#1804) so a reader can judge how fine a row can be at all.
+ * `res_ns` is `clock_getres(CLOCK_MONOTONIC)`, the clock `std::chrono::steady_clock` reads
+ * on Linux. `sample_ns` is measured: the cost of the two @ref now_ns reads that bracket one
+ * timed sample, averaged over a run of back-to-back pairs, best of eight runs. A per-op row
+ * pays it once per operation; a batch row pays it once per window.
+ */
+struct clock_floor_t {
+    double res_ns = 0;    /**< @brief Reported clock resolution. */
+    double sample_ns = 0; /**< @brief Measured cost of one sample's pair of clock reads. */
+};
+
+/** @brief Measure @ref clock_floor_t on this host, now. */
+[[nodiscard]] inline clock_floor_t measure_clock_floor() {
+    clock_floor_t f;
+    timespec res{};
+    if (clock_getres(CLOCK_MONOTONIC, &res) == 0)
+        f.res_ns = static_cast<double>(res.tv_sec) * 1e9 + static_cast<double>(res.tv_nsec);
+    constexpr std::size_t kPairs = 4096;
+    volatile std::uint64_t sink = 0;
+    double best = std::numeric_limits<double>::max();
+    for (int run = 0; run < 8; ++run) {
+        const std::uint64_t a = now_ns();
+        for (std::size_t i = 0; i < kPairs; ++i) {
+            const std::uint64_t s0 = now_ns();
+            sink = sink + (now_ns() - s0);
+        }
+        best = std::min(best, static_cast<double>(now_ns() - a) / static_cast<double>(kPairs));
+    }
+    f.sample_ns = best;
+    return f;
+}
+
+/**
+ * @brief Print this host's clock floor as one `CLOCK` line (#1804).
+ *
+ *     CLOCK res_ns sample_ns
+ *
+ * Tab-separated, on stdout ahead of the run's rows. Every RESULT parser tests the first
+ * field, so the line is skipped by all of them; `host_guard.py stamp --clock-from` reads it
+ * into the store's host descriptor, which the performance page shows on every point.
+ */
+inline void emit_clock_floor() {
+    const clock_floor_t f = measure_clock_floor();
+    std::printf("CLOCK\t%.3f\t%.3f\n", f.res_ns, f.sample_ns);
+    std::fflush(stdout);
+}
+
 /*
  * One comparable measurement. `mode` distinguishes the path / module composition
  * (libtracer inproc / inproc-borrow / loopback; zenoh inproc / net). pub_per_s is
@@ -400,6 +595,29 @@ inline void emit(const char* system, const char* mode, std::size_t size_bytes, s
                 size_bytes, fanout, endpoints, pub_per_s, deliv_per_s, mb_per_s,
                 static_cast<unsigned long long>(lat.p50), static_cast<unsigned long long>(lat.p99),
                 static_cast<unsigned long long>(lat.mean));
+    std::fflush(stdout);
+}
+
+/**
+ * @brief Publish a batch row (#1804): p50 and mean in nanoseconds to the picosecond, no p99.
+ *
+ * Same 12-column RESULT line as @ref emit, so every parser joins it unchanged; the two
+ * latency columns carry three decimals (picoseconds) instead of whole nanoseconds, and every
+ * parser reads them as floats. The p99 column is 0, which the history emitter and the gate
+ * read as "this row does not produce that metric". A `NOTE` line follows with the batch, the
+ * sample count and the shortest window, so the row states its own resolution.
+ */
+inline void emit_batch(const char* system, const char* mode, std::size_t size_bytes,
+                       std::size_t fanout, std::size_t endpoints, double pub_per_s,
+                       double deliv_per_s, double mb_per_s, const batch_timing_t& t) {
+    std::printf("RESULT\t%s\t%s\t%zu\t%zu\t%zu\t%.0f\t%.0f\t%.1f\t%.3f\t0\t%.3f\n", system, mode,
+                size_bytes, fanout, endpoints, pub_per_s, deliv_per_s, mb_per_s, t.p50_ps / 1e3,
+                t.mean_ps / 1e3);
+    std::printf(
+        "NOTE mode=%s size=%zu fan=%zu ep=%zu batch=%zu samples=%zu min_window_ns=%llu "
+        "recalibrations=%zu\n",
+        mode, size_bytes, fanout, endpoints, t.batch, t.samples,
+        static_cast<unsigned long long>(t.min_window_ns), t.recalibrations);
     std::fflush(stdout);
 }
 

@@ -231,6 +231,12 @@ jobs:
         run: |
           cmake --build bench/build --target test_delivery_count --parallel "$BUILD_JOBS"
           ./bench/build/test_delivery_count
+      # The batch-row estimator (#1804): picosecond figures, every window over the 20 µs
+      # floor, the sample floor, and the clock floor every run records.
+      - name: Batch-timing estimator test
+        run: |
+          cmake --build bench/build --target test_batch_timing --parallel "$BUILD_JOBS"
+          ./bench/build/test_batch_timing
       # TIER: blocking. This is the repo's only PRE-MERGE perf verdict, and it is the one
       # shape hardened against runner noise from the inside — same runner, interleaved
       # A/B, and a fail that needs effect + disjoint ranges + a majority of pairs (#763).

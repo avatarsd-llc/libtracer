@@ -8,6 +8,9 @@
 #
 # RESULT \t system \t mode \t size \t fanout \t endpoints \t pub_s \t deliv_s \t
 #        mb_s \t p50ns \t p99ns \t meanns
+#
+# The three latency columns are nanoseconds and may carry a fraction: a batch row prints them
+# to the picosecond (#1804), so they are read as floats.
 import sys
 
 rows = []
@@ -16,7 +19,7 @@ for line in sys.stdin:
     if len(f) == 12 and f[0] == "RESULT":
         rows.append(dict(sys=f[1], mode=f[2], size=int(f[3]), fan=int(f[4]), ep=int(f[5]),
                          pub=float(f[6]), deliv=float(f[7]), mbps=float(f[8]),
-                         p50=int(f[9]), p99=int(f[10]), mean=int(f[11])))
+                         p50=float(f[9]), p99=float(f[10]), mean=float(f[11])))
 
 
 def pick(**kw):
@@ -28,7 +31,7 @@ def n(x):
 
 
 def us(ns):
-    return f"{ns / 1000:.2f}µs" if ns >= 1000 else f"{ns}ns"
+    return f"{ns / 1000:.2f}µs" if ns >= 1000 else f"{ns:g}ns"
 
 
 def table(title, items, label):

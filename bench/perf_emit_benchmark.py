@@ -36,6 +36,7 @@ history point approximates the code's capability, not the machine lottery
 
 Stdlib only. The RESULT columns (tab-separated, from bench_libtracer):
   RESULT sys mode size fan ep pub_s deliv_s mb_s p50ns p99ns meanns
+The latency columns are ns and may carry three decimals (a batch row's picoseconds, #1804).
 """
 from __future__ import annotations
 
@@ -72,7 +73,7 @@ def parse_rows(out: str) -> list[tuple]:
         f = line.split("\t")
         if len(f) == 12 and f[0] == "RESULT":
             rows.append((f[1], f[2], int(f[3]), int(f[4]), int(f[5]),
-                         float(f[7]), int(f[9]), int(f[10])))
+                         float(f[7]), float(f[9]), float(f[10])))
     return rows
 
 
@@ -102,8 +103,10 @@ def median_point(rows: list[tuple], key: tuple):
     if not sel:
         return None
     return {
-        "p50_ns": int(statistics.median(r[6] for r in sel)),
-        "p99_ns": int(statistics.median(r[7] for r in sel)),
+        # Kept to the picosecond, never truncated to whole ns (#1804): a batch row's latency
+        # is a fraction of a nanosecond-grained quantity, and int() would re-quantize it.
+        "p50_ns": round(statistics.median(r[6] for r in sel), 3),
+        "p99_ns": round(statistics.median(r[7] for r in sel), 3),
         "deliv_s": statistics.median(r[5] for r in sel),
     }
 
@@ -167,7 +170,10 @@ def main() -> int:
              "p99_ns": min(m["p99_ns"] for m in cands),
              "deliv_s": max(m["deliv_s"] for m in cands)}
         tag = series_tag(system, mode, size, fan, ep)
-        smaller.append({"name": f"{tag} p50 latency", "unit": "ns", "value": v["p50_ns"]})
+        # A zero p50 means a bulk-only row (`lkv-*`, #1804): its one metric is throughput,
+        # recorded below, and a constant-zero latency series would not be a measurement.
+        if v["p50_ns"] > 0:
+            smaller.append({"name": f"{tag} p50 latency", "unit": "ns", "value": v["p50_ns"]})
         # A zero p99 means the row is batch-amortized and has no distribution to take a
         # percentile of, not that its tail latency is zero nanoseconds. Recording it
         # anyway gave the `lkv-*` rows eight constant-zero series, one point per commit,
@@ -182,7 +188,7 @@ def main() -> int:
             bigger.append({"name": f"{tag} throughput", "unit": "deliveries/s",
                            "value": round(v["deliv_s"], 1)})
             smaller.append({"name": f"{tag} ns/delivery",
-                            "unit": "ns", "value": round(1e9 / v["deliv_s"], 1)})
+                            "unit": "ns", "value": round(1e9 / v["deliv_s"], 3)})
 
     if args.zeroheap_raw and pathlib.Path(args.zeroheap_raw).exists():
         smaller += zeroheap_metrics(pathlib.Path(args.zeroheap_raw).read_text())
