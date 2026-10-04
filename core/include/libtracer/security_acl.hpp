@@ -32,8 +32,10 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -139,6 +141,41 @@ namespace detail_acl {
                                        std::size_t width) noexcept {
     return !payload.empty() && payload.size() <= width;
 }
+
+/**
+ * @brief One ACE key the parser accepts: its wire spelling and its payload width.
+ *
+ * The table row's INDEX is the key's slot: its bit in the seen-mask and its index in
+ * the parsed-value array (#1799).
+ */
+struct ace_key_t {
+    std::string_view key; /**< @brief The `NAME` key spelling. */
+    std::size_t width;    /**< @brief Max payload bytes; @ref kAceOpaque for `subject`. */
+};
+
+/**
+ * @brief Width marker for the opaque `subject` token (ADR-0018): any TLV type is
+ *        accepted and only non-emptiness is checked.
+ */
+inline constexpr std::size_t kAceOpaque = std::numeric_limits<std::size_t>::max();
+
+/** @brief Every ACE key, in slot order; anything else is rejected (#906). */
+inline constexpr std::array<ace_key_t, 5> kAceKeys{{
+    {"type", sizeof(std::uint8_t)},
+    {"flags", sizeof(std::uint8_t)},
+    {"subject", kAceOpaque},
+    {"access_mask", sizeof(std::uint32_t)},
+    {"expires_ns", sizeof(std::uint64_t)},
+}};
+
+inline constexpr std::size_t kAceType = 0;    /**< @brief `type` slot in @ref kAceKeys. */
+inline constexpr std::size_t kAceFlags = 1;   /**< @brief `flags` slot in @ref kAceKeys. */
+inline constexpr std::size_t kAceSubject = 2; /**< @brief `subject` slot in @ref kAceKeys. */
+inline constexpr std::size_t kAceMask = 3;    /**< @brief `access_mask` slot in @ref kAceKeys. */
+inline constexpr std::size_t kAceExpires = 4; /**< @brief `expires_ns` slot in @ref kAceKeys. */
+
+/** @brief Seen-mask bits of the required keys: `type`, `subject`, `access_mask`. */
+inline constexpr unsigned kAceRequired = (1U << kAceType) | (1U << kAceSubject) | (1U << kAceMask);
 
 }  // namespace detail_acl
 
@@ -335,6 +372,10 @@ class effective_acl_t {
  * sends more than the receiver understands, so it skips the pair; an ACL is not, so a
  * silently dropped attribute would widen access.
  *
+ * Every key runs through the same checks, driven by one `{key, width}` table
+ * (`%detail_acl::kAceKeys`) and a seen-bitmask, so the required-field rule is a single
+ * compare against `%detail_acl::kAceRequired` (#1799).
+ *
  * @tparam Policy The accepting policy (defaults to the target's selection).
  * @param acl A decoded ACL @ref wire::tlv_t (`ACL{ ACL{NAME/VALUE…}* }`).
  * @return The typed ACE list, in wire order, or `TYPE_MISMATCH`.
@@ -348,71 +389,53 @@ template <class Policy = acl_policy_t>
     for (const tlv_t& entry : acl.children) {
         if (entry.type != type_t::ACL || !entry.opt.pl)
             return std::unexpected(status_t::TYPE_MISMATCH);
-        ace_t ace;
-        bool has_type = false;
-        bool has_flags = false;
-        bool has_subject = false;
-        bool has_mask = false;
-        bool has_expires = false;
         const std::vector<tlv_t>& ch = entry.children;
         // Positional (NAME key, value) pairs: an odd count leaves an unpaired child —
         // a trailing key whose value the sender believes it wrote.
         if ((ch.size() % 2) != 0) return std::unexpected(status_t::TYPE_MISMATCH);
+        unsigned seen = 0;
+        std::array<std::span<const std::byte>, detail_acl::kAceKeys.size()> raw{};
         for (std::size_t i = 0; i + 1 < ch.size(); i += 2) {
             // Key slot. Pair-consuming (#927): i advances PAST the value below, so a
             // NAME-typed value is never resynchronized onto as the next key.
             if (ch[i].type != type_t::NAME) return std::unexpected(status_t::TYPE_MISMATCH);
-            const std::string_view key = tr::detail::as_string_view(ch[i].payload);
             const tlv_t& val = ch[i + 1];
-            if (key == "type") {
-                if (has_type || val.type != type_t::VALUE ||
-                    !detail_acl::ace_field_ok(val.payload, sizeof(std::uint8_t)))
-                    return std::unexpected(status_t::TYPE_MISMATCH);
-                const std::uint8_t t = tr::detail::load_le<std::uint8_t>(val.payload);
-                // ALLOW=0 / DENY=1; DENY only where the policy evaluates it —
-                // never store semantics the evaluator would silently weaken.
-                if (t > 1 || (t == 1 && !Policy::kAcceptsDeny))
-                    return std::unexpected(status_t::TYPE_MISMATCH);
-                ace.type = static_cast<ace_type_t>(t);
-                has_type = true;
-            } else if (key == "flags") {
-                if (has_flags || val.type != type_t::VALUE ||
-                    !detail_acl::ace_field_ok(val.payload, sizeof(std::uint8_t)))
-                    return std::unexpected(status_t::TYPE_MISMATCH);
-                ace.flags = tr::detail::load_le<std::uint8_t>(val.payload);
-                // Single INHERIT bit only: INHERIT_ONLY/NO_PROPAGATE/GROUP would
-                // be silently mis-evaluated by the merge, so reject, not weaken.
-                if ((ace.flags & static_cast<std::uint8_t>(~kAceInherit)) != 0)
-                    return std::unexpected(status_t::TYPE_MISMATCH);
-                has_flags = true;
-            } else if (key == "subject") {
-                // The subject token is opaque bytes (ADR-0018) — accept any opaque
-                // TLV's payload (VALUE recommended; NAME for the "EVERYONE@" spelling).
-                // A structured value decodes to an empty payload, so it lands here.
-                if (has_subject || val.payload.empty())
-                    return std::unexpected(status_t::TYPE_MISMATCH);
-                ace.subject.assign(val.payload.begin(), val.payload.end());
-                has_subject = true;
-            } else if (key == "access_mask") {
-                if (has_mask || val.type != type_t::VALUE ||
-                    !detail_acl::ace_field_ok(val.payload, sizeof(std::uint32_t)))
-                    return std::unexpected(status_t::TYPE_MISMATCH);
-                ace.access_mask = tr::detail::load_le<std::uint32_t>(val.payload);
-                has_mask = true;
-            } else if (key == "expires_ns") {
-                if (has_expires || val.type != type_t::VALUE ||
-                    !detail_acl::ace_field_ok(val.payload, sizeof(std::uint64_t)))
-                    return std::unexpected(status_t::TYPE_MISMATCH);
-                ace.expires_ns = tr::detail::load_le<std::uint64_t>(val.payload);
-                has_expires = true;
-            } else {
-                // Unknown key: REJECT. Ignoring it would drop a restrictive attribute a
-                // newer writer meant to apply, evaluating the ACE more broadly than
-                // written — the silently-weaken class the DENY/flags rules refuse.
+            const auto row =
+                std::ranges::find(detail_acl::kAceKeys, tr::detail::as_string_view(ch[i].payload),
+                                  &detail_acl::ace_key_t::key);
+            const auto k = static_cast<std::size_t>(row - detail_acl::kAceKeys.begin());
+            // REJECT, never skip: an unknown key (ignoring it would drop a restrictive
+            // attribute a newer writer meant to apply), a repeated key, a numeric key
+            // whose value is not a VALUE (a dropped `expires_ns` turns a time-limited
+            // grant permanent), and an empty or over-wide payload. The `subject` token
+            // is opaque bytes (ADR-0018): any TLV type — VALUE recommended, NAME for the
+            // "EVERYONE@" spelling — and a structured value decodes to an empty payload.
+            if (k == detail_acl::kAceKeys.size() || (seen & (1U << k)) != 0 ||
+                (val.type != type_t::VALUE && row->width != detail_acl::kAceOpaque) ||
+                !detail_acl::ace_field_ok(val.payload, row->width))
                 return std::unexpected(status_t::TYPE_MISMATCH);
-            }
+            seen |= 1U << k;
+            raw[k] = val.payload;
         }
-        if (!has_type || !has_subject || !has_mask) return std::unexpected(status_t::TYPE_MISMATCH);
+        // `load_le` zero-extends a narrower payload exactly, and an absent optional
+        // field loads as its 0 default.
+        const std::uint64_t type = tr::detail::load_le<std::uint64_t>(raw[detail_acl::kAceType]);
+        const std::uint64_t flags = tr::detail::load_le<std::uint64_t>(raw[detail_acl::kAceFlags]);
+        // ALLOW=0 / DENY=1, DENY only where the policy evaluates it (the highest type
+        // accepted is `kAcceptsDeny`); and the single INHERIT flag bit only
+        // (INHERIT_ONLY/NO_PROPAGATE/GROUP would be silently mis-evaluated by the
+        // merge) — never store semantics the evaluator would silently weaken.
+        if ((seen & detail_acl::kAceRequired) != detail_acl::kAceRequired ||
+            type > std::uint64_t{Policy::kAcceptsDeny} ||
+            (flags & ~std::uint64_t{kAceInherit}) != 0)
+            return std::unexpected(status_t::TYPE_MISMATCH);
+        ace_t ace;
+        ace.type = static_cast<ace_type_t>(type);
+        ace.flags = static_cast<std::uint8_t>(flags);
+        ace.subject.assign(raw[detail_acl::kAceSubject].begin(),
+                           raw[detail_acl::kAceSubject].end());
+        ace.access_mask = tr::detail::load_le<std::uint32_t>(raw[detail_acl::kAceMask]);
+        ace.expires_ns = tr::detail::load_le<std::uint64_t>(raw[detail_acl::kAceExpires]);
         out.push_back(std::move(ace));
     }
     return out;
