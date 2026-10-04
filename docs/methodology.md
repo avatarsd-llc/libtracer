@@ -998,3 +998,12 @@ back to the exact deploy that produced it. Every `main` push additionally archiv
 persisted build-to-build history on the machine-maintained `gh-pages` branch. The
 numbers on the Performance page are one run; that history is the durable signal, and
 it is what the trend charts and the soft alert read from.
+
+The history is two stores. **bench-local** (`dev/bench-local/data.js`, one pinned
+self-hosted CPU) is the **trend instrument**, and the trend charts open on it: every point
+is the same silicon, and both arms of each libtracer-vs-Zenoh point come from the same
+pass, so the zenoh ÷ libtracer ratio is computed there and only there. The GitHub-hosted
+store (`dev/bench/data.js`) keeps the best of three hosted runners per series; its
+consecutive points swing by up to about 50%, bimodally, so a 2× step in one row is lost in
+it. It stays one selector away as the **portability envelope**, with no ratio view, because
+its two arms need not come from the same runner.

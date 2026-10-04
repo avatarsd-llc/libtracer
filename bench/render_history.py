@@ -92,16 +92,18 @@ METRICS: list[dict] = [
 # the reader slice a commit range: a server-side ratio would have to be emitted once per
 # store per range and would go stale the moment either control moved.
 #
-# Why it earns a view of its own: both arms are recorded at the same commit — on bench-local
-# that is one pass on one pinned machine, so its speed on the day divides out of the quotient
-# to first order. The cancellation is partial, not total, and it is measured rather than
-# asserted: at p50 (hosted store, last 60 recorded commits; bench-local, its full 12-run
-# store), the quotient's coefficient of variation is about a tenth
-# below the libtracer line's own on the HOSTED store (that store keeps the best of three
-# runners *per series*, so a point's two arms need not come from one runner's transcript)
-# and about a third below it on bench-local, where every point is one pinned CPU. So the
-# ratio damps the runner spread the page documents — it does not escape it — which still
-# makes it the better cross-history comparison, not an immune one.
+# Why it earns a view of its own: on bench-local both arms of a point come from ONE pass on
+# one pinned machine, so its speed on the day divides out of the quotient to first order.
+# The cancellation is partial, not total, and it is measured rather than asserted: at p50
+# over bench-local's full 12-run store the quotient's coefficient of variation is about a
+# third below the libtracer line's own.
+#
+# The ratio is offered ONLY on a same-pass store (`build(..., same_pass=True)`, which is
+# bench-local). The hosted store keeps the best of three runners *per series*, so a point's
+# two arms need not come from one runner's transcript: its quotient divides one machine by
+# another, and on that store it damped the spread by only about a tenth (last 60 recorded
+# commits). A quotient of two different passes is not a comparison, so the hosted cards
+# carry no ratio toggle at all (#1769).
 #
 # `arm` names which side of the quotient a series is (num = zenoh, den = libtracer),
 # `shape` is the pairing key (two series pair iff their shapes are equal) and `pv` is the
@@ -719,7 +721,7 @@ def _host_meta(entries: list[dict]) -> dict:
     return {"hosts": per_entry}
 
 
-def build(data: dict, colors: dict[str, int] | None = None) -> dict:
+def build(data: dict, colors: dict[str, int] | None = None, same_pass: bool = True) -> dict:
     """@brief Assemble the chart payload perf_history.js draws.
 
     Returns {"suites": {key: {shas, msgs, releases}}, "charts": [...]} — each
@@ -732,6 +734,11 @@ def build(data: dict, colors: dict[str, int] | None = None) -> dict:
     same page (the hosted store and the bench-local one, switched by the page's source
     selector) agree on it. Built independently, "fan 8" would be one color before the
     switch and another after it, and the switch would read as a data change.
+
+    `same_pass` says whether both arms of a paired point were measured in ONE pass on one
+    machine. Only then is the zenoh ÷ libtracer quotient a comparison, so only then does a
+    paired family carry its `ratio` view. bench-local is same-pass; the hosted store (best of
+    three runners per series) is not, and is built with `same_pass=False` (#1769).
     """
     suites: dict[str, dict] = {}
     suite_series: dict[str, dict[str, list[list[float]]]] = {}
@@ -843,7 +850,7 @@ def build(data: dict, colors: dict[str, int] | None = None) -> dict:
         # The ratio view is offered only when BOTH arms of at least one shape survived into
         # every metric — a card advertising a quotient it cannot compute is worse than a
         # card without the toggle.
-        if "ratio" in fam and all(
+        if same_pass and "ratio" in fam and all(
                 {s["rk"] for s in v["series"] if s.get("arm") == "num"}
                 & {s["rk"] for s in v["series"] if s.get("arm") == "den"}
                 for v in variants):
@@ -872,11 +879,17 @@ def _source_selector(local_ok: bool, why: str) -> str:
     (absolute trend, one pinned host). They must never be drawn on the same axes, so the
     control is a selector rather than an overlay: one store at a time, switched in place.
 
-    `hosted` is the default for continuity — it is the store every existing reader and
-    every existing link has been reading. When the bench-local store is unreachable at
-    generate time (a fork with no `gh-pages`, an offline build) the second button renders
-    DISABLED and carries `why` as its title, rather than vanishing: a control that
-    silently disappears reads as "this page has one store", which is false.
+    `local` (bench-local) is the default and comes first, because it is the trend
+    instrument: one pinned CPU, both arms of each point from the same pass. The hosted
+    store's consecutive points swing by up to about 50% (bimodal — two runner machine
+    types), and a 2x step in one row, such as the 2026-10-01 1 KiB LKV heap regression
+    (27 -> 54 ns on bench-local), disappears in that noise (#1769). Hosted stays one click
+    away, labelled as what it is: the portability envelope.
+
+    When the bench-local store is unreachable at generate time (a fork with no
+    `gh-pages`, an offline build) its button renders DISABLED and carries `why` as its
+    title, rather than vanishing — a control that silently disappears reads as "this
+    page has one store", which is false — and the hosted button starts selected.
 
     The selector carries the TREND caveat beside it because this is the one element that
     heads every chart block on the page, so it is the only place a caveat about banked
@@ -886,16 +899,21 @@ def _source_selector(local_ok: bool, why: str) -> str:
     whose interleaved same-runner A/B, on the identical commit, read 1.02x. Cross-run
     series are read as trends; the paired same-runner A/B is what gates.
     """
-    dis = "" if local_ok else f' disabled title="{why}"'
+    if local_ok:
+        lattr, hon = ' title="one pinned self-hosted CPU, both arms of each point from the same ' \
+            'pass — the trend instrument (default)"', ""
+        lon = " on"
+    else:
+        lattr, hon, lon = f' disabled title="{why}"', " on", ""
     return (
         '<div class="ph-srcsel" role="group" aria-label="benchmark data source">'
         '<span class="ph-srclab">source</span>'
-        '<button type="button" class="ph-srcbtn on" data-src="hosted"'
-        ' title="GitHub-hosted runners, best of three per point — a portability envelope">'
-        'GitHub-hosted</button>'
-        f'<button type="button" class="ph-srcbtn" data-src="local"{dis}'
-        ' title="one pinned self-hosted CPU, same silicon every point — the absolute-trend instrument">'
-        'bench-local</button>'
+        f'<button type="button" class="ph-srcbtn{lon}" data-src="local"{lattr}>'
+        'bench-local · trend</button>'
+        f'<button type="button" class="ph-srcbtn{hon}" data-src="hosted"'
+        ' title="GitHub-hosted runners, best of three per series — points swing up to ~50%;'
+        ' read as a portability envelope, not a trend">'
+        'GitHub-hosted · portability envelope</button>'
         '<span class="ph-srcnote" title="A banked point and its baseline can come from '
         'different machines under different load; a rolling drift check once read +300% on '
         'a point whose same-runner interleaved A/B, at the identical commit, read 1.02x.">'
@@ -930,7 +948,8 @@ def html_blocks(data: dict, local: dict | None = None) -> dict[str, str]:
     unreachable. An offline build, a fork PR with no `gh-pages`, and a malformed
     store are all documented-normal conditions, so that is not a corner.
 
-    `local` is the SECOND store (bench-local, one pinned self-hosted CPU). Both payloads
+    `local` is the bench-local store (one pinned self-hosted CPU) — the DEFAULT view and
+    the only same-pass one, so it alone is built with the ratio view (#1769). Both payloads
     are embedded in every block and the page's source selector switches between them
     client-side, because the alternative \u2014 refetching on switch \u2014 would need a network
     call from a page whose whole design is to be self-contained. Both are built through
@@ -940,15 +959,16 @@ def html_blocks(data: dict, local: dict | None = None) -> dict[str, str]:
     an empty axis.
     """
     colors: dict[str, int] = {}
-    payload = build(data, colors) if data else {"suites": {}, "charts": []}
-    lpayload = build(local, colors) if local else None
+    # bench-local is built FIRST so the shared color map is assigned in the default view's
+    # order; the hosted store is built without the ratio view (not same-pass).
+    lpayload = build(local, colors, same_pass=True) if local else None
+    payload = build(data, colors, same_pass=False) if data else {"suites": {}, "charts": []}
     if not payload["charts"] and not (lpayload and lpayload["charts"]):
         return {}
-    # Section ORDER follows the hosted store (the default view, and the store whose
-    # families the surrounding prose was written against); a section only the
-    # bench-local store carries is appended rather than dropped.
-    sections = list(dict.fromkeys([c["section"] for c in payload["charts"]]
-                                  + [c["section"] for c in (lpayload or {"charts": []})["charts"]]))
+    # Section ORDER follows the bench-local store (the default view); a section only the
+    # hosted store carries is appended rather than dropped.
+    sections = list(dict.fromkeys([c["section"] for c in (lpayload or {"charts": []})["charts"]]
+                                  + [c["section"] for c in payload["charts"]]))
     out: dict[str, str] = {}
     for n, sec in enumerate(sections):
         charts = [c for c in payload["charts"] if c["section"] == sec]
@@ -961,19 +981,21 @@ def html_blocks(data: dict, local: dict | None = None) -> dict[str, str]:
             lblob = json.dumps({"suites": lpayload["suites"], "charts": lcharts},
                                separators=(",", ":"))
         # Count every metric variant, not just the active one: the card carries all
-        # four, and reporting only the default understates the block by ~4x.
-        nser = sum(len(v["series"]) for c in charts for v in c["metrics"])
+        # four, and reporting only the default understates the block by ~4x. The count
+        # describes the store the page opens on — bench-local when it was embedded.
+        shown = charts if lpayload is None else lcharts
+        nser = sum(len(v["series"]) for c in shown for v in c["metrics"])
         sel = _source_selector(
             lpayload is not None,
             "the bench-local store was not reachable when this page was generated")
         out[sec] = f""":::{{raw}} html
 <div class="ph-hist ph-sourced">
   {sel}
-  <p class="ph-note"><span class="ph-count">{len(charts)} family charts \u00b7 {nser} series</span> \u00b7 x-axis = recorded
+  <p class="ph-note"><span class="ph-count">{len(shown)} family charts \u00b7 {nser} series</span> \u00b7 x-axis = recorded
   <code>main</code> commits (oldest \u2192 newest) \u00b7 \U0001f3f7 dashed verticals mark release
   tags (<b>\u2248</b> = tag commit itself is not a recorded point; marker sits at the nearest
   following recorded commit) \u00b7 \U0001f527 dotted verticals mark commits where the BENCH
-  changed \u2014 points either side of one are not comparable. Each card carries every METRIC that point\n  recorded \u2014 <b>p50</b> / <b>p99</b> / <b>ns per delivery</b> / <b>throughput</b> \u2014 pick one under the title. Families with a numeric parameter\n  axis also offer <b>trend</b> / <b>sweep</b> / <b>heatmap</b> / <b>3D</b> views \u2014 same data,\n  three axes (commit \u00d7 parameter \u00d7 value), over a selectable <b>commit range</b>. The paired\n  libtracer-vs-Zenoh cards add a <b>ratio</b> toggle: both engines run in the same pass on the\n  same runner, so their per-commit quotient cancels runner speed and is the comparison to read\n  across a long history. Hover any chart for exact per-commit values.</p>
+  changed \u2014 points either side of one are not comparable. Each card carries every METRIC that point\n  recorded \u2014 <b>p50</b> / <b>p99</b> / <b>ns per delivery</b> / <b>throughput</b> \u2014 pick one under the title. Families with a numeric parameter\n  axis also offer <b>trend</b> / <b>sweep</b> / <b>heatmap</b> / <b>3D</b> views \u2014 same data,\n  three axes (commit \u00d7 parameter \u00d7 value), over a selectable <b>commit range</b>. The paired\n  libtracer-vs-Zenoh cards add a <b>ratio</b> toggle on <b>bench-local</b>: both engines run in the\n  same pass on one pinned CPU, so their per-commit quotient cancels runner speed and is the\n  comparison to read across a long history. The hosted store keeps the best runner per series,\n  so its two arms need not share a pass and its cards carry no ratio. Hover any chart for exact per-commit values.</p>
   <div class="ph-grid ph-charts"></div>
   <script type="application/json" class="ph-data">{blob}</script>
   <script type="application/json" class="ph-data-local">{lblob}</script>

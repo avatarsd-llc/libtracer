@@ -863,25 +863,24 @@ are not comparable to each other: different denominator, by construction.
 - Every commit-axis view is drawn over a selectable **commit range** (two sliders per card,
   the full history by default). Narrowing it re-bases the axis and the release/instrument
   markers with it, so a short window is a real chart rather than a zoom.
-- The paired libtracer-vs-Zenoh cards (fan-out and payload) add a **ratio** toggle:
-  zenoh ÷ libtracer per recorded commit, dimensionless, with a parity line at 1×. On a
-  latency metric a quotient above 1 means libtracer is faster; on throughput the same
-  statement is a quotient below 1, and the y-axis says which. This is the comparison to
-  read across a long history: both arms are measured in the **same pass on the same
-  runner**, so that machine's speed on the day divides out of the quotient to first order,
-  while the absolute lines above it carry the full shared-runner spread. Each point pairs
-  the two engines at one commit; a commit where only one arm recorded contributes no point.
-  The cancellation is partial on the **hosted** store and not total, because that store
-  records the best of three runners *per series*, so a point's two arms are not guaranteed
-  to be the same runner's — measured at fan 128/1024/8192 over that store's last 60 recorded
-  commits, the quotient's spread is about a tenth lower than the libtracer line's own. On the
-  bench-local store, where every point is one pinned CPU (measured over its full store of 12
-  runs), it is about a third lower.
-- A `source` selector heads each chart block: **GitHub-hosted** (the default — best of three
-  runners per point, a portability envelope) or **bench-local** (one pinned self-hosted CPU,
-  the absolute-trend instrument). One store at a time, page-wide, never overlaid — the two
-  answer different questions ({ch("raw")}). A family the selected store has not recorded
-  says so instead of drawing an empty axis.
+- The paired libtracer-vs-Zenoh cards (fan-out and payload) add a **ratio** toggle on the
+  **bench-local** store: zenoh ÷ libtracer per recorded commit, dimensionless, with a parity
+  line at 1×. On a latency metric a quotient above 1 means libtracer is faster; on
+  throughput the same statement is a quotient below 1, and the y-axis says which. This is
+  the comparison to read across a long history: on bench-local both arms of a point are
+  measured in the **same pass on one pinned CPU**, so that machine's speed on the day
+  divides out of the quotient to first order, while the absolute lines carry the full
+  spread. Each point pairs the two engines at one commit; a commit where only one arm
+  recorded contributes no point. Measured over bench-local's full store of 12 runs, the
+  quotient's spread is about a third lower than the libtracer line's own. The ratio is
+  computed from **same-pass arms only**: the hosted store records the best of three runners
+  *per series*, so a point's two arms need not be the same runner's, and its cards carry no
+  ratio toggle.
+- A `source` selector heads each chart block: **bench-local** (the default — one pinned
+  self-hosted CPU, the trend instrument) or **GitHub-hosted** (best of three runners per
+  series, the portability envelope). One store at a time, page-wide, never overlaid — the
+  two answer different questions ({ch("raw")}). A family the selected store has not
+  recorded says so instead of drawing an empty axis.
 - Hover any point for its exact value, the commit and its subject line — plus the host
   descriptor when the store records one, which the bench-local store does on every point.
 
@@ -952,16 +951,20 @@ A second, parallel store records the same transcript set from a **fixed self-hos
 machine** (`perf-local` workflow), pinned to one logical CPU — **[the bench-local trend
 browser ↗](https://libtracer.avatarsd.com/dev/bench-local/)**. Every family chart above
 draws **one store at a time**, chosen by the `source` selector at the head of each chart
-block (**GitHub-hosted** by default); switching redraws every chart on the page from the
+block (**bench-local** by default); switching redraws every chart on the page from the
 other store and the choice is remembered. Both raw browsers are stock
 benchmark-action pages with no selector of their own, so the deploy overlays a
 three-way nav banner on the mirrored copies — each one names the other store and links
 back here — rather than leaving a reader there believing the site has a single store. A family the selected store has not recorded
 says so rather than drawing an empty axis. The two stores answer
-different questions and are never mixed: GitHub-hosted runners vary ~2× in absolute speed
-run to run, so the hosted store reads as a portability envelope (best-across-three-runners
-per point), while the bench-local store is the **absolute-trend instrument** — same silicon
-every point, host characteristics recorded on every point (each point's tooltip carries the
+different questions and are never mixed. **bench-local is the trend instrument, and the
+page opens on it**: same silicon every point, and both arms of each paired point come from
+the same pass. GitHub-hosted points swing by up to about 50% between consecutive commits —
+bimodally, which looks like two runner machine types — so a 2× step in one row disappears
+there: the 1 KiB LKV heap regression of 2026-10-01 reads 27 → 54 ns on bench-local and is
+invisible on the hosted store. The hosted store therefore reads as a **portability
+envelope** (best-across-three-runners per series): what the code does on whatever machine
+a stranger rents. bench-local records host characteristics on every point (each point's tooltip carries the
 host descriptor and, beside it, the measurement conditions the point was taken under — the
 bench CPU's foreign time, CPU pressure and context switches, with a `CONTAMINATED` flag on a
 sample that stayed contended; `host.txt` next to the store holds the full `lscpu` capture). A two-point

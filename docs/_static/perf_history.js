@@ -23,10 +23,11 @@
 // full by default), and a family whose series pair across two engines adds a RATIO
 // toggle: the per-commit quotient of the two arms, computed here from same-run pairs.
 //
-// Each block carries TWO payloads — the GitHub-hosted store and the bench-local
-// (fixed pinned host) store — and a global source selector switches every chart
-// between them in place, remembering the choice in localStorage. The two stores
-// answer different questions and are never drawn on one axis.
+// Each block carries TWO payloads — the bench-local (fixed pinned host) store, which
+// the page opens on, and the GitHub-hosted store (the portability envelope) — and a
+// global source selector switches every chart between them in place, remembering an
+// explicit choice in localStorage. The two stores answer different questions and are
+// never drawn on one axis.
 // Vanilla JS + inline SVG only — self-contained, no CDN, theme-aware via CSS vars.
 (function () {
 
@@ -101,17 +102,13 @@
   // ---------------------------------------------------------------- ratio --
   /** @brief The per-commit quotient chart of a paired family, or null if it has no pairs.
    *
-   * Both arms of a `(zenoh )?` family are recorded at the same commit — on bench-local
-   * that is the same pass on the same pinned machine, so the quotient divides that
-   * machine's speed on the day out of the answer to first order. That is what makes this
-   * the better view across a long history — better, not immune: the cancellation is
-   * partial. Measured at p50 (the hosted store's last 60 recorded commits; bench-local's
-   * full store of 12 runs), the quotient's spread is
-   * about a tenth below the libtracer line's own on the hosted store (that store keeps
-   * the best of three runners *per series*, so a point's two arms need not come from one
-   * runner's transcript) and about a third below it on bench-local, where every point is
-   * one pinned CPU. The quotient damps the runner spread the page documents; it does not
-   * escape it.
+   * Offered only on the bench-local store, where both arms of a `(zenoh )?` point come
+   * from the same pass on the same pinned machine, so the quotient divides that machine's
+   * speed on the day out of the answer to first order. The cancellation is partial:
+   * measured at p50 over bench-local's full store of 12 runs, the quotient's spread is
+   * about a third below the libtracer line's own. The hosted store keeps the best of
+   * three runners *per series*, so its two arms need not share a pass; render_history
+   * builds that payload without `ratio` and its cards carry no toggle (#1769).
    *
    * Pairing is therefore strict and cheap: same store, same suite, same commit index,
    * same shape key (`rk`). A commit where only one arm recorded a value contributes no
@@ -685,14 +682,12 @@
       drawRange(A.full);
       byIdx = A.c.series.map(lookup);
       blurb.textContent = ratioOn && c.ratio
-        ? "Both arms are recorded at the same commit — on bench-local that is one pass on "
-          + "one pinned machine, so its speed on the day divides out of this quotient to first "
-          + "order; on the hosted store best-of-three per series means the arms' runners can "
-          + "differ. The quotient damps the shared-runner spread the absolute lines carry, but "
-          + "does not escape it: measured, its spread is about a tenth below the libtracer "
-          + "line's own on the hosted store (last 60 commits) and about a third below it on "
-          + "bench-local (full 12-run store). Each point pairs the two engines at ONE "
-          + "recorded commit; a commit where only one arm recorded a value contributes no point."
+        ? "Both arms of each point come from one pass on one pinned machine (bench-local), so "
+          + "its speed on the day divides out of this quotient to first order. The quotient "
+          + "damps the spread the absolute lines carry, but does not escape it: measured, its "
+          + "spread is about a third below the libtracer line's own (full 12-run store). The "
+          + "hosted store is not same-pass (best of three runners per series), so it offers no "
+          + "ratio. A commit where only one arm recorded a value contributes no point."
         : (mets[mi].blurb || "");
     }
 
@@ -779,24 +774,30 @@
   }
 
   // ---------------------------------------------------------------- source --
-  // The page charts two independent stores of the same benchmarks: the GitHub-hosted
-  // series (a portability envelope — runners vary ~2x, best of three per point) and the
-  // bench-local series (one pinned self-hosted CPU, the absolute-trend instrument). They
+  // The page charts two independent stores of the same benchmarks: the bench-local
+  // series (one pinned self-hosted CPU, the trend instrument and the default) and the
+  // GitHub-hosted series (a portability envelope — consecutive points swing up to ~50%,
+  // bimodally, best of three runners per series). They
   // answer different questions and are never mixed on one axis, so the page offers a
   // SELECTOR, not an overlay. Both payloads are embedded by render_history.html_blocks,
   // so switching is a re-render, not a fetch — the page stays self-contained.
-  var SRC_KEY = "ph-source";
+  // The key was renamed when the default flipped to bench-local (#1769): the old page
+  // wrote its default back on every visit, so a stored "hosted" under the old key records
+  // that a reader opened the page, not that they chose the hosted store.
+  var SRC_KEY = "ph-source-v2";
 
-  /** @brief The stored source preference, defaulting to the hosted store.
+  /** @brief The stored source preference, defaulting to the bench-local store.
    *
-   * `hosted` is the default on purpose: it is what every existing reader and every
-   * existing deep link has been looking at, so a first visit must not silently change
-   * which numbers the page shows. localStorage may be unavailable (file:// in some
-   * browsers, privacy modes) — that degrades to the default, never to an exception.
+   * `local` is the default because it is the trend instrument: the hosted store's
+   * consecutive points swing by up to about 50%, and a 2x step in one row (the
+   * 2026-10-01 1 KiB LKV heap regression, 27 -> 54 ns on bench-local) disappears in that
+   * noise. Only an explicit click is remembered. localStorage may be unavailable
+   * (file:// in some browsers, privacy modes) — that degrades to the default, never to
+   * an exception.
    */
   function readSource() {
-    try { return localStorage.getItem(SRC_KEY) === "local" ? "local" : "hosted"; }
-    catch (e) { return "hosted"; }
+    try { return localStorage.getItem(SRC_KEY) === "hosted" ? "hosted" : "local"; }
+    catch (e) { return "local"; }
   }
   /** @brief Persist the source preference; silently a no-op where storage is denied.
    *
@@ -839,15 +840,16 @@
     draw(D, host);
   }
 
-  /** @brief Switch every chart block on the page to one store, and remember it.
+  /** @brief Switch every chart block on the page to one store, remembering it if asked.
    *
    * The selector is GLOBAL even though the markup repeats it per chapter: a page whose
    * chapters could sit on different stores would put two incomparable instruments under
    * one set of conclusions. Every block re-renders and every button row restates the
-   * same answer.
+   * same answer. `remember` is set only for a reader's click: persisting the boot-time
+   * default would pin every visitor to whatever the default was on their first visit.
    */
-  function setSource(src) {
-    writeSource(src);
+  function setSource(src, remember) {
+    if (remember) writeSource(src);
     document.querySelectorAll(".ph-hist.ph-sourced").forEach(function (root) {
       root.querySelectorAll(".ph-srcbtn").forEach(function (b) {
         b.classList.toggle("on", b.dataset.src === src);
@@ -873,18 +875,19 @@
       root.querySelectorAll(".ph-srcbtn").forEach(function (b) {
         b.addEventListener("click", function () {
           if (b.disabled) return;
-          setSource(b.dataset.src);
+          setSource(b.dataset.src, true);
         });
       });
     });
     var roots = document.querySelectorAll(".ph-hist.ph-sourced");
     if (!roots.length) return;
     var src = readSource();
-    // A remembered "local" is honoured only if the build actually embedded that store.
+    // The bench-local default is honoured only if the build actually embedded that store
+    // (a fork or an offline build has none); otherwise the page opens on hosted.
     if (src === "local" && !Array.prototype.some.call(roots, function (r) { return !!r._phLocal; })) {
       src = "hosted";
     }
-    setSource(src);
+    setSource(src, false);
   }
   // This script is inlined into the LAST chapter block, so every host div is
   // already parsed by the time it runs; the readyState guard covers the case
