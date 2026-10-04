@@ -149,7 +149,7 @@ class mem_backend_t : public block_source_t {
      * (docs/adr/0016 §2).
      *
      * The default is ONE block: @ref try_alloc for the header padded to @ref alignment plus
-     * @p size, the header placed at the block's head (`%segment.hpp`). One allocation where
+     * @p size, the header placed at the block's head (`%placement.hpp`). One allocation where
      * the pre-slice-10 heap backend made two.
      *
      * @param hint     Backend-private allocation hint; `NONE` for "don't care".
@@ -215,7 +215,7 @@ class mem_backend_t : public block_source_t {
    protected:
     /**
      * @brief The one-block segment layout: draw `header + size` bytes at @p align through
-     *        @ref try_alloc and place the header at the head. Defined in `%segment.hpp`.
+     *        @ref try_alloc and place the header at the head. Defined in `%placement.hpp`.
      *
      * Non-virtual so a concrete backend's own @ref alloc can reuse the layout with a
      * compile-time @p align and no virtual call on its hot path.
@@ -324,6 +324,7 @@ void destroy_dispatch(view::segment_t* seg) noexcept;
 
 }  // namespace tr::mem
 
-// The segment type, and the inline bodies of the one-block defaults above, which need its
-// size. Included LAST so `%segment.hpp` (which includes this header first) sees the class.
+// The segment type, and (through it, `%placement.hpp`) the inline bodies of the one-block defaults
+// above, which need its size. Included LAST so `%segment.hpp` (which includes this header first)
+// sees the class.
 #include "libtracer/segment.hpp"

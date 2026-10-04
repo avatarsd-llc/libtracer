@@ -276,40 +276,43 @@ struct default_config_t {
     static constexpr std::size_t kShareThresholdBytes = 4096;
 
     /**
-     * @brief The largest block the process-default heap backend draws for ONE segment (#1768):
-     *        a segment whose padded header plus payload fits is one block, a larger one is
-     *        drawn as two — the payload, then the bare header.
+     * @brief The size-class table the placement module lays segments out against (ADR-0083
+     *        Decision 5, #1775): the classes the host allocator serves on its fast path, in
+     *        ascending order, so the last row is that path's ceiling.
      *
-     * RFC-0028 slice 10 put the `segment_t` header and the payload in one heap block, which
-     * made a 64 B value about 30% cheaper. It also moved every payload within one header of a
-     * host allocator's small-block ceiling over it: a 1024 B value asked for 1072 B, and on
+     * `tr::mem::is_one_block` reads it. A heap segment whose padded header plus payload fits the
+     * last row is ONE block; a larger one is drawn as two, the payload and then the bare header
+     * (#1768). RFC-0028 slice 10 put the `segment_t` header and the payload in one heap block,
+     * which made a 64 B value about 30% cheaper. It also moved every payload within one header
+     * of a host allocator's small-block ceiling over it: a 1024 B value asked for 1072 B, and on
      * glibc that is past the per-thread cache, so `lkv-store-heap 1024B` doubled (27 → 54 ns).
-     * Two draws that each fit the fast path are cheaper than one that misses it, so above this
-     * threshold `tr::mem::heap_backend_t` splits; at or below it the one-block layout stays.
-     * The split changes nothing a caller can see — the segment, its payload alignment and its
-     * reclaim are the same; only the number of `operator new` calls differs.
+     * Two draws that each fit the fast path are cheaper than one that misses it. The split
+     * changes nothing a caller can see: the segment, its payload alignment and its reclaim are
+     * the same; only the number of draws differs.
      *
-     * **Default 1,032 B — glibc's tcache ceiling on a 64-bit host.** glibc's per-thread cache
+     * **Default `{1032}` — glibc's tcache ceiling on a 64-bit host.** glibc's per-thread cache
      * has 64 bins 16 B apart, and the largest request it serves is 1,032 B (`MAX_TCACHE_SIZE`,
      * the `glibc.malloc.tcache_max` tunable's default). That is the cliff measured on the
-     * reference host, so it is the number to split at. A host allocator without a cliff
-     * there loses only one extra draw on a value of about 1 KiB or more, where the payload
-     * copy already costs more than the draw. The figure is 64-bit glibc's; a 32-bit host's
-     * ceiling is lower, and such a host states its own value.
+     * reference host, and the only row the placement rule reads today. The size-classed pool
+     * (ADR-0083 Decision 4) adds its classes to this table when it lands. A host allocator
+     * without a cliff there loses only one extra draw on a value of about 1 KiB or more, where
+     * the payload copy already costs more than the draw. A 32-bit host's ceiling is lower, and
+     * such a host states its own table. The table must be non-empty and strictly ascending;
+     * `%mem_heap.hpp` asserts it.
      *
      * Applies ONLY to `heap_backend_t`. An injected source (`source_backend_t`), the pool and
-     * the borrowed backends keep their one-block layout: a size-classed source wants exactly
-     * one draw per segment, and that is what it is sized against.
+     * the borrowed backends keep their one-block layout: a store the deployer sized wants
+     * exactly one draw per segment, and that is what it is sized against.
      *
      * Target-class defaults:
-     * - **host (WIDE / MID)** — 1,032 B, the glibc ceiling above.
+     * - **host (WIDE / MID)** — `{1032}`, the glibc ceiling above.
      * - **NARROW** — a per-build trait. An allocator with no small-block fast path (ESP-IDF's
      *   `multi_heap`) gains nothing from a second draw, so the ESP-IDF component binds
-     *   `SIZE_MAX`, one block always — the layout it shipped in v0.17.0.
+     *   `{SIZE_MAX}`, one block always — the layout it shipped in v0.17.0.
      *
-     * Override fragment: `static constexpr std::size_t kHeapSmallBlockBytes = 1032;`.
+     * Override fragment: `static constexpr std::size_t kSizeClasses[] = {1032};`.
      */
-    static constexpr std::size_t kHeapSmallBlockBytes = 1032;
+    static constexpr std::size_t kSizeClasses[] = {1032};
 
     /**
      * @brief The target's selected ACL policy (ADR-0047 §1 build-time module set).
@@ -792,8 +795,6 @@ inline constexpr std::size_t kHazardReaderSlots = config_t::kHazardReaderSlots;
 inline constexpr std::size_t kEdgePinSlots = config_t::kEdgePinSlots;
 /** @brief @ref default_config_t::kShareThresholdBytes for this build. */
 inline constexpr std::size_t kShareThresholdBytes = config_t::kShareThresholdBytes;
-/** @brief @ref default_config_t::kHeapSmallBlockBytes for this build. */
-inline constexpr std::size_t kHeapSmallBlockBytes = config_t::kHeapSmallBlockBytes;
 /** @brief @ref default_config_t::kDeferredReleaseSlots for this build. */
 inline constexpr std::size_t kDeferredReleaseSlots = config_t::kDeferredReleaseSlots;
 /** @brief @ref default_config_t::kQsbrParticipants for this build. */

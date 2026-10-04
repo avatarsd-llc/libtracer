@@ -14,6 +14,7 @@
 
 #include "libtracer/backend.hpp"
 #include "libtracer/mem_source.hpp"
+#include "libtracer/placement.hpp"
 #include "libtracer/segment.hpp"
 
 /**
@@ -128,19 +129,23 @@ class source_backend_t final : public mem_backend_t {
 
     /**
      * @brief The block alignment one segment is drawn at — the stricter of the payload's
-     *        fundamental alignment and the control block's own.
+     *        fundamental alignment and the control block's own (@ref segment_block_align).
      */
-    static constexpr std::size_t kBlockAlign = view::segment_block_align(alignof(std::max_align_t));
+    static constexpr std::size_t kBlockAlign = segment_block_align(alignof(std::max_align_t));
 
     /**
      * @brief Bytes the control block occupies at the head of the block, padded so the payload
-     *        that follows it starts at @ref kBlockAlign.
+     *        that follows it starts at @ref kBlockAlign (@ref segment_header_bytes).
      */
-    static constexpr std::size_t kHeaderBytes = view::segment_header_bytes(kBlockAlign);
+    static constexpr std::size_t kHeaderBytes = segment_header_bytes(kBlockAlign);
 
-    /** @brief The single block @ref alloc draws for a @p size-byte segment. */
+    /**
+     * @brief The single block @ref alloc draws for a @p size-byte segment
+     *        (@ref segment_block_bytes). Always one block: the source is sized for one draw per
+     *        segment, so this backend never asks @ref is_one_block.
+     */
     [[nodiscard]] static constexpr std::size_t block_bytes(std::size_t size) noexcept {
-        return kHeaderBytes + size;
+        return segment_block_bytes(size, kBlockAlign);
     }
 
     // Module-set traits (ADR-0047 §2), read only by a `transfer_host<>` instantiation.

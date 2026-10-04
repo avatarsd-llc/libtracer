@@ -22,6 +22,7 @@
 #include "libtracer/backend.hpp"
 #include "libtracer/config.hpp"
 #include "libtracer/mem_source.hpp"
+#include "libtracer/placement.hpp"
 #include "libtracer/segment.hpp"
 #include "libtracer/view.hpp"
 
@@ -340,40 +341,26 @@ void heap_destroy_split(view::segment_t* seg, std::size_t align) noexcept;
  *       reclaim becomes the SIZED `operator delete(p, bytes)`. Both are the arms every other
  *       #873 channel already takes.
  *
- * @par How many draws a segment costs (RFC-0028 §4.9, #1768)
- * ONE, for a segment whose padded header plus payload fits
- * @ref tr::graph::default_config_t::kHeapSmallBlockBytes, the header and the payload
- * share a block (RFC-0028 slice 10). TWO above it — the payload, then the bare `segment_t` —
- * because one block that misses the host allocator's small-block fast path costs more than
- * two that hit it (glibc's tcache ceiling is 1,032 B, so a 1024 B value's 1072 B block
- * doubled `lkv-store-heap 1024B`). Which layout a segment has is a function of its payload
- * size alone, so @ref destroy recomputes it from `bytes.size()` and returns exactly what
- * @ref alloc drew, sized. `bench_forward_heap`'s `allocs=` pins count the small-value case.
+ * @par How many draws a segment costs (RFC-0028 §4.9, #1768, #1775)
+ * The placement module decides (`%placement.hpp`, @ref tr::mem::is_one_block) against this
+ * build's @ref tr::graph::default_config_t::kSizeClasses. ONE draw for a segment whose padded
+ * header plus payload fits the table's ceiling: the header and the payload share a block
+ * (RFC-0028 slice 10). TWO above it — the payload, then the bare `segment_t` — because one
+ * block that misses the host allocator's small-block fast path costs more than two that hit it
+ * (glibc's tcache ceiling is 1,032 B, so a 1024 B value's 1072 B block doubled
+ * `lkv-store-heap 1024B`). Which layout a segment has is a function of its payload size alone,
+ * so @ref destroy recomputes it from `bytes.size()` and returns exactly what @ref alloc drew,
+ * sized. `bench_forward_heap`'s `allocs=` pins count the small-value case.
  */
 class heap_backend_t final : public mem_backend_t {
    public:
     heap_backend_t() noexcept : mem_backend_t("mem_heap") {}
 
     /** @brief The block alignment a heap segment is drawn at (payload and header alike). */
-    static constexpr std::size_t kBlockAlign = view::segment_block_align(alignof(std::max_align_t));
+    static constexpr std::size_t kBlockAlign = segment_block_align(alignof(std::max_align_t));
 
-    /** @brief The padded header at the head of a one-block segment; the payload follows it. */
-    static constexpr std::size_t kHeaderBytes = view::segment_header_bytes(kBlockAlign);
-
-    /**
-     * @brief The largest single block one segment draws; a larger segment is split (#1768).
-     *        This build's @ref tr::graph::default_config_t::kHeapSmallBlockBytes.
-     */
-    static constexpr std::size_t kSmallBlockBytes = graph::config_t::kHeapSmallBlockBytes;
-
-    /**
-     * @brief Whether a @p size-byte segment is ONE block (header + payload within
-     *        @ref kSmallBlockBytes) rather than two. A function of the size alone, so the
-     *        @ref alloc / @ref destroy pair always agrees on it.
-     */
-    [[nodiscard]] static constexpr bool is_one_block(std::size_t size) noexcept {
-        return kSmallBlockBytes >= kHeaderBytes && size <= kSmallBlockBytes - kHeaderBytes;
-    }
+    static_assert(size_classes_valid(graph::config_t::kSizeClasses),
+                  "config_t::kSizeClasses must be non-empty and strictly ascending");
 
     /** @brief One platform-heap block (@ref heap_source_t::acquire) — nothrow. */
     [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
@@ -388,27 +375,31 @@ class heap_backend_t final : public mem_backend_t {
      * @brief A small segment is ONE heap block, the header and the payload together (RFC-0028
      *        §4.9); a larger one is two (#1768).
      *
-     * One block is the `producer-own` row of `bench_lean_value_path` (slice 10). Above
-     * @ref kSmallBlockBytes the draw goes to the out-of-line `detail::heap_alloc_split` instead, so
-     * no block exceeds the host allocator's small-block ceiling unless the payload alone does.
-     * Draws straight from @ref heap_source_t::acquire rather than through the virtual @ref
-     * try_alloc, so the hot path pays no virtual call.
+     * One block is the `producer-own` row of `bench_lean_value_path` (slice 10). When
+     * @ref tr::mem::is_one_block says the block would pass the size-class ceiling, the draw goes
+     * to the out-of-line `detail::heap_alloc_split` instead, so no block exceeds the host
+     * allocator's small-block ceiling unless the payload alone does. Draws straight from
+     * @ref heap_source_t::acquire rather than through the virtual @ref try_alloc, so the hot
+     * path pays no virtual call.
      */
     view::segment_t* alloc(std::size_t size, alloc_hint_t /*hint*/) override {
-        if (!is_one_block(size)) return detail::heap_alloc_split(this, size, kBlockAlign);
-        void* const block = heap_source_t::acquire(kHeaderBytes + size, kBlockAlign);
-        return block != nullptr ? view::place_segment(this, block, size, kBlockAlign) : nullptr;
+        if (!is_one_block(size, kBlockAlign, graph::config_t::kSizeClasses)) {
+            return detail::heap_alloc_split(this, size, kBlockAlign);
+        }
+        void* const block =
+            heap_source_t::acquire(segment_block_bytes(size, kBlockAlign), kBlockAlign);
+        return block != nullptr ? place_segment(this, block, size, kBlockAlign) : nullptr;
     }
 
     /** @brief Return the block, or the two blocks, @ref alloc drew — sized, as drawn. */
     void destroy(view::segment_t* seg) noexcept override {
         const std::size_t size = seg->bytes.size();
-        if (!is_one_block(size)) {
+        if (!is_one_block(size, kBlockAlign, graph::config_t::kSizeClasses)) {
             detail::heap_destroy_split(seg, kBlockAlign);
             return;
         }
         seg->~segment_t();
-        heap_source_t::reclaim(seg, kHeaderBytes + size, kBlockAlign);
+        heap_source_t::reclaim(seg, segment_block_bytes(size, kBlockAlign), kBlockAlign);
     }
 
     /**
@@ -456,7 +447,7 @@ namespace tr::view {
  * @brief A receive block as a transport allocated it: the segment and where its frame starts.
  *
  * @ref alloc_rx hands this back instead of a bare segment because a LOANED block (RFC-0028
- * §6.9) starts its frame @ref kRxLoanBytes into the segment, and every receive loop has to
+ * §6.9) starts its frame @ref tr::mem::kRxLoanBytes into the segment, and every receive loop has to
  * read the frame to, and deliver the view from, that offset.
  */
 struct rx_block_t {
@@ -477,9 +468,9 @@ struct rx_block_t {
  *
  * A frame the graph stores by SHARING (at or above a vertex's copy-or-share threshold) used to
  * cost the terminus one allocation for the record that links it (`value_t`, 40 B on the host).
- * A block drawn here instead carries @ref kRxLoanBytes of room in front of the frame, marked by
- * `segment_t::rx_loan`, and the terminus builds that record in the room: the stored value IS
- * the receive block, and a shared ingress allocates nothing past the transport's own receive.
+ * A block drawn here instead carries @ref tr::mem::kRxLoanBytes of room in front of the frame,
+ * marked by `segment_t::rx_loan`, and the terminus builds that record in the room: the stored value
+ * IS the receive block, and a shared ingress allocates nothing past the transport's own receive.
  *
  * The reserve is taken only where it can pay:
  * - @p len at or above @p loan_min — the transport passes its build's

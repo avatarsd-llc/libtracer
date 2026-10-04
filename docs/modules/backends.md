@@ -187,6 +187,41 @@ The bounded reference backend:
 :members:
 ```
 
+### The placement module
+
+One module owns how a segment's header and payload sit in the blocks a backend draws
+(ADR-0083 Decision 5, #1775): the header size, the padding rule, a pool slot's stride, the
+choice between one block and a split, the inline value's layout and the receive-loan reserve.
+Every backend asks it; none keeps its own recipe. The one-block-or-split choice is made
+against the build's size-class table, `default_config_t::kSizeClasses`: a heap segment whose
+padded header plus payload fits the table's last row is one block, a larger one is the payload
+and a bare header. Only the heap backend asks that question. A source or pool backend is
+sized for one draw per segment and keeps one block always.
+
+```{doxygenfunction} tr::mem::is_one_block
+:project: libtracer
+```
+
+```{doxygenfunction} tr::mem::segment_block_align
+:project: libtracer
+```
+
+```{doxygenfunction} tr::mem::segment_header_bytes
+:project: libtracer
+```
+
+```{doxygenfunction} tr::mem::segment_block_bytes
+:project: libtracer
+```
+
+```{doxygenfunction} tr::mem::inline_block_bytes
+:project: libtracer
+```
+
+```{doxygenfunction} tr::mem::place_segment
+:project: libtracer
+```
+
 ### The heap backend and the space tags
 
 ```{doxygenclass} tr::mem::heap_backend_t

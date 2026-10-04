@@ -363,7 +363,7 @@ void test_settings_max_frame_boundary() {
     // front of the frame (RFC-0028 §6.9) — a fixed, frame-independent header, never a function
     // of the declared length.
     const std::size_t drawn =
-        kCap + (kCap >= tr::graph::kShareThresholdBytes ? tr::view::kRxLoanBytes : 0);
+        kCap + (kCap >= tr::graph::kShareThresholdBytes ? tr::mem::kRxLoanBytes : 0);
     check(watch.largest() == drawn,
           "the segment drawn for it was the declared length exactly (plus the loan reserve)");
 

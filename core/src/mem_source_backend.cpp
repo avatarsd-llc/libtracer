@@ -16,16 +16,14 @@
 #include "libtracer/mem_source_backend.hpp"
 
 #include <cstddef>
-#include <new>
-#include <span>
 
-#include "libtracer/segment.hpp"
+#include "libtracer/placement.hpp"
 
 namespace tr::mem {
 
 /**
  * @brief One draw: the control block at the head of the block, the payload behind it (#873
- *        phase 3).
+ *        phase 3), placed by the placement module (@ref place_segment).
  *
  * The zero-size request keeps a NULL, empty `bytes` span rather than a one-past pointer into
  * the header, so an empty segment from this backend is indistinguishable from
@@ -34,10 +32,7 @@ namespace tr::mem {
  */
 view::segment_t* source_backend_t::alloc(std::size_t size, alloc_hint_t /*hint*/) {
     void* const block = src_->try_alloc(block_bytes(size), kBlockAlign);
-    if (block == nullptr) return nullptr;
-    auto* const base = static_cast<std::byte*>(block);
-    std::byte* const payload = size != 0 ? base + kHeaderBytes : nullptr;
-    return new (base) view::segment_t(this, std::span<std::byte>(payload, size));
+    return block != nullptr ? place_segment(this, block, size, kBlockAlign) : nullptr;
 }
 
 /**
