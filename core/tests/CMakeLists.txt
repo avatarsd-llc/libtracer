@@ -1750,6 +1750,13 @@ if(LIBTRACER_NET_PLANE)
     target_link_libraries(fwd_terminus_refusal_reply_test PRIVATE libtracer)
     libtracer_test_warnings(fwd_terminus_refusal_reply_test)
     add_test(NAME fwd_terminus_refusal_reply COMMAND fwd_terminus_refusal_reply_test)
+
+    # #1709 — a terminus reply leaves through the inbound link with no by-name lookup when
+    # that link is point-to-point; a bus keeps its peer resolution.
+    add_executable(fwd_terminus_reply_link_test fwd_terminus_reply_link_test.cpp)
+    target_link_libraries(fwd_terminus_reply_link_test PRIVATE libtracer)
+    libtracer_test_warnings(fwd_terminus_reply_link_test)
+    add_test(NAME fwd_terminus_reply_link COMMAND fwd_terminus_reply_link_test)
 endif()
 
 if(LIBTRACER_NET_PLANE)
