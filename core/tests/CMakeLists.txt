@@ -39,6 +39,24 @@ add_executable(error_registry_test error_registry_test.cpp)
 target_link_libraries(error_registry_test PRIVATE libtracer)
 libtracer_test_warnings(error_registry_test)
 add_test(NAME error_registry COMMAND error_registry_test)
+# The heap-free stored callable (inline_fn.hpp, #1671): its run-time contract, plus
+# two negative-compile entries. Each compiles inline_fn_reject.cpp with one case
+# macro and passes only on the matching static_assert text, so an oversized or
+# resource-owning callable is proven to fail to compile rather than fall back.
+add_executable(inline_fn_test inline_fn_test.cpp)
+target_link_libraries(inline_fn_test PRIVATE libtracer)
+libtracer_test_warnings(inline_fn_test)
+add_test(NAME inline_fn COMMAND inline_fn_test)
+foreach(_case OVERSIZE OWNING)
+    add_test(NAME inline_fn_reject_${_case}
+             COMMAND ${CMAKE_CXX_COMPILER} -std=c++23 -fsyntax-only
+                     -I${PROJECT_SOURCE_DIR}/include -DINLINE_FN_REJECT_${_case}
+                     ${CMAKE_CURRENT_SOURCE_DIR}/inline_fn_reject.cpp)
+endforeach()
+set_tests_properties(inline_fn_reject_OVERSIZE PROPERTIES
+    PASS_REGULAR_EXPRESSION "inline_fn_t: callable exceeds the inline capacity")
+set_tests_properties(inline_fn_reject_OWNING PROPERTIES
+    PASS_REGULAR_EXPRESSION "inline_fn_t: callable must be trivially copyable")
 
 # The nothrow control-plane block seam (mem_source.hpp, #551) — its contract, the
 # structural "not a memory_resource" assertions the ruling rests on, and the

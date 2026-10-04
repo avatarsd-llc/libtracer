@@ -358,15 +358,26 @@ void test_a_full_rx_queue_drops_rather_than_blocking() {
     std::condition_variable gate_cv;
     bool gate_open = false;
     int seen_in_callback = 0;  // dispatch thread only
+    // rx_fn_t holds two pointers inline (#1671), so the callback captures ONE
+    // pointer to a bundle of the locals it needs rather than each by reference;
+    // it is declared before the link so it, too, outlives the dispatch thread.
+    struct gate_refs_t {
+        recorder_t* rec;
+        std::mutex* m;
+        std::condition_variable* cv;
+        bool* open;
+        int* seen;
+    };
+    const gate_refs_t refs{&rec, &gate_m, &gate_cv, &gate_open, &seen_in_callback};
 
     auto link = std::make_unique<twai_link_t>(config_with_rx_depth(kRxDepth));
     check(link->ok(), "the link came up on the fake controller");
     if (!link->ok()) return;
-    link->on_receive([&](const can_frame_data_t& frame) {
-        rec.record(frame);
-        if (++seen_in_callback == 1) {
-            std::unique_lock lock(gate_m);
-            gate_cv.wait(lock, [&gate_open] { return gate_open; });
+    link->on_receive([g = &refs](const can_frame_data_t& frame) {
+        g->rec->record(frame);
+        if (++*g->seen == 1) {
+            std::unique_lock lock(*g->m);
+            g->cv->wait(lock, [open = g->open] { return *open; });
         }
     });
     link->start();  // the seam's second phase (#1186): delivery begins here
