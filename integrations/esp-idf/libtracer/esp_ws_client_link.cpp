@@ -29,6 +29,8 @@
 #include "esp_transport_tcp.h"
 #include "esp_transport_ws.h"
 #include "freertos/FreeRTOS.h"
+#include "libtracer/config.hpp"
+#include "libtracer/mem_heap.hpp"
 
 namespace tr::net {
 
@@ -290,9 +292,17 @@ esp_ws_client_link_t::esp_ws_client_link_t(std::string host, std::uint16_t port,
       // moved-to; member init order is declaration order), never from the parameters.
       dial_(std::make_shared<dial_t>(host_, port_, ws_path_, handshake_headers_)),
       rx_buf_(config.rx_bytes),
-      tx_buf_(config.tx_bytes),
-      tx_(kTxQueueDepth, tr::mem::heap_source()),
+      rx_backend_(config.memory.rx),
+      // The send side's store (#1661): the scratch below, the queue's slots and the base
+      // class's gather temporary all draw from the application's `memory.io`, null meaning
+      // the process heap — the host client's rule (`transport_ws_client`).
+      tx_buf_(config.memory.io != nullptr ? *config.memory.io : tr::mem::heap_source()),
+      tx_(kTxQueueDepth, config.memory.io != nullptr ? *config.memory.io : tr::mem::heap_source()),
       armed_(!config.defer_recv) {
+    // Reserved ONCE, here: a source that refuses leaves a zero-capacity scratch, so every
+    // outbound frame takes the logged oversize drop rather than an allocation at send time.
+    if (tx_buf_.reserve(config.tx_bytes)) tx_bytes_ = config.tx_bytes;
+    if (config.memory.io != nullptr) set_egress_source(*config.memory.io);
     // Every member the recv thread reads is initialized ABOVE this line, which is the
     // whole of #959: the thread spawned below dials at once, so a knob delivered after the
     // spawn is a data race, and for a handshake token it also leaves it undefined whether
@@ -706,7 +716,7 @@ void esp_ws_client_link_t::send(std::span<const std::span<const std::byte>> iov)
     // stats() snapshot inherit that wait (#1663 took the drop half off st_m_ as well).
     // This early-out stays AHEAD of the sender tally and of write_m_ (#952 ordering): it
     // reads nothing the destructor can be racing. Counted without any lock held.
-    if (total == 0 || total > tx_buf_.size()) {  // drop oversize/empty
+    if (total == 0 || total > tx_bytes_) {  // drop oversize/empty
         // The oversize half is the `tx_bytes` CEILING, and this is the only place that can
         // name it. `transport_t::send` returns void, so the router cannot be told the frame
         // died; `tx_drops_` says one did, but the `!connected_` arm and the short-write
@@ -720,7 +730,7 @@ void esp_ws_client_link_t::send(std::span<const std::span<const std::byte>> iov)
         // name — but it is the same drop and is counted the same way.
         if (total != 0)
             ESP_LOGW(kTag, "outbound frame %u B exceeds %u B tx buffer — dropped",
-                     static_cast<unsigned>(total), static_cast<unsigned>(tx_buf_.size()));
+                     static_cast<unsigned>(total), static_cast<unsigned>(tx_bytes_));
         tx_drops_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
@@ -819,6 +829,24 @@ void esp_ws_client_link_t::write_locked(std::span<std::byte> wire,
     ++traffic_.tx_frames;
     traffic_.tx_bytes += static_cast<std::uint32_t>(wire.size());
 #endif
+}
+
+void esp_ws_client_link_t::deliver_owned(std::size_t len) {
+    // ONE copy out of the read scratch into a block from the application's source, drawn
+    // through `alloc_rx` so a message large enough to be shared carries the RFC-0028 §6.9
+    // reserve and the terminus that stores it allocates nothing more. The copy is the
+    // price of the IDF read API (see esp_ws_client_config_t::memory) and the same one the
+    // host client pays from its decoded frame.
+    view::rx_block_t blk = view::alloc_rx(*rx_backend_, len, graph::kShareThresholdBytes);
+    if (!blk.seg) {
+        // The source refused: a bounded pool doing its job. Never the heap — that would
+        // hand back the footprint the injection bounds. The message is already off the
+        // stream, so the drop costs the connection nothing.
+        dropped_rx_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    std::memcpy(blk.frame(len).data(), rx_buf_.data(), len);
+    rx_.deliver(blk.take(len));
 }
 
 void esp_ws_client_link_t::recv_loop() {
@@ -1082,7 +1110,11 @@ void esp_ws_client_link_t::recv_loop() {
                 // (#1128). Set before the delivery: the router runs the app in-call here
                 // and the app may tear the link down from this very stack.
                 exchanged = true;
-                rx_.deliver_borrowed(std::span<const std::byte>(rx_buf_.data(), off));
+                if (rx_backend_ == nullptr) {
+                    rx_.deliver_borrowed(std::span<const std::byte>(rx_buf_.data(), off));
+                } else {
+                    deliver_owned(off);
+                }
             }
             off = 0;
             assembling = false;

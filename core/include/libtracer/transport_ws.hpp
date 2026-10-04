@@ -167,10 +167,12 @@ struct ws_server_config_t {
  */
 struct ws_client_config_t {
     /**
-     * @brief The link's memory (@ref link_memory_t). `rx`: the receive seam, as the server's.
-     *        `io`: the ADR-0079 EGRESS store (#873) the masked-frame buffer AND the base
-     *        class's gather temporary draw from — one egress store per link. Both bound once,
-     *        at construction.
+     * @brief The link's memory (@ref link_memory_t). `rx`: the receive seam, as the server's;
+     *        a single-frame message's block carries the RFC-0028 §6.9 ingress-loan reserve.
+     *        `io`: the ADR-0079 EGRESS store (#873) the masked-frame buffer, the
+     *        enqueue-then-write queue's slots (#1661) AND the base class's gather temporary
+     *        draw from — one egress store per link; null means the process heap. Both bound
+     *        once, at construction.
      */
     link_memory_t memory{};
     /** @brief Receive cap (0 → `transport_ws_server::kMaxFrame`); tighten-only — see
