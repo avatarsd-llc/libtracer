@@ -103,6 +103,9 @@ import bench_conditions as bc  # noqa: E402
 # `BENCH_CPU` pins every timed execution (the pinned host sets it); unset — every hosted
 # runner — runs unpinned and is classified over the process's whole affinity set.
 LEDGER = bc.Ledger()
+# Every `CLOCK res_ns sample_ns` line the timed transcripts carried (#1804): the clock's
+# resolution and the measured cost of one timed sample, printed under the verdict.
+CLOCK_FLOORS: list[tuple[float, float]] = []
 CPUS = bc.cpus_from_env()
 EXIT_INCONCLUSIVE = 3
 
@@ -634,8 +637,12 @@ def run_bench_once(bench: pathlib.Path, extra: tuple[str, ...] = (),
     for line in out.splitlines():
         f = line.split("\t")
         if len(f) == 12 and f[0] == "RESULT":
-            rows.append((f[2], int(f[3]), int(f[4]), int(f[5]), float(f[7]), int(f[9]),
-                         int(f[11])))
+            # Latency columns are read as floats: a batch row prints them to the picosecond
+            # (#1804), and int() here would re-quantize exactly what that change removed.
+            rows.append((f[2], int(f[3]), int(f[4]), int(f[5]), float(f[7]), float(f[9]),
+                         float(f[11])))
+        elif f[0] == "CLOCK" and len(f) == 3:
+            CLOCK_FLOORS.append((float(f[1]), float(f[2])))
     return rows
 
 
@@ -646,8 +653,8 @@ def metric(rows, mode, size, fan, ep):
     mean = [r[6] for r in rows if (r[0], r[1], r[2], r[3]) == (mode, size, fan, ep)]
     if not p50:
         return None
-    return {"p50_ns": int(statistics.median(p50)), "deliv_s": statistics.median(dv),
-            "mean_ns": int(statistics.median(mean))}
+    return {"p50_ns": statistics.median(p50), "deliv_s": statistics.median(dv),
+            "mean_ns": statistics.median(mean)}
 
 
 def best_of(binaries: dict[str, pathlib.Path], runs: int) -> dict[str, dict]:
@@ -751,7 +758,7 @@ def paired_samples(cand: dict[str, pathlib.Path], base: dict[str, pathlib.Path],
     return out
 
 
-def _tick_ok(cur: int, ref: int) -> bool:
+def _tick_ok(cur: float, ref: float) -> bool:
     """@brief The sub-100ns clock-grain guard, unchanged from the legacy latency legs."""
     return ref >= 100 or cur - ref > LAT_TICK_NS
 
@@ -772,7 +779,7 @@ def paired_verdict(cand: list[float], base: list[float], factor: float,
     def breach(c: float, b: float) -> bool:
         if lower_is_worse:
             return c < b * factor
-        return c > b * factor and (not tick_guard or _tick_ok(int(c), int(b)))
+        return c > b * factor and (not tick_guard or _tick_ok(c, b))
 
     cm, bm = statistics.median(cs), statistics.median(bs)
     pairs_breached = sum(1 for c, b in zip(cs, bs) if breach(c, b))
@@ -831,15 +838,17 @@ def gate_paired(cand: dict[str, pathlib.Path], base: dict[str, pathlib.Path],
             continue
         print(f"  {k}")
         legs = [
-            ("p50_ns", "p50", "ns", "9,.0f", LAT_REGRESS, False, True),
-            ("mean_ns", "mean", "ns", "9,.0f", MEAN_REGRESS, False, True),
+            ("p50_ns", "p50", "ns", "11,.3f", LAT_REGRESS, False, True),
+            ("mean_ns", "mean", "ns", "11,.3f", MEAN_REGRESS, False, True),
             ("deliv_s", "deliv/s", "", "15,.0f", TPUT_REGRESS, True, False),
         ]
         for key, label, unit, fmt, factor, lower_worse, tick in legs:
             c = [float(x[key]) for x in cs]
             b = [float(x[key]) for x in bs]
-            if lower_worse and (min(c) <= 0 or min(b) <= 0):
-                continue  # latency-only row (#553): deliv_s = 0 means "not measured here"
+            if min(c) <= 0 or min(b) <= 0:
+                # 0 means "this row does not measure that": deliv_s on a latency-only row
+                # (#553), p50/mean on a bulk-only row such as `lkv-*` (#1804).
+                continue
             v = paired_verdict(c, b, factor, lower_worse, tick)
             worst_drift = max(worst_drift, _spread(v["base_range"]))
             print(paired_report(v, label, unit, fmt))
@@ -1161,14 +1170,16 @@ def main() -> int:
     for k, v in cur.items():
         if k.startswith("mem:"):
             continue  # handled by mem_gate above
-        line = (f"  {k:<22} p50={v['p50_ns']:>7}ns mean={v['mean_ns']:>7}ns "
+        line = (f"  {k:<22} p50={v['p50_ns']:>9.3f}ns mean={v['mean_ns']:>9.3f}ns "
                 f"deliv/s={v['deliv_s']:>14,.0f}")
         if base and k in base:
             b = base[k]
 
-            def lat_fails(cur: int, ref: int, factor: float) -> bool:
-                """Relative pullback, tick-guarded for sub-100ns points."""
-                return cur > ref * factor and (ref >= 100 or cur - ref > LAT_TICK_NS)
+            def lat_fails(cur: float, ref: float, factor: float) -> bool:
+                """Relative pullback, tick-guarded for sub-100ns points; a 0 is "not
+                measured" (a bulk-only row, #1804), never a pullback."""
+                return (ref > 0 and cur > ref * factor
+                        and (ref >= 100 or cur - ref > LAT_TICK_NS))
 
             if lat_fails(v["p50_ns"], b["p50_ns"], LAT_REGRESS):
                 fails.append(f"{k} latency pullback: {v['p50_ns']}ns vs base {b['p50_ns']}ns "
@@ -1218,6 +1229,13 @@ def print_conditions() -> None:
     print(f"  {LEDGER.line()}")
     for x in LEDGER.report(notable_only=True):
         print(x)
+    # The clock floor every transcript recorded (#1804): resolution and per-sample cost, ns.
+    if CLOCK_FLOORS:
+        res = sorted({r for r, _ in CLOCK_FLOORS})
+        cost = [c for _, c in CLOCK_FLOORS]
+        print(f"  clock floor: resolution {'/'.join(f'{r:g}' for r in res)} ns, "
+              f"{min(cost):.1f}..{max(cost):.1f} ns per timed sample "
+              f"({len(cost)} transcript(s))")
 
 
 if __name__ == "__main__":

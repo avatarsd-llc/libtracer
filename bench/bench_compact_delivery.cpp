@@ -66,8 +66,6 @@ constexpr double kDefaultBudgetSeconds = 1.0;
     return v > 0.0 ? v : kDefaultBudgetSeconds;
 }
 
-using bench::calibrate_batch;  // hoisted to bench_common.hpp (#553) — one definition
-
 std::size_t g_allocs = 0;
 std::size_t g_bytes = 0;
 bool g_arm = false;
@@ -215,32 +213,13 @@ void run_point(std::size_t payload, bool terminus) {
     const std::size_t allocs = g_allocs;
     const std::size_t bytes = g_bytes;
 
-    const std::size_t batch = calibrate_batch(deliver);
-    const auto deadline_ns = static_cast<std::uint64_t>(budget_seconds() * 1e9);
-    bench::Latency lat;
-    lat.reserve(bench::samples_for_budget(
-        [&] {
-            for (std::size_t i = 0; i < batch; ++i) deliver();
-        },
-        deadline_ns));
-    const std::uint64_t t0 = bench::now_ns();
-    std::size_t batches = 0;
-    std::uint64_t total = 0;
-    while (total < deadline_ns) {
-        const std::uint64_t a = bench::now_ns();
-        for (std::size_t i = 0; i < batch; ++i) deliver();
-        lat.add((bench::now_ns() - a) / batch);
-        ++batches;
-        total = bench::now_ns() - t0;
-    }
-
-    const double ops = static_cast<double>(batches) * static_cast<double>(batch);
-    const double ops_per_s = total == 0 ? 0.0 : ops * 1e9 / static_cast<double>(total);
-    const bench::Latency::Summary s = lat.summarize();
+    // Window-calibrated batches, per-op picoseconds, every window >= 20 µs (#1804). The
+    // plateau calibrator this used let the machine pick the batch (#1358).
+    const bench::batch_timing_t t =
+        bench::time_batches(deliver, static_cast<std::uint64_t>(budget_seconds() * 1e9));
     const char* const mode = terminus ? "compact-terminus" : "compact-forward";
-    bench::emit("libtracer", mode, payload, 1, 1, ops_per_s, ops_per_s, 0.0, s);
-    std::printf("NOTE mode=%s payload=%zu batch=%zu samples=%zu allocs=%zu bytes=%zu\n", mode,
-                payload, batch, batches, allocs, bytes);
+    bench::emit_batch("libtracer", mode, payload, 1, 1, t.ops_per_s, t.ops_per_s, 0.0, t);
+    std::printf("NOTE mode=%s payload=%zu allocs=%zu bytes=%zu\n", mode, payload, allocs, bytes);
     if (terminus ? (down.sends != 0) : (down.sends == 0))
         std::printf("WARN mode=%s delivered to the WRONG leg\n", mode);
 }
@@ -249,6 +228,7 @@ void run_point(std::size_t payload, bool terminus) {
 
 int main(int /*argc*/, char** argv) {
     bench::pin_allocator_state(argv);  // fixed allocator state (#1803)
+    bench::emit_clock_floor();         // the run's clock floor, ahead of its rows (#1804)
     std::printf("# Steady-state compacted delivery on a WARM binding (RFC-0004 §E.1 / ADR-0062)\n");
     for (const std::size_t p : kPayloadSizes) {
         run_point(p, /*terminus=*/true);

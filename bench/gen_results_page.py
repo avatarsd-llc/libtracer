@@ -751,13 +751,13 @@ a transport that does not override the gather form concatenates once in
 `transport_t::send(iov)`."""
 
 
-def _parse_codec(out: str) -> list[tuple[int, float, int, int]]:
+def _parse_codec(out: str) -> list[tuple[int, float, float, float]]:
     """Parse `RESULT\\t...\\tcodec\\t...` lines (12 fields) -> (size, pub_s, p50, mean)."""
     rows = []
     for ln in out.splitlines():
         f = ln.split("\t")
         if len(f) == 12 and f[0] == "RESULT" and f[2] == "codec":
-            rows.append((int(f[3]), float(f[6]), int(f[9]), int(f[11])))
+            rows.append((int(f[3]), float(f[6]), float(f[9]), float(f[11])))
     return rows
 
 
@@ -884,6 +884,8 @@ are not comparable to each other: different denominator, by construction.
   recorded says so instead of drawing an empty axis.
 - Hover any point for its exact value, the commit and its subject line — plus the host
   descriptor when the store records one, which the bench-local store does on every point.
+  That descriptor carries the run's **clock floor**: the clock's resolution and the measured
+  cost of one timed sample, the finest a per-op row could resolve on that host.
 
 ### Two latency series per in-process mode
 
@@ -894,7 +896,9 @@ fan-out, converging on the batch row as the operation outgrows the clock — the
 quantization* chart in {ch("dispatch")} plots exactly that gap. Use `-batch` to resolve a
 small delta; use the per-op row for **tail shape**, since it is the one with a real p99. A
 percentile of batch means measures interference between batches rather than the tail of an
-operation, so the `-batch` rows publish no p99 at all rather than a fabricated one."""
+operation, so the `-batch` rows publish no p99 at all rather than a fabricated one. Every
+batch row's window is at least 20 µs and its figure is kept to the picosecond, so a 3 ns row
+is not stepped in whole nanoseconds."""
 
 
 def compare_intro() -> str:

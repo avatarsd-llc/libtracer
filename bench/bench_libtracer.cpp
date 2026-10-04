@@ -95,8 +95,9 @@ enum class alloc_t { HEAP, BORROW };
 /**
  * @brief Publish the batch-amortized twin of a quantized latency row (#553).
  *
- * Times a CALIBRATED BATCH of @p op and divides, so the two `clock_gettime` reads and the
- * clock's granularity are amortized across the batch instead of dominating one operation.
+ * Times @p op in window-calibrated batches (@ref bench::time_batches, #1804) and reports the
+ * per-op time to the picosecond, so the two `clock_gettime` reads and the clock's granularity
+ * are amortized across a window of at least 20 µs instead of dominating one operation.
  * Emitted as a SEPARATE row under `<mode>-batch` rather than replacing the quantized one:
  * the quantized series are the primary key of long-running `gh-pages` history, and giving
  * an existing name a new meaning would silently make every point before the change
@@ -104,16 +105,13 @@ enum class alloc_t { HEAP, BORROW };
  *
  * **This row is a LATENCY instrument only.** Every other column is left at 0, which the
  * history emitter reads as "this row does not produce that metric" and skips rather than
- * charting — the same convention the `lkv-*` constant-zero p99 fix established. Each is
- * zero for its own reason:
+ * charting. Each is zero for its own reason:
  *
  * - **p99** — each sample here is a MEAN over `batch` operations, so its 99th percentile
  *   is the tail of the batch means: it measures scheduling interference BETWEEN batches,
- *   not the tail of one operation. Averaging destroys exactly the quantity a p99 is read
- *   for, so publishing one under that name would be a fabricated tail. Read the quantized
- *   twin's p99 for tail shape and this row's p50/mean for magnitude.
- * - **throughput** — this arm could report its own, and it would be a real measurement,
- *   but it would be a WORSE one: the bulk phase above times an order of magnitude more
+ *   not the tail of one operation. Read the quantized twin's p99 for tail shape and this
+ *   row's p50/mean for magnitude.
+ * - **throughput** — the bulk phase of the quantized row times an order of magnitude more
  *   work over a longer window and is already the authoritative figure for this exact
  *   point. Publishing a second, weaker estimate of one quantity is how a reader ends up
  *   with two numbers for one thing and no rule for which to trust.
@@ -126,28 +124,11 @@ enum class alloc_t { HEAP, BORROW };
 template <typename Op>
 void emit_batch_row(const char* mode, std::size_t S, std::size_t F, std::size_t E, Op&& op,
                     std::size_t lat_n) {
+    constexpr std::uint64_t kBudgetNs = 10'000'000'000ULL;  // a backstop; lat_n ends the loop
     std::size_t i = 0;
-    const std::size_t batch = calibrate_batch([&] { op(i++); });
-    const std::size_t rounds = std::max<std::size_t>(1, lat_n / batch);
-
-    Latency lat;
-    lat.reserve(rounds);
-    for (std::size_t r = 0; r < rounds; ++r) {
-        const auto a = now_ns();
-        for (std::size_t b = 0; b < batch; ++b) op(i++);
-        lat.add((now_ns() - a) / batch);
-    }
-
-    Latency::Summary sum = lat.summarize();
-    sum.p99 = 0;  // a percentile of batch means is not an operation's tail — see above
-
+    const bench::batch_timing_t t = bench::time_batches([&] { op(i++); }, kBudgetNs, lat_n);
     const std::string batch_mode = std::string(mode) + "-batch";
-    emit("libtracer", batch_mode.c_str(), S, F, E, 0.0, 0.0, 0.0, sum);
-    std::printf(
-        "NOTE mode=%s batch=%zu rounds=%zu (latency-only row: throughput and "
-        "bandwidth belong to the bulk phase of `%s`)\n",
-        batch_mode.c_str(), batch, rounds, mode);
-    std::fflush(stdout);
+    bench::emit_batch("libtracer", batch_mode.c_str(), S, F, E, 0.0, 0.0, 0.0, t);
 }
 
 /**
@@ -910,20 +891,15 @@ void run_fold(std::size_t N) {
     const double deliv_s = pub_s;  // fan=1 => one egress per publish
 
     // BATCH-AMORTIZED latency, like `run_path_parse` below and the net-plane benches. A fold
-    // op costs ~8-15 ns; timing one between two `steady_clock` reads measured the CLOCK, and
-    // published p50=30 / p99=31 for EVERY width. The `lat-fold` chart was consequently four
-    // identical flat lines, and the perf gate's `fold-n4` leg was dead: p50=30 with
-    // LAT_REGRESS=1.15 needs 34.5, i.e. one 10 ns tick, so a real ~11 ns op had to more than
-    // DOUBLE before the gate could fire. See #553 for the same defect in the other rows.
-    constexpr std::size_t kBatch = 256;
-    constexpr std::size_t kFoldRounds = 800;
-    Latency lat;
-    lat.reserve(kFoldRounds);
-    for (std::size_t r = 0; r < kFoldRounds; ++r) {
-        const auto a = now_ns();
-        for (std::size_t i = 0; i < kBatch; ++i) sink += serialize();
-        lat.add((now_ns() - a) / kBatch);
-    }
+    // op costs ~3-15 ns; timing one between two `steady_clock` reads measured the CLOCK, and
+    // published p50=30 / p99=31 for EVERY width (#553). The fixed 256-op batch that replaced
+    // it was still a ~1 µs window, 25x under the timing floor, and its integer division
+    // stepped a 3 ns row in whole nanoseconds. Now the batch is sized by window (>= 20 µs,
+    // asserted) and the result is kept in picoseconds (#1804). No p99: a percentile of batch
+    // means is not an operation's tail.
+    constexpr std::uint64_t kFoldBudgetNs = 50'000'000;
+    const bench::batch_timing_t t =
+        bench::time_batches([&] { sink += serialize(); }, kFoldBudgetNs);
     (void)sink;
     // Mode renamed `fold-n*` -> `fold-b*` because the number now means something different
     // (a batch-amortized per-op cost, not a clock-quantized single-shot). Renaming ends the
@@ -931,7 +907,7 @@ void run_fold(std::size_t N) {
     // have. Bandwidth is 0: the op reads at most 8 payload bytes per link, so the old
     // `deliv_s * 512` was ~74 GB/s of bytes never touched.
     const std::string mode = "fold-b" + std::to_string(N);
-    emit("libtracer", mode.c_str(), kFoldTotal, 1, 1, pub_s, deliv_s, 0.0, lat.summarize());
+    bench::emit_batch("libtracer", mode.c_str(), kFoldTotal, 1, 1, pub_s, deliv_s, 0.0, t);
 }
 
 /**
@@ -1160,14 +1136,14 @@ lkv_result_t run_lkv_store_alloc(std::size_t S, bool copy, tr::mem::mem_backend_
     }
     const double secs = static_cast<double>(now_ns() - t0) / 1e9;
     const double ops = secs > 0 ? kIters / secs : 0;
-    Latency::Summary lat{};
-    // Batch-amortized: the whole loop is timed as one block, so p50 == mean == the
-    // per-op average and there IS no distribution to take a percentile of. p99 stays
-    // 0, which the emitter reads as "not measured" and declines to record — it used
-    // to publish a constant-zero p99 series per commit, which was not a measurement
-    // of anything. Measuring one iteration between two clock reads is not the fix
-    // either: an alloc+free costs the same order as `clock_gettime`.
-    lat.p50 = lat.mean = static_cast<std::uint64_t>(secs * 1e9 / kIters);
+    // ONE metric (#1804): the whole loop is timed as one block, so there is exactly one
+    // measurement here — operations per second. It used to be published three ways (as
+    // throughput, and as a p50 and a mean that were both `1e9 / ops` truncated to whole
+    // nanoseconds), which the gate then counted as three legs agreeing with each other. The
+    // latency columns are 0, read everywhere as "not measured"; the history still charts the
+    // same figure as ns/delivery. Measuring one iteration between two clock reads is not the
+    // fix either: an alloc+free costs the same order as `clock_gettime`.
+    const Latency::Summary lat{};
     // Bandwidth only means something for the copy arm. The alloc-only arm moves NO
     // payload — it takes a block and gives it back — so reporting kIters*S/secs there
     // published a fabricated figure (a "151 GB/s" zero-copy allocation).
@@ -1363,30 +1339,19 @@ void run_path_parse() {
             if (c == '/') ++segs;
         }
         // Batch-amortized for the same reason the net-plane benches are: one parse is close
-        // enough to `clock_gettime` that per-op timing would measure the clock.
-        constexpr std::size_t kBatch = 256;
+        // enough to `clock_gettime` that per-op timing would measure the clock. The batch is
+        // sized by window (>= 20 µs, asserted) and the result kept in picoseconds (#1804).
         constexpr std::uint64_t kBudgetNs = 300000000ULL;
         std::size_t sink = 0;
-        const auto batch = [&] {
-            for (std::size_t i = 0; i < kBatch; ++i) {
+        const bench::batch_timing_t t = bench::time_batches(
+            [&] {
                 const auto p = tr::graph::path_t::parse(a);
                 sink += p.has_value() ? p->segment_count() : 0;
-            }
-        };
-        Latency lat;
-        lat.reserve(samples_for_budget(batch, kBudgetNs));
-        const std::uint64_t t0 = now_ns();
-        std::size_t iters = 0;
-        while (now_ns() - t0 < kBudgetNs) {
-            const std::uint64_t s0 = now_ns();
-            batch();
-            lat.add((now_ns() - s0) / kBatch);
-            ++iters;
-        }
+            },
+            kBudgetNs);
         if (sink == 0) std::printf("WARN path-parse produced nothing\n");
-        const double total_s = static_cast<double>(now_ns() - t0) / 1e9;
-        const double per_s = static_cast<double>(iters * kBatch) / total_s;
-        emit("libtracer", "path-parse", a.size(), segs, 1, per_s, per_s, 0.0, lat.summarize());
+        bench::emit_batch("libtracer", "path-parse", a.size(), segs, 1, t.ops_per_s, t.ops_per_s,
+                          0.0, t);
     }
 }
 
@@ -1763,6 +1728,7 @@ int main(int argc, char** argv) {
         const std::string_view want{argv[2]};
         if (want == "single" || want == "multi") {
             const family_set_t only = want == "multi" ? family_set_t::MULTI : family_set_t::SINGLE;
+            bench::emit_clock_floor();  // the run's clock floor, ahead of its rows (#1804)
             return run_default_sweep(argv[0], &only);
         }
         std::fprintf(stderr, "error: unknown family set '%s'\n", argv[2]);
@@ -1780,6 +1746,7 @@ int main(int argc, char** argv) {
             // own `SKIP mode=...` and `LKV-RATIO ...` lines, so an A/B driver that wants to
             // assert it got the arm it asked for reads it there.
             std::fprintf(stderr, "MODE %.*s\n", static_cast<int>(m.name.size()), m.name.data());
+            bench::emit_clock_floor();
             m.run();
             return 0;
         }
@@ -1790,6 +1757,8 @@ int main(int argc, char** argv) {
         print_usage(argv[0]);
         return 2;
     }
-    // The default sweep: every family of @ref kFamilies, each in its own fresh process.
+    // The default sweep: every family of @ref kFamilies, each in its own fresh process. The
+    // clock floor is measured once, here in the parent, ahead of every family's rows (#1804).
+    bench::emit_clock_floor();
     return run_default_sweep(argv[0]);
 }

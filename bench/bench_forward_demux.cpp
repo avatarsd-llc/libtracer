@@ -92,39 +92,6 @@ constexpr double kDefaultBudgetSeconds = 1.0;
 }
 
 /**
- * @brief The batch size a leg is timed in — DERIVED from the target window, not chosen.
- *
- * One hop costs tens of nanoseconds, the same order as `clock_gettime` itself, so timing each
- * hop individually measures the clock rather than the router. (An early draft of this bench
- * did exactly that and reported the whole-table scan *beating* the first-hit lookup — the
- * signature of a clock-dominated window.) Batching amortizes the two clock reads, but the
- * right batch is a property of the HOST's clock, not a constant to hardcode.
- *
- * This bench used to derive it with a local PLATEAU rule: double until the per-hop figure
- * stops improving by 5 %. That rule compares two *timed* quantities, so the machine gets a
- * vote in the answer — see `calibrate_batch_for_window`'s own note (#1358). It bites here.
- * Over 24 executions of the same three resolve legs on the quiet pinned host the plateau rule
- * latched batches of **8, 16 and 32** on one leg, and the batch-8 execution read `36 ns`
- * against `33–34 ns` for the others: ~3 ns (9 %) of pure calibrator, in discrete clusters,
- * with nothing but the lottery between the two arms. That is precisely the shape of a false
- * attribution, and this bench's whole third axis is an attribution (#1346).
- *
- * So ask the question directly instead: keep doubling until the measured WINDOW reaches
- * `bench::kMinBatchWindowNs`. The batch then follows the operation's own cost, repeats across
- * executions, and self-scales across a sweep whose arms differ by an order of magnitude. Every
- * leg still reports its batch, so the measurement states its own assumption.
- *
- * Directionally safe for the banked series: a longer window can only remove clock overhead, so
- * the smaller-is-better latency rows move down or stay put. The bench source changes in this
- * commit anyway, which marks every series it feeds.
- * @param hop Runs one forward hop.
- */
-template <typename Hop>
-[[nodiscard]] std::size_t calibrate_batch(Hop&& hop) {
-    return bench::calibrate_batch_for_window(hop);
-}
-
-/**
  * @brief A transport that only counts what it was handed — no I/O, no allocation.
  *
  * The scatter-gather `send` is overridden for the same reason `bench_forward_heap` does
@@ -378,7 +345,7 @@ class legacy_dst_seg_walk_t {
  * @param target_pos 1-based position of "out" among them (1 = first, `links` = last).
  * @param mode       RESULT mode tag ("fixed" or "scan").
  */
-std::uint64_t run_point(std::size_t links, std::size_t target_pos, const char* mode) {
+double run_point(std::size_t links, std::size_t target_pos, const char* mode) {
     graph_t graph;
     fwd_router_t router(graph);
     capture_transport_t in_link;
@@ -438,41 +405,18 @@ std::uint64_t run_point(std::size_t links, std::size_t target_pos, const char* m
     // so the bench was timing a routing shape production never executes.
     const auto hop = [&] { in_link.deliver(frame); };
 
-    // Calibration doubles as the warm-up: it primes lazy statics and caches, and its
-    // own timings are discarded.
-    const std::size_t batch = calibrate_batch(hop);
-
-    // Sample until the budget is spent — the sample COUNT falls out of the host's speed
-    // rather than being declared. Each sample is one amortized batch.
-    const std::uint64_t deadline_ns = static_cast<std::uint64_t>(budget_seconds() * 1e9);
-    bench::Latency lat;
-    lat.reserve(bench::samples_for_budget(
-        [&] {
-            for (std::size_t i = 0; i < batch; ++i) hop();
-        },
-        deadline_ns));
-    const std::uint64_t t0 = bench::now_ns();
-    std::size_t batches = 0;
-    std::uint64_t total = 0;
-    while (total < deadline_ns) {
-        const std::uint64_t a = bench::now_ns();
-        for (std::size_t i = 0; i < batch; ++i) hop();
-        lat.add((bench::now_ns() - a) / batch);  // per-hop ns, clock cost amortized
-        ++batches;
-        total = bench::now_ns() - t0;
-    }
-
-    const double hops = static_cast<double>(batches) * static_cast<double>(batch);
-    const double hops_per_s = total == 0 ? 0.0 : hops * 1e9 / static_cast<double>(total);
-    // size_bytes = the frame the hop carried; fanout = N; endpoints = scan position.
-    const bench::Latency::Summary s = lat.summarize();
-    bench::emit("libtracer", mode, frame.size(), links, target_pos, hops_per_s, hops_per_s, 0.0, s);
-
-    // State the measurement's own parameters: a reader can tell whether the window was
-    // amortized on THIS host, rather than trusting a constant baked in on another.
-    std::printf("NOTE mode=%s links=%zu batch=%zu samples=%zu\n", mode, links, batch, batches);
+    // Window-calibrated batches (the calibration doubles as the warm-up), per-op
+    // picoseconds, every window >= 20 µs (#1804). Sample until the budget is spent — the
+    // sample COUNT falls out of the host's speed rather than being declared.
+    const bench::batch_timing_t t =
+        bench::time_batches(hop, static_cast<std::uint64_t>(budget_seconds() * 1e9));
+    // size_bytes = the frame the hop carried; fanout = N; endpoints = scan position. The NOTE
+    // line emit_batch prints states the batch, so a reader can tell whether the window was
+    // amortized on THIS host rather than trusting a constant baked in on another.
+    bench::emit_batch("libtracer", mode, frame.size(), links, target_pos, t.ops_per_s, t.ops_per_s,
+                      0.0, t);
     if (out_link.sends == 0) std::printf("WARN mode=%s links=%zu forwarded NOTHING\n", mode, links);
-    return s.p50;
+    return t.p50_ps / 1e3;
 }
 
 /**
@@ -497,8 +441,8 @@ std::uint64_t run_point(std::size_t links, std::size_t target_pos, const char* m
  * points production takes, so this is a decomposition of the shipped path — not a model of a
  * hypothetical one.
  */
-[[nodiscard]] std::uint64_t run_leg(const char* mode, bool rebuild_leg,
-                                    path_form_t form = path_form_t::PACKED) {
+[[nodiscard]] double run_leg(const char* mode, bool rebuild_leg,
+                             path_form_t form = path_form_t::PACKED) {
     const std::byte payload[4] = {std::byte{0xDE}, std::byte{0xAD}, std::byte{0xBE},
                                   std::byte{0xEF}};
     const std::vector<std::byte> frame =
@@ -549,36 +493,20 @@ std::uint64_t run_point(std::size_t links, std::size_t target_pos, const char* m
         }
     };
 
-    const std::size_t batch = calibrate_batch(leg);
-    const std::uint64_t deadline_ns = static_cast<std::uint64_t>(budget_seconds() * 1e9);
-    bench::Latency lat;
-    lat.reserve(bench::samples_for_budget(
-        [&] {
-            for (std::size_t i = 0; i < batch; ++i) leg();
-        },
-        deadline_ns));
-    const std::uint64_t t0 = bench::now_ns();
-    std::size_t batches = 0;
-    std::uint64_t total = 0;
-    while (total < deadline_ns) {
-        const std::uint64_t a = bench::now_ns();
-        for (std::size_t i = 0; i < batch; ++i) leg();
-        lat.add((bench::now_ns() - a) / batch);
-        ++batches;
-        total = bench::now_ns() - t0;
-    }
-    const bench::Latency::Summary s = lat.summarize();
-    bench::emit("libtracer", mode, frame.size(), 1, 1, 0.0, 0.0, 0.0, s);
-    std::printf("NOTE mode=%s batch=%zu samples=%zu sink=%zu\n", mode, batch, batches, sink);
-    return s.p50;
+    const bench::batch_timing_t t =
+        bench::time_batches(leg, static_cast<std::uint64_t>(budget_seconds() * 1e9));
+    bench::emit_batch("libtracer", mode, frame.size(), 1, 1, 0.0, 0.0, 0.0, t);
+    std::printf("NOTE mode=%s sink=%zu\n", mode, sink);
+    return t.p50_ps / 1e3;
 }
 
 }  // namespace
 
 int main(int /*argc*/, char** argv) {
     bench::pin_allocator_state(argv);  // fixed allocator state (#1803)
-    std::vector<std::uint64_t> fixed;
-    std::vector<std::uint64_t> scan;
+    bench::emit_clock_floor();         // the run's clock floor, ahead of its rows (#1804)
+    std::vector<double> fixed;
+    std::vector<double> scan;
 
     // Axis 1 — fixed per-hop cost: target first, so the scan hits immediately. The term
     // strip-K ADDS (a literal + a module compare) is measured against this number.
@@ -592,17 +520,15 @@ int main(int /*argc*/, char** argv) {
     std::printf("\n%-8s %-14s %-14s %-14s %s\n", "links", "fixed_p50_ns", "scan_p50_ns",
                 "scan_delta_ns", "ns_per_link");
     for (std::size_t i = 0; i < std::size(kLinkCounts); ++i) {
-        const double delta = static_cast<double>(scan[i]) - static_cast<double>(fixed[i]);
+        const double delta = scan[i] - fixed[i];
         const std::size_t compares = kLinkCounts[i] > 1 ? kLinkCounts[i] - 1 : 1;
-        std::printf("%-8zu %-14llu %-14llu %-14.1f %.2f\n", kLinkCounts[i],
-                    static_cast<unsigned long long>(fixed[i]),
-                    static_cast<unsigned long long>(scan[i]), delta,
-                    delta / static_cast<double>(compares));
+        std::printf("%-8zu %-14.3f %-14.3f %-14.3f %.3f\n", kLinkCounts[i], fixed[i], scan[i],
+                    delta, delta / static_cast<double>(compares));
     }
     std::printf(
-        "\nSUMMARY fixed_per_hop_ns=%llu (size-independent — the term strip-K ADDS,\n"
+        "\nSUMMARY fixed_per_hop_ns=%.3f (size-independent — the term strip-K ADDS,\n"
         "        a segment[0]==\"net\" literal + a module compare, is measured against this)\n",
-        static_cast<unsigned long long>(fixed.empty() ? 0 : fixed[0]));
+        fixed.empty() ? 0.0 : fixed[0]);
 
     // Axis 3 — what a resolution cache could and could not remove from that fixed hop.
     std::printf("\n");
@@ -612,40 +538,35 @@ int main(int /*argc*/, char** argv) {
     // frequency ramp cannot be mistaken for the difference — the two packed readings bracket
     // the literal one, and the SUMMARY below prints their spread alongside the delta.
     // **If the packed arm does not beat the literal arm here, RFC-0018 is void** (§10.1).
-    const std::uint64_t resolve_ns = run_leg("fwd-demux-resolve", false);
+    const double resolve_ns = run_leg("fwd-demux-resolve", false);
     // RENAMED from `fwd-demux-resolve-literal` (#1346). The old row measured a hand-rolled
     // walk, not the retired one, and read 31 ns light; keeping the name across a change in
     // WHAT the row measures is the one thing the methodology never allows.
-    const std::uint64_t resolve_lit_ns =
-        run_leg("fwd-demux-resolve-legacy", false, path_form_t::LITERAL);
-    const std::uint64_t resolve_ns2 = run_leg("fwd-demux-resolve", false);
-    const std::uint64_t rebuild_ns = run_leg("fwd-demux-rebuild", true);
+    const double resolve_lit_ns = run_leg("fwd-demux-resolve-legacy", false, path_form_t::LITERAL);
+    const double resolve_ns2 = run_leg("fwd-demux-resolve", false);
+    const double rebuild_ns = run_leg("fwd-demux-rebuild", true);
 
-    const double hop = static_cast<double>(fixed.empty() ? 0 : fixed[0]);
-    const double scan_hi = scan.empty() ? 0.0 : static_cast<double>(scan.back()) - hop;
+    const double hop = fixed.empty() ? 0.0 : fixed[0];
+    const double scan_hi = scan.empty() ? 0.0 : scan.back() - hop;
     std::printf("\n%-22s %-12s %s\n", "leg", "p50_ns", "share of the fixed hop");
-    std::printf("%-22s %-12llu %.1f%%   <- CEILING on a resolve-once cache\n",
-                "resolve (cacheable)", static_cast<unsigned long long>(resolve_ns),
-                hop == 0.0 ? 0.0 : 100.0 * static_cast<double>(resolve_ns) / hop);
-    std::printf("%-22s %-12llu %.1f%%   <- FLOOR: per-frame, no cache removes it\n",
-                "rebuild (per-frame)", static_cast<unsigned long long>(rebuild_ns),
-                hop == 0.0 ? 0.0 : 100.0 * static_cast<double>(rebuild_ns) / hop);
+    std::printf("%-22s %-12.3f %.1f%%   <- CEILING on a resolve-once cache\n",
+                "resolve (cacheable)", resolve_ns, hop == 0.0 ? 0.0 : 100.0 * resolve_ns / hop);
+    std::printf("%-22s %-12.3f %.1f%%   <- FLOOR: per-frame, no cache removes it\n",
+                "rebuild (per-frame)", rebuild_ns, hop == 0.0 ? 0.0 : 100.0 * rebuild_ns / hop);
     std::printf(
-        "\nSUMMARY a perfect resolve-once cache saves at most %llu ns of a %.0f ns hop"
+        "\nSUMMARY a perfect resolve-once cache saves at most %.3f ns of a %.3f ns hop"
         " (%.1f%%),\n        plus the registry scan, which is %.0f ns at %zu links and"
         " ~0 at <=16.\n",
-        static_cast<unsigned long long>(resolve_ns), hop,
-        hop == 0.0 ? 0.0 : 100.0 * static_cast<double>(resolve_ns) / hop, scan_hi,
+        resolve_ns, hop, hop == 0.0 ? 0.0 : 100.0 * resolve_ns / hop, scan_hi,
         kLinkCounts[std::size(kLinkCounts) - 1]);
 
     // Falsifier 1's verdict line. `packed_spread` is the honest error bar: the two packed
     // readings were taken either side of the literal one, so a delta smaller than their own
     // spread is not a result.
-    const double packed =
-        0.5 * (static_cast<double>(resolve_ns) + static_cast<double>(resolve_ns2));
-    const double spread = static_cast<double>(resolve_ns > resolve_ns2 ? resolve_ns - resolve_ns2
-                                                                       : resolve_ns2 - resolve_ns);
-    const double lit = static_cast<double>(resolve_lit_ns);
+    const double packed = 0.5 * (resolve_ns + resolve_ns2);
+    const double spread =
+        resolve_ns > resolve_ns2 ? resolve_ns - resolve_ns2 : resolve_ns2 - resolve_ns;
+    const double lit = resolve_lit_ns;
     std::printf(
         "\nFALSIFIER-1 resolve leg: packed_p50_ns=%.1f (spread %.1f over two readings)"
         " literal_p50_ns=%.1f\n"

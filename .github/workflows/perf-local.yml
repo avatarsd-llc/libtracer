@@ -514,11 +514,15 @@ jobs:
           # is where "which host produced this number" lives, per bench, per point.
           # It now also carries the COMPILER (a toolchain bump and a code change used
           # to move the trend identically, with nothing recorded to tell them apart)
-          # and the A/A verdict, so a suspect point declares itself in the store.
+          # and the A/A verdict, so a suspect point declares itself in the store, and the
+          # CLOCK FLOOR the transcript recorded (#1804): clock resolution and per-sample
+          # timer cost, so a reader can judge how fine a row could be on this host.
           python3 bench/host_guard.py stamp \
             --json bench/benchmark_output.json \
             --json bench/benchmark_throughput.json \
-            --desc "$HOST_DESC · $COND_LINE" --compiler --note "$AA_NOTE" --note "$COND_NOTE"
+            --desc "$HOST_DESC · $COND_LINE" --compiler \
+            --clock-from bench/bench_libtracer_raw.txt \
+            --note "$AA_NOTE" --note "$COND_NOTE"
         env:
           HOST_DESC: ${{ steps.host.outputs.desc }}
           AA_NOTE: ${{ steps.bracket.outputs.note }}

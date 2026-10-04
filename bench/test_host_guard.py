@@ -230,6 +230,15 @@ class Stamping(unittest.TestCase):
         ident = hg.compiler_identity()
         self.assertTrue(ident, "compiler identity must never be empty")
 
+    def test_clock_floor_is_read_off_the_transcript(self):
+        """The CLOCK line a bench prints ahead of its rows becomes a stamped fragment (#1804)."""
+        text = "# banner\nCLOCK\t1.000\t21.874\nRESULT\tlibtracer\tfold-b4\t512\t1\t1\t1\t1\t0.0\t3.912\t0\t3.950\n"
+        self.assertEqual(hg.clock_floor(text), "clock 1 ns res · 21.9 ns/sample")
+
+    def test_clock_floor_absent_is_none(self):
+        """A transcript that predates the CLOCK line stamps nothing rather than a guess."""
+        self.assertIsNone(hg.clock_floor("RESULT\tlibtracer\tinproc\t64\t1\t1\t1\t1\t0\t9\t9\t9\n"))
+
     def test_missing_compiler_does_not_raise(self):
         """A toolchain the guard cannot interrogate must not cost the commit its point."""
         self.assertEqual(hg.compiler_identity("definitely-not-a-compiler-xyz"),

@@ -102,7 +102,7 @@ def parse(text: str) -> list[dict]:
         if f[0] == "RESULT":
             rows.append(dict(sys=f[1], mode=f[2], size=int(f[3]), fan=int(f[4]), ep=int(f[5]),
                              pub=float(f[6]), deliv=float(f[7]), mbps=float(f[8]),
-                             p50=int(f[9]), p99=int(f[10]), mean=int(f[11]),
+                             p50=float(f[9]), p99=float(f[10]), mean=float(f[11]),
                              p999=0, lat_max=0, lat_n=0, tail_ok=False))
             keys.append(key)
         elif f[0] == "RESULT_TAIL":

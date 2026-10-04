@@ -1812,6 +1812,31 @@ cost it exists to show was invisible. The batch form resolves them (~1 / 2 / 4 /
 The old series were ended rather than continued, because the number means something
 different now.
 
+#### Batch rows: picosecond figures, a 20 µs window floor, and the clock floor (#1804)
+
+Every batch row — `fold-b*`, the `-batch` twins, `path-parse`, `compact-*` and `fwd-demux-*` —
+times through one loop, `bench::time_batches` in `bench_common.hpp`:
+
+- the batch is sized by **window** (`calibrate_batch_for_window`, aimed at 40 µs), never by
+  the plateau rule, and **every** timed window is asserted to be at least 20 µs — a shorter
+  one aborts the run, because the clock is then back in the figure (or the compiler deleted
+  the work);
+- each sample is `window / batch` kept as a `double` in **picoseconds**, never integer-divided,
+  and the RESULT row prints p50 and mean in ns with three decimals. The integer division it
+  replaces stepped a 3–20 ns row in whole nanoseconds, a 5–30 % grain;
+- the p99 column is 0: a percentile of batch means measures interference between batches, not
+  the tail of one operation.
+
+The `lkv-*` rows time their whole loop as one block, so they have exactly one measurement:
+**throughput** (also charted as ns/delivery). Their p50 and mean columns read 0; they used to
+repeat `1e9 / ops` truncated to whole ns, which the gate counted as three legs agreeing.
+
+Each run also prints its **clock floor** ahead of its rows: `CLOCK <res_ns> <sample_ns>`, the
+clock's `clock_getres` resolution and the measured cost of the pair of clock reads one timed
+sample pays. Every RESULT parser skips the line; `perf_gate.py` prints it under its verdict, and
+on bench-local `host_guard.py stamp --clock-from` writes it into every point's host descriptor,
+which the Performance page shows in each point's tooltip.
+
 - **Throughput** — back-to-back publishes; `deliveries / elapsed`, where the deliveries
   are **counted at the subscriber on both sides**, never inferred from `publishes x
   fan-out`. Each engine's timed window therefore ends only once every delivery it owes has

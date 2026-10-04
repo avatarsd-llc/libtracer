@@ -322,7 +322,10 @@ Details that make these trustworthy:
   segment's header and payload in one block made the 64 B heap rows ~30% faster and the
   1 KiB ones ~2x slower, because a 1072 B request misses glibc's 1032 B per-thread cache,
   and with only the 64 B row gated the release went out green. Note the name: `lkv-store-*` measures the **copy-store
-  allocation**, not the last-known-value slot.
+  allocation**, not the last-known-value slot. Each `lkv-*` row times its whole loop as
+  one block, so it carries one metric, its **throughput**; its latency columns read 0
+  ([#1804](https://github.com/avatarsd-llc/libtracer/issues/1804)) instead of repeating
+  that same figure as a p50 and a mean.
 
   Beside those rows sits the ADR-0060 **pool check**, and it is not a speed ratio. The
   pool's acceptance has one goal: it never takes an allocation from the system heap
@@ -897,7 +900,12 @@ it has to price the move on the bench before the pin is allowed to move with it.
   picks the batch by comparing two timed quantities therefore lets the machine choose
   the answer, discretely — `bench_common.hpp`'s `calibrate_batch_for_window` doubles
   until the *window* reaches 20 µs instead, so the batch follows the operation's own
-  cost and repeats across executions.
+  cost and repeats across executions. Every batch row now times through one loop
+  (`time_batches`, [#1804](https://github.com/avatarsd-llc/libtracer/issues/1804)): every
+  window is **asserted** to be at least 20 µs, each per-op figure is kept in picoseconds
+  rather than integer-divided to whole nanoseconds, and no batch row publishes a p99. Each
+  run records the host's **clock floor** — the clock's resolution and the measured cost of
+  one timed sample — and the bench-local store carries it in every point's tooltip.
 
 **The A/B protocol — what a two-arm comparison may and may not vary.** An A/B of a code change runs two binaries and attributes the difference to the change.
 That attribution is only sound if **nothing else** differed. Two things that look

@@ -32,9 +32,9 @@ instruments, in the order the workflow uses them:
     property — `compact-forward` 1.8%, `fwd-demux-fixed` ~0%, `fold-b4` ~15% across
     placements of identical source — so a pair drawn from two builds cannot separate
     a busy neighbour from a relinked function.)
-  * `stamp` — write the host descriptor, the COMPILER IDENTITY and any contamination
-    verdict onto every emitted point, so the store records the conditions a number
-    was taken under and not just the number.
+  * `stamp` — write the host descriptor, the COMPILER IDENTITY, the CLOCK FLOOR (#1804)
+    and any contamination verdict onto every emitted point, so the store records the
+    conditions a number was taken under and not just the number.
 
 Two rules run through all of it. A busy host SKIPS its sample and never fails the
 job: refusing to measure is a correct outcome, and a red job trains the reader to
@@ -47,7 +47,8 @@ Stdlib only, like every other bench tool here.
 
     python3 bench/host_guard.py wait     --max-load-per-cpu 0.25 --timeout 600
     python3 bench/host_guard.py bracket  --pre pre.txt --post post.txt --band 6
-    python3 bench/host_guard.py stamp    --json a.json --json b.json --desc "..."
+    python3 bench/host_guard.py stamp    --json a.json --json b.json --desc "..." \
+                                         --compiler --clock-from bench_libtracer_raw.txt
     python3 bench/host_guard.py check    --data data.js          # audit the store
 """
 from __future__ import annotations
@@ -311,10 +312,33 @@ def _cmd_bracket(args: argparse.Namespace) -> int:
     return 0  # a flagged sample is recorded, not failed
 
 
+def clock_floor(text: str) -> str | None:
+    """@brief The clock floor a bench transcript recorded, as a stamped one-liner (#1804).
+
+    Every gated bench prints `CLOCK <res_ns> <sample_ns>` ahead of its rows: the clock's
+    resolution (`clock_getres`) and the measured cost of the pair of clock reads one timed
+    sample pays. Returns e.g. `clock 1 ns res · 21.9 ns/sample`, or None when the transcript
+    predates the line.
+    """
+    for line in text.splitlines():
+        f = line.split("\t")
+        if len(f) == 3 and f[0] == "CLOCK":
+            try:
+                res, sample = float(f[1]), float(f[2])
+            except ValueError:
+                continue
+            return f"clock {res:g} ns res · {sample:.1f} ns/sample"
+    return None
+
+
 def _cmd_stamp(args: argparse.Namespace) -> int:
     desc = args.desc
     if args.compiler:
         desc += SEP + compiler_identity(args.cxx)
+    if args.clock_from:
+        path = pathlib.Path(args.clock_from)
+        floor = clock_floor(path.read_text()) if path.exists() else None
+        desc += SEP + (floor or "clock floor not recorded")
     # Several verdicts can flag one sample (the A/A bracket, and since #1676 the
     # measurement-conditions ledger); each non-empty one is stamped, in order.
     for note in args.note or []:
@@ -367,6 +391,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--cxx", default=None)
     s.add_argument("--compiler", action="store_true",
                    help="append the compiler identity to the descriptor")
+    s.add_argument("--clock-from", default=None,
+                   help="a bench transcript whose CLOCK line is appended (#1804)")
     s.set_defaults(fn=_cmd_stamp)
 
     c = sub.add_parser("check", help="audit a stored data.js for flagged samples")

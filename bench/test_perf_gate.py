@@ -445,6 +445,55 @@ class HeapLkvGatedAt1KiB(unittest.TestCase):
         self.assertFalse(lat([29, 28, 29, 28], [27, 27, 27, 27])["fail"])
 
 
+class PicosecondBatchRows(unittest.TestCase):
+    """@brief Batch rows reach the gate to the picosecond, and a 0 is "not measured" (#1804).
+
+    A batch row prints p50 and mean with three decimals; reading them with int() would
+    re-quantize the very figures the change exists to keep. A bulk-only row (`lkv-*`) now
+    publishes 0 latency, which must skip that leg, never divide by it or fail on it."""
+
+    TRANSCRIPT = ("CLOCK\t1.000\t21.874\n"
+                  "RESULT\tlibtracer\tfold-b4\t512\t1\t1\t250000000\t250000000\t0.0"
+                  "\t3.912\t0\t3.950\n"
+                  "RESULT\tlibtracer\tlkv-store-heap\t64\t1\t1\t40000000\t40000000"
+                  "\t2560.0\t0\t0\t0\n")
+
+    def rows(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = pathlib.Path(d) / "bench_libtracer"
+            p.write_text("")
+            with unittest.mock.patch.object(pg, "timed", lambda *a, **k: self.TRANSCRIPT), \
+                    unittest.mock.patch.object(pg, "CLOCK_FLOORS", []):
+                rows = pg.run_bench_once(p)
+                floors = list(pg.CLOCK_FLOORS)
+        return rows, floors
+
+    def test_fractional_ns_survive_the_parse(self):
+        rows, _ = self.rows()
+        v = pg.metric(rows, "fold-b4", 512, 1, 1)
+        self.assertEqual((v["p50_ns"], v["mean_ns"]), (3.912, 3.950))
+
+    def test_clock_line_is_recorded_not_a_row(self):
+        rows, floors = self.rows()
+        self.assertEqual(floors, [(1.0, 21.874)])
+        self.assertEqual(len(rows), 2)
+
+    def test_a_zero_latency_leg_is_skipped_not_judged(self):
+        key = "lkv-store-heap/64/1/1"
+        sample = {"p50_ns": 0.0, "mean_ns": 0.0, "deliv_s": 4.0e7}
+        slow = {"p50_ns": 0.0, "mean_ns": 0.0, "deliv_s": 2.0e7}  # -50% throughput
+        fake = {"cand": {key: [dict(slow) for _ in range(4)]},
+                "base": {key: [dict(sample) for _ in range(4)]}}
+        out = io.StringIO()
+        with unittest.mock.patch.object(pg, "paired_samples", lambda *a: fake), \
+                contextlib.redirect_stdout(out):
+            fails = pg.gate_paired({}, {}, 4)
+        self.assertEqual(len(fails), 1)
+        self.assertIn("deliv/s", fails[0])  # the one leg the row has still gates
+        self.assertNotIn("p50 ", out.getvalue().split(key)[1].split("run drift")[0])
+        self.assertNotIn("inf", out.getvalue())
+
+
 def lkv_out(heap64, pool64, heap1k=None, pool1k=None):
     """@brief A doctored `bench_libtracer lkv` stdout: the two lkv-alloc rows per size."""
     def row(mode, size, ops):
