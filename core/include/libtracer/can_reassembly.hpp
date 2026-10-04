@@ -54,8 +54,8 @@ namespace tr::net {
 /**
  * @brief A 16-byte node/peer identity — mirrors the ROUTER `origin_peer_id`.
  *
- * Held as raw bytes (not `tr::net::peer_id_t`) so the reassembly buffer stays a
- * self-contained framing primitive; `transport_can` fills it from the CAN id.
+ * Held as raw bytes so the reassembly buffer stays a self-contained framing
+ * primitive; `transport_can` fills it from the CAN id.
  */
 using can_origin_id_t = std::array<std::uint8_t, 16>;
 

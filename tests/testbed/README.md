@@ -158,10 +158,10 @@ ADR-0044 pt 2, by design, at any layer, on any node. So the whole-network graph 
 client-side projection and dedup is the client's job, keyed by the identity facet. That is
 the architecture working as intended; it does not belong in a register of gaps.
 
-> One phantom outlives #406: `reference/07` describes a 128-bit `peer_id_t` with generation
-> rules, while `transport.hpp:peer_id_t` declares `using peer_id_t = std::array<std::byte, 16>`
-> with no generation rules. #406 closed without reconciling it, and it is covered by neither
-> #599 nor #586 — tracked in [#606].
+> One phantom outlived #406: a 16-byte `peer_id_t` alias in `transport.hpp` with no
+> generation rules and no users. #406 closed without reconciling it (tracked in [#606]); the
+> alias was removed as dead surface in
+> [#1721](https://github.com/avatarsd-llc/libtracer/issues/1721).
 
 ### 2. Teardown and link lifecycle — #407 / #66 (narrowed)
 

@@ -46,6 +46,15 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `tr::wire::config_reader_t`; `tr::net::sink_slot_t<Fn>` → `tr::sink_slot_t<Fn>`. Code inside
   `namespace tr::graph` that named the view types unqualified must now qualify them as `view::`
   or add a using-declaration in its own `.cpp`.
+- **`tr::net::peer_id_t` and `child_registry_t::by_segment` are removed
+  ([#1721](https://github.com/avatarsd-llc/libtracer/issues/1721)).** Both were dead surface:
+  nothing in the core, bindings, integrations, examples or benches used them. `peer_id_t` was a
+  16-byte alias with no generation rule and no v1 frame that carries it (ROUTER `0x0D` is
+  reserved). `by_segment` only forwarded to `by_name`. Tests now cover `tr::wire::err_severity`
+  (a new `error_registry` suite pins every registry row) and `tr::wire::emit_batch_offsets`.
+  **Migration:** for `peer_id_t`, declare your own `std::array<std::byte, 16>`, or use the
+  `:identity` facet for node identity. For `by_segment(seg)`, call
+  `by_name(tr::detail::as_string_view(seg))`.
 - **The config member `reader_guard_t` is renamed `guard_t`, and a fragment that still defines
   the old name no longer compiles
   ([#1703](https://github.com/avatarsd-llc/libtracer/issues/1703)).** The guard serializes
