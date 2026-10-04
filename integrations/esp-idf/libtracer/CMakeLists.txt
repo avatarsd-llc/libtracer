@@ -258,7 +258,7 @@ endif()
 # as plain C++ (ADR-0068 §Erratum 1). The DEFAULTS are not spelled here at all: they are C++
 # literals in the checked-in core/include/libtracer/config.hpp, which discovers this fragment
 # with __has_include and uses the `tr::graph::config_t` it binds. The fragment INHERITS
-# `tr::graph::default_config_t` and states only the seven knobs an ESP target changes, so a knob
+# `tr::graph::default_config_t` and states only the knobs an ESP target changes, so a knob
 # added to config.hpp later reaches this build at its new default — which is why no drift gate
 # has to hold the two files in step.
 # The generated directory is listed BEFORE core/include in INCLUDE_DIRS below, so the fragment
@@ -335,6 +335,19 @@ else()
     using lkv_slot_t = single_writer_slot_t;
 ")
 endif()
+# Inline fan-out width (#1708) — DERIVED from the target, like the two facts above. Every
+# publish reserves `kInlineFanout * sizeof(edge_view_t)` bytes of the publishing task's stack
+# for its subscriber snapshot (28 B a view on rv32), whatever the vertex's fan-out. A chip node's
+# vertices carry one or two subscribers, so 2 keeps every such publish off the allocator and
+# gives the other six slots back: graph_t::fan_out's frame measures 304 B at 8 and 128 B at 2
+# (rv32 -Os, GCC 15.2, -fstack-usage) on every publishing task; a wider fan-out
+# still delivers to every subscriber through the overflow vector. The `linux` host target keeps
+# core's default (8), as it does the slot.
+if(IDF_TARGET STREQUAL "linux")
+    set(LIBTRACER_INLINE_FANOUT 8)
+else()
+    set(LIBTRACER_INLINE_FANOUT 2)
+endif()
 # The two link modules (#1470, #1670). CONFIG_* is undefined in the early requirement-expansion
 # pass, so each fallback is its Kconfig DEFAULT — `n` for both since v0.17.0 — and the second
 # pass then writes the real value before anything compiles. The TU lists that pair with them
@@ -380,6 +393,7 @@ struct esp_config_t : default_config_t {
     static constexpr std::size_t kVertexLockStripes = ${LIBTRACER_VERTEX_LOCK_STRIPES};
     static constexpr std::size_t kCacheLineBytes = ${LIBTRACER_CACHE_LINE_BYTES};
     static constexpr std::size_t kEdgePinSlots = ${LIBTRACER_EDGE_PIN_SLOTS};
+    static constexpr std::size_t kInlineFanout = ${LIBTRACER_INLINE_FANOUT};
     static constexpr bool kSpinWaitSafe = ${LIBTRACER_SPIN_WAIT_SAFE};
     static constexpr bool kBusLinks = ${LIBTRACER_BUS_LINKS};
     static constexpr bool kSelfHealLinks = ${LIBTRACER_SELF_HEAL_LINKS};

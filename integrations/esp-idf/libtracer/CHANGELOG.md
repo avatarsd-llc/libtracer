@@ -12,6 +12,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- **A chip target's publishes reserve two inline subscriber slots, not eight
+  ([#1708](https://github.com/avatarsd-llc/libtracer/issues/1708)).** The generated config
+  fragment sets `kInlineFanout = 2` on every chip target (the `linux` host target keeps core's
+  8). Each publish reserves its subscriber snapshot on the publishing task's stack, so this
+  returns six views on every publishing frame: `graph_t::fan_out` measures 304 B at 8 and
+  128 B at 2 (rv32 `-Os`, GCC 15.2, `-fstack-usage`). A vertex with more than two subscribers
+  still delivers to all of them, through the overflow vector.
 - **The generated config fragment binds `guard_t`, not `reader_guard_t`
   ([#1703](https://github.com/avatarsd-llc/libtracer/issues/1703)).** Core renamed the config
   member and now refuses a fragment that still defines the old name. On every chip target the
