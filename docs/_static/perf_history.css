@@ -184,3 +184,11 @@ body[data-theme="dark"] .ph-hist, :root[data-theme="dark"] .ph-hist {
 .ph-hist .ph-tip .host { color: var(--ph-muted); font-family: var(--ph-mono); font-size: 9.5px; line-height: 1.35; margin-bottom: 5px; padding-bottom: 4px; border-bottom: 1px solid var(--ph-line); }
 .ph-hist .ph-tip .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
 .ph-hist .ph-tip div b { font-variant-numeric: tabular-nums; font-family: var(--ph-mono); }
+
+/* history picker on the comparison sweeps (#1771): two commit selects and a compare toggle */
+.ph-hist .ph-pick { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 0 0 8px; }
+.ph-hist .ph-pick:empty { display: none; }
+.ph-hist .ph-pick select { max-width: min(340px, 80vw); font-family: var(--ph-mono); font-size: 10.5px; padding: 1px 4px; border-radius: 6px; border: 1px solid var(--ph-line); background: var(--ph-panel); color: var(--ph-ink); }
+.ph-hist .ph-pick select[disabled] { opacity: .45; }
+.ph-hist .ph-cmp { font-family: var(--ph-mono); font-size: 10.5px; color: var(--ph-muted); display: inline-flex; gap: 4px; align-items: center; }
+.ph-hist .ph-legend .sw.dash { height: 0; border-top: 3px dashed; border-radius: 0; background: none; }

@@ -179,5 +179,84 @@ class RowsAboveOneKibAreVisible(_NoGit):
         self.assertEqual(pvs, [float(s) for s in SIZES])
 
 
+def _sweep_store() -> dict:
+    """@brief Three commits of the banked fan and payload sweeps, both engines, both suites.
+
+    The middle commit is stamped contaminated, the way the bench-local host guard stamps a
+    sample measured under load, so a test can tell "picked" from "trusted".
+    """
+    def entry(c: str, k: int, metric: str, extra: str) -> dict:
+        benches = []
+        for eng in ("", "zenoh "):
+            for fan in (1, 8):
+                benches.append({"name": f"{eng}inproc 64B/fan{fan}/1ep {metric}",
+                                "value": 100.0 * fan + k, "extra": extra})
+            for size in (8, 1024):
+                benches.append({"name": f"{eng}inproc {size}B/fan1/1ep {metric}",
+                                "value": 1000.0 + k, "extra": extra})
+        return {"commit": {"id": c * 40, "message": f"commit {c}"}, "benches": benches}
+
+    def suite(metric: str) -> list[dict]:
+        return [entry(c, k, metric, "h · CONTAMINATED (test)" if c == "b" else "h")
+                for k, c in enumerate("abc")]
+    return {"entries": {"bench-local latency": suite("p50 latency"),
+                        "bench-local throughput": suite("throughput")}}
+
+
+class ComparisonHistoryPicker(_NoGit):
+    """@brief The zenoh comparison sweeps carry a history picker over bench-local (#1771)."""
+
+    def setUp(self):
+        super().setUp()
+        rh.release_annotations = lambda entries: [{"i": 0, "label": "v0.16.0", "approx": False}]
+
+    def _hist(self) -> dict:
+        import render_compare as rc
+        return rc.history(_sweep_store())
+
+    def test_picks_carry_commits_and_release_tags(self):
+        picks = self._hist()["picks"]
+        self.assertEqual([p["sha"] for p in picks], ["a" * 7, "b" * 7, "c" * 7])
+        self.assertEqual(picks[0]["rel"], "v0.16.0")
+        self.assertNotIn("rel", picks[2])
+
+    def test_contaminated_pass_is_not_pickable(self):
+        line = self._hist()["charts"]["ltz-lat-fan"]["zenoh"]
+        self.assertEqual(line["xs"], [1, 8])
+        self.assertIsNone(line["v"][1])
+        self.assertEqual(line["v"][2], [102.0, 802.0])
+
+    def test_bandwidth_is_rate_times_size(self):
+        line = self._hist()["charts"]["ltz-mb-size"]["libtracer"]
+        # 64 B is the fan sweep's fan-1 point, which is also a payload-sweep point.
+        self.assertEqual(line["xs"], [8, 64, 1024])
+        self.assertEqual(line["v"][0], [1000.0 * 8 / 1e6, 100.0 * 64 / 1e6, 1000.0 * 1024 / 1e6])
+
+    def test_every_banked_sweep_gets_the_picker(self):
+        import render_compare as rc
+        rows = rc.parse("\n".join(
+            f"RESULT\t{s}\tinproc\t64\t{f}\t1\t1\t1\t1\t1\t1\t1"
+            for s in ("libtracer", "zenoh") for f in (1, 8)))
+        out = rc.build(rows, self._hist())
+        self.assertEqual(len(out["hist"]["picks"]), 3)
+        fan = next(c for c in out["charts"] if c["id"] == "ltz-lat-fan")
+        self.assertEqual([h["key"] for h in fan["hist"]], ["libtracer", "zenoh"])
+        # The banked line keeps the live line's legend text and color.
+        live = {s["key"]: s for s in fan["series"]}
+        self.assertEqual(fan["hist"][1]["label"], live["zenoh"]["label"])
+        self.assertEqual(fan["hist"][1]["ci"], live["zenoh"]["ci"])
+
+    def test_no_store_means_no_picker(self):
+        import render_compare as rc
+        self.assertIsNone(rc.history(None))
+        rows = rc.parse("RESULT\tlibtracer\tinproc\t64\t1\t1\t1\t1\t1\t1\t1\t1")
+        self.assertNotIn("hist", rc.build(rows, None))
+
+    def test_renderer_draws_the_compare_pick_dashed(self):
+        body = JS.read_text()
+        self.assertIn("ph-cmpon", body)
+        self.assertIn('stroke-dasharray="7 5"', body)
+
+
 if __name__ == "__main__":
     unittest.main()

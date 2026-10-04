@@ -27,6 +27,7 @@ as render_compare: path-independent, no CDN, self-contained page). Stdlib only.
 """
 from __future__ import annotations
 
+import functools
 import json
 import pathlib
 import re
@@ -444,7 +445,15 @@ def _release_tags() -> list[tuple[str, str]]:
     return tags
 
 
+@functools.lru_cache(maxsize=None)
 def _is_ancestor(a: str, b: str) -> bool:
+    """@brief Whether commit `a` is an ancestor of `b`, memoized per process.
+
+    Release markers walk every tag against every recorded commit, once per suite and
+    once more for the comparison sweeps' history picker (render_compare.history): about
+    13 s of `git merge-base` per pass over the bench-local store. Ancestry of two fixed
+    shas cannot change within one page build, so every walk after the first is free.
+    """
     try:
         return subprocess.run(["git", "merge-base", "--is-ancestor", a, b],
                               capture_output=True, cwd=REPO, timeout=30).returncode == 0

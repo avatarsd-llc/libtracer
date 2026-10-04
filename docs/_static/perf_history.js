@@ -531,11 +531,16 @@
     c.series.forEach(function (se) {
       if (!se.pts.length) return;
       var line = se.pts.map(function (p) { return X(p[0]).toFixed(1) + "," + Y(p[1]).toFixed(1); }).join(" ");
-      s += '<polyline fill="none" stroke="' + col(se.ci) + '" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round" points="' + line + '"/>';
+      // `dash` marks the second pick of a history-picker compare (#1771): same engine
+      // color, dashed line, hollow points, so the two picks read apart without a legend.
+      s += '<polyline fill="none" stroke="' + col(se.ci) + '" stroke-width="2.2" stroke-linejoin="round" stroke-linecap="round"'
+        + (se.dash ? ' stroke-dasharray="7 5"' : "") + ' points="' + line + '"/>';
       se.pts.forEach(function (p, i) {
-        s += '<circle cx="' + X(p[0]).toFixed(1) + '" cy="' + Y(p[1]).toFixed(1) + '" r="' + (i === se.pts.length - 1 ? 4 : 2.6) + '" fill="' + col(se.ci) + '"/>';
+        s += '<circle cx="' + X(p[0]).toFixed(1) + '" cy="' + Y(p[1]).toFixed(1) + '" r="' + (i === se.pts.length - 1 ? 4 : 2.6) + '" '
+          + (se.dash ? 'fill="none" stroke="' + col(se.ci) + '" stroke-width="1.6"' : 'fill="' + col(se.ci) + '"') + "/>";
       });
       var lp = se.pts[se.pts.length - 1];
+      if (se.dash) return;  // a compare pick's end value is read on hover, not overprinted
       s += '<text x="' + (X(lp[0]) - 6).toFixed(1) + '" y="' + (Y(lp[1]) - 8).toFixed(1) + '" text-anchor="end" class="ph-tick" style="fill:' + col(se.ci) + ';font-weight:700">' + yf(lp[1]) + "</text>";
     });
     s += "</svg>";
@@ -604,7 +609,7 @@
     card.innerHTML = "<h4>" + c.title + "</h4>" + '<div class="ph-tabs"></div>'
       + '<p class="cond">' + c.cond + (src ? ' \u00b7 measured by ' + src : "") + "</p>" + mrow
       + '<p class="ph-metblurb"></p>'
-      + '<div class="ph-range"></div>'
+      + '<div class="ph-range"></div><div class="ph-pick"></div>'
       + '<div class="ph-legend">' + legend + "</div>"
       + '<div class="ph-plot"></div><div class="ph-tip" style="display:none"></div>'
       + (c.reading ? '<p class="ph-reading">' + c.reading + "</p>" : "");
@@ -625,8 +630,81 @@
     // THIS, so a view, a tooltip and a legend can never disagree about which numbers are
     // on screen.
     var A = { c: c, suite: null };
+
+    // History picker (#1771). A comparison sweep that the bench-local store banks carries
+    // its banked lines in `c.hist` and the commit list in `D.hist.picks`, so the card can
+    // redraw the same axes from any recorded pass. `pa` is the pick on screen (-1 = this
+    // build's own pass, the only data the card had before), `pb` the compare pick drawn
+    // dashed over it. It opens on the newest commit any of the card's lines recorded.
+    var H = (param && c.hist && D.hist) ? D.hist.picks : null, live = c.series;
+    var have = H ? H.map(function (_, k) {
+      return c.hist.some(function (h) { return !!h.v[k]; });
+    }) : [];
+    var pa = have.lastIndexOf(true), pb = -1, cmp = false;
+    if (H) {
+      for (var k0 = pa - 1; k0 >= 0 && pb < 0; k0--) if (have[k0] && H[k0].rel) pb = k0;
+      if (pb < 0) pb = have.indexOf(true);
+    }
+    /** @brief A pick's name in the picker, legend and reading: its release tag, then sha. */
+    function pickName(k) { return k < 0 ? "this build" : (H[k].rel ? H[k].rel + " " : "") + H[k].sha; }
+    /** @brief One pick's lines: this build's pass (k < 0) or a banked commit. In compare
+     * mode every label names its pick, since two lines per engine share one color. */
+    function pickLines(k, dash) {
+      var src = k < 0 ? live : c.hist.map(function (h) {
+        var pts = [];
+        if (h.v[k]) h.xs.forEach(function (x, j) { if (h.v[k][j] !== null) pts.push([x, h.v[k][j]]); });
+        return { key: h.key, label: h.label, ci: h.ci, pts: pts };
+      });
+      return src.filter(function (se) { return se.pts.length; }).map(function (se) {
+        return { key: se.key, ci: se.ci, pts: se.pts, dash: dash,
+          label: cmp ? se.label + " @ " + pickName(k) : se.label };
+      });
+    }
+    /** @brief The sweep's endpoints per engine for the picks on screen, in the words of the
+     * build-time reading, which describes this build's pass only. */
+    function pickReading(ch) {
+      var yf = FMT[ch.fmt] || fmtNum, xf = (ch.px && FMT[ch.px.fmt]) || fmtNum;
+      return (cmp ? [pa, pb] : [pa]).map(function (k) {
+        var parts = pickLines(k, false).filter(function (se) {
+          return se.key === "libtracer" || se.key === "zenoh";
+        }).map(function (se) {
+          var a = se.pts[0], b = se.pts[se.pts.length - 1];
+          return "<b>" + (se.key === "zenoh" ? "Zenoh " : "libtracer ") + yf(a[1]) + " → " + yf(b[1])
+            + "</b> (" + xf(a[0]) + " → " + xf(b[0]) + ")";
+        });
+        return "At <code>" + pickName(k) + "</code>: " + (parts.join("; ") || "no value recorded") + ".";
+      }).join(" ");
+    }
+    /** @brief The two pick selects and the compare toggle, built once per card. Release
+     * tags lead in their own group and are marked 🏷 in the full commit list. */
+    function drawPick() {
+      var host = card.querySelector(".ph-pick");
+      if (!H) return;
+      function opts(sel) {
+        var ks = [];
+        for (var k = H.length - 1; k >= 0; k--) if (have[k]) ks.push(k);
+        function o(k, mark) {
+          return '<option value="' + k + '"' + (mark && k === sel ? " selected" : "") + ">"
+            + (k >= 0 && H[k].rel ? "🏷 " : "") + pickName(k) + (k >= 0 && H[k].msg ? " · " + H[k].msg : "") + "</option>";
+        }
+        var rel = ks.filter(function (k) { return H[k].rel; });
+        return '<option value="-1"' + (sel < 0 ? " selected" : "") + ">this build (the pass above)</option>"
+          + (rel.length ? '<optgroup label="releases">' + rel.map(function (k) { return o(k, false); }).join("") + "</optgroup>" : "")
+          + '<optgroup label="bench-local commits, newest first">' + ks.map(function (k) { return o(k, true); }).join("") + "</optgroup>";
+      }
+      host.innerHTML = '<span class="ph-rlab">point</span><select class="ph-pa" aria-label="banked commit">' + opts(pa) + "</select>"
+        + '<label class="ph-cmp"><input type="checkbox" class="ph-cmpon"> compare</label>'
+        + '<select class="ph-pb" aria-label="commit to compare against" disabled>' + opts(pb) + "</select>";
+      var sa = host.querySelector(".ph-pa"), sb = host.querySelector(".ph-pb"), on = host.querySelector(".ph-cmpon");
+      sa.addEventListener("change", function () { pa = +sa.value; rebind(); show(view); });
+      sb.addEventListener("change", function () { pb = +sb.value; rebind(); show(view); });
+      on.addEventListener("change", function () { cmp = on.checked; sb.disabled = !cmp; rebind(); show(view); });
+    }
+    drawPick();
+
     function derive() {
       var base = (ratioOn && c.ratio) ? (ratioChart(c) || c) : c;
+      if (H) base = Object.assign({}, c, { series: pickLines(pa, false).concat(cmp ? pickLines(pb, true) : []) });
       var full = param ? null : D.suites[base.suite];
       if (!full) return { c: base, suite: null, full: null };
       if (r1 < 0 || r1 > full.shas.length - 1) r1 = full.shas.length - 1;
@@ -720,8 +798,11 @@
       // collapsed into one quotient line, and a legend still naming both arms would
       // describe a chart that is not there.
       card.querySelector(".ph-legend").innerHTML = A.c.series.map(function (se) {
-        return '<span class="item"><span class="sw" style="background:' + col(se.ci) + '"></span>' + se.label + "</span>";
+        return '<span class="item"><span class="sw' + (se.dash ? " dash" : "") + '" style="'
+          + (se.dash ? "border-color:" : "background:") + col(se.ci) + '"></span>' + se.label + "</span>";
       }).join("");
+      var rd = card.querySelector(".ph-reading");
+      if (H && rd) rd.innerHTML = (pa < 0 && !cmp) ? c.reading : pickReading(A.c);
       drawRange(A.full);
       byIdx = A.c.series.map(lookup);
       blurb.textContent = ratioOn && c.ratio
