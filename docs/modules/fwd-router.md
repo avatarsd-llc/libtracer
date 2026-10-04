@@ -362,9 +362,12 @@ reports `UP` or `LISTENING` at creation (`core/src/transport_vertex.cpp:transpor
 module mints it, a `SPEC{name, config}` written there creates `/net/<module>/<name>` and a
 `NAME{<name>}` removes it, with transport and role positional. `conn` is hidden from
 `/net/<module>:children[]` (S4) while staying addressable for the creatability probe, and the old
-catalog is **gone** (S7 — see above), so there is one door rather than two. What is **not**
-implemented is a module-declared `conn:schema` catalog (S3's module-side half; the read answers
-the empty `SETTINGS` envelope) — the `CREATE`/`WRITE` gating split (S2c) is in; the link-liveness engine (S5, `self_heal_link_t`) runs for
+catalog is **gone** (S7 — see above), so there is one door rather than two. A module may
+declare its `conn:schema` catalog at `register_module` (S3's module-side half,
+[#1815](https://github.com/avatarsd-llc/libtracer/issues/1815)): the endpoint serves it inside the
+Amendment 3 `SETTINGS` and refuses a non-conforming `SPEC` `TYPE_MISMATCH`, while a module that
+declares none answers the empty `SETTINGS` envelope. The `CREATE`/`WRITE` gating split (S2c) is
+in; the link-liveness engine (S5, `self_heal_link_t`) runs for
 kinds registered `self_heal_dial`, which since
 [#1548](https://github.com/avatarsd-llc/libtracer/issues/1548) includes the built-in
 point-to-point DIAL kinds. One further

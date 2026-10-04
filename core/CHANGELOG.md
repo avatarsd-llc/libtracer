@@ -79,6 +79,30 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `tr::graph::guard_t`; drop a forward declaration of the guard types, or move it to
   `namespace tr`; mark a custom pool policy's `lock()` / `unlock()` `noexcept`.
 
+### Added
+
+- **A transport module can declare its `conn:schema` creation catalog, and its creator endpoint
+  validates a `SPEC` against it ([#1815](https://github.com/avatarsd-llc/libtracer/issues/1815),
+  RFC-0014 §2 / Amendment 3).** `transport_vertex_t::register_module` takes an optional fourth
+  argument, a `tr::net::conn_catalog_t`: a borrowed `static constexpr` table of
+  `tr::net::conn_key_t{name, dtype, required, descriptor}`, with `tr::net::conn_dtype_t`
+  (`UTF8`, `BOOL`, `U8`, `U16`, `U32`) naming the value shapes the shared config walk reads.
+  `read <net_root>/<module>/conn:schema` then answers the catalog inside Amendment 3's envelope,
+  `POINT{NAME "conn", SETTINGS{…}}`, one RFC-0013 §B per-key record per key
+  (`NAME <key> SETTINGS{NAME "dtype" NAME <tag>, [NAME "required" VALUE 01], <descriptor>}`).
+  A `SPEC` whose config omits a `required` key, or carries a catalogued key in another type or
+  width, is refused `TYPE_MISMATCH` at the write, before any factory runs or socket is built.
+  The spec names this code: RFC-0014 §2 maps a *malformed* config to
+  `ERROR{tr::schema::type_mismatch}` (`0x0030`). `SCHEMA_NOT_FOUND` stays reserved for an
+  unknown config type (an unregistered kind).
+  Uncatalogued keys stay ignored. A module that declares nothing is unchanged: the empty
+  `SETTINGS`, no validation. The catalog is fixed per endpoint, so a later `register_module`
+  under the same module that names a different table answers `PATH_IN_USE`. Kind-private keys
+  are described here, never on `conn_settings_t` (ADR-0043 §5). Alongside it,
+  `graph_t::register_vertex_key` takes an optional trailing `schema_catalog` byte span, which is
+  copied beside the payload-right rows and served as the vertex's `:schema` `SETTINGS` content.
+  Both new parameters default to empty, so existing callers are source-compatible.
+
 ### Changed
 
 - **`graph_t::default_ring_source()` is documented as the injected source itself
