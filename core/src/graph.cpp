@@ -1936,7 +1936,7 @@ result_t<value_ref_t> graph_t::read(vertex_handle_t vh, std::string_view caller)
     // bumps, not K allocations. The admission filter, the ring admission and the handler
     // reaction all still run, inside the adopting `store_value`, on the shared block.
     vertex_t::store_drops_t store_drops;
-    if (const auto stored = store_value(target, value, store_drops, e.caller()); !stored) {
+    if (const auto stored = store_value(target, value, store_drops, e.caller(), nullptr); !stored) {
         // The cause is now read off the status rather than assumed. Every refusal this leg
         // could see used to be a resource one (`BACKPRESSURE` — a declined slot publish, a
         // declined ring admission, or the rope arm's clone or block), so counting it as
@@ -2093,9 +2093,10 @@ void graph_t::fan_out(vertex_t* v, const value_t& value) {
 
 result_t<value_ref_t> graph_t::store_value(vertex_t* v, view::rope_t&& value,
                                            vertex_t::store_drops_t& drops, std::string_view caller,
+                                           const net::link_kind_t* link,
                                            vertex_t::ring_take_t* take) {
     drops = vertex_t::store_drops_t{};
-    if (v->role() == role_t::HANDLER) return handler_write_rope(v, std::move(value), caller);
+    if (v->role() == role_t::HANDLER) return handler_write_rope(v, std::move(value), caller, link);
     // ADMISSION (the retaining roles' pre-store seam). It sits HERE — inside the one function
     // every store goes through, and above the tail every storing role shares — because that is
     // the only placement under which the filter cannot be bypassed: `write`, `assign`, a
@@ -2126,7 +2127,7 @@ result_t<value_ref_t> graph_t::store_value(vertex_t* v, view::rope_t&& value,
     // admitted write still costs exactly one block, and only a refusal pays for one it frees.
     value_ref_t block = value_ref_t::adopt(value_t::make(std::move(value), *ctl_));
     if (block && v->has_admission()) {
-        admission_t decided = admit(v, *block, caller);
+        admission_t decided = admit(v, *block, caller, link);
         if (!decided) return std::unexpected(decided.error());
         // Engaged ⇒ store the NORMALISED rope instead. The writer's block dies here, which is
         // the point: nothing downstream can reach the spelling the filter rejected.
@@ -2136,21 +2137,23 @@ result_t<value_ref_t> graph_t::store_value(vertex_t* v, view::rope_t&& value,
 }
 
 [[gnu::noinline]] result_t<value_ref_t> graph_t::handler_write(vertex_t* v, const value_t& value,
-                                                               std::string_view caller) {
+                                                               std::string_view caller,
+                                                               const net::link_kind_t* link) {
     const value_handlers_t& h = v->handlers();  // load once — a retire may swap it out
     if (!h.on_write) return std::unexpected(status_t::NOT_FOUND);
     // The subject is NOT re-derived here (#375): `caller` is the identical value the
     // WRITE gate one stack frame up passed to `acl_allows`, so the handler and the ACL
     // that admitted the write cannot disagree about who wrote. The ctx is a borrowed
     // view built on the stack — no allocation, nothing stored on the vertex.
-    const write_ctx_t ctx{.subject = caller};
+    const write_ctx_t ctx{.subject = caller, .link = link};
     if (result_t<void> r = h.on_write(value, ctx); !r) return std::unexpected(r.error());
     v->note_write();
     return value_ref_t{};  // handler consumed it — nothing stored
 }
 
 [[gnu::noinline]] result_t<void> graph_t::handler_write_deliver(vertex_t* v, view::rope_t&& value,
-                                                                std::string_view caller) {
+                                                                std::string_view caller,
+                                                                const net::link_kind_t* link) {
     // A handler stores no LKV (the user handler consumes the value), so there is no
     // published pointer to deliver from — the hot roles deliver the exact pointer
     // store_value hands back. There is no CLONE either, and that is #1505: the ONE value the
@@ -2175,7 +2178,7 @@ result_t<value_ref_t> graph_t::store_value(vertex_t* v, view::rope_t&& value,
     // and on dispatch_edge_target's declined store (at width 1), so the reason code stays live
     // and `1 never stands in for N` still holds everywhere it can still be raised.
     const auto run = [&](const value_t& val) -> result_t<void> {
-        const result_t<value_ref_t> stored = handler_write(v, val, caller);
+        const result_t<value_ref_t> stored = handler_write(v, val, caller, link);
         if (!stored) return std::unexpected(stored.error());
         deliver_vertex(v, val);
         // Eager delivery flushes any pending mark a prior assign left — but only while
@@ -2195,30 +2198,31 @@ result_t<value_ref_t> graph_t::store_value(vertex_t* v, view::rope_t&& value,
 
 [[gnu::noinline]] result_t<value_ref_t> graph_t::handler_write_rope(vertex_t* v,
                                                                     view::rope_t&& value,
-                                                                    std::string_view caller) {
+                                                                    std::string_view caller,
+                                                                    const net::link_kind_t* link) {
     // The handler reads a `value_t` (RFC-0028 D10). A local write owns its rope, so the links
     // MOVE into storage on this frame — no block, no refcount traffic — exactly the relay's
     // shape; a chain past the inline bound takes one block from the graph's source instead.
     // Out of line so the 200-odd bytes of storage stay off `store_value`'s own frame.
     if (value.link_count() <= kUnstoredInline) {
         const value_storage_t<kUnstoredInline> sv{std::move(value)};
-        return handler_write(v, sv.get(), caller);
+        return handler_write(v, sv.get(), caller, link);
     }
     const value_ref_t block = value_ref_t::adopt(value_t::make(std::move(value), *ctl_));
     if (!block) return std::unexpected(status_t::BACKPRESSURE);
-    return handler_write(v, *block, caller);
+    return handler_write(v, *block, caller, link);
 }
 
 result_t<value_ref_t> graph_t::store_value(vertex_t* v, const value_t& value,
-                                           vertex_t::store_drops_t& drops,
-                                           std::string_view caller) {
+                                           vertex_t::store_drops_t& drops, std::string_view caller,
+                                           const net::link_kind_t* link) {
     // A HANDLER stores nothing and reads the value by reference (RFC-0028 D10): it is handed
     // the delivered block itself — no clone of its links, no block of its own — exactly as a
     // stored target adopts it below. What it keeps past the call it keeps through
     // `value_ref_t::keep`, which is also what makes caller-owned storage safe to hand it.
     if (v->role() == role_t::HANDLER) {
         drops = vertex_t::store_drops_t{};
-        return handler_write(v, value, caller);
+        return handler_write(v, value, caller, link);
     }
     // A value with no source is CALLER-OWNED storage (`value_storage_t`, the slice a branch
     // write delivers without storing): a reference kept past the call would outlive the frame
@@ -2231,7 +2235,7 @@ result_t<value_ref_t> graph_t::store_value(vertex_t* v, const value_t& value,
             drops = vertex_t::store_drops_t{};
             return std::unexpected(status_t::BACKPRESSURE);
         }
-        return store_value(v, std::move(clone), drops, caller);
+        return store_value(v, std::move(clone), drops, caller, link);
     }
     drops = vertex_t::store_drops_t{};
     // The admission filter still runs, on the SHARED block itself — no clone of its links —
@@ -2239,7 +2243,7 @@ result_t<value_ref_t> graph_t::store_value(vertex_t* v, const value_t& value,
     // unchanged costs the adoption nothing more. Same seam, same `caller`, same placement above
     // the storing tail as the rope arm — admission is a property of the vertex, not of a door.
     if (v->has_admission()) {
-        admission_t decided = admit(v, value, caller);
+        admission_t decided = admit(v, value, caller, link);
         if (!decided) return std::unexpected(decided.error());
         if (*decided)
             return publish_value(v, value_ref_t::adopt(value_t::make(std::move(**decided), *ctl_)),
@@ -2251,12 +2255,14 @@ result_t<value_ref_t> graph_t::store_value(vertex_t* v, const value_t& value,
     return publish_value(v, value_ref_t::share(&value), drops);
 }
 
-admission_t graph_t::admit(vertex_t* v, const value_t& value, std::string_view caller) const {
+admission_t graph_t::admit(vertex_t* v, const value_t& value, std::string_view caller,
+                           const net::link_kind_t* link) const {
     const admission_node_t* a = admission_for(v);
     if (a == nullptr || !a->on_admit) return std::optional<view::rope_t>{};
     // Same `caller` the ACL gate one frame up ran on (#375): the filter and the gate that
-    // admitted the write cannot disagree about who wrote.
-    const write_ctx_t ctx{.subject = caller};
+    // admitted the write cannot disagree about who wrote. `link` is the arrival link's catalog
+    // identity (#1650) — a pointer the router resolved once per link, never looked up here.
+    const write_ctx_t ctx{.subject = caller, .link = link};
     return a->on_admit(value, ctx);
 }
 
@@ -2377,7 +2383,8 @@ namespace {
 }
 }  // namespace
 
-result_t<void> graph_t::write_impl(vertex_t* v, view::rope_t value, std::string_view caller) {
+result_t<void> graph_t::write_impl(vertex_t* v, view::rope_t value, std::string_view caller,
+                                   const net::link_kind_t* link) {
     // The ONE WRITE gate of the value-write path, so counting the refusal here counts it for
     // every plane that enters through it: an API write, a FWD{WRITE} terminus, and both the
     // warm and cold COMPACT terminus arms (#1068). The router discards this status — it has
@@ -2418,19 +2425,19 @@ result_t<void> graph_t::write_impl(vertex_t* v, view::rope_t value, std::string_
     // retiring occupant and the storage decision of the placeholder. A single snapshot makes
     // the frame internally consistent whichever of the two it caught.
     const role_t role = v->role();
-    if (is_branch_point(value, role)) return write_branch(v, value, caller, /*notify=*/true);
-    if (role == role_t::HANDLER) return handler_write_deliver(v, std::move(value), caller);
+    if (is_branch_point(value, role)) return write_branch(v, value, caller, link, /*notify=*/true);
+    if (role == role_t::HANDLER) return handler_write_deliver(v, std::move(value), caller, link);
     // RETENTION NONE (RFC-0028 §5.4): the pure relay. Nothing is kept, so nothing needs a
     // block of its own — the value is delivered from the stack exactly as the HANDLER arm above
     // delivers it, and a vertex whose subscribers are all callbacks draws ZERO blocks per
     // write. A target subscriber still gets a block of its own (it retains; the source did
     // not mint one to share). One relaxed test of the flag byte the admission check reads.
-    if (v->retains_none()) return relay_write(v, std::move(value), caller);
+    if (v->retains_none()) return relay_write(v, std::move(value), caller, link);
     vertex_t::store_drops_t store_drops;
     // The STREAM arm's drain buffer, filled by the ring admission itself (#1713): stack-first,
     // so the common write — whose window is its own entry — allocates nothing for it.
     vertex_t::ring_take_t taken;
-    const result_t<value_ref_t> stored = store_value(v, std::move(value), store_drops, caller,
+    const result_t<value_ref_t> stored = store_value(v, std::move(value), store_drops, caller, link,
                                                      role == role_t::STREAM ? &taken : nullptr);
     if (!stored) return std::unexpected(stored.error());
     if (role == role_t::STREAM) {
@@ -2473,7 +2480,8 @@ result_t<void> graph_t::write_impl(vertex_t* v, view::rope_t value, std::string_
  * allocated for it. The admission filter still runs — it is a property of the vertex, not of
  * whether the vertex keeps what it admits — and a normalised value is the one delivered.
  */
-result_t<void> graph_t::relay_write(vertex_t* v, view::rope_t value, std::string_view caller) {
+result_t<void> graph_t::relay_write(vertex_t* v, view::rope_t value, std::string_view caller,
+                                    const net::link_kind_t* link) {
     if (v->has_admission()) {
         // The filter reads a `value_t` (RFC-0028 D10): show it the writer's links on this frame
         // (a refcount clone per link, as the relay's own delivery below takes), or — past the
@@ -2481,11 +2489,11 @@ result_t<void> graph_t::relay_write(vertex_t* v, view::rope_t value, std::string
         admission_t decided = [&]() -> admission_t {
             if (value.link_count() <= kUnstoredInline) {
                 const value_storage_t<kUnstoredInline> sv{value};
-                return admit(v, sv.get(), caller);
+                return admit(v, sv.get(), caller, link);
             }
             const value_ref_t block = value_ref_t::adopt(value_t::make(value.links(), *ctl_));
             if (!block) return std::unexpected(status_t::BACKPRESSURE);
-            return admit(v, *block, caller);
+            return admit(v, *block, caller, link);
         }();
         if (!decided) return std::unexpected(decided.error());
         if (*decided) value = std::move(**decided);
@@ -2529,9 +2537,12 @@ result_t<void> graph_t::assign(vertex_handle_t vh, view::rope_t value, std::stri
     // The STATE half only (RFC-0008 §A): swap the last-known-value / append the stream
     // ring / bump the write sequence (waking await), then mark v for the next covering
     // sweep. A branch POINT assigns each descendant the same way. Sends nothing.
-    if (is_branch_point(value, role)) return write_branch(v, value, caller, /*notify=*/false);
+    // An `assign` is an API call — no link carried it, so its admission sees a null link.
+    if (is_branch_point(value, role))
+        return write_branch(v, value, caller, nullptr, /*notify=*/false);
     vertex_t::store_drops_t store_drops;
-    const result_t<value_ref_t> stored = store_value(v, std::move(value), store_drops, caller);
+    const result_t<value_ref_t> stored =
+        store_value(v, std::move(value), store_drops, caller, nullptr);
     if (!stored) return std::unexpected(stored.error());
     // A shed ring append here loses the delivery the NEXT covering sweep would have drained
     // — deferred, not eager, but lost all the same, and the sweep has no way to know an
@@ -2542,7 +2553,8 @@ result_t<void> graph_t::assign(vertex_handle_t vh, view::rope_t value, std::stri
 }
 
 result_t<void> graph_t::write_branch(vertex_t* v, const view::rope_t& value,
-                                     std::string_view caller, bool notify) {
+                                     std::string_view caller, const net::link_kind_t* link,
+                                     bool notify) {
     // A decomposable POINT is contiguous, so decode reads the materialized head:
     // single-link (the ④a case — ingress values are single-link until ④b), that is
     // the sole link with zero copy; a multi-link POINT pays one flatten here (the
@@ -2653,7 +2665,8 @@ result_t<void> graph_t::write_branch(vertex_t* v, const view::rope_t& value,
     // §atomicity non-promise; each leaf is its own consistent refcounted snapshot).
     for (site_t& site : sites) {
         vertex_t::store_drops_t store_drops;
-        if (result_t<value_ref_t> r = store_value(site.vx, site.node->store, store_drops, caller)) {
+        if (result_t<value_ref_t> r =
+                store_value(site.vx, site.node->store, store_drops, caller, link)) {
             site.stored = std::move(*r);
         } else {
             // A landing site's own admission filter may refuse its slice, and per the
@@ -3010,14 +3023,15 @@ void graph_t::apply_delivery_mode(vertex_t* v, delivery_mode_t mode) {
  * makes its write-vs-retire window unreachable. Any future two-phase scheme un-masks the same
  * window and owes itself the same fence.
  */
-result_t<void> graph_t::write(vertex_handle_t v, view::rope_t value, std::string_view caller) {
-    return write_impl(v.get(), std::move(value), caller);
+result_t<void> graph_t::write(vertex_handle_t v, view::rope_t value, std::string_view caller,
+                              const net::link_kind_t* link) {
+    return write_impl(v.get(), std::move(value), caller, link);
 }
 
 result_t<void> graph_t::write(vertex_handle_t vh, const field_path_t& field, view::rope_t value,
-                              std::string_view caller) {
+                              std::string_view caller, const net::link_kind_t* link) {
     vertex_t* v = vh.get();
-    if (field.empty()) return write_impl(v, std::move(value), caller);
+    if (field.empty()) return write_impl(v, std::move(value), caller, link);
     // A field write targets a contiguous control TLV (settings / acl / subscribers);
     // materialize it (single-link: zero copy) before the field surface parses it. A
     // multi-link value's flatten draws from the ADR-0060 value_backend_. The refusal keeps

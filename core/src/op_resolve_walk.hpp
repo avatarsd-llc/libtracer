@@ -913,8 +913,10 @@ template <class N>
                                   graph.control_source(), flat);
             if (value.rope.total_length() == 0) return write_error(status_t::BACKPRESSURE);
 
-            result_t<void> w =
-                graph.write(v, has_field ? field : field_path_t{}, value.rope, subject);
+            // The arrival link's catalog identity (#1650) rides the token seam the walk already
+            // carries into this frame — no parameter of its own, no lookup, no branch.
+            result_t<void> w = graph.write(v, has_field ? field : field_path_t{}, value.rope,
+                                           subject, link_token.link_kind);
             // RFC-0004 Amendment 2's whole effect, in one line: the write ran (or was
             // refused by the ACL, or failed) and the terminus stays silent either way. The
             // origin loses per-write backpressure feedback — `or_backpressure` never runs on

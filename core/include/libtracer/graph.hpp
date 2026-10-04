@@ -1597,19 +1597,29 @@ class graph_t {
      *
      * Takes a rope; an existing `view_t` caller compiles unchanged via the implicit
      * `view_t`→`rope_t`. @p caller is the ACL caller context (see @ref read).
+     *
+     * @p link is the transport-catalog `(kind, role)` of the link the write arrived on, or
+     * null for a write that arrived over none (#1650). It gates nothing here: it reaches the
+     * vertex's admission filter and handler as `write_ctx_t::link`, beside @p caller as
+     * `write_ctx_t::subject`. The router passes it for a write a link carried; an API write
+     * leaves it null.
      */
     [[nodiscard]] result_t<void> write(vertex_handle_t v, view::rope_t value,
-                                       std::string_view caller = {});
+                                       std::string_view caller = {},
+                                       const net::link_kind_t* link = nullptr);
     /**
      * @brief Field-write by handle: resolve the @ref vertex_handle_t and @ref field_path_t
      *        once, then reuse them on the hot path — no string parse, no map lookup per call.
      *
      * An empty @p field is an ordinary value write. Pass `path.field()` for the field
      * selector. A field write targets a contiguous control TLV, so a multi-link value is
-     * materialized first.
+     * materialized first. @p link is as for the plain overload; a non-empty @p field does not
+     * reach `handlers_t::on_admit` (the app-field plane has its own seam), so it is consumed
+     * only by the empty-field value write.
      */
     [[nodiscard]] result_t<void> write(vertex_handle_t v, const field_path_t& field,
-                                       view::rope_t value, std::string_view caller = {});
+                                       view::rope_t value, std::string_view caller = {},
+                                       const net::link_kind_t* link = nullptr);
     /**
      * @brief Assign a vertex's value — the STATE transition only, sends NOTHING (RFC-0008).
      *
@@ -2219,7 +2229,7 @@ class graph_t {
      */
     [[nodiscard]] result_t<value_ref_t> read(const path_t& path) const;
     /** @brief Write by path — resolve the key once, then @ref write(vertex_handle_t, view::rope_t,
-     * std::string_view). */
+     * std::string_view, const net::link_kind_t*). */
     [[nodiscard]] result_t<void> write(const path_t& path, view::rope_t value);
     /** @brief Await by path — resolve the key once, then @ref await(vertex_handle_t,
      * std::chrono::nanoseconds, std::string_view). */
@@ -2454,12 +2464,16 @@ class graph_t {
     // `caller` is the ACL caller context gating the WRITE right (the API caller's
     // for a direct write; a delivered subscription's stored context terminates at
     // its target instead — see dispatch_edge_target, ADR-0051).
+    // `link` is the arrival link's catalog identity (#1650), null for a write no link carried;
+    // it travels beside `caller` to the one place it is read — the `write_ctx_t` the admission
+    // filter and the handler receive. REQUIRED on every internal leg, for `caller`'s reason:
+    // a new path must say which it is, not default into "no link".
     [[nodiscard]] result_t<void> write_impl(vertex_t* v, view::rope_t value,
-                                            std::string_view caller);
+                                            std::string_view caller, const net::link_kind_t* link);
     // write_impl's `retention_t::NONE` arm (RFC-0028 §5.4): admit, bump the sequence, and
     // deliver from the stack — no block, nothing retained.
     [[nodiscard]] result_t<void> relay_write(vertex_t* v, view::rope_t value,
-                                             std::string_view caller);
+                                             std::string_view caller, const net::link_kind_t* link);
     // The store half of a write (LKV/history/handler + seq bump + await wake),
     // WITHOUT fan-out — shared by write_impl and the branch-write apply (RFC-0005).
     // Hands back the exact published LKV pointer (null for a Handler-role write —
@@ -2493,6 +2507,7 @@ class graph_t {
     [[nodiscard]] result_t<value_ref_t> store_value(vertex_t* v, view::rope_t&& value,
                                                     vertex_t::store_drops_t& drops,
                                                     std::string_view caller,
+                                                    const net::link_kind_t* link,
                                                     vertex_t::ring_take_t* take = nullptr);
     /**
      * @brief The ADOPTING store (RFC-0028 D2, slice 4): publish a value some other vertex
@@ -2513,15 +2528,16 @@ class graph_t {
      */
     [[nodiscard]] result_t<value_ref_t> store_value(vertex_t* v, const value_t& value,
                                                     vertex_t::store_drops_t& drops,
-                                                    std::string_view caller);
+                                                    std::string_view caller,
+                                                    const net::link_kind_t* link);
     /**
      * @brief Run @p v's admission filter over @p value under @p caller — the one call both
      *        `store_value` overloads make, so the filter has a single spelling.
      * @return Disengaged to admit unchanged, engaged to store the normalised rope instead, or
      *         the filter's refusal. A vertex whose filter is mid-retire admits.
      */
-    [[nodiscard]] admission_t admit(vertex_t* v, const value_t& value,
-                                    std::string_view caller) const;
+    [[nodiscard]] admission_t admit(vertex_t* v, const value_t& value, std::string_view caller,
+                                    const net::link_kind_t* link) const;
     /**
      * @brief The HANDLER leg of both `store_value` overloads: hand @p value to @p v's
      *        `on_write` by reference (RFC-0028 D10) and store nothing.
@@ -2529,20 +2545,23 @@ class graph_t {
      *         the handler's own refusal.
      */
     [[nodiscard]] result_t<value_ref_t> handler_write(vertex_t* v, const value_t& value,
-                                                      std::string_view caller);
+                                                      std::string_view caller,
+                                                      const net::link_kind_t* link);
     /**
      * @brief The rope arm's HANDLER leg: move a local write's links into stack storage (or,
      *        past `kUnstoredInline` links, one block) and run %handler_write over it.
      */
     [[nodiscard]] result_t<value_ref_t> handler_write_rope(vertex_t* v, view::rope_t&& value,
-                                                           std::string_view caller);
+                                                           std::string_view caller,
+                                                           const net::link_kind_t* link);
     /**
      * @brief `write_impl`'s HANDLER arm: build ONE value from @p value (moved onto this frame,
      *        or one block past `kUnstoredInline` links), hand it to `on_write`, then deliver the
      *        same value to the vertex's own subscribers (#1505: no clone).
      */
     [[nodiscard]] result_t<void> handler_write_deliver(vertex_t* v, view::rope_t&& value,
-                                                       std::string_view caller);
+                                                       std::string_view caller,
+                                                       const net::link_kind_t* link);
     /**
      * @brief The storing tail every non-HANDLER store shares: publish @p sp to @p v's slot,
      *        then admit it into @p v's ring when @p v is a STREAM.
@@ -2565,7 +2584,8 @@ class graph_t {
     // half: true (the `write` path) delivers each covered site + bubbles; false (the
     // `assign` path) marks each landed vertex for the next sweep and delivers nothing.
     [[nodiscard]] result_t<void> write_branch(vertex_t* v, const view::rope_t& value,
-                                              std::string_view caller, bool notify);
+                                              std::string_view caller, const net::link_kind_t* link,
+                                              bool notify);
     void fan_out(vertex_t* v, const value_t& value);
     // The same fan-out over a SLICE no vertex stored (a branch write's per-site cut): the view
     // is wrapped in stack storage for the duration of the dispatch.
