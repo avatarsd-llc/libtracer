@@ -40,12 +40,26 @@ inline std::atomic<std::size_t> g_bytes{0};
  */
 inline std::atomic<long long> g_live_bytes{0};
 
+/**
+ * @brief The largest single request while armed (#1806): which size class the biggest block
+ *        lands in, which a total cannot show. Stays 0 when the overriding TU does not track it.
+ */
+inline std::atomic<std::size_t> g_max_bytes{0};
+
+/** @brief Raise @ref g_max_bytes to @p n if it is larger; the overriding TU calls it when armed. */
+inline void note_request(std::size_t n) {
+    std::size_t cur = g_max_bytes.load(std::memory_order_relaxed);
+    while (n > cur && !g_max_bytes.compare_exchange_weak(cur, n, std::memory_order_relaxed)) {
+    }
+}
+
 /** @brief One measurement window's result. */
 struct counts_t {
-    std::size_t allocs = 0;   /**< number of operator-new calls while armed */
-    std::size_t frees = 0;    /**< number of operator-delete calls while armed */
-    std::size_t bytes = 0;    /**< total bytes requested by those allocs */
-    long long live_bytes = 0; /**< usable-size balance: bytes still held at snapshot */
+    std::size_t allocs = 0;    /**< number of operator-new calls while armed */
+    std::size_t frees = 0;     /**< number of operator-delete calls while armed */
+    std::size_t bytes = 0;     /**< total bytes requested by those allocs */
+    long long live_bytes = 0;  /**< usable-size balance: bytes still held at snapshot */
+    std::size_t max_bytes = 0; /**< largest single request (@ref g_max_bytes) */
 };
 
 /** @brief Zero the counters (call before arming a fresh window). */
@@ -54,6 +68,7 @@ inline void reset() {
     g_frees.store(0, std::memory_order_relaxed);
     g_bytes.store(0, std::memory_order_relaxed);
     g_live_bytes.store(0, std::memory_order_relaxed);
+    g_max_bytes.store(0, std::memory_order_relaxed);
 }
 
 /**
@@ -68,7 +83,8 @@ inline void disarm() { g_armed.store(false, std::memory_order_seq_cst); }
 [[nodiscard]] inline counts_t snapshot() {
     return counts_t{
         g_allocs.load(std::memory_order_relaxed), g_frees.load(std::memory_order_relaxed),
-        g_bytes.load(std::memory_order_relaxed), g_live_bytes.load(std::memory_order_relaxed)};
+        g_bytes.load(std::memory_order_relaxed), g_live_bytes.load(std::memory_order_relaxed),
+        g_max_bytes.load(std::memory_order_relaxed)};
 }
 
 /** @brief RAII window: reset + arm on construction, disarm on scope exit; read via .result(). */

@@ -1679,10 +1679,21 @@ baseline ran every axis for minutes, both emitting well-formed rows under the sa
 `(mode, size, fan, ep)` keys for the harness to join on. A typo (`taget`) did the same.
 `bench/test_bench_cli.py` pins it.
 
+#### The payload ladder (#1806)
+
+Every data-path family runs over `bench::kPayloadLadder` — 64, 984, 985, 1024, 4096, 16384 and
+65536 B: `inproc` and `inproc-borrow` (the sizes `kSizes` lacks, after its rows), the four
+`lkv-*` rows, `eptype-stream`, both `compact-*` arms and `fwd-demux-value` (the forward hop,
+one link, keyed by its VALUE payload). 984 / 985 B straddle the heap's one-block boundary.
+Above 8 KiB the operation budget shrinks in proportion to the payload
+(`bench::ladder_budget`), and the `compact-*` / `fwd-demux-value` ladder rows take a quarter
+of their binary's time budget each. The 16 KiB row of each family is a gated point.
+
 #### Process shape: one fresh process per family, fixed allocator state (#1803)
 
 The default sweep is no longer one process. It is a list of **families** (`kFamilies` in
-`bench_libtracer.cpp` — `inproc-fan`, `inproc-size`, …, `lkv`, `lkv-aged`), and the no-argument
+`bench_libtracer.cpp` — `inproc-fan`, `inproc-size`, …, `lkv`, `lkv-aged`, `cliff-heap`,
+`cliff-pool`), and the no-argument
 run starts each one as its own child process, `bench_libtracer --family <name>`, in the
 historical order, so the transcript keeps every row, ordinal and line shape. Every bench
 process — the driver, each family, an isolated mode such as the `lkv` ratio report's, and
@@ -1740,6 +1751,7 @@ craft libtracer":
 | `lkv-alloc-heap` / `lkv-alloc-pool` | **the segment allocation alone** — `backend.alloc` + `backend.destroy`, no payload moved. The ADR-0060 pooled-vs-heap ratio `perf_gate.py` reports (never gates), and a *null control* for the pair below: it shares their loop and their binary but never flattens, so an arm that moves while these stay at 1.00x is the flatten and not the host. |
 | `lkv-store-heap` / `lkv-store-pool` | **the rope-to-contiguous copy** — `rope_t::materialize` over a 2-link rope (backend alloc + payload `memcpy`), pooled backend vs the default heap. Gated points since [#1250](https://github.com/avatarsd-llc/libtracer/issues/1250). **The name is misleading and is kept anyway:** the "store" is the *copy-store allocation*, NOT the LKV slot — there is no `graph_t`, no vertex and no last-known-value publish in this loop. A rename would end the `gh-pages` history series keyed on these names (the `fold-n*` → `fold-b*` precedent below), so the meaning is documented instead. Read it as "`materialize` got slower", never as "the LKV store got slower" — #1250 was triaged the wrong way round for exactly that reason. |
 | `lkv-alloc-heap-aged` / `lkv-store-heap-aged` | the two `lkv-*-heap` operations again, on an **aged heap**: the `lkv-aged` family first fragments its process heap from a fixed seed (16384 blocks of 16–2063 B, every other one freed, the rest held live), then runs the same loops. The un-suffixed `lkv-*-heap` rows are the **fresh-heap** variant — they run first thing in their own process. Both heap states are chosen, not inherited from sweep order ([#1803](https://github.com/avatarsd-llc/libtracer/issues/1803)). No pool twin: the pool carves a static slab and never touches the heap. |
+| `cliff-alloc-heap` / `cliff-alloc-pool` | **the allocator-cliff family** ([#1806](https://github.com/avatarsd-llc/libtracer/issues/1806)): one segment `alloc` + `destroy`, as `lkv-alloc-*`, but timed as a batch row (`bench::time_batches`, picosecond p50, every window at least 20 µs) at every size of `bench::cliff_sizes`: 960–1096 B in steps of 8 plus 985 B, and 2^k, 2^k − 48, 2^k + 48 from 64 B to 64 KiB. Families `cliff-heap` and `cliff-pool`, each in its own fresh process; the pool has one 64 KiB slot so its row should be flat. `perf_gate.py` judges each size against main and against its smaller neighbour (a new step over 1.75x fails). The exact half is `bench_forward_heap`'s `RESULT segdraw` rows: what one heap segment asks the allocator for at the same sizes, ratcheted exactly and checked against the 1032 B fast-path ceiling. |
 | `mixed` | 128 topics, varied fan-out + payloads. |
 | `net` | two processes over real UDP (`run_net.sh`). |
 | `eptype-lean` | ep-type axis: minimal sink (see below). |

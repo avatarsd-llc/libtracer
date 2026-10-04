@@ -170,6 +170,17 @@ DEFAULT_TIER = "advisory"
 #   lkv-{store,alloc}-heap @ 1024 B — the heap backend's large-segment layout (#1768)
 #   inproc-target-{handler,stored} @ fan 8 — the path-target dispatch legs
 #   eptype-stream           — the STREAM role's bounded-history retention leg
+#   the 16 KiB ladder rows  — inproc, inproc-borrow, lkv-store-{heap,pool}, eptype-stream,
+#                             compact-forward and fwd-demux-value at 16384 B (#1806)
+#
+# The 16 KiB rows are there because before #1806 no gated family had a payload above 8 KiB,
+# and the standing rule is that every perf report tracks values above 1 KiB. One size per
+# family, and 16 KiB rather than 4 KiB: 4 KiB is the ingress share threshold
+# (`kShareThresholdBytes`), where a received value switches from copied to shared by design,
+# so a gated row there would sit on a designed step; 16 KiB is clearly past it on every path. The other ladder sizes (984, 985, 1 KiB, 4 KiB,
+# 64 KiB) are charted and not gated. Like the other `main` rows these cost no extra process:
+# the default sweep emits them. The compact and demux rows run at a quarter of their
+# binary's budget, as all their ladder rows do.
 #
 # `eptype-stream` is gated and its two siblings are NOT, and the asymmetry is the whole
 # reason it is here. `eptype-lean` and `eptype-lean-cached` are `run_inproc` re-emitted
@@ -272,6 +283,15 @@ POINTS = [
     # matched nothing, which is why a key the candidate does not emit now fails (#1847).
     ("demux", "fwd-demux-fixed", 61, 1, 1),
     ("demux", "fwd-demux-scan", 61, 64, 64),
+    # The payload ladder's gated rows (#1806): one row of 16 KiB per data-path family, so a
+    # cost that only shows on large values fails the gate instead of reaching the page alone.
+    ("main", "inproc", 16384, 1, 1),
+    ("main", "inproc-borrow", 16384, 1, 1),
+    ("main", "lkv-store-heap", 16384, 1, 1),
+    ("main", "lkv-store-pool", 16384, 1, 1),
+    ("main", "eptype-stream", 16384, 1, 1),
+    ("compact", "compact-forward", 16384, 1, 1),
+    ("demux", "fwd-demux-value", 16384, 1, 1),
     # MULTI-threaded rows (#1803): timed in their own `--family-set multi` invocation and
     # judged on foreign CPU time only (see GATE_FAMILY_SET_MULTI). T=4 because the gate's
     # bench CPU set is four CPUs; a host with fewer reports them absent, not failed.
@@ -782,6 +802,10 @@ def paired_samples(cand: dict[str, pathlib.Path], base: dict[str, pathlib.Path],
                     v = metric(rows_by_bin[b], m, s, f, e)
                     if v:
                         out[arm].setdefault(f"{m}/{s}/{f}/{e}", []).append(v)
+                # The allocator-cliff family (#1806): every size it emits, not a fixed list,
+                # so the ladder can change in the bench without an edit here.
+                for k, v in cliff_rows(rows_by_bin.get("main", [])).items():
+                    out[arm].setdefault(k, []).append(v)
     return out
 
 
@@ -897,6 +921,207 @@ def gate_paired(cand: dict[str, pathlib.Path], base: dict[str, pathlib.Path],
     # this run's drift figure. It does not gate — it tells a reader whether the run was
     # worth believing at all, which is what a 2.8x baseline swing needed and never got.
     print(f"  run drift (worst baseline-arm spread across pairs): {worst_drift:.2f}x")
+    # The allocator-cliff family (#1806) rides the same interleaved session. A cliff main
+    # already has is printed (`~`) and does not fail; see gate_cliff.
+    cliff_fails, _cliff_warns = gate_cliff(samples)
+    return fails + cliff_fails
+
+
+# --- THE ALLOCATOR-CLIFF FAMILY (#1806) ---------------------------------------------
+# `bench_libtracer`'s `cliff-heap` and `cliff-pool` families time one alloc/free of a segment
+# at every size of the cliff ladder: 960..1096 B in steps of 8 plus 985 B, and 2^k, 2^k ± the
+# 48 B segment header up to 64 KiB. Each row is a batch row (#1804), so its p50 is a median of
+# window means in picoseconds and there is no tick to guard. Two checks read them, both in
+# paired mode only:
+#
+#   against main — each size's p50 is a paired verdict at LAT_REGRESS, exactly like a POINT
+#                  (effect + disjoint ranges + a majority of pairs);
+#   neighbours   — each size's p50 against the next smaller size's, pair by pair. A step of
+#                  more than CLIFF_STEP that holds in the median and in a strict majority of
+#                  pairs is a cliff. It FAILS only when it is new: main's own step at that
+#                  size, times LAT_REGRESS, must be smaller. A cliff main already has is
+#                  printed as a warning, since it is the allocator's or an older change's,
+#                  not this PR's.
+#
+# CLIFF_STEP is set from the steps healthy code has. On the reference host the heap row
+# steps ~1.5x at 985 B (the #1768 split draws two blocks instead of one) and ~1.35x at 1040 B
+# (the payload alone passes glibc's 1032 B cache ceiling); the pool row is flat. 1.75x sits
+# above both, and below the ~2x that a block falling off the allocator's fast path cost in
+# the v0.17.0 sweep.
+#
+# The cliff rows are the timed half. The exact half is the segment-draw ratchet below
+# (`segdraw_gate`): it counts what the heap backend asks for at every ladder size, which no
+# amount of runner noise can move.
+CLIFF_MODES = ("cliff-alloc-heap", "cliff-alloc-pool")
+CLIFF_STEP = 1.75
+
+
+def cliff_rows(rows: list[tuple]) -> dict[str, dict]:
+    """@brief The cliff family's rows of one run, keyed `mode/size/1/1`, medianed like a
+    POINT (@ref metric)."""
+    keys = sorted({(r[0], r[1], r[2], r[3]) for r in rows if r[0] in CLIFF_MODES})
+    out = {}
+    for (m, s, f, e) in keys:
+        v = metric(rows, m, s, f, e)
+        if v:
+            out[f"{m}/{s}/{f}/{e}"] = v
+    return out
+
+
+def _cliff_series(samples: dict[str, list[dict]], mode: str) -> list[tuple[int, list[float]]]:
+    """@brief One cliff mode's per-pair p50s, ascending by size: [(size, [p50 per pair])]."""
+    out = []
+    for k, vs in samples.items():
+        m, size, _f, _e = k.split("/")
+        if m == mode:
+            out.append((int(size), [float(v["p50_ns"]) for v in vs]))
+    return sorted(out)
+
+
+def cliff_steps(cand: list[tuple[int, list[float]]],
+                base: list[tuple[int, list[float]]] | None) -> list[dict]:
+    """@brief Every neighbour step of one cliff mode, judged (see the section comment).
+
+    @param cand The candidate's series from @ref _cliff_series.
+    @param base Main's series from the same interleaved session, or None.
+    @return One dict per size that has a smaller neighbour: `size`, `left`, the candidate's
+            median step and pairs over CLIFF_STEP, main's median step (or None), and
+            `cliff` (the candidate steps) and `new` (main does not).
+    """
+    base_by_size = dict(base or [])
+    out = []
+    for (lsize, lv), (size, v) in zip(cand, cand[1:]):
+        n = min(len(lv), len(v))
+        steps = [v[i] / lv[i] for i in range(n) if lv[i] > 0]
+        if not steps:
+            continue
+        med = statistics.median(steps)
+        over = sum(1 for x in steps if x > CLIFF_STEP)
+        majority = over * 2 > len(steps) if len(steps) >= 3 else over == len(steps)
+        cliff = med > CLIFF_STEP and majority
+        bl, bv = base_by_size.get(lsize), base_by_size.get(size)
+        base_med = None
+        if bl and bv:
+            bsteps = [bv[i] / bl[i] for i in range(min(len(bl), len(bv))) if bl[i] > 0]
+            base_med = statistics.median(bsteps) if bsteps else None
+        new = cliff and (base_med is None or med > base_med * LAT_REGRESS)
+        out.append({"size": size, "left": lsize, "step": med, "over": over, "n": len(steps),
+                    "base_step": base_med, "cliff": cliff, "new": new})
+    return out
+
+
+def gate_cliff(samples: dict[str, dict[str, list[dict]]]) -> tuple[list[str], list[str]]:
+    """@brief The allocator-cliff checks over a paired session's cliff rows.
+    @return (fails, warns): a warn is a cliff main has too, printed and not failed."""
+    fails: list[str] = []
+    warns: list[str] = []
+    cand_keys = [k for k in samples["cand"] if k.split("/")[0] in CLIFF_MODES]
+    if not cand_keys:
+        print("  allocator-cliff family: not emitted by the candidate (a binary without "
+              "the cliff families) — not gated")
+        return fails, warns
+    print(f"Allocator-cliff family ({len(cand_keys)} rows; fail: p50 "
+          f"+{(LAT_REGRESS - 1) * 100:.0f}% vs main, or a new neighbour step over "
+          f"{CLIFF_STEP:.2f}x):")
+    for k in sorted(cand_keys, key=lambda x: (x.split("/")[0], int(x.split("/")[1]))):
+        cs, bs = samples["cand"][k], samples["base"].get(k)
+        if not bs:
+            continue  # a size main does not emit: the neighbour check still covers it
+        v = paired_verdict([float(x["p50_ns"]) for x in cs], [float(x["p50_ns"]) for x in bs],
+                           LAT_REGRESS, False)
+        if v["effect"]:
+            print(f"  {k}")
+            print(paired_report(v, "p50", "ns", "9,.3f"))
+        if v["fail"]:
+            fails.append(f"{k} p50 pullback: {v['cand_med']:.3f}ns vs base "
+                         f"{v['base_med']:.3f}ns ({(v['cand_med'] / v['base_med'] - 1) * 100:+.0f}%"
+                         f"), reproduced in {v['pairs_breached']}/{v['n']} interleaved pairs "
+                         f"with disjoint ranges")
+    for mode in CLIFF_MODES:
+        cand = _cliff_series(samples["cand"], mode)
+        base = _cliff_series(samples["base"], mode) or None
+        for st in cliff_steps(cand, base):
+            if not st["cliff"]:
+                continue
+            main_says = (f"main x{st['base_step']:.2f}" if st["base_step"] is not None
+                         else "main has no such row")
+            line = (f"{mode} cliff at {st['size']} B: p50 x{st['step']:.2f} over "
+                    f"{st['left']} B in {st['over']}/{st['n']} pairs ({main_says})")
+            print(f"  {'!' if st['new'] else '~'} {line}")
+            (fails if st["new"] else warns).append(line)
+    if not fails:
+        print("  no new cliff, no size slower than main")
+    return fails, warns
+
+
+# --- THE SEGMENT-DRAW RATCHET (#1806): the cliff family's exact half ------------------
+# `bench_forward_heap` counts what ONE heap-backend segment asks the host allocator for, at
+# every cliff-ladder size: `RESULT segdraw S=<size> draws=<n> bytes=<total> max_block=<max>`.
+# It is `core/tests/mem_heap_request_size_test.cpp`'s measurement, promoted to a gate. Two
+# rules, both exact (a count, not a clock):
+#
+#   ceiling — no draw is bigger than glibc's per-thread-cache ceiling (SEGDRAW_CEILING) unless
+#             the payload alone is. This needs no baseline: it is the invariant #1768
+#             restored, and reverting #1768's split breaks it at 985 B (one 1033 B block);
+#   ratchet — against main, at every size, `draws`, `bytes` and `max_block` may not grow.
+#             A change that means to draw differently shows up here and is waived on purpose.
+SEGDRAW_CEILING = 1032
+_SEGDRAW_RE = re.compile(r"^RESULT segdraw S=(\d+) draws=(\d+) bytes=(\d+) max_block=(\d+)")
+_FWD_OUT: dict[str, str] = {}
+
+
+def fwd_output(bench_fwd: pathlib.Path) -> str:
+    """@brief `bench_forward_heap`'s stdout, run once per binary per gate (deterministic)."""
+    key = str(bench_fwd)
+    if key not in _FWD_OUT:
+        _FWD_OUT[key] = subprocess.run([key], capture_output=True, text=True,
+                                       timeout=180).stdout
+    return _FWD_OUT[key]
+
+
+def segdraw_parse(out: str) -> dict[int, dict[str, int]]:
+    """@brief The segment-draw rows of one `bench_forward_heap` run: {size: counts}."""
+    got = {}
+    for line in out.splitlines():
+        m = _SEGDRAW_RE.match(line)
+        if m:
+            got[int(m.group(1))] = {"draws": int(m.group(2)), "bytes": int(m.group(3)),
+                                    "max_block": int(m.group(4))}
+    return got
+
+
+def segdraw_probe(bench_fwd: pathlib.Path) -> dict[int, dict[str, int]]:
+    """@brief The segment-draw rows of @p bench_fwd; empty when it cannot be run, which
+    @ref segdraw_gate reports as "not gated" rather than passing in silence."""
+    try:
+        return segdraw_parse(fwd_output(bench_fwd))
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+
+
+def segdraw_gate(cur: dict[int, dict[str, int]],
+                 base: dict[int, dict[str, int]] | None) -> list[str]:
+    """@brief The ceiling rule on the candidate, and the exact ratchet against main."""
+    fails: list[str] = []
+    if not cur:
+        print("  segment-draw ratchet: the candidate emitted no segdraw rows — not gated")
+        return fails
+    changed = 0
+    for size in sorted(cur):
+        c = cur[size]
+        if size <= SEGDRAW_CEILING < c["max_block"]:
+            fails.append(f"segdraw S={size}: one draw of {c['max_block']} B is past the "
+                         f"{SEGDRAW_CEILING} B fast-path ceiling though the payload fits it "
+                         f"(the #1768 layout split is gone)")
+        b = (base or {}).get(size)
+        if b is None:
+            continue
+        grew = [f"{f} {b[f]} -> {c[f]}" for f in ("draws", "bytes", "max_block") if c[f] > b[f]]
+        if grew:
+            fails.append(f"segdraw S={size}: {', '.join(grew)} (exact ratchet vs main)")
+        changed += c != b
+    print(f"  segment-draw ratchet: {len(cur)} sizes, {changed} differ from main, "
+          f"{len(fails)} fail")
     return fails
 
 
@@ -907,7 +1132,7 @@ def mem_probe(bench_fwd: pathlib.Path) -> dict[str, dict]:
     a note, never a crash."""
     if not bench_fwd.exists():
         return {}
-    out = subprocess.run([str(bench_fwd)], capture_output=True, text=True, timeout=180).stdout
+    out = fwd_output(bench_fwd)
     got: dict[str, dict] = {}
     for line in out.splitlines():
         m = _MEM_RE.match(line)
@@ -995,7 +1220,8 @@ def mem_ratchet(bench_fwd: pathlib.Path | None, base_fwd: pathlib.Path | None) -
     cand = _mem_arm("candidate", bench_fwd, "--bench-fwd")
     base = _mem_arm("baseline", base_fwd, "--baseline-bench-fwd")
     if cand_ok and base_ok:
-        return mem_gate(mem_probe(bench_fwd), mem_probe(base_fwd))
+        return (mem_gate(mem_probe(bench_fwd), mem_probe(base_fwd))
+                + segdraw_gate(segdraw_probe(bench_fwd), segdraw_probe(base_fwd)))
     if not cand_ok and not base_ok:
         # Say so. A skipped gate that prints nothing is indistinguishable from a
         # gate that passed, which is how a guard becomes a blind spot.

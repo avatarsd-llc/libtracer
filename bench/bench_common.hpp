@@ -68,6 +68,82 @@ inline constexpr std::size_t kFanouts[] = {1, 8, 128, 1024, 8192};    // subscri
 inline constexpr std::size_t kEndpoints[] = {1, 8, 128, 1024, 8192};  // distinct topics
 
 /**
+ * @brief The payload ladder every data-path family is swept over (#1806).
+ *
+ * 64 B is the reference point. 984 and 985 B sit either side of the host heap's small-block
+ * boundary for one segment: 984 B plus the 48 B segment header is 1032 B, glibc's largest
+ * per-thread-cache request, and 985 B is the first payload past it (#1768). 1 KiB, 4 KiB,
+ * 16 KiB and 64 KiB are the standing rows above 1 KiB, so a cost that only appears with
+ * large values has a row in every family. A family that already sweeps @ref kSizes runs the
+ * ladder sizes it does not already have AFTER its existing rows (@ref ladder_extra), so no
+ * existing row moves.
+ */
+inline constexpr std::size_t kPayloadLadder[] = {64, 984, 985, 1024, 4096, 16384, 65536};
+
+/**
+ * @brief The allocator-cliff ladder (#1806): every payload size the cliff family times, and
+ *        every size `bench_forward_heap` counts the heap backend's draws at.
+ *
+ * Two parts, ascending and without duplicates:
+ *   - **the fine band**, 960 to 1096 B in steps of 8, plus the first payload past the heap's
+ *     one-block boundary. 984 B plus the 48 B segment header is 1032 B, glibc's largest
+ *     per-thread-cache request, so 985 B is the first payload past it. That boundary is where
+ *     RFC-0028 slice 10 doubled the 1 KiB heap rows (#1768);
+ *   - **the power-of-two band**, 2^k and 2^k ± @p header for 2^k from 64 B to 64 KiB, the
+ *     sizes where a size-classed allocator changes class.
+ *
+ * @param header The heap backend's padded segment header (48 B on a 64-bit host).
+ */
+[[nodiscard]] inline std::vector<std::size_t> cliff_sizes(std::size_t header) {
+    constexpr std::size_t kGlibcTcacheMax = 1032;  // glibc's largest per-thread-cache request
+    std::vector<std::size_t> out;
+    for (std::size_t s = 960; s <= 1100; s += 8) out.push_back(s);
+    out.push_back(kGlibcTcacheMax - header + 1);
+    for (std::size_t p = 64; p <= 65536; p *= 2) {
+        out.push_back(p - header);
+        out.push_back(p);
+        out.push_back(p + header);
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+}
+
+/** @brief Whether @p s is in @ref kSizes, so a ladder sweep can skip a row already emitted. */
+[[nodiscard]] constexpr bool in_sizes(std::size_t s) {
+    for (std::size_t k : kSizes)
+        if (k == s) return true;
+    return false;
+}
+
+/**
+ * @brief The ladder sizes a @ref kSizes sweep does not already emit, in ladder order.
+ * @return 984, 985, 4096, 16384 and 65536 for today's @ref kSizes.
+ */
+[[nodiscard]] inline std::vector<std::size_t> ladder_extra() {
+    std::vector<std::size_t> out;
+    for (std::size_t s : kPayloadLadder)
+        if (!in_sizes(s)) out.push_back(s);
+    return out;
+}
+
+/**
+ * @brief Scale an operation budget down for a payload above 8 KiB, so the 16 KiB and 64 KiB
+ *        ladder rows (#1806) cost about what the 8 KiB row does instead of 2-8x more.
+ *
+ * At or below 8 KiB the budget is returned unchanged, so no existing row's sample count
+ * moves. Above it the budget shrinks in proportion to the payload, with a floor of 2000
+ * operations, which is @ref publishes_for's own floor.
+ */
+[[nodiscard]] inline std::uint64_t ladder_budget(std::size_t size, std::uint64_t budget) {
+    constexpr std::size_t kFullBudgetBytes = 8192;
+    constexpr std::uint64_t kCap = 200'000;  // publishes_for's ceiling at fan-out 1
+    if (size <= kFullBudgetBytes) return budget;
+    const std::uint64_t scaled = std::min(budget, kCap) * kFullBudgetBytes / size;
+    return std::max<std::uint64_t>(2000, scaled);
+}
+
+/**
  * @brief Fan-out widths filling the two widest gaps in `kFanouts`, chosen where the
  *        dispatch cost model is expected to BREAK (#844).
  *

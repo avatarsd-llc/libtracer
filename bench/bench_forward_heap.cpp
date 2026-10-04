@@ -86,6 +86,7 @@
 #define BENCH_HAS_USABLE_SIZE 1
 #endif
 
+#include "bench_common.hpp"
 #include "heap_probe.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/graph.hpp"
@@ -102,6 +103,7 @@ void* counted_alloc(std::size_t size) {
     if (armed) {
         probe::g_allocs.fetch_add(1, std::memory_order_relaxed);
         probe::g_bytes.fetch_add(size, std::memory_order_relaxed);
+        probe::note_request(size);
     }
     void* p = std::malloc(size ? size : 1);
 #ifdef BENCH_HAS_USABLE_SIZE
@@ -138,6 +140,7 @@ void* counted_aligned_alloc(std::size_t size, std::size_t align) {
     if (armed) {
         probe::g_allocs.fetch_add(1, std::memory_order_relaxed);
         probe::g_bytes.fetch_add(size, std::memory_order_relaxed);
+        probe::note_request(size);
     }
     // aligned_alloc requires a size that is a multiple of the alignment.
     const std::size_t rounded = ((size == 0 ? 1 : size) + align - 1) / align * align;
@@ -561,6 +564,33 @@ int lkv_route_gate() {
             kIters);
     }
     return rc;
+}
+
+/**
+ * @brief What the heap backend asks the host allocator for, per payload size: the exact-count
+ *        half of the allocator-cliff family (#1806).
+ *
+ * For every size of `bench::cliff_sizes`, one warm `heap_backend().alloc(S)` + destroy is
+ * counted and printed as
+ *
+ *     RESULT segdraw S=<size> draws=<n> bytes=<total> max_block=<largest>
+ *
+ * `draws` is the number of `operator new` calls for the segment, `bytes` what they asked for
+ * in total and `max_block` the largest single request, which is what decides the allocator's
+ * size class. It is the measurement `core/tests/mem_heap_request_size_test.cpp` asserts, made
+ * a ratchet: `perf_gate.py`'s segment-draw check fails a candidate whose count, total or
+ * largest block grows at any size against main. These rows are deterministic, so they are
+ * read once per arm and never timed. They lead with `S=` rather than `allocs=`, so the
+ * history emitter does not chart them.
+ */
+void segment_draw_rows() {
+    constexpr std::size_t kHeader =
+        tr::view::segment_header_bytes(tr::mem::heap_backend_t::kBlockAlign);
+    for (const std::size_t size : bench::cliff_sizes(kHeader)) {
+        const lkv_route_t r = lkv_route_window(tr::mem::heap_backend(), size, 1);
+        std::printf("RESULT segdraw S=%zu draws=%zu bytes=%zu max_block=%zu\n", size, r.heap.allocs,
+                    r.heap.bytes, r.heap.max_bytes);
+    }
 }
 
 }  // namespace
@@ -1024,6 +1054,8 @@ int main() {
             return 2;
         }
     }
+
+    segment_draw_rows();  // the cliff family's exact counts (#1806); gated by perf_gate.py
 
     // Hard gate (always on): the ADR-0060 pool path must not touch the global heap (#1695).
     // It replaces the blocking half of `perf_gate.py`'s pool/heap throughput ratio, which

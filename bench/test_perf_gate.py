@@ -383,7 +383,10 @@ class PointsAreDocumented(unittest.TestCase):
     WORDS = {2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven",
              8: "eight", 9: "nine", 10: "ten", 11: "eleven", 12: "twelve",
              13: "thirteen", 14: "fourteen", 15: "fifteen", 16: "sixteen",
-             17: "seventeen", 18: "eighteen", 19: "nineteen", 20: "twenty"}
+             17: "seventeen", 18: "eighteen", 19: "nineteen", 20: "twenty",
+             **{20 + i: f"twenty-{w}" for i, w in enumerate(
+                 ("one", "two", "three", "four", "five", "six", "seven", "eight", "nine"),
+                 start=1)}}
 
     def test_methodology_names_every_point(self):
         if not self.DOC.exists():          # bench/ checked out alone
@@ -851,10 +854,16 @@ class MissingGatedKeysFail(unittest.TestCase):
         1fe92124 (main's history records `fwd-demux-fixed 61B/...`); pin both the size and
         the mode names the bench source emits."""
         demux = [(m, s) for (b, m, s, _f, _e) in pg.POINTS if b == "demux"]
-        self.assertEqual(demux, [("fwd-demux-fixed", 61), ("fwd-demux-scan", 61)])
+        # The frame-keyed rows carry the frame size; the `fwd-demux-value` ladder row
+        # (#1806) is keyed by its payload, so it is pinned separately.
+        frame_keyed = [(m, s) for (m, s) in demux if m != "fwd-demux-value"]
+        self.assertEqual(frame_keyed, [("fwd-demux-fixed", 61), ("fwd-demux-scan", 61)])
+        self.assertEqual([x for x in demux if x[0] == "fwd-demux-value"],
+                         [("fwd-demux-value", 16384)])
         src = (pg.HERE / "bench_forward_demux.cpp").read_text()
         self.assertIn('run_point(n, 1, "fwd-demux-fixed")', src)
         self.assertIn('run_point(n, n, "fwd-demux-scan")', src)
+        self.assertIn('run_point(1, 1, "fwd-demux-value", p,', src)
 
     def test_every_point_present_passes(self):
         fails, _ = self.gate(self.keys(), self.keys())
@@ -867,7 +876,9 @@ class MissingGatedKeysFail(unittest.TestCase):
         self.assertEqual(len(fails), 1)
         self.assertTrue(fails[0].startswith(k))
         self.assertIn("::error::", out)
-        self.assertNotIn("not gated", out)
+        # The cliff family's own "not emitted ... not gated" line is about a different
+        # family; the absent gated key must never be the one read as not gated.
+        self.assertNotIn("absent from one arm", out)
 
     def test_a_key_absent_from_the_candidate_only_fails(self):
         k = "fwd-demux-scan/61/64/64"
@@ -900,9 +911,10 @@ class MissingGatedKeysFail(unittest.TestCase):
             with unittest.mock.patch.object(pg, "timed", lambda *a, **k: transcript):
                 rows = pg.run_bench_once(p)
         for (b, m, s, f, e) in pg.POINTS:
-            if b == "demux":
+            if b == "demux" and m != "fwd-demux-value":  # payload-keyed ladder row (#1806)
                 self.assertIsNotNone(pg.metric(rows, m, s, f, e), m)
         self.assertIsNone(pg.metric(rows, "fwd-demux-fixed", 79, 1, 1))
+        self.assertIsNone(pg.metric(rows, "fwd-demux-scan", 79, 64, 64))
 
     def test_the_legacy_path_fails_a_missing_key(self):
         """No baseline binary: `best_of` is the only arm, and a key it did not emit fails."""
@@ -1030,6 +1042,112 @@ class WorkflowsDeclareTheirTier(unittest.TestCase):
                               f"{cmd}")
                 tier = cmd.split("--tier", 1)[1].split()[0]
                 self.assertIn(tier, pg.TIERS, f"{name} declares --tier {tier}")
+
+
+class AllocatorCliffFamily(unittest.TestCase):
+    """@brief The allocator-cliff checks (#1806): neighbour steps, the comparison against main,
+    and the segment-draw ratchet that a reverted #1768 split must fail at 985 B."""
+
+    @staticmethod
+    def _samples(arm_rows: dict[str, dict[int, list[float]]],
+                 mode: str = "cliff-alloc-heap") -> dict[str, dict[str, list[dict]]]:
+        """{arm: {size: [p50 per pair]}} -> the paired-samples shape gate_cliff reads."""
+        return {arm: {f"{mode}/{size}/1/1": [{"p50_ns": v, "mean_ns": v, "deliv_s": 1e9 / v}
+                                             for v in vs]
+                      for size, vs in rows.items()}
+                for arm, rows in arm_rows.items()}
+
+    # The healthy heap shape measured on the reference host: a ~1.5x step at 985 B (two draws)
+    # and a ~1.35x step at 1040 B (the payload alone past the cache ceiling).
+    HEALTHY = {960: [12.1] * 4, 984: [12.2] * 4, 985: [18.3] * 4, 1032: [18.5] * 4,
+               1040: [25.0] * 4, 4096: [25.4] * 4}
+
+    def test_healthy_steps_are_not_cliffs(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            fails, warns = pg.gate_cliff(self._samples({"cand": self.HEALTHY,
+                                                        "base": self.HEALTHY}))
+        self.assertEqual((fails, warns), ([], []))
+
+    def test_a_new_step_fails_at_its_size(self):
+        cand = {**self.HEALTHY, 985: [40.0] * 4}
+        with contextlib.redirect_stdout(io.StringIO()):
+            fails, _ = pg.gate_cliff(self._samples({"cand": cand, "base": self.HEALTHY}))
+        self.assertTrue(any("cliff at 985 B" in f for f in fails), fails)
+        self.assertTrue(any("cliff-alloc-heap/985/1/1 p50 pullback" in f for f in fails), fails)
+
+    def test_a_cliff_main_already_has_only_warns(self):
+        both = {**self.HEALTHY, 985: [40.0] * 4}
+        with contextlib.redirect_stdout(io.StringIO()):
+            fails, warns = pg.gate_cliff(self._samples({"cand": both, "base": both}))
+        self.assertEqual(fails, [])
+        self.assertTrue(any("cliff at 985 B" in w for w in warns), warns)
+
+    def test_one_noisy_pair_is_not_a_cliff(self):
+        cand = {**self.HEALTHY, 985: [18.3, 40.0, 18.4, 18.2]}
+        with contextlib.redirect_stdout(io.StringIO()):
+            fails, _ = pg.gate_cliff(self._samples({"cand": cand, "base": self.HEALTHY}))
+        self.assertEqual(fails, [])
+
+    def test_no_cliff_rows_is_said_not_passed_silently(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            fails, _ = pg.gate_cliff({"cand": {}, "base": {}})
+        self.assertEqual(fails, [])
+        self.assertIn("not gated", out.getvalue())
+
+    def test_cliff_rows_are_collected_from_a_run(self):
+        rows = [("cliff-alloc-heap", 985, 1, 1, 5e7, 18.3, 18.9),
+                ("cliff-alloc-pool", 985, 1, 1, 9e7, 9.1, 9.2),
+                ("inproc", 64, 1, 1, 6e6, 170.0, 169.0)]
+        self.assertEqual(sorted(pg.cliff_rows(rows)),
+                         ["cliff-alloc-heap/985/1/1", "cliff-alloc-pool/985/1/1"])
+
+    # `bench_forward_heap`'s segdraw rows around the boundary, on main and with #1768's
+    # layout split reverted (recorded from both builds).
+    SEGDRAW_MAIN = """RESULT segdraw S=984 draws=1 bytes=1032 max_block=1032
+RESULT segdraw S=985 draws=2 bytes=1025 max_block=985
+RESULT segdraw S=1024 draws=2 bytes=1064 max_block=1024
+RESULT segdraw S=4096 draws=2 bytes=4136 max_block=4096
+"""
+    SEGDRAW_REVERTED = """RESULT segdraw S=984 draws=1 bytes=1032 max_block=1032
+RESULT segdraw S=985 draws=1 bytes=1033 max_block=1033
+RESULT segdraw S=1024 draws=1 bytes=1072 max_block=1072
+RESULT segdraw S=4096 draws=1 bytes=4144 max_block=4144
+"""
+
+    def test_main_passes_the_segdraw_ratchet(self):
+        main = pg.segdraw_parse(self.SEGDRAW_MAIN)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(pg.segdraw_gate(main, main), [])
+
+    def test_reverting_the_split_fails_at_985(self):
+        """Acceptance (#1806): the reverted split fails the cliff family at 985 B, with or
+        without main to compare against, and 984 B stays clean."""
+        rev = pg.segdraw_parse(self.SEGDRAW_REVERTED)
+        main = pg.segdraw_parse(self.SEGDRAW_MAIN)
+        for base in (main, None):
+            with contextlib.redirect_stdout(io.StringIO()):
+                fails = pg.segdraw_gate(rev, base)
+            self.assertTrue(any(f.startswith("segdraw S=985:") and "ceiling" in f
+                                for f in fails), fails)
+            self.assertFalse(any(f.startswith("segdraw S=984:") for f in fails), fails)
+        with contextlib.redirect_stdout(io.StringIO()):
+            fails = pg.segdraw_gate(rev, main)
+        self.assertTrue(any("segdraw S=985: bytes 1025 -> 1033, max_block 985 -> 1033" in f
+                            for f in fails), fails)
+
+    def test_an_extra_draw_fails_exactly(self):
+        main = pg.segdraw_parse(self.SEGDRAW_MAIN)
+        more = pg.segdraw_parse(self.SEGDRAW_MAIN.replace("S=4096 draws=2", "S=4096 draws=3"))
+        with contextlib.redirect_stdout(io.StringIO()):
+            fails = pg.segdraw_gate(more, main)
+        self.assertEqual(fails, ["segdraw S=4096: draws 2 -> 3 (exact ratchet vs main)"])
+
+    def test_no_segdraw_rows_is_said(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(pg.segdraw_gate({}, None), [])
+        self.assertIn("not gated", out.getvalue())
 
 
 if __name__ == "__main__":

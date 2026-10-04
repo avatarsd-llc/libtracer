@@ -184,9 +184,11 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "swept over fan-out, payload size, topic count, thread count, endpoint type, value "
         "backend and dispatch mode. Every `<mode>` row has a `<mode>-batch` twin timed over a "
         "calibrated batch instead of one operation at a time. Its `fold-*`, `lkv-*` and "
-        "`*alloc-mt*` rows are what the routing and memory chapters chart.",
+        "`*alloc-mt*` rows are what the routing and memory chapters chart. The data-path "
+        "rows run over a payload ladder up to 64 KiB, and the `cliff-alloc-*` rows time one "
+        "segment alloc/free at every size of the allocator-cliff ladder (#1806).",
         "ns p50 / p99 / mean · deliveries/s",
-        "per-PR + per-push gate, twenty canonical points"),
+        "per-PR + per-push gate, twenty-seven canonical points"),
     instrument_t(
         "bench_forward_demux.cpp", "framed", ("routing",),
         "Drives one FWD forward hop through the inbound link's own receiver against a registry "
