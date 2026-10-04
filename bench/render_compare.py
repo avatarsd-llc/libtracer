@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import re
 import sys
 
 REF_SIZE = 64  # the fixed payload for the fan-out / topic sweeps (must be a kGridSizes point)
@@ -164,20 +165,146 @@ def tail_ready(rows: list[dict], mode: str) -> tuple[bool, str]:
     return True, ""
 
 
-def build(rows: list[dict]) -> dict:
-    """Assemble the chart configs + raw table from measured rows."""
+# ---- history picker (#1771) -------------------------------------------------------------
+# The in-process sweeps the bench-local store banks per commit, as chart id -> lines. Each
+# line is (series key, store-name pattern with the swept value as its one group, metric,
+# bytes-scaled). The pattern is the store spelling of the same (mode, fixed point) the
+# live chart draws, and a line's two engines come from the SAME pass on the same pinned
+# CPU, which is what lets a picked point be read as one comparison. "Bytes-scaled" turns
+# deliveries/s into MB/s exactly as the bench does (`deliv_s * size / 1e6`), since the
+# store banks the rate and not the bandwidth. The topic pair carries libtracer alone for
+# the reason the live chart does (see the ruling comment in `build`). The network charts
+# have no entry: the store banks no `net-*` rows, so they stay single-pass.
+_FAN = r"64B/fan(\d+)/1ep"
+_PAY = r"(\d+)B/fan1/1ep"
+HIST_SPECS: dict[str, list[tuple]] = {
+    "ltz-tp-fan": [("libtracer", f"inproc {_FAN}", "throughput", False),
+                   ("libtracer-deliver", f"inproc-deliver {_FAN}", "throughput", False),
+                   ("zenoh", f"zenoh inproc {_FAN}", "throughput", False)],
+    "ltz-lat-fan": [("libtracer", f"inproc {_FAN}", "p50 latency", False),
+                    ("libtracer-deliver", f"inproc-deliver {_FAN}", "p50 latency", False),
+                    ("zenoh", f"zenoh inproc {_FAN}", "p50 latency", False)],
+    "ltz-tp-size": [("libtracer", f"inproc {_PAY}", "throughput", False),
+                    ("zenoh", f"zenoh inproc {_PAY}", "throughput", False)],
+    "ltz-mb-size": [("libtracer", f"inproc {_PAY}", "throughput", True),
+                    ("zenoh", f"zenoh inproc {_PAY}", "throughput", True)],
+    "ltz-tp-ep": [("libtracer", r"inproc-path 64B/fan1/(\d+)ep", "throughput", False)],
+    "ltz-lat-ep": [("libtracer", r"inproc-path 64B/fan1/(\d+)ep", "p50 latency", False)],
+}
+
+
+def history(store: dict | None) -> dict | None:
+    """@brief The bench-local store, reshaped into per-commit sweeps for the history picker.
+
+    Returns ``{"picks": [...], "charts": {chart_id: {key: {"xs", "v"}}}}`` or None when the
+    store is absent or banks none of the swept rows. ``picks`` is one entry per recorded
+    commit, oldest first: short sha, subject line and, when a release tag resolves to that
+    commit, its name (``≈`` when the tag commit is not itself recorded and the marker sits
+    on the nearest following one, exactly as the history charts mark it). ``v[k]`` is the
+    line's value at each ``xs`` for pick ``k``, or None where that pass recorded no value.
+
+    Contaminated samples are dropped through the same predicate the history charts use, so
+    a picked point is never one the trend charts refuse to draw. Commits are keyed by full
+    sha across the two suites (latency and throughput are banked separately), so a pick
+    reads both from the same recorded pass.
+    """
+    if not store or not store.get("entries"):
+        return None
+    import render_history  # sibling; deferred so --md / --standalone stay git-free
+
+    order: list[str] = []
+    meta: dict[str, dict] = {}
+    values: dict[str, dict[str, float]] = {}  # sha -> store name -> value
+    for entries in store["entries"].values():
+        skip = render_history._contaminated_idx(entries)
+        rels = {r["i"]: ("≈ " if r["approx"] else "") + r["label"]
+                for r in render_history.release_annotations(entries)}
+        for i, e in enumerate(entries):
+            sha = e.get("commit", {}).get("id", "")
+            if not sha:
+                continue
+            if sha not in meta:
+                order.append(sha)
+                meta[sha] = {"sha": sha[:7],
+                             "msg": render_history._first_line(e["commit"].get("message", ""))}
+            if i in rels:
+                meta[sha]["rel"] = rels[i]
+            if i in skip:
+                continue
+            got = values.setdefault(sha, {})
+            for b in e.get("benches", []):
+                try:
+                    got[b["name"]] = float(b["value"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+    charts: dict[str, dict] = {}
+    for cid, lines in HIST_SPECS.items():
+        out: dict[str, dict] = {}
+        for key, pat, metric, scaled in lines:
+            rx = re.compile(f"^{pat} {re.escape(metric)}$")
+            per: list[dict[int, float]] = []
+            for sha in order:
+                pts: dict[int, float] = {}
+                for name, v in values.get(sha, {}).items():
+                    m = rx.match(name)
+                    if m:
+                        x = int(m.group(1))
+                        pts[x] = float(f"{v * x / 1e6 if scaled else v:.4g}")
+                per.append(pts)
+            xs = sorted({x for pts in per for x in pts})
+            if xs:
+                out[key] = {"xs": xs,
+                            "v": [[pts.get(x) for x in xs] if pts else None for pts in per]}
+        if out:
+            charts[cid] = out
+    if not charts:
+        return None
+    return {"picks": [meta[s] for s in order], "charts": charts}
+
+
+def _attach_history(data: dict, hist: dict | None) -> None:
+    """@brief Hang each chart's banked lines on it, labelled and colored like its live lines.
+
+    A banked line carries the live chart's legend text and color index for the same key, so
+    a picked commit is drawn in the idiom of the pass it replaces; a key the live pass did
+    not draw (a deliver row this build skipped) takes the spelled-out default label.
+    """
+    if not hist:
+        return
+    names = {k: (lab, ci) for k, lab, ci in LINES}
+    used = False
+    for c in data["charts"]:
+        banked = hist["charts"].get(c["id"])
+        if not banked:
+            continue
+        live = {s["key"]: s for s in c["series"]}
+        c["hist"] = [dict(key=k, label=live[k]["label"] if k in live else names[k][0],
+                          ci=names[k][1], **banked[k])
+                     for k, _, _ in LINES if k in banked]
+        used = True
+    if used:
+        data["hist"] = {"picks": hist["picks"]}
+
+
+# The engine is the LINE dimension here, exactly as fan-out or payload is the line
+# dimension on a history chart. Labels are spelled out rather than keyed by system id
+# so the legend reads as prose and so the write-vs-deliver distinction — the one that
+# decides whether the Zenoh row is a fair counterpart — is visible on the chart itself
+# instead of only in the prose above it.
+LINES = [("libtracer", "libtracer — write (store+notify+deliver)", 0),
+         ("libtracer-deliver", "libtracer — deliver-only (propagate)", 1),
+         ("zenoh", "Zenoh — zenoh-c 1.10.0, peer mode (put)", 2)]
+
+
+def build(rows: list[dict], hist: dict | None = None) -> dict:
+    """Assemble the chart configs + raw table from measured rows.
+
+    `hist` is @ref history's reshaped bench-local store; when given, each sweep it banks
+    gains a history picker over it (#1771).
+    """
     def two(mode, fixed, axis, col):
         return {sys: [[p[0], p[1]] for p in _series(rows, sys, mode, fixed, axis, [col])]
                 for sys in ("libtracer", "zenoh")}
-
-    # The engine is the LINE dimension here, exactly as fan-out or payload is the line
-    # dimension on a history chart. Labels are spelled out rather than keyed by system id
-    # so the legend reads as prose and so the write-vs-deliver distinction — the one that
-    # decides whether the Zenoh row is a fair counterpart — is visible on the chart itself
-    # instead of only in the prose above it.
-    LINES = [("libtracer", "libtracer — write (store+notify+deliver)", 0),
-             ("libtracer-deliver", "libtracer — deliver-only (propagate)", 1),
-             ("zenoh", "Zenoh — zenoh-c 1.10.0, peer mode (put)", 2)]
 
     def chart(cid, title, cond, series, x, fmt, ylabel, log, read, labels=None):
         """One chart in the render_history payload shape (see perf_history.js).
@@ -191,7 +318,8 @@ def build(rows: list[dict]) -> dict:
         for key, label, ci in LINES:
             pts = series.get(key) or []
             if pts:
-                out.append({"label": (labels or {}).get(key, label), "ci": ci, "pts": pts})
+                out.append({"key": key, "label": (labels or {}).get(key, label), "ci": ci,
+                            "pts": pts})
         if not out:
             return None
         return {"id": cid, "section": "zenoh", "suite": "compare", "xkind": "param",
@@ -352,7 +480,9 @@ def build(rows: list[dict]) -> dict:
                              "produced rows, so there is nothing to compare (the transport bench "
                              "did not come up).")
 
-    return {"charts": charts, "net_notes": net_notes}
+    out = {"charts": charts, "net_notes": net_notes}
+    _attach_history(out, hist)
+    return out
 
 
 def raw_table(rows: list[dict]) -> list[dict]:
@@ -446,8 +576,12 @@ def _net_notes_html(net_notes: list[str]) -> str:
             f"<ul>{items}</ul></div>")
 
 
-def html_block(rows: list[dict], provenance: str) -> str:
+def html_block(rows: list[dict], provenance: str, hist: dict | None = None) -> str:
     """@brief The comparison charts, in the page's ONE chart idiom.
+
+    `hist` (@ref history over the bench-local store) adds the history picker to every
+    sweep the store banks: the latest banked commit by default, release tags marked, and
+    a compare mode overlaying two picks on the same axes (#1771).
 
     Emits a `.ph-hist` root exactly like a history section, so `perf_history.js` picks it
     up with no special case and the charts look and behave identically to every other
@@ -458,8 +592,16 @@ def html_block(rows: list[dict], provenance: str) -> str:
     root emitted after the script tag is still drawn. That is the whole benefit of there
     being one engine — this block is data, not machinery.
     """
-    data = build(rows)
+    data = build(rows, hist)
     payload = json.dumps(data, separators=(",", ":"))
+    picker = ("" if "hist" not in data else
+              '\n  <p class="ph-note">The in-process sweeps carry a <b>history picker</b> over the '
+              "<b>bench-local</b> store: each banked commit is one pass on one pinned CPU with both "
+              "engines in it, so a picked point is as like-for-like as this build's own pass. "
+              "It opens on the latest banked commit; 🏷 marks a release tag; <b>compare</b> "
+              "overlays a second pick, dashed, on the same axes. <i>this build</i> is the pass "
+              "described above. The network charts are this build's pass only: the store banks "
+              "no transport rows.</p>")
     return f""":::{{raw}} html
 <div class="ph-hist">
   <p class="ph-note">Measured on the same runner in the same rounds — the whole grid swept
@@ -472,7 +614,7 @@ def html_block(rows: list[dict], provenance: str) -> str:
   axes — no ratios, and every "reading" under a chart is computed from that chart's own
   endpoints at render time. Read trends and orders of magnitude, not the third digit;
   shared-runner variance is real. x-axis = the swept parameter (these are the only charts on
-  the page whose x-axis is not a commit).</p>
+  the page whose x-axis is not a commit).</p>{picker}
   <div class="ph-grid ph-charts"></div>
   {_net_notes_html(data.get("net_notes", []))}
   {_tail_note_html(rows)}

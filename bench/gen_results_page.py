@@ -1075,8 +1075,11 @@ def tests_block() -> str:
             f"By area: {rows}. Full per-suite detail: [Test report](test-report.md).")
 
 
-def zenoh_compare_block() -> str:
+def zenoh_compare_block(local: dict | None = None) -> str:
     """Run both grids and render the absolute-value comparison charts.
+
+    `local` is the bench-local store: the sweeps it banks gain a history picker over it
+    (#1771). Its absence only drops the picker.
 
     Two absences are treated differently on purpose:
 
@@ -1105,7 +1108,7 @@ def zenoh_compare_block() -> str:
         return ("_(Zenoh not vendored in this build, so the comparison charts are omitted."
                 " Run [`bench/fetch_zenoh.sh`](https://github.com/avatarsd-llc/libtracer/tree/main/bench)"
                 " before the bench build to generate them; the libtracer numbers above still apply.)_")
-    return render_compare.html_block(rows, provenance())
+    return render_compare.html_block(rows, provenance(), render_compare.history(local))
 
 
 def provenance() -> str:
@@ -1367,7 +1370,7 @@ an MCU allocator in hundreds — so a host reading of churn is a *lower* bound.
 
 {mprose(M, "Fairness in the Zenoh comparison")}
 
-{zenoh_compare_block()}
+{zenoh_compare_block(history_local)}
 
 {head("codec")}
 
