@@ -32,8 +32,9 @@ the backend's `destroy` when the pre-decrement value was 1 (`tr::view::detail::r
 `segment_ptr_t`'s copy constructor and `reset`, `segment.hpp:if (seg_) seg_->refcount.inc_relaxed()` and `segment.hpp:segment_ptr_t::reset`). Relaxed
 on the increment is sound because a clone is always made from a reference the caller
 already holds; the acq_rel decrement is what orders the last writer's stores before the
-destructor reads them. A `LIBTRACER_NO_ATOMIC` build substitutes a plain counter with
-the same call shape (`segment.hpp:void inc_relaxed() noexcept { ++count_; }`).
+destructor reads them. On a core with no atomic read-modify-write the count is a load and
+a store inside the build's guard instead, with the same call shape
+(`segment.hpp:class basic_ref_count_t`).
 
 ## Interface
 

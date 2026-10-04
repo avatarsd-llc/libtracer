@@ -32,8 +32,8 @@
  *
  * The subscriber reports `pins` / `copies` by segment-pointer identity between the stored
  * value and the RX segments the backend handed out — an outcome, available with or without
- * `LIBTRACER_PIN_INSTRUMENT`. An arm that intends to share and reports zero pins invalidates its
- * own row.
+ * the decision-site counters (`kInstrumentCounters`). An arm that intends to share and reports zero
+ * pins invalidates its own row.
  *
  * @section pin_net_control What the control arm is
  *
@@ -138,7 +138,7 @@ std::vector<std::byte> fwd_write_frame(std::size_t payload_bytes, std::size_t id
  *
  * The membership set is what turns "the stored value's segment" into a pin/copy verdict
  * without needing the decision site's counters — an OUTCOME instrument, so a build with
- * `LIBTRACER_PIN_INSTRUMENT` off still reports a reachability figure per row.
+ * `kInstrumentCounters` off still reports a reachability figure per row.
  */
 class recording_pool_t final : public tr::mem::mem_backend_t {
    public:

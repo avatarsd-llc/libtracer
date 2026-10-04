@@ -46,6 +46,36 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `tr::wire::config_reader_t`; `tr::net::sink_slot_t<Fn>` → `tr::sink_slot_t<Fn>`. Code inside
   `namespace tr::graph` that named the view types unqualified must now qualify them as `view::`
   or add a using-declaration in its own `.cpp`.
+- **The four build switches that duplicated a configuration trait are gone, and each is refused
+  with a message naming the trait
+  ([#1722](https://github.com/avatarsd-llc/libtracer/issues/1722), ADR-0068).** The
+  configuration is one named type, set in `libtracer/config_override.hpp`.
+  - `LIBTRACER_NO_ATOMIC` (compile definition). The segment refcount, and the ingress-loan claim
+    word beside it, now pick their binding from the target, as `tr::rmw_counter_t` does. Where
+    the 32-bit atomic is always lock-free, the count is one hardware RMW, as before. On a core
+    without atomic RMW (Cortex-M0, rv32imc) it is a load and a store inside one section of
+    `config_t::guard_t`. `tr::view::detail::ref_count_t` is now
+    `basic_ref_count_t<config_t::guard_t, kNative>` and reports `is_native`. A test can name
+    the guarded binding directly. The second substrate build (`substrate_no_atomic`) is gone. Defining the macro is a compile error. **Migration:** a
+    single-threaded build that set `-DLIBTRACER_NO_ATOMIC` binds
+    `using guard_t = tr::no_guard_t;` in its fragment. Its refcount then compiles to the same
+    plain load and store. A multi-tasking build without atomic RMW binds an interrupt-masked
+    guard instead.
+  - `LIBTRACER_PIN_INSTRUMENT` (compile definition). The RFC-0022 §6 pin/copy counters in
+    `pin_instrument.hpp` follow `kInstrumentCounters`. The `LIBTRACER_TICK_PIN()` /
+    `LIBTRACER_TICK_COPY()` / `LIBTRACER_TICK_PIN_REFUSED()` macros are replaced by
+    `tr::graph::instrument::tick_pin()` / `tick_copy()` / `tick_refused()`, which compile to
+    nothing unless the trait is set. Defining the macro is a compile error. **Migration:** bind
+    `static constexpr bool kInstrumentCounters = true;`. In `bench/`, configure with
+    `-DLIBTRACER_INSTRUMENT_COUNTERS=ON`; the bench's own `LIBTRACER_PIN_INSTRUMENT` option is
+    removed.
+  - `-DLIBTRACER_ACL_FULL` and `-DLIBTRACER_LKV_SLOT` (CMake options, deprecated since #1142).
+    The build no longer writes an override fragment for them. Configuring with a value that
+    would have changed the build fails before `project()`, naming the trait. A cached default
+    value (`OFF`, `single_writer_slot_t`) changed nothing, so it gets a warning and is dropped
+    from the cache. **Migration:** bind `using acl_policy_t = full_acl_policy_t;` or
+    `using lkv_slot_t = hazard_slot_t;` in your fragment. CI's matrix legs now use the
+    checked-in presets under `core/tests/presets/`.
 - **The config member `reader_guard_t` is renamed `guard_t`, and a fragment that still defines
   the old name no longer compiles
   ([#1703](https://github.com/avatarsd-llc/libtracer/issues/1703)).** The guard serializes

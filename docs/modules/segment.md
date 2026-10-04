@@ -33,19 +33,24 @@ There is no separate `release()` step.
 
 The atomic orderings are the canonical intrusive_ptr pattern, specified once in
 [reference/02](../reference/02-graph-model.md) §required atomic operations:
-increment `relaxed` (`core/include/libtracer/segment.hpp:void inc_relaxed() noexcept { count_.fetch_add(1` — the caller already
+increment `relaxed` (`core/include/libtracer/segment.hpp:count_.fetch_add(1, std::memory_order_relaxed)` — the caller already
 holds a reference, so the data dependency travels through it), decrement
 `acq_rel` (`core/include/libtracer/segment.hpp:return count_.fetch_sub(1, std::memory_order_acq_rel)` — release the writes before another thread observes the count
 drop, acquire on observing the drop to zero), inspect `acquire` (`core/include/libtracer/segment.hpp:return count_.load(std::memory_order_acquire)`). The
 decrement returns the value *before* it, so a return of `1` identifies the caller
 that dropped the last reference.
 
-`LIBTRACER_NO_ATOMIC` replaces the atomic with a plain `uint_least32_t` for
-single-threaded and Cortex-M0/M0+ targets that have no LDREX/STREX
-(`core/include/libtracer/segment.hpp:#ifndef LIBTRACER_NO_ATOMIC`, `core/include/libtracer/segment.hpp:void inc_relaxed() noexcept { ++count_; }`). It is a compile definition, not a
-CMake option: the constrained-target footprint build sets it
-(`tools/cortexm0_footprint.py:"-DLIBTRACER_NO_ATOMIC"`) and the substrate test is built a second time
-with it (`core/tests/CMakeLists.txt:add_executable(substrate_test_no_atomic`, `core/tests/CMakeLists.txt:target_compile_definitions(substrate_test_no_atomic PRIVATE`).
+On a core with no atomic read-modify-write — Cortex-M0/M0+ (no LDREX/STREX), rv32imc —
+the count takes its *guarded* binding instead: a load and a store inside one section of
+the build's guard, `config_t::guard_t` (`core/include/libtracer/segment.hpp:inline constexpr bool kNativeRefCount`,
+`core/include/libtracer/segment.hpp:class basic_ref_count_t`). The choice is made from the target, the same
+way `tr::rmw_counter_t` makes it for a vertex's write sequence; nothing is defined on the
+command line. A single-threaded node makes the guard free by binding `tr::no_guard_t` in
+its `libtracer/config_override.hpp`, which is what the footprint sentinels do
+(`core/tests/footprint/config/libtracer/config_override.hpp`). On a host the substrate test
+drives the guarded binding by naming it, under several threads
+(`core/tests/substrate_test.cpp:test_refcount_bindings_under_threads`). The old
+`LIBTRACER_NO_ATOMIC` macro was removed in #1722 and is refused at compile time.
 
 ## API reference
 
@@ -121,8 +126,8 @@ sequenceDiagram
 - **Reclaim is devirtualizable** — the cached module-set tag turns per-release
   reclaim into a `switch`, foldable to one direct call on a target that links a
   single backend.
-- **Portable to cores without atomics** — `LIBTRACER_NO_ATOMIC` drops to a plain
-  counter where the application guarantees no cross-thread sharing.
+- **Portable to cores without atomics** — the guarded binding counts under the build's
+  guard, which a single-threaded node binds to `tr::no_guard_t` for a plain counter.
 
 ## Pitfalls
 
@@ -136,10 +141,10 @@ sequenceDiagram
   debug and metrics (`segment.hpp:segment_ptr_t::use_count`). A count of 1 does not mean no other
   thread is about to clone the handle, and branching on it reintroduces the race
   the refcount exists to remove.
-- **`LIBTRACER_NO_ATOMIC` is an application promise, not a portability switch.**
-  With a plain counter, one cross-thread clone or release races the count and
-  corrupts the lifetime silently. Set it only where the application serializes
-  all access to segments.
+- **`tr::no_guard_t` is an application promise, not a portability switch.**
+  With it bound, the guarded refcount is a plain load and store, and one cross-thread
+  clone or release races the count and corrupts the lifetime silently. Bind it only
+  where the application serializes all access to libtracer state.
 - **`bytes` is writable at the type level; legality is the backend's contract.**
   A borrow over ROM or a caller's `const` buffer hands out a mutable
   `std::span<std::byte>` all the same (`segment.hpp:segment_t`, `segment.hpp:segment_t::bytes`); writing through

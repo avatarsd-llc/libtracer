@@ -9,12 +9,13 @@
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
  * Reuses the
- * seed vectors as real TLV bytes; no JSON parser. Builds twice — once with
- * atomic refcounts, once with -DLIBTRACER_NO_ATOMIC (single-threaded mode).
+ * seed vectors as real TLV bytes; no JSON parser. The guarded refcount a core with no
+ * atomic read-modify-write takes is driven directly, by naming its binding (#1722).
  */
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -26,6 +27,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -99,6 +101,55 @@ void test_transfer_vs_clone() {
     tr::view::segment_ptr_t cloned = moved;  // clone: a new ref
     check(moved.use_count() == 2, "clone adds exactly one reference");
     check(be.destroys == 0, "still alive while a handle remains");
+}
+
+/**
+ * @brief Both refcount bindings keep the count exact while several threads clone and drop
+ *        (#1722).
+ *
+ * The bound count follows the target: one hardware RMW where the 32-bit atomic is always
+ * lock-free, else a load and a store inside one section of `config_t::guard_t`. A host only
+ * ever binds the first, so the guarded binding is driven here by naming it, over the real host
+ * guard. A guarded update that skipped its guard would lose updates in this run, and the count
+ * would not come back to 1.
+ */
+void test_refcount_bindings_under_threads() {
+    std::printf("Refcount bindings under concurrent clone/drop:\n");
+    check(tr::view::detail::ref_count_t::is_native ==
+              std::atomic<std::uint_least32_t>::is_always_lock_free,
+          "the bound refcount follows the target's atomic RMW");
+
+    constexpr int kThreads = 4;
+    constexpr int kRounds = 20000;
+    const auto hammer = [](auto& count) {
+        std::vector<std::thread> workers;
+        workers.reserve(kThreads);
+        for (int t = 0; t < kThreads; ++t) {
+            workers.emplace_back([&count] {
+                for (int i = 0; i < kRounds; ++i) {
+                    count.inc_relaxed();
+                    (void)count.dec_acq_rel();
+                }
+            });
+        }
+        for (auto& w : workers) w.join();
+    };
+
+    tr::view::detail::basic_ref_count_t<tr::mutex_guard_t, false> guarded(1);
+    static_assert(!decltype(guarded)::is_native);
+    hammer(guarded);
+    check(guarded.load_acquire() == 1, "guarded binding: every clone was dropped, count is 1");
+    check(guarded.dec_acq_rel() == 1, "guarded binding: the last drop reports 1");
+
+    tr::view::detail::basic_ref_count_t<tr::mutex_guard_t, true> native(1);
+    hammer(native);
+    check(native.load_acquire() == 1, "native binding: every clone was dropped, count is 1");
+
+    tr::view::rx_loan_word_t word{0};
+    check(tr::view::detail::claim_word<tr::mutex_guard_t, false>(&word, &word),
+          "guarded loan claim: the first claim takes the reserve");
+    check(!tr::view::detail::claim_word<tr::mutex_guard_t, false>(&word, &word),
+          "guarded loan claim: a second claim finds it taken");
 }
 
 void test_zero_copy_subview_concat() {
@@ -423,6 +474,7 @@ int main() {
 
     test_refcount_lifetime();
     test_transfer_vs_clone();
+    test_refcount_bindings_under_threads();
     test_zero_copy_subview_concat();
     test_rope_equivalence(vroot);
     test_cast_claim_outlives_source(vroot);
@@ -432,8 +484,5 @@ int main() {
     // Last: it fills the process-global device-backend table (#1381).
     test_device_backend_registry();
 
-#ifdef LIBTRACER_NO_ATOMIC
-    std::printf("\n(built with LIBTRACER_NO_ATOMIC — single-threaded refcount)\n");
-#endif
     return tr::testing::summary("substrate");
 }

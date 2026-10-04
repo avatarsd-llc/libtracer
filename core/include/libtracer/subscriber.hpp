@@ -274,7 +274,7 @@ struct subscriber_remote_t {
      * while the pin guarantees the entry's own reference still holds the count above zero.
      *
      * `%tr::view::detail::ref_count_t` is the in-tree primitive @ref tr::view::segment_ptr_t
-     * already uses, `LIBTRACER_NO_ATOMIC` fallback included.
+     * already uses, guarded binding included (a core with no atomic RMW, #1722).
      */
     view::detail::ref_count_t refs{1};
 };

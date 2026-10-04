@@ -240,9 +240,13 @@ is a knob the fragment does not state at all (#1244).
 | `kInstrumentCounters` (`config.hpp:default_config_t::kInstrumentCounters`) | instrumentation | `false` — compiled out | inherited — only the core test build and `bench/`'s `LIBTRACER_INSTRUMENT_COUNTERS` bind it (#1664) |
 | `kAllowInsecureTls` (`config.hpp:default_config_t::kAllowInsecureTls`) | capability | `false` — a SPEC `insecure` key is refused | inherited — only the `quic` workflow's second run binds it, through `core/tests/insecure-tls/` |
 
-Two CMake variables survive for one transition release, `-DLIBTRACER_ACL_FULL` and
-`-DLIBTRACER_LKV_SLOT`; `core/CMakeLists.txt` writes a fragment on their behalf. The five other
-cache variables this table used to list were deleted with the template (#1142).
+No knob has a CMake variable. The last two, `-DLIBTRACER_ACL_FULL` and `-DLIBTRACER_LKV_SLOT`,
+were removed after their one transition release (#1722): configuring with a value that would
+change the build is an error naming the trait to bind instead. The two compile definitions that
+duplicated a trait went with them — `LIBTRACER_NO_ATOMIC` (the segment refcount now follows the
+target and `guard_t`) and `LIBTRACER_PIN_INSTRUMENT` (folded into `kInstrumentCounters`) — and
+`config.hpp` refuses either with an `#error`. The five other cache variables this table used to
+list were deleted with the template (#1142).
 
 Each is documented at its declaration with what it costs and when to move it; that header is
 the reference, not this table. What matters here is the shape: **fifteen knobs, all named, all
@@ -422,8 +426,8 @@ and nothing can drift.
 Nothing else has to be touched. Every override fragment inherits `default_config_t`, so an
 existing override — the ESP-IDF component's, an application's — picks up the new knob at its
 new default without an edit. Deliberately, a knob does **not** get a CMake cache variable: it is
-set in the fragment, as C++. (`-DLIBTRACER_ACL_FULL` and `-DLIBTRACER_LKV_SLOT` survive for one
-transition release, with `core/CMakeLists.txt` writing a fragment on their behalf.)
+set in the fragment, as C++. (`-DLIBTRACER_ACL_FULL` and `-DLIBTRACER_LKV_SLOT`, the last two
+that had one, were removed in #1722.)
 
 Put the knob in `default_config_t` even when it states an L0 fact — `kSpinWaitSafe` is a
 `tr::mem` concept whose spelling is derived from `config_t`. A knob outside the one named type

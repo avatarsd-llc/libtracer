@@ -170,7 +170,7 @@ target_compile_options(bench_lkv_slot PRIVATE -Wall -Wextra)
 # slot under concurrency, where acquisition is amortized to a free-list hit and a substrate
 # change would read as a flat line; this one holds thousands of never-written slots live so
 # every publish takes the allocating arm. Instantiates hazard_slot_t DIRECTLY, so it measures
-# the same code at either -DLIBTRACER_LKV_SLOT binding. Diagnostic, not a perf gate.
+# the same code whichever `lkv_slot_t` the build binds. Diagnostic, not a perf gate.
 add_executable(bench_hazard_node bench_hazard_node.cpp)
 target_link_libraries(bench_hazard_node PRIVATE libtracer)
 target_compile_options(bench_hazard_node PRIVATE -Wall -Wextra)
@@ -349,15 +349,12 @@ target_compile_options(bench_failable_census PRIVATE -Wall -Wextra)
 #     bounded RX pool, so the throughput claim is a receiver's count and the RAM claim is a
 #     measured free-slot floor rather than arithmetic.
 #
-# LIBTRACER_PIN_INSTRUMENT arms the decision site's pin/copy counters. It is defined on the
-# libtracer target too (PUBLIC would leak it into every consumer), because the counter is
-# incremented inside the library's TU and read from the bench's. Both benches ALSO carry an
-# instrument that needs no such define — segment-pointer identity between the stored value and
-# the frame — which is what lets this exact source build as the untouched-main control arm.
-option(LIBTRACER_PIN_INSTRUMENT "Arm the RFC-0022 §6 pin/copy branch counters" ON)
-if(LIBTRACER_PIN_INSTRUMENT)
-    target_compile_definitions(libtracer PUBLIC LIBTRACER_PIN_INSTRUMENT)
-endif()
+# The decision site's pin/copy counters are armed by `kInstrumentCounters`, so they come with
+# LIBTRACER_INSTRUMENT_COUNTERS=ON above (the old LIBTRACER_PIN_INSTRUMENT switch was folded
+# into that trait in #1722, and defining the macro is now a compile error). Both benches ALSO
+# carry an instrument that needs no configuration — segment-pointer identity between the stored
+# value and the frame — which is what lets this exact source build as the untouched-main
+# control arm.
 
 add_executable(bench_pin_ratio bench_pin_ratio.cpp)
 target_link_libraries(bench_pin_ratio PRIVATE libtracer)

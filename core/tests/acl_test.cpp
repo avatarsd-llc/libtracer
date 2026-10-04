@@ -444,7 +444,7 @@ void test_subset_rejections() {
                                                 .mask = bit(acl_right_t::READ)},
                                            })));
         if constexpr (tr::graph::acl_policy_t::kAcceptsDeny) {
-            // full host policy (LIBTRACER_ACL_FULL): DENY is a first-class ACE, stored + evaluated
+            // full host policy (full_acl_policy_t): DENY is a first-class ACE, stored + evaluated
             check(w.has_value(), "the full policy stores an ACL carrying a DENY ACE");
         } else {
             // ALLOW-only subset: DENY is beyond the profile — rejected at write, not
@@ -489,7 +489,7 @@ void test_subset_rejections() {
     if constexpr (tr::graph::acl_policy_t::kAcceptsDeny) {
         // the full policy actually EVALUATES DENY: an ordered [DENY, ALLOW] on the same bit
         // denies (first-match-per-bit), proving a DENY overrides a later ALLOW — not just parse
-        // acceptance but real ADR-0020 evaluation coverage for the LIBTRACER_ACL_FULL config.
+        // acceptance but real ADR-0020 evaluation coverage for the full_acl_policy_t config.
         graph_t gf;
         const vertex_handle_t v = gf.register_vertex(path_t("/d"), role_t::STORED_VALUE);
         {

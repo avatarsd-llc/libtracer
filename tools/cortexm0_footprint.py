@@ -6,7 +6,8 @@
 Cross-compiles the minimum-feature (P0) libtracer node — the "required modules"
 a bare-metal MCU links, exercised by the fixed fixture
 `core/tests/footprint/sentinel_node.cpp` — for arm-none-eabi Cortex-M0 with the
-MCU profile (`-std=c++23 -Os -fno-exceptions -fno-rtti`, `LIBTRACER_NO_ATOMIC`,
+MCU profile (`-std=c++23 -Os -fno-exceptions -fno-rtti`, the single-threaded node
+fragment `core/tests/footprint/config` binding `guard_t = tr::no_guard_t`,
 `-ffunction-sections -fdata-sections` + `--gc-sections`), links and sizes it,
 and gates the flash footprint (text + rodata + data-initializers) at a hard
 ceiling. RAM occupancy (data + bss) is reported but not gated — the gate is the
@@ -155,7 +156,6 @@ def _compile_and_link(
         "-fno-rtti",
         f"-mcpu={mcpu}",
         "-mthumb",
-        "-DLIBTRACER_NO_ATOMIC",
         "-DNDEBUG",  # release profile: debug-only asserts (view.hpp bounds checks) compile out.
         # Single-backend MCU profile: the destroy dispatch folds to one direct call (ADR-0047 §2).
         "-DLIBTRACER_BACKEND_SET_POOL_ONLY",
@@ -163,6 +163,8 @@ def _compile_and_link(
         "-fdata-sections",
         "-Wall",
         "-Wextra",
+        # The single-threaded node configuration (#1722) — ahead of core/include.
+        f"-I{root / 'core' / 'tests' / 'footprint' / 'config'}",
         f"-I{include}",
     ]
     link_flags = [
@@ -301,8 +303,9 @@ def main() -> int:
     lines = [
         f"## libtracer Cortex-M0 footprint — required modules ({args.mcpu})",
         "",
-        f"Profile: `arm-none-eabi-g++ -std=c++23 -Os -fno-exceptions -fno-rtti "
-        f"-DLIBTRACER_NO_ATOMIC` + `--gc-sections`, stripped.",
+        f"Profile: `arm-none-eabi-g++ -std=c++23 -Os -fno-exceptions -fno-rtti` + the "
+        f"single-threaded node fragment (`core/tests/footprint/config`) + `--gc-sections`, "
+        f"stripped.",
         f"Required modules: {modules} + the `sentinel_node` fixture.",
         f"Toolchain: `{toolchain}` — compare flash numbers ONLY within one toolchain.",
         "",

@@ -399,7 +399,7 @@ once (`` `fwd_router.cpp:if (frame.link_count() == 1)` ``). The gate refuses a l
 research notes keep theirs, unchecked, as the record of the tree they described.
 
 `build-test` runs a **matrix**, not one configuration — ACL policy variants
-(`LIBTRACER_ACL_FULL`, `LIBTRACER_LKV_SLOT`), a minimal module set, a
+(`acl_policy_t`, `lkv_slot_t`, bound by the `core/tests/presets/` fragments), a minimal module set, a
 reclaim-strict binding, and a bus-closed build. A change that passes the default
 and breaks a matrix cell is still broken; name the cell.
 
