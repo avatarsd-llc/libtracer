@@ -860,9 +860,10 @@ def gate_paired(cand: dict[str, pathlib.Path], base: dict[str, pathlib.Path],
     for (_b, m, s, f, e) in POINTS:
         k = f"{m}/{s}/{f}/{e}"
         cs, bs = samples["cand"].get(k), samples["base"].get(k)
-        if not cs and k not in MAY_BE_ABSENT:
+        if not cs and (k not in MAY_BE_ABSENT or bs):
             # Absent from the candidate (and so from both arms, or a candidate that stopped
-            # emitting a row the baseline still has): nothing was gated, and that FAILS.
+            # emitting a row the baseline still has): nothing was gated, and that FAILS. A
+            # CPU-gated row is exempt only when the baseline, on the same host, lacks it too.
             print(f"  {k:<22} (absent from the candidate — FAIL, see below)")
             fails.append(missing_point(k))
             continue

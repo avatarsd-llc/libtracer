@@ -885,6 +885,11 @@ class MissingGatedKeysFail(unittest.TestCase):
         fails, _ = self.gate(present, present)
         self.assertEqual(fails, [])
 
+    def test_a_multi_row_the_baseline_has_but_the_candidate_dropped_fails(self):
+        k = sorted(pg.MAY_BE_ABSENT)[0]
+        fails, _ = self.gate([x for x in self.keys() if x != k], self.keys())
+        self.assertEqual([f.split()[0] for f in fails], [k])
+
     def test_the_old_79_byte_rows_do_not_satisfy_the_gate(self):
         """The exact input of the seven-week gap: the bench emits 61 B rows only."""
         transcript = "\n".join([_row("fwd-demux-fixed", 61, 1, 1),
