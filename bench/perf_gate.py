@@ -211,7 +211,7 @@ DEFAULT_TIER = "advisory"
 # and field writes, `op_resolve` reads, FWD COMPACT emission, the RX span sink — and not
 # one of the then-ten points is downstream of that call, so every gate stayed green
 # through a release. They cost NOTHING extra to run: `bench_libtracer`'s default sweep
-# already emits these rows (`run_lkv_store_gate`), so this is two more keys read out of
+# already emits these rows (`run_lkv_store_rows`), so this is two more keys read out of
 # output the gate was already collecting, not two more measurements — the added
 # wall-clock is zero. They were taken at 64 B only, on the argument that the sweep's
 # 1024 B twins move with them (measured, #1250) and a second size would buy correlated
@@ -219,8 +219,8 @@ DEFAULT_TIER = "advisory"
 # and payload in one block, which made 64 B ~30% faster and 1024 B ~2x slower (a 1072 B
 # request misses glibc's 1032 B tcache), and v0.17.0 shipped with the gate green because both
 # directions met on one size. So the heap backend is also gated at 1024 B, on both rows:
-# `lkv-store-heap` (alloc + copy) and `lkv-alloc-heap` (the alloc/free alone, which the
-# ADR-0060 pool/heap RATIO below cannot gate — a slower heap only raises that ratio). The pool
+# `lkv-store-heap` (alloc + copy) and `lkv-alloc-heap` (the alloc/free alone; the ADR-0060
+# pool/heap ratio below is report-only, so this row is its only gate). The pool
 # rows stay at 64 B: a pool slot's layout does not depend on the payload size. These two
 # rows also come from output the default sweep already emits, so they too add no wall-clock.
 # Both run in the sub-100 ns band, so `LAT_TICK_NS` tick-guards their latency legs and the
@@ -482,31 +482,22 @@ _MEM_RE = re.compile(r"^RESULT zeroheap (\w+) allocs=(\d+) frees=\d+ bytes=(\d+)
 # byte of a tolerance. The next priced step declares its own.
 MEM_CHARGED: dict[str, tuple[int, str]] = {}
 
-# --- ADR-0060 LKV copy-store gate (pool-vs-heap ratio) --------------------------------
-# The pooled value_backend vs the default heap on the write-path alloc/free op. A ratio
-# within one run cancels absolute machine speed: it proves the pool routing is live (a heap
-# fallback collapses the ratio toward 1x) and stays deterministically cheaper. The multiple
-# is host-allocator-dependent (glibc's tcache serves a hot same-size malloc/free in ~15 ns
-# -> ~2.5-3x on a quiet runner; ESP-IDF multi_heap is hundreds of ns -> the ADR's >=10x,
-# validated on-device), so the floor is conservative.
+# --- ADR-0060 LKV copy-store ratio (pool-vs-heap), REPORTED, never gated -------------
+# The pooled value_backend vs the default heap on the write-path alloc/free op, as a ratio
+# within one run. The pool's acceptance is NOT a speed ratio (maintainer, #1695, 2026-10-03):
+# its only goal is never to take an allocation from the system heap. That claim is gated
+# structurally, by `bench_forward_heap`'s LKV-ROUTE window: the pool arm's alloc/free loop
+# must make ZERO global operator new/delete calls, with the heap arm as its control, and CI
+# runs it again with LKV_ROUTE_BREAK=1 and requires it to fail. That is the ONLY blocking
+# pool check. A slower pool path is caught as a row, `lkv-store-pool/64/1/1` in POINTS.
 #
-# It is ALSO host-dependent at a fixed code point, and that is why the per-PR form is now
-# PAIRED (#1745). The single-arm form compared the candidate's ratio with a constant: on
-# #1739 it failed 3 runs in 5 at 1.5-1.6x and passed the other 2 at 3.0-3.2x, with both
-# arms' `bench_libtracer` byte-identical in `.text` and in every data address. A runner
-# whose heap is cheap relative to the pool reads low on main too, so the constant floor was
-# measuring the runner. The paired form runs main's binary and the candidate's interleaved,
-# alternating which starts (A B / B A / ...), keeps each arm's BEST observation of each row
-# across the pairs (best-of-rounds: contamination is one-sided, docs/methodology.md), and
-# fails the floor only when the candidate is below it AND below main's ratio from the same
-# session by more than the throughput tolerance. A heap fallback still fails unconditionally:
-# under LKV_FALLBACK_RATIO no runner variance explains it, whatever main reads.
-#
-# The legacy (no-baseline) form keeps the constant floor. Rows absent from a binary (an
-# older main) leave that arm out, so the comparison degrades to the floor rather than
-# passing silently.
-LKV_MIN_RATIO = 2.0
-LKV_FALLBACK_RATIO = 1.25  # a pool routed back to the heap reads ~1.0x; nothing healthy is near it
+# The ratio is printed for the record and fails nothing. It was gated before (a 2.0x floor,
+# paired against main by #1745, with a 1.25x fallback threshold), and it measured the runner:
+# over 254 per-arm best-of-3 CI readings on healthy code (2026-09-29..10-03) S=64 ran
+# 1.4x-6.5x, median 3.0x, bimodal, with main and an identical candidate at 2.1x/1.6x in the
+# SAME session. The paired form stays so the report sets main's same-session ratio beside
+# the candidate's: the arms run interleaved, alternating which starts, and each keeps its
+# BEST observation of each row (best-of-rounds: contamination is one-sided).
 LKV_ROUNDS = 3             # legacy best-of rounds, and the paired form's pair count
 LKV_ROWS = ("lkv-alloc-heap", "lkv-alloc-pool")
 
@@ -540,52 +531,31 @@ def lkv_best(runs: list[dict[int, dict[str, float]]]) -> dict[int, float]:
     return out
 
 
-def lkv_verdict(size: int, cand: float, base: float | None) -> tuple[str, str | None]:
-    """@brief One size's report line and its failure (or None).
+def lkv_line(size: int, cand: float, base: float | None) -> str:
+    """@brief One size's report line: the candidate's best-of ratio, and main's beside it.
 
-    @param cand The candidate's best-of-pairs pool/heap ratio.
+    @param cand The candidate's best-of-rounds pool/heap ratio.
     @param base Main's ratio from the SAME interleaved session, or None (legacy form, or a
                 main binary without the rows).
     """
     line = f"  lkv-alloc S={size:<6} pool/heap alloc/free = {cand:>4.1f}x"
     if base is not None:
         line += f"  (main {base:.1f}x, same session)"
-    if cand < LKV_FALLBACK_RATIO:
-        return (line + f"  << under {LKV_FALLBACK_RATIO}x: heap fallback",
-                f"lkv-alloc S={size} pool only {cand:.1f}x heap alloc/free (< "
-                f"{LKV_FALLBACK_RATIO}x — the ADR-0060 value_backend routing has fallen back "
-                f"to the heap)")
-    if cand >= LKV_MIN_RATIO:
-        return line, None
-    if base is None:
-        return (line + f"  << under {LKV_MIN_RATIO}x floor",
-                f"lkv-alloc S={size} pool only {cand:.1f}x heap alloc/free (< {LKV_MIN_RATIO}x "
-                f"— the ADR-0060 value_backend routing may have broken / fallen back to the "
-                f"heap)")
-    if cand < base * TPUT_REGRESS:
-        return (line + f"  << under {LKV_MIN_RATIO}x floor AND under main",
-                f"lkv-alloc S={size} pool only {cand:.1f}x heap alloc/free, under the "
-                f"{LKV_MIN_RATIO}x floor and under main's {base:.1f}x from the same session "
-                f"by more than {(1 - TPUT_REGRESS) * 100:.0f}% — the pool path regressed")
-    return (line + f"  (under {LKV_MIN_RATIO}x, but so is main on this runner: not gated)", None)
+    return line + "  (reported, not gated — LKV-ROUTE is the pool gate, #1695)"
 
 
-def lkv_ratio_gate(bench: pathlib.Path) -> list[str]:
-    """@brief The legacy form: the candidate alone, best of LKV_ROUNDS, against the floor."""
+def lkv_ratio_report(bench: pathlib.Path) -> None:
+    """@brief The legacy form: the candidate alone, best of LKV_ROUNDS. Fails nothing."""
     cand = lkv_best([lkv_parse(timed([str(bench), "lkv"], timeout=120))
                      for _ in range(LKV_ROUNDS)])
-    fails = []
     for size in sorted(cand):
-        line, fail = lkv_verdict(size, cand[size], None)
-        print(line)
-        if fail:
-            fails.append(fail)
-    return fails
+        print(lkv_line(size, cand[size], None))
 
 
-def lkv_ratio_gate_paired(bench: pathlib.Path, base_bench: pathlib.Path,
-                          pairs: int = LKV_ROUNDS) -> list[str]:
-    """@brief The per-PR form (#1745): main and the candidate interleaved, best-of-pairs."""
+def lkv_ratio_report_paired(bench: pathlib.Path, base_bench: pathlib.Path,
+                            pairs: int = LKV_ROUNDS) -> None:
+    """@brief The per-PR form (#1745): main and the candidate interleaved, best-of-pairs.
+    Fails nothing."""
     runs: dict[str, list] = {"cand": [], "base": []}
     for i in range(max(1, pairs)):
         order = [("base", base_bench), ("cand", bench)]
@@ -594,13 +564,8 @@ def lkv_ratio_gate_paired(bench: pathlib.Path, base_bench: pathlib.Path,
         for arm, path in order:
             runs[arm].append(lkv_parse(timed([str(path), "lkv"], timeout=120)))
     cand, base = lkv_best(runs["cand"]), lkv_best(runs["base"])
-    fails = []
     for size in sorted(cand):
-        line, fail = lkv_verdict(size, cand[size], base.get(size))
-        print(line)
-        if fail:
-            fails.append(fail)
-    return fails
+        print(lkv_line(size, cand[size], base.get(size)))
 
 
 # --- HOW THE GATE TIMES THE FAMILIES (#1803) ------------------------------------------
@@ -618,7 +583,7 @@ def lkv_ratio_gate_paired(bench: pathlib.Path, base_bench: pathlib.Path,
 #     recorded, not scored. A real intruder still shows as foreign CPU time on the bench
 #     CPUs, so it still makes the verdict INCONCLUSIVE.
 # Every SINGLE invocation runs before every MULTI one (`paired_samples` takes all pairs and
-# `best_of` all runs of the single set first, and the pressure-scored lkv ratio gate runs
+# `best_of` all runs of the single set first, and the lkv ratio report runs
 # ahead of both), so no pressure-scored launch follows a MULTI run's residue.
 #
 # Both arms must speak it or neither uses it: a baseline built before family sets refuses
@@ -1169,18 +1134,18 @@ def main() -> int:
               f"fail: p50 +{(LAT_REGRESS - 1) * 100:.0f}% / "
               f"mean +{(MEAN_REGRESS - 1) * 100:.0f}% / "
               f"deliv -{(1 - TPUT_REGRESS) * 100:.0f}%):")
-        # The lkv ratio runs FIRST: it is single-threaded and pressure-scored, and the gate's
+        # The lkv ratio report runs FIRST: it is single-threaded, and the gate's
         # last pass is the MULTI family set, whose own-pressure residue it must not inherit.
-        fails = lkv_ratio_gate_paired(bench, base_bench)  # ADR-0060 ratio, paired (#1745)
-        fails += gate_paired(cand_bins, base_bins, pairs)
+        lkv_ratio_report_paired(bench, base_bench)  # ADR-0060 ratio: reported (#1695)
+        fails = gate_paired(cand_bins, base_bins, pairs)
         fails += mem_ratchet(bench_fwd, base_fwd)
         print_conditions()
         return render_verdict(fails, [], tier, sample_note, LEDGER)
 
     runs = int(args[args.index("--runs") + 1]) if "--runs" in args else DEFAULT_RUNS
-    # The lkv ratio runs FIRST here too: it is pressure-scored, and best_of's last pass is
+    # The lkv ratio report runs FIRST here too: it is single-threaded, and best_of's last pass is
     # the MULTI family set, whose own-pressure residue it must not inherit.
-    lkv_fails = lkv_ratio_gate(bench)  # ADR-0060 same-run ratio (no baseline; skips if absent)
+    lkv_ratio_report(bench)  # ADR-0060 same-run ratio: reported, not gated (#1695)
     cur = best_of(cand_bins, runs)
     cur.update(mem_probe(bench_fwd))  # fold the mem:* points into the same baseline dict
     base = json.loads(BASELINE.read_text()) if BASELINE.exists() else None
@@ -1235,7 +1200,6 @@ def main() -> int:
             if v["deliv_s"] > 0 and v["deliv_s"] < FLOOR_DELIV:
                 fails.append(f"{k} deliv {v['deliv_s']:,.0f} under floor {FLOOR_DELIV:,}")
         print(line)
-    fails += lkv_fails
     print_conditions()
     if not LEDGER.clean:
         # A contended sample must not become the recorded baseline either.

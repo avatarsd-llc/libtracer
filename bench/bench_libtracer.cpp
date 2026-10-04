@@ -283,8 +283,9 @@ void run_inproc_pool(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc,
     std::vector<tr::mem::size_class_t> classes(64);
     tr::mem::pool_source_t<> pool{slab, classes};
     // No `-batch` twin (#553): what these rows are FOR is the pooled-vs-heap LKV
-    // comparison, and that is gated by the `lkv` same-run throughput ratio
-    // (perf_gate.py lkv_ratio_gate), not by a latency percentile. A batch twin here
+    // comparison: the pool's no-heap claim is gated by LKV-ROUTE (bench_forward_heap) and
+    // the `lkv` ratio is only reported (perf_gate.py lkv_ratio_report), never a latency
+    // percentile. A batch twin here
     // would be ten more series with no chart reading them.
     run_inproc(S, F, E, alloc, by_path, mode, budget, latbudget, &pool, false);
     if (pool.stats().refused != 0) {
@@ -1176,13 +1177,14 @@ lkv_result_t run_lkv_store_alloc(std::size_t S, bool copy, tr::mem::mem_backend_
 }
 
 /**
- * @brief Run the ADR-0060 LKV copy-store gate across two payload sizes: pooled
- *        `value_backend` vs the default heap, for both the pure alloc/free op (the
- *        gated metric) and the end-to-end flatten. Emits the charted `lkv-alloc-*` /
- *        `lkv-store-*` series and a stderr `LKV-GATE` line (the human-visible
- *        alloc-cost ratio + the zero-exhaustion / no-fragmentation check).
+ * @brief Run the ADR-0060 LKV copy-store rows across two payload sizes: pooled
+ *        `value_backend` vs the default heap, for both the pure alloc/free op and the
+ *        end-to-end flatten. Emits the charted `lkv-alloc-*` / `lkv-store-*` series and a
+ *        stderr `LKV-RATIO` line (the alloc-cost ratio and the pool's exhaustion count),
+ *        which is reported only: the pool's no-heap claim is gated by LKV-ROUTE in
+ *        `bench_forward_heap` (#1695).
  */
-void run_lkv_store_gate() {
+void run_lkv_store_rows() {
     tr::mem::mem_backend_t& heap = tr::mem::heap_backend();
     // A caller-owned slab carved into equal 2 KB slots. The loop keeps at most one
     // segment live, so a handful of slots suffice; 64 gives headroom and lets the
@@ -1203,13 +1205,10 @@ void run_lkv_store_gate() {
         run_lkv_store_alloc(S, true, heap, "lkv-store-heap");
         run_lkv_store_alloc(S, true, pool, "lkv-store-pool");
         const double ratio = ha.ops_per_s > 0 ? pa.ops_per_s / ha.ops_per_s : 0.0;
-        // Zero exhaustion == no fragmentation growth (fixed slots always reclaimed).
-        // Floor 2.0x: glibc's tcache makes a hot same-size malloc/free ~15 ns, so the
-        // pool's O(1) free-list clears ~2.5x here — the ADR's >=10x is the ESP-IDF
-        // multi_heap figure (validated on-device, the follow-up). The gate proves the
-        // routing (not a heap fallback) + determinism, robustly across host allocators.
-        std::fprintf(stderr, "LKV-GATE S=%4zu: pool %5.1fx heap alloc/free  exhausted=%zu  %s\n", S,
-                     ratio, pa.exhausted, (ratio >= 2.0 && pa.exhausted == 0) ? "PASS" : "FAIL");
+        // Reported, not judged (#1695): speed is not the pool's acceptance criterion, and the
+        // ratio moves with the host allocator (1.4x-6.5x at 64 B on healthy code).
+        std::fprintf(stderr, "LKV-RATIO S=%4zu: pool %5.1fx heap alloc/free  exhausted=%zu\n", S,
+                     ratio, pa.exhausted);
     }
 }
 
@@ -1243,7 +1242,7 @@ void age_heap() {
  *        `lkv-store-heap-aged`.
  *
  * The un-suffixed `lkv-*-heap` rows run first thing in a fresh process (@ref
- * run_lkv_store_gate in the `lkv` family), so they are the FRESH-heap variant; their names are
+ * run_lkv_store_rows in the `lkv` family), so they are the FRESH-heap variant; their names are
  * kept because they are gated keys and history series. This family ages the heap first
  * (@ref age_heap) and reports the same two operations under `-aged` names, so a change that
  * only hurts on a fragmented heap — the shape of the 1 KiB regression — has a row of its own.
@@ -1514,7 +1513,7 @@ constexpr bench_mode_t kModes[] = {
     {"deliver", run_mode_deliver},
     {"target", run_mode_target},
     {"fan", run_mode_fan},
-    {"lkv", run_lkv_store_gate},
+    {"lkv", run_lkv_store_rows},
     {"fan-remote", run_mode_fan_remote},
     {"topics", run_mode_topics},
     {"topics-rev", run_mode_topics_rev},
@@ -1656,7 +1655,7 @@ constexpr bench_family_t kFamilies[] = {
     {"acl", family_acl, family_set_t::MULTI},
     {"fold", family_fold, family_set_t::SINGLE},
     {"deliver", run_mode_deliver, family_set_t::SINGLE},
-    {"lkv", run_lkv_store_gate, family_set_t::SINGLE},
+    {"lkv", run_lkv_store_rows, family_set_t::SINGLE},
     {"inproc-pool", family_inproc_pool, family_set_t::SINGLE},
     {"syncpool", run_syncpool_gate, family_set_t::MULTI},
     {"target", run_mode_target, family_set_t::SINGLE},
@@ -1778,7 +1777,7 @@ int main(int argc, char** argv) {
             // stream perf_gate.py, perf_emit_benchmark.py and collate.py parse, and the
             // acceptance rule for this fix is that every run's stdout keeps the row set,
             // row order and line shape it had before. stderr already carries the harness's
-            // own `SKIP mode=...` and `LKV-GATE ...` lines, so an A/B driver that wants to
+            // own `SKIP mode=...` and `LKV-RATIO ...` lines, so an A/B driver that wants to
             // assert it got the arm it asked for reads it there.
             std::fprintf(stderr, "MODE %.*s\n", static_cast<int>(m.name.size()), m.name.data());
             m.run();
