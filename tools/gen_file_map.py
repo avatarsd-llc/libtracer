@@ -32,8 +32,8 @@ PAGES = {
     "segment.md": ["segment.hpp"],
     "backends.md": [
         "backend.hpp", "mem_heap.hpp", "mem_borrowed.hpp", "mem_pool.hpp", "mem_source.hpp",
-        "mem_source_alloc.hpp", "mem_source_backend.hpp", "mem_source_pmr.hpp",
-        "mem_source_sync.hpp", "mem_cuda.hpp",
+        "mem_string.hpp", "mem_sorted_map.hpp", "mem_source_alloc.hpp", "mem_source_backend.hpp",
+        "mem_source_pmr.hpp", "mem_source_sync.hpp", "mem_cuda.hpp",
     ],
     "views.md": ["view.hpp", "rope.hpp"],
     "frame-codec.md": [
@@ -45,7 +45,7 @@ PAGES = {
     "path.md": ["path.hpp"],
     "graph.md": [
         "graph.hpp", "vertex.hpp", "vertex_handle.hpp", "value.hpp", "hook.hpp", "app_fields.hpp",
-        "subscriber.hpp",
+        "function_ref.hpp", "subscriber.hpp",
         "vertex_stripe.hpp", "lkv_slot.hpp", "edge_pin.hpp", "qsbr.hpp", "link_id.hpp",
         "thread_id.hpp",
     ],

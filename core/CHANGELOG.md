@@ -155,6 +155,22 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   over the direct children that reads one header per step and allocates nothing. Every vector in
   the conformance corpus reads identically through the walker and through `decode`. `decode`
   remains for callers that keep a tree or pass one to a `tlv_t` API.
+- **The core container set: failable growth over `block_source_t`
+  ([#1776](https://github.com/avatarsd-llc/libtracer/issues/1776)).** ADR-0083 Decisions 2 and 9
+  name the containers and callback shapes core moves onto; this adds them, and nothing migrates
+  yet. `tr::mem::block_array_t` is the vector and now accepts any element with a `noexcept` move,
+  not only trivially copyable ones; a trivially copyable element compiles to the same code as
+  before. It gains `emplace_back`, `emplace_at`, `erase_at`, `clear`, `capacity`, iterators and
+  (for an element that is not trivially copyable) a move `push_back`; `push_slot` is now offered only for trivially copyable elements, which were
+  the only ones it accepted. The new `libtracer/mem_string.hpp` adds `tr::mem::string_t`, the
+  name/string store: an owning, NUL-terminated string. The new `libtracer/mem_sorted_map.hpp`
+  adds `tr::mem::sorted_map_t`, a sorted-vector map with heterogeneous lookup. Every growing call
+  on the three reports a refusal by value (`false` or a null pointer), and leaves the container,
+  and any argument passed by rvalue, unchanged when it does. The new
+  `libtracer/function_ref.hpp` adds `tr::function_ref_t`, a two-word non-owning reference to a
+  callable for synchronous callback parameters. Hooks stay `tr::graph::hook_t` (RFC-0028 D10).
+  All four are header-only, build with `-fno-exceptions`, and reference no `malloc`, `new` or
+  `free`.
 
 ### Changed
 
