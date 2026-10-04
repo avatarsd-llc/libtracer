@@ -14,6 +14,19 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Added
+
+- **`fwd_router_t::originate` lets a node issue a forwarded READ, WRITE or append itself
+  ([#1645](https://github.com/avatarsd-llc/libtracer/issues/1645)).** Until now a node had to
+  build `FWD` bytes and pass them to `on_frame` under a child name that nothing registered.
+  `originate(slot, op, dst, payload, reply_to)` builds the frame from the `egress` plane and
+  routes it through the same ingress. An append is a `WRITE` whose `dst` ends in `:field[]`.
+  The reply goes to the caller-owned `fwd_router_t::origin_t` record, paired by the return
+  route. `cancel(slot)` is how the caller's own deadline ends a request; the router reads no
+  clock and keeps no per-request state. Replies that match no armed record still go to
+  `on_reply`. `fwd_router_t` gains a user-declared destructor that disarms any record still
+  armed.
+
 ### Breaking
 
 - **`kWeaklyOrdered` is removed, the delivery-skip order assertion is unconditional, and a

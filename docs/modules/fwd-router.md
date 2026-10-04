@@ -173,6 +173,15 @@ class fwd_router_t {
     void clear_link(std::string_view link_name);
 
     void on_frame(std::string_view inbound_name, std::span<const std::byte> frame);
+
+    // Originate a READ or WRITE (an append is a WRITE to `:field[]`) from inside this node,
+    // through the same ingress (#1645). The reply goes to the caller-owned record; the
+    // caller's deadline ends it with cancel(). See "Originating an operation" below.
+    class origin_t { public: origin_t(reply_fn_t, void* ctx) noexcept; bool armed() const noexcept; };
+    graph::result_t<void> originate(origin_t& slot, graph::fwd_op_t op, const graph::path_t& dst,
+                                    std::span<const std::byte> payload = {},
+                                    const graph::path_t* reply_to = nullptr);
+    bool cancel(origin_t& slot) noexcept;
     const child_registry_t& registry() const noexcept;
     const route_handle_t&   handles()  const noexcept;
 };
@@ -220,6 +229,48 @@ flowchart TB
     classDef zc fill:#dcfce7,stroke:#166534
     class SG,SINK zc
 ```
+
+## Originating an operation
+
+A node that wants a remote value asks for it with `originate`, not by building `FWD` bytes and
+feeding them to `on_frame` under a child name nothing registered (#1645). Three things make it
+the same operation a peer's frame is:
+
+- **One ingress.** `originate` builds `FWD{ op, dst, FIELD?, src, payload? }` into one
+  exactly-sized segment from the `egress` plane and routes it through the path an inbound frame
+  takes, with no inbound link. A forward hop strips the mount and grows `src` by nothing,
+  because the origin is not a hop. A `dst` that names no mount resolves locally, and its reply
+  goes straight to the caller's record before `originate` returns.
+- **The requester owns the request.** The record (`origin_t`) is the caller's storage. The
+  router threads armed records through an intrusive list and keeps nothing once one leaves, so
+  the hops stay stateless and the router allocates nothing per request. No timer and no clock
+  are involved: the caller decides how long to wait and calls `cancel` when its deadline
+  passes. A reply that arrives after that goes to the `on_reply` sink, the same place an
+  unpaired reply has always gone.
+- **Pairing by return route.** By default each request gets its own one-record `src`, a
+  reserved `~o<hex>` name that no mount begins with, so the reply's `dst` names exactly one
+  record. A subscribe needs a chosen `src`, because the producer delivers to it, so
+  `reply_to` supplies one. Requests that share a route pair oldest first.
+
+```cpp
+got_t got;                                            // the caller's own reply state
+fwd_router_t::origin_t slot{&on_got, &got};           // on_got(void*, const rope_t&)
+if (auto r = router.originate(slot, fwd_op_t::READ, path_t("/net/ws-client/up/sensor/temp")); !r)
+    return r;                                         // refused: nothing was sent
+// ... wait on the caller's own condition, with the caller's own deadline ...
+if (timed_out && router.cancel(slot)) { /* no reply will reach on_got for this request */ }
+
+const path_t probe("/probe");                         // must outlive the armed record
+(void)router.originate(slot, fwd_op_t::WRITE,         // an append: `[]` in the dst field tail
+                       path_t("/net/ws-client/up/sensor/temp:subscribers[]"), subscriber_tlv,
+                       &probe);
+```
+
+`AWAIT` is not originated through this entry point.
+
+Signature source: `core/include/libtracer/fwd_router.hpp:fwd_router_t::originate`
+(`originate`), `core/include/libtracer/fwd_router.hpp:fwd_router_t::origin_t` (`origin_t`),
+`core/include/libtracer/fwd_router.hpp:fwd_router_t::cancel` (`cancel`).
 
 ## Consequences
 
