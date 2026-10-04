@@ -974,7 +974,11 @@ def html_blocks(data: dict, local: dict | None = None) -> dict[str, str]:
     color put. A section the second store has no chart for still gets an (empty) payload,
     so the selector can say "no bench-local data for this chapter yet" instead of drawing
     an empty axis.
+
+    Each store is first put on ONE commit axis (@ref align_store, #1801), so every trend
+    chart of a store shares the same domain and tick spacing whichever suite it draws.
     """
+    data, local = align_store(data), align_store(local)
     colors: dict[str, int] = {}
     # bench-local is built FIRST so the shared color map is assigned in the default view's
     # order; the hosted store is built without the ratio view (not same-pass).
@@ -982,6 +986,9 @@ def html_blocks(data: dict, local: dict | None = None) -> dict[str, str]:
     payload = build(data, colors, same_pass=False) if data else {"suites": {}, "charts": []}
     if not payload["charts"] and not (lpayload and lpayload["charts"]):
         return {}
+    for built, store in ((payload, data), (lpayload, local)):
+        if built and store:
+            stamp_dates(built, store)
     # Section ORDER follows the bench-local store (the default view); a section only the
     # hosted store carries is appended rather than dropped.
     sections = list(dict.fromkeys([c["section"] for c in (lpayload or {"charts": []})["charts"]]
@@ -1041,3 +1048,68 @@ def assets_block() -> str:
 <style>{css}</style>
 <script>{js}</script>
 :::"""
+
+
+# ---------------------------------------------------------------------------
+# one commit axis per store (#1801)
+# ---------------------------------------------------------------------------
+def align_store(data: dict | None) -> dict | None:
+    """@brief The store with every suite on one shared commit axis: one slot per commit.
+
+    benchmark-action banks the latency and throughput suites independently, so a store's
+    suites drift apart: a run that emitted only one of them, or a re-run of a commit,
+    adds a slot to one suite and not the other. On the hosted store the two suites were
+    647 and 623 entries long, so a latency card and a throughput card drew the same
+    history at different horizontal scales, and a re-run commit took two slots.
+
+    The aligned store has, in every suite, one entry per distinct commit, in the order
+    commits were first recorded in any suite. A re-run keeps its LAST entry (the newest
+    measurement of that commit). A commit a suite never recorded gets an entry with no
+    benches, so its series show a gap in that slot instead of compressing the axis. Every
+    consumer downstream (series, release and instrument markers, contamination, host
+    descriptors, the step detector) reads entry indices, so they all land on the shared
+    axis with no change of their own.
+    """
+    if not data or not data.get("entries"):
+        return data
+    first: dict[str, tuple] = {}  # sha -> (first run date, discovery order)
+    for entries in data["entries"].values():
+        for e in entries:
+            sha = e.get("commit", {}).get("id", "")
+            if sha and sha not in first:
+                first[sha] = (e.get("date") or 0, len(first))
+    order = sorted(first, key=lambda sha: first[sha])
+    commits: dict[str, dict] = {}
+    out = {k: v for k, v in data.items() if k != "entries"}
+    out["entries"] = {}
+    for name, entries in data["entries"].items():
+        last = {}
+        for e in entries:
+            sha = e.get("commit", {}).get("id", "")
+            if sha:
+                last[sha] = e
+                commits.setdefault(sha, e["commit"])
+        if not last:
+            out["entries"][name] = entries
+            continue
+        out["entries"][name] = [last.get(sha) or {"commit": commits.get(sha, {"id": sha}),
+                                                  "benches": []} for sha in order]
+    # A placeholder made before a later suite revealed the commit's metadata gets it now.
+    for entries in out["entries"].values():
+        for e in entries:
+            if not e["benches"] and "message" not in e["commit"]:
+                e["commit"] = commits.get(e["commit"].get("id", ""), e["commit"])
+    return out
+
+
+def stamp_dates(payload: dict, store: dict) -> None:
+    """@brief Give each suite of a built payload its commits' dates, for the hover label.
+
+    Read from the commit timestamp (``YYYY-MM-DD``), not the run date: the axis is one
+    slot per commit, so the point is labelled with when that commit landed.
+    """
+    for name, entries in store.get("entries", {}).items():
+        suite = payload["suites"].get(_suite_key(name))
+        if suite is not None:
+            suite["dates"] = [str(e.get("commit", {}).get("timestamp", ""))[:10]
+                              for e in entries]

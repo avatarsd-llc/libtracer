@@ -44,6 +44,8 @@
   // A dimensionless quotient. Printed with the '×' so it can never be mistaken for the
   // absolute number it was divided out of.
   function fmtRatio(v) { return (v >= 100 ? Math.round(v) : v >= 10 ? v.toFixed(1) : v.toFixed(2)) + "×"; }
+  /** @brief Width of the trend charts' "last N merges" zoom (#1801). */
+  var LAST = 30;
   var FMT = { ns: fmtNs, rate: fmtRate, num: fmtNum, bytes: fmtBytes, count: fmtCount, mb: fmtMB, ratio: fmtRatio };
 
   function logTicks(min, max) {
@@ -196,6 +198,7 @@
       suite: {
         shas: suite.shas.slice(a, b + 1),
         msgs: (suite.msgs || []).slice(a, b + 1),
+        dates: suite.dates ? suite.dates.slice(a, b + 1) : undefined,
         host: suite.host,
         hosts: suite.hosts ? suite.hosts.slice(a, b + 1) : undefined,
         releases: shift(suite.releases), instruments: shift(suite.instruments)
@@ -284,8 +287,18 @@
     (suite.instruments || []).forEach(function (r) { if (r.i < N) s += instrMark(X(r.i), m.t, m.t + ph, r); });
     c.series.forEach(function (se) {
       var cc = col(se.ci);
-      var pts = se.pts.map(function (p) { return X(p[0]).toFixed(1) + "," + Y(p[1]).toFixed(1); }).join(" ");
-      s += '<polyline fill="none" stroke="' + cc + '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" points="' + pts + '"/>';
+      // One polyline per run of consecutive slots (#1801): the axis is one slot per commit
+      // for every series of the store, so a commit this series did not record is a GAP in
+      // its slot, never a straight segment that reads as a measured trend across it.
+      var runs = [], run = [];
+      se.pts.forEach(function (p, j) {
+        if (j && p[0] !== se.pts[j - 1][0] + 1) { runs.push(run); run = []; }
+        run.push(X(p[0]).toFixed(1) + "," + Y(p[1]).toFixed(1));
+      });
+      if (run.length) runs.push(run);
+      runs.forEach(function (r) {
+        if (r.length > 1) s += '<polyline fill="none" stroke="' + cc + '" stroke-width="2" stroke-linejoin="round" stroke-linecap="round" points="' + r.join(" ") + '"/>';
+      });
       se.pts.forEach(function (p, i3) {
         s += '<circle cx="' + X(p[0]).toFixed(1) + '" cy="' + Y(p[1]).toFixed(1) + '" r="' + (i3 === se.pts.length - 1 ? 3.4 : 2.2) + '" fill="' + cc + '"/>';
       });
@@ -481,7 +494,7 @@
     function X(v) {
       if (xmax <= xmin) return m.l + pw / 2;
       return xlog
-        ? m.l + (Math.log10(v) - Math.log10(xmin)) / (Math.log10(xmax) - Math.log10(xmin)) * pw
+        ? m.l + (Math.log2(v) - Math.log2(xmin)) / (Math.log2(xmax) - Math.log2(xmin)) * pw
         : m.l + (v - xmin) / (xmax - xmin) * pw;
     }
     var ymin = Math.min.apply(null, all), ymax = Math.max.apply(null, all), yt;
@@ -648,6 +661,7 @@
           "<code>" + full.shas[r0] + "</code> → <code>" + full.shas[r1] + "</code> · "
           + (r1 - r0 + 1) + " of " + N;
         rangehost.querySelector(".ph-rfull").disabled = (r0 === 0 && r1 === N - 1);
+        rangehost.querySelector(".ph-rlast").disabled = (r1 === N - 1 && r0 === Math.max(0, N - LAST));
         return;
       }
       rangehost.innerHTML = '<span class="ph-rlab">commits</span>'
@@ -655,7 +669,8 @@
         + '<input type="range" class="ph-r1" min="0" max="' + (N - 1) + '" value="' + r1 + '" aria-label="last commit">'
         + '<span class="ph-rout"><code>' + full.shas[r0] + '</code> → <code>' + full.shas[r1] + '</code> · '
         + (r1 - r0 + 1) + ' of ' + N + "</span>"
-        + '<button class="ph-rfull"' + (r0 === 0 && r1 === N - 1 ? " disabled" : "") + ">full</button>";
+        + '<button class="ph-rfull"' + (r0 === 0 && r1 === N - 1 ? " disabled" : "") + ">full</button>"
+        + '<button class="ph-rfull ph-rlast"' + (N <= LAST ? " disabled" : "") + ">last " + LAST + "</button>";
       var i0 = rangehost.querySelector(".ph-r0"), i1 = rangehost.querySelector(".ph-r1");
       function moved() {
         // The two ends may cross on the way past each other; clamping rather than
@@ -667,6 +682,10 @@
       i1.addEventListener("input", moved);
       rangehost.querySelector(".ph-rfull").addEventListener("click", function () {
         r0 = 0; r1 = N - 1; rebind(); show(view);
+      });
+      // The recent window at full resolution: one slot per merge across the plot width.
+      rangehost.querySelector(".ph-rlast").addEventListener("click", function () {
+        r0 = Math.max(0, N - LAST); r1 = N - 1; rebind(); show(view);
       });
     }
 
@@ -767,7 +786,8 @@
           // as an absolute trend: "same silicon every point" is a claim the reader must
           // be able to check per point, not take on the chapter's word.
           var host = suite.host || (suite.hosts && suite.hosts[i]) || "";
-          head = "<div class='sha'><code>" + suite.shas[i] + "</code>" + rel + "</div>"
+          var day = suite.dates && suite.dates[i] ? " <span class='date'>" + suite.dates[i] + "</span>" : "";
+          head = "<div class='sha'><code>" + suite.shas[i] + "</code>" + day + rel + "</div>"
             + (suite.msgs && suite.msgs[i] ? "<div class='msg'>" + suite.msgs[i] + "</div>" : "")
             + (host ? "<div class='host'>" + host + "</div>" : "");
           rows = c.series.map(function (se, si) {
