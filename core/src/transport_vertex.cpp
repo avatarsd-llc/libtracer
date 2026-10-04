@@ -122,7 +122,7 @@ void reemit_tlv(std::vector<std::byte>& out, const tlv_t& tlv) {
  * Amendment 4), and an empty catalog therefore accepts every config.
  */
 [[nodiscard]] bool conforms(conn_catalog_t catalog, const tlv_t* config) noexcept {
-    const config_reader_t cfg(config);
+    const wire::config_reader_t cfg(config);
     for (const conn_key_t& key : catalog.keys()) {
         if (!cfg.has(key.name)) {
             if (key.required) return false;
