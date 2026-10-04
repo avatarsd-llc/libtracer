@@ -251,9 +251,12 @@ Details that make these trustworthy:
   which samples the conditions around it and records them: the measured CPU's **foreign
   time** (busy time in `/proc/stat` — including irq and hypervisor steal — minus the bench
   process's own CPU time), the bench's **involuntary context switches** (the
-  `nonvoluntary_ctxt_switches` counter), and **CPU pressure** (`some avg10`, read as the
-  execution starts, because a bench that runs several threads on one pinned CPU raises
-  pressure itself). On the pinned host the pressure that decides is the bench job's
+  `nonvoluntary_ctxt_switches` counter), and **CPU pressure** over the execution itself
+  (the growth of the PSI `some total=` stall counter between start and end, as a share
+  of the wall time — not `avg10`, a 10 s moving average a short execution would inherit
+  from the run before it). An execution shorter than 0.5 s is too short to measure a
+  share on and is judged on foreign time alone, and a multi-threaded execution, which
+  raises pressure itself, has its pressure recorded but not scored. On the pinned host the pressure that decides is the bench job's
   **own cgroup's** `cpu.pressure`: its CPUs are cgroup-isolated, so host-wide
   `/proc/pressure/cpu` says nothing about them and is recorded for information only. On
   unpinned hosted runners, host-wide pressure decides. An execution is
