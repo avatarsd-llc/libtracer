@@ -107,14 +107,24 @@ LEDGER = bc.Ledger()
 # resolution and the measured cost of one timed sample, printed under the verdict.
 CLOCK_FLOORS: list[tuple[float, float]] = []
 CPUS = bc.cpus_from_env()
+# Every timed execution that exited non-zero (#1847). A crashed or aborted bench emits a
+# partial transcript, and its missing rows used to read as "absent — not gated": a gate
+# that measured nothing printed PASS. A non-zero exit is not a verdict on the code either
+# way, so it makes the verdict INCONCLUSIVE, the same as a contended run.
+BENCH_ERRORS: list[str] = []
 EXIT_INCONCLUSIVE = 3
 
 
 def timed(argv: list[str], timeout: float, score_pressure: bool = True) -> str:
     """@brief Run one timed bench execution under the classifier; its kept stdout.
     @p score_pressure False judges it on foreign time only (a MULTI family set, #1803)."""
-    return LEDGER.add(bc.measure(argv, cpus=CPUS, timeout=timeout, log=print,
-                                 score_pressure=score_pressure)).stdout
+    m = LEDGER.add(bc.measure(argv, cpus=CPUS, timeout=timeout, log=print,
+                              score_pressure=score_pressure))
+    if m.returncode != 0:
+        name = pathlib.Path(argv[0]).name + "".join(f" {a}" for a in argv[1:])
+        BENCH_ERRORS.append(f"{name} exited {m.returncode}")
+        print(f"perf_gate: {name} exited {m.returncode} — the verdict will be INCONCLUSIVE")
+    return m.stdout
 
 # --- VERDICT TIERS (#1251): who a breached ratchet is allowed to stop --------------
 # The two-tier policy used to live in a `perf.yml` comment, which meant the gate could
@@ -257,8 +267,11 @@ POINTS = [
     ("main", "eptype-stream", 64, 1, 1),
     ("compact", "compact-forward", 64, 1, 1),
     ("compact", "compact-terminus", 64, 1, 1),
-    ("demux", "fwd-demux-fixed", 79, 1, 1),
-    ("demux", "fwd-demux-scan", 79, 64, 64),
+    # Keyed by the frame the bench EMITS (`frame.size()`): 61 B since RFC-0018's packed
+    # PATH records (1fe92124). They were keyed 79 for seven weeks after that and silently
+    # matched nothing, which is why a key the candidate does not emit now fails (#1847).
+    ("demux", "fwd-demux-fixed", 61, 1, 1),
+    ("demux", "fwd-demux-scan", 61, 64, 64),
     # MULTI-threaded rows (#1803): timed in their own `--family-set multi` invocation and
     # judged on foreign CPU time only (see GATE_FAMILY_SET_MULTI). T=4 because the gate's
     # bench CPU set is four CPUs; a host with fewer reports them absent, not failed.
@@ -266,6 +279,20 @@ POINTS = [
     ("main", "acl-inherit-d4-mt4", 64, 1, 4),
     ("main", "poolalloc-mt4", 64, 1, 1),
 ]
+# The only POINTS a correct candidate may legitimately not emit: the MULTI rows above run
+# only on a host with at least four usable CPUs (`bench::usable_cpus() >= 4`). Every other
+# gated key the candidate does not emit is a FAIL (#1847) — a renamed mode, a changed frame
+# size or a sibling binary that was not built must never read as "not gated" again.
+MAY_BE_ABSENT = frozenset({"inproc-mt4/64/1/4", "acl-inherit-d4-mt4/64/1/4",
+                           "poolalloc-mt4/64/1/1"})
+
+
+def missing_point(k: str) -> str:
+    """@brief The fail line for a gated key the candidate's run did not emit (#1847)."""
+    print(f"::error::perf gate: gated point {k} was not emitted by the candidate — "
+          f"re-key POINTS to the row the bench emits, or build its binary")
+    return (f"{k} not measured: the candidate emitted no row for this gated point "
+            f"(re-key POINTS or build the binary — a missing key is never 'not gated')")
 # No-baseline absolute-floor backstop, per point: a fan-1024 write's p50 is the
 # WHOLE 1024-subscriber fan-out (~13 µs), so the 1 µs 1:1 floor cannot apply.
 FLOOR_P50_OVERRIDE = {"inproc/64/1024/1": 100_000}
@@ -833,7 +860,14 @@ def gate_paired(cand: dict[str, pathlib.Path], base: dict[str, pathlib.Path],
     for (_b, m, s, f, e) in POINTS:
         k = f"{m}/{s}/{f}/{e}"
         cs, bs = samples["cand"].get(k), samples["base"].get(k)
+        if not cs and k not in MAY_BE_ABSENT:
+            # Absent from the candidate (and so from both arms, or a candidate that stopped
+            # emitting a row the baseline still has): nothing was gated, and that FAILS.
+            print(f"  {k:<22} (absent from the candidate — FAIL, see below)")
+            fails.append(missing_point(k))
+            continue
         if not cs or not bs:
+            # Baseline-only absence is a new point the baseline build predates.
             print(f"  {k:<22} (absent from one arm — not gated)")
             continue
         print(f"  {k}")
@@ -1028,7 +1062,8 @@ def enforces(tier: str, sample_note: str | None = None) -> tuple[bool, str]:
 
 def render_verdict(fails: list[str], warns: list[str], tier: str,
                    sample_note: str | None = None,
-                   conditions: bc.Ledger | None = None) -> int:
+                   conditions: bc.Ledger | None = None,
+                   bench_errors: list[str] | None = None) -> int:
     """@brief Print the verdict under its tier and return the process exit code.
 
     Same numbers, same lines, same markers in both tiers — `!` for a breached ratchet,
@@ -1046,18 +1081,32 @@ def render_verdict(fails: list[str], warns: list[str], tier: str,
     machine that was not ours, so neither PASS nor FAIL is true. The numbers still print
     (under `?`, never `!`); the blocking tier exits `EXIT_INCONCLUSIVE` so the job is
     re-run rather than merged on an unverified green, and the advisory tier exits 0.
+
+    @p bench_errors (#1847) makes the verdict INCONCLUSIVE the same way: a bench process
+    that exited non-zero left a partial transcript, so the comparison is not complete.
     """
-    if conditions is not None and not conditions.clean:
-        kept = conditions.kept()
-        bad = sum(not c.clean for c in kept)
-        print(f"PERF: INCONCLUSIVE  [tier={tier}] — {bad} of {len(kept)} timed "
-              f"execution(s) ran on a contended bench CPU through every re-run; this is "
-              f"not a verdict on the code. Re-run the job.")
+    contended = conditions is not None and not conditions.clean
+    if contended or bench_errors:
         mark = "::error::" if tier == "blocking" else "::warning::"
-        print(f"{mark}perf gate INCONCLUSIVE — {conditions.note()}; "
-              f"re-run on a quiet runner (a PASS or FAIL needs clean conditions)")
+        if contended:
+            kept = conditions.kept()
+            bad = sum(not c.clean for c in kept)
+            print(f"PERF: INCONCLUSIVE  [tier={tier}] — {bad} of {len(kept)} timed "
+                  f"execution(s) ran on a contended bench CPU through every re-run; this is "
+                  f"not a verdict on the code. Re-run the job.")
+            print(f"{mark}perf gate INCONCLUSIVE — {conditions.note()}; "
+                  f"re-run on a quiet runner (a PASS or FAIL needs clean conditions)")
+        if bench_errors:
+            print(f"PERF: INCONCLUSIVE  [tier={tier}] — {len(bench_errors)} bench "
+                  f"execution(s) exited non-zero; the comparison is incomplete, not passed.")
+            print(f"{mark}perf gate INCONCLUSIVE — {bench_errors[0]}"
+                  + (f" +{len(bench_errors) - 1} more" if len(bench_errors) > 1 else "")
+                  + "; fix the bench, then re-run")
+            for x in bench_errors:
+                print("  ? " + x)
+        why = "contended" if contended else "a bench exited non-zero"
         for x in fails:
-            print("  ? " + x + "  (unverified — contended)")
+            print("  ? " + x + f"  (unverified — {why})")
         for x in warns:
             print("  ~ " + x)
         return EXIT_INCONCLUSIVE if tier == "blocking" else 0
@@ -1105,8 +1154,9 @@ def _opt(args: list[str], name: str, default: pathlib.Path | None) -> pathlib.Pa
 def _siblings(bench: pathlib.Path) -> dict[str, pathlib.Path]:
     """@brief The gated binaries in @p bench's build directory, keyed as POINTS names them.
 
-    A binary that is absent is OMITTED rather than defaulted, so its points report
-    "absent from one arm — not gated" instead of being compared against a stale build.
+    A binary that is absent is OMITTED rather than defaulted, so its points are never
+    compared against a stale build: absent from the baseline they are "not gated" (a point
+    the baseline predates), absent from the candidate they FAIL (#1847).
     """
     out = {}
     for key, name in BENCH_BY_KEY.items():
@@ -1149,7 +1199,7 @@ def main() -> int:
         fails = gate_paired(cand_bins, base_bins, pairs)
         fails += mem_ratchet(bench_fwd, base_fwd)
         print_conditions()
-        return render_verdict(fails, [], tier, sample_note, LEDGER)
+        return render_verdict(fails, [], tier, sample_note, LEDGER, BENCH_ERRORS)
 
     runs = int(args[args.index("--runs") + 1]) if "--runs" in args else DEFAULT_RUNS
     # The lkv ratio report runs FIRST here too: it is single-threaded, and best_of's last pass is
@@ -1167,6 +1217,11 @@ def main() -> int:
           f"mean +{(MEAN_REGRESS - 1) * 100:.0f}% / "
           f"deliv -{(1 - TPUT_REGRESS) * 100:.0f}%{mem_hdr}):")
     fails += mem_ratchet_legacy(cur, base, bench_fwd)
+    for (_b, m, s, f, e) in POINTS:
+        k = f"{m}/{s}/{f}/{e}"
+        if k not in cur and k not in MAY_BE_ABSENT:
+            print(f"  {k:<22} (not emitted — FAIL, see below)")
+            fails.append(missing_point(k))
     for k, v in cur.items():
         if k.startswith("mem:"):
             continue  # handled by mem_gate above
@@ -1218,7 +1273,7 @@ def main() -> int:
     elif base is None or "--update-baseline" in args:
         BASELINE.write_text(json.dumps(cur, indent=2) + "\n")
         print(f"  ({'recorded' if base is None else 'updated'} baseline -> {BASELINE.name})")
-    return render_verdict(fails, warns, tier, sample_note, LEDGER)
+    return render_verdict(fails, warns, tier, sample_note, LEDGER, BENCH_ERRORS)
 
 
 def print_conditions() -> None:
