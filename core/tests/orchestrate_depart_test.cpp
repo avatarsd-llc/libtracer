@@ -233,8 +233,12 @@ std::uint32_t rope_value_u32(const tr::graph::value_t& value) {
 struct misroute_counter_t {
     std::mutex m;
     std::size_t writes = 0;
-    void note(const tlv_t& fwd) {
-        if (fwd.children.empty() || value_u8(fwd.children[0]) != static_cast<int>(fwd_op_t::WRITE))
+    void note(const tr::wire::tlv_node_t& fwd) {
+        const auto kids = fwd.children();
+        if (kids.empty()) return;
+        const tr::wire::tlv_node_t op = *kids.begin();
+        if (op.type() != type_t::VALUE || op.payload().empty() ||
+            std::to_integer<int>(op.payload()[0]) != static_cast<int>(fwd_op_t::WRITE))
             return;
         const std::lock_guard lock(m);
         ++writes;
@@ -368,7 +372,7 @@ int main() {
             },
             &c_replies);
         router_c.on_inbound(
-            [](void* ctx, std::string_view, const tlv_t& fwd) {
+            [](void* ctx, std::string_view, const tr::wire::tlv_node_t& fwd) {
                 static_cast<misroute_counter_t*>(ctx)->note(fwd);
             },
             &c_misroutes);

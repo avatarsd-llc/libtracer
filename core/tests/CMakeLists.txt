@@ -1255,6 +1255,13 @@ target_compile_definitions(tlv_arena_test PRIVATE
     LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
 add_test(NAME tlv_arena COMMAND tlv_arena_test)
 
+# #1648 — the in-place TLV walker (tlv_node_t / tlv_children_t): its surface and the
+# zero-allocation property, measured by this binary's own global operator-new counter.
+add_executable(tlv_children_test tlv_children_test.cpp)
+target_link_libraries(tlv_children_test PRIVATE libtracer)
+libtracer_test_warnings(tlv_children_test)
+add_test(NAME tlv_children COMMAND tlv_children_test)
+
 if(LIBTRACER_NET_PLANE)
     # Brick 4 (ADR-0038 §3 / ADR-0039) — per-connection pmr label tables incl. a
     # zero-global-heap lifecycle over a slab resource with a null upstream.
@@ -1767,6 +1774,13 @@ if(LIBTRACER_NET_PLANE)
     target_link_libraries(fwd_flatten_backend_test PRIVATE libtracer)
     libtracer_test_warnings(fwd_flatten_backend_test)
     add_test(NAME fwd_flatten_backend COMMAND fwd_flatten_backend_test)
+
+    # #1648 review: the in-place ingress reads (observer, bus-name rejection) spill a deep walk
+    # into the receiving link's own source, never the process heap (receiver pays).
+    add_executable(fwd_ingress_walk_source_test fwd_ingress_walk_source_test.cpp)
+    target_link_libraries(fwd_ingress_walk_source_test PRIVATE libtracer)
+    libtracer_test_warnings(fwd_ingress_walk_source_test)
+    add_test(NAME fwd_ingress_walk_source COMMAND fwd_ingress_walk_source_test)
 endif()
 
 if(LIBTRACER_NET_PLANE)

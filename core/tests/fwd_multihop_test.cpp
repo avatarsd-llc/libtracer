@@ -105,13 +105,18 @@ struct observed_t {
     opt_t opt{}; /**< @brief The inbound ROOT's opt — the #1109 / RFC-0025 stamp-carriage arm. */
     /** @brief The inbound ROOT's trailer timestamp, in whichever form `opt.tf` names. */
     std::optional<tr::wire::timestamp_t> ts{};
-    void set(const tlv_t& fwd) {
+    void set(const tr::wire::tlv_node_t& fwd) {
         const std::lock_guard lock(m);
-        opt = fwd.opt;
-        ts = fwd.trailer ? fwd.trailer->ts : std::nullopt;
-        if (fwd.children.size() < 3) return;
-        dst = tr::wire::encode(fwd.children[1]);
-        src = tr::wire::encode(fwd.children[2]);
+        opt = fwd.opt();
+        const auto trailer = fwd.trailer();
+        ts = trailer ? trailer->ts : std::nullopt;
+        // Children 1 and 2 are dst and src; a validated node's bytes are its wire encoding.
+        std::size_t i = 0;
+        for (const tr::wire::tlv_node_t c : fwd.children()) {
+            if (i == 1) dst.assign(c.bytes().begin(), c.bytes().end());
+            if (i == 2) src.assign(c.bytes().begin(), c.bytes().end());
+            ++i;
+        }
     }
     std::vector<std::byte> snap_dst() {
         const std::lock_guard lock(m);
@@ -158,7 +163,7 @@ int main() {
     observed_t b_seen;
     fwd_router_t router_b(graph_b);
     router_b.on_inbound(
-        [](void* ctx, std::string_view in, const tlv_t& fwd) {
+        [](void* ctx, std::string_view in, const tr::wire::tlv_node_t& fwd) {
             if (in == "b-in") static_cast<observed_t*>(ctx)->set(fwd);
         },
         &b_seen);
