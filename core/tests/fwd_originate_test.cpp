@@ -152,9 +152,13 @@ struct pair_t {
         a.on_reply([](void* c, const tr::view::rope_t&) { ++static_cast<pair_t*>(c)->stray; },
                    this);
         b.on_inbound(
-            [](void* c, std::string_view, const tr::wire::tlv_t& fwd) {
-                if (fwd.children.size() >= 3)
-                    static_cast<pair_t*>(c)->src = tr::wire::encode(fwd.children[2]);
+            [](void* c, std::string_view, const tr::wire::tlv_node_t& fwd) {
+                std::size_t i = 0;
+                for (const tr::wire::tlv_node_t n : fwd.children())
+                    if (i++ == 2) {
+                        static_cast<pair_t*>(c)->src.assign(n.wire().begin(), n.wire().end());
+                        return;
+                    }
             },
             this);
     }
