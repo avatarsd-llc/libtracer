@@ -14,6 +14,17 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+### Added
+
+- **`slab_class_stats_t::rounding`: the bytes a size class's live blocks lose to rounding up
+  ([#1646](https://github.com/avatarsd-llc/libtracer/issues/1646)).** The class size less what
+  each request asked, summed over the blocks `slab_pool_t::try_alloc` handed out; compiled only
+  with `kInstrumentCounters`, so a default build's pool and code are unchanged. The
+  `pool_source_t` documentation no longer calls its demand "nearly degenerate" without
+  qualification: that holds where the application chooses the sizes. Where a peer does, put a
+  `slab_pool_t` in front of the `pool_source_t` (its root), which rounds into the one
+  size-class table and keeps the bound; `pool_source_t` gets no rounding mode of its own.
+
 ## [0.18.0] — 2026-10-05
 
 ### Added

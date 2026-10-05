@@ -514,11 +514,12 @@ struct size_class_t {
  *
  * ### Why exact-size classes, measured
  *
- * The demand at this seam is nearly degenerate. Recording every `try_alloc`/`release`
- * across the host suite (70,937 events) found **12 distinct sizes, three of which cover
- * 99.8 % of all allocations** — they are the arena's geometrically growing arrays. So
- * exact classes cost **zero internal fragmentation**, and a first-fit-with-coalescing
- * allocator's header buys nothing back. Replaying that trace against both policies:
+ * The demand is nearly degenerate where the APPLICATION chooses the sizes. Recording every
+ * `try_alloc`/`release` across the host suite (70,937 events) found **12 distinct sizes,
+ * three of which cover 99.8 % of all allocations** — they are the arena's geometrically
+ * growing arrays. So exact classes cost **zero internal fragmentation**, and a
+ * first-fit-with-coalescing allocator's header buys nothing back. Replaying that trace
+ * against both policies:
  *
  * | policy | slab to serve the trace | vs peak-live floor |
  * | --- | ---: | ---: |
@@ -529,6 +530,18 @@ struct size_class_t {
  * remainder under geometric growth rarely produces the size of the next request. Note what
  * that says about the usual argument for a header-free pool: here it is worth 0.7 % of the
  * difference, so it is not the reason to choose this shape.
+ *
+ * ### Where a peer chooses the size, it is not degenerate (#1646)
+ *
+ * Receive segments, WRITE payloads and label routes have the length a PEER sent, so every
+ * distinct length is a class of its own: the class span overflows and the slab fills with
+ * blocks no later request fits. This pool gets no rounding mode for it, so the library has
+ * one size-class vocabulary, not two. Put a @ref slab_pool_t in front of it instead: the slab
+ * pool rounds a request up to a row of its table (`tr::graph::size_class_ladder_t`, or
+ * `{64, 128, 256, ...}` for a power-of-two ladder) and asks this pool only for whole slabs,
+ * a few power-of-two sizes, so the demand reaching this pool is degenerate again. The bound
+ * is still this pool's slab. Per-class occupancy and the bytes lost to rounding are
+ * @ref slab_pool_t::class_stats.
  *
  * Code size of what actually ships, `riscv32-esp-elf-g++ -Os -fno-exceptions -fno-rtti`:
  * **322 B** of text (`try_alloc` 120, `release` 142, `find` 46, teardown 14) plus a 24 B
