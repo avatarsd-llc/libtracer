@@ -179,6 +179,18 @@ std::expected<tlv_node_t, err_t> tlv_node_t::over(std::span<const std::byte> inp
     return tlv_node_t(sink.root_, input);
 }
 
+void tlv_children_t::iterator::load() noexcept {
+    if (rest_.empty()) return;
+    const auto h = grammar::parse_header(grammar::span_cursor{rest_}, grammar::crc_check_t::DEFER);
+    // Unreachable for a region `tlv_node_t::over` accepted; ending the walk keeps a broken
+    // invariant from reading past the region.
+    if (!h) {
+        rest_ = {};
+        return;
+    }
+    front_ = tlv_node_t(*h, rest_);
+}
+
 std::optional<trailer_t> tlv_node_t::trailer() const noexcept {
     return read_trailer(opt_, bytes_, header_ + length_);
 }

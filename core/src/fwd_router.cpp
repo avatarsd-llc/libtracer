@@ -2469,7 +2469,10 @@ void fwd_router_t::on_frame_impl(std::string_view inbound_name, std::span<const 
                 }
             },
             /* reject */
-            [&](graph::status_t status) {
+            // Always inlined (#1859): out of line, this by-reference closure forces `frame` onto
+            // the stack and the cursor's 16-byte copy of it stalls store-to-load forwarding on
+            // every frame (~9 ns of compact-forward). `reject_bus_name_hop` itself stays a call.
+            [&](graph::status_t status) __attribute__((always_inline)) {
                 reject_bus_name_hop(registry_, inbound_name, frame, rx_for(inbound_ctx), *egress_,
                                     status);
             },
