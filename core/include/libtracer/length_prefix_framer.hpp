@@ -102,7 +102,7 @@ class length_prefix_framer {
         };
         kind_t kind = kind_t::EMPTY; /**< @brief The decision. */
         tr::view::segment_ptr_t seg; /**< @brief The accepted frame's segment (ACCEPT only). */
-        /** @brief Where the frame starts in `seg`: `0`, or `view::kRxLoanBytes` for a block
+        /** @brief Where the frame starts in `seg`: `0`, or `mem::kRxLoanBytes` for a block
          *         drawn with the ingress-loan reserve (RFC-0028 §6.9). */
         std::size_t off = 0;
     };

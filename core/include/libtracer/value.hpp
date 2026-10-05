@@ -96,6 +96,7 @@
 
 #include "libtracer/backend.hpp"
 #include "libtracer/mem_source.hpp"
+#include "libtracer/placement.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/segment.hpp"
 #include "libtracer/view.hpp"
@@ -119,7 +120,7 @@ class inline_value_backend_t final : public mem::mem_backend_t {
     void destroy(view::segment_t* seg) noexcept override;
     /** @brief The inline bytes follow the segment header, so they are aligned to it. */
     [[nodiscard]] std::size_t alignment() const noexcept override {
-        return alignof(view::segment_t);
+        return mem::kInlinePayloadAlign;
     }
 };
 
@@ -139,7 +140,7 @@ class inline_value_backend_t final : public mem::mem_backend_t {
  * @brief The "source" of a value whose header lives in a loaned receive block (RFC-0028 §6.9,
  *        #1626) — it serves nothing and reclaims nothing.
  *
- * A loaned value's header sits in the receive block's reserve (`view::kRxLoanBytes`), and the
+ * A loaned value's header sits in the receive block's reserve (`mem::kRxLoanBytes`), and the
  * block goes back to ITS backend when the last segment reference drops, exactly as it did
  * before the value existed. So there is nothing for a value source to hand out or take back:
  * `try_alloc` refuses and `release` is never asked. It exists as an IDENTITY — non-null, so a
@@ -251,10 +252,11 @@ class value_t {
 
     /**
      * @brief The block size an INLINE value of @p len bytes occupies: header, its one link,
-     *        the embedded segment, and the bytes.
+     *        the embedded segment, and the bytes — laid out by the placement module
+     *        (@ref tr::mem::inline_block_bytes).
      */
     [[nodiscard]] static constexpr std::size_t inline_bytes_for(std::size_t len) noexcept {
-        return bytes_for(1) + sizeof(view::segment_t) + len;
+        return mem::inline_block_bytes(bytes_for(1), len);
     }
 
     /**
@@ -276,10 +278,8 @@ class value_t {
         void* p = source.try_alloc(inline_bytes_for(len), kAlign);
         if (p == nullptr) return nullptr;
         auto* v = new (p) value_t(1, &source);
-        auto* raw = static_cast<std::byte*>(p);
-        auto* seg = new (raw + bytes_for(1)) view::segment_t(
-            &inline_value_backend(),
-            std::span<std::byte>(raw + bytes_for(1) + sizeof(view::segment_t), len));
+        view::segment_t* const seg =
+            mem::place_inline(&inline_value_backend(), p, bytes_for(1), len);
         new (v->slots()) view::view_t{view::segment_ptr_t::adopt(seg), 0, len};
         return v;
     }
@@ -304,7 +304,7 @@ class value_t {
         view::segment_t* const seg = link.owner.get();
         if (seg == nullptr || seg->backend != &inline_value_backend()) return nullptr;
         if (link.offset != 0 || link.length != seg->bytes.size()) return nullptr;
-        return reinterpret_cast<value_t*>(reinterpret_cast<std::byte*>(seg) - bytes_for(1));
+        return reinterpret_cast<value_t*>(mem::inline_block_of(seg, bytes_for(1)));
     }
 
     /** @brief Whether this value's header lives in a loaned receive block (RFC-0028 §6.9). */
@@ -476,11 +476,12 @@ class value_t {
     friend class value_storage_t;
     friend class inline_value_backend_t;
 
-    /** @brief The segment an inline value embeds, right after its one link (meaningful only
-     *         when @ref is_inline). */
+    /** @brief The segment an inline value embeds, where the placement module put it after its
+     *         one link (meaningful only when @ref is_inline). */
     [[nodiscard]] view::segment_t* embedded_segment() const noexcept {
         return reinterpret_cast<view::segment_t*>(
-            const_cast<std::byte*>(reinterpret_cast<const std::byte*>(this)) + bytes_for(1));
+            const_cast<std::byte*>(reinterpret_cast<const std::byte*>(this)) +
+            mem::inline_segment_offset(bytes_for(1)));
     }
 
     /**
@@ -550,9 +551,9 @@ class value_t {
     [[gnu::noinline, gnu::cold]] static value_t* make_loaned(view::rope_t& links) noexcept {
         view::view_t& link = links.links()[0];
         view::segment_t* const seg = link.owner.get();
-        if (link.offset < view::kRxLoanBytes || !view::claim_rx_loan(seg)) return nullptr;
+        if (link.offset < mem::kRxLoanBytes || !view::claim_rx_loan(seg)) return nullptr;
         auto* const v =
-            new (seg->bytes.data() + view::kRxLoanValueOffset) value_t(1, &rx_loan_source());
+            new (seg->bytes.data() + mem::kRxLoanValueOffset) value_t(1, &rx_loan_source());
         new (v->slots()) view::view_t(std::move(link));
         links = view::rope_t{};
         return v;
@@ -597,11 +598,9 @@ class value_t {
 static_assert(sizeof(value_t) % alignof(view::view_t) == 0,
               "the links follow the header in the same block, so the header must end on a "
               "link boundary — pad the header explicitly if a member is added");
-static_assert(value_t::bytes_for(1) % alignof(view::segment_t) == 0,
-              "an inline value's segment follows its one link in the same block");
-static_assert(view::kRxLoanValueOffset % value_t::kAlign == 0 &&
-                  view::kRxLoanValueOffset >= sizeof(view::rx_loan_word_t) &&
-                  view::kRxLoanValueOffset + value_t::bytes_for(1) <= view::kRxLoanBytes,
+static_assert(mem::kRxLoanValueOffset % value_t::kAlign == 0 &&
+                  mem::kRxLoanValueOffset >= sizeof(view::rx_loan_word_t) &&
+                  mem::kRxLoanValueOffset + value_t::bytes_for(1) <= mem::kRxLoanBytes,
               "a loaned receive block's reserve must hold the claim word and a one-link value "
               "header, aligned (RFC-0028 §6.9)");
 
@@ -612,7 +611,7 @@ static_assert(view::kRxLoanValueOffset % value_t::kAlign == 0 &&
  * destructible and nothing tore them down — so the reclaimer reads `source` here.
  */
 inline void inline_value_backend_t::destroy(view::segment_t* seg) noexcept {
-    auto* const block = reinterpret_cast<std::byte*>(seg) - value_t::bytes_for(1);
+    std::byte* const block = mem::inline_block_of(seg, value_t::bytes_for(1));
     const auto* const v = reinterpret_cast<const value_t*>(block);
     mem::block_source_t* const source = v->source_;
     const std::size_t bytes = value_t::inline_bytes_for(seg->bytes.size());

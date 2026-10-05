@@ -14,8 +14,8 @@
  * opportunities and the per-class rounding paid twice for one segment.
  *
  * The properties pinned here are the ones a size-classed source depends on and that a
- * reader cannot check by inspection: one draw per segment at exactly
- * `block_bytes(size)` / `kBlockAlign`, a payload aligned to the backend's declared
+ * reader cannot check by inspection: one draw per segment (its size is pinned by
+ * `placement_request_size_test`), a payload aligned to the backend's declared
  * `alignment()` and disjoint from the control block, a refusal that answers a null
  * `segment_t*` and leaks nothing, and a release that returns exactly what was taken.
  */
@@ -107,14 +107,8 @@ int main() {
         tr::view::segment_t* const seg = be.alloc(kSize);
         check(seg != nullptr, "a segment is served");
         check(src.allocs().size() == 1, "EXACTLY one draw per segment (phase 1 made two)");
-        // The expected size is computed here, not read back from block_bytes(): comparing
-        // block_bytes() with itself could not see a header that grew (#1768).
-        constexpr std::size_t kA = source_backend_t::kBlockAlign;
-        constexpr std::size_t kPadded = (sizeof(tr::view::segment_t) + kA - 1) / kA * kA;
-        check(src.allocs()[0].bytes == kPadded + kSize,
-              "the draw is sizeof(segment_t) padded to the block alignment, plus the payload");
-        check(src.allocs()[0].align == source_backend_t::kBlockAlign,
-              "the draw is at the block alignment");
+        // The bytes and alignment of that draw, either side of every size-class boundary, are
+        // pinned by placement_request_size_test against sizes it computes itself (#1775).
         check(seg->bytes.size() == kSize, "the segment reports the requested payload size");
         const auto addr = reinterpret_cast<std::uintptr_t>(seg->bytes.data());
         check(addr % be.alignment() == 0, "the payload is aligned to the backend's alignment()");
