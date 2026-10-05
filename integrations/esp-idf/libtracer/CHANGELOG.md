@@ -10,6 +10,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-10-05
+
 ### Added
 
 - **`admission_verdict_t::REFUSE_AFTER_UPGRADE` — a refusal the peer can read

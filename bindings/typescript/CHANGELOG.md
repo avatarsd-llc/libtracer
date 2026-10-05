@@ -7,6 +7,8 @@ versioning/publish strategy.
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-10-05
+
 ### Changed
 
 - **`client.await_` always ends at a local deadline** (RFC-0004 Amendment 3: the requester owns
