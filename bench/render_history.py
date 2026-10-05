@@ -115,6 +115,16 @@ def _zenoh_ratio(shape, pv, px: dict) -> dict:
                 shape=shape, pv=pv, px=px)
 
 
+# What every libtracer-vs-Zenoh card states it compares (#1809). Each clause is a condition the
+# two harnesses meet for every paired row, so a reader can see what the quotient holds equal.
+_ZENOH_MATCHED = (
+    "Matched: one fresh process per engine and family; the same CPU pin, Zenoh's runtime "
+    "threads included (their CPU share is in the transcript's `NOTE zenoh-runtime` lines); "
+    "equal payload bytes (Zenoh puts the bytes of libtracer's VALUE TLV, header included); "
+    "resolution against resolution (a by-path write against a `Session::put` on a key, a "
+    "bound handle against a declared `Publisher`). Before #1809 the Zenoh arm ran every "
+    "row in one process and put the bare value, so its line steps at that commit")
+
 FAMILIES: list[dict] = [
     # -- latency suite ------------------------------------------------------
     dict(id="fan", section="dispatch", title="In-process write — by fan-out",
@@ -160,7 +170,8 @@ FAMILIES: list[dict] = [
               "its line is mostly the runner's own drift. Note the pin CHANGED on 2026-08-21 "
               "(zenoh-c 1.9.0 → 1.10.0): the step at that commit is an upstream version "
               "change, not runner drift and not a libtracer effect. The `ratio` toggle "
-              "divides the two arms per commit, which cancels drift but NOT that step",
+              "divides the two arms per commit, which cancels drift but NOT that step. "
+              + _ZENOH_MATCHED,
          # `\d+` already spans the deep fans (1024, 8192) the store records for BOTH arms,
          # so the fan sweep needs no widening — only the check that says so.
          pat=r"^(zenoh )?inproc 64B/fan(\d+)/1ep",
@@ -175,12 +186,43 @@ FAMILIES: list[dict] = [
     dict(id="vs-zenoh-payload", section="dispatch",
          title="libtracer vs Zenoh — by payload size, over commits",
          cond="inproc · fan-out 1 · 1 topic · same runner, same pass — the payload arm of the "
-              "comparison; `ratio` divides the two engines per commit",
+              "comparison, the payload ladder above 1 KiB included; `ratio` divides the two "
+              "engines per commit. " + _ZENOH_MATCHED,
          pat=r"^(zenoh )?inproc (\d+)B/fan1/1ep",
          label=lambda m: ("zenoh" if m.group(1) else "libtracer") + f" {m.group(2)} B",
          key=lambda m: ("z" if m.group(1) else "l") + f"-{int(m.group(2)):06d}", log=True,
          ratio=_zenoh_ratio(lambda m: f"{m.group(2)} B", lambda m: float(m.group(2)),
                             dict(label="payload size", log=True, fmt="bytes"))),
+    # The topic-count arm, by path on both sides (#1809). Zenoh's `inproc-path` used to put
+    # through a declared Publisher, so this pair compared a per-write resolution with none;
+    # it now puts through `Session::put` on a pre-built key, as libtracer writes by a
+    # pre-parsed path. The bound spelling has its own pair, below.
+    dict(id="vs-zenoh-path", section="dispatch",
+         title="libtracer vs Zenoh — write by path, by topic count, over commits",
+         cond="inproc-path · 64 B · fan-out 1 · same runner, same pass — both engines "
+              "resolve the destination on every write. Zenoh's line steps at #1809, where "
+              "its row switched from a declared Publisher to a put by key. " + _ZENOH_MATCHED,
+         pat=r"^(zenoh )?inproc-path 64B/fan1/(\d+)ep",
+         label=lambda m: ("zenoh" if m.group(1) else "libtracer") + f" {m.group(2)} topics",
+         key=lambda m: ("z" if m.group(1) else "l") + f"-{int(m.group(2)):05d}", log=True,
+         ratio=_zenoh_ratio(lambda m: f"{m.group(2)} topics", lambda m: float(m.group(2)),
+                            dict(label="topic count", log=True, fmt="count"))),
+    # The #1485 addendum-C pair, in the default charts (#1809): one card per spelling, each
+    # engine's row paired with the same spelling on the other, so the bound quotient and the
+    # by-address quotient are read apart and each card's ratio sweeps one topic axis.
+    *(dict(id=f"vs-zenoh-{arm}", section="dispatch",
+           title=f"libtracer vs Zenoh — {arm}, by topic count, over commits",
+           cond=f"{arm} · 64 B · fan-out 1 · same runner, same pass — {what}. "
+                + _ZENOH_MATCHED,
+           pat=rf"^(zenoh )?{arm} 64B/fan1/(\d+)ep",
+           label=lambda m: ("zenoh" if m.group(1) else "libtracer") + f" {m.group(2)} topics",
+           key=lambda m: ("z" if m.group(1) else "l") + f"-{int(m.group(2)):05d}", log=True,
+           ratio=_zenoh_ratio(lambda m: f"{m.group(2)} topics", lambda m: float(m.group(2)),
+                              dict(label="topic count", log=True, fmt="count")))
+      for arm, what in (
+          ("topics-bound", "a write through a pre-bound handle against a declared Publisher"),
+          ("topics-addr", "a write by pre-parsed path against `Session::put` on a pre-built "
+                          "key: both resolve the destination on every write"))),
     dict(id="mixed", section="dispatch", title="Mixed workload — the composed topology",
          cond="mixed · 128 topics · varied fan-out and payloads — one gated point, tracked "
               "over time rather than compared against a sibling",

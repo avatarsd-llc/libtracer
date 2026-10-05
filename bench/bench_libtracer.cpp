@@ -78,7 +78,15 @@ std::vector<std::byte> value_tlv(std::size_t payload) {
     tr::wire::tlv_t t{};
     t.type = tr::wire::type_t::VALUE;
     t.payload = p;
-    return tr::wire::encode(t);
+    std::vector<std::byte> out = tr::wire::encode(t);
+    // The Zenoh harness sizes its payload from bench::value_wire_bytes (#1809); a header that
+    // drifts from it would compare unequal byte counts under one row name.
+    if (out.size() != bench::value_wire_bytes(payload)) {
+        std::fprintf(stderr, "value_tlv(%zu): encoded %zu bytes, value_wire_bytes says %zu\n",
+                     payload, out.size(), bench::value_wire_bytes(payload));
+        std::abort();
+    }
+    return out;
 }
 
 /** @brief Per-message owned heap view (alloc + copy each publish) — the allocating path. */
@@ -2028,7 +2036,10 @@ struct bench_family_t {
  *     (1, 2 and 4 writers on one STREAM vertex), `route-handle` (the egress reuse read at
  *     T = 1, 2, 4), `alloc-seam` (class selection and the upstream fallback) and
  *     `inproc-pool-batch` (the window-calibrated twin of the `inproc-pool` rows).
- *   - `dce-canary` (#1805) is last: two rows proving the sink clobber still keeps timed work.
+ *   - `dce-canary` (#1805) comes after them: two rows proving the sink clobber still keeps
+ *     timed work.
+ *   - `topics` (#1809) is last of all: the `topics` mode's bound/by-path pair, so the Zenoh
+ *     topic-count chart has its libtracer rows in every default run. Charted, not gated.
  *
  * The SET column splits the sweep for the perf gate's measurement-condition check. A MULTI
  * family runs T workers on the pinned CPUs while its main thread spins waiting for them, so
@@ -2068,6 +2079,9 @@ constexpr bench_family_t kFamilies[] = {
     {"alloc-seam", run_alloc_seam, family_set_t::SINGLE},
     {"inproc-pool-batch", family_inproc_pool_batch, family_set_t::SINGLE},
     {"dce-canary", family_dce_canary, family_set_t::SINGLE},
+    // Last, so no earlier family's rows or ordinals move: the `topics-bound` / `topics-addr`
+    // pair in the default transcript, for the Zenoh topic charts (#1809). Ungated.
+    {"topics", run_mode_topics, family_set_t::SINGLE},
 };
 
 /**

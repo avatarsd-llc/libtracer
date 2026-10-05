@@ -9,6 +9,26 @@
  * one key expression), payload size, and endpoint count (E key expressions) —
  * and emits the same RESULT line. Intra-session local delivery is the closest
  * Zenoh analogue to libtracer's in-process path. See bench/README.md.
+ *
+ * @section matched Matched semantics (#1809)
+ *
+ * Each libtracer row of the compared families has a Zenoh row under the same key, measured the
+ * same way:
+ *   - **One process per family.** The default sweep runs each family below in a fresh child
+ *     process under the pinned allocator tunables (bench_process.hpp), exactly as
+ *     bench_libtracer's families run, and each family opens its own `Session`. No row inherits
+ *     a heap or a session another family aged.
+ *   - **The same pin, runtime threads accounted for.** Both binaries inherit one CPU set from
+ *     `bench_conditions.py`, and Zenoh's runtime threads share it with the publishing thread.
+ *     A `NOTE zenoh-runtime` line after each row gives those threads' CPU time over the
+ *     throughput window: 0 ns on the in-process rows, so delivery there runs on the putting
+ *     thread, as libtracer's does. Any share of the pin the runtime takes is on the record
+ *     rather than hidden in the row.
+ *   - **Equal payload bytes.** Each put carries @ref bench::value_wire_bytes bytes: the bytes
+ *     libtracer moves for the row's value, header included. Rows stay keyed by the value size.
+ *   - **Resolution against resolution.** `inproc-path` puts through `Session::put` on a
+ *     pre-built `KeyExpr`, resolved on every put, as libtracer's `inproc-path` writes by a
+ *     pre-parsed path. The bound spelling is the `topics-bound` row.
  */
 #include <atomic>
 #include <chrono>
@@ -19,7 +39,13 @@
 #include <thread>
 #include <vector>
 
+#if defined(__linux__)
+#include <dirent.h>
+#include <unistd.h>
+#endif
+
 #include "bench_common.hpp"
+#include "bench_process.hpp"
 #include "zenoh.hxx"
 
 using namespace zenoh;
@@ -40,6 +66,42 @@ enum class addr_t {
     BOUND, /**< @brief A declared `Publisher` — Zenoh's pre-bound handle. */
     ADDR   /**< @brief `Session::put` against a pre-built `KeyExpr`, resolved on every put. */
 };
+
+/** @brief CPU time the process's threads other than the caller have used, and how many there are.
+ */
+struct runtime_cpu_t {
+    std::uint64_t ns = 0;    /**< @brief Summed on-CPU time of every other thread, in ns. */
+    std::size_t threads = 0; /**< @brief How many other threads were counted. */
+};
+
+/**
+ * @brief Read the on-CPU time of every thread but the caller's: Zenoh's runtime threads.
+ *
+ * From `/proc/self/task/<tid>/schedstat` (first field, nanoseconds), which unlike `stat`'s
+ * utime/stime is not quantized to the scheduler tick. Zero threads where it cannot be read.
+ */
+runtime_cpu_t runtime_cpu() {
+    runtime_cpu_t r;
+#if defined(__linux__)
+    DIR* const dir = opendir("/proc/self/task");
+    if (dir == nullptr) return r;
+    const std::string self = std::to_string(gettid());
+    while (const dirent* const e = readdir(dir)) {
+        if (e->d_name[0] == '.' || self == e->d_name) continue;
+        const std::string path = std::string("/proc/self/task/") + e->d_name + "/schedstat";
+        std::FILE* const f = std::fopen(path.c_str(), "r");
+        if (f == nullptr) continue;  // the thread exited between readdir and open
+        unsigned long long ns = 0;
+        if (std::fscanf(f, "%llu", &ns) == 1) {
+            r.ns += ns;
+            ++r.threads;
+        }
+        std::fclose(f);
+    }
+    closedir(dir);
+#endif
+    return r;
+}
 
 void run(Session& session, std::size_t S, std::size_t F, std::size_t E, const char* mode,
          std::uint64_t budget = kDeliveryBudget, std::uint64_t latbudget = kLatencyDeliveryBudget,
@@ -63,7 +125,8 @@ void run(Session& session, std::size_t S, std::size_t F, std::size_t E, const ch
         else
             kes.push_back(KeyExpr(ke));
     }
-    const std::vector<std::uint8_t> payload(S, 0xAB);
+    // The bytes libtracer moves for an S-byte value, header included (#1809).
+    const std::vector<std::uint8_t> payload(value_wire_bytes(S), 0xAB);
     // The ONE line the two spellings differ by. The `KeyExpr` objects are pre-built, exactly as
     // libtracer's `topics-addr` arm pre-parses its `path_t`s: what is being compared is
     // per-operation RESOLUTION, not per-operation string parsing, and charging one engine for a
@@ -87,12 +150,15 @@ void run(Session& session, std::size_t S, std::size_t F, std::size_t E, const ch
         std::this_thread::yield();
 
     recv.store(0);
+    const runtime_cpu_t rt0 = runtime_cpu();
     const auto t0 = now_ns();
     for (std::size_t i = 0; i < MSGS; ++i) publish(i);
     const auto deadline = Clock::now() + std::chrono::seconds(30);
     while (recv.load(std::memory_order_relaxed) < want && Clock::now() < deadline)
         std::this_thread::yield();
-    const double secs = (now_ns() - t0) / 1e9;
+    const std::uint64_t wall_ns = now_ns() - t0;
+    const runtime_cpu_t rt1 = runtime_cpu();
+    const double secs = wall_ns / 1e9;
     const std::uint64_t got = recv.load(std::memory_order_relaxed);
     if (got < want)
         std::fprintf(stderr, "[zenoh] S=%zu F=%zu E=%zu delivered %llu/%llu (best-effort drops)\n",
@@ -120,6 +186,17 @@ void run(Session& session, std::size_t S, std::size_t F, std::size_t E, const ch
     const double deliv_s = got / secs;
     emit("zenoh", mode, S, F, E, pub_s, deliv_s, deliv_s * static_cast<double>(S) / 1e6,
          lat.summarize());
+    // The runtime threads' share of the throughput window, on the pin both engines share. A
+    // thread that started or exited inside the window is counted from what was read, which is
+    // why the line carries both thread counts.
+    const std::uint64_t rt_ns = rt1.ns > rt0.ns ? rt1.ns - rt0.ns : 0;
+    std::printf(
+        "NOTE zenoh-runtime mode=%s size=%zu fan=%zu ep=%zu wire_bytes=%zu threads=%zu/%zu "
+        "runtime_cpu_ns=%llu window_ns=%llu runtime_cpu_pct=%.1f\n",
+        mode, S, F, E, value_wire_bytes(S), rt0.threads, rt1.threads,
+        static_cast<unsigned long long>(rt_ns), static_cast<unsigned long long>(wall_ns),
+        wall_ns > 0 ? 100.0 * static_cast<double>(rt_ns) / static_cast<double>(wall_ns) : 0.0);
+    std::fflush(stdout);
 }
 
 /**
@@ -181,39 +258,132 @@ void run_topics(Session& session, bool bound_first) {
  * issue rather than left here as something to "fix".
  */
 
+/*
+ * The default sweep, as FAMILIES (#1809), named and ordered as bench_libtracer's families of
+ * the same rows, so each RESULT key has one libtracer and one Zenoh row from the same process
+ * shape. bench_libtracer runs other families between these; their rows have no Zenoh match.
+ */
+
+/** @brief `inproc` fan-out sweep at the reference payload. */
+void family_inproc_fan(Session& session) {
+    for (std::size_t F : kFanouts) run(session, kRefSize, F, kRefEndpoints, "inproc");
+}
+
+/** @brief `inproc` payload sweep at the reference fan-out, then the payload ladder (#1806). */
+void family_inproc_size(Session& session) {
+    for (std::size_t S : kSizes) run(session, S, kRefFanout, kRefEndpoints, "inproc");
+    for (std::size_t S : ladder_extra())
+        run(session, S, kRefFanout, kRefEndpoints, "inproc", ladder_budget(S, kDeliveryBudget),
+            ladder_budget(S, kLatencyDeliveryBudget));
+}
+
+/** @brief `inproc-path` topic-count sweep, resolved on every put like libtracer's by-path write. */
+void family_inproc_path(Session& session) {
+    for (std::size_t E : kEndpoints)
+        run(session, kRefSize, kRefFanout, E, "inproc-path", kDeliveryBudget,
+            kLatencyDeliveryBudget, addr_t::ADDR);
+}
+
+/** @brief The mid fan-out arms (#844), on the same `inproc` series as the coarse ladder. */
+void family_inproc_fan_mid(Session& session) {
+    for (std::size_t F : kFanoutsMid) run(session, kRefSize, F, kRefEndpoints, "inproc");
+}
+
+/** @brief The `topics` pair, bound arm first, as bench_libtracer's `topics` family. */
+void family_topics(Session& session) { run_topics(session, true); }
+
+/** @brief One family of the default sweep: its `--family` spelling and its runner. */
+struct zenoh_family_t {
+    std::string_view name; /**< @brief What `--family` must equal to select this family. */
+    void (*run)(Session&); /**< @brief The family's rows, on a session of its own. */
+};
+
+constexpr zenoh_family_t kFamilies[] = {
+    {"inproc-fan", family_inproc_fan},   {"inproc-size", family_inproc_size},
+    {"inproc-path", family_inproc_path}, {"inproc-fan-mid", family_inproc_fan_mid},
+    {"topics", family_topics},
+};
+
+/**
+ * @brief Open an in-process session.
+ *
+ * Multicast scouting OFF, as `bench_zenoh_net` already does. This is an IN-PROCESS comparison:
+ * libtracer runs no discovery subsystem at all, so leaving Zenoh's on puts a background thread
+ * and real multicast traffic inside the timed window on one side only. Measured on the default
+ * config: 23 sendto + 35 receives across one `grid` run. Small, but it is a fairness asymmetry
+ * in a chart whose whole premise is like-for-like.
+ */
+Session open_session() {
+    Config cfg = Config::create_default();
+    cfg.insert_json5("scouting/multicast/enabled", "false");
+    return Session::open(std::move(cfg));
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+    // Fixed allocator state, as bench_libtracer (#1803): re-exec before any output, and every
+    // family child inherits it.
+    pin_allocator_state(argv);
     init_log_from_env_or("error");
-    // Multicast scouting OFF, as `bench_zenoh_net` already does. This is an
-    // IN-PROCESS comparison: libtracer runs no discovery subsystem at all, so
-    // leaving Zenoh's on puts a background thread and real multicast traffic
-    // inside the timed window on one side only. Measured on the default config:
-    // 23 sendto + 35 receives across one `grid` run. Small, but it is a
-    // fairness asymmetry in a chart whose whole premise is like-for-like.
-    Config cfg = Config::create_default();
-    cfg.insert_json5("scouting/multicast/enabled", "false");
-    auto session = Session::open(std::move(cfg));
-    if (argc > 1 && std::string_view(argv[1]) == "grid") {
-        run_grid(session);
+    const std::string_view arg = argc > 1 ? std::string_view(argv[1]) : std::string_view{};
+    if (argc > 2 && arg == "--family") {
+        for (const zenoh_family_t& f : kFamilies) {
+            if (f.name != argv[2]) continue;
+            std::fprintf(stderr, "FAMILY %.*s\n", static_cast<int>(f.name.size()), f.name.data());
+            const std::size_t start_kb = rss_kb();
+            {
+                auto session = open_session();
+                f.run(session);
+            }
+            // Prefixed: perf_emit_benchmark.py keys RSS by family name across every raw it
+            // is given, and bench_libtracer's family of the same name must not merge with it.
+            emit_family_rss("zenoh-" + std::string(f.name), start_kb);
+            return 0;
+        }
+        std::fprintf(stderr, "error: unknown family '%s'\n", argv[2]);
+        return 2;
+    }
+    if (argc == 2 && arg == "--families") {
+        for (const zenoh_family_t& f : kFamilies)
+            std::printf("%.*s\tsingle\n", static_cast<int>(f.name.size()), f.name.data());
         return 0;
     }
-    if (argc > 1 && std::string_view(argv[1]) == "topics") {
-        run_topics(session, true);
+    if (arg == "grid" || arg == "topics" || arg == "topics-rev") {
+        auto session = open_session();
+        if (arg == "grid")
+            run_grid(session);
+        else
+            run_topics(session, arg == "topics");
         return 0;
     }
-    if (argc > 1 && std::string_view(argv[1]) == "topics-rev") {
-        run_topics(session, false);
-        return 0;
-    }
-    if (argc > 1 && std::string_view(argv[1]) == "scatter") {
+    if (arg == "scatter") {
         std::fprintf(stderr,
                      "bench_zenoh: the `scatter` mode was removed — it measured no network "
                      "I/O (see the note above run_grid). Emitting nothing is deliberate.\n");
         return 0;
     }
-    for (std::size_t F : kFanouts) run(session, kRefSize, F, kRefEndpoints, "inproc");
-    for (std::size_t S : kSizes) run(session, S, kRefFanout, kRefEndpoints, "inproc");
-    for (std::size_t E : kEndpoints) run(session, kRefSize, kRefFanout, E, "inproc-path");
+    if (argc > 1) {
+        std::fprintf(stderr,
+                     "error: unknown mode '%s' (grid | topics | topics-rev | --family NAME | "
+                     "--families)\n",
+                     argv[1]);
+        return 2;
+    }
+    // The default sweep: one fresh process per family, the clock floor once, ahead of them.
+    emit_clock_floor();
+    for (const zenoh_family_t& f : kFamilies) {
+        if constexpr (!kFamilyProcesses) {
+            auto session = open_session();
+            f.run(session);
+            continue;
+        }
+        const int rc = run_family_process(argv[0], f.name);
+        if (rc != 0) {
+            std::fprintf(stderr, "error: family '%.*s' failed (status %d)\n",
+                         static_cast<int>(f.name.size()), f.name.data(), rc);
+            return 1;
+        }
+    }
     return 0;
 }

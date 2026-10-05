@@ -241,6 +241,21 @@ inline constexpr std::size_t kRefFanout = 1;
 inline constexpr std::size_t kRefEndpoints = 1;
 
 /**
+ * @brief The bytes one write of an @p size -byte value moves through libtracer: the VALUE TLV,
+ *        @p size plus its header (#1809).
+ *
+ * The header is two bytes of type and options and a length that is two bytes wide up to
+ * 65535 and four above it, so 4 bytes are added up to 65535 and 6 from 65536. The Zenoh
+ * harness puts a payload of exactly this many bytes, so both engines copy and deliver the same
+ * byte count per write; every row is still keyed and charted by @p size, the value's own bytes.
+ * `bench_libtracer` checks its encoder against this function, so a header change cannot
+ * silently unbalance the comparison.
+ */
+[[nodiscard]] constexpr std::size_t value_wire_bytes(std::size_t size) {
+    return size + 2 + (size > 0xFFFF ? 4 : 2);
+}
+
+/**
  * @brief Keep wall-clock bounded + the comparison fair: target a roughly constant number of
  *        *deliveries* per run, so high fan-out does proportionally fewer publishes.
  */

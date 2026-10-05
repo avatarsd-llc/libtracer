@@ -1758,6 +1758,7 @@ craft libtracer":
 | `route-handle-egress-mt1` / `-mt2` / `-mt4` | T producer threads on one advertised `route_handle_t` flow, the reuse read (#1808). Throughput only; advisory, not gated. Family `route-handle` (MULTI). |
 | `seam-class-c1` / `-c8` / `-c32`, `seam-direct`, `seam-fallback` | the allocation seam (#1808): 64 B `try_alloc` + `release` on a `pool_source_t` whose 64 B class is the last of C; and a full `bump_source_t` falling back to its upstream pool, against that pool alone. Family `alloc-seam`. |
 | `inproc-pool-batch` | the window-calibrated twin of the heap-view `inproc-pool` rows (#1808), in its own family so the quantized pool rows did not move. |
+| `topics-bound` / `topics-addr` | the topic-count pair over `kTopicLadder` (1 / 100 / 10 000 topics): a write through a pre-bound handle, and a write by pre-parsed path. Family `topics`, last in the default sweep since #1809 so the Zenoh topic charts have their libtracer rows in every run; `run_topics.sh` still runs both arm orders for a verdict. Charted, not gated. |
 | `mixed` | 128 topics, varied fan-out + payloads. |
 | `net` | two processes over real UDP (`run_net.sh`). |
 | `eptype-lean` | ep-type axis: minimal sink (see below). |
@@ -1863,9 +1864,11 @@ which the Performance page shows in each point's tooltip.
   landed, and each prints a stderr warning naming any point that came up short. The two
   engines reach that same guarantee differently and the difference is not a handicap:
   libtracer dispatches inline (`write()` returns after the last subscriber callback), so
-  its publish loop *is* the delivery loop, whereas Zenoh delivers off the publishing
-  thread and the harness spins on the receive counter inside the window until the backlog
-  drains.
+  its publish loop *is* the delivery loop. The Zenoh harness spins on the receive counter
+  inside the window until the backlog drains, which covers a delivery made on a runtime
+  thread; the `NOTE zenoh-runtime` line after each Zenoh row shows how much the runtime
+  threads actually ran (#1809). On the in-process rows they ran for 0 ns in every window
+  measured: intra-session delivery happens on the putting thread, as libtracer's does.
 - **Latency** — one publish at a time (publish, wait for receipt, repeat); p50/p99/mean.
 - **Best-of-rounds, both engines.** The published comparison runs the whole grid several
   times and keeps each point's best observation (`best_of_rounds.py`). Contamination on a
@@ -1878,8 +1881,24 @@ which the Performance page shows in each point's tooltip.
 - libtracer builds at **`-O3`** (Release); Zenoh is the upstream **prebuilt** zenoh-c
   release binary, so "both at `-O3`" was never quite true — both are optimized builds
   measured in one pass, which is what parity actually rests on. Neither side gets
-  `-march=native` or LTO, and neither is pinned to a core. The app payload size (not the
-  on-wire envelope) is used for MB/s.
+  `-march=native` or LTO. Both run under `bench_conditions.py` with the same CPU pin, which
+  Zenoh's runtime threads share with the putting thread.
+- **Matched semantics (#1809).** Every compared row is produced the same way on both sides:
+  - **One fresh process per engine and family.** `bench_zenoh` runs its default sweep as
+    families (`inproc-fan`, `inproc-size`, `inproc-path`, `inproc-fan-mid`, `topics`), each
+    in its own child process under the pinned allocator tunables and with a session of its
+    own, as `bench_libtracer`'s families of the same names run. Each family prints an
+    `RSS family=zenoh-<name>` line beside libtracer's `RSS family=<name>`.
+  - **Equal payload bytes.** A Zenoh put carries `bench::value_wire_bytes(S)` bytes: the
+    `S`-byte value plus the 4-byte VALUE TLV header libtracer writes (6 bytes from 65 536 B).
+    `bench_libtracer` aborts if its encoder ever disagrees with that function. Rows are still
+    keyed by `S`, and MB/s still counts `S`.
+  - **Resolution against resolution.** Zenoh's `inproc-path` puts through `Session::put` on
+    a pre-built `KeyExpr`, as libtracer's writes by a pre-parsed path; until #1809 it used a
+    declared `Publisher`. The bound pair is `topics-bound`, now in both default sweeps, so
+    the `topics-bound` / `topics-addr` charts need no separate run.
+  - Every row of the compared families has its match, the payload ladder above 1 KiB
+    (984 / 985 / 4096 / 16 384 / 65 536 B) and the mid fan-outs (16 to 512) included.
 - **Where the remaining asymmetries point.** Two are worth naming because they run
   *against* libtracer, not for it. The charted `inproc` row does strictly more work than
   the Zenoh row beside it — it persists the value as the last-known-value and bumps the

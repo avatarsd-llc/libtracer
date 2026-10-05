@@ -169,6 +169,40 @@ class OneCommitAxisPerStore(_NoGit):
         self.assertIn("ph-rlast", JS.read_text())
 
 
+class ZenohCardsStateMatchedSemantics(_NoGit):
+    """@brief Every libtracer-vs-Zenoh card pairs its rows and says what it holds equal
+    (#1809): the topic arms are paired by spelling, the by-path arm against a put by key."""
+
+    TOPICS = (1, 100, 10000)
+
+    def _store(self) -> dict:
+        benches = [{"name": f"{eng}{mode} 64B/fan1/{ep}ep p50 latency", "value": 50.0 + ep,
+                    "unit": "ns", "extra": "h"}
+                   for eng in ("", "zenoh ")
+                   for mode in ("inproc-path", "topics-bound", "topics-addr")
+                   for ep in self.TOPICS]
+        return {"entries": {"libtracer latency (ns, smaller is better)": [
+            {"commit": {"id": c * 40, "message": f"commit {c}"}, "benches": benches}
+            for c in ("a", "b")]}}
+
+    def test_topic_cards_pair_each_spelling(self):
+        charts = {c["id"]: c for c in rh.build(self._store(), {}, same_pass=True)["charts"]}
+        for cid in ("vs-zenoh-path", "vs-zenoh-topics-bound", "vs-zenoh-topics-addr"):
+            chart = charts[cid]
+            self.assertIn("ratio", chart, cid)
+            arms = {(s["arm"], s["rk"]) for s in chart["series"]}
+            self.assertEqual(arms, {(a, f"{ep} topics") for a in ("num", "den")
+                                    for ep in self.TOPICS}, cid)
+
+    def test_every_zenoh_card_states_the_match(self):
+        cards = [f for f in rh.FAMILIES if f["id"].startswith("vs-zenoh")]
+        self.assertGreaterEqual(len(cards), 5)
+        for fam in cards:
+            for clause in ("one fresh process per engine and family", "the same CPU pin",
+                           "equal payload bytes", "resolution against resolution"):
+                self.assertIn(clause, fam["cond"], fam["id"])
+
+
 class RowsAboveOneKibAreVisible(_NoGit):
     """@brief Payload sizes above 1 KiB reach the default (bench-local) payload."""
 
