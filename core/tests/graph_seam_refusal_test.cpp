@@ -224,6 +224,33 @@ void test_register_unconditional() {
            "register UNCONDITIONAL");
 }
 
+/** @brief Registration over a placeholder: a refusal leaves no extension block on it. */
+void test_register_placeholder() {
+    std::printf("register_vertex — a value seam over an existing placeholder:\n");
+    static auto on_read = []() -> tr::graph::result_t<tr::graph::value_ref_t> {
+        return std::unexpected(status_t::NOT_FOUND);
+    };
+    handlers_t h;
+    h.on_read = tr::graph::thunk(on_read);
+    bool clean = true;
+    bool completed = false;
+    for (std::size_t allow = 0; allow < 64 && !completed; ++allow) {
+        gate_source_t src;
+        graph_t g{src};
+        (void)g.register_vertex(*path_t::parse("/p/v/c"),
+                                role_t::STORED_VALUE);  // "/p/v" is a placeholder
+        const long before = src.live_;
+        src.arm(allow);
+        const auto r = g.try_register_vertex(*path_t::parse("/p/v"), role_t::STORED_VALUE, h);
+        src.disarm();
+        completed = r.has_value();
+        clean = clean && (completed || (r.error() == status_t::BACKPRESSURE &&
+                                        src.live_ == before && !found(g, "/p/v")));
+    }
+    check(completed, "the registration completes once the source has room");
+    check(clean, "a refused one leaves the placeholder as it was: no block drawn stays behind");
+}
+
 /** @brief A session anchor: its record, the slot and the vertex. */
 void test_anchor() {
     std::printf("register_session_anchor:\n");
@@ -495,6 +522,7 @@ void test_init_exhaustion_message() {
 int main() {
     test_register();
     test_register_unconditional();
+    test_register_placeholder();
     test_anchor();
     test_subscribe();
     test_retire();

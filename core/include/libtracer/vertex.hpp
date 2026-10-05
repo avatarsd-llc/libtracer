@@ -3422,27 +3422,30 @@ class vertex_t {
         if (role != role_t::STREAM && !has_seam && !handlers.on_app_field_write &&
             ext_.load(std::memory_order_acquire) == nullptr)
             return true;
-        vertex_ext_t* const e = ensure_ext(src);
-        if (e == nullptr) return false;
         // Split the public input into its two lazy groups (ADR-0058 Step 2): the value
         // seam only when one of its three is set; the app-field group's apply seam only
         // when given. Registration is single-threaded for this vertex, so no lock here.
-        // Both blocks are drawn BEFORE either is published (#1778), so a refusal installs
-        // nothing and the node stays the placeholder it was.
-        value_handlers_t* seam = nullptr;
-        if (has_seam) {
-            seam = tr::mem::make_in<value_handlers_t>(
-                *e->src,
-                value_handlers_t{handlers.on_read, handlers.on_write, handlers.on_children});
-            if (seam == nullptr) return false;
+        // Every block, the extension block last, is drawn BEFORE anything is published
+        // (#1778), so a refusal installs nothing and the node stays the placeholder it was.
+        // The groups come from the source the extension block draws from: an existing
+        // block's own, else @p src, which the block about to be made records.
+        vertex_ext_t* e = ext_.load(std::memory_order_acquire);
+        tr::mem::block_source_t& from = e != nullptr ? *e->src : src;
+        value_handlers_t* const seam =
+            has_seam ? tr::mem::make_in<value_handlers_t>(
+                           from, value_handlers_t{handlers.on_read, handlers.on_write,
+                                                  handlers.on_children})
+                     : nullptr;
+        const bool need_app = handlers.on_app_field_write && (e == nullptr || e->app == nullptr);
+        app_field_group_t* const app =
+            need_app ? tr::mem::make_in<app_field_group_t>(from, from) : nullptr;
+        if (e == nullptr) e = ensure_ext(src);
+        if (e == nullptr || (has_seam && seam == nullptr) || (need_app && app == nullptr)) {
+            tr::mem::drop_in(from, seam);
+            tr::mem::drop_in(from, app);
+            return false;
         }
-        if (handlers.on_app_field_write && e->app == nullptr) {
-            e->app = tr::mem::make_in<app_field_group_t>(*e->src, *e->src);
-            if (e->app == nullptr) {
-                tr::mem::drop_in(*e->src, seam);
-                return false;
-            }
-        }
+        if (need_app) e->app = app;
         if (seam != nullptr) {
             // Publish the seam atomically. `fill` only ever runs on an UNREGISTERED node
             // (register_vertex_key returns PATH_IN_USE otherwise), and such a node's seam
