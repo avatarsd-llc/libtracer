@@ -439,7 +439,7 @@ what keeps the sweep honest — a new kind cannot be added with its keys documen
 nowhere, and `udp`'s "no kind-private keys" is a derived fact rather than a claim.
 
 The scope of that gate is connection config, and the scope is deliberate: the
-creation-SPEC envelope and the SUBSCRIBER QoS parse in `core/src/graph.cpp` read
+creation-SPEC envelope and the SUBSCRIBER QoS parse in `core/src/graph_fields.cpp` read
 their grammar through the same shared `config_reader_t` since
 [#985](https://github.com/avatarsd-llc/libtracer/issues/985), so that file is
 explicitly excluded from the sweep — its keys are not connection config — and the

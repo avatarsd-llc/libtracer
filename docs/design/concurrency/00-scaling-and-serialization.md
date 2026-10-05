@@ -54,7 +54,7 @@ discounted. `evict_link_edges` is the one function that takes it twice.
 | **unique** | `graph.cpp:graph_t::register_vertex_key`, `graph.cpp:graph_t::retire`, `graph.cpp:graph_t::collect` | control plane |
 | shared | `graph.cpp:graph_t::find_ptr` — **so every `path_t` overload pays it once**; ≥3× and non-scaling (§6) | per op, path-addressed only |
 | shared | `graph.cpp:graph_t::vertex_slot`, `graph.cpp:graph_t::vertex_slot_at`, `graph.cpp:graph_t::deref_vertex_slot`, `graph.cpp:graph_t::vertex_slot_count` | per op, bound-path addressed only — see below |
-| shared | `graph.cpp:graph_t::field_write` — the `:acl` branch only, not every `:field` write | per `:acl` write |
+| shared | `graph_fields.cpp:field_surface_t::write_acl` — the `:acl` write only, not every `:field` write | per `:acl` write |
 | shared | `graph.cpp:graph_t::read_children`, `graph.cpp:graph_t::read_children_folded`, `graph.cpp:graph_t::read_subtree_folded` | per composed read — these walk, so they need it |
 | shared | `graph.cpp:graph_t::note_subscriber_added` / `graph.cpp:graph_t::note_subscriber_removed`, `graph.cpp:graph_t::evict_link_edges`, `graph.cpp:graph_t::parked_seam_count` | control plane |
 

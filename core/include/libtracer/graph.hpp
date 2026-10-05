@@ -2469,6 +2469,13 @@ class graph_t {
 
    private:
     /**
+     * @brief The `:`-field surface (#1711): one constant row per colon field, defined in
+     *        `core/src/graph_fields.cpp` beside the two doors (`read_field_composed`,
+     *        `field_write`) that dispatch on it. A nested type rather than a friend, so no
+     *        class outside `graph_t` can claim its access.
+     */
+    struct field_surface_t;
+    /**
      * @brief The one registration door that takes a policy: refuse an illegal one before the
      *        descent, register, then apply it outside the map lock.
      */
@@ -2719,6 +2726,13 @@ class graph_t {
     // a newborn's creation-time sum and this walk never double-count).
     void note_subscriber_added(vertex_t* v);
     void note_subscriber_removed(vertex_t* v);
+    // Clear subscriber slot `slot` of `v` and, iff it was active, unwind the bookkeeping above
+    // and report the removal to the subscription observer under `caller` (a no-op for the
+    // empty, local caller): the one clear `unsubscribe` and the wire `:subscribers[N]` clear
+    // both run (#1711). False iff the slot was not active. `retired_ctx` as for
+    // vertex_t::clear_edge.
+    [[nodiscard]] bool clear_subscriber_slot(vertex_t* v, std::size_t slot, std::string_view caller,
+                                             void** retired_ctx = nullptr);
     // The single SUBSCRIBER admission step (ADR-0049): SUBSCRIBE gate under `caller` →
     // slot append → transient-local durability latch (delivered outside the lock, per
     // the edge's kind) → RFC-0005 bookkeeping. Every door — the two subscribe() sugars,

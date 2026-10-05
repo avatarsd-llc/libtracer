@@ -13,12 +13,6 @@
       ],
       "file": "core/src/graph.cpp"
     },
-    "tr::graph::graph_t::field_write": {
-      "ccn": [
-        45
-      ],
-      "file": "core/src/graph.cpp"
-    },
     "tr::graph::graph_t::propagate_folded_impl": {
       "ccn": [
         42
@@ -28,12 +22,6 @@
     "tr::graph::graph_t::propagate_impl": {
       "ccn": [
         30
-      ],
-      "file": "core/src/graph.cpp"
-    },
-    "tr::graph::graph_t::read_field_composed": {
-      "ccn": [
-        45
       ],
       "file": "core/src/graph.cpp"
     },
