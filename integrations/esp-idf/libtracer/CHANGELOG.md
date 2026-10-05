@@ -12,6 +12,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **`admission_verdict_t::REFUSE_AFTER_UPGRADE` — a refusal the peer can read
+  ([#1857](https://github.com/avatarsd-llc/libtracer/issues/1857)).** A browser's `WebSocket`
+  API hides the HTTP status of a refused upgrade, so a peer turned away by `REFUSE` sees close
+  1006, the same as a network loss. The new verdict lets the upgrade complete, then sends a
+  close frame with `httpd_ws_config_t::refusal_close_code` (0, the default, means
+  `httpd_ws_link_t::kCloseTryAgainLater`, 1013) and the optional
+  `httpd_ws_config_t::refusal_close_reason`, cut to `kMaxCloseReasonBytes` (123). The refused
+  socket takes no peer slot, no pending-handshake row and no deadline, and the link handles
+  none of its frames. It is counted in `stats_t::peers_refused`. The close is queued onto the
+  httpd task at the handshake, one small work item per refusal; if that queue refuses the
+  item, the verdict falls back to `REFUSE`. `REFUSE` is unchanged. The new enumerator and the
+  two new config members come last, so existing code compiles unchanged.
 - **`esp_ws_client_config_t::memory` — the WebSocket client link takes `link_memory_t`
   ([#1661](https://github.com/avatarsd-llc/libtracer/issues/1661)).** The shape is the server
   link's (`httpd_ws_config_t::memory`). `rx` opts in to owning delivery: each complete message
