@@ -2675,8 +2675,12 @@ void graph_t::propagate_impl(vertex_t* v) {
             if (k.size() != lo.size() && !to_deliver.push(k)) break;  // strict descendant
             own_drained = own_drained || k.size() == lo.size();
         }
-        pending_.erase_at(first, last - first);  // v itself, if present, was delivered above
-        pending_count_.fetch_sub(last - first, std::memory_order_relaxed);
+        // v itself, if present, was delivered above. An empty run takes no atomic RMW: the
+        // plain propagate of an unmarked vertex is this path's common case.
+        if (last != first) {
+            pending_.erase_at(first, last - first);
+            pending_count_.fetch_sub(last - first, std::memory_order_relaxed);
+        }
         // Iterate, do not drain; a refusal defers the rest to the next sweep.
         const auto [ufirst, uend] = subtree_run(unconditional_, lo);
         for (std::size_t i = ufirst; i < uend; ++i) {
