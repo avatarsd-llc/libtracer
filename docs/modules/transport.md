@@ -365,7 +365,7 @@ flowchart LR
   the `iov_table_t` overflow block the socket transports' `::iovec` tables grow into —
   comes from `transport_t::egress_source()`, a `mem::block_source_t` the transport
   factory wires per link (`register_builtin_transports`' `egress_src` argument, fed by
-  `transport_vertex_t`'s), defaulting to the process heap. Both the entry count and the
+  `transport_vertex_t`'s), defaulting to the process net sub-pool (#1777). Both the entry count and the
   byte count are the *sending peer's* choice, so sizing that store is what bounds a
   node's egress allocation — [ADR-0079](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md)'s
   "bounded node is a property the deployer injects". Exhaustion is unchanged: the frame

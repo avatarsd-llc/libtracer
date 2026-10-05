@@ -202,20 +202,72 @@ The bounded reference backend:
 :members:
 ```
 
+### The host slab pool
+
+On a host build the process default root, `tr::mem::default_root()`, is a size-classed slab
+pool (ADR-0083 Decision 6, #1777). It asks the platform heap only for whole slabs, carves them
+into the classes of `default_config_t::kSizeClasses`, keeps up to `kSlabClassCap` fully free
+slabs per class and returns the rest, and derives three sub-pools: values (with a per-thread
+cache), tables and net. A graph built with no source draws from them; a graph given a source
+draws from that source alone. A build that binds `kSlabPool = false` keeps the platform heap.
+
+```{doxygenclass} tr::mem::slab_pool_t
+:project: libtracer
+:members:
+```
+
+```{doxygenclass} tr::mem::host_root_t
+:project: libtracer
+:members:
+```
+
+```{doxygenclass} tr::mem::host_values_t
+:project: libtracer
+:members:
+```
+
+```{doxygenstruct} tr::mem::slab_class_stats_t
+:project: libtracer
+:members:
+```
+
+```{doxygenfunction} tr::mem::slab_classes_valid
+:project: libtracer
+```
+
+```{doxygenfunction} tr::mem::host_root
+:project: libtracer
+```
+
+```{doxygenfunction} tr::mem::default_root
+:project: libtracer
+```
+
+```{doxygenfunction} tr::mem::value_source
+:project: libtracer
+```
+
+```{doxygenfunction} tr::mem::table_source
+:project: libtracer
+```
+
+```{doxygenfunction} tr::mem::net_source
+:project: libtracer
+```
+
+```{doxygenfunction} tr::mem::net_backend
+:project: libtracer
+```
+
 ### The placement module
 
 One module owns how a segment's header and payload sit in the blocks a backend draws
 (ADR-0083 Decision 5, #1775): the header size, the padding rule, a pool slot's stride, the
-choice between one block and a split, the inline value's layout and the receive-loan reserve.
-Every backend asks it; none keeps its own recipe. The one-block-or-split choice is made
-against the build's size-class table, `default_config_t::kSizeClasses`: a heap segment whose
-padded header plus payload fits the table's last row is one block, a larger one is the payload
-and a bare header. Only the heap backend asks that question. A source or pool backend is
-sized for one draw per segment and keeps one block always.
-
-```{doxygenfunction} tr::mem::is_one_block
-:project: libtracer
-```
+inline value's layout and the receive-loan reserve. Every backend asks it; none keeps its own
+recipe. A segment is one block on every backend: the padded header, then the payload. The
+#1768 split of a large heap segment into two blocks is deleted (#1777), because the heap
+backend's blocks now come from the host slab pool's size classes, where a 1 KiB value is one
+class block and the platform allocator sees only whole slabs.
 
 ```{doxygenfunction} tr::mem::segment_block_align
 :project: libtracer

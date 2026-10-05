@@ -740,14 +740,17 @@ class graph_t {
      * channels.
      *
      * @par NARROW vs WIDE is WHICH source, never a config knob
-     * A host that passes nothing gets @ref mem::heap_source — unbounded, honestly reporting
-     * the platform heap's ceiling, and behaviourally what this graph always did: the
-     * process-default composition folds back onto `std::pmr::new_delete_resource()` and
-     * @ref mem::heap_backend, the exact objects the old defaults named, so no default-built
-     * graph changes an allocation. A bounded node injects a @ref mem::pool_source_t (or a
+     * A host that passes nothing gets @ref mem::default_root (ADR-0083 Decision 4, #1777).
+     * Where `kSlabPool` is `true` that is the host root (`%mem_slab_pool.hpp`), and the graph
+     * DERIVES its sub-pools from it: values (published values, ring admissions and every
+     * segment @ref value_backend mints, through @ref mem::heap_backend) from the value
+     * sub-pool, and registration and container blocks from the table sub-pool. The platform
+     * allocator then sees whole slabs only. Where it is `false` the default is the platform
+     * heap, as before #1777. A bounded node injects a @ref mem::pool_source_t (or a
      * @ref mem::bump_source_t over `null_source()`) and the slab's size IS the bound
-     * (ADR-0079). No `default_config_t` option expresses this and none will: the divergence
-     * is the injected object.
+     * (ADR-0079): an injected root serves every purpose itself, and no sub-pool is derived
+     * from it (@ref derives_sub_pools). No `default_config_t` option expresses the bound and
+     * none will: the divergence is the injected object.
      *
      * @par Per-domain overrides still exist, at the seams that own the resource
      * One injection is the DEFAULT, not a mandate that everything share a store. A STREAM
@@ -781,7 +784,7 @@ class graph_t {
      *            arch-selected synchronisation. Any `mem_backend_t` is a source too
      *            (RFC-0028 slice 10), so a deployer that injects one slab has one slab.
      */
-    explicit graph_t(mem::block_source_t& src = mem::heap_source(), graph_hooks_t hooks = {});
+    explicit graph_t(mem::block_source_t& src = mem::default_root(), graph_hooks_t hooks = {});
 
     graph_t(const graph_t&) = delete;
     graph_t& operator=(const graph_t&) = delete;
@@ -799,10 +802,50 @@ class graph_t {
      * @brief The graph-level DEFAULT receiver-ring source (RFC-0025 §4.6.1 clause 3).
      *
      * What a STREAM vertex charges its ring admissions against until it declares its own
-     * through @ref vertex_policy_t::ring_source. Exposed for the same reason @ref control_source
-     * is: so a host can name it in a memory census and so the wiring is observable.
+     * through @ref vertex_policy_t::ring_source, is the value sub-pool (@ref value_source), since
+     * #1777. Exposed for the same reason @ref control_source is: so a host can name it in a
+     * memory census and so the wiring is observable.
      */
-    [[nodiscard]] mem::block_source_t& default_ring_source() const noexcept { return *ring_; }
+    [[nodiscard]] mem::block_source_t& default_ring_source() const noexcept { return *values_; }
+
+    /**
+     * @brief Where this graph's VALUES are drawn from (ADR-0083 Decision 3, #1777): every
+     *        published value, the default ring admissions, and a router's warm COMPACT copy.
+     *
+     * The value sub-pool of the host root (`:stats.mem.values`) on a default graph that
+     * @ref derives_sub_pools; the injected root otherwise.
+     */
+    [[nodiscard]] mem::block_source_t& value_source() const noexcept { return *values_; }
+
+    /**
+     * @brief Where this graph's TABLE blocks are drawn from: vertex registration, the
+     *        control-plane containers and the failable scratch of a composed read or a branch
+     *        write (`:stats.mem.tables`). The table sub-pool or the injected root, as
+     *        @ref value_source.
+     */
+    [[nodiscard]] mem::block_source_t& table_source() const noexcept { return *tables_; }
+
+    /**
+     * @brief The NET sub-pool a router or link on this graph defaults to when the application
+     *        injects nothing (ADR-0083 Q21, `:stats.mem.net`): @ref mem::net_source on a graph
+     *        that @ref derives_sub_pools, the injected root otherwise.
+     *
+     * The router and transport sources stay separately injectable (receiver-pays); this is
+     * only their default, and the census name a monitor reads it by.
+     */
+    [[nodiscard]] mem::block_source_t& net_source() const noexcept {
+        return derives_sub_pools() ? mem::net_source() : *ctl_;
+    }
+
+    /**
+     * @brief Whether this graph derived its sub-pools from the host default root (#1777):
+     *        `true` for a graph built without a source on a `kSlabPool` build.
+     *
+     * An injected root serves every purpose itself, so its census is `:stats.mem.control`
+     * alone, and `:stats.mem.values`, `.tables` and `.net` answer `SCHEMA_NOT_FOUND`
+     * (RFC-0010 Amendment 3: "a node that does not derive a given sub-pool").
+     */
+    [[nodiscard]] bool derives_sub_pools() const noexcept { return values_ != ctl_; }
 
     /**
      * @brief The @ref tr::mem::mem_backend_t every @ref view::segment_t this graph owns is
@@ -3213,24 +3256,28 @@ class graph_t {
      */
     mem::block_source_t* ctl_ = &mem::heap_source();
 
-    /** @brief The GRAPH-LEVEL DEFAULT receiver-ring source (RFC-0025 §4.6.1 clause 3): the seam
-     *         a STREAM vertex charges its ring admissions against when it has declared none of
-     *         its own through @ref vertex_policy_t::ring_source.
+    /** @brief The VALUE sub-pool (#1777): every published value, the graph-level DEFAULT
+     *         receiver-ring admissions (RFC-0025 §4.6.1 clause 3) and a router's warm COMPACT
+     *         copy draw from it.
      *
-     *         It IS the injected source: the constructor binds it to `ctl_`, so every
-     *         graph-level byte, ring admissions included, draws from the one store the host
-     *         passed (or the platform heap when it passed none). This fold is deliberate, per
-     *         the one-source ruling (#1581, 2026-09-29): there is no graph-level ring seam.
-     *         Divergence is per vertex, through @ref vertex_policy_t::ring_source (bound by
-     *         `vertex_t::set_ring_source`) — receiver-pays, so a receiver that must not be
-     *         affected by another's exhaustion brings its own source, and per-vertex
-     *         isolation stays a tested property. Separating whole planes is a
-     *         deployment-profile concern, not a constructor argument. The member exists so a
-     *         vertex that declared nothing still has somewhere to charge.
+     *         The root's value sub-pool on a default graph, and the injected root itself
+     *         otherwise, so every graph-level byte still draws from the one store the host
+     *         passed. It replaced `ring_`, which was an alias of `ctl_` (#1822, folded into
+     *         #1777): rings draw from the derived layout like the values they hold. There is
+     *         still no graph-level ring SEAM (#1581, 2026-09-29): divergence is per vertex,
+     *         through @ref vertex_policy_t::ring_source (bound by `vertex_t::set_ring_source`)
+     *         — receiver-pays, so a receiver that must not be affected by another's exhaustion
+     *         brings its own source, and per-vertex isolation stays a tested property.
      *
      *         Declared beside `ctl_` for the reason that member documents — a cold pointer
      *         inserted mid-object shifts `root_` and every hot member after it. */
-    mem::block_source_t* ring_ = &mem::heap_source();
+    mem::block_source_t* values_ = &mem::heap_source();
+
+    /** @brief The TABLE sub-pool (#1777): registration, the control-plane containers and the
+     *         failable scratch of a composed read or a branch write draw from it. The root's
+     *         table sub-pool on a default graph, the injected root otherwise. Declared beside
+     *         `ctl_` for the reason that member documents. */
+    mem::block_source_t* tables_ = &mem::heap_source();
 
     /** @brief The @ref set_vertex_ceiling bound, charged against `vertex_slots_.size()` (#1314).
      *

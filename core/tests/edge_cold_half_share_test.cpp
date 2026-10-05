@@ -147,9 +147,9 @@ using tr::view::view_t;
 void test_republish_allocation_is_flat() {
     std::printf("an admission's allocation count is flat in the edges already present:\n");
     constexpr std::size_t kEdges = 48;
-    constexpr std::size_t kEarly = 5;  // 5 pre-existing edges; capacity 8, no vector growth
-    constexpr std::size_t kLate = 45;  // 45 pre-existing edges; capacity 64, no vector growth
-    graph_t g;
+    constexpr std::size_t kEarly = 5;   // 5 pre-existing edges; capacity 8, no vector growth
+    constexpr std::size_t kLate = 45;   // 45 pre-existing edges; capacity 64, no vector growth
+    graph_t g{tr::mem::heap_source()};  // raw heap: the counter sees each block (#1777)
     const path_t src = *path_t::parse("/t/share/src");
     const auto v = g.register_vertex(src, role_t::STORED_VALUE);
 
@@ -201,7 +201,7 @@ void test_republish_allocation_is_flat() {
  */
 void test_reclaim_leaves_the_survivors_intact() {
     std::printf("reclaiming one slot leaves the other edges' shared cold halves intact:\n");
-    graph_t g;
+    graph_t g{tr::mem::heap_source()};  // raw heap: the counter sees each block (#1777)
     const path_t src = *path_t::parse("/t/share/live");
     const auto v = g.register_vertex(src, role_t::STORED_VALUE);
 
@@ -273,9 +273,9 @@ void test_reclaim_leaves_the_survivors_intact() {
 void test_delivery_allocation_is_flat() {
     std::printf("a delivery's allocation count is flat in the remote fan-out:\n");
     constexpr std::size_t kEdges = 48;
-    constexpr std::size_t kEarly = 5;  // 5 remote edges — inside the inline snapshot
-    constexpr std::size_t kLate = 45;  // 45 remote edges — through the overflow buffer
-    graph_t g;
+    constexpr std::size_t kEarly = 5;   // 5 remote edges — inside the inline snapshot
+    constexpr std::size_t kLate = 45;   // 45 remote edges — through the overflow buffer
+    graph_t g{tr::mem::heap_source()};  // raw heap: the counter sees each block (#1777)
     const path_t src = *path_t::parse("/t/share/deliver");
     const auto v = g.register_vertex(src, role_t::STORED_VALUE);
     std::size_t delivered = 0;

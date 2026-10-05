@@ -182,6 +182,17 @@ namespace can = tr::net::can;
 
 using tr::testing::check;
 
+/**
+ * @brief A ws client's memory on the RAW platform heap (#1777).
+ *
+ * A link's egress store defaults to the host net sub-pool, which asks the platform allocator
+ * only for whole slabs and keeps a couple warm, so the k-th-allocation injector would reach a
+ * cold slab once and then nothing. Every link in this TU is put on the raw heap instead (the
+ * servers, tcp and udp links through `set_egress_source`), where each egress block is one
+ * `operator new` the injector can refuse — the instrument the cases below are built on.
+ */
+const tr::net::ws_client_config_t kRawWs{.memory = {.io = &tr::mem::heap_source()}};
+
 /** @brief One armed window: allocation @p fail_at on THIS thread returns null / throws. */
 struct arm_t {
     explicit arm_t(std::size_t fail_at) noexcept {
@@ -408,6 +419,7 @@ std::vector<std::span<const std::byte>> wide_gather(const std::vector<std::byte>
 void test_ws_server_send_span_is_allocation_free() {
     std::printf("ws server send(span) — allocation-free (A2/A3):\n");
     tr::net::ws_server_transport_t server(0);
+    server.set_egress_source(tr::mem::heap_source());  // raw heap (#1777)
     check(server.ok(), "server bound");
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
@@ -442,6 +454,7 @@ void test_ws_server_send_span_is_allocation_free() {
 void test_ws_server_send_iov_overflow_drops() {
     std::printf("ws server send(iov) — overflow gather drops, node lives (B1/B2):\n");
     tr::net::ws_server_transport_t server(0);
+    server.set_egress_source(tr::mem::heap_source());  // raw heap (#1777)
     check(server.ok(), "server bound");
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
@@ -497,6 +510,7 @@ void test_ws_peer_endpoint_send_iov_overflow_drops() {
     std::printf(
         "ws peer_endpoint send — directed span allocates nothing, gather drops (A2/A3/B1):\n");
     tr::net::ws_server_transport_t server(0, {.peer_named = true});
+    server.set_egress_source(tr::mem::heap_source());  // raw heap (#1777)
     check(server.ok(), "peer-named server bound");
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
@@ -571,6 +585,7 @@ void test_ws_client_send_drops_then_recovers() {
     sink_t at_server;
     auto srv_rx = [&](std::span<const std::byte> f) { at_server.push(f); };
     tr::net::ws_server_transport_t server(0);
+    server.set_egress_source(tr::mem::heap_source());  // raw heap (#1777)
     check(server.ok(), "server bound");
     server.set_receiver(srv_rx);
 
@@ -581,7 +596,7 @@ void test_ws_client_send_drops_then_recovers() {
     // client would be 0 and every injection point would be vacuous.
     std::size_t n_allocs = 0;
     {
-        tr::net::ws_client_transport_t probe("127.0.0.1", server.local_port());
+        tr::net::ws_client_transport_t probe("127.0.0.1", server.local_port(), kRawWs);
         check(probe.ok(), "ws probe client handshaken");
         n_allocs = count_allocs([&] { probe.send(payload); });
         check(at_server.wait_for(1, 2s), "the unrefused baseline frame arrived");
@@ -597,7 +612,7 @@ void test_ws_client_send_drops_then_recovers() {
 
     // EVERY injection point, each on a client whose tx_buf_ is still COLD.
     for (std::size_t k = 1; k <= n_allocs; ++k) {
-        tr::net::ws_client_transport_t client("127.0.0.1", server.local_port());
+        tr::net::ws_client_transport_t client("127.0.0.1", server.local_port(), kRawWs);
         check(client.ok(), "ws client handshaken");
         const bool escaped = escapes_at(k, [&] { client.send(payload); });
         check(!escaped, "send with the frame-buffer growth refused does not throw");
@@ -605,7 +620,7 @@ void test_ws_client_send_drops_then_recovers() {
     std::this_thread::sleep_for(150ms);
     check(at_server.n() == 1, "every refused frame was DROPPED (only the baseline arrived)");
 
-    tr::net::ws_client_transport_t client("127.0.0.1", server.local_port());
+    tr::net::ws_client_transport_t client("127.0.0.1", server.local_port(), kRawWs);
     check(client.ok(), "ws client handshaken");
     client.send(payload);
     check(at_server.wait_for(2, 2s), "the node is LIVE: the next send arrives");
@@ -626,9 +641,11 @@ void test_tcp_send_iov_overflow_drops() {
     sink_t at_listener;
     auto listener_rx = [&](std::span<const std::byte> f) { at_listener.push(f); };
     tr::net::tcp_transport_t listener(std::uint16_t{0});
+    listener.set_egress_source(tr::mem::heap_source());  // raw heap (#1777)
     check(listener.ok(), "listener bound");
     listener.set_receiver(listener_rx);
     tr::net::tcp_transport_t dialer("127.0.0.1", listener.local_port());
+    dialer.set_egress_source(tr::mem::heap_source());  // raw heap (#1777)
     check(dialer.ok(), "dialer connected");
 
     const std::vector<std::byte> storage(kWideSpans, std::byte{0x11});
@@ -661,8 +678,10 @@ void test_tcp_server_broadcast_scratch_drops() {
     sink_t at_peer;
     auto peer_rx = [&](std::span<const std::byte> f) { at_peer.push(f); };
     tr::net::tcp_server_transport_t server(0);
+    server.set_egress_source(tr::mem::heap_source());  // raw heap (#1777)
     check(server.ok(), "tcp server bound");
     tr::net::tcp_transport_t peer("127.0.0.1", server.local_port());
+    peer.set_egress_source(tr::mem::heap_source());  // raw heap (#1777)
     check(peer.ok(), "peer connected");
     peer.set_receiver(peer_rx);
     std::this_thread::sleep_for(150ms);  // let the accept complete
@@ -712,6 +731,7 @@ void test_default_send_iov_gather_drops() {
         }
     };
     counting_link_t link;
+    link.set_egress_source(tr::mem::heap_source());  // raw heap (#1777)
     const std::vector<std::byte> storage(kWideSpans, std::byte{0x5C});
     const auto iov = wide_gather(storage, kWideSpans);
     const auto send_wide = [&] { link.send(std::span<const std::span<const std::byte>>(iov)); };
@@ -740,8 +760,10 @@ void test_udp_send_iov_overflow_drops() {
     // `b` binds first with peer_port 0 (it only ever receives, and would learn its peer from
     // the inbound source address anyway); `a` then targets the port `b` actually got.
     tr::net::udp_transport_t b(0, "127.0.0.1", 0);
+    b.set_egress_source(tr::mem::heap_source());  // raw heap (#1777)
     check(b.ok(), "udp receiver bound");
     tr::net::udp_transport_t a(0, "127.0.0.1", b.local_port());
+    a.set_egress_source(tr::mem::heap_source());  // raw heap (#1777)
     check(a.ok(), "udp sender bound");
     b.set_receiver(b_rx);
 
@@ -842,6 +864,7 @@ void test_default_send_iov_uses_injected_egress_source() {
         }
     };
     counting_link_t link;
+    link.set_egress_source(tr::mem::heap_source());  // raw heap (#1777)
     const std::vector<std::byte> storage(kWideSpans, std::byte{0x71});
     const auto iov = wide_gather(storage, kWideSpans);
     const auto send_wide = [&] { link.send(std::span<const std::span<const std::byte>>(iov)); };
@@ -866,9 +889,11 @@ void test_tcp_send_iov_uses_injected_egress_source() {
     sink_t at_listener;
     auto listener_rx = [&](std::span<const std::byte> f) { at_listener.push(f); };
     tr::net::tcp_transport_t listener(std::uint16_t{0});
+    listener.set_egress_source(tr::mem::heap_source());  // raw heap (#1777)
     check(listener.ok(), "listener bound");
     listener.set_receiver(listener_rx);
     tr::net::tcp_transport_t dialer("127.0.0.1", listener.local_port());
+    dialer.set_egress_source(tr::mem::heap_source());  // raw heap (#1777)
     check(dialer.ok(), "dialer connected");
 
     const std::vector<std::byte> storage(kWideSpans, std::byte{0x72});
@@ -893,8 +918,10 @@ void test_tcp_server_iov_uses_injected_egress_source() {
     sink_t at_peer;
     auto peer_rx = [&](std::span<const std::byte> f) { at_peer.push(f); };
     tr::net::tcp_server_transport_t server(0, {.peer_named = true});
+    server.set_egress_source(tr::mem::heap_source());  // raw heap (#1777)
     check(server.ok(), "peer-named tcp server bound");
     tr::net::tcp_transport_t peer("127.0.0.1", server.local_port());
+    peer.set_egress_source(tr::mem::heap_source());  // raw heap (#1777)
     check(peer.ok(), "peer connected");
     peer.set_receiver(peer_rx);
     std::this_thread::sleep_for(150ms);  // let the accept complete
@@ -934,8 +961,10 @@ void test_udp_send_iov_uses_injected_egress_source() {
     sink_t at_b;
     auto b_rx = [&](std::span<const std::byte> f) { at_b.push(f); };
     tr::net::udp_transport_t b(0, "127.0.0.1", 0);
+    b.set_egress_source(tr::mem::heap_source());  // raw heap (#1777)
     check(b.ok(), "udp receiver bound");
     tr::net::udp_transport_t a(0, "127.0.0.1", b.local_port());
+    a.set_egress_source(tr::mem::heap_source());  // raw heap (#1777)
     check(a.ok(), "udp sender bound");
     b.set_receiver(b_rx);
 
@@ -959,6 +988,7 @@ void test_udp_send_iov_uses_injected_egress_source() {
 void test_ws_server_iov_uses_injected_egress_source() {
     std::printf("ws server broadcast + directed facade — draw from the injected store:\n");
     tr::net::ws_server_transport_t server(0, {.peer_named = true});
+    server.set_egress_source(tr::mem::heap_source());  // raw heap (#1777)
     check(server.ok(), "peer-named ws server bound");
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
@@ -1027,18 +1057,19 @@ void test_ws_client_tx_buf_uses_injected_egress_source() {
     sink_t at_server;
     auto srv_rx = [&](std::span<const std::byte> f) { at_server.push(f); };
     tr::net::ws_server_transport_t server(0);
+    server.set_egress_source(tr::mem::heap_source());  // raw heap (#1777)
     check(server.ok(), "server bound");
     server.set_receiver(srv_rx);
 
     const std::vector<std::byte> payload(64, std::byte{0x5A});
 
-    // The BASELINE, and the non-vacuous half: an un-injected client's cold send draws exactly
-    // one block from the process heap. If this ever reads 0 the arm below proves nothing.
+    // The BASELINE, and the non-vacuous half: a client on the raw heap draws exactly one block
+    // for its cold send. If this ever reads 0 the arm below proves nothing.
     {
-        tr::net::ws_client_transport_t bare("127.0.0.1", server.local_port());
-        check(bare.ok(), "un-injected ws client handshaken");
+        tr::net::ws_client_transport_t bare("127.0.0.1", server.local_port(), kRawWs);
+        check(bare.ok(), "raw-heap ws client handshaken");
         check(count_allocs([&] { bare.send(payload); }) == 1,
-              "un-injected, a cold send draws ONE block from the process heap");
+              "on the raw heap, a cold send draws ONE block from the process heap");
         check(at_server.wait_for(1, 2s), "and that baseline frame arrived");
     }
 
@@ -1243,7 +1274,10 @@ void test_can_send_advertise_allocates_nothing() {
 
     // The budget. `owned` outlives the measured lambda so the optimizer cannot elide the
     // very allocation being counted.
-    std::optional<tr::view::view_t> owned;
+    // The payload block comes from the host value sub-pool (#1777): warm its class first, so
+    // the budget and the send below both see the same warm pool rather than one cold slab.
+    std::optional<tr::view::view_t> owned = tr::view::over_bytes(payload);
+    owned.reset();
     const std::size_t budget = count_allocs([&] { owned = tr::view::over_bytes(payload); });
     check(owned.has_value() && tr::net::can::can_frame_count(*owned, cfg.mode) == 3,
           "the budget's one step ran, over a 3-window payload");
@@ -1480,6 +1514,7 @@ void test_nack_readvertise_adds_no_allocation() {
 void test_ws_ping_at_the_bound_is_answered() {
     std::printf("ws server — a 125-byte PING is answered with an identical PONG:\n");
     tr::net::ws_server_transport_t server(0);
+    server.set_egress_source(tr::mem::heap_source());  // raw heap (#1777)
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
 
@@ -1501,6 +1536,7 @@ void test_ws_ping_at_the_bound_is_answered() {
 void test_ws_oversized_ping_fails_the_connection() {
     std::printf("ws server — an oversized PING fails the connection, it is NOT echoed:\n");
     tr::net::ws_server_transport_t server(0);
+    server.set_egress_source(tr::mem::heap_source());  // raw heap (#1777)
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
 
@@ -1519,6 +1555,7 @@ void test_ws_oversized_ping_fails_the_connection() {
 void test_ws_fragmented_control_fails_the_connection() {
     std::printf("ws server — a non-final control frame fails the connection:\n");
     tr::net::ws_server_transport_t server(0);
+    server.set_egress_source(tr::mem::heap_source());  // raw heap (#1777)
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
 
@@ -1549,6 +1586,7 @@ void test_ws_fragmented_control_fails_the_connection() {
 void drive_ws_reserved_opcode(std::uint8_t op, const char* label) {
     std::printf("ws server — a reserved opcode %s fails the connection (#1060):\n", label);
     tr::net::ws_server_transport_t server(0);
+    server.set_egress_source(tr::mem::heap_source());  // raw heap (#1777)
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
 

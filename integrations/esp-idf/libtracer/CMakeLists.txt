@@ -424,7 +424,7 @@ struct esp_config_t : default_config_t {
     static constexpr std::size_t kRxDrainFrames = ${LIBTRACER_RX_DRAIN_FRAMES};
     static constexpr std::size_t kRxDrainBytes = ${LIBTRACER_RX_DRAIN_BYTES};
     static constexpr std::size_t kShareThresholdBytes = ~std::size_t{0};
-    static constexpr std::size_t kSizeClasses[] = {~std::size_t{0}};
+    static constexpr bool kSlabPool = false;
 ${LIBTRACER_SLOT_BINDING}};
 
 using config_t = esp_config_t;

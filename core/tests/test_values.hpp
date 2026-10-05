@@ -37,6 +37,7 @@
 #include <vector>
 
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_source_backend.hpp"
 #include "libtracer/view.hpp"
 
 namespace tr::testing {
@@ -60,6 +61,20 @@ inline tr::view::view_t make_value(std::initializer_list<std::uint8_t> bytes) {
     v.reserve(bytes.size());
     for (const std::uint8_t b : bytes) v.push_back(std::byte{b});
     return make_value(v);
+}
+
+/**
+ * @brief A backend over the RAW platform heap: one `operator new` per segment, at its own size.
+ *
+ * Since #1777 `mem::heap_backend()` draws from the host value sub-pool, which asks the platform
+ * allocator only for whole slabs, so a test that counts global `operator new` calls to see a
+ * path's blocks can no longer see them through it. This backend restores the one-request-per-
+ * segment instrument such a test is built on; the graph-side equivalent is
+ * `graph_t{tr::mem::heap_source()}`.
+ */
+inline tr::mem::mem_backend_t& raw_heap_backend() noexcept {
+    static tr::mem::source_backend_t be{tr::mem::heap_source()};
+    return be;
 }
 
 }  // namespace tr::testing

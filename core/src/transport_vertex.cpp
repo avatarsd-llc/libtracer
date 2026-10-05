@@ -284,11 +284,11 @@ transport_vertex_t::transport_vertex_t(graph::graph_t& graph, fwd_router_t& rout
       net_root_(std::move(net_root)),
       rx_backend_(rx_backend),
       // The nullptr guard the FULL ctor used to hold, MOVED here (#873): both ctors reach
-      // this one line, so a null argument still means the process heap and behaviour is
-      // bit-identical for every existing caller. Before this parameter a SLIM node's
+      // this one line, so a null argument means the default, the process net sub-pool (#1777),
+      // exactly as an omitted argument does. Before this parameter a SLIM node's
       // `egress_source()` answered the process heap unconditionally — it could not be told
       // otherwise, so the accessor lied about that node's store.
-      egress_src_(egress_src != nullptr ? egress_src : &mem::heap_source()) {
+      egress_src_(egress_src != nullptr ? egress_src : &mem::net_source()) {
     // Register the `<net_root>` grouping vertex if it isn't already. It is the ENUMERATION
     // root (`/net:children[]` lists this plane's modules) and nothing more: RFC-0014 S7
     // retired the `client`/`listener` CREATION registrations that used to hang off it, so a
@@ -559,7 +559,7 @@ result_t<void> transport_vertex_t::endpoint_write(const std::string& module, con
     // malformed control write rather than a transient one — the same classification
     // `graph_t::write`'s field surface makes.
     if (!value.all_host()) return std::unexpected(status_t::TYPE_MISMATCH);
-    mem::mem_backend_t& backend = rx_backend_ != nullptr ? *rx_backend_ : mem::heap_backend();
+    mem::mem_backend_t& backend = rx_backend_ != nullptr ? *rx_backend_ : mem::net_backend();
     // Single-link (every ordinary control write) is zero-copy; a rope that straddled links
     // pays one flatten, and an exhausted backend surfaces as TRANSIENT backpressure rather
     // than being read back as a truncated — and therefore "malformed" — SPEC (#917).

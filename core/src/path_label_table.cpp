@@ -30,8 +30,8 @@ path_label_table_t::path_label_table_t(mem::block_source_t* src, std::size_t cap
     : capacity_(std::min(capacity, wire::kPathLabelSlotSpace)),
       max_per_peer_(max_per_peer),
       max_peers_(std::min(max_peers == kPeersFollowCapacity ? capacity_ : max_peers, capacity_)),
-      slots_(src != nullptr ? *src : mem::heap_source()),
-      peers_(src != nullptr ? *src : mem::heap_source()) {
+      slots_(src != nullptr ? *src : mem::net_source()),
+      peers_(src != nullptr ? *src : mem::net_source()) {
     // The SLOT array is charged HERE, once and in full, so the peer-provoked mint path
     // allocates nothing: a mint takes a slot out of storage the table already owns and can
     // never be the operation that finds the source empty. A source that cannot serve it does

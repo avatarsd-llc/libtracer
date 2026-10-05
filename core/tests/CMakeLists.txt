@@ -1410,6 +1410,13 @@ target_link_libraries(placement_request_size_test PRIVATE libtracer)
 libtracer_test_warnings(placement_request_size_test)
 add_test(NAME placement_request_size COMMAND placement_request_size_test)
 
+# #1777: the size-classed slab pool and the host default root — classes, cap release, trim,
+# the refusal census, whole-slab-only platform requests, and concurrent writers (tsan lane).
+add_executable(slab_pool_test slab_pool_test.cpp)
+target_link_libraries(slab_pool_test PRIVATE libtracer Threads::Threads)
+libtracer_test_warnings(slab_pool_test)
+add_test(NAME slab_pool COMMAND slab_pool_test)
+
 # vertex_t verb interface — a BARE vertex (no graph_t): store/LKV, STREAM ring trim +
 # drain cursor, await wake, edge snapshot under concurrent add, ACL verbs.
 add_executable(vertex_test vertex_test.cpp)

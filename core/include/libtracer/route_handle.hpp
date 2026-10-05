@@ -40,6 +40,7 @@
 #include <utility>
 #include <vector>
 
+#include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/vertex_handle.hpp"
 
@@ -242,7 +243,7 @@ class route_handle_t {
      * @param max_bindings_per_link  Ceiling on a link's ingress table AND, separately, its
      *                               egress table; `0` ⇒ unbounded.
      */
-    explicit route_handle_t(mem::block_source_t* src = &mem::heap_source(),
+    explicit route_handle_t(mem::block_source_t* src = &mem::net_source(),
                             std::size_t max_bindings_per_link = 0)
         : src_(src), max_bindings_(max_bindings_per_link), links_(*src) {}
 

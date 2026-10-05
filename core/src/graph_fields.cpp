@@ -19,6 +19,7 @@
 
 #include <array>
 #include <cstring>
+#include <iterator>
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
@@ -166,9 +167,29 @@ enum class stats_seam_t : std::uint8_t {
     NONE,           /**< @brief Not a `:stats` seam spelling — SCHEMA_NOT_FOUND. */
     MEM_CONTROL,    /**< @brief `:stats.mem.control` — @ref graph_t::control_source. */
     MEM_RING,       /**< @brief `:stats.mem.ring` — @ref graph_t::default_ring_source. */
+    MEM_VALUES,     /**< @brief `:stats.mem.values` — @ref graph_t::value_source (Am. 3). */
+    MEM_TABLES,     /**< @brief `:stats.mem.tables` — @ref graph_t::table_source (Am. 3). */
+    MEM_NET,        /**< @brief `:stats.mem.net` — @ref graph_t::net_source (Am. 3). */
     GRAPH_DELIVERY, /**< @brief `:stats.graph.delivery` — @ref graph_t::delivery_drops. */
     NET,            /**< @brief A net-plane class — the installed sampler decides (Am. 2). */
 };
+
+/** @brief One `:stats.mem.<name>` seam: its name and the `graph_t` accessor it samples. */
+struct mem_seam_t {
+    std::string_view name;                                    /**< @brief The seam NAME step. */
+    mem::block_source_t& (graph_t::*source)() const noexcept; /**< @brief What it samples. */
+};
+
+/** @brief The mem seams, in @ref stats_seam_t order from `MEM_CONTROL`: one row each, so the
+ *         classifier and the census read one table rather than a branch per seam. */
+constexpr mem_seam_t kMemSeams[] = {
+    {"control", &graph_t::control_source}, {"ring", &graph_t::default_ring_source},
+    {"values", &graph_t::value_source},    {"tables", &graph_t::table_source},
+    {"net", &graph_t::net_source},
+};
+static_assert(std::to_underlying(stats_seam_t::MEM_CONTROL) + std::size(kMemSeams) ==
+                  std::to_underlying(stats_seam_t::GRAPH_DELIVERY),
+              "the mem seams are one contiguous run of stats_seam_t, in table order");
 
 /**
  * @brief Classify a `:stats…` field path per @ref stats_seam_t.
@@ -191,8 +212,9 @@ enum class stats_seam_t : std::uint8_t {
     const std::string_view cls = field.steps[1].name;
     const std::string_view name = field.steps[2].name;
     if (cls == "mem") {
-        if (name == "control") return stats_seam_t::MEM_CONTROL;
-        if (name == "ring") return stats_seam_t::MEM_RING;
+        for (std::size_t i = 0; i < std::size(kMemSeams); ++i)
+            if (name == kMemSeams[i].name)
+                return static_cast<stats_seam_t>(std::to_underlying(stats_seam_t::MEM_CONTROL) + i);
     } else if (cls == "graph") {
         if (name == "delivery") return stats_seam_t::GRAPH_DELIVERY;
     } else if (cls == "router" || cls == "labels" || cls == "link") {
@@ -240,11 +262,14 @@ void emit_counter(std::vector<std::byte>& out, std::string_view noun, std::uint6
                                                                           stats_seam_t seam) {
     std::vector<std::byte> members;
     switch (seam) {
+        case stats_seam_t::MEM_VALUES:
+        case stats_seam_t::MEM_TABLES:
+        case stats_seam_t::MEM_NET:
         case stats_seam_t::MEM_CONTROL:
         case stats_seam_t::MEM_RING: {
-            const mem::source_stats_t s = seam == stats_seam_t::MEM_CONTROL
-                                              ? g.control_source().stats()
-                                              : g.default_ring_source().stats();
+            const mem_seam_t& row =
+                kMemSeams[std::to_underlying(seam) - std::to_underlying(stats_seam_t::MEM_CONTROL)];
+            const mem::source_stats_t s = (g.*row.source)().stats();
             emit_counter(members, "capacity", s.capacity);
             emit_counter(members, "in_use", s.in_use);
             emit_counter(members, "peak", s.peak);
@@ -862,6 +887,12 @@ struct graph_t::field_surface_t {
         if (seam == stats_seam_t::NONE) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
         if (seam == stats_seam_t::NET &&
             !g.sample_stats(field.steps[1].name, field.steps[2].name, nullptr))
+            return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+        // Amendment 3: a node that derives no sub-pools (an injected root, or a build without
+        // the host slab pool) does not publish `mem.values`, `.tables` or `.net` — a NODE
+        // property, so it is settled above the gate like every other validity answer.
+        if (seam >= stats_seam_t::MEM_VALUES && seam <= stats_seam_t::MEM_NET &&
+            !g.derives_sub_pools())
             return std::unexpected(status_t::SCHEMA_NOT_FOUND);
         if (!g.acl_allows(v, caller, acl_right_t::READ))
             return std::unexpected(status_t::PERMISSION_DENIED);

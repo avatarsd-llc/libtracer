@@ -74,6 +74,7 @@
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "test_support.hpp"
+#include "test_values.hpp"
 #include "tlv_tree.hpp"  // host-only owning tree (#1829)
 
 namespace {
@@ -83,9 +84,21 @@ std::size_t g_allocs = 0;
 std::size_t g_bytes = 0;
 bool g_arm = false;
 
+/**
+ * @brief Whether an armed request of @p n bytes is counted: every one but a host slab.
+ *
+ * Since #1777 the defaulted pools (the value sub-pool every graph's values come from, the net
+ * sub-pool) ask the platform allocator only for whole slabs, and keep them warm. Whichever arm
+ * runs first pays for warming a class, which says nothing about the path under test, so a
+ * whole-slab request is not counted. Every per-block request still is.
+ */
+[[nodiscard]] bool counts(std::size_t n) noexcept {
+    return g_arm && !(tr::mem::kSlabPool && n != 0 && n % tr::mem::kSlabBytes == 0);
+}
+
 /** @brief The counted allocation itself — malloc-backed so `operator delete` can free it. */
 void* counted(std::size_t n) {
-    if (g_arm) {
+    if (counts(n)) {
         ++g_allocs;
         g_bytes += n;
     }
@@ -110,7 +123,7 @@ void* counted(std::size_t n) {
  */
 void* counted_aligned(std::size_t n, std::size_t align) {
     if (align <= alignof(std::max_align_t)) return counted(n);  // malloc already suits it
-    if (g_arm) {
+    if (counts(n)) {
         ++g_allocs;
         g_bytes += n;
     }
@@ -196,7 +209,8 @@ using tr::testing::check;
  */
 class arming_backend_t final : public tr::mem::mem_backend_t {
    public:
-    explicit arming_backend_t(tr::mem::mem_backend_t& upstream = tr::mem::heap_backend()) noexcept
+    explicit arming_backend_t(
+        tr::mem::mem_backend_t& upstream = tr::testing::raw_heap_backend()) noexcept
         : mem_backend_t("test_arming"), up_(upstream) {
         // Reserved up front: the size log is the test's own instrument, and a push_back that
         // grows it inside the counted window would be charged to the arm under test.
@@ -423,9 +437,26 @@ std::optional<std::pair<std::size_t, std::uint8_t>> stored_filled(const graph_t&
     return std::pair{tlv->payload.size(), std::to_integer<std::uint8_t>(tlv->payload[0])};
 }
 
+/**
+ * @brief Router planes on the RAW platform heap, with @p flat as given.
+ *
+ * Since #1777 a defaulted router draws from the host net sub-pool, which asks the platform
+ * allocator only for whole slabs, and keeps a couple of them warm. A global-new comparison
+ * between two arms would then charge the first arm for warming the pool and see no per-block
+ * draw in the baseline arm at all. On the raw heap every block is one counted `operator new`,
+ * exactly the instrument these comparisons are built on.
+ */
+tr::net::router_planes_t raw_planes(
+    tr::mem::mem_backend_t* flat = &tr::testing::raw_heap_backend()) noexcept {
+    return {.label_src = &tr::mem::heap_source(),
+            .rx = &tr::mem::heap_source(),
+            .flat = flat,
+            .egress = &tr::testing::raw_heap_backend()};
+}
+
 /** @brief The fixture every case shares: `/sensor/temp` behind a rope-delivering link. */
 struct node_t {
-    graph_t g;
+    graph_t g{tr::mem::heap_source()};  // raw heap, as raw_planes (#1777)
     vertex_handle_t temp = g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
     rec_link_t in{/*ropes=*/true};
 };
@@ -460,7 +491,7 @@ void test_terminus_read_draws_from_the_injected_seam() {
     {
         node_t n;
         (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x2A2A2A2Au))));
-        fwd_router_t router(n.g, {.flat = &seam});
+        fwd_router_t router(n.g, raw_planes(&seam));
         (void)router.add_child("in", n.in);
         tr::view::rope_t rope = as_rope(frame, 4);  // built OUTSIDE the window
         g_allocs = 0;
@@ -483,7 +514,7 @@ void test_terminus_read_draws_from_the_injected_seam() {
     {
         node_t n;
         (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x2A2A2A2Au))));
-        fwd_router_t router(n.g);  // defaults: flat = heap_backend()
+        fwd_router_t router(n.g, raw_planes());  // flat on the raw heap
         (void)router.add_child("in", n.in);
         tr::view::rope_t rope = as_rope(frame, 4);
         g_allocs = 0;
@@ -515,7 +546,7 @@ void test_terminus_read_refusal_is_answered() {
     node_t n;
     (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x33333333u))));
     arming_backend_t seam;
-    fwd_router_t router(n.g, {.flat = &seam});
+    fwd_router_t router(n.g, raw_planes(&seam));
     (void)router.add_child("in", n.in);
 
     seam.arm();
@@ -559,7 +590,7 @@ void test_terminus_write_refusal_stores_nothing() {
     constexpr std::uint32_t kSecond = 0x55555555u;
     (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(kFirst))));
     arming_backend_t seam;
-    fwd_router_t router(n.g, {.flat = &seam});
+    fwd_router_t router(n.g, raw_planes(&seam));
     (void)router.add_child("in", n.in);
 
     const std::vector<std::byte> write = b_fwd(fwd_op_t::WRITE, b_path({"sensor", "temp"}),
@@ -605,7 +636,7 @@ void test_terminus_refusal_sweep() {
     {
         node_t n;
         arming_backend_t seam;
-        fwd_router_t router(n.g, {.flat = &seam});
+        fwd_router_t router(n.g, raw_planes(&seam));
         (void)router.add_child("in", n.in);
         (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x66666666u))));
         n.in.inject(as_rope(frame, 4));
@@ -619,7 +650,7 @@ void test_terminus_refusal_sweep() {
     for (int k = 0; k < total; ++k) {
         node_t n;
         arming_backend_t seam;
-        fwd_router_t router(n.g, {.flat = &seam});
+        fwd_router_t router(n.g, raw_planes(&seam));
         (void)router.add_child("in", n.in);
         (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x66666666u))));
         seam.refuse_after(k);
@@ -805,7 +836,7 @@ void test_ownership_copy_draws_from_the_graph_source(tier_t t) {
         tr::mem::bump_source_t bump(slab, tr::mem::null_source());
         arming_source_t src(bump);
         src_node_t n(src);
-        fwd_router_t router(n.g);
+        fwd_router_t router(n.g, raw_planes());
         (void)router.add_child("in", n.in);
         src.reset_counts();
         g_allocs = 0;
@@ -826,7 +857,7 @@ void test_ownership_copy_draws_from_the_graph_source(tier_t t) {
     {
         arming_source_t src;  // upstream: the heap source
         src_node_t n(src);
-        fwd_router_t router(n.g);
+        fwd_router_t router(n.g, raw_planes());
         (void)router.add_child("in", n.in);
         g_allocs = 0;
         g_arm = true;
@@ -853,7 +884,7 @@ void test_ownership_copy_refusal_is_answered(tier_t t) {
     arming_source_t src;
     src_node_t n(src);
     (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_filled(4, kPriorFill))));
-    fwd_router_t router(n.g);
+    fwd_router_t router(n.g, raw_planes());
     (void)router.add_child("in", n.in);
 
     // Serve everything up to (but not including) the inline block, then refuse: the refusal
@@ -910,7 +941,7 @@ void test_ownership_copy_sweep(tier_t t) {
     {
         arming_source_t src;
         src_node_t n(src);
-        fwd_router_t router(n.g);
+        fwd_router_t router(n.g, raw_planes());
         (void)router.add_child("in", n.in);
         src.reset_counts();
         deliver(t, n, router);
@@ -924,7 +955,7 @@ void test_ownership_copy_sweep(tier_t t) {
     for (int k = 0; k < total; ++k) {
         arming_source_t src;
         src_node_t n(src);
-        fwd_router_t router(n.g);
+        fwd_router_t router(n.g, raw_planes());
         (void)router.add_child("in", n.in);
         (void)n.g.write(n.temp,
                         tr::view::rope_t(*tr::view::over_bytes(b_value_filled(4, kPriorFill))));
@@ -973,7 +1004,7 @@ void test_span_tier_asks_flat_for_nothing() {
     std::printf("the span tier asks the router's flat seam for nothing, READ or WRITE:\n");
     arming_backend_t seam;
     node_t n;
-    fwd_router_t router(n.g, {.flat = &seam});
+    fwd_router_t router(n.g, raw_planes(&seam));
     (void)router.add_child("in", n.in);
     (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x88888888u))));
     router.on_frame("in", read_frame());
@@ -991,8 +1022,8 @@ void test_span_tier_asks_flat_for_nothing() {
  * @brief The defaulted parameter keeps the terminus behaviour it had — the span (arena) tier
  *        and an un-injected rope terminus both answer exactly as before.
  *
- * The RAM rule for this change: the default is still `heap_backend()`, so a caller that
- * injects nothing pays nothing and sees no behavioural difference.
+ * The RAM rule for this change: the default is the process net sub-pool's backend (#1777),
+ * so a caller that injects nothing pays nothing and sees no behavioural difference.
  */
 void test_default_backend_unchanged() {
     std::printf("an un-injected node answers both tiers exactly as before:\n");

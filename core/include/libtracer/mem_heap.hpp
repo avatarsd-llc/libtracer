@@ -294,118 +294,103 @@ template <class T, class Alloc>
 
 namespace tr::mem {
 
-class heap_backend_t;
-
 namespace detail {
 
 /**
- * @brief `heap_backend_t`'s two-block layout above its small-block threshold (#1768): the
- *        payload at @p align, then a bare `segment_t` reclaimed by @p owner. Out of line, so
- *        the small-segment path every call site inlines stays as short as it was.
- * @retval nullptr Either draw failed; a payload already drawn is returned first.
+ * @brief One block of the VALUE sub-pool of the host root (`%mem_slab_pool.hpp`, #1777), from
+ *        this thread's cache; `nullptr` when the root refused a slab.
+ *
+ * Out of line: the per-thread cache lives in `mem_heap.cpp`. Called only where
+ * `tr::mem::kSlabPool` is `true`.
  */
-[[nodiscard]] view::segment_t* heap_alloc_split(heap_backend_t* owner, std::size_t size,
-                                                std::size_t align) noexcept;
+[[nodiscard]] void* host_value_alloc(std::size_t bytes, std::size_t align) noexcept;
 
-/** @brief The mirror of @ref heap_alloc_split: both blocks back, each at the size it was drawn. */
-void heap_destroy_split(view::segment_t* seg, std::size_t align) noexcept;
+/** @brief Return a block @ref host_value_alloc handed out, sized as asked. */
+void host_value_release(void* p, std::size_t bytes, std::size_t align) noexcept;
+
+/**
+ * @brief The per-value draw of this build: the host root's value sub-pool where
+ *        `tr::mem::kSlabPool` is `true`, the platform heap otherwise.
+ */
+[[nodiscard]] inline void* value_block_alloc(std::size_t bytes, std::size_t align) noexcept {
+    if constexpr (kSlabPool) {
+        return host_value_alloc(bytes, align);
+    } else {
+        return heap_source_t::acquire(bytes, align);
+    }
+}
+
+/** @brief The sized return of @ref value_block_alloc. */
+inline void value_block_release(void* p, std::size_t bytes, std::size_t align) noexcept {
+    if constexpr (kSlabPool) {
+        host_value_release(p, bytes, align);
+    } else {
+        heap_source_t::reclaim(p, bytes, align);
+    }
+}
 
 }  // namespace detail
 
 /**
- * @brief The host allocator backend: owns platform-heap bytes, frees them and the
+ * @brief The process-default per-value backend: owns its blocks, returns them and the
  *        `segment_t` control block on destroy.
  *
  * Exposed here (rather than TU-local) so the module-set destroy dispatch
  * (backend_set.cpp, ADR-0047 §2) can devirtualize its release; a `final` class,
  * so the qualified call in that switch is a direct call.
  *
- * @par The layering, after #873 phase 3
- * Both draws go through @ref heap_source_t::acquire and both returns through
- * @ref heap_source_t::reclaim — the substrate's OWN platform-heap arm, so the backend tier no
- * longer spells the platform-heap allocation a second time. It is a `static` entry point
- * rather than an injected @ref block_source_t reference on purpose: this backend
- * is the process default on the hottest allocation path in the library, and an injected draw
- * there would buy no bounding whatever (a deployer who wants bounding injects a source into
- * `graph_t` and gets @ref source_backend_t) while costing the virtual call #873 phase 2
- * measured at +22.7 % on the hazard domain. The re-layering is a layering claim; it is not an
- * excuse to add an indirection nobody can use.
+ * @par Where the bytes come from (#1777)
+ * Every block is drawn by `detail::value_block_alloc`: on a host build (`kSlabPool`), the value
+ * sub-pool of the host root (`%mem_slab_pool.hpp`), from this thread's cache, so the platform
+ * allocator is asked for whole slabs and never for a segment; elsewhere the platform heap,
+ * through @ref heap_source_t::acquire. Both are direct calls, not the virtual draw #873 phase 2
+ * measured at +22.7 % on the hazard domain: this backend is the process default on the hottest
+ * allocation path in the library.
  *
- * @note One consequence is worth naming rather than leaving to be discovered. The payload
- *       draw used to name the OVER-ALIGNED `operator new` unconditionally
- *       (`std::align_val_t{alignof(std::max_align_t)}`), which libstdc++ routes through
- *       `aligned_alloc`/`posix_memalign` even when the plain allocator already guarantees that
- *       alignment. @ref heap_source_t::acquire takes the plain nothrow arm whenever
- *       `align <= __STDCPP_DEFAULT_NEW_ALIGNMENT__` — which is the *definition* of the
- *       guarantee plain `operator new` gives, so nothing loses an alignment it had — and the
- *       reclaim becomes the SIZED `operator delete(p, bytes)`. Both are the arms every other
- *       #873 channel already takes.
- *
- * @par How many draws a segment costs (RFC-0028 §4.9, #1768, #1775)
- * The placement module decides (`%placement.hpp`, @ref tr::mem::is_one_block) against this
- * build's @ref tr::graph::default_config_t::kSizeClasses. ONE draw for a segment whose padded
- * header plus payload fits the table's ceiling: the header and the payload share a block
- * (RFC-0028 slice 10). TWO above it — the payload, then the bare `segment_t` — because one
- * block that misses the host allocator's small-block fast path costs more than two that hit it
- * (glibc's tcache ceiling is 1,032 B, so a 1024 B value's 1072 B block doubled
- * `lkv-store-heap 1024B`). Which layout a segment has is a function of its payload size alone,
- * so @ref destroy recomputes it from `bytes.size()` and returns exactly what @ref alloc drew,
- * sized. `bench_forward_heap`'s `allocs=` pins count the small-value case.
+ * @par How many draws a segment costs (RFC-0028 §4.9, #1777)
+ * ONE: the padded header and the payload share a block (RFC-0028 slice 10), at every size. The
+ * two-block split above glibc's 1,032 B tcache ceiling (#1768) served only the per-value heap
+ * draw this backend no longer makes on a host. The slab pool's classes have no such cliff: a
+ * 1024 B value's 1072 B block is one 1152 B class block, from the same cache a 1000 B one comes
+ * from. `bench_forward_heap`'s `allocs=` pins count the small-value case.
  */
 class heap_backend_t final : public mem_backend_t {
    public:
     heap_backend_t() noexcept : mem_backend_t("mem_heap") {}
 
-    /** @brief The block alignment a heap segment is drawn at (payload and header alike). */
+    /** @brief The block alignment a heap segment is drawn at. */
     static constexpr std::size_t kBlockAlign = segment_block_align(alignof(std::max_align_t));
 
-    static_assert(size_classes_valid(graph::config_t::kSizeClasses),
-                  "config_t::kSizeClasses must be non-empty and strictly ascending");
-
-    /** @brief One platform-heap block (@ref heap_source_t::acquire) — nothrow. */
+    /** @brief One block of this build's per-value draw — nothrow. */
     [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
-        return heap_source_t::acquire(bytes, align);
+        return detail::value_block_alloc(bytes, align);
     }
     /** @brief Return a block @ref try_alloc drew, sized. */
     void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
-        heap_source_t::reclaim(p, bytes, align);
+        detail::value_block_release(p, bytes, align);
     }
 
     /**
-     * @brief A small segment is ONE heap block, the header and the payload together (RFC-0028
-     *        §4.9); a larger one is two (#1768).
+     * @brief A segment is ONE block, the header and the payload together (RFC-0028 §4.9).
      *
-     * One block is the `producer-own` row of `bench_lean_value_path` (slice 10). When
-     * @ref tr::mem::is_one_block says the block would pass the size-class ceiling, the draw goes
-     * to the out-of-line `detail::heap_alloc_split` instead, so no block exceeds the host
-     * allocator's small-block ceiling unless the payload alone does. Draws straight from
-     * @ref heap_source_t::acquire rather than through the virtual @ref try_alloc, so the hot
-     * path pays no virtual call.
+     * One block is the `producer-own` row of `bench_lean_value_path` (slice 10). Draws straight
+     * from `detail::value_block_alloc` rather than through the virtual @ref try_alloc, so the
+     * hot path pays no virtual call.
      */
     view::segment_t* alloc(std::size_t size, alloc_hint_t /*hint*/) override {
-        if (!is_one_block(size, kBlockAlign, graph::config_t::kSizeClasses)) {
-            return detail::heap_alloc_split(this, size, kBlockAlign);
-        }
         void* const block =
-            heap_source_t::acquire(segment_block_bytes(size, kBlockAlign), kBlockAlign);
+            detail::value_block_alloc(segment_block_bytes(size, kBlockAlign), kBlockAlign);
         return block != nullptr ? place_segment(this, block, size, kBlockAlign) : nullptr;
     }
 
-    /** @brief Return the block, or the two blocks, @ref alloc drew — sized, as drawn. */
+    /** @brief Return the block @ref alloc drew — sized, as drawn. */
     void destroy(view::segment_t* seg) noexcept override {
         const std::size_t size = seg->bytes.size();
-        if (!is_one_block(size, kBlockAlign, graph::config_t::kSizeClasses)) {
-            detail::heap_destroy_split(seg, kBlockAlign);
-            return;
-        }
         seg->~segment_t();
-        heap_source_t::reclaim(seg, segment_block_bytes(size, kBlockAlign), kBlockAlign);
+        detail::value_block_release(seg, segment_block_bytes(size, kBlockAlign), kBlockAlign);
     }
 
-    /**
-     * @brief @ref kBlockAlign, in both layouts: one block's payload follows a header padded to
-     *        it, and a split payload is drawn at it.
-     */
+    /** @brief The payload follows a header padded to @ref kBlockAlign. */
     [[nodiscard]] std::size_t alignment() const noexcept override { return kBlockAlign; }
 
     [[nodiscard]] backend_tag tag() const noexcept override { return backend_tag::HEAP; }
@@ -414,15 +399,49 @@ class heap_backend_t final : public mem_backend_t {
     static constexpr bool needs_cache_ops =
         false; /**< @brief No DMA cache maintenance (host RAM). */
     static constexpr bool is_isr_safe =
-        false; /**< @brief `alloc`/`destroy` call `operator new`/`delete` — not ISR-safe. */
+        false; /**< @brief A class lock or a slab draw from the heap — not ISR-safe. */
     static constexpr bool is_nonblocking =
-        false; /**< @brief `operator new`/`delete` may lock or syscall (#928). */
-    static constexpr bool owns_bytes =
-        true; /**< @brief Owns the `operator new`'d bytes — durably storable. */
+        false; /**< @brief A class lock or a slab draw may wait or syscall (#928). */
+    static constexpr bool owns_bytes = true; /**< @brief Owns its blocks — durably storable. */
 };
 
 /** @brief The process-wide heap backend (function-local static — no init-order trap). */
 [[nodiscard]] mem_backend_t& heap_backend() noexcept;
+
+/**
+ * @brief The default root a `graph_t` takes when it is handed no source (ADR-0083 Decision 4,
+ *        #1777): the host root (`%mem_slab_pool.hpp`) where `kSlabPool` is `true`, the platform
+ *        heap (@ref heap_source) otherwise.
+ */
+[[nodiscard]] block_source_t& default_root() noexcept;
+
+/**
+ * @brief The default VALUE sub-pool (`:stats.mem.values`): the host root's, from a per-thread
+ *        cache, where `kSlabPool` is `true`; the platform heap otherwise.
+ *
+ * The source a value made outside any graph draws from (`tr::graph::value_ref_t::make`), and
+ * the one @ref heap_backend draws its segments from.
+ */
+[[nodiscard]] block_source_t& value_source() noexcept;
+
+/** @brief The default TABLE sub-pool (`:stats.mem.tables`), on the same terms as
+ *         @ref value_source. */
+[[nodiscard]] block_source_t& table_source() noexcept;
+
+/**
+ * @brief The default NET sub-pool (`:stats.mem.net`), on the same terms as @ref value_source, that
+ * is: the block source a router or link draws from when the application injects none of its own
+ * (ADR-0083 Q21).
+ */
+[[nodiscard]] block_source_t& net_source() noexcept;
+
+/**
+ * @brief The segment backend over @ref net_source, the default receive, flatten and egress
+ *        backend of the router and the links when the application injects none (Q21).
+ *
+ * @ref heap_backend itself where `kSlabPool` is `false`.
+ */
+[[nodiscard]] mem_backend_t& net_backend() noexcept;
 
 }  // namespace tr::mem
 

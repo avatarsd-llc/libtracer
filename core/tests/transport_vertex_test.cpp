@@ -426,17 +426,18 @@ void test_slim_net_reports_its_injected_egress_store() {
     fwd_router_t defaulted_router(defaulted_graph);
     transport_vertex_t defaulted(defaulted_graph, defaulted_router, "/net",
                                  &tr::mem::heap_backend(), tr::net::slim_net);
-    check(&defaulted.egress_source() == &tr::mem::heap_source(),
-          "and the DEFAULTED SLIM node still reports the process heap (unchanged)");
+    check(&defaulted.egress_source() == &tr::mem::net_source(),
+          "and the DEFAULTED SLIM node reports the net sub-pool (#1777)");
 
     // The nullptr guard moved from the FULL ctor into the SLIM one, so it must still hold on
-    // BOTH doors — an explicit null means the process heap, not a null dereference.
+    // BOTH doors — an explicit null means the default (the net sub-pool, #1777), not a null
+    // dereference.
     graph_t null_graph;
     fwd_router_t null_router(null_graph);
     transport_vertex_t null_slim(null_graph, null_router, "/net", &tr::mem::heap_backend(),
                                  tr::net::slim_net, nullptr);
-    check(&null_slim.egress_source() == &tr::mem::heap_source(),
-          "an explicit nullptr on the SLIM ctor is still the process heap");
+    check(&null_slim.egress_source() == &tr::mem::net_source(),
+          "an explicit nullptr on the SLIM ctor is the default, the net sub-pool");
 
     graph_t full_graph;
     fwd_router_t full_router(full_graph);

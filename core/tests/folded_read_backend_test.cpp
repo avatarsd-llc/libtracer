@@ -337,7 +337,7 @@ int main() {
     // exactly kNodeCount FEWER global allocations than over a heap-backed one. On the old code
     // the two arms are equal.
     {
-        graph_t heap_g;
+        graph_t heap_g{tr::mem::heap_source()};  // the raw heap arm (#1777)
         const vertex_handle_t heap_root = build_subtree(heap_g, payload);
         scratch_pool_t sp;
         graph_t pool_g(sp.pool);
@@ -400,7 +400,7 @@ int main() {
     // come from the default heap or an injected pool. This is a source-of-bytes fix, not a wire
     // change.
     {
-        graph_t heap_g;
+        graph_t heap_g{tr::mem::heap_source()};  // the raw heap arm (#1777)
         const vertex_handle_t heap_root = build_subtree(heap_g, payload);
         scratch_pool_t sp;
         graph_t pool_g(sp.pool);
@@ -447,7 +447,7 @@ int main() {
     // framed header (the heap backend spends one global `new` on the one-block segment, where
     // the pool carves it from its slab). On the old code the arms are equal.
     {
-        graph_t heap_g;
+        graph_t heap_g{tr::mem::heap_source()};  // the raw heap arm (#1777)
         const vertex_handle_t heap_root = build_subtree(heap_g, payload);
         scratch_pool_t sp;
         graph_t pool_g(sp.pool);
@@ -498,7 +498,7 @@ int main() {
     // (the invariant; green either way by design, and the guard that this is a source-of-bytes
     // fix and not a framing change).
     {
-        graph_t heap_g;
+        graph_t heap_g{tr::mem::heap_source()};  // the raw heap arm (#1777)
         const vertex_handle_t heap_root = build_subtree(heap_g, payload);
         scratch_pool_t sp;
         graph_t pool_g(sp.pool);

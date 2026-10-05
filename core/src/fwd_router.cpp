@@ -3426,7 +3426,7 @@ void fwd_router_t::on_compact(std::string_view inbound_name, std::uint16_t label
             // second block that links to a separate segment. The reference is held across the
             // write because the rope pins the block, not the value (`stored_tlv_t`).
             const graph::value_ref_t copy = graph::value_ref_t::adopt(
-                graph::value_t::make_copy(payload_bytes, graph_.control_source()));
+                graph::value_t::make_copy(payload_bytes, graph_.value_source()));
             if (!copy) {  // alloc failure ⇒ drop (one audited locus)
                 graph_.count_external_drop(graph::graph_t::external_drop_t::OUT_OF_MEMORY, 1);
                 return;

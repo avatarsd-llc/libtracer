@@ -300,15 +300,15 @@ void test_seam_accessors_report_the_injected_objects() {
     check(&router.flatten_backend() == &flat, "flatten_backend() is the injected flatten seam");
     check(&router.egress_backend() == &egress, "egress_backend() is the injected egress seam");
 
-    // And the DEFAULTED router names the process-wide singletons rather than nothing: a host
-    // that injected none of them can still poll all four.
+    // And the DEFAULTED router names the process-wide net sub-pool rather than nothing (#1777,
+    // ADR-0083 Q21): a host that injected none of them can still poll all four.
     fwd_router_t plain(g);
-    check(&plain.label_source() == &tr::mem::heap_source(),
-          "a defaulted router names the heap "
-          "source for labels");
-    check(&plain.rx_source() == &tr::mem::heap_source(), "and for rx");
-    check(&plain.flatten_backend() == &tr::mem::heap_backend(), "and the heap backend to flatten");
-    check(&plain.egress_backend() == &tr::mem::heap_backend(), "and to egress");
+    check(&plain.label_source() == &tr::mem::net_source(),
+          "a defaulted router names the net "
+          "sub-pool for labels");
+    check(&plain.rx_source() == &tr::mem::net_source(), "and for rx");
+    check(&plain.flatten_backend() == &tr::mem::net_backend(), "and the net backend to flatten");
+    check(&plain.egress_backend() == &tr::mem::net_backend(), "and to egress");
 
     const router_stats_t z = router.drop_stats();
     check(only_moved(router_stats_t{}, z, &router_stats_t::malformed_rx, 0),

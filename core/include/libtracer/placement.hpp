@@ -16,8 +16,8 @@
 
 /**
  * @file
- * @brief The L0 (`tr::mem`) placement module: segment header, padding and the one-block-or-split
- *        rule, the inline-value and receive-loan layouts.
+ * @brief The L0 (`tr::mem`) placement module: segment header and padding, the one-block
+ *        layout, the inline-value and receive-loan layouts.
  */
 
 namespace tr::mem {
@@ -65,21 +65,11 @@ namespace tr::mem {
 }
 
 /**
- * @brief The header block of a SPLIT segment: a bare @ref view::segment_t at its own size.
- *
- * Nothing follows the header in its block, so padding it to the payload's alignment would buy
- * nothing and could only push a header-sized draw into a larger size class.
- */
-inline constexpr std::size_t kSplitHeaderBytes = sizeof(view::segment_t);
-
-/** @brief The alignment @ref kSplitHeaderBytes is drawn at: the header's own. */
-inline constexpr std::size_t kSplitHeaderAlign = alignof(view::segment_t);
-
-/**
  * @brief Whether @p classes is a usable size-class table: non-empty and strictly ascending.
  *
- * A backend that reads `tr::graph::default_config_t::kSizeClasses` asserts this, so a fragment
- * that binds an unsorted table fails the build rather than splitting at the wrong row.
+ * The host slab pool asserts it of `tr::graph::default_config_t::kSizeClasses`
+ * (`tr::mem::slab_classes_valid`, with the pool's own rules on top), so a fragment that binds an
+ * unsorted table fails the build rather than serving a request from the wrong class.
  */
 [[nodiscard]] constexpr bool size_classes_valid(std::span<const std::size_t> classes) noexcept {
     if (classes.empty()) return false;
@@ -87,30 +77,6 @@ inline constexpr std::size_t kSplitHeaderAlign = alignof(view::segment_t);
         if (classes[i] <= classes[i - 1]) return false;
     }
     return true;
-}
-
-/**
- * @brief Whether a @p size-byte segment at @p align is ONE block (the header padded in front of
- *        the payload) rather than two, against the size-class table @p classes.
- *
- * The table lists the classes the host allocator serves on its fast path, ascending, so its last
- * row is that path's ceiling (`tr::graph::default_config_t::kSizeClasses`). A segment whose one
- * block fits the ceiling is one block: one draw instead of two, which made a 64 B value about
- * 30% cheaper (RFC-0028 slice 10). A larger one is split, the payload and a bare header: one
- * block that misses the fast path costs more than two that hit it, which is the 1 KiB cliff
- * #1768 measured (a 1024 B value's 1072 B block doubled `lkv-store-heap 1024B` on glibc).
- *
- * A function of the size alone, so a backend's `alloc` and `destroy` always agree on it.
- *
- * Only a backend that draws from a host allocator asks this (`heap_backend_t`). A backend over a
- * source or a pool the deployer sized keeps one block always: such a store is sized for one draw
- * per segment, and a split would spend two of its slots or classes on one segment.
- */
-[[nodiscard]] constexpr bool is_one_block(std::size_t size, std::size_t align,
-                                          std::span<const std::size_t> classes) noexcept {
-    const std::size_t ceiling = classes.back();
-    const std::size_t header = segment_header_bytes(align);
-    return ceiling >= header && size <= ceiling - header;
 }
 
 /**
@@ -124,16 +90,6 @@ inline constexpr std::size_t kSplitHeaderAlign = alignof(view::segment_t);
     auto* const base = static_cast<std::byte*>(block);
     std::byte* const payload = size != 0 ? base + segment_header_bytes(align) : nullptr;
     return new (base) view::segment_t(owner, std::span<std::byte>(payload, size));
-}
-
-/**
- * @brief Place a SPLIT segment, reclaimed by @p owner: a bare header in @p header (drawn as
- *        @ref kSplitHeaderBytes at @ref kSplitHeaderAlign) over the @p size bytes at @p payload.
- */
-[[nodiscard]] inline view::segment_t* place_split(mem_backend_t* owner, void* payload, void* header,
-                                                  std::size_t size) noexcept {
-    return new (header)
-        view::segment_t(owner, std::span<std::byte>(static_cast<std::byte*>(payload), size));
 }
 
 /**

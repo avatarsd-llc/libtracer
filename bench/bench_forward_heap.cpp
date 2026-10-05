@@ -92,6 +92,7 @@
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/graph.hpp"
 #include "libtracer/mem_source.hpp"
+#include "libtracer/mem_source_backend.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport.hpp"
@@ -521,20 +522,26 @@ lkv_route_t lkv_route_window(tr::mem::mem_backend_t& backend, std::size_t size, 
  * caller-owned slab with an explicit 64-byte alignment. Its rows lead with `S=`, not
  * `allocs=`, so neither `perf_emit_benchmark.py` nor `perf_gate.py` reads them as a series:
  * like the canaries, this is a verdict, not a number with a history.
+ *
+ * The control is the raw process heap (`heap_source()` behind a @ref
+ * tr::mem::source_backend_t), not `heap_backend()`: since #1777 the latter draws warm segments
+ * from the host slab pool and reaches `operator new` only for a whole slab, so as a control it
+ * would read blind.
  */
 int lkv_route_gate() {
     constexpr std::size_t kSlot = 2048, kSlots = 64, kIters = 1024;
     constexpr std::size_t kSlabBytes = kSlots * (sizeof(tr::view::segment_t) + kSlot + 64);
     alignas(64) static std::byte slab[kSlabBytes];
     tr::mem::pool_t pool(std::span<std::byte>(slab, kSlabBytes), kSlot, 64);
+    static tr::mem::source_backend_t raw_heap{tr::mem::heap_source()};
     // `LKV_ROUTE_BREAK=1` routes the pool arm to the heap on purpose: the negative check CI
     // runs beside the gate, proving this verdict goes red on a heap fallback (#1695).
     const char* brk = std::getenv("LKV_ROUTE_BREAK");
     const bool broken = brk != nullptr && std::string_view(brk) == "1";
-    tr::mem::mem_backend_t& pooled = broken ? tr::mem::heap_backend() : pool;
+    tr::mem::mem_backend_t& pooled = broken ? static_cast<tr::mem::mem_backend_t&>(raw_heap) : pool;
     int rc = 0;
     for (const std::size_t size : {std::size_t{64}, std::size_t{1024}}) {
-        const lkv_route_t h = lkv_route_window(tr::mem::heap_backend(), size, kIters);
+        const lkv_route_t h = lkv_route_window(raw_heap, size, kIters);
         const lkv_route_t p = lkv_route_window(pooled, size, kIters);
         const bool control_ok = h.heap.allocs >= kIters && h.heap.frees >= kIters;
         const bool pool_ok = p.heap.allocs == 0 && p.heap.frees == 0 && p.exhausted == 0;
@@ -585,6 +592,10 @@ int lkv_route_gate() {
  * largest block grows at any size against main. These rows are deterministic, so they are
  * read once per arm and never timed. They lead with `S=` rather than `allocs=`, so the
  * history emitter does not chart them.
+ *
+ * Since #1777 the heap backend serves a segment up to the last size class from a warm slab of
+ * the host slab pool, so those rows read zero draws; only a size past the last class reaches
+ * `operator new`, once, at its own size.
  */
 void segment_draw_rows() {
     constexpr std::size_t kHeader =

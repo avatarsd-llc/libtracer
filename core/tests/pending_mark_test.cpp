@@ -146,7 +146,7 @@ constexpr double kBand = 0.5;
  */
 void test_unmarked_write_skips_the_sweep_path() {
     std::printf("unmarked eager write vs a pending mark elsewhere (#1712):\n");
-    graph_t g;
+    graph_t g{tr::mem::heap_source()};  // raw heap: the counter sees each block (#1777)
     auto p = g.register_vertex(path_t("/p"), role_t::STORED_VALUE);
     auto a = g.register_vertex(path_t("/p/a"), role_t::STORED_VALUE);
     auto b = g.register_vertex(path_t("/q/b"), role_t::STORED_VALUE);
@@ -207,7 +207,7 @@ void test_unmarked_write_skips_the_sweep_path() {
  */
 void test_remark_inside_the_sweep_window() {
     std::printf("re-mark inside a sweep's drain-to-drop window (#1712):\n");
-    graph_t g;
+    graph_t g{tr::mem::heap_source()};  // raw heap: the counter sees each block (#1777)
     auto s = g.register_vertex(path_t("/s"), role_t::STORED_VALUE);
     auto a = g.register_vertex(path_t("/s/a"), role_t::STORED_VALUE);
     auto b = g.register_vertex(path_t("/s/b"), role_t::STORED_VALUE);
@@ -275,7 +275,7 @@ void seen_sink_t::operator()(const tr::graph::value_t& v) const {
  */
 void test_mark_clear_race() {
     std::printf("mark / eager clear / sweep clear race (#1712):\n");
-    graph_t g;
+    graph_t g{tr::mem::heap_source()};  // raw heap: the counter sees each block (#1777)
     auto r = g.register_vertex(path_t("/r"), role_t::STORED_VALUE);
     std::vector<vertex_handle_t> leaves;
     leaves.reserve(kLeaves);

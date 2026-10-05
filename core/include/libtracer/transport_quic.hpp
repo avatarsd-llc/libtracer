@@ -252,7 +252,7 @@ class quic_transport_t : public transport_t {
  */
 [[nodiscard]] transport_factory_t quic_transport_factory(
     std::span<const tls_profile_t> profiles = {},
-    mem::mem_backend_t* rx_backend = &mem::heap_backend());
+    mem::mem_backend_t* rx_backend = &mem::net_backend());
 
 /**
  * @brief How many `quic` SPECs this process refused for carrying `insecure` = nonzero on a

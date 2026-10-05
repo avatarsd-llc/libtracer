@@ -51,6 +51,7 @@
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "test_support.hpp"
+#include "test_values.hpp"
 #include "tlv_tree.hpp"  // host-only owning tree (#1829)
 
 namespace {
@@ -59,9 +60,21 @@ namespace {
 std::size_t g_allocs = 0;
 bool g_arm = false;
 
+/**
+ * @brief Whether an armed request of @p n bytes is counted: every one but a host slab.
+ *
+ * Since #1777 the defaulted pools (the value sub-pool every graph's values come from, the net
+ * sub-pool) ask the platform allocator only for whole slabs, and keep them warm. Whichever arm
+ * runs first pays for warming a class, which says nothing about the path under test, so a
+ * whole-slab request is not counted. Every per-block request still is.
+ */
+[[nodiscard]] bool counts(std::size_t n) noexcept {
+    return g_arm && !(tr::mem::kSlabPool && n != 0 && n % tr::mem::kSlabBytes == 0);
+}
+
 /** @brief The counted allocation itself — malloc-backed so `operator delete` can free it. */
 void* counted(std::size_t n) {
-    if (g_arm) ++g_allocs;
+    if (counts(n)) ++g_allocs;
     return std::malloc(n == 0 ? 1 : n);
 }
 
@@ -71,7 +84,7 @@ void* counted(std::size_t n) {
  */
 void* counted_aligned(std::size_t n, std::size_t align) {
     if (align <= alignof(std::max_align_t)) return counted(n);
-    if (g_arm) ++g_allocs;
+    if (counts(n)) ++g_allocs;
     const std::size_t rounded = ((n == 0 ? 1 : n) + align - 1) / align * align;
     return std::aligned_alloc(align, rounded);
 }
@@ -148,7 +161,8 @@ using tr::testing::check;
  */
 class arming_backend_t final : public tr::mem::mem_backend_t {
    public:
-    explicit arming_backend_t(tr::mem::mem_backend_t& upstream = tr::mem::heap_backend()) noexcept
+    explicit arming_backend_t(
+        tr::mem::mem_backend_t& upstream = tr::testing::raw_heap_backend()) noexcept
         : mem_backend_t("test_egress"), up_(upstream) {
         // Reserved up front: the size log is the test's own instrument, and a push_back that
         // grows it inside the counted window would be charged to the arm under test.
@@ -315,9 +329,26 @@ reply_facts_t read_reply(std::span<const std::byte> frame) {
     return std::to_underlying(tr::wire::err_t::FLOW_BACKPRESSURE);
 }
 
+/**
+ * @brief Router planes on the RAW platform heap, with @p egress as given.
+ *
+ * Since #1777 a defaulted router draws from the host net sub-pool, which asks the platform
+ * allocator only for whole slabs, and keeps a couple of them warm. A global-new comparison
+ * between two arms would then charge the first arm for warming the pool and see no per-block
+ * draw in the baseline arm at all. On the raw heap every block is one counted `operator new`,
+ * exactly the instrument these comparisons are built on.
+ */
+tr::net::router_planes_t raw_planes(
+    tr::mem::mem_backend_t* egress = &tr::testing::raw_heap_backend()) noexcept {
+    return {.label_src = &tr::mem::heap_source(),
+            .rx = &tr::mem::heap_source(),
+            .flat = &tr::testing::raw_heap_backend(),
+            .egress = egress};
+}
+
 /** @brief The fixture every case shares: `/sensor/temp`, behind a link. */
 struct node_t {
-    graph_t g;
+    graph_t g{tr::mem::heap_source()};  // raw heap, as raw_planes (#1777)
     vertex_handle_t temp = g.register_vertex(*path_t::parse("/sensor/temp"), role_t::STORED_VALUE);
     rec_link_t in;
 };
@@ -352,7 +383,7 @@ void test_span_tier_reply_head_draws_from_egress() {
         (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x2A2A2A2Au))));
         // egress is the 6th ctor arg; flat/rx keep their heap defaults so the ONLY injected
         // backend under test here is the reply-egress one.
-        fwd_router_t router(n.g, {.egress = &egress});
+        fwd_router_t router(n.g, raw_planes(&egress));
         (void)router.add_child("in", n.in);
         g_allocs = 0;
         g_arm = true;
@@ -374,7 +405,7 @@ void test_span_tier_reply_head_draws_from_egress() {
     {
         node_t n;
         (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x2A2A2A2Au))));
-        fwd_router_t router(n.g);  // defaults: egress = heap_backend()
+        fwd_router_t router(n.g, raw_planes());  // egress on the raw heap
         (void)router.add_child("in", n.in);
         g_allocs = 0;
         g_arm = true;
@@ -409,7 +440,7 @@ void test_mint_site_draws_from_egress() {
     node_t n;
     (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x5A5A5A5Au))));
     arming_backend_t egress;
-    fwd_router_t router(n.g, {.egress = &egress});
+    fwd_router_t router(n.g, raw_planes(&egress));
     (void)router.add_child("in", n.in);
 
     router.on_frame("in",
@@ -443,7 +474,7 @@ void test_egress_refusal_is_answered_by_value() {
     node_t n;
     (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x33333333u))));
     arming_backend_t egress;
-    fwd_router_t router(n.g, {.egress = &egress});
+    fwd_router_t router(n.g, raw_planes(&egress));
     (void)router.add_child("in", n.in);
 
     egress.arm();
@@ -491,7 +522,7 @@ void test_saturated_reply_degrades_to_addressed_backpressure() {
     node_t n;
     (void)n.g.write(n.temp, tr::view::rope_t(*tr::view::over_bytes(b_value_u32(0x44444444u))));
     arming_backend_t egress;
-    fwd_router_t router(n.g, {.egress = &egress});
+    fwd_router_t router(n.g, raw_planes(&egress));
     (void)router.add_child("in", n.in);
 
     // Refuse ONLY the RESULT head (the first egress draw): the rope is empty, `or_backpressure`
@@ -518,8 +549,8 @@ void test_saturated_reply_degrades_to_addressed_backpressure() {
  * @brief The defaulted egress parameter keeps the terminus behaviour it had — both tiers answer
  *        exactly as before, and the two are byte-identical (the ADR-0053 differential oracle).
  *
- * The RAM rule for this change: the default is still `heap_backend()`, so a caller that injects
- * nothing pays nothing and sees no behavioural difference.
+ * The RAM rule for this change: the default is the process net sub-pool's backend (#1777),
+ * so a caller that injects nothing pays nothing and sees no behavioural difference.
  */
 void test_default_egress_unchanged() {
     std::printf("an un-injected node answers both tiers exactly as before:\n");
