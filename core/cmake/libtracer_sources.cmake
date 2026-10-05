@@ -55,6 +55,7 @@ set(LIBTRACER_SOURCES_NET_PLANE
     "${_libtracer_src}/route_handle.cpp"
     "${_libtracer_src}/path_label_table.cpp"
     "${_libtracer_src}/fwd_router.cpp"
+    "${_libtracer_src}/fwd_originate.cpp"
     "${_libtracer_src}/transport_vertex.cpp"
 )
 
