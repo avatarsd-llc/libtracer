@@ -118,7 +118,7 @@ def bank(raw: dict, width: int = pg.PAIRS_DEFAULT) -> dict:
             if rs:
                 rows.setdefault(k, {})[leg] = round(robust_spread(rs), 5)
     meta = {"builds": raw["builds"], "rounds": raw["rounds"], "window": width,
-            "k": pg.NULL_K, "floor": pg.NULL_FLOOR, "host": raw.get("host", ""),
+            "k": pg.NULL_K, "k_cliff": pg.CLIFF_NULL_K, "floor": pg.NULL_FLOOR, "host": raw.get("host", ""),
             "banked": raw.get("date", "")}
     return {"meta": meta, "rows": rows}
 

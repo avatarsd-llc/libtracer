@@ -875,6 +875,11 @@ PAIRS_DEFAULT = 8
 NULL_FILE = HERE / "aa_null.json"
 NULL_K = 3.0        # threshold = NULL_K x the row's robust spread ...
 NULL_FLOOR = 0.03   # ... and never below 3%
+# The allocator-cliff rows' multiplier. Re-banked on the bench CPUs, their spread is
+# under-estimated by a 15-round fit: at 3x, three of them false-failed a held-out A/A replay
+# that no other row family did. 5x is the smallest multiplier that cleared every one of them
+# there; the floor stays at 3% (raising it to 5% cleared fewer).
+CLIFF_NULL_K = 5.0
 BOOT_N = 2000
 BOOT_CONF = 0.95
 LEGS = ("p50_ns", "mean_ns", "deliv_s")
@@ -892,7 +897,8 @@ def load_null(path: pathlib.Path = NULL_FILE) -> dict[str, dict[str, float]]:
 def leg_factor(k: str, leg: str, null: dict[str, dict[str, float]]) -> tuple[float, bool, str]:
     """@brief (factor, tick guard?, source) for one leg of one key.
 
-    From the null: a slowdown of 1 + max(NULL_FLOOR, NULL_K x spread); the throughput leg
+    From the null: a slowdown of 1 + max(NULL_FLOOR, NULL_K x spread), CLIFF_NULL_K x on the
+    allocator-cliff rows; the throughput leg
     takes its reciprocal. The null measured the row's clock grain, so no tick guard.
 
     CAPPED at the flat factor (maintainer ruling on #1874): a measured null may TIGHTEN a row,
@@ -904,7 +910,7 @@ def leg_factor(k: str, leg: str, null: dict[str, dict[str, float]]) -> tuple[flo
     lower = leg == "deliv_s"
     if s is None:
         return _FLAT[leg], not lower, "flat"
-    t = max(NULL_FLOOR, NULL_K * s)
+    t = max(NULL_FLOOR, (CLIFF_NULL_K if k.split("/")[0] in CLIFF_MODES else NULL_K) * s)
     flat_t = (1 / _FLAT[leg] - 1) if lower else (_FLAT[leg] - 1)
     if t >= flat_t:
         return _FLAT[leg], not lower, "cap"
@@ -1753,7 +1759,8 @@ def main() -> int:
                   "thresholds here)")
         print(f"Per-loop perf gate (libtracer in-process, INTERLEAVED baseline/candidate, "
               f"tier {tier}, fail: past the row's A/A-null threshold "
-              f"({NULL_K:g}x robust spread, floor {NULL_FLOOR:.0%}; {len(null)} banked rows), "
+              f"({NULL_K:g}x robust spread, {CLIFF_NULL_K:g}x on the cliff rows, floor "
+              f"{NULL_FLOOR:.0%}; {len(null)} banked rows), "
               f"else flat p50 +{(LAT_REGRESS - 1) * 100:.0f}% / "
               f"mean +{(MEAN_REGRESS - 1) * 100:.0f}% / "
               f"deliv -{(1 - TPUT_REGRESS) * 100:.0f}%):")

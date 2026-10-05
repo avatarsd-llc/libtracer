@@ -504,26 +504,35 @@ Details that make these trustworthy:
   **3× the robust spread** of the gate's own statistic between *different builds of the
   same source* (one source built at three function alignments, so code layout moves the
   way an unrelated change moves it), **floor 3%**, and **capped at the flat thresholds**
-  above: a measured null may tighten a row, never loosen it. A stable row gets as little as
+  above: a measured null may tighten a row, never loosen it. The allocator-cliff rows
+  (`cliff-alloc-heap`, `cliff-alloc-pool`) take **5×** instead of 3×: banked on the bench
+  CPUs, three of them false-failed a held-out A/A replay at 3× and none at 5×, and raising
+  their floor to 5% instead cleared fewer. A stable row gets as little as
   3%, so a real 10% regression fails it. A row the null does not carry is gated on the flat
   thresholds, and the report says `flat`. This replaced the disjoint-range and
   majority-of-pairs rules ([#1807](https://github.com/avatarsd-llc/libtracer/issues/1807)):
   three PRs that could not touch the rows they failed, and one with identical sources,
   failed at 15–22% with clean conditions, because within one session two builds of one
   source differ by a layout offset, and disjoint ranges read that offset as real. The null
-  is re-banked on the bench host when its CPU layout changes and when a gated row is added.
+  is banked on the gate's own host and pin (`bench.slice` CPUs 3–6, single-threaded families
+  on CPU 3, the bench runner stopped while it measures): a null first measured on a shared
+  runner CPU was tighter than the bench CPUs' own spread and false-failed nine rows of a
+  real gate run at the 3% floor. It is re-banked there when the CPU layout changes and when
+  a gated row is added.
 - **Layout-sensitive, held at the flat threshold.** On these rows 3× the banked spread is at
   or past the flat threshold, because builds of one source move them by several percent
   (the `-falign-functions=64` build ran `lkv-store-heap` ~40% slower), so they keep the
   verdict they had before the null existed — the flat threshold **and** the old rule
   (medians breach, the arms' [min..max] ranges are disjoint, a strict majority of pairs
   breach) — and the report says `cap`. A row the null does not carry is decided the same
-  way. The capped rows are: `lkv-store-heap` at 64 B and 1 KiB (throughput), `fold-b4/512/1/1`
-  (every leg), `mixed/0/6/128` (p50), `store-lat-narrow-full`, `store-lat-narrow-net-fwd`
-  and `store-lat-wide-net-fwd` (p50), and the multi-threaded `inproc-mt4`,
-  `acl-inherit-d4-mt4` and `poolalloc-mt4` rows. `inproc-path/64/1/8192` sat at the cap in
-  one of the two banked measurements and under it in the pooled null. A same-source A/A
-  between two layouts can still fail these rows, as it could before #1807; the null cannot
+  way. In the bench-CPU null the capped rows outside the cliff family are:
+  `acl-inherit-d4-mt4`, `eptype-stream/16384`, `fold-b4/512/1/1` and `poolalloc-mt4` (every
+  leg); `fwd-demux-value/16384`, `fwd-demux-scan`, `inproc/16384`, `inproc-borrow/64` and
+  `inproc-path/64/1/8192` (two legs); throughput on the `lkv-store-*` rows, `lkv-alloc-heap/1024`,
+  `inproc-borrow/16384` and `inproc-mt4`; the mean on `eptype-stream/64`, `inproc/64/1024/1`
+  and `inproc-target-handler`; and p50 on five of the eight `store-lat-*` rows. 56 of the 98
+  cliff rows hold at least one leg at the cap. A same-source A/A between two layouts can
+  still fail these rows, as it could before #1807; the null cannot
   remove that without loosening them, which was ruled out.
 - **The payload ladder** ([#1806](https://github.com/avatarsd-llc/libtracer/issues/1806)).
   Every data-path family is swept over 64 B, 984 B, 985 B, 1 KiB, 4 KiB, 16 KiB and 64 KiB:
