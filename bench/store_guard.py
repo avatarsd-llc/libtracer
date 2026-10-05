@@ -269,8 +269,8 @@ def drift_alerts(entries: list[dict], bigger_is_better: bool,
     percentage bar routinely, and an alert that fires on nothing trains the reader to
     ignore it. Against the real store this rule is the difference between 59 alerts
     and 2. So a breach must also land outside the window's ENTIRE `[min..max]` range —
-    the same disjoint-ranges criterion `docs/methodology.md` already requires before
-    an A/B may be believed. A staircase still fires (each step is worse than every
+    the disjoint-ranges criterion the per-PR gate used before #1807 replaced it with a
+    bootstrap interval. A staircase still fires (each step is worse than every
     point behind it); spread inside the historical range does not.
     """
     ok = trusted(entries, known)

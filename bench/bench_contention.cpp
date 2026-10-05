@@ -208,7 +208,7 @@ int main() {
     g_sp.store(std::make_shared<const std::uint64_t>(7));
     g_plain = std::make_shared<const std::uint64_t>(11);
 
-    const std::size_t hw = std::max<std::size_t>(1, std::thread::hardware_concurrency());
+    const std::size_t hw = bench::usable_cpus();  // the affinity mask, not the host (#1807)
     for (arm_t a : {arm_t::LOCAL, arm_t::SHARED_READ, arm_t::RMW1, arm_t::RMW2, arm_t::RMW4,
                     arm_t::RWLOCK, arm_t::MUTEX, arm_t::SP_LOAD, arm_t::SP_COPY}) {
         for (std::size_t t : kThreads) {
