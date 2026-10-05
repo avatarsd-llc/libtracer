@@ -121,9 +121,9 @@ receiver, never computed as publishes × fan-out: `eptype-stream`, `mixed` and
 `inproc-mt*` were the last rows that computed it, and a STREAM ring that sheds an entry
 still lets `write()` succeed, so only a count can show the shed. Timed results that
 nothing reads (the `lkv-*` copy, the `path-parse` result) pass through an empty `asm`
-clobber so the compiler cannot delete the work, and the `dce-canary` family checks that
-the clobber still works: a dependent chain eight times longer must time at least four
-times longer, or the run fails. Each key is emitted once: `inproc/64/1/1` comes from the
+clobber so the compiler cannot delete the work. The `dce-canary` family checks that a
+timed chain is not deleted: a dependent chain eight times longer must time at least four
+times longer, or the run fails. It does not prove the clobber itself is load-bearing. Each key is emitted once: `inproc/64/1/1` comes from the
 payload sweep only ([#1805](https://github.com/avatarsd-llc/libtracer/issues/1805)).
 
 ### 3 · Memory footprint (allocations counted, not sampled)
@@ -925,7 +925,7 @@ it has to price the move on the bench before the pin is allowed to move with it.
   interleaved pairs and compares **medians**, and fails only when the medians breach the
   threshold, the two arms' `[min..max]` ranges are disjoint, and a majority of pairs
   breach on their own (`perf_gate.py` `paired_verdict`); best-of-N survives only in its
-  legacy no-baseline mode. Measured on the pinned host with one
+  legacy mode (a recorded `perf_baseline.json`, no baseline build). Measured on the pinned host with one
   binary against itself
   ([#1358](https://github.com/avatarsd-llc/libtracer/issues/1358)): in a window where a
   neighbouring job got busy, median-of-rounds put `fwd-rope-hop` at **−33 % … +54 %**

@@ -1622,11 +1622,12 @@ void family_inproc_pool_batch() {
  * @brief `dce-canary` (#1805): proof that this build still times the work its rows name.
  *
  * Two rows, `dce-canary/8` and `dce-canary/64` (the size column is the chain's step count):
- * a dependent mixing chain kept only by @ref bench::do_not_optimize, the clobber every timed
- * sink in this file relies on, timed through @ref bench::time_batches like every batch row.
- * Kept work takes about 8x longer at 64 steps; deleted work does not. If the long chain does
- * not take at least 4x the short one, the family exits 2 and the sweep fails, because every
- * sink that uses the same clobber is then suspect too.
+ * a dependent mixing chain, timed through @ref bench::time_batches like every batch row. Kept
+ * work takes about 8x longer at 64 steps; deleted work does not. If the long chain does not
+ * take at least 4x the short one, the family exits 2 and the sweep fails. What it proves is
+ * that the timed chain itself was not deleted; it does NOT prove that
+ * @ref bench::do_not_optimize is load-bearing (on GCC 13 the chain survives with that clobber
+ * blanked), so the sinks that rely only on the clobber are not covered by it.
  */
 void family_dce_canary() {
     const bench::dce_canary_t c = bench::measure_dce_canary(100'000'000ULL);
