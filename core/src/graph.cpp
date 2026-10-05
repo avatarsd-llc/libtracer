@@ -2455,14 +2455,14 @@ result_t<void> graph_t::write_branch(vertex_t* v, const view::rope_t& value,
     // render-on-demand) — the node-key prefix of the whole decomposition plan. The key
     // render and its parse copy are NOTHROW (#477): OOM soft-fails the branch write as
     // BACKPRESSURE, the injected-resource status, never an abort on the writer thread.
-    mem::bytes_t root_key_bytes(*tables_);
+    mem::bytes_t root_key_bytes(src);  // the plan's scratch shares the decode's frame
     if (!try_build_key(v, root_key_bytes)) return std::unexpected(status_t::BACKPRESSURE);
     const std::span<const std::byte> root_key = mem::as_span(root_key_bytes);
     // post-order; plan.back() is the root. Its blocks come from the injected source (#873
     // phase 1) — the node count is PEER-CHOSEN (the peer picks how deep and how wide the
     // branch it writes is), so this is exactly the growth a bounded node must be able to cap.
-    mem::block_array_t<branch_node_t> plan(*tables_);
-    const result_t<bool> parsed = parse_branch_node(a, 0, *head, root_key, plan, *tables_);
+    mem::block_array_t<branch_node_t> plan(src);
+    const result_t<bool> parsed = parse_branch_node(a, 0, *head, root_key, plan, src);
     if (!parsed) return std::unexpected(parsed.error());
     if (!*parsed) return {};  // a value-free branch is a no-op write
 
@@ -2486,7 +2486,7 @@ result_t<void> graph_t::write_branch(vertex_t* v, const view::rope_t& value,
         bool refused = false;
     };
     // Failable, from the table source (#477, #1778): a refusal => BACKPRESSURE.
-    mem::block_array_t<site_t> sites(*tables_);
+    mem::block_array_t<site_t> sites(src);
     if (!sites.reserve(plan.size())) return std::unexpected(status_t::BACKPRESSURE);
     for (const branch_node_t& node : plan) {
         if (node.store.empty()) continue;
@@ -2633,11 +2633,15 @@ void graph_t::propagate_impl(vertex_t* v) {
     // Every allocation in the snapshot is failable and drawn from the table source (#477,
     // #1778): a refused key render skips the sweep, and a refusal mid-collection stops it
     // BEFORE draining the affected mark — the undelivered entries stay in their sets, so the
-    // sweep defers instead of aborting.
-    mem::bytes_t lo_key(*tables_);
+    // sweep defers instead of aborting. The scratch is a stack frame first (#1778): a sweep
+    // over a short subtree takes nothing from the table source's class locks, and a longer
+    // one spills to the table source.
+    std::array<std::byte, 512> scratch;
+    mem::bump_source_t frame(scratch, *tables_);
+    mem::bytes_t lo_key(frame);
     if (!try_build_key(v, lo_key)) return;  // refused: marks retained — the next sweep retries
     const std::span<const std::byte> lo = mem::as_span(lo_key);
-    key_list_t to_deliver(*tables_);
+    key_list_t to_deliver(frame);
     bool own_drained = false;  // v's own mark went with the drain (v was delivered above)
     {
         const std::lock_guard lock(sweep_mutex_);
@@ -2673,7 +2677,7 @@ void graph_t::propagate_impl(vertex_t* v) {
     // a sweep cost, never an eager-write one. The resolved pointers are the delivery list
     // too, so no key is resolved twice. On a refusal for that list the hints stay up (a
     // stale-up hint costs one slow-path probe, never a delivery) and delivery resolves per key.
-    mem::block_array_t<vertex_t*> targets(*tables_);
+    mem::block_array_t<vertex_t*> targets(frame);
     if (!targets.reserve(to_deliver.size())) {
         for (std::size_t i = 0; i < to_deliver.size(); ++i) {
             if (vertex_t* u = find_ptr(to_deliver[i])) deliver_current(u);
@@ -2791,7 +2795,9 @@ void graph_t::clear_pending(vertex_t* v, const value_t* delivered) {
     if (pending_count_.load(std::memory_order_relaxed) == 0) return;
     // Failable key render (#477): on a refusal keep the stale mark — the same safe direction.
     // Never an abort on the writer thread.
-    mem::bytes_t key(*tables_);  // outside the lock
+    std::array<std::byte, 256> scratch;  // the key is a stack frame first (#1778)
+    mem::bump_source_t frame(scratch, *tables_);
+    mem::bytes_t key(frame);  // outside the lock
     if (!try_build_key(v, key)) return;
     const std::lock_guard lock(sweep_mutex_);
     // Erase only while the value this call's own store published is still v's CURRENT LKV
@@ -3139,7 +3145,9 @@ void graph_t::notify_subscription(sub_event_t::kind_t kind, const vertex_t* v,
     }
     // A refused producer render reports an EMPTY producer, on the same terms as the target
     // above: the mutation happened either way.
-    mem::bytes_t producer(*tables_);
+    std::array<std::byte, 256> scratch;  // the render is a stack frame first (#1778)
+    mem::bump_source_t frame(scratch, *tables_);
+    mem::bytes_t producer(frame);
     (void)try_build_key(v, producer);
     observer.fn(observer.ctx, sub_event_t{.kind = kind,
                                           .producer = wire::key_view_t{mem::as_span(producer)},
@@ -3823,8 +3831,12 @@ bool graph_t::select_sweep(vertex_t* v, mem::bytes_t& lo, key_list_t& out) {
 }
 
 result_t<void> graph_t::propagate_folded_impl(vertex_t* v) {
-    mem::bytes_t lo_key(*tables_);
-    key_list_t keys(*tables_);
+    // Every table below is per-call scratch: a stack frame first, spilling to the table
+    // source (#1778), so a small fold takes nothing from its class locks.
+    std::array<std::byte, 2048> scratch;
+    mem::bump_source_t frame(scratch, *tables_);
+    mem::bytes_t lo_key(frame);
+    key_list_t keys(frame);
     if (!select_sweep(v, lo_key, keys)) return std::unexpected(status_t::BACKPRESSURE);
     const std::span<const std::byte> lo = mem::as_span(lo_key);
 
@@ -3835,15 +3847,15 @@ result_t<void> graph_t::propagate_folded_impl(vertex_t* v) {
     // exactly those two orders and nothing else. A sorted table from the table source
     // (#1778): entries MOVE on insert, so a node is addressed by index or re-found, never
     // held across an insert.
-    mem::sorted_map_t<mem::bytes_t, fold_node_t, mem::bytes_less_t> tree(*tables_);
+    mem::sorted_map_t<mem::bytes_t, fold_node_t, mem::bytes_less_t> tree(frame);
     // Admit one node, resolving the vertex and validating what it may contribute. `selected`
     // false admits a skeleton: the vertex is named so the tree stays connected, and no value
     // rides it. Returns the error a §B decomposer would raise on the frame this would build.
-    const auto admit = [this, v, lo, &tree](std::span<const std::byte> key,
-                                            bool selected) -> result_t<fold_node_t*> {
+    const auto admit = [this, v, lo, &tree, &frame](std::span<const std::byte> key,
+                                                    bool selected) -> result_t<fold_node_t*> {
         fold_node_t* found = tree.find(key);
         if (found == nullptr) {
-            mem::bytes_t k(*tables_);
+            mem::bytes_t k(frame);
             found = mem::assign_bytes(k, key) ? tree.try_emplace(std::move(k)).value : nullptr;
             if (found == nullptr) return std::unexpected(status_t::BACKPRESSURE);
             found->vx = std::ranges::equal(key, lo) ? v : find_ptr(key);

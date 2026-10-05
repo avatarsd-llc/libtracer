@@ -374,26 +374,35 @@ void test_sweep() {
     }
     check(shed_counted, "a refused pending mark is a counted OUT_OF_MEMORY drop, the assign lands");
     check(no_leak, "and the graph gives back every block it drew");
-    // The sweep: a refused snapshot keeps the marks, and the next sweep delivers them.
+    // The sweep: its scratch is a stack frame first, so only a snapshot that outgrows the
+    // frame reaches the source. Refused there, the sweep delivers what it collected and keeps
+    // the rest of the marks, and the next sweep delivers them.
     {
+        constexpr std::size_t kMarks = 64;  // 64 keys of ~26 B: past the 512 B frame
         gate_source_t src;
         {
             graph_t g{src};
             const vertex_handle_t q = g.register_vertex(*path_t::parse("/q"), role_t::STORED_VALUE);
-            const vertex_handle_t x =
-                g.register_vertex(*path_t::parse("/q/x"), role_t::STORED_VALUE);
-            (void)g.subscribe(*path_t::parse("/q/x"), +count, &delivered);
-            check(g.assign(x, tr::view::rope_t{make_value({0x07})}).has_value(), "assign marks");
+            bool marked = true;
+            for (std::size_t i = 0; i < kMarks; ++i) {
+                char p[48];
+                std::snprintf(p, sizeof p, "/q/a-long-child-name-%04zu", i);
+                const vertex_handle_t x =
+                    g.register_vertex(*path_t::parse(p), role_t::STORED_VALUE);
+                (void)g.subscribe(*path_t::parse(p), +count, &delivered);
+                marked = g.assign(x, tr::view::rope_t{make_value({0x07})}).has_value() && marked;
+            }
+            check(marked, "assign marks");
             delivered = 0;
             src.arm(0);
             (void)g.propagate(q);
-            const bool deferred = delivered == 0;
+            const bool deferred = delivered < kMarks;
             const bool folded_refused = !g.propagate(q, emission_mode_t::FOLD);
             src.disarm();
-            check(deferred, "a refused sweep snapshot delivers nothing and drains nothing");
+            check(deferred, "a sweep refused past its frame defers what it could not collect");
             check(folded_refused, "a refused FOLD sweep answers BACKPRESSURE");
             (void)g.propagate(q);
-            check(delivered == 1, "the retained mark is delivered by the next covering sweep");
+            check(delivered == kMarks, "every retained mark is delivered by the next sweep");
         }
         check(src.live_ == 0, "and the graph gives back every block it drew");
     }
