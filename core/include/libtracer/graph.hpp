@@ -42,7 +42,6 @@
 #include "libtracer/link_id.hpp"
 #include "libtracer/link_index.hpp"
 #include "libtracer/mem_heap.hpp"
-#include "libtracer/mem_slab_pool.hpp"
 #include "libtracer/mem_sorted_map.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/mem_source_backend.hpp"
@@ -826,9 +825,7 @@ class graph_t {
      *        graph without one (an injected root, or a build without the slab pool); the
      *        process-wide sub-pools are trimmed by `tr::mem::host_root().trim()`.
      */
-    void trim_tables() noexcept {
-        if (own_tables_) own_tables_->trim();
-    }
+    void trim_tables() noexcept;
 
     /**
      * @brief The NET sub-pool a router or link on this graph defaults to when the application
@@ -3035,7 +3032,21 @@ class graph_t {
     // graph, independent graphs written from different threads paid for each other's blocks
     // (inproc-mt4 -28%, #1882). Declared FIRST, so it is built before and destroyed after
     // every member that draws from it. Empty on an injected root, which serves every purpose.
-    mem::block_ptr_t<mem::host_pool_t> own_tables_;
+    // Defined in graph.cpp, so this header carries no pool definition into every unit that
+    // includes it (with it, the forward router's inlining moved: +319 B, symbol ratchet).
+    struct own_pool_t {
+        mem::block_source_t* pool = nullptr; /**< @brief The pool, or null. */
+        /** @brief Derive one when @p src is the default root of a slab-pool build. */
+        explicit own_pool_t(mem::block_source_t& src) noexcept;
+        ~own_pool_t();
+        own_pool_t(const own_pool_t&) = delete;
+        own_pool_t& operator=(const own_pool_t&) = delete;
+        /** @brief The pool, or @p src when there is none. */
+        [[nodiscard]] mem::block_source_t& or_root(mem::block_source_t& src) const noexcept {
+            return pool != nullptr ? *pool : src;
+        }
+    };
+    own_pool_t own_tables_;
     seam_park_t retired_seams_;
 
     // The node-scoped vertex index (RFC-0024 §6.4) — the ONE new structure a bound path

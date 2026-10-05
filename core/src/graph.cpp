@@ -26,6 +26,7 @@
 #include "libtracer/key_view.hpp"
 #include "libtracer/mem_borrowed.hpp"
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_slab_pool.hpp"
 #include "libtracer/mem_source_alloc.hpp"
 #include "libtracer/packed_path.hpp"
 #include "libtracer/security_acl.hpp"
@@ -478,18 +479,6 @@ struct branch_node_t {
     return mem::kSlabPool && is_default_source(&src) ? &sub : &src;
 }
 
-/** @brief A default graph's own table sub-pool (#1778), over the platform heap; empty when
- *         @p src is injected or the build has no slab pool. A refused pool is a sizing bug. */
-[[nodiscard]] mem::block_ptr_t<mem::host_pool_t> own_table_pool(mem::block_source_t& src) noexcept {
-    if (!mem::kSlabPool || !is_default_source(&src)) return {};
-    mem::block_ptr_t<mem::host_pool_t> pool = mem::make_block<mem::host_pool_t>(
-        mem::heap_source(), "tables",
-        std::span<const std::size_t, mem::host_pool_t::classes()>(config_t::kSizeClasses),
-        mem::heap_source());
-    if (!pool) mem::exhausted_at_init(mem::heap_source(), "graph_t");
-    return pool;
-}
-
 /** @brief The retention a role holds when its policy names none (RFC-0028 §5.4). */
 [[nodiscard]] constexpr retention_t default_retention(role_t role) noexcept {
     return role == role_t::HANDLER  ? retention_t::NONE
@@ -529,18 +518,37 @@ template <class Set>
 
 }  // namespace
 
+graph_t::own_pool_t::own_pool_t(mem::block_source_t& src) noexcept {
+    // Over the platform heap; none when @p src is injected or the build has no slab pool. A
+    // refused pool is a sizing bug, as for every other construction-time draw.
+    if (!mem::kSlabPool || !is_default_source(&src)) return;
+    pool = mem::make_in<mem::host_pool_t>(
+        mem::heap_source(), "tables",
+        std::span<const std::size_t, mem::host_pool_t::classes()>(config_t::kSizeClasses),
+        mem::heap_source());
+    if (pool == nullptr) mem::exhausted_at_init(mem::heap_source(), "graph_t");
+}
+
+graph_t::own_pool_t::~own_pool_t() {
+    mem::drop_in(mem::heap_source(), static_cast<mem::host_pool_t*>(pool));
+}
+
+void graph_t::trim_tables() noexcept {
+    if (own_tables_.pool != nullptr) static_cast<mem::host_pool_t*>(own_tables_.pool)->trim();
+}
+
 graph_t::graph_t(mem::block_source_t& src, graph_hooks_t hooks)
-    : own_tables_(own_table_pool(src)),
-      retired_seams_(own_tables_ ? *own_tables_ : src),
-      vertex_slots_(own_tables_ ? *own_tables_ : src),
+    : own_tables_(src),
+      retired_seams_(own_tables_.or_root(src)),
+      vertex_slots_(own_tables_.or_root(src)),
       src_backend_(src),
-      child_types_(own_tables_ ? *own_tables_ : src),
-      identity_record_(own_tables_ ? *own_tables_ : src),
-      pending_(own_tables_ ? *own_tables_ : src),
-      unconditional_(own_tables_ ? *own_tables_ : src),
+      child_types_(own_tables_.or_root(src)),
+      identity_record_(own_tables_.or_root(src)),
+      pending_(own_tables_.or_root(src)),
+      unconditional_(own_tables_.or_root(src)),
       ctl_(&src),
       values_(sub_pool(src, mem::value_source())),
-      tables_(own_tables_ ? own_tables_.get() : &src) {
+      tables_(&own_tables_.or_root(src)) {
     // The process-default FOLD, resolved in the BODY: `&src_backend_` is only taken once its
     // lifetime has started. A few stores at construction, never read again.
     // On the host default root (#1777) values and rings draw from the value sub-pool and
