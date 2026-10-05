@@ -10,7 +10,8 @@
  * `FIELD?` selector, `src` (PATH), then per-op:
  *   - REPLY: `kind` (VALUE u8), optional payload
  *   - WRITE: optional payload
- *   - AWAIT: optional `await_timeout` (VALUE u64 ns)
+ *   - AWAIT: optional `await_timeout` (VALUE u64 ns), a hint the terminus MAY ignore; the
+ *     deadline is the requester's own (RFC-0004 Amendment 3)
  *   - READ : nothing
  *
  * Vector-pinned: all nine vectors under `fwd/`.
@@ -104,7 +105,12 @@ pub struct FwdRequest<'a> {
     pub payload: Option<Tlv>,
     /** @brief REPLY only — the reply [`fwd_kind`] (defaults to RESULT). */
     pub kind: Option<u8>,
-    /** @brief AWAIT only — the `await_timeout` in ns (absent ⇒ the responder default). */
+    /**
+     * @brief AWAIT only — the `await_timeout` in ns, a hint the terminus MAY ignore.
+     *
+     * The deadline is the requester's own (RFC-0004 Amendment 3): the caller ends its wait on
+     * its own clock, and a core responder never answers `TIMEOUT`. Absent, no hint is sent.
+     */
     pub await_timeout_ns: Option<u64>,
 }
 

@@ -15,7 +15,8 @@
  * Child order (RFC-0004 §B): op, dst (PATH), FIELD? selector, src (PATH), then
  *   - REPLY:  kind (VALUE u8), payload?
  *   - WRITE:  payload?
- *   - AWAIT:  await_timeout? (VALUE u64 ns)
+ *   - AWAIT:  await_timeout? (VALUE u64 ns), a hint the terminus MAY ignore; the deadline is
+ *     the requester's own (RFC-0004 Amendment 3)
  *   - READ :  nothing
  */
 
@@ -234,7 +235,12 @@ export interface FwdRequest {
   readonly payload?: Uint8Array;
   /** @brief REPLY only — the reply {@link FWD_KIND}. */
   readonly kind?: number;
-  /** @brief AWAIT only — the `await_timeout` in ns (absent ⇒ the responder's 1 s default). */
+  /**
+   * @brief AWAIT only — the `await_timeout` in ns, a hint the terminus MAY ignore.
+   *
+   * The deadline is the requester's own (RFC-0004 Amendment 3): the caller ends its wait on
+   * its own clock, and a core responder never answers `TIMEOUT`. Absent, no hint is sent.
+   */
   readonly awaitTimeoutNs?: bigint;
 }
 
