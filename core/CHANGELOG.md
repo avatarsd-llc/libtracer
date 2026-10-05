@@ -14,6 +14,8 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ## [Unreleased]
 
+## [0.18.0] — 2026-10-05
+
 ### Added
 
 - **`fwd_router_t::originate` lets a node issue a forwarded READ, WRITE or append itself
@@ -26,6 +28,346 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   clock and keeps no per-request state. Replies that match no armed record still go to
   `on_reply`. `fwd_router_t` gains a user-declared destructor that disarms any record still
   armed.
+
+- **`value_ref_t::copy(bytes, source = heap_source())`
+  ([#1655](https://github.com/avatarsd-llc/libtracer/issues/1655)).** Mints an inline value
+  over a copy of the bytes: one block from the source, through `value_t::make_copy`. It is the
+  spelling an `on_read` hook uses for a value it computes. Returns an empty reference when the
+  source refuses the block.
+
+- **A transport module can declare its `conn:schema` creation catalog, and its creator endpoint
+  validates a `SPEC` against it ([#1815](https://github.com/avatarsd-llc/libtracer/issues/1815),
+  RFC-0014 §2 / Amendment 3).** `transport_vertex_t::register_module` takes an optional fourth
+  argument, a `tr::net::conn_catalog_t`: a borrowed `static constexpr` table of
+  `tr::net::conn_key_t{name, dtype, required, descriptor}`, with `tr::net::conn_dtype_t`
+  (`UTF8`, `BOOL`, `U8`, `U16`, `U32`) naming the value shapes the shared config walk reads.
+  `read <net_root>/<module>/conn:schema` then answers the catalog inside Amendment 3's envelope,
+  `POINT{NAME "conn", SETTINGS{…}}`, one RFC-0013 §B per-key record per key
+  (`NAME <key> SETTINGS{NAME "dtype" NAME <tag>, [NAME "required" VALUE 01], <descriptor>}`).
+  A `SPEC` whose config omits a `required` key, or carries a catalogued key in another type or
+  width, is refused `TYPE_MISMATCH` at the write, before any factory runs or socket is built.
+  The spec names this code: RFC-0014 §2 maps a *malformed* config to
+  `ERROR{tr::schema::type_mismatch}` (`0x0030`). `SCHEMA_NOT_FOUND` stays reserved for an
+  unknown config type (an unregistered kind).
+  Uncatalogued keys stay ignored. A module that declares nothing is unchanged: the empty
+  `SETTINGS`, no validation. The catalog is fixed per endpoint, so a later `register_module`
+  under the same module that names a different table answers `PATH_IN_USE`. Kind-private keys
+  are described here, never on `conn_settings_t` (ADR-0043 §5). Alongside it,
+  `graph_t::register_vertex_key` takes an optional trailing `schema_catalog` byte span, which is
+  copied beside the payload-right rows and served as the vertex's `:schema` `SETTINGS` content.
+  Both new parameters default to empty, so existing callers are source-compatible.
+- **`wire::tlv_node_t` and `wire::tlv_children_t`: a non-owning TLV child walker in `frame.hpp`
+  ([#1648](https://github.com/avatarsd-llc/libtracer/issues/1648)).** `tlv_node_t::over(span)`
+  validates one frame with the same grammar walk as `decode` and returns its root as a borrowed
+  span plus the header facts (32 bytes, against 96 for a `tlv_t`). `children()` is a forward range
+  over the direct children that reads one header per step and allocates nothing. Every vector in
+  the conformance corpus reads identically through the walker and through `decode`. `decode`
+  remains for callers that keep a tree or pass one to a `tlv_t` API.
+- **The core container set: failable growth over `block_source_t`
+  ([#1776](https://github.com/avatarsd-llc/libtracer/issues/1776)).** ADR-0083 Decisions 2 and 9
+  name the containers and callback shapes core moves onto; this adds them, and nothing migrates
+  yet. `tr::mem::block_array_t` is the vector and now accepts any element with a `noexcept` move,
+  not only trivially copyable ones; a trivially copyable element compiles to the same code as
+  before. It gains `emplace_back`, `emplace_at`, `erase_at`, `clear`, `capacity`, iterators and
+  (for an element that is not trivially copyable) a move `push_back`; `push_slot` is now offered only for trivially copyable elements, which were
+  the only ones it accepted. The new `libtracer/mem_string.hpp` adds `tr::mem::string_t`, the
+  name/string store: an owning, NUL-terminated string. The new `libtracer/mem_sorted_map.hpp`
+  adds `tr::mem::sorted_map_t`, a sorted-vector map with heterogeneous lookup. Every growing call
+  on the three reports a refusal by value (`false` or a null pointer), and leaves the container,
+  and any argument passed by rvalue, unchanged when it does. The new
+  `libtracer/function_ref.hpp` adds `tr::function_ref_t`, a two-word non-owning reference to a
+  callable for synchronous callback parameters. Hooks stay `tr::graph::hook_t` (RFC-0028 D10).
+  All four are header-only, build with `-fno-exceptions`, and reference no `malloc`, `new` or
+  `free`.
+- **An admission filter can now see what kind of link a write arrived on
+  ([#1650](https://github.com/avatarsd-llc/libtracer/issues/1650)).** `write_ctx_t` gains
+  `link`, a pointer to the new `tr::net::link_kind_t`: the transport-catalog `(kind, role)` of the
+  connection that carried the write. `handlers_t::on_admit` and `handlers_t::on_write` both
+  receive it. Before this, a filter decided on the value and the writer's subject only, so it
+  could not admit a write from a dialled peer link and refuse the same write from a session a
+  `ws` listener accepted, except by parsing link names. A filter tests
+  `ctx.link->is("ws", tr::net::conn_role_t::LISTEN)`. `link` is null when no catalogued link
+  carried the write: the owner's own API write, a delivery from a subscription edge, or a link
+  added to the router without a catalog identity. The pair is fixed once per link:
+  `fwd_router_t::add_child` takes it as a new defaulted `link_kind_t` argument and interns it,
+  and `transport_vertex_t` passes each connection's declared pair. A frame then carries one
+  pointer and does no lookup, and `edge_view_t` does not grow. `graph_t::write` (both handle
+  overloads) and `graph::inbound_ref_t` gain a defaulted `link` / `link_kind` argument that
+  carries it. `tr::net::conn_role_t` moves to the new `libtracer/link_kind.hpp`;
+  `transport_vertex.hpp` includes it, so existing spellings compile unchanged.
+
+- **`default_config_t::kRxDrainFrames` and `default_config_t::kRxDrainBytes` (with the derived
+  `tr::net::kRxDrainFrames` / `tr::net::kRxDrainBytes`), the ingress drain budget
+  ([ADR-0085](../docs/adr/0085-ingress-drain-budget-waits-for-the-idle-task-not-a-clock.md)).**
+  Defaults 32 frames and 32,768 bytes; `0` removes that budget. They bound how much a link's
+  receive context reads back to back before it waits for its core to go idle. The one reader is
+  the ESP-IDF `httpd_ws_link_t`; no core link reads them, so nothing changes on a host.
+- **`default_config_t::kHeapSmallBlockBytes` (and its derived `tr::graph::kHeapSmallBlockBytes`),
+  the largest block the process-default heap backend draws for one segment
+  ([#1768](https://github.com/avatarsd-llc/libtracer/issues/1768)).** Default 1,032 B, glibc's
+  64-bit tcache ceiling. `heap_backend_t` also publishes `kHeaderBytes`, `kSmallBlockBytes` and
+  `is_one_block(size)`. See **Fixed** below for why it exists.
+
+### Changed
+
+- **A routed subscription now holds its link up through the RFC-0014 §4 refcount
+  ([#1816](https://github.com/avatarsd-llc/libtracer/issues/1816)).** On a build with the
+  liveness engine (`kSelfHealLinks = true`), every remote subscription edge that delivers over
+  a connection calls `transport_vertex_t::acquire_link` when it is admitted and
+  `release_link` when it is cleared, replaced or evicted. That covers an edge a peer made over
+  the link and an edge bound toward a target through the link's mount (`subscribe_toward`, or
+  a wire `SUBSCRIBER` whose `PATH` routes through a mount). So a subscription over a `DORMANT`
+  engine link dials it, keeps it self-healing on loss, and its teardown is the last standing
+  release. The engine's existing count is the only state: no timer, no clock read, and no
+  per-subscription liveness. Reconnect and backoff stay the engine's and the application's,
+  as before. A `:subscribers[]` field-write edge delivers to a local target and holds nothing,
+  and an `await` takes no standing hold. **New public surface:** `graph::link_hold_fn_t` and
+  `graph_hooks_t::link_hold`, the seam the `transport_vertex_t` constructor installs (it is
+  not installed when `kSelfHealLinks = false`); `transport_vertex_t` gains a destructor that
+  uninstalls it. `vertex_t::evict_link_edges` takes a second argument, a `std::size_t&` it
+  adds the evicted routed-edge count to, so a direct caller of the one-argument form must
+  pass one. Retiring a producer gives back the holds of the routed edges it drops.
+  `fwd_router_t::remove_child` now runs its departure eviction after releasing the router's
+  control lock, because that eviction gives the holds back through `transport_vertex_t`,
+  whose lock sits above the router's. **Migration:** an embedder that
+  drove `acquire_link` / `release_link` by hand for its own subscriptions should stop, or the
+  link is held twice and stays up after its subscriptions are gone. A binding the graph does
+  not see can still drive the seam directly.
+
+- **`graph_t::default_ring_source()` is documented as the injected source itself
+  ([#1581](https://github.com/avatarsd-llc/libtracer/issues/1581)).** Documentation only; no
+  signature or behaviour changes. The graph-level default ring source has resolved to the one
+  injected source since the one-source constructor, and that fold is now stated as deliberate:
+  there is no graph-level ring seam, and a vertex that needs its own ring store declares it
+  through `vertex_policy_t::ring_source`. The member doc no longer claims a separate
+  platform-heap default.
+
+- **`transport_ws_client`'s enqueue-then-write queue draws its slots from `memory.io`
+  ([#1661](https://github.com/avatarsd-llc/libtracer/issues/1661)).** A client frame is masked
+  in place, so every queued record is the link's own copy. Those slots used to come from the
+  process heap whatever the application injected; they now come from the same egress store as
+  the masked-frame scratch and the gather temporary (`ws_client_config_t::memory.io`, null
+  meaning the process heap). A bounded store therefore bounds the queue too: a record the
+  store cannot hold is refused and counted on `dropped_tx()`, never taken from the heap.
+  `stream_endpoint_t` gains a constructor that takes the slot source. **Migration:** an
+  application that injects a tight `memory.io` sizes it for the queue as well, up to eight
+  records behind the one in flight.
+- **Diagnostic drop counters are word-wide atomics, so a 32-bit target links no libatomic
+  call for them ([#1697](https://github.com/avatarsd-llc/libtracer/issues/1697)).** On rv32,
+  the ESP32-C6 included, a 64-bit atomic is an `__atomic_*_8` call, which masks interrupts on
+  ESP-IDF. The storage behind `graph_t::delivery_drops`, `vertex_ceiling_refusals`,
+  `deferred_release_drops`, the TCP, UDP, WebSocket and CAN `drop_stats`, the stalled-send
+  count and the self-healing link's fail-fast drops is now `std::size_t`, per `core/STYLE.md`
+  §Introspection clause 5. The accessors still return `std::uint64_t`, so callers compile
+  unchanged. On a 64-bit host nothing changes. On a 32-bit target each counter wraps after
+  2^32 events instead of 2^64. The ESP32-C6 `full_node` image loses 600 B of flash and 8 B of
+  `.bss`, and its libtracer archive goes from 92 libatomic calls to 34; the 26 left in core are
+  listed, with their reasons, at their declarations.
+- **The router's labelled-hop count is the build's `rmw_counter_t`, relaxed
+  ([#1697](https://github.com/avatarsd-llc/libtracer/issues/1697)).** It is the one counter the
+  label plane bumps on a success arm. The new alias `tr::graph::bound_rmw_counter_t<T, kOrder>`
+  spells the binding rule once: native where `T` is lock-free, otherwise guarded by `guard_t`,
+  and forced to guarded by `kForceGuardedRmw`. `tr::rmw_counter_t` gains a fourth template
+  parameter, `kOrder` (default `seq_cst`, so existing spellings keep their ordering).
+  `write_seq_counter_t` is now `bound_rmw_counter_t<write_seq_t>`, which is the same type it
+  was before. The labelled-hop count names `relaxed`, so its native bump is the plain AMO it
+  was: `lock add` on x86-64, `amoadd.w` on rv32imac, `ldadd` on aarch64. On a core with no atomic RMW (ESP32-C3, Cortex-M0) it is one guard
+  section in place of `__atomic_fetch_add_4`.
+- **A remote AWAIT no longer occupies the receive context
+  ([ADR-0084](../docs/adr/0084-remote-await-completes-from-a-receiver-side-waiter.md)).** The
+  router answers it later, from the writer's thread, when the awaited vertex changes. Its waiter
+  is one block of the receiving link's rx source, released when the link goes down or the router
+  is destroyed. The router adds no thread and reads no clock. The request's `await_timeout` is
+  ignored on the receiver: the requester owns the deadline (RFC-0004 Amendment 3), so a
+  requester that relied on a terminus `TIMEOUT` reply ends its wait at its own deadline. Replies on one link may now arrive in a
+  different order than their requests, which `reference/04` already allows. New public API:
+  `graph::await_waiter_t`, `graph_t::arm_await` / `disarm_await` / `await_value`,
+  `vertex_t::arm_waiter` / `disarm_waiter`, `op_resolver_t::on_await_defer` with
+  `deferred_await_t` and a trailing `bool* deferred` parameter on both `resolve` overloads
+  (defaulted, so existing calls are unchanged), and `fwd_router_t::pending_awaits`.
+  `fwd_router_t` now has a user-declared destructor that cancels pending AWAITs.
+
+- **`vertex_handle_t`, `vertex_slot_t`, `kGenerationSaturated`, `saturating_next_generation` and
+  `bound_generation_matches` move to the new leaf header `libtracer/vertex_handle.hpp`
+  ([#1707](https://github.com/avatarsd-llc/libtracer/issues/1707)).** The leaf includes no graph
+  or vertex header. `graph.hpp` and `vertex.hpp` include it, so existing code compiles unchanged.
+  `route_handle.hpp` includes the leaf instead of `graph.hpp`, which cuts its standalone parse
+  time from about 1.15 s to about 0.21 s.
+- **`conn_role_t`, `link_state_t`, `conn_settings_t` and `transport_kind_traits_t` move to the
+  new leaf header `libtracer/transport_factory.hpp`, which also adds the namespace-scope
+  `tr::net::transport_factory_t`
+  ([#1720](https://github.com/avatarsd-llc/libtracer/issues/1720)).** The leaf includes no
+  graph or vertex header. `transport_vertex.hpp` includes it, and
+  `transport_vertex_t::transport_factory_t` stays as an alias, so existing code that includes
+  `transport_vertex.hpp` compiles unchanged. `transport_can.hpp`, `transport_quic.hpp`,
+  `transport_webtransport.hpp` and `self_heal_link.hpp` include the leaf instead of
+  `transport_vertex.hpp`, so they no longer bring in `graph.hpp`, `vertex.hpp` or
+  `transport_vertex.hpp`. **Migration:** code that used `transport_vertex_t`, `graph_t` or
+  another graph name while including only one of those four headers must include
+  `libtracer/transport_vertex.hpp` (or `libtracer/graph.hpp`) itself.
+- **CAN framing moves from the view layer to the net plane: `libtracer/view_can.hpp` →
+  `libtracer/can_framing.hpp`, `tr::view::` → `tr::net::can::`
+  ([#1725](https://github.com/avatarsd-llc/libtracer/issues/1725)).** Splitting a payload into
+  CAN data-field windows is transport framing, so it now lives beside the CAN ID and advertise
+  codecs, and the view layer holds no transport-specific code. The names and behaviour are
+  unchanged: `can_frame_mode_t`, `can_frame_count`, `can_frame_at`, `can_max_data`,
+  `can_fd_dlc_round_up`, `kCanClassicMaxData` and `kCanFdMaxData`. **Alias window (kept
+  for one release):** `libtracer/view_can.hpp` still exists and re-exports all seven names into
+  `tr::view`, and `transport_can.hpp` still includes it, so existing code compiles unchanged
+  whichever of the two headers it reached the names through; both go in the next release. **Migration:** include `libtracer/can_framing.hpp` in place of
+  `libtracer/view_can.hpp`, and spell `tr::view::can_frame_mode_t` as
+  `tr::net::can::can_frame_mode_t` (and likewise for the other six names).
+- **A terminus reply leaves through the link the request arrived on, with no by-name lookup
+  ([#1709](https://github.com/avatarsd-llc/libtracer/issues/1709)).** `fwd_router_t` used to
+  find a reply's egress link by scanning its child registry for the inbound name, although a
+  frame from a registered child's receiver already carries that child's link. A point-to-point
+  child's reply (and its memory-refusal answer) now goes back through that link directly. A bus
+  child keeps its peer resolution by name (ADR-0044), and so does a frame pushed through the
+  public by-name `on_frame` door. New API: `fwd_router_t::reply_name_lookups()` counts the
+  replies that still resolved their link by name, so a deployment can confirm the scan is gone.
+- **The inline fan-out width is a compile-time trait, `default_config_t::kInlineFanout`
+  ([#1708](https://github.com/avatarsd-llc/libtracer/issues/1708)).** A publish snapshots up to
+  this many subscribers into a stack buffer and delivers to wider fan-outs through the
+  overflow vector, as before. The default stays 8, so a host build is unchanged (identical
+  `graph.cpp` code). A NARROW target shrinks the buffer every publish frame carries:
+  `kInlineFanout * sizeof(edge_view_t)`, 48 B a view on a 64-bit host and 28 B on rv32. At 2,
+  `graph_t::fan_out`'s rv32 frame drops from 304 B to 128 B. `edge_snapshot_t::kCapacity` and
+  `vertex_t::kInlineFanout` now mirror the trait; the derived spelling is
+  `tr::graph::kInlineFanout`. The ESP-IDF component sets 2 on chip targets.
+
+- **A STREAM write takes its vertex stripe lock once and allocates nothing for its drain
+  ([#1713](https://github.com/avatarsd-llc/libtracer/issues/1713)).** The receiver ring's
+  admission and the write's drain were two lock sections, and the drain snapshot was a heap
+  `std::vector` per write. The admission now takes the unflushed window in the same section, into
+  the new stack-first `tr::graph::vertex_t::ring_take_t` (four in-frame entries, one heap spill
+  past that); `propagate` drains into the same buffer. Delivery order, the shed and gap accounting
+  and the public `graph_t::drain_unflushed` are unchanged. The admission also resolves a vertex's
+  own ring source under that lock now, which removes an unlocked read that raced the first
+  admission on a vertex written from several threads.
+- **`tr::rmw_counter_t::preset` is private**
+  ([#1719](https://github.com/avatarsd-llc/libtracer/issues/1719)). A store that races every
+  bump is a test tool, not API. A test reaches it through `tr::rmw_counter_test_door_t`, which
+  `guard.hpp` declares and the library never defines, the same pattern as
+  `tr::graph::vertex_seq_test_door_t`. The type is unreleased, so no shipped code is affected.
+- **An observed eager write no longer takes the graph-wide sweep lock because some OTHER
+  vertex holds an `assign` mark ([#1712](https://github.com/avatarsd-llc/libtracer/issues/1712)).**
+  While any mark was pending, every observed write rendered its key (one heap block) and took
+  the sweep lock to retire a mark it almost never had. A per-vertex hint bit in `vertex_t`'s
+  existing flag byte now skips that path for unmarked vertices. No API change;
+  `sizeof(vertex_t)` is unchanged. Covering sweeps deliver exactly as before.
+- **On the guarded write-sequence binding, a publish opens one guard section, not two
+  ([#1715](https://github.com/avatarsd-llc/libtracer/issues/1715)).** Where the 32-bit write
+  sequence has no native atomic RMW (ESP32-C3, Cortex-M0), `vertex_t` now bumps it inside the
+  LKV slot's section, after the swap, instead of taking a second section of its own. Both bump
+  sites, the stored publish and the HANDLER `note_write`, take the guard anchored at the vertex's
+  LKV slot, so they exclude each other. The native binding is unchanged; a host build's code is
+  byte-identical. `hazard_slot_t` keeps the separate bump. New API this rests on:
+  - `tr::rmw_counter_t::bump(anchor)` bumps under the guard for `anchor`, and
+    `bump_in_section()` bumps when the caller already holds that guard (guarded binding only).
+    Every guarded bump of one counter must take the same guard.
+  - `basic_single_writer_slot_t::store(v, in_section)` publishes `v` and runs `in_section`
+    inside the same guard section. The slot now names its guard as `guard_type`.
+  - The concept `tr::graph::publishes_under<S, G>` holds when slot policy `S` takes its sections
+    on guard `G`.
+  - `tr::graph::write_seq_counter_t` names the counter type behind `write_seq_t`.
+  - `default_config_t::kForceGuardedRmw` (default `false`) forces the guarded binding on a host
+    whose atomics are native. It is a test knob: the core test build uses it to run the guarded
+    path, and a shipped node leaves it off.
+- **The host guard is sized by the target: `tr::basic_mutex_guard_t<LineBytes, Stripes>`
+  ([#1716](https://github.com/avatarsd-llc/libtracer/issues/1716)).** The address-striped host
+  guard hard-coded 64-byte alignment and 64 stripes, a 4 KB `.bss` table on every build. It is
+  now a template, and `tr::mutex_guard_t` names its default sizing,
+  `basic_mutex_guard_t<64, 64>`. A build that keeps the default `guard_t` gets the guard sized
+  from its own `kCacheLineBytes` and the new `default_config_t::kGuardStripes` (default 64, a
+  power of two). For example, `kCacheLineBytes = 0` with `kGuardStripes = 16` costs 16 bytes,
+  not 4 KB. A fragment that names its guard itself gets exactly that guard. The default host
+  build is unchanged: same type, same 4 KB table, same code. New: `tr::is_mutex_guard_v<G>`,
+  the derived `tr::graph::kGuardStripes`. **Migration:** `tr::mutex_guard_t` is now an alias, so
+  a forward declaration `struct tr::mutex_guard_t;` no longer compiles; include
+  `libtracer/guard_mutex.hpp` instead.
+
+- **The write sequence is 32-bit on every target: `vertex_t::current_seq()` returns
+  `tr::graph::write_seq_t` and `wait_for_change` takes one
+  ([#1621](https://github.com/avatarsd-llc/libtracer/issues/1621), RFC-0028 D6).**
+  `write_seq_t` is `std::uint32_t` (was `std::uint64_t`); there is no configuration trait. The
+  sequence wraps, and `await` compares it for equality only (`current != seq0`), so a wrap is
+  still a change; the one alias is exactly 2^32 publishes to one vertex inside one await window,
+  which the await's timeout bounds. The bump keeps its `seq_cst` ordering. On a core with
+  atomic RMW (rv32imac such as the ESP32-C6, Cortex-M3/M4/M7, Xtensa, every host) a publish
+  now bumps the sequence with one hardware add (`amoadd.w` on rv32) instead of calling
+  `__atomic_fetch_add_8`, which masks interrupts on ESP-IDF; on a core without one (rv32imc
+  such as the ESP32-C3, Cortex-M0/M0+) it is a load and a store inside one section of
+  `config_t::guard_t`, the build's critical-section guard, with no call.
+  `tr::rmw_counter_t<T, G>` (in `libtracer/guard.hpp`, see the guard move below) is that choice, made at
+  compile time from `std::atomic<T>::is_always_lock_free`. `sizeof(vertex_t)` drops 72 → **64 B**
+  (`config_t::kMaxVertexBytes32` lowered to match). On 64-bit hosts it stays 88 B: the tail
+  padding absorbs the 4 bytes. **Migration:** spell a sequence snapshot `write_seq_t` (or
+  `auto`) instead of `std::uint64_t`, and compare two snapshots with `==` / `!=` only, never
+  `<` / `>`.
+
+- **A warm COMPACT delivery stores its payload in ONE block, drawn from the graph's source
+  ([#1714](https://github.com/avatarsd-llc/libtracer/issues/1714)).** The memoized terminus
+  arm of `fwd_router_t` used to copy the payload into a segment from the router's `flat`
+  backend and then publish a second `value_t` block linking to it; it now copies into one
+  inline value from `graph_t::control_source()` that the store adopts, exactly as the
+  full-route terminus's copy arm does. No signature changes. **Migration:** a deployer who
+  sized `router_planes_t::flat` for warm COMPACT payloads can shrink it; that traffic is now
+  charged to the graph's injected source (which already held the value block). The cold arm
+  (first frame on a label) still draws its copy from `flat`. Exhaustion is still one counted
+  `delivery_drops().out_of_memory` drop.
+- **The per-link departure index moves out of `graph_t` into its own header,
+  `libtracer/link_index.hpp` ([#1710](https://github.com/avatarsd-llc/libtracer/issues/1710)).**
+  `tr::graph::link_index_t` is an implementation type that `graph.hpp` includes because
+  `graph_t` holds it by value; applications keep using `graph_t`'s link doors
+  (`intern_link`, `intern_link_hinted`, `release_link`, `link_edge_candidates`,
+  `link_index_name_lookups`), whose signatures and answers are unchanged. No behaviour change:
+  the slots, the token carry, the name scan and the lock are the same code, now compiled in
+  `link_index.cpp`. `sizeof(graph_t)` grows by one pointer (8 B on a 64-bit host), the index's
+  own record of the resource its per-link lists draw from.
+
+### Deprecated
+
+- **Ten public types take the `_t` suffix, and the transport classes use one word order
+  ([#1723](https://github.com/avatarsd-llc/libtracer/issues/1723)).** Per `core/STYLE.md`
+  §Type and value naming, every type is `snake_case_t`, and a transport class is
+  `<kind>_transport_t`, as `tcp_transport_t` and `udp_transport_t` already were. The old
+  names stay as plain aliases for one release and are removed in v0.19.0. No layout, symbol
+  size or behaviour changes; demangled symbol names change with the class names.
+
+  | Old name | New name |
+  | --- | --- |
+  | `tr::net::transport_ws_server` | `tr::net::ws_server_transport_t` |
+  | `tr::net::transport_ws_client` | `tr::net::ws_client_transport_t` |
+  | `tr::net::transport_tcp_server` | `tr::net::tcp_server_transport_t` |
+  | `tr::net::transport_can` | `tr::net::can_transport_t` |
+  | `tr::net::length_prefix_framer` | `tr::net::length_prefix_framer_t` |
+  | `tr::net::stack_writer<N>` | `tr::net::stack_writer_t<N>` |
+  | `tr::wire::grammar::span_cursor` | `tr::wire::grammar::span_cursor_t` |
+  | `tr::wire::grammar::rope_cursor` | `tr::wire::grammar::rope_cursor_t` |
+  | `tr::crc::crc32c_state` | `tr::crc::crc32c_state_t` |
+  | `tr::crc::crc16_ccitt_state` | `tr::crc::crc16_ccitt_state_t` |
+
+  **Migration:** rename the uses; code that keeps the old names compiles unchanged until
+  v0.19.0. A new CI check, `tools/check_type_names.py`, refuses a public type declared without
+  the suffix.
+
+### Fixed
+
+- **A heap value of about 1 KiB is back on the host allocator's fast path
+  ([#1768](https://github.com/avatarsd-llc/libtracer/issues/1768)).** v0.17.0 regressed it.
+  RFC-0028 slice 10 made `heap_backend_t` draw the segment header and the payload as one block,
+  so a 1024 B value asked `malloc` for 1072 B, past glibc tcache's 1032 B ceiling:
+  `lkv-store-heap 1024B` went from 27 to 54 ns, `lkv-alloc-heap 1024B` from 17.6 to 47 ns, and
+  the 1 KiB / 8 KiB `inproc` rows were 16–20% slower. A segment whose padded header plus payload
+  exceeds `kHeapSmallBlockBytes` is now drawn as two blocks: the payload, then the bare
+  `segment_t`. A smaller one stays one block, so the 64 B gain is kept. `destroy` takes the
+  layout from the payload size and returns each block sized as drawn. Only `heap_backend_t`
+  changes; `source_backend_t`, the pools and the borrowed backends keep their one-block layout.
+  No signature changes. The perf gate now also gates `lkv-store-heap` and `lkv-alloc-heap` at
+  1024 B, and `mem_heap_request_size_test` pins the bytes requested on either side of the
+  boundary. **Migration:** none; to keep one block always (an allocator with no small-block
+  cliff), bind `kHeapSmallBlockBytes = SIZE_MAX` in your fragment, as the ESP-IDF component
+  does.
 
 ### Breaking
 
@@ -258,352 +600,6 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   rope you built, or a `value_ref_t` you hold; change the lambda's declared return type to
   `result_t<value_ref_t>`. At an oracle call site, dereference twice (`(*r)->flatten()`,
   `(*r)->link_count()`), or take `(*r)->rope()` where a `rope_t` is needed.
-
-### Deprecated
-
-- **Ten public types take the `_t` suffix, and the transport classes use one word order
-  ([#1723](https://github.com/avatarsd-llc/libtracer/issues/1723)).** Per `core/STYLE.md`
-  §Type and value naming, every type is `snake_case_t`, and a transport class is
-  `<kind>_transport_t`, as `tcp_transport_t` and `udp_transport_t` already were. The old
-  names stay as plain aliases for one release and are removed in v0.19.0. No layout, symbol
-  size or behaviour changes; demangled symbol names change with the class names.
-
-  | Old name | New name |
-  | --- | --- |
-  | `tr::net::transport_ws_server` | `tr::net::ws_server_transport_t` |
-  | `tr::net::transport_ws_client` | `tr::net::ws_client_transport_t` |
-  | `tr::net::transport_tcp_server` | `tr::net::tcp_server_transport_t` |
-  | `tr::net::transport_can` | `tr::net::can_transport_t` |
-  | `tr::net::length_prefix_framer` | `tr::net::length_prefix_framer_t` |
-  | `tr::net::stack_writer<N>` | `tr::net::stack_writer_t<N>` |
-  | `tr::wire::grammar::span_cursor` | `tr::wire::grammar::span_cursor_t` |
-  | `tr::wire::grammar::rope_cursor` | `tr::wire::grammar::rope_cursor_t` |
-  | `tr::crc::crc32c_state` | `tr::crc::crc32c_state_t` |
-  | `tr::crc::crc16_ccitt_state` | `tr::crc::crc16_ccitt_state_t` |
-
-  **Migration:** rename the uses; code that keeps the old names compiles unchanged until
-  v0.19.0. A new CI check, `tools/check_type_names.py`, refuses a public type declared without
-  the suffix.
-
-### Added
-
-- **`value_ref_t::copy(bytes, source = heap_source())`
-  ([#1655](https://github.com/avatarsd-llc/libtracer/issues/1655)).** Mints an inline value
-  over a copy of the bytes: one block from the source, through `value_t::make_copy`. It is the
-  spelling an `on_read` hook uses for a value it computes. Returns an empty reference when the
-  source refuses the block.
-
-### Added
-
-- **A transport module can declare its `conn:schema` creation catalog, and its creator endpoint
-  validates a `SPEC` against it ([#1815](https://github.com/avatarsd-llc/libtracer/issues/1815),
-  RFC-0014 §2 / Amendment 3).** `transport_vertex_t::register_module` takes an optional fourth
-  argument, a `tr::net::conn_catalog_t`: a borrowed `static constexpr` table of
-  `tr::net::conn_key_t{name, dtype, required, descriptor}`, with `tr::net::conn_dtype_t`
-  (`UTF8`, `BOOL`, `U8`, `U16`, `U32`) naming the value shapes the shared config walk reads.
-  `read <net_root>/<module>/conn:schema` then answers the catalog inside Amendment 3's envelope,
-  `POINT{NAME "conn", SETTINGS{…}}`, one RFC-0013 §B per-key record per key
-  (`NAME <key> SETTINGS{NAME "dtype" NAME <tag>, [NAME "required" VALUE 01], <descriptor>}`).
-  A `SPEC` whose config omits a `required` key, or carries a catalogued key in another type or
-  width, is refused `TYPE_MISMATCH` at the write, before any factory runs or socket is built.
-  The spec names this code: RFC-0014 §2 maps a *malformed* config to
-  `ERROR{tr::schema::type_mismatch}` (`0x0030`). `SCHEMA_NOT_FOUND` stays reserved for an
-  unknown config type (an unregistered kind).
-  Uncatalogued keys stay ignored. A module that declares nothing is unchanged: the empty
-  `SETTINGS`, no validation. The catalog is fixed per endpoint, so a later `register_module`
-  under the same module that names a different table answers `PATH_IN_USE`. Kind-private keys
-  are described here, never on `conn_settings_t` (ADR-0043 §5). Alongside it,
-  `graph_t::register_vertex_key` takes an optional trailing `schema_catalog` byte span, which is
-  copied beside the payload-right rows and served as the vertex's `:schema` `SETTINGS` content.
-  Both new parameters default to empty, so existing callers are source-compatible.
-- **`wire::tlv_node_t` and `wire::tlv_children_t`: a non-owning TLV child walker in `frame.hpp`
-  ([#1648](https://github.com/avatarsd-llc/libtracer/issues/1648)).** `tlv_node_t::over(span)`
-  validates one frame with the same grammar walk as `decode` and returns its root as a borrowed
-  span plus the header facts (32 bytes, against 96 for a `tlv_t`). `children()` is a forward range
-  over the direct children that reads one header per step and allocates nothing. Every vector in
-  the conformance corpus reads identically through the walker and through `decode`. `decode`
-  remains for callers that keep a tree or pass one to a `tlv_t` API.
-- **The core container set: failable growth over `block_source_t`
-  ([#1776](https://github.com/avatarsd-llc/libtracer/issues/1776)).** ADR-0083 Decisions 2 and 9
-  name the containers and callback shapes core moves onto; this adds them, and nothing migrates
-  yet. `tr::mem::block_array_t` is the vector and now accepts any element with a `noexcept` move,
-  not only trivially copyable ones; a trivially copyable element compiles to the same code as
-  before. It gains `emplace_back`, `emplace_at`, `erase_at`, `clear`, `capacity`, iterators and
-  (for an element that is not trivially copyable) a move `push_back`; `push_slot` is now offered only for trivially copyable elements, which were
-  the only ones it accepted. The new `libtracer/mem_string.hpp` adds `tr::mem::string_t`, the
-  name/string store: an owning, NUL-terminated string. The new `libtracer/mem_sorted_map.hpp`
-  adds `tr::mem::sorted_map_t`, a sorted-vector map with heterogeneous lookup. Every growing call
-  on the three reports a refusal by value (`false` or a null pointer), and leaves the container,
-  and any argument passed by rvalue, unchanged when it does. The new
-  `libtracer/function_ref.hpp` adds `tr::function_ref_t`, a two-word non-owning reference to a
-  callable for synchronous callback parameters. Hooks stay `tr::graph::hook_t` (RFC-0028 D10).
-  All four are header-only, build with `-fno-exceptions`, and reference no `malloc`, `new` or
-  `free`.
-- **An admission filter can now see what kind of link a write arrived on
-  ([#1650](https://github.com/avatarsd-llc/libtracer/issues/1650)).** `write_ctx_t` gains
-  `link`, a pointer to the new `tr::net::link_kind_t`: the transport-catalog `(kind, role)` of the
-  connection that carried the write. `handlers_t::on_admit` and `handlers_t::on_write` both
-  receive it. Before this, a filter decided on the value and the writer's subject only, so it
-  could not admit a write from a dialled peer link and refuse the same write from a session a
-  `ws` listener accepted, except by parsing link names. A filter tests
-  `ctx.link->is("ws", tr::net::conn_role_t::LISTEN)`. `link` is null when no catalogued link
-  carried the write: the owner's own API write, a delivery from a subscription edge, or a link
-  added to the router without a catalog identity. The pair is fixed once per link:
-  `fwd_router_t::add_child` takes it as a new defaulted `link_kind_t` argument and interns it,
-  and `transport_vertex_t` passes each connection's declared pair. A frame then carries one
-  pointer and does no lookup, and `edge_view_t` does not grow. `graph_t::write` (both handle
-  overloads) and `graph::inbound_ref_t` gain a defaulted `link` / `link_kind` argument that
-  carries it. `tr::net::conn_role_t` moves to the new `libtracer/link_kind.hpp`;
-  `transport_vertex.hpp` includes it, so existing spellings compile unchanged.
-
-### Changed
-
-- **A routed subscription now holds its link up through the RFC-0014 §4 refcount
-  ([#1816](https://github.com/avatarsd-llc/libtracer/issues/1816)).** On a build with the
-  liveness engine (`kSelfHealLinks = true`), every remote subscription edge that delivers over
-  a connection calls `transport_vertex_t::acquire_link` when it is admitted and
-  `release_link` when it is cleared, replaced or evicted. That covers an edge a peer made over
-  the link and an edge bound toward a target through the link's mount (`subscribe_toward`, or
-  a wire `SUBSCRIBER` whose `PATH` routes through a mount). So a subscription over a `DORMANT`
-  engine link dials it, keeps it self-healing on loss, and its teardown is the last standing
-  release. The engine's existing count is the only state: no timer, no clock read, and no
-  per-subscription liveness. Reconnect and backoff stay the engine's and the application's,
-  as before. A `:subscribers[]` field-write edge delivers to a local target and holds nothing,
-  and an `await` takes no standing hold. **New public surface:** `graph::link_hold_fn_t` and
-  `graph_hooks_t::link_hold`, the seam the `transport_vertex_t` constructor installs (it is
-  not installed when `kSelfHealLinks = false`); `transport_vertex_t` gains a destructor that
-  uninstalls it. `vertex_t::evict_link_edges` takes a second argument, a `std::size_t&` it
-  adds the evicted routed-edge count to, so a direct caller of the one-argument form must
-  pass one. Retiring a producer gives back the holds of the routed edges it drops.
-  `fwd_router_t::remove_child` now runs its departure eviction after releasing the router's
-  control lock, because that eviction gives the holds back through `transport_vertex_t`,
-  whose lock sits above the router's. **Migration:** an embedder that
-  drove `acquire_link` / `release_link` by hand for its own subscriptions should stop, or the
-  link is held twice and stays up after its subscriptions are gone. A binding the graph does
-  not see can still drive the seam directly.
-
-- **`graph_t::default_ring_source()` is documented as the injected source itself
-  ([#1581](https://github.com/avatarsd-llc/libtracer/issues/1581)).** Documentation only; no
-  signature or behaviour changes. The graph-level default ring source has resolved to the one
-  injected source since the one-source constructor, and that fold is now stated as deliberate:
-  there is no graph-level ring seam, and a vertex that needs its own ring store declares it
-  through `vertex_policy_t::ring_source`. The member doc no longer claims a separate
-  platform-heap default.
-
-- **`transport_ws_client`'s enqueue-then-write queue draws its slots from `memory.io`
-  ([#1661](https://github.com/avatarsd-llc/libtracer/issues/1661)).** A client frame is masked
-  in place, so every queued record is the link's own copy. Those slots used to come from the
-  process heap whatever the application injected; they now come from the same egress store as
-  the masked-frame scratch and the gather temporary (`ws_client_config_t::memory.io`, null
-  meaning the process heap). A bounded store therefore bounds the queue too: a record the
-  store cannot hold is refused and counted on `dropped_tx()`, never taken from the heap.
-  `stream_endpoint_t` gains a constructor that takes the slot source. **Migration:** an
-  application that injects a tight `memory.io` sizes it for the queue as well, up to eight
-  records behind the one in flight.
-- **Diagnostic drop counters are word-wide atomics, so a 32-bit target links no libatomic
-  call for them ([#1697](https://github.com/avatarsd-llc/libtracer/issues/1697)).** On rv32,
-  the ESP32-C6 included, a 64-bit atomic is an `__atomic_*_8` call, which masks interrupts on
-  ESP-IDF. The storage behind `graph_t::delivery_drops`, `vertex_ceiling_refusals`,
-  `deferred_release_drops`, the TCP, UDP, WebSocket and CAN `drop_stats`, the stalled-send
-  count and the self-healing link's fail-fast drops is now `std::size_t`, per `core/STYLE.md`
-  §Introspection clause 5. The accessors still return `std::uint64_t`, so callers compile
-  unchanged. On a 64-bit host nothing changes. On a 32-bit target each counter wraps after
-  2^32 events instead of 2^64. The ESP32-C6 `full_node` image loses 600 B of flash and 8 B of
-  `.bss`, and its libtracer archive goes from 92 libatomic calls to 34; the 26 left in core are
-  listed, with their reasons, at their declarations.
-- **The router's labelled-hop count is the build's `rmw_counter_t`, relaxed
-  ([#1697](https://github.com/avatarsd-llc/libtracer/issues/1697)).** It is the one counter the
-  label plane bumps on a success arm. The new alias `tr::graph::bound_rmw_counter_t<T, kOrder>`
-  spells the binding rule once: native where `T` is lock-free, otherwise guarded by `guard_t`,
-  and forced to guarded by `kForceGuardedRmw`. `tr::rmw_counter_t` gains a fourth template
-  parameter, `kOrder` (default `seq_cst`, so existing spellings keep their ordering).
-  `write_seq_counter_t` is now `bound_rmw_counter_t<write_seq_t>`, which is the same type it
-  was before. The labelled-hop count names `relaxed`, so its native bump is the plain AMO it
-  was: `lock add` on x86-64, `amoadd.w` on rv32imac, `ldadd` on aarch64. On a core with no atomic RMW (ESP32-C3, Cortex-M0) it is one guard
-  section in place of `__atomic_fetch_add_4`.
-- **A remote AWAIT no longer occupies the receive context
-  ([ADR-0084](../docs/adr/0084-remote-await-completes-from-a-receiver-side-waiter.md)).** The
-  router answers it later, from the writer's thread, when the awaited vertex changes. Its waiter
-  is one block of the receiving link's rx source, released when the link goes down or the router
-  is destroyed. The router adds no thread and reads no clock. The request's `await_timeout` is
-  ignored on the receiver: the requester owns the deadline (RFC-0004 Amendment 3), so a
-  requester that relied on a terminus `TIMEOUT` reply ends its wait at its own deadline. Replies on one link may now arrive in a
-  different order than their requests, which `reference/04` already allows. New public API:
-  `graph::await_waiter_t`, `graph_t::arm_await` / `disarm_await` / `await_value`,
-  `vertex_t::arm_waiter` / `disarm_waiter`, `op_resolver_t::on_await_defer` with
-  `deferred_await_t` and a trailing `bool* deferred` parameter on both `resolve` overloads
-  (defaulted, so existing calls are unchanged), and `fwd_router_t::pending_awaits`.
-  `fwd_router_t` now has a user-declared destructor that cancels pending AWAITs.
-
-- **`vertex_handle_t`, `vertex_slot_t`, `kGenerationSaturated`, `saturating_next_generation` and
-  `bound_generation_matches` move to the new leaf header `libtracer/vertex_handle.hpp`
-  ([#1707](https://github.com/avatarsd-llc/libtracer/issues/1707)).** The leaf includes no graph
-  or vertex header. `graph.hpp` and `vertex.hpp` include it, so existing code compiles unchanged.
-  `route_handle.hpp` includes the leaf instead of `graph.hpp`, which cuts its standalone parse
-  time from about 1.15 s to about 0.21 s.
-- **`conn_role_t`, `link_state_t`, `conn_settings_t` and `transport_kind_traits_t` move to the
-  new leaf header `libtracer/transport_factory.hpp`, which also adds the namespace-scope
-  `tr::net::transport_factory_t`
-  ([#1720](https://github.com/avatarsd-llc/libtracer/issues/1720)).** The leaf includes no
-  graph or vertex header. `transport_vertex.hpp` includes it, and
-  `transport_vertex_t::transport_factory_t` stays as an alias, so existing code that includes
-  `transport_vertex.hpp` compiles unchanged. `transport_can.hpp`, `transport_quic.hpp`,
-  `transport_webtransport.hpp` and `self_heal_link.hpp` include the leaf instead of
-  `transport_vertex.hpp`, so they no longer bring in `graph.hpp`, `vertex.hpp` or
-  `transport_vertex.hpp`. **Migration:** code that used `transport_vertex_t`, `graph_t` or
-  another graph name while including only one of those four headers must include
-  `libtracer/transport_vertex.hpp` (or `libtracer/graph.hpp`) itself.
-- **CAN framing moves from the view layer to the net plane: `libtracer/view_can.hpp` →
-  `libtracer/can_framing.hpp`, `tr::view::` → `tr::net::can::`
-  ([#1725](https://github.com/avatarsd-llc/libtracer/issues/1725)).** Splitting a payload into
-  CAN data-field windows is transport framing, so it now lives beside the CAN ID and advertise
-  codecs, and the view layer holds no transport-specific code. The names and behaviour are
-  unchanged: `can_frame_mode_t`, `can_frame_count`, `can_frame_at`, `can_max_data`,
-  `can_fd_dlc_round_up`, `kCanClassicMaxData` and `kCanFdMaxData`. **Alias window (kept
-  for one release):** `libtracer/view_can.hpp` still exists and re-exports all seven names into
-  `tr::view`, and `transport_can.hpp` still includes it, so existing code compiles unchanged
-  whichever of the two headers it reached the names through; both go in the next release. **Migration:** include `libtracer/can_framing.hpp` in place of
-  `libtracer/view_can.hpp`, and spell `tr::view::can_frame_mode_t` as
-  `tr::net::can::can_frame_mode_t` (and likewise for the other six names).
-- **A terminus reply leaves through the link the request arrived on, with no by-name lookup
-  ([#1709](https://github.com/avatarsd-llc/libtracer/issues/1709)).** `fwd_router_t` used to
-  find a reply's egress link by scanning its child registry for the inbound name, although a
-  frame from a registered child's receiver already carries that child's link. A point-to-point
-  child's reply (and its memory-refusal answer) now goes back through that link directly. A bus
-  child keeps its peer resolution by name (ADR-0044), and so does a frame pushed through the
-  public by-name `on_frame` door. New API: `fwd_router_t::reply_name_lookups()` counts the
-  replies that still resolved their link by name, so a deployment can confirm the scan is gone.
-- **The inline fan-out width is a compile-time trait, `default_config_t::kInlineFanout`
-  ([#1708](https://github.com/avatarsd-llc/libtracer/issues/1708)).** A publish snapshots up to
-  this many subscribers into a stack buffer and delivers to wider fan-outs through the
-  overflow vector, as before. The default stays 8, so a host build is unchanged (identical
-  `graph.cpp` code). A NARROW target shrinks the buffer every publish frame carries:
-  `kInlineFanout * sizeof(edge_view_t)`, 48 B a view on a 64-bit host and 28 B on rv32. At 2,
-  `graph_t::fan_out`'s rv32 frame drops from 304 B to 128 B. `edge_snapshot_t::kCapacity` and
-  `vertex_t::kInlineFanout` now mirror the trait; the derived spelling is
-  `tr::graph::kInlineFanout`. The ESP-IDF component sets 2 on chip targets.
-
-- **A STREAM write takes its vertex stripe lock once and allocates nothing for its drain
-  ([#1713](https://github.com/avatarsd-llc/libtracer/issues/1713)).** The receiver ring's
-  admission and the write's drain were two lock sections, and the drain snapshot was a heap
-  `std::vector` per write. The admission now takes the unflushed window in the same section, into
-  the new stack-first `tr::graph::vertex_t::ring_take_t` (four in-frame entries, one heap spill
-  past that); `propagate` drains into the same buffer. Delivery order, the shed and gap accounting
-  and the public `graph_t::drain_unflushed` are unchanged. The admission also resolves a vertex's
-  own ring source under that lock now, which removes an unlocked read that raced the first
-  admission on a vertex written from several threads.
-- **`tr::rmw_counter_t::preset` is private**
-  ([#1719](https://github.com/avatarsd-llc/libtracer/issues/1719)). A store that races every
-  bump is a test tool, not API. A test reaches it through `tr::rmw_counter_test_door_t`, which
-  `guard.hpp` declares and the library never defines, the same pattern as
-  `tr::graph::vertex_seq_test_door_t`. The type is unreleased, so no shipped code is affected.
-- **An observed eager write no longer takes the graph-wide sweep lock because some OTHER
-  vertex holds an `assign` mark ([#1712](https://github.com/avatarsd-llc/libtracer/issues/1712)).**
-  While any mark was pending, every observed write rendered its key (one heap block) and took
-  the sweep lock to retire a mark it almost never had. A per-vertex hint bit in `vertex_t`'s
-  existing flag byte now skips that path for unmarked vertices. No API change;
-  `sizeof(vertex_t)` is unchanged. Covering sweeps deliver exactly as before.
-- **On the guarded write-sequence binding, a publish opens one guard section, not two
-  ([#1715](https://github.com/avatarsd-llc/libtracer/issues/1715)).** Where the 32-bit write
-  sequence has no native atomic RMW (ESP32-C3, Cortex-M0), `vertex_t` now bumps it inside the
-  LKV slot's section, after the swap, instead of taking a second section of its own. Both bump
-  sites, the stored publish and the HANDLER `note_write`, take the guard anchored at the vertex's
-  LKV slot, so they exclude each other. The native binding is unchanged; a host build's code is
-  byte-identical. `hazard_slot_t` keeps the separate bump. New API this rests on:
-  - `tr::rmw_counter_t::bump(anchor)` bumps under the guard for `anchor`, and
-    `bump_in_section()` bumps when the caller already holds that guard (guarded binding only).
-    Every guarded bump of one counter must take the same guard.
-  - `basic_single_writer_slot_t::store(v, in_section)` publishes `v` and runs `in_section`
-    inside the same guard section. The slot now names its guard as `guard_type`.
-  - The concept `tr::graph::publishes_under<S, G>` holds when slot policy `S` takes its sections
-    on guard `G`.
-  - `tr::graph::write_seq_counter_t` names the counter type behind `write_seq_t`.
-  - `default_config_t::kForceGuardedRmw` (default `false`) forces the guarded binding on a host
-    whose atomics are native. It is a test knob: the core test build uses it to run the guarded
-    path, and a shipped node leaves it off.
-- **The host guard is sized by the target: `tr::basic_mutex_guard_t<LineBytes, Stripes>`
-  ([#1716](https://github.com/avatarsd-llc/libtracer/issues/1716)).** The address-striped host
-  guard hard-coded 64-byte alignment and 64 stripes, a 4 KB `.bss` table on every build. It is
-  now a template, and `tr::mutex_guard_t` names its default sizing,
-  `basic_mutex_guard_t<64, 64>`. A build that keeps the default `guard_t` gets the guard sized
-  from its own `kCacheLineBytes` and the new `default_config_t::kGuardStripes` (default 64, a
-  power of two). For example, `kCacheLineBytes = 0` with `kGuardStripes = 16` costs 16 bytes,
-  not 4 KB. A fragment that names its guard itself gets exactly that guard. The default host
-  build is unchanged: same type, same 4 KB table, same code. New: `tr::is_mutex_guard_v<G>`,
-  the derived `tr::graph::kGuardStripes`. **Migration:** `tr::mutex_guard_t` is now an alias, so
-  a forward declaration `struct tr::mutex_guard_t;` no longer compiles; include
-  `libtracer/guard_mutex.hpp` instead.
-
-- **The write sequence is 32-bit on every target: `vertex_t::current_seq()` returns
-  `tr::graph::write_seq_t` and `wait_for_change` takes one
-  ([#1621](https://github.com/avatarsd-llc/libtracer/issues/1621), RFC-0028 D6).**
-  `write_seq_t` is `std::uint32_t` (was `std::uint64_t`); there is no configuration trait. The
-  sequence wraps, and `await` compares it for equality only (`current != seq0`), so a wrap is
-  still a change; the one alias is exactly 2^32 publishes to one vertex inside one await window,
-  which the await's timeout bounds. The bump keeps its `seq_cst` ordering. On a core with
-  atomic RMW (rv32imac such as the ESP32-C6, Cortex-M3/M4/M7, Xtensa, every host) a publish
-  now bumps the sequence with one hardware add (`amoadd.w` on rv32) instead of calling
-  `__atomic_fetch_add_8`, which masks interrupts on ESP-IDF; on a core without one (rv32imc
-  such as the ESP32-C3, Cortex-M0/M0+) it is a load and a store inside one section of
-  `config_t::guard_t`, the build's critical-section guard, with no call.
-  `tr::rmw_counter_t<T, G>` (in `libtracer/guard.hpp`, see the guard move below) is that choice, made at
-  compile time from `std::atomic<T>::is_always_lock_free`. `sizeof(vertex_t)` drops 72 → **64 B**
-  (`config_t::kMaxVertexBytes32` lowered to match). On 64-bit hosts it stays 88 B: the tail
-  padding absorbs the 4 bytes. **Migration:** spell a sequence snapshot `write_seq_t` (or
-  `auto`) instead of `std::uint64_t`, and compare two snapshots with `==` / `!=` only, never
-  `<` / `>`.
-
-- **A warm COMPACT delivery stores its payload in ONE block, drawn from the graph's source
-  ([#1714](https://github.com/avatarsd-llc/libtracer/issues/1714)).** The memoized terminus
-  arm of `fwd_router_t` used to copy the payload into a segment from the router's `flat`
-  backend and then publish a second `value_t` block linking to it; it now copies into one
-  inline value from `graph_t::control_source()` that the store adopts, exactly as the
-  full-route terminus's copy arm does. No signature changes. **Migration:** a deployer who
-  sized `router_planes_t::flat` for warm COMPACT payloads can shrink it; that traffic is now
-  charged to the graph's injected source (which already held the value block). The cold arm
-  (first frame on a label) still draws its copy from `flat`. Exhaustion is still one counted
-  `delivery_drops().out_of_memory` drop.
-- **The per-link departure index moves out of `graph_t` into its own header,
-  `libtracer/link_index.hpp` ([#1710](https://github.com/avatarsd-llc/libtracer/issues/1710)).**
-  `tr::graph::link_index_t` is an implementation type that `graph.hpp` includes because
-  `graph_t` holds it by value; applications keep using `graph_t`'s link doors
-  (`intern_link`, `intern_link_hinted`, `release_link`, `link_edge_candidates`,
-  `link_index_name_lookups`), whose signatures and answers are unchanged. No behaviour change:
-  the slots, the token carry, the name scan and the lock are the same code, now compiled in
-  `link_index.cpp`. `sizeof(graph_t)` grows by one pointer (8 B on a 64-bit host), the index's
-  own record of the resource its per-link lists draw from.
-
-### Added
-
-- **`default_config_t::kRxDrainFrames` and `default_config_t::kRxDrainBytes` (with the derived
-  `tr::net::kRxDrainFrames` / `tr::net::kRxDrainBytes`), the ingress drain budget
-  ([ADR-0085](../docs/adr/0085-ingress-drain-budget-waits-for-the-idle-task-not-a-clock.md)).**
-  Defaults 32 frames and 32,768 bytes; `0` removes that budget. They bound how much a link's
-  receive context reads back to back before it waits for its core to go idle. The one reader is
-  the ESP-IDF `httpd_ws_link_t`; no core link reads them, so nothing changes on a host.
-- **`default_config_t::kHeapSmallBlockBytes` (and its derived `tr::graph::kHeapSmallBlockBytes`),
-  the largest block the process-default heap backend draws for one segment
-  ([#1768](https://github.com/avatarsd-llc/libtracer/issues/1768)).** Default 1,032 B, glibc's
-  64-bit tcache ceiling. `heap_backend_t` also publishes `kHeaderBytes`, `kSmallBlockBytes` and
-  `is_one_block(size)`. See **Fixed** below for why it exists.
-
-### Fixed
-
-- **A heap value of about 1 KiB is back on the host allocator's fast path
-  ([#1768](https://github.com/avatarsd-llc/libtracer/issues/1768)).** v0.17.0 regressed it.
-  RFC-0028 slice 10 made `heap_backend_t` draw the segment header and the payload as one block,
-  so a 1024 B value asked `malloc` for 1072 B, past glibc tcache's 1032 B ceiling:
-  `lkv-store-heap 1024B` went from 27 to 54 ns, `lkv-alloc-heap 1024B` from 17.6 to 47 ns, and
-  the 1 KiB / 8 KiB `inproc` rows were 16–20% slower. A segment whose padded header plus payload
-  exceeds `kHeapSmallBlockBytes` is now drawn as two blocks: the payload, then the bare
-  `segment_t`. A smaller one stays one block, so the 64 B gain is kept. `destroy` takes the
-  layout from the payload size and returns each block sized as drawn. Only `heap_backend_t`
-  changes; `source_backend_t`, the pools and the borrowed backends keep their one-block layout.
-  No signature changes. The perf gate now also gates `lkv-store-heap` and `lkv-alloc-heap` at
-  1024 B, and `mem_heap_request_size_test` pins the bytes requested on either side of the
-  boundary. **Migration:** none; to keep one block always (an allocator with no small-block
-  cliff), bind `kHeapSmallBlockBytes = SIZE_MAX` in your fragment, as the ESP-IDF component
-  does.
 
 ## [0.17.0] — 2026-10-01
 
