@@ -176,9 +176,59 @@ void more_drops_than_deliveries_saturates() {
           "a drop tally past the ceiling reports zero, never a wrapped count");
 }
 
+/** @brief A ring source that funds nothing: every STREAM admission against it sheds. */
+class refusing_source_t final : public tr::mem::block_source_t {
+   public:
+    refusing_source_t() : tr::mem::block_source_t("refusing") {}
+
+    /** @brief Refuse, and count the refusal. */
+    [[nodiscard]] void* try_alloc(std::size_t /*bytes*/, std::size_t /*align*/) noexcept override {
+        ++refusals;
+        return nullptr;
+    }
+
+    /** @brief Nothing was ever served, so nothing comes back. */
+    void release(void* /*p*/, std::size_t /*bytes*/, std::size_t /*align*/) noexcept override {}
+
+    std::uint64_t refusals = 0; /**< @brief try_alloc calls refused. */
+};
+
+/** @brief @p msgs writes to the `eptype-stream` fixture; returns what its subscriber counted. */
+[[nodiscard]] std::uint64_t stream_writes(bench::stream_fixture_t& fx, std::size_t msgs) {
+    const std::vector<std::byte> tlv = value_tlv(64);
+    fx.recv.store(0);
+    for (std::size_t i = 0; i < msgs; ++i) (void)fx.g.write(fx.v, owned_view(tlv));
+    return fx.recv.load();
+}
+
+/**
+ * @brief A forced STREAM shed moves the `eptype-stream` delivery rate (#1805).
+ *
+ * The row used to publish `pub_s` as its delivery rate. Here the same fixture runs over a
+ * best-effort ring whose source refuses every entry: each write still returns, and each entry
+ * is shed. The counted rate must fall below the publish rate; the healthy twin must match it.
+ */
+void a_shed_stream_moves_the_eptype_stream_rate() {
+    constexpr std::size_t kMsgs = 1000;
+    bench::stream_fixture_t healthy;
+    const std::uint64_t ok = stream_writes(healthy, kMsgs);
+    check(ok == kMsgs, "a healthy STREAM ring delivers every write");
+    check(bench::delivered_rate("eptype-stream", 64, 1, 1, kMsgs, ok, 1.0) == kMsgs,
+          "...so the counted rate equals the publish rate");
+
+    refusing_source_t refusing;
+    bench::stream_fixture_t shed(&refusing);
+    const std::uint64_t got = stream_writes(shed, kMsgs);
+    check(refusing.refusals > 0, "the ring source was asked and refused");
+    check(got < kMsgs, "a shedding STREAM ring delivers fewer than it was written");
+    check(bench::delivered_rate("eptype-stream", 64, 1, 1, kMsgs, got, 1.0) < kMsgs,
+          "...and the counted rate falls below the publish rate");
+}
+
 }  // namespace
 
 int main() {
+    a_shed_stream_moves_the_eptype_stream_rate();
     a_shed_delivery_counts_below_the_arithmetic();
     a_healthy_fan_out_counts_the_arithmetic();
     the_published_rate_is_the_counted_one();

@@ -118,18 +118,23 @@ def _zenoh_ratio(shape, pv, px: dict) -> dict:
 FAMILIES: list[dict] = [
     # -- latency suite ------------------------------------------------------
     dict(id="fan", section="dispatch", title="In-process write — by fan-out",
-         cond="inproc · 64 B payload · 1 topic — one line per fan-out",
+         cond="inproc · 64 B payload · 1 topic — one line per fan-out; each op includes the "
+              "producer's own allocation and copy of the value",
          pat=r"^inproc 64B/fan(\d+)/1ep",
          label=lambda m: f"fan {m.group(1)}", key=_num, log=True,
          px=dict(label="fan-out (subscribers)", log=True, fmt="count")),
     dict(id="payload", section="dispatch", title="In-process write — by payload size",
-         cond="inproc · fan-out 1 · 1 topic — one line per payload",
+         cond="inproc · fan-out 1 · 1 topic — one line per payload; each op includes the "
+              "producer's own allocation and S-byte copy of the value, so the size slope is "
+              "partly the producer's",
          pat=r"^inproc (\d+)B/fan1/1ep",
          label=lambda m: f"{m.group(1)} B", key=_num, log=False,
          px=dict(label="payload size", log=True, fmt="bytes")),
     dict(id="borrow-payload", section="dispatch",
          title="Loaned (zero-copy) write — by payload size",
-         cond="inproc-borrow · fan-out 1 · 1 topic — one line per payload",
+         cond="inproc-borrow · fan-out 1 · 1 topic — one line per payload; no payload copy, "
+              "but not allocation-free: a borrowed-segment header and the stored-value block "
+              "per write",
          pat=r"^inproc-borrow (\d+)B/fan1/1ep",
          label=lambda m: f"borrow {m.group(1)} B", key=_num, log=False,
          px=dict(label="payload size", log=True, fmt="bytes")),
@@ -568,7 +573,8 @@ INSTRUMENT_SOURCES: list[tuple[str, list[str]]] = [
      r"|inproc-target-\w+"
      r"|inproc-mt\d+|eptype-[\w-]+|fold-b\d+|acl-\S+|mixed|path-parse|lkv-\S+"
      r"|poolalloc-mt\d+|heapalloc-mt\d+|cliff-alloc-\w+|inproc-pool-batch|stream-\w+"
-     r"|route-handle-\S+|seam-\S+)\b", ["bench/bench_libtracer.cpp"]),
+     r"|route-handle-\S+|seam-\S+|dce-canary)\b",
+     ["bench/bench_libtracer.cpp", "bench/delivery_count.hpp"]),
     (r"^zenoh ", ["bench/bench_zenoh.cpp"]),
     (r"^fwd-demux-", ["bench/bench_forward_demux.cpp"]),
     (r"^compact-", ["bench/bench_compact_delivery.cpp"]),
