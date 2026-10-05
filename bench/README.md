@@ -625,7 +625,7 @@ now banks its **deterministic half**, and only that half.
 | --- | --- | --- |
 | store `used()` per (arm, T) | `RESULT_STORE_HWM` | **banked** as a series **and** pinned — warn-first ratchet, `bench/store_sweep_pins.json` |
 | store COUNT per (arm, T) | `RESULT_STORE_HWM` | **pinned exactly**, not trended (a constant series can never alert) |
-| T=1 latency per (arm, leg) | `RESULT_STORE_LAT` | **banked** as a series; watched by `store_guard.py drift`, never pinned |
+| T=1 latency per (arm, leg) | `RESULT_STORE_LAT` | **banked** as a series; watched by `store_guard.py drift`, never pinned. **Gated per PR** on the NARROW and WIDE arms, p50 of each leg, as `store-lat-<arm>-<leg>/32/1/1` POINTS in `perf_gate.py` ([#1869](https://github.com/avatarsd-llc/libtracer/issues/1869)) |
 | fan-out throughput, T ≥ 2 | `RESULT_STORE_TPUT` | **never gated** |
 | process-heap escape | `RESULT_STORE_ESCAPE` | **never gated** |
 
