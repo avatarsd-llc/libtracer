@@ -2100,33 +2100,14 @@ add_executable(ws_fuzz_harness ws_fuzz_harness.cpp)
 target_link_libraries(ws_fuzz_harness PRIVATE libtracer)
 libtracer_test_warnings(ws_fuzz_harness)
 
-# M2 — substrate harness in single-threaded mode. LIBTRACER_NO_ATOMIC changes the
-# Segment refcount layout, so this variant compiles the library sources directly
-# (rather than linking the atomic-built libtracer.a) to keep one consistent ABI.
-add_executable(substrate_test_no_atomic
-    substrate_test.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/../src/frame.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/../src/backend_set.cpp
-    # backend_set.cpp's multi-member `transfer` dispatches its DEVICE arm here (#1381).
-    ${CMAKE_CURRENT_SOURCE_DIR}/../src/device_backend.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/../src/mem_heap.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/../src/mem_pool.cpp
-    # frame.cpp's decode spills its walk stack to mem::heap_source() (#588).
-    ${CMAKE_CURRENT_SOURCE_DIR}/../src/mem_source.cpp
-    ${CMAKE_CURRENT_SOURCE_DIR}/../src/rope.cpp
-)
-target_include_directories(substrate_test_no_atomic PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
-target_compile_features(substrate_test_no_atomic PRIVATE cxx_std_23)
-libtracer_test_warnings(substrate_test_no_atomic)
-target_compile_definitions(substrate_test_no_atomic PRIVATE
-    LIBTRACER_NO_ATOMIC
-    LIBTRACER_VECTORS_DIR="${LIBTRACER_VECTORS_DIR}")
-add_test(NAME substrate_no_atomic COMMAND substrate_test_no_atomic)
+# M2 — the substrate harness's second build (`substrate_no_atomic`) is gone with the
+# LIBTRACER_NO_ATOMIC macro (#1722): the refcount's guarded binding is a template parameter
+# substrate_test names directly, so one build covers both bindings.
 
 # #922 — the SINGLE-MEMBER module-set dispatch (LIBTRACER_BACKEND_SET_POOL_ONLY, the MCU
 # profile). Nothing else in the suite compiles that fold, which is how its destroy leg
 # shipped with an unconditional static_cast<pool_t*> while the `transfer` two lines below
-# it checked the tag. Like substrate_test_no_atomic this compiles the (few) library
+# it checked the tag. Like the old substrate_no_atomic build this compiles the (few) library
 # sources it needs directly rather than linking libtracer.a — the library's own
 # backend_set.o carries the MULTI-member dispatch, so linking both would be a duplicate
 # definition of destroy_dispatch/transfer.
@@ -2613,15 +2594,48 @@ add_test(NAME spin_slot_guard COMMAND ${CMAKE_COMMAND}
          -DLT_PROBE=${CMAKE_CURRENT_SOURCE_DIR}/spin_slot_guard_probe.cpp
          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/spin_slot_guard.cmake)
 
-# #1703 — the guard_t rename tripwire. A fragment that still binds the pre-rename member
-# `reader_guard_t` must fail to compile, by the tripwire's own message, instead of silently
-# keeping the host mutex guard. Same harness shape as spin_slot_guard (one fixture dir per arm).
-add_test(NAME guard_rename COMMAND ${CMAKE_COMMAND}
-         -DLT_CXX=${CMAKE_CXX_COMPILER}
-         -DLT_CORE_INCLUDE=${CMAKE_CURRENT_SOURCE_DIR}/../include
-         -DLT_FIXTURES=${CMAKE_CURRENT_SOURCE_DIR}/guard_rename
-         -DLT_PROBE=${CMAKE_CURRENT_SOURCE_DIR}/spin_slot_guard_probe.cpp
-         -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/guard_rename.cmake)
+# Removed-spelling tripwires, all on one harness (cmake/expect_rejected.cmake): a build that
+# still uses a spelling libtracer no longer reads must FAIL, by the tripwire's own message,
+# instead of building on as if it had been honoured.
+#
+# libtracer_compile_tripwire(<name> <regex> <flag>...): the spin_slot_guard probe compiles as
+# shipped, and fails with <regex> when <flag>... come first on its command line.
+function(libtracer_compile_tripwire name want)
+    set(_cc "${CMAKE_CXX_COMPILER}|-std=c++23|-fsyntax-only")
+    set(_probe "-I${CMAKE_CURRENT_SOURCE_DIR}/../include|${CMAKE_CURRENT_SOURCE_DIR}/spin_slot_guard_probe.cpp")
+    list(JOIN ARGN "|" _flags)
+    add_test(NAME ${name} COMMAND ${CMAKE_COMMAND} -DLT_NAME=${name} "-DLT_WANT=${want}"
+             "-DLT_ACCEPT_CMD=${_cc}|${_probe}" "-DLT_REJECT_CMD=${_cc}|${_flags}|${_probe}"
+             -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/expect_rejected.cmake)
+endfunction()
+# libtracer_configure_tripwire(<name> <regex> <arg>...): configuring core with <arg>... fails
+# with <regex>. The check sits before project(), so the arm costs no compiler detection; the
+# accept arm is this very build, which configured without the argument.
+function(libtracer_configure_tripwire name want)
+    list(JOIN ARGN "|" _args)
+    add_test(NAME ${name} COMMAND ${CMAKE_COMMAND} -DLT_NAME=${name} "-DLT_WANT=${want}"
+             "-DLT_REJECT_CMD=${CMAKE_COMMAND}|-S|${CMAKE_CURRENT_SOURCE_DIR}/..|-B|${CMAKE_CURRENT_BINARY_DIR}/${name}|${_args}"
+             -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/expect_rejected.cmake)
+endfunction()
+
+# #1703 — a fragment that still binds the pre-rename member `reader_guard_t` would silently
+# keep the host mutex guard.
+libtracer_compile_tripwire(guard_rename "renamed to guard_t"
+                           -I${CMAKE_CURRENT_SOURCE_DIR}/guard_rename/stale)
+# #1722 — the four build switches that duplicated a config_t trait. Each message names the
+# trait to set instead.
+libtracer_compile_tripwire(no_atomic_removed
+                           "LIBTRACER_NO_ATOMIC was removed.*config_t::guard_t"
+                           -DLIBTRACER_NO_ATOMIC)
+libtracer_compile_tripwire(pin_instrument_removed
+                           "LIBTRACER_PIN_INSTRUMENT was removed.*kInstrumentCounters"
+                           -DLIBTRACER_PIN_INSTRUMENT)
+libtracer_configure_tripwire(acl_full_removed
+                             "LIBTRACER_ACL_FULL[ \n]+was[ \n]+removed.*acl_policy_t"
+                             -DLIBTRACER_ACL_FULL=ON)
+libtracer_configure_tripwire(lkv_slot_removed
+                             "LIBTRACER_LKV_SLOT[ \n]+was[ \n]+removed.*lkv_slot_t"
+                             -DLIBTRACER_LKV_SLOT=hazard_slot_t)
 
 # #1717 — kWeaklyOrdered was removed. A fragment that still sets it must fail to compile, by
 # the tripwire's own message, instead of compiling on as if it still waived the delivery-skip

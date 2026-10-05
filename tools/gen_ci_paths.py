@@ -111,9 +111,8 @@ WORKFLOWS_REL = ".github/workflows"
 
 # The core project is the one whose test targets reach outside their own root, so it
 # is the one that gets configured. `-DBUILD_TESTING=ON` is what registers the tests;
-# core-ci's other configure options (LIBTRACER_ACL_FULL, LIBTRACER_LKV_SLOT) only set
-# compile definitions inside core/CMakeLists.txt and add no sources, so they cannot
-# change the derived set.
+# core-ci's legs otherwise differ only by a config_override.hpp preset on the include path
+# (core/tests/presets/, #1722), which adds no sources, so they cannot change the derived set.
 CORE_PROJECT = "core"
 CONFIGURE_ARGS = ["-DBUILD_TESTING=ON"]
 

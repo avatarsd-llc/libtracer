@@ -769,8 +769,9 @@ that sets a non-sentinel `K` on a retain-heavy NARROW node is buying.
 
 **Reachability is measured as an OUTCOME.** The `pins`/`copies` columns come from segment-pointer
 identity between the stored value and the segments `recording_pool_t` handed out — available with
-or without `LIBTRACER_PIN_INSTRUMENT` (which is `ON` by default here and arms the decision-site
-counters separately). An arm that intends to pin and reports zero pins **invalidates its own row**;
+or without the decision-site counters (armed by `kInstrumentCounters`, the
+`-DLIBTRACER_INSTRUMENT_COUNTERS=ON` preset; the old `LIBTRACER_PIN_INSTRUMENT` switch was folded
+into it in #1722). An arm that intends to pin and reports zero pins **invalidates its own row**;
 that check is not optional, and a Leg-1 pass proves nothing without it.
 
 **Bind failures are retried, not fatal.** A full sweep burns two UDP ports per pair and wraps the

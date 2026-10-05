@@ -61,6 +61,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `guard_t = tr::esp::critical_guard_t` and `lkv_slot_t = single_writer_slot_t`, so nothing
   changes at run time. **Migration:** an application that replaces the fragment with its own
   deletes its `kSingleWriter` line.
+- **Chips without atomic read-modify-write count segment references under the component's
+  critical section (inherited from core,
+  [#1722](https://github.com/avatarsd-llc/libtracer/issues/1722)).** Core's segment refcount
+  now follows the target. Where the 32-bit atomic is not always lock-free (the ESP32-C3's
+  rv32imc core, for one), a clone or drop is a load and a store inside one
+  `tr::esp::critical_guard_t` section instead of a libatomic call. That is the same treatment
+  #1715 gave the write sequence. Chips whose atomic is lock-free (the C6, for one) are
+  unchanged. Nothing to migrate for an application that
+  uses the generated fragment; core now refuses the `LIBTRACER_NO_ATOMIC` macro.
 - **The generated config fragment binds `guard_t`, not `reader_guard_t`
   ([#1703](https://github.com/avatarsd-llc/libtracer/issues/1703)).** Core renamed the config
   member and now refuses a fragment that still defines the old name. On every chip target the

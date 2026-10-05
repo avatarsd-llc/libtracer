@@ -252,8 +252,10 @@ jobs:
     timeout-minutes: 20
     # Build + ctest under BOTH ACL policy configs: the default ALLOW-only MCU
     # subset (acl_full=OFF) and the full security_acl host policy with DENY
-    # (acl_full=ON). LIBTRACER_ACL_FULL swaps acl_policy_t at compile time, so
-    # the full config is a distinct compilation the default job never covers (#345).
+    # (acl_full=ON). The checked-in preset core/tests/presets/acl-full binds
+    # acl_policy_t at compile time, so the full config is a distinct compilation the
+    # default job never covers (#345). Presets, not -D options: the old
+    # -DLIBTRACER_ACL_FULL / -DLIBTRACER_LKV_SLOT were removed (#1722).
     #
     # The first two legs keep the default single-writer slot (the binding an RTOS target
     # uses, RFC 0028 §5.5, here over the striped host mutex guard); the third rebinds
@@ -307,7 +309,10 @@ jobs:
           persist-credentials: false
       - name: Configure + build (C++23) + ctest
         run: |
-          cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo -DLIBTRACER_ACL_FULL=${{ matrix.acl_full }} -DLIBTRACER_LKV_SLOT=${{ matrix.lkv_slot }}
+          preset=""
+          if [ "${{ matrix.acl_full }}" = "ON" ]; then preset="-I$PWD/core/tests/presets/acl-full"; fi
+          if [ "${{ matrix.lkv_slot }}" = "hazard_slot_t" ]; then preset="-I$PWD/core/tests/presets/hazard-slot"; fi
+          cmake -S core -B core/build -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS="$preset"
           cmake --build core/build --parallel "$BUILD_JOBS"
           ctest --test-dir core/build --output-on-failure
       - name: Compiler cache statistics (this job)
@@ -1005,9 +1010,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: ASan + UBSan build + ctest
         run: |
+          preset=""
+          if [ "${{ matrix.lkv_slot }}" = "hazard_slot_t" ]; then preset="-I$PWD/core/tests/presets/hazard-slot"; fi
           cmake -S core -B core/build-asan -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Debug \
-            -DLIBTRACER_LKV_SLOT=${{ matrix.lkv_slot }} \
-            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -g"
+            -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-sanitize-recover=all -g $preset"
           cmake --build core/build-asan --parallel "$BUILD_JOBS"
           # ASLR can make ASan/TSan abort in this runner; pin it off.
           setarch "$(uname -m)" -R ctest --test-dir core/build-asan --output-on-failure
@@ -1052,9 +1058,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: ThreadSanitizer build + ctest (graph concurrency)
         run: |
+          preset=""
+          if [ "${{ matrix.lkv_slot }}" = "hazard_slot_t" ]; then preset="-I$PWD/core/tests/presets/hazard-slot"; fi
           cmake -S core -B core/build-tsan -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Debug \
-            -DLIBTRACER_LKV_SLOT=${{ matrix.lkv_slot }} \
-            -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1"
+            -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1 $preset"
           cmake --build core/build-tsan --parallel "$BUILD_JOBS"
           setarch "$(uname -m)" -R ctest --test-dir core/build-tsan --output-on-failure
 
@@ -1110,6 +1117,9 @@ jobs:
           /** @brief The defaults, with a grace point spanning every thread (a many-core host). */
           struct reclaim_qsbr_config_t : default_config_t {
               using reclaim_policy_t = reclaim_qsbr_t;
+              // The matrix slot, bound here rather than by a second fragment: one build has
+              // one config_t, so two fragments would shadow one another (#1722).
+              using lkv_slot_t = ${{ matrix.lkv_slot }};
               // The two link modules are opt-in since v0.17.0 (#1670); this leg's subject is
               // elsewhere, so it keeps the full test build's modules on.
               static constexpr bool kBusLinks = true;
@@ -1123,7 +1133,6 @@ jobs:
           }  // namespace tr::graph
           FRAGMENT
           cmake -S core -B core/build-tsan-qsbr -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Debug \
-            -DLIBTRACER_LKV_SLOT=${{ matrix.lkv_slot }} \
             -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1 -I$PWD/reclaim-qsbr-tsan"
           cmake --build core/build-tsan-qsbr --parallel "$BUILD_JOBS"
           setarch "$(uname -m)" -R ctest --test-dir core/build-tsan-qsbr --output-on-failure

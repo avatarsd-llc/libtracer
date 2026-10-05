@@ -13,7 +13,7 @@
  *   - allow_only_policy_t — the required-modules MCU profile (ALLOW-only,
  *     single INHERIT flag); the default.
  *   - full_acl_policy_t   — the security_acl host module (ordered
- *     first-match-per-bit with DENY), selected by LIBTRACER_ACL_FULL.
+ *     first-match-per-bit with DENY), bound by an override fragment.
  *
  * The typed ACE parse/build (`ace_t` ↔ wire ACL TLV, docs/reference/05 §0x0A) lives
  * here too, so ACE edge cases (expiry, INHERIT, ordering) are unit-testable without a
@@ -241,8 +241,8 @@ struct full_acl_policy_t {
     }
 };
 
-// The `acl_policy_t` binding lives in libtracer/config.hpp (ADR-0068): the CMake option
-// LIBTRACER_ACL_FULL rebinds the alias there as plain C++ — no `#if` in this header. Both
+// The `acl_policy_t` binding lives in libtracer/config.hpp (ADR-0068): an override fragment
+// rebinds the alias there as plain C++ — no `#if` in this header. Both
 // policy structs above are always compiled and unit-tested regardless of the binding.
 
 /**

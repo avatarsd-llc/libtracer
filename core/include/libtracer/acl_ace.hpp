@@ -66,7 +66,7 @@ enum class ace_type_t : std::uint8_t {
  * default ALLOW-only MCU profile rejects a DENY ACE (or any flag bit beyond
  * `kAceInherit`) at write time with TYPE_MISMATCH, so stored ACEs never carry
  * semantics the selected evaluator would silently weaken; the full `security_acl`
- * host policy (LIBTRACER_ACL_FULL) stores DENY and evaluates ordered
+ * host policy (`acl_policy_t = full_acl_policy_t`) stores DENY and evaluates ordered
  * first-match-per-bit.
  */
 struct ace_t {

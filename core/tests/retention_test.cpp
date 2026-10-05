@@ -372,6 +372,15 @@ void test_ring_rides_the_source() {
               "a ring 64 deep over its own source");
         // `assign` stores without delivering, so the only difference between the two arms is
         // the ring admission itself. The retired deque allocated a chunk every 16 appends.
+        // Both arms are WARMED first, uncounted: under `hazard_slot_t` each LKV publish
+        // displaces a reclamation node, and until this thread's scans stock its free list a
+        // publish draws that node from the global heap ON PURPOSE (the #873 carve-out in
+        // `lkv_slot.hpp`). Whichever arm ran first paid that one-time priming — measured under
+        // the qsbr TSan leg as STREAM 249 against STORED_VALUE 201 — which is not the ring.
+        for (std::size_t i = 0; i < kWrites; ++i) {
+            (void)g.assign(st, rope_t{seg});
+            (void)g.assign(sv, rope_t{seg});
+        }
         const std::size_t stream_allocs = count_allocs([&] { (void)g.assign(st, rope_t{seg}); });
         const std::size_t stored_allocs = count_allocs([&] { (void)g.assign(sv, rope_t{seg}); });
         std::printf("   allocations over %zu appends: STREAM %zu, STORED_VALUE %zu\n", kWrites,

@@ -43,7 +43,6 @@ SUITES = {
     "can_frames":           ("Codec (L2/L3)", "CAN 29-bit ID + can_framing split/reassemble"),
     "path":                 ("Substrate (L0/L1)", "path parse/canonicalize, PathKey, field-path"),
     "substrate":            ("Substrate (L0/L1)", "segment/view/rope, refcount, backends"),
-    "substrate_no_atomic":  ("Substrate (L0/L1)", "the NO_ATOMIC single-core refcount build"),
     "cuda":                 ("Substrate (L0/L1)", "device-memory views + heterogeneous rope (opt-in)"),
     "graph":                ("Graph (L4)", "roles, lock-free LKV, read/write/await, fan-out, field-write"),
     "children":             ("Graph (L4)", ":children[] SPEC vertex creation (ADR-0017/#82)"),
@@ -103,8 +102,8 @@ def _test_sources() -> dict[str, pathlib.Path]:
     """@brief ctest suite name -> its defining source file, read off the build graph.
 
     Resolves `add_test(NAME x COMMAND tgt)` through `add_executable(tgt src...)`, so
-    the four naming exceptions need no special case: the conformance runner, the
-    NO_ATOMIC rebuild of an existing source, a suite whose target is spelled
+    the naming exceptions need no special case: the conformance runner, a rebuild of
+    an existing source under another name, a suite whose target is spelled
     differently from its test name, and every `core/examples/` binary all fall out of
     the same two rules.
     """

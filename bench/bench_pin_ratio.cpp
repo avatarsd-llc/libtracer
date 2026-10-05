@@ -37,7 +37,8 @@
  * satisfies neither reports a clean "no regression" on nothing (the `fold-b4` lesson). Each
  * cell therefore reports `pins`/`copies` counted TWO independent ways: segment-pointer
  * identity between the stored value and the frame — an OUTCOME, independent of any
- * compile-time switch — and, when built with `LIBTRACER_PIN_INSTRUMENT`, the decision site's
+ * compile-time switch — and, when built with `kInstrumentCounters` (the bench's
+ * `LIBTRACER_INSTRUMENT_COUNTERS=ON` preset), the decision site's
  * own counters. `--calibrate` breaks the line on purpose: it drives a CRC-trailered payload
  * and a borrowed (span-delivered) frame through the share-always arm and requires zero shares
  * from both instruments, so an inert instrument fails loudly before any cell is believed.
@@ -167,13 +168,11 @@ struct arm_t {
 /** @brief One grid cell's outcome for one arm in one round. */
 struct cell_result_t {
     bench::Latency::Summary lat{};
-    std::uint64_t pins = 0;   /**< stores whose segment IS the frame's (outcome instrument) */
-    std::uint64_t copies = 0; /**< stores whose segment is a fresh one */
-#ifdef LIBTRACER_PIN_INSTRUMENT
+    std::uint64_t pins = 0;         /**< stores whose segment IS the frame's (outcome instrument) */
+    std::uint64_t copies = 0;       /**< stores whose segment is a fresh one */
     std::uint64_t site_pins = 0;    /**< the decision site's own pin counter */
     std::uint64_t site_copies = 0;  /**< ... and its copy counter */
     std::uint64_t site_refused = 0; /**< predicate said share, reader could not */
-#endif
 };
 
 /** @brief Iterations per cell — enough that the p50 is a distribution, cheap enough for 10+ rounds.
@@ -199,9 +198,7 @@ cell_result_t run_cell(std::size_t payload_bytes, std::size_t segment_bytes, std
     const std::vector<std::byte> frame = b_fwd_write(b_value(payload_bytes, crc));
     const std::size_t seg_bytes = std::max(segment_bytes, frame.size());
 
-#ifdef LIBTRACER_PIN_INSTRUMENT
     tr::graph::instrument::reset();
-#endif
     cell_result_t out;
     out.lat.n = 0;
     bench::Latency lat;
@@ -227,11 +224,9 @@ cell_result_t run_cell(std::size_t payload_bytes, std::size_t segment_bytes, std
             ++out.copies;
     }
     out.lat = lat.summarize();
-#ifdef LIBTRACER_PIN_INSTRUMENT
     out.site_pins = tr::graph::instrument::g_pin_hits;
     out.site_copies = tr::graph::instrument::g_copy_hits;
     out.site_refused = tr::graph::instrument::g_pin_refused;
-#endif
     return out;
 }
 
@@ -256,13 +251,13 @@ void emit_pin(int round, const char* arm, std::size_t threshold, std::size_t pay
                 static_cast<unsigned long long>(r.lat.mean),
                 static_cast<unsigned long long>(r.pins), static_cast<unsigned long long>(r.copies),
                 r.lat.n);
-#ifdef LIBTRACER_PIN_INSTRUMENT
-    std::printf("\t%llu\t%llu\t%llu", static_cast<unsigned long long>(r.site_pins),
-                static_cast<unsigned long long>(r.site_copies),
-                static_cast<unsigned long long>(r.site_refused));
-#else
-    std::printf("\t-\t-\t-");
-#endif
+    if constexpr (tr::graph::kInstrumentCounters) {
+        std::printf("\t%llu\t%llu\t%llu", static_cast<unsigned long long>(r.site_pins),
+                    static_cast<unsigned long long>(r.site_copies),
+                    static_cast<unsigned long long>(r.site_refused));
+    } else {
+        std::printf("\t-\t-\t-");
+    }
     std::printf("\n");
     std::fflush(stdout);
 }
@@ -319,16 +314,16 @@ int calibrate() {
     // Threshold: a 64 B payload (68 B TLV) is below a 4,096 B threshold.
     expect("threshold 4096 never shares a 64 B payload", run_cell(64, 65536, 4096).pins, 0);
 
-#ifdef LIBTRACER_PIN_INSTRUMENT
-    expect("decision-site counter agrees with the outcome (positive)", pos.site_pins, pos.pins);
-    expect("decision-site counter agrees with the outcome (CRC)", crc.site_pins, 0);
-    // A borrowed frame clears the threshold, so the predicate asks `pin_wire` — which has no
-    // owning segment to share and refuses. Every store is therefore a REFUSAL that falls
-    // through to a copy; the two counters must agree on that, sample for sample.
-    expect("borrowed frame is REFUSED by pin_wire at share-always", borrowed.site_refused,
-           borrowed.lat.n);
-    expect("borrowed frame is counted as a copy", borrowed.site_copies, borrowed.lat.n);
-#endif
+    if constexpr (tr::graph::kInstrumentCounters) {
+        expect("decision-site counter agrees with the outcome (positive)", pos.site_pins, pos.pins);
+        expect("decision-site counter agrees with the outcome (CRC)", crc.site_pins, 0);
+        // A borrowed frame clears the threshold, so the predicate asks `pin_wire` — which has no
+        // owning segment to share and refuses. Every store is therefore a REFUSAL that falls
+        // through to a copy; the two counters must agree on that, sample for sample.
+        expect("borrowed frame is REFUSED by pin_wire at share-always", borrowed.site_refused,
+               borrowed.lat.n);
+        expect("borrowed frame is counted as a copy", borrowed.site_copies, borrowed.lat.n);
+    }
     return bad;
 }
 

@@ -3,6 +3,34 @@
 
 cmake_minimum_required(VERSION 3.16)
 
+# Removed configure options (#1722, ADR-0068 §Erratum 1). Each duplicated a trait of the one
+# configuration type, which is set in a libtracer/config_override.hpp fragment as plain C++.
+# A value that would have changed the build is refused, naming the trait; a value equal to the
+# old default changed nothing, so a build directory that merely cached it is told once and the
+# entry is dropped. Checked before project(), so a refused configure costs no compiler probe.
+if(DEFINED LIBTRACER_ACL_FULL)
+    if(LIBTRACER_ACL_FULL)
+        message(FATAL_ERROR "LIBTRACER_ACL_FULL was removed (#1722). Bind the ACL policy in "
+                            "your libtracer/config_override.hpp instead: "
+                            "`using acl_policy_t = full_acl_policy_t;` in a struct that "
+                            "inherits tr::graph::default_config_t (docs/modules/config.md).")
+    endif()
+    message(WARNING "LIBTRACER_ACL_FULL was removed (#1722) and its default value did nothing; "
+                    "dropping it from the cache. The ACL policy is config_t::acl_policy_t.")
+    unset(LIBTRACER_ACL_FULL CACHE)
+endif()
+if(DEFINED LIBTRACER_LKV_SLOT)
+    if(NOT LIBTRACER_LKV_SLOT STREQUAL "single_writer_slot_t")
+        message(FATAL_ERROR "LIBTRACER_LKV_SLOT was removed (#1722). Bind the LKV slot in your "
+                            "libtracer/config_override.hpp instead: "
+                            "`using lkv_slot_t = ${LIBTRACER_LKV_SLOT};` in a struct that "
+                            "inherits tr::graph::default_config_t (docs/modules/config.md).")
+    endif()
+    message(WARNING "LIBTRACER_LKV_SLOT was removed (#1722) and its default value did nothing; "
+                    "dropping it from the cache. The LKV slot is config_t::lkv_slot_t.")
+    unset(LIBTRACER_LKV_SLOT CACHE)
+endif()
+
 # Version — one source of truth, no hardcoded literal to drift. Resolution order:
 #   1. the release git tag (`vMAJOR.MINOR.PATCH`), when building at a tag, so a
 #      tagged release reports its exact version;
@@ -209,14 +237,6 @@ else()
     target_compile_options(libtracer PRIVATE -Wall -Wextra -Werror=switch)
 endif()
 
-# security_acl — the ACL policy seam (docs/adr/0050). The policy is selected at
-# build time per target (ADR-0047 §1): OFF (default) = the ALLOW-only MCU
-# profile; ON = the full host policy (ordered first-match-per-bit with DENY).
-# Both adapters are always compiled and unit-tested (security_acl_test); this
-# switch only picks which one graph_t evaluates and how strict :acl parse is.
-option(LIBTRACER_ACL_FULL "Evaluate ACLs with the full security_acl host policy (DENY, ordered)"
-       OFF)
-
 # ---- libtracer/config.hpp — per-target build configuration as plain C++ (ADR-0068) ----
 # The defaults are C++ literals in include/libtracer/config.hpp and the build system does not
 # spell them at all. A target with non-default knobs supplies a `libtracer/config_override.hpp`
@@ -226,70 +246,9 @@ option(LIBTRACER_ACL_FULL "Evaluate ACLs with the full security_acl host policy 
 # the checked-in second copy of the defaults and the configure-time drift gate that guarded the
 # two against each other — a class of rot that cannot occur when there is one copy (§Erratum 1).
 #
-# TRANSITION, one release (#1142): the two option names CI legs and embedder scripts already
-# pass on the command line keep working, by writing that fragment on their behalf. A NEW knob
-# does not get a CMake variable — it is set in the fragment, as ordinary C++.
-#
-# LIBTRACER_LKV_SLOT takes `single_writer_slot_t` (the default, over the striped host mutex
-# guard) or `hazard_slot_t` (the lock-free host opt-in), which the fragment then binds.
-set(LIBTRACER_LKV_SLOT single_writer_slot_t CACHE STRING
-    "DEPRECATED (one release): LKV slot policy type. Prefer a libtracer/config_override.hpp")
-set_property(CACHE LIBTRACER_LKV_SLOT PROPERTY STRINGS single_writer_slot_t hazard_slot_t)
-if(NOT LIBTRACER_LKV_SLOT MATCHES "^(hazard_slot_t|single_writer_slot_t)$")
-    message(FATAL_ERROR "LIBTRACER_LKV_SLOT=${LIBTRACER_LKV_SLOT}: expected hazard_slot_t or "
-                        "single_writer_slot_t (sp_atomic_slot_t was removed — it spin-waits). A "
-                        "build directory configured before the removal caches the old default: "
-                        "reconfigure with -DLIBTRACER_LKV_SLOT=single_writer_slot_t")
-endif()
-set(_lt_cfg_binding "")
-if(LIBTRACER_ACL_FULL)
-    string(APPEND _lt_cfg_binding "    using acl_policy_t = full_acl_policy_t;\n")
-endif()
-if(LIBTRACER_LKV_SLOT STREQUAL "hazard_slot_t")
-    string(APPEND _lt_cfg_binding "    using lkv_slot_t = hazard_slot_t;\n")
-endif()
-if(NOT _lt_cfg_binding STREQUAL "")
-    # This fragment owns `config_t`, so neither the test build's preset nor an embedder can bind
-    # the two link modules beside it (#1670). Bind them from the TU switches they must agree with:
-    # the engine member follows its own TU, and the bus tier is carried whenever CAN compiles
-    # (a CAN link is a bus by construction) or this is the project's own test build.
-    if(LIBTRACER_SELF_HEAL_LINKS)
-        string(APPEND _lt_cfg_binding "    static constexpr bool kSelfHealLinks = true;\n")
-    endif()
-    if(LIBTRACER_TRANSPORT_CAN OR _libtracer_link_modules_default)
-        string(APPEND _lt_cfg_binding "    static constexpr bool kBusLinks = true;\n")
-    endif()
-    # The project's own test build arms the fault-injection hooks (#1719). The preset that would
-    # opt it in yields to this fragment, so the fragment opts in for it, on the same condition
-    # that installs the preset; an embedder's build keeps the lean `false`.
-    if(_libtracer_link_modules_default)
-        string(APPEND _lt_cfg_binding "    static constexpr bool kFaultInjection = true;\n")
-    endif()
-    message(STATUS "libtracer: writing a config_override.hpp for the deprecated -D knobs "
-                   "(LIBTRACER_ACL_FULL / LIBTRACER_LKV_SLOT) — prefer supplying the fragment")
-    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/generated/include/libtracer/config_override.hpp
-"/**
- * @file
- * @brief GENERATED — the deprecated -D knobs as an override fragment (ADR-0068 §Erratum 1).
- *
- * Written by core/CMakeLists.txt for the one-release transition off `-DLIBTRACER_ACL_FULL` /
- * `-DLIBTRACER_LKV_SLOT`. Supply your own `libtracer/config_override.hpp` instead.
- */
-#pragma once
-
-namespace tr::graph {
-
-/** @brief This build's configuration: the defaults, with the -D knobs applied. */
-struct cmake_config_t : default_config_t {
-${_lt_cfg_binding}};
-
-using config_t = cmake_config_t;
-
-}  // namespace tr::graph
-")
-    target_include_directories(libtracer BEFORE PUBLIC
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/generated/include>)
-endif()
+# The ACL policy and the LKV slot are traits like any other: `using acl_policy_t = ...;` and
+# `using lkv_slot_t = ...;` in that fragment. Their one-release CMake options
+# (-DLIBTRACER_ACL_FULL, -DLIBTRACER_LKV_SLOT) were removed in #1722 and are refused above.
 
 # The GPU device backend used to be an option HERE, compiled into libtracer itself with a
 # PUBLIC `-DLIBTRACER_WITH_CUDA` every consumer TU then carried. It is now a tier module —
@@ -367,14 +326,9 @@ if(LIBTRACER_INSTALL)
 
     install(DIRECTORY include/libtracer
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-    # An installed non-default package must be self-consistent (ADR-0068): config.hpp itself
-    # is the checked-in default the directory copy above already brought along, so what has to
-    # ship alongside it is this build's override fragment — when one exists. config.hpp finds
-    # it by the same include-path question in the installed tree as in the build tree.
-    if(EXISTS ${CMAKE_CURRENT_BINARY_DIR}/generated/include/libtracer/config_override.hpp)
-        install(FILES ${CMAKE_CURRENT_BINARY_DIR}/generated/include/libtracer/config_override.hpp
-            DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/libtracer)
-    endif()
+    # config.hpp itself is the checked-in default the directory copy above brought along. The
+    # build no longer generates an override fragment (#1722), so an embedder that configures a
+    # non-default package ships its own libtracer/config_override.hpp beside it (ADR-0068).
 
     set(LIBTRACER_CMAKE_CONFIG_DIR ${CMAKE_INSTALL_LIBDIR}/cmake/libtracer)
 

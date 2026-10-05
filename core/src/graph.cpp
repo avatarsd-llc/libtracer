@@ -554,7 +554,7 @@ void emit_app_container(std::vector<std::byte>& out, const std::vector<app_field
 
 // ACE evaluation and the typed :acl parse live in security_acl.hpp (ADR-0050):
 // a pure per-target policy (acl_policy_t — ALLOW-only MCU profile by default,
-// the full first-match-per-bit host policy under LIBTRACER_ACL_FULL), the
+// the full first-match-per-bit host policy when a fragment binds it), the
 // effective-ACL merge semantics (effective_acl_t), and parse_acl/encode_acl.
 // The graph keeps only the ancestor walk (inside the lazy per-vertex cache
 // rebuild) and the subtree-precise invalidation below.

@@ -284,7 +284,7 @@ Removing it is not a local edit: the shared hold is what excludes concurrent ver
 during the walk. A count of 11–12 ThreadSanitizer-reported races with the lock removed circulates
 without a named build, shape set or test list, and is **not verified here**. The check that
 settles it: the CI ThreadSanitizer configuration — `-fsanitize=thread -g -O1`,
-`CMAKE_BUILD_TYPE=Debug`, both `LIBTRACER_LKV_SLOT` bindings, `ctest` over `core/`
+`CMAKE_BUILD_TYPE=Debug`, both `lkv_slot_t` bindings, `ctest` over `core/`
 (`.github/workflows/core-ci.yml:name: tsan (slot=${{ matrix.lkv_slot }})`) — rebuilt with `find_ptr`'s `shared_lock` removed,
 recording each reported race site rather than a count.
 
