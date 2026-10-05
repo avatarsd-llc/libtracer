@@ -862,10 +862,12 @@ def best_of(binaries: dict[str, pathlib.Path], runs: int) -> dict[str, dict]:
 #               layout-sensitive row is held at the flat threshold ("cap"); a key the null
 #               does not carry falls back to the flat thresholds too ("flat").
 #   evidence  — the per-pair ratio cand/base, its median, and a bootstrap confidence
-#               interval on that median (`BOOT_N` resamples of the pairs, `BOOT_CONF`). It
-#               replaces both the disjoint-range rule and the pair-majority vote: a FAIL
-#               needs the median past the threshold AND the interval to exclude 1.0, so a
-#               single wild pair moves neither and a reproduced shift moves both.
+#               interval on that median (`BOOT_N` resamples of the pairs, `BOOT_CONF`). On a
+#               leg the null tightens it replaces the disjoint-range rule and the pair-
+#               majority vote: a FAIL needs the median past the threshold AND the interval
+#               to exclude 1.0. A leg at the cap (or with no null) keeps main's WHOLE verdict
+#               — flat threshold, disjoint ranges, majority of pairs — so no row is looser or
+#               more false-fail-prone than before (ruling on #1874; `leg_verdict`).
 #
 # Cost. `PAIRS_DEFAULT` pairs of every family, each arm once per pair. The sweep's families
 # total ~15 s per arm and the sibling binaries ~30 s, so 8 pairs are ~12 min of timed work.
@@ -995,7 +997,49 @@ def paired_verdict(cand: list[float], base: list[float], factor: float,
             "factor": factor, "cand_range": (min(cs), max(cs)),
             "base_range": (min(bs), max(bs)),
             "pairs_breached": sum(1 for x in ratios if breach(x)),
-            "effect": effect, "significant": significant, "fail": effect and significant}
+            "effect": effect, "significant": significant, "fail": effect and significant,
+            "rule": "ci"}
+
+
+def legacy_verdict(cand: list[float], base: list[float], factor: float,
+                   lower_is_worse: bool, tick_guard: bool = False) -> dict:
+    """@brief Main's decision rule before #1807, for a leg the null does not tighten.
+
+    Fails only when the arms' medians breach @p factor (tick-guarded when asked), their
+    [min..max] ranges are disjoint, and a strict majority of the pairs breach on their own
+    (every pair below three). The ratio and interval of @ref paired_verdict are kept for the
+    report; they do not decide.
+    """
+    v = paired_verdict(cand, base, factor, lower_is_worse, tick_guard)
+    cs, bs = cand[:v["n"]], base[:v["n"]]
+
+    def breach(c: float, b: float) -> bool:
+        if lower_is_worse:
+            return c < b * factor
+        return c > b * factor and (not tick_guard or _tick_ok(c, b))
+
+    pb = sum(1 for c, b in zip(cs, bs) if breach(c, b))
+    disjoint = (max(cs) < min(bs)) if lower_is_worse else (min(cs) > max(bs))
+    majority = pb * 2 > v["n"] if v["n"] >= 3 else pb == v["n"]
+    effect = breach(v["cand_med"], v["base_med"])
+    v.update(effect=effect, pairs_breached=pb, disjoint=disjoint, majority=majority,
+             fail=effect and disjoint and majority, rule="flat")
+    return v
+
+
+def leg_verdict(k: str, leg: str, cand: list[float], base: list[float], null: dict,
+                tick_ok: bool = True) -> tuple[dict, float, str]:
+    """@brief One leg of one key, decided by the rule its threshold selects (ruling on #1874).
+
+    A leg the null TIGHTENS (source `null`) takes the median-of-ratios + bootstrap rule. A leg
+    whose null hits the cap (`cap`), or that has no null (`flat`), keeps main's whole verdict:
+    the flat threshold AND @ref legacy_verdict. No row is looser, or more false-fail-prone,
+    than before #1807. @p tick_ok False drops the tick guard (a picosecond batch row).
+    @return (verdict, factor, source).
+    """
+    factor, tick, source = leg_factor(k, leg, null)
+    rule = paired_verdict if source == "null" else legacy_verdict
+    return rule(cand, base, factor, leg == "deliv_s", tick and tick_ok), factor, source
 
 
 def _spread(rng: tuple[float, float]) -> float:
@@ -1014,7 +1058,10 @@ def paired_report(v: dict, label: str, unit: str, fmt: str, source: str = "") ->
             f"cand {v['cand_med']:>{fmt}}{unit} [{cr[0]:>{fmt}}..{cr[1]:>{fmt}}]  "
             f"x{v['ratio']:.3f} CI [{lo:.3f}..{hi:.3f}] vs x{v['factor']:.3f}"
             + (f" ({source})" if source else ""))
-    if v["effect"]:
+    if v["effect"] and v.get("rule") == "flat":
+        line += (f"  | effect YES, pairs {v['pairs_breached']}/{v['n']}, "
+                 f"ranges {'DISJOINT' if v['disjoint'] else 'OVERLAP'}")
+    elif v["effect"]:
         line += (f"  | effect YES, pairs {v['pairs_breached']}/{v['n']}, "
                  f"CI {'excludes' if v['significant'] else 'includes'} 1")
         if not v["fail"]:
@@ -1064,17 +1111,17 @@ def gate_paired(cand: dict[str, pathlib.Path], base: dict[str, pathlib.Path],
                 # 0 means "this row does not measure that": deliv_s on a latency-only row
                 # (#553), p50/mean on a bulk-only row such as `lkv-*` (#1804).
                 continue
-            factor, tick, source = leg_factor(k, key, null)
-            v = paired_verdict(c, b, factor, key == "deliv_s", tick and tick_guarded(k))
+            v, factor, source = leg_verdict(k, key, c, b, null, tick_guarded(k))
             worst_drift = max(worst_drift, _spread(v["base_range"]))
             print(paired_report(v, label, unit, fmt, source))
             if v["fail"]:
                 lo, hi = v["ci"]
+                why = (f"{BOOT_CONF:.0%} CI [{lo:.3f}..{hi:.3f}]" if v["rule"] == "ci" else
+                       f"{v['pairs_breached']}/{v['n']} pairs, disjoint ranges")
                 fails.append(
                     f"{k} {label} pullback: {v['cand_med']:,.0f}{unit} vs base "
                     f"{v['base_med']:,.0f}{unit} (median pair ratio x{v['ratio']:.3f}, "
-                    f"{BOOT_CONF:.0%} CI [{lo:.3f}..{hi:.3f}], threshold x{factor:.3f} "
-                    f"{source}, {v['n']} pairs)")
+                    f"{why}, threshold x{factor:.3f} {source})")
     # The baseline arm cannot be moved by the candidate's code, so its worst spread is
     # this run's drift figure. It does not gate — it tells a reader whether the run was
     # worth believing at all, which is what a 2.8x baseline swing needed and never got.
@@ -1092,9 +1139,9 @@ def gate_paired(cand: dict[str, pathlib.Path], base: dict[str, pathlib.Path],
 # window means in picoseconds and there is no tick to guard. Two checks read them, both in
 # paired mode only:
 #
-#   against main — each size's p50 is a paired verdict exactly like a POINT's: its threshold
-#                  from the banked A/A null where the null has the row, LAT_REGRESS where
-#                  not, and a bootstrap interval that must exclude 1 (#1807);
+#   against main — each size's p50 is decided exactly like a POINT's leg (@ref leg_verdict):
+#                  tightened by the banked A/A null with a bootstrap interval that must
+#                  exclude 1, or at LAT_REGRESS under main's old rule (#1807);
 #   neighbours   — each size's p50 against the next smaller size's, pair by pair. A step of
 #                  more than CLIFF_STEP that holds in the median and in a strict majority of
 #                  pairs is a cliff. It FAILS only when it is new: main's own step at that
@@ -1188,17 +1235,18 @@ def gate_cliff(samples: dict, null: dict | None = None) -> tuple[list[str], list
         cs, bs = samples["cand"][k], samples["base"].get(k)
         if not bs:
             continue  # a size main does not emit: the neighbour check still covers it
-        factor, _tick, source = leg_factor(k, "p50_ns", null)
-        v = paired_verdict([float(x["p50_ns"]) for x in cs], [float(x["p50_ns"]) for x in bs],
-                           factor, False)
+        v, factor, source = leg_verdict(k, "p50_ns", [float(x["p50_ns"]) for x in cs],
+                                        [float(x["p50_ns"]) for x in bs], null, False)
         if v["effect"]:
             print(f"  {k}")
             print(paired_report(v, "p50", "ns", "9,.3f", source))
         if v["fail"]:
             lo, hi = v["ci"]
+            why = (f"CI [{lo:.3f}..{hi:.3f}]" if v["rule"] == "ci" else
+                   f"{v['pairs_breached']}/{v['n']} pairs, disjoint ranges")
             fails.append(f"{k} p50 pullback: {v['cand_med']:.3f}ns vs base "
                          f"{v['base_med']:.3f}ns (median pair ratio x{v['ratio']:.3f}, "
-                         f"CI [{lo:.3f}..{hi:.3f}], threshold x{factor:.3f} {source})")
+                         f"{why}, threshold x{factor:.3f} {source})")
     for mode in CLIFF_MODES:
         cand = _cliff_series(samples["cand"], mode)
         base = _cliff_series(samples["base"], mode) or None

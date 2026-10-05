@@ -106,10 +106,31 @@ class NoFalseFails(unittest.TestCase):
                          (pg.TPUT_REGRESS, False, "cap"))
         self.assertEqual(pg.leg_factor("fold-b4/512/1/1", "p50_ns", null),
                          (pg.LAT_REGRESS, True, "cap"))
-        # Just under the cap is still the null's own (tighter) threshold.
+        # At the cap the leg keeps main's whole rule: the #1855 samples (x0.85 with one
+        # overlapping pair) fail on the flat threshold only if ranges are disjoint AND a
+        # majority breach — and the CI rule alone is not what decides.
+        c, b = [212, 214, 213, 230], [251, 250, 252, 249]
+        v, _f, src = pg.leg_verdict("fold-b4/512/1/1", "deliv_s", c, b, null)
+        self.assertEqual((src, v["rule"]), ("cap", "flat"))
+        self.assertEqual(v["fail"], pg.legacy_verdict(c, b, pg.TPUT_REGRESS, True)["fail"])
+        v, _f, _s = pg.leg_verdict("fold-b4/512/1/1", "deliv_s", [80, 80, 80, 130],
+                                   [100, 100, 100, 100], null)
+        self.assertFalse(v["disjoint"])
+        self.assertFalse(v["fail"], "main's separation rule still holds on a capped leg")
+        v, _f, _s = pg.leg_verdict("fold-b4/512/1/1", "deliv_s", [10, 80, 95, 99],
+                                   [100, 100, 100, 100], null)
+        self.assertFalse(v["majority"])
+        self.assertFalse(v["fail"], "main's majority rule still holds on a capped leg")
+        # A leg with no null at all is decided the same way.
+        self.assertEqual(pg.leg_verdict("new/64/1/1", "p50_ns", [1.0], [1.0], {})[0]["rule"],
+                         "flat")
+        # Just under the cap is still the null's own (tighter) threshold, under the CI rule.
         f, _t, src = pg.leg_factor("k", "mean_ns", {"k": {"mean_ns": 0.039}})
         self.assertEqual(src, "null")
         self.assertLess(f, pg.MEAN_REGRESS)
+        v, _f, _s = pg.leg_verdict("k", "mean_ns", [1.2] * 4, [1.0] * 4,
+                                   {"k": {"mean_ns": 0.039}})
+        self.assertEqual(v["rule"], "ci")
 
     def test_1871_two_percent_disjoint_passes_at_the_floor(self):
         """#1871's A/A: two copies of one binary, narrow-full x1.02 with DISJOINT ranges."""

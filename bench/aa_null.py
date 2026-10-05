@@ -133,8 +133,7 @@ def _verdicts(cs: list[dict], bs: list[dict], k: str, null: dict, scale: float) 
             continue
         lower = leg == "deliv_s"
         c = [x / scale if lower else x * scale for x in c]
-        factor, tick, _src = pg.leg_factor(k, leg, null)
-        if pg.paired_verdict(c, b, factor, lower, tick)["fail"]:
+        if pg.leg_verdict(k, leg, c, b, null, pg.tick_guarded(k))[0]["fail"]:
             failed.append(leg)
     return failed
 

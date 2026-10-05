@@ -266,7 +266,7 @@ thresholds, one hard invariant:
 
 | mechanism | when | comparison | threshold | effect |
 | --- | --- | --- | --- | --- |
-| **per-PR hard gate** ([`perf_gate.py`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/perf_gate.py)) | every PR | PR build vs `main` build, **one runner, interleaved A/B per family** | per row and leg, **3× the row's A/A-null spread, floor 3%** (flat p50 **+15%** · mean **+12%** · deliveries/s **−12%** where the null has no row) · per-vertex bytes **+2%** — *and* a bootstrap 95% interval on the median pair ratio that excludes 1 | fails the PR |
+| **per-PR hard gate** ([`perf_gate.py`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/perf_gate.py)) | every PR | PR build vs `main` build, **one runner, interleaved A/B per family** | per row and leg, **3× the row's A/A-null spread, floor 3%** (flat p50 **+15%** · mean **+12%** · deliveries/s **−12%** where the null has no row) · per-vertex bytes **+2%** — *and* a bootstrap 95% interval on the median pair ratio that excludes 1 (a row at the flat threshold keeps the old disjoint-ranges + majority-of-pairs rule) | fails the PR |
 | **push ratchet** | every `main` push | HEAD vs its parent, **three independently-drawn runners** | same as above | **advisory** — each replica reports (see the tier note below) |
 | **forward-hop zero-alloc gate** | every CI run | absolute | `> 0` allocations on the forward hop | fails the build |
 | **soft trend alert** | per `main` commit | vs previous point, **cross-runner** | series drifts past **125%** | a comment, *not* a verdict |
@@ -514,8 +514,11 @@ Details that make these trustworthy:
   is re-banked on the bench host when its CPU layout changes and when a gated row is added.
 - **Layout-sensitive, held at the flat threshold.** On these rows 3× the banked spread is at
   or past the flat threshold, because builds of one source move them by several percent
-  (the `-falign-functions=64` build ran `lkv-store-heap` ~40% slower), so they gate exactly
-  as before the null existed and the report says `cap`: `lkv-store-heap` at 64 B and 1 KiB (throughput), `fold-b4/512/1/1`
+  (the `-falign-functions=64` build ran `lkv-store-heap` ~40% slower), so they keep the
+  verdict they had before the null existed — the flat threshold **and** the old rule
+  (medians breach, the arms' [min..max] ranges are disjoint, a strict majority of pairs
+  breach) — and the report says `cap`. A row the null does not carry is decided the same
+  way. The capped rows are: `lkv-store-heap` at 64 B and 1 KiB (throughput), `fold-b4/512/1/1`
   (every leg), `mixed/0/6/128` (p50), `store-lat-narrow-full`, `store-lat-narrow-net-fwd`
   and `store-lat-wide-net-fwd` (p50), and the multi-threaded `inproc-mt4`,
   `acl-inherit-d4-mt4` and `poolalloc-mt4` rows. `inproc-path/64/1/8192` sat at the cap in
