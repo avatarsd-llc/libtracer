@@ -691,8 +691,10 @@ class graph_t {
      *
      * @par Which bytes flow through @p src after phase 1
      * ALL of the following, where before they came from four separately-injected places:
-     * - the per-write LKV control block and `rope_t` wrapper (ADR-0039 §1, #361 §5) —
-     *   through an internally-built `std::pmr` adapter (@ref mem::source_resource_t);
+     * - the graph's own tables (#1778): the vertex tree, the vertex index, the link index,
+     *   subscriber edge tables, the seam park, the creation catalog, the identity record, the
+     *   declaration lists and the propagate-sweep sets — through the table sub-pool
+     *   (@ref table_source), in core containers;
      * - the write-path copy-store's owned value @ref view::segment_t and both folded READs'
      *   exactly-sized POINT headers (ADR-0060, #831) — through an internally-built
      *   @ref mem::source_backend_t;
@@ -715,28 +717,19 @@ class graph_t {
      *   +22.7 % on hazard-node acquisition and +3.5 % on the free-list-hit steady arm, with
      *   disjoint ranges against an A/A null band of −0.12 %. The seam's own `@note` carries
      *   the figures.
-     * - the plain **`std::vector<std::byte>`** sites are an allocator swap only in
-     *   appearance, because their container type is fixed by the signatures they cross.
-     *   Two groups: the KEY containers (`try_build_key`'s out-parameter, `select_sweep`'s
-     *   output, the branch-write child-key composition, the sweep snapshot's element type),
-     *   pinned by member-function signatures and by the `pending_` / `unconditional_` key
-     *   sets, so moving them is a key-TYPE change across the graph; and the read-back
-     *   encoders' STAGING buffers, pinned by `tr::wire::emit_tlv`'s `std::vector<std::byte>&`
-     *   sink. Phase 3 moved the resulting SEGMENT onto the injection; the transient buffer it
-     *   is copied from is still the global heap's, and that is stated rather than glossed.
-     *
-     * The `std::vector` growth behind `tr::detail::try_reserve`/`try_push_back` is otherwise
-     * migrated where the container's element type permits it; the residual sites carry their
-     * own `#981 residual` notes.
+     * - the read-back encoders' STAGING buffers, pinned by `tr::wire::emit_tlv`'s
+     *   `std::vector<std::byte>&` sink. Phase 3 moved the resulting SEGMENT onto the
+     *   injection; the transient buffer it is copied from is still the global heap's. The
+     *   public signatures that still take or return owning `std` types are the same kind of
+     *   residual, and move with the public-API batch of the seam migration.
      *
      * @par Failure convention
      * The substrate speaks raw `nullptr`-on-exhaustion and the graph does not wrap it.
-     * Adapters translate at their own boundaries and nowhere else: the pmr adapter turns a
-     * refusal into `std::bad_alloc` because `std::pmr`'s contract requires a throw, and the
-     * backend adapter turns it into a null @ref view::segment_t, which is the BACKPRESSURE
-     * signal the write path already answered. So an injected @p src bounds the node, and a
-     * peer's CREATE frame can no longer reboot a `-fno-exceptions` node through the failable
-     * channels.
+     * The one adapter translates at its own boundary and nowhere else: the backend adapter
+     * turns a refusal into a null @ref view::segment_t, which is the BACKPRESSURE signal the
+     * write path already answered. The graph's own tables answer BACKPRESSURE directly. So an
+     * injected @p src bounds the node, and a peer's CREATE frame can no longer reboot a
+     * `-fno-exceptions` node through the failable channels.
      *
      * @par NARROW vs WIDE is WHICH source, never a config knob
      * A host that passes nothing gets @ref mem::default_root (ADR-0083 Decision 4, #1777).
@@ -1581,7 +1574,7 @@ class graph_t {
      * would have done anyway. Offering both would buy nothing and invite the wrong one.
      *
      * The order is the SAME one the RFC-0008 sweep sets are kept in (`pending_` /
-     * `unconditional_`, byte-keyed `std::set`s), and it earns its keep the same way: the
+     * `unconditional_`, byte-keyed sorted tables), and it earns its keep the same way: the
      * length-prefixed NAME framing makes a parent's key a byte-prefix of every descendant's,
      * so a parent always precedes its subtree and that subtree is a CONTIGUOUS run. The
      * result therefore reads as a stable pre-order tree listing.
@@ -1593,8 +1586,11 @@ class graph_t {
      *       is stability and subtree contiguity.
      *
      * @warning **CONTROL-PLANE ONLY** and priced as such: it allocates one owned key per
-     *          registered vertex plus the snapshot vector, then sorts. Do not put this on a
-     *          delivery or write path.
+     *          registered vertex plus the snapshot array, all from the graph's table source,
+     *          then sorts. Do not put this on a delivery or write path.
+     *
+     * @return false when the table source refused the snapshot (#1778): @p fn was called for
+     *         nothing. A walk either visits every vertex or none.
      *
      * Concurrency: the {key, vertex} snapshot is taken under ONE shared `map_mutex_` hold and
      * `fn` runs OUTSIDE it — the same two-phase discipline @ref evict_link_edges and the
@@ -1606,20 +1602,31 @@ class graph_t {
      * Vertices registered BEFORE the hold are all visited.
      */
     template <typename Fn>
-    void for_each_vertex(Fn&& fn) const {
-        std::vector<std::pair<std::vector<std::byte>, vertex_t*>> snap;
+    bool for_each_vertex(Fn&& fn) const {
+        struct entry_t {
+            mem::bytes_t key; /**< @brief The vertex's canonical key. */
+            vertex_t* v;      /**< @brief The vertex. */
+        };
+        mem::block_array_t<entry_t> snap(*tables_);
+        bool ok = true;
         {
             const std::shared_lock lock(map_mutex_);
             vertex_t* const r = root();
-            const auto take = [&snap](vertex_t& c) {
-                if (c.registered()) snap.emplace_back(build_key(&c), &c);
+            const auto take = [this, &snap, &ok](vertex_t& c) {
+                if (!ok || !c.registered()) return;
+                mem::bytes_t k(*tables_);
+                ok = try_build_key(&c, k) && snap.push_back(entry_t{std::move(k), &c});
             };
             take(*r);
             r->for_each_descendant(take);
         }
-        std::sort(snap.begin(), snap.end(),
-                  [](const auto& a, const auto& b) { return a.first < b.first; });
-        for (const auto& e : snap) fn(wire::key_view_t{e.first}, vertex_handle_t{e.second});
+        if (!ok) return false;
+        std::sort(snap.begin(), snap.end(), [](const entry_t& a, const entry_t& b) {
+            return mem::bytes_less_t{}(a.key, b.key);
+        });
+        for (const entry_t& e : snap)
+            fn(wire::key_view_t{mem::as_span(e.key)}, vertex_handle_t{e.v});
+        return true;
     }
 
     /**
@@ -2559,15 +2566,26 @@ class graph_t {
         vertex_policy_t&& policy, std::span<const payload_right_t> rights,
         std::span<const std::byte> schema_catalog = {});
 
-    /** @brief Apply a legal @ref vertex_policy_t to @p vx, skipping every member that holds;
-     *         an owning field table is MOVED into the vertex, never copied.
+    /** @brief Apply a legal @ref vertex_policy_t's vertex-local members — every member but
+     *         the delivery mode — to @p vx, skipping every member that holds; an owning field
+     *         table is MOVED into the vertex, never copied. @p role is the role @p vx has, or
+     *         is about to be filled with.
      *  @retval false The table source refused a member's block (#1778); the members before
      *          it are applied, the rest are not. */
-    [[nodiscard]] bool apply_policy(vertex_t* vx, vertex_policy_t&& policy);
+    [[nodiscard]] bool apply_policy(vertex_t* vx, role_t role, vertex_policy_t&& policy);
 
     /** @brief Set @p v's propagation policy and maintain the sweep's UNCONDITIONAL membership
-     *         under the sweep lock (RFC-0008 §C) — the delivery-mode arm of `apply_policy`. */
-    void apply_delivery_mode(vertex_t* v, delivery_mode_t mode);
+     *         under the sweep lock (RFC-0008 §C) — the policy member applied apart from
+     *         `apply_policy`, because the sweep lock never nests with the map lock. @p key is
+     *         @p v's canonical key.
+     *  @retval false The table source refused the set entry (#1778); nothing changed. */
+    [[nodiscard]] bool apply_delivery_mode(vertex_t* v, delivery_mode_t mode,
+                                           std::span<const std::byte> key);
+
+    /** @brief Add @p key to the UNCONDITIONAL sweep set, under the sweep lock.
+     *  @return true when this call added it, false when it was there already, BACKPRESSURE
+     *          when the table source refused (#1778). */
+    [[nodiscard]] result_t<bool> enroll_unconditional(std::span<const std::byte> key);
 
     // Internal (raw `vertex_t*`) forms of the public handle-returning resolvers: the graph's
     // own machinery threads raw pointers (ADR-0056 — internal methods keep `vertex_t*`), and
@@ -2579,10 +2597,12 @@ class graph_t {
     // retains the key, so the public owning-vector overload is a convenience wrapper and the
     // graph's own callers (write-creates, path registration) pass a span rather than paying a
     // heap copy just to spell the call (#1139/#873).
+    // @p policy, when given, has its vertex-local members applied (moved from) to the node
+    // before it is filled, so a refused one leaves it a placeholder (#1778).
     [[nodiscard]] result_t<vertex_handle_t> register_vertex_key_span(
         std::span<const std::byte> key, role_t role, const handlers_t& handlers,
         std::span<const payload_right_t> rights = {},
-        std::span<const std::byte> schema_catalog = {});
+        std::span<const std::byte> schema_catalog = {}, vertex_policy_t* policy = nullptr);
     // Update the vertex value (LKV/history/handler), then fan out to subscribers.
     // `caller` is the ACL caller context gating the WRITE right (the API caller's
     // for a direct write; a delivered subscription's stored context terminates at
@@ -2766,6 +2786,34 @@ class graph_t {
     // since the last flush, in order (RFC-0008 §E — a queue, not a coalesce); HANDLER /
     // never-assigned (null LKV): nothing.
     void deliver_current(vertex_t* v);
+    /**
+     * @brief A flat list of vertex keys drawn from one source (#1778): every key's bytes in
+     *        one array plus where each ends, so collecting N keys is two growing arrays, not
+     *        N owned buffers.
+     */
+    class key_list_t {
+       public:
+        /** @brief An empty list drawing from @p src. */
+        explicit key_list_t(mem::block_source_t& src) noexcept : bytes_(src), ends_(src) {}
+        /** @brief Append @p k. @retval false The source refused; the list is unchanged. */
+        [[nodiscard]] bool push(std::span<const std::byte> k) noexcept {
+            return ends_.reserve(ends_.size() + 1) && bytes_.append(k.data(), k.size()) &&
+                   ends_.push_back(bytes_.size());  // reserved: cannot fail
+        }
+        /** @brief Keys held. */
+        [[nodiscard]] std::size_t size() const noexcept { return ends_.size(); }
+        /** @brief Key @p i (`i < size()`). */
+        [[nodiscard]] std::span<const std::byte> operator[](std::size_t i) const noexcept {
+            const std::size_t b = i == 0 ? 0 : ends_[i - 1];
+            return {bytes_.data() + b, ends_[i] - b};
+        }
+
+       private:
+        mem::bytes_t bytes_;                   /**< @brief Every key's bytes, back to back. */
+        mem::block_array_t<std::size_t> ends_; /**< @brief Where each key ends. */
+    };
+    /** @brief A byte-ordered set of vertex keys (the sweep sets; the value is unused). */
+    using key_set_t = mem::sorted_map_t<mem::bytes_t, std::uint8_t, mem::bytes_less_t>;
     // The propagate(v) sweep body: delivers v then its qualifying descendants
     // (RFC-0008 §B/§C). Loop-free by construction (each delivery terminates at its
     // target — ADR-0051), so no recursion depth to thread.
@@ -2782,8 +2830,7 @@ class graph_t {
     // able to refuse an unencodable selection without having consumed it. The marks are
     // retired afterwards by `clear_pending`, exactly as the eager branch write retires its
     // landing sites. False on an OOM key render — the sweep defers, as it does today.
-    [[nodiscard]] bool select_sweep(vertex_t* v, std::vector<std::byte>& lo,
-                                    std::vector<std::vector<std::byte>>& out);
+    [[nodiscard]] bool select_sweep(vertex_t* v, mem::bytes_t& lo, key_list_t& out);
     // Record v as assigned-since-last-sweep so a covering propagate flushes it (RFC-0008
     // §B). No-op for EXPLICIT (never ancestor-swept), for UNCONDITIONAL (already a
     // permanent sweep member), and — the idle-write fast path — when nothing observes at
@@ -2915,16 +2962,13 @@ class graph_t {
     [[nodiscard]] result_t<view::view_t> read_settings_app(vertex_t* v) const;
 
     // The full canonical key of `v` — its ancestors' NAME records concatenated root-down
-    // (ADR-0057 render-on-demand: vertices store one segment, not the full key). Walks
-    // immutable parent links, so no lock. Used only at sweep/observed-write/wiring
-    // frequency (the RFC-0008 byte-keyed sweep sets, `create_child` key composition).
-    [[nodiscard]] static std::vector<std::byte> build_key(const vertex_t* v);
-    // The NOTHROW twin of build_key for the writer-thread store/delivery legs (#477):
-    // renders into `out` via the mem_heap.hpp nothrow growth primitives; false on OOM
-    // (out is cleared), so a sweep-set mark/drain leg drops or defers instead of a
-    // bad_alloc abort() under the MCU profile's -fno-exceptions.
-    [[nodiscard]] static bool try_build_key(const vertex_t* v,
-                                            std::vector<std::byte>& out) noexcept;
+    // (ADR-0057 render-on-demand: vertices store one segment, not the full key) — rendered
+    // into `out`, whose source the bytes come from. Walks immutable parent links, so no lock.
+    // Used only at sweep/observed-write/wiring frequency (the RFC-0008 byte-keyed sweep sets,
+    // `create_child` key composition). The ONE renderer since #1778 (its throwing twin
+    // `build_key` is gone): false when the source refused (out is then empty), so every
+    // caller drops, defers or answers BACKPRESSURE instead of aborting.
+    [[nodiscard]] static bool try_build_key(const vertex_t* v, mem::bytes_t& out) noexcept;
     // Bump every strict descendant's listeners_above_ by `delta` (RFC-0005 bookkeeping) —
     // a child-link subtree walk (placeholders included, so a later fill inherits a
     // correct count). Call with map_mutex_ held (shared suffices; counters are atomics).
@@ -2932,8 +2976,7 @@ class graph_t {
 
     // RFC-0009 §B.6: pre-order re-virginize of @p v's subtree — unwind each vertex's
     // subscriber contribution to its descendants' listeners_above_, revert it to a
-    // placeholder, and flip it unregistered. Collects each retired vertex's key into
-    // @p keys for the caller's sweep-set cleanup, and parks each detached value-seam block
+    // placeholder, and flip it unregistered. Parks each detached value-seam block
     // into @ref retired_seams_. Each vertex's subscriber slot table is MOVED into @p gone,
     // which the caller reserved one entry per visited vertex, so the walk cannot fail; the
     // caller gives each routed edge's link hold back and drops the tables once the locks are
@@ -2941,7 +2984,7 @@ class graph_t {
     // parks into retired_seams_, both map-lock-guarded).
     /** @brief The slot tables a retirement moved out of its vertices. */
     using gone_edges_t = mem::block_array_t<mem::block_array_t<subscriber_t>>;
-    void retire_subtree(vertex_t* v, std::vector<std::vector<std::byte>>& keys, gone_edges_t& gone);
+    void retire_subtree(vertex_t* v, gone_edges_t& gone);
 
     // Value-seam blocks detached by retirement (RFC-0009 §B.6). A seam is read lock-free,
     // so a swapped-out block cannot be freed while a reader might still hold the old
@@ -3142,7 +3185,7 @@ class graph_t {
     // leaving them free-floating) is what lets `retire` — which refuses a parentless vertex
     // — work on them unchanged.
     //
-    // Anchor keys cannot collide with an addressable vertex's key: build_key stops at the
+    // Anchor keys cannot collide with an addressable vertex's key: try_build_key stops at the
     // node whose parent is null, so an anchor's key is its own single NAME record, and the
     // router composes that record's content to contain `:` and `/` — two of the SEVEN
     // characters `path::valid_segment` rejects, so no registered address anywhere in this
@@ -3160,7 +3203,7 @@ class graph_t {
     // and it is taken here rather than on any hot path. It buys a defined outcome for a
     // caller that violates the setup-only contract instead of a corrupted tree walk.
     mutable std::shared_mutex child_types_mutex_;
-    mem::sorted_map_t<mem::string_t, child_factory_t> child_types_{mem::heap_source()};
+    mem::sorted_map_t<mem::string_t, child_factory_t> child_types_;
     // The five CONFIGURATION sinks (#1049). Each is the ADR-0047 {fn, ctx} pair published
     // through a sink_slot_t — the mechanism #914 established for fwd_router_t's five, hoisted
     // to the layer-neutral `tr` namespace so L4 can hold one without naming the net plane.
@@ -3204,7 +3247,7 @@ class graph_t {
     // once #873 injects a `block_source_t` (whose `Sync` policy may take its own lock) at
     // the allocation site.
     mutable std::shared_mutex identity_mutex_;
-    mem::bytes_t identity_record_{mem::heap_source()};
+    mem::bytes_t identity_record_;
     /**
      * @brief The two test/bench instrumentation counters, present only when
      *        @ref default_config_t::kInstrumentCounters is bound `true` (#1664).
@@ -3270,8 +3313,11 @@ class graph_t {
     // when a subscriber exists at/above a written vertex, so the idle write stays
     // lock-free. Snapshots are taken under it and delivered outside it (callbacks /
     // re-dispatch re-enter the graph), mirroring fan_out's discipline.
-    std::set<std::vector<std::byte>> pending_;
-    std::set<std::vector<std::byte>> unconditional_;
+    //
+    // Sorted tables of table-source keys since #1778: an insert or a drained range moves the
+    // tail once, and the subtree range is found by binary search, as it was in the tree.
+    key_set_t pending_;
+    key_set_t unconditional_;
     std::mutex sweep_mutex_;
     // pending_.size() mirrored as a relaxed atomic: the observed-write fast path
     // (clear_pending on every eager delivery) skips the key render + sweep lock while no
@@ -3290,9 +3336,7 @@ class graph_t {
      *
      *         Defaults to the platform heap, so behaviour is byte-identical until a host
      *         injects a bounded source — except that exhaustion is a `nullptr` return
-     *         rather than the `-fno-exceptions` abort stub. Kept a DIFFERENT type from
-     *         `mr_` on purpose (see @ref tr::mem::block_source_t): the pmr channel may be
-     *         null-checked away and throws, this one cannot and does not.
+     *         rather than the `-fno-exceptions` abort stub.
      *
      *         LAST on purpose: no hot path reads it, so declaring it here keeps
      *         every other member at the byte offset it had before this seam
@@ -3300,8 +3344,8 @@ class graph_t {
      *         everything after it, which is a layout change the forward-hop bench
      *         can see and nothing gains from.
      *
-     *         The two adapters built over this source — `src_backend_` and `src_mr_` — do
-     *         NOT sit here for that reason: they are declared FIRST in the class (see the
+     *         The adapter built over this source — `src_backend_` — does NOT sit here for
+     *         that reason: they are declared FIRST in the class (see the
      *         "DECLARED FIRST so they are DESTROYED LAST" block), because a retained payload
      *         segment reclaims through `src_backend_` while `roots_`'s vertex tree is torn
      *         down, and members die in reverse declaration order. Moving them down here to

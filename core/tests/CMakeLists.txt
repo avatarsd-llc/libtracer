@@ -1595,6 +1595,13 @@ if(LIBTRACER_NET_PLANE)
     add_test(NAME graph_oom_softfail COMMAND graph_oom_softfail_test)
 endif()
 
+# #1778: every growth site of the graph core driven to exhaustion of its table source, and the
+# setup-time exhaustion message (ADR-0056 amendment, ADR-0083).
+add_executable(graph_seam_refusal_test graph_seam_refusal_test.cpp)
+target_link_libraries(graph_seam_refusal_test PRIVATE libtracer)
+libtracer_test_warnings(graph_seam_refusal_test)
+add_test(NAME graph_seam_refusal COMMAND graph_seam_refusal_test)
+
 # ADR-0060 §2 thread-safe pool value_backend: concurrent alloc + cross-thread reclaim
 # (the tsan job in core-ci.yml builds this with -fsanitize=thread and runs it).
 add_executable(mem_sync_pool_test mem_sync_pool_test.cpp)

@@ -110,6 +110,21 @@ class refusing_source_t final : public tr::mem::block_source_t {
     std::int64_t live = 0; /**< @brief Outstanding reservations — zero means no leak. */
 };
 
+/** @brief Serves from the heap, refusing exactly the requests of @ref refuse_bytes bytes —
+ *         pinpoints one growth site on a graph's injected root (#1778). */
+class exact_refusing_source_t final : public tr::mem::block_source_t {
+   public:
+    exact_refusing_source_t() noexcept : block_source_t("test-exact") {}
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        if (bytes == refuse_bytes) return nullptr;
+        return ::operator new(bytes, std::align_val_t{align}, std::nothrow);
+    }
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        ::operator delete(p, bytes, std::align_val_t{align});
+    }
+    std::size_t refuse_bytes = 0; /**< @brief The one request size refused; 0 = none. */
+};
+
 /** @brief RAII: install an OOM-injection hook for one scope, always uninstalled on exit. */
 struct hook_guard_t {
     explicit hook_guard_t(bool (*hook)(std::size_t) noexcept) {
@@ -751,7 +766,8 @@ void test_stream_shed_is_counted() {
  */
 void test_shed_pending_mark_is_counted() {
     std::printf("deferred mark — a shed pending mark is counted, and the sweep delivers none:\n");
-    graph_t g;
+    exact_refusing_source_t src;
+    graph_t g{src};
     auto parent = g.register_vertex(path_t("/p"), role_t::STORED_VALUE);
     auto child = g.register_vertex(path_t("/p/c"), role_t::STORED_VALUE);
     int seen = 0;
@@ -764,15 +780,14 @@ void test_shed_pending_mark_is_counted() {
 
     const auto before = g.delivery_drops();
     {
-        // Pinpoint the mark: reject EXACTLY the pending-set node probe, spelled as graph.cpp
-        // spells it, so the store above it still allocates and the assign still succeeds. A
-        // blanket fail_big would not shed this at all — the node probe is well under its
-        // 512 B threshold — and a fail_all would soft-fail the store instead, which is a
-        // different defect on a different plane.
-        g_reject_size = 8 * sizeof(void*) + sizeof(std::vector<std::byte>);
-        const hook_guard_t frag(fail_exact);
+        // Pinpoint the mark: refuse EXACTLY the mark's key render — `/p/c` packs to two
+        // one-byte records, 4 bytes, drawn from the table source since #1778 — so the store
+        // above it still allocates and the assign still succeeds. Refusing everything would
+        // soft-fail the store instead, which is a different defect on a different plane.
+        src.refuse_bytes = 4;
         check(g.assign(child, make_value({0x02})).has_value(),
               "the assign SUCCEEDs — the value was stored, only the MARK was shed");
+        src.refuse_bytes = 0;
     }
     // A fully healthy sweep now: nothing is injected, so anything undelivered is lost, not
     // deferred.

@@ -143,8 +143,9 @@ class sorted_map_t {
     [[nodiscard]] entry_t& at(std::size_t i) noexcept { return entries_[i]; }
     /** @brief Entry @p i in key order, unchecked (read-only). */
     [[nodiscard]] const entry_t& at(std::size_t i) const noexcept { return entries_[i]; }
-    /** @brief Remove entry @p i, shifting the tail down. Precondition: `i < size()`. */
-    void erase_at(std::size_t i) noexcept { entries_.erase_at(i); }
+    /** @brief Remove the @p n entries from @p i, shifting the tail down once. Precondition:
+     *         `i + n <= size()`. */
+    void erase_at(std::size_t i, std::size_t n = 1) noexcept { entries_.erase_at(i, n); }
 
     /**
      * @brief Index of the first entry whose key is not less than @p key — where a range scan

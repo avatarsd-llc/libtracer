@@ -999,7 +999,11 @@ result_t<void> graph_t::create_child(vertex_t* parent, const view::view_t& spec_
     // Compose the child key = parent's canonical PATH-payload + one packed record for
     // `child_name` (RFC-0018). The graph owns this addressing; the factory only sees the
     // finished key.
-    std::vector<std::byte> child_key = build_key(parent);
+    // The factory's key is an owning `std::vector` by its public signature (the public-API
+    // half of the seam migration); the render itself draws from the table source (#1778).
+    mem::bytes_t parent_key(*tables_);
+    if (!try_build_key(parent, parent_key)) return std::unexpected(status_t::BACKPRESSURE);
+    std::vector<std::byte> child_key(parent_key.begin(), parent_key.end());
     if (!wire::emit_path_segment(child_key, child_name))
         return std::unexpected(status_t::INVALID_PATH);
 

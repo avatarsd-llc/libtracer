@@ -95,7 +95,7 @@ Two consequences `qos.c` has to live with:
 - **A libtracer-only delivery mode is `rmw_tracer`-local, not a QoS extension.**
   `delivery_mode_t` (`vertex.hpp:delivery_mode_t` — `IF_NEWER` / `UNCONDITIONAL` / `EXPLICIT`; there is
   no `ON_CHANGE` member) is owner-side and wiring-time via `vertex_policy_t::delivery_mode`
-  (`core/src/graph.cpp:if (!detail::try_assign(copy, k)) return false;`) with no wire spelling. `rmw_tracer` may set it on vertices it
+  (`core/src/graph.cpp:graph_t::apply_delivery_mode`) with no wire spelling. `rmw_tracer` may set it on vertices it
   owns; it cannot round-trip it to a remote peer.
 
 ## Transports & the differentiators

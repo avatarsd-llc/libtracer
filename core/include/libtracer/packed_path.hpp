@@ -11,6 +11,8 @@
 #include <string_view>
 #include <vector>
 
+#include "libtracer/mem_source.hpp"
+
 /**
  * @file
  * @brief L2/L3 (`tr::wire`) — THE packed `PATH` body grammar (RFC-0018).
@@ -178,6 +180,24 @@ inline constexpr std::uint8_t kPackedEscapeKindLabel = 0x16;
 
 /** @brief Text overload of @ref emit_path_segment (no temporary buffer). */
 [[nodiscard]] inline bool emit_path_segment(std::vector<std::byte>& out, std::string_view seg) {
+    return emit_path_segment(out, std::span<const std::byte>(
+                                      reinterpret_cast<const std::byte*>(seg.data()), seg.size()));
+}
+
+/**
+ * @brief The same record appended to a core byte array (#1778). Reserve
+ *        `seg.size() + 1` more first and the append cannot be refused, so a false return
+ *        then means only what it means above: @p seg is not a legal segment.
+ */
+[[nodiscard]] inline bool emit_path_segment(mem::bytes_t& out,
+                                            std::span<const std::byte> seg) noexcept {
+    if (seg.empty() || seg.size() > kPackedSegMaxBytes) return false;
+    const std::byte len{static_cast<std::uint8_t>(seg.size())};
+    return out.append(&len, 1) && out.append(seg.data(), seg.size());
+}
+
+/** @brief Text overload of the core-array form. */
+[[nodiscard]] inline bool emit_path_segment(mem::bytes_t& out, std::string_view seg) noexcept {
     return emit_path_segment(out, std::span<const std::byte>(
                                       reinterpret_cast<const std::byte*>(seg.data()), seg.size()));
 }

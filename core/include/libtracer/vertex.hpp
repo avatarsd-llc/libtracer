@@ -950,7 +950,7 @@ class vertex_t {
     [[nodiscard]] role_t role() const noexcept { return role_.load(std::memory_order_relaxed); }
     /** @brief This vertex's own canonical NAME record (its single path segment, ADR-0057);
      *         empty at the root. The full key is a parent-walk concatenation
-     *         (`graph_t`'s `build_key`). */
+     *         (`graph_t`'s `try_build_key`). */
     [[nodiscard]] const path_key_t& name() const noexcept { return name_; }
     /**
      * @brief Whether the lazily-allocated cold extension block EXISTS on this vertex (#361 §1).
