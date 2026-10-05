@@ -109,13 +109,10 @@ link_id_t link_index_t::intern_locked(std::string_view name) {
     // slot `p3` already has rather than stranding it behind a second one.
     if (const std::uint32_t i = find_slot(name); i != kNoSlot)
         return link_id_t{i, slots_[i].generation};
-    // Room on the free list for this slot's eventual release is taken HERE, while a refusal
-    // still costs nothing, so `release_slot` never grows it and can never fail (#1778).
-    if (!free_.reserve(slots_.size() + 1)) return {};
-    std::uint32_t i = 0;
-    if (!free_.empty()) {
-        i = free_.back();
-        free_.pop_back();
+    std::uint32_t i = free_head_;
+    if (i != kNoSlot) {
+        free_head_ = static_cast<std::uint32_t>(slots_[i].e.compacted);
+        slots_[i].e.compacted = 0;
     } else {
         // Grown to EXACTLY what is needed rather than doubled. This runs once per link-up
         // and the figure #1266 is judged on is bytes at rest in the user-pinned arena
@@ -131,7 +128,8 @@ link_id_t link_index_t::intern_locked(std::string_view name) {
     link_slot_t& s = slots_[i];
     if (s.generation == 0) s.generation = 1;  // fresh; a released slot was bumped on release
     if (!name_slot(i, name)) {
-        (void)free_.push_back(i);  // reserved above; the slot stays dead (len == 0)
+        s.e.compacted = free_head_;  // the slot stays dead (len == 0), first to be reused
+        free_head_ = i;
         return {};
     }
     return link_id_t{i, s.generation};
@@ -193,8 +191,8 @@ void link_index_t::release_slot(std::uint32_t i) {
     ++s.generation;
     if (s.generation == 0) s.generation = 1;  // wrapped: 0 is reserved for "no token"
     s.e.vs.clear();
-    s.e.compacted = 0;
-    (void)free_.push_back(i);  // room was reserved when this slot was minted
+    s.e.compacted = free_head_;  // a dead slot's prefix mark is the free list's link
+    free_head_ = i;
 }
 
 /** @brief Record @p v under @p link, by the carried token when it validates. */
@@ -238,7 +236,9 @@ bool link_index_t::index_vertex(std::string_view link, link_id_t token, vertex_t
     // insert a reject (+19% on this path, #1071, from the N/2-pointer shift the Nth
     // subscription paid). A genuinely new vertex still lands with a bare `push_back`.
     if (candidates_contain(e.vs, e.compacted, v)) return true;
-    if (!e.vs.push_back(v)) return false;
+    // A link's FIRST candidate takes a one-pointer block, not the container's opening eight:
+    // most links carry a single subscribed vertex, and the list is per link (#1778).
+    if ((e.vs.capacity() == 0 && !e.vs.reserve(1)) || !e.vs.push_back(v)) return false;
     // With the membership test above the list IS the distinct set, so compaction no longer
     // bounds unbounded growth — nothing can grow it past the vertices this link subscribed
     // on. What it bounds now is the TAIL, i.e. how long the linear half of that test can get:

@@ -128,8 +128,7 @@ class vertex_t;
 class link_index_t {
    public:
     /** @brief An empty index whose tables, per-link lists and names all draw from @p src. */
-    explicit link_index_t(mem::block_source_t& src) noexcept
-        : slots_(src), free_(src), long_names_(src) {}
+    explicit link_index_t(mem::block_source_t& src) noexcept : slots_(src), long_names_(src) {}
 
     /** @brief Non-copyable — the graph holds its one index by value. */
     link_index_t(const link_index_t&) = delete;
@@ -207,7 +206,8 @@ class link_index_t {
                                            *          `[0, compacted)` sorted, then an unsorted
                                            *          tail (@ref index_vertex). */
         std::size_t compacted = 0;        /**< @brief Where the sorted prefix ends — `vs.size()`
-                                           *          as of the last compaction. */
+                                           *          as of the last compaction. On a DEAD
+                                           *          slot, the next free slot (`free_head_`). */
     };
     /** @brief How long a link's UNSORTED tail may get before it is merged into the sorted
      *         prefix — so the membership test's linear half stays a handful of pointers and
@@ -281,15 +281,17 @@ class link_index_t {
     // observable graph state. Guarded by the mutable mutex below.
     /** @brief The dense slot vector, addressed by `link_id_t::slot`. */
     mutable mem::block_array_t<link_slot_t> slots_;
-    /** @brief Released slots awaiting reuse — what keeps a churning node's slot space
-     *         bounded by its CONCURRENT link count instead of by its lifetime's. */
-    mem::block_array_t<std::uint32_t> free_;
+    /** @brief The first released slot awaiting reuse, or `kNoSlot` — what keeps a churning
+     *         node's slot space bounded by its CONCURRENT link count instead of by its
+     *         lifetime's. The list is INTRUSIVE: a dead slot's `e.compacted` holds the next
+     *         one, so releasing a slot draws nothing and cannot be refused (#1778). */
+    std::uint32_t free_head_ = kNoSlot;
     /** @brief Names past `kInlineNameChars`. Empty on every shipped deployment. */
     mem::block_array_t<link_long_name_t> long_names_;
     /** @brief @ref name_lookups's counter. A plain word, not an atomic: every read and write
      *         of it is already inside `mutex_`. */
     std::size_t name_lookups_ = 0;
-    /** @brief Guards `slots_`, `free_` and `long_names_` ONLY. A leaf: never held across a
+    /** @brief Guards `slots_`, `free_head_` and `long_names_` ONLY. A leaf: never held across a
      *         map, stripe, or sweep acquisition, so it orders against nothing else. */
     mutable std::mutex mutex_;
 };
