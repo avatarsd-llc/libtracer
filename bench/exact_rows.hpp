@@ -18,9 +18,14 @@
  *     RESULT writeblocks <owned|rope2> S=<size> seam_x1000=<n> seam_bytes_x1000=<n>
  *            heap_x1000=<n> n=<writes>
  *     RESULT streamlock <case> sections_x1000=<n> heap_x1000=<n> delivered_x1000=<n> n=<writes>
+ *     RESULT slabfoot <what> live_x1000=<n> blocks_x1000=<n> n=<units> (ungated)
  *
  * (`writeblocks` is one line; it is wrapped here only. The `w4` streamlock row has no
  * `heap_x1000` field: see `stream_locks` in exact_rows.cpp.)
+ *
+ * `slabfoot` is the one row nothing gates: the edge probes' window on a DEFAULT graph, whose
+ * tables come from the host slab pool and are counted a whole slab at a time (#1778). The
+ * gated `ramprobe` edge rows draw per object instead; see `ram_edges_on` in exact_rows.cpp.
  *
  * They lead with a field other than `allocs=`, so the history emitter's zeroheap parser does
  * not read them as that series; it charts them through its own parsers.
