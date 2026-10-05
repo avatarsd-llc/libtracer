@@ -20,6 +20,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [0.18.0] — 2026-10-05
 
+No `rmw_tracer`-specific changes. `rmw_tracer` builds against the C++ core, so the core 0.18.0 breaking changes apply when it is rebuilt against this release; see core's 0.18.0 section, in particular `wire::decode`'s removal (readers take `tlv_node_t`), the removed re-export aliases and the build switches that became config traits.
+
 ## [0.17.0] — 2026-10-01
 
 No `rmw_tracer`-specific changes (only documentation citation re-pins). `rmw_tracer` builds against the C++ core, so the core 0.17.0 breaking changes apply when it is rebuilt against this release. See core's 0.17.0 section, in particular the RFC 0028 one-surface API and the opt-in `kBusLinks` and `kSelfHealLinks`.
