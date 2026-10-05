@@ -19,10 +19,11 @@
  *     bench_libtracer's families run, and each family opens its own `Session`. No row inherits
  *     a heap or a session another family aged.
  *   - **The same pin, runtime threads accounted for.** Both binaries inherit one CPU set from
- *     `bench_conditions.py`. Zenoh delivers on its own runtime threads, which share that set
- *     with the publishing thread; libtracer delivers inline on it. A `NOTE zenoh-runtime` line
- *     after each row gives those threads' CPU time over the throughput window, so the share of
- *     the pin that went to the runtime is on the record rather than hidden in the row.
+ *     `bench_conditions.py`, and Zenoh's runtime threads share it with the publishing thread.
+ *     A `NOTE zenoh-runtime` line after each row gives those threads' CPU time over the
+ *     throughput window: 0 ns on the in-process rows, so delivery there runs on the putting
+ *     thread, as libtracer's does. Any share of the pin the runtime takes is on the record
+ *     rather than hidden in the row.
  *   - **Equal payload bytes.** Each put carries @ref bench::value_wire_bytes bytes: the bytes
  *     libtracer moves for the row's value, header included. Rows stay keyed by the value size.
  *   - **Resolution against resolution.** `inproc-path` puts through `Session::put` on a
