@@ -143,10 +143,17 @@ jobs:
       - name: Build main's benchmark on this runner (baseline)
         run: |
           git fetch --no-tags origin main
+          # The baseline is the main this PR was MERGED ONTO (#1864): the merge ref's first
+          # parent, fixed when the run was queued. origin/main at run time can be up to a
+          # queue's length newer, and then any speed-up that landed meanwhile reads as a
+          # regression in the PR. A non-merge HEAD (push to main) keeps origin/main.
+          base=origin/main
+          if [ "$(git rev-list --parents -n 1 HEAD | wc -w)" -eq 3 ]; then base="$(git rev-parse HEAD^1)"; fi
+          echo "baseline: $(git rev-parse "$base") (origin/main is $(git rev-parse origin/main))"
           # The bench host is persistent, unlike a hosted VM: drop the last run's baseline tree.
           git worktree remove --force ../main-baseline 2>/dev/null || true
           rm -rf ../main-baseline; git worktree prune
-          git worktree add --detach ../main-baseline origin/main
+          git worktree add --detach ../main-baseline "$base"
           cmake -S ../main-baseline/bench -B ../main-baseline/bench/build -DCMAKE_BUILD_TYPE=Release
           cmake --build ../main-baseline/bench/build --target bench_libtracer bench_forward_heap \
             bench_compact_delivery bench_forward_demux --parallel "$BUILD_JOBS"
