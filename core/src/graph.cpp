@@ -522,10 +522,15 @@ graph_t::own_pool_t::own_pool_t(mem::block_source_t& src) noexcept {
     // Over the platform heap; none when @p src is injected or the build has no slab pool. A
     // refused pool is a sizing bug, as for every other construction-time draw.
     if (!mem::kSlabPool || !is_default_source(&src)) return;
+    // Page-sized base slabs, not the shared pools' 64 KiB: every default graph opens a slab
+    // per class it touches, so the base slab IS the per-graph floor (64 KiB: 640 KiB for a
+    // graph with one subscribed leaf; 4 KiB: 48 KiB). Tables are control-plane state, so the
+    // extra carves a small slab costs never reach a write.
+    constexpr std::size_t kSlabBytes = 4096;
     pool = mem::make_in<mem::host_pool_t>(
         mem::heap_source(), "tables",
         std::span<const std::size_t, mem::host_pool_t::classes()>(config_t::kSizeClasses),
-        mem::heap_source());
+        mem::heap_source(), kSlabBytes);
     if (pool == nullptr) mem::exhausted_at_init(mem::heap_source(), "graph_t");
 }
 
