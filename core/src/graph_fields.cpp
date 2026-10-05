@@ -318,14 +318,27 @@ void emit_counter(std::vector<std::byte>& out, std::string_view noun, std::uint6
 // and the pin ratio that D3 replaced with `graph_t::set_share_threshold_bytes`).
 
 /** @brief Emit the RFC-0010 §A.4 app-container members into @p out: each declared,
- *         non-`wo` field HOLDING a value, in table order — `NAME <name>` then the stored
- *         TLV bytes verbatim (`wo` has no read surface; unset fields are omitted). */
-void emit_app_container(std::vector<std::byte>& out, const std::vector<app_field_t>& table) {
+ *         non-`wo` field HOLDING a value, in table order — `NAME <name>` then its TLV bytes
+ *         (`wo` has no read surface; unset fields are omitted). A field @p live answers
+ *         (`handlers_t::on_app_field_read`, #1878) lists the owner's bytes instead of the
+ *         stored ones, so the container never disagrees with the named read.
+ *  @return False when @p live answered a refused allocation (BACKPRESSURE). */
+[[nodiscard]] bool emit_app_container(std::vector<std::byte>& out,
+                                      const std::vector<app_field_t>& table,
+                                      const app_field_read_hook_t& live) {
     for (const app_field_t& f : table) {
-        if (f.access == app_access_t::WO || f.value.empty()) continue;
+        if (f.access == app_access_t::WO) continue;
+        const std::optional<value_ref_t> owner = live ? live(f.name) : std::nullopt;
+        if (owner && !*owner) return false;
+        if (!owner && f.value.empty()) continue;
         wire::emit_name(out, f.name);
-        out.insert(out.end(), f.value.begin(), f.value.end());
+        if (!owner)
+            out.insert(out.end(), f.value.begin(), f.value.end());
+        else
+            for (const view::view_t& l : (**owner).links())
+                out.insert(out.end(), l.bytes().begin(), l.bytes().end());
     }
+    return true;
 }
 
 }  // namespace
@@ -716,7 +729,8 @@ struct graph_t::field_surface_t {
      *
      * Past the gate: bare `:settings` is the container (RFC-0022 §4: the nested app record, and
      * nothing else); `:settings.app` is the app container alone; `:settings.app.<name…>` is
-     * one declared field's stored TLV verbatim.
+     * one declared field's stored TLV verbatim, or the owner's live value when its
+     * `on_app_field_read` seam answers (#1878).
      *
      * DIVERGENCE (#869), pinned NOT fixed: `plain_step(steps[0])` is tested HERE and not on
      * the write door, so `:settings[0].app.<name>` is SCHEMA_NOT_FOUND on a read and a
@@ -733,18 +747,25 @@ struct graph_t::field_surface_t {
         if (app == app_sel_t::NONE) return single_link(g.read_settings(v));
         if (app == app_sel_t::CONTAINER) return single_link(g.read_settings_app(v));
         if (app != app_sel_t::NAMED) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+        // ONE locked lookup classifies the field and copies its stored bytes, as before: a
+        // vertex without the owner's read seam pays nothing more for it.
         std::vector<std::byte> bytes;
-        switch (v->app_field_get(key, bytes)) {
-            case vertex_t::app_read_t::UNDECLARED:  // ENOTTY (undeclared) …
-            case vertex_t::app_read_t::WRITE_ONLY:  // … and `wo` has no read
-                // surface either (the secret never mirrors back) — the same
-                // caller-independent identity, deliberately indistinguishable.
-                return std::unexpected(status_t::SCHEMA_NOT_FOUND);
-            case vertex_t::app_read_t::UNSET:  // declared but empty — distinct
-                return std::unexpected(status_t::NOT_FOUND);
-            case vertex_t::app_read_t::OK:
-                break;
-        }
+        const vertex_t::app_read_t got = v->app_field_get(key, bytes);
+        // ENOTTY (undeclared), and `wo` has no read surface either (the secret never mirrors
+        // back) — the same caller-independent identity, deliberately indistinguishable. Both
+        // answer before the owner's read seam is asked, so it never runs on a field without a
+        // read surface and is never an existence oracle.
+        if (got == vertex_t::app_read_t::UNDECLARED || got == vertex_t::app_read_t::WRITE_ONLY)
+            return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+        // The owner's LIVE value (#1878, RFC-0010 Amendment 4) wins over the stored bytes, so
+        // a write the owner did not adopt never reads back as state. A decline reads the
+        // stored bytes; an empty answer is the owner's refused allocation.
+        if (const app_field_read_hook_t live = g.app_field_reader(v); live)
+            if (std::optional<value_ref_t> owner = live(key))
+                return *owner ? result_t<value_ref_t>{std::move(*owner)}
+                              : std::unexpected(status_t::BACKPRESSURE);
+        if (got == vertex_t::app_read_t::UNSET)  // declared but empty — distinct
+            return std::unexpected(status_t::NOT_FOUND);
         // `bytes` is a non-empty stored TLV; `nullopt` is exactly an alloc
         // failure → BACKPRESSURE (the audited alloc/copy/over locus).
         const auto out = view::over_bytes(bytes, *g.value_backend_);
@@ -1173,7 +1194,8 @@ result_t<view::view_t> graph_t::read_settings(vertex_t* v) const {
     const std::vector<app_field_t> table = v->app_fields_snapshot();
     if (!table.empty()) {
         std::vector<std::byte> app_children;
-        emit_app_container(app_children, table);
+        if (!emit_app_container(app_children, table, app_field_reader(v)))
+            return std::unexpected(status_t::BACKPRESSURE);
         wire::emit_name(children, "app");
         wire::emit_tlv(children, type_t::SETTINGS, opt_t{.pl = true}, app_children);
     }
@@ -1194,7 +1216,8 @@ result_t<view::view_t> graph_t::read_settings_app(vertex_t* v) const {
     const std::vector<app_field_t> table = v->app_fields_snapshot();
     if (table.empty()) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
     std::vector<std::byte> children;
-    emit_app_container(children, table);
+    if (!emit_app_container(children, table, app_field_reader(v)))
+        return std::unexpected(status_t::BACKPRESSURE);
     std::vector<std::byte> out;
     wire::emit_tlv(out, type_t::SETTINGS, opt_t{.pl = true}, children);
     // `out` is non-empty by construction (the SETTINGS header at minimum); `nullopt` is
@@ -1202,6 +1225,11 @@ result_t<view::view_t> graph_t::read_settings_app(vertex_t* v) const {
     const auto res = view::over_bytes(out, *value_backend_);
     if (!res) return std::unexpected(status_t::BACKPRESSURE);
     return *res;
+}
+
+app_field_read_hook_t graph_t::app_field_reader(const vertex_t* v) const noexcept {
+    const admission_node_t* adm = v->has_admission() ? admission_for(v) : nullptr;
+    return adm != nullptr ? adm->on_app_field_read : app_field_read_hook_t{};
 }
 
 result_t<view::view_t> graph_t::read_acl(vertex_t* v) const {

@@ -84,7 +84,7 @@ struct hook_t<R(A...)> {     // THE callback idiom (RFC-0028 D10): {fn, ctx}, 16
 };
 thunk(f);                    // hook over a callable you keep alive (a stateless one: any lifetime)
 
-struct handlers_t {                                       // six hooks, 96 B on the host
+struct handlers_t {                                       // seven hooks, 112 B on the host
     hook_t<result_t<value_ref_t>()>                               on_read;    // one read type
     hook_t<result_t<void>(const value_t&, const write_ctx_t&)>    on_write;   // BY REFERENCE
     hook_t<result_t<view_t>()>                                    on_children;
@@ -92,6 +92,7 @@ struct handlers_t {                                       // six hooks, 96 B on 
     hook_t<result_t<view_t>(std::string_view, const view_t&, const write_ctx_t&)>
                                                                   on_app_field_admit;
     hook_t<void(std::string_view, const view_t&)>                 on_app_field_write;
+    hook_t<std::optional<value_ref_t>(std::string_view)>          on_app_field_read; // live
 };                            // keep a value past on_write/on_admit: value_ref_t::keep(value)
 
 using subscriber_fn_t = void (*)(void* ctx, const value_t& value);
