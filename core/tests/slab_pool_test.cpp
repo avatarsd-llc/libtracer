@@ -17,7 +17,11 @@
  *     platform allocator sees whole slabs and nothing else;
  *   - concurrent writers and cross-thread frees through the value sub-pool's per-thread
  *     caches: the tsan lane runs this suite, so a plain-memory race on a class or a cache is
- *     a report.
+ *     a report;
+ *   - #1646: over a bounded root (a `pool_source_t` on a static slab) a power-of-two ladder
+ *     serves a peer-random size distribution with a bounded miss rate and no refusal, where
+ *     the exact-size pool alone on the same slab refuses; the rounding waste is in
+ *     `class_stats`.
  *
  * The instrument for the platform allocator is a counting replacement of the global
  * `operator new` family; it records only while armed, and only sizes.
@@ -39,6 +43,7 @@
 
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_slab_pool.hpp"
+#include "libtracer/mem_source.hpp"
 #include "libtracer/tracer.hpp"
 #include "test_support.hpp"
 #include "test_values.hpp"
@@ -472,6 +477,139 @@ void test_concurrent_writers() {
     check(tr::mem::value_source().stats().refused == 0, "and the pool refused nothing");
 }
 
+/** @brief A power-of-two ladder, 16 B to 1 KiB: the table a peer-sized seam rounds into. */
+constexpr auto kPow2 = tr::graph::size_class_ladder_t<16, 1, 1024>::kTable;
+/** @brief The bounded slab both arms of the peer-size case draw from. */
+constexpr std::size_t kPeerSlab = 256 * 1024;
+/** @brief Requests in the peer-size case. */
+constexpr std::size_t kPeerOps = 200000;
+/** @brief The most blocks the peer-size case keeps live at once. */
+constexpr std::size_t kPeerLive = 64;
+
+/** @brief One live block of the peer-size case. */
+struct peer_block_t {
+    void* p;           /**< @brief The block. */
+    std::size_t bytes; /**< @brief What the peer asked for. */
+    std::byte tag;     /**< @brief The byte it was filled with. */
+};
+
+/** @brief What the peer-size case saw. */
+struct peer_run_t {
+    std::size_t allocs = 0;  /**< @brief Requests made. */
+    std::size_t refused = 0; /**< @brief Of those, answered `nullptr`. */
+};
+
+/**
+ * @brief Drive @p src with a peer-random size distribution (1 B to 1 KiB, uniform, up to
+ *        @ref kPeerLive live), checking every block is still whole when freed.
+ *
+ * @param rounding Called after each step with the bytes the live blocks lose to rounding,
+ *                 as the test computes them from @p class_bytes; may be empty.
+ * @return The requests made and refused.
+ */
+template <typename Src, typename ClassBytes, typename OnStep>
+peer_run_t drive_peer_sizes(Src& src, ClassBytes class_bytes, OnStep on_step) {
+    std::uint64_t x = 0x9E3779B97F4A7C15ULL;
+    const auto next = [&x] {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        return x;
+    };
+    std::array<peer_block_t, kPeerLive> live{};
+    std::size_t n = 0;
+    peer_run_t run;
+    std::size_t rounding = 0;
+    bool whole = true;
+    for (std::size_t op = 0; op < kPeerOps; ++op) {
+        const std::uint64_t r = next();
+        if (n < kPeerLive && (n == 0 || (r & 1U) != 0)) {
+            const std::size_t bytes = 1 + static_cast<std::size_t>((r >> 8) % 1024);
+            void* const p = src.try_alloc(bytes, kAlign);
+            ++run.allocs;
+            if (p == nullptr) {
+                ++run.refused;
+            } else {
+                const auto tag = static_cast<std::byte>(op);
+                std::memset(p, static_cast<int>(tag), bytes);
+                live[n++] = {p, bytes, tag};
+                rounding += class_bytes(bytes) - bytes;
+            }
+        } else {
+            const std::size_t k = static_cast<std::size_t>(r >> 8) % n;
+            const peer_block_t b = live[k];
+            const auto* const q = static_cast<const std::byte*>(b.p);
+            whole = whole && q[0] == b.tag && q[b.bytes - 1] == b.tag;
+            src.release(b.p, b.bytes, kAlign);
+            rounding -= class_bytes(b.bytes) - b.bytes;
+            live[k] = live[--n];
+        }
+        on_step(rounding);
+    }
+    for (std::size_t k = 0; k < n; ++k) src.release(live[k].p, live[k].bytes, kAlign);
+    check(whole, "every block reads back whole when freed: no two blocks overlap");
+    return run;
+}
+
+/** @brief #1646: peer-chosen sizes over a bounded root, laddered versus exact-size. */
+void test_ladder_over_a_bounded_root() {
+    std::printf("slab pool: a ladder over a bounded root, peer-chosen sizes (#1646):\n");
+    using ladder_t = tr::mem::slab_pool_t<tr::no_guard_t, kPow2.size(), /*kCounters=*/true>;
+    alignas(16384) static std::byte slab[kPeerSlab];
+
+    std::size_t draws = 0;
+    {
+        std::array<tr::mem::size_class_t, 8> roots{};
+        tr::mem::pool_source_t<> root{std::span<std::byte>(slab), roots};
+        ladder_t pool("peer", std::span<const std::size_t, kPow2.size()>{kPow2}, root, kBase, 1);
+        const auto class_bytes = [&pool](std::size_t n) {
+            return pool.class_bytes(pool.class_of(n, kAlign));
+        };
+        bool rounding_matches = true;
+        const auto census = [&](std::size_t expect) {
+            std::size_t sum = 0;
+            for (std::size_t i = 0; i < kPow2.size(); ++i) sum += pool.class_stats(i).rounding;
+            rounding_matches = rounding_matches && sum == expect;
+        };
+        const peer_run_t run = drive_peer_sizes(pool, class_bytes, census);
+        for (std::size_t i = 0; i < kPow2.size(); ++i) {
+            const tr::mem::slab_class_stats_t c = pool.class_stats(i);
+            draws += c.slabs + c.released;
+            std::printf("    class %5zu B: %zu slab(s) held, %zu released\n", c.bytes, c.slabs,
+                        c.released);
+        }
+        std::printf(
+            "    ladder: %zu of %zu requests refused, %zu missed to the root (a slab "
+            "draw); root carved %zu of %zu B in %zu exact classes, %zu overflowed\n",
+            run.refused, run.allocs, draws, root.used(), kPeerSlab, root.classes_used(),
+            root.overflowed());
+        check(run.refused == 0 && pool.stats().refused == 0,
+              "the ladder serves every peer-sized request from the bounded slab");
+        check(draws * 100 < run.allocs, "and misses to the root are bounded: under 1 %");
+        check(root.used() <= kPeerSlab / 2, "the root carves under half its slab, then recycles");
+        check(root.classes_used() <= 3 && root.overflowed() == 0,
+              "the root sees only slab sizes, so its exact classes stay degenerate");
+        check(rounding_matches, "class_stats().rounding is the bytes lost to rounding, live");
+        for (std::size_t i = 0; i < kPow2.size(); ++i) {
+            if (pool.class_stats(i).live != 0 || pool.class_stats(i).rounding != 0)
+                rounding_matches = false;
+        }
+        check(rounding_matches, "and every class reads zero once its blocks are back");
+    }
+    {
+        std::array<tr::mem::size_class_t, 64> classes{};
+        tr::mem::pool_source_t<> exact{std::span<std::byte>(slab), classes};
+        const peer_run_t run =
+            drive_peer_sizes(exact, [](std::size_t n) { return n; }, [](std::size_t) {});
+        std::printf(
+            "    exact-size alone: %zu of %zu requests refused, %zu overflowed, %zu "
+            "classes\n",
+            run.refused, run.allocs, exact.overflowed(), exact.classes_used());
+        check(run.refused * 2 > run.allocs,
+              "the exact-size pool alone on the same slab refuses most peer sizes");
+    }
+}
+
 }  // namespace
 
 int main() {
@@ -484,5 +622,6 @@ int main() {
     test_refusal_census();
     test_default_graph_sees_only_slabs();
     test_concurrent_writers();
+    test_ladder_over_a_bounded_root();
     return tr::testing::summary("slab_pool");
 }

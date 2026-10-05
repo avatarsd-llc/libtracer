@@ -406,6 +406,8 @@ Its one limitation is worth knowing before you size a slab: **classes do not sha
 
 So the ~11 % is entirely the inability to reuse a freed block at a different class. A coalescing allocator can do that and still loses, because splitting a remainder under geometric growth rarely produces the size of the next request: re-running the replay with the header zeroed decomposes the gap as **1,088 B of external fragmentation against only 184 B of header**. `classes_used()` and `overflowed()` report what to size the class span against.
 
+That replay is the demand where the *application* chooses the sizes. Where a **peer** chooses them — receive segments, WRITE payloads, label routes — every distinct length is a class of its own, and an exact-size pool overflows its class span and fills its slab with blocks no later request fits. `pool_source_t` gets no rounding mode for it (#1646): the library keeps one size-class vocabulary. Put a `slab_pool_t` in front of it instead, with its root the `pool_source_t`: the slab pool rounds each request up to a row of its table (`size_class_ladder_t`, or a power-of-two table) and asks the bounded pool only for whole slabs, a few power-of-two sizes, so the exact classes are degenerate again and a slab one class frees can serve another. On a peer-random 1 B to 1 KiB load (`core/tests/slab_pool_test.cpp:test_ladder_over_a_bounded_root`), a 256 KiB slab behind a 16 B to 1 KiB power-of-two ladder refused nothing, missing to the root on 155 of 100,025 requests, where the exact-size pool alone on the same slab refused 175,854 of 187,927. The bound is still the `pool_source_t`'s slab. With `kInstrumentCounters`, `slab_pool_t::class_stats(i).rounding` reports the bytes the class's live blocks lose to rounding up.
+
 :::{warning}
 **Own one per receiver; do not share one across receive threads.** A shared free-list pool
 collapses to roughly a fifteenth of its own single-thread rate on a 12-core host
@@ -599,7 +601,7 @@ Each entry: module-set membership, what it wraps, allocation supported, footprin
 - **Locking**: one lock per class through `guard_t`, which compiles away under `no_guard_t`. The value sub-pool puts a per-thread cache in front of its classes; the table and net sub-pools take the class lock per draw.
 - **Census**: `:stats.mem.values`, `.tables` and `.net` ([RFC-0010](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0010-owner-app-fields-and-schema.md) Amendment 3): `in_use` is the slab bytes held — **an oversize value (past the last class, over 64 KiB) is not in it**, so a node holding large values holds more than `in_use` reports — `peak` its high-water mark (summed over the sub-pools in the root's own census, so an upper bound there), `refused` and `largest_refused` the refusals. Per-class detail is behind `kInstrumentCounters`.
 - **When to use**: the host default; nothing to configure.
-- **When to avoid**: a bounded node (inject a `pool_source_t` at the graph); a chip whose allocator has no size-class cliff (bind `kSlabPool = false`, as the ESP-IDF component does).
+- **When to avoid**: as the host default, a bounded node (inject a `pool_source_t` at the graph, or a `slab_pool_t` over one where peers choose the sizes); a chip whose allocator has no size-class cliff (bind `kSlabPool = false`, as the ESP-IDF component does).
 
 ### `mem_pool_static`
 

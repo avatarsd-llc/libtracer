@@ -17,6 +17,7 @@
 #include <cstring>
 #include <new>
 #include <span>
+#include <type_traits>
 
 #include "libtracer/config.hpp"
 #include "libtracer/guard.hpp"
@@ -108,6 +109,10 @@ struct slab_class_stats_t {
     std::size_t live = 0;     /**< @brief Blocks out of the class: handed out, or parked in a
                                    thread cache. */
     std::size_t released = 0; /**< @brief Slabs given back to the root, by the cap or a trim. */
+    std::size_t rounding = 0; /**< @brief Bytes the live blocks lose to rounding up: the class
+                                   size less what each request asked, summed over the blocks
+                                   @ref slab_pool_t::try_alloc handed out (#1646). A block a
+                                   thread cache holds is live but not in it. */
 };
 
 /**
@@ -129,14 +134,20 @@ struct slab_class_stats_t {
  *   slab, on the caller's schedule — the library keeps no timer to do it.
  * - **Oversize.** A request above the last class, or aligned past @ref kHeaderBytes, is its
  *   own block from the root, at its own size, and goes back to the root when freed.
+ * - **Bounded.** Over a bounded root, a @ref pool_source_t on a caller slab, the pool is bounded
+ *   by that slab and never touches a heap. That is the shape for sizes a PEER chooses (receive
+ *   segments, WRITE payloads, label routes; #1646): an exact-size pool gives every distinct
+ *   length a class of its own, where this one rounds it up to a row of the table. The root
+ *   then sees only slab sizes, a few powers of two, so its exact classes are degenerate again,
+ *   and a slab one class frees can serve another.
  * - **Locking.** One lock per class, of type @p Sync. Under `tr::no_guard_t` it is empty and
  *   costs nothing. The slab of a block is found by masking the block's address, and the class
  *   from the sized `release`, so a block carries no header.
  * - **Counting.** The `:stats` census (@ref stats) counts the SLAB bytes this pool takes from its
  *   root — not oversize blocks, which pass through uncounted — and is updated only on the slab
  *   path, never on the block path (`core/STYLE.md`
- *   §Introspection, counting doctrine 1). Per-class detail is @ref class_stats, compiled only
- *   with @p kCounters.
+ *   §Introspection, counting doctrine 1). Per-class detail is @ref class_stats, rounding
+ *   waste included, compiled only with @p kCounters.
  *
  * @tparam Sync     The per-class lock, a `tr::lockable`.
  * @tparam N        Rows in the size-class table.
@@ -229,7 +240,7 @@ class slab_pool_t final : public block_source_t {
         const std::size_t i = class_of(bytes, align);
         if (i == kNoClass) return oversize_alloc(bytes, align);
         void* p = nullptr;
-        (void)take(i, &p, 1, bytes);
+        if (take(i, &p, 1, bytes) == 1) count_rounding(i, bytes_[i] - bytes, true);
         return p;
     }
 
@@ -241,6 +252,7 @@ class slab_pool_t final : public block_source_t {
             return;
         }
         give(i, &p, 1);
+        count_rounding(i, bytes_[i] - bytes, false);
     }
 
     /**
@@ -331,7 +343,7 @@ class slab_pool_t final : public block_source_t {
     {
         class_t& c = cls_[i];
         c.lock.lock();
-        const slab_class_stats_t s{bytes_[i], c.slabs, c.live, c.released};
+        const slab_class_stats_t s{bytes_[i], c.slabs, c.live, c.released, rounding_[i]};
         c.lock.unlock();
         return s;
     }
@@ -517,6 +529,22 @@ class slab_pool_t final : public block_source_t {
     }
 
    private:
+    /** @brief Count the @p bytes one block of class @p i loses to rounding, as it goes out
+     *         (@p out) or comes back. Only with `kCounters`: a build without them keeps the
+     *         block path exactly as it was. */
+    void count_rounding(std::size_t i, std::size_t bytes, bool out) noexcept {
+        if constexpr (kCounters) {
+            class_t& c = cls_[i];
+            c.lock.lock();
+            rounding_[i] = out ? rounding_[i] + bytes : rounding_[i] - bytes;
+            c.lock.unlock();
+        } else {
+            (void)i;
+            (void)bytes;
+            (void)out;
+        }
+    }
+
     /** @brief Add @p n slab bytes to the census and raise the high-water mark. */
     void account(std::size_t n) noexcept {
         const std::size_t now = in_use_.fetch_add(n, std::memory_order_relaxed) + n;
@@ -544,6 +572,12 @@ class slab_pool_t final : public block_source_t {
     std::array<std::size_t, N> slab_{};  /**< @brief Slab size per class. */
     std::array<std::uint8_t, kLookupBytes / kMinAlign + 1> lookup_{}; /**< @brief 16 B -> class. */
     std::array<class_t, N> cls_{};                                    /**< @brief The classes. */
+    /** @brief The empty stand-in for `rounding_` in a build without `kCounters`. */
+    struct no_rounding_t {};
+    /** @brief Rounding bytes of each class's live blocks; no storage without `kCounters`, so
+     *         the pool keeps its size. */
+    [[no_unique_address]] std::conditional_t<kCounters, std::array<std::size_t, N>, no_rounding_t>
+        rounding_{};
     std::atomic<std::size_t> in_use_{0};          /**< @brief Slab bytes held. */
     std::atomic<std::size_t> peak_{0};            /**< @brief High-water of `in_use_`. */
     std::atomic<std::size_t> refused_{0};         /**< @brief Requests answered `nullptr`. */
