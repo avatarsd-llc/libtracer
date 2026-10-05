@@ -261,8 +261,8 @@ struct parsed_fwd_t {
      * reference before storing it (the remote-subscribe arm below).
      */
     std::optional<N> reverse{};
-    std::uint64_t await_timeout = 0; /**< AWAIT only */
-    bool has_await_timeout = false;
+    /** AWAIT only: the request's `await_timeout`, or @ref kDefaultAwaitTimeout when absent. */
+    std::uint64_t await_timeout = static_cast<std::uint64_t>(kDefaultAwaitTimeout.count());
     /**
      * @brief The `src` PATH is present but ZERO-LENGTH — *no reply requested*
      *        (RFC-0004 Amendment 2, #1502/#1491).
@@ -347,7 +347,6 @@ template <class N>
     } else if (p.op == fwd_op_t::AWAIT) {
         if (tail && tail->type() == type_t::VALUE) {
             p.await_timeout = detail::load_le<std::uint64_t>(tail->body());
-            p.has_await_timeout = true;
             tail = ch.next();
         }
     }
@@ -765,15 +764,14 @@ template <class N>
                 const reply_route_t ok = labelled_route();
                 return or_backpressure(
                     assemble_reply(ok, reply_kind_t::RESULT,
-                                   std::span<const std::byte>(wrapper.data(), wll ? 6u : 4u), *subs,
+                                   std::span<const std::byte>(wrapper.data(), wout.p), *subs,
                                    sub_len, egress, mint),
                     ok, egress);
             }
             // One read type (RFC-0028 D11): a `:field` read composes a value, a plain value
             // read hands back a REFERENCE to the published one, and both arrive as a
             // `value_ref_t` the reply assembly reads without copying.
-            result_t<value_ref_t> r =
-                has_field ? graph.read(v, field, subject) : graph.read(v, subject);
+            result_t<value_ref_t> r = graph.read(v, field, subject);  // empty field: the value
             if (!r) return assemble_error_reply(route, r.error(), egress);
             // The composed-root case: graph.read may SUCCEED (a folded ~hundreds-of-links
             // snapshot) yet the reply's own link-table reserve fail on the fragmented heap.
@@ -916,8 +914,7 @@ template <class N>
 
             // The arrival link's catalog identity (#1650) rides the token seam the walk already
             // carries into this frame — no parameter of its own, no lookup, no branch.
-            result_t<void> w = graph.write(v, has_field ? field : field_path_t{}, value.rope,
-                                           subject, link_token.link_kind);
+            result_t<void> w = graph.write(v, field, value.rope, subject, link_token.link_kind);
             // RFC-0004 Amendment 2's whole effect, in one line: the write ran (or was
             // refused by the ACL, or failed) and the terminus stays silent either way. The
             // origin loses per-write backpressure feedback — `or_backpressure` never runs on
@@ -949,9 +946,7 @@ template <class N>
             // `graph_t::await` takes no field parameter at all, so the local API never
             // offered this -- only the wire path decoded a selector it could not honour.
             if (has_field) return assemble_error_reply(route, status_t::SCHEMA_NOT_FOUND, egress);
-            const std::chrono::nanoseconds timeout =
-                req.has_await_timeout ? std::chrono::nanoseconds(req.await_timeout)
-                                      : kDefaultAwaitTimeout;
+            const std::chrono::nanoseconds timeout(req.await_timeout);
             // ADR-0084: with a deferral sink and a caller that can send a later reply, the
             // wait leaves this thread. Blocking here for `timeout` held the receive context of
             // the link the request arrived on, and every frame queued behind it. The READ gate
