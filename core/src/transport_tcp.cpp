@@ -28,7 +28,7 @@ namespace tr::net {
 namespace {
 
 /** @brief The u32-LE length prefix (transport framing) — the framer's, shared verbatim. */
-constexpr std::size_t kPrefixBytes = length_prefix_framer::kPrefixBytes;
+constexpr std::size_t kPrefixBytes = length_prefix_framer_t::kPrefixBytes;
 
 /**
  * @brief Frames are small and latency-sensitive (a READ round-trip is two tiny records); Nagle
@@ -107,8 +107,8 @@ tcp_transport_t::tcp_transport_t(const std::string& peer_host, std::uint16_t pee
     const std::size_t max_frame = config.max_frame;
     const bool defer_recv = config.defer_recv;
     const std::uint32_t liveness_window_ms = config.liveness_window_ms;
-    liveness_window_ms_ = liveness_window_ms;                      // the #838 send bound's source
-    max_frame_ = length_prefix_framer::configured_cap(max_frame);  // tighten-only (#1035)
+    liveness_window_ms_ = liveness_window_ms;                        // the #838 send bound's source
+    max_frame_ = length_prefix_framer_t::configured_cap(max_frame);  // tighten-only (#1035)
     const int fd = ::socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return;
 
@@ -136,7 +136,7 @@ tcp_transport_t::tcp_transport_t(const std::string& peer_host, std::uint16_t pee
     // silently — no dropped_rx(), no malformed_rx(). `defer_recv` hands that ordering back to
     // the owner: the socket is up and its bytes are left on it until `start_receiving()`.
     //
-    // Qualified deliberately (the transport_ws_client spelling): dispatching a virtual from a
+    // Qualified deliberately (the ws_client_transport_t spelling): dispatching a virtual from a
     // constructor would reach THIS class's override anyway (the derived part does not exist
     // yet), so spelling it out is the honest form — a subclass cannot substitute its own
     // bring-up here, and nothing in this call should look as if it could.
@@ -171,8 +171,8 @@ tcp_transport_t::tcp_transport_t(std::uint16_t bind_port, const tcp_config_t& co
     const std::size_t max_frame = config.max_frame;
     const std::size_t recv_stack = config.recv_stack;
     const std::uint32_t liveness_window_ms = config.liveness_window_ms;
-    liveness_window_ms_ = liveness_window_ms;                      // the #838 send bound's source
-    max_frame_ = length_prefix_framer::configured_cap(max_frame);  // tighten-only (#1035)
+    liveness_window_ms_ = liveness_window_ms;                        // the #838 send bound's source
+    max_frame_ = length_prefix_framer_t::configured_cap(max_frame);  // tighten-only (#1035)
     listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
     if (listen_fd_ < 0) return;
 
@@ -329,16 +329,16 @@ void tcp_transport_t::serve(int fd) {
         const std::size_t len = tr::detail::load_le<std::uint32_t>(prefix);
 
         // The framing rules (empty record, over the protocol cap ⇒ malformed,
-        // undeliverable ⇒ backpressure drain) live in length_prefix_framer — one
+        // undeliverable ⇒ backpressure drain) live in length_prefix_framer_t — one
         // home shared with the chunk-fed transports (quic/webtransport). Only the
         // byte source differs: this pull-mode loop reads the body straight off
         // the socket into the accepted segment (ADR-0042 §2/§4 — no library
         // buffer, no copy; feeding recv chunks through feed() would add one).
-        using kind_t = length_prefix_framer::prefix_decision_t::kind_t;
+        using kind_t = length_prefix_framer_t::prefix_decision_t::kind_t;
         // Large frames come with the ingress-loan reserve (RFC-0028 §6.9): the terminus that
         // shares the value out of this frame builds its record in the block, not beside it.
-        auto dec = length_prefix_framer::on_prefix(*backend_, max_frame_, len,
-                                                   graph::kShareThresholdBytes);
+        auto dec = length_prefix_framer_t::on_prefix(*backend_, max_frame_, len,
+                                                     graph::kShareThresholdBytes);
         if (dec.kind == kind_t::EMPTY) continue;  // an empty record carries no TLV — a no-op
         if (dec.kind == kind_t::MALFORMED) {
             // Beyond the protocol cap (corrupt/hostile): count it and tear the
@@ -388,8 +388,8 @@ void tcp_transport_t::run_listen() {
 }
 
 // ---------------------------------------------------------------------------
-// transport_tcp_server — the multi-peer listener.  The slot/poll machinery is
-// slot_server_t's (posix_endpoint.hpp, shared with transport_ws_server since
+// tcp_server_transport_t — the multi-peer listener.  The slot/poll machinery is
+// slot_server_t's (posix_endpoint.hpp, shared with ws_server_transport_t since
 // #871); what lives here is the raw length-prefix stream framing.
 // ---------------------------------------------------------------------------
 
@@ -400,28 +400,28 @@ void tcp_transport_t::run_listen() {
  *
  * The framer is poll-thread-only, like every protocol buffer a slot carries.
  */
-struct transport_tcp_server::session_t : slot_server_t::session_base_t {
-    length_prefix_framer framer; /**< @brief Per-stream u32-LE frame reassembly. */
-    peer_endpoint_t endpoint;    /**< @brief The directed facade `peer_link` returns. */
+struct tcp_server_transport_t::session_t : slot_server_t::session_base_t {
+    length_prefix_framer_t framer; /**< @brief Per-stream u32-LE frame reassembly. */
+    peer_endpoint_t endpoint;      /**< @brief The directed facade `peer_link` returns. */
 };
 
-transport_tcp_server::transport_tcp_server(std::uint16_t bind_port,
-                                           const tcp_server_config_t& config)
+tcp_server_transport_t::tcp_server_transport_t(std::uint16_t bind_port,
+                                               const tcp_server_config_t& config)
     : stream_server_base_t(config.max_peers, config.peer_named, config.liveness_window_ms),
       backend_(config.memory.rx) {
-    max_frame_ = length_prefix_framer::configured_cap(config.max_frame);  // tighten-only (#1035)
+    max_frame_ = length_prefix_framer_t::configured_cap(config.max_frame);  // tighten-only (#1035)
     if (!bind_listen(bind_port)) return;
     start([this] { run(); }, config.recv_stack);
 }
 
-transport_tcp_server::~transport_tcp_server() {
+tcp_server_transport_t::~tcp_server_transport_t() {
     // FIRST: the run() thread dispatches this class's variance points, so it must be
     // joined while the derived object is still whole.  ~slot_server_t closes the listen
     // socket and sweeps the slot fds after this body.
     stop_and_join();
 }
 
-std::unique_ptr<slot_server_t::session_base_t> transport_tcp_server::make_session() {
+std::unique_ptr<slot_server_t::session_base_t> tcp_server_transport_t::make_session() {
     auto slot = std::make_unique<session_t>();
     slot->endpoint.owner_ = this;
     slot->endpoint.slot_ = slot.get();
@@ -429,29 +429,29 @@ std::unique_ptr<slot_server_t::session_base_t> transport_tcp_server::make_sessio
     return slot;
 }
 
-bool transport_tcp_server::on_accept(session_base_t& s, int fd) {
+bool tcp_server_transport_t::on_accept(session_base_t& s, int fd) {
     set_nodelay(fd);
     static_cast<session_t&>(s).framer.reset();
     // No handshake phase: the peer is open the moment it is accepted.
     return true;
 }
 
-void transport_tcp_server::on_slot_publishing() {
+void tcp_server_transport_t::on_slot_publishing() {
     if constexpr (graph::kFaultInjection) {
         if (detail::tcp_peer_publishing_hook != nullptr) detail::tcp_peer_publishing_hook();
     }
 }
 
-void transport_tcp_server::on_slot_reset(session_base_t& s) {
+void tcp_server_transport_t::on_slot_reset(session_base_t& s) {
     static_cast<session_t&>(s).framer.reset();
 }
 
-void transport_tcp_server::send(std::span<const std::byte> frame) {
+void tcp_server_transport_t::send(std::span<const std::byte> frame) {
     const std::span<const std::byte> one[1] = {frame};
     send(std::span<const std::span<const std::byte>>(one));
 }
 
-void transport_tcp_server::send(std::span<const std::span<const std::byte>> iov) {
+void tcp_server_transport_t::send(std::span<const std::span<const std::byte>> iov) {
     // Build the record ONCE, then hand the gather to the shared fan-out, which writes
     // it to every peer under the header lock order (peers_m_ → write_m_) — the gather
     // is read-only, so no per-peer copy is taken (#932).
@@ -465,12 +465,13 @@ void transport_tcp_server::send(std::span<const std::span<const std::byte>> iov)
     dropped_tx_.fetch_add(broadcast_iov(rec.span()), std::memory_order_relaxed);
 }
 
-void transport_tcp_server::peer_endpoint_t::send(std::span<const std::byte> frame) {
+void tcp_server_transport_t::peer_endpoint_t::send(std::span<const std::byte> frame) {
     const std::span<const std::byte> one[1] = {frame};
     send(std::span<const std::span<const std::byte>>(one));
 }
 
-void transport_tcp_server::peer_endpoint_t::send(std::span<const std::span<const std::byte>> iov) {
+void tcp_server_transport_t::peer_endpoint_t::send(
+    std::span<const std::span<const std::byte>> iov) {
     if (owner_ == nullptr || slot_ == nullptr) return;
     // The single-fd twin of the broadcast override: one gathered record, one peer.
     const prefixed_iov_t rec(iov, tcp_transport_t::kMaxFrame, owner_->egress_source());
@@ -494,8 +495,8 @@ void transport_tcp_server::peer_endpoint_t::send(std::span<const std::span<const
         owner_->dropped_tx_.fetch_add(1, std::memory_order_relaxed);
 }
 
-void transport_tcp_server::on_readable(session_base_t& base, const std::byte* data,
-                                       std::size_t len) {
+void tcp_server_transport_t::on_readable(session_base_t& base, const std::byte* data,
+                                         std::size_t len) {
     session_t& s = static_cast<session_t&>(base);
     // Feed the chunk through the slot's reassembler; each completed frame is
     // delivered inline.  Tier select per frame: the constructed MODE picks the

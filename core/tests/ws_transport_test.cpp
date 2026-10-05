@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * A transport_ws_server binds an
+ * A ws_server_transport_t binds an
  * ephemeral localhost port; the test drives it with a raw TCP client: send a
  * correct RFC 6455 Upgrade request, verify the 101 response carries the right
  * Sec-WebSocket-Accept (cross-checked with ws::accept_key), then (a) send a
@@ -14,12 +14,12 @@
  * BINARY frame ws::decode_frame()s to those bytes. Built under TSan (recv thread
  * + receiver handoff) and ASan+UBSan.
  *
- * A second test wires a transport_ws_client into a transport_ws_server and
+ * A second test wires a ws_client_transport_t into a ws_server_transport_t and
  * asserts a full round trip (client.send → server receiver, server.send → client
  * receiver) — the real integration test for the dial-out (client) half (#54).
  *
  * The last group inverts the roles: a raw socket acts as a HOSTILE SERVER and our
- * transport_ws_client dials it, which is the only way to reach the client's own control-frame
+ * ws_client_transport_t dials it, which is the only way to reach the client's own control-frame
  * reply and teardown paths over a socket (#1010).
  */
 
@@ -183,7 +183,7 @@ bool raw_handshake(int cfd) {
  * @brief A peer is OPEN to senders the instant its `101` is on the wire — the handshake
  *        window is closed, proven by holding it open rather than by racing for it.
  *
- * `transport_ws_server::on_readable` writes the `101 Switching Protocols` response and
+ * `ws_server_transport_t::on_readable` writes the `101 Switching Protocols` response and
  * publishes the slot
  * (`open = true`) inside ONE `write_m_` critical section. Store `open` after that lock is
  * released and there is a window in which the peer has already read the response — so it
@@ -202,7 +202,7 @@ bool raw_handshake(int cfd) {
 void test_peer_open_before_response_is_readable() {
     std::printf("transport_ws server — a peer is open to senders the instant its 101 lands:\n");
 
-    tr::net::transport_ws_server server(0);
+    tr::net::ws_server_transport_t server(0);
     check(server.ok(), "listen socket bound");
 
     // The parked window. `reached` is set on the server's poll thread; `released` is set by
@@ -284,7 +284,7 @@ void test_fragmented_message_rope() {
     std::promise<tr::view::rope_t> got;
     auto fut = got.get_future();
     auto rope_rx = [&](tr::view::rope_t msg) { got.set_value(std::move(msg)); };
-    tr::net::transport_ws_server server(0);
+    tr::net::ws_server_transport_t server(0);
     check(server.ok() && server.delivers_ropes(), "server up; delivers_ropes() is true");
 
     server.set_rope_receiver(rope_rx);
@@ -333,7 +333,7 @@ void test_fragmented_message_span() {
     auto rx = [&](std::span<const std::byte> f) {
         got.set_value(std::vector<std::byte>(f.begin(), f.end()));
     };
-    tr::net::transport_ws_server server(0);
+    tr::net::ws_server_transport_t server(0);
     check(server.ok(), "server up");
 
     server.set_receiver(rx);
@@ -382,7 +382,7 @@ void test_reserved_frame_between_fragments_fails_the_connection() {
     auto rx = [&](std::span<const std::byte> f) {
         got.set_value(std::vector<std::byte>(f.begin(), f.end()));
     };
-    tr::net::transport_ws_server server(0);
+    tr::net::ws_server_transport_t server(0);
     check(server.ok(), "server up");
     server.set_receiver(rx);
 
@@ -417,7 +417,7 @@ void test_handshake_and_frames() {
     auto rx = [&](std::span<const std::byte> f) {
         got.set_value(std::vector<std::byte>(f.begin(), f.end()));
     };
-    tr::net::transport_ws_server server(0);
+    tr::net::ws_server_transport_t server(0);
     check(server.ok(), "listen socket bound");
     const std::uint16_t port = server.local_port();
     check(port != 0, "ephemeral port resolved");
@@ -503,7 +503,7 @@ void test_handshake_and_frames() {
 void test_scatter_gather_send() {
     std::printf("transport_ws server — scatter-gather send(iov) zero-copy egress:\n");
 
-    tr::net::transport_ws_server server(0);
+    tr::net::ws_server_transport_t server(0);
     check(server.ok(), "listen socket bound");
     const std::uint16_t port = server.local_port();
 
@@ -550,8 +550,8 @@ void test_scatter_gather_send() {
 }
 
 /**
- * @brief Two real transport_t endpoints over a live WS connection: a transport_ws_server and a
- *        transport_ws_client dialing into it.
+ * @brief Two real transport_t endpoints over a live WS connection: a ws_server_transport_t and a
+ *        ws_client_transport_t dialing into it.
  *
  * Asserts a FULL round trip — the
  * client's MASKED BINARY frame surfaces at the server's receiver as exact bytes,
@@ -573,14 +573,14 @@ void test_client_server_roundtrip() {
         cli_got.set_value(std::vector<std::byte>(f.begin(), f.end()));
     };
 
-    tr::net::transport_ws_server server(0);
+    tr::net::ws_server_transport_t server(0);
     check(server.ok(), "server listen socket bound");
     const std::uint16_t port = server.local_port();
     check(port != 0, "ephemeral port resolved");
 
     server.set_receiver(srv_rx);
 
-    tr::net::transport_ws_client client("127.0.0.1", port);
+    tr::net::ws_client_transport_t client("127.0.0.1", port);
     check(client.ok(), "client connected + 101 Sec-WebSocket-Accept verified");
 
     client.set_receiver(cli_rx);
@@ -673,16 +673,16 @@ void test_multi_peer_bus() {
     frame_sink_t a_sink;
     frame_sink_t b_sink;
 
-    tr::net::transport_ws_server server(0, {.peer_named = true});
+    tr::net::ws_server_transport_t server(0, {.peer_named = true});
     check(server.ok(), "listen socket bound");
     const std::uint16_t port = server.local_port();
     check(server.bus() != nullptr, "peer_named server exposes the bus_link_t facet (ADR-0044)");
     srv_sink.bus = server.bus();
     server.bus()->set_peer_receiver(srv_sink);
 
-    tr::net::transport_ws_client a("127.0.0.1", port);
+    tr::net::ws_client_transport_t a("127.0.0.1", port);
     a.set_receiver(a_sink);
-    std::optional<tr::net::transport_ws_client> b;
+    std::optional<tr::net::ws_client_transport_t> b;
     b.emplace("127.0.0.1", port);
     b->set_receiver(b_sink);
     check(a.ok() && b->ok(), "TWO clients connected concurrently (listen(fd,1) era over)");
@@ -756,7 +756,7 @@ void test_multi_peer_bus() {
     }
 
     // --- slot recycling: a new session lands in the freed slot and REUSES its name ---
-    std::optional<tr::net::transport_ws_client> c;
+    std::optional<tr::net::ws_client_transport_t> c;
     c.emplace("127.0.0.1", port);
     frame_sink_t c_sink;
     c->set_receiver(c_sink);
@@ -780,22 +780,22 @@ void test_multi_peer_bus() {
 void test_max_peers_cap() {
     std::printf("transport_ws server — max_peers admission cap (#362):\n");
 
-    tr::net::transport_ws_server server(0, {.max_peers = 1});
+    tr::net::ws_server_transport_t server(0, {.max_peers = 1});
     check(server.ok(), "capped server bound");
     const std::uint16_t port = server.local_port();
 
-    std::optional<tr::net::transport_ws_client> a;
+    std::optional<tr::net::ws_client_transport_t> a;
     a.emplace("127.0.0.1", port);
     check(a->ok(), "first client admitted");
 
-    const tr::net::transport_ws_client b("127.0.0.1", port);
+    const tr::net::ws_client_transport_t b("127.0.0.1", port);
     check(!b.ok(), "second client refused cleanly at the cap (handshake never completes)");
 
     a.reset();  // departure frees the slot...
     const auto deadline = std::chrono::steady_clock::now() + 2s;
     bool readmitted = false;
     while (!readmitted && std::chrono::steady_clock::now() < deadline) {
-        const tr::net::transport_ws_client c("127.0.0.1", port);
+        const tr::net::ws_client_transport_t c("127.0.0.1", port);
         readmitted = c.ok();
         if (!readmitted) std::this_thread::sleep_for(50ms);
     }
@@ -812,15 +812,15 @@ void test_close_peer() {
     frame_sink_t a_sink;
     frame_sink_t b_sink;
 
-    tr::net::transport_ws_server server(0, {.max_peers = 2, .peer_named = true});
+    tr::net::ws_server_transport_t server(0, {.max_peers = 2, .peer_named = true});
     check(server.ok(), "listen socket bound");
     const std::uint16_t port = server.local_port();
     srv_sink.bus = server.bus();
     server.bus()->set_peer_receiver(srv_sink);
 
-    tr::net::transport_ws_client a("127.0.0.1", port);
+    tr::net::ws_client_transport_t a("127.0.0.1", port);
     a.set_receiver(a_sink);
-    std::optional<tr::net::transport_ws_client> b;
+    std::optional<tr::net::ws_client_transport_t> b;
     b.emplace("127.0.0.1", port);
     b->set_receiver(b_sink);
     check(a.ok() && b->ok(), "two clients connected");
@@ -866,7 +866,7 @@ void test_close_peer() {
     const auto rd = std::chrono::steady_clock::now() + 2s;
     bool readmitted = false;
     while (!readmitted && std::chrono::steady_clock::now() < rd) {
-        const tr::net::transport_ws_client c("127.0.0.1", port);
+        const tr::net::ws_client_transport_t c("127.0.0.1", port);
         readmitted = c.ok();
         if (!readmitted) std::this_thread::sleep_for(50ms);
     }
@@ -881,7 +881,7 @@ void test_close_peer() {
  *
  * `bus()` returning nullptr is the contract "this link has no peer-named tier", but
  * `bus_link_t` is a PUBLIC base, so `set_peer_receiver` is reachable by an explicit upcast
- * — and before #889 that flipped `transport_ws_server::on_readable` into peer-named
+ * — and before #889 that flipped `ws_server_transport_t::on_readable` into peer-named
  * delivery, because its tier select read `peer_rx_.has_any()`. The refusal lives in
  * `bus_link_t` (so the upcast cannot dodge it) and the tier select reads `peer_named_`.
  *
@@ -907,17 +907,17 @@ void test_flat_server_rejects_peer_receiver() {
     frame_sink_t flat_sink;
     peer_sink_t forced_peer_sink;
 
-    tr::net::transport_ws_server server(0);
+    tr::net::ws_server_transport_t server(0);
     check(server.ok(), "flat server bound");
     check(server.bus() == nullptr, "flat server exposes no bus facet (peer_named=false)");
-    static_assert(std::is_base_of_v<tr::net::bus_link_t, tr::net::transport_ws_server> == kBus,
+    static_assert(std::is_base_of_v<tr::net::bus_link_t, tr::net::ws_server_transport_t> == kBus,
                   "the facet is a base of a listener iff this build carries the bus module");
     server.set_receiver(flat_sink);
     // The out-of-contract path itself: the public base, named explicitly. A member-shadowing
     // guard would not catch this call, so the refusal has to live in bus_link_t.
     if constexpr (kBus) force_peer_sink(server, forced_peer_sink);
 
-    tr::net::transport_ws_client client("127.0.0.1", server.local_port());
+    tr::net::ws_client_transport_t client("127.0.0.1", server.local_port());
     check(client.ok(), "client connected + 101 verified");
 
     const std::array<std::byte, 3> payload{std::byte{0x01}, std::byte{0x02}, std::byte{0x03}};
@@ -952,13 +952,13 @@ void test_peer_named_server_does_not_downgrade_to_flat() {
     frame_sink_t flat_sink;
     peer_sink_t peer_sink;
 
-    tr::net::transport_ws_server server(0, {.peer_named = true});
+    tr::net::ws_server_transport_t server(0, {.peer_named = true});
     check(server.ok(), "peer-named server bound");
     check(server.bus() != nullptr, "peer-named server exposes the bus facet");
     // The WRONG tier for this mode, and the only one wired.
     server.set_receiver(flat_sink);
 
-    tr::net::transport_ws_client client("127.0.0.1", server.local_port());
+    tr::net::ws_client_transport_t client("127.0.0.1", server.local_port());
     check(client.ok(), "client connected + 101 verified");
     const std::array<std::byte, 2> first{std::byte{0x0A}, std::byte{0x0B}};
     client.send(first);
@@ -997,12 +997,12 @@ void append_server_frame(std::vector<std::byte>& out, ws::opcode_t op,
 /**
  * @brief #1020 — bytes the server pipelines behind its `101` reach the frame stream.
  *
- * `transport_ws_client::handshake` reads the response into a buffer of its own until
+ * `ws_client_transport_t::handshake` reads the response into a buffer of its own until
  * CRLFCRLF, and a single `recv` routinely returns the `101` AND whatever the server sent
  * straight after it — which is what a server that pushes state on connect does. Those
  * bytes are off the socket; if the handshake drops them nothing can ever read them back,
  * and the frame vanishes with no counter moving. The accept side has carried them over
- * since it grew a second peer (`transport_ws_server::on_readable`); this is the DIAL side
+ * since it grew a second peer (`ws_server_transport_t::on_readable`); this is the DIAL side
  * of that rule.
  *
  * The peer here writes the `101`, a complete PING, and the FIRST fragment of a BINARY
@@ -1110,7 +1110,7 @@ void test_frame_pipelined_behind_the_101() {
     // The sink outlives the transport that delivers to it (this file's destruction idiom).
     frame_sink_t sink;
     {
-        tr::net::transport_ws_client client("127.0.0.1", ntohs(bound.sin_port));
+        tr::net::ws_client_transport_t client("127.0.0.1", ntohs(bound.sin_port));
         check(client.ok(), "the client completed its opening handshake");
         client.set_receiver(sink);
         receiver_ready.set_value();
@@ -1260,8 +1260,8 @@ void test_push_on_connect_waits_for_start_receiving() {
     // The sink outlives the transport that delivers to it (this file's destruction idiom).
     frame_sink_t sink;
     {
-        tr::net::transport_ws_client client("127.0.0.1", ntohs(bound.sin_port),
-                                            {.defer_recv = true});
+        tr::net::ws_client_transport_t client("127.0.0.1", ntohs(bound.sin_port),
+                                              {.defer_recv = true});
         check(client.ok(), "the deferred client completed its opening handshake");
         check(one_write_fut.wait_for(3s) == std::future_status::ready && one_write_fut.get(),
               "the peer put the 101 and a COMPLETE pushed message in ONE write");
@@ -1431,7 +1431,7 @@ struct control_breach_outcome_t {
 };
 
 /**
- * @brief Dial a `%transport_ws_client` at a raw socket acting as a HOSTILE SERVER, feed it
+ * @brief Dial a `%ws_client_transport_t` at a raw socket acting as a HOSTILE SERVER, feed it
  *        @p breach, and collect what the client did about it.
  *
  * `defer_recv` is what makes this deterministic rather than a race: the breach is written
@@ -1487,7 +1487,7 @@ control_breach_outcome_t drive_control_breach(std::span<const std::byte> breach)
     down_latch_t latch;
     frame_sink_t sink;
     {
-        tr::net::transport_ws_client client("127.0.0.1", port, {.defer_recv = true});
+        tr::net::ws_client_transport_t client("127.0.0.1", port, {.defer_recv = true});
         out.handshaken = client.ok();
         out.link_up_before = client.link_up();
         out.malformed_before = client.malformed_rx();
@@ -1586,7 +1586,7 @@ void test_client_answers_a_control_frame_at_the_bound_masked() {
     down_latch_t latch;
     frame_sink_t sink;
     {
-        tr::net::transport_ws_client client("127.0.0.1", port, {.defer_recv = true});
+        tr::net::ws_client_transport_t client("127.0.0.1", port, {.defer_recv = true});
         check(client.ok(), "the client completed its opening handshake");
         client.set_receiver(sink);
         client.set_down_notifier(&down_latch_t::notify, &latch);

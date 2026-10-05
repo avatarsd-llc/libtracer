@@ -3,7 +3,7 @@
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
  * The rope-source cursor + rope validator (ADR-0048 §1): the link-walking twin of
- * grammar::span_cursor. It satisfies the same structural cursor concept the one
+ * grammar::span_cursor_t. It satisfies the same structural cursor concept the one
  * grammar core (`%grammar.hpp`) reads through, so the identical header/trailer rules
  * validate a frame delivered as a scatter-gather rope (CAN reassembly, WS
  * fragments) WITHOUT first flattening it — a header or trailer that straddles a
@@ -44,7 +44,7 @@
 namespace tr::wire::grammar {
 
 /**
- * @brief The rope byte-source cursor — the link-walking twin of `span_cursor`.
+ * @brief The rope byte-source cursor — the link-walking twin of `span_cursor_t`.
  *
  * Reads the grammar's bytes across an ordered chain of @ref view::view_t links so
  * the same `parse_header` rules serve a scatter-gather frame. A window of @ref size
@@ -69,13 +69,13 @@ namespace tr::wire::grammar {
  * @warning Reads dereference link bytes on the CPU, so every link must be HOST
  *          (@ref view::rope_t::all_host). `validate_rope` enforces this.
  */
-class rope_cursor {
+class rope_cursor_t {
    public:
     /** @brief An empty cursor (zero bytes) — the walk-stack inline-slot default. */
-    rope_cursor() noexcept = default;
+    rope_cursor_t() noexcept = default;
 
     /** @brief A cursor over the whole of rope @p r. */
-    explicit rope_cursor(const view::rope_t& r) noexcept
+    explicit rope_cursor_t(const view::rope_t& r) noexcept
         : links_(r.links()), size_(r.total_length()) {}
 
     /**
@@ -88,9 +88,9 @@ class rope_cursor {
      * @note Precondition: the anchor names a byte the chain holds (or its exact end,
      *       for an empty window) and @p len bytes follow it.
      */
-    [[nodiscard]] static rope_cursor at(std::span<const view::view_t> links, std::size_t li,
-                                        std::size_t intra, std::size_t len) noexcept {
-        rope_cursor c;
+    [[nodiscard]] static rope_cursor_t at(std::span<const view::view_t> links, std::size_t li,
+                                          std::size_t intra, std::size_t len) noexcept {
+        rope_cursor_t c;
         c.links_ = links;
         c.li_ = li;
         c.intra_ = intra;
@@ -135,15 +135,15 @@ class rope_cursor {
      * link. Used to descend into a node's children region exactly as `decode_into`
      * `subspan`s the payload.
      * @note Precondition: `off + len <= size()` (debug-asserted) — the same
-     *       containment contract `span_cursor::region` gets for free from
+     *       containment contract `span_cursor_t::region` gets for free from
      *       `std::span::subspan`, and that @ref view::view_t::subview asserts.
      */
-    [[nodiscard]] rope_cursor region(std::size_t off, std::size_t len) const noexcept {
+    [[nodiscard]] rope_cursor_t region(std::size_t off, std::size_t len) const noexcept {
         // Precondition, enforced in debug builds (zero release cost; fuzz + sanitizer CI
         // catches a violation): the sub-window must lie within this cursor's window. An
         // unclamped region would otherwise let a cursor claim bytes that do not exist.
         assert(off + len <= size());
-        rope_cursor c = *this;
+        rope_cursor_t c = *this;
         c.size_ = len;
         // Fast path — the sub-window opens inside the SAME link. This is what a header
         // region is on any rope whose links are larger than a TLV header, so it must not
@@ -290,6 +290,9 @@ class rope_cursor {
     // cursor trivially copyable, as the walk stack's relocation memcpy needs.
     mutable bool poisoned_ = false;
 };
+
+/** @brief The pre-v0.18.0 spelling of @ref rope_cursor_t; removed in v0.19.0 (#1723). */
+using rope_cursor = rope_cursor_t;
 
 }  // namespace tr::wire::grammar
 

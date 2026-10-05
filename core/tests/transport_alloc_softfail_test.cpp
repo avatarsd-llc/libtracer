@@ -32,14 +32,14 @@
  *   - ws client `send(span)` — the one nothrow twin (A5);
  *   - tcp `send(iov)` and the multi-peer broadcast scratch;
  *   - udp `send(iov)`;
- *   - can `transport_can::send` — its advertise (A1 — the allocation is DELETED, not
+ *   - can `can_transport_t::send` — its advertise (A1 — the allocation is DELETED, not
  *     guarded, so the case is an allocation BUDGET on the transport, not a drop leg);
  *   - the oversized / non-final control frame fails the connection instead of being echoed.
  *
  * ## What this harness deliberately does NOT gate: three sites, named
  *
  * **The two PING→PONG call sites.** The two PONG replies
- * (`transport_ws_server::drain_frames`'s `PING` case — reached only from `on_readable` —
+ * (`ws_server_transport_t::drain_frames`'s `PING` case — reached only from `on_readable` —
  * and the client `serve` loop's) build
  * their frame with `ws::encode_server_control` / `ws::encode_client_control` into a stack
  * `std::array`. That the ENCODERS allocate nothing is gated — `bench_failable_census guard`
@@ -51,7 +51,7 @@
  * also arm the transports' unrelated receive allocations and make every case here flaky — a
  * worse instrument than the census arm plus this note.
  *
- * **`transport_can::emit_hello`'s dropped `hello.path = cfg_.path`.** #848 dropped the same
+ * **`can_transport_t::emit_hello`'s dropped `hello.path = cfg_.path`.** #848 dropped the same
  * `std::string` path copy in TWO places, and only one of them is gated. MEASURED, by putting
  * each line back and rebuilding:
  *   - `send_impl`'s `adv.path = cfg_.path` restored => A1 REDDENS (91 PASS / 1 FAIL, rc=1):
@@ -370,7 +370,7 @@ bool raw_handshake(int cfd) {
  * (The peer's routable `p<slot>` name is stamped at accept regardless of the server's
  * `peer_named` setting, so this works on a default server too.)
  */
-[[nodiscard]] bool wait_for_peers(const tr::net::transport_ws_server& server, std::size_t want,
+[[nodiscard]] bool wait_for_peers(const tr::net::ws_server_transport_t& server, std::size_t want,
                                   std::chrono::milliseconds budget) {
     const auto deadline = std::chrono::steady_clock::now() + budget;
     while (std::chrono::steady_clock::now() < deadline) {
@@ -407,7 +407,7 @@ std::vector<std::span<const std::byte>> wide_gather(const std::vector<std::byte>
  */
 void test_ws_server_send_span_is_allocation_free() {
     std::printf("ws server send(span) — allocation-free (A2/A3):\n");
-    tr::net::transport_ws_server server(0);
+    tr::net::ws_server_transport_t server(0);
     check(server.ok(), "server bound");
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
@@ -441,7 +441,7 @@ void test_ws_server_send_span_is_allocation_free() {
  */
 void test_ws_server_send_iov_overflow_drops() {
     std::printf("ws server send(iov) — overflow gather drops, node lives (B1/B2):\n");
-    tr::net::transport_ws_server server(0);
+    tr::net::ws_server_transport_t server(0);
     check(server.ok(), "server bound");
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
@@ -496,7 +496,7 @@ void test_ws_server_send_iov_overflow_drops() {
 void test_ws_peer_endpoint_send_iov_overflow_drops() {
     std::printf(
         "ws peer_endpoint send — directed span allocates nothing, gather drops (A2/A3/B1):\n");
-    tr::net::transport_ws_server server(0, {.peer_named = true});
+    tr::net::ws_server_transport_t server(0, {.peer_named = true});
     check(server.ok(), "peer-named server bound");
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
@@ -570,7 +570,7 @@ void test_ws_client_send_drops_then_recovers() {
     std::printf("ws client send(span) — nothrow twin drops, link recovers (A5):\n");
     sink_t at_server;
     auto srv_rx = [&](std::span<const std::byte> f) { at_server.push(f); };
-    tr::net::transport_ws_server server(0);
+    tr::net::ws_server_transport_t server(0);
     check(server.ok(), "server bound");
     server.set_receiver(srv_rx);
 
@@ -581,7 +581,7 @@ void test_ws_client_send_drops_then_recovers() {
     // client would be 0 and every injection point would be vacuous.
     std::size_t n_allocs = 0;
     {
-        tr::net::transport_ws_client probe("127.0.0.1", server.local_port());
+        tr::net::ws_client_transport_t probe("127.0.0.1", server.local_port());
         check(probe.ok(), "ws probe client handshaken");
         n_allocs = count_allocs([&] { probe.send(payload); });
         check(at_server.wait_for(1, 2s), "the unrefused baseline frame arrived");
@@ -597,7 +597,7 @@ void test_ws_client_send_drops_then_recovers() {
 
     // EVERY injection point, each on a client whose tx_buf_ is still COLD.
     for (std::size_t k = 1; k <= n_allocs; ++k) {
-        tr::net::transport_ws_client client("127.0.0.1", server.local_port());
+        tr::net::ws_client_transport_t client("127.0.0.1", server.local_port());
         check(client.ok(), "ws client handshaken");
         const bool escaped = escapes_at(k, [&] { client.send(payload); });
         check(!escaped, "send with the frame-buffer growth refused does not throw");
@@ -605,7 +605,7 @@ void test_ws_client_send_drops_then_recovers() {
     std::this_thread::sleep_for(150ms);
     check(at_server.n() == 1, "every refused frame was DROPPED (only the baseline arrived)");
 
-    tr::net::transport_ws_client client("127.0.0.1", server.local_port());
+    tr::net::ws_client_transport_t client("127.0.0.1", server.local_port());
     check(client.ok(), "ws client handshaken");
     client.send(payload);
     check(at_server.wait_for(2, 2s), "the node is LIVE: the next send arrives");
@@ -660,7 +660,7 @@ void test_tcp_server_broadcast_scratch_drops() {
     std::printf("tcp server broadcast — record gather drops, node lives:\n");
     sink_t at_peer;
     auto peer_rx = [&](std::span<const std::byte> f) { at_peer.push(f); };
-    tr::net::transport_tcp_server server(0);
+    tr::net::tcp_server_transport_t server(0);
     check(server.ok(), "tcp server bound");
     tr::net::tcp_transport_t peer("127.0.0.1", server.local_port());
     check(peer.ok(), "peer connected");
@@ -691,7 +691,7 @@ void test_tcp_server_broadcast_scratch_drops() {
 /** @brief The datagram gather's overflow store: refuse it and the datagram drops. */
 /**
  * @brief `transport_t::send(iov)`'s DEFAULT body — the gather every transport that does not
- *        override it lands on, `transport_can` and any embedder's included.
+ *        override it lands on, `can_transport_t` and any embedder's included.
  *
  * `compact_cache_test` already drives this path's drop leg through `probe_fail_hook`, but a
  * hook the code consults by hand cannot see an allocation the code makes without asking:
@@ -892,7 +892,7 @@ void test_tcp_server_iov_uses_injected_egress_source() {
     std::printf("tcp server broadcast + directed facade — draw from the injected store:\n");
     sink_t at_peer;
     auto peer_rx = [&](std::span<const std::byte> f) { at_peer.push(f); };
-    tr::net::transport_tcp_server server(0, {.peer_named = true});
+    tr::net::tcp_server_transport_t server(0, {.peer_named = true});
     check(server.ok(), "peer-named tcp server bound");
     tr::net::tcp_transport_t peer("127.0.0.1", server.local_port());
     check(peer.ok(), "peer connected");
@@ -958,7 +958,7 @@ void test_udp_send_iov_uses_injected_egress_source() {
 /** @brief ws's broadcast gather, and its directed facade's `owner_->` spelling. */
 void test_ws_server_iov_uses_injected_egress_source() {
     std::printf("ws server broadcast + directed facade — draw from the injected store:\n");
-    tr::net::transport_ws_server server(0, {.peer_named = true});
+    tr::net::ws_server_transport_t server(0, {.peer_named = true});
     check(server.ok(), "peer-named ws server bound");
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
@@ -1026,7 +1026,7 @@ void test_ws_client_tx_buf_uses_injected_egress_source() {
     std::printf("ws client tx_buf_ — drawn from the CONSTRUCTOR's store (#873):\n");
     sink_t at_server;
     auto srv_rx = [&](std::span<const std::byte> f) { at_server.push(f); };
-    tr::net::transport_ws_server server(0);
+    tr::net::ws_server_transport_t server(0);
     check(server.ok(), "server bound");
     server.set_receiver(srv_rx);
 
@@ -1035,7 +1035,7 @@ void test_ws_client_tx_buf_uses_injected_egress_source() {
     // The BASELINE, and the non-vacuous half: an un-injected client's cold send draws exactly
     // one block from the process heap. If this ever reads 0 the arm below proves nothing.
     {
-        tr::net::transport_ws_client bare("127.0.0.1", server.local_port());
+        tr::net::ws_client_transport_t bare("127.0.0.1", server.local_port());
         check(bare.ok(), "un-injected ws client handshaken");
         check(count_allocs([&] { bare.send(payload); }) == 1,
               "un-injected, a cold send draws ONE block from the process heap");
@@ -1045,8 +1045,8 @@ void test_ws_client_tx_buf_uses_injected_egress_source() {
     // The wired arm: same cold send, but the store came in through the constructor.
     roomy_egress_t roomy;
     {
-        tr::net::transport_ws_client wired("127.0.0.1", server.local_port(),
-                                           {.memory = {.io = &roomy.store}});
+        tr::net::ws_client_transport_t wired("127.0.0.1", server.local_port(),
+                                             {.memory = {.io = &roomy.store}});
         check(wired.ok(), "store-injected ws client handshaken");
         check(count_allocs([&] { wired.send(payload); }) == 0,
               "wired, the cold send draws NOTHING from the process heap");
@@ -1059,8 +1059,8 @@ void test_ws_client_tx_buf_uses_injected_egress_source() {
     // counted, never truncated and never escalated to the process heap.
     {
         tight_egress_t tight;
-        tr::net::transport_ws_client bounded("127.0.0.1", server.local_port(),
-                                             {.memory = {.io = &tight.store}});
+        tr::net::ws_client_transport_t bounded("127.0.0.1", server.local_port(),
+                                               {.memory = {.io = &tight.store}});
         check(bounded.ok(), "hard-bounded ws client handshaken");
         check(count_allocs([&] { bounded.send(payload); }) == 0,
               "a refused injected store draws NOTHING from the heap");
@@ -1192,7 +1192,7 @@ void test_can_over_long_path_refused() {
     tr::net::transport_can_config_t cfg;
     cfg.node = 3;
     cfg.path = adv.path;  // the hello at join carries it
-    const tr::net::transport_can can_tx(std::move(link), cfg);
+    const tr::net::can_transport_t can_tx(std::move(link), cfg);
     check(raw->count() == 0, "the join hello emits NOTHING rather than an undecodable frame");
 }
 
@@ -1205,7 +1205,7 @@ void test_can_emit_advertise_wire_identical() {
     tr::net::transport_can_config_t cfg;
     cfg.node = 5;
     cfg.path = "node5/telemetry";
-    const tr::net::transport_can can_tx(std::move(link), cfg);
+    const tr::net::can_transport_t can_tx(std::move(link), cfg);
 
     can::advertise_t hello;
     hello.can_id = can::encode_can_id({cfg.version, cfg.node, 0});
@@ -1218,10 +1218,10 @@ void test_can_emit_advertise_wire_identical() {
 }
 
 /**
- * @brief A1, at the TRANSPORT: the advertise a real `transport_can::send` emits costs ZERO
+ * @brief A1, at the TRANSPORT: the advertise a real `can_transport_t::send` emits costs ZERO
  *        allocations, and still lands on the wire whole.
  *
- * The free `encode_advertise_header` being stack-only proves nothing about `transport_can` —
+ * The free `encode_advertise_header` being stack-only proves nothing about `can_transport_t` —
  * only this drives the site `send_impl` actually reaches. The budget is DERIVED rather than
  * hard-coded: a send legitimately owns exactly ONE allocating step, the payload block
  * (`view::over_bytes`), so running it standalone gives the number `send` must not exceed —
@@ -1237,7 +1237,7 @@ void test_can_send_advertise_allocates_nothing() {
     cfg.path = "node9/sensor/temperature";  // 24 chars: past SSO, so a copy WOULD allocate
     auto link = std::make_unique<fixed_link_t>();
     fixed_link_t* raw = link.get();
-    tr::net::transport_can can_tx(std::move(link), cfg);
+    tr::net::can_transport_t can_tx(std::move(link), cfg);
 
     const std::vector<std::byte> payload(24, std::byte{0xA5});  // 3 CLASSIC windows
 
@@ -1470,7 +1470,7 @@ void test_nack_readvertise_adds_no_allocation() {
 // RFC 6455 §5.5 — the PONG is unfailable because the control frame is bounded
 //
 // These three drive the SERVER. Their CLIENT mirror — a raw socket acting as a hostile
-// server with our `transport_ws_client` dialing it — lives in `ws_transport_test.cpp`
+// server with our `ws_client_transport_t` dialing it — lives in `ws_transport_test.cpp`
 // (#1010): the two halves share `decode_frame_checked` but not the reply buffer they build
 // into or the teardown path they fail through, so neither set covers the other.
 // ---------------------------------------------------------------------------
@@ -1479,7 +1479,7 @@ void test_nack_readvertise_adds_no_allocation() {
  *         built on the stack, so there is no allocation to fail. */
 void test_ws_ping_at_the_bound_is_answered() {
     std::printf("ws server — a 125-byte PING is answered with an identical PONG:\n");
-    tr::net::transport_ws_server server(0);
+    tr::net::ws_server_transport_t server(0);
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
 
@@ -1500,7 +1500,7 @@ void test_ws_ping_at_the_bound_is_answered() {
  *         being echoed — which is what removed both the abort and the amplification. */
 void test_ws_oversized_ping_fails_the_connection() {
     std::printf("ws server — an oversized PING fails the connection, it is NOT echoed:\n");
-    tr::net::transport_ws_server server(0);
+    tr::net::ws_server_transport_t server(0);
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
 
@@ -1518,7 +1518,7 @@ void test_ws_oversized_ping_fails_the_connection() {
 /** @brief A FRAGMENTED control frame is equally illegal (RFC 6455 §5.5). */
 void test_ws_fragmented_control_fails_the_connection() {
     std::printf("ws server — a non-final control frame fails the connection:\n");
-    tr::net::transport_ws_server server(0);
+    tr::net::ws_server_transport_t server(0);
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
 
@@ -1548,7 +1548,7 @@ void test_ws_fragmented_control_fails_the_connection() {
  */
 void drive_ws_reserved_opcode(std::uint8_t op, const char* label) {
     std::printf("ws server — a reserved opcode %s fails the connection (#1060):\n", label);
-    tr::net::transport_ws_server server(0);
+    tr::net::ws_server_transport_t server(0);
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0 && raw_handshake(cfd), "raw client handshaken");
 

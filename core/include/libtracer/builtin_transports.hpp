@@ -50,7 +50,7 @@ namespace tr::net {
  * before.
  *
  * **`delivers_ropes` is `true` for all three** because every one of their DIAL classes
- * (`udp_transport_t`, `tcp_transport_t`, `transport_ws_client`) overrides
+ * (`udp_transport_t`, `tcp_transport_t`, `ws_client_transport_t`) overrides
  * `transport_t::delivers_ropes` to `true` unconditionally. The engine must answer this
  * for `fwd_router_t::add_child` BEFORE any socket exists, so it is declared statically
  * here; a wrong answer would install the wrong receiver on the engine for its whole life.

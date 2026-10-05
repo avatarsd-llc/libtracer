@@ -34,7 +34,7 @@ The reference-implementation symbols are:
 | 29-bit ID + advertise codec | `tr::net::can` | `can.hpp` | transport plane |
 | header-elided framing | `tr::net::can::can_frame_count` / `can_frame_at` | `can_framing.hpp` | transport plane |
 | multi-frame reassembly | `tr::net::can_reassembly_t` | `can_reassembly.hpp` | transport plane |
-| SocketCAN binding + raw-frame seam | `tr::net::transport_can`, `can_link_t`, `socketcan_link_t` | `transport_can.hpp` | transport plane |
+| SocketCAN binding + raw-frame seam | `tr::net::can_transport_t`, `can_link_t`, `socketcan_link_t` | `transport_can.hpp` | transport plane |
 
 ## The structured 29-bit extended ID
 
@@ -304,7 +304,7 @@ This is one of two framing modes, chosen per transport and mixable per frame. **
 
 ## The SocketCAN binding (`transport_can`)
 
-`tr::net::transport_can` is a `transport_t` that drives the framing above over a
+`tr::net::can_transport_t` is a `transport_t` that drives the framing above over a
 real Linux CAN bus. A forwarder hands it a complete libtracer frame via `send()`;
 the byte-exact frame surfaces at the peer's receiver.
 

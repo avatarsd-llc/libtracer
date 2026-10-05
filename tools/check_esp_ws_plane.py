@@ -4,7 +4,7 @@
 """Assert the ESP-IDF chip image carries the IDF-NATIVE WebSocket plane only.
 
 Maintainer ruling on #947: **ESP-IDF WebSocket must never use POSIX sockets.**
-``transport_ws_server`` / ``transport_ws_client`` (``core/src/transport_ws.cpp``) are
+``ws_server_transport_t`` / ``ws_client_transport_t`` (``core/src/transport_ws.cpp``) are
 the HOST implementation — they own their socket and egress through
 ``posix_endpoint``'s ``sendmsg(MSG_NOSIGNAL)``, a flag lwIP defines but
 ``lwip_sendmsg`` rejects with ``EOPNOTSUPP``, so on silicon every scatter-gather data
@@ -19,7 +19,7 @@ because either alone is weak:
 * **Nothing compiled them** — ``transport_ws.cpp.obj`` / ``builtin_transport_ws.cpp.obj``
   are absent from the build tree (the archive-side proof).
 * **Nothing links them** — ``nm`` on the final ELF reports ZERO
-  ``transport_ws_server`` / ``transport_ws_client`` symbols (the image-side proof).
+  ``ws_server_transport_t`` / ``ws_client_transport_t`` symbols (the image-side proof).
   Build-success alone proves nothing here: the pair COMPILES fine against lwIP, which
   is exactly why it shipped into images for so long. And ``--gc-sections`` cannot save
   the image on its own — the factory registration keeps the symbols reachable, which
@@ -63,7 +63,7 @@ import sys
 # The portable (POSIX-socket) WS types that must not reach a chip image. Matched as
 # substrings of the MANGLED names nm prints — an Itanium-ABI mangling embeds each
 # source identifier verbatim, so no demangler is needed (and none may be available).
-PORTABLE_WS_SYMBOLS = ("transport_ws_server", "transport_ws_client")
+PORTABLE_WS_SYMBOLS = ("ws_server_transport_t", "ws_client_transport_t")
 
 # The IDF-native WS link types — asserted absent from the image under --ws-plane none.
 NATIVE_WS_SYMBOLS = ("httpd_ws_link", "esp_ws_client_link")

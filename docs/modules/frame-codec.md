@@ -572,12 +572,12 @@ gates this one, compiled with `NDEBUG` forced **on** so it cannot pass vacuously
 :project: libtracer
 ```
 
-```{doxygenstruct} tr::wire::grammar::span_cursor
+```{doxygenstruct} tr::wire::grammar::span_cursor_t
 :project: libtracer
 :members:
 ```
 
-```{doxygenclass} tr::wire::grammar::rope_cursor
+```{doxygenclass} tr::wire::grammar::rope_cursor_t
 :project: libtracer
 :members:
 ```
@@ -605,7 +605,7 @@ cannot be re-framed and the caller must tear the connection down. The state
 machine names no transport type, which is why it is tested directly with no live
 connection.
 
-```{doxygenclass} tr::net::length_prefix_framer
+```{doxygenclass} tr::net::length_prefix_framer_t
 :project: libtracer
 :members:
 ```

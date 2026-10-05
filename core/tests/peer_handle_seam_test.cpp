@@ -18,9 +18,9 @@
  *     recycled slot comes back at the same index and a DIFFERENT generation, so a handle
  *     minted against the departed session never matches its successor.
  *
- * The `slot_server_t` plane (here: `transport_tcp_server`) is the vehicle because it is the
+ * The `slot_server_t` plane (here: `tcp_server_transport_t`) is the vehicle because it is the
  * positional kind — the one where slot reuse can confuse identity at all. The announce-census
- * arm (`transport_can`, one constant generation) is covered by `transport_can_test`'s
+ * arm (`can_transport_t`, one constant generation) is covered by `transport_can_test`'s
  * peer-named rope delivery, which resolves its `n<node>` name back through this same seam.
  */
 
@@ -149,7 +149,7 @@ void test_seam_over_slot_server() {
     handle_sink_t sink;
     lifecycle_probe_t probe;
 
-    tr::net::transport_tcp_server server(0, {.peer_named = true});
+    tr::net::tcp_server_transport_t server(0, {.peer_named = true});
     check(server.ok(), "listen socket bound");
     bus_link_t* const bus = server.bus();
     check(bus != nullptr, "a peer_named server exposes the bus facet");

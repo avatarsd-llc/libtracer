@@ -71,7 +71,7 @@ on a real bus is a separate, still-open sign-off — the job energises no pin.
 **A PlatformIO `espressif32` build ships no WebSocket transport at all** (#984, applying
 the #947 maintainer ruling: *ESP-IDF WebSocket must never use POSIX sockets*).
 
-- The portable `transport_ws_server` / `transport_ws_client` pair is **excluded
+- The portable `ws_server_transport_t` / `ws_client_transport_t` pair is **excluded
   per-environment** by the build hook: on lwIP its scatter-gather egress is rejected
   (`lwip_sendmsg` returns `EOPNOTSUPP` for `MSG_NOSIGNAL`), so every data frame was
   silently dropped while the handshake and PING/PONG still worked (#948) — it was a

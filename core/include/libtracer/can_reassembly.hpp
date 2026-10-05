@@ -9,7 +9,7 @@
  * group" (CONTEXT.md *Advertise + id-match*), reused so CAN stays uniform with
  * UDP/QUIC scatter-gather.
  *
- * Lives in `tr::net`, beside `transport_can` — the reassembly buffer is a
+ * Lives in `tr::net`, beside `can_transport_t` — the reassembly buffer is a
  * transport-plane concern, and the earlier `tr::mem::mem_can_reassembly_t`
  * naming was a self-admitted L0→L1 layer inversion (an L0 `tr::mem` type
  * referencing the L1 `rope_t` it assembles). Resolved by the rehome (ADR-0048
@@ -55,7 +55,7 @@ namespace tr::net {
  * @brief A 16-byte node/peer identity — mirrors the ROUTER `origin_peer_id`.
  *
  * Held as raw bytes so the reassembly buffer stays a self-contained framing
- * primitive; `transport_can` fills it from the CAN id.
+ * primitive; `can_transport_t` fills it from the CAN id.
  */
 using can_origin_id_t = std::array<std::uint8_t, 16>;
 

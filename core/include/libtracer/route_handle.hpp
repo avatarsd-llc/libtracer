@@ -6,7 +6,7 @@
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
  * RFC-0004 / ADR-0035 slice 4 — the route-handle: ws delivery-compaction. The ws
- * (full-TLV) counterpart of transport_can's `identity↔path` map (#55/ADR-0030).
+ * (full-TLV) counterpart of can_transport_t's `identity↔path` map (#55/ADR-0030).
  *
  * Taken literally, "a delivery *is* a FWD WRITE" (RFC-0004 §D) makes every streamed
  * sample re-carry its full return route — ~16x overhead on a small high-rate
@@ -892,7 +892,7 @@ class route_handle_t {
  *
  * The label child is a fixed-shape run — opaque (`opt.PL=0`), 2-byte length — so it needs no
  * header emitter and no growable buffer. Returning it lets a SCATTER-GATHER egress build a
- * frame head entirely on the stack (`tr::net::stack_writer`) while keeping the byte layout
+ * frame head entirely on the stack (`tr::net::stack_writer_t`) while keeping the byte layout
  * at ONE locus: the builders below emit it through here too, so a gathered frame and a built
  * one cannot drift apart. Since #885 every ADVERTISE, COMPACT and HANDLE_NACK the router
  * sends is gathered off a head that starts with these six bytes.

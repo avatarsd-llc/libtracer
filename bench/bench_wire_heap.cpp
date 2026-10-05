@@ -444,7 +444,7 @@ void arm_udp_widths() {
 void arm_tcp_server_widths() {
     // The MULTI-peer server: its broadcast builds a pristine record AND a per-write scratch
     // copy, so it has two independent spill points on one send.
-    tr::net::transport_tcp_server server(0);
+    tr::net::tcp_server_transport_t server(0);
     if (!server.ok()) return;
     rx_probe_t probe;
     server.set_rope_receiver(&rx_probe_t::on_rope, &probe);
@@ -485,11 +485,11 @@ void arm_tcp_server_widths() {
 }
 
 void arm_ws() {
-    tr::net::transport_ws_server server(0);
+    tr::net::ws_server_transport_t server(0);
     if (!server.ok()) return;
     rx_probe_t srv_probe;
     server.set_rope_receiver(&rx_probe_t::on_rope, &srv_probe);
-    tr::net::transport_ws_client client("127.0.0.1", server.local_port());
+    tr::net::ws_client_transport_t client("127.0.0.1", server.local_port());
     if (!client.ok()) return;
     std::this_thread::sleep_for(std::chrono::milliseconds(80));
 

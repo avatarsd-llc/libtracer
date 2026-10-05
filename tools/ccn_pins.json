@@ -157,13 +157,13 @@
       ],
       "file": "core/src/transport_vertex.cpp"
     },
-    "tr::net::transport_ws_client::serve": {
+    "tr::net::ws_client_transport_t::serve": {
       "ccn": [
         21
       ],
       "file": "core/src/transport_ws.cpp"
     },
-    "tr::net::transport_ws_server::drain_frames": {
+    "tr::net::ws_server_transport_t::drain_frames": {
       "ccn": [
         18
       ],

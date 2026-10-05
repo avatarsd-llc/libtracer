@@ -165,9 +165,9 @@ struct tcp_pair {
 };
 
 struct ws_pair {
-    tr::net::transport_ws_server server_{0}; /**< binds an ephemeral port (see @ref udp_pair) */
-    tr::net::transport_ws_client client_{"127.0.0.1",
-                                         server_.local_port()}; /**< handshake in the ctor */
+    tr::net::ws_server_transport_t server_{0}; /**< binds an ephemeral port (see @ref udp_pair) */
+    tr::net::ws_client_transport_t client_{"127.0.0.1",
+                                           server_.local_port()}; /**< handshake in the ctor */
     [[nodiscard]] bool ok() const { return server_.ok() && client_.ok(); }
     [[nodiscard]] transport_t& a() { return client_; }
     [[nodiscard]] transport_t& b() { return server_; }

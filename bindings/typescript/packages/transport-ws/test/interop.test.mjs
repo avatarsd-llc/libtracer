@@ -5,7 +5,7 @@
  * @brief C++ <-> TypeScript transport_ws INTEROP test (#54).
  *
  * Unlike roundtrip.test.mjs (which echoes against a pure-Node `ws` server),
- * this drives the real C++ `tr::net::transport_ws_server` over a live socket:
+ * this drives the real C++ `tr::net::ws_server_transport_t` over a live socket:
  * a genuine RFC 6455 101 handshake, a MASKED TS client BINARY frame in, an
  * UNMASKED C++ server BINARY frame back — end-to-end validation of the
  * web-UI <-> device path.
@@ -105,7 +105,7 @@ function waitExit(child, ms = 4000) {
 }
 
 test(
-  'TLV round-trips byte-identical: TS TransportWs <-> C++ transport_ws_server over a real socket',
+  'TLV round-trips byte-identical: TS TransportWs <-> C++ ws_server_transport_t over a real socket',
   { skip: skip ? 'set LIBTRACER_WS_INTEROP_SERVER to the built ws_interop_server binary' : false },
   async () => {
     const { child, port } = await startServer();
@@ -124,7 +124,7 @@ test(
     });
 
     try {
-      // A real RFC 6455 101 handshake against the C++ transport_ws_server.
+      // A real RFC 6455 101 handshake against the C++ ws_server_transport_t.
       await transport.connect();
       // One MASKED client BINARY frame out; the C++ server unmasks and echoes it
       // back as one UNMASKED server BINARY frame.

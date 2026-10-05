@@ -1,11 +1,11 @@
 /**
  * @file
- * @brief #55 (increment 2) — REAL-bus smoke test for transport_can over Linux SocketCAN.
+ * @brief #55 (increment 2) — REAL-bus smoke test for can_transport_t over Linux SocketCAN.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * It drives two transport_can instances over an actual `vcan0` virtual CAN device
+ * It drives two can_transport_t instances over an actual `vcan0` virtual CAN device
  * via socketcan_link_t (the genuine PF_CAN / SOCK_RAW path) and asserts a byte-exact
  * frame round-trips each way.
  *
@@ -200,14 +200,14 @@ int main() {
     check(link_a->ok() && link_b->ok(), "two CAN_RAW sockets bound to vcan0");
 
     // Sinks + named receiver lambdas BEFORE the transports: the slot binds the
-    // callable by address, and ~transport_can joins its receive thread.
+    // callable by address, and ~can_transport_t joins its receive thread.
     sink_t sink_a, sink_b;
     auto rx_a = [&](std::span<const std::byte> f) { sink_a.on(f); };
     auto rx_b = [&](std::span<const std::byte> f) { sink_b.on(f); };
-    tr::net::transport_can tx_a(std::move(link_a),
-                                {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "a/p"});
-    tr::net::transport_can tx_b(std::move(link_b),
-                                {0, 2, tr::net::can::can_frame_mode_t::CLASSIC, "b/q"});
+    tr::net::can_transport_t tx_a(std::move(link_a),
+                                  {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "a/p"});
+    tr::net::can_transport_t tx_b(std::move(link_b),
+                                  {0, 2, tr::net::can::can_frame_mode_t::CLASSIC, "b/q"});
 
     tx_a.set_receiver(rx_a);
     tx_b.set_receiver(rx_b);
@@ -228,7 +228,7 @@ int main() {
 
     // ADR-0044: stateless peer enumeration over the REAL bus. Both nodes have
     // spoken (join hello + the round trips above), so each is audible to the other.
-    const auto peers_of = [](tr::net::transport_can& t) {
+    const auto peers_of = [](tr::net::can_transport_t& t) {
         std::vector<std::string> names;
         t.enumerate_peers([&](std::string_view p) { names.emplace_back(p); });
         return names;
@@ -242,8 +242,8 @@ int main() {
     check(link_c->ok(), "third CAN_RAW socket bound to vcan0");
     sink_t sink_c;
     auto rx_c = [&](std::span<const std::byte> f) { sink_c.on(f); };
-    tr::net::transport_can tx_c(std::move(link_c),
-                                {0, 3, tr::net::can::can_frame_mode_t::CLASSIC, "c/r"});
+    tr::net::can_transport_t tx_c(std::move(link_c),
+                                  {0, 3, tr::net::can::can_frame_mode_t::CLASSIC, "c/r"});
     tx_c.set_receiver(rx_c);
 
     tr::net::transport_t* const to_b = tx_a.peer_link("n2");
@@ -357,8 +357,8 @@ int main() {
     // ------------------------------------------------------------------------
     auto link_d = std::make_unique<tr::net::socketcan_link_t>("vcan0");
     check(link_d->ok(), "fourth CAN_RAW socket bound to vcan0");
-    tr::net::transport_can tx_d(std::move(link_d),
-                                {0, 4, tr::net::can::can_frame_mode_t::CLASSIC, "d/s"});
+    tr::net::can_transport_t tx_d(std::move(link_d),
+                                  {0, 4, tr::net::can::can_frame_mode_t::CLASSIC, "d/s"});
     // No set_receiver on D: this IS the window. A's broadcast group completes on
     // D's receive thread and delivery finds both receiver slots empty.
     tx_a.send(payload(26, 0x2A));

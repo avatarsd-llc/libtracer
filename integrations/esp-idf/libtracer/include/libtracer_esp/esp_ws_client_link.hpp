@@ -6,7 +6,7 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * The embedded-native counterpart to core's portable `transport_ws_client`
+ * The embedded-native counterpart to core's portable `ws_client_transport_t`
  * (core/src/transport_ws.cpp). That portable client opens its OWN ::socket, hand-
  * rolls the RFC 6455 opening handshake (`Sec-WebSocket-Key`/`-Accept`) and the
  * frame codec/masking over lwIP BSD sockets — which does not reliably complete on
@@ -17,7 +17,7 @@
  * masking/framing, and PING/PONG/CLOSE control-frame handling. It is the client
  * mirror of @ref httpd_ws_link_t (the esp_http_server-backed *server* link) — the
  * same "platform link picked by which TU compiles, never an in-source #ifdef"
- * split as `twai_link_t` is for CAN. The portable `transport_ws_client` stays for
+ * split as `twai_link_t` is for CAN. The portable `ws_client_transport_t` stays for
  * the linux virtual board (glibc sockets); the two are selected by the build.
  *
  * Since #947 the selection is EXCLUSIVE and nothing rests on `--gc-sections`: on a
@@ -29,7 +29,7 @@
  * asks `sendmsg` for `MSG_NOSIGNAL`, `lwip_sendmsg` rejects it with `EOPNOTSUPP`,
  * and every data frame is dropped in silence (#948).
  *
- * It presents the same `transport_t` contract as `transport_ws_client`: one
+ * It presents the same `transport_t` contract as `ws_client_transport_t`: one
  * inbound BINARY WebSocket message is one libtracer TLV, delivered borrowed
  * in-call to the router; `send()` emits one masked BINARY frame per libtracer
  * frame. Point-to-point (one dialed peer), so it is NOT a bus link
@@ -184,7 +184,7 @@
  * steady-state send/recv touch neither the global heap nor a per-frame allocation. The
  * one per-message draw is opt-in: a link given `memory.rx` takes each receive block from
  * that application source. One recv thread per dialed peer (each blocks on its own connection),
- * mirroring `transport_ws_client`.
+ * mirroring `ws_client_transport_t`.
  */
 #pragma once
 
@@ -288,7 +288,7 @@ struct esp_ws_client_config_t {
  * @brief A WebSocket (RFC 6455) *client* `transport_t` on ESP-IDF `esp_transport_ws`
  *        — dials one peer and exposes it through the point-to-point `transport_t` seam.
  *
- * Public surface mirrors `transport_ws_client`: a chip node substitutes this type at
+ * Public surface mirrors `ws_client_transport_t`: a chip node substitutes this type at
  * its dial construction site with no other change. Span delivery by default: each
  * frame is delivered borrowed and the router services it in-call, so nothing outlives
  * the callback (@ref delivers_ropes is false). Naming `memory.rx` switches it to owning

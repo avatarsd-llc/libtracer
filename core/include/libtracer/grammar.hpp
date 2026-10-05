@@ -12,7 +12,7 @@
  * forked (`parse_one` vs `parse_header`), held byte-for-byte equal only by the
  * decode<->decode_into equivalence test — every future rule was a two-file edit.
  *
- * The cursor is the byte-SOURCE seam, not an access-model one: `span_cursor` is
+ * The cursor is the byte-SOURCE seam, not an access-model one: `span_cursor_t` is
  * the contiguous case (today's path, zero new cost); the rope cursor
  * (link-walking with a straddled-header scratch) plugs in here for the
  * rope-aware decode ADR-0048 §1 commits to, without touching these rules.
@@ -57,7 +57,7 @@ static_assert(sizeof(std::size_t) >= 4, "a wire length must narrow to size_t wit
  * seam (`parse_header`) so the identical rules serve a rope cursor
  * (link-walking, ADR-0048 §1) once that lands, with no rule change here.
  */
-struct span_cursor {
+struct span_cursor_t {
     std::span<const std::byte> buf; /**< @brief The bytes this cursor reads over. */
 
     /** @brief Number of bytes available from the TLV's start. */
@@ -69,7 +69,7 @@ struct span_cursor {
      *
      * The rope source's latch exists because its window is a SOFT bound: the link chain
      * physically continues past it, so an overshooting feed reads real bytes belonging
-     * to another part of the rope and nothing faults. A `span_cursor`'s window is its
+     * to another part of the rope and nothing faults. A `span_cursor_t`'s window is its
      * whole object — @ref for_each_span clamps to it, and past that there are no bytes
      * to serve, wrong or otherwise.
      *
@@ -84,12 +84,12 @@ struct span_cursor {
     /**
      * @brief A sub-cursor over the `[off, off + len)` window of this cursor.
      *
-     * The contiguous analogue of @ref rope_cursor::region — a plain `subspan`, so
+     * The contiguous analogue of @ref rope_cursor_t::region — a plain `subspan`, so
      * the same cursor-generic code (a forward-plane header read, a child descent)
      * narrows either source with one call.
      */
-    [[nodiscard]] span_cursor region(std::size_t off, std::size_t len) const noexcept {
-        return span_cursor{buf.subspan(off, len)};
+    [[nodiscard]] span_cursor_t region(std::size_t off, std::size_t len) const noexcept {
+        return span_cursor_t{buf.subspan(off, len)};
     }
     /** @brief The unsigned byte at offset @p off. */
     [[nodiscard]] std::uint8_t byte_at(std::size_t off) const noexcept {
@@ -114,6 +114,9 @@ struct span_cursor {
         fn(buf.subspan(off, n));
     }
 };
+
+/** @brief The pre-v0.18.0 spelling of @ref span_cursor_t; removed in v0.19.0 (#1723). */
+using span_cursor = span_cursor_t;
 
 /**
  * @brief The same bound where a sum CAN wrap — 32-bit `Size` (rv32, the primary MCU target).
@@ -254,7 +257,7 @@ struct header_t {
  * the trailer has already been CRC-verified; the caller only re-reads the stored
  * timestamp/CRC bytes it wants to model.
  *
- * @tparam Cursor A byte-source cursor (@ref span_cursor, or the rope cursor).
+ * @tparam Cursor A byte-source cursor (@ref span_cursor_t, or the rope cursor).
  * @param  cur    The cursor positioned at the TLV's first byte.
  * @param  crc_policy CRC-trailer policy (@ref crc_check_t). Defaults to `VERIFY`
  *                (the eager decoders' behavior); the lazy tier passes `DEFER`
@@ -311,7 +314,7 @@ template <class Cursor>
         // crc*(a, b) (the CRC is associative over the feed) with no `covered`
         // concatenation buffer; a rope payload never has to flatten to be checked.
         if (opt.cw) {
-            crc::crc16_ccitt_state crc;
+            crc::crc16_ccitt_state_t crc;
             const auto feed = [&crc](std::span<const std::byte> s) { crc.feed(s); };
             cur.for_each_span(header, pay_len, feed);
             cur.for_each_span(header + pay_len, ts_size, feed);
@@ -319,7 +322,7 @@ template <class Cursor>
                 return std::unexpected(err_t::FRAME_CRC_FAIL);
             }
         } else {
-            crc::crc32c_state crc;
+            crc::crc32c_state_t crc;
             const auto feed = [&crc](std::span<const std::byte> s) { crc.feed(s); };
             cur.for_each_span(header, pay_len, feed);
             cur.for_each_span(header + pay_len, ts_size, feed);
@@ -352,7 +355,7 @@ template <class Cursor>
  * @brief One open structured node's traversal state in `walk`: a cursor over
  *        its children region and the walk position within it.
  *
- * @tparam Cursor A byte-source cursor (@ref span_cursor, or the rope cursor).
+ * @tparam Cursor A byte-source cursor (@ref span_cursor_t, or the rope cursor).
  */
 template <class Cursor>
 struct walk_frame_t {
@@ -475,7 +478,7 @@ class walk_stack_t {
  * which the sink extracts the spans it wants (payload / wire / trailer) using the
  * header's offsets.
  *
- * @tparam Cursor A byte-source cursor (@ref span_cursor, or the rope cursor).
+ * @tparam Cursor A byte-source cursor (@ref span_cursor_t, or the rope cursor).
  * @tparam Sink   A type providing the three hooks above.
  * @param root      The cursor positioned at the frame's first byte.
  * @param sink      The node model (built as the walk visits).

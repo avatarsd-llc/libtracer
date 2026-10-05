@@ -28,7 +28,7 @@
  * cost the node and may never widen it.
  *
  * The handshake is driven from a raw POSIX socket so it is visible on the wire; the shipped
- * `transport_ws_client` then does the same thing behind `ok()`.
+ * `ws_client_transport_t` then does the same thing behind `ok()`.
  *
  * Needs the WS transport (`LIBTRACER_TRANSPORT_WS`, on by default). Runs under ctest as
  * `example_net_ws_upgrade`; returns non-zero on any failed check.
@@ -175,7 +175,7 @@ int main() {
     bool ok = true;
 
     sink_t at_server;
-    tr::net::transport_ws_server server(std::uint16_t{0});
+    tr::net::ws_server_transport_t server(std::uint16_t{0});
     server.set_receiver(at_server);
     check(ok, server.ok(), "the WS listener bound an ephemeral port");
 
@@ -216,7 +216,7 @@ int main() {
     // --- The same handshake, behind ok() ------------------------------------------------
     std::printf("the shipped dialer does exactly that:\n");
     sink_t at_client;
-    tr::net::transport_ws_client client("127.0.0.1", server.local_port());
+    tr::net::ws_client_transport_t client("127.0.0.1", server.local_port());
     client.set_receiver(at_client);
     check(ok, client.ok(), "ok() on a WS client is the HANDSHAKE's verdict, not the socket's");
 
@@ -235,9 +235,9 @@ int main() {
     // --- The budget the handshake makes necessary ---------------------------------------
     check(ok, server.effective_max_handshake() > 0,
           "the pre-auth handshake budget is a real, positive bound (#934)");
-    tr::net::transport_ws_server tight(std::uint16_t{0}, {.max_handshake = 256});
+    tr::net::ws_server_transport_t tight(std::uint16_t{0}, {.max_handshake = 256});
     check(ok, tight.effective_max_handshake() == 256, "a smaller budget is honoured…");
-    tr::net::transport_ws_server loose(std::uint16_t{0}, {.max_handshake = 1u << 30});
+    tr::net::ws_server_transport_t loose(std::uint16_t{0}, {.max_handshake = 1u << 30});
     check(ok, loose.effective_max_handshake() == server.effective_max_handshake(),
           "…and a LARGER one is clamped back — tighten-only, because the peer is anonymous");
 

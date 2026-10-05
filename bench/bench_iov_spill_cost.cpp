@@ -25,7 +25,7 @@
  *    `udp_transport_t::send(iov)` over loopback, so the allocation is priced against the
  *    syscall it actually sits behind. Same 8-vs-9 control.
  *  - **E — the always-allocate path.** `transport_t::send(iov)`'s DEFAULT (flatten into a
- *    `std::vector<std::byte>`, then `send(span)`) is what `transport_can` and any embedder
+ *    `std::vector<std::byte>`, then `send(span)`) is what `can_transport_t` and any embedder
  *    transport that does not override the gather gets: one allocation plus a full payload copy
  *    on EVERY frame, at every width. Priced against the inline gather so the two items can be
  *    ranked against each other rather than only against zero.
@@ -492,7 +492,7 @@ void arm_d2_real_tcp(const std::vector<std::vector<std::byte>>& store) {
 /* ------------------------------------------- arm E: the DEFAULT send(iov) - always allocates */
 
 /** @brief A sink transport that does NOT override `send(iov)`, so it inherits the base class's
- *         flatten-into-a-vector default — exactly what `transport_can` and any embedder
+ *         flatten-into-a-vector default — exactly what `can_transport_t` and any embedder
  *         transport without native scatter-gather gets. */
 struct flatten_sink_t : transport_t {
     void send(std::span<const std::byte> f) override { g_sink += f.size(); }

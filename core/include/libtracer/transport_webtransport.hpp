@@ -105,10 +105,10 @@ struct webtransport_config_t {
 class webtransport_transport_t : public transport_t {
    public:
     /** @brief The largest frame the length prefix may announce — the shared
-     *         length_prefix_framer::kDefaultMaxFrame (16 MiB) unless `:settings
+     *         length_prefix_framer_t::kDefaultMaxFrame (16 MiB) unless `:settings
      *         max_frame` tightens it. A larger prefix is malformed: counted via
      *         @ref malformed_rx and the session's connection is shut down. */
-    static constexpr std::size_t kMaxFrame = length_prefix_framer::kDefaultMaxFrame;
+    static constexpr std::size_t kMaxFrame = length_prefix_framer_t::kDefaultMaxFrame;
 
     /**
      * @brief The largest H3 HANDSHAKE a PRE-AUTH peer may make this node buffer
@@ -133,14 +133,14 @@ class webtransport_transport_t : public transport_t {
     /**
      * @brief Resolve a `max_handshake` request into the honored budget — TIGHTEN-ONLY
      *        against @ref kMaxHandshakeBytes, exactly as
-     *        `length_prefix_framer::configured_cap` is against `kDefaultMaxFrame`.
+     *        `length_prefix_framer_t::configured_cap` is against `kDefaultMaxFrame`.
      *
      * `0` (unset) keeps the default; a nonzero value yields
      * `min(max_handshake, kMaxHandshakeBytes)`. The value arrives through a config-writable
      * key (`webtransport`-private `max_handshake`), and a config-writable key must never
      * RAISE a pre-auth bound — only narrow it.
      *
-     * @note The same shape `transport_ws_server::handshake_cap` carries for the WS plane
+     * @note The same shape `ws_server_transport_t::handshake_cap` carries for the WS plane
      *       (#1407), deliberately spelled rather than shared: `transport_ws.hpp` sits
      *       behind `LIBTRACER_TRANSPORT_WS` and can be configured OFF, so consuming its
      *       symbol here would make an optional core module a hard dependency of this

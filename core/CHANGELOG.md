@@ -259,6 +259,32 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `result_t<value_ref_t>`. At an oracle call site, dereference twice (`(*r)->flatten()`,
   `(*r)->link_count()`), or take `(*r)->rope()` where a `rope_t` is needed.
 
+### Deprecated
+
+- **Ten public types take the `_t` suffix, and the transport classes use one word order
+  ([#1723](https://github.com/avatarsd-llc/libtracer/issues/1723)).** Per `core/STYLE.md`
+  §Type and value naming, every type is `snake_case_t`, and a transport class is
+  `<kind>_transport_t`, as `tcp_transport_t` and `udp_transport_t` already were. The old
+  names stay as plain aliases for one release and are removed in v0.19.0. No layout, symbol
+  size or behaviour changes; demangled symbol names change with the class names.
+
+  | Old name | New name |
+  | --- | --- |
+  | `tr::net::transport_ws_server` | `tr::net::ws_server_transport_t` |
+  | `tr::net::transport_ws_client` | `tr::net::ws_client_transport_t` |
+  | `tr::net::transport_tcp_server` | `tr::net::tcp_server_transport_t` |
+  | `tr::net::transport_can` | `tr::net::can_transport_t` |
+  | `tr::net::length_prefix_framer` | `tr::net::length_prefix_framer_t` |
+  | `tr::net::stack_writer<N>` | `tr::net::stack_writer_t<N>` |
+  | `tr::wire::grammar::span_cursor` | `tr::wire::grammar::span_cursor_t` |
+  | `tr::wire::grammar::rope_cursor` | `tr::wire::grammar::rope_cursor_t` |
+  | `tr::crc::crc32c_state` | `tr::crc::crc32c_state_t` |
+  | `tr::crc::crc16_ccitt_state` | `tr::crc::crc16_ccitt_state_t` |
+
+  **Migration:** rename the uses; code that keeps the old names compiles unchanged until
+  v0.19.0. A new CI check, `tools/check_type_names.py`, refuses a public type declared without
+  the suffix.
+
 ### Added
 
 - **`value_ref_t::copy(bytes, source = heap_source())`

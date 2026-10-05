@@ -256,7 +256,7 @@ target_link_libraries(rope_test PRIVATE libtracer)
 libtracer_test_warnings(rope_test)
 add_test(NAME rope COMMAND rope_test)
 
-# rope_cursor bounds preconditions (#916) — the debug-assert parity with
+# rope_cursor_t bounds preconditions (#916) — the debug-assert parity with
 # view_t::subview. The asserts are debug-only, so this TU forces NDEBUG off and
 # observes each abort in a forked child; POSIX-only (fork/waitpid).
 if(UNIX)
@@ -2057,7 +2057,7 @@ if(LIBTRACER_TRANSPORT_TCP AND LIBTRACER_TRANSPORT_UDP AND LIBTRACER_TRANSPORT_W
 endif()
 
 if(LIBTRACER_TRANSPORT_WS)
-    # #54 (interop) — standalone transport_ws_server harness driven by the TypeScript
+    # #54 (interop) — standalone ws_server_transport_t harness driven by the TypeScript
     # transport-ws interop test (a real TS TransportWs client over a live socket).
     # Deliberately NOT an add_test(): it is a helper binary the TS test spawns (see
     # bindings/typescript/packages/transport-ws/test/interop.test.mjs and the
@@ -2071,7 +2071,7 @@ if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_WS)
     # #56 / RFC-0004 (interop) — standalone FWD-serving node harness driven by the
     # TypeScript client SDK interop test (the web-UI<->device consumer proof). A
     # graph_t seeded with /sensor/temp behind a fwd_router_t + op_resolver_t, served
-    # over a live transport_ws_server. Like ws_interop_server it is a helper binary
+    # over a live ws_server_transport_t. Like ws_interop_server it is a helper binary
     # the TS test spawns, NOT an add_test() (it would otherwise block on its deadline).
     add_executable(fwd_node_server fwd_node_server.cpp)
     target_link_libraries(fwd_node_server PRIVATE libtracer)
@@ -2242,7 +2242,7 @@ add_test(NAME spin_pool_guard COMMAND ${CMAKE_COMMAND}
 
 if(LIBTRACER_NET_PLANE AND LIBTRACER_TRANSPORT_TCP)
     # #1223 step 2 — an accepted slot_server_t session's identity anchor: a real
-    # transport_tcp_server, real dialled sockets, and the two hazards the shape had to clear
+    # tcp_server_transport_t, real dialled sockets, and the two hazards the shape had to clear
     # (unaddressable below the mount; :children[] untouched). Real threads ⇒ built under TSan.
     add_executable(session_anchor_test session_anchor_test.cpp)
     target_link_libraries(session_anchor_test PRIVATE libtracer)

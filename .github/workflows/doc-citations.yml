@@ -73,6 +73,8 @@ on:
       - "tools/tests/test_check_ci_workspace_cleanup.py"
       - "tools/gen_record_index.py"
       - "tools/gen_file_map.py"
+      - "tools/check_type_names.py"
+      - "tools/tests/test_check_type_names.py"
       - ".github/workflows/doc-citations.yml"
       # Non-source files a doc may cite outside the trees above (#1095). Listed exactly
       # rather than as `.github/workflows/**` and `bindings/**`, for the same reason
@@ -100,6 +102,8 @@ on:
       - "tools/tests/test_check_ci_workspace_cleanup.py"
       - "tools/gen_record_index.py"
       - "tools/gen_file_map.py"
+      - "tools/check_type_names.py"
+      - "tools/tests/test_check_type_names.py"
       - ".github/workflows/doc-citations.yml"
       - ".github/workflows/core-ci.yml"
       - ".github/workflows/footprint-cortexm0.yml"
@@ -166,6 +170,12 @@ jobs:
       # land undocumented. `core/**` and `backends/**` already fire this job.
       - name: Every public header has a row in the file map
         run: python3 tools/gen_file_map.py --check
+      # The `_t` rule on public type names (#1723). `core/**`, `backends/**` and
+      # `integrations/**` already fire this job, and the check needs no build.
+      - name: Type-name check unit tests
+        run: python3 -m unittest discover -s tools/tests -p "test_check_type_names.py" -v
+      - name: Every public type follows the _t rule
+        run: python3 tools/check_type_names.py
       - name: Every CI image reference matches the Dockerfile hash
         run: python3 tools/check_ci_image_tag.py
       - name: Restore workspace ownership for the host runner

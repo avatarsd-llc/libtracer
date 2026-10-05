@@ -23,7 +23,7 @@
  *
  * @section what What this measures
  *
- * One `transport_tcp_server`, N concurrent dialers each on its own thread sending fixed-size
+ * One `tcp_server_transport_t`, N concurrent dialers each on its own thread sending fixed-size
  * frames as fast as they are accepted, for a fixed window. Reports **aggregate frames/s** and
  * **per-peer frames/s** as N sweeps.
  *
@@ -107,7 +107,7 @@ struct point_t {
 /** @brief Run one sweep point: @p peers dialers hammering one server for the window. */
 [[nodiscard]] point_t run_point(std::size_t peers, double seconds) {
     counting_sink_t sink;
-    tr::net::transport_tcp_server server(0, {.peer_named = true});
+    tr::net::tcp_server_transport_t server(0, {.peer_named = true});
     if (!server.ok() || server.bus() == nullptr) return point_t{peers, 0, 0.0, 0};
     server.bus()->set_peer_receiver(sink);
     const std::uint16_t port = server.local_port();

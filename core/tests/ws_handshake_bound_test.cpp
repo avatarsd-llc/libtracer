@@ -180,7 +180,7 @@ template <typename Probe>
 }
 
 /** @brief How many peers @p server currently reports as OPEN (handshaken, named). */
-[[nodiscard]] std::size_t open_peers(const tr::net::transport_ws_server& server) {
+[[nodiscard]] std::size_t open_peers(const tr::net::ws_server_transport_t& server) {
     std::size_t n = 0;
     server.enumerate_peers([&n](std::string_view) { ++n; });
     return n;
@@ -237,7 +237,7 @@ bool dribble(int fd, std::string_view s, std::size_t step) {
  */
 void test_endless_request_is_refused_and_bounded() {
     std::printf("ws server — a never-terminated Upgrade request is refused at the budget:\n");
-    tr::net::transport_ws_server server(0);  // the default 16 KiB pre-auth budget
+    tr::net::ws_server_transport_t server(0);  // the default 16 KiB pre-auth budget
     check(server.ok(), "server bound");
     const int cfd = tcp_connect(server.local_port());
     check(cfd >= 0, "raw client connected");
@@ -319,12 +319,12 @@ void test_client_refuses_an_endless_server_header_block() {
     std::thread hostile([lfd] { endless_header_server(lfd); });
 
     const std::size_t rss_before = peak_rss_bytes();
-    tr::net::transport_ws_client client("127.0.0.1", ntohs(bound.sin_port));
+    tr::net::ws_client_transport_t client("127.0.0.1", ntohs(bound.sin_port));
     const std::size_t growth = peak_rss_bytes() - rss_before;
 
     check(!client.ok(), "the dial failed rather than completing a handshake");
     check(client.malformed_rx() == 1, "the over-budget response header block was counted");
-    check(client.effective_max_handshake() == tr::net::transport_ws_server::kMaxHandshakeBytes,
+    check(client.effective_max_handshake() == tr::net::ws_server_transport_t::kMaxHandshakeBytes,
           "on the default budget, the same 16 KiB the accept side defaults to");
     check(growth < kRssSlack, "and the accumulation did not follow the server's offer");
 
@@ -350,7 +350,7 @@ void test_the_budget_is_the_configured_one() {
     const std::string request = padded_request(4096);
 
     {
-        tr::net::transport_ws_server tight(0, {.max_handshake = 1024});
+        tr::net::ws_server_transport_t tight(0, {.max_handshake = 1024});
         check(tight.effective_max_handshake() == 1024, "the tight server honors 1024");
         const int cfd = tcp_connect(tight.local_port());
         check(cfd >= 0, "raw client connected (1 KiB budget)");
@@ -364,8 +364,8 @@ void test_the_budget_is_the_configured_one() {
         ::close(cfd);
     }
     {
-        tr::net::transport_ws_server wide(0);  // the default budget (kMaxHandshakeBytes)
-        check(wide.effective_max_handshake() == tr::net::transport_ws_server::kMaxHandshakeBytes,
+        tr::net::ws_server_transport_t wide(0);  // the default budget (kMaxHandshakeBytes)
+        check(wide.effective_max_handshake() == tr::net::ws_server_transport_t::kMaxHandshakeBytes,
               "the default server honors kMaxHandshakeBytes");
         const int cfd = tcp_connect(wide.local_port());
         check(cfd >= 0, "raw client connected (default budget)");
@@ -379,19 +379,20 @@ void test_the_budget_is_the_configured_one() {
 
     // Tighten-only: a request ABOVE the default cannot widen the pre-auth bound. Non-vacuous —
     // without the clamp the accessor would read back the 64 KiB that was asked for.
-    const tr::net::transport_ws_server raised(0, {.max_handshake = 64u * 1024u});
-    check(raised.effective_max_handshake() == tr::net::transport_ws_server::kMaxHandshakeBytes,
+    const tr::net::ws_server_transport_t raised(0, {.max_handshake = 64u * 1024u});
+    check(raised.effective_max_handshake() == tr::net::ws_server_transport_t::kMaxHandshakeBytes,
           "a max_handshake ABOVE the default is clamped — tighten-only, never raise");
 
     // The DIAL half resolves through the SAME `handshake_cap` home. Port 1 refuses the
     // connect, so this asserts the resolution alone, with no listener to stand up.
-    const tr::net::transport_ws_client dial_tight("127.0.0.1", 1,
-                                                  {.defer_recv = true, .max_handshake = 2048});
+    const tr::net::ws_client_transport_t dial_tight("127.0.0.1", 1,
+                                                    {.defer_recv = true, .max_handshake = 2048});
     check(dial_tight.effective_max_handshake() == 2048, "the dial half honors its own budget");
-    const tr::net::transport_ws_client dial_raised("127.0.0.1", 1,
-                                                   {.defer_recv = true, .max_handshake = 1u << 20});
-    check(dial_raised.effective_max_handshake() == tr::net::transport_ws_server::kMaxHandshakeBytes,
-          "and clamps a raised one to the same ceiling the accept side does");
+    const tr::net::ws_client_transport_t dial_raised(
+        "127.0.0.1", 1, {.defer_recv = true, .max_handshake = 1u << 20});
+    check(
+        dial_raised.effective_max_handshake() == tr::net::ws_server_transport_t::kMaxHandshakeBytes,
+        "and clamps a raised one to the same ceiling the accept side does");
 }
 
 // ---------------------------------------------------------------------------
@@ -412,7 +413,7 @@ void test_a_dribbled_request_is_judged_on_its_total() {
     check(kUpgradeRequest.size() > 128 && kUpgradeRequest.size() < 512,
           "the legal request sits between the two budgets this case uses");
     {
-        tr::net::transport_ws_server ample(0, {.max_handshake = 512});
+        tr::net::ws_server_transport_t ample(0, {.max_handshake = 512});
         const int cfd = tcp_connect(ample.local_port());
         check(cfd >= 0, "raw client connected (512-byte budget)");
         check(dribble(cfd, kUpgradeRequest, 64),
@@ -426,7 +427,7 @@ void test_a_dribbled_request_is_judged_on_its_total() {
         ::close(cfd);
     }
     {
-        tr::net::transport_ws_server tiny(0, {.max_handshake = 128});
+        tr::net::ws_server_transport_t tiny(0, {.max_handshake = 128});
         const int cfd = tcp_connect(tiny.local_port());
         check(cfd >= 0, "raw client connected (128-byte budget)");
         (void)dribble(cfd, kUpgradeRequest, 64);  // refused partway; the writes then fail

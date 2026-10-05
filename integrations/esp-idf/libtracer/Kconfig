@@ -24,7 +24,7 @@ menu "libtracer"
         bool "Build the TCP stream transport"
         default y
         help
-            Compile the built-in `tcp` transport (tcp_transport_t / transport_tcp_server
+            Compile the built-in `tcp` transport (tcp_transport_t / tcp_server_transport_t
             + transport_tcp.cpp + its factory glue). ON by default. Turn OFF on a node
             that never creates a `kind=tcp` connection.
 
@@ -86,7 +86,7 @@ menu "libtracer"
                 (on esp_transport_ws) and, with LIBTRACER_WS_SERVER=y,
                 httpd_ws_link_t (adopts your running esp_http_server). ESP-IDF
                 WebSocket never uses POSIX sockets: core's portable
-                transport_ws_server / transport_ws_client are the HOST
+                ws_server_transport_t / ws_client_transport_t are the HOST
                 implementation and are NOT compiled here. They are not merely
                 unreachable on lwIP, they are unusable — their scatter-gather
                 egress asks sendmsg for MSG_NOSIGNAL, which lwip_sendmsg rejects

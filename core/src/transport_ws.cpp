@@ -215,30 +215,31 @@ std::pair<::iovec*, std::size_t> build_server_iov(
  * published NOT-open and its `open` store is the `101`'s, taken under the same
  * `write_m_` the response write holds (`on_readable` below).
  */
-struct transport_ws_server::session_t : slot_server_t::session_base_t {
+struct ws_server_transport_t::session_t : slot_server_t::session_base_t {
     std::string hs_buf;         /**< @brief HTTP Upgrade request accumulation. */
     std::vector<std::byte> buf; /**< @brief Stream bytes → frame reassembly. */
     ws_assembler_t assembler;   /**< @brief RFC 6455 fragment reassembly. */
     peer_endpoint_t endpoint;   /**< @brief The directed facade `peer_link` returns. */
 };
 
-transport_ws_server::transport_ws_server(std::uint16_t bind_port, const ws_server_config_t& config)
+ws_server_transport_t::ws_server_transport_t(std::uint16_t bind_port,
+                                             const ws_server_config_t& config)
     : stream_server_base_t(config.max_peers, config.peer_named, config.liveness_window_ms),
       backend_(config.memory.rx) {
-    max_frame_ = length_prefix_framer::configured_cap(config.max_frame);  // tighten-only (#1035)
-    max_handshake_ = handshake_cap(config.max_handshake);                 // tighten-only (#934)
+    max_frame_ = length_prefix_framer_t::configured_cap(config.max_frame);  // tighten-only (#1035)
+    max_handshake_ = handshake_cap(config.max_handshake);                   // tighten-only (#934)
     if (!bind_listen(bind_port)) return;
     start([this] { run(); }, config.recv_stack);
 }
 
-transport_ws_server::~transport_ws_server() {
+ws_server_transport_t::~ws_server_transport_t() {
     // FIRST: the run() thread dispatches this class's variance points, so it must be
     // joined while the derived object is still whole. ~slot_server_t closes the listen
     // socket and sweeps the slot fds after this body.
     stop_and_join();
 }
 
-std::unique_ptr<slot_server_t::session_base_t> transport_ws_server::make_session() {
+std::unique_ptr<slot_server_t::session_base_t> ws_server_transport_t::make_session() {
     auto slot = std::make_unique<session_t>();
     slot->endpoint.owner_ = this;
     slot->endpoint.slot_ = slot.get();
@@ -246,7 +247,7 @@ std::unique_ptr<slot_server_t::session_base_t> transport_ws_server::make_session
     return slot;
 }
 
-bool transport_ws_server::on_accept(session_base_t& base, int fd) {
+bool ws_server_transport_t::on_accept(session_base_t& base, int fd) {
     (void)fd;  // no per-socket option of its own: WS rides the shared stream setup, which
                // since #838 includes the bounded SO_SNDTIMEO armed in accept_peer
 
@@ -260,7 +261,7 @@ bool transport_ws_server::on_accept(session_base_t& base, int fd) {
     return false;
 }
 
-void transport_ws_server::on_slot_reset(session_base_t& base) {
+void ws_server_transport_t::on_slot_reset(session_base_t& base) {
     session_t& s = static_cast<session_t&>(base);
     s.buf.clear();
     s.buf.shrink_to_fit();
@@ -273,7 +274,7 @@ void transport_ws_server::on_slot_reset(session_base_t& base) {
     s.assembler.reset();
 }
 
-void transport_ws_server::send(std::span<const std::byte> frame) {
+void ws_server_transport_t::send(std::span<const std::byte> frame) {
     // One span, same wire bytes — the gathered path is the ONE implementation (the
     // tcp_transport_t::send idiom). A server frame is UNMASKED (RFC 6455 §5.1), so the
     // caller's payload rides to the wire untouched behind a stack-built header: this
@@ -283,7 +284,7 @@ void transport_ws_server::send(std::span<const std::byte> frame) {
     send(std::span<const std::span<const std::byte>>(one));
 }
 
-void transport_ws_server::send(std::span<const std::span<const std::byte>> iov) {
+void ws_server_transport_t::send(std::span<const std::span<const std::byte>> iov) {
     // Encode the ONE server frame header for the whole gathered payload, then fan
     // [header, span0, span1, ...] to every open peer as a single gathered write —
     // no flatten, no re-copy (server frames are UNMASKED, RFC 6455 §5.1). Lock
@@ -310,14 +311,14 @@ void transport_ws_server::send(std::span<const std::span<const std::byte>> iov) 
                           std::memory_order_relaxed);
 }
 
-void transport_ws_server::peer_endpoint_t::send(std::span<const std::byte> frame) {
+void ws_server_transport_t::peer_endpoint_t::send(std::span<const std::byte> frame) {
     // One span through the gathered path — the same delegation as the broadcast override
     // (#848): no per-send vector, no payload copy.
     const std::span<const std::byte> one[1] = {frame};
     send(std::span<const std::span<const std::byte>>(one));
 }
 
-void transport_ws_server::peer_endpoint_t::send(std::span<const std::span<const std::byte>> iov) {
+void ws_server_transport_t::peer_endpoint_t::send(std::span<const std::span<const std::byte>> iov) {
     if (owner_ == nullptr || slot_ == nullptr) return;
     // The single-fd twin of the broadcast override: one gathered [header, spans...]
     // write, server frame UNMASKED (RFC 6455 §5.1), no flatten copy.
@@ -349,8 +350,8 @@ void transport_ws_server::peer_endpoint_t::send(std::span<const std::span<const 
         owner_->dropped_tx_.fetch_add(1, std::memory_order_relaxed);
 }
 
-void transport_ws_server::on_readable(session_base_t& base, const std::byte* data,
-                                      std::size_t len) {
+void ws_server_transport_t::on_readable(session_base_t& base, const std::byte* data,
+                                        std::size_t len) {
     session_t& s = static_cast<session_t&>(base);
     if (!s.open.load(std::memory_order_relaxed)) {
         const int fd = s.fd.load(std::memory_order_relaxed);
@@ -433,7 +434,7 @@ void transport_ws_server::on_readable(session_base_t& base, const std::byte* dat
     if (!drain_frames(s)) teardown_slot(s);
 }
 
-bool transport_ws_server::drain_frames(session_t& s) {
+bool ws_server_transport_t::drain_frames(session_t& s) {
     // Drain every complete frame currently buffered; leftover partial bytes stay
     // for the next read. Returns false when the peer sent CLOSE — or broke RFC 6455,
     // which fails the connection through the exact same teardown (§7.1.7).
@@ -441,7 +442,7 @@ bool transport_ws_server::drain_frames(session_t& s) {
     // The cap resolves from the two INJECTED resources on every pass (one virtual call, the
     // tcp_transport_t::serve idiom) rather than being cached: it is what stops `s.buf` from
     // following a declared 64-bit length, so it must be the live answer, not a snapshot.
-    const std::size_t cap = length_prefix_framer::effective_cap(*backend_, max_frame_);
+    const std::size_t cap = length_prefix_framer_t::effective_cap(*backend_, max_frame_);
     while (true) {
         ws::decode_result_t decoded = ws::decode_frame_checked(s.buf, cap);
         if (decoded.status == ws::decode_status_t::NEED_MORE) return true;
@@ -538,11 +539,11 @@ bool transport_ws_server::drain_frames(session_t& s) {
 }
 
 // ---------------------------------------------------------------------------
-// transport_ws_client — the dial-out half.
+// ws_client_transport_t — the dial-out half.
 // ---------------------------------------------------------------------------
 
-transport_ws_client::transport_ws_client(const std::string& host, std::uint16_t port,
-                                         const ws_client_config_t& config)
+ws_client_transport_t::ws_client_transport_t(const std::string& host, std::uint16_t port,
+                                             const ws_client_config_t& config)
     // The queue's slots hold this link's own masked copies, so they are egress store too
     // (#1661): drawn from `memory.io` like `tx_buf_`, not from the process heap.
     : stream_endpoint_t(config.memory.io != nullptr ? *config.memory.io : mem::heap_source()),
@@ -562,11 +563,11 @@ transport_ws_client::transport_ws_client(const std::string& host, std::uint16_t 
     // not two. First statement on purpose — `start_receiving()` at the end of this body
     // spawns the recv thread.
     if (egress_src != nullptr) set_egress_source(*egress_src);
-    liveness_window_ms_ = liveness_window_ms;                      // the #838 send bound's source
-    max_frame_ = length_prefix_framer::configured_cap(max_frame);  // tighten-only (#1035)
+    liveness_window_ms_ = liveness_window_ms;                        // the #838 send bound's source
+    max_frame_ = length_prefix_framer_t::configured_cap(max_frame);  // tighten-only (#1035)
     // One home for the resolution, shared with the accept side (#934): a dialled server is
     // no more trusted with our pre-auth memory than a peer that dialled us.
-    max_handshake_ = transport_ws_server::handshake_cap(max_handshake);
+    max_handshake_ = ws_server_transport_t::handshake_cap(max_handshake);
     // Seed the per-frame masking-key stream with something that varies between
     // connections (steady_clock + this address). Not crypto-strong — RFC 6455
     // masking exists for proxy/cache safety, not to defend against a peer.
@@ -618,10 +619,10 @@ transport_ws_client::transport_ws_client(const std::string& host, std::uint16_t 
     // class's override anyway (the derived part does not exist yet), so spelling it out is
     // the honest form — a subclass cannot substitute its own bring-up here, and nothing in
     // this call should look as if it could.
-    if (!defer_recv) transport_ws_client::start_receiving();
+    if (!defer_recv) ws_client_transport_t::start_receiving();
 }
 
-void transport_ws_client::start_receiving() {
+void ws_client_transport_t::start_receiving() {
     if (!came_up_) return;  // handshake failed: there is nothing to serve
     // One-shot: `posix_endpoint_t::start` may be called at most once per endpoint, and this
     // is reachable both from the constructor (one-phase) and from an owner that calls it
@@ -632,13 +633,13 @@ void transport_ws_client::start_receiving() {
           recv_stack_);
 }
 
-transport_ws_client::~transport_ws_client() {
+ws_client_transport_t::~ws_client_transport_t() {
     stop_and_join();  // FIRST: serve() touches conn_fd_
     // A leftover fd (never-spawned thread — handshake failed — leaves conn_fd_
     // at -1 anyway) is closed by ~stream_endpoint_t after this body.
 }
 
-std::uint32_t transport_ws_client::next_mask_key() {
+std::uint32_t ws_client_transport_t::next_mask_key() {
     // SplitMix64 step → a varied (non-crypto) 32-bit masking key per frame.
     std::uint64_t z = mask_state_.fetch_add(0x9E3779B97F4A7C15ull, std::memory_order_relaxed) +
                       0x9E3779B97F4A7C15ull;
@@ -648,7 +649,7 @@ std::uint32_t transport_ws_client::next_mask_key() {
     return static_cast<std::uint32_t>(z);
 }
 
-void transport_ws_client::send(std::span<const std::byte> frame) {
+void ws_client_transport_t::send(std::span<const std::byte> frame) {
     // One MASKED record per frame, through the enqueue-then-write queue (RFC 0028 §4.7,
     // #1619). A client frame MUST be masked (RFC 6455 §5.1), so unlike every server-side send
     // this one cannot gather the caller's bytes by reference and genuinely needs a buffer —
@@ -675,8 +676,8 @@ void transport_ws_client::send(std::span<const std::byte> frame) {
     if (shed != 0) dropped_tx_.fetch_add(shed, std::memory_order_relaxed);
 }
 
-bool transport_ws_client::handshake(int fd, const std::string& host, std::uint16_t port,
-                                    std::vector<std::byte>& pipelined) {
+bool ws_client_transport_t::handshake(int fd, const std::string& host, std::uint16_t port,
+                                      std::vector<std::byte>& pipelined) {
     pipelined.clear();
     // A fresh 16-byte nonce (RFC 6455 §4.1) base64'd into Sec-WebSocket-Key.
     std::array<std::byte, 16> nonce{};
@@ -746,19 +747,19 @@ bool transport_ws_client::handshake(int fd, const std::string& host, std::uint16
 
     // Bytes pipelined past the header are the start of the frame stream — they are already
     // off the socket, so `serve` can never read them again. Carry them over, exactly as
-    // `transport_ws_server::on_readable` does on the accept side.
+    // `ws_server_transport_t::on_readable` does on the accept side.
     const auto* rest = reinterpret_cast<const std::byte*>(resp.data()) + hdr_end + 4;
     pipelined.assign(rest, rest + (resp.size() - hdr_end - 4));
     return true;
 }
 
-void transport_ws_client::serve(int fd, std::vector<std::byte> pipelined) {
+void ws_client_transport_t::serve(int fd, std::vector<std::byte> pipelined) {
     ws_assembler_t asm_state;  // per-connection fragment assembly (recv thread only)
     std::vector<std::byte> buf = std::move(pipelined);
     std::array<std::byte, 4096> chunk;
     // The ingress bound, resolved from the injected backend and `max_frame` exactly as the
     // server resolves it — a dialled peer gets no more credit than an accepted one.
-    const std::size_t cap = length_prefix_framer::effective_cap(*backend_, max_frame_);
+    const std::size_t cap = length_prefix_framer_t::effective_cap(*backend_, max_frame_);
 
     while (true) {
         // Drain BEFORE touching the socket: the loop starts with whatever the server

@@ -254,7 +254,7 @@ add_executable(bench_wire_heap bench_wire_heap.cpp)
 target_link_libraries(bench_wire_heap PRIVATE libtracer)
 target_compile_options(bench_wire_heap PRIVATE -Wall -Wextra)
 
-# Aggregate throughput vs concurrent peer count — prices transport_tcp_server's SINGLE poll
+# Aggregate throughput vs concurrent peer count — prices tcp_server_transport_t's SINGLE poll
 # thread (the "MCU-shaped choice, #362") on a many-core host, which nothing else measures.
 add_executable(bench_tcp_fanin bench_tcp_fanin.cpp)
 target_link_libraries(bench_tcp_fanin PRIVATE libtracer)

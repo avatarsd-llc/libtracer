@@ -17,9 +17,9 @@
  *
  * Three shapes: tcp_transport_t DIAL (connect out to host:port, synchronously
  * at construction), tcp_transport_t LISTEN (accept ONE inbound peer at a time,
- * re-accepting after a peer departs), and transport_tcp_server (the MULTI-peer
+ * re-accepting after a peer departs), and tcp_server_transport_t (the MULTI-peer
  * listener — the shared slot_server_t slot/poll machinery (`%posix_endpoint.hpp`,
- * one home with transport_ws_server since #871) over raw length-prefix framing,
+ * one home with ws_server_transport_t since #871) over raw length-prefix framing,
  * with the ADR-0044 bus_link_t facet; the `kind=tcp` listener factory builds
  * this one). POSIX sockets; a receive thread reassembles each frame and
  * delivers it. Per ADR-0042 §4 a stream frame is reassembled into ONE contiguous
@@ -102,7 +102,7 @@ struct tcp_config_t {
     link_memory_t memory{};
     /**
      * @brief Receive cap, bytes (0 → @ref tcp_transport_t::kMaxFrame). TIGHTEN-ONLY: a value
-     *        above `kMaxFrame` is clamped to it (`length_prefix_framer::configured_cap`,
+     *        above `kMaxFrame` is clamped to it (`length_prefix_framer_t::configured_cap`,
      *        #1035); a frame inside the cap the backend cannot hold is shed as backpressure,
      *        not treated as malformed (#932).
      */
@@ -129,7 +129,7 @@ struct tcp_config_t {
 };
 
 /**
- * @brief `transport_tcp_server`'s knobs as one aggregate (#1593), after the bind port.
+ * @brief `tcp_server_transport_t`'s knobs as one aggregate (#1593), after the bind port.
  */
 struct tcp_server_config_t {
     /** @brief The link's memory (@ref link_memory_t); `rx` is the per-connection receive
@@ -147,7 +147,7 @@ struct tcp_server_config_t {
      */
     std::size_t max_peers = 0;
     /** @brief Expose the @ref bus_link_t facet (see @ref transport_t::bus) — the board↔board
-     *         wiring choice, same contract as `transport_ws_server`'s. */
+     *         wiring choice, same contract as `ws_server_transport_t`'s. */
     bool peer_named = false;
     /** @brief Poll-thread stack size in bytes, 0 = platform default. One thread serves every
      *         peer, so this is the whole server's recv-stack knob. */
@@ -175,16 +175,16 @@ struct tcp_server_config_t {
 class tcp_transport_t : public transport_t, private stream_endpoint_t {
    public:
     /** @brief The largest frame the length prefix may announce — the shared
-     *         length_prefix_framer::kDefaultMaxFrame (16 MiB) unless `:settings
+     *         length_prefix_framer_t::kDefaultMaxFrame (16 MiB) unless `:settings
      *         max_frame` tightens it. A larger prefix is malformed — counted via
      *         @ref malformed_rx and the connection is closed (a desynced stream
      *         cannot be trusted again). */
-    static constexpr std::size_t kMaxFrame = length_prefix_framer::kDefaultMaxFrame;
+    static constexpr std::size_t kMaxFrame = length_prefix_framer_t::kDefaultMaxFrame;
 
     /**
      * @brief DIAL mode: connect to @p peer_host:@p peer_port (synchronous).
      *
-     * The TCP connect happens in the constructor (the transport_ws_client
+     * The TCP connect happens in the constructor (the ws_client_transport_t
      * shape) — confirm with ok(); on failure no thread is spawned. By default
      * the receive thread starts immediately, so receivers must be installed
      * before frames flow (the set_receiver contract); @p defer_recv is what
@@ -201,7 +201,7 @@ class tcp_transport_t : public transport_t, private stream_endpoint_t {
     /**
      * @brief LISTEN mode: bind+listen on @p bind_port, accept ONE inbound peer.
      *
-     * The same one-peer model as transport_ws_server: one connected client at a
+     * The same one-peer model as ws_server_transport_t: one connected client at a
      * time; after a peer departs the accept loop resumes for the next. Use ok()
      * to confirm the listen socket bound; the bound port (an ephemeral 0
      * request resolved) is observable via local_port().
@@ -371,20 +371,20 @@ class tcp_transport_t : public transport_t, private stream_endpoint_t {
  *        one listener and exposes them through the @ref bus_link_t facet
  *        (ADR-0044).
  *
- * The raw-stream sibling of transport_ws_server (#362): LITERALLY the same
+ * The raw-stream sibling of ws_server_transport_t (#362): LITERALLY the same
  * slot/poll machinery, since #871 shared as @ref slot_server_t — ONE
  * poll-based thread accepts clients and serves every open connection
  * concurrently; peers occupy SLOTS recycled on departure, so steady-state
  * memory is bounded by the maximum concurrent peers ever reached (or @p
  * max_peers, the RFC-0006 injected bound).  What this class adds to that base
  * is its FRAMING: the shared u32-LE length prefix (one chunk-fed
- * length_prefix_framer per slot) where WS has RFC 6455 packaging.  There is NO
+ * length_prefix_framer_t per slot) where WS has RFC 6455 packaging.  There is NO
  * handshake phase: a peer is open (named `p<slot>`, ADR-0073 §2 / #426) from
  * the moment its connection is accepted.  The board↔board listener shape:
  * leaner than WS packaging (no HTTP upgrade, no frame masking) with the same
  * per-peer return-route identity when @p peer_named.
  */
-class transport_tcp_server : public stream_server_base_t {
+class tcp_server_transport_t : public stream_server_base_t {
    public:
     /**
      * @brief Bind+listen on @p bind_port (0 = ephemeral; see local_port()).
@@ -396,13 +396,14 @@ class transport_tcp_server : public stream_server_base_t {
      * @param config     The server's knobs (@ref tcp_server_config_t): memory, receive cap,
      *                   peer cap, bus facet, poll-thread stack, liveness window.
      */
-    explicit transport_tcp_server(std::uint16_t bind_port, const tcp_server_config_t& config = {});
+    explicit tcp_server_transport_t(std::uint16_t bind_port,
+                                    const tcp_server_config_t& config = {});
 
     /** @brief Stop the poll thread and close all sockets. */
-    ~transport_tcp_server() override;
+    ~tcp_server_transport_t() override;
 
-    transport_tcp_server(const transport_tcp_server&) = delete;
-    transport_tcp_server& operator=(const transport_tcp_server&) = delete;
+    tcp_server_transport_t(const tcp_server_transport_t&) = delete;
+    tcp_server_transport_t& operator=(const tcp_server_transport_t&) = delete;
 
     /**
      * @brief Send @p frame as one length-prefixed record to EVERY open peer
@@ -481,9 +482,9 @@ class transport_tcp_server : public stream_server_base_t {
         }
 
        private:
-        friend class transport_tcp_server;
-        transport_tcp_server* owner_ = nullptr; /**< @brief The owning server. */
-        session_t* slot_ = nullptr;             /**< @brief The peer slot this sends to. */
+        friend class tcp_server_transport_t;
+        tcp_server_transport_t* owner_ = nullptr; /**< @brief The owning server. */
+        session_t* slot_ = nullptr;               /**< @brief The peer slot this sends to. */
     };
 
     /** @brief One fresh slot with its length-prefix framer and directed facade. */
@@ -518,5 +519,8 @@ class transport_tcp_server : public stream_server_base_t {
     std::atomic<std::size_t> malformed_rx_{0};
     std::atomic<std::size_t> dropped_tx_{0};
 };
+
+/** @brief The pre-v0.18.0 spelling of @ref tcp_server_transport_t; removed in v0.19.0 (#1723). */
+using transport_tcp_server = tcp_server_transport_t;
 
 }  // namespace tr::net

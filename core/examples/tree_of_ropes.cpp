@@ -40,7 +40,7 @@
  *
  * The transport half runs over the in-process `loopback_channel_t` (dev/test
  * only) so the example is deterministic and needs no hardware — the same
- * `provide_link` seam accepts a real `transport_can` bus link on a Linux host
+ * `provide_link` seam accepts a real `can_transport_t` bus link on a Linux host
  * with a (v)CAN interface, and the structural claims asserted here are
  * identical. This file self-checks and returns non-zero on any mismatch, so it
  * runs as the `example_tree_of_ropes` ctest smoke test. Needs the FWD net plane

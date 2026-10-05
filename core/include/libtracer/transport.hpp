@@ -98,7 +98,7 @@ class bus_link_t {
      *
      * Every kind answers this as a PURE FUNCTION of the handle's index, because every
      * kind's peer name already is one: `slot_server_t` names a peer `p<slot>` for the slot
-     * it landed in, and @ref transport_can names one `n<node>` for its bus node id. So the
+     * it landed in, and @ref can_transport_t names one `n<node>` for its bus node id. So the
      * call takes no lock, allocates nothing, and is safe to make from the delivery callback
      * on the transport's own receive thread — which is where the router makes it, once per
      * inbound frame, exactly where the name used to arrive for free.
@@ -135,7 +135,7 @@ class bus_link_t {
      * edge stores the peer NAME rather than this pointer.
      *
      * Which kinds are exposed follows from the naming regime alone:
-     *  - IDENTITY-derived names are immune — @ref transport_can names a peer `n<node-id>`
+     *  - IDENTITY-derived names are immune — @ref can_transport_t names a peer `n<node-id>`
      *    for its own bus node id, so the name, the table key and the endpoint are one
      *    identity that no other peer can inherit.
      *  - POSITIONAL names are exposed — @ref slot_server_t names a peer `p<slot>` for the
@@ -403,7 +403,7 @@ struct link_memory_t {
     mem::mem_backend_t* rx = &mem::heap_backend();
     /**
      * @brief The link's EGRESS store (ADR-0079, #873): the per-frame scratch a kind draws
-     *        while one outbound frame is in flight — `transport_ws_client`'s masked-frame copy
+     *        while one outbound frame is in flight — `ws_client_transport_t`'s masked-frame copy
      *        and the base class's gather temporary. A kind with no such draw ignores it.
      *        Default: the process heap.
      */
@@ -524,7 +524,7 @@ class transport_t {
         // under `-fno-exceptions` ABORTS the node on an exhausted heap rather than shedding
         // the frame. That is reachable on the FORWARD hot path today — `route_fwd_forward`
         // scatter-gathers into `send(iov)`, and a transport that does not override this
-        // (`transport_can`, and any embedder's) lands here. An egress that cannot allocate
+        // (`can_transport_t`, and any embedder's) lands here. An egress that cannot allocate
         // must DROP, exactly as every other writer-side allocation on this plane does.
         //
         // The store is a `tr::mem::block_array_t`, NOT a `std::vector` + `try_reserve`:
@@ -643,7 +643,7 @@ class transport_t {
      * @warning This setter reaches the allocations a send makes THROUGH this base — it does
      *          not re-seat a concrete link's CONSTRUCTION-BOUND buffers. A
      *          `mem::block_array_t` member takes its source in its own constructor and keeps
-     *          it for life, so a link that owns one (e.g. `transport_ws_client::tx_buf_`)
+     *          it for life, so a link that owns one (e.g. `ws_client_transport_t::tx_buf_`)
      *          takes the store as a CONSTRUCTOR argument and applies it to both halves
      *          there (#873). Wiring such a link only through this setter would leave that
      *          buffer on whatever source it was built with.

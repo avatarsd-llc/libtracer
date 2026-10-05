@@ -51,7 +51,7 @@ host gets unless it says otherwise. The in-band spelling of those bounds — the
 creation SPEC carries, alongside the bus identity `ifname` / `node` — is
 [connection config](connection-config.md).
 
-**The binding** (`tr::net::transport_can`) joins all of that to a real bus
+**The binding** (`tr::net::can_transport_t`) joins all of that to a real bus
 through the `can_link_t` seam. `socketcan_link_t` is the production Linux
 implementation, a `PF_CAN` raw socket with a receive thread. A different platform
 implements the same seam — and inherits the same admission rule, because the rule
@@ -261,7 +261,7 @@ explains how the receiver observes a lap.
 :project: libtracer
 ```
 
-```{doxygenclass} tr::net::transport_can
+```{doxygenclass} tr::net::can_transport_t
 :project: libtracer
 :members:
 ```

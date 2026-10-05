@@ -142,4 +142,4 @@ free-floating `/** */` block attaches to no entity, and orphan doc blocks trip
 - **Floor: C++23** — the standard the MCU toolchains implement. The whole `core/` compiles under `-std=c++23` on every target.
 - **C++26: opportunistic only** — behind `__cpp_*` feature-test macros with a C++23 fallback. Nothing in the MCU profile gates on `-std=c++26`.
 - **Templating: zero-cost / erased only** above the seam (strong types, concepts, `constexpr`, inlining CRTP); the ownership seam stays virtual + monomorphic (one `segment_t`, virtual `mem_backend_t`). See [ADR-0016 §3](../docs/adr/0016-substrate-zero-copy-layer-namespaces-no-templates-through-seam.md).
-- **MCU profile:** `-fno-exceptions -fno-rtti -Os`, `std::expected`-based `Result<T>`, a single-core `config_t` (`guard_t = tr::no_guard_t` for a single-threaded node). The ≤16 KB Cortex-M0 sentinel is the gate that keeps aggressive templating honest.
+- **MCU profile:** `-fno-exceptions -fno-rtti -Os`, `std::expected`-based `result_t`, a single-core `config_t` (`guard_t = tr::no_guard_t` for a single-threaded node). The ≤16 KB Cortex-M0 sentinel is the gate that keeps aggressive templating honest.

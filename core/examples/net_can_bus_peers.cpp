@@ -92,7 +92,7 @@ class fake_bus_t {
  * @brief One node's raw-frame link — the whole `can_link_t` seam, in memory.
  *
  * Two-phase by contract (#1186): construction only opens the link, and nothing is delivered
- * until @ref start, which `transport_can` calls for its owner after installing the receiver.
+ * until @ref start, which `can_transport_t` calls for its owner after installing the receiver.
  */
 class fake_link_t final : public tr::net::can_link_t {
    public:
@@ -225,7 +225,7 @@ class sink_t {
 class named_sink_t {
    public:
     /** @brief Bind the link whose deliveries this sink will name; call before frames flow. */
-    void bind(tr::net::transport_can& link) { link_ = &link; }
+    void bind(tr::net::can_transport_t& link) { link_ = &link; }
 
     /** @brief The peer-named receiver callback — record who sent @p frame, then @p frame. */
     void operator()(tr::net::peer_handle_t peer, std::span<const std::byte> frame) {
@@ -265,21 +265,21 @@ class named_sink_t {
     }
 
    private:
-    tr::net::transport_can* link_ = nullptr;
+    tr::net::can_transport_t* link_ = nullptr;
     mutable std::mutex m_;
     std::condition_variable cv_;
     std::vector<std::vector<std::byte>> frames_;
     std::vector<std::string> senders_;
 };
 
-/** @brief A `transport_can` node on @p bus with id @p node, advertising @p path. */
-std::unique_ptr<tr::net::transport_can> make_node(fake_bus_t& bus, std::uint16_t node,
-                                                  std::string path) {
+/** @brief A `can_transport_t` node on @p bus with id @p node, advertising @p path. */
+std::unique_ptr<tr::net::can_transport_t> make_node(fake_bus_t& bus, std::uint16_t node,
+                                                    std::string path) {
     tr::net::transport_can_config_t cfg;
     cfg.node = node;
     cfg.mode = tr::net::can::can_frame_mode_t::CLASSIC;
     cfg.path = std::move(path);
-    return std::make_unique<tr::net::transport_can>(std::make_unique<fake_link_t>(bus), cfg);
+    return std::make_unique<tr::net::can_transport_t>(std::make_unique<fake_link_t>(bus), cfg);
 }
 
 /** @brief The peer names @p link currently hears, in enumeration order. */

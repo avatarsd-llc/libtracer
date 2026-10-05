@@ -349,7 +349,7 @@ void test_tcp_link_sheds_and_drops_a_stalled_peer() {
  * opening more connections. With the fix the divisor is the admission cap, so the batch
  * fits one window however many peers are stalled.
  *
- * Restore the `1` at `transport_tcp_server::peer_endpoint_t::send` and the elapsed time
+ * Restore the `1` at `tcp_server_transport_t::peer_endpoint_t::send` and the elapsed time
  * below goes from about one window to about `peers` windows — past the assertion.
  */
 void test_concurrent_directed_sends_share_one_window() {
@@ -358,7 +358,7 @@ void test_concurrent_directed_sends_share_one_window() {
     // per-record bound is a real quotient rather than the floor.
     const std::uint32_t window = 1600;
     const std::size_t peers = 4;
-    tr::net::transport_tcp_server server(
+    tr::net::tcp_server_transport_t server(
         0, {.max_peers = peers, .peer_named = true, .liveness_window_ms = window});
     check(server.ok(), "the peer-named listener is up");
     check(server.max_peers() == peers, "the injected cap is the one enforced");

@@ -53,9 +53,9 @@ std::unique_ptr<transport_t> make_endpoint(std::string_view proto, bool sub, std
         return sub ? std::make_unique<tr::net::tcp_transport_t>(port)
                    : std::make_unique<tr::net::tcp_transport_t>("127.0.0.1", port);
     if (proto == "ws")
-        return sub ? std::unique_ptr<transport_t>(new tr::net::transport_ws_server(port))
+        return sub ? std::unique_ptr<transport_t>(new tr::net::ws_server_transport_t(port))
                    : std::unique_ptr<transport_t>(
-                         new tr::net::transport_ws_client("127.0.0.1", port));
+                         new tr::net::ws_client_transport_t("127.0.0.1", port));
     return nullptr;
 }
 

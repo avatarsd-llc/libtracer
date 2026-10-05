@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
 #
 # C++ <-> TypeScript transport_ws INTEROP end-to-end job (#54). Builds the C++
-# `ws_interop_server` helper binary (a real `tr::net::transport_ws_server`) and
+# `ws_interop_server` helper binary (a real `tr::net::ws_server_transport_t`) and
 # runs the TypeScript transport-ws interop test against it over a live socket: a
 # genuine RFC 6455 101 handshake, a MASKED TS client frame in, an UNMASKED C++
 # server frame back. This proves the published @avatarsd-llc/libtracer-ws client

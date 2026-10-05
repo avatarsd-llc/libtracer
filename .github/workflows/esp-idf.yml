@@ -233,8 +233,8 @@ jobs:
           idf.py build
 
       # WS-plane gate (#947 ruling): ESP-IDF WebSocket must never use POSIX sockets.
-      # Asserts the linked chip ELF carries ZERO transport_ws_server /
-      # transport_ws_client symbols (nm), that their TUs were not compiled, and that
+      # Asserts the linked chip ELF carries ZERO ws_server_transport_t /
+      # ws_client_transport_t symbols (nm), that their TUs were not compiled, and that
       # the IDF-native links that replace them (httpd_ws_link_t / esp_ws_client_link_t)
       # ARE built — so an over-trim that sheds WebSocket entirely cannot pass as a fix.
       # A build alone proves nothing here: the portable pair COMPILES fine against

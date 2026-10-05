@@ -50,8 +50,8 @@ using tr::testing::check;
 
 using tr::view::rope_t;
 using tr::view::view_t;
-using tr::wire::grammar::rope_cursor;
-using tr::wire::grammar::span_cursor;
+using tr::wire::grammar::rope_cursor_t;
+using tr::wire::grammar::span_cursor_t;
 
 /** @brief A borrowed view over @p bytes (the caller's storage must outlive it). */
 view_t borrowed_view(std::span<std::byte> bytes) { return view_t::over(tr::view::borrow(bytes)); }
@@ -83,18 +83,18 @@ void test_in_contract_feeds_are_unchanged() {
     std::array<std::byte, 2> b{std::byte{0x20}, std::byte{0x21}};
     rope_t r(borrowed_view(a));
     r.append(borrowed_view(b));
-    const rope_cursor cur{r};
+    const rope_cursor_t cur{r};
 
     const feed_result_t whole = feed(cur, 0, 5);
     check(whole.bytes == 5 && !whole.poisoned, "the whole window feeds 5 bytes and does not latch");
 
-    const rope_cursor narrowed = cur.region(0, 3);
+    const rope_cursor_t narrowed = cur.region(0, 3);
     const feed_result_t exact = feed(narrowed, 0, 3);
     check(exact.bytes == 3 && !exact.poisoned,
           "a feed that exactly fills a narrowed window is in "
           "contract");
 
-    const rope_cursor tail = cur.region(3, 2);
+    const rope_cursor_t tail = cur.region(3, 2);
     const feed_result_t crossed = feed(tail, 0, 2);
     check(crossed.bytes == 2 && !crossed.poisoned, "a window opening mid-chain feeds its 2 bytes");
 
@@ -118,20 +118,20 @@ void test_overshoot_is_clamped_not_served() {
 
     // The issue's own repro: two links 3+2, region(0, 3), for_each_span(0, 5).
     // Pre-fix release behaviour was "fed 5 bytes from a 3-byte window, returned normally".
-    const rope_cursor narrowed = rope_cursor{r}.region(0, 3);
+    const rope_cursor_t narrowed = rope_cursor_t{r}.region(0, 3);
     const feed_result_t over = feed(narrowed, 0, 5);
     check(over.bytes == 3, "the overshoot is clamped to the window (was: 5 bytes, silently)");
     check(over.poisoned, "and the cursor latches so a boundary can answer for it");
 
     // Bytes that ARE in the chain but past the window must not be reachable by offset
     // either — the clamp is on the window, not on the chain.
-    const rope_cursor front = rope_cursor{r}.region(0, 2);
+    const rope_cursor_t front = rope_cursor_t{r}.region(0, 2);
     const feed_result_t off_over = feed(front, 1, 4);
     check(off_over.bytes == 1 && off_over.poisoned,
           "a feed whose START is in-window but whose end is not is clamped to the remainder");
 
     // A feed starting past the window names no byte at all.
-    const rope_cursor short_win = rope_cursor{r}.region(0, 2);
+    const rope_cursor_t short_win = rope_cursor_t{r}.region(0, 2);
     const feed_result_t past = feed(short_win, 2, 1);
     check(past.bytes == 0 && past.poisoned, "a feed starting at the window end serves nothing");
 
@@ -144,7 +144,7 @@ void test_overshoot_is_clamped_not_served() {
 /**
  * @brief The contiguous twin is deliberately NOT latched, and costs nothing for it (#986).
  *
- * The asymmetry is the measured half of this issue's ruling. A `span_cursor`'s window IS
+ * The asymmetry is the measured half of this issue's ruling. A `span_cursor_t`'s window IS
  * its whole object, so an overshoot is an out-of-range `subspan` — UB the fuzz/ASan CI
  * reports — where the rope's overshoot reads real bytes from elsewhere in the chain and
  * is reportable by nothing. Giving the span source the same clamp-and-latch measured
@@ -157,15 +157,15 @@ void test_span_cursor_is_constexpr_clean() {
     std::printf("release build: span_cursor stays unlatched by construction (#986):\n");
     std::array<std::byte, 5> bytes{std::byte{0x10}, std::byte{0x11}, std::byte{0x12},
                                    std::byte{0x20}, std::byte{0x21}};
-    const span_cursor cur{std::span<const std::byte>(bytes)};
+    const span_cursor_t cur{std::span<const std::byte>(bytes)};
 
     const feed_result_t whole = feed(cur, 0, 5);
     check(whole.bytes == 5 && !whole.poisoned, "the whole span feeds and reports no latch");
 
-    static_assert(!span_cursor::poisoned(),
+    static_assert(!span_cursor_t::poisoned(),
                   "span_cursor::poisoned must fold at compile time, so the shared grammar's "
                   "check costs the contiguous source nothing");
-    static_assert(sizeof(span_cursor) == sizeof(std::span<const std::byte>),
+    static_assert(sizeof(span_cursor_t) == sizeof(std::span<const std::byte>),
                   "span_cursor must stay exactly one span wide — carrying a latch byte is what "
                   "cost compact-forward a third of its throughput");
 }
@@ -192,14 +192,14 @@ void test_parse_header_maps_latch_to_truncated() {
     put(0x00);
     put(0xAA);
     put(0xBB);
-    tr::crc::crc16_ccitt_state crc;
+    tr::crc::crc16_ccitt_state_t crc;
     const std::array<std::byte, 2> payload{std::byte{0xAA}, std::byte{0xBB}};
     crc.feed(std::span<const std::byte>(payload));
     const std::uint16_t sum = crc.value();
     put(static_cast<std::uint8_t>(sum & 0xFFu));
     put(static_cast<std::uint8_t>((sum >> 8) & 0xFFu));
 
-    const span_cursor whole{std::span<const std::byte>(frame)};
+    const span_cursor_t whole{std::span<const std::byte>(frame)};
     const auto good = tr::wire::grammar::parse_header(whole);
     check(good.has_value(), "the well-formed frame still parses (the guard does not over-fire)");
     check(!whole.poisoned(), "and parsing it latches nothing");
@@ -207,7 +207,7 @@ void test_parse_header_maps_latch_to_truncated() {
     // The same bytes through a window that stops inside the trailer. `total_size_fits`
     // already refuses this before any feed runs — asserted here as the PARITY baseline
     // the rope source must match below, not as a #986 behaviour.
-    const span_cursor clipped{std::span<const std::byte>(frame).first(frame.size() - 1)};
+    const span_cursor_t clipped{std::span<const std::byte>(frame).first(frame.size() - 1)};
     const auto clipped_head = tr::wire::grammar::parse_header(clipped);
     check(!clipped_head.has_value(), "a frame whose trailer is outside the window is rejected");
 
@@ -215,12 +215,12 @@ void test_parse_header_maps_latch_to_truncated() {
     // sources, per ADR-0048 §1.
     std::vector<std::byte> storage(frame.begin(), frame.end());
     rope_t r(borrowed_view(std::span<std::byte>(storage)));
-    const rope_cursor rope_whole{r};
+    const rope_cursor_t rope_whole{r};
     const auto rope_good = tr::wire::grammar::parse_header(rope_whole);
     check(rope_good.has_value() && !rope_whole.poisoned(),
           "the rope source parses the same frame with no latch");
 
-    const rope_cursor rope_clipped = rope_cursor{r}.region(0, storage.size() - 1);
+    const rope_cursor_t rope_clipped = rope_cursor_t{r}.region(0, storage.size() - 1);
     const auto rope_head = tr::wire::grammar::parse_header(rope_clipped);
     check(!rope_head.has_value(), "and rejects the clipped window exactly as the span source does");
 }

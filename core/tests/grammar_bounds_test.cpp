@@ -153,7 +153,7 @@ int main() {
     {
         // type=0x01, opt = TS|CR|LL (0x38): header 6, ts 8, crc 4 (CRC-32C).
         const auto buf = hostile_frame(0x01, 0x38, 0xFFFFFFFFu, 32);
-        const tr::wire::grammar::span_cursor cur{std::span<const std::byte>(buf)};
+        const tr::wire::grammar::span_cursor_t cur{std::span<const std::byte>(buf)};
         const auto h = tr::wire::grammar::parse_header(cur);
         check(!h && h.error() == tr::wire::err_t::FRAME_TRUNCATED,
               "the hostile frame is FRAME_TRUNCATED on this host too");
@@ -163,7 +163,7 @@ int main() {
         const std::array<std::byte, 7> b{std::byte{0x01}, std::byte{0x00}, std::byte{0x03},
                                          std::byte{0x00}, std::byte{0xAA}, std::byte{0xBB},
                                          std::byte{0xCC}};
-        const tr::wire::grammar::span_cursor cur{std::span<const std::byte>(b)};
+        const tr::wire::grammar::span_cursor_t cur{std::span<const std::byte>(b)};
         const auto h = tr::wire::grammar::parse_header(cur);
         check(h.has_value() && h->total == 7 && h->header == 4 && h->length == 3,
               "a well-formed TLV still parses (total = 7)");

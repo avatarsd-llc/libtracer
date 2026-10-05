@@ -5,7 +5,7 @@
 #
 # On an espressif32 target it compiles the ESP-IDF TWAI can_link_t
 # (integrations/esp-idf/libtracer/twai_link.cpp) and exposes its header, so
-# `tr::net::transport_can` gets a real on-chip CAN 2.0 bus driver under
+# `tr::net::can_transport_t` gets a real on-chip CAN 2.0 bus driver under
 # PlatformIO. Construct a `tr::net::twai_link_t{{tx_gpio, rx_gpio, bitrate}}`,
 # hand it to a CLASSIC `transport_can`, and register `can_transport_factory()`.
 #

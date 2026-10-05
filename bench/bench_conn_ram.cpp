@@ -367,15 +367,15 @@ sample_t run_stream_arm(std::size_t k, std::size_t big, Make make, Dial dial, Pu
 }
 
 sample_t arm_tcp(std::size_t k, std::size_t big) {
-    return run_stream_arm<tr::net::transport_tcp_server>(
-        k, big, [] { return new tr::net::transport_tcp_server(0, {.peer_named = true}); },
+    return run_stream_arm<tr::net::tcp_server_transport_t>(
+        k, big, [] { return new tr::net::tcp_server_transport_t(0, {.peer_named = true}); },
         [](std::uint16_t p) { return dial_tcp(p); },
         [](int fd, std::size_t n) { (void)send_tcp_frame(fd, n); });
 }
 
 sample_t arm_ws(std::size_t k, std::size_t big) {
-    return run_stream_arm<tr::net::transport_ws_server>(
-        k, big, [] { return new tr::net::transport_ws_server(0, {.peer_named = true}); },
+    return run_stream_arm<tr::net::ws_server_transport_t>(
+        k, big, [] { return new tr::net::ws_server_transport_t(0, {.peer_named = true}); },
         [](std::uint16_t p) {
             const int fd = dial_tcp(p);
             if (fd < 0) return -1;
@@ -499,7 +499,7 @@ sample_t arm_can(std::size_t k, const char* ifname, bool with_group) {
         ::close(raw);
         return out;
     }
-    auto srv = std::make_unique<tr::net::transport_can>(std::move(link), cfg);
+    auto srv = std::make_unique<tr::net::can_transport_t>(std::move(link), cfg);
     tr::net::bus_link_t* bus = srv->bus();
     quiesce();
     const long long t0 = live();
@@ -620,11 +620,11 @@ int main(int argc, char** argv) {
     std::printf("# bench_conn_ram peers=%zu frame=%zu reps=%zu\n", k, big, reps);
     std::printf(
         "# sizeof: tcp_client=%zu tcp_server=%zu udp=%zu ws_server=%zu ws_client=%zu can=%zu\n",
-        sizeof(tr::net::tcp_transport_t), sizeof(tr::net::transport_tcp_server),
-        sizeof(tr::net::udp_transport_t), sizeof(tr::net::transport_ws_server),
-        sizeof(tr::net::transport_ws_client), sizeof(tr::net::transport_can));
+        sizeof(tr::net::tcp_transport_t), sizeof(tr::net::tcp_server_transport_t),
+        sizeof(tr::net::udp_transport_t), sizeof(tr::net::ws_server_transport_t),
+        sizeof(tr::net::ws_client_transport_t), sizeof(tr::net::can_transport_t));
     std::printf("# sizeof: framer=%zu socketcan_link=%zu can_cfg=%zu\n",
-                sizeof(tr::net::length_prefix_framer), sizeof(tr::net::socketcan_link_t),
+                sizeof(tr::net::length_prefix_framer_t), sizeof(tr::net::socketcan_link_t),
                 sizeof(tr::net::transport_can_config_t));
     std::fflush(stdout);
 
