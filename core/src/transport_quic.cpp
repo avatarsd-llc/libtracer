@@ -27,12 +27,10 @@
 #include <atomic>
 #include <cstdint>
 #include <cstring>
-#include <memory>
-#include <string>
 #include <string_view>
 #include <utility>
-#include <vector>
 
+#include "libtracer/builtin_transports.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/config.hpp"
 #include "libtracer/config_reader.hpp"
@@ -133,10 +131,12 @@ struct quic_transport_t::impl_t : msquic_endpoint_t {
     }
 };
 
-quic_transport_t::quic_transport_t(const std::string& peer_host, std::uint16_t peer_port,
+quic_transport_t::quic_transport_t(std::string_view peer_host, std::uint16_t peer_port,
                                    quic_dial_tls_t tls, const quic_config_t& config)
-    : impl_(std::make_unique<impl_t>()) {
+    : impl_(mem::make_poly<impl_t>(config.memory.state_or_default())) {
+    if (!impl_) return;  // the link's store refused the endpoint: inert, ok() is false
     impl_t& i = *impl_;
+    i.tx_src = &config.memory.io_or_default();
     i.rx = &rx_;  // the delivery-tier slot lives in the transport_t base
     i.backend = config.memory.rx;
     i.max_frame = length_prefix_framer::configured_cap(config.max_frame);  // tighten-only (#1035)
@@ -175,10 +175,12 @@ quic_transport_t::quic_transport_t(const std::string& peer_host, std::uint16_t p
     i.open_ok = true;
 }
 
-quic_transport_t::quic_transport_t(std::uint16_t bind_port, const std::string& cert_file,
-                                   const std::string& key_file, const quic_config_t& config)
-    : impl_(std::make_unique<impl_t>()) {
+quic_transport_t::quic_transport_t(std::uint16_t bind_port, std::string_view cert_file,
+                                   std::string_view key_file, const quic_config_t& config)
+    : impl_(mem::make_poly<impl_t>(config.memory.state_or_default())) {
+    if (!impl_) return;  // the link's store refused the endpoint: inert, ok() is false
     impl_t& i = *impl_;
+    i.tx_src = &config.memory.io_or_default();
     i.rx = &rx_;  // the delivery-tier slot lives in the transport_t base
     i.backend = config.memory.rx;
     i.max_frame = length_prefix_framer::configured_cap(config.max_frame);  // tighten-only (#1035)
@@ -203,30 +205,37 @@ quic_transport_t::quic_transport_t(std::uint16_t bind_port, const std::string& c
 
 quic_transport_t::~quic_transport_t() = default;  // ~impl_t runs the base teardown()
 
-void quic_transport_t::send(std::span<const std::byte> frame) { impl_->send_frame(frame); }
+// Every accessor below tolerates an absent impl_ (its store refused it at construction):
+// such a link is inert — never ok(), never up, sends nothing, counts nothing.
 
-void quic_transport_t::send(std::span<const std::span<const std::byte>> iov) {
-    impl_->send_frame(iov);
+void quic_transport_t::send(std::span<const std::byte> frame) {
+    if (impl_) impl_->send_frame(frame);
 }
 
-bool quic_transport_t::ok() const noexcept { return impl_->open_ok; }
+void quic_transport_t::send(std::span<const std::span<const std::byte>> iov) {
+    if (impl_) impl_->send_frame(iov);
+}
 
-std::uint16_t quic_transport_t::local_port() const noexcept { return impl_->bound_port; }
+bool quic_transport_t::ok() const noexcept { return impl_ && impl_->open_ok; }
+
+std::uint16_t quic_transport_t::local_port() const noexcept {
+    return impl_ ? impl_->bound_port : 0;
+}
 
 bool quic_transport_t::link_up() const noexcept {
-    return impl_->up.load(std::memory_order_relaxed);
+    return impl_ && impl_->up.load(std::memory_order_relaxed);
 }
 
 std::uint64_t quic_transport_t::dropped_rx() const noexcept {
-    return impl_->dropped_rx.load(std::memory_order_relaxed);
+    return impl_ ? impl_->dropped_rx.load(std::memory_order_relaxed) : 0;
 }
 
 std::uint64_t quic_transport_t::malformed_rx() const noexcept {
-    return impl_->malformed_rx.load(std::memory_order_relaxed);
+    return impl_ ? impl_->malformed_rx.load(std::memory_order_relaxed) : 0;
 }
 
 std::uint64_t quic_transport_t::dropped_tx() const noexcept {
-    return impl_->dropped_tx.load(std::memory_order_relaxed);
+    return impl_ ? impl_->dropped_tx.load(std::memory_order_relaxed) : 0;
 }
 
 namespace {
@@ -277,8 +286,8 @@ std::atomic<std::uint64_t> g_insecure_refusals{0};
 
 transport_factory_t quic_transport_factory(std::span<const tls_profile_t> profiles,
                                            mem::mem_backend_t* rx_backend) {
-    return [profiles, rx_backend](const conn_settings_t& s, const wire::tlv_node_t* raw_config)
-               -> graph::result_t<std::unique_ptr<transport_t>> {
+    return [profiles, rx_backend](const conn_settings_t& s, const wire::tlv_node_t* raw_config,
+                                  mem::block_source_t& src) -> graph::result_t<transport_ptr_t> {
         // BOTH roles carry kind-private keys, so the parse precedes the role split:
         // the DIAL branch used to return before parse_quic_config ever ran, which is
         // why no SPEC could reach the dial-side trust knobs at all (#918).
@@ -301,33 +310,31 @@ transport_factory_t quic_transport_factory(std::span<const tls_profile_t> profil
         const tls_profile_t* const prof = find_tls_profile(profiles, priv.tls);
         if (priv.retired || (prof == nullptr && !priv.tls.empty()))
             return std::unexpected(graph::status_t::TYPE_MISMATCH);
-        std::unique_ptr<quic_transport_t> t;
         if (s.role == conn_role_t::DIAL) {
             if (s.addr.empty() || s.port == 0)
                 return std::unexpected(graph::status_t::TYPE_MISMATCH);
             // Secure by default (#918): with no profile, or a profile with no anchor,
             // this verifies the server certificate against the system trust store.
             // `insecure = 1` is the explicit dev opt-out.
-            t = std::make_unique<quic_transport_t>(
-                s.addr, s.port,
-                quic_dial_tls_t{.ca_file = std::string(prof != nullptr ? prof->ca_file : ""),
+            // The link object and its egress (impl, send records) are drawn from `src`, the
+            // receiving vertex's store (#1780).
+            // A refused object is BACKPRESSURE; a refused handshake is TRANSIENT, not a bad
+            // address (#929) — `make_checked` answers both.
+            return make_checked<quic_transport_t>(
+                src, s.addr, s.port,
+                quic_dial_tls_t{.ca_file = prof != nullptr ? prof->ca_file : std::string_view{},
                                 .insecure_no_verify = priv.insecure},
-                quic_config_t{.memory = {.rx = rx_backend}, .max_frame = s.max_frame});
-            // A refused handshake is TRANSIENT, not a bad address (#929).
-            if (!t->ok()) return std::unexpected(graph::status_t::TRANSPORT_DOWN);
-            return t;
+                quic_config_t{.memory = {.rx = rx_backend, .io = &src}, .max_frame = s.max_frame});
         }
         // `port = 0` on a LISTEN is the EPHEMERAL request (#1362), not a missing key: the
         // OS picks and `local_port()` reports it. Only an ABSENT key is the config error,
         // and so is a profile that carries no credential to serve.
         if (!s.port_set || prof == nullptr || prof->cert_file.empty() || prof->key_file.empty())
             return std::unexpected(graph::status_t::TYPE_MISMATCH);
-        t = std::make_unique<quic_transport_t>(
-            s.port, std::string(prof->cert_file), std::string(prof->key_file),
-            quic_config_t{.memory = {.rx = rx_backend}, .max_frame = s.max_frame});
-        // bind/cred failed — the listener did not come up (#929).
-        if (!t->ok()) return std::unexpected(graph::status_t::TRANSPORT_DOWN);
-        return t;
+        // A bind/cred failure is a listener that did not come up (#929).
+        return make_checked<quic_transport_t>(
+            src, s.port, prof->cert_file, prof->key_file,
+            quic_config_t{.memory = {.rx = rx_backend, .io = &src}, .max_frame = s.max_frame});
     };
 }
 

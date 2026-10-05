@@ -24,11 +24,8 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
-#include <functional>
-#include <memory>
 #include <mutex>
 #include <span>
-#include <vector>
 
 #include "libtracer/config.hpp"
 #include "libtracer/thread_id.hpp"
@@ -107,7 +104,7 @@ class self_heal_link_t final : public transport_t {
     /** @brief The liveness sink the engine publishes every transition through —
      *         installed once by the owner (a write of the 1-byte `link_state_t` VALUE
      *         to the connection vertex), before the link is wired into the router. */
-    using liveness_publish_fn_t = std::function<void(link_state_t)>;
+    using liveness_publish_fn_t = inline_fn_t<void(link_state_t)>;
 
     /**
      * @brief Bind the engine over @p factory with the connection's creation-time config.
@@ -117,17 +114,23 @@ class self_heal_link_t final : public transport_t {
      *                       `connect_timeout_ms` of 0 are resolved to the engine defaults
      *                       HERE, so the factory and the engine see the same effective
      *                       values (RFC-0014 §4: config overrides the engine's defaults).
-     * @param raw_config     The SPEC's `config` SETTINGS TLV, re-encoded to owned bytes
-     *                       (empty = the SPEC carried none): the kind-private keys the
-     *                       factory re-parses on each dial.
+     * @param raw_config     The SPEC's `config` SETTINGS TLV as contiguous bytes (empty = the
+     *                       SPEC carried none): the kind-private keys the factory re-parses
+     *                       on each dial. BORROWED: the owner keeps them, and the text views
+     *                       in @p settings, alive until this engine is destroyed —
+     *                       `transport_vertex_t` holds them as the connection's config copy
+     *                       and drops that copy only after the engine (#1780).
      * @param inner_delivers_ropes The kind's delivery capability
      *                       (`transport_kind_traits_t::delivers_ropes`): the engine must
      *                       answer @ref delivers_ropes BEFORE any socket exists, because
      *                       `fwd_router_t::add_child` installs the matching receiver on
      *                       the ENGINE exactly once, at registration.
+     * @param src            The store each dial's socket, and the engine's record of it, is
+     *                       drawn from — the factory's third argument (receiver pays).
      */
     self_heal_link_t(transport_factory_t factory, conn_settings_t settings,
-                     std::vector<std::byte> raw_config, bool inner_delivers_ropes);
+                     std::span<const std::byte> raw_config, bool inner_delivers_ropes,
+                     mem::block_source_t& src);
 
     /** @brief Stops the engine (see @ref stop) and destroys any remaining socket. */
     ~self_heal_link_t() override;
@@ -201,13 +204,66 @@ class self_heal_link_t final : public transport_t {
    private:
     /** @brief One constructed socket plus the identity its down-notifier reports with:
      *         the ctx handed to `transport_t::set_down_notifier` must outlive every
-     *         notification, so it lives WITH the socket it names. */
+     *         notification, so it lives WITH the socket it names.
+     *
+     *  Shared by count, not by `std::shared_ptr` (#1780): the record is one block from the
+     *  engine's store, the count is in the block, and the corpse list threads through it,
+     *  so parking a dead socket can never fail for want of memory. */
     struct sock_t {
-        std::unique_ptr<transport_t> link; /**< @brief The factory-constructed socket. */
-        self_heal_link_t* self = nullptr;  /**< @brief Back-pointer for the notifier. */
-        std::uint64_t gen = 0;             /**< @brief Dial generation — a stale corpse's
-                                                       late down must not kill a healed
-                                                       successor. */
+        transport_ptr_t link;               /**< @brief The factory-constructed socket. */
+        self_heal_link_t* self = nullptr;   /**< @brief Back-pointer for the notifier. */
+        std::uint64_t gen = 0;              /**< @brief Dial generation — a stale corpse's
+                                                        late down must not kill a healed
+                                                        successor. */
+        std::atomic<std::uint32_t> refs{1}; /**< @brief Holders: `inner_`, the corpse list,
+                                                        and each in-flight send. */
+        sock_t* next_corpse = nullptr;      /**< @brief The corpse list's link. */
+    };
+
+    /**
+     * @brief One counted hold on a `sock_t` — what `inner_` and an in-flight send keep.
+     *        The last hold to go destroys the socket (joining its receive thread) and
+     *        returns its block, on whichever thread drops it, as the `std::shared_ptr` it
+     *        replaces did.
+     */
+    class sock_ref_t {
+       public:
+        /** @brief An empty hold. */
+        sock_ref_t() noexcept = default;
+        /** @brief Adopt one count already taken on @p s (a fresh record starts at one). */
+        explicit sock_ref_t(sock_t* s) noexcept : s_(s) {}
+        /** @brief Take one more count on @p o's socket. */
+        sock_ref_t(const sock_ref_t& o) noexcept : s_(o.s_) {
+            if (s_ != nullptr) s_->refs.fetch_add(1, std::memory_order_relaxed);
+        }
+        /** @brief Take over @p o's count; @p o is left empty. */
+        sock_ref_t(sock_ref_t&& o) noexcept : s_(o.s_) { o.s_ = nullptr; }
+        /** @brief Drop this hold, then take @p o's (copy-and-swap). */
+        sock_ref_t& operator=(sock_ref_t o) noexcept {
+            sock_t* const t = s_;
+            s_ = o.s_;
+            o.s_ = t;
+            return *this;
+        }
+        /** @brief Drops the hold. */
+        ~sock_ref_t() { reset(); }
+        /** @brief Drop the hold; the last one destroys the socket and frees its record. */
+        void reset() noexcept;
+        /** @brief Give the count up without dropping it (the corpse list adopts it). */
+        [[nodiscard]] sock_t* detach() noexcept {
+            sock_t* const s = s_;
+            s_ = nullptr;
+            return s;
+        }
+        /** @brief The socket record, or null. */
+        [[nodiscard]] sock_t* get() const noexcept { return s_; }
+        /** @brief Member access. Precondition: not empty. */
+        [[nodiscard]] sock_t* operator->() const noexcept { return s_; }
+        /** @brief True when a socket is held. */
+        [[nodiscard]] explicit operator bool() const noexcept { return s_ != nullptr; }
+
+       private:
+        sock_t* s_ = nullptr; /**< @brief The held record, or null. */
     };
 
     /** @brief The worker body — sole dialer and sole liveness publisher. */
@@ -243,7 +299,13 @@ class self_heal_link_t final : public transport_t {
 
     /** @brief The op-side gate: the §4 transient hold. Returns the socket to send on, or
      *         nullptr = drop (fail-fast, or the one bounded auto-wake attempt failed). */
-    [[nodiscard]] std::shared_ptr<sock_t> ready_socket();
+    [[nodiscard]] sock_ref_t ready_socket();
+
+    /** @brief Park @p dead on the corpse list (it adopts the hold); caller holds `m_`. */
+    void park_locked(sock_ref_t dead) noexcept;
+
+    /** @brief Drop the list's hold on every corpse from @p head; call with `m_` RELEASED. */
+    static void drop_corpses(sock_t* head) noexcept;
 
     /** @brief Serializes every engine transition. Ordering: `m_` is taken AFTER the
      *         owner's control mutex (acquire/release under `ctl_m_`) and never before it;
@@ -251,11 +313,13 @@ class self_heal_link_t final : public transport_t {
     mutable std::mutex m_;
     std::condition_variable cv_; /**< @brief Worker wake + op-waiter rendezvous. */
 
-    const transport_factory_t factory_;       /**< @brief Re-run per dial. */
-    const conn_settings_t settings_;          /**< @brief Universal keys, defaults resolved. */
-    const std::vector<std::byte> raw_config_; /**< @brief The SPEC's config TLV bytes. */
-    const bool inner_ropes_;                  /**< @brief The kind's delivery capability. */
-    liveness_publish_fn_t publish_;           /**< @brief Set once, before router wiring. */
+    const transport_factory_t factory_;           /**< @brief Re-run per dial. */
+    const conn_settings_t settings_;              /**< @brief Universal keys, defaults resolved. */
+    const std::span<const std::byte> raw_config_; /**< @brief The SPEC's config TLV bytes
+                                                              (borrowed, see the ctor). */
+    const bool inner_ropes_;                      /**< @brief The kind's delivery capability. */
+    mem::block_source_t& src_;      /**< @brief Where each socket and its record come from. */
+    liveness_publish_fn_t publish_; /**< @brief Set once, before router wiring. */
 
     link_state_t state_ = link_state_t::DORMANT; /**< @brief The machine (DIAL subset). */
     std::uint32_t refs_ = 0;                     /**< @brief Standing bindings (§4). */
@@ -267,8 +331,9 @@ class self_heal_link_t final : public transport_t {
                                                 the worker owes the publish. */
     bool stop_ = false;             /**< @brief Terminal; set by @ref stop. */
 
-    std::shared_ptr<sock_t> inner_;                /**< @brief The live socket (UP only). */
-    std::vector<std::shared_ptr<sock_t>> corpses_; /**< @brief Dead sockets awaiting reap. */
+    sock_ref_t inner_;          /**< @brief The live socket (UP only). */
+    sock_t* corpses_ = nullptr; /**< @brief Dead sockets awaiting reap — an intrusive list
+                                            through `sock_t::next_corpse`, one hold each. */
 
     // A raw pthread rather than a `std::thread`, for the two reasons `posix_endpoint_t` and
     // `socketcan_link_t` already are (#1470): `std::thread`'s constructor THROWS on spawn

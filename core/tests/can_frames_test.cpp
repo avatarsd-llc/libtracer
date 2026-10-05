@@ -34,6 +34,15 @@
 
 namespace {
 
+/** @brief A whole advertise frame in a `std::vector` — the test-side form of
+ *         `can::encode_advertise` (#1780 moved it into a caller's `bytes_t`); empty when
+ *         the advertise is unencodable. */
+[[maybe_unused]] std::vector<std::byte> advertise_vec(const tr::net::can::advertise_t& a) {
+    tr::mem::bytes_t b(tr::mem::heap_source());
+    if (!tr::net::can::encode_advertise(b, a)) return {};
+    return std::vector<std::byte>(b.begin(), b.end());
+}
+
 using tr::testing::check;
 
 // #1725: the old `tr::view` spellings must name the very same entities as the net-plane
@@ -184,14 +193,14 @@ int main() {
 
         // Feed slices OUT OF ORDER: 2, 0, 1.
         tr::net::can_reassembly_t reasm;
-        reasm.set_expected_count(key, 3);
-        reasm.add_slice(key, 2, slice(2));
-        reasm.add_slice(key, 0, slice(0));
+        (void)reasm.set_expected_count(key, 3);
+        (void)reasm.add_slice(key, 2, slice(2));
+        (void)reasm.add_slice(key, 0, slice(0));
         check(!reasm.is_complete(key), "group incomplete with slice 1 missing");
         check(reasm.has_interior_gap(key), "interior gap detected (have 0,2 not 1)");
         check(!reasm.assemble(key).has_value(), "assemble() returns nullopt while incomplete");
 
-        reasm.add_slice(key, 1, slice(1));
+        (void)reasm.add_slice(key, 1, slice(1));
         check(!reasm.has_interior_gap(key), "no interior gap once slice 1 arrives");
         check(reasm.is_complete(key), "group complete: all 3 slices present + expected set");
 
@@ -202,9 +211,9 @@ int main() {
 
         // Totality opt-in: without expected_count, completeness is undecidable.
         tr::net::can_reassembly_t no_total;
-        no_total.add_slice(key, 0, slice(0));
-        no_total.add_slice(key, 1, slice(1));
-        no_total.add_slice(key, 2, slice(2));
+        (void)no_total.add_slice(key, 0, slice(0));
+        (void)no_total.add_slice(key, 1, slice(1));
+        (void)no_total.add_slice(key, 2, slice(2));
         check(!no_total.is_complete(key),
               "no expected_count => not complete (trailing-drop blind)");
         no_total.erase(key);
@@ -228,11 +237,11 @@ int main() {
 
         // Bound live groups at 2; a third distinct group evicts the oldest (ts=1),
         // never OOM (the no-synthetic-limits doctrine: bounded drop + a counter).
-        tr::net::can_reassembly_t bounded(std::pmr::new_delete_resource(), /*max_groups=*/2);
-        bounded.add_slice(key_ts(1), 0, slice(0));
-        bounded.add_slice(key_ts(2), 0, slice(0));
+        tr::net::can_reassembly_t bounded(tr::mem::heap_source(), /*max_groups=*/2);
+        (void)bounded.add_slice(key_ts(1), 0, slice(0));
+        (void)bounded.add_slice(key_ts(2), 0, slice(0));
         check(bounded.dropped_groups() == 0, "no eviction while within the group bound");
-        bounded.add_slice(key_ts(3), 0, slice(0));  // exceeds 2 => evict oldest (ts=1)
+        (void)bounded.add_slice(key_ts(3), 0, slice(0));  // exceeds 2 => evict oldest (ts=1)
         check(bounded.dropped_groups() == 1, "a 3rd group evicts one (dropped_groups == 1)");
         check(!bounded.contains(key_ts(1)), "the oldest group (ts=1) was evicted");
         check(bounded.contains(key_ts(2)) && bounded.contains(key_ts(3)),
@@ -260,8 +269,8 @@ int main() {
 
         tr::net::can_reassembly_t aging;
         aging.set_now(1000);
-        aging.set_expected_count(key_ts(1), 3);   // an advertise promising 3 slices
-        aging.add_slice(key_ts(1), 0, slice(0));  // ... only 1 of which lands
+        (void)aging.set_expected_count(key_ts(1), 3);   // an advertise promising 3 slices
+        (void)aging.add_slice(key_ts(1), 0, slice(0));  // ... only 1 of which lands
         check(!aging.is_complete(key_ts(1)), "the group is incomplete (a slice was lost)");
 
         aging.set_now(1100);
@@ -272,7 +281,7 @@ int main() {
         // A live group keeps its place: a touch restamps it, so only groups that
         // stopped making progress age out.
         aging.set_now(1400);
-        aging.add_slice(key_ts(1), 1, slice(1));
+        (void)aging.add_slice(key_ts(1), 1, slice(1));
         aging.set_now(1800);
         check(aging.sweep_stale(500) == 0,
               "a group still receiving slices is restamped, not swept");
@@ -293,7 +302,7 @@ int main() {
         a.slice_count = 1;
         a.path = "/a/b";
 
-        const std::vector<std::byte> enc = encode_advertise(a);
+        const std::vector<std::byte> enc = advertise_vec(a);
         const std::vector<std::byte> expect = bytes_of({
             0xAD, 0x02, 0x00, 0x00,  // magic, fmt v2 (ADR-0044), flags, reserved
             0xBC, 0xAA, 0x15, 0x02,  // can_id LE (0x0215AABC)
@@ -319,13 +328,15 @@ int main() {
         g.group_total_len = 100;
         g.slice_count = 2;
         g.path = "/cam/0";
-        const auto gdec = decode_advertise(encode_advertise(g));
+        const std::vector<std::byte> genc = advertise_vec(g);  // the decode views it
+        const auto gdec = decode_advertise(genc);
         check(gdec.has_value() && gdec->first == g, "group/manifest advertise round-trips");
 
         // Directed form (ADR-0044): a target node id rides the manifest.
         advertise_t d = g;
         d.target = 5;
-        const auto ddec = decode_advertise(encode_advertise(d));
+        const std::vector<std::byte> denc = advertise_vec(d);  // the decode views it
+        const auto ddec = decode_advertise(denc);
         check(ddec.has_value() && ddec->first == d && ddec->first.target == 5,
               "directed advertise (target_node) round-trips");
 
@@ -334,7 +345,8 @@ int main() {
         h.can_id = encode_can_id({0, 3, 0});
         h.slice_count = 0;
         h.path = "/board";
-        const auto hdec = decode_advertise(encode_advertise(h));
+        const std::vector<std::byte> henc = advertise_vec(h);  // the decode views it
+        const auto hdec = decode_advertise(henc);
         check(hdec.has_value() && hdec->first == h && hdec->first.slice_count == 0,
               "hello (slice_count 0) advertise round-trips");
 

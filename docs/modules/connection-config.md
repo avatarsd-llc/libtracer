@@ -317,8 +317,8 @@ naming a resource the server does not serve; the one case taken out of it by
 with `TYPE_MISMATCH` rather than dialled. Before [#1023] there was no key at all
 and the factory hard-coded `/`, so a SPEC could reach only a root-served session
 and any other server needed the direct constructor plus `provide_link`. On the
-LISTEN side, `webtransport_transport_t::session_path()` reports the `:path` the
-accepted CONNECT named — an observation, never an admission decision.
+LISTEN side, `webtransport_transport_t::session_path(out)` writes the `:path` the
+accepted CONNECT named into a caller buffer — an observation, never an admission decision.
 
 ## Certificate trust on a SPEC-created dialer
 

@@ -20,7 +20,7 @@
 #include <charconv>
 #include <chrono>
 #include <cstdint>
-#include <string>
+#include <cstring>
 #include <utility>
 
 #include "libtracer/iov_table.hpp"
@@ -223,6 +223,14 @@ write_result_t write_all_bounded(int fd, std::span<const std::byte> bytes,
 }
 }  // namespace
 
+bool parse_ipv4(std::string_view host, ::in_addr& out) noexcept {
+    char text[INET_ADDRSTRLEN];
+    if (host.size() >= sizeof(text)) return false;
+    std::copy_n(host.data(), host.size(), text);  // an empty view may carry a null data()
+    text[host.size()] = '\0';
+    return ::inet_pton(AF_INET, text, &out) == 1;
+}
+
 write_fault_stats_t write_fault_stats() noexcept {
     return {.malformed_calls = g_malformed_calls.load(std::memory_order_relaxed),
             .last_errno = g_last_malformed_errno.load(std::memory_order_relaxed)};
@@ -235,8 +243,8 @@ void* posix_endpoint_t::thread_entry(void* self) {
     return nullptr;
 }
 
-void posix_endpoint_t::start(std::function<void()> body, std::size_t stack_size) {
-    body_ = std::move(body);
+void posix_endpoint_t::start(thread_body_t body, std::size_t stack_size) {
+    body_ = body;
 
     pthread_attr_t attr;
     ::pthread_attr_init(&attr);
@@ -357,7 +365,7 @@ write_result_t stream_endpoint_t::write_record(int fd, const tx_handoff_t::recor
     // straight from the published block. One gathered record under the caller's write_m_
     // hold, so its bytes cannot interleave with another record's.
     std::array<::iovec, kMaxInlineIov> inline_vec;
-    iov_table_t<::iovec> table(inline_vec, mem::heap_source());
+    iov_table_t<::iovec> table(inline_vec, *io_src_);
     ::iovec* const vec = table.acquire(1 + rec.value->link_count());
     // Refused before a byte moved: a shed record, never a desync.
     if (vec == nullptr) return {write_outcome_t::FAILED, false};
@@ -406,8 +414,8 @@ void stream_endpoint_t::teardown_peer(int fd) {
     ::close(fd);
 }
 
-void stream_endpoint_t::run_accept_loop(int listen_fd, const std::function<bool(int)>& on_accept,
-                                        const std::function<void(int)>& serve_peer) {
+void stream_endpoint_t::run_accept_loop(int listen_fd, function_ref_t<bool(int)> on_accept,
+                                        function_ref_t<void(int)> serve_peer) {
     while (!stop_.load(std::memory_order_relaxed)) {
         // One poll-100ms-recheck accept pass: timeout / error / no connection
         // → re-check stop_ and try again.
@@ -435,7 +443,7 @@ slot_server_t::~slot_server_t() {
     // The derived destructor's first act was stop_and_join, so the poll thread is gone
     // and nothing races either close below.
     if (listen_fd_ >= 0) ::close(listen_fd_);
-    for (const std::unique_ptr<session_base_t>& s : slots_) {
+    for (const mem::poly_ptr_t<session_base_t>& s : slots_) {
         const int fd = s->fd.exchange(-1, std::memory_order_relaxed);
         if (fd >= 0) ::close(fd);
     }
@@ -469,8 +477,8 @@ bool slot_server_t::bind_listen(std::uint16_t bind_port) {
 
 void slot_server_t::enumerate_peers(const peer_visitor_t& visit) const {
     const std::lock_guard lock(peers_m_);
-    for (const std::unique_ptr<session_base_t>& s : slots_)
-        if (s->open.load(std::memory_order_relaxed) && !s->name.empty()) visit(s->name);
+    for (const mem::poly_ptr_t<session_base_t>& s : slots_)
+        if (s->open.load(std::memory_order_relaxed) && s->name[0] != '\0') visit(s->name_view());
 }
 
 std::string_view slot_server_t::peer_name(peer_handle_t peer, std::span<char> scratch) const {
@@ -521,8 +529,9 @@ std::string_view slot_server_t::peer_subject(peer_handle_t peer, std::span<char>
  */
 transport_t* slot_server_t::peer_link(std::string_view peer) {
     const std::lock_guard lock(peers_m_);
-    for (const std::unique_ptr<session_base_t>& s : slots_)
-        if (s->open.load(std::memory_order_relaxed) && s->name == peer) return s->peer_endpoint;
+    for (const mem::poly_ptr_t<session_base_t>& s : slots_)
+        if (s->open.load(std::memory_order_relaxed) && s->name_view() == peer)
+            return s->peer_endpoint;
     return nullptr;
 }
 
@@ -532,8 +541,8 @@ bool slot_server_t::close_peer(std::string_view peer) {
     // duplicate logic, and no off-thread touch of the poll-thread-only buffers
     // teardown_slot's on_slot_reset hook clears.
     const std::lock_guard plock(peers_m_);
-    for (const std::unique_ptr<session_base_t>& s : slots_) {
-        if (!s->open.load(std::memory_order_relaxed) || s->name != peer) continue;
+    for (const mem::poly_ptr_t<session_base_t>& s : slots_) {
+        if (!s->open.load(std::memory_order_relaxed) || s->name_view() != peer) continue;
         const std::lock_guard wlock(write_m_);
         const int fd = s->fd.load(std::memory_order_relaxed);
         if (fd >= 0) ::shutdown(fd, SHUT_RDWR);
@@ -552,12 +561,12 @@ std::size_t slot_server_t::broadcast_iov(std::span<const ::iovec> rec) {
     // locks inside one window (#838). The divisor is the round's own size, a fact in hand,
     // not a guessed cap.
     std::size_t open_peers = 0;
-    for (const std::unique_ptr<session_base_t>& s : slots_)
+    for (const mem::poly_ptr_t<session_base_t>& s : slots_)
         if (s->open.load(std::memory_order_relaxed)) ++open_peers;
     const std::uint32_t bound = derive_send_bound_ms(liveness_window_ms_, open_peers);
 
     std::size_t shed = 0;
-    for (const std::unique_ptr<session_base_t>& s : slots_) {
+    for (const mem::poly_ptr_t<session_base_t>& s : slots_) {
         if (!s->open.load(std::memory_order_relaxed)) continue;
         const int fd = s->fd.load(std::memory_order_relaxed);
         const write_result_t r = write_all_iov(fd, rec, bound);
@@ -592,23 +601,28 @@ void slot_server_t::accept_peer() {
                 ::close(fd);  // clean refusal at the deployment cap, not a hung SYN
                 return;
             }
-            slots_.push_back(make_session());
+            // A refused session (the store is exhausted) refuses the peer exactly as the cap
+            // does: a clean close, nothing half-built in the table.
+            mem::poly_ptr_t<session_base_t> fresh = make_session();
+            if (!fresh || !slots_.push_back(std::move(fresh))) {
+                ::close(fd);
+                return;
+            }
             slot = slots_.back().get();
             idx = slots_.size() - 1;
         }
         // The routable NAME is the slot index — `p<slot>`, legal by construction and a
         // pure function of the slot's position (ADR-0073 §2), so a reused slot gets the
-        // SAME name back (teardown_slot moved the old string out for the eviction seam).
-        slot->name = 'p' + std::to_string(idx);
+        // SAME name back (teardown_slot copied the old one out for the eviction seam).
+        slot->name[0] = 'p';
+        const auto named = std::to_chars(slot->name + 1, slot->name + kPeerNameChars - 1, idx);
+        *named.ptr = '\0';  // kPeerNameChars holds the widest index: never truncated
         // Mint this tenancy's HANDLE (#1294) beside the name, under the same lock and from
         // the same slot index. The generation never repeats and never lands on 0 (which is
         // reserved for "no peer"), so a handle minted against the session that used to hold
         // this slot can never be mistaken for its successor's.
         if (++slot->gen_seq == 0) slot->gen_seq = 1;
         slot->handle = peer_handle_t{static_cast<std::uint32_t>(idx), slot->gen_seq};
-        char ip[INET_ADDRSTRLEN] = {};
-        ::inet_ntop(AF_INET, &remote.sin_addr, ip, sizeof(ip));
-        slot->endpoint_str = std::string(ip) + ':' + std::to_string(ntohs(remote.sin_port));
     }
     // The bounded send, armed here rather than in either derived on_accept: an accepted
     // peer's socket is a shared-machinery fact, and #838 is a defect of the SHARED write
@@ -652,7 +666,7 @@ void slot_server_t::publish_peer_up(const session_base_t& s) {
     // `bus_mode()`, not `peer_named_`: a build with no bus module has no per-session identity
     // to anchor, so the arrival seam folds away entirely there (#375 deliverable 3).
     if (!bus_mode()) return;
-    std::string name;
+    char name[kPeerNameChars];
     peer_handle_t handle;
     {
         // The name is peers_m_-guarded state (enumerate_peers / peer_link read it off this
@@ -660,14 +674,14 @@ void slot_server_t::publish_peer_up(const session_base_t& s) {
         // the routing plane, and holding a transport lock across that inverts the documented
         // order (`transport_vertex_t::ctl_m_` → router → `graph_t::map_mutex_`).
         const std::lock_guard lock(peers_m_);
-        name = s.name;
+        std::memcpy(name, s.name, sizeof(name));
         handle = s.handle;
     }
     // Through the arrival HOOK, not `notify_peer_up` directly (#1438): the notifier is the
     // bus facet's, and this tier is no longer a `bus_link_t`. `bus_slot_server_t` overrides
     // the hook to fire it; the flat arm's inherited no-op is unreachable behind the
     // `bus_mode()` guard above.
-    if (!name.empty()) announce_peer_up(handle, name);
+    if (name[0] != '\0') announce_peer_up(handle, name);
 }
 
 void slot_server_t::service_peer(session_base_t& s) {
@@ -685,15 +699,15 @@ void slot_server_t::service_peer(session_base_t& s) {
 }
 
 void slot_server_t::teardown_slot(session_base_t& s) {
-    std::string departed;
+    char departed[kPeerNameChars];
     peer_handle_t departed_handle;
     {
         // Stop peer_link/enumerate resolution FIRST, so no new sender targets the dying
         // slot by name. Keep the name: it identifies the departed session to the eviction
         // seam below.
         const std::lock_guard lock(peers_m_);
-        departed = std::move(s.name);
-        s.name.clear();
+        std::memcpy(departed, s.name, sizeof(departed));
+        s.name[0] = '\0';
         // RETIRE the handle with the name (#1294): the seam's contract is "valid until
         // depart", so nothing this slot delivers after this point may carry the departed
         // session's identity. `gen_seq` survives, so the next accept mints a fresh one.
@@ -730,7 +744,7 @@ void slot_server_t::teardown_slot(session_base_t& s) {
     // The check runs on the poll thread with both transport locks released: `open` is
     // mutated only here and in accept_peer, both on this thread, so no session can appear
     // or vanish between the answer and the notification.
-    if (was_open && !departed.empty()) {
+    if (was_open && departed[0] != '\0') {
         if (bus_mode())
             announce_peer_down(departed_handle, departed);
         else if (!any_open_session())
@@ -743,7 +757,7 @@ bool slot_server_t::any_open_session() const {
     // peer_link); the `open` loads are relaxed for the same reason they are everywhere else
     // — the lock, not the memory order, is what orders them.
     const std::lock_guard lock(peers_m_);
-    for (const std::unique_ptr<session_base_t>& s : slots_)
+    for (const mem::poly_ptr_t<session_base_t>& s : slots_)
         if (s->open.load(std::memory_order_relaxed)) return true;
     return false;
 }
@@ -752,30 +766,40 @@ void slot_server_t::run() {
     // ONE poll pass multiplexes the listen socket and every live peer — no per-peer thread
     // (the MCU-shaped choice, #362), bounded to 100 ms so the loop stays
     // shutdown-responsive (the posix_endpoint_t idiom).
-    std::vector<pollfd> pfds;
-    std::vector<session_base_t*> pslots;
+    //
+    // The poll set is sized ONCE, to the admission cap plus the listen socket (#1780): the
+    // slot table never outgrows the cap, so no pass below grows it. Should that one sizing be
+    // refused, a pass serves the peers that fit and the listen socket always (it goes first).
+    mem::block_array_t<pollfd> pfds(slots_.source());
+    mem::block_array_t<session_base_t*> pslots(slots_.source());
+    (void)pfds.reserve(max_peers_ + 1);
+    (void)pslots.reserve(max_peers_);
+    pollfd listen_only{listen_fd_, POLLIN, 0};
     while (!stop_.load(std::memory_order_relaxed)) {
         pfds.clear();
         pslots.clear();
-        pfds.push_back(pollfd{listen_fd_, POLLIN, 0});
-        {
+        if (pfds.push_back(listen_only)) {
             const std::lock_guard lock(peers_m_);
-            for (const std::unique_ptr<session_base_t>& s : slots_) {
+            for (const mem::poly_ptr_t<session_base_t>& s : slots_) {
                 const int fd = s->fd.load(std::memory_order_relaxed);
-                if (fd >= 0) {
-                    pfds.push_back(pollfd{fd, POLLIN, 0});
-                    pslots.push_back(s.get());
+                if (fd < 0) continue;
+                if (!pfds.push_back(pollfd{fd, POLLIN, 0})) break;
+                if (!pslots.push_back(s.get())) {
+                    pfds.pop_back();
+                    break;
                 }
             }
         }
-        const int pr = ::poll(pfds.data(), static_cast<nfds_t>(pfds.size()), 100);
+        pollfd* const set = pfds.empty() ? &listen_only : pfds.data();
+        const std::size_t set_n = pfds.empty() ? 1 : pfds.size();
+        const int pr = ::poll(set, static_cast<nfds_t>(set_n), 100);
         if (pr <= 0) continue;  // timeout or transient error → re-check stop_
         if (stop_.load(std::memory_order_relaxed)) break;
         // Peers first (their events are bound to this pass's fd list), then the accept
         // (which may add a slot).
-        for (std::size_t i = 1; i < pfds.size(); ++i)
-            if ((pfds[i].revents & (POLLIN | POLLHUP | POLLERR)) != 0) service_peer(*pslots[i - 1]);
-        if ((pfds[0].revents & POLLIN) != 0) accept_peer();
+        for (std::size_t i = 1; i < set_n; ++i)
+            if ((set[i].revents & (POLLIN | POLLHUP | POLLERR)) != 0) service_peer(*pslots[i - 1]);
+        if ((set[0].revents & POLLIN) != 0) accept_peer();
     }
 }
 

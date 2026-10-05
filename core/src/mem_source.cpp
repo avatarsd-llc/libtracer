@@ -5,6 +5,9 @@
 
 #include "libtracer/mem_source.hpp"
 
+#include <cstdio>
+#include <cstdlib>
+
 /**
  * @file
  * @brief The process-wide default @ref tr::mem::block_source_t.
@@ -31,5 +34,15 @@ constinit null_source_t g_null_source{};
 block_source_t& heap_source() noexcept { return g_heap_source; }
 
 block_source_t& null_source() noexcept { return g_null_source; }
+
+void exhausted_at_init(const block_source_t& src, const char* what) noexcept {
+    const source_stats_t s = src.stats();
+    std::fprintf(stderr,
+                 "libtracer: %s: the \"%s\" memory source refused an allocation at "
+                 "initialization (%zu bytes needed, %zu bytes in use): a sizing bug, give it "
+                 "more room (ADR-0056, ADR-0083)\n",
+                 what, src.name(), s.largest_refused, s.in_use);
+    std::abort();
+}
 
 }  // namespace tr::mem

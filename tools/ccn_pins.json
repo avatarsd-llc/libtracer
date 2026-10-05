@@ -127,12 +127,6 @@
       ],
       "file": "core/src/fwd_router.cpp"
     },
-    "tr::net::quic_transport_factory": {
-      "ccn": [
-        16
-      ],
-      "file": "core/src/transport_quic.cpp"
-    },
     "tr::net::rebuild_fwd_forward": {
       "ccn": [
         47
@@ -157,6 +151,30 @@
       ],
       "file": "core/src/transport_vertex.cpp"
     },
+    "tr::net::udp_transport_t::run": {
+      "ccn": [
+        17
+      ],
+      "file": "core/src/transport_udp.cpp"
+    },
+    "tr::net::webtransport_transport_factory": {
+      "ccn": [
+        16
+      ],
+      "file": "core/src/transport_webtransport.cpp"
+    },
+    "tr::net::webtransport_transport_t::impl_t::classify_bidi": {
+      "ccn": [
+        32
+      ],
+      "file": "core/src/transport_webtransport.cpp"
+    },
+    "tr::net::ws::detail::decode_one": {
+      "ccn": [
+        20
+      ],
+      "file": "core/include/libtracer/ws.hpp"
+    },
     "tr::net::ws_client_transport_t::serve": {
       "ccn": [
         21
@@ -168,30 +186,6 @@
         18
       ],
       "file": "core/src/transport_ws.cpp"
-    },
-    "tr::net::udp_transport_t::run": {
-      "ccn": [
-        17
-      ],
-      "file": "core/src/transport_udp.cpp"
-    },
-    "tr::net::webtransport_transport_factory": {
-      "ccn": [
-        18
-      ],
-      "file": "core/src/transport_webtransport.cpp"
-    },
-    "tr::net::webtransport_transport_t::impl_t::classify_bidi": {
-      "ccn": [
-        33
-      ],
-      "file": "core/src/transport_webtransport.cpp"
-    },
-    "tr::net::ws::detail::decode_one": {
-      "ccn": [
-        20
-      ],
-      "file": "core/include/libtracer/ws.hpp"
     },
     "tr::net::wt_h3::decode_field_section": {
       "ccn": [

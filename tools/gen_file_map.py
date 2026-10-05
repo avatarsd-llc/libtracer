@@ -32,7 +32,8 @@ PAGES = {
     "segment.md": ["segment.hpp"],
     "backends.md": [
         "backend.hpp", "placement.hpp", "mem_heap.hpp", "mem_borrowed.hpp", "mem_pool.hpp",
-        "mem_source.hpp", "mem_string.hpp", "mem_sorted_map.hpp", "mem_source_alloc.hpp",
+        "mem_source.hpp", "mem_string.hpp", "mem_sorted_map.hpp", "mem_poly_ptr.hpp",
+        "mem_source_alloc.hpp",
         "mem_source_backend.hpp", "mem_source_pmr.hpp", "mem_source_sync.hpp", "mem_cuda.hpp",
         "mem_slab_pool.hpp",
     ],

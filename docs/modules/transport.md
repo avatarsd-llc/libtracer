@@ -577,7 +577,7 @@ computation — is pure and lives in `tr::net::ws`:
 :project: libtracer
 ```
 
-```{doxygenfunction} tr::net::ws::encode_frame
+```{doxygenfunction} tr::net::ws::try_encode_frame
 :project: libtracer
 ```
 
@@ -590,10 +590,6 @@ computation — is pure and lives in `tr::net::ws`:
 ```
 
 ```{doxygenfunction} tr::net::ws::encode_client_control
-:project: libtracer
-```
-
-```{doxygenfunction} tr::net::ws::encode_client_frame
 :project: libtracer
 ```
 

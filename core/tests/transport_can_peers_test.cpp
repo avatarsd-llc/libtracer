@@ -53,6 +53,15 @@
 
 namespace {
 
+/** @brief A whole advertise frame in a `std::vector` — the test-side form of
+ *         `can::encode_advertise` (#1780 moved it into a caller's `bytes_t`); empty when
+ *         the advertise is unencodable. */
+[[maybe_unused]] std::vector<std::byte> advertise_vec(const tr::net::can::advertise_t& a) {
+    tr::mem::bytes_t b(tr::mem::heap_source());
+    if (!tr::net::can::encode_advertise(b, a)) return {};
+    return std::vector<std::byte>(b.begin(), b.end());
+}
+
 using namespace std::chrono_literals;
 namespace can = tr::net::can;
 using tr::graph::fwd_op_t;
@@ -273,7 +282,7 @@ void test_enumeration_and_forwarding() {
     (void)router_t.add_child("cli", channel.a());
     channel.b().set_receiver(cli_rx);
 
-    tr::net::transport_can tcan_t(std::make_unique<fake_link_t>(bus),
+    tr::net::transport_can tcan_t(tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus),
                                   {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "transit"});
     // A bus has no dial/listen asymmetry, so `can` is ONE module for both roles (RFC-0014 §1).
     // Declaring it mints the creator endpoint /net/can/conn this SPEC is written to.
@@ -289,14 +298,14 @@ void test_enumeration_and_forwarding() {
     tr::graph::vertex_handle_t vp = graph_p.register_vertex(path_t("/a/b"), role_t::STORED_VALUE);
     (void)graph_p.write(vp, owned(b_value_u32(kStored)));
     fwd_router_t router_p(graph_p);
-    tr::net::transport_can tcan_p(std::make_unique<fake_link_t>(bus),
+    tr::net::transport_can tcan_p(tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus),
                                   {0, 5, tr::net::can::can_frame_mode_t::CLASSIC, "boardB"});
     (void)router_p.add_child("can0", tcan_p);
 
     // ----- bystander Q (CAN node 7): same bus, must never deliver n5 traffic. -
     std::atomic<int> q_deliveries{0};
     auto q_rx = [&](std::span<const std::byte>) { ++q_deliveries; };
-    tr::net::transport_can tcan_q(std::make_unique<fake_link_t>(bus),
+    tr::net::transport_can tcan_q(tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus),
                                   {0, 7, tr::net::can::can_frame_mode_t::CLASSIC, "boardC"});
     tcan_q.set_receiver(q_rx);
 
@@ -395,12 +404,12 @@ void test_peer_expiry() {
 
     fake_can_bus_t bus;
     tr::net::transport_can observer(
-        std::make_unique<fake_link_t>(bus),
+        tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus),
         {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "obs", std::chrono::milliseconds(150)});
 
     std::optional<tr::net::transport_can> ghost;
     ghost.emplace(
-        std::make_unique<fake_link_t>(bus),
+        tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus),
         tr::net::transport_can_config_t{0, 9, tr::net::can::can_frame_mode_t::CLASSIC, "ghost"});
 
     const auto names = [&] {
@@ -433,7 +442,7 @@ void test_resolved_endpoint_is_identity_scoped() {
 
     fake_can_bus_t bus;
     tr::net::transport_can observer(
-        std::make_unique<fake_link_t>(bus),
+        tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus),
         {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "obs", std::chrono::milliseconds(150)});
 
     const auto names = [&] {
@@ -447,7 +456,7 @@ void test_resolved_endpoint_is_identity_scoped() {
     auto n9_rx = [&](std::span<const std::byte>) { ++n9_deliveries; };
     std::optional<tr::net::transport_can> peer9;
     peer9.emplace(
-        std::make_unique<fake_link_t>(bus),
+        tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus),
         tr::net::transport_can_config_t{0, 9, tr::net::can::can_frame_mode_t::CLASSIC, "n9-first"});
     peer9->set_receiver(n9_rx);
     check(wait_until([&] { return names().count("n9") == 1; }, kBudget),
@@ -465,7 +474,7 @@ void test_resolved_endpoint_is_identity_scoped() {
     // --- a different peer arrives while n9 is gone. It cannot inherit the name.
     std::atomic<int> n7_deliveries{0};
     auto n7_rx = [&](std::span<const std::byte>) { ++n7_deliveries; };
-    tr::net::transport_can peer7(std::make_unique<fake_link_t>(bus),
+    tr::net::transport_can peer7(tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus),
                                  {0, 7, tr::net::can::can_frame_mode_t::CLASSIC, "n7-newcomer",
                                   std::chrono::milliseconds(150)});
     peer7.set_receiver(n7_rx);
@@ -475,7 +484,7 @@ void test_resolved_endpoint_is_identity_scoped() {
           "n9 STILL does not resolve — an arriving peer inherits no departed peer's name");
 
     // --- n9 returns on the same node id: the CACHED pointer still means n9. ---
-    peer9.emplace(std::make_unique<fake_link_t>(bus),
+    peer9.emplace(tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus),
                   tr::net::transport_can_config_t{0, 9, tr::net::can::can_frame_mode_t::CLASSIC,
                                                   "n9-returned"});
     peer9->set_receiver(n9_rx);
@@ -498,7 +507,7 @@ void test_peer_table_growth() {
     std::printf("ADR-0044 peer table (per-distinct-node growth, idempotent refresh):\n");
 
     fake_can_bus_t bus;
-    tr::net::transport_can observer(std::make_unique<fake_link_t>(bus),
+    tr::net::transport_can observer(tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus),
                                     {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "obs"});
 
     // A raw injector announces hellos from many distinct nodes — TWICE, so a
@@ -511,7 +520,7 @@ void test_peer_table_growth() {
             can::advertise_t hello;
             hello.can_id = can::encode_can_id({0, node, tr::net::kCanControlEndpoint});
             hello.slice_count = 0;  // presence only
-            const std::vector<std::byte> bytes = can::encode_advertise(hello);
+            const std::vector<std::byte> bytes = advertise_vec(hello);
             std::size_t off = 0;
             while (off < bytes.size()) {
                 const std::size_t n =

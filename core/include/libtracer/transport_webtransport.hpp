@@ -29,12 +29,12 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 #include <span>
-#include <string>
+#include <string_view>
 
 #include "libtracer/length_prefix_framer.hpp"
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer/tls_profile.hpp"
 #include "libtracer/transport.hpp"
 #include "libtracer/transport_factory.hpp"
@@ -51,9 +51,10 @@ namespace tr::net {
  * DEV-ONLY mode a self-signed dev cert requires.
  */
 struct webtransport_dial_tls_t {
-    std::string ca_file;             /**< @brief PEM CA bundle path to verify the server
+    std::string_view ca_file;        /**< @brief PEM CA bundle path to verify the server
                                                  certificate against (empty = the system
-                                                 trust store). */
+                                                 trust store). Borrowed for the
+                                                 constructor call only (#1780). */
     bool insecure_no_verify = false; /**< @brief DEV ONLY: skip server certificate
                                                  validation entirely (self-signed dev
                                                  certs — tools/gen-dev-cert.sh). Never
@@ -173,8 +174,8 @@ class webtransport_transport_t : public transport_t {
      * @param config    The link's knobs (@ref webtransport_config_t): memory, receive cap,
      *                  deferred receive, handshake budget.
      */
-    webtransport_transport_t(const std::string& peer_host, std::uint16_t peer_port,
-                             const std::string& path = "/", webtransport_dial_tls_t tls = {},
+    webtransport_transport_t(std::string_view peer_host, std::uint16_t peer_port,
+                             std::string_view path = "/", webtransport_dial_tls_t tls = {},
                              const webtransport_config_t& config = {});
 
     /**
@@ -195,8 +196,8 @@ class webtransport_transport_t : public transport_t {
      * @param config    The link's knobs (@ref webtransport_config_t); `defer_rx` is
      *                  DIAL-only and ignored here.
      */
-    webtransport_transport_t(std::uint16_t bind_port, const std::string& cert_file,
-                             const std::string& key_file, const webtransport_config_t& config = {});
+    webtransport_transport_t(std::uint16_t bind_port, std::string_view cert_file,
+                             std::string_view key_file, const webtransport_config_t& config = {});
 
     /** @brief Shut the session down, drain msquic callbacks, and release the
      *         msquic API (listener → streams → connection → registration order). */
@@ -269,15 +270,20 @@ class webtransport_transport_t : public transport_t {
      *
      * The listener serves every path (it validates `:method`/`:protocol`, never
      * the resource), so this is an observation, not an admission decision: it
-     * is how a host sees which resource a session asked for. Returns a copy —
-     * thread-safe, and not on any frame path.
+     * is how a host sees which resource a session asked for. Copies into the caller's
+     * buffer (#1780: no owning string crosses the API) — thread-safe, and not on any
+     * frame path.
      *
      * STABLE for the life of a session (#1410): a second extended CONNECT on a live
      * session is refused at stream scope, so a peer that has already been answered cannot
      * rewrite what a host observes here. It changes only when the session itself does —
      * connection teardown, or the one-peer replacement path accepting a new peer.
+     *
+     * @param out Where the path goes: its first `min(out.size(), length)` characters,
+     *            no terminator.
+     * @return The path's full length — larger than `out.size()` means it was truncated.
      */
-    [[nodiscard]] std::string session_path() const;
+    [[nodiscard]] std::size_t session_path(std::span<char> out) const;
 
     /** @brief Frames dropped because the RX backend was exhausted (backpressure,
      *         ADR-0042 §2) — drained off the stream, never an OOM. */
@@ -344,7 +350,9 @@ class webtransport_transport_t : public transport_t {
 
    private:
     struct impl_t;  // all msquic + H3 state lives in the .cpp
-    std::unique_ptr<impl_t> impl_;
+    /** @brief The endpoint, drawn from `config.memory.io` (default the net sub-pool); empty
+     *         when that store refused it, which leaves the link inert (#1780). */
+    mem::poly_ptr_t<impl_t> impl_;
 };
 
 /**

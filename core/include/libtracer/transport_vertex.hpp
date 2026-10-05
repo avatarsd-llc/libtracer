@@ -33,22 +33,19 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <functional>
-#include <map>
-#include <memory>
 #include <mutex>
 #include <optional>
-#include <set>
 #include <span>
-#include <string>
 #include <string_view>
-#include <vector>
 
 #include "libtracer/graph.hpp"
 #include "libtracer/key_view.hpp"
 #include "libtracer/link_kind.hpp"
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_poly_ptr.hpp"
+#include "libtracer/mem_sorted_map.hpp"
 #include "libtracer/mem_source.hpp"
+#include "libtracer/mem_string.hpp"
 #include "libtracer/thread_id.hpp"
 #include "libtracer/transport.hpp"
 #include "libtracer/transport_factory.hpp"
@@ -300,7 +297,8 @@ class transport_vertex_t {
      *                   registered later via @ref register_transport_type reaches the same
      *                   store through @ref egress_source.
      */
-    transport_vertex_t(graph::graph_t& graph, fwd_router_t& router, std::string net_root = "/net",
+    transport_vertex_t(graph::graph_t& graph, fwd_router_t& router,
+                       std::string_view net_root = "/net",
                        mem::mem_backend_t* rx_backend = &mem::net_backend(),
                        mem::block_source_t* egress_src = &mem::net_source());
 
@@ -330,7 +328,7 @@ class transport_vertex_t {
      *                   `nullptr` (and the default) means the process net sub-pool
      *                   (#1777). Must outlive this object.
      */
-    transport_vertex_t(graph::graph_t& graph, fwd_router_t& router, std::string net_root,
+    transport_vertex_t(graph::graph_t& graph, fwd_router_t& router, std::string_view net_root,
                        mem::mem_backend_t* rx_backend, slim_net_t,
                        mem::block_source_t* egress_src = &mem::net_source());
 
@@ -353,11 +351,15 @@ class transport_vertex_t {
      * `SCHEMA_NOT_FOUND` (the same "unsupported catalog entry" convention the graph's own
      * child-type catalog gives an unknown SPEC `type`). Call at setup, before frames flow
      * (mirrors `%graph::graph_t::register_child_type`'s thread contract).
-     * @param kind    The config `kind` selector (e.g. "udp", "quic").
+     *
+     * The catalog row is drawn from @ref egress_source (#1780); a store too small to hold it
+     * is a sizing bug, so the node stops with a message naming the store (ADR-0056,
+     * ADR-0083 Q7), exactly as an exhausted `register_vertex` does.
+     * @param kind    The config `kind` selector (e.g. "udp", "quic"), copied.
      * @param factory Builds an owning transport from the parsed universal settings
      *                plus the raw config TLV (for its kind-private keys).
      */
-    void register_transport_type(std::string kind, transport_factory_t factory);
+    void register_transport_type(std::string_view kind, transport_factory_t factory);
 
     /**
      * @brief Register a transport factory WITH its kind capabilities (RFC-0014 §4 S5).
@@ -372,7 +374,7 @@ class transport_vertex_t {
      *                once per dial attempt, off the creation path.
      * @param traits  The kind's capability row — see @ref transport_kind_traits_t.
      */
-    void register_transport_type(std::string kind, transport_factory_t factory,
+    void register_transport_type(std::string_view kind, transport_factory_t factory,
                                  transport_kind_traits_t traits);
 
     /**
@@ -477,8 +479,8 @@ class transport_vertex_t {
      *         nothing is recorded); the graph's own refusal (e.g. `BACKPRESSURE`) if the
      *         endpoint could not be registered — in which case nothing is declared either.
      */
-    [[nodiscard]] graph::result_t<void> register_module(std::string module, std::string kind,
-                                                        conn_role_t role,
+    [[nodiscard]] graph::result_t<void> register_module(std::string_view module,
+                                                        std::string_view kind, conn_role_t role,
                                                         conn_catalog_t catalog = {});
 
     /**
@@ -494,9 +496,11 @@ class transport_vertex_t {
      *       @ref register_module could reallocate out from under the walk — the
      *       declare-only-at-setup contract that papered over the gap is WITHDRAWN. The
      *       lock is control-plane; nothing on the forward or delivery path takes it.
+     * @return A view of the declared module name. It stays valid for this object's life:
+     *         a declaration is never removed and its text never moves (#1780).
      */
-    [[nodiscard]] graph::result_t<std::string> module_for(std::string_view kind,
-                                                          conn_role_t role) const;
+    [[nodiscard]] graph::result_t<std::string_view> module_for(std::string_view kind,
+                                                               conn_role_t role) const;
 
     /**
      * @brief Is @p key one of THIS net plane's **structural vertices** — the net root, or a
@@ -562,8 +566,11 @@ class transport_vertex_t {
      *               mounts (RFC-0014 §1).
      * @param name The connection's NAME (the `/net/<module>/<name>` leaf segment).
      * @param link The transport carrying this connection's bytes.
+     *
+     * The staging row is drawn from @ref egress_source; exhaustion at this setup call stops
+     * the node with a sizing message, as @ref register_transport_type does (#1780).
      */
-    void provide_link(std::string module, std::string name, transport_t& link);
+    void provide_link(std::string_view module, std::string_view name, transport_t& link);
 
     /**
      * @brief Report a connection's link-liveness state — a write to the vertex value.
@@ -612,6 +619,11 @@ class transport_vertex_t {
 
     /**
      * @brief The parsed transport-private settings of connection @p name (nullptr if none).
+     *
+     * The record's text keys view this connection's own copy of its config, so they live as
+     * long as the connection. The POINTER is valid until the next connection is created or
+     * removed: the table is one sorted block (#1780), and growing or shrinking it moves the
+     * records. Read what you need and drop it.
      * @param name The connection's **qualified** key `net/<module>/<name>` (#605).
      */
     [[nodiscard]] const conn_settings_t* settings_of(std::string_view name) const;
@@ -639,8 +651,13 @@ class transport_vertex_t {
     // child_registry_t (Brick 3a); `make_connection_locked` registers the link there.
     struct conn_t {
         graph::vertex_handle_t vertex;  // the /net/<name> identity vertex (set on creation)
+        // The SPEC's `config` SETTINGS, re-encoded into a block this connection owns (#1780):
+        // the write's own node borrows a rope that is gone once the write returns, and
+        // `settings`' text keys are views — they point in here, so they live exactly as long
+        // as the connection. Empty when the SPEC carried no config.
+        mem::bytes_t config;
         conn_settings_t settings;
-        std::unique_ptr<transport_t> owned;  // config-constructed socket (see class docs)
+        transport_ptr_t owned;  // config-constructed socket (see class docs)
         // The S5 liveness engine, iff this connection is engine-managed (RFC-0014 §4):
         // a non-owning view of `owned` as its concrete type, so teardown can stop the
         // worker BEFORE the vertex retires and acquire/release can reach the refcount.
@@ -651,8 +668,8 @@ class transport_vertex_t {
     // the role it fixes positionally. Declared above the methods that name it because a
     // member function's return type is parsed against the class-so-far.
     struct module_decl_t {
-        std::string module;
-        std::string kind;
+        mem::string_t module;
+        mem::string_t kind;
         conn_role_t role;
     };
 
@@ -718,13 +735,14 @@ class transport_vertex_t {
         void publish(graph::vertex_handle_t vertex, link_state_t state);
 
         /** @brief Collect `fwd_router_t::remove_child(name)` — the un-route, first in phase 2. */
-        void unroute(std::string name);
+        void unroute(mem::string_t name);
 
         /** @brief Collect `self_heal_link_t::stop()` on @p engine — JOINS its worker. */
         void stop_engine(self_heal_link_t* engine);
 
-        /** @brief Collect the destruction of @p link — JOINS its receive thread. */
-        void destroy_link(std::unique_ptr<transport_t> link);
+        /** @brief Collect the destruction of @p link — JOINS its receive thread — and then of
+         *         @p config, the connection's config copy the link's settings view. */
+        void destroy_link(transport_ptr_t link, mem::bytes_t config);
 
         /** @brief Collect `graph_t::retire(vertex)` — the connection's identity goes. */
         void retire(graph::vertex_handle_t vertex);
@@ -750,11 +768,13 @@ class transport_vertex_t {
         void release_lock();
 
         const transport_vertex_t& owner_;
-        std::unique_lock<std::mutex> ops_lock_; /**< @brief Engaged for an `OPERATION`. */
-        std::unique_lock<std::mutex> lock_;     /**< @brief `ctl_m_`; dropped by phase 2. */
-        std::string unroute_;                   /**< @brief Empty = no un-route. */
-        self_heal_link_t* stop_ = nullptr;      /**< @brief Null = no engine to stop. */
-        std::unique_ptr<transport_t> destroy_;  /**< @brief Null = nothing to destroy. */
+        std::unique_lock<std::mutex> ops_lock_;     /**< @brief Engaged for an `OPERATION`. */
+        std::unique_lock<std::mutex> lock_;         /**< @brief `ctl_m_`; dropped by phase 2. */
+        mem::string_t unroute_{mem::null_source()}; /**< @brief Empty = no un-route. */
+        self_heal_link_t* stop_ = nullptr;          /**< @brief Null = no engine to stop. */
+        transport_ptr_t destroy_;                   /**< @brief Null = nothing to destroy. */
+        /** @brief The destroyed connection's config bytes; released after `destroy_`. */
+        mem::bytes_t destroy_config_{mem::null_source()};
         // Engaged = collected. `vertex_handle_t` has no default state to spell (ADR-0056 —
         // it is exactly a pointer, constructible only by the graph), so the optional IS the
         // armed flag rather than riding beside a synthetic null handle.
@@ -782,16 +802,19 @@ class transport_vertex_t {
      * where the module came from.
      * @param module   The module segment the connection mounts under.
      * @param name     The connection's leaf NAME (already segment-validated).
-     * @param config   The SPEC's raw `config` SETTINGS, for the kind factory's private keys.
-     * @param settings The universal keys parsed out of @p config, with `role` and `kind`
-     *                 already fixed by the module's declaration.
+     * @param config   The SPEC's `config` SETTINGS, for the kind factory's private keys — a node
+     *                 over @p config_bytes, or null when the SPEC carried none.
+     * @param config_bytes The connection's own copy of that config; the connection keeps it.
+     * @param settings The universal keys parsed out of @p config_bytes (their text views
+     *                 point into it), with `role` and `kind` already fixed by the module's
+     *                 declaration.
      * @param txn      The open transaction — creation's birth liveness (RFC-0014 §4's
      *                 `UP`/`LISTENING`/`DORMANT`) is COLLECTED on it, not published here,
      *                 because publishing fans out to subscribers under `ctl_m_`.
      */
     [[nodiscard]] graph::result_t<graph::vertex_handle_t> make_connection_locked(
-        ctl_txn_t& txn, const std::string& module, const std::string& name,
-        const wire::tlv_node_t* config, conn_settings_t settings);
+        ctl_txn_t& txn, std::string_view module, std::string_view name,
+        const wire::tlv_node_t* config, mem::bytes_t config_bytes, conn_settings_t settings);
 
     /**
      * @brief `remove_connection`'s body, for a caller that ALREADY holds `ctl_m_` — the
@@ -816,7 +839,7 @@ class transport_vertex_t {
      * when this call mints it; when the endpoint already exists, a non-empty @p catalog other
      * than the one it was minted with answers `PATH_IN_USE`.
      */
-    [[nodiscard]] graph::result_t<void> mint_module_locked(const std::string& module,
+    [[nodiscard]] graph::result_t<void> mint_module_locked(std::string_view module,
                                                            conn_catalog_t catalog);
 
     /**
@@ -832,20 +855,20 @@ class transport_vertex_t {
      * @param catalog The module's creation catalog, captured at mint time beside @p module.
      * @param value   The written value, exactly as the graph handed it over (borrowed).
      */
-    [[nodiscard]] graph::result_t<void> endpoint_write(const std::string& module,
+    [[nodiscard]] graph::result_t<void> endpoint_write(std::string_view module,
                                                        conn_catalog_t catalog,
                                                        const graph::value_t& value);
 
     /** @brief The `SPEC` ⇒ create leg of `%endpoint_write`; runs in @p txn's phase 1, and
      *         refuses a config that does not conform to @p catalog before anything is built. */
     [[nodiscard]] graph::result_t<void> endpoint_create_locked(ctl_txn_t& txn,
-                                                               const std::string& module,
+                                                               std::string_view module,
                                                                conn_catalog_t catalog,
                                                                const wire::tlv_node_t& spec);
 
     /** @brief The `NAME` ⇒ remove leg of `%endpoint_write`; runs in @p txn's phase 1. */
     [[nodiscard]] graph::result_t<void> endpoint_remove_locked(ctl_txn_t& txn,
-                                                               const std::string& module,
+                                                               std::string_view module,
                                                                std::string_view name);
 
     /**
@@ -859,7 +882,7 @@ class transport_vertex_t {
      * a module declared for two kinds is genuinely ambiguous without one (`TYPE_MISMATCH`),
      * the same refusal an ambiguous staging used to give the retired `:children[]` spelling.
      */
-    [[nodiscard]] graph::result_t<module_decl_t> declaration_for_locked(
+    [[nodiscard]] graph::result_t<const module_decl_t*> declaration_for_locked(
         std::string_view module, std::string_view kind) const;
 
     /**
@@ -968,9 +991,12 @@ class transport_vertex_t {
 
     graph::graph_t& graph_;
     fwd_router_t& router_;
-    std::string net_root_;
-    mem::mem_backend_t* rx_backend_;   // RX segment source for owned view-delivering sockets
-    mem::block_source_t* egress_src_;  // TX gather store for owned sockets (#873 / ADR-0079)
+    mem::mem_backend_t* rx_backend_;  // RX segment source for owned view-delivering sockets
+    // TX gather store for owned sockets (#873 / ADR-0079), and since #1780 the store every
+    // table below and every factory-built link object is drawn from: this net plane's one
+    // injected source (the net sub-pool when nothing is injected, ADR-0083 Q21).
+    mem::block_source_t* egress_src_;
+    mem::string_t net_root_;
     // One factory-catalog row: the constructor and the kind's capability declarations
     // (RFC-0014 S5). Traits ride WITH the factory so one lookup answers both.
     struct kind_entry_t {
@@ -980,26 +1006,27 @@ class transport_vertex_t {
 
     // Pre-supplied links awaiting their SPEC, and created connections, both by NAME;
     // the transport-factory catalog by config `kind`.
-    std::map<std::string, transport_t*, std::less<>> pending_links_;
-    std::map<std::string, conn_t, std::less<>> conns_;
-    std::map<std::string, kind_entry_t, std::less<>> transport_types_;
+    mem::sorted_map_t<mem::string_t, transport_t*> pending_links_;
+    mem::sorted_map_t<mem::string_t, conn_t> conns_;
+    mem::sorted_map_t<mem::string_t, kind_entry_t> transport_types_;
     // Declared modules — see register_module / module_for (declared-only, ADR-0073 §4).
     // A flat vector, not a map: this is written at setup and read once per
     // connection creation, so an rbtree buys nothing a linear scan over a handful of entries
     // does not — and it costs a whole extra container instantiation in flash. Nothing here is
     // on the forward path.
-    std::vector<module_decl_t> modules_;
+    mem::block_array_t<module_decl_t> modules_;
 
     /** @brief The creator endpoint's `on_write` context — the hook's `ctx` (RFC-0028 D10). */
     struct endpoint_ctx_t {
         transport_vertex_t* self; /**< @brief The owning transport vertex. */
-        std::string module;       /**< @brief The module the endpoint creates under. */
+        mem::string_t module;     /**< @brief The module the endpoint creates under. */
         conn_catalog_t catalog;   /**< @brief The module's creation catalog (borrowed; empty ⇒
                                    *          none declared, nothing validated). */
     };
-    /** @brief One context per minted creator endpoint, each a heap node that never moves, so a
-     *         hook's `ctx` stays valid for this object's lifetime. Appended under `ctl_m_`. */
-    std::vector<std::unique_ptr<endpoint_ctx_t>> endpoints_;
+    /** @brief One context per minted creator endpoint, each in its own block that never moves,
+     *         so a hook's `ctx` stays valid for this object's lifetime. Appended under
+     *         `ctl_m_`. */
+    mem::block_array_t<mem::poly_ptr_t<endpoint_ctx_t>> endpoints_;
 };
 
 }  // namespace tr::net

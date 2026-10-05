@@ -30,21 +30,19 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <map>
-#include <memory>
-#include <memory_resource>
 #include <mutex>
 #include <optional>
 #include <span>
-#include <string>
 #include <string_view>
 #include <thread>
-#include <vector>
 
 #include "libtracer/can.hpp"
 #include "libtracer/can_framing.hpp"
 #include "libtracer/can_reassembly.hpp"
 #include "libtracer/inline_fn.hpp"
+#include "libtracer/mem_poly_ptr.hpp"
+#include "libtracer/mem_sorted_map.hpp"
+#include "libtracer/mem_string.hpp"
 #include "libtracer/transport.hpp"
 #include "libtracer/transport_factory.hpp"
 // The one-release alias window (#1725): code that reached the old `tr::view::can_*` names
@@ -275,7 +273,7 @@ class socketcan_link_t : public can_link_t {
      *        `pthread_attr_setstacksize` at @ref start; mirrors
      *        `net::posix_endpoint_t::start`).
      */
-    explicit socketcan_link_t(const std::string& ifname, std::size_t recv_stack = 0);
+    explicit socketcan_link_t(std::string_view ifname, std::size_t recv_stack = 0);
 
     /** @brief Stop the receive thread and close the socket. */
     ~socketcan_link_t() override;
@@ -330,28 +328,31 @@ struct transport_can_config_t {
     tr::net::can::can_frame_mode_t mode =
         tr::net::can::can_frame_mode_t::CLASSIC; /**< @brief Classic (≤8B) or CAN-FD (≤64B) framing.
                                                   */
-    std::string path; /**< @brief The path advertised for this node's groups. */
+    std::string_view path; /**< @brief The path advertised for this node's groups —
+                                borrowed for the constructor, which keeps its own copy
+                                (#1780). */
     std::chrono::milliseconds peer_ttl =
         kCanDefaultPeerTtl; /**< @brief Peer liveness window (ADR-0044): a peer silent
                                  longer than this expires from the enumeration. */
 
     // --- ingress bounding (#912): the injected-resource / config seam ----------
 
-    std::pmr::memory_resource* reasm_mr =
-        std::pmr::new_delete_resource(); /**< @brief Where the RX buffers (reassembly
-                                              groups/slices and the pending-slice queue)
-                                              draw their structure. A constrained node
-                                              injects a bounded resource; the default is
-                                              the process heap. Must outlive the
-                                              transport. */
-    std::size_t max_groups = 0;          /**< @brief Live reassembly-group ceiling; `0` = unbounded
-                                              (host-bounded per RFC-0006). Overflow evicts the
-                                              oldest group and ticks @ref
-                                              can_transport_t::dropped_groups. */
-    std::size_t max_pending = 0;         /**< @brief Ceiling on data slices parked awaiting their
-                                              advertise; `0` = unbounded (host-bounded per
-                                              RFC-0006). Overflow evicts the oldest parked slice
-                                              and ticks @ref can_transport_t::dropped_rx. */
+    mem::block_source_t* reasm_src = nullptr; /**< @brief Where the RX tables (reassembly
+                                                   groups/slices, the pending-slice queue, the
+                                                   learned bindings, per-node control streams and
+                                                   the peer table) and the path copy draw their
+                                                   structure (#1780; was the `reasm_mr` pmr
+                                                   resource). A constrained node injects a
+                                                   bounded source; `nullptr` = the process net
+                                                   sub-pool. Must outlive the transport. */
+    std::size_t max_groups = 0;  /**< @brief Live reassembly-group ceiling; `0` = unbounded
+                                      (host-bounded per RFC-0006). Overflow evicts the
+                                      oldest group and ticks @ref
+                                      can_transport_t::dropped_groups. */
+    std::size_t max_pending = 0; /**< @brief Ceiling on data slices parked awaiting their
+                                      advertise; `0` = unbounded (host-bounded per
+                                      RFC-0006). Overflow evicts the oldest parked slice
+                                      and ticks @ref can_transport_t::dropped_rx. */
     std::chrono::milliseconds rx_ttl =
         kCanRxTtlFromPeerTtl; /**< @brief RX staleness window: a parked slice or an
                                    incomplete reassembly group untouched this long is
@@ -374,7 +375,7 @@ struct transport_can_config_t {
                       global heap; a refusal drops the whole group and ticks @ref
                       can_transport_t::dropped_rx. Must outlive the transport — the
                       segments it hands out are released by it. Companion to @ref
-                      reasm_mr — that one bounds the reassembly STRUCTURE, this one the
+                      reasm_src — that one bounds the reassembly STRUCTURE, this one the
                       slice BYTES. */
 };
 
@@ -423,11 +424,14 @@ class can_transport_t : public transport_t, public bus_link_t {
      * Drives the link's two-phase lifecycle (#1186) on the owner's behalf:
      * registers the receiver, THEN calls @ref can_link_t::start. A caller that
      * hands its link here must not have started it.
+     * Exhaustion of the RX source while copying the path is a sizing bug and aborts
+     * (`%tr::mem::exhausted_at_init`, ADR-0083): this is a setup call.
+     *
      * @param link   The owned raw-frame link (a @ref socketcan_link_t in production),
-     *               open but not yet started.
+     *               open but not yet started — made with `%tr::mem::make_poly` (#1780).
      * @param config This node's version/node/mode/path identity on the bus.
      */
-    can_transport_t(std::unique_ptr<can_link_t> link, transport_can_config_t config);
+    can_transport_t(mem::poly_ptr_t<can_link_t> link, const transport_can_config_t& config);
 
     /** @brief Detach the receiver and release the link (stopping its receive thread). */
     ~can_transport_t() override;
@@ -447,9 +451,13 @@ class can_transport_t : public transport_t, public bus_link_t {
     /**
      * @brief Look up a learned `id ↔ path` binding by its base CAN ID (test/introspection hook).
      * @param base_can_id The advertised group's base 29-bit CAN ID.
-     * @return The learned @ref tr::net::can::advertise_t, or `std::nullopt` if unknown.
+     * @param path_out    Where the binding's path is copied (truncated to fit; #1780: no
+     *                    owning string crosses the API). Empty = the path is not read.
+     * @return The learned @ref tr::net::can::advertise_t — its `path` views @p path_out —
+     *         or `std::nullopt` if unknown.
      */
-    [[nodiscard]] std::optional<can::advertise_t> learned_binding(std::uint32_t base_can_id) const;
+    [[nodiscard]] std::optional<can::advertise_t> learned_binding(
+        std::uint32_t base_can_id, std::span<char> path_out = {}) const;
 
     // --- drop counters (#912) — the sibling-transport convention -----------------
 
@@ -644,8 +652,8 @@ class can_transport_t : public transport_t, public bus_link_t {
     // table is keyed by node, and a node id never aliases): expiry hides an
     // entry from enumeration/resolution but never frees it, so the endpoint
     // facades peer_link hands out stay pointer-stable for the transport's life
-    // (std::map nodes never move). Growth is one entry per DISTINCT node id ever
-    // heard — structurally bounded by the 13-bit id space, never per-frame.
+    // (each entry is its own block, which never moves). Growth is one entry per DISTINCT node id
+    // ever heard — structurally bounded by the 13-bit id space, never per-frame.
     struct peer_entry_t {
         std::chrono::steady_clock::time_point last_heard{};
         peer_endpoint_t endpoint;
@@ -654,6 +662,8 @@ class can_transport_t : public transport_t, public bus_link_t {
     // --- ingress (runs on the link's receive thread) ---
     void on_rx(const can_frame_data_t& frame);
     void learn_advertise(const can::advertise_t& adv);  // requires rx_m_ held
+    struct node_rx_t;
+    node_rx_t* node_rx(std::uint16_t node) noexcept;  // requires rx_m_ held; null = refused
     // Retire every same-node binding whose endpoint run overlaps the one a fresh
     // advertise claims, and discard the reassembly group each was feeding (#909).
     // The 12-bit endpoint space wraps, so a base RECURS; without this a stale run
@@ -684,8 +694,14 @@ class can_transport_t : public transport_t, public bus_link_t {
     void send_impl(std::span<const std::byte> frame, std::uint16_t target);
     void emit_hello();  // the join-time presence advertise (slice_count == 0)
 
-    std::unique_ptr<can_link_t> link_;
-    transport_can_config_t cfg_;
+    /** @brief The store every RX table below is drawn from (`cfg.reasm_src`, resolved). */
+    [[nodiscard]] static mem::block_source_t& rx_source(const transport_can_config_t& c) noexcept {
+        return c.reasm_src != nullptr ? *c.reasm_src : mem::net_source();
+    }
+
+    mem::poly_ptr_t<can_link_t> link_;
+    transport_can_config_t cfg_;  // cfg_.path views path_
+    mem::string_t path_;          // this node's advertised path, owned
 
     // egress
     std::mutex tx_m_;  // serializes whole-group emission
@@ -694,13 +710,14 @@ class can_transport_t : public transport_t, public bus_link_t {
     // ingress. A learned binding remembers whether its group is for THIS node —
     // a directed group addressed elsewhere is consumed but never reassembled.
     struct binding_t {
-        can::advertise_t adv;
+        can::advertise_t adv;  // adv.path views `path`
+        mem::string_t path;    // the advertised path, owned (#1780)
         bool deliver = true;
         // True once the producer's endpoint allocator has come round past this
         // binding: it was learned in a PRIOR lap, so no advertise of the current lap
         // stands behind it and a slice resolving to it would be welded (#1011).
-        // Set by mark_prior_lap; never cleared — the fresh binding inserted after the
-        // sweep starts false, and the only exit from a prior lap is being replaced.
+        // Set by mark_prior_lap; cleared only on the fresh binding, right after the lap
+        // sweep that may have marked it, so the only exit from a prior lap is being replaced.
         // Costs ZERO bytes: it lands in the tail padding `bool deliver` already had.
         bool prior_lap = false;
     };
@@ -709,13 +726,14 @@ class can_transport_t : public transport_t, public bus_link_t {
      *        endpoint of the last advertise it was seen to place.
      *
      * One map instead of two. The lap test needs a single `std::uint16_t` per node and
-     * the control-stream buffer is already keyed by exactly that — a second
-     * `std::map<std::uint16_t, ...>` would have cost a whole map node (allocator
-     * header, three pointers, colour) to carry two bytes on a target where the RX
-     * buffers are injected precisely because the heap is scarce.
+     * the control-stream buffer is already keyed by exactly that — a second map would
+     * have cost a whole entry to carry two bytes on a target where the RX buffers are
+     * injected precisely because the heap is scarce.
      */
     struct node_rx_t {
-        std::vector<std::byte> control; /**< @brief Accumulated advertise byte stream. */
+        /** @brief Draw the control stream from @p src (the transport's RX store). */
+        explicit node_rx_t(mem::block_source_t& src) noexcept : control(src) {}
+        mem::bytes_t control; /**< @brief Accumulated advertise byte stream. */
         // The base endpoint of the most recent advertise learned from this node.
         // `alloc_base` issues strictly ascending bases and wraps to
         // kCanFirstDataEndpoint, so a fresh base that does not EXCEED this one is proof
@@ -743,15 +761,15 @@ class can_transport_t : public transport_t, public bus_link_t {
     // recurring base from claiming two bindings at once. Growth is otherwise one
     // entry per distinct base a node advertises, structurally bounded by the 12-bit
     // endpoint space per node.
-    std::map<std::uint32_t, binding_t> learned_;
+    mem::sorted_map_t<std::uint32_t, binding_t> learned_;
     // node id -> its advertise byte stream + last advertised base (the lap witness).
     // Growth is one entry per distinct node heard, bounded by the 13-bit node space.
-    std::map<std::uint16_t, node_rx_t> nodes_;
+    mem::sorted_map_t<std::uint16_t, node_rx_t> nodes_;
     // Data slices awaiting their advertise. Drawn from the injected resource (the
     // RX thread must not reach the global heap), bounded in COUNT by max_pending
     // and in AGE by rx_ttl; append-ordered, so both the stale prefix and the
     // evict-oldest end are the front.
-    std::pmr::vector<pending_slice_t> pending_;
+    mem::block_array_t<pending_slice_t> pending_;
     std::chrono::steady_clock::time_point rx_now_{};  // current frame's arrival stamp
     // Where an inbound slice's bytes are copied (cfg_.rx_backend, resolved to the
     // process heap once in the constructor). Resolved rather than branched so the
@@ -767,9 +785,11 @@ class can_transport_t : public transport_t, public bus_link_t {
     std::atomic<std::size_t> dropped_presink_{0};
     std::atomic<std::size_t> dropped_stale_binding_{0};
 
-    // the last-heard peer table (ADR-0044) — node id -> entry, insert-only
+    // the last-heard peer table (ADR-0044) — node id -> entry, insert-only. Each entry
+    // is its own block (drawn from the RX store, freed with the transport) because
+    // `peer_link` hands out a pointer to its endpoint that must never move.
     mutable std::mutex peers_m_;
-    std::map<std::uint16_t, peer_entry_t> peers_;
+    mem::sorted_map_t<std::uint16_t, peer_entry_t*> peers_;
 
     // Inbound delivery goes through the inherited peer-named slot (bus_link_t::
     // peer_rx_) — the ONE tier-select mechanism; no transport-local receivers.
@@ -818,21 +838,21 @@ using transport_can = can_transport_t;
  *       vertex's whole life. The dial/listen asymmetry the engine's state machine is built
  *       on does not exist here either: there is nothing to re-dial on a bus.
  *
- * @param reasm_mr Where every constructed transport's RX buffers draw their
- *                 structure — the injection point for the pmr seam the config TLV
- *                 cannot carry (a resource is a pointer, not a wire value). A host
- *                 registers the factory with its own bounded resource; the default
- *                 is the process heap. Must outlive every transport built here.
+ * @param reasm_src Where every constructed transport's RX tables draw their
+ *                 structure (@ref transport_can_config_t::reasm_src) — the injection
+ *                 point the config TLV cannot carry (a source is a pointer, not a wire
+ *                 value). `nullptr` = the process net sub-pool. Must outlive every
+ *                 transport built here. The link objects themselves are drawn from the
+ *                 receiving vertex's store (the factory's third argument).
  * @param rx_backend Where every constructed transport COPIES an inbound data slice's
  *                 bytes (@ref transport_can_config_t::rx_backend). Injected here for
- *                 the same reason as @p reasm_mr — a backend is a pointer, not a wire
+ *                 the same reason as @p reasm_src — a backend is a pointer, not a wire
  *                 value — so the seam is reachable from production registration and
  *                 not only from a unit test. `nullptr` = the process heap. Must
  *                 outlive every transport built here.
  * @return The factory functor for @ref transport_vertex_t::register_transport_type.
  */
-[[nodiscard]] transport_factory_t can_transport_factory(
-    std::pmr::memory_resource* reasm_mr = std::pmr::new_delete_resource(),
-    mem::mem_backend_t* rx_backend = nullptr);
+[[nodiscard]] transport_factory_t can_transport_factory(mem::block_source_t* reasm_src = nullptr,
+                                                        mem::mem_backend_t* rx_backend = nullptr);
 
 }  // namespace tr::net

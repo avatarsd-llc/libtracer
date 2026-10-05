@@ -78,9 +78,10 @@ inline std::vector<std::uint8_t> payload(std::size_t len, std::uint8_t seed) {
  *              (#934). */
 inline std::vector<std::uint8_t> connect_frame(std::string_view authority,
                                                std::string_view path = "/") {
+    std::vector<std::uint8_t> section;
+    tr::net::wt_h3::encode_connect_field_section(section, authority, path);
     std::vector<std::uint8_t> out;
-    tr::net::wt_h3::append_h3_frame(out, tr::net::wt_h3::kFrameHeaders,
-                                    tr::net::wt_h3::encode_connect_field_section(authority, path));
+    tr::net::wt_h3::append_h3_frame(out, tr::net::wt_h3::kFrameHeaders, section);
     return out;
 }
 

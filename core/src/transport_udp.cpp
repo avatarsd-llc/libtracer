@@ -14,7 +14,6 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
-#include <memory>
 #include <utility>
 #include <vector>
 
@@ -27,11 +26,33 @@ namespace {
 [[nodiscard]] std::uint64_t pack_peer(std::uint32_t ip_net, std::uint16_t port_host) noexcept {
     return (static_cast<std::uint64_t>(ip_net) << 16) | port_host;
 }
+
+/**
+ * @brief The receive loop's lazily drawn scratch buffer, returned to its store when the loop
+ *        ends; while the store refuses, a one-byte drain stands in for it.
+ */
+struct rx_scratch_t {
+    mem::block_source_t& src; /**< @brief Where the buffer is drawn from. */
+    std::size_t cap;          /**< @brief The buffer's size. */
+    std::byte* p = nullptr;   /**< @brief The buffer, once drawn. */
+    std::byte drain[1]{};     /**< @brief The stand-in while the store refuses. */
+    /** @brief The buffer, drawn on first use — or, while the source refuses, the one
+     *         byte a refused datagram is drained through (the caller compares against
+     *         `drain`). */
+    std::span<std::byte> get() noexcept {
+        if (p == nullptr) p = static_cast<std::byte*>(src.try_alloc(cap, alignof(std::byte)));
+        return p != nullptr ? std::span<std::byte>(p, cap) : std::span<std::byte>(drain);
+    }
+    /** @brief Return the buffer, if one was drawn. */
+    ~rx_scratch_t() {
+        if (p != nullptr) src.release(p, cap, alignof(std::byte));
+    }
+};
 }  // namespace
 
-udp_transport_t::udp_transport_t(std::uint16_t bind_port, const std::string& peer_host,
+udp_transport_t::udp_transport_t(std::uint16_t bind_port, std::string_view peer_host,
                                  std::uint16_t peer_port, const udp_config_t& config)
-    : backend_(config.memory.rx) {
+    : backend_(config.memory.rx), state_src_(&config.memory.state_or_default()) {
     const std::size_t max_frame = config.max_frame;
     const std::size_t recv_stack = config.recv_stack;
     // `:settings max_frame` (0 = unset) tightens the accepted-datagram cap. kMaxDatagram is
@@ -40,7 +61,7 @@ udp_transport_t::udp_transport_t(std::uint16_t bind_port, const std::string& pee
     if (max_frame != 0 && max_frame < max_frame_) max_frame_ = max_frame;
     std::uint32_t peer_ip = 0;
     in_addr addr{};
-    if (::inet_pton(AF_INET, peer_host.c_str(), &addr) == 1) peer_ip = addr.s_addr;
+    if (parse_ipv4(peer_host, addr)) peer_ip = addr.s_addr;
     peer_.store(pack_peer(peer_ip, peer_port), std::memory_order_relaxed);
     // An unresolved peer at construction = listener mode: learn it from inbound
     // datagrams' source addresses (see the header note).
@@ -160,11 +181,13 @@ void udp_transport_t::run() {
     // installed, backend healthy) never pays for it — and the recv thread never carries a
     // 64 KiB frame on its stack (FreeRTOS/pthread stacks are a few KiB; a stack array here
     // would overflow them on-target).
-    std::unique_ptr<std::byte[]> scratch;
-    const auto scratch_buf = [&scratch, scratch_cap]() -> std::byte* {
-        if (!scratch) scratch = std::make_unique<std::byte[]>(scratch_cap);
-        return scratch.get();
-    };
+    //
+    // It is drawn from the link's `memory.state` — receive-side state this link was given
+    // (receiver pays, #1780) — and returned when the loop ends. A refused draw is
+    // backpressure like a refused segment: the datagram is drained through a one-byte buffer
+    // and counted.
+    rx_scratch_t scratch{*state_src_, scratch_cap};
+    std::byte drain[1];          // a datagram with no segment to land in is drained through this
     view::segment_ptr_t rx_seg;  // pending RX segment, reused across recv timeouts
 
     // The owning-vs-span RECEIVE STRATEGY is decided per iteration off the slot's
@@ -182,8 +205,10 @@ void udp_transport_t::run() {
             if (!rx_seg) rx_seg = view::segment_ptr_t::adopt(backend_->alloc(alloc_cap));
             sockaddr_in from{};
             socklen_t flen = sizeof(from);
-            std::byte* const dst = rx_seg ? rx_seg->bytes.data() : scratch_buf();
-            const std::size_t cap = rx_seg ? rx_seg->bytes.size() : scratch_cap;
+            // No segment: the datagram is drained through one byte and dropped below — its
+            // size is never needed, because a refused segment is the verdict either way.
+            std::byte* const dst = rx_seg ? rx_seg->bytes.data() : drain;
+            const std::size_t cap = rx_seg ? rx_seg->bytes.size() : sizeof(drain);
             const ssize_t n =
                 ::recvfrom(fd_, dst, cap, 0, reinterpret_cast<sockaddr*>(&from), &flen);
             if (n <= 0) continue;  // timeout / EAGAIN / error → re-check stop_ (rx_seg kept)
@@ -214,15 +239,20 @@ void udp_transport_t::run() {
         // Span path: recvfrom into the borrowed scratch (no owning segment committed).
         sockaddr_in from{};
         socklen_t flen = sizeof(from);
-        std::byte* const buf = scratch_buf();
+        const std::span<std::byte> scratch_span = scratch.get();
+        std::byte* const buf = scratch_span.data();
         const ssize_t n =
-            ::recvfrom(fd_, buf, scratch_cap, 0, reinterpret_cast<sockaddr*>(&from), &flen);
+            ::recvfrom(fd_, buf, scratch_span.size(), 0, reinterpret_cast<sockaddr*>(&from), &flen);
         if (n <= 0) continue;  // timeout / EAGAIN / error → re-check stop_
         // Listener mode: the latest datagram's source IS the peer (single-peer
         // UDP-server shape) — replies/sends target it from now on.
         if (learn_peer_)
             peer_.store(pack_peer(from.sin_addr.s_addr, ntohs(from.sin_port)),
                         std::memory_order_relaxed);
+        if (buf == scratch.drain) {  // the scratch was refused: drained, dropped, counted
+            dropped_rx_.fetch_add(1, std::memory_order_relaxed);
+            continue;
+        }
         // The configured cap applies to the borrowed path too — the sink shape is the
         // node's business, the admitted datagram size is the peer's.
         if (static_cast<std::size_t>(n) > frame_cap) {

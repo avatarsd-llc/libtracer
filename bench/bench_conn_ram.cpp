@@ -95,6 +95,15 @@
 
 namespace {
 
+/** @brief A whole advertise frame in a `std::vector` — the test-side form of
+ *         `can::encode_advertise` (#1780 moved it into a caller's `bytes_t`); empty when
+ *         the advertise is unencodable. */
+[[maybe_unused]] std::vector<std::byte> advertise_vec(const tr::net::can::advertise_t& a) {
+    tr::mem::bytes_t b(tr::mem::heap_source());
+    if (!tr::net::can::encode_advertise(b, a)) return {};
+    return std::vector<std::byte>(b.begin(), b.end());
+}
+
 /** @brief Live usable-size balance while armed — the steady-state heap the process holds. */
 std::atomic<long long> g_live{0};
 /** @brief High-water mark of @ref g_live — catches TRANSIENT per-frame buffers. */
@@ -487,14 +496,14 @@ sample_t arm_can(std::size_t k, const char* ifname, bool with_group) {
         a.group_total_len = with_group ? 8 : 0;
         if (with_group) a.path = "/sensor/temp";
         a.target = tr::net::can::kCanBroadcastNode;
-        hellos.push_back(tr::net::can::encode_advertise(a));
+        hellos.push_back(advertise_vec(a));
         ctrl_ids.push_back(tr::net::can::encode_can_id({0, node, tr::net::kCanControlEndpoint}));
     }
 
     const long long pre = live();
     tr::net::transport_can_config_t cfg{};
     cfg.node = 1;
-    auto link = std::make_unique<tr::net::socketcan_link_t>(ifname, 0);
+    auto link = tr::mem::make_poly<tr::net::socketcan_link_t>(tr::mem::net_source(), ifname, 0);
     if (!link->ok()) {
         ::close(raw);
         return out;

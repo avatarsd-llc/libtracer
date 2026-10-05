@@ -67,11 +67,12 @@
  * paths that hold no `try_reserve` probe). `main` returns non-zero if any arm's expectation
  * is violated, so this mode is runnable as a CI gate rather than a bench somebody reads.
  *
- * The instrument is kept honest by a deliberately-UNGUARDED control arm (the retained
- * throwing `ws::encode_frame`), which the gate requires to escape: if the injector ever
- * breaks, stops arming, or the compiler elides the allocation, that arm reports `escaped=0`
- * and the gate fails ON THE GOOD BUILD. That is a permanently-live mutant, unlike a one-off
- * "revert a site and confirm it reddens" ritual nobody repeats.
+ * The instrument is kept honest by a deliberately-UNGUARDED control arm (a plain throwing
+ * `std::vector` copy of the payload; #1780 retired the throwing `ws::encode_frame`), which the gate
+ * requires to escape: if the injector ever breaks, stops arming, or the compiler elides the
+ * allocation, that arm reports `escaped=0` and the gate fails ON THE GOOD BUILD. That is a
+ * permanently-live mutant, unlike a one-off "revert a site and confirm it reddens" ritual nobody
+ * repeats.
  *
  * Single-threaded by construction: all three modes measure per-operation allocation shape,
  * and the global counter is process-wide.
@@ -865,13 +866,20 @@ int run_guard() {
     static const std::vector<std::byte> stale_compact = tr::net::encode_compact(0x4242, route);
 
     const arm_t arms[] = {
-        // The CONTROL arm: the retained THROWING server encoder, which nothing on a
-        // peer-driven path calls any more. It MUST escape — if it stops escaping, the
-        // injector is broken and every other verdict on this page is worthless.
-        {"ws_encode_frame_throwing_CONTROL", expect_t::UNGUARDED,
+        // The CONTROL arm: a plain THROWING allocation (a std::vector copy of the payload,
+        // the shape the retired `ws::encode_frame` had). It MUST escape — if it stops
+        // escaping, the injector is broken and every other verdict on this page is worthless.
+        {"throwing_vector_copy_CONTROL", expect_t::UNGUARDED,
          [] {
-             const std::vector<std::byte> f = ws::encode_frame(ws::opcode_t::BINARY, payload);
+             const std::vector<std::byte> f(payload.begin(), payload.end());
              asm volatile("" : : "r"(f.data()) : "memory");
+         }},
+        // The server egress encoder, failable since #1780.
+        {"ws_try_encode_frame", expect_t::GUARDED,
+         [] {
+             tr::mem::block_array_t<std::byte> out(tr::mem::heap_source());
+             (void)ws::try_encode_frame(out, ws::opcode_t::BINARY, payload);
+             asm volatile("" : : "r"(out.data()) : "memory");
          }},
         // A5 — the one WS egress encoder that survives as a nothrow twin.
         {"ws_try_encode_client_frame", expect_t::GUARDED,

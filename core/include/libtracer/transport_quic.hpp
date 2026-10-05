@@ -23,12 +23,12 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 #include <span>
-#include <string>
+#include <string_view>
 
 #include "libtracer/length_prefix_framer.hpp"
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer/tls_profile.hpp"
 #include "libtracer/transport.hpp"
 #include "libtracer/transport_factory.hpp"
@@ -44,9 +44,10 @@ namespace tr::net {
  * only way to reach a self-signed dev cert, which cannot chain to any CA).
  */
 struct quic_dial_tls_t {
-    std::string ca_file;             /**< @brief PEM CA bundle path to verify the server
+    std::string_view ca_file;        /**< @brief PEM CA bundle path to verify the server
                                                  certificate against (empty = the system
-                                                 trust store). */
+                                                 trust store). Borrowed for the
+                                                 constructor call only (#1780). */
     bool insecure_no_verify = false; /**< @brief DEV ONLY: skip server certificate
                                                  validation entirely (self-signed
                                                  dev certs — tools/gen-dev-cert.sh).
@@ -79,7 +80,7 @@ struct quic_config_t {
  * reassembles the prefix and exactly-`len` body bytes into ONE refcounted
  * segment drawn from the injected `mem_backend_t` (ADR-0042 §2), handed up
  * OWNING when a view receiver is installed. TX copies each frame ONCE into a
- * heap buffer that msquic owns until its SEND_COMPLETE event (the msquic
+ * buffer from `config.memory.io` that msquic owns until its SEND_COMPLETE event (the msquic
  * buffer-lifetime contract) — the only library-held buffer, and only for the
  * duration of the in-flight send.
  */
@@ -108,8 +109,8 @@ class quic_transport_t : public transport_t {
      *                  no-verify flag (see @ref quic_dial_tls_t).
      * @param config    The link's knobs (@ref quic_config_t): memory, receive cap.
      */
-    quic_transport_t(const std::string& peer_host, std::uint16_t peer_port,
-                     quic_dial_tls_t tls = {}, const quic_config_t& config = {});
+    quic_transport_t(std::string_view peer_host, std::uint16_t peer_port, quic_dial_tls_t tls = {},
+                     const quic_config_t& config = {});
 
     /**
      * @brief LISTEN mode: serve QUIC on @p bind_port with the PEM certificate
@@ -127,8 +128,8 @@ class quic_transport_t : public transport_t {
      * @param key_file  PEM private-key path matching @p cert_file.
      * @param config    The link's knobs (@ref quic_config_t) — see the DIAL constructor.
      */
-    quic_transport_t(std::uint16_t bind_port, const std::string& cert_file,
-                     const std::string& key_file, const quic_config_t& config = {});
+    quic_transport_t(std::uint16_t bind_port, std::string_view cert_file, std::string_view key_file,
+                     const quic_config_t& config = {});
 
     /** @brief Shut the connection down, drain msquic callbacks, and release the
      *         msquic API (listener → stream → connection → registration order). */
@@ -203,7 +204,9 @@ class quic_transport_t : public transport_t {
 
    private:
     struct impl_t;  // all msquic types live in the .cpp (no msquic in public headers)
-    std::unique_ptr<impl_t> impl_;
+    /** @brief The endpoint, drawn from `config.memory.io` (default the net sub-pool); empty
+     *         when that store refused it, which leaves the link inert (#1780). */
+    mem::poly_ptr_t<impl_t> impl_;
 };
 
 /**

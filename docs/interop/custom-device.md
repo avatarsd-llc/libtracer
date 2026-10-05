@@ -156,7 +156,7 @@ the SPEC carries no `type` and no `role`
 ([RFC-0014 — creator endpoint: connection lifecycle and link liveness](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0014-creator-endpoint-connection-lifecycle-and-link-liveness.md)).
 The `config` member `kind` selects which transport factory builds the link
 (`core/src/transport_vertex.cpp:if (const auto v = cfg.name("kind"))`, factories registered through
-`register_transport_type` at `core/src/transport_vertex.cpp:transport_vertex_t::register_transport_type(std::string kind, transport_factory_t factory)`, catalogued at `core/src/transport_vertex.cpp:transport_types_.insert_or_assign(std::move(kind),`) and cross-checks the module's declaration. The
+`register_transport_type` at `core/src/transport_vertex.cpp:transport_vertex_t::register_transport_type(std::string_view kind, transport_factory_t factory,`, catalogued at `core/src/transport_vertex.cpp:transport_types_.try_emplace(std::move(key), kind_entry_t{factory, traits})`) and cross-checks the module's declaration. The
 created connection is mounted and routed at **`/net/<module>/<name>`**, where `module`
 is **declared by the application** through `register_module` — modules are declared-only
 (ADR-0073 §4); an undeclared `(kind, role)` pair fails creation with `SCHEMA_NOT_FOUND`

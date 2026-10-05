@@ -209,9 +209,9 @@ struct dead_sock_t final : tr::net::transport_t {
 void declare_fake_module(transport_vertex_t& net) {
     net.register_transport_type(
         "fake",
-        [](const tr::net::conn_settings_t&, const tr::wire::tlv_node_t*)
-            -> tr::graph::result_t<std::unique_ptr<tr::net::transport_t>> {
-            return std::make_unique<dead_sock_t>();
+        [](const tr::net::conn_settings_t&, const tr::wire::tlv_node_t*,
+           tr::mem::block_source_t& src) -> tr::graph::result_t<tr::net::transport_ptr_t> {
+            return tr::net::make_transport<dead_sock_t>(src);
         },
         tr::net::transport_kind_traits_t{.self_heal_dial = false, .delivers_ropes = false});
     (void)net.register_module("fake-client", "fake", conn_role_t::DIAL);
@@ -336,10 +336,10 @@ tr::graph::result_t<void> declare_catalog_module(transport_vertex_t& net,
                                                  tr::net::conn_catalog_t catalog) {
     net.register_transport_type(
         "cat",
-        [](const tr::net::conn_settings_t&, const tr::wire::tlv_node_t*)
-            -> tr::graph::result_t<std::unique_ptr<tr::net::transport_t>> {
+        [](const tr::net::conn_settings_t&, const tr::wire::tlv_node_t*,
+           tr::mem::block_source_t& src) -> tr::graph::result_t<tr::net::transport_ptr_t> {
             ++g_catalog_factory_runs;
-            return std::make_unique<dead_sock_t>();
+            return tr::net::make_transport<dead_sock_t>(src);
         },
         tr::net::transport_kind_traits_t{.self_heal_dial = false, .delivers_ropes = false});
     return net.register_module("cat-client", "cat", conn_role_t::DIAL, catalog);

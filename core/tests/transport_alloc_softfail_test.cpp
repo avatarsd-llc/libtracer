@@ -34,7 +34,10 @@
  *   - udp `send(iov)`;
  *   - can `can_transport_t::send` — its advertise (A1 — the allocation is DELETED, not
  *     guarded, so the case is an allocation BUDGET on the transport, not a drop leg);
- *   - the oversized / non-final control frame fails the connection instead of being echoed.
+ *   - the oversized / non-final control frame fails the connection instead of being echoed;
+ *   - #1780: the transports' own growth sites on the allocation seam — the ws server's
+ *     session and handshake store, a factory's link object, the CAN reassembler and the CAN
+ *     receive tables — each refused at an injected `block_source_t`.
  *
  * ## What this harness deliberately does NOT gate: three sites, named
  *
@@ -75,6 +78,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -91,8 +95,10 @@
 #include <thread>
 #include <vector>
 
+#include "libtracer/builtin_transports.hpp"
 #include "libtracer/can.hpp"
 #include "libtracer/can_framing.hpp"
+#include "libtracer/can_reassembly.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/graph.hpp"
 #include "libtracer/iov_table.hpp"
@@ -110,6 +116,15 @@
 // --- the fail-the-k-th-allocation injector (this TU owns the override) -------
 
 namespace {
+
+/** @brief A whole advertise frame in a `std::vector` — the test-side form of
+ *         `can::encode_advertise` (#1780 moved it into a caller's `bytes_t`); empty when
+ *         the advertise is unencodable. */
+[[maybe_unused]] std::vector<std::byte> advertise_vec(const tr::net::can::advertise_t& a) {
+    tr::mem::bytes_t b(tr::mem::heap_source());
+    if (!tr::net::can::encode_advertise(b, a)) return {};
+    return std::vector<std::byte>(b.begin(), b.end());
+}
 
 thread_local bool t_armed = false;      /**< @brief Count/fail only on the arming thread. */
 thread_local std::size_t t_allocs = 0;  /**< @brief Allocations seen since arming. */
@@ -438,8 +453,7 @@ void test_ws_server_send_span_is_allocation_free() {
     check(!escaped, "send(span) with the FIRST allocation refused does not throw");
     check(allocs == 0, "send(span) performs ZERO heap allocations");
 
-    const auto got =
-        read_until(cfd, [](const std::vector<std::byte>& b) { return b.size() >= 10; }, 2s);
+    auto got = read_until(cfd, [](const std::vector<std::byte>& b) { return b.size() >= 10; }, 2s);
     const auto dec = ws::decode_frame(got);
     check(dec.has_value() && dec->first.payload.size() == payload.size() &&
               std::memcmp(dec->first.payload.data(), payload.data(), payload.size()) == 0,
@@ -487,7 +501,7 @@ void test_ws_server_send_iov_overflow_drops() {
 
     // ... and the node is still live: the next send, unrefused, arrives whole.
     send_wide();
-    const auto got = read_until(
+    auto got = read_until(
         cfd, [](const std::vector<std::byte>& b) { return b.size() >= kWideFrameBytes; }, 2s);
     const auto dec = ws::decode_frame(got);
     check(dec.has_value() && dec->first.payload.size() == kWideSpans,
@@ -539,8 +553,7 @@ void test_ws_peer_endpoint_send_iov_overflow_drops() {
     });
     check(!span_escaped, "directed send(span) with the FIRST allocation refused does not throw");
     check(span_allocs == 0, "directed send(span) performs ZERO heap allocations");
-    const auto one =
-        read_until(cfd, [](const std::vector<std::byte>& b) { return b.size() >= 10; }, 2s);
+    auto one = read_until(cfd, [](const std::vector<std::byte>& b) { return b.size() >= 10; }, 2s);
     const auto one_dec = ws::decode_frame(one);
     check(one_dec.has_value() && one_dec->first.payload.size() == payload.size() &&
               std::memcmp(one_dec->first.payload.data(), payload.data(), payload.size()) == 0,
@@ -563,7 +576,7 @@ void test_ws_peer_endpoint_send_iov_overflow_drops() {
     check(nothing.empty(), "every refused directed frame was DROPPED");
 
     send_wide();
-    const auto got = read_until(
+    auto got = read_until(
         cfd, [](const std::vector<std::byte>& b) { return b.size() >= kWideFrameBytes; }, 2s);
     const auto dec = ws::decode_frame(got);
     check(dec.has_value() && dec->first.payload.size() == kWideSpans,
@@ -1158,6 +1171,11 @@ class recording_link_t final : public tr::net::can_link_t {
         const std::lock_guard lock(m_);
         return frames_.size();
     }
+    /** @brief A copy of every recorded frame, in order (to replay into a receiver). */
+    [[nodiscard]] std::vector<tr::net::can_frame_data_t> frames() const {
+        const std::lock_guard lock(m_);
+        return frames_;
+    }
     /** @brief The concatenated data bytes of every recorded frame, in order. */
     [[nodiscard]] std::vector<std::byte> stream() const {
         const std::lock_guard lock(m_);
@@ -1190,7 +1208,7 @@ void test_can_advertise_header_is_allocation_free() {
     adv.target = 42;
     adv.path = "node/sensor/temperature";
 
-    const std::vector<std::byte> whole = can::encode_advertise(adv);  // unarmed reference
+    const std::vector<std::byte> whole = advertise_vec(adv);  // unarmed reference
     check(whole.size() == can::kAdvertiseHeaderSize + adv.path.size(), "reference frame encoded");
 
     std::array<std::byte, can::kAdvertiseHeaderSize> header{};
@@ -1212,13 +1230,14 @@ void test_can_over_long_path_refused() {
     std::printf("can advertise — an over-long path is refused, not silently truncated:\n");
     can::advertise_t adv;
     adv.can_id = 0x7;
-    adv.path = std::string(can::kAdvertiseMaxPathLen + 1, 'x');
+    const std::string long_path(can::kAdvertiseMaxPathLen + 1, 'x');  // adv.path views it
+    adv.path = long_path;
     std::array<std::byte, can::kAdvertiseHeaderSize> header{};
     check(!can::encode_advertise_header(header, adv, adv.path),
           "encode_advertise_header refuses it");
-    check(can::encode_advertise(adv).empty(), "encode_advertise returns no bytes");
+    check(advertise_vec(adv).empty(), "encode_advertise returns no bytes");
 
-    auto link = std::make_unique<recording_link_t>();
+    auto link = tr::mem::make_poly<recording_link_t>(tr::mem::net_source());
     recording_link_t* raw = link.get();
     tr::net::transport_can_config_t cfg;
     cfg.node = 3;
@@ -1231,7 +1250,7 @@ void test_can_over_long_path_refused() {
  *         proving the two-source stack walk did not change the wire. */
 void test_can_emit_advertise_wire_identical() {
     std::printf("can emit_advertise — the sliced stack walk matches the contiguous encoder:\n");
-    auto link = std::make_unique<recording_link_t>();
+    auto link = tr::mem::make_poly<recording_link_t>(tr::mem::net_source());
     recording_link_t* raw = link.get();
     tr::net::transport_can_config_t cfg;
     cfg.node = 5;
@@ -1244,7 +1263,7 @@ void test_can_emit_advertise_wire_identical() {
     hello.group_total_len = 0;
     hello.slice_count = 0;
     hello.path = cfg.path;
-    const std::vector<std::byte> expect = can::encode_advertise(hello);
+    const std::vector<std::byte> expect = advertise_vec(hello);
     check(raw->stream() == expect, "the emitted hello byte stream equals encode_advertise(hello)");
 }
 
@@ -1266,7 +1285,7 @@ void test_can_send_advertise_allocates_nothing() {
     tr::net::transport_can_config_t cfg;
     cfg.node = 9;
     cfg.path = "node9/sensor/temperature";  // 24 chars: past SSO, so a copy WOULD allocate
-    auto link = std::make_unique<fixed_link_t>();
+    auto link = tr::mem::make_poly<fixed_link_t>(tr::mem::net_source());
     fixed_link_t* raw = link.get();
     tr::net::can_transport_t can_tx(std::move(link), cfg);
 
@@ -1522,11 +1541,12 @@ void test_ws_ping_at_the_bound_is_answered() {
     for (std::size_t i = 0; i < payload.size(); ++i) payload[i] = static_cast<std::byte>(i);
     write_bytes(cfd, masked_client_frame(ws::opcode_t::PING, payload));
 
-    const auto got = read_until(
+    auto got = read_until(
         cfd, [](const std::vector<std::byte>& b) { return b.size() >= ws::kMaxControlPayload + 2; },
         2s);
     const auto dec = ws::decode_frame(got);
-    check(dec.has_value() && dec->first.op == ws::opcode_t::PONG && dec->first.payload == payload,
+    check(dec.has_value() && dec->first.op == ws::opcode_t::PONG &&
+              std::ranges::equal(dec->first.payload, payload),
           "the PONG echoes the 125-byte payload exactly");
     ::close(cfd);
 }
@@ -1544,7 +1564,7 @@ void test_ws_oversized_ping_fails_the_connection() {
     write_bytes(cfd, masked_client_frame(ws::opcode_t::PING, payload));
 
     bool closed = false;
-    const auto got =
+    auto got =
         read_until(cfd, [](const std::vector<std::byte>& b) { return !b.empty(); }, 2s, &closed);
     check(got.empty(), "no PONG (and so no 4 KiB reflection) came back");
     check(closed, "the server failed the connection");
@@ -1563,7 +1583,7 @@ void test_ws_fragmented_control_fails_the_connection() {
     write_bytes(cfd, masked_client_frame(ws::opcode_t::PING, payload, /*fin=*/false));
 
     bool closed = false;
-    const auto got =
+    auto got =
         read_until(cfd, [](const std::vector<std::byte>& b) { return !b.empty(); }, 2s, &closed);
     check(got.empty() && closed, "no PONG, and the connection was failed");
     ::close(cfd);
@@ -1594,7 +1614,7 @@ void drive_ws_reserved_opcode(std::uint8_t op, const char* label) {
     write_bytes(cfd, masked_client_frame(static_cast<ws::opcode_t>(op), payload));
 
     bool closed = false;
-    const auto got =
+    auto got =
         read_until(cfd, [](const std::vector<std::byte>& b) { return !b.empty(); }, 2s, &closed);
     check(got.empty(), "the server wrote nothing back");
     check(closed, "the server FAILED the connection");
@@ -1612,6 +1632,27 @@ void test_ws_reserved_control_opcode_fails_the_connection() {
     drive_ws_reserved_opcode(0xB, "0xB, legal-shaped (reserved control)");
 }
 
+/** @brief A whole server frame in a `std::vector` — the test-side reference form of
+ *         `ws::try_encode_frame` (#1780 removed the library's vector-returning encoder). */
+[[maybe_unused]] std::vector<std::byte> server_frame_ref(tr::net::ws::opcode_t op,
+                                                         std::span<const std::byte> payload) {
+    std::array<std::byte, tr::net::ws::kMaxServerFrameHeader> header{};
+    const std::size_t hlen = tr::net::ws::encode_frame_header(header, op, payload.size());
+    std::vector<std::byte> out(header.begin(), header.begin() + static_cast<std::ptrdiff_t>(hlen));
+    out.insert(out.end(), payload.begin(), payload.end());
+    return out;
+}
+
+/** @brief A whole masked client frame in a `std::vector` — the test-side reference form of
+ *         `ws::try_encode_client_frame`. */
+[[maybe_unused]] std::vector<std::byte> client_frame_ref(tr::net::ws::opcode_t op,
+                                                         std::span<const std::byte> payload,
+                                                         std::uint32_t mask_key) {
+    std::vector<std::byte> out(tr::net::ws::detail::client_frame_bytes(payload.size()));
+    tr::net::ws::detail::put_client_frame(out, op, payload, mask_key, /*fin=*/true);
+    return out;
+}
+
 /** @brief The stack control encoders emit exactly what the contiguous encoders do — the split
  *         changed where the bytes are built, never what they are. */
 void test_control_encoders_are_byte_identical() {
@@ -1621,17 +1662,21 @@ void test_control_encoders_are_byte_identical() {
 
     std::array<std::byte, ws::kMaxServerControlFrame> srv{};
     const std::size_t slen = ws::encode_server_control(srv, ws::opcode_t::PONG, payload);
-    const std::vector<std::byte> srv_ref = ws::encode_frame(ws::opcode_t::PONG, payload);
+    const std::vector<std::byte> srv_ref = server_frame_ref(ws::opcode_t::PONG, payload);
     check(slen == srv_ref.size() && std::memcmp(srv.data(), srv_ref.data(), slen) == 0,
-          "encode_server_control == encode_frame");
+          "encode_server_control == the contiguous server frame");
+    tr::mem::bytes_t whole(tr::mem::heap_source());
+    check(ws::try_encode_frame(whole, ws::opcode_t::PONG, payload) && whole.size() == slen &&
+              std::memcmp(whole.data(), srv_ref.data(), slen) == 0,
+          "try_encode_frame == the contiguous server frame");
 
     std::array<std::byte, ws::kMaxClientControlFrame> cli{};
     const std::size_t clen =
         ws::encode_client_control(cli, ws::opcode_t::PONG, payload, 0xDEADBEEFu);
     const std::vector<std::byte> cli_ref =
-        ws::encode_client_frame(ws::opcode_t::PONG, payload, 0xDEADBEEFu);
+        client_frame_ref(ws::opcode_t::PONG, payload, 0xDEADBEEFu);
     check(clen == cli_ref.size() && std::memcmp(cli.data(), cli_ref.data(), clen) == 0,
-          "encode_client_control == encode_client_frame");
+          "encode_client_control == the contiguous client frame");
 
     // Over the bound both refuse rather than write past the buffer.
     const std::vector<std::byte> too_big(ws::kMaxControlPayload + 1, std::byte{0});
@@ -1645,15 +1690,14 @@ void test_control_encoders_are_byte_identical() {
 void test_try_encode_client_frame() {
     std::printf("ws try_encode_client_frame — same bytes, soft-fails on exhaustion:\n");
     const std::vector<std::byte> payload(300, std::byte{0x9C});  // the 16-bit length encoding
-    const std::vector<std::byte> ref =
-        ws::encode_client_frame(ws::opcode_t::BINARY, payload, 0x01020304u);
+    const std::vector<std::byte> ref = client_frame_ref(ws::opcode_t::BINARY, payload, 0x01020304u);
 
     tr::mem::block_array_t<std::byte> out(tr::mem::heap_source());
     const std::size_t n =
         ws::try_encode_client_frame(out, ws::opcode_t::BINARY, payload, 0x01020304u);
     check(n == ref.size(), "the nothrow twin succeeds on a healthy heap");
     check(n == ref.size() && std::memcmp(out.data(), ref.data(), n) == 0,
-          "and produces exactly the throwing form's bytes");
+          "and produces exactly the contiguous reference's bytes");
 
     // A cold encode must have exactly ONE refusable allocation. The previous
     // `std::vector` + `tr::detail::try_reserve` form had two — a nothrow probe and the
@@ -1682,6 +1726,187 @@ void test_try_encode_client_frame() {
 }
 
 }  // namespace
+
+// ---------------------------------------------------------------------------
+// #1780 — the transports' OWN growth sites, now on the allocation seam
+//
+// Everything above injects at the process heap. Since #1780 the transports draw their
+// sessions, handshake buffers, peer tables and reassembly structure from a `block_source_t`
+// (the link's `memory.state`, or the CAN config's `reasm_src`), so the refusal is injected
+// THERE: a source that serves its first `allow` blocks and refuses every later one. Each
+// case asserts the same three things the heap cases do — the refusal is COUNTED, the node
+// stays LIVE, and nothing half-built is left behind.
+// ---------------------------------------------------------------------------
+
+/**
+ * @brief A thread-safe source over the process heap that serves its first @ref allow blocks
+ *        and refuses every later one, counting the refusals.
+ *
+ * Thread-safe because the sites under test run on the transports' own poll and receive
+ * threads, which the `thread_local` heap injector above cannot reach.
+ */
+class budget_source_t final : public tr::mem::block_source_t {
+   public:
+    /** @brief Serve @p allow blocks, then refuse. */
+    explicit budget_source_t(std::size_t allow) noexcept : block_source_t("budget"), left_(allow) {}
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        std::size_t n = left_.load(std::memory_order_relaxed);
+        while (n != 0 && !left_.compare_exchange_weak(n, n - 1, std::memory_order_relaxed)) {
+        }
+        if (n == 0) {
+            refused_.fetch_add(1, std::memory_order_relaxed);
+            return nullptr;
+        }
+        return tr::mem::heap_source().try_alloc(bytes, align);
+    }
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        tr::mem::heap_source().release(p, bytes, align);
+    }
+    /** @brief Serve every later request (the refusal is over). */
+    void lift() noexcept { left_.store(SIZE_MAX, std::memory_order_relaxed); }
+    /** @brief How many requests were refused. */
+    [[nodiscard]] std::size_t refused() const noexcept {
+        return refused_.load(std::memory_order_relaxed);
+    }
+
+   private:
+    std::atomic<std::size_t> left_;
+    std::atomic<std::size_t> refused_{0};
+};
+
+/**
+ * @brief The ws server's per-peer SESSION and its handshake buffer are drawn from the link's
+ *        `memory.state`, and a refusal of either closes that one peer and never the server.
+ *
+ * Swept over every budget from 0 upward, because which block the k-th one is (session,
+ * slot table, handshake buffer, rx buffer) is the implementation's business: at every k the
+ * peer is either served or cleanly closed, and once the budget is lifted the SAME server
+ * completes a handshake. The sweep stops at the first k that serves the handshake whole.
+ */
+void test_ws_server_session_store_refusal_closes_the_peer() {
+    std::printf("ws server session + handshake store — a refusal sheds the peer (#1780):\n");
+    std::size_t refused_total = 0;
+    std::size_t k = 0;
+    for (; k < 16; ++k) {
+        budget_source_t budget(k);
+        tr::net::ws_server_config_t cfg;
+        cfg.memory.state = &budget;
+        tr::net::ws_server_transport_t server(0, cfg);
+        if (!server.ok()) {
+            check(false, "the ws server bound");
+            return;
+        }
+        const int cfd = tcp_connect(server.local_port());
+        const bool served = cfd >= 0 && raw_handshake(cfd);
+        if (cfd >= 0) ::close(cfd);
+        refused_total += budget.refused();
+        if (served) break;
+        budget.lift();  // the refusal is over: the SAME server serves the next peer
+        const int again = tcp_connect(server.local_port());
+        const bool recovered = again >= 0 && raw_handshake(again);
+        if (again >= 0) ::close(again);
+        if (!recovered) {
+            check(false, "after a refused peer the server serves the next one");
+            return;
+        }
+    }
+    check(k > 0 && k < 16, "a budget of zero refuses the peer, and a finite one serves it");
+    check(refused_total >= k, "every refused budget was a COUNTED refusal at the seam");
+    check(true, "no budget aborted the node, and each refused server served the next peer");
+}
+
+/**
+ * @brief A factory whose source refuses the link object answers BACKPRESSURE and dials
+ *        nothing — the object is the first thing it draws (#1780).
+ */
+void test_factory_refusal_is_backpressure() {
+    std::printf("make_checked — a refused link object is BACKPRESSURE (#1780):\n");
+    budget_source_t none(0);
+    const auto t =
+        tr::net::make_checked<tr::net::tcp_transport_t>(none, "127.0.0.1", std::uint16_t{9});
+    check(!t.has_value() && t.error() == tr::graph::status_t::BACKPRESSURE,
+          "a refused tcp link object => BACKPRESSURE, never a throw or an abort");
+    check(none.refused() == 1, "and the refusal was the object's one block");
+}
+
+/**
+ * @brief The CAN reassembler's group and slice tables are failable: a refused entry is
+ *        `false` with nothing half-recorded, and the same reassembler serves once the store
+ *        has room again (#1780).
+ */
+void test_can_reassembly_refusal_is_reported() {
+    std::printf("can reassembly — a refused group or slice is reported, not thrown (#1780):\n");
+    budget_source_t budget(0);
+    tr::net::can_reassembly_t reasm(budget);
+    const tr::net::reassembly_key_t key{{}, 7};
+    const std::array<std::byte, 8> bytes{};
+    const auto slice = tr::view::over_bytes(std::span<const std::byte>(bytes));
+    check(slice.has_value(), "the slice view was built (outside the seam under test)");
+    if (!slice) return;
+    check(!reasm.add_slice(key, 0, *slice), "a refused group => add_slice reports false");
+    check(!reasm.set_expected_count(key, 2), "a refused group => set_expected_count false");
+    check(!reasm.contains(key), "and nothing half-recorded was left behind");
+    check(budget.refused() >= 2, "both refusals were at the injected seam");
+    budget.lift();
+    check(reasm.add_slice(key, 0, *slice) && reasm.set_expected_count(key, 1),
+          "once the store has room the SAME reassembler takes the slice");
+    check(reasm.contains(key), "and tracks the group");
+}
+
+/** @brief A `can_link_t` whose receive callback the test drives synchronously. */
+class inject_link_t final : public tr::net::can_link_t {
+   public:
+    void write_raw(const tr::net::can_frame_data_t&) override {}
+    void on_receive(rx_fn_t rx) override { rx_ = std::move(rx); }
+    /** @brief Nothing to spawn — @ref inject delivers on the caller's thread. */
+    void start() override {}
+    /** @brief Deliver @p f as if it had arrived on the bus. */
+    void inject(const tr::net::can_frame_data_t& f) { rx_(f); }
+
+   private:
+    rx_fn_t rx_;
+};
+
+/**
+ * @brief The CAN transport's receive tables (per-node state, learned bindings, peer entries,
+ *        reassembly) draw from `reasm_src`; a refusal drops the inbound frame COUNTED and the
+ *        node keeps sending (#1780).
+ */
+void test_can_receive_tables_refusal_is_counted() {
+    std::printf("can receive tables — a refused entry is a counted drop (#1780):\n");
+    tr::net::transport_can_config_t tx_cfg;
+    tx_cfg.node = 3;
+    tx_cfg.path = "node3/out";
+    auto rec = tr::mem::make_poly<recording_link_t>(tr::mem::net_source());
+    recording_link_t* const rec_raw = rec.get();
+    tr::net::can_transport_t sender(std::move(rec), tx_cfg);
+    const std::vector<std::byte> payload(24, std::byte{0x3C});  // 3 CLASSIC windows
+    sender.send(payload);
+    const std::vector<tr::net::can_frame_data_t> wire = rec_raw->frames();
+    check(!wire.empty(), "the sender put its hello and the payload on the bus");
+
+    budget_source_t budget(0);
+    tr::net::transport_can_config_t rx_cfg;
+    rx_cfg.node = 4;
+    rx_cfg.path = "node4/in";
+    rx_cfg.reasm_src = &budget;
+    auto inj = tr::mem::make_poly<inject_link_t>(tr::mem::net_source());
+    inject_link_t* const inj_raw = inj.get();
+    tr::net::can_transport_t receiver(std::move(inj), rx_cfg);
+    std::size_t delivered = 0;
+    auto sink = [&delivered](std::span<const std::byte>) { ++delivered; };
+    receiver.set_receiver(sink);
+
+    for (const auto& f : wire) inj_raw->inject(f);
+    check(delivered == 0, "with every table entry refused, nothing was delivered");
+    check(receiver.dropped_rx() > 0, "and the refused frames were COUNTED in dropped_rx");
+    check(budget.refused() > 0, "the refusals were at the injected reasm_src seam");
+
+    budget.lift();
+    sender.send(payload);
+    for (const auto& f : rec_raw->frames()) inj_raw->inject(f);
+    check(delivered >= 1, "once the store has room the SAME receiver delivers the payload");
+}
 
 int main() {
     std::printf("#848 — transport egress framing soft-fail\n");
@@ -1713,5 +1938,9 @@ int main() {
     test_ws_reserved_control_opcode_fails_the_connection();
     test_control_encoders_are_byte_identical();
     test_try_encode_client_frame();
+    test_ws_server_session_store_refusal_closes_the_peer();
+    test_factory_refusal_is_backpressure();
+    test_can_reassembly_refusal_is_reported();
+    test_can_receive_tables_refusal_is_counted();
     return tr::testing::summary("transport_alloc_softfail");
 }

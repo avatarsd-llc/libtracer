@@ -350,7 +350,7 @@ SPEC's config carries the universal keys `kind`, `addr`, `port`, `max_frame`,
 `kind` is read at `core/src/transport_vertex.cpp:cfg.name("kind")` and the RFC-0014 §4 self-heal pair at `core/src/transport_vertex.cpp:if (const auto v = cfg.u32("backoff")) s.backoff_ms = *v`). There is **no `type` pair
 and no `role` key**: the module segment in the path fixes both the transport and the role, and
 `kind` — when spelled at all — only cross-checks the module's own declaration. Extra transport kinds join the runtime catalog through
-`register_transport_type` (`core/src/transport_vertex.cpp:transport_vertex_t::register_transport_type(std::string kind, transport_factory_t factory)`) — that is how the QUIC module
+`register_transport_type` (`core/src/transport_vertex.cpp:transport_vertex_t::register_transport_type(std::string_view kind, transport_factory_t factory,`) — that is how the QUIC module
 extends a node without this file ever learning about it.
 
 The superseded global spelling `write /net:children[] += SPEC{type, name, config}` was **retired**
@@ -396,7 +396,7 @@ no liveness, and answers `BACKPRESSURE` (`core/src/transport_vertex.cpp:transpor
 `bool` left a connection reporting `UP` that no `dst` resolved, no inbound frame reached, and
 `remove_child` did not know about — a ghost a peer could mint by creating connections until the
 registry slab exhausted. A `provide_link` staging is consumed only once the wiring has succeeded
-(`core/src/transport_vertex.cpp:if (pl != pending_links_.end()) pending_links_.erase(pl)`), so a retry after the pressure clears still finds its link.
+(`core/src/transport_vertex.cpp:(void)pending_links_.erase(staged_key)`), so a retry after the pressure clears still finds its link.
 
 **Liveness is the connection vertex's value.** `link_state_t` is six states —
 `DORMANT`, `DIALING`, `RECONNECTING`, `UP`, `LISTENING`, `BIND_FAILED`

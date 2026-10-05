@@ -121,14 +121,14 @@ int main() {
     std::printf("a kind the core does not contain:\n");
     net.register_transport_type(
         "demo",
-        [](const tr::net::conn_settings_t& settings, const tr::wire::tlv_node_t* raw_config)
-            -> tr::graph::result_t<std::unique_ptr<tr::net::transport_t>> {
+        [](const tr::net::conn_settings_t& settings, const tr::wire::tlv_node_t* raw_config,
+           tr::mem::block_source_t& src) -> tr::graph::result_t<tr::net::transport_ptr_t> {
             // A real factory parses its kind-PRIVATE keys out of `raw_config` here (quic's
             // `tls` profile name is the shipped example); the universal keys are already
             // parsed into `settings`. This one needs neither, and says so.
             (void)settings;
             (void)raw_config;
-            return std::unique_ptr<tr::net::transport_t>(std::make_unique<demo_link_t>());
+            return tr::net::make_transport<demo_link_t>(src);
         });
     check(ok, net.register_module("demo-client", "demo", conn_role_t::DIAL).has_value(),
           "register_module accepts a kind that exists only in this file");

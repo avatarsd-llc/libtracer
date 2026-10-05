@@ -16,17 +16,17 @@
  *  - **sized-release fidelity**: `std::pmr`'s sized+aligned `deallocate` round-trips the
  *    seam's header-free `release` contract, so a `pool_source_t` under the adapter
  *    RECYCLES rather than growing monotonically;
- *  - **the family-5 consumer**: `tr::net::can_reassembly_t`'s two `std::pmr::map`s hold a
- *    refcounted `tr::view::view_t`, which fails `block_array_t`'s trivially-copyable /
- *    trivially-destructible assertions and therefore CANNOT be retyped — this adapter is
- *    what puts that store on a bounded slab.
+ *  - **the former family-5 consumer**: `tr::net::can_reassembly_t` held its refcounted
+ *    slices in two `std::pmr::map`s and reached a bounded slab through this adapter. Since
+ *    #1780 it draws from a `block_source_t` directly (`sorted_map_t`), so section 5 now
+ *    pins that it lives on the injected slab with NO adapter in between.
  *
  * Plus the boundary itself, stated as a test rather than only as a doc comment: the
  * adapter throws where the seam would have returned `nullptr`.
  *
  * THE ABLATION (run by hand; see core/tests/CMakeLists.txt for the exact command):
  * `-DLIBTRACER_ABLATE_PMR_ADAPTER` hands the containers `std::pmr::new_delete_resource()`
- * instead of the adapter, and sections 2/3/4/5 go RED — a guard that cannot redden is not
+ * instead of the adapter, and sections 2/3/4 go RED — a guard that cannot redden is not
  * a guard.
  */
 
@@ -241,19 +241,18 @@ int main() {
         check(pool.classes_used() <= classes.size(), "the class table stayed within its span");
     }
 
-    // --- 5. THE FAMILY-5 CONSUMER, unmodified: can_reassembly_t over the adapter.
-    // Its two std::pmr::map's hold a refcounted view_t, so block_array_t's static asserts
-    // reject them and the store cannot be retyped — that is precisely why an adapter is
-    // owed. pool_source_t has NO upstream, so if the drive below completes at all, every
-    // byte of the reassembly structure came from this slab and none escaped to the process
-    // heap. (The slice PAYLOADS are heap segments built by the fixture; they are the
-    // transport's bytes, not the store's, and mem_backend_t is need C — deliberately out
-    // of ADR-0079's scope.) ---
+    // --- 5. THE FORMER FAMILY-5 CONSUMER: can_reassembly_t straight over the source.
+    // It used to hold its refcounted view_t slices in two std::pmr::maps and needed this
+    // adapter to reach a slab; since #1780 its maps are sorted_map_t over the source itself.
+    // pool_source_t has NO upstream, so if the drive below completes at all, every byte of
+    // the reassembly structure came from this slab and none escaped to the process heap.
+    // (The slice PAYLOADS are heap segments built by the fixture; they are the transport's
+    // bytes, not the store's, and mem_backend_t is need C — deliberately out of ADR-0079's
+    // scope.) ---
     {
         std::array<std::byte, 64 * 1024> slab{};
         std::array<tr::mem::size_class_t, 8> classes{};
         tr::mem::pool_source_t<> pool{slab, classes};
-        tr::mem::source_resource_t adapter{pool};
 
         const std::vector<std::byte> payload = ramp(20);
         const tr::view::view_t pv = view_over(payload);
@@ -266,18 +265,18 @@ int main() {
             return k;
         };
 
-        tr::net::can_reassembly_t reasm{under_test(adapter), /*max_groups=*/2};
+        tr::net::can_reassembly_t reasm{pool, /*max_groups=*/2};
         const std::size_t n =
             tr::net::can::can_frame_count(pv, tr::net::can::can_frame_mode_t::CLASSIC);
         check(n == 3, "a 20-byte payload splits into 3 classic CAN data fields");
 
         // Out-of-order arrival, then the advertise's slice count, then assembly.
         reasm.set_now(1000);
-        reasm.add_slice(key_ts(1), 2, slice(2));
-        reasm.add_slice(key_ts(1), 0, slice(0));
+        (void)reasm.add_slice(key_ts(1), 2, slice(2));
+        (void)reasm.add_slice(key_ts(1), 0, slice(0));
         check(reasm.has_interior_gap(key_ts(1)), "the missing interior slice is visible");
-        reasm.add_slice(key_ts(1), 1, slice(1));
-        reasm.set_expected_count(key_ts(1), static_cast<std::uint32_t>(n));
+        (void)reasm.add_slice(key_ts(1), 1, slice(1));
+        (void)reasm.set_expected_count(key_ts(1), static_cast<std::uint32_t>(n));
         check(reasm.is_complete(key_ts(1)), "the group completes once every index is present");
         const auto assembled = reasm.assemble(key_ts(1));
         check(assembled.has_value(), "a complete group assembles");
@@ -288,9 +287,9 @@ int main() {
 
         // The bound still bounds: a third live group evicts the oldest and ticks the
         // counter. The store's policy is untouched by where its bytes come from.
-        reasm.add_slice(key_ts(2), 0, slice(0));
+        (void)reasm.add_slice(key_ts(2), 0, slice(0));
         check(reasm.dropped_groups() == 0, "no eviction while within the group bound");
-        reasm.add_slice(key_ts(3), 0, slice(0));
+        (void)reasm.add_slice(key_ts(3), 0, slice(0));
         check(reasm.dropped_groups() == 1, "a 3rd group evicts one — a bounded drop, not an OOM");
         check(!reasm.contains(key_ts(1)), "the oldest group was the one evicted");
 
@@ -300,7 +299,7 @@ int main() {
         check(reasm.sweep_stale(100) == 2, "both idle groups age out");
         const std::size_t plateau = pool.used();
         for (int i = 0; i < 16; ++i) {
-            reasm.add_slice(key_ts(100 + static_cast<std::uint64_t>(i)), 0, slice(0));
+            (void)reasm.add_slice(key_ts(100 + static_cast<std::uint64_t>(i)), 0, slice(0));
         }
         check(pool.used() == plateau, "the swept groups' blocks were recycled, not re-carved");
     }

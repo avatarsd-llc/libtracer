@@ -22,7 +22,10 @@
 
 #include <atomic>
 #include <cstddef>
-#include <memory>
+#include <new>
+
+#include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_source.hpp"
 
 /**
  * @file
@@ -64,12 +67,37 @@ class can_tx_pool_t {
      * Size it to the driver's maximum in-flight frame count (for the ESP TWAI
      * node: `tx_queue_depth` + the hardware TX slot), so a successful acquire
      * implies the driver can accept the frame without waiting.
+     * Both arrays are drawn from @p src once, here (#1780). This is a SETUP call: a store
+     * that cannot hold them is a sizing bug, and the constructor aborts with a message naming
+     * it (`%tr::mem::exhausted_at_init`, ADR-0083).
+     *
      * @param capacity Number of slots; at least 1 is enforced.
+     * @param src      Where the slot and flag arrays are drawn from (default: the process
+     *                 net sub-pool).
      */
-    explicit can_tx_pool_t(std::size_t capacity)
-        : slots_(std::make_unique<slot_t[]>(capacity == 0 ? 1 : capacity)),
-          in_flight_(std::make_unique<std::atomic<bool>[]>(capacity == 0 ? 1 : capacity)),
-          capacity_(capacity == 0 ? 1 : capacity) {}
+    explicit can_tx_pool_t(std::size_t capacity, mem::block_source_t& src = mem::net_source())
+        : src_(&src), capacity_(capacity == 0 ? 1 : capacity) {
+        slots_ = static_cast<slot_t*>(src.try_alloc(capacity_ * sizeof(slot_t), alignof(slot_t)));
+        in_flight_ = static_cast<std::atomic<bool>*>(
+            src.try_alloc(capacity_ * sizeof(std::atomic<bool>), alignof(std::atomic<bool>)));
+        if (slots_ == nullptr || in_flight_ == nullptr)
+            mem::exhausted_at_init(src, "can_tx_pool_t slots");
+        for (std::size_t i = 0; i < capacity_; ++i) {
+            ::new (static_cast<void*>(slots_ + i)) slot_t();
+            ::new (static_cast<void*>(in_flight_ + i)) std::atomic<bool>(false);
+        }
+    }
+
+    /** @brief Destroys the slots and returns both arrays. */
+    ~can_tx_pool_t() {
+        for (std::size_t i = 0; i < capacity_; ++i) {
+            slots_[i].~slot_t();
+            in_flight_[i].~atomic();
+        }
+        src_->release(slots_, capacity_ * sizeof(slot_t), alignof(slot_t));
+        src_->release(in_flight_, capacity_ * sizeof(std::atomic<bool>),
+                      alignof(std::atomic<bool>));
+    }
 
     can_tx_pool_t(const can_tx_pool_t&) = delete;
     can_tx_pool_t& operator=(const can_tx_pool_t&) = delete;
@@ -114,8 +142,8 @@ class can_tx_pool_t {
     bool release(slot_t* slot) noexcept {
         // Bounds first: an index is only formed for a pointer that lies inside
         // the slot array, so a foreign pointer never reaches in_flight_[].
-        if (slot < slots_.get() || slot >= slots_.get() + capacity_) return false;
-        const auto i = static_cast<std::size_t>(slot - slots_.get());
+        if (slot < slots_ || slot >= slots_ + capacity_) return false;
+        const auto i = static_cast<std::size_t>(slot - slots_);
         // CAS true→false: a double (or never-acquired) release loses here and is
         // refused, so count_ can never underflow. release on success orders the
         // completed transmit before the slot's next reuse (pairs with the
@@ -138,10 +166,11 @@ class can_tx_pool_t {
     }
 
    private:
-    std::unique_ptr<slot_t[]> slots_; /**< @brief The slot storage (index-parallel). */
-    std::unique_ptr<std::atomic<bool>[]>
-        in_flight_;                     /**< @brief Per-slot ownership flag (index-parallel). */
-    std::size_t capacity_;              /**< @brief Number of slots. */
+    mem::block_source_t* src_; /**< @brief The store both arrays came from. */
+    std::size_t capacity_;     /**< @brief Number of slots. */
+    slot_t* slots_ = nullptr;  /**< @brief The slot storage (index-parallel). */
+    std::atomic<bool>* in_flight_ =
+        nullptr;                        /**< @brief Per-slot ownership flag (index-parallel). */
     std::size_t next_ = 0;              /**< @brief Scan hint; touched only by the (serialized)
                                              acquirer, so plain non-atomic is correct. */
     std::atomic<std::size_t> count_{0}; /**< @brief In-flight count for stats/tests. */

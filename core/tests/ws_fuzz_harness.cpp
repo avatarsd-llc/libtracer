@@ -87,7 +87,7 @@ int main() {
             std::printf("ERR:EMPTY_LINE\n");
             continue;
         }
-        const auto bytes = from_hex(line);
+        auto bytes = from_hex(line);
         if (!bytes) {
             std::printf("ERR:BAD_HEX\n");
             continue;

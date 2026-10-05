@@ -45,17 +45,18 @@ void register_udp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
     // never peer-known). The LISTEN arm never reaches the engine at all.
     vertex.register_transport_type(
         "udp",
-        [rx_backend, egress_src](const conn_settings_t& s, const wire::tlv_node_t* /*raw_config*/) {
+        [rx_backend, egress_src](const conn_settings_t& s, const wire::tlv_node_t* /*raw_config*/,
+                                 mem::block_source_t& src) {
             auto link = dial_or_listen(
                 s,
                 [&] {
                     return make_checked<udp_transport_t>(
-                        0, s.addr, s.port,
+                        src, 0, s.addr, s.port,
                         udp_config_t{.memory = {.rx = rx_backend}, .max_frame = s.max_frame});
                 },
                 [&] {
                     return make_checked<udp_transport_t>(
-                        s.port, s.addr, 0,
+                        src, s.port, s.addr, 0,
                         udp_config_t{.memory = {.rx = rx_backend}, .max_frame = s.max_frame});
                 });
             // The ADR-0079 egress store, wired before the link is handed to the router

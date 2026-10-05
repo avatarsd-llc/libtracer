@@ -32,10 +32,8 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 #include <mutex>
 #include <span>
-#include <string>
 #include <string_view>
 #include <vector>
 
@@ -195,7 +193,7 @@ class tcp_transport_t : public transport_t, private stream_endpoint_t {
      * @param config    The link's knobs (@ref tcp_config_t): memory, receive cap, recv-thread
      *                  stack, deferred receive, liveness window.
      */
-    tcp_transport_t(const std::string& peer_host, std::uint16_t peer_port,
+    tcp_transport_t(std::string_view peer_host, std::uint16_t peer_port,
                     const tcp_config_t& config = {});
 
     /**
@@ -488,7 +486,7 @@ class tcp_server_transport_t : public stream_server_base_t {
     };
 
     /** @brief One fresh slot with its length-prefix framer and directed facade. */
-    std::unique_ptr<session_base_t> make_session() override;
+    mem::poly_ptr_t<session_base_t> make_session() override;
 
     /** @brief Per-accept setup: TCP_NODELAY + a reset framer.  Returns true — a raw
      *         stream peer has no handshake, so it is open the moment it is accepted. */

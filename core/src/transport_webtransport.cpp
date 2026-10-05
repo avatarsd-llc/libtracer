@@ -84,22 +84,22 @@
 #include <msquic.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
+#include <charconv>
 #include <cstdint>
 #include <cstring>
-#include <memory>
-#include <new>
 #include <span>
-#include <string>
 #include <string_view>
 #include <utility>
-#include <vector>
 
+#include "libtracer/builtin_transports.hpp"
 #include "libtracer/byteorder.hpp"
 #include "libtracer/config.hpp"
 #include "libtracer/config_reader.hpp"
 #include "libtracer/frame.hpp"
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_string.hpp"
 #include "msquic_endpoint.hpp"
 #include "wt_h3.hpp"
 
@@ -142,24 +142,38 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
             DRAIN,          /**< @brief Classified, contents irrelevant — discard. */
             LOCAL,          /**< @brief Locally-opened control/QPACK stream (sends only). */
         };
-        impl_t* owner = nullptr;       /**< @brief The owning endpoint. */
-        HQUIC h = nullptr;             /**< @brief The stream handle. */
-        kind_t kind = kind_t::DRAIN;   /**< @brief The classification state. */
-        std::vector<std::uint8_t> acc; /**< @brief Handshake bytes, bounded by the
-                                                   endpoint's `max_handshake` budget. */
-        bool harvested = false;        /**< @brief Guarded by conn_m: the dtor/replacement path
-                                                   took this handle for closing — never
-                                                   re-adopt it. */
+        /** @brief Draw the handshake accumulation from @p src — the endpoint's store. */
+        explicit stream_ctx_t(mem::block_source_t& src) noexcept : acc(src) {}
+        impl_t* owner = nullptr;              /**< @brief The owning endpoint. */
+        HQUIC h = nullptr;                    /**< @brief The stream handle. */
+        kind_t kind = kind_t::DRAIN;          /**< @brief The classification state. */
+        mem::block_array_t<std::uint8_t> acc; /**< @brief Handshake bytes, bounded by the
+                                                          endpoint's `max_handshake` budget. */
+        bool harvested = false; /**< @brief Guarded by conn_m: the dtor/replacement path
+                                            took this handle for closing — never
+                                            re-adopt it. */
+
+        /** @brief Empty @ref acc AND return its block (a handshake budget's worth of
+         *         capacity must not stay attached to a classified stream). */
+        void drop_acc() noexcept { acc = mem::block_array_t<std::uint8_t>(acc.source()); }
     };
 
-    std::string authority; /**< @brief DIAL: the CONNECT :authority. */
+    /** @brief Every table and stream context this endpoint owns is drawn from @p state (the
+     *         link's `memory.state`); its egress send contexts from @p io (`tx_src`, the
+     *         link's `memory.io` — #1780). */
+    impl_t(mem::block_source_t& state, mem::block_source_t& io) noexcept
+        : authority(state), path(state), ctxs(state) {
+        tx_src = &io;
+    }
+
+    mem::string_t authority; /**< @brief DIAL: the CONNECT :authority. */
     /**
      * @brief The session's CONNECT :path — DIAL: the one this endpoint
      *        requests (written in the constructor, before any callback exists);
      *        LISTEN: the one the accepted CONNECT named (written on the stream
      *        callback under conn_m, a derived slot of the live session).
      */
-    std::string path;
+    mem::string_t path;
 
     /**
      * @brief The pre-auth H3 handshake budget this endpoint honors (#1408) — resolved
@@ -173,7 +187,7 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
     std::size_t max_handshake = webtransport_transport_t::kMaxHandshakeBytes;
 
     /** @brief Every stream context of the live session (guarded by conn_m). */
-    std::vector<stream_ctx_t*> ctxs;
+    mem::block_array_t<stream_ctx_t*> ctxs;
     /** @brief Extended CONNECT accepted (200) — the session state.
      *
      * A ONE-WAY latch per connection: only teardown / `replace_peer` clears it, and while
@@ -260,17 +274,21 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
         // path, so the capacity is taken here too and BEFORE `StreamOpen` — a throw at the
         // `push_back` below would strand a started stream whose ctx msquic already holds.
         // (#981: hosted-only TU — no probe window here; see the file header.)
-        if (!detail::try_reserve(ctxs, ctxs.size() + 1)) return nullptr;
-        auto ctx = std::unique_ptr<stream_ctx_t>(new (std::nothrow) stream_ctx_t());
-        if (!ctx) return nullptr;
+        if (!ctxs.reserve(ctxs.size() + 1)) return nullptr;
+        stream_ctx_t* const ctx = mem::make_in<stream_ctx_t>(ctxs.source(), ctxs.source());
+        if (ctx == nullptr) return nullptr;
         ctx->owner = this;
         ctx->kind = kind;
         HQUIC s = nullptr;
-        if (QUIC_FAILED(api->StreamOpen(on_conn, flags, &stream_cb, ctx.get(), &s))) return nullptr;
+        if (QUIC_FAILED(api->StreamOpen(on_conn, flags, &stream_cb, ctx, &s))) {
+            mem::drop_in(ctxs.source(), ctx);
+            return nullptr;
+        }
         ctx->h = s;
-        tsan_release(ctx.get());  // publish the ctx to its callbacks (see the base header)
+        tsan_release(ctx);  // publish the ctx to its callbacks (see the base header)
         if (QUIC_FAILED(api->StreamStart(s, QUIC_STREAM_START_FLAG_NONE))) {
-            api->StreamClose(s);
+            api->StreamClose(s);  // drains its callbacks: nothing references the ctx after
+            mem::drop_in(ctxs.source(), ctx);
             return nullptr;
         }
         // The preamble copy is the LAST allocation on this path, and it is FAILABLE
@@ -279,7 +297,7 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
         // (callbacks never close handles — the base's discipline).
         if (!send_raw(s, preamble)) {
             api->StreamShutdown(s, QUIC_STREAM_SHUTDOWN_FLAG_ABORT, kAppErrBadRequest);
-            ctxs.push_back(ctx.release());
+            (void)ctxs.push_back(ctx);  // within the capacity reserved above
             return nullptr;
         }
         // Only after the preamble is queued: a send() racing this open must not
@@ -293,7 +311,7 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
             // control closed, which is the point of holding in the native window.
             if (delivery_held()) set_stream_receive(s, false);
         }
-        ctxs.push_back(ctx.release());
+        (void)ctxs.push_back(ctx);  // within the capacity reserved above
         return s;
     }
 
@@ -337,11 +355,7 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
         // is tight is exactly the over-broad refusal #919 removed. So an OOM aborts just
         // this stream and returns true: the connection, and any live session on it, stay up.
         // (#981: hosted-only TU — no probe window here; see the file header.)
-        if (!detail::try_reserve(c.acc, c.acc.size() + n)) {
-            refuse_stream(c);
-            return true;
-        }
-        c.acc.insert(c.acc.end(), p, p + n);  // within capacity — cannot reallocate
+        if (!c.acc.append(p, n)) refuse_stream(c);
         return true;
     }
 
@@ -352,8 +366,7 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
     void classify_uni(stream_ctx_t& c) {
         if (wt_h3::read_varint(c.acc)) {
             c.kind = stream_ctx_t::kind_t::DRAIN;
-            c.acc.clear();
-            c.acc.shrink_to_fit();
+            c.drop_acc();
         }
     }
 
@@ -370,8 +383,7 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
      */
     void refuse_stream(stream_ctx_t& c) {
         c.kind = stream_ctx_t::kind_t::DRAIN;
-        c.acc.clear();
-        c.acc.shrink_to_fit();
+        c.drop_acc();
         if (c.h != nullptr)
             api->StreamShutdown(c.h, QUIC_STREAM_SHUTDOWN_FLAG_ABORT, kAppErrBadRequest);
     }
@@ -421,7 +433,7 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
         std::size_t skipped = 0;  // acc bytes consumed by unknown frames this pass
         while (true) {
             const std::span<const std::uint8_t> in =
-                std::span<const std::uint8_t>(c.acc).subspan(skipped);
+                std::span<const std::uint8_t>(c.acc.data(), c.acc.size()).subspan(skipped);
             const auto t = wt_h3::read_varint(in);
             if (!t) break;  // need more bytes
 
@@ -469,14 +481,10 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
                 // The bytes after the 0x41 preamble are the first frame-channel data, and
                 // they live in `c.acc` — which must be released before the reassembler runs.
                 // MOVE the buffer out rather than copying the tail into a fresh one (#1108):
-                // a vector move transfers the heap block without touching it, so `rest` stays
-                // valid over the same addresses, and the peer-SIZED allocation that stood here
-                // is DELETED rather than made nothrow. The moved-from vector is then cleared
-                // and shrunk explicitly, since a moved-from `std::vector` is only guaranteed
-                // valid, not empty.
-                const std::vector<std::uint8_t> held = std::move(c.acc);
-                c.acc.clear();
-                c.acc.shrink_to_fit();
+                // a move transfers the block without touching it, so `rest` stays valid over
+                // the same addresses, and the peer-SIZED allocation that stood here is
+                // DELETED rather than made nothrow. The moved-from array is left empty.
+                const mem::block_array_t<std::uint8_t> held = std::move(c.acc);
                 const auto tail = rest.subspan(sid->consumed);
                 if (tail.empty()) return true;
                 if (delivery_held()) {
@@ -573,7 +581,7 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
                 bool recorded = false;
                 {
                     const std::lock_guard lock(conn_m);
-                    recorded = detail::try_assign(path, req_path);  // peer-SIZED (#1108 shape)
+                    recorded = path.assign(req_path);  // peer-SIZED (#1108 shape)
                 }
                 if (!recorded) return refuse_session();
                 // The response bytes are a `constexpr` view of static storage since #934;
@@ -588,8 +596,7 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
                 // any unknown/GREASE frame — is ignored by the SESSION arm of
                 // on_stream_rx, which is exactly RFC 9114 §7.2.8's "ignore".
                 c.kind = stream_ctx_t::kind_t::SESSION;
-                c.acc.clear();
-                c.acc.shrink_to_fit();
+                c.drop_acc();
                 return true;
             }
 
@@ -609,15 +616,14 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
             skipped += t->consumed + len->consumed + static_cast<std::size_t>(len->value);
         }
 
-        if (skipped != 0)
-            c.acc.erase(c.acc.begin(), c.acc.begin() + static_cast<std::ptrdiff_t>(skipped));
+        c.acc.erase_front(skipped);  // drop the skipped frames, keeping the rest
         return true;
     }
 
     /** @brief The DIAL side's CONNECT stream: parse the response HEADERS,
      *         demand 200. */
     void parse_connect_response(stream_ctx_t& c) {
-        const std::span<const std::uint8_t> in(c.acc);
+        const std::span<const std::uint8_t> in(c.acc.data(), c.acc.size());
         const auto t = wt_h3::read_varint(in);
         if (!t) return;
         if (t->value != wt_h3::kFrameHeaders) {
@@ -649,8 +655,7 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
         }
         const bool accepted = status == "200";
         c.kind = stream_ctx_t::kind_t::SESSION;
-        c.acc.clear();
-        c.acc.shrink_to_fit();
+        c.drop_acc();
         if (accepted) {
             session.store(true, std::memory_order_relaxed);
             signal_session(true);
@@ -723,7 +728,7 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
         }
         if (reap != nullptr) {
             tsan_acquire(reap);  // pairs with the ctx guard's release just above
-            delete reap;
+            mem::drop_in(reap->acc.source(), reap);
         }
         return st;
     }
@@ -820,7 +825,7 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
             if (c.harvested) return nullptr;  // a harvester owns it — it will close and free
             const auto it = std::find(ctxs.begin(), ctxs.end(), &c);
             if (it == ctxs.end()) return nullptr;  // never adopted, or already taken
-            ctxs.erase(it);
+            ctxs.erase_at(static_cast<std::size_t>(it - ctxs.begin()));
             if (frame_stream != nullptr && frame_stream == c.h) frame_stream = nullptr;
         }
         // Past the erase this ctx is unreachable from any harvest, so the handle is ours.
@@ -863,15 +868,15 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
         //      throw. Growing it after the ctx has been handed to `SetCallbackHandler` would
         //      strand a ctx msquic already points at — which is what a bare `push_back` does
         //      today on a failed reallocation.
-        //   2. the ctx itself, through nothrow `new`.
+        //   2. the ctx itself, from the endpoint's store.
         // Either failure aborts JUST this stream. That is #919's refusal scope: a peer
         // stream we cannot afford must not take down a session the peer already
         // established. `ctxs` is bounded by the concurrency caps in `session_settings` plus
         // the per-stream reclamation added in #1163, so this is a growth of a SMALL list —
         // the point is the disposition on failure, not the size.
         // (#981: hosted-only TU — no probe window here; see the file header.)
-        if (!detail::try_reserve(ctxs, ctxs.size() + 1)) return QUIC_STATUS_ABORTED;
-        auto* c = new (std::nothrow) stream_ctx_t{};
+        if (!ctxs.reserve(ctxs.size() + 1)) return QUIC_STATUS_ABORTED;
+        stream_ctx_t* const c = mem::make_in<stream_ctx_t>(ctxs.source(), ctxs.source());
         if (c == nullptr) return QUIC_STATUS_ABORTED;
         c->owner = this;
         c->h = ev->PEER_STREAM_STARTED.Stream;
@@ -881,19 +886,19 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
         tsan_release(c);  // publish the ctx to its callbacks (see the base header)
         api->SetCallbackHandler(ev->PEER_STREAM_STARTED.Stream,
                                 reinterpret_cast<void*>(&impl_t::stream_cb), c);
-        ctxs.push_back(c);
+        (void)ctxs.push_back(c);  // within the capacity reserved above
         return QUIC_STATUS_SUCCESS;
     }
 
     /** @brief One-peer replacement harvest: detach and close every departed
      *         stream ctx + the connection (refuse while the peer is up). */
     bool replace_peer() override {
-        std::vector<stream_ctx_t*> old_ctxs;
+        mem::block_array_t<stream_ctx_t*> old_ctxs(ctxs.source());
         HQUIC old_conn = nullptr;
         {
             const std::lock_guard lock(conn_m);
             if (conn != nullptr && up.load(std::memory_order_relaxed)) return false;
-            old_ctxs = std::exchange(ctxs, {});
+            old_ctxs = std::move(ctxs);  // leaves `ctxs` empty, on the same store
             for (stream_ctx_t* c : old_ctxs) c->harvested = true;  // never re-adopted
             old_conn = std::exchange(conn, nullptr);
             frame_stream = nullptr;
@@ -903,7 +908,7 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
         for (stream_ctx_t* c : old_ctxs) {
             if (c->h != nullptr) api->StreamClose(c->h);
             tsan_acquire(c);  // its callbacks have drained — take their writes
-            delete c;
+            mem::drop_in(ctxs.source(), c);
         }
         if (old_conn != nullptr) api->ConnectionClose(old_conn);
         session.store(false, std::memory_order_relaxed);
@@ -913,11 +918,11 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
     /** @brief Teardown harvest: detach every stream ctx + the connection under
      *         conn_m, abort+close each stream, hand the connection back. */
     HQUIC harvest_and_close_streams() override {
-        std::vector<stream_ctx_t*> old_ctxs;
+        mem::block_array_t<stream_ctx_t*> old_ctxs(ctxs.source());
         HQUIC c = nullptr;
         {
             const std::lock_guard lock(conn_m);
-            old_ctxs = std::exchange(ctxs, {});
+            old_ctxs = std::move(ctxs);  // leaves `ctxs` empty, on the same store
             for (stream_ctx_t* sc : old_ctxs) sc->harvested = true;  // never re-adopted
             frame_stream = nullptr;
             c = std::exchange(conn, nullptr);
@@ -928,7 +933,7 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
                 api->StreamClose(sc->h);
             }
             tsan_acquire(sc);  // its callbacks have drained — take their writes
-            delete sc;
+            mem::drop_in(ctxs.source(), sc);
         }
         return c;
     }
@@ -953,11 +958,14 @@ struct webtransport_transport_t::impl_t : msquic_endpoint_t {
     }
 };
 
-webtransport_transport_t::webtransport_transport_t(const std::string& peer_host,
-                                                   std::uint16_t peer_port, const std::string& path,
+webtransport_transport_t::webtransport_transport_t(std::string_view peer_host,
+                                                   std::uint16_t peer_port, std::string_view path,
                                                    webtransport_dial_tls_t tls,
                                                    const webtransport_config_t& config)
-    : impl_(std::make_unique<impl_t>()) {
+    : impl_(mem::make_poly<impl_t>(config.memory.state_or_default(),
+                                   config.memory.state_or_default(),
+                                   config.memory.io_or_default())) {
+    if (!impl_) return;  // the link's store refused the endpoint: inert, ok() is false
     const std::size_t max_frame = config.max_frame;
     const bool defer_rx = config.defer_rx;
     const std::size_t max_handshake = config.max_handshake;
@@ -982,8 +990,15 @@ webtransport_transport_t::webtransport_transport_t(const std::string& peer_host,
     // quic / ws-client; never notify_peer_down, the multi-peer bus facet's).
     i.link_down_ctx = this;
     i.link_down_fn = [](void* ctx) { static_cast<webtransport_transport_t*>(ctx)->notify_down(); };
-    i.authority = peer_host + ":" + std::to_string(peer_port);
-    i.path = path.empty() ? "/" : path;
+    std::array<char, 8> port_text{};
+    const char* const port_end =
+        std::to_chars(port_text.data(), port_text.data() + port_text.size(), peer_port).ptr;
+    const std::string_view port_view(port_text.data(),
+                                     static_cast<std::size_t>(port_end - port_text.data()));
+    if (!i.authority.assign(peer_host) || !i.authority.append(":") ||
+        !i.authority.append(port_view) ||
+        !i.path.assign(path.empty() ? std::string_view("/") : path))
+        return;  // the link's store refused the request text: the dial does not come up
 
     // Stage 1: the QUIC handshake (the transport_quic.cpp dial shape — base).
     if (!i.dial("libtracer_wt", kAlpnH3, impl_t::session_settings(), tls.ca_file,
@@ -995,14 +1010,19 @@ webtransport_transport_t::webtransport_transport_t(const std::string& peer_host,
     // conn_m and publishes the ctx before dropping it.
     i.open_h3_face();
     // The DIAL request is the one handshake buffer whose length is NOT a protocol
-    // constant (it carries the configured `:authority` and `:path`), so it keeps its
-    // vector — built here, on the owner's own constructor thread, where a throw is the
-    // caller's to catch. `open_stream` only borrows it (#934).
-    std::vector<std::uint8_t> req;
-    wt_h3::append_h3_frame(req, wt_h3::kFrameHeaders,
-                           wt_h3::encode_connect_field_section(i.authority, i.path));
-    HQUIC connect_stream = i.open_stream(QUIC_STREAM_OPEN_FLAG_NONE,
-                                         impl_t::stream_ctx_t::kind_t::CONNECT_CLIENT, req);
+    // constant (it carries the configured `:authority` and `:path`), so it is built in
+    // blocks from the link's store, failably (#1780). `open_stream` only borrows it (#934).
+    mem::block_array_t<std::uint8_t> section(*i.tx_src);
+    wt_h3::failable_sink_t section_sink{section};
+    wt_h3::encode_connect_field_section(section_sink, i.authority.view(), i.path.view());
+    mem::block_array_t<std::uint8_t> req(*i.tx_src);
+    wt_h3::failable_sink_t req_sink{req};
+    wt_h3::append_h3_frame(req_sink, wt_h3::kFrameHeaders,
+                           std::span<const std::uint8_t>(section.data(), section.size()));
+    if (!section_sink.ok || !req_sink.ok) return;  // the store refused: the dial fails
+    HQUIC connect_stream =
+        i.open_stream(QUIC_STREAM_OPEN_FLAG_NONE, impl_t::stream_ctx_t::kind_t::CONNECT_CLIENT,
+                      std::span<const std::uint8_t>(req.data(), req.size()));
     if (connect_stream == nullptr) return;
     // The id is read AFTER the request is queued (the request never carries it);
     // the 0x41 frame-channel header below is what needs it.
@@ -1017,20 +1037,24 @@ webtransport_transport_t::webtransport_transport_t(const std::string& peer_host,
     // Open THE frame channel: a bidirectional WebTransport stream announcing
     // itself with 0x41 + the CONNECT stream's id (the browser
     // createBidirectionalStream() wire shape), then length-prefixed records.
-    std::vector<std::uint8_t> preamble;
+    // Two varints: at most 16 bytes, on the stack.
+    wt_h3::fixed_bytes_t<16> preamble;
     wt_h3::append_varint(preamble, wt_h3::kFrameWtStream);
     wt_h3::append_varint(preamble, i.connect_stream_id);
-    if (i.open_stream(QUIC_STREAM_OPEN_FLAG_NONE, impl_t::stream_ctx_t::kind_t::FRAME, preamble) ==
-        nullptr)
+    if (i.open_stream(QUIC_STREAM_OPEN_FLAG_NONE, impl_t::stream_ctx_t::kind_t::FRAME,
+                      preamble.bytes()) == nullptr)
         return;
     i.open_ok = true;
 }
 
 webtransport_transport_t::webtransport_transport_t(std::uint16_t bind_port,
-                                                   const std::string& cert_file,
-                                                   const std::string& key_file,
+                                                   std::string_view cert_file,
+                                                   std::string_view key_file,
                                                    const webtransport_config_t& config)
-    : impl_(std::make_unique<impl_t>()) {
+    : impl_(mem::make_poly<impl_t>(config.memory.state_or_default(),
+                                   config.memory.state_or_default(),
+                                   config.memory.io_or_default())) {
+    if (!impl_) return;  // the link's store refused the endpoint: inert, ok() is false
     const std::size_t max_frame = config.max_frame;
     const std::size_t max_handshake = config.max_handshake;
     impl_t& i = *impl_;
@@ -1056,54 +1080,68 @@ webtransport_transport_t::webtransport_transport_t(std::uint16_t bind_port,
 
 webtransport_transport_t::~webtransport_transport_t() = default;  // ~impl_t runs teardown()
 
-void webtransport_transport_t::start_receiving() { impl_->open_delivery_gate(); }
+// Every accessor below tolerates an absent impl_ (its store refused it at construction):
+// such a link is inert — never ok(), never up, sends nothing, counts nothing.
 
-void webtransport_transport_t::send(std::span<const std::byte> frame) { impl_->send_frame(frame); }
-
-void webtransport_transport_t::send(std::span<const std::span<const std::byte>> iov) {
-    impl_->send_frame(iov);
+void webtransport_transport_t::start_receiving() {
+    if (impl_) impl_->open_delivery_gate();
 }
 
-bool webtransport_transport_t::ok() const noexcept { return impl_->open_ok; }
+void webtransport_transport_t::send(std::span<const std::byte> frame) {
+    if (impl_) impl_->send_frame(frame);
+}
 
-std::uint16_t webtransport_transport_t::local_port() const noexcept { return impl_->bound_port; }
+void webtransport_transport_t::send(std::span<const std::span<const std::byte>> iov) {
+    if (impl_) impl_->send_frame(iov);
+}
+
+bool webtransport_transport_t::ok() const noexcept { return impl_ && impl_->open_ok; }
+
+std::uint16_t webtransport_transport_t::local_port() const noexcept {
+    return impl_ ? impl_->bound_port : 0;
+}
 
 bool webtransport_transport_t::link_up() const noexcept {
-    return impl_->up.load(std::memory_order_relaxed);
+    return impl_ && impl_->up.load(std::memory_order_relaxed);
 }
 
 bool webtransport_transport_t::session_up() const noexcept {
-    return impl_->session.load(std::memory_order_relaxed);
+    return impl_ && impl_->session.load(std::memory_order_relaxed);
 }
 
-std::string webtransport_transport_t::session_path() const {
+std::size_t webtransport_transport_t::session_path(std::span<char> out) const {
+    if (!impl_) return 0;
     const std::lock_guard lock(impl_->conn_m);
-    return impl_->path;
+    const std::string_view p = impl_->path.view();
+    std::copy_n(p.data(), std::min(out.size(), p.size()), out.data());  // `out` may be empty
+    return p.size();
 }
 
 std::uint64_t webtransport_transport_t::dropped_rx() const noexcept {
-    return impl_->dropped_rx.load(std::memory_order_relaxed);
+    return impl_ ? impl_->dropped_rx.load(std::memory_order_relaxed) : 0;
 }
 
 std::uint64_t webtransport_transport_t::malformed_rx() const noexcept {
-    return impl_->malformed_rx.load(std::memory_order_relaxed);
+    return impl_ ? impl_->malformed_rx.load(std::memory_order_relaxed) : 0;
 }
 
 std::uint64_t webtransport_transport_t::dropped_tx() const noexcept {
-    return impl_->dropped_tx.load(std::memory_order_relaxed);
+    return impl_ ? impl_->dropped_tx.load(std::memory_order_relaxed) : 0;
 }
 
 std::uint64_t webtransport_transport_t::refused_sessions() const noexcept {
-    return impl_->refused_sessions.load(std::memory_order_relaxed);
+    return impl_ ? impl_->refused_sessions.load(std::memory_order_relaxed) : 0;
 }
 
 std::size_t webtransport_transport_t::live_streams() const noexcept {
+    if (!impl_) return 0;
     const std::lock_guard lock(impl_->conn_m);
     return impl_->ctxs.size();
 }
 
 std::size_t webtransport_transport_t::effective_max_handshake() const noexcept {
-    return impl_->max_handshake;  // constructor-resolved and immutable thereafter
+    // Constructor-resolved and immutable thereafter.
+    return impl_ ? impl_->max_handshake : 0;
 }
 
 namespace {
@@ -1130,8 +1168,10 @@ struct wt_private_cfg_t {
     bool insecure = false;         /**< @brief DEV ONLY: skip server-certificate validation on
                                                the DIAL side entirely. Must be asked for
                                                explicitly — the default is to verify (DIAL). */
-    std::string path;              /**< @brief The extended CONNECT `:path` the dial requests;
-                                               empty = the "/" default (DIAL, #1023). */
+    std::string_view path;         /**< @brief The extended CONNECT `:path` the dial requests;
+                                               empty = the "/" default (DIAL, #1023). A
+                                               view into the raw config, valid for the
+                                               factory call only. */
     std::size_t max_handshake = 0; /**< @brief Pre-auth H3 handshake budget in bytes;
                                                0 = webtransport_transport_t::
                                                kMaxHandshakeBytes, and TIGHTEN-ONLY
@@ -1159,7 +1199,7 @@ std::atomic<std::uint64_t> g_insecure_refusals{0};
     const wire::config_reader_t cfg(raw_config);
     if (const auto v = cfg.name("tls")) out.tls = *v;
     if (const auto v = cfg.flag("insecure")) out.insecure = *v;
-    if (const auto v = cfg.name("path")) out.path = std::string(*v);
+    if (const auto v = cfg.name("path")) out.path = *v;
     out.max_handshake = static_cast<std::size_t>(cfg.u32("max_handshake").value_or(0));
     out.retired = cfg.has("ca") || cfg.has("cert") || cfg.has("key");
     return out;
@@ -1169,8 +1209,8 @@ std::atomic<std::uint64_t> g_insecure_refusals{0};
 
 transport_factory_t webtransport_transport_factory(std::span<const tls_profile_t> profiles,
                                                    mem::mem_backend_t* rx_backend) {
-    return [profiles, rx_backend](const conn_settings_t& s, const wire::tlv_node_t* raw_config)
-               -> graph::result_t<std::unique_ptr<transport_t>> {
+    return [profiles, rx_backend](const conn_settings_t& s, const wire::tlv_node_t* raw_config,
+                                  mem::block_source_t& src) -> graph::result_t<transport_ptr_t> {
         // BOTH roles carry kind-private keys, so the parse precedes the role split:
         // the DIAL branch used to return before parse_wt_config ever ran, which is
         // why no SPEC could reach the dial-side trust knobs at all (#918).
@@ -1193,7 +1233,9 @@ transport_factory_t webtransport_transport_factory(std::span<const tls_profile_t
         const tls_profile_t* const prof = find_tls_profile(profiles, priv.tls);
         if (priv.retired || (prof == nullptr && !priv.tls.empty()))
             return std::unexpected(graph::status_t::TYPE_MISMATCH);
-        std::unique_ptr<webtransport_transport_t> t;
+        // The link object and its egress (endpoint, stream contexts, send records) are drawn
+        // from `src`, the receiving vertex's store (#1780); `make_checked` answers a refused
+        // object as BACKPRESSURE and a link that did not come up as TRANSPORT_DOWN (#929).
         if (s.role == conn_role_t::DIAL) {
             // #1039: an `https` request's `:path` is non-empty and, in origin-form,
             // begins with "/" (RFC 9114 §4.3.1 / RFC 9113 §8.3.1), so a value like
@@ -1217,32 +1259,26 @@ transport_factory_t webtransport_transport_factory(std::span<const tls_profile_t
             // after this returns, and a server that pushes the instant its session comes
             // up has that frame in flight through the whole window. Held in msquic's
             // per-stream receive window until the vertex calls `start_receiving()`.
-            t = std::make_unique<webtransport_transport_t>(
-                s.addr, s.port, priv.path,
+            return make_checked<webtransport_transport_t>(
+                src, s.addr, s.port, priv.path,
                 webtransport_dial_tls_t{
-                    .ca_file = std::string(prof != nullptr ? prof->ca_file : ""),
+                    .ca_file = prof != nullptr ? prof->ca_file : std::string_view{},
                     .insecure_no_verify = priv.insecure},
-                webtransport_config_t{.memory = {.rx = rx_backend},
+                webtransport_config_t{.memory = {.rx = rx_backend, .io = &src},
                                       .max_frame = s.max_frame,
                                       .defer_rx = true,
                                       .max_handshake = priv.max_handshake});
-            // A refused session is TRANSIENT, not a bad address (#929).
-            if (!t->ok()) return std::unexpected(graph::status_t::TRANSPORT_DOWN);
-            return t;
         }
         // `port = 0` on a LISTEN is the EPHEMERAL request (#1362), not a missing key: the
         // OS picks and `local_port()` reports it. Only an ABSENT key is the config error,
         // and so is a profile that carries no credential to serve.
         if (!s.port_set || prof == nullptr || prof->cert_file.empty() || prof->key_file.empty())
             return std::unexpected(graph::status_t::TYPE_MISMATCH);
-        t = std::make_unique<webtransport_transport_t>(
-            s.port, std::string(prof->cert_file), std::string(prof->key_file),
-            webtransport_config_t{.memory = {.rx = rx_backend},
+        return make_checked<webtransport_transport_t>(
+            src, s.port, prof->cert_file, prof->key_file,
+            webtransport_config_t{.memory = {.rx = rx_backend, .io = &src},
                                   .max_frame = s.max_frame,
                                   .max_handshake = priv.max_handshake});
-        // bind/cred failed — the listener did not come up (#929).
-        if (!t->ok()) return std::unexpected(graph::status_t::TRANSPORT_DOWN);
-        return t;
     };
 }
 

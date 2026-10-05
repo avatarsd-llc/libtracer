@@ -16,6 +16,8 @@
 
 #include "libtracer/ws.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -59,6 +61,27 @@ std::string str_of(std::span<const std::byte> b) {
  * payload size are the caller's, so a reserved CONTROL opcode can be given the perfectly
  * legal §5.5 shape that is the sharp half of the case.
  */
+/** @brief A whole server frame in a `std::vector` — the test-side reference form of
+ *         `ws::try_encode_frame` (#1780 removed the library's vector-returning encoder). */
+[[maybe_unused]] std::vector<std::byte> server_frame_ref(tr::net::ws::opcode_t op,
+                                                         std::span<const std::byte> payload) {
+    std::array<std::byte, tr::net::ws::kMaxServerFrameHeader> header{};
+    const std::size_t hlen = tr::net::ws::encode_frame_header(header, op, payload.size());
+    std::vector<std::byte> out(header.begin(), header.begin() + static_cast<std::ptrdiff_t>(hlen));
+    out.insert(out.end(), payload.begin(), payload.end());
+    return out;
+}
+
+/** @brief A whole masked client frame in a `std::vector` — the test-side reference form of
+ *         `ws::try_encode_client_frame`. */
+[[maybe_unused]] std::vector<std::byte> client_frame_ref(tr::net::ws::opcode_t op,
+                                                         std::span<const std::byte> payload,
+                                                         std::uint32_t mask_key) {
+    std::vector<std::byte> out(tr::net::ws::detail::client_frame_bytes(payload.size()));
+    tr::net::ws::detail::put_client_frame(out, op, payload, mask_key, /*fin=*/true);
+    return out;
+}
+
 std::vector<std::byte> raw_op_frame(std::uint8_t op, std::size_t len, bool fin = true) {
     std::vector<std::byte> out;
     out.push_back(static_cast<std::byte>((fin ? 0x80u : 0x00u) | (op & 0x0Fu)));
@@ -75,14 +98,14 @@ int main() {
 
     // RFC 6455 §1.3 — the canonical Sec-WebSocket-Accept worked example.
     {
-        const std::string acc = accept_key("dGhlIHNhbXBsZSBub25jZQ==");
+        const std::string acc(accept_key("dGhlIHNhbXBsZSBub25jZQ==").view());
         check(acc == "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=",
               "accept_key matches RFC 6455 §1.3 vector (s3pPLMBiTxaQ9kYGzzhZRbK+xOo=)");
     }
 
     // RFC 6455 §5.7 — single-frame masked "Hello" from a client.
     {
-        const std::vector<std::byte> masked_hello =
+        std::vector<std::byte> masked_hello =
             bytes_of({0x81, 0x85, 0x37, 0xfa, 0x21, 0x3d, 0x7f, 0x9f, 0x4d, 0x51, 0x58});
         const auto dec = decode_frame(masked_hello);
         check(dec.has_value(), "masked client \"Hello\" frame decodes");
@@ -98,9 +121,9 @@ int main() {
     // Server BINARY frame: FIN=1, unmasked, 7-bit length. encode -> exact bytes.
     {
         const std::vector<std::byte> payload = bytes_of("Hi");
-        const std::vector<std::byte> enc = encode_frame(opcode_t::BINARY, payload);
+        std::vector<std::byte> enc = server_frame_ref(opcode_t::BINARY, payload);
         const std::vector<std::byte> expect = bytes_of({0x82, 0x02, 'H', 'i'});
-        check(enc == expect, "encode_frame(BINARY, \"Hi\") == 82 02 'H' 'i'");
+        check(enc == expect, "server frame (BINARY, \"Hi\") == 82 02 'H' 'i'");
 
         const auto dec = decode_frame(enc);
         check(dec.has_value(), "encoded BINARY frame decodes");
@@ -114,14 +137,14 @@ int main() {
 
     // Need-more: a 1-byte buffer is an incomplete frame -> nullopt.
     {
-        const std::vector<std::byte> partial = bytes_of({0x81});
+        std::vector<std::byte> partial = bytes_of({0x81});
         check(!decode_frame(partial).has_value(), "1-byte buffer returns nullopt (need-more)");
     }
 
     // 16-bit extended length: 200-byte payload uses the 126 marker + 2-byte len.
     {
         std::vector<std::byte> payload(200, static_cast<std::byte>(0xAB));
-        const std::vector<std::byte> enc = encode_frame(opcode_t::BINARY, payload);
+        std::vector<std::byte> enc = server_frame_ref(opcode_t::BINARY, payload);
         check(enc.size() == 2 + 2 + 200, "200-byte frame is 2 + 2-byte-len + 200 payload");
         check(std::to_integer<std::uint8_t>(enc[1]) == 126,
               "  uses the 126 extended-length marker");
@@ -133,7 +156,8 @@ int main() {
         check(dec.has_value(), "200-byte frame decodes");
         if (dec) {
             check(dec->first.payload.size() == 200, "  decoded payload is 200 bytes");
-            check(dec->first.payload == payload, "  decoded payload round-trips byte-exactly");
+            check(std::ranges::equal(dec->first.payload, payload),
+                  "  decoded payload round-trips byte-exactly");
             check(dec->second == enc.size(), "  consumes whole buffer");
         }
     }
@@ -143,7 +167,7 @@ int main() {
     // bypass a naive `buf.size() < pos + len`, causing an OOB read. Must return nullopt,
     // never crash / read past the buffer.
     {
-        const std::vector<std::byte> evil =
+        std::vector<std::byte> evil =
             bytes_of({0x82, 0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xAA, 0xBB});
         check(!decode_frame(evil).has_value(),
               "64-bit over-long length is rejected (nullopt), no overflow/OOB read");
@@ -158,7 +182,7 @@ int main() {
         char what[128];
         for (std::uint8_t op = 0x3; op <= 0xF; ++op) {
             if (is_defined_opcode(static_cast<opcode_t>(op))) continue;  // 0x8-0xA
-            const std::vector<std::byte> f = raw_op_frame(op, 2);
+            std::vector<std::byte> f = raw_op_frame(op, 2);
 
             const decode_result_t r = decode_frame_checked(f, kNoPayloadCap);
             std::snprintf(what, sizeof what,
@@ -184,7 +208,7 @@ int main() {
     {
         // FIN | opcode 0x3, then MASK=1 with the 126 extended-length marker — so a decoder
         // that reached the length ladder would need two more bytes and answer NEED_MORE.
-        const std::vector<std::byte> stub = bytes_of({0x83, 0xFE});
+        std::vector<std::byte> stub = bytes_of({0x83, 0xFE});
         const decode_result_t r = decode_frame_checked(stub, kNoPayloadCap);
         check(r.status == decode_status_t::PROTOCOL_ERROR,
               "a reserved opcode is diagnosed off the header alone (not NEED_MORE)");
@@ -198,7 +222,7 @@ int main() {
         char what[128];
         static constexpr std::uint8_t kDefined[] = {0x0, 0x1, 0x2, 0x8, 0x9, 0xA};
         for (std::uint8_t op : kDefined) {
-            const std::vector<std::byte> f = raw_op_frame(op, 2);
+            std::vector<std::byte> f = raw_op_frame(op, 2);
             const decode_result_t r = decode_frame_checked(f, kNoPayloadCap);
             std::snprintf(what, sizeof what, "checked decode of DEFINED opcode 0x%X still OK", op);
             check(r.status == decode_status_t::OK && static_cast<std::uint8_t>(r.frame.op) == op &&
@@ -216,9 +240,10 @@ int main() {
         check(
             decode_frame_checked(oversize, kNoPayloadCap).status == decode_status_t::PROTOCOL_ERROR,
             "§5.5 still rejects an over-125-byte control frame");
-        check(decode_frame_checked(raw_op_frame(0x9, 8, /*fin=*/false), kNoPayloadCap).status ==
-                  decode_status_t::PROTOCOL_ERROR,
-              "§5.5 still rejects a non-final control frame");
+        std::vector<std::byte> nonfinal = raw_op_frame(0x9, 8, /*fin=*/false);
+        check(
+            decode_frame_checked(nonfinal, kNoPayloadCap).status == decode_status_t::PROTOCOL_ERROR,
+            "§5.5 still rejects a non-final control frame");
     }
 
     return tr::testing::summary("ws");

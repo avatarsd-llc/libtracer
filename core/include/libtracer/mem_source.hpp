@@ -353,6 +353,19 @@ class null_source_t final : public block_source_t {
     void release(void*, std::size_t, std::size_t) noexcept override {}
 };
 
+/**
+ * @brief Stop the node because @p src refused an allocation that INITIALIZATION needed — the
+ *        ADR-0056 rule, extended by ADR-0083 (#1778): exhaustion at init is a sizing bug, not
+ *        a runtime outcome.
+ *
+ * Prints one line to `stderr` naming @p what (the call that needed the memory), the
+ * source's census name (`"tables"`, `"values"`, `"net"` or the injected source's own) and
+ * the bytes it needed (the source's @ref source_stats_t::largest_refused, 0 for a source
+ * that counts nothing), then aborts. The failable twins (`try_register_vertex`, ...) return
+ * `BACKPRESSURE` instead and never reach this.
+ */
+[[noreturn]] void exhausted_at_init(const block_source_t& src, const char* what) noexcept;
+
 /** @brief The process-wide @ref null_source_t (serves nothing; see the class docs). */
 [[nodiscard]] block_source_t& null_source() noexcept;
 
@@ -444,7 +457,7 @@ class bump_source_t final : public block_source_t {
      *
      * `refused` counts what a caller experienced: a @ref try_alloc that answered `nullptr`,
      * which for this source means the buffer could not fit the request AND the upstream
-     * refused it too. Against a bounded upstream (@ref null_source() — the composition that
+     * refused it too. Against a bounded upstream (`null_source()` — the composition that
      * makes the buffer a hard limit) that is exactly "the buffer overflowed"; against
      * @ref heap_source() it stays 0 until the platform heap is gone, which is the honest
      * reading in both cases.
@@ -923,6 +936,23 @@ class block_array_t {
         return end_++;
     }
 
+    /**
+     * @brief Append @p n elements copied from @p p, growing to fit them exactly when needed.
+     *
+     * Offered only for a trivially copyable `T` (a byte string, a pointer table). @p p must
+     * not point into this array.
+     *
+     * @retval false The source is exhausted — the array is unchanged (BACKPRESSURE).
+     */
+    [[nodiscard]] bool append(const T* p, std::size_t n) noexcept
+        requires kTrivial
+    {
+        if (n > static_cast<std::size_t>(cap_ - end_) && !regrow(size() + n)) return false;
+        if (n != 0) std::memcpy(static_cast<void*>(end_), p, n * sizeof(T));
+        end_ += n;
+        return true;
+    }
+
     /** @brief Drop the last element. Precondition: not empty. */
     void pop_back() noexcept {
         --end_;
@@ -938,6 +968,23 @@ class block_array_t {
             for (T* p = data_ + i; p + 1 != end_; ++p) *p = std::move(p[1]);
             pop_back();
         }
+    }
+    /**
+     * @brief Drop the first @p n elements, keeping the rest at the front in order — the one
+     *        compaction a stream buffer or a FIFO table takes (#1780). Never allocates.
+     *        Precondition: `n <= size()`.
+     */
+    void erase_front(std::size_t n) noexcept {
+        T* const kept_end = end_ - n;
+        if constexpr (kTrivial) {
+            if (n != 0)
+                std::memmove(data_, data_ + n,
+                             static_cast<std::size_t>(kept_end - data_) * sizeof(T));
+        } else {
+            for (T* p = data_; p != kept_end; ++p) *p = std::move(p[n]);
+            for (T* p = kept_end; p != end_; ++p) p->~T();
+        }
+        end_ = kept_end;
     }
     /** @brief Destroy every element; the block is kept for reuse. */
     void clear() noexcept {
@@ -1076,6 +1123,127 @@ class block_array_t {
     T* data_ = nullptr;   /**< @brief The block, or null before the first growth. */
     T* end_ = nullptr;    /**< @brief One past the last live element. */
     T* cap_ = nullptr;    /**< @brief One past the block's last slot. */
+};
+
+/**
+ * @brief An owned byte string drawn from a @ref block_source_t — the core's spelling of the
+ *        `std::vector<std::byte>` a key, a record or a scratch encoding used to be (#1778).
+ */
+using bytes_t = block_array_t<std::byte>;
+
+/**
+ * @brief Copy @p b into @p out, replacing what it held.
+ * @retval false The source refused — @p out is unchanged.
+ */
+[[nodiscard]] inline bool assign_bytes(bytes_t& out, std::span<const std::byte> b) noexcept {
+    if (!out.reserve(b.size())) return false;
+    out.clear();
+    return out.append(b.data(), b.size());  // reserved above: cannot grow
+}
+
+/** @brief The bytes of @p b as a span (a @ref bytes_t is contiguous). */
+[[nodiscard]] inline std::span<const std::byte> as_span(const bytes_t& b) noexcept {
+    return {b.data(), b.size()};
+}
+
+/**
+ * @brief Construct one @p T in a block drawn from @p src — the core's failable `new`
+ *        (ADR-0083 Decision 1, #1778).
+ * @retval nullptr The source refused; nothing was constructed.
+ */
+template <class T, class... Args>
+[[nodiscard]] T* make_in(block_source_t& src, Args&&... args) noexcept {
+    void* p = src.try_alloc(sizeof(T), alignof(T));
+    if (p == nullptr) return nullptr;
+    return ::new (p) T(std::forward<Args>(args)...);
+}
+
+/** @brief Destroy @p p and return its block to @p src, which served it. Null-safe. */
+template <class T>
+void drop_in(block_source_t& src, T* p) noexcept {
+    if (p == nullptr) return;
+    p->~T();
+    src.release(p, sizeof(T), alignof(T));
+}
+
+/**
+ * @brief The sole owner of one @p T in a block from a @ref block_source_t — what a
+ *        `std::unique_ptr` member becomes on the seam (#1778).
+ *
+ * Two words — the source and the object — so the owner frees to the source that served it
+ * without anyone else remembering which that was. Empty when default-built.
+ */
+template <class T>
+class block_ptr_t {
+   public:
+    /** @brief An empty owner. */
+    block_ptr_t() noexcept = default;
+    /** @brief Adopt @p p, which @p src served (null adopts nothing). */
+    block_ptr_t(block_source_t& src, T* p) noexcept : src_(&src), p_(p) {}
+    /** @brief Destroys the object and returns its block. */
+    ~block_ptr_t() { reset(); }
+    /** @brief Non-copyable — one object, one owner. */
+    block_ptr_t(const block_ptr_t&) = delete;
+    /** @brief Non-assignable by copy. */
+    block_ptr_t& operator=(const block_ptr_t&) = delete;
+    /** @brief Take over @p o's object; @p o is left empty. */
+    block_ptr_t(block_ptr_t&& o) noexcept : src_(o.src_), p_(o.p_) { o.p_ = nullptr; }
+    /** @brief Free this owner's object, then take over @p o's. */
+    block_ptr_t& operator=(block_ptr_t&& o) noexcept {
+        if (this != &o) {
+            reset();
+            src_ = o.src_;
+            p_ = o.p_;
+            o.p_ = nullptr;
+        }
+        return *this;
+    }
+    /** @brief Destroy the object, if any, and return its block. */
+    void reset() noexcept {
+        if (p_ != nullptr) drop_in(*src_, p_);
+        p_ = nullptr;
+    }
+    /** @brief The object, or null. */
+    [[nodiscard]] T* get() const noexcept { return p_; }
+    /** @brief Member access. Precondition: not empty. */
+    [[nodiscard]] T* operator->() const noexcept { return p_; }
+    /** @brief The object. Precondition: not empty. */
+    [[nodiscard]] T& operator*() const noexcept { return *p_; }
+    /** @brief True when an object is owned. */
+    [[nodiscard]] explicit operator bool() const noexcept { return p_ != nullptr; }
+
+   private:
+    block_source_t* src_ = nullptr; /**< @brief The source that served `p_`. */
+    T* p_ = nullptr;                /**< @brief The owned object, or null. */
+};
+
+/**
+ * @brief Construct one @p T from @p args in a block from @p src and own it.
+ * @return An empty owner when the source refused.
+ */
+template <class T, class... Args>
+[[nodiscard]] block_ptr_t<T> make_block(block_source_t& src, Args&&... args) noexcept {
+    return block_ptr_t<T>(src, make_in<T>(src, std::forward<Args>(args)...));
+}
+
+/**
+ * @brief The byte-wise lexicographic order over anything that is a contiguous run of bytes —
+ *        a @ref bytes_t, a `std::span<const std::byte>`, a `std::vector<std::byte>` — so a
+ *        map keyed by owned byte strings is searched with a borrowed span (transparent).
+ *
+ * The same order `std::vector<std::byte>`'s `operator<` gives: `memcmp` over the common
+ * prefix, then the shorter first.
+ */
+struct bytes_less_t {
+    /** @brief Heterogeneous lookup is allowed. */
+    using is_transparent = void;
+    /** @brief True when @p a sorts before @p b. */
+    template <class A, class B>
+    [[nodiscard]] bool operator()(const A& a, const B& b) const noexcept {
+        const std::size_t n = a.size() < b.size() ? a.size() : b.size();
+        const int c = n == 0 ? 0 : std::memcmp(a.data(), b.data(), n);
+        return c < 0 || (c == 0 && a.size() < b.size());
+    }
 };
 
 }  // namespace tr::mem
