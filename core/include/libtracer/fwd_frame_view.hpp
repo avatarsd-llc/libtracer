@@ -25,7 +25,6 @@
 #include <string_view>
 #include <type_traits>
 #include <utility>
-#include <vector>
 
 #include "libtracer/config.hpp"
 #include "libtracer/grammar.hpp"
@@ -1608,33 +1607,6 @@ template <class Cursor, class MintFn = no_mint_t, class ReverseMintFn = no_mint_
     }
 
     return r;
-}
-
-/**
- * @brief Encode @p segs as a run of packed PATH records — the precomputed mount prefix (#508).
- *
- * Built ONCE per child, at registration, and handed to every hop as
- * @ref fwd_rebuild_t::mount_tlv. Under RFC-0018 there is only ONE form to emit — a record is
- * `[u8 len][bytes]` with no option byte — so the ADR-0062 §"Considered options" caveat this
- * used to carry (a peer may legally spell the same NAME with `opt.LL = 1`, so emitting and
- * matching are different problems) simply no longer applies: emitting and matching are now the
- * same bytes.
- * @return The encoded run, or nullopt if a segment is empty (it would spell the §5.4 escape)
- *         or exceeds the record's `u8` length field.
- */
-[[nodiscard]] inline std::optional<std::vector<std::byte>> encode_mount_tlv(
-    std::span<const std::string_view> segs) {
-    std::vector<std::byte> out;
-    std::size_t total = 0;
-    for (const std::string_view s : segs) {
-        if (s.empty() || s.size() > wire::kPackedSegMaxBytes) return std::nullopt;
-        total += 1u + s.size();
-    }
-    out.reserve(total);
-    for (const std::string_view s : segs) {
-        if (!wire::emit_path_segment(out, s)) return std::nullopt;
-    }
-    return out;
 }
 
 /**

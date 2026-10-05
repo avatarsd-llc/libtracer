@@ -24,6 +24,13 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   qualification: that holds where the application chooses the sizes. Where a peer does, put a
   `slab_pool_t` in front of the `pool_source_t` (its root), which rounds into the one
   size-class table and keeps the bound; `pool_source_t` gets no rounding mode of its own.
+- **`wire::path_label_record(label)` (`path_label.hpp`) and `wire::store_path_segment(out,
+  seg)` (`packed_path.hpp`) ([#1779](https://github.com/avatarsd-llc/libtracer/issues/1779)).**
+  These are fixed-buffer forms of `emit_path_label` and `emit_path_segment`, with the same
+  bytes and no vector. `store_path_segment` measures when `out` is empty.
+- **`mem::block_array_t::append(p, n)` ([#1779](https://github.com/avatarsd-llc/libtracer/issues/1779)).**
+  It appends `n` trivially copyable elements and grows to fit them exactly. It returns `false`,
+  leaving the array unchanged, when the source refuses.
 
 - **`graph_t::trim_tables()`
   ([#1778](https://github.com/avatarsd-llc/libtracer/issues/1778)).** Releases the free slabs
@@ -113,6 +120,38 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     pointer to the state instead.
   - The ESP-IDF links (`httpd_ws_link_t`, `esp_ws_client_link_t`, `twai_link_t`) are not
     migrated yet. A follow-up issue tracks them.
+- **The net plane's own state comes from the seam
+  ([#1779](https://github.com/avatarsd-llc/libtracer/issues/1779), ADR-0083).** The router's
+  registry slots, receiver contexts, bus-mount token caches and interned link kinds, its
+  origin-side scratch, and the `tx_handoff_t` ring no longer use `std::string`,
+  `std::vector`, `std::deque` or `std::make_unique`. They draw from the router's label plane
+  (`router_planes_t::label_src`, the net sub-pool by default), or from the source the
+  `tx_handoff_t` is given. A refusal is the call's ordinary failure answer: `add_child`
+  returns `false` with nothing registered, `bound_dispatch` / `label_dispatch` return
+  `nullopt`, `adopt_binding` / `adopt_path_label` return `false`, and a refused handoff ring
+  has no slots (`capacity() == 0`, so it drops and counts every overlapping record). Public
+  API changes, with migration:
+  - `fwd_router_t::add_child(std::string name, …)` and `child_registry_t::add(std::string
+    name, …)` take `std::string_view`. Callers compile unchanged.
+  - `child_registry_t::child_t::name` is a `std::string_view` and `mount_tlv` a
+    `std::span<const std::byte>`, both views of the slot's own text block, valid for the
+    registry's life. Compare with `==` or `std::ranges::equal`, not with a vector.
+  - `child_registry_t::mount_run_for(name)` is removed. Use
+    `child_registry_t::encode_mount_name(name, nullptr)` to measure a mount run and
+    `encode_mount_name(name, out)` to write it.
+  - `fwd_router_t::bound_dispatch_t::dst` and `label_dispatch_t::dst` are
+    `mem::block_array_t<std::byte>`. They are contiguous ranges, so pass them where a
+    `std::span<const std::byte>` is taken, and compare with `std::ranges::equal`.
+  - `fwd_router_t::session_anchor_id(mount, peer)` returns a `session_anchor_id_t`, a fixed
+    buffer that converts to `std::string_view`. An id longer than one packed segment record
+    (`wire::kPackedSegMaxBytes`) comes back empty, and the router anchors nothing for it. Write
+    `const auto id = fwd_router_t::session_anchor_id(m, p);` where a `std::string` was held.
+  - `tr::net::encode_advertise`, `encode_compact`, `encode_handle_nack` (`route_handle.hpp`) and
+    `encode_mount_tlv` (`fwd_frame_view.hpp`) are removed from the library. No production
+    path called them since #885. They returned owning vectors from the throwing global heap.
+    Tests and host tools can include `core/tests/route_frame_builder.hpp`, which keeps the
+    same names and bytes. Production code uses the router's own doors (`advertise`,
+    `send_compact`).
 
 ### Changed
 

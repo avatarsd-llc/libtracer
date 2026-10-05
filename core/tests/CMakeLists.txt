@@ -1147,6 +1147,12 @@ if(LIBTRACER_NET_PLANE)
 endif()
 
 if(LIBTRACER_NET_PLANE)
+    # The net plane's own state on the seam (#1779): each growth site refuses by value,
+    # registers nothing, and returns every block.
+    add_executable(net_plane_refusal_test net_plane_refusal_test.cpp)
+    target_link_libraries(net_plane_refusal_test PRIVATE libtracer)
+    libtracer_test_warnings(net_plane_refusal_test)
+    add_test(NAME net_plane_refusal COMMAND net_plane_refusal_test)
     # `add_child` under a REFUSING allocator (#523): the registry chunk is the one soft-failing
     # allocation on the control path, and it is driven by replacing the global NOTHROW
     # `operator new` — a whole-program decision, hence its own binary.

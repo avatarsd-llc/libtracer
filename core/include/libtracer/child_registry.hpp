@@ -28,10 +28,8 @@
 #include <new>
 #include <optional>
 #include <span>
-#include <string>
 #include <string_view>
 #include <utility>
-#include <vector>
 
 #include "libtracer/byteorder.hpp"
 #include "libtracer/mem_heap.hpp"
@@ -120,6 +118,12 @@ class child_registry_t {
     ~child_registry_t() {
         for (chunk_t* c = head_.load(std::memory_order_relaxed); c != nullptr;) {
             chunk_t* const nxt = c->next.load(std::memory_order_relaxed);
+            const std::size_t used = c->used.load(std::memory_order_relaxed);
+            for (std::size_t i = 0; i < used; ++i) {
+                const child_t& slot = c->slots[i];
+                src_->release(const_cast<char*>(slot.name.data()),
+                              slot.name.size() + slot.mount_tlv.size(), 1);
+            }
             c->~chunk_t();
             src_->release(c, sizeof(chunk_t), alignof(chunk_t));
             c = nxt;
@@ -158,8 +162,13 @@ class child_registry_t {
      * `net` root). A null link marks a TOMBSTONE (#494) — the slot is dead but stays put so
      * a concurrent lock-free reader's iteration remains valid. The link and its shape are
      * ONE atomic word and are read through @ref egress; see `egress_` for why.
+     *
+     * Aligned to two pointers so a 64-bit slot is exactly one cache line: with the name and
+     * mount run held as views (#1779) the natural size is 56 bytes, and that stride put one
+     * slot in eight's `seg_count`/`name_digest` pair across a line boundary on the descent's
+     * hot scan, which measured as a +2% hop at 64 links. A 32-bit slot stays its natural size.
      */
-    struct child_t {
+    struct alignas(2 * sizeof(void*)) child_t {
         /**
          * @brief How many `/`-separated segments @ref name has — the slot's OWN mount width.
          *
@@ -231,7 +240,15 @@ class child_registry_t {
          * overwhelming majority of candidates cost one compare.
          */
         std::uint64_t name_digest = 0;
-        std::string name; /**< @brief Qualified mount name, `"<module>/<name>"`. */
+        /**
+         * @brief Qualified mount name, `"<module>/<name>"` — a view of this slot's own TEXT
+         *        block, drawn from the registry's source by @ref add (#1779).
+         *
+         * The block holds the name followed by @ref mount_tlv's bytes, one allocation per
+         * slot, released only by the registry's destructor. Immutable after publish for the
+         * reason @ref mount_tlv gives, so a lock-free reader may hold either view.
+         */
+        std::string_view name;
         /**
          * @brief This slot's link AND its shape, from ONE acquire load.
          *
@@ -277,8 +294,12 @@ class child_registry_t {
          *         what lets the forward path read this vector as a span with NO lock while
          *         @ref add runs concurrently on a control thread; reassigning here would be
          *         a use-after-free on the reader (#684). Slot reuse under a DIFFERENT name
-         *         (should teardown ever recycle slots) inherits this invariant. */
-        std::vector<std::byte> mount_tlv;
+         *         (should teardown ever recycle slots) inherits this invariant.
+         *
+         *         A view into the slot's text block, right after @ref name's bytes (#1779):
+         *         empty when a segment has no packed spelling, and the hop then encodes the
+         *         name per frame. */
+        std::span<const std::byte> mount_tlv;
 
        private:
         friend class child_registry_t;
@@ -310,11 +331,11 @@ class child_registry_t {
      * — or a wider field that stops fitting — fails here instead of quietly costing the mount
      * descent eight more cache lines per frame at `N = 64`.
      */
-    struct child_slot_layout_oracle_t {
+    struct alignas(2 * sizeof(void*)) child_slot_layout_oracle_t {
         std::uint32_t seg_count = 0;           /**< @brief Mirrors @ref child_t::seg_count. */
         std::uint64_t name_digest = 0;         /**< @brief Mirrors @ref child_t::name_digest. */
-        std::string name;                      /**< @brief Mirrors @ref child_t::name. */
-        std::vector<std::byte> mount_tlv;      /**< @brief Mirrors @ref child_t::mount_tlv. */
+        std::string_view name;                 /**< @brief Mirrors @ref child_t::name. */
+        std::span<const std::byte> mount_tlv;  /**< @brief Mirrors @ref child_t::mount_tlv. */
         std::atomic<std::uintptr_t> egress{0}; /**< @brief Mirrors `child_t`'s egress word. */
     };
     static_assert(sizeof(child_t) == sizeof(child_slot_layout_oracle_t),
@@ -348,8 +369,11 @@ class child_registry_t {
      * discarded this bool and reported success, so `make_connection` minted a ghost UP-but-
      * unroutable connection under heap exhaustion (#930). Tests that mean to ignore an
      * allocation failure now write `(void)` and are unchanged in behaviour.
+     *
+     * A fresh slot copies @p name and its mount run into ONE block from the registry's
+     * source (#1779); a refused block is the same `false` a refused chunk is.
      */
-    [[nodiscard]] bool add(std::string name, transport_t& link) {
+    [[nodiscard]] bool add(std::string_view name, transport_t& link) {
         // Shape and link become ONE word here, so no reader can ever see one without the
         // other (#882). `bus()` is probed exactly once, on this control-plane call.
         //
@@ -375,20 +399,27 @@ class child_registry_t {
             // receive thread may hold it as a span right now, and the bytes a rebind
             // would write are identical anyway — `encode_mount_name` is pure and the
             // slot was matched by name. The assert pins that purity invariant.
-            assert(hit->mount_tlv == encode_mount_name(name));
+            assert(hit->mount_tlv.size() == encode_mount_name(name, nullptr));
             hit->egress_.store(egress, std::memory_order_release);
             // A tombstone coming back to life changes what a `dst` prefix resolves to, so it
             // moves the mount shape exactly as a fresh append does (#765).
             bump_generation();
             return true;
         }
-        std::vector<std::byte> mount = encode_mount_name(name);
         child_t* const slot = append();
         if (slot == nullptr) return false;  // no chunk — NOTHING is registered; see the docs
-        slot->name = std::move(name);
+        // The name and its mount run, in ONE block. A routable name is never empty, so the
+        // block is never zero-sized. Refused ⇒ the appended slot stays unpublished and is
+        // reused by the next append: NOTHING is registered, as for a refused chunk.
+        const std::size_t mount_bytes = encode_mount_name(name, nullptr);
+        auto* const text = static_cast<std::byte*>(src_->try_alloc(name.size() + mount_bytes, 1));
+        if (text == nullptr) return false;
+        std::memcpy(text, name.data(), name.size());
+        (void)encode_mount_name(name, text + name.size());
+        slot->name = std::string_view(reinterpret_cast<const char*>(text), name.size());
         slot->name_digest = digest_name(slot->name);
         slot->seg_count = static_cast<std::uint32_t>(segment_count(slot->name));
-        slot->mount_tlv = std::move(mount);
+        slot->mount_tlv = std::span<const std::byte>(text + name.size(), mount_bytes);
         slot->egress_.store(egress, std::memory_order_release);
         publish(slot);
         bump_generation();
@@ -654,8 +685,14 @@ class child_registry_t {
      * routable next-hop segment with no registry mutation and no stored peer state
      * — the peer table lives inside the bus transport and expires with its traffic.
      */
-    /** @brief The live child slot registered under exactly @p name (nullptr if none). */
-    [[nodiscard]] const child_t* entry_by_name(std::string_view name) const {
+    /**
+     * @brief The live child slot registered under exactly @p name (nullptr if none).
+     *
+     * Kept out of line and cold: on the forward path it is the no-ctx fallback only, and
+     * inlined it grew every `route_fwd_forward` instantiation by its whole scan (#1779).
+     */
+    [[nodiscard, gnu::cold, gnu::noinline]] const child_t* entry_by_name(
+        std::string_view name) const {
         const child_t* hit = nullptr;
         for_each([&](const child_t& c) {
             if (c.live() && c.name == name) {
@@ -701,14 +738,40 @@ class child_registry_t {
     }
 
     /**
-     * @brief Qualified name @p name pre-encoded as a run of NAME TLVs — the mount run.
+     * @brief Encode qualified name @p name (`"a/b"`) as a run of packed PATH segment
+     *        records, one per segment (`[u8 len][bytes]`, RFC-0018).
      *
-     * The same bytes a slot's `mount_tlv` holds, exposed so a link's receiver ctx can carry
-     * its OWN copy and a forward hop need not scan the table to find them. It is a pure
-     * function of @p name, so the copy cannot drift from the slot's. A control-plane call.
+     * Under the packed body there is only ONE form to emit — a record has no option byte —
+     * so the ADR-0062 §"Considered options" caveat this used to carry (emitting and MATCHING
+     * are different problems, because a peer may legally spell the same NAME with
+     * `opt.LL = 1`) no longer applies: emitting and matching are now the same bytes. A
+     * segment that is empty (it would spell the §5.4 escape) or too long for the record's
+     * `u8` length field yields an empty run, and the hop falls back to encoding the name
+     * per-frame.
+     *
+     * One pass serves both halves of @ref add's single allocation (#1779): with @p out null
+     * it only measures, otherwise it writes the run there (sized by the measuring call).
+     * Public because it is a pure function of @p name, and the router's origin spells its own
+     * first-hop local part with exactly these bytes (`fwd_router_t::adopt_path_label`).
+     *
+     * @return The run's byte count; `0` ⇔ the name has no packed spelling.
      */
-    [[nodiscard]] static std::vector<std::byte> mount_run_for(std::string_view name) {
-        return encode_mount_name(name);
+    [[nodiscard]] static std::size_t encode_mount_name(std::string_view name,
+                                                       std::byte* out) noexcept {
+        std::size_t n = 0;
+        for (std::size_t at = 0;;) {
+            const std::size_t slash = name.find('/', at);
+            const std::string_view seg = name.substr(
+                at, slash == std::string_view::npos ? std::string_view::npos : slash - at);
+            const std::size_t rec = wire::store_path_segment(
+                out == nullptr ? std::span<std::byte>{}
+                               : std::span<std::byte>(out + n, 1 + seg.size()),
+                seg);
+            if (rec == 0) return 0;
+            n += rec;
+            if (slash == std::string_view::npos) return n;
+            at = slash + 1;
+        }
     }
 
     /** @brief Number of slots — live children PLUS tombstones (test introspection). */
@@ -792,32 +855,6 @@ class child_registry_t {
 
    private:
     /**
-     * @brief Encode qualified name @p name (`"a/b"`) as a run of packed PATH segment
-     *        records, one per segment (`[u8 len][bytes]`, RFC-0018).
-     *
-     * Under the packed body there is only ONE form to emit — a record has no option byte —
-     * so the ADR-0062 §"Considered options" caveat this used to carry (emitting and MATCHING
-     * are different problems, because a peer may legally spell the same NAME with
-     * `opt.LL = 1`) no longer applies: emitting and matching are now the same bytes. A
-     * segment that is empty (it would spell the §5.4 escape) or too long for the record's
-     * `u8` length field yields an empty run, and the hop falls back to encoding the name
-     * per-frame.
-     */
-    [[nodiscard]] static std::vector<std::byte> encode_mount_name(std::string_view name) {
-        std::vector<std::byte> out;
-        std::size_t at = 0;
-        while (at <= name.size()) {
-            const std::size_t slash = name.find('/', at);
-            const std::string_view seg = name.substr(
-                at, slash == std::string_view::npos ? std::string_view::npos : slash - at);
-            if (!wire::emit_path_segment(out, seg)) return {};
-            if (slash == std::string_view::npos) break;
-            at = slash + 1;
-        }
-        return out;
-    }
-
-    /**
      * @brief True iff @p key equals the first @p k segments @p at yields, joined by `/`.
      *
      * Compared in place — no key is built, so the descent allocates nothing. This is the
@@ -827,7 +864,7 @@ class child_registry_t {
      * this key is this address's prefix.
      */
     template <class SegAt>
-    [[nodiscard]] static bool matches_prefix(const std::string& key, std::size_t k,
+    [[nodiscard]] static bool matches_prefix(std::string_view key, std::size_t k,
                                              SegAt& at) noexcept {
         std::size_t pos = 0;
         for (std::size_t i = 0; i < k; ++i) {

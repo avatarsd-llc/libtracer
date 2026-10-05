@@ -38,7 +38,6 @@
 #include <mutex>
 #include <span>
 #include <utility>
-#include <vector>
 
 #include "libtracer/mem_source.hpp"
 #include "libtracer/value.hpp"
@@ -106,16 +105,20 @@ class tx_handoff_t {
      *
      * @param depth      Records that may wait behind the writer. `0` makes the link
      *                   drop-and-count whenever a write is in flight — the zero-RAM form.
-     * @param src        Where slot storage is drawn from.
+     * @param src        Where slot storage is drawn from — the ring itself as well as each
+     *                   slot's bytes (#1779). A ring @p src refuses is a ring of NO slots: the
+     *                   link degrades to the `depth = 0` form, dropping and counting every
+     *                   record that meets a write in flight, and @ref capacity says so.
      * @param slot_bytes Bytes reserved in each slot up front, so a fill up to that size never
      *                   allocates at send time. `0` reserves nothing; a slot grows on first
      *                   use and keeps its capacity afterwards.
      */
-    tx_handoff_t(std::size_t depth, mem::block_source_t& src, std::size_t slot_bytes = 0) {
-        slots_.reserve(depth);
+    tx_handoff_t(std::size_t depth, mem::block_source_t& src, std::size_t slot_bytes = 0)
+        : slots_(src) {
+        if (!slots_.reserve(depth)) return;
         for (std::size_t i = 0; i < depth; ++i) {
-            slots_.emplace_back(src);
-            if (slot_bytes > 0) (void)slots_.back().buf.reserve(slot_bytes);
+            slot_t* const slot = slots_.emplace_back(src);  // reserved above: cannot grow
+            if (slot_bytes > 0) (void)slot->buf.reserve(slot_bytes);
         }
     }
 
@@ -220,16 +223,16 @@ class tx_handoff_t {
                                                        §6.9); empty for a copied record. */
     };
 
-    mutable std::mutex m_;      /**< @brief Guards every field below; never held across the
-                                            caller's I/O. */
-    std::vector<slot_t> slots_; /**< @brief The ring of queued records. */
-    std::size_t head_ = 0;      /**< @brief Oldest queued record's slot. */
-    std::size_t count_ = 0;     /**< @brief Queued records, the handed-out one included
-                                            until the next @ref next. */
-    std::size_t refused_ = 0;   /**< @brief Records refused since construction. */
-    std::size_t peak_ = 0;      /**< @brief High-water mark of `count_`. */
-    bool busy_ = false;         /**< @brief A writer is in flight. */
-    bool handed_ = false;       /**< @brief `slots_[head_]` is being written. */
+    mutable std::mutex m_;             /**< @brief Guards every field below; never held across the
+                                                   caller's I/O. */
+    mem::block_array_t<slot_t> slots_; /**< @brief The ring of queued records. */
+    std::size_t head_ = 0;             /**< @brief Oldest queued record's slot. */
+    std::size_t count_ = 0;            /**< @brief Queued records, the handed-out one included
+                                                   until the next @ref next. */
+    std::size_t refused_ = 0;          /**< @brief Records refused since construction. */
+    std::size_t peak_ = 0;             /**< @brief High-water mark of `count_`. */
+    bool busy_ = false;                /**< @brief A writer is in flight. */
+    bool handed_ = false;              /**< @brief `slots_[head_]` is being written. */
 };
 
 }  // namespace tr::net

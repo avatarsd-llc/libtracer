@@ -56,6 +56,7 @@
 #include "libtracer/route_handle.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
+#include "route_frame_builder.hpp"  // host-only frame builders (#1779)
 #include "test_support.hpp"
 #include "tlv_tree.hpp"  // host-only owning tree (#1829)
 

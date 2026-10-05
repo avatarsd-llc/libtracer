@@ -709,10 +709,6 @@ at the terminus, which is what makes a per-writer subject reachable at `peer_nam
 :project: libtracer
 ```
 
-```{doxygenfunction} tr::net::encode_mount_tlv
-:project: libtracer
-```
-
 ```{doxygenvariable} tr::net::kDstSegCacheSlots
 :project: libtracer
 ```

@@ -178,6 +178,29 @@ inline constexpr std::uint8_t kPackedEscapeKindLabel = 0x16;
     return true;
 }
 
+/**
+ * @brief Store one packed segment record `[u8 len][bytes]` for @p seg into @p out — the
+ *        span form of @ref emit_path_segment, for a caller filling a block it sized itself
+ *        (`child_registry_t`'s slot text, #1779).
+ *
+ * An EMPTY @p out only measures, so one walk both sizes and fills the block. The vector form
+ * above does not delegate here on purpose: its body is inlined on the graph's key builders,
+ * and re-shaping it re-partitions their inline budget (the `emit_header` precedent in
+ * `tlv_emit.hpp`). The two are pinned equal by `net_plane_refusal_test`.
+ *
+ * @return The record's byte count (`1 + seg.size()`); `0`, storing NOTHING, when @p seg is
+ *         empty or longer than @ref kPackedSegMaxBytes, or a non-empty @p out is too small.
+ */
+[[nodiscard]] inline std::size_t store_path_segment(std::span<std::byte> out,
+                                                    std::string_view seg) noexcept {
+    if (seg.empty() || seg.size() > kPackedSegMaxBytes) return 0;
+    if (out.empty()) return 1 + seg.size();
+    if (out.size() < 1 + seg.size()) return 0;
+    out[0] = static_cast<std::byte>(seg.size());
+    for (std::size_t i = 0; i < seg.size(); ++i) out[1 + i] = static_cast<std::byte>(seg[i]);
+    return 1 + seg.size();
+}
+
 /** @brief Text overload of @ref emit_path_segment (no temporary buffer). */
 [[nodiscard]] inline bool emit_path_segment(std::vector<std::byte>& out, std::string_view seg) {
     return emit_path_segment(out, std::span<const std::byte>(

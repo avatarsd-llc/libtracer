@@ -10,12 +10,10 @@
 #include <cassert>
 #include <chrono>
 #include <cstring>
-#include <memory_resource>
 #include <new>
 #include <optional>
 #include <type_traits>
 #include <utility>
-#include <vector>
 
 #include "fwd_reply.hpp"
 #include "libtracer/byteorder.hpp"
@@ -996,10 +994,10 @@ void fwd_router_t::reclaim_refused_route(std::string_view inbound_name,
     (void)graph_.evict_route_edges(inbound_name, frame.subspan(ref->off, ref->len));
 }
 
-bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_source_t* rx,
+bool fwd_router_t::add_child(std::string_view name, transport_t& link, mem::block_source_t* rx,
                              link_kind_t kind) {
     // ADR-0063 §3: serialize control-plane writers. The registry's scan-then-append and the
-    // child_rx_ deque's emplace_back are both non-atomic, and two creates arriving on two
+    // receiver chain's append are both non-atomic, and two creates arriving on two
     // different transports' receive threads are genuinely concurrent. Readers take nothing.
     const std::lock_guard ctl(ctl_m_);
     // ALWAYS-ON, and only for a bound that is REAL (#523). The width bound this replaced was
@@ -1029,8 +1027,44 @@ bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_sou
     // The link's catalog identity (#1650) is interned FIRST, so its one control-plane append
     // happens before anything is registered. Interned once here, every write the child carries
     // hands the graph a pointer and nothing else; stored on both arms below, before publication.
-    const link_kind_t* const interned_kind = intern_kind(kind);
-    if (!registry_.add(name, link)) return false;
+    //
+    // The router's own state for this registration draws from the label plane's source
+    // (#1779), and every allocation is taken BEFORE anything changes or undone at once: the
+    // kind record and a bus mount's token cache up front, the ctx right after the registry
+    // slot it views. A refusal is this function's ordinary `false`, with nothing registered.
+    // A kind record already interned is kept; it is what the next such registration finds.
+    const std::optional<const link_kind_t*> interned = intern_kind(kind);
+    if (!interned) return false;
+    const link_kind_t* const interned_kind = *interned;
+    bus_link_t* const bus = bus_of(link);
+    // A bus mount's per-peer token cache, drawn up front on every bus registration. A name keeps
+    // ONE cache for the router's life (see `peer_tokens_own`), so on a re-add whose ctx already
+    // has one the fresh block simply goes back below — a control-plane alloc/free pair, in
+    // exchange for one undo path instead of two.
+    bus_token_cache_t* tokens = nullptr;
+    if (bus != nullptr) {
+        void* const raw =
+            label_src_->try_alloc(sizeof(bus_token_cache_t), alignof(bus_token_cache_t));
+        if (raw == nullptr) return false;
+        tokens = ::new (raw) bus_token_cache_t();
+    }
+    const auto drop_tokens = [&] {
+        if (tokens == nullptr) return;
+        tokens->~bus_token_cache_t();
+        label_src_->release(tokens, sizeof(bus_token_cache_t), alignof(bus_token_cache_t));
+    };
+    if (!registry_.add(name, link)) {
+        drop_tokens();
+        return false;
+    }
+    child_rx_ctx_t* const ctx_p = acquire_ctx(name, rx);
+    if (ctx_p == nullptr) {
+        // Only a name with no ctx at all gets here, so its slot was not live before this
+        // call: tombstoning it again is the whole undo.
+        (void)registry_.erase(name);
+        drop_tokens();
+        return false;
+    }
     // Capability-matched receiver (ADR-0042 §1 / ADR-0044): a BUS link delivers
     // frames tagged with the SENDING peer's name, which becomes the hop's inbound
     // NAME — so the `src` grown on a forward (and the link a terminus reply goes
@@ -1042,7 +1076,7 @@ bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_sou
     // wires every child point-to-point, and the whole peer-named arm below — the two
     // peer-lifecycle notifiers, the peer-named receivers, the `child_rx_ctx_t::bus` stamp
     // `resolve_peer_name` keys off — is discarded at compile time rather than branched over.
-    if (bus_link_t* const bus = bus_of(link)) {
+    if (bus != nullptr) {
         // A reassembling bus that delivers ropes (ADR-0053 §5) hands its group up
         // as-is — zero-copy; a span-only bus keeps the borrowed peer-named path.
         // A bus frame arrives tagged with the sending peer's name — but a PEER has no
@@ -1074,7 +1108,7 @@ bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_sou
         // A bound route over a bus therefore fails validation at this hop and the origin falls
         // back to canonical, which is exactly what the canonical spelling already does with the
         // bus link's own name.
-        child_rx_ctx_t& bctx = acquire_ctx(name, rx);
+        child_rx_ctx_t& bctx = *ctx_p;
         // The bus facet the frame paths resolve a peer handle's NAME through (#1294) —
         // recorded before publication, like every other resolved-once fact on this ctx.
         bctx.bus.store(bus, std::memory_order_relaxed);
@@ -1088,9 +1122,9 @@ bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_sou
         // reader on the receive thread can hold its address across a re-add. `acquire_ctx`
         // already cleared its contents; what is stored here is the facet flag that tells
         // `link_id_of` which tier this ctx is.
-        if (bctx.peer_tokens_own == nullptr)
-            bctx.peer_tokens_own = std::make_unique<bus_token_cache_t>();
-        bctx.peer_tokens.store(bctx.peer_tokens_own.get(), std::memory_order_relaxed);
+        if (bctx.peer_tokens_own == nullptr) std::swap(bctx.peer_tokens_own, tokens);
+        drop_tokens();  // the fresh cache, unless the ctx just took it
+        bctx.peer_tokens.store(bctx.peer_tokens_own, std::memory_order_relaxed);
         publish_ctx(bctx);
         // The session-identity pair (#1223 step 2). Arrival is a NEW seam and only an
         // ACCEPTING listener fires it — `set_peer_up_notifier` is what turns ADR-0044's
@@ -1132,8 +1166,8 @@ bool fwd_router_t::add_child(std::string name, transport_t& link, mem::block_sou
         return true;
     }
     // Point-to-point: the inbound NAME is fixed per child, carried by a stable
-    // per-child ctx (child_rx_ holds the address for the transport's lifetime).
-    child_rx_ctx_t& ctx = acquire_ctx(name, rx);
+    // per-child ctx (the chain holds the address for the router's lifetime).
+    child_rx_ctx_t& ctx = *ctx_p;
     // No bus facet on this tenancy — CLEARED rather than left, because a re-add rebinds
     // this ctx (#884) and a name that used to be a bus mount must not keep answering with
     // the facet it no longer has (#1294).
@@ -1347,13 +1381,17 @@ void fwd_router_t::link_down(std::string_view link_name) {
     cancel_awaits_locked(link_name, false);
 }
 
-std::string fwd_router_t::session_anchor_id(std::string_view mount, std::string_view peer) {
-    std::string id;
-    id.reserve(mount.size() + peer.size() + 2);
-    id += ':';
-    id += mount;
-    id += '/';
-    id += peer;
+session_anchor_id_t fwd_router_t::session_anchor_id(std::string_view mount,
+                                                    std::string_view peer) noexcept {
+    session_anchor_id_t id;
+    // Over one segment record ⇒ EMPTY: no anchor key could hold it (see the declaration).
+    if (mount.size() + peer.size() + 2 > id.bytes.size()) return id;
+    char* out = id.bytes.data();
+    *out++ = ':';
+    out = std::copy(mount.begin(), mount.end(), out);
+    *out++ = '/';
+    out = std::copy(peer.begin(), peer.end(), out);
+    id.len = static_cast<std::size_t>(out - id.bytes.data());
     return id;
 }
 
@@ -1363,8 +1401,10 @@ void fwd_router_t::bus_peer_up(const child_rx_ctx_t& ctx, std::string_view peer)
     // makes. Read `retired` the way the frame paths do.
     if (ctx.retired.load(std::memory_order_acquire)) return;
     // PATH_IN_USE (the session is already anchored) is the only error this can answer, and
-    // the right response to it is to keep the anchor that exists. Discarded by value.
-    (void)graph_.register_session_anchor(session_anchor_id(ctx.name, peer));
+    // the right response to it is to keep the anchor that exists. Discarded by value. An id
+    // too long for one key record anchors nothing, as the departure below finds nothing.
+    const session_anchor_id_t id = session_anchor_id(ctx.name, peer);
+    if (id.len != 0) (void)graph_.register_session_anchor(id);
 }
 
 void fwd_router_t::bus_peer_down(const child_rx_ctx_t& ctx, peer_handle_t handle,
@@ -1431,14 +1471,16 @@ namespace {
 }  // namespace
 
 fwd_router_t::child_rx_ctx_t* fwd_router_t::ctl_ctx_by_name(std::string_view name) {
-    // The owning deque, not the chain: this is the control plane, it holds `ctl_m_`, and it
-    // must see a TOMBSTONE — which is exactly what the published walks refuse to return.
-    for (child_rx_ctx_t& c : child_rx_)
-        if (c.name == name) return &c;
+    // The chain read WITHOUT the tombstone test: this is the control plane, it holds `ctl_m_`
+    // (the only writer of the links), and it must see a TOMBSTONE — which is exactly what the
+    // published walks refuse to return.
+    for (child_rx_ctx_t* c = rx_head_.load(std::memory_order_relaxed); c != nullptr;
+         c = c->next.load(std::memory_order_relaxed))
+        if (c->name == name) return c;
     return nullptr;
 }
 
-fwd_router_t::child_rx_ctx_t& fwd_router_t::acquire_ctx(const std::string& name,
+fwd_router_t::child_rx_ctx_t* fwd_router_t::acquire_ctx(std::string_view name,
                                                         mem::block_source_t* rx) {
     if (child_rx_ctx_t* const hit = ctl_ctx_by_name(name)) {
         // One ctx per NAME, for the router's life — `child_registry_t::add`'s rule, one layer
@@ -1482,17 +1524,36 @@ fwd_router_t::child_rx_ctx_t& fwd_router_t::acquire_ctx(const std::string& name,
         // `child_registry_t::add` gives about its own `mount_tlv`: a reader on a receive
         // thread may be holding either right now, and the bytes a rewrite would store are
         // identical anyway — the mount run is a pure function of the name.
-        return *hit;
+        return hit;
     }
-    child_rx_ctx_t& fresh = child_rx_.emplace_back(this, name, registry_.mount_run_for(name), rx);
-    fresh.entry = registry_.entry_by_name(name);
+    // A fresh node: one block from the label plane's source (#1779). It VIEWS its registry
+    // slot's name and mount run rather than copying them — the slot is keyed by this name for
+    // the registry's life and its text never changes, which is the property `entry` relies on.
+    const child_registry_t::child_t* const entry = registry_.entry_by_name(name);
+    void* const raw = label_src_->try_alloc(sizeof(child_rx_ctx_t), alignof(child_rx_ctx_t));
+    if (raw == nullptr || entry == nullptr) {
+        if (raw != nullptr)
+            label_src_->release(raw, sizeof(child_rx_ctx_t), alignof(child_rx_ctx_t));
+        return nullptr;
+    }
+    child_rx_ctx_t& fresh = *::new (raw) child_rx_ctx_t(this, entry->name, entry->mount_tlv, rx);
+    fresh.entry = entry;
     // The §8.3 ceiling needs an identity a single far side cannot spend on everyone else's
     // behalf, and a point-to-point child has none of its own (#1294 mints handles for a bus
     // facet only). `kSolePeerHandle` is one constant for the whole node, so every child would
     // share one budget — precisely the case the ceiling exists to prevent. One handle per
     // child, minted here, is that doctrine applied at the granularity that makes it true.
     fresh.label_peer.store(next_label_peer_bits(), std::memory_order_relaxed);
-    return fresh;
+    // Linked NOW, still retired: a reader that reaches it skips it, and `publish_ctx`'s
+    // release-clear is its publication edge — the same one a revived tombstone takes.
+    fresh.retired.store(true, std::memory_order_relaxed);
+    if (rx_tail_ == nullptr) {
+        rx_head_.store(&fresh, std::memory_order_release);
+    } else {
+        rx_tail_->next.store(&fresh, std::memory_order_release);
+    }
+    rx_tail_ = &fresh;
+    return &fresh;
 }
 
 std::uint64_t fwd_router_t::next_label_peer_bits() noexcept {
@@ -1504,35 +1565,30 @@ std::uint64_t fwd_router_t::next_label_peer_bits() noexcept {
     return (static_cast<std::uint64_t>(gen) << 32);
 }
 
-const link_kind_t* fwd_router_t::intern_kind(link_kind_t kind) {
+std::optional<const link_kind_t*> fwd_router_t::intern_kind(link_kind_t kind) {
     if (kind.kind.empty()) return nullptr;
-    for (const kind_rec_t& r : kinds_) {
-        if (r.view.is(kind.kind, kind.role)) return &r.view;
+    for (const kind_rec_t* r = kinds_; r != nullptr; r = r->next) {
+        if (r->view.is(kind.kind, kind.role)) return &r->view;
     }
     // A miss appends, at most once per distinct pair — the same control-plane allocation
-    // `acquire_ctx` makes for a fresh name, and bounded by the catalog, not by traffic.
-    kind_rec_t& r = kinds_.emplace_back();
-    r.bytes.assign(kind.kind);
-    r.view = link_kind_t{.kind = r.bytes, .role = kind.role};
-    return &r.view;
+    // `acquire_ctx` makes for a fresh name, and bounded by the catalog, not by traffic. One
+    // block: the record, then its `kind` bytes (#1779).
+    void* const raw =
+        label_src_->try_alloc(sizeof(kind_rec_t) + kind.kind.size(), alignof(kind_rec_t));
+    if (raw == nullptr) return std::nullopt;
+    auto* const text = static_cast<char*>(raw) + sizeof(kind_rec_t);
+    std::memcpy(text, kind.kind.data(), kind.kind.size());
+    kinds_ = ::new (raw) kind_rec_t{
+        .view = link_kind_t{.kind = std::string_view(text, kind.kind.size()), .role = kind.role},
+        .next = kinds_};
+    return &kinds_->view;
 }
 
 void fwd_router_t::publish_ctx(child_rx_ctx_t& ctx) noexcept {
-    // Release-published either way: a reader that reaches the node sees a fully built one.
-    if (ctx.linked) {
-        // A revived tombstone is already reachable, so clearing the flag IS the publish —
-        // linking it a second time would splice the chain onto itself and lose every node
-        // between here and the tail.
-        ctx.retired.store(false, std::memory_order_release);
-        return;
-    }
-    if (rx_tail_ == nullptr) {
-        rx_head_.store(&ctx, std::memory_order_release);
-    } else {
-        rx_tail_->next.store(&ctx, std::memory_order_release);
-    }
-    rx_tail_ = &ctx;
-    ctx.linked = true;
+    // Every node is already on the chain (`acquire_ctx` links a fresh one retired), so
+    // clearing the flag IS the publish, and a reader that reaches the node sees a fully built
+    // one. Fresh and revived nodes take the same edge.
+    ctx.retired.store(false, std::memory_order_release);
 }
 
 const fwd_router_t::child_rx_ctx_t* fwd_router_t::ctx_by_name(std::string_view link_name) const {
@@ -1551,9 +1607,8 @@ const fwd_router_t::child_rx_ctx_t* fwd_router_t::ctx_by_conn_slot(std::uint32_t
     // frame rather than adding to it: a bound hop runs this instead of `resolve_mount_at`, not
     // as well as, so the per-hop work is strictly the smaller of the two (RFC-0024 §3.4).
     //
-    // Walked over the PUBLISHED chain, never the owning deque: `add_child` appends from a
-    // control thread while this runs on a receive thread, and iterating the deque under no
-    // lock is a race on its chunk map (ADR-0063 erratum 3's ruling, applied to a container).
+    // Walked over the PUBLISHED chain with an acquire per link: `add_child` appends from a
+    // control thread while this runs on a receive thread (ADR-0063 erratum 3's ruling).
     //
     // A TOMBSTONED node is skipped before its slot is even compared (#884), and the acquire on
     // that test is what orders the compare against a concurrent rebind. Skipping is not
@@ -1662,11 +1717,14 @@ bool fwd_router_t::adopt_binding(graph::path_t& path, std::string_view link_name
     // origin is the one hop no peer ever sees (§4.1).
     const std::optional<wire::path_ref_element_t> own = connection_ref(link_name);
     if (!own) return false;
-    std::vector<wire::path_ref_element_t> elements;
-    elements.reserve(n + 1);
-    elements.push_back(*own);
-    for (std::size_t i = 0; i < n; ++i) elements.push_back(wire::path_ref_element_at(refs, i));
-    return path.bind(elements);
+    // Scratch from the label plane's source (#1779): a refusal leaves the path canonical, the
+    // same non-event a reply without a mint is.
+    mem::block_array_t<wire::path_ref_element_t> elements(*label_src_);
+    if (!elements.reserve(n + 1)) return false;
+    (void)elements.push_back(*own);  // reserved above: cannot grow
+    for (std::size_t i = 0; i < n; ++i)
+        (void)elements.push_back(wire::path_ref_element_at(refs, i));
+    return path.bind(std::span<const wire::path_ref_element_t>(elements.data(), elements.size()));
 }
 
 std::optional<fwd_router_t::bound_dispatch_t> fwd_router_t::bound_dispatch(
@@ -1678,10 +1736,15 @@ std::optional<fwd_router_t::bound_dispatch_t> fwd_router_t::bound_dispatch(
     // line a forwarder runs, and having ONE of them is what keeps the two from drifting.
     transport_t* const link = bound_egress(b.elements.front(), {}, right);
     if (link == nullptr) return std::nullopt;
-    bound_dispatch_t out;
-    out.link = link;
-    if (!wire::emit_path_ref(out.dst,
-                             std::span<const wire::path_ref_element_t>(b.elements).subspan(1)))
+    // The residual's `PATH_REF`, written straight into a block of exactly its size from the
+    // label plane's source (#1779); a refusal is the same `nullopt` a stale element is.
+    const auto residual = std::span<const wire::path_ref_element_t>(b.elements).subspan(1);
+    if (residual.size() > wire::kMaxPathRefElements) return std::nullopt;
+    bound_dispatch_t out{.link = link, .dst = mem::block_array_t<std::byte>(*label_src_)};
+    const std::size_t bytes = wire::path_ref_wire_bytes(residual.size());
+    if (!out.dst.reserve(bytes)) return std::nullopt;
+    for (std::size_t i = 0; i < bytes; ++i) (void)out.dst.push_slot();  // reserved: cannot grow
+    if (!wire::emit_path_ref_into(std::span<std::byte>(out.dst.data(), bytes), residual))
         return std::nullopt;
     return out;
 }
@@ -1706,28 +1769,6 @@ namespace {
         return c.payload();
     }
     return {};
-}
-
-/**
- * @brief Append @p link_name's mount run to @p out as LITERAL segment records.
- *
- * The origin's own first-hop local part, spelled the only way an origin with no mint table can
- * spell it (§4.1, ruled 2026-08-24). A registry name is the qualified `"<module>/<name>"` run,
- * so it is split on `/` exactly as the canonical parse splits the same run out of a path string.
- *
- * @return false, having appended a prefix of the run, when the name has no packed spelling — an
- *         empty run or an empty/over-long segment. Callers build into a scratch buffer they drop.
- */
-[[nodiscard]] bool emit_name_segments(std::vector<std::byte>& out, std::string_view link_name) {
-    if (link_name.empty()) return false;
-    std::size_t pos = 0;
-    for (;;) {
-        const std::size_t slash = link_name.find('/', pos);
-        const std::size_t end = slash == std::string_view::npos ? link_name.size() : slash;
-        if (!wire::emit_path_segment(out, link_name.substr(pos, end - pos))) return false;
-        if (slash == std::string_view::npos) return true;
-        pos = slash + 1;
-    }
 }
 
 /**
@@ -1762,42 +1803,58 @@ namespace {
     const wire::path_element_census_t census = wire::path_element_census(src);
     if (!census.well_formed || census.labels == 0) return false;
     // Built into a fresh buffer and handed over whole: the cache validates what it is given, and
-    // a half-built body must never be what it validates.
-    std::vector<std::byte> body;
-    body.reserve(link_name.size() + 1 + src.size());
-    if (!emit_name_segments(body, link_name)) return false;
-    body.insert(body.end(), src.begin(), src.end());
-    return path.cache_path_label(body);
+    // a half-built body must never be what it validates. The head is this node's own first-hop
+    // local part as LITERAL segment records — the registry's mount-run spelling of the link
+    // name, since an origin with no mint table can spell it no other way (§4.1, ruled
+    // 2026-08-24). Scratch from the label plane's source (#1779); a refusal stays canonical.
+    const std::size_t head = child_registry_t::encode_mount_name(link_name, nullptr);
+    if (head == 0) return false;  // no packed spelling: an empty or over-long segment
+    mem::block_array_t<std::byte> body(*label_src_);
+    if (!body.reserve(head + src.size())) return false;
+    for (std::size_t i = 0; i < head; ++i) (void)body.push_slot();  // reserved: cannot grow
+    (void)child_registry_t::encode_mount_name(link_name, body.data());
+    (void)body.append(src.data(), src.size());
+    return path.cache_path_label(std::span<const std::byte>(body.data(), body.size()));
 }
 
 [[gnu::cold]] std::optional<fwd_router_t::label_dispatch_t> fwd_router_t::label_dispatch(
     const graph::path_t& path) const {
     const graph::path_label_cache_t& c = path.path_label();
-    if (!c.cached || c.body.empty()) return std::nullopt;
+    // An empty body needs no test of its own: its head is the sentinel alone, which no mount
+    // matches, so the descent below answers "no mount".
+    if (!c.cached) return std::nullopt;
     const std::span<const std::byte> body{c.body.data(), c.body.size()};
 
     // The LITERAL head is the only part this node resolves: everything from the first label
-    // element on belongs to hops downstream, which is the whole point of holding it.
-    std::vector<std::string_view> head;
-    wire::path_element_cursor_t walk(body);
-    while (const std::optional<wire::path_element_t> el = walk.next()) {
-        if (el->kind != wire::path_element_kind_t::SEGMENT) break;
-        head.push_back(detail::as_string_view(el->payload));
-    }
-    if (head.empty()) return std::nullopt;  // a head this node cannot consume is not this node's
-    // The descent asks whether anything exists BELOW the matched mount, and here the answer is
-    // "the labelled residual". An empty name answers exactly that and matches no registered
-    // child, so the sentinel cannot lengthen the run it is only there to prove is non-empty.
-    head.emplace_back();
-    const mount_hit_t hit = resolve_mount_segs(registry_, head);
-    // No mount (this node terminates the head), a bus link's own name with a residual below it,
-    // and a bus PEER are the same answer: no directed labelled egress from here. A bus child is
-    // never labelled at all — one label per child would stand for a different address per peer.
-    if (hit.link == nullptr || hit.rejected || !hit.peer.empty()) return std::nullopt;
-    if (hit.strip_k == 0 || hit.strip_k + 1 > head.size()) return std::nullopt;
+    // element on belongs to hops downstream, which is the whole point of holding it. It is read
+    // LAZILY, the way `split_subscriber_target` reads a key, so no segment table is built
+    // (#1779). Past the head the descent is told "" once and then "nothing": it asks whether
+    // anything exists BELOW the matched mount, and here the answer is "the labelled residual".
+    // An empty name matches no registered child, so the sentinel cannot lengthen the run it is
+    // only there to prove is non-empty. The bytes are the path's, so retaining is the identity.
+    const auto head_at = [body](std::size_t i) -> std::optional<std::string_view> {
+        wire::path_element_cursor_t walk(body);
+        std::optional<wire::path_element_t> el;
+        for (std::size_t k = 0; k <= i; ++k) {
+            el = walk.next();
+            if (!el || el->kind != wire::path_element_kind_t::SEGMENT)
+                return k == i ? std::optional<std::string_view>(std::string_view{}) : std::nullopt;
+        }
+        return detail::as_string_view(el->payload);
+    };
+    const mount_hit_t hit = resolve_mount_by(
+        registry_, head_at, [&head_at](std::size_t i) { return head_at(i).value_or(""); });
+    // No mount (this node terminates the head — an empty head included), a bus link's own name
+    // with a residual below it, and a bus PEER are the same answer: no directed labelled egress
+    // from here. A bus child is never labelled at all — one label per child would stand for a
+    // different address per peer.
+    if (hit.link == nullptr || hit.rejected || !hit.peer.empty() || hit.strip_k == 0)
+        return std::nullopt;
 
     // Where the consumed run ends in the CACHED bytes — walked again rather than remembered,
-    // because the run is a count of elements and the residual is a byte offset.
+    // because the run is a count of elements and the residual is a byte offset. The descent
+    // matched `strip_k` LITERAL segments (the sentinel and everything past it match no slot),
+    // so the first `strip_k` elements are those segments.
     std::size_t residual_at = 0;
     std::size_t consumed = 0;
     wire::path_element_cursor_t cut(body);
@@ -1808,18 +1865,21 @@ namespace {
     }
     if (consumed != hit.strip_k || residual_at >= body.size()) return std::nullopt;
 
-    label_dispatch_t out;
-    out.link = hit.link;
-    // The 4-byte `PATH` header, then the residual bytes. Spelled as `emit_header` + insert
-    // rather than `emit_tlv`, and the reason is measured, not stylistic: one more inlinable
-    // `emit_tlv` call in THIS TU re-partitions GCC's inline budget and pushes the hot
-    // `route_fwd_forward<rope_cursor>` back from 2620 B to the 2939 B shape the symbol ratchet
-    // re-pinned away from — on a hop that executes none of this code. The bytes are identical:
-    // `emit_tlv`'s only extra act is widening the length field past 0xFFFF, and a labelled body
-    // is bounded by `graph::kMaxPathBytes` long before that.
-    wire::emit_header(out.dst, wire::type_t::PATH, wire::opt_t{}, body.size() - residual_at);
-    out.dst.insert(out.dst.end(), body.begin() + static_cast<std::ptrdiff_t>(residual_at),
-                   body.end());
+    label_dispatch_t out{.link = hit.link, .dst = mem::block_array_t<std::byte>(*label_src_)};
+    // The 4-byte `PATH` header, then the residual bytes, into one block of exactly that size
+    // from the label plane's source (#1779). Spelled as `store_header` + append rather than
+    // `emit_tlv`, and the reason is measured, not stylistic: one more inlinable `emit_tlv` call
+    // in THIS TU re-partitions GCC's inline budget and pushes the hot
+    // `route_fwd_forward<rope_cursor>` back to the shape the symbol ratchet re-pinned away
+    // from — on a hop that executes none of this code. The bytes are identical: `emit_tlv`'s
+    // only extra act is widening the length field past 0xFFFF, and a labelled body is bounded
+    // by `graph::kMaxPathBytes` long before that.
+    const std::span<const std::byte> residual = body.subspan(residual_at);
+    std::array<std::byte, 4> header{};
+    wire::store_header(header, wire::type_t::PATH, wire::opt_t{}, residual.size());
+    if (!out.dst.reserve(header.size() + residual.size())) return std::nullopt;
+    (void)out.dst.append(header.data(), header.size());  // reserved above: cannot grow
+    (void)out.dst.append(residual.data(), residual.size());
     return out;
 }
 
@@ -2559,16 +2619,16 @@ std::span<const std::byte> fwd_router_t::child_label_record(std::string_view inb
     const std::optional<wire::path_label_t> label = labels_->mint(peer, *target);
     if (!label) return {};  // §8.3 ceiling/capacity/all-retired ⇒ refuse-new, NOT an error
 
-    // Encode once, into the ctx, so every later reply is the load above. `emit_path_label`
-    // cannot fail on a label the table minted (a minted label is always `valid()`), and the
-    // vector is local because the ctx's storage is a fixed 7-byte array.
-    std::vector<std::byte> rec;
-    if (!wire::emit_path_label(rec, *label) || rec.size() != wire::kPathLabelRecordBytes) {
+    // Encode once, into the ctx, so every later reply is the load above. The record cannot
+    // be refused for a label the table minted (a minted label is always `valid()`); it is
+    // built in place, a fixed 7-byte array like the ctx's own storage.
+    const auto rec = wire::path_label_record(*label);
+    if (!rec) {
         (void)labels_->release(*label);  // spelling refused ⇒ do not strand the slot
         return {};
     }
     auto& ctx_mut = const_cast<child_rx_ctx_t&>(ctx);
-    std::copy(rec.begin(), rec.end(), ctx_mut.path_label_tlv.begin());
+    ctx_mut.path_label_tlv = *rec;
     ctx_mut.path_label_for.store(peer.bits(), std::memory_order_relaxed);
     // Release-store LAST: the bytes AND the owning peer are whole before anything can observe
     // the label as present, so a reader that sees it never pairs it with the wrong owner.
@@ -2614,13 +2674,13 @@ std::span<const std::byte> fwd_router_t::terminus_label_record(std::string_view 
     // has not yet spelled it.
     const std::optional<wire::path_label_t> label = labels_->mint(peer, target);
     if (!label) return {};  // §8.3 ceiling/capacity/all-retired ⇒ refuse-new, NOT an error
-    std::vector<std::byte> rec;
-    if (!wire::emit_path_label(rec, *label) || rec.size() != wire::kPathLabelRecordBytes) {
+    const auto rec = wire::path_label_record(*label);
+    if (!rec) {
         (void)labels_->release(*label);  // spelling refused ⇒ do not strand the slot
         return {};
     }
     auto& ctx_mut = const_cast<child_rx_ctx_t&>(*ctx);
-    std::copy(rec.begin(), rec.end(), ctx_mut.terminus_label_tlv.begin());
+    ctx_mut.terminus_label_tlv = *rec;
     ctx_mut.terminus_label_for.store(peer.bits(), std::memory_order_relaxed);
     ctx_mut.terminus_label_target.store(want, std::memory_order_relaxed);
     // Release-store LAST: the bytes, the owning peer and the residual it stands for are all
@@ -2720,9 +2780,9 @@ void fwd_router_t::route_fwd_forward(std::string_view inbound_name,
     // The mount run comes off the LINK's own receiver ctx — no registry lookup at all. That
     // removes one of the two per-frame linear scans a hop used to pay (`entry_by_name`,
     // fetching this same run out of the table); `docs/performance.md` §2b measures it. The
-    // ctx is created once per child in add_child and lives in a deque, so its address and
-    // its bytes are stable for the link's lifetime — unlike a registry SLOT pointer, which
-    // an append would invalidate (#521). A frame delivered through the public on_frame (no
+    // ctx is created once per child in add_child and lives on the router's chain, so its
+    // address is stable for the router's lifetime, and its bytes are its registry slot's
+    // immutable text (#1779). A frame delivered through the public on_frame (no
     // ctx: tests, SDK hosts, a link wired outside add_child) still resolves by name.
     const std::span<const std::byte> mount =
         inbound_ctx != nullptr ? std::span<const std::byte>(inbound_ctx->mount_tlv)
@@ -3664,26 +3724,37 @@ graph::result_t<void> fwd_router_t::subscribe_toward(const graph::path_t& produc
     // single copy every delivery then clones by refcount (ADR-0041 §2). Both owned copies
     // below draw from the injected `flat` seam (#1582), the same store the wire door's
     // un-injected default lands on; a refusal is BACKPRESSURE by value, never a heap fallback.
+    //
+    // Each TLV is written straight into its owned segment (#1779): no intermediate buffer,
+    // one copy of the residual. The header widens past 0xFFFF exactly as `emit_tlv` would.
     const std::span<const std::byte> residual = split.residual;
-    std::vector<std::byte> route_tlv;
-    wire::emit_tlv(route_tlv, wire::type_t::PATH, wire::opt_t{}, residual);
-    const auto route_view = view::over_bytes(route_tlv, *flat_);
-    if (!route_view) return std::unexpected(graph::status_t::BACKPRESSURE);
+    const wire::opt_t route_opt{.ll = residual.size() > 0xFFFFu};
+    const std::size_t route_head = wire::header_bytes(route_opt);
+    view::segment_ptr_t route_seg = view::segment_alloc(*flat_, route_head + residual.size());
+    if (!route_seg) return std::unexpected(graph::status_t::BACKPRESSURE);
+    wire::store_header(route_seg->bytes, wire::type_t::PATH, route_opt, residual.size());
+    if (!residual.empty())
+        std::memcpy(route_seg->bytes.data() + route_head, residual.data(), residual.size());
+    const view::view_t route_view = view::view_t::over(std::move(route_seg));
 
     // A minimal SUBSCRIBER composite — the same admission door as the wire append
     // (subscribe_wire parses it once; no compact opt-in, deliveries ride the
-    // full-route FWD{WRITE} form).
-    std::vector<std::byte> sub_tlv;
-    wire::emit_tlv(sub_tlv, wire::type_t::SUBSCRIBER, wire::opt_t{.pl = true}, {});
-    const auto sub_view = view::over_bytes(sub_tlv, *flat_);
-    if (!sub_view) return std::unexpected(graph::status_t::BACKPRESSURE);
+    // full-route FWD{WRITE} form). An empty body: the header alone.
+    const wire::opt_t sub_opt{.pl = true};
+    view::segment_ptr_t sub_seg = view::segment_alloc(*flat_, wire::header_bytes(sub_opt));
+    if (!sub_seg) return std::unexpected(graph::status_t::BACKPRESSURE);
+    wire::store_header(sub_seg->bytes, wire::type_t::SUBSCRIBER, sub_opt, 0);
+    const view::view_t sub_view = view::view_t::over(std::move(sub_seg));
 
     // The mount's own interned token rides along (#1437). This door builds no SUBSCRIBER PATH
     // child, so the graph's mount arm never runs and never gets the chance to swap the token
     // itself: the link handed over IS the mount, and the token beside it is the mount's, so
     // the index insert is a subscript rather than the name door's scan of the live slots.
     // Un-carried, this was the ONE caller paying that scan per subscribe in steady state.
-    return graph_.subscribe_wire(*v, *sub_view, *route_view, std::string(split.link), {}, {},
+    //
+    // The one owning string left in this file is the graph API's own parameter type
+    // (`subscribe_wire` takes the link by `std::string`); it goes when that signature does.
+    return graph_.subscribe_wire(*v, sub_view, route_view, std::string(split.link), {}, {},
                                  split.token);
 }
 
@@ -3884,6 +3955,26 @@ fwd_router_t::~fwd_router_t() {
         o = next;
     }
     origins_.store(nullptr, std::memory_order_relaxed);
+    // The router's registration state goes back to the label plane's source (#1779): every
+    // receiver ctx with its bus token cache, then the interned kind records. Nothing reads
+    // them any more — the transports outlive no router they are registered with.
+    for (child_rx_ctx_t* c = rx_head_.load(std::memory_order_relaxed); c != nullptr;) {
+        child_rx_ctx_t* const next = c->next.load(std::memory_order_relaxed);
+        if (bus_token_cache_t* const t = c->peer_tokens_own) {
+            t->~bus_token_cache_t();
+            label_src_->release(t, sizeof(bus_token_cache_t), alignof(bus_token_cache_t));
+        }
+        c->~child_rx_ctx_t();
+        label_src_->release(c, sizeof(child_rx_ctx_t), alignof(child_rx_ctx_t));
+        c = next;
+    }
+    for (kind_rec_t* r = kinds_; r != nullptr;) {
+        kind_rec_t* const next = r->next;
+        const std::size_t bytes = sizeof(kind_rec_t) + r->view.kind.size();
+        r->~kind_rec_t();
+        label_src_->release(r, bytes, alignof(kind_rec_t));
+        r = next;
+    }
 }
 
 std::size_t fwd_router_t::pending_awaits() const {

@@ -41,13 +41,10 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
-#include <deque>
 #include <mutex>
 #include <optional>
 #include <span>
-#include <string>
 #include <string_view>
-#include <vector>
 
 #include "libtracer/child_registry.hpp"
 #include "libtracer/frame.hpp"
@@ -267,6 +264,23 @@ struct router_planes_t {
      * safe on the same terms as @p flat. Must outlive the router.
      */
     mem::mem_backend_t* retained = nullptr;
+};
+
+/**
+ * @brief A session-anchor id (`:<mount>/<peer>`) in a fixed buffer — what
+ *        @ref fwd_router_t::session_anchor_id returns (#1779).
+ *
+ * Bounded by the one packed segment record the anchor key is stored as, so it never needs
+ * an allocation. Reads as a `std::string_view`; an id that would not fit reads EMPTY.
+ */
+struct session_anchor_id_t {
+    std::array<char, wire::kPackedSegMaxBytes> bytes{}; /**< @brief The id's characters. */
+    std::size_t len = 0;                                /**< @brief How many are used. */
+    /** @brief The id; empty ⇔ it did not fit one segment record. */
+    [[nodiscard]] std::string_view view() const noexcept { return {bytes.data(), len}; }
+    /** @brief Implicit, so the id passes wherever a `std::string_view` is taken. */
+    // NOLINTNEXTLINE(google-explicit-constructor)
+    operator std::string_view() const noexcept { return view(); }
 };
 
 /**
@@ -569,8 +583,13 @@ class fwd_router_t {
      * A caller that genuinely cannot act on the failure writes `(void)` and says so. That is
      * the point of the attribute: it does not forbid ignoring the result, it makes ignoring it
      * a deliberate, greppable act instead of the default.
+     *
+     * The router's own registration state — the receiver ctx, a bus mount's token cache and
+     * an interned link kind — is drawn from the LABEL plane's source (`router_planes_t::
+     * label_src`, the net sub-pool by default; #1779). A refusal there is the same `false`,
+     * with nothing registered.
      */
-    [[nodiscard]] bool add_child(std::string name, transport_t& link,
+    [[nodiscard]] bool add_child(std::string_view name, transport_t& link,
                                  mem::block_source_t* rx = nullptr, link_kind_t kind = {});
 
     /**
@@ -715,7 +734,9 @@ class fwd_router_t {
     /** @brief What the origin sends a bound operation as: the link, and the `dst` on the wire. */
     struct bound_dispatch_t {
         transport_t* link = nullptr; /**< @brief The egress link element 0 named. */
-        std::vector<std::byte> dst;  /**< @brief The `PATH_REF` TLV carrying the RESIDUAL. */
+        /** @brief The `PATH_REF` TLV carrying the RESIDUAL, drawn from the label plane's
+         *         source (#1779). */
+        mem::block_array_t<std::byte> dst;
     };
 
     /**
@@ -730,9 +751,10 @@ class fwd_router_t {
      * @param right The right the operation carries, evaluated at the dereferenced connection
      *              vertex like any other hop's (§6.2).
      * @retval std::nullopt @p path is unbound, or element 0 no longer validates — a link
-     *         removed, a connection vertex retired, an ACL revoked. The caller's recovery is
-     *         the one that always works: `clear_binding()` and send the canonical path it
-     *         still holds, which may then re-mint (§5.3).
+     *         removed, a connection vertex retired, an ACL revoked — or the label plane's
+     *         source refused the `dst` bytes. The caller's recovery is the one that always
+     *         works: `clear_binding()` and send the canonical path it still holds, which may
+     *         then re-mint (§5.3).
      */
     [[nodiscard]] std::optional<bound_dispatch_t> bound_dispatch(const graph::path_t& path,
                                                                  graph::acl_right_t right) const;
@@ -779,7 +801,9 @@ class fwd_router_t {
      */
     struct label_dispatch_t {
         transport_t* link = nullptr; /**< @brief The egress link the literal head resolved to. */
-        std::vector<std::byte> dst;  /**< @brief The `PATH` TLV carrying the labelled RESIDUAL. */
+        /** @brief The `PATH` TLV carrying the labelled RESIDUAL, drawn from the label plane's
+         *         source (#1779). */
+        mem::block_array_t<std::byte> dst;
     };
 
     /**
@@ -1005,9 +1029,13 @@ class fwd_router_t {
      *
      * Exposed because it is what a test (and a later step's mint) needs in order to name the
      * anchor the router created; it is a pure function of its arguments and holds no state.
+     *
+     * Returned BY VALUE in a fixed buffer, with no allocation (#1779): the anchor key is ONE
+     * packed segment record, so an id longer than `wire::kPackedSegMaxBytes` could never be
+     * stored anyway. Such an id comes back EMPTY, and the router anchors nothing for it.
      */
-    [[nodiscard]] static std::string session_anchor_id(std::string_view mount,
-                                                       std::string_view peer);
+    [[nodiscard]] static session_anchor_id_t session_anchor_id(std::string_view mount,
+                                                               std::string_view peer) noexcept;
 
     /** @brief The route-handle label store (test introspection — assert statelessness). */
     [[nodiscard]] const route_handle_t& handles() const noexcept { return handles_; }
@@ -1177,7 +1205,11 @@ class fwd_router_t {
      */
     [[nodiscard]] std::size_t receiver_ctx_count() const {
         const std::lock_guard ctl(ctl_m_);
-        return child_rx_.size();
+        std::size_t n = 0;
+        for (const child_rx_ctx_t* c = rx_head_.load(std::memory_order_relaxed); c != nullptr;
+             c = c->next.load(std::memory_order_relaxed))
+            ++n;
+        return n;
     }
 
    private:
@@ -1314,8 +1346,11 @@ class fwd_router_t {
      */
     struct child_rx_ctx_t {
         fwd_router_t* self;
-        std::string name;
-        std::vector<std::byte> mount_tlv;
+        /** @brief The child's registered NAME — a view of its registry slot's text, which is
+         *         immutable after publish and lives as long as the router (#1779). */
+        std::string_view name;
+        /** @brief The child's mount run — a view of the same slot's text (#1779). */
+        std::span<const std::byte> mount_tlv;
         /**
          * @brief This child's OWN failable-block source; null falls back to the router's.
          *
@@ -1407,8 +1442,11 @@ class fwd_router_t {
          * null (not destroyed) when the same name is re-added as a FLAT child, for the reason
          * `bus` is — a name that used to be a bus mount must not keep answering with the
          * facet it no longer has.
+         *
+         * OWNED: drawn from the label plane's source and returned by the router's destructor
+         * (#1779). A refused table refuses the bus registration, with nothing registered.
          */
-        std::unique_ptr<bus_token_cache_t> peer_tokens_own;
+        bus_token_cache_t* peer_tokens_own = nullptr;
         /** @brief `peer_tokens_own` as the frame path reads it; null ⇒ the FLAT tier. */
         std::atomic<bus_token_cache_t*> peer_tokens{nullptr};
         /**
@@ -1475,27 +1513,18 @@ class fwd_router_t {
          */
         std::atomic<bool> retired{false};
         /**
-         * @brief Already linked into the published chain — CONTROL PLANE ONLY, under `ctl_m_`.
-         *
-         * Distinguishes the two things `publish_ctx` must do: LINK a fresh node, or clear the
-         * tombstone on one that is already reachable. Never read by a frame path, so it is a
-         * plain `bool` rather than an atomic.
-         */
-        bool linked = false;
-        /**
          * @brief Next published receiver ctx — the LOCK-FREE reader chain (ADR-0063 §3).
          *
          * The bound hop reads this table from a transport RECEIVE thread while `add_child`
          * appends to it from whichever thread a CREATE arrived on, and those are genuinely
-         * concurrent (see `ctl_m_`). Walking the owning `std::deque` under no lock is a data
-         * race on the deque's own chunk map, however benign a given codegen looks — the same
-         * ruling ADR-0063 erratum 3 made about `multi_peer`. So the deque OWNS the contexts and
-         * this intrusive chain PUBLISHES them, exactly as `child_registry_t` does with its
-         * chunks: the node is fully built before the release-store that links it, and a reader
-         * acquires each link before touching the node behind it. The chain is append-only —
-         * `remove_child` retires a node where it stands rather than unlinking it, and a re-add
-         * revives that same node (`retired`) — so a reader's walk is never invalidated, and
-         * churn on a stable name set adds no links at all.
+         * concurrent (see `ctl_m_`). The chain both OWNS and PUBLISHES the contexts (#1779;
+         * a `std::deque` owned them before): each node is one block from the label plane's
+         * source, linked by `acquire_ctx` while still `retired`, so a reader that reaches it
+         * skips it until `publish_ctx` release-clears the flag — the same edge a revived
+         * tombstone takes. The chain is append-only — `remove_child` retires a node where it
+         * stands rather than unlinking it, and a re-add revives that same node (`retired`) — so
+         * a reader's walk is never invalidated, churn on a stable name set adds no links at
+         * all, and the router's destructor is the only place a node is returned.
          */
         std::atomic<child_rx_ctx_t*> next{nullptr};
         /**
@@ -2059,7 +2088,7 @@ class fwd_router_t {
      * @brief The receiver ctx of @p name whatever its state — live OR tombstoned (#884).
      *
      * The CONTROL-PLANE half of the name → ctx direction, and deliberately a different
-     * function from `ctx_by_name`: this one walks the owning deque under `ctl_m_` and
+     * function from `ctx_by_name`: this one walks the chain under `ctl_m_` and
      * matches a tombstone, because both of its callers exist to change one. A frame path must
      * use `ctx_by_name`, which walks the published chain and skips the dead.
      */
@@ -2099,18 +2128,22 @@ class fwd_router_t {
      * @brief The receiver ctx @p name is to be registered through — reuse-or-append (#884).
      *
      * The one-ctx-per-NAME rule, enforced where it can be: an existing ctx for @p name (live
-     * or tombstoned) is HIDDEN and rebound; only a name this router has never seen appends.
-     * The returned ctx is not visible to a reader until `publish_ctx`, so the caller may
-     * finish filling it (`conn_slot`) first.
+     * or tombstoned) is HIDDEN and rebound; only a name this router has never seen appends,
+     * linked onto the chain already retired. The returned ctx is not visible to a reader
+     * until `publish_ctx`, so the caller may finish filling it (`conn_slot`) first.
      *
-     * Control plane, under `ctl_m_` — it walks the OWNING deque, which no frame path may.
+     * Control plane, under `ctl_m_`, after `registry_.add(name)` succeeded: a fresh ctx
+     * views that slot's name and mount run.
+     *
+     * @retval nullptr The label plane's source refused a fresh node — nothing was linked.
      */
-    child_rx_ctx_t& acquire_ctx(const std::string& name, mem::block_source_t* rx);
+    child_rx_ctx_t* acquire_ctx(std::string_view name, mem::block_source_t* rx);
     /**
      * @brief Publish @p ctx to the lock-free readers. Control plane, under `ctl_m_`.
      *
-     * Links a fresh node onto the chain, or clears the tombstone on a revived one — a
-     * release-store either way, so a reader that reaches the node sees every field it needs.
+     * Clears the node's tombstone with a release-store — fresh and revived nodes alike, since
+     * `acquire_ctx` links a fresh one already retired — so a reader that reaches the node
+     * sees every field it needs.
      */
     void publish_ctx(child_rx_ctx_t& ctx) noexcept;
     /**
@@ -2119,9 +2152,10 @@ class fwd_router_t {
      *
      * One record per distinct `(kind, role)` this router has ever registered — a handful on
      * any node — found by a linear scan and appended on a miss, never freed before the router.
-     * @return The record, or null when @p kind is empty (a link with no catalog identity).
+     * @return The record, or null when @p kind is empty (a link with no catalog identity);
+     *         `nullopt` when the label plane's source refused a new record (#1779).
      */
-    [[nodiscard]] const link_kind_t* intern_kind(link_kind_t kind);
+    [[nodiscard]] std::optional<const link_kind_t*> intern_kind(link_kind_t kind);
     /** @brief The LIVE receiver ctx of child @p link_name, or nullptr — the name → ctx
      *         direction. Tombstoned nodes are skipped: a removed child resolves to nothing,
      *         and a re-added one resolves to its CURRENT tenancy (#884). */
@@ -2307,36 +2341,40 @@ class fwd_router_t {
     // a peer-provoked receive thread before. Held here as well as inside `handles_` because
     // those router-side reads are the store's callers, not the store.
     mem::block_source_t* label_src_;
-    mem::block_source_t* rx_;              // DEFAULT terminus-arena source, NOTHROW (#588);
-                                           // a child may carry its own (ADR-0067 §3)
-    mem::mem_backend_t* flat_;             // every rope flatten the router performs (#730);
-                                           // a null result is answered by value, never stored
-    mem::mem_backend_t* egress_;           // terminus REPLY head + mint egress bytes (#795);
-                                           // a refusal degrades to addressed BACKPRESSURE
-    child_registry_t registry_;            // the one NAME→link demux table (Brick 3a, ADR-0037);
-                                           // its chunks draw from `label_src` (#873 phase 1)
-    route_handle_t handles_;               // per-link label tables (compact flows only)
-    std::deque<child_rx_ctx_t> child_rx_;  // stable receiver contexts, one per child
-    /** @brief One interned link-kind record: the owned `kind` bytes and the view over them. */
+    mem::block_source_t* rx_;     // DEFAULT terminus-arena source, NOTHROW (#588);
+                                  // a child may carry its own (ADR-0067 §3)
+    mem::mem_backend_t* flat_;    // every rope flatten the router performs (#730);
+                                  // a null result is answered by value, never stored
+    mem::mem_backend_t* egress_;  // terminus REPLY head + mint egress bytes (#795);
+                                  // a refusal degrades to addressed BACKPRESSURE
+    child_registry_t registry_;   // the one NAME→link demux table (Brick 3a, ADR-0037);
+                                  // its chunks draw from `label_src` (#873 phase 1)
+    route_handle_t handles_;      // per-link label tables (compact flows only)
+    /**
+     * @brief One interned link-kind record: the view a `child_rx_ctx_t::kind` points at,
+     *        with the owned `kind` bytes right after it in the same block (#1779).
+     */
     struct kind_rec_t {
-        std::string bytes; /**< @brief The owned copy of the catalog `kind`. */
-        link_kind_t view;  /**< @brief The record a `child_rx_ctx_t::kind` points at. */
+        link_kind_t view;           /**< @brief The record a `child_rx_ctx_t::kind` points at. */
+        kind_rec_t* next = nullptr; /**< @brief The next record — control plane only. */
     };
-    /** @brief Interned `(kind, role)` records (#1650), under `ctl_m_`. A `std::deque` so a
-     *         record never moves once a ctx points at it; never shrunk before the router. */
-    std::deque<kind_rec_t> kinds_;
+    /** @brief Interned `(kind, role)` records (#1650), under `ctl_m_`: a list of blocks from
+     *         the label plane's source, so a record never moves once a ctx points at it, and
+     *         returned only by the destructor. */
+    kind_rec_t* kinds_ = nullptr;
     await_plane_t awaits_;  // deferred remote AWAITs (ADR-0084)
-    /** @brief Head of the LOCK-FREE published chain through `child_rx_` — the only spelling a
-     *         frame-path reader may use (see `child_rx_ctx_t::next`). */
+    /** @brief Head of the LOCK-FREE chain of receiver contexts — it owns them, and it is the
+     *         only spelling a frame-path reader may use (see `child_rx_ctx_t::next`). */
     std::atomic<child_rx_ctx_t*> rx_head_{nullptr};
     /** @brief Tail of that chain. Written under `ctl_m_` only, never read by a frame path. */
     child_rx_ctx_t* rx_tail_ = nullptr;
     /**
-     * @brief Serializes CONTROL-PLANE mutation of the registry and `child_rx_` (ADR-0063 §3).
+     * @brief Serializes CONTROL-PLANE mutation of the registry and the receiver-ctx chain
+     *        (ADR-0063 §3).
      *
-     * `add_child` performs a scan-then-append on the registry and an `emplace_back` on the
-     * receiver deque; neither is atomic, so two concurrent creates could be handed the same
-     * empty slot (losing a child) or corrupt the deque spine. Those creates are genuinely
+     * `add_child` performs a scan-then-append on the registry and on the receiver chain;
+     * neither is atomic, so two concurrent creates could be handed the same empty slot
+     * (losing a child) or link two nodes onto one tail. Those creates are genuinely
      * concurrent on an ordinary multi-transport node: `make_connection` runs on whichever
      * transport's RECEIVE thread delivered the CREATE, and each transport has its own.
      *
