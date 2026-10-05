@@ -187,7 +187,7 @@ int main() {
     std::printf("transport_can REAL vcan0 smoke test:\n");
 
     // Probe the bus; self-skip cleanly if vcan0 is unavailable.
-    auto probe = std::make_unique<tr::net::socketcan_link_t>("vcan0");
+    auto probe = tr::mem::make_poly<tr::net::socketcan_link_t>(tr::mem::net_source(), "vcan0");
     if (!probe->ok()) {
         std::printf(
             "  [SKIP] vcan0 unavailable (no kernel CAN here) — covered by can-vcan-e2e CI\n");
@@ -195,8 +195,8 @@ int main() {
     }
     probe.reset();
 
-    auto link_a = std::make_unique<tr::net::socketcan_link_t>("vcan0");
-    auto link_b = std::make_unique<tr::net::socketcan_link_t>("vcan0");
+    auto link_a = tr::mem::make_poly<tr::net::socketcan_link_t>(tr::mem::net_source(), "vcan0");
+    auto link_b = tr::mem::make_poly<tr::net::socketcan_link_t>(tr::mem::net_source(), "vcan0");
     check(link_a->ok() && link_b->ok(), "two CAN_RAW sockets bound to vcan0");
 
     // Sinks + named receiver lambdas BEFORE the transports: the slot binds the
@@ -238,7 +238,7 @@ int main() {
 
     // ADR-0044: directed per-peer send over the real bus. C (node 3) joins the same
     // vcan0; a frame A sends via its n2 peer endpoint reaches B and NOT C.
-    auto link_c = std::make_unique<tr::net::socketcan_link_t>("vcan0");
+    auto link_c = tr::mem::make_poly<tr::net::socketcan_link_t>(tr::mem::net_source(), "vcan0");
     check(link_c->ok(), "third CAN_RAW socket bound to vcan0");
     sink_t sink_c;
     auto rx_c = [&](std::span<const std::byte> f) { sink_c.on(f); };
@@ -271,7 +271,7 @@ int main() {
     check(adversary.ok(), "bare CAN_RAW adversary socket bound to vcan0");
 
     frame_sink_t admitted;
-    auto guard_link = std::make_unique<tr::net::socketcan_link_t>("vcan0");
+    auto guard_link = tr::mem::make_poly<tr::net::socketcan_link_t>(tr::mem::net_source(), "vcan0");
     check(guard_link->ok(), "seam-rule link bound to vcan0");
     guard_link->on_receive([&](const tr::net::can_frame_data_t& f) { admitted.on(f); });
     // The seam is two-phase (#1186): the sink is registered, so the link may read.
@@ -319,7 +319,7 @@ int main() {
     // ------------------------------------------------------------------------
     raw_can_socket_t observer("vcan0");
     check(observer.ok(), "observer CAN_RAW socket bound to vcan0");
-    auto tx_link = std::make_unique<tr::net::socketcan_link_t>("vcan0");
+    auto tx_link = tr::mem::make_poly<tr::net::socketcan_link_t>(tr::mem::net_source(), "vcan0");
     check(tx_link->ok(), "egress-vector link bound to vcan0");
 
     constexpr std::uint32_t kOverId = 0x1BADBEu;
@@ -355,7 +355,7 @@ int main() {
     // without kernel CAN); the counter's merge-blocking guard is the unit case in
     // transport_can_test.
     // ------------------------------------------------------------------------
-    auto link_d = std::make_unique<tr::net::socketcan_link_t>("vcan0");
+    auto link_d = tr::mem::make_poly<tr::net::socketcan_link_t>(tr::mem::net_source(), "vcan0");
     check(link_d->ok(), "fourth CAN_RAW socket bound to vcan0");
     tr::net::can_transport_t tx_d(std::move(link_d),
                                   {0, 4, tr::net::can::can_frame_mode_t::CLASSIC, "d/s"});

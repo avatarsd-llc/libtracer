@@ -57,6 +57,13 @@
 
 namespace {
 
+/** @brief The session's `:path` as a string (the transport writes it into a caller buffer). */
+std::string path_of(const tr::net::webtransport_transport_t& t) {
+    std::array<char, 512> buf{};
+    const std::size_t n = t.session_path(buf);
+    return std::string(buf.data(), std::min(n, buf.size()));
+}
+
 static_assert(!tr::graph::default_config_t::kAllowInsecureTls,
               "the shipped default must refuse the SPEC `insecure` key");
 
@@ -154,7 +161,12 @@ void test_wt_h3_huffman() {
     std::printf("wt_h3 — Huffman decoding (RFC 7541 Appendix C vectors):\n");
     const auto dec = [](std::string_view hex) {
         const auto bytes = from_hex(hex);
-        return tr::net::wt_h3::huffman_decode(bytes);
+        std::string out(tr::net::wt_h3::huffman_max_decoded(bytes.size()), '\0');
+        const auto n =
+            tr::net::wt_h3::huffman_decode_into(bytes, std::span<char>(out.data(), out.size()));
+        if (!n) return std::optional<std::string>{};
+        out.resize(*n);
+        return std::optional<std::string>{out};
     };
     const auto v1 = dec("f1e3c2e5f23a6ba0ab90f4ff");
     check(v1 && *v1 == "www.example.com", "C.4.1: 'www.example.com'");
@@ -172,7 +184,8 @@ void test_wt_h3_field_sections() {
     std::printf("wt_h3 — QPACK static-subset field sections:\n");
     // Our own extended CONNECT encoding decodes back to its five pseudo-headers.
     tr::net::wt_h3::field_section_t store;
-    const auto req = tr::net::wt_h3::encode_connect_field_section("robot.local:4433", "/");
+    std::vector<std::uint8_t> req;
+    tr::net::wt_h3::encode_connect_field_section(req, "robot.local:4433", "/");
     const auto hdrs = tr::net::wt_h3::decode_field_section(req, store);
     bool ok = hdrs.has_value();
     std::string method, scheme, authority, path, protocol;
@@ -881,7 +894,7 @@ void test_spec_dial_connect_path() {
 
     webtransport_transport_t served(std::uint16_t{0}, g_cert, g_key);
     check(served.ok(), "a directly-constructed listener is up");
-    check(served.session_path().empty(), "no session yet — the listener has accepted no CONNECT");
+    check(path_of(served).empty(), "no session yet — the listener has accepted no CONNECT");
 
     // 1. `path = "/tracer"` — the key reaches the wire. Verification stays ON
     //    (`ca` = the peer's own self-signed cert), so this is a real session.
@@ -889,7 +902,7 @@ void test_spec_dial_connect_path() {
                                     wt_conn_spec("named", served.local_port(), "127.0.0.1", "dev",
                                                  {}, std::nullopt, "/tracer"));
     check(named.has_value(), "A: SPEC{..., path=\"/tracer\"} constructs the dialer");
-    check(served.session_path() == "/tracer",
+    check(path_of(served) == "/tracer",
           "the CONNECT that reached the server named /tracer — the SPEC key is on the wire");
 
     // 2. No `path` key: the "/" default the factory used to hard-code is preserved.
@@ -898,14 +911,14 @@ void test_spec_dial_connect_path() {
         node_a.write(path_t("/net/webtransport-client/conn"),
                      wt_conn_spec("plain", defaulted.local_port(), "127.0.0.1", "dev"));
     check(plain.has_value(), "A: a SPEC with no `path` key still constructs the dialer");
-    check(defaulted.session_path() == "/", "a SPEC with no `path` key dials the / default");
+    check(path_of(defaulted) == "/", "a SPEC with no `path` key dials the / default");
 
     // 3. The empty-string normalisation the factory leans on (an absent key
     //    parses to an empty string, which the constructor turns into "/").
     webtransport_transport_t empty_path(std::uint16_t{0}, g_cert, g_key);
     webtransport_transport_t dialer("127.0.0.1", empty_path.local_port(), "", dev_tls());
     check(dialer.ok(), "a direct dial with an EMPTY path establishes its session");
-    check(empty_path.session_path() == "/", "an empty path is normalised to / before the CONNECT");
+    check(path_of(empty_path) == "/", "an empty path is normalised to / before the CONNECT");
 
     // 4. #1039 — a non-empty `path` that is not origin-form. RFC 9114 §4.3.1 /
     //    RFC 9113 §8.3.1: an `https` request's `:path` is non-empty and, in
@@ -929,7 +942,7 @@ void test_spec_dial_connect_path() {
                                                 {}, std::nullopt, "tracer"));
     check(!bare.has_value() && bare.error() == tr::graph::status_t::TYPE_MISMATCH,
           "A: SPEC{..., path=\"tracer\"} is REFUSED with TYPE_MISMATCH");
-    check(untouched.session_path().empty() && !untouched.session_up(),
+    check(path_of(untouched).empty() && !untouched.session_up(),
           "the refused creation dialled nothing — the listener accepted no CONNECT");
     check(router_a.registry().by_name("net/webtransport-client/bare") == nullptr,
           "A: the refused creation leaves no endpoint behind");
@@ -941,7 +954,7 @@ void test_spec_dial_connect_path() {
         path_t("/net/webtransport-client/conn"),
         wt_conn_spec("deep", deep.local_port(), "127.0.0.1", "dev", {}, std::nullopt, "/a/b"));
     check(nested.has_value(), "A: SPEC{..., path=\"/a/b\"} still constructs the dialer");
-    check(deep.session_path() == "/a/b", "the origin-form path reached the server verbatim");
+    check(path_of(deep) == "/a/b", "the origin-form path reached the server verbatim");
 }
 
 // ---- LISTEN-side classifier vectors: the raw peer lives in raw_wt_client.hpp ----
@@ -1128,7 +1141,7 @@ void test_second_connect_is_refused() {
         auto* first = cli.open_bidi();
         cli.write(first, connect_frame("127.0.0.1:0", "/first"));
         check(wait_session(listener, 3000ms), "the first extended CONNECT established a session");
-        check(listener.session_path() == "/first", "and it is the FIRST request's resource");
+        check(path_of(listener) == "/first", "and it is the FIRST request's resource");
 
         auto* second = cli.open_bidi();
         cli.write(second, connect_frame("127.0.0.1:0", "/second"));
@@ -1137,7 +1150,7 @@ void test_second_connect_is_refused() {
         check(listener.session_up(), "the established session survives the refusal");
         check(!cli.shut.load(std::memory_order_relaxed),
               "refusal is STREAM-scoped — the connection stays up");
-        check(listener.session_path() == "/first",
+        check(path_of(listener) == "/first",
               "session_path() still reports the FIRST resource — an answered peer cannot "
               "rewrite it");
         check(listener.refused_sessions() == 0,
@@ -1177,7 +1190,7 @@ void test_second_connect_is_refused() {
               "companion: a non-CONNECT HEADERS on a second stream is aborted");
         check(listener.session_up() && !cli.shut.load(std::memory_order_relaxed),
               "companion: it is STREAM-scoped now — the session and the connection both live");
-        check(listener.session_path() == "/first", "companion: and the resource is untouched");
+        check(path_of(listener) == "/first", "companion: and the resource is untouched");
     }
 }
 

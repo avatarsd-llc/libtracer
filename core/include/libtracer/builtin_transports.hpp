@@ -25,7 +25,6 @@
  */
 #pragma once
 
-#include <memory>
 #include <utility>
 
 #include "libtracer/config.hpp"
@@ -94,12 +93,17 @@ inline constexpr transport_kind_traits_t kBuiltinPointToPointTraits{
  * `tr::path::not_found` — a PERMANENT "that address does not exist", when the address the
  * SPEC named resolved fine and it was the LINK that did not come up. A peer reading the
  * registry disposition off the code stopped retrying a link that would have come back.
+ *
+ * The object is drawn from @p src, the store the factory was handed (#1780); a refusal is
+ * `BACKPRESSURE`, before any socket is opened.
  */
 template <class T, class... Args>
-[[nodiscard]] graph::result_t<std::unique_ptr<transport_t>> make_checked(Args&&... args) {
-    auto t = std::make_unique<T>(std::forward<Args>(args)...);
+[[nodiscard]] graph::result_t<transport_ptr_t> make_checked(mem::block_source_t& src,
+                                                            Args&&... args) {
+    mem::poly_ptr_t<T> t = mem::make_poly<T>(src, std::forward<Args>(args)...);
+    if (!t) return std::unexpected(graph::status_t::BACKPRESSURE);
     if (!t->ok()) return std::unexpected(graph::status_t::TRANSPORT_DOWN);
-    return t;  // unique_ptr<T> => unique_ptr<transport_t> (upcast move)
+    return transport_ptr_t(std::move(t));  // poly_ptr_t<T> => poly_ptr_t<transport_t>
 }
 
 /**
@@ -117,9 +121,8 @@ template <class T, class... Args>
  * refuses `0`: there is no such thing as dialling the ephemeral port.
  */
 template <class Dial, class Listen>
-[[nodiscard]] graph::result_t<std::unique_ptr<transport_t>> dial_or_listen(const conn_settings_t& s,
-                                                                           Dial&& dial,
-                                                                           Listen&& listen) {
+[[nodiscard]] graph::result_t<transport_ptr_t> dial_or_listen(const conn_settings_t& s, Dial&& dial,
+                                                              Listen&& listen) {
     if (s.role == conn_role_t::DIAL) {
         if (s.addr.empty() || s.port == 0) return std::unexpected(graph::status_t::TYPE_MISMATCH);
         return dial();
@@ -144,8 +147,8 @@ template <class Dial, class Listen>
  * @param link       The factory's result — forwarded on unchanged.
  * @param egress_src The store to wire; `nullptr` leaves the link on the process default.
  */
-[[nodiscard]] inline graph::result_t<std::unique_ptr<transport_t>> with_egress_source(
-    graph::result_t<std::unique_ptr<transport_t>> link, mem::block_source_t* egress_src) noexcept {
+[[nodiscard]] inline graph::result_t<transport_ptr_t> with_egress_source(
+    graph::result_t<transport_ptr_t> link, mem::block_source_t* egress_src) noexcept {
     if (link.has_value() && egress_src != nullptr) (*link)->set_egress_source(*egress_src);
     return link;
 }

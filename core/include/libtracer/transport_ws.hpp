@@ -63,12 +63,9 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <memory>
 #include <mutex>
 #include <span>
-#include <string>
 #include <string_view>
-#include <vector>
 
 #include "libtracer/length_prefix_framer.hpp"
 #include "libtracer/mem_heap.hpp"
@@ -283,7 +280,7 @@ class ws_server_transport_t : public stream_server_base_t {
      * @brief Send @p frame as one server→client BINARY WebSocket message to
      *        EVERY open peer (the flat point-to-point surface).
      *
-     * Encodes once via ws::encode_frame(BINARY, frame) (FIN=1, unmasked) and
+     * Encodes once via ws::try_encode_frame(BINARY, frame) (FIN=1, unmasked) and
      * writes the whole frame to each connected client. No-op until a client is
      * connected. Thread-safe (socket writes are guarded). A directed
      * single-peer send is `peer_link(name)->send(frame)`.
@@ -393,7 +390,7 @@ class ws_server_transport_t : public stream_server_base_t {
     };
 
     /** @brief One fresh slot with its handshake/frame buffers, reassembler and facade. */
-    std::unique_ptr<session_base_t> make_session() override;
+    mem::poly_ptr_t<session_base_t> make_session() override;
 
     /** @brief Per-accept setup: clear the slot's handshake and frame buffers. Returns
      *         false — a WS session only carries frames PAST its `101`, which
@@ -460,7 +457,7 @@ class ws_client_transport_t : public transport_t, private stream_endpoint_t {
      *             egress store), receive cap, recv-thread stack, deferred receive, liveness
      *             window, handshake budget.
      */
-    ws_client_transport_t(const std::string& host, std::uint16_t port,
+    ws_client_transport_t(std::string_view host, std::uint16_t port,
                           const ws_client_config_t& config = {});
 
     /** @brief Stop the recv thread and close the socket. */
@@ -570,13 +567,13 @@ class ws_client_transport_t : public transport_t, private stream_endpoint_t {
      * first frame in that same segment. Those bytes are the start of the frame stream, so
      * they are moved into @p pipelined (cleared first, empty in the common case) for
      * `serve` to decode; dropping them loses that frame silently. The server half has
-     * carried them over since it grew a second peer (`on_readable`'s `s.buf.assign`) —
+     * carried them over since it grew a second peer (`on_readable`'s `s.buf.append`) —
      * this is the DIAL half of the same rule (#1020).
      */
-    bool handshake(int fd, const std::string& host, std::uint16_t port,
-                   std::vector<std::byte>& pipelined);
-    /** @brief Frame recv loop, seeded with the bytes `handshake` found behind the 101. */
-    void serve(int fd, std::vector<std::byte> pipelined);
+    bool handshake(int fd, std::string_view host, std::uint16_t port, mem::bytes_t& pipelined);
+    /** @brief Frame recv loop, seeded with the bytes `handshake` found behind the 101
+     *         (`pipelined_`, which it takes over). */
+    void serve(int fd);
     std::uint32_t next_mask_key();  // per-frame masking key (varied, not crypto)
 
     // conn_fd_ + write_m_ (and their teardown discipline) live in stream_endpoint_t.
@@ -624,10 +621,11 @@ class ws_client_transport_t : public transport_t, private stream_endpoint_t {
      * @brief The bytes the server pipelined behind its `101`, parked between the handshake
      *        and @ref start_receiving (moved into the recv thread there, empty after).
      *
-     * Written by the constructor, read once by the thread-spawning `start_receiving`; the
-     * recv thread never touches this member (it owns its own copy).
+     * Written by the constructor; the recv thread `start_receiving` spawns takes it over
+     * (`serve` moves it into its own buffer before reading), and nothing else touches it.
+     * Drawn from the link's egress store (#1780).
      */
-    std::vector<std::byte> pipelined_;
+    mem::bytes_t pipelined_;
     std::size_t recv_stack_ = 0; /**< @brief The stack hint, held for `start_receiving`. */
     /** @brief One-shot latch making @ref start_receiving idempotent — `start()` may be
      *         called at most once per endpoint. */

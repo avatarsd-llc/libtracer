@@ -21,13 +21,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <functional>
 #include <span>
 #include <string_view>
 #include <type_traits>
-#include <vector>
 
 #include "libtracer/config.hpp"
+#include "libtracer/function_ref.hpp"
 #include "libtracer/iov_table.hpp"
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source.hpp"
@@ -76,8 +75,9 @@ class transport_t;
  */
 class bus_link_t {
    public:
-    /** @brief Visitor invoked once per currently-audible peer name. */
-    using peer_visitor_t = std::function<void(std::string_view)>;
+    /** @brief Visitor invoked once per currently-audible peer name — a synchronous,
+     *         non-owning callable reference (ADR-0083 Q10): passing a lambda costs nothing. */
+    using peer_visitor_t = function_ref_t<void(std::string_view)>;
     /** @brief The peer-named inbound sink fn: (ctx, sending peer's HANDLE, frame bytes). */
     using peer_receiver_fn_t = receiver_slot_t<peer_handle_t>::span_fn_t;
     /** @brief The OWNING peer-named sink fn (ADR-0053 §5): (ctx, sending peer's
@@ -409,6 +409,27 @@ struct link_memory_t {
      *        Default: the process net sub-pool (#1777).
      */
     mem::block_source_t* io = &mem::net_source();
+
+    /**
+     * @brief The link's connection-STATE store (#1780): what a kind holds for as long as a
+     *        connection or the link lives — the link's own endpoint object, a server's slot
+     *        table and per-peer sessions, handshake and receive-accumulation buffers, a QUIC
+     *        stream-context table. Peer-provoked, so the receiving link pays: a refusal at
+     *        runtime sheds that one peer or frame, counted; only a refusal while the link
+     *        is being built leaves it inert (`ok()` false). Default: the process net
+     *        sub-pool. Kept apart from @ref io so a bound on in-flight egress never caps
+     *        how many peers can connect, and the reverse.
+     */
+    mem::block_source_t* state = &mem::net_source();
+
+    /** @brief @ref io, or the process net sub-pool when a config left it null. */
+    [[nodiscard]] mem::block_source_t& io_or_default() const noexcept {
+        return io != nullptr ? *io : mem::net_source();
+    }
+    /** @brief @ref state, or the process net sub-pool when a config left it null. */
+    [[nodiscard]] mem::block_source_t& state_or_default() const noexcept {
+        return state != nullptr ? *state : mem::net_source();
+    }
 };
 
 /**

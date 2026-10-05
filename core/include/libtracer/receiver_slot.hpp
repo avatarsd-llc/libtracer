@@ -27,6 +27,17 @@
 #include "libtracer/rope.hpp"
 #include "libtracer/view.hpp"
 
+#if defined(__SANITIZE_THREAD__)
+#define LIBTRACER_SLOT_TSAN 1
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define LIBTRACER_SLOT_TSAN 1
+#endif
+#endif
+#if defined(LIBTRACER_SLOT_TSAN)
+#include <sanitizer/tsan_interface.h>
+#endif
+
 namespace tr::net {
 
 /**
@@ -50,6 +61,15 @@ namespace tr::net {
 template <typename... Tag>
 class receiver_slot_t {
    public:
+#if defined(LIBTRACER_SLOT_TSAN)
+    /** @brief Empty slot. */
+    receiver_slot_t() = default;
+    /** @brief Tell ThreadSanitizer this slot's mutex is gone. `std::mutex` never calls
+     *         `pthread_mutex_destroy`, so a later mutex at the same address (a reused stack
+     *         slot, or a pooled block since #1780) would inherit this one's lock-order
+     *         history and report an inversion that no thread can reach. */
+    ~receiver_slot_t() { __tsan_mutex_destroy(&m_, 0); }
+#endif
     /** @brief The borrowed-span sink: the frame is valid only for the call. */
     using span_fn_t = void (*)(void* ctx, Tag..., std::span<const std::byte>);
     /** @brief The owning sink: refcounted rope links the sink may keep or forward. */

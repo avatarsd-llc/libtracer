@@ -16,13 +16,13 @@
  * round 2): the reassembly is a `tr::net` component that composes L1 views into a
  * rope, exactly as any transport does.
  *
- * Storage is drawn from an injected `std::pmr::memory_resource` and the group
- * count is bounded by config, so on a constrained node exhaustion is a bounded
- * drop (evict-oldest + a `dropped_groups` counter), never an OOM (the
- * no-synthetic-limits doctrine: bounds are injected resources / config, never a
- * hardcoded magic number). The defaults — the process heap, unbounded — preserve
- * the pre-rehome behavior; a target injects a stack resource + `max_groups` to
- * bound it (the per-connection `:settings` path).
+ * Storage is drawn from an injected `tr::mem::block_source_t` (the one allocation seam,
+ * ADR-0083 — #1780) and the group count is bounded by config, so on a constrained node
+ * exhaustion is a bounded drop (evict-oldest + a `dropped_groups` counter, or a refused
+ * slice the caller discards), never an OOM (the no-synthetic-limits doctrine: bounds are
+ * injected resources / config, never a hardcoded magic number). The defaults — the process
+ * net sub-pool, unbounded — preserve the pre-rehome behavior; a target injects a bounded
+ * source + `max_groups` to bound it (the per-connection `:settings` path).
  *
  * A count bound alone does not reclaim a group that will NEVER complete — the
  * exact residue a lost advertise or a lost data slice leaves behind, since
@@ -37,10 +37,10 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <map>
-#include <memory_resource>
 #include <optional>
 
+#include "libtracer/mem_sorted_map.hpp"
+#include "libtracer/mem_source.hpp"
 #include "libtracer/rope.hpp"
 #include "libtracer/view.hpp"
 
@@ -70,7 +70,7 @@ struct reassembly_key_t {
     can_origin_id_t origin{}; /**< @brief The originating node id (16 bytes). */
     std::uint64_t ts = 0;     /**< @brief The group's per-producer monotonic timestamp. */
 
-    /** @brief Total ordering, so the key works as a `std::map` key (value type). */
+    /** @brief Total ordering, so the key works as a sorted-map key (value type). */
     [[nodiscard]] auto operator<=>(const reassembly_key_t&) const = default;
     /** @brief Field-wise equality (value type). */
     [[nodiscard]] bool operator==(const reassembly_key_t&) const = default;
@@ -88,7 +88,7 @@ struct reassembly_key_t {
  * assemble chains the slices, in index order, into a @ref tr::view::rope_t with
  * zero copies.
  *
- * Structure and slices are drawn from the injected memory resource; when
+ * Structure and slices are drawn from the injected block source; when
  * `max_groups` is non-zero and a new group would exceed it, the oldest group
  * is evicted (its buffered slices freed) and @ref dropped_groups is incremented —
  * a bounded drop rather than unbounded growth. Independently of that count bound,
@@ -98,48 +98,59 @@ struct reassembly_key_t {
 class can_reassembly_t {
    public:
     /**
-     * @brief Construct over @p mr, bounding the live group count at @p max_groups.
-     * @param mr         Where the group/slice structure is allocated
-     *                   (default: the process heap).
+     * @brief Construct over @p src, bounding the live group count at @p max_groups.
+     * @param src        Where the group/slice structure is drawn from
+     *                   (default: the process net sub-pool).
      * @param max_groups Live-group ceiling; `0` means unbounded (the default, and
      *                   the pre-rehome behavior).
      */
-    explicit can_reassembly_t(std::pmr::memory_resource* mr = std::pmr::new_delete_resource(),
-                              std::size_t max_groups = 0)
-        : max_groups_(max_groups), groups_(mr), slices_(mr) {}
+    explicit can_reassembly_t(mem::block_source_t& src = mem::net_source(),
+                              std::size_t max_groups = 0) noexcept
+        : max_groups_(max_groups), groups_(src), slices_(src) {}
 
     /**
      * @brief Add (or replace) slice @p index of group @p key.
      * @param key   The `(origin, ts)` group identity.
      * @param index The zero-based slice position.
      * @param slice The slice's bytes (one CAN data field), borrowed zero-copy.
+     * @retval false The source refused the group or the slice (BACKPRESSURE): the slice was
+     *               not taken, and the caller abandons the group (@ref discard).
      */
-    void add_slice(const reassembly_key_t& key, std::uint32_t index, tr::view::view_t slice) {
-        touch_group(key);
-        slices_.insert_or_assign(slice_id_t{key, index}, std::move(slice));
+    [[nodiscard]] bool add_slice(const reassembly_key_t& key, std::uint32_t index,
+                                 tr::view::view_t slice) noexcept {
+        if (touch_group(key) == nullptr) return false;
+        const slice_id_t id{key, index};
+        if (tr::view::view_t* const held = slices_.find(id)) {
+            *held = std::move(slice);
+            return true;
+        }
+        return slices_.try_emplace(id, std::move(slice)).value != nullptr;
     }
 
     /**
      * @brief Declare the expected slice count of group @p key (totality opt-in).
      * @param key   The group identity.
      * @param count The number of slices the complete group contains.
+     * @retval false The source refused a new group's entry (BACKPRESSURE): nothing was
+     *               recorded.
      */
-    void set_expected_count(const reassembly_key_t& key, std::uint32_t count) {
-        touch_group(key).expected = count;
+    [[nodiscard]] bool set_expected_count(const reassembly_key_t& key,
+                                          std::uint32_t count) noexcept {
+        group_meta_t* const g = touch_group(key);
+        if (g == nullptr) return false;
+        g->expected = count;
+        return true;
     }
 
     /** @brief True when group @p key is being tracked (has a slice or an expected count). */
-    [[nodiscard]] bool contains(const reassembly_key_t& key) const {
-        return groups_.find(key) != groups_.end();
+    [[nodiscard]] bool contains(const reassembly_key_t& key) const noexcept {
+        return groups_.contains(key);
     }
 
     /** @brief Number of slices currently buffered for group @p key (0 if unknown). */
-    [[nodiscard]] std::size_t slice_count(const reassembly_key_t& key) const {
+    [[nodiscard]] std::size_t slice_count(const reassembly_key_t& key) const noexcept {
         std::size_t n = 0;
-        for (auto it = slices_.lower_bound(slice_id_t{key, 0});
-             it != slices_.end() && it->first.group == key; ++it) {
-            ++n;
-        }
+        for (std::size_t i = first_slice(key); in_group(i, key); ++i) ++n;
         return n;
     }
 
@@ -149,13 +160,12 @@ class can_reassembly_t {
      * Detects a dropped *interior* slice even before the count is known; a missing
      * *trailing* slice is not an interior gap (ADR-0011).
      */
-    [[nodiscard]] bool has_interior_gap(const reassembly_key_t& key) const {
+    [[nodiscard]] bool has_interior_gap(const reassembly_key_t& key) const noexcept {
         std::size_t n = 0;
         std::uint32_t highest = 0;
-        for (auto it = slices_.lower_bound(slice_id_t{key, 0});
-             it != slices_.end() && it->first.group == key; ++it) {
+        for (std::size_t i = first_slice(key); in_group(i, key); ++i) {
             ++n;
-            highest = it->first.index;  // ordered by index — the last seen is the highest
+            highest = slices_.at(i).key.index;  // ordered by index — the last is the highest
         }
         if (n == 0) return false;
         return n != static_cast<std::size_t>(highest) + 1;
@@ -167,16 +177,15 @@ class can_reassembly_t {
      * Requires @ref set_expected_count (totality opt-in); without it, completeness
      * is undecidable (a trailing drop is invisible) and this returns false.
      */
-    [[nodiscard]] bool is_complete(const reassembly_key_t& key) const {
-        const auto it = groups_.find(key);
-        if (it == groups_.end() || !it->second.expected) return false;
-        const std::uint32_t expected = *it->second.expected;
+    [[nodiscard]] bool is_complete(const reassembly_key_t& key) const noexcept {
+        const group_meta_t* const g = groups_.find(key);
+        if (g == nullptr || !g->expected) return false;
+        const std::uint32_t expected = *g->expected;
         std::size_t n = 0;
         std::uint32_t highest = 0;
-        for (auto s = slices_.lower_bound(slice_id_t{key, 0});
-             s != slices_.end() && s->first.group == key; ++s) {
+        for (std::size_t i = first_slice(key); in_group(i, key); ++i) {
             ++n;
-            highest = s->first.index;
+            highest = slices_.at(i).key.index;
         }
         if (n != static_cast<std::size_t>(expected)) return false;
         return expected == 0 || highest == expected - 1;
@@ -191,15 +200,12 @@ class can_reassembly_t {
     [[nodiscard]] std::optional<tr::view::rope_t> assemble(const reassembly_key_t& key) const {
         if (!is_complete(key)) return std::nullopt;
         tr::view::rope_t r;
-        for (auto it = slices_.lower_bound(slice_id_t{key, 0});
-             it != slices_.end() && it->first.group == key; ++it) {
-            r.append(it->second);
-        }
+        for (std::size_t i = first_slice(key); in_group(i, key); ++i) r.append(slices_.at(i).value);
         return r;
     }
 
     /** @brief Drop all buffered state for group @p key (after assembly or timeout). */
-    void erase(const reassembly_key_t& key) { drop_group(key); }
+    void erase(const reassembly_key_t& key) noexcept { drop_group(key); }
 
     /**
      * @brief Abandon group @p key as one that will NEVER complete — erase it AND count it.
@@ -217,8 +223,8 @@ class can_reassembly_t {
      *
      * @retval false Nothing was tracked under @p key — no group, so no drop to count.
      */
-    bool discard(const reassembly_key_t& key) {
-        if (groups_.find(key) == groups_.end()) return false;
+    bool discard(const reassembly_key_t& key) noexcept {
+        if (!groups_.contains(key)) return false;
         drop_group(key);
         ++dropped_groups_;
         return true;
@@ -248,17 +254,16 @@ class can_reassembly_t {
      * @note Ages against the stamp last given to @ref set_now; a caller that never
      *       calls it sweeps nothing (every group reads as age 0).
      */
-    std::size_t sweep_stale(std::uint64_t max_age) {
+    std::size_t sweep_stale(std::uint64_t max_age) noexcept {
         std::size_t swept = 0;
-        for (auto it = groups_.begin(); it != groups_.end();) {
+        for (std::size_t i = 0; i < groups_.size();) {
             // Guard a non-monotonic stamp: an entry from "the future" is not stale.
-            const std::uint64_t touched = it->second.last_touch;
+            const std::uint64_t touched = groups_.at(i).value.last_touch;
             if (now_ < touched || now_ - touched <= max_age) {
-                ++it;
+                ++i;
                 continue;
             }
-            const reassembly_key_t key = it->first;
-            ++it;  // advance off the node drop_group is about to erase
+            const reassembly_key_t key = groups_.at(i).key;  // index `i` now holds the next group
             drop_group(key);
             ++dropped_groups_;
             ++swept;
@@ -274,7 +279,7 @@ class can_reassembly_t {
 
    private:
     // A whole-buffer slice identity: `(group, index)`, so a group's slices are a
-    // contiguous, index-ordered run in one flat map (no nested pmr container).
+    // contiguous, index-ordered run in one flat map (no nested container).
     struct slice_id_t {
         reassembly_key_t group{};
         std::uint32_t index = 0;
@@ -290,36 +295,43 @@ class can_reassembly_t {
     // Track a group, creating it (bound-enforced) if new; returns its metadata.
     // Every touch restamps it, so a group still receiving slices never ages out
     // and one that stopped making progress does.
-    group_meta_t& touch_group(const reassembly_key_t& key) {
-        const auto it = groups_.find(key);
-        if (it != groups_.end()) {
-            it->second.last_touch = now_;
-            return it->second;
+    // Null when the source refused a new group's entry.
+    group_meta_t* touch_group(const reassembly_key_t& key) noexcept {
+        if (group_meta_t* const g = groups_.find(key)) {
+            g->last_touch = now_;
+            return g;
         }
         if (max_groups_ != 0 && groups_.size() >= max_groups_) evict_oldest();
         return groups_
-            .emplace(key,
-                     group_meta_t{.expected = std::nullopt, .seq = next_seq_++, .last_touch = now_})
-            .first->second;
+            .try_emplace(
+                key, group_meta_t{.expected = std::nullopt, .seq = next_seq_++, .last_touch = now_})
+            .value;
+    }
+
+    // The index of the first slice of group @p key (or of the first entry after it).
+    [[nodiscard]] std::size_t first_slice(const reassembly_key_t& key) const noexcept {
+        return slices_.lower_bound(slice_id_t{key, 0});
+    }
+    // True when slice entry @p i exists and belongs to group @p key.
+    [[nodiscard]] bool in_group(std::size_t i, const reassembly_key_t& key) const noexcept {
+        return i < slices_.size() && slices_.at(i).key.group == key;
     }
 
     // Erase a group's metadata and its slice run (the flat-map range for the group).
-    void drop_group(const reassembly_key_t& key) {
-        groups_.erase(key);
-        const auto lo = slices_.lower_bound(slice_id_t{key, 0});
-        auto hi = lo;
-        while (hi != slices_.end() && hi->first.group == key) ++hi;
-        slices_.erase(lo, hi);
+    void drop_group(const reassembly_key_t& key) noexcept {
+        (void)groups_.erase(key);
+        const std::size_t lo = first_slice(key);
+        while (in_group(lo, key)) slices_.erase_at(lo);
     }
 
     // Evict the oldest-inserted group to make room (bounded drop, counted).
-    void evict_oldest() {
-        auto oldest = groups_.begin();
-        for (auto it = groups_.begin(); it != groups_.end(); ++it) {
-            if (it->second.seq < oldest->second.seq) oldest = it;
+    void evict_oldest() noexcept {
+        if (groups_.empty()) return;
+        std::size_t oldest = 0;
+        for (std::size_t i = 1; i < groups_.size(); ++i) {
+            if (groups_.at(i).value.seq < groups_.at(oldest).value.seq) oldest = i;
         }
-        if (oldest == groups_.end()) return;
-        const reassembly_key_t key = oldest->first;
+        const reassembly_key_t key = groups_.at(oldest).key;
         drop_group(key);
         ++dropped_groups_;
     }
@@ -328,8 +340,8 @@ class can_reassembly_t {
     std::uint64_t next_seq_ = 0;
     std::uint64_t dropped_groups_ = 0;
     std::uint64_t now_ = 0;  // the caller's latest stamp (set_now); no clock here.
-    std::pmr::map<reassembly_key_t, group_meta_t> groups_;
-    std::pmr::map<slice_id_t, tr::view::view_t> slices_;
+    mem::sorted_map_t<reassembly_key_t, group_meta_t> groups_;
+    mem::sorted_map_t<slice_id_t, tr::view::view_t> slices_;
 };
 
 }  // namespace tr::net

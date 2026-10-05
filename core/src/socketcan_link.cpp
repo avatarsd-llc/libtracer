@@ -21,6 +21,7 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <utility>
@@ -34,7 +35,7 @@ void* socketcan_link_t::thread_entry(void* self) {
     return nullptr;
 }
 
-socketcan_link_t::socketcan_link_t(const std::string& ifname, std::size_t recv_stack)
+socketcan_link_t::socketcan_link_t(std::string_view ifname, std::size_t recv_stack)
     : recv_stack_(recv_stack) {
     fd_ = ::socket(PF_CAN, SOCK_RAW, CAN_RAW);
     if (fd_ < 0) return;
@@ -44,7 +45,7 @@ socketcan_link_t::socketcan_link_t(const std::string& ifname, std::size_t recv_s
     ::setsockopt(fd_, SOL_CAN_RAW, CAN_RAW_FD_FRAMES, &enable_fd, sizeof(enable_fd));
 
     ifreq ifr{};
-    std::strncpy(ifr.ifr_name, ifname.c_str(), IFNAMSIZ - 1);
+    std::memcpy(ifr.ifr_name, ifname.data(), std::min<std::size_t>(ifname.size(), IFNAMSIZ - 1));
     if (::ioctl(fd_, SIOCGIFINDEX, &ifr) < 0) {
         ::close(fd_);
         fd_ = -1;

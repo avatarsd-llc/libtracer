@@ -66,14 +66,15 @@ void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
     // `make_connection` closed it. The LISTEN arm never reaches the engine.
     vertex.register_transport_type(
         "tcp",
-        [rx_backend, egress_src](const conn_settings_t& s, const wire::tlv_node_t* raw_config) {
+        [rx_backend, egress_src](const conn_settings_t& s, const wire::tlv_node_t* raw_config,
+                                 mem::block_source_t& src) {
             const wire::config_reader_t cfg(raw_config);
             const bool peer_named = cfg.flag("peer_named").value_or(false);
             // The bus-module refusal — the ws factory's twin; see its comment for why
             // TYPE_MISMATCH rather than TRANSPORT_DOWN (#375 deliverable 3).
             if constexpr (!kBusLinks)
                 if (peer_named)
-                    return graph::result_t<std::unique_ptr<transport_t>>(
+                    return graph::result_t<transport_ptr_t>(
                         std::unexpected(graph::status_t::TYPE_MISMATCH));
             const auto max_peers = static_cast<std::size_t>(cfg.u32("max_peers").value_or(0));
             const std::uint32_t liveness_window = cfg.u32("liveness_window").value_or(0);
@@ -89,7 +90,7 @@ void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
                     // with no counter moving. The vertex calls `start_receiving()` once the link
                     // is fully wired.
                     return make_checked<tcp_transport_t>(
-                        s.addr, s.port,
+                        src, s.addr, s.port,
                         tcp_config_t{.memory = {.rx = rx_backend},
                                      .max_frame = s.max_frame,
                                      .defer_recv = true,
@@ -97,11 +98,12 @@ void register_tcp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
                 },
                 [&] {
                     return make_checked<transport_tcp_server>(
-                        s.port, tcp_server_config_t{.memory = {.rx = rx_backend},
-                                                    .max_frame = s.max_frame,
-                                                    .max_peers = max_peers,
-                                                    .peer_named = peer_named,
-                                                    .liveness_window_ms = liveness_window});
+                        src, s.port,
+                        tcp_server_config_t{.memory = {.rx = rx_backend},
+                                            .max_frame = s.max_frame,
+                                            .max_peers = max_peers,
+                                            .peer_named = peer_named,
+                                            .liveness_window_ms = liveness_window});
                 });
             // The ADR-0079 egress store, wired before the link is handed to the router (#873).
             return with_egress_source(std::move(link), egress_src);

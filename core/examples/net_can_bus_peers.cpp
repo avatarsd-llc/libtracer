@@ -279,7 +279,8 @@ std::unique_ptr<tr::net::can_transport_t> make_node(fake_bus_t& bus, std::uint16
     cfg.node = node;
     cfg.mode = tr::net::can::can_frame_mode_t::CLASSIC;
     cfg.path = std::move(path);
-    return std::make_unique<tr::net::can_transport_t>(std::make_unique<fake_link_t>(bus), cfg);
+    return std::make_unique<tr::net::can_transport_t>(
+        tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus), cfg);
 }
 
 /** @brief The peer names @p link currently hears, in enumeration order. */

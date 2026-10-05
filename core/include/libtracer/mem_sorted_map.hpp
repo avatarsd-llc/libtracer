@@ -139,9 +139,17 @@ class sorted_map_t {
     [[nodiscard]] const_iterator begin() const noexcept { return entries_.begin(); }
     /** @brief Past the last entry (read-only). */
     [[nodiscard]] const_iterator end() const noexcept { return entries_.end(); }
+    /** @brief Entry @p i in key order, unchecked. */
+    [[nodiscard]] entry_t& at(std::size_t i) noexcept { return entries_[i]; }
+    /** @brief Entry @p i in key order, unchecked (read-only). */
+    [[nodiscard]] const entry_t& at(std::size_t i) const noexcept { return entries_[i]; }
+    /** @brief Remove entry @p i, shifting the tail down. Precondition: `i < size()`. */
+    void erase_at(std::size_t i) noexcept { entries_.erase_at(i); }
 
-   private:
-    /** @brief Index of the first entry whose key is not less than @p key. */
+    /**
+     * @brief Index of the first entry whose key is not less than @p key — where a range scan
+     *        over a key prefix starts (`size()` when there is none).
+     */
     template <class Q>
     [[nodiscard]] std::size_t lower_bound(const Q& key) const noexcept {
         std::size_t lo = 0;
@@ -158,6 +166,7 @@ class sorted_map_t {
         return lo;
     }
 
+   private:
     block_array_t<entry_t> entries_;  /**< @brief The entries, sorted by key. */
     [[no_unique_address]] Less less_; /**< @brief The key order. */
 };

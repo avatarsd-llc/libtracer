@@ -29,6 +29,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <condition_variable>
@@ -259,8 +260,13 @@ void test_peer_open_before_response_is_readable() {
     }
     cv.notify_all();
 
-    const auto got = read_until(
-        cfd, [](const std::vector<std::byte>& b) { return ws::decode_frame(b).has_value(); }, 2s);
+    auto got = read_until(
+        cfd,
+        [](const std::vector<std::byte>& b) {
+            auto copy = b;  // the decoder unmasks in place
+            return ws::decode_frame(copy).has_value();
+        },
+        2s);
     const auto dec = ws::decode_frame(got);
     check(dec.has_value(), "the frame sent in that instant REACHED the peer");
     if (dec)
@@ -400,7 +406,7 @@ void test_reserved_frame_between_fragments_fails_the_connection() {
     write_bytes(cfd, masked_client_frame(ws::opcode_t::CONT, tail, mask, /*fin=*/true));
 
     bool closed = false;
-    const auto back =
+    auto back =
         read_until(cfd, [](const std::vector<std::byte>& b) { return !b.empty(); }, 2s, &closed);
     check(back.empty() && closed, "nothing came back, and the server FAILED the connection");
     check(fut.wait_for(500ms) != std::future_status::ready,
@@ -451,7 +457,7 @@ void test_handshake_and_frames() {
     check(resp.find("Upgrade: websocket") != std::string::npos, "response has Upgrade: websocket");
     check(resp.find("Connection: Upgrade") != std::string::npos,
           "response has Connection: Upgrade");
-    const std::string expect_accept = ws::accept_key(client_key);
+    const std::string expect_accept(ws::accept_key(client_key).view());
     check(resp.find("Sec-WebSocket-Accept: " + expect_accept) != std::string::npos,
           "Sec-WebSocket-Accept matches ws::accept_key");
 
@@ -475,8 +481,13 @@ void test_handshake_and_frames() {
                                            std::byte{0xFE}};
     server.send(out_tlv);
 
-    const auto srv_bytes = read_until(
-        cfd, [](const std::vector<std::byte>& b) { return ws::decode_frame(b).has_value(); }, 2s);
+    auto srv_bytes = read_until(
+        cfd,
+        [](const std::vector<std::byte>& b) {
+            auto copy = b;  // the decoder unmasks in place
+            return ws::decode_frame(copy).has_value();
+        },
+        2s);
     auto decoded = ws::decode_frame(srv_bytes);
     check(decoded.has_value(), "client decoded a server frame");
     if (decoded) {
@@ -525,8 +536,13 @@ void test_scatter_gather_send() {
 
     // --- (a) scatter-gather send: the four spans emit as ONE server frame ---
     server.send(std::span<const std::span<const std::byte>>(spans));
-    const auto sg_bytes = read_until(
-        cfd, [](const std::vector<std::byte>& b) { return ws::decode_frame(b).has_value(); }, 2s);
+    auto sg_bytes = read_until(
+        cfd,
+        [](const std::vector<std::byte>& b) {
+            auto copy = b;  // the decoder unmasks in place
+            return ws::decode_frame(copy).has_value();
+        },
+        2s);
     auto sg = ws::decode_frame(sg_bytes);
     check(sg.has_value(), "client decoded the scatter-gather server frame");
     if (sg) {
@@ -538,12 +554,17 @@ void test_scatter_gather_send() {
 
     // --- (b) flat send of the SAME payload: byte-identical reassembly ---
     server.send(std::span<const std::byte>(payload));
-    const auto flat_bytes = read_until(
-        cfd, [](const std::vector<std::byte>& b) { return ws::decode_frame(b).has_value(); }, 2s);
+    auto flat_bytes = read_until(
+        cfd,
+        [](const std::vector<std::byte>& b) {
+            auto copy = b;  // the decoder unmasks in place
+            return ws::decode_frame(copy).has_value();
+        },
+        2s);
     auto flat = ws::decode_frame(flat_bytes);
     check(flat.has_value(), "client decoded the flat server frame");
     if (sg && flat)
-        check(flat->first.payload == sg->first.payload,
+        check(std::ranges::equal(flat->first.payload, sg->first.payload),
               "flat send and scatter-gather send reassemble to identical bytes");
 
     ::close(cfd);
@@ -1090,8 +1111,12 @@ void test_frame_pipelined_behind_the_101() {
 
         // Nothing else is written until the PONG comes back: the client must decode the
         // pipelined PING with no further bytes arriving on the socket.
-        const auto pong = read_until(
-            cfd, [](const std::vector<std::byte>& b) { return ws::decode_frame(b).has_value(); },
+        auto pong = read_until(
+            cfd,
+            [](const std::vector<std::byte>& b) {
+                auto copy = b;  // the decoder unmasks in place
+                return ws::decode_frame(copy).has_value();
+            },
             3s);
         const auto dec = ws::decode_frame(pong);
         pong_seen.set_value(
@@ -1241,7 +1266,11 @@ void test_push_on_connect_waits_for_start_receiving() {
 
         armed_fut.wait();
         auto back = read_until(
-            cfd, [](const std::vector<std::byte>& b) { return ws::decode_frame(b).has_value(); },
+            cfd,
+            [](const std::vector<std::byte>& b) {
+                auto copy = b;  // the decoder unmasks in place
+                return ws::decode_frame(copy).has_value();
+            },
             3s);
         // Anything that leaked into the held window still counts as sent: the PONG check must
         // stay a POSITIVE control (the bytes survived and decode) in both states, so that the
@@ -1622,7 +1651,7 @@ void test_client_answers_a_control_frame_at_the_bound_masked() {
               "byte-exact and actually masked");
         const auto dec = ws::decode_frame(got);
         check(dec.has_value() && dec->first.op == ws::opcode_t::PONG &&
-                  dec->first.payload == ping_payload,
+                  std::ranges::equal(dec->first.payload, ping_payload),
               "and unmasking the frame recovers the 125-byte payload exactly");
 
         check(sink.wait_count(1, 4s),
@@ -1663,7 +1692,7 @@ void test_client_answers_a_control_frame_at_the_bound_masked() {
 void test_client_fails_the_connection_on_an_oversize_control_frame() {
     std::printf(
         "transport_ws client — a hostile server's 4 KiB PING fails the connection (#1010):\n");
-    const auto got = drive_control_breach(oversize_server_control(ws::opcode_t::PING, 4096));
+    auto got = drive_control_breach(oversize_server_control(ws::opcode_t::PING, 4096));
     check(got.handshaken, "the client completed its opening handshake");
     check(got.reply.empty(), "no PONG came back — and so no 4 KiB reflection");
     check(got.peer_closed, "the client FAILED the connection: its end of the socket went away");
@@ -1692,7 +1721,7 @@ void test_client_fails_the_connection_on_a_fragmented_control_frame() {
     std::vector<std::byte> frame;
     append_server_frame(frame, ws::opcode_t::PING, payload, /*fin=*/false);
 
-    const auto got = drive_control_breach(frame);
+    auto got = drive_control_breach(frame);
     check(got.handshaken, "the client completed its opening handshake");
     check(got.reply.empty(), "no PONG came back for a non-final control frame");
     check(got.peer_closed, "the client FAILED the connection: its end of the socket went away");
@@ -1719,7 +1748,7 @@ void test_client_link_up_clears_on_peer_close() {
         "transport_ws client — a peer CLOSE clears link_up(), ok() stays came-up (#1059):\n");
     std::vector<std::byte> close_frame;
     append_server_frame(close_frame, ws::opcode_t::CLOSE, {});
-    const auto got = drive_control_breach(close_frame);
+    auto got = drive_control_breach(close_frame);
     check(got.handshaken, "the client completed its opening handshake");
     check(got.link_up_before, "link_up() was true on the handshaken, not-yet-closed link");
     check(got.peer_closed, "the client closed its end of the socket on the peer's CLOSE");
@@ -1752,7 +1781,7 @@ void drive_client_reserved_opcode(std::uint8_t op, const char* label) {
     std::vector<std::byte> frame;
     append_server_frame(frame, static_cast<ws::opcode_t>(op), payload);
 
-    const auto got = drive_control_breach(frame);
+    auto got = drive_control_breach(frame);
     check(got.handshaken, "the client completed its opening handshake");
     check(got.reply.empty(), "the client wrote nothing back");
     check(got.peer_closed, "the client FAILED the connection: its end of the socket went away");

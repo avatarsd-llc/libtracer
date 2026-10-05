@@ -15,7 +15,6 @@
 #include <array>
 #include <cerrno>
 #include <cstring>
-#include <memory>
 #include <mutex>
 #include <utility>
 
@@ -101,7 +100,7 @@ struct prefixed_iov_t {
 
 }  // namespace
 
-tcp_transport_t::tcp_transport_t(const std::string& peer_host, std::uint16_t peer_port,
+tcp_transport_t::tcp_transport_t(std::string_view peer_host, std::uint16_t peer_port,
                                  const tcp_config_t& config)
     : backend_(config.memory.rx), recv_stack_(config.recv_stack) {
     const std::size_t max_frame = config.max_frame;
@@ -115,7 +114,7 @@ tcp_transport_t::tcp_transport_t(const std::string& peer_host, std::uint16_t pee
     sockaddr_in peer{};
     peer.sin_family = AF_INET;
     peer.sin_port = htons(peer_port);
-    if (::inet_pton(AF_INET, peer_host.c_str(), &peer.sin_addr) != 1 ||
+    if (!parse_ipv4(peer_host, peer.sin_addr) ||
         ::connect(fd, reinterpret_cast<sockaddr*>(&peer), sizeof(peer)) < 0) {
         ::close(fd);
         return;
@@ -407,7 +406,8 @@ struct tcp_server_transport_t::session_t : slot_server_t::session_base_t {
 
 tcp_server_transport_t::tcp_server_transport_t(std::uint16_t bind_port,
                                                const tcp_server_config_t& config)
-    : stream_server_base_t(config.max_peers, config.peer_named, config.liveness_window_ms),
+    : stream_server_base_t(config.max_peers, config.peer_named, config.liveness_window_ms,
+                           config.memory.io_or_default(), config.memory.state_or_default()),
       backend_(config.memory.rx) {
     max_frame_ = length_prefix_framer_t::configured_cap(config.max_frame);  // tighten-only (#1035)
     if (!bind_listen(bind_port)) return;
@@ -421,8 +421,9 @@ tcp_server_transport_t::~tcp_server_transport_t() {
     stop_and_join();
 }
 
-std::unique_ptr<slot_server_t::session_base_t> tcp_server_transport_t::make_session() {
-    auto slot = std::make_unique<session_t>();
+mem::poly_ptr_t<slot_server_t::session_base_t> tcp_server_transport_t::make_session() {
+    mem::poly_ptr_t<session_t> slot = mem::make_poly<session_t>(slots_.source());
+    if (!slot) return nullptr;
     slot->endpoint.owner_ = this;
     slot->endpoint.slot_ = slot.get();
     slot->peer_endpoint = &slot->endpoint;

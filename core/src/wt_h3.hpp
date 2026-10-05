@@ -50,9 +50,9 @@
 #include <cstdint>
 #include <optional>
 #include <span>
-#include <string>
 #include <string_view>
-#include <vector>
+
+#include "libtracer/mem_source.hpp"
 
 namespace tr::net::wt_h3 {
 
@@ -96,8 +96,8 @@ struct varint_t {
  * nothing at all to answer.
  *
  * It is a `push_back` sink on purpose, so the appenders below take it and a
- * `std::vector` through the SAME code (the DIAL-side request, whose length depends on a
- * configured `:authority`/`:path`, keeps its vector).
+ * @ref failable_sink_t through the SAME code (the DIAL-side request, whose length depends
+ * on a configured `:authority`/`:path`, is built in store blocks — #1780).
  *
  * @warning Writing past @p N is undefined; every builder here is checked by a
  *          `static_assert` on the resulting length.
@@ -116,6 +116,22 @@ struct fixed_bytes_t {
     }
 };
 
+/**
+ * @brief A `push_back` byte sink over a failable @ref tr::mem::block_array_t — what a
+ *        builder below writes into when its length is not a protocol constant (#1780).
+ *
+ * The builders take any `push_back` sink and cannot report a refusal, so this one records
+ * it: after the build, @ref ok says whether every byte landed. A refusal leaves the array
+ * holding a prefix, which the caller discards.
+ */
+struct failable_sink_t {
+    mem::block_array_t<std::uint8_t>& out; /**< @brief The array appended to. */
+    bool ok = true;                        /**< @brief False once a byte was refused. */
+
+    /** @brief Append one byte (or record that the store refused it). */
+    void push_back(std::uint8_t b) noexcept { ok = ok && out.push_back(b); }
+};
+
 /** Decode one QUIC varint; nullopt = the buffer does not yet hold all its bytes. */
 inline std::optional<varint_t> read_varint(std::span<const std::uint8_t> in) {
     if (in.empty()) return std::nullopt;
@@ -127,7 +143,7 @@ inline std::optional<varint_t> read_varint(std::span<const std::uint8_t> in) {
 }
 
 /** Append @p v as a QUIC varint (shortest encoding) to any `push_back` byte sink —
- *  a `std::vector` (the DIAL request) or a @ref fixed_bytes_t (the constant preambles). */
+ *  a @ref failable_sink_t (the DIAL request) or a @ref fixed_bytes_t (the preambles). */
 template <class Out>
 constexpr void append_varint(Out& out, std::uint64_t v) {
     if (v < 0x40) {
@@ -251,20 +267,11 @@ inline std::optional<std::size_t> huffman_decode_into(std::span<const std::uint8
     return written;
 }
 
-/**
- * @brief The owning convenience wrapper over huffman_decode_into.
- *
- * Sized for the widest possible expansion (the shortest code is 5 bits, so at
- * most 8/5 bytes out per byte in) and therefore never refuses for storage. Used
- * where an owned string is wanted and the input is not peer-provoked — the
- * decoder proper goes through huffman_decode_into into fixed scratch.
- */
-inline std::optional<std::string> huffman_decode(std::span<const std::uint8_t> in) {
-    std::string out((in.size() * 8) / 5 + 1, '\0');
-    const auto written = huffman_decode_into(in, std::span<char>(out.data(), out.size()));
-    if (!written) return std::nullopt;
-    out.resize(*written);
-    return out;
+/** @brief The widest a Huffman decode of @p n input bytes can expand to: the shortest
+ *         code is 5 bits, so at most 8/5 bytes out per byte in (size a
+ *         @ref huffman_decode_into buffer with this and it never refuses for storage). */
+[[nodiscard]] constexpr std::size_t huffman_max_decoded(std::size_t n) noexcept {
+    return (n * 8) / 5 + 1;
 }
 
 // ---- QPACK static-table subset + prefixed integers (RFC 9204 / RFC 7541 §5.1) ----
@@ -338,9 +345,11 @@ inline std::optional<varint_t> read_prefixed_int(std::span<const std::uint8_t> i
     }
 }
 
-/** Append an RFC 7541 §5.1 prefixed integer, OR-ing @p flags into the first byte. */
-inline void append_prefixed_int(std::vector<std::uint8_t>& out, std::uint64_t v,
-                                unsigned prefix_bits, std::uint8_t flags) {
+/** Append an RFC 7541 §5.1 prefixed integer, OR-ing @p flags into the first byte, to any
+ *  `push_back` byte sink (see @ref wt_h3::append_varint). */
+template <class Out>
+constexpr void append_prefixed_int(Out& out, std::uint64_t v, unsigned prefix_bits,
+                                   std::uint8_t flags) {
     const std::uint64_t mask = (1u << prefix_bits) - 1u;
     if (v < mask) {
         out.push_back(static_cast<std::uint8_t>(flags | v));
@@ -575,23 +584,27 @@ static_assert(kStreamTypeQpackEncoder < 0x40 && kStreamTypeQpackDecoder < 0x40,
 namespace detail {
 
 /** Append a QPACK string literal with H=0 (never Huffman on our encode side). */
-inline void append_string(std::vector<std::uint8_t>& out, std::string_view s) {
+template <class Out>
+constexpr void append_string(Out& out, std::string_view s) {
     append_prefixed_int(out, s.size(), 7, 0x00);
-    out.insert(out.end(), s.begin(), s.end());
+    for (const char ch : s) out.push_back(static_cast<std::uint8_t>(ch));
 }
 
 }  // namespace detail
 
 /**
- * The QPACK encoded field section of the extended CONNECT request
+ * Append the QPACK encoded field section of the extended CONNECT request
  * (`:method=CONNECT, :protocol=webtransport, :scheme=https, :authority, :path`)
- * — static references where the table has the pair, literals (H=0) elsewhere.
+ * — static references where the table has the pair, literals (H=0) elsewhere — to any
+ * `push_back` byte sink (@ref failable_sink_t on the DIAL path, #1780).
  */
-inline std::vector<std::uint8_t> encode_connect_field_section(std::string_view authority,
-                                                              std::string_view path) {
-    std::vector<std::uint8_t> out{0x00, 0x00};  // RIC=0, base=0 (no dynamic table)
-    out.push_back(0xc0 | 15);                   // :method: CONNECT   (static 15)
-    out.push_back(0xc0 | 23);                   // :scheme: https     (static 23)
+template <class Out>
+constexpr void encode_connect_field_section(Out& out, std::string_view authority,
+                                            std::string_view path) {
+    out.push_back(0x00);       // RIC=0
+    out.push_back(0x00);       // base=0 (no dynamic table)
+    out.push_back(0xc0 | 15);  // :method: CONNECT   (static 15)
+    out.push_back(0xc0 | 23);  // :scheme: https     (static 23)
     // :authority — literal with static name reference 0.
     detail::append_prefixed_int(out, 0, 4, 0x50);
     detail::append_string(out, authority);
@@ -604,9 +617,8 @@ inline std::vector<std::uint8_t> encode_connect_field_section(std::string_view a
     // :protocol: webtransport — literal name (not in the static table).
     detail::append_prefixed_int(out, sizeof(":protocol") - 1, 3, 0x20);
     constexpr std::string_view proto_name = ":protocol";
-    out.insert(out.end(), proto_name.begin(), proto_name.end());
+    for (const char ch : proto_name) out.push_back(static_cast<std::uint8_t>(ch));
     detail::append_string(out, "webtransport");
-    return out;
 }
 
 /** The QPACK encoded field section of the `200` CONNECT response — a 3-byte protocol

@@ -19,7 +19,6 @@
 #include <cstdint>
 #include <mutex>
 #include <span>
-#include <string>
 #include <string_view>
 
 #include "libtracer/mem_heap.hpp"
@@ -104,7 +103,7 @@ class udp_transport_t : public transport_t, private posix_endpoint_t {
      * @param config The link's knobs (@ref udp_config_t): memory (the RX seam that bounds the
      *        datagram), receive cap, recv-thread stack.
      */
-    udp_transport_t(std::uint16_t bind_port, const std::string& peer_host, std::uint16_t peer_port,
+    udp_transport_t(std::uint16_t bind_port, std::string_view peer_host, std::uint16_t peer_port,
                     const udp_config_t& config = {});
     ~udp_transport_t() override;
 
@@ -174,6 +173,8 @@ class udp_transport_t : public transport_t, private posix_endpoint_t {
     // RX segment source for view delivery (ADR-0042 §2) + backend-exhaustion
     // drop counter (backpressure, never OOM).
     mem::mem_backend_t* backend_;
+    /** @brief The receive scratch's store — the link's `memory.state` (#1780). */
+    mem::block_source_t* state_src_;
     std::size_t max_frame_ = kMaxDatagram;  // accepted-datagram cap (:settings; 0 => kMaxDatagram)
     // Drop counters: word-wide, not 64-bit (core/STYLE.md §Introspection clause 5, #1697) —
     // a 64-bit atomic is a libatomic call on every rv32, the ESP32-C6 included. The 64-bit

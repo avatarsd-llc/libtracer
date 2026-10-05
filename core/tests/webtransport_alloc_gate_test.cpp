@@ -567,7 +567,7 @@ void test_connect_path_copy_is_failable() {
         check(counted, "ARMED: the CONNECT was REFUSED and counted (refused_sessions())");
         check(!listener.session_up(), "and no session was left half-established");
         check(peer_saw_close, "the peer saw the count-then-CLOSE (#934's 2026-08-15 ruling)");
-        check(listener.session_path().empty(),
+        check(listener.session_path({}) == 0,
               "the refused :path was never recorded (try_assign leaves dst unchanged)");
     }
 
@@ -581,7 +581,9 @@ void test_connect_path_copy_is_failable() {
         check(connect_only(listener, peer), "control: QUIC up");
         check(peer.session(long_path), "control: the peer sent the same extended CONNECT");
         check(wait_session(listener, 5000ms), "UNARMED: the session IS established");
-        check(listener.session_path() == long_path, "and the 512-byte :path was recorded");
+        std::string recorded(listener.session_path({}), '\0');  // sized by the full length
+        (void)listener.session_path(recorded);
+        check(recorded == long_path, "and the 512-byte :path was recorded");
         check(listener.refused_sessions() == 0, "with nothing refused");
     }
 }
@@ -595,23 +597,41 @@ void test_connect_path_copy_is_failable() {
  * msquic owns until SEND_COMPLETE — unavoidable, because the seam's spans are borrowed only
  * for the `StreamSend` call — and that copy is what this vector refuses.
  *
- * Armed at exactly 5 bytes (the frame's fixed length: HEADERS type, length, and the 3-byte
- * `:status: 200` section), `send_ctx_t::make_raw` returns null, `send_raw` answers false,
- * and the CONNECT is refused with the same count-then-close. Unarmed, the identical
- * sequence establishes the session.
+ * Since #1780 that copy is a block from the link's EGRESS store (`memory.io`), so the refusal
+ * is injected there: a store that serves until armed and then refuses everything. Armed
+ * once QUIC is up, the only egress draw left before the session would be the 200 itself,
+ * so `send_ctx_t::make_raw` returns null, `send_raw` answers false, and the CONNECT is
+ * refused with the same count-then-close. Unarmed, the identical sequence establishes the
+ * session.
  */
 void test_connect_response_send_is_failable() {
     std::printf("WebTransport — the 200 response's owned copy refuses, never aborts (#934):\n");
     {
-        webtransport_transport_t listener(std::uint16_t{0}, g_cert, g_key);
+        /** @brief The listener's egress store: the process heap, refusing while armed. */
+        struct armed_egress_t final : tr::mem::block_source_t {
+            armed_egress_t() noexcept : block_source_t("armed-egress") {}
+            void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+                if (g_armed.load(std::memory_order_acquire)) {
+                    g_refusals.fetch_add(1, std::memory_order_relaxed);
+                    return nullptr;
+                }
+                return tr::mem::heap_source().try_alloc(bytes, align);
+            }
+            void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+                tr::mem::heap_source().release(p, bytes, align);
+            }
+        } egress;
+        webtransport_transport_t listener(std::uint16_t{0}, g_cert, g_key,
+                                          {.memory = {.io = &egress}});
         check(listener.ok(), "armed: listener started");
         peer_driver_t peer(LIBTRACER_WT_PEER_DRIVER);
         check(peer.ok, "armed: the peer driver runs in a SEPARATE process");
         check(connect_only(listener, peer), "armed: QUIC up");
 
-        // The root path fits `path`'s SSO buffer, so guard 3 never probes and this vector is
-        // about the response copy alone.
-        arm(5);
+        // The egress store refuses everything while armed; the `:path` copy is connection
+        // STATE (`memory.state`), so this vector is about the response copy alone. The
+        // process-wide probe hook stays idle: it is armed for a size nothing probes.
+        arm(SIZE_MAX);
         const bool sent = peer.session("/");
         const bool counted = sent && wait_refused(listener, 1, 5000ms);
         const bool peer_saw_close = counted && peer.wait_shutdown(5000ms);

@@ -51,6 +51,15 @@
 
 namespace {
 
+/** @brief A whole advertise frame in a `std::vector` — the test-side form of
+ *         `can::encode_advertise` (#1780 moved it into a caller's `bytes_t`); empty when
+ *         the advertise is unencodable. */
+[[maybe_unused]] std::vector<std::byte> advertise_vec(const tr::net::can::advertise_t& a) {
+    tr::mem::bytes_t b(tr::mem::heap_source());
+    if (!tr::net::can::encode_advertise(b, a)) return {};
+    return std::vector<std::byte>(b.begin(), b.end());
+}
+
 using namespace std::chrono_literals;
 namespace can = tr::net::can;
 
@@ -252,7 +261,7 @@ bool wait_until(Fn cond, std::chrono::milliseconds budget) {
  *        exactly what `can_transport_t::emit_advertise` puts on the wire.
  */
 void inject_advertise(fake_link_t& link, std::uint16_t node, const can::advertise_t& adv) {
-    const std::vector<std::byte> bytes = can::encode_advertise(adv);
+    const std::vector<std::byte> bytes = advertise_vec(adv);
     const std::uint32_t control_id = can::encode_can_id({0, node, tr::net::kCanControlEndpoint});
     for (std::size_t off = 0; off < bytes.size(); off += 8) {
         tr::net::can_frame_data_t f;
@@ -298,8 +307,8 @@ void test_roundtrip(tr::net::can::can_frame_mode_t mode, std::size_t payload_len
     // callable by address, and ~can_transport_t joins its receive thread.
     sink_t sink;
     auto rx = [&](std::span<const std::byte> f) { sink.on(f); };
-    auto link_a = std::make_unique<fake_link_t>(bus);
-    auto link_b = std::make_unique<fake_link_t>(bus);
+    auto link_a = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
+    auto link_b = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
 
     tr::net::can_transport_t tx_a(std::move(link_a), {0, 1, mode, "sensor/temp"});
     tr::net::can_transport_t tx_b(std::move(link_b), {0, 2, mode, "actuator/valve"});
@@ -316,7 +325,8 @@ void test_roundtrip(tr::net::can::can_frame_mode_t mode, std::size_t payload_len
     // The peer learned the in-band advertise binding for A's first group (base
     // endpoint 1, node 1, version 0).
     const std::uint32_t base_id = can::encode_can_id({0, 1, tr::net::kCanFirstDataEndpoint});
-    const auto binding = tx_b.learned_binding(base_id);
+    std::array<char, 64> path_buf{};
+    const auto binding = tx_b.learned_binding(base_id, path_buf);
     check(binding.has_value(), "identity↔path map learned the advertise binding");
     if (binding) {
         check(binding->path == "sensor/temp", "learned binding carries the advertised path");
@@ -330,8 +340,8 @@ void test_fd_dlc_padding() {
     fake_can_bus_t bus;
     sink_t sink;
     auto rx = [&](std::span<const std::byte> f) { sink.on(f); };
-    auto link_a = std::make_unique<fake_link_t>(bus);
-    auto link_b = std::make_unique<fake_link_t>(bus);
+    auto link_a = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
+    auto link_b = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
     frame_tap_t tap(bus);  // records every frame on the bus
 
     tr::net::can_transport_t tx_a(std::move(link_a),
@@ -378,7 +388,7 @@ void test_control_stream_resync() {
     fake_can_bus_t bus;
     sink_t sink;
     auto rx = [&](std::span<const std::byte> f) { sink.on(f); };
-    auto link_b = std::make_unique<fake_link_t>(bus);
+    auto link_b = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
     fake_link_t injector(bus);  // stands in for the tail of an in-flight advertise
 
     // B is listening BEFORE A exists — then a fragment of node 1's control
@@ -397,7 +407,7 @@ void test_control_stream_resync() {
     for (std::size_t i = 0; i < 5; ++i) fragment.data[i] = static_cast<std::byte>(tail[i]);
     injector.write_raw(fragment);
 
-    auto link_a = std::make_unique<fake_link_t>(bus);
+    auto link_a = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
     tr::net::can_transport_t tx_a(std::move(link_a),
                                   {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "sensor/temp"});
     const std::vector<std::byte> payload = make_payload(24);
@@ -414,8 +424,8 @@ void test_lifecycle() {
     for (int i = 0; i < 8; ++i) {
         sink_t sink;
         auto rx = [&](std::span<const std::byte> f) { sink.on(f); };
-        auto link_a = std::make_unique<fake_link_t>(bus);
-        auto link_b = std::make_unique<fake_link_t>(bus);
+        auto link_a = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
+        auto link_b = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
         tr::net::can_transport_t tx_a(std::move(link_a),
                                       {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "a"});
         tr::net::can_transport_t tx_b(std::move(link_b),
@@ -433,8 +443,8 @@ void test_single_value() {
     fake_can_bus_t bus;
     sink_t sink;
     auto rx = [&](std::span<const std::byte> f) { sink.on(f); };
-    auto link_a = std::make_unique<fake_link_t>(bus);
-    auto link_b = std::make_unique<fake_link_t>(bus);
+    auto link_a = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
+    auto link_b = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
     tr::net::can_transport_t tx_a(std::move(link_a),
                                   {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "p"});
     tr::net::can_transport_t tx_b(std::move(link_b),
@@ -460,7 +470,7 @@ void test_pending_flood_is_capped_and_counted() {
 
     fake_can_bus_t bus;
     fake_link_t injector(bus);  // stands in for a peer that floods data, never advertises
-    auto link_b = std::make_unique<fake_link_t>(bus);
+    auto link_b = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
 
     tr::net::transport_can_config_t cfg = rx_test_config();
     cfg.max_pending = 4;
@@ -492,7 +502,7 @@ void test_pending_slices_age_out() {
 
     fake_can_bus_t bus;
     fake_link_t injector(bus);
-    auto link_b = std::make_unique<fake_link_t>(bus);
+    auto link_b = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
 
     tr::net::transport_can_config_t cfg = rx_test_config();
     cfg.max_pending = 0;  // count cap OFF — only the age-out can reclaim these
@@ -534,7 +544,7 @@ void test_zero_peer_ttl_does_not_disable_the_age_out() {
     {
         fake_can_bus_t bus;
         fake_link_t injector(bus);  // a peer that floods data and never advertises
-        auto link_b = std::make_unique<fake_link_t>(bus);
+        auto link_b = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
 
         tr::net::transport_can_config_t cfg = rx_test_config();
         cfg.max_pending = 0;  // count cap OFF — the age-out is the only bound
@@ -558,7 +568,7 @@ void test_zero_peer_ttl_does_not_disable_the_age_out() {
         // above would pass for a sweep that simply drops everything every time.
         fake_can_bus_t bus;
         fake_link_t injector(bus);
-        auto link_b = std::make_unique<fake_link_t>(bus);
+        auto link_b = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
 
         tr::net::transport_can_config_t cfg = rx_test_config();
         cfg.max_pending = 0;
@@ -588,7 +598,7 @@ void test_incomplete_group_is_swept() {
 
     fake_can_bus_t bus;
     fake_link_t injector(bus);
-    auto link_b = std::make_unique<fake_link_t>(bus);
+    auto link_b = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
 
     tr::net::transport_can_config_t cfg = rx_test_config();
     cfg.rx_ttl = 30ms;
@@ -634,7 +644,7 @@ void test_max_groups_reaches_the_reassembly_buffer() {
 
     fake_can_bus_t bus;
     fake_link_t injector(bus);
-    auto link_b = std::make_unique<fake_link_t>(bus);
+    auto link_b = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
 
     tr::net::transport_can_config_t cfg = rx_test_config();
     cfg.max_groups = 2;
@@ -680,8 +690,8 @@ void test_oversized_group_is_refused_before_advertising() {
     fake_can_bus_t bus;
     sink_t sink;
     auto rx = [&](std::span<const std::byte> f) { sink.on(f); };
-    auto link_a = std::make_unique<fake_link_t>(bus);
-    auto link_b = std::make_unique<fake_link_t>(bus);
+    auto link_a = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
+    auto link_b = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
 
     tr::net::transport_can_config_t cfg_b = rx_test_config();
     cfg_b.rx_ttl = 30ms;  // short, so any pinned group is provably sweepable below
@@ -733,8 +743,8 @@ void test_u16_slice_count_wrap_cannot_advertise_a_hello() {
     std::printf("transport_can >65535-slice group cannot wrap into a hello (#910):\n");
 
     fake_can_bus_t bus;
-    auto link_a = std::make_unique<fake_link_t>(bus);
-    auto link_b = std::make_unique<fake_link_t>(bus);
+    auto link_a = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
+    auto link_b = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
     tr::net::can_transport_t tx_a(std::move(link_a),
                                   {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "sensor/temp"});
     tr::net::can_transport_t tx_b(std::move(link_b), rx_test_config());
@@ -791,8 +801,8 @@ void test_rx_slice_refusal_drops_the_group_and_counts() {
     fake_can_bus_t bus;
     sink_t sink;
     auto rx = [&](std::span<const std::byte> f) { sink.on(f); };
-    auto link_a = std::make_unique<fake_link_t>(bus);
-    auto link_b = std::make_unique<fake_link_t>(bus);
+    auto link_a = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
+    auto link_b = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
 
     tr::net::transport_can_config_t cfg_b = rx_test_config();
     cfg_b.rx_backend = &pool;
@@ -844,7 +854,7 @@ void test_rx_zero_length_slice_drops_the_group_and_counts() {
     sink_t sink;
     auto rx = [&](std::span<const std::byte> f) { sink.on(f); };
     fake_link_t injector(bus);
-    auto link_b = std::make_unique<fake_link_t>(bus);
+    auto link_b = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
     tr::net::can_transport_t tx_b(std::move(link_b), rx_test_config());
     tx_b.set_receiver(rx);
 
@@ -878,7 +888,7 @@ void test_rx_zero_length_slice_drops_the_group_and_counts() {
     // the short frame, so it would report liveness on the very corruption above — the
     // guard has to be able to fail for the reason it names.
     const std::size_t before = sink.count();
-    auto link_a = std::make_unique<fake_link_t>(bus);
+    auto link_a = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
     tr::net::can_transport_t tx_a(std::move(link_a),
                                   {0, 3, tr::net::can::can_frame_mode_t::CLASSIC, "sensor/other"});
     const std::vector<std::byte> live(2 * tr::net::can::kCanClassicMaxData, std::byte{0xA7});
@@ -931,8 +941,8 @@ void test_endpoint_wraparound_does_not_alias_stale_state() {
     fake_can_bus_t bus;
     sink_t sink;
     auto rx = [&](std::span<const std::byte> f) { sink.on(f); };
-    auto link_a = std::make_unique<fake_link_t>(bus);
-    auto link_b = std::make_unique<fake_link_t>(bus);
+    auto link_a = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
+    auto link_b = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
 
     tr::net::transport_can_config_t cfg_b = rx_test_config();
     cfg_b.rx_ttl = 60s;  // far out of reach: the age-out must NOT be what reclaims the trap
@@ -1016,8 +1026,8 @@ void test_clean_run_counters_are_zero() {
     fake_can_bus_t bus;
     sink_t sink;
     auto rx = [&](std::span<const std::byte> f) { sink.on(f); };
-    auto link_a = std::make_unique<fake_link_t>(bus);
-    auto link_b = std::make_unique<fake_link_t>(bus);
+    auto link_a = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
+    auto link_b = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
     tr::net::can_transport_t tx_a(std::move(link_a),
                                   {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "sensor/temp"});
     tr::net::can_transport_t tx_b(std::move(link_b),
@@ -1051,8 +1061,8 @@ void test_presink_window_drop_is_named() {
     fake_can_bus_t bus;
     sink_t sink;
     auto rx = [&](std::span<const std::byte> f) { sink.on(f); };
-    auto link_a = std::make_unique<fake_link_t>(bus);
-    auto link_b = std::make_unique<fake_link_t>(bus);
+    auto link_a = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
+    auto link_b = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
     tr::net::can_transport_t tx_a(std::move(link_a),
                                   {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "sensor/temp"});
     tr::net::can_transport_t tx_b(std::move(link_b),
@@ -1124,8 +1134,8 @@ void test_stale_lap_binding_is_refused_not_welded() {
     fake_can_bus_t bus;
     sink_t sink;
     auto rx = [&](std::span<const std::byte> f) { sink.on(f); };
-    auto link_a = std::make_unique<fake_link_t>(bus);
-    auto link_b = std::make_unique<fake_link_t>(bus);
+    auto link_a = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
+    auto link_b = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
 
     tr::net::transport_can_config_t cfg_b = rx_test_config();
     cfg_b.rx_ttl = 60s;  // far out of reach: the age-out must not be what refuses anything
@@ -1233,8 +1243,8 @@ void test_rope_delivery() {
         got = std::move(frame);  // the refcounted links outlive the callback
         cv.notify_all();
     };
-    auto link_a = std::make_unique<fake_link_t>(bus);
-    auto link_b = std::make_unique<fake_link_t>(bus);
+    auto link_a = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
+    auto link_b = tr::mem::make_poly<fake_link_t>(tr::mem::net_source(), bus);
 
     tr::net::can_transport_t tx_a(std::move(link_a),
                                   {0, 1, tr::net::can::can_frame_mode_t::FD, "p"});

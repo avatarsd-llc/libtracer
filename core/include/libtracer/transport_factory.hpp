@@ -16,12 +16,14 @@
  */
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
-#include <functional>
-#include <memory>
-#include <string>
+#include <string_view>
+#include <utility>
 
+#include "libtracer/inline_fn.hpp"
 #include "libtracer/link_kind.hpp"
+#include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer/status.hpp"
 #include "libtracer/transport.hpp"
 
@@ -82,9 +84,16 @@ enum class link_state_t : std::uint8_t {
  * receives alongside these settings. A universal key with no consumer is not kept here either:
  * the `keepalive` key is still ACCEPTED on the wire (existing configs parse) but is ignored and
  * lands nowhere (#1666) — a keepalive a kind needs belongs in that kind's own config.
+ *
+ * The two text keys are VIEWS, not owned strings (ADR-0083 Q15, #1780): they borrow the config
+ * bytes they were parsed from. `transport_vertex_t` parses them out of its own copy of the
+ * SPEC's config, which lives as long as the connection, so a factory, the liveness engine and
+ * @ref transport_vertex_t::settings_of all read views that stay valid for the connection's
+ * life. A caller building a record by hand keeps the viewed text alive for as long as the
+ * record is used.
  */
 struct conn_settings_t {
-    std::string addr;                     /**< @brief Peer IPv4 dotted-quad (DIAL). */
+    std::string_view addr;                /**< @brief Peer IPv4 dotted-quad (DIAL). */
     std::uint16_t port = 0;               /**< @brief Peer port (DIAL) / bind port (LISTEN);
                                                       `0` on a LISTEN is the EPHEMERAL request —
                                                       see @ref port_set. */
@@ -106,7 +115,7 @@ struct conn_settings_t {
                                                       their u32 prefix, `ws` off the RFC 6455 frame
                                                       header; 0 = the protocol default (`kMaxFrame`,
                                                       16 MiB). Only tightens, never raises. */
-    std::string kind;                     /**< @brief Transport-factory selector ("udp",
+    std::string_view kind;                /**< @brief Transport-factory selector ("udp",
                                                       "ws", ...); empty = provide_link only. */
     std::uint32_t backoff_ms = 0;         /**< @brief DIAL self-heal retry interval (RFC-0014 §4);
                                                       consumed by the S5 liveness engine
@@ -158,13 +167,38 @@ struct transport_kind_traits_t {
 };
 
 /**
+ * @brief The owner of a factory-built link: the concrete transport, in a block from the
+ *        source the factory was handed, destroyed through `transport_t`'s virtual destructor
+ *        and returned at the concrete type's size (ADR-0083, #1780).
+ */
+using transport_ptr_t = mem::poly_ptr_t<transport_t>;
+
+/**
+ * @brief Build concrete transport `T` from @p args in a block from @p src, as a
+ *        @ref transport_ptr_t — the factory's spelling of `std::make_unique<T>`.
+ * @return An empty owner when @p src refused; nothing was constructed.
+ */
+template <class T, class... Args>
+[[nodiscard]] transport_ptr_t make_transport(mem::block_source_t& src, Args&&... args) noexcept {
+    return mem::make_poly<T>(src, std::forward<Args>(args)...);
+}
+
+/** @brief Bytes a @ref transport_factory_t keeps inline for its captures: four pointers (a
+ *         backend, a source and room for a kind's own two). A bigger capture fails to
+ *         compile; capture a pointer to a context instead. */
+inline constexpr std::size_t kTransportFactoryCapacity = 4 * sizeof(void*);
+
+/**
  * @brief Constructs an owning transport from a connection's parsed settings plus
- *        the raw config TLV.
+ *        the raw config TLV, in a block from the source it is handed.
  *
  * The shared @ref conn_settings_t carries ONLY the universal keys (the ADR-0043 §5
- * leanness ruling); @p raw_config is the SPEC's config SETTINGS TLV as written (may
+ * leanness ruling); the raw config is the SPEC's config SETTINGS TLV as written (may
  * be null when the SPEC carried none), from which a kind's factory parses its own
  * kind-private keys (e.g. quic's `tls`/`insecure`) — the factory's business, module-side.
+ * The third argument is the store the link object itself is drawn from: the receiving
+ * `transport_vertex_t` passes its own (receiver pays, ADR-0083 Q21), and the factory builds
+ * with `%make_transport` over it. Its refusal is `BACKPRESSURE`.
  *
  * Returns the live transport, or a status: `TYPE_MISMATCH` for a config missing
  * the fields the kind requires (e.g. a DIAL without `addr`/`port`),
@@ -177,8 +211,13 @@ struct transport_kind_traits_t {
  * `tr::path::not_found`, which the RFC-0002 registry marks PERMANENT, telling a
  * peer to stop retrying a link that may well come back. `TRANSPORT_DOWN` carries
  * the TRANSIENT disposition the condition actually has.
+ *
+ * A stored, non-hook callable, so it is an `inline_fn_t` (ADR-0083 Q10/Q18): the
+ * captures live inline, and one that does not fit, or owns a resource, fails to compile.
  */
-using transport_factory_t = std::function<graph::result_t<std::unique_ptr<transport_t>>(
-    const conn_settings_t&, const wire::tlv_node_t* raw_config)>;
+using transport_factory_t =
+    inline_fn_t<graph::result_t<transport_ptr_t>(const conn_settings_t&, const wire::tlv_node_t*,
+                                                 mem::block_source_t&),
+                kTransportFactoryCapacity>;
 
 }  // namespace tr::net

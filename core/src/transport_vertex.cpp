@@ -5,12 +5,14 @@
 
 #include "libtracer/transport_vertex.hpp"
 
+#include <array>
 #include <cassert>
 #include <cstring>
-#include <memory>
+#include <initializer_list>
 #include <span>
 #include <thread>
 #include <utility>
+#include <vector>  // graph_key only: the graph's register_vertex_key parameter type
 
 #include "libtracer/builtin_transports.hpp"
 #include "libtracer/byteorder.hpp"
@@ -53,8 +55,8 @@ namespace {
  */
 void parse_config(const tlv_node_t* config, conn_settings_t& s) {
     const wire::config_reader_t cfg(config);
-    if (const auto v = cfg.name("addr")) s.addr = std::string(*v);
-    if (const auto v = cfg.name("kind")) s.kind = std::string(*v);
+    if (const auto v = cfg.name("addr")) s.addr = *v;
+    if (const auto v = cfg.name("kind")) s.kind = *v;
     if (const auto v = cfg.u16("port")) {
         s.port = *v;
         s.port_set = true;
@@ -64,20 +66,92 @@ void parse_config(const tlv_node_t* config, conn_settings_t& s) {
     if (const auto v = cfg.u32("connect_timeout")) s.connect_timeout_ms = *v;
 }
 
+/** @brief @p s's bytes as a byte span (no copy). */
+[[nodiscard]] std::span<const std::byte> text_bytes(std::string_view s) noexcept {
+    return {reinterpret_cast<const std::byte*>(s.data()), s.size()};
+}
+
 /**
- * @brief Re-encode a validated node to owned wire bytes — the S5 engine's copy of the SPEC's
- *        `config` SETTINGS, taken because the node BORROWS the write's rope,
- *        which is gone by the first re-dial. Trailers are not re-emitted (a config
- *        SETTINGS never carries one; the reader would ignore it anyway).
+ * @brief Append one TLV (`<type> <opt> <length> <body>`) to @p out — `wire::emit_tlv`'s bytes,
+ *        written into a failable store (#1780).
+ *
+ * The same rule `emit_tlv` applies: trailer bits cleared, the length widened to u32 for a body
+ * past 0xFFFF; the header itself is `wire::store_header`'s, so the layout has one spelling.
+ * @retval false The store refused — @p out may hold a partial record; the caller drops it.
  */
-void reemit_tlv(std::vector<std::byte>& out, const tlv_node_t& tlv) {
-    if (tlv.opt().pl) {
-        std::vector<std::byte> body;
-        for (const tlv_node_t child : tlv.children()) reemit_tlv(body, child);
-        wire::emit_tlv(out, tlv.type(), tlv.opt(), body);
-        return;
+[[nodiscard]] bool put_tlv(mem::bytes_t& out, type_t type, wire::opt_t opt,
+                           std::span<const std::byte> body) noexcept {
+    opt = opt.without_trailer();
+    if (body.size() > 0xFFFFu) opt.ll = true;
+    std::array<std::byte, 6> head{};
+    const std::size_t n = wire::header_bytes(opt);
+    wire::store_header(std::span<std::byte>(head).first(n), type, opt, body.size());
+    return out.append(head.data(), n) && out.append(body.data(), body.size());
+}
+
+/**
+ * @brief Append one packed path segment record `[u8 len][bytes]` per entry of @p segs —
+ *        `wire::emit_path_segment`'s bytes, into a failable store.
+ * @retval false A segment is empty or longer than a record can say, or the store refused.
+ */
+[[nodiscard]] bool put_segments(mem::bytes_t& out,
+                                std::initializer_list<std::string_view> segs) noexcept {
+    for (const std::string_view seg : segs) {
+        if (seg.empty() || seg.size() > wire::kPackedSegMaxBytes) return false;
+        const auto len = static_cast<std::byte>(seg.size());
+        if (!out.append(&len, 1) || !out.append(text_bytes(seg).data(), seg.size())) return false;
     }
-    wire::emit_tlv(out, tlv.type(), tlv.opt(), tlv.payload());
+    return true;
+}
+
+/** @brief @p key less its last packed record, which spells @p last (the parent's key). */
+[[nodiscard]] std::span<const std::byte> parent_key(const mem::bytes_t& key,
+                                                    std::string_view last) noexcept {
+    return mem::as_span(key).first(key.size() - 1 - last.size());
+}
+
+/**
+ * @brief Replace @p out with @p parts joined by `/` — the qualified connection key
+ *        `net/<module>/<name>` and the staging key `<module>/<name>`.
+ * @retval false The store refused.
+ */
+[[nodiscard]] bool join_into(mem::string_t& out, std::initializer_list<std::string_view> parts) {
+    out.clear();
+    for (const std::string_view part : parts) {
+        if (!out.empty() && !out.append("/")) return false;
+        if (!out.append(part)) return false;
+    }
+    return true;
+}
+
+/** @brief True when @p key is `<dir>/...` — @p dir followed by a segment separator. */
+[[nodiscard]] bool under_dir(std::string_view key, std::string_view dir) noexcept {
+    return key.size() > dir.size() && key.starts_with(dir) && key[dir.size()] == '/';
+}
+
+/**
+ * @brief The graph's key parameter: `graph_t::register_vertex_key` still takes its key as a
+ *        `std::vector` by value, so this one boundary builds the graph's own container (the
+ *        graph-core batch, #1778, owns that signature). Nothing here keeps it.
+ */
+[[nodiscard]] std::vector<std::byte> graph_key(std::span<const std::byte> key) {
+    return {key.begin(), key.end()};
+}
+
+/**
+ * @brief Re-encode a validated node to owned wire bytes — the connection's copy of the SPEC's
+ *        `config` SETTINGS, taken because the node BORROWS the write's rope, which is gone
+ *        once the write returns (and long gone by the liveness engine's first re-dial).
+ *        Trailers are not re-emitted (a config SETTINGS never carries one; the reader would
+ *        ignore it anyway).
+ * @retval false The store refused.
+ */
+[[nodiscard]] bool put_node(mem::bytes_t& out, const tlv_node_t& tlv) noexcept {
+    if (!tlv.opt().pl) return put_tlv(out, tlv.type(), tlv.opt(), tlv.payload());
+    mem::bytes_t body(out.source());
+    for (const tlv_node_t child : tlv.children())
+        if (!put_node(body, child)) return false;
+    return put_tlv(out, tlv.type(), tlv.opt(), mem::as_span(body));
 }
 
 /**
@@ -89,24 +163,24 @@ void reemit_tlv(std::vector<std::byte>& out, const tlv_node_t& tlv) {
  * validates against, so the advertised catalog cannot contradict the refusal, and the
  * module's descriptor bytes follow verbatim. Runs once, when the endpoint is minted; the
  * result is handed to the graph, which keeps its own copy, so nothing here outlives the call.
+ * @retval false The store refused.
  */
-[[nodiscard]] std::vector<std::byte> encode_catalog(conn_catalog_t catalog) {
-    std::vector<std::byte> out;
+[[nodiscard]] bool encode_catalog(mem::bytes_t& out, conn_catalog_t catalog) noexcept {
     for (const conn_key_t& key : catalog.keys()) {
-        std::vector<std::byte> record;
-        wire::emit_name(record, "dtype");
-        wire::emit_name(record, to_string(key.dtype));
-        if (key.required) {
-            const std::byte yes{1};
-            wire::emit_name(record, "required");
-            wire::emit_tlv(record, type_t::VALUE, wire::opt_t{},
-                           std::span<const std::byte>(&yes, 1));
-        }
-        record.insert(record.end(), key.descriptor.begin(), key.descriptor.end());
-        wire::emit_name(out, key.name);
-        wire::emit_tlv(out, type_t::SETTINGS, wire::opt_t{.pl = true}, record);
+        mem::bytes_t record(out.source());
+        const std::byte yes{1};
+        if (!put_tlv(record, type_t::NAME, {}, text_bytes("dtype")) ||
+            !put_tlv(record, type_t::NAME, {}, text_bytes(to_string(key.dtype))))
+            return false;
+        if (key.required && (!put_tlv(record, type_t::NAME, {}, text_bytes("required")) ||
+                             !put_tlv(record, type_t::VALUE, {}, std::span(&yes, 1))))
+            return false;
+        if (!record.append(key.descriptor.data(), key.descriptor.size()) ||
+            !put_tlv(out, type_t::NAME, {}, text_bytes(key.name)) ||
+            !put_tlv(out, type_t::SETTINGS, wire::opt_t{.pl = true}, mem::as_span(record)))
+            return false;
     }
-    return out;
+    return true;
 }
 
 /**
@@ -151,9 +225,9 @@ void reemit_tlv(std::vector<std::byte>& out, const tlv_node_t& tlv) {
 
 /** @brief A 1-byte link-liveness VALUE TLV (link_state_t) as an owned view. */
 [[nodiscard]] view_t link_state_value(link_state_t state) {
-    std::vector<std::byte> out;
-    const std::byte b{static_cast<std::uint8_t>(state)};
-    wire::emit_tlv(out, type_t::VALUE, wire::opt_t{}, std::span<const std::byte>(&b, 1));
+    std::array<std::byte, 5> out{};  // a 4-byte header and the one state byte
+    wire::store_header(std::span<std::byte>(out).first(4), type_t::VALUE, wire::opt_t{}, 1);
+    out[4] = static_cast<std::byte>(state);
     return view::over_bytes(out).value_or(
         view_t{});  // empty view on alloc failure (caller-checked)
 }
@@ -214,12 +288,13 @@ void transport_vertex_t::ctl_txn_t::publish(vertex_handle_t vertex, link_state_t
     publish_state_ = state;
 }
 
-void transport_vertex_t::ctl_txn_t::unroute(std::string name) { unroute_ = std::move(name); }
+void transport_vertex_t::ctl_txn_t::unroute(mem::string_t name) { unroute_ = std::move(name); }
 
 void transport_vertex_t::ctl_txn_t::stop_engine(self_heal_link_t* engine) { stop_ = engine; }
 
-void transport_vertex_t::ctl_txn_t::destroy_link(std::unique_ptr<transport_t> link) {
+void transport_vertex_t::ctl_txn_t::destroy_link(transport_ptr_t link, mem::bytes_t config) {
     destroy_ = std::move(link);
+    destroy_config_ = std::move(config);
 }
 
 void transport_vertex_t::ctl_txn_t::retire(vertex_handle_t vertex) { retire_ = vertex; }
@@ -232,7 +307,7 @@ result_t<void> transport_vertex_t::ctl_txn_t::discharge() {
     // so no liveness write can land on a vertex that is about to retire, then retire, then
     // destroy the socket.
     if (!unroute_.empty()) {
-        (void)owner_.router_.remove_child(unroute_);
+        (void)owner_.router_.remove_child(unroute_.view());
         unroute_.clear();
     }
     // `if constexpr` on the module gate (#1470), here and at every other call INTO the
@@ -253,6 +328,8 @@ result_t<void> transport_vertex_t::ctl_txn_t::discharge() {
         out = owner_.graph_.retire(vertex);
     }
     destroy_.reset();  // JOINS the receive thread — same reason
+    // The config the socket (or its engine's settings) viewed goes only after the socket.
+    destroy_config_ = mem::bytes_t(mem::null_source());
     if (publish_) {
         const vertex_handle_t vertex = *publish_;
         publish_.reset();
@@ -277,18 +354,25 @@ bool transport_vertex_t::ops_held_by_this_thread() const noexcept {
 // linker garbage-collect the udp/tcp/ws factories (and the transport TUs nothing else
 // references). The full ctor below delegates here and adds the builtins.
 transport_vertex_t::transport_vertex_t(graph::graph_t& graph, fwd_router_t& router,
-                                       std::string net_root, mem::mem_backend_t* rx_backend,
+                                       std::string_view net_root, mem::mem_backend_t* rx_backend,
                                        slim_net_t, mem::block_source_t* egress_src)
     : graph_(graph),
       router_(router),
-      net_root_(std::move(net_root)),
       rx_backend_(rx_backend),
       // The nullptr guard the FULL ctor used to hold, MOVED here (#873): both ctors reach
       // this one line, so a null argument means the default, the process net sub-pool (#1777),
       // exactly as an omitted argument does. Before this parameter a SLIM node's
       // `egress_source()` answered the process heap unconditionally — it could not be told
       // otherwise, so the accessor lied about that node's store.
-      egress_src_(egress_src != nullptr ? egress_src : &mem::net_source()) {
+      egress_src_(egress_src != nullptr ? egress_src : &mem::net_source()),
+      net_root_(*egress_src_),
+      pending_links_(*egress_src_),
+      conns_(*egress_src_),
+      transport_types_(*egress_src_),
+      modules_(*egress_src_),
+      endpoints_(*egress_src_) {
+    if (!net_root_.assign(net_root))
+        mem::exhausted_at_init(*egress_src_, "transport_vertex_t: the net root");
     // Register the `<net_root>` grouping vertex if it isn't already. It is the ENUMERATION
     // root (`/net:children[]` lists this plane's modules) and nothing more: RFC-0014 S7
     // retired the `client`/`listener` CREATION registrations that used to hang off it, so a
@@ -296,8 +380,8 @@ transport_vertex_t::transport_vertex_t(graph::graph_t& graph, fwd_router_t& rout
     // `SCHEMA_NOT_FOUND` like any other unregistered catalog type. The ONE wire creation door
     // for a connection is the per-module creator endpoint `<net_root>/<module>/conn`
     // (`register_module` mints it; RFC-0014 §1/§2).
-    if (!graph_.find(path_t::parse(net_root_)->key())) {
-        (void)graph_.register_vertex(*path_t::parse(net_root_), graph::role_t::STORED_VALUE);
+    if (!graph_.find(path_t::parse(net_root_.view())->key())) {
+        (void)graph_.register_vertex(*path_t::parse(net_root_.view()), graph::role_t::STORED_VALUE);
     }
     // The `quic` kind is NOT a builtin: it lives in the separate libtracer_quic
     // module (ADR-0043), which extends this catalog through register_transport_type
@@ -346,21 +430,22 @@ void transport_vertex_t::link_hold_thunk(void* ctx, std::string_view link, bool 
 // here is the ONLY reference to register_builtin_transports, so it (and the builtins)
 // stay linked exactly when this ctor is reachable — @ref slim_net_t sheds them.
 transport_vertex_t::transport_vertex_t(graph::graph_t& graph, fwd_router_t& router,
-                                       std::string net_root, mem::mem_backend_t* rx_backend,
+                                       std::string_view net_root, mem::mem_backend_t* rx_backend,
                                        mem::block_source_t* egress_src)
-    : transport_vertex_t(graph, router, std::move(net_root), rx_backend, slim_net, egress_src) {
+    : transport_vertex_t(graph, router, net_root, rx_backend, slim_net, egress_src) {
     // The ADR-0079 net-plane egress store (#873 family 1) is now set by the delegated ctor —
     // the nullptr guard lives there, so a SLIM node gets the same treatment this one does
     // and `egress_source()` answers for both. All that is left here is the builtin catalog.
     register_builtin_transports(*this, rx_backend_, egress_src_);
 }
 
-void transport_vertex_t::register_transport_type(std::string kind, transport_factory_t factory) {
+void transport_vertex_t::register_transport_type(std::string_view kind,
+                                                 transport_factory_t factory) {
     // Default traits: eager construction, exactly as every pre-S5 registration behaved.
-    register_transport_type(std::move(kind), std::move(factory), transport_kind_traits_t{});
+    register_transport_type(kind, factory, transport_kind_traits_t{});
 }
 
-void transport_vertex_t::register_transport_type(std::string kind, transport_factory_t factory,
+void transport_vertex_t::register_transport_type(std::string_view kind, transport_factory_t factory,
                                                  transport_kind_traits_t traits) {
     // The #1470 module gate: on a build that closed the RFC-0014 §4 S5 engine out, a kind
     // that asks for an engine-managed DIAL is REFUSED, never quietly downgraded. Registering
@@ -379,10 +464,19 @@ void transport_vertex_t::register_transport_type(std::string kind, transport_fac
         }
     }
     const ctl_txn_t txn(*this, ctl_scope_t::OPERATION);  // ADR-0063 §3 serialization
-    transport_types_.insert_or_assign(std::move(kind), kind_entry_t{std::move(factory), traits});
+    if (kind_entry_t* const row = transport_types_.find(kind)) {
+        *row = kind_entry_t{factory, traits};  // replace: the row's key is already held
+        return;
+    }
+    // A setup call: a store too small for the catalog is a sizing bug (ADR-0056, ADR-0083 Q7).
+    mem::string_t key(*egress_src_);
+    if (!key.assign(kind) ||
+        transport_types_.try_emplace(std::move(key), kind_entry_t{factory, traits}).value ==
+            nullptr)
+        mem::exhausted_at_init(*egress_src_, "transport_vertex_t::register_transport_type");
 }
 
-result_t<void> transport_vertex_t::register_module(std::string module, std::string kind,
+result_t<void> transport_vertex_t::register_module(std::string_view module, std::string_view kind,
                                                    conn_role_t role, conn_catalog_t catalog) {
     // Registration is a minting boundary (ADR-0073 §1): the ONE shared segment-validity
     // predicate gates the name here, exactly as path_t::parse gates the local string tier.
@@ -415,12 +509,16 @@ result_t<void> transport_vertex_t::register_module(std::string module, std::stri
     // endpoint could not be registered would advertise a (kind, role) the wire has no door to.
     // Idempotent, so the re-declaration path above runs it again and mints nothing.
     if (auto minted = mint_module_locked(module, catalog); !minted) return minted;
-    if (!declared) modules_.push_back({std::move(module), std::move(kind), role});
+    if (declared) return {};
+    module_decl_t decl{mem::string_t(*egress_src_), mem::string_t(*egress_src_), role};
+    if (!decl.module.assign(module) || !decl.kind.assign(kind) ||
+        modules_.emplace_back(std::move(decl)) == nullptr)
+        return std::unexpected(status_t::BACKPRESSURE);
     return {};
 }
 
-result_t<std::string> transport_vertex_t::module_for(std::string_view kind,
-                                                     conn_role_t role) const {
+result_t<std::string_view> transport_vertex_t::module_for(std::string_view kind,
+                                                          conn_role_t role) const {
     // The public entry locks (#881) and IS the body: since S7 retired the `:children[]`
     // creation door, no caller resolves a module from inside its own locked section — a
     // creation goes through `declaration_for_locked` — so the #881 entry-locks/`_locked`-body
@@ -429,7 +527,7 @@ result_t<std::string> transport_vertex_t::module_for(std::string_view kind,
     // already holds it must re-split rather than call this, which would self-deadlock.
     const ctl_txn_t txn(*this);  // ADR-0063 §3 control-plane serialization
     for (const module_decl_t& d : modules_) {
-        if (d.kind == kind && d.role == role) return d.module;
+        if (d.kind == kind && d.role == role) return d.module.view();
     }
     // Declared-only (ADR-0073 §4): no derived "<kind>-client"/"<kind>-server" fallback —
     // an undeclared (kind, role) is an unsupported catalog entry, the same convention as
@@ -438,7 +536,7 @@ result_t<std::string> transport_vertex_t::module_for(std::string_view kind,
 }
 
 /** @brief The declaration an endpoint write resolves its (kind, role) through. */
-result_t<transport_vertex_t::module_decl_t> transport_vertex_t::declaration_for_locked(
+result_t<const transport_vertex_t::module_decl_t*> transport_vertex_t::declaration_for_locked(
     std::string_view module, std::string_view kind) const {
     const module_decl_t* found = nullptr;
     std::size_t hits = 0;
@@ -458,25 +556,24 @@ result_t<transport_vertex_t::module_decl_t> transport_vertex_t::declaration_for_
     // refused rather than resolved by declaration order — the same ruling (and the same
     // status) the retired `:children[]` spelling gave two stagings sharing a leaf NAME.
     if (hits > 1) return std::unexpected(status_t::TYPE_MISMATCH);
-    return *found;
+    return found;
 }
 
-result_t<void> transport_vertex_t::mint_module_locked(const std::string& module,
+result_t<void> transport_vertex_t::mint_module_locked(std::string_view module,
                                                       conn_catalog_t catalog) {
     // The `<net_root>/<module>` grouping vertex. graph_.find IS the dedupe — the same rule
     // `make_connection_locked`'s lazy mint follows, and for the same reason: a separate
     // seen-set would be a second source of truth for something the graph already knows.
-    std::vector<std::byte> mod_key;
-    (void)wire::emit_path_segment(mod_key, std::string_view(net_root_).substr(1));
-    (void)wire::emit_path_segment(mod_key, module);
+    // The endpoint's key is built once; the module's is its prefix.
+    mem::bytes_t endpoint_key(*egress_src_);
+    if (!put_segments(endpoint_key, {net_root_.view().substr(1), module, kConnEndpointName}))
+        return std::unexpected(status_t::BACKPRESSURE);
+    const std::span<const std::byte> mod_key = parent_key(endpoint_key, kConnEndpointName);
     if (!graph_.find(mod_key)) {
-        auto mod = graph_.register_vertex_key(mod_key, graph::role_t::STORED_VALUE, {});
+        auto mod = graph_.register_vertex_key(graph_key(mod_key), graph::role_t::STORED_VALUE, {});
         if (!mod) return std::unexpected(mod.error());
     }
-
-    std::vector<std::byte> endpoint_key = mod_key;
-    (void)wire::emit_path_segment(endpoint_key, kConnEndpointName);
-    if (graph_.find(endpoint_key)) {
+    if (graph_.find(mem::as_span(endpoint_key))) {
         // A second declaration under the same module (a second kind, or the same triple
         // again). The catalog is the ENDPOINT's — there is one `:schema` to serve it from —
         // so it was fixed when the endpoint was minted. Naming no catalog makes no claim;
@@ -511,7 +608,12 @@ result_t<void> transport_vertex_t::mint_module_locked(const std::string& module,
     // (RFC-0028 D10), so it must outlive the vertex: it lives in `endpoints_`, one heap node
     // per minted module that never moves, for as long as this object — the lifetime every
     // seam here has.
-    endpoints_.push_back(std::make_unique<endpoint_ctx_t>(endpoint_ctx_t{this, module, catalog}));
+    mem::string_t ctx_module(*egress_src_);
+    if (!ctx_module.assign(module)) return std::unexpected(status_t::BACKPRESSURE);
+    mem::poly_ptr_t<endpoint_ctx_t> owned_ctx =
+        mem::make_poly<endpoint_ctx_t>(*egress_src_, this, std::move(ctx_module), catalog);
+    if (!owned_ctx || !endpoints_.push_back(std::move(owned_ctx)))
+        return std::unexpected(status_t::BACKPRESSURE);
     endpoint_ctx_t& ctx = *endpoints_.back();
     graph::handlers_t handlers;
     handlers.on_write = {
@@ -532,9 +634,14 @@ result_t<void> transport_vertex_t::mint_module_locked(const std::string& module,
         graph::payload_right_t{wire::type_t::NAME, graph::acl_right_t::WRITE},
     };
     // Empty for a catalog-less module, which then costs the graph nothing beyond the rows.
-    const std::vector<std::byte> encoded = encode_catalog(catalog);
-    auto endpoint = graph_.register_vertex_key(std::move(endpoint_key), graph::role_t::HANDLER,
-                                               handlers, {}, kRights, encoded);
+    mem::bytes_t encoded(*egress_src_);
+    if (!encode_catalog(encoded, catalog)) {
+        endpoints_.pop_back();
+        return std::unexpected(status_t::BACKPRESSURE);
+    }
+    auto endpoint =
+        graph_.register_vertex_key(graph_key(mem::as_span(endpoint_key)), graph::role_t::HANDLER,
+                                   handlers, {}, kRights, mem::as_span(encoded));
     if (!endpoint) {
         // Nothing may answer for a module whose endpoint does not exist: the context pushed
         // above would otherwise let a retried declaration's catalog check find it.
@@ -553,7 +660,7 @@ result_t<void> transport_vertex_t::mint_module_locked(const std::string& module,
     return {};
 }
 
-result_t<void> transport_vertex_t::endpoint_write(const std::string& module, conn_catalog_t catalog,
+result_t<void> transport_vertex_t::endpoint_write(std::string_view module, conn_catalog_t catalog,
                                                   const graph::value_t& value) {
     // A DEVICE-link payload is permanently un-parsable on the CPU (ADR-0024), so it is a
     // malformed control write rather than a transient one — the same classification
@@ -599,7 +706,7 @@ result_t<void> transport_vertex_t::endpoint_write(const std::string& module, con
     }
 }
 
-result_t<void> transport_vertex_t::endpoint_create_locked(ctl_txn_t& txn, const std::string& module,
+result_t<void> transport_vertex_t::endpoint_create_locked(ctl_txn_t& txn, std::string_view module,
                                                           conn_catalog_t catalog,
                                                           const tlv_node_t& spec) {
     // SPEC{ NAME "name" NAME <seg>, NAME "config" SETTINGS{ pairs }? } — no `type` and no
@@ -642,6 +749,19 @@ result_t<void> transport_vertex_t::endpoint_create_locked(ctl_txn_t& txn, const 
     // `SCHEMA_NOT_FOUND` is not this answer: §Compatibility and Amendment 3 reserve it for
     // "endpoint present, config TYPE unknown", the unregistered-kind refusal below.
     if (!conforms(catalog, config)) return std::unexpected(status_t::TYPE_MISMATCH);
+    // The connection's own copy of its config (#1780): `config` borrows the write's rope,
+    // which is gone once the write returns, and the settings below VIEW their text keys —
+    // so they are parsed out of the copy, which the connection keeps for its whole life.
+    mem::bytes_t config_bytes(*egress_src_);
+    if (config != nullptr && !put_node(config_bytes, *config))
+        return std::unexpected(status_t::BACKPRESSURE);
+    std::optional<tlv_node_t> owned_node;
+    if (config != nullptr) {
+        auto node = tlv_node_t::over(mem::as_span(config_bytes));
+        if (!node) return std::unexpected(status_t::TYPE_MISMATCH);
+        owned_node = *node;
+    }
+    config = owned_node ? &*owned_node : nullptr;
     conn_settings_t settings;
     parse_config(config, settings);
 
@@ -651,22 +771,22 @@ result_t<void> transport_vertex_t::endpoint_create_locked(ctl_txn_t& txn, const 
     // Nothing on the wire can say otherwise: the `role` config pair died with the superseded
     // `:children[]` spelling it belonged to (S7), and `parse_config` no longer reads one, so a
     // creator cannot mount a LISTEN socket under a module whose path promises DIAL.
-    settings.role = declared->role;
+    settings.role = (*declared)->role;
     // A kind-less SPEC is the staged-link spelling; the module's declared kind is the kind
     // this endpoint constructs, so recording it keeps `settings_of` honest about what the
     // connection is. `make_connection_locked` still prefers a `provide_link` staging over
     // the factory, so filling this in does not change WHICH link is used.
-    if (settings.kind.empty()) settings.kind = declared->kind;
+    if (settings.kind.empty()) settings.kind = (*declared)->kind.view();
 
     const auto made =
-        make_connection_locked(txn, module, std::string(name), config, std::move(settings));
+        make_connection_locked(txn, module, name, config, std::move(config_bytes), settings);
     if (!made) return std::unexpected(made.error());
     // The endpoint is valueless: the handle the creation produced is the connection's, not
     // this vertex's, and it is deliberately not published anywhere the write can return it.
     return {};
 }
 
-result_t<void> transport_vertex_t::endpoint_remove_locked(ctl_txn_t& txn, const std::string& module,
+result_t<void> transport_vertex_t::endpoint_remove_locked(ctl_txn_t& txn, std::string_view module,
                                                           std::string_view name) {
     // An empty NAME names nothing and is not an "absent" connection — it is a malformed
     // control payload, so it is refused rather than swallowed as a no-op success.
@@ -675,17 +795,15 @@ result_t<void> transport_vertex_t::endpoint_remove_locked(ctl_txn_t& txn, const 
     // before the lookup, so it never reaches `retire()`.
     if (name == kConnEndpointName) return std::unexpected(status_t::PERMISSION_DENIED);
 
-    std::string qualified(std::string_view(net_root_).substr(1));
-    qualified.push_back('/');
-    qualified += module;
-    qualified.push_back('/');
-    qualified += name;
+    mem::string_t qualified(*egress_src_);
+    if (!join_into(qualified, {net_root_.view().substr(1), module, name}))
+        return std::unexpected(status_t::BACKPRESSURE);
     // An unresolvable name — never created, or already removed — is a NO-OP SUCCESS at this
     // layer (RFC-0014 §2). `retire()`'s own idempotence only covers an already-resolved
     // handle, so the endpoint owns this leg: a retried remove after a dropped reply must
     // answer the same as the first one, or teardown is not retry-safe either.
-    if (!conns_.contains(qualified)) return {};
-    return remove_connection_locked(txn, qualified);
+    if (!conns_.contains(qualified.view())) return {};
+    return remove_connection_locked(txn, qualified.view());
 }
 
 bool transport_vertex_t::is_structural(wire::key_view_t key) const {
@@ -694,7 +812,7 @@ bool transport_vertex_t::is_structural(wire::key_view_t key) const {
     // (`make_connection_locked` composes the mount key the same way), so the whole
     // predicate is two segment compares
     // over the key bytes — no key is materialised and nothing is allocated.
-    const std::string_view root = std::string_view(net_root_).substr(1);
+    const std::string_view root = net_root_.view().substr(1);
     const wire::key_view_t parent = key.parent();
     const std::string_view leaf = detail::as_string_view(key.last_segment());
     // `<net_root>` itself: the enumeration root the ctor registers.
@@ -714,51 +832,80 @@ bool transport_vertex_t::is_structural(wire::key_view_t key) const {
     // module name of this plane can be read back from.
     // No fourth container is added for this (commit `221ed983` deleted exactly that state):
     // these are the ones the class already keeps for creation and teardown.
-    std::string under(leaf);
-    under.push_back('/');
-    for (const auto& [staged_key, staged] : pending_links_) {
-        (void)staged;
-        if (staged_key.starts_with(under)) return true;  // key is `<module>/<name>`
-    }
-    std::string qualified_under(root);
-    qualified_under.push_back('/');
-    qualified_under += under;
-    for (const auto& [qualified, conn] : conns_) {
-        (void)conn;
-        if (qualified.starts_with(qualified_under)) return true;  // `<root>/<module>/<name>`
+    for (const auto& staged : pending_links_)
+        if (under_dir(staged.key, leaf)) return true;  // key is `<module>/<name>`
+    for (const auto& conn : conns_) {
+        const std::string_view qualified = conn.key;  // `<root>/<module>/<name>`
+        if (under_dir(qualified, root) && under_dir(qualified.substr(root.size() + 1), leaf))
+            return true;
     }
     return false;
 }
 
-void transport_vertex_t::provide_link(std::string module, std::string name, transport_t& link) {
+void transport_vertex_t::provide_link(std::string_view module, std::string_view name,
+                                      transport_t& link) {
     const ctl_txn_t txn(*this, ctl_scope_t::OPERATION);  // ADR-0063 §3 serialization
-    std::string key = std::move(module);
-    key.push_back('/');
-    key += name;
-    pending_links_.insert_or_assign(std::move(key), &link);
+    // A setup call: a store too small for the staging is a sizing bug (ADR-0056, ADR-0083 Q7).
+    mem::string_t key(*egress_src_);
+    if (!join_into(key, {module, name}))
+        mem::exhausted_at_init(*egress_src_, "transport_vertex_t::provide_link");
+    if (transport_t** const staged = pending_links_.find(key.view())) {
+        *staged = &link;
+        return;
+    }
+    if (pending_links_.try_emplace(std::move(key), &link).value == nullptr)
+        mem::exhausted_at_init(*egress_src_, "transport_vertex_t::provide_link");
 }
 
-result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(ctl_txn_t& txn,
-                                                                     const std::string& module,
-                                                                     const std::string& name,
-                                                                     const tlv_node_t* config,
-                                                                     conn_settings_t settings) {
-    // With the module resolved, the staging is a DIRECT lookup: `pending_links_` is keyed by
-    // exactly this string (see `provide_link`). No scan, and no way to reach a key whose
-    // module half is not the one this connection mounts under.
-    std::string staged_key = module;
-    staged_key.push_back('/');
-    staged_key += name;
+namespace {
+/**
+ * @brief A BUS connection vertex's `on_children` hook (RFC-0028 D10 `{fn, ctx}`, @p c the
+ *        bus facet): its currently-audible peers as a POINT of POINT{NAME <peer>} members,
+ *        built on every read.
+ *
+ * Scratch for one read, from the net sub-pool: the hook's `ctx` is the bus facet alone, and
+ * the answer is copied into an owned view before this returns. `ok` collects every refusal:
+ * one refused record anywhere refuses the read as BACKPRESSURE.
+ */
+result_t<view_t> bus_children(void* c) {
+    mem::bytes_t members(mem::net_source());
+    bool ok = true;
+    static_cast<bus_link_t*>(c)->enumerate_peers([&](std::string_view peer) {
+        mem::bytes_t body(members.source());
+        ok &= put_tlv(body, type_t::NAME, wire::opt_t{}, text_bytes(peer)) &&
+              put_tlv(members, type_t::POINT, wire::opt_t{.pl = true}, mem::as_span(body));
+    });
+    mem::bytes_t out(members.source());
+    ok &= put_tlv(out, type_t::POINT, wire::opt_t{.pl = true}, mem::as_span(members));
+    const auto res = view::over_bytes(mem::as_span(out));
+    if (!ok || !res) return std::unexpected(status_t::BACKPRESSURE);
+    return *res;
+}
+}  // namespace
 
+result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(
+    ctl_txn_t& txn, std::string_view module, std::string_view name, const tlv_node_t* config,
+    mem::bytes_t config_bytes, conn_settings_t settings) {
+    const std::string_view root = net_root_.view().substr(1);
     // The routing key IS the mount path (ADR-0061): `net/<module>/<name>`. Keeping the root
     // segment in the key means the registry's precomputed run is exactly the prefix a hop
     // prepends to `src`, so the forward path needs no per-hop assembly.
-    std::string qualified(std::string_view(net_root_).substr(1));
-    qualified.push_back('/');
-    qualified += module;
-    qualified.push_back('/');
-    qualified += name;
-    if (conns_.contains(qualified)) return std::unexpected(status_t::PATH_IN_USE);
+    mem::string_t qualified(*egress_src_);
+    // The mount key `<net_root>/<module>/<name>` is built here too, so one refusal answers
+    // both; the `/net/<module>` vertex's key is its prefix.
+    mem::bytes_t mount_key(*egress_src_);
+    if (!join_into(qualified, {root, module, name}) ||
+        !put_segments(mount_key, {root, module, name}))
+        return std::unexpected(status_t::BACKPRESSURE);
+    // The key's bytes do not move when the string is moved into the table below, so this view
+    // names the connection for the rest of the call.
+    const std::string_view qv = qualified.view();
+    // With the module resolved, the staging is a DIRECT lookup: `pending_links_` is keyed by
+    // `<module>/<name>` — exactly the qualified key past its root (see `provide_link`). No
+    // scan, and no way to reach a key whose module half is not the one this connection
+    // mounts under.
+    const std::string_view staged_key = qv.substr(root.size() + 1);
+    if (conns_.contains(qv)) return std::unexpected(status_t::PATH_IN_USE);
 
     // The #373 first-level shadow guard is GONE, and can be: it existed because a connection
     // NAME was the first `dst` segment, so a link sharing a name with a first-level vertex
@@ -769,46 +916,36 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(ctl_txn_t& 
 
     // Compose the mount key: `<net_root>/<module>/<name>`, replacing the flat key the
     // graph's `:children[]` machinery used to hand the retired door (the endpoint never had one).
-    std::vector<std::byte> mount_key;
-    for (std::string_view seg : {std::string_view(net_root_).substr(1), std::string_view(module),
-                                 std::string_view(name)}) {
-        (void)wire::emit_path_segment(mount_key, seg);
-    }
-
     // The `/net/<module>` structural vertex, created lazily on first use. graph_.find IS the
     // dedupe — a separate seen-set would be a second source of truth (and another container
-    // instantiation) for something the graph already knows.
-    {
-        std::vector<std::byte> mod_key;
-        (void)wire::emit_path_segment(mod_key, std::string_view(net_root_).substr(1));
-        (void)wire::emit_path_segment(mod_key, module);
-        if (!graph_.find(mod_key)) {
-            (void)graph_.register_vertex_key(mod_key, graph::role_t::STORED_VALUE, {});
-        }
-    }
+    // instantiation) for something the graph already knows. Its key is the mount key's first
+    // two records, so it is read off that key's prefix rather than built twice.
+    const std::span<const std::byte> module_key = parent_key(mount_key, name);
+    if (!graph_.find(module_key))
+        (void)graph_.register_vertex_key(graph_key(module_key), graph::role_t::STORED_VALUE, {});
 
     // Resolve the connection's link. Precedence, WITHIN the module resolved above: a
     // provide_link-staged transport wins (the test/manual seam); otherwise the config `kind`
     // selects a factory and the real socket is CONSTRUCTED here and owned by the connection.
     // A staging under a DIFFERENT module is a different connection and is not considered.
     transport_t* link = nullptr;
-    std::unique_ptr<transport_t> owned;
+    transport_ptr_t owned;
     self_heal_link_t* engine = nullptr;
-    const auto pl = pending_links_.find(staged_key);
-    if (pl != pending_links_.end()) {
-        link = pl->second;
+    transport_t* const* const pl = pending_links_.find(staged_key);
+    if (pl != nullptr) {
+        link = *pl;
     } else if (!settings.kind.empty()) {
-        const auto factory = transport_types_.find(settings.kind);
+        const kind_entry_t* const factory = transport_types_.find(settings.kind);
         // An unregistered kind is an unsupported catalog entry — same convention as an
         // unknown SPEC `type` (SCHEMA_NOT_FOUND, the ENOTTY of creation).
-        if (factory == transport_types_.end()) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
+        if (factory == nullptr) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
         // The one mint site of the S5 engine, behind the #1470 module gate. On a
         // `kSelfHealLinks = false` build the whole arm is DISCARDED — `self_heal_link_t` is
         // never named, so the linker never pulls its TU in — and no kind can reach it
         // anyway, because `register_transport_type` refuses to catalogue a `self_heal_dial`
         // kind on such a build. The eager arm below then serves every registered kind.
         if constexpr (kSelfHealLinks) {
-            if (factory->second.traits.self_heal_dial && settings.role == conn_role_t::DIAL) {
+            if (factory->traits.self_heal_dial && settings.role == conn_role_t::DIAL) {
                 // The RFC-0014 §4 S5 engine (#492): creation constructs NO socket — the vertex
                 // is minted DORMANT and the engine dials on demand / self-heals under its own
                 // worker. The factory therefore does not run here, so the universal DIAL keys
@@ -821,13 +958,13 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(ctl_txn_t& 
                 // factory's to refuse, at dial time.
                 if (settings.addr.empty() || settings.port == 0)
                     return std::unexpected(status_t::TYPE_MISMATCH);
-                // The engine owns a byte COPY of the raw config: the node borrows the write's
-                // rope, which is gone by the first re-dial.
-                std::vector<std::byte> raw;
-                if (config != nullptr) reemit_tlv(raw, *config);
-                auto heal = std::make_unique<self_heal_link_t>(
-                    factory->second.factory, settings, std::move(raw),
-                    factory->second.traits.delivers_ropes);
+                // The engine re-reads the raw config on every dial from the connection's own
+                // copy, which outlives it (`ctl_txn_t::destroy_link` drops the copy after the
+                // engine); its settings' views point into the same copy.
+                mem::poly_ptr_t<self_heal_link_t> heal = mem::make_poly<self_heal_link_t>(
+                    *egress_src_, factory->factory, settings, mem::as_span(config_bytes),
+                    factory->traits.delivers_ropes, *egress_src_);
+                if (!heal) return std::unexpected(status_t::BACKPRESSURE);
                 engine = heal.get();
                 owned = std::move(heal);
                 link = owned.get();
@@ -840,7 +977,7 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(ctl_txn_t& 
         if (link == nullptr) {
             // The raw config TLV rides along so the kind's factory can parse its own
             // kind-private keys (ADR-0043 §5 leanness: they never land in settings).
-            auto built = factory->second.factory(settings, config);
+            auto built = factory->factory(settings, config, *egress_src_);
             if (!built) return std::unexpected(built.error());
             owned = std::move(*built);
             link = owned.get();
@@ -872,27 +1009,13 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(ctl_txn_t& 
     // emission it performs — is never compiled. The hook's `ctx` is the bus facet itself,
     // which lives exactly as long as the link (RFC-0028 D10: nothing captured, nothing owned).
     if (bus_link_t* const bus = bus_of(*link)) {
-        handlers.on_children = {
-            [](void* c) -> result_t<view_t> {
-                std::vector<std::byte> members;
-                static_cast<bus_link_t*>(c)->enumerate_peers([&members](std::string_view peer) {
-                    std::vector<std::byte> body;
-                    wire::emit_name(body, peer);
-                    wire::emit_tlv(members, type_t::POINT, wire::opt_t{.pl = true}, body);
-                });
-                std::vector<std::byte> out;
-                wire::emit_tlv(out, type_t::POINT, wire::opt_t{.pl = true}, members);
-                const auto res = view::over_bytes(out);
-                if (!res) return std::unexpected(status_t::BACKPRESSURE);
-                return *res;
-            },
-            bus};
+        handlers.on_children = {&bus_children, bus};
     }
 
     // Register the identity vertex at the composed /net/<name> key (graph owns addressing).
     // On failure the just-constructed socket (if any) is torn down by `owned`'s destructor.
-    result_t<vertex_handle_t> v =
-        graph_.register_vertex_key(std::move(mount_key), graph::role_t::STORED_VALUE, handlers);
+    result_t<vertex_handle_t> v = graph_.register_vertex_key(graph_key(mem::as_span(mount_key)),
+                                                             graph::role_t::STORED_VALUE, handlers);
     if (!v) return v;  // PATH_IN_USE on a duplicate connection name
 
     // The engine is the sole writer of this connection's DIAL transitions (RFC-0014 §4):
@@ -909,12 +1032,22 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(ctl_txn_t& 
         }
     }
 
-    const bool constructed = owned != nullptr && engine == nullptr;
+    const bool constructed = owned && engine == nullptr;
     const conn_role_t effective_role = settings.role;
-    const auto inserted = conns_.insert_or_assign(qualified, conn_t{.vertex = *v,
-                                                                    .settings = std::move(settings),
-                                                                    .owned = std::move(owned),
-                                                                    .engine = engine});
+    conn_t made{.vertex = *v,
+                .config = std::move(config_bytes),
+                .settings = settings,
+                .owned = std::move(owned),
+                .engine = engine};
+    conn_t* const conn = conns_.try_emplace(std::move(qualified), std::move(made)).value;
+    if (conn == nullptr) {
+        // The table could not grow: the rollback a refused `add_child` takes below, minus the
+        // table entry. A refused emplace moves nothing out of its arguments, so `made` still
+        // owns the socket, which goes to phase 2 like every other join.
+        (void)graph_.retire(*v);
+        txn.destroy_link(std::move(made.owned), std::move(made.config));
+        return std::unexpected(status_t::BACKPRESSURE);
+    }
 
     // Wire the link into the router's child_registry_t — the single owner of the
     // NAME→link demux table (Brick 3a). The `/net/<name>` NAME is exactly the router
@@ -939,23 +1072,25 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(ctl_txn_t& 
     // The connection's catalog `(kind, role)` rides along (#1650): the router interns it once,
     // so every write this link carries tells the target's admission filter which kind of
     // session it came from. The pair is the module's own declaration, held nowhere new.
-    const conn_settings_t& wired = inserted.first->second.settings;
-    if (!router_.add_child(qualified, *link, nullptr,
-                           link_kind_t{.kind = wired.kind, .role = effective_role})) {
+    // `qv` views the table key, a `string_t`, which keeps a terminator: its `data()` is the C
+    // string the router's (owning) name parameter is built from.
+    if (!router_.add_child(qv.data(), *link, nullptr,
+                           link_kind_t{.kind = conn->settings.kind, .role = effective_role})) {
         (void)graph_.retire(*v);
         // The config-constructed socket's destructor JOINS its receive thread, so it is
         // handed to phase 2 like every other join (S6, #492) instead of running here under
         // `ctl_m_`; the map entry itself goes now, so nothing observes a half-built
         // connection once the lock drops.
-        txn.destroy_link(std::move(inserted.first->second.owned));
-        conns_.erase(inserted.first);
+        txn.destroy_link(std::move(conn->owned), std::move(conn->config));
+        conns_.erase(qv);
         return std::unexpected(status_t::BACKPRESSURE);
     }
     // The staged link is CONSUMED only once the connection is fully wired. Erasing it before
     // the registry call would make the rollback above lossy: the caller's provide_link
     // staging would be gone, so a retry once the pressure clears would no longer find its
-    // link and would fail NOT_FOUND instead of succeeding.
-    if (pl != pending_links_.end()) pending_links_.erase(pl);
+    // link and would fail NOT_FOUND instead of succeeding. (Unconditional: with nothing
+    // staged under this key, the erase finds nothing.)
+    (void)pending_links_.erase(staged_key);
     // LAST WIRING STEP (#1025): the link may now deliver. Everything an inbound frame needs
     // is in place — the registry entry is published and `add_child` has installed the
     // receiver and the down-notifier — so this is the first instant at which a decoded frame
@@ -976,13 +1111,13 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(ctl_txn_t& 
     // how a `client`'s `UP` once landed over a socket the factory had just BOUND as a listener.
     if (constructed)
         (void)set_link_state_locked(
-            txn, qualified,
+            txn, qv,
             effective_role == conn_role_t::LISTEN ? link_state_t::LISTENING : link_state_t::UP);
     // An engine-managed connection is born RESTING (RFC-0014 §4: vertex exists, no
     // socket, refcount 0) — the one initial publish the engine's worker does not own.
     // COLLECTED here, before any op can reach the link, and written by phase 2 once
     // `ctl_m_` is down: a birth publish fans out like any other (S6, #492).
-    if (engine != nullptr) (void)set_link_state_locked(txn, qualified, link_state_t::DORMANT);
+    if (engine != nullptr) (void)set_link_state_locked(txn, qv, link_state_t::DORMANT);
     return v;
 }
 
@@ -998,8 +1133,10 @@ result_t<void> transport_vertex_t::remove_connection(std::string_view name) {
 
 /** @brief `remove_connection`'s body, for a caller that already holds `ctl_m_`. */
 result_t<void> transport_vertex_t::remove_connection_locked(ctl_txn_t& txn, std::string_view name) {
-    const auto it = conns_.find(name);
-    if (it == conns_.end()) return std::unexpected(status_t::NOT_FOUND);
+    const std::size_t at = conns_.lower_bound(name);
+    if (at == conns_.size() || conns_.at(at).key != name)
+        return std::unexpected(status_t::NOT_FOUND);
+    auto& entry = conns_.at(at);
     // Everything below is COLLECTED, in the order #494 fixed and phase 2 replays:
     //
     //  1. Un-route BEFORE anything is destroyed: after this the NAME resolves to nothing,
@@ -1025,15 +1162,17 @@ result_t<void> transport_vertex_t::remove_connection_locked(ctl_txn_t& txn, std:
     // thread the teardown arrived on, which is precisely the free location graph_t::collect()
     // exists to take out of the library's hands. The embedder calls collect() where it knows
     // no reader holds a seam.
-    txn.unroute(std::string(name));
-    txn.stop_engine(it->second.engine);
-    txn.retire(it->second.vertex);
-    txn.destroy_link(std::move(it->second.owned));
+    // The routing name is handed over with the entry's own key: the entry goes below, the
+    // un-route happens in phase 2, and nothing is copied to bridge the two.
+    txn.unroute(std::move(entry.key));
+    txn.stop_engine(entry.value.engine);
+    txn.retire(entry.value.vertex);
+    txn.destroy_link(std::move(entry.value.owned), std::move(entry.value.config));
     // The map entry goes NOW, under the lock, while the identity vertex is still registered
     // — so a same-name creation racing this teardown is refused `PATH_IN_USE` by
     // `register_vertex_key` until phase 2's retire lands, and by then phase 2's un-route has
     // landed too. There is no window in which two connections own one routing NAME.
-    conns_.erase(it);
+    conns_.erase_at(at);
     return {};
 }
 
@@ -1057,53 +1196,53 @@ result_t<void> transport_vertex_t::set_link_state(std::string_view name, link_st
 /** @brief `set_link_state`'s body, for a caller that already holds `ctl_m_`. */
 result_t<void> transport_vertex_t::set_link_state_locked(ctl_txn_t& txn, std::string_view name,
                                                          link_state_t state) {
-    const auto it = conns_.find(name);
-    if (it == conns_.end()) return std::unexpected(status_t::NOT_FOUND);
+    conn_t* const it = conns_.find(name);
+    if (it == nullptr) return std::unexpected(status_t::NOT_FOUND);
     // Resolution is all that happens under the lock. The write itself bumps write_seq_ and
     // DELIVERS to subscribers (RFC-0008 §D) — so await(/net/<name>) fires and a subscribe
     // streams the transition — and a routing-plane subscriber of this very connection's
     // liveness drives `acquire_link`/`release_link` (RFC-0014 §4's standing-binding seam),
     // straight back into `ctl_m_`. Publishing from here re-entered a non-recursive mutex on
     // its own thread; the collected write runs in phase 2 with the lock down (S6, #492).
-    txn.publish(it->second.vertex, state);
+    txn.publish(it->vertex, state);
     return {};
 }
 
 result_t<void> transport_vertex_t::acquire_link(std::string_view name) {
     const ctl_txn_t txn(*this);  // ADR-0063 §3 control-plane serialization
-    const auto it = conns_.find(name);
-    if (it == conns_.end()) return std::unexpected(status_t::NOT_FOUND);
+    conn_t* const it = conns_.find(name);
+    if (it == nullptr) return std::unexpected(status_t::NOT_FOUND);
     // Lock order: ctl_m_ → the engine's own mutex; the engine never takes ctl_m_ back, and
     // neither `acquire` nor `release` joins a thread or dispatches — they flip the refcount
     // and kick the worker — so they stay in phase 1 where the `conns_` lookup already is.
     // A connection without an engine answers success as a no-op (see the header: a
     // LISTEN ignores refcount per RFC-0014 §4, and a manual link's liveness is manual).
     if constexpr (kSelfHealLinks)  // #1470 module gate
-        if (it->second.engine != nullptr) it->second.engine->acquire();
+        if (it->engine != nullptr) it->engine->acquire();
     return {};
 }
 
 result_t<void> transport_vertex_t::release_link(std::string_view name) {
     const ctl_txn_t txn(*this);  // ADR-0063 §3 control-plane serialization
-    const auto it = conns_.find(name);
-    if (it == conns_.end()) return std::unexpected(status_t::NOT_FOUND);
+    conn_t* const it = conns_.find(name);
+    if (it == nullptr) return std::unexpected(status_t::NOT_FOUND);
     if constexpr (kSelfHealLinks)  // #1470 module gate
-        if (it->second.engine != nullptr) it->second.engine->release();
+        if (it->engine != nullptr) it->engine->release();
     return {};
 }
 
 const conn_settings_t* transport_vertex_t::settings_of(std::string_view name) const {
     // ADR-0063 §3 — readers of conns_ race the insert's rebalance
     const ctl_txn_t txn(*this);
-    const auto it = conns_.find(name);
-    return it == conns_.end() ? nullptr : &it->second.settings;
+    const conn_t* const it = conns_.find(name);
+    return it == nullptr ? nullptr : &it->settings;
 }
 
 transport_t* transport_vertex_t::link_of(std::string_view name) const {
     // ADR-0063 §3 — readers of conns_ race the insert's rebalance
     const ctl_txn_t txn(*this);
-    const auto it = conns_.find(name);
-    return it == conns_.end() ? nullptr : it->second.owned.get();
+    const conn_t* const it = conns_.find(name);
+    return it == nullptr ? nullptr : it->owned.get();
 }
 
 }  // namespace tr::net

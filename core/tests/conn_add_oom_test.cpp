@@ -148,11 +148,12 @@ std::uint8_t link_state_byte(graph_t& g, std::string_view path) {
 /** @brief Wire the `fake` kind and its module declaration onto @p net (ADR-0073 §4). */
 void declare_fake_module(transport_vertex_t& net) {
     (void)net.register_module("fake-client", "fake", conn_role_t::DIAL);
-    net.register_transport_type("fake",
-                                [](const tr::net::conn_settings_t&, const tr::wire::tlv_node_t*)
-                                    -> tr::graph::result_t<std::unique_ptr<tr::net::transport_t>> {
-                                    return std::unique_ptr<tr::net::transport_t>(new fake_link_t());
-                                });
+    net.register_transport_type(
+        "fake",
+        [](const tr::net::conn_settings_t&, const tr::wire::tlv_node_t*,
+           tr::mem::block_source_t& src) -> tr::graph::result_t<tr::net::transport_ptr_t> {
+            return tr::net::make_transport<fake_link_t>(src);
+        });
 }
 
 }  // namespace

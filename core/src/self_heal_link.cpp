@@ -34,25 +34,50 @@ static_assert(kSelfHealLinks,
 using wire::tlv_node_t;
 
 self_heal_link_t::self_heal_link_t(transport_factory_t factory, conn_settings_t settings,
-                                   std::vector<std::byte> raw_config, bool inner_delivers_ropes)
-    : factory_(std::move(factory)),
+                                   std::span<const std::byte> raw_config, bool inner_delivers_ropes,
+                                   mem::block_source_t& src)
+    : factory_(factory),
       // Defaults resolved ONCE, at bind time, so the factory and every wait in this file
       // read the same effective values (RFC-0014 §4: config overrides the engine's own
       // defaults; 0/absent means "the engine's default", never "no bound").
       settings_([&] {
-          conn_settings_t s = std::move(settings);
+          conn_settings_t s = settings;
           if (s.backoff_ms == 0) s.backoff_ms = kDefaultBackoffMs;
           if (s.connect_timeout_ms == 0) s.connect_timeout_ms = kDefaultConnectTimeoutMs;
           return s;
       }()),
-      raw_config_(std::move(raw_config)),
-      inner_ropes_(inner_delivers_ropes) {}
+      raw_config_(raw_config),
+      inner_ropes_(inner_delivers_ropes),
+      src_(src) {}
 
 self_heal_link_t::~self_heal_link_t() { stop(); }
 
 void self_heal_link_t::set_liveness_publisher(liveness_publish_fn_t fn) {
     const std::lock_guard l(m_);
-    publish_ = std::move(fn);
+    publish_ = fn;
+}
+
+void self_heal_link_t::sock_ref_t::reset() noexcept {
+    sock_t* const s = s_;
+    s_ = nullptr;
+    if (s == nullptr || s->refs.fetch_sub(1, std::memory_order_acq_rel) != 1) return;
+    mem::block_source_t& src = s->self->src_;
+    mem::drop_in(src, s);  // destroys the socket first: joins its receive thread
+}
+
+void self_heal_link_t::park_locked(sock_ref_t dead) noexcept {
+    sock_t* const s = dead.detach();
+    if (s == nullptr) return;
+    s->next_corpse = corpses_;
+    corpses_ = s;
+}
+
+void self_heal_link_t::drop_corpses(sock_t* head) noexcept {
+    while (head != nullptr) {
+        sock_t* const next = head->next_corpse;
+        sock_ref_t{head}.reset();  // the list's hold; the last one destroys the socket
+        head = next;
+    }
 }
 
 link_state_t self_heal_link_t::state() const {
@@ -66,12 +91,12 @@ bool self_heal_link_t::link_up() const noexcept {
 }
 
 transport_drop_stats_t self_heal_link_t::drop_stats() const noexcept {
-    std::shared_ptr<sock_t> s;
+    sock_ref_t s;
     {
         const std::lock_guard l(m_);
         s = inner_;
     }
-    transport_drop_stats_t stats = s != nullptr ? s->link->drop_stats() : transport_drop_stats_t{};
+    transport_drop_stats_t stats = s ? s->link->drop_stats() : transport_drop_stats_t{};
     stats.dropped_tx += engine_dropped_tx_.load(std::memory_order_relaxed);
     return stats;
 }
@@ -97,7 +122,7 @@ void self_heal_link_t::release() {
     // for the worker to reap and the transition published by the worker (sole publisher);
     // a RECONNECTING loop observes refs_ == 0 at its next gate and dormants itself.
     if (state_ == link_state_t::UP) {
-        corpses_.push_back(std::move(inner_));
+        park_locked(std::move(inner_));
         live_gen_ = 0;
         state_ = link_state_t::DORMANT;
         publish_pending_ = true;
@@ -123,21 +148,21 @@ void self_heal_link_t::stop() {
     if (started) (void)::pthread_join(w, nullptr);
     // Tear the sockets down with `m_` RELEASED: each destruction joins a receive thread
     // that may itself be blocked in on_socket_down waiting for `m_`.
-    std::vector<std::shared_ptr<sock_t>> dead;
-    std::shared_ptr<sock_t> last;
+    sock_t* dead = nullptr;
+    sock_ref_t last;
     {
         const std::lock_guard l(m_);
-        dead.swap(corpses_);
+        dead = std::exchange(corpses_, nullptr);
         last = std::move(inner_);
         live_gen_ = 0;
         state_ = link_state_t::DORMANT;  // terminal resting value; nothing publishes it
     }
-    dead.clear();
+    drop_corpses(dead);
     last.reset();
 }
 
 void self_heal_link_t::send(std::span<const std::byte> frame) {
-    if (const std::shared_ptr<sock_t> s = ready_socket()) {
+    if (const sock_ref_t s = ready_socket()) {
         s->link->send(frame);
         return;
     }
@@ -145,40 +170,38 @@ void self_heal_link_t::send(std::span<const std::byte> frame) {
 }
 
 void self_heal_link_t::send(std::span<const std::span<const std::byte>> iov) {
-    if (const std::shared_ptr<sock_t> s = ready_socket()) {
+    if (const sock_ref_t s = ready_socket()) {
         s->link->send(iov);
         return;
     }
     engine_dropped_tx_.fetch_add(1, std::memory_order_relaxed);
 }
 
-std::shared_ptr<self_heal_link_t::sock_t> self_heal_link_t::ready_socket() {
+self_heal_link_t::sock_ref_t self_heal_link_t::ready_socket() {
     std::unique_lock l(m_);
-    if (stop_) return nullptr;
-    if (state_ == link_state_t::UP && inner_ != nullptr) return inner_;
+    if (stop_) return {};
+    if (state_ == link_state_t::UP && inner_) return inner_;
     // Ops on a down/RECONNECTING link fail fast with link-down (§4) — the self-heal loop
     // is already driving toward UP; blocking here would stall the forward path on a dead
     // peer for up to backoff × forever.
-    if (state_ == link_state_t::RECONNECTING) return nullptr;
+    if (state_ == link_state_t::RECONNECTING) return {};
     // DORMANT / DIALING: any op auto-wakes the link and waits for ONE connect attempt,
     // bounded by connect_timeout (§4's sanctioned stall-on-dial) — except the worker's
     // own publish fan-out, which must not block on the worker (a subscriber of this
     // link's own liveness routed through this link would otherwise self-deadlock).
-    if (detail::this_thread_id() == worker_id_) return nullptr;
+    if (detail::this_thread_id() == worker_id_) return {};
     if (state_ == link_state_t::DORMANT) {
         wake_requested_ = true;
         ensure_worker_locked();
         cv_.notify_all();
     }
     const std::uint64_t before = attempt_seq_;
-    const bool concluded =
-        cv_.wait_for(l, std::chrono::milliseconds(settings_.connect_timeout_ms), [&] {
-            return stop_ || (state_ == link_state_t::UP && inner_ != nullptr) ||
-                   attempt_seq_ > before;
-        });
-    if (!concluded || stop_) return nullptr;  // deadline: the attempt is still in flight
-    if (state_ == link_state_t::UP && inner_ != nullptr) return inner_;
-    return nullptr;  // the one attempt concluded not-up: link-down
+    const bool concluded = cv_.wait_for(
+        l, std::chrono::milliseconds(settings_.connect_timeout_ms),
+        [&] { return stop_ || (state_ == link_state_t::UP && inner_) || attempt_seq_ > before; });
+    if (!concluded || stop_) return {};  // deadline: the attempt is still in flight
+    if (state_ == link_state_t::UP && inner_) return inner_;
+    return {};  // the one attempt concluded not-up: link-down
 }
 
 void* self_heal_link_t::worker_entry(void* self) {
@@ -217,10 +240,9 @@ void self_heal_link_t::publish_unlocked(std::unique_lock<std::mutex>& l, link_st
 }
 
 void self_heal_link_t::reap_locked(std::unique_lock<std::mutex>& l) {
-    std::vector<std::shared_ptr<sock_t>> dead;
-    dead.swap(corpses_);
+    sock_t* const dead = std::exchange(corpses_, nullptr);
     l.unlock();
-    dead.clear();  // joins each dead socket's receive thread — hence outside `m_`
+    drop_corpses(dead);  // joins each dead socket's receive thread — hence outside `m_`
     l.lock();
 }
 
@@ -258,8 +280,8 @@ void self_heal_link_t::on_socket_down(sock_t& sock) {
     if (stop_) return;
     // A corpse's late report (its recv thread firing after a heal already replaced it)
     // must not kill the healthy successor: only the LIVE generation's loss transitions.
-    if (sock.gen != live_gen_ || inner_ == nullptr || state_ != link_state_t::UP) return;
-    corpses_.push_back(std::move(inner_));
+    if (sock.gen != live_gen_ || !inner_ || state_ != link_state_t::UP) return;
+    park_locked(std::move(inner_));
     live_gen_ = 0;
     // Loss while in use → self-heal (refcount > 0); loss with nothing bound → dormant,
     // no background retry (§4). State flips HERE so ops fail fast immediately; the
@@ -280,10 +302,12 @@ bool self_heal_link_t::attempt_locked(std::unique_lock<std::mutex>& l) {
         if (auto node = tlv_node_t::over(raw_config_)) cfg = *node;
     }
     const tlv_node_t* cfg_ptr = cfg ? &*cfg : nullptr;
-    auto built = factory_(settings_, cfg_ptr);
-    std::shared_ptr<sock_t> sock;
-    if (built) {
-        sock = std::make_shared<sock_t>();
+    auto built = factory_(settings_, cfg_ptr, src_);
+    sock_ref_t sock;
+    // A refused record is a failed attempt, as a refused socket is: the link it would have
+    // named is destroyed with `built` and the engine retries on its backoff.
+    if (built) sock = sock_ref_t(mem::make_in<sock_t>(src_));
+    if (sock) {
         sock->link = std::move(*built);
         sock->self = this;
         sock->gen = gen_ctr_.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -291,17 +315,17 @@ bool self_heal_link_t::attempt_locked(std::unique_lock<std::mutex>& l) {
         // thread starts in its constructor is already draining, and the sinks route into
         // this engine's rx_, which the router wired at add_child — frames have somewhere
         // to land from the first instant (#1025).
-        wire_socket(*sock);
+        wire_socket(*sock.get());
     }
     l.lock();
     ++attempt_seq_;
     if (stop_) {
         // Torn down concurrently: the just-built socket is a corpse (destroyed by stop()
         // outside m_), never adopted.
-        if (sock != nullptr) corpses_.push_back(std::move(sock));
+        park_locked(std::move(sock));
         return false;
     }
-    if (sock == nullptr) return false;
+    if (!sock) return false;
     inner_ = std::move(sock);
     live_gen_ = inner_->gen;
     return true;
@@ -312,11 +336,11 @@ void self_heal_link_t::worker_main() {
     worker_id_ = detail::this_thread_id();
     for (;;) {
         cv_.wait(l, [&] {
-            return stop_ || !corpses_.empty() || publish_pending_ || wake_requested_ ||
+            return stop_ || corpses_ != nullptr || publish_pending_ || wake_requested_ ||
                    state_ == link_state_t::RECONNECTING;
         });
         if (stop_) break;
-        if (!corpses_.empty()) {
+        if (corpses_ != nullptr) {
             reap_locked(l);
             continue;  // re-evaluate: state may have moved while unlocked
         }

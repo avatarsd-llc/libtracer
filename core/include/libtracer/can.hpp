@@ -25,10 +25,10 @@
 #include <cstdint>
 #include <optional>
 #include <span>
-#include <string>
 #include <string_view>
 #include <utility>
-#include <vector>
+
+#include "libtracer/mem_source.hpp"
 
 /**
  * @file
@@ -232,7 +232,9 @@ struct advertise_t {
     std::uint16_t slice_count = 1;     /**< @brief Slice count (1 = single value, 0 = hello). */
     std::uint16_t target = kCanBroadcastNode; /**< @brief Directed target node id, or
                                                    @ref kCanBroadcastNode for every node. */
-    std::string path;                         /**< @brief The libtracer path the id maps to. */
+    std::string_view path; /**< @brief The libtracer path the id maps to — a VIEW (#1780):
+                                into the buffer @ref decode_advertise read, or the
+                                caller's own text when encoding. */
 
     /** @brief Field-wise equality (value type). */
     [[nodiscard]] bool operator==(const advertise_t&) const = default;
@@ -297,26 +299,27 @@ struct advertise_t {
 }
 
 /**
- * @brief Serialize an @ref advertise_t frame to its on-wire bytes.
+ * @brief Serialize an @ref advertise_t frame to its on-wire bytes, into @p out.
  *
  * The header comes from @ref encode_advertise_header (the one field-encoding locus); this
  * form appends the path and exists for callers that want the whole frame contiguous. The
  * CAN transport does not use it — it slices the header and the path separately, allocating
- * nothing.
+ * nothing. Replaces the `std::vector`-returning form (#1780).
  *
- * @param a The advertise to encode (its @ref advertise_t::path may be empty).
- * @retval {} @p a's path exceeds @ref kAdvertiseMaxPathLen — the advertise is unencodable.
- * @return The fully serialized frame bytes (@ref kAdvertiseHeaderSize + path length).
+ * @param out The frame store; replaced with the frame (left empty on any failure).
+ * @param a   The advertise to encode (its @ref advertise_t::path may be empty).
+ * @retval false @p a's path exceeds @ref kAdvertiseMaxPathLen (the advertise is
+ *               unencodable), or @p out could not be grown.
  */
-[[nodiscard]] inline std::vector<std::byte> encode_advertise(const advertise_t& a) {
+[[nodiscard]] inline bool encode_advertise(mem::bytes_t& out, const advertise_t& a) noexcept {
     std::array<std::byte, kAdvertiseHeaderSize> header{};
-    if (!encode_advertise_header(header, a, a.path)) return {};
-
-    std::vector<std::byte> out;
-    out.reserve(kAdvertiseHeaderSize + a.path.size());
-    out.insert(out.end(), header.begin(), header.end());
-    for (char c : a.path) out.push_back(static_cast<std::byte>(c));
-    return out;
+    out.clear();
+    if (!encode_advertise_header(header, a, a.path)) return false;
+    if (out.append(header.data(), header.size()) &&
+        out.append(reinterpret_cast<const std::byte*>(a.path.data()), a.path.size()))
+        return true;
+    out.clear();
+    return false;
 }
 
 /**
@@ -330,10 +333,11 @@ struct advertise_t {
  *            possibly followed by more bytes.
  * @return `std::nullopt` if @p buf does not yet hold a complete, valid frame
  *         (need more bytes, or malformed); otherwise the decoded advertise paired
- *         with the number of bytes consumed from the front of @p buf.
+ *         with the number of bytes consumed from the front of @p buf. The advertise's
+ *         `path` views @p buf (#1780): copy it before @p buf changes.
  */
 [[nodiscard]] inline std::optional<std::pair<advertise_t, std::size_t>> decode_advertise(
-    std::span<const std::byte> buf) {
+    std::span<const std::byte> buf) noexcept {
     if (buf.size() < kAdvertiseHeaderSize) return std::nullopt;
 
     const auto u8 = [&](std::size_t i) { return std::to_integer<std::uint8_t>(buf[i]); };
@@ -363,11 +367,9 @@ struct advertise_t {
     // so buf.size() - kAdvertiseHeaderSize cannot underflow.
     if (path_len > buf.size() - kAdvertiseHeaderSize) return std::nullopt;
 
-    a.path.reserve(path_len);
-    for (std::size_t i = 0; i < path_len; ++i) {
-        a.path.push_back(static_cast<char>(u8(kAdvertiseHeaderSize + i)));
-    }
-    return std::make_pair(std::move(a), kAdvertiseHeaderSize + static_cast<std::size_t>(path_len));
+    a.path = std::string_view(reinterpret_cast<const char*>(buf.data()) + kAdvertiseHeaderSize,
+                              path_len);
+    return std::make_pair(a, kAdvertiseHeaderSize + static_cast<std::size_t>(path_len));
 }
 
 /**

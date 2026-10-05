@@ -40,6 +40,75 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `caller` and `link` to the filter. Nothing else changes at run time. **Migration:** add a
   trailing `const write_ctx_t&` parameter to every `on_app_field_admit` callable; a filter that
   ignores it leaves the parameter unnamed.
+- **`mem::poly_ptr_t<T>` and `mem::make_poly<T>(src, args...)`
+  ([#1780](https://github.com/avatarsd-llc/libtracer/issues/1780)).** The failable
+  `std::make_unique` for an object that is owned through a base type. It records the block's
+  size and alignment, so a derived link is returned to its `block_source_t` at the shape it
+  was drawn with. An empty owner means the source refused.
+
+- **`link_memory_t::state`
+  ([#1780](https://github.com/avatarsd-llc/libtracer/issues/1780)).** The link's
+  connection-state store: a server's slot table and sessions, handshake and receive buffers,
+  the UDP receive scratch, the QUIC endpoint object and the WebTransport stream-context table.
+  Defaults to the net sub-pool. It is separate from `io` (the egress store), so a bound on
+  in-flight egress never caps how many peers can connect.
+
+- **`mem::block_array_t<T>::erase_front(n)`
+  ([#1780](https://github.com/avatarsd-llc/libtracer/issues/1780)).** Drops the first `n`
+  elements and keeps the rest at the front, in order, without allocating. A stream buffer or a
+  FIFO table uses it to compact. For a trivially copyable `T` it is one `memmove`.
+
+### Breaking
+
+- **The transports allocate through the one allocation seam
+  ([#1780](https://github.com/avatarsd-llc/libtracer/issues/1780), ADR-0083).** tcp, udp,
+  ws, can, quic, webtransport and the self-heal engine no longer hold a `std::vector`,
+  `std::string`, `std::unique_ptr`, `std::function` or a bare `new`. Every growth site draws
+  from a `block_source_t`, and a runtime refusal sheds the frame or the peer and counts it.
+  An init-time refusal is a sizing bug and aborts with the source's name (ADR-0083 Q7). The
+  per-connection RAM census is unchanged or smaller.
+  - `transport_factory_t` is now
+    `inline_fn_t<result_t<transport_ptr_t>(const conn_settings_t&, const tlv_node_t*, block_source_t&)>`,
+    and `transport_ptr_t` is `mem::poly_ptr_t<transport_t>`. **Migration:** a registered
+    factory takes the third `block_source_t& src` argument and builds its link with
+    `make_transport<T>(src, ...)` (or `mem::make_poly<T>(src, ...)`), answering
+    `BACKPRESSURE` when it comes back empty. `make_checked<T>(src, args...)` takes the
+    source first.
+  - `can_transport_t` takes its link as `mem::poly_ptr_t<can_link_t>`.
+    `transport_can_config_t::reasm_mr` is replaced by `reasm_src` (a `block_source_t*`; null
+    means the net sub-pool), and `path` is a `std::string_view`.
+    `can_transport_factory(reasm_src, rx_backend)` takes the source.
+    `learned_binding(id, path_out)` copies the path into a caller buffer.
+    **Migration:** build the link with `mem::make_poly<my_link_t>(src, ...)` in place of
+    `std::make_unique`, and pass a `block_source_t` where a `memory_resource` was passed.
+  - `can::encode_advertise(bytes_t& out, adv)` writes into a failable buffer and returns
+    `bool`. `decode_advertise` returns a path that views the input buffer.
+    `can_reassembly_t(src, max_groups)` takes a `block_source_t`. Its `add_slice` and
+    `set_expected_count` are `[[nodiscard]] bool`, and false means the source refused.
+    `can_tx_pool_t(capacity, src)` draws its slots from `src`. **Migration:** keep the
+    encoded buffer alive while you read the decoded path, and handle the `false` returns.
+  - `ws::encode_frame` (which returned a `std::vector`) is replaced by
+    `ws::try_encode_frame(block_array_t<std::byte>& out, op, payload, fin)`, and the vector
+    `ws::encode_client_frame` is removed (use `try_encode_client_frame`).
+    `decode_frame` and `decode_frame_checked` take a mutable `std::span<std::byte>` and
+    unmask in place; `frame_t::payload` is a view into that buffer.
+    `ws::accept_key(key)` returns a fixed-size `accept_key_t` (`.view()` gives the text).
+    **Migration:** decode from a buffer you own, compare payloads with
+    `std::ranges::equal`, and call `.view()` where a string was used.
+  - `webtransport_transport_t::session_path(std::span<char> out)` writes the `:path` into
+    `out` and returns its full length. `wt_h3::huffman_decode` is replaced by
+    `huffman_decode_into` sized with `huffman_max_decoded(n)`, and
+    `encode_connect_field_section(out, authority, path)` appends to a caller sink.
+    **Migration:** call `session_path({})` for the length, then read into a buffer of that size.
+  - The transport constructors take `std::string_view` for host, path and certificate
+    arguments in place of `const std::string&`. **Migration:** none for callers that pass
+    strings or literals.
+  - `self_heal_link_t` takes its raw config as a span plus the source it copies into.
+    `liveness_publish_fn_t` is an `inline_fn_t`, and `bus_link_t::peer_visitor_t` is a
+    `function_ref_t`. **Migration:** an oversized capture now fails to compile. Capture a
+    pointer to the state instead.
+  - The ESP-IDF links (`httpd_ws_link_t`, `esp_ws_client_link_t`, `twai_link_t`) are not
+    migrated yet. A follow-up issue tracks them.
 
 ## [0.18.0] — 2026-10-05
 

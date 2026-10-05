@@ -412,7 +412,10 @@ void test_local_path_untouched() {
  */
 void test_slim_net_reports_its_injected_egress_store() {
     std::printf("SLIM transport_vertex_t: egress_source() answers for the injected store:\n");
-    std::array<std::byte, 256> slab{};
+    // Room for the plane's own tables too: since #1780 the injected store is the one the
+    // catalog, module and connection tables are drawn from, and the FULL ctor below
+    // registers the built-in kinds into it (an init-time refusal there is a sizing bug).
+    static std::array<std::byte, 16384> slab{};
     tr::mem::bump_source_t store(std::span<std::byte>(slab), tr::mem::null_source());
 
     graph_t injected_graph;
@@ -584,12 +587,13 @@ int g_stub_built = 0;
 void declare_stub_kind(transport_vertex_t& net, std::string module, std::string kind,
                        conn_role_t role) {
     (void)net.register_module(std::move(module), kind, role);
-    net.register_transport_type(std::move(kind),
-                                [](const tr::net::conn_settings_t&, const tr::wire::tlv_node_t*)
-                                    -> tr::graph::result_t<std::unique_ptr<tr::net::transport_t>> {
-                                    ++g_stub_built;
-                                    return std::make_unique<stub_link_t>();
-                                });
+    net.register_transport_type(
+        std::move(kind),
+        [](const tr::net::conn_settings_t&, const tr::wire::tlv_node_t*,
+           tr::mem::block_source_t& src) -> tr::graph::result_t<tr::net::transport_ptr_t> {
+            ++g_stub_built;
+            return tr::net::make_transport<stub_link_t>(src);
+        });
 }
 
 /**
@@ -1549,7 +1553,8 @@ void test_refused_dial_is_transport_down() {
     // dial hits. Asserted directly because since the #1548 S5 flip the engine no longer runs
     // this factory on the CREATION path, so a creating write is no longer where the mapping is
     // observable on a stock build.
-    const auto direct = tr::net::make_checked<tr::net::tcp_transport_t>("127.0.0.1", dead);
+    const auto direct =
+        tr::net::make_checked<tr::net::tcp_transport_t>(tr::mem::net_source(), "127.0.0.1", dead);
     check(!direct.has_value() && direct.error() == status_t::TRANSPORT_DOWN,
           "a refused tcp dial => TRANSPORT_DOWN (the pre-#929 answer was NOT_FOUND)");
 

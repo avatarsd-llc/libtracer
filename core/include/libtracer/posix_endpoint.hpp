@@ -29,22 +29,23 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <functional>
-#include <memory>
 #include <mutex>
 #include <span>
-#include <string>
 #include <string_view>
 #include <type_traits>
 #include <utility>
-#include <vector>
 
+#include "libtracer/function_ref.hpp"
+#include "libtracer/inline_fn.hpp"
+#include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer/transport.hpp"
 #include "libtracer/tx_handoff.hpp"
 
 /** @brief The POSIX scatter-gather descriptor (`<sys/uio.h>`), forward-declared
  *         so this header need not pull the system socket headers in. */
 struct iovec;
+/** @brief The POSIX IPv4 address (`<netinet/in.h>`), forward-declared for the same reason. */
+struct in_addr;
 
 namespace tr::detail {
 
@@ -100,6 +101,16 @@ struct write_fault_stats_t {
  *        synchronizer).
  */
 [[nodiscard]] write_fault_stats_t write_fault_stats() noexcept;
+
+/**
+ * @brief Parse the dotted-quad IPv4 @p host into @p out — `inet_pton` over a view.
+ *
+ * The socket transports take their peer address as a `std::string_view` (ADR-0083 Q15,
+ * #1780); `inet_pton` wants a terminated string, so the text is copied into a stack buffer
+ * of `INET_ADDRSTRLEN` bytes first. Nothing is allocated.
+ * @retval false @p host is not a dotted quad (too long for one included); @p out is unchanged.
+ */
+[[nodiscard]] bool parse_ipv4(std::string_view host, ::in_addr& out) noexcept;
 
 /**
  * @brief The default peer LIVENESS WINDOW, milliseconds — how long a peer may fail to
@@ -279,6 +290,10 @@ struct write_result_t {
  */
 class posix_endpoint_t {
    protected:
+    /** @brief The receive thread's body: a stored callable with inline storage (ADR-0083
+     *         Q10) — every transport's body captures `this` and at most a descriptor. */
+    using thread_body_t = inline_fn_t<void()>;
+
     /** @brief Constructs with no thread running and @ref stop_ clear. */
     posix_endpoint_t() = default;
 
@@ -322,7 +337,7 @@ class posix_endpoint_t {
      *        for every pthread in the system. A hint below the platform floor is
      *        ignored (the default stack is used) rather than failing the spawn.
      */
-    void start(std::function<void()> body, std::size_t stack_size = 0);
+    void start(thread_body_t body, std::size_t stack_size = 0);
 
     /**
      * @brief Request shutdown and join the receive thread (idempotent).
@@ -402,11 +417,11 @@ class posix_endpoint_t {
      */
     static void* thread_entry(void* self);
 
-    std::function<void()> body_; /**< @brief The owned thread body `thread_entry` runs. */
-    pthread_t thread_{};         /**< @brief The receive thread (joined by stop_and_join;
-                                            valid only while `started_`). */
-    bool started_ = false;       /**< @brief Whether `thread_` holds a joinable thread
-                                            (a failed/never-attempted spawn stays false). */
+    thread_body_t body_;   /**< @brief The thread body `thread_entry` runs. */
+    pthread_t thread_{};   /**< @brief The receive thread (joined by stop_and_join;
+                                      valid only while `started_`). */
+    bool started_ = false; /**< @brief Whether `thread_` holds a joinable thread
+                                      (a failed/never-attempted spawn stays false). */
 };
 
 /**
@@ -440,8 +455,8 @@ class posix_endpoint_t {
  */
 class stream_endpoint_t : protected posix_endpoint_t {
    protected:
-    /** @brief Constructs with no peer connected (@ref conn_fd_ = -1); the queue's slots
-     *         draw from the process heap. */
+    /** @brief Constructs with no peer connected (@ref conn_fd_ = -1); the queue's slots and
+     *         the gather overflow draw from the process net sub-pool. */
     stream_endpoint_t() = default;
 
     /**
@@ -453,7 +468,8 @@ class stream_endpoint_t : protected posix_endpoint_t {
      *
      * @param tx_src Where the enqueue-then-write queue's slot storage comes from.
      */
-    explicit stream_endpoint_t(mem::block_source_t& tx_src) : tx_{kTxQueueDepth, tx_src} {}
+    explicit stream_endpoint_t(mem::block_source_t& tx_src)
+        : io_src_(&tx_src), tx_{kTxQueueDepth, tx_src} {}
 
     /**
      * @brief Closes a leftover peer fd (one the recv thread never tore down).
@@ -634,8 +650,7 @@ class stream_endpoint_t : protected posix_endpoint_t {
      * @param bound_ms The record's send bound (see @ref write_all).
      * @return How the write ended.
      */
-    static write_result_t write_record(int fd, const tx_handoff_t::record_t& rec,
-                                       std::uint32_t bound_ms);
+    write_result_t write_record(int fd, const tx_handoff_t::record_t& rec, std::uint32_t bound_ms);
 
     /**
      * @brief Tear the peer connection down (recv-thread side).
@@ -662,8 +677,8 @@ class stream_endpoint_t : protected posix_endpoint_t {
      * @param serve_peer The per-connection recv loop; returns on peer
      *                   departure or `stop_`.
      */
-    void run_accept_loop(int listen_fd, const std::function<bool(int)>& on_accept,
-                         const std::function<void(int)>& serve_peer);
+    void run_accept_loop(int listen_fd, function_ref_t<bool(int)> on_accept,
+                         function_ref_t<void(int)> serve_peer);
 
     std::mutex write_m_;           /**< @brief Serializes writes to @ref conn_fd_ (see the
                                                write-serialization invariant). */
@@ -684,8 +699,11 @@ class stream_endpoint_t : protected posix_endpoint_t {
     /** @brief Records a single-peer sender may queue behind the write in flight
      *         (@ref handoff_send). Past it a publisher drops and counts rather than waits. */
     static constexpr std::size_t kTxQueueDepth = 8;
+    /** @brief This link's egress store: the queue's records, a retained record's gather
+     *         overflow (@ref write_record), and a derived class's own link buffers (#1780). */
+    mem::block_source_t* io_src_ = &mem::net_source();
     /** @brief The enqueue-then-write queue @ref handoff_send drives (RFC 0028 §4.7). */
-    tx_handoff_t tx_{kTxQueueDepth, mem::heap_source()};
+    tx_handoff_t tx_{kTxQueueDepth, *io_src_};
 };
 
 /**
@@ -872,6 +890,10 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
     [[nodiscard]] bool close_peer(std::string_view peer);
 
    protected:
+    /** @brief Bytes a session's `p<slot>` name holds, terminator included: `p` and the
+     *         widest slot index. */
+    static constexpr std::size_t kPeerNameChars = 24;
+
     /**
      * @brief The protocol-agnostic half of ONE peer slot.
      *
@@ -898,7 +920,9 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
          *         segment, unlike the old `<ip>:<port>`. It identifies a SESSION, not a
          *         device — a reconnecting peer may land in a different slot; device-stable
          *         identity is a named link (RFC-0014). */
-        std::string name;
+        char name[kPeerNameChars] = {};
+        /** @brief @ref name as a view; empty while the slot is unnamed. */
+        [[nodiscard]] std::string_view name_view() const noexcept { return name; }
         /** @brief This session's identity HANDLE, `(slot index, generation)` — what the
          *         peer-receiver seam tags every inbound frame with (#1294).
          *
@@ -913,9 +937,6 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
          *         @ref handle is minted at. Bumped once per accept (never reused, never
          *         zero), so the counter survives the retire that clears @ref handle. */
         std::uint32_t gen_seq = 0;
-        /** @brief The remote `<ip>:<port>` — DIAGNOSTIC only, never a name and never in
-         *         the graph (#584 owns any future per-peer facet). Refreshed per accept. */
-        std::string endpoint_str;
         /** @brief The directed facade @ref peer_link returns — the derived slot's own
          *         member, registered here by @ref make_session. */
         transport_t* peer_endpoint = nullptr;
@@ -937,13 +958,23 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      *                   that ceiling is clamped to it. Read the enforced value back from
      *                   @ref max_peers.
      * @param peer_named Expose the @ref bus_link_t facet (see @ref bus).
+     * @param src        The store the TX hand-off ring and the egress gathers are drawn from
+     *                   (the link's `memory.io`). Must outlive the server.
+     * @param state_src  The store the slot table, every session and each poll pass's tables
+     *                   are drawn from (the link's `memory.state`, #1780). Must outlive the
+     *                   server.
      * @param liveness_window_ms The app-provided peer liveness window, ms (0 =
      *                   `kDefaultLivenessWindowMs`) — see @ref broadcast_iov for how
      *                   one fan-out round is bounded by it (#838), and
      *                   @ref directed_send_bound_ms for the directed twin (#1295).
      */
-    slot_server_t(std::size_t max_peers, bool peer_named, std::uint32_t liveness_window_ms = 0)
-        : max_peers_(derive_max_peers(liveness_window_ms, max_peers)), peer_named_(peer_named) {
+    slot_server_t(std::size_t max_peers, bool peer_named, std::uint32_t liveness_window_ms = 0,
+                  mem::block_source_t& src = mem::net_source(),
+                  mem::block_source_t& state_src = mem::net_source())
+        : stream_endpoint_t(src),
+          slots_(state_src),
+          max_peers_(derive_max_peers(liveness_window_ms, max_peers)),
+          peer_named_(peer_named) {
         liveness_window_ms_ = liveness_window_ms;
     }
 
@@ -1027,7 +1058,7 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      *
      * Called under @ref peers_m_ when no free slot exists and the cap allows growth.
      */
-    virtual std::unique_ptr<session_base_t> make_session() = 0;
+    virtual mem::poly_ptr_t<session_base_t> make_session() = 0;
 
     /**
      * @brief Per-accept setup: socket options and the slot's protocol buffers, run after
@@ -1124,7 +1155,7 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      */
     mutable std::mutex peers_m_;
     /** @brief The peer slots: insert-only, recycled in place, never freed early. */
-    std::vector<std::unique_ptr<session_base_t>> slots_;
+    mem::block_array_t<mem::poly_ptr_t<session_base_t>> slots_;
     int listen_fd_ = -1;           /**< @brief The bound+listening socket (-1 = not bound). */
     std::uint16_t bound_port_ = 0; /**< @brief The resolved bound port (see local_port()). */
     /** @brief The ENFORCED admission cap (RFC-0006), resolved once by `derive_max_peers`

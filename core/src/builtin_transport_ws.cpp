@@ -90,7 +90,8 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_ba
     // only on the listener.
     vertex.register_transport_type(
         "ws",
-        [rx_backend, egress_src](const conn_settings_t& s, const wire::tlv_node_t* raw_config) {
+        [rx_backend, egress_src](const conn_settings_t& s, const wire::tlv_node_t* raw_config,
+                                 mem::block_source_t& src) {
             const wire::config_reader_t cfg(raw_config);
             const bool peer_named = cfg.flag("peer_named").value_or(false);
             // The bus-module refusal (#375 deliverable 3). TYPE_MISMATCH, the status this
@@ -99,7 +100,7 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_ba
             // failed bind gets, because no retry will make this build grow a bus facet.
             if constexpr (!kBusLinks)
                 if (peer_named)
-                    return graph::result_t<std::unique_ptr<transport_t>>(
+                    return graph::result_t<transport_ptr_t>(
                         std::unexpected(graph::status_t::TYPE_MISMATCH));
             const auto max_peers = static_cast<std::size_t>(cfg.u32("max_peers").value_or(0));
             const std::uint32_t liveness_window = cfg.u32("liveness_window").value_or(0);
@@ -123,7 +124,7 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_ba
                     // runs — it is what wires the LISTEN arm and the base gather — and this
                     // argument is what makes the DIAL arm's own buffer agree with it.
                     return make_checked<transport_ws_client>(
-                        s.addr, s.port,
+                        src, s.addr, s.port,
                         ws_client_config_t{.memory = {.rx = rx_backend, .io = egress_src},
                                            .max_frame = s.max_frame,
                                            .defer_recv = true,
@@ -132,12 +133,13 @@ void register_ws_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_ba
                 },
                 [&] {
                     return make_checked<transport_ws_server>(
-                        s.port, ws_server_config_t{.memory = {.rx = rx_backend},
-                                                   .max_frame = s.max_frame,
-                                                   .max_peers = max_peers,
-                                                   .peer_named = peer_named,
-                                                   .liveness_window_ms = liveness_window,
-                                                   .max_handshake = max_handshake});
+                        src, s.port,
+                        ws_server_config_t{.memory = {.rx = rx_backend},
+                                           .max_frame = s.max_frame,
+                                           .max_peers = max_peers,
+                                           .peer_named = peer_named,
+                                           .liveness_window_ms = liveness_window,
+                                           .max_handshake = max_handshake});
                 });
             // The ADR-0079 egress store, wired before the link is handed to the router
             // (#873).

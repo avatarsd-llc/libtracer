@@ -241,7 +241,7 @@ tree, and one is not:
 
 - The registry's refusal is the whole creation's verdict: when `add_child` cannot grow, the
   creation rolls back — retire the vertex, drop the entry, destroy the socket — and answers
-  `BACKPRESSURE` (`core/src/transport_vertex.cpp:if (pl != pending_links_.end()) pending_links_.erase(pl);`, `core/src/transport_vertex.cpp:if (!router_.add_child(qualified, *link, nullptr,`). Without that, a bounded node
+  `BACKPRESSURE` (`core/src/transport_vertex.cpp:(void)pending_links_.erase(staged_key);`, `core/src/transport_vertex.cpp:if (!router_.add_child(qv.data(), *link, nullptr,`). Without that, a bounded node
   could be driven to publish connections that no `dst` resolves and no removal can take down.
 - `SPEC` naming an existing name answers `PATH_IN_USE`, and the reserved `conn` name is
   refused in both directions, so the endpoint cannot be made to destroy itself.
@@ -294,7 +294,7 @@ universal settings (`core/include/libtracer/transport_factory.hpp:conn_settings_
 The mechanism is the factory signature: a factory is
 `(const conn_settings_t&, const wire::tlv_node_t* raw_config) -> result_t<unique_ptr<transport_t>>`,
 registered at runtime through `transport_vertex_t::register_transport_type`
-(`core/src/transport_vertex.cpp:transport_vertex_t::register_transport_type(std::string kind, transport_factory_t factory)`). The central parse reads the universal keys and nothing
+(`core/src/transport_vertex.cpp:transport_vertex_t::register_transport_type(std::string_view kind, transport_factory_t factory,`). The central parse reads the universal keys and nothing
 else (`core/src/transport_vertex.cpp:parse_config`, `core/src/transport_vertex.cpp:if (const auto v = cfg.name("kind"))`); unknown pairs are ignored, so a newer peer
 may send keys this node has never heard of. `quic` reads its own `tls` / `insecure`, `ws`
 and `tcp` read `peer_named` / `max_peers`, `can` reads its bus identity — and none of them

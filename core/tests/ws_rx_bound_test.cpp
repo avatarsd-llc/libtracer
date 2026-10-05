@@ -543,8 +543,7 @@ void test_backend_exhaustion_is_counted_backpressure() {
     check(write_bytes(cfd, masked_client_frame(ws::opcode_t::PING,
                                                std::span<const std::byte>(piece.data(), 4))),
           "a PING was written after the drop");
-    const auto pong =
-        read_until(cfd, [](const std::vector<std::byte>& b) { return b.size() >= 6; }, 2s);
+    auto pong = read_until(cfd, [](const std::vector<std::byte>& b) { return b.size() >= 6; }, 2s);
     const auto dec = ws::decode_frame(pong);
     check(dec.has_value() && dec->first.op == ws::opcode_t::PONG,
           "the connection survived the exhaustion and answered it");

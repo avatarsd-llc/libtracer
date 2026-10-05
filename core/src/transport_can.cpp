@@ -116,15 +116,27 @@ tr::net::reassembly_key_t key_of(std::uint16_t node, std::uint16_t base_endpoint
 // build-system concern, never an in-source #ifdef. This TU stays 100% portable:
 // the transport talks only to the can_link_t seam.
 
-can_transport_t::can_transport_t(std::unique_ptr<can_link_t> link, transport_can_config_t config)
+can_transport_t::can_transport_t(mem::poly_ptr_t<can_link_t> link,
+                                 const transport_can_config_t& config)
     : link_(std::move(link)),
-      cfg_(std::move(config)),
+      cfg_(config),
+      // The node's OWN path is configuration, not peer-provoked state, so it is not drawn
+      // from the receive source: a receive store that refuses from the start must shed
+      // inbound frames (counted), never stop the node from being built.
+      path_(mem::net_source()),
       // The injected-bound seam the reassembly buffer was built around, finally
       // reached (#912): before this it was default-constructed, so max_groups was
-      // 0 and its evict-oldest never fired. Both RX buffers draw from the same
-      // injected resource — the RX thread never reaches the global heap.
-      reasm_(cfg_.reasm_mr, cfg_.max_groups),
-      pending_(cfg_.reasm_mr) {
+      // 0 and its evict-oldest never fired. Every RX table draws from the same
+      // injected source — the RX thread never reaches the global heap.
+      reasm_(rx_source(config), cfg_.max_groups),
+      learned_(rx_source(config)),
+      nodes_(rx_source(config)),
+      pending_(rx_source(config)),
+      peers_(rx_source(config)) {
+    // The advertised path is held here, not borrowed from the caller (a setup call:
+    // exhaustion is a sizing bug, ADR-0083).
+    if (!path_.assign(config.path)) mem::exhausted_at_init(mem::net_source(), "can path");
+    cfg_.path = path_.view();
     // The RX staleness window is derived, not invented: left at zero it tracks the
     // configured peer liveness window, since RX state a peer would have completed
     // is dead once that peer is itself considered gone.
@@ -167,13 +179,19 @@ can_transport_t::~can_transport_t() {
     rx_.set(nullptr, nullptr);
     rx_.set_rope(nullptr, nullptr);
     link_.reset();
+    for (const auto& entry : peers_) mem::drop_in(rx_source(cfg_), entry.value);
 }
 
-std::optional<can::advertise_t> transport_can::learned_binding(std::uint32_t base_can_id) const {
+std::optional<can::advertise_t> transport_can::learned_binding(std::uint32_t base_can_id,
+                                                               std::span<char> path_out) const {
     const std::lock_guard lock(const_cast<std::mutex&>(rx_m_));
-    const auto it = learned_.find(base_can_id);
-    if (it == learned_.end()) return std::nullopt;
-    return it->second.adv;
+    const binding_t* const b = learned_.find(base_can_id);
+    if (b == nullptr) return std::nullopt;
+    can::advertise_t adv = b->adv;
+    const std::size_t n = std::min(path_out.size(), b->path.size());
+    if (n != 0) std::memcpy(path_out.data(), b->path.c_str(), n);
+    adv.path = std::string_view(path_out.data(), n);
+    return adv;
 }
 
 std::uint64_t transport_can::dropped_groups() const {
@@ -188,6 +206,13 @@ std::size_t transport_can::pending_slices() const {
     return pending_.size();
 }
 
+/** @brief The receive state of @p node, created on first use; null when the RX store
+ *         refused a new node's entry. Requires `rx_m_` held. */
+transport_can::node_rx_t* transport_can::node_rx(std::uint16_t node) noexcept {
+    if (node_rx_t* const known = nodes_.find(node)) return known;
+    return nodes_.try_emplace(node, rx_source(cfg_)).value;
+}
+
 // --- the bus capability (ADR-0044) -------------------------------------------
 
 void transport_can::touch_peer(std::uint16_t node, std::chrono::steady_clock::time_point now) {
@@ -195,20 +220,29 @@ void transport_can::touch_peer(std::uint16_t node, std::chrono::steady_clock::ti
     // Insert-only, one entry per DISTINCT node id ever heard (unlike learned_, which
     // retires overlapping runs — #909): growth tracks the bus population, structurally
     // bounded by the 13-bit id space, never per-frame; an existing entry only refreshes.
-    const auto [it, fresh] = peers_.try_emplace(node);
-    it->second.last_heard = now;
-    if (fresh) {
-        it->second.endpoint.owner_ = this;
-        it->second.endpoint.node_.store(node, std::memory_order_relaxed);
+    if (peer_entry_t* const* const known = peers_.find(node)) {
+        (*known)->last_heard = now;
+        return;
     }
+    // A new peer: its entry is one block from the RX store. Refused ⇒ the peer simply
+    // stays unenumerated until a later frame finds room (receiver pays, counted).
+    peer_entry_t* const fresh = mem::make_in<peer_entry_t>(rx_source(cfg_));
+    if (fresh == nullptr || !peers_.try_emplace(node, fresh).inserted) {
+        if (fresh != nullptr) mem::drop_in(rx_source(cfg_), fresh);
+        dropped_rx_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    fresh->last_heard = now;
+    fresh->endpoint.owner_ = this;
+    fresh->endpoint.node_.store(node, std::memory_order_relaxed);
 }
 
 void transport_can::enumerate_peers(const peer_visitor_t& visit) const {
     const auto now = std::chrono::steady_clock::now();
     const std::lock_guard lock(peers_m_);
-    for (const auto& [node, e] : peers_) {
-        if (now - e.last_heard > cfg_.peer_ttl) continue;  // expired = inaudible
-        const peer_name_buf_t name = format_peer_name(node);
+    for (const auto& entry : peers_) {
+        if (now - entry.value->last_heard > cfg_.peer_ttl) continue;  // expired = inaudible
+        const peer_name_buf_t name = format_peer_name(entry.key);
         visit(name.view());
     }
 }
@@ -235,9 +269,9 @@ transport_t* transport_can::peer_link(std::string_view peer) {
     if (!node) return nullptr;
     const auto now = std::chrono::steady_clock::now();
     const std::lock_guard lock(peers_m_);
-    const auto it = peers_.find(*node);
-    if (it == peers_.end() || now - it->second.last_heard > cfg_.peer_ttl) return nullptr;
-    return &it->second.endpoint;
+    peer_entry_t* const* const e = peers_.find(*node);
+    if (e == nullptr || now - (*e)->last_heard > cfg_.peer_ttl) return nullptr;
+    return &(*e)->endpoint;
 }
 
 std::string_view transport_can::peer_name(peer_handle_t peer, std::span<char> scratch) const {
@@ -444,14 +478,24 @@ void transport_can::on_rx(const can_frame_data_t& frame) {
     expire_pending();
     if (fields->endpoint == kCanControlEndpoint) {
         // Accumulate the per-node advertise byte stream and pop every complete frame.
-        std::vector<std::byte>& buf = nodes_[fields->node].control;
+        node_rx_t* const node = node_rx(fields->node);
         const std::span<const std::byte> in = frame.bytes();
-        buf.insert(buf.end(), in.begin(), in.end());
-        while (!buf.empty()) {
-            const auto decoded = can::decode_advertise(buf);
+        if (node == nullptr || !node->control.append(in.data(), in.size())) {
+            // The RX store refused the control stream's growth: this frame's bytes are
+            // lost, which the resync below recovers from like any lost control frame.
+            dropped_rx_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        mem::bytes_t& buf = node->control;
+        // Every decoded advertise is learned (its path copied) before the stream moves, so
+        // the consumed prefix is dropped once, after the loop.
+        std::size_t off = 0;
+        while (off < buf.size()) {
+            const std::span<const std::byte> rest(buf.data() + off, buf.size() - off);
+            const auto decoded = can::decode_advertise(rest);
             if (decoded) {
                 learn_advertise(decoded->first);
-                buf.erase(buf.begin(), buf.begin() + static_cast<std::ptrdiff_t>(decoded->second));
+                off += decoded->second;
                 continue;
             }
             // Not decodable from the front. A plausible prefix just needs more
@@ -459,14 +503,17 @@ void transport_can::on_rx(const can_frame_data_t& frame) {
             // of an in-flight advertise, or a lost control frame tore one) —
             // resynchronize by dropping bytes up to the next plausible boundary,
             // or the stream wedges permanently on the garbage prefix.
-            if (can::advertise_prefix_plausible(buf)) break;
+            if (can::advertise_prefix_plausible(rest)) break;
             std::size_t skip = 1;
-            while (skip < buf.size() &&
-                   std::to_integer<std::uint8_t>(buf[skip]) != can::kAdvertiseMagic) {
+            while (skip < rest.size() &&
+                   std::to_integer<std::uint8_t>(rest[skip]) != can::kAdvertiseMagic) {
                 ++skip;
             }
-            buf.erase(buf.begin(), buf.begin() + static_cast<std::ptrdiff_t>(skip));
+            off += skip;
         }
+        const std::size_t kept = buf.size() - off;
+        if (kept != 0 && off != 0) std::memmove(buf.data(), buf.data() + off, kept);
+        while (buf.size() > kept) buf.pop_back();
         return;
     }
     process_data(frame);
@@ -502,33 +549,55 @@ void transport_can::learn_advertise(const can::advertise_t& adv) {
     // one plus a slice count of at least 1, so equality is unreachable from a
     // conforming producer and can only mean a full revolution (or a duplicate frame).
     // The spurious direction is safe — a false lap only retires OLDER bindings, and
-    // the fresh one below is inserted after the sweep, so it always starts current.
-    node_rx_t& node = nodes_[base->node];
-    if (base->endpoint <= node.last_base) mark_prior_lap(base->node);
-    node.last_base = base->endpoint;
+    // the fresh one is cleared of the mark right after, so it always starts current.
+    //
     // The endpoint space wraps by design, so this base has been used before (#909).
-    // Retire whatever still claims these slots BEFORE the fresh binding lands.
+    // Retire whatever still claims these slots BEFORE the fresh binding lands — which
+    // includes any binding under this very id, so the emplace below always inserts.
     invalidate_overlapping(*base, adv.slice_count);
-    learned_[adv.can_id] = binding_t{adv, deliver, false};
-    if (deliver) reasm_.set_expected_count(key_of(base->node, base->endpoint), adv.slice_count);
+    // The binding owns its path: `adv.path` views the control stream, which moves on. A
+    // refusal of the node's entry, the binding or its path binds nothing, and is counted.
+    node_rx_t* const node = node_rx(base->node);
+    binding_t* const bound =
+        learned_.try_emplace(adv.can_id, binding_t{adv, mem::string_t(rx_source(cfg_)), deliver})
+            .value;
+    if (node == nullptr || bound == nullptr || !bound->path.assign(adv.path)) {
+        (void)learned_.erase(adv.can_id);
+        dropped_rx_.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
+    if (base->endpoint <= node->last_base) mark_prior_lap(base->node);
+    node->last_base = base->endpoint;
+    bound->adv.path = bound->path.view();
+    bound->prior_lap = false;  // the fresh binding is current, whatever the lap test marked
+    // A refused entry leaves the group without its totality: its slices are then refused
+    // at add_slice or aged out by the sweep, and each of those is counted.
+    if (deliver)
+        (void)reasm_.set_expected_count(key_of(base->node, base->endpoint), adv.slice_count);
 
     // A data frame may have arrived ahead of its manifest (cross-ID arbitration);
     // re-drive any now-matchable pending slices. Compact in place and lift only the
-    // matches into one batch drawn from the SAME injected resource — the old
-    // two-vector rebuild reallocated the whole queue from the global heap on every
-    // advertise, and a pmr container cannot be move-assigned across resources.
-    std::pmr::vector<pending_slice_t> ready(pending_.get_allocator());
-    auto keep = pending_.begin();
-    for (auto& p : pending_) {
+    // matches into one batch drawn from the SAME injected source — the old two-vector
+    // rebuild reallocated the whole queue from the global heap on every advertise. The
+    // batch is reserved up front; a refused reservation sheds the matches, counted.
+    mem::block_array_t<pending_slice_t> ready(pending_.source());
+    (void)ready.reserve(pending_.size());  // one block; a refusal leaves push_back to try
+    std::size_t keep = 0;
+    for (std::size_t i = 0; i < pending_.size(); ++i) {
+        const pending_slice_t& p = pending_[i];
         const auto ff = can::decode_can_id(p.frame.id);
-        if (ff && ff->node == base->node && ff->endpoint >= base->endpoint &&
-            ff->endpoint < base->endpoint + adv.slice_count) {
-            ready.push_back(std::move(p));
+        // In the advertised run: one unsigned compare covers both ends (below the base wraps
+        // past the count).
+        if (ff && ff->node == base->node &&
+            static_cast<std::uint32_t>(ff->endpoint - base->endpoint) < adv.slice_count) {
+            // A refused lift sheds that slice, counted.
+            dropped_rx_.fetch_add(static_cast<std::size_t>(!ready.push_back(p)),
+                                  std::memory_order_relaxed);
         } else {
-            *keep++ = std::move(p);
+            pending_[keep++] = p;
         }
     }
-    pending_.erase(keep, pending_.end());
+    while (pending_.size() > keep) pending_.pop_back();
     for (const auto& p : ready) process_data(p.frame);
 }
 
@@ -578,18 +647,18 @@ void transport_can::invalidate_overlapping(const can::can_id_fields_t& base,
     // it is compared in; the values themselves are the wire's.
     const std::uint32_t lo = base.endpoint;
     const std::uint32_t hi = lo + slice_count;
-    for (auto it = learned_.begin(); it != learned_.end();) {
-        const auto stale = can::decode_can_id(it->first);
+    for (std::size_t i = 0; i < learned_.size();) {
+        const auto stale = can::decode_can_id(learned_.at(i).key);
         // A different node's slots are a different address space entirely — the node
         // sub-field is part of the id, so only THIS node's runs can be aliased.
         if (!stale || stale->node != base.node) {
-            ++it;
+            ++i;
             continue;
         }
         const std::uint32_t s_lo = stale->endpoint;
-        const std::uint32_t s_hi = s_lo + it->second.adv.slice_count;
+        const std::uint32_t s_hi = s_lo + learned_.at(i).value.adv.slice_count;
         if (s_hi <= lo || hi <= s_lo) {  // disjoint runs — untouched
-            ++it;
+            ++i;
             continue;
         }
         // Ordered discard-then-erase: the key is derived from the entry being erased.
@@ -597,7 +666,7 @@ void transport_can::invalidate_overlapping(const can::can_id_fields_t& base,
         // group (a directed group addressed elsewhere, or one whose slices are all
         // still in flight), so nothing is counted that was not actually reclaimed.
         reasm_.discard(key_of(stale->node, stale->endpoint));
-        it = learned_.erase(it);
+        learned_.erase_at(i);  // index `i` now holds the next binding
     }
 }
 
@@ -631,9 +700,9 @@ void transport_can::invalidate_overlapping(const can::can_id_fields_t& base,
  * @note Requires `rx_m_` held.
  */
 void transport_can::mark_prior_lap(std::uint16_t node) {
-    for (auto& [base_id, b] : learned_) {
-        const auto fields = can::decode_can_id(base_id);
-        if (fields && fields->node == node) b.prior_lap = true;
+    for (auto& entry : learned_) {
+        const auto fields = can::decode_can_id(entry.key);
+        if (fields && fields->node == node) entry.value.prior_lap = true;
     }
 }
 
@@ -644,12 +713,12 @@ void transport_can::process_data(const can_frame_data_t& frame) {
     // Find the binding whose [base, base+slice_count) endpoint range owns this id.
     const binding_t* binding = nullptr;
     std::uint16_t base_ep = 0;
-    for (const auto& [base_id, b] : learned_) {
-        const auto base = can::decode_can_id(base_id);
+    for (const auto& entry : learned_) {
+        const auto base = can::decode_can_id(entry.key);
         if (!base || base->node != fields->node) continue;
         if (fields->endpoint >= base->endpoint &&
-            fields->endpoint < base->endpoint + b.adv.slice_count) {
-            binding = &b;
+            fields->endpoint < base->endpoint + entry.value.adv.slice_count) {
+            binding = &entry.value;
             base_ep = base->endpoint;
             break;
         }
@@ -711,13 +780,14 @@ void transport_can::process_data(const can_frame_data_t& frame) {
         dropped_rx_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
+    // The bytes' backend and the reassembly store may each refuse; either way the group
+    // can never complete truthfully, so it takes the same discard-and-count (#1780).
     std::optional<tr::view::view_t> slice = tr::view::over_bytes(frame.bytes(), *rx_backend_);
-    if (!slice) {
+    if (!slice || !reasm_.add_slice(key, index, *std::move(slice))) {
         reasm_.discard(key);
         dropped_rx_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
-    reasm_.add_slice(key, index, *std::move(slice));
 
     if (!reasm_.is_complete(key)) return;
     const auto rope = reasm_.assemble(key);
@@ -752,10 +822,12 @@ void transport_can::park_pending(const can_frame_data_t& frame) {
     // its advertise still in flight, so it is the one worth keeping.
     if (cfg_.max_pending != 0 && pending_.size() >= cfg_.max_pending) {
         const std::size_t over = pending_.size() + 1 - cfg_.max_pending;
-        pending_.erase(pending_.begin(), pending_.begin() + static_cast<std::ptrdiff_t>(over));
+        pending_.erase_front(over);
         dropped_rx_.fetch_add(over, std::memory_order_relaxed);
     }
-    pending_.push_back(pending_slice_t{frame, rx_now_});
+    // A refused park is the same counted drop an evicted one is (receiver pays).
+    if (!pending_.push_back(pending_slice_t{frame, rx_now_}))
+        dropped_rx_.fetch_add(1, std::memory_order_relaxed);
 }
 
 /**
@@ -774,11 +846,10 @@ void transport_can::expire_pending() {
     // unbounded RX growth under the default `max_pending=0`.
     if (pending_.empty()) return;
     const auto cutoff = rx_now_ - cfg_.rx_ttl;
-    auto first_live = pending_.begin();
-    while (first_live != pending_.end() && first_live->arrived < cutoff) ++first_live;
-    const auto stale = static_cast<std::size_t>(first_live - pending_.begin());
+    std::size_t stale = 0;
+    while (stale < pending_.size() && pending_[stale].arrived < cutoff) ++stale;
     if (stale == 0) return;
-    pending_.erase(pending_.begin(), first_live);
+    pending_.erase_front(stale);
     dropped_rx_.fetch_add(stale, std::memory_order_relaxed);
 }
 
@@ -818,55 +889,56 @@ void transport_can::deliver(std::uint16_t src_node, tr::view::rope_t frame) {
 
 // --- the `can` catalog factory (ADR-0027 / ADR-0043 §5 / ADR-0044) -----------
 
-transport_factory_t can_transport_factory(std::pmr::memory_resource* reasm_mr,
+transport_factory_t can_transport_factory(mem::block_source_t* reasm_src,
                                           mem::mem_backend_t* rx_backend) {
-    return
-        [reasm_mr, rx_backend](
-            const conn_settings_t& /*settings*/,
-            const wire::tlv_node_t* raw_config) -> graph::result_t<std::unique_ptr<transport_t>> {
-            // Every CAN-private key is parsed HERE from the raw config TLV (the
-            // ADR-0043 §5 leanness ruling): nothing CAN-shaped lands in the shared
-            // conn_settings_t. The shared config_reader_t walk, CAN's own keys.
-            std::string ifname;
-            transport_can_config_t cfg;
-            bool have_node = false;
-            const wire::config_reader_t reader(raw_config);
-            if (const auto v = reader.name("ifname")) ifname = std::string(*v);
-            if (const auto v = reader.name("path")) cfg.path = std::string(*v);
-            if (const auto v = reader.u16("node")) {
-                cfg.node = *v;
-                have_node = true;
-            }
-            if (const auto v = reader.u8("version")) cfg.version = *v;
-            if (const auto v = reader.flag("fd"))
-                cfg.mode = *v ? tr::net::can::can_frame_mode_t::FD
-                              : tr::net::can::can_frame_mode_t::CLASSIC;
-            if (const auto v = reader.u32("peer_ttl_ms"))
-                cfg.peer_ttl = std::chrono::milliseconds(*v);
-            // The ingress bounds (#912). Without these keys the reassembly buffer's
-            // evict-oldest seam was unreachable from production config at all — the
-            // buffer was default-constructed with max_groups == 0. The pmr resource
-            // cannot ride a config TLV (it is a pointer, not a wire value), so it is
-            // injected at factory-registration time instead.
-            cfg.reasm_mr = reasm_mr != nullptr ? reasm_mr : std::pmr::new_delete_resource();
-            // Same reasoning one seam over (#911): the slice-byte backend is a pointer, so
-            // it rides the factory registration, not the config TLV. nullptr = process heap.
-            cfg.rx_backend = rx_backend;
-            if (const auto v = reader.u32("max_groups"))
-                cfg.max_groups = static_cast<std::size_t>(*v);
-            if (const auto v = reader.u32("max_pending"))
-                cfg.max_pending = static_cast<std::size_t>(*v);
-            if (const auto v = reader.u32("rx_ttl_ms")) cfg.rx_ttl = std::chrono::milliseconds(*v);
-            if (ifname.empty() || !have_node || cfg.node > can::kNodeMax ||
-                cfg.version > can::kVersionMax) {
-                return std::unexpected(graph::status_t::TYPE_MISMATCH);
-            }
-            auto link = std::make_unique<socketcan_link_t>(ifname);
-            // The kernel would not open the interface — the link is down, not the address
-            // wrong (#929).
-            if (!link->ok()) return std::unexpected(graph::status_t::TRANSPORT_DOWN);
-            return std::make_unique<transport_can>(std::move(link), std::move(cfg));
-        };
+    return [reasm_src, rx_backend](const conn_settings_t& /*settings*/,
+                                   const wire::tlv_node_t* raw_config,
+                                   mem::block_source_t& src) -> graph::result_t<transport_ptr_t> {
+        // Every CAN-private key is parsed HERE from the raw config TLV (the
+        // ADR-0043 §5 leanness ruling): nothing CAN-shaped lands in the shared
+        // conn_settings_t. The shared config_reader_t walk, CAN's own keys.
+        // Both views borrow the raw config, which outlives this call; the transport
+        // and the link copy what they keep.
+        std::string_view ifname;
+        transport_can_config_t cfg;
+        const wire::config_reader_t reader(raw_config);
+        if (const auto v = reader.name("ifname")) ifname = *v;
+        if (const auto v = reader.name("path")) cfg.path = *v;
+        const auto node = reader.u16("node");  // required: its absence is refused below
+        cfg.node = node.value_or(0);
+        if (const auto v = reader.u8("version")) cfg.version = *v;
+        if (const auto v = reader.flag("fd"))
+            cfg.mode =
+                *v ? tr::net::can::can_frame_mode_t::FD : tr::net::can::can_frame_mode_t::CLASSIC;
+        if (const auto v = reader.u32("peer_ttl_ms")) cfg.peer_ttl = std::chrono::milliseconds(*v);
+        // The ingress bounds (#912). Without these keys the reassembly buffer's
+        // evict-oldest seam was unreachable from production config at all — the
+        // buffer was default-constructed with max_groups == 0. The RX source
+        // cannot ride a config TLV (it is a pointer, not a wire value), so it is
+        // injected at factory-registration time instead (null = the net sub-pool).
+        cfg.reasm_src = reasm_src;
+        // Same reasoning one seam over (#911): the slice-byte backend is a pointer, so
+        // it rides the factory registration, not the config TLV. nullptr = process heap.
+        cfg.rx_backend = rx_backend;
+        if (const auto v = reader.u32("max_groups")) cfg.max_groups = static_cast<std::size_t>(*v);
+        if (const auto v = reader.u32("max_pending"))
+            cfg.max_pending = static_cast<std::size_t>(*v);
+        if (const auto v = reader.u32("rx_ttl_ms")) cfg.rx_ttl = std::chrono::milliseconds(*v);
+        if (ifname.empty() || !node || cfg.node > can::kNodeMax || cfg.version > can::kVersionMax) {
+            return std::unexpected(graph::status_t::TYPE_MISMATCH);
+        }
+        // The link and the transport are drawn from `src`, the receiving vertex's
+        // store (#1780).
+        mem::poly_ptr_t<socketcan_link_t> link = mem::make_poly<socketcan_link_t>(src, ifname);
+        if (!link) return std::unexpected(graph::status_t::BACKPRESSURE);
+        // The kernel would not open the interface — the link is down, not the address
+        // wrong (#929).
+        if (!link->ok()) return std::unexpected(graph::status_t::TRANSPORT_DOWN);
+        mem::poly_ptr_t<can_transport_t> t =
+            mem::make_poly<can_transport_t>(src, mem::poly_ptr_t<can_link_t>(std::move(link)), cfg);
+        if (!t) return std::unexpected(graph::status_t::BACKPRESSURE);
+        return transport_ptr_t(std::move(t));
+    };
 }
 
 }  // namespace tr::net

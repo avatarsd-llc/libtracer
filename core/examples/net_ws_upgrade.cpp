@@ -50,6 +50,7 @@
 #include <string>
 #include <vector>
 
+#include "libtracer/mem_heap.hpp"
 #include "libtracer/transport_ws.hpp"
 #include "libtracer/ws.hpp"
 
@@ -202,13 +203,17 @@ int main() {
     check(ok, response.find("101 Switching Protocols") != std::string::npos,
           "the server answered 101 Switching Protocols");
     check(ok,
-          response.find("Sec-WebSocket-Accept: " + ws::accept_key(client_key)) != std::string::npos,
+          response.find("Sec-WebSocket-Accept: " +
+                        std::string(ws::accept_key(client_key).view())) != std::string::npos,
           "…with Sec-WebSocket-Accept derived from OUR key, not a constant");
 
     // --- One libtracer frame is one BINARY message --------------------------------------
     std::printf("a frame, once the upgrade is done:\n");
     const auto payload = frame_of(9, 0x10);
-    raw.write(ws::encode_client_frame(ws::opcode_t::BINARY, payload, 0x37FA213Du));
+    tr::mem::bytes_t masked(tr::mem::heap_source());
+    const std::size_t masked_len =
+        ws::try_encode_client_frame(masked, ws::opcode_t::BINARY, payload, 0x37FA213Du);
+    raw.write(std::span<const std::byte>(masked.data(), masked_len));
     check(ok, at_server.wait_for(1, 2s), "the masked BINARY message reached the receiver");
     check(ok, at_server.at(0) == payload,
           "…unmasked and stripped: the sink sees the frame, never the WS header");

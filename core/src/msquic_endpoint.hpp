@@ -64,13 +64,14 @@
 #include <mutex>
 #include <new>
 #include <span>
-#include <string>
+#include <string_view>
+#include <type_traits>
 #include <utility>
-#include <vector>
 
 #include "libtracer/byteorder.hpp"
 #include "libtracer/length_prefix_framer.hpp"
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_string.hpp"
 #include "libtracer/receiver_slot.hpp"
 
 #if defined(__SANITIZE_THREAD__)
@@ -137,68 +138,76 @@ inline constexpr std::uint32_t kHandshakeWaitMs = 10'000;
  * unavoidable — and the only library-held buffer, freed by SEND_COMPLETE.
  * Used both for length-prefixed frame records and for raw handshake bytes.
  *
- * @par Built only through the two nothrow factories (#934)
- * Both allocations — the ctx and its byte buffer — are made by @ref make_frame /
- * @ref make_raw through `new (std::nothrow)` and `%tr::detail::try_reserve`, and a
- * refusal is a null return. That is not a stylistic preference: the H3 handshake writes
- * this buffer from an msquic STREAM CALLBACK, i.e. from inside libmsquic's C frames,
- * where a `std::bad_alloc` has nowhere to unwind to and the module holds no `catch`. A
- * throwing constructor there is an unauthenticated peer's route to `std::terminate` on a
- * tight heap, which is exactly what the #934 audit set out to answer.
+ * @par One block from the endpoint's egress store (#934, #1780)
+ * The ctx and its bytes are ONE block drawn from @ref msquic_endpoint_t::tx_src — the
+ * header here, the bytes right behind it — by @ref make_frame / @ref make_raw, and a
+ * refusal is a null return. Failable is not a stylistic preference: the H3 handshake writes
+ * this buffer from an msquic STREAM CALLBACK, i.e. from inside libmsquic's C frames, where a
+ * `std::bad_alloc` has nowhere to unwind to and the module holds no `catch`. A throwing
+ * constructor there is an unauthenticated peer's route to `std::terminate` on a tight heap,
+ * which is exactly what the #934 audit set out to answer.
  */
 struct send_ctx_t {
-    QUIC_BUFFER buf{};            /**< @brief The buffer descriptor handed to StreamSend. */
-    std::vector<std::byte> bytes; /**< @brief The owned copy of `prefix ++ frame` (or raw). */
+    QUIC_BUFFER buf{};                  /**< @brief The buffer descriptor handed to StreamSend. */
+    mem::block_source_t* src = nullptr; /**< @brief The store the block came from. */
+    std::size_t block_bytes = 0;        /**< @brief The block's size: header plus bytes. */
 
-    /** @brief Empty — the factories fill it. */
-    send_ctx_t() = default;
+    /** @brief Returns a ctx's block to its store (the ctx is trivially destructible). */
+    struct drop_t {
+        /** @brief Release @p c's block. */
+        void operator()(send_ctx_t* c) const noexcept {
+            c->src->release(c, c->block_bytes, alignof(send_ctx_t));
+        }
+    };
+    /** @brief The sole owner of one ctx until msquic takes it. */
+    using ptr_t = std::unique_ptr<send_ctx_t, drop_t>;
+
+    /** @brief The owned bytes, right behind the header. */
+    [[nodiscard]] std::byte* bytes() noexcept { return reinterpret_cast<std::byte*>(this + 1); }
 
     /**
-     * @brief A length-prefixed frame record: prefix ++ @p frame_len zero bytes the caller
-     *        then fills. Nothrow.
-     * @retval nullptr The ctx or its buffer could not be allocated — the caller sheds the
-     *                 frame and counts it.
+     * @brief A length-prefixed frame record: prefix ++ @p frame_len bytes the caller then
+     *        fills. Nothrow.
+     * @retval nullptr @p src refused the block — the caller sheds the frame and counts it.
      */
-    [[nodiscard]] static std::unique_ptr<send_ctx_t> make_frame(std::size_t frame_len) noexcept {
-        const std::size_t total = kPrefixBytes + frame_len;
-        std::unique_ptr<send_ctx_t> ctx = make_sized(total);
+    [[nodiscard]] static ptr_t make_frame(mem::block_source_t& src,
+                                          std::size_t frame_len) noexcept {
+        ptr_t ctx = make_sized(src, kPrefixBytes + frame_len);
         if (!ctx) return nullptr;
-        detail::store_le(std::span(ctx->bytes).first(kPrefixBytes),
+        detail::store_le(std::span(ctx->bytes(), kPrefixBytes),
                          static_cast<std::uint32_t>(frame_len));
         return ctx;
     }
 
     /**
      * @brief Raw bytes (H3 handshake material) — no prefix. Nothrow.
-     * @retval nullptr The ctx or its buffer could not be allocated — the caller refuses
-     *                 the handshake step rather than aborting the node.
+     * @retval nullptr @p src refused the block — the caller refuses the handshake step
+     *                 rather than aborting the node.
      */
-    [[nodiscard]] static std::unique_ptr<send_ctx_t> make_raw(
-        std::span<const std::uint8_t> raw) noexcept {
-        std::unique_ptr<send_ctx_t> ctx = make_sized(raw.size());
+    [[nodiscard]] static ptr_t make_raw(mem::block_source_t& src,
+                                        std::span<const std::uint8_t> raw) noexcept {
+        ptr_t ctx = make_sized(src, raw.size());
         if (!ctx) return nullptr;
-        if (!raw.empty()) std::memcpy(ctx->bytes.data(), raw.data(), raw.size());
+        if (!raw.empty()) std::memcpy(ctx->bytes(), raw.data(), raw.size());
         return ctx;
-    }
-
-    /** @brief Point the QUIC_BUFFER at the owned bytes. */
-    void arm() noexcept {
-        buf.Length = static_cast<std::uint32_t>(bytes.size());
-        buf.Buffer = reinterpret_cast<uint8_t*>(bytes.data());
     }
 
    private:
-    /** @brief The shared nothrow body of both factories: a ctx owning @p total zeroed,
-     *         armed bytes. */
-    [[nodiscard]] static std::unique_ptr<send_ctx_t> make_sized(std::size_t total) noexcept {
-        std::unique_ptr<send_ctx_t> ctx(new (std::nothrow) send_ctx_t());
-        if (!ctx) return nullptr;
-        if (!detail::try_reserve(ctx->bytes, total)) return nullptr;
-        ctx->bytes.resize(total);  // within capacity — cannot reallocate, cannot throw
-        ctx->arm();
+    /** @brief The shared nothrow body of both factories: one block holding the header and
+     *         @p total armed bytes. */
+    [[nodiscard]] static ptr_t make_sized(mem::block_source_t& src, std::size_t total) noexcept {
+        const std::size_t block_bytes = sizeof(send_ctx_t) + total;
+        void* block = src.try_alloc(block_bytes, alignof(send_ctx_t));
+        if (block == nullptr) return nullptr;
+        ptr_t ctx(::new (block) send_ctx_t{});
+        ctx->src = &src;
+        ctx->block_bytes = block_bytes;
+        ctx->buf.Length = static_cast<std::uint32_t>(total);
+        ctx->buf.Buffer = reinterpret_cast<uint8_t*>(ctx->bytes());
         return ctx;
     }
 };
+static_assert(std::is_trivially_destructible_v<send_ctx_t>);
 
 /**
  * @brief The msquic-mechanical endpoint base each QUIC transport's impl_t
@@ -248,7 +257,10 @@ class msquic_endpoint_t {
      * @name RX segment source for frame reassembly (ADR-0042 §2) + counters.
      * @{
      */
-    mem::mem_backend_t* backend = nullptr;      /**< @brief The injected RX memory seam. */
+    mem::mem_backend_t* backend = nullptr; /**< @brief The injected RX memory seam. */
+    /** @brief The egress store every in-flight send's @ref send_ctx_t is drawn from
+     *         (`link_memory_t::io`, default the net sub-pool — #1780). */
+    mem::block_source_t* tx_src = &mem::net_source();
     std::size_t max_frame = kMaxFrame;          /**< @brief This connection's frame cap, `:settings
                                                             max_frame` resolved through
                                                             `length_prefix_framer_t::configured_cap`
@@ -511,7 +523,7 @@ class msquic_endpoint_t {
      *         ends exactly here. Pairs with the sender's tsan_release. */
     static void complete_send(void* client_ctx) {
         tsan_acquire(client_ctx);
-        delete static_cast<send_ctx_t*>(client_ctx);
+        send_ctx_t::drop_t{}(static_cast<send_ctx_t*>(client_ctx));
     }
 
     /**
@@ -528,7 +540,7 @@ class msquic_endpoint_t {
      *         the wire; only the frame path counts it (@ref submit_frame), because a
      *         refused handshake write is a setup failure, not a shed frame.
      */
-    [[nodiscard]] bool submit(HQUIC stream, std::unique_ptr<send_ctx_t> ctx) {
+    [[nodiscard]] bool submit(HQUIC stream, send_ctx_t::ptr_t ctx) {
         tsan_release(ctx.get());  // pairs with SEND_COMPLETE's acquire
         if (!QUIC_SUCCEEDED(api->StreamSend(stream, &ctx->buf, 1, QUIC_SEND_FLAG_NONE, ctx.get())))
             return false;
@@ -546,7 +558,7 @@ class msquic_endpoint_t {
      * Both shed paths — no stream, and a `StreamSend` msquic refused — count
      * @ref dropped_tx, so the caller's frame is never lost silently (#932).
      */
-    void submit_frame(std::unique_ptr<send_ctx_t> ctx) {
+    void submit_frame(send_ctx_t::ptr_t ctx) {
         const std::lock_guard lock(conn_m);
         if (frame_stream == nullptr) {  // no peer stream (yet / anymore) — drop
             dropped_tx.fetch_add(1, std::memory_order_relaxed);
@@ -570,7 +582,7 @@ class msquic_endpoint_t {
      *         nothing is counted here.
      */
     [[nodiscard]] bool send_raw(HQUIC stream, std::span<const std::uint8_t> bytes) {
-        std::unique_ptr<send_ctx_t> ctx = send_ctx_t::make_raw(bytes);
+        send_ctx_t::ptr_t ctx = send_ctx_t::make_raw(*tx_src, bytes);
         if (!ctx) return false;
         return submit(stream, std::move(ctx));
     }
@@ -593,13 +605,12 @@ class msquic_endpoint_t {
         }
         // The one library-held buffer, and the one allocation on the TX path: failable
         // (#934), so a tight heap sheds the frame with a counter instead of aborting.
-        std::unique_ptr<send_ctx_t> ctx = send_ctx_t::make_frame(frame.size());
+        send_ctx_t::ptr_t ctx = send_ctx_t::make_frame(*tx_src, frame.size());
         if (!ctx) {
             dropped_tx.fetch_add(1, std::memory_order_relaxed);
             return;
         }
-        if (!frame.empty())
-            std::memcpy(ctx->bytes.data() + kPrefixBytes, frame.data(), frame.size());
+        if (!frame.empty()) std::memcpy(ctx->bytes() + kPrefixBytes, frame.data(), frame.size());
         submit_frame(std::move(ctx));
     }
 
@@ -619,7 +630,7 @@ class msquic_endpoint_t {
             dropped_tx.fetch_add(1, std::memory_order_relaxed);
             return;
         }
-        std::unique_ptr<send_ctx_t> ctx = send_ctx_t::make_frame(total);  // failable (#934)
+        send_ctx_t::ptr_t ctx = send_ctx_t::make_frame(*tx_src, total);  // failable (#934)
         if (!ctx) {
             dropped_tx.fetch_add(1, std::memory_order_relaxed);
             return;
@@ -627,7 +638,7 @@ class msquic_endpoint_t {
         std::size_t off = kPrefixBytes;
         for (const auto& s : iov) {
             if (s.empty()) continue;
-            std::memcpy(ctx->bytes.data() + off, s.data(), s.size());
+            std::memcpy(ctx->bytes() + off, s.data(), s.size());
             off += s.size();
         }
         submit_frame(std::move(ctx));
@@ -676,8 +687,13 @@ class msquic_endpoint_t {
      *         with open_ok still false and teardown() unwinds what opened.
      */
     bool dial(const char* reg_name, const QUIC_BUFFER& alpn, const QUIC_SETTINGS& settings,
-              const std::string& ca_file, bool insecure_no_verify, const std::string& peer_host,
+              std::string_view ca_file, bool insecure_no_verify, std::string_view peer_host,
               std::uint16_t peer_port) {
+        // msquic reads C strings: NUL-terminated copies from the egress store, held for the
+        // calls below (msquic copies what it keeps). A refused copy fails the dial.
+        mem::string_t ca(*tx_src);
+        mem::string_t host(*tx_src);
+        if (!ca.assign(ca_file) || !host.assign(peer_host)) return false;
         QUIC_CREDENTIAL_CONFIG cred{};
         cred.Type = QUIC_CREDENTIAL_TYPE_NONE;
         unsigned flags = QUIC_CREDENTIAL_FLAG_CLIENT;
@@ -685,7 +701,7 @@ class msquic_endpoint_t {
             flags |= QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;  // DEV ONLY (self-signed)
         } else if (!ca_file.empty()) {
             flags |= QUIC_CREDENTIAL_FLAG_SET_CA_CERTIFICATE_FILE;
-            cred.CaCertificateFile = ca_file.c_str();
+            cred.CaCertificateFile = ca.c_str();
         }
         cred.Flags = static_cast<QUIC_CREDENTIAL_FLAGS>(flags);
         if (!open_common(reg_name, alpn, settings, cred)) return false;
@@ -695,8 +711,8 @@ class msquic_endpoint_t {
             return false;
         }
         tsan_release(this);  // publish the constructed endpoint to the callbacks
-        if (QUIC_FAILED(api->ConnectionStart(conn, config, QUIC_ADDRESS_FAMILY_UNSPEC,
-                                             peer_host.c_str(), peer_port)))
+        if (QUIC_FAILED(api->ConnectionStart(conn, config, QUIC_ADDRESS_FAMILY_UNSPEC, host.c_str(),
+                                             peer_port)))
             return false;
         return wait_stage(handshake_done, handshake_ok);
     }
@@ -708,12 +724,16 @@ class msquic_endpoint_t {
      *        ConfigurationLoadCredential).
      */
     bool listen_start(const char* reg_name, const QUIC_BUFFER& alpn, const QUIC_SETTINGS& settings,
-                      const std::string& cert_file, const std::string& key_file,
+                      std::string_view cert_file, std::string_view key_file,
                       std::uint16_t bind_port) {
         listen = true;
+        // C strings for msquic, as in @ref dial: read during ConfigurationLoadCredential.
+        mem::string_t cert_path(*tx_src);
+        mem::string_t key_path(*tx_src);
+        if (!cert_path.assign(cert_file) || !key_path.assign(key_file)) return false;
         QUIC_CERTIFICATE_FILE cert{};
-        cert.PrivateKeyFile = key_file.c_str();
-        cert.CertificateFile = cert_file.c_str();
+        cert.PrivateKeyFile = key_path.c_str();
+        cert.CertificateFile = cert_path.c_str();
         QUIC_CREDENTIAL_CONFIG cred{};
         cred.Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE;
         cred.Flags = QUIC_CREDENTIAL_FLAG_NONE;

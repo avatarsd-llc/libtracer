@@ -134,8 +134,8 @@ void declare_fake_engine_module(transport_vertex_t& net, dial_script_t& script) 
     dial_script_t* const s = &script;
     net.register_transport_type(
         "fake",
-        [s](const tr::net::conn_settings_t& settings, const tr::wire::tlv_node_t*)
-            -> tr::graph::result_t<std::unique_ptr<tr::net::transport_t>> {
+        [s](const tr::net::conn_settings_t& settings, const tr::wire::tlv_node_t*,
+            tr::mem::block_source_t& src) -> tr::graph::result_t<tr::net::transport_ptr_t> {
             std::unique_lock l(s->m);
             s->last = settings;
             ++s->attempts;
@@ -145,7 +145,7 @@ void declare_fake_engine_module(transport_vertex_t& net, dial_script_t& script) 
             const bool up = s->outcomes.front();
             s->outcomes.pop_front();
             if (!up) return std::unexpected(status_t::TRANSPORT_DOWN);
-            auto sock = std::make_unique<fake_sock_t>();
+            auto sock = tr::mem::make_poly<fake_sock_t>(src);
             s->built.push_back(sock.get());
             return sock;
         },
