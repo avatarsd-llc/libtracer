@@ -143,7 +143,7 @@ whose vertex never changes is released when the link goes down or the node tears
 replies name no request op, do not pipeline a `read` behind an `await` on the same vertex over
 one link: their two RESULTs cannot be told apart. Later requests on the same link are not held behind it, so their replies may arrive
 first, as the reply-ordering invariant below already allows
-([ADR-0084](../adr/0084-remote-await-completes-from-a-receiver-side-waiter.md)).
+([ADR-0084](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0084-remote-await-completes-from-a-receiver-side-waiter.md)).
 
 `await` is logically equivalent to `subscribe + receive-one + unsubscribe`. An implementation MAY make it cheaper than the literal sequence, for instance by not creating a persistent SUBSCRIBER record.
 

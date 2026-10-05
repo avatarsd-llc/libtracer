@@ -1680,7 +1680,7 @@ class vertex_t {
      * @brief Unlink @p w if it has not fired yet (a timeout or a cancel).
      *
      * Needs no live vertex: the stripe is derived from the address @p w recorded.
-     * @retval true  @p w was still armed and is now the caller's; @ref await_waiter_t::fire
+     * @retval true  @p w was still armed and is now the caller's; the waiter's fire callback
      *               will never be called for it.
      * @retval false A publish already took it: its fire runs (or ran) on the writer's thread.
      */
