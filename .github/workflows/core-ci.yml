@@ -308,6 +308,10 @@ jobs:
           # These jobs build, test and lint; none uses git credentials after checkout.
           persist-credentials: false
       - name: Configure + build (C++23) + ctest
+        env:
+          LT_EXPECT_LKV_SLOT: ${{ matrix.lkv_slot }}
+          LT_EXPECT_RECLAIM_POLICY: reclaim_local_t
+          LT_EXPECT_ACL_POLICY: ${{ matrix.acl_full == 'ON' && 'full_acl_policy_t' || 'allow_only_policy_t' }}
         run: |
           preset=""
           if [ "${{ matrix.acl_full }}" = "ON" ]; then preset="-I$PWD/core/tests/presets/acl-full"; fi
@@ -380,6 +384,10 @@ jobs:
           # re-roots `.git/config` after the cleanup step has already run.
           persist-credentials: false
       - name: Configure + build (minimal module set) + ctest
+        env:
+          LT_EXPECT_LKV_SLOT: single_writer_slot_t
+          LT_EXPECT_RECLAIM_POLICY: reclaim_local_t
+          LT_EXPECT_ACL_POLICY: allow_only_policy_t
         run: |
           cmake -S core -B core/build-minimal -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DLIBTRACER_NET_PLANE=OFF \
@@ -453,6 +461,10 @@ jobs:
           # re-roots `.git/config` after the cleanup step has already run.
           persist-credentials: false
       - name: Bind reclaim_strict_t, build + ctest
+        env:
+          LT_EXPECT_LKV_SLOT: single_writer_slot_t
+          LT_EXPECT_RECLAIM_POLICY: reclaim_strict_t
+          LT_EXPECT_ACL_POLICY: allow_only_policy_t
         run: |
           mkdir -p "$PWD/reclaim-strict/libtracer"
           cat > "$PWD/reclaim-strict/libtracer/config_override.hpp" <<'FRAGMENT'
@@ -566,6 +578,10 @@ jobs:
           # re-roots `.git/config` after the cleanup step has already run.
           persist-credentials: false
       - name: Bind kBusLinks = false, build + ctest
+        env:
+          LT_EXPECT_LKV_SLOT: single_writer_slot_t
+          LT_EXPECT_RECLAIM_POLICY: reclaim_local_t
+          LT_EXPECT_ACL_POLICY: allow_only_policy_t
         run: |
           mkdir -p "$PWD/bus-closed/libtracer"
           cat > "$PWD/bus-closed/libtracer/config_override.hpp" <<'FRAGMENT'
@@ -669,6 +685,10 @@ jobs:
           # re-roots `.git/config` after the cleanup step has already run.
           persist-credentials: false
       - name: Bind kSelfHealLinks = false, build + ctest
+        env:
+          LT_EXPECT_LKV_SLOT: single_writer_slot_t
+          LT_EXPECT_RECLAIM_POLICY: reclaim_local_t
+          LT_EXPECT_ACL_POLICY: allow_only_policy_t
         run: |
           mkdir -p "$PWD/self-heal-closed/libtracer"
           cat > "$PWD/self-heal-closed/libtracer/config_override.hpp" <<'FRAGMENT'
@@ -775,43 +795,17 @@ jobs:
           # re-roots `.git/config` after the cleanup step has already run.
           persist-credentials: false
       - name: Bind reclaim_qsbr_t, build + ctest
-        # The `-I` MUST name the directory the fragment is written to. Until #1692 it named
-        # `reclaim-strict` (absent in this job), `__has_include` found no override, and the
-        # leg silently rebuilt the DEFAULT config under a qsbr name. The static_assert probe
-        # (the SAME `$fixture` flag, syntax-only, ~1 s) fails the leg if the binding ever drifts again.
+        # The checked-in preset core/tests/presets/reclaim-qsbr binds the policy (#1810). Until
+        # #1692 the `-I` named a directory absent in this job, `__has_include` found no
+        # override, and the leg silently rebuilt the DEFAULT config under a qsbr name. The
+        # `config_binding` test fails the leg if the bound config ever drifts from LT_EXPECT_*.
+        env:
+          LT_EXPECT_LKV_SLOT: single_writer_slot_t
+          LT_EXPECT_RECLAIM_POLICY: reclaim_qsbr_t
+          LT_EXPECT_ACL_POLICY: allow_only_policy_t
         run: |
-          mkdir -p "$PWD/reclaim-qsbr/libtracer"
-          cat > "$PWD/reclaim-qsbr/libtracer/config_override.hpp" <<'FRAGMENT'
-          /**
-           * @file
-           * @brief GENERATED CI fixture — the ADR-0080 CROSS-THREAD reclamation policy bound.
-           */
-          #pragma once
-
-          namespace tr::graph {
-
-          /** @brief The defaults, with a grace point spanning every thread (a many-core host). */
-          struct reclaim_qsbr_config_t : default_config_t {
-              using reclaim_policy_t = reclaim_qsbr_t;
-              // The two link modules are opt-in since v0.17.0 (#1670); this leg's subject is
-              // elsewhere, so it keeps the full test build's modules on.
-              static constexpr bool kBusLinks = true;
-              static constexpr bool kSelfHealLinks = true;
-              // The fault-injection tests run here too, so the hooks are compiled in (#1719).
-              static constexpr bool kFaultInjection = true;
-          };
-
-          using config_t = reclaim_qsbr_config_t;
-
-          }  // namespace tr::graph
-          FRAGMENT
-          fixture="-I$PWD/reclaim-qsbr"
-          cmake -S core -B core/build-qsbr -DBUILD_TESTING=ON \
-            -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_CXX_FLAGS="$fixture"
-          printf '%s\n' '#include <libtracer/config.hpp>' '#include <type_traits>' \
-            'static_assert(std::is_same_v<tr::graph::config_t::reclaim_policy_t, tr::graph::reclaim_qsbr_t>, "reclaim_qsbr_t is not bound");' \
-            > "$RUNNER_TEMP/qsbr_bound.cpp"
-          g++ -std=c++23 "$fixture" -Icore/include -fsyntax-only "$RUNNER_TEMP/qsbr_bound.cpp"
+          cmake -S core -B core/build-qsbr -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CXX_FLAGS="-I$PWD/core/tests/presets/reclaim-qsbr"
           cmake --build core/build-qsbr --parallel "$BUILD_JOBS"
           ctest --test-dir core/build-qsbr --output-on-failure
       - name: Compiler cache statistics (this job)
@@ -873,6 +867,10 @@ jobs:
           fi
       - uses: actions/checkout@v4
       - name: Configure + build (C++23, aarch64) + ctest
+        env:
+          LT_EXPECT_LKV_SLOT: single_writer_slot_t
+          LT_EXPECT_RECLAIM_POLICY: reclaim_local_t
+          LT_EXPECT_ACL_POLICY: allow_only_policy_t
         run: |
           cmake -S core -B core/build-arm64 -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo
           cmake --build core/build-arm64 --parallel "$BUILD_JOBS"
@@ -944,6 +942,9 @@ jobs:
         env:
           CC: gcc-15
           CXX: g++-15
+          LT_EXPECT_LKV_SLOT: single_writer_slot_t
+          LT_EXPECT_RECLAIM_POLICY: reclaim_local_t
+          LT_EXPECT_ACL_POLICY: allow_only_policy_t
         run: |
           cmake -S core -B core/build-gcc15 -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=RelWithDebInfo \
             -DCMAKE_C_COMPILER=gcc-15 -DCMAKE_CXX_COMPILER=g++-15
@@ -1009,6 +1010,10 @@ jobs:
           fi
       - uses: actions/checkout@v4
       - name: ASan + UBSan build + ctest
+        env:
+          LT_EXPECT_LKV_SLOT: ${{ matrix.lkv_slot }}
+          LT_EXPECT_RECLAIM_POLICY: reclaim_local_t
+          LT_EXPECT_ACL_POLICY: allow_only_policy_t
         run: |
           preset=""
           if [ "${{ matrix.lkv_slot }}" = "hazard_slot_t" ]; then preset="-I$PWD/core/tests/presets/hazard-slot"; fi
@@ -1057,6 +1062,10 @@ jobs:
           fi
       - uses: actions/checkout@v4
       - name: ThreadSanitizer build + ctest (graph concurrency)
+        env:
+          LT_EXPECT_LKV_SLOT: ${{ matrix.lkv_slot }}
+          LT_EXPECT_RECLAIM_POLICY: reclaim_local_t
+          LT_EXPECT_ACL_POLICY: allow_only_policy_t
         run: |
           preset=""
           if [ "${{ matrix.lkv_slot }}" = "hazard_slot_t" ]; then preset="-I$PWD/core/tests/presets/hazard-slot"; fi
@@ -1066,7 +1075,9 @@ jobs:
           setarch "$(uname -m)" -R ctest --test-dir core/build-tsan --output-on-failure
 
   # The SAME TSan matrix with `reclaim_qsbr_t` bound (#1376). A separate job rather than a third
-  # matrix axis because it needs the override fragment generated first. This is the gate that
+  # matrix axis because it binds its own presets: core/tests/presets/reclaim-qsbr, and
+  # reclaim-qsbr-hazard-slot, which binds the slot AND the policy in ONE fragment because two
+  # fragments would shadow each other (#1810). This is the gate that
   # matters most for this policy: it is the first one with real cross-thread ordering (a seq_cst
   # announce paired against the retiring thread's epoch RMW — a Dekker shape), and it must run at
   # BOTH lkv_slot bindings because `hazard_slot_t` is the leg that exercises #897's self-drain.
@@ -1103,37 +1114,15 @@ jobs:
           fi
       - uses: actions/checkout@v4
       - name: ThreadSanitizer build + ctest (reclaim_qsbr grace period)
+        env:
+          LT_EXPECT_LKV_SLOT: ${{ matrix.lkv_slot }}
+          LT_EXPECT_RECLAIM_POLICY: reclaim_qsbr_t
+          LT_EXPECT_ACL_POLICY: allow_only_policy_t
         run: |
-          mkdir -p "$PWD/reclaim-qsbr-tsan/libtracer"
-          cat > "$PWD/reclaim-qsbr-tsan/libtracer/config_override.hpp" <<'FRAGMENT'
-          /**
-           * @file
-           * @brief GENERATED CI fixture — the ADR-0080 CROSS-THREAD reclamation policy bound.
-           */
-          #pragma once
-
-          namespace tr::graph {
-
-          /** @brief The defaults, with a grace point spanning every thread (a many-core host). */
-          struct reclaim_qsbr_config_t : default_config_t {
-              using reclaim_policy_t = reclaim_qsbr_t;
-              // The matrix slot, bound here rather than by a second fragment: one build has
-              // one config_t, so two fragments would shadow one another (#1722).
-              using lkv_slot_t = ${{ matrix.lkv_slot }};
-              // The two link modules are opt-in since v0.17.0 (#1670); this leg's subject is
-              // elsewhere, so it keeps the full test build's modules on.
-              static constexpr bool kBusLinks = true;
-              static constexpr bool kSelfHealLinks = true;
-              // The fault-injection tests run here too, so the hooks are compiled in (#1719).
-              static constexpr bool kFaultInjection = true;
-          };
-
-          using config_t = reclaim_qsbr_config_t;
-
-          }  // namespace tr::graph
-          FRAGMENT
+          preset="-I$PWD/core/tests/presets/reclaim-qsbr"
+          if [ "${{ matrix.lkv_slot }}" = "hazard_slot_t" ]; then preset="-I$PWD/core/tests/presets/reclaim-qsbr-hazard-slot"; fi
           cmake -S core -B core/build-tsan-qsbr -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1 -I$PWD/reclaim-qsbr-tsan"
+            -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1 $preset"
           cmake --build core/build-tsan-qsbr --parallel "$BUILD_JOBS"
           setarch "$(uname -m)" -R ctest --test-dir core/build-tsan-qsbr --output-on-failure
 
