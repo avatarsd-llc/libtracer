@@ -2833,12 +2833,16 @@ result_t<bool> graph_t::enroll_unconditional(std::span<const std::byte> key) {
 
 bool graph_t::apply_delivery_mode(vertex_t* v, delivery_mode_t mode,
                                   std::span<const std::byte> key) {
-    // The one failable step, taken before anything changes (#1778): the set entry. Enrolled
-    // already (a registration takes it first) ⇒ nothing to allocate. Between the two locks a
-    // sweep may deliver the vertex as a member once while its mode still reads the old one —
-    // a duplicate, the safe direction.
-    if (mode == delivery_mode_t::UNCONDITIONAL && !enroll_unconditional(key)) return false;
+    // The one failable step, taken before anything changes (#1778): the set entry. Its key is
+    // copied outside the lock, and the entry goes in UNDER the same lock as the mode store and
+    // the pending erase, so no sweep ever sees the key in both sets (#895).
+    const bool enroll = mode == delivery_mode_t::UNCONDITIONAL;
+    mem::bytes_t k(*tables_);
+    if (enroll && !mem::assign_bytes(k, key)) return false;
     const std::lock_guard lock(sweep_mutex_);
+    if (enroll && !unconditional_.contains(key) &&
+        unconditional_.try_emplace(std::move(k), std::uint8_t{0}).value == nullptr)
+        return false;
     v->set_delivery_mode(mode);
     // Leaving IF_NEWER retires any mark below, and the pending-mark hint (#1712) with it:
     // UNCONDITIONAL is swept via unconditional_ now (no double membership) and EXPLICIT is
