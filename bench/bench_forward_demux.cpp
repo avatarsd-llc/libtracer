@@ -343,9 +343,15 @@ class legacy_dst_seg_walk_t {
  * ("l0", "l1", …) pad the registry so the target sits at scan position @p target_pos.
  * @param links      Total forwardable children registered (N).
  * @param target_pos 1-based position of "out" among them (1 = first, `links` = last).
- * @param mode       RESULT mode tag ("fixed" or "scan").
+ * @param mode       RESULT mode tag ("fixed", "scan" or "value").
+ * @param payload_bytes The VALUE payload the frame carries: 4 B for the fixed and scan axes.
+ * @param by_payload Key the row by @p payload_bytes instead of the whole frame's size: the
+ *                   `fwd-demux-value` ladder (#1806), whose axis is the payload.
+ * @param budget     The timed loop's budget in seconds.
  */
-double run_point(std::size_t links, std::size_t target_pos, const char* mode) {
+double run_point(std::size_t links, std::size_t target_pos, const char* mode,
+                 std::size_t payload_bytes = 4, bool by_payload = false,
+                 double budget = budget_seconds()) {
     graph_t graph;
     fwd_router_t router(graph);
     capture_transport_t in_link;
@@ -387,11 +393,13 @@ double run_point(std::size_t links, std::size_t target_pos, const char* mode) {
     // finally caught. Keep this to ONE call.
     router.add_child("net/ws-server/in", in_link);
 
-    const std::byte payload[4] = {std::byte{0xDE}, std::byte{0xAD}, std::byte{0xBE},
-                                  std::byte{0xEF}};
+    // DE AD BE EF repeated: at 4 B this is the exact payload the axes always carried.
+    constexpr std::array<std::byte, 4> kPattern = {std::byte{0xDE}, std::byte{0xAD},
+                                                   std::byte{0xBE}, std::byte{0xEF}};
+    std::vector<std::byte> payload(payload_bytes);
+    for (std::size_t i = 0; i < payload_bytes; ++i) payload[i] = kPattern[i % kPattern.size()];
     const std::vector<std::byte> frame =
-        make_fwd({"net", "ws-client", "out", "sensor", "temp"}, {"reply"},
-                 std::span<const std::byte>(payload, 4));
+        make_fwd({"net", "ws-client", "out", "sensor", "temp"}, {"reply"}, payload);
 
     // Drive the hop through the INBOUND LINK's receiver, not `router.on_frame` directly.
     // That is how a real transport delivers: `add_child` installs a receiver bound to a
@@ -409,12 +417,13 @@ double run_point(std::size_t links, std::size_t target_pos, const char* mode) {
     // picoseconds, every window >= 20 µs (#1804). Sample until the budget is spent — the
     // sample COUNT falls out of the host's speed rather than being declared.
     const bench::batch_timing_t t =
-        bench::time_batches(hop, static_cast<std::uint64_t>(budget_seconds() * 1e9));
-    // size_bytes = the frame the hop carried; fanout = N; endpoints = scan position. The NOTE
-    // line emit_batch prints states the batch, so a reader can tell whether the window was
-    // amortized on THIS host rather than trusting a constant baked in on another.
-    bench::emit_batch("libtracer", mode, frame.size(), links, target_pos, t.ops_per_s, t.ops_per_s,
-                      0.0, t);
+        bench::time_batches(hop, static_cast<std::uint64_t>(budget * 1e9));
+    // size_bytes = the frame the hop carried (the payload, for the value ladder); fanout = N;
+    // endpoints = scan position. The NOTE line emit_batch prints states the batch, so a reader
+    // can tell whether the window was amortized on THIS host rather than trusting a constant
+    // baked in on another.
+    bench::emit_batch("libtracer", mode, by_payload ? payload_bytes : frame.size(), links,
+                      target_pos, t.ops_per_s, t.ops_per_s, 0.0, t);
     if (out_link.sends == 0) std::printf("WARN mode=%s links=%zu forwarded NOTHING\n", mode, links);
     return t.p50_ps / 1e3;
 }
@@ -575,5 +584,13 @@ int main(int /*argc*/, char** argv) {
         " RFC is void.\n",
         packed, spread, lit, lit - packed, lit == 0.0 ? 0.0 : 100.0 * (lit - packed) / lit,
         (lit - packed) > spread ? "PACKED-WINS" : "INCONCLUSIVE-OR-REFUTED");
+
+    // Axis 4 — the VALUE payload ladder (#1806): the fixed hop (one link, target first) over
+    // every ladder payload, keyed by the payload rather than the frame. Appended after every
+    // other row and summary, at a quarter of the budget per point. The sink links copy nothing,
+    // so any cost that grows with the payload is the hop's own.
+    std::printf("\n");
+    for (const std::size_t p : bench::kPayloadLadder)
+        (void)run_point(1, 1, "fwd-demux-value", p, true, budget_seconds() / 4);
     return 0;
 }

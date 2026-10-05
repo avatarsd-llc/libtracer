@@ -26,6 +26,7 @@
  * delivery is close enough to `clock_gettime` that per-op timing measures the clock.
  */
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -33,6 +34,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <initializer_list>
+#include <iterator>
 #include <new>
 #include <span>
 #include <string>
@@ -180,9 +182,11 @@ std::vector<std::byte> value_tlv(std::size_t n) {
 
 /**
  * @brief One measured point: N compacted deliveries on a WARM binding.
+ * @param payload  The VALUE payload each compacted sample carries.
  * @param terminus true ⇒ the label resolves locally; false ⇒ it swaps and forwards.
+ * @param budget   The timed loop's budget in seconds.
  */
-void run_point(std::size_t payload, bool terminus) {
+void run_point(std::size_t payload, bool terminus, double budget) {
     graph_t g;
     if (terminus) (void)g.register_vertex(*path_t::parse("/sink"), role_t::STORED_VALUE);
     fwd_router_t router(g);
@@ -216,7 +220,7 @@ void run_point(std::size_t payload, bool terminus) {
     // Window-calibrated batches, per-op picoseconds, every window >= 20 µs (#1804). The
     // plateau calibrator this used let the machine pick the batch (#1358).
     const bench::batch_timing_t t =
-        bench::time_batches(deliver, static_cast<std::uint64_t>(budget_seconds() * 1e9));
+        bench::time_batches(deliver, static_cast<std::uint64_t>(budget * 1e9));
     const char* const mode = terminus ? "compact-terminus" : "compact-forward";
     bench::emit_batch("libtracer", mode, payload, 1, 1, t.ops_per_s, t.ops_per_s, 0.0, t);
     std::printf("NOTE mode=%s payload=%zu allocs=%zu bytes=%zu\n", mode, payload, allocs, bytes);
@@ -231,8 +235,19 @@ int main(int /*argc*/, char** argv) {
     bench::emit_clock_floor();         // the run's clock floor, ahead of its rows (#1804)
     std::printf("# Steady-state compacted delivery on a WARM binding (RFC-0004 §E.1 / ADR-0062)\n");
     for (const std::size_t p : kPayloadSizes) {
-        run_point(p, /*terminus=*/true);
-        run_point(p, /*terminus=*/false);
+        run_point(p, /*terminus=*/true, budget_seconds());
+        run_point(p, /*terminus=*/false, budget_seconds());
+    }
+    // The payload ladder (#1806), after every existing row: the sizes the sweep above does
+    // not have, at a quarter of the budget each, so the binary's wall-clock grows by about
+    // half rather than threefold. A quarter-second of 40 us windows is still thousands of
+    // samples.
+    for (const std::size_t p : bench::kPayloadLadder) {
+        if (std::find(std::begin(kPayloadSizes), std::end(kPayloadSizes), p) !=
+            std::end(kPayloadSizes))
+            continue;
+        run_point(p, /*terminus=*/true, budget_seconds() / 4);
+        run_point(p, /*terminus=*/false, budget_seconds() / 4);
     }
     return 0;
 }

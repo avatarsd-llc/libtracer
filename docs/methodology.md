@@ -273,7 +273,7 @@ Details that make these trustworthy:
   set, and the interleaved A/B remains their primary defence. The allocation-count
   instruments (the zero-alloc gate, the memory probes, the RAM censuses) are exempt —
   load cannot move a count.
-- The per-PR gate watches **twenty canonical points** — a representative slice of the
+- The per-PR gate watches **twenty-seven canonical points** — a representative slice of the
   fan-out / payload / topic sweeps plus a fold-width point, one per *gated* family
   (`inproc` and `inproc-borrow` share one), so a pullback on any of those legs is caught and
   not just the 1:1 write. They are **not** the whole dispatch surface, and this page should
@@ -301,7 +301,12 @@ Details that make these trustworthy:
   is the leg a wire `SUBSCRIBER` actually takes; and three **multi-threaded** rows at four
   threads, `inproc-mt4/64/1/4` (parallel dispatch, one graph per thread),
   `acl-inherit-d4-mt4/64/1/4` (ACL-gated reads under a shared ancestor) and
-  `poolalloc-mt4/64/1/1` (the thread-safe pool's alloc/free under contention).
+  `poolalloc-mt4/64/1/1` (the thread-safe pool's alloc/free under contention); and seven
+  **16 KiB payload-ladder** rows, one per data-path family
+  ([#1806](https://github.com/avatarsd-llc/libtracer/issues/1806)): `inproc/16384/1/1`,
+  `inproc-borrow/16384/1/1`, `lkv-store-heap/16384/1/1`, `lkv-store-pool/16384/1/1`,
+  `eptype-stream/16384/1/1`, `compact-forward/16384/1/1` and `fwd-demux-value/16384/1/1`
+  (the forward hop keyed by its VALUE payload rather than its frame size).
 
   The multi-threaded rows are timed in their own invocation (`--family-set multi`), after
   every single-threaded one, and that invocation is judged on **foreign CPU time only**
@@ -408,13 +413,14 @@ Details that make these trustworthy:
   `try_alloc` fires on every write — **does not exist**, and neither does one for the ring's
   resident bytes. Both are gaps in this page, not numbers it is withholding.
 
-  Four of the twenty come from OTHER bench binaries, and they are here because of what
+  Six of the twenty-seven come from OTHER bench binaries, and they are here because of what
   happened without them (#1173): `compact-forward` moved **+41%** across the v0.8.0 →
   v0.9.0 window while every gated point stayed flat, so the gate had nothing to object to.
   They are `compact-forward/64/1/1` and `compact-terminus/64/1/1` — the compact-delivery
   tier's forward hop and its terminus, from `bench_compact_delivery`; and
   `fwd-demux-fixed/61/1/1` and `fwd-demux-scan/61/64/64` — the fixed-slot and scanning
-  arms of the FWD demux, from `bench_forward_demux`. Each `POINTS` entry names the binary
+  arms of the FWD demux, from `bench_forward_demux`; plus the two 16 KiB ladder rows from
+  those binaries, named above. Each `POINTS` entry names the binary
   that produces it; every one of them emits the same 12-column `RESULT` format, so this
   costs two extra processes per arm per pair and no new parsing.
 
@@ -432,6 +438,31 @@ Details that make these trustworthy:
   best-of-3 estimator rejects a bad *sample* but not a bad *window*: a runner that goes
   slow for the whole of one arm's block produces a clean, reproducible, entirely false
   breach, and the majority-of-interleaved-pairs rule is what a window cannot fake.
+- **The payload ladder** ([#1806](https://github.com/avatarsd-llc/libtracer/issues/1806)).
+  Every data-path family is swept over 64 B, 984 B, 985 B, 1 KiB, 4 KiB, 16 KiB and 64 KiB:
+  `inproc`, `inproc-borrow`, the four `lkv-*` rows, `eptype-stream`, both `compact-*` arms
+  and `fwd-demux-value`. 984 and 985 B sit either side of the heap's one-block boundary (984 B
+  plus the 48 B segment header is glibc's 1032 B per-thread-cache ceiling). Rows a family
+  did not have before run after its existing rows, so no existing row moves. Above 8 KiB the
+  operation budget shrinks in proportion to the payload, and the `compact-*` and
+  `fwd-demux-value` ladder rows run at a quarter of their binary's time budget, so the
+  ladder adds seconds to a sweep rather than minutes. Only the 16 KiB rows are gated.
+- **The allocator-cliff family** ([#1806](https://github.com/avatarsd-llc/libtracer/issues/1806)).
+  `cliff-alloc-heap` and `cliff-alloc-pool` time one segment alloc/free, each family in its
+  own fresh process, at every size of the cliff ladder: 960–1096 B in steps of 8 plus 985 B,
+  and 2^k, 2^k − 48 and 2^k + 48 from 64 B to 64 KiB. They are batch rows (picosecond p50,
+  every window at least 20 µs). The gate reads every size twice: against main at the same
+  size (the paired rule above, at the p50 threshold), and against the next smaller size,
+  where a step of more than **1.75×** in the median and in a majority of pairs is a cliff.
+  A cliff fails only when main does not have it; one main has too is printed as a warning.
+  The exact half is the **segment-draw ratchet**: `bench_forward_heap` counts what one heap
+  segment asks the allocator for at every ladder size (draws, total bytes, largest block),
+  which is `mem_heap_request_size_test` promoted to a gate. No draw may pass the 1032 B
+  fast-path ceiling unless the payload alone does, and no count may grow against main.
+  Reverting the #1768 layout split fails it at 985 B (one 1033 B draw). The timed rows do
+  not, on this host: with glibc 2.39 a 1033 B request costs about as much as the split's two
+  cached draws in a fresh process, so the 2x step the v0.17.0 sweep showed does not appear
+  in an alloc-only row timed this way. The count is what holds the boundary.
 - Each arm's own spread across the pairs is printed, and the **baseline arm's worst
   spread is reported as the run's drift figure** — the baseline binary cannot be moved
   by the change under test, so its spread is the invariant control leg. It does not

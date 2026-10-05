@@ -17,6 +17,7 @@
  * `routers-hN` ROUTER-flood modes were retired with bridge_t — ADR-0040; FWD forward
  * cost is measured by bench_forward_heap.) See bench/README.md for the caveats.
  */
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
@@ -788,9 +789,11 @@ void run_inproc_mt(std::size_t T) {
 // lean / lean-cached reuse the existing inproc paths via run_inproc(), re-emitted
 // under the eptype-* tag (the original inproc / inproc-borrow lines still print too).
 
-/** @brief The STREAM-role class: time write+deliver where each write retains history. */
-void run_eptype_stream() {
-    constexpr std::size_t S = 64;
+/**
+ * @brief The STREAM-role class: time write+deliver where each write retains history.
+ * @param S The payload; 64 B is the gated reference row, the rest are the ladder (#1806).
+ */
+void run_eptype_stream(std::size_t S) {
     graph_t g;
     const path_t path = *path_t::parse("/bench/stream");
     auto v = g.register_vertex(path, role_t::STREAM);
@@ -803,8 +806,8 @@ void run_eptype_stream() {
     const std::vector<std::byte> tlv = value_tlv(S);
     const auto put = [&]() { (void)g.write(v, owned_view(tlv)); };  // heap view: lean parity
 
-    const std::size_t MSGS = publishes_for(1, kDeliveryBudget);
-    const std::size_t LATN = publishes_for(1, kLatencyDeliveryBudget);
+    const std::size_t MSGS = publishes_for(1, ladder_budget(S, kDeliveryBudget));
+    const std::size_t LATN = publishes_for(1, ladder_budget(S, kLatencyDeliveryBudget));
     for (std::size_t i = 0; i < 1000; ++i) put();  // warmup
 
     recv.store(0);
@@ -825,7 +828,10 @@ void run_eptype_stream() {
     emit("libtracer", "eptype-stream", S, 1, 1, pub_s, deliv_s, mb_s, lat.summarize());
 }
 
-/** @brief The full ep-type sweep: lean, lean-cached, stream — all at size=64 fan=1 ep=1. */
+/**
+ * @brief The full ep-type sweep: lean, lean-cached, stream — all at size=64 fan=1 ep=1 — then
+ *        the STREAM leg over the rest of the payload ladder (#1806).
+ */
 void run_eptype() {
     // No `-batch` twins (#553): these two re-emit `inproc` / `inproc-borrow` at the
     // reference point under an endpoint-type name, so their batch twins would be a
@@ -834,7 +840,7 @@ void run_eptype() {
                kLatencyDeliveryBudget, nullptr, false);
     run_inproc(kRefSize, 1, 1, alloc_t::BORROW, false, "eptype-lean-cached", kDeliveryBudget,
                kLatencyDeliveryBudget, nullptr, false);
-    run_eptype_stream();
+    for (std::size_t S : kPayloadLadder) run_eptype_stream(S);
 }
 
 /**
@@ -1112,14 +1118,16 @@ lkv_result_t run_lkv_store_alloc(std::size_t S, bool copy, tr::mem::mem_backend_
     rope_t src{borrowed_view(a)};
     src.append(borrowed_view(b));
 
-    constexpr std::size_t kIters = 200000;
+    // 200 000 iterations up to 8 KiB, as always; fewer above it (#1806), so a 64 KiB copy
+    // costs about what an 8 KiB one does.
+    const std::size_t iters = ladder_budget(S, 200000);
     std::size_t exhausted = 0;
     {
         const view_t warm = src.materialize(backend);
         (void)warm;
     }  // fault-in / warm caches
     const std::uint64_t t0 = now_ns();
-    for (std::size_t i = 0; i < kIters; ++i) {
+    for (std::size_t i = 0; i < iters; ++i) {
         if (copy) {
             const view_t flat = src.materialize(backend);  // alloc + payload memcpy
             if (flat.empty()) ++exhausted;                 // pool exhaustion == BACKPRESSURE
@@ -1135,7 +1143,7 @@ lkv_result_t run_lkv_store_alloc(std::size_t S, bool copy, tr::mem::mem_backend_
         }
     }
     const double secs = static_cast<double>(now_ns() - t0) / 1e9;
-    const double ops = secs > 0 ? kIters / secs : 0;
+    const double ops = secs > 0 ? iters / secs : 0;
     // ONE metric (#1804): the whole loop is timed as one block, so there is exactly one
     // measurement here — operations per second. It used to be published three ways (as
     // throughput, and as a p50 and a mean that were both `1e9 / ops` truncated to whole
@@ -1145,9 +1153,9 @@ lkv_result_t run_lkv_store_alloc(std::size_t S, bool copy, tr::mem::mem_backend_
     // fix either: an alloc+free costs the same order as `clock_gettime`.
     const Latency::Summary lat{};
     // Bandwidth only means something for the copy arm. The alloc-only arm moves NO
-    // payload — it takes a block and gives it back — so reporting kIters*S/secs there
+    // payload — it takes a block and gives it back — so reporting iters*S/secs there
     // published a fabricated figure (a "151 GB/s" zero-copy allocation).
-    const double mb_per_s = copy ? static_cast<double>(kIters) * S / (secs * 1e6) : 0.0;
+    const double mb_per_s = copy ? static_cast<double>(iters) * S / (secs * 1e6) : 0.0;
     emit("libtracer", mode, S, 1, 1, ops, ops, mb_per_s, lat);
     return {ops, exhausted};
 }
@@ -1175,11 +1183,25 @@ void run_lkv_store_rows() {
     constexpr std::size_t kSlabBytes = kSlots * (sizeof(tr::view::segment_t) + kSlot + 64);
     alignas(64) static std::byte slab[kSlabBytes];
     tr::mem::pool_t pool(std::span<std::byte>(slab, kSlabBytes), kSlot, 64);
-    for (std::size_t S : {std::size_t{64}, std::size_t{1024}}) {
+    // The payload ladder's larger values (#1806) need a slot of 64 KiB; four slots are enough
+    // for a loop that keeps one segment live. A separate pool, so the 2 KB-slot rows above
+    // keep the exact slot layout their history was recorded on.
+    constexpr std::size_t kBigSlot = 65536, kBigSlots = 4;
+    constexpr std::size_t kBigSlabBytes = kBigSlots * (sizeof(tr::view::segment_t) + kBigSlot + 64);
+    alignas(64) static std::byte big_slab[kBigSlabBytes];
+    tr::mem::pool_t big_pool(std::span<std::byte>(big_slab, kBigSlabBytes), kBigSlot, 64);
+    // 64 B and 1 KiB first, in their historical order; then the rest of the ladder.
+    std::vector<std::size_t> sizes{64, 1024};
+    for (std::size_t S : kPayloadLadder)
+        if (S != 64 && S != 1024) sizes.push_back(S);
+    for (std::size_t S : sizes) {
+        tr::mem::mem_backend_t& pooled = S <= kSlot
+                                             ? static_cast<tr::mem::mem_backend_t&>(pool)
+                                             : static_cast<tr::mem::mem_backend_t&>(big_pool);
         const lkv_result_t ha = run_lkv_store_alloc(S, false, heap, "lkv-alloc-heap");
-        const lkv_result_t pa = run_lkv_store_alloc(S, false, pool, "lkv-alloc-pool");
+        const lkv_result_t pa = run_lkv_store_alloc(S, false, pooled, "lkv-alloc-pool");
         run_lkv_store_alloc(S, true, heap, "lkv-store-heap");
-        run_lkv_store_alloc(S, true, pool, "lkv-store-pool");
+        run_lkv_store_alloc(S, true, pooled, "lkv-store-pool");
         const double ratio = ha.ops_per_s > 0 ? pa.ops_per_s / ha.ops_per_s : 0.0;
         // Reported, not judged (#1695): speed is not the pool's acceptance criterion, and the
         // ratio moves with the host allocator (1.4x-6.5x at 64 B on healthy code).
@@ -1231,6 +1253,69 @@ void run_lkv_aged() {
         run_lkv_store_alloc(S, false, heap, "lkv-alloc-heap-aged");
         run_lkv_store_alloc(S, true, heap, "lkv-store-heap-aged");
     }
+}
+
+/**
+ * @brief One cliff row per size: a segment allocated from @p backend and returned, nothing
+ *        else (#1806).
+ *
+ * The operation is the `lkv-alloc-*` one, `backend.alloc(S)` then `destroy` through the owning
+ * `segment_ptr_t`, but timed through @ref bench::time_batches: an alloc/free costs 10-40 ns,
+ * which a per-operation clock read cannot resolve and a single bulk window reports as one
+ * figure. Each row is a batch row (p50 and mean of the window means, in ns to the picosecond;
+ * no p99). The family runs in its own fresh process, so the first row sees an unaged heap and
+ * every later row sees only what the rows below it in size left behind.
+ *
+ * The gate reads each row twice: against main at the same size, and against the next smaller
+ * size (`perf_gate.py`'s cliff check), so a new size-class cliff fails at whatever size it
+ * appears; one main already has is reported, not failed.
+ *
+ * @param backend The backend under test: the process heap or a pool with a 64 KiB slot.
+ * @param mode    The row's mode: `cliff-alloc-heap` or `cliff-alloc-pool`.
+ */
+void run_cliff(tr::mem::mem_backend_t& backend, const char* mode) {
+    constexpr std::uint64_t kCliffBudgetNs = 20'000'000;  // 20 ms: ~500 windows of 40 us
+    // The header is computed the way the heap backend computes it, not read from the #1768
+    // trait, so the ladder is the same on a build that predates that trait or reverts it.
+    constexpr std::size_t kHeader =
+        tr::mem::segment_header_bytes(tr::mem::heap_backend_t::kBlockAlign);
+    for (std::size_t S : bench::cliff_sizes(kHeader)) {
+        std::size_t exhausted = 0;
+        const auto op = [&] {
+            tr::view::segment_t* const seg = backend.alloc(S);
+            if (seg == nullptr) {
+                ++exhausted;
+                return;
+            }
+            const tr::view::segment_ptr_t p = tr::view::segment_ptr_t::adopt(seg);
+        };
+        const bench::batch_timing_t t = bench::time_batches(op, kCliffBudgetNs);
+        bench::emit_batch("libtracer", mode, S, 1, 1, t.ops_per_s, t.ops_per_s, 0.0, t);
+        if (exhausted != 0)
+            std::printf("WARN mode=%s size=%zu: %zu allocations failed\n", mode, S, exhausted);
+    }
+}
+
+/**
+ * @brief The cliff family on the process-default heap backend (`cliff-alloc-heap`).
+ *
+ * Fresh heap only. A fenced, aged variant was tried and dropped: on the reference host
+ * (glibc 2.39) a request past the per-thread-cache ceiling costs about 6 ns more than a cache
+ * hit in a fresh heap and in a fenced one alike, so a second set of 49 rows bought no
+ * coverage. The `lkv-*-heap-aged` rows keep an aged heap state for the 64 B and 1 KiB rows.
+ */
+void family_cliff_heap() { run_cliff(tr::mem::heap_backend(), "cliff-alloc-heap"); }
+
+/**
+ * @brief The cliff family on a pool (`cliff-alloc-pool`): one 64 KiB slot fits every size, so
+ *        the row should be flat across the ladder; a step in it is a pool regression.
+ */
+void family_cliff_pool() {
+    constexpr std::size_t kSlot = 65536 + 64, kSlots = 4;
+    constexpr std::size_t kSlabBytes = kSlots * (sizeof(tr::view::segment_t) + kSlot + 64);
+    alignas(64) static std::byte slab[kSlabBytes];
+    tr::mem::pool_t pool(std::span<std::byte>(slab, kSlabBytes), kSlot, 64);
+    run_cliff(pool, "cliff-alloc-pool");
 }
 
 }  // namespace
@@ -1502,12 +1587,21 @@ void family_inproc_fan() {
 void family_inproc_size() {
     for (std::size_t S : kSizes)
         run_inproc(S, kRefFanout, kRefEndpoints, alloc_t::HEAP, false, "inproc");
+    // The payload ladder's rows above and around 1 KiB (#1806), after every existing row.
+    for (std::size_t S : bench::ladder_extra())
+        run_inproc(S, kRefFanout, kRefEndpoints, alloc_t::HEAP, false, "inproc",
+                   bench::ladder_budget(S, kDeliveryBudget),
+                   bench::ladder_budget(S, kLatencyDeliveryBudget));
 }
 
 /** @brief `inproc-borrow` payload sweep (gated `inproc-borrow/64/1/1`). */
 void family_inproc_borrow() {
     for (std::size_t S : kSizes)
         run_inproc(S, kRefFanout, kRefEndpoints, alloc_t::BORROW, false, "inproc-borrow");
+    for (std::size_t S : bench::ladder_extra())  // the payload ladder (#1806)
+        run_inproc(S, kRefFanout, kRefEndpoints, alloc_t::BORROW, false, "inproc-borrow",
+                   bench::ladder_budget(S, kDeliveryBudget),
+                   bench::ladder_budget(S, kLatencyDeliveryBudget));
 }
 
 /** @brief `inproc-path` topic-count sweep, write by path (gated `inproc-path/64/1/8192`). */
@@ -1595,6 +1689,8 @@ struct bench_family_t {
  *     gated).
  *   - `target` is the PATH-TARGET fan-out (#619), the leg a wire `SUBSCRIBER` takes.
  *   - `lkv-aged` (#1803) is new and appended last: the `lkv-*-heap` rows on an aged heap.
+ *   - `cliff-heap` and `cliff-pool` (#1806) come after it: alloc-only rows over the
+ *     allocator-cliff ladder (`bench::cliff_sizes`), one family per backend.
  *
  * The SET column splits the sweep for the perf gate's measurement-condition check. A MULTI
  * family runs T workers on the pinned CPUs while its main thread spins waiting for them, so
@@ -1626,6 +1722,8 @@ constexpr bench_family_t kFamilies[] = {
     {"target", run_mode_target, family_set_t::SINGLE},
     {"inproc-fan-mid", family_inproc_fan_mid, family_set_t::SINGLE},
     {"lkv-aged", run_lkv_aged, family_set_t::SINGLE},
+    {"cliff-heap", family_cliff_heap, family_set_t::SINGLE},
+    {"cliff-pool", family_cliff_pool, family_set_t::SINGLE},
 };
 
 /**

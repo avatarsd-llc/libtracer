@@ -179,6 +179,30 @@ class RowsAboveOneKibAreVisible(_NoGit):
         self.assertEqual(pvs, [float(s) for s in SIZES])
 
 
+class LadderFamiliesAreCharted(_NoGit):
+    """@brief Every #1806 ladder and cliff family charts its rows above 1 KiB, the gated
+    16 KiB point included, one line per size."""
+
+    LADDER = (64, 1024, 4096, 16384, 65536)
+
+    def test_each_family_has_a_line_per_size(self):
+        modes = {"eptype-stream-payload": "eptype-stream", "demux-value": "fwd-demux-value",
+                 "cliff-heap": "cliff-alloc-heap", "cliff-pool": "cliff-alloc-pool",
+                 "compact-forward": "compact-forward", "borrow-payload": "inproc-borrow",
+                 "payload": "inproc"}
+        benches = [{"name": f"{mode} {size}B/fan1/1ep p50 latency", "value": 10.0 + size / 64,
+                    "unit": "ns", "extra": "h"}
+                   for mode in modes.values() for size in self.LADDER]
+        store = {"entries": {"libtracer latency (ns, smaller is better)": [
+            {"commit": {"id": c * 40, "message": f"commit {c}"}, "benches": benches}
+            for c in ("a", "b")]}}
+        charts = {c["id"]: c for c in rh.build(store, {}, same_pass=True)["charts"]}
+        for fam in modes:
+            self.assertIn(fam, charts, f"{fam} draws no chart")
+            pvs = sorted({s["pv"] for s in charts[fam]["series"]})
+            self.assertEqual(pvs, [float(s) for s in self.LADDER], fam)
+
+
 def _sweep_store() -> dict:
     """@brief Three commits of the banked fan and payload sweeps, both engines, both suites.
 
