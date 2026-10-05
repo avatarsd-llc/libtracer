@@ -915,9 +915,9 @@ class vertex_t {
      *         allocated, from @p src, only if this identity needs one (#361 §1).
      *
      *  The graph builds every vertex as a handler-less placeholder (no allocation) and
-     *  installs an identity through @ref fill, whose refusal is a value. A standalone vertex
-     *  built WITH handlers whose @p src refuses the extension block stops the node
-     *  (`mem::exhausted_at_init`): a constructor has no other way to answer. */
+     *  installs an identity through `%fill`, whose refusal is a value. A standalone
+     * vertex built WITH handlers whose @p src refuses the extension block stops the node
+     *  (`%mem::exhausted_at_init`): a constructor has no other way to answer. */
     vertex_t(role_t role, path_key_t name, handlers_t handlers,
              tr::mem::block_source_t& src = tr::mem::table_source())
         : name_(std::move(name)), role_(role) {
@@ -2733,9 +2733,9 @@ class vertex_t {
      *        self-description) — or store nothing, if the field retains nothing (`wo`, or
      *        declared @ref retention_t::NONE; RFC-0028 §5.4). The caller's apply seam fires
      *        either way.
-     * @return @ref app_store_t::UNDECLARED iff @p name is not declared (e.g. a concurrent
+     * @return `%app_store_t::UNDECLARED` iff @p name is not declared (e.g. a concurrent
      *         table replacement removed it between the caller's gate and this store), and
-     *         @ref app_store_t::REFUSED when the table source could not hold the bytes
+     *         `%app_store_t::REFUSED` when the table source could not hold the bytes
      *         (#1778) — the field keeps its previous bytes.
      */
     [[nodiscard]] app_store_t app_field_store(std::string_view name,
