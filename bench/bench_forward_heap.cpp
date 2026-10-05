@@ -585,7 +585,7 @@ int lkv_route_gate() {
  */
 void segment_draw_rows() {
     constexpr std::size_t kHeader =
-        tr::view::segment_header_bytes(tr::mem::heap_backend_t::kBlockAlign);
+        tr::mem::segment_header_bytes(tr::mem::heap_backend_t::kBlockAlign);
     for (const std::size_t size : bench::cliff_sizes(kHeader)) {
         const lkv_route_t r = lkv_route_window(tr::mem::heap_backend(), size, 1);
         std::printf("RESULT segdraw S=%zu draws=%zu bytes=%zu max_block=%zu\n", size, r.heap.allocs,

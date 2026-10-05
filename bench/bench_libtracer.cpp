@@ -1278,7 +1278,7 @@ void run_cliff(tr::mem::mem_backend_t& backend, const char* mode) {
     // The header is computed the way the heap backend computes it, not read from the #1768
     // trait, so the ladder is the same on a build that predates that trait or reverts it.
     constexpr std::size_t kHeader =
-        tr::view::segment_header_bytes(tr::mem::heap_backend_t::kBlockAlign);
+        tr::mem::segment_header_bytes(tr::mem::heap_backend_t::kBlockAlign);
     for (std::size_t S : bench::cliff_sizes(kHeader)) {
         std::size_t exhausted = 0;
         const auto op = [&] {
