@@ -35,10 +35,12 @@
  */
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 
+#include "libtracer/mem_source.hpp"
 #include "libtracer/tracer.hpp"
 
 namespace bench {
@@ -109,5 +111,38 @@ namespace bench {
                      static_cast<unsigned long long>(want));
     return static_cast<double>(got) / secs;
 }
+
+/**
+ * @brief The STREAM vertex every STREAM row writes to: depth 16, one counting edge.
+ *
+ * `eptype-stream`, `stream-w<T>`, `stream-spill` and `stream-defer` all write here, and all
+ * publish the delivery rate from @ref recv, never from their write count (#1805). It lives in
+ * this header so `test_delivery_count` builds the same topology with a ring source that
+ * refuses, sheds every entry on purpose, and checks that the counted rate falls with it.
+ */
+struct stream_fixture_t {
+    tr::graph::graph_t g;               /**< @brief The graph, on the default source. */
+    tr::graph::vertex_handle_t v;       /**< @brief The STREAM vertex. */
+    std::atomic<std::uint64_t> recv{0}; /**< @brief Deliveries the subscriber saw. */
+
+    /**
+     * @brief Register `/bench/stream`, a 16-deep ring and one counting subscriber.
+     * @param ring_source The ring's own source; null (every bench row) keeps the graph's
+     *                    default. The self-test passes one that refuses, to force a shed.
+     */
+    explicit stream_fixture_t(tr::mem::block_source_t* ring_source = nullptr)
+        : v(g.register_vertex(*tr::graph::path_t::parse("/bench/stream"),
+                              tr::graph::role_t::STREAM)) {
+        (void)g.set_policy(
+            v, {.retention = tr::graph::retention_t::N, .depth = 16, .ring_source = ring_source});
+        (void)g.subscribe(
+            *tr::graph::path_t::parse("/bench/stream"),
+            [](void* c, const tr::graph::value_t&) {
+                static_cast<std::atomic<std::uint64_t>*>(c)->fetch_add(1,
+                                                                       std::memory_order_relaxed);
+            },
+            &recv);
+    }
+};
 
 }  // namespace bench

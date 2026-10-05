@@ -8,7 +8,7 @@
  * Sweeps the matrix:
  *   - fan-out   1/8/128/1024/8192 subscribers on one endpoint (dispatch scaling), plus the
  *               mid arms 16/32/64/256/512 on `inproc` (#844 — `kFanoutsMid`)
- *   - payload   1..8192 bytes (per-byte cost), heap-alloc vs borrowed (zero-alloc)
+ *   - payload   1..8192 bytes (per-byte cost), heap-alloc vs borrowed (no payload copy)
  *   - endpoints 1..8192 distinct topics, write BY PATH (registry/lookup scaling)
  *   - mixed     128 topics, varied fan-out + payloads
  * Module compositions are surfaced as distinct `mode`s (inproc / inproc-borrow /
@@ -88,7 +88,12 @@ view_t owned_view(std::span<const std::byte> bytes) {
     return view_t::over(std::move(seg));
 }
 
-/** @brief Borrowed view over a stable buffer — zero alloc, zero copy (refcount handoff). */
+/**
+ * @brief Borrowed view over a stable buffer: no payload copy, but not allocation-free.
+ *
+ * `borrow_const` allocates the segment header that points at the buffer, and the write then
+ * stores a block for the value, so a borrowed write still makes two allocations (#1805).
+ */
 view_t borrowed_view(std::span<const std::byte> bytes) {
     return view_t::over(tr::view::borrow_const(bytes));
 }
@@ -148,6 +153,13 @@ void emit_batch_row(const char* mode, std::size_t S, std::size_t F, std::size_t 
  * `by_path`
  * writes through the path registry (lookup each publish) instead of the resolved
  * vertex_handle_t hot path — the honest "many topics" measurement.
+ *
+ * **What a HEAP row times includes the producer.** Each timed op builds the value it writes
+ * (`owned_view`: one segment allocation and an S-byte copy) and then writes it, so above
+ * 1 KiB part of the size slope is the producer's copy, not the library's. It stays inside the
+ * timed region on purpose (#1805): the Zenoh rows these are drawn against copy the payload on
+ * `put` too, and the history keyed `inproc` was recorded with it. The labels on the page and
+ * in `docs/methodology.md` say so; `inproc-borrow` is the row without the copy.
  */
 void run_inproc(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc, bool by_path,
                 const char* mode, std::uint64_t budget = kDeliveryBudget,
@@ -656,14 +668,19 @@ void run_mixed() {
     constexpr std::size_t MSGS = 100000;
     for (std::size_t i = 0; i < 1000; ++i) (void)g.write(verts[i % E], owned_view(tlvs[i % E]));
 
-    std::uint64_t deliveries = 0;
+    // `want` is the arithmetic ceiling, summed outside the timed loop; the published figure is
+    // what the subscribers COUNTED (#1805).
+    std::uint64_t want = 0;
+    for (std::size_t i = 0; i < MSGS; ++i) want += fan[i % E];
+    recv.store(0);
     const auto t0 = now_ns();
     for (std::size_t i = 0; i < MSGS; ++i) {
         const std::size_t e = i % E;
         (void)g.write(verts[e], owned_view(tlvs[e]));
-        deliveries += fan[e];
     }
     const double secs = (now_ns() - t0) / 1e9;
+    const double deliv_s = delivered_rate("mixed", 0, total_fan / E, E, want,
+                                          recv.load(std::memory_order_relaxed), secs);
 
     constexpr std::size_t kMixedLatN = 20000;
     Latency lat;
@@ -674,8 +691,7 @@ void run_mixed() {
         (void)g.write(verts[e], owned_view(tlvs[e]));
         lat.add(now_ns() - a);
     }
-    emit("libtracer", "mixed", 0, total_fan / E, E, MSGS / secs, deliveries / secs, 0.0,
-         lat.summarize());
+    emit("libtracer", "mixed", 0, total_fan / E, E, MSGS / secs, deliv_s, 0.0, lat.summarize());
 }
 
 /**
@@ -743,8 +759,14 @@ void run_inproc_mt(std::size_t T) {
     for (auto& th : threads) th.join();
     const double secs = (now_ns() - t0) / 1e9;
 
-    const double pub_s = static_cast<double>(T) * MSGS / secs;  // F=1 => deliv==pub
-    const double deliv_s = pub_s;
+    const double pub_s = static_cast<double>(T) * MSGS / secs;
+    // COUNTED (#1805): each worker's subscriber counted its own deliveries, reset before the
+    // release, so the sum is what the throughput phase delivered across every graph.
+    std::uint64_t got = 0;
+    for (const auto& w : ws) got += w->recv.load(std::memory_order_relaxed);
+    const std::string mode = "inproc-mt" + std::to_string(T);
+    const double deliv_s =
+        delivered_rate(mode.c_str(), S, 1, T, static_cast<std::uint64_t>(T) * MSGS, got, secs);
     const double mb_s = deliv_s * static_cast<double>(S) / 1e6;
 
     // --- Latency phase: per-op timing under the same parallel load. ---
@@ -777,7 +799,6 @@ void run_inproc_mt(std::size_t T) {
     for (auto& w : ws)
         for (std::uint64_t ns : w->lat) lat.add(ns);
 
-    const std::string mode = "inproc-mt" + std::to_string(T);
     emit("libtracer", mode.c_str(), S, 1, T, pub_s, deliv_s, mb_s, lat.summarize());
 }
 
@@ -788,8 +809,8 @@ void run_inproc_mt(std::size_t T) {
 //   eptype-lean        minimal sink: a plain in-process write+deliver to a
 //                      STORED_VALUE vertex, heap-allocated view per publish.
 //                      Same path as the existing `inproc` mode.
-//   eptype-lean-cached the zero-alloc loaned / out_cache read path: a borrowed view
-//                      (zero alloc, zero copy — a refcount handoff). Same path as
+//   eptype-lean-cached the loaned / out_cache path: a borrowed view (no payload copy;
+//                      a segment header and a stored-value block per write). Same path as
 //                      the existing `inproc-borrow` mode.
 //   eptype-stream      a STREAM-role vertex: each write appends to the bounded
 //                      history ring (retention work) *then* fans out — strictly more
@@ -807,28 +828,24 @@ void run_inproc_mt(std::size_t T) {
  * @param S The payload; 64 B is the gated reference row, the rest are the ladder (#1806).
  */
 void run_eptype_stream(std::size_t S) {
-    graph_t g;
-    const path_t path = *path_t::parse("/bench/stream");
-    auto v = g.register_vertex(path, role_t::STREAM);
-    (void)g.set_policy(v, {.retention = tr::graph::retention_t::N,
-                           .depth = 16});  // a real bounded ring: retention work on every write
-    std::atomic<std::uint64_t> recv{0};
-    auto cb = [&](const tr::graph::value_t&) { recv.fetch_add(1, std::memory_order_relaxed); };
-    (void)g.subscribe(path, cb);
-
+    // The same fixture as the #1808 STREAM rows: a 16-deep ring, one counting subscriber.
+    stream_fixture_t fx;
     const std::vector<std::byte> tlv = value_tlv(S);
-    const auto put = [&]() { (void)g.write(v, owned_view(tlv)); };  // heap view: lean parity
+    const auto put = [&]() { (void)fx.g.write(fx.v, owned_view(tlv)); };  // heap view: lean parity
 
     const std::size_t MSGS = publishes_for(1, ladder_budget(S, kDeliveryBudget));
     const std::size_t LATN = publishes_for(1, ladder_budget(S, kLatencyDeliveryBudget));
     for (std::size_t i = 0; i < 1000; ++i) put();  // warmup
 
-    recv.store(0);
+    fx.recv.store(0);
     const auto t0 = now_ns();
     for (std::size_t i = 0; i < MSGS; ++i) put();
     const double secs = (now_ns() - t0) / 1e9;
     const double pub_s = MSGS / secs;
-    const double deliv_s = pub_s;  // fan=1 => one delivery per publish
+    // COUNTED at the subscriber (#1805). A best-effort ring that cannot fund an entry sheds
+    // it and `write()` still succeeds, so `pub_s` was a claim that held only while nothing shed.
+    const double deliv_s = delivered_rate("eptype-stream", S, 1, 1, MSGS,
+                                          fx.recv.load(std::memory_order_relaxed), secs);
     const double mb_s = deliv_s * static_cast<double>(S) / 1e6;
 
     Latency lat;
@@ -1144,6 +1161,9 @@ lkv_result_t run_lkv_store_alloc(std::size_t S, bool copy, tr::mem::mem_backend_
         if (copy) {
             const view_t flat = src.materialize(backend);  // alloc + payload memcpy
             if (flat.empty()) ++exhausted;                 // pool exhaustion == BACKPRESSURE
+            // Kept (#1805): nothing reads the copy, so without this the memcpy into a block
+            // freed at once is a dead store the optimizer may drop with its alloc/free pair.
+            bench::do_not_optimize(flat);
             // `flat` drops here → segment_ptr_t release → backend.destroy (1 free).
         } else {
             tr::view::segment_t* seg = backend.alloc(S);  // the allocation alone
@@ -1151,6 +1171,7 @@ lkv_result_t run_lkv_store_alloc(std::size_t S, bool copy, tr::mem::mem_backend_
                 ++exhausted;
             } else {
                 const tr::view::segment_ptr_t p = tr::view::segment_ptr_t::adopt(seg);
+                bench::do_not_optimize(p);  // an unread alloc/free pair is elidable (#1805)
                 // `p` drops here → release → backend.destroy (1 free).
             }
         }
@@ -1332,25 +1353,6 @@ void family_cliff_pool() {
 }
 
 // --- rows for the logic that changed and is coming (#1808) ---------------------------------
-
-/** @brief The STREAM vertex every #1808 STREAM row writes to: depth 16, one counting edge. */
-struct stream_fixture_t {
-    graph_t g;                          /**< @brief The graph, on the process-default source. */
-    vertex_handle_t v;                  /**< @brief The STREAM vertex. */
-    std::atomic<std::uint64_t> recv{0}; /**< @brief Deliveries the one subscriber saw. */
-
-    /** @brief Register `/bench/stream`, a 16-deep ring and one counting subscriber. */
-    stream_fixture_t() : v(g.register_vertex(*path_t::parse("/bench/stream"), role_t::STREAM)) {
-        (void)g.set_policy(v, {.retention = tr::graph::retention_t::N, .depth = 16});
-        (void)g.subscribe(
-            *path_t::parse("/bench/stream"),
-            [](void* c, const tr::graph::value_t&) {
-                static_cast<std::atomic<std::uint64_t>*>(c)->fetch_add(1,
-                                                                       std::memory_order_relaxed);
-            },
-            &recv);
-    }
-};
 
 /** @brief Entries one spill cycle queues ahead of its write: two past the in-frame slots. */
 constexpr std::size_t kSpillBacklog = tr::graph::vertex_t::ring_take_t::kInline + 2;
@@ -1616,6 +1618,31 @@ void family_inproc_pool_batch() {
                         kDeliveryBudget, kLatencyDeliveryBudget, rows_t::BATCH);
 }
 
+/**
+ * @brief `dce-canary` (#1805): proof that this build still times the work its rows name.
+ *
+ * Two rows, `dce-canary/8` and `dce-canary/64` (the size column is the chain's step count):
+ * a dependent mixing chain kept only by @ref bench::do_not_optimize, the clobber every timed
+ * sink in this file relies on, timed through @ref bench::time_batches like every batch row.
+ * Kept work takes about 8x longer at 64 steps; deleted work does not. If the long chain does
+ * not take at least 4x the short one, the family exits 2 and the sweep fails, because every
+ * sink that uses the same clobber is then suspect too.
+ */
+void family_dce_canary() {
+    const bench::dce_canary_t c = bench::measure_dce_canary(100'000'000ULL);
+    bench::emit_batch("libtracer", "dce-canary", bench::kDceSmallK, 1, 1, c.small.ops_per_s, 0.0,
+                      0.0, c.small);
+    bench::emit_batch("libtracer", "dce-canary", bench::kDceBigK, 1, 1, c.big.ops_per_s, 0.0, 0.0,
+                      c.big);
+    if (!c.holds) {
+        std::fprintf(stderr,
+                     "DCE-CANARY FAIL: %zu steps %.3f ns, %zu steps %.3f ns — the measured work "
+                     "was optimized away\n",
+                     bench::kDceSmallK, c.small.p50_ps / 1e3, bench::kDceBigK, c.big.p50_ps / 1e3);
+        std::exit(2);
+    }
+}
+
 }  // namespace
 
 /**
@@ -1730,6 +1757,7 @@ void run_path_parse() {
             [&] {
                 const auto p = tr::graph::path_t::parse(a);
                 sink += p.has_value() ? p->segment_count() : 0;
+                bench::do_not_optimize(p);  // the parsed path, not only its count (#1805)
             },
             kBudgetNs);
         if (sink == 0) std::printf("WARN path-parse produced nothing\n");
@@ -1875,10 +1903,16 @@ constexpr bench_mode_t kModes[] = {
  * pinned allocator tunables, so no family inherits the heap another one aged.
  */
 
-/** @brief `inproc` fan-out sweep at the reference payload (gated `inproc/64/1024/1`). */
+/**
+ * @brief `inproc` fan-out sweep at the reference payload (gated `inproc/64/1024/1`).
+ *
+ * Starts past fan-out 1 (#1805): `inproc/64/1/1` is the payload sweep's reference row, and
+ * this family used to print it too, so the gate and the history medianed two processes' runs
+ * of one point under one key. The `fan` A/B mode still runs the whole ladder.
+ */
 void family_inproc_fan() {
     for (std::size_t F : kFanouts)
-        run_inproc(kRefSize, F, kRefEndpoints, alloc_t::HEAP, false, "inproc");
+        if (F != kRefFanout) run_inproc(kRefSize, F, kRefEndpoints, alloc_t::HEAP, false, "inproc");
 }
 
 /** @brief `inproc` payload sweep at the reference fan-out (gated `inproc/64/1/1`). */
@@ -1993,6 +2027,7 @@ struct bench_family_t {
  *     (1, 2 and 4 writers on one STREAM vertex), `route-handle` (the egress reuse read at
  *     T = 1, 2, 4), `alloc-seam` (class selection and the upstream fallback) and
  *     `inproc-pool-batch` (the window-calibrated twin of the `inproc-pool` rows).
+ *   - `dce-canary` (#1805) is last: two rows proving the sink clobber still keeps timed work.
  *
  * The SET column splits the sweep for the perf gate's measurement-condition check. A MULTI
  * family runs T workers on the pinned CPUs while its main thread spins waiting for them, so
@@ -2031,6 +2066,7 @@ constexpr bench_family_t kFamilies[] = {
     {"route-handle", family_route_handle, family_set_t::MULTI},
     {"alloc-seam", run_alloc_seam, family_set_t::SINGLE},
     {"inproc-pool-batch", family_inproc_pool_batch, family_set_t::SINGLE},
+    {"dce-canary", family_dce_canary, family_set_t::SINGLE},
 };
 
 /**

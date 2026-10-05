@@ -93,6 +93,14 @@ int main() {
     expect(s.min_window_ns >= bench::kMinBatchWindowNs, "every kept window clears the floor");
     expect(s.samples == bench::kMinBatchSamples, "samples restart at the recovered batch");
 
+    // The `dce-canary` verdict (#1805): kept work scales with its length, deleted work does not.
+    expect(bench::dce_canary_holds(10'000, 75'000, 8, 64), "a 7.5x ratio on 8x work holds");
+    expect(!bench::dce_canary_holds(300, 310, 8, 64), "a collapsed ratio (deleted work) fails");
+    expect(!bench::dce_canary_holds(0, 0, 8, 64), "a zero reading fails, never divides");
+    // ...and the real canary, timed the way the bench row times it, holds on this build.
+    const bench::dce_canary_t dce = bench::measure_dce_canary(5'000'000ULL);
+    expect(dce.holds, "the dce-canary chains scale with their length");
+
     const bench::clock_floor_t f = bench::measure_clock_floor();
     expect(f.res_ns > 0.0, "clock_getres reports a resolution");
     expect(f.sample_ns > 0.0, "a timed sample costs something");

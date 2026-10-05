@@ -69,8 +69,11 @@ publishes per second). It sweeps three axes independently:
 
 Several named *modes* isolate distinct costs on the same axes:
 
-- `inproc` — the full write (store + notify + deliver);
-- `inproc-borrow` — the zero-alloc loaned-view path;
+- `inproc` — the full write (store + notify + deliver), **including the producer's own
+  work**: each op allocates a segment and copies the payload into it before the write, so
+  above 1 KiB part of the size slope is the producer's copy, not the library's;
+- `inproc-borrow` — the loaned-view path: no payload copy, but **not** allocation-free —
+  each write allocates a segment header for the borrow and the block the vertex stores;
 - `inproc-deliver` — deliver-only (`propagate`), value stored once;
 - `inproc-path` — **write-by-path**, resolving the registry on *every* write. This
   is a deliberate **resolver canary**, not a hot pattern: real code resolves a path
@@ -112,6 +115,16 @@ heap, aged by every row ahead of them, so a row's value partly depended on its p
 the sweep. A heap state that matters is now a named row instead: `lkv-*-heap` runs on a
 fresh heap and `lkv-*-heap-aged` on a deliberately fragmented one
 ([#1803](https://github.com/avatarsd-llc/libtracer/issues/1803)).
+
+**Counted, kept and listed once.** Every delivery rate in this sweep is counted at the
+receiver, never computed as publishes × fan-out: `eptype-stream`, `mixed` and
+`inproc-mt*` were the last rows that computed it, and a STREAM ring that sheds an entry
+still lets `write()` succeed, so only a count can show the shed. Timed results that
+nothing reads (the `lkv-*` copy, the `path-parse` result) pass through an empty `asm`
+clobber so the compiler cannot delete the work, and the `dce-canary` family checks that
+the clobber still works: a dependent chain eight times longer must time at least four
+times longer, or the run fails. Each key is emitted once: `inproc/64/1/1` comes from the
+payload sweep only ([#1805](https://github.com/avatarsd-llc/libtracer/issues/1805)).
 
 ### 3 · Memory footprint (allocations counted, not sampled)
 
@@ -827,7 +840,7 @@ it has to price the move on the bench before the pin is allowed to move with it.
 ## Reading the numbers (noise & variance)
 
 - **Runner lottery.** Shared CI runners vary ~2× in absolute speed. **The tell:** a
-  move that hits *every* series at once — including unrelated ones like the pure-codec
+  move that hits *every* series at once — including unrelated ones like the L0 rope-walk
   `fold-b*` rows — is the runner; a move confined to one family is the code. Read
   trends across several commits, not the third digit of one point.
 - **Per-point noise floor.** Each recorded point is the **median of the repeated
@@ -879,7 +892,7 @@ it has to price the move on the bench before the pin is allowed to move with it.
   moves both. When only the bulk timer moves and both latency legs come back
   flat-or-better, the two instruments contradict each other, and the gate reports the
   contradiction rather than failing on it. This is not hypothetical: one PR that touched
-  only L4 was failed at −33 % throughput on an L0 codec point it has no call path to,
+  only L4 was failed at −33 % throughput on an L0 rope-walk point it has no call path to,
   with p50 identical and the mean *better*. The guard is deliberately narrow — any
   upward move in either latency leg, of any size, leaves the failure standing.
 - **Sign conventions in the history store.** The latency suite is
@@ -907,8 +920,12 @@ it has to price the move on the bench before the pin is allowed to move with it.
   contamination diagnostic.** Contamination is one-sided: a busy neighbour can only
   make a round slower, never faster. A low order statistic across an arm's rounds
   therefore rejects a dirty round, while the median merely counts them, and the median
-  flips as soon as half the rounds are dirty — which is why the gate estimates
-  best-of-N and why an ad-hoc driver must too. Measured on the pinned host with one
+  flips as soon as half the rounds are dirty — which is why an ad-hoc driver
+  estimates best-of-N. **The per-PR gate does not:** it runs the two binaries in
+  interleaved pairs and compares **medians**, and fails only when the medians breach the
+  threshold, the two arms' `[min..max]` ranges are disjoint, and a majority of pairs
+  breach on their own (`perf_gate.py` `paired_verdict`); best-of-N survives only in its
+  legacy no-baseline mode. Measured on the pinned host with one
   binary against itself
   ([#1358](https://github.com/avatarsd-llc/libtracer/issues/1358)): in a window where a
   neighbouring job got busy, median-of-rounds put `fwd-rope-hop` at **−33 % … +54 %**

@@ -171,11 +171,12 @@ DEFAULT_TIER = "advisory"
 # -batch twins and the eptype-* sweep's two LEAN arms are charted and published but
 # ungated. Do not restate this list as "anywhere on the dispatch surface" —
 # docs/methodology.md did, and that sentence reaches the public performance page (#1041):
-#   inproc / inproc-borrow  — the canonical zero-copy / loaned 1:1 writes
+#   inproc / inproc-borrow  — the canonical 1:1 writes: owned copy (producer alloc+copy
+#                             included) / loaned view (no copy, still two allocs a write)
 #   fan-out 1024            — the subscriber fan-out loop
 #   inproc-path @ 8192 ep   — the resolver canary (registry lookup per write)
 #   mixed                   — the composed realistic topology
-#   fold-b4                 — the L0 inline-fold codec tier (batch-amortized)
+#   fold-b4                 — the L0 rope fold walk, `to_iovec` over 4 links (batch-amortized)
 #   lkv-store-{heap,pool}   — the L1 rope->contiguous copy (`rope_t::materialize`)
 #   lkv-{store,alloc}-heap @ 1024 B — the heap backend's large-segment layout (#1768)
 #   inproc-target-{handler,stored} @ fan 8 — the path-target dispatch legs
@@ -408,7 +409,7 @@ DEFAULT_RUNS = 3
 # and the honest verdict for a contradiction is "inconclusive" — not "fail".
 #
 # The concrete case. PR #708 touched only L4 (`graph.cpp`, `vertex.hpp`); `fold-b4` is
-# the L0 inline-fold codec tier and no call path connects them. The gate failed it:
+# the L0 rope fold walk (`rope_t::to_iovec`) and no call path connects them. The gate failed it:
 #
 #   fold-b4/512/1/1  p50=8ns  mean=7ns  deliv/s=34,960,881  (base p50=8ns, 52,471,790)
 #   ! fold-b4/512/1/1 throughput pullback: -33%

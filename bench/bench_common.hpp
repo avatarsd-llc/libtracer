@@ -39,6 +39,41 @@ using Clock = std::chrono::steady_clock;
 }
 
 /**
+ * @brief Make the compiler treat @p value as read, and every store before it as needed (#1805).
+ *
+ * A timed loop whose result nothing reads is dead code to the optimizer: a copy into a block
+ * that is freed unread, or a parse whose result only feeds a counter the loop never prints,
+ * may be deleted, and the row then times an empty loop. The empty `asm` takes the object's
+ * address and clobbers memory, so the object and everything it points to must exist at this
+ * point. It emits no instruction. The `dce-canary` row checks it still works.
+ */
+template <typename T>
+inline void do_not_optimize(const T& value) noexcept {
+    asm volatile("" : : "r"(&value) : "memory");
+}
+
+/**
+ * @brief The `dce-canary` verdict: does timed work that grows K-fold time at least half as
+ *        much longer?
+ *
+ * The canary times one dependent chain of @p small_k steps and one of @p big_k steps, each
+ * kept by @ref do_not_optimize. Work the compiler kept scales with its length; work it deleted
+ * costs the empty loop's floor at both lengths, so the ratio collapses to about 1. Half the
+ * ideal ratio is the bar, so loop overhead and the clock floor cannot fail a healthy build.
+ *
+ * @param small_ps Per-op time of the short chain, in picoseconds.
+ * @param big_ps   Per-op time of the long chain, in picoseconds.
+ * @param small_k  Steps in the short chain.
+ * @param big_k    Steps in the long chain.
+ */
+[[nodiscard]] constexpr bool dce_canary_holds(double small_ps, double big_ps, std::size_t small_k,
+                                              std::size_t big_k) {
+    if (small_ps <= 0 || big_ps <= 0 || small_k == 0 || big_k <= small_k) return false;
+    const double ideal = static_cast<double>(big_k) / static_cast<double>(small_k);
+    return big_ps / small_ps >= ideal / 2;
+}
+
+/**
  * @brief CPUs this process may run on: its affinity mask, not the host's CPU count.
  *
  * A multi-threaded row sized from `hardware_concurrency()` puts its threads on however few
@@ -606,6 +641,55 @@ template <typename Op>
     std::sort(ps.begin(), ps.end());
     t.p50_ps = ps[std::min(ps.size() - 1, ps.size() / 2)];
     return t;
+}
+
+/** @brief Steps in the `dce-canary` short chain. */
+inline constexpr std::size_t kDceSmallK = 8;
+/** @brief Steps in the `dce-canary` long chain: eight times the short one. */
+inline constexpr std::size_t kDceBigK = 64;
+
+/**
+ * @brief @p k dependent mixing steps on @p x: work no compiler can fold into fewer steps.
+ *
+ * Each step needs the previous one's result (a shift-xor then a multiply), so the chain
+ * cannot be vectorized or collapsed into a closed form; its only way to get cheaper is to be
+ * deleted, which is what the canary watches for.
+ */
+[[nodiscard]] constexpr std::uint64_t dce_chain(std::uint64_t x, std::size_t k) {
+    for (std::size_t i = 0; i < k; ++i) {
+        x ^= x >> 29;
+        x *= 0xbf58476d1ce4e5b9ULL;
+    }
+    return x;
+}
+
+/** @brief Both `dce-canary` timings and their verdict (@ref dce_canary_holds). */
+struct dce_canary_t {
+    batch_timing_t small; /**< @brief The @ref kDceSmallK chain. */
+    batch_timing_t big;   /**< @brief The @ref kDceBigK chain. */
+    bool holds = false;   /**< @brief The long chain timed at least half its ideal ratio. */
+};
+
+/**
+ * @brief Time the two canary chains the way every batch row is timed, each result kept only by
+ *        @ref do_not_optimize, and judge them.
+ * @param budget_ns Timing budget per chain.
+ */
+[[nodiscard]] inline dce_canary_t measure_dce_canary(std::uint64_t budget_ns) {
+    std::uint64_t x = 0x9e3779b97f4a7c15ULL;
+    const auto chain = [&](std::size_t k) {
+        return time_batches(
+            [&] {
+                x = dce_chain(x, k);
+                do_not_optimize(x);
+            },
+            budget_ns);
+    };
+    dce_canary_t c;
+    c.small = chain(kDceSmallK);
+    c.big = chain(kDceBigK);
+    c.holds = dce_canary_holds(c.small.p50_ps, c.big.p50_ps, kDceSmallK, kDceBigK);
+    return c;
 }
 
 /**
