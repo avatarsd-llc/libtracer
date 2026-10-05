@@ -325,9 +325,13 @@ using app_field_admit_hook_t =
  * `:children[]` field serves this synthesized member listing (a complete POINT TLV view)
  * INSTEAD of enumerating registered child vertices — the ADR-0044 seam by which a
  * transport/connection vertex lists its live bus peers without ever creating a vertex for
- * them. `on_read` supplies the vertex value as the rope it is (a contiguous scalar is the
- * single-link case); `on_write` and `on_admit` receive the written value as the @ref value_t
- * the write path already holds — by reference, with no clone of its links.
+ * them. `on_read` supplies the vertex value as a @ref value_ref_t (RFC-0028 D11, one read
+ * type): a handler that holds a value already (a cached reading, a value it kept with
+ * `value_ref_t::keep`) answers a reference to it at no allocation, and one that computes a
+ * scalar mints it with `value_ref_t::copy` — one block, the bytes inline. The graph hands the
+ * reference back from `graph_t::read` / `graph_t::await` unchanged; `on_write` and `on_admit`
+ * receive the written value as the @ref value_t the write path already holds — by reference, with
+ * no clone of its links.
  *
  * Every seam is a `{fn, ctx}` pair whose `ctx` the CALLER keeps alive for as long as the
  * vertex is registered (see `libtracer/hook.hpp` for the two idiomatic spellings and
@@ -337,8 +341,13 @@ using app_field_admit_hook_t =
  * are the trailing `rights` argument of `graph_t::register_vertex` and its siblings.
  */
 struct handlers_t {
-    /** @brief Supplies the vertex value on read. */
-    hook_t<result_t<view::rope_t>()> on_read;
+    /**
+     * @brief Supplies the vertex value on read, as an owning reference (RFC-0028 D11).
+     *
+     * An empty reference on success is read as a refused allocation and answers
+     * `BACKPRESSURE`, the same answer a `value_t::make*` that returned `nullptr` deserves.
+     */
+    hook_t<result_t<value_ref_t>()> on_read;
     /**
      * @brief Receives the written value and the writer's @ref write_ctx_t (#375).
      *
@@ -441,7 +450,8 @@ struct handlers_t {
  * Set once at registration (`vertex_t::adopt_identity`), read lock-free thereafter.
  */
 struct value_handlers_t {
-    hook_t<result_t<view::rope_t>()> on_read; /**< @brief Supplies the vertex value on read. */
+    /** @brief Supplies the vertex value on read — the @ref handlers_t::on_read contract. */
+    hook_t<result_t<value_ref_t>()> on_read;
     /** @brief Receives the written value and the writer's @ref write_ctx_t (#375) — the
      *         @ref handlers_t::on_write contract, verbatim. */
     hook_t<result_t<void>(const value_t& value, const write_ctx_t& ctx)> on_write;

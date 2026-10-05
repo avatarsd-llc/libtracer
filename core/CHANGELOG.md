@@ -209,6 +209,29 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   (`core/tests/instrumented`). `mem_source.hpp` now includes `config.hpp`. **Migration:** a
   build of your own that arms any of these hooks adds
   `static constexpr bool kFaultInjection = true;` to its `libtracer/config_override.hpp`.
+- **`handlers_t::on_read` and the folded read oracles answer `value_ref_t`
+  ([#1655](https://github.com/avatarsd-llc/libtracer/issues/1655), RFC-0028 D11: one read
+  type).** `handlers_t::on_read` (and the internal `value_handlers_t::on_read`) is now
+  `hook_t<result_t<value_ref_t>()>`, was `hook_t<result_t<rope_t>()>`. `graph_t::read` and
+  `graph_t::await` hand the handler's reference back as it came, so a handler that holds a value
+  already answers at no allocation, and one that computes a scalar pays one block (the bytes
+  inline) where the rope it answered cost a segment and a wrapping block. An empty reference on
+  success answers `BACKPRESSURE`. `graph_t::read_children_folded`,
+  `graph_t::read_children_materialized` and `graph_t::read_subtree_folded` now return
+  `result_t<value_ref_t>`, was `result_t<rope_t>`; the production reads that wrap them are
+  unchanged in bytes and allocations. **Migration:** in an `on_read` hook, return
+  `value_ref_t::copy(bytes)` for computed bytes, `value_ref_t::composed(std::move(rope))` for a
+  rope you built, or a `value_ref_t` you hold; change the lambda's declared return type to
+  `result_t<value_ref_t>`. At an oracle call site, dereference twice (`(*r)->flatten()`,
+  `(*r)->link_count()`), or take `(*r)->rope()` where a `rope_t` is needed.
+
+### Added
+
+- **`value_ref_t::copy(bytes, source = heap_source())`
+  ([#1655](https://github.com/avatarsd-llc/libtracer/issues/1655)).** Mints an inline value
+  over a copy of the bytes: one block from the source, through `value_t::make_copy`. It is the
+  spelling an `on_read` hook uses for a value it computes. Returns an empty reference when the
+  source refuses the block.
 
 ### Added
 

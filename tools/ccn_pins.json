@@ -31,7 +31,7 @@
       ],
       "file": "core/src/graph.cpp"
     },
-    "tr::graph::graph_t::read_field_rope": {
+    "tr::graph::graph_t::read_field_composed": {
       "ccn": [
         45
       ],

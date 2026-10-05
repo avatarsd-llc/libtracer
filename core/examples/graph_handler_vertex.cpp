@@ -66,9 +66,12 @@ int main() {
                           return {};
                       },
                       &commands};
-    relay.on_read = {[](void* ctx) -> tr::graph::result_t<tr::view::rope_t> {
+    // `on_read` answers the one read type (RFC-0028 D11): a value the handler mints with
+    // `value_ref_t::copy` costs one block, the bytes inline, and is never stored.
+    relay.on_read = {[](void* ctx) -> tr::graph::result_t<tr::graph::value_ref_t> {
                          const int n = *static_cast<const int*>(ctx);
-                         return tr::view::rope_t{value_of(n % 2 ? "ON" : "OFF")};  // never stored
+                         const std::string_view state = n % 2 ? "ON" : "OFF";
+                         return tr::graph::value_ref_t::copy(std::as_bytes(std::span(state)));
                      },
                      &commands};
     const auto sw = g.register_vertex(path_t("/dev/relay0"), role_t::HANDLER, relay);

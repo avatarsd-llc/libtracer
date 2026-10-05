@@ -249,9 +249,9 @@ void test_thunk_forms() {
     check(h.on_children.ctx == nullptr, "a stateless thunk carries a null ctx");
     // A capturing callable is referenced, so it must be a named object.
     int reads = 0;
-    auto on_read = [&reads]() -> result_t<tr::view::rope_t> {
+    auto on_read = [&reads]() -> result_t<tr::graph::value_ref_t> {
         ++reads;
-        return tr::view::rope_t{make_value({0x07})};
+        return tr::graph::value_ref_t::composed(make_value({0x07}));
     };
     h.on_read = tr::graph::thunk(on_read);
     check(h.on_read.ctx == &on_read, "a capturing thunk points at the callable");
