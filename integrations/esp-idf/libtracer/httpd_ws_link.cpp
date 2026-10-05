@@ -2377,6 +2377,10 @@ void httpd_ws_link_t::refuse_upgraded(int fd) {
     (void)send_now(nullptr, fd, HTTPD_WS_TYPE_CLOSE,
                    std::span<const std::byte>(payload.data(), 2 + refusal_reason_.size()));
     condemn(fd);
+    // Its frame went through the drain budget like any other, so it may be the socket a drain
+    // put on Nagle (ADR-0085 §7). It has no session for on_session_closed to clear that from,
+    // so it is cleared here: a recycled descriptor starts on TCP_NODELAY like every other.
+    if (rx_nagle_fd_ == fd) rx_nagle_fd_ = -1;
 }
 
 httpd_ws_link_t::session_t* httpd_ws_link_t::claim_session(int fd, bool authenticated) {
