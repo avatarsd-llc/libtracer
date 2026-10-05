@@ -71,13 +71,23 @@ HERE = pathlib.Path(__file__).resolve().parent
 BENCH = HERE / "build" / "bench_libtracer"
 BENCH_FWD = HERE / "build" / "bench_forward_heap"
 # The gated points no longer all come from one binary (#1173). Each POINTS entry names
-# the binary that produces its RESULT rows; they all emit bench_common's shared 12-column
-# format, so `run_bench_once` reads any of them unchanged.
+# the binary that produces its RESULT rows. All but one emit bench_common's shared 12-column
+# format, which `run_bench_once` reads unchanged; `bench_store_sweep`'s own row is folded
+# into the same shape there (#1869).
 BENCH_BY_KEY = {
     "main": "bench_libtracer",
     "compact": "bench_compact_delivery",
     "demux": "bench_forward_demux",
+    "store": "bench_store_sweep",
 }
+# `bench_store_sweep` (#1869) does not speak the 12-column `RESULT` format: its latency mode
+# prints `RESULT_STORE_LAT round tag arm leg p50ps p99ps meanps n batch`, one row per
+# (store profile, workload leg). `run_bench_once` folds each into a POINTS-shaped row keyed
+# `store-lat-<profile>-<leg>/<value bytes>/1/1`. The workload writes one fixed value size,
+# `store_sweep_node.hpp`'s `kValueBytes`, which the row does not print; this is that number,
+# and `test_perf_gate.py` reads the header to keep the two equal.
+STORE_LAT_PREFIX = "store-lat-"
+STORE_LAT_VALUE_BYTES = 32
 BASELINE = HERE / "perf_baseline.json"
 
 # `is_contaminated` is host_guard.py's single contamination predicate, and it is IMPORTED
@@ -300,6 +310,20 @@ POINTS = [
     ("main", "inproc-mt4", 64, 1, 4),
     ("main", "acl-inherit-d4-mt4", 64, 1, 4),
     ("main", "poolalloc-mt4", 64, 1, 1),
+    # The store-latency rows (#1869): bench_store_sweep's four workload legs, single-threaded,
+    # on the NARROW and the WIDE store profile. They were banked and charted but never gated,
+    # so a slower store read or write merged without the gate saying anything. The workload's
+    # value is 32 B, the only size the sweep has: no row above 1 KiB exists to gate. Blocking
+    # like every POINT: an A/A null of 40 runs on one pinned CPU put every row's robust spread
+    # (MAD) under 1.3% of its median and failed 0 of 160 four-pair A/A verdicts at +15%.
+    ("store", "store-lat-narrow-net-fwd", 32, 1, 1),
+    ("store", "store-lat-narrow-graph-write", 32, 1, 1),
+    ("store", "store-lat-narrow-graph-read", 32, 1, 1),
+    ("store", "store-lat-narrow-full", 32, 1, 1),
+    ("store", "store-lat-wide-net-fwd", 32, 1, 1),
+    ("store", "store-lat-wide-graph-write", 32, 1, 1),
+    ("store", "store-lat-wide-graph-read", 32, 1, 1),
+    ("store", "store-lat-wide-full", 32, 1, 1),
 ]
 # The only POINTS a correct candidate may legitimately not emit: the MULTI rows above run
 # only on a host with at least four usable CPUs (`bench::usable_cpus() >= 4`). Every other
@@ -307,6 +331,15 @@ POINTS = [
 # size or a sibling binary that was not built must never read as "not gated" again.
 MAY_BE_ABSENT = frozenset({"inproc-mt4/64/1/4", "acl-inherit-d4-mt4/64/1/4",
                            "poolalloc-mt4/64/1/1"})
+
+
+def tick_guarded(k: str) -> bool:
+    """@brief Whether point @p k's latency legs take the `LAT_TICK_NS` clock-grain guard.
+
+    Every POINT does except the store-latency rows (#1869). Each of those is a median of
+    window-calibrated batch means in picoseconds, so it has no clock tick, and `graph-write`
+    sits near 76 ns, where the guard would demand +25 ns (+33%) before a breach counted."""
+    return not k.startswith(STORE_LAT_PREFIX)
 
 
 def missing_point(k: str) -> str:
@@ -690,6 +723,11 @@ def run_bench_once(bench: pathlib.Path, extra: tuple[str, ...] = (),
             # (#1804), and int() here would re-quantize exactly what that change removed.
             rows.append((f[2], int(f[3]), int(f[4]), int(f[5]), float(f[7]), float(f[9]),
                          float(f[11])))
+        elif len(f) == 10 and f[0] == "RESULT_STORE_LAT":
+            # p50 only, in ns from the row's ps (#1869): the mean and deliveries columns are 0,
+            # which every leg below reads as "not measured" and skips.
+            rows.append((f"{STORE_LAT_PREFIX}{f[3].lower()}-{f[4]}", STORE_LAT_VALUE_BYTES, 1, 1,
+                         0.0, int(f[5]) / 1000.0, 0.0))
         elif f[0] == "CLOCK" and len(f) == 3:
             CLOCK_FLOORS.append((float(f[1]), float(f[2])))
     return rows
@@ -910,7 +948,7 @@ def gate_paired(cand: dict[str, pathlib.Path], base: dict[str, pathlib.Path],
                 # 0 means "this row does not measure that": deliv_s on a latency-only row
                 # (#553), p50/mean on a bulk-only row such as `lkv-*` (#1804).
                 continue
-            v = paired_verdict(c, b, factor, lower_worse, tick)
+            v = paired_verdict(c, b, factor, lower_worse, tick and tick_guarded(k))
             worst_drift = max(worst_drift, _spread(v["base_range"]))
             print(paired_report(v, label, unit, fmt))
             if v["fail"]:
@@ -1569,7 +1607,7 @@ def main() -> int:
                 """Relative pullback, tick-guarded for sub-100ns points; a 0 is "not
                 measured" (a bulk-only row, #1804), never a pullback."""
                 return (ref > 0 and cur > ref * factor
-                        and (ref >= 100 or cur - ref > LAT_TICK_NS))
+                        and (ref >= 100 or cur - ref > LAT_TICK_NS or not tick_guarded(k)))
 
             if lat_fails(v["p50_ns"], b["p50_ns"], LAT_REGRESS):
                 fails.append(f"{k} latency pullback: {v['p50_ns']}ns vs base {b['p50_ns']}ns "

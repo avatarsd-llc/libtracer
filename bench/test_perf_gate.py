@@ -386,6 +386,10 @@ class PointsAreDocumented(unittest.TestCase):
              17: "seventeen", 18: "eighteen", 19: "nineteen", 20: "twenty",
              **{20 + i: f"twenty-{w}" for i, w in enumerate(
                  ("one", "two", "three", "four", "five", "six", "seven", "eight", "nine"),
+                 start=1)},
+             30: "thirty",
+             **{30 + i: f"thirty-{w}" for i, w in enumerate(
+                 ("one", "two", "three", "four", "five", "six", "seven", "eight", "nine"),
                  start=1)}}
 
     def test_methodology_names_every_point(self):
@@ -936,6 +940,97 @@ class MissingGatedKeysFail(unittest.TestCase):
                 rc = pg.main()
         self.assertEqual(rc, 1, out.getvalue())
         self.assertIn("inproc/64/1/1 not measured", out.getvalue())
+
+
+class StoreLatencyRowsAreGated(unittest.TestCase):
+    """@brief #1869: bench_store_sweep's `RESULT_STORE_LAT` rows reach the gate as POINTS.
+
+    They were banked and charted, never gated, so a store read or write that got slower
+    merged with the gate silent. These pin the parser, the key shape, the profiles and legs
+    covered, the missing-key rule and the absence of a clock-tick guard on batch rows."""
+
+    TRANSCRIPT = ("# RESULT_STORE_LAT round tag arm leg p50ps p99ps meanps n batch\n"
+                  "RESULT_STORE_LAT\t0\tA\tNARROW\tgraph-read\t300500\t490000\t310000"
+                  "\t256\t128\n"
+                  "RESULT_STORE_LAT\t0\tA\tWIDE\tgraph-write\t77125\t110000\t80000"
+                  "\t256\t256\n")
+
+    def rows(self) -> list[tuple]:
+        with tempfile.TemporaryDirectory() as d:
+            p = pathlib.Path(d) / "bench_store_sweep"
+            p.write_text("")
+            with unittest.mock.patch.object(pg, "timed", lambda *a, **k: self.TRANSCRIPT):
+                return pg.run_bench_once(p)
+
+    def test_rows_parse_to_point_keys_with_p50_only(self):
+        rows = self.rows()
+        v = pg.metric(rows, "store-lat-narrow-graph-read", 32, 1, 1)
+        self.assertEqual(v, {"p50_ns": 300.5, "deliv_s": 0.0, "mean_ns": 0.0})
+        self.assertEqual(pg.metric(rows, "store-lat-wide-graph-write", 32, 1, 1)["p50_ns"],
+                         77.125)
+
+    def test_every_leg_is_gated_on_a_narrow_and_a_wide_profile(self):
+        store = {m for (b, m, _s, _f, _e) in pg.POINTS if b == "store"}
+        for profile in ("narrow", "wide"):
+            for leg in ("net-fwd", "graph-write", "graph-read", "full"):
+                self.assertIn(f"store-lat-{profile}-{leg}", store)
+        src = (pg.HERE / "bench_store_sweep.cpp").read_text()
+        for leg in ("net-fwd", "graph-write", "graph-read", "full"):
+            self.assertIn(f'"{leg}"', src, f"bench_store_sweep no longer names leg {leg}")
+        self.assertEqual(pg.BENCH_BY_KEY["store"], "bench_store_sweep")
+
+    def test_every_gate_build_step_builds_every_gated_binary(self):
+        """A binary the workflow does not build is a missing key on every run (#1847): each
+        `cmake --build` step that builds `bench_libtracer` for the gate builds them all."""
+        wf = pg.HERE.parent / ".github" / "workflows" / "perf.yml"
+        if not wf.exists():
+            self.skipTest(f"{wf} not present")
+        steps = re.findall(r"cmake --build [^\n]*--target bench_libtracer(?:[^\n]*\\\n)*[^\n]*",
+                           wf.read_text())
+        self.assertGreaterEqual(len(steps), 4)
+        for step in steps:
+            for name in pg.BENCH_BY_KEY.values():
+                self.assertIn(name, step, f"perf.yml builds without {name}: {step}")
+
+    def test_value_bytes_match_the_workload(self):
+        """The row does not print its value size; the key's size is the header's constant."""
+        hdr = (pg.HERE / "store_sweep_node.hpp").read_text()
+        m = re.search(r"kValueBytes\s*=\s*(\d+)", hdr)
+        self.assertIsNotNone(m)
+        self.assertEqual(int(m.group(1)), pg.STORE_LAT_VALUE_BYTES)
+        for (b, _m, s, _f, _e) in pg.POINTS:
+            if b == "store":
+                self.assertEqual(s, pg.STORE_LAT_VALUE_BYTES)
+
+    def test_a_missing_store_key_fails(self):
+        keys = [f"{m}/{s}/{f}/{e}" for (_b, m, s, f, e) in pg.POINTS]
+        k = "store-lat-wide-graph-read/32/1/1"
+        sample = {"p50_ns": 300.0, "mean_ns": 0.0, "deliv_s": 0.0}
+        fake = {"cand": {x: [dict(sample) for _ in range(4)] for x in keys if x != k},
+                "base": {x: [dict(sample) for _ in range(4)] for x in keys}}
+        with unittest.mock.patch.object(pg, "paired_samples", lambda *a: fake), \
+                contextlib.redirect_stdout(io.StringIO()):
+            fails = pg.gate_paired({}, {}, 4)
+        self.assertEqual([f.split()[0] for f in fails], [k])
+
+    def test_a_ten_ns_regression_at_76_ns_is_not_tick_guarded(self):
+        """graph-write runs ~76 ns: a real +16% must fail, where the tick guard would hold
+        it until +25 ns."""
+        self.assertFalse(pg.tick_guarded("store-lat-wide-graph-write/32/1/1"))
+        self.assertTrue(pg.tick_guarded("inproc/64/1/1"))
+        keys = [f"{m}/{s}/{f}/{e}" for (_b, m, s, f, e) in pg.POINTS]
+        k = "store-lat-wide-graph-write/32/1/1"
+
+        def arm(p50: float) -> list[dict]:
+            return [{"p50_ns": p50 + i * 0.1, "mean_ns": 0.0, "deliv_s": 0.0} for i in range(4)]
+
+        fake = {"cand": {x: arm(88.5 if x == k else 300.0) for x in keys},
+                "base": {x: arm(76.0 if x == k else 300.0) for x in keys}}
+        with unittest.mock.patch.object(pg, "paired_samples", lambda *a: fake), \
+                contextlib.redirect_stdout(io.StringIO()):
+            fails = pg.gate_paired({}, {}, 4)
+        self.assertEqual(len(fails), 1, fails)
+        self.assertTrue(fails[0].startswith(f"{k} p50 pullback"), fails)
 
 
 class NonZeroBenchExitIsInconclusive(unittest.TestCase):

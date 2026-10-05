@@ -301,7 +301,7 @@ Details that make these trustworthy:
   set, and the interleaved A/B remains their primary defence. The allocation-count
   instruments (the zero-alloc gate, the memory probes, the RAM censuses) are exempt —
   load cannot move a count.
-- The per-PR gate watches **twenty-seven canonical points** — a representative slice of the
+- The per-PR gate watches **thirty-five canonical points** — a representative slice of the
   fan-out / payload / topic sweeps plus a fold-width point, one per *gated* family
   (`inproc` and `inproc-borrow` share one), so a pullback on any of those legs is caught and
   not just the 1:1 write. They are **not** the whole dispatch surface, and this page should
@@ -334,7 +334,20 @@ Details that make these trustworthy:
   ([#1806](https://github.com/avatarsd-llc/libtracer/issues/1806)): `inproc/16384/1/1`,
   `inproc-borrow/16384/1/1`, `lkv-store-heap/16384/1/1`, `lkv-store-pool/16384/1/1`,
   `eptype-stream/16384/1/1`, `compact-forward/16384/1/1` and `fwd-demux-value/16384/1/1`
-  (the forward hop keyed by its VALUE payload rather than its frame size).
+  (the forward hop keyed by its VALUE payload rather than its frame size); and eight
+  **store-latency** rows from `bench_store_sweep`
+  ([#1869](https://github.com/avatarsd-llc/libtracer/issues/1869)), the p50 of each of its
+  four workload legs — the rope forward hop, a graph write, a composed subtree read, and all
+  three — on the NARROW and the WIDE store profile: `store-lat-narrow-net-fwd/32/1/1`,
+  `store-lat-narrow-graph-write/32/1/1`, `store-lat-narrow-graph-read/32/1/1`,
+  `store-lat-narrow-full/32/1/1`, `store-lat-wide-net-fwd/32/1/1`,
+  `store-lat-wide-graph-write/32/1/1`, `store-lat-wide-graph-read/32/1/1` and
+  `store-lat-wide-full/32/1/1`. The workload writes a 32 B value, the only size the sweep
+  has, so no store row above 1 KiB exists to gate. These rows are batch medians in
+  picoseconds, so the clock-tick guard does not apply to them; their mean is not gated. An
+  A/A null of 40 runs on one pinned CPU put every row's robust spread under 1.3 % of its
+  median and failed none of 160 four-pair A/A verdicts, so they gate on the blocking tier
+  like every other point, at the cost of about one second per gate.
 
   The multi-threaded rows are timed in their own invocation (`--family-set multi`), after
   every single-threaded one, and that invocation is judged on **foreign CPU time only**
@@ -441,16 +454,18 @@ Details that make these trustworthy:
   `try_alloc` fires on every write — **does not exist**, and neither does one for the ring's
   resident bytes. Both are gaps in this page, not numbers it is withholding.
 
-  Six of the twenty-seven come from OTHER bench binaries, and they are here because of what
+  Fourteen of the thirty-five come from OTHER bench binaries, and they are here because of what
   happened without them (#1173): `compact-forward` moved **+41%** across the v0.8.0 →
   v0.9.0 window while every gated point stayed flat, so the gate had nothing to object to.
   They are `compact-forward/64/1/1` and `compact-terminus/64/1/1` — the compact-delivery
   tier's forward hop and its terminus, from `bench_compact_delivery`; and
   `fwd-demux-fixed/61/1/1` and `fwd-demux-scan/61/64/64` — the fixed-slot and scanning
   arms of the FWD demux, from `bench_forward_demux`; plus the two 16 KiB ladder rows from
-  those binaries, named above. Each `POINTS` entry names the binary
-  that produces it; every one of them emits the same 12-column `RESULT` format, so this
-  costs two extra processes per arm per pair and no new parsing.
+  those binaries, named above; and the eight store-latency rows from `bench_store_sweep`,
+  also named above. Each `POINTS` entry names the binary that produces it. The compact and
+  demux binaries emit the same 12-column `RESULT` format; `bench_store_sweep`'s
+  `RESULT_STORE_LAT` row is folded into that shape by the gate. This costs three extra
+  processes per arm per pair.
 
   The points are `mode` values of the benches described above, and the numbers are
   their `size` / `fan-out` / `endpoint` columns. The binaries are run

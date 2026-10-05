@@ -188,7 +188,7 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "rows run over a payload ladder up to 64 KiB, and the `cliff-alloc-*` rows time one "
         "segment alloc/free at every size of the allocator-cliff ladder (#1806).",
         "ns p50 / p99 / mean · deliveries/s",
-        "per-PR + per-push gate, twenty-seven canonical points"),
+        "per-PR + per-push gate, thirty-five canonical points"),
     instrument_t(
         "bench_forward_demux.cpp", "framed", ("routing",),
         "Drives one FWD forward hop through the inbound link's own receiver against a registry "
@@ -464,7 +464,8 @@ INSTRUMENTS: tuple[instrument_t, ...] = (
         "high-water; its `calibrate` mode fails the run if any channel served nothing.",
         "ns p50 · ops/s per thread · store bytes",
         "store bytes + the T=1 latency cell recorded per `main` push, occupancy additionally "
-        "warn-ratcheted; the T-sweep stays diagnostic — see bench/README.md"),
+        "warn-ratcheted; the T=1 p50 of every leg on NARROW and WIDE gated per PR (#1869); "
+        "the T-sweep stays diagnostic — see bench/README.md"),
     instrument_t(
         "bench_store_escape.cpp", "counted", (),
         "The memory half of the store sweep, in its own binary so a global `operator new` "
