@@ -27,7 +27,8 @@
 #     8 ABBA pairs each), in one job, so a drift window in the machine is shared by the two
 #     arms instead of landing on whichever one happened to be running (#763). A fail needs
 #     the median per-pair ratio past the row's threshold — 3x its banked A/A-null spread,
-#     floor 3% (bench/aa_null.json; flat +15% / +12% / -12% for a row the null lacks) — AND
+#     floor 3%, capped at the flat +15% / +12% / -12% (bench/aa_null.json; flat for a row
+#     the null lacks) — AND
 #     a bootstrap 95% interval on that median that excludes 1 (#1807). No Actions cache
 #     feeds the gate.
 #  3. Push ratchet (`ratchet`) — every main push re-runs the same gate on THREE

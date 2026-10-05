@@ -13,8 +13,8 @@ binaries are executed INTERLEAVED, family by family — A B / B A / A B / … �
 compared as a population, never as two sequential blocks. See `paired_samples` and
 `paired_verdict` for the rules; the short version (#1807) is that a fail needs the
 median per-pair ratio past the row's threshold, taken from the banked A/A null
-(`aa_null.json`: 3x the row's robust spread between builds of one source, floor 3%),
-AND a bootstrap confidence interval on that median that excludes 1.
+(`aa_null.json`: 3x the row's robust spread between builds of one source, floor 3%,
+capped at the flat thresholds), AND a bootstrap confidence interval on that median that excludes 1.
 
 Within a run, repeated RESULT rows are medianed (single-iteration jitter), and
 comparisons are only ever same-runner, so absolute machine speed cancels and the
@@ -856,10 +856,11 @@ def best_of(binaries: dict[str, pathlib.Path], runs: int) -> dict[str, dict]:
 #
 #   threshold — PER ROW AND LEG, from the banked A/A null (`aa_null.json`, written by
 #               `bench/aa_null.py bank`): 3x the robust spread of the gate's own statistic
-#               between DIFFERENT builds of the same source, floor 3%. A layout-sensitive
-#               row gets the wide threshold its null measured; a stable row gets 3%, so a
-#               real 10% regression fails it. A key the null does not carry falls back to
-#               the flat thresholds above, and the report says so ("flat").
+#               between DIFFERENT builds of the same source, floor 3%, CAPPED at the flat
+#               thresholds above (ruling on #1874: a null may tighten a row, never loosen
+#               it). A stable row gets as little as 3%, so a real 10% regression fails it; a
+#               layout-sensitive row is held at the flat threshold ("cap"); a key the null
+#               does not carry falls back to the flat thresholds too ("flat").
 #   evidence  — the per-pair ratio cand/base, its median, and a bootstrap confidence
 #               interval on that median (`BOOT_N` resamples of the pairs, `BOOT_CONF`). It
 #               replaces both the disjoint-range rule and the pair-majority vote: a FAIL
@@ -890,14 +891,21 @@ def leg_factor(k: str, leg: str, null: dict[str, dict[str, float]]) -> tuple[flo
     """@brief (factor, tick guard?, source) for one leg of one key.
 
     From the null: a slowdown of 1 + max(NULL_FLOOR, NULL_K x spread); the throughput leg
-    takes its reciprocal. The null measured the row's clock grain, so no tick guard. With no
-    null entry: the flat factor, tick-guarded on the latency legs as before.
+    takes its reciprocal. The null measured the row's clock grain, so no tick guard.
+
+    CAPPED at the flat factor (maintainer ruling on #1874): a measured null may TIGHTEN a row,
+    never loosen it. A row whose null is wider than flat (a layout-sensitive row) is gated
+    exactly as before the null existed — the flat factor, tick-guarded on the latency legs —
+    and reported as `cap`. With no null entry: the same flat gating, reported as `flat`.
     """
     s = (null.get(k) or {}).get(leg)
     lower = leg == "deliv_s"
     if s is None:
         return _FLAT[leg], not lower, "flat"
     t = max(NULL_FLOOR, NULL_K * s)
+    flat_t = (1 / _FLAT[leg] - 1) if lower else (_FLAT[leg] - 1)
+    if t >= flat_t:
+        return _FLAT[leg], not lower, "cap"
     return (1 / (1 + t) if lower else 1 + t), False, "null"
 
 

@@ -503,15 +503,25 @@ Details that make these trustworthy:
   written by [`bench/aa_null.py`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/aa_null.py)):
   **3× the robust spread** of the gate's own statistic between *different builds of the
   same source* (one source built at three function alignments, so code layout moves the
-  way an unrelated change moves it), **floor 3%**. A row whose code placement moves it gets
-  the wide threshold its null measured; a stable row gets 3%, so a real 10% regression
-  fails it. A row the null does not carry is gated on the flat thresholds above, and the
-  report says `flat`. This replaced the disjoint-range and majority-of-pairs rules
-  ([#1807](https://github.com/avatarsd-llc/libtracer/issues/1807)): three PRs that could
-  not touch the rows they failed, and one with identical sources, failed at 15–22% with
-  clean conditions, because within one session two builds of one source differ by a
-  layout offset, and disjoint ranges read that offset as real. The null is re-banked on
-  the bench host when its CPU layout changes and when a gated row is added.
+  way an unrelated change moves it), **floor 3%**, and **capped at the flat thresholds**
+  above: a measured null may tighten a row, never loosen it. A stable row gets as little as
+  3%, so a real 10% regression fails it. A row the null does not carry is gated on the flat
+  thresholds, and the report says `flat`. This replaced the disjoint-range and
+  majority-of-pairs rules ([#1807](https://github.com/avatarsd-llc/libtracer/issues/1807)):
+  three PRs that could not touch the rows they failed, and one with identical sources,
+  failed at 15–22% with clean conditions, because within one session two builds of one
+  source differ by a layout offset, and disjoint ranges read that offset as real. The null
+  is re-banked on the bench host when its CPU layout changes and when a gated row is added.
+- **Layout-sensitive, held at the flat threshold.** On these rows 3× the banked spread is at
+  or past the flat threshold, because builds of one source move them by several percent
+  (the `-falign-functions=64` build ran `lkv-store-heap` ~40% slower), so they gate exactly
+  as before the null existed and the report says `cap`: `lkv-store-heap` at 64 B and 1 KiB (throughput), `fold-b4/512/1/1`
+  (every leg), `mixed/0/6/128` (p50), `store-lat-narrow-full`, `store-lat-narrow-net-fwd`
+  and `store-lat-wide-net-fwd` (p50), and the multi-threaded `inproc-mt4`,
+  `acl-inherit-d4-mt4` and `poolalloc-mt4` rows. `inproc-path/64/1/8192` sat at the cap in
+  one of the two banked measurements and under it in the pooled null. A same-source A/A
+  between two layouts can still fail these rows, as it could before #1807; the null cannot
+  remove that without loosening them, which was ruled out.
 - **The payload ladder** ([#1806](https://github.com/avatarsd-llc/libtracer/issues/1806)).
   Every data-path family is swept over 64 B, 984 B, 985 B, 1 KiB, 4 KiB, 16 KiB and 64 KiB:
   `inproc`, `inproc-borrow`, the four `lkv-*` rows, `eptype-stream`, both `compact-*` arms

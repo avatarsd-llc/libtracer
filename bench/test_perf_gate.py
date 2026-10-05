@@ -97,18 +97,19 @@ class NoFalseFails(unittest.TestCase):
         self.assertFalse(tput([100, 100, 100, 100], [100, 100, 100, 100])["fail"])
         self.assertFalse(lat([100, 100, 100, 100], [100, 100, 100, 100])["fail"])
 
-    def test_1855_layout_offset_passes_on_its_null_threshold(self):
-        """#1855: identical sources, `fold-b4` deliv/s x0.85 with disjoint ranges in 3/4 pairs.
-
-        The old rule failed it twice. Its null measured the layout offset between builds of
-        one source, so its threshold sits past it, and the same samples PASS."""
-        null = {"fold-b4/512/1/1": {"deliv_s": 0.06}}  # 3 x 6% = an 18% threshold
-        factor, tick, src = pg.leg_factor("fold-b4/512/1/1", "deliv_s", null)
+    def test_a_layout_sensitive_row_is_held_at_the_flat_threshold(self):
+        """#1855's row: `fold-b4` throughput moves ~15-25% between builds of one source, so
+        its null is wider than flat. The ruling on #1874 caps it: the null may tighten a
+        row, never loosen it, so the row gates exactly as it did before the null."""
+        null = {"fold-b4/512/1/1": {"deliv_s": 0.26, "p50_ns": 0.14}}
+        self.assertEqual(pg.leg_factor("fold-b4/512/1/1", "deliv_s", null),
+                         (pg.TPUT_REGRESS, False, "cap"))
+        self.assertEqual(pg.leg_factor("fold-b4/512/1/1", "p50_ns", null),
+                         (pg.LAT_REGRESS, True, "cap"))
+        # Just under the cap is still the null's own (tighter) threshold.
+        f, _t, src = pg.leg_factor("k", "mean_ns", {"k": {"mean_ns": 0.039}})
         self.assertEqual(src, "null")
-        v = pg.paired_verdict([212, 214, 213, 230], [251, 250, 252, 249], factor, True, tick)
-        self.assertTrue(v["significant"])  # the offset is real between these two builds ...
-        self.assertFalse(v["effect"])      # ... and inside what the null says builds differ by
-        self.assertFalse(v["fail"])
+        self.assertLess(f, pg.MEAN_REGRESS)
 
     def test_1871_two_percent_disjoint_passes_at_the_floor(self):
         """#1871's A/A: two copies of one binary, narrow-full x1.02 with DISJOINT ranges."""
@@ -179,10 +180,10 @@ class ThresholdBoundary(unittest.TestCase):
         self.assertTrue(tput([63, 62], [100, 100])["fail"])
 
     def test_null_threshold_is_three_spreads_with_a_floor(self):
-        null = {"k": {"p50_ns": 0.05, "mean_ns": 0.001, "deliv_s": 0.05}}
-        self.assertAlmostEqual(pg.leg_factor("k", "p50_ns", null)[0], 1.15)
+        null = {"k": {"p50_ns": 0.03, "mean_ns": 0.001, "deliv_s": 0.03}}
+        self.assertAlmostEqual(pg.leg_factor("k", "p50_ns", null)[0], 1.09)
         self.assertAlmostEqual(pg.leg_factor("k", "mean_ns", null)[0], 1.03)  # the floor
-        self.assertAlmostEqual(pg.leg_factor("k", "deliv_s", null)[0], 1 / 1.15)
+        self.assertAlmostEqual(pg.leg_factor("k", "deliv_s", null)[0], 1 / 1.09)
         self.assertFalse(pg.leg_factor("k", "p50_ns", null)[1], "the null measured the grain")
 
     def test_a_row_the_null_lacks_falls_back_to_flat_and_says_so(self):
