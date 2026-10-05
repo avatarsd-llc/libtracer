@@ -488,6 +488,16 @@ struct branch_node_t {
     return src == nullptr || src == &mem::default_root();
 }
 
+/**
+ * @brief The sub-pool @p sub when @p src is the default root on a `kSlabPool` build (the graph
+ *        DERIVES its sub-pools, #1777), else @p src itself: an injected root serves every
+ *        purpose.
+ */
+[[nodiscard]] mem::block_source_t* sub_pool(mem::block_source_t& src,
+                                            mem::block_source_t& sub) noexcept {
+    return mem::kSlabPool && is_default_source(&src) ? &sub : &src;
+}
+
 /** @brief The retention a role holds when its policy names none (RFC-0028 §5.4). */
 [[nodiscard]] constexpr retention_t default_retention(role_t role) noexcept {
     return role == role_t::HANDLER  ? retention_t::NONE
@@ -511,34 +521,23 @@ struct branch_node_t {
 
 graph_t::graph_t(mem::block_source_t& src, graph_hooks_t hooks)
     : src_backend_(src),
-      src_mr_(src),
       root_(std::make_unique<vertex_t>(role_t::STORED_VALUE, path_key_t{}, handlers_t{})),
       // The anchors' private structural root (#1223). It takes NO vertex slot: it is never
       // an anchor itself and no element can name it, and giving it one would put a second
       // unaddressable hole in an index whose only documented hole is slot 0.
       anchor_root_(std::make_unique<vertex_t>(role_t::STORED_VALUE, path_key_t{}, handlers_t{})),
       ctl_(&src),
-      values_(ctl_),
-      tables_(ctl_) {
+      values_(sub_pool(src, mem::value_source())),
+      tables_(sub_pool(src, mem::table_source())) {
     // The process-default FOLD. Resolved in the BODY rather than in the member-initializer
     // list: `&src_mr_` there would convert a pointer to an object whose lifetime has not
     // started into a pointer to its base, which is undefined even though the adapters are now
     // declared first. A few stores at construction, never read again.
-    if (!is_default_source(&src)) {
-        mr_ = &src_mr_;
-        value_backend_ = &src_backend_;
-    } else if constexpr (mem::kSlabPool) {
-        // The host default root (#1777): values and rings from the value sub-pool, tables from
-        // the table sub-pool, and the control-plane pmr containers through the root, which
-        // serves from the table sub-pool too. `value_backend_` stays `heap_backend()`, which
-        // draws from the value sub-pool on this build.
-        values_ = &mem::value_source();
-        tables_ = &mem::table_source();
-        mr_ = &src_mr_;
-    }
-    // The link index's tables were built against `mr_` as it stood at member initialization;
-    // its per-link lists follow the resource resolved just above, as they always have (#1710).
-    link_index_.set_entry_resource(mr_);
+    // On the host default root (#1777) values and rings draw from the value sub-pool and
+    // every table from the table sub-pool (both resolved in the initializer list, so the link
+    // index is built on the right one); `value_backend_` stays `heap_backend()`, which draws
+    // from the value sub-pool on that build.
+    if (!is_default_source(&src)) value_backend_ = &src_backend_;
     set_hooks(hooks);
     // Slot 0 is the structural root (RFC-0024 §6.4): the index is seeded here so it stays
     // allocation-ordered from the first vertex_t this graph owns. The root is not a
@@ -1098,7 +1097,8 @@ std::size_t graph_t::evict_link_edges(std::string_view link_name) {
     // The empty key still matches nothing (#1056), one step earlier than before: it is now
     // refused at the index instead of per vertex.
     if (link_name.empty()) return 0;
-    const std::pmr::vector<vertex_t*> candidates = link_index_.candidates(link_name, /*take=*/true);
+    const mem::block_array_t<vertex_t*> candidates =
+        link_index_.candidates(link_name, /*take=*/true);
     std::size_t total = 0;
     std::size_t routed = 0;  // the edges that held `link_name` (#1816), given back below
     for (vertex_t* v : candidates) {
@@ -1132,7 +1132,7 @@ std::size_t graph_t::evict_route_edges(std::string_view link_name,
     const bool bound_echo =
         static_cast<wire::type_t>(std::to_integer<std::uint8_t>(route_wire[0])) ==
         wire::type_t::PATH_REF;
-    const std::pmr::vector<vertex_t*> candidates =
+    const mem::block_array_t<vertex_t*> candidates =
         link_index_.candidates(link_name, /*take=*/false);
     std::size_t total = 0;
     for (vertex_t* v : candidates) {
@@ -2973,9 +2973,12 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
     // delivery link is the mount's and not the arrival's, and the `caller` fallback — are
     // exactly the ones the name compare inside rejects, so neither can silently un-index the
     // edges #943 and #1071 fixed.
-    if (s.remote)
-        link_index_.index_vertex(s.remote->link.empty() ? s.remote->caller : s.remote->link,
-                                 link_token, v);
+    //
+    // A refused entry (#1778: the table source is exhausted) refuses the ADMISSION, for the
+    // same reason: an edge that no departure can find is a leak, not a degraded delivery.
+    if (s.remote && !link_index_.index_vertex(
+                        s.remote->link.empty() ? s.remote->caller : s.remote->link, link_token, v))
+        return std::unexpected(status_t::BACKPRESSURE);
     note_subscriber_added(v);  // RFC-0005: descendants' writes now bubble here
     // The hold is taken BEFORE the edge can be seen, for the reason the index entry above is:
     // a departure that evicts the edge the instant it lands gives the hold back, and must

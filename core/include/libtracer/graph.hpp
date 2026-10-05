@@ -2997,24 +2997,16 @@ class graph_t {
      */
     void note_owner_slot(vertex_t& v) noexcept;
 
-    // ---- DECLARED FIRST so they are DESTROYED LAST (#873 phase 1) ---------------------
+    // ---- DECLARED FIRST so it is DESTROYED LAST (#873 phase 1) -----------------------
     //
-    // These two are the graph's internal faces of the one injected source, and their
-    // position in the object is a LIFETIME requirement, not a preference. The value path no
-    // longer draws through them (a stored LKV is a `value_t` block drawn straight from `ctl_`
-    // since RFC-0028 slice 3, and `ctl_` is the caller's object), but the control-plane pmr
-    // containers below still allocate through `mr_` → `src_mr_`, and a payload segment a
-    // vertex retains still reclaims through `src_backend_` — both from inside `~graph_t`, when
+    // The graph's internal face of the one injected source for VALUE segments, and its
+    // position in the object is a LIFETIME requirement, not a preference: a payload segment a
+    // vertex retains still reclaims through `src_backend_` from inside `~graph_t`, when
     // `root_`'s vertex tree is torn down. Members are destroyed in REVERSE declaration order,
     // so an adapter declared after `root_` is already dead by then: a virtual call on a
-    // destroyed object, caught by UBSan's `vptr` check as "member call on address ... which
-    // does not point to an object of type 'memory_resource'" across six tests. Declaring them
-    // first inverts that and is robust by construction — it does not depend on anyone
-    // enumerating which member might hold such an allocation, which an explicit teardown
-    // order would.
-    //
-    // The cost is that every member below sits 40 B further into the object than it did.
-    // That was measured rather than assumed: the symbol ratchet's seven pins are unmoved.
+    // destroyed object, caught by UBSan's `vptr` check across six tests. Declaring it first
+    // inverts that and is robust by construction. Its pmr sibling `src_mr_` is gone (#1778):
+    // no graph table draws through `std::pmr` any more.
 
     /** @brief The graph's OWN `mem_backend_t` over the injected source (#873 phase 1).
      *
@@ -3024,17 +3016,6 @@ class graph_t {
      *         to the ADR-0047 §2 devirtualized `HEAP` reclaim arm. Held BY VALUE: it is
      *         three words, and making it optional would cost the same space plus a branch. */
     mem::source_backend_t src_backend_;
-
-    /** @brief The graph's OWN `std::pmr::memory_resource` over the injected source (#873
-     *         phase 1).
-     *
-     *         Same story as `src_backend_`: pointed at by `mr_` only when a
-     *         non-default source was injected, so a process-default graph's control-plane
-     *         containers still come from `new_delete_resource()` through exactly one
-     *         virtual call, as they always did. This adapter is where the substrate's
-     *         `nullptr` becomes a `std::bad_alloc` — the ONE boundary in the graph that
-     *         translates the failure convention, and only because `std::pmr` requires it. */
-    mem::source_resource_t src_mr_;
 
     mutable std::shared_mutex map_mutex_;
     // The Composite vertex tree's root (ADR-0057): an unregistered structural node whose
@@ -3048,18 +3029,6 @@ class graph_t {
     // route_handle clear_link dangling-ref class, fixed in #220); it needs a vertex
     // lifetime scheme (refcount / epoch reclamation, or a tombstone) first. Registering
     // the empty key fills this node in place (the "root vertex" the flat map allowed).
-    /** @brief The ADR-0039 pmr resource the CONTROL-PLANE containers draw from (the link
-     *         index, its free list and long names). NOT the value path: since RFC-0028 slice 3
-     *         a publish draws its one `value_t` block straight from `ctl_`, and this channel's
-     *         throwing seam (ADR-0079 Decision 3) is off the hot path for good.
-     *
-     *         Since #873 phase 1 this is no longer injected — it POINTS at whichever
-     *         resource the constructor's single source resolved to: `new_delete_resource()`
-     *         for a process-default graph (so the default composition is byte-for-byte what
-     *         it always was), or the graph's own `src_mr_` adapter over the injected
-     *         source. A pointer rather than the object because those are two different
-     *         types and the hot path reads one indirection either way. */
-    std::pmr::memory_resource* mr_ = std::pmr::get_default_resource();
 
     /** @brief The ADR-0060 byte-buffer seam the write-path copy-store draws its owned
      *         value @ref view::segment_t from (the flatten of a branch/field write,
@@ -3305,7 +3274,7 @@ class graph_t {
      * Built against `mr_` as it stands at member initialization; the constructor body points
      * its per-link allocations at the resolved resource (`link_index_t::set_entry_resource`).
      */
-    link_index_t link_index_{mr_};
+    link_index_t link_index_{*tables_};
 
     /**
      * @brief One vertex's declared payload-type → required-ACL-right rows (RFC-0014 Am. 2),

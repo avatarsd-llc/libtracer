@@ -24,13 +24,12 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <memory_resource>
 #include <mutex>
-#include <string>
 #include <string_view>
-#include <vector>
 
 #include "libtracer/link_id.hpp"
+#include "libtracer/mem_source.hpp"
+#include "libtracer/mem_string.hpp"
 
 namespace tr::graph {
 
@@ -62,9 +61,11 @@ class vertex_t;
  * therefore exactly the pre-existing one `graph_t::evict_link_edges` documents, neither
  * widened nor narrowed.
  *
- * Drawn from the graph's pmr resource (ADR-0039): the departure path allocated a
- * global-heap `std::vector` sized to the graph's whole subscribed set on every peer
- * hangup, which is the allocation #1071 called out. It now allocates nothing at all —
+ * Drawn from the graph's TABLE source (`graph_t::table_source`, ADR-0083, #1778): every
+ * table here is a core container whose growth refuses by value, so an exhausted source
+ * answers a failed intern or a refused admission instead of a throw. The departure path
+ * allocated a global-heap `std::vector` sized to the graph's whole subscribed set on every
+ * peer hangup, which is the allocation #1071 called out. It now allocates nothing at all —
  * the candidate list IS this entry, moved out.
  *
  * @section link_index_carried Why this is a DENSE SLOT VECTOR and not a map (#1266 / #1417)
@@ -126,33 +127,21 @@ class vertex_t;
  */
 class link_index_t {
    public:
-    /**
-     * @brief An empty index whose tables — and, until @ref set_entry_resource, whose
-     *        per-link lists — draw from @p mr.
-     */
-    explicit link_index_t(std::pmr::memory_resource* mr)
-        : slots_(mr), free_(mr), long_names_(mr), entry_mr_(mr) {}
+    /** @brief An empty index whose tables, per-link lists and names all draw from @p src. */
+    explicit link_index_t(mem::block_source_t& src) noexcept
+        : slots_(src), free_(src), long_names_(src) {}
 
+    /** @brief Non-copyable — the graph holds its one index by value. */
     link_index_t(const link_index_t&) = delete;
+    /** @brief Non-assignable. */
     link_index_t& operator=(const link_index_t&) = delete;
-
-    /**
-     * @brief Point the per-link candidate lists and overflowed names at @p mr.
-     *
-     * `graph_t` resolves its control-plane resource in its constructor BODY (see
-     * `graph_t::graph_t`), after this index's tables were already built against the
-     * resource the member held at initialization. The per-link allocations have always
-     * followed the resolved resource while the three tables kept the one they were built
-     * with; this call is that split, stated rather than changed. Call it before the first
-     * link is interned.
-     */
-    void set_entry_resource(std::pmr::memory_resource* mr) noexcept { entry_mr_ = mr; }
 
     /**
      * @brief Mint-or-find @p name's interned token — `graph_t::intern_link`'s body.
      *
      * Idempotent by name: the same spelling always answers the same live token (#1263).
-     * @return The token, or a default-constructed one for an empty name (#1056).
+     * @return The token, or a default-constructed one for an empty name (#1056) or when the
+     *         table source refused a new slot (#1778).
      */
     [[nodiscard]] link_id_t intern(std::string_view name);
 
@@ -178,8 +167,10 @@ class link_index_t {
      * (#1056). Idempotent at the insert (#1266). @p token is the CARRIED identity (#1417):
      * used only when it names a live slot that spells @p link, otherwise @p link is interned
      * by name and the fallback is counted in @ref name_lookups.
+     * @retval false The table source refused the entry: @p v is NOT indexed, so the caller
+     *               must refuse the admission (a live unindexed edge would outlive its link).
      */
-    void index_vertex(std::string_view link, link_id_t token, vertex_t* v);
+    [[nodiscard]] bool index_vertex(std::string_view link, link_id_t token, vertex_t* v);
 
     /**
      * @brief The DISTINCT candidate count for @p link — `graph_t::link_edge_candidates`'s body.
@@ -197,9 +188,11 @@ class link_index_t {
      *             that link's edges is about to be gone and the entry would otherwise be a
      *             permanent stale list. The route-scoped sibling passes false — it reclaims
      *             only SOME of the link's edges, so the entry must survive for the link's
-     *             eventual teardown.
+     *             eventual teardown. The copy is drawn from the table source; when it is
+     *             refused the answer is empty, and the route-scoped eviction reclaims
+     *             nothing until the link's own teardown takes the entry whole.
      */
-    [[nodiscard]] std::pmr::vector<vertex_t*> candidates(std::string_view link, bool take);
+    [[nodiscard]] mem::block_array_t<vertex_t*> candidates(std::string_view link, bool take);
 
     /**
      * @brief How many index inserts fell back to a NAME LOOKUP —
@@ -210,11 +203,11 @@ class link_index_t {
    private:
     /** @brief One link's candidate list, plus where its sorted prefix ends. */
     struct link_entry_t {
-        std::pmr::vector<vertex_t*> vs; /**< @brief The link's DISTINCT candidate vertices:
-                                         *          `[0, compacted)` sorted, then an unsorted
-                                         *          tail (@ref index_vertex). */
-        std::size_t compacted = 0;      /**< @brief Where the sorted prefix ends — `vs.size()`
-                                         *          as of the last compaction. */
+        mem::block_array_t<vertex_t*> vs; /**< @brief The link's DISTINCT candidate vertices:
+                                           *          `[0, compacted)` sorted, then an unsorted
+                                           *          tail (@ref index_vertex). */
+        std::size_t compacted = 0;        /**< @brief Where the sorted prefix ends — `vs.size()`
+                                           *          as of the last compaction. */
     };
     /** @brief How long a link's UNSORTED tail may get before it is merged into the sorted
      *         prefix — so the membership test's linear half stays a handful of pointers and
@@ -263,8 +256,8 @@ class link_index_t {
     /** @brief A link name too long for `link_slot_t` — rare, so a scanned list beats a
      *         second hashed container, and it costs nothing at all while it is empty. */
     struct link_long_name_t {
-        std::uint32_t slot;    /**< @brief Which slot it belongs to. */
-        std::pmr::string text; /**< @brief The spelling. */
+        std::uint32_t slot; /**< @brief Which slot it belongs to. */
+        mem::string_t text; /**< @brief The spelling. */
     };
 
     /** @brief "No such slot" — what a name scan answers when nothing matches. */
@@ -276,7 +269,7 @@ class link_index_t {
     /** @brief The live slot holding @p name, or `kNoSlot`. */
     [[nodiscard]] std::uint32_t find_slot(std::string_view name) const;
     /** @brief Give slot @p i the spelling @p name, inline when it fits. */
-    void name_slot(std::uint32_t i, std::string_view name);
+    [[nodiscard]] bool name_slot(std::uint32_t i, std::string_view name);
     /** @brief @ref intern with the lock already held. */
     [[nodiscard]] link_id_t intern_locked(std::string_view name);
     /** @brief Retire slot @p i: drop its name, bump its stamp, free its list, list it for
@@ -287,21 +280,18 @@ class link_index_t {
     // diagnostic reader compacts one in place to report a distinct count, which changes no
     // observable graph state. Guarded by the mutable mutex below.
     /** @brief The dense slot vector, addressed by `link_id_t::slot`. */
-    mutable std::pmr::vector<link_slot_t> slots_;
+    mutable mem::block_array_t<link_slot_t> slots_;
     /** @brief Released slots awaiting reuse — what keeps a churning node's slot space
      *         bounded by its CONCURRENT link count instead of by its lifetime's. */
-    std::pmr::vector<std::uint32_t> free_;
+    mem::block_array_t<std::uint32_t> free_;
     /** @brief Names past `kInlineNameChars`. Empty on every shipped deployment. */
-    std::pmr::vector<link_long_name_t> long_names_;
+    mem::block_array_t<link_long_name_t> long_names_;
     /** @brief @ref name_lookups's counter. A plain word, not an atomic: every read and write
      *         of it is already inside `mutex_`. */
     std::size_t name_lookups_ = 0;
     /** @brief Guards `slots_`, `free_` and `long_names_` ONLY. A leaf: never held across a
      *         map, stripe, or sweep acquisition, so it orders against nothing else. */
     mutable std::mutex mutex_;
-    /** @brief Where a NEW slot's candidate list and an overflowed name draw from — see
-     *         @ref set_entry_resource. */
-    std::pmr::memory_resource* entry_mr_;
 };
 
 }  // namespace tr::graph
