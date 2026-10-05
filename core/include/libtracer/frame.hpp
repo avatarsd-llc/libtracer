@@ -217,19 +217,16 @@ class tlv_children_t {
        private:
         friend class tlv_children_t;
         explicit iterator(std::span<const std::byte> region) noexcept : rest_(region) { load(); }
-        /** @brief Parse the front header of `rest_` (already validated, so it cannot fail). */
-        void load() noexcept {
-            if (rest_.empty()) return;
-            const auto h =
-                grammar::parse_header(grammar::span_cursor{rest_}, grammar::crc_check_t::DEFER);
-            // Unreachable for a region `tlv_node_t::over` accepted; ending the walk keeps a
-            // broken invariant from reading past the region.
-            if (!h) {
-                rest_ = {};
-                return;
-            }
-            front_ = tlv_node_t(*h, rest_);
-        }
+        /**
+         * @brief Parse the front header of `rest_` (already validated, so it cannot fail).
+         *
+         * Defined OUT OF LINE in frame.cpp on purpose (#1859): inline here, every child walk
+         * in a translation unit adds a `grammar::parse_header` call site to it, and GCC 13
+         * then stops inlining `parse_header` into that unit's hot header readers
+         * (`read_fwd_header`, `peek_control` in fwd_router.cpp) — +55% on `compact-forward`.
+         * The pin on `read_fwd_header` in bench/symbol_ratchet.json trips if it happens again.
+         */
+        void load() noexcept;
 
         std::span<const std::byte> rest_{}; /**< @brief Unread region, front child first. */
         tlv_node_t front_{};                /**< @brief The cached front child. */
