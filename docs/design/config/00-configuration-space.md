@@ -237,6 +237,7 @@ is a knob the fragment does not state at all (#1244).
 | `kBusLinks` (`config.hpp:default_config_t::kBusLinks`) | module presence | `false` — opt-in since v0.17.0 (#1670) | menuconfig `CONFIG_LIBTRACER_BUS_LINKS`, default `n`; CAN is offered only with it |
 | `kSelfHealLinks` (`config.hpp:default_config_t::kSelfHealLinks`) | module presence | `false` — opt-in since v0.17.0 (#1670) | menuconfig `CONFIG_LIBTRACER_SELF_HEAL_LINKS`, default `n` (`integrations/esp-idf/libtracer/CMakeLists.txt:set(LIBTRACER_SELF_HEAL_LINKS true)`) |
 | `kSelfHealWorkerStackBytes` (`config.hpp:default_config_t::kSelfHealWorkerStackBytes`) | size | `0` — the platform default | menuconfig `CONFIG_LIBTRACER_SELF_HEAL_WORKER_STACK` (`integrations/esp-idf/libtracer/CMakeLists.txt:if(CONFIG_LIBTRACER_SELF_HEAL_WORKER_STACK)`) |
+| `kRxDrainFrames` / `kRxDrainBytes` (`config.hpp:default_config_t::kRxDrainFrames` / `config.hpp:default_config_t::kRxDrainBytes`) | ingress budget | 32 frames / 32,768 B per drain; `0` = none (ADR-0085) | menuconfig `CONFIG_LIBTRACER_WS_SERVER_RX_DRAIN_FRAMES` / `CONFIG_LIBTRACER_WS_SERVER_RX_DRAIN_BYTES` (`integrations/esp-idf/libtracer/CMakeLists.txt:if(DEFINED CONFIG_LIBTRACER_WS_SERVER_RX_DRAIN_FRAMES)`) |
 | `kInstrumentCounters` (`config.hpp:default_config_t::kInstrumentCounters`) | instrumentation | `false` — compiled out | inherited — only the core test build and `bench/`'s `LIBTRACER_INSTRUMENT_COUNTERS` bind it (#1664) |
 | `kFaultInjection` (`config.hpp:default_config_t::kFaultInjection`) | instrumentation | `false` — compiled out | inherited — only the core test build binds it, through `core/tests/instrumented/` (#1719) |
 | `kAllowInsecureTls` (`config.hpp:default_config_t::kAllowInsecureTls`) | capability | `false` — a SPEC `insecure` key is refused | inherited — only the `quic` workflow's second run binds it, through `core/tests/insecure-tls/` |
@@ -250,11 +251,13 @@ target and `guard_t`) and `LIBTRACER_PIN_INSTRUMENT` (folded into `kInstrumentCo
 list were deleted with the template (#1142).
 
 Each is documented at its declaration with what it costs and when to move it; that header is
-the reference, not this table. What matters here is the shape: **fifteen knobs, all named, all
+the reference, not this table. What matters here is the shape: **seventeen knobs, all named, all
 finite.** Three are counts (`kVertexLockStripes`, `kHazardReaderSlots`, `kEdgePinSlots`), one is a
 padding width, one is a per-target RAM ceiling, three are sizes (`kShareThresholdBytes`, the
 size-class table `kSizeClasses` whose last row is the heap backend's split point, and the
-thread stack size `kSelfHealWorkerStackBytes`), two are type bindings, one is a
+thread stack size `kSelfHealWorkerStackBytes`), two are an ingress budget (`kRxDrainFrames` and
+`kRxDrainBytes`, the frames and bytes a receive context reads before it waits for its core to
+idle), two are type bindings, one is a
 target fact rather than a preference, and two — `kBusLinks`, below, and `kSelfHealLinks` (the
 RFC-0014 S5 link-liveness engine, #1470) — state whether a *module* is present at all. `kSpinWaitSafe` says whether a task on this target may spin
 for a lock another task holds, and the guard in `mem_pool.hpp` reads it to refuse

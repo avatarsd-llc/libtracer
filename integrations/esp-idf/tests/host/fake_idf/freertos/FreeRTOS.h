@@ -58,3 +58,11 @@ typedef uint32_t TickType_t;
 #define pdMS_TO_TICKS(ms) \
     ((TickType_t)(((TickType_t)(ms) * (TickType_t)configTICK_RATE_HZ) / (TickType_t)1000U))
 #endif
+
+#ifndef portNUM_PROCESSORS
+/** @brief The host fake models a single-core chip: the shape the idle-starvation fix is for. */
+#define portNUM_PROCESSORS 1
+#endif
+
+/** @brief The core the caller runs on — always 0 on the single-core host model. */
+static inline BaseType_t xPortGetCoreID(void) { return 0; }

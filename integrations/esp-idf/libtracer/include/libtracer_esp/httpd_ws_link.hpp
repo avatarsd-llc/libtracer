@@ -761,6 +761,21 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
          * count means the producer is pushing to sessions long dead.
          */
         std::uint32_t tx_to_dead_peer = 0;
+        /**
+         * @brief Frames the socket write itself refused: `httpd_ws_send_frame_async` returned
+         *        an error on a session the link had just vouched for, queued or in-call.
+         *
+         * The send bound (`send_timeout_ms`) is what usually spends it: the peer's TCP window
+         * stayed shut for the whole bound, so the frame was dropped and the session kept (the
+         * #481 shape; three in a row condemn it, see `sessions_condemned`). Each one is also
+         * charged to the session's own `tx_drops`. Before this field the only trace was the
+         * `ws send failed` / `ws reply failed` WARN line, so a listener reading counters
+         * could see a reply go missing and count no drop. A frame cut off mid-write (#951)
+         * is counted here as well — the peer did not get it either — and its session is
+         * condemned on top (`sessions_condemned`); the two counters answer different
+         * questions and one event may feed both.
+         */
+        std::uint32_t tx_send_failed = 0;
         /** @brief Opening handshakes turned away — by the admission predicate (either
          *         refusal verdict, before or after the upgrade), by `max_peers`, or (#1247)
          *         by a FULL pending-handshake ledger, which is what a link with an auth hook
@@ -823,6 +838,21 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
          * the exposure the deadline exists for.
          */
         std::uint32_t auth_expired = 0;
+        /**
+         * @brief Times the receive path stopped reading because its drain budget was spent
+         *        and waited for its core's idle task to run (ADR-0085).
+         *
+         * Not a drop: the unread bytes stayed in the socket and were read after the wait.
+         * Zero on a link that never saturates its core. A count that tracks inbound traffic
+         * means a peer is sending faster than this node can serve and the TCP window is
+         * doing the pacing — the budget (`tr::net::kRxDrainFrames` /
+         * `tr::net::kRxDrainBytes`) is working, not failing.
+         *
+         * Zero is ambiguous: it also reads zero when the link is not pacing at all — both
+         * budgets bound to 0, or the idle hook could not be installed (IDF's per-core hook
+         * table was full; logged once at construction as "ingress unpaced").
+         */
+        std::uint32_t rx_drain_waits = 0;
     };
 
     /**
@@ -838,15 +868,15 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      * Projected from this link's own richer counters: an ingress frame refused at the
      * abuse cap is the `malformed_rx` class (the peer broke the agreed bound and is
      * dropped with it), an ingress allocation failure — the global heap's, or the injected
-     * @ref rx_backend's — is `dropped_rx` (backpressure), and both egress classes — an
-     * enqueue that found no slot/queue/heap, and a send to a peer that had already departed
-     * — sum into `dropped_tx`.
+     * @ref rx_backend's — is `dropped_rx` (backpressure), and the three egress classes — an
+     * enqueue that found no slot/queue/heap, a send to a peer that had already departed, and
+     * a frame the socket write refused — sum into `dropped_tx`.
      */
     [[nodiscard]] transport_drop_stats_t drop_stats() const noexcept override {
         const stats_t s = stats();
         return {static_cast<std::uint64_t>(s.rx_dropped_alloc) + s.rx_dropped_pool,
                 s.rx_dropped_oversize,
-                static_cast<std::uint64_t>(s.enqueue_drops) + s.tx_to_dead_peer};
+                static_cast<std::uint64_t>(s.enqueue_drops) + s.tx_to_dead_peer + s.tx_send_failed};
     }
 
     /** @brief TX work slots claimed RIGHT NOW (filling, queued, or sending) — across the
@@ -1365,6 +1395,9 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     void refuse_upgraded(int fd);
     static void on_session_closed(void* slot_ctx);  // free_ctx_fn: a peer departed
     static void tx_work(void* work_arg);            // httpd_queue_work fn: one queued send
+    /** @brief Send one posted item on the httpd task: @ref tx_work's body, also run by a
+     *         drain parked inside @ref pace_rx, which leaves the slot to the loop's copy. */
+    static void send_posted(tx_work_t* work, bool release_slot);
     /** @brief Write a RETAINED item's frame (RFC-0028 §6.9): its slot bytes, then its value's
      *         links, each through the session's send override inside @ref tx_work's bracket. */
     static esp_err_t send_retained(httpd_handle_t handle, int fd, const tx_work_t& work);
@@ -1373,6 +1406,47 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
 
     // --- instance handlers (run on the httpd task) ---
     esp_err_t on_data_frame(httpd_req_t* req);  // recv one WS frame, (reassemble,) deliver
+    /**
+     * @brief Charge one inbound frame of @p frame_bytes to the current DRAIN, first waiting
+     *        for this core's idle task to run if the drain's budget is already spent
+     *        (ADR-0085; httpd task only).
+     *
+     * A drain is the run of frames this link consumes while its core never idles. The
+     * budget is the build's `tr::net::kRxDrainFrames` / `tr::net::kRxDrainBytes`; either
+     * one spent ends the drain. The wait blocks the httpd task on a semaphore the core's
+     * idle hook gives, so the frame's payload, and everything queued behind it, stays in
+     * the socket until then, and TCP flow control holds the peer. No timer, no clock read.
+     * Compiled to nothing when both budgets are zero. Every frame is charged, control frames
+     * (ping, close) included: each costs the same handler pass. A drain belongs to the core
+     * it started on; a task that migrated starts a new one (see ADR-0085, dual core).
+     *
+     * The drain also ends when the in-call replies it wrote reach a quarter of lwIP's send
+     * buffer, and once it has read `kRxDrainNagleFrames` frames back to back the session's
+     * socket @p fd is switched to Nagle until its next light drain (ADR-0085 §7): while
+     * this task holds unread ingress, lwIP drops the peer's data-bearing segments and the
+     * ACKs they carry, so a burst of two-segment replies under TCP_NODELAY would fill the
+     * segment queue and the reply write would wait for an ACK only this task can release.
+     *
+     * The wait is also where this link's queued sends go out while it lasts. The parked
+     * task is the httpd task, the one that runs them, so a send posted by another task
+     * (@ref egress_pending_) is sent from inside the wait (@ref send_posted_in_park) and
+     * the wait goes on: egress wakes the park, ingress waits for idle, and no peer can buy
+     * ingress by provoking egress. The frame is not read before the core idles.
+     */
+    void pace_rx(int fd, std::size_t frame_bytes);
+    /** @brief Set or clear TCP_NODELAY on @p fd (best-effort; see `kRxDrainNagleFrames`). */
+    static void set_nodelay(int fd, bool on);
+    /** @brief Wake a drain parked for idle so it sends the item just posted (any task; the
+     *         producer's side of the idle-gate handshake, after the count and the mark). */
+    void egress_posted() noexcept;
+    /** @brief One posted egress item has been sent (or refused before any sender took it). */
+    void egress_drained() noexcept;
+    /**
+     * @brief Send every item posted to the httpd task from inside a parked drain
+     *        (httpd task only, inside @ref pace_rx's wait).
+     * @return Whether anything was sent.
+     */
+    bool send_posted_in_park();
     /**
      * @brief Turn @p fd into a peer slot: enforce `max_peers`, take a free or fresh slot,
      *        name it, stamp its identity and its authentication state (httpd task only;
@@ -1853,6 +1927,8 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
     std::int64_t auth_deadline_us_ = 0;
     std::atomic<std::uint32_t> auth_rejected_{0};
     std::atomic<std::uint32_t> auth_expired_{0};
+    /** @brief See @ref stats_t::rx_drain_waits. Bumped on the httpd task. */
+    std::atomic<std::uint32_t> rx_drain_waits_{0};
     /**
      * @brief The periodic `esp_timer` that fires the deadline sweep, as an opaque pointer so
      *        this header names no `esp_timer` type; null when auth is not configured.
@@ -2016,6 +2092,8 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      */
     std::atomic<std::int64_t> tx_wait_futile_until_us_{0};
     std::atomic<std::uint32_t> tx_to_dead_peer_{0};
+    /** @brief See @ref stats_t::tx_send_failed. Bumped where the send result is judged. */
+    std::atomic<std::uint32_t> tx_send_failed_{0};
     std::atomic<std::uint32_t> peers_refused_{0};
     std::atomic<std::uint32_t> sessions_condemned_{0};
     std::atomic<std::uint32_t> rx_dropped_oversize_{0};
@@ -2110,6 +2188,33 @@ class httpd_ws_link_t : public transport_t, public bus_link_t {
      *         against @ref kDefaultRxScratchBytes, and zeroed if the allocation failed so
      *         the size and the pointer can never disagree. */
     std::size_t rx_scratch_bytes_ = 0;
+    /** @brief The idle-gate epoch the current drain began in (see @ref pace_rx). httpd
+     *         task only, like @ref rx_scratch_. */
+    std::uint32_t rx_drain_epoch_ = 0;
+    /** @brief The core the current drain began on; its idle gate is the one compared. */
+    std::size_t rx_drain_core_ = 0;
+    /** @brief Frames consumed in the current drain (see @ref pace_rx). */
+    std::size_t rx_drain_frames_ = 0;
+    /** @brief Payload bytes consumed in the current drain (see @ref pace_rx). */
+    std::size_t rx_drain_bytes_ = 0;
+    /** @brief In-call reply bytes written in the current drain; the drain ends when they
+     *         reach a quarter of lwIP's send buffer (ADR-0085 §7). httpd task only. */
+    std::size_t rx_drain_tx_bytes_ = 0;
+    /** @brief The session socket currently switched from TCP_NODELAY to Nagle because a
+     *         drain showed the flood shape, or -1 (ADR-0085 §7). httpd task only. */
+    int rx_nagle_fd_ = -1;
+    /**
+     * @brief Sends this link posted to the httpd task that have not been sent yet. Raised
+     *        by the posting task before it marks the item (see `tx_work_t::state`), lowered
+     *        by whichever sender sends it, the loop's copy (@ref tx_work) or a parked drain
+     *        (@ref send_posted_in_park), or by the poster when the enqueue was refused
+     *        untouched. Non-zero tells a parked drain there is egress to run. `seq_cst` on
+     *        both sides: it is one half of the idle-gate handshake.
+     */
+    std::atomic<std::uint32_t> egress_pending_{0};
+    /** @brief The next post ticket (`tx_work_t::ticket`): the link's post order, which a
+     *         parked drain sends in. Relaxed: the kQueued store publishes the value. */
+    std::atomic<std::uint32_t> egress_ticket_{0};
     /** @brief Once-allocated TX work-slot pool: claimed lock-free by sending tasks,
      *         released by the httpd task as each send drains. */
     std::unique_ptr<tx_slot_t[]> tx_pool_;

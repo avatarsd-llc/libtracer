@@ -8,13 +8,23 @@
 
 #include "fake_httpd.hpp"
 
+#include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/socket.h>
 
+#include <array>
+#include <atomic>
+#include <cassert>
 #include <cerrno>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <utility>
 #include <vector>
+
+#include "esp_freertos_hooks.h"
+#include "freertos/semphr.h"
 
 namespace fake_httpd {
 
@@ -48,7 +58,35 @@ thread_local request_scope_t t_req;
 /** @brief The route the last httpd_register_uri_handler installed (see the header). */
 route_t g_route;
 
+/** @brief Idle-hook entries per core — IDF's MAX_HOOKS. */
+constexpr std::size_t kIdleHookSlots = 8;
+/** @brief The per-core idle hook table (`freertos_hooks.c`), guarded by @ref g_hooks_m. */
+std::array<std::array<esp_freertos_idle_cb_t, kIdleHookSlots>, portNUM_PROCESSORS> g_idle_hooks{};
+std::mutex g_hooks_m;
+/** @brief Callers inside the fake `xSemaphoreTake` right now. */
+std::atomic<std::size_t> g_sem_waiters{0};
+
 }  // namespace
+
+std::size_t run_idle_hooks(unsigned core) {
+    if (core >= portNUM_PROCESSORS) return 0;
+    // Snapshot under the lock, run outside it: a hook gives a semaphore, and the woken
+    // thread may install or remove hooks.
+    std::array<esp_freertos_idle_cb_t, kIdleHookSlots> hooks{};
+    {
+        const std::lock_guard lock(g_hooks_m);
+        hooks = g_idle_hooks[core];
+    }
+    std::size_t ran = 0;
+    for (auto* hook : hooks)
+        if (hook != nullptr) {
+            (void)hook();
+            ++ran;
+        }
+    return ran;
+}
+
+std::size_t semaphore_waiters() { return g_sem_waiters.load(std::memory_order_seq_cst); }
 
 route_t registered_route() { return g_route; }
 
@@ -513,6 +551,8 @@ void server_t::run_frame_hook() {
     if (hook) hook();  // unlocked: the hook drives a concurrent teardown
 }
 
+void server_t::set_sustained_ingress(bool sustained) { sustained_ingress_.store(sustained); }
+
 esp_err_t server_t::deliver_frame(int fd, std::span<const std::byte> body, bool final,
                                   httpd_ws_type_t type) {
     // The route comes from the SESSION (httpd_parse.c:796,824), so this dispatches
@@ -535,6 +575,8 @@ esp_err_t server_t::deliver_frame(int fd, std::span<const std::byte> body, bool 
     req.fd = fd;
     const esp_err_t err = handler(&req);
     t_pending = pending_frame_t{};
+    // Back in select() with nothing readable: the core idles (see set_sustained_ingress).
+    if (!sustained_ingress_.load()) (void)run_idle_hooks();
 
     // httpd_req_cleanup (httpd_parse.c:733-735): a socket-table ctx that no longer
     // matches the request's is freed HERE, with the STORED destructor, after the handler
@@ -730,4 +772,67 @@ extern "C" int __wrap_shutdown(int fd, int how) {
 httpd_ws_client_info_t httpd_ws_get_fd_info(httpd_handle_t handle, int fd) {
     (void)handle;
     return fake_httpd::instance().fd_info(fd);
+}
+
+// --- esp_freertos_hooks.h ---------------------------------------------------------------
+
+esp_err_t esp_register_freertos_idle_hook_for_cpu(esp_freertos_idle_cb_t new_idle_cb,
+                                                  UBaseType_t cpuid) {
+    if (cpuid >= portNUM_PROCESSORS) return ESP_ERR_INVALID_ARG;
+    const std::lock_guard lock(fake_httpd::g_hooks_m);
+    for (auto& slot : fake_httpd::g_idle_hooks[cpuid])
+        if (slot == nullptr) {
+            slot = new_idle_cb;
+            return ESP_OK;
+        }
+    return ESP_ERR_NO_MEM;
+}
+
+void esp_deregister_freertos_idle_hook_for_cpu(esp_freertos_idle_cb_t old_idle_cb,
+                                               UBaseType_t cpuid) {
+    if (cpuid >= portNUM_PROCESSORS) return;
+    const std::lock_guard lock(fake_httpd::g_hooks_m);
+    for (auto& slot : fake_httpd::g_idle_hooks[cpuid])
+        if (slot == old_idle_cb) slot = nullptr;
+}
+
+// --- freertos/semphr.h: the binary semaphore the idle gate parks on ---------------------
+//
+// fake_twai.cpp carries the instrumented COUNTING model the TWAI link needs; the two fakes
+// are never linked into one binary. This one is a plain count under a mutex.
+
+/** @brief A FreeRTOS semaphore: a count, a ceiling, and its parked callers. */
+struct fake_semaphore_t {
+    std::mutex m;               /**< @brief Guards @ref count. */
+    std::condition_variable cv; /**< @brief Signalled by every give. */
+    unsigned count = 0;         /**< @brief Counts available. */
+    unsigned max_count = 1;     /**< @brief The ceiling a give will not pass. */
+};
+
+SemaphoreHandle_t xSemaphoreCreateBinaryStatic(StaticSemaphore_t* /*storage*/) {
+    // Process-lifetime, as the link's static storage is: never deleted.
+    return new fake_semaphore_t();
+}
+
+BaseType_t xSemaphoreTake(SemaphoreHandle_t semaphore, TickType_t ticks_to_wait) {
+    std::unique_lock lock(semaphore->m);
+    fake_httpd::g_sem_waiters.fetch_add(1, std::memory_order_seq_cst);
+    // Only the block-forever form is modelled: it is the only one the idle gate uses. A
+    // future caller with a finite wait would silently get a non-blocking take; refuse it.
+    assert(ticks_to_wait == portMAX_DELAY);
+    semaphore->cv.wait(lock, [semaphore] { return semaphore->count > 0; });
+    fake_httpd::g_sem_waiters.fetch_sub(1, std::memory_order_seq_cst);
+    if (semaphore->count == 0) return pdFALSE;
+    --semaphore->count;
+    return pdTRUE;
+}
+
+BaseType_t xSemaphoreGive(SemaphoreHandle_t semaphore) {
+    {
+        const std::lock_guard lock(semaphore->m);
+        if (semaphore->count >= semaphore->max_count) return pdFALSE;
+        ++semaphore->count;
+    }
+    semaphore->cv.notify_one();
+    return pdTRUE;
 }

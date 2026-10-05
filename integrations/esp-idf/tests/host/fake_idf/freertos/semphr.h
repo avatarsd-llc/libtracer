@@ -49,3 +49,18 @@ BaseType_t xSemaphoreGive(SemaphoreHandle_t semaphore);
  */
 BaseType_t xSemaphoreGiveFromISR(SemaphoreHandle_t semaphore,
                                  BaseType_t* higher_priority_task_woken);
+
+/** @brief Storage for a statically created semaphore. The fake allocates its model on the
+ *         heap and ignores this; the real one holds the whole kernel object. */
+typedef struct {
+    void* unused; /**< @brief Placeholder; never read. */
+} StaticSemaphore_t;
+
+/**
+ * @brief Create a BINARY semaphore (max 1, starting empty) in caller-provided storage.
+ *
+ * Modelled by fake_httpd.cpp, for the ingress drain's idle gate. fake_twai.cpp models the
+ * counting API the TWAI link uses; the two are never linked into one binary, so each fake
+ * owns the semaphore model of the one link it stands behind.
+ */
+SemaphoreHandle_t xSemaphoreCreateBinaryStatic(StaticSemaphore_t* storage);

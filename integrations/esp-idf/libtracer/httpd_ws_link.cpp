@@ -19,6 +19,7 @@
 #include <sys/time.h>
 
 #include <array>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
@@ -32,9 +33,11 @@
 #include <utility>
 #include <vector>
 
+#include "esp_freertos_hooks.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 namespace tr::net {
@@ -173,6 +176,117 @@ constexpr std::size_t kStackHeadroomFloor =
  */
 constexpr std::size_t kMaxFrameBytes = 32768;
 
+/** @brief Whether this build bounds a drain at all: either budget non-zero (ADR-0085). */
+constexpr bool kRxDrainPaced = kRxDrainFrames != 0 || kRxDrainBytes != 0;
+
+/**
+ * @brief lwIP's per-connection segment queue and send buffer, the two limits a drain's
+ *        in-call replies run into (ADR-0085 §7).
+ *
+ * Both are the board's lwIP configuration (`lwipopts.h`, from `CONFIG_LWIP_TCP_SND_BUF_DEFAULT`
+ * and lwIP's own `TCP_SND_QUEUELEN` formula), reached through the socket headers this file
+ * includes. The host build has no lwIP; it binds lwIP's values at IDF's defaults so the
+ * host test exercises the same arithmetic.
+ */
+#if defined(TCP_SND_QUEUELEN)
+constexpr std::size_t kTcpSndQueueLen = TCP_SND_QUEUELEN;
+#else
+constexpr std::size_t kTcpSndQueueLen = 16;  // (4 * 5760 + 1439) / 1440
+#endif
+#if defined(TCP_SND_BUF)
+constexpr std::size_t kTcpSndBuf = TCP_SND_BUF;
+#else
+constexpr std::size_t kTcpSndBuf = 5760;
+#endif
+
+/**
+ * @brief One core's IDLE GATE: how many times its idle task has run, and the semaphore a
+ *        link whose drain budget is spent waits on until it runs again (ADR-0085).
+ *
+ * The idle task is the one task that runs only when nothing else on its core wants to, so
+ * "it has run" is the event a starved core is missing — no clock, no timer, no tick
+ * arithmetic. `epoch` has ONE writer, that core's idle hook, which is why it advances by a
+ * load and a store rather than an RMW (a libatomic call on a core without one, every idle
+ * iteration). `waiters` is the hook's test for "is anybody parked", so a gate nobody waits
+ * on costs the idle loop one store and one load.
+ *
+ * The pair is a Dekker handshake, both sides `seq_cst`: a waiter counts itself in, then
+ * re-reads `epoch`; the hook advances `epoch`, then reads `waiters`. Whichever goes second
+ * sees the other, so a waiter either finds the epoch already moved or is given the
+ * semaphore. A give nobody takes saturates the binary semaphore at one, and the waiter's
+ * loop re-tests the epoch, so a stale give costs one extra pass and never a missed wake.
+ *
+ * Two links (or two servers) parked on one core share the binary semaphore: one give wakes
+ * one of them, and the other wakes on the next idle pass, which comes once the first has
+ * read its budget and parked again. Liveness holds; fairness is one drain late.
+ *
+ * The idle hook is not the only giver. A producer that has just posted egress work to the
+ * httpd task (@ref httpd_ws_link_t::egress_posted) gives the same semaphore, with the same
+ * handshake against `waiters`: the httpd task is the one drain of its own control queue, so
+ * a drain parked for idle must not hold the sends and closes it alone can run. That wake
+ * reads one frame and parks again (see @ref httpd_ws_link_t::pace_rx).
+ */
+struct idle_gate_t {
+    std::atomic<std::uint32_t> epoch{0};   /**< @brief Idle-task iterations, mod 2^32. */
+    std::atomic<std::uint32_t> waiters{0}; /**< @brief Links parked on @ref sem right now. */
+    std::atomic<bool> hooked{false};       /**< @brief The idle hook is installed. */
+    StaticSemaphore_t sem_storage{};       /**< @brief @ref sem's storage: no heap, no failure. */
+    SemaphoreHandle_t sem = nullptr;       /**< @brief Given by the hook while a link waits. */
+};
+
+/** @brief One gate per core: a starved core is a per-core fact (portNUM_PROCESSORS). */
+std::array<idle_gate_t, portNUM_PROCESSORS> g_idle_gates;
+
+/**
+ * @brief Core @p Core's idle hook: advance its epoch and wake a parked link.
+ *
+ * Runs ON the idle task, which must never block: `xSemaphoreGive` does not. Answers true,
+ * so it never holds the core out of its low-power wait.
+ */
+template <std::size_t Core>
+bool on_core_idle() {
+    idle_gate_t& gate = g_idle_gates[Core];
+    gate.epoch.store(gate.epoch.load(std::memory_order_relaxed) + 1, std::memory_order_seq_cst);
+    if (gate.waiters.load(std::memory_order_seq_cst) != 0) (void)xSemaphoreGive(gate.sem);
+    return true;
+}
+
+/** @brief The hook of every core, indexed by core (the IDF hook takes no context). */
+template <std::size_t... Core>
+constexpr std::array<esp_freertos_idle_cb_t, sizeof...(Core)> idle_hooks(
+    std::index_sequence<Core...> /*cores*/) {
+    return {&on_core_idle<Core>...};
+}
+
+/**
+ * @brief Install every core's idle hook, once per process.
+ *
+ * Called from each link constructor; the first one installs, the rest find it done. The
+ * hooks are never removed: one store and one load per idle iteration is what a process
+ * that once served a link keeps paying, and removing them would race a link being torn
+ * down on one core against a hook running on another. A core whose hook table is full
+ * (IDF holds eight per core) is reported once and left UNPACED — a link must never wait
+ * on an idle hook that will not run.
+ */
+void install_idle_hooks() {
+    if constexpr (!kRxDrainPaced) return;
+    static const bool installed = [] {
+        constexpr auto hooks = idle_hooks(std::make_index_sequence<portNUM_PROCESSORS>{});
+        for (std::size_t core = 0; core < hooks.size(); ++core) {
+            idle_gate_t& gate = g_idle_gates[core];
+            gate.sem = xSemaphoreCreateBinaryStatic(&gate.sem_storage);
+            const bool ok = esp_register_freertos_idle_hook_for_cpu(
+                                hooks[core], static_cast<UBaseType_t>(core)) == ESP_OK;
+            if (!ok)
+                ESP_LOGE(kTag, "idle hook not installed on core %u: ingress unpaced",
+                         (unsigned)core);
+            gate.hooked.store(ok, std::memory_order_release);
+        }
+        return true;
+    }();
+    (void)installed;
+}
+
 /**
  * @brief Sockets reserved beyond the peer cap: httpd's internal working sockets
  *        plus headroom so the (cap+1)th peer is still ACCEPTED and can be refused
@@ -229,6 +343,55 @@ constexpr std::uint8_t kMaxConsecutiveTxDrops = 3;
  * and the frame-atomicity work point at); it is a fact about the API in use, not a policy.
  */
 constexpr std::uint32_t kIdfWsWriteLegs = 2;
+
+/**
+ * @brief Frames a drain reads back to back before the session's socket is switched from
+ *        TCP_NODELAY to Nagle, so the drain's remaining replies coalesce (ADR-0085 §7).
+ *
+ * Why the socket must change under a flood, and only then. The receive context is the
+ * task that writes the in-call replies, and while it holds unread ingress lwIP holds the
+ * peer's data segments as REFUSED (the socket's recv mbox is full) and drops every further
+ * data-bearing segment from that peer before processing it, ACK numbers included
+ * (`tcp_in.c`, the `refused_data` test at the top of `tcp_input`'s per-pcb path). The
+ * peer keeps piggybacking its ACKs on data for as long as it has data to send, so the
+ * board's own reply segments stay unacknowledged until the board READS. Under
+ * TCP_NODELAY every reply is two segments (header and payload, @ref kIdfWsWriteLegs), so
+ * a drain of @ref kRxDrainFrames small replies queues 2x that many against
+ * @ref kTcpSndQueueLen; the write that finds the queue full waits for an ACK only the
+ * waiting task can release, spends the send bound, and fails: one reply refused, or a
+ * header on the wire with its payload lost, and three in a row condemn a healthy session.
+ *
+ * Nagle is TCP's own answer: with unacknowledged data outstanding, small writes gather in
+ * one unsent segment until it fills or an ACK arrives, so a drain's replies cost one or two
+ * segments, never the queue. It is wrong for the interactive case (a lone reply's payload
+ * leg would wait a delayed-ACK behind its header leg), so it is applied only once a drain
+ * has shown the flood shape, this many frames without the core idling, and held until the
+ * peer's next LIGHT drain, one that ends by idle before reaching it. A peer that flooded
+ * once and then only receives never produces that drain and keeps paying one delayed ACK
+ * per push burst until it sends lightly again or reconnects. The threshold is half the
+ * queue in frames: what the drain wrote under TCP_NODELAY before switching can never fill
+ * it.
+ */
+constexpr std::size_t kRxDrainNagleFrames = kTcpSndQueueLen / (2 * kIdfWsWriteLegs);
+
+/**
+ * @brief In-call reply bytes a drain may write before it ends, whatever its frame count:
+ *        a quarter of lwIP's send buffer (ADR-0085 §7).
+ *
+ * The byte half of @ref kRxDrainNagleFrames. Coalesced or not, the replies of a drain stay
+ * unacknowledged until the next drain's reads let the peer's ACKs through, so the replies
+ * of about two drains are outstanding at once. Bounding a drain's reply bytes to a quarter
+ * of @ref kTcpSndBuf keeps that total under half of it, and a reply write never waits for
+ * send-buffer space the writer itself is withholding. Frames with small replies never
+ * reach it; a drain of large replies ends sooner and parks more often: the receiver pays.
+ *
+ * In-call replies only. Pushes posted by other tasks and sent from inside the park
+ * (@ref send_posted_in_park) are outside this bound: one pool depth of them can go out
+ * while the peer's ACKs are withheld, and four pushes of 1.5 KiB or more exceed
+ * @ref kTcpSndBuf, which ends in a counted `tx_send_failed` or a condemned session. A
+ * single in-call reply larger than the send buffer has the same caveat (pre-existing).
+ */
+constexpr std::size_t kRxDrainTxBytes = kTcpSndBuf / 4;
 
 /**
  * @brief The task-watchdog period, seconds — the numerator of the send bound.
@@ -1124,6 +1287,31 @@ struct httpd_ws_link_t::tx_work_t {
      *        link's life and never null on a queued item.
      */
     tx_slot_t* slot = nullptr;
+    /**
+     * @brief Where this item is between its enqueue and its send (ADR-0085).
+     *
+     * A posted item has TWO possible senders: the httpd loop's copy of it (@ref tx_work)
+     * and the receive context parked inside @ref pace_rx, which runs the link's posted
+     * sends rather than hold them. Whoever moves the state from @ref kQueued to @ref kTaken
+     * sends; the other finds the move done and only releases the slot. @ref kRefused is the
+     * producer's word that the enqueue failed while the park was sending, so no httpd copy
+     * will ever come and the park releases. Zero outside that window.
+     */
+    std::atomic<std::uint8_t> state{0};
+    /**
+     * @brief This item's place in the link's post order: drawn from `egress_ticket_` before
+     *        the @ref kQueued store publishes it. The control queue is FIFO in post order,
+     *        and a parked drain sends the lowest ticket first (@ref send_posted_in_park), so
+     *        two items from one producer reach the wire in the order they were posted
+     *        whichever party sends them. Compared modulo 2^32.
+     */
+    std::uint32_t ticket = 0;
+    static constexpr std::uint8_t kQueued = 1; /**< @brief Complete; posted or being posted. */
+    static constexpr std::uint8_t kTaken = 2;  /**< @brief A sender has it. */
+    static constexpr std::uint8_t kSentInPark =
+        3; /**< @brief The park sent it; the copy releases. */
+    static constexpr std::uint8_t kRefused =
+        4;                              /**< @brief Enqueue failed mid-send; the park releases. */
     std::unique_ptr<std::byte[]> owned; /**< @brief Heap payload (the exceptional tail only). */
     /**
      * @brief A RETAINED item's payload (RFC-0028 §6.9): @ref payload then holds the frame's
@@ -1260,6 +1448,7 @@ httpd_ws_link_t::httpd_ws_link_t(std::uint16_t bind_port, const httpd_ws_config_
       tx_large_slots_(config.tx_large.slots) {
     const std::size_t max_peers = config.max_peers;
     const std::uint32_t send_timeout_ms = config.send_timeout_ms;
+    install_idle_hooks();      // before any handler can run (ADR-0085)
     if (!open_gate()) return;  // ok() stays false; nothing was registered
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port = bind_port;
@@ -1333,6 +1522,7 @@ httpd_ws_link_t::httpd_ws_link_t(httpd_handle_t external, const char* uri_patter
       tx_large_slots_(config.tx_large.slots) {
     const std::size_t max_peers = config.max_peers;
     const std::uint32_t send_timeout_ms = config.send_timeout_ms;
+    install_idle_hooks();      // before any handler can run (ADR-0085)
     if (!open_gate()) return;  // ok() stays false; nothing was registered
     // The adopted server's httpd_config_t belongs to the caller and esp_http_server
     // exposes no reader for it, so the clamp uses IDF's default send_wait_timeout — the
@@ -1615,6 +1805,7 @@ void httpd_ws_link_t::release_tx_work(tx_work_t* work) {
         work->large_busy = nullptr;
         flag->store(false, std::memory_order_release);
     }
+    work->state.store(0, std::memory_order_relaxed);  // every sender is done with it
     work->slot->busy.store(false, std::memory_order_release);
 }
 
@@ -2186,6 +2377,10 @@ void httpd_ws_link_t::refuse_upgraded(int fd) {
     (void)send_now(nullptr, fd, HTTPD_WS_TYPE_CLOSE,
                    std::span<const std::byte>(payload.data(), 2 + refusal_reason_.size()));
     condemn(fd);
+    // Its frame went through the drain budget like any other, so it may be the socket a drain
+    // put on Nagle (ADR-0085 §7). It has no session for on_session_closed to clear that from,
+    // so it is cleared here: a recycled descriptor starts on TCP_NODELAY like every other.
+    if (rx_nagle_fd_ == fd) rx_nagle_fd_ = -1;
 }
 
 httpd_ws_link_t::session_t* httpd_ws_link_t::claim_session(int fd, bool authenticated) {
@@ -2273,6 +2468,142 @@ httpd_ws_link_t::session_t* httpd_ws_link_t::claim_session(int fd, bool authenti
     return slot;
 }
 
+void httpd_ws_link_t::set_nodelay(int fd, bool on) {
+    const int value = on ? 1 : 0;
+    // Best-effort like bound_socket: a socket that cannot take the option keeps what it
+    // had, which is the pre-ADR-0085 behaviour for that one peer.
+    if (::setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &value, sizeof(value)) != 0)
+        ESP_LOGD(kTag, "TCP_NODELAY=%d not applied fd=%d", value, fd);
+}
+
+void httpd_ws_link_t::pace_rx(int fd, std::size_t frame_bytes) {
+    if constexpr (!kRxDrainPaced) return;
+    const auto core = static_cast<std::size_t>(xPortGetCoreID());
+    idle_gate_t& gate = g_idle_gates[core];
+    if (!gate.hooked.load(std::memory_order_acquire)) return;
+    std::uint32_t epoch = gate.epoch.load(std::memory_order_seq_cst);
+    // An unpinned httpd task that migrated compares against a different core's epoch, which
+    // means nothing; it starts a new drain on the core it is now on. The budget is therefore
+    // approximate for such a task (ADR-0085), never a hang: it waits on the gate it is on.
+    if (core != rx_drain_core_) {
+        rx_drain_core_ = core;
+        rx_drain_epoch_ = epoch - 1;  // any value but `epoch`: forces the reset below
+    }
+    // The drain is the run of frames since this core last idled; an epoch that moved since
+    // the previous frame starts a new one. Otherwise a spent budget waits for the idle
+    // task. While it waits it is still the httpd task, the one drain of this link's queued
+    // sends, so a send posted to it by another task (egress_pending_) is RUN FROM HERE,
+    // on this task, the socket write and all, and the park goes on. The frame stays unread:
+    // egress wakes the park, ingress waits for idle, and a peer who can make this link
+    // post a send per frame (a subscriber over another link, an app that replies off-task)
+    // buys no ingress with it. The waiter counts itself in, THEN re-reads the epoch and the
+    // pending count (the handshake on idle_gate_t, which egress_posted joins from the
+    // producer's side), so neither an idle pass nor a post in between is slept through.
+    // Returning instead, to let the server loop run the item, is not an option: IDF has
+    // consumed the frame's first header byte before this handler is called
+    // (httpd_parse.c httpd_req_new -> httpd_ws_get_frame_type), so a handler that returns
+    // without the payload desynchronises the stream.
+    // The third way a drain ends is on its own EGRESS: the in-call reply bytes it wrote
+    // (kRxDrainTxBytes), so that what is unacknowledged never outgrows the send buffer
+    // while this task is the one holding the ACKs back (see kRxDrainNagleFrames).
+    const bool spent = (kRxDrainFrames != 0 && rx_drain_frames_ >= kRxDrainFrames) ||
+                       (kRxDrainBytes != 0 && rx_drain_bytes_ >= kRxDrainBytes) ||
+                       rx_drain_tx_bytes_ >= kRxDrainTxBytes;
+    if (epoch == rx_drain_epoch_ && spent) {
+        rx_drain_waits_.fetch_add(1, std::memory_order_relaxed);
+        gate.waiters.fetch_add(1, std::memory_order_seq_cst);
+        while (gate.epoch.load(std::memory_order_seq_cst) == epoch) {
+            if (egress_pending_.load(std::memory_order_seq_cst) != 0 && send_posted_in_park())
+                continue;  // more may have been posted while those went out
+            (void)xSemaphoreTake(gate.sem, portMAX_DELAY);
+        }
+        gate.waiters.fetch_sub(1, std::memory_order_seq_cst);
+        epoch = gate.epoch.load(std::memory_order_seq_cst);
+    }
+    if (epoch != rx_drain_epoch_) {
+        // A drain that ended by idle BEFORE the flood shape showed is a light load: the
+        // session that was put on Nagle gets TCP_NODELAY back. One that reached the shape
+        // keeps Nagle through the next drain, since its coalesced segments may still be
+        // unacknowledged and the next drain's first replies would otherwise queue behind
+        // them under TCP_NODELAY. Interactive peers never reach the shape and never flip.
+        if (rx_nagle_fd_ >= 0 && rx_drain_frames_ < kRxDrainNagleFrames) {
+            set_nodelay(rx_nagle_fd_, true);
+            rx_nagle_fd_ = -1;
+        }
+        rx_drain_epoch_ = epoch;
+        rx_drain_frames_ = 0;
+        rx_drain_bytes_ = 0;
+        rx_drain_tx_bytes_ = 0;
+    }
+    ++rx_drain_frames_;
+    rx_drain_bytes_ += frame_bytes;
+    // The flood shape: this many frames without the core idling. From here the drain's
+    // replies coalesce. Switched on the session being drained, before its reply is written.
+    if (rx_drain_frames_ >= kRxDrainNagleFrames && rx_nagle_fd_ != fd) {
+        if (rx_nagle_fd_ >= 0) set_nodelay(rx_nagle_fd_, true);
+        set_nodelay(fd, false);
+        rx_nagle_fd_ = fd;
+    }
+}
+
+void httpd_ws_link_t::egress_posted() noexcept {
+    if constexpr (!kRxDrainPaced) return;
+    // The producer's side of the idle_gate_t handshake, after it has raised the pending
+    // count and marked the item kQueued: a drain that counted itself in before those stores
+    // sees `waiters` here and is given the semaphore; one that counts itself in after them
+    // re-reads the count and runs the item before it sleeps. A give nobody takes saturates
+    // the binary semaphore and costs the next waiter one extra pass. Every core's gate is
+    // tested, because a producer does not know which core the httpd task is parked on; a
+    // gate with no waiter costs one load.
+    for (idle_gate_t& gate : g_idle_gates)
+        if (gate.waiters.load(std::memory_order_seq_cst) != 0) (void)xSemaphoreGive(gate.sem);
+}
+
+void httpd_ws_link_t::egress_drained() noexcept {
+    if constexpr (!kRxDrainPaced) return;
+    egress_pending_.fetch_sub(1, std::memory_order_seq_cst);
+}
+
+bool httpd_ws_link_t::send_posted_in_park() {
+    // Runs on the httpd task, inside pace_rx's wait, where nothing of this task's is
+    // mid-write: the handler has read a header and nothing since. Every slot whose item is
+    // kQueued is sent here exactly as tx_work would send it, and is left BUSY: the server
+    // loop still holds its copy of the item, which will find kSentInPark and release the
+    // slot. The producer is the one party that can still be racing: an enqueue refused
+    // after this scan took the item leaves kRefused in place of kTaken, and then no copy
+    // is coming and the slot is released here. The pending count is lowered by the send
+    // itself (send_posted), so a loop that finds nothing to send goes back to sleep.
+    //
+    // In POST order, never slot order: the control queue is FIFO, and a session's frames
+    // (an LKV update behind the RETAINED value it supersedes) must reach the wire in the
+    // order they were posted. Each pass finds the kQueued item with the lowest ticket and
+    // sends it, then looks again, so an item posted while one was going out takes its turn
+    // after it. The slot index says nothing about order: a producer takes the lowest FREE
+    // slot, so a later post lands in a lower slot whenever an earlier one was released.
+    bool ran = false;
+    if (tx_pool_ == nullptr) return ran;
+    for (;;) {
+        tx_work_t* next = nullptr;
+        for (std::size_t i = 0; i < tx_slots_total_; ++i) {
+            tx_work_t& work = tx_pool_[i].work;
+            if (work.state.load(std::memory_order_seq_cst) != tx_work_t::kQueued) continue;
+            if (next == nullptr || static_cast<std::int32_t>(work.ticket - next->ticket) < 0)
+                next = &work;
+        }
+        if (next == nullptr) return ran;
+        std::uint8_t expected = tx_work_t::kQueued;
+        if (!next->state.compare_exchange_strong(expected, tx_work_t::kTaken,
+                                                 std::memory_order_seq_cst))
+            continue;  // its producer withdrew it (kRefused) between the scan and the take
+        send_posted(next, false);
+        expected = tx_work_t::kTaken;
+        if (!next->state.compare_exchange_strong(expected, tx_work_t::kSentInPark,
+                                                 std::memory_order_seq_cst))
+            release_tx_work(next);  // kRefused: the enqueue failed; no copy will release it
+        ran = true;
+    }
+}
+
 esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
     httpd_ws_frame_t frame = {};
     // Pass 1 (max_len 0): read the header only — fills frame.len / frame.type. The
@@ -2286,6 +2617,10 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
         note_rx_oversize(frame.len);
         return ESP_FAIL;  // abusive frame => drop the peer
     }
+    // The drain budget (ADR-0085). After the header, so the frame's size is known and is
+    // charged whole; before the payload, so a spent budget leaves every byte of it — and
+    // of whatever follows — in the socket while this task waits for its core to idle.
+    pace_rx(httpd_req_to_sockfd(req), frame.len);
 
     // Pass 2: ALWAYS drain the payload — even a frame type we ignore must be consumed,
     // or its bytes stay in the stream and the next recv reads them as a frame header
@@ -2854,6 +3189,9 @@ void httpd_ws_link_t::on_session_closed(void* ctx) {
         const std::lock_guard lock(gate->m);
         owner = gate->link;
         if (owner == nullptr) return;
+        // The socket on Nagle is gone with its session; a recycled descriptor starts on
+        // TCP_NODELAY from bound_socket like every other.
+        if (owner->rx_nagle_fd_ == slot->fd) owner->rx_nagle_fd_ = -1;
         departed = owner->reclaim_slot(slot, departed_handle);
         if (departed.empty()) return;  // nothing owed to the routing plane
         // A departure IS owed, and it is fired below with `m` RELEASED (#960). The mutex
@@ -3198,11 +3536,36 @@ void httpd_ws_link_t::queue_send(const session_ref_t& to,
             if (!part.empty()) std::memcpy(p, part.data(), part.size());
             p += part.size();
         }
+        // Count it and mark it complete BEFORE the enqueue, in that order: a drain parked
+        // for idle sends kQueued items itself (ADR-0085, send_posted_in_park), and it must
+        // never find one whose count is not yet raised, nor one the httpd loop's copy may
+        // already have started.
+        egress_pending_.fetch_add(1, std::memory_order_seq_cst);
+        work->ticket = egress_ticket_.fetch_add(1, std::memory_order_relaxed);
+        work->state.store(tx_work_t::kQueued, std::memory_order_seq_cst);
         queued = httpd_queue_work(h, &httpd_ws_link_t::tx_work, work) == ESP_OK;
-        // A refused enqueue is the only enqueue failure that exists above the ESP-IDF floor
-        // this component requires, and it hands the slot straight back: the item was never
-        // posted, so nothing else can be reading it (see tx_slot_t).
-        if (!queued) release_tx_work(work);
+        if (queued) {
+            egress_posted();  // a parked drain runs it now rather than hold it
+        } else {
+            // A refused enqueue is the only enqueue failure that exists above the ESP-IDF
+            // floor this component requires. The slot comes straight back unless a parked
+            // drain took the item in the meantime: then it was, or is being, SENT, which is
+            // a delivery and not a drop, and whoever finishes with it releases the slot
+            // (see tx_work_t::state).
+            switch (work->state.exchange(tx_work_t::kRefused, std::memory_order_seq_cst)) {
+                case tx_work_t::kQueued:
+                    egress_drained();
+                    release_tx_work(work);
+                    break;
+                case tx_work_t::kSentInPark:
+                    release_tx_work(work);
+                    queued = true;  // delivered from inside the park
+                    break;
+                default:
+                    queued = true;  // kTaken: the park is sending it and will release it
+                    break;
+            }
+        }
     }
     // A frame that never reached the queue is charged to the LINK, not to this peer: a
     // refused enqueue is evidence about the shared control queue, and under #835's shape
@@ -3332,6 +3695,9 @@ void httpd_ws_link_t::send_in_call(const session_ref_t& to,
     if (err != ESP_OK && on_wire == 0)
         ESP_LOGW(kTag, "ws reply failed (%s) fd=%d len=%u - frame dropped", esp_err_to_name(err),
                  fd, (unsigned)total);
+    // Charged to the current drain (ADR-0085 §7): an in-call reply is written by the
+    // receive context, on the httpd task, so this is the one writer the drain accounts.
+    if (err == ESP_OK) rx_drain_tx_bytes_ += total;
     note_tx_result(to, err == ESP_OK, total);
 }
 
@@ -3352,6 +3718,7 @@ httpd_ws_link_t::stats_t httpd_ws_link_t::stats() const noexcept {
     s.tx_large_dropped = tx_large_dropped_.load(std::memory_order_relaxed);
     s.tx_large_peak = tx_large_peak_.load(std::memory_order_relaxed);
     s.tx_to_dead_peer = tx_to_dead_peer_.load(std::memory_order_relaxed);
+    s.tx_send_failed = tx_send_failed_.load(std::memory_order_relaxed);
     s.peers_refused = peers_refused_.load(std::memory_order_relaxed);
     s.sessions_condemned = sessions_condemned_.load(std::memory_order_relaxed);
     s.rx_dropped_oversize = rx_dropped_oversize_.load(std::memory_order_relaxed);
@@ -3359,6 +3726,7 @@ httpd_ws_link_t::stats_t httpd_ws_link_t::stats() const noexcept {
     s.rx_dropped_pool = rx_dropped_pool_.load(std::memory_order_relaxed);
     s.auth_rejected = auth_rejected_.load(std::memory_order_relaxed);
     s.auth_expired = auth_expired_.load(std::memory_order_relaxed);
+    s.rx_drain_waits = rx_drain_waits_.load(std::memory_order_relaxed);
     return s;
 }
 
@@ -3484,6 +3852,10 @@ void httpd_ws_link_t::note_tx_skip(const session_ref_t& to) {
 }
 
 void httpd_ws_link_t::note_tx_result(const session_ref_t& to, bool sent, std::size_t bytes) {
+    // The link-wide tally first, before any test of the destination: a frame the socket
+    // write refused is a frame the peer never got whether or not its session is still here
+    // to carry the streak. Until this counter existed the only trace was the WARN line.
+    if (!sent) tx_send_failed_.fetch_add(1, std::memory_order_relaxed);
     bool close_now = false;
     std::string peer;
     char addr[kEndpointChars] = {};
@@ -3734,6 +4106,18 @@ void httpd_ws_link_t::note_send_desync(session_t* slot, const char* cause, std::
 
 void httpd_ws_link_t::tx_work(void* arg) {
     auto* const work = static_cast<tx_work_t*>(arg);
+    // The httpd loop's copy of the item. A drain parked for idle may have sent it already
+    // (send_posted_in_park); then the slot is all that is left, and it is released here.
+    // Otherwise this copy takes the item and sends it (see tx_work_t::state).
+    if (work->state.exchange(tx_work_t::kTaken, std::memory_order_seq_cst) ==
+        tx_work_t::kSentInPark) {
+        release_tx_work(work);
+        return;
+    }
+    send_posted(work, true);
+}
+
+void httpd_ws_link_t::send_posted(tx_work_t* work, bool release_slot) {
     // This item runs exactly once per successful enqueue and owns its slot for the whole
     // call: the claim marked the slot busy before a byte was written into it, and nothing
     // clears that flag but the release at the end of this function. `work->slot` is stable
@@ -3758,6 +4142,10 @@ void httpd_ws_link_t::tx_work(void* arg) {
     if (work->gate != nullptr) {
         const std::lock_guard lock(work->gate->m);
         if (httpd_ws_link_t* const owner = work->gate->link; owner != nullptr) {
+            // The item egress_posted counted is running. A null `link` is a link whose
+            // destructor has completed: its counter is gone with it, and nothing can be
+            // parked on it any more, so there is nothing to lower and no one to wake.
+            owner->egress_drained();
             fd = owner->live_fd(work->to);
             // Adopted mode only. In owning mode the purge this defends against is off by
             // construction (the ctor sets lru_purge_enable = false on the cfg it starts
@@ -3852,7 +4240,9 @@ void httpd_ws_link_t::tx_work(void* arg) {
     gate_t* const gate = work->gate;
     const session_ref_t to = work->to;
     const std::size_t len = work->len + (work->value ? work->value->total_length() : 0);
-    release_tx_work(work);  // recycle the pool slot (and any oversize heap payload)
+    // Recycle the pool slot (and any oversize heap payload) — unless this send ran inside a
+    // park, where the httpd loop's copy of the item still points at the slot and releases it.
+    if (release_slot) release_tx_work(work);
     // A skipped send is not evidence for the STREAK: no result. Every skip qualifies — the
     // peer departed, a different session now holds its slot, or it was condemned and the
     // verdict is already in. It is still a frame the peer never got, so the CUMULATIVE
@@ -3974,9 +4364,25 @@ void httpd_ws_link_t::queue_send_retained(const session_ref_t& to,
         if (!part.empty()) std::memcpy(p, part.data(), part.size());
         p += part.size();
     }
-    if (httpd_queue_work(h, &httpd_ws_link_t::tx_work, work) != ESP_OK) {
-        release_tx_work(work);
-        note_enqueue_drop(fd, payload_len);
+    // The same count-mark-enqueue order as queue_send, for the same parked drain.
+    egress_pending_.fetch_add(1, std::memory_order_seq_cst);
+    work->ticket = egress_ticket_.fetch_add(1, std::memory_order_relaxed);
+    work->state.store(tx_work_t::kQueued, std::memory_order_seq_cst);
+    if (httpd_queue_work(h, &httpd_ws_link_t::tx_work, work) == ESP_OK) {
+        egress_posted();
+        return;
+    }
+    switch (work->state.exchange(tx_work_t::kRefused, std::memory_order_seq_cst)) {
+        case tx_work_t::kQueued:
+            egress_drained();
+            release_tx_work(work);
+            note_enqueue_drop(fd, payload_len);
+            break;
+        case tx_work_t::kSentInPark:
+            release_tx_work(work);  // delivered from inside the park: not a drop
+            break;
+        default:
+            break;  // kTaken: the park is sending it and will release it
     }
 }
 

@@ -70,6 +70,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   #1715 gave the write sequence. Chips whose atomic is lock-free (the C6, for one) are
   unchanged. Nothing to migrate for an application that
   uses the generated fragment; core now refuses the `LIBTRACER_NO_ATOMIC` macro.
+- **`httpd_ws_link_t` paces a peer that never stops sending
+  ([ADR-0085](../../../docs/adr/0085-ingress-drain-budget-waits-for-the-idle-task-not-a-clock.md)).**
+  The link reads at most `CONFIG_LIBTRACER_WS_SERVER_RX_DRAIN_FRAMES` frames (default 32) or
+  `CONFIG_LIBTRACER_WS_SERVER_RX_DRAIN_BYTES` payload bytes (default 32,768) back to back while
+  its core never goes idle. Both default to `0` (no pacing) in a build whose task watchdog does
+  not watch the idle task of every core, because a non-zero budget needs a core that idles. Then it stops reading until that core's idle task has run once. The
+  unread bytes stay in the socket and TCP flow control holds the peer, so nothing is dropped. The
+  link adds no timer and reads no clock: it installs one FreeRTOS idle hook per core, once per
+  process. A link whose peers leave the core idle now and then never waits. New
+  `stats_t::rx_drain_waits` counts the waits. A send queued from another task while the drain is
+  parked is sent from inside the park, on the httpd task, and the park goes on: a push from a
+  producer task is never held behind it, and a peer that provokes a send per frame buys no
+  ingress with it. A drain also ends when its in-call replies reach a quarter of lwIP's send
+  buffer, and a session whose drain shows the flood shape (half the lwIP segment queue in
+  frames, back to back) is switched from `TCP_NODELAY` to Nagle until its next light drain, so its burst of
+  replies cannot fill the segment queue while the unread ingress holds the peer's ACKs back; an
+  interactive session never reaches that shape and keeps the no-delay path. New
+  `stats_t::tx_send_failed` (also summed into `drop_stats().dropped_tx`)
+  counts frames the socket write itself refused, which until now left only a WARN line.
+  **Observable:** under a sustained inbound flood the
+  httpd task, and every session on it, now pauses each budget until the core idles, which
+  includes waiting for lower-priority ready tasks on that core to block. **Migration:**
+  none; set either option to `0` to remove that budget.
 - **The generated config fragment binds `guard_t`, not `reader_guard_t`
   ([#1703](https://github.com/avatarsd-llc/libtracer/issues/1703)).** Core renamed the config
   member and now refuses a fragment that still defines the old name. On every chip target the
