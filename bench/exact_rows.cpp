@@ -32,6 +32,7 @@
 #include "heap_probe.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/mem_source.hpp"
+#include "libtracer/mem_source_backend.hpp"
 #include "libtracer/tracer.hpp"
 #include "libtracer/transport.hpp"
 
@@ -227,9 +228,17 @@ bool ram_links() {
  * The vertices are registered outside the window. Inside it, each value is minted (one owned
  * 1 KiB segment, as a producer hands one over) and written, so the live balance holds the
  * segment the vertex keeps and the record around it: the RAM a 1 KiB value really costs.
+ *
+ * Two arms, as for the edges (#1778). The gated `ramprobe` row injects
+ * `tr::mem::heap_source()` into the graph and mints each segment through a backend over that
+ * same source, so the record and the segment are each one counted `operator new`. The
+ * ungated `slabfoot` row is the old window: a default graph, segments from the host slab
+ * pool's value sub-pool, counted a slab at a time (one kept free slab over 256 units moved
+ * the old row by 384 B, #1879).
  */
-bool ram_value_1k() {
-    graph_t g;
+bool ram_value_1k_on(bool per_object) {
+    static tr::mem::source_backend_t heap_segments{tr::mem::heap_source()};
+    graph_t g(per_object ? tr::mem::heap_source() : tr::mem::default_root());
     std::vector<vertex_handle_t> vs;
     vs.reserve(kRamN);
     for (std::size_t i = 0; i < kRamN; ++i) {
@@ -237,15 +246,24 @@ bool ram_value_1k() {
         std::snprintf(pb, sizeof pb, "/kv/v%04zu", i);
         vs.push_back(g.register_vertex(*path_t::parse(pb), role_t::STORED_VALUE));
     }
+    const auto mint = [per_object](std::uint8_t fill) {
+        tr::view::segment_ptr_t seg =
+            per_object ? tr::view::segment_alloc(heap_segments, 1024) : tr::view::heap_alloc(1024);
+        if (seg) std::memset(seg->bytes.data(), fill, 1024);
+        return tr::view::view_t::over(std::move(seg));
+    };
     bool ok = true;
     probe::window_t win;
     for (std::size_t i = 0; i < kRamN; ++i)
-        ok = g.write(vs[i], heap_view(1024, static_cast<std::uint8_t>(i))).has_value() && ok;
+        ok = g.write(vs[i], mint(static_cast<std::uint8_t>(i))).has_value() && ok;
     const probe::counts_t c = win.result();
     if (!ok) return false;
-    print_ram("vertex_value_1k", c, kRamN, true);
+    print_ram("vertex_value_1k", c, kRamN, per_object);
     return true;
 }
+
+/** @brief Both arms of @ref ram_value_1k_on: the gated per-object row, then the slab row. */
+bool ram_value_1k() { return ram_value_1k_on(true) && ram_value_1k_on(false); }
 
 /**
  * @brief Blocks per write at each payload-ladder size, for both ways a value arrives: from

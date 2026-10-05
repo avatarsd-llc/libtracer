@@ -23,9 +23,10 @@
  * (`writeblocks` is one line; it is wrapped here only. The `w4` streamlock row has no
  * `heap_x1000` field: see `stream_locks` in exact_rows.cpp.)
  *
- * `slabfoot` is the one row nothing gates: the edge probes' window on a DEFAULT graph, whose
- * tables come from the host slab pool and are counted a whole slab at a time (#1778). The
- * gated `ramprobe` edge rows draw per object instead; see `ram_edges_on` in exact_rows.cpp.
+ * `slabfoot` is the one row nothing gates: the edge and 1 KiB-value probes' window on a
+ * DEFAULT graph, whose blocks come from the host slab pool and are counted a whole slab at a
+ * time (#1778). The gated `ramprobe` rows for those draw per object instead; see
+ * `ram_edges_on` and `ram_value_1k_on` in exact_rows.cpp.
  *
  * They lead with a field other than `allocs=`, so the history emitter's zeroheap parser does
  * not read them as that series; it charts them through its own parsers.

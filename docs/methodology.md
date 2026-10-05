@@ -152,14 +152,17 @@ instrument #1713's own test uses).
 its tables from the host slab pool
 ([#1777](https://github.com/avatarsd-llc/libtracer/issues/1777), ADR-0083), a counting window
 over a default graph sees whole slabs (64 KiB and up, one per size class a growing table
-first reaches), not the object it is pricing. So the gated `vertex`, `edge_callback` and
-`edge_wire` probes register on a graph injected with `tr::mem::heap_source()`: every table
-block is then its own counted `operator new`, which is what a build without the slab pool
-(an MCU) pays per object. The same windows on a default graph are still printed, ungated, as
+first reaches), not the object it is pricing. So the gated `vertex`, `edge_callback`,
+`edge_wire` and `vertex_value_1k` probes run on a graph injected with
+`tr::mem::heap_source()` (and `vertex_value_1k` mints its segments through a backend over
+that same source): every block is then its own counted `operator new`, which is what a build
+without the slab pool (an MCU) pays per object. The same windows on a default graph are still printed, ungated, as
 `RESULT slabfoot <what> live_x1000= blocks_x1000= n=`, so the slab cost stays visible. The
 two methods differ only where the old one missed a block: on `main` before #1778, a wire
 edge's per-link candidate list came from the graph's pmr pool, which the old window did not
-see (7.035 blocks per wire edge counted per object, 6.035 the old way).
+see (7.035 blocks per wire edge counted per object, 6.035 the old way); and the old
+`vertex_value_1k` row moved by a whole kept free slab between runs of the same code
+(+384 B over 256 units).
 
 Two invariants sit on this surface, and **the scope of the armed window is part of the
 first one**. The steady-state forward hop's *own* work must touch no heap — the two-plane
