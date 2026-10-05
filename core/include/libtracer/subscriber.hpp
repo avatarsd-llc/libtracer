@@ -771,6 +771,8 @@ struct pub_edge_t {
 struct alignas(pub_edge_t) edge_pub_t {
     edge_pub_t* retire_next = nullptr; /**< @brief Retire-list link (off-slot only). */
     std::uint32_t count = 0;           /**< @brief Constructed entries following this header. */
+    std::uint32_t capacity = 0; /**< @brief Entries the block was sized for — what the sized
+                                     release returns (#1778); rides the header's padding. */
 
     /** @brief The inline entry storage. */
     [[nodiscard]] pub_edge_t* entries() noexcept {
@@ -789,19 +791,23 @@ struct alignas(pub_edge_t) edge_pub_t {
  * filled array is always destroyable by `destroy_edge_pub`.
  * @return Null on OOM (#477 — the control-plane verb soft-fails; nothing is published).
  */
-[[nodiscard]] inline edge_pub_t* alloc_edge_pub(std::size_t n) noexcept {
-    void* raw = ::operator new(sizeof(edge_pub_t) + n * sizeof(pub_edge_t), std::nothrow);
+[[nodiscard]] inline edge_pub_t* alloc_edge_pub(mem::block_source_t& src, std::size_t n) noexcept {
+    void* raw = src.try_alloc(sizeof(edge_pub_t) + n * sizeof(pub_edge_t), alignof(edge_pub_t));
     if (raw == nullptr) return nullptr;
-    return ::new (raw) edge_pub_t{};
+    edge_pub_t* const p = ::new (raw) edge_pub_t{};
+    p->capacity = static_cast<std::uint32_t>(n);
+    return p;
 }
 
-/** @brief Destroy an edge array's constructed entries and free it. Null-safe. */
-inline void destroy_edge_pub(edge_pub_t* p) noexcept {
+/** @brief Destroy an edge array's constructed entries and return it to @p src, which served
+ *         it. Null-safe. */
+inline void destroy_edge_pub(mem::block_source_t& src, edge_pub_t* p) noexcept {
     if (p == nullptr) return;
     pub_edge_t* e = p->entries();
     for (std::uint32_t i = p->count; i-- > 0;) e[i].~pub_edge_t();
+    const std::size_t bytes = sizeof(edge_pub_t) + p->capacity * sizeof(pub_edge_t);
     p->~edge_pub_t();
-    ::operator delete(static_cast<void*>(p));
+    src.release(p, bytes, alignof(edge_pub_t));
 }
 
 /**
@@ -818,11 +824,14 @@ inline void destroy_edge_pub(edge_pub_t* p) noexcept {
  * dispatch-side projection of it that publishers read without any lock.
  */
 struct edge_block_t {
-    std::vector<subscriber_t> slots;       /**< @brief The master slot table (stripe-locked). */
+    /** @brief The master slot table (stripe-locked). Its source served this block and serves
+     *         every published array too (#1778). */
+    mem::block_array_t<subscriber_t> slots;
     std::atomic<edge_pub_t*> pub{nullptr}; /**< @brief The published array (null ⇒ no edges). */
     std::atomic<edge_pub_t*> retired{nullptr}; /**< @brief Displaced arrays awaiting a scan. */
 
-    edge_block_t() = default;
+    /** @brief An empty block drawing from @p src. */
+    explicit edge_block_t(mem::block_source_t& src) noexcept : slots(src) {}
     edge_block_t(const edge_block_t&) = delete;
     edge_block_t& operator=(const edge_block_t&) = delete;
 
@@ -836,10 +845,10 @@ struct edge_block_t {
      * on the joined-threads side of that line.
      */
     ~edge_block_t() {
-        destroy_edge_pub(pub.exchange(nullptr, std::memory_order_acq_rel));
+        destroy_edge_pub(slots.source(), pub.exchange(nullptr, std::memory_order_acq_rel));
         for (edge_pub_t* p = retired.exchange(nullptr, std::memory_order_acq_rel); p != nullptr;) {
             edge_pub_t* next = p->retire_next;
-            destroy_edge_pub(p);
+            destroy_edge_pub(slots.source(), p);
             p = next;
         }
     }
@@ -880,7 +889,7 @@ inline void scan_retired_edges(edge_block_t& b) noexcept {
             p->retire_next = keep;
             keep = p;
         } else {
-            destroy_edge_pub(p);
+            destroy_edge_pub(b.slots.source(), p);
         }
         p = next;
     }

@@ -208,10 +208,21 @@ int main() {
         check(std::strcmp(g_ptr.control_source().name(), "budget") == 0,
               "the injected source reports its own name");
 
-        // Constructing a graph draws nothing from the seam — the first consumer is the
-        // branch-write decode (graph.cpp), which only reaches the seam past its 4 KiB
-        // stack buffer. Registration is still to migrate.
-        check(injected.served_ == 0, "constructing a graph draws no control blocks");
+        // Since #1778 a graph's own tables draw from the injected root too: constructing one
+        // takes its structural blocks (the two roots, the first vertex-index chunk and its
+        // directory, the built-in `stored_value` catalog entry) from it, and destroying the
+        // graph gives every one of them back.
+        check(injected.served_ > 0, "constructing a graph draws its tables from the root");
+    }
+    {
+        budget_source_t root(64);
+        {
+            tr::graph::graph_t g{root};
+            (void)g.try_register_vertex(*tr::graph::path_t::parse("/a/b"),
+                                        tr::graph::role_t::STORED_VALUE);
+        }
+        check(root.served_ > 0 && root.released_ == root.served_,
+              "a graph returns every table block it drew when it is destroyed (#1778)");
     }
 
     return tr::testing::summary("mem_source");

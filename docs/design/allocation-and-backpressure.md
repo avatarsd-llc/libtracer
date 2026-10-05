@@ -67,21 +67,21 @@ sizes and censuses ONE store.
 
 | Channel | Reaches the source through | What it allocates | Exhaustion |
 | --- | --- | --- | --- |
-| `mr_` (`graph.hpp:graph_t::mr_`) | `tr::mem::source_resource_t` (`src_mr_`, `graph.hpp:graph_t::src_mr_`) | the small control *objects* of a stored write: the `shared_ptr` control block and the `rope_t` wrapping the value's links | throws — `std::pmr` structurally cannot report by value, so the adapter translates `nullptr` to `bad_alloc` at its own boundary |
+| `tables_` (`graph.hpp:graph_t::tables_`) | directly — the table sub-pool on a default graph, the injected root otherwise | the graph's own tables (#1778): the vertex tree, the vertex index, the link index, edge tables, the seam park, the creation catalog, the identity record and the declaration lists. Its pmr predecessor `mr_` is gone | `nullptr` → the operation answers `BACKPRESSURE`; at setup (`register_vertex`, `register_child_type`, the constructor) it aborts with a message naming the sub-pool and the bytes (ADR-0056 amendment) |
 | `value_backend_` (`graph.hpp:graph_t::value_backend_`) | `tr::mem::source_backend_t` (`src_backend_`, `graph.hpp:graph_t::src_backend_`) | the graph's **payload** byte `segment`s: the durable buffer holding a vertex's last-known value when the write path must own its bytes, and (since #831) **both** folded READs' POINT headers — the composed root's per-node header and the `":children"` listing's per-member + outer header | `nullptr` → the operation answers `BACKPRESSURE` |
 | `ctl_` (`graph.hpp:graph_t::ctl_`) | directly — it IS the injected source | every allocation a peer can provoke | `nullptr` → the operation answers a status |
 | `values_` (`graph.hpp:graph_t::values_`) | directly | the graph-level value source (#1777: it replaced the ring alias `ring_`), and so the DEFAULT for a receiving STREAM vertex's ring ADMISSIONS — the reservation each queued entry holds until it retires ([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.6.1). A vertex that declares its own through `vertex_policy_t::ring_source` never touches this one. It bounds admission, NOT placement | `nullptr` → best-effort sheds the oldest with a gap; reliable answers `BACKPRESSURE` |
 
 **The failure convention does not leak.** The substrate speaks raw `nullptr`; nothing wraps a
-refusal in a `result_t`, and no channel falls back to the global heap. Only the two adapters
-translate, each at its own boundary and for its own contract's reason.
+refusal in a `result_t`, and no channel falls back to the global heap. Only the payload adapter
+translates, at its own boundary and for its own contract's reason.
 
 **The process default folds back onto the pre-#873 objects.** A graph handed nothing points
-`mr_` at `std::pmr::new_delete_resource()` and `value_backend_` at `mem::heap_backend()` — the
+`value_backend_` at `mem::heap_backend()` — the
 exact objects the retired defaults named, including the ADR-0047 §2 devirtualized `HEAP` reclaim
-arm — so a default-built graph gains no indirection anywhere on the write path. The adapters are
-constructed either way (they are three and two words) and used only when a host injected
-something. `ctl_` and the two adapters are declared last in the object on purpose: no hot path
+arm — so a default-built graph gains no indirection anywhere on the write path. The adapter is
+constructed either way (it is three words) and used only when a host injected
+something. `ctl_` and the adapter are declared last in the object on purpose: no hot path
 reads them, so placing them there leaves every other member at the byte offset it had before the
 seam existed, which keeps the forward-hop bench measuring the same layout (`graph.hpp:graph_t::ctl_`).
 
@@ -126,7 +126,7 @@ seam is sized against — folding it into `flat` would silently re-scope a slab 
 flattens ([ADR-0074](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0074-terminus-reply-egress-is-its-own-injected-backend.md);
 see [What `flat` covers](#what-flat-covers-and-the-two-things-beside-it-that-it-does-not) below).
 
-**A bounded node must inject all of them.** Injecting `mr_` and `value_backend_` alone leaves every
+**A bounded node must inject all of them.** Injecting the graph's root alone leaves every
 peer-driven allocation on the global heap, where the failure mode on a `-fno-exceptions` target is
 the abort this seam exists to remove. A host reaching for "one slab, whole stack" points all three
 plus the router's `rx`, its `flat` **and its `egress`**, and the transport-receive backend at the

@@ -521,11 +521,10 @@ struct branch_node_t {
 
 graph_t::graph_t(mem::block_source_t& src, graph_hooks_t hooks)
     : src_backend_(src),
-      root_(std::make_unique<vertex_t>(role_t::STORED_VALUE, path_key_t{}, handlers_t{})),
-      // The anchors' private structural root (#1223). It takes NO vertex slot: it is never
-      // an anchor itself and no element can name it, and giving it one would put a second
-      // unaddressable hole in an index whose only documented hole is slot 0.
-      anchor_root_(std::make_unique<vertex_t>(role_t::STORED_VALUE, path_key_t{}, handlers_t{})),
+      retired_seams_(*sub_pool(src, mem::table_source())),
+      vertex_slots_(*sub_pool(src, mem::table_source())),
+      child_types_(*sub_pool(src, mem::table_source())),
+      identity_record_(*sub_pool(src, mem::table_source())),
       ctl_(&src),
       values_(sub_pool(src, mem::value_source())),
       tables_(sub_pool(src, mem::table_source())) {
@@ -538,13 +537,22 @@ graph_t::graph_t(mem::block_source_t& src, graph_hooks_t hooks)
     // index is built on the right one); `value_backend_` stays `heap_backend()`, which draws
     // from the value sub-pool on that build.
     if (!is_default_source(&src)) value_backend_ = &src_backend_;
+    payload_rights_.src = tables_;
+    admissions_.src = tables_;
+    // Both structural roots, in one table-source block. The anchors' private root (#1223)
+    // takes NO vertex slot: it is never an anchor itself and no element can name it, and
+    // giving it one would put a second unaddressable hole in an index whose only documented
+    // hole is slot 0. A source too small for the roots and the first index chunk is a sizing
+    // bug (ADR-0056, ADR-0083).
+    roots_ = mem::make_block<roots_t>(*tables_, *tables_);
+    if (!roots_ || !vertex_slots_.reserve_next()) mem::exhausted_at_init(*tables_, "graph_t");
     set_hooks(hooks);
     // Slot 0 is the structural root (RFC-0024 §6.4): the index is seeded here so it stays
     // allocation-ordered from the first vertex_t this graph owns. The root is not a
     // registrable address, so no bound path ever names slot 0 — it is in the vector because
     // leaving a hole there would make "slot i is the i-th vertex_t allocated" false.
-    vertex_slots_.push_back(root_.get());
-    note_owner_slot(*root_);
+    vertex_slots_.push_back(root());
+    note_owner_slot(*root());
     // The one built-in creation-catalog type (#82, ADR-0017): `stored_value` makes a
     // plain last-writer-wins vertex at the composed child key. Its optional SPEC
     // `config` SETTINGS is ignored for now (a stored-value has no instantiation params
@@ -558,12 +566,16 @@ graph_t::graph_t(mem::block_source_t& src, graph_hooks_t hooks)
                                          nullptr});
 }
 
-void graph_t::register_child_type(std::string type, child_factory_t factory) {
-    // Exclusive: an insert rebalances the tree `create_child` walks (#1049). Setup-only by
+void graph_t::register_child_type(std::string_view type, child_factory_t factory) {
+    // Exclusive: an insert moves the entries `create_child` reads (#1049). Setup-only by
     // doctrine; locked so that a caller who ignores that gets a serialized registration
-    // rather than a torn walk of a red-black tree driven by a peer's bytes.
+    // rather than a torn read of a table driven by a peer's bytes.
     const std::unique_lock lock(child_types_mutex_);
-    child_types_.insert_or_assign(std::move(type), factory);
+    mem::string_t key(*tables_);
+    child_factory_t* const slot =
+        key.assign(type) ? child_types_.try_emplace(std::move(key), factory).value : nullptr;
+    if (slot == nullptr) mem::exhausted_at_init(*tables_, "register_child_type");
+    *slot = factory;  // a re-registration replaces
 }
 
 vertex_handle_t graph_t::register_vertex(const path_t& path, role_t role, handlers_t handlers,
@@ -574,6 +586,11 @@ vertex_handle_t graph_t::register_vertex(const path_t& path, role_t role, handle
     // PATH_IN_USE on a compile-site literal is a source bug, not a runtime outcome — fail loud
     // (ADR-0056, mirroring path_t(std::string_view)) rather than hand back a result the caller
     // would only `*`-deref unchecked. A genuine runtime path uses try_register_vertex.
+    // A refusal that is not the vertex ceiling's is the table source running dry at setup —
+    // a sizing bug, reported with the sub-pool and the bytes it was asked for before the
+    // abort (ADR-0056 amendment, ADR-0083).
+    if (!h && h.error() == status_t::BACKPRESSURE)
+        mem::exhausted_at_init(*tables_, "register_vertex");
     if (!h) std::abort();
     return *h;
 }
@@ -609,8 +626,13 @@ result_t<vertex_handle_t> graph_t::register_with_policy(std::span<const std::byt
     if (!h) return h;
     // Applied after the map lock is released: the delivery-mode arm takes the sweep lock and
     // rebuilds the key, and nothing in a policy needs the map lock. The window between the
-    // two is the "configure before frames flow" contract every wiring verb carries.
-    apply_policy(h->get(), std::move(policy));
+    // two is the "configure before frames flow" contract every wiring verb carries. A policy
+    // the table source cannot hold retires the half-made registration again (#1778), so a
+    // refused registration leaves nothing behind but an unregistered placeholder.
+    if (!apply_policy(h->get(), std::move(policy))) {
+        (void)retire(*h);
+        return std::unexpected(status_t::BACKPRESSURE);
+    }
     return h;
 }
 
@@ -626,7 +648,7 @@ result_t<vertex_handle_t> graph_t::register_vertex_key_span(
     // no ancestor walk, no cached ancestor reference, and no question about what happens to
     // descendants when a parent's configuration changes after they exist. The two owner-side
     // magnitudes are declared per vertex, by the owner, or they are at their defaults.
-    vertex_t* node = root_.get();
+    vertex_t* node = root();
     std::size_t i = 0;
     while (i < key.size()) {
         const std::size_t e = segment_end(key, i);
@@ -646,9 +668,17 @@ result_t<vertex_handle_t> graph_t::register_vertex_key_span(
                 return std::unexpected(status_t::BACKPRESSURE);
             }
             // A placeholder is a plain STORED_VALUE with no handlers, so `adopt_identity`'s
-            // early return fires and it allocates NO extension block.
-            auto fresh =
-                std::make_unique<vertex_t>(role_t::STORED_VALUE, path_key_t{record}, handlers_t{});
+            // early return fires and it allocates NO extension block. Every failable step —
+            // the index slot, the vertex, its parent's child entry — runs before anything is
+            // linked in, so a refused creation (#1778) leaves the tree and the index as they
+            // were. Placeholders made by EARLIER levels of this descent stay: they are
+            // invisible, and the next registration down this path reuses them.
+            vertex_t* const fresh =
+                vertex_slots_.reserve_next()
+                    ? mem::make_in<vertex_t>(*tables_, role_t::STORED_VALUE, path_key_t{record},
+                                             handlers_t{}, *tables_)
+                    : nullptr;
+            if (fresh == nullptr) return std::unexpected(status_t::BACKPRESSURE);
             // Subtree-subscription init (RFC-0005): a vertex born under a subscribed
             // ancestor starts with the ancestor-listener count already summed — O(1) from
             // the parent's maintained counters (under the same unique lock the
@@ -656,7 +686,11 @@ result_t<vertex_handle_t> graph_t::register_vertex_key_span(
             // never double-count); the write path's is-anyone-listening check stays a
             // single relaxed load.
             fresh->init_listeners_above(node->listeners_above() + node->own_subs());
-            child = node->add_child(std::move(fresh));
+            child = node->add_child(fresh, *tables_);
+            if (child == nullptr) {
+                mem::drop_in(*tables_, fresh);
+                return std::unexpected(status_t::BACKPRESSURE);
+            }
             // One slot per vertex_t ALLOCATION (RFC-0024 §6.4), appended under the same
             // unique map-lock hold that linked it in, so slot order is allocation order.
             // Placeholders take a slot too: they are ordinary vertex_t objects that a later
@@ -674,44 +708,52 @@ result_t<vertex_handle_t> graph_t::register_vertex_key_span(
     // vertex keeps only the flag bit that says they exist. We are under the unique map lock,
     // which is exactly the hold `declare_payload_rights` requires. The RFC-0014 Amendment 3
     // `:schema` catalog rides the same node, for the same reason and under the same hold.
-    declare_payload_rights(node, rights, schema_catalog);
     // Same treatment, same hold, and for the same reason (see `graph_t::admissions_`): the two
     // ADMISSION filters are taken here, before `fill` adopts the rest, so the seam block
     // `adopt_identity` may allocate is byte-for-byte the one it allocated before this feature.
-    declare_admission(node, handlers.on_admit, handlers.on_app_field_admit);
-    node->fill(role, handlers);
+    // The flags are raised only once all three have succeeded (#1778): a node published for
+    // a refused registration is never walked, because nothing flags its vertex, and a later
+    // declaration at this address is found first anyway.
+    if (!declare_payload_rights(node, rights, schema_catalog) ||
+        !declare_admission(node, handlers.on_admit, handlers.on_app_field_admit) ||
+        !node->fill(role, handlers, *tables_))
+        return std::unexpected(status_t::BACKPRESSURE);
+    if (!rights.empty() || !schema_catalog.empty()) node->mark_payload_rights();
+    if (handlers.on_admit || handlers.on_app_field_admit) node->mark_admission();
     return vertex_handle_t{node};
 }
 
-void graph_t::declare_payload_rights(vertex_t* v, std::span<const payload_right_t> rows,
+bool graph_t::declare_payload_rights(vertex_t* v, std::span<const payload_right_t> rows,
                                      std::span<const std::byte> catalog) {
     // The overwhelming majority: no node, no flag, no cost.
-    if (rows.empty() && catalog.empty()) return;
+    if (rows.empty() && catalog.empty()) return true;
     // PREPEND, so a re-registration at the same address publishes rows the walk finds before
     // any the previous occupant left behind (the list is never unlinked — see the member's
-    // doc for why that is what makes the gate's walk lock-free).
-    payload_right_store_.push_back(std::make_unique<payload_right_node_t>(
-        payload_right_node_t{v, std::vector<payload_right_t>(rows.begin(), rows.end()),
-                             std::vector<std::byte>(catalog.begin(), catalog.end()), nullptr}));
-    payload_right_node_t* node = payload_right_store_.back().get();
-    node->next = payload_rights_.load(std::memory_order_relaxed);
-    payload_rights_.store(node, std::memory_order_release);
-    v->mark_payload_rights();
+    // doc for why that is what makes the gate's walk lock-free). Filled before it is
+    // published, so a refused copy frees an unpublished node.
+    payload_right_node_t* const node = mem::make_in<payload_right_node_t>(*tables_, *tables_);
+    if (node == nullptr || !node->rows.append(rows.data(), rows.size()) ||
+        !mem::assign_bytes(node->catalog, catalog)) {
+        mem::drop_in(*tables_, node);
+        return false;
+    }
+    node->v = v;
+    payload_rights_.prepend(node);
+    return true;
 }
 
-void graph_t::declare_admission(vertex_t* v, admit_hook_t on_admit,
+bool graph_t::declare_admission(vertex_t* v, admit_hook_t on_admit,
                                 app_field_admit_hook_t on_app_field_admit) {
     // The overwhelming majority: no node, no flag, no cost.
-    if (!on_admit && !on_app_field_admit) return;
+    if (!on_admit && !on_app_field_admit) return true;
     // PREPEND, so a re-registration at the same address publishes a filter the walk finds
     // before any the previous occupant left behind (the list is never unlinked — see the
     // member's doc for why that is what makes the read lock-free).
-    admission_store_.push_back(std::make_unique<admission_node_t>(
-        admission_node_t{v, on_admit, on_app_field_admit, nullptr}));
-    admission_node_t* node = admission_store_.back().get();
-    node->next = admissions_.load(std::memory_order_relaxed);
-    admissions_.store(node, std::memory_order_release);
-    v->mark_admission();
+    admission_node_t* const node = mem::make_in<admission_node_t>(
+        *tables_, admission_node_t{v, on_admit, on_app_field_admit, nullptr});
+    if (node == nullptr) return false;
+    admissions_.prepend(node);
+    return true;
 }
 
 const graph_t::admission_node_t* graph_t::admission_for(const vertex_t* v) const noexcept {
@@ -719,7 +761,7 @@ const graph_t::admission_node_t* graph_t::admission_for(const vertex_t* v) const
     // declaring registration, and a node is immortal, so no lock is needed to read one. The
     // FIRST match is the vertex's own newest declaration — an older node left by a previous
     // occupant of this address sits behind it and must never answer for it.
-    for (const admission_node_t* n = admissions_.load(std::memory_order_acquire); n != nullptr;
+    for (const admission_node_t* n = admissions_.head.load(std::memory_order_acquire); n != nullptr;
          n = n->next)
         if (n->v == v) return n;
     return nullptr;
@@ -729,7 +771,7 @@ acl_right_t graph_t::declared_write_right(const vertex_t* v, wire::type_t type) 
     // Walks only for a vertex whose flag says it declared: the list holds one node per
     // declaring registration (a creator endpoint per transport module — a handful), and a
     // node is immortal, so no lock is needed to read one.
-    for (const payload_right_node_t* n = payload_rights_.load(std::memory_order_acquire);
+    for (const payload_right_node_t* n = payload_rights_.head.load(std::memory_order_acquire);
          n != nullptr; n = n->next) {
         if (n->v != v) continue;
         for (const payload_right_t& row : n->rows)
@@ -746,14 +788,14 @@ std::span<const std::byte> graph_t::declared_catalog(const vertex_t* v) const no
     // The same walk `declared_write_right` makes, for the same reasons: only a flagged vertex
     // gets here, nodes are immortal, and the FIRST match is the vertex's own newest
     // declaration — an older node left by a previous occupant of this address never answers.
-    for (const payload_right_node_t* n = payload_rights_.load(std::memory_order_acquire);
+    for (const payload_right_node_t* n = payload_rights_.head.load(std::memory_order_acquire);
          n != nullptr; n = n->next)
-        if (n->v == v) return n->catalog;
+        if (n->v == v) return mem::as_span(n->catalog);
     return {};
 }
 
 void graph_t::retire_subtree(vertex_t* v, std::vector<std::vector<std::byte>>& keys,
-                             std::vector<remote_ptr_t>& routed) {
+                             gone_edges_t& gone) {
     // Pre-order, under the UNIQUE map lock. Order within a vertex matters:
     //  (1) read its active-edge count and unwind exactly that contribution from every
     //      descendant's listeners_above_ BEFORE revert zeroes own_subs_ — the mirror of
@@ -774,7 +816,7 @@ void graph_t::retire_subtree(vertex_t* v, std::vector<std::vector<std::byte>>& k
     // tree's SHAPE, so it honours for_each_descendant's no-structural-mutation contract -- the
     // walk re-reads the sibling list on each ascent and an insert or erase mid-walk would move
     // the position it resumes from.
-    const auto retire_one = [this, &keys, &routed](vertex_t& x) {
+    const auto retire_one = [this, &keys, &gone](vertex_t& x) {
         const std::uint32_t k = x.own_subs();
         if (k > 0) bump_subtree_listeners(&x, -static_cast<std::int32_t>(k));
         keys.push_back(build_key(&x));
@@ -784,8 +826,12 @@ void graph_t::retire_subtree(vertex_t* v, std::vector<std::vector<std::byte>>& k
         // which the embedder calls at a moment it knows no reader holds a seam (#576); the
         // graph's own teardown is a growth backstop only — retired_seams_ destructs LAST, so
         // a seam that re-enters the graph must be collected explicitly. Under map_mutex_.
-        if (value_handlers_t* seam = x.revert_to_placeholder(routed))
-            retired_seams_.emplace_back(seam);
+        // Parking links the seam into an intrusive chain, and the slot table moves into room
+        // `retire` reserved, so neither step can fail mid-walk (#1778).
+        mem::block_array_t<subscriber_t> table(*tables_);
+        if (value_handlers_t* seam = x.revert_to_placeholder(table))
+            (void)retired_seams_.seams.push_back(seam);              // reserved: cannot fail
+        if (!table.empty()) (void)gone.push_back(std::move(table));  // reserved: cannot fail
         x.mark_unregistered();
     };
     retire_one(*v);
@@ -817,7 +863,7 @@ std::uint64_t graph_t::vertex_ceiling_refusals() const noexcept {
 /**
  * @brief One anchor's NAME record — the whole of an anchor's key (#1223).
  *
- * `build_key` stops at the node whose parent is null, and an anchor's parent (`anchor_root_`)
+ * `build_key` stops at the node whose parent is null, and an anchor's parent (`anchor_root()`)
  * is that node, so this single record IS the key retirement's sweep cleanup sees. The caller
  * composes @p id to contain characters `path::valid_segment` rejects, which is what makes the
  * rendered bytes unreachable from any address; framing it as an ordinary packed segment
@@ -832,16 +878,24 @@ static std::vector<std::byte> anchor_record(std::string_view id) {
 result_t<vertex_handle_t> graph_t::register_session_anchor(std::string_view id) {
     const std::vector<std::byte> rec = anchor_record(id);
     const std::unique_lock lock(map_mutex_);
-    vertex_t* node = anchor_root_->child_by_record(rec);
+    vertex_t* node = anchor_root()->child_by_record(rec);
     if (node == nullptr) {
         // FIRST sight of this id: one allocation, one slot, forever. Every later arrival on
         // the same id lands on the branch below and re-fills THIS object, which is the whole
         // bounded-across-churn property — a listener with `max_peers` slots can only ever ask
         // for `max_peers` distinct ids, so anchors are bounded by the accept policy and not
         // by how often clients reconnect (ADR-0044 §Amendment's measurement).
-        auto fresh =
-            std::make_unique<vertex_t>(role_t::STORED_VALUE, path_key_t{rec}, handlers_t{});
-        node = anchor_root_->add_child(std::move(fresh));
+        // Failable steps first, as in the registration descent (#1778).
+        vertex_t* const fresh =
+            vertex_slots_.reserve_next()
+                ? mem::make_in<vertex_t>(*tables_, role_t::STORED_VALUE, path_key_t{rec},
+                                         handlers_t{}, *tables_)
+                : nullptr;
+        node = fresh != nullptr ? anchor_root()->add_child(fresh, *tables_) : nullptr;
+        if (node == nullptr) {
+            mem::drop_in(*tables_, fresh);
+            return std::unexpected(status_t::BACKPRESSURE);
+        }
         vertex_slots_.push_back(node);
         note_owner_slot(*node);
     }
@@ -853,14 +907,15 @@ result_t<vertex_handle_t> graph_t::register_session_anchor(std::string_view id) 
     // against the same object at the same slot. The generation was bumped by the RETIRE that
     // made this reachable, so the revived anchor already reads as a different tenancy to any
     // element minted against its predecessor.
-    node->fill(role_t::STORED_VALUE, handlers_t{});
+    if (!node->fill(role_t::STORED_VALUE, handlers_t{}, *tables_))
+        return std::unexpected(status_t::BACKPRESSURE);
     return vertex_handle_t{node};
 }
 
 std::optional<vertex_handle_t> graph_t::find_session_anchor(std::string_view id) const {
     const std::vector<std::byte> rec = anchor_record(id);
     const std::shared_lock lock(map_mutex_);
-    vertex_t* const node = anchor_root_->child_by_record(rec);
+    vertex_t* const node = anchor_root()->child_by_record(rec);
     if (node == nullptr || !node->registered()) return std::nullopt;
     return vertex_handle_t{node};
 }
@@ -889,7 +944,7 @@ std::optional<graph_t::session_anchor_route_t> graph_t::session_anchor_route(
 std::size_t graph_t::session_anchor_slots() const noexcept {
     const std::shared_lock lock(map_mutex_);
     std::size_t n = 0;
-    anchor_root_->for_each_child([&n](const vertex_t&) { ++n; });
+    anchor_root()->for_each_child([&n](const vertex_t&) { ++n; });
     return n;
 }
 
@@ -924,7 +979,7 @@ std::optional<vertex_slot_t> graph_t::vertex_slot(vertex_handle_t vh) const noex
     //
     // It is re-validated rather than trusted, and the two compares are not defensive
     // decoration: they are what keeps a `vertex_t` that no graph ever slotted — the tests
-    // build them directly, and `anchor_root_` is one — resolving exactly as it did before,
+    // build them directly, and `anchor_root()` is one — resolving exactly as it did before,
     // by falling through to the scan below. Cost of the fast path is a bounds test and one
     // pointer compare against a `std::deque` element, against a scan measured at 450 ns per
     // 10^3 resident vertices and 410 us at 10^6 (#1485/#1496) — held, all of it, under the
@@ -1006,16 +1061,26 @@ result_t<void> graph_t::retire(vertex_handle_t vh) {
         return std::unexpected(status_t::INVALID_PATH);
 
     std::vector<std::vector<std::byte>> retired_keys;
-    std::vector<remote_ptr_t> routed;  // the routed edges the retirement dropped (#1816)
+    gone_edges_t gone(*tables_);  // the slot tables the retirement dropped (#1816, #1778)
     {
         const std::unique_lock lock(map_mutex_);
         // Idempotent (§B.4): an already-retired / never-filled placeholder is a no-op.
         if (!root->registered()) return {};
-        retire_subtree(root, retired_keys, routed);
+        // One entry per vertex the walk can visit, reserved BEFORE anything changes, so a
+        // refusal retires nothing and the walk below cannot fail halfway (#1778).
+        std::size_t n = 1;
+        root->for_each_descendant([&n](vertex_t&) { ++n; });
+        if (!gone.reserve(n) || !retired_seams_.seams.reserve(retired_seams_.seams.size() + n))
+            return std::unexpected(status_t::BACKPRESSURE);
+        retire_subtree(root, retired_keys, gone);
     }
     // Each dropped routed edge gives its link hold back, outside every graph lock: an edge
     // is reported exactly twice over its life, and retirement is one of its ends (#1816).
-    for (const remote_ptr_t& r : routed) hold_link(delivery_link(r), false);
+    // The tables themselves are destroyed when `gone` leaves scope — outside the locks too.
+    for (const mem::block_array_t<subscriber_t>& table : gone)
+        for (const subscriber_t& e : table)
+            if (e.active && e.remote != nullptr && !e.remote->link.empty())
+                hold_link(delivery_link(e.remote), false);
     // Drop the retired vertices from the sweep sets — AFTER releasing the map lock, so no
     // map⊃sweep nesting is introduced. A stale entry would otherwise (a) leak, and worse
     // (b) silently re-enroll a revived vertex into UNCONDITIONAL sweeping through the
@@ -1037,23 +1102,24 @@ result_t<void> graph_t::retire(vertex_handle_t vh) {
  *        (#576). The whole point is WHERE the free happens, so read the two scopes below.
  */
 void graph_t::collect() {
-    std::vector<std::unique_ptr<value_handlers_t>> dead;
+    mem::block_array_t<value_handlers_t*> dead(retired_seams_.seams.source());
     {
         // Under the map lock: nothing but the swap. The lock is what serialises us against
         // retire_subtree's append, and it is all it is here for — a free under it would put
         // arbitrary user-callback destructor code inside the graph's widest lock, which is
         // the mutual-wait every earlier design round died on.
         const std::unique_lock lock(map_mutex_);
-        dead.swap(retired_seams_);
+        std::swap(dead, retired_seams_.seams);
     }
-    // `dead` destructs HERE — outside every graph lock, on the caller's thread, at a moment
+    // `dead` is freed HERE — outside every graph lock, on the caller's thread, at a moment
     // the embedder chose. So a seam callback's destructor may re-enter the graph, and a slow
     // one blocks no reader or writer. Do not hoist this into the scope above.
+    seam_park_t::free_all(dead);
 }
 
 std::size_t graph_t::parked_seam_count() const {
     const std::shared_lock lock(map_mutex_);
-    return retired_seams_.size();
+    return retired_seams_.seams.size();
 }
 
 // ---- The per-link departure index's doors (#1071). The index itself — its slots, the
@@ -1364,7 +1430,7 @@ vertex_t* graph_t::find_ptr(std::span<const std::byte> key) const {
     const std::shared_lock lock(map_mutex_);
     // O(segments) Composite child walk from the root (ADR-0057); a placeholder terminus
     // (an unregistered intermediate) is "no such vertex", as under the flat map.
-    vertex_t* node = root_.get();
+    vertex_t* node = root();
     std::size_t i = 0;
     while (i < key.size()) {
         const std::size_t e = segment_end(key, i);
@@ -1439,7 +1505,7 @@ retention_t graph_t::retention(vertex_handle_t v) const noexcept { return v.get(
 result_t<void> graph_t::set_policy(vertex_handle_t v, vertex_policy_t policy) {
     vertex_t* const vx = v.get();
     if (!policy_legal(vx->role(), policy)) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
-    apply_policy(vx, std::move(policy));
+    if (!apply_policy(vx, std::move(policy))) return std::unexpected(status_t::BACKPRESSURE);
     return {};
 }
 
@@ -1451,20 +1517,26 @@ result_t<void> graph_t::set_policy(vertex_handle_t v, vertex_policy_t policy) {
  * drains the ring and a depth set first would be applied to a ring about to be emptied anyway;
  * either order is correct, this one does the drain once.
  */
-void graph_t::apply_policy(vertex_t* vx, vertex_policy_t&& policy) {
+bool graph_t::apply_policy(vertex_t* vx, vertex_policy_t&& policy) {
     const role_t role = vx->role();
-    if (vx->ring_source() != policy.ring_source || vx->ring_reliable() != policy.ring_reliable)
-        vx->set_ring_source(policy.ring_source, policy.ring_reliable);
+    mem::block_source_t& tables = *tables_;
+    // Each member that moves may need the vertex's extension block (#1778); the first refusal
+    // stops the rest, so a refused policy is never applied out of order.
+    if ((vx->ring_source() != policy.ring_source || vx->ring_reliable() != policy.ring_reliable) &&
+        !vx->set_ring_source(policy.ring_source, policy.ring_reliable, tables))
+        return false;
     // A HANDLER is NONE by role and carries no bit for it.
     if (role != role_t::HANDLER) {
         const retention_t r = policy.retention.value_or(default_retention(role));
         const bool depth_moves = r == retention_t::N && vx->retention_depth() != policy.depth;
-        if (r != vx->retention() || depth_moves) vx->set_retention(r, policy.depth);
+        if ((r != vx->retention() || depth_moves) && !vx->set_retention(r, policy.depth, tables))
+            return false;
     }
     const std::size_t threshold =
         policy.share_threshold_bytes >= UINT32_MAX ? SIZE_MAX : policy.share_threshold_bytes;
-    if (vx->share_threshold_bytes() != threshold)
-        vx->set_share_threshold_bytes(policy.share_threshold_bytes);
+    if (vx->share_threshold_bytes() != threshold &&
+        !vx->set_share_threshold_bytes(policy.share_threshold_bytes, tables))
+        return false;
     if (vx->delivery_mode() != policy.delivery_mode) apply_delivery_mode(vx, policy.delivery_mode);
     // Owner-facing declaration (RFC-0010 §A.2) — a local host API, so no ACL gate. A borrowed
     // table already installed is the same declaration and keeps its stored values.
@@ -1472,13 +1544,13 @@ void graph_t::apply_policy(vertex_t* vx, vertex_policy_t&& policy) {
     if (fields.is_borrowed()) {
         const std::span<const app_field_slot_t> want = fields.borrowed().slots();
         const std::span<const app_field_slot_t> have = vx->app_field_slots();
-        if (have.data() != want.data() || have.size() != want.size())
-            vx->set_app_fields_static(fields.borrowed());
-    } else if (!fields.owned().empty()) {
-        vx->set_app_fields(std::move(policy.app_fields).owned());  // moved, never copied
-    } else if (!vx->app_field_slots().empty()) {
-        vx->set_app_fields({});  // uninstall: back to the closed ENOTTY surface
+        return (have.data() == want.data() && have.size() == want.size()) ||
+               vx->set_app_fields_static(fields.borrowed(), tables);
     }
+    if (!fields.owned().empty())  // moved, never copied
+        return vx->set_app_fields(std::move(policy.app_fields).owned(), tables);
+    // Uninstall: back to the closed ENOTTY surface.
+    return vx->app_field_slots().empty() || vx->set_app_fields({}, tables);
 }
 
 /** @brief Bytes the receiver ring currently holds reserved — the byte bound's observable. */
@@ -2214,7 +2286,7 @@ result_t<void> graph_t::write_impl(vertex_t* v, view::rope_t value, std::string_
     vertex_t::store_drops_t store_drops;
     // The STREAM arm's drain buffer, filled by the ring admission itself (#1713): stack-first,
     // so the common write — whose window is its own entry — allocates nothing for it.
-    vertex_t::ring_take_t taken;
+    vertex_t::ring_take_t taken(*values_);
     const result_t<value_ref_t> stored = store_value(v, std::move(value), store_drops, caller, link,
                                                      role == role_t::STREAM ? &taken : nullptr);
     if (!stored) return std::unexpected(stored.error());
@@ -2519,7 +2591,7 @@ void graph_t::deliver_current(vertex_t* v) {
         // the last flush, in order — NOT a coalesce. Snapshot under the lock
         // (vertex_t::take_unflushed), deliver outside — into a stack-first buffer, so a sweep
         // over a short window allocates nothing for it (#1713).
-        vertex_t::ring_take_t batch;
+        vertex_t::ring_take_t batch(*values_);
         if (v->take_unflushed(batch) == 0) return;  // nothing appended since the last flush
         for (const value_ref_t& sp : batch.entries()) deliver_vertex(v, *sp);
         return;
@@ -3007,7 +3079,7 @@ result_t<subscription_t> graph_t::admit_subscriber(vertex_t* v, subscriber_t s,
             notify_subscription(sub_event_t::kind_t::REMOVED, v, caller, displaced_tlv, *slot);
         idx = *slot;
     } else {
-        idx = v->add_edge(std::move(s), &latch);
+        idx = v->add_edge(std::move(s), &latch, *tables_);
         // The injected resource could not carry the edge (#477 / #635: publishing the new edge
         // array is the one allocation an append now makes). Nothing was admitted, so give the
         // speculative listener bump back and report it — an admitted-but-unpublished edge
