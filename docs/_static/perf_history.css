@@ -192,3 +192,13 @@ body[data-theme="dark"] .ph-hist, :root[data-theme="dark"] .ph-hist {
 .ph-hist .ph-pick select[disabled] { opacity: .45; }
 .ph-hist .ph-cmp { font-family: var(--ph-mono); font-size: 10.5px; color: var(--ph-muted); display: inline-flex; gap: 4px; align-items: center; }
 .ph-hist .ph-legend .sw.dash { height: 0; border-top: 3px dashed; border-radius: 0; background: none; }
+
+/* noise band (#1848): a trailing window's p10–p90 shaded under each trend line, min/max as
+   faint whiskers, and the window's CV in the legend and tooltip. bench-local only. */
+.ph-hist .ph-bandsel { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 0 0 8px; }
+.ph-hist .ph-bandsel:empty { display: none; }
+.ph-hist .ph-bandsel select { font-family: var(--ph-mono); font-size: 10.5px; padding: 1px 4px; border-radius: 6px; border: 1px solid var(--ph-line); background: var(--ph-panel); color: var(--ph-ink); }
+.ph-hist .ph-bandnote { font-family: var(--ph-mono); font-size: 10px; color: var(--ph-muted); }
+.ph-hist .ph-bandfill { opacity: .14; stroke: none; }
+.ph-hist .ph-whisk { fill: none; stroke-width: 1; opacity: .35; stroke-dasharray: 2 3; }
+.ph-hist .ph-cv { font-family: var(--ph-mono); font-size: 10px; font-weight: 400; color: var(--ph-muted); }

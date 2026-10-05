@@ -46,6 +46,12 @@
   function fmtRatio(v) { return (v >= 100 ? Math.round(v) : v >= 10 ? v.toFixed(1) : v.toFixed(2)) + "×"; }
   /** @brief Width of the trend charts' "last N merges" zoom (#1801). */
   var LAST = 30;
+  /** @brief Default trailing window, in recorded points, of the noise band (#1848). */
+  var BAND_N = 10;
+  /** @brief The windows the band picker offers; 0 turns the band off. */
+  var BAND_NS = [0, 5, 10, 20, 30];
+  /** @brief A coefficient of variation as a percentage, one decimal below 10%. */
+  function fmtPct(v) { v *= 100; return (v < 10 ? v.toFixed(1) : Math.round(v)) + "%"; }
   var FMT = { ns: fmtNs, rate: fmtRate, num: fmtNum, bytes: fmtBytes, count: fmtCount, mb: fmtMB, ratio: fmtRatio };
 
   function logTicks(min, max) {
@@ -95,6 +101,39 @@
       var ok = true;
       for (var s = 0; s < have.length; s++) if (!have[s][i]) { ok = false; break; }
       if (ok) out.push(i);
+    }
+    return out;
+  }
+
+  /** @brief The trailing-window dispersion of one series: its noise band (#1848).
+   *
+   * For every recorded point that has at least @p n recorded points behind it (itself
+   * included), the window is the series' own last @p n values, and the result row is
+   * `[slot, p10, p90, min, max, cv]`: the 10th and 90th percentiles (linear interpolation
+   * between order statistics), the window's extremes, and its coefficient of variation
+   * (sample standard deviation over mean). A series with fewer than @p n points gets no
+   * band at all rather than a band over a shorter window, so every band on a chart
+   * describes the same amount of history.
+   *
+   * The window counts RECORDED points, not slots: a contaminated sample is already
+   * omitted from `pts`, so it cannot widen the band it would otherwise dominate.
+   * Self-contained on purpose: bench/test_render_history.py runs it under node against a
+   * series with a known spread.
+   */
+  function windowBand(pts, n) {
+    var out = [];
+    if (!(n >= 2) || pts.length < n) return out;
+    function q(w, f) {
+      var x = f * (w.length - 1), lo = Math.floor(x), hi = Math.ceil(x);
+      return w[lo] + (w[hi] - w[lo]) * (x - lo);
+    }
+    for (var j = n - 1; j < pts.length; j++) {
+      var w = [], sum = 0, ss = 0;
+      for (var k = j - n + 1; k <= j; k++) { w.push(pts[k][1]); sum += pts[k][1]; }
+      var mean = sum / n;
+      w.forEach(function (v) { ss += (v - mean) * (v - mean); });
+      w.sort(function (a, b) { return a - b; });
+      out.push([pts[j][0], q(w, 0.1), q(w, 0.9), w[0], w[n - 1], mean ? Math.sqrt(ss / (n - 1)) / Math.abs(mean) : 0]);
     }
     return out;
   }
@@ -187,6 +226,10 @@
       for (var k2 in se) if (Object.prototype.hasOwnProperty.call(se, k2)) s2[k2] = se[k2];
       s2.pts = se.pts.filter(function (p) { return p[0] >= a && p[0] <= b; })
         .map(function (p) { return [p[0] - a, p[1]]; });
+      if (se.band) {
+        s2.band = se.band.filter(function (t) { return t[0] >= a && t[0] <= b; })
+          .map(function (t) { return [t[0] - a].concat(t.slice(1)); });
+      }
       if (se.steps) {
         s2.steps = se.steps.filter(function (t) { return t[0] >= a && t[0] <= b; })
           .map(function (t) { return [t[0] - a, t[1], t[2]]; });
@@ -245,7 +288,12 @@
     var pw = W - m.l - m.r, ph = H - m.t - m.b;
     function X(i) { return m.l + (N <= 1 ? pw / 2 : (i / (N - 1)) * pw); }
     var all = [];
-    c.series.forEach(function (s) { s.pts.forEach(function (p) { if (!c.log || p[1] > 0) all.push(p[1]); }); });
+    c.series.forEach(function (s) {
+      s.pts.forEach(function (p) { if (!c.log || p[1] > 0) all.push(p[1]); });
+      // A window may reach back past the start of a sliced range, so its extremes can lie
+      // outside the visible points; the domain takes them in rather than clipping the band.
+      (s.band || []).forEach(function (t) { [t[3], t[4]].forEach(function (v) { if (!c.log || v > 0) all.push(v); }); });
+    });
     if (!all.length) all = [1];
     var ymin = Math.min.apply(null, all), ymax = Math.max.apply(null, all), yt;
     var floor = ymin;
@@ -285,6 +333,24 @@
     if (c.unity) s += unityMark(Y, m.l, W - m.r, ymin, ymax);
     (suite.releases || []).forEach(function (r) { if (r.i < N) s += relMark(X(r.i), m.t, m.t + ph, r); });
     (suite.instruments || []).forEach(function (r) { if (r.i < N) s += instrMark(X(r.i), m.t, m.t + ph, r); });
+    // Noise bands go UNDER every line (#1848): p10-p90 shaded, min and max as faint
+    // whiskers. Broken into runs of consecutive slots exactly like the lines are, so a
+    // band never spans a commit its series did not record.
+    c.series.forEach(function (se) {
+      var cc = col(se.ci), runs = [], run = [];
+      (se.band || []).forEach(function (t, j) {
+        if (j && t[0] !== se.band[j - 1][0] + 1) { runs.push(run); run = []; }
+        run.push(t);
+      });
+      if (run.length) runs.push(run);
+      runs.forEach(function (r) {
+        if (r.length < 2) return;
+        function at(col2) { return r.map(function (t) { return X(t[0]).toFixed(1) + "," + Y(t[col2]).toFixed(1); }); }
+        s += '<polygon class="ph-bandfill" fill="' + cc + '" points="' + at(2).concat(at(1).reverse()).join(" ") + '"/>';
+        s += '<polyline class="ph-whisk" stroke="' + cc + '" points="' + at(4).join(" ") + '"/>';
+        s += '<polyline class="ph-whisk" stroke="' + cc + '" points="' + at(3).join(" ") + '"/>';
+      });
+    });
     c.series.forEach(function (se) {
       var cc = col(se.ci);
       // One polyline per run of consecutive slots (#1801): the axis is one slot per commit
@@ -609,7 +675,7 @@
     card.innerHTML = "<h4>" + c.title + "</h4>" + '<div class="ph-tabs"></div>'
       + '<p class="cond">' + c.cond + (src ? ' \u00b7 measured by ' + src : "") + "</p>" + mrow
       + '<p class="ph-metblurb"></p>'
-      + '<div class="ph-range"></div><div class="ph-pick"></div>'
+      + '<div class="ph-range"></div><div class="ph-pick"></div><div class="ph-bandsel"></div>'
       + '<div class="ph-legend">' + legend + "</div>"
       + '<div class="ph-plot"></div><div class="ph-tip" style="display:none"></div>'
       + (c.reading ? '<p class="ph-reading">' + c.reading + "</p>" : "");
@@ -623,6 +689,11 @@
     // reset when the metric changes, because the two suites are recorded independently
     // and index 40 of one is not index 40 of the other.
     var ratioOn = false, r0 = 0, r1 = -1;
+    // The noise band's trailing window, in recorded points (0 = off). Card state like the
+    // range, and kept across a metric switch: it counts points, not commits of one suite.
+    // Only a payload that says `bands` (bench-local, where every point shares one host)
+    // draws one; on the hosted store a band would mostly measure the runner mix.
+    var bands = !!D.bands && !param, bandN = BAND_N, bandAt = [];
 
     // The chart the views are actually drawn from: the active metric's series, optionally
     // turned into the per-commit quotient, then restricted to the selected commit range.
@@ -702,9 +773,32 @@
     }
     drawPick();
 
+    /** @brief The noise band's window picker, built once per card that can draw a band. */
+    function drawBandSel() {
+      if (!bands) return;
+      var host = card.querySelector(".ph-bandsel");
+      host.innerHTML = '<span class="ph-rlab">noise band</span><select class="ph-bandn" aria-label="noise band window">'
+        + BAND_NS.map(function (n) {
+          return '<option value="' + n + '"' + (n === bandN ? " selected" : "") + ">"
+            + (n ? "last " + n + " points" : "off") + "</option>";
+        }).join("") + "</select>"
+        + '<span class="ph-bandnote">trend view · p10–p90 shaded, min/max faint · cv = window '
+        + "std/mean · none for a series with fewer points than the window</span>";
+      var sel = host.querySelector(".ph-bandn");
+      sel.addEventListener("change", function () { bandN = +sel.value; rebind(); show(view); });
+    }
+    drawBandSel();
+
     function derive() {
       var base = (ratioOn && c.ratio) ? (ratioChart(c) || c) : c;
       if (H) base = Object.assign({}, c, { series: pickLines(pa, false).concat(cmp ? pickLines(pb, true) : []) });
+      // The band is computed over the WHOLE series before the range slice, so the first
+      // points of a narrowed range still carry a full window behind them.
+      if (bands && bandN) {
+        base = Object.assign({}, base, { series: base.series.map(function (se) {
+          return Object.assign({}, se, { band: windowBand(se.pts, bandN) });
+        }) });
+      }
       var full = param ? null : D.suites[base.suite];
       if (!full) return { c: base, suite: null, full: null };
       if (r1 < 0 || r1 > full.shas.length - 1) r1 = full.shas.length - 1;
@@ -797,14 +891,22 @@
       // The legend follows the active chart: in ratio mode a pair of engine lines has
       // collapsed into one quotient line, and a legend still naming both arms would
       // describe a chart that is not there.
+      // With a band on, each legend item carries its series' CV over the window ending at
+      // the range's last point: "is this row noisy" as a number.
       card.querySelector(".ph-legend").innerHTML = A.c.series.map(function (se) {
+        var last = se.band && se.band.length ? se.band[se.band.length - 1] : null;
         return '<span class="item"><span class="sw' + (se.dash ? " dash" : "") + '" style="'
-          + (se.dash ? "border-color:" : "background:") + col(se.ci) + '"></span>' + se.label + "</span>";
+          + (se.dash ? "border-color:" : "background:") + col(se.ci) + '"></span>' + se.label
+          + (last ? ' <span class="ph-cv" title="coefficient of variation over the last ' + bandN
+            + ' points">cv ' + fmtPct(last[5]) + "</span>" : "") + "</span>";
       }).join("");
       var rd = card.querySelector(".ph-reading");
       if (H && rd) rd.innerHTML = (pa < 0 && !cmp) ? c.reading : pickReading(A.c);
       drawRange(A.full);
       byIdx = A.c.series.map(lookup);
+      bandAt = A.c.series.map(function (se) {
+        var m2 = {}; (se.band || []).forEach(function (t) { m2[t[0]] = t; }); return m2;
+      });
       blurb.textContent = ratioOn && c.ratio
         ? "Both arms of each point come from one pass on one pinned machine (bench-local), so "
           + "its speed on the day divides out of this quotient to first order. The quotient "
@@ -872,9 +974,11 @@
             + (suite.msgs && suite.msgs[i] ? "<div class='msg'>" + suite.msgs[i] + "</div>" : "")
             + (host ? "<div class='host'>" + host + "</div>" : "");
           rows = c.series.map(function (se, si) {
-            var v = byIdx[si][i];
+            var v = byIdx[si][i], bt = bandAt[si] && bandAt[si][i];
             return v === undefined ? "" : '<div><span class="dot" style="background:' + col(se.ci) + '"></span>'
-              + se.label + " <b>" + g.yf(v) + "</b></div>";
+              + se.label + " <b>" + g.yf(v) + "</b>"
+              + (bt ? ' <span class="ph-cv">cv ' + fmtPct(bt[5]) + " · p10–p90 " + g.yf(bt[1]) + "–" + g.yf(bt[2])
+                + " over " + bandN + "</span>" : "") + "</div>";
           }).join("");
         }
         tip.innerHTML = head + rows;

@@ -888,6 +888,11 @@ def build(data: dict, colors: dict[str, int] | None = None, same_pass: bool = Tr
 # ---------------------------------------------------------------------------
 # emission
 # ---------------------------------------------------------------------------
+# The noise band's default trailing window, in recorded points (#1848). The page script
+# owns the band; this mirrors its `BAND_N` for the chart note, and a test keeps them equal.
+BAND_N = 10
+
+
 def _assets() -> tuple[str, str]:
     """@brief The committed chart CSS + JS, read at generate time to be INLINED
     (same reasoning as render_compare._assets: performance.md renders one
@@ -1011,7 +1016,10 @@ def html_blocks(data: dict, local: dict | None = None) -> dict[str, str]:
             lblob = "null"
         else:
             lcharts = [c for c in lpayload["charts"] if c["section"] == sec]
-            lblob = json.dumps({"suites": lpayload["suites"], "charts": lcharts},
+            # `bands` turns on the trailing-window noise band (#1848), on this payload only:
+            # every bench-local point shares one host, so a band there is the row's own
+            # noise. On the hosted store it would mostly measure the runner mix.
+            lblob = json.dumps({"suites": lpayload["suites"], "charts": lcharts, "bands": True},
                                separators=(",", ":"))
         # Count every metric variant, not just the active one: the card carries all
         # four, and reporting only the default understates the block by ~4x. The count
@@ -1028,7 +1036,7 @@ def html_blocks(data: dict, local: dict | None = None) -> dict[str, str]:
   <code>main</code> commits (oldest \u2192 newest) \u00b7 \U0001f3f7 dashed verticals mark release
   tags (<b>\u2248</b> = tag commit itself is not a recorded point; marker sits at the nearest
   following recorded commit) \u00b7 \U0001f527 dotted verticals mark commits where the BENCH
-  changed \u2014 points either side of one are not comparable. Each card carries every METRIC that point\n  recorded \u2014 <b>p50</b> / <b>p99</b> / <b>ns per delivery</b> / <b>throughput</b> \u2014 pick one under the title. Families with a numeric parameter\n  axis also offer <b>trend</b> / <b>sweep</b> / <b>heatmap</b> / <b>3D</b> views \u2014 same data,\n  three axes (commit \u00d7 parameter \u00d7 value), over a selectable <b>commit range</b>. The paired\n  libtracer-vs-Zenoh cards add a <b>ratio</b> toggle on <b>bench-local</b>: both engines run in the\n  same pass on one pinned CPU, so their per-commit quotient cancels runner speed and is the\n  comparison to read across a long history. The hosted store keeps the best runner per series,\n  so its two arms need not share a pass and its cards carry no ratio. On <b>bench-local</b>, a\n  <b>\u25b2</b> / <b>\u25bc</b> on a trend line marks a sustained <b>step</b> (the row moved past its own\n  noise threshold and held for {step_detect.HOLD_POINTS} points), at the first commit that measured the new level.\n  Hover any chart for exact per-commit values.</p>
+  changed \u2014 points either side of one are not comparable. Each card carries every METRIC that point\n  recorded \u2014 <b>p50</b> / <b>p99</b> / <b>ns per delivery</b> / <b>throughput</b> \u2014 pick one under the title. Families with a numeric parameter\n  axis also offer <b>trend</b> / <b>sweep</b> / <b>heatmap</b> / <b>3D</b> views \u2014 same data,\n  three axes (commit \u00d7 parameter \u00d7 value), over a selectable <b>commit range</b>. The paired\n  libtracer-vs-Zenoh cards add a <b>ratio</b> toggle on <b>bench-local</b>: both engines run in the\n  same pass on one pinned CPU, so their per-commit quotient cancels runner speed and is the\n  comparison to read across a long history. The hosted store keeps the best runner per series,\n  so its two arms need not share a pass and its cards carry no ratio. On <b>bench-local</b>, a\n  <b>\u25b2</b> / <b>\u25bc</b> on a trend line marks a sustained <b>step</b> (the row moved past its own\n  noise threshold and held for {step_detect.HOLD_POINTS} points), at the first commit that measured the new level.\n  Also on <b>bench-local</b>, a trend line carries a <b>noise band</b>: over each series' last N recorded points\n  (default {BAND_N}, picked per card) the p10\u2013p90 is shaded and min/max drawn faint, and the legend and\n  tooltip give the window's coefficient of variation, so a dip can be read against the row's own\n  noise. A series with fewer than N points gets no band.\n  Hover any chart for exact per-commit values.</p>
   <div class="ph-grid ph-charts"></div>
   <script type="application/json" class="ph-data">{blob}</script>
   <script type="application/json" class="ph-data-local">{lblob}</script>

@@ -258,5 +258,74 @@ class ComparisonHistoryPicker(_NoGit):
         self.assertIn('stroke-dasharray="7 5"', body)
 
 
+def _node() -> str | None:
+    """@brief The node binary, or None: the band's arithmetic lives in the page script."""
+    import shutil
+    return shutil.which("node")
+
+
+class NoiseBand(_NoGit):
+    """@brief The trailing-window noise band (#1848): bench-local only, checked numerically.
+
+    The band is computed client-side, because the reader picks the window. So the test runs
+    the page script's own `windowBand` under node over a series with a known spread, rather
+    than a Python copy of it that could drift from what the page draws.
+    """
+
+    def _band(self, pts: list, n: int) -> list:
+        import subprocess
+        node = _node()
+        if node is None:
+            self.skipTest("node is not installed; the band is computed by the page script")
+        fn = re.search(r"\n  function windowBand\(.*?\n  \}\n", JS.read_text(), re.S).group(0)
+        out = subprocess.run([node, "-e", fn + f"console.log(JSON.stringify(windowBand({json.dumps(pts)}, {n})));"],
+                             capture_output=True, text=True, check=True, timeout=30)
+        return json.loads(out.stdout)
+
+    def test_band_matches_a_known_spread(self):
+        # Values 1..10 repeating: every 10-point window holds exactly {1, ..., 10}, so
+        # p10 = 1.9, p90 = 9.1 (linear interpolation), min 1, max 10, mean 5.5, and the
+        # sample standard deviation is sqrt(82.5 / 9).
+        pts = [[i, float(i % 10 + 1)] for i in range(30)]
+        band = self._band(pts, 10)
+        self.assertEqual([t[0] for t in band], list(range(9, 30)))
+        cv = (82.5 / 9) ** 0.5 / 5.5
+        for t in band:
+            for got, want in zip(t[1:], (1.9, 9.1, 1.0, 10.0, cv)):
+                self.assertAlmostEqual(got, want, places=9)
+
+    def test_constant_series_has_zero_width(self):
+        band = self._band([[i, 42.0] for i in range(12)], 10)
+        self.assertEqual(len(band), 3)
+        self.assertTrue(all(t[1:] == [42.0, 42.0, 42.0, 42.0, 0] for t in band))
+
+    def test_short_series_has_no_band(self):
+        self.assertEqual(self._band([[i, 1.0 + i] for i in range(9)], 10), [])
+
+    def test_window_counts_recorded_points_not_slots(self):
+        # Slots 3 and 4 were omitted (a contaminated sample is), so the window ending at
+        # slot 6 reaches back over five recorded points, not five slots.
+        pts = [[0, 1.0], [1, 2.0], [2, 3.0], [5, 4.0], [6, 5.0]]
+        band = self._band(pts, 5)
+        self.assertEqual([t[0] for t in band], [6])
+        self.assertEqual(band[0][3:5], [1.0, 5.0])
+
+    def test_bands_are_bench_local_only(self):
+        block = rh.html_blocks(_store(), _store())["dispatch"]
+        hosted = json.loads(re.search(r'class="ph-data">(.*?)</script>', block).group(1))
+        local = json.loads(re.search(r'class="ph-data-local">(.*?)</script>', block).group(1))
+        self.assertTrue(local.get("bands"))
+        self.assertNotIn("bands", hosted)
+
+    def test_default_window_and_tooltip_cv(self):
+        js = JS.read_text()
+        self.assertEqual(int(re.search(r"var BAND_N = (\d+);", js).group(1)), rh.BAND_N)
+        self.assertEqual(rh.BAND_N, 10)
+        self.assertIn("var bands = !!D.bands && !param", js)
+        # The tooltip row carries the window's CV.
+        self.assertIn("bt = bandAt[si] && bandAt[si][i]", js)
+        self.assertIn("cv ' + fmtPct(bt[5])", js)
+
+
 if __name__ == "__main__":
     unittest.main()
