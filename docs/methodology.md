@@ -589,8 +589,11 @@ of work per operation*.
   and each prints a warning naming any point that came up short. The two engines reach
   that guarantee differently, and the difference is not a handicap: libtracer dispatches
   inline, so `write()` returns only after the last subscriber callback and its publish
-  loop *is* its delivery loop, whereas Zenoh delivers off the publishing thread and the
-  harness spins on the receive counter inside the window until the backlog drains. This
+  loop *is* its delivery loop, while the Zenoh harness spins on the receive counter inside
+  the window until the backlog drains, so a delivery made on a runtime thread is still
+  inside the window. Each Zenoh row is followed by a `NOTE zenoh-runtime` line with its
+  runtime threads' CPU time over the window: on the in-process rows it is 0 ns, so
+  intra-session delivery happens on the putting thread there, as libtracer's does. This
   matters because the arithmetic form would not merely be imprecise, it would be
   unfalsifiable: libtracer's wide-fan-out snapshot truncates to its inline prefix when its
   overflow reserve fails, and its HANDLER and STREAM legs shed an entire fan-out on a
@@ -635,6 +638,23 @@ of work per operation*.
   conclusion are in *Designated model boundaries* below; the short form is that bound against
   bound both engines are near-flat, and the axis the audit reported as Zenoh's was the
   unmatched pair.
+- **Each compared row is matched on four conditions**
+  ([#1809](https://github.com/avatarsd-llc/libtracer/issues/1809)), and every
+  libtracer-vs-Zenoh chart restates them:
+  - **One fresh process per engine and family.** Both harnesses run their default sweep as
+    families, each in a new child process with pinned allocator tunables, and the Zenoh
+    family opens its own session. No row inherits a heap or a session that an earlier family
+    aged.
+  - **The same pin, runtime threads included.** Both binaries run under one CPU set, which
+    Zenoh's runtime threads share with the putting thread, and their CPU time is printed per
+    row (above).
+  - **Equal payload bytes.** A libtracer write moves the value plus its 4-byte VALUE TLV
+    header (6 bytes from 64 KiB), so a Zenoh put carries the same count. Rows stay keyed by
+    the value's size.
+  - **Resolution against resolution.** Zenoh's `inproc-path` row now puts by key, resolved on
+    every put, as libtracer's writes by path; the bound pair is `topics-bound`, which both
+    default sweeps now emit, so the topic-count charts below pair each spelling with its own.
+    The Zenoh `inproc-path` series changes meaning at that commit and steps with it.
 - **ACL is disabled in the comparison rows.** No subject resolver is installed, so
   the access gate is a single null check. The *cost of enforcement* is measured
   separately (the `acl-inherit` rows), never hidden inside the comparison.
@@ -798,8 +818,11 @@ stability.
 And **the `topics-*` arms are not on the generated results page.** One ladder costs about
 nine minutes, almost all of it the Zenoh `topics-addr` rung at 10 000 keys, so wiring it
 into the documentation job would add roughly twenty minutes to every docs build to
-re-derive a result whose interesting content is structural. It is run by hand; the table
-above is its output. Those numbers supersede the preliminary single-round, single-engine
+re-derive a result whose interesting content is structural. The table above is the output
+of a hand run. Since [#1809](https://github.com/avatarsd-llc/libtracer/issues/1809) both
+default sweeps also emit the pair (family `topics`), so the trend charts carry it on every
+recorded commit, one round and one arm order per commit; a verdict on the axis still comes
+from `run_topics.sh`. Those numbers supersede the preliminary single-round, single-engine
 Zenoh figures recorded on #1485, which were never quotable and are deliberately not
 reproduced here. The decomposition beside them was taken on a quiet box (1-minute load
 0.64–1.15, no `cc1plus` alive, 31 CPUs, best of 3 rounds with the arm order flipped on
