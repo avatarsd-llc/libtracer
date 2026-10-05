@@ -19,7 +19,7 @@
  *    destructor live in `twai_link.cpp`, the one out-of-tree TU the hook feeds
  *    to `env.BuildSources`. If that call stops contributing an object file to
  *    the program, this fails at LINK time with an undefined reference.
- *  - handing the link to a CLASSIC `tr::net::transport_can` and registering
+ *  - handing the link to a CLASSIC `tr::net::can_transport_t` and registering
  *    `tr::net::can_transport_factory()` — the shape the hook's own file comment
  *    tells a consumer to write, so the packaged `srcFilter` has to carry the
  *    portable CAN plane (`transport_can.cpp` + `socketcan_link_stub.cpp`) too.
@@ -50,7 +50,7 @@ volatile bool g_run_hardware = false;
  * @brief Build the ESP32 CAN stack the PlatformIO hook is supposed to enable.
  *
  * Never invoked (see @ref g_run_hardware); its purpose is to make the compiler
- * and linker resolve the TWAI link, the CLASSIC `transport_can` over it, and
+ * and linker resolve the TWAI link, the CLASSIC `can_transport_t` over it, and
  * the catalog factory.
  */
 void build_can_stack() {
@@ -66,7 +66,7 @@ void build_can_stack() {
     tr::net::transport_can_config_t can_cfg{};
     can_cfg.node = 1;
     can_cfg.mode = tr::net::can::can_frame_mode_t::CLASSIC;
-    tr::net::transport_can can{std::move(link), can_cfg};
+    tr::net::can_transport_t can{std::move(link), can_cfg};
 
     // The ADR-0027 catalog entry a deployed node registers.
     tr::net::transport_vertex_t::transport_factory_t factory = tr::net::can_transport_factory();

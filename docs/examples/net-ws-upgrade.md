@@ -13,7 +13,7 @@ to be **computed from the client's own nonce**, not a constant a stub could echo
 
 - **`ok()` on a WS transport is the handshake's verdict, not the socket's.** The TCP connect
   succeeding is not the link coming up. The example proves the point twice: once by hand, once
-  behind `transport_ws_client`, which does exactly the exchange spelled out above.
+  behind `ws_client_transport_t`, which does exactly the exchange spelled out above.
 - **One libtracer frame is one BINARY message.** The sink is handed the payload; the WS header
   never reaches it. Client→server frames are masked (§5.1), server→client are not — and both
   directions land in the same sink shape, because masking is the kind's business.
@@ -24,8 +24,8 @@ to be **computed from the client's own nonce**, not a constant a stub could echo
 - **Tighten-only is the general shape of a config-writable bound here.** A key an unauthenticated
   peer's deployment can reach may narrow what it costs the node and may never widen it — the
   same rule `max_frame` follows on every kind.
-- **The multi-peer listener is the same object.** `transport_ws_server` shares its slot/poll
-  machinery with `transport_tcp_server` (#871); what WS adds is the packaging. The slot side is
+- **The multi-peer listener is the same object.** `ws_server_transport_t` shares its slot/poll
+  machinery with `tcp_server_transport_t` (#871); what WS adds is the packaging. The slot side is
   [its own page](net-multi-peer-listener.md).
 - **This target needs the WS transport.** It is built only when `LIBTRACER_TRANSPORT_WS` is on
   (the default). Nothing in it is conditional at run time.

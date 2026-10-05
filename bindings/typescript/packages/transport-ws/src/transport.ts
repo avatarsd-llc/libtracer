@@ -5,13 +5,13 @@
  * @brief TransportWs — the dial-out WebSocket transport for libtracer (#54,
  * ADR-0029).
  *
- * It mirrors the seam of the C++ `tr::net::transport_ws_client`
+ * It mirrors the seam of the C++ `tr::net::ws_client_transport_t`
  * (core/src/transport_ws.cpp): a `send(bytes)` that puts a complete libtracer
  * TLV onto the wire as ONE binary WebSocket frame, plus a receiver registration
  * for inbound frames. A libtracer TLV is carried as a single RFC 6455 BINARY
  * frame (opcode 0x2): the C++ transport sends the whole TLV as one masked client
  * frame and reassembles inbound frames the same way, so this transport stays
- * wire-compatible with the C++ `transport_ws_server`.
+ * wire-compatible with the C++ `ws_server_transport_t`.
  *
  * Framing is delegated to the runtime's WebSocket (native in the browser and in
  * Node >= 22; the `ws` package in older Node). That implementation performs the
@@ -102,7 +102,7 @@ export class TransportWs {
   /**
    * @brief Register (or clear) the inbound-frame receiver.
    *
-   * Mirrors the C++ `transport_ws_client::set_receiver`. The callback is
+   * Mirrors the C++ `ws_client_transport_t::set_receiver`. The callback is
    * invoked once per inbound BINARY frame with that frame's payload bytes.
    */
   onFrame(receiver: FrameReceiver | null): void {

@@ -713,7 +713,7 @@ int main(int argc, char** argv) {
     std::printf("# TCP transport, constructed in-band via write /net/tcp-server/conn <- SPEC\n");
     std::printf("# sizeof: graph_t=%zu vertex_t=%zu tcp_server=%zu transport_vertex_t=%zu\n",
                 sizeof(tr::graph::graph_t), sizeof(tr::graph::vertex_t),
-                sizeof(tr::net::transport_tcp_server), sizeof(tr::net::transport_vertex_t));
+                sizeof(tr::net::tcp_server_transport_t), sizeof(tr::net::transport_vertex_t));
     std::fflush(stdout);
 
     series_t mixed, small, large;

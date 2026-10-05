@@ -111,7 +111,7 @@ int main(int argc, char** argv) {
     // named "client"; an inbound FWD resolves /sensor/temp locally and the reply
     // goes back over this link. ---------------------------------------------------
     tr::net::fwd_router_t router(graph);
-    tr::net::transport_ws_server server(g_port);
+    tr::net::ws_server_transport_t server(g_port);
     if (!server.ok()) {
         std::fprintf(stderr, "fwd_node_server: ws server failed to bind/listen\n");
         return 1;

@@ -231,7 +231,7 @@ class p2p_link_t : public tr::net::transport_t {
 };
 
 /**
- * @brief A bus-capable link: `bus()` returns its own facet, exactly as `transport_can`
+ * @brief A bus-capable link: `bus()` returns its own facet, exactly as `can_transport_t`
  *        does unconditionally and as tcp/ws do when wired `peer_named = true`.
  *
  * That single property is what makes `add_connection` install an `on_children` on the

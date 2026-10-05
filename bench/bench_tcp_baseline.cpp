@@ -15,7 +15,7 @@
  *
  * @section phases Three phases per sweep point, each on a FRESH server
  *
- * Every phase constructs its own `transport_tcp_server` and its own dialers and destroys them
+ * Every phase constructs its own `tcp_server_transport_t` and its own dialers and destroys them
  * before the collector is read. That is deliberate: the receiver runs ON the poll thread, so
  * the only race-free moment to read its `Latency` vector is after the server's destructor has
  * joined that thread. A shared server across phases would need a quiescence protocol whose
@@ -197,7 +197,7 @@ struct result_t {
 }
 
 /** @brief Count the server's currently-open peers (the anti-vacuity check). */
-[[nodiscard]] std::size_t open_peers(tr::net::transport_tcp_server& server) {
+[[nodiscard]] std::size_t open_peers(tr::net::tcp_server_transport_t& server) {
     std::size_t n = 0;
     server.bus()->enumerate_peers([&n](std::string_view) { ++n; });
     return n;
@@ -226,7 +226,7 @@ struct result_t {
     double span = 0.0;
     std::size_t seen = 0;
     {
-        tr::net::transport_tcp_server server(0, {.peer_named = true});
+        tr::net::tcp_server_transport_t server(0, {.peer_named = true});
         if (!server.ok() || server.bus() == nullptr) return r;
         server.bus()->set_peer_receiver(sink);
         const std::uint16_t port = server.local_port();

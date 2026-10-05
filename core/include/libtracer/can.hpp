@@ -2,10 +2,10 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * transport_can (#55) — the PURE, host-testable CAN framing layer: the
+ * can_transport_t (#55) — the PURE, host-testable CAN framing layer: the
  * structured 29-bit extended-CAN-ID codec and the in-band `advertise` frame
  * codec. No SocketCAN, no kernel `vcan`, no real socket — this header knows
- * nothing about `socket(PF_CAN…)`; the `transport_can : transport_t` SocketCAN
+ * nothing about `socket(PF_CAN…)`; the `can_transport_t : transport_t` SocketCAN
  * binding is a deferred increment (see docs/reference/14-can-transport.md).
  *
  * Header-elided framing (ADR-0022): the CAN ID *is* the path, so the TLV header
@@ -244,14 +244,14 @@ struct advertise_t {
  *
  * This is the ONE advertise field-encoding implementation (the `%ws.hpp`
  * `encode_frame_header` / `encode_frame` split, applied to CAN): @ref encode_advertise
- * appends the path after it, and `transport_can::emit_advertise` walks this stack header and
+ * appends the path after it, and `can_transport_t::emit_advertise` walks this stack header and
  * then the path's bytes in place, so slicing an advertise into 8-byte CAN windows allocates
  * NOTHING — it never needed a contiguous buffer (#848). That matters because
  * `emit_advertise` runs on *every* CAN send, so the old `std::vector` was a per-send
  * `abort()` risk under `-fno-exceptions`.
  *
  * The path is a SEPARATE parameter because the header is a function of the path's LENGTH,
- * not of who owns its bytes: `transport_can` passes its own `cfg_.path` and never copies a
+ * not of who owns its bytes: `can_transport_t` passes its own `cfg_.path` and never copies a
  * path into the @ref advertise_t it emits, which is what keeps the whole emission free of
  * allocation. @ref advertise_t::path on @p a is therefore NOT read here — @ref
  * encode_advertise is the caller that passes it.

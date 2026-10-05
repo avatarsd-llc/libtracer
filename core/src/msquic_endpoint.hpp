@@ -33,7 +33,7 @@
  *     until SEND_COMPLETE (Canceled included), the seam's spans are only
  *     borrowed for the send() call, so ONE copy into the single owned heap
  *     buffer is unavoidable — and the only library-held buffer.
- *   - The RX length-prefix reassembly (the shared length_prefix_framer) and
+ *   - The RX length-prefix reassembly (the shared length_prefix_framer_t) and
  *     its delivery through the outer transport's receiver_slot_t.
  *   - The dial-side handshake rendezvous (the constructor blocks until
  *     CONNECTED or shutdown, the tcp_transport_t dial shape) and the shared
@@ -121,7 +121,7 @@ struct tsan_cb_guard_t {
 /** @brief The u32-LE length prefix TX writes (transport framing) — the SAME
  *         constant the RX reassembler consumes, aliased so the two widths
  *         cannot drift (transport_tcp.cpp does it this way too). */
-inline constexpr std::size_t kPrefixBytes = length_prefix_framer::kPrefixBytes;
+inline constexpr std::size_t kPrefixBytes = length_prefix_framer_t::kPrefixBytes;
 /** @brief App-layer connection-shutdown code: framing lost on the frame stream. */
 inline constexpr std::uint64_t kAppErrMalformed = 0x1;
 /** @brief Dial-constructor rendezvous budget per stage (milliseconds). */
@@ -219,9 +219,9 @@ struct send_ctx_t {
 class msquic_endpoint_t {
    public:
     /** @brief The largest frame the length prefix may announce — the shared
-     *         length_prefix_framer::kDefaultMaxFrame (16 MiB), restated by both
+     *         length_prefix_framer_t::kDefaultMaxFrame (16 MiB), restated by both
      *         public transport classes. */
-    static constexpr std::size_t kMaxFrame = length_prefix_framer::kDefaultMaxFrame;
+    static constexpr std::size_t kMaxFrame = length_prefix_framer_t::kDefaultMaxFrame;
 
     /** @brief Constructs inert: no msquic state opened yet. */
     msquic_endpoint_t() = default;
@@ -251,10 +251,10 @@ class msquic_endpoint_t {
     mem::mem_backend_t* backend = nullptr;      /**< @brief The injected RX memory seam. */
     std::size_t max_frame = kMaxFrame;          /**< @brief This connection's frame cap, `:settings
                                                             max_frame` resolved through
-                                                            `length_prefix_framer::configured_cap`
+                                                            `length_prefix_framer_t::configured_cap`
                                                             (tighten-only, #1035). It bounds BOTH
                                                             directions: RX through
-                                                            `length_prefix_framer::feed`, and TX
+                                                            `length_prefix_framer_t::feed`, and TX
                                                             through both @ref send_frame overloads
                                                             (#1409). */
     std::atomic<std::uint64_t> dropped_rx{0};   /**< @brief Backpressure-dropped frames. */
@@ -364,7 +364,7 @@ class msquic_endpoint_t {
      *        callbacks) and reset by the listener before a replacement peer's
      *        stream can start.
      */
-    length_prefix_framer framer_;
+    length_prefix_framer_t framer_;
 
     /** @brief Reset the RX reassembly state for a replacement peer. */
     void reset_rx() { framer_.reset(); }
@@ -470,7 +470,7 @@ class msquic_endpoint_t {
 
     /**
      * @brief Feed one msquic RECEIVE chunk through the shared length-prefix
-     *        reassembler (length_prefix_framer).
+     *        reassembler (length_prefix_framer_t).
      *
      * Each reassembled frame goes up through the slot: tier select (owning
      * rope sink, else the same segment bytes borrowed) lives in
@@ -868,7 +868,7 @@ class msquic_endpoint_t {
         const tsan_cb_guard_t guard(self);  // msquic serializes callbacks (see file top)
         if (ev->Type != QUIC_LISTENER_EVENT_NEW_CONNECTION) return QUIC_STATUS_SUCCESS;
 
-        // ONE peer at a time (the tcp_transport_t / transport_ws_server
+        // ONE peer at a time (the tcp_transport_t / ws_server_transport_t
         // model): refuse a second while the first is up; a DEPARTED peer's
         // handles are closed by the harvest and replaced. Closing blocks until
         // the old handles' callbacks drain, so after this point nothing

@@ -19,7 +19,7 @@
  * offset, so the receiver can tell a whole frame from one spliced out of two. Two arms, one
  * per direction of one connection:
  *
- *  1. **client → server** through `transport_ws_client::send` — the enqueue-then-write
+ *  1. **client → server** through `ws_client_transport_t::send` — the enqueue-then-write
  *     queue (`stream_endpoint_t::handoff_send`, RFC-0028 §4.7). Two threads publish frames of
  *     mixed sizes, the large ones well past both socket buffers so a write is still in
  *     flight when the other thread's frame arrives and has to QUEUE behind it. The server's
@@ -282,11 +282,11 @@ void test_client_queue_race() {
     std::printf("client -> server: two publishers, one queued link, frames stay whole:\n");
     live_count_source_t egress;  // outlives the client, which returns its blocks on the way out
     race_sink_t sink;  // before the transports: they join their recv threads before it dies
-    tr::net::transport_ws_server server(0);
+    tr::net::ws_server_transport_t server(0);
     check(server.ok(), "server listening");
     server.set_receiver(sink);
-    tr::net::transport_ws_client client("127.0.0.1", server.local_port(),
-                                        {.memory = {.io = &egress}});
+    tr::net::ws_client_transport_t client("127.0.0.1", server.local_port(),
+                                          {.memory = {.io = &egress}});
     check(client.ok(), "client connected");
     if (!server.ok() || !client.ok()) return;
 
@@ -317,9 +317,9 @@ void test_client_queue_race() {
 void test_server_two_doors_race() {
     std::printf("server -> client: broadcast and directed sends onto one peer stay whole:\n");
     race_sink_t sink;
-    tr::net::transport_ws_server server(0, {.peer_named = tr::net::kBusLinks});
+    tr::net::ws_server_transport_t server(0, {.peer_named = tr::net::kBusLinks});
     check(server.ok(), "server listening");
-    tr::net::transport_ws_client client("127.0.0.1", server.local_port());
+    tr::net::ws_client_transport_t client("127.0.0.1", server.local_port());
     check(client.ok(), "client connected");
     client.set_receiver(sink);
     if (!server.ok() || !client.ok()) return;

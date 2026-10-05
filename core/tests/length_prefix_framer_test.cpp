@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief length_prefix_framer unit test — drives the u32-length-prefix reassembly state machine
+ * @brief length_prefix_framer_t unit test — drives the u32-length-prefix reassembly state machine
  *        directly (no QUIC connection), the whole point of extracting it from transport_quic /
  *        transport_webtransport (finding #4): prefix/body split across chunks, multiple frames per
  *        chunk, empty records, over the protocol cap => malformed, over local capacity =>
@@ -90,7 +90,7 @@ int main() {
 
     // 1. One record delivered whole.
     {
-        tr::net::length_prefix_framer f;
+        tr::net::length_prefix_framer_t f;
         collector_t c;
         const bytes_t payload = ramp(10, 1);
         const bytes_t rec = record(payload);
@@ -102,7 +102,7 @@ int main() {
 
     // 2. The same record fed one byte at a time (prefix + body split maximally).
     {
-        tr::net::length_prefix_framer f;
+        tr::net::length_prefix_framer_t f;
         collector_t c;
         const bytes_t payload = ramp(37, 5);
         const bytes_t rec = record(payload);
@@ -113,7 +113,7 @@ int main() {
 
     // 3. Two records concatenated, fed in one chunk => two frames in order.
     {
-        tr::net::length_prefix_framer f;
+        tr::net::length_prefix_framer_t f;
         collector_t c;
         const bytes_t a = ramp(4, 0x10);
         const bytes_t b = ramp(6, 0x20);
@@ -127,7 +127,7 @@ int main() {
 
     // 4. An empty record (len == 0) is a no-op; a following record still parses.
     {
-        tr::net::length_prefix_framer f;
+        tr::net::length_prefix_framer_t f;
         collector_t c;
         const bytes_t empty = record({});
         const bytes_t real = ramp(8, 0x30);
@@ -141,7 +141,7 @@ int main() {
 
     // 5. An oversize length prefix is malformed and stops the feed.
     {
-        tr::net::length_prefix_framer f;
+        tr::net::length_prefix_framer_t f;
         collector_t c;
         const bytes_t rec = record(ramp(100));  // claims 100 bytes...
         const auto res = f.feed(heap, /*max_frame=*/8, rec.data(), rec.size(), c,
@@ -152,7 +152,7 @@ int main() {
 
     // 6. Backpressure: a failing alloc drops one frame (drained), then resyncs.
     {
-        tr::net::length_prefix_framer f;
+        tr::net::length_prefix_framer_t f;
         collector_t c;
         toggle_backend_t be;
         const bytes_t dropped_payload = ramp(12, 0x40);
@@ -177,7 +177,7 @@ int main() {
     //     is backpressure, not malformed: the peer obeyed the agreed limit, our local
     //     segment size is our problem — drain, count, resync, keep the connection.
     {
-        tr::net::length_prefix_framer f;
+        tr::net::length_prefix_framer_t f;
         collector_t c;
         toggle_backend_t be;
         be.max_seg = 8;                        // this backend never allocates more than 8 bytes
@@ -197,7 +197,7 @@ int main() {
 
     // 6c. (#932) Only a length beyond the PROTOCOL cap still tears the stream down.
     {
-        tr::net::length_prefix_framer f;
+        tr::net::length_prefix_framer_t f;
         collector_t c;
         toggle_backend_t be;
         be.max_seg = 8;
@@ -208,7 +208,7 @@ int main() {
 
     // 7. reset() discards partial state (a half-read prefix does not corrupt the next).
     {
-        tr::net::length_prefix_framer f;
+        tr::net::length_prefix_framer_t f;
         collector_t c;
         const bytes_t rec = record(ramp(5, 0x60));
         f.feed(heap, kMax, rec.data(), 2, c, ignore_drops);  // feed only 2 of the 4 prefix bytes
@@ -222,7 +222,7 @@ int main() {
     // 8. The shared rule kernel directly (on_prefix / effective_cap) — the same
     //    rules tcp_transport_t applies in pull mode without the chunk machine.
     {
-        using framer_t = tr::net::length_prefix_framer;
+        using framer_t = tr::net::length_prefix_framer_t;
         using kind_t = framer_t::prefix_decision_t::kind_t;
         toggle_backend_t be;
         be.max_seg = 64;
@@ -252,7 +252,7 @@ int main() {
     //     Flipping `on_prefix`'s comparison to `>=` fails the ACCEPT half; dropping
     //     the comparison entirely fails the MALFORMED half.
     {
-        using framer_t = tr::net::length_prefix_framer;
+        using framer_t = tr::net::length_prefix_framer_t;
         using kind_t = framer_t::prefix_decision_t::kind_t;
         constexpr std::size_t kCap = 1000;
         toggle_backend_t be;
@@ -278,7 +278,7 @@ int main() {
     //    assigns through — is TIGHTEN-ONLY against kDefaultMaxFrame (#1035): a
     //    config-writable key must not raise the ingress cap.
     {
-        using framer_t = tr::net::length_prefix_framer;
+        using framer_t = tr::net::length_prefix_framer_t;
         constexpr std::size_t kDefault = framer_t::kDefaultMaxFrame;
         check(framer_t::configured_cap(0) == kDefault, "configured_cap: 0 (unset) => the default");
         check(framer_t::configured_cap(4096) == 4096,
@@ -296,7 +296,7 @@ int main() {
     //     is the exact shape the WebTransport backpressure test hits, where small
     //     frames routinely coalesce into one msquic RECEIVE.
     {
-        tr::net::length_prefix_framer f;
+        tr::net::length_prefix_framer_t f;
         toggle_backend_t be;
         be.max_seg = 8;  // 20 bytes can never be held; 6 can
         const bytes_t kept_payload = ramp(6, 0x70);
@@ -322,7 +322,7 @@ int main() {
         // count, which is precisely the defect. Kept as an executable statement of
         // WHY the callback exists, so a future revert to per-chunk batching fails here
         // instead of intermittently in a live transport suite.
-        tr::net::length_prefix_framer f2;
+        tr::net::length_prefix_framer_t f2;
         std::size_t local_tally = 0;
         std::size_t published = 0;
         std::size_t published_visible_at_delivery = 0;

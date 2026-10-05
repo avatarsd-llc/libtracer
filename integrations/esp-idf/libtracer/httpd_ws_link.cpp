@@ -7,7 +7,7 @@
  *
  * Chip-target-only TU (needs esp_http_server + lwIP BSD sockets), selected by the
  * component CMakeLists — never an in-source #ifdef, the same rule twai_link.cpp
- * follows. The linux virtual board keeps core's raw-socket transport_ws_server.
+ * follows. The linux virtual board keeps core's raw-socket ws_server_transport_t.
  */
 
 #include "libtracer_esp/httpd_ws_link.hpp"
@@ -725,7 +725,7 @@ struct asm_buf_t {
  * released. That keeps the destructor's join intact without giving the mutex an ordering
  * constraint on a foreign lock. It does NOT make destroying a link from under a lock its
  * in-flight work needs safe: that deadlocks on the join, here as in the URI-handler case
- * and as in `transport_ws_server`, whose destructor joins its poll thread for the same
+ * and as in `ws_server_transport_t`, whose destructor joins its poll thread for the same
  * reason.
  */
 struct httpd_ws_link_t::gate_t {
@@ -1273,7 +1273,7 @@ httpd_ws_link_t::httpd_ws_link_t(std::uint16_t bind_port, const httpd_ws_config_
     const std::size_t peers = max_peers != 0 ? max_peers : kDefaultPeerCap;
     cfg.max_open_sockets = static_cast<std::uint16_t>(peers + kInternalSockSlack);
     // Do NOT LRU-evict an existing client: at the cap we refuse the NEW peer in the
-    // handshake handler, never drop a live graph peer mid-stream (transport_ws_server's
+    // handshake handler, never drop a live graph peer mid-stream (ws_server_transport_t's
     // admission contract). lru_purge would silently sever an in-flight subscriber.
     cfg.lru_purge_enable = false;
     // The bound WS sockets get at admission — never the server's, which still governs

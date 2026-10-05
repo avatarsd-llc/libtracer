@@ -19,7 +19,7 @@
  * TLV) handed to the receiver — tagged with the SENDING peer's name through the
  * bus_link_t facet (ADR-0044), so return routes name the right browser tab; PING
  * is answered with a stack-built PONG. Every connection dies down ONE path
- * (slot_server_t::teardown_slot — one home, shared with transport_tcp_server since
+ * (slot_server_t::teardown_slot — one home, shared with tcp_server_transport_t since
  * #871; five call sites in this server's `on_readable` framing hook): the
  * peer closing the socket or a read error, at either phase; on an ESTABLISHED
  * stream a CLOSE or an RFC 6455 violation the checked decode reports (an
@@ -38,8 +38,8 @@
  * send(frame) broadcasts to every open peer (the flat point-to-point surface);
  * a directed per-peer send is peer_link(name)->send().
  *
- * Both roles live here: transport_ws_server (accept inbound peers) and
- * transport_ws_client (dial out to a ws:// peer — device-to-device / NAT egress),
+ * Both roles live here: ws_server_transport_t (accept inbound peers) and
+ * ws_client_transport_t (dial out to a ws:// peer — device-to-device / NAT egress),
  * the latter sending MASKED client frames per RFC 6455 §5.1. POSIX sockets;
  * mirrors transport_udp's lifecycle (a recv thread polled for a clean shutdown).
  * The framing itself is never reimplemented here — it all goes through tr::net::ws.
@@ -81,7 +81,7 @@ namespace tr::net {
 namespace detail {
 
 /**
- * @brief TEST SEAM: run by `transport_ws_server::on_readable` at the exact instant a peer's
+ * @brief TEST SEAM: run by `ws_server_transport_t::on_readable` at the exact instant a peer's
  *        `101 Switching Protocols` response is on the wire AND its slot is published open.
  *
  * The handshake's two visible transitions — "the peer may believe the connection is up" and
@@ -114,7 +114,7 @@ inline constexpr std::string_view kWsClientSuggestedModule = "ws-client";
 inline constexpr std::string_view kWsServerSuggestedModule = "ws-server";
 
 /**
- * @brief `transport_ws_server`'s knobs as one aggregate (#1593), after the bind port.
+ * @brief `ws_server_transport_t`'s knobs as one aggregate (#1593), after the bind port.
  *
  * Every member defaults to the historical default, so `ws_server_config_t{}` is the
  * unconfigured server and a caller names only what it sets.
@@ -127,8 +127,8 @@ struct ws_server_config_t {
      */
     link_memory_t memory{};
     /**
-     * @brief Per-connection receive cap (0 → `transport_ws_server::kMaxFrame`). TIGHTEN-ONLY
-     *        (`length_prefix_framer::configured_cap`, #1035), and bounded by the backend's real
+     * @brief Per-connection receive cap (0 → `ws_server_transport_t::kMaxFrame`). TIGHTEN-ONLY
+     *        (`length_prefix_framer_t::configured_cap`, #1035), and bounded by the backend's real
      *        capacity. Checked against the DECLARED length in the WS frame header, so an
      *        oversize announcement is refused before one body byte is buffered.
      */
@@ -155,7 +155,7 @@ struct ws_server_config_t {
     std::uint32_t liveness_window_ms = 0;
     /**
      * @brief PRE-AUTH request-size budget for the opening handshake in bytes (0 →
-     *        `transport_ws_server::kMaxHandshakeBytes`). TIGHTEN-ONLY (`handshake_cap`):
+     *        `ws_server_transport_t::kMaxHandshakeBytes`). TIGHTEN-ONLY (`handshake_cap`):
      *        enforced BEFORE the append, so the byte that would exceed it is never copied;
      *        over budget ⇒ `malformed_rx` ticks and the link is closed (#934).
      */
@@ -163,7 +163,7 @@ struct ws_server_config_t {
 };
 
 /**
- * @brief `transport_ws_client`'s knobs as one aggregate (#1593), after the peer address.
+ * @brief `ws_client_transport_t`'s knobs as one aggregate (#1593), after the peer address.
  */
 struct ws_client_config_t {
     /**
@@ -175,7 +175,7 @@ struct ws_client_config_t {
      *        once, at construction.
      */
     link_memory_t memory{};
-    /** @brief Receive cap (0 → `transport_ws_server::kMaxFrame`); tighten-only — see
+    /** @brief Receive cap (0 → `ws_server_transport_t::kMaxFrame`); tighten-only — see
      *         @ref ws_server_config_t::max_frame. */
     std::size_t max_frame = 0;
     /** @brief Recv-thread stack size in bytes, 0 = platform default. */
@@ -193,7 +193,7 @@ struct ws_client_config_t {
     std::uint32_t liveness_window_ms = 0;
     /**
      * @brief The DIAL half of the pre-auth handshake budget (#934), resolved through
-     *        `transport_ws_server::handshake_cap` (0 → the default; tighten-only). It bounds
+     *        `ws_server_transport_t::handshake_cap` (0 → the default; tighten-only). It bounds
      *        the RESPONSE header block the dialled server may make this node accumulate.
      */
     std::size_t max_handshake = 0;
@@ -209,27 +209,27 @@ struct ws_client_config_t {
  * (the routable `p<slot>` fallback, ADR-0073 §2 / #426) when a peer-named sink is installed (the
  * router's bus wiring), or to the flat @ref transport_t receiver otherwise —
  * so a single-client deployment behaves exactly as the point-to-point server
- * always did. The dial-out counterpart is transport_ws_client below.
+ * always did. The dial-out counterpart is ws_client_transport_t below.
  *
  * Peer lifecycle: peers occupy SLOTS. A departed peer's slot is recycled for
  * the next accept, so steady-state memory is bounded by the maximum number of
  * CONCURRENT peers ever reached (or by @p max_peers when set — the RFC-0006
  * injected bound), never by the number of connections ever served. That whole
  * slot/poll layer is @ref slot_server_t, shared verbatim with
- * transport_tcp_server since #871; what this class adds is the RFC 6455
+ * tcp_server_transport_t since #871; what this class adds is the RFC 6455
  * packaging — the opening handshake and the frame codec.
  */
-class transport_ws_server : public stream_server_base_t {
+class ws_server_transport_t : public stream_server_base_t {
    public:
     /** @brief The largest MESSAGE a peer may announce — the shared
-     *         length_prefix_framer::kDefaultMaxFrame (16 MiB) unless `:settings max_frame`
+     *         length_prefix_framer_t::kDefaultMaxFrame (16 MiB) unless `:settings max_frame`
      *         tightens it, and further bounded by the injected backend's real capacity.
      *
      * One WS message is one libtracer frame, so this is the same per-connection receive cap
      * tcp/quic/webtransport apply to their length prefix — it just reads off a WS frame
      * header instead. A frame (or a reassembled message) claiming more is malformed:
      * @ref malformed_rx ticks and the connection is failed, RFC 6455 §7.1.7. */
-    static constexpr std::size_t kMaxFrame = length_prefix_framer::kDefaultMaxFrame;
+    static constexpr std::size_t kMaxFrame = length_prefix_framer_t::kDefaultMaxFrame;
 
     /**
      * @brief The largest OPENING HANDSHAKE a PRE-AUTH peer may make this node buffer
@@ -248,7 +248,7 @@ class transport_ws_server : public stream_server_base_t {
     /**
      * @brief Resolve a `max_handshake` request into the honored budget — TIGHTEN-ONLY
      *        against @ref kMaxHandshakeBytes, exactly as
-     *        `length_prefix_framer::configured_cap` is against `kDefaultMaxFrame`.
+     *        `length_prefix_framer_t::configured_cap` is against `kDefaultMaxFrame`.
      *
      * `0` (unset) keeps the default; a nonzero value yields
      * `min(max_handshake, kMaxHandshakeBytes)`. The value arrives through a config-writable
@@ -271,13 +271,13 @@ class transport_ws_server : public stream_server_base_t {
      *                  peer cap, bus facet, poll-thread stack, liveness window, handshake
      *                  budget.
      */
-    explicit transport_ws_server(std::uint16_t bind_port, const ws_server_config_t& config = {});
+    explicit ws_server_transport_t(std::uint16_t bind_port, const ws_server_config_t& config = {});
 
     /** @brief Stop the recv thread and close all sockets. */
-    ~transport_ws_server() override;
+    ~ws_server_transport_t() override;
 
-    transport_ws_server(const transport_ws_server&) = delete;
-    transport_ws_server& operator=(const transport_ws_server&) = delete;
+    ws_server_transport_t(const ws_server_transport_t&) = delete;
+    ws_server_transport_t& operator=(const ws_server_transport_t&) = delete;
 
     /**
      * @brief Send @p frame as one server→client BINARY WebSocket message to
@@ -344,7 +344,7 @@ class transport_ws_server : public stream_server_base_t {
      *         a declared frame length is compared against, resolved from the two injected
      *         resources rather than restated as a number. */
     [[nodiscard]] std::size_t effective_max_frame() const noexcept {
-        return length_prefix_framer::effective_cap(*backend_, max_frame_);
+        return length_prefix_framer_t::effective_cap(*backend_, max_frame_);
     }
 
     /** @brief The pre-auth handshake budget actually honored: `handshake_cap(max_handshake)`
@@ -387,9 +387,9 @@ class transport_ws_server : public stream_server_base_t {
         }
 
        private:
-        friend class transport_ws_server;
-        transport_ws_server* owner_ = nullptr; /**< @brief The owning server. */
-        session_t* slot_ = nullptr;            /**< @brief The peer slot this sends to. */
+        friend class ws_server_transport_t;
+        ws_server_transport_t* owner_ = nullptr; /**< @brief The owning server. */
+        session_t* slot_ = nullptr;              /**< @brief The peer slot this sends to. */
     };
 
     /** @brief One fresh slot with its handshake/frame buffers, reassembler and facade. */
@@ -429,10 +429,13 @@ class transport_ws_server : public stream_server_base_t {
     std::atomic<std::size_t> dropped_tx_{0};
 };
 
+/** @brief The pre-v0.18.0 spelling of @ref ws_server_transport_t; removed in v0.19.0 (#1723). */
+using transport_ws_server = ws_server_transport_t;
+
 /**
  * @brief A WebSocket (RFC 6455) client transport_t — dials out to one peer.
  *
- * The mirror of transport_ws_server: a board that DIALS OUT to a ws:// peer
+ * The mirror of ws_server_transport_t: a board that DIALS OUT to a ws:// peer
  * (device-to-device, or egress through a NAT). The constructor TCP-connects to
  * @p host:@p port, runs the opening handshake from the client side (sends an
  * HTTP GET Upgrade with a fresh Sec-WebSocket-Key, then verifies the 101
@@ -441,7 +444,7 @@ class transport_ws_server : public stream_server_base_t {
  * (ws::encode_client_frame); inbound server frames are unmasked and decode the
  * same way the server's do. ok() confirms the handshake completed.
  */
-class transport_ws_client : public transport_t, private stream_endpoint_t {
+class ws_client_transport_t : public transport_t, private stream_endpoint_t {
    public:
     /**
      * @brief Connect to @p host:@p port and run the client opening handshake.
@@ -457,14 +460,14 @@ class transport_ws_client : public transport_t, private stream_endpoint_t {
      *             egress store), receive cap, recv-thread stack, deferred receive, liveness
      *             window, handshake budget.
      */
-    transport_ws_client(const std::string& host, std::uint16_t port,
-                        const ws_client_config_t& config = {});
+    ws_client_transport_t(const std::string& host, std::uint16_t port,
+                          const ws_client_config_t& config = {});
 
     /** @brief Stop the recv thread and close the socket. */
-    ~transport_ws_client() override;
+    ~ws_client_transport_t() override;
 
-    transport_ws_client(const transport_ws_client&) = delete;
-    transport_ws_client& operator=(const transport_ws_client&) = delete;
+    ws_client_transport_t(const ws_client_transport_t&) = delete;
+    ws_client_transport_t& operator=(const ws_client_transport_t&) = delete;
 
     /**
      * @brief Send @p frame as one client→server MASKED BINARY WebSocket message.
@@ -551,7 +554,7 @@ class transport_ws_client : public transport_t, private stream_endpoint_t {
 
     /** @brief The cap actually honored: `min(max_frame, backend.max_segment_size())`. */
     [[nodiscard]] std::size_t effective_max_frame() const noexcept {
-        return length_prefix_framer::effective_cap(*backend_, max_frame_);
+        return length_prefix_framer_t::effective_cap(*backend_, max_frame_);
     }
 
     /** @brief The pre-auth handshake budget actually honored — the server-side accessor's
@@ -583,9 +586,9 @@ class transport_ws_client : public transport_t, private stream_endpoint_t {
     std::atomic<std::uint64_t> mask_state_{0};
     // The RX seam + ingress bound + counters, identical to the server's (and to tcp's).
     mem::mem_backend_t* backend_;
-    std::size_t max_frame_ = transport_ws_server::kMaxFrame;
+    std::size_t max_frame_ = ws_server_transport_t::kMaxFrame;
     /** @brief The pre-auth handshake budget (#934) — the server-side member's twin. */
-    std::size_t max_handshake_ = transport_ws_server::kMaxHandshakeBytes;
+    std::size_t max_handshake_ = ws_server_transport_t::kMaxHandshakeBytes;
     // Drop counters: word-wide, not 64-bit (core/STYLE.md §Introspection clause 5, #1697) —
     // a 64-bit atomic is a libatomic call on every rv32, the ESP32-C6 included. The 64-bit
     // accessors widen on read; a 32-bit target wraps after 2^32.
@@ -630,5 +633,8 @@ class transport_ws_client : public transport_t, private stream_endpoint_t {
      *         called at most once per endpoint. */
     std::atomic<bool> recv_started_{false};
 };
+
+/** @brief The pre-v0.18.0 spelling of @ref ws_client_transport_t; removed in v0.19.0 (#1723). */
+using transport_ws_client = ws_client_transport_t;
 
 }  // namespace tr::net

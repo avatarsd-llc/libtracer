@@ -8,7 +8,7 @@
  * The REQUEST half of origination: frame building, arming and cancelling the caller's record.
  * The reply half (`reply_target`) stays in fwd_router.cpp beside the reply terminus it serves.
  * A TU of its own, and that is measured: added to fwd_router.cpp, this code re-partitioned
- * GCC's inline budget and grew the ratchet-pinned `route_fwd_forward<rope_cursor>` by 319 B
+ * GCC's inline budget and grew the ratchet-pinned `route_fwd_forward<rope_cursor_t>` by 319 B
  * without touching it.
  */
 #include <algorithm>

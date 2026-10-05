@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * length_prefix_framer — reassembles u32-LE length-prefixed frames from a stream
+ * length_prefix_framer_t — reassembles u32-LE length-prefixed frames from a stream
  * delivered as arbitrary chunks (a msquic RECEIVE event's buffers). Extracted
  * from the byte-for-byte identical RX state machine that transport_quic and
  * transport_webtransport each open-coded (the review's finding #4 "verbatim"
@@ -43,7 +43,7 @@
 
 /**
  * @file
- * @brief `tr::net` u32-length-prefix stream reassembler: `length_prefix_framer`.
+ * @brief `tr::net` u32-length-prefix stream reassembler: `length_prefix_framer_t`.
  */
 
 namespace tr::net {
@@ -57,7 +57,7 @@ namespace tr::net {
  * framer serves one stream and is reused across a stream's chunks; @ref reset
  * discards partial state when a new peer's stream takes over.
  */
-class length_prefix_framer {
+class length_prefix_framer_t {
    public:
     /** @brief The u32-LE length prefix's size on the wire (transport framing). */
     static constexpr std::size_t kPrefixBytes = 4;
@@ -299,5 +299,8 @@ class length_prefix_framer {
     std::size_t rx_off_ = 0;                        // body bytes filled so far
     std::size_t drain_left_ = 0;  // backpressure: dropped-frame bytes left to skip
 };
+
+/** @brief The pre-v0.18.0 spelling of @ref length_prefix_framer_t; removed in v0.19.0 (#1723). */
+using length_prefix_framer = length_prefix_framer_t;
 
 }  // namespace tr::net

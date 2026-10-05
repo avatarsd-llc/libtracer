@@ -212,7 +212,7 @@ It has two legs, and only one of them copies payload bytes.
 `FWD{ op=WRITE, dst=<stored return route>, src=<empty PATH>, payload=<VALUE> }` as a
 retained send (RFC-0028 §6.9): three head spans on the stack (a fresh header, the stored route,
 an empty `src`) and the value by reference, handed to `transport_t::send(head, value)`
-(`fwd_router.cpp:fwd_router_t::deliver_remote`). The header is a `stack_writer<16>` — the FWD header of at
+(`fwd_router.cpp:fwd_router_t::deliver_remote`). The header is a `stack_writer_t<16>` — the FWD header of at
 most 6 bytes plus the 5-byte op TLV — and both constant TLVs are `constexpr` arrays with no
 runtime construction (`fwd_router.cpp:fwd_router_t::deliver_remote`). The route bytes were copied once at subscribe
 time, so a delivery re-uses them by reference; a multi-link value crosses as its own segments,

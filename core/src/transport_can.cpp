@@ -116,7 +116,7 @@ tr::net::reassembly_key_t key_of(std::uint16_t node, std::uint16_t base_endpoint
 // build-system concern, never an in-source #ifdef. This TU stays 100% portable:
 // the transport talks only to the can_link_t seam.
 
-transport_can::transport_can(std::unique_ptr<can_link_t> link, transport_can_config_t config)
+can_transport_t::can_transport_t(std::unique_ptr<can_link_t> link, transport_can_config_t config)
     : link_(std::move(link)),
       cfg_(std::move(config)),
       // The injected-bound seam the reassembly buffer was built around, finally
@@ -158,7 +158,7 @@ transport_can::transport_can(std::unique_ptr<can_link_t> link, transport_can_con
     emit_hello();
 }
 
-transport_can::~transport_can() {
+can_transport_t::~can_transport_t() {
     // Drop the receivers first (both the peer-named slot and the flat fallback);
     // then releasing the link stops its receive thread, which can no longer
     // re-enter a half-destroyed transport.

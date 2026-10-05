@@ -690,7 +690,7 @@ class stream_endpoint_t : protected posix_endpoint_t {
 
 /**
  * @brief The MULTI-peer slot/poll machinery every stream SERVER shares
- *        (transport_tcp_server, transport_ws_server) — one listener, N
+ *        (tcp_server_transport_t, ws_server_transport_t) — one listener, N
  *        recycled peer slots, one poll thread (#871).
  *
  * The tier above @ref stream_endpoint_t — that one owns a single peer fd, this

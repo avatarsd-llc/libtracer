@@ -86,11 +86,11 @@ struct quic_config_t {
 class quic_transport_t : public transport_t {
    public:
     /** @brief The largest frame the length prefix may announce — the shared
-     *         length_prefix_framer::kDefaultMaxFrame (16 MiB) unless `:settings
+     *         length_prefix_framer_t::kDefaultMaxFrame (16 MiB) unless `:settings
      *         max_frame` tightens it. A larger prefix is malformed: counted via
      *         @ref malformed_rx and the connection is shut down (a desynced
      *         stream cannot be trusted again). */
-    static constexpr std::size_t kMaxFrame = length_prefix_framer::kDefaultMaxFrame;
+    static constexpr std::size_t kMaxFrame = length_prefix_framer_t::kDefaultMaxFrame;
 
     /**
      * @brief DIAL mode: connect to @p peer_host:@p peer_port and open the
@@ -114,7 +114,7 @@ class quic_transport_t : public transport_t {
     /**
      * @brief LISTEN mode: serve QUIC on @p bind_port with the PEM certificate
      *        at @p cert_file / private key at @p key_file, accepting ONE
-     *        inbound peer at a time (the tcp_transport_t / transport_ws_server
+     *        inbound peer at a time (the tcp_transport_t / ws_server_transport_t
      *        one-peer model; re-accepts after a peer departs).
      *
      * Use ok() to confirm the listener started (bad cert paths fail here); the

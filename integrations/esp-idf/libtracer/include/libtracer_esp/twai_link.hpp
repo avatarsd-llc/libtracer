@@ -8,14 +8,14 @@
  *
  * twai_link_t — the ESP-IDF implementation of libtracer's `can_link_t` seam
  * over the on-chip TWAI controller (ESP-IDF's CAN 2.0 peripheral, driven by the
- * `esp_driver_twai` node API). The seam is what makes `tr::net::transport_can`
+ * `esp_driver_twai` node API). The seam is what makes `tr::net::can_transport_t`
  * portable: the framing / advertise / reassembly layers above it are pure and
  * host-tested (core/tests/transport_can_test.cpp over a fake link); this class
  * only moves raw classic-CAN frames. It lives in the ESP-IDF component tree —
  * NOT in core/ — because it needs IDF headers; the build system selects it for
  * chip targets (integrations/esp-idf/libtracer/CMakeLists.txt), never a macro.
  *
- * TWAI is CLASSIC CAN only (no CAN-FD): pair it with a `transport_can` whose
+ * TWAI is CLASSIC CAN only (no CAN-FD): pair it with a `can_transport_t` whose
  * `transport_can_config_t::mode` is `can_frame_mode_t::CLASSIC`. Frames flagged
  * `fd` are dropped on write (mirroring the link contract's best-effort drop).
  *
@@ -118,7 +118,7 @@ class twai_link_t : public can_link_t {
      * @brief Write one classic CAN frame to the bus (serialized, bounded wait).
      *
      * CAN-FD frames (`frame.fd == true`) and payloads over 8 bytes are dropped —
-     * TWAI is classic-only; configure the owning `transport_can` as CLASSIC.
+     * TWAI is classic-only; configure the owning `can_transport_t` as CLASSIC.
      * When every in-flight slot is taken the call blocks up to
      * `tx_timeout_ms` for the tx-done ISR to free one (backpressure); an
      * expired wait drops the frame and increments @ref tx_dropped.
@@ -153,7 +153,7 @@ class twai_link_t : public can_link_t {
      * `link_up()` counterpart to add here: this type is a `can_link_t` driver seam, not a
      * `transport_t`, so it is not on the #1059 contract at all — and a BUS has no closure
      * concept anyway, which is exactly why that contract's base default is `true`. The
-     * owning `transport_can` is the `transport_t` in this stack.
+     * owning `can_transport_t` is the `transport_t` in this stack.
      */
     [[nodiscard]] bool ok() const noexcept { return node_ != nullptr; }
 

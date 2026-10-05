@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * transport_can (increment 2 of #55) — the SocketCAN binding that drives the
+ * can_transport_t (increment 2 of #55) — the SocketCAN binding that drives the
  * pure framing layer (can.hpp / can_framing.hpp / can_reassembly.hpp) over a
  * real Linux CAN bus. It is a `tr::net::transport_t`: a bridge hands it a complete
  * libtracer frame via send(), the transport address-shift-fragments that frame
@@ -53,7 +53,7 @@
 
 /**
  * @file
- * @brief The SocketCAN binding `tr::net::transport_can`, its raw-frame seam
+ * @brief The SocketCAN binding `tr::net::can_transport_t`, its raw-frame seam
  *        `can_link_t`, and the production `socketcan_link_t`.
  */
 
@@ -176,9 +176,9 @@ struct can_frame_data_t {
 }
 
 /**
- * @brief The raw-frame seam between @ref transport_can and a physical CAN bus.
+ * @brief The raw-frame seam between @ref can_transport_t and a physical CAN bus.
  *
- * Abstracting the socket here is what makes @ref transport_can testable without
+ * Abstracting the socket here is what makes @ref can_transport_t testable without
  * the kernel `vcan` module: production uses @ref socketcan_link_t, tests use an
  * in-memory paired link. A link is single-owner (held by one transport) and
  * delivers inbound frames through the registered @ref rx_fn_t, which may fire on
@@ -318,7 +318,7 @@ class socketcan_link_t : public can_link_t {
 };
 
 /**
- * @brief Static identity of a @ref transport_can node on the bus.
+ * @brief Static identity of a @ref can_transport_t node on the bus.
  *
  * Fixes the CAN-ID `version`/`node` band this transport transmits in and the
  * framing mode it slices into. @ref path is the libtracer path this node binds in
@@ -347,11 +347,11 @@ struct transport_can_config_t {
     std::size_t max_groups = 0;          /**< @brief Live reassembly-group ceiling; `0` = unbounded
                                               (host-bounded per RFC-0006). Overflow evicts the
                                               oldest group and ticks @ref
-                                              transport_can::dropped_groups. */
+                                              can_transport_t::dropped_groups. */
     std::size_t max_pending = 0;         /**< @brief Ceiling on data slices parked awaiting their
                                               advertise; `0` = unbounded (host-bounded per
                                               RFC-0006). Overflow evicts the oldest parked slice
-                                              and ticks @ref transport_can::dropped_rx. */
+                                              and ticks @ref can_transport_t::dropped_rx. */
     std::chrono::milliseconds rx_ttl =
         kCanRxTtlFromPeerTtl; /**< @brief RX staleness window: a parked slice or an
                                    incomplete reassembly group untouched this long is
@@ -372,7 +372,7 @@ struct transport_can_config_t {
                       bounded backend (`mem::pool_t`) so ingress exhaustion is a
                       by-value refusal on the RX thread instead of a reach into the
                       global heap; a refusal drops the whole group and ticks @ref
-                      transport_can::dropped_rx. Must outlive the transport — the
+                      can_transport_t::dropped_rx. Must outlive the transport — the
                       segments it hands out are released by it. Companion to @ref
                       reasm_mr — that one bounds the reassembly STRUCTURE, this one the
                       slice BYTES. */
@@ -415,7 +415,7 @@ struct transport_can_config_t {
  *    inbound NAME — replies route back per-peer with no per-request state.
  * No peer ever creates a vertex or any other graph state (ADR-0044 §1).
  */
-class transport_can : public transport_t, public bus_link_t {
+class can_transport_t : public transport_t, public bus_link_t {
    public:
     /**
      * @brief Bind this transport to raw link @p link with node identity @p config.
@@ -427,13 +427,13 @@ class transport_can : public transport_t, public bus_link_t {
      *               open but not yet started.
      * @param config This node's version/node/mode/path identity on the bus.
      */
-    transport_can(std::unique_ptr<can_link_t> link, transport_can_config_t config);
+    can_transport_t(std::unique_ptr<can_link_t> link, transport_can_config_t config);
 
     /** @brief Detach the receiver and release the link (stopping its receive thread). */
-    ~transport_can() override;
+    ~can_transport_t() override;
 
-    transport_can(const transport_can&) = delete;
-    transport_can& operator=(const transport_can&) = delete;
+    can_transport_t(const can_transport_t&) = delete;
+    can_transport_t& operator=(const can_transport_t&) = delete;
 
     /**
      * @brief Fragment @p frame across CAN frames and emit it (advertise + data).
@@ -634,8 +634,8 @@ class transport_can : public transport_t, public bus_link_t {
         }
 
        private:
-        friend class transport_can;
-        transport_can* owner_ = nullptr;
+        friend class can_transport_t;
+        can_transport_t* owner_ = nullptr;
         std::atomic<std::uint16_t> node_{0};
     };
 
@@ -775,6 +775,9 @@ class transport_can : public transport_t, public bus_link_t {
     // peer_rx_) — the ONE tier-select mechanism; no transport-local receivers.
 };
 
+/** @brief The pre-v0.18.0 spelling of @ref can_transport_t; removed in v0.19.0 (#1723). */
+using transport_can = can_transport_t;
+
 /**
  * @brief The ready-to-register `can` transport factory — how the CAN module plugs
  *        into the ADR-0027 connection-vertex catalog.
@@ -782,7 +785,7 @@ class transport_can : public transport_t, public bus_link_t {
  * Register at setup: `net.register_transport_type("can", can_transport_factory())`
  * plus `net.register_module("can", "can", conn_role_t::DIAL)`, which mints the module's
  * creator endpoint. A subsequent `write /net/can/conn <- SPEC{name, config{kind = "can", …}}`
- * then constructs a @ref transport_can over a production @ref socketcan_link_t and
+ * then constructs a @ref can_transport_t over a production @ref socketcan_link_t and
  * the connection vertex owns it. Per the ADR-0043 §5 leanness ruling, every
  * CAN-private key is parsed HERE from the raw config SETTINGS TLV — nothing lands
  * in the shared `conn_settings_t`:

@@ -295,7 +295,7 @@ esp_ws_client_link_t::esp_ws_client_link_t(std::string host, std::uint16_t port,
       rx_backend_(config.memory.rx),
       // The send side's store (#1661): the scratch below, the queue's slots and the base
       // class's gather temporary all draw from the application's `memory.io`, null meaning
-      // the process heap — the host client's rule (`transport_ws_client`).
+      // the process heap — the host client's rule (`ws_client_transport_t`).
       tx_buf_(config.memory.io != nullptr ? *config.memory.io : tr::mem::heap_source()),
       tx_(kTxQueueDepth, config.memory.io != nullptr ? *config.memory.io : tr::mem::heap_source()),
       armed_(!config.defer_recv) {
@@ -954,7 +954,7 @@ void esp_ws_client_link_t::recv_loop() {
                 // that no longer exists and resolving compact labels against a stranger's
                 // label space. Re-establishing after a flap is cheap and correct;
                 // resurrecting stale routing is neither. This is also what core's
-                // portable `transport_ws_client` does at the end of its recv loop
+                // portable `ws_client_transport_t` does at the end of its recv loop
                 // (core/src/transport_ws.cpp), which this type claims to be a drop-in
                 // for. Guarded by the `stop_` break above, on core's rule: a LOCAL
                 // teardown is not a peer departure and reports nothing.

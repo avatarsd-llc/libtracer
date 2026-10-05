@@ -1,8 +1,8 @@
 # One listener, many slots — and why `p<slot>` is not an identity (transport plane)
 
 `tcp_transport_t`'s LISTEN constructor accepts one peer at a time — the board↔board shape. A
-node that fans out to browser tabs or to a fleet needs the other one: `transport_tcp_server`
-(and its RFC 6455 sibling `transport_ws_server`, sharing the same slot/poll machinery since
+node that fans out to browser tabs or to a fleet needs the other one: `tcp_server_transport_t`
+(and its RFC 6455 sibling `ws_server_transport_t`, sharing the same slot/poll machinery since
 #871) runs **one** poll thread over a slot table, so steady-state memory is bounded by the
 concurrent-peer high-water mark or by `max_peers`, whichever is smaller.
 

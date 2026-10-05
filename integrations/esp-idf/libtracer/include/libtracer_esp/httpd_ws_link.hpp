@@ -6,7 +6,7 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * The embedded-native counterpart to core's raw-socket `transport_ws_server`
+ * The embedded-native counterpart to core's raw-socket `ws_server_transport_t`
  * (core/src/transport_ws.cpp). That portable server opens its OWN
  * ::socket/::listen/::accept, hand-rolls the RFC 6455 handshake + frame codec +
  * fragment reassembly, and runs a dedicated poll thread — ~16 KB of flash and an
@@ -17,7 +17,7 @@
  * external-handle ctor — no second server), letting the tested platform stack own
  * the listen socket, the handshake, the masking/framing and the recv task — the
  * same "platform link" split as `twai_link_t` is for CAN. The portable
- * `transport_ws_server` stays for the linux virtual board, which has no
+ * `ws_server_transport_t` stays for the linux virtual board, which has no
  * `esp_http_server` (it uses glibc sockets); the two are picked by which TU the
  * build compiles, never an in-source `#ifdef`.
  *
@@ -31,7 +31,7 @@
  * server therefore needs `CONFIG_HTTPD_WS_SUPPORT=y`: there is no portable
  * fallback behind it.
  *
- * It presents the SAME `transport_t` + `bus_link_t` contract `transport_ws_server`
+ * It presents the SAME `transport_t` + `bus_link_t` contract `ws_server_transport_t`
  * does — one inbound BINARY WebSocket frame is one libtracer TLV; a peer-named
  * server tags each frame with the sending peer's `<ip>:<port>` so a directed FWD
  * reply reaches only the tab that asked (ADR-0044); `send()` broadcasts. So it
@@ -201,7 +201,7 @@ struct httpd_ws_config_t {
      * @brief Concurrent-peer admission cap; 0 = unbounded. Beyond it the peer is refused at
      *        the edge that claims its slot — the HANDSHAKE for a session the three-valued
      *        predicate answered `ADMIT_AUTHENTICATED` for, its FIRST frame for every other
-     *        (#1334). Clean either way, mirroring `transport_ws_server`. In adopted mode the
+     *        (#1334). Clean either way, mirroring `ws_server_transport_t`. In adopted mode the
      *        host's own socket policy still decides which peers are accepted at all.
      */
     std::size_t max_peers = 0;
@@ -265,7 +265,7 @@ struct httpd_ws_config_t {
  * @brief A WebSocket (RFC 6455) server `transport_t` on `esp_http_server` — accepts
  *        many inbound peers and exposes them through the @ref bus_link_t facet.
  *
- * Public surface mirrors `transport_ws_server` (the node's introspection —
+ * Public surface mirrors `ws_server_transport_t` (the node's introspection —
  * enumerate_peers / local_port / ok — and its S7 census depend on it), so a chip
  * node substitutes this type at its construction site with no other change. Span
  * delivery (not ropes): each frame is delivered borrowed and the router services

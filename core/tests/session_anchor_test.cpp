@@ -6,7 +6,7 @@
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * The client plane is a REAL `tr::net::transport_tcp_server` on an ephemeral port with
+ * The client plane is a REAL `tr::net::tcp_server_transport_t` on an ephemeral port with
  * genuinely dialled sockets, because slot allocation, naming and teardown are exactly the
  * machinery under test — a fake would assume away the first-free recycling that #1223's
  * confirmed disclosure rests on.
@@ -85,7 +85,7 @@ struct client_t {
 };
 
 /** @brief The listener's currently audible peer names, in enumeration order. */
-std::vector<std::string> peers_of(const tr::net::transport_tcp_server& s) {
+std::vector<std::string> peers_of(const tr::net::tcp_server_transport_t& s) {
     std::vector<std::string> out;
     s.enumerate_peers([&out](std::string_view n) { out.emplace_back(n); });
     return out;
@@ -161,7 +161,7 @@ bytes_t children_bytes(const graph_t& g, vertex_handle_t mount) {
 void run() {
     graph_t node;
     fwd_router_t router(node);
-    tr::net::transport_tcp_server server(0, {.max_peers = 2, .peer_named = true});
+    tr::net::tcp_server_transport_t server(0, {.max_peers = 2, .peer_named = true});
     check(server.ok(), "the listener bound an ephemeral port");
     const vertex_handle_t mount = register_mount(node, *server.bus());
     check(router.add_child(std::string(kMount), server), "the listener mounts on the router");

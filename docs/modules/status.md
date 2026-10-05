@@ -131,12 +131,12 @@ carries is an `opt`-bit decision described in
 :project: libtracer
 ```
 
-```{doxygenstruct} tr::crc::crc32c_state
+```{doxygenstruct} tr::crc::crc32c_state_t
 :project: libtracer
 :members:
 ```
 
-```{doxygenstruct} tr::crc::crc16_ccitt_state
+```{doxygenstruct} tr::crc::crc16_ccitt_state_t
 :project: libtracer
 :members:
 ```

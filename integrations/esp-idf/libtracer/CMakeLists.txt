@@ -81,8 +81,8 @@ endif()
 # REQUIRES never propagates (it evaluates false in the early pass).
 
 # --- Which WS PLANE this target gets (#947, ruling; #948) ---------------------------
-# ESP-IDF WebSocket never uses POSIX sockets. core's transport_ws_server /
-# transport_ws_client are the HOST implementation: they open their own ::socket, run
+# ESP-IDF WebSocket never uses POSIX sockets. core's ws_server_transport_t /
+# ws_client_transport_t are the HOST implementation: they open their own ::socket, run
 # their own poll thread, and egress through posix_endpoint's sendmsg(MSG_NOSIGNAL) —
 # a flag lwIP DEFINES but lwip_sendmsg REJECTS with EOPNOTSUPP, which write_all_iov
 # reads as peer-gone. On a chip target they are therefore not merely 18 KB of code no
@@ -185,7 +185,7 @@ if(NOT IDF_TARGET STREQUAL "linux")
     # that never names critical_pool_t leaves the symbols for --gc-sections to drop.
     list(APPEND LIBTRACER_SRCS "critical_pool.cpp")
     # Chip targets: the esp_http_server-backed WS transport link (httpd_ws_link_t) — the
-    # embedded-native REPLACEMENT for core's raw-socket transport_ws_server, a platform
+    # embedded-native REPLACEMENT for core's raw-socket ws_server_transport_t, a platform
     # link picked by which TU compiles (never an in-source #ifdef). Since #947 that is a
     # true replacement, not a coexistence: transport_ws.cpp is NOT compiled here at all
     # (LIBTRACER_PORTABLE_WS is FALSE on chips), so nothing relies on --gc-sections to
@@ -210,7 +210,7 @@ if(NOT IDF_TARGET STREQUAL "linux")
             "serves WebSocket. Ignore this if CONFIG_HTTPD_WS_SUPPORT is on for another reason.")
     endif()
     # Chip targets: the esp_transport_ws-backed WS *client* link (esp_ws_client_link_t) — the
-    # embedded-native replacement for core's raw-socket transport_ws_client (which fails the
+    # embedded-native replacement for core's raw-socket ws_client_transport_t (which fails the
     # handshake on lwIP silicon), the dial mirror of httpd_ws_link_t. Uses tcp_transport (core
     # IDF), so gated on CONFIG_LIBTRACER_TRANSPORT_WS alone (no esp_http_server dependency).
     # It is the ONLY ws dialer on a chip target since #947.

@@ -1,7 +1,7 @@
 /**
  * @file
- * @brief #55 (increment 2) — transport_can SocketCAN-binding tests over an in-memory fake link, so
- *        they pass in plain Docker with NO kernel CAN (vcan).
+ * @brief #55 (increment 2) — can_transport_t SocketCAN-binding tests over an in-memory fake link,
+ * so they pass in plain Docker with NO kernel CAN (vcan).
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
@@ -83,7 +83,7 @@ class fake_can_bus_t {
      *
      * A real CAN bus drops frames, and a lost data slice is what leaves a receiver
      * holding an incomplete group. Modelled at the link seam rather than by hand-building
-     * frames, so the sender stays the real `transport_can::send` path throughout.
+     * frames, so the sender stays the real `can_transport_t::send` path throughout.
      * `nullptr` restores a lossless bus.
      */
     void set_drop(std::function<bool(const tr::net::can_frame_data_t&)> pred) {
@@ -249,7 +249,7 @@ bool wait_until(Fn cond, std::chrono::milliseconds budget) {
 
 /**
  * @brief Emit `adv` as node `node`'s control-slot byte stream, in CLASSIC ≤8B windows —
- *        exactly what `transport_can::emit_advertise` puts on the wire.
+ *        exactly what `can_transport_t::emit_advertise` puts on the wire.
  */
 void inject_advertise(fake_link_t& link, std::uint16_t node, const can::advertise_t& adv) {
     const std::vector<std::byte> bytes = can::encode_advertise(adv);
@@ -295,14 +295,14 @@ void test_roundtrip(tr::net::can::can_frame_mode_t mode, std::size_t payload_len
 
     fake_can_bus_t bus;
     // Sink + named receiver lambda BEFORE the transports: the slot binds the
-    // callable by address, and ~transport_can joins its receive thread.
+    // callable by address, and ~can_transport_t joins its receive thread.
     sink_t sink;
     auto rx = [&](std::span<const std::byte> f) { sink.on(f); };
     auto link_a = std::make_unique<fake_link_t>(bus);
     auto link_b = std::make_unique<fake_link_t>(bus);
 
-    tr::net::transport_can tx_a(std::move(link_a), {0, 1, mode, "sensor/temp"});
-    tr::net::transport_can tx_b(std::move(link_b), {0, 2, mode, "actuator/valve"});
+    tr::net::can_transport_t tx_a(std::move(link_a), {0, 1, mode, "sensor/temp"});
+    tr::net::can_transport_t tx_b(std::move(link_b), {0, 2, mode, "actuator/valve"});
 
     tx_b.set_receiver(rx);
 
@@ -334,8 +334,10 @@ void test_fd_dlc_padding() {
     auto link_b = std::make_unique<fake_link_t>(bus);
     frame_tap_t tap(bus);  // records every frame on the bus
 
-    tr::net::transport_can tx_a(std::move(link_a), {0, 1, tr::net::can::can_frame_mode_t::FD, "p"});
-    tr::net::transport_can tx_b(std::move(link_b), {0, 2, tr::net::can::can_frame_mode_t::FD, "q"});
+    tr::net::can_transport_t tx_a(std::move(link_a),
+                                  {0, 1, tr::net::can::can_frame_mode_t::FD, "p"});
+    tr::net::can_transport_t tx_b(std::move(link_b),
+                                  {0, 2, tr::net::can::can_frame_mode_t::FD, "q"});
 
     tx_b.set_receiver(rx);
 
@@ -383,8 +385,8 @@ void test_control_stream_resync() {
     // stream arrives (what a mid-stream join or a lost control frame leaves
     // behind). Without resynchronization this wedges B's decoder for node 1
     // permanently and A's later traffic is never delivered.
-    tr::net::transport_can tx_b(std::move(link_b),
-                                {0, 2, tr::net::can::can_frame_mode_t::CLASSIC, "q"});
+    tr::net::can_transport_t tx_b(std::move(link_b),
+                                  {0, 2, tr::net::can::can_frame_mode_t::CLASSIC, "q"});
     tx_b.set_receiver(rx);
 
     tr::net::can_frame_data_t fragment;
@@ -396,8 +398,8 @@ void test_control_stream_resync() {
     injector.write_raw(fragment);
 
     auto link_a = std::make_unique<fake_link_t>(bus);
-    tr::net::transport_can tx_a(std::move(link_a),
-                                {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "sensor/temp"});
+    tr::net::can_transport_t tx_a(std::move(link_a),
+                                  {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "sensor/temp"});
     const std::vector<std::byte> payload = make_payload(24);
     tx_a.send(payload);
 
@@ -414,10 +416,10 @@ void test_lifecycle() {
         auto rx = [&](std::span<const std::byte> f) { sink.on(f); };
         auto link_a = std::make_unique<fake_link_t>(bus);
         auto link_b = std::make_unique<fake_link_t>(bus);
-        tr::net::transport_can tx_a(std::move(link_a),
-                                    {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "a"});
-        tr::net::transport_can tx_b(std::move(link_b),
-                                    {0, 2, tr::net::can::can_frame_mode_t::CLASSIC, "b"});
+        tr::net::can_transport_t tx_a(std::move(link_a),
+                                      {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "a"});
+        tr::net::can_transport_t tx_b(std::move(link_b),
+                                      {0, 2, tr::net::can::can_frame_mode_t::CLASSIC, "b"});
         tx_b.set_receiver(rx);
         tx_a.send(make_payload(30));
         sink.wait_for_count(1, 1s);
@@ -433,10 +435,10 @@ void test_single_value() {
     auto rx = [&](std::span<const std::byte> f) { sink.on(f); };
     auto link_a = std::make_unique<fake_link_t>(bus);
     auto link_b = std::make_unique<fake_link_t>(bus);
-    tr::net::transport_can tx_a(std::move(link_a),
-                                {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "p"});
-    tr::net::transport_can tx_b(std::move(link_b),
-                                {0, 2, tr::net::can::can_frame_mode_t::CLASSIC, "q"});
+    tr::net::can_transport_t tx_a(std::move(link_a),
+                                  {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "p"});
+    tr::net::can_transport_t tx_b(std::move(link_b),
+                                  {0, 2, tr::net::can::can_frame_mode_t::CLASSIC, "q"});
     tx_b.set_receiver(rx);
     const std::vector<std::byte> payload = make_payload(5);
     tx_a.send(payload);
@@ -463,7 +465,7 @@ void test_pending_flood_is_capped_and_counted() {
     tr::net::transport_can_config_t cfg = rx_test_config();
     cfg.max_pending = 4;
     cfg.rx_ttl = 60s;  // far out of reach: the count cap must be what bounds this
-    tr::net::transport_can tx_b(std::move(link_b), cfg);
+    tr::net::can_transport_t tx_b(std::move(link_b), cfg);
 
     constexpr std::uint16_t kFlood = 64;
     for (std::uint16_t ep = 1; ep <= kFlood; ++ep) inject_data(injector, /*node=*/1, ep);
@@ -495,7 +497,7 @@ void test_pending_slices_age_out() {
     tr::net::transport_can_config_t cfg = rx_test_config();
     cfg.max_pending = 0;  // count cap OFF — only the age-out can reclaim these
     cfg.rx_ttl = 30ms;
-    tr::net::transport_can tx_b(std::move(link_b), cfg);
+    tr::net::can_transport_t tx_b(std::move(link_b), cfg);
 
     constexpr std::uint16_t kParked = 6;
     for (std::uint16_t ep = 1; ep <= kParked; ++ep) inject_data(injector, /*node=*/1, ep);
@@ -538,7 +540,7 @@ void test_zero_peer_ttl_does_not_disable_the_age_out() {
         cfg.max_pending = 0;  // count cap OFF — the age-out is the only bound
         cfg.peer_ttl = 0ms;   // degenerate: nothing is live
         cfg.rx_ttl = tr::net::kCanRxTtlFromPeerTtl;  // derive it — this is the vector
-        tr::net::transport_can tx_b(std::move(link_b), cfg);
+        tr::net::can_transport_t tx_b(std::move(link_b), cfg);
 
         // The claim is about GROWTH, so the flood has to be large enough that "it
         // did not grow" is not just "not much arrived yet".
@@ -561,7 +563,7 @@ void test_zero_peer_ttl_does_not_disable_the_age_out() {
         tr::net::transport_can_config_t cfg = rx_test_config();
         cfg.max_pending = 0;
         cfg.rx_ttl = 60s;  // far out of reach
-        tr::net::transport_can tx_b(std::move(link_b), cfg);
+        tr::net::can_transport_t tx_b(std::move(link_b), cfg);
 
         constexpr std::uint16_t kParked = 4;
         for (std::uint16_t ep = 1; ep <= kParked; ++ep) inject_data(injector, /*node=*/1, ep);
@@ -590,7 +592,7 @@ void test_incomplete_group_is_swept() {
 
     tr::net::transport_can_config_t cfg = rx_test_config();
     cfg.rx_ttl = 30ms;
-    tr::net::transport_can tx_b(std::move(link_b), cfg);
+    tr::net::can_transport_t tx_b(std::move(link_b), cfg);
 
     // Node 1 advertises a 2-slice group at base endpoint 1 ...
     can::advertise_t adv;
@@ -637,7 +639,7 @@ void test_max_groups_reaches_the_reassembly_buffer() {
     tr::net::transport_can_config_t cfg = rx_test_config();
     cfg.max_groups = 2;
     cfg.rx_ttl = 60s;  // far out of reach: the COUNT bound must be what evicts
-    tr::net::transport_can tx_b(std::move(link_b), cfg);
+    tr::net::can_transport_t tx_b(std::move(link_b), cfg);
 
     // Three distinct 2-slice groups, each left one slice short, so none completes
     // and none is erased by the delivery path.
@@ -683,9 +685,9 @@ void test_oversized_group_is_refused_before_advertising() {
 
     tr::net::transport_can_config_t cfg_b = rx_test_config();
     cfg_b.rx_ttl = 30ms;  // short, so any pinned group is provably sweepable below
-    tr::net::transport_can tx_a(std::move(link_a),
-                                {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "sensor/temp"});
-    tr::net::transport_can tx_b(std::move(link_b), cfg_b);
+    tr::net::can_transport_t tx_a(std::move(link_a),
+                                  {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "sensor/temp"});
+    tr::net::can_transport_t tx_b(std::move(link_b), cfg_b);
     tx_b.set_receiver(rx);
 
     // Exactly one slice more than the data-endpoint window holds. Sized from the
@@ -733,9 +735,9 @@ void test_u16_slice_count_wrap_cannot_advertise_a_hello() {
     fake_can_bus_t bus;
     auto link_a = std::make_unique<fake_link_t>(bus);
     auto link_b = std::make_unique<fake_link_t>(bus);
-    tr::net::transport_can tx_a(std::move(link_a),
-                                {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "sensor/temp"});
-    tr::net::transport_can tx_b(std::move(link_b), rx_test_config());
+    tr::net::can_transport_t tx_a(std::move(link_a),
+                                  {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "sensor/temp"});
+    tr::net::can_transport_t tx_b(std::move(link_b), rx_test_config());
 
     // One slice past the u16 range — the count that used to narrow to zero.
     const std::size_t slices = std::size_t{0xFFFF} + 1;
@@ -794,9 +796,9 @@ void test_rx_slice_refusal_drops_the_group_and_counts() {
 
     tr::net::transport_can_config_t cfg_b = rx_test_config();
     cfg_b.rx_backend = &pool;
-    tr::net::transport_can tx_a(std::move(link_a),
-                                {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "sensor/temp"});
-    tr::net::transport_can tx_b(std::move(link_b), cfg_b);
+    tr::net::can_transport_t tx_a(std::move(link_a),
+                                  {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "sensor/temp"});
+    tr::net::can_transport_t tx_b(std::move(link_b), cfg_b);
     tx_b.set_receiver(rx);
 
     // 24 bytes => 3 CLASSIC windows against 2 free slots: the third copy is refused.
@@ -843,7 +845,7 @@ void test_rx_zero_length_slice_drops_the_group_and_counts() {
     auto rx = [&](std::span<const std::byte> f) { sink.on(f); };
     fake_link_t injector(bus);
     auto link_b = std::make_unique<fake_link_t>(bus);
-    tr::net::transport_can tx_b(std::move(link_b), rx_test_config());
+    tr::net::can_transport_t tx_b(std::move(link_b), rx_test_config());
     tx_b.set_receiver(rx);
 
     can::advertise_t adv;
@@ -877,8 +879,8 @@ void test_rx_zero_length_slice_drops_the_group_and_counts() {
     // guard has to be able to fail for the reason it names.
     const std::size_t before = sink.count();
     auto link_a = std::make_unique<fake_link_t>(bus);
-    tr::net::transport_can tx_a(std::move(link_a),
-                                {0, 3, tr::net::can::can_frame_mode_t::CLASSIC, "sensor/other"});
+    tr::net::can_transport_t tx_a(std::move(link_a),
+                                  {0, 3, tr::net::can::can_frame_mode_t::CLASSIC, "sensor/other"});
     const std::vector<std::byte> live(2 * tr::net::can::kCanClassicMaxData, std::byte{0xA7});
     tx_a.send(live);
     check(sink.wait_for_count(before + 1, 2s), "the node is LIVE: a later group is delivered");
@@ -934,9 +936,9 @@ void test_endpoint_wraparound_does_not_alias_stale_state() {
 
     tr::net::transport_can_config_t cfg_b = rx_test_config();
     cfg_b.rx_ttl = 60s;  // far out of reach: the age-out must NOT be what reclaims the trap
-    tr::net::transport_can tx_a(std::move(link_a),
-                                {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "sensor/temp"});
-    tr::net::transport_can tx_b(std::move(link_b), cfg_b);
+    tr::net::can_transport_t tx_a(std::move(link_a),
+                                  {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "sensor/temp"});
+    tr::net::can_transport_t tx_b(std::move(link_b), cfg_b);
     tx_b.set_receiver(rx);
 
     constexpr std::size_t kWin = tr::net::can::kCanClassicMaxData;
@@ -1016,10 +1018,10 @@ void test_clean_run_counters_are_zero() {
     auto rx = [&](std::span<const std::byte> f) { sink.on(f); };
     auto link_a = std::make_unique<fake_link_t>(bus);
     auto link_b = std::make_unique<fake_link_t>(bus);
-    tr::net::transport_can tx_a(std::move(link_a),
-                                {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "sensor/temp"});
-    tr::net::transport_can tx_b(std::move(link_b),
-                                {0, 2, tr::net::can::can_frame_mode_t::CLASSIC, "q"});
+    tr::net::can_transport_t tx_a(std::move(link_a),
+                                  {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "sensor/temp"});
+    tr::net::can_transport_t tx_b(std::move(link_b),
+                                  {0, 2, tr::net::can::can_frame_mode_t::CLASSIC, "q"});
     tx_b.set_receiver(rx);
     const std::vector<std::byte> payload = make_payload(40);
     tx_a.send(payload);
@@ -1051,10 +1053,10 @@ void test_presink_window_drop_is_named() {
     auto rx = [&](std::span<const std::byte> f) { sink.on(f); };
     auto link_a = std::make_unique<fake_link_t>(bus);
     auto link_b = std::make_unique<fake_link_t>(bus);
-    tr::net::transport_can tx_a(std::move(link_a),
-                                {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "sensor/temp"});
-    tr::net::transport_can tx_b(std::move(link_b),
-                                {0, 2, tr::net::can::can_frame_mode_t::CLASSIC, "q"});
+    tr::net::can_transport_t tx_a(std::move(link_a),
+                                  {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "sensor/temp"});
+    tr::net::can_transport_t tx_b(std::move(link_b),
+                                  {0, 2, tr::net::can::can_frame_mode_t::CLASSIC, "q"});
 
     // NO receiver on B — this IS the window.
     const std::vector<std::byte> payload = make_payload(20);
@@ -1127,9 +1129,9 @@ void test_stale_lap_binding_is_refused_not_welded() {
 
     tr::net::transport_can_config_t cfg_b = rx_test_config();
     cfg_b.rx_ttl = 60s;  // far out of reach: the age-out must not be what refuses anything
-    tr::net::transport_can tx_a(std::move(link_a),
-                                {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "sensor/temp"});
-    tr::net::transport_can tx_b(std::move(link_b), cfg_b);
+    tr::net::can_transport_t tx_a(std::move(link_a),
+                                  {0, 1, tr::net::can::can_frame_mode_t::CLASSIC, "sensor/temp"});
+    tr::net::can_transport_t tx_b(std::move(link_b), cfg_b);
     tx_b.set_receiver(rx);
 
     constexpr std::size_t kWin = tr::net::can::kCanClassicMaxData;
@@ -1215,7 +1217,7 @@ void test_rope_delivery() {
 
     fake_can_bus_t bus;
     // Capture state + named peer-rope lambda BEFORE the transports (the slot
-    // binds the callable by address; ~transport_can joins its receive thread).
+    // binds the callable by address; ~can_transport_t joins its receive thread).
     std::mutex m;
     std::condition_variable cv;
     std::string peer;
@@ -1234,8 +1236,10 @@ void test_rope_delivery() {
     auto link_a = std::make_unique<fake_link_t>(bus);
     auto link_b = std::make_unique<fake_link_t>(bus);
 
-    tr::net::transport_can tx_a(std::move(link_a), {0, 1, tr::net::can::can_frame_mode_t::FD, "p"});
-    tr::net::transport_can tx_b(std::move(link_b), {0, 2, tr::net::can::can_frame_mode_t::FD, "q"});
+    tr::net::can_transport_t tx_a(std::move(link_a),
+                                  {0, 1, tr::net::can::can_frame_mode_t::FD, "p"});
+    tr::net::can_transport_t tx_b(std::move(link_b),
+                                  {0, 2, tr::net::can::can_frame_mode_t::FD, "q"});
 
     check(tx_b.delivers_ropes(), "transport_can::delivers_ropes() is true");
 

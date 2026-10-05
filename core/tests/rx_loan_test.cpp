@@ -197,7 +197,7 @@ void test_graph_write_stores_loaned() {
     // transport hands a frame up.
     std::vector<std::byte> tlv;
     {
-        tr::net::stack_writer<16> h;
+        tr::net::stack_writer_t<16> h;
         h.header(tr::wire::type_t::VALUE, kPayload);
         const std::span<const std::byte> hs = h.span();
         tlv.assign(hs.begin(), hs.end());

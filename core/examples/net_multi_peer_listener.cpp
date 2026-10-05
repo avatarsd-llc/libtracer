@@ -5,14 +5,14 @@
 
 /**
  * @file
- * @brief ONE CONCEPT — a LISTEN link is not one link per peer: `transport_tcp_server` holds
+ * @brief ONE CONCEPT — a LISTEN link is not one link per peer: `tcp_server_transport_t` holds
  *        many peers in recycled SLOTS behind one `transport_t`, names them POSITIONALLY as
  *        `p<slot>`, and that positional naming is precisely why a resolved peer endpoint
  *        must be re-resolved per use instead of cached.
  *
  * `tcp_transport_t`'s LISTEN constructor accepts one peer at a time — the board↔board
  * shape. A node that fans out to browser tabs or to a fleet needs the other one:
- * `transport_tcp_server` (and its RFC 6455 sibling `transport_ws_server`) share one
+ * `tcp_server_transport_t` (and its RFC 6455 sibling `ws_server_transport_t`) share one
  * poll thread over a slot table, so steady-state memory is bounded by the concurrent-peer
  * high-water mark or by `max_peers`, whichever is smaller — an injected bound (RFC-0006),
  * never a synthetic backlog. A connection past the cap is accepted and immediately closed,
@@ -188,8 +188,8 @@ int main() {
     // request of 0 takes the liveness window's own ceiling), so the value the server ENFORCES
     // is read back rather than assumed to be what was asked for.
     constexpr std::size_t kRequestedPeers = 4;
-    tr::net::transport_tcp_server server(std::uint16_t{0},
-                                         {.max_peers = kRequestedPeers, .peer_named = true});
+    tr::net::tcp_server_transport_t server(std::uint16_t{0},
+                                           {.max_peers = kRequestedPeers, .peer_named = true});
     check(ok, server.ok(), "the multi-peer listener bound an ephemeral port");
     check(ok, server.max_peers() == kRequestedPeers, "the admission cap is the one requested");
     check(ok, server.bus() != nullptr, "peer_named=true exposes the bus facet");

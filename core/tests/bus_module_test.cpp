@@ -185,7 +185,7 @@ void test_the_registry_follows_the_gate() {
 /** @brief (c) A FLAT listener is what the knob must not disturb. */
 void test_a_flat_listener_is_untouched() {
     std::printf("(c) a FLAT listener comes up and stays flat under both bindings:\n");
-    tr::net::transport_ws_server flat(kEphemeral, {.max_frame = 1024, .max_peers = 4});
+    tr::net::ws_server_transport_t flat(kEphemeral, {.max_frame = 1024, .max_peers = 4});
     check(flat.ok(), "a peer_named=false ws listener comes up on every binding");
     check(flat.bus() == nullptr && bus_of(flat) == nullptr, "and exposes no bus facet, either way");
     check(!flat.peer_named(), "its mode authority answers FLAT");
@@ -202,8 +202,8 @@ void test_a_flat_listener_is_untouched() {
 /** @brief (d) A PEER-NAMED listener is refused rather than demoted, when the module is closed. */
 void test_a_peer_named_listener_is_refused_when_closed() {
     std::printf("(d) a peer_named listener: served when present, REFUSED when closed:\n");
-    tr::net::transport_ws_server named(kEphemeral,
-                                       {.max_frame = 1024, .max_peers = 4, .peer_named = true});
+    tr::net::ws_server_transport_t named(kEphemeral,
+                                         {.max_frame = 1024, .max_peers = 4, .peer_named = true});
     check(named.ok() == kBusLinks,
           "ok() — the came-up predicate make_checked asks — is true iff the module is present");
     check((named.bus() != nullptr) == kBusLinks, "and the facet follows it");
@@ -262,9 +262,9 @@ void test_the_spec_factory_refuses_the_key_when_closed() {
  */
 void test_the_layout_follows_the_binding() {
     std::printf("(f) the listener's LAYOUT carries the facet iff this build has one:\n");
-    check(std::is_base_of_v<tr::net::bus_link_t, tr::net::transport_ws_server> == kBusLinks,
+    check(std::is_base_of_v<tr::net::bus_link_t, tr::net::ws_server_transport_t> == kBusLinks,
           "a ws listener inherits bus_link_t iff the module is bound");
-    check(std::is_base_of_v<tr::net::bus_link_t, tr::net::transport_tcp_server> == kBusLinks,
+    check(std::is_base_of_v<tr::net::bus_link_t, tr::net::tcp_server_transport_t> == kBusLinks,
           "and so does a tcp listener — one seam, both stream servers");
     check(!std::is_base_of_v<tr::net::bus_link_t, tr::net::slot_server_t>,
           "the SHARED slot tier never inherits it, under either binding (#1438)");
@@ -275,7 +275,7 @@ void test_the_layout_follows_the_binding() {
     // flat tier plus its own framing — measured on the C6 profile as 208 B -> 168 B.
     check((sizeof(tr::net::bus_slot_server_t) > sizeof(tr::net::flat_slot_server_t)),
           "carrying the facet is strictly larger at rest than not carrying it");
-    check(sizeof(tr::net::transport_tcp_server) >= sizeof(tr::net::stream_server_base_t),
+    check(sizeof(tr::net::tcp_server_transport_t) >= sizeof(tr::net::stream_server_base_t),
           "and a concrete listener is its bound arm plus its framing, nothing else");
 }
 

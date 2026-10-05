@@ -60,10 +60,10 @@ where the mechanism lives:
 - **Egress scatter-gathers.** `rope_t::to_iovec` (`core/include/libtracer/rope.hpp:rope_t::to_iovec`) emits one
   span per link into the original segments. The host WS server builds `[header, link0, link1, …]`
   and `sendmsg`s it with "no flatten, no re-copy (server frames are UNMASKED, RFC 6455 §5.1)"
-  (`core/src/transport_ws.cpp:transport_ws_server::send(std::span<const std::span<const std::byte>> iov)`); TCP prepends a u32-LE length via `prefixed_iov_t`
+  (`core/src/transport_ws.cpp:ws_server_transport_t::send(std::span<const std::span<const std::byte>> iov)`); TCP prepends a u32-LE length via `prefixed_iov_t`
   (`core/src/transport_tcp.cpp:prefixed_iov_t`). With `kMaxServerIov = 16` (`core/src/transport_ws.cpp:constexpr std::size_t kMaxServerIov = kMaxInlineIov`),
   the common reply (≤ ~6 spans) fits the stack `std::array<::iovec, kMaxServerIov + 1>`
-  (`core/src/transport_ws.cpp:transport_ws_server::send(std::span<const std::span<const std::byte>> iov)`) — zero heap, zero payload copy. The only host TX copy is the
+  (`core/src/transport_ws.cpp:ws_server_transport_t::send(std::span<const std::span<const std::byte>> iov)`) — zero heap, zero payload copy. The only host TX copy is the
   kernel skb copy every BSD socket pays.
 - **Flatten refuses a heterogeneous rope.** A DEVICE link is not CPU-addressable, so a host memcpy
   would fault; the one body `flatten` and `try_flatten` share checks `all_host()` up front and
@@ -141,12 +141,12 @@ correspondingly smaller; that figure has not been compiled here and is not asser
 
 ### 3.2 Why the rope cursor does not remove the arena
 
-`rope_cursor` (`core/include/libtracer/rope_decode.hpp:rope_cursor`) is a **byte source**. It lets the
+`rope_cursor_t` (`core/include/libtracer/rope_decode.hpp:rope_cursor_t`) is a **byte source**. It lets the
 grammar read fields off a scatter-gather rope by stitching straddling headers a byte at a time and
-feeding the CRC link by link, satisfying the same `Cursor` concept as `span_cursor`. But
+feeding the CRC link by link, satisfying the same `Cursor` concept as `span_cursor_t`. But
 `decode_into` does not only read bytes — it stores structure: a random-accessible `arena_tlv_t`
 array that `parse_branch_node` (`core/src/graph.cpp:parse_branch_node`) walks via `end` / `first_child`. That
-node array is byte-source-independent. Swapping `span_cursor` for `rope_cursor` changes where field
+node array is byte-source-independent. Swapping `span_cursor_t` for `rope_cursor_t` changes where field
 bytes come from, not the fact that a node array and walk stacks must exist.
 
 `core/include/libtracer/rope_decode.hpp:SINK NOTE` states the same constraint from the decoder's side:
@@ -180,7 +180,7 @@ deep receive task.
 A stack budget for that task counts four such buffers, not one. The decode arena is the only one
 this document covers; the other three are transport receive and chunk scratch, each a 4096-byte
 `std::array` — `core/src/transport_tcp.cpp:tcp_transport_t::drain` (the backpressure drain),
-`core/src/transport_ws.cpp:transport_ws_client::serve` (the WS client's receive loop), and
+`core/src/transport_ws.cpp:ws_client_transport_t::serve` (the WS client's receive loop), and
 `core/src/posix_endpoint.cpp:slot_server_t::service_peer` — the ONE per-chunk scratch both multi-peer servers now
 share, since #871 folded their duplicated poll loops into `slot_server_t::service_peer` (it
 was two buffers, one apiece, before that). They are not decode arenas and carry no structure,
@@ -229,7 +229,7 @@ exhaustion is representable. The general failable-allocation contract is
 
 ### 4.1 Rope-native consumers
 
-`rope_cursor` drives four live consumers with no flatten:
+`rope_cursor_t` drives four live consumers with no flatten:
 
 - `check_frame` and `validate_rope` (`core/src/rope_decode.cpp:check_frame`, `core/src/rope_decode.cpp:validate_rope`) validate structure and
   CRC straight over a rope.
@@ -284,12 +284,12 @@ referenced STORE, not to ops that patch bytes.
 
 ### 4.3 Complexity of a rope walk
 
-`span_cursor::byte_at` is O(1). `rope_cursor::byte_at` calls `locate()`, a linear scan over links,
+`span_cursor_t::byte_at` is O(1). `rope_cursor_t::byte_at` calls `locate()`, a linear scan over links,
 so `load_le(n)` is n such scans, a header read costs O(header_bytes × L) and a CRC feed costs
 O(payload + L), for L links.
 
 - For a **single-link rope** — the common case, one recv chunk becoming one ingress segment, where
-  `materialize` returns `links()[0]` — L = 1, so `rope_cursor` ≈ `span_cursor` plus a trivial
+  `materialize` returns `links()[0]` — L = 1, so `rope_cursor_t` ≈ `span_cursor_t` plus a trivial
   constant. There is no regression.
 - For a **multi-link rope** the header pointer-chase is bounded by fragment count × a 4–6-byte
   header, and the payload feed is asymptotically identical to the memcpy it replaces, but read-only
@@ -299,7 +299,7 @@ O(payload + L), for L links.
   (no destination buffer).
 
 There is no latency-versus-RAM trade-off for the decode walk. The one genuine cost is code size:
-`rope_cursor` lives in a separate translation unit so a span-only target never instantiates it
+`rope_cursor_t` lives in a separate translation unit so a span-only target never instantiates it
 ([ADR-0048, one wire grammar, chunk cursor, rope-aware decode](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0048-one-wire-grammar-chunk-cursor-rope-aware-decode.md)
 §1). That is a build-configuration trait, not a runtime trade-off.
 
@@ -321,7 +321,7 @@ bytes in an owned segment.
 **Why the pull path pays nothing extra.** The TCP `serve` loop reads the body straight into the
 accepted segment: `read_exact(fd, seg->bytes.data() + dec.off, len)` (`core/src/transport_tcp.cpp:tcp_transport_t::serve`,
 `read_exact` defined at `core/src/transport_tcp.cpp:tcp_transport_t::read_exact`) fills a segment freshly allocated from the injected backend by
-`length_prefix_framer::on_prefix`. The pooled receive target *is* the owned segment — one kernel
+`length_prefix_framer_t::on_prefix`. The pooled receive target *is* the owned segment — one kernel
 copy and zero user-space copies. The in-source rationale names the trade explicitly: feeding recv
 chunks through `feed()` "would add one" copy, so the pull loop shares framing *rules* with the
 chunk-fed transports rather than their state machine (`core/src/transport_tcp.cpp:tcp_transport_t::serve`). The

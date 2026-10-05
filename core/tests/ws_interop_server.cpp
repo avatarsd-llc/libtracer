@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief #54 (interop) — a standalone transport_ws_server harness driven by the TypeScript
+ * @brief #54 (interop) — a standalone ws_server_transport_t harness driven by the TypeScript
  *        transport-ws interop test (bindings/typescript/.../test/interop.test.mjs).
  *
  * SPDX-License-Identifier: Apache-2.0
@@ -8,7 +8,7 @@
  *
  * It proves the real socket path: the TS TransportWs client performs an actual
  * RFC 6455 101 handshake and sends a MASKED client BINARY frame; this C++
- * transport_ws_server unmasks it, hands the libtracer TLV to a receiver that
+ * ws_server_transport_t unmasks it, hands the libtracer TLV to a receiver that
  * echoes the exact bytes back as an UNMASKED server BINARY frame.
  *
  * This is NOT an add_test() unit test — it is a helper binary the TS test spawns.
@@ -53,7 +53,7 @@ void parse_args(int argc, char** argv) {
 int main(int argc, char** argv) {
     parse_args(argc, argv);
 
-    tr::net::transport_ws_server server(g_port);
+    tr::net::ws_server_transport_t server(g_port);
     if (!server.ok()) {
         std::fprintf(stderr, "ws_interop_server: failed to bind/listen\n");
         return 1;
@@ -64,7 +64,7 @@ int main(int argc, char** argv) {
     // {fn, ctx} form: the sink cannot outlive its context (the server itself).
     server.set_receiver(
         [](void* ctx, std::span<const std::byte> frame) {
-            static_cast<tr::net::transport_ws_server*>(ctx)->send(frame);
+            static_cast<tr::net::ws_server_transport_t*>(ctx)->send(frame);
         },
         &server);
 
@@ -73,7 +73,7 @@ int main(int argc, char** argv) {
     std::printf("PORT=%u\n", static_cast<unsigned>(server.local_port()));
     std::fflush(stdout);
 
-    // Bounded run: exit cleanly at the deadline. transport_ws_server's destructor
+    // Bounded run: exit cleanly at the deadline. ws_server_transport_t's destructor
     // stops the recv thread, joins it, and closes the sockets, so returning here
     // is a clean stop->join->exit. The parent normally kills us sooner once it has
     // asserted the round-trip; the deadline is the unconditional CI backstop.

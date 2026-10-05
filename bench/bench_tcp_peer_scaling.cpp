@@ -235,7 +235,7 @@ struct rep_t {
 [[nodiscard]] rep_t run_point(std::size_t active, std::size_t idle, double seconds,
                               std::uint64_t gap_ns) {
     counting_sink_t sink;
-    tr::net::transport_tcp_server server(0, {.peer_named = true});
+    tr::net::tcp_server_transport_t server(0, {.peer_named = true});
     if (!server.ok() || server.bus() == nullptr) return rep_t{};
     server.bus()->set_peer_receiver(sink);
     const std::uint16_t port = server.local_port();

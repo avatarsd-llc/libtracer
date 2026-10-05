@@ -1,15 +1,15 @@
 /**
  * @file
- * @brief `rope_cursor` bounds preconditions (#916) — the debug-assert parity death tests.
+ * @brief `rope_cursor_t` bounds preconditions (#916) — the debug-assert parity death tests.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * `rope_cursor` used to hide an out-of-range read instead of failing on it: `region`
+ * `rope_cursor_t` used to hide an out-of-range read instead of failing on it: `region`
  * clamped nothing, so a cursor could claim bytes the chain does not hold, and `locate`
  * answered any at/past-end offset with `{last_link, 0}` — so `byte_at` returned byte 0
  * of the last link, a REAL but WRONG byte that no sanitizer could see (unlike the
- * sibling `span_cursor`, whose out-of-range read is span UB that ASan/fuzz CI catches).
+ * sibling `span_cursor_t`, whose out-of-range read is span UB that ASan/fuzz CI catches).
  * On an empty chain it was hard UB.
  *
  * `for_each_span`, the one BULK reader, had the same hole and none of the backstop: its
@@ -60,7 +60,7 @@ using tr::testing::check;
 
 using tr::view::rope_t;
 using tr::view::view_t;
-using tr::wire::grammar::rope_cursor;
+using tr::wire::grammar::rope_cursor_t;
 
 /** @brief A borrowed view over @p bytes (the caller's storage must outlive it). */
 view_t borrowed_view(std::span<std::byte> bytes) { return view_t::over(tr::view::borrow(bytes)); }
@@ -114,12 +114,12 @@ void test_in_bounds_unaffected() {
 
     rope_t r(borrowed_view(a));
     r.append(borrowed_view(b));
-    const rope_cursor cur{r};
+    const rope_cursor_t cur{r};
     check(cur.size() == 5, "cursor spans the whole chain");
     check(cur.byte_at(0) == 0x10 && cur.byte_at(2) == 0x12, "byte_at reads inside the first link");
     check(cur.byte_at(3) == 0x20 && cur.byte_at(4) == 0x21, "byte_at walks into the second link");
 
-    const rope_cursor sub = cur.region(2, 3);
+    const rope_cursor_t sub = cur.region(2, 3);
     check(sub.size() == 3 && sub.byte_at(0) == 0x12 && sub.byte_at(2) == 0x21,
           "an exactly-fitting region straddles the link boundary");
     check(cur.region(5, 0).size() == 0, "an empty region at the very end is legal");
@@ -153,7 +153,7 @@ void test_out_of_range_aborts() {
     check(aborts([&] {
               rope_t r(borrowed_view(a));
               r.append(borrowed_view(b));
-              const rope_cursor cur{r};
+              const rope_cursor_t cur{r};
               g_sink = static_cast<std::uint8_t>(cur.region(3, 3).size());
           }),
           "region(off, len) past the parent window aborts (was: an unclamped end_)");
@@ -161,7 +161,7 @@ void test_out_of_range_aborts() {
     check(aborts([&] {
               rope_t r(borrowed_view(a));
               r.append(borrowed_view(b));
-              const rope_cursor cur{r};
+              const rope_cursor_t cur{r};
               g_sink = static_cast<std::uint8_t>(cur.region(6, 0).size());
           }),
           "region whose OFFSET alone is past the window aborts");
@@ -169,7 +169,7 @@ void test_out_of_range_aborts() {
     check(aborts([&] {
               rope_t r(borrowed_view(a));
               r.append(borrowed_view(b));
-              const rope_cursor cur{r};
+              const rope_cursor_t cur{r};
               g_sink = cur.byte_at(5);
           }),
           "byte_at at the end aborts (was: byte 0 of the last link — a real, WRONG byte)");
@@ -177,14 +177,14 @@ void test_out_of_range_aborts() {
     check(aborts([&] {
               rope_t r(borrowed_view(a));
               r.append(borrowed_view(b));
-              const rope_cursor sub = rope_cursor{r}.region(1, 2);
+              const rope_cursor_t sub = rope_cursor_t{r}.region(1, 2);
               g_sink = sub.byte_at(2);
           }),
           "byte_at past a NARROWED window aborts even though the chain holds that byte");
 
     check(aborts([&] {
               const rope_t empty;
-              const rope_cursor cur{empty};
+              const rope_cursor_t cur{empty};
               g_sink = cur.byte_at(0);
           }),
           "byte_at on an EMPTY chain aborts (was: links_[0] on an empty span — hard UB)");
@@ -192,7 +192,7 @@ void test_out_of_range_aborts() {
     check(aborts([&] {
               rope_t r(borrowed_view(a));
               r.append(borrowed_view(b));
-              const rope_cursor cur{r};
+              const rope_cursor_t cur{r};
               cur.for_each_span(5, 1, [&](std::span<const std::byte> s) {
                   g_sink = static_cast<std::uint8_t>(s.size());
               });
@@ -208,7 +208,7 @@ void test_out_of_range_aborts() {
     check(aborts([&] {
               rope_t r(borrowed_view(a));
               r.append(borrowed_view(b));
-              const rope_cursor cur = rope_cursor{r}.region(0, 3);
+              const rope_cursor_t cur = rope_cursor_t{r}.region(0, 3);
               cur.for_each_span(0, 5, [&](std::span<const std::byte> s) {
                   g_sink = static_cast<std::uint8_t>(s.size());
               });

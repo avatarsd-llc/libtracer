@@ -6,9 +6,9 @@
 `send` framed bytes (a single buffer **or** a scatter-gather `iovec`), install a
 sink for inbound frames. It never sees TLV semantics — only bytes. Implementations:
 **`loopback_channel_t`** (in-process dev/test), **`udp_transport_t`**
-(localhost/LAN UDP), **`tcp_transport_t`** / **`transport_tcp_server`** (reliable
+(localhost/LAN UDP), **`tcp_transport_t`** / **`tcp_server_transport_t`** (reliable
 TCP stream, 4-byte u32-LE length-prefix framing — the prefix is transport framing,
-not part of the TLV), **`transport_ws_client`** / **`transport_ws_server`** (the
+not part of the TLV), **`ws_client_transport_t`** / **`ws_server_transport_t`** (the
 browser↔robot WebSocket keystone, RFC 6455), **`transport_can`** (SocketCAN,
 classic + CAN-FD), **`quic_transport_t`** and **`webtransport_transport_t`** (the
 separate `libtracer_quic` module, msquic-backed).
@@ -65,9 +65,9 @@ the rope form for an owning link, the span form otherwise (`fwd_router.cpp:link.
 `fwd_router.cpp:bus->set_peer_rope_receiver(`, `fwd_router.cpp:bus->set_peer_receiver(` for the peer-named bus equivalent).
 
 Every socket transport in the tree declares the owning tier: UDP
-(`transport_udp.hpp:udp_transport_t::delivers_ropes`), TCP client and server (`transport_tcp.hpp:tcp_transport_t::delivers_ropes`, `transport_tcp.hpp:transport_tcp_server::delivers_ropes`),
-WebSocket server and client (`transport_ws.hpp:transport_ws_server::delivers_ropes`, `transport_ws.hpp:transport_ws_client::delivers_ropes`), CAN
-(`transport_can.hpp:transport_can::delivers_ropes`), QUIC (`transport_quic.hpp:quic_transport_t::delivers_ropes`) and WebTransport
+(`transport_udp.hpp:udp_transport_t::delivers_ropes`), TCP client and server (`transport_tcp.hpp:tcp_transport_t::delivers_ropes`, `transport_tcp.hpp:tcp_server_transport_t::delivers_ropes`),
+WebSocket server and client (`transport_ws.hpp:ws_server_transport_t::delivers_ropes`, `transport_ws.hpp:ws_client_transport_t::delivers_ropes`), CAN
+(`transport_can.hpp:can_transport_t::delivers_ropes`), QUIC (`transport_quic.hpp:quic_transport_t::delivers_ropes`) and WebTransport
 (`transport_webtransport.hpp:webtransport_transport_t::delivers_ropes`). The borrowed-span path is the base-class default
 and the tier an out-of-tree transport gets for free.
 
@@ -93,7 +93,7 @@ wants one no longer re-derives it from a string on every frame. No vertex is cre
 for a peer and no peer state is stored.
 
 `transport_t::bus()` returns the facet or `nullptr`. CAN always returns it
-(`transport_can.hpp:transport_can::bus`); the TCP and WebSocket **servers** return it when
+(`transport_can.hpp:can_transport_t::bus`); the TCP and WebSocket **servers** return it when
 configured peer-named — one implementation, on the slot-server base both of them
 inherit (`posix_endpoint.hpp:bus_slot_server_t::bus`); every other kind keeps the `nullptr` default.
 
@@ -167,7 +167,7 @@ The PROVIDER side of the same fold is the base-class selection described above
 (`stream_server_base_t`). It is what makes the saving reach a listener's own bytes rather
 than only the routing plane's code: measured on the esp32c6 full-node profile
 (`-Os -fno-exceptions -fno-rtti`, `riscv32-esp-elf` 14.2.0), a bus-closed build's
-`transport_tcp_server` shrinks **208 B → 168 B at rest, −40 B per listener**, with a further
+`tcp_server_transport_t` shrinks **208 B → 168 B at rest, −40 B per listener**, with a further
 **−568 B** of image `.text` and **±0 B of `.bss`**. With the module carried the listener's
 size does not move and the seam costs **+80 B `.text` / +96 B `.rodata`** once, for the
 forwarding overrides and the two peer-lifecycle hooks.
@@ -326,7 +326,7 @@ flowchart LR
   next statement runs, and an empty sink drops it with no counter moving
   ([#1025](https://github.com/avatarsd-llc/libtracer/issues/1025)). `start_receiving()`
   is the second phase that opens the window — a no-op default, so an owner calls it
-  unconditionally as its last wiring step; `transport_ws_client` and `tcp_transport_t`
+  unconditionally as its last wiring step; `ws_client_transport_t` and `tcp_transport_t`
   honor it when constructed with `defer_recv`
   ([#1045](https://github.com/avatarsd-llc/libtracer/issues/1045)), which is how
   `transport_vertex_t` builds a SPEC-created `ws` or `tcp` dialer. The ESP-IDF-native WS
@@ -351,7 +351,7 @@ flowchart LR
   without starving the liveness bookkeeping it drives (`last_heard`, the
   pending/reassembly sweeps). Any bystander traffic already on the wire lands in the
   window, so the answer is [ADR-0081](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0081-pre-sink-ingress-native-window-hold-or-named-drop-never-parked.md)
-  §4's other arm — drop, and tick `transport_can::dropped_presink()`
+  §4's other arm — drop, and tick `can_transport_t::dropped_presink()`
   ([#1103](https://github.com/avatarsd-llc/libtracer/issues/1103)).
 - **The callable sugar binds by address.** `set_receiver(F& sink)` and
   `set_rope_receiver(F& sink)` take an lvalue; a temporary lambda does not compile,
@@ -394,8 +394,8 @@ they are the reason a new binding is small.
   that keeps a concurrent send from writing to a reused descriptor. UDP keeps its
   datagram shape and uses only the base. `slot_server_t` is one tier further up,
   for the MULTI-peer stream servers: it owns the slot vector, the accept/poll/
-  teardown machinery and the peer query trio, so `transport_tcp_server`
-  and `transport_ws_server` differ only in their framing and handshake — the two
+  teardown machinery and the peer query trio, so `tcp_server_transport_t`
+  and `ws_server_transport_t` differ only in their framing and handshake — the two
   hooks it dispatches into them. The ADR-0044 bus FACET is a tier below that
   again — `bus_slot_server_t` carries it, `flat_slot_server_t` does not, and
   `stream_server_base_t` picks between them by `tr::net::kBusLinks` — so a
@@ -522,7 +522,7 @@ counted and closed rather than blocked on forever (#838):
 :members:
 ```
 
-```{doxygenclass} tr::net::transport_tcp_server
+```{doxygenclass} tr::net::tcp_server_transport_t
 :project: libtracer
 :members:
 ```
@@ -534,7 +534,7 @@ counted and closed rather than blocked on forever (#838):
 :members:
 ```
 
-```{doxygenclass} tr::net::transport_ws_client
+```{doxygenclass} tr::net::ws_client_transport_t
 :project: libtracer
 :members:
 ```
@@ -544,7 +544,7 @@ counted and closed rather than blocked on forever (#838):
 :members:
 ```
 
-```{doxygenclass} tr::net::transport_ws_server
+```{doxygenclass} tr::net::ws_server_transport_t
 :project: libtracer
 :members:
 ```

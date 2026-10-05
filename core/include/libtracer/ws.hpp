@@ -417,7 +417,7 @@ namespace detail {
  * @param buf A byte stream that may contain a partial or whole frame, possibly
  *            followed by more frames.
  * @param max_payload The transport's effective receive cap: `min(max_frame,
- *            backend.max_segment_size())` (`length_prefix_framer::effective_cap` — the
+ *            backend.max_segment_size())` (`length_prefix_framer_t::effective_cap` — the
  *            no-synthetic-limits doctrine). Deliberately NOT defaulted: a transport that
  *            forgets to name its bound is exactly the defect this parameter closes, so
  *            omitting it must not compile.

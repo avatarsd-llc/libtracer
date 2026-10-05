@@ -270,9 +270,9 @@ class transport_vertex_t {
      *
      * Also registers the built-in transport factories: `udp` (DIAL: bind an ephemeral
      * port, peer = `addr:port`; LISTEN: bind `port`, peer learned from inbound
-     * datagrams) and `ws` (DIAL: `transport_ws_client(addr, port)` — a synchronous
+     * datagrams) and `ws` (DIAL: `ws_client_transport_t(addr, port)` — a synchronous
      * connect + RFC 6455 handshake, run by the liveness engine on its first DIAL rather
-     * than at creation; LISTEN: `transport_ws_server(port)`
+     * than at creation; LISTEN: `ws_server_transport_t(port)`
      * — accepts MANY concurrent inbound peers (#362), with the ws-private `peer_named` /
      * `max_peers` config keys selecting the ADR-0044 bus facet and the admission cap).
      *

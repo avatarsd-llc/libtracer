@@ -1,6 +1,6 @@
 /**
  * @file
- * @brief transport_can PURE framing-layer test (#55).
+ * @brief can_transport_t PURE framing-layer test (#55).
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC

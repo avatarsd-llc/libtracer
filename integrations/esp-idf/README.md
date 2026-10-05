@@ -46,7 +46,7 @@ dependencies:
 
 ### The WebSocket plane: IDF-native on chips, portable on `linux`
 
-**ESP-IDF WebSocket never uses POSIX sockets** ([#947](https://github.com/avatarsd-llc/libtracer/issues/947) ruling). Core's `transport_ws_server` / `transport_ws_client` are the **host** implementation, and a chip build does not compile them at all — not as a footprint preference but as a correctness one. Their scatter-gather egress (`posix_endpoint_t::write_all_iov`) asks `sendmsg` for `MSG_NOSIGNAL`; lwIP *defines* that flag but `lwip_sendmsg` rejects any flag outside `MSG_DONTWAIT|MSG_MORE` with `EOPNOTSUPP`, which `write_all_iov` reads as peer-gone. On silicon the portable server therefore accepts connections, completes the RFC 6455 handshake, answers PINGs — and silently discards **every** data frame ([#948](https://github.com/avatarsd-llc/libtracer/issues/948)).
+**ESP-IDF WebSocket never uses POSIX sockets** ([#947](https://github.com/avatarsd-llc/libtracer/issues/947) ruling). Core's `ws_server_transport_t` / `ws_client_transport_t` are the **host** implementation, and a chip build does not compile them at all — not as a footprint preference but as a correctness one. Their scatter-gather egress (`posix_endpoint_t::write_all_iov`) asks `sendmsg` for `MSG_NOSIGNAL`; lwIP *defines* that flag but `lwip_sendmsg` rejects any flag outside `MSG_DONTWAIT|MSG_MORE` with `EOPNOTSUPP`, which `write_all_iov` reads as peer-gone. On silicon the portable server therefore accepts connections, completes the RFC 6455 handshake, answers PINGs — and silently discards **every** data frame ([#948](https://github.com/avatarsd-llc/libtracer/issues/948)).
 
 So on a chip target the plane is:
 
@@ -59,7 +59,7 @@ Neither is a factory entry: the application constructs the link and hands it in 
 
 For the dial link the recipe has one more step ([#1102](https://github.com/avatarsd-llc/libtracer/issues/1102), ADR-0081): construct `esp_ws_client_link_t` **with `defer_recv = true`**, `provide_link`, then issue the creating write to the module's `conn` endpoint. The flag holds the link's first dial until `start_receiving()` — which the creating write calls once the receiver sink is installed — so a peer's push-on-connect cannot arrive before a sink exists and be dropped silently. There is no `ws` factory on a chip target to pass the flag for you (the way the core `tcp`/`ws` factories pass theirs), so opting in is the application's move; a link constructed with the flag and never armed **never dials**. The historical dial-at-once default is unchanged for embedders that wire the receiver themselves before any peer can push.
 
-`tools/check_esp_ws_plane.py` is the gate: zero `transport_ws_server` / `transport_ws_client` symbols in the linked chip ELF (`nm`), the portable TUs uncompiled, and both native links still built.
+`tools/check_esp_ws_plane.py` is the gate: zero `ws_server_transport_t` / `ws_client_transport_t` symbols in the linked chip ELF (`nm`), the portable TUs uncompiled, and both native links still built.
 
 ### lwIP portability audit (what the socket transports use)
 

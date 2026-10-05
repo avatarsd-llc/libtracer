@@ -512,7 +512,7 @@ tested against hand-built frames with no live transport.
   self-heal. A flow that is not flagged for compaction allocates nothing here,
   which is what preserves the stateless-forwarder property for everything else.
 - **The frame view** (`fwd_hdr_t`, `fwd_pre_t`, `dst_seg_walk_t`,
-  `control_head_t`, `fwd_rebuild_t`, `stack_writer`) is the offset-dispatch
+  `control_head_t`, `fwd_rebuild_t`, `stack_writer_t`) is the offset-dispatch
   cluster the forward hop reads a frame by: one header read as absolute offsets,
   the forward-versus-terminus peeks, the control-frame head peek, a fixed-capacity
   stack byte writer, and the shrunk-`dst` / grown-`src` head rebuild. Everything
@@ -638,7 +638,7 @@ at the terminus, which is what makes a per-writer subject reachable at `peer_nam
 :members:
 ```
 
-```{doxygenclass} tr::net::stack_writer
+```{doxygenclass} tr::net::stack_writer_t
 :project: libtracer
 :members:
 ```

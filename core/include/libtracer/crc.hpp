@@ -220,7 +220,7 @@ inline std::uint32_t crc32c_hw(std::uint32_t c, const std::byte* p, std::size_t 
  * `crc32c` over the concatenation (the CRC is associative over the feed), with no
  * intermediate buffer. The single-/two-span `crc32c` below delegate to it.
  */
-struct crc32c_state {
+struct crc32c_state_t {
     std::uint32_t c = 0xFFFFFFFFu; /**< @brief Running state; init per RFC 3720. */
     /** @brief Feed one contiguous chunk of covered bytes. */
     constexpr void feed(std::span<const std::byte> data) noexcept {
@@ -230,11 +230,14 @@ struct crc32c_state {
     [[nodiscard]] constexpr std::uint32_t value() const noexcept { return c ^ 0xFFFFFFFFu; }
 };
 
+/** @brief The pre-v0.18.0 spelling of @ref crc32c_state_t; removed in v0.19.0 (#1723). */
+using crc32c_state = crc32c_state_t;
+
 /**
- * @brief A running CRC-16-CCITT (FALSE) accumulator — the crc16 twin of @ref crc32c_state
+ * @brief A running CRC-16-CCITT (FALSE) accumulator — the crc16 twin of @ref crc32c_state_t
  *        (init 0xFFFF, no final xor). Same feed-chunks-then-read-value contract.
  */
-struct crc16_ccitt_state {
+struct crc16_ccitt_state_t {
     std::uint16_t c = 0xFFFFu; /**< @brief Running state; init 0xFFFF, no final xor. */
     /** @brief Feed one contiguous chunk of covered bytes. */
     constexpr void feed(std::span<const std::byte> data) noexcept {
@@ -244,9 +247,12 @@ struct crc16_ccitt_state {
     [[nodiscard]] constexpr std::uint16_t value() const noexcept { return c; }
 };
 
+/** @brief The pre-v0.18.0 spelling of @ref crc16_ccitt_state_t; removed in v0.19.0 (#1723). */
+using crc16_ccitt_state = crc16_ccitt_state_t;
+
 /** @brief CRC-32C (Castagnoli) over @p data. */
 [[nodiscard]] constexpr std::uint32_t crc32c(std::span<const std::byte> data) noexcept {
-    crc32c_state s;
+    crc32c_state_t s;
     s.feed(data);
     return s.value();
 }
@@ -257,7 +263,7 @@ struct crc16_ccitt_state {
  */
 [[nodiscard]] constexpr std::uint32_t crc32c(std::span<const std::byte> a,
                                              std::span<const std::byte> b) noexcept {
-    crc32c_state s;
+    crc32c_state_t s;
     s.feed(a);
     s.feed(b);
     return s.value();
@@ -265,7 +271,7 @@ struct crc16_ccitt_state {
 
 /** @brief CRC-16-CCITT (FALSE) over @p data. */
 [[nodiscard]] constexpr std::uint16_t crc16_ccitt(std::span<const std::byte> data) noexcept {
-    crc16_ccitt_state s;
+    crc16_ccitt_state_t s;
     s.feed(data);
     return s.value();
 }
@@ -276,7 +282,7 @@ struct crc16_ccitt_state {
  */
 [[nodiscard]] constexpr std::uint16_t crc16_ccitt(std::span<const std::byte> a,
                                                   std::span<const std::byte> b) noexcept {
-    crc16_ccitt_state s;
+    crc16_ccitt_state_t s;
     s.feed(a);
     s.feed(b);
     return s.value();

@@ -8,11 +8,11 @@
  * the control-frame head peek, the fixed-capacity stack byte-writer, and the
  * shrunk-dst / grown-src head rebuild. Everything is templated over the grammar
  * `Cursor` concept (`%grammar.hpp`), so the identical logic serves a contiguous
- * `span_cursor` and a link-walking `rope_cursor` — offsets, never spans, so every
+ * `span_cursor_t` and a link-walking `rope_cursor_t` — offsets, never spans, so every
  * result is source-agnostic and the caller re-slices from its own cursor.
  *
  * Extracted from fwd_router.cpp so the dispatch rules are unit-testable directly
- * (hand-built frames, no live transports) — the length_prefix_framer precedent.
+ * (hand-built frames, no live transports) — the length_prefix_framer_t precedent.
  * The router delegates mechanically; frames are byte-identical.
  */
 #pragma once
@@ -114,7 +114,7 @@ template <class Cursor>
  *
  * Templated over the grammar `Cursor` concept (ADR-0053 ④b): the forward plane
  * reads its dispatch offsets through the SAME byte-source seam the one grammar
- * validates through — `span_cursor` for the contiguous path, the rope cursor for
+ * validates through — `span_cursor_t` for the contiguous path, the rope cursor for
  * a scatter-gather frame, with no per-cursor offset math. `cur.region(pos, …)`
  * narrows either source in O(1) before the header parse.
  *
@@ -640,8 +640,8 @@ class dst_seg_walk_t {
     /**
      * @brief A TEMPORARY cursor is refused at compile time (both value categories).
      *
-     * `dst_seg_walk_t<span_cursor> w(span_cursor{frame}, pre);` reads exactly like the
-     * `peek_fwd_dst(span_cursor{frame}, pre)` one line above it and is the one spelling that
+     * `dst_seg_walk_t<span_cursor_t> w(span_cursor_t{frame}, pre);` reads exactly like the
+     * `peek_fwd_dst(span_cursor_t{frame}, pre)` one line above it and is the one spelling that
      * is wrong: the temporary dies at the end of the full expression and every later `at()`
      * reads a dead stack slot. That is not hypothetical — it is what a test wrote and what
      * ASan caught as `stack-use-after-scope` through `read_packed_seg`. Deleting these makes
@@ -888,7 +888,7 @@ template <class Cursor>
  * @tparam N The writer's stack capacity in bytes.
  */
 template <std::size_t N>
-class stack_writer {
+class stack_writer_t {
    public:
     /**
      * @brief Append a structured TLV header (`pl` set, `ll` auto-widened) for @p body_len.
@@ -991,6 +991,13 @@ class stack_writer {
     bool overflow_ = false;          /**< @brief A write exceeded @p N. */
 };
 
+/**
+ * @brief The pre-v0.18.0 spelling of @ref stack_writer_t; removed in v0.19.0 (#1723).
+ * @tparam N The inline byte capacity, as for @ref stack_writer_t.
+ */
+template <std::size_t N>
+using stack_writer = stack_writer_t<N>;
+
 /** @brief Capacity of the forward hop's first head: FWD hdr(≤6) + op TLV(small) + PATH hdr(≤6). */
 inline constexpr std::size_t kFwdHead1Cap = 64;
 /** @brief Capacity of the forward hop's second head: the grown src PATH header alone. */
@@ -1063,8 +1070,8 @@ inline constexpr std::size_t kFwdMaxIov = 10;
  * pre-extraction router.
  */
 struct fwd_rebuild_t {
-    stack_writer<kFwdHead1Cap> head1;  /**< @brief FWD header + op (copied) + shrunk dst header. */
-    stack_writer<kFwdSrcHdrCap> head2; /**< @brief The grown src PATH header. */
+    stack_writer_t<kFwdHead1Cap> head1; /**< @brief FWD header + op (copied) + shrunk dst header. */
+    stack_writer_t<kFwdSrcHdrCap> head2; /**< @brief The grown src PATH header. */
     /** @brief The inbound mount as ALREADY-ENCODED packed records, emitted as ONE span and never
      *         copied. Precomputed once per child (#508), so a hop does no per-segment work. */
     std::span<const std::byte> mount_tlv;
@@ -1080,7 +1087,7 @@ struct fwd_rebuild_t {
      * clear = the WIDE absolute stamp (8 bytes), set = the NARROW relative one (4). Read it
      * through @ref ts_off and @ref ts_bytes, never raw. The CRC half of an inbound trailer
      * is NOT here and never will be: the rebuilt body invalidates it, so it is dropped
-     * rather than forwarded stale (see @ref stack_writer::header).
+     * rather than forwarded stale (see @ref stack_writer_t::header).
      *
      * **One 4-byte word here, rather than an offset and a width at the end of this struct,
      * is MEASURED, not tidiness** (#1235). It occupies the alignment hole after
@@ -1122,7 +1129,7 @@ struct fwd_rebuild_t {
      * way `src` accumulates on the way in (RFC-0004 §B), and it is a rope operation on the
      * egress rather than a rewrite: the existing elements are referenced, never copied.
      */
-    stack_writer<4 + wire::kPathRefElementBytes> mint;
+    stack_writer_t<4 + wire::kPathRefElementBytes> mint;
     std::size_t ref_body_off = 0; /**< @brief The trailing `PATH_REF`'s existing element array. */
     std::size_t ref_body_len = 0; /**< @brief Its length; 0 with a written @ref mint is H = 0. */
     /** @brief @ref ts_window's bit 31: the stamp is the NARROW relative form (`opt.TF` set). */
@@ -1552,7 +1559,7 @@ template <class Cursor, class MintFn = no_mint_t, class ReverseMintFn = no_mint_
     // dropped at the first forwarder, which is exactly the gap #1109 names. Either form
     // relays (a hop does not interpret the value; the anchorless-TF=1 MUST-reject binds
     // where the stamp is CONSUMED). An inbound CRC is dropped, not preserved: the body
-    // this hop emits differs from the one the CRC covered (see stack_writer::header).
+    // this hop emits differs from the one the CRC covered (see stack_writer_t::header).
     //
     // The window is ONE word — offset plus the producer's form bit (`ts_window`, 4 bytes in
     // an alignment hole, which is what keeps this struct at 256; #1235). A body ending past

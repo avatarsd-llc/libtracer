@@ -47,10 +47,10 @@ namespace tr::wire {
  *
  * @note This is a **deliberate second spelling** of the same four bytes, not an oversight, and
  *       it joins the ones `emit_header` already names below (`emit_path_ref_into`, the
- *       `fwd_frame_view` / `stack_writer` tiers). Making `emit_header` delegate here was tried
+ *       `fwd_frame_view` / `stack_writer_t` tiers). Making `emit_header` delegate here was tried
  *       and **reverted on measurement**: the `resize`-then-store body re-partitioned the
  *       inliner's budget on the forward hop, growing
- *       `fwd_router_t::route_fwd_forward<rope_cursor>` by 319 B and
+ *       `fwd_router_t::route_fwd_forward<rope_cursor_t>` by 319 B and
  *       `graph_t::dispatch_edge_remote` by 32 B on the symbol-size ratchet
  *       (`bench/symbol_ratchet.json`) — a code-shape change on the hottest leg the router has,
  *       for a header nobody was misspelling. The equivalence is held the way this tree already
@@ -80,7 +80,7 @@ inline void store_header(std::span<std::byte> out, type_t type, opt_t opt,
  * `emit_tlv` is NOT the only home of that rule, and a caller must not assume it is: the
  * subscribe sugar in `graph.cpp` calls this directly (safe only because `kMaxPathBytes`
  * bounds the length), `emit_path_ref_into` hand-rolls its own header, and the forward plane's
- * `fwd_frame_view` / `stack_writer` tiers each carry a separate copy of the widen rule. A
+ * `fwd_frame_view` / `stack_writer_t` tiers each carry a separate copy of the widen rule. A
  * caller reaching for `emit_header` owns the width decision itself.
  */
 inline void emit_header(std::vector<std::byte>& out, type_t type, opt_t opt, std::size_t body_len) {
