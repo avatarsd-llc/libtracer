@@ -190,9 +190,15 @@ int main() {
         check(&g_default.default_ring_source() == &tr::mem::value_source(),
               "graph_t{} draws its default rings from the value sub-pool (#1822 folded in #1777)");
         check(&g_default.value_source() == &tr::mem::value_source() &&
-                  &g_default.table_source() == &tr::mem::table_source() &&
                   &g_default.net_source() == &tr::mem::net_source(),
-              "and its values, tables and net default from the default sub-pools");
+              "and its values and net default from the default sub-pools");
+        {
+            tr::graph::graph_t g_other;
+            const bool own = &g_default.table_source() != &tr::mem::table_source() &&
+                             &g_default.table_source() != &g_other.table_source();
+            check(own == tr::mem::kSlabPool,
+                  "and each default graph draws its tables from its own sub-pool (#1778)");
+        }
         check(g_default.derives_sub_pools() == tr::mem::kSlabPool,
               "it derives sub-pools exactly where the build has the host slab pool");
 

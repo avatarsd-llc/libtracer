@@ -42,6 +42,7 @@
 #include "libtracer/link_id.hpp"
 #include "libtracer/link_index.hpp"
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_slab_pool.hpp"
 #include "libtracer/mem_sorted_map.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/mem_source_backend.hpp"
@@ -812,10 +813,22 @@ class graph_t {
     /**
      * @brief Where this graph's TABLE blocks are drawn from: vertex registration, the
      *        control-plane containers and the failable scratch of a composed read or a branch
-     *        write (`:stats.mem.tables`). The table sub-pool or the injected root, as
-     *        @ref value_source.
+     *        write (`:stats.mem.tables`). On a default graph of a `kSlabPool` build, a table
+     *        sub-pool of the graph's OWN, derived from the host root's platform heap (#1778):
+     *        independent graphs share no class lock and no cache line. The injected root
+     *        otherwise, as @ref value_source.
      */
     [[nodiscard]] mem::block_source_t& table_source() const noexcept { return *tables_; }
+
+    /**
+     * @brief Return every fully free slab of this graph's own table sub-pool to the platform
+     *        heap, on the caller's schedule (the graph keeps no timer to do it). A no-op on a
+     *        graph without one (an injected root, or a build without the slab pool); the
+     *        process-wide sub-pools are trimmed by `tr::mem::host_root().trim()`.
+     */
+    void trim_tables() noexcept {
+        if (own_tables_) own_tables_->trim();
+    }
 
     /**
      * @brief The NET sub-pool a router or link on this graph defaults to when the application
@@ -3017,6 +3030,12 @@ class graph_t {
             a.clear();
         }
     };
+    // The graph's OWN table sub-pool (#1778). A default graph on a `kSlabPool` build derives
+    // one from the platform heap instead of sharing the host root's: with one pool for every
+    // graph, independent graphs written from different threads paid for each other's blocks
+    // (inproc-mt4 -28%, #1882). Declared FIRST, so it is built before and destroyed after
+    // every member that draws from it. Empty on an injected root, which serves every purpose.
+    mem::block_ptr_t<mem::host_pool_t> own_tables_;
     seam_park_t retired_seams_;
 
     // The node-scoped vertex index (RFC-0024 §6.4) — the ONE new structure a bound path

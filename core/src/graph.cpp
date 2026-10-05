@@ -478,6 +478,18 @@ struct branch_node_t {
     return mem::kSlabPool && is_default_source(&src) ? &sub : &src;
 }
 
+/** @brief A default graph's own table sub-pool (#1778), over the platform heap; empty when
+ *         @p src is injected or the build has no slab pool. A refused pool is a sizing bug. */
+[[nodiscard]] mem::block_ptr_t<mem::host_pool_t> own_table_pool(mem::block_source_t& src) noexcept {
+    if (!mem::kSlabPool || !is_default_source(&src)) return {};
+    mem::block_ptr_t<mem::host_pool_t> pool = mem::make_block<mem::host_pool_t>(
+        mem::heap_source(), "tables",
+        std::span<const std::size_t, mem::host_pool_t::classes()>(config_t::kSizeClasses),
+        mem::heap_source());
+    if (!pool) mem::exhausted_at_init(mem::heap_source(), "graph_t");
+    return pool;
+}
+
 /** @brief The retention a role holds when its policy names none (RFC-0028 §5.4). */
 [[nodiscard]] constexpr retention_t default_retention(role_t role) noexcept {
     return role == role_t::HANDLER  ? retention_t::NONE
@@ -518,16 +530,17 @@ template <class Set>
 }  // namespace
 
 graph_t::graph_t(mem::block_source_t& src, graph_hooks_t hooks)
-    : src_backend_(src),
-      retired_seams_(*sub_pool(src, mem::table_source())),
-      vertex_slots_(*sub_pool(src, mem::table_source())),
-      child_types_(*sub_pool(src, mem::table_source())),
-      identity_record_(*sub_pool(src, mem::table_source())),
-      pending_(*sub_pool(src, mem::table_source())),
-      unconditional_(*sub_pool(src, mem::table_source())),
+    : own_tables_(own_table_pool(src)),
+      retired_seams_(own_tables_ ? *own_tables_ : src),
+      vertex_slots_(own_tables_ ? *own_tables_ : src),
+      src_backend_(src),
+      child_types_(own_tables_ ? *own_tables_ : src),
+      identity_record_(own_tables_ ? *own_tables_ : src),
+      pending_(own_tables_ ? *own_tables_ : src),
+      unconditional_(own_tables_ ? *own_tables_ : src),
       ctl_(&src),
       values_(sub_pool(src, mem::value_source())),
-      tables_(sub_pool(src, mem::table_source())) {
+      tables_(own_tables_ ? own_tables_.get() : &src) {
     // The process-default FOLD, resolved in the BODY: `&src_backend_` is only taken once its
     // lifetime has started. A few stores at construction, never read again.
     // On the host default root (#1777) values and rings draw from the value sub-pool and

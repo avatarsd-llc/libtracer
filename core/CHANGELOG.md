@@ -25,6 +25,10 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `slab_pool_t` in front of the `pool_source_t` (its root), which rounds into the one
   size-class table and keeps the bound; `pool_source_t` gets no rounding mode of its own.
 
+- **`graph_t::trim_tables()`
+  ([#1778](https://github.com/avatarsd-llc/libtracer/issues/1778)).** Releases the free slabs
+  of a default graph's own table sub-pool; a no-op on a graph with an injected root.
+
 ### Breaking
 
 - **`handlers_t::on_app_field_admit` receives the writer's `write_ctx_t`
@@ -116,8 +120,9 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   ([#1778](https://github.com/avatarsd-llc/libtracer/issues/1778), ADR-0083).** The vertex
   tree, the vertex index, the link index, subscriber edge tables, the seam park, the creation
   catalog, the identity record, the payload-right and admission lists and the propagate-sweep
-  sets now live in core containers over `graph_t::table_source()` (the table sub-pool on a
-  default graph, the injected root otherwise), not in `std` containers on the global heap.
+  sets now live in core containers over `graph_t::table_source()` (on a default graph, a
+  table sub-pool of the graph's own, so independent graphs share no pool lock and no slab;
+  the injected root otherwise), not in `std` containers on the global heap.
   Every growth site is failable: a refusal answers `BACKPRESSURE` and leaves nothing
   half-made. A refused `try_register_vertex` leaves an unregistered placeholder. A refused
   `retire` changes nothing. A refused `set_policy` may have applied the members before the
