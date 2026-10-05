@@ -2689,6 +2689,13 @@ target_link_libraries(lean_link_defaults_test PRIVATE libtracer)
 libtracer_test_warnings(lean_link_defaults_test)
 add_test(NAME lean_link_defaults COMMAND lean_link_defaults_test)
 
+# #1810 — each core-ci leg states the LKV slot, reclamation policy and ACL policy its name
+# carries (LT_EXPECT_* in the environment); this fails a leg whose fragment bound anything else.
+add_executable(config_binding_test config_binding_test.cpp)
+target_link_libraries(config_binding_test PRIVATE libtracer)
+libtracer_test_warnings(config_binding_test)
+add_test(NAME config_binding COMMAND config_binding_test)
+
 # #1713 — a STREAM write is ONE stripe-lock section and zero heap allocations in the common
 # case. `--wrap=pthread_mutex_lock` is the lock counter (the httpd suites' `--wrap=send`
 # precedent); the test counts only the watched stripe's acquisitions.
