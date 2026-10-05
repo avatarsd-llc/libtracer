@@ -93,6 +93,7 @@ Statuses: `draft`, `proposed`, `in-comment`, `accepted`, `superseded`, `rejected
 | [ADR-0081](adr/0081-pre-sink-ingress-native-window-hold-or-named-drop-never-parked.md) | Pre-sink ingress is held in the transport's native flow-control window or dropped with a named counter — never parked inside the library | accepted |  |  |
 | [ADR-0082](adr/0082-auth-subject-and-peer-named-are-decoupled-claims-default-stays-false.md) | The auth subject and `peer_named` are two different claims — who wrote this, versus where the peer appears in the graph — and the `peer_named` default stays `false` | accepted |  |  |
 | [ADR-0083](adr/0083-one-allocation-seam.md) | One allocation seam: every core allocation draws from one injected block source, placed by one module | accepted |  | [ADR-0039](adr/0039-pmr-memory-model-host-aligned-allocation.md) (part) |
+| [ADR-0084](adr/0084-remote-await-completes-from-a-receiver-side-waiter.md) | A remote AWAIT completes from a one-shot receiver-side waiter charged to the receiving link, and never holds that link's receive context | accepted |  |  |
 
 ## RFCs
 

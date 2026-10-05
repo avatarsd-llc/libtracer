@@ -261,8 +261,8 @@ struct parsed_fwd_t {
      * reference before storing it (the remote-subscribe arm below).
      */
     std::optional<N> reverse{};
-    std::uint64_t await_timeout = 0; /**< AWAIT only */
-    bool has_await_timeout = false;
+    /** AWAIT only: the request's `await_timeout`, or @ref kDefaultAwaitTimeout when absent. */
+    std::uint64_t await_timeout = static_cast<std::uint64_t>(kDefaultAwaitTimeout.count());
     /**
      * @brief The `src` PATH is present but ZERO-LENGTH — *no reply requested*
      *        (RFC-0004 Amendment 2, #1502/#1491).
@@ -347,7 +347,6 @@ template <class N>
     } else if (p.op == fwd_op_t::AWAIT) {
         if (tail && tail->type() == type_t::VALUE) {
             p.await_timeout = detail::load_le<std::uint64_t>(tail->body());
-            p.has_await_timeout = true;
             tail = ch.next();
         }
     }
@@ -644,7 +643,8 @@ template <class N>
     const field_path_t& field, bool has_field,
     op_resolver_t::reverse_ref_fn_t reverse_ref_fn = nullptr, void* reverse_ref_ctx = nullptr,
     op_resolver_t::path_label_fn_t path_label_fn = nullptr, void* path_label_ctx = nullptr,
-    bool dst_labelled = false, link_token_seam_t link_token = {}) {
+    bool dst_labelled = false, link_token_seam_t link_token = {},
+    await_defer_seam_t await_defer = {}) {
     // The mint answer (RFC-0024 §7.5): this node's own reference to the target vertex, as a
     // one-element `PATH_REF` the origin stacks under whatever it already holds for the hops
     // in front of it. 4 + 8 bytes, on the reply only, and only when asked — the request side
@@ -764,15 +764,14 @@ template <class N>
                 const reply_route_t ok = labelled_route();
                 return or_backpressure(
                     assemble_reply(ok, reply_kind_t::RESULT,
-                                   std::span<const std::byte>(wrapper.data(), wll ? 6u : 4u), *subs,
+                                   std::span<const std::byte>(wrapper.data(), wout.p), *subs,
                                    sub_len, egress, mint),
                     ok, egress);
             }
             // One read type (RFC-0028 D11): a `:field` read composes a value, a plain value
             // read hands back a REFERENCE to the published one, and both arrive as a
             // `value_ref_t` the reply assembly reads without copying.
-            result_t<value_ref_t> r =
-                has_field ? graph.read(v, field, subject) : graph.read(v, subject);
+            result_t<value_ref_t> r = graph.read(v, field, subject);  // empty field: the value
             if (!r) return assemble_error_reply(route, r.error(), egress);
             // The composed-root case: graph.read may SUCCEED (a folded ~hundreds-of-links
             // snapshot) yet the reply's own link-table reserve fail on the fragmented heap.
@@ -915,8 +914,7 @@ template <class N>
 
             // The arrival link's catalog identity (#1650) rides the token seam the walk already
             // carries into this frame — no parameter of its own, no lookup, no branch.
-            result_t<void> w = graph.write(v, has_field ? field : field_path_t{}, value.rope,
-                                           subject, link_token.link_kind);
+            result_t<void> w = graph.write(v, field, value.rope, subject, link_token.link_kind);
             // RFC-0004 Amendment 2's whole effect, in one line: the write ran (or was
             // refused by the ACL, or failed) and the terminus stays silent either way. The
             // origin loses per-write backpressure feedback — `or_backpressure` never runs on
@@ -948,9 +946,30 @@ template <class N>
             // `graph_t::await` takes no field parameter at all, so the local API never
             // offered this -- only the wire path decoded a selector it could not honour.
             if (has_field) return assemble_error_reply(route, status_t::SCHEMA_NOT_FOUND, egress);
-            const std::chrono::nanoseconds timeout =
-                req.has_await_timeout ? std::chrono::nanoseconds(req.await_timeout)
-                                      : kDefaultAwaitTimeout;
+            const std::chrono::nanoseconds timeout(req.await_timeout);
+            // ADR-0084: with a deferral sink and a caller that can send a later reply, the
+            // wait leaves this thread. Blocking here for `timeout` held the receive context of
+            // the link the request arrived on, and every frame queued behind it. The READ gate
+            // answers first, and only then may §6.1's label mint spend a slot (§8.1), exactly
+            // as on the synchronous arm below.
+            if (await_defer.fn != nullptr && await_defer.deferred != nullptr) {
+                if (!graph.allows(v, subject, acl_right_t::READ))
+                    return assemble_error_reply(route, status_t::PERMISSION_DENIED, egress);
+                const reply_route_t ok = labelled_route();
+                const deferred_await_t d{.vertex = v,
+                                         .timeout = timeout,
+                                         .subject = subject,
+                                         .inbound = link_token.inbound,
+                                         .dst = route.dst_wire,
+                                         .src = route.src_wire,
+                                         .ok_src = ok.src_wire,
+                                         .echo_ts = route.echo_ts,
+                                         .mint = mint};
+                const result_t<void> taken = await_defer.fn(await_defer.ctx, d);
+                if (!taken) return assemble_error_reply(route, taken.error(), egress);
+                *await_defer.deferred = true;
+                return rope_t{};
+            }
             result_t<value_ref_t> r = graph.await(v, timeout, subject);
             if (!r)
                 return assemble_error_reply(route, r.error(),
@@ -980,7 +999,7 @@ template <class N>
     mem::mem_backend_t& retained, op_resolver_t::reverse_ref_fn_t reverse_ref_fn = nullptr,
     void* reverse_ref_ctx = nullptr, op_resolver_t::path_label_fn_t path_label_fn = nullptr,
     void* path_label_ctx = nullptr, const wire::path_ref_element_t* dst_label_target = nullptr,
-    link_token_seam_t link_token = {}) {
+    link_token_seam_t link_token = {}, await_defer_seam_t await_defer = {}) {
     result_t<parsed_fwd_t<N>> parsed = parse_fwd(root);
     if (!parsed) return std::unexpected(parsed.error());
     parsed_fwd_t<N>& req = *parsed;
@@ -1135,7 +1154,7 @@ template <class N>
         return apply_op(graph, req, *bound, inbound_link, subject, frame_view, flat, egress,
                         retained, route, field, has_field, reverse_ref_fn, reverse_ref_ctx,
                         path_label_fn, path_label_ctx,
-                        /*dst_labelled=*/true, link_token);
+                        /*dst_labelled=*/true, link_token, await_defer);
     }
 
     if (req.dst_bound) {
@@ -1156,7 +1175,8 @@ template <class N>
         // "it is not there any more" is exactly the stale case the deref just refused.
         return apply_op(graph, req, *bound, inbound_link, subject, frame_view, flat, egress,
                         retained, route, field, has_field, reverse_ref_fn, reverse_ref_ctx,
-                        path_label_fn, path_label_ctx, /*dst_labelled=*/false, link_token);
+                        path_label_fn, path_label_ctx, /*dst_labelled=*/false, link_token,
+                        await_defer);
     }
 
     // dst resolution is the router's PATH-keyed dispatch — span-aliased for a
@@ -1201,7 +1221,7 @@ template <class N>
     if (!found) return reply_error(status_t::NOT_FOUND);
     return apply_op(graph, req, *found, inbound_link, subject, frame_view, flat, egress, retained,
                     route, field, has_field, reverse_ref_fn, reverse_ref_ctx, path_label_fn,
-                    path_label_ctx, /*dst_labelled=*/false, link_token);
+                    path_label_ctx, /*dst_labelled=*/false, link_token, await_defer);
 }
 
 }  // namespace

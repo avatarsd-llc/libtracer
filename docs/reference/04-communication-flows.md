@@ -134,6 +134,17 @@ Or on timeout:
    | <── STATUS=ERROR(TIMEOUT) ───|
 ```
 
+A **remote** `await` (an `FWD{AWAIT}` arriving over a link) is answered the same way, but the
+waiting happens at the vertex and not on the link: the terminus parks a one-shot waiter, drawn
+from the receiving link's own rx source, and returns that link's receive context at once. The
+reply goes out on the next write, from the writer's thread. The terminus enforces no deadline:
+the requester owns it (RFC-0004 Amendment 3), and `await_timeout` is only its hint. A waiter
+whose vertex never changes is released when the link goes down or the node tears down. Because
+replies name no request op, do not pipeline a `read` behind an `await` on the same vertex over
+one link: their two RESULTs cannot be told apart. Later requests on the same link are not held behind it, so their replies may arrive
+first, as the reply-ordering invariant below already allows
+([ADR-0084](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0084-remote-await-completes-from-a-receiver-side-waiter.md)).
+
 `await` is logically equivalent to `subscribe + receive-one + unsubscribe`. An implementation MAY make it cheaper than the literal sequence, for instance by not creating a persistent SUBSCRIBER record.
 
 A subscriber that wants persistent, callback-driven delivery uses **subscribe via field-write** (next flow), not repeated `await` calls.

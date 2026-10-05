@@ -7,6 +7,14 @@ versioning/publish strategy.
 
 ## [Unreleased]
 
+### Changed
+
+- **`client.await_` always ends at a local deadline** (RFC-0004 Amendment 3: the requester owns
+  an AWAIT's deadline, and a responder need not answer `TIMEOUT`). The deadline is the shorter of
+  `requestTimeoutMs` (10 s by default, and still 10 s for `await_` when the option disables other
+  deadlines) and the call's `timeoutNs`; it rejects with a `FwdError` whose `codeName` is
+  `"TIMEOUT"`. New export: `awaitDeadlineMs`.
+
 ## [0.17.0] — 2026-10-01
 
 No TypeScript-binding changes. The `@avatarsd-llc/*` packages are a native implementation and do not link the C++ core, so 0.17.0's breaking changes (RFC 0028's one-surface API, app-owned TLS profiles, opt-in link modules and instrumentation counters) do not reach them. They are released in lockstep with core, and their wire behaviour is unchanged.

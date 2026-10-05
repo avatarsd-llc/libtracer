@@ -42,6 +42,17 @@ unsubscribe(); // local detach
 client.onError((err) => console.error('inbound decode error', err));
 ```
 
+**`await_` deadlines are the client's own.** A responder is not required to answer
+`TIMEOUT` (RFC-0004 Amendment 3): it answers on the next write, and otherwise stays silent.
+`await_` therefore always ends locally, at the shorter of `requestTimeoutMs` (10 s by
+default, and still 10 s for `await_` when that option disables other deadlines) and its
+`timeoutNs`, rejecting with a `FwdError` whose `codeName` is `"TIMEOUT"`.
+
+**Do not pipeline a `read` behind an `await_` on the same vertex.** Replies name no request
+op, so with both outstanding to one vertex over one connection the two RESULTs cannot be told
+apart, and the `read`'s answer can be handed to the `await_`. Await and read different
+vertices, or let one settle before sending the other.
+
 The pure builders (the exact bytes, transport-free) are also exported — the FWD /
 FIELD envelope builders and the payload builders, each pinned to a conformance
 vector:

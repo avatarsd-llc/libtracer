@@ -1780,6 +1780,33 @@ class graph_t {
     [[nodiscard]] result_t<value_ref_t> await(vertex_handle_t v, std::chrono::nanoseconds timeout,
                                               std::string_view caller = {});
     /**
+     * @brief The non-blocking form of @ref await (ADR-0084): gate @p caller for READ, then arm
+     *        the one-shot waiter @p w on @p v and return at once.
+     *
+     * @p w fires on the next change of @p v, on the writer's thread, after the publish has
+     * landed; the callee then serves the value with @ref await_value. The graph allocates
+     * nothing: @p w is the caller's, and must stay alive until it fires or @ref disarm_await
+     * returns true for it. There is no deadline here — a timeout is the caller's to run, by
+     * calling @ref disarm_await.
+     * @return `PERMISSION_DENIED` when the READ gate refuses (nothing is armed).
+     */
+    [[nodiscard]] result_t<void> arm_await(vertex_handle_t v, await_waiter_t& w,
+                                           std::string_view caller = {});
+    /**
+     * @brief Take back an armed waiter that has not fired (a timeout or a teardown).
+     * @retval true  It had not fired, and it never will: it is the caller's again.
+     * @retval false It already fired (or is firing) on a writer's thread.
+     */
+    [[nodiscard]] static bool disarm_await(await_waiter_t& w) noexcept;
+    /**
+     * @brief Serve a woken await's value: the role dispatch @ref await runs after its wake,
+     *        shared so the blocking and the armed forms answer alike.
+     *
+     * The READ gate is the caller's to have checked (@ref arm_await checks it).
+     * @return The value, or `NOT_FOUND` (never assigned / a handler with no `on_read`).
+     */
+    [[nodiscard]] result_t<value_ref_t> await_value(vertex_handle_t v) const;
+    /**
      * @brief Field-read by handle (the read dual of the field-write overload).
      *
      * An empty @p field is an ordinary value read — the SAME reference @ref read hands back,

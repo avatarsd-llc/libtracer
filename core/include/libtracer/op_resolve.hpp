@@ -220,6 +220,47 @@ struct link_token_seam_t {
 };
 
 /**
+ * @brief A remote AWAIT the terminus hands to its deferral sink instead of waiting for it
+ *        (ADR-0084): everything the sink needs to answer it later, borrowed for the call.
+ *
+ * The READ gate has already answered "allowed" and every route span is the exact bytes the
+ * synchronous reply would have carried. All spans point into the request and the resolver's
+ * stack, so a sink that keeps the wait copies them before it returns.
+ */
+struct deferred_await_t {
+    vertex_handle_t vertex; /**< @brief The awaited vertex. */
+    /** @brief The request's `await_timeout` (or the default): the requester's own deadline,
+     *         which a sink MAY ignore (RFC-0004 Amendment 3). */
+    std::chrono::nanoseconds timeout;
+    std::string_view subject;          /**< @brief The ACL subject the gate passed. */
+    const inbound_ref_t* inbound;      /**< @brief Where it arrived and who sent it. */
+    std::span<const std::byte> dst;    /**< @brief Reply `dst` (the request's `src`). */
+    std::span<const std::byte> src;    /**< @brief Reply `src` for an ERROR (the timeout). */
+    std::span<const std::byte> ok_src; /**< @brief Reply `src` for the RESULT (may be labelled). */
+    std::optional<wire::timestamp_t> echo_ts; /**< @brief The TF=0 stamp to echo, if any. */
+    std::span<const std::byte> mint; /**< @brief The RFC-0024 mint the RESULT carries, if any. */
+};
+
+/**
+ * @brief The terminus's AWAIT deferral sink (ADR-0084): take over @p req and answer it when
+ *        the vertex changes, so the resolve returns the receive context at once.
+ * @return Success when the sink now owns the answer; an error (`BACKPRESSURE` when the
+ *         receiving link's source refused the waiter) is answered at once by the resolver.
+ */
+using await_defer_fn_t = result_t<void> (*)(void* ctx, const deferred_await_t& req);
+
+/**
+ * @brief The deferral seam as the resolve walk carries it: the sink, its context, and the
+ *        caller's out-flag. Deferral happens only when all three are set, so a caller that
+ *        cannot send a later reply keeps the synchronous AWAIT.
+ */
+struct await_defer_seam_t {
+    await_defer_fn_t fn = nullptr; /**< @brief The sink, or null. */
+    void* ctx = nullptr;           /**< @brief Its caller-owned context. */
+    bool* deferred = nullptr;      /**< @brief Set to true when the sink took the request. */
+};
+
+/**
  * @brief Resolves an arena-decoded FWD against a local graph and builds the FWD{REPLY} rope.
  *
  * Local-only (RFC-0004 / ADR-0035): no transport, no multi-hop forwarding, no
@@ -388,13 +429,18 @@ class op_resolver_t {
      *                     reply echoes as its `src`, IS the label) nor answers an RFC-0024
      *                     mint request with a `PATH_REF` for it (*"SHOULD NOT bind a
      *                     `PATH_REF` over a path whose elements are already labelled"*).
+     * @param deferred     Out-flag for a deferred AWAIT (ADR-0084). Non-null with a sink
+     *                     installed through @ref on_await_defer, an AWAIT is handed to that
+     *                     sink, `*deferred` is set, and the reply is an EMPTY rope that the
+     *                     caller does not send: the sink answers later. Null keeps the
+     *                     synchronous AWAIT.
      * @return The reply as a @ref view::rope_t (head segment + roped payload views),
      *         or a `status_t` on a malformed/non-request frame.
      */
     [[nodiscard]] result_t<view::rope_t> resolve(
         const wire::tlv_arena_t& fwd, const inbound_ref_t& inbound = {},
         const view::view_t* frame_view = nullptr,
-        const wire::path_ref_element_t* dst_label_target = nullptr);
+        const wire::path_ref_element_t* dst_label_target = nullptr, bool* deferred = nullptr);
 
     /**
      * @brief Resolve a rope-delivered request FWD (the lazy `tlv_view_t` tier) and
@@ -419,13 +465,14 @@ class op_resolver_t {
      *                     arrive fragmented like any other, and the two tiers answering one
      *                     logical request differently is the drift ADR-0053 §7's single walk
      *                     exists to make impossible.
+     * @param deferred     The deferred-AWAIT out-flag, as the arena overload documents.
      * @return The reply as a @ref view::rope_t, or a `status_t` on a
      *         malformed/non-request frame.
      */
     [[nodiscard]] result_t<view::rope_t> resolve(
         const wire::tlv_view_t& fwd, const inbound_ref_t& inbound = {},
         const view::view_t* frame_view = nullptr,
-        const wire::path_ref_element_t* dst_label_target = nullptr);
+        const wire::path_ref_element_t* dst_label_target = nullptr, bool* deferred = nullptr);
 
     /**
      * @brief The responder's own reverse-direction element supplier (RFC-0024 §7.1
@@ -551,6 +598,21 @@ class op_resolver_t {
         link_id_ctx_ = ctx;
     }
 
+    /**
+     * @brief Install the AWAIT deferral sink (ADR-0084); `nullptr` uninstalls it.
+     *
+     * With a sink installed, a resolve given a `deferred` out-flag no longer runs
+     * `graph_t::await` on the calling thread: it gates the READ, hands the request to the
+     * sink and returns. The router installs it so a remote AWAIT never holds the receive
+     * context of the link it arrived on.
+     * @param fn  The sink; @p ctx is caller-owned and must outlive every resolve.
+     * @param ctx Handed back to @p fn.
+     */
+    void on_await_defer(await_defer_fn_t fn, void* ctx) noexcept {
+        await_defer_fn_ = fn;
+        await_defer_ctx_ = ctx;
+    }
+
    private:
     graph_t& graph_;
     mem::mem_backend_t* flat_ = &mem::heap_backend();    // rope-tier terminus flattens (#766)
@@ -577,6 +639,8 @@ class op_resolver_t {
     void* subject_ctx_ = nullptr;                /**< @brief Its caller-owned context. */
     link_id_fn_t link_id_fn_ = nullptr;          // #1417 terminus link-token carry
     void* link_id_ctx_ = nullptr;                /**< @brief Its caller-owned context. */
+    await_defer_fn_t await_defer_fn_ = nullptr;  // ADR-0084 deferred AWAIT sink
+    void* await_defer_ctx_ = nullptr;            /**< @brief Its caller-owned context. */
 
     /** @brief The token seam as the walk carries it — the pair plus the identity it
      *         resolves, bundled so `resolve_node` grows ONE parameter and not three. */
@@ -585,6 +649,12 @@ class op_resolver_t {
                                  .ctx = link_id_ctx_,
                                  .inbound = &inbound,
                                  .link_kind = inbound.link_kind};
+    }
+
+    /** @brief The deferral seam as the walk carries it, with this resolve's out-flag. */
+    [[nodiscard]] await_defer_seam_t await_defer_seam(bool* deferred) const noexcept {
+        return await_defer_seam_t{
+            .fn = await_defer_fn_, .ctx = await_defer_ctx_, .deferred = deferred};
     }
 
     /**

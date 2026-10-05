@@ -102,19 +102,6 @@ fwd_router_t::origin_t::~origin_t() {
         (void)r->cancel(*this);
 }
 
-fwd_router_t::~fwd_router_t() {
-    // A record outliving its router must not keep a dangling owner: disarm every one still
-    // linked, so its destructor finds nothing to cancel.
-    const std::lock_guard lock(origin_m_);
-    for (origin_t* o = origins_.load(std::memory_order_relaxed); o != nullptr;) {
-        origin_t* const next = o->next_;
-        o->next_ = nullptr;
-        o->owner_.store(nullptr, std::memory_order_release);
-        o = next;
-    }
-    origins_.store(nullptr, std::memory_order_relaxed);
-}
-
 graph::result_t<void> fwd_router_t::originate(origin_t& slot, fwd_op_t op, const graph::path_t& dst,
                                               std::span<const std::byte> payload,
                                               const graph::path_t* reply_to) {

@@ -421,6 +421,20 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   was before. The labelled-hop count names `relaxed`, so its native bump is the plain AMO it
   was: `lock add` on x86-64, `amoadd.w` on rv32imac, `ldadd` on aarch64. On a core with no atomic RMW (ESP32-C3, Cortex-M0) it is one guard
   section in place of `__atomic_fetch_add_4`.
+- **A remote AWAIT no longer occupies the receive context
+  ([ADR-0084](../docs/adr/0084-remote-await-completes-from-a-receiver-side-waiter.md)).** The
+  router answers it later, from the writer's thread, when the awaited vertex changes. Its waiter
+  is one block of the receiving link's rx source, released when the link goes down or the router
+  is destroyed. The router adds no thread and reads no clock. The request's `await_timeout` is
+  ignored on the receiver: the requester owns the deadline (RFC-0004 Amendment 3), so a
+  requester that relied on a terminus `TIMEOUT` reply ends its wait at its own deadline. Replies on one link may now arrive in a
+  different order than their requests, which `reference/04` already allows. New public API:
+  `graph::await_waiter_t`, `graph_t::arm_await` / `disarm_await` / `await_value`,
+  `vertex_t::arm_waiter` / `disarm_waiter`, `op_resolver_t::on_await_defer` with
+  `deferred_await_t` and a trailing `bool* deferred` parameter on both `resolve` overloads
+  (defaulted, so existing calls are unchanged), and `fwd_router_t::pending_awaits`.
+  `fwd_router_t` now has a user-declared destructor that cancels pending AWAITs.
+
 - **`vertex_handle_t`, `vertex_slot_t`, `kGenerationSaturated`, `saturating_next_generation` and
   `bound_generation_matches` move to the new leaf header `libtracer/vertex_handle.hpp`
   ([#1707](https://github.com/avatarsd-llc/libtracer/issues/1707)).** The leaf includes no graph

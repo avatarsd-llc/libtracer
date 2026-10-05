@@ -301,9 +301,9 @@ deployment:
 - **A lost reply is silence.** Because there is no correlation-id and no per-hop request state
   (RFC-0004 §D), a one-shot whose reply is lost to a partition produces no answer rather than an
   error, and `core/include/libtracer/fwd_router.hpp` exposes no reply-deadline surface — ending
-  the wait is the caller's concern. A remote `await` that *reaches* its terminus is bounded there (the
-  `FWD`'s `await_timeout`, with a default when the child is absent — `core/include/libtracer/op_resolve.hpp`);
-  one that never arrives is not.
+  the wait is the caller's concern. That holds for a remote `await` too, whether or not it reaches
+  its terminus: the deadline is the requester's (RFC-0004 Amendment 3). The terminus parks a
+  waiter and answers on the next change, and enforces no `await_timeout`.
 
 **What recovery is.** A `DIAL` link with a standing binding re-dials with `backoff` and has no
 give-up bound and no terminal-failure state; a consumer distinguishes "transiently retrying"

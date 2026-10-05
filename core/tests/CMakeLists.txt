@@ -1837,6 +1837,13 @@ if(LIBTRACER_NET_PLANE)
     target_link_libraries(fwd_terminus_reply_link_test PRIVATE libtracer)
     libtracer_test_warnings(fwd_terminus_reply_link_test)
     add_test(NAME fwd_terminus_reply_link COMMAND fwd_terminus_reply_link_test)
+
+    # ADR-0084 — a remote AWAIT is answered from a one-shot receiver-side waiter charged to
+    # the receiving link's rx source, and never holds that link's receive context.
+    add_executable(fwd_await_defer_test fwd_await_defer_test.cpp)
+    target_link_libraries(fwd_await_defer_test PRIVATE libtracer)
+    libtracer_test_warnings(fwd_await_defer_test)
+    add_test(NAME fwd_await_defer COMMAND fwd_await_defer_test)
 endif()
 
 if(LIBTRACER_NET_PLANE)
