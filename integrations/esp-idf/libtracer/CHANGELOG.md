@@ -115,6 +115,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   on a chip. **Migration:** an application that replaces the fragment with its own renames
   `kHeapSmallBlockBytes = N` to `kSizeClasses[] = {N}` there.
 
+- **The generated config fragment binds `kSlabPool = false` in place of `kSizeClasses[] =
+  {SIZE_MAX}` ([#1777](https://github.com/avatarsd-llc/libtracer/issues/1777)).** Core's host
+  default is now a size-classed slab pool, and the heap backend no longer splits a segment, so
+  the table no longer chooses a split point. `multi_heap` is the chip's allocator: the component
+  keeps the heap backend on it, one heap block per segment, as before, and its threads carry no
+  slab-pool cache. Nothing changes on a chip. **Migration:** an application that replaces the
+  fragment with its own drops its `kSizeClasses` line and binds `kSlabPool = false` there.
+
 ## [0.17.0] — 2026-10-01
 
 ### Changed

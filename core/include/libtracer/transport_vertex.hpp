@@ -285,7 +285,7 @@ class transport_vertex_t {
      *                   (ADR-0042 §2): the built-in `udp` factory passes it to
      *                   every socket it constructs, so a creator-endpoint-created
      *                   connection participates in owning delivery. Default: the
-     *                   process heap; a bounded host injects its pool over its
+     *                   process net sub-pool; a bounded host injects its pool over its
      *                   static slab. Must outlive this object (and thus every
      *                   owned transport).
      * @param egress_src The EGRESS twin of @p rx_backend (#873 family 1, ADR-0079's
@@ -295,14 +295,14 @@ class transport_vertex_t {
      *                   `iov_table_t` overflow, both sized by the SENDING peer. Sizing it
      *                   is what bounds this node's egress allocation; exhaustion drops the
      *                   frame and counts it, exactly as it already does. Default: the
-     *                   process heap, i.e. today's behaviour unchanged. Must outlive this
+     *                   process net sub-pool (#1777). Must outlive this
      *                   object (and thus every owned transport). A kind's own factory
      *                   registered later via @ref register_transport_type reaches the same
      *                   store through @ref egress_source.
      */
     transport_vertex_t(graph::graph_t& graph, fwd_router_t& router, std::string net_root = "/net",
-                       mem::mem_backend_t* rx_backend = &mem::heap_backend(),
-                       mem::block_source_t* egress_src = &mem::heap_source());
+                       mem::mem_backend_t* rx_backend = &mem::net_backend(),
+                       mem::block_source_t* egress_src = &mem::net_source());
 
     /**
      * @brief SLIM ctor (@ref slim_net_t): bind to @p graph / @p router and register
@@ -327,12 +327,12 @@ class transport_vertex_t {
      *                   accessor is the documented way a factory reaches "this net plane's
      *                   store", and before this parameter existed it answered the process
      *                   heap on a slim node no matter what the composition root had chosen.
-     *                   `nullptr` (and the default) means the process heap, i.e. today's
-     *                   behaviour unchanged. Must outlive this object.
+     *                   `nullptr` (and the default) means the process net sub-pool
+     *                   (#1777). Must outlive this object.
      */
     transport_vertex_t(graph::graph_t& graph, fwd_router_t& router, std::string net_root,
                        mem::mem_backend_t* rx_backend, slim_net_t,
-                       mem::block_source_t* egress_src = &mem::heap_source());
+                       mem::block_source_t* egress_src = &mem::net_source());
 
     /**
      * @brief Uninstall the routed-subscription hold seam (#1816) before any connection is

@@ -397,17 +397,18 @@ struct link_memory_t {
     /**
      * @brief The RX memory seam (ADR-0042 §2): each inbound frame is read into a segment drawn
      *        from it. Exhaustion is backpressure — the frame is dropped and counted, never an
-     *        OOM. Default: the process heap. A kind whose zero-copy delivery is opt-in (the
-     *        ESP-IDF `httpd_ws_link_t`) defaults it to null, meaning "borrowed delivery".
+     *        OOM. Default: the process net sub-pool (#1777). A kind whose zero-copy delivery is
+     *        opt-in (the ESP-IDF `httpd_ws_link_t`) defaults it to null, meaning "borrowed
+     *        delivery".
      */
-    mem::mem_backend_t* rx = &mem::heap_backend();
+    mem::mem_backend_t* rx = &mem::net_backend();
     /**
      * @brief The link's EGRESS store (ADR-0079, #873): the per-frame scratch a kind draws
      *        while one outbound frame is in flight — `ws_client_transport_t`'s masked-frame copy
      *        and the base class's gather temporary. A kind with no such draw ignores it.
-     *        Default: the process heap.
+     *        Default: the process net sub-pool (#1777).
      */
-    mem::block_source_t* io = &mem::heap_source();
+    mem::block_source_t* io = &mem::net_source();
 };
 
 /**
@@ -617,8 +618,8 @@ class transport_t {
      * store and the egress path is bounded by it, with exhaustion answered the way it
      * already is — the frame is DROPPED and counted, never truncated and never `abort()`.
      *
-     * The default is the process heap, so a link nothing was wired into behaves exactly as
-     * it did before this seam existed.
+     * The default is the process net sub-pool (#1777): unbounded, as a link nothing was wired
+     * into always was.
      */
     [[nodiscard]] mem::block_source_t& egress_source() const noexcept { return *egress_src_; }
 
@@ -857,7 +858,7 @@ class transport_t {
     /** @brief The injected egress store — see @ref egress_source. Not atomic: it is wired
      *         once during bring-up, before any thread can send on this link, exactly as the
      *         receiver slots are. */
-    mem::block_source_t* egress_src_ = &mem::heap_source();
+    mem::block_source_t* egress_src_ = &mem::net_source();
 
    public:
     /**

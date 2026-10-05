@@ -142,7 +142,7 @@ class source_backend_t final : public mem_backend_t {
     /**
      * @brief The single block @ref alloc draws for a @p size-byte segment
      *        (@ref segment_block_bytes). Always one block: the source is sized for one draw per
-     *        segment, so this backend never asks @ref is_one_block.
+     *        segment, so a segment here is never split across draws.
      */
     [[nodiscard]] static constexpr std::size_t block_bytes(std::size_t size) noexcept {
         return segment_block_bytes(size, kBlockAlign);

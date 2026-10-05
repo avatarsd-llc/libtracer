@@ -146,7 +146,7 @@ can_transport_t::can_transport_t(std::unique_ptr<can_link_t> link, transport_can
     // Resolve the slice-byte seam ONCE (#911). `nullptr` means the process heap, which
     // is what this path used unconditionally before; resolving here rather than
     // branching per slice keeps the RX path at one indirect call either way.
-    rx_backend_ = cfg_.rx_backend != nullptr ? cfg_.rx_backend : &tr::mem::heap_backend();
+    rx_backend_ = cfg_.rx_backend != nullptr ? cfg_.rx_backend : &tr::mem::net_backend();
     link_->on_receive([this](const can_frame_data_t& f) { on_rx(f); });
     // ...and only NOW does the link begin reading (#1186). The seam is two-phase
     // precisely so this order is expressible: the receiver is installed first, so

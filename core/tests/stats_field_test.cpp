@@ -346,9 +346,65 @@ void test_reading_the_census_is_not_a_write() {
 
 }  // namespace
 
+/**
+ * @brief RFC-0010 Amendment 3 (#1777): a node that derives sub-pools answers
+ *        `:stats.mem.values`, `.tables` and `.net`; one that does not answers
+ *        `SCHEMA_NOT_FOUND` for each.
+ */
+void test_sub_pool_seams() {
+    std::printf("RFC-0010 Am.3: the derived sub-pools are three seams:\n");
+    constexpr std::array<const char*, 3> kNames{"/n:stats.mem.values", "/n:stats.mem.tables",
+                                                "/n:stats.mem.net"};
+    {
+        graph_t g;  // the host default root
+        const auto n = g.register_vertex(path_t("/n"), role_t::STORED_VALUE);
+        (void)g.write(n, make_value({0x01, 0x02, 0x03}));
+        for (const char* name : kNames) {
+            const auto r = read_as(g, name, {});
+            if (!tr::mem::kSlabPool) {
+                check(!r && r.error() == status_t::SCHEMA_NOT_FOUND,
+                      "without the host slab pool no sub-pool is derived: SCHEMA_NOT_FOUND");
+                continue;
+            }
+            const auto bytes = read_bytes(g, name, {});
+            const auto dec = tr::wire::decode(bytes);
+            std::printf("    %s: in_use %llu, peak %llu, refused %llu\n", name,
+                        static_cast<unsigned long long>(dec ? counter(*dec, "in_use") : 0),
+                        static_cast<unsigned long long>(dec ? counter(*dec, "peak") : 0),
+                        static_cast<unsigned long long>(dec ? counter(*dec, "refused") : 0));
+            check(dec && dec->type == type_t::SETTINGS && dec->children.size() == 10,
+                  "a sub-pool seam is one SETTINGS block of the five mem nouns");
+            check(dec && counter(*dec, "capacity") == 0 &&
+                      counter(*dec, "peak") >= counter(*dec, "in_use"),
+                  "capacity 0 (the pool caps retention, not demand); peak never below in_use");
+        }
+        if (tr::mem::kSlabPool) {
+            const auto bytes = read_bytes(g, "/n:stats.mem.values", {});
+            const auto dec = tr::wire::decode(bytes);
+            check(dec && counter(*dec, "in_use") > 0,
+                  "the value sub-pool holds the value this node just stored");
+        }
+    }
+    {
+        std::array<std::byte, 4096> slab{};
+        std::array<tr::mem::size_class_t, 8> classes{};
+        tr::mem::pool_source_t pool(slab, classes);
+        graph_t g(pool);  // an injected root serves every purpose itself
+        (void)g.register_vertex(path_t("/n"), role_t::STORED_VALUE);
+        for (const char* name : kNames) {
+            const auto r = read_as(g, name, {});
+            check(!r && r.error() == status_t::SCHEMA_NOT_FOUND,
+                  "an injected root derives no sub-pool: each name answers SCHEMA_NOT_FOUND");
+        }
+        check(!read_bytes(g, "/n:stats.mem.control", {}).empty(),
+              "while the root's own seam still answers");
+    }
+}
+
 int main() {
     std::printf("#1503 step 5 / RFC-0010 Amendment 1 — the node-scoped `:stats` census\n\n");
     test_one_seam_is_one_block();
+    test_sub_pool_seams();
     test_node_scoped();
     test_value_is_read_gated();
     test_unknown_spellings_are_caller_independent();

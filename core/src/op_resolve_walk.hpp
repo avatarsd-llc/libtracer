@@ -909,7 +909,7 @@ template <class N>
             // allocation failure.
             const stored_tlv_t value =
                 share_or_copy_tlv(payload_node, frame_view, graph.share_threshold_bytes(v),
-                                  graph.control_source(), flat);
+                                  graph.value_source(), flat);
             if (value.rope.total_length() == 0) return write_error(status_t::BACKPRESSURE);
 
             // The arrival link's catalog identity (#1650) rides the token seam the walk already

@@ -124,7 +124,8 @@ struct router_stats_t {
  * @brief The router's allocation planes as ONE aggregate (RFC-0028 §8.2, slice 10) — what
  *        `fwd_router_t`'s constructor takes in place of six positional, defaulted seams.
  *
- * Every member defaults to what an un-injected router always used (the process heap), so
+ * Every member defaults to the process net sub-pool (`mem::net_source()` /
+ * `mem::net_backend()`, #1777), so
  * `router_planes_t{}` is the unbounded host router and a bounded node names only the planes
  * it points at its own slab:
  *
@@ -159,7 +160,7 @@ struct router_planes_t {
      * is per-frame decode scratch and may legitimately be a `bump_source_t`, while label state is
      * LONG-LIVED and would monotonically fill one.
      */
-    mem::block_source_t* label_src = &mem::heap_source();
+    mem::block_source_t* label_src = &mem::net_source();
 
     /**
      * @brief The nothrow source the TERMINUS ARENA draws from (#588). Split from @p label_src
@@ -171,7 +172,7 @@ struct router_planes_t {
      * A bounded node points
      * this at the same slab as @p label_src. Must outlive the router.
      */
-    mem::block_source_t* rx = &mem::heap_source();
+    mem::block_source_t* rx = &mem::net_source();
 
     /**
      * @brief The byte backend EVERY rope flatten on the router's forward AND terminus paths draws
@@ -214,7 +215,7 @@ struct router_planes_t {
      * `critical_guard_t` on an MCU. A bounded node points this at the same slab as @p label_src /
      * @p rx only through such a composition. Must outlive the router.
      */
-    mem::mem_backend_t* flat = &mem::heap_backend();
+    mem::mem_backend_t* flat = &mem::net_backend();
 
     /**
      * @brief Ceiling on one link's ingress table and, separately, its egress table (#603). `0` ⇒
@@ -238,13 +239,13 @@ struct router_planes_t {
      * reply head is egress construction sized against ROUTE bytes, so widening @p flat's contract
      * would silently re-scope a slab deployments already set for flattens (a node could begin
      * refusing replies it used to send). Passed straight to the @ref graph::op_resolver_t.
-     * The default is the global heap; only a bounded node that points it at its slab gets the
+     * The default is the net sub-pool; only a bounded node that points it at its slab gets the
      * bound. A refusal degrades
      * through the same empty-rope → `or_backpressure` → addressed `STATUS{BACKPRESSURE}` path OOM
      * already takes — answered by value, never an abort. MUST be thread-safe on the same terms as
      * @p flat. Must outlive the router.
      */
-    mem::mem_backend_t* egress = &mem::heap_backend();
+    mem::mem_backend_t* egress = &mem::net_backend();
 
     /**
      * @brief The backend for the two allocations a REMOTE SUBSCRIBE keeps for the LIFE OF THE
@@ -289,7 +290,7 @@ class fwd_router_t {
      *
      * @param graph The node's local graph.
      * @param planes The router's allocation planes (@ref router_planes_t); every member
-     *               defaults to the process heap. Each must outlive the router.
+     *               defaults to the process net sub-pool. Each must outlive the router.
      */
     explicit fwd_router_t(graph::graph_t& graph, const router_planes_t& planes = {})
         : graph_(graph),
@@ -306,7 +307,7 @@ class fwd_router_t {
           // mark is the count of DISTINCT link names ever registered, so they take the LABEL
           // store rather than the per-frame `rx` one — which a `bump_source_t` may legitimately
           // be, and which would fill monotonically under them (#873 phase 1).
-          registry_(planes.label_src != nullptr ? *planes.label_src : mem::heap_source()),
+          registry_(planes.label_src != nullptr ? *planes.label_src : mem::net_source()),
           handles_(planes.label_src, planes.max_label_bindings_per_link) {
         // The captureless {fn, ctx} pair the ADR-0047 doctrine prescribes (#1049) — the same
         // shape as `on_reverse_ref` below. The graph publishes it through a `sink_slot_t`,

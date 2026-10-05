@@ -163,7 +163,7 @@ struct fixture_t {
  * depend on the width: the clone was taken before the width was ever consulted.
  */
 [[nodiscard]] double per_write_allocs(bool handler, std::size_t links) {
-    graph_t g;
+    graph_t g{tr::mem::heap_source()};  // raw heap: the counter sees each block (#1777)
     const path_t src = *path_t::parse("/t/alloc/src");
     std::atomic<std::uint64_t> hits{0};
     auto v = [&] {

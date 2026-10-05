@@ -158,7 +158,7 @@ void count_sink(void* ctx, const tr::graph::value_t& /*value*/) {
 /** @brief §6.6 gate 1 — a `wo` write reaches the seam and leaves `values` unallocated. */
 void test_wo_field_stores_nothing() {
     std::printf("app field `wo` — delivered to the seam, stored nowhere:\n");
-    graph_t g;
+    graph_t g{tr::mem::heap_source()};  // raw heap: the counter sees each block (#1777)
     int fired = 0;
     std::vector<std::byte> seen;
     handlers_t h;
@@ -229,7 +229,7 @@ void test_wo_field_stores_nothing() {
  *         write, and the verbs that need a retained value refuse. */
 void test_none_vertex_relays() {
     std::printf("\nvalue vertex `NONE` — the pure relay:\n");
-    graph_t g;
+    graph_t g{tr::mem::heap_source()};  // raw heap: the counter sees each block (#1777)
     const path_t p("/relay/x");
     const vertex_handle_t v = g.register_vertex(p, role_t::STORED_VALUE);
     std::atomic<std::uint64_t> recv{0};
@@ -315,7 +315,7 @@ void test_none_relay_draws_no_block() {
     // A persistent segment: building the written rope is a refcount, never an allocation.
     const view_t seg = make_value({0xAB, 0xCD, 0xEF, 0x01});
     std::atomic<std::uint64_t> recv{0};
-    graph_t g;
+    graph_t g{tr::mem::heap_source()};  // raw heap: the counter sees each block (#1777)
     const path_t pn("/z/none");
     const path_t pl("/z/last");
     const vertex_handle_t none = g.register_vertex(pn, role_t::STORED_VALUE);
@@ -364,7 +364,7 @@ void test_ring_rides_the_source() {
     const view_t seg = make_value({0x11, 0x22, 0x33, 0x44});
     ring_source_t src;  // outlives the graph: the ring releases into it on teardown
     {
-        graph_t g;
+        graph_t g{tr::mem::heap_source()};  // raw heap: the counter sees each block (#1777)
         const vertex_handle_t st = g.register_vertex(path_t("/r/stream"), role_t::STREAM);
         const vertex_handle_t sv = g.register_vertex(path_t("/r/stored"), role_t::STORED_VALUE);
         check(g.set_policy(st, {.retention = retention_t::N, .depth = 64, .ring_source = &src})

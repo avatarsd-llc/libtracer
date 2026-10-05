@@ -230,7 +230,10 @@ is a knob the fragment does not state at all (#1244).
 | `kEdgePinSlots` (`config.hpp:default_config_t::kEdgePinSlots`) | count | 32 | set to 8 (`integrations/esp-idf/libtracer/CMakeLists.txt:set(LIBTRACER_EDGE_PIN_SLOTS 8)`) |
 | `kMaxVertexBytes64` / `kMaxVertexBytes32` (`config.hpp:default_config_t::kMaxVertexBytes64` / `config.hpp:default_config_t::kMaxVertexBytes32`) | RAM ratchet | 88 / 64 | the preset — deliberately not overridable |
 | `kShareThresholdBytes` (`config.hpp:default_config_t::kShareThresholdBytes`) | size | 4,096 — RFC-0028 §11 ruling 2 | `SIZE_MAX`, copy always (`integrations/esp-idf/libtracer/CMakeLists.txt:static constexpr std::size_t kShareThresholdBytes = ~std::size_t{0}`) |
-| `kSizeClasses` (`config.hpp:default_config_t::kSizeClasses`) | size-class table | `{1032}` — glibc's 64-bit tcache ceiling (#1768, #1775) | `{SIZE_MAX}`, one heap block always (`integrations/esp-idf/libtracer/CMakeLists.txt:static constexpr std::size_t kSizeClasses[] = {~std::size_t{0}}`) |
+| `kSizeClasses` (`config.hpp:default_config_t::kSizeClasses`) | size-class table | 80 rows: 16–128 B by 16, then eight per doubling to 64 KiB — the host slab pool's classes (#1777) | inherited — unused on a chip, which has no slab pool |
+| `kSlabPool` (`config.hpp:default_config_t::kSlabPool`) | allocator choice | `true` — the host default root is a slab pool with value, table and net sub-pools (#1777) | `false`, the platform heap as before (`integrations/esp-idf/libtracer/CMakeLists.txt:static constexpr bool kSlabPool = false`) |
+| `kSlabBytes` (`config.hpp:default_config_t::kSlabBytes`) | size | 65,536 — the base slab | inherited — unused on a chip |
+| `kSlabClassCap` (`config.hpp:default_config_t::kSlabClassCap`) | count | 2 — fully free slabs a class keeps | inherited — unused on a chip |
 | `acl_policy_t` (`config.hpp:default_config_t::acl_policy_t`) | policy type | `allow_only_policy_t` | inherited — the full policy is not selectable |
 | `lkv_slot_t` (`config.hpp:default_config_t::lkv_slot_t`) | policy type | `single_writer_slot_t` | `single_writer_slot_t` on every chip, with `guard_t = tr::esp::critical_guard_t`; inherited on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:if(LIBTRACER_SPIN_WAIT_SAFE)`) |
 | `kSpinWaitSafe` (`config.hpp:inline constexpr bool kSpinWaitSafe`) | target fact | `true` | derived from `IDF_TARGET` — `false` on every chip, `true` on `linux` (`integrations/esp-idf/libtracer/CMakeLists.txt:set(LIBTRACER_SPIN_WAIT_SAFE true)`) |
@@ -251,13 +254,14 @@ target and `guard_t`) and `LIBTRACER_PIN_INSTRUMENT` (folded into `kInstrumentCo
 list were deleted with the template (#1142).
 
 Each is documented at its declaration with what it costs and when to move it; that header is
-the reference, not this table. What matters here is the shape: **seventeen knobs, all named, all
-finite.** Three are counts (`kVertexLockStripes`, `kHazardReaderSlots`, `kEdgePinSlots`), one is a
-padding width, one is a per-target RAM ceiling, three are sizes (`kShareThresholdBytes`, the
-size-class table `kSizeClasses` whose last row is the heap backend's split point, and the
-thread stack size `kSelfHealWorkerStackBytes`), two are an ingress budget (`kRxDrainFrames` and
-`kRxDrainBytes`, the frames and bytes a receive context reads before it waits for its core to
-idle), two are type bindings, one is a
+the reference, not this table. What matters here is the shape: **twenty knobs, all named, all
+finite.** Four are counts (`kVertexLockStripes`, `kHazardReaderSlots`, `kEdgePinSlots`,
+`kSlabClassCap`), one is a padding width, one is a per-target RAM ceiling, four are sizes
+(`kShareThresholdBytes`, the slab pool's size-class table `kSizeClasses`, its base slab
+`kSlabBytes`, and the thread stack size `kSelfHealWorkerStackBytes`), two are an ingress budget
+(`kRxDrainFrames` and `kRxDrainBytes`, the frames and bytes a receive context reads before it
+waits for its core to idle), one chooses the host allocator (`kSlabPool`), two are type
+bindings, one is a
 target fact rather than a preference, and two — `kBusLinks`, below, and `kSelfHealLinks` (the
 RFC-0014 S5 link-liveness engine, #1470) — state whether a *module* is present at all. `kSpinWaitSafe` says whether a task on this target may spin
 for a lock another task holds, and the guard in `mem_pool.hpp` reads it to refuse
@@ -275,8 +279,8 @@ supplies (#1664). `kFaultInjection` is its twin for the test-only fault-injectio
 (`probe_fail_hook` and three transport seams): closed out, the default allocation path carries
 no hook branch and no hook variable reaches the archive (#1719).
 
-Three of the sixteen carry no build-system variable at all. `kMaxVertexBytes64` / `kMaxVertexBytes32`,
-`kShareThresholdBytes` and `kSizeClasses` are preset members: an application moves them by declaring its own
+Several of the twenty carry no build-system variable at all. `kMaxVertexBytes64` / `kMaxVertexBytes32`,
+`kShareThresholdBytes`, `kSizeClasses`, `kSlabPool`, `kSlabBytes` and `kSlabClassCap` are preset members: an application moves them by declaring its own
 traits type, not by passing `-D`. `kShareThresholdBytes` is the copy-or-share threshold of
 [RFC-0028](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0028-lean-value-path.md)
 §5.3 — a trailer-less written value of at least that many bytes is stored as a subview of the

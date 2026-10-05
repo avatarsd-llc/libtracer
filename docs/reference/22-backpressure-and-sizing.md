@@ -32,9 +32,9 @@ rather than a throw
 [ADR-0065](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0065-failable-allocation-gets-its-own-seam-block-source.md)).
 
 The corollary a deployer must internalise: **libtracer will not choose the pressure point for
-you.** Every seam defaults to the process heap, so an unwired build is all-heap and has no
-designated point at all — the bottleneck is then wherever the platform's allocator happens to
-give out. Choosing is the deployment's job
+you.** Every seam defaults to the process heap (on a host, through the slab pool's value, table
+and net sub-pools, #1777), so an unwired build is all-heap and has no designated point at all —
+the bottleneck is then wherever the platform's allocator happens to give out. Choosing is the deployment's job
 ([ADR-0079](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0079-allocation-store-composition-defaults-to-per-plane-mid.md):
 no composition is the default, policy stays with the deployer).
 

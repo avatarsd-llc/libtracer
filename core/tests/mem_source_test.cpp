@@ -179,15 +179,22 @@ int main() {
     }
 
     // Wiring: #873 phase 1 collapsed the graph's four positional seams into ONE injected
-    // `block_source_t`, so what is checked here is that the default composition still names
-    // the process heap, that an injected source is the one the graph reports, and that BOTH
-    // derived channels (control + the graph-level default ring) resolve to it.
+    // `block_source_t`, so what is checked here is that the default composition names the
+    // build's default root and derives its sub-pools from it (#1777), that an injected source
+    // is the one the graph reports, and that BOTH derived channels (control + the graph-level
+    // default ring) resolve to it.
     {
         tr::graph::graph_t g_default;
-        check(&g_default.control_source() == &tr::mem::heap_source(),
-              "graph_t{} defaults its control seam to heap_source()");
-        check(&g_default.default_ring_source() == &tr::mem::heap_source(),
-              "graph_t{} defaults its ring seam to heap_source() too");
+        check(&g_default.control_source() == &tr::mem::default_root(),
+              "graph_t{} defaults its control seam to the build's default root");
+        check(&g_default.default_ring_source() == &tr::mem::value_source(),
+              "graph_t{} draws its default rings from the value sub-pool (#1822 folded in #1777)");
+        check(&g_default.value_source() == &tr::mem::value_source() &&
+                  &g_default.table_source() == &tr::mem::table_source() &&
+                  &g_default.net_source() == &tr::mem::net_source(),
+              "and its values, tables and net default from the default sub-pools");
+        check(g_default.derives_sub_pools() == tr::mem::kSlabPool,
+              "it derives sub-pools exactly where the build has the host slab pool");
 
         budget_source_t injected(8);
         tr::graph::graph_t g_ptr{injected};
@@ -195,6 +202,9 @@ int main() {
               "an injected source is the one the graph holds");
         check(&g_ptr.default_ring_source() == &injected,
               "and the SAME source is the graph-level ring default (one injection, #873)");
+        check(!g_ptr.derives_sub_pools() && &g_ptr.value_source() == &injected &&
+                  &g_ptr.table_source() == &injected && &g_ptr.net_source() == &injected,
+              "an injected root serves every purpose itself: no sub-pool is derived from it");
         check(std::strcmp(g_ptr.control_source().name(), "budget") == 0,
               "the injected source reports its own name");
 

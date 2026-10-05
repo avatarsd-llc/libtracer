@@ -95,6 +95,7 @@
 #include <vector>
 
 #include "libtracer/backend.hpp"
+#include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/placement.hpp"
 #include "libtracer/rope.hpp"
@@ -654,14 +655,15 @@ class value_ref_t {
      * @brief Take ownership of a freshly COMPOSED value, giving it a published value's shape.
      *
      * The composed branch read builds a rope no vertex published; this is what lets it answer
-     * the same signature. It draws one block from the global heap — the composed value has no
-     * vertex, so no injected source — which the published path does not pay; measured neutral
+     * the same signature. It draws one block from the host value sub-pool (`mem::value_source()`,
+     * #1777) — the composed value has no vertex, so no injected source — which the published
+     * path does not pay; measured neutral
      * (1.00x over 30 paired samples), because a subtree walk dominates it.
      *
      * @return The reference, or an EMPTY one when the heap refused the block (#477).
      */
     [[nodiscard]] static value_ref_t composed(view::rope_t&& r) noexcept {
-        return value_ref_t{value_t::make(std::move(r), mem::heap_source())};
+        return value_ref_t{value_t::make(std::move(r), mem::value_source())};
     }
 
     /**
@@ -676,7 +678,7 @@ class value_ref_t {
      */
     [[nodiscard]] static value_ref_t copy(
         std::span<const std::byte> bytes,
-        mem::block_source_t& source = mem::heap_source()) noexcept {
+        mem::block_source_t& source = mem::value_source()) noexcept {
         return value_ref_t{value_t::make_copy(bytes, source)};
     }
 
@@ -697,7 +699,7 @@ class value_ref_t {
      * @return The reference, or an EMPTY one when @p source refused the block (#477).
      */
     [[nodiscard]] static value_ref_t keep(
-        const value_t& v, mem::block_source_t& source = mem::heap_source()) noexcept {
+        const value_t& v, mem::block_source_t& source = mem::value_source()) noexcept {
         if (v.source() != nullptr) return share(&v);
         return value_ref_t{value_t::make(v.links(), source)};
     }

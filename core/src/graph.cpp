@@ -475,20 +475,17 @@ struct branch_node_t {
 }
 
 /**
- * @brief True when @p src is the process-wide default source — the test the constructor's
- *        "process-default fold" turns on (#873 phase 1).
+ * @brief True when @p src is the build's default root (@ref mem::default_root) — the test the
+ *        constructor's "process-default fold" turns on (#873 phase 1, #1777).
  *
- * A graph handed nothing (or the process default explicitly) must allocate exactly what it
- * allocated before the four seams collapsed into one. That is not a nicety: the pmr channel
- * would otherwise gain a second virtual hop (`source_resource_t` → `heap_source_t`) on the
- * per-write control block, and the value channel would swap the ADR-0047 §2 devirtualized
- * `HEAP` reclaim arm for the virtual fallback — on the hot write path, for a composition
- * that by construction cannot behave differently. So the default folds onto the very objects
- * the retired defaults named, and the adapters are used only where a host actually injected
- * something. One branch, at construction, never again.
+ * A graph handed nothing keeps the ADR-0047 §2 devirtualized `HEAP` reclaim arm on its value
+ * segments (@ref mem::heap_backend draws from the root's value sub-pool on a `kSlabPool`
+ * build), and on such a build derives its value and table sub-pools from the root. The
+ * adapters over an INJECTED root are used only where a host actually injected something. One
+ * branch, at construction, never again.
  */
 [[nodiscard]] bool is_default_source(const mem::block_source_t* src) noexcept {
-    return src == nullptr || src == &mem::heap_source();
+    return src == nullptr || src == &mem::default_root();
 }
 
 /** @brief The retention a role holds when its policy names none (RFC-0028 §5.4). */
@@ -521,14 +518,23 @@ graph_t::graph_t(mem::block_source_t& src, graph_hooks_t hooks)
       // unaddressable hole in an index whose only documented hole is slot 0.
       anchor_root_(std::make_unique<vertex_t>(role_t::STORED_VALUE, path_key_t{}, handlers_t{})),
       ctl_(&src),
-      ring_(ctl_) {
+      values_(ctl_),
+      tables_(ctl_) {
     // The process-default FOLD. Resolved in the BODY rather than in the member-initializer
     // list: `&src_mr_` there would convert a pointer to an object whose lifetime has not
     // started into a pointer to its base, which is undefined even though the adapters are now
-    // declared first. Two stores at construction, never read again.
+    // declared first. A few stores at construction, never read again.
     if (!is_default_source(&src)) {
         mr_ = &src_mr_;
         value_backend_ = &src_backend_;
+    } else if constexpr (mem::kSlabPool) {
+        // The host default root (#1777): values and rings from the value sub-pool, tables from
+        // the table sub-pool, and the control-plane pmr containers through the root, which
+        // serves from the table sub-pool too. `value_backend_` stays `heap_backend()`, which
+        // draws from the value sub-pool on this build.
+        values_ = &mem::value_source();
+        tables_ = &mem::table_source();
+        mr_ = &src_mr_;
     }
     // The link index's tables were built against `mr_` as it stood at member initialization;
     // its per-link lists follow the resource resolved just above, as they always have (#1710).
@@ -1897,13 +1903,13 @@ result_t<value_ref_t> graph_t::store_value(vertex_t* v, view::rope_t&& value,
     // It is minted BEFORE the filter runs, because the filter reads the value as a `value_t`
     // (RFC-0028 D10) and this block is the one an admitted write publishes anyway: an
     // admitted write still costs exactly one block, and only a refusal pays for one it frees.
-    value_ref_t block = value_ref_t::adopt(value_t::make(std::move(value), *ctl_));
+    value_ref_t block = value_ref_t::adopt(value_t::make(std::move(value), *values_));
     if (block && v->has_admission()) {
         admission_t decided = admit(v, *block, caller, link);
         if (!decided) return std::unexpected(decided.error());
         // Engaged ⇒ store the NORMALISED rope instead. The writer's block dies here, which is
         // the point: nothing downstream can reach the spelling the filter rejected.
-        if (*decided) block = value_ref_t::adopt(value_t::make(std::move(**decided), *ctl_));
+        if (*decided) block = value_ref_t::adopt(value_t::make(std::move(**decided), *values_));
     }
     return publish_value(v, std::move(block), drops, take);
 }
@@ -1963,7 +1969,7 @@ result_t<value_ref_t> graph_t::store_value(vertex_t* v, view::rope_t&& value,
         const value_storage_t<kUnstoredInline> sv{std::move(value)};
         return run(sv.get());
     }
-    const value_ref_t block = value_ref_t::adopt(value_t::make(std::move(value), *ctl_));
+    const value_ref_t block = value_ref_t::adopt(value_t::make(std::move(value), *values_));
     if (!block) return std::unexpected(status_t::BACKPRESSURE);
     return run(*block);
 }
@@ -1980,7 +1986,7 @@ result_t<value_ref_t> graph_t::store_value(vertex_t* v, view::rope_t&& value,
         const value_storage_t<kUnstoredInline> sv{std::move(value)};
         return handler_write(v, sv.get(), caller, link);
     }
-    const value_ref_t block = value_ref_t::adopt(value_t::make(std::move(value), *ctl_));
+    const value_ref_t block = value_ref_t::adopt(value_t::make(std::move(value), *values_));
     if (!block) return std::unexpected(status_t::BACKPRESSURE);
     return handler_write(v, *block, caller, link);
 }
@@ -2018,8 +2024,8 @@ result_t<value_ref_t> graph_t::store_value(vertex_t* v, const value_t& value,
         admission_t decided = admit(v, value, caller, link);
         if (!decided) return std::unexpected(decided.error());
         if (*decided)
-            return publish_value(v, value_ref_t::adopt(value_t::make(std::move(**decided), *ctl_)),
-                                 drops);
+            return publish_value(
+                v, value_ref_t::adopt(value_t::make(std::move(**decided), *values_)), drops);
     }
     // ADOPT (RFC-0028 D2): one more reference on the block that is already the value. Zero
     // allocations, zero copies — the target's slot and the source's hold the same block, which
@@ -2088,7 +2094,7 @@ result_t<value_ref_t> graph_t::publish_value(vertex_t* v, value_ref_t sp,
     // `vertex_t::ring_admit` charges the bound source first — "per-injection-point, never a
     // shared pool" (RFC-0025 §4.6.1 clause 3), spelled once, under the lock. Reading the bound
     // source here, unlocked, raced the first admission that creates the ring state.
-    if (receives && !v->ring_admit(sp, retained, *ring_, &drops, take))
+    if (receives && !v->ring_admit(sp, retained, *values_, &drops, take))
         return std::unexpected(status_t::BACKPRESSURE);  // the RELIABLE arm of §4.4
     return sp;
 }
@@ -2100,7 +2106,7 @@ void graph_t::deliver_unstored(vertex_t* v, const view::rope_t& value,
         (this->*fn)(v, sv.get());
         return;
     }
-    const value_ref_t heap = value_ref_t::adopt(value_t::make(value.links(), *ctl_));
+    const value_ref_t heap = value_ref_t::adopt(value_t::make(value.links(), *values_));
     if (!heap) {
         count_drop(drop_reason_t::OUT_OF_MEMORY, width);
         return;
@@ -2263,7 +2269,7 @@ result_t<void> graph_t::relay_write(vertex_t* v, view::rope_t value, std::string
                 const value_storage_t<kUnstoredInline> sv{value};
                 return admit(v, sv.get(), caller, link);
             }
-            const value_ref_t block = value_ref_t::adopt(value_t::make(value.links(), *ctl_));
+            const value_ref_t block = value_ref_t::adopt(value_t::make(value.links(), *values_));
             if (!block) return std::unexpected(status_t::BACKPRESSURE);
             return admit(v, *block, caller, link);
         }();
@@ -2356,7 +2362,7 @@ result_t<void> graph_t::write_branch(vertex_t* v, const view::rope_t& value,
     // a bounded node that injected `ctl` gets its own store here too, and the default
     // (heap_source) reproduces today's behaviour exactly.
     std::array<std::byte, 4096> stack;
-    mem::bump_source_t src(stack, *ctl_);
+    mem::bump_source_t src(stack, *tables_);
     const std::expected<wire::tlv_arena_t, wire::err_t> arena =
         wire::decode_into(head->bytes(), src);
     if (!arena) return std::unexpected(status_t::TYPE_MISMATCH);
@@ -2384,8 +2390,9 @@ result_t<void> graph_t::write_branch(vertex_t* v, const view::rope_t& value,
     // post-order; plan.back() is the root. Its blocks come from the injected source (#873
     // phase 1) — the node count is PEER-CHOSEN (the peer picks how deep and how wide the
     // branch it writes is), so this is exactly the growth a bounded node must be able to cap.
-    mem::source_vector_t<branch_node_t> plan{mem::source_allocator_t<branch_node_t>{*ctl_}};
-    const result_t<bool> parsed = parse_branch_node(a, 0, *head, std::move(parse_key), plan, *ctl_);
+    mem::source_vector_t<branch_node_t> plan{mem::source_allocator_t<branch_node_t>{*tables_}};
+    const result_t<bool> parsed =
+        parse_branch_node(a, 0, *head, std::move(parse_key), plan, *tables_);
     if (!parsed) return std::unexpected(parsed.error());
     if (!*parsed) return {};  // a value-free branch is a no-op write
 
@@ -2414,7 +2421,7 @@ result_t<void> graph_t::write_branch(vertex_t* v, const view::rope_t& value,
     // ALLOCATOR moves the block onto the injected store and leaves the element type alone.
     // #981 residual, narrowed: the `-fno-exceptions` arm is still probe-then-commit and still
     // carries the #850 window; the probe now asks the store the growth will use.
-    mem::source_vector_t<site_t> sites{mem::source_allocator_t<site_t>{*ctl_}};
+    mem::source_vector_t<site_t> sites{mem::source_allocator_t<site_t>{*tables_}};
     if (!detail::try_reserve(sites, plan.size())) return std::unexpected(status_t::BACKPRESSURE);
     for (const branch_node_t& node : plan) {
         if (node.store.empty()) continue;
@@ -3554,7 +3561,7 @@ result_t<value_ref_t> graph_t::read_subtree_folded(vertex_handle_t vh,
     // `std::shared_ptr`, so `block_array_t` is still out — a source allocator is what bounds
     // it without changing the element type. The node COUNT is peer-chosen, like the collect
     // stack below it.
-    mem::source_vector_t<snap_node_t> nodes{mem::source_allocator_t<snap_node_t>{*ctl_}};
+    mem::source_vector_t<snap_node_t> nodes{mem::source_allocator_t<snap_node_t>{*tables_}};
     {
         /** @brief One unvisited subtree root: the vertex and its parent's array index. */
         struct work_t {
@@ -3572,7 +3579,7 @@ result_t<value_ref_t> graph_t::read_subtree_folded(vertex_handle_t vh,
         // draws from the node's own resource instead of the global heap. The node COUNT is
         // peer-chosen (it picks which composed root to READ), so this is exactly the growth
         // a peer can drive to exhaustion.
-        mem::block_array_t<work_t> stack(*ctl_);
+        mem::block_array_t<work_t> stack(*tables_);
         // `nodes` stays on the throwing-growth-guarded helper — `snap_node_t` holds a
         // `std::shared_ptr`, so `block_array_t`'s memcpy relocation cannot carry it — but it
         // draws from the SAME `ctl_` store this stack does (#873 phase 1). A lambda cannot

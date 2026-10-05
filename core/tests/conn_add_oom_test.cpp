@@ -186,8 +186,8 @@ namespace {
 void test_refused_wiring_rolls_back() {
     std::printf("make_connection under a refusing allocator:\n");
     g_links_built = 0;
-    graph_t node;
-    fwd_router_t router(node);
+    graph_t node{tr::mem::heap_source()};  // raw heap: the refusal sees each block (#1777)
+    fwd_router_t router(node, {.label_src = &tr::mem::heap_source()});
     transport_vertex_t net(node, router);
     declare_fake_module(net);
 
@@ -227,8 +227,8 @@ void test_refused_wiring_rolls_back() {
 void test_open_allocator_creates() {
     std::printf("make_connection with the allocator open:\n");
     g_links_built = 0;
-    graph_t node;
-    fwd_router_t router(node);
+    graph_t node{tr::mem::heap_source()};  // raw heap: the refusal sees each block (#1777)
+    fwd_router_t router(node, {.label_src = &tr::mem::heap_source()});
     transport_vertex_t net(node, router);
     declare_fake_module(net);
 
@@ -259,8 +259,8 @@ void test_open_allocator_creates() {
  */
 void test_refused_wiring_leaves_staged_link_reusable() {
     std::printf("make_connection under a refusing allocator, with a STAGED link:\n");
-    graph_t node;
-    fwd_router_t router(node);
+    graph_t node{tr::mem::heap_source()};  // raw heap: the refusal sees each block (#1777)
+    fwd_router_t router(node, {.label_src = &tr::mem::heap_source()});
     transport_vertex_t net(node, router);
     declare_fake_module(net);
     fake_link_t staged;

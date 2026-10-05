@@ -29,6 +29,7 @@
 #include <mutex>
 #include <optional>
 
+#include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/path_label.hpp"
 #include "libtracer/path_ref.hpp"
@@ -169,7 +170,7 @@ class path_label_table_t {
      *                     (@ref kPeersFollowCapacity) derives it from @p capacity. Clamped to
      *                     @p capacity, which no census can exceed anyway.
      */
-    explicit path_label_table_t(mem::block_source_t* src = &mem::heap_source(),
+    explicit path_label_table_t(mem::block_source_t* src = &mem::net_source(),
                                 std::size_t capacity = kMintsNothing,
                                 std::size_t max_per_peer = kNoPeerCeiling,
                                 std::size_t max_peers = kPeersFollowCapacity);

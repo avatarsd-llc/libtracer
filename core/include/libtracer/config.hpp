@@ -26,6 +26,7 @@
  */
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <type_traits>
@@ -52,6 +53,32 @@ struct no_guard_t;  // guard.hpp — guards nothing; single-threaded builds only
 }  // namespace tr
 
 namespace tr::graph {
+
+/**
+ * @brief A size-class ladder: @p PerDoubling classes of @p Step bytes from @p Step, then
+ *        @p PerDoubling evenly spaced classes in every doubling up to @p Top.
+ *
+ * The generator behind @ref default_config_t::kSizeClasses (#1777), so the default table is
+ * spelled by its three parameters rather than as 80 literals.
+ */
+template <std::size_t Step, std::size_t PerDoubling, std::size_t Top>
+struct size_class_ladder_t {
+    /** @brief Rows in the ladder. */
+    static constexpr std::size_t kRows = [] {
+        std::size_t n = PerDoubling;
+        for (std::size_t lo = Step * PerDoubling; lo < Top; lo *= 2) n += PerDoubling;
+        return n;
+    }();
+    /** @brief The ladder, ascending. */
+    static constexpr std::array<std::size_t, kRows> kTable = [] {
+        std::array<std::size_t, kRows> t{};
+        std::size_t i = 0;
+        for (std::size_t k = 1; k <= PerDoubling; ++k) t[i++] = k * Step;
+        for (std::size_t lo = Step * PerDoubling; lo < Top; lo *= 2)
+            for (std::size_t k = 1; k <= PerDoubling; ++k) t[i++] = lo + k * (lo / PerDoubling);
+        return t;
+    }();
+};
 
 /**
  * @brief Deprecated alias of @ref tr::mutex_guard_t, kept for one release (#1703).
@@ -312,43 +339,84 @@ struct default_config_t {
     static constexpr std::size_t kShareThresholdBytes = 4096;
 
     /**
-     * @brief The size-class table the placement module lays segments out against (ADR-0083
-     *        Decision 5, #1775): the classes the host allocator serves on its fast path, in
-     *        ascending order, so the last row is that path's ceiling.
+     * @brief The size-class table of the host slab pool (ADR-0083 Decisions 4 and 5, #1775,
+     *        #1777): the block sizes a class serves, ascending.
      *
-     * `tr::mem::is_one_block` reads it. A heap segment whose padded header plus payload fits the
-     * last row is ONE block; a larger one is drawn as two, the payload and then the bare header
-     * (#1768). RFC-0028 slice 10 put the `segment_t` header and the payload in one heap block,
-     * which made a 64 B value about 30% cheaper. It also moved every payload within one header
-     * of a host allocator's small-block ceiling over it: a 1024 B value asked for 1072 B, and on
-     * glibc that is past the per-thread cache, so `lkv-store-heap 1024B` doubled (27 → 54 ns).
-     * Two draws that each fit the fast path are cheaper than one that misses it. The split
-     * changes nothing a caller can see: the segment, its payload alignment and its reclaim are
-     * the same; only the number of draws differs.
+     * The host default root (`%mem_slab_pool.hpp`, `tr::mem::host_root_t`) carves every block it
+     * serves from a slab of one class: a request takes the smallest class that holds it, and
+     * the host allocator sees only whole slabs. A size-class boundary is therefore a row in
+     * this one table, not a property of the platform allocator. That is what removes the
+     * 1 KiB cliff #1768 measured: a 1024 B value's 1072 B one-block segment is a 1152 B block
+     * here, from the same per-thread cache a 1000 B one comes from, where glibc served it on a
+     * slower path than a 1032 B request.
      *
-     * **Default `{1032}` — glibc's tcache ceiling on a 64-bit host.** glibc's per-thread cache
-     * has 64 bins 16 B apart, and the largest request it serves is 1,032 B (`MAX_TCACHE_SIZE`,
-     * the `glibc.malloc.tcache_max` tunable's default). That is the cliff measured on the
-     * reference host, and the only row the placement rule reads today. The size-classed pool
-     * (ADR-0083 Decision 4) adds its classes to this table when it lands. A host allocator
-     * without a cliff there loses only one extra draw on a value of about 1 KiB or more, where
-     * the payload copy already costs more than the draw. A 32-bit host's ceiling is lower, and
-     * such a host states its own table. The table must be non-empty and strictly ascending;
-     * `%mem_heap.hpp` asserts it.
+     * **Default: 16 B to 64 KiB, 8 classes per doubling.** Eight classes of 16 B up to 128 B,
+     * then eight evenly spaced classes in every doubling above it (144 ... 256, 288 ... 512,
+     * ... 61440, 65536): 80 rows, so no block wastes more than one eighth of its size. A
+     * request above the last row, or one aligned past 64 B, is drawn from the root as whole
+     * slabs of its own (@ref kSlabBytes multiples) and returned there when freed.
      *
-     * Applies ONLY to `heap_backend_t`. An injected source (`source_backend_t`), the pool and
-     * the borrowed backends keep their one-block layout: a store the deployer sized wants
-     * exactly one draw per segment, and that is what it is sized against.
+     * Every row must be a multiple of 16 (`alignof(std::max_align_t)` on the reference hosts),
+     * so every block keeps the platform allocator's alignment, and the table must be non-empty
+     * and strictly ascending, with at most 255 rows; the pool asserts all three. A node whose
+     * payloads cluster (mostly 4 KiB frames) states its own table, and pays no slab for a class
+     * it never draws: a class takes its first slab on its first request.
      *
-     * Target-class defaults:
-     * - **host (WIDE / MID)** — `{1032}`, the glibc ceiling above.
-     * - **NARROW** — a per-build trait. An allocator with no small-block fast path (ESP-IDF's
-     *   `multi_heap`) gains nothing from a second draw, so the ESP-IDF component binds
-     *   `{SIZE_MAX}`, one block always — the layout it shipped in v0.17.0.
+     * Read only where @ref kSlabPool is `true`. The ESP-IDF component binds that `false`, so
+     * the table is not read on that target.
      *
-     * Override fragment: `static constexpr std::size_t kSizeClasses[] = {1032};`.
+     * Override fragment: `static constexpr std::size_t kSizeClasses[] = {64, 256, 1024, 4096};`.
      */
-    static constexpr std::size_t kSizeClasses[] = {1032};
+    static constexpr auto kSizeClasses = size_class_ladder_t<16, 8, 65536>::kTable;
+
+    /**
+     * @brief Whether this build's default root is the host slab pool (ADR-0083 Decision 4,
+     *        #1777).
+     *
+     * `true` (the host default): a `graph_t` built without a source derives its value, table
+     * and net sub-pools from `tr::mem::host_root()`, and `tr::mem::heap_backend()`,
+     * `value_source()`, `table_source()`, `net_source()` and `net_backend()` all draw from them.
+     * The host allocator then serves whole slabs only (@ref kSlabBytes), never a request per
+     * value.
+     *
+     * `false`: those defaults are the platform heap directly, one request per block, which is
+     * what every build did before #1777. A target with no small-block fast path and a few
+     * hundred KiB of RAM gains nothing from 64 KiB slabs, so the ESP-IDF component binds
+     * `false`; its static-arena default is ADR-0083 Decision 12's step 6. No sub-pool is derived
+     * there, and the `:stats.mem.values`, `.tables` and `.net` seams answer `SCHEMA_NOT_FOUND`.
+     *
+     * Override fragment: `static constexpr bool kSlabPool = false;`.
+     */
+    static constexpr bool kSlabPool = true;
+
+    /**
+     * @brief The slab the host slab pool draws for a class, in bytes: the smallest unit it asks
+     *        the root for (#1777). A power of two.
+     *
+     * A class draws a slab of this size, or the next power of two that holds 8 of its blocks if
+     * that is larger, aligned to its own size, so a block finds its slab by masking its
+     * address. A slab is carved lazily, one block at a time, so its untouched pages cost the
+     * node address space and not resident memory. Default 64 KiB: one slab holds 8 or more
+     * blocks of every class up to 7 KiB.
+     *
+     * Override fragment: `static constexpr std::size_t kSlabBytes = 16384;`.
+     */
+    static constexpr std::size_t kSlabBytes = 65536;
+
+    /**
+     * @brief The fully free slabs a host slab-pool class keeps (ADR-0083 Decision 6, #1777).
+     *
+     * A slab whose last block comes back is RELEASED to the root when its class already keeps
+     * this many fully free slabs, and kept for the next burst otherwise, however many slabs of
+     * the class are live, so a long-running service
+     * gives back what a burst took instead of holding its peak forever. Nothing is released on
+     * a timer (there is none in the library): `tr::mem::host_root_t::trim()` releases every
+     * fully free slab on the application's own schedule. At least 1, so a class that
+     * alternates one allocation and one free does not draw and release a slab each time.
+     *
+     * Override fragment: `static constexpr std::size_t kSlabClassCap = 1;`.
+     */
+    static constexpr std::size_t kSlabClassCap = 2;
 
     /**
      * @brief The target's selected ACL policy (ADR-0047 §1 build-time module set).
@@ -1030,6 +1098,13 @@ inline constexpr bool kSpinWaitSafe = tr::graph::config_t::kSpinWaitSafe;
  * consumer is the bounded table behind @ref register_device_backend (`device_backend.cpp`).
  */
 inline constexpr std::size_t kDeviceBackendSlots = tr::graph::config_t::kDeviceBackendSlots;
+
+/** @brief @ref tr::graph::default_config_t::kSlabPool for this build (#1777). */
+inline constexpr bool kSlabPool = tr::graph::config_t::kSlabPool;
+/** @brief @ref tr::graph::default_config_t::kSlabBytes for this build (#1777). */
+inline constexpr std::size_t kSlabBytes = tr::graph::config_t::kSlabBytes;
+/** @brief @ref tr::graph::default_config_t::kSlabClassCap for this build (#1777). */
+inline constexpr std::size_t kSlabClassCap = tr::graph::config_t::kSlabClassCap;
 
 }  // namespace tr::mem
 

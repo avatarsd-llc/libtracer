@@ -34,6 +34,7 @@
 #include <vector>
 
 #include "libtracer/byteorder.hpp"
+#include "libtracer/mem_heap.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/packed_path.hpp"
 #include "libtracer/tlv.hpp"
@@ -111,8 +112,7 @@ class child_registry_t {
      *
      * @param src Must outlive this registry and every slot reference handed out of it.
      */
-    explicit child_registry_t(mem::block_source_t& src = mem::heap_source()) noexcept
-        : src_(&src) {}
+    explicit child_registry_t(mem::block_source_t& src = mem::net_source()) noexcept : src_(&src) {}
     child_registry_t(const child_registry_t&) = delete;
     child_registry_t& operator=(const child_registry_t&) = delete;
     /** @brief Returns the chunks to the injected source. Nothing is reclaimed before this

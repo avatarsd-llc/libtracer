@@ -49,6 +49,7 @@
 #include "libtracer/rope.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "test_support.hpp"
+#include "test_values.hpp"
 
 namespace {
 
@@ -186,8 +187,9 @@ struct fixture_t {
     g_allocs = 0;
     g_bytes = 0;
     g_arm = true;
-    rope_t r = tr::wire::compose_batch(
-        tr::mem::heap_backend(), tr::wire::batch_carriage_t::STANDALONE, kBase, fx.views, kOffsets);
+    rope_t r =
+        tr::wire::compose_batch(tr::testing::raw_heap_backend(),
+                                tr::wire::batch_carriage_t::STANDALONE, kBase, fx.views, kOffsets);
     g_arm = false;
 
     // The composition must be REAL — an empty rope (refused segment) would allocate nothing and

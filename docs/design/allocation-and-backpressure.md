@@ -70,7 +70,7 @@ sizes and censuses ONE store.
 | `mr_` (`graph.hpp:graph_t::mr_`) | `tr::mem::source_resource_t` (`src_mr_`, `graph.hpp:graph_t::src_mr_`) | the small control *objects* of a stored write: the `shared_ptr` control block and the `rope_t` wrapping the value's links | throws — `std::pmr` structurally cannot report by value, so the adapter translates `nullptr` to `bad_alloc` at its own boundary |
 | `value_backend_` (`graph.hpp:graph_t::value_backend_`) | `tr::mem::source_backend_t` (`src_backend_`, `graph.hpp:graph_t::src_backend_`) | the graph's **payload** byte `segment`s: the durable buffer holding a vertex's last-known value when the write path must own its bytes, and (since #831) **both** folded READs' POINT headers — the composed root's per-node header and the `":children"` listing's per-member + outer header | `nullptr` → the operation answers `BACKPRESSURE` |
 | `ctl_` (`graph.hpp:graph_t::ctl_`) | directly — it IS the injected source | every allocation a peer can provoke | `nullptr` → the operation answers a status |
-| `ring_` (`graph.hpp:graph_t::ring_`) | directly | the graph-level DEFAULT for a receiving STREAM vertex's ring ADMISSIONS — the reservation each queued entry holds until it retires ([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.6.1). A vertex that declares its own through `vertex_policy_t::ring_source` never touches this one. It bounds admission, NOT placement | `nullptr` → best-effort sheds the oldest with a gap; reliable answers `BACKPRESSURE` |
+| `values_` (`graph.hpp:graph_t::values_`) | directly | the graph-level value source (#1777: it replaced the ring alias `ring_`), and so the DEFAULT for a receiving STREAM vertex's ring ADMISSIONS — the reservation each queued entry holds until it retires ([RFC-0025](https://github.com/avatarsd-llc/libtracer/blob/main/docs/spec/rfcs/0025-stream-class-values.md) §4.6.1). A vertex that declares its own through `vertex_policy_t::ring_source` never touches this one. It bounds admission, NOT placement | `nullptr` → best-effort sheds the oldest with a gap; reliable answers `BACKPRESSURE` |
 
 **The failure convention does not leak.** The substrate speaks raw `nullptr`; nothing wraps a
 refusal in a `result_t`, and no channel falls back to the global heap. Only the two adapters
@@ -215,7 +215,7 @@ Four implementations ship:
 
 | Source | Construction | Behaviour |
 | --- | --- | --- |
-| `heap_source()` (`mem_source.hpp:heap_source`) | free function, process-wide | wraps the platform allocator; the default for all three seams |
+| `heap_source()` (`mem_source.hpp:heap_source`) | free function, process-wide | wraps the platform allocator; the root of the host slab pool (#1777), and the default itself where a build binds `kSlabPool = false` |
 | `null_source()` (`mem_source.hpp:null_source`) | free function, process-wide | serves nothing; makes a `bump_source_t`'s buffer a hard bound |
 | `bump_source_t` (`mem_source.hpp:bump_source_t`) | `bump_source_t(std::span<std::byte> buffer, block_source_t& upstream = heap_source())` | carves from `buffer`, falls back to `upstream` once it cannot fit |
 | `pool_source_t` (`mem_source.hpp:pool_source_t`) | caller-supplied slab plus a caller-supplied span of size classes | segregated exact-size free lists; recycles, so it suits a long-lived seam |
@@ -244,8 +244,9 @@ mem::bump_source_t src(stack, *ctl_);
   a general one about every allocation near it. Each seam is covered because it was injected and
   the site was pointed at it, one site at a time — the router's flattens went uncovered for a
   release precisely because they looked like they were included in a sentence like this one (#730).
-- **The default reproduces heap behaviour exactly.** `ctl_` defaults to `heap_source()`, so a host
-  that injects nothing sees the same capability it had with an unbounded resource.
+- **The default is unbounded.** `ctl_` defaults to `default_root()` (the host slab pool over the
+  platform heap, #1777), so a host that injects nothing sees the same capability it had with an
+  unbounded resource.
 - **Exhaustion is a value.** A tree larger than the slab still decodes where the upstream can serve
   it, and where the upstream cannot, `decode_into` returns an error the caller converts to a status.
 

@@ -546,12 +546,12 @@ ws_client_transport_t::ws_client_transport_t(const std::string& host, std::uint1
                                              const ws_client_config_t& config)
     // The queue's slots hold this link's own masked copies, so they are egress store too
     // (#1661): drawn from `memory.io` like `tx_buf_`, not from the process heap.
-    : stream_endpoint_t(config.memory.io != nullptr ? *config.memory.io : mem::heap_source()),
+    : stream_endpoint_t(config.memory.io != nullptr ? *config.memory.io : mem::net_source()),
       backend_(config.memory.rx),
       // `block_array_t` binds its source ONCE, here (#873): a post-construction
       // set_egress_source can never re-seat this member, which is why the store is a
       // constructor argument on this class and not only a base-class setter.
-      tx_buf_(config.memory.io != nullptr ? *config.memory.io : mem::heap_source()),
+      tx_buf_(config.memory.io != nullptr ? *config.memory.io : mem::net_source()),
       recv_stack_(config.recv_stack) {
     mem::block_source_t* const egress_src = config.memory.io;
     const std::size_t max_frame = config.max_frame;

@@ -404,12 +404,12 @@ class webtransport_transport_t : public transport_t {
  *                   outlive the factory and every transport it constructs.
  * @param rx_backend The ADR-0042 §2 receive-segment seam every constructed
  *                   endpoint draws inbound frame segments from (default: the
- *                   process heap). Must outlive the constructed transports.
+ *                   process net sub-pool). Must outlive the constructed transports.
  * @return The factory functor for @ref transport_vertex_t::register_transport_type.
  */
 [[nodiscard]] transport_factory_t webtransport_transport_factory(
     std::span<const tls_profile_t> profiles = {},
-    mem::mem_backend_t* rx_backend = &mem::heap_backend());
+    mem::mem_backend_t* rx_backend = &mem::net_backend());
 
 /**
  * @brief How many `webtransport` SPECs this process refused for carrying `insecure` =

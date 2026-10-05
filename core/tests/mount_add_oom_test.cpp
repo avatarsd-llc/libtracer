@@ -101,8 +101,10 @@ namespace {
 /** @brief A refused chunk means: no registration, no receiver, no ghost. */
 void test_refused_registration_reports_failure() {
     std::printf("add_child under a refusing allocator\n");
-    tr::graph::graph_t graph;
-    tr::net::fwd_router_t router{graph};
+    // On the raw heap (#1777): the default net sub-pool would serve the registry's chunk from a
+    // warm slab, and the refusing `operator new` would never be asked.
+    tr::graph::graph_t graph{tr::mem::heap_source()};
+    tr::net::fwd_router_t router{graph, {.label_src = &tr::mem::heap_source()}};
     counting_link_t link;
 
     g_refuse_nothrow_new = true;  // the FIRST chunk the registry asks for is refused
@@ -122,8 +124,10 @@ void test_refused_registration_reports_failure() {
  *         difference, so the red above cannot be the test refusing everything. */
 void test_open_allocator_still_registers() {
     std::printf("add_child with the allocator open\n");
-    tr::graph::graph_t graph;
-    tr::net::fwd_router_t router{graph};
+    // On the raw heap (#1777): the default net sub-pool would serve the registry's chunk from a
+    // warm slab, and the refusing `operator new` would never be asked.
+    tr::graph::graph_t graph{tr::mem::heap_source()};
+    tr::net::fwd_router_t router{graph, {.label_src = &tr::mem::heap_source()}};
     counting_link_t link;
     const bool added = router.add_child("net/ws/a", link);
     check(added, "add_child succeeds");

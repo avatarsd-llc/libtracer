@@ -371,6 +371,60 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
 
 ### Breaking
 
+- **The host default is a size-classed slab pool, with sub-pools for values, tables and net
+  ([#1777](https://github.com/avatarsd-llc/libtracer/issues/1777), ADR-0083 Decision 6,
+  RFC-0010 Amendment 3).** The new header `libtracer/mem_slab_pool.hpp` (`tr::mem`) holds
+  `slab_pool_t<Sync, N, kCounters>`, a pool that asks its root only for whole slabs (a power of
+  two, aligned to its size), carves blocks of the size class a request falls in, and serves a
+  request past the last class, or aligned past 64 B, its own block from the root, at its own size and outside the census. Each
+  class has one lock through `guard_t`, which compiles away under `no_guard_t`. A fully free slab
+  above the class's high-water cap goes back to the root at once; `trim()` returns every fully
+  free slab, on the application's schedule. A refused slab is a counted refusal, never an abort.
+  - **The host default root.** `tr::mem::default_root()` is the root a defaulted `graph_t`
+    takes. On a host build (`kSlabPool`, the default) it is `tr::mem::host_root()`, a process-wide
+    `host_root_t` that is never destroyed, over the platform heap. It derives three sub-pools:
+    `value_source()` (values, with a per-thread cache in front of the classes),
+    `table_source()` (registration and branch-plan tables) and `net_source()` (the router and
+    transport defaults), each with one lock per class. A build that binds `kSlabPool = false`
+    keeps the platform heap there, as before.
+  - **`graph_t` draws values and rings from `value_source()` and its tables from
+    `table_source()`** when it was given the default root. A graph given any other root serves
+    every purpose from that root, as before, and derives nothing. Passing
+    `tr::mem::heap_source()` explicitly therefore means the raw platform heap, one request per
+    segment. New accessors: `graph_t::value_source()`, `table_source()`, `net_source()` and
+    `derives_sub_pools()`.
+  - **The net defaults move to the net sub-pool.** Every router plane (`router_planes_t::
+    label_src`, `rx`, `flat`, `egress`), `link_memory_t::rx` and `::io`, a transport's egress
+    store, the transport vertex's `rx_backend` / `egress_src`, the CAN slice backend, the label
+    tables and the child registry now default to `tr::mem::net_source()` /
+    `tr::mem::net_backend()` in place of `heap_source()` / `heap_backend()`. Each stays
+    separately injectable; a null argument still means the default.
+  - **`heap_backend()` draws from the value sub-pool, always one block.** The #1768 split rule is
+    deleted: `tr::mem::is_one_block`, `place_split`, `kSplitHeaderBytes` and
+    `kSplitHeaderAlign` are removed, and the #1775 entry below describes a rule that no longer
+    exists. A 1024 B value is one 1152 B class block, and the platform allocator never sees it.
+  - **`default_config_t::kSizeClasses` is the pool's class table**, no longer a split point:
+    16 to 128 B by 16, then eight classes per doubling up to 64 KiB (80 rows,
+    `size_class_ladder_t<16, 8, 65536>`). Every row must be a multiple of `max_align_t`'s
+    alignment (`slab_classes_valid`). New traits: `kSlabPool` (`true`), `kSlabBytes` (65536,
+    the base slab) and `kSlabClassCap` (2 fully free slabs kept per class), with `tr::mem::` spellings.
+  - **`:stats.mem.values`, `:stats.mem.tables` and `:stats.mem.net`** report `in_use` (slab bytes
+    held), `peak` and `refused` per sub-pool; the root's own census sums them, its `peak` an
+    upper bound. A block past the last class (over 64 KiB) passes straight through to the
+    platform heap and is NOT in `in_use`; its refusals are counted. A node that derives no sub-pool answers
+    `SCHEMA_NOT_FOUND` for each. Per-class detail (`slab_pool_t::class_stats`) is kept behind
+    `kInstrumentCounters`.
+  - **`graph_t`'s ring member is gone** (#1822, folded in): `default_ring_source()` returns the
+    value source, so a ring of a default graph draws from the value sub-pool.
+
+  **Migration:** a config fragment that bound `kSizeClasses[] = {SIZE_MAX}` to keep one heap
+  block drops that line and binds `static constexpr bool kSlabPool = false;` instead. A caller
+  of `is_one_block` or `place_split` uses `place_segment` (one block, always). A test that
+  counts global `operator new` calls to see a path's blocks gives the graph
+  `tr::mem::heap_source()` and the router raw-heap planes. Code that compared
+  `default_ring_source()` or a defaulted plane with `heap_source()` / `heap_backend()` compares
+  with `value_source()`, `net_source()` or `net_backend()`.
+
 - **One placement module owns segment layout, against a `config_t` size-class table
   ([#1775](https://github.com/avatarsd-llc/libtracer/issues/1775), ADR-0083 Decision 5).** The
   new header `libtracer/placement.hpp` (`tr::mem`, reached through `segment.hpp` as before) is
