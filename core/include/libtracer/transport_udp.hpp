@@ -165,6 +165,9 @@ class udp_transport_t : public transport_t, private posix_endpoint_t {
 
     int fd_ = -1;
     std::uint16_t bound_port_ = 0;
+    // 64-bit because the packed (ip, port) is 48 bits read whole — stored and loaded, never an
+    // RMW. On rv32 each access is an `__atomic_*_8` call, so send() pays one per datagram
+    // there (#1697).
     std::atomic<std::uint64_t> peer_{0};
     bool learn_peer_ = false;  // constructed peer-less => adopt each datagram's source
 
@@ -172,9 +175,12 @@ class udp_transport_t : public transport_t, private posix_endpoint_t {
     // drop counter (backpressure, never OOM).
     mem::mem_backend_t* backend_;
     std::size_t max_frame_ = kMaxDatagram;  // accepted-datagram cap (:settings; 0 => kMaxDatagram)
-    std::atomic<std::uint64_t> dropped_rx_{0};
-    std::atomic<std::uint64_t> malformed_rx_{0};
-    std::atomic<std::uint64_t> dropped_tx_{0};
+    // Drop counters: word-wide, not 64-bit (core/STYLE.md §Introspection clause 5, #1697) —
+    // a 64-bit atomic is a libatomic call on every rv32, the ESP32-C6 included. The 64-bit
+    // accessors widen on read; a 32-bit target wraps after 2^32.
+    std::atomic<std::size_t> dropped_rx_{0};
+    std::atomic<std::size_t> malformed_rx_{0};
+    std::atomic<std::size_t> dropped_tx_{0};
 };
 
 }  // namespace tr::net

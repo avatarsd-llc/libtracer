@@ -145,17 +145,23 @@ struct rmw_counter_test_door_t;
  * guard serializes the writers; the reader needs no guard, because every store is a whole
  * aligned word.
  *
- * Both bindings give the bump `seq_cst` ordering, so a caller's Dekker pair (bump, then read a
- * flag; set the flag, then read the counter) holds on either. The counter only ever moves by
- * one and wraps at `T`'s width, so it is for EQUALITY tests (`now != then`), never `<`.
+ * Both bindings give the bump, the load and the preset the ordering @p kOrder names. The
+ * default is `seq_cst`, so a caller's Dekker pair (bump, then read a flag; set the flag, then
+ * read the counter) holds on either: the write sequence relies on it. A diagnostic tally that
+ * orders nothing names `relaxed` (`core/STYLE.md` §Introspection, rule 5), so its native bump
+ * is the plain AMO (`amoadd.w`, not `amoadd.w.aqrl`, on rv32imac; `ldadd`, not `ldaddal`, on
+ * aarch64). The counter only ever moves by one and wraps at `T`'s width, so it is for
+ * EQUALITY tests (`now != then`), never `<`.
  *
  * @tparam T       An unsigned integer, at most a machine word wide.
  * @tparam G       The build's critical-section guard (a `tr::guard`), taken only by the guarded
  *                 binding.
  * @tparam kNative Which binding. Defaults to what the target supports; a test names it to
  *                 drive the guarded binding on a host that has atomic RMW.
+ * @tparam kOrder  The memory order of every access. `seq_cst` unless the count orders nothing.
  */
-template <class T, class G, bool kNative = std::atomic<T>::is_always_lock_free>
+template <class T, class G, bool kNative = std::atomic<T>::is_always_lock_free,
+          std::memory_order kOrder = std::memory_order_seq_cst>
 class rmw_counter_t {
     static_assert(std::is_unsigned_v<T>, "the counter wraps, so it must be unsigned");
 
@@ -163,7 +169,7 @@ class rmw_counter_t {
     /** @brief Whether the bump is one hardware RMW (`true`) or a guarded load + store. */
     static constexpr bool is_native = kNative;
 
-    /** @brief Move the counter on by one, `seq_cst`, wrapping at `T`'s width. */
+    /** @brief Move the counter on by one, at @p kOrder, wrapping at `T`'s width. */
     void bump() noexcept { bump(this); }
 
     /**
@@ -179,7 +185,7 @@ class rmw_counter_t {
     void bump(const void* anchor) noexcept {
         if constexpr (kNative) {
             (void)anchor;
-            value_.fetch_add(1, std::memory_order_seq_cst);
+            value_.fetch_add(1, kOrder);
         } else {
             static_assert(guard<G>, "the guarded bump needs the build's guard (tr::guard)");
             const guard_scope_t<G> section(anchor);
@@ -189,7 +195,7 @@ class rmw_counter_t {
 
     /**
      * @brief The guarded bump's body, for a caller that ALREADY holds the guard every other
-     *        bump of this counter takes (#1715): a load and a `seq_cst` store, no section.
+     *        bump of this counter takes (#1715): a load and a @p kOrder store, no section.
      *
      * The precondition is the whole of its soundness: the load + store is atomic against other
      * bumpers only because they all serialize on that one guard. The LKV slot's fused publish
@@ -199,12 +205,11 @@ class rmw_counter_t {
     void bump_in_section() noexcept
         requires(!kNative)
     {
-        value_.store(static_cast<T>(value_.load(std::memory_order_relaxed) + 1u),
-                     std::memory_order_seq_cst);
+        value_.store(static_cast<T>(value_.load(std::memory_order_relaxed) + 1u), kOrder);
     }
 
-    /** @brief The current count, `seq_cst`. Lock-free on both bindings. */
-    [[nodiscard]] T load() const noexcept { return value_.load(std::memory_order_seq_cst); }
+    /** @brief The current count, at @p kOrder. Lock-free on both bindings. */
+    [[nodiscard]] T load() const noexcept { return value_.load(kOrder); }
 
    private:
     friend struct rmw_counter_test_door_t;  // test-only: presets the count to reach the wrap.
@@ -214,7 +219,7 @@ class rmw_counter_t {
      *        and for nothing else: a store races every bump. Reached only through
      *        `%tr::rmw_counter_test_door_t` (#1719).
      */
-    void preset(T value) noexcept { value_.store(value, std::memory_order_seq_cst); }
+    void preset(T value) noexcept { value_.store(value, kOrder); }
 
     std::atomic<T> value_{0}; /**< @brief The count; stores and loads are whole words. */
 };

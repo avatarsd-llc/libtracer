@@ -92,9 +92,9 @@ std::string_view delivery_link(const remote_ptr_t& remote) noexcept {
  *
  * Behind `graph_t::deferred_release_drops`, which sums this with the QSBR domain's own tally.
  * Relaxed: it is a diagnostic that orders nothing, exactly like the graph's snapshot-drop
- * counters.
+ * counters. Word-wide, as they are (#1697): a 64-bit atomic is a libatomic call on rv32.
  */
-std::atomic<std::uint64_t> g_deferred_release_drops{0};
+std::atomic<std::size_t> g_deferred_release_drops{0};
 
 /**
  * @brief How many pairs one thread parks locally — @ref kDeferredReleaseSlots, or none under a
@@ -1507,16 +1507,16 @@ void graph_t::count_drop(drop_reason_t why, std::uint64_t n) noexcept {
     // exact failure this centralization is fixing.
     switch (why) {
         case drop_reason_t::NO_TARGET:
-            drops_no_target_.fetch_add(n, std::memory_order_relaxed);
+            drops_no_target_.fetch_add(static_cast<std::size_t>(n), std::memory_order_relaxed);
             return;
         case drop_reason_t::DENIED:
-            drops_denied_.fetch_add(n, std::memory_order_relaxed);
+            drops_denied_.fetch_add(static_cast<std::size_t>(n), std::memory_order_relaxed);
             return;
         case drop_reason_t::OUT_OF_MEMORY:
-            drops_oom_.fetch_add(n, std::memory_order_relaxed);
+            drops_oom_.fetch_add(static_cast<std::size_t>(n), std::memory_order_relaxed);
             return;
         case drop_reason_t::FAN_OUT_TRUNCATED:
-            drops_truncated_.fetch_add(n, std::memory_order_relaxed);
+            drops_truncated_.fetch_add(static_cast<std::size_t>(n), std::memory_order_relaxed);
             return;
     }
 }

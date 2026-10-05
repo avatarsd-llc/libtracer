@@ -124,8 +124,12 @@ inline constexpr std::size_t kNoIndex = static_cast<std::size_t>(-1);
  * a line against a sibling that is also dispatching.
  */
 struct alignas(kCellAlign) cell_t {
-    std::atomic<std::uint64_t> state{0}; /**< @brief `epoch | kOnlineBit`, or 0 when quiescent. */
-    std::atomic<bool> claimed{false};    /**< @brief Whether a live thread owns this index. */
+    /** @brief `epoch | kOnlineBit`, or 0 when quiescent. 64-bit with @ref control_t::epoch,
+     *         whose width it carries (#1697) — a store per dispatch, never an RMW. On rv32
+     *         that store is an `__atomic_store_8` call; `reclaim_qsbr_t` is the many-core
+     *         host policy, and an MCU keeps the default `reclaim_local_t`. */
+    std::atomic<std::uint64_t> state{0};
+    std::atomic<bool> claimed{false}; /**< @brief Whether a live thread owns this index. */
 };
 
 static_assert(alignof(cell_t) == kCellAlign,
@@ -172,6 +176,10 @@ struct alignas(kCellAlign) control_t {
      * of zero RAM, i.e. the cost paid twice. Nothing needs it to start at 1: "offline" is the
      * state word being exactly 0, and an online participant always sets @ref kOnlineBit, so
      * online-at-epoch-0 is already distinct from offline.
+     *
+     * 64-bit ON PURPOSE (#1697): the grace period compares epochs by ORDER, so a wrap would
+     * free a pair a reader still holds; 2^64 advances cannot happen, 2^32 can. The advance is
+     * a control-plane RMW (once per retirement), not a per-dispatch one.
      */
     std::atomic<std::uint64_t> epoch{0};
     /** @brief How many @ref retired_slot_t entries are occupied — the drain path's early-out. */
@@ -191,7 +199,9 @@ struct registry_t {
     std::array<cell_t, kQsbrParticipants> cells{}; /**< @brief The announcements. */
     control_t ctl{};                               /**< @brief The read-mostly words. */
     std::array<retired_slot_t, kDeferredReleaseSlots> retired{}; /**< @brief Deferred releases. */
-    std::atomic<std::uint64_t> drops{0}; /**< @brief Pairs dropped for want of a slot. */
+    /** @brief Pairs dropped for want of a slot. Word-wide, as every drop counter is
+     *         (core/STYLE.md §Introspection clause 5, #1697). */
+    std::atomic<std::size_t> drops{0};
 };
 
 /** @brief The one domain. */

@@ -421,9 +421,12 @@ class transport_ws_server : public stream_server_base_t {
     // The PRE-AUTH handshake budget (#934): a separate bound from max_frame_ because it
     // guards a separate phase — bytes from a host that has authenticated nothing.
     std::size_t max_handshake_ = kMaxHandshakeBytes;
-    std::atomic<std::uint64_t> dropped_rx_{0};
-    std::atomic<std::uint64_t> malformed_rx_{0};
-    std::atomic<std::uint64_t> dropped_tx_{0};
+    // Drop counters: word-wide, not 64-bit (core/STYLE.md §Introspection clause 5, #1697) —
+    // a 64-bit atomic is a libatomic call on every rv32, the ESP32-C6 included. The 64-bit
+    // accessors widen on read; a 32-bit target wraps after 2^32.
+    std::atomic<std::size_t> dropped_rx_{0};
+    std::atomic<std::size_t> malformed_rx_{0};
+    std::atomic<std::size_t> dropped_tx_{0};
 };
 
 /**
@@ -574,15 +577,21 @@ class transport_ws_client : public transport_t, private stream_endpoint_t {
     std::uint32_t next_mask_key();  // per-frame masking key (varied, not crypto)
 
     // conn_fd_ + write_m_ (and their teardown discipline) live in stream_endpoint_t.
+    // 64-bit on purpose (#1697): the splitmix64 state behind the per-frame masking key. This
+    // portable client is never compiled for a chip target (the ESP-IDF build uses its native
+    // WS link), so its rv32 libatomic call is never linked there.
     std::atomic<std::uint64_t> mask_state_{0};
     // The RX seam + ingress bound + counters, identical to the server's (and to tcp's).
     mem::mem_backend_t* backend_;
     std::size_t max_frame_ = transport_ws_server::kMaxFrame;
     /** @brief The pre-auth handshake budget (#934) — the server-side member's twin. */
     std::size_t max_handshake_ = transport_ws_server::kMaxHandshakeBytes;
-    std::atomic<std::uint64_t> dropped_rx_{0};
-    std::atomic<std::uint64_t> malformed_rx_{0};
-    std::atomic<std::uint64_t> dropped_tx_{0};
+    // Drop counters: word-wide, not 64-bit (core/STYLE.md §Introspection clause 5, #1697) —
+    // a 64-bit atomic is a libatomic call on every rv32, the ESP32-C6 included. The 64-bit
+    // accessors widen on read; a 32-bit target wraps after 2^32.
+    std::atomic<std::size_t> dropped_rx_{0};
+    std::atomic<std::size_t> malformed_rx_{0};
+    std::atomic<std::size_t> dropped_tx_{0};
     /**
      * @brief The REUSED masked-frame buffer `send` encodes into, touched only by the thread
      *        holding the enqueue-then-write writer role (`handoff_send`).

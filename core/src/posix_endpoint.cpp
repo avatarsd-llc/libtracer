@@ -67,8 +67,9 @@ struct send_deadline_t {
     [[nodiscard]] bool expired() const { return bounded && std::chrono::steady_clock::now() >= at; }
 };
 
-/** @brief Process-wide malformed-call tally (#948) — see @ref write_fault_stats_t. */
-std::atomic<std::uint64_t> g_malformed_calls{0};
+/** @brief Process-wide malformed-call tally (#948) — see @ref write_fault_stats_t. Word-wide,
+ *         as every drop counter is (#1697): a 64-bit atomic is a libatomic call on rv32. */
+std::atomic<std::size_t> g_malformed_calls{0};
 
 /** @brief The errno of the most recent malformed-call fault (#948). */
 std::atomic<int> g_last_malformed_errno{0};

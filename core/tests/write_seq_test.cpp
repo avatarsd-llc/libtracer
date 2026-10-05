@@ -83,6 +83,12 @@ static_assert(sizeof(write_seq_t) == 4, "the write sequence is 32-bit on every t
 static_assert(tr::graph::write_seq_counter_t::is_native != tr::graph::kForceGuardedRmw,
               "a host build bumps the write sequence with one hardware RMW, never a guard — "
               "unless the build forces the guarded binding (the write_seq_guarded leg, #1715)");
+static_assert(tr::graph::bound_rmw_counter_t<std::size_t>::is_native != tr::graph::kForceGuardedRmw,
+              "the build's word-wide hot counter (the router's labelled-hop count, #1697) binds "
+              "exactly as the write sequence does");
+static_assert(tr::graph::bound_rmw_counter_t<std::size_t, std::memory_order_relaxed>::is_native ==
+                  tr::graph::bound_rmw_counter_t<std::size_t>::is_native,
+              "the memory order never changes the binding");
 
 /** @brief The guarded binding, named on a host that has atomic RMW so CI can drive it. */
 using guarded_counter_t = tr::rmw_counter_t<write_seq_t, tr::mutex_guard_t, false>;
