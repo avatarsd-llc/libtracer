@@ -132,7 +132,16 @@ class counting_root_t final : public tr::mem::block_source_t {
 
     [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
         if (refuse) return nullptr;
-        void* const p = misalign ? misaligned(bytes, align) : heap().try_alloc(bytes, align);
+        void* p = nullptr;
+        if (doubled_aligned && align == kAlign) {
+            // The doubled fallback draw, handed out aligned to the slab after all.
+            p = heap().try_alloc(bytes, bytes / 2);
+            dbl = p;
+            dbl_bytes = bytes;
+        } else {
+            p = misalign || doubled_aligned ? misaligned(bytes, align)
+                                            : heap().try_alloc(bytes, align);
+        }
         if (p != nullptr) {
             ++draws;
             last_bytes = bytes;
@@ -144,7 +153,13 @@ class counting_root_t final : public tr::mem::block_source_t {
     void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
         ++releases;
         live -= bytes;
-        if (misalign) {
+        if (doubled_aligned && p == dbl && p != nullptr) {
+            dbl_released_as_drawn = bytes == dbl_bytes && align == kAlign;
+            heap().release(p, dbl_bytes, dbl_bytes / 2);
+            dbl = nullptr;
+            return;
+        }
+        if (misalign || doubled_aligned) {
             auto* const b = static_cast<std::byte*>(p);
             std::size_t off;
             std::memcpy(&off, b - sizeof off, sizeof off);
@@ -154,13 +169,18 @@ class counting_root_t final : public tr::mem::block_source_t {
         heap().release(p, bytes, align);
     }
 
-    bool refuse = false;        /**< @brief Refuse every draw while set. */
-    bool misalign = false;      /**< @brief Ignore the alignment asked, and never meet it. */
-    std::size_t draws = 0;      /**< @brief Draws served. */
-    std::size_t releases = 0;   /**< @brief Releases seen. */
-    std::size_t last_bytes = 0; /**< @brief The last draw's size. */
-    std::size_t last_align = 0; /**< @brief The last draw's alignment. */
-    std::size_t live = 0;       /**< @brief Bytes drawn and not yet released. */
+    bool refuse = false;   /**< @brief Refuse every draw while set. */
+    bool misalign = false; /**< @brief Ignore the alignment asked, and never meet it. */
+    /** @brief Misalign every slab draw, but hand the doubled fallback out slab-ALIGNED. */
+    bool doubled_aligned = false;
+    void* dbl = nullptr;                /**< @brief The live doubled block, in that mode. */
+    std::size_t dbl_bytes = 0;          /**< @brief Its size as drawn. */
+    bool dbl_released_as_drawn = false; /**< @brief It came back at the size and alignment drawn. */
+    std::size_t draws = 0;              /**< @brief Draws served. */
+    std::size_t releases = 0;           /**< @brief Releases seen. */
+    std::size_t last_bytes = 0;         /**< @brief The last draw's size. */
+    std::size_t last_align = 0;         /**< @brief The last draw's alignment. */
+    std::size_t live = 0;               /**< @brief Bytes drawn and not yet released. */
 
    private:
     static constexpr std::size_t kAlign = alignof(std::max_align_t);
@@ -216,10 +236,11 @@ void test_classes_and_slabs() {
         void* const big = pool.try_alloc(5000, kAlign);
         check(big != nullptr && root.draws == 2 && root.last_bytes == 5008,
               "an oversize request is its own block, at its own size (16 B granules)");
+        check(pool.stats().in_use == kBase, "outside the census, which counts slab bytes");
         if (big != nullptr) std::memset(big, 0x22, 5000);
         pool.release(big, 5000, kAlign);
         check(root.releases == 1 && pool.stats().in_use == kBase,
-              "and goes straight back to the root when released, passing the census by");
+              "it goes straight back to the root when released, passing the census by");
 
         pool.release(a, 40, kAlign);
         pool.release(b, 64, kAlign);
@@ -279,6 +300,51 @@ void test_misaligning_root() {
         pool.trim();
     }
     check(root.live == 0, "and every block the root handed out went back to it");
+}
+
+/** @brief A doubled fallback block that happens to be slab-aligned goes back as drawn. */
+void test_doubled_block_aligned_by_chance() {
+    std::printf("slab pool: a doubled block the root aligned to the slab anyway:\n");
+    counting_root_t root;
+    root.doubled_aligned = true;
+    {
+        pool_t pool("t", std::span<const std::size_t, 3>{kRows}, root, kBase, 1);
+        void* const a = pool.try_alloc(64, kAlign);
+        check(a != nullptr && root.last_bytes == 2 * kBase && root.last_align == kAlign,
+              "the misaligned slab draw goes back and a doubled block is drawn");
+        check(root.dbl != nullptr && reinterpret_cast<std::uintptr_t>(root.dbl) % kBase == 0,
+              "the root handed the doubled block out slab-aligned");
+        pool.release(a, 64, kAlign);
+        pool.trim();
+        check(root.dbl == nullptr && root.dbl_released_as_drawn,
+              "the slab goes back at twice its size and max_align_t's alignment, as drawn");
+    }
+    check(root.live == 0, "and the root is square");
+}
+
+/** @brief An alloc/free pair at a slab boundary keeps its slab: the cap counts FREE slabs. */
+void test_no_thrash_at_a_slab_boundary() {
+    std::printf("slab pool: an alloc/free pair at a slab boundary does not thrash:\n");
+    counting_root_t root;
+    pool_t pool("t", std::span<const std::size_t, 3>{kRows}, root, kBase, 2);
+    const std::size_t per_slab = (kBase - pool_t::kHeaderBytes) / 64;
+    std::vector<void*> blocks;
+    for (std::size_t i = 0; i < 3 * per_slab; ++i) blocks.push_back(pool.try_alloc(64, kAlign));
+    check(root.draws == 3 && pool.class_stats(0).slabs == 3,
+          "three slabs carved full: more live slabs than the cap of 2");
+    for (int k = 0; k < 100; ++k) {
+        void* const p = pool.try_alloc(64, kAlign);
+        pool.release(p, 64, kAlign);
+    }
+    check(root.draws == 4 && root.releases == 0,
+          "100 turns past the boundary draw ONE slab and release none");
+    check(pool.class_stats(0).slabs == 4,
+          "the emptied fourth slab is kept, being the only free one");
+    for (void* p : blocks) pool.release(p, 64, kAlign);
+    check(pool.class_stats(0).slabs == 2 && root.releases == 2,
+          "freeing the rest keeps two free slabs, the cap, and releases the others");
+    pool.trim();
+    check(root.live == 0, "trim() returns the rest");
 }
 
 /** @brief A refusing root is a counted refusal, by value. */
@@ -413,6 +479,8 @@ int main() {
     test_classes_and_slabs();
     test_release_above_the_cap();
     test_misaligning_root();
+    test_doubled_block_aligned_by_chance();
+    test_no_thrash_at_a_slab_boundary();
     test_refusal_census();
     test_default_graph_sees_only_slabs();
     test_concurrent_writers();

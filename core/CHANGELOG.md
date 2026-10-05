@@ -407,9 +407,11 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
     16 to 128 B by 16, then eight classes per doubling up to 64 KiB (80 rows,
     `size_class_ladder_t<16, 8, 65536>`). Every row must be a multiple of `max_align_t`'s
     alignment (`slab_classes_valid`). New traits: `kSlabPool` (`true`), `kSlabBytes` (65536,
-    the base slab) and `kSlabClassCap` (2 slabs per class), with `tr::mem::` spellings.
+    the base slab) and `kSlabClassCap` (2 fully free slabs kept per class), with `tr::mem::` spellings.
   - **`:stats.mem.values`, `:stats.mem.tables` and `:stats.mem.net`** report `in_use` (slab bytes
-    held), `peak` and `refused` per sub-pool. A node that derives no sub-pool answers
+    held), `peak` and `refused` per sub-pool; the root's own census sums them, its `peak` an
+    upper bound. A block past the last class (over 64 KiB) passes straight through to the
+    platform heap and is NOT in `in_use`; its refusals are counted. A node that derives no sub-pool answers
     `SCHEMA_NOT_FOUND` for each. Per-class detail (`slab_pool_t::class_stats`) is kept behind
     `kInstrumentCounters`.
   - **`graph_t`'s ring member is gone** (#1822, folded in): `default_ring_source()` returns the

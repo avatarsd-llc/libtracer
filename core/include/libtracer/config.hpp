@@ -404,11 +404,11 @@ struct default_config_t {
     static constexpr std::size_t kSlabBytes = 65536;
 
     /**
-     * @brief The high-water cap of a host slab-pool class, in slabs (ADR-0083 Decision 6,
-     *        #1777).
+     * @brief The fully free slabs a host slab-pool class keeps (ADR-0083 Decision 6, #1777).
      *
-     * A slab whose last block comes back is RELEASED to the root when its class holds more
-     * than this many slabs, and kept for the next burst otherwise, so a long-running service
+     * A slab whose last block comes back is RELEASED to the root when its class already keeps
+     * this many fully free slabs, and kept for the next burst otherwise, however many slabs of
+     * the class are live, so a long-running service
      * gives back what a burst took instead of holding its peak forever. Nothing is released on
      * a timer (there is none in the library): `tr::mem::host_root_t::trim()` releases every
      * fully free slab on the application's own schedule. At least 1, so a class that

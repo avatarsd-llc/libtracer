@@ -203,7 +203,8 @@ void* host_value_alloc(std::size_t bytes, std::size_t align) noexcept {
     if constexpr (kSlabPool) {
         host_pool_t& pool = shared_values();
         const std::size_t i = pool.class_of(bytes, align);
-        if (i == host_pool_t::kNoClass) return pool.try_alloc(bytes, align);
+        // The pool's own `try_alloc` would consult the test probe a second time.
+        if (i == host_pool_t::kNoClass) return pool.oversize_alloc(bytes, align);
         value_cache_t& c = t_cache;
         if (c.head[i] != nullptr) return cache_pop(c, i);
         return cache_refill(c, i, bytes);
@@ -217,7 +218,7 @@ void host_value_release(void* p, std::size_t bytes, std::size_t align) noexcept 
         host_pool_t& pool = shared_values();
         const std::size_t i = pool.class_of(bytes, align);
         if (i == host_pool_t::kNoClass) {
-            pool.release(p, bytes, align);
+            pool.oversize_release(p, bytes, align);
             return;
         }
         value_cache_t& c = t_cache;

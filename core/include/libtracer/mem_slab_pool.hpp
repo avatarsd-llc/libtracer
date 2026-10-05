@@ -122,17 +122,19 @@ struct slab_class_stats_t {
  *
  * - **Lazy carving.** A fresh slab is carved one block at a time, so its untouched pages are
  *   address space, not resident memory.
- * - **Release.** Each class keeps at most `cap` slabs. A slab whose last block comes back while
- *   its class holds more is released to the root at once; one at or under the cap is kept for
- *   the next burst. @ref trim releases every fully free slab, on the caller's schedule — the
- *   library keeps no timer to do it.
+ * - **Release.** Each class keeps at most `cap` fully FREE slabs, however many slabs are live.
+ *   A slab whose last block comes back while its class already keeps `cap` free ones is released
+ *   to the root at once; otherwise it is kept for the next burst, so an alloc/free pair at a slab
+ *   boundary does not draw and release a slab on every turn. @ref trim releases every fully free
+ *   slab, on the caller's schedule — the library keeps no timer to do it.
  * - **Oversize.** A request above the last class, or aligned past @ref kHeaderBytes, is its
  *   own block from the root, at its own size, and goes back to the root when freed.
  * - **Locking.** One lock per class, of type @p Sync. Under `tr::no_guard_t` it is empty and
  *   costs nothing. The slab of a block is found by masking the block's address, and the class
  *   from the sized `release`, so a block carries no header.
- * - **Counting.** The `:stats` census (@ref stats) counts SLAB bytes — what this pool takes
- *   from its root — and is updated only on the slab path, never on the block path (`core/STYLE.md`
+ * - **Counting.** The `:stats` census (@ref stats) counts the SLAB bytes this pool takes from its
+ *   root — not oversize blocks, which pass through uncounted — and is updated only on the slab
+ *   path, never on the block path (`core/STYLE.md`
  *   §Introspection, counting doctrine 1). Per-class detail is @ref class_stats, compiled only
  *   with @p kCounters.
  *
@@ -162,7 +164,7 @@ class slab_pool_t final : public block_source_t {
      * @param classes    The size-class table; @ref slab_classes_valid must hold of it.
      * @param root       Where slabs come from; it must outlive the pool.
      * @param slab_bytes The base slab size, a power of two of at least 4 KiB.
-     * @param cap        The high-water cap, in slabs per class (at least 1).
+     * @param cap        The fully free slabs a class keeps (at least 1).
      */
     constexpr slab_pool_t(const char* name, std::span<const std::size_t, N> classes,
                           block_source_t& root, std::size_t slab_bytes = kSlabBytes,
@@ -257,6 +259,7 @@ class slab_pool_t final : public block_source_t {
         while (got < n) {
             slab_t* s = c.head;
             if (s == nullptr && (s = grow(c, i, request)) == nullptr) break;
+            if (s->live == 0) --c.empty;  // a kept free slab is in use again
             void* b;
             if (s->free != nullptr) {
                 b = s->free;
@@ -296,7 +299,10 @@ class slab_pool_t final : public block_source_t {
             c.lock.lock();
             // Fully free slabs are the tail of the list (see `put`), so the walk stops at the
             // first slab with a live block.
-            while (c.tail != nullptr && c.tail->live == 0) release_slab(c, i, c.tail);
+            while (c.tail != nullptr && c.tail->live == 0) {
+                --c.empty;
+                release_slab(c, i, c.tail);
+            }
             c.lock.unlock();
         }
     }
@@ -304,11 +310,12 @@ class slab_pool_t final : public block_source_t {
     /**
      * @brief This pool's census, in the `core/STYLE.md` §Introspection vocabulary.
      *
-     * `in_use` is the SLAB bytes held from the root (an oversize block passes through to the
-     * root and is not in it): what the pool
-     * costs the node, never less than its live blocks. `peak` is its high-water mark,
-     * `refused` the requests answered `nullptr` because the root refused a slab, and
-     * `largest_refused` the biggest of those requests. `capacity` is 0: the pool caps
+     * `in_use` is the SLAB bytes held from the root: what the slabs cost the node, never less
+     * than their live blocks. An oversize block (past the last class) is NOT in it — it passes
+     * straight through to the root uncounted, so a node holding large values holds more than
+     * `in_use` says; its refusals are still counted. `peak` is its
+     * high-water mark, `refused` the requests answered `nullptr` because the root refused a slab,
+     * and `largest_refused` the biggest of those requests. `capacity` is 0: the pool caps
      * retention, not demand. Sampled with relaxed loads (the snapshot-coherence clause).
      */
     [[nodiscard]] source_stats_t stats() const noexcept override {
@@ -347,6 +354,7 @@ class slab_pool_t final : public block_source_t {
         std::uint32_t live = 0;     /**< @brief Blocks out of this slab. */
         std::uint32_t capacity = 0; /**< @brief Blocks this slab holds. */
         bool listed = false;        /**< @brief On the free-block list (it has a block to give). */
+        bool doubled = false;       /**< @brief Cut from a block twice its size (see `grow`). */
         void* raw = nullptr;        /**< @brief What the root handed out (see `grow`). */
     };
     static_assert(sizeof(slab_t) <= kHeaderBytes, "the slab header fits its reserve");
@@ -358,8 +366,9 @@ class slab_pool_t final : public block_source_t {
         slab_t* tail = nullptr;            /**< @brief The list's last slab. */
         slab_t* all = nullptr;             /**< @brief Every slab of the class. */
         std::size_t slabs = 0;             /**< @brief Slabs held. */
-        std::size_t live = 0;              /**< @brief Blocks out (only with `kCounters`). */
-        std::size_t released = 0;          /**< @brief Slabs released (cap or trim). */
+        std::size_t empty = 0;    /**< @brief Of those, fully free (the cap counts these). */
+        std::size_t live = 0;     /**< @brief Blocks out (only with `kCounters`). */
+        std::size_t released = 0; /**< @brief Slabs released (cap or trim). */
     };
 
     /** @brief The slab block @p p of class @p i was carved from: its address, masked. */
@@ -367,7 +376,8 @@ class slab_pool_t final : public block_source_t {
         return reinterpret_cast<slab_t*>(reinterpret_cast<std::uintptr_t>(p) & ~(slab_[i] - 1));
     }
 
-    /** @brief Return one block to its slab; release the slab when it empties above the cap. */
+    /** @brief Return one block to its slab; release the slab when it empties while its class
+     *         already keeps `cap` free ones. */
     void put(class_t& c, std::size_t i, void* p) noexcept {
         slab_t* const s = slab_of(p, i);
         detail::slab_link(p, s->free);
@@ -378,10 +388,11 @@ class slab_pool_t final : public block_source_t {
             return;
         }
         if (s->listed) unlink(c, s);
-        if (c.slabs > cap_) {
+        if (c.empty >= cap_) {
             release_slab(c, i, s, false);
             return;
         }
+        ++c.empty;
         push_back(c, s);  // fully free slabs gather at the tail, where `trim` finds them
     }
 
@@ -392,7 +403,9 @@ class slab_pool_t final : public block_source_t {
         // mask away from where `slab_of` looks for it. Such a draw goes back, and the slab is
         // cut from a block twice its size instead.
         void* raw = root_->try_alloc(slab_[i], slab_[i]);
-        if (raw != nullptr && (reinterpret_cast<std::uintptr_t>(raw) & (slab_[i] - 1)) != 0) {
+        const bool doubled =
+            raw != nullptr && (reinterpret_cast<std::uintptr_t>(raw) & (slab_[i] - 1)) != 0;
+        if (doubled) {
             root_->release(raw, slab_[i], slab_[i]);
             raw = root_->try_alloc(2 * slab_[i], kMinAlign);
         }
@@ -404,12 +417,14 @@ class slab_pool_t final : public block_source_t {
             (reinterpret_cast<std::uintptr_t>(raw) + slab_[i] - 1) & ~(slab_[i] - 1));
         auto* const s = new (m) slab_t{};
         s->raw = raw;
+        s->doubled = doubled;
         s->capacity = static_cast<std::uint32_t>((slab_[i] - kHeaderBytes) / bytes_[i]);
         detail::slab_poison(static_cast<std::byte*>(m) + kHeaderBytes, slab_[i] - kHeaderBytes);
         s->all_next = c.all;
         if (c.all != nullptr) c.all->all_prev = s;
         c.all = s;
         ++c.slabs;
+        ++c.empty;  // `take` counts it back down as it hands out the first block
         push_front(c, s);
         account(slab_[i]);
         return s;
@@ -428,11 +443,14 @@ class slab_pool_t final : public block_source_t {
     /** @brief Hand slab @p s of class @p i back to the root, as `grow` drew it. */
     void free_slab(slab_t* s, std::size_t i) noexcept {
         void* const raw = s->raw;
+        const bool doubled = s->doubled;
         detail::slab_unpoison(s, slab_[i]);
-        if (raw == s)
-            root_->release(raw, slab_[i], slab_[i]);
-        else
+        // By the flag, not by `raw == s`: a doubled block the root happened to align to the
+        // slab starts where its slab does, and still goes back at the size it was drawn.
+        if (doubled)
             root_->release(raw, 2 * slab_[i], kMinAlign);
+        else
+            root_->release(raw, slab_[i], slab_[i]);
     }
 
     /** @brief Put @p s at the head of the free-block list. */
@@ -468,8 +486,11 @@ class slab_pool_t final : public block_source_t {
         if (s->all_next != nullptr) s->all_next->all_prev = s->all_prev;
     }
 
+   public:
     /**
-     * @brief An oversize request: its own block from the root, at its own size.
+     * @brief An oversize request: its own block from the root, at its own size. Public for a
+     *        front end that has already consulted the test probe (the host value cache), so
+     *        one request consumes it once.
      *
      * Not rounded up to slabs or pages: rounding a value just past the last class up to
      * whole 64 KiB slabs asked glibc for 128 KiB, its mmap threshold, and a 64 KiB
@@ -477,9 +498,10 @@ class slab_pool_t final : public block_source_t {
      * the heap top past its trim threshold on every free. At its own size the block is what the
      * platform allocator saw before the pool existed.
      *
-     * Nor is it in the census: it passes straight through to the root, and two atomic
-     * read-modify-writes per draw cost a 64 KiB value +11 ns on bench-local (26 -> 37 ns), the
-     * whole price of its allocation. A refusal is still counted.
+     * Nor is it in `in_use`: it passes straight through to the root, and counting it (one
+     * atomic add on the draw, one subtract on the release) cost a 64 KiB draw +8 ns on
+     * bench-local (20.9 -> 28.7 ns), more than the platform allocator's own 26 ns before the
+     * pool. A refusal is still counted.
      */
     [[nodiscard]] void* oversize_alloc(std::size_t bytes, std::size_t align) noexcept {
         const std::size_t n = pad_to(bytes, kMinAlign);
@@ -494,6 +516,7 @@ class slab_pool_t final : public block_source_t {
         root_->release(p, n, std::max(align, kMinAlign));
     }
 
+   private:
     /** @brief Add @p n slab bytes to the census and raise the high-water mark. */
     void account(std::size_t n) noexcept {
         const std::size_t now = in_use_.fetch_add(n, std::memory_order_relaxed) + n;
@@ -516,7 +539,7 @@ class slab_pool_t final : public block_source_t {
 
     block_source_t* root_;               /**< @brief Where slabs come from. */
     std::size_t base_;                   /**< @brief The base slab size. */
-    std::size_t cap_;                    /**< @brief Slabs a class keeps. */
+    std::size_t cap_;                    /**< @brief Fully free slabs a class keeps. */
     std::array<std::size_t, N> bytes_{}; /**< @brief Block size per class. */
     std::array<std::size_t, N> slab_{};  /**< @brief Slab size per class. */
     std::array<std::uint8_t, kLookupBytes / kMinAlign + 1> lookup_{}; /**< @brief 16 B -> class. */
@@ -602,7 +625,13 @@ class host_root_t final : public block_source_t {
     void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
         tables_.release(p, bytes, align);
     }
-    /** @brief The three sub-pools' census, summed: slab bytes held from the platform heap. */
+    /**
+     * @brief The three sub-pools' census, summed: slab bytes held from the platform heap.
+     *
+     * `peak` is the SUM of the sub-pools' own peaks, an upper bound on the root's true
+     * high-water mark: the three need not have peaked at once. `largest_refused` is the
+     * largest of theirs.
+     */
     [[nodiscard]] source_stats_t stats() const noexcept override;
     /** @brief Release every fully free slab of all three sub-pools (this thread's value cache
      *         first). */
