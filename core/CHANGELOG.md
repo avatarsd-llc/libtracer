@@ -25,6 +25,22 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   `slab_pool_t` in front of the `pool_source_t` (its root), which rounds into the one
   size-class table and keeps the bound; `pool_source_t` gets no rounding mode of its own.
 
+### Breaking
+
+- **`handlers_t::on_app_field_admit` receives the writer's `write_ctx_t`
+  ([#1832](https://github.com/avatarsd-llc/libtracer/issues/1832)).** The app-field admission
+  filter was handed the field key and the written TLV only, so it could not see who wrote or
+  which link the write arrived on, while `on_admit` and `on_write` see both (#1650). It now
+  takes the same context by `const&`: `write_ctx_t::subject` is the subject the ACL gate ran on,
+  and `write_ctx_t::link` is the arrival link's `(kind, role)`, null for the owner's own write.
+  `app_field_admit_hook_t` is now
+  `hook_t<result_t<view_t>(std::string_view, const view_t&, const write_ctx_t&)>`; the hook stays
+  a non-owning `{fn, ctx}` pair. A field write through
+  `graph_t::write(vertex_handle_t, const field_path_t&, rope_t, caller, link)` now hands
+  `caller` and `link` to the filter. Nothing else changes at run time. **Migration:** add a
+  trailing `const write_ctx_t&` parameter to every `on_app_field_admit` callable; a filter that
+  ignores it leaves the parameter unnamed.
+
 ## [0.18.0] — 2026-10-05
 
 ### Added

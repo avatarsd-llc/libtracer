@@ -16,10 +16,14 @@
  * 2. over the `ws`/`LISTEN` link it is refused, the refusal reaches the writer as an ERROR
  *    reply, and the prior last-known-value stands;
  * 3. the owner's own API write presents a null link;
- * 4. a HANDLER's `on_write` sees the same pair through the same context.
+ * 4. a HANDLER's `on_write` sees the same pair through the same context;
+ * 5. the app-field admission filter (`on_app_field_admit`, #1832) receives the same context on
+ *    a `:settings.app.<name>` write: the subject and the pair over a link, the empty owner
+ *    subject and a null link on the owner's own field write.
  *
  * Vectors 1, 2 and 4 fail with the production hunks reverted: the filter sees a null link on
- * both, so it can tell the two sessions apart only by name.
+ * both, so it can tell the two sessions apart only by name. Vector 5 fails to compile with
+ * #1832 reverted: the field filter was handed no context at all.
  */
 
 #include <chrono>
@@ -46,6 +50,8 @@ namespace {
 
 using namespace std::chrono_literals;
 using tr::graph::admission_t;
+using tr::graph::app_access_t;
+using tr::graph::app_field_t;
 using tr::graph::fwd_op_t;
 using tr::graph::graph_t;
 using tr::graph::handlers_t;
@@ -124,6 +130,18 @@ struct seen_t {
     return static_cast<reply_kind_t>(std::to_integer<std::uint8_t>(k[0]));
 }
 
+/** @brief A `FIELD` selector naming `:settings.app.<name>` — the wire spelling of the
+ *         app-field write door. */
+[[nodiscard]] std::vector<std::byte> b_app_field(std::string_view name) {
+    std::vector<std::byte> body;
+    tr::wire::emit_name(body, "settings");
+    tr::wire::emit_name(body, "app");
+    tr::wire::emit_name(body, name);
+    std::vector<std::byte> field;
+    tr::wire::emit_tlv(field, type_t::FIELD, tr::wire::opt_t{.pl = true}, body);
+    return field;
+}
+
 /** @brief Hand every frame arriving at a raw far-side endpoint to a @ref mailbox_t. */
 void into_mailbox(void* ctx, std::span<const std::byte> frame) {
     static_cast<mailbox_t*>(ctx)->push(std::vector<std::byte>(frame.begin(), frame.end()));
@@ -163,6 +181,24 @@ int main() {
     };
     hh.on_write = tr::graph::thunk(on_write);
     (void)g.register_vertex(path_t("/cmd"), role_t::HANDLER, std::move(hh));
+
+    // An app-field owner, for vector 5: the same policy, spelled on the field plane's filter.
+    seen_t field_seen;
+    handlers_t fh;
+    auto on_field_admit = [&field_seen](std::string_view, const view_t& value,
+                                        const write_ctx_t& ctx) -> tr::graph::result_t<view_t> {
+        field_seen.note(ctx);
+        if (ctx.link != nullptr && ctx.link->is("ws", conn_role_t::LISTEN))
+            return std::unexpected(status_t::PERMISSION_DENIED);
+        return value;
+    };
+    fh.on_app_field_admit = tr::graph::thunk(on_field_admit);
+    const vertex_handle_t dev =
+        g.register_vertex(path_t("/dev"), role_t::STORED_VALUE, std::move(fh));
+    std::vector<app_field_t> table;
+    table.push_back(app_field_t{.name = "mode", .access = app_access_t::RW});
+    check(g.set_policy(dev, {.app_fields = std::move(table)}).has_value(),
+          "declare /dev's remotely writable app field `mode`");
 
     // Two links, two modules, two catalog pairs. Nothing constructs from these kinds — a staged
     // link outranks a factory — but the module's declared pair is what the router interns.
@@ -238,6 +274,42 @@ int main() {
         check(write_seen.calls == 1 && write_seen.had_link && write_seen.kind == "ws" &&
                   write_seen.role == conn_role_t::LISTEN,
               "on_write saw the link as (ws, LISTEN)");
+    }
+
+    // ----- 5. the app-field filter sees the same context -----
+    std::printf("vector 5 — the app-field admission filter:\n");
+    const std::vector<std::byte> mode_field = b_app_field("mode");
+    const path_t mode_path("/dev:settings.app.mode");
+    ch_peer.a().send(b_fwd(fwd_op_t::WRITE, b_path({"dev"}), reply_ep, mode_field, v22));
+    const auto r5 = peer_inbox.wait(kBudget);
+    check(r5.has_value() && reply_kind(*r5) == reply_kind_t::RESULT,
+          "the peer's field write is answered RESULT");
+    check(stored_bytes(g, mode_path) == v22, "and its bytes are stored");
+    {
+        const std::lock_guard lock(field_seen.m);
+        check(field_seen.calls == 1 && field_seen.had_link && field_seen.kind == "tcp" &&
+                  field_seen.role == conn_role_t::DIAL,
+              "the field filter saw the link as (tcp, DIAL)");
+        check(!field_seen.subject.empty(), "beside a non-owner subject");
+    }
+    ch_browser.a().send(b_fwd(fwd_op_t::WRITE, b_path({"dev"}), reply_ep, mode_field, v33));
+    const auto r6 = browser_inbox.wait(kBudget);
+    check(r6.has_value() && reply_kind(*r6) == reply_kind_t::ERROR,
+          "the browser session's field write is answered ERROR");
+    check(stored_bytes(g, mode_path) == v22, "and the field's prior bytes stand");
+    {
+        const std::lock_guard lock(field_seen.m);
+        check(field_seen.calls == 2 && field_seen.had_link && field_seen.kind == "ws" &&
+                  field_seen.role == conn_role_t::LISTEN,
+              "the field filter saw the link as (ws, LISTEN)");
+    }
+    const std::vector<std::byte> v44 = b_value_u8(0x44);
+    check(g.write(mode_path, tr::testing::make_value(v44)).has_value(),
+          "the owner's own field write is admitted");
+    {
+        const std::lock_guard lock(field_seen.m);
+        check(field_seen.calls == 3 && !field_seen.had_link && field_seen.subject.empty(),
+              "it presents a null link and the empty owner subject");
     }
 
     // The predicate a filter spells its policy with matches both halves of the pair.
