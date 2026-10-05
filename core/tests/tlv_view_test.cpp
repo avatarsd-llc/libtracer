@@ -25,6 +25,7 @@
 #include "libtracer/rope.hpp"
 #include "libtracer/view.hpp"
 #include "test_support.hpp"
+#include "tlv_tree.hpp"  // host-only owning tree (#1829)
 
 namespace {
 
@@ -327,7 +328,7 @@ void test_materialize_and_timestamp() {
           "lazy timestamp() == eager trailer (stitched across links)");
 
     const auto m = v->materialize();
-    check(m.has_value() && tr::wire::equal(m->root, *eager),
+    check(m.has_value() && tr::wire::equal(tr::wire::to_tree(m->root), *eager),
           "materialize() == decode (the one explicit copy)");
 
     // #917: an allocator refusal is THIS node's transient failure, not the peer's

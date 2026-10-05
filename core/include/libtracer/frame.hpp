@@ -1,15 +1,18 @@
 /**
  * @file
- * @brief The frame codec: decode wire bytes into a borrowed, zero-copy TLV tree and encode one
- *        back.
+ * @brief The frame codec: validate wire bytes and read them in place (tr::wire::tlv_node_t),
+ *        and encode a TLV tree back to bytes.
  *
  * SPDX-License-Identifier: Apache-2.0
  * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
  *
- * The frame codec: decode wire bytes into a borrowed (zero-copy) TLV tree, and
- * encode a TLV tree back to bytes. Decoding never copies payload bytes — they
- * are std::span views into the caller's input buffer, which must outlive the
- * returned tlv_t. See docs/reference/01-data-format.md + 05-protocol-tlvs.md.
+ * The frame codec: validate one frame and walk it in place (`tlv_node_t::over` +
+ * `children()`), and encode a `tlv_t` tree back to bytes. Reading never copies or allocates —
+ * nodes are std::span views into the caller's input buffer, which must outlive them. The
+ * owning-tree `decode` that returned a `tlv_t` with vector children is gone from the library
+ * (#1829); a reader walks nodes, and a caller that needs a bounded materialized tree wants the
+ * terminus arena (`wire::decode_into`). See docs/reference/01-data-format.md +
+ * 05-protocol-tlvs.md.
  */
 #pragma once
 
@@ -66,11 +69,14 @@ struct trailer_t {
 };
 
 /**
- * @brief A decoded TLV — the materialized, eager representation of one wire frame node.
+ * @brief A TLV tree a caller BUILDS to encode: the eager, owning model @ref encode serializes.
  *
  * For opaque TLVs (`opt.pl == 0`) @ref payload holds the bytes and @ref children is
- * empty; for structured TLVs (`opt.pl == 1`) @ref children holds the parsed sub-TLVs and
- * @ref payload is empty. @ref payload (and child payloads) BORROW the input buffer.
+ * empty; for structured TLVs (`opt.pl == 1`) @ref children holds the sub-TLVs and
+ * @ref payload is empty. @ref payload (and child payloads) BORROW the caller's bytes.
+ *
+ * The library no longer decodes INTO this type (#1829): reading a frame walks it in place as
+ * @ref tlv_node_t, which allocates nothing.
  */
 struct tlv_t {
     type_t type{}; /**< @brief The TLV type code. */
@@ -87,11 +93,11 @@ struct tlv_t {
 class tlv_children_t;
 
 /**
- * @brief One TLV of a validated frame, read in place: the non-owning counterpart of @ref tlv_t
- *        (#1648).
+ * @brief One TLV of a validated frame, read in place: the library's one reader of a frame
+ *        (#1648, #1829).
  *
  * A node is two words of borrowed bytes plus the header facts, never a tree. It is minted by
- * @ref over (which validates the WHOLE frame once, exactly as `decode` does) or by walking a
+ * @ref over (which validates the WHOLE frame once, CRC trailers included) or by walking a
  * validated node's @ref children, so every node a caller can hold has already passed the
  * grammar, CRC trailers included. That is what lets the walk itself be free: stepping to the
  * next sibling re-reads one header and never fails.
@@ -104,12 +110,13 @@ class tlv_node_t {
     /**
      * @brief Validate @p input as exactly one TLV and return its root node.
      *
-     * The acceptance is `decode`'s, by construction: the same @ref grammar::walk with the same
-     * inline walk slots, so the same frames are refused with the same `err_t`
-     * (`FRAME_TRUNCATED` / `FRAME_INVALID` / `FRAME_CRC_FAIL` / `TLV_NESTING_TOO_DEEP`). What
-     * differs is the sink: nothing is built, so a frame nested no deeper than the inline slots
-     * (the typical FWD) validates with zero allocations, and a deeper one draws only its walk
-     * stack from @p spill. `over(input, mem::null_source())` refuses the deeper frame instead.
+     * The acceptance is the grammar's: one @ref grammar::walk over the whole frame with inline
+     * walk slots sized for the typical FWD nesting, refusing with `FRAME_TRUNCATED` /
+     * `FRAME_INVALID` / `FRAME_CRC_FAIL` / `TLV_NESTING_TOO_DEEP`. Nothing is built, so a frame
+     * nested no deeper than the inline slots validates with zero allocations, and a deeper one
+     * draws only its walk stack from @p spill — the RFC-0006 decode-resource bound is the
+     * caller's to inject (#873, ADR-0079). `over(input, mem::null_source())` refuses the deeper
+     * frame instead.
      *
      * @param input The bytes to validate — exactly one TLV; trailing bytes ⇒ `FRAME_INVALID`.
      * @param spill The block source the walk stack spills into past its inline slots.
@@ -232,6 +239,18 @@ class tlv_children_t {
         tlv_node_t front_{};                /**< @brief The cached front child. */
     };
 
+    /** @brief An empty range: no children. */
+    tlv_children_t() = default;
+
+    /**
+     * @brief The children from @p at onward: the unread tail of a range this walk produced,
+     *        still validated (#1829). A reader that consumed a fixed prefix (a BATCH base, an
+     *        offset run) hands the rest on as a range of its own.
+     */
+    [[nodiscard]] static tlv_children_t from(const iterator& at) noexcept {
+        return tlv_children_t(at.rest_);
+    }
+
     /** @brief The first child. */
     [[nodiscard]] iterator begin() const noexcept { return iterator(region_); }
     /** @brief The end sentinel. */
@@ -242,7 +261,7 @@ class tlv_children_t {
    private:
     friend class tlv_node_t;
     explicit tlv_children_t(std::span<const std::byte> region) noexcept : region_(region) {}
-    std::span<const std::byte> region_; /**< @brief The parent's children region. */
+    std::span<const std::byte> region_{}; /**< @brief The parent's children region. */
 };
 
 inline tlv_children_t tlv_node_t::children() const noexcept {
@@ -299,29 +318,6 @@ inline void stamp_ts(tlv_t& tlv, std::int64_t now_ns) noexcept {
 inline void stamp_ts(tlv_t& tlv, wire_clock_t& clock) noexcept { stamp_ts(tlv, clock.now_ns()); }
 
 /**
- * @brief Decode exactly one TLV that fills @p input.
- *
- * The structural descent's open-node stack starts in inline slots sized for the typical
- * FWD nesting and SPILLS to @p spill for deeper frames, so the RFC-0006 decode-resource
- * bound is a property the caller injects rather than one this function fixes (#873,
- * ADR-0079). `decode(input, mem::null_source())` is the spelling of "no spill at all":
- * a frame nested past the inline slots is refused with `TLV_NESTING_TOO_DEEP` instead of
- * growing (@ref grammar::walk_stack_t).
- *
- * @note @p spill bounds the WALK STACK only. The returned tree is an OWNING `tlv_t`, whose
- *       child vectors allocate on the global heap by construction — this parameter does not
- *       make an owning decode allocation-free, and a caller that needs the whole decode on
- *       an injected store wants the terminus arena (`wire::decode_into`) instead.
- *
- * @param input The bytes to decode — must be exactly one TLV; trailing bytes ⇒ `FrameInvalid`.
- * @param spill The block source the walk stack spills into once its inline slots are full.
- *              Default: the process heap, i.e. today's behaviour unchanged.
- * @return The decoded @ref tlv_t (borrowing @p input), or an `err_t` on failure.
- */
-[[nodiscard]] std::expected<tlv_t, err_t> decode(std::span<const std::byte> input,
-                                                 mem::block_source_t& spill = mem::heap_source());
-
-/**
  * @brief Encode a TLV to its wire bytes (recomputing the trailer CRC when `opt.cr` is set).
  *
  * The length width is not taken from @p tlv verbatim: a body larger than 0xFFFF widens to the
@@ -331,7 +327,8 @@ inline void stamp_ts(tlv_t& tlv, wire_clock_t& clock) noexcept { stamp_ts(tlv, c
  * 0xFFFFFFFF still truncates modulo 2^32 — the grammar has no wider length form, so that
  * residual is a wire-format limit rather than something `encode` can express.
  *
- * Encoding is SYMMETRIC with `decode`: the grammar's one per-type structural rule — a
+ * Encoding is SYMMETRIC with the reader (@ref tlv_node_t::over): the grammar's one per-type
+ * structural rule — a
  * `PATH_REF` body is a fixed-stride 8-byte record array, so `opt.PL` and `opt.LL` are both
  * forbidden and the length is bounded (RFC-0024 §4.2/§4.3, `wire::path_ref_body_valid`) — is
  * applied here too, so this codec cannot mint a frame it would itself reject (#886). A refused
@@ -351,7 +348,7 @@ inline void stamp_ts(tlv_t& tlv, wire_clock_t& clock) noexcept { stamp_ts(tlv, c
 [[nodiscard]] std::vector<std::byte> encode(const tlv_t& tlv);
 
 /**
- * @brief The canonical PATH-payload key of a decoded PATH TLV — the graph vertex-map key.
+ * @brief The canonical PATH-payload key of a validated PATH node — the graph vertex-map key.
  *
  * The PATH body's packed `[u8 len][bytes]` segment records, copied (RFC-0018 — `opt.PL = 0`,
  * so the body IS the key). One locus for what `graph_t`, `op_resolver_t`, and `fwd_router_t`
@@ -370,28 +367,10 @@ inline void stamp_ts(tlv_t& tlv, wire_clock_t& clock) noexcept { stamp_ts(tlv, c
  *       the ROOT vertex — an empty-key rejection would convert this bug into a misroute to `/`,
  *       which is worse than the bug.
  *
- * @param path A decoded PATH @ref tlv_t.
+ * @param path A validated PATH node, read in place (#1829).
  * @return The canonical key bytes, or `nullopt` if the body is not a run of literal packed
  *         records (ragged framing, an escape record, or a structured `opt.PL = 1` PATH).
  */
-[[nodiscard]] std::optional<std::vector<std::byte>> path_key(const tlv_t& path);
-
-/**
- * @brief Decode exactly one TLV from a flat view (the L1↔L2 cast, zero-copy).
- *
- * The L1↔L2 cast — "a TLV is a cast from a view." It lives at L2 (it produces a
- * @ref tlv_t) and consumes an L1 @ref view::view_t. The returned `tlv_t` borrows
- * the view's bytes, so keep the view — and thus its segment — alive while using
- * it.
- *
- * @param v The view whose bytes are exactly one TLV.
- * @param spill Forwarded to the span overload — the walk stack's spill source, defaulting
- *              to the process heap.
- * @return The decoded @ref tlv_t (borrowing @p v's bytes), or an `err_t` on failure.
- */
-[[nodiscard]] inline std::expected<tlv_t, err_t> decode(
-    const view::view_t& v, mem::block_source_t& spill = mem::heap_source()) {
-    return decode(v.bytes(), spill);
-}
+[[nodiscard]] std::optional<std::vector<std::byte>> path_key(const tlv_node_t& path);
 
 }  // namespace tr::wire

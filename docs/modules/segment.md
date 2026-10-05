@@ -118,7 +118,7 @@ sequenceDiagram
 
 - **Zero-copy fan-out** — N subscribers share one buffer; delivery is N relaxed
   increments, no `memcpy`.
-- **A decoded TLV outlives its receive call** — a `tlv_t` borrows segment bytes
+- **A decoded TLV outlives its receive call** — a `tlv_node_t` borrows segment bytes
   via spans; the `segment_ptr_t` keeps them alive exactly as long as some view
   needs them, which is what makes borrowed (zero-copy) decode safe at all.
 - **No hidden allocation** — the count is in the segment, so MMIO, pool and

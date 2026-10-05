@@ -57,6 +57,7 @@
 #include "libtracer/mem_heap.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "test_support.hpp"
+#include "tlv_tree.hpp"  // host-only owning tree (#1829)
 
 namespace {
 
@@ -138,12 +139,12 @@ constexpr std::uint64_t kDt = 1000;
 constexpr std::size_t kSamples = 3;
 
 /**
- * @brief One decoded batch and the bytes and `tlv_t` it borrows from — the lifetime a
+ * @brief One validated batch and the bytes and `tlv_node_t` it walks — the lifetime a
  *        @ref tr::wire::batch_view_t requires, kept in one object.
  */
 struct decoded_batch_t {
     std::vector<std::byte> bytes;
-    std::optional<tr::wire::tlv_t> tlv;
+    std::optional<tr::wire::tlv_node_t> tlv;
     batch_view_t view;
 };
 
@@ -169,9 +170,9 @@ decoded_batch_t build(std::int64_t base_ns, std::uint64_t dt_ns,
     for (const std::vector<std::byte>& f : frames) spans.emplace_back(f);
     tr::wire::emit_batch(d.bytes, base_ns, spans, offsets_ns);
 
-    auto got = tr::wire::decode(d.bytes, tr::mem::heap_source());
+    auto got = tr::wire::tlv_node_t::over(d.bytes, tr::mem::heap_source());
     check(got.has_value(), "the folded batch decodes as an ordinary structured TLV");
-    d.tlv = std::move(*got);
+    d.tlv = *got;
     const std::optional<batch_view_t> v = tr::wire::read_batch(*d.tlv, dt_ns);
     check(v.has_value(), "... and read_batch spells the convention out of it");
     d.view = *v;

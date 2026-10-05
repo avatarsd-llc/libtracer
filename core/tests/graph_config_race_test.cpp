@@ -690,7 +690,7 @@ void child_catalog_flip_race() {
             g.register_child_type(
                 fillers[static_cast<std::size_t>(i) % fillers.size()],
                 tr::graph::thunk(
-                    [](graph_t& gg, std::vector<std::byte> key, const tr::wire::tlv_t*) {
+                    [](graph_t& gg, std::vector<std::byte> key, const tr::wire::tlv_node_t*) {
                         return gg.register_vertex_key(std::move(key), role_t::STORED_VALUE);
                     }));
             registrations.fetch_add(1, std::memory_order_relaxed);

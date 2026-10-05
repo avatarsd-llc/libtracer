@@ -32,6 +32,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <initializer_list>
+#include <iterator>
 #include <span>
 #include <string_view>
 #include <vector>
@@ -106,9 +107,13 @@ std::vector<std::byte> fwd_read(std::initializer_list<std::string_view> dst,
 
 /** @brief The `PATH` child at index @p i of @p frame, re-encoded — or empty if absent. */
 std::vector<std::byte> path_child(std::span<const std::byte> frame, std::size_t i) {
-    const auto tlv = tr::wire::decode(frame);
-    if (!tlv || tlv->children.size() <= i || tlv->children[i].type != type_t::PATH) return {};
-    return tr::wire::encode(tlv->children[i]);
+    const auto tlv = tr::wire::tlv_node_t::over(frame);
+    if (!tlv) return {};
+    const tr::wire::tlv_children_t kids = tlv->children();
+    const auto at = std::ranges::next(kids.begin(), static_cast<std::ptrdiff_t>(i), kids.end());
+    if (at == kids.end() || (*at).type() != type_t::PATH) return {};
+    const std::span<const std::byte> whole = (*at).bytes();  // the child's own encoding
+    return {whole.begin(), whole.end()};
 }
 
 }  // namespace
@@ -170,10 +175,14 @@ int main() {
     check(ok, !sink.last_frame.empty() && sink.last_frame == b_to_o.sent[0],
           "byte-for-byte the frame the terminus emitted — the origin was one hop away");
 
-    const auto reply = tr::wire::decode(sink.last_frame);
-    const bool is_result =
-        reply && reply->children.size() >= 4 && reply->children[3].payload.size() == 1 &&
-        static_cast<reply_kind_t>(reply->children[3].payload[0]) == reply_kind_t::RESULT;
+    const auto reply = tr::wire::tlv_node_t::over(sink.last_frame);
+    bool is_result = false;
+    if (reply) {
+        const tr::wire::tlv_children_t kids = reply->children();
+        const auto kind = std::ranges::next(kids.begin(), 3, kids.end());  // VALUE kind
+        is_result = kind != kids.end() && (*kind).payload().size() == 1 &&
+                    static_cast<reply_kind_t>((*kind).payload()[0]) == reply_kind_t::RESULT;
+    }
     check(ok, is_result, "and it is kind=RESULT, carrying the value the terminus read");
 
     check(ok, router_o.handles().ingress_count() == 0 && router_b.handles().ingress_count() == 0,

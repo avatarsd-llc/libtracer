@@ -377,31 +377,32 @@ class effective_acl_t {
  * compare against `%detail_acl::kAceRequired` (#1799).
  *
  * @tparam Policy The accepting policy (defaults to the target's selection).
- * @param acl A decoded ACL @ref wire::tlv_t (`ACL{ ACL{NAME/VALUE…}* }`).
+ * @param acl A validated ACL node (`ACL{ ACL{NAME/VALUE…}* }`), walked in place (#1829).
  * @return The typed ACE list, in wire order, or `TYPE_MISMATCH`.
  */
 template <class Policy = acl_policy_t>
-[[nodiscard]] result_t<std::vector<ace_t>> parse_acl(const wire::tlv_t& acl) {
-    using wire::tlv_t;
+[[nodiscard]] result_t<std::vector<ace_t>> parse_acl(const wire::tlv_node_t& acl) {
+    using wire::tlv_node_t;
     using wire::type_t;
     std::vector<ace_t> out;
-    out.reserve(acl.children.size());
-    for (const tlv_t& entry : acl.children) {
-        if (entry.type != type_t::ACL || !entry.opt.pl)
+    for (const tlv_node_t entry : acl.children()) {
+        if (entry.type() != type_t::ACL || !entry.opt().pl)
             return std::unexpected(status_t::TYPE_MISMATCH);
-        const std::vector<tlv_t>& ch = entry.children;
-        // Positional (NAME key, value) pairs: an odd count leaves an unpaired child —
-        // a trailing key whose value the sender believes it wrote.
-        if ((ch.size() % 2) != 0) return std::unexpected(status_t::TYPE_MISMATCH);
         unsigned seen = 0;
         std::array<std::span<const std::byte>, detail_acl::kAceKeys.size()> raw{};
-        for (std::size_t i = 0; i + 1 < ch.size(); i += 2) {
-            // Key slot. Pair-consuming (#927): i advances PAST the value below, so a
+        const wire::tlv_children_t ch = entry.children();
+        for (auto it = ch.begin(); it != ch.end();) {
+            // Key slot. Pair-consuming (#927): the walk steps PAST the value below, so a
             // NAME-typed value is never resynchronized onto as the next key.
-            if (ch[i].type != type_t::NAME) return std::unexpected(status_t::TYPE_MISMATCH);
-            const tlv_t& val = ch[i + 1];
+            const tlv_node_t key = *it;
+            // Positional (NAME key, value) pairs: a key with no value is an odd count — a
+            // trailing key whose value the sender believes it wrote.
+            if (++it == ch.end() || key.type() != type_t::NAME)
+                return std::unexpected(status_t::TYPE_MISMATCH);
+            const tlv_node_t val = *it;
+            ++it;
             const auto row =
-                std::ranges::find(detail_acl::kAceKeys, tr::detail::as_string_view(ch[i].payload),
+                std::ranges::find(detail_acl::kAceKeys, tr::detail::as_string_view(key.payload()),
                                   &detail_acl::ace_key_t::key);
             const auto k = static_cast<std::size_t>(row - detail_acl::kAceKeys.begin());
             // REJECT, never skip: an unknown key (ignoring it would drop a restrictive
@@ -409,13 +410,13 @@ template <class Policy = acl_policy_t>
             // whose value is not a VALUE (a dropped `expires_ns` turns a time-limited
             // grant permanent), and an empty or over-wide payload. The `subject` token
             // is opaque bytes (ADR-0018): any TLV type — VALUE recommended, NAME for the
-            // "EVERYONE@" spelling — and a structured value decodes to an empty payload.
+            // "EVERYONE@" spelling — and a structured value reads as an empty payload.
             if (k == detail_acl::kAceKeys.size() || (seen & (1U << k)) != 0 ||
-                (val.type != type_t::VALUE && row->width != detail_acl::kAceOpaque) ||
-                !detail_acl::ace_field_ok(val.payload, row->width))
+                (val.type() != type_t::VALUE && row->width != detail_acl::kAceOpaque) ||
+                !detail_acl::ace_field_ok(val.payload(), row->width))
                 return std::unexpected(status_t::TYPE_MISMATCH);
             seen |= 1U << k;
-            raw[k] = val.payload;
+            raw[k] = val.payload();
         }
         // `load_le` zero-extends a narrower payload exactly, and an absent optional
         // field loads as its 0 default.

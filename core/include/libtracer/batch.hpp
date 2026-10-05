@@ -312,8 +312,8 @@ inline void emit_batch(std::vector<std::byte>& out, std::int64_t base_ns,
  * @brief A decoded BATCH record: its base, its sample frames, and the arithmetic that turns
  *        an index into a sample time.
  *
- * Borrows @ref read_batch's argument — the `tlv_t` (and the buffer it decoded from) must
- * outlive the view.
+ * Borrows @ref read_batch's argument — the bytes the node was validated over must outlive
+ * the view. The samples are walked in place (#1829).
  */
 struct batch_view_t {
     /** @brief The batch base: the SAMPLE time of frame 0, ns since the Unix epoch. */
@@ -323,10 +323,12 @@ struct batch_view_t {
     /** @brief The packed `i32` LE offset run; EMPTY on a uniform stream. */
     std::span<const std::byte> offsets{};
     /** @brief The sample frames, in order — the children after the base (and the offsets). */
-    std::span<const tlv_t> samples{};
+    tlv_children_t samples{};
+    /** @brief How many sample frames @ref samples holds. */
+    std::size_t count = 0;
 
     /** @brief How many sample frames this batch folded. */
-    [[nodiscard]] constexpr std::size_t size() const noexcept { return samples.size(); }
+    [[nodiscard]] constexpr std::size_t size() const noexcept { return count; }
 
     /** @brief True when per-sample time is DERIVED from the descriptor's rate (0 B/sample). */
     [[nodiscard]] constexpr bool uniform() const noexcept { return dt_ns != 0; }
@@ -350,7 +352,7 @@ struct batch_view_t {
      */
     [[nodiscard]] constexpr std::optional<std::int64_t> sample_time_ns(
         std::size_t i) const noexcept {
-        if (i >= samples.size()) return std::nullopt;
+        if (i >= count) return std::nullopt;
         if (!uniform()) {
             const std::int64_t off = offset_ns(i);
             if (off > 0 && base_ns > std::numeric_limits<std::int64_t>::max() - off)
@@ -378,12 +380,12 @@ struct batch_view_t {
 };
 
 /** @brief True iff @p tlv is a structured record at the assigned BATCH type code. */
-[[nodiscard]] inline bool is_batch(const tlv_t& tlv) noexcept {
-    return tlv.type == type_t::BATCH && tlv.opt.pl;
+[[nodiscard]] inline bool is_batch(const tlv_node_t& tlv) noexcept {
+    return tlv.type() == type_t::BATCH && tlv.opt().pl;
 }
 
 /**
- * @brief Read a BATCH record's convention out of a decoded @p tlv, against the descriptor's
+ * @brief Read a BATCH record's convention out of a validated @p tlv, against the descriptor's
  *        @p dt_ns.
  *
  * @param dt_ns The nominal sample period from the stream's §4.3 descriptor. Non-zero ⇒ a
@@ -398,28 +400,30 @@ struct batch_view_t {
  *         still round-trips byte-for-byte, because the user range is a range the protocol does
  *         not opine on (docs/reference/05-protocol-tlvs.md §User range).
  */
-[[nodiscard]] inline std::optional<batch_view_t> read_batch(const tlv_t& tlv,
+[[nodiscard]] inline std::optional<batch_view_t> read_batch(const tlv_node_t& tlv,
                                                             std::uint64_t dt_ns) noexcept {
-    if (!is_batch(tlv) || tlv.children.empty()) return std::nullopt;
-    const tlv_t& base = tlv.children.front();
-    if (base.type != type_t::TIME || base.payload.size() != 8u) return std::nullopt;
-    const std::uint64_t raw = detail::load_le<std::uint64_t>(base.payload);
+    if (!is_batch(tlv)) return std::nullopt;
+    const tlv_children_t ch = tlv.children();
+    auto it = ch.begin();
+    if (it == ch.end()) return std::nullopt;
+    const tlv_node_t base = *it;
+    if (base.type() != type_t::TIME || base.payload().size() != 8u) return std::nullopt;
+    const std::uint64_t raw = detail::load_le<std::uint64_t>(base.payload());
     if (raw > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
         return std::nullopt;
 
     batch_view_t v{};
     v.base_ns = static_cast<std::int64_t>(raw);
     v.dt_ns = dt_ns;
-    const std::span<const tlv_t> rest{tlv.children.data() + 1, tlv.children.size() - 1};
-    if (dt_ns != 0) {
-        v.samples = rest;
-        return v;
+    ++it;
+    if (dt_ns == 0) {
+        if (it == ch.end() || (*it).type() != type_t::VALUE) return std::nullopt;
+        v.offsets = (*it).payload();
+        ++it;
     }
-    if (rest.empty()) return std::nullopt;
-    if (rest.front().type != type_t::VALUE) return std::nullopt;
-    v.offsets = rest.front().payload;
-    v.samples = rest.subspan(1);
-    if (v.offsets.size() != v.samples.size() * kBatchOffsetBytes) return std::nullopt;
+    v.samples = tlv_children_t::from(it);
+    for (; it != ch.end(); ++it) ++v.count;
+    if (dt_ns == 0 && v.offsets.size() != v.count * kBatchOffsetBytes) return std::nullopt;
     return v;
 }
 

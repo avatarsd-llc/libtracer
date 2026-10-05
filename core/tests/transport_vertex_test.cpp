@@ -63,6 +63,7 @@
 #include "libtracer/transport_ws.hpp"
 #include "libtracer/ws.hpp"
 #include "test_support.hpp"
+#include "tlv_tree.hpp"  // host-only owning tree (#1829)
 
 namespace {
 
@@ -582,13 +583,12 @@ int g_stub_built = 0;
 void declare_stub_kind(transport_vertex_t& net, std::string module, std::string kind,
                        conn_role_t role) {
     (void)net.register_module(std::move(module), kind, role);
-    net.register_transport_type(
-        std::move(kind),
-        [](const tr::net::conn_settings_t&,
-           const tr::wire::tlv_t*) -> tr::graph::result_t<std::unique_ptr<tr::net::transport_t>> {
-            ++g_stub_built;
-            return std::make_unique<stub_link_t>();
-        });
+    net.register_transport_type(std::move(kind),
+                                [](const tr::net::conn_settings_t&, const tr::wire::tlv_node_t*)
+                                    -> tr::graph::result_t<std::unique_ptr<tr::net::transport_t>> {
+                                    ++g_stub_built;
+                                    return std::make_unique<stub_link_t>();
+                                });
 }
 
 /**
@@ -2296,17 +2296,17 @@ void test_conn_spec_round_trips_through_the_reader() {
     for (const std::string_view kind : {std::string_view{}, std::string_view{"udp"}}) {
         for (const std::string_view addr : {std::string_view{}, std::string_view{"127.0.0.1"}}) {
             const view_t spec = conn_spec("x", 47000, kind, addr);
-            const auto decoded = tr::wire::decode(spec);
+            const auto decoded = tr::wire::tlv_node_t::over(spec);
             if (!decoded) {
                 check(false, "the built SPEC decodes");
                 continue;
             }
-            const tr::wire::tlv_t* config = nullptr;
-            for (const tr::wire::tlv_t& child : decoded->children) {
-                if (child.type == type_t::SETTINGS) config = &child;
+            std::optional<tr::wire::tlv_node_t> config;
+            for (const tr::wire::tlv_node_t& child : decoded->children()) {
+                if (child.type() == type_t::SETTINGS) config = child;
             }
-            const tr::wire::config_reader_t cfg(config);
-            const bool ok = config != nullptr && !cfg.u8("role") && cfg.u16("port") &&
+            const tr::wire::config_reader_t cfg(config ? &*config : nullptr);
+            const bool ok = config.has_value() && !cfg.u8("role") && cfg.u16("port") &&
                             *cfg.u16("port") == 47000 &&
                             cfg.name("kind").value_or(std::string_view{}) == kind &&
                             cfg.name("addr").value_or(std::string_view{}) == addr;

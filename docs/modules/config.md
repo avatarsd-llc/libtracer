@@ -119,7 +119,7 @@ refcount slot `sp_atomic_slot_t` was removed because libstdc++ spin-locks it
   core to false-share with", and it is an optimization knob in both directions —
   never a correctness one.
 - **A `config_reader_t` borrows.** The reader and every `std::string_view` it
-  returns point into the decoded TLV's storage; both die with the `tlv_t`.
+  returns point into the bytes its `tlv_node_t` borrows; both die with those bytes.
 - **Ignoring an unknown key is deliberate.** A reader that rejects settings it
   does not recognize breaks forward compatibility with a newer peer. This is the
   *opposite* ruling from `parse_acl`, which rejects an unknown key: an ACL is a

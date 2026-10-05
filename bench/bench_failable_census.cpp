@@ -653,8 +653,9 @@ int run_blocks() {
         gate(print_census("wire_encode_4seg_path", c, kN,
                           "on_advertise:strip+re-encode:UNGUARDED_recursive"));
 
-        // `on_advertise` also DEEP-COPIES the decoded route TLV before stripping
-        // (`tlv_t stripped = route;`) — one `std::vector<tlv_t>` per node, also unguarded.
+        // The owning model's deep copy — one `std::vector<tlv_t>` per node, unguarded. Kept as
+        // the encode-side model's cost; `on_advertise` no longer pays it (#1829: the route is
+        // a `tlv_node_t` and the stripped body a span over it).
         census_t d;
         g_allocs = g_frees = g_bytes = 0;
         g_armed = true;
@@ -665,7 +666,7 @@ int run_blocks() {
         g_armed = false;
         d.heap_blocks = g_allocs;
         d.heap_bytes = g_bytes;
-        gate(print_census("tlv_deep_copy_4seg", d, kN, "on_advertise:stripped=route:UNGUARDED"));
+        gate(print_census("tlv_deep_copy_4seg", d, kN, "tlv_t_copy:encode_side_model:UNGUARDED"));
     }
 
     // (9)-(10) The #873 body-internal residuals in `tr::wire`: the two walk-stack SPILLS that
@@ -675,10 +676,10 @@ int run_blocks() {
     {
         const std::vector<std::byte> deep = make_deep_frame(12);
 
-        // `wire::decode` — the OWNING tree. Only the spill moves onto the seam: the tlv_t
-        // children are std::vectors and allocate on the process heap by construction, so the
-        // honest claim is "the spill block moved", NOT "zero escapes". `heap_blocks` stays
-        // well above zero here and that is the correct reading.
+        // `wire::tlv_node_t::over` — the one frame reader since the owning `decode` was
+        // deleted (#1829). It builds nothing (a validate-only sink over the grammar walk), so
+        // once the spill is on the seam this row is a TRUE zero-escape: `heap_blocks` must
+        // read 0.00, and the spill block lands on the injected source.
         {
             counting_source_t src;
             census_t c;
@@ -687,7 +688,7 @@ int run_blocks() {
             g_allocs = g_frees = g_bytes = 0;
             g_armed = true;
             for (std::size_t i = 0; i < kN; ++i) {
-                const auto t = tr::wire::decode(std::span<const std::byte>(deep), src);
+                const auto t = tr::wire::tlv_node_t::over(std::span<const std::byte>(deep), src);
                 asm volatile("" : : "r"(t.has_value()) : "memory");
             }
             g_armed = false;
@@ -695,12 +696,9 @@ int run_blocks() {
             c.mr_bytes = src.bytes - sb0;
             c.heap_blocks = g_allocs;
             c.heap_bytes = g_bytes;
-            // REPORT_ONLY on the heap column deliberately: the owning `tlv_t` tree's children
-            // are `std::vector`s today, but a future arena could legitimately take that to
-            // zero, and a NONZERO expectation here would pin the row to escaping.
             gate(print_census("wire_decode_deep_spill", c, kN,
-                              "depth12:spill_on_the_seam:owning_tlv_tree_STILL_on_the_heap",
-                              block_expect_t::REPORT_ONLY, block_expect_t::NONZERO));
+                              "depth12:tlv_node_over:ZERO_heap_escapes", block_expect_t::ZERO,
+                              block_expect_t::NONZERO));
         }
 
         // `wire::validate_rope` — the same frame as a borrowed 2-link rope. `null_sink_t`

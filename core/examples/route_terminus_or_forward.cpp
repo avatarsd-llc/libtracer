@@ -31,6 +31,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <initializer_list>
+#include <iterator>
 #include <optional>
 #include <span>
 #include <string_view>
@@ -100,11 +101,13 @@ std::vector<std::byte> fwd_write(std::initializer_list<std::string_view> dst,
 
 /** @brief The `kind` of a `FWD{REPLY}` frame, or `std::nullopt` if @p frame is not one. */
 std::optional<reply_kind_t> reply_kind(std::span<const std::byte> frame) {
-    const auto tlv = tr::wire::decode(frame);
+    const auto tlv = tr::wire::tlv_node_t::over(frame);
+    if (!tlv) return std::nullopt;
     // Child order is `VALUE op, PATH dst, PATH src, VALUE kind, …` — the kind is child 3.
-    if (!tlv || tlv->children.size() < 4 || tlv->children[3].payload.size() != 1)
-        return std::nullopt;
-    return static_cast<reply_kind_t>(tlv->children[3].payload[0]);
+    const tr::wire::tlv_children_t kids = tlv->children();
+    const auto kind = std::ranges::next(kids.begin(), 3, kids.end());
+    if (kind == kids.end() || (*kind).payload().size() != 1) return std::nullopt;
+    return static_cast<reply_kind_t>((*kind).payload()[0]);
 }
 
 }  // namespace

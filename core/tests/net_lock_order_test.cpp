@@ -214,8 +214,8 @@ void declare_fake_engine_module(transport_vertex_t& net, dial_script_t& script) 
     dial_script_t* const s = &script;
     net.register_transport_type(
         "fake",
-        [s](const tr::net::conn_settings_t&,
-            const tr::wire::tlv_t*) -> tr::graph::result_t<std::unique_ptr<tr::net::transport_t>> {
+        [s](const tr::net::conn_settings_t&, const tr::wire::tlv_node_t*)
+            -> tr::graph::result_t<std::unique_ptr<tr::net::transport_t>> {
             std::unique_lock l(s->m);
             ++s->attempts;
             s->cv.notify_all();

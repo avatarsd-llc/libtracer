@@ -1,8 +1,8 @@
 # `decode_into`: a flat arena drawn from a stack slab (L2/L3 codec)
 
-`decode` returns an owning `tlv_t` whose `children` vectors allocate on the global heap by
-construction — fine on a host, wrong at a terminus that must not touch the heap on the receive
-path. `wire::decode_into`
+`tlv_node_t::over` validates a frame in place and builds nothing; a terminus that wants every
+node's spans at once, in pre-order, without re-walking, wants an index instead.
+`wire::decode_into`
 ([ADR-0041](https://github.com/avatarsd-llc/libtracer/blob/main/docs/adr/0041-terminus-arena-decode-span-contract.md))
 answers the identical grammar with a flat, pre-order `arena_tlv_t` array whose storage comes
 from an injected **block source** ([CONTEXT.md](../../CONTEXT.md) §Block source). Point that at

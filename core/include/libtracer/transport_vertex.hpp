@@ -791,7 +791,7 @@ class transport_vertex_t {
      */
     [[nodiscard]] graph::result_t<graph::vertex_handle_t> make_connection_locked(
         ctl_txn_t& txn, const std::string& module, const std::string& name,
-        const wire::tlv_t* config, conn_settings_t settings);
+        const wire::tlv_node_t* config, conn_settings_t settings);
 
     /**
      * @brief `remove_connection`'s body, for a caller that ALREADY holds `ctl_m_` — the
@@ -841,7 +841,7 @@ class transport_vertex_t {
     [[nodiscard]] graph::result_t<void> endpoint_create_locked(ctl_txn_t& txn,
                                                                const std::string& module,
                                                                conn_catalog_t catalog,
-                                                               const wire::tlv_t& spec);
+                                                               const wire::tlv_node_t& spec);
 
     /** @brief The `NAME` ⇒ remove leg of `%endpoint_write`; runs in @p txn's phase 1. */
     [[nodiscard]] graph::result_t<void> endpoint_remove_locked(ctl_txn_t& txn,

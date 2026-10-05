@@ -49,8 +49,8 @@ std::expected<void, err_t> validate_rope(const view::rope_t& r, mem::block_sourc
     if (!r.all_host()) return std::unexpected(err_t::FRAME_INVALID);
     // The walk stack starts inline and spills to `spill` — the INJECTED source since
     // #873, defaulted to the process heap so the verdict still matches
-    // decode(flatten(r)) for every existing caller. The RFC-0006 depth bound is the
-    // caller's: hand it the same source you hand `decode` and the two agree.
+    // tlv_node_t::over(flatten(r)) for every existing caller. The RFC-0006 depth bound is
+    // the caller's: hand it the same source you hand `over` and the two agree.
     // `null_sink_t` models nothing, so this block is the whole allocation footprint.
     null_sink_t sink;
     std::array<grammar::walk_frame_t<grammar::rope_cursor>, 8> slots;

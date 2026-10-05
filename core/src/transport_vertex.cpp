@@ -30,7 +30,7 @@ using graph::result_t;
 using graph::status_t;
 using graph::vertex_handle_t;
 using view::view_t;
-using wire::tlv_t;
+using wire::tlv_node_t;
 using wire::type_t;
 
 namespace {
@@ -51,7 +51,7 @@ namespace {
  * receives. Unknown pairs are ignored (forward-compat). `keepalive` is one of them since
  * #1666: it had no consumer, so it is accepted and dropped rather than stored.
  */
-void parse_config(const tlv_t* config, conn_settings_t& s) {
+void parse_config(const tlv_node_t* config, conn_settings_t& s) {
     const wire::config_reader_t cfg(config);
     if (const auto v = cfg.name("addr")) s.addr = std::string(*v);
     if (const auto v = cfg.name("kind")) s.kind = std::string(*v);
@@ -65,19 +65,19 @@ void parse_config(const tlv_t* config, conn_settings_t& s) {
 }
 
 /**
- * @brief Re-encode a decoded TLV to owned wire bytes — the S5 engine's copy of the SPEC's
- *        `config` SETTINGS, taken because the decoded tlv_t BORROWS the write's rope,
+ * @brief Re-encode a validated node to owned wire bytes — the S5 engine's copy of the SPEC's
+ *        `config` SETTINGS, taken because the node BORROWS the write's rope,
  *        which is gone by the first re-dial. Trailers are not re-emitted (a config
  *        SETTINGS never carries one; the reader would ignore it anyway).
  */
-void reemit_tlv(std::vector<std::byte>& out, const tlv_t& tlv) {
-    if (tlv.opt.pl) {
+void reemit_tlv(std::vector<std::byte>& out, const tlv_node_t& tlv) {
+    if (tlv.opt().pl) {
         std::vector<std::byte> body;
-        for (const tlv_t& child : tlv.children) reemit_tlv(body, child);
-        wire::emit_tlv(out, tlv.type, tlv.opt, body);
+        for (const tlv_node_t child : tlv.children()) reemit_tlv(body, child);
+        wire::emit_tlv(out, tlv.type(), tlv.opt(), body);
         return;
     }
-    wire::emit_tlv(out, tlv.type, tlv.opt, tlv.payload);
+    wire::emit_tlv(out, tlv.type(), tlv.opt(), tlv.payload());
 }
 
 /**
@@ -121,7 +121,7 @@ void reemit_tlv(std::vector<std::byte>& out, const tlv_t& tlv) {
  * not name are not looked at: they stay forward-compatible unknown pairs (RFC-0014
  * Amendment 4), and an empty catalog therefore accepts every config.
  */
-[[nodiscard]] bool conforms(conn_catalog_t catalog, const tlv_t* config) noexcept {
+[[nodiscard]] bool conforms(conn_catalog_t catalog, const tlv_node_t* config) noexcept {
     const wire::config_reader_t cfg(config);
     for (const conn_key_t& key : catalog.keys()) {
         if (!cfg.has(key.name)) {
@@ -565,7 +565,7 @@ result_t<void> transport_vertex_t::endpoint_write(const std::string& module, con
     // than being read back as a truncated — and therefore "malformed" — SPEC (#917).
     const auto flat = value.try_materialize(backend);
     if (!flat) return std::unexpected(status_t::BACKPRESSURE);
-    const auto payload = wire::decode(*flat);
+    const auto payload = wire::tlv_node_t::over(*flat);
     if (!payload) return std::unexpected(status_t::TYPE_MISMATCH);
 
     // ONE critical section for the whole DECISION: parse, declaration lookup, socket
@@ -575,7 +575,7 @@ result_t<void> transport_vertex_t::endpoint_write(const std::string& module, con
     // of its own locks across `on_write`, so nothing here descends against that order.
     // What the decision does NOT do is fan out or join: those are phase 2's (S6, #492).
     ctl_txn_t txn(*this, ctl_scope_t::OPERATION);  // ADR-0063 §3 serialization
-    switch (payload->type) {
+    switch (payload->type()) {
         case type_t::SPEC: {
             const result_t<void> made = endpoint_create_locked(txn, module, catalog, *payload);
             // A creation's BIRTH-liveness publish is not the creation's verdict — the
@@ -586,7 +586,7 @@ result_t<void> transport_vertex_t::endpoint_write(const std::string& module, con
         }
         case type_t::NAME: {
             const result_t<void> removed =
-                endpoint_remove_locked(txn, module, detail::as_string_view(payload->payload));
+                endpoint_remove_locked(txn, module, detail::as_string_view(payload->payload()));
             if (!removed) return removed;
             // A removal's verdict IS the retire's, which phase 2 performs.
             return txn.discharge();
@@ -601,7 +601,7 @@ result_t<void> transport_vertex_t::endpoint_write(const std::string& module, con
 
 result_t<void> transport_vertex_t::endpoint_create_locked(ctl_txn_t& txn, const std::string& module,
                                                           conn_catalog_t catalog,
-                                                          const tlv_t& spec) {
+                                                          const tlv_node_t& spec) {
     // SPEC{ NAME "name" NAME <seg>, NAME "config" SETTINGS{ pairs }? } — no `type` and no
     // `role`: the module in the path already says both (RFC-0014 §1). Read through the ONE
     // pair-consuming walk, exactly as `graph_t::create_child` reads the `:children[]` SPEC.
@@ -633,7 +633,8 @@ result_t<void> transport_vertex_t::endpoint_create_locked(ctl_txn_t& txn, const 
     // side-effect guard only — it answers exactly what falling through would.
     if (name == kConnEndpointName) return std::unexpected(status_t::PATH_IN_USE);
 
-    const tlv_t* config = pairs.settings("config");
+    const std::optional<tlv_node_t> settings_node = pairs.settings("config");
+    const tlv_node_t* config = settings_node ? &*settings_node : nullptr;
     // The module's declared catalog (RFC-0014 §2: the device validates "the `config` against
     // its `conn:schema` catalog"). A config that omits a required key, or carries a
     // catalogued key in another shape, is MALFORMED — §2's `tr::schema::type_mismatch` —
@@ -740,7 +741,7 @@ void transport_vertex_t::provide_link(std::string module, std::string name, tran
 result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(ctl_txn_t& txn,
                                                                      const std::string& module,
                                                                      const std::string& name,
-                                                                     const tlv_t* config,
+                                                                     const tlv_node_t* config,
                                                                      conn_settings_t settings) {
     // With the module resolved, the staging is a DIRECT lookup: `pending_links_` is keyed by
     // exactly this string (see `provide_link`). No scan, and no way to reach a key whose
@@ -820,8 +821,8 @@ result_t<vertex_handle_t> transport_vertex_t::make_connection_locked(ctl_txn_t& 
                 // factory's to refuse, at dial time.
                 if (settings.addr.empty() || settings.port == 0)
                     return std::unexpected(status_t::TYPE_MISMATCH);
-                // The engine owns a byte COPY of the raw config: the decoded TLV borrows the
-                // write's rope, which is gone by the first re-dial.
+                // The engine owns a byte COPY of the raw config: the node borrows the write's
+                // rope, which is gone by the first re-dial.
                 std::vector<std::byte> raw;
                 if (config != nullptr) reemit_tlv(raw, *config);
                 auto heal = std::make_unique<self_heal_link_t>(

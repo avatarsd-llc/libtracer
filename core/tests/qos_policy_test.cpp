@@ -57,6 +57,7 @@
 #include "test_history.hpp"
 #include "test_support.hpp"
 #include "test_values.hpp"
+#include "tlv_tree.hpp"  // host-only owning tree (#1829)
 
 namespace {
 
@@ -535,10 +536,10 @@ std::vector<std::byte> vector_bytes(std::string_view case_dir) {
  * a lenient readback oracle can mask a strict parser's regression.
  */
 std::optional<std::uint16_t> policy_word_of(std::span<const std::byte> sub) {
-    const auto dec = tr::wire::decode(sub);
-    if (!dec || dec->type != type_t::SUBSCRIBER) return std::nullopt;
-    for (const tlv_t& child : dec->children) {
-        if (child.type != type_t::SETTINGS) continue;
+    const auto dec = tr::wire::tlv_node_t::over(sub);
+    if (!dec || dec->type() != type_t::SUBSCRIBER) return std::nullopt;
+    for (const tr::wire::tlv_node_t& child : dec->children()) {
+        if (child.type() != type_t::SETTINGS) continue;
         if (const auto word = tr::wire::config_reader_t(&child).u16("delivery_policy")) return word;
     }
     return std::nullopt;

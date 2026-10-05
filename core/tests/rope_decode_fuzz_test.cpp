@@ -37,6 +37,7 @@
 #include "libtracer/rope_decode.hpp"
 #include "libtracer/tlv_view.hpp"
 #include "libtracer/view.hpp"
+#include "tlv_tree.hpp"  // host-only owning tree (#1829)
 
 namespace {
 

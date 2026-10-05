@@ -2,20 +2,25 @@
 
 ```{admonition} In one paragraph
 :class: tip
-The codec turns wire bytes into a borrowed `tlv_t` tree and back. A TLV is a 4- or
-6-byte header (type, an `opt` bitfield, a length) + payload + an optional trailer
-(timestamp, CRC). **`decode`** never copies payloads — they are `std::span`s into
-the input buffer; **`encode`** serializes a `tlv_t` and recomputes the CRC. The
+The codec turns wire bytes into a validated, borrowed `tlv_node_t` and a `tlv_t` model
+into wire bytes. A TLV is a 4- or 6-byte header (type, an `opt` bitfield, a length) +
+payload + an optional trailer (timestamp, CRC). **`tlv_node_t::over`** never copies or
+builds anything — the node and every child it walks are spans into the input buffer;
+**`encode`** serializes a `tlv_t` and recomputes the CRC. The
 [bit-level walkthrough](wire-format-bits.md) shows every bit.
 ```
 
-## Decode and encode
+## Read and encode
 
-`decode(bytes) → std::expected<tlv_t, err_t>` parses exactly one TLV that fills the
-input: it reads the header, rejects reserved bits and bad structure, verifies the
-trailer CRC, and — when `opt.PL=1` (payload-is-structured) — walks child TLVs
-**iteratively**, never recursively. The result borrows the input, so holding it
-requires keeping the bytes alive (that is what [views](views.md) provide).
+`tlv_node_t::over(bytes) → std::expected<tlv_node_t, err_t>` validates exactly one TLV
+that fills the input: it reads the header, rejects reserved bits and bad structure,
+verifies the trailer CRC, and — when `opt.PL=1` (payload-is-structured) — walks child
+TLVs **iteratively**, never recursively. It builds nothing: the result is the input span
+plus the root's header facts, so holding it requires keeping the bytes alive (that is
+what [views](views.md) provide). The owning `decode` that copied the frame into a `tlv_t`
+tree with vector children was deleted in
+[#1829](https://github.com/avatarsd-llc/libtracer/issues/1829); `tlv_t` stays as the
+encode-side model.
 `encode(tlv)` does the reverse, recomputing the CRC over the body when `opt.CR` is
 set. It does **not** take the length width from the model verbatim: a body over
 `0xFFFF` widens to the u32 `LL` form whatever `tlv.opt.ll` says, because `encode`
@@ -23,7 +28,7 @@ emits through `emit_tlv` (below) — the one home of the length-width policy. A
 programmatically built tree therefore cannot serialize a length truncated to
 `size & 0xFFFF`; bodies at or under `0xFFFF` are unchanged and `opt.ll` is never
 cleared. Decode failure is one of `FRAME_TRUNCATED`, `FRAME_INVALID`, `FRAME_CRC_FAIL`
-or `TLV_NESTING_TOO_DEEP` — the RFC-0002 registry codes, not a decode-only error
+or `TLV_NESTING_TOO_DEEP` — the RFC-0002 registry codes, not a reader-only error
 vocabulary (`core/include/libtracer/frame.hpp:Decode failures reuse`).
 
 ```{mermaid}
@@ -37,7 +42,7 @@ flowchart TD
     O --> T
     T --> N{"more bytes<br/>in region?"}
     N -->|yes| H
-    N -->|no| D["tlv_t tree (borrowed)"]
+    N -->|no| D["tlv_node_t (borrowed, nothing built)"]
 ```
 
 The `opt` byte is the protocol's compactness lever: six 1-bit flags select
@@ -102,14 +107,13 @@ cost, not behaviour** (`grammar.hpp:receiver-resource depth bound`). Exhausting 
 the frame with `TLV_NESTING_TOO_DEEP`, which means exactly "exceeds this receiver's
 decode resources" (`grammar.hpp:Cursor`).
 
-The two decoders differ only in what they spill to, and therefore in what bounds
+The two readers differ only in what they spill to, and therefore in what bounds
 them:
 
-| decoder | inline slots | spill source | the depth bound is |
+| reader | inline slots | spill source | the depth bound is |
 | --- | --- | --- | --- |
-| `decode` → owning `tlv_t` | 8 (`core/src/frame.cpp:span_cursor>, 8> slots`) | the caller's spill source, the nothrow heap by default (`frame.cpp:stack(slots, &spill)`) | the heap — an owning-tree decode allocates there regardless |
+| `tlv_node_t::over` → in-place node | 8 (`core/src/frame.cpp:span_cursor>, 8> slots`) | the caller's `mem::block_source_t`, the heap by default (`frame.cpp:stack(slots, &spill)`) | the spill source only — nothing else is drawn |
 | `decode_into` → `tlv_arena_t` | 8 (`core/src/tlv_arena.cpp:span_cursor>, 8> slots`) | the caller's `mem::block_source_t` (`tlv_arena.cpp:stack(slots, &src)`) | whatever resource the caller injected |
-| `tlv_node_t::over` → in-place node | 8 (the same walk as `decode`) | the caller's `mem::block_source_t`, the heap by default | the spill source only — nothing else is drawn |
 
 The 8 is the typical FWD nesting (three to four levels) with headroom, not a
 ceiling: the arena test decodes a frame nested 100 deep (`core/tests/tlv_arena_test.cpp:encode(nested(100))`).
@@ -173,10 +177,10 @@ namespace tr::crc { constexpr std::uint32_t crc32c(...);        // 1 or 2 spans
                     struct crc32c_state; struct crc16_ccitt_state; }  // n chunks
 ```
 
-`decode(const view::view_t&)` is the L1→L2 cast — "a TLV is a cast from a view." It
-lives at L2 because it produces a `tlv_t`, and consumes an L1 [view](views.md); the
-returned tree borrows the view's bytes, so the view and its segment must outlive
-it.
+`tlv_node_t::over(const view::view_t&)` is the L1→L2 cast — "a TLV is a cast from a
+view." It lives at L2 because it produces a `tlv_node_t`, and consumes an L1
+[view](views.md); the returned node borrows the view's bytes, so the view and its
+segment must outlive it.
 
 ## Byte emission without a model object
 
@@ -209,9 +213,8 @@ same way. Pass `opt_t{.pl = true}` for a structured payload.
 
 These live in `tr::wire` (L2/L3) because they produce wire bytes from wire types;
 the layer-free little-endian byte helper they build on stays in `tr::detail`
-(`byteorder.hpp`). For decoding, and for emitting a full `tlv_t` value with
-payload, children and trailers, `frame.hpp`'s `decode`/`encode` are the entry
-points.
+(`byteorder.hpp`). For reading, `frame.hpp`'s `tlv_node_t::over` is the entry point; for emitting a
+full `tlv_t` value with payload, children and trailers, `encode` is.
 
 ## The BATCH record — folding a flush into one written value
 
@@ -272,24 +275,27 @@ refusals are as load-bearing as the capabilities:
 
 ## The in-place walker
 
-A reader that only walks a frame's children needs no tree. **`wire::tlv_node_t::over(span)`**
-validates the whole frame with the same `grammar::walk` and inline slots as `decode`, so it
-accepts and refuses exactly the frames `decode` does, with the same `err_t`. Its sink keeps
+A reader walks a frame's children; it needs no tree. **`wire::tlv_node_t::over(span)`**
+validates the whole frame with `grammar::walk`, the same descent `decode_into` uses, so the
+two accept and refuse exactly the same frames with the same `err_t`. Its sink keeps
 nothing, so a frame nested no deeper than the inline slots validates with zero allocations.
 The result is a node: a borrowed span plus the header facts. `children()` is a forward range
 that reads one header per step and yields each child as another node; a reader descends by
 walking a child's own `children()`. Because every node comes from a validated frame, the
 walk has no error channel and never fails.
 
-`decode` stays for callers that keep a tree or hand one to a `tlv_t` API (`encode`,
-`config_reader_t`, `parse_acl`). Router ingress uses the walker: the inbound observer receives
-a `tlv_node_t`, and a refused bus-NAME hop reads its routes in place. The conformance runner
-checks every vector through both and requires the same verdict, the same error and the same
-tree (`core/tests/conformance_runner.cpp:same_tree`).
+Every core reader takes a node: `config_reader_t`, `parse_acl`, `is_batch` / `read_batch`
+and the playout helper, `path_key`, the child and transport factories' config argument, and
+the router's `adopt_binding`, `adopt_path_label`, `fall_back_on_label_refusal` and
+`on_advertise`. Router ingress uses the walker too: the inbound observer receives a
+`tlv_node_t`, and a refused bus-NAME hop reads its routes in place. The owning tree survives
+only as host-only test support (`core/tests/tlv_tree.hpp`), which the conformance runner uses
+to check that every vector re-encodes byte for byte
+(`core/tests/conformance_runner.cpp:same_tree`).
 
 ## The terminus arena decoder
 
-Alongside the owning `tlv_t` model, the codec ships a second decoder for the FWD
+Alongside the in-place node, the codec ships a second reader for the FWD
 terminus: **`wire::decode_into(span, tr::mem::block_source_t&) → tlv_arena_t`**
 (public header `tlv_arena.hpp`). It parses the same frames with the same
 validation — bounds, reserved bits, type `0x00`, the bound-path (`0x14`/`0x15`) body shape, trailer
@@ -376,14 +382,6 @@ Headers: `frame.hpp`, `tlv.hpp`, `tlv_emit.hpp`, `tlv_arena.hpp`, `batch.hpp`,
 ```{doxygenstruct} tr::wire::trailer_t
 :project: libtracer
 :members:
-```
-
-```{doxygenfunction} tr::wire::decode(std::span<const std::byte>, mem::block_source_t&)
-:project: libtracer
-```
-
-```{doxygenfunction} tr::wire::decode(const view::view_t&, mem::block_source_t&)
-:project: libtracer
 ```
 
 ```{doxygenfunction} tr::wire::encode

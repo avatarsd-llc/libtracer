@@ -71,8 +71,8 @@ flowchart LR
 | [status](graph.md#status-codes) | `enum class status_t`; `template<class T> using result_t = std::expected<T, status_t>` |
 | [backends](backends.md) | `class mem_backend_t { alloc(); destroy(); alignment(); … }` · `view::heap_alloc()` · `view::borrow()` / `borrow_const()` · `mem::pool_t` |
 | [segment](segment.md) | `struct segment_t{ ref_count_t; mem_backend_t*; span<byte> }` · `class segment_ptr_t{ adopt/retain; copy=clone; reset() }` |
-| [views](views.md) | `struct view_t{ owner; offset; length; bytes(); subview() }` · `class rope_t{ append; concat; to_iovec; materialize; flatten }` · `tr::wire::decode(view_t)→std::expected<tlv_t, err_t>` |
-| [frame-codec](frame-codec.md) | `enum class type_t` · `struct opt_t` · `struct tlv_t{ type; opt; payload; children; trailer }` · `decode()` · `encode()` · `decode_into(span, mem::block_source_t&)→std::expected<tlv_arena_t, err_t>` · `struct arena_tlv_t` · `crc::crc32c/crc16_ccitt` |
+| [views](views.md) | `struct view_t{ owner; offset; length; bytes(); subview() }` · `class rope_t{ append; concat; to_iovec; materialize; flatten }` · `tr::wire::tlv_node_t::over(view_t)→std::expected<tlv_node_t, err_t>` |
+| [frame-codec](frame-codec.md) | `enum class type_t` · `struct opt_t` · `struct tlv_t{ type; opt; payload; children; trailer }` (the encode-side model) · `class tlv_node_t{ over(); type(); payload(); children(); trailer() }` · `encode()` · `decode_into(span, mem::block_source_t&)→std::expected<tlv_arena_t, err_t>` · `struct arena_tlv_t` · `crc::crc32c/crc16_ccitt` |
 | [path](path.md) | `class path_t{ parse(); key(); field() }` · `bool valid_segment(string_view)` — THE segment predicate every minting boundary shares (ADR-0073 §1; the local parser and the wire creation door both call it, so they cannot drift) · `struct path_key_t` + `path_key_hash_t` |
 | [graph](graph.md) | `class graph_t{ register_vertex→vertex_handle_t; try_register_vertex; retire; read; write; assign; propagate; await; history; subscribe; unsubscribe; set_policy(vertex_handle_t, vertex_policy_t); set_hooks(graph_hooks_t); hooks(); subscribe_wire(vertex_handle_t, view_t source_view, view_t return_route, std::string link, view_t reverse_route = {}, std::string caller = {}) }` · `class vertex_handle_t` · `enum class role_t` · `struct vertex_policy_t` (the owner-declared per-vertex policy, RFC-0028 D12) · `struct graph_hooks_t` (the five graph-wide seams, RFC-0028 D9) · `struct delivery_policy_t` (the per-subscription packed policy, RFC-0022) · `struct handlers_t` — `read` and `await` return `result_t<value_ref_t>` (a reference to the published value); the folding reads `read_children_folded` / `read_children_materialized` / `read_subtree_folded` and `handlers_t::on_read` compose a new value and return it as the same `result_t<value_ref_t>` (RFC-0028 D11) |
 | [transport](transport.md) | `class transport_t{ send(span); send(iov); set_receiver() }` · `class loopback_channel_t` |
@@ -81,8 +81,8 @@ flowchart LR
 
 ## Two contracts hold the stack together
 
-1. **A TLV is a cast from a `view_t`** — the `decode(view_t)` overload = `decode(view.bytes())`. The
-   decoder borrows; the `view_t`'s `segment_ptr_t` owns. So L2 (bytes) and L1 (ownership)
+1. **A TLV is a cast from a `view_t`** — the `tlv_node_t::over(view_t)` overload =
+   `tlv_node_t::over(view.bytes())`. The node borrows; the `view_t`'s `segment_ptr_t` owns. So L2 (bytes) and L1 (ownership)
    meet with no copy.
 2. **A `segment_t` is reclaimed by its backend** — the only `mem_backend_t`→`segment_t` edge
    is `destroy`, fired by `segment_ptr_t` at refcount zero. So L0 (allocation) and L1

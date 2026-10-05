@@ -108,12 +108,12 @@ std::vector<std::byte> one_ace(std::span<const std::byte> entry) {
 /**
  * @brief Assert that @p wire is REJECTED with `TYPE_MISMATCH` under `Policy`.
  *
- * @note `wire::decode` borrows its input, so @p wire must outlive the call — passing a
+ * @note `wire::tlv_node_t::over` borrows its input, so @p wire must outlive the call — passing a
  *       temporary is fine (it lives to the end of the full expression).
  */
 template <class Policy>
 void rejects(std::span<const std::byte> wire, std::string_view what) {
-    const auto acl = tr::wire::decode(wire);
+    const auto acl = tr::wire::tlv_node_t::over(wire);
     if (!acl.has_value()) {
         check(false, what);  // the blob must be structurally decodable to test the parse gate
         return;
@@ -125,7 +125,7 @@ void rejects(std::span<const std::byte> wire, std::string_view what) {
 /** @brief The ACEs @p wire parses to under `Policy`, or an empty list if it was rejected. */
 template <class Policy>
 std::vector<ace_t> parsed_aces(std::span<const std::byte> wire) {
-    const auto acl = tr::wire::decode(wire);
+    const auto acl = tr::wire::tlv_node_t::over(wire);
     if (!acl.has_value()) return {};
     const auto out = parse_acl<Policy>(*acl);
     if (!out.has_value()) return {};
@@ -159,7 +159,7 @@ std::vector<std::byte> one_ace_of(const std::vector<pair_t>& pairs) {
 /** @brief True iff @p wire parses (any result) under `Policy`. */
 template <class Policy>
 bool accepts(std::span<const std::byte> wire) {
-    const auto acl = tr::wire::decode(wire);
+    const auto acl = tr::wire::tlv_node_t::over(wire);
     return acl.has_value() && parse_acl<Policy>(*acl).has_value();
 }
 
@@ -266,8 +266,9 @@ int main() {
                                         ace_type_t::ALLOW, kAceInherit, /*expires=*/42),
                                     ace("EVERYONE@", bit(acl_right_t::SUBSCRIBE))};
         const std::vector<std::byte> wire = encode_acl(in);
-        const auto acl = tr::wire::decode(wire);
-        check(acl.has_value() && acl->type == tr::wire::type_t::ACL, "encode_acl yields ACL{...}");
+        const auto acl = tr::wire::tlv_node_t::over(wire);
+        check(acl.has_value() && acl->type() == tr::wire::type_t::ACL,
+              "encode_acl yields ACL{...}");
         const auto out = parse_acl<allow_only_policy_t>(*acl);
         check(out.has_value() && out->size() == 2, "parse_acl round-trips 2 ACEs");
         check(out && (*out)[0].subject == in[0].subject &&
@@ -283,7 +284,7 @@ int main() {
     {
         const std::vector<ace_t> in{ace("alice", bit(acl_right_t::WRITE), ace_type_t::DENY)};
         const std::vector<std::byte> wire = encode_acl(in);
-        const auto acl = tr::wire::decode(wire);
+        const auto acl = tr::wire::tlv_node_t::over(wire);
         check(acl.has_value(), "a DENY ACL encodes/decodes structurally");
         const auto strict = parse_acl<allow_only_policy_t>(*acl);
         check(!strict && strict.error() == status_t::TYPE_MISMATCH,
@@ -298,10 +299,10 @@ int main() {
     {
         const std::vector<ace_t> in{
             ace("alice", bit(acl_right_t::READ), ace_type_t::ALLOW, /*flags=*/0x2)};
-        // Bind the encoded bytes: decode() is zero-copy (the tlv borrows the input),
+        // Bind the encoded bytes: over() is zero-copy (the node borrows the input),
         // so the buffer must outlive parse_acl below.
         const std::vector<std::byte> wire = encode_acl(in);
-        const auto acl = tr::wire::decode(wire);
+        const auto acl = tr::wire::tlv_node_t::over(wire);
         check(acl.has_value() && !parse_acl<full_acl_policy_t>(*acl).has_value(),
               "a flag bit beyond INHERIT is TYPE_MISMATCH even under full");
     }

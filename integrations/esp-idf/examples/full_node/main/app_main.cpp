@@ -190,19 +190,20 @@ std::vector<std::byte> b_fwd(tr::graph::fwd_op_t op, const std::vector<std::byte
     return out;
 }
 
-/** @brief Decode the u32 out of a stored VALUE TLV (a vertex's last-known value). */
+/** @brief Read the u32 out of a stored VALUE TLV (a vertex's last-known value), in place. */
 std::uint32_t value_u32_of(const view_t& lkv) {
-    const auto t = tr::wire::decode(lkv);
-    if (!t || t->type != type_t::VALUE || t->payload.size() != 4) return 0;
-    return tr::detail::load_le<std::uint32_t>(t->payload);
+    const auto t = tr::wire::tlv_node_t::over(lkv);
+    if (!t || t->type() != type_t::VALUE || t->payload().size() != 4) return 0;
+    return tr::detail::load_le<std::uint32_t>(t->payload());
 }
 
-/** @brief The trailing 4-byte VALUE of a FWD reply (the read's result). */
-std::uint32_t reply_value_u32(const tr::wire::tlv_t& f) {
-    for (auto it = f.children.rbegin(); it != f.children.rend(); ++it)
-        if (it->type == type_t::VALUE && it->payload.size() == 4)
-            return tr::detail::load_le<std::uint32_t>(it->payload);
-    return 0;
+/** @brief The trailing 4-byte VALUE of a FWD reply (the read's result), read in place. */
+std::uint32_t reply_value_u32(const tr::wire::tlv_node_t& f) {
+    std::uint32_t last = 0;
+    for (const tr::wire::tlv_node_t c : f.children())
+        if (c.type() == type_t::VALUE && c.payload().size() == 4)
+            last = tr::detail::load_le<std::uint32_t>(c.payload());
+    return last;
 }
 
 /** @name the device node (the origin-firmware shape) */
@@ -418,7 +419,7 @@ int run_host_probe(device_node_t& dev) {
     std::uint32_t got = 0;
     if (read_ok) {
         const std::lock_guard lock(reply_box.m);
-        const auto dec = tr::wire::decode(reply_box.bytes);
+        const auto dec = tr::wire::tlv_node_t::over(reply_box.bytes);
         got = dec ? reply_value_u32(*dec) : 0;
     }
     check(read_ok && got == 21, "FWD{READ} round-trip: /dev/sensor/temp == 21");

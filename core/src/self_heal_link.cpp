@@ -31,7 +31,7 @@ static_assert(kSelfHealLinks,
               "otherwise turn LIBTRACER_SELF_HEAL_LINKS (CMake) OFF so the TU is dropped too. "
               "The ESP-IDF CONFIG_LIBTRACER_SELF_HEAL_LINKS sets both.");
 
-using wire::tlv_t;
+using wire::tlv_node_t;
 
 self_heal_link_t::self_heal_link_t(transport_factory_t factory, conn_settings_t settings,
                                    std::vector<std::byte> raw_config, bool inner_delivers_ropes)
@@ -272,17 +272,14 @@ void self_heal_link_t::on_socket_down(sock_t& sock) {
 
 bool self_heal_link_t::attempt_locked(std::unique_lock<std::mutex>& l) {
     l.unlock();
-    // Decode the stored config bytes fresh per attempt (the tlv borrows raw_config_,
-    // which outlives it); the factory re-parses its kind-private keys from it exactly as
-    // it would at an eager creation.
-    const tlv_t* cfg_ptr = nullptr;
-    std::optional<tlv_t> cfg;
+    // Validate the stored config bytes fresh per attempt and read them in place (the node
+    // borrows raw_config_, which outlives it); the factory re-parses its kind-private keys
+    // from it exactly as it would at an eager creation.
+    std::optional<tlv_node_t> cfg;
     if (!raw_config_.empty()) {
-        if (auto decoded = wire::decode(raw_config_)) {
-            cfg.emplace(std::move(*decoded));
-            cfg_ptr = &*cfg;
-        }
+        if (auto node = tlv_node_t::over(raw_config_)) cfg = *node;
     }
+    const tlv_node_t* cfg_ptr = cfg ? &*cfg : nullptr;
     auto built = factory_(settings_, cfg_ptr);
     std::shared_ptr<sock_t> sock;
     if (built) {

@@ -53,6 +53,7 @@
 #include "libtracer/tlv_emit.hpp"
 #include "libtracer/tracer.hpp"
 #include "test_support.hpp"
+#include "tlv_tree.hpp"  // host-only owning tree (#1829)
 
 namespace {
 
@@ -349,7 +350,8 @@ int main() {
 
         // The origin's own element is the one no peer can supply (§4.1), and adopt_binding
         // is what puts it on the front.
-        check(dec.has_value() && r_cli.adopt_binding(target, "net/uplink/a", *dec),
+        check(dec.has_value() &&
+                  r_cli.adopt_binding(target, "net/uplink/a", *tr::wire::tlv_node_t::over(*minted)),
               "the client adopts the binding, stacking its OWN first-hop element under it");
     }
     check(target.binding().bound && target.binding().elements.size() == 3,

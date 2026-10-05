@@ -292,7 +292,7 @@ own factory parses it from the raw config `SETTINGS` TLV it receives alongside t
 universal settings (`core/include/libtracer/transport_factory.hpp:conn_settings_t`, ADR-0043 §3, §5).
 
 The mechanism is the factory signature: a factory is
-`(const conn_settings_t&, const wire::tlv_t* raw_config) -> result_t<unique_ptr<transport_t>>`,
+`(const conn_settings_t&, const wire::tlv_node_t* raw_config) -> result_t<unique_ptr<transport_t>>`,
 registered at runtime through `transport_vertex_t::register_transport_type`
 (`core/src/transport_vertex.cpp:transport_vertex_t::register_transport_type(std::string kind, transport_factory_t factory)`). The central parse reads the universal keys and nothing
 else (`core/src/transport_vertex.cpp:parse_config`, `core/src/transport_vertex.cpp:if (const auto v = cfg.name("kind"))`); unknown pairs are ignored, so a newer peer

@@ -2,7 +2,7 @@
 
 Integrity rides at the **end** of a TLV, and it is **optional**
 ([reference 01](../reference/01-data-format.md) §trailer). `opt.cr` says a CRC-32C follows the
-body — `encode` computes it, `decode` checks it. `opt.ts` says a wire-time stamp follows.
+body — `encode` computes it, `tlv_node_t::over` checks it. `opt.ts` says a wire-time stamp follows.
 Neither is in the header, and a TLV that wants neither pays for neither, which is what makes
 the codec usable as a transparent byte router over live memory.
 

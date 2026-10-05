@@ -207,16 +207,17 @@ void emit_value(std::vector<std::byte>& out, std::uint32_t v) {
 
 /** @brief The `src` PATH body of an emitted FWD frame — where §6.1 erratum 2's mint lands. */
 [[nodiscard]] std::optional<std::vector<std::byte>> src_body_of(std::span<const std::byte> frame) {
-    const auto dec = tr::wire::decode(frame);
+    const auto dec = tr::wire::tlv_node_t::over(frame);
     if (!dec) return std::nullopt;
     bool seen_dst = false;
-    for (const tr::wire::tlv_t& c : dec->children) {
-        if (c.type != type_t::PATH) continue;
+    for (const tr::wire::tlv_node_t& c : dec->children()) {
+        if (c.type() != type_t::PATH) continue;
         if (!seen_dst) {
             seen_dst = true;
             continue;
         }
-        return std::vector<std::byte>(c.payload.begin(), c.payload.end());
+        const std::span<const std::byte> body = c.payload();
+        return std::vector<std::byte>(body.begin(), body.end());
     }
     return std::nullopt;
 }

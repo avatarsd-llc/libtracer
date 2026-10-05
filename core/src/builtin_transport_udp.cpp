@@ -45,7 +45,7 @@ void register_udp_transport(transport_vertex_t& vertex, mem::mem_backend_t* rx_b
     // never peer-known). The LISTEN arm never reaches the engine at all.
     vertex.register_transport_type(
         "udp",
-        [rx_backend, egress_src](const conn_settings_t& s, const wire::tlv_t* /*raw_config*/) {
+        [rx_backend, egress_src](const conn_settings_t& s, const wire::tlv_node_t* /*raw_config*/) {
             auto link = dial_or_listen(
                 s,
                 [&] {

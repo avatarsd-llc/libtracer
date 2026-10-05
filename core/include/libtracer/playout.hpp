@@ -97,14 +97,16 @@ struct playout_clock_t {
 /**
  * @brief One sample frame, with its derived time and the caller's verdict on it.
  *
- * Handed to the visitor by reference, valid only for that call: @ref frame borrows out of the
- * `tlv_t` the batch decoded from, which the caller owns and must keep alive.
+ * Handed to the visitor by reference, valid only for that call: @ref frame points at a node
+ * that lives for that call only, and borrows the batch's frame bytes, which the caller owns and
+ * must keep alive.
  */
 struct playout_sample_t {
     /** @brief Position of this frame within the batch, in frame order. */
     std::size_t index = 0;
-    /** @brief The sample frame itself — a borrowed child of the caller's decoded batch. */
-    const tlv_t* frame = nullptr;
+    /** @brief The sample frame itself, walked in place from the caller's batch (#1829); null
+     *         when the batch's @ref batch_view_t::count runs past its samples. */
+    const tlv_node_t* frame = nullptr;
     /** @brief The DERIVED sample time, ns since the Unix epoch. Meaningful only when
      *         @ref time_known; `0` otherwise, never a fabricated plausible value. */
     std::int64_t sample_time_ns = 0;
@@ -211,7 +213,7 @@ struct playout_report_t {
  * discontinuity is surfaced to the caller, never smoothed over.
  *
  * @param cursor      The caller's sequence expectation for this stream; updated in place.
- * @param batch       The decoded batch (@ref read_batch), whose backing `tlv_t` must outlive
+ * @param batch       The decoded batch (@ref read_batch), whose frame bytes must outlive
  *                    this call.
  * @param clock       The application's "now" and lateness budget.
  * @param gaps_before Shed points reported immediately before this batch; `0` for none.
@@ -237,10 +239,16 @@ template <class on_sample_t>
 
     std::int64_t last_ns = 0;
     bool have_last = false;
+    auto at = batch.samples.begin();
     for (std::size_t i = 0; i < batch.size(); ++i) {
         playout_sample_t sample{};
         sample.index = i;
-        sample.frame = &batch.samples[i];
+        std::optional<tlv_node_t> node;
+        if (at != batch.samples.end()) {
+            node = *at;
+            ++at;
+        }
+        sample.frame = node ? &*node : nullptr;
         if (const std::optional<std::int64_t> t = batch.sample_time_ns(i); t.has_value()) {
             sample.time_known = true;
             sample.sample_time_ns = *t;
@@ -293,7 +301,7 @@ template <class on_sample_t>
  * still resets @p cursor.
  *
  * @param cursor      The caller's sequence expectation for this stream; updated in place.
- * @param batch       The decoded batch, whose backing `tlv_t` must outlive this call.
+ * @param batch       The decoded batch, whose frame bytes must outlive this call.
  * @param clock       The application's "now" and lateness budget.
  * @param gaps_before Shed points reported immediately before this batch; `0` for none.
  * @return The derivation's counts and continuity verdict.

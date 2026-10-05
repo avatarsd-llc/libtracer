@@ -48,6 +48,7 @@
 #include "libtracer/frame.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "test_support.hpp"
+#include "tlv_tree.hpp"  // host-only owning tree (#1829)
 
 namespace {
 
@@ -103,20 +104,23 @@ void raw_child(std::vector<std::byte>& out, type_t type, opt_t opt,
  * Heap-held so the decoded TLV's spans stay valid for the reader's whole lifetime.
  */
 struct config_blob_t {
-    std::vector<std::byte> bytes; /**< @brief The encoded SETTINGS TLV. */
-    tr::wire::tlv_t tlv;          /**< @brief The decode of `bytes`. */
+    std::vector<std::byte> bytes;            /**< @brief The encoded SETTINGS TLV. */
+    std::optional<tr::wire::tlv_node_t> tlv; /**< @brief The node over `bytes`. */
+
+    /** @brief The node, or null if `bytes` failed to validate. */
+    [[nodiscard]] const tr::wire::tlv_node_t* node() const { return tlv ? &*tlv : nullptr; }
 };
 
 /** @brief Wrap @p children as `SETTINGS(PL=1){…}` and decode it. */
 std::unique_ptr<config_blob_t> settings(const std::vector<std::byte>& children) {
     auto blob = std::make_unique<config_blob_t>();
     tr::wire::emit_tlv(blob->bytes, type_t::SETTINGS, opt_t{.pl = true}, children);
-    auto dec = tr::wire::decode(blob->bytes);
+    auto dec = tr::wire::tlv_node_t::over(blob->bytes);
     if (!dec) {
         check(false, "fixture SETTINGS failed to decode");
         return blob;
     }
-    blob->tlv = std::move(*dec);
+    blob->tlv = *dec;
     return blob;
 }
 
@@ -140,7 +144,7 @@ void test_unknown_key_value_cannot_hijack() {
     name_child(ch, "10.0.0.9");
     name_child(ch, "up");
     const auto blob = settings(ch);
-    const config_reader_t cfg(&blob->tlv);
+    const config_reader_t cfg(blob->node());
 
     const std::optional<std::string_view> addr = cfg.name("addr");
     std::printf("  (observed addr = %.*s)\n", static_cast<int>(addr.value_or("<absent>").size()),
@@ -168,7 +172,7 @@ void test_known_key_value_cannot_hijack() {
     name_child(ch, "port");
     value_child<std::uint16_t>(ch, 9000);
     const auto blob = settings(ch);
-    const config_reader_t cfg(&blob->tlv);
+    const config_reader_t cfg(blob->node());
 
     const std::optional<std::string_view> addr = cfg.name("addr");
     std::printf("  (observed addr = %.*s)\n", static_cast<int>(addr.value_or("<absent>").size()),
@@ -202,7 +206,7 @@ void test_unknown_pairs_are_still_tolerated() {
     name_child(ch, "keepalive");
     value_child<std::uint32_t>(ch, 30000);
     const auto blob = settings(ch);
-    const config_reader_t cfg(&blob->tlv);
+    const config_reader_t cfg(blob->node());
 
     check(is(cfg.name("addr"), "10.0.0.1"), "a known key after an unknown integer pair");
     check(cfg.u16("port") == std::optional<std::uint16_t>{8080},
@@ -236,7 +240,7 @@ void test_universal_keys_unchanged() {
     name_child(ch, "connect_timeout");
     value_child<std::uint32_t>(ch, 3000);
     const auto blob = settings(ch);
-    const config_reader_t cfg(&blob->tlv);
+    const config_reader_t cfg(blob->node());
 
     check(is(cfg.name("kind"), "udp") && is(cfg.name("addr"), "203.0.113.4"),
           "kind / addr (string values)");
@@ -266,7 +270,7 @@ void test_kind_private_keys_unchanged() {
         name_child(ch, "max_peers");
         value_child<std::uint32_t>(ch, 4);
         const auto blob = settings(ch);
-        const config_reader_t cfg(&blob->tlv);
+        const config_reader_t cfg(blob->node());
         check(cfg.flag("peer_named") == std::optional<bool>{true} &&
                   cfg.u32("max_peers") == std::optional<std::uint32_t>{4} &&
                   is(cfg.name("kind"), "tcp"),
@@ -279,7 +283,7 @@ void test_kind_private_keys_unchanged() {
         name_child(ch, "key");
         name_child(ch, "/etc/node/key.pem");
         const auto blob = settings(ch);
-        const config_reader_t cfg(&blob->tlv);
+        const config_reader_t cfg(blob->node());
         check(
             is(cfg.name("cert"), "/etc/node/cert.pem") && is(cfg.name("key"), "/etc/node/key.pem"),
             "quic: cert / key — two adjacent string pairs, the shape most at risk");
@@ -297,7 +301,7 @@ void test_kind_private_keys_unchanged() {
         name_child(ch, "peer_ttl_ms");
         value_child<std::uint32_t>(ch, 5000);
         const auto blob = settings(ch);
-        const config_reader_t cfg(&blob->tlv);
+        const config_reader_t cfg(blob->node());
         check(is(cfg.name("ifname"), "can0") &&
                   cfg.u16("node") == std::optional<std::uint16_t>{3} &&
                   cfg.u8("version") == std::optional<std::uint8_t>{1} &&
@@ -318,7 +322,7 @@ void test_repeat_and_illformed_semantics_unchanged() {
         name_child(ch, "addr");
         name_child(ch, "second");
         const auto blob = settings(ch);
-        const config_reader_t cfg(&blob->tlv);
+        const config_reader_t cfg(blob->node());
         check(is(cfg.name("addr"), "second"), "a repeated key resolves to the LAST occurrence");
     }
     {
@@ -328,7 +332,7 @@ void test_repeat_and_illformed_semantics_unchanged() {
         name_child(ch, "port");
         name_child(ch, "not-an-integer");
         const auto blob = settings(ch);
-        const config_reader_t cfg(&blob->tlv);
+        const config_reader_t cfg(blob->node());
         check(cfg.u16("port") == std::optional<std::uint16_t>{6000},
               "a wrong-typed later occurrence is ignored, not destructive");
     }
@@ -337,7 +341,7 @@ void test_repeat_and_illformed_semantics_unchanged() {
         name_child(ch, "port");
         raw_child(ch, type_t::VALUE, opt_t{}, {});
         const auto blob = settings(ch);
-        const config_reader_t cfg(&blob->tlv);
+        const config_reader_t cfg(blob->node());
         check(!cfg.u16("port").has_value(), "an empty VALUE payload is ignored");
     }
     {
@@ -352,7 +356,7 @@ void test_repeat_and_illformed_semantics_unchanged() {
         name_child(ch, "port");  // documented u16, sent as u32
         value_child<std::uint32_t>(ch, 8080);
         const auto blob = settings(ch);
-        const config_reader_t cfg(&blob->tlv);
+        const config_reader_t cfg(blob->node());
         check(!cfg.u32("keepalive").has_value(),
               "a narrower-than-requested VALUE is absent, not zero-extended");
         check(!cfg.u16("port").has_value(),
@@ -369,7 +373,7 @@ void test_repeat_and_illformed_semantics_unchanged() {
         name_child(ch, "port");
         value_child<std::uint32_t>(ch, 7000);
         const auto blob = settings(ch);
-        const config_reader_t cfg(&blob->tlv);
+        const config_reader_t cfg(blob->node());
         check(cfg.u16("port") == std::optional<std::uint16_t>{6000},
               "a wrong-width later occurrence is ignored, not destructive (#928)");
     }
@@ -379,7 +383,7 @@ void test_repeat_and_illformed_semantics_unchanged() {
         name_child(ch, "10.0.0.2");
         name_child(ch, "kind");
         const auto blob = settings(ch);
-        const config_reader_t cfg(&blob->tlv);
+        const config_reader_t cfg(blob->node());
         check(is(cfg.name("addr"), "10.0.0.2") && !cfg.name("kind").has_value(),
               "a trailing unpaired key is ignored, the pairs before it still parse");
     }
@@ -387,7 +391,7 @@ void test_repeat_and_illformed_semantics_unchanged() {
         const config_reader_t none(nullptr);
         std::vector<std::byte> ch;
         const auto blob = settings(ch);
-        const config_reader_t empty(&blob->tlv);
+        const config_reader_t empty(blob->node());
         check(!none.name("addr").has_value() && !none.u16("port").has_value() &&
                   !empty.name("addr").has_value(),
               "a null config and an empty SETTINGS answer nullopt");
@@ -410,7 +414,7 @@ void test_desync_stops_the_walk() {
     name_child(ch, "port");
     value_child<std::uint16_t>(ch, 9100);
     const auto blob = settings(ch);
-    const config_reader_t cfg(&blob->tlv);
+    const config_reader_t cfg(blob->node());
 
     check(is(cfg.name("addr"), "10.0.0.3"), "the pair before the desync still parses");
     check(!cfg.u16("port").has_value(), "nothing after the desync is bound (no resync guessing)");
@@ -445,7 +449,7 @@ void test_cert_key_pair_cannot_be_hijacked() {
     name_child(ch, "/tmp/attacker-key.pem");
     name_child(ch, "pem");
     const auto blob = settings(ch);
-    const config_reader_t cfg(&blob->tlv);
+    const config_reader_t cfg(blob->node());
 
     const std::optional<std::string_view> k = cfg.name("key");
     std::printf("  (observed key = %.*s)\n", static_cast<int>(k.value_or("<absent>").size()),
@@ -488,7 +492,7 @@ void test_l4_accessors_share_the_walk() {
     raw_child(ch, type_t::SETTINGS, opt_t{.pl = true}, decoy_cfg);
     name_child(ch, "pad");
     const auto blob = settings(ch);
-    const config_reader_t cfg(&blob->tlv);
+    const config_reader_t cfg(blob->node());
 
     const std::optional<std::span<const std::byte>> nb = cfg.name_bytes("name");
     check(nb.has_value() && tr::detail::as_string_view(*nb) == "sensor-a",
@@ -498,17 +502,18 @@ void test_l4_accessors_share_the_walk() {
     check(!cfg.name_bytes("config").has_value() && !cfg.name_bytes("absent").has_value(),
           "`name_bytes` answers by TYPE (SETTINGS value => nullopt) and absent => nullopt");
 
-    const tr::wire::tlv_t* nested = cfg.settings("config");
-    check(nested != nullptr &&
-              config_reader_t(nested).u16("port") == std::optional<std::uint16_t>{4433},
+    const std::optional<tr::wire::tlv_node_t> nested = cfg.settings("config");
+    check(nested.has_value() &&
+              config_reader_t(&*nested).u16("port") == std::optional<std::uint16_t>{4433},
           "`settings` returns the legitimate nested SETTINGS, readable by a nested reader");
-    check(config_reader_t(nested).u16("port") != std::optional<std::uint16_t>{9999},
+    check(nested.has_value() &&
+              config_reader_t(&*nested).u16("port") != std::optional<std::uint16_t>{9999},
           "... NOT the decoy a hijacked every-offset scan would have bound");
-    check(cfg.settings("type") == nullptr && cfg.settings("absent") == nullptr,
-          "`settings` answers by TYPE (NAME value => nullptr) and absent => nullptr");
-    check(config_reader_t(nullptr).settings("config") == nullptr &&
+    check(!cfg.settings("type").has_value() && !cfg.settings("absent").has_value(),
+          "`settings` answers by TYPE (NAME value => nullopt) and absent => nullopt");
+    check(!config_reader_t(nullptr).settings("config").has_value() &&
               !config_reader_t(nullptr).name_bytes("name").has_value(),
-          "a null config answers nullptr / nullopt on the new accessors too");
+          "a null config answers nullopt on the new accessors too");
 
     {
         std::vector<std::byte> ch2;  // last well-formed occurrence wins for SETTINGS too
@@ -519,12 +524,12 @@ void test_l4_accessors_share_the_walk() {
         name_child(ch2, "config");
         name_child(ch2, "wrong-type-string");
         const auto blob2 = settings(ch2);
-        const config_reader_t cfg2(&blob2->tlv);
-        const tr::wire::tlv_t* n2 = cfg2.settings("config");
-        check(
-            n2 != nullptr && config_reader_t(n2).u16("port") == std::optional<std::uint16_t>{4433},
-            "repeated `config`: the LAST well-formed SETTINGS wins, a wrong-typed later "
-            "occurrence is ignored");
+        const config_reader_t cfg2(blob2->node());
+        const std::optional<tr::wire::tlv_node_t> n2 = cfg2.settings("config");
+        check(n2.has_value() &&
+                  config_reader_t(&*n2).u16("port") == std::optional<std::uint16_t>{4433},
+              "repeated `config`: the LAST well-formed SETTINGS wins, a wrong-typed later "
+              "occurrence is ignored");
     }
 }
 
@@ -541,8 +546,8 @@ void test_l4_accessors_share_the_walk() {
 void test_shared_vector_pins_the_walk() {
     std::printf("the settings/duplicate-key-last-wins vector reads the same here (#995):\n");
     const std::vector<std::byte> vec = vector_bytes("settings/duplicate-key-last-wins");
-    const auto dec = tr::wire::decode(vec);
-    check(dec.has_value() && dec->type == type_t::SETTINGS, "the vector decodes as SETTINGS");
+    const auto dec = tr::wire::tlv_node_t::over(vec);
+    check(dec.has_value() && dec->type() == type_t::SETTINGS, "the vector decodes as SETTINGS");
     const config_reader_t cfg(&*dec);
     check(is(cfg.name("kind"), "ws"),
           "`kind` reads \"ws\": the wrong-typed first occurrence is skipped, the last "

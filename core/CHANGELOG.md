@@ -106,7 +106,41 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   **Migration:** read `fwd.type()`, `fwd.opt()` and `fwd.trailer()` instead of the fields, and walk
   `for (const wire::tlv_node_t c : fwd.children())` instead of indexing `fwd.children[i]`. A
   child's `bytes()` is its wire encoding, so `wire::encode(fwd.children[i])` becomes
-  `c.bytes()`. An observer that needs an owning tree can still call `wire::decode(fwd.bytes())`.
+  `c.bytes()`. The owning `wire::decode` an observer could fall back on is gone too (#1829,
+  next entry).
+- **`wire::decode` is removed, and every core reader takes the in-place `wire::tlv_node_t`
+  instead of an owning `wire::tlv_t` tree
+  ([#1829](https://github.com/avatarsd-llc/libtracer/issues/1829)).** `decode` copied each
+  frame into a `tlv_t` whose children were heap vectors; `tlv_node_t::over` validates the same
+  frames with the same `err_t` and builds nothing. `tlv_t` stays as the encode-side model
+  (`encode`, `equal`, `stamp_ts`). The changed signatures:
+  - `wire::decode(std::span<const std::byte>, mem::block_source_t&)` and
+    `wire::decode(const view::view_t&, mem::block_source_t&)`: removed. Use
+    `wire::tlv_node_t::over` with the same arguments.
+  - `wire::config_reader_t(const tlv_t*)` is now `config_reader_t(const tlv_node_t*)`, and
+    `config_reader_t::settings(key)` returns `std::optional<tlv_node_t>` instead of
+    `const tlv_t*` (`nullopt` where it returned `nullptr`).
+  - `graph::parse_acl(const tlv_t&)` is now `parse_acl(const tlv_node_t&)`.
+  - `wire::is_batch` and `wire::read_batch` take `const tlv_node_t&`. `batch_view_t::samples` is
+    a `tlv_children_t` range instead of a `std::span<const tlv_t>`, and the new
+    `batch_view_t::count` holds the sample count `size()` returns.
+  - `wire::playout_sample_t::frame` is `const tlv_node_t*` instead of `const tlv_t*`. It is valid
+    only during the callback.
+  - `wire::path_key(const tlv_t&)` is now `path_key(const tlv_node_t&)`.
+  - `graph::child_factory_t` and `net::transport_factory_t` receive the config as
+    `const wire::tlv_node_t*` instead of `const wire::tlv_t*`.
+  - `fwd_router_t::adopt_binding`, `adopt_path_label`, `fall_back_on_label_refusal` and
+    `on_advertise` take `const wire::tlv_node_t&`.
+  - `wire::tlv_view_t::materialized_t::root` is a `tlv_node_t` instead of a `tlv_t`.
+  - `wire::tlv_children_t` gains a public default constructor (an empty range) and
+    `tlv_children_t::from(iterator)`, the rest of a walk from one position.
+
+  **Migration:** replace `wire::decode(bytes)` with `wire::tlv_node_t::over(bytes)` and pass the
+  node (or its address) to the reader. Read `type()`, `opt()`, `payload()` and `trailer()`
+  instead of the fields, and walk `children()` instead of indexing `children[i]`
+  (`std::ranges::next(kids.begin(), i, kids.end())` reaches child `i`). A factory lambda's last
+  parameter becomes `const tr::wire::tlv_node_t*`. Code that needs an owning tree builds one from
+  the node; the node and everything read from it borrow the input bytes, which must outlive them.
 
 - **`can_link_t::rx_fn_t` is a heap-free `tr::inline_fn_t`, not a `std::function`
   ([#1671](https://github.com/avatarsd-llc/libtracer/issues/1671)).** It was the last

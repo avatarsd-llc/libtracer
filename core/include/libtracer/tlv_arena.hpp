@@ -122,7 +122,7 @@ class tlv_arena_t {
 /**
  * @brief Decode exactly one TLV filling @p input into a flat arena drawn from @p src.
  *
- * The terminus-side counterpart of `decode` (ADR-0041 §1): identical
+ * The terminus-side counterpart of `tlv_node_t::over` (ADR-0041 §1): identical
  * validation (bounds, reserved bits, type 0x00, trailer CRC, trailing bytes ⇒
  * FRAME_INVALID), iterative (no recursion) with the node array, the sink's
  * open-node stack and the walk stack all drawn from @p src — so the caller's

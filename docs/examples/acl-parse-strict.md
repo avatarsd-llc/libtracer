@@ -50,6 +50,6 @@ does.
 
 See also: [security-acl module](../modules/security-acl.md) ·
 [protocol TLVs](../reference/05-protocol-tlvs.md) ·
-[what `decode` refuses](wire-decode-refusals.md) ·
+[what the frame reader refuses](wire-decode-refusals.md) ·
 [the two policy profiles](acl-policy-profiles.md) ·
 [expiry](acl-expiry.md).

@@ -121,7 +121,7 @@ int main() {
     std::printf("a kind the core does not contain:\n");
     net.register_transport_type(
         "demo",
-        [](const tr::net::conn_settings_t& settings, const tr::wire::tlv_t* raw_config)
+        [](const tr::net::conn_settings_t& settings, const tr::wire::tlv_node_t* raw_config)
             -> tr::graph::result_t<std::unique_ptr<tr::net::transport_t>> {
             // A real factory parses its kind-PRIVATE keys out of `raw_config` here (quic's
             // `tls` profile name is the shipped example); the universal keys are already

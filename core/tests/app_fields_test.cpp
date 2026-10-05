@@ -35,6 +35,7 @@
 #include "test_history.hpp"
 #include "test_support.hpp"
 #include "test_values.hpp"
+#include "tlv_tree.hpp"  // host-only owning tree (#1829)
 
 namespace {
 

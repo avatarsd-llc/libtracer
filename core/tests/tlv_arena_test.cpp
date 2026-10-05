@@ -39,6 +39,7 @@
 #include "libtracer/packed_path.hpp"
 #include "libtracer/tlv_emit.hpp"
 #include "test_support.hpp"
+#include "tlv_tree.hpp"  // host-only owning tree (#1829)
 
 namespace {
 
@@ -256,7 +257,7 @@ int main() {
         const std::vector<std::byte> bytes = encode(path);
         auto& mr = fresh_heap_resource();
         const auto arena = decode_into(bytes, mr);
-        const auto tree = decode(bytes);
+        const auto tree = tr::wire::tlv_node_t::over(bytes);
         check(arena && arena->size() == 1 && !arena->root().opt.pl,
               "a packed PATH decodes as ONE opaque node (opt.PL = 0)");
         if (arena && tree) {
@@ -287,7 +288,7 @@ int main() {
             p.type = type_t::PATH;
             p.payload = std::span<const std::byte>(*b);
             const std::vector<std::byte> wire_bytes = encode(p);
-            const auto tree = decode(wire_bytes);
+            const auto tree = tr::wire::tlv_node_t::over(wire_bytes);
             refused = refused && tree && !path_key(*tree).has_value();
         }
         check(refused, "ragged framing and the len==0 escape are refused in key context");
@@ -298,7 +299,7 @@ int main() {
         structured.opt.pl = true;
         structured.children.push_back(make_name("a"));
         const std::vector<std::byte> b_struct = encode(structured);
-        const auto struct_tree = decode(b_struct);
+        const auto struct_tree = tr::wire::tlv_node_t::over(b_struct);
         check(struct_tree && !path_key(*struct_tree).has_value(),
               "a structured (opt.PL=1) PATH is not a key");
 

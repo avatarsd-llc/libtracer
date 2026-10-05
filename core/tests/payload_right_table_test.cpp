@@ -42,6 +42,7 @@
 #include "libtracer/tracer.hpp"
 #include "test_support.hpp"
 #include "test_values.hpp"
+#include "tlv_tree.hpp"  // host-only owning tree (#1829)
 
 namespace {
 
@@ -208,8 +209,8 @@ struct dead_sock_t final : tr::net::transport_t {
 void declare_fake_module(transport_vertex_t& net) {
     net.register_transport_type(
         "fake",
-        [](const tr::net::conn_settings_t&,
-           const tr::wire::tlv_t*) -> tr::graph::result_t<std::unique_ptr<tr::net::transport_t>> {
+        [](const tr::net::conn_settings_t&, const tr::wire::tlv_node_t*)
+            -> tr::graph::result_t<std::unique_ptr<tr::net::transport_t>> {
             return std::make_unique<dead_sock_t>();
         },
         tr::net::transport_kind_traits_t{.self_heal_dial = false, .delivers_ropes = false});
@@ -335,8 +336,8 @@ tr::graph::result_t<void> declare_catalog_module(transport_vertex_t& net,
                                                  tr::net::conn_catalog_t catalog) {
     net.register_transport_type(
         "cat",
-        [](const tr::net::conn_settings_t&,
-           const tr::wire::tlv_t*) -> tr::graph::result_t<std::unique_ptr<tr::net::transport_t>> {
+        [](const tr::net::conn_settings_t&, const tr::wire::tlv_node_t*)
+            -> tr::graph::result_t<std::unique_ptr<tr::net::transport_t>> {
             ++g_catalog_factory_runs;
             return std::make_unique<dead_sock_t>();
         },

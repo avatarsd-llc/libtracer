@@ -47,7 +47,7 @@ std::expected<tlv_view_t, err_t> tlv_view_t::over(view::rope_t frame) {
     if (!frame.all_host()) return std::unexpected(err_t::FRAME_INVALID);
 
     // The bounds anchor (ADR-0053 §4): root header with the CRC walk DEFERRED,
-    // then the exact-total check decode() applies ("trailing bytes").
+    // then the exact-total check tlv_node_t::over applies ("trailing bytes").
     const auto h = grammar::parse_header(grammar::rope_cursor{frame}, grammar::crc_check_t::DEFER);
     if (!h) return std::unexpected(h.error());
     if (h->total != frame.total_length()) return std::unexpected(err_t::FRAME_INVALID);
@@ -63,7 +63,7 @@ std::expected<std::optional<tlv_view_t>, err_t> tlv_view_t::children_t::next() {
 
     // Parse exactly ONE child header (CRC deferred). Containment: the cursor
     // region ends at the parent's body end, so a child whose declared total
-    // overruns it is FRAME_TRUNCATED — the lazy analogue of decode()'s
+    // overruns it is FRAME_TRUNCATED — the lazy analogue of over()'s
     // subspan-bounded parse_one. The cursor RESUMES at the anchor the previous
     // call left, so it re-enters the chain at this child instead of walking to it
     // from link 0 (#917).
@@ -125,9 +125,10 @@ std::expected<tlv_view_t::materialized_t, err_t> tlv_view_t::materialize(
                                    ? err_t::FLOW_BACKPRESSURE
                                    : err_t::FRAME_INVALID);
     }
-    auto tree = decode(flat->bytes());
-    if (!tree) return std::unexpected(tree.error());
-    return materialized_t{std::move(*flat), std::move(*tree)};
+    // The node borrows the segment's bytes, which a `view_t` move does not relocate.
+    const auto root = tlv_node_t::over(flat->bytes());
+    if (!root) return std::unexpected(root.error());
+    return materialized_t{std::move(*flat), *root};
 }
 
 }  // namespace tr::wire

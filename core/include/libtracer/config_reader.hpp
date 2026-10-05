@@ -10,7 +10,8 @@
  * kind-private keys never land in the shared conn_settings_t) — what is shared is the
  * walk, not the vocabulary.
  *
- * The type lives in `tr::wire` (#985): it decodes a `wire::tlv_t`'s children, and the L4
+ * The type lives in `tr::wire` (#985): it walks a `wire::tlv_node_t`'s children in place
+ * (#1829), and the L4
  * readers of the same grammar — `graph_t::create_child` (the creation SPEC) and
  * `parse_subscriber_tlv` (the SUBSCRIBER QoS SETTINGS) — may not depend on `tr::net`
  * (dependencies point up the layers only). Before the hoist those two carried the
@@ -59,24 +60,29 @@ namespace tr::wire {
  * than a receiver understands, whereas an ACL is a security document in which a
  * silently dropped attribute widens access.
  *
- * @note The returned string_views/spans (and the reader itself) borrow the decoded
- *       TLV's storage — use them while the `tlv_t` is alive.
+ * @note The returned string_views, spans and nodes (and the reader itself) borrow the
+ *       frame bytes the node was validated over (@ref tlv_node_t::over) — use them while
+ *       those bytes are alive. The reader walks the children in place and allocates nothing
+ *       (#1829).
  */
 class config_reader_t {
    public:
     /**
      * @brief Construct over @p config's children.
      *
-     * @param config The decoded pair-container TLV; nullptr = no config (every
-     *               accessor returns nullopt / nullptr).
+     * @param config The validated pair-container node; nullptr = no config (every
+     *               accessor returns nullopt). The node is copied (it is two words of
+     *               borrowed bytes); the bytes it borrows must outlive the reader.
      */
-    explicit config_reader_t(const tlv_t* config) noexcept : config_(config) {}
+    explicit config_reader_t(const tlv_node_t* config) noexcept {
+        if (config != nullptr) config_ = *config;
+    }
 
     /** @brief The string value of @p key (a `NAME` value child), if present. */
     [[nodiscard]] std::optional<std::string_view> name(std::string_view key) const noexcept {
-        const tlv_t* val = find(key, type_t::NAME);
-        if (val == nullptr) return std::nullopt;
-        return detail::as_string_view(val->payload);
+        const std::optional<tlv_node_t> val = find(key, type_t::NAME);
+        if (!val) return std::nullopt;
+        return detail::as_string_view(val->payload());
     }
 
     /**
@@ -89,13 +95,11 @@ class config_reader_t {
      * as find(), so a value child spelling @p key is never mistaken for it.
      */
     [[nodiscard]] bool has(std::string_view key) const noexcept {
-        if (config_ == nullptr) return false;
-        const std::vector<tlv_t>& ch = config_->children;
-        for (std::size_t i = 0; i + 1 < ch.size(); i += 2) {
-            if (ch[i].type != type_t::NAME) break;
-            if (detail::as_string_view(ch[i].payload) == key) return true;
-        }
-        return false;
+        bool seen = false;
+        walk_pairs([&](const tlv_node_t& k, const tlv_node_t&) noexcept {
+            seen = seen || detail::as_string_view(k.payload()) == key;
+        });
+        return seen;
     }
 
     /**
@@ -107,18 +111,18 @@ class config_reader_t {
      */
     [[nodiscard]] std::optional<std::span<const std::byte>> name_bytes(
         std::string_view key) const noexcept {
-        const tlv_t* val = find(key, type_t::NAME);
-        if (val == nullptr) return std::nullopt;
-        return val->payload;
+        const std::optional<tlv_node_t> val = find(key, type_t::NAME);
+        if (!val) return std::nullopt;
+        return val->payload();
     }
 
     /**
-     * @brief The nested `SETTINGS` value child of @p key, or nullptr.
+     * @brief The nested `SETTINGS` value child of @p key, or nullopt.
      *
      * A module namespace ("config" in the creation SPEC, a per-transport block in a
-     * connection config). Borrowed from the decoded TLV, same as every accessor.
+     * connection config). A node over the same borrowed bytes, same as every accessor.
      */
-    [[nodiscard]] const tlv_t* settings(std::string_view key) const noexcept {
+    [[nodiscard]] std::optional<tlv_node_t> settings(std::string_view key) const noexcept {
         return find(key, type_t::SETTINGS);
     }
 
@@ -149,13 +153,34 @@ class config_reader_t {
     /** @brief Decode @p key's exactly-`sizeof(T)`-byte `VALUE` payload little-endian as @p T. */
     template <class T>
     [[nodiscard]] std::optional<T> value_as(std::string_view key) const noexcept {
-        const tlv_t* val = find(key, type_t::VALUE, sizeof(T));
-        if (val == nullptr) return std::nullopt;
-        return detail::load_le<T>(val->payload);
+        const std::optional<tlv_node_t> val = find(key, type_t::VALUE, sizeof(T));
+        if (!val) return std::nullopt;
+        return detail::load_le<T>(val->payload());
     }
 
     /**
-     * @brief The last well-formed value child for @p key, or nullptr.
+     * @brief Call @p fn on each well-paired `(NAME key, value)` child pair, in wire order.
+     *
+     * **Pair-consuming** (#927): the walk takes two children at a time, so a value child is
+     * never re-read as the next position's key. A key slot that is not a `NAME` loses the
+     * pairing and ends the walk; a trailing unpaired key is ignored.
+     */
+    template <class Fn>
+    void walk_pairs(Fn&& fn) const noexcept {
+        if (!config_) return;
+        const tlv_children_t ch = config_->children();
+        for (auto it = ch.begin(); it != ch.end();) {
+            const tlv_node_t k = *it;
+            if (++it == ch.end()) return;  // trailing unpaired key
+            if (k.type() != type_t::NAME) return;
+            const tlv_node_t v = *it;
+            ++it;
+            fn(k, v);
+        }
+    }
+
+    /**
+     * @brief The last well-formed value child for @p key, or nullopt.
      *
      * **Pair-consuming** (#927): the walk steps two children at a time over
      * `(NAME key, value)` pairs and advances past the value it consumed, so a
@@ -187,25 +212,20 @@ class config_reader_t {
      * resynchronizing on every offset is the defect above. A trailing unpaired
      * key is ignored.
      */
-    [[nodiscard]] const tlv_t* find(std::string_view key, type_t value_type,
-                                    std::size_t value_width = 0) const noexcept {
-        if (config_ == nullptr) return nullptr;
-        const std::vector<tlv_t>& ch = config_->children;
-        const tlv_t* found = nullptr;
-        for (std::size_t i = 0; i + 1 < ch.size(); i += 2) {
-            // Key slot. Anything but a NAME means the pairing is lost from here on.
-            if (ch[i].type != type_t::NAME) break;
+    [[nodiscard]] std::optional<tlv_node_t> find(std::string_view key, type_t value_type,
+                                                 std::size_t value_width = 0) const noexcept {
+        std::optional<tlv_node_t> found;
+        walk_pairs([&](const tlv_node_t& k, const tlv_node_t& val) noexcept {
             // Not our key: skip the whole pair, value slot included (forward-compat).
-            if (detail::as_string_view(ch[i].payload) != key) continue;
-            const tlv_t& val = ch[i + 1];
-            if (val.type != value_type) continue;
-            if (value_type == type_t::VALUE && val.payload.size() != value_width) continue;
-            found = &val;
-        }
+            if (detail::as_string_view(k.payload()) != key) return;
+            if (val.type() != value_type) return;
+            if (value_type == type_t::VALUE && val.payload().size() != value_width) return;
+            found = val;
+        });
         return found;
     }
 
-    const tlv_t* config_; /**< @brief The pair-container TLV (nullable, borrowed). */
+    std::optional<tlv_node_t> config_; /**< @brief The pair-container node; empty = none. */
 };
 
 }  // namespace tr::wire

@@ -54,9 +54,9 @@ int main() {
 
     std::vector<std::byte> frame;
     tr::wire::emit_tlv(frame, type_t::PATH, opt_t{}, body);
-    const auto decoded = tr::wire::decode(frame);
+    const auto decoded = tr::wire::tlv_node_t::over(frame);
     check(ok, decoded.has_value(), "the PATH TLV decodes");
-    check(ok, decoded && decoded->children.empty(),
+    check(ok, decoded && decoded->children().empty(),
           "a PATH has no children — the records are the body (RFC-0018)");
 
     // The key the graph would look this up by, from both directions.

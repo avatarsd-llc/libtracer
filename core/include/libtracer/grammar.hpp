@@ -5,8 +5,9 @@
  * The one wire-grammar core (ADR-0048 §1): the TLV header/trailer rules —
  * type-0x00 reject, reserved-bit reject, `LL` length width, trailer sizing, the
  * two-span CRC — parsed + validated in ONE place, read through a small
- * chunk-cursor so the same rules serve every byte source. Both materializing
- * decoders funnel through it: the owning `tlv_t` tree (frame.cpp `decode`) and
+ * chunk-cursor so the same rules serve every byte source. Every frame reader
+ * funnels through it: the in-place node (frame.cpp `tlv_node_t::over`, which
+ * builds nothing; the owning `decode` it replaced was deleted in #1829) and
  * the terminus arena (tlv_arena.cpp `decode_into`). Previously this grammar was
  * forked (`parse_one` vs `parse_header`), held byte-for-byte equal only by the
  * decode<->decode_into equivalence test — every future rule was a two-file edit.
