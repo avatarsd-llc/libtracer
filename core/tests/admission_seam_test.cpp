@@ -439,8 +439,8 @@ void test_field_admission_accepts() {
     int admits = 0;
     int applied = 0;
     handlers_t h;
-    auto h_on_app_field_admit = [&admits](std::string_view name,
-                                          const view_t& value) -> tr::graph::result_t<view_t> {
+    auto h_on_app_field_admit = [&admits](std::string_view name, const view_t& value,
+                                          const write_ctx_t&) -> tr::graph::result_t<view_t> {
         ++admits;
         check(name == "mode", "the filter is handed the field key below settings.app.");
         return value;
@@ -473,8 +473,8 @@ void test_field_admission_normalises() {
     graph_t g;
     std::vector<std::byte> applied_bytes;
     handlers_t h;
-    auto h_on_app_field_admit2 = [](std::string_view,
-                                    const view_t&) -> tr::graph::result_t<view_t> {
+    auto h_on_app_field_admit2 = [](std::string_view, const view_t&,
+                                    const write_ctx_t&) -> tr::graph::result_t<view_t> {
         return make_value(value_tlv("ECO"));  // the canonical spelling, whatever was written
     };
     h.on_app_field_admit = tr::graph::thunk(h_on_app_field_admit2);
@@ -511,8 +511,8 @@ void test_field_admission_refuses() {
     // shape of validation the descriptor table deliberately does not perform for the owner.
     const std::size_t limit = value_tlv("eco").size();
     handlers_t h;
-    auto h_on_app_field_admit3 = [limit](std::string_view,
-                                         const view_t& value) -> tr::graph::result_t<view_t> {
+    auto h_on_app_field_admit3 = [limit](std::string_view, const view_t& value,
+                                         const write_ctx_t&) -> tr::graph::result_t<view_t> {
         if (value.bytes().size() > limit) return std::unexpected(status_t::TYPE_MISMATCH);
         return value;
     };

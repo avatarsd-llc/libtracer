@@ -1694,9 +1694,9 @@ class graph_t {
      *
      * An empty @p field is an ordinary value write. Pass `path.field()` for the field
      * selector. A field write targets a contiguous control TLV, so a multi-link value is
-     * materialized first. @p link is as for the plain overload; a non-empty @p field does not
-     * reach `handlers_t::on_admit` (the app-field plane has its own seam), so it is consumed
-     * only by the empty-field value write.
+     * materialized first. @p link is as for the plain overload: an empty @p field hands it to
+     * `handlers_t::on_admit` and `on_write`, and a `:settings.app.<name>` field write hands it,
+     * with @p caller, to `handlers_t::on_app_field_admit` in the same `write_ctx_t` (#1832).
      */
     [[nodiscard]] result_t<void> write(vertex_handle_t v, const field_path_t& field,
                                        view::rope_t value, std::string_view caller = {},
@@ -2844,9 +2844,10 @@ class graph_t {
         return subscription_observer_.installed() && !caller.empty();
     }
     // Field surface: ":settings.<f>", ":settings.app.<name…>" (RFC-0010),
-    // ":subscribers[]" / "[N]", ":children[]".
+    // ":subscribers[]" / "[N]", ":children[]". `ctx.subject` is the ACL caller context every
+    // row gates on; the whole context reaches the app-field admission filter (#1832).
     [[nodiscard]] result_t<void> field_write(vertex_t* v, const field_path_t& field,
-                                             const view::view_t& value, std::string_view caller);
+                                             const view::view_t& value, const write_ctx_t& ctx);
     // The ACL gate (#81, ADR-0018/0020): true iff `caller` may exercise `right` on
     // `v`. True with no resolver installed (one null check — enforcement off), for the
     // trusted EMPTY (local) caller — settled before the resolver runs, #905 — or when

@@ -89,7 +89,8 @@ struct handlers_t {                                       // six hooks, 96 B on 
     hook_t<result_t<void>(const value_t&, const write_ctx_t&)>    on_write;   // BY REFERENCE
     hook_t<result_t<view_t>()>                                    on_children;
     hook_t<admission_t(const value_t&, const write_ctx_t&)>       on_admit;
-    hook_t<result_t<view_t>(std::string_view, const view_t&)>     on_app_field_admit;
+    hook_t<result_t<view_t>(std::string_view, const view_t&, const write_ctx_t&)>
+                                                                  on_app_field_admit;
     hook_t<void(std::string_view, const view_t&)>                 on_app_field_write;
 };                            // keep a value past on_write/on_admit: value_ref_t::keep(value)
 

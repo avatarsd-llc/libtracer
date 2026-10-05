@@ -415,7 +415,7 @@ struct graph_t::field_surface_t {
                                                 const field_path_t& field, std::string_view caller);
     /** @brief A field's write; a row without one has no write surface (SCHEMA_NOT_FOUND). */
     using write_fn_t = result_t<void> (*)(graph_t& g, vertex_t* v, const field_path_t& field,
-                                          const view::view_t& value, std::string_view caller);
+                                          const view::view_t& value, const write_ctx_t& ctx);
 
     /**
      * @brief A contiguous control TLV as the one read type (RFC-0028 D11): a single-link
@@ -486,7 +486,7 @@ struct graph_t::field_surface_t {
      * SCHEMA_NOT_FOUND) is what each arm below states.
      */
     static result_t<void> write_subscribers(graph_t& g, vertex_t* v, const field_path_t& field,
-                                            const view::view_t& value, std::string_view caller) {
+                                            const view::view_t& value, const write_ctx_t& ctx) {
         // `[]` appends and `[N]` clears or replaces (RFC-0009 §D.1); the two share ONE parse
         // and admission tail below, and `slot` is the only thing that tells them apart.
         const field_sel_t sel = field_selector(field);
@@ -494,7 +494,7 @@ struct graph_t::field_surface_t {
         if (sel == field_sel_t::SLOT) {
             // `[N]` is gated on WRITE before its payload is looked at. The append is gated by
             // the SUBSCRIBE gate inside `admit_subscriber` alone, as it always was.
-            if (!g.acl_allows(v, caller, acl_right_t::WRITE))
+            if (!g.acl_allows(v, ctx.subject, acl_right_t::WRITE))
                 return std::unexpected(status_t::PERMISSION_DENIED);
             slot = field.steps[0].index;
         } else if (sel != field_sel_t::APPEND) {
@@ -532,7 +532,7 @@ struct graph_t::field_surface_t {
             // Clear-and-report through the ONE slot-clear door `unsubscribe` also runs: the
             // observer's view is taken before the clear, the RFC-0005 counters unwind, and only
             // a slot that WAS active is reported as a removal.
-            (void)g.clear_subscriber_slot(v, *slot, caller);
+            (void)g.clear_subscriber_slot(v, *slot, ctx.subject);
             return {};
         }
         subscriber_t s;
@@ -564,11 +564,11 @@ struct graph_t::field_surface_t {
         // append is reached only through the public `graph_t::write(v, field, value, caller)`,
         // which an embedder may drive with an inbound link name. `[N]` has no such diversion
         // and IS reached from the wire.
-        if (!caller.empty()) s.ensure_remote().caller.assign(caller);
+        if (!ctx.subject.empty()) s.ensure_remote().caller.assign(ctx.subject);
         // The single admission step (ADR-0049): SUBSCRIBE gate → append (or replace at
         // `slot` — §D.1's "admitted through the same admission door") → latch. A field-write
         // subscribe returns no host handle — discard it.
-        if (const auto r = g.admit_subscriber(v, std::move(s), caller, slot); !r)
+        if (const auto r = g.admit_subscriber(v, std::move(s), ctx.subject, slot); !r)
             return std::unexpected(r.error());
         return {};
     }
@@ -614,9 +614,9 @@ struct graph_t::field_surface_t {
      * changes a code that leaves the device; `field_shape_matrix` pins both answers.
      */
     static result_t<void> write_acl(graph_t& g, vertex_t* v, const field_path_t& field,
-                                    const view::view_t& value, std::string_view caller) {
+                                    const view::view_t& value, const write_ctx_t& ctx) {
         if (!whole_field(field)) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
-        if (!g.acl_allows(v, caller, acl_right_t::WRITE_ACL))
+        if (!g.acl_allows(v, ctx.subject, acl_right_t::WRITE_ACL))
             return std::unexpected(status_t::PERMISSION_DENIED);
         const auto acl = wire::tlv_node_t::over(value);
         if (!acl || acl->type() != type_t::ACL || !acl->opt().pl)
@@ -679,10 +679,10 @@ struct graph_t::field_surface_t {
      * and `:children` bare has no write surface at all.
      */
     static result_t<void> write_children(graph_t& g, vertex_t* v, const field_path_t& field,
-                                         const view::view_t& value, std::string_view caller) {
+                                         const view::view_t& value, const write_ctx_t& ctx) {
         if (field_selector(field) != field_sel_t::APPEND)
             return std::unexpected(status_t::SCHEMA_NOT_FOUND);
-        if (!g.acl_allows(v, caller, acl_right_t::CREATE))
+        if (!g.acl_allows(v, ctx.subject, acl_right_t::CREATE))
             return std::unexpected(status_t::PERMISSION_DENIED);
         return g.create_child(v, value);
     }
@@ -767,7 +767,7 @@ struct graph_t::field_surface_t {
      * to what leaves the device for that spelling; `field_shape_matrix` pins both answers.
      */
     static result_t<void> write_settings(graph_t& g, vertex_t* v, const field_path_t& field,
-                                         const view::view_t& value, std::string_view caller) {
+                                         const view::view_t& value, const write_ctx_t& ctx) {
         std::string key;
         if (app_field_sel(field, key) != app_sel_t::NAMED)
             return std::unexpected(status_t::SCHEMA_NOT_FOUND);
@@ -780,7 +780,7 @@ struct graph_t::field_surface_t {
         // name set nor which spellings exist. The read door has the same order (its READ
         // gate sits above `settings.app.` resolution); #430's write-side hoist left this
         // branch answering SCHEMA_NOT_FOUND pre-gate, which leaked field existence.
-        if (!caller.empty() && !g.acl_allows(v, caller, acl_right_t::WRITE))
+        if (!ctx.is_local_owner() && !g.acl_allows(v, ctx.subject, acl_right_t::WRITE))
             return std::unexpected(status_t::PERMISSION_DENIED);
         const std::optional<app_access_t> access = v->app_field_access(key);
         if (!access)  // undeclared stays ENOTTY — the table opens only its own names
@@ -790,7 +790,7 @@ struct graph_t::field_surface_t {
         // caller gets, identically; per the erratum it sits BELOW the ACL gate so it is
         // never an existence oracle for a denied one. The owner (empty caller) skips
         // both checks — it is updating its own projection, not a caller.
-        if (!caller.empty() && *access == app_access_t::RO)
+        if (!ctx.is_local_owner() && *access == app_access_t::RO)
             return std::unexpected(status_t::SCHEMA_NOT_FOUND);
         // ADMISSION (§A.3), the field plane's twin of the value plane's `on_admit`. The
         // descriptor table is still consumer self-description and still never a runtime
@@ -807,10 +807,13 @@ struct graph_t::field_surface_t {
         // lives for the cost reason `graph_t::admissions_` states) and called with no vertex
         // lock held, so it may re-enter the graph like the apply seam below. `admitted` is the
         // view it returned, READ by the store on the next line and never retained past it.
+        // `ctx` is the very context the gates above ran on (#1832): the filter and the gate
+        // cannot disagree about who wrote, and it sees the arrival link the value plane's
+        // `on_admit` sees.
         view::view_t admitted = value;
         const admission_node_t* adm = v->has_admission() ? g.admission_for(v) : nullptr;
         if (adm != nullptr && adm->on_app_field_admit) {
-            result_t<view::view_t> decided = adm->on_app_field_admit(key, value);
+            result_t<view::view_t> decided = adm->on_app_field_admit(key, value, ctx);
             if (!decided) return std::unexpected(decided.error());
             admitted = std::move(*decided);
         }
@@ -930,10 +933,10 @@ struct graph_t::field_surface_t {
 };
 
 result_t<void> graph_t::field_write(vertex_t* v, const field_path_t& field,
-                                    const view::view_t& value, std::string_view caller) {
+                                    const view::view_t& value, const write_ctx_t& ctx) {
     const field_surface_t::row_t* row = field_surface_t::find(field.steps[0].name);
     if (row == nullptr || row->write == nullptr) return std::unexpected(status_t::SCHEMA_NOT_FOUND);
-    return row->write(*this, v, field, value, caller);
+    return row->write(*this, v, field, value, ctx);
 }
 
 result_t<value_ref_t> graph_t::read_field_composed(vertex_handle_t vh, const field_path_t& field,

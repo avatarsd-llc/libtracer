@@ -2825,7 +2825,7 @@ result_t<void> graph_t::write(vertex_handle_t vh, const field_path_t& field, vie
                                    ? status_t::BACKPRESSURE
                                    : status_t::TYPE_MISMATCH);
     }
-    return field_write(v, field, *head, caller);
+    return field_write(v, field, *head, write_ctx_t{.subject = caller, .link = link});
 }
 
 result_t<value_ref_t> graph_t::await(vertex_handle_t vh, std::chrono::nanoseconds timeout,
@@ -3105,7 +3105,7 @@ result_t<void> graph_t::subscribe(const path_t& src, const path_t& target,
     if (!value) return std::unexpected(status_t::BACKPRESSURE);
     field_path_t field;
     field.steps.push_back(field_step_t{.name = "subscribers", .indexed = true, .append = true});
-    return field_write(v, field, *value, {});
+    return field_write(v, field, *value, write_ctx_t{});
 }
 
 result_t<subscription_t> graph_t::subscribe(const path_t& src, subscriber_fn_t fn, void* ctx,

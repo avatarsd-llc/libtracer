@@ -314,8 +314,8 @@ using admission_t = result_t<std::optional<view::rope_t>>;
 /** @brief The @ref hook_t shape of `handlers_t::on_admit` (RFC-0028 D10). */
 using admit_hook_t = hook_t<admission_t(const value_t& value, const write_ctx_t& ctx)>;
 /** @brief The @ref hook_t shape of `handlers_t::on_app_field_admit` (RFC-0028 D10). */
-using app_field_admit_hook_t =
-    hook_t<result_t<view::view_t>(std::string_view name, const view::view_t& value)>;
+using app_field_admit_hook_t = hook_t<result_t<view::view_t>(
+    std::string_view name, const view::view_t& value, const write_ctx_t& ctx)>;
 
 /**
  * @brief User behavior for a Handler-role vertex — six @ref hook_t seams, 96 B on the host
@@ -405,8 +405,11 @@ struct handlers_t {
      *        @ref on_admit — runs BEFORE a declared `:settings.app.<name>` write stores its
      *        bytes, and may refuse it or normalise it.
      *
-     * Called with the field's key (below `settings.app.`) and the written TLV, after the ACL
-     * gate and after the RFC-0010 §A.3 writability check, before `app_field_store`. Return the
+     * Called with the field's key (below `settings.app.`), the written TLV and the writer's
+     * @ref write_ctx_t, after the ACL gate and after the RFC-0010 §A.3 writability check, before
+     * `app_field_store`. The context is the one @ref on_admit receives (#1832): the subject the
+     * ACL gate ran on, and the arrival link's `(kind, role)` — null for the owner's own write
+     * and for a field write no catalogued link carried. Return the
      * view handed in to store it verbatim (the pre-existing behaviour), a DIFFERENT view to
      * store those bytes instead, or `std::unexpected(status)` to refuse — in which case nothing
      * is stored, the field keeps its prior bytes, @ref on_app_field_write does NOT fire, and the
@@ -414,7 +417,8 @@ struct handlers_t {
      *
      * @warning A returned view is READ during the call that returned it — the store copies the
      *          bytes out before returning — so it may point at storage the filter owns, but that
-     *          storage must outlive the return. Unset ⇒ bytes store verbatim, as before.
+     *          storage must outlive the return. The context is BORROWED for the call, as for
+     *          @ref on_admit. Unset ⇒ bytes store verbatim, as before.
      */
     app_field_admit_hook_t on_app_field_admit;
     /**
