@@ -98,8 +98,13 @@ target_compile_options(bench_transports PRIVATE -Wall -Wextra)
 # The 16KB-RAM zero-heap forward-path gate (ADR-0038): a global operator-new counter
 # measures how many heap allocations one FWD forward hop costs. Report-only now (the
 # Stage-1 baseline is non-zero); CI flips it to a hard gate (ZEROHEAP_MAX=0) at Stage-2.
-add_executable(bench_forward_heap bench_forward_heap.cpp)
+#
+# exact_rows.cpp adds #1808's exact-count rows (RAM per edge/link/1 KiB value, blocks per write,
+# STREAM stripe-lock sections). `--wrap=pthread_mutex_lock` is that lock counter, the same
+# instrument core/tests/stream_admit_one_lock_test.cpp asserts #1713 with.
+add_executable(bench_forward_heap bench_forward_heap.cpp exact_rows.cpp)
 target_link_libraries(bench_forward_heap PRIVATE libtracer)
+target_link_options(bench_forward_heap PRIVATE "-Wl,--wrap=pthread_mutex_lock")
 target_compile_options(bench_forward_heap PRIVATE -Wall -Wextra)
 
 # The forward-demux baseline (ADR-0061's one open acceptance condition): times ONE FWD

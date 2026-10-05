@@ -1,0 +1,434 @@
+/**
+ * @file
+ * @brief The exact-count rows of #1808 (see exact_rows.hpp): RAM probes, blocks per write and
+ *        the STREAM write's stripe-lock sections.
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright 2026 avatarsd LLC
+ *
+ * Linked into `bench_forward_heap`, whose TU owns the counting `operator new` this file reads
+ * through heap_probe.hpp. The lock counter is `-Wl,--wrap=pthread_mutex_lock`, the instrument
+ * `core/tests/stream_admit_one_lock_test.cpp` asserts #1713 with: only the STREAM vertex's
+ * stripe mutex is counted, and that mutex is LEARNED from a one-section control
+ * (`graph_t::ring_reserved_bytes`), so the counter is shown live before it is read.
+ */
+#include "exact_rows.hpp"
+
+#include <pthread.h>
+
+#include <atomic>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <deque>
+#include <span>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "bench_common.hpp"
+#include "heap_probe.hpp"
+#include "libtracer/fwd_router.hpp"
+#include "libtracer/mem_source.hpp"
+#include "libtracer/tracer.hpp"
+#include "libtracer/transport.hpp"
+
+namespace {
+
+/** @brief The one mutex whose acquisitions are counted (null: count nothing). */
+std::atomic<pthread_mutex_t*> g_watch{nullptr};
+/** @brief Acquisitions of @ref g_watch on this thread. */
+thread_local std::size_t g_locks = 0;
+/** @brief Acquisitions of ANY mutex on this thread (the control's learning count). */
+thread_local std::size_t g_any = 0;
+/** @brief The mutex this thread acquired last (the control learns the stripe from it). */
+thread_local pthread_mutex_t* g_last = nullptr;
+
+}  // namespace
+
+extern "C" {
+/** @brief The real `pthread_mutex_lock` (`-Wl,--wrap`). */
+int __real_pthread_mutex_lock(pthread_mutex_t* m);  // NOLINT(bugprone-reserved-identifier)
+
+/** @brief Count an acquisition (and the watched stripe's), then take the mutex for real. */
+int __wrap_pthread_mutex_lock(pthread_mutex_t* m) {  // NOLINT(bugprone-reserved-identifier)
+    if (m == g_watch.load(std::memory_order_relaxed)) ++g_locks;
+    ++g_any;
+    g_last = m;
+    return __real_pthread_mutex_lock(m);
+}
+}
+
+namespace {
+
+using tr::graph::graph_t;
+using tr::graph::path_t;
+using tr::graph::role_t;
+using tr::graph::vertex_handle_t;
+
+/** @brief A per-unit count kept to a thousandth: `total * 1000 / units`. */
+std::size_t x1000(long long total, std::size_t units) {
+    return total > 0 && units > 0 ? static_cast<std::size_t>(total) * 1000 / units : 0;
+}
+
+/** @brief A view over a fresh heap segment of @p n bytes (minted outside every window). */
+tr::view::view_t heap_view(std::size_t n, std::uint8_t fill) {
+    tr::view::segment_ptr_t seg = tr::view::heap_alloc(n);
+    if (n != 0) std::memset(seg->bytes.data(), fill, n);
+    return tr::view::view_t::over(std::move(seg));
+}
+
+/** @brief A view over a fresh heap segment holding a copy of @p bytes. */
+tr::view::view_t bytes_view(std::span<const std::byte> bytes) {
+    tr::view::segment_ptr_t seg = tr::view::heap_alloc(bytes.size());
+    std::memcpy(seg->bytes.data(), bytes.data(), bytes.size());
+    return tr::view::view_t::over(std::move(seg));
+}
+
+/** @brief A callback edge that does nothing: the probe prices the edge, not the delivery. */
+void noop_cb(void*, const tr::graph::value_t&) {}
+
+/**
+ * @brief A malloc-backed source that counts what it serves, so a seam-served block never
+ *        reaches the counted global `operator new` and the two columns stay disjoint.
+ */
+class counting_seam_t final : public tr::mem::block_source_t {
+   public:
+    counting_seam_t() noexcept : block_source_t("exact-rows") {}
+    std::atomic<std::size_t> blocks{0}; /**< @brief Blocks served. */
+    std::atomic<std::size_t> bytes{0};  /**< @brief Bytes requested by those blocks. */
+    /** @brief Serve from `aligned_alloc`, counting. */
+    [[nodiscard]] void* try_alloc(std::size_t n, std::size_t align) noexcept override {
+        blocks.fetch_add(1, std::memory_order_relaxed);
+        bytes.fetch_add(n, std::memory_order_relaxed);
+        const std::size_t a = align < alignof(std::max_align_t) ? alignof(std::max_align_t) : align;
+        const std::size_t rounded = ((n == 0 ? 1 : n) + a - 1) / a * a;
+        return std::aligned_alloc(a, rounded);
+    }
+    /** @brief Release to the C allocator. */
+    void release(void* p, std::size_t, std::size_t) noexcept override { std::free(p); }
+};
+
+/** @brief A transport that sends nowhere: what a link costs the router, not its socket. */
+struct null_link_t : tr::net::transport_t {
+    void send(std::span<const std::byte>) override {}
+    void send(std::span<const std::span<const std::byte>>) override {}
+};
+
+/** @brief Print one `ramprobe` row from a window's counts over @p n units. */
+void print_ram(const char* what, const probe::counts_t& c, std::size_t n) {
+    std::printf("RESULT ramprobe %s blocks_x1000=%zu bytes_x1000=%zu n=%zu\n", what,
+                x1000(static_cast<long long>(c.allocs), n), x1000(c.live_bytes, n), n);
+}
+
+/** @brief Units each RAM probe spreads its window over. */
+constexpr std::size_t kRamN = 256;
+
+/**
+ * @brief RAM per callback edge (`edge_callback`) and per WIRE subscriber edge (`edge_wire`).
+ *
+ * One vertex, a warm first edge outside the window, then @ref kRamN more inside it. Live
+ * usable-size bytes and heap blocks per edge. The wire edge names its link
+ * `192.168.x.y:9000`, past the small-string buffer like a real `host:port` link, and that
+ * name is built inside the window because the edge keeps it.
+ */
+bool ram_edges() {
+    {
+        graph_t g;
+        const path_t p = *path_t::parse("/edge/cb");
+        (void)g.register_vertex(p, role_t::STORED_VALUE);
+        if (!g.subscribe(p, noop_cb, nullptr).has_value()) return false;
+        bool ok = true;
+        probe::window_t win;
+        for (std::size_t i = 0; i < kRamN; ++i)
+            ok = g.subscribe(p, noop_cb, nullptr).has_value() && ok;
+        const probe::counts_t c = win.result();
+        if (!ok) return false;
+        print_ram("edge_callback", c, kRamN);
+    }
+    {
+        graph_t g;
+        const vertex_handle_t v =
+            g.register_vertex(*path_t::parse("/edge/wire"), role_t::STORED_VALUE);
+        // The remote SUBSCRIBER form (no PATH child) and the smallest well-formed route.
+        const std::vector<std::byte> sub{std::byte{0x04}, std::byte{0x40}, std::byte{0x00},
+                                         std::byte{0x00}};
+        const std::vector<std::byte> route{std::byte{0x06}, std::byte{0x00}, std::byte{0x00},
+                                           std::byte{0x00}};
+        const tr::view::view_t sub_v = bytes_view(sub);
+        const tr::view::view_t route_v = bytes_view(route);
+        const auto link = [](std::size_t i) {
+            return "192.168." + std::to_string(i / 250) + "." + std::to_string(i % 250) + ":9000";
+        };
+        if (!g.subscribe_wire(v, sub_v, route_v, link(kRamN)).has_value()) return false;
+        bool ok = true;
+        probe::window_t win;
+        for (std::size_t i = 0; i < kRamN; ++i)
+            ok = g.subscribe_wire(v, sub_v, route_v, link(i)).has_value() && ok;
+        const probe::counts_t c = win.result();
+        if (!ok) return false;
+        print_ram("edge_wire", c, kRamN);
+    }
+    return true;
+}
+
+/**
+ * @brief RAM per LINK (`link`): what one `fwd_router_t::add_child` costs the router.
+ *
+ * The transports are the caller's and are built outside the window; the mount names are
+ * RFC-0014 shaped (`net/tcp/conn-NNNNN`) and built inside it, because the router keeps them.
+ */
+bool ram_links() {
+    graph_t g;
+    tr::net::fwd_router_t router(g);
+    std::deque<null_link_t> links(kRamN + 1);
+    if (!router.add_child("net/tcp/warm", links.back())) return false;
+    bool ok = true;
+    probe::window_t win;
+    for (std::size_t i = 0; i < kRamN; ++i) {
+        char name[40];
+        std::snprintf(name, sizeof name, "net/tcp/conn-%05zu", i);
+        ok = router.add_child(name, links[i]) && ok;
+    }
+    const probe::counts_t c = win.result();
+    if (!ok) return false;
+    print_ram("link", c, kRamN);
+    return true;
+}
+
+/**
+ * @brief RAM a vertex holding a 1 KiB last-known value occupies beyond an empty one
+ *        (`vertex_value_1k`), the 1 KiB twin of the gated `vertex_value` probe (4 B).
+ *
+ * The vertices are registered outside the window. Inside it, each value is minted (one owned
+ * 1 KiB segment, as a producer hands one over) and written, so the live balance holds the
+ * segment the vertex keeps and the record around it: the RAM a 1 KiB value really costs.
+ */
+bool ram_value_1k() {
+    graph_t g;
+    std::vector<vertex_handle_t> vs;
+    vs.reserve(kRamN);
+    for (std::size_t i = 0; i < kRamN; ++i) {
+        char pb[24];
+        std::snprintf(pb, sizeof pb, "/kv/v%04zu", i);
+        vs.push_back(g.register_vertex(*path_t::parse(pb), role_t::STORED_VALUE));
+    }
+    bool ok = true;
+    probe::window_t win;
+    for (std::size_t i = 0; i < kRamN; ++i)
+        ok = g.write(vs[i], heap_view(1024, static_cast<std::uint8_t>(i))).has_value() && ok;
+    const probe::counts_t c = win.result();
+    if (!ok) return false;
+    print_ram("vertex_value_1k", c, kRamN);
+    return true;
+}
+
+/**
+ * @brief Blocks per write at each payload-ladder size, for both ways a value arrives: from
+ *        the graph's injected source (`seam`, with the bytes it asked for) and from the global
+ *        heap (`heap`, the escape).
+ *
+ *  - `owned`: the producer hands over a sole-owner segment, minted outside the window; the
+ *    write adopts it and draws only its record.
+ *  - `rope2`: the value arrives as a two-link rope over buffers the producer keeps (a header
+ *    and a body, say). The write keeps the links and draws one record sized for two of them.
+ *
+ * Measured at this commit: one seam block per write in both shapes and at every size (40 B for
+ * one link, 64 B for two), and nothing from the global heap. The payload is never copied on a
+ * leaf write, whatever its size; a change that starts copying it, or draws a second block,
+ * fails the ratchet at the size where it does.
+ *
+ * The allocation seam's per-write accounting (#1773): a size-classed source (#1777) is judged
+ * on exactly these counts, and today's default source is what they ratchet.
+ */
+bool write_blocks() {
+    constexpr std::size_t kWrites = 64;
+    for (const bool rope2 : {false, true}) {
+        for (const std::size_t S : bench::kPayloadLadder) {
+            counting_seam_t seam;  // outlives the graph: its blocks are released into it
+            graph_t g(seam);
+            const vertex_handle_t v = g.register_vertex(*path_t::parse("/w"), role_t::STORED_VALUE);
+            const std::vector<std::byte> head(S - S / 2, std::byte{0x5A});
+            const std::vector<std::byte> body(S / 2, std::byte{0xA5});
+            const auto value = [&] {
+                if (!rope2) return tr::view::rope_t{heap_view(S, 2)};
+                tr::view::rope_t r{tr::view::view_t::over(tr::view::borrow_const(head))};
+                r.append(tr::view::view_t::over(tr::view::borrow_const(body)));
+                return r;
+            };
+            for (std::size_t i = 0; i < 8; ++i)
+                if (!g.write(v, value()).has_value()) return false;  // warm
+            std::vector<tr::view::rope_t> vals;
+            vals.reserve(kWrites);
+            for (std::size_t i = 0; i < kWrites; ++i) vals.push_back(value());
+            const std::size_t b0 = seam.blocks.load();
+            const std::size_t y0 = seam.bytes.load();
+            bool ok = true;
+            probe::window_t win;
+            for (tr::view::rope_t& val : vals) ok = g.write(v, std::move(val)).has_value() && ok;
+            const probe::counts_t c = win.result();
+            if (!ok) return false;
+            std::printf(
+                "RESULT writeblocks %s S=%zu seam_x1000=%zu seam_bytes_x1000=%zu heap_x1000=%zu "
+                "n=%zu\n",
+                rope2 ? "rope2" : "owned", S,
+                x1000(static_cast<long long>(seam.blocks.load() - b0), kWrites),
+                x1000(static_cast<long long>(seam.bytes.load() - y0), kWrites),
+                x1000(static_cast<long long>(c.allocs), kWrites), kWrites);
+        }
+    }
+    return true;
+}
+
+/** @brief The delivery count a STREAM case's subscriber keeps. */
+void count_cb(void* ctx, const tr::graph::value_t&) {
+    static_cast<std::atomic<std::size_t>*>(ctx)->fetch_add(1, std::memory_order_relaxed);
+}
+
+/**
+ * @brief LEARN the stripe mutex @p v rides from a one-section verb, and arm the counter on it.
+ * @return false when the wrap is never reached (a standard library whose mutex is out of line).
+ */
+bool watch_stripe_of(graph_t& g, vertex_handle_t v) {
+    g_watch.store(nullptr, std::memory_order_relaxed);
+    g_any = 0;
+    g_last = nullptr;
+    (void)g.ring_reserved_bytes(v);
+    if (g_any != 1) return false;
+    g_watch.store(g_last, std::memory_order_relaxed);
+    return true;
+}
+
+/** @brief Print one `streamlock` row. */
+void print_lock(const char* what, std::size_t sections, std::size_t heap, std::size_t delivered,
+                std::size_t n) {
+    std::printf(
+        "RESULT streamlock %s sections_x1000=%zu heap_x1000=%zu delivered_x1000=%zu n=%zu\n", what,
+        x1000(static_cast<long long>(sections), n), x1000(static_cast<long long>(heap), n),
+        x1000(static_cast<long long>(delivered), n), n);
+}
+
+/**
+ * @brief The STREAM write's stripe-lock sections and heap blocks, per write (#1713, #1808).
+ *
+ *  - `w1`: the steady-state write, past two hazard retire batches of warm-up (the #873
+ *    carve-out). #1713's claim is ONE section and ZERO heap, and the gate holds it to that.
+ *  - `spill`: a write over `ring_take_t::kInline + 2` queued entries; still one section, plus
+ *    the one spill vector.
+ *  - `defer`: the same write with every global allocation refused, so the spill cannot be
+ *    allocated and the window is deferred: delivered is 0, and the next write delivers it all.
+ *  - `w4`: four writers on one vertex at once; sections per write (heap is not printed: each
+ *    new thread stocks its own reclamation list once, which is not the write's cost).
+ *
+ * Values and ring reservations come from injected counting sources, so the heap column is only
+ * what the write path takes from the global heap.
+ */
+bool stream_locks() {
+    constexpr std::size_t kN = 64;
+    constexpr std::size_t kBacklog = tr::graph::vertex_t::ring_take_t::kInline + 2;
+    counting_seam_t values;
+    counting_seam_t ring;
+    graph_t g(values);
+    const vertex_handle_t v = g.register_vertex(*path_t::parse("/s"), role_t::STREAM);
+    if (!g.set_policy(v,
+                      {.retention = tr::graph::retention_t::N, .depth = 16, .ring_source = &ring})
+             .has_value())
+        return false;
+    std::atomic<std::size_t> seen{0};
+    if (!g.subscribe(*path_t::parse("/s"), count_cb, &seen).has_value()) return false;
+    for (std::size_t i = 0; i < 2 * tr::graph::kHazardReaderSlots + 4; ++i)
+        if (!g.write(v, heap_view(4, 1)).has_value()) return false;
+    if (!watch_stripe_of(g, v)) {
+        std::printf("NOTE streamlock: the lock wrap is not reached here; no rows\n");
+        return true;
+    }
+
+    std::vector<tr::view::view_t> vals;
+    const auto mint = [&](std::size_t n) {
+        vals.clear();
+        for (std::size_t i = 0; i < n; ++i) vals.push_back(heap_view(4, 2));
+    };
+    mint(kN);
+    seen.store(0);
+    g_locks = 0;
+    probe::reset();
+    probe::arm();
+    for (tr::view::view_t& val : vals) (void)g.write(v, std::move(val));
+    probe::disarm();
+    print_lock("w1", g_locks, probe::snapshot().allocs, seen.load(), kN);
+
+    std::size_t sections = 0, heap = 0;
+    seen.store(0);
+    for (std::size_t c = 0; c < kN; ++c) {
+        mint(kBacklog + 1);
+        for (std::size_t i = 0; i < kBacklog; ++i) (void)g.assign(v, std::move(vals[i]));
+        g_locks = 0;
+        probe::reset();
+        probe::arm();
+        (void)g.write(v, std::move(vals[kBacklog]));
+        probe::disarm();
+        sections += g_locks;
+        heap += probe::snapshot().allocs;
+    }
+    print_lock("spill", sections, heap, seen.load(), kN);
+
+    sections = 0;
+    std::size_t deferred_delivered = 0;
+    seen.store(0);
+    for (std::size_t c = 0; c < kN; ++c) {
+        mint(kBacklog + 2);
+        for (std::size_t i = 0; i < kBacklog; ++i) (void)g.assign(v, std::move(vals[i]));
+        const std::size_t before = seen.load();
+        g_locks = 0;
+        probe::g_refuse.store(true);
+        (void)g.write(v, std::move(vals[kBacklog]));
+        probe::g_refuse.store(false);
+        sections += g_locks;
+        deferred_delivered += seen.load() - before;
+        (void)g.write(v, std::move(vals[kBacklog + 1]));  // catches the deferred window up
+    }
+    if (seen.load() != kN * (kBacklog + 2)) {
+        std::printf("FAIL streamlock defer: %zu of %zu entries delivered after recovery\n",
+                    seen.load(), kN * (kBacklog + 2));
+        return false;
+    }
+    print_lock("defer", sections, 0, deferred_delivered, kN);
+
+    constexpr std::size_t kThreads = 4, kPer = 2000;
+    std::atomic<std::size_t> total{0};
+    seen.store(0);
+    std::vector<std::thread> ts;
+    for (std::size_t t = 0; t < kThreads; ++t) {
+        ts.emplace_back([&] {
+            std::vector<tr::view::view_t> mine;
+            mine.reserve(kPer);
+            for (std::size_t i = 0; i < kPer; ++i) mine.push_back(heap_view(4, 3));
+            g_locks = 0;
+            for (tr::view::view_t& val : mine) (void)g.write(v, std::move(val));
+            total.fetch_add(g_locks);
+        });
+    }
+    for (std::thread& th : ts) th.join();
+    (void)g.propagate(v);
+    std::printf("RESULT streamlock w4 sections_x1000=%zu delivered_x1000=%zu n=%zu\n",
+                x1000(static_cast<long long>(total.load()), kThreads * kPer),
+                x1000(static_cast<long long>(seen.load()), kThreads * kPer), kThreads * kPer);
+    g_watch.store(nullptr, std::memory_order_relaxed);
+    return true;
+}
+
+}  // namespace
+
+namespace exact_rows {
+
+int print_all() {
+    if (!ram_edges() || !ram_links() || !ram_value_1k() || !write_blocks() || !stream_locks()) {
+        std::printf("FAIL: an exact-count fixture (#1808) did not do what its row claims\n");
+        return 2;
+    }
+    return 0;
+}
+
+}  // namespace exact_rows

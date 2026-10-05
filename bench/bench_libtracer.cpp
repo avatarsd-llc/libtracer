@@ -18,6 +18,7 @@
  * cost is measured by bench_forward_heap.) See bench/README.md for the caveats.
  */
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
@@ -42,6 +43,7 @@
 #include "libtracer/mem_pool.hpp"
 #include "libtracer/mem_source.hpp"
 #include "libtracer/rope.hpp"
+#include "libtracer/route_handle.hpp"
 #include "libtracer/security_acl.hpp"
 #include "libtracer/tracer.hpp"
 
@@ -93,6 +95,14 @@ view_t borrowed_view(std::span<const std::byte> bytes) {
 
 enum class alloc_t { HEAP, BORROW };
 
+/** @brief Which rows one @ref run_inproc call publishes for its point. */
+enum class rows_t {
+    BOTH,      /**< The clock-quantized row and its `<mode>-batch` twin (the default). */
+    QUANTIZED, /**< The quantized row alone: rows whose twin would have no reader. */
+    BATCH,     /**< The `<mode>-batch` twin alone (#1808): a point whose quantized row is
+                    already published by another family. */
+};
+
 /**
  * @brief Publish the batch-amortized twin of a quantized latency row (#553).
  *
@@ -142,7 +152,7 @@ void emit_batch_row(const char* mode, std::size_t S, std::size_t F, std::size_t 
 void run_inproc(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc, bool by_path,
                 const char* mode, std::uint64_t budget = kDeliveryBudget,
                 std::uint64_t latbudget = kLatencyDeliveryBudget,
-                tr::mem::block_source_t* src = nullptr, bool batch_row = true) {
+                tr::mem::block_source_t* src = nullptr, rows_t rows = rows_t::BOTH) {
     // src==nullptr keeps the process-default source, which folds back onto the global-heap
     // LKV (make_shared) exactly as before #873 phase 1; an injected source routes the
     // per-write LKV allocate_shared through the graph's internal pmr adapter over it — the
@@ -174,6 +184,10 @@ void run_inproc(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc, bool
     const std::size_t LATN = publishes_for(F, latbudget);
     for (std::size_t i = 0; i < 1000; ++i) put(i);  // warmup
 
+    if (rows == rows_t::BATCH) {
+        emit_batch_row(mode, S, F, E, put, LATN);
+        return;
+    }
     recv.store(0);
     const auto t0 = now_ns();
     for (std::size_t i = 0; i < MSGS; ++i) put(i);
@@ -222,7 +236,7 @@ void run_inproc(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc, bool
         lat.add(now_ns() - a);
     }
     emit("libtracer", mode, S, F, E, pub_s, deliv_s, mb_s, lat.summarize());
-    if (batch_row) emit_batch_row(mode, S, F, E, put, LATN);
+    if (rows == rows_t::BOTH) emit_batch_row(mode, S, F, E, put, LATN);
 }
 
 /**
@@ -252,7 +266,8 @@ void run_inproc(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc, bool
  */
 void run_inproc_pool(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc, bool by_path,
                      const char* mode, std::uint64_t budget = kDeliveryBudget,
-                     std::uint64_t latbudget = kLatencyDeliveryBudget) {
+                     std::uint64_t latbudget = kLatencyDeliveryBudget,
+                     rows_t rows = rows_t::QUANTIZED) {
     // Since #873 phase 1 the graph takes ONE `block_source_t`, so the pooled arm is a
     // `tr::mem::pool_source_t` over a caller-owned slab rather than a
     // `std::pmr::unsynchronized_pool_resource`. Same shape of instrument — a real recycling
@@ -264,12 +279,10 @@ void run_inproc_pool(std::size_t S, std::size_t F, std::size_t E, alloc_t alloc,
     std::vector<std::byte> slab(4u * 1024u * 1024u);
     std::vector<tr::mem::size_class_t> classes(64);
     tr::mem::pool_source_t<> pool{slab, classes};
-    // No `-batch` twin (#553): what these rows are FOR is the pooled-vs-heap LKV
-    // comparison: the pool's no-heap claim is gated by LKV-ROUTE (bench_forward_heap) and
-    // the `lkv` ratio is only reported (perf_gate.py lkv_ratio_report), never a latency
-    // percentile. A batch twin here
-    // would be ten more series with no chart reading them.
-    run_inproc(S, F, E, alloc, by_path, mode, budget, latbudget, &pool, false);
+    // The `inproc-pool` family publishes the quantized rows alone. Their window-calibrated
+    // twin, `inproc-pool-batch` (#1808), is a family of its own, appended last, so adding it
+    // moved no existing row: the quantized pool rows still run in the process they always did.
+    run_inproc(S, F, E, alloc, by_path, mode, budget, latbudget, &pool, rows);
     if (pool.stats().refused != 0) {
         std::fprintf(stderr, "FAIL: %s pooled arm exhausted its slab (%zu refusals)\n", mode,
                      pool.stats().refused);
@@ -610,14 +623,14 @@ void run_grid() {
     for (std::size_t S : kGridSizes)
         for (std::size_t F : kGridFanouts)
             run_inproc(S, F, 1, alloc_t::HEAP, false, "inproc", kGridBudget, kGridLatBudget,
-                       nullptr, false);
+                       nullptr, rows_t::QUANTIZED);
     // Deliver-only fan sweep at the reference payload (the comparison charts' fixed
     // size): propagate touches no payload bytes, so a full size sweep would be flat.
     for (std::size_t F : kGridFanouts) run_inproc_deliver(kRefSize, F, kGridBudget, kGridLatBudget);
     for (std::size_t S : kGridSizes)
         for (std::size_t E : kGridEndpoints)
             run_inproc(S, 1, E, alloc_t::HEAP, true, "inproc-path", kGridBudget, kGridLatBudget,
-                       nullptr, false);
+                       nullptr, rows_t::QUANTIZED);
 }
 
 /** @brief Mixed workload: 128 topics with varied fan-out (1..16) and payloads (1..8192). */
@@ -837,9 +850,9 @@ void run_eptype() {
     // reference point under an endpoint-type name, so their batch twins would be a
     // duplicate measurement of `inproc-batch 64B/fan1/1ep` and its borrow counterpart.
     run_inproc(kRefSize, 1, 1, alloc_t::HEAP, false, "eptype-lean", kDeliveryBudget,
-               kLatencyDeliveryBudget, nullptr, false);
+               kLatencyDeliveryBudget, nullptr, rows_t::QUANTIZED);
     run_inproc(kRefSize, 1, 1, alloc_t::BORROW, false, "eptype-lean-cached", kDeliveryBudget,
-               kLatencyDeliveryBudget, nullptr, false);
+               kLatencyDeliveryBudget, nullptr, rows_t::QUANTIZED);
     for (std::size_t S : kPayloadLadder) run_eptype_stream(S);
 }
 
@@ -1318,6 +1331,291 @@ void family_cliff_pool() {
     run_cliff(pool, "cliff-alloc-pool");
 }
 
+// --- rows for the logic that changed and is coming (#1808) ---------------------------------
+
+/** @brief The STREAM vertex every #1808 STREAM row writes to: depth 16, one counting edge. */
+struct stream_fixture_t {
+    graph_t g;                          /**< @brief The graph, on the process-default source. */
+    vertex_handle_t v;                  /**< @brief The STREAM vertex. */
+    std::atomic<std::uint64_t> recv{0}; /**< @brief Deliveries the one subscriber saw. */
+
+    /** @brief Register `/bench/stream`, a 16-deep ring and one counting subscriber. */
+    stream_fixture_t() : v(g.register_vertex(*path_t::parse("/bench/stream"), role_t::STREAM)) {
+        (void)g.set_policy(v, {.retention = tr::graph::retention_t::N, .depth = 16});
+        (void)g.subscribe(
+            *path_t::parse("/bench/stream"),
+            [](void* c, const tr::graph::value_t&) {
+                static_cast<std::atomic<std::uint64_t>*>(c)->fetch_add(1,
+                                                                       std::memory_order_relaxed);
+            },
+            &recv);
+    }
+};
+
+/** @brief Entries one spill cycle queues ahead of its write: two past the in-frame slots. */
+constexpr std::size_t kSpillBacklog = tr::graph::vertex_t::ring_take_t::kInline + 2;
+static_assert(kSpillBacklog + 1 <= 16, "the spill window must fit the fixture's 16-deep ring");
+
+/**
+ * @brief `stream-w<T>` (#1808): T writer threads on ONE STREAM vertex, the admission #1713
+ *        fused into one stripe-lock section, measured as it runs under contention.
+ *
+ * Each writer makes a fixed number of 64 B writes (a heap view per write, the `eptype-stream`
+ * parity). Throughput is aggregate writes per second; the delivery rate is COUNTED at the one
+ * subscriber, after a trailing covering sweep, so a shed or a lost entry lowers it. Latency is
+ * one write between two clock reads on every writer, merged, like `inproc-mt<T>`. The thread
+ * count lives in the mode name only.
+ */
+void run_stream_mt(std::size_t T) {
+    constexpr std::size_t S = 64;
+    constexpr std::size_t MSGS = 200'000;  // per writer (throughput phase)
+    constexpr std::size_t LATN = 50'000;   // per writer (latency phase)
+    stream_fixture_t fx;
+    const std::vector<std::byte> tlv = value_tlv(S);
+    const auto put = [&] { (void)fx.g.write(fx.v, owned_view(tlv)); };
+    for (std::size_t i = 0; i < 1000; ++i) put();  // warmup
+
+    std::vector<std::vector<std::uint64_t>> lats(T);
+    const auto phase = [&](bool timed) {
+        std::atomic<std::size_t> ready{0};
+        std::atomic<bool> go{false};
+        std::vector<std::thread> ts;
+        ts.reserve(T);
+        for (std::size_t t = 0; t < T; ++t) {
+            ts.emplace_back([&, t] {
+                std::vector<std::uint64_t>& mine = lats[t];
+                mine.resize(LATN);  // reserve AND touch before the release (#1803)
+                mine.clear();
+                ready.fetch_add(1, std::memory_order_acq_rel);
+                while (!go.load(std::memory_order_acquire)) { /* spin until released */
+                }
+                if (!timed) {
+                    for (std::size_t i = 0; i < MSGS; ++i) put();
+                    return;
+                }
+                for (std::size_t i = 0; i < LATN; ++i) {
+                    const auto a = now_ns();
+                    put();
+                    mine.push_back(now_ns() - a);
+                }
+            });
+        }
+        while (ready.load(std::memory_order_acquire) < T) { /* wait */
+        }
+        const auto t0 = now_ns();
+        go.store(true, std::memory_order_release);
+        for (std::thread& th : ts) th.join();
+        return (now_ns() - t0) / 1e9;
+    };
+
+    fx.recv.store(0);
+    const double secs = phase(false);
+    (void)fx.g.propagate(fx.v);  // a covering sweep: whatever a racing take left behind
+    const std::uint64_t want = static_cast<std::uint64_t>(T) * MSGS;
+    const std::string mode = "stream-w" + std::to_string(T);
+    const double pub_s = static_cast<double>(want) / secs;
+    const double deliv_s = delivered_rate(mode.c_str(), S, 1, 1, want, fx.recv.load(), secs);
+    (void)phase(true);
+    Latency lat;
+    lat.reserve(T * LATN);
+    for (const std::vector<std::uint64_t>& per : lats)
+        for (std::uint64_t ns : per) lat.add(ns);
+    emit("libtracer", mode.c_str(), S, 1, 1, pub_s, deliv_s, deliv_s * static_cast<double>(S) / 1e6,
+         lat.summarize());
+}
+
+/**
+ * @brief One batch-timed STREAM cycle with its delivery rate counted at the subscriber.
+ *
+ * The cycle is timed through @ref bench::time_batches. Its deliveries are COUNTED over every
+ * cycle that ran, calibration included, and scale the cycle rate into the delivery column, so
+ * an entry the window lost lowers the figure instead of being assumed.
+ */
+template <typename Cycle>
+void emit_stream_cycle(const char* mode, stream_fixture_t& fx, Cycle&& cycle,
+                       std::size_t per_cycle) {
+    constexpr std::uint64_t kBudgetNs = 200'000'000;
+    std::uint64_t cycles = 0;
+    fx.recv.store(0);
+    const bench::batch_timing_t t = bench::time_batches(
+        [&] {
+            cycle();
+            ++cycles;
+        },
+        kBudgetNs);
+    const std::uint64_t want = cycles * per_cycle;
+    const std::uint64_t got = fx.recv.load(std::memory_order_relaxed);
+    if (got != want)
+        std::fprintf(stderr, "WARN mode=%s delivered %llu of %llu entries\n", mode,
+                     static_cast<unsigned long long>(got), static_cast<unsigned long long>(want));
+    const double per = cycles != 0 ? static_cast<double>(got) / static_cast<double>(cycles) : 0.0;
+    bench::emit_batch("libtracer", mode, 64, 1, 1, t.ops_per_s, t.ops_per_s * per, 0.0, t);
+}
+
+/**
+ * @brief The single-writer STREAM cycles (#1808): `stream-spill` and `stream-defer`.
+ *
+ *  - `stream-spill`: @ref kSpillBacklog `assign`s queue entries without delivering, then one
+ *    `write` admits its own entry and takes the whole window. The window is wider than
+ *    `ring_take_t::kInline`, so the take spills to its one heap vector (#1713's overflow arm).
+ *  - `stream-defer`: `ring_take_t::kInline` `assign`s with delivery DEFERRED, then one
+ *    covering `propagate` delivers them: the in-frame take, with no write in the window.
+ *
+ * Each row's p50 and mean are per CYCLE, not per entry; the delivery column is entries per
+ * second, counted. The refused-spill deferral (a window held back because its spill could not
+ * be allocated) is an exact-count row in `bench_forward_heap`, which can refuse the allocation.
+ */
+void run_stream_cycles() {
+    const std::vector<std::byte> tlv = value_tlv(64);
+    {
+        stream_fixture_t fx;
+        emit_stream_cycle(
+            "stream-spill", fx,
+            [&] {
+                for (std::size_t i = 0; i < kSpillBacklog; ++i)
+                    (void)fx.g.assign(fx.v, owned_view(tlv));
+                (void)fx.g.write(fx.v, owned_view(tlv));
+            },
+            kSpillBacklog + 1);
+    }
+    {
+        stream_fixture_t fx;
+        constexpr std::size_t kDeferred = tr::graph::vertex_t::ring_take_t::kInline;
+        emit_stream_cycle(
+            "stream-defer", fx,
+            [&] {
+                for (std::size_t i = 0; i < kDeferred; ++i)
+                    (void)fx.g.assign(fx.v, owned_view(tlv));
+                (void)fx.g.propagate(fx.v);
+            },
+            kDeferred);
+    }
+}
+
+/**
+ * @brief `route-handle-egress-mt<T>` (#1808, advisory): T producer threads on ONE advertised
+ *        `(link, route)` flow of a `route_handle_t`, the steady-state reuse read a compacted
+ *        delivery's egress takes per write.
+ *
+ * `bench_route_handle_contention` sweeps this to T=128 on a wall-clock window; this is its
+ * T=1/2/4 slice in the default sweep, on fixed work per thread so every point runs the same
+ * operations. One metric: aggregate reads per second. The per-op columns are 0, because one
+ * read costs about what a clock read does and a mean derived from the rate is not a
+ * measurement of its own (#1804). Charted, not gated.
+ */
+void run_route_handle_mt(std::size_t T) {
+    constexpr std::size_t kOps = 500'000;  // per thread
+    constexpr std::size_t kRouteBytes = 32;
+    tr::net::route_handle_t h;
+    const std::vector<std::byte> route(kRouteBytes, std::byte{0x5A});
+    (void)h.ensure_egress("b", route);  // advertise once: every timed call is a reuse read
+    std::atomic<std::size_t> ready{0};
+    std::atomic<bool> go{false};
+    std::atomic<std::size_t> sink{0};
+    std::vector<std::thread> ts;
+    ts.reserve(T);
+    for (std::size_t t = 0; t < T; ++t) {
+        ts.emplace_back([&] {
+            ready.fetch_add(1, std::memory_order_acq_rel);
+            while (!go.load(std::memory_order_acquire)) { /* spin until released */
+            }
+            std::size_t acc = 0;
+            for (std::size_t i = 0; i < kOps; ++i) acc += h.ensure_egress("b", route).first;
+            sink.fetch_add(acc, std::memory_order_relaxed);
+        });
+    }
+    while (ready.load(std::memory_order_acquire) < T) { /* wait */
+    }
+    const auto t0 = now_ns();
+    go.store(true, std::memory_order_release);
+    for (std::thread& th : ts) th.join();
+    const double secs = (now_ns() - t0) / 1e9;
+    if (sink.load() == 0) std::fprintf(stderr, "WARN route-handle reads returned no label\n");
+    const double ops = static_cast<double>(T * kOps) / secs;
+    const std::string mode = "route-handle-egress-mt" + std::to_string(T);
+    emit("libtracer", mode.c_str(), kRouteBytes, 1, 1, ops, ops, 0.0, Latency::Summary{});
+}
+
+/**
+ * @brief The allocation seam's two decisions, timed (#1808): size-class selection and the
+ *        fallback to an upstream source.
+ *
+ *  - `seam-class-c<C>`: a `pool_source_t` whose class table holds C classes, the 64 B one
+ *    LAST, so each 64 B `try_alloc` + `release` walks all C to find its class. C = 1, 8, 32:
+ *    the cost of choosing a class as the table grows.
+ *  - `seam-fallback`: a `bump_source_t` whose buffer is full, over an upstream
+ *    `pool_source_t`: each 64 B block is refused by the bump, served by the upstream, and
+ *    released back there. `seam-direct` is the same block from the upstream alone, so the
+ *    pair's difference is what the fallback costs.
+ *
+ * Batch rows at 64 B; the size-classed host pool (#1777) will be judged on the same rows.
+ */
+void run_alloc_seam() {
+    constexpr std::uint64_t kBudgetNs = 100'000'000;
+    constexpr std::size_t S = 64, kAlign = alignof(std::max_align_t);
+    const auto alloc_free = [](tr::mem::block_source_t& src) {
+        return [&src] {
+            void* const p = src.try_alloc(S, kAlign);
+            if (p != nullptr) src.release(p, S, kAlign);
+        };
+    };
+    for (std::size_t C : {std::size_t{1}, std::size_t{8}, std::size_t{32}}) {
+        std::vector<std::byte> slab(64 * 1024);
+        std::vector<tr::mem::size_class_t> classes(C);
+        tr::mem::pool_source_t<> pool{slab, classes};
+        for (std::size_t i = 1; i < C; ++i) {  // the other classes first, so 64 B is the last
+            const std::size_t n = S + 16 * i;
+            pool.release(pool.try_alloc(n, kAlign), n, kAlign);
+        }
+        pool.release(pool.try_alloc(S, kAlign), S, kAlign);
+        if (pool.classes_used() != C)
+            std::fprintf(stderr, "WARN seam-class-c%zu: %zu classes in use\n", C,
+                         pool.classes_used());
+        const bench::batch_timing_t t = bench::time_batches(alloc_free(pool), kBudgetNs);
+        const std::string mode = "seam-class-c" + std::to_string(C);
+        bench::emit_batch("libtracer", mode.c_str(), S, 1, 1, t.ops_per_s, t.ops_per_s, 0.0, t);
+    }
+    std::vector<std::byte> slab(64 * 1024);
+    std::vector<tr::mem::size_class_t> classes(4);
+    tr::mem::pool_source_t<> upstream{slab, classes};
+    alignas(64) std::array<std::byte, 64> full{};
+    tr::mem::bump_source_t bump{full, upstream};
+    while (bump.used() + 8 <= full.size() && bump.try_alloc(8, 8) != nullptr) {
+    }  // fill the buffer: from here on every 64 B request falls back to the upstream
+    const bench::batch_timing_t direct = bench::time_batches(alloc_free(upstream), kBudgetNs);
+    bench::emit_batch("libtracer", "seam-direct", S, 1, 1, direct.ops_per_s, direct.ops_per_s, 0.0,
+                      direct);
+    const bench::batch_timing_t fb = bench::time_batches(alloc_free(bump), kBudgetNs);
+    bench::emit_batch("libtracer", "seam-fallback", S, 1, 1, fb.ops_per_s, fb.ops_per_s, 0.0, fb);
+    if (upstream.refused() != 0)
+        std::fprintf(stderr, "WARN seam rows: the upstream refused %zu requests\n",
+                     upstream.refused());
+}
+
+/** @brief `stream-mt` family (#1808): `stream-w1`, `-w2`, `-w4`, capped by the affinity mask. */
+void family_stream_mt() {
+    const std::size_t hw = bench::usable_cpus();
+    for (std::size_t T : {std::size_t{1}, std::size_t{2}, std::size_t{4}})
+        if (T <= hw) run_stream_mt(T);
+}
+
+/** @brief `route-handle` family (#1808): T = 1, 2, 4, capped by the affinity mask. */
+void family_route_handle() {
+    const std::size_t hw = bench::usable_cpus();
+    for (std::size_t T : {std::size_t{1}, std::size_t{2}, std::size_t{4}})
+        if (T <= hw) run_route_handle_mt(T);
+}
+
+/**
+ * @brief `inproc-pool-batch` (#1808): the window-calibrated twin of every heap-view
+ *        `inproc-pool` row, in its own process so the quantized pool rows did not move.
+ */
+void family_inproc_pool_batch() {
+    for (std::size_t S : kSizes)
+        run_inproc_pool(S, kRefFanout, kRefEndpoints, alloc_t::HEAP, false, "inproc-pool",
+                        kDeliveryBudget, kLatencyDeliveryBudget, rows_t::BATCH);
+}
+
 }  // namespace
 
 /**
@@ -1513,16 +1811,16 @@ void run_mode_fan_remote() {
  * emits the matching pair; run them from `run_topics.sh`, which alternates the engines and runs
  * both arm orders.
  *
- * The batch twin is suppressed on these rows (`batch_row = false`): the whole point is a
+ * The batch twin is suppressed on these rows (`rows_t::QUANTIZED`): the whole point is a
  * cross-engine comparison, the Zenoh side has no batch twin to compare against, and ten more
  * unread series is not what a new arm should cost.
  */
 void run_mode_topics() {
     for (std::size_t E : kTopicLadder) {
         run_inproc(kRefSize, kRefFanout, E, alloc_t::HEAP, false, "topics-bound", kDeliveryBudget,
-                   kLatencyDeliveryBudget, nullptr, false);
+                   kLatencyDeliveryBudget, nullptr, rows_t::QUANTIZED);
         run_inproc(kRefSize, kRefFanout, E, alloc_t::HEAP, true, "topics-addr", kDeliveryBudget,
-                   kLatencyDeliveryBudget, nullptr, false);
+                   kLatencyDeliveryBudget, nullptr, rows_t::QUANTIZED);
     }
 }
 
@@ -1530,9 +1828,9 @@ void run_mode_topics() {
 void run_mode_topics_rev() {
     for (std::size_t E : kTopicLadder) {
         run_inproc(kRefSize, kRefFanout, E, alloc_t::HEAP, true, "topics-addr", kDeliveryBudget,
-                   kLatencyDeliveryBudget, nullptr, false);
+                   kLatencyDeliveryBudget, nullptr, rows_t::QUANTIZED);
         run_inproc(kRefSize, kRefFanout, E, alloc_t::HEAP, false, "topics-bound", kDeliveryBudget,
-                   kLatencyDeliveryBudget, nullptr, false);
+                   kLatencyDeliveryBudget, nullptr, rows_t::QUANTIZED);
     }
 }
 
@@ -1691,6 +1989,10 @@ struct bench_family_t {
  *   - `lkv-aged` (#1803) is new and appended last: the `lkv-*-heap` rows on an aged heap.
  *   - `cliff-heap` and `cliff-pool` (#1806) come after it: alloc-only rows over the
  *     allocator-cliff ladder (`bench::cliff_sizes`), one family per backend.
+ *   - #1808's families come last: `stream` (the spill and deferral cycles), `stream-mt`
+ *     (1, 2 and 4 writers on one STREAM vertex), `route-handle` (the egress reuse read at
+ *     T = 1, 2, 4), `alloc-seam` (class selection and the upstream fallback) and
+ *     `inproc-pool-batch` (the window-calibrated twin of the `inproc-pool` rows).
  *
  * The SET column splits the sweep for the perf gate's measurement-condition check. A MULTI
  * family runs T workers on the pinned CPUs while its main thread spins waiting for them, so
@@ -1724,6 +2026,11 @@ constexpr bench_family_t kFamilies[] = {
     {"lkv-aged", run_lkv_aged, family_set_t::SINGLE},
     {"cliff-heap", family_cliff_heap, family_set_t::SINGLE},
     {"cliff-pool", family_cliff_pool, family_set_t::SINGLE},
+    {"stream", run_stream_cycles, family_set_t::SINGLE},
+    {"stream-mt", family_stream_mt, family_set_t::MULTI},
+    {"route-handle", family_route_handle, family_set_t::MULTI},
+    {"alloc-seam", run_alloc_seam, family_set_t::SINGLE},
+    {"inproc-pool-batch", family_inproc_pool_batch, family_set_t::SINGLE},
 };
 
 /**
@@ -1807,7 +2114,9 @@ int main(int argc, char** argv) {
             if (f.name != want) continue;
             // stderr, like the MODE marker: stdout stays the RESULT stream.
             std::fprintf(stderr, "FAMILY %.*s\n", static_cast<int>(f.name.size()), f.name.data());
+            const std::size_t start_kb = bench::rss_kb();
             f.run();
+            bench::emit_family_rss(f.name, start_kb);
             return 0;
         }
         std::fprintf(stderr, "error: unknown family '%s'\n", argv[2]);

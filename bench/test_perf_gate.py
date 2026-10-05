@@ -1150,5 +1150,91 @@ RESULT segdraw S=4096 draws=1 bytes=4144 max_block=4144
         self.assertIn("not gated", out.getvalue())
 
 
+class ExactRows1808(unittest.TestCase):
+    """@brief #1808's exact rows: RAM per edge / link / 1 KiB value, blocks per write and the
+    STREAM write's stripe-lock sections. Counts, so every rule is exact."""
+
+    # Recorded from `bench_forward_heap` at the commit that added the rows.
+    MAIN = """RESULT ramprobe edge_callback blocks_x1000=1035 bytes_x1000=215687 n=256
+RESULT ramprobe edge_wire blocks_x1000=8035 bytes_x1000=489187 n=256
+RESULT ramprobe link blocks_x1000=13769 bytes_x1000=412187 n=256
+RESULT ramprobe vertex_value_1k blocks_x1000=3000 bytes_x1000=1112812 n=256
+RESULT writeblocks owned S=1024 seam_x1000=1000 seam_bytes_x1000=40000 heap_x1000=0 n=64
+RESULT writeblocks rope2 S=16384 seam_x1000=1000 seam_bytes_x1000=64000 heap_x1000=0 n=64
+RESULT streamlock w1 sections_x1000=1000 heap_x1000=0 delivered_x1000=1000 n=64
+RESULT streamlock spill sections_x1000=1000 heap_x1000=2000 delivered_x1000=7000 n=64
+RESULT streamlock defer sections_x1000=1000 heap_x1000=0 delivered_x1000=0 n=64
+RESULT streamlock w4 sections_x1000=1000 delivered_x1000=1000 n=8000
+"""
+
+    def gate(self, cur: str, base: str | None) -> list[str]:
+        with contextlib.redirect_stdout(io.StringIO()):
+            return pg.exact_gate(pg.exact_parse(cur),
+                                 pg.exact_parse(base) if base is not None else None)
+
+    def test_every_row_kind_is_parsed(self):
+        got = pg.exact_parse(self.MAIN)
+        self.assertEqual(len(got), 10)
+        self.assertEqual(got["ramprobe:edge_callback"]["blocks_x1000"], 1035)
+        self.assertEqual(got["writeblocks:rope2 S=16384"]["seam_bytes_x1000"], 64000)
+        self.assertNotIn("heap_x1000", got["streamlock:w4"])
+
+    def test_main_against_itself_passes(self):
+        self.assertEqual(self.gate(self.MAIN, self.MAIN), [])
+        self.assertEqual(self.gate(self.MAIN, None), [])
+
+    def test_a_fraction_of_a_block_more_fails(self):
+        cur = self.MAIN.replace("edge_callback blocks_x1000=1035", "edge_callback blocks_x1000=1036")
+        fails = self.gate(cur, self.MAIN)
+        self.assertEqual(len(fails), 1)
+        self.assertIn("ramprobe:edge_callback: blocks_x1000 1.035 -> 1.036", fails[0])
+
+    def test_a_second_seam_block_per_write_fails(self):
+        cur = self.MAIN.replace("owned S=1024 seam_x1000=1000", "owned S=1024 seam_x1000=2000")
+        self.assertTrue(any("writeblocks:owned S=1024" in f for f in self.gate(cur, self.MAIN)))
+
+    def test_live_bytes_have_the_per_vertex_tolerance(self):
+        one_byte = self.MAIN.replace("bytes_x1000=412187", "bytes_x1000=413187")
+        self.assertEqual(self.gate(one_byte, self.MAIN), [])
+        many = self.MAIN.replace("bytes_x1000=412187", "bytes_x1000=432187")
+        self.assertTrue(any("ramprobe:link: live bytes" in f for f in self.gate(many, self.MAIN)))
+
+    def test_a_second_stripe_section_fails_without_a_baseline(self):
+        """#1713's one-section claim needs no main to compare against."""
+        for case in ("w1", "spill", "w4"):
+            cur = self.MAIN.replace(f"streamlock {case} sections_x1000=1000",
+                                    f"streamlock {case} sections_x1000=2000")
+            fails = self.gate(cur, None)
+            self.assertTrue(any(f.startswith(f"streamlock {case}: 2 stripe-lock") for f in fails),
+                            fails)
+
+    def test_heap_on_the_steady_stream_write_fails(self):
+        cur = self.MAIN.replace("w1 sections_x1000=1000 heap_x1000=0",
+                                "w1 sections_x1000=1000 heap_x1000=1000")
+        self.assertTrue(any("streamlock w1: 1 global-heap" in f for f in self.gate(cur, None)))
+
+    def test_a_refused_spill_that_delivers_fails(self):
+        cur = self.MAIN.replace("defer sections_x1000=1000 heap_x1000=0 delivered_x1000=0",
+                                "defer sections_x1000=1000 heap_x1000=0 delivered_x1000=4000")
+        self.assertTrue(any("streamlock defer" in f for f in self.gate(cur, None)))
+
+    def test_a_row_main_has_and_the_candidate_dropped_fails(self):
+        cur = "\n".join(ln for ln in self.MAIN.splitlines() if "edge_wire" not in ln)
+        fails = self.gate(cur, self.MAIN)
+        self.assertTrue(any(f.startswith("ramprobe:edge_wire: main emits") for f in fails))
+        self.assertTrue(any("ramprobe:edge_wire is a gated RAM probe" in f for f in fails))
+
+    def test_a_main_without_the_rows_gates_only_the_invariants(self):
+        self.assertEqual(self.gate(self.MAIN, ""), [])
+
+    def test_ram_points_are_documented(self):
+        doc = pathlib.Path(__file__).resolve().parents[1] / "docs" / "methodology.md"
+        if not doc.exists():
+            self.skipTest(f"{doc} not present")
+        text = doc.read_text()
+        for point in pg.RAM_POINTS:
+            self.assertTrue(f"`{point}`" in text, f"{point} is gated but not named in {doc}")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

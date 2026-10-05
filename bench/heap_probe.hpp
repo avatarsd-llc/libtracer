@@ -46,6 +46,13 @@ inline std::atomic<long long> g_live_bytes{0};
  */
 inline std::atomic<std::size_t> g_max_bytes{0};
 
+/**
+ * @brief While set, every counted allocation FAILS (#1808): the throwing forms throw
+ *        `std::bad_alloc`, the nothrow forms return null. It is how the STREAM deferral row
+ *        refuses a take's spill; the overriding TU honours it, armed or not.
+ */
+inline std::atomic<bool> g_refuse{false};
+
 /** @brief Raise @ref g_max_bytes to @p n if it is larger; the overriding TU calls it when armed. */
 inline void note_request(std::size_t n) {
     std::size_t cur = g_max_bytes.load(std::memory_order_relaxed);

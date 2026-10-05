@@ -1721,8 +1721,9 @@ gated MULTI points are `inproc-mt4/64/1/4`, `acl-inherit-d4-mt4/64/1/4` and
 
 `LIBTRACER_BENCH_FAMILY_SEED=<n>` runs the families in a seeded shuffled order (printed on
 stderr as `FAMILY-ORDER`). It exists to check the isolation: a shuffled run must leave every row
-inside its A/A spread. `/usr/bin/time -v`'s max RSS is now the largest single family's peak, not
-the whole sweep's.
+inside its A/A spread. Each family also prints its own RSS delta on stdout, `RSS family=<name>
+start_kb= peak_kb= delta_kb=` (#1808): the high-water mark minus the resident set it started
+from, which replaces the whole-run `/usr/bin/time -v` max RSS (the harness's peak).
 
 What each in-process row publishes as its delivery figure is pinned the same way, by
 `bench/test_delivery_count` (`cmake --build build --target test_delivery_count`). It drives
@@ -1752,6 +1753,11 @@ craft libtracer":
 | `lkv-store-heap` / `lkv-store-pool` | **the rope-to-contiguous copy** — `rope_t::materialize` over a 2-link rope (backend alloc + payload `memcpy`), pooled backend vs the default heap. Gated points since [#1250](https://github.com/avatarsd-llc/libtracer/issues/1250). **The name is misleading and is kept anyway:** the "store" is the *copy-store allocation*, NOT the LKV slot — there is no `graph_t`, no vertex and no last-known-value publish in this loop. A rename would end the `gh-pages` history series keyed on these names (the `fold-n*` → `fold-b*` precedent below), so the meaning is documented instead. Read it as "`materialize` got slower", never as "the LKV store got slower" — #1250 was triaged the wrong way round for exactly that reason. |
 | `lkv-alloc-heap-aged` / `lkv-store-heap-aged` | the two `lkv-*-heap` operations again, on an **aged heap**: the `lkv-aged` family first fragments its process heap from a fixed seed (16384 blocks of 16–2063 B, every other one freed, the rest held live), then runs the same loops. The un-suffixed `lkv-*-heap` rows are the **fresh-heap** variant — they run first thing in their own process. Both heap states are chosen, not inherited from sweep order ([#1803](https://github.com/avatarsd-llc/libtracer/issues/1803)). No pool twin: the pool carves a static slab and never touches the heap. |
 | `cliff-alloc-heap` / `cliff-alloc-pool` | **the allocator-cliff family** ([#1806](https://github.com/avatarsd-llc/libtracer/issues/1806)): one segment `alloc` + `destroy`, as `lkv-alloc-*`, but timed as a batch row (`bench::time_batches`, picosecond p50, every window at least 20 µs) at every size of `bench::cliff_sizes`: 960–1096 B in steps of 8 plus 985 B, and 2^k, 2^k − 48, 2^k + 48 from 64 B to 64 KiB. Families `cliff-heap` and `cliff-pool`, each in its own fresh process; the pool has one 64 KiB slot so its row should be flat. `perf_gate.py` judges each size against main and against its smaller neighbour (a new step over 1.75x fails). The exact half is `bench_forward_heap`'s `RESULT segdraw` rows: what one heap segment asks the allocator for at the same sizes, ratcheted exactly and checked against the 1032 B fast-path ceiling. |
+| `stream-w1` / `-w2` / `-w4` | 1, 2 and 4 writer threads on ONE STREAM vertex (depth 16, one counting subscriber), #1713's single-lock admission under contention ([#1808](https://github.com/avatarsd-llc/libtracer/issues/1808)). Family `stream-mt` (MULTI), T capped by the affinity mask. Delivery counted at the subscriber after a covering sweep. |
+| `stream-spill` / `stream-defer` | batch-timed per CYCLE (#1808): six `assign`s then one `write` whose take spills past `ring_take_t::kInline`; four `assign`s then one covering `propagate`. Family `stream`. The refused-spill deferral is an exact row in `bench_forward_heap` (`RESULT streamlock defer`). |
+| `route-handle-egress-mt1` / `-mt2` / `-mt4` | T producer threads on one advertised `route_handle_t` flow, the reuse read (#1808). Throughput only; advisory, not gated. Family `route-handle` (MULTI). |
+| `seam-class-c1` / `-c8` / `-c32`, `seam-direct`, `seam-fallback` | the allocation seam (#1808): 64 B `try_alloc` + `release` on a `pool_source_t` whose 64 B class is the last of C; and a full `bump_source_t` falling back to its upstream pool, against that pool alone. Family `alloc-seam`. |
+| `inproc-pool-batch` | the window-calibrated twin of the heap-view `inproc-pool` rows (#1808), in its own family so the quantized pool rows did not move. |
 | `mixed` | 128 topics, varied fan-out + payloads. |
 | `net` | two processes over real UDP (`run_net.sh`). |
 | `eptype-lean` | ep-type axis: minimal sink (see below). |

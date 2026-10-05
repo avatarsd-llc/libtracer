@@ -27,6 +27,7 @@
 #pragma once
 
 #include <cerrno>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -35,6 +36,7 @@
 
 #if defined(__linux__)
 #include <spawn.h>
+#include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -135,6 +137,55 @@ inline int run_family_process(const char* argv0, std::string_view family) {
     (void)argv0;
     (void)family;
     return -1;
+#endif
+}
+
+/**
+ * @brief This process's resident set right now, in KiB; 0 where it cannot be read.
+ *
+ * Read from `/proc/self/statm` (resident pages times the page size): the CURRENT figure, which
+ * `getrusage` does not give. Paired with the peak in @ref emit_family_rss.
+ */
+inline std::size_t rss_kb() {
+#if defined(__linux__)
+    std::FILE* const f = std::fopen("/proc/self/statm", "r");
+    if (f == nullptr) return 0;
+    unsigned long size = 0;
+    unsigned long resident = 0;
+    const int got = std::fscanf(f, "%lu %lu", &size, &resident);
+    std::fclose(f);
+    const long page = sysconf(_SC_PAGESIZE);
+    return got == 2 && page > 0 ? resident * static_cast<std::size_t>(page) / 1024 : 0;
+#else
+    return 0;
+#endif
+}
+
+/**
+ * @brief Print one family's RSS delta (#1808): `RSS family=<name> start_kb= peak_kb= delta_kb=`.
+ *
+ * It replaces the whole-run "max RSS" that `/usr/bin/time -v` reported, which since #1803 was
+ * the largest single family's peak and counted the harness itself (the binary, the C++
+ * runtime, the latency vectors reserved before timing). `start_kb` is the resident set when the
+ * family starts, `peak_kb` the process's high-water mark when it ends (`getrusage`), and
+ * `delta_kb` their difference: what the family's own rows added. A plain line on stdout, so it
+ * lands in the transcript beside the family's rows; every RESULT parser skips it on its tag.
+ *
+ * @param family   The family that just ran.
+ * @param start_kb @ref rss_kb taken before the family's first row.
+ */
+inline void emit_family_rss(std::string_view family, std::size_t start_kb) {
+#if defined(__linux__)
+    rusage ru{};
+    if (start_kb == 0 || getrusage(RUSAGE_SELF, &ru) != 0) return;
+    const auto peak_kb = static_cast<std::size_t>(ru.ru_maxrss);  // KiB on Linux
+    std::printf("RSS family=%.*s start_kb=%zu peak_kb=%zu delta_kb=%zu\n",
+                static_cast<int>(family.size()), family.data(), start_kb, peak_kb,
+                peak_kb > start_kb ? peak_kb - start_kb : 0);
+    std::fflush(stdout);
+#else
+    (void)family;
+    (void)start_kb;
 #endif
 }
 

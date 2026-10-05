@@ -18,7 +18,9 @@ one direction per suite:
     ns/delivery (throughput re-expressed in the legacy ns unit so the pre-existing
     series continue unbroken), plus the memory-footprint metrics — heap bytes per
     forward hop / per terminus resolve parsed from bench_forward_heap's probe
-    output, and the whole-run max RSS from `/usr/bin/time -v` when provided.
+    output (plus its #1808 exact rows: RAM per edge / link / 1 KiB value, blocks per write,
+    STREAM stripe sections), and each bench_libtracer family's RSS delta (`RSS family=`
+    lines in the transcript, #1808), which replaced the whole-run max RSS.
   * `--out-bigger` (customBiggerIsBetter): per-point throughput in natural
     deliveries/s, so throughput trends read in their own direction and unit.
 
@@ -31,7 +33,7 @@ history point approximates the code's capability, not the machine lottery
 (GitHub-hosted runners vary ~2x in absolute speed).
 
   ./perf_emit_benchmark.py --raw r1.txt --raw r2.txt --raw r3.txt \\
-      --zeroheap-raw zh.txt --time-v time.txt \\
+      --zeroheap-raw zh.txt \\
       --out-smaller benchmark_ns.json --out-bigger benchmark_throughput.json
 
 Stdlib only. The RESULT columns (tab-separated, from bench_libtracer):
@@ -126,11 +128,41 @@ def zeroheap_metrics(text: str) -> list[dict]:
     return series
 
 
-def rss_metric(text: str) -> list[dict]:
-    """Whole-run memory footprint from a `/usr/bin/time -v` transcript."""
-    m = re.search(r"Maximum resident set size \(kbytes\):\s*(\d+)", text)
-    return ([{"name": "bench_libtracer max RSS", "unit": "KB", "value": int(m.group(1))}]
-            if m else [])
+def exact_metrics(text: str) -> list[dict]:
+    """@brief bench_forward_heap's #1808 exact rows as series, each `_x1000` field divided
+    back to its unit so a fraction (1.035 blocks per edge) is charted as one."""
+    series = []
+    for m in re.finditer(r"^RESULT ramprobe (\w+) blocks_x1000=(\d+) bytes_x1000=(\d+)",
+                         text, re.MULTILINE):
+        series.append({"name": f"live bytes per {m.group(1)} (ramprobe)", "unit": "bytes",
+                       "value": int(m.group(3)) / 1000})
+        series.append({"name": f"heap blocks per {m.group(1)} (ramprobe)", "unit": "blocks",
+                       "value": int(m.group(2)) / 1000})
+    for m in re.finditer(r"^RESULT writeblocks (\w+) S=(\d+) seam_x1000=(\d+) "
+                         r"seam_bytes_x1000=(\d+) heap_x1000=(\d+)", text, re.MULTILINE):
+        tag = f"{m.group(1)} write {m.group(2)}B"
+        series.append({"name": f"seam blocks per {tag}", "unit": "blocks",
+                       "value": int(m.group(3)) / 1000})
+        series.append({"name": f"heap blocks per {tag}", "unit": "blocks",
+                       "value": int(m.group(5)) / 1000})
+    for m in re.finditer(r"^RESULT streamlock (\w+) sections_x1000=(\d+)", text, re.MULTILINE):
+        series.append({"name": f"stripe sections per STREAM write ({m.group(1)})",
+                       "unit": "sections", "value": int(m.group(2)) / 1000})
+    return series
+
+
+_RSS_RE = re.compile(r"^RSS family=(\S+) start_kb=\d+ peak_kb=\d+ delta_kb=(\d+)", re.MULTILINE)
+
+
+def rss_metrics(texts: list[str]) -> list[dict]:
+    """@brief Each bench_libtracer family's RSS delta (#1808): what the family's own rows
+    added to its fresh process, not the harness peak the old whole-run max RSS reported.
+    Smallest across runners, like every other smaller-is-better metric here."""
+    best: dict[str, int] = {}
+    for text in texts:
+        for m in _RSS_RE.finditer(text):
+            best[m.group(1)] = min(best.get(m.group(1), int(m.group(2))), int(m.group(2)))
+    return [{"name": f"{fam} RSS delta", "unit": "KB", "value": kb} for fam, kb in best.items()]
 
 
 def main() -> int:
@@ -143,8 +175,6 @@ def main() -> int:
                          "emitter records the best across them per metric")
     ap.add_argument("--zeroheap-raw", help="pre-captured bench_forward_heap stdout: "
                                            "heap-probe bytes become memory-footprint metrics")
-    ap.add_argument("--time-v", help="pre-captured `/usr/bin/time -v` stderr of the bench "
-                                     "run: max RSS becomes a memory-footprint metric")
     ap.add_argument("--out-smaller", "--out", dest="out_smaller",
                     default=str(HERE / "benchmark_output.json"),
                     help="customSmallerIsBetter JSON: latency ns + ns/delivery + memory")
@@ -191,9 +221,9 @@ def main() -> int:
                             "unit": "ns", "value": round(1e9 / v["deliv_s"], 3)})
 
     if args.zeroheap_raw and pathlib.Path(args.zeroheap_raw).exists():
-        smaller += zeroheap_metrics(pathlib.Path(args.zeroheap_raw).read_text())
-    if args.time_v and pathlib.Path(args.time_v).exists():
-        smaller += rss_metric(pathlib.Path(args.time_v).read_text())
+        zh = pathlib.Path(args.zeroheap_raw).read_text()
+        smaller += zeroheap_metrics(zh) + exact_metrics(zh)
+    smaller += rss_metrics(texts)
 
     if not smaller:
         print("perf_emit_benchmark: no RESULT rows parsed from the bench", file=sys.stderr)

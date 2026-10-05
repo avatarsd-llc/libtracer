@@ -1127,6 +1127,111 @@ def segdraw_gate(cur: dict[int, dict[str, int]],
     return fails
 
 
+# --- THE #1808 EXACT ROWS: RAM probes, blocks per write, STREAM stripe sections -------------
+# `bench_forward_heap` prints three more kinds of exact row (bench/exact_rows.hpp), every
+# per-unit figure multiplied by 1000 so a fraction survives:
+#
+#   RESULT ramprobe <what> blocks_x1000= bytes_x1000= n=        RAM per edge / link / value
+#   RESULT writeblocks <input> S=<size> seam_x1000= seam_bytes_x1000= heap_x1000= n=
+#   RESULT streamlock <case> sections_x1000= [heap_x1000=] delivered_x1000= n=
+#
+# Rules, all counts and none timed:
+#   ratchet   — against main, a block or section count may not grow at all, and a ramprobe's
+#               live bytes may not grow past MEM_REGRESS and by more than one byte per unit
+#               (the per-vertex rule; bytes are host-allocator dependent, blocks are not);
+#   presence  — a key main emits that the candidate does not is a FAIL, never "not gated"
+#               (#1847's rule, for these rows);
+#   invariant — #1713's claims, needing no baseline: the steady STREAM write (`w1`), the
+#               spilling write (`spill`) and four concurrent writers (`w4`) take exactly ONE
+#               stripe-lock section per write; `w1` takes nothing from the global heap; and a
+#               write whose spill is refused (`defer`) delivers nothing until the next one.
+#
+# EDITORS: RAM_POINTS is the list docs/methodology.md names as the gated RAM probes.
+RAM_POINTS = ["edge_callback", "edge_wire", "link", "vertex_value_1k"]
+_EXACT_RES = (
+    ("ramprobe", re.compile(r"^RESULT ramprobe (\w+) blocks_x1000=(?P<blocks_x1000>\d+) "
+                            r"bytes_x1000=(?P<bytes_x1000>\d+)")),
+    ("writeblocks", re.compile(r"^RESULT writeblocks (\w+ S=\d+) seam_x1000=(?P<seam_x1000>\d+) "
+                               r"seam_bytes_x1000=(?P<seam_bytes_x1000>\d+) "
+                               r"heap_x1000=(?P<heap_x1000>\d+)")),
+    ("streamlock", re.compile(r"^RESULT streamlock (\w+) sections_x1000=(?P<sections_x1000>\d+)"
+                              r"(?: heap_x1000=(?P<heap_x1000>\d+))? "
+                              r"delivered_x1000=(?P<delivered_x1000>\d+)")),
+)
+# Fields that may not grow against main at all. `delivered_x1000` is not one: more delivered
+# is not a regression, and the `defer` invariant below pins the one case where it must be 0.
+_EXACT_RATCHET = ("blocks_x1000", "seam_x1000", "seam_bytes_x1000", "heap_x1000",
+                  "sections_x1000")
+ONE_SECTION_CASES = ("w1", "spill", "w4")
+
+
+def exact_parse(out: str) -> dict[str, dict[str, int]]:
+    """@brief The #1808 exact rows of one `bench_forward_heap` run, keyed `<kind>:<what>`."""
+    got: dict[str, dict[str, int]] = {}
+    for line in out.splitlines():
+        for kind, rx in _EXACT_RES:
+            m = rx.match(line)
+            if m:
+                got[f"{kind}:{m.group(1)}"] = {k: int(v) for k, v in m.groupdict().items()
+                                               if v is not None}
+    return got
+
+
+def exact_probe(bench_fwd: pathlib.Path) -> dict[str, dict[str, int]]:
+    """@brief The #1808 exact rows of @p bench_fwd; empty when it cannot be run."""
+    try:
+        return exact_parse(fwd_output(bench_fwd))
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+
+
+def exact_invariants(cur: dict[str, dict[str, int]]) -> list[str]:
+    """@brief #1713's STREAM claims on the candidate alone (see the block comment above)."""
+    fails = []
+    if any(k.startswith("ramprobe:") for k in cur):
+        fails += [f"ramprobe:{p} is a gated RAM probe and the candidate did not emit it"
+                  for p in RAM_POINTS if f"ramprobe:{p}" not in cur]
+    for case in ONE_SECTION_CASES:
+        row = cur.get(f"streamlock:{case}")
+        if row is not None and row["sections_x1000"] != 1000:
+            fails.append(f"streamlock {case}: {row['sections_x1000'] / 1000:g} stripe-lock "
+                         f"sections per STREAM write, not exactly one (#1713)")
+    w1 = cur.get("streamlock:w1")
+    if w1 is not None and w1.get("heap_x1000", 0) != 0:
+        fails.append(f"streamlock w1: {w1['heap_x1000'] / 1000:g} global-heap blocks per "
+                     f"steady-state STREAM write, not zero (#1713)")
+    defer = cur.get("streamlock:defer")
+    if defer is not None and defer["delivered_x1000"] != 0:
+        fails.append("streamlock defer: a write whose spill was refused delivered part of its "
+                     "window instead of deferring it (#477, #1713)")
+    return fails
+
+
+def exact_gate(cur: dict[str, dict[str, int]],
+               base: dict[str, dict[str, int]] | None) -> list[str]:
+    """@brief Ratchet, presence and invariant rules for the #1808 exact rows."""
+    fails = exact_invariants(cur)
+    for key, b in sorted((base or {}).items()):
+        c = cur.get(key)
+        if c is None:
+            fails.append(f"{key}: main emits this exact row and the candidate does not "
+                         f"(a missing key is never 'not gated', #1847)")
+            continue
+        grew = [f"{f} {b[f] / 1000:g} -> {c[f] / 1000:g}" for f in _EXACT_RATCHET
+                if f in b and f in c and c[f] > b[f]]
+        if grew:
+            fails.append(f"{key}: {', '.join(grew)} per unit (exact ratchet vs main)")
+        if "bytes_x1000" in b and "bytes_x1000" in c:
+            over = c["bytes_x1000"] - b["bytes_x1000"]
+            if c["bytes_x1000"] > b["bytes_x1000"] * MEM_REGRESS and over > MEM_TICK_B * 1000:
+                fails.append(f"{key}: live bytes {b['bytes_x1000'] / 1000:g} -> "
+                             f"{c['bytes_x1000'] / 1000:g} per unit (+{over / 1000:g} B)")
+    if cur or base:
+        print(f"  exact rows (#1808): {len(cur)} in the candidate, {len(base or {})} on main, "
+              f"{len(fails)} fail")
+    return fails
+
+
 def mem_probe(bench_fwd: pathlib.Path) -> dict[str, dict]:
     """Live usable-size bytes AND heap-block count per vertex from the counting-allocator
     probes — one run (deterministic). Returns {"mem:<what>": {"bytes": N, "allocs": M}};
@@ -1223,7 +1328,8 @@ def mem_ratchet(bench_fwd: pathlib.Path | None, base_fwd: pathlib.Path | None) -
     base = _mem_arm("baseline", base_fwd, "--baseline-bench-fwd")
     if cand_ok and base_ok:
         return (mem_gate(mem_probe(bench_fwd), mem_probe(base_fwd))
-                + segdraw_gate(segdraw_probe(bench_fwd), segdraw_probe(base_fwd)))
+                + segdraw_gate(segdraw_probe(bench_fwd), segdraw_probe(base_fwd))
+                + exact_gate(exact_probe(bench_fwd), exact_probe(base_fwd)))
     if not cand_ok and not base_ok:
         # Say so. A skipped gate that prints nothing is indistinguishable from a
         # gate that passed, which is how a guard becomes a blind spot.
