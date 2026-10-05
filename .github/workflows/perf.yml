@@ -373,20 +373,14 @@ jobs:
           set -o pipefail
           ZEROHEAP_MAX=0 ./bench/build/bench_forward_heap | tee bench/bench_forward_heap_raw.txt
       # One full-bench transcript per replica; the history job aggregates all three.
-      # GNU time -v: whole-run max RSS feeds the memory-footprint series. Degrades
-      # to an empty transcript (metric omitted) if GNU time is absent on the runner.
+      # Each family prints its own `RSS family=` delta into the transcript (#1808), which
+      # feeds the memory-footprint series in place of the old whole-run max RSS.
       - name: Run the bench once (this replica's history transcript)
         run: |
           # Through the condition classifier (#1676): unpinned here, re-run while
           # contended, and recorded in bench/conditions.jsonl beside the transcript.
           measure="python3 bench/bench_conditions.py run --record bench/conditions.jsonl"
-          if [ -x /usr/bin/time ]; then
-            $measure --out bench/bench_libtracer_raw.txt --err bench/bench_libtracer_time.txt \
-              -- /usr/bin/time -v ./bench/build/bench_libtracer
-          else
-            $measure --out bench/bench_libtracer_raw.txt -- ./bench/build/bench_libtracer
-            : >bench/bench_libtracer_time.txt
-          fi
+          $measure --out bench/bench_libtracer_raw.txt -- ./bench/build/bench_libtracer
       # The NETWORK-plane series. These emit the same 12-column RESULT rows as
       # bench_libtracer, so they feed the same history store with no emitter change — and
       # without them the routing and delivery numbers are untracked, which is how a 63%
@@ -470,7 +464,6 @@ jobs:
           name: bench-raw-r${{ matrix.replica }}
           path: |
             bench/bench_libtracer_raw.txt
-            bench/bench_libtracer_time.txt
             bench/bench_forward_heap_raw.txt
             bench/bench_forward_demux_raw.txt
             bench/bench_compact_delivery_raw.txt
@@ -520,9 +513,8 @@ jobs:
             echo "no replica produced a transcript — nothing to record"; exit 1
           fi
           zh=$(ls bench/raws/*/bench_forward_heap_raw.txt 2>/dev/null | head -1)
-          tv=$(ls bench/raws/*/bench_libtracer_time.txt 2>/dev/null | head -1)
           python3 bench/perf_emit_benchmark.py $args \
-            ${zh:+--zeroheap-raw "$zh"} ${tv:+--time-v "$tv"} \
+            ${zh:+--zeroheap-raw "$zh"} \
             --out-smaller bench/benchmark_output.json \
             --out-bigger bench/benchmark_throughput.json
       - name: Upload the aggregated bench results (rich per-commit record)

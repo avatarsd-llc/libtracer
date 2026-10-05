@@ -21,7 +21,8 @@
  *   - `compact-forward`  — the label swaps and re-emits downstream.
  *
  * Both are measured on a WARM binding (the advertise and first frames run before the window
- * opens), and allocations are counted around one frame — so the RAM axis is exact rather than
+ * opens), every frame enters through the child's receiver ctx, the production path (#1808), and
+ * allocations are counted around one frame — so the RAM axis is exact rather than
  * inferred. Batch-amortized and self-calibrating for the same reason the other benches are: one
  * delivery is close enough to `clock_gettime` that per-op timing measures the clock.
  */
@@ -158,12 +159,28 @@ void operator delete[](void* p, std::align_val_t, const std::nothrow_t&) noexcep
 
 namespace {
 
-/** @brief A link that swallows what it is handed — no I/O, no allocation in the window. */
+/**
+ * @brief A link that swallows what it is handed (no I/O, no allocation in the window), and
+ *        hands an inbound frame up the way a real link's receive thread does.
+ */
 struct sink_link_t : tr::net::transport_t {
     std::size_t sends = 0;
     void send(std::span<const std::byte>) override { ++sends; }
     void send(std::span<const std::span<const std::byte>>) override { ++sends; }
+    /** @brief Deliver @p frame to the receiver `add_child` installed: the per-child ctx. */
+    void inject(std::span<const std::byte> frame) const { rx_.deliver_borrowed(frame); }
+    /** @brief Whether a borrowed-span receiver (and no rope receiver) is installed. */
+    [[nodiscard]] bool has_span_receiver() const noexcept {
+        return rx_.has_any() && !rx_.has_rope();
+    }
 };
+
+/** @brief Stop the run: the frame did not take the production path this bench claims. */
+[[noreturn]] void path_broken(const char* mode, const char* why) {
+    std::fprintf(stderr, "FAIL mode=%s: %s\n", mode, why);
+    std::fflush(stdout);
+    std::exit(1);
+}
 
 std::vector<std::byte> path_tlv(std::initializer_list<std::string_view> segs) {
     std::vector<std::byte> body;
@@ -201,7 +218,23 @@ void run_point(std::size_t payload, bool terminus, double budget) {
     router.on_frame("net/ws-client/up", tr::net::encode_advertise(9, route));
 
     const std::vector<std::byte> frame = tr::net::encode_compact(9, value_tlv(payload));
-    const auto deliver = [&] { router.on_frame("net/ws-client/up", frame); };
+    // Through the child's RECEIVER CTX (#1808), as a link's receive thread delivers it, and not
+    // through the public by-name `on_frame` door: production frames never take that door, and
+    // it pays a name-to-ctx lookup per frame that the receiver ctx resolved once at add_child.
+    const auto deliver = [&] { up.inject(frame); };
+    const char* const mode = terminus ? "compact-terminus" : "compact-forward";
+
+    // Assert the path before timing it: the receiver is installed, and ONE injected frame
+    // lands on exactly the leg its label names, without a single by-name reply lookup.
+    if (!up.has_span_receiver()) path_broken(mode, "add_child installed no span receiver");
+    const std::size_t sends0 = down.sends;
+    deliver();
+    if (down.sends - sends0 != (terminus ? 0U : 1U))
+        path_broken(mode, "one injected frame did not reach exactly its own leg");
+    if (terminus && !g.read(*path_t::parse("/sink")).has_value())
+        path_broken(mode, "the terminus frame wrote nothing to /sink");
+    if (router.reply_name_lookups() != 0)
+        path_broken(mode, "a frame resolved its link by NAME, not through the receiver ctx");
 
     // WARM the binding before anything is measured — the first frame resolves cold and
     // memoizes, and it is precisely the frame this bench is NOT about.
@@ -221,7 +254,6 @@ void run_point(std::size_t payload, bool terminus, double budget) {
     // plateau calibrator this used let the machine pick the batch (#1358).
     const bench::batch_timing_t t =
         bench::time_batches(deliver, static_cast<std::uint64_t>(budget * 1e9));
-    const char* const mode = terminus ? "compact-terminus" : "compact-forward";
     bench::emit_batch("libtracer", mode, payload, 1, 1, t.ops_per_s, t.ops_per_s, 0.0, t);
     std::printf("NOTE mode=%s payload=%zu allocs=%zu bytes=%zu\n", mode, payload, allocs, bytes);
     if (terminus ? (down.sends != 0) : (down.sends == 0))

@@ -87,6 +87,7 @@
 #endif
 
 #include "bench_common.hpp"
+#include "exact_rows.hpp"
 #include "heap_probe.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/graph.hpp"
@@ -99,6 +100,7 @@
 
 namespace {
 void* counted_alloc(std::size_t size) {
+    if (probe::g_refuse.load(std::memory_order_relaxed)) return nullptr;  // #1808's deferral row
     const bool armed = probe::g_armed.load(std::memory_order_relaxed);
     if (armed) {
         probe::g_allocs.fetch_add(1, std::memory_order_relaxed);
@@ -136,6 +138,7 @@ void* counted_alloc(std::size_t size) {
  */
 void* counted_aligned_alloc(std::size_t size, std::size_t align) {
     if (align <= alignof(std::max_align_t)) return counted_alloc(size);  // malloc already suits
+    if (probe::g_refuse.load(std::memory_order_relaxed)) return nullptr;
     const bool armed = probe::g_armed.load(std::memory_order_relaxed);
     if (armed) {
         probe::g_allocs.fetch_add(1, std::memory_order_relaxed);
@@ -1056,6 +1059,9 @@ int main() {
     }
 
     segment_draw_rows();  // the cliff family's exact counts (#1806); gated by perf_gate.py
+    // RAM per edge, per link and per 1 KiB value, blocks per write, and the STREAM write's
+    // stripe-lock sections (#1808); all exact, all gated by perf_gate.py.
+    if (const int rc = exact_rows::print_all(); rc != 0) return rc;
 
     // Hard gate (always on): the ADR-0060 pool path must not touch the global heap (#1695).
     // It replaces the blocking half of `perf_gate.py`'s pool/heap throughput ratio, which

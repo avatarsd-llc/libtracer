@@ -82,6 +82,20 @@ Several named *modes* isolate distinct costs on the same axes:
   the registry, passes the fan-in ACL gate, clones the rope nothrow, and applies the
   target's write effects — measured at roughly **10× a callback edge** at fan-out. The
   `stored` / `handler` pair separates the target's own store from the dispatch itself.
+- `stream-w1` / `stream-w2` / `stream-w4` — 1, 2 and 4 writer threads on **one** STREAM
+  vertex, the single-lock admission of
+  [#1713](https://github.com/avatarsd-llc/libtracer/issues/1713) under contention; delivery
+  is counted at the subscriber. `stream-spill` times a write whose take is wider than the
+  in-frame slots (it spills), and `stream-defer` a burst of `assign`s delivered by one
+  covering `propagate`; both per cycle, batch-timed
+  ([#1808](https://github.com/avatarsd-llc/libtracer/issues/1808)).
+- `route-handle-egress-mt1` / `-mt2` / `-mt4` — producer threads on one advertised
+  route-handle flow, the egress reuse read a compacted delivery takes. Advisory: charted,
+  never gated.
+- `seam-class-c1` / `-c8` / `-c32`, `seam-direct`, `seam-fallback` — the allocation seam's
+  two decisions: finding a block's size class among C classes, and a full `bump_source_t`
+  falling back to its upstream pool (`seam-direct` is that pool alone).
+- `inproc-pool-batch` — the window-calibrated twin of the heap-view `inproc-pool` rows.
 
 Every mode above except the `inproc-target-*` pair subscribes with an in-process
 callback, so a fan-out curve reads the **callback** leg unless its mode says otherwise.
@@ -105,9 +119,20 @@ A different instrument entirely. `bench_forward_heap` replaces the global alloca
 with a counting wrapper and **arms it around exactly one operation**, so these are
 *exact* allocation counts and byte totals — not statistics, not sampling. Bytes are
 read from `malloc_usable_size`, so a resident figure is what the allocator really
-holds rather than what the caller asked for; max RSS comes from
-`/usr/bin/time -v` and is the coarse process-level number beside them (since the sweep
-runs one process per family, it is the largest single family's peak).
+holds rather than what the caller asked for. The coarse process-level number beside them
+is each family's **RSS delta**: every `bench_libtracer` family runs in its own process and
+prints `RSS family=<name> start_kb= peak_kb= delta_kb=`, the high-water mark minus the
+resident set the family started from. It replaced a whole-run "max RSS" from
+`/usr/bin/time -v`, which was the harness's peak, not any family's footprint
+([#1808](https://github.com/avatarsd-llc/libtracer/issues/1808)).
+
+Beside the per-vertex probes, `bench_forward_heap` prints RAM **per callback edge**
+(`edge_callback`), **per wire subscriber edge** (`edge_wire`), **per link** (`link`, one
+router child) and **per 1 KiB value** (`vertex_value_1k`), each over 256 units and multiplied
+by 1000 so a fraction of a block survives the division; the heap blocks **per write** at every
+payload-ladder size, from the injected source and from the global heap; and the STREAM
+write's **stripe-lock sections** per write (counted through `--wrap=pthread_mutex_lock`, the
+instrument #1713's own test uses).
 
 Two invariants sit on this surface, and **the scope of the armed window is part of the
 first one**. The steady-state forward hop's *own* work must touch no heap — the two-plane
@@ -149,7 +174,10 @@ measures the clock instead of the code.
 `bench_forward_demux` and `bench_compact_delivery` are recorded into the build-to-build
 history alongside the in-process series, so a routing or delivery regression shows up as a
 trend rather than being noticed later. They emit the same `RESULT` rows as `bench_libtracer`,
-so they need no separate aggregation. Their transcripts are tolerated-empty — a bench that
+so they need no separate aggregation. `bench_compact_delivery` drives every frame through
+the child's **receiver ctx**, the way a link's receive thread delivers it, and asserts so
+before timing: the public by-name `on_frame` door it used to call is one production frames
+never take ([#1808](https://github.com/avatarsd-llc/libtracer/issues/1808)). Their transcripts are tolerated-empty — a bench that
 fails to run must not cost a commit its whole history point — but an empty one emits a build
 warning naming the file, because a silently-empty transcript is otherwise a green job that
 recorded nothing.
@@ -194,7 +222,7 @@ distinct instrument, and a distinct rule for *what a "worse" number means*.
 | **latency** | ns (p50 / p99 / mean) | wall-clock per op, `bench_libtracer` | lower better | gated ✅ per-PR + push |
 | **throughput** | deliveries/s, publishes/s | ops / elapsed, `bench_libtracer` | higher better | gated ✅ per-PR + push |
 | **alloc bytes** | bytes & count per op | counting allocator, `bench_forward_heap` | lower better | forward hop gated ✅ = 0; other probes tracked |
-| **memory footprint** | live bytes / vertex, max RSS | `malloc_usable_size` balance + `/usr/bin/time` | lower better | gated ✅ per-vertex (+2% same-runner); RSS tracked |
+| **memory footprint** | live bytes / vertex, edge, link; RSS delta per family | `malloc_usable_size` balance + `RSS family=` lines | lower better | gated ✅ per-vertex, edge and link (+2% same-runner); RSS tracked |
 | **wire bytes** | encoded frame bytes | TLV frame size over the v1 vectors, codec surface | lower better | being promoted to a first-class series |
 | **CPU** | work per op | per-op cost on a pinned core | lower better | latency is today's proxy; dedicated counter planned |
 
@@ -482,6 +510,14 @@ Details that make these trustworthy:
   `--baseline-bench-fwd`. Supplying that binary for one arm and not the other **fails**
   the gate as a wiring error; supplying it for neither prints an explicit `SKIP` — a
   probe that cannot run never passes silently.
+- The #1808 **exact rows** are gated beside them, on counts alone: the four RAM probes
+  `edge_callback`, `edge_wire`, `link` and `vertex_value_1k` (`perf_gate.py`'s
+  `RAM_POINTS`), the blocks per write, and the STREAM stripe-lock sections. Against main, no
+  block or section count may grow at all and live bytes may not grow past the same +2%; a
+  row main emits that the candidate does not fails. #1713's claims are checked with no
+  baseline: a steady STREAM write, a spilling one and four concurrent writers each take
+  **exactly one** stripe-lock section per write, the steady write takes nothing from the
+  global heap, and a write whose spill is refused delivers nothing until the next write.
 - A per-vertex cost a **ratified clause already prices** is not a pullback, and the memory
   ratchet has one narrow way to say so: a **charged step** (`perf_gate.py`'s
   `MEM_CHARGED`), declared per probe, in bytes, naming the clause that charges it. A

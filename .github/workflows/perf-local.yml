@@ -273,13 +273,9 @@ jobs:
         run: |
           # `bench_conditions.py run` pins to BENCH_CPU and records the conditions (#1676).
           measure="python3 bench/bench_conditions.py run"
-          if [ -x /usr/bin/time ]; then
-            $measure --out bench/bench_libtracer_raw.txt --err bench/bench_libtracer_time.txt \
-              -- /usr/bin/time -v ./bench/build/bench_libtracer
-          else
-            $measure --out bench/bench_libtracer_raw.txt -- ./bench/build/bench_libtracer
-            : >bench/bench_libtracer_time.txt
-          fi
+          # Each family prints its own `RSS family=` delta into this transcript (#1808); the
+          # whole-run `/usr/bin/time -v` max RSS it replaces measured the harness peak.
+          $measure --out bench/bench_libtracer_raw.txt -- ./bench/build/bench_libtracer
           $measure --out bench/bench_forward_demux_raw.txt -- ./bench/build/bench_forward_demux || true
           $measure --out bench/bench_compact_delivery_raw.txt -- ./bench/build/bench_compact_delivery || true
           # An empty transcript is a silent non-recording — say so (mirrors perf.yml,
@@ -488,7 +484,6 @@ jobs:
           done
           python3 bench/perf_emit_benchmark.py $args \
             --zeroheap-raw bench/bench_forward_heap_raw.txt \
-            --time-v bench/bench_libtracer_time.txt \
             --out-smaller bench/benchmark_output.json \
             --out-bigger bench/benchmark_throughput.json
           # The RAM censuses MERGE into the smaller-is-better file the emitter just
@@ -537,7 +532,6 @@ jobs:
           path: |
             bench/host.txt
             bench/bench_libtracer_raw.txt
-            bench/bench_libtracer_time.txt
             bench/bench_forward_heap_raw.txt
             bench/bench_forward_demux_raw.txt
             bench/bench_compact_delivery_raw.txt
