@@ -897,6 +897,76 @@ void test_close_peer() {
 }
 
 /**
+ * @brief What a flat server's `inbound_peer()` answered, read on its own poll thread: once
+ *        inside each delivery and once from the link-down notifier, which runs outside one.
+ */
+struct inbound_probe_t {
+    const tr::net::transport_t* link = nullptr;  /**< @brief The server under test. */
+    std::mutex m;                                /**< @brief Guards the fields below. */
+    std::condition_variable cv;                  /**< @brief Signalled on every record. */
+    std::vector<tr::net::peer_handle_t> during;  /**< @brief One answer per delivery. */
+    std::optional<tr::net::peer_handle_t> after; /**< @brief The answer at link-down. */
+
+    /** @brief The flat receiver: record the answer while the frame is being delivered. */
+    void operator()(std::span<const std::byte>) {
+        {
+            const std::lock_guard lock(m);
+            during.push_back(link->inbound_peer());
+        }
+        cv.notify_all();
+    }
+    /** @brief The `{fn, ctx}` link-down notifier: record the answer outside a delivery. */
+    static void on_down(void* ctx) {
+        auto* self = static_cast<inbound_probe_t*>(ctx);
+        {
+            const std::lock_guard lock(self->m);
+            self->after = self->link->inbound_peer();
+        }
+        self->cv.notify_all();
+    }
+    /** @brief True once @p n deliveries and the link-down landed before @p timeout. */
+    bool wait_done(std::size_t n, std::chrono::milliseconds timeout) {
+        std::unique_lock lock(m);
+        return cv.wait_for(lock, timeout, [&] { return during.size() >= n && after.has_value(); });
+    }
+};
+
+/**
+ * @brief #1915 — a flat WS server names the delivering session only inside a delivery,
+ *        including after a frame that records the session and is not delivered.
+ *
+ * The last frame is a non-final BINARY fragment: the server records the session for it and
+ * then holds the fragment mid-message instead of delivering it. The link-down notifier, run
+ * on the poll thread once the client hangs up, must still read no inbound session.
+ */
+void test_flat_server_inbound_peer_only_inside_a_delivery() {
+    std::printf(
+        "transport_ws server — flat: inbound_peer() outside a delivery is empty (#1915):\n");
+
+    inbound_probe_t probe;
+    tr::net::ws_server_transport_t server(0);
+    check(server.ok(), "flat server bound");
+    probe.link = &server;
+    server.set_receiver(probe);
+    server.set_down_notifier(&inbound_probe_t::on_down, &probe);
+
+    const int cfd = tcp_connect(server.local_port());
+    check(cfd >= 0 && raw_handshake(cfd), "raw client connected + 101 handshake");
+    const std::array<std::byte, 3> payload{std::byte{0x01}, std::byte{0x02}, std::byte{0x03}};
+    write_bytes(cfd, masked_client_frame(ws::opcode_t::BINARY, payload, {1, 2, 3, 4}));
+    write_bytes(cfd,
+                masked_client_frame(ws::opcode_t::BINARY, payload, {5, 6, 7, 8}, /*fin=*/false));
+    if (cfd >= 0) ::close(cfd);  // the last session goes, so the link reports down
+
+    check(probe.wait_done(1, 2s), "the whole frame delivered, then the link-down fired");
+    const std::lock_guard lock(probe.m);
+    check(probe.during.size() == 1 && probe.during[0].valid(),
+          "inside the delivery the link names the delivering session");
+    check(probe.after.has_value() && !probe.after->valid(),
+          "outside a delivery the link reports no inbound session, even after a held fragment");
+}
+
+/**
  * @brief #889 — a FLAT ws server refuses peer-named wiring; delivery keys off the
  *        constructed mode, not off "a peer sink happens to be installed".
  *
@@ -1822,6 +1892,7 @@ int main() {
     test_max_peers_cap();
     test_close_peer();
     test_flat_server_rejects_peer_receiver();
+    test_flat_server_inbound_peer_only_inside_a_delivery();
     test_peer_named_server_does_not_downgrade_to_flat();
     test_frame_pipelined_behind_the_101();
     test_push_on_connect_waits_for_start_receiving();

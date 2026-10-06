@@ -520,12 +520,15 @@ void tcp_server_transport_t::on_readable(session_base_t& base, const std::byte* 
             view::view_t frame{std::move(seg), 0, flen};
             // The FLAT tier's WHO (#375 Part 2) — see the ws server's twin of this store:
             // the peer-named tier passes the handle as an argument, the flat tier has no
-            // per-frame tag at all, and one unconditional 8-byte store serves both.
+            // per-frame tag at all, and one unconditional 8-byte store serves both. Cleared
+            // once the frame is handed up, so the field names a session only while that
+            // session's frame is being delivered (#1915).
             delivering_ = s.handle;
             if (bus_mode())
                 deliver_to_peer(s.handle, std::move(frame));
             else
                 rx_.deliver(std::move(frame));
+            delivering_ = {};
         },
         // At decision time, so a frame delivered later in this same chunk cannot reach
         // an observer before the drop that preceded it is counted (#1255).

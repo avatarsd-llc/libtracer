@@ -847,8 +847,9 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
      * A peer-named server tags every frame through the bus seam and never needs this. A FLAT
      * one cannot: it has exactly one routing identity for every peer it carries, and the
      * `p<slot>` tag it computes is thrown away at the delivery fork. This is where that tag
-     * survives — stamped on the poll thread immediately before the flat delivery and read
-     * back, on that same thread, by the router's terminus.
+     * survives — stamped on the poll thread immediately before the flat delivery, read
+     * back, on that same thread, by the router's terminus, and cleared once the frame has
+     * been handed up. Outside a delivery it answers the default (invalid) handle (#1915).
      *
      * @warning Poll-thread state, meaningful ONLY inside a receive callback. It is a plain
      *          member and not an atomic on purpose: one server owns one poll thread
@@ -1187,7 +1188,8 @@ class slot_server_t : public transport_t, protected stream_endpoint_t {
     [[nodiscard]] bool bus_mode() const noexcept { return kBusLinks && peer_named_; }
     /** @brief The peer whose frame is being delivered RIGHT NOW — @ref inbound_peer's
      *         storage. Stamped by the derived server's receive loop immediately before it
-     *         hands a frame up the FLAT tier, on the poll thread, and never read off it. */
+     *         hands a frame up the FLAT tier, on the poll thread, and never read off it;
+     *         reset to the default handle after each frame, delivered or not (#1915). */
     peer_handle_t delivering_{};
 
    private:

@@ -554,6 +554,7 @@ bool ws_server_transport_t::drain_frames(session_t& s) {
                     // Fragments summing past the cap — the same answer a single over-cap
                     // frame gets, so the fragmented route is not a way around the bound.
                     malformed_rx_.fetch_add(1, std::memory_order_relaxed);
+                    delivering_ = {};
                     return false;
                 }
                 if (msg.status != assemble_status_t::COMPLETE) break;  // mid-message
@@ -589,6 +590,10 @@ bool ws_server_transport_t::drain_frames(session_t& s) {
             default:
                 break;  // TEXT / PONG: ignored (a RESERVED opcode never gets here: #1060)
         }
+        // The one point every `break` above reaches, delivered or not (shed, mid-message):
+        // the field names a session only while that session's frame is being delivered, and
+        // the over-cap arm, which leaves by `return`, clears it on its own way out (#1915).
+        delivering_ = {};
     }
 }
 
