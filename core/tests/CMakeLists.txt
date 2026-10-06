@@ -549,6 +549,29 @@ if(LIBTRACER_TEST_ESP_WS_SERVER AND EXISTS "${LIBTRACER_ESP_DIR}/libtracer/httpd
     set_tests_properties(httpd_ws_tx_large_class
         PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
 
+    # #1880 — the ALLOCATION SEAM's runtime growth sites, on the same fake: a refusal from
+    # the injected `memory.state` / `memory.io` store sheds one peer (the session table) or
+    # one frame (reassembly, a receive buffer past the scratch, a TX payload past the inline
+    # capacity), counted, and a refused resolution is "no such peer". The stores balance at
+    # an owning link's teardown.
+    add_executable(httpd_ws_alloc_softfail_test
+        "${LIBTRACER_ESP_DIR}/tests/host/httpd_ws_alloc_softfail_test.cpp"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_httpd.cpp"
+        "${LIBTRACER_ESP_DIR}/libtracer/httpd_ws_link.cpp")
+    target_include_directories(httpd_ws_alloc_softfail_test PRIVATE
+        "${LIBTRACER_ESP_DIR}/tests/host"
+        "${LIBTRACER_ESP_DIR}/tests/host/fake_idf"
+        "${LIBTRACER_ESP_DIR}/libtracer/include")
+    target_link_libraries(httpd_ws_alloc_softfail_test PRIVATE libtracer)
+    target_link_options(httpd_ws_alloc_softfail_test PRIVATE
+        "-Wl,--wrap=send" "-Wl,--wrap=shutdown")
+    libtracer_test_warnings(httpd_ws_alloc_softfail_test)
+    add_test(NAME httpd_ws_alloc_softfail COMMAND httpd_ws_alloc_softfail_test)
+    # Adopted-mode teardown leaks the handler gate BY DESIGN (the #815 precedent), and most
+    # cases here construct an adopting link — same exemption as the suites above.
+    set_tests_properties(httpd_ws_alloc_softfail
+        PROPERTIES ENVIRONMENT "LSAN_OPTIONS=detect_leaks=0")
+
     # #1565 — OPT-IN OWNING RX delivery from a bounded, INJECTED pool, on the same fake and
     # the same allocation-counting instrument. Four subjects: the borrowed default must stay
     # zero-alloc (the dispatch-inline cliff, #1223/#1250), a named backend must hand the sink
@@ -2362,6 +2385,7 @@ set(LIBTRACER_BUS_TESTS
     ws_transport
     httpd_ws_admission
     httpd_ws_adopted_host
+    httpd_ws_alloc_softfail
     httpd_ws_auth
     httpd_ws_close_peer
     httpd_ws_departure_cost

@@ -53,6 +53,8 @@
 #include "esp_freertos_hooks.h"
 #include "fake_httpd.hpp"
 #include "libtracer/config.hpp"
+#include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer_esp/httpd_ws_link.hpp"
 
 namespace {
@@ -138,16 +140,16 @@ class ingress_t {
 };
 
 /** @brief A fresh link and a fresh drain: the core idles once before the burst starts. */
-std::unique_ptr<httpd_ws_link_t> fresh_link(int fd) {
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
-                                                  tr::net::httpd_ws_config_t{.peer_named = true});
+tr::mem::poly_ptr_t<httpd_ws_link_t> fresh_link(int fd) {
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
     fake_httpd::instance().open_session(fd);
     (void)fake_httpd::run_idle_hooks();
     g_payload_reads.store(0);
     return link;
 }
 
-void finish(std::unique_ptr<httpd_ws_link_t> link) {
+void finish(tr::mem::poly_ptr_t<httpd_ws_link_t> link) {
     link.reset();
     fake_httpd::instance().close_all();
 }

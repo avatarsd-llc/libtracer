@@ -31,6 +31,7 @@
 #include "freertos/FreeRTOS.h"
 #include "libtracer/config.hpp"
 #include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_string.hpp"
 
 namespace tr::net {
 
@@ -254,6 +255,10 @@ class sender_exit_t {
  * every byte it is still reading has to belong to this slot rather than to the corpse:
  * the pre-#1058 call passed `host_.c_str()` and `cfg.headers = handshake_headers_.c_str()`
  * — pointers INTO members — to a call that blocks for up to `kDialTimeoutMs`.
+ *
+ * Since #1880 the slot is the link's ONLY copy of those three strings, drawn with the slot
+ * itself from `memory.state`, and it records that store so whichever party frees it last —
+ * the destructor, or a condemned dial — returns it there.
  */
 struct esp_ws_client_link_t::dial_t {
     /** @brief Guards the two flags below and the handle hand-off. A LEAF: never taken with
@@ -266,32 +271,36 @@ struct esp_ws_client_link_t::dial_t {
      *         when it finds `in_flight`; the dial reads it at the resolve and releases the
      *         transport pair itself. */
     bool condemned = false;
-    const std::string host;    /**< @brief COPY of the link's host — see the note above. */
-    const std::string ws_path; /**< @brief COPY of the requested WS URI. */
-    const std::string headers; /**< @brief COPY of the handshake header lines, "" = none. */
-    const std::uint16_t port;  /**< @brief COPY of the peer's TCP port. */
+    mem::block_source_t* const src; /**< @brief The store this slot and its strings came from. */
+    mem::string_t host;             /**< @brief COPY of the link's host — see the note above. */
+    mem::string_t ws_path;          /**< @brief COPY of the requested WS URI. */
+    mem::string_t headers;          /**< @brief COPY of the handshake header lines, "" = none. */
+    const std::uint16_t port;       /**< @brief COPY of the peer's TCP port. */
+    /** @brief All three strings were copied; false means @ref src refused one. */
+    const bool copied;
     esp_transport_handle_t tcp = nullptr; /**< @brief The pair being built, until the
                                            *         resolve hands it to the link or the
                                            *         orphan releases it. */
     esp_transport_handle_t ws = nullptr;  /**< @brief The WS half of that pair. */
 
-    /** @brief Copy the dial's inputs out of the link, once, at construction. */
-    dial_t(std::string h, std::uint16_t p, std::string path, std::string hdrs)
-        : host(std::move(h)), ws_path(std::move(path)), headers(std::move(hdrs)), port(p) {}
+    /** @brief Copy the dial's inputs out of the caller's config, once, at construction. */
+    dial_t(mem::block_source_t& from, std::string_view h, std::uint16_t p, std::string_view path,
+           std::string_view hdrs) noexcept
+        : src(&from),
+          host(from),
+          ws_path(from),
+          headers(from),
+          port(p),
+          copied(host.assign(h) && ws_path.assign(path) && headers.assign(hdrs)) {}
 };
 
-esp_ws_client_link_t::esp_ws_client_link_t(std::string host, std::uint16_t port,
+esp_ws_client_link_t::esp_ws_client_link_t(std::string_view host, std::uint16_t port,
                                            const esp_ws_client_config_t& config)
-    : host_(std::move(host)),
-      port_(port),
-      ws_path_(config.ws_path),
-      handshake_headers_(config.handshake_headers),
-      // Allocated ONCE, here, and reused by every dial — not per dial: the three strings
-      // are `const` for the link's life, so one slot serves them all and the file's "NO
-      // per-frame heap" posture is untouched. Initialized from the MEMBERS above (already
-      // moved-to; member init order is declaration order), never from the parameters.
-      dial_(std::make_shared<dial_t>(host_, port_, ws_path_, handshake_headers_)),
-      rx_buf_(config.rx_bytes),
+    // Drawn ONCE, here, and reused by every dial — not per dial: the three strings never
+    // change for the link's life, so one slot serves them all and the file's "NO per-frame
+    // allocation" posture is untouched.
+    : dial_(mem::make_in<dial_t>(config.memory.state_or_default(), config.memory.state_or_default(),
+                                 host, port, config.ws_path, config.handshake_headers)),
       rx_backend_(config.memory.rx),
       // The send side's store (#1661): the scratch below, the queue's slots and the base
       // class's gather temporary all draw from the application's `memory.io`, null meaning
@@ -299,6 +308,12 @@ esp_ws_client_link_t::esp_ws_client_link_t(std::string host, std::uint16_t port,
       tx_buf_(config.memory.io != nullptr ? *config.memory.io : tr::mem::heap_source()),
       tx_(kTxQueueDepth, config.memory.io != nullptr ? *config.memory.io : tr::mem::heap_source()),
       armed_(!config.defer_recv) {
+    // The connection state is drawn at setup, so a store that cannot hold it is a sizing
+    // bug, never a runtime condition (ADR-0083): the constructor stops here, before the
+    // recv thread that would read it exists.
+    mem::block_source_t& state = config.memory.state_or_default();
+    if (dial_ == nullptr || !dial_->copied || !rx_buf_.assign(state, config.rx_bytes))
+        mem::exhausted_at_init(state, "esp_ws_client_link_t dial slot and read scratch");
     // Reserved ONCE, here: a source that refuses leaves a zero-capacity scratch, so every
     // outbound frame takes the logged oversize drop rather than an allocation at send time.
     if (tx_buf_.reserve(config.tx_bytes)) tx_bytes_ = config.tx_bytes;
@@ -378,6 +393,9 @@ esp_ws_client_link_t::~esp_ws_client_link_t() {
     } else if (recv_thread_.joinable()) {
         recv_thread_.join();
     }
+    // The slot has exactly one owner left (#1880): a condemned dial returns it itself as it
+    // resolves, so only a slot with no dial in flight is this destructor's to return.
+    if (!orphaned_dial) mem::drop_in(*dial_->src, dial_);
     {
         // The recv thread has stopped (or been condemned and detached, in which case it
         // touches nothing on this object ever again), but it was only ONE of the two
@@ -441,7 +459,7 @@ esp_ws_client_link_t::dial_outcome_t esp_ws_client_link_t::connect_once() {
 
     // PUBLISH the dial (#1058). From the lock below until the resolve at the bottom of
     // this block, this thread touches NOT ONE member of the link — everything the dial
-    // needs is in the slot, whose lifetime is a shared_ptr and not this object's. That is
+    // needs is in the slot, whose lifetime is not this object's (#1880). That is
     // what lets the destructor detach instead of joining: the corpse is never read.
     //
     // The lock is the linearization point against the destructor, which stores `stop_`
@@ -452,7 +470,7 @@ esp_ws_client_link_t::dial_outcome_t esp_ws_client_link_t::connect_once() {
     // #1606 ask 1: the attempt is counted whatever it ends as.
     dial_attempts_.fetch_add(1, std::memory_order_relaxed);
 #endif
-    const std::shared_ptr<dial_t> slot = dial_;
+    dial_t* const slot = dial_;
     {
         const std::lock_guard<std::mutex> lk(slot->m);
         if (stop_.load(std::memory_order_acquire)) return dial_outcome_t::FAILED;
@@ -500,10 +518,12 @@ esp_ws_client_link_t::dial_outcome_t esp_ws_client_link_t::connect_once() {
     // first, because a completed handshake means there is a connection on the peer's side
     // to take down. `condemned` is read under the same mutex the destructor set it under,
     // so the two decisions cannot both fire and cannot both be skipped.
+    bool orphaned = false;
     {
         const std::lock_guard<std::mutex> lk(slot->m);
         slot->in_flight = false;
-        if (slot->condemned) {
+        orphaned = slot->condemned;
+        if (orphaned) {
             if (slot->ws != nullptr) {
                 esp_transport_close(slot->ws);
                 esp_transport_destroy(slot->ws);
@@ -513,14 +533,20 @@ esp_ws_client_link_t::dial_outcome_t esp_ws_client_link_t::connect_once() {
                 esp_transport_destroy(slot->tcp);
                 slot->tcp = nullptr;
             }
-            // No log through a member (`host_` is gone) and no counter bump: this thread
-            // has no object left to talk about. The caller must return at once.
-            return dial_outcome_t::ORPHANED;
+        } else {
+            ws_ = slot->ws;
+            tcp_ = slot->tcp;
+            slot->ws = nullptr;
+            slot->tcp = nullptr;
         }
-        ws_ = slot->ws;
-        tcp_ = slot->tcp;
-        slot->ws = nullptr;
-        slot->tcp = nullptr;
+    }
+    if (orphaned) {
+        // The link is gone, so this dial is the slot's last owner and returns it — with its
+        // mutex released, never from inside it. No log (the strings go with the slot) and no
+        // counter bump: this thread has no object left to talk about. The caller must
+        // return at once.
+        mem::drop_in(*slot->src, slot);
+        return dial_outcome_t::ORPHANED;
     }
     if (rc != 0) {
         // #1606 ask 2: release the failed pair HERE, on the failure path, not at the top of
@@ -544,8 +570,8 @@ esp_ws_client_link_t::dial_outcome_t esp_ws_client_link_t::connect_once() {
         const std::int64_t now = esp_timer_get_time();
         if (failures == 1 || now - last_dial_warn_us_ >= kDialWarnIntervalUs) {
             last_dial_warn_us_ = now;
-            ESP_LOGW(kTag, "dial ws://%s:%u%s failed (%u failures so far)", host_.c_str(),
-                     static_cast<unsigned>(port_), ws_path_.c_str(),
+            ESP_LOGW(kTag, "dial ws://%s:%u%s failed (%u failures so far)", dial_->host.c_str(),
+                     static_cast<unsigned>(dial_->port), dial_->ws_path.c_str(),
                      static_cast<unsigned>(failures));
         }
 #endif
@@ -629,8 +655,8 @@ esp_ws_client_link_t::dial_outcome_t esp_ws_client_link_t::connect_once() {
     // `connected_ == true` necessarily also sees the came-up fact.
     came_up_.store(true, std::memory_order_relaxed);
     connected_.store(true, std::memory_order_release);
-    ESP_LOGI(kTag, "connected ws://%s:%u%s", host_.c_str(), static_cast<unsigned>(port_),
-             ws_path_.c_str());
+    ESP_LOGI(kTag, "connected ws://%s:%u%s", dial_->host.c_str(),
+             static_cast<unsigned>(dial_->port), dial_->ws_path.c_str());
     return dial_outcome_t::UP;
 }
 

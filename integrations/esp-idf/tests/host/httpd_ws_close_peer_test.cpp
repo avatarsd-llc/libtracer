@@ -47,6 +47,8 @@
 #include <vector>
 
 #include "fake_httpd.hpp"
+#include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer_esp/httpd_ws_link.hpp"
 
 namespace {
@@ -117,7 +119,7 @@ void note_departed(void* ctx, tr::net::peer_handle_t, std::string_view peer) {
 }
 
 /** @brief Retire the link and the fake's sessions between cases. */
-void reset(std::unique_ptr<httpd_ws_link_t>& link) {
+void reset(tr::mem::poly_ptr_t<httpd_ws_link_t>& link) {
     link.reset();
     fake_httpd::instance().close_all();
     drain();
@@ -128,9 +130,10 @@ void reset(std::unique_ptr<httpd_ws_link_t>& link) {
 }
 
 /** @brief An adopting, peer-named link with the departure seam wired, as a node builds it. */
-std::unique_ptr<httpd_ws_link_t> make_link(bool peer_named = true) {
-    auto link = std::make_unique<httpd_ws_link_t>(
-        handle(), "/ws", tr::net::httpd_ws_config_t{.peer_named = peer_named});
+tr::mem::poly_ptr_t<httpd_ws_link_t> make_link(bool peer_named = true) {
+    auto link =
+        tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                            tr::net::httpd_ws_config_t{.peer_named = peer_named});
     if (link->bus() != nullptr) link->bus()->set_peer_down_notifier(&note_departed, nullptr);
     return link;
 }

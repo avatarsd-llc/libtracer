@@ -68,6 +68,8 @@
 
 #include "esp_timer.h"
 #include "fake_httpd.hpp"
+#include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer_esp/httpd_ws_link.hpp"
 
 namespace {
@@ -173,8 +175,8 @@ void test_no_hook_serves_immediately() {
     std::printf("#1184 an unconfigured link is unchanged:\n");
     reset_server();
     const std::size_t timers_before = fake_esp_timer_live();
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
-                                                  tr::net::httpd_ws_config_t{.peer_named = true});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
     check(link->ok(), "the adopting link registered its URI");
     constexpr int kFd = 610;
     check(fake_httpd::instance().open_session(kFd), "the handshake was answered");
@@ -191,8 +193,8 @@ void test_pending_session_is_served_nothing() {
     std::printf("#1184 an unauthenticated session gets nothing:\n");
     reset_server();
     int ctx_object = 0;
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
-                                                  tr::net::httpd_ws_config_t{.peer_named = true});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
     link->set_auth_cb(&recording_auth, &ctx_object);
     reset_hook({httpd_ws_link_t::auth_verdict_t::CONTINUE});
     constexpr int kFd = 620;
@@ -223,8 +225,8 @@ void test_pending_session_is_served_nothing() {
 void test_accept_promotes_and_binds_subject() {
     std::printf("#1184 ACCEPT turns the session into a peer:\n");
     reset_server();
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
-                                                  tr::net::httpd_ws_config_t{.peer_named = true});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
     link->set_auth_cb(&recording_auth, nullptr);
     reset_hook({httpd_ws_link_t::auth_verdict_t::ACCEPT});
     g_subject = "ed25519:abcdef";
@@ -255,8 +257,8 @@ void test_accept_promotes_and_binds_subject() {
 void test_continue_carries_a_reply() {
     std::printf("#1184 CONTINUE is a round trip, not a verdict:\n");
     reset_server();
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
-                                                  tr::net::httpd_ws_config_t{.peer_named = true});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
     link->set_auth_cb(&recording_auth, nullptr);
     reset_hook(
         {httpd_ws_link_t::auth_verdict_t::CONTINUE, httpd_ws_link_t::auth_verdict_t::ACCEPT});
@@ -289,8 +291,8 @@ void test_continue_carries_a_reply() {
 void test_reject_closes_with_its_own_code() {
     std::printf("#1184 REJECT closes with kCloseAuthFailed:\n");
     reset_server();
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
-                                                  tr::net::httpd_ws_config_t{.peer_named = true});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
     link->set_auth_cb(&recording_auth, nullptr);
     reset_hook({httpd_ws_link_t::auth_verdict_t::REJECT});
     constexpr int kFd = 650;
@@ -321,8 +323,9 @@ void test_deadline_closes_a_squatter() {
     reset_server();
     // A deadline long enough that the first tick lands INSIDE it, so "not before it expires"
     // is a real observation rather than a race won by luck.
-    auto link = std::make_unique<httpd_ws_link_t>(
-        handle(), "/ws", tr::net::httpd_ws_config_t{.peer_named = true, .auth_deadline_ms = 400});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(
+        tr::mem::net_source(), handle(), "/ws",
+        tr::net::httpd_ws_config_t{.peer_named = true, .auth_deadline_ms = 400});
     link->set_auth_cb(&recording_auth, nullptr);
     reset_hook({httpd_ws_link_t::auth_verdict_t::CONTINUE});
     constexpr int kFd = 660;
@@ -364,8 +367,8 @@ void test_expired_squatter_cannot_consume_the_cap() {
     reset_server();
     // max_peers = 1: the squatter below is the ONLY slot, so a second peer gets in exactly
     // when the reap has freed it.
-    auto link = std::make_unique<httpd_ws_link_t>(
-        handle(), "/ws",
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(
+        tr::mem::net_source(), handle(), "/ws",
         tr::net::httpd_ws_config_t{.max_peers = 1, .peer_named = true, .auth_deadline_ms = 200});
     link->set_auth_cb(&recording_auth, nullptr);
     reset_hook({httpd_ws_link_t::auth_verdict_t::CONTINUE});
@@ -397,8 +400,8 @@ void test_expired_squatter_cannot_consume_the_cap() {
 void test_pending_departure_notifies_nobody() {
     std::printf("#1184 an unauthenticated departure notifies nobody:\n");
     reset_server();
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
-                                                  tr::net::httpd_ws_config_t{.peer_named = true});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
     link->set_auth_cb(&recording_auth, nullptr);
     reset_hook({httpd_ws_link_t::auth_verdict_t::CONTINUE});
     int downs = 0;
@@ -437,8 +440,9 @@ void test_handshake_authentication_skips_the_frame() {
     reset_server();
     // A SHORT deadline, so "no deadline is armed for this session" is proven by a sweep the
     // session outlives rather than by reading a flag.
-    auto link = std::make_unique<httpd_ws_link_t>(
-        handle(), "/ws", tr::net::httpd_ws_config_t{.peer_named = true, .auth_deadline_ms = 200});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(
+        tr::mem::net_source(), handle(), "/ws",
+        tr::net::httpd_ws_config_t{.peer_named = true, .auth_deadline_ms = 200});
     link->set_admission_verdict_cb(&preauth_admission, nullptr);
     link->set_auth_cb(&recording_auth, nullptr);
     reset_hook({httpd_ws_link_t::auth_verdict_t::REJECT});
@@ -503,8 +507,9 @@ void test_preauthenticated_silence_outlives_the_deadline() {
     std::printf("#1334 a pre-authenticated peer that says NOTHING outlives the deadline:\n");
     reset_server();
     // A short deadline, so the silence below is measured against a sweep that really fires.
-    auto link = std::make_unique<httpd_ws_link_t>(
-        handle(), "/ws", tr::net::httpd_ws_config_t{.peer_named = true, .auth_deadline_ms = 200});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(
+        tr::mem::net_source(), handle(), "/ws",
+        tr::net::httpd_ws_config_t{.peer_named = true, .auth_deadline_ms = 200});
     link->set_admission_verdict_cb(&preauth_admission, nullptr);
     link->set_auth_cb(&recording_auth, nullptr);
     reset_hook({httpd_ws_link_t::auth_verdict_t::REJECT});
@@ -555,8 +560,8 @@ void test_preauthenticated_cap_is_charged_at_the_handshake() {
     std::printf("#1334 max_peers is charged, and released, at the 101:\n");
     reset_server();
     // max_peers = 1: the first pre-authenticated handshake takes the only slot.
-    auto link = std::make_unique<httpd_ws_link_t>(
-        handle(), "/ws",
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(
+        tr::mem::net_source(), handle(), "/ws",
         tr::net::httpd_ws_config_t{.max_peers = 1, .peer_named = true, .auth_deadline_ms = 200});
     link->set_admission_verdict_cb(&preauth_admission, nullptr);
     link->set_auth_cb(&recording_auth, nullptr);
@@ -593,8 +598,8 @@ void test_preauthenticated_cap_is_charged_at_the_handshake() {
 void test_verdict_refuse_and_overload_exclusivity() {
     std::printf("#1245 REFUSE refuses, and the two predicate forms are exclusive:\n");
     reset_server();
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
-                                                  tr::net::httpd_ws_config_t{.peer_named = true});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
     link->set_admission_verdict_cb(&preauth_admission, nullptr);
     g_admission_calls = 0;
     g_admission_verdict = httpd_ws_link_t::admission_verdict_t::REFUSE;
@@ -628,8 +633,9 @@ void test_silent_upgrade_is_closed_at_the_deadline() {
     reset_server();
     // Long enough that the first tick lands INSIDE the window, so "not before it expires" is
     // an observation rather than a race won by luck — the same shape as the squatter case.
-    auto link = std::make_unique<httpd_ws_link_t>(
-        handle(), "/ws", tr::net::httpd_ws_config_t{.peer_named = true, .auth_deadline_ms = 400});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(
+        tr::mem::net_source(), handle(), "/ws",
+        tr::net::httpd_ws_config_t{.peer_named = true, .auth_deadline_ms = 400});
     link->set_auth_cb(&recording_auth, nullptr);
     reset_hook({httpd_ws_link_t::auth_verdict_t::CONTINUE});
     constexpr int kSilent = 700;
@@ -669,8 +675,9 @@ void test_silent_upgrade_is_closed_at_the_deadline() {
 void test_no_hook_leaves_a_silent_socket_alone() {
     std::printf("#1247 with no hook a silent socket is nobody's business but httpd's:\n");
     reset_server();
-    auto link = std::make_unique<httpd_ws_link_t>(
-        handle(), "/ws", tr::net::httpd_ws_config_t{.peer_named = true, .auth_deadline_ms = 200});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(
+        tr::mem::net_source(), handle(), "/ws",
+        tr::net::httpd_ws_config_t{.peer_named = true, .auth_deadline_ms = 200});
     constexpr int kSilent = 710;
     check(fake_httpd::instance().open_session(kSilent), "the handshake was answered");
     advance_ms(250);
@@ -695,8 +702,9 @@ void test_full_ledger_refuses_the_handshake() {
     std::printf("#1247 a full pending-handshake ledger refuses the next 101:\n");
     reset_server();
     // A short deadline, so the recovery half below is a sweep rather than a wait.
-    auto link = std::make_unique<httpd_ws_link_t>(
-        handle(), "/ws", tr::net::httpd_ws_config_t{.peer_named = true, .auth_deadline_ms = 200});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(
+        tr::mem::net_source(), handle(), "/ws",
+        tr::net::httpd_ws_config_t{.peer_named = true, .auth_deadline_ms = 200});
     link->set_auth_cb(&recording_auth, nullptr);
     reset_hook({httpd_ws_link_t::auth_verdict_t::CONTINUE});
     constexpr int kBase = 720;
@@ -747,8 +755,8 @@ bool is_close(const fake_httpd::server_t::sent_frame_t& f, std::uint16_t code,
 void test_refusal_after_upgrade_closes_with_a_code() {
     std::printf("#1857 REFUSE_AFTER_UPGRADE answers the 101, then closes 1013:\n");
     reset_server();
-    auto link = std::make_unique<httpd_ws_link_t>(
-        handle(), "/ws",
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(
+        tr::mem::net_source(), handle(), "/ws",
         tr::net::httpd_ws_config_t{.max_peers = 1,
                                    .peer_named = true,
                                    .auth_deadline_ms = 200,
@@ -820,8 +828,8 @@ void test_refusal_after_upgrade_custom_code_and_long_reason() {
     std::printf("#1857 the refusal sends the configured code and a cut reason:\n");
     reset_server();
     const std::string long_reason(200, 'x');
-    auto link = std::make_unique<httpd_ws_link_t>(
-        handle(), "/ws",
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(
+        tr::mem::net_source(), handle(), "/ws",
         tr::net::httpd_ws_config_t{.refusal_close_code = 4503,
                                    .refusal_close_reason = long_reason});
     link->set_admission_verdict_cb(&preauth_admission, nullptr);
@@ -844,8 +852,8 @@ void test_teardown_retires_the_timer() {
     reset_server();
     const std::size_t before = fake_esp_timer_live();
     {
-        auto link = std::make_unique<httpd_ws_link_t>(
-            handle(), "/ws", tr::net::httpd_ws_config_t{.peer_named = true});
+        auto link = tr::mem::make_poly<httpd_ws_link_t>(
+            tr::mem::net_source(), handle(), "/ws", tr::net::httpd_ws_config_t{.peer_named = true});
         link->set_auth_cb(&recording_auth, nullptr);
         check(fake_esp_timer_live() == before + 1, "installing a hook armed exactly one timer");
         link->set_auth_cb(&recording_auth, nullptr);

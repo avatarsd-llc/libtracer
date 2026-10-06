@@ -43,6 +43,8 @@
 #include "graph_sinks.hpp"
 #include "libtracer/fwd_router.hpp"
 #include "libtracer/graph.hpp"
+#include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer_esp/httpd_ws_link.hpp"
 #include "test_values.hpp"
 
@@ -150,8 +152,8 @@ void test_departure_cost_is_bounded_by_the_departing_peer() {
     server_task_t task;
     graph_t g;
     fwd_router_t router(g);
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
-                                                  tr::net::httpd_ws_config_t{.peer_named = true});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
     check(link->ok(), "the adopting link registered its URI");
     // add_child installs the bus peer-down notifier, so a session's departure reaches
     // fwd_router_t::link_down under the peer's ROUTABLE name (#994) — `p<slot>`.

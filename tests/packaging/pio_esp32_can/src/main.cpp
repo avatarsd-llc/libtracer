@@ -30,10 +30,11 @@
  * branch away and drop the references — the link step is the assertion.
  */
 #include <cstdio>
-#include <memory>
 #include <utility>
 
 #include "libtracer/builtin_transports.hpp"
+#include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer/transport_can.hpp"
 #include "libtracer/transport_vertex.hpp"
 #include "libtracer_esp/twai_link.hpp"
@@ -59,7 +60,10 @@ void build_can_stack() {
     link_cfg.rx_gpio = 5;
     link_cfg.bitrate = 500000;
 
-    auto link = std::make_unique<tr::net::twai_link_t>(link_cfg);
+    // The link is drawn from the allocation seam (ADR-0083): `can_transport_t` owns it
+    // through a `poly_ptr_t`, which returns it to the store that served it.
+    auto link = tr::mem::make_poly<tr::net::twai_link_t>(tr::mem::net_source(), link_cfg);
+    if (link == nullptr) return;
     const bool link_ok = link->ok();
 
     // TWAI is classic-only, so the transport above it must be CLASSIC framing.

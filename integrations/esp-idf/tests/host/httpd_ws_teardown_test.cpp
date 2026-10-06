@@ -48,6 +48,8 @@
 #include <utility>
 
 #include "fake_httpd.hpp"
+#include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer_esp/httpd_ws_link.hpp"
 
 namespace {
@@ -137,8 +139,8 @@ void free_co_tenant(void* ctx) { static_cast<co_tenant_t*>(ctx)->freed = true; }
 void test_queued_detach() {
     std::printf("adopted dtor, server task live:\n");
     server_task_t task;
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
-                                                  tr::net::httpd_ws_config_t{.peer_named = true});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
     check(link->ok(), "the adopting link registered its URI");
 
     claim_session(task, 100);
@@ -172,8 +174,8 @@ void test_queued_detach() {
 void test_dtor_on_server_task() {
     std::printf("adopted dtor, running ON the server task:\n");
     server_task_t task;
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
-                                                  tr::net::httpd_ws_config_t{.peer_named = true});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
     claim_session(task, 200);
 
     const std::size_t before = fake_httpd::instance().free_ctx_calls();
@@ -204,8 +206,8 @@ void test_dtor_on_server_task() {
 void test_wedged_server_task() {
     std::printf("adopted dtor, server task wedged:\n");
     server_task_t task;
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
-                                                  tr::net::httpd_ws_config_t{.peer_named = true});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
     claim_session(task, 300);
 
     task.park();  // the queue stops being drained: the detach can never run
@@ -233,8 +235,8 @@ void test_wedged_server_task() {
 void test_handler_barrier() {
     std::printf("frame inside the handler when the teardown starts:\n");
     server_task_t task;
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
-                                                  tr::net::httpd_ws_config_t{.peer_named = true});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
     // NOT claimed: this is the peer whose FIRST frame is in flight, so the link holds no
     // slot for it at all — the population the destructor's session snapshot cannot see.
     fake_httpd::instance().open_session(400);
@@ -281,8 +283,8 @@ void test_handler_barrier() {
 void test_dispatch_after_teardown() {
     std::printf("frame dispatched after the destructor returned:\n");
     server_task_t task;
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
-                                                  tr::net::httpd_ws_config_t{.peer_named = true});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
     // Upgraded, never heard from: httpd answers the handshake itself and (IDF v6) does
     // not call the handler for it, so this session holds the route while being INVISIBLE
     // to the link. No slot is open, so the destructor's session work is a no-op — and
@@ -306,8 +308,8 @@ void test_dispatch_after_teardown() {
 void test_teardown_inside_handler() {
     std::printf("app destroys the link from inside the handler:\n");
     server_task_t task;
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
-                                                  tr::net::httpd_ws_config_t{.peer_named = true});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
     // The delivery sink IS the teardown — a graph command that retires this transport,
     // serviced in-call on the server task, which is the #814 shape. Armed only after the
     // peer is established, so the teardown lands on a session that is already claimed.
@@ -345,8 +347,8 @@ void test_teardown_inside_handler() {
 void test_fd_reuse_before_detach() {
     std::printf("detach draining onto a reused descriptor:\n");
     server_task_t task;
-    auto link = std::make_unique<httpd_ws_link_t>(handle(), "/ws",
-                                                  tr::net::httpd_ws_config_t{.peer_named = true});
+    auto link = tr::mem::make_poly<httpd_ws_link_t>(tr::mem::net_source(), handle(), "/ws",
+                                                    tr::net::httpd_ws_config_t{.peer_named = true});
     claim_session(task, 700);
 
     // Wedge the server task so the destructor abandons its detach with the work item

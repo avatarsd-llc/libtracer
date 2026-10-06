@@ -61,6 +61,8 @@
 #include <vector>
 
 #include "fake_twai.hpp"
+#include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer_esp/twai_link.hpp"
 
 namespace {
@@ -192,7 +194,7 @@ void run_refusal_case(const fake_twai::scripted_rx_frame_t& refused, std::string
     // link's destructor joins the dispatch thread, so the recorder has to outlive
     // the link rather than the other way round.
     recorder_t rec;
-    auto link = std::make_unique<twai_link_t>(config_with_rx_depth(8));
+    auto link = tr::mem::make_poly<twai_link_t>(tr::mem::net_source(), config_with_rx_depth(8));
     check(link->ok(), "the link came up on the fake controller");
     if (!link->ok()) return;
     link->on_receive([&rec](const can_frame_data_t& frame) { rec.record(frame); });
@@ -260,7 +262,7 @@ void test_an_extended_data_frame_is_delivered() {
     fake_twai::reset();
 
     recorder_t rec;
-    auto link = std::make_unique<twai_link_t>(config_with_rx_depth(8));
+    auto link = tr::mem::make_poly<twai_link_t>(tr::mem::net_source(), config_with_rx_depth(8));
     check(link->ok(), "the link came up on the fake controller");
     if (!link->ok()) return;
     link->on_receive([&rec](const can_frame_data_t& frame) { rec.record(frame); });
@@ -300,7 +302,7 @@ void test_a_dlc_above_the_classic_width_is_truncated() {
     fake_twai::reset();
 
     recorder_t rec;
-    auto link = std::make_unique<twai_link_t>(config_with_rx_depth(8));
+    auto link = tr::mem::make_poly<twai_link_t>(tr::mem::net_source(), config_with_rx_depth(8));
     check(link->ok(), "the link came up on the fake controller");
     if (!link->ok()) return;
     link->on_receive([&rec](const can_frame_data_t& frame) { rec.record(frame); });
@@ -370,7 +372,8 @@ void test_a_full_rx_queue_drops_rather_than_blocking() {
     };
     const gate_refs_t refs{&rec, &gate_m, &gate_cv, &gate_open, &seen_in_callback};
 
-    auto link = std::make_unique<twai_link_t>(config_with_rx_depth(kRxDepth));
+    auto link =
+        tr::mem::make_poly<twai_link_t>(tr::mem::net_source(), config_with_rx_depth(kRxDepth));
     check(link->ok(), "the link came up on the fake controller");
     if (!link->ok()) return;
     link->on_receive([g = &refs](const can_frame_data_t& frame) {

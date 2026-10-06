@@ -52,6 +52,8 @@
 #include <vector>
 
 #include "fake_httpd.hpp"
+#include "libtracer/mem_heap.hpp"
+#include "libtracer/mem_poly_ptr.hpp"
 #include "libtracer_esp/httpd_ws_link.hpp"
 
 /**
@@ -186,13 +188,18 @@ void drain() {
 }
 
 /** @brief A link that adopts the fake server, declaring the given large size class (0/0 =
- *         no class at all, which is every link that shipped before #1566). */
-std::unique_ptr<httpd_ws_link_t> make_link(std::size_t large_bytes, std::size_t large_slots) {
-    return std::make_unique<httpd_ws_link_t>(
-        handle(), "/ws",
+ *         no class at all, which is every link that shipped before #1566).
+ *
+ * Its egress store is the process HEAP, the store a chip build's default resolves to (the
+ * component binds no slab pool): that keeps the tail arm a counted `operator new` here, so
+ * "took the per-frame payload" stays a number this suite can read (#1880). */
+tr::mem::poly_ptr_t<httpd_ws_link_t> make_link(std::size_t large_bytes, std::size_t large_slots) {
+    return tr::mem::make_poly<httpd_ws_link_t>(
+        tr::mem::net_source(), handle(), "/ws",
         tr::net::httpd_ws_config_t{.peer_named = true,
                                    .send_timeout_ms = kSendBoundMs,
-                                   .tx_large = {.bytes = large_bytes, .slots = large_slots}});
+                                   .tx_large = {.bytes = large_bytes, .slots = large_slots},
+                                   .memory = {.rx = nullptr, .io = &tr::mem::heap_source()}});
 }
 
 /** @brief Admit @p fd and claim it as a peer (the lazy first-data-frame claim). */
@@ -209,7 +216,7 @@ tr::net::transport_t* only_peer(httpd_ws_link_t& link) {
 }
 
 /** @brief Retire the link, the fake's sessions and its queue settings between cases. */
-void reset(std::unique_ptr<httpd_ws_link_t>& link) {
+void reset(tr::mem::poly_ptr_t<httpd_ws_link_t>& link) {
     link.reset();
     fake_httpd::instance().set_queue_refusing(false);
     fake_httpd::instance().set_queue_capacity(0);

@@ -25,13 +25,9 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstring>
-#include <memory>
 #include <mutex>
-#include <new>
-#include <string>
 #include <thread>
 #include <utility>
-#include <vector>
 
 #include "esp_freertos_hooks.h"
 #include "esp_log.h"
@@ -616,17 +612,21 @@ constexpr std::int64_t kMinAuthSweepUs = 100000;
 }
 
 /**
- * @brief Cut @p reason to @ref httpd_ws_link_t::kMaxCloseReasonBytes, backed off to a UTF-8
- *        character boundary so the close frame never carries half a character (#1857).
+ * @brief Copy @p reason into @p out, cut to @ref httpd_ws_link_t::kMaxCloseReasonBytes and
+ *        backed off to a UTF-8 character boundary so the close frame never carries half a
+ *        character (#1857).
+ * @return The bytes copied.
  */
-[[nodiscard]] std::string resolve_close_reason(std::string_view reason) {
+[[nodiscard]] std::uint8_t copy_close_reason(
+    std::string_view reason, std::array<char, httpd_ws_link_t::kMaxCloseReasonBytes>& out) {
     std::size_t n = reason.size();
-    if (n > httpd_ws_link_t::kMaxCloseReasonBytes) {
-        n = httpd_ws_link_t::kMaxCloseReasonBytes;
+    if (n > out.size()) {
+        n = out.size();
         // A continuation byte (10xxxxxx) at the cut means the character starts earlier.
         while (n > 0 && (static_cast<unsigned char>(reason[n]) & 0xC0U) == 0x80U) --n;
     }
-    return std::string(reason.substr(0, n));
+    std::copy_n(reason.data(), n, out.data());
+    return static_cast<std::uint8_t>(n);
 }
 
 /**
@@ -673,7 +673,8 @@ constexpr std::size_t kAddrChars = INET_ADDRSTRLEN;
 constexpr std::size_t kEndpointChars = kAddrChars + 6;
 
 /**
- * @brief The peer's routable name for slot @p idx — `p<slot>` (ADR-0073 §2).
+ * @brief Write the peer's routable name for slot @p idx — `p<slot>` (ADR-0073 §2) — and its
+ *        NUL into @p out, which holds at least 22 characters; returns the name's length.
  *
  * Two measured decisions, both against an A/A null of 0 on this TU's `.text`:
  *
@@ -690,7 +691,7 @@ constexpr std::size_t kEndpointChars = kAddrChars + 6;
  * (`core/src/posix_endpoint.cpp:406`) — it is host code with no image budget; the STRING is
  * identical either way, which is all the two have to agree on.
  */
-[[gnu::noinline]] [[nodiscard]] std::string slot_name(std::size_t idx) {
+[[gnu::noinline]] [[nodiscard]] std::uint8_t format_slot_name(std::size_t idx, char* out) {
     char buf[24];
     char* p = buf + sizeof(buf);
     do {
@@ -698,7 +699,10 @@ constexpr std::size_t kEndpointChars = kAddrChars + 6;
         idx /= 10;
     } while (idx != 0);
     *--p = 'p';
-    return std::string(p, static_cast<std::size_t>(buf + sizeof(buf) - p));
+    const auto len = static_cast<std::size_t>(buf + sizeof(buf) - p);
+    std::copy_n(p, len, out);
+    out[len] = '\0';
+    return static_cast<std::uint8_t>(len);
 }
 
 /**
@@ -770,8 +774,8 @@ constexpr std::size_t kEndpointChars = kAddrChars + 6;
 }
 
 /**
- * @brief Nothrow fragment-reassembly buffer: grows by exact-size `new (std::nothrow)`
- *        reallocation, so heap exhaustion drops the in-flight message instead of
+ * @brief Failable fragment-reassembly buffer: grows by exact-size reallocation from the
+ *        link's `memory.state` (#1880), so a refusal drops the in-flight message instead of
  *        aborting the node.
  *
  * `std::vector` is unusable here: under `-fno-exceptions` its throwing allocator
@@ -783,17 +787,16 @@ constexpr std::size_t kEndpointChars = kAddrChars + 6;
  * choice over capacity doubling.
  */
 struct asm_buf_t {
+    /** @brief An empty buffer that will draw its storage from @p src (`memory.state`). */
+    explicit asm_buf_t(mem::block_source_t& src) noexcept : bytes_(src) {}
     /** @brief True when no reassembly is in progress. */
-    [[nodiscard]] bool empty() const noexcept { return len_ == 0; }
+    [[nodiscard]] bool empty() const noexcept { return bytes_.empty(); }
     /** @brief Assembled length so far, bytes. */
-    [[nodiscard]] std::size_t size() const noexcept { return len_; }
+    [[nodiscard]] std::size_t size() const noexcept { return bytes_.size(); }
     /** @brief The assembled bytes so far (valid until the next append/clear). */
-    [[nodiscard]] std::span<const std::byte> bytes() const noexcept { return {bytes_.get(), len_}; }
+    [[nodiscard]] std::span<const std::byte> bytes() const noexcept { return mem::as_span(bytes_); }
     /** @brief Release the storage (post-deliver / slot-reclaim / drop reset). */
-    void clear() noexcept {
-        bytes_.reset();
-        len_ = 0;
-    }
+    void clear() noexcept { bytes_ = mem::bytes_t(bytes_.source()); }
     /**
      * @brief Move the assembled message OUT, leaving this buffer empty.
      *
@@ -804,34 +807,23 @@ struct asm_buf_t {
      * RX path touches NOTHING owned by the link once it has delivered.
      */
     [[nodiscard]] asm_buf_t take() noexcept {
-        asm_buf_t out;
+        asm_buf_t out(bytes_.source());
         out.bytes_ = std::move(bytes_);
-        out.len_ = len_;
-        len_ = 0;
         return out;
     }
     /**
      * @brief Append @p chunk, nothrow.
-     * @retval false Allocation failed — the buffer is cleared (the partial message is
+     * @retval false The store refused — the buffer is cleared (the partial message is
      *               unrecoverable) and the caller drops the message (backpressure).
      */
     [[nodiscard]] bool append(std::span<const std::byte> chunk) noexcept {
-        if (chunk.empty()) return true;
-        std::unique_ptr<std::byte[]> grown(new (std::nothrow) std::byte[len_ + chunk.size()]);
-        if (grown == nullptr) {
-            clear();
-            return false;
-        }
-        if (len_ != 0) std::memcpy(grown.get(), bytes_.get(), len_);
-        std::memcpy(grown.get() + len_, chunk.data(), chunk.size());
-        bytes_ = std::move(grown);
-        len_ += chunk.size();
-        return true;
+        if (bytes_.append(chunk.data(), chunk.size())) return true;
+        clear();
+        return false;
     }
 
    private:
-    std::unique_ptr<std::byte[]> bytes_; /**< @brief Owned storage (exact-sized). */
-    std::size_t len_ = 0;                /**< @brief Assembled length, bytes. */
+    mem::bytes_t bytes_; /**< @brief Owned storage, grown to fit exactly. */
 };
 
 }  // namespace
@@ -892,6 +884,9 @@ struct asm_buf_t {
  * reason.
  */
 struct httpd_ws_link_t::gate_t {
+    /** @brief Where this gate and every work item queued through it were drawn
+     *         (`memory.state`); set once, before the gate is published. */
+    mem::block_source_t* src = nullptr;
     std::mutex m;                    /**< @brief Guards every member below. */
     std::condition_variable cv;      /**< @brief Signalled as @ref depth falls. */
     httpd_ws_link_t* link = nullptr; /**< @brief The link, or null once it is going. */
@@ -923,6 +918,8 @@ struct httpd_ws_link_t::gate_t {
  * creation and never changes.
  */
 struct httpd_ws_link_t::session_t {
+    /** @brief A free slot whose reassembly buffer draws from @p src (`memory.state`). */
+    explicit session_t(mem::block_source_t& src) noexcept : asm_buf(src) {}
     /**
      * @brief The owning link's gate — how @ref on_session_closed reaches the link.
      *
@@ -974,11 +971,11 @@ struct httpd_ws_link_t::session_t {
      * The physical address did not disappear with it; it moved to @ref endpoint_str.
      *
      * A pure function of the slot's position, so a recycled slot gets the SAME name back
-     * (@ref httpd_ws_link_t::reclaim_slot moves the old string out for the eviction seam),
-     * exactly as core's own bus servers do it (`core/src/posix_endpoint.cpp:406`). It also
-     * fits every libstdc++ small-string buffer, so a claim no longer heap-allocates a name.
+     * (@ref httpd_ws_link_t::reclaim_slot hands the old one out for the eviction seam),
+     * exactly as core's own bus servers do it (`core/src/posix_endpoint.cpp:406`). Held in
+     * place, so a claim allocates nothing for it (#1880).
      */
-    std::string name;
+    slot_name_t name;
     /**
      * @brief The peer's `<ip>:<port>` — DIAGNOSTICS ONLY, never a path segment.
      *
@@ -1311,8 +1308,10 @@ struct httpd_ws_link_t::tx_work_t {
     static constexpr std::uint8_t kSentInPark =
         3; /**< @brief The park sent it; the copy releases. */
     static constexpr std::uint8_t kRefused =
-        4;                              /**< @brief Enqueue failed mid-send; the park releases. */
-    std::unique_ptr<std::byte[]> owned; /**< @brief Heap payload (the exceptional tail only). */
+        4; /**< @brief Enqueue failed mid-send; the park releases. */
+    /** @brief A payload past the inline and large capacities, drawn from `memory.io` (the
+     *         exceptional tail only). */
+    fixed_array_t<std::byte> owned;
     /**
      * @brief A RETAINED item's payload (RFC-0028 §6.9): @ref payload then holds the frame's
      *        encoded WebSocket header and head, and these bytes follow them on the wire,
@@ -1392,22 +1391,23 @@ struct httpd_ws_link_t::tx_slot_t {
  * precisely so those addresses stay unique for as long as this item can run.
  */
 struct httpd_ws_link_t::detach_req_t {
-    httpd_handle_t handle = nullptr;   /**< @brief The adopted server (still running). */
-    std::unique_ptr<int[]> fds;        /**< @brief Snapshot of the open peers' sockets. */
-    std::unique_ptr<void*[]> ctxs;     /**< @brief The ctx each fd carried (identity only). */
-    std::size_t n = 0;                 /**< @brief Entries in @ref fds / @ref ctxs. */
-    std::atomic<bool> done{false};     /**< @brief Set once every fd has been detached. */
-    std::atomic<bool> released{false}; /**< @brief Ownership handshake (see the brief). */
+    mem::block_source_t* src = nullptr; /**< @brief Where this item came from (`memory.state`). */
+    httpd_handle_t handle = nullptr;    /**< @brief The adopted server (still running). */
+    fixed_array_t<int> fds;             /**< @brief Snapshot of the open peers' sockets. */
+    fixed_array_t<void*> ctxs;          /**< @brief The ctx each fd carried (identity only). */
+    std::size_t n = 0;                  /**< @brief Entries in @ref fds / @ref ctxs. */
+    std::atomic<bool> done{false};      /**< @brief Set once every fd has been detached. */
+    std::atomic<bool> released{false};  /**< @brief Ownership handshake (see the brief). */
 };
 
 /**
  * @brief The @ref httpd_ws_link_t::close_peer work item: the session identity to close,
  *        and the gate to reach the link through — NOTHING that belongs to the link.
  *
- * Heap-allocated per call and freed by @ref httpd_ws_link_t::close_work, which is
- * affordable because close_peer is an administrative action, never a data-path one — the
+ * Drawn per call from `memory.state` and returned by @ref httpd_ws_link_t::close_work, which
+ * is affordable because close_peer is an administrative action, never a data-path one — the
  * no-allocation discipline protects the per-frame paths, and a revocation is not one.
- * Nothrow, like every allocation here: a failed `new` is a `false` to the caller, not an
+ * Failable, like every allocation here: a refused draw is a `false` to the caller, not an
  * abort. The gate rather than the link for the same reason @ref
  * httpd_ws_link_t::tx_work_t carries one: the item can drain on the adopted server's task
  * after the link is gone, and the gate is the one object designed to outlive it.
@@ -1421,10 +1421,10 @@ struct httpd_ws_link_t::close_req_t {
  * @brief One @ref httpd_ws_link_t::queue_refusal work item: the socket to close and the gate
  *        to reach the link through.
  *
- * Heap-allocated per refusal and freed by @ref httpd_ws_link_t::refusal_work, like @ref
- * close_req_t and for the same reasons: it is not a frame-path allocation, and the gate is
- * the one object that outlives the link. It lives from the handshake until the close is
- * written, and it is the only thing the refusal costs that is not the httpd session itself.
+ * Drawn per refusal from `memory.state` and returned by @ref httpd_ws_link_t::refusal_work, like
+ * @ref close_req_t and for the same reasons: it is not a frame-path allocation, and the gate is the
+ * one object that outlives the link. It lives from the handshake until the close is written, and it
+ * is the only thing the refusal costs that is not the httpd session itself.
  */
 struct httpd_ws_link_t::refusal_req_t {
     gate_t* gate = nullptr; /**< @brief The owning link's gate. */
@@ -1436,9 +1436,14 @@ httpd_ws_link_t::httpd_ws_link_t(std::uint16_t bind_port, const httpd_ws_config_
       max_peers_(config.max_peers),
       refusal_code_(config.refusal_close_code != 0 ? config.refusal_close_code
                                                    : kCloseTryAgainLater),
-      refusal_reason_(resolve_close_reason(config.refusal_close_reason)),
+      refusal_reason_len_(copy_close_reason(config.refusal_close_reason, refusal_reason_)),
       auth_deadline_us_(resolve_auth_deadline_us(config.auth_deadline_ms)),
       peer_named_(config.peer_named),
+      state_src_(&config.memory.state_or_default()),
+      io_src_(&config.memory.io_or_default()),
+      uri_(*state_src_),
+      slots_(*state_src_),
+      resolutions_(*state_src_),
       rx_backend_(config.memory.rx),
       rx_scratch_bytes_(resolve_size(config.rx_scratch_bytes, kDefaultRxScratchBytes)),
       tx_inline_bytes_(resolve_size(config.tx_inline_bytes, kDefaultTxInlineBytes)),
@@ -1448,8 +1453,8 @@ httpd_ws_link_t::httpd_ws_link_t(std::uint16_t bind_port, const httpd_ws_config_
       tx_large_slots_(config.tx_large.slots) {
     const std::size_t max_peers = config.max_peers;
     const std::uint32_t send_timeout_ms = config.send_timeout_ms;
-    install_idle_hooks();      // before any handler can run (ADR-0085)
-    if (!open_gate()) return;  // ok() stays false; nothing was registered
+    install_idle_hooks();  // before any handler can run (ADR-0085)
+    open_gate();
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.server_port = bind_port;
     // A SECOND httpd instance must not share the first's control UDP port — the SPA
@@ -1480,8 +1485,8 @@ httpd_ws_link_t::httpd_ws_link_t(std::uint16_t bind_port, const httpd_ws_config_
     // cannot be handed to the API by address any more — and that is the better shape
     // regardless: no producer can observe a half-initialised handle.
     handle_.store(started, std::memory_order_relaxed);
-    uri_ = "/";            // owns_httpd_ stays true; the dtor stops the server, but keep uri_
-                           // coherent with the adopting path (both register the same handler).
+    // owns_httpd_ stays true and `uri_` stays empty: the dtor stops the server instead of
+    // unregistering the URI, so nothing ever reads it on this path.
     httpd_uri_t uri = {};  // zero-init, then set fields by name (the struct's tail members
     uri.uri = "/";         // sit behind Kconfig, so positional init would not be stable)
     uri.method = HTTP_GET;
@@ -1510,9 +1515,14 @@ httpd_ws_link_t::httpd_ws_link_t(httpd_handle_t external, const char* uri_patter
     : max_peers_(config.max_peers),
       refusal_code_(config.refusal_close_code != 0 ? config.refusal_close_code
                                                    : kCloseTryAgainLater),
-      refusal_reason_(resolve_close_reason(config.refusal_close_reason)),
+      refusal_reason_len_(copy_close_reason(config.refusal_close_reason, refusal_reason_)),
       auth_deadline_us_(resolve_auth_deadline_us(config.auth_deadline_ms)),
       peer_named_(config.peer_named),
+      state_src_(&config.memory.state_or_default()),
+      io_src_(&config.memory.io_or_default()),
+      uri_(*state_src_),
+      slots_(*state_src_),
+      resolutions_(*state_src_),
       rx_backend_(config.memory.rx),
       rx_scratch_bytes_(resolve_size(config.rx_scratch_bytes, kDefaultRxScratchBytes)),
       tx_inline_bytes_(resolve_size(config.tx_inline_bytes, kDefaultTxInlineBytes)),
@@ -1522,8 +1532,8 @@ httpd_ws_link_t::httpd_ws_link_t(httpd_handle_t external, const char* uri_patter
       tx_large_slots_(config.tx_large.slots) {
     const std::size_t max_peers = config.max_peers;
     const std::uint32_t send_timeout_ms = config.send_timeout_ms;
-    install_idle_hooks();      // before any handler can run (ADR-0085)
-    if (!open_gate()) return;  // ok() stays false; nothing was registered
+    install_idle_hooks();  // before any handler can run (ADR-0085)
+    open_gate();
     // The adopted server's httpd_config_t belongs to the caller and esp_http_server
     // exposes no reader for it, so the clamp uses IDF's default send_wait_timeout — the
     // value that server has unless its owner tightened it, in which case the socket
@@ -1556,7 +1566,8 @@ httpd_ws_link_t::httpd_ws_link_t(httpd_handle_t external, const char* uri_patter
     handle_.store(external, std::memory_order_relaxed);
     owns_httpd_ = false;
     port_ = 0;
-    uri_ = uri_pattern;
+    if (!uri_.assign(uri_pattern))
+        mem::exhausted_at_init(*state_src_, "httpd_ws_link_t: the registered URI");
 
     httpd_uri_t uri = {};    // zero-init, then set fields by name (the struct's tail members
     uri.uri = uri_.c_str();  // sit behind Kconfig, so positional init would not be stable)
@@ -1578,15 +1589,15 @@ httpd_ws_link_t::httpd_ws_link_t(httpd_handle_t external, const char* uri_patter
     alloc_buffers();
 }
 
-bool httpd_ws_link_t::open_gate() {
-    // Nothrow, and load-bearing: the gate is what makes the registered handler safe to
-    // dispatch after this link dies, so a link that could not allocate one must not
-    // register a handler at all. Both constructors bail to ok() == false on failure.
-    gate_t* const g = new (std::nothrow) gate_t;
-    if (g == nullptr) return false;
+void httpd_ws_link_t::open_gate() {
+    // Load-bearing: the gate is what makes the registered handler safe to dispatch after
+    // this link dies, so a link that could not draw one must not register a handler at all.
+    // It is drawn at setup, so a refusal is a sizing bug (ADR-0083), not a runtime state.
+    gate_t* const g = mem::make_in<gate_t>(*state_src_);
+    if (g == nullptr) mem::exhausted_at_init(*state_src_, "httpd_ws_link_t: the handler gate");
+    g->src = state_src_;
     g->link = this;
     gate_.store(g, std::memory_order_relaxed);
-    return true;
 }
 
 void httpd_ws_link_t::close_gate() {
@@ -1616,28 +1627,18 @@ void httpd_ws_link_t::close_gate() {
 }
 
 void httpd_ws_link_t::alloc_buffers() {
-    // Both are once-per-link and nothrow, and they fail DIFFERENTLY since #949. RX stays
-    // optional — a frame just takes the per-frame nothrow buffer it already takes when it
-    // outgrows the scratch. TX is not optional any more: the pool is the only place an
-    // outbound frame can be gathered, so a link that could not allocate one drops every
-    // send on the counted enqueue-drop path (@ref note_enqueue_drop) instead of quietly
-    // moving a hot publish path onto the global heap.
-    rx_scratch_.reset(new (std::nothrow) std::byte[rx_scratch_bytes_]);
-    // The size and the pointer must never disagree: on_data_frame decides "does this frame
-    // fit the scratch" from rx_scratch_bytes_, so a failed allocation has to zero it or a
-    // frame would be memcpy'd into nothing.
-    if (rx_scratch_ == nullptr) rx_scratch_bytes_ = 0;
-    tx_pool_.reset(new (std::nothrow) tx_slot_t[tx_slots_total_]);
-    tx_inline_.reset(new (std::nothrow) std::byte[tx_slots_total_ * tx_inline_bytes_]);
-    // Two allocations, one pool: a slot with no payload storage behind it is not a usable
-    // slot, so the pair fails together. Dropping the array is what puts every send on the
-    // counted enqueue-drop path (@ref note_enqueue_drop) rather than leaving a claimable
-    // slot whose inline_buf is null.
-    if (tx_pool_ == nullptr || tx_inline_ == nullptr) {
-        tx_pool_.reset();
-        tx_inline_.reset();
-        return;
-    }
+    // Once per link, at the sizes the constructor resolved, through the allocation seam
+    // (#1880): the RX scratch is connection state, the TX pool and its inline payload block
+    // are egress. All three are sized by the integrator's own knobs, so a store that cannot
+    // hold them is a sizing bug and aborts here, naming it (ADR-0083) — never a link that
+    // comes up and then drops every frame. That also keeps the size and the pointer from
+    // ever disagreeing: on_data_frame decides "does this frame fit the scratch" from
+    // rx_scratch_bytes_, and a claimable slot always has its inline_buf behind it.
+    if (!rx_scratch_.assign(*state_src_, rx_scratch_bytes_))
+        mem::exhausted_at_init(*state_src_, "httpd_ws_link_t: the RX scratch");
+    if (!tx_pool_.assign(*io_src_, tx_slots_total_) ||
+        !tx_inline_.assign(*io_src_, tx_slots_total_ * tx_inline_bytes_))
+        mem::exhausted_at_init(*io_src_, "httpd_ws_link_t: the TX slot pool");
     // Bind each slot to its embedded work item ONCE, here, and never again. The
     // back-pointer is a property of the slot, not of the claim: the work item is how the
     // httpd task finds the slot to release, and a claimer re-storing the same value into it
@@ -1645,7 +1646,7 @@ void httpd_ws_link_t::alloc_buffers() {
     // slice of the inline block is bound on the same terms and for the same reason.
     for (std::size_t i = 0; i < tx_slots_total_; ++i) {
         tx_pool_[i].work.slot = &tx_pool_[i];
-        tx_pool_[i].inline_buf = tx_inline_.get() + i * tx_inline_bytes_;
+        tx_pool_[i].inline_buf = tx_inline_.data() + i * tx_inline_bytes_;
     }
     alloc_tx_large();
 }
@@ -1674,24 +1675,12 @@ void httpd_ws_link_t::alloc_tx_large() {
         tx_large_slots_ = 0;
         return;
     }
-    tx_large_.reset(new (std::nothrow) std::byte[tx_large_slots_ * tx_large_bytes_]);
-    tx_large_busy_.reset(new (std::nothrow) std::atomic<bool>[tx_large_slots_]);
-    // The pair fails together, exactly as tx_pool_/tx_inline_ do: a flag with no bytes
-    // behind it is a claimable buffer that cannot be written into. Failure is not fatal
-    // either — it degrades to the heap tail, which is where these frames were before the
-    // class existed — but the size must be zeroed with the pointer so that the band test in
-    // queue_send can never route a frame at storage that is not there.
-    if (tx_large_ == nullptr || tx_large_busy_ == nullptr) {
-        tx_large_.reset();
-        tx_large_busy_.reset();
-        ESP_LOGE(kTag, "tx large class alloc failed (%u x %u B) - falling back to the heap arm",
-                 (unsigned)tx_large_slots_, (unsigned)tx_large_bytes_);
-        tx_large_bytes_ = 0;
-        tx_large_slots_ = 0;
-        return;
-    }
-    for (std::size_t i = 0; i < tx_large_slots_; ++i)
-        tx_large_busy_[i].store(false, std::memory_order_relaxed);
+    // A VALID declaration is sized by the integrator exactly as the pool is, so a store that
+    // cannot hold it is the same sizing bug and aborts the same way (#1880): the pair is
+    // drawn together, and each claimed flag starts clear (value-initialized).
+    if (!tx_large_.assign(*io_src_, tx_large_slots_ * tx_large_bytes_) ||
+        !tx_large_busy_.assign(*io_src_, tx_large_slots_))
+        mem::exhausted_at_init(*io_src_, "httpd_ws_link_t: the TX large class");
 }
 
 std::byte* httpd_ws_link_t::claim_tx_large(tx_work_t* work) {
@@ -1705,7 +1694,7 @@ std::byte* httpd_ws_link_t::claim_tx_large(tx_work_t* work) {
             continue;
         work->large_busy = &tx_large_busy_[i];
         note_tx_large_peak();
-        return tx_large_.get() + i * tx_large_bytes_;
+        return tx_large_.data() + i * tx_large_bytes_;
     }
     return nullptr;  // every buffer of the class in flight — the caller drops and counts
 }
@@ -1883,10 +1872,10 @@ httpd_ws_link_t::~httpd_ws_link_t() {
             // release stores through the busy flag beside it. Leaking the bytes without the
             // flags (or the reverse) would leave one half of a live pair dangling.
             ESP_LOGW(kTag, "tx pool leaked at teardown: a queued send outlived the drain bound");
-            (void)tx_pool_.release();
-            (void)tx_inline_.release();
-            (void)tx_large_.release();
-            (void)tx_large_busy_.release();
+            tx_pool_.leak();
+            tx_inline_.leak();
+            tx_large_.leak();
+            tx_large_busy_.leak();
         }
     }
     // The gate outlives the link exactly when the server does. Owning mode: httpd_stop
@@ -1897,12 +1886,17 @@ httpd_ws_link_t::~httpd_ws_link_t() {
     // handler that stays safe to dispatch forever. Nothing was registered when the
     // constructor failed, so that case frees it too.
     if (owns_httpd_ || handle_.load(std::memory_order_relaxed) == nullptr) {
-        delete gate_.load(std::memory_order_relaxed);
+        mem::drop_in(*state_src_, gate_.load(std::memory_order_relaxed));
     } else {
         ESP_LOGD(kTag, "handler gate leaked at teardown: the adopted server still routes to it");
     }
     gate_.store(nullptr, std::memory_order_relaxed);
     handle_.store(nullptr, std::memory_order_relaxed);
+    // The session table and the resolution handles it owns. A teardown that abandoned them
+    // (@ref abandon_sessions) emptied both tables without returning a block, so this returns
+    // exactly what nothing can still reach.
+    for (session_t* const slot : slots_) mem::drop_in(*state_src_, slot);
+    for (peer_resolution_t* const r : resolutions_) mem::drop_in(*state_src_, r);
 }
 
 void httpd_ws_link_t::detach_work(void* req_arg) {
@@ -1937,7 +1931,7 @@ void httpd_ws_link_t::detach_work(void* req_arg) {
         (void)httpd_sess_trigger_close(req->handle, fd);
     }
     req->done.store(true, std::memory_order_release);
-    if (req->released.exchange(true, std::memory_order_acq_rel)) delete req;
+    if (req->released.exchange(true, std::memory_order_acq_rel)) mem::drop_in(*req->src, req);
 }
 
 void httpd_ws_link_t::detach_sessions() {
@@ -1971,31 +1965,30 @@ void httpd_ws_link_t::detach_sessions() {
     }
     if (open_n == 0) return;  // no slot armed => no ctx of ours left to retire
 
-    // Nothrow throughout: a teardown that cannot allocate must still be memory-safe, so
-    // an OOM here takes the neutralise-and-leak path rather than skipping the detach.
-    std::unique_ptr<detach_req_t> req(new (std::nothrow) detach_req_t);
-    std::unique_ptr<int[]> fds(new (std::nothrow) int[open_n]);
-    std::unique_ptr<void*[]> ctxs(new (std::nothrow) void*[open_n]);
-    if (req == nullptr || fds == nullptr || ctxs == nullptr) {
+    // Failable throughout, from `memory.state`: a teardown that cannot draw must still be
+    // memory-safe, so a refusal here takes the neutralise-and-leak path rather than skipping
+    // the detach.
+    detach_req_t* raw = mem::make_in<detach_req_t>(*state_src_);
+    if (raw == nullptr || !raw->fds.assign(*state_src_, open_n) ||
+        !raw->ctxs.assign(*state_src_, open_n)) {
+        mem::drop_in(*state_src_, raw);
         abandon_sessions();
         return;
     }
+    raw->src = state_src_;
     {
         const std::lock_guard lock(peers_m_);
         std::size_t i = 0;
-        for (const auto& s : slots_)
+        for (session_t* const s : slots_)
             if (s->open && i < open_n) {
-                fds[i] = s->fd;
-                ctxs[i] = s.get();  // the ctx this fd was armed with — identity only
+                raw->fds[i] = s->fd;
+                raw->ctxs[i] = s;  // the ctx this fd was armed with — identity only
                 ++i;
             }
-        req->n = i;
+        raw->n = i;
     }
-    req->handle = handle_.load(std::memory_order_relaxed);
-    req->fds = std::move(fds);
-    req->ctxs = std::move(ctxs);
+    raw->handle = handle_.load(std::memory_order_relaxed);
 
-    detach_req_t* raw = req.release();
     bool detached = false;
     // Relaxed both ways: a match can only be observed by the task that stored it, and a
     // stale MISS on any other task is the safe direction (queue the work and wait, which
@@ -2010,7 +2003,7 @@ void httpd_ws_link_t::detach_sessions() {
     } else if (httpd_queue_work(handle_.load(std::memory_order_relaxed),
                                 &httpd_ws_link_t::detach_work, raw) != ESP_OK) {
         ESP_LOGE(kTag, "session detach could not be queued (ctrl queue full)");
-        delete raw;  // never queued => nobody else can own it
+        mem::drop_in(*state_src_, raw);  // never queued => nobody else can own it
         raw = nullptr;
     } else {
         for (int turn = 0; turn < kDrainTurns && !detached; ++turn) {
@@ -2020,7 +2013,8 @@ void httpd_ws_link_t::detach_sessions() {
     }
     if (raw != nullptr && !detached)
         ESP_LOGE(kTag, "session detach did not run on the httpd task within the drain bound");
-    if (raw != nullptr && raw->released.exchange(true, std::memory_order_acq_rel)) delete raw;
+    if (raw != nullptr && raw->released.exchange(true, std::memory_order_acq_rel))
+        mem::drop_in(*state_src_, raw);
     if (!detached) abandon_sessions();
 }
 
@@ -2034,9 +2028,8 @@ void httpd_ws_link_t::abandon_sessions() {
         // unrelated allocation land on its address and be mistaken for ours. Leaking the
         // whole set keeps those addresses unique for as long as the item can run, and
         // this path is already the loudly-logged, teardown-only loss.
-        for (auto& s : slots_) {
-            neutralise(s.get());
-            (void)s.release();
+        for (session_t* const s : slots_) {
+            neutralise(s);
             ++leaked;
         }
         slots_.clear();
@@ -2045,7 +2038,6 @@ void httpd_ws_link_t::abandon_sessions() {
         // them inert, so leaking the pool is what keeps that inert object at a valid
         // address. Freeing it here would turn a no-op send into a use-after-free — the
         // precedent the leaked slot shells beside it set (#815).
-        for (auto& r : resolutions_) (void)r.release();
         resolutions_.clear();
         free_resolutions_ = nullptr;
         free_resolutions_tail_ = nullptr;
@@ -2059,11 +2051,10 @@ void httpd_ws_link_t::abandon_sessions() {
 
 void httpd_ws_link_t::abandon_session(int fd) {
     const std::lock_guard lock(peers_m_);
-    for (auto it = slots_.begin(); it != slots_.end(); ++it) {
-        if ((*it)->fd != fd) continue;
-        neutralise(it->get());
-        (void)it->release();
-        slots_.erase(it);
+    for (std::size_t i = 0; i < slots_.size(); ++i) {
+        if (slots_[i]->fd != fd) continue;
+        neutralise(slots_[i]);
+        slots_.erase_at(i);
         ESP_LOGW(kTag, "session slot fd=%d leaked at teardown: it is the request in flight", fd);
         return;
     }
@@ -2226,7 +2217,7 @@ esp_err_t httpd_ws_link_t::ws_pre_handshake(httpd_req_t* req) {
     // re-resolved through the gate the way every other latched callback does.
     session_t* claimed = nullptr;
     peer_handle_t claimed_handle;
-    std::string claimed_peer;
+    slot_name_t claimed_peer;
     if (admit && verdict == admission_verdict_t::ADMIT_AUTHENTICATED) {
         // Reap expired sessions BEFORE the cap test, with NO lock of ours held — the same
         // ordering, and the same argument, as the first-frame claim (see on_data_frame): a
@@ -2257,7 +2248,9 @@ esp_err_t httpd_ws_link_t::ws_pre_handshake(httpd_req_t* req) {
                     // route. Strictly better than the alternative this replaces — admitting the
                     // peer and then killing it at the deadline — and it is counted exactly
                     // once, by the `!admit` arm below, never here as well.
-                    ESP_LOGW(kTag, "peer refused at the handshake: at max_peers=%u (fd=%d)",
+                    ESP_LOGW(kTag,
+                             "peer refused at the handshake: at max_peers=%u or out of session "
+                             "memory (fd=%d)",
                              (unsigned)self->max_peers_, fd);
                     admit = false;
                 } else {
@@ -2300,7 +2293,7 @@ esp_err_t httpd_ws_link_t::ws_pre_handshake(httpd_req_t* req) {
             // the notifier re-enters the routing plane and takes graph locks. This session is
             // authenticated, so unlike the pending case there is nothing the narrowing is
             // withholding from it.
-            self->notify_arrived(claimed_handle, claimed_peer);
+            self->notify_arrived(claimed_handle, claimed_peer.view());
         }
     }
     {
@@ -2320,12 +2313,14 @@ esp_err_t httpd_ws_link_t::ws_pre_handshake(httpd_req_t* req) {
 
 bool httpd_ws_link_t::queue_refusal(gate_t* gate, httpd_req_t* req) {
     const int fd = httpd_req_to_sockfd(req);
-    auto* const item = new (std::nothrow) refusal_req_t{gate, fd};
+    // From the gate's store (`memory.state`): this is a static callback, and the gate is the
+    // one object that both reaches the link's source and outlives the link.
+    auto* const item = mem::make_in<refusal_req_t>(*gate->src, gate, fd);
     if (item == nullptr) return false;
     // Queued from the httpd task, so it cannot run before this handshake returns and the
     // server writes the 101: the close always follows the upgrade on the wire.
     if (httpd_queue_work(req->handle, &httpd_ws_link_t::refusal_work, item) != ESP_OK) {
-        delete item;
+        mem::drop_in(*gate->src, item);
         return false;
     }
     // The mark: the gate as the session ctx. The session exists already (httpd seats it at
@@ -2337,7 +2332,8 @@ bool httpd_ws_link_t::queue_refusal(gate_t* gate, httpd_req_t* req) {
 }
 
 void httpd_ws_link_t::refusal_work(void* req_arg) {
-    const std::unique_ptr<refusal_req_t> req(static_cast<refusal_req_t*>(req_arg));
+    auto* const raw = static_cast<refusal_req_t*>(req_arg);
+    const mem::block_ptr_t<refusal_req_t> req(*raw->gate->src, raw);
     httpd_ws_link_t* owner = nullptr;
     {
         // Resolved through the gate and held by `depth`, exactly as close_work does. A link
@@ -2373,9 +2369,9 @@ void httpd_ws_link_t::refuse_upgraded(int fd) {
     std::array<std::byte, 2 + kMaxCloseReasonBytes> payload{};
     payload[0] = static_cast<std::byte>((refusal_code_ >> 8) & 0xFF);
     payload[1] = static_cast<std::byte>(refusal_code_ & 0xFF);
-    std::memcpy(payload.data() + 2, refusal_reason_.data(), refusal_reason_.size());
+    std::memcpy(payload.data() + 2, refusal_reason_.data(), refusal_reason_len_);
     (void)send_now(nullptr, fd, HTTPD_WS_TYPE_CLOSE,
-                   std::span<const std::byte>(payload.data(), 2 + refusal_reason_.size()));
+                   std::span<const std::byte>(payload.data(), 2 + refusal_reason_len_));
     condemn(fd);
     // Its frame went through the drain budget like any other, so it may be the socket a drain
     // put on Nagle (ADR-0085 §7). It has no session for on_session_closed to clear that from,
@@ -2408,7 +2404,7 @@ httpd_ws_link_t::session_t* httpd_ws_link_t::claim_session(int fd, bool authenti
         // REACHABILITY, and the peer it turns away is a live one being refused on
         // behalf of a dead one. This is what makes the auth deadline's reap effective
         // in the same call rather than one server pass later (#1184).
-        for (const auto& s : slots_)
+        for (session_t* const s : slots_)
             if (s->open && !s->dead) ++open_n;
         if (open_n >= max_peers_) return nullptr;  // the CALLER counts and names it
     }
@@ -2419,15 +2415,20 @@ httpd_ws_link_t::session_t* httpd_ws_link_t::claim_session(int fd, bool authenti
     std::size_t idx = 0;
     for (std::size_t i = 0; i < slots_.size(); ++i)
         if (slots_[i]->fd < 0) {
-            slot = slots_[i].get();
+            slot = slots_[i];
             idx = i;
             break;
         }  // reuse a departed slot
     if (slot == nullptr) {
-        auto s = std::make_unique<session_t>();
-        slot = s.get();
+        // A new peer past the high-water mark: one session and one table entry from
+        // `memory.state` (#1880). A refusal of either is this peer's to pay — it is refused
+        // exactly like a peer past `max_peers`, and the CALLER counts it the same way.
+        slot = mem::make_in<session_t>(*state_src_, *state_src_);
+        if (slot == nullptr || !slots_.push_back(slot)) {
+            mem::drop_in(*state_src_, slot);
+            return nullptr;
+        }
         slot->gate = gate_.load(std::memory_order_relaxed);
-        slots_.push_back(std::move(s));
         idx = slots_.size() - 1;
     }
     // Belt and braces: every path that frees a slot retires its handle first, so
@@ -2437,7 +2438,7 @@ httpd_ws_link_t::session_t* httpd_ws_link_t::claim_session(int fd, bool authenti
     retire_resolution(slot, /*inert=*/false);
     // ADR-0073 §2: the routable NAME is the slot index, legal by construction, and
     // the `<ip>:<port>` goes to the diagnostics field instead of into the graph.
-    slot->name = slot_name(idx);
+    slot->name.len = format_slot_name(idx, slot->name.text.data());
     format_endpoint(fd, slot->endpoint_str);
     slot->asm_buf.clear();
     slot->fd = fd;
@@ -2633,7 +2634,7 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
     // std::vector would abort the node on heap exhaustion under -fno-exceptions);
     // on OOM the payload cannot be drained, so fail the handler — httpd closes just
     // this session (backpressure), never the whole node.
-    std::unique_ptr<std::byte[]> heap_payload;
+    fixed_array_t<std::byte> heap_payload;
     // The OWNING-RX segment (#1565), when an integrator named a source to draw it from. It
     // is the recv DESTINATION, not a copy of one: the frame lands in pool memory once and
     // travels from there by refcount, which is the entire saving the mode exists for. Empty
@@ -2662,7 +2663,7 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
         }
         if (payload == nullptr) {
             if (rx_scratch_ != nullptr && frame.len <= rx_scratch_bytes_) {
-                payload = rx_scratch_.get();
+                payload = rx_scratch_.data();
             } else if (pool_refused) {
                 // A refused frame too large to drain through the scratch. Allocating a
                 // drain buffer here would defeat the refusal, so the only bounded answer is
@@ -2671,12 +2672,11 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
                 note_rx_pool_refusal(frame.len);
                 return ESP_FAIL;
             } else {
-                heap_payload.reset(new (std::nothrow) std::byte[frame.len]);
-                if (heap_payload == nullptr) {
+                if (!heap_payload.assign(*state_src_, frame.len)) {
                     note_rx_alloc_fail(frame.len);
                     return ESP_FAIL;
                 }
-                payload = heap_payload.get();
+                payload = heap_payload.data();
             }
         }
         frame.payload = reinterpret_cast<std::uint8_t*>(payload);
@@ -2706,7 +2706,7 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
     // earlier and elsewhere — ws_pre_handshake, before the upgrade — so a peer that
     // reaches here has already been admitted.
     session_t* slot = nullptr;
-    std::string peer;
+    slot_name_t peer;
     peer_handle_t handle;
     bool newly_claimed = false;
     bool pending = false;  // this session has not authenticated yet — see session_t::auth_pending
@@ -2721,9 +2721,9 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
     if (auth_fn_ != nullptr) sweep_auth_deadlines();
     {
         const std::lock_guard lock(peers_m_);
-        for (const auto& s : slots_)
+        for (session_t* const s : slots_)
             if (s->open && s->fd == fd) {
-                slot = s.get();
+                slot = s;
                 break;
             }
         // A socket refused after its upgrade (#1857) that spoke before its queued close went
@@ -2751,7 +2751,8 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
                 // and named HERE rather than inside the claim, because the other claim edge
                 // counts its refusal through the abandoned upgrade instead (#1334).
                 peers_refused_.fetch_add(1, std::memory_order_relaxed);
-                ESP_LOGW(kTag, "peer refused: at max_peers=%u", (unsigned)max_peers_);
+                ESP_LOGW(kTag, "peer refused: at max_peers=%u or out of session memory",
+                         (unsigned)max_peers_);
                 return ESP_FAIL;
             }
             newly_claimed = true;
@@ -2785,7 +2786,7 @@ esp_err_t httpd_ws_link_t::on_data_frame(httpd_req_t* req) {
         // so it grants a pending session nothing the auth narrowing withholds — and a
         // session closed at the auth deadline is torn down through the ordinary departure
         // seam, which retires it.
-        notify_arrived(handle, peer);
+        notify_arrived(handle, peer.view());
     }
 
     // Reassembly — asm_buf is httpd-task-only, so no lock. The SPA sends one whole TLV
@@ -2957,10 +2958,10 @@ void httpd_ws_link_t::sweep_auth_deadlines() {
         {
             const std::lock_guard lock(peers_m_);
             while (next < slots_.size() && n < kFanoutChunk) {
-                const auto& s = slots_[next++];
+                session_t* const s = slots_[next++];
                 if (s->open && !s->dead && s->auth_pending && s->auth_deadline_us != 0 &&
                     now >= s->auth_deadline_us)
-                    expired[n++] = s.get();
+                    expired[n++] = s;
             }
             more = next < slots_.size();
         }
@@ -3177,7 +3178,7 @@ void httpd_ws_link_t::on_session_closed(void* ctx) {
     if (slot == nullptr || slot->gate == nullptr) return;
     gate_t* const gate = slot->gate;
     httpd_ws_link_t* owner = nullptr;
-    std::string departed;
+    slot_name_t departed;
     peer_handle_t departed_handle;
     {
         // Resolve the link through the gate. That is what makes this safe against a
@@ -3211,7 +3212,7 @@ void httpd_ws_link_t::on_session_closed(void* ctx) {
         // wait moves from the mutex to the condition variable; it does not disappear.
         ++gate->depth;
     }
-    owner->notify_departed(departed_handle, departed);
+    owner->notify_departed(departed_handle, departed.view());
     {
         // `owner` may be DESTROYED by now, exactly as at the tail of @ref ws_handler: the
         // notifier can drive an app teardown, and the barrier above is what let it start.
@@ -3222,8 +3223,8 @@ void httpd_ws_link_t::on_session_closed(void* ctx) {
     gate->cv.notify_all();
 }
 
-std::string httpd_ws_link_t::reclaim_slot(session_t* slot, peer_handle_t& handle) {
-    std::string departed;
+httpd_ws_link_t::slot_name_t httpd_ws_link_t::reclaim_slot(session_t* slot, peer_handle_t& handle) {
+    slot_name_t departed;
     handle = peer_handle_t{};
     bool was_open;
     bool was_pending;
@@ -3237,7 +3238,7 @@ std::string httpd_ws_link_t::reclaim_slot(session_t* slot, peer_handle_t& handle
         slot->auth_pending = false;
         slot->auth_deadline_us = 0;
         slot->subject[0] = '\0';
-        departed = std::move(slot->name);
+        departed = slot->name;
         // RETIRE the seam's handle with the name (#1294): "valid until depart" means
         // nothing this slot carries afterwards may be stamped with the departed session's
         // identity. `gen` itself survives, so the next claim mints a fresh one.
@@ -3245,7 +3246,7 @@ std::string httpd_ws_link_t::reclaim_slot(session_t* slot, peer_handle_t& handle
         slot->handle = peer_handle_t{};
         slot->open = false;
         slot->fd = -1;
-        slot->name.clear();
+        slot->name = {};
         // The session this slot carried is over, so the handle that NAMED that session is
         // spent: back to the pool, where it waits out the quarantine before it can be
         // restamped (#1013). Anyone still holding it now fails the generation test rather
@@ -3327,7 +3328,7 @@ bool httpd_ws_link_t::any_open_session() const {
     // — nothing to lose — which is why the two need not be one critical section (and must
     // not be: notify_down runs with no lock of this link's held).
     const std::lock_guard lock(peers_m_);
-    for (const std::unique_ptr<session_t>& s : slots_)
+    for (const session_t* const s : slots_)
         if (s->open) return true;
     return false;
 }
@@ -3510,9 +3511,8 @@ void httpd_ws_link_t::queue_send(const session_ref_t& to,
                 work = nullptr;
             }
         } else {
-            work->owned.reset(new (std::nothrow) std::byte[total]);
-            dst = work->owned.get();
-            if (dst == nullptr) {  // oversize-payload OOM: recycle the slot, drop below
+            dst = work->owned.assign(*io_src_, total) ? work->owned.data() : nullptr;
+            if (dst == nullptr) {  // the egress store refused: recycle the slot, drop below
                 release_tx_work(work);
                 work = nullptr;
             }
@@ -3666,12 +3666,11 @@ void httpd_ws_link_t::send_in_call(const session_ref_t& to,
                 return;
             }
         } else if (total > tx_inline_bytes_) {
-            // Nothrow END TO END on the one arm that can still allocate — never a
+            // Failable END TO END on the one arm that can still allocate — never a
             // std::vector, whose throwing allocator once aborted the node under
-            // -fno-exceptions on a reply-sized copy.
-            scratch->owned.reset(new (std::nothrow) std::byte[total]);
-            dst = scratch->owned.get();
-            if (dst == nullptr) {  // oversize-payload OOM: recycle the scratch, drop
+            // -fno-exceptions on a reply-sized copy. Drawn from `memory.io` (#1880).
+            dst = scratch->owned.assign(*io_src_, total) ? scratch->owned.data() : nullptr;
+            if (dst == nullptr) {  // the egress store refused: recycle the scratch, drop
                 release_tx_work(scratch);
                 note_enqueue_drop(fd, total);
                 return;
@@ -3857,7 +3856,7 @@ void httpd_ws_link_t::note_tx_result(const session_ref_t& to, bool sent, std::si
     // to carry the streak. Until this counter existed the only trace was the WARN line.
     if (!sent) tx_send_failed_.fetch_add(1, std::memory_order_relaxed);
     bool close_now = false;
-    std::string peer;
+    slot_name_t peer;
     char addr[kEndpointChars] = {};
     int fd = -1;
     {
@@ -4072,7 +4071,7 @@ int httpd_ws_link_t::send_guarded(httpd_handle_t handle, int fd, const char* buf
 
 void httpd_ws_link_t::note_send_desync(session_t* slot, const char* cause, std::size_t on_wire,
                                        std::size_t lost) {
-    std::string peer;
+    slot_name_t peer;
     int fd = -1;
     {
         const std::lock_guard lock(peers_m_);
@@ -4397,9 +4396,9 @@ void httpd_ws_link_t::send(std::span<const std::span<const std::byte>> head,
         {
             const std::lock_guard lock(peers_m_);
             while (next < slots_.size() && n < kFanoutChunk) {
-                const auto& s = slots_[next++];
+                session_t* const s = slots_[next++];
                 if (s->open && !s->dead && !s->auth_pending)
-                    targets[n++] = session_ref_t{s.get(), s->gen};
+                    targets[n++] = session_ref_t{s, s->gen};
             }
             more = next < slots_.size();
         }
@@ -4446,13 +4445,13 @@ void httpd_ws_link_t::send(std::span<const std::span<const std::byte>> iov) {
             // A condemned peer is skipped from the lock the snapshot already holds, so the
             // fan-out never even offers it a frame (queue_send would refuse it anyway).
             while (next < slots_.size() && n < kFanoutChunk) {
-                const auto& s = slots_[next++];
+                session_t* const s = slots_[next++];
                 // `!auth_pending` (#1184): a broadcast is how a subscription push reaches its
                 // peers, so including an unauthenticated session would leak vertex VALUES to
                 // a peer that has presented no credential — the most direct possible defeat
                 // of the gate, and the one that needs no lookup at all.
                 if (s->open && !s->dead && !s->auth_pending)
-                    targets[n++] = session_ref_t{s.get(), s->gen};
+                    targets[n++] = session_ref_t{s, s->gen};
             }
             more = next < slots_.size();
         }
@@ -4570,14 +4569,14 @@ void httpd_ws_link_t::enumerate_peers(const peer_visitor_t& visit) const {
     // whoever read the census, which is the enumerable⇒addressable invariant working against
     // the gate. Same reasoning as the `!dead` filter beside it: the facet reports peers this
     // link will actually carry frames for.
-    for (const auto& s : slots_)
-        if (s->open && !s->dead && !s->auth_pending && !s->name.empty()) visit(s->name);
+    for (const session_t* const s : slots_)
+        if (s->open && !s->dead && !s->auth_pending && !s->name.empty()) visit(s->name.view());
 }
 
 void httpd_ws_link_t::enumerate_peer_stats(const peer_stats_visitor_t& visit) const {
     const std::lock_guard lock(peers_m_);
     for (std::size_t i = 0; i < slots_.size(); ++i) {
-        const auto& s = slots_[i];
+        const session_t* const s = slots_[i];
         if (!s->open) continue;  // a reclaimed slot keeps stale numbers — never report it
         // Unauthenticated sessions are absent here for the reason recorded on
         // enumerate_peers: they are not peers yet. Their existence is still observable, but
@@ -4588,7 +4587,7 @@ void httpd_ws_link_t::enumerate_peer_stats(const peer_stats_visitor_t& visit) co
         // The counters are COPIED into the visitor's argument; `name`, `endpoint_str` and
         // `subject` borrow, and only for the duration of the call (same contract as
         // enumerate_peers).
-        visit(peer_stats_t{s->name, i, s->gen, s->st, s->endpoint_str, s->subject});
+        visit(peer_stats_t{s->name.view(), i, s->gen, s->st, s->endpoint_str, s->subject});
     }
 }
 
@@ -4601,31 +4600,24 @@ transport_t* httpd_ws_link_t::peer_link(std::string_view peer) {
     // `!auth_pending` (#1184): resolving an unauthenticated session would hand the routing
     // plane a working endpoint for a peer that has presented nothing, which is the whole
     // gate defeated by one lookup — a directed FWD reply does not consult the census.
-    for (const auto& s : slots_)
-        if (s->open && !s->dead && !s->auth_pending && s->name == peer)
-            return acquire_resolution(s.get());
+    for (session_t* const s : slots_)
+        if (s->open && !s->dead && !s->auth_pending && s->name.view() == peer)
+            return acquire_resolution(s);
     return nullptr;
 }
 
 std::string_view httpd_ws_link_t::peer_name(peer_handle_t peer, std::span<char> scratch) const {
     // Positional by construction (ADR-0073 §2): the name a slot is stamped with at the
     // claim IS 'p' + its index, so the inverse is that formatting and needs neither
-    // `peers_m_` nor the slot vector. Written out by hand for the reason @ref slot_name
-    // is — `std::to_string` is +1456 B of this TU per call site — and into the CALLER's
-    // scratch, so it heap-allocates nothing on the per-frame path.
+    // `peers_m_` nor the slot vector. The SAME formatter the claim stamps with (#1880), into
+    // a local name and then the CALLER's scratch, so it allocates nothing on the per-frame
+    // path.
     if (!peer.valid() || scratch.size() < 2) return {};
-    char buf[24];
-    char* p = buf + sizeof(buf);
-    std::uint32_t idx = peer.index;
-    do {
-        *--p = static_cast<char>('0' + (idx % 10));
-        idx /= 10;
-    } while (idx != 0);
-    *--p = 'p';
-    const auto len = static_cast<std::size_t>(buf + sizeof(buf) - p);
-    if (len > scratch.size()) return {};
-    for (std::size_t i = 0; i < len; ++i) scratch[i] = p[i];
-    return std::string_view(scratch.data(), len);
+    slot_name_t name;
+    name.len = format_slot_name(peer.index, name.text.data());
+    if (name.len > scratch.size()) return {};
+    std::copy_n(name.text.data(), name.len, scratch.data());
+    return std::string_view(scratch.data(), name.len);
 }
 
 httpd_ws_link_t::peer_resolution_t* httpd_ws_link_t::acquire_resolution(session_t* slot) {
@@ -4647,11 +4639,14 @@ httpd_ws_link_t::peer_resolution_t* httpd_ws_link_t::acquire_resolution(session_
         --free_resolutions_n_;
         got->free_next_ = nullptr;
     } else if (resolutions_.size() < slots_.size() + kResolutionSpare) {
-        // Same shape as the slot claim's own growth a few lines up: one small object per
-        // peer past the high-water mark, never per frame.
-        auto r = std::make_unique<peer_resolution_t>();
-        got = r.get();
-        resolutions_.push_back(std::move(r));
+        // Same shape as the slot claim's own growth: one small object per peer past the
+        // high-water mark, never per frame, from `memory.state` (#1880). A refusal is the
+        // honest "no such peer" below.
+        got = mem::make_in<peer_resolution_t>(*state_src_);
+        if (got != nullptr && !resolutions_.push_back(got)) {
+            mem::drop_in(*state_src_, got);
+            got = nullptr;
+        }
     } else if (free_resolutions_ != nullptr) {
         // At the cap with a shallow quarantine: recycle rather than refuse. Reachable only
         // when the pool is already sized for every slot, i.e. when the retirements ahead of
@@ -4716,22 +4711,22 @@ bool httpd_ws_link_t::close_peer(std::string_view peer) {
         // `true` for sessions the caller was told do not exist (an unauthenticated one, or
         // one already condemned and awaiting its reap).
         for (const auto& s : slots_) {
-            if (!s->open || s->dead || s->auth_pending || s->name != peer) continue;
+            if (!s->open || s->dead || s->auth_pending || s->name.view() != peer) continue;
             // Mint the identity HERE, under the lock that resolved it (#954). The close runs
             // on the httpd task an arbitrary time later, by which point this slot may have
             // been reclaimed and re-earned the very same positional name — `p3` is a pure
             // function of the slot index, so the NAME cannot survive as the token. The
             // generation can.
-            to = session_ref_t{s.get(), s->gen};
+            to = session_ref_t{s, s->gen};
             break;
         }
     }
     if (to.slot == nullptr) return false;  // no served session answers to that name
-    // Heap, nothrow, one per call: this is an administrative action, not a data-path one,
-    // so it does not draw on the TX pool whose whole purpose is to bound the FRAME path's
-    // in-flight depth. A revocation competing with the fan-out for slots would be exactly
-    // backwards — it is most needed when that pool is under pressure.
-    auto* const req = new (std::nothrow) close_req_t{g, to};
+    // From `memory.state`, failable, one per call: this is an administrative action, not a
+    // data-path one, so it does not draw on the TX pool whose whole purpose is to bound the
+    // FRAME path's in-flight depth. A revocation competing with the fan-out for slots would
+    // be exactly backwards — it is most needed when that pool is under pressure.
+    auto* const req = mem::make_in<close_req_t>(*g->src, g, to);
     if (req == nullptr) return false;
     // The honest half of the contract, and the whole reason #1146 was blocked on a transport
     // fact rather than on effort. Above the component's ESP-IDF floor (>=5.5.5) this verdict
@@ -4742,7 +4737,7 @@ bool httpd_ws_link_t::close_peer(std::string_view peer) {
     // which a `true` here would have been a security-relevant lie, told precisely when the
     // queue is fullest, which is when a stalling peer most needs revoking.
     if (httpd_queue_work(h, &httpd_ws_link_t::close_work, req) != ESP_OK) {
-        delete req;
+        mem::drop_in(*g->src, req);
         return false;  // refused: nothing was initiated, and the caller may retry
     }
     return true;
@@ -4753,8 +4748,8 @@ void httpd_ws_link_t::close_work(void* req_arg) {
     // accept, close and therefore the descriptor's lifetime, which is what makes the
     // `shutdown` inside close_session safe here and unsafe from the caller's task (#954's
     // recycled-fd hazard, and the precondition condemn() documents).
-    const std::unique_ptr<close_req_t> req(static_cast<close_req_t*>(req_arg));
-    if (req->gate == nullptr) return;
+    auto* const raw = static_cast<close_req_t*>(req_arg);
+    const mem::block_ptr_t<close_req_t> req(*raw->gate->src, raw);
     httpd_ws_link_t* owner = nullptr;
     {
         // Resolve the link through the gate, exactly as tx_work and on_session_closed do:
