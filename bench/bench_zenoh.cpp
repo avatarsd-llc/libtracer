@@ -213,6 +213,10 @@ void run_grid(Session& session) {
     for (std::size_t S : kGridSizes)
         for (std::size_t E : kGridEndpoints)
             run(session, S, 1, E, "inproc-path", kGridBudget, kGridLatBudget);
+    // The dense payload sweep (#1890), at fan-out 1 only: the payload charts' slice.
+    for (std::size_t S : sweep_extra(kGridSizes))
+        run(session, S, 1, 1, "inproc", ladder_budget(S, kGridBudget),
+            ladder_budget(S, kGridLatBudget));
 }
 
 /**
@@ -269,10 +273,15 @@ void family_inproc_fan(Session& session) {
     for (std::size_t F : kFanouts) run(session, kRefSize, F, kRefEndpoints, "inproc");
 }
 
-/** @brief `inproc` payload sweep at the reference fan-out, then the payload ladder (#1806). */
+/** @brief `inproc` payload sweep at the reference fan-out, then the payload ladder (#1806) and
+ *         the dense comparison sweep (#1890). */
 void family_inproc_size(Session& session) {
     for (std::size_t S : kSizes) run(session, S, kRefFanout, kRefEndpoints, "inproc");
     for (std::size_t S : ladder_extra())
+        run(session, S, kRefFanout, kRefEndpoints, "inproc", ladder_budget(S, kDeliveryBudget),
+            ladder_budget(S, kLatencyDeliveryBudget));
+    // The dense payload sweep (#1890), after every existing row.
+    for (std::size_t S : sweep_extra(kSizes, kPayloadLadder))
         run(session, S, kRefFanout, kRefEndpoints, "inproc", ladder_budget(S, kDeliveryBudget),
             ladder_budget(S, kLatencyDeliveryBudget));
 }

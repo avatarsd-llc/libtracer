@@ -980,7 +980,12 @@ envelope** (best-across-three-runners per series): what the code does on whateve
 a stranger rents. bench-local records host characteristics on every point (each point's tooltip carries the
 host descriptor and, beside it, the measurement conditions the point was taken under — the
 bench CPU's foreign time, CPU pressure and context switches, with a `CONTAMINATED` flag on a
-sample that stayed contended; `host.txt` next to the store holds the full `lscpu` capture). A two-point
+sample that stayed contended; `host.txt` next to the store holds the full `lscpu` capture). A
+flagged sample is not hidden whole on the charts: they drop only its rows that failed their own
+A/A check or sit outside their own neighbours' spread, and the whole sample only when more than
+half its rows do; gating keeps the whole-sample verdict. Wherever a series has no trusted value
+at a commit, the trend view draws a hollow ring on a dashed bridge, so a gap reads as missing
+rather than as noise (#1890). A two-point
 regression verdict is only ever read from the bench-local store or from a same-host
 interleaved A/B, never from the hosted one."""
 

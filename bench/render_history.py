@@ -762,38 +762,38 @@ def _suite_key(suite_name: str) -> str:
     return suite_name
 
 
-def _contaminated_idx(entries: list[dict]) -> dict[int, str]:
-    """@brief entry index -> contamination reason, for the samples the charts must not trust.
+def _untrusted_cells(entries: list[dict]) -> dict[int, tuple[str, set[str] | None]]:
+    """@brief entry index -> (reason, hidden row names or None for the whole run).
 
     The pinned host is a shared workstation, so a sample can measure a parallel build
-    instead of the commit (#1236). `host_guard` owns the predicate — a flag the sample
-    stamped on itself through its A/A bracket, or the reviewed list of samples that
-    predate the guard — and this is the one place the renderer asks.
+    instead of the commit (#1236). `host_guard.untrusted_cells` owns the rule — which
+    flagged runs are hidden whole, and which rows of the others are hidden per row
+    (#1890) — and this is the one place the renderer asks.
     """
-    known = host_guard.load_known_contaminated()
-    out: dict[int, str] = {}
-    for i, e in enumerate(entries):
-        reason = host_guard.entry_contaminated(e, known)
-        if reason:
-            out[i] = reason
-    return out
+    return host_guard.untrusted_cells(entries, host_guard.load_known_contaminated())
 
 
 def _series_by_name(entries: list[dict],
-                    skip: dict[int, str] | None = None) -> dict[str, list[list[float]]]:
+                    skip: dict[int, tuple[str, set[str] | None]] | None = None
+                    ) -> dict[str, list[list[float]]]:
     """@brief name -> [[entry_idx, value], ...] (sparse; a series may start late).
 
-    Points from contaminated samples are OMITTED rather than drawn, which the sparse
-    shape already expresses as a gap. Drawing them was the defect: a quarter of the
-    board stepping at one commit reads as a regression at that commit, and it was the
-    machine. The datum survives in the store; only the line stops asserting it.
+    Untrusted points (@p skip, from `_untrusted_cells`) are OMITTED rather than drawn,
+    which the sparse shape already expresses as a gap, and which the trend view marks
+    (#1890). Drawing them was the defect: a quarter of the board stepping at one commit
+    reads as a regression at that commit, and it was the machine. Omitting a whole run
+    for one bad row was the opposite defect, so a flagged run loses only the rows
+    `host_guard` hides. The datum survives in the store; only the line stops asserting it.
     """
     skip = skip or {}
     out: dict[str, list[list[float]]] = {}
     for i, e in enumerate(entries):
-        if i in skip:
+        rows = skip[i][1] if i in skip else set()
+        if rows is None:
             continue
         for b in e.get("benches", []):
+            if b.get("name") in rows:
+                continue
             try:
                 out.setdefault(b["name"], []).append([i, float(b["value"])])
             except (KeyError, TypeError, ValueError):
@@ -903,7 +903,7 @@ def build(data: dict, colors: dict[str, int] | None = None, same_pass: bool = Tr
         # Resolved once per suite: the same map decides which points the series omit
         # and which samples the page names as skipped, so the gap in the line and the
         # explanation for it can never disagree.
-        contaminated = _contaminated_idx(entries)
+        untrusted = _untrusted_cells(entries)
         suites[k] = {
             "shas": [e.get("commit", {}).get("id", "")[:7] for e in entries],
             "msgs": [_first_line(e.get("commit", {}).get("message", "")) for e in entries],
@@ -915,11 +915,14 @@ def build(data: dict, colors: dict[str, int] | None = None, same_pass: bool = Tr
                 sorted({b.get("name", "") for e in entries for b in e.get("benches", [])}),
                 entries),
             # Sample index -> why it is not drawn. Carried into the payload so the gap
-            # is explained where it appears instead of reading as missing data.
-            "contaminated": {str(i): r for i, r in contaminated.items()},
+            # is explained where it appears instead of reading as missing data. A flagged
+            # run that is drawn in part is listed under `partial`, with the number of its
+            # rows hidden (#1890).
+            "contaminated": {str(i): r for i, (r, rows) in untrusted.items() if rows is None},
+            "partial": {str(i): len(rows) for i, (_, rows) in untrusted.items() if rows},
             **_host_meta(entries),
         }
-        suite_series[k] = _series_by_name(entries, contaminated)
+        suite_series[k] = _series_by_name(entries, untrusted)
         if steps:
             suite_rows[k] = step_detect.rows_of(entries)
 

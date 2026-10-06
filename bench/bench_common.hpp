@@ -163,6 +163,35 @@ inline constexpr std::size_t kPayloadLadder[] = {64, 984, 985, 1024, 4096, 16384
 }
 
 /**
+ * @brief The dense payload sweep the libtracer-vs-Zenoh payload charts draw (#1890).
+ *
+ * 1 B to 64 KiB on a log scale: every power of two, plus the half-step between each pair
+ * (2^(k+1/2), rounded to the nearest byte), with the half-step below 2 B dropped as a
+ * duplicate of 1 B. 32 sizes, against the 5 of @ref kSizes, so a curve above 1 KiB has
+ * points between its corners rather than a straight line across them.
+ */
+inline constexpr std::size_t kPayloadSweep[] = {
+    1,    2,    3,    4,    6,     8,     11,    16,    23,    32,   45,
+    64,   91,   128,  181,  256,   362,   512,   724,   1024,  1448, 2048,
+    2896, 4096, 5793, 8192, 11585, 16384, 23170, 32768, 46341, 65536};
+
+/**
+ * @brief The @ref kPayloadSweep sizes that none of @p have emits, in sweep order.
+ *
+ * A family that already sweeps some sizes runs the rest AFTER its existing rows, as
+ * @ref ladder_extra does, so no existing row moves.
+ * @param have The size lists the family already sweeps.
+ */
+template <std::size_t... N>
+[[nodiscard]] inline std::vector<std::size_t> sweep_extra(const std::size_t (&... have)[N]) {
+    std::vector<std::size_t> out;
+    for (std::size_t s : kPayloadSweep)
+        if (!((std::find(std::begin(have), std::end(have), s) != std::end(have)) || ...))
+            out.push_back(s);
+    return out;
+}
+
+/**
  * @brief Scale an operation budget down for a payload above 8 KiB, so the 16 KiB and 64 KiB
  *        ladder rows (#1806) cost about what the 8 KiB row does instead of 2-8x more.
  *

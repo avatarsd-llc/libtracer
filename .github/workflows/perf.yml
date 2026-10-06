@@ -263,14 +263,30 @@ jobs:
           # runners.slice, where CPU 2 is not allowed (taskset fails EINVAL there).
           cg="/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)"
           own="$(cat "$cg/cgroup.procs" "$cg"/*/cgroup.procs 2>/dev/null || true)"
+          # Record each process's affinity first: the step below puts it back (#1890).
+          : >"$RUNNER_TEMP/runner-affinity.txt"
           for pid in $(pgrep -u "$(id -u)" -f 'Runner\.(Listener|Worker)'); do
-            if grep -qx "$pid" <<<"$own"; then taskset -a -p -c 2 "$pid"; fi
+            if grep -qx "$pid" <<<"$own"; then
+              echo "$pid $(taskset -c -p "$pid" | sed 's/.*: //')" >>"$RUNNER_TEMP/runner-affinity.txt"
+              taskset -a -p -c 2 "$pid"
+            fi
           done
       - name: Performance gate (INTERLEAVED same-runner A/B vs main) — BLOCKING tier
         run: |
           python3 bench/perf_gate.py --tier blocking \
             --baseline-bench ../main-baseline/bench/build/bench_libtracer \
             --baseline-bench-fwd ../main-baseline/bench/build/bench_forward_heap
+      # Put the runner's processes back where the move above found them (#1890), whatever
+      # the gate did. Runner.Listener outlives this job: left on CPU 2, every later job's
+      # Runner.Worker inherited CPU 2, which is the one CPU perf-local measures on, and from
+      # 2026-10-03 every perf-local point was flagged contended by the job's own runner.
+      - name: Restore the runner's own processes' CPU affinity
+        if: always() && runner.environment == 'self-hosted'
+        run: |
+          [ -s "$RUNNER_TEMP/runner-affinity.txt" ] || exit 0
+          while read -r pid cpus; do
+            taskset -a -p -c "$cpus" "$pid" || true  # a Worker may already have exited
+          done <"$RUNNER_TEMP/runner-affinity.txt"
 
   # --- the composition harness, EXECUTED (audit pass only) -----------------------
   # bench/run_compose.sh is the two-process, delivery-counted composition harness (#568).

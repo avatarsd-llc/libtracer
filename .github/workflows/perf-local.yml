@@ -216,6 +216,29 @@ jobs:
 
       - uses: actions/checkout@v4
 
+      # KEEP THE RUNNER OFF THE BENCH CPU (#1890). gate-pr (perf.yml) moves this runner's
+      # own processes ONTO CPU 2 so it can measure on 3-6, and the long-lived
+      # Runner.Listener keeps that affinity: every later job's Runner.Worker inherited
+      # CPU 2, the one CPU this leg measures on. From 2026-10-03 every invocation here read
+      # 80-100 own-cgroup CPU pressure with under 1% foreign time and ~10x the involuntary
+      # switches, and was flagged contended: the bench's own job queued behind the bench.
+      # So, before anything runs, move them onto the rest of this job's CPUs. Only THIS
+      # job's processes, matched the way perf.yml matches them.
+      - name: Move the runner's own processes off the bench CPU
+        run: |
+          cg="/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)"
+          own="$(cat "$cg/cgroup.procs" "$cg"/*/cgroup.procs 2>/dev/null || true)"
+          rest="$(python3 bench/bench_conditions.py off-cpus --cpu "$BENCH_CPU")"
+          for pid in $(pgrep -u "$(id -u)" -f 'Runner\.(Listener|Worker)'); do
+            if grep -qx "$pid" <<<"$own"; then taskset -a -p -c "$rest" "$pid" || true; fi
+          done
+
+      # The proof the move took: no runner process of this job may still run on the bench
+      # CPU. Red rather than a silent contended point: this is a workflow defect, not a busy
+      # host, and every point it costs would be flagged anyway.
+      - name: Check the bench CPU is free of the runner's processes
+        run: python3 bench/bench_conditions.py runner-check --cpu "$BENCH_CPU"
+
       - name: Capture host characteristics (stamped onto every recorded point)
         id: host
         run: |
@@ -334,7 +357,12 @@ jobs:
       - name: A/A bracket verdict
         id: bracket
         if: steps.guard.outputs.bank == 'true'
-        run: python3 bench/host_guard.py bracket --pre bench/aa_pre.txt --post bench/aa_post.txt
+        # `--rows-out` names the banked rows that failed their own A/A check (#1890); the
+        # stamp step flags exactly those points, so the charts hide them per row while the
+        # whole-run `note` below still decides for every gating consumer.
+        run: |
+          python3 bench/host_guard.py bracket --pre bench/aa_pre.txt --post bench/aa_post.txt \
+            --rows-out bench/aa_rows.json
 
       # The measurement-conditions verdict (#1676), over EVERY timed invocation above —
       # decided once, here, by the one module that samples them. `line` goes next to the
@@ -517,7 +545,7 @@ jobs:
             --json bench/benchmark_throughput.json \
             --desc "$HOST_DESC · $COND_LINE" --compiler \
             --clock-from bench/bench_libtracer_raw.txt \
-            --note "$AA_NOTE" --note "$COND_NOTE"
+            --note "$AA_NOTE" --note "$COND_NOTE" --row-flags bench/aa_rows.json
         env:
           HOST_DESC: ${{ steps.host.outputs.desc }}
           AA_NOTE: ${{ steps.bracket.outputs.note }}
@@ -541,6 +569,7 @@ jobs:
             bench/bench_store_sweep_raw.txt
             bench/aa_pre.txt
             bench/aa_post.txt
+            bench/aa_rows.json
             bench/conditions.jsonl
           retention-days: 90
 
