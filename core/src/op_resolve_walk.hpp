@@ -745,10 +745,15 @@ template <class N, class ReplyError>
     // of the three request opcodes: READ, then WRITE, and AWAIT is what is left.
     if (req.op == fwd_op_t::READ) {
         if (is_subscribers_array(field)) {
-            result_t<std::vector<view::view_t>> subs = graph.read_subscribers(v, subject);
-            if (!subs) return assemble_error_reply(route, subs.error(), egress);
+            // The slot table is a stack frame first, spilling to the table source
+            // (#1778, #1781): a short listing allocates nothing.
+            alignas(view::view_t) std::array<std::byte, 8 * sizeof(view::view_t)> table_bytes;
+            mem::bump_source_t table_frame(table_bytes, graph.table_source());
+            mem::block_array_t<view::view_t> subs(table_frame);
+            if (const result_t<std::size_t> n = graph.read_subscribers(v, subs, subject); !n)
+                return assemble_error_reply(route, n.error(), egress);
             std::size_t sub_len = 0;
-            for (const view::view_t& s : *subs) sub_len += s.length;
+            for (const view::view_t& s : subs) sub_len += s.length;
             // PL=1 wrapper (POINT) whose children are the slot SUBSCRIBER views,
             // roped on zero-copy. POINT is the structured introspection-result
             // container already used for :schema and vertex enumeration.
@@ -759,7 +764,8 @@ template <class N, class ReplyError>
             const reply_route_t ok = labelled_route();
             return or_backpressure(
                 assemble_reply(ok, reply_kind_t::RESULT,
-                               std::span<const std::byte>(wrapper.data(), wout.p), *subs, sub_len,
+                               std::span<const std::byte>(wrapper.data(), wout.p),
+                               std::span<const view::view_t>(subs.data(), subs.size()), sub_len,
                                egress, mint),
                 ok, egress);
         }

@@ -100,38 +100,49 @@ view_t owned(std::span<const std::byte> bytes) {
     return view_t::over(std::move(seg));
 }
 
-std::vector<std::byte> b_value_u32(std::uint32_t v) {
-    std::vector<std::byte> out;
-    tr::wire::emit_value_le(out, v);
+// The builders write into core byte arrays (`tr::mem::bytes_t`, #1781) drawn from the heap
+// source. Each emit folds into one flag; a refused one hands back an EMPTY frame, which the
+// router refuses and the `check` that follows reports.
+using bytes_t = tr::mem::bytes_t;
+
+bytes_t finish(bytes_t out, bool ok) {
+    if (!ok) out.clear();
     return out;
 }
 
-std::vector<std::byte> b_value_u8(std::uint8_t v) {
-    std::vector<std::byte> out;
-    tr::wire::emit_value_le(out, v);
-    return out;
+bytes_t b_value_u32(std::uint32_t v) {
+    bytes_t out(tr::mem::heap_source());
+    const bool ok = tr::wire::emit_value_le(out, v);
+    return finish(std::move(out), ok);
 }
 
-std::vector<std::byte> b_path(std::initializer_list<std::string_view> segs) {
-    std::vector<std::byte> body;
-    for (std::string_view s : segs) (void)tr::wire::emit_path_segment(body, s);
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, body);
-    return out;
+bytes_t b_value_u8(std::uint8_t v) {
+    bytes_t out(tr::mem::heap_source());
+    const bool ok = tr::wire::emit_value_le(out, v);
+    return finish(std::move(out), ok);
 }
 
-void append(std::vector<std::byte>& dst, const std::vector<std::byte>& src) {
-    dst.insert(dst.end(), src.begin(), src.end());
+bytes_t b_path(std::initializer_list<std::string_view> segs) {
+    bytes_t body(tr::mem::heap_source());
+    bool ok = true;
+    for (std::string_view s : segs) ok &= tr::wire::emit_path_segment(body, s);
+    bytes_t out(tr::mem::heap_source());
+    ok &= tr::wire::emit_tlv(out, type_t::PATH, opt_t{}, tr::mem::as_span(body));
+    return finish(std::move(out), ok);
+}
+
+[[nodiscard]] bool append(bytes_t& dst, std::span<const std::byte> src) {
+    return dst.append(src.data(), src.size());
 }
 
 /** @brief FIELD{ NAME "subscribers", VALUE u8 index_mode=ELEMENT } — ":subscribers[]" append. */
-std::vector<std::byte> b_field_subscribers_append() {
-    std::vector<std::byte> body;
-    tr::wire::emit_name(body, "subscribers");
-    append(body, b_value_u8(1));  // index_mode = ELEMENT (append)
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::FIELD, opt_t{.pl = true}, body);
-    return out;
+bytes_t b_field_subscribers_append() {
+    bytes_t body(tr::mem::heap_source());
+    bool ok = tr::wire::emit_name(body, "subscribers");
+    ok &= append(body, tr::mem::as_span(b_value_u8(1)));  // index_mode = ELEMENT (append)
+    bytes_t out(tr::mem::heap_source());
+    ok &= tr::wire::emit_tlv(out, type_t::FIELD, opt_t{.pl = true}, tr::mem::as_span(body));
+    return finish(std::move(out), ok);
 }
 
 /**
@@ -150,44 +161,46 @@ std::vector<std::byte> b_field_subscribers_append() {
  * Both zero emits no child at all — absent ⇒ all-zero ⇒ the default behaviour,
  * byte-identically to what a sender that predates the keys produces.
  */
-std::vector<std::byte> b_subscriber(const std::vector<std::byte>& target,
-                                    std::uint16_t delivery_policy = 0,
-                                    bool delivery_compact = false) {
-    std::vector<std::byte> body(target);
+bytes_t b_subscriber(std::span<const std::byte> target, std::uint16_t delivery_policy = 0,
+                     bool delivery_compact = false) {
+    bytes_t body(tr::mem::heap_source());
+    bool ok = append(body, target);
     if (delivery_policy != 0 || delivery_compact) {
-        std::vector<std::byte> members;
+        bytes_t members(tr::mem::heap_source());
         if (delivery_policy != 0) {
-            tr::wire::emit_name(members, "delivery_policy");
+            ok &= tr::wire::emit_name(members, "delivery_policy");
             const std::array<std::byte, 2> bits{
                 std::byte{static_cast<std::uint8_t>(delivery_policy & 0xFF)},
                 std::byte{static_cast<std::uint8_t>(delivery_policy >> 8)}};
-            tr::wire::emit_tlv(members, type_t::VALUE, opt_t{}, std::span<const std::byte>(bits));
+            ok &= tr::wire::emit_tlv(members, type_t::VALUE, opt_t{},
+                                     std::span<const std::byte>(bits));
         }
         if (delivery_compact) {
-            tr::wire::emit_name(members, "delivery_compact");
+            ok &= tr::wire::emit_name(members, "delivery_compact");
             const std::array<std::byte, 1> one{std::byte{1}};
-            tr::wire::emit_tlv(members, type_t::VALUE, opt_t{}, std::span<const std::byte>(one));
+            ok &= tr::wire::emit_tlv(members, type_t::VALUE, opt_t{},
+                                     std::span<const std::byte>(one));
         }
-        tr::wire::emit_tlv(body, type_t::SETTINGS, opt_t{.pl = true}, members);
+        ok &= tr::wire::emit_tlv(body, type_t::SETTINGS, opt_t{.pl = true},
+                                 tr::mem::as_span(members));
     }
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::SUBSCRIBER, opt_t{.pl = true}, body);
-    return out;
+    bytes_t out(tr::mem::heap_source());
+    ok &= tr::wire::emit_tlv(out, type_t::SUBSCRIBER, opt_t{.pl = true}, tr::mem::as_span(body));
+    return finish(std::move(out), ok);
 }
 
-std::vector<std::byte> b_fwd(tr::graph::fwd_op_t op, const std::vector<std::byte>& dst,
-                             const std::vector<std::byte>& src,
-                             const std::vector<std::byte>& field = {},
-                             const std::vector<std::byte>& payload = {}) {
-    std::vector<std::byte> body;
-    append(body, b_value_u8(static_cast<std::uint8_t>(op)));
-    append(body, dst);
-    if (!field.empty()) append(body, field);
-    append(body, src);
-    if (!payload.empty()) append(body, payload);
-    std::vector<std::byte> out;
-    tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, body);
-    return out;
+bytes_t b_fwd(tr::graph::fwd_op_t op, std::span<const std::byte> dst,
+              std::span<const std::byte> src, std::span<const std::byte> field = {},
+              std::span<const std::byte> payload = {}) {
+    bytes_t body(tr::mem::heap_source());
+    bool ok = append(body, tr::mem::as_span(b_value_u8(static_cast<std::uint8_t>(op))));
+    ok &= append(body, dst);
+    ok &= append(body, field);  // an empty field or payload appends nothing
+    ok &= append(body, src);
+    ok &= append(body, payload);
+    bytes_t out(tr::mem::heap_source());
+    ok &= tr::wire::emit_tlv(out, type_t::FWD, opt_t{.pl = true}, tr::mem::as_span(body));
+    return finish(std::move(out), ok);
 }
 
 /** @brief Read the u32 out of a stored VALUE TLV (a vertex's last-known value), in place. */

@@ -27,7 +27,7 @@
   "core/include/libtracer/conn_spec.hpp": {
     "owner": "#1781 step 2: the SPEC staging moves to bytes_t; step 3 removes the vector bytes()",
     "counts": {
-      "vector": 6
+      "vector": 4
     }
   },
   "core/include/libtracer/frame.hpp": {
@@ -102,7 +102,7 @@
   "core/include/libtracer/security_acl.hpp": {
     "owner": "#1781 step 2: the ACE merge and parse/encode staging move onto core tables; step 3 removes the vector forms",
     "counts": {
-      "vector": 12
+      "vector": 8
     }
   },
   "core/include/libtracer/subscriber.hpp": {

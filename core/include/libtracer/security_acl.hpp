@@ -482,41 +482,6 @@ template <class Policy = acl_policy_t>
     return r;
 }
 
-/**
- * @brief Encode typed ACEs as the wire `ACL{ ACL{…}* }` TLV bytes — the typed
- *        builder (the inverse of @ref parse_acl; kills per-test byte builders).
- *
- * Emits NAME-tagged `type`(u8) / `flags`(u8) / `subject`(opaque VALUE) /
- * `access_mask`(u32) children, plus `expires_ns`(u64) when non-zero, per
- * docs/reference/05 §0x0A. Encoding is unvalidated by design (tests build
- * deliberately-rejectable ACLs with it); @ref parse_acl is the gate.
- */
-[[nodiscard]] inline std::vector<std::byte> encode_acl(std::span<const ace_t> aces) {
-    using wire::opt_t;
-    using wire::type_t;
-    const auto emit_u = [](std::vector<std::byte>& out, std::string_view name, std::uint64_t v,
-                           std::size_t width) {
-        wire::emit_name(out, name);
-        std::vector<std::byte> payload(width);
-        tr::detail::store_le(payload, v, width);
-        wire::emit_tlv(out, type_t::VALUE, opt_t{}, payload);
-    };
-    std::vector<std::byte> body;
-    for (const ace_t& ace : aces) {
-        std::vector<std::byte> entry;
-        emit_u(entry, "type", static_cast<std::uint8_t>(ace.type), 1);
-        emit_u(entry, "flags", ace.flags, 1);
-        wire::emit_name(entry, "subject");
-        wire::emit_tlv(entry, type_t::VALUE, opt_t{}, ace.subject);
-        emit_u(entry, "access_mask", ace.access_mask, 4);
-        if (ace.expires_ns != 0) emit_u(entry, "expires_ns", ace.expires_ns, 8);
-        wire::emit_tlv(body, type_t::ACL, opt_t{.pl = true}, entry);
-    }
-    std::vector<std::byte> out;
-    wire::emit_tlv(out, type_t::ACL, opt_t{.pl = true}, body);
-    return out;
-}
-
 namespace detail_acl {
 
 /** @brief Wire bytes of a `(NAME key, VALUE)` pair whose value body is @p value_len bytes. */
@@ -545,8 +510,14 @@ namespace detail_acl {
 }  // namespace detail_acl
 
 /**
- * @brief @ref encode_acl appended to a core byte array (#1781) — the same bytes, sized first
- *        and written in one reservation, so a refusal appends nothing.
+ * @brief Encode typed ACEs as the wire `ACL{ ACL{…}* }` TLV bytes, appended to a core byte
+ *        array (#1781) — the typed builder, the inverse of @ref parse_acl.
+ *
+ * Emits NAME-tagged `type`(u8) / `flags`(u8) / `subject`(opaque VALUE) /
+ * `access_mask`(u32) children, plus `expires_ns`(u64) when non-zero, per
+ * docs/reference/05 §0x0A. Encoding is unvalidated by design (tests build
+ * deliberately-rejectable ACLs with it); @ref parse_acl is the gate. The bytes are sized
+ * first and written in one reservation, so a refusal appends nothing.
  * @retval false The source refused the bytes; @p out is unchanged.
  */
 [[nodiscard]] inline bool encode_acl(std::span<const ace_t> aces, mem::bytes_t& out) noexcept {
@@ -572,6 +543,17 @@ namespace detail_acl {
              (ace.expires_ns == 0 || detail_acl::put_u(out, "expires_ns", ace.expires_ns, 8));
     }
     return ok;
+}
+
+/**
+ * @brief The vector spelling of @ref encode_acl, kept until the #1781 contract step: the
+ *        core-array form plus one copy.
+ * @return The ACL bytes; EMPTY when the heap refused them (an encoded ACL is never empty).
+ */
+[[nodiscard]] inline std::vector<std::byte> encode_acl(std::span<const ace_t> aces) {
+    mem::bytes_t out(mem::heap_source());
+    if (!encode_acl(aces, out)) return {};
+    return std::vector<std::byte>(out.begin(), out.end());
 }
 
 }  // namespace tr::graph
