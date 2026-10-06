@@ -42,6 +42,7 @@
 #include <string_view>
 #include <vector>
 
+#include "../core/tests/route_frame_builder.hpp"  // host-only frame builders (#1779)
 #include "bench_common.hpp"
 #include "bench_process.hpp"
 #include "libtracer/route_handle.hpp"

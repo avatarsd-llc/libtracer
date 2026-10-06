@@ -214,6 +214,26 @@ inline constexpr std::size_t kPathLabelRecordBytes = kPackedEscapeOverhead + kPa
 }
 
 /**
+ * @brief The label element for @p label — `00 16 04 <u32 LE>` — as a fixed 7-byte record, for a
+ *        caller that keeps it in place rather than appending it (#1779: the router's per-child
+ *        `path_label_tlv` caches, which used to round-trip through a temporary vector).
+ *
+ * Same bytes as @ref emit_path_label, which stays the growing-buffer form; `path_label_test`
+ * pins the two equal.
+ * @return `nullopt` when @p label is not a label a host ever minted (§4.1's reserved zero).
+ */
+[[nodiscard]] constexpr std::optional<std::array<std::byte, kPathLabelRecordBytes>>
+path_label_record(path_label_t label) noexcept {
+    if (!label.valid()) return std::nullopt;
+    std::array<std::byte, kPathLabelRecordBytes> rec{};
+    rec[0] = static_cast<std::byte>(kPackedEscapeLen);
+    rec[1] = static_cast<std::byte>(kPackedEscapeKindLabel);
+    rec[2] = static_cast<std::byte>(kPathLabelBodyBytes);
+    path_label_store(std::span<std::byte>(rec).subspan(kPackedEscapeOverhead), label);
+    return rec;
+}
+
+/**
  * @brief Read the label element at @p at of a packed `PATH` body, or `nullopt` when the record
  *        there is not one.
  *

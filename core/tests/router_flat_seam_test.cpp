@@ -47,6 +47,7 @@
 #include <vector>
 
 #include "libtracer/tracer.hpp"
+#include "route_frame_builder.hpp"  // host-only frame builders (#1779)
 #include "test_support.hpp"
 
 namespace {

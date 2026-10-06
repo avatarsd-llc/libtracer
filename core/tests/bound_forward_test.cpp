@@ -28,6 +28,7 @@
  * a forwarder's element names — is created by `transport_vertex.cpp` and never hand-spelled.
  */
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
@@ -225,14 +226,33 @@ constexpr auto kDropBudget = 500ms;
 
 std::uint8_t value_u8(const tlv_t& v) { return tr::detail::load_le<std::uint8_t>(v.payload); }
 
+/**
+ * @brief A heap-backed source a test can CLOSE — the client router's label plane, so the
+ *        origin's bind scratch and `dst` block can be refused on cue (#1779).
+ */
+class gate_source_t final : public tr::mem::block_source_t {
+   public:
+    gate_source_t() noexcept : tr::mem::block_source_t("gate") {}
+    /** @brief Serve from the heap unless closed. */
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        return closed ? nullptr : tr::mem::heap_source().try_alloc(bytes, align);
+    }
+    /** @brief Return to the heap. */
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        tr::mem::heap_source().release(p, bytes, align);
+    }
+    bool closed = false; /**< @brief Refuse every request while set. */
+};
+
 }  // namespace
 
 int main() {
     std::printf("RFC-0024 car 3: bound forwarder hop + origin bind, client -> A -> B\n");
 
     // ----- three nodes, production wiring ------------------------------------------------
+    gate_source_t cli_label_src;
     graph_t g_cli;
-    fwd_router_t r_cli(g_cli);
+    fwd_router_t r_cli(g_cli, {.label_src = &cli_label_src});
     transport_vertex_t net_cli(g_cli, r_cli);
 
     graph_t g_a;
@@ -350,6 +370,13 @@ int main() {
 
         // The origin's own element is the one no peer can supply (§4.1), and adopt_binding
         // is what puts it on the front.
+        // The bind's element scratch is on the label plane (#1779): refused, it binds nothing.
+        cli_label_src.closed = true;
+        check(dec.has_value() && !r_cli.adopt_binding(target, "net/uplink/a",
+                                                      *tr::wire::tlv_node_t::over(*minted)),
+              "a refused element scratch binds nothing");
+        check(!target.binding().bound, "…and the path stays canonical");
+        cli_label_src.closed = false;
         check(dec.has_value() &&
                   r_cli.adopt_binding(target, "net/uplink/a", *tr::wire::tlv_node_t::over(*minted)),
               "the client adopts the binding, stacking its OWN first-hop element under it");
@@ -361,12 +388,17 @@ int main() {
     // ===== 2) the bound write, forwarded by A, applied at B ==============================
     std::printf("A bound WRITE traverses the same two hops (§3.4/§5):\n");
     const std::uint32_t kWritten = 0x12345678u;
+    cli_label_src.closed = true;
+    check(!r_cli.bound_dispatch(target, acl_right_t::WRITE).has_value(),
+          "a refused `dst` block is no dispatch — the caller falls back to canonical (#1779)");
+    cli_label_src.closed = false;
     const auto dispatch = r_cli.bound_dispatch(target, acl_right_t::WRITE);
     check(dispatch.has_value(), "the origin resolves its OWN element 0 to the link out");
     check(dispatch &&
-              dispatch->dst ==
+              std::ranges::equal(
+                  dispatch->dst,
                   b_path_ref(
-                      std::span<const path_ref_element_t>(target.binding().elements).subspan(1)),
+                      std::span<const path_ref_element_t>(target.binding().elements).subspan(1))),
           "and puts the RESIDUAL on the wire — its own element is consumed here, not sent");
     if (dispatch) {
         dispatch->link->send(

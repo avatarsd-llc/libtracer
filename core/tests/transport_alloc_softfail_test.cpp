@@ -111,6 +111,7 @@
 #include "libtracer/transport_ws.hpp"
 #include "libtracer/view.hpp"
 #include "libtracer/ws.hpp"
+#include "route_frame_builder.hpp"  // host-only frame builders (#1779)
 #include "test_support.hpp"
 
 // --- the fail-the-k-th-allocation injector (this TU owns the override) -------

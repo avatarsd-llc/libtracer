@@ -644,37 +644,12 @@ std::size_t route_handle_t::link_count() const {
     return links_.size();
 }
 
-// --- transport-plane frame BUILDERS -------------------------------------------
-//
-// These three return owning byte vectors and therefore allocate through the throwing global
-// heap. Since #885 NO production path calls them: every ADVERTISE / COMPACT / HANDLE_NACK the
-// router puts on a link is scatter-gathered off a stack head (`fwd_router.cpp`'s
-// `emit_advertise` / `emit_compact` / `emit_handle_nack`), which is what removed the last
-// peer-provoked throwing allocation from the label plane. What survives here is the
-// bytes-in-hand form: conformance vectors, the test suite's frame injection, and benches that
-// need a frame as a value rather than as a send. Do not reach for them from a receive thread.
-
-namespace {
-
-/**
- * @brief A 2-byte little-endian VALUE TLV carrying a u16 label (the FIRST child of every route-
- *        handle frame).
- *
- * Opaque (opt.PL=0), 2-byte length: 6 bytes on the wire.
- */
-void emit_label(std::vector<std::byte>& out, std::uint16_t label) {
-    const std::array<std::byte, 6> tlv = label_tlv(label);
-    out.insert(out.end(), tlv.begin(), tlv.end());
-}
-
-}  // namespace
-
 std::array<std::byte, 6> label_tlv(std::uint16_t label) noexcept {
     // The one spelling of the label child's bytes: a 2-byte opaque VALUE. Written field by
     // field rather than as a literal so the length and the payload keep the wire's
-    // little-endian order by construction. `emit_label` (and therefore every built encoder
-    // below) goes through here, and so does every gather emitter in `fwd_router.cpp`, so a
-    // gathered frame head and a built frame cannot disagree; `compact_cache_test` pins these
+    // little-endian order by construction. Every gather emitter in `fwd_router.cpp` goes
+    // through here, and so do the host-test frame builders (#1779), so a gathered frame head
+    // and a built frame cannot disagree; `compact_cache_test` pins these
     // bytes against `wire::emit_tlv` independently, since a shared locus alone would let a
     // wrong layout pass a self-comparison.
     std::array<std::byte, 6> out{};
@@ -682,33 +657,6 @@ std::array<std::byte, 6> label_tlv(std::uint16_t label) noexcept {
     out[1] = static_cast<std::byte>(opt_t{}.encode());
     detail::store_le<std::uint16_t>(std::span<std::byte>(out).subspan(2, 2), 2);
     detail::store_le<std::uint16_t>(std::span<std::byte>(out).subspan(4, 2), label);
-    return out;
-}
-
-std::vector<std::byte> encode_advertise(std::uint16_t label,
-                                        std::span<const std::byte> route_path) {
-    std::vector<std::byte> body;
-    emit_label(body, label);
-    body.insert(body.end(), route_path.begin(), route_path.end());
-    std::vector<std::byte> out;
-    wire::emit_tlv(out, type_t::ADVERTISE, opt_t{.pl = true}, body);
-    return out;
-}
-
-std::vector<std::byte> encode_compact(std::uint16_t label, std::span<const std::byte> payload) {
-    std::vector<std::byte> body;
-    emit_label(body, label);
-    body.insert(body.end(), payload.begin(), payload.end());
-    std::vector<std::byte> out;
-    wire::emit_tlv(out, type_t::COMPACT, opt_t{.pl = true}, body);
-    return out;
-}
-
-std::vector<std::byte> encode_handle_nack(std::uint16_t label) {
-    std::vector<std::byte> body;
-    emit_label(body, label);
-    std::vector<std::byte> out;
-    wire::emit_tlv(out, type_t::HANDLE_NACK, opt_t{.pl = true}, body);
     return out;
 }
 

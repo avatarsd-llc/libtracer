@@ -216,9 +216,28 @@ struct hop_t {
  * stands up no mint table of its own (amendment 7 keeps the table opt-in and OFF by default, the
  * per-hop saving is a WIDE claim, and an origin is very often the narrowest node on the route).
  */
+/**
+ * @brief A heap-backed source a test can CLOSE — the origin's label plane for the refusal
+ *        section (#1779), open by default so registration is unaffected.
+ */
+class gate_source_t final : public tr::mem::block_source_t {
+   public:
+    gate_source_t() noexcept : tr::mem::block_source_t("gate") {}
+    /** @brief Serve from the heap unless closed. */
+    [[nodiscard]] void* try_alloc(std::size_t bytes, std::size_t align) noexcept override {
+        return closed ? nullptr : tr::mem::heap_source().try_alloc(bytes, align);
+    }
+    /** @brief Return to the heap. */
+    void release(void* p, std::size_t bytes, std::size_t align) noexcept override {
+        tr::mem::heap_source().release(p, bytes, align);
+    }
+    bool closed = false; /**< @brief Refuse every request while set. */
+};
+
 struct origin_t {
+    gate_source_t label_src;
     graph_t g;
-    fwd_router_t r{g};
+    fwd_router_t r{g, {.label_src = &label_src}};
     span_sink_t uplink;
 
     origin_t() {
@@ -355,7 +374,8 @@ int main() {
         const auto dispatch = o.r.label_dispatch(target);
         check(dispatch.has_value(), "the origin resolves its OWN literal head to the link out");
         check(dispatch && dispatch->link == &o.uplink, "…and it is the child that head names");
-        check(dispatch && dispatch->dst == b_path_labelled(label, {"sensor", "temp"}),
+        check(dispatch &&
+                  std::ranges::equal(dispatch->dst, b_path_labelled(label, {"sensor", "temp"})),
               "…and what goes on the wire is the RESIDUAL: its own part consumed, not sent");
         check(key_intact(target),
               "…with the canonical bytes still held — a spend discards nothing");
@@ -467,6 +487,29 @@ int main() {
         check(odec.has_value() && !o.r.fall_back_on_label_refusal(target, *odec),
               "a RESULT whose payload happens to be two bytes is not a NOT_FOUND refusal");
         check(target.path_label().cached, "…and the spelling is still there");
+    }
+
+    // ===== 5) the origin's scratch is on the seam (#1779): a refusal stays canonical =========
+    std::printf("\n5) refused: the label plane says no, and the path stays canonical\n");
+    {
+        hop_t h(/*mint=*/true);
+        const std::optional<bytes_t> minted = hop_round_trip(h);
+        origin_t o;
+        path_t target = origin_target();
+        const auto dec = tr::wire::tlv_node_t::over(*minted);
+        o.label_src.closed = true;
+        check(dec.has_value() && !o.r.adopt_path_label(target, kOriginLink, *dec),
+              "a refused scratch body adopts nothing");
+        check(!target.path_label().cached && key_intact(target), "…the path is untouched");
+        o.label_src.closed = false;
+        check(dec.has_value() && o.r.adopt_path_label(target, kOriginLink, *dec),
+              "the same reply adopts once the source serves again");
+        o.label_src.closed = true;
+        check(!o.r.label_dispatch(target).has_value(),
+              "a refused `dst` block is no dispatch — the caller sends the canonical spelling");
+        check(target.path_label().cached, "…and the cached spelling is kept for the next try");
+        o.label_src.closed = false;
+        check(o.r.label_dispatch(target).has_value(), "…which succeeds once the source serves");
     }
 
     return tr::testing::summary("path_label_origin");

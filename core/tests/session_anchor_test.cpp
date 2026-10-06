@@ -167,7 +167,7 @@ void run() {
     check(router.add_child(std::string(kMount), server), "the listener mounts on the router");
     const std::uint16_t port = server.local_port();
 
-    const std::string id0 = fwd_router_t::session_anchor_id(kMount, "p0");
+    const tr::net::session_anchor_id_t id0 = fwd_router_t::session_anchor_id(kMount, "p0");
     const std::size_t slots_before = node.vertex_slot_count();
     const bytes_t children_idle = children_bytes(node, mount);
     check(!node.find_session_anchor(id0).has_value(), "no anchor exists before any session");
@@ -332,7 +332,7 @@ void run() {
     auto ca = std::make_unique<client_t>(port);
     auto cb = std::make_unique<client_t>(port);
     check(wait_until([&] { return peers_of(server).size() == 2; }), "two peers are audible");
-    const std::string id1 = fwd_router_t::session_anchor_id(kMount, "p1");
+    const tr::net::session_anchor_id_t id1 = fwd_router_t::session_anchor_id(kMount, "p1");
     check(wait_until([&] { return node.find_session_anchor(id1).has_value(); }),
           "the second slot anchored under its own id");
     check(node.session_anchor_slots() == 2, "two slots ⇒ two anchors, and no more");
