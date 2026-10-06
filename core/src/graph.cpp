@@ -2566,7 +2566,7 @@ result_t<void> graph_t::write_branch(vertex_t* v, const view::rope_t& value,
         // the plain path's if a subscriber can still see the slice that was refused.
         // BACKPRESSURE keeps its old behaviour (delivered, unretained) — that is a
         // resource event, not a verdict on the value — so it reads as "not refused".
-        site->refused = r.error_or(status_t::BACKPRESSURE) != status_t::BACKPRESSURE;
+        site->refused = !r && r.error() != status_t::BACKPRESSURE;
         site->stored = std::move(r).value_or(value_ref_t{});
         // Counted ONLY on the assign half. The notify half below delivers each covered site's
         // slice through fan_out and then mark_flushed()es the cursor, so on that path the ring

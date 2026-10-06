@@ -27,7 +27,7 @@
     },
     "tr::graph::graph_t::write_branch": {
       "ccn": [
-        26
+        27
       ],
       "file": "core/src/graph.cpp"
     },
