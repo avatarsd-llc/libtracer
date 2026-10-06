@@ -27,10 +27,13 @@ one direction per suite:
 Medians the repeated RESULT rows, exactly as the gate does, so run-to-run jitter
 does not move the recorded point. `--raw` consumes a pre-captured bench transcript
 instead of re-running the binary, and **may repeat**: CI runs the bench on THREE
-independently-drawn runners and feeds all transcripts here; per metric the emitter
-records the BEST across runners (min latency / max throughput), so the recorded
-history point approximates the code's capability, not the machine lottery
-(GitHub-hosted runners vary ~2x in absolute speed).
+independently-drawn runners and feeds all transcripts here; per point the emitter
+records the BEST RUNNER's whole tuple (`best_tuple`: the runner with the lowest p50, or the
+highest throughput on a bulk-only row), so the recorded history point approximates the
+code's capability, not the machine lottery (GitHub-hosted runners vary ~2x in absolute
+speed). It never mixes runners inside one point (#1807): a min of p99s across runners
+recorded a tail no single machine had, and a p50 from one runner beside a throughput from
+another described no run at all.
 
   ./perf_emit_benchmark.py --raw r1.txt --raw r2.txt --raw r3.txt \\
       --zeroheap-raw zh.txt \\
@@ -113,6 +116,15 @@ def median_point(rows: list[tuple], key: tuple):
     }
 
 
+def best_tuple(cands: list[dict]) -> dict:
+    """@brief The one runner's tuple a point records (#1807): lowest p50, or highest
+    throughput when the row has no latency (a bulk-only row, #1804). Ties keep the first.
+    Never a per-metric min/max across runners, and never a min of p99s."""
+    if any(m["p50_ns"] > 0 for m in cands):
+        return min((m for m in cands if m["p50_ns"] > 0), key=lambda m: m["p50_ns"])
+    return max(cands, key=lambda m: m["deliv_s"])
+
+
 def zeroheap_metrics(text: str) -> list[dict]:
     """Memory footprint from bench_forward_heap's probe lines: heap bytes (and alloc
     count) armed around one steady-state forward hop / terminus resolve. Space-
@@ -172,7 +184,7 @@ def main() -> int:
     ap.add_argument("--raw", action="append",
                     help="pre-captured bench_libtracer stdout to parse instead of "
                          "re-running the binary; repeatable — one per runner, the "
-                         "emitter records the best across them per metric")
+                         "emitter records the best runner's whole tuple per point")
     ap.add_argument("--zeroheap-raw", help="pre-captured bench_forward_heap stdout: "
                                            "heap-probe bytes become memory-footprint metrics")
     ap.add_argument("--out-smaller", "--out", dest="out_smaller",
@@ -193,12 +205,9 @@ def main() -> int:
     bigger: list[dict] = []
     for key in points(all_rows):
         system, mode, size, fan, ep = key
-        # Best across runners: each runner contributes its own median for the
-        # point; min latency / max throughput wins (machine speed cancels).
-        cands = [m for m in (median_point(rows, key) for rows in per_runner) if m]
-        v = {"p50_ns": min(m["p50_ns"] for m in cands),
-             "p99_ns": min(m["p99_ns"] for m in cands),
-             "deliv_s": max(m["deliv_s"] for m in cands)}
+        # Best runner: each runner contributes its own median for the point, and the
+        # best one's WHOLE tuple is recorded — p50, p99 and throughput from one machine.
+        v = best_tuple([m for m in (median_point(rows, key) for rows in per_runner) if m])
         tag = series_tag(system, mode, size, fan, ep)
         # A zero p50 means a bulk-only row (`lkv-*`, #1804): its one metric is throughput,
         # recorded below, and a constant-zero latency series would not be a measurement.

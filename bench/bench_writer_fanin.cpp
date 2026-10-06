@@ -196,7 +196,7 @@ enum class arm_t { LOCKFREE, STREAM };
 
 /** @brief Both arms at every admissible writer count, reporting the same-run ratio per count. */
 int main() {
-    const std::size_t hw = std::max<std::size_t>(1, std::thread::hardware_concurrency());
+    const std::size_t hw = bench::usable_cpus();  // the affinity mask, not the host (#1807)
     for (std::size_t t : kWriters) {
         if (t > hw) continue;
         // The two arms run back to back at each width, so a drift window is shared by both

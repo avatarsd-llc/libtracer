@@ -951,8 +951,9 @@ artifact (`bench-results-<sha>`, on the `perf` workflow run), and records every
 `(mode, size, fanout, endpoints)` point — latency, throughput and memory footprint as
 **separate series** — to a build-to-build history on the machine-maintained `gh-pages` branch
 ([benchmark-action/github-action-benchmark](https://github.com/benchmark-action/github-action-benchmark)).
-Per metric the recorded value is the **best across the three runners**, which approximates
-the code's capability rather than the machine lottery.
+Per point the recorded values are the **best runner's whole tuple** (its p50, p99 and
+throughput together, never a per-metric minimum across runners), which approximates the
+code's capability rather than the machine lottery.
 
 The store carries roughly three times as many series as this page charts — every recorded
 point, including the ones no family groups. **[Open the raw per-series trend

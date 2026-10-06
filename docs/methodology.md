@@ -266,7 +266,7 @@ thresholds, one hard invariant:
 
 | mechanism | when | comparison | threshold | effect |
 | --- | --- | --- | --- | --- |
-| **per-PR hard gate** ([`perf_gate.py`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/perf_gate.py)) | every PR | PR build vs `main` build, **one runner, interleaved A/B** | p50 **+15%** · mean **+12%** · deliveries/s **−12%** · per-vertex bytes **+2%** — *and* disjoint ranges *and* a majority of pairs | fails the PR |
+| **per-PR hard gate** ([`perf_gate.py`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/perf_gate.py)) | every PR | PR build vs `main` build, **one runner, interleaved A/B per family** | per row and leg, **3× the row's A/A-null spread, floor 3%** (flat p50 **+15%** · mean **+12%** · deliveries/s **−12%** where the null has no row) · per-vertex bytes **+2%** — *and* a bootstrap 95% interval on the median pair ratio that excludes 1 (a row at the flat threshold keeps the old disjoint-ranges + majority-of-pairs rule) | fails the PR |
 | **push ratchet** | every `main` push | HEAD vs its parent, **three independently-drawn runners** | same as above | **advisory** — each replica reports (see the tier note below) |
 | **forward-hop zero-alloc gate** | every CI run | absolute | `> 0` allocations on the forward hop | fails the build |
 | **soft trend alert** | per `main` commit | vs previous point, **cross-runner** | series drifts past **125%** | a comment, *not* a verdict |
@@ -303,8 +303,11 @@ Details that make these trustworthy:
   unpinned hosted runners, host-wide pressure decides. An execution is
   **contended** when foreign time exceeds **2 %** of its window or pressure exceeds **5**;
   a contended execution is re-run, up to three attempts, and the first clean one is kept.
-  If any execution is still contended after its last attempt, the gate prints
-  **`PERF: INCONCLUSIVE`** instead of PASS or FAIL — the comparison's numbers still print,
+  The per-PR gate judges **each family's own window** (#1807): a pair whose execution
+  stayed contended is dropped for that family, both arms, and the family is judged on its
+  other pairs. Only when a family that emits a gated row loses more than two of its pairs
+  (and, outside the per-PR gate, when any execution is still contended after its last
+  attempt) does the gate print **`PERF: INCONCLUSIVE`** instead of PASS or FAIL — the comparison's numbers still print,
   marked `?` as unverified — and the blocking tier exits 3 so the job is re-run rather than
   merged on an unverified green. On the pinned host the same verdict is stamped next to the
   host descriptor on every recorded point (and so in every chart tooltip), and a contended
@@ -481,19 +484,56 @@ Details that make these trustworthy:
   processes per arm per pair.
 
   The points are `mode` values of the benches described above, and the numbers are
-  their `size` / `fan-out` / `endpoint` columns. The binaries are run
-  **interleaved** — `A B / B A / A B / B A`, four pairs, alternating which one starts —
-  so a slow window in the machine is shared by both arms rather than donated to
-  whichever one holds it. Because the baseline is *the same PR's `main` rebuilt on the
-  same runner in the same pass*, the comparison is machine-neutral.
-- A point fails only when **all three** of these hold, and the gate prints every one of
-  them: the **medians** breach the threshold (the effect is big enough), the two arms'
-  **[min..max] ranges are disjoint** (a sign flip inside the ranges reads as
-  indistinguishable and can never fail), and a **strict majority of the interleaved
-  pairs** breach on their own (the effect reproduces). All three are needed because a
-  best-of-3 estimator rejects a bad *sample* but not a bad *window*: a runner that goes
-  slow for the whole of one arm's block produces a clean, reproducible, entirely false
-  breach, and the majority-of-interleaved-pairs rule is what a window cannot fake.
+  their `size` / `fan-out` / `endpoint` columns. The binaries are run **family by
+  family** (`bench_libtracer --family NAME`, and each sibling binary as one step), and
+  each family's pairs run back to back, **ABBA** — `A B / B A / A B / …`, eight pairs,
+  alternating which one starts — so the two arms of a pair are seconds apart and a slow
+  window in the machine is shared by both rather than donated to whichever one holds it.
+  A single-threaded family is pinned to **one logical CPU** (the first of `BENCH_CPU`, or
+  `BENCH_CPU_SINGLE`); a multi-threaded family runs on the whole `BENCH_CPU` set, sizes its
+  thread count from that affinity mask, and runs after every single-threaded one. Because
+  the baseline is *the same PR's `main` rebuilt on the same runner in the same pass*, the
+  comparison is machine-neutral.
+- A point's leg fails only when **both** of these hold, and the gate prints each, with the
+  numbers: the **median of the per-pair ratios** candidate/baseline is past the row's
+  threshold (the effect is big enough), and a **bootstrap 95% confidence interval** on
+  that median (2 000 resamples of the pairs, seeded) **excludes 1** (the effect is real).
+  The threshold is **per row and per leg**, from a banked **A/A null**
+  ([`bench/aa_null.json`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/aa_null.json),
+  written by [`bench/aa_null.py`](https://github.com/avatarsd-llc/libtracer/blob/main/bench/aa_null.py)):
+  **3× the robust spread** of the gate's own statistic between *different builds of the
+  same source* (one source built at three function alignments, so code layout moves the
+  way an unrelated change moves it), **floor 3%**, and **capped at the flat thresholds**
+  above: a measured null may tighten a row, never loosen it. The allocator-cliff rows
+  (`cliff-alloc-heap`, `cliff-alloc-pool`) take **5×** instead of 3×: banked on the bench
+  CPUs, three of them false-failed a held-out A/A replay at 3× and none at 5×, and raising
+  their floor to 5% instead cleared fewer. A stable row gets as little as
+  3%, so a real 10% regression fails it. A row the null does not carry is gated on the flat
+  thresholds, and the report says `flat`. This replaced the disjoint-range and
+  majority-of-pairs rules ([#1807](https://github.com/avatarsd-llc/libtracer/issues/1807)):
+  three PRs that could not touch the rows they failed, and one with identical sources,
+  failed at 15–22% with clean conditions, because within one session two builds of one
+  source differ by a layout offset, and disjoint ranges read that offset as real. The null
+  is banked on the gate's own host and pin (`bench.slice` CPUs 3–6, single-threaded families
+  on CPU 3, the bench runner stopped while it measures): a null first measured on a shared
+  runner CPU was tighter than the bench CPUs' own spread and false-failed nine rows of a
+  real gate run at the 3% floor. It is re-banked there when the CPU layout changes and when
+  a gated row is added.
+- **Layout-sensitive, held at the flat threshold.** On these rows 3× the banked spread is at
+  or past the flat threshold, because builds of one source move them by several percent
+  (the `-falign-functions=64` build ran `lkv-store-heap` ~40% slower), so they keep the
+  verdict they had before the null existed — the flat threshold **and** the old rule
+  (medians breach, the arms' [min..max] ranges are disjoint, a strict majority of pairs
+  breach) — and the report says `cap`. A row the null does not carry is decided the same
+  way. In the bench-CPU null the capped rows outside the cliff family are:
+  `acl-inherit-d4-mt4`, `eptype-stream/16384`, `fold-b4/512/1/1` and `poolalloc-mt4` (every
+  leg); `fwd-demux-value/16384`, `fwd-demux-scan`, `inproc/16384`, `inproc-borrow/64` and
+  `inproc-path/64/1/8192` (two legs); throughput on the `lkv-store-*` rows, `lkv-alloc-heap/1024`,
+  `inproc-borrow/16384` and `inproc-mt4`; the mean on `eptype-stream/64`, `inproc/64/1024/1`
+  and `inproc-target-handler`; and p50 on five of the eight `store-lat-*` rows. 56 of the 98
+  cliff rows hold at least one leg at the cap. A same-source A/A between two layouts can
+  still fail these rows, as it could before #1807; the null cannot
+  remove that without loosening them, which was ruled out.
 - **The payload ladder** ([#1806](https://github.com/avatarsd-llc/libtracer/issues/1806)).
   Every data-path family is swept over 64 B, 984 B, 985 B, 1 KiB, 4 KiB, 16 KiB and 64 KiB:
   `inproc`, `inproc-borrow`, the four `lkv-*` rows, `eptype-stream`, both `compact-*` arms
@@ -868,8 +908,10 @@ it has to price the move on the bench before the pin is allowed to move with it.
   trends across several commits, not the third digit of one point.
 - **Per-point noise floor.** Each recorded point is the **median of the repeated
   RESULT rows** one run emits, so per-iteration jitter does not move a series. Points
-  are then recorded as the **best across three runner draws**, approximating the
-  code's capability rather than the machine lottery. Sub-microsecond points sit on a
+  are then recorded from the **best of three runner draws** — that runner's whole tuple
+  (p50, p99 and throughput from one machine, never a per-metric minimum across runners,
+  and never a minimum of p99s), approximating the code's capability rather than the
+  machine lottery. Sub-microsecond points sit on a
   ~10 ns timer grain — do not over-read a 5 ns wiggle.
 - **Tail percentiles are published, not gated — and here is the measurement that
   decided it.** The deeper into a distribution a statistic reaches, the fewer samples

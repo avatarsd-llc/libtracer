@@ -332,6 +332,19 @@ def cpus_from_env() -> tuple[int, ...] | None:
     return tuple(sorted(out))
 
 
+def single_cpu_from_env(cpus: tuple[int, ...] | None) -> tuple[int, ...] | None:
+    """@brief The ONE logical CPU a single-threaded bench step is pinned to (#1807).
+
+    `BENCH_CPU_SINGLE` when set, else the first CPU of @p cpus (the `BENCH_CPU` set), else
+    None (unpinned). One CPU, because a single-threaded measurement spread over several lets
+    the scheduler migrate it mid-window; the set is for the multi-threaded families.
+    """
+    spec = os.environ.get("BENCH_CPU_SINGLE", "").strip()
+    if spec:
+        return (int(spec),)
+    return (cpus[0],) if cpus else None
+
+
 def _run_once(argv: list[str], cpus: tuple[int, ...] | None, timeout: float | None,
               env: dict | None, score_pressure: bool = True) -> tuple[str, str, int, Conditions]:
     """@brief Run @p argv once, pinned to @p cpus when given, and classify the window."""

@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import json
 import pathlib
 import re
 import sys
@@ -49,13 +50,13 @@ def lat(cand, base):
 
 
 class NoFalseFails(unittest.TestCase):
-    """@brief The three recorded false failures must all come back PASS."""
+    """@brief The recorded false failures must all come back PASS."""
 
     def test_708_shared_depression_window(self):
         """The #708 shape: a machine depression on pair 3 that both arms fell into."""
         v = tput([252, 251, 161, 255], [258, 251, 236, 250])
+        self.assertFalse(v["effect"])  # the median pair is flat
         self.assertFalse(v["fail"])
-        self.assertFalse(v["disjoint"])  # the populations overlap: indistinguishable
 
     def test_758_fold_b4_overlapping_distributions(self):
         """The #758 shape: medians x1.01, distributions fully overlapping."""
@@ -68,54 +69,78 @@ class NoFalseFails(unittest.TestCase):
         self.assertFalse(v["fail"])
         self.assertEqual(v["pairs_breached"], 1)
 
-    def test_sign_flip_inside_the_ranges_is_never_a_fail(self):
-        """Medians breach, but the candidate's best beats the baseline's worst."""
+    def test_a_contrary_pair_keeps_the_interval_open(self):
+        """Medians breach, but one pair says the opposite: the interval still reaches 1.
+
+        This is the case the disjoint-range rule used to decide. Deleting the interval
+        condition turns it into a FAIL, which is how this test proves it does work."""
         v = tput([88, 200, 80, 86], [100, 104, 98, 102])
         self.assertTrue(v["effect"])
-        self.assertFalse(v["disjoint"])
+        self.assertFalse(v["significant"])
         self.assertFalse(v["fail"])
 
-    def test_separation_is_load_bearing(self):
-        """effect + majority hold; only DISJOINTNESS stands between this and a fail.
-
-        Three pairs breach hard and the medians breach, but one candidate sample beats
-        every baseline sample. Deleting the range rule turns this into a FAIL, which is
-        how this test proves the rule is doing work rather than riding along.
-        """
+    def test_one_wild_pair_of_four_cannot_close_the_interval(self):
+        """Three pairs breach hard; the fourth points the other way."""
         v = tput([80, 80, 80, 130], [100, 100, 100, 100])
         self.assertTrue(v["effect"])
-        self.assertTrue(v["majority"])
-        self.assertFalse(v["disjoint"])
-        self.assertFalse(v["fail"])
-
-    def test_reproducibility_is_load_bearing(self):
-        """effect + disjointness hold; only the MAJORITY rule stands in the way.
-
-        A bimodal candidate: two pairs breach, two are within a hair of the baseline.
-        Deleting the majority rule turns this into a FAIL.
-        """
-        v = tput([10, 80, 95, 99], [100, 100, 100, 100])
-        self.assertTrue(v["effect"])
-        self.assertTrue(v["disjoint"])
-        self.assertFalse(v["majority"])
+        self.assertFalse(v["significant"])
         self.assertFalse(v["fail"])
 
     def test_effect_size_is_load_bearing(self):
-        """disjointness + majority hold; only the MEDIAN threshold stands in the way.
-
-        Every candidate sample is worse and two of three pairs breach, but the
-        aggregate move is -11% — under the -12% gate. Deleting the median leg turns
-        this into a FAIL on a difference the gate does not claim to resolve.
-        """
-        v = tput([64, 60, 64], [68, 72, 76])
-        self.assertTrue(v["disjoint"])
-        self.assertTrue(v["majority"])
+        """Every pair is slower (significant), but only by 10% — under the -12% flat gate."""
+        v = tput([90, 89, 90, 91], [100, 100, 100, 100])
+        self.assertTrue(v["significant"])
         self.assertFalse(v["effect"])
         self.assertFalse(v["fail"])
 
     def test_identical_arms(self):
         self.assertFalse(tput([100, 100, 100, 100], [100, 100, 100, 100])["fail"])
         self.assertFalse(lat([100, 100, 100, 100], [100, 100, 100, 100])["fail"])
+
+    def test_a_layout_sensitive_row_is_held_at_the_flat_threshold(self):
+        """#1855's row: `fold-b4` throughput moves ~15-25% between builds of one source, so
+        its null is wider than flat. The ruling on #1874 caps it: the null may tighten a
+        row, never loosen it, so the row gates exactly as it did before the null."""
+        null = {"fold-b4/512/1/1": {"deliv_s": 0.26, "p50_ns": 0.14}}
+        self.assertEqual(pg.leg_factor("fold-b4/512/1/1", "deliv_s", null),
+                         (pg.TPUT_REGRESS, False, "cap"))
+        self.assertEqual(pg.leg_factor("fold-b4/512/1/1", "p50_ns", null),
+                         (pg.LAT_REGRESS, True, "cap"))
+        # At the cap the leg keeps main's whole rule: the #1855 samples (x0.85 with one
+        # overlapping pair) fail on the flat threshold only if ranges are disjoint AND a
+        # majority breach — and the CI rule alone is not what decides.
+        c, b = [212, 214, 213, 230], [251, 250, 252, 249]
+        v, _f, src = pg.leg_verdict("fold-b4/512/1/1", "deliv_s", c, b, null)
+        self.assertEqual((src, v["rule"]), ("cap", "flat"))
+        self.assertEqual(v["fail"], pg.legacy_verdict(c, b, pg.TPUT_REGRESS, True)["fail"])
+        v, _f, _s = pg.leg_verdict("fold-b4/512/1/1", "deliv_s", [80, 80, 80, 130],
+                                   [100, 100, 100, 100], null)
+        self.assertFalse(v["disjoint"])
+        self.assertFalse(v["fail"], "main's separation rule still holds on a capped leg")
+        v, _f, _s = pg.leg_verdict("fold-b4/512/1/1", "deliv_s", [10, 80, 95, 99],
+                                   [100, 100, 100, 100], null)
+        self.assertFalse(v["majority"])
+        self.assertFalse(v["fail"], "main's majority rule still holds on a capped leg")
+        # A leg with no null at all is decided the same way.
+        self.assertEqual(pg.leg_verdict("new/64/1/1", "p50_ns", [1.0], [1.0], {})[0]["rule"],
+                         "flat")
+        # Just under the cap is still the null's own (tighter) threshold, under the CI rule.
+        f, _t, src = pg.leg_factor("k", "mean_ns", {"k": {"mean_ns": 0.039}})
+        self.assertEqual(src, "null")
+        self.assertLess(f, pg.MEAN_REGRESS)
+        v, _f, _s = pg.leg_verdict("k", "mean_ns", [1.2] * 4, [1.0] * 4,
+                                   {"k": {"mean_ns": 0.039}})
+        self.assertEqual(v["rule"], "ci")
+
+    def test_1871_two_percent_disjoint_passes_at_the_floor(self):
+        """#1871's A/A: two copies of one binary, narrow-full x1.02 with DISJOINT ranges."""
+        factor, _t, _s = pg.leg_factor("store-lat-narrow-full/32/1/1", "p50_ns",
+                                       {"store-lat-narrow-full/32/1/1": {"p50_ns": 0.004}})
+        self.assertAlmostEqual(factor, 1 + pg.NULL_FLOOR)
+        v = pg.paired_verdict([750, 752, 758, 765, 751, 754, 760, 756],
+                              [741, 742, 741, 742, 741, 742, 741, 742], factor, False)
+        self.assertTrue(v["significant"])
+        self.assertFalse(v["fail"])
 
 
 class RealRegressionsStillFail(unittest.TestCase):
@@ -128,24 +153,33 @@ class RealRegressionsStillFail(unittest.TestCase):
         self.assertEqual(v["pairs_breached"], 4)
 
     def test_synthetic_fold_b4_ablation(self):
-        """The -20% fold-b4 throughput ablation this fix was demonstrated against.
-
-        This is the load-bearing one for #763's defect 1: `fold-b4` runs at ~3 ns, so
-        LAT_TICK_NS leaves throughput as its ONLY live gate leg. The rule must fail it
-        on throughput alone when the effect reproduces.
-        """
+        """The -20% fold-b4 throughput ablation #763's fix was demonstrated against."""
         v = tput([205, 203, 207, 201], [258, 251, 256, 253])
         self.assertTrue(v["fail"])
 
     def test_regression_survives_one_noisy_pair(self):
-        """A real step that one pair fails to reproduce still fails on the majority."""
+        """A real step that one pair fails to reproduce still fails."""
         v = tput([63, 65, 62, 64], [100, 104, 98, 66])
         self.assertTrue(v["fail"])
         self.assertEqual(v["pairs_breached"], 3)
 
+    def test_an_injected_ten_percent_fails_a_row_at_the_floor(self):
+        """#1807's acceptance shape: +10% on a row whose null is tight (3% threshold), in 8
+        noisy ABBA pairs. The flat +15% gate could not fail this by construction."""
+        null = {"inproc/64/1/1": {"p50_ns": 0.004, "deliv_s": 0.004}}
+        base = [100.0, 101.0, 99.5, 100.4, 100.9, 99.8, 100.2, 100.6]
+        slow = [b * 1.10 for b in reversed(base)]
+        f, t, _ = pg.leg_factor("inproc/64/1/1", "p50_ns", null)
+        self.assertTrue(pg.paired_verdict(slow, base, f, False, t)["fail"])
+        f, t, _ = pg.leg_factor("inproc/64/1/1", "deliv_s", null)
+        self.assertTrue(pg.paired_verdict([1e9 / x for x in slow], [1e9 / x for x in base],
+                                          f, True, t)["fail"])
+        f, t, _ = pg.leg_factor("inproc/64/1/1", "p50_ns", {})  # no null: the flat +15%
+        self.assertFalse(pg.paired_verdict(slow, base, f, False, t)["fail"])
+
 
 class ThresholdBoundary(unittest.TestCase):
-    """@brief The thresholds themselves are unchanged — only the decision around them."""
+    """@brief Where the threshold comes from, and the boundary it draws."""
 
     def test_just_under_the_threshold_passes(self):
         v = tput([89, 89, 89, 89], [100, 100, 100, 100])  # -11%, under the -12% gate
@@ -157,14 +191,46 @@ class ThresholdBoundary(unittest.TestCase):
         self.assertTrue(v["fail"])
 
     def test_sub_tick_latency_step_cannot_fail_on_grain_alone(self):
-        """A one-grain p50 step on a single-digit-ns point is still tick-guarded."""
+        """A one-grain p50 step on a single-digit-ns point is still tick-guarded (flat)."""
         v = lat([4, 4, 4, 4], [3, 3, 3, 3])
         self.assertFalse(v["fail"])
 
     def test_two_pairs_require_unanimity(self):
-        """Below three pairs 'a majority' is meaningless, so every pair must breach."""
+        """Two pairs that disagree leave the interval reaching 1; two that agree close it."""
         self.assertFalse(tput([63, 101], [100, 100])["fail"])
         self.assertTrue(tput([63, 62], [100, 100])["fail"])
+
+    def test_null_threshold_is_three_spreads_with_a_floor(self):
+        null = {"k": {"p50_ns": 0.03, "mean_ns": 0.001, "deliv_s": 0.03}}
+        self.assertAlmostEqual(pg.leg_factor("k", "p50_ns", null)[0], 1.09)
+        self.assertAlmostEqual(pg.leg_factor("k", "mean_ns", null)[0], 1.03)  # the floor
+        self.assertAlmostEqual(pg.leg_factor("k", "deliv_s", null)[0], 1 / 1.09)
+        self.assertFalse(pg.leg_factor("k", "p50_ns", null)[1], "the null measured the grain")
+
+    def test_a_row_the_null_lacks_falls_back_to_flat_and_says_so(self):
+        self.assertEqual(pg.leg_factor("new/64/1/1", "p50_ns", {}),
+                         (pg.LAT_REGRESS, True, "flat"))
+        self.assertEqual(pg.leg_factor("new/64/1/1", "deliv_s", {}),
+                         (pg.TPUT_REGRESS, False, "flat"))
+
+    def test_the_bootstrap_is_deterministic(self):
+        r = [1.01, 0.98, 1.05, 1.02, 0.99, 1.03, 1.00, 1.04]
+        self.assertEqual(pg.bootstrap_ci(r), pg.bootstrap_ci(list(r)))
+        lo, hi = pg.bootstrap_ci(r)
+        self.assertLessEqual(lo, 1.015)
+        self.assertGreaterEqual(hi, 1.015)
+
+    def test_the_banked_null_file_parses(self):
+        """The committed null is what the gate reads; a malformed one must not ship."""
+        if not pg.NULL_FILE.exists():
+            self.skipTest("no banked null in this tree")
+        doc = json.loads(pg.NULL_FILE.read_text())
+        self.assertIn("meta", doc)
+        for k, legs in doc["rows"].items():
+            self.assertRegex(k, r"^[\w-]+/\d+/\d+/\d+$")
+            for leg, s in legs.items():
+                self.assertIn(leg, pg.LEGS)
+                self.assertGreaterEqual(s, 0.0)
 
 
 class MemoryRatchetIsNeverSilent(unittest.TestCase):
@@ -469,7 +535,8 @@ class PicosecondBatchRows(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             p = pathlib.Path(d) / "bench_libtracer"
             p.write_text("")
-            with unittest.mock.patch.object(pg, "timed", lambda *a, **k: self.TRANSCRIPT), \
+            with unittest.mock.patch.object(pg, "timed_run",
+                                            lambda a, *_x, **_k: _measurement(a, self.TRANSCRIPT)), \
                     unittest.mock.patch.object(pg, "CLOCK_FLOORS", []):
                 rows = pg.run_bench_once(p)
                 floors = list(pg.CLOCK_FLOORS)
@@ -492,9 +559,8 @@ class PicosecondBatchRows(unittest.TestCase):
         fake = {"cand": {key: [dict(slow) for _ in range(4)]},
                 "base": {key: [dict(sample) for _ in range(4)]}}
         out = io.StringIO()
-        with unittest.mock.patch.object(pg, "paired_samples", lambda *a: fake), \
-                contextlib.redirect_stdout(out):
-            fails = pg.gate_paired({}, {}, 4)
+        with contextlib.redirect_stdout(out):
+            fails, _ = pg.gate_paired({}, {}, 4, {}, fake)
         fails = [x for x in fails if x.startswith(key)]  # the other points are missing (#1847)
         self.assertEqual(len(fails), 1)
         self.assertIn("deliv/s", fails[0])  # the one leg the row has still gates
@@ -526,7 +592,7 @@ class LkvRatioReport(unittest.TestCase):
 
     def run_paired(self, cand_out, base_out, pairs=3):
         """@brief The paired report over doctored outputs, keyed by which binary ran."""
-        def fake_timed(argv, timeout):
+        def fake_timed(argv, timeout, **_k):
             return cand_out(argv) if argv[0] == "cand" else base_out(argv)
         with unittest.mock.patch.object(pg, "timed", fake_timed), \
                 contextlib.redirect_stdout(io.StringIO()) as out:
@@ -543,7 +609,7 @@ class LkvRatioReport(unittest.TestCase):
 
     def test_ratio_never_fails_legacy(self):
         for pool in (98, 102, 150, 300):
-            with unittest.mock.patch.object(pg, "timed", lambda argv, timeout: lkv_out(100, pool)), \
+            with unittest.mock.patch.object(pg, "timed", lambda argv, timeout, **_k: lkv_out(100, pool)), \
                     contextlib.redirect_stdout(io.StringIO()) as out:
                 self.assertIsNone(pg.lkv_ratio_report(pathlib.Path("cand")))
             self.assertIn("reported, not gated", out.getvalue())
@@ -693,19 +759,26 @@ class VerdictTier(unittest.TestCase):
         self.assertEqual(cm.exception.code, 2)
 
 
-class GateTimesBothFamilySets(unittest.TestCase):
-    """@brief The gate times the SINGLE and the MULTI family sets apart (#1803).
+def _measurement(argv, stdout: str = "", clean: bool = True, rc: int = 0) -> "pg.bc.Measurement":
+    """@brief A kept attempt with the given output and verdict, for a patched `timed_run`."""
+    cond = pg.bc.Conditions(cpus=(3,), pinned=True, wall_s=1.0, foreign_pct=0.0 if clean else 9.0,
+                            own_cpu_s=1.0, nivcsw=0, pressure=0.0,
+                            verdict=pg.bc.CLEAN if clean else pg.bc.CONTENDED,
+                            reason="" if clean else "foreign 9.0% > 2%")
+    return pg.bc.Measurement(list(argv), stdout, "", rc, [cond])
 
-    The MULTI families (bench threads queueing behind each other on the pinned CPUs) raised
-    the bench's own-cgroup CPU pressure, and the condition check called it contention:
-    INCONCLUSIVE with 0% foreign load. Under the fix the MULTI rows stay gated (timed in
-    both arms and compared A/B) in their own invocation, judged on foreign time only, after
-    every pressure-scored SINGLE invocation. These pin the argv and its order, that the MULTI
-    points are gated, and that a foreign intruder still makes either set INCONCLUSIVE while
-    pressure is still scored on the SINGLE set.
+
+class GateTimesFamilyByFamily(unittest.TestCase):
+    """@brief The gate times each family on its own, ABBA, pinned by its set (#1807).
+
+    A SINGLE family runs on ONE logical CPU, pressure scored; a MULTI family on every bench
+    CPU, judged on foreign time only (#1803), after every SINGLE step. A contended pair is
+    dropped for its family alone, and only a gated family that lost more than
+    MAX_DROPPED_PAIRS makes the verdict INCONCLUSIVE.
     """
 
     MULTI_POINTS = {"inproc-mt4/64/1/4", "acl-inherit-d4-mt4/64/1/4", "poolalloc-mt4/64/1/1"}
+    FAMILIES = {"inproc-fan": "single", "inproc-mt": "multi", "fold": "single"}
 
     def bins(self, root: pathlib.Path, tag: str) -> dict:
         out = {}
@@ -720,77 +793,121 @@ class GateTimesBothFamilySets(unittest.TestCase):
         keys = {f"{m}/{s}/{f}/{e}" for (_b, m, s, f, e) in pg.POINTS}
         self.assertLessEqual(self.MULTI_POINTS, keys)
 
-    def test_both_arms_with_family_sets_split_the_sweep(self):
-        with tempfile.TemporaryDirectory() as d:
-            cand, base = self.bins(pathlib.Path(d), "c"), self.bins(pathlib.Path(d), "b")
-            self.assertEqual(pg.gate_sweep_args(cand, base, probe=lambda p: True),
-                             pg.GATE_FAMILY_SET)
-
-    def test_an_arm_without_family_sets_makes_both_sweep_everything(self):
-        with tempfile.TemporaryDirectory() as d:
-            cand, base = self.bins(pathlib.Path(d), "c"), self.bins(pathlib.Path(d), "b")
-            only_cand = lambda p: "/c/" in str(p)  # noqa: E731 — the baseline predates sets
-            self.assertEqual(pg.gate_sweep_args(cand, base, probe=only_cand), ())
-
-    def run_paired(self, sets: bool) -> list[tuple[list[str], bool]]:
-        seen: list[tuple[list[str], bool]] = []
-
-        def fake_timed(argv, timeout, score_pressure=True):
-            seen.append((argv, score_pressure))
-            return ""
+    def plan(self, probe) -> list:
         with tempfile.TemporaryDirectory() as d, \
-                unittest.mock.patch.object(pg, "has_family_sets", lambda p: sets), \
-                unittest.mock.patch.object(pg, "timed", fake_timed), \
-                contextlib.redirect_stdout(io.StringIO()):
-            cand, base = self.bins(pathlib.Path(d), "c"), self.bins(pathlib.Path(d), "b")
-            pg.paired_samples(cand, base, pairs=2)
-        return seen
+                unittest.mock.patch.object(pg, "CPUS", (3, 4, 5, 6)), \
+                unittest.mock.patch.object(pg, "CPU_SINGLE", (3,)):
+            return pg.gate_plan(self.bins(pathlib.Path(d), "c"), self.bins(pathlib.Path(d), "b"),
+                                probe=probe)
 
-    def test_single_set_scored_first_then_multi_set_foreign_only(self):
-        seen = self.run_paired(sets=True)
-        mains = [(a[1:], psi) for a, psi in seen if a[0].endswith("bench_libtracer")]
-        # 2 pairs x 2 arms of the single set, THEN 2 pairs x 2 arms of the multi set.
-        self.assertEqual(mains, [(list(pg.GATE_FAMILY_SET), True)] * 4
-                         + [(list(pg.GATE_FAMILY_SET_MULTI), False)] * 4)
-        last_scored = max(i for i, (_a, psi) in enumerate(seen) if psi)
-        first_multi = min(i for i, (a, _p) in enumerate(seen) if a[1:] ==
-                          list(pg.GATE_FAMILY_SET_MULTI))
-        self.assertLess(last_scored, first_multi,
-                        "a pressure-scored run launched after a MULTI run's residue")
-        for a, psi in seen:
-            if not a[0].endswith("bench_libtracer"):
-                self.assertEqual((a[1:], psi), ([], True), "compact/demux: one scored run")
+    def test_single_families_then_siblings_then_multi(self):
+        plan = self.plan(lambda p: self.FAMILIES)
+        labels = [s.label for s in plan]
+        siblings = [n for k, n in pg.BENCH_BY_KEY.items() if k != "main"]
+        self.assertEqual(labels, ["inproc-fan", "fold", *siblings, "inproc-mt"])
+        for s in plan:
+            if s.label == "inproc-mt":
+                self.assertEqual((s.cpus, s.score_pressure), ((3, 4, 5, 6), False))
+            else:
+                self.assertEqual((s.cpus, s.score_pressure), ((3,), True), s.label)
+        self.assertEqual(plan[0].args, {0: ("--family", "inproc-fan"),
+                                        1: ("--family", "inproc-fan")})
 
-    def run_best_of(self, runs: int) -> list[tuple[list[str], bool]]:
-        seen: list[tuple[list[str], bool]] = []
+    def test_an_arm_without_families_makes_both_sweep_everything(self):
+        plan = self.plan(lambda p: self.FAMILIES if "/c/" in str(p) else None)
+        main = [s for s in plan if s.key == "main"]
+        self.assertEqual(len(main), 1)
+        self.assertEqual((main[0].args, main[0].cpus, main[0].score_pressure),
+                         ({0: (), 1: ()}, (3, 4, 5, 6), True))
 
-        def fake_timed(argv, timeout, score_pressure=True):
-            seen.append((argv, score_pressure))
-            return ""
+    def test_a_family_only_the_candidate_lists_runs_on_the_candidate_alone(self):
+        plan = self.plan(lambda p: {**self.FAMILIES, "new": "single"} if "/c/" in str(p)
+                         else self.FAMILIES)
+        new = next(s for s in plan if s.label == "new")
+        self.assertEqual(new.args, {0: ("--family", "new")})
+
+    def run_paired(self, contended: set[tuple[str, int]] = frozenset(), pairs: int = 4,
+                   families: dict | None = None):
+        """@brief paired_samples over doctored runs; @p contended = {(family, pair)}."""
+        seen: list[tuple[str, str]] = []
+        count: dict[str, int] = {}
+
+        def fake(argv, timeout, score_pressure=True, cpus=None):
+            fam = argv[2] if len(argv) > 2 else pathlib.Path(argv[0]).name
+            arm = "cand" if "/c/" in argv[0] else "base"
+            seen.append((fam, arm))
+            n = count[fam] = count.get(fam, 0) + 1
+            row = _row("inproc", 64, 1, 1) if fam == "inproc-fan" else ""
+            return _measurement(argv, row + "\n", ((fam, (n - 1) // 2) not in contended))
         with tempfile.TemporaryDirectory() as d, \
-                unittest.mock.patch.object(pg, "has_family_sets", lambda p: True), \
-                unittest.mock.patch.object(pg, "timed", fake_timed), \
+                unittest.mock.patch.object(pg, "list_families",
+                                           lambda p: families or self.FAMILIES), \
+                unittest.mock.patch.object(pg, "timed_run", fake), \
                 contextlib.redirect_stdout(io.StringIO()):
-            pg.best_of(self.bins(pathlib.Path(d), "c"), runs)
-        return seen
+            s = pg.paired_samples(self.bins(pathlib.Path(d), "c"),
+                                  self.bins(pathlib.Path(d), "b"), pairs)
+        return s, seen
 
-    def test_best_of_runs_every_single_set_run_before_any_multi_run(self):
-        # The legacy/ratchet path (no baseline binary) takes the same order as the paired one.
-        seen = self.run_best_of(runs=3)
-        mains = [(a[1:], psi) for a, psi in seen if a[0].endswith("bench_libtracer")]
-        self.assertEqual(mains, [(list(pg.GATE_FAMILY_SET), True)] * 3
-                         + [(list(pg.GATE_FAMILY_SET_MULTI), False)] * 3)
-        last_scored = max(i for i, (_a, psi) in enumerate(seen) if psi)
-        first_multi = min(i for i, (a, _p) in enumerate(seen) if a[1:] ==
-                          list(pg.GATE_FAMILY_SET_MULTI))
-        self.assertLess(last_scored, first_multi,
-                        "a pressure-scored run launched after a MULTI run's residue")
+    def test_each_family_runs_its_pairs_back_to_back_abba(self):
+        _, seen = self.run_paired(pairs=4)
+        fan = [arm for fam, arm in seen if fam == "inproc-fan"]
+        self.assertEqual(fan, ["base", "cand", "cand", "base"] * 2)
+        first = [fam for fam, _ in seen]
+        self.assertEqual(first[:8], ["inproc-fan"] * 8, "one family's pairs are contiguous")
+        last_single = max(i for i, (f, _) in enumerate(seen) if f != "inproc-mt")
+        first_multi = min(i for i, (f, _) in enumerate(seen) if f == "inproc-mt")
+        self.assertLess(last_single, first_multi)
 
-    def test_a_baseline_without_sets_keeps_the_old_single_invocation(self):
-        seen = self.run_paired(sets=False)
-        self.assertTrue(seen)
-        for a, psi in seen:
-            self.assertEqual((a[1:], psi), ([], True))
+    def test_a_contended_pair_is_dropped_for_its_family_only(self):
+        s, _ = self.run_paired({("inproc-fan", 1)}, pairs=4)
+        self.assertEqual(len(s["cand"]["inproc/64/1/1"]), 3)
+        self.assertEqual(len(s["base"]["inproc/64/1/1"]), 3)
+        self.assertEqual(s["dropped"], {"inproc-fan": 1})
+        self.assertEqual(s["inconclusive"], [])
+
+    def test_a_gated_family_that_lost_too_many_pairs_is_inconclusive(self):
+        lost = {("inproc-fan", i) for i in range(pg.MAX_DROPPED_PAIRS + 1)}
+        s, _ = self.run_paired(lost, pairs=8)
+        self.assertEqual(len(s["inconclusive"]), 1)
+        self.assertIn("inproc-fan", s["inconclusive"][0])
+
+    def test_an_ungated_family_never_makes_the_run_inconclusive(self):
+        s, _ = self.run_paired({("fold", i) for i in range(8)}, pairs=8)
+        self.assertEqual(s["dropped"]["fold"], 8)
+        self.assertEqual(s["inconclusive"], [])
+
+    def test_the_verdict_names_the_inconclusive_family(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = pg.render_verdict([], [], "blocking", None, None, [],
+                                   ["inproc-fan: only 5/8 pairs ran clean"])
+        self.assertEqual(rc, pg.EXIT_INCONCLUSIVE)
+        self.assertIn("? inproc-fan: only 5/8", out.getvalue())
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(pg.render_verdict([], [], "advisory", None, None, [],
+                                               ["inproc-fan: x"]), 0)
+
+    def test_single_cpu_defaults_to_the_first_bench_cpu(self):
+        with unittest.mock.patch.dict(pg.bc.os.environ, {"BENCH_CPU_SINGLE": ""}):
+            self.assertEqual(pg.bc.single_cpu_from_env((3, 4, 5, 6)), (3,))
+            self.assertIsNone(pg.bc.single_cpu_from_env(None))
+        with unittest.mock.patch.dict(pg.bc.os.environ, {"BENCH_CPU_SINGLE": "5"}):
+            self.assertEqual(pg.bc.single_cpu_from_env((3, 4, 5, 6)), (5,))
+
+    def test_best_of_runs_every_single_step_before_any_multi_step(self):
+        seen: list[str] = []
+
+        def fake(argv, timeout, score_pressure=True, cpus=None):
+            seen.append(argv[2] if len(argv) > 2 else pathlib.Path(argv[0]).name)
+            return _measurement(argv)
+        with tempfile.TemporaryDirectory() as d, \
+                unittest.mock.patch.object(pg, "list_families", lambda p: self.FAMILIES), \
+                unittest.mock.patch.object(pg, "timed_run", fake), \
+                contextlib.redirect_stdout(io.StringIO()):
+            pg.best_of(self.bins(pathlib.Path(d), "c"), 3)
+        self.assertEqual(seen[:6], ["inproc-fan"] * 3 + ["fold"] * 3)
+        self.assertEqual(seen[-3:], ["inproc-mt"] * 3)
 
     def verdict_for(self, cond: "pg.bc.Conditions") -> tuple[int, str]:
         led = pg.bc.Ledger()
@@ -807,7 +924,7 @@ class GateTimesBothFamilySets(unittest.TestCase):
         return pg.bc.classify(before, after, own_cpu_s=own_cpu_s, nivcsw=0, cpus=[3, 4, 5, 6],
                               pinned=True, clk_tck=100, score_pressure=not multi)
 
-    def test_a_foreign_intruder_is_inconclusive_on_either_set(self):
+    def test_a_foreign_intruder_is_contended_on_either_set(self):
         # 12% of the window was someone else's CPU time; our own cgroup psi reads 0.
         for multi in (False, True):
             with self.subTest(multi=multi):
@@ -845,9 +962,8 @@ class MissingGatedKeysFail(unittest.TestCase):
         fake = {"cand": {k: [self.sample() for _ in range(4)] for k in cand_keys},
                 "base": {k: [self.sample() for _ in range(4)] for k in base_keys}}
         out = io.StringIO()
-        with unittest.mock.patch.object(pg, "paired_samples", lambda *a: fake), \
-                contextlib.redirect_stdout(out):
-            fails = pg.gate_paired({}, {}, 4)
+        with contextlib.redirect_stdout(out):
+            fails, _ = pg.gate_paired({}, {}, 4, {}, fake)
         return fails, out.getvalue()
 
     def keys(self):
@@ -912,7 +1028,8 @@ class MissingGatedKeysFail(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             p = pathlib.Path(d) / "bench_forward_demux"
             p.write_text("")
-            with unittest.mock.patch.object(pg, "timed", lambda *a, **k: transcript):
+            with unittest.mock.patch.object(pg, "timed_run",
+                                            lambda a, *_x, **_k: _measurement(a, transcript)):
                 rows = pg.run_bench_once(p)
         for (b, m, s, f, e) in pg.POINTS:
             if b == "demux" and m != "fwd-demux-value":  # payload-keyed ladder row (#1806)
@@ -959,7 +1076,8 @@ class StoreLatencyRowsAreGated(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             p = pathlib.Path(d) / "bench_store_sweep"
             p.write_text("")
-            with unittest.mock.patch.object(pg, "timed", lambda *a, **k: self.TRANSCRIPT):
+            with unittest.mock.patch.object(pg, "timed_run",
+                                            lambda a, *_x, **_k: _measurement(a, self.TRANSCRIPT)):
                 return pg.run_bench_once(p)
 
     def test_rows_parse_to_point_keys_with_p50_only(self):
@@ -1008,9 +1126,8 @@ class StoreLatencyRowsAreGated(unittest.TestCase):
         sample = {"p50_ns": 300.0, "mean_ns": 0.0, "deliv_s": 0.0}
         fake = {"cand": {x: [dict(sample) for _ in range(4)] for x in keys if x != k},
                 "base": {x: [dict(sample) for _ in range(4)] for x in keys}}
-        with unittest.mock.patch.object(pg, "paired_samples", lambda *a: fake), \
-                contextlib.redirect_stdout(io.StringIO()):
-            fails = pg.gate_paired({}, {}, 4)
+        with contextlib.redirect_stdout(io.StringIO()):
+            fails, _ = pg.gate_paired({}, {}, 4, {}, fake)
         self.assertEqual([f.split()[0] for f in fails], [k])
 
     def test_a_ten_ns_regression_at_76_ns_is_not_tick_guarded(self):
@@ -1026,9 +1143,8 @@ class StoreLatencyRowsAreGated(unittest.TestCase):
 
         fake = {"cand": {x: arm(88.5 if x == k else 300.0) for x in keys},
                 "base": {x: arm(76.0 if x == k else 300.0) for x in keys}}
-        with unittest.mock.patch.object(pg, "paired_samples", lambda *a: fake), \
-                contextlib.redirect_stdout(io.StringIO()):
-            fails = pg.gate_paired({}, {}, 4)
+        with contextlib.redirect_stdout(io.StringIO()):
+            fails, _ = pg.gate_paired({}, {}, 4, {}, fake)
         self.assertEqual(len(fails), 1, fails)
         self.assertTrue(fails[0].startswith(f"{k} p50 pullback"), fails)
 
@@ -1330,6 +1446,73 @@ RESULT streamlock w4 sections_x1000=1000 delivered_x1000=1000 n=8000
         for point in pg.RAM_POINTS:
             self.assertTrue(f"`{point}`" in text, f"{point} is gated but not named in {doc}")
 
+
+
+class AaNullBankAndReplay(unittest.TestCase):
+    """@brief `aa_null.py` (#1807): the spread it banks, and the replay that reports the
+    false-fail rate and the injected-10% detection rate the acceptance criteria name."""
+
+    @staticmethod
+    def raw(offsets: list[float], noise: float, rounds: int = 12, gone=()) -> dict:
+        """@brief A synthetic measurement: one row per build at 100 ns x (1 + offset), with
+        a deterministic +-noise wobble per round; (build, round) in @p gone is dropped."""
+        import random as _r
+        rng = _r.Random(7)
+        per_build = []
+        for b, off in enumerate(offsets):
+            col = []
+            for r in range(rounds):
+                v = 100.0 * (1 + off) * (1 + rng.uniform(-noise, noise))
+                col.append(None if (b, r) in gone else
+                           {"p50_ns": v, "mean_ns": v, "deliv_s": 1e9 / v})
+            per_build.append(col)
+        return {"builds": [f"b{i}" for i in range(len(offsets))], "rounds": rounds,
+                "samples": {"inproc/64/1/1": per_build}}
+
+    def test_a_tight_row_banks_a_tight_spread(self):
+        import aa_null
+        out = aa_null.bank(self.raw([0, 0, 0], 0.005))
+        s = out["rows"]["inproc/64/1/1"]["p50_ns"]
+        self.assertLess(s, 0.01)
+        self.assertAlmostEqual(pg.leg_factor("inproc/64/1/1", "p50_ns", out["rows"])[0],
+                               1 + pg.NULL_FLOOR)
+
+    def test_a_layout_offset_between_builds_widens_the_threshold(self):
+        """A +8% build is the #1761/#1767 shape: the null must price it, not ignore it."""
+        import aa_null
+        rows = aa_null.bank(self.raw([0, 0.08, -0.02], 0.005))["rows"]
+        self.assertGreater(pg.leg_factor("inproc/64/1/1", "p50_ns", rows)[0], 1.08)
+
+    def test_replay_counts_no_false_fail_and_catches_ten_percent(self):
+        import aa_null
+        ev = aa_null.evaluate(self.raw([0, 0, 0], 0.01),
+                              aa_null.bank(self.raw([0, 0, 0], 0.01, rounds=10))["rows"])
+        self.assertGreater(ev["sessions"], 0)
+        self.assertEqual(ev["false_fail_sessions"], 0)
+        caught, total = ev["detect"]["inproc/64/1/1"]
+        self.assertEqual(caught, total)
+
+    def test_a_dropped_round_breaks_only_the_windows_through_it(self):
+        import aa_null
+        ses = aa_null.session_ratios(self.raw([0, 0], 0.0, rounds=10, gone={(0, 9)})
+                                     ["samples"]["inproc/64/1/1"], "p50_ns", 8)
+        self.assertEqual(len(ses), 2 * 2)  # windows 0-7 and 1-8, both directions
+
+
+class HistoryKeepsOneRunnersTuple(unittest.TestCase):
+    """@brief The history emitter records one runner's whole tuple per point (#1807)."""
+
+    def test_the_best_p50_runner_brings_its_own_p99_and_throughput(self):
+        import perf_emit_benchmark as pe
+        a = {"p50_ns": 100.0, "p99_ns": 900.0, "deliv_s": 9.0e6}
+        b = {"p50_ns": 105.0, "p99_ns": 300.0, "deliv_s": 9.9e6}
+        self.assertEqual(pe.best_tuple([b, a]), a)  # never p99 300 beside p50 100
+
+    def test_a_bulk_only_row_picks_by_throughput(self):
+        import perf_emit_benchmark as pe
+        a = {"p50_ns": 0.0, "p99_ns": 0.0, "deliv_s": 4.0e7}
+        b = {"p50_ns": 0.0, "p99_ns": 0.0, "deliv_s": 4.4e7}
+        self.assertEqual(pe.best_tuple([a, b]), b)
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

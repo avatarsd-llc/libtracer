@@ -941,7 +941,7 @@ int main(int argc, char** argv) {
     const std::size_t t_only = argc > 3 ? std::strtoul(argv[3], nullptr, 10) : 0;
     const auto want = [&](topo_t t) { return topo_only.empty() || topo_only == topo_name(t); };
     const auto want_t = [&](std::size_t t) { return t_only == 0 || t_only == t; };
-    const std::size_t hw = std::max<std::size_t>(1, std::thread::hardware_concurrency());
+    const std::size_t hw = bench::usable_cpus();  // the affinity mask, not the host (#1807)
 
     if (only.empty() || only == "slot") {
         for (shape_t shape : {shape_t::READ, shape_t::PUBSUB, shape_t::WRITE}) {

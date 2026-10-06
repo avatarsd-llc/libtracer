@@ -9,13 +9,12 @@ Compares against a baseline BINARY built on the same runner (paired mode, below)
 — only where no such binary exists — against a recorded bench/perf_baseline.json.
 
 PAIRED mode (`--baseline-bench`, what CI runs) is the primary shape. The two
-binaries are executed INTERLEAVED — A B / B A / A B / B A — and compared as a
-population, never as two sequential blocks. See `paired_samples` and
-`paired_verdict` for the rules; the short version is that a fail needs the
-effect to be large (median), separated (the two arms' ranges are disjoint) and
-reproducible (a strict majority of the interleaved pairs breach the threshold
-on their own). Any sign flip inside the ranges reads as indistinguishable and
-can never fail the gate.
+binaries are executed INTERLEAVED, family by family — A B / B A / A B / … — and
+compared as a population, never as two sequential blocks. See `paired_samples` and
+`paired_verdict` for the rules; the short version (#1807) is that a fail needs the
+median per-pair ratio past the row's threshold, taken from the banked A/A null
+(`aa_null.json`: 3x the row's robust spread between builds of one source, floor 3%,
+capped at the flat thresholds), AND a bootstrap confidence interval on that median that excludes 1.
 
 Within a run, repeated RESULT rows are medianed (single-iteration jitter), and
 comparisons are only ever same-runner, so absolute machine speed cancels and the
@@ -30,7 +29,7 @@ time-correlated depression of the runner that outlasts every run of whichever ar
 happens to hold the machine at the time (#763, #464).
 
   ./perf_gate.py --baseline-bench PATH   # PAIRED: interleave PATH (base) vs the candidate
-  ./perf_gate.py --pairs N               # interleaved A/B pairs (default 4)
+  ./perf_gate.py --pairs N               # interleaved ABBA pairs per family (default 8)
   ./perf_gate.py --tier blocking         # a breached ratchet stops the job (see TIERS)
   ./perf_gate.py --tier advisory         # the same comparison, reported, never fails
   ./perf_gate.py --sample-note "..."     # host_guard's per-sample verdict (see TIERS)
@@ -45,9 +44,10 @@ The comparison this file makes is the same on every machine; what differs is whe
 breached ratchet is allowed to STOP the job. That is the caller's TIER, declared on the
 command line rather than described in a workflow comment — see `TIERS` below.
 
-Exit 0 = PERF: PASS, 1 = PERF: FAIL (p50 up >15%, mean up >12%, deliveries/s down
->12%, or per-vertex live bytes up >2%, vs the same-runner baseline, or — with no
-baseline — past the absolute floors). The memory points come from bench_forward_heap
+Exit 0 = PERF: PASS, 1 = PERF: FAIL (a leg past its A/A-null threshold — or, for a row
+the null lacks, p50 up >15%, mean up >12%, deliveries/s down >12% — or per-vertex live
+bytes up >2%, vs the same-runner baseline, or — with no baseline — past the absolute
+floors), 3 = PERF: INCONCLUSIVE on the blocking tier. The memory points come from bench_forward_heap
 (counting allocator, deterministic) and are NOT timed, so they need no interleaving:
 they are probed once per binary and ratchet exactly. Supplying that binary for one arm
 and not the other is a wiring error and FAILS; supplying it for neither prints an
@@ -59,8 +59,10 @@ the thresholds below. Stdlib only; no zenoh needed.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import pathlib
+import random
 import re
 import statistics
 import subprocess
@@ -72,7 +74,7 @@ BENCH = HERE / "build" / "bench_libtracer"
 BENCH_FWD = HERE / "build" / "bench_forward_heap"
 # The gated points no longer all come from one binary (#1173). Each POINTS entry names
 # the binary that produces its RESULT rows. All but one emit bench_common's shared 12-column
-# format, which `run_bench_once` reads unchanged; `bench_store_sweep`'s own row is folded
+# format, which `parse_rows` reads unchanged; `bench_store_sweep`'s own row is folded
 # into the same shape there (#1869).
 BENCH_BY_KEY = {
     "main": "bench_libtracer",
@@ -82,7 +84,7 @@ BENCH_BY_KEY = {
 }
 # `bench_store_sweep` (#1869) does not speak the 12-column `RESULT` format: its latency mode
 # prints `RESULT_STORE_LAT round tag arm leg p50ps p99ps meanps n batch`, one row per
-# (store profile, workload leg). `run_bench_once` folds each into a POINTS-shaped row keyed
+# (store profile, workload leg). `parse_rows` folds each into a POINTS-shaped row keyed
 # `store-lat-<profile>-<leg>/<value bytes>/1/1`. The workload writes one fixed value size,
 # `store_sweep_node.hpp`'s `kValueBytes`, which the row does not print; this is that number,
 # and `test_perf_gate.py` reads the header to keep the two equal.
@@ -117,6 +119,9 @@ LEDGER = bc.Ledger()
 # resolution and the measured cost of one timed sample, printed under the verdict.
 CLOCK_FLOORS: list[tuple[float, float]] = []
 CPUS = bc.cpus_from_env()
+# The ONE logical CPU a single-threaded step is pinned to (#1807): `BENCH_CPU_SINGLE`, or the
+# first CPU of `BENCH_CPU`; None when unpinned. See "HOW THE GATE TIMES THE FAMILIES".
+CPU_SINGLE = bc.single_cpu_from_env(CPUS)
 # Every timed execution that exited non-zero (#1847). A crashed or aborted bench emits a
 # partial transcript, and its missing rows used to read as "absent — not gated": a gate
 # that measured nothing printed PASS. A non-zero exit is not a verdict on the code either
@@ -125,16 +130,24 @@ BENCH_ERRORS: list[str] = []
 EXIT_INCONCLUSIVE = 3
 
 
-def timed(argv: list[str], timeout: float, score_pressure: bool = True) -> str:
-    """@brief Run one timed bench execution under the classifier; its kept stdout.
-    @p score_pressure False judges it on foreign time only (a MULTI family set, #1803)."""
-    m = LEDGER.add(bc.measure(argv, cpus=CPUS, timeout=timeout, log=print,
-                              score_pressure=score_pressure))
+def timed_run(argv: list[str], timeout: float, score_pressure: bool = True,
+              cpus: tuple[int, ...] | None = None) -> bc.Measurement:
+    """@brief Run one timed bench execution under the classifier; its kept attempt.
+    @p score_pressure False judges it on foreign time only (a MULTI family, #1803).
+    @p cpus is the pin; None = `CPUS` (`BENCH_CPU`, or unpinned when that is unset)."""
+    m = LEDGER.add(bc.measure(argv, cpus=CPUS if cpus is None else cpus, timeout=timeout,
+                              log=print, score_pressure=score_pressure))
     if m.returncode != 0:
         name = pathlib.Path(argv[0]).name + "".join(f" {a}" for a in argv[1:])
         BENCH_ERRORS.append(f"{name} exited {m.returncode}")
         print(f"perf_gate: {name} exited {m.returncode} — the verdict will be INCONCLUSIVE")
-    return m.stdout
+    return m
+
+
+def timed(argv: list[str], timeout: float, score_pressure: bool = True,
+          cpus: tuple[int, ...] | None = None) -> str:
+    """@brief @ref timed_run's kept stdout."""
+    return timed_run(argv, timeout, score_pressure, cpus).stdout
 
 # --- VERDICT TIERS (#1251): who a breached ratchet is allowed to stop --------------
 # The two-tier policy used to live in a `perf.yml` comment, which meant the gate could
@@ -305,8 +318,8 @@ POINTS = [
     ("main", "eptype-stream", 16384, 1, 1),
     ("compact", "compact-forward", 16384, 1, 1),
     ("demux", "fwd-demux-value", 16384, 1, 1),
-    # MULTI-threaded rows (#1803): timed in their own `--family-set multi` invocation and
-    # judged on foreign CPU time only (see GATE_FAMILY_SET_MULTI). T=4 because the gate's
+    # MULTI-threaded rows (#1803): each family timed on every bench CPU and judged on
+    # foreign CPU time only (see HOW THE GATE TIMES THE FAMILIES). T=4 because the gate's
     # bench CPU set is four CPUs; a host with fewer reports them absent, not failed.
     ("main", "inproc-mt4", 64, 1, 4),
     ("main", "acl-inherit-d4-mt4", 64, 1, 4),
@@ -632,7 +645,7 @@ def lkv_line(size: int, cand: float, base: float | None) -> str:
 
 def lkv_ratio_report(bench: pathlib.Path) -> None:
     """@brief The legacy form: the candidate alone, best of LKV_ROUNDS. Fails nothing."""
-    cand = lkv_best([lkv_parse(timed([str(bench), "lkv"], timeout=120))
+    cand = lkv_best([lkv_parse(timed([str(bench), "lkv"], timeout=120, cpus=CPU_SINGLE))
                      for _ in range(LKV_ROUNDS)])
     for size in sorted(cand):
         print(lkv_line(size, cand[size], None))
@@ -648,74 +661,102 @@ def lkv_ratio_report_paired(bench: pathlib.Path, base_bench: pathlib.Path,
         if i % 2:
             order.reverse()
         for arm, path in order:
-            runs[arm].append(lkv_parse(timed([str(path), "lkv"], timeout=120)))
+            runs[arm].append(lkv_parse(timed([str(path), "lkv"], timeout=120, cpus=CPU_SINGLE)))
     cand, base = lkv_best(runs["cand"]), lkv_best(runs["base"])
     for size in sorted(cand):
         print(lkv_line(size, cand[size], base.get(size)))
 
 
-# --- HOW THE GATE TIMES THE FAMILIES (#1803) ------------------------------------------
+# --- HOW THE GATE TIMES THE FAMILIES (#1803, #1807) -----------------------------------
 # `bench_libtracer`'s default sweep is a list of families, each tagged SINGLE- or MULTI-
-# threaded (`bench_libtracer --families`). A MULTI family (inproc-mt*, acl-…-mt4, the
-# *alloc-mt* rows) runs T workers on the pinned CPUs while its main thread spins waiting for
-# them, so the bench's OWN threads queue behind each other and its own cgroup's CPU
-# pressure climbs. The condition check scored that pressure and, sampled at the next
-# launch, the residue too: about one gate in three came back INCONCLUSIVE with 0% foreign
-# load and own-cgroup psi 84 -> 23 -> 5.7 across its re-runs.
+# threaded (`bench_libtracer --families`), and each one can be run on its own as
+# `bench_libtracer --family NAME`. The gate times FAMILY BY FAMILY (#1807), not sweep by sweep:
 #
-# So the gate times the two sets as SEPARATE invocations, and both stay compared A/B:
-#   - `--family-set single`, judged on foreign time AND own-cgroup pressure, as before;
-#   - `--family-set multi`, judged on foreign time ONLY. Its own threads' pressure is
-#     recorded, not scored. A real intruder still shows as foreign CPU time on the bench
-#     CPUs, so it still makes the verdict INCONCLUSIVE.
-# Every SINGLE invocation runs before every MULTI one (`paired_samples` takes all pairs and
-# `best_of` all runs of the single set first, and the lkv ratio report runs
-# ahead of both), so no pressure-scored launch follows a MULTI run's residue.
+#   - Each family is one step. Its pairs run back to back, A B / B A / A B / ... (ABBA), so
+#     the two arms of a pair are seconds apart and share whatever the machine was doing.
+#   - A SINGLE family runs pinned to ONE logical CPU (`CPU_SINGLE`: `BENCH_CPU_SINGLE`, or
+#     the first CPU of `BENCH_CPU`), judged on that CPU's foreign time and on own-cgroup
+#     pressure. The methodology's own rule is one CPU per single-threaded measurement; the
+#     old whole-sweep invocation needed several CPUs only because MULTI rows rode along.
+#   - A MULTI family runs on every bench CPU (`BENCH_CPU`), judged on foreign time only: its
+#     own threads raise its own cgroup's pressure (#1803). It sizes T from its affinity mask
+#     (`bench::usable_cpus`), so T never exceeds the CPUs it was given. MULTI steps run after
+#     every SINGLE step, so no pressure-scored launch inherits their residue.
+#   - The sibling binaries (`BENCH_BY_KEY`, other than `main`) are one SINGLE step each.
 #
-# Both arms must speak it or neither uses it: a baseline built before family sets refuses
-# `--families` (exit 2), and then both arms sweep everything in one invocation, pressure
-# scored, exactly as before this change.
-GATE_FAMILY_SET = ("--family-set", "single")
-GATE_FAMILY_SET_MULTI = ("--family-set", "multi")
+# The condition check therefore judges each family's own window. A pair whose invocation
+# stayed contended through its re-runs is DROPPED for that family (both arms, so the pairing
+# holds); the family still gates on its other pairs. Only a family that emits a gated row and
+# lost more than `MAX_DROPPED_PAIRS` pairs makes the verdict INCONCLUSIVE — one contended
+# second no longer voids a ten-minute run.
+#
+# Both arms must speak `--families` or neither is split: a baseline built before family
+# sets refuses it (exit 2), and then each arm sweeps everything in one invocation on every
+# bench CPU, pressure scored, as before #1803. A family only one arm lists runs on that arm
+# alone; its rows are then absent from the other ("not gated" if the baseline predates it).
+MAX_DROPPED_PAIRS = 2
 
 
-def has_family_sets(bench: pathlib.Path) -> bool:
-    """@brief Whether @p bench understands `--family-set` (its `--families` probe exits 0)."""
+@dataclasses.dataclass(frozen=True)
+class Step:
+    """@brief One timed unit of the gate: a family (or a sibling binary) run once per arm."""
+
+    label: str                          # what the log and an INCONCLUSIVE line name
+    key: str                            # BENCH_BY_KEY key of the binary it runs
+    args: dict[int, tuple[str, ...]]    # arm index -> extra argv; an arm absent here skips it
+    cpus: tuple[int, ...] | None        # the pin (None: unpinned)
+    score_pressure: bool                # False for a MULTI family (#1803)
+
+
+def list_families(bench: pathlib.Path) -> dict[str, str] | None:
+    """@brief `bench --families` as {name: "single"|"multi"}, or None when @p bench
+    predates family selection (it refuses the flag) or cannot be run."""
     try:
         p = subprocess.run([str(bench), "--families"], capture_output=True, text=True,
                            timeout=30)
     except (OSError, subprocess.TimeoutExpired):
-        return False
-    return p.returncode == 0 and "\tsingle" in p.stdout
+        return None
+    out = {}
+    for line in p.stdout.splitlines() if p.returncode == 0 else []:
+        name, _, kind = line.partition("\t")
+        if kind in ("single", "multi"):
+            out[name] = kind
+    return out or None
 
 
-def gate_sweep_args(*binary_sets: dict[str, pathlib.Path],
-                    probe: Callable[[pathlib.Path], bool] | None = None) -> tuple[str, ...]:
-    """@brief The extra argv the gate passes to every `main` binary for its FIRST pass: the
-    SINGLE family set when every arm's `bench_libtracer` supports family sets (a second,
-    foreign-only pass then times the MULTI set), otherwise nothing (one whole sweep).
-    @p probe defaults to @ref has_family_sets, looked up at call time so tests can patch it."""
-    probe = probe or has_family_sets
-    mains = [bins["main"] for bins in binary_sets if bins and "main" in bins]
-    if mains and all(probe(m) for m in mains):
-        return GATE_FAMILY_SET
-    return ()
+def gate_plan(*arms: dict[str, pathlib.Path] | None,
+              probe: Callable[[pathlib.Path], dict[str, str] | None] | None = None) -> list[Step]:
+    """@brief The gate's steps for @p arms (candidate first): SINGLE families, then the
+    sibling binaries, then MULTI families. @p probe defaults to @ref list_families, looked
+    up at call time so tests can patch it."""
+    probe = probe or list_families
+    present = [(i, a) for i, a in enumerate(arms) if a]
+    listed = {i: probe(a["main"]) for i, a in present if "main" in a}
+    single: list[Step] = []
+    multi: list[Step] = []
+    if listed and all(v is not None for v in listed.values()):
+        names: dict[str, str] = {}
+        for i in sorted(listed):
+            for name, kind in listed[i].items():
+                names.setdefault(name, kind)
+        for name, kind in names.items():
+            args = {i: ("--family", name) for i in listed if name in listed[i]}
+            if kind == "multi":
+                multi.append(Step(name, "main", args, CPUS, False))
+            else:
+                single.append(Step(name, "main", args, CPU_SINGLE, True))
+    elif listed:
+        single.append(Step("bench_libtracer (whole sweep)", "main", {i: () for i in listed},
+                           CPUS, True))
+    for key, name in BENCH_BY_KEY.items():
+        have = {i: () for i, a in present if key != "main" and key in a}
+        if have:
+            single.append(Step(name, key, have, CPU_SINGLE, True))
+    return single + multi
 
 
-def _passes(extra: tuple[str, ...]) -> list[tuple[tuple[str, ...], bool, bool]]:
-    """@brief The gate's timing passes: (main argv, run the sibling binaries?, score psi?)."""
-    if not extra:
-        return [((), True, True)]
-    return [(extra, True, True), (GATE_FAMILY_SET_MULTI, False, False)]
-
-
-def run_bench_once(bench: pathlib.Path, extra: tuple[str, ...] = (),
-                   score_pressure: bool = True) -> list[tuple]:
-    if not bench.exists():
-        print(f"perf_gate: {bench} not built — run: cmake -S {HERE} -B {HERE}/build "
-              f"-DCMAKE_BUILD_TYPE=Release && cmake --build {HERE}/build -j", file=sys.stderr)
-        sys.exit(2)
-    out = timed([str(bench), *extra], timeout=180, score_pressure=score_pressure)
+def parse_rows(out: str) -> list[tuple]:
+    """@brief The 12-column RESULT rows of one transcript; records its CLOCK line (#1804)."""
     rows = []
     for line in out.splitlines():
         f = line.split("\t")
@@ -734,6 +775,23 @@ def run_bench_once(bench: pathlib.Path, extra: tuple[str, ...] = (),
     return rows
 
 
+def run_step(bench: pathlib.Path, step: Step, arm: int) -> tuple[list[tuple], bool]:
+    """@brief Run @p step for one arm: its rows, and whether the kept attempt ran clean."""
+    if not bench.exists():
+        print(f"perf_gate: {bench} not built — run: cmake -S {HERE} -B {HERE}/build "
+              f"-DCMAKE_BUILD_TYPE=Release && cmake --build {HERE}/build -j", file=sys.stderr)
+        sys.exit(2)
+    m = timed_run([str(bench), *step.args[arm]], timeout=180,
+                  score_pressure=step.score_pressure, cpus=step.cpus)
+    return parse_rows(m.stdout), m.clean
+
+
+def run_bench_once(bench: pathlib.Path, extra: tuple[str, ...] = (),
+                   score_pressure: bool = True) -> list[tuple]:
+    """@brief One whole invocation of @p bench on every bench CPU; its rows."""
+    return run_step(bench, Step(bench.name, "", {0: extra}, CPUS, score_pressure), 0)[0]
+
+
 def metric(rows, mode, size, fan, ep):
     """Median across one run's repeated RESULT rows for the point."""
     p50 = [r[5] for r in rows if (r[0], r[1], r[2], r[3]) == (mode, size, fan, ep)]
@@ -745,33 +803,32 @@ def metric(rows, mode, size, fan, ep):
             "mean_ns": statistics.median(mean)}
 
 
+def step_metrics(key: str, rows: list[tuple]) -> dict[str, dict]:
+    """@brief Every gated key one step's rows carry: the POINTS its binary declares, plus
+    (for `main`) every allocator-cliff row (#1806) — keyed `mode/size/fan/ep`."""
+    out = {}
+    for (b, m, s, f, e) in POINTS:
+        if b == key:
+            v = metric(rows, m, s, f, e)
+            if v:
+                out[f"{m}/{s}/{f}/{e}"] = v
+    if key == "main":
+        out.update(cliff_rows(rows))
+    return out
+
+
 def best_of(binaries: dict[str, pathlib.Path], runs: int) -> dict[str, dict]:
     """Best run per point: min p50, max deliveries/s across `runs` executions.
 
-    Each BINARY is executed once per run and its rows are matched only against the points
-    that declare it, so adding a point from a new binary costs one extra process per run
-    rather than one per point.
-
-    The pass loop is outermost, as in @ref paired_samples: every run of the pressure-scored
-    SINGLE pass launches before any MULTI run, so none starts into a MULTI run's residue.
-    The fold is a per-point min/max, so the order does not change the result.
+    The legacy path (no baseline binary) times the same steps as the paired gate, each
+    `runs` times; the fold is a per-point min/max, so the order does not change the result.
+    Every SINGLE step runs before any MULTI one, so none starts into a MULTI run's residue.
     """
     cur: dict[str, dict] = {}
-    for args, siblings, psi in _passes(gate_sweep_args(binaries)):
+    for step in gate_plan(binaries):
         for _ in range(max(1, runs)):
-            rows_by_bin: dict[str, list] = {}
-            for b, path in binaries.items():
-                if b == "main":
-                    rows_by_bin[b] = run_bench_once(path, args, psi)
-                elif siblings:
-                    rows_by_bin[b] = run_bench_once(path)
-            for (b, m, s, f, e) in POINTS:
-                if b not in rows_by_bin:
-                    continue
-                v = metric(rows_by_bin[b], m, s, f, e)
-                if not v:
-                    continue
-                k = f"{m}/{s}/{f}/{e}"
+            rows, _clean = run_step(binaries[step.key], step, 0)
+            for k, v in step_metrics(step.key, rows).items():
                 if k not in cur:
                     cur[k] = v
                 else:
@@ -781,72 +838,125 @@ def best_of(binaries: dict[str, pathlib.Path], runs: int) -> dict[str, dict]:
     return cur
 
 
-# --- PAIRED (interleaved) comparison — the fix for #763 --------------------------
-# Defect: baseline and candidate were measured as two SEQUENTIAL BLOCKS on one runner
-# (record main's three runs, then time the PR's three runs). Any drift in the machine
-# between the blocks lands entirely on one side of the comparison, and best-of-N does
-# not help: it rejects a bad SAMPLE, not a bad WINDOW. Measured on #708 and again on
-# #758 — nine same-binary A/B pairs where the low sample landed on run 3 for BOTH
-# binaries, a machine depression of 0.64x median that CI reported as a 0.67x "candidate
-# regression" against an untouched baseline arm that itself swung 2.8x across runners.
+# --- PAIRED (interleaved) comparison — #763, re-founded on a measured null by #1807 ------
+# #763's defect: baseline and candidate measured as two SEQUENTIAL BLOCKS, so any drift
+# between the blocks landed on one arm. Its fix, kept here: run the two binaries
+# INTERLEAVED, alternating which one starts each pair, so a drift window is shared by both
+# arms; then decide on the population of pairs rather than on one order statistic.
 #
-# Fix: run the two binaries INTERLEAVED, alternating which one starts each pair, so a
-# drift window is shared by both arms instead of being donated to one. Then decide on
-# the resulting population rather than on one order statistic. Three conditions must
-# ALL hold to fail, and each answers a different question the old gate could not ask:
+# What #1807 changed is the decision on that population. The old rule failed a point when
+# the median breached a FLAT threshold (+15% p50 / +12% mean / -12% deliv/s), the two arms'
+# [min..max] ranges were disjoint, and a majority of 4 pairs breached. Three PRs that could
+# not touch the rows they failed (#1761, #1767, #1772), and a tooling-only PR with identical
+# sources (#1855), failed at 15-22% with clean conditions: within one session, two builds of
+# the same source differ by a code-layout offset, and the disjoint-range rule reads that
+# offset as "real". A flat 15% also could not catch a real 10% regression by construction.
 #
-#   effect         — median(cand) vs median(base) breaches the threshold  (is it big?)
-#   separation     — the two arms' [min..max] ranges are DISJOINT         (is it real?)
-#   reproducibility— a strict majority of the interleaved pairs breach    (does it recur?)
+# The rule now has two parts, and each answers one of those defects:
 #
-# The separation rule is the "never fail on a sign flip inside the ranges" clause: if the
-# candidate's best sample is no worse than the baseline's worst, the two populations are
-# not distinguishable by this instrument and the honest verdict is PASS, whatever the
-# medians say. It is also what supplies the run-drift readout #763 asked for: each arm's
-# own [min..max] spread IS the control leg. No extra bench point is needed — the baseline
-# arm is by construction invariant under the change being gated, so its spread across the
-# interleaved pairs is exactly the "did this run drift?" number.
+#   threshold — PER ROW AND LEG, from the banked A/A null (`aa_null.json`, written by
+#               `bench/aa_null.py bank`): 3x the robust spread of the gate's own statistic
+#               between DIFFERENT builds of the same source, floor 3%, CAPPED at the flat
+#               thresholds above (ruling on #1874: a null may tighten a row, never loosen
+#               it). A stable row gets as little as 3%, so a real 10% regression fails it; a
+#               layout-sensitive row is held at the flat threshold ("cap"); a key the null
+#               does not carry falls back to the flat thresholds too ("flat").
+#   evidence  — the per-pair ratio cand/base, its median, and a bootstrap confidence
+#               interval on that median (`BOOT_N` resamples of the pairs, `BOOT_CONF`). On a
+#               leg the null tightens it replaces the disjoint-range rule and the pair-
+#               majority vote: a FAIL needs the median past the threshold AND the interval
+#               to exclude 1.0. A leg at the cap (or with no null) keeps main's WHOLE verdict
+#               — flat threshold, disjoint ranges, majority of pairs — so no row is looser or
+#               more false-fail-prone than before (ruling on #1874; `leg_verdict`).
 #
-# Cost. The old shape was 3 baseline + 3 candidate = 6 bench executions per gate. The new
-# one is PAIRS x 2 = 8 at the default, i.e. ~1.33x wall-clock — inside the ~2x budget.
-PAIRS_DEFAULT = 4
+# Cost. `PAIRS_DEFAULT` pairs of every family, each arm once per pair. The sweep's families
+# total ~15 s per arm and the sibling binaries ~30 s, so 8 pairs are ~12 min of timed work.
+PAIRS_DEFAULT = 8
+NULL_FILE = HERE / "aa_null.json"
+NULL_K = 3.0        # threshold = NULL_K x the row's robust spread ...
+NULL_FLOOR = 0.03   # ... and never below 3%
+# The allocator-cliff rows' multiplier. Re-banked on the bench CPUs, their spread is
+# under-estimated by a 15-round fit: at 3x, three of them false-failed a held-out A/A replay
+# that no other row family did. 5x is the smallest multiplier that cleared every one of them
+# there; the floor stays at 3% (raising it to 5% cleared fewer).
+CLIFF_NULL_K = 5.0
+BOOT_N = 2000
+BOOT_CONF = 0.95
+LEGS = ("p50_ns", "mean_ns", "deliv_s")
+_FLAT = {"p50_ns": LAT_REGRESS, "mean_ns": MEAN_REGRESS, "deliv_s": TPUT_REGRESS}
+
+
+def load_null(path: pathlib.Path = NULL_FILE) -> dict[str, dict[str, float]]:
+    """@brief The banked A/A null's per-row spreads, {key: {leg: spread}}; {} when absent."""
+    try:
+        return json.loads(path.read_text()).get("rows", {})
+    except (OSError, ValueError):
+        return {}
+
+
+def leg_factor(k: str, leg: str, null: dict[str, dict[str, float]]) -> tuple[float, bool, str]:
+    """@brief (factor, tick guard?, source) for one leg of one key.
+
+    From the null: a slowdown of 1 + max(NULL_FLOOR, NULL_K x spread), CLIFF_NULL_K x on the
+    allocator-cliff rows; the throughput leg
+    takes its reciprocal. The null measured the row's clock grain, so no tick guard.
+
+    CAPPED at the flat factor (maintainer ruling on #1874): a measured null may TIGHTEN a row,
+    never loosen it. A row whose null is wider than flat (a layout-sensitive row) is gated
+    exactly as before the null existed — the flat factor, tick-guarded on the latency legs —
+    and reported as `cap`. With no null entry: the same flat gating, reported as `flat`.
+    """
+    s = (null.get(k) or {}).get(leg)
+    lower = leg == "deliv_s"
+    if s is None:
+        return _FLAT[leg], not lower, "flat"
+    t = max(NULL_FLOOR, (CLIFF_NULL_K if k.split("/")[0] in CLIFF_MODES else NULL_K) * s)
+    flat_t = (1 / _FLAT[leg] - 1) if lower else (_FLAT[leg] - 1)
+    if t >= flat_t:
+        return _FLAT[leg], not lower, "cap"
+    return (1 / (1 + t) if lower else 1 + t), False, "null"
 
 
 def paired_samples(cand: dict[str, pathlib.Path], base: dict[str, pathlib.Path],
-                   pairs: int) -> dict[str, dict[str, list[dict]]]:
-    """@brief Run candidate and baseline interleaved, alternating which one starts.
+                   pairs: int, plan: list[Step] | None = None) -> dict:
+    """@brief Run candidate and baseline interleaved, family by family, ABBA.
 
-    Emits A B / B A / A B / … so neither arm systematically owns the early (cold, or
-    boost-ramping) part of the job and neither systematically owns a late drift window.
-    Returns {"cand"|"base": {point_key: [per-pair metric dict, …]}} with index `i` of
-    both arms drawn from the SAME pair, so the lists can be compared element-wise.
+    Returns {"cand"|"base": {key: [per-pair metric dict, …]}, "dropped": {family: n},
+    "inconclusive": [reason, …]} with index `i` of both arms drawn from the SAME clean pair,
+    so the lists can be compared element-wise.
     """
-    out: dict[str, dict[str, list[dict]]] = {"cand": {}, "base": {}}
-    passes = _passes(gate_sweep_args(cand, base))
-    print("  bench_libtracer sweep: " + (
-        "all families, one invocation" if len(passes) == 1 else
-        "single set (foreign + pressure), then multi set (foreign only)"))
-    # Pass by pass, each one interleaved over every pair: all pressure-scored SINGLE
-    # invocations run before any MULTI one, so none launches into a MULTI run's residue.
-    for args, siblings, psi in passes:
+    out: dict = {"cand": {}, "base": {}, "dropped": {}, "inconclusive": []}
+    plan = gate_plan(cand, base) if plan is None else plan
+    n_multi = sum(not s.score_pressure for s in plan)
+    print(f"  {len(plan)} steps ({n_multi} multi-threaded), {max(1, pairs)} ABBA pairs each; "
+          f"single-threaded pinned to {','.join(map(str, CPU_SINGLE)) if CPU_SINGLE else 'nothing (unpinned)'}")
+    arms = {"cand": (0, cand), "base": (1, base)}
+    for step in plan:
+        clean_pairs, gated = 0, False
         for i in range(max(1, pairs)):
-            order = [("base", base), ("cand", cand)]
-            if i % 2:
-                order.reverse()
-            for arm, binaries in order:
-                rows_by_bin = {b: (run_bench_once(path, args, psi) if b == "main"
-                                   else run_bench_once(path))
-                               for b, path in binaries.items() if b == "main" or siblings}
-                for (b, m, s, f, e) in POINTS:
-                    if b not in rows_by_bin:
-                        continue
-                    v = metric(rows_by_bin[b], m, s, f, e)
-                    if v:
-                        out[arm].setdefault(f"{m}/{s}/{f}/{e}", []).append(v)
-                # The allocator-cliff family (#1806): every size it emits, not a fixed list,
-                # so the ladder can change in the bench without an edit here.
-                for k, v in cliff_rows(rows_by_bin.get("main", [])).items():
+            order = ["base", "cand"] if i % 2 == 0 else ["cand", "base"]
+            got, ok = {}, True
+            for arm in order:
+                idx, bins = arms[arm]
+                if idx in step.args and step.key in bins:
+                    rows, clean = run_step(bins[step.key], step, idx)
+                    got[arm] = step_metrics(step.key, rows)
+                    ok = ok and clean
+                    gated = gated or bool(got[arm])
+            if not ok:
+                continue  # contended through every re-run: drop the pair, both arms
+            clean_pairs += 1
+            for arm, kv in got.items():
+                for k, v in kv.items():
                     out[arm].setdefault(k, []).append(v)
+        lost = max(1, pairs) - clean_pairs
+        if lost:
+            out["dropped"][step.label] = lost
+            print(f"  {step.label}: {lost} of {max(1, pairs)} pair(s) dropped (contended)")
+            if gated and lost > MAX_DROPPED_PAIRS:
+                out["inconclusive"].append(
+                    f"{step.label}: only {clean_pairs}/{max(1, pairs)} pairs ran clean "
+                    f"(more than {MAX_DROPPED_PAIRS} contended)")
     return out
 
 
@@ -855,34 +965,87 @@ def _tick_ok(cur: float, ref: float) -> bool:
     return ref >= 100 or cur - ref > LAT_TICK_NS
 
 
+def bootstrap_ci(ratios: list[float], n_boot: int = BOOT_N, conf: float = BOOT_CONF,
+                 seed: int = 1807) -> tuple[float, float]:
+    """@brief Percentile bootstrap interval of the median of @p ratios (pairs resampled
+    with replacement). Seeded, so one sample set always gets one verdict."""
+    if len(ratios) < 2:
+        return (ratios[0], ratios[0]) if ratios else (1.0, 1.0)
+    rng = random.Random(seed)
+    n = len(ratios)
+    meds = sorted(statistics.median(rng.choices(ratios, k=n)) for _ in range(n_boot))
+    tail = (1 - conf) / 2
+    return meds[int(tail * n_boot)], meds[min(n_boot - 1, int((1 - tail) * n_boot))]
+
+
 def paired_verdict(cand: list[float], base: list[float], factor: float,
                    lower_is_worse: bool, tick_guard: bool = False) -> dict:
     """@brief Decide one metric of one point from its interleaved A/B pairs.
 
-    `factor` is the existing relative threshold (1.15 for p50, 0.88 for deliv/s);
-    `lower_is_worse` selects the throughput sense. Returns the three conditions plus the
-    numbers a reader needs to audit the call, and fails only when all three hold. With
-    fewer than three pairs "a strict majority" degrades to "every pair", because two
-    samples cannot vote.
+    `factor` is the leg's threshold as a ratio (1.06 for a latency leg at 6%, 1/1.06 for
+    throughput); `lower_is_worse` selects the throughput sense. Fails only when the median
+    per-pair ratio cand/base is past `factor` (effect) AND its bootstrap interval excludes
+    1.0 (significant). The ranges and the per-pair breach count are reported for audit.
     """
     n = min(len(cand), len(base))
     cs, bs = cand[:n], base[:n]
+    ratios = [c / b for c, b in zip(cs, bs)]
+    r = statistics.median(ratios)
+    lo, hi = bootstrap_ci(ratios)
+    cm, bm = statistics.median(cs), statistics.median(bs)
+
+    def breach(x: float) -> bool:
+        return x < factor if lower_is_worse else x > factor
+
+    effect = breach(r) and (lower_is_worse or not tick_guard or _tick_ok(cm, bm))
+    significant = hi < 1.0 if lower_is_worse else lo > 1.0
+    return {"n": n, "cand_med": cm, "base_med": bm, "ratio": r, "ci": (lo, hi),
+            "factor": factor, "cand_range": (min(cs), max(cs)),
+            "base_range": (min(bs), max(bs)),
+            "pairs_breached": sum(1 for x in ratios if breach(x)),
+            "effect": effect, "significant": significant, "fail": effect and significant,
+            "rule": "ci"}
+
+
+def legacy_verdict(cand: list[float], base: list[float], factor: float,
+                   lower_is_worse: bool, tick_guard: bool = False) -> dict:
+    """@brief Main's decision rule before #1807, for a leg the null does not tighten.
+
+    Fails only when the arms' medians breach @p factor (tick-guarded when asked), their
+    [min..max] ranges are disjoint, and a strict majority of the pairs breach on their own
+    (every pair below three). The ratio and interval of @ref paired_verdict are kept for the
+    report; they do not decide.
+    """
+    v = paired_verdict(cand, base, factor, lower_is_worse, tick_guard)
+    cs, bs = cand[:v["n"]], base[:v["n"]]
 
     def breach(c: float, b: float) -> bool:
         if lower_is_worse:
             return c < b * factor
         return c > b * factor and (not tick_guard or _tick_ok(c, b))
 
-    cm, bm = statistics.median(cs), statistics.median(bs)
-    pairs_breached = sum(1 for c, b in zip(cs, bs) if breach(c, b))
-    # Disjoint = the candidate's BEST sample is still worse than the baseline's WORST.
+    pb = sum(1 for c, b in zip(cs, bs) if breach(c, b))
     disjoint = (max(cs) < min(bs)) if lower_is_worse else (min(cs) > max(bs))
-    majority = pairs_breached * 2 > n if n >= 3 else pairs_breached == n
-    return {"n": n, "cand_med": cm, "base_med": bm,
-            "cand_range": (min(cs), max(cs)), "base_range": (min(bs), max(bs)),
-            "effect": breach(cm, bm), "disjoint": disjoint,
-            "pairs_breached": pairs_breached, "majority": majority,
-            "fail": breach(cm, bm) and disjoint and majority}
+    majority = pb * 2 > v["n"] if v["n"] >= 3 else pb == v["n"]
+    effect = breach(v["cand_med"], v["base_med"])
+    v.update(effect=effect, pairs_breached=pb, disjoint=disjoint, majority=majority,
+             fail=effect and disjoint and majority, rule="flat")
+    return v
+
+
+def leg_verdict(k: str, leg: str, cand: list[float], base: list[float], null: dict,
+                tick_ok: bool = True) -> tuple[dict, float, str]:
+    """@brief One leg of one key, decided by the rule its threshold selects (ruling on #1874).
+
+    A leg the null TIGHTENS (source `null`) takes the median-of-ratios + bootstrap rule. A leg
+    whose null hits the cap (`cap`), or that has no null (`flat`), keeps main's whole verdict:
+    the flat threshold AND @ref legacy_verdict. No row is looser, or more false-fail-prone,
+    than before #1807. @p tick_ok False drops the tick guard (a picosecond batch row).
+    @return (verdict, factor, source).
+    """
+    factor, tick, source = leg_factor(k, leg, null)
+    rule = paired_verdict if source == "null" else legacy_verdict
+    return rule(cand, base, factor, leg == "deliv_s", tick and tick_ok), factor, source
 
 
 def _spread(rng: tuple[float, float]) -> float:
@@ -891,35 +1054,40 @@ def _spread(rng: tuple[float, float]) -> float:
     return (hi / lo) if lo else float("inf")
 
 
-def paired_report(v: dict, label: str, unit: str, fmt: str) -> str:
-    """@brief One human-auditable line per metric: medians, both ranges, and the verdict
-    path (which of effect / separation / reproducibility held)."""
+def paired_report(v: dict, label: str, unit: str, fmt: str, source: str = "") -> str:
+    """@brief One human-auditable line per metric: medians, ranges, the median ratio with
+    its interval, the threshold and where it came from, and the verdict path."""
     cr, br = v["cand_range"], v["base_range"]
-    ratio = (v["cand_med"] / v["base_med"]) if v["base_med"] else float("nan")
+    lo, hi = v["ci"]
     line = (f"      {label:<9} base {v['base_med']:>{fmt}}{unit} "
-            f"[{br[0]:>{fmt}}..{br[1]:>{fmt}}, spread {_spread(br):.2f}x]  "
-            f"cand {v['cand_med']:>{fmt}}{unit} "
-            f"[{cr[0]:>{fmt}}..{cr[1]:>{fmt}}, spread {_spread(cr):.2f}x]  x{ratio:.2f}")
-    if v["effect"]:
+            f"[{br[0]:>{fmt}}..{br[1]:>{fmt}}]  "
+            f"cand {v['cand_med']:>{fmt}}{unit} [{cr[0]:>{fmt}}..{cr[1]:>{fmt}}]  "
+            f"x{v['ratio']:.3f} CI [{lo:.3f}..{hi:.3f}] vs x{v['factor']:.3f}"
+            + (f" ({source})" if source else ""))
+    if v["effect"] and v.get("rule") == "flat":
         line += (f"  | effect YES, pairs {v['pairs_breached']}/{v['n']}, "
                  f"ranges {'DISJOINT' if v['disjoint'] else 'OVERLAP'}")
+    elif v["effect"]:
+        line += (f"  | effect YES, pairs {v['pairs_breached']}/{v['n']}, "
+                 f"CI {'excludes' if v['significant'] else 'includes'} 1")
         if not v["fail"]:
             line += " -> INDISTINGUISHABLE, not failed"
     return line
 
 
 def gate_paired(cand: dict[str, pathlib.Path], base: dict[str, pathlib.Path],
-                pairs: int) -> list[str]:
-    """@brief The interleaved per-PR gate. Prints the full population and returns fails."""
-    samples = paired_samples(cand, base, pairs)
+                pairs: int, null: dict | None = None,
+                samples: dict | None = None) -> tuple[list[str], list[str]]:
+    """@brief The interleaved per-PR gate. Prints the full population; returns
+    (fails, inconclusive reasons)."""
+    null = load_null() if null is None else null
+    samples = paired_samples(cand, base, pairs) if samples is None else samples
     fails: list[str] = []
-    print(f"Interleaved A/B perf gate ({pairs} pairs, alternating start; fail needs "
-          f"effect + disjoint ranges + a majority of pairs):")
+    print(f"Interleaved A/B perf gate ({pairs} ABBA pairs per family; fail needs the median "
+          f"per-pair ratio past the row's threshold AND its {BOOT_CONF:.0%} bootstrap CI "
+          f"excluding 1; thresholds from the banked A/A null: {len(null)} rows):")
     if pairs < 3:
-        # Below three pairs "reproduces across a majority" degrades to "happened twice",
-        # which is the property #763 showed a runner can manufacture. Usable for a quick
-        # local look; not a verdict, and CI never runs it this way.
-        print(f"  WARNING: {pairs} pair(s) — the reproducibility rule cannot discriminate "
+        print(f"  WARNING: {pairs} pair(s) — the bootstrap interval cannot discriminate "
               f"below 3. Treat a FAIL here as a prompt to re-run at the default.")
     worst_drift = 0.0
     for (_b, m, s, f, e) in POINTS:
@@ -938,34 +1106,36 @@ def gate_paired(cand: dict[str, pathlib.Path], base: dict[str, pathlib.Path],
             continue
         print(f"  {k}")
         legs = [
-            ("p50_ns", "p50", "ns", "11,.3f", LAT_REGRESS, False, True),
-            ("mean_ns", "mean", "ns", "11,.3f", MEAN_REGRESS, False, True),
-            ("deliv_s", "deliv/s", "", "15,.0f", TPUT_REGRESS, True, False),
+            ("p50_ns", "p50", "ns", "11,.3f"),
+            ("mean_ns", "mean", "ns", "11,.3f"),
+            ("deliv_s", "deliv/s", "", "15,.0f"),
         ]
-        for key, label, unit, fmt, factor, lower_worse, tick in legs:
+        for key, label, unit, fmt in legs:
             c = [float(x[key]) for x in cs]
             b = [float(x[key]) for x in bs]
             if min(c) <= 0 or min(b) <= 0:
                 # 0 means "this row does not measure that": deliv_s on a latency-only row
                 # (#553), p50/mean on a bulk-only row such as `lkv-*` (#1804).
                 continue
-            v = paired_verdict(c, b, factor, lower_worse, tick and tick_guarded(k))
+            v, factor, source = leg_verdict(k, key, c, b, null, tick_guarded(k))
             worst_drift = max(worst_drift, _spread(v["base_range"]))
-            print(paired_report(v, label, unit, fmt))
+            print(paired_report(v, label, unit, fmt, source))
             if v["fail"]:
+                lo, hi = v["ci"]
+                why = (f"{BOOT_CONF:.0%} CI [{lo:.3f}..{hi:.3f}]" if v["rule"] == "ci" else
+                       f"{v['pairs_breached']}/{v['n']} pairs, disjoint ranges")
                 fails.append(
                     f"{k} {label} pullback: {v['cand_med']:,.0f}{unit} vs base "
-                    f"{v['base_med']:,.0f}{unit} "
-                    f"({(v['cand_med'] / v['base_med'] - 1) * 100:+.0f}%), reproduced in "
-                    f"{v['pairs_breached']}/{v['n']} interleaved pairs with disjoint ranges")
+                    f"{v['base_med']:,.0f}{unit} (median pair ratio x{v['ratio']:.3f}, "
+                    f"{why}, threshold x{factor:.3f} {source})")
     # The baseline arm cannot be moved by the candidate's code, so its worst spread is
     # this run's drift figure. It does not gate — it tells a reader whether the run was
     # worth believing at all, which is what a 2.8x baseline swing needed and never got.
     print(f"  run drift (worst baseline-arm spread across pairs): {worst_drift:.2f}x")
     # The allocator-cliff family (#1806) rides the same interleaved session. A cliff main
     # already has is printed (`~`) and does not fail; see gate_cliff.
-    cliff_fails, _cliff_warns = gate_cliff(samples)
-    return fails + cliff_fails
+    cliff_fails, _cliff_warns = gate_cliff(samples, null)
+    return fails + cliff_fails, list(samples.get("inconclusive", []))
 
 
 # --- THE ALLOCATOR-CLIFF FAMILY (#1806) ---------------------------------------------
@@ -975,8 +1145,9 @@ def gate_paired(cand: dict[str, pathlib.Path], base: dict[str, pathlib.Path],
 # window means in picoseconds and there is no tick to guard. Two checks read them, both in
 # paired mode only:
 #
-#   against main — each size's p50 is a paired verdict at LAT_REGRESS, exactly like a POINT
-#                  (effect + disjoint ranges + a majority of pairs);
+#   against main — each size's p50 is decided exactly like a POINT's leg (@ref leg_verdict):
+#                  tightened by the banked A/A null with a bootstrap interval that must
+#                  exclude 1, or at LAT_REGRESS under main's old rule (#1807);
 #   neighbours   — each size's p50 against the next smaller size's, pair by pair. A step of
 #                  more than CLIFF_STEP that holds in the median and in a strict majority of
 #                  pairs is a cliff. It FAILS only when it is new: main's own step at that
@@ -1051,9 +1222,11 @@ def cliff_steps(cand: list[tuple[int, list[float]]],
     return out
 
 
-def gate_cliff(samples: dict[str, dict[str, list[dict]]]) -> tuple[list[str], list[str]]:
+def gate_cliff(samples: dict, null: dict | None = None) -> tuple[list[str], list[str]]:
     """@brief The allocator-cliff checks over a paired session's cliff rows.
+    @param null The banked A/A null's rows (@ref load_null); {} = flat thresholds.
     @return (fails, warns): a warn is a cliff main has too, printed and not failed."""
+    null = {} if null is None else null
     fails: list[str] = []
     warns: list[str] = []
     cand_keys = [k for k in samples["cand"] if k.split("/")[0] in CLIFF_MODES]
@@ -1061,23 +1234,25 @@ def gate_cliff(samples: dict[str, dict[str, list[dict]]]) -> tuple[list[str], li
         print("  allocator-cliff family: not emitted by the candidate (a binary without "
               "the cliff families) — not gated")
         return fails, warns
-    print(f"Allocator-cliff family ({len(cand_keys)} rows; fail: p50 "
-          f"+{(LAT_REGRESS - 1) * 100:.0f}% vs main, or a new neighbour step over "
-          f"{CLIFF_STEP:.2f}x):")
+    print(f"Allocator-cliff family ({len(cand_keys)} rows; fail: p50 past its null "
+          f"threshold (flat +{(LAT_REGRESS - 1) * 100:.0f}% without one) vs main, or a new "
+          f"neighbour step over {CLIFF_STEP:.2f}x):")
     for k in sorted(cand_keys, key=lambda x: (x.split("/")[0], int(x.split("/")[1]))):
         cs, bs = samples["cand"][k], samples["base"].get(k)
         if not bs:
             continue  # a size main does not emit: the neighbour check still covers it
-        v = paired_verdict([float(x["p50_ns"]) for x in cs], [float(x["p50_ns"]) for x in bs],
-                           LAT_REGRESS, False)
+        v, factor, source = leg_verdict(k, "p50_ns", [float(x["p50_ns"]) for x in cs],
+                                        [float(x["p50_ns"]) for x in bs], null, False)
         if v["effect"]:
             print(f"  {k}")
-            print(paired_report(v, "p50", "ns", "9,.3f"))
+            print(paired_report(v, "p50", "ns", "9,.3f", source))
         if v["fail"]:
+            lo, hi = v["ci"]
+            why = (f"CI [{lo:.3f}..{hi:.3f}]" if v["rule"] == "ci" else
+                   f"{v['pairs_breached']}/{v['n']} pairs, disjoint ranges")
             fails.append(f"{k} p50 pullback: {v['cand_med']:.3f}ns vs base "
-                         f"{v['base_med']:.3f}ns ({(v['cand_med'] / v['base_med'] - 1) * 100:+.0f}%"
-                         f"), reproduced in {v['pairs_breached']}/{v['n']} interleaved pairs "
-                         f"with disjoint ranges")
+                         f"{v['base_med']:.3f}ns (median pair ratio x{v['ratio']:.3f}, "
+                         f"{why}, threshold x{factor:.3f} {source})")
     for mode in CLIFF_MODES:
         cand = _cliff_series(samples["cand"], mode)
         base = _cliff_series(samples["base"], mode) or None
@@ -1437,7 +1612,8 @@ def enforces(tier: str, sample_note: str | None = None) -> tuple[bool, str]:
 def render_verdict(fails: list[str], warns: list[str], tier: str,
                    sample_note: str | None = None,
                    conditions: bc.Ledger | None = None,
-                   bench_errors: list[str] | None = None) -> int:
+                   bench_errors: list[str] | None = None,
+                   inconclusive: list[str] | None = None) -> int:
     """@brief Print the verdict under its tier and return the process exit code.
 
     Same numbers, same lines, same markers in both tiers — `!` for a breached ratchet,
@@ -1458,9 +1634,13 @@ def render_verdict(fails: list[str], warns: list[str], tier: str,
 
     @p bench_errors (#1847) makes the verdict INCONCLUSIVE the same way: a bench process
     that exited non-zero left a partial transcript, so the comparison is not complete.
+
+    @p inconclusive (#1807) is the paired gate's per-family form of the same rule: each entry
+    names a family that emits a gated row and lost more than `MAX_DROPPED_PAIRS` pairs to
+    contention. A family that lost fewer was judged on its clean pairs and is not listed.
     """
     contended = conditions is not None and not conditions.clean
-    if contended or bench_errors:
+    if contended or bench_errors or inconclusive:
         mark = "::error::" if tier == "blocking" else "::warning::"
         if contended:
             kept = conditions.kept()
@@ -1470,6 +1650,15 @@ def render_verdict(fails: list[str], warns: list[str], tier: str,
                   f"not a verdict on the code. Re-run the job.")
             print(f"{mark}perf gate INCONCLUSIVE — {conditions.note()}; "
                   f"re-run on a quiet runner (a PASS or FAIL needs clean conditions)")
+        if inconclusive:
+            print(f"PERF: INCONCLUSIVE  [tier={tier}] — {len(inconclusive)} gated family(ies) "
+                  f"lost too many pairs to a contended bench CPU; this is not a verdict on "
+                  f"the code. Re-run the job.")
+            print(f"{mark}perf gate INCONCLUSIVE — {inconclusive[0]}"
+                  + (f" +{len(inconclusive) - 1} more" if len(inconclusive) > 1 else "")
+                  + "; re-run on a quiet runner")
+            for x in inconclusive:
+                print("  ? " + x)
         if bench_errors:
             print(f"PERF: INCONCLUSIVE  [tier={tier}] — {len(bench_errors)} bench "
                   f"execution(s) exited non-zero; the comparison is incomplete, not passed.")
@@ -1478,7 +1667,7 @@ def render_verdict(fails: list[str], warns: list[str], tier: str,
                   + "; fix the bench, then re-run")
             for x in bench_errors:
                 print("  ? " + x)
-        why = "contended" if contended else "a bench exited non-zero"
+        why = "contended" if contended or inconclusive else "a bench exited non-zero"
         for x in fails:
             print("  ? " + x + f"  (unverified — {why})")
         for x in warns:
@@ -1562,18 +1751,28 @@ def main() -> int:
     # the same interleaved rotation, which is the whole point of #763's fix.
     if base_bench is not None:
         pairs = int(args[args.index("--pairs") + 1]) if "--pairs" in args else PAIRS_DEFAULT
+        # The null was measured on the pinned bench host; an unpinned runner's noise is not
+        # that host's, so it gates on the flat thresholds and says so (#1807).
+        null = load_null() if CPUS else {}
+        if not CPUS:
+            print("  (unpinned runner: the banked A/A null is the pinned host's — flat "
+                  "thresholds here)")
         print(f"Per-loop perf gate (libtracer in-process, INTERLEAVED baseline/candidate, "
-              f"tier {tier}, "
-              f"fail: p50 +{(LAT_REGRESS - 1) * 100:.0f}% / "
+              f"tier {tier}, fail: past the row's A/A-null threshold "
+              f"({NULL_K:g}x robust spread, {CLIFF_NULL_K:g}x on the cliff rows, floor "
+              f"{NULL_FLOOR:.0%}; {len(null)} banked rows), "
+              f"else flat p50 +{(LAT_REGRESS - 1) * 100:.0f}% / "
               f"mean +{(MEAN_REGRESS - 1) * 100:.0f}% / "
               f"deliv -{(1 - TPUT_REGRESS) * 100:.0f}%):")
         # The lkv ratio report runs FIRST: it is single-threaded, and the gate's
         # last pass is the MULTI family set, whose own-pressure residue it must not inherit.
         lkv_ratio_report_paired(bench, base_bench)  # ADR-0060 ratio: reported (#1695)
-        fails = gate_paired(cand_bins, base_bins, pairs)
+        fails, inconclusive = gate_paired(cand_bins, base_bins, pairs, null)
         fails += mem_ratchet(bench_fwd, base_fwd)
         print_conditions()
-        return render_verdict(fails, [], tier, sample_note, LEDGER, BENCH_ERRORS)
+        # The ledger is printed, not judged: a contended pair was dropped for its family
+        # alone, and `inconclusive` names any gated family that lost too many (#1807).
+        return render_verdict(fails, [], tier, sample_note, None, BENCH_ERRORS, inconclusive)
 
     runs = int(args[args.index("--runs") + 1]) if "--runs" in args else DEFAULT_RUNS
     # The lkv ratio report runs FIRST here too: it is single-threaded, and best_of's last pass is
