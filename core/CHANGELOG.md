@@ -84,6 +84,9 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   - `graph_t::read_subscribers(v, mem::block_array_t<view_t>&, caller)` and
     `graph_t::drain_unflushed(v, mem::block_array_t<value_ref_t>&, gap)`. The table comes from
     the array's own source.
+  - `vertex_t::edge_sources(mem::block_array_t<view::view_t>&)` and
+    `vertex_t::drain_unflushed(mem::block_array_t<value_ref_t>&, gap)`: the vertex-level forms
+    the two graph overloads above call.
   - **`graph_hooks_t::subject_lookup`** (`subject_lookup_fn_t`): the subject resolver writing
     the token into a `mem::bytes_t` the ACL gate owns, instead of returning a
     `std::vector`. The gate's buffer is a 64-byte stack frame that spills to the graph's table
@@ -392,6 +395,10 @@ reference implementation is pre-1.0; the first cut release is `[0.3.0]`, below.
   - `conn_spec_t::bytes()` → `bytes(out)`.
   - `graph_t::read_subscribers(v, caller)` and `drain_unflushed(v, std::vector&, gap)` → the
     `mem::block_array_t` overloads.
+  - `vertex_t::edge_sources()` → `edge_sources(out)` over a `mem::block_array_t<view::view_t>`;
+    it returns `false`, leaving `out` empty, when the array's source refuses the table.
+  - `vertex_t::drain_unflushed(std::vector<value_ref_t>&, gap)` →
+    `drain_unflushed(mem::block_array_t<value_ref_t>&, gap)`; the count it returns is unchanged.
   - `graph_hooks_t::subject_resolver` → `subject_lookup`: append the token to `out` and
     return `{}`, or return the same error as before.
   - `key_view_t::split_levels(std::vector&)` → `for_each_level(emit)`, which allocates nothing.
