@@ -2528,9 +2528,11 @@ result_t<void> graph_t::write_branch(vertex_t* v, const view::rope_t& value,
         return std::unexpected(status_t::INVALID_PATH);
     if (!*parsed) return {};  // a value-free branch is a no-op write
     // Tag the root ONCE: it lands at `v` itself (already WRITE-gated by write_impl), and its
-    // subscription point is notified with the whole written TLV as-is.
+    // subscription point is notified with the whole written TLV as-is. The notify is
+    // move-assigned from a fresh copy: a copy-assignment straight from `*head` trips GCC's
+    // -Wmaybe-uninitialized (a false positive on the SRA'd view at -Os, IDF v6.0).
     plan.back().vx = v;
-    plan.back().notify = *head;
+    plan.back().notify = view::view_t(*head);
 
     // Admission: resolve-or-create every landing vertex (write-creates, CREATE-
     // gated) and gate WRITE on each BEFORE any store, so a denial rejects the
