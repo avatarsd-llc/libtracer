@@ -1031,7 +1031,7 @@ class fwd_router_t {
      * anchor the router created; it is a pure function of its arguments and holds no state.
      *
      * Returned BY VALUE in a fixed buffer, with no allocation (#1779): the anchor key is ONE
-     * packed segment record, so an id longer than `wire::kPackedSegMaxBytes` could never be
+     * packed segment record, so an id longer than `%wire::kPackedSegMaxBytes` could never be
      * stored anyway. Such an id comes back EMPTY, and the router anchors nothing for it.
      */
     [[nodiscard]] static session_anchor_id_t session_anchor_id(std::string_view mount,
