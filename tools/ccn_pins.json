@@ -3,7 +3,7 @@
   "functions": {
     "tr::graph::apply_op": {
       "ccn": [
-        49
+        38
       ],
       "file": "core/src/op_resolve_walk.hpp"
     },
@@ -51,13 +51,7 @@
     },
     "tr::graph::resolve_node": {
       "ccn": [
-        29
-      ],
-      "file": "core/src/op_resolve_walk.hpp"
-    },
-    "tr::graph::selector_to_field": {
-      "ccn": [
-        17
+        21
       ],
       "file": "core/src/op_resolve_walk.hpp"
     },
