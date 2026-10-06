@@ -2517,16 +2517,16 @@ class vertex_t {
         // the ext block may be absent). The graph has already adjusted descendant
         // listeners_above_ for these edges before calling us. Publishing the EMPTY array
         // allocates nothing, so retirement can never fail to stop delivering.
-        // The slots are SWAPPED out rather than cleared in place, so the routed ones can be
-        // sorted from the rest after the stripe lock is down — nothing allocates under it.
+        // The slots are MOVED out rather than cleared in place, so the routed ones can be
+        // sorted from the rest after the stripe lock is down — nothing allocates under it. The
+        // move leaves the slot table empty with its source untouched: `scan_retired_edges`
+        // reads that source outside the stripe lock, so nothing here may write it (#1919).
         edge_block_t* b = nullptr;
         {
             const std::lock_guard lock(vertex_stripe_of(this).m);
             b = edges_locked();
             if (b != nullptr) {
-                tr::mem::block_source_t& src = b->slots.source();
                 gone = std::move(b->slots);
-                b->slots = tr::mem::block_array_t<subscriber_t>(src);
                 (void)try_publish_edges(*b);  // slots are empty ⇒ publishes null, cannot fail
             }
         }
